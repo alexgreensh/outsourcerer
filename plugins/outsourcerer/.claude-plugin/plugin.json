@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "outsourcerer",
+  "displayName": "Outsourcerer",
+  "version": "0.3.1",
+  "description": "Delegate the grind, keep the glory. Offload grunt work to a cheaper or different engine (OpenRouter, Codex, keyless Gemini) while Claude orchestrates, or pull a stronger model in as an advisor. Per-model prompting, image gen, consensus second opinions, cost Tab.",
+  "author": {
+    "name": "Alex Greenshpun",
+    "url": "https://github.com/alexgreensh"
+  },
+  "homepage": "https://github.com/alexgreensh/outsourcerer",
+  "repository": "https://github.com/alexgreensh/outsourcerer",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "delegation",
+    "offload",
+    "openrouter",
+    "codex",
+    "gemini",
+    "subagents",
+    "cost-optimization",
+    "claude-code"
+  ]
+}

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 430" width="820" height="430" font-family="'SF Mono','Fira Code','Cascadia Code','Consolas',monospace">
+  <!-- Outsourcerer, advisor-panel conversation, 20s loop. Several top-tier models review in parallel. -->
+  <defs>
+    <clipPath id="ac"><rect width="820" height="430" rx="10"/></clipPath>
+    <clipPath id="typeA">
+      <rect x="0" y="116" width="0" height="24">
+        <animate attributeName="width" values="0;0;760;760;760;0;0"
+          keyTimes="0;0.03;0.13;0.9;0.95;0.95;1" dur="20s" repeatCount="indefinite"/>
+      </rect>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#ac)">
+    <rect width="820" height="430" fill="#14152e"/>
+    <rect width="820" height="34" fill="#0e0f22"/>
+  </g>
+  <rect width="820" height="430" rx="10" fill="none" stroke="#2a2c52" stroke-width="1.5"/>
+  <circle cx="18" cy="17" r="5.5" fill="#f06bac"/>
+  <circle cx="36" cy="17" r="5.5" fill="#f9c46b"/>
+  <circle cx="54" cy="17" r="5.5" fill="#7fd88f"/>
+  <text x="410" y="22" text-anchor="middle" fill="#6a6c96" font-size="12">🧙 Outsourcerer &#183; advisor panel</text>
+
+  <text x="24" y="66" fill="#f06bac" font-size="15" font-weight="bold">🧙 Outsourcerer</text>
+  <text x="210" y="66" fill="#8a8cb0" font-size="13">bring the big brains in, several at once</text>
+  <line x1="24" y1="88" x2="796" y2="88" stroke="#2a2c52" stroke-width="0.6"/>
+
+  <text clip-path="url(#typeA)" x="28" y="128" fill="#8ab4ff" font-size="14" font-weight="bold">❯ before we build this, is the plan actually sound?</text>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.15;0.18;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text fill="#e8e6f5" font-size="14">
+      <tspan x="28" y="164">🧙 Want an advisor panel on it? I can convene <tspan fill="#f0b95a" font-weight="bold">several models, one per</tspan></tspan>
+      <tspan x="28" dy="22">subscription, in parallel and only greenlight it if they all agree.</tspan>
+    </text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.28;0.31;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="28" y="230" fill="#8ab4ff" font-size="14" font-weight="bold">❯ yes, convene them</text>
+  </g>
+
+  <!-- three advisors across three subscriptions, reviewing in parallel, staggered -->
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.37;0.40;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="44" y="262" fill="#c9b8ff" font-size="13">→ <tspan font-weight="bold">GPT-5.6 Sol</tspan> <tspan fill="#6a6c96">(Codex)</tspan>  reviewing…  <tspan fill="#7fd88f">✓ sound, flags one race condition</tspan></text>
+  </g>
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.43;0.46;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="44" y="288" fill="#c9b8ff" font-size="13">→ <tspan font-weight="bold">Fable high</tspan> <tspan fill="#6a6c96">(Claude)</tspan>  reviewing…  <tspan fill="#7fd88f">✓ agrees, suggests a guardrail</tspan></text>
+  </g>
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.49;0.52;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text x="44" y="314" fill="#c9b8ff" font-size="13">→ <tspan font-weight="bold">Hy3</tspan> <tspan fill="#6a6c96">(OpenRouter)</tspan>  reviewing…  <tspan fill="#7fd88f">✓ agrees</tspan></text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.60;0.64;0.9;0.95;1" dur="20s" repeatCount="indefinite"/>
+    <text fill="#e8e6f5" font-size="14">
+      <tspan x="28" y="352">🧙 <tspan fill="#f0b95a" font-weight="bold">Consensus: 3 / 3 say proceed.</tspan> I folded in the guardrail and the</tspan>
+      <tspan x="28" dy="22">race-condition fix. Ready when you are.</tspan>
+    </text>
+  </g>
+
+  <rect x="28" y="392" width="9" height="16" fill="#8ab4ff">
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.4;0.5;1" dur="1s" repeatCount="indefinite"/>
+  </rect>
+</svg>

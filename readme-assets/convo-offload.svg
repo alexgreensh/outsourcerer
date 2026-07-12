@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 400" width="820" height="400" font-family="'SF Mono','Fira Code','Cascadia Code','Consolas',monospace">
+  <!-- Outsourcerer, offload conversation, 18s loop. Midnight-navy + pink/gold brand palette. -->
+  <defs>
+    <clipPath id="oc"><rect width="820" height="400" rx="10"/></clipPath>
+    <clipPath id="type1">
+      <rect x="0" y="116" width="0" height="24">
+        <animate attributeName="width" values="0;0;760;760;760;0;0"
+          keyTimes="0;0.03;0.14;0.88;0.93;0.93;1" dur="18s" repeatCount="indefinite"/>
+      </rect>
+    </clipPath>
+  </defs>
+
+  <!-- window -->
+  <g clip-path="url(#oc)">
+    <rect width="820" height="400" fill="#14152e"/>
+    <rect width="820" height="34" fill="#0e0f22"/>
+  </g>
+  <rect width="820" height="400" rx="10" fill="none" stroke="#2a2c52" stroke-width="1.5"/>
+  <circle cx="18" cy="17" r="5.5" fill="#f06bac"/>
+  <circle cx="36" cy="17" r="5.5" fill="#f9c46b"/>
+  <circle cx="54" cy="17" r="5.5" fill="#7fd88f"/>
+  <text x="410" y="22" text-anchor="middle" fill="#6a6c96" font-size="12">🧙 Outsourcerer</text>
+
+  <!-- header -->
+  <text x="24" y="66" fill="#f06bac" font-size="15" font-weight="bold">🧙 Outsourcerer</text>
+  <text x="210" y="66" fill="#8a8cb0" font-size="13">delegate the grind · keep the glory</text>
+  <line x1="24" y1="88" x2="796" y2="88" stroke="#2a2c52" stroke-width="0.6"/>
+
+  <!-- conversation -->
+  <text clip-path="url(#type1)" x="28" y="128" fill="#8ab4ff" font-size="14" font-weight="bold">❯ map how auth flows through this repo, use outsourcerer for it</text>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.17;0.20;0.88;0.93;1" dur="18s" repeatCount="indefinite"/>
+    <text fill="#e8e6f5" font-size="14">
+      <tspan x="28" y="164">🧙 I'll offload the repo-mapping to <tspan fill="#f0b95a" font-weight="bold">GLM-5.2 on OpenRouter</tspan> and keep your</tspan>
+      <tspan x="28" dy="22">Claude tokens for the reasoning.</tspan>
+    </text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.32;0.35;0.88;0.93;1" dur="18s" repeatCount="indefinite"/>
+    <text x="28" y="230" fill="#8ab4ff" font-size="14" font-weight="bold">❯ yeah do it</text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.44;0.47;0.88;0.93;1" dur="18s" repeatCount="indefinite"/>
+    <text x="28" y="266" fill="#e8e6f5" font-size="14">🧙 Done. Auth map ready ↓</text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.52;0.55;0.88;0.93;1" dur="18s" repeatCount="indefinite"/>
+    <text x="52" y="296" fill="#8a8cb0" font-size="13">Logged to your Tab &#183; 1.2M tokens read, 120K written:</text>
+  </g>
+
+  <g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.60;0.64;0.88;0.93;1" dur="18s" repeatCount="indefinite"/>
+    <text x="52" y="324" fill="#f0b95a" font-size="14" font-weight="bold">billed $0.66 on GLM-5.2 &#183; frontier would've been ~$27 &#183; ~40&#215; cheaper</text>
+  </g>
+
+  <rect x="28" y="352" width="9" height="16" fill="#8ab4ff">
+    <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.4;0.5;1" dur="1s" repeatCount="indefinite"/>
+  </rect>
+</svg>

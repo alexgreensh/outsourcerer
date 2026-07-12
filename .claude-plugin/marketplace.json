@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "outsourcerer",
+  "owner": {
+    "name": "Alex Greenshpun",
+    "url": "https://github.com/alexgreensh"
+  },
+  "metadata": {
+    "description": "The Outsourcerer marketplace: delegate coding grunt-work to cheaper or different backends while Claude orchestrates.",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "outsourcerer",
+      "source": "./plugins/outsourcerer",
+      "description": "Delegate the grind, keep the glory. Offload subagent-style work to OpenRouter / Codex / native premium lanes / Gemini, with tier-aware prompting, a liveness watchdog, a cost ledger, and second opinions.",
+      "category": "productivity",
+      "tags": ["delegation", "offload", "openrouter", "codex", "gemini", "cost-optimization"]
+    }
+  ]
+}

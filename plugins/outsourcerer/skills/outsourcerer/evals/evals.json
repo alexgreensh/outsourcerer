@@ -1,0 +1,22 @@
+[
+  {"query": "use GLM to explore this repo with parallel subagents", "should_trigger": true},
+  {"query": "offload this search to Devin", "should_trigger": true},
+  {"query": "delegate this refactor to GLM", "should_trigger": true},
+  {"query": "run this on GLM instead of your own subagents", "should_trigger": true},
+  {"query": "spin GLM subagents to map the auth code", "should_trigger": true},
+  {"query": "use a free Devin model for this grunt work", "should_trigger": true},
+  {"query": "/outsourcerer run a parallel exploration of src/", "should_trigger": true},
+  {"query": "fan this work out to a cheaper model via Devin", "should_trigger": true},
+  {"query": "sync my Claude skills and MCPs into Devin", "should_trigger": true},
+  {"query": "switch the model on my Devin session to deepseek mid-conversation", "should_trigger": true},
+  {"query": "continue this GLM offload but escalate the hard turn to opus", "should_trigger": true},
+  {"query": "run this research on GLM and let it actually use the recall binary", "should_trigger": true},
+  {"query": "change my Claude Code model to opus", "should_trigger": false},
+  {"query": "install the Devin CLI on my machine", "should_trigger": false},
+  {"query": "log me into Devin", "should_trigger": false},
+  {"query": "what is GLM-5.2 and how does it compare to Claude", "should_trigger": false},
+  {"query": "refactor this function to remove duplication", "should_trigger": false},
+  {"query": "use your own subagents to review this PR", "should_trigger": false},
+  {"query": "write a unit test for this module", "should_trigger": false},
+  {"query": "open the Windsurf IDE", "should_trigger": false}
+]

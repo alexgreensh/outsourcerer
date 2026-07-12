@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Secrets, never commit
+.env
+*.key
+*.pem
+
+# Backups / scratch
+*.bak
+*.bak-*
+*.orig
+*.tmp
+
+# Runtime state (Outsourcerer writes jobs/ledger under $HOME/.outsourcerer)
+.outsourcerer/
+
+# derived README preview
+readme-preview.html
+
+# stray Antigravity CLI session state
+.antigravitycli/
+
+# Python bytecode from shim tests
+__pycache__/
+*.pyc
