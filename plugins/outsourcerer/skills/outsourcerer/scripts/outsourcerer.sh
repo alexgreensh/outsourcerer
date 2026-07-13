@@ -641,19 +641,23 @@ _effort_thinking_tokens() {
 # =============================================================================
 # THE TAB: per-run ledger, tab, estimate, credits.
 # =============================================================================
-# record_ledger <provider> <model> <tier> <verb> <task> [cost]
+# record_ledger <provider> <model> <tier> <verb> <task> [cost] [lane]
 record_ledger() {
   # bg jobs record the accurate (stream-json) entry from __runjob; skip the child's estimate then.
   [ "${OSRC_STREAM:-0}" = "1" ] && [ "${OSRC_LEDGER_FORCE:-0}" != "1" ] && return 0
   have jq || return 0
   mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
-  local prov="$1" model="$2" tier="$3" verb="$4" task="$5" cost="${6:-}"
+  local prov="$1" model="$2" tier="$3" verb="$4" task="$5" cost="${6:-}" lane="${7:-}"
   local intok; intok="$(_est_tokens "$task")"
   local ts; ts="$(date +%Y-%m-%dT%H:%M:%S)"
   local hash; hash="$(printf '%s' "$task" | cksum | cut -d' ' -f1)"
+  # lane (resolved lane code: cx/cc/gm/or/dv/local) drives the Tab's plan-vs-cash split. The bg path
+  # (run_job) records the RAW provider (e.g. devin) which mislabels a plan lane as cash, so it passes
+  # the resolved lane here; cmd_tab's is_sub prefers .lane and falls back to the provider string.
   local _line; _line="$(jq -cn --arg ts "$ts" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
-     --arg c "$cost" --argjson it "$intok" --arg h "$hash" \
-     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h}')" || return 0
+     --arg c "$cost" --argjson it "$intok" --arg h "$hash" --arg lane "$lane" \
+     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h}
+      + (if $lane=="" then {} else {lane:$lane} end)')" || return 0
   [ -n "$_line" ] || return 0
   if command -v flock >/dev/null 2>&1; then
     # Wait briefly for the lock; if it genuinely can't be acquired, do NOT silently drop the
@@ -1129,7 +1133,7 @@ _bg_launch() {
 cmd_bg() {
   [ "${1:-}" = "--worktree" ] && { export OSRC_WORKTREE=1; shift; }   # opt-in git-worktree isolation
   [ $# -gt 0 ] || die "bg needs a verb + task (e.g. bg run -m hy3 \"...\")"
-  case "${1:-}" in run|research|edit|yolo) ;; *) die "bg needs a verb first (run|research|edit|yolo), e.g. bg run -m <model> \"task\" — got '${1:-}'";; esac
+  case "${1:-}" in run|explore|research|edit|yolo) ;; *) die "bg needs a verb first (run|explore|research|edit|yolo), e.g. bg run -m <model> \"task\" — got '${1:-}'";; esac
   _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -1236,7 +1240,7 @@ run_job() {
       real_cost="0.000000"   # no OpenRouter generation in the stream => no-cash (native/keyless) lane
     fi
   fi
-  [ -n "$real_cost" ] && OSRC_LEDGER_FORCE=1 record_ledger "$prov" "$id2" "$tier" "$verb" "job:$id" "$real_cost"
+  [ -n "$real_cost" ] && OSRC_LEDGER_FORCE=1 record_ledger "$prov" "$id2" "$tier" "$verb" "job:$id" "$real_cost" "$lane"
   return "$sc"
 }
 
