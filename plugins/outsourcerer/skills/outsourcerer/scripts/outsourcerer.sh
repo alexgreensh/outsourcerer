@@ -803,7 +803,7 @@ cmd_tab() {
     # no-cash lanes: native ChatGPT/Claude text, keyless Antigravity/Gemini, keyless gpt-image
     # (provider "codex" + verb "image"). Everything else (cc, codex->OpenRouter, gemini API,
     # openrouter, devin) is a cash lane.
-    def is_sub: ((.provider // "") | test("codex-native|claude-native|antigravity"))
+    def is_sub: (if (.lane // "") != "" then ((.lane) | test("^(cx|cc|gm)$")) else ((.provider // "") | test("codex-native|claude-native|antigravity")) end)
                 or ((.verb // "") == "image" and (.provider // "") == "codex");
     # cost_usd forms: "" (foreground, unmeasured) · "0.0010" (bg REAL OpenRouter delta) ·
     # "~0.03" (bg harness ESTIMATE, offline fallback only). Parse each apart.
@@ -1129,6 +1129,7 @@ _bg_launch() {
 cmd_bg() {
   [ "${1:-}" = "--worktree" ] && { export OSRC_WORKTREE=1; shift; }   # opt-in git-worktree isolation
   [ $# -gt 0 ] || die "bg needs a verb + task (e.g. bg run -m hy3 \"...\")"
+  case "${1:-}" in run|research|edit|yolo) ;; *) die "bg needs a verb first (run|research|edit|yolo), e.g. bg run -m <model> \"task\" — got '${1:-}'";; esac
   _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
