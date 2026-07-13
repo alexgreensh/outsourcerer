@@ -726,23 +726,6 @@ or_credits() {   # best-effort OpenRouter credit line; never fatal
     | jq -r '.data | "limit=\(.limit // "n/a") usage=\(.usage // 0) remaining=\(.limit_remaining // "n/a")"' 2>/dev/null
 }
 
-# _or_usage -> bare cumulative OpenRouter usage number (dollars spent to date), or empty. Snapshot
-# this before + after a bg dispatch; the DELTA is the REAL cash that OpenRouter billed for the run.
-# This is the source of truth for cc/codex-OpenRouter cash, the harness's own total_cost_usd is an
-# untrustworthy estimate (seen ~28x high on :free lanes). Native/keyless lanes never move it (=> $0).
-_or_usage() {
-  have curl && have jq || return 0
-  _or_load_key 2>/dev/null || return 0
-  curl -fsS -H "Authorization: Bearer $OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/key" 2>/dev/null \
-    | jq -r '.data.usage // empty' 2>/dev/null
-}
-
-# _or_cost_delta <before> <after> -> non-negative dollar delta at 6dp, or empty if inputs non-numeric.
-_or_cost_delta() {
-  case "$1$2" in ''|*[!0-9.]*) return 0 ;; esac
-  awk -v a="$1" -v b="$2" 'BEGIN{ d=b-a; if(d<0)d=0; printf "%.6f", d }' 2>/dev/null
-}
-
 # _or_gen_cost <generation-id> -> authoritative real dollar cost of ONE OpenRouter generation, or
 # empty. Queries /generation?id=... which returns the exact settled cost for that call, no account-
 # level lag/noise (the /key usage endpoint is async + eventually-consistent, so before/after deltas
@@ -771,13 +754,16 @@ _or_run_cost() {
   local ids id sum="" got=0
   ids="$(grep -oE 'gen-[0-9]+-[a-zA-Z0-9]+' "$log" 2>/dev/null | sort -u)"
   [ -n "$ids" ] || return 0
-  sum=0
+  sum=0; local miss=0
   for id in $ids; do
     local c; c="$(_or_gen_cost "$id")"
-    case "$c" in ''|*[!0-9.]*) continue ;; esac
+    case "$c" in ''|*[!0-9.]*) miss=1; continue ;; esac
     sum="$(awk -v s="$sum" -v c="$c" 'BEGIN{printf "%.6f", s+c}')"; got=1
   done
-  [ "$got" = "1" ] && printf '%s' "$sum"
+  # Return the exact per-gen sum ONLY when EVERY generation resolved. A partial sum (some lookups
+  # failed) would masquerade as authoritative and suppress the caller's '~' estimate -> undercount.
+  # On any miss, return empty so the caller falls to the clearly-labeled estimate.
+  [ "$got" = "1" ] && [ "$miss" = "0" ] && printf '%s' "$sum"
 }
 
 # _est_tokens <text> -> calibrated token estimate (~3.3 chars/token, the Token Optimizer constant;
@@ -1253,9 +1239,10 @@ run_job() {
   # last.txt is the result payload; keep it private.
   [ -f "$jd/last.txt" ] && chmod 600 "$jd/last.txt" 2>/dev/null || true
   # REAL cash, in priority order:
-  #  1. Per-generation cost from OpenRouter's /generation endpoint (authoritative, exact, no lag race).
-  #  2. If this WAS an OpenRouter run but the per-gen lookup failed: account-usage delta, then the
-  #     harness estimate (labeled "~"). 3. No OpenRouter generation at all => native/keyless => $0 cash.
+  #  1. Per-generation cost from OpenRouter's /generation endpoint (authoritative, exact, per-job).
+  #  2. If this WAS an OpenRouter run but the per-gen lookup failed: the harness estimate (labeled "~").
+  #     (The account-usage DELTA was removed -- it double-counted under concurrent fanout.)
+  #  3. No OpenRouter generation at all => native/keyless => $0 cash.
   local real_cost; real_cost="$(_or_run_cost "$jd/out.log" 2>/dev/null)"
   if [ -z "$real_cost" ]; then
     if grep -qE 'gen-[0-9]+-[a-zA-Z0-9]+' "$jd/out.log" 2>/dev/null; then
@@ -2310,7 +2297,9 @@ _cloud_disclose() {
   [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0     # already disclosed in-process -> skip the notice only
   local cwd="${PWD/#$HOME/~}"
   local train="paid/non-training route (no training on your data)"
-  case "$model" in *:free|*:free:*) train="':free' route — PROVIDER MAY TRAIN on your data" ;; esac
+  # match :free ANYWHERE — the model arg may be a comma-joined pair (second-opinion), so a leading
+  # `hy3:free,deepseek/...` must still disclose may-train (an ends-with test missed the joined case).
+  case "$model" in *:free*) train="':free' route — PROVIDER MAY TRAIN on your data" ;; esac
   printf '>>> [outsourcerer] CLOUD DISCLOSURE (U1): delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
   printf '>>>   destination : a third-party API over the network — repo content LEAVES this machine.\n' >&2
   printf '>>>   readable    : this working dir (%s) + any --with files you passed.\n' "$cwd" >&2
