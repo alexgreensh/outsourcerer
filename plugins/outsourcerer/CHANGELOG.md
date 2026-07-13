@@ -3,6 +3,17 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.2] - 2026-07-14
+
+Truthful cost accounting: the Tab now reports what a run actually cost, on the lane it actually ran. No breaking changes.
+
+### Changed
+- **The Tab splits three ways: cash, plan, and free.** A delegation is now bucketed by its *resolved* lane, not the raw provider string. Local/on-your-hardware runs (Ollama, LM Studio, llama.cpp) and keyless work are no longer miscounted as cash spend — they get their own "on your hardware (local): $0 cash AND $0 plan, fully private" line. Subscription lanes (ChatGPT/Claude/Antigravity) stay in the plan bucket; only genuinely cash-billed lanes (OpenRouter, paid APIs) count toward cash.
+- **The recorded lane mirrors where a run actually dispatched.** A background run records the effective lane (e.g. `-m glm --provider devin` records the Devin lane, not the OpenRouter default), so `bg`/`fanout` receipts and the Tab stop mislabeling a plan run as cash. Local-prefix models (`ollama:`/`lmstudio:`/`lms:`/`local:`) and `--provider local` always record local; an implicit (no `-m`) run records the provider's default lane.
+
+### Fixed
+- **`bg`/`fanout` reject a non-verb in the verb position up front.** `bg -m glm "..."` (a flag where the verb should be) previously ran the full window on the wrong default model before failing; it now fails fast with the correct usage. The verb allowlist is centralized, so `fanout --verb explore` is accepted (it was wrongly rejected).
+
 ## [0.4.1] - 2026-07-13
 
 Security transparency: a plain-language "what leaves your machine" page, and the audit numbers refreshed to the current scanner with every finding triaged by name (no suppressions). No behavior changes.
