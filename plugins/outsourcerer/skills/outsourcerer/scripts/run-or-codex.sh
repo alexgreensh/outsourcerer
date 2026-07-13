@@ -15,6 +15,20 @@ MODEL="${1:-tencent/hy3:free}"
 MODE="${2:-tui}"
 
 export PATH="$HOME/.local/bin:$PATH"
+
+# Guard: this script routes through OpenRouter ONLY. The BARE ChatGPT-subscription aliases/ids
+# (sol/terra/luna and bare gpt-5.x) are NOT served by OpenRouter and 400 here. Match only bare tokens
+# -- NOT provider-qualified slugs like `openai/gpt-5.6-sol`, which ARE valid OpenRouter models (no
+# leading-`*` glob, so a slug containing a `/` is never matched). Point the caller at the native path.
+case "$MODEL" in
+  */*) : ;;   # provider-qualified slug (e.g. openai/gpt-5.6-sol) -> a real OpenRouter id, allow it through
+  sol|terra|luna|gpt-5|gpt-5.*)
+    echo "ERROR: '$MODEL' is a bare ChatGPT-subscription model; it 400s on OpenRouter." >&2
+    echo "  For an interactive NATIVE-codex session (your ChatGPT auth) use:" >&2
+    echo "    outsourcerer --provider codex session start -m $MODEL" >&2
+    echo "  (--provider must precede the subcommand. This script is only for OpenRouter model ids.)" >&2
+    exit 2 ;;
+esac
 # Extract ONLY the OpenRouter key, never allexport the whole ~/.env into Codex's env.
 _l="$(grep -E '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
 OPENROUTER_API_KEY="${_l#*OPENROUTER_API_KEY=}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY%\"}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY#\"}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY%\'}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY#\'}"; export OPENROUTER_API_KEY

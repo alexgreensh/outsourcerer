@@ -65,9 +65,14 @@
 #                     fidelity). Runs in Codex's own AGENTS.md + MCP ecosystem, not Claude's.
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
-# deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers;
-# continue/session/parity are Devin-only (for interactive OR sessions use the sibling
-# scripts/run-or-model.sh [cc] / scripts/run-or-codex.sh [codex] next to this script).
+# deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers.
+# INTERACTIVE sessions: `outsourcerer --provider devin|codex|cc session start -m <model>` is the one
+# turnkey path and is provider-aware. NOTE --provider must come BEFORE the `session` subcommand (global
+# flags are parsed before subcommands). --provider codex launches NATIVE codex (sol/terra/luna run on
+# YOUR ChatGPT auth); --provider cc launches native claude (fable/opus/...); devin is the default.
+# continue/parity are Devin-only. The sibling scripts/run-or-{model,codex}.sh are ONLY for running
+# arbitrary OpenRouter model ids interactively -- they force provider=openrouter, so bare ChatGPT-sub
+# aliases (sol/terra/luna/gpt-5.x) 400 there; use `--provider codex session start` for those instead.
 #
 # REASONING EFFORT is a parameter everywhere: --effort minimal|low|medium|high|xhigh|max (alias
 # --reasoning), or OUTSOURCERER_EFFORT. Native on codex lanes (model_reasoning_effort) and Claude
@@ -94,7 +99,7 @@ OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
-# U3: any per-run MCP config temp is removed at script exit (only in the main shell, not in
+# Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
 trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" 2>/dev/null; fi' EXIT
 # Tier override: --tier flag (parsed later) or OUTSOURCERER_TIER env. "raw" = no wrapper.
@@ -174,7 +179,7 @@ logged_in() { devin auth status 2>/dev/null | grep -qi "Logged in"; }
 MODEL="$DEFAULT_MODEL"
 MODEL_EXPLICIT=0
 
-# U3: validate a model token before it reaches a shell command (tmux send-keys, etc).
+# Validate a model token before it reaches a shell command (tmux send-keys, etc).
 # Reject anything outside the safe set [A-Za-z0-9._:/-] to prevent shell injection.
 _validate_model_token() {
   local token="${1:-}"
@@ -185,17 +190,22 @@ _validate_model_token() {
 }
 
 parse_model() {
-  # U6: strip ALL outsourcerer flags (not just leading -m) so none leak into the Devin CLI.
+  # Strip ALL outsourcerer flags (not just leading -m) so none leak into the Devin CLI.
   # The `--effort high` leak crashed `devin -p` ("unexpected argument '--effort high...'").
-  # Devin has no native effort/tier knob, so --effort is consumed here and surfaced as advisory
-  # by the caller; --tier/--with are Devin-irrelevant and simply dropped from the prompt.
-  MODEL="$DEFAULT_MODEL"; MODEL_EXPLICIT=0; EFFORT="${OUTSOURCERER_EFFORT:-}"; REST=()
+  # parse_model sets the SAME flag state as _consume_flags (TIER_FLAG/OSRC_TIER_OVERRIDE,
+  # WITH_SPEC) and validates --effort identically, so the two parsers no longer diverge. The Devin lane
+  # still ignores tier/with (advisory only); non-Devin callers of parse_model (session, continue) get
+  # the correct tier/effort state instead of silently dropping it.
+  MODEL="$DEFAULT_MODEL"; MODEL_EXPLICIT=0; EFFORT="${OUTSOURCERER_EFFORT:-}"; TIER_FLAG=""; WITH_SPEC=""; REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model)           [ -n "${2:-}" ] || die "-m requires a model name"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
-      --tier)               [ -n "${2:-}" ] || die "--tier requires a value"; shift 2 ;;
-      --with)               [ -n "${2:-}" ] || die "--with requires a value"; shift 2 ;;
-      --effort|--reasoning) [ -n "${2:-}" ] || die "--effort requires a value"; EFFORT="$2"; shift 2 ;;
+      --tier)               [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
+      --with)               [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
+      --effort|--reasoning) [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
+                            case "$2" in minimal|low|medium|high|xhigh|max|none) EFFORT="$2" ;;
+                              *) die "--effort '$2' invalid (use: minimal|low|medium|high|xhigh|max)" ;; esac
+                            shift 2 ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --)                   shift; REST+=("$@"); break ;;
@@ -204,7 +214,7 @@ parse_model() {
   done
 }
 
-# U6: which Devin model serves an OpenRouter-lane alias (cross-lane sibling), empty if none.
+# Which Devin model serves an OpenRouter-lane alias (cross-lane sibling), empty if none.
 # Only GLM is dual-lane today (glm/z-ai/glm-5.2 on OpenRouter <-> glm-5.2 on Devin).
 _devin_model_for() {
   case "$1" in
@@ -227,7 +237,7 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt="${REST[*]}"
-  # U6: Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
+  # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
   [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory only: Devin lane has no native effort knob; not sent to the CLI)\n' "$EFFORT" >&2
   need_devin
@@ -249,7 +259,7 @@ continue_turn() {
   need_devin
   logged_in || die "Not logged in. Run:  ! devin auth login"
   echo ">>> devin -c --model $MODEL -p (continue)" >&2
-  # U2: continue must NOT silently escalate a read-only conversation to accept-edits.
+  # `continue` must NOT silently escalate a read-only conversation to accept-edits.
   # Devin -c inherits the existing conversation's permission mode; forcing accept-edits here
   # was a silent privilege escalation. Remove it.
   devin -c --model "$MODEL" -p "$prompt" </dev/null
@@ -537,7 +547,7 @@ $(cat "$f")
 }
 
 # build_mcp_flags_cc -> echoes claude flags to expose ONLY the named MCP servers (--with mcp=...).
-# U3: the extracted MCP config is a secret-bearing temp file: create it with umask 077 + chmod 600
+# The extracted MCP config is a secret-bearing temp file: create it with umask 077 + chmod 600
 # and remove it on script exit so it never outlives the run.
 build_mcp_flags_cc() {
   [ -n "${WITH_SPEC:-}" ] || return 0
@@ -603,6 +613,7 @@ _consume_flags() {
       --tier)     [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
                   case "$2" in minimal|low|medium|high|xhigh|max|none) EFFORT="$2" ;;
@@ -640,10 +651,31 @@ record_ledger() {
   local intok; intok="$(_est_tokens "$task")"
   local ts; ts="$(date +%Y-%m-%dT%H:%M:%S)"
   local hash; hash="$(printf '%s' "$task" | cksum | cut -d' ' -f1)"
-  jq -cn --arg ts "$ts" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
+  local _line; _line="$(jq -cn --arg ts "$ts" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
      --arg c "$cost" --argjson it "$intok" --arg h "$hash" \
-     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h}' \
-     >> "$OSRC_LEDGER" 2>/dev/null || true
+     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h}')" || return 0
+  [ -n "$_line" ] || return 0
+  if command -v flock >/dev/null 2>&1; then
+    # Wait briefly for the lock; if it genuinely can't be acquired, do NOT silently drop the
+    # accounting record -- fall back to a best-effort append (one small line, atomic under PIPE_BUF) and
+    # warn once. A possibly-interleaved line beats losing spend/activity data with no signal.
+    # The lock-failure flag is raised INSIDE the fd-9 group but the warning is emitted
+    # OUTSIDE it -- the group's `2>/dev/null` (needed to hush flock/open noise) must not eat the warning.
+    local _lockfail=0
+    { if flock -w 5 9 2>/dev/null; then
+        printf '%s\n' "$_line" >> "$OSRC_LEDGER"
+      else
+        printf '%s\n' "$_line" >> "$OSRC_LEDGER" 2>/dev/null || true
+        _lockfail=1
+      fi
+    } 9>>"$OSRC_LEDGER" 2>/dev/null || true
+    if [ "$_lockfail" = "1" ] && [ "${OSRC_LEDGER_LOCK_WARNED:-0}" != "1" ]; then
+      echo "outsourcerer: ledger lock unavailable — appended without lock (accounting may interleave under heavy parallelism)" >&2
+      export OSRC_LEDGER_LOCK_WARNED=1
+    fi
+  else
+    printf '%s\n' "$_line" >> "$OSRC_LEDGER" 2>/dev/null || true
+  fi
 }
 
 refresh_models() {
@@ -894,7 +926,7 @@ _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
 _supervise() {
   local jd="$1" warn="$2" kill_after="$3" hard="$4"; shift 4
   [ "${1:-}" = "--" ] && shift
-  # U3: job dir private, out.log restricted. The mkdir -m 700 may be a no-op if the dir exists;
+  # Job dir private, out.log restricted. The mkdir -m 700 may be a no-op if the dir exists;
   # chmod handles the existing case. 600 out.log because it can contain tool output.
   mkdir -p -m 700 "$jd"; chmod 700 "$jd"
   : > "$jd/out.log"; chmod 600 "$jd/out.log"
@@ -903,7 +935,7 @@ _supervise() {
   local pid=$! t0 last_size=0 last_change now size idle age
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
-  # Exploration-spiral guard (F3): a mutating verb that reads/greps forever grows the log, so the
+  # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too; a mutating job with 0 writes past the window is
   # flagged "exploring?" (visible in status/watch) so the orchestrator can steer instead of cancelling
   # blind. Not killed — late-writers exist; the hard timeout still backstops.
@@ -968,7 +1000,7 @@ _supervise() {
   fi
 }
 
-_new_job_id() { printf '%s-%s' "$(date +%Y%m%d-%H%M%S)" "$(od -An -N2 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%04x' $$)"; }
+_new_job_id() { printf '%s-%s' "$(date +%Y%m%d-%H%M%S)" "$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%06x%06x' $$ ${RANDOM:-0})"; }
 
 _tier_windows() {   # <tier> -> "warn kill hard" seconds (env overrides win)
   case "$1" in
@@ -979,7 +1011,7 @@ _tier_windows() {   # <tier> -> "warn kill hard" seconds (env overrides win)
 }
 
 # _fg_guard <dispatch-fn> <tier> -- run a FOREGROUND delegate attached to the terminal, but under a
-# watchdog (F1). `bg`/`fanout` are supervised by _supervise; foreground verbs (run/research/edit/yolo)
+# watchdog. `bg`/`fanout` are supervised by _supervise; foreground verbs (run/research/edit/yolo)
 # had NO watchdog, so a delegate that finishes the work but wedges on teardown (proven: codex emits the
 # answer, then an MCP-auth worker dies + a Stop hook loops, and the process never exits) hangs forever.
 # Design: keep the terminal attached (stream stdout live via tee, leave stderr as-is);
@@ -1022,12 +1054,73 @@ _fg_guard() {
   return "$rc"
 }
 
+# Cloud gate for DETACHED jobs. A bg/fanout job runs via `nohup __runjob` with no TTY, so the
+# in-child cloud disclosure would hit the fail-closed non-interactive REFUSE and break the primary
+# parallel path by default (Devin, the default provider, is a cloud lane). Acquire the ack ONCE here
+# in the interactive PARENT and propagate it to children via OSRC_CLOUD_ACK -- the FLAG, not ACKED, so
+# each child STILL runs its own secret-scan hard-block on real credential files. Local lanes are exempt
+# (they never leave the machine). Idempotent across a fanout batch once OSRC_CLOUD_ACK is exported.
+_bg_cloud_preack() {   # args: <verb> [flags] "task"
+  [ "${OSRC_CLOUD_ACK:-0}" = "1" ] && return 0
+  [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0
+  # honor an explicit --cloud-ack on the bg/fanout CLI: the documented non-interactive escape hatch.
+  # Scan leading flags only -- skip the verb ($1), skip each value-taking flag's argument,
+  # and STOP at `--` or the first positional task. A task whose text is literally "--cloud-ack" (passed
+  # after `--`) must NOT self-ack. Model token is captured in the same single pass.
+  local _a _prev="verb" _m="" _first=1
+  for _a in "$@"; do
+    if [ "$_first" = "1" ]; then _first=0; continue; fi          # skip the verb
+    case "$_prev" in
+      -m|--model) _m="$_a"; _prev="$_a"; continue ;;             # flag value: capture model, don't treat as task
+      -t|--tier|-e|--effort|--with|--label|--route|-p|--provider) _prev="$_a"; continue ;;
+    esac
+    case "$_a" in
+      --) break ;;                                                # end of flags -> everything after is task
+      --cloud-ack) export OSRC_CLOUD_ACK=1; return 0 ;;
+      -*) _prev="$_a" ;;                                          # some other leading flag, keep scanning
+      *) break ;;                                                 # first positional task -> stop
+    esac
+  done
+  # local lanes never touch the network -> no ack needed (mirrors route_delegate's local short-circuit).
+  case "$PROVIDER:$_m" in local:*|*:ollama:*|*:lmstudio:*|*:lms:*|*:local|*:local:*) return 0 ;; esac
+  if [ -t 0 ] && [ -t 2 ]; then
+    printf '>>> [outsourcerer] CLOUD bg/fanout: jobs delegate to a cloud lane (provider=%s) -- repo content in %s LEAVES this machine.\n' "$PROVIDER" "${PWD/#$HOME/~}" >&2
+    printf '>>>   Each job still runs a secret-scan hard-block on real credential files. Acknowledge for this batch? [y/N] ' >&2
+    local ans=""; IFS= read -r ans </dev/tty 2>/dev/null || ans=""
+    case "$ans" in y|Y|yes|YES) export OSRC_CLOUD_ACK=1; return 0 ;; esac
+    die "CLOUD GATE: bg/fanout cloud disclosure declined -- refusing. Re-run with --cloud-ack / OSRC_CLOUD_ACK=1, or use a local (ollama/lmstudio) lane."
+  fi
+  die "CLOUD GATE: bg/fanout to a cloud lane needs an explicit ack in a non-interactive context. Pass --cloud-ack or set OSRC_CLOUD_ACK=1 (local ollama/lmstudio lanes are exempt)."
+}
+
 # _bg_launch <verb> [flags] "task" -> mint a job id, detach a supervised __runjob, echo ONLY the id.
 # Shared by cmd_bg and cmd_fanout so a job is minted+detached the exact same way everywhere.
 _bg_launch() {
-  mkdir -p -m 700 "$OSRC_JOBS"; chmod 700 "$OSRC_JOBS"
-  local id jd; id="$(_new_job_id)"; jd="$OSRC_JOBS/$id"; mkdir -p -m 700 "$jd"; chmod 700 "$jd"
-  echo running > "$jd/status"   # mark launching immediately so fanout's live-count sees it at once
+  # NOTE: the cloud preack is intentionally NOT called here -- _bg_launch runs inside `id=$(_bg_launch ...)`
+  # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
+  # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
+  mkdir -p -m 700 "$OSRC_JOBS" 2>/dev/null; chmod 700 "$OSRC_JOBS" 2>/dev/null
+  local id jd tries=0
+  # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
+  # concurrent launches that mint the same id can never share one directory; regenerate on collision.
+  while :; do
+    id="$(_new_job_id)"; jd="$OSRC_JOBS/$id"
+    mkdir -m 700 "$jd" 2>/dev/null && break
+    tries=$((tries+1))
+    [ "$tries" -ge 8 ] && { echo "bg: could not allocate a unique job dir under $OSRC_JOBS" >&2; return 1; }
+  done
+  chmod 700 "$jd" 2>/dev/null
+  # If we cannot even record the initial status, the job never really started -- clean up and
+  # fail loudly rather than emitting an id for a phantom job (which makes fanout's waiter hang forever).
+  # Verify the supervisor binary is actually runnable BEFORE we claim the job
+  # and background it -- otherwise nohup of a missing/non-exec SCRIPT_PATH fails asynchronously while we
+  # already printed an id and wrote status=running, leaving a phantom job the fanout waiter hangs on.
+  if [ ! -x "$SCRIPT_PATH" ] && ! command -v "$SCRIPT_PATH" >/dev/null 2>&1; then
+    rm -rf "$jd" 2>/dev/null; echo "bg: supervisor not executable: $SCRIPT_PATH (nothing started)" >&2; return 1
+  fi
+  if ! echo running > "$jd/status" 2>/dev/null; then
+    rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
+  fi
   nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   printf '%s' "$id"
 }
@@ -1036,7 +1129,9 @@ _bg_launch() {
 cmd_bg() {
   [ "${1:-}" = "--worktree" ] && { export OSRC_WORKTREE=1; shift; }   # opt-in git-worktree isolation
   [ $# -gt 0 ] || die "bg needs a verb + task (e.g. bg run -m hy3 \"...\")"
+  _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
+  [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
   echo "[outsourcerer] job $id launched (provider=$PROVIDER). Poll: $0 status $id  |  read: $0 result $id" >&2
 }
@@ -1060,6 +1155,10 @@ _worktree_setup() {
 # __runjob <id> <provider> <verb> [flags] "task"  (internal; run detached by cmd_bg)
 run_job() {
   local id="$1" prov="$2"; shift 2
+  # This detached job process creates last.txt/out.log (incl. the Codex --output-last-message
+  # path that writes last.txt DURING _supervise). Set a private umask up front so NONE of them are ever
+  # briefly world-readable. No restore needed -- this is a dedicated short-lived process that exits after.
+  umask 077
   local jd="$OSRC_JOBS/$id"; mkdir -p -m 700 "$jd"; chmod 700 "$jd"
   local verb="$1"; shift
   # OPT-IN worktree isolation: run this job in its own disposable git worktree so parallel EDITING jobs
@@ -1108,11 +1207,12 @@ run_job() {
       "$id" "$wbr" "$wt" "$ahead" "$dirty" "$id" >&2
   fi
   # Post-process: extract last.txt from cc stream-json; text fallback otherwise.
+  # (umask 077 already set at run_job start -- covers this and the earlier Codex --output-last-message write.)
   if [ ! -s "$jd/last.txt" ] && grep -aq '"type":"result"' "$jd/out.log" 2>/dev/null && have jq; then
     jq -r 'select(.type=="result")|.result' "$jd/out.log" 2>/dev/null > "$jd/last.txt"
   fi
   [ -s "$jd/last.txt" ] || cp "$jd/out.log" "$jd/last.txt" 2>/dev/null || true
-  # U3: last.txt is the result payload; keep it private.
+  # last.txt is the result payload; keep it private.
   [ -f "$jd/last.txt" ] && chmod 600 "$jd/last.txt" 2>/dev/null || true
   # REAL cash, in priority order:
   #  1. Per-generation cost from OpenRouter's /generation endpoint (authoritative, exact, no lag race).
@@ -1305,7 +1405,7 @@ cmd_cleanup() {
   echo "[outsourcerer] removed worktree for $target (branch $branch)"
 }
 
-# U3: gc --older-than DAYS. Delete completed job dirs whose mtime is older than N days.
+# gc --older-than DAYS. Delete completed job dirs whose mtime is older than N days.
 # Only terminal states (done/done?/failed/blocked/timeout/wedged/canceled/permission-blocked)
 # are removed; running/interrupted jobs are left alone.
 cmd_gc() {
@@ -1324,10 +1424,13 @@ cmd_gc() {
   for d in "$OSRC_JOBS"/*/; do
     [ -d "$d" ] || continue
     st="$(cat "$d/status" 2>/dev/null || echo running)"
-    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked) ;;
+    case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked) ;;
       *) skipped=$((skipped+1)); continue ;;
     esac
-    mtime=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo 0)
+    mtime=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo "")
+    if [ -z "$mtime" ] || ! printf '%s\n' "$mtime" | grep -q '^[0-9][0-9]*$'; then
+      skipped=$((skipped+1)); continue
+    fi
     if [ "$mtime" -lt "$cutoff" ]; then
       rm -rf "$d"
       removed=$((removed+1))
@@ -1341,7 +1444,7 @@ cmd_gc() {
 # =============================================================================
 # FANOUT (parallel multi-subagent): run N delegations in parallel across ANY provider, each as a
 # supervised bg job (reuses _bg_launch/_supervise/tier-windows/ledger), with a concurrency cap and
-# result collection. This is how a multi-agent skill (a review gauntlet like <your-review-skill>, or a
+# result collection. This is how a multi-agent skill (a code-review suite, or a
 # per-module sweep) runs THROUGH the outsourcerer: N headless jobs, one fast bootstrap each, true OS
 # parallelism. NOT N interactive tmux sessions, each with its own bootstrap cost. codex/devin exec
 # tools HEADLESS in a sandbox (research/edit/yolo verbs) — the "headless == read-only" limit is
@@ -1506,6 +1609,7 @@ cmd_fanout() {
       --agents)       [ -n "${2:-}" ] || die "--agents needs a dir"; agentsdir="$2"; shift 2 ;;
       --sub)          [ -n "${2:-}" ] || die "--sub needs KEY=VALUE"; subs+=("$2"); shift 2 ;;
       --label-prefix) [ -n "${2:-}" ] || die "--label-prefix needs a value"; label_prefix="$2"; shift 2 ;;
+      --cloud-ack)    export OSRC_CLOUD_ACK=1; shift ;;   # T3/#2: documented non-interactive cloud ack for fanout
       --)             shift; inline=("$@"); break ;;
       *) die "fanout: unknown flag '$1' (sources: --agents DIR | --tasks FILE | -- \"t1\" \"t2\"; knobs: -m --effort --tier --provider --with --verb --max --preamble --sub --task \"<t>\" --route 'pat=model,...' --worktree; routing precedence: -m > --route > agent frontmatter > default; --worktree isolates each job in its own git worktree, remove with 'cleanup <id|gid> [--force]')" ;;
     esac
@@ -1563,8 +1667,29 @@ $body"
     "${g_prov:-$PROVIDER}" "$verb" "$maxpar" "${g_model:-<per-agent|default>}" "${g_effort:-<per-agent|lane>}" "${g_tier:-<auto>}" "${fwd[*]-}" "${#labels[@]}" "$PWD" > "$gd/manifest.txt"
   echo "[outsourcerer] fanout $gid: ${#labels[@]} agents, provider=${g_prov:-$PROVIDER} verb=$verb max-parallel=$maxpar" >&2
 
+  # Acquire the cloud ack ONCE in the PARENT before the launch loop (each _bg_launch
+  # below runs in a command substitution where a `die` cannot abort the batch). The gate must consider each
+  # job's EFFECTIVE lane, not just the batch-global knob: per-agent frontmatter or --route can select a
+  # cloud lane even when the global provider is local (and vice versa). Resolve every job's effective
+  # provider/model with the SAME precedence the launch loop uses; if ANY routes to a cloud lane, preack once
+  # in the parent (dies here if refused, before a single job dir is minted). All-local batches stay exempt.
+  local _pi _pem _pep _pjprov _cloud_prov="" _cloud_model=""
+  for _pi in "${!labels[@]}"; do
+    _pem="$g_model"
+    [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"
+    [ -z "$_pem" ] && _pem="${a_model[$_pi]}"
+    _pep="${g_prov:-${a_prov[$_pi]}}"; _pjprov="${_pep:-$PROVIDER}"
+    # local lanes never touch the network (mirror _bg_cloud_preack's local short-circuit); skip them.
+    case "$_pjprov:$_pem" in local:*|*:ollama:*|*:lmstudio:*|*:lms:*|*:local|*:local:*) continue ;; esac
+    _cloud_prov="$_pjprov"; _cloud_model="$_pem"; break   # a representative cloud job -> gate the batch
+  done
+  if [ -n "$_cloud_prov" ]; then
+    local -a _pk=("$verb"); [ -n "$_cloud_model" ] && _pk+=(-m "$_cloud_model")
+    PROVIDER="$_cloud_prov" _bg_cloud_preack "${_pk[@]}"
+  fi
+
   local i jid em ee et ep jprov rtag
-  local -a jfwd=()
+  local -a jfwd=(); local _fail=0 _ok=0
   for i in "${!labels[@]}"; do
     while [ "$(_fanout_running "$gid")" -ge "$maxpar" ]; do sleep "${OSRC_POLL:-10}"; done
     # Routing precedence: global CLI knob > --route name-pattern map > agent-file frontmatter > lane default.
@@ -1575,11 +1700,18 @@ $body"
     jfwd=(); [ -n "$em" ] && jfwd+=(-m "$em"); [ -n "$ee" ] && jfwd+=(--effort "$ee"); [ -n "$et" ] && jfwd+=(--tier "$et")
     jprov="${ep:-$PROVIDER}"
     jid="$(PROVIDER="$jprov" _bg_launch "$verb" ${jfwd[@]+"${jfwd[@]}"} ${fwd[@]+"${fwd[@]}"} "${prompts[$i]}")"
-    printf '%s\t%s\n' "$jid" "${labels[$i]}" >> "$gd/members.tsv"
+    if [ -z "$jid" ]; then echo "  ! launch FAILED for ${labels[$i]} (no job id minted); skipping" >&2; _fail=$((_fail+1)); continue; fi
+    printf '%s\t%s\n' "$jid" "${labels[$i]}" >> "$gd/members.tsv"; _ok=$((_ok+1))
     rtag=""; [ -z "$g_model" ] && [ -n "${a_model[$i]}" ] && rtag=" [${a_model[$i]}${a_prov[$i]:+ @${a_prov[$i]}}]"
     echo "  + launched ${labels[$i]} -> $jid${rtag}" >&2
   done
   echo "$gid"
+  # Surface partial-launch failures and return nonzero if ANY job failed to
+  # launch, so a caller/script can't mistake a half-launched batch for a clean fanout.
+  if [ "$_fail" -gt 0 ]; then
+    echo "[outsourcerer] fanout $gid: $_ok launched, $_fail FAILED to launch. Watch: $0 fanout wait $gid  |  status: $0 fanout status $gid" >&2
+    return 1
+  fi
   echo "[outsourcerer] all ${#labels[@]} launched. Watch: $0 fanout wait $gid  |  status: $0 fanout status $gid  |  collect: $0 fanout collect $gid" >&2
 }
 
@@ -1715,10 +1847,10 @@ delegate_ccnative() {
   local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH)
   if [ -n "$EFFORT" ]; then local think; think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && { clean+=("MAX_THINKING_TOKENS=$think"); printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; }; fi
   local rc=0
-  # U7: same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
+  # Same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
   # Bash permission prompt. auto stays read-only; mutating verbs get Bash. Terminated by --permission-mode.
   local tools=()
-  if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then tools=(--allowedTools $OSRC_ALLOWED_TOOLS)
+  if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
   else case "$tier" in
     auto)                   tools=(--allowedTools Read Grep Glob) ;;
     accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
@@ -1731,11 +1863,14 @@ delegate_ccnative() {
   else
     # foreground: capture JSON, print the result text, then VERIFY the real model from modelUsage.
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.ccnative.$$.json"
+    local old_umask; old_umask="$(umask)"; umask 077
     "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json $extra --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
     record_ledger claude-native "$id" "$ttier" "$tier" "$task"
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
+    chmod 600 "$tmpj" 2>/dev/null || true
     rm -f "$tmpj"
+    umask "$old_umask"
   fi
   if [ "$rc" -ne 0 ]; then
     printf '>>> [hint] claude-native exited %s. If it still reports "Not logged in", run `claude` once and /login (headless auth is separate from interactive Claude Code).\n' "$rc" >&2
@@ -2034,7 +2169,7 @@ _perm_escalate() {
 _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude, ~/.codex, ...); headless acceptEdits cannot auto-approve it. Re-run with 'yolo' (bypassPermissions), edit a copy, or unset OSRC_NO_BYPASS."
 
 # =============================================================================
-# U1 — CLOUD DISCLOSURE + SECRET-SCAN GATE (security hardening, Phase 0).
+# CLOUD DISCLOSURE + SECRET-SCAN GATE (security hardening).
 # Mirrors the _perm_escalate/_protected_scope shapes: a small pure classifier plus a
 # gate that dies on REFUSE. Local/ollama/lmstudio lanes are short-circuited in
 # route_delegate BEFORE this runs, so this only guards CLOUD lanes (cc/codex/OpenRouter,
@@ -2052,7 +2187,7 @@ _is_cloud_lane() {
 }
 
 # _secret_scan <prompt> -> best-effort, gitignore-aware (KTD2). Hard-dies if a REAL credential
-# file sits inside the delegated scope (cwd top-level + .aws). Reports (via OSRC_SECRET_HITS) any
+# file sits inside the delegated scope (cwd top-level + .aws). Reports (via OSRC_SECRET_HIT_COUNT) any
 # high-signal pattern found in the prompt or a --with file, but does NOT hard-block on a regex
 # hit alone (avoid crying wolf); only an actual credential FILE hard-blocks.
 _secret_scan() {
@@ -2066,36 +2201,86 @@ _secret_scan() {
     case "$f" in *.example|*.sample|*.template|*.dist) continue ;; esac
     [ -f "$f" ] && die "CLOUD GATE: real credential file in delegated scope: $f — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane."
   done < <(compgen -G "$PWD/.env.*" 2>/dev/null)
+  # (1b) A cloud delegate can read the WHOLE workspace, not just its root, so a nested
+  # credential file (services/prod/.env, deploy/.env.production, config/id_rsa) is just as exfiltrable.
+  # Bounded recursive sweep: depth-limited, prunes heavy/vendored dirs, excludes obvious templates.
+  # Opt out with OSRC_SECRET_SCAN_DEEP=0 (e.g. a giant monorepo where the walk is too slow).
+  if [ "${OSRC_SECRET_SCAN_DEEP:-1}" = "1" ] && command -v find >/dev/null 2>&1; then
+    # Validate depth to an integer -- a bogus OSRC_SECRET_SCAN_DEPTH made `find`
+    # error out, the read loop saw nothing, and the scan FAILED OPEN (no die). Never fail open on a scan
+    # we cannot run: sanitize to the default, and if find itself errors, refuse the cloud route.
+    local _depth="${OSRC_SECRET_SCAN_DEPTH:-4}"
+    case "$_depth" in ''|*[!0-9]*) _depth=4 ;; esac
+    [ "$_depth" -gt 12 ] 2>/dev/null && _depth=12   # cap: an unbounded walk is a DoS/hang, not security
+    # Process substitution DISCARDS find's exit status, so a find that fails
+    # to run scans nothing and the gate fails OPEN. Run find into a private temp file, CHECK its status,
+    # and hard-die (fail CLOSED) if the scan could not complete. A cloud delegate runs with our own repo
+    # privileges, so paths find can read are exactly the paths the delegate can read.
+    local _sf _ef
+    _sf="$(mktemp "${TMPDIR:-/tmp}/osrc.scan.XXXXXX" 2>/dev/null)" || die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."
+    _ef="$(mktemp "${TMPDIR:-/tmp}/osrc.scanerr.XXXXXX" 2>/dev/null)" || { rm -f "$_sf"; die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."; }
+    find "$PWD" -maxdepth "$_depth" \
+               \( -name .git -o -name node_modules -o -name vendor -o -name .venv -o -name venv \
+                  -o -name target -o -name dist -o -name build -o -name .terraform \) -prune -o \
+               -type f \( -name '.env' -o -name '.env.*' -o -name 'credentials' -o -name 'id_rsa' \
+                  -o -name 'id_ed25519' \) -print > "$_sf" 2>"$_ef"
+    local _fs=$?
+    # A nonzero find rc is USUALLY routine traversal noise (a mode-000 or
+    # root-owned subdir). Same-privilege: a path find can't read, the cloud delegate can't read either, so
+    # that's NOT an exfil gap -- process the readable results and proceed. Fail CLOSED only on a REAL scan
+    # failure (bad invocation/syntax/tool error): i.e. stderr has a line that is NOT a permission diagnostic.
+    if [ "$_fs" -ne 0 ] && [ -s "$_ef" ] && grep -qvE 'Permission denied|Operation not permitted|Not a directory|No such file' "$_ef"; then
+      rm -f "$_sf" "$_ef"; die "CLOUD GATE: workspace credential scan could not complete (find rc=$_fs) — refusing cloud route (fail closed). Fix the scan or set OSRC_SECRET_SCAN_DEEP=0 to skip it (NOT recommended for cloud lanes)."
+    fi
+    local _hit=""
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case "$f" in *.example|*.sample|*.template|*.dist) continue ;; esac
+      _hit="$f"; break
+    done < "$_sf"
+    rm -f "$_sf" "$_ef"
+    [ -n "$_hit" ] && die "CLOUD GATE: real credential file in delegated scope: $_hit — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine."
+  fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
   if [ -n "${WITH_SPEC:-}" ]; then
-    local tok
-    for tok in $WITH_SPEC; do
+    local tok; local -a _ws; IFS=' ' read -ra _ws <<< "$WITH_SPEC"
+    for tok in "${_ws[@]}"; do
       case "$tok" in *=*) continue ;; esac          # skills=a,b / mcp=x are not file paths
       [ -f "$tok" ] && scan="$scan
 $(cat "$tok" 2>/dev/null)"
     done
   fi
-  OSRC_SECRET_HITS="$(printf '%s\n' "$scan" | grep -Eoi 'OPENROUTER_API_KEY|sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' 2>/dev/null | sort -u | tr '\n' ' ')"
-  OSRC_SECRET_HITS="${OSRC_SECRET_HITS% }"
+  # Count distinct high-signal matches; do NOT retain the matched secret text (only a count is
+  # surfaced downstream, so the raw credential fragments never live in a variable or reach stderr/logs).
+  OSRC_SECRET_HIT_COUNT="$(printf '%s\n' "$scan" | grep -Eoi 'OPENROUTER_API_KEY|sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' 2>/dev/null | sort -u | grep -c . )"
+  OSRC_SECRET_HIT_COUNT="${OSRC_SECRET_HIT_COUNT:-0}"
 }
 
-# _cloud_disclose <lane> <model> <prompt> -> the cloud gate (U1). Idempotent per process via
+# _cloud_disclose <lane> <model> <prompt> -> the cloud gate. Idempotent per process via
 # OSRC_CLOUD_ACKED (set on any successful ack so fanout does not re-prompt N times).
 _cloud_disclose() {
   local lane="$1" model="${2:-}" prompt="${3:-}"
   _is_cloud_lane "$lane" || return 0                 # local/ollama/lmstudio: skip entirely
-  [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0
+  # SECURITY (CRITICAL): the credential hard-block MUST run for every cloud delegation,
+  # BEFORE any acknowledgement short-circuit. OSRC_CLOUD_ACKED is exported and therefore inherited by
+  # child processes (bg/fanout __runjob, nested invocations); if the ACKED early-return preceded the
+  # scan, `OSRC_CLOUD_ACKED=1` in the environment would ship a repo with a live .env to a third-party
+  # API with the hard-block silently skipped. An ack only suppresses the human-facing notice/prompt --
+  # never the scan.
+  _secret_scan "$prompt"                             # dies here if a real cred file is in scope
+  [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0     # already disclosed in-process -> skip the notice only
   local cwd="${PWD/#$HOME/~}"
   local train="paid/non-training route (no training on your data)"
   case "$model" in *:free|*:free:*) train="':free' route — PROVIDER MAY TRAIN on your data" ;; esac
-  _secret_scan "$prompt"                             # dies here if a real cred file is in scope
   printf '>>> [outsourcerer] CLOUD DISCLOSURE (U1): delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
   printf '>>>   destination : a third-party API over the network — repo content LEAVES this machine.\n' >&2
   printf '>>>   readable    : this working dir (%s) + any --with files you passed.\n' "$cwd" >&2
   printf '>>>   training    : %s\n' "$train" >&2
-  [ -n "${OSRC_SECRET_HITS:-}" ] && printf '>>>   secret scan : high-signal pattern(s) in prompt/--with: %s\n' "$OSRC_SECRET_HITS" >&2
+  # Report the COUNT of high-signal matches, never the matched secret text itself (printing the
+  # values would leak the very credentials we are warning about to the terminal / any log capturing stderr).
+  [ "${OSRC_SECRET_HIT_COUNT:-0}" -gt 0 ] 2>/dev/null && printf '>>>   secret scan : %s high-signal credential pattern(s) detected in prompt/--with (values redacted)\n' "$OSRC_SECRET_HIT_COUNT" >&2
   # acknowledge: env/flag ack, else interactive prompt, else fail-closed refuse.
-  if [ "${OSRC_CLOUD_ACK:-0}" = "1" ] || [ "${OSRC_CLOUD_ACK_FLAG:-0}" = "1" ]; then
+  if [ "${OSRC_CLOUD_ACK:-0}" = "1" ]; then
     export OSRC_CLOUD_ACKED=1; return 0
   fi
   if [ -t 0 ] && [ -t 2 ]; then
@@ -2131,18 +2316,19 @@ delegate_cc() {
   fi
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--verbose --output-format stream-json)
   local extra; extra="$(build_mcp_flags_cc)"
-  # U7: grant the coding toolset so a headless mutating job does NOT wedge on an unanswerable Bash
-  # permission prompt (acceptEdits auto-approves edits but NOT bash -> the #1 headless failure mode).
+  # Grant the coding toolset so a headless mutating job does NOT wedge on an unanswerable Bash
+  # permission prompt (acceptEdits auto-approves edits but NOT bash -> the top headless failure mode).
   # `run` (auto) stays read-only; mutating verbs (edit/yolo) get Bash. --allowedTools is VARIADIC, so it
   # must be terminated by --permission-mode before the prompt. Override the set with OSRC_ALLOWED_TOOLS.
   local tools=()
-  if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then tools=(--allowedTools $OSRC_ALLOWED_TOOLS)
+  if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
   else case "$tier" in
     auto)                   tools=(--allowedTools Read Grep Glob) ;;
     accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
   esac; fi
   local think=""; if [ -n "$EFFORT" ]; then think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; fi
   local m rc=1 ttier wrapped cap
+  local old_umask; old_umask="$(umask)"; umask 077
   cap="$OSRC_HOME/.ccerr-$$"
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
@@ -2161,8 +2347,9 @@ delegate_cc() {
     local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
     "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} $extra ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>"$cap"
     rc=$?
+    chmod 600 "$cap" 2>/dev/null || true
     if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; break; fi
-    # U4: only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
+    # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
       echo "HINT: model '$m' failed (rc=$rc) on a transport/infra error; escalating to next in chain..." >&2
       continue
@@ -2172,6 +2359,7 @@ delegate_cc() {
     break
   done
   rm -f "$cap" 2>/dev/null
+  umask "$old_umask"
   return "$rc"
 }
 
@@ -2291,7 +2479,7 @@ _local_agentic() {
   else _local_agentic_shim "$tier" "$base" "$model"; fi
 }
 
-# U1: agentic local via codex Responses (LM Studio / any Responses-API server), keyless, NO install.
+# Agentic local via codex Responses (LM Studio / any Responses-API server), keyless, NO install.
 _local_agentic_codex() {
   local tier="$1" base="$2" model="$3"
   have codex || die "agentic-local on a Responses-API server needs the codex CLI (npm i -g @openai/codex), or use a chat-only server for the shim path."
@@ -2319,7 +2507,7 @@ _local_agentic_codex() {
   return "$rc"
 }
 
-# U3: agentic local on a chat-only server (Ollama) via the on-demand vendored shim + the cc lane.
+# Agentic local on a chat-only server (Ollama) via the on-demand vendored shim + the cc lane.
 # LAZY: reuse an existing proxy (OSRC_LOCAL_ANTHROPIC_URL) if present; else launch the shim ONLY here,
 # where the user has explicitly asked for agentic-local; tear it down after. Never eager, never installs.
 _local_agentic_shim() {
@@ -2371,7 +2559,7 @@ _is_tooltype_400() {
   grep -qiE 'native .?namespace.? tool type|does not support the native .* tool type|support the native `?[a-z_]+`? tool type' "$1" 2>/dev/null
 }
 
-# U4: classify a delegate failure as a transport/infra issue (safe to escalate) vs a task failure
+# Classify a delegate failure as a transport/infra issue (safe to escalate) vs a task failure
 # (must be surfaced, not retried). Returns 0 for connection, HTTP-5xx, 429, 401/403 auth, context
 # length, model_not_found, timeout, or empty-stderr failures. Returns 1 for task failures (e.g., a
 # red test suite, max-turns, or any non-zero exit with normal diagnostic output).
@@ -2379,11 +2567,30 @@ _is_transport_failure() {
   local stderr="$1" rc="${2:-0}"
   # Success is never a transport failure.
   [ "$rc" -eq 0 ] && return 1
-  # Empty diagnostic output on a non-zero exit means we got no useful task result; treat as infra.
-  [ -z "$stderr" ] && return 0
-  # Connection / HTTP / auth / rate-limit / context-length / model-not-found signatures.
-  printf '%s' "$stderr" | grep -qiE \
-'connection(.*(error|refused|failed|reset|timeout|timed out))?|network error|could(n.t| not) connect|tls|ssl|econnrefused|etimedout|enetunreach|no route to host|name or service not known|dns|http [0-9]+|5[0-9][0-9]|429|401|403|unauthorized|forbidden|auth|api.*key|invalid.*token|rate.*limit|too many requests|context.*length|context_length|context too long|maximum context length|token limit exceeded|max.*tokens|model_not_found|model not found|model.*(unavailable|not available|does not exist)|timeout|timed out|time out|request timed out|empty response|no response' && return 0
+  # Empty diagnostic output on a non-zero exit is AMBIGUOUS -- it can be a silently-failed TASK
+  # (red tests, an assertion, a killed step) just as easily as an infra hiccup. Auto-classifying it as
+  # transport would blind-RETRY a mutating task with no rollback (the exact failure this guard exists to stop).
+  # Default: NOT transport (surface it as a task failure). Opt back in via OSRC_EMPTY_STDERR_IS_TRANSPORT=1.
+  if [ -z "$stderr" ]; then
+    [ "${OSRC_EMPTY_STDERR_IS_TRANSPORT:-0}" = "1" ] && return 0 || return 1
+  fi
+  # Transport classification is a TWO-PASS match, because substring signatures fall into
+  # two classes with different false-positive risk:
+  #  PASS 1 -- MACHINE tokens + context-DISCRIMINATED signatures. These never occur in ordinary task/test
+  #  prose (snake_case error codes, errno constants) or carry their own non-positional discriminator (a URL,
+  #  the literal "after", an HTTP/version prefix, a status-code delimiter). Safe to match ANYWHERE in stderr.
+  if printf '%s' "$stderr" | grep -qiE \
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|status[ _]?code[:= ]+[45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)'; then
+    return 0
+  fi
+  #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
+  #  optionally behind a bare "error: " wrapper); ordinary failed-task stderr only ever EMBEDS them mid-sentence
+  #  ("AssertionError: connection refused should be rendered..."). So every one is LINE-ANCHORED. This is what
+  #  stops the prose-false-positive class wholesale (a false positive here would blind-RETRY a mutating task).
+  if printf '%s' "$stderr" | grep -qiE \
+'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?[45][0-9][0-9]|authentication[ _]?(required|failed|error)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
+    return 0
+  fi
   return 1
 }
 
@@ -2407,7 +2614,15 @@ delegate_codex() {
   # code_mode_host self-heal: disable when the host binary is absent (else file reads can hang).
   local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
-  local cap="${OSRC_JOB_DIR:-$OSRC_HOME}/.cxcap.$$"
+  # Guarantee the capture's parent dir exists and is private BEFORE the tee, else on a fresh
+  # $OSRC_HOME the very first delegation's `tee "$cap"` fails, the capture is empty, and a real transport
+  # failure (e.g. 429) is misclassified as a task failure with no escalation.
+  local capdir="${OSRC_JOB_DIR:-$OSRC_HOME}"; mkdir -p -m 700 "$capdir" 2>/dev/null; chmod 700 "$capdir" 2>/dev/null || true
+  # Refuse to invoke Codex unless the capture dir is verified writable. A silent
+  # mkdir failure meant `tee "$cap"` produced an empty capture and a real transport failure (429) got
+  # misclassified as a task failure with no escalation. Fail loud instead of running blind.
+  { [ -d "$capdir" ] && [ -w "$capdir" ]; } || die "delegate_codex: capture dir not writable: $capdir — refusing (cannot capture output / classify transport failures reliably). Set OSRC_JOB_DIR/OSRC_HOME to a writable path."
+  local cap="$capdir/.cxcap.$$"
   local m rc=1 ttier wrapped healed=0
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
@@ -2425,7 +2640,7 @@ delegate_codex() {
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then record_ledger codex "$m" "$ttier" "$tier" "$prompt"; break; fi
     if _is_tooltype_400 "$cap"; then
-      # U2: codex->cc drops the Codex OS sandbox (cc has none). Gate this downgrade exactly like
+      # codex->cc drops the Codex OS sandbox (cc has none). Gate this downgrade exactly like
       # acceptEdits->bypassPermissions: explicit --allow-downgrade / OSRC_ALLOW_DOWNGRADE=1.
       if [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ]; then
         printf '>>> [SECURITY DOWNGRADE] codex+OpenRouter (%s): dropping the Codex sandbox and re-running the SAME model on the cc lane (Claude Code -> OpenRouter, standard tools) because --allow-downgrade/OSRC_ALLOW_DOWNGRADE=1.\n' "$m" >&2
@@ -2434,11 +2649,15 @@ delegate_codex() {
       printf '>>> [outsourcerer] SECURITY DOWNGRADE: codex->cc self-heal would drop the sandbox; that requires --allow-downgrade. Re-run with --allow-downgrade to enable, or use a different lane/model.\n' >&2
       break
     fi
-    # U4: only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
+    # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
       echo "HINT: model '$m' failed (rc=$rc) on a transport/infra error; escalating to next in chain..." >&2
       continue
     fi
+    # Mirror delegate_cc -- surface the task-failure output to STDERR so a caller that captured
+    # stdout as the RESULT still sees the failure. Foreground stdout already showed it via `tee`, so
+    # only re-emit when stdout is being captured (not a tty) to avoid double-printing interactively.
+    [ -t 1 ] || cat "$cap" >&2
     break
   done
   rm -f "$cap" 2>/dev/null
@@ -2506,7 +2725,7 @@ route_delegate() {
                       printf '>>> [route] -m %s is served by BOTH OpenRouter and Devin; using the Devin lane (%s) on the default provider (Devin has quota). Force OpenRouter with --provider cc|codex.\n' "$MODEL" "$_dvm" >&2
                       # Rewrite the model token in ORIG so the Devin lane runs the Devin id, not the OR alias.
                       local _i; for _i in "${!ORIG[@]}"; do
-                        case "${ORIG[$_i]}" in -m|--model) ORIG[$((_i+1))]="$_dvm" ;; esac
+                        case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac
                       done
                       RESOLVED_ID="$_dvm"; disp=devin
                     else
@@ -2524,16 +2743,18 @@ route_delegate() {
     esac
   fi
 
-  # U1 wire-in: cloud disclosure + secret-scan gate. Local lanes were short-circuited above;
+  # Cloud gate wire-in: cloud disclosure + secret-scan gate. Local lanes were short-circuited above;
   # this is the SINGLE choke point after lane resolution, before delegate_* dispatch (no per-lane
-  # bypass). Idempotent per process via OSRC_CLOUD_ACKED inside _cloud_disclose. --cloud-ack flag
-  # is normalized to the same OSRC_CLOUD_ACK=1 ack path without touching _consume_flags.
-  case " ${ORIG[*]} " in *' --cloud-ack '*) export OSRC_CLOUD_ACK=1 ;; esac
-  if [ "${OSRC_CLOUD_ACKED:-0}" != "1" ]; then
-    _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]}"
-  fi
+  # bypass). The --cloud-ack flag is consumed by _consume_flags (leading flag only) which sets
+  # OSRC_CLOUD_ACK -- NO string match on ORIG here: matching " --cloud-ack " anywhere would let a task
+  # PROMPT containing that text silently bypass the gate (and left the flag in REST, leaking it).
+  # SECURITY (CRITICAL): ALWAYS call _cloud_disclose -- the ACKED short-circuit lives
+  # INSIDE it, AFTER _secret_scan. Guarding the CALL with `[ ACKED != 1 ]` let an inherited/exported
+  # OSRC_CLOUD_ACKED=1 skip the credential hard-block entirely (a .env would ship to the cloud lane).
+  # The disclosure notice is still suppressed for an already-acked process by the in-function return.
+  _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]}"
 
-  # The actual dispatch, wrapped so the FOREGROUND path is watchdog-guarded (F1). Defined as a nested
+  # The actual dispatch, wrapped so the FOREGROUND path is watchdog-guarded. Defined as a nested
   # fn so it still sees $disp/$tier/$ORIG (bash dynamic scope) when _fg_guard calls it.
   __osrc_fg_dispatch() {
     case "$disp" in
@@ -2550,6 +2771,23 @@ route_delegate() {
   _fg_guard __osrc_fg_dispatch "$tier"
 }
 
+# Reset a TUI pane's input BEFORE typing into it. Two real failure modes this guards:
+#  1) copy-mode: if the pane is in tmux copy-mode (any scroll/mouse event triggers it), send-keys
+#     are consumed by copy-mode navigation and NEVER reach the program -- keystrokes silently vanish.
+#  2) residual draft: send-keys -l appends to whatever text is already in the input line, so a stale
+#     draft (e.g. an unsubmitted "commit this") corrupts the next prompt by concatenation.
+# Safe to call when idle; harmless on an empty line. Call it before every programmatic send.
+_tmux_reset_input() {
+  local s="$1" aggressive="${2:-}"
+  # Always safe: leave copy-mode (else keystrokes are eaten) and kill-line to wipe a stale input draft.
+  # C-u only edits the input LINE; it does not cancel an in-progress model turn.
+  [ "$(tmux display -p -t "$s" '#{pane_in_mode}' 2>/dev/null)" = "1" ] && tmux send-keys -t "$s" -X cancel 2>/dev/null || true
+  tmux send-keys -t "$s" C-u 2>/dev/null || true       # kill-line: wipe any leftover input
+  # Escape is DESTRUCTIVE in these TUIs -- while a turn is generating it interrupts/cancels it.
+  # Only send it for an explicit `session clear` (aggressive), never on a routine `session send`.
+  [ "$aggressive" = "aggressive" ] && tmux send-keys -t "$s" Escape 2>/dev/null || true
+}
+
 # ---- interactive tmux session (opt-in) ----
 session() {
   have tmux || die "tmux not installed (brew install tmux)"
@@ -2557,7 +2795,7 @@ session() {
   case "$sub" in
     start)
       parse_model "$@"
-      # U3: validate the model token before it is interpolated into a tmux shell command.
+      # Validate the model token before it is interpolated into a tmux shell command.
       _validate_model_token "$MODEL"
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude
       # (fable/opus/...), not just Devin. Each launches its own interactive TUI inside tmux; the generic
@@ -2570,10 +2808,13 @@ session() {
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
-          # U3: the resolved codex model id is what enters the tmux command.
+          # The resolved codex model id is what enters the tmux command.
           _validate_model_token "$cid"
           local ccmh=""; _codex_code_mode_host || ccmh=" -c features.code_mode_host=false"  # self-heal in the TUI too
-          launch="codex -m $cid -s workspace-write --cd \"$PWD\"$ccmh" ;;
+          # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
+          # Interpolating $PWD into this shell-command string was a directory-name injection vector
+          # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
+          launch="codex -m $cid -s workspace-write$ccmh" ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
@@ -2584,10 +2825,12 @@ session() {
       tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD"
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
-      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session model [name]   |   $0 session stop"
+      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
+      tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      _tmux_reset_input "$SESSION_NAME"          # cancel copy-mode + wipe residual draft, else keys vanish or concatenate
       tmux send-keys -t "$SESSION_NAME" -l "$*"
       sleep 0.5                                  # let the TUI debounce the pasted text before submitting
       tmux send-keys -t "$SESSION_NAME" Enter
@@ -2596,6 +2839,11 @@ session() {
       ;;
     read)
       tmux capture-pane -t "$SESSION_NAME" -p | grep -v '^[[:space:]]*$'
+      ;;
+    clear)
+      tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      _tmux_reset_input "$SESSION_NAME" aggressive   # explicit reset: also sends Escape (may interrupt an active turn)
+      echo "cleared input for '$SESSION_NAME' (copy-mode canceled + Escape + draft wiped). NOTE: Escape can interrupt an in-progress turn. Re-check with: $0 session read"
       ;;
     model)
       # Mid-session model switch is TUI-specific. Devin uses the opt+m (Meta-m) picker, wired here.
@@ -2616,7 +2864,7 @@ session() {
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | model [NAME] | stop"
+      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | stop"
       ;;
   esac
 }

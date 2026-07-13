@@ -3,6 +3,20 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.0] - 2026-07-13
+
+Security and reliability hardening for the cloud gate, the transport-vs-task retry classifier, and the parallel job machinery. No breaking changes.
+
+### Security
+- **The credential hard-block now runs on every cloud delegation.** The scan that refuses to send a repo containing a real `.env` / `id_rsa` / `credentials` file to a cloud lane now runs *before* any acknowledgement short-circuit, so an inherited `OSRC_CLOUD_ACK`/`ACKED` (e.g. in a detached `bg`/`fanout` child, or a nested invocation) can no longer skip it. The scan also sweeps **nested** credential files (bounded depth, capped, vendored dirs pruned), not just the repo root, and **fails closed** if it cannot complete.
+- **`bg`/`fanout` cloud gate is now per-job.** The disclosure/ack is resolved from each job's *effective* lane, so a cloud-routed agent inside an otherwise-local batch is gated correctly (and an all-local batch stays exempt). `--cloud-ack` is honored only as a leading flag — a task string that merely equals `--cloud-ack` (after `--`) can no longer self-ack.
+- **Directory-name shell-injection fixed** in `session start`: the working directory is no longer interpolated into a tmux shell command (tmux already opens the pane there). Detected secret values are never printed to stderr/logs — only a redacted count is surfaced.
+
+### Fixed
+- **Transport-vs-task retry classification rewritten (two-pass, line-anchored).** The fallback chain now retries only genuine transport/infra failures (connection / HTTP status / rate-limit / auth / timeout), never a failed *task* whose output merely quotes such phrases — so a red test or an assertion string can't trigger an auto-retry of mutating work. Real curl/HTTP/socket diagnostics are still caught, and previously-missed signatures (`could not resolve host`, `operation timed out`, `socket hang up`, `HTTPError: 5xx`) now escalate correctly.
+- **Parallel job machinery hardened.** Job directories are claimed **atomically** with more entropy (no silent collision under high-parallel fanout); a launch that can't start (unwritable filesystem, non-executable supervisor) now **fails loudly** instead of emitting a phantom job id, and `fanout` returns nonzero if any job fails to launch.
+- **Temp-file and accounting hygiene.** Capture/result temp files are created private (`umask 077` + restrictive perms) with the directory verified writable before use; the cost ledger appends under a bounded-wait lock with a best-effort fallback and a one-time warning instead of silently dropping a record under lock contention.
+
 ## [0.3.1] - 2026-07-11
 
 Run any agent library as a routed crew, isolate parallel editors in git worktrees, and a class-wide fix for the headless permission wall. No breaking changes.
