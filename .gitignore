@@ -29,3 +29,5 @@ readme-preview.html
 # Python bytecode from shim tests
 __pycache__/
 *.pyc
+.torture-scratch/
+.outsourcerer/
