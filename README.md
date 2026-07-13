@@ -165,12 +165,13 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 <img src="readme-assets/section-security.png" alt="The sorcerer in protective gloves guarding a single glowing key behind a ward, keeping it away from open lanes" width="100%">
 
-Audited by [repo-forensics](https://github.com/alexgreensh/repo-forensics) on every release: **0 critical, 18 high, 1 medium, every finding triaged by name** in [SECURITY.md](SECURITY.md). (The 18 "high" are correlation flags for a delegation tool doing exactly what it says: reading one scoped key, calling one provider, supervising background jobs.)
+Audited by [repo-forensics](https://github.com/alexgreensh/repo-forensics) on every release, and **every finding is triaged by name — no suppressions** — in [SECURITY.md](SECURITY.md). A static data-flow scanner necessarily flags a delegation tool's core behavior, so the counts are non-zero and *shown in full*: the "critical" flags are the local-inference shim forwarding your prompt to *your own* model on `127.0.0.1` (and its test); the rest are background-job supervision, one scoped key read, and localhost references. Nothing leaves your machine unexpectedly, and the [local lane](#run-it-on-your-own-machine) leaves it not at all.
 
 - **Keyless by default** where your subscription allows, Gemini/Antigravity, GPT-image, and the native Claude / Codex / Devin lanes. Keyless means **no API key and no cash**, not free: these lanes spend your subscription's finite 5-hour and weekly limits, and the Tab shows how much. Keys are only for the paid OpenRouter lanes.
 - **Single-key sourcing.** Only the one key a lane needs is read from `~/.env`, never your whole environment. A budget model never sees a secret it wasn't handed.
 - **Tells you the lane and tier on every dispatch** (and the sandbox posture, read-only / can-write), and asks before anything destructive.
 - **`:free` models may train on your prompts.** Outsourcerer flags `:free` lanes as may-train and defaults them to least-privilege, so you decide before sensitive context goes down one.
+- **Your credentials can't ride along to the cloud.** Before any cloud delegation, a hard-block refuses the route if a real credential file (`.env`, `id_rsa`, `credentials`, …) is anywhere in the working tree — root or nested — and it runs on every call, fails closed, and tells you exactly what left the machine. Prefer nothing leaves at all? The **local lane** routes to a model on your own machine: no key, no network. See [SECURITY.md](SECURITY.md#your-repo--what-leaves-the-machine).
 
 ---
 

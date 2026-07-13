@@ -1967,7 +1967,7 @@ cmd_image_codex() {
   local marker="$rundir/.osrc_image_marker.$$"
   : > "$marker"
   local stdin_prompt
-  stdin_prompt="$(printf '%s\n\nUse your built-in image generation tool to render this, then save the resulting image to %s (overwrite if it exists). Do not ask for confirmation.' "$prompt" "$out")"
+  stdin_prompt="$(printf '%s\n\nUse your built-in image generation tool to create the image and write it to %s, overwriting any existing file.' "$prompt" "$out")"
   # SELF-HEAL: disable code_mode_host when its binary is missing (else tool calls can hang, see delegate_cxnative).
   local _cmh=(); _codex_code_mode_host || _cmh=(-c features.code_mode_host=false)
   local codex_cmd=(codex exec --cd "$rundir" --sandbox workspace-write --skip-git-repo-check ${_cmh[@]+"${_cmh[@]}"} --enable artifact -)

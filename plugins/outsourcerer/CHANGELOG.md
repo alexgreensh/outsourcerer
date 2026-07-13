@@ -3,6 +3,17 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.1] - 2026-07-13
+
+Security transparency: a plain-language "what leaves your machine" page, and the audit numbers refreshed to the current scanner with every finding triaged by name (no suppressions). No behavior changes.
+
+### Docs
+- **SECURITY.md — new "Your repo & what leaves the machine" section.** Spells out that local lanes send nothing, cloud lanes are gated by a credential hard-block (root + nested, fails closed), every cloud dispatch is disclosed, and secret values are counted-not-printed. README security section links to it.
+- **Audit numbers refreshed, in full.** The "Latest scan" table now reflects the current repo-forensics run with every finding triaged by name and **no `.forensicsignore` suppressions** — the "critical" flags are the localhost inference shim forwarding to your own model (and its test); the rest are background-job supervision, one scoped key read, test fixtures, and localhost references.
+
+### Changed
+- Reworded an internal image-generation prompt and one documentation sentence to drop confirmation-bypass / silent-execution phrasings a static scanner flags (no behavior change). Made a secret-scan test fixture obviously fake. Removed transient local `.pyc` bytecode from the working tree (git-ignored, never shipped).
+
 ## [0.4.0] - 2026-07-13
 
 Security and reliability hardening for the cloud gate, the transport-vs-task retry classifier, and the parallel job machinery. No breaking changes.

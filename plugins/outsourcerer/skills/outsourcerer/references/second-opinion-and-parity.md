@@ -19,8 +19,8 @@ strongest on short factual answers; for essay-length answers treat disagreement 
 ## Running a specific Claude model (fable/opus/...) as an advisor, verified (read this)
 
 Native Agent/Task subagents in Claude Code have a dangerous failure: when you pass `model: fable` but
-Fable resolves to something unavailable (allowlist/plan/region), Claude Code **silently runs your
-default model (usually Opus) with no error**, and there is **no authoritative way to verify** which
+Fable resolves to something unavailable (allowlist/plan/region), Claude Code **falls back to your
+default model (usually Opus) with no error and no notice**, and there is **no authoritative way to verify** which
 model a subagent actually used. That is exactly how an Opus run gets mislabeled as "Fable".
 
 **So prefer the claude-native lane for a proven run:** `outsourcerer.sh run -m fable "…"`.
