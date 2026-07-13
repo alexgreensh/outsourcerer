@@ -5,22 +5,23 @@ Outsourcerer is audited with [repo-forensics](https://github.com/alexgreensh/rep
 
 ## Latest scan
 
-`run_forensics.sh <plugin> --skill-scan` (repo-forensics 2.12.x) → **7 critical, 57 high, 7 medium,
-26 low — every finding triaged benign-by-design, no suppressions.** No committed secrets, no *remote*
-network exfiltration, no obfuscation, no dynamic code fetch-and-execute. A tool that routes tasks to
-other models and supervises background jobs will, by construction, trip a static data-flow scanner on
-its own core behavior. Each bucket below **is** that behavior — the raw counts, nothing suppressed:
+`run_forensics.sh <plugin> --skill-scan` (repo-forensics 2.12.x) → **every finding triaged
+benign-by-design, no suppressions.** No committed secrets, no *remote* network exfiltration, no
+obfuscation, no dynamic code fetch-and-execute. A static data-flow scanner flags a delegation tool's
+core behavior by construction, so the honest way to read the count is **by component**:
 
-| Findings | Scanner finding | Why it fires | Verdict |
-|---|---|---|---|
-| **7× "critical"** (confidence 0.85) | "Tainted Data Reaches Sink" / "Potential Data Exfiltration" | The **local-inference shim** forwards your prompt to *your own* model server: `OSRC_SHIM_UPSTREAM` defaults to `http://localhost:…` and the shim **binds `127.0.0.1` only and refuses other binds**. A taint scanner flags any proxy's "input → network sink"; here the sink is your own machine (5 findings). The other 2 are the shim's **certification test** copying the environment to launch it as a subprocess. Neither is remote exfiltration. | benign, localhost-only |
-| 27× HIGH | "Output/stderr suppression with background exec" | `nohup … >/dev/null 2>&1 &` for the background-job supervisor (`bg` / `status` / `watch`). | by-design, job supervision |
-| 13× HIGH | "Nested Command Substitution" | `$(cd "$(dirname "$0")" && pwd)` — the script self-locates so it runs from any host. | benign, standard idiom |
-| 7× HIGH | "Eval in Shell" | **Test-only**: fake-CLI dynamic-variable lookup and function extraction for isolated unit tests. There is **no `eval` in the shipped `outsourcerer.sh`**. | benign, test scaffolding |
-| 5× HIGH | "Accessing Claude configuration" | References host skill dirs (`~/.claude/skills`, `~/.gemini/…`) that `parity` symlinks into. | by-design, documented install paths |
-| 3× HIGH | "OpenAI API Key" | **Fake fixtures** in the secret-scan self-tests: deliberately unreal `sk-…` strings used to prove the scanner detects them. | benign, test fixtures |
-| 2× HIGH | "Credential-path directive" | Reads the **one** scoped key (`OPENROUTER_API_KEY`) a lane needs — its entire purpose. | by-design, scoped auth |
-| 7× MED · 26× LOW | "Environment variable access" / "Hardcoded IP" | Reads config from env (`OSRC_SHIM_UPSTREAM`, `PORT`, …) and references `127.0.0.1` / `localhost`. | benign, config + localhost |
+| Component | crit / high / med / low | What the scanner sees |
+|---|---|---|
+| **Core delegation engine** — what runs by default | **0 / 36 / 0 / 2** | Background-job supervision (`nohup … >/dev/null 2>&1 &`), the self-locating shell idiom (`$(cd "$(dirname "$0")" && pwd)`), and the single scoped key read. All benign — **zero critical**. |
+| **Local-inference shim** — experimental, opt-in | 5 / 0 / 5 / 6 | The shim forwards your prompt to *your own* model server (`OSRC_SHIM_UPSTREAM` defaults to `http://localhost:…`; it binds `127.0.0.1` only). A taint scanner flags any proxy's "input → network sink" — here the sink is your own machine. Runs only if you opt into agentic-local. |
+| **Test harness** — dev-only, never runs for users | 2 / 21 / 2 / 18 | Fake-CLI `eval` var-lookup, self-locating `$()`, deliberately-fake `sk-…` fixtures that prove the secret scanner works, and one test copying the env to launch the shim as a subprocess. |
+
+**In plain terms: the tool you install and run has zero critical findings.** Every "critical" flag is
+either the opt-in local proxy talking to *your own machine* or a test — no remote exfiltration anywhere.
+By behavior, the flags are: background-job output redirection (`nohup`), self-locating `$(cd …)`, one
+scoped `OPENROUTER_API_KEY` read, `parity` symlink paths under `~/.claude`, `127.0.0.1`/`localhost`
+references, and `eval`/fake-key patterns confined to the test harness (`eval` never appears in the shipped
+`outsourcerer.sh`).
 
 **Hardened over prior releases:** the vendor install one-liners were rewritten to
 download-then-inspect-then-run (clearing an earlier batch of "curl \| bash" criticals); an image-generation
