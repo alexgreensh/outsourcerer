@@ -3,6 +3,17 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.3] - 2026-07-14
+
+Security + accounting: the cloud gate now covers every off-machine path, and cost accounting stops both double-counting and undercounting. No breaking changes.
+
+### Security
+- **`image` and `second-opinion` now run the cloud gate.** Both shipped prompts to a cloud API without the secret-scan hard-block + disclosure that `run`/`bg`/`fanout` enforce; they now gate before any dispatch, so a repo containing a real credential file is refused and every cloud send is disclosed. The `:free` "may train on your data" disclosure now fires for a `:free` model in any position (including a comma-joined `second-opinion` model pair).
+
+### Fixed
+- **Cash is no longer double-counted under concurrent `fanout`.** The account-usage delta fallback (which attributed every concurrent job the sum of all in-flight spend) is removed; per-generation cost stays authoritative and, when a lookup is incomplete, the receipt falls to a clearly-labeled `~` estimate instead of a wrong "measured" number.
+- **Per-generation cost no longer undercounts on a partial lookup.** A run whose generations only partially resolve now reports the labeled estimate rather than a partial sum masquerading as the exact cost.
+
 ## [0.4.2] - 2026-07-14
 
 Truthful cost accounting: the Tab now reports what a run actually cost, on the lane it actually ran. No breaking changes.
