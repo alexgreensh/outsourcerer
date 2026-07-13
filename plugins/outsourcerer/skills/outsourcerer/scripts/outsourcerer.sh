@@ -1175,15 +1175,19 @@ run_job() {
   fi
   # peek model/tier for windows + meta (non-fatal)
   _consume_flags "$@" 2>/dev/null || true
-  local row id2 ttier="" tier
+  local row id2 ttier="" tier lane=""
   row="$(resolve_model_row "$MODEL")"; id2="$MODEL"
-  [ -n "$row" ] && { id2="${row%%|*}"; ttier="${row##*|}"; }
+  # row is "resolved-id|lane|tier" (see resolve_model_row). Capture the LANE (middle field) too --
+  # meta previously recorded only provider (the ORIGINAL provider, e.g. devin), which mislabels a
+  # plan lane (gm/cx/cc) as a cash lane in the Tab. Persist the resolved lane so accounting is truthful.
+  [ -n "$row" ] && { id2="${row%%|*}"; ttier="${row##*|}"; lane="$(printf '%s' "$row" | awk -F'|' '{print $2}')"; }
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
   if have jq; then
-    jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" \
+    jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
        --arg cwd "$PWD" --argjson st "$(date +%s)" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" \
        '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st}
+        + (if $lane=="" then {} else {lane:$lane} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
   fi
   # Snapshot real OpenRouter spend so we can bill the true cash delta (not the harness's estimate).
