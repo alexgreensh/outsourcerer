@@ -37,6 +37,13 @@ ck "ollama: prefix -> local"        "$(_effective_lane '' devin ollama:qwen)" lo
 ck "local: prefix -> local"         "$(_effective_lane '' cc local:foo)"     local
 ck "open-weight glm via cc -> or"   "$(_effective_lane or cc glm)"           or
 ck "open-weight glm via devin -> dv" "$(_effective_lane or devin glm)"       dv
+# Sol re-check #2: implicit model (no -m, arg4=0) follows the PROVIDER default, not glm-5.2's dv;
+# and the lms: prefix is local.
+ck "implicit default + cc -> or"    "$(_effective_lane dv cc glm-5.2 0)"     or     # bare --provider cc run
+ck "implicit default + codex -> or" "$(_effective_lane dv codex glm-5.2 0)"  or
+ck "implicit default + devin -> dv" "$(_effective_lane dv devin glm-5.2 0)"  dv
+ck "explicit glm-5.2 + cc stays dv" "$(_effective_lane dv cc glm-5.2 1)"     dv     # explicit Devin-pinned unchanged
+ck "lms: prefix -> local"           "$(_effective_lane '' cc lms:qwen)"      local
 
 # --- B. cmd_tab three-way bucket (G1). Extract the live `def bucket:` from the script so the test
 #        can never drift from the real code (addresses the earlier "hand-copied classifier" finding). ---
