@@ -1226,8 +1226,6 @@ run_job() {
         + (if $lane=="" then {} else {lane:$lane} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
   fi
-  # Snapshot real OpenRouter spend so we can bill the true cash delta (not the harness's estimate).
-  local or_before; or_before="$(_or_usage 2>/dev/null)"
   # Run the real dispatch (foreground path) under the watchdog, in stream mode so we get last.txt+cost.
   OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_DEPTH=0 OUTSOURCERER_PROVIDER="$prov" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
@@ -1261,12 +1259,10 @@ run_job() {
   local real_cost; real_cost="$(_or_run_cost "$jd/out.log" 2>/dev/null)"
   if [ -z "$real_cost" ]; then
     if grep -qE 'gen-[0-9]+-[a-zA-Z0-9]+' "$jd/out.log" 2>/dev/null; then
-      local or_after; or_after="$(_or_usage 2>/dev/null)"
-      real_cost="$(_or_cost_delta "$or_before" "$or_after")"
-      if [ -z "$real_cost" ]; then
-        local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$jd/out.log" 2>/dev/null | tail -1)"
-        [ -n "$est" ] && real_cost="~$est"
-      fi
+      # per-gen cost is authoritative and per-job; the account-usage delta double-counts under concurrent
+      # fanout (overlapping before/after windows), so drop it -> use the clearly-labeled '~' estimate.
+      local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$jd/out.log" 2>/dev/null | tail -1)"
+      [ -n "$est" ] && real_cost="~$est"
     else
       real_cost="0.000000"   # no OpenRouter generation in the stream => no-cash (native/keyless) lane
     fi
@@ -1776,6 +1772,7 @@ second_opinion() {
   local m1 m2; m1="${pair%%,*}"; m2="${pair#*,}"
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
   echo ">>> second-opinion: $m1  vs  $m2" >&2
+  _cloud_disclose ccor "$m1,$m2" "$q"
   local a1 a2 n1 n2
   a1="$(_so_run "$m1" "$q")"; a2="$(_so_run "$m2" "$q")"
   n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
@@ -2142,6 +2139,8 @@ cmd_image() {
   fi
 
   local ttier; ttier="$(resolve_tier "$id" "")"
+  local _idisp; case "$backend" in codex) _idisp=cxnative ;; gemini) _idisp=gmnative ;; *) _idisp=codexor ;; esac
+  _cloud_disclose "$_idisp" "$id" "$prompt"
   case "$backend" in
     codex)      cmd_image_codex "$prompt" "$out" "$ttier" ;;
     gemini)     cmd_image_gemini "$id" "$prompt" "$out" "$ttier" ;;
