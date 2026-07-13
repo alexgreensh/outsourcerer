@@ -169,6 +169,9 @@ SESSION_NAME="${OUTSOURCERER_TMUX:-$(_sess_slug)}"
 die() { echo "ERROR: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+_OSRC_VERBS="run explore research edit yolo"
+_is_verb() { case " $_OSRC_VERBS " in *" ${1:-} "*) return 0 ;; *) return 1 ;; esac; }
+
 need_devin() {
   have devin || die "devin CLI not on PATH (~/.local/bin). Install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"
 }
@@ -394,6 +397,19 @@ resolve_tier() {
   n="$(tier_from_name "$1")" && [ -n "$n" ] && { echo "$n"; return; }                # capability signal by family
   tier_from_price "$1" 2>/dev/null && return                                         # cached price (cheap unknowns)
   echo mid                                                                           # last-resort default
+}
+
+# _effective_lane <table_lane> <provider> -> effective lane code for TRUTHFUL accounting.
+# Native/fixed lanes ignore --provider; open-weight/unknown lanes follow the transport provider
+# (so `-m glm --provider devin` records dv, not the table's default 'or').
+_effective_lane() {
+  case "$1" in cx|cc|gm|gi|ci|local) printf '%s' "$1"; return ;; esac
+  case "$2" in
+    devin)    printf 'dv' ;;
+    cc|codex) printf 'or' ;;
+    local)    printf 'local' ;;
+    *)        printf '%s' "${1:-$2}" ;;
+  esac
 }
 
 # ---- the canonical OSRC:: progress protocol block, injected into raw/continue/tmux ----
@@ -804,27 +820,30 @@ cmd_tab() {
   have jq || { echo "jq needed for tab (brew install jq)"; return 0; }
   echo "== The Tab (outsourcerer ledger: $OSRC_LEDGER) =="
   jq -rs '
-    # no-cash lanes: native ChatGPT/Claude text, keyless Antigravity/Gemini, keyless gpt-image
-    # (provider "codex" + verb "image"). Everything else (cc, codex->OpenRouter, gemini API,
-    # openrouter, devin) is a cash lane.
-    def is_sub: (if (.lane // "") != "" then ((.lane) | test("^(cx|cc|gm)$")) else ((.provider // "") | test("codex-native|claude-native|antigravity")) end)
-                or ((.verb // "") == "image" and (.provider // "") == "codex");
-    # cost_usd forms: "" (foreground, unmeasured) · "0.0010" (bg REAL OpenRouter delta) ·
-    # "~0.03" (bg harness ESTIMATE, offline fallback only). Parse each apart.
+    # Three-way lane bucket (truthful accounting):
+    #   FREE = local (your hardware): $0 cash AND $0 plan.  PLAN = native cx/cc/gm + keyless gpt-image.
+    #   CASH = everything else (cc/codex->OpenRouter, gemini API, devin-paid).
+    def bucket:
+      (.lane // "") as $l | (.provider // "") as $p | (.verb // "") as $v
+      | if ($l == "local") or ($p == "local") then "free"
+        elif ($l | test("^(cx|cc|gm)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
+        else "cash" end;
     def realcost: (.cost_usd // "") as $c
       | if ($c == "") or ($c | startswith("~")) then null else ($c | tonumber? // null) end;
     def estcost:  (.cost_usd // "") as $c
       | if ($c | startswith("~")) then ($c[1:] | tonumber? // null) else null end;
-    ([ .[] | select(is_sub | not) ]) as $cashlanes
+    ([ .[] | select(bucket=="cash") ]) as $cashlanes
     | (([ $cashlanes[] | realcost | select(. != null) ] | add) // 0) as $cash
     | (([ $cashlanes[] | estcost  | select(. != null) ] | add) // 0) as $est
     | ([ $cashlanes[] | select((.cost_usd // "") == "") ] | length) as $unmeasured
-    | ([ .[] | select(is_sub) ] | length) as $subs
+    | ([ .[] | select(bucket=="plan") ] | length) as $subs
+    | ([ .[] | select(bucket=="free") ] | length) as $free
     | "runs recorded          : \(length)",
       "cash billed (measured)  : $\($cash)   (REAL per-generation OpenRouter cost, captured on bg runs)",
       (if $est > 0 then "cash (harness estimate) : ~$\($est)   (bg run offline, could not read OpenRouter; estimate only)" else empty end),
       "cash lanes, est-only    : \($unmeasured) run(s)   (foreground; run via bg to capture real $)",
       "on your subscription    : \($subs) run(s)  , $0 cash, but spent your ChatGPT / Claude / Antigravity PLAN LIMITS",
+      (if $free > 0 then "on your hardware (local): \($free) run(s)  , $0 cash AND $0 plan, fully private" else empty end),
       "by model:",
       (group_by(.model)[] | "  \(.[0].model)  \(length) run(s)")
   ' "$OSRC_LEDGER" 2>/dev/null || echo "(ledger parse error)"
@@ -1133,7 +1152,7 @@ _bg_launch() {
 cmd_bg() {
   [ "${1:-}" = "--worktree" ] && { export OSRC_WORKTREE=1; shift; }   # opt-in git-worktree isolation
   [ $# -gt 0 ] || die "bg needs a verb + task (e.g. bg run -m hy3 \"...\")"
-  case "${1:-}" in run|explore|research|edit|yolo) ;; *) die "bg needs a verb first (run|explore|research|edit|yolo), e.g. bg run -m <model> \"task\" — got '${1:-}'";; esac
+  _is_verb "${1:-}" || die "bg needs a verb first ($_OSRC_VERBS), e.g. bg run -m <model> \"task\" — got '${1:-}'"
   _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -1186,6 +1205,7 @@ run_job() {
   # meta previously recorded only provider (the ORIGINAL provider, e.g. devin), which mislabels a
   # plan lane (gm/cx/cc) as a cash lane in the Tab. Persist the resolved lane so accounting is truthful.
   [ -n "$row" ] && { id2="${row%%|*}"; ttier="${row##*|}"; lane="$(printf '%s' "$row" | awk -F'|' '{print $2}')"; }
+  lane="$(_effective_lane "$lane" "$prov")"
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
   if have jq; then
@@ -1623,7 +1643,7 @@ cmd_fanout() {
       *) die "fanout: unknown flag '$1' (sources: --agents DIR | --tasks FILE | -- \"t1\" \"t2\"; knobs: -m --effort --tier --provider --with --verb --max --preamble --sub --task \"<t>\" --route 'pat=model,...' --worktree; routing precedence: -m > --route > agent frontmatter > default; --worktree isolates each job in its own git worktree, remove with 'cleanup <id|gid> [--force]')" ;;
     esac
   done
-  case "$verb" in run|research|edit|yolo) ;; *) die "fanout --verb must be run|research|edit|yolo (got '$verb')" ;; esac
+  _is_verb "$verb" || die "fanout --verb must be one of: $_OSRC_VERBS (got '$verb')"
 
   local pre=""; [ -n "$preamble" ] && { [ -f "$preamble" ] || die "--preamble file not found: $preamble"; pre="$(cat "$preamble")"; }
   local -a labels=() prompts=() a_model=() a_effort=() a_tier=() a_prov=()
