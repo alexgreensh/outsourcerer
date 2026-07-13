@@ -399,15 +399,21 @@ resolve_tier() {
   echo mid                                                                           # last-resort default
 }
 
-# _effective_lane <table_lane> <provider> -> effective lane code for TRUTHFUL accounting.
-# Native/fixed lanes ignore --provider; open-weight/unknown lanes follow the transport provider
-# (so `-m glm --provider devin` records dv, not the table's default 'or').
+# _effective_lane <table_lane> <provider> [model] -> effective lane code, MIRRORING actual dispatch
+# routing (not a provider-only guess). Precedence matches route_delegate:
+#   1. local short-circuit: an ollama:/lmstudio:/local: model or `--provider local` ALWAYS runs local,
+#      regardless of the alias's table lane (so `--provider local -m sol` records local, not cx).
+#   2. fixed lanes (native premium cx/cc/gm, image gi/ci, devin-pinned dv, local) ignore --provider
+#      (so a Devin-pinned `glm-5.2` stays dv even under `--provider cc`, matching where it dispatches).
+#   3. only a genuinely provider-routed open-weight/unknown model follows the transport provider
+#      (so `-m glm --provider devin` records dv, `--provider cc` records or).
 _effective_lane() {
-  case "$1" in cx|cc|gm|gi|ci|local) printf '%s' "$1"; return ;; esac
+  case "${3:-}" in local|ollama:*|lmstudio:*|local:*) printf 'local'; return ;; esac
+  [ "$2" = "local" ] && { printf 'local'; return; }
+  case "$1" in cx|cc|gm|gi|ci|local|dv) printf '%s' "$1"; return ;; esac
   case "$2" in
     devin)    printf 'dv' ;;
     cc|codex) printf 'or' ;;
-    local)    printf 'local' ;;
     *)        printf '%s' "${1:-$2}" ;;
   esac
 }
@@ -1205,7 +1211,7 @@ run_job() {
   # meta previously recorded only provider (the ORIGINAL provider, e.g. devin), which mislabels a
   # plan lane (gm/cx/cc) as a cash lane in the Tab. Persist the resolved lane so accounting is truthful.
   [ -n "$row" ] && { id2="${row%%|*}"; ttier="${row##*|}"; lane="$(printf '%s' "$row" | awk -F'|' '{print $2}')"; }
-  lane="$(_effective_lane "$lane" "$prov")"
+  lane="$(_effective_lane "$lane" "$prov" "$MODEL")"
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
   if have jq; then

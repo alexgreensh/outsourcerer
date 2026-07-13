@@ -29,6 +29,14 @@ ck "_effective_lane or devin"    "$(_effective_lane or devin)"    dv
 ck "_effective_lane or cc"       "$(_effective_lane or cc)"       or
 ck "_effective_lane or codex"    "$(_effective_lane or codex)"    or
 ck "_effective_lane '' devin"    "$(_effective_lane '' devin)"    dv
+# Sol's blocker cases: the helper must MIRROR actual dispatch routing, not a provider-only guess.
+ck "dv-pinned under cc (glm-5.2)"   "$(_effective_lane dv cc glm-5.2)"       dv     # Devin-pinned stays dv (regression guard)
+ck "dv-pinned under codex"          "$(_effective_lane dv codex glm-5.2)"    dv
+ck "--provider local beats native"  "$(_effective_lane cx local sol)"        local  # local wins over table cx
+ck "ollama: prefix -> local"        "$(_effective_lane '' devin ollama:qwen)" local
+ck "local: prefix -> local"         "$(_effective_lane '' cc local:foo)"     local
+ck "open-weight glm via cc -> or"   "$(_effective_lane or cc glm)"           or
+ck "open-weight glm via devin -> dv" "$(_effective_lane or devin glm)"       dv
 
 # --- B. cmd_tab three-way bucket (G1). Extract the live `def bucket:` from the script so the test
 #        can never drift from the real code (addresses the earlier "hand-copied classifier" finding). ---
