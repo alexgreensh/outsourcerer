@@ -26,7 +26,7 @@ echo "=== STATIC gate: Phase-0 invariants wired ==="
 
 # 1. Every unit test suite is green (aggregate).
 for t in test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
-         test_lane_fallback test_interactive_default test_harness_isolation; do
+         test_lane_fallback test_interactive_default test_harness_isolation test_autodetach; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
   else note "unit suite $t absent"; fi
@@ -40,6 +40,8 @@ grep -q '_validate_model_token'                   "$SRC" && ok "U3 model-token i
 grep -q '_is_transport_failure'                   "$SRC" && ok "U4 transport-vs-task classifier present"           || bad "U4 classifier missing"
 grep -q '_devin_model_for'                        "$SRC" && ok "U6 availability-aware routing present"             || bad "U6 routing missing"
 grep -q 'Read Edit Write Bash Grep Glob'          "$SRC" && ok "U7 mutating coding toolset granted (no bash wedge)" || bad "U7 toolset missing"
+grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach trigger present"                       || bad "D3 trigger missing"
+grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
 
 # 3. bash -n on the script + all sibling shell scripts.
 for f in "$SRC" "$SCRIPT_DIR"/../run-or-model.sh "$SCRIPT_DIR"/../run-or-codex.sh; do

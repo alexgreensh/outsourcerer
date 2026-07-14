@@ -573,28 +573,82 @@ $(cat "$f")
   [ -n "$out" ] && printf 'You have been granted the following capability docs; use them as needed.\n%s\n' "$out"
 }
 
-# build_mcp_flags_cc -> echoes claude flags to expose ONLY the named MCP servers (--with mcp=...).
-# The extracted MCP config is a secret-bearing temp file: create it with umask 077 + chmod 600
-# and remove it on script exit so it never outlives the run.
+# build_mcp_flags_cc -> populates the global array CC_MCP_FLAGS with claude --strict-mcp-config /
+# --mcp-config <path> args so a headless `claude -p` delegate does NOT inherit the user's live
+# ~/.claude.json MCP surface (project-scoped servers, which can wedge a sandboxed, non-interactive
+# run by demanding interactive OAuth — the I1 parity gap with the codex lanes).
+#
+# CONTRACT (fail-closed + whitespace-safe):
+#   - Returns 0 and sets CC_MCP_FLAGS on success. Callers use "${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"}"
+#     (quoted array expansion) so paths with spaces are safe. On failure returns nonzero; the caller
+#     MUST die (never run the delegate without isolation — that would inherit live MCP, the exact
+#     invariant this function enforces). die is called in the CALLER, not here, because die inside
+#     a $(...) subshell only exits the subshell.
+#
+# ISOLATION MODEL (mirrors the codex `--ignore-user-config` / OSRC_CODEX_USER_CONFIG gate):
+#   - DEFAULT: CC_MCP_FLAGS=(--strict-mcp-config --mcp-config <empty.json>) so NO user MCP servers load.
+#     Auth survives (verified live: haiku answers PONG with the empty strict config on the OAuth
+#     path, no --bare needed). This is the I1 PARITY STANDARD for the claude harness.
+#   - --with mcp=a,b: extract ONLY the named servers from ~/.claude.json into a temp config and
+#     strict-load just those (the original opt-in behavior, unchanged). jq failure = die (the user
+#     asked for specific servers; silent empty-config would be a misleading no-op).
+#   - OSRC_CLAUDE_USER_CONFIG=1: escape hatch — CC_MCP_FLAGS=() so claude loads its full default
+#     MCP surface (interactive-style; use only when you deliberately want the live config).
+# The temp config is secret-bearing: created with umask 077 + chmod 600 and removed on script exit
+# (the EXIT trap at line ~104 already targets the with-mcp-$$.json name).
+CC_MCP_FLAGS=()
 build_mcp_flags_cc() {
-  [ -n "${WITH_SPEC:-}" ] || return 0
-  printf '%s' "$WITH_SPEC" | grep -q 'mcp=' || return 0
-  have jq || return 0
-  local tok mspec=""
-  for tok in $WITH_SPEC; do case "$tok" in mcp=*) mspec="${tok#mcp=}" ;; esac; done
-  [ -n "$mspec" ] || return 0
-  local cj="$HOME/.claude.json"; [ -f "$cj" ] || return 0
-  mkdir -p -m 700 "$OSRC_HOME"
+  CC_MCP_FLAGS=()
+  # Escape hatch: opt out of isolation, ride the full live MCP surface (interactive-style).
+  [ "${OSRC_CLAUDE_USER_CONFIG:-0}" = "1" ] && return 0
+  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null || { echo "ERROR: isolation setup: cannot mkdir OSRC_HOME ($OSRC_HOME)" >&2; return 1; }
   chmod 700 "$OSRC_HOME" 2>/dev/null || true
   local cfg="$OSRC_HOME/with-mcp-$$.json"
-  local old_umask; old_umask="$(umask)"; umask 077
-  jq -c --arg names "$mspec" '
-    ((.mcpServers // {}) + (reduce ((.projects//{})|to_entries[]) as $p ({}; . + (($p.value.mcpServers)//{})))) as $all
-    | {mcpServers: ($all | with_entries(select(.key as $k | ($names|split(",")|index($k)) != null)))}
-  ' "$cj" > "$cfg" 2>/dev/null || { umask "$old_umask"; return 0; }
+  # --with mcp=a,b -> extract ONLY the named servers (original opt-in path, unchanged).
+  if [ -n "${WITH_SPEC:-}" ] && printf '%s' "$WITH_SPEC" | grep -q 'mcp=' && have jq; then
+    local tok mspec=""
+    for tok in $WITH_SPEC; do case "$tok" in mcp=*) mspec="${tok#mcp=}" ;; esac; done
+    if [ -n "$mspec" ]; then
+      local cj="$HOME/.claude.json"
+      if [ -f "$cj" ]; then
+        local old_umask; old_umask="$(umask)"; umask 077
+        if jq -c --arg names "$mspec" '
+          ((.mcpServers // {}) + (reduce ((.projects//{})|to_entries[]) as $p ({}; . + (($p.value.mcpServers)//{})))) as $all
+          | {mcpServers: ($all | with_entries(select(.key as $k | ($names|split(",")|index($k)) != null)))}
+        ' "$cj" > "$cfg" 2>/dev/null; then
+          chmod 600 "$cfg" 2>/dev/null || true
+          umask "$old_umask"
+          CC_MCP_FLAGS=(--strict-mcp-config --mcp-config "$cfg")
+          return 0
+        fi
+        umask "$old_umask"
+        echo "ERROR: isolation setup: jq filter of ~/.claude.json failed (--with mcp=$mspec); aborting to avoid silent no-isolation" >&2
+        return 1
+      fi
+    fi
+  fi
+  # DEFAULT (and fallback when --with mcp= has no match / no ~/.claude.json): empty strict MCP config.
+  _emit_empty_mcp_cfg "$cfg" || return 1
+  CC_MCP_FLAGS=(--strict-mcp-config --mcp-config "$cfg")
+  return 0
+}
+
+# _emit_empty_mcp_cfg <path> -> write {"mcpServers":{}} (umask 077, chmod 600). Returns nonzero on
+# write failure so the caller can die fail-closed (never silently emit no flags -> live MCP inherits).
+# This is the isolation primitive: --strict-mcp-config with an empty server set means claude loads
+# ZERO user MCP servers, so no interactive-auth MCP server can wedge a headless run. Verified live:
+# `claude -p --strict-mcp-config --mcp-config <this> --model haiku "reply PONG"` -> PONG (OAuth ok).
+_emit_empty_mcp_cfg() {
+  local cfg="$1" old_umask
+  old_umask="$(umask)"; umask 077
+  if ! printf '{"mcpServers":{}}' > "$cfg" 2>/dev/null; then
+    umask "$old_umask"
+    echo "ERROR: isolation setup: cannot write empty MCP config to $cfg" >&2
+    return 1
+  fi
   chmod 600 "$cfg" 2>/dev/null || true
   umask "$old_umask"
-  printf ' --strict-mcp-config --mcp-config %s' "$cfg"
+  return 0
 }
 
 # _build_prompt <model-id> <raw-task> [table-tier] -> final prompt (preamble + tier wrapper).
@@ -641,6 +695,7 @@ _consume_flags() {
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
+      --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
                   case "$2" in minimal|low|medium|high|xhigh|max|none) EFFORT="$2" ;;
@@ -1155,6 +1210,54 @@ cmd_bg() {
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
   echo "[outsourcerer] job $id launched (provider=$PROVIDER). Poll: $0 status $id  |  read: $0 result $id" >&2
+}
+
+# AUTO-DETACH (D3): a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
+# for frontier/reasoning). When invoked through a harness shell tool with a ~2-min timeout, the call is
+# KILLED mid-run (observed twice on Sol gates). When non-interactive AND slow-lane, auto-promote the run
+# to the existing bg path: launch detached under the bg watchdog, print the job id + poll command, return
+# in <1s. The caller polls status/watch. This is ROUTING — it reuses _bg_launch (same watchdog, same
+# status receipt, same result retrieval as `bg`), NOT new infra.
+#
+# Escape hatches (both directions):
+#   OSRC_NO_AUTODETACH=1 / --wait / --foreground : forces foreground even for slow lanes.
+#   OSRC_FORCE_AUTODETACH=1                       : forces detach even interactively (for testing).
+#
+# _autodetach_should <disp> <model-id> <model-tier> -> return 0 if the run should auto-detach, 1 if not.
+# Trigger: non-interactive (stdout not a TTY) AND slow lane (any cloud lane OR frontier/reasoning tier).
+# NOT triggered for: local lanes, budget/quick tiers, interactive (TTY) runs, or inside an existing bg job.
+_autodetach_should() {
+  local disp="$1" mid="$2" mtier="$3"
+  # Escape hatch: explicit opt-out -> always foreground.
+  [ "${OSRC_NO_AUTODETACH:-0}" = "1" ] && return 1
+  # Already inside a bg job (OSRC_STREAM=1 or OSRC_JOB_DIR set) -> don't re-detach (would fork-bomb).
+  [ "${OSRC_STREAM:-0}" = "1" ] && return 1
+  [ -n "${OSRC_JOB_DIR:-}" ] && return 1
+  # Escape hatch: explicit force -> always detach (even interactive, for testing).
+  [ "${OSRC_FORCE_AUTODETACH:-0}" = "1" ] && return 0
+  # Interactive (stdout is a TTY) -> stay foreground (a human wants to watch).
+  [ -t 1 ] && return 1
+  # Local lanes are fast (no network) -> stay foreground.
+  case "$disp" in local) return 1 ;; esac
+  # Budget tier (quick models) -> stay foreground even if cloud (they're fast).
+  [ "$mtier" = "budget" ] && return 1
+  # At this point: non-interactive, not local, not budget -> SLOW lane (cloud or frontier) -> auto-detach.
+  return 0
+}
+
+# _autodetach_run <verb> [flags] "task" -> launch via the existing bg machinery, print receipt, return 0.
+# Reuses _bg_launch (same watchdog, same status, same result retrieval as `bg`). The cloud preack is
+# already satisfied: _cloud_disclose ran BEFORE this and set OSRC_CLOUD_ACKED=1, so _bg_cloud_preack
+# returns early (the ack propagates to the detached child via OSRC_CLOUD_ACK).
+_autodetach_run() {
+  _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+  local id; id="$(_bg_launch "$@")"
+  [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
+  printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
+  printf '>>>   job id : %s\n' "$id" >&2
+  printf '>>>   poll   : %s status %s  |  watch: %s watch %s  |  result: %s result %s\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
+  echo "$id"
+  return 0
 }
 
 # _worktree_setup <job-id> -> "path<TAB>branch<TAB>base_sha" + rc 0 when OSRC_WORKTREE=1 and we're in a
@@ -1750,6 +1853,7 @@ _so_run() {   # <model> <prompt> -> stdout text via the cc/OpenRouter lane (read
     claude -p --bare --permission-mode default "$2" 2>/dev/null
 }
 second_opinion() {
+  local _so_orig=("$@")
   _consume_flags "$@"
   local q="${REST[*]:-}"
   [ -n "$q" ] || die "second-opinion needs a question"
@@ -1760,6 +1864,13 @@ second_opinion() {
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
   echo ">>> second-opinion: $m1  vs  $m2" >&2
   _cloud_disclose ccor "$m1,$m2" "$q"
+  # AUTO-DETACH (D3): second-opinion runs 2-3 sequential cloud API calls (can take 2-5 min).
+  # If non-interactive AND slow-lane, auto-promote to bg so a harness tool-timeout can't kill it.
+  local _so_tier; _so_tier="$(resolve_tier "$m1" "")"
+  if _autodetach_should ccor "$m1" "$_so_tier"; then
+    _autodetach_run second-opinion ${_so_orig[@]+"${_so_orig[@]}"}
+    return $?
+  fi
   local a1 a2 n1 n2
   a1="$(_so_run "$m1" "$q")"; a2="$(_so_run "$m2" "$q")"
   n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
@@ -1861,9 +1972,15 @@ delegate_ccnative() {
   # `--bare` gives a clean minimal run BUT forces ANTHROPIC_API_KEY / apiKeyHelper auth and disables
   # OAuth. Subscription (OAuth) users have no API key, so --bare there fails with "Not logged in". Use
   # --bare only when a key is present; otherwise drop it so the OAuth login works (context then loads).
-  local bare=() load_note="OAuth login (context loads; --bare needs an API key, skipped)"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then bare=(--bare); load_note="clean (--bare, API key auth)";
-  elif [ "${OUTSOURCERER_LOADED:-0}" = "1" ]; then load_note="LOADED, full CLAUDE.md + skills + MCP"; fi
+  # ISOLATION (I1, claude harness parity): the OAuth path used to load the user's FULL live MCP surface
+  # (project-scoped servers in ~/.claude.json), which can wedge a headless run on interactive OAuth.
+  # build_mcp_flags_cc now emits --strict-mcp-config --mcp-config <empty> by DEFAULT so NO user MCP
+  # servers load (auth survives; verified live). --with mcp=a,b opts specific servers in;
+  # OSRC_CLAUDE_USER_CONFIG=1 is the escape hatch back to the full live surface. OUTSOURCERER_LOADED=1
+  # keeps the strict-MCP isolation (it loads CLAUDE.md/skills, NOT MCP — MCP still needs --with mcp=).
+  local bare=() load_note="OAuth login, MCP ISOLATED (strict-empty; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then bare=(--bare); load_note="clean (--bare, API key auth, no MCP surface)";
+  elif [ "${OUTSOURCERER_LOADED:-0}" = "1" ]; then load_note="LOADED, full CLAUDE.md + skills (MCP still isolated; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"; fi
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   # Inside Claude Code a native subagent (Agent tool) can also run a Claude model IN-session, BUT its
   # per-invocation model can SILENTLY fall back to your default (usually Opus) with NO way to verify.
@@ -1871,7 +1988,7 @@ delegate_ccnative() {
   # used, so it can never mislabel an Opus run as $id. Prefer it when you need a proven, independent run.
   [ -n "${CLAUDECODE:-}" ] && printf '>>> [note] running a VERIFIED, independent %s via the CLI. (An in-session Agent subagent with model=%s is the alternative, but it cannot prove which model ran.)\n' "$id" "$id" >&2
   _tier_banner "claude-native" "$id" "$ttier" "$posture, draws your Claude subscription limits | env: $load_note"
-  local extra; extra="$(build_mcp_flags_cc)"
+  build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config; aborting to avoid inheriting live MCP — set OSRC_CLAUDE_USER_CONFIG=1 to override)"
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
   # in", which is the failure users hit). Verified: with these unset, headless claude runs normally.
@@ -1889,13 +2006,13 @@ delegate_ccnative() {
   local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
   if [ "${OSRC_STREAM:-0}" = "1" ]; then
     # bg/stream path: stream-json carries modelUsage (verify from the captured out.log downstream).
-    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --verbose --output-format stream-json $extra --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
+    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
     record_ledger claude-native "$id" "$ttier" "$tier" "$task"
   else
     # foreground: capture JSON, print the result text, then VERIFY the real model from modelUsage.
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.ccnative.$$.json"
     local old_umask; old_umask="$(umask)"; umask 077
-    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json $extra --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
+    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
     record_ledger claude-native "$id" "$ttier" "$tier" "$task"
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
@@ -1975,7 +2092,13 @@ $wrapped"
   esac
   _tier_banner "gemini-cli (api key)" "$id" "$ttier" "$posture, draws your GEMINI_API_KEY quota"
   local ofmt=(--output-format text); [ "${OSRC_STREAM:-0}" = "1" ] && ofmt=(--output-format json)
-  gemini -p "$wrapped" "${gflag[@]}" "${ofmt[@]}" --model "$id" || rc=$?
+  # ISOLATION (I1, gemini harness parity): gemini-cli loads ~/.gemini/settings.json mcpServers
+  # unconditionally; a headless run can wedge on an interactive-auth MCP server. --allowed-mcp-server-names
+  # is an allowlist (array); a sentinel matching NO configured server (__none__) means ZERO MCP servers
+  # load. Escape hatch: OSRC_GEMINI_USER_MCP=1 drops the flag so the full live surface loads.
+  local gmcp=()
+  [ "${OSRC_GEMINI_USER_MCP:-0}" = "1" ] || gmcp=(--allowed-mcp-server-names __none__)
+  gemini -p "$wrapped" "${gflag[@]}" "${gmcp[@]+"${gmcp[@]}"}" "${ofmt[@]}" --model "$id" || rc=$?
   record_ledger gemini "$id" "$ttier" "$tier" "$task"
   return "$rc"
 }
@@ -2348,12 +2471,16 @@ delegate_cc() {
   # --bare by default: the delegate does NOT inherit your CLAUDE.md / ~90 skills / MCP schemas
   # (keeps tokens low, avoids leaking your config to a 3rd-party model, and prevents it seeing
   # THIS skill and re-delegating). OUTSOURCERER_LOADED=1 opts into a full inherited session.
-  local bare=(--bare) load_note="clean (--bare)"
+  # ISOLATION (I1, claude harness parity): even on the LOADED path, build_mcp_flags_cc now emits
+  # --strict-mcp-config --mcp-config <empty> by DEFAULT so the delegate does NOT inherit the user's
+  # live project-scoped MCP servers (which can wedge a headless run on interactive OAuth). LOADED
+  # brings in CLAUDE.md + skills, NOT MCP — MCP still needs --with mcp=a,b or OSRC_CLAUDE_USER_CONFIG=1.
+  local bare=(--bare) load_note="clean (--bare, no MCP surface)"
   if [ "${OUTSOURCERER_LOADED:-0}" = "1" ]; then
-    bare=(); load_note="LOADED, inherits your full CLAUDE.md + skills + MCP (heavier; delegate can see this skill)"
+    bare=(); load_note="LOADED, inherits your full CLAUDE.md + skills (MCP isolated; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"
   fi
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--verbose --output-format stream-json)
-  local extra; extra="$(build_mcp_flags_cc)"
+  build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config; aborting to avoid inheriting live MCP — set OSRC_CLAUDE_USER_CONFIG=1 to override)"
   # Grant the coding toolset so a headless mutating job does NOT wedge on an unanswerable Bash
   # permission prompt (acceptEdits auto-approves edits but NOT bash -> the top headless failure mode).
   # `run` (auto) stays read-only; mutating verbs (edit/yolo) get Bash. --allowedTools is VARIADIC, so it
@@ -2383,7 +2510,7 @@ delegate_cc() {
       "ANTHROPIC_SMALL_FAST_MODEL=$m")
     [ -n "$think" ] && envp+=("MAX_THINKING_TOKENS=$think")
     local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
-    "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} $extra ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>"$cap"
+    "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>"$cap"
     rc=$?
     chmod 600 "$cap" 2>/dev/null || true
     if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; break; fi
@@ -2719,7 +2846,7 @@ delegate_codex() {
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
 route_delegate() {
-  local tier="$1"; shift
+  local tier="$1" verb="$2"; shift 2
   # Mutating verbs get the BUILD DISCIPLINE preamble (write early, don't over-explore). See _build_discipline.
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1
   # Recursion guard: a delegated model must NOT re-delegate (Sorcerer's-Apprentice fork bomb).
@@ -2799,6 +2926,17 @@ route_delegate() {
   # OSRC_CLOUD_ACKED=1 skip the credential hard-block entirely (a .env would ship to the cloud lane).
   # The disclosure notice is still suppressed for an already-acked process by the in-function return.
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]}"
+
+  # AUTO-DETACH (D3): if non-interactive AND slow-lane, auto-promote to the bg path so a harness
+  # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
+  # The model tier (frontier/capable/mid/budget) drives the "slow" decision, NOT the verb tier.
+  # Escape hatches: OSRC_NO_AUTODETACH=1 / --wait / --foreground forces foreground; OSRC_FORCE_AUTODETACH=1
+  # forces detach (for testing). See _autodetach_should for the full trigger logic.
+  local _ad_model_tier; _ad_model_tier="$(resolve_tier "$RESOLVED_ID" "${TTIER:-}")"
+  if _autodetach_should "$disp" "$RESOLVED_ID" "$_ad_model_tier"; then
+    _autodetach_run "$verb" ${ORIG[@]+"${ORIG[@]}"}
+    return $?
+  fi
 
   # The actual dispatch, wrapped so the FOREGROUND path is watchdog-guarded. Defined as a nested
   # fn so it still sees $disp/$tier/$ORIG (bash dynamic scope) when _fg_guard calls it.
@@ -3038,9 +3176,9 @@ doctor() {
     # --ignore-user-config: the diagnostic itself must not wedge on a user's interactive-auth MCP
     # server (auth survives the flag; this is exactly the isolation the delegate paths now use).
     have codex  && { codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" >/dev/null 2>&1 && echo "      codex-native luna: PONG (authenticated)" || echo "      codex-native luna: no reply (not authed / model unavailable)"; }
-    have claude && { env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --model haiku "reply PONG" >/dev/null 2>&1 && echo "      claude-native haiku: PONG (authenticated)" || echo "      claude-native haiku: no reply (not authed / model unavailable)"; }
+    have claude && { env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" >/dev/null 2>&1 && echo "      claude-native haiku: PONG (authenticated)" || echo "      claude-native haiku: no reply (not authed / model unavailable)"; }
     if have agy; then agy -p "reply PONG" --model "gemini-3.5-flash" --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
-    have gemini && { gemini -p "reply PONG" --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
+    have gemini && { gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
   else
     echo "    (set OSRC_DOCTOR_PING=1 to probe native lane auth with a 1-token ping)"
   fi
@@ -3144,10 +3282,10 @@ main() {
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log
     doctor)   doctor ;;
     models)   models "$@" ;;
-    run|explore) route_delegate "auto" "$@" ;;
-    research)    route_delegate "autonomous" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
-    edit)        route_delegate "accept-edits" "$@" ;;
-    yolo)        route_delegate "dangerous" "$@" ;;
+    run|explore) route_delegate "auto" "$cmd" "$@" ;;
+    research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
+    edit)        route_delegate "accept-edits" "$cmd" "$@" ;;
+    yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
     bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
     status)      cmd_status "$@" ;;                        # job table / one job's state
