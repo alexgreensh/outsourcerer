@@ -1,0 +1,46 @@
+name: "CLA Assistant"
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# Deny by default at the workflow level; grant the minimum at the job level so the
+# elevated token's blast radius stays scoped (this workflow runs on pull_request_target,
+# which executes with the base repo's secrets even for fork PRs).
+permissions: {}
+
+jobs:
+  CLAAssistant:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+      # Required so that after a contributor signs, the action can re-run the failed
+      # CLA check on the PR's head commit and turn it green. Without this the post-sign
+      # re-run fails with "Resource not accessible by integration" and the PR stays red
+      # ("all checks have failed") even though the contributor signed. See
+      # contributor-assistant/github-action -> reRunLastWorkflowIfRequired (cla-assistant#39).
+      actions: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: "CLA Assistant"
+        if: (contains(github.event.comment.body, 'recheck') || contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')) || github.event_name == 'pull_request_target'
+        # Pinned to v2.6.1 SHA for supply-chain safety
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: "signatures/cla.json"
+          path-to-document: "https://github.com/alexgreensh/outsourcerer/blob/main/.github/CLA.md"
+          branch: "cla-signatures"
+          allowlist: "alexgreensh,dependabot[bot],bot*"
+          custom-notsigned-prcomment: |
+            Thank you for your contribution! Before we can merge this PR, you need to sign our [Contributor License Agreement](https://github.com/alexgreensh/outsourcerer/blob/main/.github/CLA.md).
+
+            This project may use dual licensing now or in the future. The CLA ensures we can continue offering both public and commercial licenses.
+
+            To sign, please post a comment with exactly:
+            `I have read the CLA Document and I hereby sign the CLA`
