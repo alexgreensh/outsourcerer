@@ -40,6 +40,10 @@ fi
 # OpenRouter provider, passed per-invocation (NOT persisted to config.toml).
 # wire_api MUST be "responses", Codex 0.144+ dropped Chat Completions;
 # OpenRouter serves a Responses-compatible endpoint at /api/v1/responses.
+# ISOLATION: --ignore-user-config so this OpenRouter run does not LOAD your live ~/.codex config
+# (above all its mcp_servers, which can wedge a headless run demanding interactive OAuth). The OR
+# provider below fully defines the lane; auth is the env key, not config. Opt out: OSRC_CODEX_USER_CONFIG=1.
+IUC=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || IUC=(--ignore-user-config)
 OR=(
   -c model_provider=openrouter
   -c 'model_providers.openrouter.name="OpenRouter"'
@@ -52,8 +56,10 @@ if [ "$MODE" = "exec" ]; then
   shift 2 2>/dev/null
   echo "==> Codex (headless) on OpenRouter model: $MODEL" >&2
   exec codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
-    "${OR[@]}" -m "$MODEL" "$@"
+    ${IUC[@]+"${IUC[@]}"} "${OR[@]}" -m "$MODEL" "$@"
 else
+  # NOTE: --ignore-user-config is an `exec`-only flag; the interactive TUI is human-driven (a human
+  # can answer an MCP OAuth prompt), so the headless-only wedge doesn't apply here. Don't pass IUC.
   echo "==> Codex (interactive TUI) on OpenRouter model: $MODEL"
   exec codex "${OR[@]}" -m "$MODEL"
 fi

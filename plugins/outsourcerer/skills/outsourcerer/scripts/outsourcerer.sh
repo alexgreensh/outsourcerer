@@ -1811,8 +1811,15 @@ delegate_cxnative() {
   _codex_code_mode_host || { cmh=(-c features.code_mode_host=false); printf '>>> [self-heal] codex-code-mode-host binary missing; running with code_mode_host disabled so file reads do not hang.\n' >&2; }
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
+  # ISOLATION (I1): a delegated headless run must NOT inherit your live, interactive ~/.codex config
+  # -- above all its `mcp_servers`, which can demand OAuth mid-run and WEDGE a sandboxed job with no
+  # human to answer (the exact failure that sandbox-blocked Sol). `--ignore-user-config` drops that
+  # surface; per `codex exec --help` auth still uses CODEX_HOME, so your ChatGPT-sub login (Sol/Terra/
+  # Luna) keeps working. Verified live: luna answers PONG with the flag on. Escape hatch: set
+  # OSRC_CODEX_USER_CONFIG=1 to deliberately ride your full live config (e.g. to reuse an MCP server).
+  local iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || iso=(--ignore-user-config)
   local rc=0
-  codex exec --skip-git-repo-check ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
+  codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
   record_ledger codex-native "$id" "$ttier" "$tier" "$task"
   # Honest receipt: no cash, but this DID spend your ChatGPT plan limits, quote the real numbers.
   if [ "${OSRC_STREAM:-0}" != "1" ]; then
@@ -1994,7 +2001,10 @@ cmd_image_codex() {
   stdin_prompt="$(printf '%s\n\nUse your built-in image generation tool to create the image and write it to %s, overwriting any existing file.' "$prompt" "$out")"
   # SELF-HEAL: disable code_mode_host when its binary is missing (else tool calls can hang, see delegate_cxnative).
   local _cmh=(); _codex_code_mode_host || _cmh=(-c features.code_mode_host=false)
-  local codex_cmd=(codex exec --cd "$rundir" --sandbox workspace-write --skip-git-repo-check ${_cmh[@]+"${_cmh[@]}"} --enable artifact -)
+  # ISOLATION (I1): don't inherit the user's live ~/.codex MCP surface for a headless image job
+  # (auth survives --ignore-user-config; escape hatch OSRC_CODEX_USER_CONFIG=1).
+  local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
+  local codex_cmd=(codex exec --cd "$rundir" --sandbox workspace-write --skip-git-repo-check ${_iso[@]+"${_iso[@]}"} ${_cmh[@]+"${_cmh[@]}"} --enable artifact -)
   local out_log rc=0
   if have timeout; then
     out_log="$(printf '%s' "$stdin_prompt" | timeout 600 "${codex_cmd[@]}" 2>&1)" || rc=$?
@@ -2521,10 +2531,14 @@ _local_agentic_codex() {
   local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
   local eff=(); [ -n "$EFFORT" ] && { eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native)\n' "$EFFORT" >&2; }
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
+  # ISOLATION (I1): the local lane's whole promise is "nothing leaves your machine" -- inheriting the
+  # user's live ~/.codex mcp_servers would both break that (a cloud MCP server could load) and wedge
+  # on interactive MCP auth. Drop the live config; the inline oslocal provider fully defines the lane.
+  local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
   _tier_banner "local-agentic/codex ($base)" "$model" "$ttier" "$posture | AGENTIC tool use | PRIVATE: on YOUR hardware, \$0 cash, \$0 plan, nothing leaves your machine"
   local rc=0
   OSRC_LOCAL_KEY="${OSRC_LOCAL_KEY:-local}" \
-  codex exec --skip-git-repo-check ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} \
+  codex exec --skip-git-repo-check ${_iso[@]+"${_iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} \
     -c model_provider=oslocal -c 'model_providers.oslocal.name="Local"' \
     -c "model_providers.oslocal.base_url=\"$base\"" \
     -c 'model_providers.oslocal.env_key="OSRC_LOCAL_KEY"' \
@@ -2652,13 +2666,17 @@ delegate_codex() {
   { [ -d "$capdir" ] && [ -w "$capdir" ]; } || die "delegate_codex: capture dir not writable: $capdir — refusing (cannot capture output / classify transport failures reliably). Set OSRC_JOB_DIR/OSRC_HOME to a writable path."
   local cap="$capdir/.cxcap.$$"
   local m rc=1 ttier wrapped healed=0
+  local _or_iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _or_iso=(--ignore-user-config)
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
     wrapped="$(_build_prompt "$m" "$prompt" "")"
     _tier_banner "codex-openrouter" "$m" "$ttier" "$posture"
     # wire_api MUST be "responses" (Codex 0.144+ dropped chat completions); OpenRouter serves it.
     # Capture combined output (still shown via tee) so we can detect the tool-type 400 and self-heal.
-    codex exec --skip-git-repo-check ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} \
+    # ISOLATION (I1): the inline -c openrouter provider fully defines the lane, so don't load the
+    # user's live ~/.codex config/MCP surface (avoids the interactive-MCP-auth wedge on a delegated
+    # run). OPENROUTER_API_KEY comes from env, not config. Escape hatch: OSRC_CODEX_USER_CONFIG=1.
+    codex exec --skip-git-repo-check ${_or_iso[@]+"${_or_iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} \
          -c model_provider=openrouter \
          -c 'model_providers.openrouter.name="OpenRouter"' \
          -c 'model_providers.openrouter.base_url="https://openrouter.ai/api/v1"' \
@@ -3017,7 +3035,9 @@ doctor() {
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."
   if [ "${OSRC_DOCTOR_PING:-0}" = "1" ]; then
     echo "    (pinging native lanes, costs ~1 token each)"
-    have codex  && { codex exec --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" >/dev/null 2>&1 && echo "      codex-native luna: PONG (authenticated)" || echo "      codex-native luna: no reply (not authed / model unavailable)"; }
+    # --ignore-user-config: the diagnostic itself must not wedge on a user's interactive-auth MCP
+    # server (auth survives the flag; this is exactly the isolation the delegate paths now use).
+    have codex  && { codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" >/dev/null 2>&1 && echo "      codex-native luna: PONG (authenticated)" || echo "      codex-native luna: no reply (not authed / model unavailable)"; }
     have claude && { env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --model haiku "reply PONG" >/dev/null 2>&1 && echo "      claude-native haiku: PONG (authenticated)" || echo "      claude-native haiku: no reply (not authed / model unavailable)"; }
     if have agy; then agy -p "reply PONG" --model "gemini-3.5-flash" --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
     have gemini && { gemini -p "reply PONG" --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
