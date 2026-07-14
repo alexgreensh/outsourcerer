@@ -94,6 +94,14 @@ dependent in Codex 0.144+), the skill automatically re-runs that model on the **
 standard Anthropic tool format every OpenRouter model serves. The job stays green; you just see a
 `>>> [self-heal]` line. So `fanout` is robust no matter which provider/model the user names.
 
+The same holds in the other direction for **dual-lane models** (`glm` today): if `--provider cc`'s
+whole OpenRouter chain is exhausted on transport/availability grounds (out of credits, rate-limited,
+provider down), the skill re-runs the SAME model on its **Devin** sibling instead of failing the job —
+Devin isn't rationed by your OpenRouter balance. You'll see a `>>> [self-heal]` line naming the Devin
+model it switched to. `OSRC_NO_CROSS_LANE=1` disables this if you specifically want a hard
+OpenRouter-only failure. If you already know OpenRouter credits are tight, skip the round-trip and
+fan out on the default provider (`devin`, no `--provider` flag) directly.
+
 ## Recipe: run a multi-agent SKILL (e.g. `<your-review-skill>`) through the Outsourcerer
 
 A gauntlet-style skill that launches many agent prompt files (`agents/*.md`) as native subagents can
