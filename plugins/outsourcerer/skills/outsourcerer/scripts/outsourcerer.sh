@@ -81,6 +81,14 @@
 # ~Opus-4.8 class) and get the thin frontier wrapper, not the budget worker-drone scaffold.
 # Model is a parameter everywhere. Default is overridable via OUTSOURCERER_MODEL.
 # Free-model status on Devin CHANGES over time, this script never hardcodes it; use `models`.
+#
+# MODEL ADVISORY (which model should I use?):
+#   advise [--refresh] [--json] "<task>"   Classifies your task (code/reasoning/agentic/creative/
+#   simple), scores every known model against live benchmark data (OpenRouter benchmarks API:
+#   intelligence/coding/agentic indices + pricing), and recommends the best value model that meets
+#   the capability threshold for the task type. Explains WHY it picked that model. Use --refresh to
+#   pull fresh benchmark data (needs OPENROUTER_API_KEY in ~/.env). Without benchmarks, falls back to
+#   tier-based proxy scores. Pair with `suggest` for price-only discovery, `estimate` for cost quotes.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -973,6 +981,331 @@ cmd_suggest() {
   echo "   Antigravity (keyless): gemini-pro / gemini-flash / gemini-flash-lite"
   echo
   echo "Route one with:  $0 run -m <model> \"<task>\"   (add --provider cc|codex for OpenRouter lanes)"
+}
+
+# =============================================================================
+# MODEL ADVISORY: task-aware model recommendation with benchmark data.
+# Answers "which model should I use for this task?" with data, not guesses.
+# Data source: OpenRouter benchmarks API (intelligence/coding/agentic indices + pricing).
+# Graceful degradation: OR benchmarks -> cached models.json pricing -> tier proxy scores.
+# =============================================================================
+
+# Cache file for benchmark data from OpenRouter.
+OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json"
+
+# Native model -> OR benchmark permaslug prefix. Native subscription models (claude/codex/
+# gemini lanes) need explicit mapping because their resolved ids don't appear in the OR catalog.
+# Keyed by RESOLVED id (column 2 of OSRC_MODEL_TABLE), not the alias.
+_NATIVE_BENCH_MAP="
+fable|anthropic/claude-5-fable
+opus|anthropic/claude-4.8-opus
+sonnet|anthropic/claude-sonnet-5
+haiku|anthropic/claude-4.5-haiku
+gpt-5.6-sol|openai/gpt-5.6-sol
+gpt-5.6-terra|openai/gpt-5.6-terra
+gpt-5.6-luna|openai/gpt-5.6-luna
+gpt-5.5|openai/gpt-5.5
+glm-5.2|z-ai/glm-5.2
+gemini-3.1-pro-preview|google/gemini-3.1-pro
+gemini-3.5-flash|google/gemini-3.5-flash
+"
+
+# Task classification keywords, pipe-separated phrases. Category with most hits wins; default: simple.
+_TASK_KW_CODE='function|class method|bug|fix|refactor|implement|compile|error|stack trace|debug|unit test|api endpoint|sql query|regex|algorithm|data structure|code review|pull request|merge conflict|lint|type error|import|module|package|deploy|ci/cd|docker|kubernetes'
+_TASK_KW_REASONING='analyze|compare|evaluate|assess|critique|reason|prove|derive|tradeoff|trade-off|implication|consequence|strategy|architect|design system|decision|justify|deduce|infer|formal|mathematical|proof|logical'
+_TASK_KW_AGENTIC='agent|tool use|tool call|multi-step|autonomous|execute command|run shell|file system|web search|browser|orchestrat|workflow|pipeline|subagent|delegate|parallel|fanout'
+_TASK_KW_CREATIVE='write a story|write a blog|write an article|essay|creative|generate content|copywriting|headline|tagline|brand voice|narrative|storytelling|poem|screenplay|dialogue'
+
+# Good-enough thresholds per category (benchmark index minimum).
+_THRESH_CODE=60
+_THRESH_REASONING=45
+_THRESH_AGENTIC=35
+_THRESH_CREATIVE=45
+
+# refresh_benchmarks: fetch benchmark data from OpenRouter API, cache locally.
+# Needs OPENROUTER_API_KEY. Graceful failure: returns 1, caller falls back to tier proxy.
+refresh_benchmarks() {
+  mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
+  have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
+  # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
+  local _k
+  _k="$(grep -E '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
+  _k="${_k#*OPENROUTER_API_KEY=}"; _k="${_k%\"}"; _k="${_k#\"}"; _k="${_k%\'}"; _k="${_k#\'}"
+  _k="${_k%%#*}"  # strip inline comments
+  _k="${_k%"${_k##*[![:space:]]}"}"  # strip trailing whitespace
+  [ -n "$_k" ] || { echo "OPENROUTER_API_KEY needed for benchmark data (put it in ~/.env)" >&2; return 1; }
+  # Pass key via temp file to avoid exposure in process args (ps table).
+  local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
+  printf 'Authorization: Bearer %s\n' "$_k" > "$_hdr"; chmod 600 "$_hdr"
+  local _tmp; _tmp="$(mktemp "$OSRC_HOME/.bench.XXXXXX" 2>/dev/null)" || { rm -f "$_hdr"; echo "cannot create temp file" >&2; return 1; }
+  if curl -fsS -H @"$_hdr" \
+    "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis&task_type=intelligence&max_results=100" \
+    -o "$_tmp" 2>/dev/null; then
+    # Validate JSON before promoting to cache (prevents HTML error pages / truncated responses from poisoning the cache).
+    if jq -e '.data | type == "array"' "$_tmp" >/dev/null 2>&1; then
+      mv -f "$_tmp" "$OSRC_BENCH_JSON" || { rm -f "$_tmp" "$_hdr"; echo "failed to write benchmark cache" >&2; return 1; }
+      echo "refreshed benchmark cache ($(jq -r '.meta.model_count // "?"' "$OSRC_BENCH_JSON" 2>/dev/null) models, as of $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null))"
+    else
+      rm -f "$_tmp"
+      echo "benchmark refresh failed (response was not valid JSON with .data array)" >&2; rm -f "$_hdr"; return 1
+    fi
+  else
+    rm -f "$_tmp"
+    echo "benchmark refresh failed (offline? no OR key?)" >&2; rm -f "$_hdr"; return 1
+  fi
+  rm -f "$_hdr"
+}
+
+# _classify_task <prompt> -> echoes category: code|reasoning|agentic|creative|simple
+# Keyword-based, most hits wins. Ties: code > reasoning > agentic > creative > simple.
+# Uses grep -oE with pipe-separated phrases to count distinct keyword matches.
+_classify_task() {
+  local prompt="$*" lc
+  lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
+  local code reasoning agentic creative
+  code="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CODE" 2>/dev/null | wc -l | tr -d ' ')"
+  reasoning="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_REASONING" 2>/dev/null | wc -l | tr -d ' ')"
+  agentic="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_AGENTIC" 2>/dev/null | wc -l | tr -d ' ')"
+  creative="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CREATIVE" 2>/dev/null | wc -l | tr -d ' ')"
+  code="${code:-0}"; reasoning="${reasoning:-0}"; agentic="${agentic:-0}"; creative="${creative:-0}"
+  local best=simple best_n=0
+  [ "$code" -gt "$best_n" ] && { best=code; best_n=$code; }
+  [ "$reasoning" -gt "$best_n" ] && { best=reasoning; best_n=$reasoning; }
+  [ "$agentic" -gt "$best_n" ] && { best=agentic; best_n=$agentic; }
+  [ "$creative" -gt "$best_n" ] && { best=creative; best_n=$creative; }
+  printf '%s' "$best"
+}
+
+# _bench_score_field <category> -> benchmark JSON field name for that category.
+_bench_score_field() {
+  case "$1" in
+    code)      printf 'coding_index' ;;
+    agentic)   printf 'agentic_index' ;;
+    reasoning|creative|simple|*) printf 'intelligence_index' ;;
+  esac
+}
+
+# _bench_threshold_for <category> -> numeric threshold (0 for simple = no floor).
+_bench_threshold_for() {
+  case "$1" in
+    code)      printf '%s' "$_THRESH_CODE" ;;
+    reasoning) printf '%s' "$_THRESH_REASONING" ;;
+    agentic)   printf '%s' "$_THRESH_AGENTIC" ;;
+    creative)  printf '%s' "$_THRESH_CREATIVE" ;;
+    *)         printf '0' ;;
+  esac
+}
+
+# _resolve_bench_slug <alias-or-resolved-id> -> OR benchmark permaslug prefix, or empty.
+# Checks native map first, then strips :free and uses the id directly.
+_resolve_bench_slug() {
+  local mapped
+  mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')"
+  [ -n "$mapped" ] && { printf '%s' "$mapped"; return 0; }
+  printf '%s' "${1%:free}"
+}
+
+# _bench_lookup <resolved-id> <field> -> "score\tprice_in\tprice_out" or empty.
+# Queries the cached benchmark JSON. Prefers exact match, falls back to shortest prefix match.
+_bench_lookup() {
+  [ -f "$OSRC_BENCH_JSON" ] && have jq || return 0
+  local slug; slug="$(_resolve_bench_slug "$1")"
+  [ -n "$slug" ] || return 0
+  # Try exact match first, then prefix match sorted by slug length (shortest = most canonical).
+  local result
+  result="$(jq -r --arg slug "$slug" --arg field "$2" '
+    .data[] | select(.model_permaslug == $slug)
+    | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
+  ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
+  if [ -z "$result" ]; then
+    # Prefix match: collect into array, sort by slug length, take shortest. Empty array -> no output.
+    result="$(jq -r --arg slug "$slug" --arg field "$2" '
+      [.data[] | select(.model_permaslug | startswith($slug))]
+      | if length > 0 then sort_by(.model_permaslug | length) | .[0]
+        | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
+        else empty end
+    ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
+  fi
+  printf '%s' "$result"
+}
+
+# _tier_score_proxy <tier> -> rough capability score when no benchmark data exists.
+_tier_score_proxy() {
+  case "$1" in
+    frontier) printf '55' ;;
+    capable)  printf '50' ;;
+    mid)      printf '40' ;;
+    budget)   printf '30' ;;
+    *)        printf '35' ;;
+  esac
+}
+
+# cmd_advise: task-aware model recommendation with benchmark data.
+# Usage: advise [--refresh] [--json] "<task prompt>"
+# Classifies the task, scores all known models, recommends the best value model
+# that meets the capability threshold. Explains WHY it picked that model.
+cmd_advise() {
+  local do_refresh=0 json_out=0 task=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --refresh) do_refresh=1; shift ;;
+      --json)    json_out=1; shift ;;
+      --)        shift; task="${*:-}"; break ;;
+      --*)       task="${task:+$task }$1"; shift ;;   # unknown --flags treated as task text
+      *)         task="${task:+$task }$1"; shift ;;
+    esac
+  done
+  [ -n "$task" ] || die "advise needs a task description (try: $0 advise \"refactor auth module\")"
+  # JSON output requires jq; fail explicitly rather than emitting empty output.
+  if [ "$json_out" -eq 1 ] && ! have jq; then
+    die "advise --json requires jq (install it or run without --json for text output)"
+  fi
+
+  if [ "$do_refresh" -eq 1 ] || [ ! -f "$OSRC_BENCH_JSON" ]; then
+    # On explicit --refresh, show diagnostics (don't suppress stderr).
+    if [ "$do_refresh" -eq 1 ]; then
+      refresh_benchmarks || true
+    else
+      refresh_benchmarks 2>/dev/null || true
+    fi
+  fi
+
+  local category field threshold
+  category="$(_classify_task "$task")"
+  field="$(_bench_score_field "$category")"
+  threshold="$(_bench_threshold_for "$category")"
+
+  # Score each candidate from the alias table.
+  local results="" has_bench=0 bench_count=0 total_count=0
+  local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
+  while IFS='|' read -r alias resolved lane tier; do
+    [ -n "$alias" ] || continue
+    case "$lane" in gi|ci) continue ;; esac   # skip image lanes
+    total_count=$((total_count + 1))
+    bench_line="$(_bench_lookup "$resolved" "$field")"
+    if [ -n "$bench_line" ]; then
+      bench_count=$((bench_count + 1))
+      score="$(printf '%s' "$bench_line" | cut -f1)"
+      price_in="$(printf '%s' "$bench_line" | cut -f2)"
+      price_out="$(printf '%s' "$bench_line" | cut -f3)"
+    else
+      score="$(_tier_score_proxy "$tier")"
+      price_in="0"; price_out="0"
+      if [ -f "$OSRC_MODELS_JSON" ] && have jq; then
+        local p
+        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.prompt // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
+        [ -n "$p" ] && price_in="$p"
+        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.completion // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
+        [ -n "$p" ] && price_out="$p"
+      fi
+    fi
+    # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
+    # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
+    case "$lane" in cx|cc|dv|gm) price_in="0"; price_out="0" ;; esac
+    # Value ratio = score / max(cost_per_m_input, 0.01). Free models floored to 0.01.
+    cost_per_m="$(awk -v p="$price_in" 'BEGIN{printf "%.6f", p*1000000}')"
+    value_ratio="$(awk -v s="$score" -v c="$cost_per_m" 'BEGIN{if(c<0.01)c=0.01; printf "%.2f", s/c}')"
+    meets=0
+    awk -v s="$score" -v t="$threshold" 'BEGIN{exit (s+0 >= t+0) ? 0 : 1}' && meets=1
+    # Display label for subscription lanes.
+    case "$lane" in cx|cc|dv|gm) cost_per_m="0 (plan)" ;; esac
+    results="$results$alias|$resolved|$lane|$tier|$score|$cost_per_m|$value_ratio|$meets
+"
+  done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
+
+  # Pick recommendation in two cohorts to avoid subscription lanes dominating value ratio.
+  # Subscription lanes (cx/cc/dv/gm): ranked by score (cost is plan-limited, not comparable to per-token).
+  # Paid lanes (or/codex): ranked by value ratio (score / cost_per_m).
+  # Prefer subscription if it meets threshold; else best paid by value ratio; else highest score overall.
+  local rec_alias="" rec_resolved="" rec_lane="" rec_reason=""
+  local sub_best_alias="" sub_best_resolved="" sub_best_lane="" sub_best_score=-1
+  local paid_best_alias="" paid_best_resolved="" paid_best_lane="" paid_best_vr=-1
+  local any_best_alias="" any_best_resolved="" any_best_lane="" any_best_score=-1
+  while IFS='|' read -r alias resolved lane tier score cost vr meets; do
+    [ -n "$alias" ] || continue
+    # Track highest score overall (fallback when nothing meets threshold).
+    awk -v s="$score" -v b="$any_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
+      any_best_score="$score"; any_best_alias="$alias"; any_best_resolved="$resolved"; any_best_lane="$lane"
+    }
+    [ "$meets" = "1" ] || continue
+    case "$lane" in
+      cx|cc|dv|gm)
+        awk -v s="$score" -v b="$sub_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
+          sub_best_score="$score"; sub_best_alias="$alias"; sub_best_resolved="$resolved"; sub_best_lane="$lane"
+        } ;;
+      *)
+        awk -v v="$vr" -v b="$paid_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' && {
+          paid_best_vr="$vr"; paid_best_alias="$alias"; paid_best_resolved="$resolved"; paid_best_lane="$lane"
+        } ;;
+    esac
+  done < <(printf '%s\n' "$results")
+
+  # Prefer subscription (if it meets threshold), then paid by value ratio, then highest score fallback.
+  if [ -n "$sub_best_alias" ]; then
+    rec_alias="$sub_best_alias"; rec_resolved="$sub_best_resolved"; rec_lane="$sub_best_lane"
+    rec_reason="best subscription model (score $sub_best_score, meets ${category} threshold $threshold, plan-limited cost)"
+  elif [ -n "$paid_best_alias" ]; then
+    rec_alias="$paid_best_alias"; rec_resolved="$paid_best_resolved"; rec_lane="$paid_best_lane"
+    rec_reason="best value (ratio $paid_best_vr, meets ${category} threshold $threshold)"
+  else
+    rec_alias="$any_best_alias"; rec_resolved="$any_best_resolved"; rec_lane="$any_best_lane"
+    rec_reason="highest score (score $any_best_score, no model met ${category} threshold $threshold, consider escalating)"
+  fi
+
+  # Determine benchmark data quality: live (majority), partial, or none.
+  if [ "$bench_count" -gt 0 ] && [ "$total_count" -gt 0 ] && [ "$bench_count" -ge $((total_count / 2)) ]; then
+    has_bench=1
+  elif [ "$bench_count" -gt 0 ]; then
+    has_bench=2  # partial
+  else
+    has_bench=0
+  fi
+
+  # Guard: if no candidates at all (empty model table), fail gracefully.
+  [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
+
+  if [ "$json_out" -eq 1 ]; then
+    jq -n \
+      --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
+      --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
+      --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
+      '{task:$task, category:$category, score_field:$field, threshold:$threshold,
+        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, reason:$rec_reason},
+        benchmark_data_available:($has_bench=="1"),
+        benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring)))}'
+
+  else
+    echo "== outsourcerer advise =="
+    echo "   task: $task"
+    echo "   category: $category"
+    echo "   scoring by: $field (threshold: $threshold)"
+    if [ "$has_bench" = "1" ]; then
+      echo "   benchmark data: live (OpenRouter, $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null), $bench_count/$total_count models)"
+    elif [ "$has_bench" = "2" ]; then
+      echo "   benchmark data: partial ($bench_count/$total_count models have live scores, rest use tier proxy, run: $0 advise --refresh \"$task\")"
+    else
+      echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
+    fi
+    echo
+    echo "--- recommendation ---"
+    echo "   model: $rec_alias ($rec_resolved)"
+    echo "   lane:  $rec_lane"
+    echo "   why:   $rec_reason"
+    echo
+    echo "--- all candidates (sorted by value ratio, >> = recommended) ---"
+    printf '%s\n' "$results" | sort -t'|' -k7 -rn | while IFS='|' read -r alias resolved lane tier score cost vr meets; do
+      [ -n "$alias" ] || continue
+      local mark="  "
+      [ "$alias" = "$rec_alias" ] && mark=">>"
+      printf '%s %-16s %-28s lane=%-3s score=%-5s $/M=%-14s ratio=%-7s %s\n' \
+        "$mark" "$alias" "$resolved" "$lane" "$score" "$cost" "$vr" \
+        "$([ "$meets" = "1" ] && echo OK || echo 'below threshold')"
+    done
+    echo
+    echo "Run with:  $0 run -m $rec_alias \"$task\""
+    echo "Override:  $0 run -m <any-model> \"$task\"   (you know better, pick your own)"
+  fi
 }
 
 # =============================================================================
@@ -3325,6 +3658,7 @@ main() {
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live cheap/free models per platform right now
+    advise)      cmd_advise "$@" ;;                        # task-aware model recommendation with benchmark data
     second-opinion|second) second_opinion "$@" ;;         # 2 cheap models; disagree -> escalate
     image)       cmd_image "$@" ;;                         # Gemini text-to-image (nano-banana default); prints file path
     parity-codex) parity_codex ;;                          # reverse bridge: Codex -> claude insource
@@ -3337,9 +3671,9 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
     ""|-h|--help|help)
-      sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
       ;;
-    *) die "unknown subcommand '$cmd' (try: doctor|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|second-opinion|image|continue|session|parity|parity-codex; prepend --provider devin|cc|codex)" ;;
+    *) die "unknown subcommand '$cmd' (try: doctor|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex; prepend --provider devin|cc|codex)" ;;
   esac
 }
 main "$@"

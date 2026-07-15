@@ -1,6 +1,6 @@
 ---
 name: outsourcerer
-description: 'Delegate grunt work to a cheaper or different engine while Claude orchestrates, across OpenRouter (GLM/hy3/DeepSeek), Codex, Claude, and keyless Gemini/Antigravity lanes, plus image gen and a cost Tab. Triggers: outsource, offload, delegate, use GLM/Devin/Codex, or get a second opinion.'
+description: '''Delegate grunt work to a cheaper or different engine while Claude orchestrates, across OpenRouter (GLM/hy3/DeepSeek), Codex, Claude, and keyless Gemini/Antigravity lanes, plus image gen and a cost Tab. Triggers: outsource, offload, delegate, use GLM/Devin/Codex, or get a second opinion.'''
 ---
 
 # Outsourcerer
@@ -221,3 +221,31 @@ Reference paths below are relative to the skill directory (the folder containing
 - `references/second-opinion-and-parity.md`, consensus-gated `second-opinion`, the `parity-codex`
   reverse bridge, `parity` (skills+MCP porting to Devin/Antigravity), per-host install paths, and an
   env-var index. Read when setting up parity/insourcing or tracing an env var to its full doc.
+- `references/model-advisory.md`, the `advise` subcommand: task-aware model recommendation with live
+  benchmark data (OpenRouter benchmarks API: intelligence/coding/agentic indices + pricing). Explains
+  how task classification works (code/reasoning/agentic/creative/simple), the scoring formula
+  (value ratio = capability score / cost), good-enough thresholds per category, and the graceful
+  degradation path (OR benchmarks -> cached pricing -> tier proxy scores). Read when the user asks
+  "which model should I use?" or you need data-backed model selection instead of a heuristic guess.
+
+## Model advisory: data-backed "which model should I use?"
+
+When you need to pick a model and want **data, not a guess**, run `advise`:
+
+```
+outsourcerer.sh advise "refactor the authentication module to use JWT tokens"
+outsourcerer.sh advise --refresh "analyze tradeoffs of microservices vs monolith"  # pull fresh benchmarks
+outsourcerer.sh advise --json "execute a multi-step agent workflow" | jq .recommendation
+```
+
+It classifies the task (code/reasoning/agentic/creative/simple), scores every known model against
+**live benchmark data** from the OpenRouter benchmarks API (intelligence/coding/agentic indices +
+pricing), and recommends the best value model that meets the capability threshold for the task
+type. It explains WHY it picked that model, shows all candidates sorted by value ratio, and gives
+you the exact `run -m <model>` command to execute.
+
+**When to use it**: when the user asks "which model should I use for X?", when you're unsure
+between a cheap and a premium lane for a task, or when you want to justify a model choice with
+data instead of vibes. Pair with `suggest` (price-only discovery) and `estimate` (cost quotes) for
+the full picture. Without benchmark data (no OR key or offline), it falls back to tier-based proxy
+scores so it always works, just less precisely.
