@@ -3,6 +3,35 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.7] - 2026-07-15
+
+Torture-room hardening: 16-agent security/reliability gauntlet findings applied. No breaking changes. All 21 conformance tests + 62 advise tests pass.
+
+### Security
+- **API keys no longer appear in process arguments.** All curl calls to OpenRouter/Gemini now write bearer tokens to a `chmod 600` temp header file referenced via `@header-file`, not `-H "Authorization: Bearer ..."` on the command line (visible to `ps`/other users).
+- **SSRF blocked on local-lane URLs.** `OSRC_LOCAL_URL` / `OLLAMA_HOST` pointing to a non-loopback address is refused; only `127.0.0.1`, `::1`, and `localhost` are accepted.
+- **SSRF blocked on image-gen response URLs.** The OpenRouter image lane validates the returned URL scheme/host before fetching.
+- **`rm -rf` on JSON-sourced paths is containment-checked.** `cmd_cleanup` refuses to delete a path that does not contain `.outsourcerer/worktrees/`, preventing a poisoned JSON payload from targeting arbitrary directories.
+- **`OSRC_PROTECTED_PATHS` word-splitting fixed.** Unquoted expansion that could break on paths with spaces now uses `IFS=:` safe splitting.
+
+### Reliability
+- **Portable version sort.** `sort -V` is wrapped in a `vsort` helper that falls back to numeric sort on platforms without it.
+- **Atomic `models.json` refresh.** `refresh_models` now writes to a `mktemp` temp file and `mv`s into place, matching the benchmark cache pattern. Prevents partial-write corruption on concurrent refresh or crash.
+- **PID reuse protection.** Background supervisor PID files now record a start-time; `status`/`gc` verify the PID is still the same process before trusting it, preventing PID-recycling from reaping an unrelated process.
+- **Stale-job reaping in `gc`.** A `running` job whose PID is dead is auto-healed to `interrupted` and becomes eligible for GC.
+- **EXIT trap cleans header temp files.** Bearer-token temp files (`.hdr.*`) are now cleaned on exit alongside `with-mcp-$$.json`.
+- **`second_opinion` detects upstream failures.** Empty model output (network/key failure) is no longer treated as "consensus on empty string"; both-empty dies, one-empty uses the other, premium-empty dies.
+- **`fanout wait`/`collect` return nonzero on failure.** A batch with any failed/blocked/timed-out member now exits nonzero so orchestrators can detect partial failure.
+- **Fanout mutating-verb warning.** `fanout --verb edit|research|yolo` without `--worktree` prints a collision warning.
+- **tmux session collision check.** `session start` refuses to kill an existing session; it reports the collision and tells the user to stop or reattach.
+- **`continue_turn` captures exit code.** A failed continue now propagates nonzero instead of always exiting 0.
+- **Test fake CLI `eval` hardened.** The call-counter in test fakes validates `n` is numeric before the indirect `eval`, preventing injection via a poisoned count file.
+
+### Added
+- **`--version` / `-V` flag.** Prints `outsourcerer <version>` and exits.
+- **Version in `doctor` output.** The doctor banner now includes the version number.
+- **`OSRC_VERSION` variable** in the script as the single source of truth for the version.
+
 ## [0.4.3] - 2026-07-14
 
 Security + accounting: the cloud gate now covers every off-machine path, and cost accounting stops both double-counting and undercounting. No breaking changes.

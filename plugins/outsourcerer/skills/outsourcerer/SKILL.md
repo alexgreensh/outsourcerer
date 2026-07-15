@@ -1,6 +1,6 @@
 ---
 name: outsourcerer
-description: '''Delegate grunt work to a cheaper or different engine while Claude orchestrates, across OpenRouter (GLM/hy3/DeepSeek), Codex, Claude, and keyless Gemini/Antigravity lanes, plus image gen and a cost Tab. Triggers: outsource, offload, delegate, use GLM/Devin/Codex, or get a second opinion.'''
+description: 'Delegate grunt work to a cheaper or different engine while Claude orchestrates, across OpenRouter (GLM/hy3/DeepSeek), Codex, Claude, and keyless Gemini/Antigravity lanes, plus image gen and a cost Tab. Triggers: outsource, offload, delegate, use GLM/Devin/Codex, or get a second opinion.'
 ---
 
 # Outsourcerer
@@ -14,6 +14,8 @@ The single entrypoint is the helper script:
 ```
 ${CLAUDE_PLUGIN_ROOT}/skills/outsourcerer/scripts/outsourcerer.sh <subcommand> [args]
 ```
+
+**Argument order:** `--provider` MUST be the FIRST argument, before the subcommand. Correct: `outsourcerer --provider cc run "task"`. Wrong: `outsourcerer run --provider cc "task"`.
 
 ## How to behave (the magic contract)
 
@@ -37,6 +39,20 @@ The user should never have to learn a command, remember a model name, or ask "is
 4. **Pick the right model AND effort for the task, don't ask the user to.** Say which one you picked and why, let the user override. Cheap ≠ dumb: `glm-5.2`/`hy3`/`deepseek` are `capable` tier (frontier capability, budget price). Only route AWAY from genuinely small models (`haiku`/`*-mini`). Use `--effort` when depth matters. Details: `references/effort-and-tiers.md`.
    - **Pick the run MODE too.** Headless one-shots (`run`/`research`/`edit`/`yolo`/`bg`/`fanout`) DO execute tools. Only claude-native `auto` is genuinely read-only-ish. Don't use N interactive tmux sessions for tool access, use headless `fanout`. Reserve `session` for live steering. Details: `references/mechanism.md`.
    - **Foreground vs supervised.** For anything substantial or unattended, prefer `bg` and poll `status`. Foreground is for quick watched one-shots. Details: `references/jobs-and-safety.md`.
+
+   **Verb = permission mode.** Three axes: read-only / mutating / sandboxed-exec. Pick the verb that matches the trust level:
+
+   | Verb | Mode | Tier | What it does |
+   |---|---|---|---|
+   | `run` | read-only (Read/Grep/Glob, no Bash exec) | auto | Observe, map, search. No side effects. |
+   | `explore` | alias for `run` | auto | Same as run. |
+   | `research` | sandboxed tool exec (devin/codex only) | autonomous | Run commands inside the delegate's sandbox. |
+   | `edit` | auto-accept file edits | accept-edits | Modify files, no human prompt per edit. |
+   | `yolo` | auto-approve ALL tools, no sandbox | dangerous (HIGH RISK) | Full autonomy. Use sparingly, never default. |
+   | `bg` | any verb detached + supervised | (inherits verb) | Long/unattended work. Poll `status`. |
+   | `fanout` | N parallel jobs | (inherits verb) | Multi-agent gauntlet. |
+   | `session` | interactive tmux session | interactive | Live steering, you watch and intervene. |
+
 5. **Drive the commands yourself.** The subcommand table, provider flags, model aliases, tier system, all in `references/*.md`, is the **mechanism you operate**, not a manual for the user. The user's experience should stay "I said outsource this, it happened."
 6. **Report cost honestly, never call a subscription lane "free."** Split **cash** from **plan limits**. A ChatGPT-sub/Claude-sub/keyless run charges $0 cash but spends finite plan limits, say both. The local lane is the one genuinely free tier ($0 cash, $0 plan, private). Details: `references/tab.md`.
 
@@ -85,6 +101,32 @@ outsourcerer.sh advise --json "execute a multi-step agent workflow" | jq .recomm
 Present the output conversationally: "I'd recommend **sol** for this, it scores 77.4 on coding and you have it on your Claude plan. Want me to run it?" Then wait for the go-ahead. Don't dump the table, translate it into a recommendation a human can act on.
 
 How it picks: classifies the task (code/reasoning/agentic/creative/simple), pulls live benchmark scores from OpenRouter API, scores every model (subscription by capability, paid by value ratio), recommends the best model meeting the threshold. Falls back to tier-based proxy scores offline. Full details: `references/model-advisory.md`.
+
+## Other subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `suggest` / `deals` | What's cheap/free right now. |
+| `estimate` | Cost quote before a big offload. |
+| `cleanup` | Remove old worktrees. |
+| `gc` | Reclaim old job dirs (`--older-than DAYS`). |
+| `continue` / `cont` | Resume a Devin conversation with a model switch. |
+| `second-opinion` / `second` | Run cheap models, escalate on disagreement. |
+| `parity` | Sync skills into Devin/Codex/Antigravity. |
+| `parity-codex` | Sync skills into Codex. |
+| `image` | Generate an image (codex/gemini/openrouter backends). |
+
+## How to report failures to the user
+
+Map each terminal state to a one-line user message:
+
+| Exit state | User message |
+|---|---|
+| `done` (exit 0) | "Done. <result summary>" |
+| `done?` (exit 2) | "It says done but the progress marker was missing. Here's the output..." |
+| `blocked` (exit 3) | "It needs input: <result>. Want me to answer and continue, or handle it here?" |
+| `timeout` (exit 124) | "Hit the time cap. For long work I'll use `bg` next time." |
+| `wedged` (exit 125) | "The delegate stalled after <last progress>. I'll re-run on a stronger model or do it myself." |
 
 ## References
 

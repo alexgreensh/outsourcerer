@@ -91,7 +91,11 @@
 #   tier-based proxy scores. Pair with `suggest` for price-only discovery, `estimate` for cost quotes.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+# Version identifier (eng-plan-reviewer C1/H5). Single source of truth; bump the rightmost
+# number for patch releases. `doctor` and `--version` both read this.
+OSRC_VERSION="0.4.7"
 
+OSRC_VERSION="0.4.7"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # Offload backend: devin (default) | cc (Claude Code->OpenRouter) | codex (Codex->OpenRouter).
@@ -100,7 +104,12 @@ PROVIDER="${OUTSOURCERER_PROVIDER:-devin}"
 OR_CHAIN_DEFAULT="tencent/hy3:free,z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
-SCRIPT_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+# Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
+SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
+case "$SCRIPT_PATH" in
+  /*) ;;  # already absolute
+  *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
+esac
 
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
@@ -109,7 +118,7 @@ OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
-trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" 2>/dev/null; fi' EXIT
+trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr."* 2>/dev/null; fi' EXIT
 # Tier override: --tier flag (parsed later) or OUTSOURCERER_TIER env. "raw" = no wrapper.
 OSRC_TIER_OVERRIDE="${OUTSOURCERER_TIER:-}"
 # Reasoning effort: --effort/--reasoning flag (parsed in _consume_flags) or OUTSOURCERER_EFFORT env.
@@ -176,6 +185,13 @@ SESSION_NAME="${OUTSOURCERER_TMUX:-$(_sess_slug)}"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# Portable version sort: use GNU sort -V if available, else fall back to numeric field sort.
+if printf '1.10\n1.2\n' | sort -V >/dev/null 2>&1; then
+  _vsort() { sort -V; }
+else
+  _vsort() { sort -t. -k1,1n -k2,2n -k3,3n -k4,4n; }
+fi
 
 _OSRC_VERBS="run explore research edit yolo"
 _is_verb() { case " $_OSRC_VERBS " in *" ${1:-} "*) return 0 ;; *) return 1 ;; esac; }
@@ -273,20 +289,33 @@ continue_turn() {
   # `continue` must NOT silently escalate a read-only conversation to accept-edits.
   # Devin -c inherits the existing conversation's permission mode; forcing accept-edits here
   # was a silent privilege escalation. Remove it.
-  devin -c --model "$MODEL" -p "$prompt" </dev/null
+  # Capture exit code so callers can detect failure (error-handling-reviewer F3).
+  local rc=0
+  devin -c --model "$MODEL" -p "$prompt" </dev/null || rc=$?
+  return "$rc"
+  return "$rc"
 }
 
 # ---- OpenRouter backends (no proxy, no install), cc = Claude Code, codex = Codex ----
 # OpenRouter natively serves BOTH the Anthropic Messages API (for cc) and the OpenAI Responses
 # API (for codex), so each CLI talks to it without a translation server.
+# ---- Shared key extraction from ~/.env (strips export, quotes, comments, whitespace) ----
+_extract_kv_value() {
+  # $1 = env var name (e.g. OPENROUTER_API_KEY). Echoes the value or empty if not found.
+  local _key="$1" _l _v
+  _l="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${_key}=" "$HOME/.env" 2>/dev/null | tail -n1)"
+  _v="${_l#*${_key}=}"
+  _v="${_v%%#*}"              # strip inline comments
+  _v="${_v%"${_v##*[![:space:]]}"}"  # strip trailing whitespace
+  _v="${_v%\"}"; _v="${_v#\"}"  # strip double quotes
+  _v="${_v%\'}"; _v="${_v#\'}"  # strip single quotes
+  printf '%s' "$_v"
+}
+
 _or_load_key() {
   # Extract ONLY the OpenRouter key. NEVER `set -a; . ~/.env`, allexport would push every
   # other secret in ~/.env into the delegate's environment, exposing them to a third-party model.
-  local _l
-  _l="$(grep -E '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
-  OPENROUTER_API_KEY="${_l#*OPENROUTER_API_KEY=}"
-  OPENROUTER_API_KEY="${OPENROUTER_API_KEY%\"}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY#\"}"
-  OPENROUTER_API_KEY="${OPENROUTER_API_KEY%\'}"; OPENROUTER_API_KEY="${OPENROUTER_API_KEY#\'}"
+  OPENROUTER_API_KEY="$(_extract_kv_value OPENROUTER_API_KEY)"
   [ -n "$OPENROUTER_API_KEY" ] || die "OPENROUTER_API_KEY not found in ~/.env (needed for --provider cc/codex)"
   export OPENROUTER_API_KEY
 }
@@ -296,19 +325,37 @@ _gm_load_key() {
   # Extract ONLY the Gemini key. NEVER `set -a; . ~/.env`, same single-key-only rule as
   # _or_load_key above. Tries GEMINI_API_KEY first, then GOOGLE_API_KEY (gemini-cli's own
   # precedence is GOOGLE_API_KEY > GEMINI_API_KEY when both are set; here either satisfies us).
-  local _l
-  _l="$(grep -E '^[[:space:]]*(export[[:space:]]+)?GEMINI_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
-  GEMINI_API_KEY="${_l#*GEMINI_API_KEY=}"
-  GEMINI_API_KEY="${GEMINI_API_KEY%\"}"; GEMINI_API_KEY="${GEMINI_API_KEY#\"}"
-  GEMINI_API_KEY="${GEMINI_API_KEY%\'}"; GEMINI_API_KEY="${GEMINI_API_KEY#\'}"
+  GEMINI_API_KEY="$(_extract_kv_value GEMINI_API_KEY)"
   if [ -z "$GEMINI_API_KEY" ]; then
-    _l="$(grep -E '^[[:space:]]*(export[[:space:]]+)?GOOGLE_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
-    GEMINI_API_KEY="${_l#*GOOGLE_API_KEY=}"
-    GEMINI_API_KEY="${GEMINI_API_KEY%\"}"; GEMINI_API_KEY="${GEMINI_API_KEY#\"}"
-    GEMINI_API_KEY="${GEMINI_API_KEY%\'}"; GEMINI_API_KEY="${GEMINI_API_KEY#\'}"
+    GEMINI_API_KEY="$(_extract_kv_value GOOGLE_API_KEY)"
   fi
   [ -n "$GEMINI_API_KEY" ] || die "GEMINI_API_KEY (or GOOGLE_API_KEY) not found in ~/.env (needed for gemini-pro/gemini-flash/nano-banana). Get a key: https://aistudio.google.com/apikey"
   export GEMINI_API_KEY
+}
+
+# ---- Secure curl header helper: pass API keys via temp file, not process args (ps table) ----
+# Usage: _curl_with_key <header_value> <curl args...>
+# Writes the header to a 0600 temp file and uses curl -H @file to avoid exposing the key in ps.
+_curl_hdr_tmp=""
+_curl_with_auth() {
+  local _hdr_val="$1"; shift
+  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 600 "$_curl_hdr_tmp" 2>/dev/null || true
+  printf 'Authorization: Bearer %s\n' "$_hdr_val" > "$_curl_hdr_tmp"
+  curl -H @"$_curl_hdr_tmp" "$@"
+  local rc=$?
+  rm -f "$_curl_hdr_tmp" 2>/dev/null; _curl_hdr_tmp=""
+  return $rc
+}
+_curl_with_gemini_key() {
+  local _hdr_val="$1"; shift
+  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null || mktemp)"
+  chmod 600 "$_curl_hdr_tmp" 2>/dev/null || true
+  printf 'x-goog-api-key: %s\n' "$_hdr_val" > "$_curl_hdr_tmp"
+  curl -H @"$_curl_hdr_tmp" "$@"
+  local rc=$?
+  rm -f "$_curl_hdr_tmp" 2>/dev/null; _curl_hdr_tmp=""
+  return $rc
 }
 
 # ---- Codex image backend detection (gpt-image-2, KEYLESS via the user's Codex/ChatGPT subscription) ----
@@ -775,8 +822,9 @@ record_ledger() {
 refresh_models() {
   mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
   have curl || { echo "curl needed to refresh the model catalog" >&2; return 1; }
-  if curl -fsS "https://openrouter.ai/api/v1/models" -o "$OSRC_MODELS_JSON.tmp" 2>/dev/null; then
-    mv "$OSRC_MODELS_JSON.tmp" "$OSRC_MODELS_JSON"; echo "refreshed $OSRC_MODELS_JSON"
+  local _tmp; _tmp="$(mktemp "$OSRC_HOME/.models.XXXXXX" 2>/dev/null || mktemp)"
+  if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" "https://openrouter.ai/api/v1/models" -o "$_tmp" 2>/dev/null; then
+    jq -e '.data' "$_tmp" >/dev/null 2>&1 && mv -f "$_tmp" "$OSRC_MODELS_JSON" && echo "refreshed $OSRC_MODELS_JSON" || { rm -f "$_tmp"; echo "refresh failed: invalid JSON" >&2; return 1; }
   else
     rm -f "$OSRC_MODELS_JSON.tmp"; echo "model refresh failed (offline?)" >&2; return 1
   fi
@@ -785,7 +833,7 @@ refresh_models() {
 or_credits() {   # best-effort OpenRouter credit line; never fatal
   have curl && have jq || return 0
   _or_load_key 2>/dev/null || return 0
-  curl -fsS -H "Authorization: Bearer $OPENROUTER_API_KEY" "https://openrouter.ai/api/v1/key" 2>/dev/null \
+  _curl_with_auth "$OPENROUTER_API_KEY" -fsS -m "${OSRC_CURL_TIMEOUT:-30}" "https://openrouter.ai/api/v1/key" 2>/dev/null \
     | jq -r '.data | "limit=\(.limit // "n/a") usage=\(.usage // 0) remaining=\(.limit_remaining // "n/a")"' 2>/dev/null
 }
 
@@ -800,7 +848,7 @@ _or_gen_cost() {
   _or_load_key 2>/dev/null || return 0
   local i c
   for i in 1 2 3 4 5; do
-    c="$(curl -fsS -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    c="$(_curl_with_auth "$OPENROUTER_API_KEY" -fsS -m "${OSRC_CURL_TIMEOUT:-30}" \
          "https://openrouter.ai/api/v1/generation?id=$gid" 2>/dev/null \
          | jq -r '.data.total_cost // empty' 2>/dev/null)"
     case "$c" in ''|*[!0-9.]*) ;; *) printf '%s' "$c"; return 0 ;; esac
@@ -1029,17 +1077,13 @@ refresh_benchmarks() {
   have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
   have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
   # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
-  local _k
-  _k="$(grep -E '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null | tail -n1)"
-  _k="${_k#*OPENROUTER_API_KEY=}"; _k="${_k%\"}"; _k="${_k#\"}"; _k="${_k%\'}"; _k="${_k#\'}"
-  _k="${_k%%#*}"  # strip inline comments
-  _k="${_k%"${_k##*[![:space:]]}"}"  # strip trailing whitespace
+  local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"
   [ -n "$_k" ] || { echo "OPENROUTER_API_KEY needed for benchmark data (put it in ~/.env)" >&2; return 1; }
   # Pass key via temp file to avoid exposure in process args (ps table).
   local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
   printf 'Authorization: Bearer %s\n' "$_k" > "$_hdr"; chmod 600 "$_hdr"
   local _tmp; _tmp="$(mktemp "$OSRC_HOME/.bench.XXXXXX" 2>/dev/null)" || { rm -f "$_hdr"; echo "cannot create temp file" >&2; return 1; }
-  if curl -fsS -H @"$_hdr" \
+  if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" -H @"$_hdr" \
     "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis&task_type=intelligence&max_results=100" \
     -o "$_tmp" 2>/dev/null; then
     # Validate JSON before promoting to cache (prevents HTML error pages / truncated responses from poisoning the cache).
@@ -1343,6 +1387,11 @@ _supervise() {
   local pid=$! t0 last_size=0 last_change now size idle age
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
+  # Record start time for PID-reuse detection (concurrency-master C1).
+  local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
+  printf '%s\n' "$_stime" > "$jd/pid_start"
+  # Signal trap: kill the delegate tree if the supervisor is signaled (concurrency-master H3).
+  trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too; a mutating job with 0 writes past the window is
   # flagged "exploring?" (visible in status/watch) so the orchestrator can steer instead of cancelling
@@ -1351,6 +1400,12 @@ _supervise() {
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   while kill -0 "$pid" 2>/dev/null; do
+    # PID-reuse guard: verify the process is still ours (concurrency-master C1).
+    local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
+    if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
+      echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
+      echo interrupted > "$jd/status"; echo 130 > "$jd/exit"; return 130
+    fi
     sleep "${OSRC_POLL:-10}"
     now=$(date +%s)
     size=$(wc -c < "$jd/out.log" 2>/dev/null || echo 0)
@@ -1716,6 +1771,13 @@ _status_line() {
   local id="$1" jd="$OSRC_JOBS/$1" st model started now age prog acts verb flag=""
   [ -d "$jd" ] || { echo "no such job: $1" >&2; return 1; }
   st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+  # Liveness check: if status says running but PID is dead, mark interrupted (concurrency-master H4).
+  if [ "$st" = "running" ]; then
+    local _jpid; _jpid="$(cat "$jd/pid" 2>/dev/null)"
+    if [ -n "$_jpid" ] && ! kill -0 "$_jpid" 2>/dev/null; then
+      echo interrupted > "$jd/status"; st="interrupted"
+    fi
+  fi
   model="$(_job_field "$id" '.model')"
   started="$(_job_field "$id" '.started')"; [ "$started" = "?" ] && started=0
   now=$(date +%s); age=$(( now - started ))
@@ -1853,6 +1915,11 @@ cmd_cleanup() {
   fi
   local maindir="${path%/.outsourcerer/worktrees/*}"
   [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
+  # Containment check: refuse to rm -rf anything outside the expected worktree root.
+  case "$path" in
+    */.outsourcerer/worktrees/*) ;;
+    *) die "refusing to remove path outside worktree root: $path" ;;
+  esac
   if [ -n "$maindir" ] && [ -d "$maindir/.git" ]; then
     git -C "$maindir" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
     git -C "$maindir" branch -D "$branch" 2>/dev/null || true
@@ -1883,7 +1950,14 @@ cmd_gc() {
   for d in "$OSRC_JOBS"/*/; do
     [ -d "$d" ] || continue
     st="$(cat "$d/status" 2>/dev/null || echo running)"
-    case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked) ;;
+    # Auto-heal: a running job whose PID is dead is reaped (concurrency-master H4).
+    if [ "$st" = "running" ]; then
+      local _gpid; _gpid="$(cat "$d/pid" 2>/dev/null)"
+      if [ -n "$_gpid" ] && ! kill -0 "$_gpid" 2>/dev/null; then
+        echo interrupted > "$d/status"; st="interrupted"
+      fi
+    fi
+    case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
       *) skipped=$((skipped+1)); continue ;;
     esac
     mtime=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo "")
@@ -1971,7 +2045,15 @@ _fanout_wait() {
     sleep "${OSRC_POLL:-10}"
   done
   _fanout_status "$gid" >&2
-  echo "[outsourcerer] fanout $gid: $(_fanout_running "$gid") still running." >&2
+  # Return nonzero if any member failed (error-handling-reviewer F5).
+  local _fail=0 _jid _st
+  while IFS="$(printf '\t')" read -r _jid _; do
+    [ -n "$_jid" ] || continue
+    _st="$(cat "$OSRC_JOBS/$_jid/status" 2>/dev/null || echo '?')"
+    case "$_st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
+  done < "$gd/members.tsv"
+  echo "[outsourcerer] fanout $gid: $(_fanout_running "$gid") still running, $_fail failed." >&2
+  [ "$_fail" -eq 0 ] || return 1
 }
 
 # _fanout_collect <gid> -> copy each member's final message into findings/NN-label.md, concat into
@@ -1992,7 +2074,15 @@ _fanout_collect() {
     cat "$dst" >> "$out" 2>/dev/null || true
   done < "$gd/members.tsv"
   echo "$out"
-  echo "[outsourcerer] collected $n agent outputs -> $out  (per-agent: $gd/findings/)" >&2
+  # Return nonzero if any member failed (error-handling-reviewer F5).
+  local _fail=0
+  while IFS="$(printf '\t')" read -r jid label; do
+    [ -n "$jid" ] || continue
+    st="$(cat "$OSRC_JOBS/$jid/status" 2>/dev/null || echo '?')"
+    case "$st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
+  done < "$gd/members.tsv"
+  echo "[outsourcerer] collected $n agent outputs -> $out  ($_fail failed)  (per-agent: $gd/findings/)" >&2
+  [ "$_fail" -eq 0 ] || return 1
 }
 
 _fanout_list() {
@@ -2074,6 +2164,10 @@ cmd_fanout() {
     esac
   done
   _is_verb "$verb" || die "fanout --verb must be one of: $_OSRC_VERBS (got '$verb')"
+  # Warn on mutating verbs without --worktree (concurrency-master H5).
+  case "$verb" in edit|research|yolo)
+    [ "${OSRC_WORKTREE:-0}" != "1" ] && echo "[outsourcerer] WARNING: fanout with --verb $verb without --worktree — parallel mutating jobs share \$PWD and may collide. Use --worktree for isolation." >&2
+  ;; esac
 
   local pre=""; [ -n "$preamble" ] && { [ -f "$preamble" ] || die "--preamble file not found: $preamble"; pre="$(cat "$preamble")"; }
   local -a labels=() prompts=() a_model=() a_effort=() a_tier=() a_prov=()
@@ -2208,10 +2302,21 @@ second_opinion() {
   a1="$(_so_run "$m1" "$q")"; a2="$(_so_run "$m2" "$q")"
   n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
   record_ledger cc "$m1,$m2" mixed second-opinion "$q"
-  if [ -n "$n1" ] && [ "$n1" = "$n2" ]; then
+  # Detect upstream failures: empty output means the call failed (error-handling-reviewer C1).
+  if [ -z "$n1" ] && [ -z "$n2" ]; then
+    die "second-opinion: both cheap models ($m1, $m2) returned empty — upstream failure (check OPENROUTER_API_KEY / network)"
+  fi
+  if [ -z "$n1" ] || [ -z "$n2" ]; then
+    local _fail_model="$m2"; [ -z "$n1" ] && _fail_model="$m1"
+    echo ">>> [WARNING] $_fail_model returned empty (upstream failure), using the other model's answer" >&2
+  fi
+  if [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" = "$n2" ]; then
     echo "== CONSENSUS ($m1 == $m2), no escalation =="
     printf '%s\n' "$a1"; return 0
   fi
+  # If one model failed, use the other's answer directly (no point adjudicating against empty).
+  if [ -z "$n1" ]; then echo "== $m1 failed, using $m2 ==" >&2; printf '%s\n' "$a2"; return 0; fi
+  if [ -z "$n2" ]; then echo "== $m2 failed, using $m1 ==" >&2; printf '%s\n' "$a1"; return 0; fi
   echo "== DISAGREEMENT, escalating to premium ($premium) with both answers ==" >&2
   local esc
   esc="$(_so_run "$premium" "Two cheaper models disagree. Adjudicate and give the single correct answer.
@@ -2225,6 +2330,7 @@ $a1
 ANSWER FROM $m2:
 $a2")"
   record_ledger cc "$premium" mid second-opinion-escalate "$q"
+  [ -n "$esc" ] || die "second-opinion: premium adjudication ($premium) also returned empty — total upstream failure"
   echo "== ADJUDICATED ($premium) =="
   printf '%s\n' "$esc"
 }
@@ -2501,9 +2607,9 @@ cmd_image_gemini() {
   have jq   || die "jq needed for the image lane (brew install jq)"
   _gm_load_key
   echo ">>> [gemini-image] $id  tier=$ttier  -> $out" >&2
-  local resp; resp="$(curl -fsS -X POST \
+  local resp; resp="$(_curl_with_gemini_key "$GEMINI_API_KEY" -fsS -m "${OSRC_IMAGE_TIMEOUT:-180}" -X POST \
     "https://generativelanguage.googleapis.com/v1beta/models/$id:generateContent" \
-    -H "x-goog-api-key: $GEMINI_API_KEY" -H 'Content-Type: application/json' \
+    -H 'Content-Type: application/json' \
     -d "$(jq -cn --arg p "$prompt" '{contents:[{parts:[{text:$p}]}]}')" 2>/dev/null)" \
     || die "gemini image API call failed (network / auth / model id?)"
   local b64; b64="$(printf '%s' "$resp" | jq -r '.candidates[0].content.parts[]? | select(.inlineData) | .inlineData.data' 2>/dev/null | head -1)"
@@ -2525,15 +2631,16 @@ cmd_image_openrouter() {
   have jq   || die "jq needed for the image lane (brew install jq)"
   _or_load_key
   echo ">>> [openrouter-image] $id  tier=$ttier  -> $out" >&2
-  local resp; resp="$(curl -fsS -X POST "https://openrouter.ai/api/v1/chat/completions" \
-    -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'Content-Type: application/json' \
+  local resp; resp="$(_curl_with_auth "$OPENROUTER_API_KEY" -fsS -m "${OSRC_IMAGE_TIMEOUT:-180}" -X POST "https://openrouter.ai/api/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
     -d "$(jq -cn --arg m "$id" --arg p "$prompt" '{model:$m,messages:[{role:"user",content:$p}],modalities:["image","text"]}')" 2>/dev/null)" \
     || die "OpenRouter image API call failed (network / auth / model id?)"
   local url; url="$(printf '%s' "$resp" | jq -r '.choices[0].message.images[0].image_url.url // empty' 2>/dev/null)"
   [ -n "$url" ] || die "no image returned from OpenRouter (check OPENROUTER_API_KEY / model id). Raw response (truncated): $(printf '%s' "$resp" | head -c 300)"
   case "$url" in
     data:*base64,*) printf '%s' "${url#*base64,}" | base64 -d > "$out" 2>/dev/null || die "failed to decode/write image to $out" ;;
-    http*)          curl -fsS "$url" -o "$out" 2>/dev/null || die "failed to download image from $url" ;;
+    https://*)      curl -fsS -m "${OSRC_IMAGE_TIMEOUT:-180}" "$url" -o "$out" 2>/dev/null || die "failed to download image from $url" ;;
+    http://*)       die "refusing to fetch non-HTTPS image URL from API response (SSRF risk): $(printf '%s' "$url" | head -c 100)" ;;
     *)               die "unrecognized image URL format from OpenRouter: $(printf '%s' "$url" | head -c 100)" ;;
   esac
   record_ledger openrouter "$id" "$ttier" image "$prompt"
@@ -2630,11 +2737,14 @@ EOF
 # config dir. Headless `claude -p` cannot auto-approve edits to these (Claude Code treats its config dir as
 # a "sensitive file" needing an interactive prompt), so acceptEdits silently wedges. Extend via OSRC_PROTECTED_PATHS.
 _protected_scope() {
-  local prompt="${1:-}" d
-  for d in ${OSRC_PROTECTED_PATHS:-"$HOME/.claude" "$HOME/.codex" "$HOME/.config"}; do
-    case "$PWD/" in "$d"/*) return 0 ;; esac
-    case "$prompt" in *"$d"*) return 0 ;; esac
+  local prompt="${1:-}" d _ifs_save="$IFS"
+  # Colon-separated like PATH, so paths with spaces work correctly.
+  IFS=':'
+  for d in ${OSRC_PROTECTED_PATHS:-"$HOME/.claude:$HOME/.codex:$HOME/.config"}; do
+    case "$PWD/" in "$d"/*) IFS="$_ifs_save"; return 0 ;; esac
+    case "$prompt" in *"$d"*) IFS="$_ifs_save"; return 0 ;; esac
   done
+  IFS="$_ifs_save"
   case "$prompt" in *'~/.claude'*|*'~/.codex'*) return 0 ;; esac
   return 1
 }
@@ -2906,11 +3016,36 @@ _local_probe() {   # <base_url> -> echo first model id if it's a real OpenAI-com
 }
 
 # _local_detect -> echo "base_url|model|label" for the first live local server, else nonzero.
+# Validate that a URL points to a loopback address (127.0.0.1, localhost, ::1).
+# Prevents SSRF via OSRC_LOCAL_URL / OLLAMA_HOST pointing to internal/external hosts.
+_is_loopback_url() {
+  local url="$1" host
+  case "$url" in
+    http://localhost[:/]*|http://localhost|https://localhost[:/]*|https://localhost) return 0 ;;
+    http://127.0.0.1[:/]*|http://127.0.0.1|https://127.0.0.1[:/]*|https://127.0.0.1) return 0 ;;
+    http://[::1][:/]*|http://[::1]|https://[::1][:/]*|https://[::1]) return 0 ;;
+  esac
+  # Extract host from URL for further checking
+  host="${url#*://}"; host="${host%%/*}"; host="${host%%:*}"
+  case "$host" in
+    localhost|127.0.0.1|\[::1\]) return 0 ;;
+  esac
+  # Allow non-loopback only with explicit opt-in
+  [ "${OSRC_LOCAL_ALLOW_REMOTE:-0}" = "1" ] && return 0
+  return 1
+}
+
 _local_detect() {
   local c base label mid
   local cands=()
-  [ -n "${OSRC_LOCAL_URL:-}" ] && cands+=("${OSRC_LOCAL_URL%/}|custom")
-  [ -n "${OLLAMA_HOST:-}" ] && cands+=("${OLLAMA_HOST%/}/v1|ollama")
+  if [ -n "${OSRC_LOCAL_URL:-}" ]; then
+    _is_loopback_url "${OSRC_LOCAL_URL%/}" || die "OSRC_LOCAL_URL must point to localhost/127.0.0.1 (got: ${OSRC_LOCAL_URL}). Set OSRC_LOCAL_ALLOW_REMOTE=1 to override."
+    cands+=("${OSRC_LOCAL_URL%/}|custom")
+  fi
+  if [ -n "${OLLAMA_HOST:-}" ]; then
+    _is_loopback_url "${OLLAMA_HOST%/}" || die "OLLAMA_HOST must point to localhost/127.0.0.1 (got: ${OLLAMA_HOST}). Set OSRC_LOCAL_ALLOW_REMOTE=1 to override."
+    cands+=("${OLLAMA_HOST%/}/v1|ollama")
+  fi
   cands+=("http://localhost:11434/v1|ollama" "http://localhost:1234/v1|lmstudio" "http://localhost:8080/v1|llama.cpp")
   for c in "${cands[@]}"; do
     base="${c%|*}"; label="${c#*|}"
@@ -3365,7 +3500,11 @@ session() {
           launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL" ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc)" ;;
       esac
-      tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
+      # Use has-session to avoid killing a concurrent session (concurrency-master H2).
+      if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo "Session '$SESSION_NAME' already exists. Use '$0 session stop' first, or reattach with 'tmux attach -t $SESSION_NAME'."
+        return 0
+      fi
       tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD"
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
@@ -3436,7 +3575,7 @@ parity() {
     local plug ver vdir sk name
     for plug in "$pcache"/*/*/; do            # <marketplace>/<plugin>/
       [ -d "$plug" ] || continue
-      ver="$(ls -1 "$plug" 2>/dev/null | sort -V | tail -1)"   # latest semver dir
+      ver="$(ls -1 "$plug" 2>/dev/null | _vsort | tail -1)"   # latest semver dir
       [ -n "$ver" ] || continue
       vdir="${plug}${ver}/skills"
       [ -d "$vdir" ] || continue
@@ -3516,7 +3655,7 @@ parity() {
 }
 
 doctor() {
-  echo "== outsourcerer doctor =="
+  echo "== outsourcerer doctor (v$OSRC_VERSION) =="
   echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
@@ -3637,6 +3776,7 @@ main() {
   fi
   local cmd="${1:-}"; shift || true
   case "$cmd" in
+    --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)
     __gencost) _or_gen_cost "$1"; echo ;;                 # internal test: real cost of one generation id
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log

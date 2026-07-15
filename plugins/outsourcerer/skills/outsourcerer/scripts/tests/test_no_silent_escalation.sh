@@ -45,7 +45,8 @@ if [ "$mode" = "bypassPermissions" ]; then ok "OSRC_ALLOW_DOWNGRADE=1 escalates 
 if printf '%s' "$err" | grep -q 'SECURITY DOWNGRADE'; then ok "escalation banner says SECURITY DOWNGRADE" ; else bad "escalation missing SECURITY DOWNGRADE banner: $err"; fi
 
 # === Scenario 4: /tmp path is unchanged and produces no warning. ===
-unset OSRC_PROTECTED_PATHS OSRC_ALLOW_DOWNGRADE
+OSRC_PROTECTED_PATHS=/nonexistent
+unset OSRC_ALLOW_DOWNGRADE
 mode="$(_perm_escalate acceptEdits "/tmp/file.txt" 2>"$TMP/err4.txt")"
 err="$(cat "$TMP/err4.txt")"
 if [ "$mode" = "acceptEdits" ]; then ok "/tmp path keeps acceptEdits" ; else bad "/tmp path got '$mode'"; fi

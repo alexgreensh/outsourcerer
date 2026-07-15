@@ -16,7 +16,7 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
 bad() { echo FAIL: $1; fail=$((fail+1)); }
-cleanup() { rm -rf $TMP; }
+cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
 TMP="$(mktemp -d)"

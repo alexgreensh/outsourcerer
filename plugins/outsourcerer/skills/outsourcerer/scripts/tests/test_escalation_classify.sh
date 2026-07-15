@@ -28,6 +28,7 @@ cat > "$HOME/.local/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 f="$HOME/.claude_call_count"
 n=$(cat "$f" 2>/dev/null || echo 0)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
 n=$((n+1))
 echo "$n" > "$f"
 eval "err=\${CLAU_ERR_${n}:-}"
@@ -40,6 +41,7 @@ cat > "$HOME/.local/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 f="$HOME/.codex_call_count"
 n=$(cat "$f" 2>/dev/null || echo 0)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
 n=$((n+1))
 echo "$n" > "$f"
 eval "err=\${CODEX_ERR_${n}:-}"
