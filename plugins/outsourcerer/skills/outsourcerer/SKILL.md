@@ -43,7 +43,12 @@ user instead of just running it, you're doing it wrong.
    *and logged in* (devin / codex / claude / agy) and which models each one currently offers live.
    The user never runs `doctor` themselves, you run it, read it, and act on it. Never ask "do you
    have Devin set up?", check, then either use it or explain what's missing.
-2. **Proactively OFFER the smart move, in plain language, every time, always with the token-savings
+2. **When the user hasn't named a model, run `advise` and present the recommendation conversationally.**
+   Don't make them pick. Run `advise "their task description"`, read the output, and say something
+   like: *"For this task I'd recommend **sol**, it scores 77 on coding and you already have it on
+   your Claude plan (zero extra cost). Want me to run it?"* Then wait for the go-ahead. This is
+   the data-backed version of step 3, use it whenever the user hasn't already named a model/lane.
+3. **Proactively OFFER the smart move, in plain language, every time, always with the token-savings
    angle.** Don't wait to be asked "should I offload this?"; say what you'd do and why it's cheaper,
    then let the user green-light it. Adapt these canonical offers to what `doctor` actually found:
    - *"I see Devin's set up with GLM-5.2, want me to offload this repo-mapping there and keep your
@@ -65,7 +70,7 @@ user instead of just running it, you're doing it wrong.
    - *"This is a multi-agent gauntlet (a review skill / a per-module sweep / N parallel reviewers).
      Want me to `fanout` all N agents in parallel on GLM and collect the findings, instead of
      spending Claude subagent tokens?"*
-3. **Pick the right model AND effort for the task, don't ask the user to.** Visual/UI/design review →
+4. **Pick the right model AND effort for the task, don't ask the user to.** Visual/UI/design review →
    Gemini (`gemini-flash`/`gemini-pro`, keyless via `agy`). Mechanical/bulk/grunt work → a cheap lane
    (`glm`/`hy3`). Image generation → GPT-image first (see the image backend order below). These are
    defaults, not rules, say which one you picked and why, and let the user override.
@@ -100,12 +105,12 @@ user instead of just running it, you're doing it wrong.
      or the codex-native lane** (which can wedge on teardown after finishing — an MCP-auth worker dies
      and a Stop hook loops), prefer **`bg`** and poll `status`, don't fire a bare foreground `run` and
      wait on it. Reach for foreground only for a quick, watched one-shot. Live steering → `session`.
-4. **Drive the commands yourself.** The subcommand table, the provider flags, the model aliases,
+5. **Drive the commands yourself.** The subcommand table, the provider flags, the model aliases,
    the tier system, all documented in `references/*.md` (see the References index below), is the
    **mechanism you operate**, not a manual for the user to read. Treat it as reference material for
    you, the orchestrator: look things up there when you need the exact flag, but the user's
    experience should stay "I said outsource this, it happened."
-5. **Report cost honestly, never call a subscription lane "free."** When you tell the user what a
+6. **Report cost honestly, never call a subscription lane "free."** When you tell the user what a
    delegation cost (the receipt), split **cash** from **plan limits**:
    - Cash-free is not cost-free. A ChatGPT-sub (`codex-native`/`sol`/`terra`/`luna`), Claude-sub
      (`claude-native`/`fable`/`opus`), keyless Antigravity (`agy`/`gemini-*`), or keyless GPT-image
@@ -230,7 +235,10 @@ Reference paths below are relative to the skill directory (the folder containing
 
 ## Model advisory: data-backed "which model should I use?"
 
-When you need to pick a model and want **data, not a guess**, run `advise`:
+**Proactive rule**: When the user says anything like "let's use Outsourcerer for this", "delegate
+this", "outsource this", or describes a task without naming a model, **run `advise` first** and
+show them the recommendation before dispatching. Don't make them ask. The whole point is that they
+don't need to know which model to pick, the skill figures it out and tells them.
 
 ```
 outsourcerer.sh advise "refactor the authentication module to use JWT tokens"
@@ -238,14 +246,25 @@ outsourcerer.sh advise --refresh "analyze tradeoffs of microservices vs monolith
 outsourcerer.sh advise --json "execute a multi-step agent workflow" | jq .recommendation
 ```
 
-It classifies the task (code/reasoning/agentic/creative/simple), scores every known model against
-**live benchmark data** from the OpenRouter benchmarks API (intelligence/coding/agentic indices +
-pricing), and recommends the best value model that meets the capability threshold for the task
-type. It explains WHY it picked that model, shows all candidates sorted by value ratio, and gives
-you the exact `run -m <model>` command to execute.
+When you run it, present the output conversationally: "I'd recommend **sol** for this, it scores
+77.4 on coding tasks and you have it on your Claude plan (zero extra cost). Want me to run it?"
+Then wait for the go-ahead. Don't just dump the table, translate it into a recommendation a human
+can act on.
 
-**When to use it**: when the user asks "which model should I use for X?", when you're unsure
-between a cheap and a premium lane for a task, or when you want to justify a model choice with
-data instead of vibes. Pair with `suggest` (price-only discovery) and `estimate` (cost quotes) for
-the full picture. Without benchmark data (no OR key or offline), it falls back to tier-based proxy
-scores so it always works, just less precisely.
+**How it picks the right model**:
+1. Reads the task text and classifies it: code, reasoning, agentic, creative, or simple (keyword
+   matching, no ML, zero cost).
+2. Pulls live benchmark scores from the OpenRouter benchmarks API (intelligence/coding/agentic
+   indices + pricing for ~100 models). Cached locally so it works offline after the first pull.
+3. Scores every model you can route to. Subscription models (your Claude/ChatGPT/Gemini plans)
+   rank by capability since they're plan-limited, not per-token. Paid models rank by value ratio
+   (capability score / cost per million tokens).
+4. Recommends the best model that's good enough for the task type (e.g. coding score above 60 for
+   code tasks). If nothing clears the bar, picks the strongest one and flags it as an escalation.
+5. Falls back to rough tier-based scores (frontier=55, capable=50, mid=40, budget=30) if there's
+   no API key or no internet. Less precise but never dead.
+
+**When to use it**: proactively (see above), when the user asks "which model should I use for X?",
+when you're unsure between a cheap and a premium lane, or when you want to justify a model choice
+with data instead of vibes. Pair with `suggest` (price-only discovery) and `estimate` (cost quotes)
+for the full picture.
