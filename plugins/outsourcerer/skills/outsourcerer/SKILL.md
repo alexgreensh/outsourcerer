@@ -162,6 +162,12 @@ reliable tool-using lane for GLM/open-weight models; **`devin`** fans out its ow
 **`codex`** is best for codex-native models (`sol`/`terra`/`gpt-5.5`). If you pick `codex` with an
 OpenRouter model and its upstream provider rejects Codex's native tool types, the skill **self-heals**
 by re-running that model on the `cc` lane automatically, fanout stays green no matter the provider.
+The same applies in reverse for dual-lane models (`glm` today): if `--provider cc`'s whole OpenRouter
+chain is exhausted on transport/availability grounds (out of credits, rate-limited, etc.), the skill
+self-heals across to that model's Devin sibling instead of dying, since it's the same model on a lane
+that isn't rationed by your OpenRouter balance. You don't need to pick `devin` up front to get that
+safety net, but if OpenRouter credits are already known to be tight, going straight to the default
+provider (`devin`, no `--provider` flag) skips the OpenRouter round-trip entirely.
 Full mechanics + the generic multi-agent recipe: `references/parallel-and-fanout.md`.
 
 ## Prerequisites

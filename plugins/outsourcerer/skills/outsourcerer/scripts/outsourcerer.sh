@@ -2455,6 +2455,7 @@ _cloud_disclose() {
 
 delegate_cc() {
   local tier="$1"; shift
+  local ORIGARGS=("$@")   # preserved verbatim for the cross-lane self-heal (-> devin), same technique delegate_codex uses for -> cc
   _consume_flags "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt="${REST[*]}"
@@ -2495,6 +2496,7 @@ delegate_cc() {
   local m rc=1 ttier wrapped cap
   local old_umask; old_umask="$(umask)"; umask 077
   cap="$OSRC_HOME/.ccerr-$$"
+  local last_transport=0
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
     wrapped="$(_build_prompt "$m" "$prompt" "")"
@@ -2510,21 +2512,46 @@ delegate_cc() {
       "ANTHROPIC_SMALL_FAST_MODEL=$m")
     [ -n "$think" ] && envp+=("MAX_THINKING_TOKENS=$think")
     local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
-    "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>"$cap"
-    rc=$?
+    # Capture COMBINED stdout+stderr, like delegate_codex does (2>&1 | tee), not stderr-only.
+    # An OpenRouter transport/affordability error (e.g. "API Error: 402 ... requires more
+    # credits") is reported by `claude -p` as a stream-json/stdout message, NOT on stderr -- a
+    # stderr-only capture leaves _is_transport_failure permanently blind to it (verified live: a
+    # real 402 here produced empty/unrelated stderr -- just an "Advisor disabled" warning -- while
+    # the actual error only ever appeared in stdout). PIPESTATUS[0], not $?, after the pipe.
+    "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>&1 | tee "$cap"
+    rc=${PIPESTATUS[0]}
     chmod 600 "$cap" 2>/dev/null || true
-    if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; break; fi
+    if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; last_transport=0; break; fi
     # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
+      last_transport=1
       echo "HINT: model '$m' failed (rc=$rc) on a transport/infra error; escalating to next in chain..." >&2
       continue
     fi
+    last_transport=0
     # Surface the task result to the orchestrator and stop retrying.
     cat "$cap" >&2
     break
   done
   rm -f "$cap" 2>/dev/null
   umask "$old_umask"
+  # Cross-lane self-heal: every model in the OpenRouter chain was exhausted on transport/
+  # availability grounds (e.g. 402 insufficient credit), and the ORIGINALLY requested model also
+  # has a Devin-lane sibling (glm today, see _devin_model_for). This is not a security downgrade
+  # (Devin has its own sandbox), so it heals by default -- opt out with OSRC_NO_CROSS_LANE=1 if
+  # you specifically want a hard OpenRouter-only failure (e.g. to test OpenRouter itself).
+  if [ "$rc" -ne 0 ] && [ "$last_transport" = "1" ] && [ "${OSRC_NO_CROSS_LANE:-0}" != "1" ]; then
+    local _dvm; _dvm="$(_devin_model_for "$MODEL")"
+    if [ -n "$_dvm" ]; then
+      printf '>>> [self-heal] OpenRouter exhausted for "%s" (transport/availability failure on every model tried); "%s" also runs on Devin -- retrying there instead. Set OSRC_NO_CROSS_LANE=1 to disable and fail on OpenRouter instead.\n' "$MODEL" "$_dvm" >&2
+      # Rewrite the model token in ORIGARGS so the Devin lane runs the Devin id, not the OR alias
+      # (same rewrite technique route_delegate's U6 reroute uses for the default-provider case).
+      local _i; for _i in "${!ORIGARGS[@]}"; do
+        case "${ORIGARGS[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIGARGS[@]} ] && ORIGARGS[$((_i+1))]="$_dvm" ;; esac
+      done
+      PROVIDER=devin delegate "$tier" "" ${ORIGARGS[@]+"${ORIGARGS[@]}"}; return $?
+    fi
+  fi
   return "$rc"
 }
 
