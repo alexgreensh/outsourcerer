@@ -5,7 +5,8 @@
 [![Version](https://img.shields.io/github/v/release/alexgreensh/outsourcerer?color=8A5CF6&label=version)](https://github.com/alexgreensh/outsourcerer/releases)
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
-![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Antigravity%20·%20Devin-8A5CF6)
+![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin-8A5CF6)
+![Windows: no WSL](https://img.shields.io/badge/Windows-no%20WSL%20needed-8A5CF6)
 
 ### Your frontier model is doing grep.
 
@@ -41,6 +42,26 @@ No flags to memorize, no routing tables. You say what you want; it checks what y
 <img src="readme-assets/convo-offload.svg" alt="Terminal: you ask to map auth; Outsourcerer offloads it to GLM-5.2 on OpenRouter and logs a real saving to your Tab" width="100%">
 
 If something isn't installed, it tells you the one command to fix it. You just say yes.
+
+---
+
+## You decide how much you drive
+
+The first time it wakes up in a session, Outsourcerer shows you what's ready, how much of your token budget is left, and asks one question: how do you want to drive?
+
+- **Auto-pilot.** It takes the wheel. Picks the engine, offloads the grind, conserves your limits, and just tells you what it did. For when you want the work done, not the decisions.
+- **You-drive.** Nothing moves without your say-so. It proposes, shows you the cost, and waits. For when the call is yours to own.
+- **Hybrid.** You agree once on what it can handle alone (tests, repo-mapping, the mechanical stuff), and it asks about everything else. The sweet spot most people settle into.
+
+Pick once and it remembers. Change your mind in plain language any time ("take the wheel", "ask me first"). And no mode is a trap: safety, cloud consent, and your sign-off on anything risky hold in all three. Beginners aren't dropped at a command line, they're handed a steering wheel and told what each pedal does.
+
+---
+
+## It watches your fuel gauge, so you never hit empty
+
+You know the feeling: 2pm, deep in a build, and your 5-hour limit taps out. Work stops.
+
+Outsourcerer reads your live usage and, the moment you cross into the danger zone, quietly shifts the heavy lifting off your main model onto a cheaper lane that's still full, and tells you why it did. Your best model stays sharp for the judgment calls instead of getting spent on grep. The wall stops being a surprise you slam into and becomes a corner the sorcerer already saw coming. Different setup, same care: no Devin? It leans on Codex. Only local models? It keeps everything on your machine. It conserves with whatever *you* actually have.
 
 ---
 
@@ -226,12 +247,11 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 <img src="readme-assets/section-roadmap.png" alt="The sorcerer facing a row of magic portals, two open and two still forming in the distance" width="100%">
 
-**More harnesses, coming soon.** Today it works across **Codex · Antigravity · Claude Code · Devin**. Next up:
+**More harnesses, coming soon.** Today it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
 
-- **Cursor** *(high priority)*, the harness most of you asked for first.
 - **Pi** and more harnesses as the frontier expands.
-- `insourcerer`, the reverse bridge, first-class.
-- An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling. *(Already shipped: parallel `fanout` in v0.2.0; the local Ollama/LM-Studio lane in v0.3.0; per-crew git-worktree isolation, agent-library routing, and machine-readable `status --json` in v0.3.1.)*
+- An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
+- *Already shipped:* the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, or Cursor too; parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 
