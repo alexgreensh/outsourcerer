@@ -3,6 +3,11 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.10] - 2026-07-16
+
+### Changed
+- **`session` reframed as live orchestrator supervision, not a spectator mode.** It's the one delegation mode with a real feedback loop: the orchestrator reads the delegate's work as it happens (`session read`) and steers it mid-flight (`session send`), switches its model, or stops it. Headless `run`/`bg`/`fanout` fire-and-forget and only surface progress markers or a final result. SKILL.md + mechanism now guide preferring `session` for long, complex, exploratory, or high-stakes delegations where catching a wrong turn early beats one blind shot (tmux → Mac/Linux; Windows falls back to `bg`+`status`).
+
 ## [0.4.9] - 2026-07-16
 
 Docs + contract polish (no code behavior change beyond the model-pick clarification).

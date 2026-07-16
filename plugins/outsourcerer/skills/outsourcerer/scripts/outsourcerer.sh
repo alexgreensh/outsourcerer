@@ -25,7 +25,9 @@
 #                                  Then: fanout status|wait|collect|list <gid>. See parallel-and-fanout.md.
 #   continue|cont [-m MODEL] "<task>"   Continue the most recent Devin conversation; '-m' SWITCHES
 #                                  the model mid-conversation with full context preserved.
-#   session start|send|read|model|stop  Persistent interactive Devin TUI via tmux (opt-in).
+#   session start|send|read|model|stop  Live supervision: the ORCHESTRATOR watches a delegate
+#                                  (session read) and steers it mid-flight (session send), switches
+#                                  its model, or stops it. A real feedback loop headless lacks. tmux.
 #                                  'model [NAME]' switches the live model mid-session (drives opt+m).
 #   parity                         Sync Claude skills + local MCP servers into Devin (skip cloud)
 #   image   [-m MODEL] "<prompt>" [out.png]   Text-to-image, backend AUTO-RESOLVED (never hardcode
@@ -109,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier (eng-plan-reviewer C1/H5). Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.9"
+OSRC_VERSION="0.4.10"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -4520,7 +4522,7 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
     ""|-h|--help|help)
-      sed -n '2,105p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'
       ;;
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;

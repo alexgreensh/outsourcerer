@@ -175,9 +175,13 @@ Pick a different model for a single call (flexible, overrides the default):
 
 **Always cd into the target project first** so Devin has the right repo context; the script runs in `$PWD`.
 
-## Interactive mode (opt-in, tmux)
+## Live supervision mode (`session`, tmux)
 
-**tmux is used by the `session` subcommand ONLY**, `run`/`research`/`edit`/`continue` are plain `devin -p`/`-c` (clean stdout, no tmux). Reach for `session` only when the user wants a live, persistent back-and-forth rather than fire-and-forget:
+**This is the orchestrator's feedback loop, not a human-spectator mode.** `session` lets YOU (Claude, the orchestrator) watch a delegate's actual work as it happens and steer it mid-flight: `session read` captures what the model is doing right now, `session send` course-corrects or answers its question, `session model` swaps its model, `session stop` ends it. Headless `run`/`bg`/`fanout` fire-and-forget, so they only ever surface progress markers or a final result, you never get to catch a wrong turn early or unblock a stuck delegate in the moment. That read→steer→read loop is precisely what headless delegations miss.
+
+**When to prefer it over headless:** long, complex, exploratory, or high-stakes delegations where an early correction saves a whole wasted run, or where the delegate is likely to need a clarifying answer. For short, well-scoped, obviously-correct work, headless is cheaper and fine.
+
+**tmux is used by the `session` subcommand ONLY** (`run`/`research`/`edit`/`continue` are plain `devin -p`/`-c`, no tmux), so `session` is Mac/Linux; on Windows fall back to `bg` + `status` polling. Provider-aware: `--provider devin|codex|cc session start`.
 
 **Separate tasks get separate sessions.** The tmux session name is derived from the working directory, so a `session start` in one repo can never clobber a concurrent live session in another (each `start` kills only its own name). `read`/`send`/`model`/`stop` run from the same `$PWD` and resolve the same session automatically. To run two isolated sessions in ONE directory, set `OUTSOURCERER_TMUX=<name>` explicitly for each. (`-p` modes were always isolated, each call is its own process.)
 ```

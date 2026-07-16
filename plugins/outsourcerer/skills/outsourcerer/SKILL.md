@@ -39,7 +39,9 @@ When the user hasn't named a model, **always run `advise`** — it classifies th
 
 ## The verbs (verb = permission mode)
 
-`run`/`explore` (read-only) · `research` (sandboxed exec, devin/codex) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox — sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs. `session` is live tmux steering. Full semantics + tiers: `references/mechanism.md`, `references/jobs-and-safety.md`.
+`run`/`explore` (read-only) · `research` (sandboxed exec, devin/codex) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox — sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs.
+
+**`session` = YOU supervise a delegate live (not a spectator mode).** It's a persistent tmux TUI you drive programmatically: `session read` shows the delegate's actual work as it happens, `session send "…"` steers it mid-flight, `session model <name>` switches its model, `session stop` ends it. This is the one mode with a real feedback loop — headless `run`/`bg`/`fanout` fire-and-forget (you get progress markers or a final result, never the chance to course-correct mid-run). **Prefer `session` for long, complex, exploratory, or high-stakes delegations** where catching a wrong turn early, answering the delegate's clarifying question in the moment, or iterating with it beats one blind shot. The read→steer→read loop is exactly what watched sessions get and headless ones miss. (tmux-based → Mac/Linux; on Windows fall back to `bg`+`status`.) Full semantics + tiers: `references/mechanism.md`, `references/jobs-and-safety.md`.
 
 ## Model alias → lane (the alias picks the lane; no `--provider` needed)
 
