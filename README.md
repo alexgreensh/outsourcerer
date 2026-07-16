@@ -4,7 +4,7 @@
 
 [![Version](https://img.shields.io/github/v/release/alexgreensh/outsourcerer?color=8A5CF6&label=version)](https://github.com/alexgreensh/outsourcerer/releases)
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
 ![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Antigravity%20·%20Devin-8A5CF6)
 
 ### Your frontier model is doing grep.
@@ -234,6 +234,12 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling. *(Already shipped: parallel `fanout` in v0.2.0; the local Ollama/LM-Studio lane in v0.3.0; per-crew git-worktree isolation, agent-library routing, and machine-readable `status --json` in v0.3.1.)*
 
 Issues and PRs welcome.
+
+## License
+
+Outsourcerer is available under the [PolyForm Noncommercial 1.0.0](LICENSE)
+license. Commercial use requires a separate license from Alex Greenshpun. Contact
+[me@alexgreenshpun.com](mailto:me@alexgreenshpun.com) to discuss commercial licensing.
 
 ---
 
