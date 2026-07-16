@@ -76,6 +76,8 @@ You shouldn't have to memorize which model is best at what, or keep up with a le
 
 That means a frontier-grade answer on a budget lane when the cheap model genuinely clears the bar, and a premium model only when the task truly earns it. It shows you the score and the reason it chose what it chose, so the pick is never a black box, and you can always overrule it. When it can't reach the live boards, it falls back to a built-in capability map, so the recommendation is never worse than a good default.
 
+This is the same brain your **copilot** uses to choose. In auto-pilot it scores the models, takes the best value, and just proceeds (telling you which and why). In you-drive or hybrid it scores them the same way, then shows you the pick and waits for your nod. The benchmarks drive the choice in every mode; the mode only decides whether it asks first.
+
 ---
 
 ## Advisors: bring the big brains in, several at once
