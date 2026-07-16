@@ -3,6 +3,15 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.9] - 2026-07-16
+
+Docs + contract polish (no code behavior change beyond the model-pick clarification).
+
+### Changed
+- The copilot's model choice is now explicitly benchmark-driven in **every** mode: auto-pilot runs `advise` and proceeds on the best-value winner; you-drive/hybrid score the same way then ask first. The mode only decides whether it asks, not whether benchmarks drive the pick.
+- SKILL.md trimmed to 80 lines with a ~74-token description and proper progressive disclosure (mechanism detail moved to `references/`; the duplicated advisory section, verb table, and failure table collapsed to pointers).
+- README: benefit-led sections for the copilot (driving modes + auto-conservation) and the benchmark model advisory; macOS/Linux/Windows + copilot + advisory badges; roadmap refreshed for the shipped lanes.
+
 ## [0.4.8] - 2026-07-16
 
 Copilot + platform-parity release (one small bump from 0.4.7). The skill now greets you each session, shows your live limits, hands you the wheel, conserves tokens on its own when the session runs hot, works on Windows without WSL, and adds Droid/Cursor/claudex lanes. Reviewed by a 5-agent Opus gauntlet before release (0 critical, 0 high).
