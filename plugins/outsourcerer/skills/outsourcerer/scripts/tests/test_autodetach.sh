@@ -352,7 +352,7 @@ chmod +x "$SABOTAGED"
 
 # Verify the sabotage worked: the `if _autodetach_should` call is GONE from route_delegate.
 SAB_RD_START=$(grep -n '^route_delegate()' "$SABOTAGED" | head -1 | cut -d: -f1)
-SAB_HAS_AUTODETACH=$(awk -v s="$SAB_RD_START" 'NR>s && NR<s+100 && /if _autodetach_should/{print NR; exit}' "$SABOTAGED")
+SAB_HAS_AUTODETACH=$(awk -v s="$SAB_RD_START" 'NR>s && NR<s+200 && /if _autodetach_should/{print NR; exit}' "$SABOTAGED")
 if [ -n "$SAB_HAS_AUTODETACH" ]; then
   no "negative control: sabotage failed (auto-detach branch still present in route_delegate)"
 else
@@ -402,7 +402,7 @@ fi
 
 # Also verify the REAL engine still HAS the branch (sabotage didn't affect the original).
 REAL_RD_START=$(grep -n '^route_delegate()' "$ENGINE" | head -1 | cut -d: -f1)
-REAL_HAS_AUTODETACH=$(awk -v s="$REAL_RD_START" 'NR>s && NR<s+100 && /if _autodetach_should/{print NR; exit}' "$ENGINE")
+REAL_HAS_AUTODETACH=$(awk -v s="$REAL_RD_START" 'NR>s && NR<s+200 && /if _autodetach_should/{print NR; exit}' "$ENGINE")
 if [ -n "$REAL_HAS_AUTODETACH" ]; then
   ok "negative control: real engine still has the auto-detach branch (unaffected by sabotage)"
 else

@@ -3,6 +3,12 @@ set -euo pipefail
 
 SK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../outsourcerer.sh"
 
+# ISOLATE persistent state (v0.4.8 remembered consent): never read/pollute the user's
+# real ~/.outsourcerer — a stored grant there would make every refusal assertion fail.
+export OSRC_HOME="${TMPDIR:-/tmp}/osrc-covtest-home-$$"
+mkdir -p "$OSRC_HOME"
+trap 'rm -rf "$OSRC_HOME"' EXIT
+
 PASS=0
 FAIL=0
 

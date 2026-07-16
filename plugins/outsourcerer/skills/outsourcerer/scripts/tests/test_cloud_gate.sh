@@ -8,6 +8,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 
+# ISOLATE persistent state: consent is remembered in $OSRC_HOME/cloud-consent since v0.4.8,
+# so the suite must never read (or pollute) the user's real ~/.outsourcerer. Export BEFORE
+# sourcing — OSRC_CONSENT_FILE is derived from OSRC_HOME at source time.
+export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-home-$$"
+mkdir -p "$OSRC_HOME"
+
 # Load the script's functions. main "$@" runs with no args (prints help, returns 0);
 # all gate functions are then defined in this shell. set -u is inherited from the
 # sourced file, so keep every expansion default-safe.
@@ -16,7 +22,7 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
 bad() { echo FAIL: $1; fail=$((fail+1)); }
-cleanup() { rm -rf "$TMP"; }
+cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 
 TMP="$(mktemp -d)"
@@ -24,12 +30,12 @@ TMP="$(mktemp -d)"
 # --- Scenario 1: local lanes classified non-cloud; skip the gate entirely. ---
 if ! _is_cloud_lane "local" >/dev/null 2>&1; then ok "local lane classified non-cloud"; else bad "local lane mis-classified as cloud"; fi
 if ! _is_cloud_lane "ollama" >/dev/null 2>&1 && ! _is_cloud_lane "lmstudio" >/dev/null 2>&1; then ok "ollama/lmstudio classified non-cloud"; else bad "ollama/lmstudio mis-classified as cloud"; fi
-out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_disclose "local" "llama3" "do thing" ) 2>&1 )"
+out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _cloud_disclose "local" "llama3" "do thing" ) 2>&1 )"
 [ $? -eq 0 ] && ok "non-cloud _cloud_disclose returns 0" || bad "non-cloud _cloud_disclose nonzero"
 echo "$out" | grep -qi 'CLOUD' && bad "non-cloud lane printed a cloud disclosure" || ok "non-cloud lane prints no disclosure"
 
 # --- Scenario 2: cloud lane, non-interactive, no ack => fail-closed REFUSE. ---
-out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_disclose "ccor" "gpt-4o" "summarize repo" ) </dev/null 2>&1 )"; rc=$?
+out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _cloud_disclose "ccor" "gpt-4o" "summarize repo" ) </dev/null 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "cloud no-ack non-interactive REFUSES (rc=$rc)" || bad "cloud no-ack non-interactive proceeded (rc=$rc)"
 echo "$out" | grep -qi 'CLOUD GATE' && ok "refusal names CLOUD GATE" || bad "refusal missing CLOUD GATE marker"
 
@@ -42,14 +48,14 @@ echo "$out" | grep -q 'repo content LEAVES' && ok "disclosure states data leaves
 # --- Scenario 4: a real .env in cwd scope => hard die with the path, ack or not. ---
 mkdir -p "$TMP/envscope"
 printf 'OPENROUTER_API_KEY=sk-XXXX\n' > "$TMP/envscope/.env"
-out="$( ( cd "$TMP/envscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
+out="$( ( cd "$TMP/envscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "real .env in scope hard-dies (rc=$rc)" || bad "real .env in scope did NOT die"
 echo "$out" | grep -q "$TMP/envscope/.env" && ok "die names the credential path" || bad "die omitted credential path"
 
 # --- Scenario 4b: a NESTED credential file (not at PWD root) is also caught by the deep scan. ---
 mkdir -p "$TMP/deepscope/services/prod"
 printf 'AWS_SECRET_ACCESS_KEY=xxxx\n' > "$TMP/deepscope/services/prod/.env"
-out="$( ( cd "$TMP/deepscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
+out="$( ( cd "$TMP/deepscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "nested services/prod/.env hard-dies" || bad "nested .env NOT caught (deep scan failed)"
 echo "$out" | grep -q "deepscope/services/prod/.env" && ok "die names the nested credential path" || bad "die omitted nested path"
 
@@ -98,11 +104,11 @@ echo "$out" | grep -qi 'values redacted' && ok "disclosure states values redacte
 
 # --- Scenario 10: bg/fanout cloud gate acquired at launch, not in the detached (no-TTY) child. ---
 PROVIDER=devin
-( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _bg_cloud_preack run -m glm "task" </dev/null >/dev/null 2>&1 )
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _bg_cloud_preack run -m glm "task" </dev/null >/dev/null 2>&1 )
 [ $? -ne 0 ] && ok "cloud bg preack REFUSES non-interactive without ack" || bad "cloud bg preack proceeded without ack"
 ( export OSRC_CLOUD_ACK=1; _bg_cloud_preack run -m glm "task" </dev/null >/dev/null 2>&1 )
 [ $? -eq 0 ] && ok "cloud bg preack passes with OSRC_CLOUD_ACK=1" || bad "cloud bg preack blocked despite ack"
-( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; PROVIDER=local; _bg_cloud_preack run -m ollama:llama3 "task" </dev/null >/dev/null 2>&1 )
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; PROVIDER=local; _bg_cloud_preack run -m ollama:llama3 "task" </dev/null >/dev/null 2>&1 )
 [ $? -eq 0 ] && ok "local-lane bg preack exempt (no ack needed)" || bad "local-lane bg preack wrongly refused"
 if grep -q '_bg_cloud_preack "\$@"' "$SRC"; then ok "preack wired into _bg_launch"; else bad "preack not wired into _bg_launch"; fi
 
@@ -112,22 +118,22 @@ if grep -q '_bg_cloud_preack "\$@"' "$SRC"; then ok "preack wired into _bg_launc
 _bg_launch() { echo REACHED_LAUNCH > "$TMP/launched"; echo "stubid-123"; }
 PROVIDER=devin
 rm -f "$TMP/launched"
-( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; cmd_bg run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
+( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
 [ "$rc" -ne 0 ] && ok "cmd_bg refused cloud gate returns nonzero (no fake success)" || bad "cmd_bg exited 0 despite refusal"
 [ ! -f "$TMP/launched" ] && ok "cmd_bg did NOT reach _bg_launch after refusal" || bad "cmd_bg launched a job despite refusal"
 rm -f "$TMP/launched"
-out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; cmd_bg run --cloud-ack -m glm "task" </dev/null 2>/dev/null )"; rc=$?
+out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack -m glm "task" </dev/null 2>/dev/null )"; rc=$?
 { [ "$rc" -eq 0 ] && [ -f "$TMP/launched" ] && printf '%s' "$out" | grep -q 'stubid-123'; } && ok "cmd_bg --cloud-ack proceeds to launch and prints the job id" || bad "cmd_bg --cloud-ack did not launch (rc=$rc)"
 
 # --- Scenario 12: _bg_cloud_preack honors --cloud-ack only among LEADING flags, never a
 #     positional task that merely equals "--cloud-ack" (passed after `--`). ---
 PROVIDER=devin
-( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _bg_cloud_preack run -m glm --cloud-ack "task" </dev/null >/dev/null 2>&1 )
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _bg_cloud_preack run -m glm --cloud-ack "task" </dev/null >/dev/null 2>&1 )
 [ $? -eq 0 ] && ok "leading --cloud-ack still acks the bg/fanout preack" || bad "leading --cloud-ack no longer acks"
-( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _bg_cloud_preack run -m glm -- --cloud-ack </dev/null >/dev/null 2>&1 )
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _bg_cloud_preack run -m glm -- --cloud-ack </dev/null >/dev/null 2>&1 )
 [ $? -ne 0 ] && ok "a task literally '--cloud-ack' after '--' does NOT self-ack (still refuses)" || bad "positional --cloud-ack after -- bypassed the gate"
 # the -m value must not be mistaken for the task, and a normal cloud job still refuses without ack
-( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _bg_cloud_preack run -m glm "just do the thing" </dev/null >/dev/null 2>&1 )
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _bg_cloud_preack run -m glm "just do the thing" </dev/null >/dev/null 2>&1 )
 [ $? -ne 0 ] && ok "ordinary cloud bg job still refuses without ack" || bad "cloud job proceeded without ack"
 
 # --- Scenario 13: route_delegate must call _cloud_disclose UNCONDITIONALLY.
@@ -140,14 +146,14 @@ echo "$ctx" | grep -q 'OSRC_CLOUD_ACKED.*!=.*1' && bad "_cloud_disclose STILL gu
 # --- Scenario 14: a bogus OSRC_SECRET_SCAN_DEPTH must NOT fail the deep scan open. ---
 mkdir -p "$TMP/bogusdepth/nested"
 printf 'OPENROUTER_API_KEY=sk-XXXX\n' > "$TMP/bogusdepth/nested/.env"
-out="$( ( cd "$TMP/bogusdepth"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1 OSRC_SECRET_SCAN_DEPTH=bogus _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
+out="$( ( cd "$TMP/bogusdepth"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1 OSRC_SECRET_SCAN_DEPTH=bogus _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "bogus scan depth still hard-dies on nested .env (no fail-open)" || bad "bogus scan depth FAILED OPEN"
 rm -rf "$TMP/bogusdepth"
 
 # --- Scenario 14b: a routine unreadable (mode-000) subdir is permission NOISE, not a scan
 #     failure -- the deep scan must tolerate it and PROCEED (same-privilege), not fail-closed. ---
 mkdir -p "$TMP/permnoise/src" "$TMP/permnoise/locked"; echo "code" > "$TMP/permnoise/src/a.py"; chmod 000 "$TMP/permnoise/locked"
-( cd "$TMP/permnoise"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1 _cloud_disclose "ccor" "gpt-4o" "task" ) >/dev/null 2>&1; rc=$?
+( cd "$TMP/permnoise"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1 _cloud_disclose "ccor" "gpt-4o" "task" ) >/dev/null 2>&1; rc=$?
 chmod 755 "$TMP/permnoise/locked" 2>/dev/null
 [ $rc -eq 0 ] && ok "mode-000 subdir tolerated as permission noise (no wrong fail-closed)" || bad "routine unreadable dir wrongly refused a normal repo"
 rm -rf "$TMP/permnoise"
@@ -157,5 +163,25 @@ grep -q 'supervisor not executable' "$SRC" && ok "_bg_launch validates SCRIPT_PA
 grep -q 'capture dir not writable' "$SRC" && ok "delegate_codex refuses on non-writable capture dir" || bad "capdir writable check missing"
 
 echo
+# --- Scenario 16: PERSISTENT CONSENT (v0.4.8). A remembered grant replaces the per-run ack,
+# NEVER the secret scan; OSRC_CLOUD_ACK=0 overrides the stored grant for one run. ---
+rm -f "$OSRC_HOME/cloud-consent"
+( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_consent_persist; _cloud_disclose "ccor" "gpt-4o" "task" </dev/null >/dev/null 2>&1 ); rc=$?
+[ $rc -eq 0 ] && ok "remembered consent lets non-interactive cloud run proceed" || bad "remembered consent ignored (rc=$rc)"
+( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=0 _cloud_disclose "ccor" "gpt-4o" "task" </dev/null >/dev/null 2>&1 ); rc=$?
+[ $rc -ne 0 ] && ok "OSRC_CLOUD_ACK=0 overrides the stored grant (refuses)" || bad "OSRC_CLOUD_ACK=0 did not override stored grant"
+mkdir -p "$TMP/consentenv"; echo "SECRET=x" > "$TMP/consentenv/.env"
+out="$( ( cd "$TMP/consentenv"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
+{ [ $rc -ne 0 ] && echo "$out" | grep -q "credential file"; } && ok "stored grant NEVER skips the secret-scan hard-block" || bad "stored grant skipped the secret scan (rc=$rc)"
+rm -f "$OSRC_HOME/cloud-consent"
+( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_consent_persist; _bg_cloud_preack run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
+[ $rc -eq 0 ] && ok "bg preack honors remembered consent" || bad "bg preack ignored remembered consent (rc=$rc)"
+rm -f "$OSRC_HOME/cloud-consent"
+out="$(cmd_consent status 2>&1)"; echo "$out" | grep -qi "not granted" && ok "consent status reports not-granted" || bad "consent status wrong when absent: $out"
+cmd_consent grant >/dev/null 2>&1
+[ -f "$OSRC_HOME/cloud-consent" ] && ok "consent grant writes the consent file" || bad "consent grant wrote nothing"
+cmd_consent revoke >/dev/null 2>&1
+[ ! -f "$OSRC_HOME/cloud-consent" ] && ok "consent revoke removes the consent file" || bad "consent revoke left the file"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

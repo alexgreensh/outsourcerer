@@ -34,7 +34,9 @@ parse_model -m glm --tier capable --with skills=x --allow-downgrade --cloud-ack 
 [ "$(_devin_model_for glm)" = "glm-5.2" ] && ok "glm -> Devin sibling glm-5.2" || bad "glm sibling wrong"
 [ "$(_devin_model_for z-ai/glm-5.2)" = "glm-5.2" ] && ok "z-ai/glm-5.2 -> Devin sibling" || bad "OR-id sibling wrong"
 [ -z "$(_devin_model_for hy3)" ] && ok "hy3 has no Devin sibling (OR-only)" || bad "hy3 wrongly mapped"
-[ -z "$(_devin_model_for deepseek)" ] && ok "deepseek has no Devin sibling (OR-only)" || bad "deepseek wrongly mapped"
+# deepseek became dual-lane when Devin added deepseek-v4-pro (verified via the live model probe, 2026-07).
+[ "$(_devin_model_for deepseek)" = "deepseek-v4-pro" ] && ok "deepseek maps to Devin sibling deepseek-v4-pro" || bad "deepseek Devin sibling wrong: '$(_devin_model_for deepseek)'"
+[ -z "$(_devin_model_for hy3)" ] && ok "hy3 has no Devin sibling (OR-only)" || bad "hy3 wrongly mapped"
 [ -z "$(_devin_model_for sol)" ] && ok "sol (single-lane) no Devin sibling" || bad "sol wrongly mapped"
 
 # --- Scenario 4: routing wire-in present (availability-aware reroute + ORIG model rewrite). ---

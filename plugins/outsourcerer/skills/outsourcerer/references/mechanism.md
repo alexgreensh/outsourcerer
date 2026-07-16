@@ -59,16 +59,25 @@ Two shapes of parallelism, both first-class:
 - A persistent interactive TUI is available via tmux (opt-in), for genuinely back-and-forth *steering*,
   not for parallelism or tool access (headless already has both, see the mode note in `SKILL.md`).
 
-## Providers (offload backend), `--provider devin | cc | codex`
+## Providers (offload backend), `--provider devin | cc | codex | droid | cursor | local`
 
-The offload backend is selectable. Prepend `--provider NAME` before any one-shot subcommand
-(`run`/`research`/`edit`/`yolo`), or set `OUTSOURCERER_PROVIDER`. Default is `devin` (unchanged).
+The offload backend is selectable. Pass `--provider NAME` anywhere (before or after the
+subcommand), or set `OUTSOURCERER_PROVIDER`. Default is `devin` (unchanged).
 
 | Provider | Engine | Protocol | Inherits | Sandbox | Best for |
 |---|---|---|---|---|---|
 | `devin` (default) | Devin CLI |, | Devin skills/MCP (via `parity`) | OS sandbox (`research`) | delegated fan-out with Devin's own subagents |
 | `cc` | `claude -p` → OpenRouter | Anthropic-compat (1 hop) | **your Claude skills/MCP/Task subagents, free** | none (CC permission modes only) | offload that must use your exact Claude capabilities |
 | `codex` | `codex exec` → OpenRouter | native OpenAI Responses API (0 hops) | Codex's AGENTS.md + its MCP | OS sandbox (`--sandbox`) | cleanest tool-calling on cheap OpenAI-native models |
+| `droid` | Factory `droid exec` | droid's own | droid's AGENTS.md + the user's `~/.factory/settings.json` (incl. **BYOK customModels**) | `--auto low/medium/high` autonomy levels | users who already live in droid with their own free/cheap API lanes configured |
+| `cursor` | `cursor-agent -p` | cursor's own | the user's Cursor rules/AGENTS.md + account models | `--sandbox enabled` (research verb) | users on a Cursor subscription (CLI shares its credit pool) |
+| `claudex` | `claude -p` → user's local CLIProxyAPI | Anthropic-compat `/v1/messages` | Claude Code harness UX (strict MCP isolation) | none (CC permission modes) | GPT-5.6 Sol/Terra inside the Claude harness; DETECT-ONLY, see `lanes-and-models.md` |
+
+**Engine lanes (`droid`/`cursor`) pass `-m` through VERBATIM** — the engine's own catalog (incl.
+user-configured BYOK models) decides what a name means; the alias table never rewrites it. No `-m`
+= the engine's configured default. Verb mapping: `run` = read-only default, `edit` = `--auto medium`
+/ `--force`, `yolo` = `--auto high` / `--force --sandbox disabled`. `--effort` maps natively to
+droid's `-r`; advisory on cursor.
 
 **OpenRouter lanes (`cc`/`codex`):** no proxy, no install, OpenRouter natively serves both the
 Anthropic Messages API and the OpenAI Responses API. They read `OPENROUTER_API_KEY` from `~/.env`.

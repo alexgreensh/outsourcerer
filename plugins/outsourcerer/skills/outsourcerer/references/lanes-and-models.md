@@ -28,6 +28,57 @@ ChatGPT / Claude subscription auth, so they are premium and are **never** auto-e
 | `deepseek` | `deepseek/deepseek-v4-pro` | OpenRouter | **capable** | strongest cheap lane, pro reasoning flagship |
 | any other OpenRouter id | itself | OpenRouter | by cached price, then name | see tiers below |
 | `glm-5.2` under `--provider devin` | Devin's id | devin | table/name | Devin path unchanged |
+| `swe` / `swe-1.7` | `swe-1.7` | devin | **capable** | Devin's own SWE agent model (open-weight/free-lane class) |
+| `swe-1.7-lightning` | itself | devin | mid | faster/cheaper SWE variant |
+| `kimi` | `kimi-k2.7` | devin | **capable** | open-weight lane on Devin |
+
+**Dual-lane self-heal:** `glm` and `deepseek` exist on BOTH OpenRouter and Devin. With the default
+provider, they route to Devin (which has quota) instead of hard-failing when the OpenRouter key is
+out of credits; force OpenRouter with `--provider cc|codex`. `hy3` is OpenRouter-only.
+
+## Claudex lane: GPT-5.6 Sol/Terra INSIDE the Claude Code harness (`--provider claudex`)
+
+The community "claudex" pattern (Theo's recipe): more and more users treat the **model and the
+harness as separate choices** — Claude Code's harness UX driving a ChatGPT-subscription model.
+This lane does it supervised: `--provider claudex run [-m sol|terra|luna] "task"` runs
+`claude -p --model gpt-5.6-*` with `ANTHROPIC_BASE_URL` pointed at the user's **locally-running
+CLIProxyAPI** (default `http://127.0.0.1:8317`, token = the proxy's own `api-keys` entry,
+auto-parsed from `~/.cli-proxy-api/config.yaml`; override with `OSRC_CLAUDEX_URL`/`OSRC_CLAUDEX_TOKEN`).
+
+- **Detect-only, by policy.** Outsourcerer never installs or launches the proxy. The user installs
+  and audits it themselves (https://github.com/router-for-me/CLIProxyAPI, then
+  `cli-proxy-api --codex-login`). Our own supply-chain audit of that repo is in the project
+  findings; treat release binaries with the usual skepticism and prefer building from source.
+- **Disclosures the lane prints every run:** unofficial community bridge; the upstream Codex
+  endpoint is internal/not guaranteed; the proxy has no rate limiting, so heavy unthrottled use
+  risks provider-side account limits. The official, ToS-clean alternative for Codex-in-Claude is
+  OpenAI's `codex-plugin-cc` plugin.
+- **Claude-sub models are refused here** (`-m fable --provider claudex` dies): routing Claude OAuth
+  through a third-party proxy breaks Anthropic's usage policy; the claude-native lane already
+  serves those models first-class.
+- Verbs map like claude-native (`run` read-only, `edit` acceptEdits, `yolo` bypassPermissions,
+  `research` refused — no OS sandbox); the run VERIFIES the actual model via `modelUsage`.
+- **codex CLI keeps its jobs**: gpt-image generation and the codex-native/OpenRouter lanes are
+  unchanged; claudex is an additional road, not a replacement.
+
+## Engine lanes: droid (Factory) + cursor — the user's OWN tools
+
+`--provider droid` / `--provider cursor` delegate through the agent CLI the user already runs, with
+the models THEY configured there. This is the "work with MY tools" lane: someone with free/cheap
+BYOK API lanes set up in droid (`~/.factory/settings.json` → `customModels`) or a Cursor
+subscription gets full outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) over their
+existing setup — zero new keys, zero migration.
+
+- `-m <name>` passes through **verbatim** to the engine; the alias table never rewrites it. No
+  `-m` = the engine's configured default.
+- Verbs map to the engine's own autonomy: droid `run`=read-only, `edit`/`research`=`--auto medium`,
+  `yolo`=`--auto high`; cursor `run`=propose-only, `edit`=`--force`,
+  `research`=`--force --sandbox enabled`, `yolo`=`--force --sandbox disabled`.
+- `--effort` is native on droid (`droid exec -r`), advisory on cursor.
+- Billing: droid = the user's Factory plan or their BYOK keys; cursor = their Cursor subscription
+  credits. Both are cloud lanes → full cloud gate + secret-scan apply.
+- Auth: `droid` login once interactively (or `FACTORY_API_KEY`); `cursor-agent login` once (or
+  `CURSOR_API_KEY`). `doctor` shows install/auth state for both.
 
 **Guardrails:** `gpt-5.6-*` (Sol/Terra/Luna) are ChatGPT-backend-only and 400 through OpenRouter,
 so `-m sol --provider cc` **hard-dies** with the reason (drop `--provider`; the codex-native lane

@@ -3,6 +3,32 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.8] - 2026-07-16
+
+Copilot + platform-parity release (one small bump from 0.4.7). The skill now greets you each session, shows your live limits, hands you the wheel, conserves tokens on its own when the session runs hot, works on Windows without WSL, and adds Droid/Cursor/claudex lanes. Reviewed by a 5-agent Opus gauntlet before release (0 critical, 0 high).
+
+### Added
+- **Session-start handshake (`brief`) + interactive-by-default.** On activation the skill shows ready lanes + live session limits + a conservation recommendation + driving mode, and presents a three-way menu when no mode is set (instead of silently running CLI). Read-only, never prompts — safe in bg/fanout/CI.
+- **Driving modes (`mode auto|manual|hybrid`, remembered once).** Auto-pilot (skill picks lane/model + conserves), you-drive (never delegates unless asked), hybrid (agree once which task-types auto-delegate). Persisted atomically, symlink-refused, A/B/C aliases.
+- **Live limit awareness + auto-conservation.** Reads the Claude 5h/7d window (via the new universal `tap`, or token-optimizer if present) and the ChatGPT/Codex plan. Crossing the conserve line (default 50%, `OSRC_CONSERVE_THRESHOLD`) routes grind to the cheapest ready lane: local > Devin GLM/SWE > keyless Gemini > Codex Sol/Terra (if headroom) > OpenRouter (if funded). Routing-only — never weakens safety/consent/quality.
+- **`tap` — universal limit capture without token-optimizer.** `tap install` wires a passthrough into Claude Code's statusLine, saving live 5h/7d limits; `tap uninstall` restores the original.
+- **One-time cloud consent** (`consent status|grant|revoke`) — the disclosure gate asks once, ever; the per-delegation secret-scan hard-block is never skippable.
+- **Windows support without WSL** — runs under Git Bash; `outsourcerer.cmd` / `.ps1` launchers; platform-aware doctor; `pgrep`/`ps` fallbacks.
+- **Engine lanes**: `--provider droid` (Factory, BYOK customModels), `--provider cursor` (subscription), `--provider claudex` (GPT-5.6 Sol/Terra inside the Claude Code harness via a user-run CLIProxyAPI, detect-only). Reverse bridges `parity-droid` / `parity-cursor`.
+- **Devin aliases** swe/swe-1.7/kimi; deepseek is dual-lane and self-heals to Devin when the OpenRouter key is exhausted.
+
+### Fixed
+- Flag placement (`--provider`/`--cloud-ack`) accepted anywhere; `bg` no longer requires an explicit verb.
+- State-home writability preflight fails fast with the exact fix instead of launching jobs with nowhere to write.
+
+### Hardened (5-agent Opus review)
+- `run`/`edit`/`yolo` with no task gave a raw unbound-variable crash on bash 3.2 — now a clean message.
+- Codex 5h/weekly windows bucketed by `window_minutes`, not slot position (they were mislabeled).
+- `tap`: exempt from the write-preflight so a sandbox can't kill your statusline; whole-object stash/restore; freshness gate fails closed; clears its frozen capture on uninstall; Windows routes through the `.cmd` launcher.
+- `brief` caps its Devin/OpenRouter probes with a portable timeout so the handshake can't stall.
+- `_descendants` reads PID/PPID by header column (process-tree kill works on MSYS `ps`).
+- State home is chmod 700; cloud-consent refuses symlinks; `mode` rejects trailing args; limits render in plain English.
+
 ## [0.4.7] - 2026-07-15
 
 Torture-room hardening: 16-agent security/reliability gauntlet findings applied. No breaking changes. All 21 conformance tests + 62 advise tests pass.

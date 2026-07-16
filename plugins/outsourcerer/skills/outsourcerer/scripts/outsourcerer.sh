@@ -3,7 +3,11 @@
 # Self-contained helper for the `outsourcerer` Claude Code skill.
 #
 # Subcommands:
-#   doctor                         Preflight: devin installed? logged in? default model live?
+#   doctor                         Preflight: platform, state-home writability, lanes, auth, consent.
+#   brief                          Session-start handshake: ready lanes, live limits, conserve rec, mode.
+#   mode [status|auto|manual|hybrid|reset]   The copilot driving mode (persisted, remembered once).
+#   consent status|grant|revoke    Cloud-disclosure consent, remembered ONCE in ~/.outsourcerer
+#                                  (the secret-scan still runs on every delegation regardless).
 #   models                         Print the LIVE list of selectable Devin models (+ free-lane heuristic)
 #   run     [-m MODEL] "<task>"    One-shot delegation (permission: auto / read-only auto-approve)
 #   explore [-m MODEL] "<task>"    Alias for run, read-only fan-out (NOTE: 'auto' blocks tool EXEC)
@@ -56,13 +60,25 @@
 #   with OSRC_LOCAL_URL). Runs on YOUR hardware, nothing leaves the machine -> the privacy lane for
 #   sensitive IP. TEXT delegation (no autonomous tool exec; see references/lanes-and-models.md).
 #
-# PROVIDER (offload backend), prepend `--provider NAME` before the subcommand, or set
+# PROVIDER (offload backend): `--provider NAME` anywhere (before OR after the subcommand), or set
 # OUTSOURCERER_PROVIDER. Backends:
 #   devin  (default)  Devin CLI, sandboxed exec + Devin's own subagent fan-out.
 #   cc                Claude Code -> OpenRouter via ANTHROPIC_BASE_URL (Anthropic-compat, 1 hop).
 #                     Inherits YOUR Claude skills / MCP / Task subagents for free.
 #   codex             Codex `exec` -> OpenRouter (native OpenAI Responses API, 0 hops; best tool
 #                     fidelity). Runs in Codex's own AGENTS.md + MCP ecosystem, not Claude's.
+#   droid             Factory Droid CLI (`droid exec`). YOUR configured models pass through
+#                     verbatim, incl. free/cheap BYOK customModels in ~/.factory/settings.json.
+#   cursor            Cursor CLI (`cursor-agent -p`). Bills your Cursor subscription credits.
+#   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
+#                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
+#   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
+# Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor teach
+# that host agent to drive outsourcerer, so its users reach Devin/OpenRouter/Claude/local too.
+#
+# WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
+# outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
+# Everything works except tmux `session` mode (bg/fanout cover the same ground, supervised).
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
 # deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers.
@@ -93,10 +109,16 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier (eng-plan-reviewer C1/H5). Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.7"
-
-OSRC_VERSION="0.4.7"
+OSRC_VERSION="0.4.8"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
+
+# ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
+# required: everything except tmux `session` mode works there. See doctor's platform section.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) OSRC_PLATFORM="windows" ;;
+  Darwin)               OSRC_PLATFORM="mac" ;;
+  *)                    OSRC_PLATFORM="linux" ;;
+esac
 
 # Offload backend: devin (default) | cc (Claude Code->OpenRouter) | codex (Codex->OpenRouter).
 PROVIDER="${OUTSOURCERER_PROVIDER:-devin}"
@@ -119,6 +141,111 @@ OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
 trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr."* 2>/dev/null; fi' EXIT
+# ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
+# (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
+# lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One
+# denied write must be an INSTANT actionable error, never a silent half-run.
+_state_home_preflight() {
+  mkdir -p "$OSRC_HOME" 2>/dev/null
+  # Lock down to 0700: cloud-consent / mode / ledger / rate-limits live here and must not be
+  # world-readable on a shared host (a permissive default umask would leave them 0755).
+  chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  if ( : > "$OSRC_HOME/.wtest" ) 2>/dev/null; then rm -f "$OSRC_HOME/.wtest" 2>/dev/null; return 0; fi
+  die "state home $OSRC_HOME is NOT WRITABLE (sandboxed shell?). Jobs/ledger/model-cache live there, so nothing can run.
+  Fix ONE of:
+    1) allow writes to ~/.outsourcerer in your harness sandbox (Claude Code: settings.json -> sandbox allowWrite; or run this one command with the sandbox disabled),
+    2) point OSRC_HOME at a writable dir:  OSRC_HOME=\$PWD/.outsourcerer $0 ...
+  Then re-run the same command."
+}
+
+# ---- persistent cloud consent. The cloud-disclosure gate used to demand --cloud-ack / OSRC_CLOUD_ACK=1
+# on EVERY non-interactive run: audits showed 1-2 wasted attempts per session on a gate the user had
+# already accepted before. Consent is now remembered ONCE (any explicit ack persists it) in
+# $OSRC_HOME/cloud-consent. SECURITY: the per-run secret-scan hard-block is NEVER skipped -- persisted
+# consent only replaces the ack prompt/refusal, exactly like OSRC_CLOUD_ACK=1 does. Revoke anytime:
+# `consent revoke`, or force a one-run refusal with OSRC_CLOUD_ACK=0.
+OSRC_CONSENT_FILE="$OSRC_HOME/cloud-consent"
+_cloud_consent_ok() {
+  [ "${OSRC_CLOUD_ACK:-}" = "0" ] && return 1   # explicit per-run opt-out beats the stored grant
+  [ -L "$OSRC_CONSENT_FILE" ] && return 1        # refuse a symlinked consent file (defense-in-depth)
+  [ -f "$OSRC_CONSENT_FILE" ]
+}
+_cloud_consent_persist() {
+  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  [ -L "$OSRC_CONSENT_FILE" ] && rm -f "$OSRC_CONSENT_FILE" 2>/dev/null   # never write through a planted symlink
+  { printf 'granted-at: %s\nby: %s\nscope: cloud-disclosure ack (secret-scan still runs per delegation)\nrevoke: %s consent revoke\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null)" "${USER:-unknown}" "$0" > "$OSRC_CONSENT_FILE"; } 2>/dev/null || true
+}
+cmd_consent() {
+  case "${1:-status}" in
+    status) if [ -f "$OSRC_CONSENT_FILE" ]; then echo "cloud consent: GRANTED (remembered)"; sed 's/^/  /' "$OSRC_CONSENT_FILE" 2>/dev/null
+            else echo "cloud consent: not granted. First cloud delegation will ask once (or pass --cloud-ack) and be remembered."; fi ;;
+    grant)  _cloud_consent_persist; echo "cloud consent: granted + remembered in $OSRC_CONSENT_FILE (secret-scan still runs on every delegation). Revoke: $0 consent revoke" ;;
+    revoke) rm -f "$OSRC_CONSENT_FILE" 2>/dev/null; echo "cloud consent: revoked. The next cloud delegation will ask again (interactive) or need --cloud-ack (non-interactive)." ;;
+    *)      die "consent: unknown action '${1:-}' (use: status|grant|revoke)" ;;
+  esac
+}
+
+# ---- COPILOT DRIVING MODE (auto|manual|hybrid), persisted per-user in $OSRC_HOME/mode.
+# The session-start handshake: the skill greets the user, shows live limits + ready lanes, and
+# offers three ways to drive. Chosen ONCE, remembered forever (ask-once-then-remember). The BASH
+# side only persists + reports; the conversational menu is presented by the orchestrator (SKILL.md
+# contract). SECURITY/ROBUSTNESS (GLM review): brief/mode are READ-ONLY prints — they NEVER prompt
+# (a prompt would hang bg/CI), always print to stderr-safe channels, and validate the stored value.
+OSRC_MODE_FILE="$OSRC_HOME/mode"
+# Conserve trigger: route grind OFF the Claude session once the 5-hour window crosses this %.
+# Alex's call: 50 (she only relaxes after the 50% mark). Tunable per-user/CI.
+OSRC_CONSERVE_THRESHOLD="${OSRC_CONSERVE_THRESHOLD:-50}"
+
+_mode_meaning() {
+  case "$1" in
+    auto)   printf '%s' 'auto-pilot — I pick the best ready lane/model and conserve tight windows, asking only for safety/consent/ambiguity/new spend' ;;
+    manual) printf '%s' 'you-drive — I never delegate unless you tell me to, and I show the lane + limit impact before each run' ;;
+    hybrid) printf '%s' 'hybrid — we agree once which task-types I auto-delegate (tests, repo-mapping, mechanical grind); I ask about everything else' ;;
+    *)      return 1 ;;
+  esac
+}
+
+_mode_read() {
+  [ -f "$OSRC_MODE_FILE" ] || return 1
+  [ -L "$OSRC_MODE_FILE" ] && { printf '>>> [notice] refusing symlinked mode file %s\n' "$OSRC_MODE_FILE" >&2; return 1; }
+  local mode; mode="$(tr -d '[:space:]' < "$OSRC_MODE_FILE" 2>/dev/null)" || return 1
+  case "$mode" in auto|manual|hybrid) printf '%s' "$mode" ;; *) return 1 ;; esac
+}
+
+_mode_menu() {
+  printf 'driving mode: NOT SET — pick once (remembered after):\n'
+  printf '  A) auto   — %s\n' "$(_mode_meaning auto)"
+  printf '  B) manual — %s\n' "$(_mode_meaning manual)"
+  printf '  C) hybrid — %s\n' "$(_mode_meaning hybrid)"
+  printf 'set with: %s mode auto|manual|hybrid  (change anytime)\n' "$0"
+}
+
+_mode_persist() {
+  local mode="$1" cur tmp="$OSRC_HOME/.mode.$$"
+  cur="$(_mode_read 2>/dev/null)" && [ "$cur" = "$mode" ] && return 0   # F13: skip write if unchanged
+  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null || die "mode: cannot create state home $OSRC_HOME"
+  { umask 077; printf '%s\n' "$mode" > "$tmp"; } 2>/dev/null \
+    || { rm -f "$tmp" 2>/dev/null; die "mode: cannot write $OSRC_MODE_FILE (state home not writable?)"; }
+  mv -f "$tmp" "$OSRC_MODE_FILE" 2>/dev/null \
+    || { rm -f "$tmp" 2>/dev/null; die "mode: cannot replace $OSRC_MODE_FILE"; }
+}
+
+cmd_mode() {
+  local action="${1:-status}"
+  [ "$#" -le 1 ] || die "mode: '$action' takes no extra arguments (got: $*)"
+  case "$action" in
+    status)
+      local mode; if mode="$(_mode_read)"; then printf 'driving mode: %s\n  %s\n' "$mode" "$(_mode_meaning "$mode")"
+      else [ -f "$OSRC_MODE_FILE" ] && printf '>>> [notice] ignoring invalid driving mode in %s (expected auto|manual|hybrid)\n' "$OSRC_MODE_FILE" >&2; _mode_menu; fi ;;
+    auto|manual|hybrid|a|A|b|B|c|C)
+      case "$action" in a|A) action=auto ;; b|B) action=manual ;; c|C) action=hybrid ;; esac
+      _mode_persist "$action"; printf 'driving mode set: %s\n  %s\n' "$action" "$(_mode_meaning "$action")" ;;
+    reset) rm -f "$OSRC_MODE_FILE" 2>/dev/null; printf 'driving mode: reset (the session-start menu shows again next time).\n' ;;
+    *) die "mode: unknown action '$action' (use: status|auto|manual|hybrid|reset)" ;;
+  esac
+}
+
 # Tier override: --tier flag (parsed later) or OUTSOURCERER_TIER env. "raw" = no wrapper.
 OSRC_TIER_OVERRIDE="${OUTSOURCERER_TIER:-}"
 # Reasoning effort: --effort/--reasoning flag (parsed in _consume_flags) or OUTSOURCERER_EFFORT env.
@@ -156,6 +283,11 @@ tencent/hy3:free|tencent/hy3:free|or|capable
 deepseek|deepseek/deepseek-v4-pro|or|capable
 deepseek/deepseek-v4-pro|deepseek/deepseek-v4-pro|or|capable
 glm-5.2|glm-5.2|dv|capable
+swe|swe-1.7|dv|capable
+swe-1.7|swe-1.7|dv|capable
+swe-1.7-lightning|swe-1.7-lightning|dv|mid
+kimi|kimi-k2.7|dv|capable
+kimi-k2.7|kimi-k2.7|dv|capable
 gemini-pro|gemini-3.1-pro-preview|gm|frontier
 gemini-3.1-pro-preview|gemini-3.1-pro-preview|gm|frontier
 gemini-flash|gemini-3.5-flash|gm|mid
@@ -202,6 +334,22 @@ need_devin() {
 
 logged_in() { devin auth status 2>/dev/null | grep -qi "Logged in"; }
 
+# _timeout <secs> <cmd...> -> run with a wall-clock cap. Uses coreutils timeout/gtimeout when present
+# (Linux, or macOS with coreutils), else a portable watchdog (works on stock macOS + Git Bash, which
+# ship NO `timeout`). Keeps the interactive `brief` handshake from stalling on a slow Devin backend.
+_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  "$@" &
+  local cmd_pid=$!
+  ( sleep "$secs" 2>/dev/null; kill -TERM "$cmd_pid" 2>/dev/null ) &
+  local wd_pid=$!
+  local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
+  kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+  return "$rc"
+}
+
 # Extract an optional leading "-m MODEL" / "--model MODEL"; echoes MODEL, sets REST via global.
 MODEL="$DEFAULT_MODEL"
 MODEL_EXPLICIT=0
@@ -235,6 +383,7 @@ parse_model() {
                             shift 2 ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -242,10 +391,11 @@ parse_model() {
 }
 
 # Which Devin model serves an OpenRouter-lane alias (cross-lane sibling), empty if none.
-# Only GLM is dual-lane today (glm/z-ai/glm-5.2 on OpenRouter <-> glm-5.2 on Devin).
+# GLM and DeepSeek are dual-lane today (OpenRouter id <-> Devin id). hy3 is OpenRouter-only.
 _devin_model_for() {
   case "$1" in
     glm|z-ai/glm-5.2|glm-5.2) printf 'glm-5.2' ;;
+    deepseek|deepseek/deepseek-v4-pro) printf 'deepseek-v4-pro' ;;
     *) printf '' ;;
   esac
 }
@@ -467,6 +617,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
+  case "$2" in droid|cursor|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -750,6 +901,7 @@ _consume_flags() {
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -893,10 +1045,16 @@ _codex_rate_limits() {
   [ -n "$newest" ] || return 1
   local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
   [ -n "$line" ] || return 1
+  # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
+  # .primary (observed: primary.window_minutes=10080 = weekly, secondary=null). Classify each present
+  # slot by its window (<=360min -> 5h/short, else weekly/long) so codex5h/codexwk are never swapped.
   printf '%s' "$line" | jq -r '
     ([.. | objects | select(has("rate_limits")) | .rate_limits] | last) as $r
     | select($r != null)
-    | "\($r.primary.used_percent // "")|\($r.secondary.used_percent // "")|\($r.primary.resets_at // "")|\($r.secondary.resets_at // "")"
+    | [ $r.primary, $r.secondary ] | map(select(. != null)) as $slots
+    | ( [ $slots[] | select((.window_minutes // 100000) <= 360) ] | first ) as $sh
+    | ( [ $slots[] | select((.window_minutes // 0)      >  360) ] | first ) as $wk
+    | "\($sh.used_percent // "")|\($wk.used_percent // "")|\($sh.resets_at // "")|\($wk.resets_at // "")"
   ' 2>/dev/null | head -1
 }
 
@@ -921,6 +1079,66 @@ _codex_quota_line() {
   msg="$msg · weekly: ${s:-?}%"
   [ -n "$se" ] && msg="$msg (resets in $se)"
   printf '%s' "$msg"
+}
+
+# ---- SESSION LIMIT AWARENESS (copilot conserve engine). Best-effort, degrade gracefully (GLM review):
+# NEVER die, NEVER block a delegation — a wrong/absent limit signal must only soften a RECOMMENDATION.
+_pct_normalize() {   # echo a 0..100 number, else nothing
+  awk -v v="${1:-}" 'BEGIN { if (v ~ /^([0-9]+([.][0-9]+)?|[.][0-9]+)$/ && v>=0 && v<=100) printf "%g", v }' 2>/dev/null
+}
+_window_pct() {   # <pct> <resets_at-epoch> -> pct if the window is still live, else nothing (drop expired)
+  local pct reset="${2:-}" now
+  pct="$(_pct_normalize "${1:-}")"; [ -n "$pct" ] || return 1
+  case "$reset" in ''|null) ;; *[!0-9]*) return 1 ;;
+    *) now="$(date +%s 2>/dev/null)" || return 1; [ "$reset" -gt "$now" ] || return 1 ;; esac
+  printf '%s' "$pct"
+}
+# _session_limits -> normalized one-liner "claude5h=95 claude7d=38 codex5h=.. codexwk=.." (omits unknown).
+# Claude source = the token-optimizer statusline artifact (the only readable 5h/7d signal Claude Code
+# exposes; ADVISORY — it's derived + only fresh while a statusline renders). We drop stale (>10min) and
+# expired-window values rather than trust them, and honor OSRC_CC_PRESSURE as an explicit override.
+_session_limits() {
+  # Claude 5h/7d source precedence: explicit override > outsourcerer's own statusline tap
+  # (universal, `tap install`) > the token-optimizer statusline artifact (if that plugin is present).
+  local cand raw c5="" c7="" c5r="" c7r="" ts="" nowms line=""
+  if [ -n "${OSRC_CC_PRESSURE:-}" ]; then
+    c5="$(_pct_normalize "$OSRC_CC_PRESSURE")"       # explicit orchestrator override wins
+  else
+    # Try each candidate in precedence order; a STALE/expired/invalid one is SKIPPED so we fall
+    # through to the next fresh source (fixes: a frozen $OSRC_HOME artifact shadowing token-optimizer's
+    # fresh file forever). tap file first (universal), then token-optimizer's.
+    for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
+      [ -f "$cand" ] && have jq && jq -e . "$cand" >/dev/null 2>&1 || continue
+      raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
+      IFS='|' read -r c5 c5r c7 c7r ts <<EOF
+$raw
+EOF
+      # Freshness gate: fail CLOSED. A statusline artifact older than 10min — OR one whose timestamp is
+      # missing/non-integer (can't prove freshness) — is treated as stale and skipped.
+      nowms="$(date +%s 2>/dev/null)"; [ -n "$nowms" ] && nowms=$((nowms*1000))
+      case "$ts" in
+        ''|*[!0-9]*) c5=""; c7="" ;;                                             # unprovable -> stale
+        *) [ -n "$nowms" ] && [ $((nowms - ts)) -gt 600000 ] && { c5=""; c7=""; } ;;
+      esac
+      c5="$(_window_pct "$c5" "$c5r" 2>/dev/null)" || c5=""
+      c7="$(_window_pct "$c7" "$c7r" 2>/dev/null)" || c7=""
+      [ -n "$c5$c7" ] && break                                                   # got fresh data -> stop
+    done
+  fi
+  raw="$(_codex_rate_limits 2>/dev/null)" || raw=""
+  local x5="" xw="" x5r="" xwr=""
+  if [ -n "$raw" ]; then
+    IFS='|' read -r x5 xw x5r xwr <<EOF
+$raw
+EOF
+    x5="$(_window_pct "$x5" "$x5r" 2>/dev/null)" || x5=""
+    xw="$(_window_pct "$xw" "$xwr" 2>/dev/null)" || xw=""
+  fi
+  [ -n "$c5" ] && line="$line claude5h=$c5"
+  [ -n "$c7" ] && line="$line claude7d=$c7"
+  [ -n "$x5" ] && line="$line codex5h=$x5"
+  [ -n "$xw" ] && line="$line codexwk=$xw"
+  printf '%s\n' "${line# }"
 }
 
 cmd_tab() {
@@ -1029,6 +1247,168 @@ cmd_suggest() {
   echo "   Antigravity (keyless): gemini-pro / gemini-flash / gemini-flash-lite"
   echo
   echo "Route one with:  $0 run -m <model> \"<task>\"   (add --provider cc|codex for OpenRouter lanes)"
+}
+
+# _ready_lanes -> space-joined "lane=detail" tokens for lanes that are ACTUALLY usable right now.
+# Only ready lanes are ever offered to the user (Terra UX: never tour install paths for a lane they
+# lack). Best-effort + fast; a slow probe (OpenRouter credits) is time-capped.
+_ready_lanes() {
+  local lanes="" ld dlm cred rem
+  ld="$(_local_detect 2>/dev/null)" && lanes="$lanes local=${ld##*|}"
+  # Devin probes (auth + live model list) hit the network; cap them so `brief` can't stall the
+  # handshake for 10-30s on a slow backend. OSRC_BRIEF_TIMEOUT overrides (default 5s each).
+  if have devin && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null | grep -qi "Logged in"; then
+    dlm="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" bash -c 'devin --model "__list__" -p "x" </dev/null 2>&1 | grep -i "^Available:"' 2>/dev/null)"
+    printf '%s' "$dlm" | grep -qiE 'glm|swe' && lanes="$lanes devin=glm/swe"
+  fi
+  have agy && lanes="$lanes gemini=keyless"
+  have codex && lanes="$lanes codex=sol/terra"
+  if [ -n "$(_extract_kv_value OPENROUTER_API_KEY 2>/dev/null)" ]; then
+    # or_credits already caps curl via OSRC_CURL_TIMEOUT; tighten it for the interactive brief probe.
+    cred="$(OSRC_CURL_TIMEOUT="${OSRC_BRIEF_TIMEOUT:-5}" or_credits 2>/dev/null)"
+    rem="${cred##*remaining=}"; rem="${rem%% *}"
+    awk -v n="$rem" 'BEGIN { exit !(n ~ /^[0-9]+([.][0-9]+)?$/ && n>0) }' 2>/dev/null \
+      && lanes="$lanes openrouter=funded" || lanes="$lanes openrouter=key-capped"
+  fi
+  have claude && lanes="$lanes claude=native"
+  have droid && lanes="$lanes droid=byok"
+  have cursor-agent && lanes="$lanes cursor=subscription"
+  _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
+  printf '%s\n' "${lanes# }"
+}
+
+# _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
+# OSRC_CONSERVE_THRESHOLD (default 50, Alex's call). Priority when the Claude 5h window is tight:
+# local($0/private) > Devin GLM/SWE(free) > keyless Gemini > Codex Sol/Terra(only if ChatGPT plan has
+# headroom) > OpenRouter(only if funded). "All lanes tight" is handled first (GLM F6).
+_conserve_reco() {
+  local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" posture lane="" why="" tight=0
+  for tok in $limits; do case "$tok" in
+    claude5h=*) c5="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
+  esac; done
+  if [ -n "$c5" ]; then
+    posture="Claude 5h at ${c5}%"
+    awk -v n="$c5" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n >= t) }' 2>/dev/null && tight=1
+  else posture="Claude 5h unknown"; fi
+  if [ "$tight" = "0" ]; then
+    printf 'HEADROOM: %s (< %s%% conserve line) — route by best-fit; no forced conservation.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"
+    return 0
+  fi
+  case " $lanes " in
+    *" local="*)          lane="local";          why="private, \$0 cash + \$0 plan" ;;
+    *" devin=glm/swe "*)  lane="Devin GLM/SWE";   why="free lane, preserves your Claude quota" ;;
+    *" gemini=keyless "*) lane="keyless Gemini";  why="Antigravity login, no API key" ;;
+  esac
+  if [ -z "$lane" ]; then
+    local codex_ok=0 seen=0 blocked=0 v
+    case " $lanes " in *" codex=sol/terra "*)
+      for v in "$x5" "$xw"; do [ -n "$v" ] || continue; seen=1
+        awk -v n="$v" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n < t) }' 2>/dev/null || blocked=1; done
+      [ "$seen" = "1" ] && [ "$blocked" = "0" ] && codex_ok=1 ;;
+    esac
+    if [ "$codex_ok" = "1" ]; then lane="Codex Sol/Terra"; why="your ChatGPT plan is below the conserve line in every known window"
+    else case " $lanes " in *" openrouter=funded "*) lane="OpenRouter"; why="funded cash lane, preserves subscription quotas" ;; esac; fi
+  fi
+  if [ -n "$lane" ]; then printf 'CONSERVE: %s (>= %s%%) — route grind to %s (%s); keep Claude for judgment.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD" "$lane" "$why"
+  else printf 'CONSERVE: %s (>= %s%%) — but no lower-cost lane is ready. Start local inference (ollama) or log into Devin; meanwhile throttle and keep judgment on Claude.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"; fi
+}
+
+# ---- LIMITS TAP: universal session-limit capture (works WITHOUT token-optimizer).
+# Claude Code passes a status JSON (incl. rate-limit fields) to the configured statusLine command on
+# every render. `tap run` is a PASSTHROUGH: it saves those fields to $OSRC_HOME/rate-limits.json and
+# then execs the user's ORIGINAL statusline untouched (or prints a minimal line when none existed).
+# `tap install` wires it into ~/.claude/settings.json (backup kept, idempotent); `tap uninstall`
+# restores the original. Opt-in only — brief/doctor suggest it, never auto-install.
+# The statusLine command Claude Code should invoke. On Windows the statusLine runs via cmd.exe, which
+# cannot execute a bare .sh — route through the .cmd launcher sitting next to this script instead.
+_tap_statusline_cmd() {
+  if [ "$OSRC_PLATFORM" = "windows" ]; then
+    local dir cmd; dir="$(dirname "$SCRIPT_PATH")"; cmd="$dir/outsourcerer.cmd"
+    [ -f "$cmd" ] && { printf '%s tap run' "$cmd"; return; }
+    printf 'bash "%s" tap run' "$SCRIPT_PATH"; return   # fallback: explicit bash
+  fi
+  printf '%s tap run' "$SCRIPT_PATH"
+}
+cmd_tap() {
+  local settings="${OSRC_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+  local stash="$OSRC_HOME/tap-original-statusline.json"
+  case "${1:-}" in
+    run)
+      local input; input="$(cat 2>/dev/null)"
+      if have jq && [ -n "$input" ]; then
+        mkdir -p "$OSRC_HOME" 2>/dev/null
+        printf '%s' "$input" | jq -c '
+          {five_hour: (.rate_limits.five_hour // .five_hour // null),
+           seven_day: (.rate_limits.seven_day // .seven_day // null),
+           timestamp: (now*1000|floor), source: "outsourcerer-tap"}
+          | select(.five_hour != null)' > "$OSRC_HOME/.rl.tmp.$$" 2>/dev/null
+        [ -s "$OSRC_HOME/.rl.tmp.$$" ] && mv -f "$OSRC_HOME/.rl.tmp.$$" "$OSRC_HOME/rate-limits.json" 2>/dev/null
+        rm -f "$OSRC_HOME/.rl.tmp.$$" 2>/dev/null
+      fi
+      # passthrough: run the original statusline command with the same stdin, else a minimal line.
+      local orig=""; [ -f "$stash" ] && have jq && orig="$(jq -r '.command // ""' "$stash" 2>/dev/null)"
+      if [ -n "$orig" ]; then printf '%s' "$input" | sh -c "$orig"
+      else printf '%s' "$input" | { have jq && jq -r '[(.model.display_name // "claude"), (.workspace.current_dir // "" | split("/") | last)] | map(select(. != "")) | join(" · ")' 2>/dev/null || echo "claude"; }; fi ;;
+    install)
+      have jq || die "tap install needs jq ($( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || echo 'brew/apt install jq'))"
+      [ -f "$settings" ] || printf '{}\n' > "$settings" 2>/dev/null || die "tap: cannot create $settings"
+      if jq -re '.statusLine.command // ""' "$settings" 2>/dev/null | grep -q "tap run"; then
+        echo "tap: already installed (statusLine already routes through outsourcerer). Limits land in $OSRC_HOME/rate-limits.json"; return 0
+      fi
+      mkdir -p "$OSRC_HOME" 2>/dev/null
+      # Stash the WHOLE original statusLine object (type/command/padding/…), not just .command.
+      jq -c '.statusLine // {}' "$settings" > "$stash" 2>/dev/null
+      local orig; orig="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
+      cp "$settings" "$settings.bak-osrc-tap" 2>/dev/null
+      jq --arg cmd "$(_tap_statusline_cmd)" '.statusLine = {type:"command", command:$cmd}' "$settings" > "$settings.tmp.$$" 2>/dev/null \
+        && mv -f "$settings.tmp.$$" "$settings" || { rm -f "$settings.tmp.$$"; die "tap: could not update $settings"; }
+      echo "tap: installed. Claude Code now feeds live 5h/7d limits to $OSRC_HOME/rate-limits.json on every statusline render."
+      [ -n "$orig" ] && echo "tap: your original statusline still runs unchanged (passthrough): $orig"
+      echo "tap: undo anytime with: $0 tap uninstall  (backup: $settings.bak-osrc-tap)" ;;
+    uninstall)
+      have jq || die "tap uninstall needs jq"
+      [ -f "$settings" ] || { echo "tap: no settings file; nothing to uninstall."; return 0; }
+      # Restore the WHOLE stashed statusLine object; if it was empty/absent, remove statusLine.
+      if [ -f "$stash" ] && [ "$(jq -r '.command // "" | length' "$stash" 2>/dev/null)" != "0" ]; then
+        jq --slurpfile s "$stash" '.statusLine = $s[0]' "$settings" > "$settings.tmp.$$" 2>/dev/null
+      else jq 'del(.statusLine)' "$settings" > "$settings.tmp.$$" 2>/dev/null; fi
+      [ -s "$settings.tmp.$$" ] && mv -f "$settings.tmp.$$" "$settings" || { rm -f "$settings.tmp.$$"; die "tap: could not update $settings"; }
+      rm -f "$stash" "$OSRC_HOME/tap-original-statusline" "$OSRC_HOME/rate-limits.json" 2>/dev/null   # drop the frozen capture so it can't shadow a fresh source
+      echo "tap: uninstalled (original statusline restored, captured limits cleared)." ;;
+    status|"")
+      if [ -f "$OSRC_HOME/rate-limits.json" ]; then echo "tap: capturing — $(cat "$OSRC_HOME/rate-limits.json" 2>/dev/null | head -c 200)"
+      else echo "tap: not capturing yet. Install with: $0 tap install (one-time; makes limit-awareness automatic without token-optimizer)"; fi ;;
+    *) die "tap: unknown action '${1:-}' (use: install|uninstall|status; 'run' is the internal statusline handler)" ;;
+  esac
+}
+
+# cmd_brief -> the session-start handshake readout. READ-ONLY, never prompts (safe in bg/CI: prints
+# and returns). The orchestrator runs this on skill activation, then presents the mode menu
+# conversationally per the SKILL.md contract.
+cmd_brief() {
+  local lanes limits mode
+  lanes="$(_ready_lanes 2>/dev/null)"
+  limits="$(_session_limits 2>/dev/null)"
+  printf '== outsourcerer session brief ==\n'
+  printf 'ready lanes : %s\n' "${lanes:-none detected (run doctor)}"
+  # Human-readable limits: turn "claude5h=95" into "Claude 5h window: 95%% used" so a non-technical
+  # reader instantly knows high = nearly out. Keep the raw tokens too (agents/scripts parse them).
+  if [ -n "$limits" ]; then
+    local _pretty="" _t
+    for _t in $limits; do case "$_t" in
+      claude5h=*) _pretty="$_pretty · Claude 5h: ${_t#*=}% used" ;;
+      claude7d=*) _pretty="$_pretty · Claude 7d: ${_t#*=}% used" ;;
+      codex5h=*)  _pretty="$_pretty · ChatGPT 5h: ${_t#*=}% used" ;;
+      codexwk=*)  _pretty="$_pretty · ChatGPT weekly: ${_t#*=}% used" ;;
+    esac; done
+    printf 'limits      :%s   [%s]\n' "${_pretty# · }" "$limits"
+  else
+    printf 'limits      : %s\n' "unavailable (no readable session meter — treat as unknown)"
+  fi
+  [ -z "$limits" ] && printf 'tip         : %s tap install  — one-time statusline tap; makes limit-awareness automatic (no token-optimizer needed)\n' "$0"
+  _conserve_reco "$limits" "$lanes"
+  if mode="$(_mode_read)"; then printf 'driving mode : %s — %s\n' "$mode" "$(_mode_meaning "$mode")"
+  else printf -- '---\n'; _mode_menu; fi
 }
 
 # =============================================================================
@@ -1357,7 +1737,18 @@ cmd_advise() {
 # =============================================================================
 _descendants() {   # echo ALL descendant pids of $1 (recursive, parent-before-child order)
   local p
-  for p in $(pgrep -P "$1" 2>/dev/null); do echo "$p"; _descendants "$p"; done
+  if have pgrep; then
+    for p in $(pgrep -P "$1" 2>/dev/null); do echo "$p"; _descendants "$p"; done
+  else
+    # No pgrep (Git Bash / MSYS / minimal boxes): derive children from `ps`. Column layout DIFFERS:
+    # System-V `ps -ef` is "UID PID PPID ..." (PID=$2, PPID=$3), but MSYS/Cygwin `ps` is
+    # "PID PPID PGID ..." (PID=$1, PPID=$2). Locate the PID/PPID columns from the HEADER so we signal
+    # real children on both, instead of only ever the root pid.
+    ps -ef 2>/dev/null | awk -v pp="$1" '
+      NR==1 { for(i=1;i<=NF;i++){ u=toupper($i); if(u=="PID")pc=i; else if(u=="PPID")ppc=i } next }
+      (pc && ppc && $ppc==pp) { print $pc }
+    ' | while IFS= read -r p; do [ -n "$p" ] && { echo "$p"; _descendants "$p"; }; done
+  fi
 }
 _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
   # macOS has no setsid/process-group-kill and `pkill -P` is only ONE level, so a hung codex's MCP
@@ -1526,6 +1917,8 @@ _fg_guard() {
 _bg_cloud_preack() {   # args: <verb> [flags] "task"
   [ "${OSRC_CLOUD_ACK:-0}" = "1" ] && return 0
   [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0
+  # remembered consent: same weight as OSRC_CLOUD_ACK=1 (children still run their own secret-scan).
+  _cloud_consent_ok && { export OSRC_CLOUD_ACK=1; return 0; }
   # honor an explicit --cloud-ack on the bg/fanout CLI: the documented non-interactive escape hatch.
   # Scan leading flags only -- skip the verb ($1), skip each value-taking flag's argument,
   # and STOP at `--` or the first positional task. A task whose text is literally "--cloud-ack" (passed
@@ -1539,7 +1932,7 @@ _bg_cloud_preack() {   # args: <verb> [flags] "task"
     esac
     case "$_a" in
       --) break ;;                                                # end of flags -> everything after is task
-      --cloud-ack) export OSRC_CLOUD_ACK=1; return 0 ;;
+      --cloud-ack) _cloud_consent_persist; export OSRC_CLOUD_ACK=1; return 0 ;;
       -*) _prev="$_a" ;;                                          # some other leading flag, keep scanning
       *) break ;;                                                 # first positional task -> stop
     esac
@@ -1550,10 +1943,12 @@ _bg_cloud_preack() {   # args: <verb> [flags] "task"
     printf '>>> [outsourcerer] CLOUD bg/fanout: jobs delegate to a cloud lane (provider=%s) -- repo content in %s LEAVES this machine.\n' "$PROVIDER" "${PWD/#$HOME/~}" >&2
     printf '>>>   Each job still runs a secret-scan hard-block on real credential files. Acknowledge for this batch? [y/N] ' >&2
     local ans=""; IFS= read -r ans </dev/tty 2>/dev/null || ans=""
-    case "$ans" in y|Y|yes|YES) export OSRC_CLOUD_ACK=1; return 0 ;; esac
+    case "$ans" in y|Y|yes|YES) _cloud_consent_persist; export OSRC_CLOUD_ACK=1; return 0 ;; esac
     die "CLOUD GATE: bg/fanout cloud disclosure declined -- refusing. Re-run with --cloud-ack / OSRC_CLOUD_ACK=1, or use a local (ollama/lmstudio) lane."
   fi
-  die "CLOUD GATE: bg/fanout to a cloud lane needs an explicit ack in a non-interactive context. Pass --cloud-ack or set OSRC_CLOUD_ACK=1 (local ollama/lmstudio lanes are exempt)."
+  die "CLOUD GATE: bg/fanout to a cloud lane needs a ONE-TIME consent in a non-interactive context. Fix once, never see this again:
+    $0 consent grant        # remember consent for all future runs
+  or pass --cloud-ack on this command (also remembered). Local ollama/lmstudio lanes are exempt."
 }
 
 # _bg_launch <verb> [flags] "task" -> mint a job id, detach a supervised __runjob, echo ONLY the id.
@@ -1590,9 +1985,23 @@ _bg_launch() {
 
 # bg [--provider X already parsed] [--worktree] <verb> [flags] "task" -> detach a supervised job, print id.
 cmd_bg() {
-  [ "${1:-}" = "--worktree" ] && { export OSRC_WORKTREE=1; shift; }   # opt-in git-worktree isolation
-  [ $# -gt 0 ] || die "bg needs a verb + task (e.g. bg run -m hy3 \"...\")"
-  _is_verb "${1:-}" || die "bg needs a verb first ($_OSRC_VERBS), e.g. bg run -m <model> \"task\" — got '${1:-}'"
+  # flag-placement tolerance: global flags are legal between `bg` and the verb.
+  while :; do case "${1:-}" in
+    --worktree)  export OSRC_WORKTREE=1; shift ;;
+    --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    *) break ;;
+  esac; done
+  [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m hy3 \"...\")"
+  # INTUITIVE DEFAULT (papercut fix): if no verb is given, assume `run`. `bg "task"`, `bg -m glm "task"`,
+  # and `bg run "task"` all work now. Only a bare word that isn't a verb and isn't a flag triggers it.
+  if ! _is_verb "${1:-}"; then
+    case "${1:-}" in
+      -*) set -- run "$@" ;;                          # starts with a flag -> insert default verb `run`
+      *)  set -- run "$@" ;;                          # a task string     -> insert default verb `run`
+    esac
+    printf '>>> [bg] no verb given; defaulting to `run` (read-only). Use edit/yolo for mutating work.\n' >&2
+  fi
   _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -1693,6 +2102,12 @@ run_job() {
   # meta previously recorded only provider (the ORIGINAL provider, e.g. devin), which mislabels a
   # plan lane (gm/cx/cc) as a cash lane in the Tab. Persist the resolved lane so accounting is truthful.
   [ -n "$row" ] && { id2="${row%%|*}"; ttier="${row##*|}"; lane="$(printf '%s' "$row" | awk -F'|' '{print $2}')"; }
+  # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
+  # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
+  case "$prov" in
+    droid|cursor) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
+  esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
@@ -2550,6 +2965,166 @@ $wrapped"
 # invocation is verified against illo's source (which documents it as verified live on Codex CLI
 # 0.141/0.144) but is NOT independently re-verified against a live `codex` binary; treat as
 # unverified until confirmed.
+# =============================================================================
+# CLAUDEX LANE (--provider claudex): GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness,
+# via a locally-running CLIProxyAPI the USER already installed and logged into. The community
+# "claudex" pattern (Theo's recipe): Claude Code's UX + subagents driving a ChatGPT-sub model.
+# DETECT-ONLY by design: this lane never installs or launches the proxy — our supply-chain audit
+# of CLIProxyAPI (2026-07-16, findings/cliproxyapi-forensics.json) plus its use of internal,
+# non-guaranteed upstream endpoints means installing it is the USER's informed call, not ours.
+# Facts verified against the proxy docs: default port 8317, Anthropic-compatible /v1/messages,
+# auth token must match the proxy's own api-keys list, model registry auto-routes gpt-5.6-* to
+# the Codex OAuth session, health probe = authenticated GET /v1/models (no /health endpoint).
+# =============================================================================
+_claudex_url() { printf '%s' "${OSRC_CLAUDEX_URL:-http://127.0.0.1:8317}"; }
+_claudex_token() {
+  [ -n "${OSRC_CLAUDEX_TOKEN:-}" ] && { printf '%s' "$OSRC_CLAUDEX_TOKEN"; return 0; }
+  # first api-key from the proxy's own config (yaml list under "api-keys:").
+  local cfg="${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}"
+  [ -f "$cfg" ] && awk '/^api-keys:/{f=1;next} f&&/^[[:space:]]*-/{sub(/^[[:space:]]*-[[:space:]]*"?/,"");sub(/"?[[:space:]]*$/,"");print;exit} f&&/^[^[:space:]]/{exit}' "$cfg" 2>/dev/null
+}
+_claudex_up() {   # is a CLIProxyAPI answering with our token? (authenticated /v1/models probe)
+  local url tok hdr; url="$(_claudex_url)"; tok="$(_claudex_token)"
+  [ -n "$tok" ] || return 1
+  mkdir -p "$OSRC_HOME" 2>/dev/null
+  hdr="$OSRC_HOME/.hdr.claudex.$$"; { umask 077; printf 'Authorization: Bearer %s\n' "$tok" > "$hdr"; } 2>/dev/null || return 1
+  curl -fsS -m 4 -H @"$hdr" "$url/v1/models" >/dev/null 2>&1; local rc=$?
+  rm -f "$hdr" 2>/dev/null
+  return "$rc"
+}
+
+delegate_claudex() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="$RESOLVED_ID"
+  have claude || die "claudex lane needs the claude CLI on PATH."
+  _claudex_up || die "claudex lane: no CLIProxyAPI answering at $(_claudex_url) (or no api-key found). This lane rides a proxy YOU install and log into: https://github.com/router-for-me/CLIProxyAPI (then cli-proxy-api --codex-login). Set OSRC_CLAUDEX_URL / OSRC_CLAUDEX_TOKEN if yours is elsewhere. Meanwhile -m $id runs fine on the codex-native lane (drop --provider)."
+  local mode posture
+  case "$tier" in
+    auto)         mode="default";          posture="READ-ONLY (headless denies tool exec)" ;;
+    accept-edits) mode="acceptEdits";       posture="MUTATING (auto-accepts file edits)" ;;
+    autonomous)   die "claudex lane has NO OS sandbox (claude harness); use --provider codex/devin for sandboxed exec, or 'yolo'." ;;
+    dangerous)    mode="bypassPermissions"; posture="DANGER (bypasses ALL permission checks, no sandbox)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
+  _tier_banner "claudex (Claude harness -> CLIProxyAPI)" "$id" "$ttier" "$posture, bills your ChatGPT plan through YOUR local proxy"
+  # Honest one-time-per-run caveat: unofficial bridge, upstream endpoints are internal/unstable,
+  # heavy use without rate limiting has triggered upstream account limits for some users.
+  printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
+  build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config)"
+  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u ANTHROPIC_API_KEY
+               "ANTHROPIC_BASE_URL=$(_claudex_url)" "ANTHROPIC_AUTH_TOKEN=$(_claudex_token)")
+  # Effort: the model behind the proxy is a GPT reasoning model; Claude Code's effort plumbing is
+  # enabled and the level is ALSO injected as a prompt directive (never silently dropped).
+  if [ -n "$EFFORT" ]; then
+    clean+=("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1")
+    wrapped="Reasoning effort: $EFFORT. Match your depth of analysis and thinking to this level.
+
+$wrapped"
+    printf '>>> [effort] reasoning=%s (claudex: CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1 + prompt directive)\n' "$EFFORT" >&2
+  fi
+  local tools=()
+  if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
+  else case "$tier" in
+    auto)                   tools=(--allowedTools Read Grep Glob) ;;
+    accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
+  esac; fi
+  local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
+  local rc=0
+  if [ "${OSRC_STREAM:-0}" = "1" ]; then
+    "${clean[@]}" claude -p --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
+    record_ledger claudex "$id" "$ttier" "$tier" "$task"
+  else
+    mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.claudex.$$.json"
+    local old_umask; old_umask="$(umask)"; umask 077
+    "${clean[@]}" claude -p --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
+    record_ledger claudex "$id" "$ttier" "$tier" "$task"
+    if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
+    _cc_verify_model "$id" "$tmpj"
+    rm -f "$tmpj"; umask "$old_umask"
+  fi
+  [ "$rc" -ne 0 ] && printf '>>> [hint] claudex exited %s. Check the proxy is up (curl %s/v1/models with your api-key) and that cli-proxy-api --codex-login succeeded.\n' "$rc" "$(_claudex_url)" >&2
+  printf '>>> [receipt] no cash charged, ran on your ChatGPT plan via your local CLIProxyAPI (Claude harness UX, zero Claude-sub spend).\n' >&2
+  return "$rc"
+}
+
+# =============================================================================
+# DROID / CURSOR ENGINE LANES (provider-selected: --provider droid | cursor).
+# "The skill works with YOUR tools, you don't adapt to its": these lanes drive the user's own
+# agent CLI, with whatever models THEY configured there (incl. BYOK/custom models -- droid:
+# ~/.factory/settings.json customModels; cursor: the user's Cursor account models). A -m value is
+# passed VERBATIM to the engine (never re-routed by our alias table); no -m = the engine's default.
+# Both are cloud lanes (the engine calls its vendor + the model API) -> full cloud gate applies.
+# Billing: droid = your Factory plan/BYOK keys; cursor = your Cursor subscription credits.
+# =============================================================================
+
+# _droid_effort <ours> -> droid exec -r value (off|none|low|medium|high). Ours: minimal..max.
+_droid_effort() {
+  case "$1" in minimal) echo "none" ;; low) echo "low" ;; medium) echo "medium" ;;
+    high|xhigh|max) echo "high" ;; *) echo "" ;; esac
+}
+
+delegate_droid() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in."
+  # droid exec autonomy: default = read-only; --auto low (read-only + safe cmds) / medium (edits +
+  # safe cmds) / high (full auto). --skip-permissions-unsafe is sandbox-only and never used here.
+  local aflag=() posture
+  case "$tier" in
+    auto)         aflag=();              posture="READ-ONLY (droid exec default: no edits, no unsafe cmds)" ;;
+    accept-edits) aflag=(--auto medium); posture="MUTATING (--auto medium: edits + safe commands)" ;;
+    autonomous)   aflag=(--auto medium); posture="MUTATING (--auto medium; droid has no separate OS-sandbox exec mode)" ;;
+    dangerous)    aflag=(--auto high);   posture="DANGER (--auto high: full autonomy incl. riskier commands)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(-m "$id"); else id="(droid default/configured)"; fi
+  local eff=()
+  if [ -n "$EFFORT" ]; then local de; de="$(_droid_effort "$EFFORT")"
+    [ -n "$de" ] && { eff=(-r "$de"); printf '>>> [effort] reasoning=%s (native: droid exec -r %s)\n' "$EFFORT" "$de" >&2; }; fi
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-droid}" "$task" "$ttier")"
+  _tier_banner "droid (Factory)" "$id" "$ttier" "$posture, bills your Factory plan / your own BYOK keys"
+  local rc=0
+  droid exec ${mflag[@]+"${mflag[@]}"} ${aflag[@]+"${aflag[@]}"} ${eff[@]+"${eff[@]}"} -o text "$wrapped" || rc=$?
+  record_ledger droid "${MODEL:-droid-default}" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] ran on YOUR droid setup (Factory plan or the BYOK keys configured in ~/.factory/settings.json), no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
+delegate_cursor() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  local cur=""
+  if have cursor-agent; then cur="cursor-agent"; elif have agent && agent --help 2>/dev/null | grep -qi cursor; then cur="agent"; fi
+  [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)."
+  # cursor-agent autonomy: default headless = propose-only; -f/--force = apply edits/commands.
+  # --trust skips the workspace-trust prompt that would wedge a headless run.
+  local fflag=() posture
+  case "$tier" in
+    auto)         fflag=();                            posture="READ-ONLY-ish (no --force: edits are not auto-applied)" ;;
+    accept-edits) fflag=(--force);                     posture="MUTATING (--force: applies edits/commands without per-step prompts)" ;;
+    autonomous)   fflag=(--force --sandbox enabled);   posture="MUTATING inside Cursor's sandbox (--force --sandbox enabled)" ;;
+    dangerous)    fflag=(--force --sandbox disabled);  posture="DANGER (--force, sandbox disabled)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(--model "$id"); else id="(cursor default/configured)"; fi
+  [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: cursor-agent has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-cursor}" "$task" "$ttier")"
+  _tier_banner "cursor-agent" "$id" "$ttier" "$posture, bills your Cursor subscription credits"
+  local rc=0
+  "$cur" -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${fflag[@]+"${fflag[@]}"} --trust --output-format text || rc=$?
+  record_ledger cursor "${MODEL:-cursor-default}" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] no cash charged here, ran on your Cursor subscription credits, no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -2711,6 +3286,49 @@ cmd_image() {
 # =============================================================================
 # reverse bridge (insourcerer): let a Codex session delegate INTO claude.
 # =============================================================================
+# Reverse bridge INTO droid / cursor: teach the HOST agent (Factory droid, Cursor CLI) to drive
+# outsourcerer from ITS side — someone living in droid/cursor gets Devin/OpenRouter/Claude/Codex/
+# local lanes + bg/fanout supervision without leaving their tool. Blocks are idempotent
+# (marker-guarded, same OUTSOURCERER:INSOURCE marker as parity-codex).
+_insource_block() {   # <host-label>
+  cat <<EOF
+
+<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: $1) -->
+## Outsourcerer: delegate grunt work to cheaper/different engines
+This machine has outsourcerer installed. From this $1 session you can delegate to Devin
+(glm-5.2/swe-1.7, free-lane class), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
+a VERIFIED Claude model (run -m fable|opus|sonnet|haiku, Claude subscription), ChatGPT-sub
+models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0, private).
+  $SCRIPT_PATH doctor                          # what's available right now (run this first)
+  $SCRIPT_PATH run -m glm "<read-only task>"   # one-shot; edit/yolo for mutating work
+  $SCRIPT_PATH bg run -m hy3 "<long task>"     # supervised background job -> status/result <id>
+  $SCRIPT_PATH fanout --max 6 -m glm --verb run -- "t1" "t2"   # parallel multi-agent
+First cloud delegation needs a one-time consent: $SCRIPT_PATH consent grant (remembered after).
+Read only the final message; delegates end with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>).
+<!-- /OUTSOURCERER:INSOURCE -->
+EOF
+}
+
+parity_droid() {
+  have droid || printf '>>> note: droid CLI not on PATH yet; writing the bridge anyway so it works the moment droid is installed.\n' >&2
+  local fhome="${FACTORY_HOME:-$HOME/.factory}" agents; agents="$fhome/AGENTS.md"
+  mkdir -p "$fhome"
+  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
+    echo "parity-droid: insource block already present in $agents"; return 0
+  fi
+  _insource_block "Factory droid" >> "$agents" || die "parity-droid: cannot write $agents"
+  echo "parity-droid: appended insource block to $agents (droid loads ~/.factory/AGENTS.md globally)"
+}
+
+parity_cursor() {
+  local agents="$PWD/AGENTS.md"
+  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
+    echo "parity-cursor: insource block already present in $agents"; return 0
+  fi
+  _insource_block "Cursor" >> "$agents" || die "parity-cursor: cannot write $agents"
+  echo "parity-cursor: appended insource block to $agents (cursor-agent auto-loads repo-root AGENTS.md; repo-level by design — commit or gitignore as you prefer)"
+}
+
 parity_codex() {
   local codex_home="${CODEX_HOME:-$HOME/.codex}" agents
   agents="$codex_home/AGENTS.md"
@@ -2783,7 +3401,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
-    ccor|codexor|ccnative|cxnative|gmnative|devin) return 0 ;;
+    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|claudex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2883,17 +3501,24 @@ _cloud_disclose() {
   # Report the COUNT of high-signal matches, never the matched secret text itself (printing the
   # values would leak the very credentials we are warning about to the terminal / any log capturing stderr).
   [ "${OSRC_SECRET_HIT_COUNT:-0}" -gt 0 ] 2>/dev/null && printf '>>>   secret scan : %s high-signal credential pattern(s) detected in prompt/--with (values redacted)\n' "$OSRC_SECRET_HIT_COUNT" >&2
-  # acknowledge: env/flag ack, else interactive prompt, else fail-closed refuse.
+  # acknowledge: env/flag ack (persisted for next time), else remembered consent, else interactive
+  # prompt (persisted on yes), else fail-closed refuse with the one-time-fix spelled out.
   if [ "${OSRC_CLOUD_ACK:-0}" = "1" ]; then
+    _cloud_consent_persist; export OSRC_CLOUD_ACKED=1; return 0
+  fi
+  if _cloud_consent_ok; then
+    printf '>>>   consent     : remembered grant in %s (revoke: %s consent revoke)\n' "${OSRC_CONSENT_FILE/#$HOME/~}" "$0" >&2
     export OSRC_CLOUD_ACKED=1; return 0
   fi
   if [ -t 0 ] && [ -t 2 ]; then
-    printf '>>>   Acknowledge cloud disclosure? [y/N] ' >&2
+    printf '>>>   Acknowledge cloud disclosure? (remembered for future runs) [y/N] ' >&2
     local ans=""; IFS= read -r ans || ans=""
-    case "$ans" in y|Y|yes|YES) export OSRC_CLOUD_ACKED=1; return 0 ;; esac
+    case "$ans" in y|Y|yes|YES) _cloud_consent_persist; export OSRC_CLOUD_ACKED=1; return 0 ;; esac
     die "CLOUD GATE: disclosure declined interactively — refusing cloud route. Re-run with OSRC_CLOUD_ACK=1 or --cloud-ack."
   fi
-  die "CLOUD GATE: cloud disclosure requires explicit ack in non-interactive mode — refusing. Set OSRC_CLOUD_ACK=1 or pass --cloud-ack. (Local ollama/lmstudio lanes skip this gate entirely.)"
+  die "CLOUD GATE: cloud delegation needs a ONE-TIME consent (this run sends repo content to a third-party API). Fix once, never see this again:
+    $0 consent grant        # remember consent for all future runs
+  or pass --cloud-ack on this command (also remembered). Local ollama/lmstudio lanes never need this."
 }
 
 delegate_cc() {
@@ -3244,7 +3869,7 @@ _is_transport_failure() {
   #  prose (snake_case error codes, errno constants) or carry their own non-positional discriminator (a URL,
   #  the literal "after", an HTTP/version prefix, a status-code delimiter). Safe to match ANYWHERE in stderr.
   if printf '%s' "$stderr" | grep -qiE \
-'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|status[ _]?code[:= ]+[45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)'; then
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|status[ _]?code[:= ]+[45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|(key|credit) limit exceeded|insufficient credits|requires more credits|api error: [45][0-9][0-9]'; then
     return 0
   fi
   #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
@@ -3363,7 +3988,10 @@ route_delegate() {
   esac
 
   RESOLVED_ID="$MODEL"; RESOLVED_LANE=""; TTIER=""
-  if [ "$MODEL_EXPLICIT" = "1" ]; then
+  # DROID/CURSOR engine lanes skip alias resolution entirely: the engine owns its model catalog
+  # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
+  # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -3372,7 +4000,30 @@ route_delegate() {
   fi
 
   local disp=""
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ -n "$RESOLVED_LANE" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ]; then
+    disp="$PROVIDER"
+    # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
+    # otherwise bury this error inside a background job the user has to go dig out.
+    case "$disp" in
+      droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in." ;;
+      cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
+    esac
+  elif [ "$PROVIDER" = "claudex" ]; then
+    # CLAUDEX: a ChatGPT-sub model (sol/terra/luna/gpt-5.5) inside the Claude Code HARNESS via the
+    # user's local CLIProxyAPI. Alias resolution DID run above (sol -> gpt-5.6-sol). Guardrails:
+    #  - Claude-subscription models are REFUSED here: routing Claude OAuth through a third-party
+    #    proxy breaks Anthropic's usage policy; the claude-native lane already serves them first-class.
+    #  - no -m defaults to gpt-5.6-sol (the model this lane exists for).
+    case "$RESOLVED_LANE" in
+      cc) die "-m $MODEL is a Claude-subscription model; routing it through a third-party proxy breaks Anthropic's usage policy. Drop --provider claudex and run -m $MODEL on the claude-native lane (same harness, fully legit)." ;;
+    esac
+    [ "$MODEL_EXPLICIT" = "1" ] || RESOLVED_ID="gpt-5.6-sol"
+    # Fail FAST (pre-cloud-gate, pre-auto-detach): a missing claude CLI or dead proxy must be an
+    # instant pointer, not an error buried inside a detached background job.
+    have claude || die "claudex lane needs the claude CLI on PATH."
+    [ -n "${OSRC_JOB_DIR:-}" ] || _claudex_up || die "claudex lane: no CLIProxyAPI answering at $(_claudex_url) (or no api-key found). This lane rides a proxy YOU install and log into: https://github.com/router-for-me/CLIProxyAPI (then cli-proxy-api --codex-login). Set OSRC_CLAUDEX_URL / OSRC_CLAUDEX_TOKEN if yours is elsewhere. Meanwhile -m ${RESOLVED_ID} runs fine on the codex-native lane (drop --provider)."
+    disp=claudex
+  elif [ "$MODEL_EXPLICIT" = "1" ] && [ -n "$RESOLVED_LANE" ]; then
     case "$RESOLVED_LANE" in
       cx)  [ "$PROVIDER" = "cc" ] && die "gpt-5.6-* (Sol/Terra/Luna) is ChatGPT-backend-only; dispatching it via OpenRouter/cc 400s. Drop --provider and let '-m $MODEL' use the codex native lane (needs no OpenRouter key)."
            disp=cxnative ;;
@@ -3407,7 +4058,7 @@ route_delegate() {
       devin) disp=devin ;;
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|claudex|local)" ;;
     esac
   fi
 
@@ -3420,7 +4071,10 @@ route_delegate() {
   # INSIDE it, AFTER _secret_scan. Guarding the CALL with `[ ACKED != 1 ]` let an inherited/exported
   # OSRC_CLOUD_ACKED=1 skip the credential hard-block entirely (a .env would ship to the cloud lane).
   # The disclosure notice is still suppressed for an already-acked process by the in-function return.
-  _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]}"
+  # Guard the no-task case: on bash 3.2 (macOS default) "${REST[*]}" on an empty array trips `set -u`.
+  # Fail with the clean contract message instead of a raw unbound-variable crash.
+  [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
+  _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
 
   # AUTO-DETACH (D3): if non-interactive AND slow-lane, auto-promote to the bg path so a harness
   # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
@@ -3445,6 +4099,9 @@ route_delegate() {
       cxnative) delegate_cxnative "$tier" ;;
       ccnative) delegate_ccnative "$tier" ;;
       gmnative) delegate_gmnative "$tier" ;;
+      droid)    delegate_droid    "$tier" ;;
+      cursor)   delegate_cursor   "$tier" ;;
+      claudex)  delegate_claudex  "$tier" ;;
     esac
   }
   _fg_guard __osrc_fg_dispatch "$tier"
@@ -3469,7 +4126,10 @@ _tmux_reset_input() {
 
 # ---- interactive tmux session (opt-in) ----
 session() {
-  have tmux || die "tmux not installed (brew install tmux)"
+  if ! have tmux; then
+    [ "$OSRC_PLATFORM" = "windows" ] && die "interactive 'session' mode needs tmux, which Git Bash doesn't ship. EVERYTHING ELSE works on Windows without WSL: use run/edit/yolo for one-shots and bg/fanout + status/watch for long or parallel work (same capability, supervised). If you really want session mode, install tmux via MSYS2 (pacman -S tmux) or use WSL."
+    die "tmux not installed ($( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')). Only 'session' needs it — bg/fanout cover the same ground supervised."
+  fi
   local sub="${1:-}"; shift || true
   case "$sub" in
     start)
@@ -3656,7 +4316,20 @@ parity() {
 
 doctor() {
   echo "== outsourcerer doctor (v$OSRC_VERSION) =="
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex or OUTSOURCERER_PROVIDER)"
+  echo "  platform: $OSRC_PLATFORM$( [ "$OSRC_PLATFORM" = "windows" ] && echo ' (Git Bash — NO WSL needed. Works: run/edit/yolo/bg/fanout/status/doctor/advise. Not available: tmux session mode.)')"
+  # State-home writability: THE silent killer under sandboxed harness shells. Report, don't die —
+  # doctor's job is to diagnose.
+  mkdir -p "$OSRC_HOME" 2>/dev/null
+  if ( : > "$OSRC_HOME/.wtest" ) 2>/dev/null; then rm -f "$OSRC_HOME/.wtest" 2>/dev/null
+    echo "  state home: $OSRC_HOME (writable — jobs/ledger/cache OK)"
+  else
+    echo "  state home: $OSRC_HOME NOT WRITABLE — every job will fail. Sandboxed shell? Allow writes to ~/.outsourcerer (Claude Code: settings.json sandbox allowWrite) or set OSRC_HOME to a writable dir."
+  fi
+  if [ -f "$OSRC_CONSENT_FILE" ]; then echo "  cloud consent: granted + remembered ($0 consent revoke to undo)"
+  else echo "  cloud consent: not yet granted — first cloud delegation asks ONCE and remembers ($0 consent grant to pre-grant)"; fi
+  local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
+  local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -3680,6 +4353,22 @@ doctor() {
     have gemini && { gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
   else
     echo "    (set OSRC_DOCTOR_PING=1 to probe native lane auth with a 1-token ping)"
+  fi
+  echo "  -- Engine lanes (YOUR agent CLI + YOUR configured models, incl. BYOK) --"
+  if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Uses your Factory plan / customModels in ~/.factory/settings.json (free/cheap BYOK lanes work as-is)."
+  else echo "    droid (Factory): NOT on PATH — install: https://docs.factory.ai/cli (macOS/Linux/Windows-native)"; fi
+  if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Bills your Cursor subscription credits."
+  else echo "    cursor-agent: NOT on PATH — install: curl https://cursor.com/install -fsS | bash (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
+  echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
+  if have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
+    if _claudex_up 2>/dev/null; then
+      echo "    claudex: READY — proxy answering at $(_claudex_url). Route: --provider claudex run [-m sol|terra|luna] \"task\" (Claude harness UX, bills your ChatGPT plan)."
+      echo "      note: UNOFFICIAL community bridge (internal upstream endpoints, no rate limiting — heavy use risks provider-side limits). Claude-sub models are refused here by policy; codex CLI is still the lane for gpt-image."
+    else
+      echo "    claudex: proxy installed but NOT answering at $(_claudex_url) (start it, check api-keys in ~/.cli-proxy-api/config.yaml, or set OSRC_CLAUDEX_URL/OSRC_CLAUDEX_TOKEN)"
+    fi
+  else
+    echo "    claudex: not set up (optional). It runs sol/terra/luna INSIDE Claude Code via a self-hosted proxy the USER installs + audits: https://github.com/router-for-me/CLIProxyAPI (then: cli-proxy-api --codex-login). Detect-only: outsourcerer never installs it. Official alternative: openai/codex-plugin-cc."
   fi
   echo "  -- Local inference lane (Ollama / LM Studio / llama.cpp, KEYLESS, PRIVATE, \$0 cash + \$0 plan) --"
   local _ld; if _ld="$(_local_detect 2>/dev/null)"; then
@@ -3737,8 +4426,8 @@ doctor() {
     echo "  auth:  NOT logged in -> run:  ! devin auth login"
   fi
   echo "  default model: $DEFAULT_MODEL"
-  have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: parity MCP port)" || echo "  jq:   not installed -> brew install jq   (only needed for 'parity')"
-  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed -> brew install tmux (only needed for 'session')"
+  have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: jobs/status/advise/parity)" || echo "  jq:   not installed -> $( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || { [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install jq' || echo 'apt/dnf install jq'; }) (jobs/status/advise need it)"
+  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' unavailable; bg/fanout cover it" || echo "brew/apt install tmux — only needed for 'session'"))"
   local lm; lm="$(live_models)"
   if [ -n "$lm" ]; then echo "  live models:"; printf '%s\n' "$lm" | tr ',' '\n' | sed 's/^/    /'
   else echo "  live models: (probe returned nothing, devin may be offline or changed its 'Available:' output)"; fi
@@ -3769,18 +4458,36 @@ EOF
 }
 
 main() {
-  # optional leading `--provider NAME` overrides the env/default backend
-  if [ "${1:-}" = "--provider" ]; then
-    [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex)"
-    PROVIDER="$2"; shift 2
-  fi
+  # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
+  # ALSO accepted after it, via _consume_flags/parse_model). Audits showed a misplaced --cloud-ack
+  # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
+  while :; do
+    case "${1:-}" in
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"
+                  PROVIDER="$2"; shift 2 ;;
+      --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
+      *) break ;;
+    esac
+  done
   local cmd="${1:-}"; shift || true
+  # Fail fast + self-explaining if the state home is unwritable (sandboxed shell). Skipped for
+  # help/version/doctor: those must still run so they can DIAGNOSE the problem.
+  # Read-only handshake/status commands must still run in a sandbox (they only READ); mode setters
+  # enforce their own write inside _mode_persist.
+  # tap is exempt too: `tap run` fires on EVERY statusline render and MUST reach its guaranteed
+  # passthrough even when OSRC_HOME is unwritable (a preflight die would silently kill the user's
+  # real statusline). Its write paths self-guard. brief/mode are read-only/self-guarding likewise.
+  case "$cmd" in ""|-h|--help|help|--version|-V|doctor|brief|mode|tap) ;; *) _state_home_preflight ;; esac
   case "$cmd" in
     --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)
     __gencost) _or_gen_cost "$1"; echo ;;                 # internal test: real cost of one generation id
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log
     doctor)   doctor ;;
+    brief)    cmd_brief ;;                                 # session-start handshake: lanes + limits + conserve + mode
+    mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
+    tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
+    consent)  cmd_consent "$@" ;;                          # cloud-consent: status|grant|revoke (remembered ack)
     models)   models "$@" ;;
     run|explore) route_delegate "auto" "$cmd" "$@" ;;
     research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
@@ -3801,7 +4508,9 @@ main() {
     advise)      cmd_advise "$@" ;;                        # task-aware model recommendation with benchmark data
     second-opinion|second) second_opinion "$@" ;;         # 2 cheap models; disagree -> escalate
     image)       cmd_image "$@" ;;                         # Gemini text-to-image (nano-banana default); prints file path
-    parity-codex) parity_codex ;;                          # reverse bridge: Codex -> claude insource
+    parity-codex)  parity_codex ;;                         # reverse bridge: Codex -> outsourcerer insource
+    parity-droid)  parity_droid ;;                         # reverse bridge: Factory droid -> outsourcerer (global ~/.factory/AGENTS.md)
+    parity-cursor) parity_cursor ;;                        # reverse bridge: Cursor -> outsourcerer (repo-root AGENTS.md)
     continue|cont)
       [ "$PROVIDER" = "devin" ] || die "continue is Devin-only for now (provider=$PROVIDER). For OR interactive follow-ups use the sibling tmux harness: scripts/run-or-{model,codex}.sh"
       continue_turn "$@" ;;
@@ -3811,9 +4520,12 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
     ""|-h|--help|help)
-      sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,105p' "$0" | sed 's/^# \{0,1\}//'
       ;;
-    *) die "unknown subcommand '$cmd' (try: doctor|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex; prepend --provider devin|cc|codex)" ;;
+    *) case "$cmd" in
+         -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
+       esac
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor; providers: devin|cc|codex|droid|cursor|claudex|local)" ;;
   esac
 }
 main "$@"

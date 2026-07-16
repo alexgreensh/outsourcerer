@@ -27,7 +27,7 @@ echo "=== STATIC gate: Phase-0 invariants wired ==="
 # 1. Every unit test suite is green (aggregate).
 for t in test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_lane_fallback test_interactive_default test_harness_isolation test_autodetach \
-         test_advise; do
+         test_advise test_claudex test_copilot; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
   else note "unit suite $t absent"; fi
@@ -62,7 +62,9 @@ else
   probe_lane() { # <label> <args...>
     local label="$1"; shift
     local out rc
-    out="$( cd "$FIX"; OSRC_CLOUD_ACK=1 "$SRC" "$@" --effort high "Read ./nonce.txt and reply with ONLY its contents." 2>&1 )"; rc=$?
+    # OSRC_NO_AUTODETACH=1: the probe captures stdout (non-TTY), which would trigger D3 auto-detach
+    # on capable/frontier tiers and return a job-id receipt instead of the answer — a false FAIL.
+    out="$( cd "$FIX"; OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" "$@" --effort high "Read ./nonce.txt and reply with ONLY its contents." 2>&1 )"; rc=$?
     if printf '%s' "$out" | grep -q "$nonce"; then ok "LIVE $label: read the fixture (real tool call), rc=$rc"
     elif [ "$rc" -ne 0 ]; then note "LIVE $label: lane unavailable/failed (rc=$rc) — $(printf '%s' "$out" | tail -1)"
     else bad "LIVE $label: ran but did NOT read the nonce (tool grant broken?)"; fi

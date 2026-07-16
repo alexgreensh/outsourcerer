@@ -30,6 +30,35 @@ do NOT silently re-run the same model on a half-mutated tree; report the last pr
 escalate one tier up or do it yourself. Stall/kill/timeout windows: budget 90/240/900s,
 mid 150/420/1800s, frontier 300/900/3600s (override with `OSRC_STALL_WARN`/`OSRC_STALL_KILL`/`OSRC_TIMEOUT`).
 
+## Cloud gate + one-time consent
+
+Every cloud lane (devin/cc/codex/native/gemini/droid/cursor) runs two independent protections
+before dispatch; local ollama/lmstudio lanes skip both (nothing leaves the machine):
+
+1. **Secret-scan hard-block** — a real credential file in the delegated scope (`.env`, `id_rsa`,
+   `.aws/credentials`, nested variants) kills the run REGARDLESS of any consent. Runs on every
+   single delegation, always. Not skippable by ack, consent file, or env.
+2. **Cloud disclosure consent** — "repo content leaves this machine" must be acknowledged ONCE per
+   user, not once per run. Any explicit ack (interactive `y`, `--cloud-ack`, `OSRC_CLOUD_ACK=1`,
+   or `consent grant`) is remembered in `~/.outsourcerer/cloud-consent`; from then on the
+   disclosure banner still prints but nothing asks or refuses. `consent status|grant|revoke`
+   manages it; `OSRC_CLOUD_ACK=0` forces one run to ignore the stored grant.
+
+**How Claude drives it:** first cloud delegation for a user → one conversational line ("this sends
+repo content to <lane>; ok if I remember that choice?"), then `consent grant` and proceed. Never
+show the user raw gate errors or make them learn flags; never blindly re-run a refusal.
+
+**State home preflight:** every state-touching subcommand verifies `~/.outsourcerer` is writable
+and dies with the exact fix if not (sandboxed harness shells deny it: allow the path in the
+sandbox config, disable the sandbox for the call, or set `OSRC_HOME`). `doctor` reports it too.
+
+## Windows (Git Bash, no WSL)
+
+`run`/`edit`/`yolo`/`bg`/`fanout`/`status`/`doctor`/`advise`/`consent` all work under Git Bash
+(ships with Git for Windows). `scripts/outsourcerer.cmd` / `scripts/outsourcerer.ps1` launch it
+from cmd/PowerShell and find Git Bash automatically. Only tmux `session` mode is unavailable —
+use `bg` + `watch` for the same supervised capability. `jq` on Windows: `winget install jqlang.jq`.
+
 ## Orchestration rules while this skill is active
 
 (Mechanism detail for the "magic contract" in `SKILL.md`, read that first for *how* to
