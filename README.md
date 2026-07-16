@@ -251,7 +251,7 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 <img src="readme-assets/section-roadmap.png" alt="The sorcerer facing a row of magic portals, two open and two still forming in the distance" width="100%">
 
-**More harnesses, coming soon.** Today it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
+**Today it drives like a copilot.** It greets you each session, shows your live token budget, and hands you the wheel: **auto-pilot**, **you-drive**, or **hybrid**, then conserves your limits on its own when the session runs hot. And it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
 
 - **Pi** and more harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
