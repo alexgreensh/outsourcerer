@@ -6,7 +6,11 @@
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
 ![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin-8A5CF6)
-![Windows: no WSL](https://img.shields.io/badge/Windows-no%20WSL%20needed-8A5CF6)
+
+![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
+![Windows](https://img.shields.io/badge/Windows-Git%20Bash%2C%20no%20WSL-0078D6?logo=windows&logoColor=white)
+![Copilot](https://img.shields.io/badge/copilot-auto%20·%20manual%20·%20hybrid-8A5CF6)
 
 ### Your frontier model is doing grep.
 
