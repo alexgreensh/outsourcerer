@@ -10,7 +10,8 @@
 ![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
 ![Windows](https://img.shields.io/badge/Windows-Git%20Bash%2C%20no%20WSL-0078D6?logo=windows&logoColor=white)
-![Copilot](https://img.shields.io/badge/copilot-auto%20·%20manual%20·%20hybrid-8A5CF6)
+![Copilot](https://img.shields.io/badge/🚗%20copilot-auto%20·%20manual%20·%20hybrid-2ea44f)
+![Model advisory](https://img.shields.io/badge/model%20advisory-benchmark--scored-2ea44f)
 
 ### Your frontier model is doing grep.
 
@@ -66,6 +67,14 @@ Pick once and it remembers. Change your mind in plain language any time ("take t
 You know the feeling: 2pm, deep in a build, and your 5-hour limit taps out. Work stops.
 
 Outsourcerer reads your live usage and, the moment you cross into the danger zone, quietly shifts the heavy lifting off your main model onto a cheaper lane that's still full, and tells you why it did. Your best model stays sharp for the judgment calls instead of getting spent on grep. The wall stops being a surprise you slam into and becomes a corner the sorcerer already saw coming. Different setup, same care: no Devin? It leans on Codex. Only local models? It keeps everything on your machine. It conserves with whatever *you* actually have.
+
+---
+
+## It knows which model is actually worth it
+
+You shouldn't have to memorize which model is best at what, or keep up with a leaderboard that shuffles every week. Ask Outsourcerer to pick, and it does the homework for you: it reads what the task really is (code? reasoning? a quick errand?), pulls **live benchmark scores** for every model you can reach, weighs quality against what each one actually costs you, and recommends the best *value* for this job, not just the most famous name.
+
+That means a frontier-grade answer on a budget lane when the cheap model genuinely clears the bar, and a premium model only when the task truly earns it. It shows you the score and the reason it chose what it chose, so the pick is never a black box, and you can always overrule it. When it can't reach the live boards, it falls back to a built-in capability map, so the recommendation is never worse than a good default.
 
 ---
 
