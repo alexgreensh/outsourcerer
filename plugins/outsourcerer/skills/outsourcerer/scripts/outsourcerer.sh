@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier (eng-plan-reviewer C1/H5). Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.10"
+OSRC_VERSION="0.4.11"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -428,6 +428,11 @@ delegate() {
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ]; then
     echo "HINT: sandboxed run exited $rc. If a Read/Write scope was denied, retry with 'yolo' (dangerous, no sandbox)." >&2
   fi
+  # Diagnostics-only: devin prints a bare "Connection error" when its Rust TLS stack rejects a
+  # local/sandboxed proxy's cert (rustls OSStatus cert-verify, visible only in devin's own CLI log).
+  # Surface a specific, recognizable hint so the failure is diagnosable from outsourcerer's side.
+  # No retry/routing change -- the hint just names the cause and the fix (disable the sandbox/proxy).
+  [ "$rc" -ne 0 ] && _devin_sandboxed_proxy_tls_hint
   return "$rc"
 }
 
@@ -2278,13 +2283,23 @@ cmd_watch() {
 cmd_result() {
   local id="${1:-}"; [ -n "$id" ] || die "result needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
-  if [ -s "$jd/last.txt" ]; then cat "$jd/last.txt"; else tail -n 40 "$jd/out.log" 2>/dev/null; fi
+  local shown
+  if [ -s "$jd/last.txt" ]; then shown="$(cat "$jd/last.txt")"; cat "$jd/last.txt"; else shown="$(tail -n 40 "$jd/out.log" 2>/dev/null)"; tail -n 40 "$jd/out.log" 2>/dev/null; fi
+  # Diagnostics-only: if this is a failed devin job and the recognizable TLS/proxy hint is not
+  # already in the surfaced text, re-scan devin's own log and append it to STDERR (the cause lives
+  # in ~/.local/share/devin/cli/logs/, not out.log; stderr keeps it out of the result payload).
+  # No retry/routing change. stdout-only redirect: the hint itself is written to stderr by the helper.
+  _devin_job_tls_hint "$id" "$shown" >/dev/null
 }
 
 cmd_logs() {
   local id="${1:-}"; [ -n "$id" ] || die "logs needs a job id"
   local n=60; [ "${2:-}" = "-n" ] && n="${3:-60}"
-  tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null || die "no log for $id"
+  local shown; shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "no log for $id"
+  tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null
+  # Diagnostics-only (see cmd_result): append the recognizable TLS/proxy hint for a failed devin
+  # job to STDERR when it is not already in the tailed log. No retry/routing change.
+  _devin_job_tls_hint "$id" "$shown" >/dev/null
 }
 
 cmd_cancel() {
@@ -3885,6 +3900,77 @@ _is_transport_failure() {
   return 1
 }
 
+# _is_sandboxed_proxy_tls_failure <text> -> 0 if <text> carries the specific signature of devin's
+# Rust TLS stack (rustls_platform_verifier) rejecting a local/sandboxed proxy's peer certificate
+# (an Apple Security OSStatus cert-verify code), typically alongside chisel_cloud_bridge handoff
+# retries. This is the failure that surfaces from devin as a bare, generic "Connection error" with
+# no hint of the real cause; the signature only appears in devin's OWN CLI log
+# (~/.local/share/devin/cli/logs/), not in the captured out.log. DIAGNOSTICS-ONLY: this never
+# drives retry/routing/fallback -- it only names a recognizable failure so the caller can act.
+# Narrowness follows the same discipline as _is_transport_failure's PASS 1: the matched tokens are
+# MACHINE identifiers (a Rust crate name + an Apple Security error code) that never occur in
+# ordinary task/test prose, so an anywhere-in-text match is false-positive-safe.
+_is_sandboxed_proxy_tls_failure() {
+  local text="$1"
+  # PASS 1 (machine tokens, anywhere in text): rustls_platform_verifier + an OSStatus cert-verify
+  # code on the same log scan. Both tokens are emitted only by devin's TLS verify path against an
+  # untrusted peer cert and never appear in task/test output.
+  if printf '%s' "$text" | grep -qiE 'rustls_platform_verifier' && \
+     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+    return 0
+  fi
+  # PASS 2 (corroborated): chisel_cloud_bridge handoff retries + an OSStatus cert-verify code.
+  # The chisel tunnel is devin's cloud ACP transport; an OSStatus cert failure there is the same
+  # root cause surfaced through a different log line. Require BOTH tokens to stay narrow.
+  if printf '%s' "$text" | grep -qiE 'chisel_cloud_bridge' && \
+     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+    return 0
+  fi
+  return 1
+}
+
+# _devin_sandboxed_proxy_tls_hint -> 0 and prints a one-line diagnostics hint to stderr when
+# devin's own CLI log (~/.local/share/devin/cli/logs/devin_*.log) carries the sandboxed-proxy TLS
+# signature. Called from delegate() after a non-zero devin exit (covers foreground + bg: for bg the
+# supervisor captures stderr into out.log, so the hint reaches result/logs too). Purely diagnostic --
+# does not change retry/routing. Silent on no match. The scan reads only the tail of the NEWEST
+# devin log: the rustls/chisel retry storm lands at the end of the log right before devin gives up,
+# so a tail scan avoids stale matches from an earlier session (override tail size via
+# OSRC_DEVIN_LOG_SCAN, default 300 lines).
+_devin_sandboxed_proxy_tls_hint() {
+  local dlog_dir="${HOME}/.local/share/devin/cli/logs"
+  [ -d "$dlog_dir" ] || return 1
+  local newest; newest="$(ls -t "$dlog_dir"/devin_*.log 2>/dev/null | head -1)"
+  [ -n "$newest" ] || return 1
+  local tail_text; tail_text="$(tail -n "${OSRC_DEVIN_LOG_SCAN:-300}" "$newest" 2>/dev/null)"
+  [ -n "$tail_text" ] || return 1
+  _is_sandboxed_proxy_tls_failure "$tail_text" || return 1
+  local osstatus; osstatus="$(printf '%s' "$tail_text" | grep -oE 'OSStatus -[0-9]+' | head -1)"
+  [ -n "$osstatus" ] || osstatus="OSStatus cert-verify error"
+  printf 'devin TLS handshake failed against a local proxy in your shell (rustls cert verify: %s). This usually means a sandboxed/corporate proxy that devin'\''s Rust TLS client won'\''t trust. If you'\''re inside Claude Code'\''s sandboxed Bash tool, re-run this call with the sandbox disabled for devin-backed verbs.\n' "$osstatus" >&2
+  return 0
+}
+
+# _devin_job_tls_hint <job-id> <already-shown-text> -> emits the sandboxed-proxy TLS hint to stderr
+# for a terminal-failed devin job whose surfaced text does NOT already carry it (avoids
+# double-printing when delegate() already wrote the hint into out.log). Used by cmd_result/cmd_logs
+# so a caller inspecting a failed devin job later still sees the recognizable cause. Diagnostics-only.
+_devin_job_tls_hint() {
+  local id="$1" jd="$OSRC_JOBS/$1" shown="$2"
+  [ -d "$jd" ] || return 1
+  local prov; prov="$(_job_field "$id" '.provider' 2>/dev/null)"
+  [ "$prov" = "devin" ] || return 1
+  local st; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+  case "$st" in
+    failed|wedged|timeout|interrupted|permission-blocked) ;;
+    *) return 1 ;;
+  esac
+  case "$shown" in
+    *rustls*proxy*|*"devin TLS handshake failed"*) return 0 ;;   # already surfaced in out.log
+  esac
+  _devin_sandboxed_proxy_tls_hint
+}
+
 # delegate_codex <perm-tier> [-m MODEL] "<task>" , Codex exec -> OpenRouter (native Responses API)
 delegate_codex() {
   local tier="$1"; shift
@@ -4426,6 +4512,12 @@ doctor() {
     echo "  auth:  $(devin auth status 2>/dev/null | awk -F: '/Tier/{gsub(/^[ \t]+/,"",$2);print "logged in ("$2" tier)"}')"
   else
     echo "  auth:  NOT logged in -> run:  ! devin auth login"
+  fi
+  # Proactive diagnostics: a *_PROXY env var in this shell + devin present means devin's Rust TLS
+  # client may reject the proxy cert (rustls OSStatus cert-verify), surfacing as a bare "Connection
+  # error" ~100-160s in. Name it now so the failure is recognizable when it happens. Detect-only.
+  if [ -n "${HTTPS_PROXY:-}${HTTP_PROXY:-}${ALL_PROXY:-}${https_proxy:-}${http_proxy:-}${all_proxy:-}" ]; then
+    echo "  proxy: a *_PROXY env var is set in this shell — devin's Rust TLS client may reject the proxy cert (rustls OSStatus cert-verify error, surfaces as a bare 'Connection error' after ~100-160s). If devin-backed verbs fail that way, re-run with the sandbox/proxy disabled for that call."
   fi
   echo "  default model: $DEFAULT_MODEL"
   have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: jobs/status/advise/parity)" || echo "  jq:   not installed -> $( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || { [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install jq' || echo 'apt/dnf install jq'; }) (jobs/status/advise need it)"

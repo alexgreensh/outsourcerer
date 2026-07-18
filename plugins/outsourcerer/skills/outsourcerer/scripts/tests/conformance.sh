@@ -26,8 +26,8 @@ echo "=== STATIC gate: Phase-0 invariants wired ==="
 
 # 1. Every unit test suite is green (aggregate).
 for t in test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
-         test_lane_fallback test_interactive_default test_harness_isolation test_autodetach \
-         test_advise test_claudex test_copilot; do
+         test_devin_tls_diagnostics test_lane_fallback test_interactive_default \
+         test_harness_isolation test_autodetach test_advise test_claudex test_copilot; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
   else note "unit suite $t absent"; fi

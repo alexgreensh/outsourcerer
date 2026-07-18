@@ -52,6 +52,25 @@ show the user raw gate errors or make them learn flags; never blindly re-run a r
 and dies with the exact fix if not (sandboxed harness shells deny it: allow the path in the
 sandbox config, disable the sandbox for the call, or set `OSRC_HOME`). `doctor` reports it too.
 
+**Devin sandboxed-proxy TLS failure:** when a devin-backed job dies on the sandboxed-proxy TLS
+mismatch, devin prints only a bare `Connection error, send a message to continue retrying` and
+silently retries with backoff for ~100-160s before giving up. The real cause lives in devin's own
+CLI log (`~/.local/share/devin/cli/logs/devin_*.log`): `rustls_platform_verifier` rejecting a
+local/sandboxed proxy's peer certificate (`OSStatus -<n>` cert-verify code), typically alongside
+`chisel_cloud_bridge` handoff retries. outsourcerer scans the newest devin log tail after a
+non-zero devin exit and surfaces a one-line hint naming the cause and the fix:
+
+```
+devin TLS handshake failed against a local proxy in your shell (rustls cert verify: OSStatus -26276).
+This usually means a sandboxed/corporate proxy that devin's Rust TLS client won't trust. If you're
+inside Claude Code's sandboxed Bash tool, re-run this call with the sandbox disabled for devin-backed verbs.
+```
+
+This is diagnostics-only — it does not change retry, routing, fallback, or transport-vs-task
+classification. `doctor` proactively notes a `*_PROXY` env var when devin is installed. The hint
+flows through `delegate()` (foreground + bg, since the supervisor captures stderr into `out.log`)
+and is re-emitted by `result`/`logs` for a failed devin job when not already present.
+
 ## Windows (Git Bash, no WSL)
 
 `run`/`edit`/`yolo`/`bg`/`fanout`/`status`/`doctor`/`advise`/`consent` all work under Git Bash
