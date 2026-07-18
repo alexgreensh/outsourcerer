@@ -432,7 +432,9 @@ delegate() {
   # local/sandboxed proxy's cert (rustls OSStatus cert-verify, visible only in devin's own CLI log).
   # Surface a specific, recognizable hint so the failure is diagnosable from outsourcerer's side.
   # No retry/routing change -- the hint just names the cause and the fix (disable the sandbox/proxy).
-  [ "$rc" -ne 0 ] && _devin_sandboxed_proxy_tls_hint
+  # `|| true` keeps the diagnostic line from leaking a non-zero status into delegate()'s return
+  # (rc is already captured above; the helper is best-effort and silent on no match).
+  [ "$rc" -ne 0 ] && _devin_sandboxed_proxy_tls_hint || true
   return "$rc"
 }
 
@@ -2283,23 +2285,28 @@ cmd_watch() {
 cmd_result() {
   local id="${1:-}"; [ -n "$id" ] || die "result needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
-  local shown
-  if [ -s "$jd/last.txt" ]; then shown="$(cat "$jd/last.txt")"; cat "$jd/last.txt"; else shown="$(tail -n 40 "$jd/out.log" 2>/dev/null)"; tail -n 40 "$jd/out.log" 2>/dev/null; fi
+  local shown rc=0
+  if [ -s "$jd/last.txt" ]; then shown="$(cat "$jd/last.txt")"; cat "$jd/last.txt" || rc=$?
+  else shown="$(tail -n 40 "$jd/out.log" 2>/dev/null)"; tail -n 40 "$jd/out.log" 2>/dev/null || rc=$?; fi
   # Diagnostics-only: if this is a failed devin job and the recognizable TLS/proxy hint is not
   # already in the surfaced text, re-scan devin's own log and append it to STDERR (the cause lives
   # in ~/.local/share/devin/cli/logs/, not out.log; stderr keeps it out of the result payload).
-  # No retry/routing change. stdout-only redirect: the hint itself is written to stderr by the helper.
-  _devin_job_tls_hint "$id" "$shown" >/dev/null
+  # No retry/routing change. `|| true` keeps the helper's no-match exit (1) from becoming this
+  # function's return code -- result/logs must stay 0 on a successful print (regression guard).
+  _devin_job_tls_hint "$id" "$shown" >/dev/null || true
+  return "$rc"
 }
 
 cmd_logs() {
   local id="${1:-}"; [ -n "$id" ] || die "logs needs a job id"
   local n=60; [ "${2:-}" = "-n" ] && n="${3:-60}"
-  local shown; shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "no log for $id"
-  tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null
+  local shown rc=0; shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "no log for $id"
+  tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null || rc=$?
   # Diagnostics-only (see cmd_result): append the recognizable TLS/proxy hint for a failed devin
-  # job to STDERR when it is not already in the tailed log. No retry/routing change.
-  _devin_job_tls_hint "$id" "$shown" >/dev/null
+  # job to STDERR when it is not already in the tailed log. `|| true` preserves the original
+  # return code (rc) -- the helper's no-match exit must not change result/logs' exit status.
+  _devin_job_tls_hint "$id" "$shown" >/dev/null || true
+  return "$rc"
 }
 
 cmd_cancel() {

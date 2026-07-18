@@ -145,6 +145,47 @@ if [ -n "$job_hint_run" ]; then bad "job_hint: FALSE-POSITIVE for non-terminal (
 job_hint_none="$(_devin_job_tls_hint "no-such-job" 'whatever' 2>&1)"
 if [ -n "$job_hint_none" ]; then bad "job_hint: emitted for nonexistent job"; else ok "job_hint: silent for nonexistent job"; fi
 
+# --- Scenario 3f: cmd_result/cmd_logs preserve exit 0 on a successful print (regression guard).
+# The diagnostics helper must NOT change result/logs' return code: a no-match helper exits 1, and
+# if it became the function's return code, `result`/`logs` would return non-zero on every successful
+# print. Re-emit-on-match must also leave the exit code at 0.
+# (a) devin job WITHOUT the TLS signature in devin's log -> hint silent, exit 0.
+rm -f "$HOME/.local/share/devin/cli/logs"/devin_*.log
+printf '%s\n' 'INFO  devin: normal run, no TLS error' > "$HOME/.local/share/devin/cli/logs/devin_clean.log"
+jid_clean="job-devin-clean"; jd_clean="$OSRC_HOME/jobs/$jid_clean"; mkdir -p "$jd_clean"
+printf '{"provider":"devin","verb":"run","model":"glm-5.2"}' > "$jd_clean/meta.json"
+echo done > "$jd_clean/status"
+printf 'all good, task complete\n' > "$jd_clean/last.txt"
+printf 'all good, task complete\n' > "$jd_clean/out.log"
+cmd_result "$jid_clean" >/dev/null 2>&1; rc_result=$?
+if [ "$rc_result" -eq 0 ]; then ok "cmd_result: exit 0 on successful print (no TLS match)"; else bad "cmd_result: exit $rc_result (regression: helper exit leaked)"; fi
+cmd_logs "$jid_clean" >/dev/null 2>&1; rc_logs=$?
+if [ "$rc_logs" -eq 0 ]; then ok "cmd_logs: exit 0 on successful print (no TLS match)"; else bad "cmd_logs: exit $rc_logs (regression: helper exit leaked)"; fi
+
+# (b) devin job WITH the TLS signature -> hint emitted to stderr, exit STILL 0.
+printf '%s\n' "$rustls_fixture" > "$HOME/.local/share/devin/cli/logs/devin_newest.log"
+jid_sig="job-devin-sig"; jd_sig="$OSRC_HOME/jobs/$jid_sig"; mkdir -p "$jd_sig"
+printf '{"provider":"devin","verb":"run","model":"glm-5.2"}' > "$jd_sig/meta.json"
+echo failed > "$jd_sig/status"
+printf 'Error: Agent error: Connection error\n' > "$jd_sig/last.txt"
+printf 'Error: Agent error: Connection error\n' > "$jd_sig/out.log"
+sig_out="$(cmd_result "$jid_sig" 2>/tmp/rr_sig 1>/dev/null)"; rc_sig=$?
+sig_err="$(cat /tmp/rr_sig 2>/dev/null)"; rm -f /tmp/rr_sig
+if [ "$rc_sig" -eq 0 ]; then ok "cmd_result: exit 0 even when hint is emitted"; else bad "cmd_result: exit $rc_sig when hint emitted (regression)"; fi
+if printf '%s' "$sig_err" | grep -q 'devin TLS handshake failed'; then ok "cmd_result: hint emitted to stderr on signature"; else bad "cmd_result: hint NOT emitted on signature"; fi
+sig_logs_out="$(cmd_logs "$jid_sig" 2>/tmp/rl_sig 1>/dev/null)"; rc_sigl=$?
+sig_logs_err="$(cat /tmp/rl_sig 2>/dev/null)"; rm -f /tmp/rl_sig
+if [ "$rc_sigl" -eq 0 ]; then ok "cmd_logs: exit 0 even when hint is emitted"; else bad "cmd_logs: exit $rc_sigl when hint emitted (regression)"; fi
+if printf '%s' "$sig_logs_err" | grep -q 'devin TLS handshake failed'; then ok "cmd_logs: hint emitted to stderr on signature"; else bad "cmd_logs: hint NOT emitted on signature"; fi
+
+# (c) non-devin (cc) job -> hint silent, exit 0.
+jid_cc="job-cc-clean"; jd_cc="$OSRC_HOME/jobs/$jid_cc"; mkdir -p "$jd_cc"
+printf '{"provider":"cc","verb":"run","model":"glm-5.2"}' > "$jd_cc/meta.json"
+echo done > "$jd_cc/status"
+printf 'result text\n' > "$jd_cc/last.txt"
+cc_err="$(cmd_result "$jid_cc" 2>&1 >/dev/null)"; rc_cc=$?
+if [ "$rc_cc" -eq 0 ] && [ -z "$cc_err" ]; then ok "cmd_result: non-devin job exit 0, no hint"; else bad "cmd_result: non-devin job rc=$rc_cc err='$cc_err'"; fi
+
 # --- Scenario 4: regression — _is_transport_failure classifications are NOT affected. ---
 # The new diagnostics must not change existing transport-vs-task classification. Re-assert a few
 # canonical cases from test_escalation_classify.sh stay classified exactly as before.
