@@ -82,7 +82,9 @@ mkdir -p "$HOME/.local/share/devin/cli/logs"
 # An older log file (must NOT be scanned when a newer one exists — avoids stale matches).
 printf '%s\n' 'ERROR rustls_platform_verifier::verification::apple: OSStatus -9843 (stale, older session)' \
   > "$HOME/.local/share/devin/cli/logs/devin_old.log"
-sleep 0.05 2>/dev/null || true
+# sleep 1 for deterministic mtime ordering on macOS (1s mtime granularity on HFS+; APFS is finer
+# but `ls -t` ties are still possible sub-second). Guarantees the newest log sorts strictly newer.
+sleep 1
 # The newest log: the rustls/chisel retry storm at the tail (within the default 300-line scan).
 {
   for i in $(seq 1 20); do printf '%s\n' "2026-07-18T22:13:0${i}Z INFO  devin: starting up (line $i)"; done
