@@ -1835,6 +1835,22 @@ _supervise() {
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
+    # DEVIN PRINT-MODE HANG (LANE-AGNOSTIC, immediate): a headless devin (`-p` / print mode) that
+    # attempts a tool exec requiring confirmation cannot prompt, so it rejects the tool and then
+    # HANGS — it does not exit, it does not retry, it goes silent. This is a hard wall (not a
+    # retry spiral), so a single occurrence is a reliable death signal. Without this check the
+    # only backstop is the byte-growth stall-kill (default 900s / 15min for capable tier), which
+    # wastes a quarter-hour on a process that is already dead-in-the-water. Abort immediately.
+    # Observed in the wild: devin finishes its file writes, hits this on a final validation/commit
+    # command, hangs for hours until an external reaper kills the shell with an ambiguous status.
+    # OSRC_NO_PRINTMODE_ABORT=1 disables (escape hatch for lanes that recover from print-mode rejects).
+    if [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
+      if grep -aq 'Print mode: rejecting tool exec that requires confirmation' "$jd/out.log" 2>/dev/null; then
+        echo "permission-blocked" > "$jd/status"
+        echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
+        _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
+      fi
+    fi
     if [ "$age" -ge "$hard" ]; then
       echo timeout > "$jd/status"; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
     fi
