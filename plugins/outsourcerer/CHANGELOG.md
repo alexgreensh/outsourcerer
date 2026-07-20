@@ -3,6 +3,13 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.11] - 2026-07-18
+
+Diagnostics-only patch: when a devin-backed job dies on the sandboxed-proxy TLS mismatch (devin's Rust TLS stack rejecting a local proxy's cert), the failure is now recognizable from outsourcerer's side instead of a bare, generic "Connection error". No retry/routing/fallback behavior change.
+
+### Added
+- **Sandboxed-proxy TLS failure diagnostics for the devin lane.** devin prints only a generic "Connection error, send a message to continue retrying" when its `rustls_platform_verifier` rejects a local/sandboxed proxy's peer certificate (Apple Security `OSStatus -<n>` cert-verify code, visible only in devin's own CLI log at `~/.local/share/devin/cli/logs/`), silently retrying with backoff for ~100-160s before giving up. A narrow detector (`_is_sandboxed_proxy_tls_failure`, machine-token + corroborated two-pass, same false-positive discipline as `_is_transport_failure`) now scans devin's newest CLI log tail after a non-zero devin exit and surfaces a one-line hint naming the cause and the fix (disable the sandbox/proxy for that call). The hint flows through `delegate()` (foreground + bg, since the supervisor captures stderr into `out.log`) and is re-emitted by `result`/`logs` for a failed devin job when not already present. `doctor` proactively notes a `*_PROXY` env var when devin is installed. Diagnostics-only — no change to retry, routing, fallback, or transport-vs-task classification.
+
 ## [0.4.10] - 2026-07-16
 
 ### Changed
