@@ -172,6 +172,33 @@ printf '%s' "$out" | grep -qi 'no such job' \
   && ok "an unknown job id is reported as unknown, not as a missing log" \
   || bad "unknown job id is indistinguishable from a missing log"
 
+
+# --- findings from the adversarial pass -----------------------------------------------------------
+# 1. `interrupted` was missing from the fanout waiter's terminal list. Reconciling dead jobs to
+#    `interrupted` made that latent gap reachable: a killed member counted as live forever and
+#    `fanout wait` never returned. A fix that makes a state common must check who consumes it.
+for st in interrupted done failed blocked timeout wedged canceled permission-blocked; do
+  case " done done? failed blocked timeout wedged canceled permission-blocked interrupted " in
+    *" $st "*) ;; *) bad "state '$st' missing from the terminal vocabulary" ;;
+  esac
+done
+awk '/^_fanout_running\(\)/,/^}/' "$SRC" | grep -q 'interrupted' \
+  && ok "the fanout waiter treats interrupted as terminal (cannot hang on a killed member)" \
+  || bad "fanout waiter would count an interrupted member as still running"
+
+# 2. `launching` was reconciled only on the text path, so the JSON plane and the fanout waiter kept
+#    seeing a stillborn job as live work. Reconciliation belongs to the single owner every reader uses.
+jl2="$OSRC_HOME/jobs/sb-recon"; mkdir -p "$jl2"
+echo launching > "$jl2/status"; echo $(( $(date +%s) - 600 )) > "$jl2/started_at"
+[ "$(_reconcile_status sb-recon)" = "failed" ] \
+  && ok "a stillborn job reconciles to failed for every reader, not just the text view" \
+  || bad "stillborn job still reads as launching through _reconcile_status"
+jl3="$OSRC_HOME/jobs/sb-young"; mkdir -p "$jl3"
+echo launching > "$jl3/status"; date +%s > "$jl3/started_at"
+[ "$(_reconcile_status sb-young)" = "launching" ] \
+  && ok "a job that just launched is still allowed to be launching" \
+  || bad "a healthy just-launched job was declared dead"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

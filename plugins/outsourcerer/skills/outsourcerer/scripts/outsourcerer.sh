@@ -2468,6 +2468,29 @@ _reconcile_status() {
       fi
       [ "$_alive" = "0" ] && { echo interrupted > "$jd/status" 2>/dev/null; st="interrupted"; }
       ;;
+    launching)
+      # A launcher that detached and never produced a worker leaves `launching` on disk forever. The
+      # text status path converted that to a failure, but every OTHER reader (the JSON control plane,
+      # the fanout waiter) called this function and got back "launching" — so a stillborn job counted
+      # as live work and a fanout could wait on it indefinitely. Reconciliation has to live here, with
+      # the single owner, or each new reader silently reintroduces the phantom.
+      local _sa _grace _now2; _now2=$(date +%s)
+      _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=$_now2 ;; esac
+      _grace="${OSRC_LAUNCH_GRACE:-45}"; [ -f "$jd/setup" ] && _grace="${OSRC_SETUP_GRACE:-900}"
+      if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( _now2 - _sa )) -ge "$_grace" ]; then
+        echo failed > "$jd/status" 2>/dev/null; st="failed"
+        # The REASON travels with the state change. Writing the status here and the explanation
+        # somewhere else means whichever reader gets there first leaves the other empty.
+        if [ ! -s "$jd/error" ]; then
+          local _ph; _ph="$(cat "$jd/setup" 2>/dev/null)"
+          if [ -n "$_ph" ]; then
+            printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_ph" "$_grace" > "$jd/error" 2>/dev/null || true
+          else
+            printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely killed the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "$_grace" > "$jd/error" 2>/dev/null || true
+          fi
+        fi
+      fi
+      ;;
   esac
   printf '%s' "$st"
 }
@@ -2765,7 +2788,9 @@ _fanout_running() {
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
     st="$(_reconcile_status "$jid" 2>/dev/null || echo running)"
-    case "$st" in done|done\?|failed|blocked|timeout|wedged|canceled|permission-blocked) ;; *) n=$((n+1)) ;; esac
+    # `interrupted` is terminal. Reconciliation flips dead jobs to it, so omitting it here means a
+    # killed member is counted as live forever and `fanout wait` never returns.
+    case "$st" in done|done\?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;; *) n=$((n+1)) ;; esac
   done < "$gd/members.tsv"
   printf '%s' "$n"
 }
@@ -5120,9 +5145,9 @@ _check_signature() {
   sed -E \
     -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+Z?//g' \
     -e 's/[0-9]{1,2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?//g' \
-    -e 's/[0-9]+(\.[0-9]+)?(ms|s|m)\b//g' \
+    -e 's/[0-9]+(\.[0-9]+)?(ms|s|m)([^a-zA-Z]|$)/\3/g' \
     -e 's/[0-9]{6,}//g' \
-    -e 's/\b[0-9a-f]{8,}\b//g' \
+    -e 's/([^0-9a-zA-Z]|^)[0-9a-f]{8,}([^0-9a-zA-Z]|$)/\1\2/g' \
     -e 's/(tmp|temp)[A-Za-z0-9_.-]+//g' \
     -e 's/[[:space:]]+/ /g' 2>/dev/null | sort
 }

@@ -208,6 +208,17 @@ printf '%s' "$out" | grep -qi 'even when it bills' \
   && ok "the report says a \$0 lane still burns plan limits" \
   || bad "consumption report implies a \$0 lane costs nothing"
 
+# 19. The stall normaliser must not rely on GNU-only regex. `\b` is silently IGNORED by BSD sed, so
+#     durations were never stripped on macOS and the guard was weaker than its tests implied — the
+#     third GNU-vs-BSD divergence found in this codebase, so it gets a permanent check.
+grep -v '^[[:space:]]*#' "$SRC" | grep -q '\\b' \
+  && bad "a GNU-only \\b word boundary is back in the source (BSD sed ignores it silently)" \
+  || ok "no GNU-only word boundaries in the source"
+a="$(printf 'FAIL auth took 0.42s\n' | _check_signature)"
+b="$(printf 'FAIL auth took 9.91s\n' | _check_signature)"
+[ "$a" = "$b" ] && ok "two runs of the same failure with different durations compare equal" \
+  || bad "durations still make identical failures look different ([$a] vs [$b])"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
