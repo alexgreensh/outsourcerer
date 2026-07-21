@@ -1515,7 +1515,13 @@ cmd_brief() {
   lanes="$(_ready_lanes 2>/dev/null)"
   limits="$(_session_limits 2>/dev/null)"
   printf '== outsourcerer session brief ==\n'
-  printf 'ready lanes : %s\n' "${lanes:-none detected (run doctor)}"
+  # "installed", not "ready". This list is built from which CLIs are present and logged in, which is
+  # not the same as which can currently serve a request: a lane stays installed and authenticated while
+  # its subscription window is exhausted or its backend has stopped answering. Calling that "ready" is
+  # how work gets routed somewhere that cannot take it. `doctor` issues real requests and reports which
+  # of these actually respond.
+  printf 'lanes installed: %s\n' "${lanes:-none detected (run doctor)}"
+  printf '  (installed + logged in — not proof any of them will answer right now; `%s doctor` probes for real)\n' "$0"
   # Human-readable limits: turn "claude5h=95" into "Claude 5h window: 95%% used" so a non-technical
   # reader instantly knows high = nearly out. Keep the raw tokens too (agents/scripts parse them).
   if [ -n "$limits" ]; then
@@ -5129,6 +5135,22 @@ _check_signature() {
 cmd_loop() {
   local shape="${1:-}"; [ $# -gt 0 ] && shift
   case "$shape" in
+    status)
+      # What anyone needs mid-run: is it moving, how far in, and what is still wrong.
+      local _l _st _at _mx _el _lf _now; _now=$(date +%s)
+      [ -d "$OSRC_HOME/loops" ] || { echo "no loops yet"; return 0; }
+      printf '%-26s %-9s %-8s %-7s %s\n' "LOOP" "STATE" "ATTEMPT" "ELAPSED" "LAST FAILURE"
+      for _l in "$OSRC_HOME/loops"/*/; do
+        [ -d "$_l" ] || continue
+        _st="$(cat "$_l/state" 2>/dev/null || echo '?')"
+        _at="$(cat "$_l/attempt" 2>/dev/null || echo '-')"
+        _mx="$(sed -n 's/^max: //p' "$_l/meta" 2>/dev/null || echo '?')"
+        _el="$(sed -n 's/^started: //p' "$_l/meta" 2>/dev/null)"
+        case "$_el" in ''|*[!0-9]*) _el="?" ;; *) _el="$(( _now - _el ))s" ;; esac
+        _lf="$(cut -c1-46 "$_l/last_fail" 2>/dev/null)"
+        printf '%-26s %-9s %-8s %-7s %s\n' "$(basename "$_l")" "$_st" "$_at/$_mx" "$_el" "${_lf:-—}"
+      done
+      return 0 ;;
     verify) ;;
     ''|-h|--help|help) die "loop: the built-in shape is 'verify'. Usage: loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\"
 
@@ -5177,9 +5199,14 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   local _t0; _t0=$(date +%s)
   echo "[loop verify] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
 
+  # Live state on disk from the FIRST second. A loop that only records its verdict at the end is
+  # unobservable exactly while it matters: you cannot tell a loop grinding usefully from one that is
+  # stuck, so you cannot decide whether to steer it or kill it.
+  printf 'running\n' > "$ldir/state" 2>/dev/null || true
   local attempt feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
   [ -n "$model" ] && mflag="-m"
   for attempt in $(seq 1 "$max"); do
+    printf '%s\n' "$attempt" > "$ldir/attempt" 2>/dev/null || true
     echo "OSRC::PROGRESS $attempt/$max delegate+verify" >&2
     local aprompt="$task"
     [ -n "$feedback" ] && aprompt="$task
@@ -5208,6 +5235,7 @@ $feedback"
     # EXTERNAL verification (the model never judges itself).
     local cout crc; cout="$(bash -c "$check" 2>&1)"; crc=$?
     printf '%s' "$cout" > "$ldir/check-$attempt.out" 2>/dev/null || true
+    printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || true
     if [ "$crc" -eq 0 ]; then state="success"; echo "[loop verify] $lid: acceptance check PASSED on attempt $attempt." >&2; break; fi
     # Stall guard: byte-identical check output on two consecutive attempts means the feedback is
     # not moving the delegate -> stop rather than burn the remaining budget on a spin. Keyed on a
@@ -5226,6 +5254,14 @@ $feedback"
     fi
   done
   printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || true
+  # Report the SPEND even when it is $0. The default lane is a subscription lane, so a dollar figure is
+  # always zero there and tells you nothing — while the thing that actually runs out is the plan's rate
+  # limit. Attempts and elapsed time are the units that bind on every lane, so they are what a loop
+  # reports back. (Observed: a subscription lane hitting its weekly ceiling mid-session while every
+  # cash figure still read $0.)
+  local _spent=$(( $(date +%s) - _t0 ))
+  printf '>>> [loop verify] used %s attempt(s) over %sm%ss on %s. Every attempt is a delegation and counts against that lane'"'"'s plan limits, even when it bills $0.\n' \
+    "$attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "${model:-the default lane}" >&2
   echo "[loop verify] $lid final: $state  ·  attempts + check output in $ldir" >&2
   echo "$state"
   case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"

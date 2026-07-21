@@ -65,6 +65,17 @@ grep -q 'OSRC_LIMITS_MAX_AGE' "$SRC" \
   && ok "the staleness threshold is configurable (OSRC_LIMITS_MAX_AGE)" \
   || bad "staleness threshold is hardcoded"
 
+# --- installed is not ready, and the greeting must not claim otherwise -----------------------------
+# The lane list is built from which CLIs are present and logged in. A lane stays installed and
+# authenticated while its subscription window is exhausted or its backend has stopped answering, so
+# calling that list "ready" is how work gets routed somewhere that cannot take it.
+grep -q "printf 'ready lanes" "$SRC" \
+  && bad "the greeting still calls merely-installed lanes 'ready'" \
+  || ok "the greeting says lanes are installed, not that they will answer"
+grep -q 'not proof any of them will answer right now' "$SRC" \
+  && ok "the greeting points at the command that checks for real" \
+  || bad "no pointer from the lane list to an actual liveness check"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

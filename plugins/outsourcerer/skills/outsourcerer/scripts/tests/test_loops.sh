@@ -178,6 +178,36 @@ s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --max 9 \
   && ok "a loop whose failures are shrinking is allowed to finish" \
   || bad "a converging loop was wrongly stopped (state=$s)"
 
+# 17. A loop must be observable WHILE it runs. State written only at the end is unreadable exactly
+#     when it matters — you cannot tell grinding-usefully from stuck, so you cannot steer or kill it.
+export MOCK_CNT="$TMP/c_live"; : > "$MOCK_CNT"
+cat > "$MOCK" <<'EOF'
+#!/usr/bin/env bash
+echo "run" >> "$MOCK_CNT"
+exit 0
+EOF
+chmod +x "$MOCK"
+MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "echo 'FAIL: thing broke'; false" --max 2 "t" >/dev/null 2>&1
+_ld="$(ls -dt "$OSRC_HOME/loops"/*/ 2>/dev/null | head -1)"
+[ -f "$_ld/attempt" ] && ok "the loop records which attempt it is on, not just the verdict" \
+  || bad "no per-attempt state written (a running loop is unobservable)"
+grep -q 'thing broke' "$_ld/last_fail" 2>/dev/null \
+  && ok "the latest failure is readable without opening every check file" \
+  || bad "no last-failure summary recorded"
+out="$(cmd_loop status 2>/dev/null)"
+printf '%s' "$out" | grep -q 'LAST FAILURE' \
+  && ok "loop status surfaces state, attempt, elapsed and the current failure" \
+  || bad "loop status does not report live state"
+
+# 18. Spend must be reported in units that BIND. On a subscription lane the dollar figure is always
+#     zero while the plan's rate limit is what actually runs out, so attempts and time are the truth.
+out="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "true" --max 3 "t" 2>&1 >/dev/null)"
+printf '%s' "$out" | grep -qi 'attempt(s) over' \
+  && ok "a finished loop reports what it consumed" || bad "loop does not report its consumption"
+printf '%s' "$out" | grep -qi 'even when it bills' \
+  && ok "the report says a \$0 lane still burns plan limits" \
+  || bad "consumption report implies a \$0 lane costs nothing"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
