@@ -1112,6 +1112,14 @@ _or_run_cost() {
 # as such everywhere, provider-reported usage (bg stream cost, codex rate-limits) is preferred.
 _est_tokens() { local n=${#1}; echo $(( n * 10 / 33 )); }
 
+# _mtime <path> -> file modification time as a unix epoch, on both GNU and BSD.
+# ORDER MATTERS AND IS NOT INTERCHANGEABLE. `stat -f` means "modification time" on BSD/macOS but
+# "filesystem status" on GNU/Linux, where it SUCCEEDS and prints filesystem info — so a
+# `stat -f ... || stat -c ...` fallback is unreachable on Linux and yields garbage that silently fails
+# every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
+# GNU FIRST is the only ordering where the fallback actually happens on both.
+_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
+
 # _codex_rate_limits -> "5h%|wk%|5h_reset_epoch|wk_reset_epoch" from the newest Codex session
 # rollout. Codex records the ChatGPT-plan rate-limit windows the API returns into every rollout, so
 # this is the REAL cost of a "no cash" ChatGPT-sub run: it spends your finite 5-hour and weekly
@@ -1128,7 +1136,8 @@ _codex_rate_limits() {
   # The age travels in the RETURN STRING. This function is read through a command substitution, so an
   # exported variable would die with the subshell and the caller would silently see nothing — the same
   # defect that left the 0-writes flag dead for its entire life.
-  local _age; _age=$(( $(date +%s) - $(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest" 2>/dev/null || date +%s) ))
+  local _mt; _mt="$(_mtime "$newest")"; case "$_mt" in ''|*[!0-9]*) _mt="$(date +%s)" ;; esac
+  local _age; _age=$(( $(date +%s) - _mt ))
   local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
   [ -n "$line" ] || return 1
   # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
@@ -2702,7 +2711,7 @@ cmd_gc() {
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
       *) skipped=$((skipped+1)); continue ;;
     esac
-    mtime=$(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo "")
+    mtime="$(_mtime "$d")"
     if [ -z "$mtime" ] || ! printf '%s\n' "$mtime" | grep -q '^[0-9][0-9]*$'; then
       skipped=$((skipped+1)); continue
     fi

@@ -73,8 +73,10 @@ if grep -q 'with-mcp-.*\$\$' "$SRC" && grep -qE "trap .*rm -f .*with-mcp|trap .*
 # --- Scenario 5: new job dir is 700 and out.log is 600. ---
 jd="$TMP/jobs/testjob"
 _supervise "$jd" 10 20 30 -- true >/dev/null 2>&1 || true
-dir_perms=$(stat -f '%Lp' "$jd" 2>/dev/null || stat -c '%a' "$jd" 2>/dev/null)
-log_perms=$(stat -f '%Lp' "$jd/out.log" 2>/dev/null || stat -c '%a' "$jd/out.log" 2>/dev/null)
+# GNU first: BSD rejects -c and falls through, but GNU's -f SUCCEEDS with a different meaning
+# (filesystem status), so the BSD-first ordering silently returns garbage on Linux.
+dir_perms=$(stat -c '%a' "$jd" 2>/dev/null || stat -f '%Lp' "$jd" 2>/dev/null)
+log_perms=$(stat -c '%a' "$jd/out.log" 2>/dev/null || stat -f '%Lp' "$jd/out.log" 2>/dev/null)
 if [ "$dir_perms" = "700" ]; then ok "job dir permissions are 700" ; else bad "job dir permissions are '$dir_perms'"; fi
 if [ "$log_perms" = "600" ]; then ok "out.log permissions are 600" ; else bad "out.log permissions are '$log_perms'"; fi
 
@@ -94,6 +96,22 @@ if [ ! -d "$old_done" ]; then ok "gc removed old completed dir" ; else bad "gc d
 if [ -d "$old_running" ]; then ok "gc preserved running dir" ; else bad "gc removed running dir"; fi
 if [ -d "$recent_done" ]; then ok "gc preserved recent done dir" ; else bad "gc removed recent done dir"; fi
 printf '%s' "$out" | grep -q 'removed 1' && ok "gc reports 1 removed" || bad "gc did not report removal: $out"
+
+
+# --- stat portability: the ordering is load-bearing. ---------------------------------------------
+# `stat -f` means "modification time" on BSD and "filesystem status" on GNU, where it SUCCEEDS and
+# prints filesystem info. So `stat -f ... || stat -c ...` never falls through on Linux and hands back
+# a block-device dump where a number was expected, which then fails every numeric test silently. This
+# broke `gc` on Linux completely: it could never parse an mtime, so it removed nothing, ever.
+if grep -v '^[[:space:]]*#' "$SRC" | grep -q 'stat -f [^|]*|| *stat -c'; then
+  bad "BSD-first stat ordering found: the GNU fallback is unreachable on Linux"
+else
+  ok "stat calls try GNU first, so the BSD fallback is actually reachable on both"
+fi
+# And the real behaviour, not just the spelling: an mtime must be a plain integer here.
+_m="$(_mtime "$SRC" 2>/dev/null)"
+case "$_m" in ''|*[!0-9]*) bad "_mtime returned a non-integer ('$(printf '%s' "$_m" | cut -c1-40)')" ;;
+  *) ok "_mtime returns a plain epoch integer on this platform" ;; esac
 
 echo
 echo "RESULT: $pass passed, $fail failed"
