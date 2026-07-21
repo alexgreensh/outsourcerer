@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.13"
+OSRC_VERSION="0.4.14"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -2226,7 +2226,8 @@ cmd_bg() {
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
-  echo "[outsourcerer] job $id launched (provider=$PROVIDER). Poll: $0 status $id  |  read: $0 result $id" >&2
+  echo "[outsourcerer] job $id launched (provider=$PROVIDER)." >&2
+  echo "[outsourcerer] NOW WATCH IT: $0 watch $id     (it runs unobserved until you do; status/result: $0 status $id | $0 result $id)" >&2
 }
 
 # AUTO-DETACH: a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
@@ -2272,7 +2273,7 @@ _autodetach_run() {
   [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
   printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
   printf '>>>   job id : %s\n' "$id" >&2
-  printf '>>>   poll   : %s status %s  |  watch: %s watch %s  |  result: %s result %s\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
+  printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
   echo "$id"
   return 0
 }
@@ -2549,6 +2550,7 @@ _job_json() {
 }
 
 cmd_status() {
+  _mark_watched "${1:-}"
   local id="${1:-}"
   # `status --json [id]` / `status [id] --json` -> machine-readable control plane for orchestrators.
   if [ "$id" = "--json" ] || [ "${2:-}" = "--json" ]; then
@@ -2569,6 +2571,7 @@ cmd_status() {
 }
 
 cmd_watch() {
+  _mark_watched "${1:-}"
   local id="${1:-}"; [ -n "$id" ] || die "watch needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-60}"
@@ -2589,6 +2592,7 @@ cmd_watch() {
 }
 
 cmd_result() {
+  _mark_watched "${1:-}"
   local id="${1:-}"; [ -n "$id" ] || die "result needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local shown rc=0
@@ -2612,7 +2616,19 @@ cmd_logs() {
   # Capture once and printf once: a double tail is a TOCTOU on a growing log (the dedup check
   # would see a different snapshot than what is printed). die fires on the capture if the log is
   # missing; rc stays 0 on a successful print.
-  local shown rc=0; shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "no log for $id"
+  # "no log" has three very different causes and the status file, sitting right next to the missing
+  # log, distinguishes them. Reporting them identically sends someone hunting for a broken job when the
+  # answer is "wait two seconds", or hunting for a typo when the job id is genuinely wrong.
+  local shown rc=0
+  if [ ! -f "$OSRC_JOBS/$id/out.log" ]; then
+    [ -d "$OSRC_JOBS/$id" ] || die "no such job: $id (check the id, or run '$0 status' to list jobs)"
+    local _st; _st="$(_reconcile_status "$id" 2>/dev/null || printf '?')"
+    case "$_st" in
+      launching) die "job $id is still starting up — the delegate has not written any output yet. Give it a moment and retry, or watch it live: $0 watch $id" ;;
+      *)         die "job $id has status '$_st' but never produced a log. If it stayed 'launching' the worker never started (see '$0 status $id' for the reason); otherwise the job directory is incomplete." ;;
+    esac
+  fi
+  shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "cannot read the log for $id (permissions?): $OSRC_JOBS/$id/out.log"
   printf '%s' "$shown"
   # Diagnostics-only (see cmd_result): append the recognizable TLS/proxy hint for a failed devin
   # job to STDERR when it is not already in the tailed log. `|| true` preserves the original
@@ -4729,6 +4745,41 @@ session() {
   esac
 }
 
+# ---- unwatched-job detection --------------------------------------------------------------------
+# A detached job nobody is watching is the failure mode this tool exists to prevent: it accepts work,
+# goes quiet, and the orchestrator finds out minutes or hours later. Telling the orchestrator to
+# "remember to watch" does not survive a busy session, so the tool tracks attention itself and says so
+# at the next opportunity, rather than relying on anyone's memory.
+_mark_watched() { [ -n "${1:-}" ] && [ -d "$OSRC_JOBS/$1" ] && date +%s > "$OSRC_JOBS/$1/last_seen" 2>/dev/null || true; }
+
+# _unwatched_jobs -> lines "<id> <seconds-since-anyone-looked>" for RUNNING jobs nobody is tracking.
+_unwatched_jobs() {
+  local jd id st seen now age; now=$(date +%s)
+  [ -d "$OSRC_JOBS" ] || return 0
+  for jd in "$OSRC_JOBS"/*/; do
+    [ -d "$jd" ] || continue
+    id="$(basename "$jd")"
+    st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+    case "$st" in running|launching|"stalled?"|"exploring?") ;; *) continue ;; esac
+    seen="$(cat "$jd/last_seen" 2>/dev/null)"
+    case "$seen" in ''|*[!0-9]*) seen="$(cat "$jd/started_at" 2>/dev/null)" ;; esac
+    case "$seen" in ''|*[!0-9]*) continue ;; esac
+    age=$(( now - seen ))
+    [ "$age" -ge "${OSRC_UNWATCHED_AFTER:-120}" ] && printf '%s %s\n' "$id" "$age"
+  done
+}
+
+# _warn_unwatched -> loud, actionable notice on stderr when live jobs are going unobserved.
+_warn_unwatched() {
+  local out n; out="$(_unwatched_jobs)"; [ -n "$out" ] || return 0
+  n="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+  printf '>>> [outsourcerer] %s job(s) are RUNNING and nobody has looked at them:\n' "$n" >&2
+  printf '%s\n' "$out" | while read -r _i _a; do
+    printf '>>>   %s  (unobserved %ss)   watch it: %s watch %s\n' "$_i" "$_a" "$0" "$_i" >&2
+  done
+  printf '>>>   An unwatched job is how a wedge becomes a lost hour. Watch it, or cancel it.\n' >&2
+}
+
 # ---- parity: sync Claude skills + local MCPs into Devin ----
 parity() {
   need_devin
@@ -5051,23 +5102,58 @@ Free-lane note (CHANGES OFTEN, verify, never assume):
 EOF
 }
 
+# _check_signature -> a check's output reduced to its MEANING, for comparing one attempt to the next.
+# Byte-comparison is useless against real test output: a suite that prints a duration, a timestamp, a
+# temp path or a run id produces different bytes every time while reporting the identical failure, so a
+# byte-identical guard never fires on the tools people actually use. Only VOLATILE tokens are removed.
+# Small integers are deliberately KEPT: "5 tests failed" -> "3 tests failed" is progress, and erasing
+# that would stop a loop that is converging. Lines are sorted so ordering noise does not read as
+# change, but duplicates are NOT collapsed: five identical failures and three are different states,
+# and deduplicating them would hide exactly the progress this guard must not interrupt.
+_check_signature() {
+  sed -E \
+    -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9:.]+Z?//g' \
+    -e 's/[0-9]{1,2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?//g' \
+    -e 's/[0-9]+(\.[0-9]+)?(ms|s|m)\b//g' \
+    -e 's/[0-9]{6,}//g' \
+    -e 's/\b[0-9a-f]{8,}\b//g' \
+    -e 's/(tmp|temp)[A-Za-z0-9_.-]+//g' \
+    -e 's/[[:space:]]+/ /g' 2>/dev/null | sort
+}
+
 # cmd_loop -- bounded loops. The ONE built-in shape is `verify`: delegate -> run an EXTERNAL check ->
 # retry-with-feedback, on the cheapest model, until the check passes or a cap fires. Richer shapes
-# (sweep / best-of-N / eval-optimize / council-build) are orchestrator recipes in references/loops.md,
+# (sweep / best-of-N / evaluator-optimizer / council-build) are orchestrator recipes in references/loops.md,
 # composed from the existing verbs — not a workflow engine here. Terminates into exactly one state:
 # success (0) | blocked (3) | max_turns (2). State (each attempt + check output) lives on disk.
 cmd_loop() {
   local shape="${1:-}"; [ $# -gt 0 ] && shift
   case "$shape" in
     verify) ;;
-    ''|-h|--help|help) die "loop: the built-in shape is 'verify'. Usage: loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\". Other shapes (sweep / best-of-N / council-build) are orchestrator recipes — see references/loops.md." ;;
+    ''|-h|--help|help) die "loop: the built-in shape is 'verify'. Usage: loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\"
+
+Which loop do you want?
+  a machine can verify it (tests/lint/build), one known target  -> loop verify   (this one)
+  a machine can verify it, but you do not know how much work    -> sweep         (recipe)
+  no checker, but you can compare candidates                    -> best-of-N     (recipe)
+  quality is a matter of degree, not pass/fail                  -> evaluator-optimizer (recipe)
+  the PLAN is the risky part, not the code                      -> council-build (recipe)
+If nothing can verify the result, do not loop at all — delegate once and read it yourself.
+Recipes are composed from the existing verbs, not a workflow engine: see references/loops.md." ;;
     *) die "loop: unknown shape '$shape' (only 'verify' is built in; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
   esac
-  local model="" check="" max="${OSRC_LOOP_MAX:-3}" verb=edit task=""
+  # The CHECK is the goal; these are runaway guards, not targets. The loop ends the moment the check
+  # passes, so a cap only ever fires when the work is NOT converging. A round count alone is a poor
+  # guard because rounds are not equal work — three attempts at a one-line fix and three at a refactor
+  # are wildly different — so a wall-clock bound sits alongside it. A money cap is deliberately absent:
+  # the default lane is a subscription lane that reports $0, so a dollar bound would never fire on the
+  # path most people use, while time and attempts always bind.
+  local model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}" verb=edit task=""
   while [ $# -gt 0 ]; do case "$1" in
     -m|--model) [ -n "${2:-}" ] || die "loop verify: -m needs a model"; model="$2"; shift 2 ;;
     --check)    [ -n "${2:-}" ] || die "loop verify: --check needs a command"; check="$2"; shift 2 ;;
     --max)      [ -n "${2:-}" ] || die "loop verify: --max needs a number"; max="$2"; shift 2 ;;
+    --max-minutes) [ -n "${2:-}" ] || die "loop verify: --max-minutes needs a number"; maxmin="$2"; shift 2 ;;
     --verb)     [ -n "${2:-}" ] || die "loop verify: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
     --worktree) die "loop verify: --worktree is not supported yet. Isolation would have to be established by the loop itself (the delegate runs in the foreground here, and the acceptance check must run inside the same tree), so a half-wired flag would verify the wrong files. Run the loop inside a worktree you created, or use 'bg --worktree' for one-shot isolated work." ;;
     --)         shift; task="$*"; break ;;
@@ -5078,13 +5164,18 @@ cmd_loop() {
   [ -n "$check" ] || die "loop verify needs a --check command. External verification is MANDATORY — a loop that trusts the model's own 'done' is not a loop, it's a hope."
   case "$max" in ''|*[!0-9]*) die "loop verify: --max must be a positive integer" ;; esac
   [ "$max" -ge 1 ] 2>/dev/null || die "loop verify: --max must be >= 1"
+  # Fractional minutes are allowed (0.5 = 30s): short verification loops are real, and forcing whole
+  # minutes would make the only usable time bound a full minute.
+  case "$maxmin" in ''|*[!0-9.]*|*.*.*) die "loop verify: --max-minutes must be a number of minutes, e.g. 10 or 0.5 (0 = no time bound)" ;; esac
+  local _maxsec; _maxsec="$(awk -v m="$maxmin" 'BEGIN{printf "%d", m*60}')"
   case "$verb" in edit|yolo) ;; *) die "loop verify: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
 
   local lid ldir; lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
   mkdir -p -m 700 "$ldir" 2>/dev/null || die "loop: cannot create loop dir under $OSRC_HOME/loops"
   { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nverb: %s\nstarted: %s\n' \
       "$task" "$check" "${model:-<default>}" "$max" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
-  echo "[loop verify] $lid — up to $max attempts on ${model:-default lane}; acceptance check: $check" >&2
+  local _t0; _t0=$(date +%s)
+  echo "[loop verify] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
 
   local attempt feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
   [ -n "$model" ] && mflag="-m"
@@ -5122,15 +5213,22 @@ $feedback"
     # not moving the delegate -> stop rather than burn the remaining budget on a spin. Keyed on a
     # seen-prior flag, NOT on prev_fail being non-empty — an empty check output (e.g. a bare
     # `false`) is still a repeatable failure that should trip the guard.
-    if [ "$have_prev" = "1" ] && [ "$cout" = "$prev_fail" ]; then
-      state="blocked"; echo "[loop verify] $lid: identical check failure two attempts running (no progress) — stopping to avoid a spin. Inspect $ldir, then steer or escalate a tier." >&2; break
+    local csig; csig="$(printf '%s' "$cout" | _check_signature)"
+    if [ "$have_prev" = "1" ] && [ "$csig" = "$prev_fail" ]; then
+      state="blocked"; echo "[loop verify] $lid: the check reported the same failures two attempts running (timestamps and run ids ignored, so this is genuinely no new progress) — stopping to avoid a spin. Inspect $ldir, then steer or escalate a tier." >&2; break
     fi
-    prev_fail="$cout"; have_prev=1; feedback="$cout"
+    prev_fail="$csig"; have_prev=1; feedback="$cout"
+    # Time guard: checked BETWEEN attempts so a run in progress is never abandoned half-done.
+    if [ "$_maxsec" -gt 0 ] && [ $(( $(date +%s) - _t0 )) -ge "$_maxsec" ]; then
+      state="max_time"
+      echo "[loop verify] $lid: hit the ${maxmin}-minute time bound after $attempt attempt(s), still failing. Stopping. Inspect $ldir — the last check output shows how close it got." >&2
+      break
+    fi
   done
   printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || true
   echo "[loop verify] $lid final: $state  ·  attempts + check output in $ldir" >&2
   echo "$state"
-  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac
+  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
 main() {
@@ -5140,6 +5238,14 @@ main() {
   # prompt/reader in THAT process still match each other.
   [ -n "${OSRC_MARK:-}" ] || OSRC_MARK="$(_new_mark)"
   export OSRC_MARK
+  # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
+  # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
+  # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
+  # commands whose whole purpose is already to look.
+  case "${1:-}" in
+    __runjob|watch|status|result|logs|cancel|gc|"") ;;
+    *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
+  esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
   # ALSO accepted after it, via _consume_flags/parse_model). Audits showed a misplaced --cloud-ack
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.

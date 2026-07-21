@@ -41,7 +41,13 @@ When the user hasn't named a model, **always run `advise`** — it classifies th
 
 `run`/`explore` (read-only) · `research` (sandboxed exec, devin/codex) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox — sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs.
 
-**Loops** (`loop verify`): a bounded delegate→external-check→retry cycle on the cheapest model — `loop verify -m glm --check "npm test" "make the tests pass"` runs up to `--max` (default 3) attempts, feeding each check failure back, and stops at `success`/`blocked`(stall or needs-human)/`max_turns`. Richer loops (sweep/until-dry, best-of-N, eval-optimize, and the **council-build** flow: debate two advisors → build with a cheap engine → advisor-verify → you test → launch) are recipes you compose from the verbs — see `references/loops.md`. Every loop is bounded, disk-backed, and verified externally; none run unattended-infinite.
+**Loops**: for work that has to be *checked*, not just done, offer a bounded delegate→check→retry cycle that runs on a cheap external model while you orchestrate. **OFFER IT, don't wait to be asked and don't make the user name a shape.** When a task fits one, say so in plain language before running: what it will do, what counts as done, what stops it. "That's a build-until-the-tests-pass job — want me to hand it to GLM and keep re-running your suite until it's green? I'll stop if it stalls or after 20 minutes." The user should never learn a flag, a shape name, or a subcommand; they say yes.
+
+Pick the shape yourself: a machine can verify it and it's one known target → `loop verify` (the built-in); verifiable but open-ended → **sweep** (until nothing new turns up); no checker but you can compare → **best-of-N**; quality is a matter of degree → **evaluator-optimizer**; the PLAN is the risky part → **council-build** (debate → build → verify). The rest are recipes composed from existing verbs, not an engine — `references/loops.md`.
+
+**The check IS the goal — derive it from THIS session's definition of done.** If the user said "make the failing auth tests pass", the check is that test command. A vague check reports finished work as failed. Set the bounds from the task, never the default: `--max` (default 6) is a runaway backstop, not a target — the loop ends the moment the check passes — and `--max-minutes` bounds open-ended work far better than a lap count, since rounds are not equal work.
+
+**Say no to a loop when it's wrong.** If nothing external can verify the result, don't loop — that's a model marking its own homework; delegate once and read it. If a human has to decide mid-way, use `session` and steer live. Every loop is bounded, disk-backed, externally verified, and ends in one honest state (`success`/`blocked`/`max_turns`/`max_time`); none run unattended-infinite.
 
 **`session` = YOU supervise a delegate live (not a spectator mode).** It's a persistent tmux TUI you drive programmatically: `session read` shows the delegate's actual work as it happens, `session send "…"` steers it mid-flight, `session model <name>` switches its model, `session stop` ends it. This is the one mode with a real feedback loop — headless `run`/`bg`/`fanout` fire-and-forget (you get progress markers or a final result, never the chance to course-correct mid-run). **Prefer `session` for long, complex, exploratory, or high-stakes delegations** where catching a wrong turn early, answering the delegate's clarifying question in the moment, or iterating with it beats one blind shot. The read→steer→read loop is exactly what watched sessions get and headless ones miss. (tmux-based → Mac/Linux; on Windows fall back to `bg`+`status`.) Full semantics + tiers: `references/mechanism.md`, `references/jobs-and-safety.md`.
 
@@ -59,6 +65,19 @@ When the user hasn't named a model, **always run `advise`** — it classifies th
 | any model the USER configured | **droid** / **cursor** (`--provider droid|cursor`) — their CLI, their models (incl. BYOK); `-m` passes through verbatim |
 
 Full table + image backend order: `references/lanes-and-models.md`.
+
+## Watch what you launch (non-negotiable)
+
+**Every `bg`/`fanout` job gets a watcher, immediately, in the same turn you launch it.** A detached job
+nobody is observing is the failure this tool exists to prevent: it accepts the work, goes silent, and
+you find out it wedged an hour later. Launch, then `watch` — or `status` on a real cadence if you are
+juggling several. Never launch and wander off. If you genuinely cannot watch it, say so to the user and
+cancel it rather than leaving it running blind.
+
+The tool enforces this from its side: a launch prints **NOW WATCH IT**, and any later invocation lists
+jobs that have been running with nobody looking. If you see that warning, you already made this mistake
+— watch or cancel before doing anything else. Watching is also what makes loops steerable: you cannot
+course-correct or kill a bad run you are not reading.
 
 ## Operating rules
 

@@ -120,6 +120,28 @@ All of it in plain language. The commands underneath are the sorcerer's, not you
 
 ---
 
+## Loops: send the laps somewhere cheaper
+
+<img src="readme-assets/section-loops.png" alt="The sorcerer on a glowing ring track, passing a task orb to a constellation creature that hands it back, past a checkpoint gate, an hourglass beside it" width="100%">
+
+Loops are not new. Claude Code has them and they work. What is expensive is **who runs the laps**.
+
+A verify loop is the same three moves over and over: try it, check it, try again. That is the least interesting work in software and the most repetitive, and if your frontier model is doing it, you are paying archmage rates for someone to re-run your test suite.
+
+So the sorcerer sends the laps somewhere cheap and keeps the judgment. A budget model does the trying. **Your** tests do the checking. The archmage decides what "done" means and reads the result when it lands.
+
+Nothing grades its own homework. The check is a real command — your suite, your build, your linter — because a model asked whether it succeeded will say yes.
+
+It stops when the check goes green. It stops when the same failures come back twice, because a loop that is not converging is an expensive way to be wrong. It stops when the time you gave it runs out. Four endings, all of them honest, none of them a shrug.
+
+You will not type any of it. Describe the problem and the sorcerer offers you the shape:
+
+> *"That's a build-until-the-tests-pass job. Want me to hand it to GLM and keep re-running your suite until it's green? I'll stop if it stalls, or after twenty minutes."*
+
+Yes is the whole interface. And it will talk you *out* of a loop when there is nothing that can verify the result, because at that point a loop is just a model marking its own homework in a circle.
+
+---
+
 ## Run it on your own machine
 
 <img src="readme-assets/section-local.png" alt="The ink-drop sorcerer beside his own glowing wireframe machine, a gold padlock and a gold zero-coin" width="100%">
@@ -143,6 +165,8 @@ Most "cost saver" tools show you a number they made up. This one keeps two hones
     ChatGPT plan usage, 5h window: 6% (resets in 4h 32m) · weekly: 1%
   note: a $0 cash line is NOT "free", subscription lanes spend finite plan rate limits.
 ```
+
+A number on the Tab is only as fresh as its last reading. A subscription window comes from whatever your CLI recorded the last time it ran, which can be hours old if you have been elsewhere, and usage only ever climbs — so an old number quietly reads as headroom you do not have. The sorcerer says how old it is, and won't send work down a lane the reading only *thinks* has room left.
 
 That `$0.002245` is not an estimate. For OpenRouter lanes the Tab reads the **exact per-generation cost** back from the provider after the run, because the harness's own built-in cost number runs roughly **28× high** on cheap lanes. For the subscription lanes it reads the real 5-hour and weekly rate-limit numbers the CLI records after each call. The archmage only gets billed for archmage work, and a no-cash line never pretends a plan lane was free.
 
@@ -209,6 +233,8 @@ Audited by [repo-forensics](https://github.com/alexgreensh/repo-forensics) on ev
 - **`:free` models may train on your prompts.** Outsourcerer flags `:free` lanes as may-train and defaults them to least-privilege, so you decide before sensitive context goes down one.
 - **Your credentials can't ride along to the cloud.** Before any cloud delegation, a hard-block refuses the route if a real credential file (`.env`, `id_rsa`, `credentials`, …) is anywhere in the working tree — root or nested — and it runs on every call, fails closed, and tells you exactly what left the machine. Prefer nothing leaves at all? The **local lane** routes to a model on your own machine: no key, no network. See [SECURITY.md](SECURITY.md#your-repo--what-leaves-the-machine).
 
+  You can trust one lane in one repo, and nothing wider. Name a lane and the repos you trust it in, and the credential-file block stands down *there* and nowhere else — never for a secret you pasted into a prompt, which is a different decision you did not make. Empty out of the box, so an untouched install is as strict as it ever was, and the disclosure always tells you when the gate stood down. Not an env var — that would leak into every background job you spawn. A file, scoped to the one repo you meant.
+
 ---
 
 ## Get it (30 seconds, per host)
@@ -266,7 +292,7 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 - **Pi** and more harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
-- *Already shipped:* the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, or Cursor too; parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, or Cursor too; parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 

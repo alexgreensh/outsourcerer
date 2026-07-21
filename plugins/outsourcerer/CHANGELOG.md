@@ -3,6 +3,39 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.14] - 2026-07-22
+
+Loops become steerable, and background work stops being able to run unobserved.
+
+### Added
+- **Every launch demands a watcher, and the tool checks.** A detached job nobody is watching is how a
+  wedge becomes a lost hour: it accepts the work, goes quiet, and the failure surfaces much later.
+  Launching now says so plainly instead of listing poll options, and any later command reports jobs
+  that have been running with nobody looking at them, naming the command to start. The warning clears
+  as soon as you actually look. A just-launched job gets a grace period so this never cries wolf
+  (`OSRC_UNWATCHED_AFTER`).
+- **Loops are offered, not memorised.** When a task suits one, the assistant proposes it in plain
+  language — what it will do, what counts as done, what stops it — and runs it on your say-so. There
+  is no shape name or flag to learn. It will also talk you out of a loop when nothing external can
+  verify the result, because that is a model marking its own homework.
+- **A time bound for loops** (`--max-minutes`, fractional allowed), checked between attempts so a run
+  in progress is never abandoned half-done. Rounds are not equal work, so a lap count alone is a poor
+  bound on open-ended tasks. The attempt cap remains as a backstop and now defaults to 6.
+
+### Fixed
+- **The stall guard was ineffective on real test output.** It compared the check's output byte for
+  byte, so any suite printing a duration, timestamp, temp path or run id — most of them — produced
+  different bytes while reporting the identical failure, and the guard never fired. Loops spent their
+  whole budget re-reporting the same thing. Comparison now ignores those volatile tokens while keeping
+  failure counts intact, so a genuinely repeating failure stops the loop and a shrinking one is still
+  allowed to finish.
+- **`logs` said "no log" for three unrelated situations** — a job still starting, an id that does not
+  exist, and a job that died before writing — while the status file that distinguishes them sat unread
+  beside the missing log. Each now says what actually happened and what to do next.
+
+### Changed
+- `eval-optimize` is now **`evaluator-optimizer`**, the established name for the pattern.
+
 ## [0.4.13] - 2026-07-21
 
 Reliability patch. Every fix below is a case where the tool told you something that was not true: a

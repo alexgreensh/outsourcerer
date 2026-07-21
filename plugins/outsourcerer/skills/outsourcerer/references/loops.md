@@ -5,6 +5,31 @@ honest state: `success` · `blocked` · `max_turns` · `max_budget`. State lives
 unattended-infinite. Verification is external to the model that did the work — tests/lint/build ideal, a
 second model is the fallback, the model's own "I'm done" is never enough alone.
 
+## Which loop is this? (pick before you build anything)
+
+Two questions decide it. Answer them in order.
+
+**1. Can a MACHINE tell you it worked?** A test suite, a linter, a build, a schema check, an exit code.
+
+**2. Do you know how much work there is?**
+
+| Machine can verify? | Amount of work | Use | Why |
+|---|---|---|---|
+| Yes | Known, one target | **`loop verify`** (built in) | The check is the judge. Delegate, run it, feed failures back. |
+| Yes | Unknown / open-ended | **sweep** (until-dry) | You cannot set a sensible `--max` when you do not know how many there are; stop when rounds stop finding anything. |
+| No, but you can COMPARE | Small | **best-of-N** | No oracle, but you can look at five and know which is best. |
+| No, and quality is a matter of degree | Any | **evaluator-optimizer** | "Correct" is not binary. Score against a rubric and iterate on the score. |
+| Not yet — the PLAN is the risky part | Large | **council-build** | The expensive mistake is building the wrong thing well. Argue it out first, then use `loop verify` for the build step. |
+
+Two rules that override the table:
+
+- **If nothing can verify it, do not loop.** A loop with no external check is a model marking its own
+  homework in a circle. Use a single delegation and read the result yourself.
+- **If a human must decide mid-way, do not loop.** Loops are for work you would otherwise babysit.
+  Anything needing a judgement call belongs in `session`, where you can steer it live.
+
+Cheapest correct answer wins: most real work is `loop verify`, because most real work has tests.
+
 ## The one built-in: `loop verify`
 The mechanical 90% case — delegate, run a real check, retry with the failure fed back, on the cheapest
 model. You (the orchestrator) only re-enter on `blocked` or when the cap fires.
@@ -21,8 +46,19 @@ outsourcerer loop verify -m glm --check "npm test" [--max 3] [--verb edit|yolo] 
   worktree you created yourself if a bad attempt must not touch main. (A loop-level `--worktree` is a
   named future add: the loop would have to create the tree AND run the acceptance check inside it, or
   the check grades the wrong files. It is refused with that explanation rather than half-wired.)
-- Budget: `--max` is the iteration cap (primary bound); each attempt is a normal delegation visible in
-  the Tab, so spend ≈ max × per-attempt cost.
+- **Bounds, in order of what actually stops the loop.** The GOAL is `--check` passing; everything else
+  is a runaway guard that only fires when the work is not converging:
+  1. `--check` exits 0 → `success`. This is the real terminating condition.
+  2. Same check failure twice → `blocked`. Not converging; surfaces instead of burning the budget.
+  3. `--max-minutes` → `max_time`. Checked between attempts, so a run in progress is never abandoned
+     half-done. Prefer this for open-ended work: three attempts at a one-line fix and three at a
+     refactor are not comparable amounts of work, so a round count is a poor bound on its own.
+  4. `--max` attempts (default 6) → `max_turns`. A backstop, not a target.
+  There is deliberately **no money cap**: the default lane is a subscription lane that reports $0, so a
+  dollar bound would never fire on the path most people use, while time and attempts always bind. Each
+  attempt is a normal delegation and shows up in the Tab.
+- **Write the check as the session's definition of done**, not a generic one. "The auth tests pass" is a
+  goal; "tests probably pass" is not checkable, and a vague check makes a finished job look failed.
 
 ## The rest are RECIPES you drive (no engine, just compose the verbs)
 
@@ -45,7 +81,7 @@ outsourcerer fanout --max 4 -m glm -- "impl approach A" "impl approach B" "impl 
 # then: read each result, judge, keep the best.
 ```
 
-### eval-optimize — quality matters, "correct" isn't binary (copy, design, refactor)
+### evaluator-optimizer — quality matters, "correct" isn't binary (copy, design, refactor)
 generate → an advisor scores against an explicit rubric → refine. Stop when the score clears the bar OR
 a round yields no improvement (diminishing returns).
 ```

@@ -101,6 +101,83 @@ printf '%s' "$e" | grep -qi 'bg --worktree' \
   && ok "--worktree refusal names the working alternative" \
   || bad "--worktree refusal gives no alternative"
 
+# 11. Knowing loops exist is not the same as knowing which one to run. Listing the shapes without
+#     selection criteria pushes the hardest decision back onto the user at the exact moment they have
+#     the least context, and a wrong choice here wastes a whole run.
+e="$( ( cmd_loop ) 2>&1 )"
+printf '%s' "$e" | grep -qi 'which loop do you want' \
+  && ok "the loop help asks the selection question instead of only listing shapes" \
+  || bad "loop help lists shapes with no guidance on choosing"
+for shape in sweep best-of-N evaluator-optimizer council-build; do
+  printf '%s' "$e" | grep -q "$shape" || bad "selection guidance omits $shape"
+done
+printf '%s' "$e" | grep -qi 'do not loop' \
+  && ok "the guidance also says when NOT to loop (no checker means no loop)" \
+  || bad "no guidance on when looping is the wrong tool"
+ok "selection guidance names every recipe"
+
+# 12. The GOAL ends the loop, not the cap. A passing check must stop it immediately even when a huge
+#     attempt budget and a long time bound are available — otherwise the guards are being treated as
+#     targets and every success costs the full budget.
+export MOCK_CNT="$TMP/c_goal"; : > "$MOCK_CNT"
+cat > "$MOCK" <<'EOF'
+#!/usr/bin/env bash
+echo "run" >> "$MOCK_CNT"
+exit 0
+EOF
+chmod +x "$MOCK"
+s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "true" --max 99 --max-minutes 60 "task" 2>/dev/null)"
+{ [ "$s" = success ] && [ "$(grep -c run "$MOCK_CNT")" -eq 1 ]; } \
+  && ok "a passing check ends the loop at once, however large the guards are" \
+  || bad "the loop kept going past its goal (state=$s attempts=$(grep -c run "$MOCK_CNT"))"
+
+# 13. A wall-clock bound must be able to stop a loop a round count would let run for ages. Rounds are
+#     not equal work, so time is the better guard on open-ended tasks.
+export MOCK_CNT="$TMP/c_time"; : > "$MOCK_CNT"
+cat > "$MOCK" <<'EOF'
+#!/usr/bin/env bash
+echo "run" >> "$MOCK_CNT"
+sleep 1
+exit 0
+EOF
+chmod +x "$MOCK"
+s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "echo x >> $TMP/tick; cat $TMP/tick; false" --max 999 --max-minutes 0.05 "task" 2>/dev/null)"
+[ "$s" = max_time ] \
+  && ok "the time bound stops a non-converging loop the attempt cap would not" \
+  || bad "time bound did not fire (state=$s)"
+
+# 14. Guard values must be validated, not silently coerced: a mistyped bound that becomes 0 turns a
+#     runaway guard off entirely, which is the opposite of what the user asked for.
+( cmd_loop verify --check true --max-minutes abc "t" >/dev/null 2>&1 ); [ $? -ne 0 ] \
+  && ok "a non-numeric time bound is rejected rather than silently disabled" \
+  || bad "--max-minutes accepted a non-number"
+
+# 15. The stall guard must survive REAL test output. Byte-comparison is defeated by any suite that
+#     prints a duration, timestamp, temp path or run id — the failure is identical, the bytes are not,
+#     so the guard never fires and the loop burns its whole budget re-reporting the same thing.
+export MOCK_CNT="$TMP/c_noise"; : > "$MOCK_CNT"
+cat > "$MOCK" <<'EOF'
+#!/usr/bin/env bash
+echo "run" >> "$MOCK_CNT"
+exit 0
+EOF
+chmod +x "$MOCK"
+s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --max 9 \
+      --check 'echo "[$(date +%H:%M:%S)] FAIL: auth::test_login took 0.42s"; false' "t" 2>/dev/null)"
+{ [ "$s" = blocked ] && [ "$(grep -c run "$MOCK_CNT")" -le 3 ]; } \
+  && ok "the same failure wearing a fresh timestamp still counts as no progress" \
+  || bad "noisy-but-identical failures did not trip the stall guard (state=$s attempts=$(grep -c run "$MOCK_CNT"))"
+
+# 16. ...and the opposite error is worse: stopping a loop that IS getting somewhere. Shrinking failure
+#     counts are progress, so small integers must survive the comparison even though timestamps do not.
+export MOCK_CNT="$TMP/c_conv"; : > "$MOCK_CNT"
+CNT="$TMP/conv_n"; echo 4 > "$CNT"
+s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --max 9 \
+      --check "n=\$(cat $CNT); n=\$((n-1)); echo \$n > $CNT; for i in \$(seq 1 \$n); do echo \"FAIL test_\$i\"; done; [ \$n -eq 0 ]" "t" 2>/dev/null)"
+[ "$s" = success ] \
+  && ok "a loop whose failures are shrinking is allowed to finish" \
+  || bad "a converging loop was wrongly stopped (state=$s)"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

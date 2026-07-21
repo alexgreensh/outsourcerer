@@ -151,6 +151,27 @@ OSRC_POLL=1 _supervise "$jdb" 1 3 30 -- sh -c 'printf "%s\n" ">>> banner"; for i
 grep -v '^[[:space:]]*#' "$SRC" | grep -q -- '-newermt' && bad "filesystem-progress check uses the GNU-only -newermt" \
   || ok "filesystem-progress check is POSIX (-newer), so it works on BSD find too"
 
+
+# --- "no log" must say WHICH kind of no-log. -----------------------------------------------------
+# A job that is still starting, a job id that does not exist, and a job that died before writing all
+# produced the identical "no log for <id>". The status file that distinguishes them sits right beside
+# the missing log and was never consulted, so the message sent people hunting for a broken job when
+# the answer was "wait a moment", or hunting for a typo when the id was fine.
+jl="$OSRC_HOME/jobs/still-launching"; mkdir -p "$jl"
+echo launching > "$jl/status"; date +%s > "$jl/started_at"
+out="$(run logs still-launching 2>&1)"
+printf '%s' "$out" | grep -qi 'still starting up' \
+  && ok "a launching job says it is still starting, not that the log is missing" \
+  || bad "launching job still reports a bare missing-log error: $(printf '%s' "$out" | tail -1)"
+printf '%s' "$out" | grep -q 'watch still-launching' \
+  && ok "the message offers the command that shows the job live" \
+  || bad "no actionable next step for a launching job"
+
+out="$(run logs no-such-job-id 2>&1)"
+printf '%s' "$out" | grep -qi 'no such job' \
+  && ok "an unknown job id is reported as unknown, not as a missing log" \
+  || bad "unknown job id is indistinguishable from a missing log"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
