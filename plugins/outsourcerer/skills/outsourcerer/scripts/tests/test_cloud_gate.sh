@@ -96,11 +96,23 @@ unset OSRC_CLOUD_ACK; _consume_flags -m glm "please pass --cloud-ack somewhere"
 if grep -q 'case " ${ORIG\[\*\]} " in \*.*--cloud-ack' "$SRC"; then bad "dead ORIG string-match for --cloud-ack still present"; else ok "ORIG string-match bypass removed"; fi
 
 # --- Scenario 9: secret scan surfaces a COUNT, never the matched secret text. ---
-( cd "$TMP" && WITH_SPEC="" _secret_scan "here is a key sk-FAKEfixture0notarealkey and OPENROUTER_API_KEY=x" >/dev/null 2>&1; echo "${OSRC_SECRET_HIT_COUNT:-0}" ) > "$TMP/cnt"
+# a real secret VALUE now HARD-BLOCKS by default. To test the count/redaction MECHANISM
+# (report-only path) we run with OSRC_SECRET_ALLOW_VALUE=1, which bypasses the value hard-block but
+# still computes the redacted hit count. Scenario 9b below asserts the hard-block itself.
+( cd "$TMP" && WITH_SPEC="" OSRC_SECRET_ALLOW_VALUE=1 _secret_scan "here is a key sk-FAKEfixture0notarealkey and OPENROUTER_API_KEY=x" >/dev/null 2>&1; echo "${OSRC_SECRET_HIT_COUNT:-0}" ) > "$TMP/cnt"
 [ "$(cat "$TMP/cnt")" -ge 1 ] 2>/dev/null && ok "secret scan sets a positive hit count" || bad "secret hit count not set"
-out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "leak sk-FAKEfixture0notarealkey here" ) 2>&1 )"
+out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; OSRC_SECRET_ALLOW_VALUE=1 _cloud_disclose "ccor" "gpt-4o" "leak sk-FAKEfixture0notarealkey here" ) 2>&1 )"
 echo "$out" | grep -q 'sk-FAKEfixture0notarealkey' && bad "raw secret value printed to stderr" || ok "raw secret value NOT printed (redacted)"
 echo "$out" | grep -qi 'values redacted' && ok "disclosure states values redacted" || bad "redaction note missing"
+
+# --- Scenario 9b (regression guard): a live secret VALUE in the prompt HARD-BLOCKS the cloud route by
+# default (nonzero exit), names the fix, and still never prints the value. The opt-out lifts it. ---
+vout="$( ( cd "$TMP" && WITH_SPEC="" _secret_scan "please rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 for me" ) 2>&1 )"; vrc=$?
+[ "$vrc" -ne 0 ] && ok "#3 live secret value hard-blocks by default (nonzero exit)" || bad "#3 secret value did NOT hard-block"
+echo "$vout" | grep -qi 'secret VALUE' && ok "#3 block message names the cause (secret VALUE)" || bad "#3 block message unclear"
+echo "$vout" | grep -q 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' && bad "#3 raw secret value leaked in block message" || ok "#3 raw value not printed in block"
+( cd "$TMP" && WITH_SPEC="" OSRC_SECRET_ALLOW_VALUE=1 _secret_scan "please rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 for me" >/dev/null 2>&1 ) \
+  && ok "#3 OSRC_SECRET_ALLOW_VALUE=1 lifts the value hard-block" || bad "#3 opt-out did not lift the block"
 
 # --- Scenario 10: bg/fanout cloud gate acquired at launch, not in the detached (no-TTY) child. ---
 PROVIDER=devin

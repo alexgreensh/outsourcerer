@@ -109,9 +109,9 @@
 #   tier-based proxy scores. Pair with `suggest` for price-only discovery, `estimate` for cost quotes.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
-# Version identifier (eng-plan-reviewer C1/H5). Single source of truth; bump the rightmost
+# Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.11"
+OSRC_VERSION="0.4.12"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -175,8 +175,12 @@ _cloud_consent_ok() {
 _cloud_consent_persist() {
   mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null; chmod 700 "$OSRC_HOME" 2>/dev/null || true
   [ -L "$OSRC_CONSENT_FILE" ] && rm -f "$OSRC_CONSENT_FILE" 2>/dev/null   # never write through a planted symlink
-  { printf 'granted-at: %s\nby: %s\nscope: cloud-disclosure ack (secret-scan still runs per delegation)\nrevoke: %s consent revoke\n' \
-      "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null)" "${USER:-unknown}" "$0" > "$OSRC_CONSENT_FILE"; } 2>/dev/null || true
+  # Atomic write: tmp-then-mv, mirroring _mode_persist. A plain `printf > file` on a
+  # shared host lets a concurrent reader see a half-written consent file (TOCTOU); the rename is atomic.
+  local tmp="$OSRC_HOME/.consent.$$"
+  { umask 077; printf 'granted-at: %s\nby: %s\nscope: cloud-disclosure ack (secret-scan still runs per delegation)\nrevoke: %s consent revoke\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null)" "${USER:-unknown}" "$0" > "$tmp"; } 2>/dev/null \
+    && mv -f "$tmp" "$OSRC_CONSENT_FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; true; }
 }
 cmd_consent() {
   case "${1:-status}" in
@@ -196,7 +200,7 @@ cmd_consent() {
 # (a prompt would hang bg/CI), always print to stderr-safe channels, and validate the stored value.
 OSRC_MODE_FILE="$OSRC_HOME/mode"
 # Conserve trigger: route grind OFF the Claude session once the 5-hour window crosses this %.
-# Alex's call: 50 (she only relaxes after the 50% mark). Tunable per-user/CI.
+# Default 50% (conserve once the window is half-spent). Tunable per-user/CI.
 OSRC_CONSERVE_THRESHOLD="${OSRC_CONSERVE_THRESHOLD:-50}"
 
 _mode_meaning() {
@@ -225,7 +229,7 @@ _mode_menu() {
 
 _mode_persist() {
   local mode="$1" cur tmp="$OSRC_HOME/.mode.$$"
-  cur="$(_mode_read 2>/dev/null)" && [ "$cur" = "$mode" ] && return 0   # F13: skip write if unchanged
+  cur="$(_mode_read 2>/dev/null)" && [ "$cur" = "$mode" ] && return 0   # skip write if unchanged
   mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null || die "mode: cannot create state home $OSRC_HOME"
   { umask 077; printf '%s\n' "$mode" > "$tmp"; } 2>/dev/null \
     || { rm -f "$tmp" 2>/dev/null; die "mode: cannot write $OSRC_MODE_FILE (state home not writable?)"; }
@@ -385,6 +389,7 @@ parse_model() {
                             shift 2 ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
+      --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
       --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
@@ -448,10 +453,9 @@ continue_turn() {
   # `continue` must NOT silently escalate a read-only conversation to accept-edits.
   # Devin -c inherits the existing conversation's permission mode; forcing accept-edits here
   # was a silent privilege escalation. Remove it.
-  # Capture exit code so callers can detect failure (error-handling-reviewer F3).
+  # Capture exit code so callers can detect failure.
   local rc=0
   devin -c --model "$MODEL" -p "$prompt" </dev/null || rc=$?
-  return "$rc"
   return "$rc"
 }
 
@@ -910,6 +914,9 @@ _consume_flags() {
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
+      # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
+      # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
+      --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
@@ -945,6 +952,10 @@ record_ledger() {
   [ "${OSRC_STREAM:-0}" = "1" ] && [ "${OSRC_LEDGER_FORCE:-0}" != "1" ] && return 0
   have jq || return 0
   mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  # Restrict the ledger itself: the $OSRC_HOME dir is 700, but if OSRC_HOME is ever
+  # pointed at a shared location the ledger (task hashes, costs, model names) should still be 600.
+  [ -e "$OSRC_LEDGER" ] || : > "$OSRC_LEDGER" 2>/dev/null || true
+  chmod 600 "$OSRC_LEDGER" 2>/dev/null || true
   local prov="$1" model="$2" tier="$3" verb="$4" task="$5" cost="${6:-}" lane="${7:-}"
   local intok; intok="$(_est_tokens "$task")"
   local ts; ts="$(date +%Y-%m-%dT%H:%M:%S)"
@@ -1154,34 +1165,53 @@ cmd_tab() {
   [ -f "$OSRC_LEDGER" ] || { echo "The Tab is empty (no offloads recorded yet)."; return 0; }
   have jq || { echo "jq needed for tab (brew install jq)"; return 0; }
   echo "== The Tab (outsourcerer ledger: $OSRC_LEDGER) =="
-  jq -rs '
-    # Three-way lane bucket (truthful accounting):
-    #   FREE = local (your hardware): $0 cash AND $0 plan.  PLAN = native cx/cc/gm + keyless gpt-image.
-    #   CASH = everything else (cc/codex->OpenRouter, gemini API, devin-paid).
+  # RESILIENT PARSE: pre-filter with `fromjson? // empty` so ONE malformed/interleaved
+  # ledger line (plausible under the flock-fallback append warned about in record_ledger) drops just
+  # that row instead of failing the whole `jq -rs` slurp and blanking the entire Tab. Warn on stderr
+  # if rows were dropped so a corrupted ledger is visible, not silent.
+  local _tot _good _bad
+  _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null || echo 0)"
+  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null || echo 0)"
+  _bad=$(( _tot - _good )); [ "$_bad" -lt 0 ] && _bad=0
+  jq -R 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | jq -rs '
+    # cashnum: numeric magnitude of the cost, treating "~est" as its number and blank/garbage as 0.
+    def cashnum: (.cost_usd // "") as $c
+      | if $c=="" then 0 elif ($c|startswith("~")) then ($c[1:]|tonumber? // 0) else ($c|tonumber? // 0) end;
+    # Lane bucket (truthful accounting):
+    #   FREE = local ($0 cash AND $0 plan). PLAN = native cx/cc/gm + keyless gpt-image + Devin-Pro ($0
+    #   cash, spends a subscription/plan). CASH = cc/codex->OpenRouter, gemini API (real dollars).
+    #   devin (dv): PLAN when $0 (Pro tier), but a NONZERO measured/estimated cost = pay-per-use = CASH
+    #   (the bucket is decided on the cost axis, not the lane alone, so paid devin is never hidden).
     def bucket:
       (.lane // "") as $l | (.provider // "") as $p | (.verb // "") as $v
       | if ($l == "local") or ($p == "local") then "free"
+        elif $l == "dv" then (if (cashnum > 0) then "cash" else "plan" end)
         elif ($l | test("^(cx|cc|gm)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
         else "cash" end;
     def realcost: (.cost_usd // "") as $c
       | if ($c == "") or ($c | startswith("~")) then null else ($c | tonumber? // null) end;
     def estcost:  (.cost_usd // "") as $c
       | if ($c | startswith("~")) then ($c[1:] | tonumber? // null) else null end;
+    def malformed: (.cost_usd // "") as $c
+      | ($c != "") and (($c|startswith("~"))|not) and (($c|tonumber?) == null);
     ([ .[] | select(bucket=="cash") ]) as $cashlanes
     | (([ $cashlanes[] | realcost | select(. != null) ] | add) // 0) as $cash
-    | (([ $cashlanes[] | estcost  | select(. != null) ] | add) // 0) as $est
+    | (([ .[]        | estcost  | select(. != null) ] | add) // 0) as $est
     | ([ $cashlanes[] | select((.cost_usd // "") == "") ] | length) as $unmeasured
+    | ([ $cashlanes[] | select(malformed) ] | length) as $malformed
     | ([ .[] | select(bucket=="plan") ] | length) as $subs
     | ([ .[] | select(bucket=="free") ] | length) as $free
     | "runs recorded          : \(length)",
       "cash billed (measured)  : $\($cash)   (REAL per-generation OpenRouter cost, captured on bg runs)",
       (if $est > 0 then "cash (harness estimate) : ~$\($est)   (bg run offline, could not read OpenRouter; estimate only)" else empty end),
-      "cash lanes, est-only    : \($unmeasured) run(s)   (foreground; run via bg to capture real $)",
-      "on your subscription    : \($subs) run(s)  , $0 cash, but spent your ChatGPT / Claude / Antigravity PLAN LIMITS",
+      "cash lanes, cost not captured: \($unmeasured) run(s)   (foreground run — re-run via bg to capture real $)",
+      (if $malformed > 0 then "cash lanes, malformed $  : \($malformed) run(s)   (unparseable cost in ledger — inspect \($ARGS.named.led // "the ledger"))" else empty end),
+      "on your subscription    : \($subs) run(s)  , $0 cash, but spent your ChatGPT / Claude / Antigravity / Devin Pro PLAN LIMITS",
       (if $free > 0 then "on your hardware (local): \($free) run(s)  , $0 cash AND $0 plan, fully private" else empty end),
       "by model:",
-      (group_by(.model)[] | "  \(.[0].model)  \(length) run(s)")
-  ' "$OSRC_LEDGER" 2>/dev/null || echo "(ledger parse error)"
+      (group_by(.model)[] | "  \(.[0].model // "(unknown)")  \(length) run(s)")
+  ' --arg led "$OSRC_LEDGER" 2>/dev/null || echo "(ledger parse error)"
+  [ "$_bad" -gt 0 ] && echo "  note: skipped $_bad unparseable ledger line(s) (corrupted/interleaved append) — Tab totals exclude them." >&2
   # Real ChatGPT-plan headroom (5h + weekly) when Codex has recorded it, the true cost of the
   # "no cash" sub lane. Best-effort; silent if unavailable.
   local ql; ql="$(_codex_quota_line 2>/dev/null)" && [ -n "$ql" ] && echo "  $ql"
@@ -1287,7 +1317,7 @@ _ready_lanes() {
 }
 
 # _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
-# OSRC_CONSERVE_THRESHOLD (default 50, Alex's call). Priority when the Claude 5h window is tight:
+# OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
 # local($0/private) > Devin GLM/SWE(free) > keyless Gemini > Codex Sol/Terra(only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first (GLM F6).
 _conserve_reco() {
@@ -1787,10 +1817,16 @@ _supervise() {
   local pid=$! t0 last_size=0 last_change now size idle age
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
-  # Record start time for PID-reuse detection (concurrency-master C1).
+  # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
+  # but the delegate it spawned is orphaned and keeps running, none of the stall/timeout/print-mode
+  # guards below can fire — and _status_line's delegate-pid `kill -0` would still report "running".
+  # Recording the supervisor pid lets _status_line detect a dead watchdog over a live orphan.
+  echo "$$" > "$jd/supervisor_pid"
+  ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ' > "$jd/supervisor_pid_start" 2>/dev/null || true
+  # Record start time for PID-reuse detection.
   local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
   printf '%s\n' "$_stime" > "$jd/pid_start"
-  # Signal trap: kill the delegate tree if the supervisor is signaled (concurrency-master H3).
+  # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too; a mutating job with 0 writes past the window is
@@ -1800,7 +1836,7 @@ _supervise() {
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   while kill -0 "$pid" 2>/dev/null; do
-    # PID-reuse guard: verify the process is still ours (concurrency-master C1).
+    # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
@@ -1844,8 +1880,19 @@ _supervise() {
     # Observed in the wild: devin finishes its file writes, hits this on a final validation/commit
     # command, hangs for hours until an external reaper kills the shell with an ambiguous status.
     # OSRC_NO_PRINTMODE_ABORT=1 disables (escape hatch for lanes that recover from print-mode rejects).
+    #
+    # Match devin's ACTUAL emission of the rejection, not the bare phrase: the phrase can appear in
+    # ordinary delegate output (a delegate that reads/echoes source, greps a log, or summarizes an
+    # error), and a bare-substring match there would wrongly abort a healthy job. Two anchors keep it
+    # specific to a real hang:
+    #   1. Require devin's log-module prefix `chisel::repl::handler:` — echoed prose/code never carries it.
+    #   2. Scan only the recent TAIL: a genuine print-mode hang emits the line and then goes silent, so
+    #      it sits at the end of the log; an incidental mid-run mention is pushed out of the tail.
+    # If devin's log format ever changes, the check simply no-ops and the 15-min byte-growth stall-kill
+    # (still in place) reaps the hang instead — slower, but correct.
     if [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
-      if grep -aq 'Print mode: rejecting tool exec that requires confirmation' "$jd/out.log" 2>/dev/null; then
+      if tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null \
+           | grep -aq 'chisel::repl::handler: Print mode: rejecting tool exec that requires confirmation'; then
         echo "permission-blocked" > "$jd/status"
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
@@ -1870,6 +1917,18 @@ _supervise() {
   case "$last" in
     OSRC::BLOCKED|OSRC::NEED_INPUT) echo blocked > "$jd/status"; return 3 ;;
   esac
+  # Output-token exhaustion is a distinct, recoverable failure, but engines report it as a generic
+  # non-zero exit with the partial answer still sitting in the log. Left unnamed it reads as "the run
+  # broke"; the operator keeps the truncated output and never learns the result was cut, not wrong.
+  # Scanned in the TAIL only: a real cut-off is the LAST thing in the log, whereas prose that merely
+  # mentions truncation (a delegate discussing an API response, or reading a log containing the phrase)
+  # lands mid-run and gets pushed out. Same anchoring discipline as the print-mode detector.
+  if [ "$rc" -ne 0 ] && tail -n 15 "$jd/out.log" 2>/dev/null | grep -aqiE 'response truncated|max output token limit|finish_reason.*length'; then
+    echo failed > "$jd/status"
+    printf 'output-token-limit\n' > "$jd/reason" 2>/dev/null || true
+    echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything." >&2
+    return "$rc"
+  fi
   if [ "$rc" -ne 0 ]; then echo failed > "$jd/status"; return "$rc"
   elif [ "$last" = "OSRC::DONE" ]; then echo done > "$jd/status"; return 0
   else
@@ -2001,7 +2060,14 @@ _bg_launch() {
   if [ ! -x "$SCRIPT_PATH" ] && ! command -v "$SCRIPT_PATH" >/dev/null 2>&1; then
     rm -rf "$jd" 2>/dev/null; echo "bg: supervisor not executable: $SCRIPT_PATH (nothing started)" >&2; return 1
   fi
-  if ! echo running > "$jd/status" 2>/dev/null; then
+  # LAUNCHING sentinel (job liveness): record the start time and a NON-TERMINAL `launching` state
+  # BEFORE detaching. The detached child writes meta.json/pid/out.log and _supervise flips the state to
+  # `running` only once the real process is up. If the child dies in that window (a sandbox that reaps
+  # detached jobs, an early crash), the job stays `launching` — and _status_line converts a `launching`
+  # job with no process/log after a grace window into `failed` (stillborn), instead of leaving a job
+  # stuck reporting `running` that no watchdog ever reaps. `date` first so `started_at` always exists.
+  date +%s > "$jd/started_at" 2>/dev/null || true
+  if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
   nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
@@ -2027,14 +2093,14 @@ cmd_bg() {
     esac
     printf '>>> [bg] no verb given; defaulting to `run` (read-only). Use edit/yolo for mutating work.\n' >&2
   fi
-  _bg_cloud_preack "$@"   # T3/#1: ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+  _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
   echo "[outsourcerer] job $id launched (provider=$PROVIDER). Poll: $0 status $id  |  read: $0 result $id" >&2
 }
 
-# AUTO-DETACH (D3): a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
+# AUTO-DETACH: a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
 # for frontier/reasoning). When invoked through a harness shell tool with a ~2-min timeout, the call is
 # KILLED mid-run (observed twice on Sol gates). When non-interactive AND slow-lane, auto-promote the run
 # to the existing bg path: launch detached under the bg watchdog, print the job id + poll command, return
@@ -2136,9 +2202,12 @@ run_job() {
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
+  # Prefer the start time _bg_launch recorded before detaching (job liveness), so `started` reflects
+  # the real launch instant, not the later meta write; fall back to now for a direct (non-bg) call.
+  local _started; _started="$(cat "$jd/started_at" 2>/dev/null)"; case "$_started" in ''|*[!0-9]*) _started="$(date +%s)" ;; esac
   if have jq; then
     jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
-       --arg cwd "$PWD" --argjson st "$(date +%s)" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" \
+       --arg cwd "$PWD" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" \
        '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st}
         + (if $lane=="" then {} else {lane:$lane} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
@@ -2182,10 +2251,21 @@ run_job() {
       local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$jd/out.log" 2>/dev/null | tail -1)"
       [ -n "$est" ] && real_cost="~$est"
     else
-      real_cost="0.000000"   # no OpenRouter generation in the stream => no-cash (native/keyless) lane
+      # No OpenRouter generation id in the stream. For a NATIVE/keyless/local/plan lane that genuinely
+      # means no cash ($0). But for a CASH OpenRouter lane (or) it means we COULD NOT MEASURE this run
+      # (the Responses stream never surfaced a gen- id and the /generation lookup was empty) -- recording
+      # $0 there would UNDERSTATE real spend (cash-lane under-report guard). Leave it unmeasured so the Tab counts it under
+      # "cash lanes, est-only" (honest) instead of "$0 measured" (false).
+      case "$lane" in
+        or) real_cost="" ;;                 # cash OpenRouter, unmeasurable -> unmeasured, NOT "free"
+        *)  real_cost="0.000000" ;;         # native / keyless / local / plan -> genuinely no cash
+      esac
     fi
   fi
-  [ -n "$real_cost" ] && OSRC_LEDGER_FORCE=1 record_ledger "$prov" "$id2" "$tier" "$verb" "job:$id" "$real_cost" "$lane"
+  # Always record the run (even unmeasured): an empty cost is meaningful (cmd_tab counts it as
+  # est-only), and the old `[ -n "$real_cost" ]` guard would DROP an unmeasured cash run entirely,
+  # hiding a real offload from the Tab. record_ledger tolerates an empty cost arg.
+  OSRC_LEDGER_FORCE=1 record_ledger "$prov" "$id2" "$tier" "$verb" "job:$id" "$real_cost" "$lane"
   return "$sc"
 }
 
@@ -2211,25 +2291,52 @@ _status_line() {
   local id="$1" jd="$OSRC_JOBS/$1" st model started now age prog acts verb flag=""
   [ -d "$jd" ] || { echo "no such job: $1" >&2; return 1; }
   st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-  # Liveness check: if status says running but PID is dead, mark interrupted (concurrency-master H4).
+  # Liveness check: a job is alive only if either
+  #   (a) the DELEGATE pid is live AND still OUR process — a bare `kill -0` can match a recycled pid,
+  #       so compare live `ps -o lstart=` against the saved pid_start exactly as _supervise does; or
+  #   (b) the SUPERVISOR (watchdog) is still running — it will reconcile the delegate itself.
+  # If neither holds, the job is not actually running -> mark interrupted. Falls back to a bare
+  # kill -0 for legacy jobs that predate the pid_start/supervisor_pid files (empty saved value).
   if [ "$st" = "running" ]; then
-    local _jpid; _jpid="$(cat "$jd/pid" 2>/dev/null)"
-    if [ -n "$_jpid" ] && ! kill -0 "$_jpid" 2>/dev/null; then
-      echo interrupted > "$jd/status"; st="interrupted"
+    local _jpid _spid _alive=0 _live_stime _saved_stime
+    _jpid="$(cat "$jd/pid" 2>/dev/null)"
+    if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
+      _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
+      _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
+      { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+    fi
+    if [ "$_alive" = "0" ]; then
+      _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+      [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null && _alive=1
+    fi
+    [ "$_alive" = "0" ] && { echo interrupted > "$jd/status"; st="interrupted"; }
+  fi
+  # STILLBORN detection (job liveness): a job stuck in `launching` with no process AND no log after
+  # the grace window means the detached worker never came up (sandbox reaped it, early crash) — convert
+  # it to `failed` with an actionable reason instead of leaving a permanent `launching`/phantom.
+  now=$(date +%s)
+  if [ "$st" = "launching" ]; then
+    local _sa; _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=$now ;; esac
+    if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "${OSRC_LAUNCH_GRACE:-45}" ]; then
+      echo failed > "$jd/status"; st="failed"
+      printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely killed the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "${OSRC_LAUNCH_GRACE:-45}" > "$jd/error" 2>/dev/null || true
     fi
   fi
   model="$(_job_field "$id" '.model')"
-  started="$(_job_field "$id" '.started')"; [ "$started" = "?" ] && started=0
-  now=$(date +%s); age=$(( now - started ))
+  # Start time: meta.started -> the started_at sentinel -> unknown. NEVER default to 0: an epoch-1970
+  # fallback would render a meaningless multi-decade "age". Show `?` when genuinely unknown.
+  started="$(_job_field "$id" '.started')"; case "$started" in ''|'?'|*[!0-9]*) started="$(cat "$jd/started_at" 2>/dev/null)" ;; esac
+  local agetxt agenum=0
+  case "$started" in ''|*[!0-9]*) agetxt="?" ;; *) agenum=$(( now - started )); agetxt="${agenum}s" ;; esac
   prog="$(tail -1 "$jd/progress" 2>/dev/null)"
   case "$prog" in *OSRC::*) prog="OSRC::$(printf '%s' "${prog##*OSRC::}" | tr -d '"\\' )" ;; esac
   acts="$(_job_acts "$jd" 2>/dev/null)"
   verb="$(_job_field "$id" '.verb')"
   case "$verb" in edit|research|yolo)
-    [ "${_OSRC_LASTW:-1}" = "0" ] && [ "$age" -gt "${OSRC_NOWRITE_WARN:-180}" ] && [ "$st" = "running" ] && flag=" !exploring(0-writes)" ;;
+    [ "${_OSRC_LASTW:-1}" = "0" ] && [ "$agenum" -gt "${OSRC_NOWRITE_WARN:-180}" ] && [ "$st" = "running" ] && flag=" !exploring(0-writes)" ;;
   esac
-  prog="$(printf '%s' "$prog" | cut -c1-46)"
-  printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "${age}s" "$model" "${acts:-—}$flag" "$prog"
+  prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
+  printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
 
 # _job_json <id> [label] -> one job as a stable JSON object (orchestrator control plane, schema v1).
@@ -2237,7 +2344,20 @@ _status_line() {
 _job_json() {
   local id="$1" lbl="${2:-}" jd="$OSRC_JOBS/$1" L
   [ -d "$jd" ] && have jq || return 1
-  [ -f "$jd/meta.json" ] || return 1
+  # Do NOT silently drop a job that has no meta.json (job liveness): a launching/stillborn job the
+  # orchestrator can't SEE is worse than one it can. Emit a minimal record so the control plane always
+  # reflects reality — status + started_at from the sentinel, everything else null.
+  if [ ! -f "$jd/meta.json" ]; then
+    local _st _sa; _st="$(cat "$jd/status" 2>/dev/null || echo unknown)"
+    _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=null ;; esac
+    jq -n --arg id "$id" --arg status "$_st" --arg label "$lbl" --argjson started "${_sa:-null}" \
+      '{schema_version:"1", job_id:$id, label:(if $label=="" then null else $label end),
+        provider:null, verb:null, shape:null, model:null, tier:null, effort:null,
+        status:$status, exit:null, started:$started, cwd:null,
+        progress:{last_marker:null, reads:0, writes:0, bash:0},
+        result_path:null, log_path:null, note:"no meta.json — launching/stillborn or pre-dispatch death"}'
+    return 0
+  fi
   L="$jd/out.log"
   local st exitc last r=0 w=0 b=0 rp=""
   st="$(cat "$jd/status" 2>/dev/null || echo unknown)"
@@ -2288,11 +2408,17 @@ cmd_watch() {
   local id="${1:-}"; [ -n "$id" ] || die "watch needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-60}"
-  local t0; t0=$(date +%s); local last=""
+  local t0; t0=$(date +%s); local last="" lastprog=""
   while :; do
     local st; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-    [ "$st" != "$last" ] && { _status_line "$id"; last="$st"; }
-    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked) break ;; esac
+    # HEARTBEAT: print on a status change OR when a NEW OSRC::PROGRESS marker lands.
+    # Before this, watch was silent for the entire multi-minute 'running' phase even while the delegate
+    # emitted progress — the native equivalent of "going dark" the whole time work is happening.
+    local prog; prog="$(tail -1 "$jd/progress" 2>/dev/null)"
+    if [ "$st" != "$last" ] || { [ -n "$prog" ] && [ "$prog" != "$lastprog" ]; }; then
+      _status_line "$id"; last="$st"; lastprog="$prog"
+    fi
+    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) break ;; esac
     [ "$forsec" -gt 0 ] && [ $(( $(date +%s) - t0 )) -ge "$forsec" ] && break
     sleep "${OSRC_POLL:-10}"
   done
@@ -2411,7 +2537,7 @@ cmd_gc() {
   for d in "$OSRC_JOBS"/*/; do
     [ -d "$d" ] || continue
     st="$(cat "$d/status" 2>/dev/null || echo running)"
-    # Auto-heal: a running job whose PID is dead is reaped (concurrency-master H4).
+    # Auto-heal: a running job whose PID is dead is reaped.
     if [ "$st" = "running" ]; then
       local _gpid; _gpid="$(cat "$d/pid" 2>/dev/null)"
       if [ -n "$_gpid" ] && ! kill -0 "$_gpid" 2>/dev/null; then
@@ -2486,13 +2612,14 @@ _fanout_status() {
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
     jd="$OSRC_JOBS/$jid"; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-    started="$(_job_field "$jid" '.started')"; [ "$started" = "?" ] && started=0
-    now=$(date +%s); age=$(( now - started ))
+    # start time: meta.started -> started_at sentinel -> unknown (never epoch 0 => no meaningless huge age from an epoch-0 fallback).
+    started="$(_job_field "$jid" '.started')"; case "$started" in ''|'?'|*[!0-9]*) started="$(cat "$jd/started_at" 2>/dev/null)" ;; esac
+    now=$(date +%s); local agetxt; case "$started" in ''|*[!0-9]*) age=0; agetxt="?" ;; *) age=$(( now - started )); agetxt="${age}s" ;; esac
     prog="$(tail -1 "$jd/progress" 2>/dev/null)"
     # stream-json out.log makes progress a raw JSON blob; surface the human OSRC:: line and truncate.
     case "$prog" in *OSRC::*) prog="OSRC::$(printf '%s' "${prog##*OSRC::}" | tr -d '"\\')" ;; esac
     prog="$(printf '%s' "$prog" | cut -c1-72)"
-    printf '%-24s %-9s %-7s %-22s %s\n' "$jid" "$st" "${age}s" "$label" "$prog"
+    printf '%-24s %-9s %-7s %-22s %s\n' "$jid" "$st" "$agetxt" "$label" "$prog"
   done < "$gd/members.tsv"
 }
 
@@ -2506,7 +2633,7 @@ _fanout_wait() {
     sleep "${OSRC_POLL:-10}"
   done
   _fanout_status "$gid" >&2
-  # Return nonzero if any member failed (error-handling-reviewer F5).
+  # Return nonzero if any member failed.
   local _fail=0 _jid _st
   while IFS="$(printf '\t')" read -r _jid _; do
     [ -n "$_jid" ] || continue
@@ -2535,7 +2662,7 @@ _fanout_collect() {
     cat "$dst" >> "$out" 2>/dev/null || true
   done < "$gd/members.tsv"
   echo "$out"
-  # Return nonzero if any member failed (error-handling-reviewer F5).
+  # Return nonzero if any member failed.
   local _fail=0
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
@@ -2619,13 +2746,13 @@ cmd_fanout() {
       --agents)       [ -n "${2:-}" ] || die "--agents needs a dir"; agentsdir="$2"; shift 2 ;;
       --sub)          [ -n "${2:-}" ] || die "--sub needs KEY=VALUE"; subs+=("$2"); shift 2 ;;
       --label-prefix) [ -n "${2:-}" ] || die "--label-prefix needs a value"; label_prefix="$2"; shift 2 ;;
-      --cloud-ack)    export OSRC_CLOUD_ACK=1; shift ;;   # T3/#2: documented non-interactive cloud ack for fanout
+      --cloud-ack)    export OSRC_CLOUD_ACK=1; shift ;;   # documented non-interactive cloud ack for fanout
       --)             shift; inline=("$@"); break ;;
       *) die "fanout: unknown flag '$1' (sources: --agents DIR | --tasks FILE | -- \"t1\" \"t2\"; knobs: -m --effort --tier --provider --with --verb --max --preamble --sub --task \"<t>\" --route 'pat=model,...' --worktree; routing precedence: -m > --route > agent frontmatter > default; --worktree isolates each job in its own git worktree, remove with 'cleanup <id|gid> [--force]')" ;;
     esac
   done
   _is_verb "$verb" || die "fanout --verb must be one of: $_OSRC_VERBS (got '$verb')"
-  # Warn on mutating verbs without --worktree (concurrency-master H5).
+  # Warn on mutating verbs without --worktree.
   case "$verb" in edit|research|yolo)
     [ "${OSRC_WORKTREE:-0}" != "1" ] && echo "[outsourcerer] WARNING: fanout with --verb $verb without --worktree — parallel mutating jobs share \$PWD and may collide. Use --worktree for isolation." >&2
   ;; esac
@@ -2752,7 +2879,7 @@ second_opinion() {
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
   echo ">>> second-opinion: $m1  vs  $m2" >&2
   _cloud_disclose ccor "$m1,$m2" "$q"
-  # AUTO-DETACH (D3): second-opinion runs 2-3 sequential cloud API calls (can take 2-5 min).
+  # AUTO-DETACH: second-opinion runs 2-3 sequential cloud API calls (can take 2-5 min).
   # If non-interactive AND slow-lane, auto-promote to bg so a harness tool-timeout can't kill it.
   local _so_tier; _so_tier="$(resolve_tier "$m1" "")"
   if _autodetach_should ccor "$m1" "$_so_tier"; then
@@ -2763,7 +2890,7 @@ second_opinion() {
   a1="$(_so_run "$m1" "$q")"; a2="$(_so_run "$m2" "$q")"
   n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
   record_ledger cc "$m1,$m2" mixed second-opinion "$q"
-  # Detect upstream failures: empty output means the call failed (error-handling-reviewer C1).
+  # Detect upstream failures: empty output means the call failed.
   if [ -z "$n1" ] && [ -z "$n2" ]; then
     die "second-opinion: both cheap models ($m1, $m2) returned empty — upstream failure (check OPENROUTER_API_KEY / network)"
   fi
@@ -3015,8 +3142,7 @@ $wrapped"
 # CLAUDEX LANE (--provider claudex): GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness,
 # via a locally-running CLIProxyAPI the USER already installed and logged into. The community
 # "claudex" pattern (Theo's recipe): Claude Code's UX + subagents driving a ChatGPT-sub model.
-# DETECT-ONLY by design: this lane never installs or launches the proxy — our supply-chain audit
-# of CLIProxyAPI (2026-07-16, findings/cliproxyapi-forensics.json) plus its use of internal,
+# DETECT-ONLY by design: this lane never installs or launches the proxy — its reliance on internal,
 # non-guaranteed upstream endpoints means installing it is the USER's informed call, not ours.
 # Facts verified against the proxy docs: default port 8317, Anthropic-compatible /v1/messages,
 # auth token must match the proxy's own api-keys list, model registry auto-routes gpt-5.6-* to
@@ -3452,13 +3578,53 @@ _is_cloud_lane() {
   esac
 }
 
+# ---- per-lane / per-repo trust for the credential-FILE hard-block (issue #2).
+# Default EMPTY, so every install stays fail-closed exactly as before. A lane is trusted only for
+# repos explicitly listed for it, so trusting a lane in one repo grants nothing anywhere else.
+# Deliberately NOT an environment variable: an exported grant is inherited by every child process
+# (bg/fanout jobs, nested invocations) and would silently widen the trusted set far past the repo the
+# operator was thinking about. The config file and a per-invocation flag are the only two grants, and
+# neither survives into a child.
+# Config: $XDG_CONFIG_HOME/outsourcerer/trusted-lanes.json (default ~/.config/...), shape:
+#   { "devin": ["/abs/path/to/repo", ...], "cc": [...] }
+_trust_config_file() { printf '%s/outsourcerer/trusted-lanes.json' "${XDG_CONFIG_HOME:-$HOME/.config}"; }
+
+# _lane_trusted_for_pwd <lane> -> 0 when this lane is trusted for the current repo. Fails CLOSED on
+# every uncertainty: no file, unreadable, bad JSON, no jq, unresolvable path.
+_lane_trusted_for_pwd() {
+  local lane="$1" cf here p rp
+  [ -n "$lane" ] || return 1
+  # Per-invocation grant (--trust-lane). Not exported, so a bg/fanout child re-evaluates from config.
+  case " ${OSRC_TRUST_LANE_ONCE:-} " in *" $lane "*) return 0 ;; esac
+  cf="$(_trust_config_file)"
+  [ -f "$cf" ] && [ -r "$cf" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  # Resolve $PWD through symlinks so a symlinked path cannot masquerade as a trusted repo.
+  here="$(cd "$PWD" 2>/dev/null && pwd -P)" || return 1
+  [ -n "$here" ] || return 1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in "~"/*) p="$HOME/${p#\~/}" ;; esac
+    rp="$(cd "$p" 2>/dev/null && pwd -P)" || continue
+    # Exact repo, or anywhere inside it. Never a prefix-string match (/repo must not match /repo-two).
+    [ "$here" = "$rp" ] && return 0
+    case "$here" in "$rp"/*) return 0 ;; esac
+  done < <(jq -r --arg l "$lane" '.[$l] // [] | .[]? | select(type=="string")' "$cf" 2>/dev/null)
+  return 1
+}
+
 # _secret_scan <prompt> -> best-effort, gitignore-aware (KTD2). Hard-dies if a REAL credential
 # file sits inside the delegated scope (cwd top-level + .aws). Reports (via OSRC_SECRET_HIT_COUNT) any
 # high-signal pattern found in the prompt or a --with file, but does NOT hard-block on a regex
 # hit alone (avoid crying wolf); only an actual credential FILE hard-blocks.
 _secret_scan() {
-  local prompt="${1:-}" f scan="$1"
-  # (1) hard block: an actual credential file in scope.
+  local prompt="${1:-}" f scan="$1" lane="${2:-}" trusted=0
+  if _lane_trusted_for_pwd "$lane"; then trusted=1; fi
+  # (1) hard block: an actual credential file in scope. Skipped ONLY for a lane explicitly trusted for
+  # THIS repo. The pattern scan (2) and the pasted-VALUE block (3) below still run either way: trusting
+  # a lane with the credentials a repo already contains is a different decision from letting a live
+  # secret VALUE be pasted into a prompt, and the second is never implied by the first.
+  if [ "$trusted" = "0" ]; then
   for f in "$PWD/.env" "$PWD/.env.local" "$PWD/credentials" "$PWD/id_rsa" "$PWD/id_ed25519" "$PWD/.aws/credentials"; do
     [ -f "$f" ] && die "CLOUD GATE: real credential file in delegated scope: $f — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine."
   done
@@ -3507,6 +3673,7 @@ _secret_scan() {
     rm -f "$_sf" "$_ef"
     [ -n "$_hit" ] && die "CLOUD GATE: real credential file in delegated scope: $_hit — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine."
   fi
+  fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
   if [ -n "${WITH_SPEC:-}" ]; then
     local tok; local -a _ws; IFS=' ' read -ra _ws <<< "$WITH_SPEC"
@@ -3520,6 +3687,16 @@ $(cat "$tok" 2>/dev/null)"
   # surfaced downstream, so the raw credential fragments never live in a variable or reach stderr/logs).
   OSRC_SECRET_HIT_COUNT="$(printf '%s\n' "$scan" | grep -Eoi 'OPENROUTER_API_KEY|sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' 2>/dev/null | sort -u | grep -c . )"
   OSRC_SECRET_HIT_COUNT="${OSRC_SECRET_HIT_COUNT:-0}"
+  # (3) VALUE hard-block: a real high-entropy secret VALUE pasted into the prompt / --with
+  # files (not merely a keyword like the bare name OPENROUTER_API_KEY, which appears in normal code
+  # discussion) ships a LIVE credential to a cloud lane. These patterns are token values and are almost
+  # never legitimately pasted, so — unlike the count-only keyword scan above — they HARD-BLOCK by
+  # default. Opt out with OSRC_SECRET_ALLOW_VALUE=1 for the rare deliberate case. The value itself is
+  # never printed (only the refusal). Reference secrets by NAME, not value, when delegating.
+  if [ "${OSRC_SECRET_ALLOW_VALUE:-0}" != "1" ] \
+     && printf '%s\n' "$scan" | grep -Eq 'sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+    die "CLOUD GATE: a live secret VALUE (API key / token / private key) is in the prompt or a --with file — refusing the cloud route so it doesn't leave your machine. Reference the secret by NAME instead of pasting its value, or set OSRC_SECRET_ALLOW_VALUE=1 if you truly intend to send it."
+  fi
 }
 
 # _cloud_disclose <lane> <model> <prompt> -> the cloud gate. Idempotent per process via
@@ -3533,7 +3710,7 @@ _cloud_disclose() {
   # scan, `OSRC_CLOUD_ACKED=1` in the environment would ship a repo with a live .env to a third-party
   # API with the hard-block silently skipped. An ack only suppresses the human-facing notice/prompt --
   # never the scan.
-  _secret_scan "$prompt"                             # dies here if a real cred file is in scope
+  _secret_scan "$prompt" "$lane"                     # dies here if a real cred file is in scope
   [ "${OSRC_CLOUD_ACKED:-0}" = "1" ] && return 0     # already disclosed in-process -> skip the notice only
   local cwd="${PWD/#$HOME/~}"
   local train="paid/non-training route (no training on your data)"
@@ -3547,6 +3724,9 @@ _cloud_disclose() {
   # Report the COUNT of high-signal matches, never the matched secret text itself (printing the
   # values would leak the very credentials we are warning about to the terminal / any log capturing stderr).
   [ "${OSRC_SECRET_HIT_COUNT:-0}" -gt 0 ] 2>/dev/null && printf '>>>   secret scan : %s high-signal credential pattern(s) detected in prompt/--with (values redacted)\n' "$OSRC_SECRET_HIT_COUNT" >&2
+  # A skipped credential scan is never silent: the one case where the gate stood down is the case the
+  # operator most needs to see named, every single time.
+  _lane_trusted_for_pwd "$lane" && printf '>>>   trust       : credential-file scan SKIPPED — lane '"'"'%s'"'"' is trusted for %s (trusted-lanes.json / --trust-lane). Pasted-secret and pattern scans still ran.\n' "$lane" "$cwd" >&2
   # acknowledge: env/flag ack (persisted for next time), else remembered consent, else interactive
   # prompt (persisted on yes), else fail-closed refuse with the one-time-fix spelled out.
   if [ "${OSRC_CLOUD_ACK:-0}" = "1" ]; then
@@ -3659,7 +3839,7 @@ delegate_cc() {
     if [ -n "$_dvm" ]; then
       printf '>>> [self-heal] OpenRouter exhausted for "%s" (transport/availability failure on every model tried); "%s" also runs on Devin -- retrying there instead. Set OSRC_NO_CROSS_LANE=1 to disable and fail on OpenRouter instead.\n' "$MODEL" "$_dvm" >&2
       # Rewrite the model token in ORIGARGS so the Devin lane runs the Devin id, not the OR alias
-      # (same rewrite technique route_delegate's U6 reroute uses for the default-provider case).
+      # (same rewrite technique route_delegate's availability-aware reroute uses for the default-provider case).
       local _i; for _i in "${!ORIGARGS[@]}"; do
         case "${ORIGARGS[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIGARGS[@]} ] && ORIGARGS[$((_i+1))]="$_dvm" ;; esac
       done
@@ -3915,7 +4095,7 @@ _is_transport_failure() {
   #  prose (snake_case error codes, errno constants) or carry their own non-positional discriminator (a URL,
   #  the literal "after", an HTTP/version prefix, a status-code delimiter). Safe to match ANYWHERE in stderr.
   if printf '%s' "$stderr" | grep -qiE \
-'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|status[ _]?code[:= ]+[45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|(key|credit) limit exceeded|insufficient credits|requires more credits|api error: [45][0-9][0-9]'; then
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|(key|credit) limit exceeded|insufficient credits|requires more credits|api error: [45][0-9][0-9]'; then
     return 0
   fi
   #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
@@ -3923,7 +4103,7 @@ _is_transport_failure() {
   #  ("AssertionError: connection refused should be rendered..."). So every one is LINE-ANCHORED. This is what
   #  stops the prose-false-positive class wholesale (a false positive here would blind-RETRY a mutating task).
   if printf '%s' "$stderr" | grep -qiE \
-'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?[45][0-9][0-9]|authentication[ _]?(required|failed|error)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
+'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?[45][0-9][0-9]|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
     return 0
   fi
   return 1
@@ -3971,6 +4151,9 @@ _devin_sandboxed_proxy_tls_hint() {
   [ -d "$dlog_dir" ] || return 1
   local newest; newest="$(ls -t "$dlog_dir"/devin_*.log 2>/dev/null | head -1)"
   [ -n "$newest" ] || return 1
+  # Symlink discipline: match _cloud_consent_ok/_mode_read — never read through a
+  # planted symlink, even though this path only ever emits a numeric OSStatus code (low blast radius).
+  [ -L "$newest" ] && return 1
   local tail_text; tail_text="$(tail -n "${OSRC_DEVIN_LOG_SCAN:-300}" "$newest" 2>/dev/null)"
   [ -n "$tail_text" ] || return 1
   _is_sandboxed_proxy_tls_failure "$tail_text" || return 1
@@ -4153,7 +4336,7 @@ route_delegate() {
       or)  case "$PROVIDER" in
              cc)    disp=ccor ;;
              codex) disp=codexor ;;
-             *)     # U6 availability-aware routing: default provider (devin) + an OpenRouter model that
+             *)     # availability-aware routing: default provider (devin) + an OpenRouter model that
                     # Devin ALSO serves -> use the Devin lane (has quota) instead of dying/forcing OpenRouter.
                     # This fixes `-m glm` hard-failing when the OpenRouter key is out of monthly quota.
                     local _dvm; _dvm="$(_devin_model_for "$MODEL")"
@@ -4165,7 +4348,12 @@ route_delegate() {
                       done
                       RESOLVED_ID="$_dvm"; disp=devin
                     else
-                      die "'$RESOLVED_ID' is an OpenRouter model; use --provider cc or codex (devin cannot serve it)."
+                      # AUTO-ROUTE: an OpenRouter-only model the active provider
+                      # cannot serve should FOLLOW its lane automatically — the SKILL promise is "the
+                      # alias picks the lane; no --provider needed." Don't die and make the user recall
+                      # `--provider cc`; route to the cc transport (Claude Code -> OpenRouter) and say so.
+                      printf '>>> [route] -m %s is an OpenRouter-only model; active provider (%s) cannot serve it — auto-routing to the OpenRouter lane (--provider cc). Force codex with --provider codex.\n' "$MODEL" "$PROVIDER" >&2
+                      PROVIDER=cc; disp=ccor
                     fi ;;
            esac ;;
     esac
@@ -4193,7 +4381,7 @@ route_delegate() {
   [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
 
-  # AUTO-DETACH (D3): if non-interactive AND slow-lane, auto-promote to the bg path so a harness
+  # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to the bg path so a harness
   # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
   # The model tier (frontier/capable/mid/budget) drives the "slow" decision, NOT the verb tier.
   # Escape hatches: OSRC_NO_AUTODETACH=1 / --wait / --foreground forces foreground; OSRC_FORCE_AUTODETACH=1
@@ -4277,7 +4465,7 @@ session() {
           launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL" ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc)" ;;
       esac
-      # Use has-session to avoid killing a concurrent session (concurrency-master H2).
+      # Use has-session to avoid killing a concurrent session.
       if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         echo "Session '$SESSION_NAME' already exists. Use '$0 session stop' first, or reattach with 'tmux attach -t $SESSION_NAME'."
         return 0
@@ -4434,6 +4622,22 @@ parity() {
 doctor() {
   echo "== outsourcerer doctor (v$OSRC_VERSION) =="
   echo "  platform: $OSRC_PLATFORM$( [ "$OSRC_PLATFORM" = "windows" ] && echo ' (Git Bash — NO WSL needed. Works: run/edit/yolo/bg/fanout/status/doctor/advise. Not available: tmux session mode.)')"
+  # VERSION-DRIFT check: the manifest, THIS running script, and any OTHER installed copy
+  # (a stale standalone skill dir) can silently disagree — a user then runs old code missing every
+  # recent fix. Flag any mismatch loudly. Best-effort; silent when nothing to compare.
+  { local _dver _mf _sd _drift=""
+    _mf="$(dirname "$SCRIPT_PATH")/../../../.claude-plugin/plugin.json"
+    [ -f "$_mf" ] && have jq && _dver="$(jq -r '.version // empty' "$_mf" 2>/dev/null)"
+    [ -n "$_dver" ] && [ "$_dver" != "$OSRC_VERSION" ] && _drift="  version DRIFT: running script v$OSRC_VERSION but plugin.json says v$_dver — bump one to match."
+    # A second installed copy under ~/.claude/skills that isn't the one running now.
+    _sd="$HOME/.claude/skills/outsourcerer/scripts/outsourcerer.sh"
+    if [ -f "$_sd" ] && [ "$_sd" != "$SCRIPT_PATH" ]; then
+      local _sv; _sv="$(grep -m1 '^OSRC_VERSION=' "$_sd" 2>/dev/null | cut -d'"' -f2)"
+      [ -n "$_sv" ] && [ "$_sv" != "$OSRC_VERSION" ] && _drift="${_drift}
+  version DRIFT: a SECOND copy at $_sd is v$_sv (this run is v$OSRC_VERSION) — /outsourcerer may load the stale one. Sync or remove it."
+    fi
+    [ -n "$_drift" ] && printf '%s\n' "$_drift"
+  }
   # State-home writability: THE silent killer under sandboxed harness shells. Report, don't die —
   # doctor's job is to diagnose.
   mkdir -p "$OSRC_HOME" 2>/dev/null
@@ -4580,6 +4784,87 @@ Free-lane note (CHANGES OFTEN, verify, never assume):
 EOF
 }
 
+# cmd_loop -- bounded loops. The ONE built-in shape is `verify`: delegate -> run an EXTERNAL check ->
+# retry-with-feedback, on the cheapest model, until the check passes or a cap fires. Richer shapes
+# (sweep / best-of-N / eval-optimize / council-build) are orchestrator recipes in references/loops.md,
+# composed from the existing verbs — not a workflow engine here. Terminates into exactly one state:
+# success (0) | blocked (3) | max_turns (2). State (each attempt + check output) lives on disk.
+cmd_loop() {
+  local shape="${1:-}"; [ $# -gt 0 ] && shift
+  case "$shape" in
+    verify) ;;
+    ''|-h|--help|help) die "loop: the built-in shape is 'verify'. Usage: loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\". Other shapes (sweep / best-of-N / council-build) are orchestrator recipes — see references/loops.md." ;;
+    *) die "loop: unknown shape '$shape' (only 'verify' is built in; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
+  esac
+  local model="" check="" max="${OSRC_LOOP_MAX:-3}" verb=edit task=""
+  while [ $# -gt 0 ]; do case "$1" in
+    -m|--model) [ -n "${2:-}" ] || die "loop verify: -m needs a model"; model="$2"; shift 2 ;;
+    --check)    [ -n "${2:-}" ] || die "loop verify: --check needs a command"; check="$2"; shift 2 ;;
+    --max)      [ -n "${2:-}" ] || die "loop verify: --max needs a number"; max="$2"; shift 2 ;;
+    --verb)     [ -n "${2:-}" ] || die "loop verify: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
+    --worktree) die "loop verify: --worktree is not supported yet. Isolation would have to be established by the loop itself (the delegate runs in the foreground here, and the acceptance check must run inside the same tree), so a half-wired flag would verify the wrong files. Run the loop inside a worktree you created, or use 'bg --worktree' for one-shot isolated work." ;;
+    --)         shift; task="$*"; break ;;
+    -*)         die "loop verify: unknown flag '$1'" ;;
+    *)          task="$1"; shift ;;
+  esac; done
+  [ -n "$task" ]  || die "loop verify needs a task, e.g.: loop verify -m glm --check \"npm test\" \"make the auth tests pass\""
+  [ -n "$check" ] || die "loop verify needs a --check command. External verification is MANDATORY — a loop that trusts the model's own 'done' is not a loop, it's a hope."
+  case "$max" in ''|*[!0-9]*) die "loop verify: --max must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] 2>/dev/null || die "loop verify: --max must be >= 1"
+  case "$verb" in edit|yolo) ;; *) die "loop verify: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
+
+  local lid ldir; lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
+  mkdir -p -m 700 "$ldir" 2>/dev/null || die "loop: cannot create loop dir under $OSRC_HOME/loops"
+  { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nverb: %s\nstarted: %s\n' \
+      "$task" "$check" "${model:-<default>}" "$max" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
+  echo "[loop verify] $lid — up to $max attempts on ${model:-default lane}; acceptance check: $check" >&2
+
+  local attempt feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
+  [ -n "$model" ] && mflag="-m"
+  for attempt in $(seq 1 "$max"); do
+    echo "OSRC::PROGRESS $attempt/$max delegate+verify" >&2
+    local aprompt="$task"
+    [ -n "$feedback" ] && aprompt="$task
+
+The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
+$feedback"
+    # Delegate this attempt via the script itself (reuses all routing/consent/watchdog machinery).
+    # OSRC_NO_AUTODETACH=1 is MANDATORY here, not a preference: a detached delegate returns a job id
+    # immediately, so the acceptance check would run against files the delegate has not touched yet.
+    # Every attempt would then see the same pre-edit failure, the stall guard would fire, and the loop
+    # would report `blocked` while the real work landed in the background, unwatched. The loop is its
+    # own supervisor and is the thing meant to be long-running, so it always waits in the foreground.
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    # Defense in depth: if a delegate ever detaches anyway, the check below would silently grade stale
+    # files. Refuse to grade rather than emit a confident wrong verdict.
+    if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
+      state="blocked"
+      echo "[loop verify] $lid: attempt $attempt detached to the background, so the acceptance check would grade work that has not happened yet. Refusing to grade. Inspect $ldir/attempt-$attempt.out." >&2
+      break
+    fi
+    # Distinct BLOCKED terminal state: the delegate asked for a human / hit a wall — surface, don't grind.
+    if grep -aqE 'OSRC::(BLOCKED|NEED_INPUT)' "$ldir/attempt-$attempt.out" 2>/dev/null; then
+      state="blocked"; echo "[loop verify] $lid: delegate reported BLOCKED on attempt $attempt — stopping for a human." >&2; break
+    fi
+    # EXTERNAL verification (the model never judges itself).
+    local cout crc; cout="$(bash -c "$check" 2>&1)"; crc=$?
+    printf '%s' "$cout" > "$ldir/check-$attempt.out" 2>/dev/null || true
+    if [ "$crc" -eq 0 ]; then state="success"; echo "[loop verify] $lid: acceptance check PASSED on attempt $attempt." >&2; break; fi
+    # Stall guard: byte-identical check output on two consecutive attempts means the feedback is
+    # not moving the delegate -> stop rather than burn the remaining budget on a spin. Keyed on a
+    # seen-prior flag, NOT on prev_fail being non-empty — an empty check output (e.g. a bare
+    # `false`) is still a repeatable failure that should trip the guard.
+    if [ "$have_prev" = "1" ] && [ "$cout" = "$prev_fail" ]; then
+      state="blocked"; echo "[loop verify] $lid: identical check failure two attempts running (no progress) — stopping to avoid a spin. Inspect $ldir, then steer or escalate a tier." >&2; break
+    fi
+    prev_fail="$cout"; have_prev=1; feedback="$cout"
+  done
+  printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || true
+  echo "[loop verify] $lid final: $state  ·  attempts + check output in $ldir" >&2
+  echo "$state"
+  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac
+}
+
 main() {
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
   # ALSO accepted after it, via _consume_flags/parse_model). Audits showed a misplaced --cloud-ack
@@ -4618,6 +4903,7 @@ main() {
     yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
     bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
+    loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
     watch)       cmd_watch "$@" ;;                         # poll a job until terminal (or --for N)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)

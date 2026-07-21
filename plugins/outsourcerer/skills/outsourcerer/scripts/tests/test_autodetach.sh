@@ -2,7 +2,7 @@
 # test_autodetach.sh — D3 invariant: a non-interactive slow-lane foreground run must auto-detach to
 # the bg path so a harness tool-timeout can't kill it mid-run.
 #
-# Sol's BLOCK required four genuine behavioral tests (not vacuous text-presence):
+# The review required four genuine behavioral tests (not vacuous text-presence):
 #   1. NEGATIVE CONTROL: actually EXECUTE a sabotaged engine (auto-detach branch removed) on a
 #      non-interactive slow-lane run and assert NO job is created (it falls through to _fg_guard).
 #   2. FULL RE-ENTRY: drive the real path _bg_launch -> __runjob -> route_delegate with a FAKED

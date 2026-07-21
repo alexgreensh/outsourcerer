@@ -27,7 +27,9 @@ echo "=== STATIC gate: Phase-0 invariants wired ==="
 # 1. Every unit test suite is green (aggregate).
 for t in test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default \
-         test_harness_isolation test_autodetach test_advise test_claudex test_copilot; do
+         test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
+         test_loops test_job_lifecycle test_output_truncation test_lane_accounting \
+         test_selfcontained_hardening test_trusted_lanes; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
   else note "unit suite $t absent"; fi
@@ -39,9 +41,11 @@ grep -q 'protected path needs --allow-downgrade'  "$SRC" && ok "U2 no-silent-esc
 grep -q 'SECURITY DOWNGRADE'                      "$SRC" && ok "U2 downgrade is labeled, not silent"               || bad "U2 label missing"
 grep -q '_validate_model_token'                   "$SRC" && ok "U3 model-token injection guard present"            || bad "U3 guard missing"
 grep -q '_is_transport_failure'                   "$SRC" && ok "U4 transport-vs-task classifier present"           || bad "U4 classifier missing"
-grep -q '_devin_model_for'                        "$SRC" && ok "U6 availability-aware routing present"             || bad "U6 routing missing"
+grep -q '_devin_model_for'                        "$SRC" && ok "availability-aware routing present"             || bad "availability-aware routing missing"
 grep -q 'Read Edit Write Bash Grep Glob'          "$SRC" && ok "U7 mutating coding toolset granted (no bash wedge)" || bad "U7 toolset missing"
 grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach trigger present"                       || bad "D3 trigger missing"
+grep -q '_lane_trusted_for_pwd'                    "$SRC" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
+grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation trust grant is exported (child jobs would inherit it)" || ok "trust grant is never exported (no inheritance)"
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
 
 # 3. bash -n on the script + all sibling shell scripts.
@@ -69,7 +73,7 @@ else
     elif [ "$rc" -ne 0 ]; then note "LIVE $label: lane unavailable/failed (rc=$rc) — $(printf '%s' "$out" | tail -1)"
     else bad "LIVE $label: ran but did NOT read the nonce (tool grant broken?)"; fi
   }
-  # Devin GLM (U6 routing fix — this is the exact path that used to 403 on OpenRouter).
+  # Devin GLM (availability-aware routing fix — this is the exact path that used to 403 on OpenRouter).
   if have devin && devin auth status 2>/dev/null | grep -qi "logged in"; then
     probe_lane "devin/glm" run -m glm
   else note "LIVE devin: not installed / not logged in"; fi

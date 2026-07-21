@@ -41,6 +41,12 @@ grep -aq "Print mode: rejecting tool exec that requires confirmation" "$SRC" \
 grep -aq 'OSRC_NO_PRINTMODE_ABORT' "$SRC" \
   && ok "source: print-mode abort has an opt-out (OSRC_NO_PRINTMODE_ABORT)" \
   || bad "source: no opt-out for print-mode abort"
+# ANCHOR guard (echo-poisoning regression fix): the runtime trigger must require devin's real log
+# module prefix (chisel::repl::handler:), NOT a bare-phrase grep of the whole out.log — otherwise a
+# delegate that merely echoes the phrase (reviewing this repo, grepping logs) is false-aborted.
+grep -aq "chisel::repl::handler: Print mode: rejecting tool exec that requires confirmation" "$SRC" \
+  && ok "source: abort trigger anchored to devin's chisel log-module prefix (echo-safe)" \
+  || bad "source: abort trigger not anchored to chisel:: prefix — bare-phrase echoes will false-abort"
 
 # --- Scenario 2: runtime — a delegate that emits the print-mode rejection then hangs
 # is aborted with status=permission-blocked + exit 3, well before the stall-kill window. ---
@@ -129,6 +135,42 @@ if [ "$status3" != "permission-blocked" ]; then
   ok "no-false-positive: normal finish not marked permission-blocked (status=$status3)"
 else
   bad "no-false-positive: normal finish was falsely marked permission-blocked"
+fi
+
+# --- Scenario 5: ECHO-POISONING REGRESSION. A delegate that echoes the BARE
+# phrase into its output (e.g. a QA agent reviewing this very repo, or grepping a devin log) — WITHOUT
+# devin's chisel log-module prefix — must NOT be aborted. Before the fix, this false-aborted real jobs
+#. The delegate here prints the bare phrase, keeps producing output,
+# then finishes cleanly with OSRC::DONE → must be exit 0 / done, never permission-blocked. ---
+jd4="$TMP/jobs/echo-poison"
+mkdir -p -m 700 "$jd4"
+echo '{"verb":"run"}' > "$jd4/meta.json"
+
+FAKE_ECHO="$TMP/fake-echo.sh"
+cat > "$FAKE_ECHO" <<'EOF'
+#!/usr/bin/env bash
+# Simulates a review agent quoting the trigger phrase from the diff/source it is analyzing.
+echo "Reviewing _supervise: it greps for 'Print mode: rejecting tool exec that requires confirmation'."
+echo "OSRC::PROGRESS 1/2 analyzing the abort logic"
+echo "The check looks correct; no issues found in this hunk."
+echo "OSRC::DONE"
+exit 0
+EOF
+chmod +x "$FAKE_ECHO"
+
+OSRC_POLL=1 _supervise "$jd4" 5 60 120 -- "$FAKE_ECHO" >/dev/null 2>&1
+rc4=$?
+status4="$(cat "$jd4/status" 2>/dev/null)"
+
+if [ "$rc4" -eq 0 ]; then
+  ok "echo-poison: delegate echoing the BARE phrase finishes exit 0 (not false-aborted)"
+else
+  bad "echo-poison: bare-phrase echo got exit $rc4 (status=$status4) — REGRESSION, should be 0"
+fi
+if [ "$status4" != "permission-blocked" ]; then
+  ok "echo-poison: bare-phrase echo not marked permission-blocked (status=$status4)"
+else
+  bad "echo-poison: bare-phrase echo FALSE-aborted as permission-blocked — the echo-poisoning regression is back"
 fi
 
 echo

@@ -242,6 +242,25 @@ calls=$(cat "$HOME/.codex_call_count" 2>/dev/null || echo 0)
 if [ "$rc" -ne 0 ]; then ok "codex: empty stderr surfaced, not blind-retried (rc=$rc)" ; else bad "codex: empty stderr blind-retried (rc=$rc)"; fi
 if [ "$calls" -eq 1 ]; then ok "codex: empty stderr did NOT escalate by default" ; else bad "codex: empty stderr calls=$calls (expected 1)"; fi
 
+
+# --- Prose vs diagnostic: test output that merely TALKS about infra must not be retried blindly. ---
+# A delegate testing an API client prints "rate limit exceeded" / "statusCode: 404" / "invalid_api_key"
+# as assertion text. Classified as transport, the runner silently retries the whole task on another
+# model — re-running a possibly-mutating task whose real failure was a red test.
+for probe in \
+  "AssertionError: expected rate limit exceeded, got noop" \
+  "test_invalid_api_key_rejected FAILED" \
+  "AssertionError: got statusCode: 404" \
+  "  assert resp.statusCode: 500"; do
+  if _is_transport_failure "$probe" 1; then bad "prose misread as transport (would blind-retry): $probe"
+  else ok "prose stays a task failure: $probe"; fi
+done
+# ...while the same words as a real CLI's own diagnostic line must STILL escalate.
+for probe in "rate limit exceeded" "invalid api key" "statusCode: 503" "ECONNREFUSED" "curl: (7) failed to connect"; do
+  if _is_transport_failure "$probe" 1; then ok "real diagnostic still classified transport: $probe"
+  else bad "lost transport coverage for: $probe"; fi
+done
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

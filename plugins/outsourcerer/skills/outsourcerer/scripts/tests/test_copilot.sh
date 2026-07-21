@@ -45,7 +45,7 @@ future=$(( $(date +%s) + 3600 )); past=$(( $(date +%s) - 3600 ))
 lim="$(OSRC_CC_PRESSURE=77 _session_limits)"
 case "$lim" in *claude5h=77*) ok "OSRC_CC_PRESSURE override reflected in limits" ;; *) bad "pressure override missing: $lim" ;; esac
 
-# --- conserve reco: threshold behavior (Alex's 50% line) ---
+# --- conserve reco: threshold behavior (default 50% line) ---
 r="$(OSRC_CONSERVE_THRESHOLD=50 _conserve_reco 'claude5h=95' 'devin=glm/swe claude=native')"
 case "$r" in CONSERVE:*Devin*) ok "conserve fires >=50% and picks the free Devin lane" ;; *) bad "conserve wrong at 95%: $r" ;; esac
 r="$(OSRC_CONSERVE_THRESHOLD=50 _conserve_reco 'claude5h=20' 'devin=glm/swe')"

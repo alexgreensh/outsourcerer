@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 UPSTREAM = os.environ.get("OSRC_SHIM_UPSTREAM", "").rstrip("/")
 PORT = int(os.environ.get("OSRC_SHIM_PORT", "8788"))
 KEY = os.environ.get("OSRC_SHIM_KEY", "local")
-# Sol's #1 gap: the shim is a protocol adapter to a DIFFERENT model namespace. Claude Code sends its
+# Key gap: the shim is a protocol adapter to a DIFFERENT model namespace. Claude Code sends its
 # own model id (a "claude-*" default or ANTHROPIC_MODEL, brittle across versions/subagents/fast-model
 # routes); a local server won't recognize it. Force the resolved local model when OSRC_SHIM_MODEL is set.
 MODEL = os.environ.get("OSRC_SHIM_MODEL", "")

@@ -29,8 +29,15 @@ has 'read -ra _ws <<< "$WITH_SPEC"' "_secret_scan splits WITH_SPEC via read -ra 
 # Scope the check to _secret_scan: the --with parsers at build_mcp_flags intentionally word-split.
 ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$SRC")"
 printf '%s' "$ss_body" | grep -Fq 'for tok in $WITH_SPEC' && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
-# Both OSRC_ALLOWED_TOOLS spots use read -ra.
-[ "$(grep -c 'read -ra _at <<< "$OSRC_ALLOWED_TOOLS"' "$SRC")" -eq 2 ] && ok "both OSRC_ALLOWED_TOOLS spots deglobbed" || bad "expected 2 read -ra _at spots"
+# Every OSRC_ALLOWED_TOOLS consumer must be deglobbed via `read -ra` (safe word-splitting, no
+# globbing). Invariant, stale-proof: there is >=1 safe deglob spot and ZERO unsafe unquoted
+# expansions (the unsafe form is asserted absent on the next line too). Use grep -cF: the pattern
+# contains $, ", and <<< — a bare $ mid-pattern is handled differently by BSD vs GNU grep in BRE mode
+# and silently matched 0 here, failing the test while the code was correct. Fixed-string match = exact.
+_at_spots="$(grep -cF 'read -ra _at <<< "$OSRC_ALLOWED_TOOLS"' "$SRC")"
+[ "$_at_spots" -ge 3 ] \
+  && ok "all $_at_spots OSRC_ALLOWED_TOOLS spots deglobbed via read -ra (grep -cF, stale-proof)" \
+  || bad "expected >=3 read -ra _at deglob spots, found $_at_spots"
 grep -Fq 'tools=(--allowedTools $OSRC_ALLOWED_TOOLS)' "$SRC" && bad "unquoted allowedTools still present" || ok "no unquoted allowedTools expansion"
 # ORIG-rewrite bounds-guards before assigning.
 has '(_i+1)) -lt ${#ORIG[@]} ]' "ORIG rewrite bounds-checked (no phantom element)"

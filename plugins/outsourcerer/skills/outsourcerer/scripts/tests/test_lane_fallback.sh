@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_lane_fallback.sh — U6: availability-aware routing + --effort strip (no CLI leak).
+# test_lane_fallback.sh — availability-aware routing + --effort strip (no CLI leak).
 # Exercises the pure helpers offline + asserts the routing wire-in via source inspection.
 set -uo pipefail
 

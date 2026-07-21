@@ -2,7 +2,7 @@
 # test_cc_devin_selfheal.sh — cc-lane OpenRouter exhaustion (e.g. 402 insufficient credit) heals
 # across to the Devin lane for dual-lane models (glm today), instead of dying on OpenRouter with
 # a healthy Devin sibling sitting unused. Companion to the existing codex->cc self-heal
-# (test_no_silent_escalation.sh) and the default-provider U6 reroute (test_lane_fallback.sh).
+# (test_no_silent_escalation.sh) and the default-provider availability-aware reroute (test_lane_fallback.sh).
 #
 # Root cause this guards: `claude -p` reports an OpenRouter transport/affordability error (e.g.
 # "API Error: 402 ... requires more credits") as a stream-json STDOUT message, not on stderr. A
@@ -40,12 +40,12 @@ grep -q 'rc=${PIPESTATUS\[0\]}' "$SRC" && ok "delegate_cc reads rc via PIPESTATU
 # --- Scenario 3: cross-lane self-heal is wired -- OpenRouter chain exhaustion for a dual-lane
 # model retries on Devin, gated by a transport-failure flag and an opt-out. ---
 grep -q 'last_transport=1' "$SRC" && ok "delegate_cc tracks a last_transport flag across the retry loop" || bad "last_transport flag missing"
-[ "$(grep -c '_devin_model_for "\$MODEL"' "$SRC")" -ge 2 ] && ok "_devin_model_for is consulted in >=2 places (U6 default-provider reroute + cc self-heal)" || bad "cc self-heal does not consult _devin_model_for"
+[ "$(grep -c '_devin_model_for "\$MODEL"' "$SRC")" -ge 2 ] && ok "_devin_model_for is consulted in >=2 places (availability-aware default-provider reroute + cc self-heal)" || bad "cc self-heal does not consult _devin_model_for"
 grep -q 'OSRC_NO_CROSS_LANE' "$SRC" && ok "cross-lane self-heal has an opt-out (OSRC_NO_CROSS_LANE)" || bad "no opt-out for cross-lane self-heal"
 grep -q 'PROVIDER=devin delegate "\$tier" "" \${ORIGARGS\[@\]+"\${ORIGARGS\[@\]}"}' "$SRC" && ok "self-heal re-dispatches to the Devin lane via ORIGARGS (preserves --effort/--with/etc.)" || bad "self-heal dispatch to devin missing or does not preserve original flags"
 
 # --- Scenario 4: ORIGARGS is captured before _consume_flags mutates state, and the model token
-# gets rewritten to the Devin id before re-dispatch (mirrors route_delegate's U6 rewrite). ---
+# gets rewritten to the Devin id before re-dispatch (mirrors the availability-aware rewrite). ---
 grep -q 'local ORIGARGS=("\$@")   # preserved verbatim for the cross-lane self-heal (-> devin)' "$SRC" && ok "delegate_cc preserves ORIGARGS before _consume_flags" || bad "ORIGARGS not preserved at top of delegate_cc"
 grep -q 'case "\${ORIGARGS\[\$_i\]}" in -m|--model) \[ \$((_i+1)) -lt \${#ORIGARGS\[@\]} \] && ORIGARGS\[\$((_i+1))\]="\$_dvm" ;; esac' "$SRC" && ok "self-heal rewrites the -m token in ORIGARGS to the Devin id" || bad "model-token rewrite in ORIGARGS missing"
 
