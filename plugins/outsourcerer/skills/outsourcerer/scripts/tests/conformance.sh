@@ -34,7 +34,14 @@ _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escal
          test_parser_parity test_resolved_lane test_limits_freshness test_gemini_lane"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
-    if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
+    # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say
+    # "test_x FAILED" and nothing else, which is the difference between a fixable report and a mystery.
+    _out="$(bash "$SCRIPT_DIR/$t.sh" 2>&1)"
+    if [ $? -eq 0 ]; then ok "unit suite $t green"
+    else
+      bad "unit suite $t FAILED"
+      printf '%s\n' "$_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
+    fi
   else note "unit suite $t absent"; fi
 done
 
