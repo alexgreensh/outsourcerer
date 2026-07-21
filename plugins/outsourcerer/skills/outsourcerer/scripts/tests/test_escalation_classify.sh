@@ -261,6 +261,28 @@ for probe in "rate limit exceeded" "invalid api key" "statusCode: 503" "ECONNREF
   else bad "lost transport coverage for: $probe"; fi
 done
 
+
+# --- Only RETRYABLE failures may escalate. --------------------------------------------------------
+# Escalation re-runs the whole task on another model. For a 400/422 that produces the identical error
+# on every lane, burns the budget, and buries the real cause under a self-heal. And Kubernetes speaks
+# our infra language: "no endpoints found for service/foo" is routine kubectl output from the task,
+# not the router losing a lane.
+for probe in \
+  "API error: 400 invalid_request_error" \
+  "API error: 422 Unprocessable Entity" \
+  "API error: 404 model not found for this key" \
+  "Error: no endpoints found for service/foo" \
+  "  no endpoints found for deployment/api" \
+  "FAIL: key limit exceeded for bucket test_3"; do
+  if _is_transport_failure "$probe" 1; then bad "non-retryable/task output would escalate: $probe"
+  else ok "stays a task failure: $probe"; fi
+done
+for probe in "API error: 503 upstream unavailable" "API error: 429 rate limited" \
+             "no endpoints found for z-ai/glm-5.2" "key limit exceeded" "http/1.1 502 bad gateway"; do
+  if _is_transport_failure "$probe" 1; then ok "real transport still escalates: $probe"
+  else bad "lost transport coverage: $probe"; fi
+done
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

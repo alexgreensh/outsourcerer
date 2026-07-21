@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.12"
+OSRC_VERSION="0.4.13"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -642,8 +642,52 @@ _effective_lane() {
   esac
 }
 
+# _last_marker <file> -> the final terminal marker, preferring one SIGNED with this run's id.
+# A signed marker cannot be produced by echoing the instructions, quoting an example, or diffing this
+# repo, because the id is minted per run. Unsigned markers are still honoured (older prompts, raw
+# passthrough, a delegate that drops the id) but only when no signed marker exists, so a real signed
+# status always wins over anything the delegate merely repeated.
+_last_marker() {
+  local f="$1" m=""
+  if [ -n "${OSRC_MARK:-}" ]; then
+    m="$(grep -aoE "^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)#${OSRC_MARK}" "$f" 2>/dev/null | tail -1)"
+    [ -n "$m" ] && { printf 'OSRC::%s' "$(printf '%s' "${m##*OSRC::}" | cut -d'#' -f1)"; return 0; }
+  fi
+  m="$(grep -aoE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)([^#]|$)' "$f" 2>/dev/null | tail -1)"
+  [ -n "$m" ] && printf 'OSRC::%s' "$(printf '%s' "${m##*OSRC::}" | tr -cd 'A-Z_')"
+}
+
+# ---- per-run marker signature -------------------------------------------------------------------
+# Control decisions used to be made by grepping the delegate's stdout for bare OSRC:: markers. That
+# makes the delegate's output the control plane, and the delegate can trip it by ACCIDENT: quoting the
+# protocol it was handed, echoing a log, reviewing this repo, or diffing this very file. It happened
+# three separate times (a print-mode phrase, a truncation phrase, and the terminal markers), each fixed
+# by anchoring the pattern a little harder — which treats the symptom.
+# The fix is a value the delegate cannot reproduce by echoing anything it was given: a random token
+# minted per run. Instructions carry it, so a genuine marker is signed and echoed text never is.
+_new_mark() { od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%04x%04x' $$ "${RANDOM:-0}"; }
+
 # ---- the canonical OSRC:: progress protocol block, injected into raw/continue/tmux ----
 osrc_protocol_block() {
+  if [ -n "${OSRC_MARK:-}" ]; then
+    printf -- '--- PROGRESS PROTOCOL (required; machine-monitored) ---\n'
+    printf 'Your run is supervised. A watchdog kills silent processes, so signal liveness.\n\n'
+    printf 'IMPORTANT: this run has the id %s. Every OSRC:: line you emit MUST carry it, like this:\n' "$OSRC_MARK"
+    printf '  OSRC::PROGRESS#%s <step> <5-10 words on what you are doing now>\n' "$OSRC_MARK"
+    printf '  OSRC::BLOCKED#%s <what is blocking you and what you tried>\n' "$OSRC_MARK"
+    printf '  OSRC::NEED_INPUT#%s <the single question>\n' "$OSRC_MARK"
+    printf '  OSRC::DONE#%s <one-line summary of what you did>\n\n' "$OSRC_MARK"
+    printf 'Rules:\n'
+    printf '1. Each line stands alone, at the START of a line, nothing before it.\n'
+    printf '2. Print a PROGRESS line before each major step; never go ~1 minute silent.\n'
+    printf '   Between long commands it is fine to emit it from your shell tool.\n'
+    printf '3. If blocked (missing file, failing dependency, denied permission, repeated\n'
+    printf '   error) do NOT retry endlessly. Print ONE BLOCKED line and stop.\n'
+    printf '4. Finish with exactly one DONE line as the final line.\n'
+    printf '5. If you need to QUOTE or discuss these markers, omit the id. Only real\n'
+    printf '   status lines carry %s, so quoted examples are never mistaken for status.\n' "$OSRC_MARK"
+    return
+  fi
   cat <<'OSRCEOF'
 --- PROGRESS PROTOCOL (required; machine-monitored) ---
 Your run is supervised. A watchdog kills silent processes, so signal liveness:
@@ -755,6 +799,16 @@ OUTPUT FORMAT (exact headings, exact order):
 OSRCEOF
 }
 
+# _sign_markers -> stamp this run's id onto the marker tokens in a wrapped prompt (stdin -> stdout).
+# The tier scaffolds are quoted heredocs, so the id cannot be interpolated where the text is written.
+# Signing here instead means EVERY lane gets signed markers from one place, and a scaffold added later
+# is covered without anyone remembering to. Only the marker token is touched, never the surrounding
+# instructions. With no id set this is a pass-through, so nothing changes for callers that never set one.
+_sign_markers() {
+  [ -n "${OSRC_MARK:-}" ] || { cat; return; }
+  sed -E "s/OSRC::(PROGRESS|PLAN|DONE|BLOCKED|NEED_INPUT)([^#A-Z_]|\$)/OSRC::\\1#${OSRC_MARK}\\2/g"
+}
+
 # wrap_prompt <tier> <task> -> tier-appropriate wrapped prompt ({{TASK}} substituted literally).
 wrap_prompt() {
   local tier="$1" task="$2" tmpl
@@ -764,6 +818,10 @@ wrap_prompt() {
     budget)          tmpl="$(_wrap_budget)" ;;
     mid|*)           tmpl="$(_wrap_mid)" ;;
   esac
+  # Sign the SCAFFOLD, THEN substitute the task. Order matters: the task is the user's text and may
+  # legitimately discuss these markers (a prompt about this very repo does). Signing after substitution
+  # would stamp a live id onto the user's words and hand the delegate a ready-made forgery.
+  tmpl="$(printf '%s' "$tmpl" | _sign_markers)"
   printf '%s\n' "${tmpl//\{\{TASK\}\}/$task}"
 }
 
@@ -1063,6 +1121,14 @@ _codex_rate_limits() {
   local sdir="$HOME/.codex/sessions"; [ -d "$sdir" ] || return 1
   local newest; newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
   [ -n "$newest" ] || return 1
+  # How OLD this reading is matters more than the number. Codex only records rate limits while it is
+  # RUNNING, so with no recent codex session the newest rollout can be days old. Usage only ever rises
+  # within a window, so a stale reading is a FLOOR, never a current value — and reporting it as current
+  # overstates headroom in the one direction that hurts: work gets routed to an exhausted lane.
+  # The age travels in the RETURN STRING. This function is read through a command substitution, so an
+  # exported variable would die with the subshell and the caller would silently see nothing — the same
+  # defect that left the 0-writes flag dead for its entire life.
+  local _age; _age=$(( $(date +%s) - $(stat -f %m "$newest" 2>/dev/null || stat -c %Y "$newest" 2>/dev/null || date +%s) ))
   local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
   [ -n "$line" ] || return 1
   # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
@@ -1075,7 +1141,7 @@ _codex_rate_limits() {
     | ( [ $slots[] | select((.window_minutes // 100000) <= 360) ] | first ) as $sh
     | ( [ $slots[] | select((.window_minutes // 0)      >  360) ] | first ) as $wk
     | "\($sh.used_percent // "")|\($wk.used_percent // "")|\($sh.resets_at // "")|\($wk.resets_at // "")"
-  ' 2>/dev/null | head -1
+  ' 2>/dev/null | head -1 | sed "s/\$/|$_age/"
 }
 
 # _human_eta <epoch> -> "3h 12m" remaining until epoch, or "" if past/unknown.
@@ -1146,9 +1212,9 @@ EOF
     done
   fi
   raw="$(_codex_rate_limits 2>/dev/null)" || raw=""
-  local x5="" xw="" x5r="" xwr=""
+  local x5="" xw="" x5r="" xwr="" xage=""
   if [ -n "$raw" ]; then
-    IFS='|' read -r x5 xw x5r xwr <<EOF
+    IFS='|' read -r x5 xw x5r xwr xage <<EOF
 $raw
 EOF
     x5="$(_window_pct "$x5" "$x5r" 2>/dev/null)" || x5=""
@@ -1158,6 +1224,11 @@ EOF
   [ -n "$c7" ] && line="$line claude7d=$c7"
   [ -n "$x5" ] && line="$line codex5h=$x5"
   [ -n "$xw" ] && line="$line codexwk=$xw"
+  # Mark the codex figures stale rather than dropping them: a floor with its age attached is useful,
+  # a confident wrong number is not.
+  case "$xage" in ''|*[!0-9]*) xage=0 ;; esac
+  { [ -n "$x5" ] || [ -n "$xw" ]; } && [ "$xage" -gt "${OSRC_LIMITS_MAX_AGE:-7200}" ] \
+    && line="$line codexage=${xage}"
   printf '%s\n' "${line# }"
 }
 
@@ -1321,9 +1392,10 @@ _ready_lanes() {
 # local($0/private) > Devin GLM/SWE(free) > keyless Gemini > Codex Sol/Terra(only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first (GLM F6).
 _conserve_reco() {
-  local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" posture lane="" why="" tight=0
+  local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" xstale="" posture lane="" why="" tight=0
   for tok in $limits; do case "$tok" in
     claude5h=*) c5="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
+    codexage=*) xstale="${tok#*=}" ;;
   esac; done
   if [ -n "$c5" ]; then
     posture="Claude 5h at ${c5}%"
@@ -1341,11 +1413,16 @@ _conserve_reco() {
   if [ -z "$lane" ]; then
     local codex_ok=0 seen=0 blocked=0 v
     case " $lanes " in *" codex=sol/terra "*)
+      # A stale reading is a FLOOR, not a measurement: usage only rises within a window, so an old
+      # low number is exactly how work gets routed to a lane that is already exhausted. Fail closed,
+      # the same way the Claude freshness gate does.
+      [ -n "$xstale" ] && blocked=1 && seen=1
       for v in "$x5" "$xw"; do [ -n "$v" ] || continue; seen=1
         awk -v n="$v" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n < t) }' 2>/dev/null || blocked=1; done
       [ "$seen" = "1" ] && [ "$blocked" = "0" ] && codex_ok=1 ;;
     esac
     if [ "$codex_ok" = "1" ]; then lane="Codex Sol/Terra"; why="your ChatGPT plan is below the conserve line in every known window"
+    elif [ -n "$xstale" ]; then : # codex deliberately skipped: its usage reading is too old to trust
     else case " $lanes " in *" openrouter=funded "*) lane="OpenRouter"; why="funded cash lane, preserves subscription quotas" ;; esac; fi
   fi
   if [ -n "$lane" ]; then printf 'CONSERVE: %s (>= %s%%) — route grind to %s (%s); keep Claude for judgment.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD" "$lane" "$why"
@@ -1439,7 +1516,11 @@ cmd_brief() {
       claude7d=*) _pretty="$_pretty · Claude 7d: ${_t#*=}% used" ;;
       codex5h=*)  _pretty="$_pretty · ChatGPT 5h: ${_t#*=}% used" ;;
       codexwk=*)  _pretty="$_pretty · ChatGPT weekly: ${_t#*=}% used" ;;
+      codexage=*) _codexstale="${_t#*=}" ;;
     esac; done
+    if [ -n "${_codexstale:-}" ]; then
+      _pretty="$_pretty  (ChatGPT figures are AT LEAST that used — last reading is $(( _codexstale / 3600 ))h old, from the newest codex session on disk. Usage only rises within a window, so the real number is higher and the lane may be exhausted. Run codex once to refresh.)"
+    fi
     printf 'limits      :%s   [%s]\n' "${_pretty# · }" "$limits"
   else
     printf 'limits      : %s\n' "unavailable (no readable session meter — treat as unknown)"
@@ -1814,7 +1895,7 @@ _supervise() {
   : > "$jd/out.log"; chmod 600 "$jd/out.log"
   echo running > "$jd/status"
   ( exec "$@" </dev/null >> "$jd/out.log" 2>&1 ) &
-  local pid=$! t0 last_size=0 last_change now size idle age
+  local pid=$! t0 last_size=0 last_change now size idle age _jcwd=""
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
   # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
@@ -1833,6 +1914,9 @@ _supervise() {
   # flagged "exploring?" (visible in status/watch) so the orchestrator can steer instead of cancelling
   # blind. Not killed — late-writers exist; the hard timeout still backstops.
   local verb=""; [ -f "$jd/meta.json" ] && verb="$(jq -r '.verb // ""' "$jd/meta.json" 2>/dev/null)"
+  [ -f "$jd/meta.json" ] && _jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
+  [ -n "$_jcwd" ] || _jcwd="$PWD"
+  : > "$jd/.fsmark" 2>/dev/null || true
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   while kill -0 "$pid" 2>/dev/null; do
@@ -1901,8 +1985,39 @@ _supervise() {
     if [ "$age" -ge "$hard" ]; then
       echo timeout > "$jd/status"; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
     fi
+    # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
+    # while writing files is working, and killing it is the failure this watchdog causes rather than
+    # prevents. The log cannot answer this — a silent delegate emits no tool-call markers either — so
+    # ask the filesystem. Bounded and only consulted at the moment of judgement, so healthy jobs never
+    # pay for it. OSRC_FS_PROGRESS=0 disables.
+    if [ "$idle" -ge "$warn" ] && [ "${OSRC_FS_PROGRESS:-1}" = "1" ] && [ -n "${_jcwd:-}" ] && [ -d "$_jcwd" ]; then
+      local _newest
+      # `-newer <file>` is POSIX; `-newermt @epoch` is a GNU extension that BSD find silently fails to
+      # parse, which would make this check quietly never fire on macOS. Compare against a marker file
+      # we re-stamp on every confirmed sign of life instead.
+      _newest="$(find "$_jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+                   \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+                   -type f -newer "$jd/.fsmark" -print 2>/dev/null | head -1)"
+      if [ -n "$_newest" ]; then
+        last_change=$now; idle=0; : > "$jd/.fsmark"
+        [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
+      fi
+    fi
     if [ "$idle" -ge "$kill_after" ]; then
-      echo wedged > "$jd/status"; _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      # A job that never emitted ANYTHING past the launch banner is a different failure from one that
+      # produced work and then went quiet, and it has a different fix. The usual cause is a prompt that
+      # told the delegate to stay silent (write to a file, print only at the end) — advice this tool
+      # itself gives for output-token exhaustion. Following that advice makes a long job look identical
+      # to a hung one, so say which case this is instead of a bare "wedged".
+      echo wedged > "$jd/status"
+      # "Never spoke" is decided by CONTENT, not by a byte count taken before the child had even
+      # written its banner. Our own launcher lines all start with '>>> '; if the log holds nothing
+      # else, the delegate contributed nothing and this is the silent-by-instruction case.
+      if ! grep -aqv '^>>> ' "$jd/out.log" 2>/dev/null; then
+        printf 'silent-delegate\n' > "$jd/reason" 2>/dev/null || true
+        echo "[outsourcerer] job $(basename "$jd") produced NO output for ${idle}s and was stopped. It never printed anything past the launch banner, so there was no way to tell work from a hang. If you told the delegate to write to a file and print only at the end, ask it to also emit a periodic 'OSRC::PROGRESS <what it is doing>' line — that is what keeps the watchdog fed. If the work is genuinely long and silent, raise the stall window: OSRC_STALL_KILL=<seconds>." >&2
+      fi
+      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     if [ "$idle" -ge "$warn" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       echo "stalled?" > "$jd/status"
@@ -1913,7 +2028,12 @@ _supervise() {
   # Classify on the LAST OSRC:: terminal marker, not the FIRST appearance. A delegate that ends with
   # OSRC::DONE is done even if "OSRC::BLOCKED" appeared earlier (e.g. it echoed the protocol
   # instructions, or reconsidered mid-run). Only a final BLOCKED/NEED_INPUT means blocked.
-  local last; last="$(grep -aoE 'OSRC::(DONE|BLOCKED|NEED_INPUT)' "$jd/out.log" 2>/dev/null | tail -1)"
+  # ANCHORED to line start. A delegate emits its terminal marker as its own line; the protocol text it
+  # was given ("end with OSRC::DONE <summary> or OSRC::BLOCKED <reason>") embeds BOTH markers in one
+  # sentence, so a delegate that finishes and then echoes that reminder would be graded on the echo and
+  # its completed work reported as blocked. Same class as the print-mode and truncation scans: a
+  # signature matched anywhere in a log is one the delegate can forge just by quoting it.
+  local last; last="$(_last_marker "$jd/out.log")"
   case "$last" in
     OSRC::BLOCKED|OSRC::NEED_INPUT) echo blocked > "$jd/status"; return 3 ;;
   esac
@@ -1926,7 +2046,7 @@ _supervise() {
   if [ "$rc" -ne 0 ] && tail -n 15 "$jd/out.log" 2>/dev/null | grep -aqiE 'response truncated|max output token limit|finish_reason.*length'; then
     echo failed > "$jd/status"
     printf 'output-token-limit\n' > "$jd/reason" 2>/dev/null || true
-    echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything." >&2
+    echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything — in that case also ask it to print a periodic 'OSRC::PROGRESS <step>' line, or a long silent run looks identical to a hang and gets stopped." >&2
     return "$rc"
   fi
   if [ "$rc" -ne 0 ]; then echo failed > "$jd/status"; return "$rc"
@@ -1971,7 +2091,7 @@ _fg_guard() {
   ( local t0 now mk=0; t0=$(date +%s)
     while kill -0 "$prod" 2>/dev/null; do
       sleep 2; now=$(date +%s)
-      [ "$mk" = 0 ] && grep -qaE 'OSRC::(DONE|BLOCKED|NEED_INPUT)' "$cap" 2>/dev/null && mk=$now
+      [ "$mk" = 0 ] && grep -qaE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)' "$cap" 2>/dev/null && mk=$now
       if [ "$mk" != 0 ] && [ $((now-mk)) -ge "$tdl" ]; then echo teardown > "$hit"; _kill_tree "$prod"; break; fi
       if [ $((now-t0)) -ge "$hard" ];               then echo hard     > "$hit"; _kill_tree "$prod"; break; fi
     done ) & local gd=$!
@@ -1981,7 +2101,7 @@ _fg_guard() {
   trap - INT TERM
   export OSRC_FG_GUARD_ACTIVE=0
   local rc hval lastmark; rc="$(cat "$rcf" 2>/dev/null || echo 124)"; hval="$(cat "$hit" 2>/dev/null || echo)"
-  lastmark="$(grep -aoE 'OSRC::(DONE|BLOCKED|NEED_INPUT)' "$cap" 2>/dev/null | tail -1)"
+  lastmark="$(_last_marker "$cap")"
   case "$hval" in
     teardown) printf '>>> [watchdog] work finished (%s) but the process kept running %ss past it — a teardown hang (e.g. codex MCP-auth / Stop-hook loop). Killed the tree. For unattended work use `bg` (auto watchdog + report).\n' "${lastmark:-marker}" "$tdl" >&2
               case "$lastmark" in OSRC::BLOCKED|OSRC::NEED_INPUT) rc=3 ;; *) rc=0 ;; esac ;;
@@ -2176,6 +2296,11 @@ run_job() {
   # OPT-IN worktree isolation: run this job in its own disposable git worktree so parallel EDITING jobs
   # never collide. cd into it BEFORE meta.json is written so cwd records the worktree.
   local wt="" wbr="" wbase="" _wl
+  # Mark the slow pre-supervisor setup phase. `git worktree add` on a large repo can take minutes, and
+  # until _supervise runs there is no pid and no out.log — exactly the signature of a job the
+  # environment killed. Without this marker the stillborn check reports a perfectly healthy job as
+  # dead the moment setup outlasts the launch grace.
+  printf 'worktree\n' > "$jd/setup" 2>/dev/null || true
   if _wl="$(_worktree_setup "$id")"; then
     wt="${_wl%%$'\t'*}"; _wl="${_wl#*$'\t'}"; wbr="${_wl%%$'\t'*}"; wbase="${_wl##*$'\t'}"
     # If cd fails, DON'T run in the old cwd while pretending to be isolated — clear worktree state so the
@@ -2185,6 +2310,7 @@ run_job() {
       wt=""; wbr=""; wbase=""
     fi
   fi
+  rm -f "$jd/setup" 2>/dev/null || true   # setup finished; normal launch-grace applies from here
   # peek model/tier for windows + meta (non-fatal)
   _consume_flags "$@" 2>/dev/null || true
   local row id2 ttier="" tier lane=""
@@ -2281,44 +2407,72 @@ _job_acts() {
   w=$(grep -aco '"name":"\(Write\|Edit\|MultiEdit\|NotebookEdit\)"' "$L" 2>/dev/null); w=${w:-0}
   b=$(grep -aco '"name":"Bash"' "$L" 2>/dev/null); b=${b:-0}
   [ "$r$w$b" = "000" ] && return 1
-  printf 'R%s W%s B%s' "$r" "$w" "$b"
   # A mutating job (edit/research/yolo) that has read/bashed for a while with ZERO writes is very
-  # likely stuck exploring — flag it so the orchestrator can steer instead of cancelling blind.
-  export _OSRC_LASTW="$w"
+  # likely stuck exploring. The write count travels in this RETURN STRING, not in an exported variable:
+  # callers read this function through a command substitution, so anything exported here dies with the
+  # subshell and the caller silently sees a default forever.
+  printf 'R%s W%s B%s' "$r" "$w" "$b"
+}
+
+# _reconcile_status <id> -> echo the job's status, first flipping a stale one to reflect reality.
+# Extracted so EVERY read path shares it. A status file records what was true when it was written; a
+# delegate killed after `running` was written leaves that word on disk forever. Any reader that trusts
+# it without this reconciliation reports a corpse as a live job — which is how `status --json` showed
+# phantom `running` jobs and how `fanout wait` could block forever on a member that had already died.
+_reconcile_status() {
+  local jd="$OSRC_JOBS/$1" st now
+  [ -d "$jd" ] || return 1
+  st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+  # A job is alive only if either
+  #   (a) the DELEGATE pid is live AND still OUR process — a bare `kill -0` can match a recycled pid,
+  #       so compare live `ps -o lstart=` against the saved pid_start exactly as _supervise does; or
+  #   (b) the SUPERVISOR (watchdog) is still running AND is likewise still our process — it will
+  #       reconcile the delegate itself.
+  # Falls back to a bare kill -0 for legacy jobs that predate the pid_start/supervisor_pid files.
+  # Also covers stalled?/exploring?: those are still-running states, and a job killed while flagged
+  # would otherwise keep that flag forever because nothing writes a terminal status for it.
+  case "$st" in
+    running|stalled\?|exploring\?)
+      local _jpid _spid _alive=0 _live_stime _saved_stime
+      _jpid="$(cat "$jd/pid" 2>/dev/null)"
+      if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
+        _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
+        _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
+        { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+      fi
+      if [ "$_alive" = "0" ]; then
+        _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+        if [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null; then
+          # Same pid-reuse discipline as the delegate: a recycled supervisor pid must not resurrect
+          # a dead job just because some unrelated process now holds that number.
+          _live_stime="$(ps -o lstart= -p "$_spid" 2>/dev/null | tr -s ' ')"
+          _saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
+          { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+        fi
+      fi
+      [ "$_alive" = "0" ] && { echo interrupted > "$jd/status" 2>/dev/null; st="interrupted"; }
+      ;;
+  esac
+  printf '%s' "$st"
 }
 
 _status_line() {
-  local id="$1" jd="$OSRC_JOBS/$1" st model started now age prog acts verb flag=""
+  local id="$1" jd="$OSRC_JOBS/$1" st model started now age prog acts verb flag="" _w
   [ -d "$jd" ] || { echo "no such job: $1" >&2; return 1; }
-  st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-  # Liveness check: a job is alive only if either
-  #   (a) the DELEGATE pid is live AND still OUR process — a bare `kill -0` can match a recycled pid,
-  #       so compare live `ps -o lstart=` against the saved pid_start exactly as _supervise does; or
-  #   (b) the SUPERVISOR (watchdog) is still running — it will reconcile the delegate itself.
-  # If neither holds, the job is not actually running -> mark interrupted. Falls back to a bare
-  # kill -0 for legacy jobs that predate the pid_start/supervisor_pid files (empty saved value).
-  if [ "$st" = "running" ]; then
-    local _jpid _spid _alive=0 _live_stime _saved_stime
-    _jpid="$(cat "$jd/pid" 2>/dev/null)"
-    if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
-      _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
-      _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
-      { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
-    fi
-    if [ "$_alive" = "0" ]; then
-      _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
-      [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null && _alive=1
-    fi
-    [ "$_alive" = "0" ] && { echo interrupted > "$jd/status"; st="interrupted"; }
-  fi
+  st="$(_reconcile_status "$id")"
   # STILLBORN detection (job liveness): a job stuck in `launching` with no process AND no log after
   # the grace window means the detached worker never came up (sandbox reaped it, early crash) — convert
   # it to `failed` with an actionable reason instead of leaving a permanent `launching`/phantom.
   now=$(date +%s)
   if [ "$st" = "launching" ]; then
     local _sa; _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=$now ;; esac
-    if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "${OSRC_LAUNCH_GRACE:-45}" ]; then
+    # A job still inside its setup phase gets a much longer bound: the work is real, just slow. It is
+    # still BOUNDED — a setup that hangs forever must not become a permanent phantom.
+    local _grace="${OSRC_LAUNCH_GRACE:-45}" _phase=""
+    if [ -f "$jd/setup" ]; then _grace="${OSRC_SETUP_GRACE:-900}"; _phase="$(cat "$jd/setup" 2>/dev/null)"; fi
+    if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "$_grace" ]; then
       echo failed > "$jd/status"; st="failed"
+      [ -n "$_phase" ] && printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_phase" "$_grace" > "$jd/error" 2>/dev/null || \
       printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely killed the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "${OSRC_LAUNCH_GRACE:-45}" > "$jd/error" 2>/dev/null || true
     fi
   fi
@@ -2333,7 +2487,8 @@ _status_line() {
   acts="$(_job_acts "$jd" 2>/dev/null)"
   verb="$(_job_field "$id" '.verb')"
   case "$verb" in edit|research|yolo)
-    [ "${_OSRC_LASTW:-1}" = "0" ] && [ "$agenum" -gt "${OSRC_NOWRITE_WARN:-180}" ] && [ "$st" = "running" ] && flag=" !exploring(0-writes)" ;;
+    _w="${acts#*W}"; _w="${_w%% *}"; case "$_w" in ''|*[!0-9]*) _w=1 ;; esac
+    [ "$_w" = "0" ] && [ "$agenum" -gt "${OSRC_NOWRITE_WARN:-180}" ] && [ "$st" = "running" ] && flag=" !exploring(0-writes)" ;;
   esac
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
@@ -2348,7 +2503,7 @@ _job_json() {
   # orchestrator can't SEE is worse than one it can. Emit a minimal record so the control plane always
   # reflects reality — status + started_at from the sentinel, everything else null.
   if [ ! -f "$jd/meta.json" ]; then
-    local _st _sa; _st="$(cat "$jd/status" 2>/dev/null || echo unknown)"
+    local _st _sa; _st="$(_reconcile_status "$id" 2>/dev/null || echo unknown)"
     _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=null ;; esac
     jq -n --arg id "$id" --arg status "$_st" --arg label "$lbl" --argjson started "${_sa:-null}" \
       '{schema_version:"1", job_id:$id, label:(if $label=="" then null else $label end),
@@ -2360,7 +2515,7 @@ _job_json() {
   fi
   L="$jd/out.log"
   local st exitc last r=0 w=0 b=0 rp=""
-  st="$(cat "$jd/status" 2>/dev/null || echo unknown)"
+  st="$(_reconcile_status "$id" 2>/dev/null || echo unknown)"
   exitc="$(cat "$jd/exit" 2>/dev/null || true)"; case "$exitc" in ''|*[!0-9-]*) exitc=null ;; esac
   if [ -s "$L" ]; then   # grep -c already prints a count (incl. 0); no `|| echo 0` (would double-print)
     r=$(grep -aco '"name":"\(Read\|Grep\|Glob\)"' "$L" 2>/dev/null); r=${r:-0}
@@ -2578,7 +2733,7 @@ _fanout_running() {
   [ -f "$gd/members.tsv" ] || { printf 0; return; }
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
-    st="$(cat "$OSRC_JOBS/$jid/status" 2>/dev/null || echo running)"
+    st="$(_reconcile_status "$jid" 2>/dev/null || echo running)"
     case "$st" in done|done\?|failed|blocked|timeout|wedged|canceled|permission-blocked) ;; *) n=$((n+1)) ;; esac
   done < "$gd/members.tsv"
   printf '%s' "$n"
@@ -3064,6 +3219,24 @@ _agy_model_token() {
   esac
 }
 
+# _agy_effort <agy-model-token> <requested-effort> -> an effort level that model actually accepts.
+# agy REQUIRES --effort for these models and rejects the run outright without it
+# ("invalid model selection (--model X --effort \"\"): requires --effort"), and the accepted set is
+# per-model: pro offers low|high with NO medium, flash offers low|medium|high. An unsupported level is
+# rounded UP rather than down, because silently giving less thinking than asked for is the failure the
+# caller cannot see; the clamp is announced.
+_agy_effort() {
+  local tok="$1" want="${2:-medium}" out
+  case "$want" in low|medium|high) ;; *) want=medium ;; esac
+  case "$tok" in
+    *pro*)   case "$want" in medium) out=high ;; *) out="$want" ;; esac ;;
+    *flash*) out="$want" ;;
+    *)       out="$want" ;;
+  esac
+  [ "$out" != "$want" ] && printf '>>> [effort] %s has no "%s" level (accepts low|high) — using "%s" rather than quietly giving you less thinking.\n' "$tok" "$want" "$out" >&2
+  printf '%s' "$out"
+}
+
 # delegate_gmnative <tier>, Gemini text/agentic lane. TWO vehicles:
 #   PRIMARY  agy (Antigravity CLI), KEYLESS, rides the user's Antigravity/Google app login.
 #   FALLBACK gemini CLI (gemini-cli) + GEMINI_API_KEY (single-key extraction, _gm_load_key).
@@ -3079,9 +3252,10 @@ delegate_gmnative() {
     fi
   fi
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
-  # Effort on the Gemini lane is ADVISORY: neither agy nor gemini-cli exposes a reasoning-effort knob
-  # today, so we inject it as a prompt directive and say so (never silently dropped).
-  if [ -n "$EFFORT" ]; then
+  # Effort is NATIVE on agy (it takes --effort and refuses to run without one for these models) and
+  # ADVISORY on gemini-cli, which still has no knob. Injecting the prompt directive on the agy path too
+  # would double-signal, so it is only added for the gemini-cli vehicle.
+  if [ -n "$EFFORT" ] && [ "$vehicle" != "agy" ]; then
     wrapped="Reasoning effort: $EFFORT. Match your depth of analysis and thinking to this level.
 
 $wrapped"
@@ -3101,7 +3275,22 @@ $wrapped"
     _tier_banner "antigravity-agy (keyless)" "$atok" "$ttier" "$posture, rides your Antigravity/Google login, NO API key"
     # agy has no --output-format json; the supervisor watches plain-stdout byte growth and the bg
     # path derives last.txt from out.log, so no stream flags are needed. --print-timeout caps waits.
-    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" || rc=$?
+    local aeff; aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
+    # Capture stderr so a "timeout waiting for response" can be TRANSLATED. agy reports a dead lane the
+    # same way it reports a slow one, and at the default 5m print-timeout that costs five minutes per
+    # attempt to learn nothing. The distinguishing fact is that agy's own auth/model resolution
+    # succeeded and only the generation never returned, which points at the backend, not the request.
+    local _aerr; _aerr="$(mktemp -t osrc-agy)"
+    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" --effort "$aeff" \
+        --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> >(tee "$_aerr" >&2) || rc=$?
+    if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
+      printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
+      printf '>>>   check      : %s doctor  — it probes this lane for real rather than assuming the installed CLI works.\n' "$0" >&2
+      printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm on Devin is free).\n' >&2
+      printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
+      rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
+    fi
+    rm -f "$_aerr" 2>/dev/null || true
     record_ledger antigravity-agy "$atok" "$ttier" "$tier" "$task"
     return "$rc"
   fi
@@ -4089,21 +4278,35 @@ _is_transport_failure() {
   if [ -z "$stderr" ]; then
     [ "${OSRC_EMPTY_STDERR_IS_TRANSPORT:-0}" = "1" ] && return 0 || return 1
   fi
+  # Kubernetes speaks the same sentence we use as an infra signal: `no endpoints found for service/foo`
+  # is routine kubectl output from a DELEGATED TASK, while `no endpoints found for vendor/model` is the
+  # router telling us the lane is gone. Same words, opposite meaning, and no regex separates them —
+  # so name the resource kinds that make it task output and take them off the table first.
+  local _scan="$stderr"
+  if printf '%s' "$_scan" | grep -qiE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/'; then
+    _scan="$(printf '%s' "$_scan" | grep -viE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/')"
+  fi
+
   # Transport classification is a TWO-PASS match, because substring signatures fall into
   # two classes with different false-positive risk:
   #  PASS 1 -- MACHINE tokens + context-DISCRIMINATED signatures. These never occur in ordinary task/test
   #  prose (snake_case error codes, errno constants) or carry their own non-positional discriminator (a URL,
   #  the literal "after", an HTTP/version prefix, a status-code delimiter). Safe to match ANYWHERE in stderr.
-  if printf '%s' "$stderr" | grep -qiE \
-'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|(key|credit) limit exceeded|insufficient credits|requires more credits|api error: [45][0-9][0-9]'; then
+  #  Two disciplines apply here. (1) Only RETRYABLE statuses count: a 400/404/422 is a malformed request,
+  #  so escalating it through every model produces the same error N times, burns the budget, and buries
+  #  the real cause. (2) Phrases made of ordinary English ("no endpoints found", "key limit exceeded")
+  #  are things a DELEGATED TASK legitimately prints — kubectl output, a KV-store test — so they are
+  #  either line-anchored or shaped tightly enough that task prose cannot satisfy them.
+  if printf '%s' "$_scan" | grep -qiE \
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found for [a-z0-9._-]+/[a-z0-9._:-]+$|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|^[[:space:]]*(error: )?(key|credit) limit exceeded|insufficient credits|requires more credits|api error:? *\(?(408|409|425|429|5[0-9][0-9])'; then
     return 0
   fi
   #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
   #  optionally behind a bare "error: " wrapper); ordinary failed-task stderr only ever EMBEDS them mid-sentence
   #  ("AssertionError: connection refused should be rendered..."). So every one is LINE-ANCHORED. This is what
   #  stops the prose-false-positive class wholesale (a false positive here would blind-RETRY a mutating task).
-  if printf '%s' "$stderr" | grep -qiE \
-'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?[45][0-9][0-9]|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
+  if printf '%s' "$_scan" | grep -qiE \
+'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?(408|409|425|429|5[0-9][0-9])|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
     return 0
   fi
   return 1
@@ -4547,12 +4750,29 @@ parity() {
       for sk in "$vdir"/*/; do
         [ -f "${sk}SKILL.md" ] || continue
         name="$(basename "$sk")"
-        [ -e "$dst/$name" ] || [ -L "$dst/$name" ] && continue   # first wins (top-level/earlier plugin)
+        # A DANGLING symlink must NOT count as already-linked. Plugin caches are versioned, so every
+        # plugin upgrade deletes the version directory an earlier parity run pointed at. Treating any
+        # symlink as present made parity structurally unable to repair itself: the skills silently
+        # disappeared from the delegate while this directory still looked fully populated, so the
+        # delegate ran without the skills the host believes it has. Only a link that RESOLVES wins.
+        [ -e "$dst/$name" ] && continue                          # live entry: first wins
+        [ -L "$dst/$name" ] && rm -f "$dst/$name"                # dangling: replace, don't preserve
         ln -sfn "${sk%/}" "$dst/$name" && plinked=$((plinked+1))
       done
     done
   fi
   echo "  linked $plinked plugin skill(s) [latest version each] -> $dst"
+  # Sweep anything still dangling (a skill deleted upstream, or a cache layout that moved). A stale
+  # entry here is worse than a missing one: it makes the delegate look equipped when it is not.
+  local _stale=0 _l
+  for _l in "$dst"/*; do
+    [ -L "$_l" ] || continue
+    [ -e "$_l" ] && continue
+    rm -f "$_l" && _stale=$((_stale+1))
+  done
+  [ "$_stale" -gt 0 ] && echo "  pruned $_stale dead link(s) whose source no longer exists"
+  # The delegate should also be able to see THIS skill.
+  [ -f "$HOME/.claude/skills/outsourcerer/SKILL.md" ] && ln -sfn "$HOME/.claude/skills/outsourcerer" "$dst/outsourcerer" 2>/dev/null || true
 
   # Antigravity host (bonus): Antigravity CLI (agy) loads SKILL.md-format skills from its own
   # skills dir (~/.gemini/antigravity/skills -> ~/.gemini/config/skills). If that dir exists,
@@ -4636,6 +4856,13 @@ doctor() {
       [ -n "$_sv" ] && [ "$_sv" != "$OSRC_VERSION" ] && _drift="${_drift}
   version DRIFT: a SECOND copy at $_sd is v$_sv (this run is v$OSRC_VERSION) — /outsourcerer may load the stale one. Sync or remove it."
     fi
+    # Version strings matching is NOT the same as the code matching. Two copies at the same version
+    # with different content is the worse case: nothing looks wrong, and half your fixes are running
+    # only in the copy you are not executing. Compare the bytes, not the label.
+    if [ -f "$_sd" ] && [ "$_sd" != "$SCRIPT_PATH" ] && ! cmp -s "$_sd" "$SCRIPT_PATH"; then
+      _drift="${_drift}
+  install DRIFT: a second copy at $_sd differs from the running script. Same version, different code — one of them is missing fixes. Re-sync before trusting either."
+    fi
     [ -n "$_drift" ] && printf '%s\n' "$_drift"
   }
   # State-home writability: THE silent killer under sandboxed harness shells. Report, don't die —
@@ -4646,6 +4873,23 @@ doctor() {
   else
     echo "  state home: $OSRC_HOME NOT WRITABLE — every job will fail. Sandboxed shell? Allow writes to ~/.outsourcerer (Claude Code: settings.json sandbox allowWrite) or set OSRC_HOME to a writable dir."
   fi
+  # Parity link health. Plugin caches are versioned, so an upgrade can leave every linked skill
+  # pointing at a directory that no longer exists. The skills dir stays FULL and looks healthy while
+  # the delegate silently runs without the toolkit you believe it has — invisible unless something
+  # counts the dead links.
+  { local _pd="$HOME/.config/devin/skills" _dead=0 _tot=0 _l
+    if [ -d "$_pd" ]; then
+      for _l in "$_pd"/*; do
+        [ -e "$_l" ] || [ -L "$_l" ] || continue
+        _tot=$((_tot+1)); [ -e "$_l" ] || _dead=$((_dead+1))
+      done
+      if [ "$_dead" -gt 0 ]; then
+        echo "  parity: $_dead of $_tot linked skill(s) are DEAD links — the delegate cannot see them. Re-run: $0 parity"
+      else
+        echo "  parity: $_tot skill(s) linked into the devin lane, all resolving"
+      fi
+    fi
+  } 2>/dev/null
   if [ -f "$OSRC_CONSENT_FILE" ]; then echo "  cloud consent: granted + remembered ($0 consent revoke to undo)"
   else echo "  cloud consent: not yet granted — first cloud delegation asks ONCE and remembers ($0 consent grant to pre-grant)"; fi
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
@@ -4705,6 +4949,20 @@ doctor() {
   echo "    text vehicle in use: $gm_default"
   if have agy; then
     echo "    agy (Antigravity CLI, PRIMARY/keyless): v$(agy --version 2>/dev/null | head -1), auth = your Antigravity/Google app login (no API key)"
+    # INSTALLED IS NOT READY. Reporting a lane as available because its binary prints a version is how
+    # work gets routed to something that cannot answer: agy stays installed and authenticated-looking
+    # while every request times out (expired app login, service trouble). A bounded real request is the
+    # only thing that distinguishes the two. OSRC_DOCTOR_PROBE=0 skips it.
+    if [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
+      local _pt _prc=0
+      _pt="$(agy -p "reply with the single word: ok" --model gemini-3.5-flash --effort low \
+              --print-timeout "${OSRC_DOCTOR_PROBE_TIMEOUT:-25s}" 2>&1)" || _prc=$?
+      case "$_pt" in
+        *[Oo][Kk]*) echo "    agy liveness: RESPONDS (probed just now with a real request)" ;;
+        *timeout*)  echo "    agy liveness: INSTALLED BUT NOT ANSWERING — a real request timed out. Treat this lane as DOWN, not ready: sign in to the Antigravity app again, or force the API-key vehicle with OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY)." ;;
+        *)          echo "    agy liveness: UNCLEAR (rc=$_prc) — $(printf '%s' "$_pt" | tr -d '\n' | cut -c1-120)" ;;
+      esac
+    fi
   else
     echo "    agy (Antigravity CLI, PRIMARY/keyless): NOT on PATH"
     echo "      install: curl -fsSL https://antigravity.google/cli/install.sh -o agy-install.sh (inspect it, then run: bash agy-install.sh)   (then open Antigravity once to sign in)"
@@ -4843,7 +5101,8 @@ $feedback"
       break
     fi
     # Distinct BLOCKED terminal state: the delegate asked for a human / hit a wall — surface, don't grind.
-    if grep -aqE 'OSRC::(BLOCKED|NEED_INPUT)' "$ldir/attempt-$attempt.out" 2>/dev/null; then
+    if [ "$(_last_marker "$ldir/attempt-$attempt.out")" = "OSRC::BLOCKED" ] || \
+       [ "$(_last_marker "$ldir/attempt-$attempt.out")" = "OSRC::NEED_INPUT" ]; then
       state="blocked"; echo "[loop verify] $lid: delegate reported BLOCKED on attempt $attempt — stopping for a human." >&2; break
     fi
     # EXTERNAL verification (the model never judges itself).
@@ -4866,6 +5125,12 @@ $feedback"
 }
 
 main() {
+  # Mint this run's marker id once, and export it so the prompt the delegate receives and every
+  # supervisor that grades its output agree on the same value. A detached bg job re-enters this
+  # script as a fresh process and inherits it; if it ever arrives unset, one is minted there and the
+  # prompt/reader in THAT process still match each other.
+  [ -n "${OSRC_MARK:-}" ] || OSRC_MARK="$(_new_mark)"
+  export OSRC_MARK
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
   # ALSO accepted after it, via _consume_flags/parse_model). Audits showed a misplaced --cloud-ack
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.

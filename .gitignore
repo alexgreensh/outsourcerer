@@ -31,3 +31,9 @@ __pycache__/
 *.pyc
 .torture-scratch/
 .outsourcerer/
+
+# Delegate scratch: a background job that dies mid-run leaves its working files behind.
+# They are working notes, not shipped code, and they carry internal task names.
+plugins/outsourcerer/skills/outsourcerer/scripts/probe_*.sh
+plugins/outsourcerer/skills/outsourcerer/scripts/proof_*.sh
+plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh

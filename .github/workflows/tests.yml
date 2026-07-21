@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    # Both platforms, because the bugs differ by platform. macOS is where this tool actually runs for
+    # most users and is the only place BSD-vs-GNU tool differences show up; Linux is what a
+    # contributor's machine and most CI images look like. Testing one would hide the other's failures.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          if command -v jq >/dev/null 2>&1; then jq --version; exit 0; fi
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install jq; else sudo apt-get update && sudo apt-get install -y jq; fi
+        shell: bash
+
+      - name: Run conformance tests
+        run: bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh
+        shell: bash

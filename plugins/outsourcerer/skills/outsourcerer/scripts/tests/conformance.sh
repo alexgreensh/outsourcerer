@@ -25,11 +25,14 @@ note() { echo "SKIP: $1"; skip=$((skip+1)); }
 echo "=== STATIC gate: Phase-0 invariants wired ==="
 
 # 1. Every unit test suite is green (aggregate).
-for t in test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
+_ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default \
          test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
          test_loops test_job_lifecycle test_output_truncation test_lane_accounting \
-         test_selfcontained_hardening test_trusted_lanes; do
+         test_selfcontained_hardening test_trusted_lanes test_parity_links \
+         test_cc_devin_selfheal test_cloud_gate_coverage test_cost_disclosure \
+         test_parser_parity test_resolved_lane test_limits_freshness test_gemini_lane"
+for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     if bash "$SCRIPT_DIR/$t.sh" >/dev/null 2>&1; then ok "unit suite $t green"; else bad "unit suite $t FAILED"; fi
   else note "unit suite $t absent"; fi
@@ -47,6 +50,27 @@ grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach 
 grep -q '_lane_trusted_for_pwd'                    "$SRC" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
 grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation trust grant is exported (child jobs would inherit it)" || ok "trust grant is never exported (no inheritance)"
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
+
+# 2a. TEST REGISTRATION: a suite that exists but is not in the list above never runs. Four suites sat
+# unregistered in this directory for a full release cycle, green locally and never executed by the
+# gate. An unrun test is indistinguishable from no test, except that it looks like coverage.
+_unreg=""
+for _f in "$SCRIPT_DIR"/test_*.sh; do
+  _n="$(basename "$_f" .sh)"
+  case " $_ALL_SUITES " in *" $_n "*) ;; *) _unreg="$_unreg $_n" ;; esac
+done
+[ -z "$_unreg" ] && ok "every test_*.sh in this directory is registered with the runner" \
+  || bad "test suite(s) present but never run by the gate:$_unreg"
+
+# 2b. INSTALL DRIFT: a second installed copy running different code than this one is the failure that
+# makes every other gate here meaningless — the suite passes against a tree the user never executes.
+# It has bitten twice: a stale standalone copy running old code, and edits made in one copy silently
+# overwritten by a sync from the other.
+_alt="$HOME/.claude/skills/outsourcerer/scripts/outsourcerer.sh"
+if [ -f "$_alt" ] && [ "$(cd "$(dirname "$_alt")" && pwd -P)" != "$(cd "$(dirname "$SRC")" && pwd -P)" ]; then
+  if cmp -s "$SRC" "$_alt"; then ok "second installed copy is byte-identical to this one"
+  else bad "INSTALL DRIFT: $_alt differs from the tree under test — one of them is running stale code"; fi
+fi
 
 # 3. bash -n on the script + all sibling shell scripts.
 for f in "$SRC" "$SCRIPT_DIR"/../run-or-model.sh "$SCRIPT_DIR"/../run-or-codex.sh; do

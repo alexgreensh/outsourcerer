@@ -3,6 +3,67 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.13] - 2026-07-21
+
+Reliability patch. Every fix below is a case where the tool told you something that was not true: a
+job that had died reported as running, a lane advertised as ready that could not answer, a usage
+figure from two days ago presented as current, finished work graded as blocked. All are covered by
+tests, and each test was watched failing against the old code before it was accepted.
+
+### Fixed
+- **A delegate can no longer trip control decisions by quoting them.** Job state was decided by
+  scanning the delegate's output for bare `OSRC::` markers, so a delegate that echoed the protocol it
+  was handed, printed a log, or read this repo could accidentally flip its own status — completed work
+  reported as blocked. Each run now mints an id that its instructions carry, so genuine status lines
+  are signed and repeated text is not. Unsigned markers still work when nothing is signed, so existing
+  prompts are unaffected.
+- **Dead jobs no longer report as running.** `status --json` and the fanout waiter read the recorded
+  status without checking whether the process was still alive, so a job whose delegate had been killed
+  stayed `running` forever and `fanout wait` could block on it indefinitely. Liveness is now
+  reconciled on every read path, including jobs flagged `stalled?`/`exploring?`, and a recycled pid can
+  no longer make a dead job look alive.
+- **A quiet delegate is no longer mistaken for a hung one.** The stall watchdog measured log growth, so
+  a delegate writing files while printing nothing was killed as wedged — including delegates following
+  this tool's own advice to write results to a file. Progress now also counts real file activity, and a
+  job that truly produced nothing is reported as such with the reason and the fix.
+- **Healthy jobs are no longer declared stillborn.** Setting up an isolated worktree on a large repo
+  can outlast the launch grace, which looked identical to a worker the environment killed. The setup
+  phase now has its own bound and its own message, and remains bounded.
+- **A failed task is no longer mistaken for a network problem.** Phrases like `rate limit exceeded`,
+  `statusCode: 404`, `invalid api key` and `no endpoints found` were matched anywhere in a delegate's
+  output, including inside test output that merely discusses an API or ordinary `kubectl` output, so a
+  red test could be silently retried on another model after it had already changed files. Only genuinely
+  retryable failures escalate now, and a 400/422 surfaces instead of being retried on every lane.
+- **Gemini/Antigravity lane runs again.** `--effort` was never passed, which that CLI now requires and
+  refuses to run without, and the accepted levels differ per model. Effort is passed explicitly and
+  clamped to a level the chosen model accepts, announced rather than silently changed. A lane that
+  accepts a request and never answers is now reported with the cause and the alternatives instead of
+  waiting out the timeout in silence.
+- **Usage figures say how old they are.** ChatGPT/Codex limits are read from the newest local codex
+  session, which can be days old when codex has not run. Usage only rises within a window, so a stale
+  reading always overstates what is left. Old readings are now labelled as a floor, and are refused for
+  routing decisions rather than sending work to an exhausted lane.
+- **`parity` repairs its own links.** Skills are linked into the Devin lane from a versioned plugin
+  cache, so upgrading a plugin left every link pointing at a directory that no longer existed. Because
+  a broken link still counted as "already linked", re-running parity could not fix it: the skills
+  directory stayed full while the delegate silently ran without them. Dead links are now replaced and
+  pruned, and the count is reported.
+- **Output-token exhaustion is reported as itself**, with the remedy, instead of a generic failure that
+  leaves a partial answer looking complete.
+
+### Added
+- **Per-lane, per-repo trust for the credential hard-block (#2).** Some cloud lanes are trusted the way
+  a local agent is trusted, but only for particular repos. `~/.config/outsourcerer/trusted-lanes.json`
+  expresses exactly that: when the current lane is trusted for the current repo, the credential-*file*
+  block is skipped and nothing else is. Default empty, so an untouched install is unchanged. The
+  disclosure always names the skip. `--trust-lane` covers one-offs and is deliberately not an
+  environment variable, so no background job inherits it.
+- **`doctor` checks its own installation**: whether a second installed copy is running different code
+  (same version, different bytes), whether linked skills still resolve, and whether the keyless Gemini
+  lane can actually answer rather than merely being installed.
+- **Continuous integration.** The test gate runs on every push and pull request, on macOS and Linux,
+  because the two platforms fail differently.
+
 ## [0.4.12] - 2026-07-21
 
 Reliability, truthful-accounting, and hardening patch, plus a fix for a false-abort regression in the 0.4.11 print-mode detector. All changes are covered by the test suite.
@@ -73,7 +134,7 @@ Copilot + platform-parity release (one small bump from 0.4.7). The skill now gre
 
 ## [0.4.7] - 2026-07-15
 
-Torture-room hardening: 16-agent security/reliability gauntlet findings applied. No breaking changes. All 21 conformance tests + 62 advise tests pass.
+Security and reliability hardening: findings from a multi-agent adversarial audit applied. No breaking changes. All 21 conformance tests + 62 advise tests pass.
 
 ### Security
 - **API keys no longer appear in process arguments.** All curl calls to OpenRouter/Gemini now write bearer tokens to a `chmod 600` temp header file referenced via `@header-file`, not `-H "Authorization: Bearer ..."` on the command line (visible to `ps`/other users).
