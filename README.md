@@ -126,19 +126,31 @@ All of it in plain language. The commands underneath are the sorcerer's, not you
 
 Loops are not new. Claude Code has them and they work. What is expensive is **who runs the laps**.
 
-A verify loop is the same three moves over and over: try it, check it, try again. That is the least interesting work in software and the most repetitive, and if your frontier model is doing it, you are paying archmage rates for someone to re-run your test suite.
+A loop is the same few moves over and over: try it, check it, try again. That is the least interesting work in software and the most repetitive, and if your frontier model is doing it, you are paying archmage rates for someone to re-run your test suite.
 
 So the sorcerer sends the laps somewhere cheap and keeps the judgment. A budget model does the trying. **Your** tests do the checking. The archmage decides what "done" means and reads the result when it lands.
 
-Nothing grades its own homework. The check is a real command — your suite, your build, your linter — because a model asked whether it succeeded will say yes.
+Nothing grades its own homework. The check is a real command, your suite, your build, your linter, because a model asked whether it succeeded will say yes.
 
-It stops when the check goes green. It stops when the same failures come back twice, because a loop that is not converging is an expensive way to be wrong. It stops when the time you gave it runs out. Four endings, all of them honest, none of them a shrug.
+And "loop" is not one shape. Build-until-the-tests-pass is the one everybody knows. It is not the only one worth sending away:
 
-You will not type any of it. Describe the problem and the sorcerer offers you the shape:
+- a machine can settle it, so it runs until the check goes green
+- you do not know how much work is in there, so it sweeps until nothing is left
+- nothing can check it, but you can tell good from bad, so it tries several ways and keeps the best
+- quality is a matter of degree, so one model drafts and another critiques until it stops improving
+- the *plan* is the risky part, so two advisors argue it out before a cheap model touches a file
+
+You will not type any of it. Describe the problem and the sorcerer picks the shape and offers it:
 
 > *"That's a build-until-the-tests-pass job. Want me to hand it to GLM and keep re-running your suite until it's green? I'll stop if it stalls, or after twenty minutes."*
 
 Yes is the whole interface. And it will talk you *out* of a loop when there is nothing that can verify the result, because at that point a loop is just a model marking its own homework in a circle.
+
+While it runs, you can watch it: which attempt it is on, how long it has been going, and what is still failing. A loop you cannot see inside is a bet, not a tool.
+
+It stops when the check goes green. It stops when the same failures come back twice, because a loop that is not converging is an expensive way to be wrong. It stops when the time you gave it runs out. It even stops when the *check itself* hangs, which used to be the one way a bounded loop could quietly run forever.
+
+And stopping early is not a dead end. It keeps the task, the check, and the exact thing that broke last, so you can send it back around from where it stopped instead of paying twice for ground it already covered.
 
 ---
 

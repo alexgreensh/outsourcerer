@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.14"
+OSRC_VERSION="0.4.15"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -349,7 +349,12 @@ _timeout() {
   if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
   "$@" &
   local cmd_pid=$!
-  ( sleep "$secs" 2>/dev/null; kill -TERM "$cmd_pid" 2>/dev/null ) &
+  # Signal the whole TREE, not just the direct child. Killing only the child leaves grandchildren
+  # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
+  # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
+  # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
+  # which is the same reason it exists for the job supervisor.
+  ( sleep "$secs" 2>/dev/null; _kill_tree "$cmd_pid" 2>/dev/null ) &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
@@ -665,6 +670,10 @@ _last_marker() {
 # by anchoring the pattern a little harder — which treats the symptom.
 # The fix is a value the delegate cannot reproduce by echoing anything it was given: a random token
 # minted per run. Instructions carry it, so a genuine marker is signed and echoed text never is.
+# One hole remained and is now closed: the injected protocol block used to print its EXAMPLE marker
+# lines carrying the LIVE id, so a delegate that echoed the block back emitted a perfectly valid
+# signed terminal by accident. The examples now use the literal placeholder <run-id> and the live id
+# is disclosed exactly once as prose, so no copyable line in the prompt is ever a valid marker.
 _new_mark() { od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || printf '%04x%04x' $$ "${RANDOM:-0}"; }
 
 # ---- the canonical OSRC:: progress protocol block, injected into raw/continue/tmux ----
@@ -672,11 +681,14 @@ osrc_protocol_block() {
   if [ -n "${OSRC_MARK:-}" ]; then
     printf -- '--- PROGRESS PROTOCOL (required; machine-monitored) ---\n'
     printf 'Your run is supervised. A watchdog kills silent processes, so signal liveness.\n\n'
-    printf 'IMPORTANT: this run has the id %s. Every OSRC:: line you emit MUST carry it, like this:\n' "$OSRC_MARK"
-    printf '  OSRC::PROGRESS#%s <step> <5-10 words on what you are doing now>\n' "$OSRC_MARK"
-    printf '  OSRC::BLOCKED#%s <what is blocking you and what you tried>\n' "$OSRC_MARK"
-    printf '  OSRC::NEED_INPUT#%s <the single question>\n' "$OSRC_MARK"
-    printf '  OSRC::DONE#%s <one-line summary of what you did>\n\n' "$OSRC_MARK"
+    printf 'Your live run id is: %s\n' "$OSRC_MARK"
+    printf 'Every real OSRC:: line MUST end its marker with #<that id>. The examples below show the\n'
+    printf 'literal placeholder <run-id> and NEVER the live id, so echoing this block back cannot\n'
+    printf 'produce a valid status line:\n'
+    printf '  OSRC::PROGRESS#<run-id> <step> <5-10 words on what you are doing now>\n'
+    printf '  OSRC::BLOCKED#<run-id> <what is blocking you and what you tried>\n'
+    printf '  OSRC::NEED_INPUT#<run-id> <the single question>\n'
+    printf '  OSRC::DONE#<run-id> <one-line summary of what you did>\n\n'
     printf 'Rules:\n'
     printf '1. Each line stands alone, at the START of a line, nothing before it.\n'
     printf '2. Print a PROGRESS line before each major step; never go ~1 minute silent.\n'
@@ -684,8 +696,7 @@ osrc_protocol_block() {
     printf '3. If blocked (missing file, failing dependency, denied permission, repeated\n'
     printf '   error) do NOT retry endlessly. Print ONE BLOCKED line and stop.\n'
     printf '4. Finish with exactly one DONE line as the final line.\n'
-    printf '5. If you need to QUOTE or discuss these markers, omit the id. Only real\n'
-    printf '   status lines carry %s, so quoted examples are never mistaken for status.\n' "$OSRC_MARK"
+    printf '5. If you quote or discuss these markers, keep <run-id> literally unchanged.\n'
     return
   fi
   cat <<'OSRCEOF'
@@ -2232,7 +2243,11 @@ cmd_bg() {
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
-  echo "[outsourcerer] job $id launched (provider=$PROVIDER)." >&2
+  # PROVIDER is only the DEFAULT lane. A model alias routes per-model (`-m terra` goes to codex-native
+  # even while the default provider is devin), and that decision is made in the detached child, after
+  # this line prints. Stating "provider=devin" for a job that ran on codex-native is the tool lying
+  # about its own routing, so name it as a default and point at the record that is actually true.
+  echo "[outsourcerer] job $id launched (default lane: $PROVIDER; a model alias can route it elsewhere, and '$0 status $id' shows the model it really ran)." >&2
   echo "[outsourcerer] NOW WATCH IT: $0 watch $id     (it runs unobserved until you do; status/result: $0 status $id | $0 result $id)" >&2
 }
 
@@ -4993,22 +5008,61 @@ doctor() {
   echo "    model chain: ${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}"
   local cred; cred="$(or_credits)"; [ -n "$cred" ] && echo "    openrouter credits: $cred"
   echo "  -- Native premium lanes (model-selected; ride your own subscription) --"
-  echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present, auth = your ChatGPT login' || echo 'codex NOT on PATH')"
+  echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH')"
   if have codex; then _codex_code_mode_host \
     && echo "      code-mode-host: present (codex file-reading tool calls work)" \
     || echo "      code-mode-host: MISSING, self-healed (Outsourcerer runs codex with code_mode_host disabled so file reads do not hang; install codex-code-mode-host to ~/.local/bin to use the feature)"; fi
-  echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present, auth = your Claude login' || echo 'claude NOT on PATH')"
+  echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH')"
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."
   if [ "${OSRC_DOCTOR_PING:-0}" = "1" ]; then
-    echo "    (pinging native lanes, costs ~1 token each)"
+    echo "    (pinging native lanes, costs ~1 token each; bounded to ${OSRC_DOCTOR_PING_TIMEOUT:-30}s per lane)"
+    # INSTALLED IS NOT READY. A lane stays installed and authenticated while its subscription window is
+    # exhausted, its token has expired, or its backend has stopped answering — and a binary that prints
+    # a version proves none of that. Only a real request separates the two, so the probe classifies WHY
+    # it failed and names the remedy, instead of a bare "no reply" the user cannot act on.
+    # Bounded via _timeout so a dead lane costs seconds, not minutes.
+    # NOTE: OSRC_DOCTOR_PING_TIMEOUT is a bare number of seconds. It is deliberately NOT agy's
+    # OSRC_DOCTOR_PROBE_TIMEOUT, which carries an 's' suffix for agy's own --print-timeout flag and
+    # would be rejected by _timeout.
+    local _ppt _prc
     # --ignore-user-config: the diagnostic itself must not wedge on a user's interactive-auth MCP
     # server (auth survives the flag; this is exactly the isolation the delegate paths now use).
-    have codex  && { codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" >/dev/null 2>&1 && echo "      codex-native luna: PONG (authenticated)" || echo "      codex-native luna: no reply (not authed / model unavailable)"; }
-    have claude && { env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" >/dev/null 2>&1 && echo "      claude-native haiku: PONG (authenticated)" || echo "      claude-native haiku: no reply (not authed / model unavailable)"; }
+    if have codex; then
+      _ppt=""; _prc=0
+      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" 2>&1)" || _prc=$?
+      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+        echo "      codex-native luna: READY (probed just now, answered)"
+      else
+        case "$_ppt" in
+          *[Aa]uth*|*401*|*403*|*[Uu]nauthor*)
+            echo "      codex-native luna: INSTALLED BUT NOT ANSWERING — auth rejected. Fix: run 'codex login' to refresh your ChatGPT token." ;;
+          *429*|*[Rr]ate*|*[Ll]imit*|*[Qq]uota*|*[Ee]xhaust*)
+            echo "      codex-native luna: INSTALLED BUT NOT ANSWERING — plan window exhausted / rate-limited. Fix: wait for your ChatGPT plan window to reset, or switch lanes for now." ;;
+          *)
+            echo "      codex-native luna: INSTALLED BUT NOT ANSWERING (rc=$_prc) — a real request did not come back. Treat this lane as DOWN, not ready: check your network, then 'codex login', then whether your ChatGPT plan window is exhausted." ;;
+        esac
+      fi
+    fi
+    if have claude; then
+      _ppt=""; _prc=0
+      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" 2>&1)" || _prc=$?
+      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+        echo "      claude-native haiku: READY (probed just now, answered)"
+      else
+        case "$_ppt" in
+          *[Aa]uth*|*401*|*403*|*[Uu]nauthor*)
+            echo "      claude-native haiku: INSTALLED BUT NOT ANSWERING — auth rejected. Fix: run 'claude' interactively to re-login." ;;
+          *429*|*[Rr]ate*|*[Ll]imit*|*[Qq]uota*|*[Ee]xhaust*)
+            echo "      claude-native haiku: INSTALLED BUT NOT ANSWERING — plan window exhausted / rate-limited. Fix: wait for your Claude plan window to reset, or switch lanes for now." ;;
+          *)
+            echo "      claude-native haiku: INSTALLED BUT NOT ANSWERING (rc=$_prc) — a real request did not come back. Treat this lane as DOWN, not ready: check your network, then re-run 'claude' to re-login, then whether your Claude plan window is exhausted." ;;
+        esac
+      fi
+    fi
     if have agy; then agy -p "reply PONG" --model "gemini-3.5-flash" --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
     have gemini && { gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
   else
-    echo "    (set OSRC_DOCTOR_PING=1 to probe native lane auth with a 1-token ping)"
+    echo "    (set OSRC_DOCTOR_PING=1 to probe native lane liveness with a bounded 1-token request; without it, 'present' above means installed + authed-looking, NOT proven to answer)"
   fi
   echo "  -- Engine lanes (YOUR agent CLI + YOUR configured models, incl. BYOK) --"
   if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Uses your Factory plan / customModels in ~/.factory/settings.json (free/cheap BYOK lanes work as-is)."
@@ -5091,9 +5145,30 @@ doctor() {
   echo "  -- Devin lane --"
   if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
   if logged_in; then
-    echo "  auth:  $(devin auth status 2>/dev/null | awk -F: '/Tier/{gsub(/^[ \t]+/,"",$2);print "logged in ("$2" tier)"}')"
+    echo "  auth:  $(devin auth status 2>/dev/null | awk -F: '/Tier/{gsub(/^[ \t]+/,"",$2);print "logged in ("$2" tier)"}')  [status check only — NOT probed for liveness; set OSRC_DOCTOR_PING=1 to verify it answers]"
   else
     echo "  auth:  NOT logged in -> run:  ! devin auth login"
+  fi
+  # Same lesson as the agy probe, applied to the default lane: `devin auth status` reads a login file,
+  # which proves nothing about whether the backend answers. A bounded real request is the only thing
+  # that catches an expired token, an exhausted plan/ACU window, or an outage. glm-5.2 is the free
+  # default (cheapest real request) and `auto` only auto-approves READ-ONLY tools, so the probe cannot
+  # edit anything. </dev/null keeps it non-interactive.
+  if [ "${OSRC_DOCTOR_PING:-0}" = "1" ] && logged_in; then
+    local _dpt _drc=0
+    _dpt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT_DEVIN:-45}" devin --model glm-5.2 --permission-mode auto -p "reply PONG" </dev/null 2>&1)" || _drc=$?
+    if [ "$_drc" -eq 0 ] && printf '%s' "$_dpt" | grep -qi 'pong'; then
+      echo "  devin liveness: READY (probed just now with glm-5.2, answered)"
+    else
+      case "$_dpt" in
+        *[Aa]uth*|*401*|*403*|*[Uu]nauthor*|*"ot logged"*)
+          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — auth rejected / not logged in. Fix: run 'devin auth login'." ;;
+        *429*|*[Rr]ate*|*[Ll]imit*|*[Qq]uota*|*[Ee]xhaust*|*ACU*)
+          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — Devin plan/ACU budget exhausted or rate-limited. Fix: wait for the window to reset, or switch to a free local/OpenRouter lane for now." ;;
+        *)
+          echo "  devin liveness: INSTALLED BUT NOT ANSWERING (rc=$_drc) — a real request did not come back. Treat this lane as DOWN, not ready: check your network and any *_PROXY env var (see the proxy note above), then 'devin auth login'." ;;
+      esac
+    fi
   fi
   # Proactive diagnostics: a *_PROXY env var in this shell + devin present means devin's Rust TLS
   # client may reject the proxy cert (rustls OSStatus cert-verify), surfacing as a bare "Connection
@@ -5157,8 +5232,36 @@ _check_signature() {
 # (sweep / best-of-N / evaluator-optimizer / council-build) are orchestrator recipes in references/loops.md,
 # composed from the existing verbs — not a workflow engine here. Terminates into exactly one state:
 # success (0) | blocked (3) | max_turns (2). State (each attempt + check output) lives on disk.
+# _loop_check <secs> <check> <outfile> -> run the acceptance check under a wall-clock cap.
+# The check is EXTERNAL and arbitrary — someone else's test suite, build, or linter — so it can hang.
+# An unbounded check is not merely slow: the loop's own time guard is only consulted BETWEEN attempts,
+# so a hung check means --max-minutes never fires and the loop runs forever, which is the one thing a
+# bounded loop promises not to do. Stock macOS ships no `timeout`, so this polls and then uses the
+# existing recursive killer, ensuring the check's children die with it rather than leaking.
+# Returns 124 on timeout, matching coreutils' convention, so it can never be mistaken for success.
+_loop_check() {
+  local secs="$1" check="$2" outfile="$3" pid started now rc=0
+  : > "$outfile" || return 125
+  bash -c "$check" > "$outfile" 2>&1 &
+  pid=$!
+  started=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    if [ $(( now - started )) -ge "$secs" ]; then
+      _kill_tree "$pid"
+      printf '\n[outsourcerer] acceptance check TIMED OUT after %ss.\n' "$secs" >> "$outfile"
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+  wait "$pid" 2>/dev/null || rc=$?
+  return "$rc"
+}
+
 cmd_loop() {
   local shape="${1:-}"; [ $# -gt 0 ] && shift
+  local resume=0 lid="" ldir=""
   case "$shape" in
     status)
       # What anyone needs mid-run: is it moving, how far in, and what is still wrong.
@@ -5177,17 +5280,36 @@ cmd_loop() {
       done
       return 0 ;;
     verify) ;;
-    ''|-h|--help|help) die "loop: the built-in shape is 'verify'. Usage: loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\"
+    resume)
+      # A loop that stopped without converging still holds everything needed to continue: the task,
+      # the check, and the accumulated failure feedback. Restarting from attempt 1 throws that away and
+      # pays for the same ground twice, so a non-success terminal loop can be picked up where it left off.
+      resume=1
+      lid="${1:-}"
+      [ -n "$lid" ] || die "loop resume needs a loop id (see: loop status)"
+      shift
+      case "$lid" in *[!A-Za-z0-9._-]*|'') die "loop resume: invalid loop id" ;; esac
+      ldir="$OSRC_HOME/loops/$lid"
+      [ -d "$ldir" ] || die "loop resume: no such loop '$lid' (see: loop status)"
+      case "$(cat "$ldir/state" 2>/dev/null)" in
+        success) die "loop resume: '$lid' already succeeded; refusing to rerun a successful loop" ;;
+        blocked|max_turns|max_time) ;;
+        *) die "loop resume: '$lid' is not a resumable terminal loop (state: $(cat "$ldir/state" 2>/dev/null || echo '?'))" ;;
+      esac ;;
+    ''|-h|--help|help) die "loop: the built-in shapes are 'verify' and 'resume'. Usage:
+  loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\"
+  loop resume <loop-id> [--max N]
 
 Which loop do you want?
   a machine can verify it (tests/lint/build), one known target  -> loop verify   (this one)
+  continue a stopped loop using its saved feedback              -> loop resume
   a machine can verify it, but you do not know how much work    -> sweep         (recipe)
   no checker, but you can compare candidates                    -> best-of-N     (recipe)
   quality is a matter of degree, not pass/fail                  -> evaluator-optimizer (recipe)
   the PLAN is the risky part, not the code                      -> council-build (recipe)
 If nothing can verify the result, do not loop at all — delegate once and read it yourself.
 Recipes are composed from the existing verbs, not a workflow engine: see references/loops.md." ;;
-    *) die "loop: unknown shape '$shape' (only 'verify' is built in; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
+    *) die "loop: unknown shape '$shape' (only 'verify' and 'resume' are built in; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
   esac
   # The CHECK is the goal; these are runaway guards, not targets. The loop ends the moment the check
   # passes, so a cap only ever fires when the work is NOT converging. A round count alone is a poor
@@ -5196,12 +5318,37 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   # the default lane is a subscription lane that reports $0, so a dollar bound would never fire on the
   # path most people use, while time and attempts always bind.
   local model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}" verb=edit task=""
+  local original_max="" max_set=0 prior_attempt=0
+
+  # On resume the shape of the work is FIXED by the original run. Re-specifying the task, check, model
+  # or verb would silently grade new work against old feedback, so those are read back from meta and
+  # refused on the command line; only the attempt ceiling may be raised.
+  if [ "$resume" = "1" ]; then
+    task="$(sed -n 's/^task: //p' "$ldir/meta" 2>/dev/null)"
+    check="$(sed -n 's/^check: //p' "$ldir/meta" 2>/dev/null)"
+    model="$(sed -n 's/^model: //p' "$ldir/meta" 2>/dev/null)"
+    max="$(sed -n 's/^max: //p' "$ldir/meta" 2>/dev/null)"
+    verb="$(sed -n 's/^verb: //p' "$ldir/meta" 2>/dev/null)"
+    maxmin="$(sed -n 's/^max-minutes: //p' "$ldir/meta" 2>/dev/null)"
+    [ "$model" = "<default>" ] && model=""
+    [ -n "$maxmin" ] || maxmin=0       # loops created before resume existed saved no time cap
+    original_max="$max"
+    prior_attempt="$(cat "$ldir/attempt" 2>/dev/null || echo 0)"
+    case "$prior_attempt" in ''|*[!0-9]*) die "loop resume: corrupt attempt state in '$lid'" ;; esac
+    [ -n "$task" ] && [ -n "$check" ] && [ -n "$max" ] && [ -n "$verb" ] ||
+      die "loop resume: '$lid' has incomplete metadata and cannot be resumed safely"
+  fi
+
   while [ $# -gt 0 ]; do case "$1" in
-    -m|--model) [ -n "${2:-}" ] || die "loop verify: -m needs a model"; model="$2"; shift 2 ;;
-    --check)    [ -n "${2:-}" ] || die "loop verify: --check needs a command"; check="$2"; shift 2 ;;
-    --max)      [ -n "${2:-}" ] || die "loop verify: --max needs a number"; max="$2"; shift 2 ;;
-    --max-minutes) [ -n "${2:-}" ] || die "loop verify: --max-minutes needs a number"; maxmin="$2"; shift 2 ;;
-    --verb)     [ -n "${2:-}" ] || die "loop verify: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
+    -m|--model) [ "$resume" != "1" ] || die "loop resume: the model is fixed by the original loop"
+                [ -n "${2:-}" ] || die "loop verify: -m needs a model"; model="$2"; shift 2 ;;
+    --check)    [ "$resume" != "1" ] || die "loop resume: the check is fixed by the original loop"
+                [ -n "${2:-}" ] || die "loop verify: --check needs a command"; check="$2"; shift 2 ;;
+    --max)      [ -n "${2:-}" ] || die "loop $shape: --max needs a number"; max="$2"; max_set=1; shift 2 ;;
+    --max-minutes) [ "$resume" != "1" ] || die "loop resume: the time bound is fixed by the original loop"
+                [ -n "${2:-}" ] || die "loop verify: --max-minutes needs a number"; maxmin="$2"; shift 2 ;;
+    --verb)     [ "$resume" != "1" ] || die "loop resume: the verb is fixed by the original loop"
+                [ -n "${2:-}" ] || die "loop verify: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
     --worktree) die "loop verify: --worktree is not supported yet. Isolation would have to be established by the loop itself (the delegate runs in the foreground here, and the acceptance check must run inside the same tree), so a half-wired flag would verify the wrong files. Run the loop inside a worktree you created, or use 'bg --worktree' for one-shot isolated work." ;;
     --)         shift; task="$*"; break ;;
     -*)         die "loop verify: unknown flag '$1'" ;;
@@ -5209,28 +5356,56 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   esac; done
   [ -n "$task" ]  || die "loop verify needs a task, e.g.: loop verify -m glm --check \"npm test\" \"make the auth tests pass\""
   [ -n "$check" ] || die "loop verify needs a --check command. External verification is MANDATORY — a loop that trusts the model's own 'done' is not a loop, it's a hope."
-  case "$max" in ''|*[!0-9]*) die "loop verify: --max must be a positive integer" ;; esac
-  [ "$max" -ge 1 ] 2>/dev/null || die "loop verify: --max must be >= 1"
+  case "$max" in ''|*[!0-9]*) die "loop $shape: --max must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] 2>/dev/null || die "loop $shape: --max must be >= 1"
   # Fractional minutes are allowed (0.5 = 30s): short verification loops are real, and forcing whole
   # minutes would make the only usable time bound a full minute.
-  case "$maxmin" in ''|*[!0-9.]*|*.*.*) die "loop verify: --max-minutes must be a number of minutes, e.g. 10 or 0.5 (0 = no time bound)" ;; esac
+  case "$maxmin" in ''|*[!0-9.]*|*.*.*) die "loop $shape: --max-minutes must be a number of minutes, e.g. 10 or 0.5 (0 = no time bound)" ;; esac
   local _maxsec; _maxsec="$(awk -v m="$maxmin" 'BEGIN{printf "%d", m*60}')"
-  case "$verb" in edit|yolo) ;; *) die "loop verify: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
+  case "$verb" in edit|yolo) ;; *) die "loop $shape: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
+  # Resuming with the SAME ceiling would start at prior+1 and exit immediately having done nothing,
+  # which reads as a second failure rather than a no-op. Demand a strictly larger ceiling instead.
+  [ "$resume" != "1" ] || [ "$max_set" != "1" ] || [ "$max" -gt "$original_max" ] 2>/dev/null ||
+    die "loop resume: --max must be greater than the original maximum ($original_max)"
 
-  local lid ldir; lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
-  mkdir -p -m 700 "$ldir" 2>/dev/null || die "loop: cannot create loop dir under $OSRC_HOME/loops"
-  { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nverb: %s\nstarted: %s\n' \
-      "$task" "$check" "${model:-<default>}" "$max" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
+  if [ "$resume" = "1" ]; then
+    if [ "$max_set" = "1" ]; then
+      local _mtmp
+      _mtmp="$(mktemp "$ldir/meta.XXXXXX" 2>/dev/null)" || die "loop resume: cannot update metadata"
+      awk -v newmax="$max" '/^max: / { print "max: " newmax; next } { print }' "$ldir/meta" > "$_mtmp" &&
+        mv "$_mtmp" "$ldir/meta" || { rm -f "$_mtmp"; die "loop resume: cannot update metadata"; }
+    fi
+    printf 'resumed: %s\n' "$(date +%s)" >> "$ldir/meta" 2>/dev/null || true
+  else
+    lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
+    mkdir -p -m 700 "$ldir" 2>/dev/null || die "loop: cannot create loop dir under $OSRC_HOME/loops"
+    { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nstarted: %s\n' \
+        "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
+  fi
   local _t0; _t0=$(date +%s)
-  echo "[loop verify] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
+  echo "[loop $shape] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
 
   # Live state on disk from the FIRST second. A loop that only records its verdict at the end is
   # unobservable exactly while it matters: you cannot tell a loop grinding usefully from one that is
   # stuck, so you cannot decide whether to steer it or kill it.
   printf 'running\n' > "$ldir/state" 2>/dev/null || true
-  local attempt feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
+  local attempt="$(( prior_attempt + 1 ))" last_attempt="$prior_attempt"
+  local feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
   [ -n "$model" ] && mflag="-m"
-  for attempt in $(seq 1 "$max"); do
+
+  # Carry the previous run's failure across the restart. Without this a resumed loop hands the delegate
+  # a blank slate (paying again for ground already covered) and re-arms the stall guard from scratch, so
+  # a loop that was stuck repeating one failure would happily repeat it for another full budget.
+  if [ "$resume" = "1" ] && [ "$prior_attempt" -gt 0 ]; then
+    feedback="$(cat "$ldir/feedback" 2>/dev/null)"
+    [ -n "$feedback" ] || feedback="$(cat "$ldir/check-$prior_attempt.out" 2>/dev/null)"
+    if [ -n "$feedback" ]; then
+      prev_fail="$(printf '%s' "$feedback" | _check_signature)"; have_prev=1
+    fi
+  fi
+
+  while [ "$attempt" -le "$max" ]; do
+    last_attempt="$attempt"
     printf '%s\n' "$attempt" > "$ldir/attempt" 2>/dev/null || true
     echo "OSRC::PROGRESS $attempt/$max delegate+verify" >&2
     local aprompt="$task"
@@ -5257,10 +5432,32 @@ $feedback"
        [ "$(_last_marker "$ldir/attempt-$attempt.out")" = "OSRC::NEED_INPUT" ]; then
       state="blocked"; echo "[loop verify] $lid: delegate reported BLOCKED on attempt $attempt — stopping for a human." >&2; break
     fi
-    # EXTERNAL verification (the model never judges itself).
-    local cout crc; cout="$(bash -c "$check" 2>&1)"; crc=$?
-    printf '%s' "$cout" > "$ldir/check-$attempt.out" 2>/dev/null || true
-    printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || true
+    # EXTERNAL verification (the model never judges itself), under a wall-clock cap. The cap defaults
+    # to 300s and is further clamped to the time left in --max-minutes, so a hung check can never eat
+    # the whole run: without it the between-attempt time guard below is simply never reached.
+    local check_timeout remaining cout crc
+    if [ -n "${OSRC_CHECK_TIMEOUT:-}" ]; then
+      case "$OSRC_CHECK_TIMEOUT" in ''|*[!0-9]*) die "OSRC_CHECK_TIMEOUT must be a positive whole number of seconds" ;; esac
+      [ "$OSRC_CHECK_TIMEOUT" -ge 1 ] 2>/dev/null || die "OSRC_CHECK_TIMEOUT must be >= 1"
+      check_timeout="$OSRC_CHECK_TIMEOUT"
+    else
+      check_timeout="${OSRC_CHECK_TIMEOUT_DEFAULT:-300}"
+      if [ "$_maxsec" -gt 0 ]; then
+        remaining=$(( _maxsec - ( $(date +%s) - _t0 ) ))
+        [ "$remaining" -ge 1 ] || remaining=1
+        [ "$remaining" -lt "$check_timeout" ] && check_timeout="$remaining"
+      fi
+    fi
+    _loop_check "$check_timeout" "$check" "$ldir/check-$attempt.out"; crc=$?
+    cout="$(cat "$ldir/check-$attempt.out" 2>/dev/null)"
+    if [ "$crc" -eq 124 ]; then
+      printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || true
+      echo "[loop verify] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
+    else
+      printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || true
+    fi
+    # Persist the feedback so a later `loop resume` can pick up exactly where this one stopped.
+    printf '%s' "$cout" > "$ldir/feedback" 2>/dev/null || true
     if [ "$crc" -eq 0 ]; then state="success"; echo "[loop verify] $lid: acceptance check PASSED on attempt $attempt." >&2; break; fi
     # Stall guard: byte-identical check output on two consecutive attempts means the feedback is
     # not moving the delegate -> stop rather than burn the remaining budget on a spin. Keyed on a
@@ -5277,6 +5474,7 @@ $feedback"
       echo "[loop verify] $lid: hit the ${maxmin}-minute time bound after $attempt attempt(s), still failing. Stopping. Inspect $ldir — the last check output shows how close it got." >&2
       break
     fi
+    attempt=$(( attempt + 1 ))
   done
   printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || true
   # Report the SPEND even when it is $0. The default lane is a subscription lane, so a dollar figure is
@@ -5286,8 +5484,13 @@ $feedback"
   # cash figure still read $0.)
   local _spent=$(( $(date +%s) - _t0 ))
   printf '>>> [loop verify] used %s attempt(s) over %sm%ss on %s. Every attempt is a delegation and counts against that lane'"'"'s plan limits, even when it bills $0.\n' \
-    "$attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "${model:-the default lane}" >&2
+    "$last_attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "${model:-the default lane}" >&2
   echo "[loop verify] $lid final: $state  ·  attempts + check output in $ldir" >&2
+  # A loop that ran out of room is not a dead end: say so, with the exact command, while the state is fresh.
+  case "$state" in
+    blocked|max_turns|max_time)
+      echo "[loop verify] $lid is resumable — it keeps its task, check and last failure: ./outsourcerer.sh loop resume $lid --max $(( max + 3 ))" >&2 ;;
+  esac
   echo "$state"
   case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }

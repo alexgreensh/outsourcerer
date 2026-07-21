@@ -3,6 +3,51 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.15] - 2026-07-22
+
+A loop that stops is no longer a dead end, a check that hangs no longer defeats the bound, and
+"installed" stops being reported as "will answer".
+
+### Added
+- **Loops resume.** A loop that stopped without converging (`blocked`, `max_turns`, `max_time`) keeps
+  its task, its check and the exact failure it ended on, so `loop resume <id>` continues from that
+  attempt instead of restarting at one and paying twice for ground already covered. The stall guard is
+  restored across the restart, so a loop that was stuck repeating one failure cannot quietly spend a
+  second budget repeating it. The task, check, model and verb are fixed by the original run and refused
+  on the command line; only the attempt ceiling may be raised, and a loop that already succeeded is
+  never re-run. The final line of a stopped loop now names the resume command.
+- **Real liveness probes for the native lanes** (`OSRC_DOCTOR_PING=1`). A lane stays installed and
+  authenticated while its plan window is exhausted, its token has expired, or its backend has stopped
+  answering, and a binary that prints a version proves none of that. codex-native, claude-native and
+  devin now send a bounded one-token request and report `READY` or `INSTALLED BUT NOT ANSWERING` with
+  the reason (auth rejected, rate-limited, or no answer) and the remedy for that lane. The devin lane
+  previously had no real request at all: its readiness came from a login-file check. Without the flag,
+  those lanes now say they are installed and authed-looking rather than implying they are ready.
+  Bounded by `OSRC_DOCTOR_PING_TIMEOUT` (bare seconds; distinct from agy's suffixed probe timeout).
+
+### Fixed
+- **A hung acceptance check could run forever.** The loop's time bound is only consulted between
+  attempts, so a `--check` that never returned meant `--max-minutes` never fired and a bounded loop
+  ran unbounded. Worse, a check that eventually exited zero after blowing through its entire budget was
+  graded a success. The check now runs under a wall-clock cap (`OSRC_CHECK_TIMEOUT`, default 300s and
+  further clamped to the time left in `--max-minutes`); a timeout is recorded in the check artifact and
+  counted as a failed attempt, never as a pass.
+- **Echoing the progress protocol could forge a terminal marker.** Status markers are signed with a
+  per-run id so quoted examples are not mistaken for real status, but the injected protocol block
+  printed its own example lines carrying the live id. A delegate that quoted the block back emitted a
+  valid signed terminal by accident, and the supervisor believed it. The examples now use a literal
+  placeholder and the live id is disclosed once as prose, so no copyable line in the prompt is a valid
+  marker.
+- **`_timeout` killed only the direct child, not its descendants.** A surviving grandchild still
+  holding the inherited stdout kept a captured call blocked long after the bound fired, so the timeout
+  appeared to work while the caller hung: a bounded call could still block far past its limit. It
+  now signals the whole tree, which matters most on macOS, where no `timeout` binary exists and this
+  fallback is the only path.
+- **A background launch reported the wrong lane.** The launch line printed the default provider as
+  though it were the resolved one, so a job dispatched to codex-native by a model alias announced
+  itself as devin. Routing is decided after that line prints, so it now names the default as a default
+  and points at the record showing the model the job really ran.
+
 ## [0.4.14] - 2026-07-22
 
 Loops become steerable, and background work stops being able to run unobserved.
