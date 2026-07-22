@@ -32,7 +32,8 @@ _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escal
          test_selfcontained_hardening test_trusted_lanes test_parity_links \
          test_cc_devin_selfheal test_cloud_gate_coverage test_cost_disclosure \
          test_parser_parity test_resolved_lane test_limits_freshness test_gemini_lane test_watcher \
-         test_marker_forgery test_loop_resume test_lane_liveness"
+         test_marker_forgery test_loop_resume test_lane_liveness \
+         test_with_injection test_no_phantom_jobs"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say

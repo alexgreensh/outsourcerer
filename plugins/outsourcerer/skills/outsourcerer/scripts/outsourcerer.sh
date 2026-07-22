@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.15"
+OSRC_VERSION="0.4.16"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -125,7 +125,10 @@ esac
 # Offload backend: devin (default) | cc (Claude Code->OpenRouter) | codex (Codex->OpenRouter).
 PROVIDER="${OUTSOURCERER_PROVIDER:-devin}"
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
-OR_CHAIN_DEFAULT="tencent/hy3:free,z-ai/glm-5.2,deepseek/deepseek-v4-pro"
+# Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
+# model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
+# round trip for it. A chain is a fallback mechanism, not a place to keep retired ids.
+OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
@@ -655,7 +658,19 @@ _effective_lane() {
 _last_marker() {
   local f="$1" m=""
   if [ -n "${OSRC_MARK:-}" ]; then
-    m="$(grep -aoE "^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)#${OSRC_MARK}" "$f" 2>/dev/null | tail -1)"
+    # A SIGNED marker is matched anywhere in the file, deliberately NOT anchored to line start.
+    # codex-native and claude-native write out.log as a JSON EVENT STREAM, so a perfectly good
+    # terminal marker sits inside a JSON string field and never begins a line. Anchoring made every
+    # such run report `done?` (exited clean, no marker seen) even when the delegate finished properly
+    # and said so, so a finished run was routinely filed as unverified.
+    # This is only safe because the injected prompt contains NO live-signed marker: the protocol block
+    # shows the literal placeholder <run-id> and discloses the real id once as prose. If that ever
+    # regresses, this un-anchored match becomes forgeable by echo — test_marker_forgery.sh guards it.
+    # Anchored to a LINE start, a JSON escaped newline (\n inside a string field), or a quote that opens
+    # one. Fully un-anchoring would accept a marker mid-sentence ("I will print OSRC::DONE#... when
+    # finished"), which is prose, not status. This keeps the "must begin a line" rule while recognising
+    # that in a JSON stream the line begins inside the string.
+    m="$(grep -aoE "(^|\\\\n|\")[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)#${OSRC_MARK}" "$f" 2>/dev/null | tail -1)"
     [ -n "$m" ] && { printf 'OSRC::%s' "$(printf '%s' "${m##*OSRC::}" | cut -d'#' -f1)"; return 0; }
   fi
   m="$(grep -aoE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)([^#]|$)' "$f" 2>/dev/null | tail -1)"
@@ -838,6 +853,22 @@ wrap_prompt() {
 
 # ---- capability injection (--with): skills contents + named MCP servers ----
 # build_with_preamble -> echoes injected SKILL.md contents block (uses WITH_SPEC global), or nothing.
+# _resolve_skill_file <name> -> path to that skill's SKILL.md, searching every real home for one.
+# A skill can live in the user's own dir, inside an installed PLUGIN's versioned cache, or in the
+# parity dir we symlink for delegate lanes. Searching only the first silently drops every plugin skill.
+# Plugin caches are version-scoped, so the newest version wins rather than whichever glob sorts first.
+_resolve_skill_file() {
+  local name="$1" p
+  for p in "$HOME/.claude/skills/$name/SKILL.md" \
+           "$HOME/.config/devin/skills/$name/SKILL.md"; do
+    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  # Plugin caches: .../<plugin>/<version>/skills/<name>/SKILL.md — take the highest version present.
+  p="$(ls -1d "$HOME"/.claude/plugins/cache/*/*/*/skills/"$name"/SKILL.md 2>/dev/null | sort -V | tail -1)"
+  [ -n "$p" ] && [ -f "$p" ] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+
 build_with_preamble() {
   [ -n "${WITH_SPEC:-}" ] || return 0
   local tok val name f out=""
@@ -845,15 +876,38 @@ build_with_preamble() {
     case "$tok" in
       skills=*) val="${tok#skills=}"
         for name in $(printf '%s' "$val" | tr ',' ' '); do
-          f="$HOME/.claude/skills/$name/SKILL.md"
-          if [ -f "$f" ]; then
-            out="$out
+          # Resolve across every place a skill really lives, not just the user's own skills dir.
+          # Only ~/.claude/skills was searched before, so every PLUGIN skill (the whole ce-* family)
+          # silently resolved to "NOT FOUND" and the delegate ran without the capability the caller
+          # believed it had granted. A capability promise that fails quietly is worse than one that
+          # was never offered, because nobody goes looking.
+          f="$(_resolve_skill_file "$name")"
+          if [ -n "$f" ] && [ -f "$f" ]; then
+            # Bound the injection. A SKILL.md can be ~100KB; pasting several verbatim buys latency and
+            # spend on every single delegation, and on a lane that emits nothing until it finishes, a
+            # bloated prompt is indistinguishable from a hang. Truncate loudly and name the file so the
+            # delegate can read the rest itself.
+            local _sz _cap; _cap="${OSRC_WITH_MAX_BYTES:-20000}"
+            _sz=$(wc -c < "$f" 2>/dev/null || echo 0)
+            if [ "$_sz" -gt "$_cap" ]; then
+              printf '>>> [with] skill %s is %sb; injecting the first %sb only (raise with OSRC_WITH_MAX_BYTES). Full file: %s\n' \
+                "$name" "$_sz" "$_cap" "$f" >&2
+              out="$out
+=== INJECTED SKILL: $name (TRUNCATED to ${_cap}b of ${_sz}b; full file readable at $f) ===
+$(head -c "$_cap" "$f")
+=== END SKILL: $name ==="
+            else
+              out="$out
 === INJECTED SKILL: $name ===
 $(cat "$f")
 === END SKILL: $name ==="
+            fi
           else
+            # Say it on stderr too. Buried inside the prompt, a NOT FOUND note is read by the delegate
+            # and by nobody else, so the caller never learns the capability did not arrive.
+            printf '>>> [with] skill %s NOT FOUND (looked in ~/.claude/skills, the plugin caches, and the parity dir). The delegate is running WITHOUT it.\n' "$name" >&2
             out="$out
-(injected skill '$name' NOT FOUND at $f)"
+(injected skill '$name' NOT FOUND)"
           fi
         done ;;
     esac
@@ -2229,7 +2283,24 @@ cmd_bg() {
     --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
     *) break ;;
   esac; done
-  [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m hy3 \"...\")"
+  [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
+  # PARENT-SIDE VALIDATION. Everything below must fail HERE, before _bg_launch mints a job dir and
+  # prints an id. An invalid invocation is costly because the caller got an ID and believed work had started; the
+  # command only died later inside the detached child, so a session moved on from work that never ran.
+  #
+  # An unexpanded shell variable is a CALLER bug, never a task. A wrong quoting pattern can emit a whole run of these, each one a phantom job with an id.
+  case "${1:-}" in
+    '$'*) die "bg: refusing to launch — the first argument is the literal string '$1', which is an unexpanded shell variable, not a task or a verb. Nothing was started. Check the quoting in the command that produced this (a single-quoted \"\$var\" never expands)." ;;
+  esac
+  # -m before the verb is the single most common caller mistake after the above. It used to die with
+  # "unknown subcommand '-m'". It is unambiguous, so accept it by hoisting it after the verb instead of
+  # spending a whole round trip teaching the caller our argument order.
+  if [ "${1:-}" = "-m" ] || [ "${1:-}" = "--model" ]; then
+    [ -n "${2:-}" ] || die "bg: $1 needs a model name"
+    local _hm="$1" _hv="$2"; shift 2
+    if _is_verb "${1:-}"; then local _hverb="$1"; shift; set -- "$_hverb" "$_hm" "$_hv" "$@"
+    else set -- run "$_hm" "$_hv" "$@"; fi
+  fi
   # INTUITIVE DEFAULT (papercut fix): if no verb is given, assume `run`. `bg "task"`, `bg -m glm "task"`,
   # and `bg run "task"` all work now. Only a bare word that isn't a verb and isn't a flag triggers it.
   if ! _is_verb "${1:-}"; then
@@ -2239,6 +2310,20 @@ cmd_bg() {
     esac
     printf '>>> [bg] no verb given; defaulting to `run` (read-only). Use edit/yolo for mutating work.\n' >&2
   fi
+  # Last parent-side gate: there must be a real task. A flags-only invocation used to mint a job whose
+  # detached child then died on a usage error, which is the phantom-job pattern this block exists to
+  # stop. Skip the verb, skip flag/value pairs, and require something left over.
+  local _sawtask=0 _skipnext=0 _first=1 _a
+  for _a in "$@"; do
+    [ "$_first" = "1" ] && { _first=0; continue; }          # position 1 is the verb
+    [ "$_skipnext" = "1" ] && { _skipnext=0; continue; }    # this token is a flag's VALUE
+    case "$_a" in
+      -m|--model|--effort|--with|--provider) _skipnext=1 ;;
+      -*) ;;                                                 # a bare flag, keep looking
+      *) _sawtask=1; break ;;
+    esac
+  done
+  [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."

@@ -43,7 +43,7 @@ chmod +x "$SCRIPT_PATH"
 # ---------------------------------------------------------------------------------------------
 _new_job_id() { printf 'timeout-test'; }
 t0=$(date +%s)
-OSRC_CHECK_TIMEOUT=2 cmd_loop verify -m fake --max 1 --check 'sleep 60' 'exercise timeout' >/dev/null 2>&1
+OSRC_CHECK_TIMEOUT=2 cmd_loop verify -m fake --max 1 --check "sleep 60.$$" 'exercise timeout' >/dev/null 2>&1
 rc=$?
 el=$(( $(date +%s) - t0 ))
 d="$OSRC_HOME/loops/timeout-test"
@@ -61,10 +61,13 @@ grep -q 'timed out after 2s' "$d/last_fail" 2>/dev/null \
   && ok "last_fail names the timeout rather than an empty failure" \
   || bad "last_fail does not record the timeout"
 
-# The killer must not leave the check's children behind: a leaked `sleep 60` outliving the loop is how
-# a "bounded" loop quietly keeps consuming the machine.
+# The killer must not leave the check's children behind: a leaked child outliving the loop is how a
+# "bounded" loop quietly keeps consuming the machine.
+# Scope this to a marker unique to THIS test run. A global `pgrep -f 'sleep 60'` matches any unrelated
+# process on the machine — it was observed failing because another shell was running its own polling
+# loop — and a test that goes red for something it does not control teaches people to ignore it.
 sleep 1
-if pgrep -f 'sleep 60' >/dev/null 2>&1; then
+if pgrep -f "sleep 60.$$" >/dev/null 2>&1; then
   bad "the timed-out check left a child process running (kill did not reach the tree)"
 else
   ok "the timed-out check's process tree was actually reaped"

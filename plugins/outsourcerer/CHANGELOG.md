@@ -3,6 +3,37 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.16] - 2026-07-22
+
+Delegations that fail before they start, and completions that cannot be proven, were costing more than
+any model error. This release targets both.
+
+### Fixed
+- **A granted capability silently never arrived.** `--with skills=<name>` resolved only
+  `~/.claude/skills/<name>/SKILL.md`, so every skill that ships inside a PLUGIN resolved to "NOT FOUND",
+  and the note went into the prompt where only the delegate could read it. Whole sessions of delegations
+  ran without the capability the caller believed it had granted. Resolution now covers the user's skills
+  dir, the plugin caches (newest version wins, so an upgrade is not shadowed), and the parity dir, and a
+  missing skill is reported to the CALLER on stderr, stating the delegate is running without it.
+- **Skill injection is now bounded.** A `SKILL.md` can approach 100KB; pasting it verbatim into every
+  delegation buys latency and spend, and on a lane that prints nothing until it finishes, a bloated
+  prompt is indistinguishable from a hang. Capped at `OSRC_WITH_MAX_BYTES` (default 20000), truncated
+  visibly, with the full path so the delegate can read the rest itself.
+- **An invalid invocation minted a real job.** `bg` treated anything it did not recognise as a task,
+  created the job directory, detached, and printed an id — so the caller received an id, believed work
+  had started, and moved on, while the command died later inside the detached child. A caller whose quoting is wrong can produce a run of these from a literal, unexpanded variable. An
+  unexpanded shell variable, or an invocation with no task text, is now refused in the parent: no job
+  directory, no id, non-zero exit, and an error naming the actual mistake.
+- **`-m` before the verb is accepted instead of rejected.** It was the second most common caller mistake
+  and cost a whole round trip to a usage error. It is unambiguous, so it is now hoisted into place.
+- **`done?` was reported for work that finished and said so.** codex-native and claude-native write
+  their log as a JSON event stream, so a perfectly good terminal marker sits inside a string field and
+  never begins a line. The line-anchored reader missed it, so finished work was reported as unverified. A signed marker is now recognised at a line start, a JSON escaped newline, or a
+  string boundary. Mid-sentence prose is still refused, and the anti-forgery property is unchanged.
+- **A dead model led the default OpenRouter chain.** `tencent/hy3:free` returns HTTP 404
+  `model_not_found`, so every OpenRouter delegation opened by calling a model that no longer exists and
+  paid a wasted round trip for it. Removed from `OR_CHAIN_DEFAULT`.
+
 ## [0.4.15] - 2026-07-22
 
 A loop that stops is no longer a dead end, a check that hangs no longer defeats the bound, and
