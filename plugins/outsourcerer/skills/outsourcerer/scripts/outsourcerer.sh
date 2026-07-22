@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.16"
+OSRC_VERSION="0.4.17"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -3301,16 +3301,67 @@ delegate_cxnative() {
 # stderr from the REAL model in the run's `modelUsage`. This is the anti-lying guarantee: a native
 # subagent's model can silently fall back to your default (Opus) with NO signal, but the claude CLI
 # reports the model it actually used, so we can prove it and refuse to mislabel.
+# _rule_files_note -> name the always-on rule files an agent CLI will inject beyond the working dir.
+# Observed: the devin CLI marks ~/.claude/CLAUDE.md (and a Windsurf global_rules.md) as `always_on`
+# and prepends them to every session. Two consequences, and the second is the one people miss:
+#   1. those files leave the machine even though they sit outside the delegated scope, and
+#   2. they are INSTRUCTIONS, so a delegate briefed for one narrow task also inherits a global
+#      operating doctrine nobody chose for it.
+# This is diagnostics only: it changes nothing about the run, it just stops the banner above from
+# describing a smaller blast radius than the one that actually applies.
+_rule_files_note() {
+  local f found=""
+  for f in "$HOME/.claude/CLAUDE.md" "$HOME/.codeium/windsurf/memories/global_rules.md" "$HOME/.config/AGENTS.md"; do
+    [ -f "$f" ] && found="$found ${f#$HOME/}"
+  done
+  [ -n "$found" ] || return 0
+  printf '>>>   also sent   : your agent CLI may inject always-on rule files from $HOME regardless of the scope above:%s\n' "$found"
+  # Point at the CLI's own control rather than inventing a knob here. Outsourcerer does not perform this
+  # injection and cannot switch it off from the outside; claiming otherwise would be a promise it cannot
+  # keep. `devin rules list` shows exactly what is always-on for a given run.
+  printf '>>>                 they are instructions, so they also steer the delegate. Inspect with: devin rules list\n'
+}
+
 _cc_verify_model() {
-  local want="$1" src="$2" actual
-  actual="$(grep -oE '"modelUsage":[[:space:]]*\{[[:space:]]*"[^"]*"' "$src" 2>/dev/null | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
-  [ -n "$actual" ] || { printf '%s' "$src" | grep -q "modelUsage" && actual="$(printf '%s' "$src" | grep -oE '"modelUsage":[[:space:]]*\{[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"; }
-  [ -n "$actual" ] || return 0
-  if printf '%s' "$actual" | grep -qiF "$want"; then
+  local want="$1" src="$2" all actual foreign
+  # Read EVERY model the run billed, not just the first. A run can START on the requested model and
+  # SWITCH mid-flight (a fallback to the account default), which is invisible if you only look at the
+  # opening entry: the receipt says "verified" while later turns executed on something else entirely.
+  # modelUsage is keyed by model id, so a second key is a second model.
+  # modelUsage is an object keyed by model id, and each value is itself an object. Matching `[^}]*`
+  # stops at the FIRST inner closing brace, so only the opening model is ever seen — which is exactly
+  # how a mid-run switch stayed invisible. Take the whole segment from modelUsage onward and pull every
+  # key that opens an object; a model id always carries a version digit, which separates it from
+  # sibling keys like "cache_creation" or "usage".
+  local _seg
+  _seg="$(grep -aoE '"modelUsage"[[:space:]]*:[[:space:]]*\{.*' "$src" 2>/dev/null | head -1)"
+  [ -n "$_seg" ] || _seg="$(printf '%s' "$src" | grep -aoE '"modelUsage"[[:space:]]*:[[:space:]]*\{.*' | head -1)"
+  all="$(printf '%s' "$_seg" \
+        | grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*\{' \
+        | sed -E 's/^"([^"]*)".*/\1/' \
+        | grep -E '[0-9]' | sort -u | tr '\n' ' ')"
+  [ -n "$all" ] || return 0
+  actual="${all% }"
+  # Anything present that is NOT the requested model is drift, even if the requested one is there too.
+  foreign=""
+  local m
+  for m in $all; do printf '%s' "$m" | grep -qiF "$want" || foreign="$foreign $m"; done
+  if [ -z "$foreign" ]; then
     printf '>>> [verified] this run actually executed on %s (requested %s).\n' "$actual" "$want" >&2
+    return 0
+  fi
+  if printf '%s' "$all" | grep -qiF "$want"; then
+    # The dangerous case: it ran as asked, then drifted. A single-model check calls this "verified".
+    printf '>>> [MODEL DRIFT] you requested %s and the run STARTED there but ALSO executed on:%s\n' "$want" "$foreign" >&2
+    printf '>>>   A mid-run fallback is silent and billed to whatever it fell back to. Do NOT label this output as pure %s.\n' "$want" >&2
+    # Be exact about WHEN this is known: usage is only reported once the run ends, so this is a
+    # post-hoc receipt, not an interception. Promising an abort here would be a guarantee the tool
+    # cannot keep. The only place drift can be corrected while it is happening is a live session.
+    printf '>>>   Detected after the fact (usage is only reported at the end). To catch it live, run it as a `session` and correct with: session model %s\n' "$want" >&2
   else
     printf '>>> [WARNING] you requested %s but the run ACTUALLY executed on %s. Do NOT label the output as %s (that would be a fabricated model identity). Likely a silent model fallback, check that %s is available on your plan/region.\n' "$want" "$actual" "$want" "$want" >&2
   fi
+  return 3
 }
 
 delegate_ccnative() {
@@ -4084,6 +4135,11 @@ _cloud_disclose() {
   printf '>>> [outsourcerer] CLOUD DISCLOSURE (U1): delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
   printf '>>>   destination : a third-party API over the network — repo content LEAVES this machine.\n' >&2
   printf '>>>   readable    : this working dir (%s) + any --with files you passed.\n' "$cwd" >&2
+  # Some agent CLIs additionally pull "always-on" rule files from $HOME and prepend them to every
+  # session. That is outside the working dir, so the line above would otherwise be a promise this gate
+  # cannot keep. Naming it matters twice over: those files leave the machine, and because they are
+  # INSTRUCTIONS they also steer the delegate on a task that never asked for them.
+  _rule_files_note >&2
   printf '>>>   training    : %s\n' "$train" >&2
   # Report the COUNT of high-signal matches, never the matched secret text itself (printing the
   # values would leak the very credentials we are warning about to the terminal / any log capturing stderr).

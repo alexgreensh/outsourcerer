@@ -3,6 +3,27 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.17] - 2026-07-22
+
+Two guarantees that were not being kept: which model actually ran, and what actually leaves the machine.
+
+### Fixed
+- **A mid-run model fallback was reported as verified.** The native Claude lane proves which model ran
+  by reading the run's `modelUsage`, but it only read the FIRST entry. A run that started on the
+  requested model and switched part-way through — a silent fallback to the account default — still
+  printed a clean `[verified]` receipt naming the requested model. Since that receipt is what gets used
+  to label the output, the one case most worth catching was the one it could not see. Every model billed
+  by the run is now examined, and a run that drifted reports `[MODEL DRIFT]`, names what it fell back to,
+  and returns non-zero. Attribution covers the whole run rather than its opening turn.
+- **The cloud disclosure understated its own scope.** The banner listed the delegated working directory
+  and any `--with` files as what leaves the machine. Some agent CLIs additionally load "always-on" rule
+  files from `$HOME` and prepend them to every session, which is outside that scope, so the banner was
+  describing a smaller blast radius than the one that applied. Those files are now named, along with the
+  point that matters more than their contents: they are instructions, so a delegate briefed for one
+  narrow task also inherits whatever global direction they carry. The banner points at the CLI's own
+  command for listing them; Outsourcerer does not perform the injection and does not claim it can
+  disable it.
+
 ## [0.4.16] - 2026-07-22
 
 Delegations that fail before they start, and completions that cannot be proven, cost more than any
