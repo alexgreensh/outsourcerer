@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.18"
+OSRC_VERSION="0.4.19"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -121,6 +121,65 @@ case "$(uname -s 2>/dev/null)" in
   Darwin)               OSRC_PLATFORM="mac" ;;
   *)                    OSRC_PLATFORM="linux" ;;
 esac
+
+# ---- private-directory creation (portable)
+#
+# `mkdir -m 700 DIR` asks for the directory AND the mode in one call. On filesystems without Unix
+# permission bits (NTFS under Git Bash/MSYS) the directory is created but applying the mode fails, so
+# mkdir CREATES the thing and still exits non-zero. Any caller that reads that exit status concludes
+# the directory does not exist and takes a failure path, which is how a working system reports itself
+# as broken.
+#
+# Splitting the call fixes it without weakening anything: creation and permission-hardening are
+# separate concerns with different failure semantics. Creation must succeed or the caller has no
+# state to write. Hardening is best-effort by nature, because a filesystem that cannot express 700
+# cannot be made to. That degradation is deliberate and platform-imposed, not a relaxation of the
+# POSIX posture: on Mac and Linux the final mode is exactly what it was before.
+#
+# The creation runs under `umask 077` because splitting the call would otherwise open a window that
+# `-m` did not have. `mkdir -m 700` sets the mode in the same syscall that creates the directory;
+# plain `mkdir` creates it at 0777 & ~umask and only narrows on the following chmod. Under a
+# permissive umask on a shared machine (002 with a shared group) that window is group-writable, long
+# enough for another member to plant a file or a symlink inside a state or job directory before it
+# is hardened. Setting the umask in a subshell closes the window without reintroducing `-m`, and
+# leaves the caller's umask untouched.
+
+# _harden_dir <dir> -> always 0. Applies the private mode, and says so ONCE when it cannot.
+# "Best-effort" must not mean "silent everywhere". On Windows the failure is expected and explained
+# by the filesystem. On Mac or Linux the same failure means something real (a restrictive ACL, a
+# network mount, a directory owned by someone else) and the tool is about to write consent state,
+# the ledger, MCP config, and job output into a directory it could not restrict. The code cannot
+# tell those apart from the chmod alone, so it uses the platform to decide whether silence is honest.
+_harden_dir() {
+  chmod 700 "$1" 2>/dev/null && return 0
+  [ "${OSRC_PLATFORM:-}" = "windows" ] && return 0
+  [ -n "${_OSRC_HARDEN_WARNED:-}" ] && return 0
+  _OSRC_HARDEN_WARNED=1
+  printf '[outsourcerer] WARN: could not restrict permissions on %s (chmod 700 failed). State written there may be readable by other users on this machine.\n' "$1" >&2
+  return 0
+}
+
+# _mkdir_private <dir> -> 0 when <dir> exists and is as private as the filesystem allows.
+# Use for state directories, where "already exists" is success.
+_mkdir_private() {
+  ( umask 077; mkdir -p "$1" ) 2>/dev/null
+  _harden_dir "$1"
+  [ -d "$1" ]
+}
+
+# _mkdir_claim <dir> -> 0 only if THIS call created <dir>; 1 if it already existed.
+# Use where the directory doubles as a lock. Plain `mkdir` (no -p) is the atomic primitive: the
+# kernel guarantees exactly one of two racing callers creates it, which is what stops concurrent
+# launches from sharing one job directory. Do NOT relax this to a test-then-create, and do not fold
+# it into _mkdir_private, whose -p makes an existing directory a success.
+_mkdir_claim() {
+  # The subshell carries the umask, not the atomicity: `mkdir` with no -p is still the single
+  # syscall that either creates the directory or fails because someone else already did, and the
+  # subshell's exit status is that mkdir's.
+  ( umask 077; mkdir "$1" ) 2>/dev/null || return 1
+  _harden_dir "$1"
+  return 0
+}
 
 # Offload backend: devin (default) | cc (Claude Code->OpenRouter) | codex (Codex->OpenRouter).
 PROVIDER="${OUTSOURCERER_PROVIDER:-devin}"
@@ -176,7 +235,7 @@ _cloud_consent_ok() {
   [ -f "$OSRC_CONSENT_FILE" ]
 }
 _cloud_consent_persist() {
-  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  _mkdir_private "$OSRC_HOME" || true
   [ -L "$OSRC_CONSENT_FILE" ] && rm -f "$OSRC_CONSENT_FILE" 2>/dev/null   # never write through a planted symlink
   # Atomic write: tmp-then-mv, mirroring _mode_persist. A plain `printf > file` on a
   # shared host lets a concurrent reader see a half-written consent file (TOCTOU); the rename is atomic.
@@ -233,7 +292,7 @@ _mode_menu() {
 _mode_persist() {
   local mode="$1" cur tmp="$OSRC_HOME/.mode.$$"
   cur="$(_mode_read 2>/dev/null)" && [ "$cur" = "$mode" ] && return 0   # skip write if unchanged
-  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null || die "mode: cannot create state home $OSRC_HOME"
+  _mkdir_private "$OSRC_HOME" || die "mode: cannot create state home $OSRC_HOME"
   { umask 077; printf '%s\n' "$mode" > "$tmp"; } 2>/dev/null \
     || { rm -f "$tmp" 2>/dev/null; die "mode: cannot write $OSRC_MODE_FILE (state home not writable?)"; }
   mv -f "$tmp" "$OSRC_MODE_FILE" 2>/dev/null \
@@ -943,7 +1002,7 @@ build_mcp_flags_cc() {
   CC_MCP_FLAGS=()
   # Escape hatch: opt out of isolation, ride the full live MCP surface (interactive-style).
   [ "${OSRC_CLAUDE_USER_CONFIG:-0}" = "1" ] && return 0
-  mkdir -p -m 700 "$OSRC_HOME" 2>/dev/null || { echo "ERROR: isolation setup: cannot mkdir OSRC_HOME ($OSRC_HOME)" >&2; return 1; }
+  _mkdir_private "$OSRC_HOME" || { echo "ERROR: isolation setup: cannot mkdir OSRC_HOME ($OSRC_HOME)" >&2; return 1; }
   chmod 700 "$OSRC_HOME" 2>/dev/null || true
   local cfg="$OSRC_HOME/with-mcp-$$.json"
   # --with mcp=a,b -> extract ONLY the named servers (original opt-in path, unchanged).
@@ -1074,7 +1133,7 @@ record_ledger() {
   # bg jobs record the accurate (stream-json) entry from __runjob; skip the child's estimate then.
   [ "${OSRC_STREAM:-0}" = "1" ] && [ "${OSRC_LEDGER_FORCE:-0}" != "1" ] && return 0
   have jq || return 0
-  mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  _mkdir_private "$OSRC_HOME" || true
   # Restrict the ledger itself: the $OSRC_HOME dir is 700, but if OSRC_HOME is ever
   # pointed at a shared location the ledger (task hashes, costs, model names) should still be 600.
   [ -e "$OSRC_LEDGER" ] || : > "$OSRC_LEDGER" 2>/dev/null || true
@@ -1115,7 +1174,7 @@ record_ledger() {
 }
 
 refresh_models() {
-  mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  _mkdir_private "$OSRC_HOME" || true
   have curl || { echo "curl needed to refresh the model catalog" >&2; return 1; }
   local _tmp; _tmp="$(mktemp "$OSRC_HOME/.models.XXXXXX" 2>/dev/null || mktemp)"
   if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" "https://openrouter.ai/api/v1/models" -o "$_tmp" 2>/dev/null; then
@@ -1653,7 +1712,7 @@ _THRESH_CREATIVE=45
 # refresh_benchmarks: fetch benchmark data from OpenRouter API, cache locally.
 # Needs OPENROUTER_API_KEY. Graceful failure: returns 1, caller falls back to tier proxy.
 refresh_benchmarks() {
-  mkdir -p -m 700 "$OSRC_HOME"; chmod 700 "$OSRC_HOME" 2>/dev/null || true
+  _mkdir_private "$OSRC_HOME" || true
   have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
   have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
   # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
@@ -2048,10 +2107,12 @@ _devin_live_mtime() {
 _supervise() {
   local jd="$1" warn="$2" kill_after="$3" hard="$4"; shift 4
   [ "${1:-}" = "--" ] && shift
-  # Job dir private, out.log restricted. The mkdir -m 700 may be a no-op if the dir exists;
-  # chmod handles the existing case. 600 out.log because it can contain tool output.
-  mkdir -p -m 700 "$jd"; chmod 700 "$jd"
-  : > "$jd/out.log"; chmod 600 "$jd/out.log"
+  # Job dir private, out.log restricted. The job dir usually already exists (the launcher claimed
+  # it); _mkdir_private treats that as success and re-applies the mode either way. 600 out.log
+  # because it can contain tool output. The chmod is best-effort for the same reason as the
+  # directory mode: a filesystem without permission bits cannot be made to express one.
+  _mkdir_private "$jd"
+  : > "$jd/out.log"; chmod 600 "$jd/out.log" 2>/dev/null || true
   echo running > "$jd/status"
   ( exec "$@" </dev/null >> "$jd/out.log" 2>&1 ) &
   local pid=$! t0 last_size=0 last_change now size idle age _jcwd=""
@@ -2345,13 +2406,13 @@ _bg_launch() {
   # NOTE: the cloud preack is intentionally NOT called here -- _bg_launch runs inside `id=$(_bg_launch ...)`
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
-  mkdir -p -m 700 "$OSRC_JOBS" 2>/dev/null; chmod 700 "$OSRC_JOBS" 2>/dev/null
+  _mkdir_private "$OSRC_JOBS" || true
   local id jd tries=0
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
   # concurrent launches that mint the same id can never share one directory; regenerate on collision.
   while :; do
     id="$(_new_job_id)"; jd="$OSRC_JOBS/$id"
-    mkdir -m 700 "$jd" 2>/dev/null && break
+    _mkdir_claim "$jd" && break
     tries=$((tries+1))
     [ "$tries" -ge 8 ] && { echo "bg: could not allocate a unique job dir under $OSRC_JOBS" >&2; return 1; }
   done
@@ -2530,7 +2591,7 @@ run_job() {
   # path that writes last.txt DURING _supervise). Set a private umask up front so NONE of them are ever
   # briefly world-readable. No restore needed -- this is a dedicated short-lived process that exits after.
   umask 077
-  local jd="$OSRC_JOBS/$id"; mkdir -p -m 700 "$jd"; chmod 700 "$jd"
+  local jd="$OSRC_JOBS/$id"; _mkdir_private "$jd"
   local verb="$1"; shift
   # OPT-IN worktree isolation: run this job in its own disposable git worktree so parallel EDITING jobs
   # never collide. cd into it BEFORE meta.json is written so cwd records the worktree.
@@ -4744,7 +4805,7 @@ delegate_codex() {
   # Guarantee the capture's parent dir exists and is private BEFORE the tee, else on a fresh
   # $OSRC_HOME the very first delegation's `tee "$cap"` fails, the capture is empty, and a real transport
   # failure (e.g. 429) is misclassified as a task failure with no escalation.
-  local capdir="${OSRC_JOB_DIR:-$OSRC_HOME}"; mkdir -p -m 700 "$capdir" 2>/dev/null; chmod 700 "$capdir" 2>/dev/null || true
+  local capdir="${OSRC_JOB_DIR:-$OSRC_HOME}"; _mkdir_private "$capdir" || true
   # Refuse to invoke Codex unless the capture dir is verified writable. A silent
   # mkdir failure meant `tee "$cap"` produced an empty capture and a real transport failure (429) got
   # misclassified as a task failure with no escalation. Fail loud instead of running blind.
@@ -5224,7 +5285,11 @@ doctor() {
   # VERSION-DRIFT check: the manifest, THIS running script, and any OTHER installed copy
   # (a stale standalone skill dir) can silently disagree — a user then runs old code missing every
   # recent fix. Flag any mismatch loudly. Best-effort; silent when nothing to compare.
-  { local _dver _mf _sd _drift=""
+  # _dver is INITIALISED, not merely declared: it is assigned only when jq is present, but read
+  # unconditionally on the next line. Under `set -u` a bare `local _dver` leaves it unset, so on a
+  # machine without jq the read aborts doctor entirely — the one command whose job is to tell the
+  # user that jq is missing would die before it could say so.
+  { local _dver="" _mf _sd _drift=""
     _mf="$(dirname "$SCRIPT_PATH")/../../../.claude-plugin/plugin.json"
     [ -f "$_mf" ] && have jq && _dver="$(jq -r '.version // empty' "$_mf" 2>/dev/null)"
     [ -n "$_dver" ] && [ "$_dver" != "$OSRC_VERSION" ] && _drift="  version DRIFT: running script v$OSRC_VERSION but plugin.json says v$_dver — bump one to match."
@@ -5651,7 +5716,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
     printf 'resumed: %s\n' "$(date +%s)" >> "$ldir/meta" 2>/dev/null || true
   else
     lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
-    mkdir -p -m 700 "$ldir" 2>/dev/null || die "loop: cannot create loop dir under $OSRC_HOME/loops"
+    _mkdir_private "$ldir" || die "loop: cannot create loop dir under $OSRC_HOME/loops"
     { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nstarted: %s\n' \
         "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
   fi

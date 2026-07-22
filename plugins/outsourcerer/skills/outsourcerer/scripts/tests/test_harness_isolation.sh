@@ -150,6 +150,10 @@ EXTRACT="$TMPDIR_ISOL/funcs.sh"
 {
   awk '/^die\(\)/,/^}/' "$ENGINE"
   awk '/^have\(\)/,/^}/' "$ENGINE"
+  # build_mcp_flags_cc creates its state home through the shared private-directory helper, so the
+  # helper has to come across with it. Extracting a function without its dependencies produces a
+  # "command not found" that looks exactly like the behaviour under test failing.
+  awk '/^_mkdir_private\(\)/,/^}/' "$ENGINE"
   echo 'CC_MCP_FLAGS=()'
   # Extract build_mcp_flags_cc (from the comment block before the function through the closing brace)
   awk '/^# build_mcp_flags_cc/,/^}$/' "$ENGINE" | grep -v '^#'

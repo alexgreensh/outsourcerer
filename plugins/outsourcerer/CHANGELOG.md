@@ -3,6 +3,35 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.19] - 2026-07-22
+
+Windows gets working background delegation.
+
+### Added
+- **Background delegation on Windows and Git Bash (#5).** Job directories are now created in a way
+  that works on filesystems with no Unix permission bits, so `bg`, `fanout`, and auto-detached runs
+  work on Windows the way they do everywhere else. Creation and permission-hardening are separate
+  steps with different failure semantics: creation must succeed, hardening is applied wherever the
+  filesystem can express it. On Mac and Linux the resulting modes are unchanged. The job directory
+  is still claimed atomically, so concurrent fanout workers can never share one.
+- **`doctor` reports a missing jq instead of exiting on it (#5).** The version-drift check no longer
+  depends on a variable that only exists when jq is installed, so the command that exists to tell you
+  what is missing now runs on a machine that is missing it.
+- **State and job directories are private from the moment they are created.** Creation runs under a
+  restrictive umask, so there is no interval between a directory existing and its permissions being
+  applied. Previously the mode was set in the same call that created it; splitting those steps for
+  portability would otherwise have opened that interval on shared machines.
+- **A permission-hardening failure is reported rather than assumed benign.** Where the filesystem
+  cannot express the mode the degradation is expected and silent; anywhere else the tool now says so
+  once, because it is about to write consent state, the ledger, and job output into that directory.
+
+### Testing
+- New portability suite in the conformance gate. It simulates the no-permission-bits filesystem
+  rather than describing it, asserts the atomic claim still admits exactly one of ten concurrent
+  racers, and asserts directories are born private under a hostile umask. Each assertion carries a
+  control proving it can fail: the race harness is checked against a deliberately non-atomic claim,
+  and the jq probe against the reintroduced defect. 53 checks green.
+
 ## [0.4.18] - 2026-07-22
 
 Long-running delegation now runs to the finish.
