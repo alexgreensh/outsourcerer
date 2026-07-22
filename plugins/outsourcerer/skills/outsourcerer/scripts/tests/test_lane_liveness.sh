@@ -30,7 +30,7 @@ type -t _timeout >/dev/null || { echo "FAIL: _timeout not loaded"; exit 1; }
 # --- behavioural: a lane that hangs must be bounded and classified -------------------------------
 # Use a stub lane that spawns a GRANDCHILD, because that is the case that actually broke: killing only
 # the direct child leaves the grandchild holding the inherited stdout, and the `$( )` capture below
-# stays blocked long after the bound fired. so a "bounded" probe can still block far past its limit.
+# stays blocked long after the bound fired, so a "bounded" probe can still block far past its limit.
 # This must exercise the REAL _timeout from the script — a local copy of the logic would happily keep
 # passing while the shipped function stayed broken.
 dead_lane() { sh -c 'sleep 300' ; }

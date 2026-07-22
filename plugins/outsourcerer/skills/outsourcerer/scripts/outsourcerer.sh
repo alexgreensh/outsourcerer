@@ -2285,10 +2285,12 @@ cmd_bg() {
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
   # PARENT-SIDE VALIDATION. Everything below must fail HERE, before _bg_launch mints a job dir and
-  # prints an id. An invalid invocation is costly because the caller got an ID and believed work had started; the
-  # command only died later inside the detached child, so a session moved on from work that never ran.
+  # prints an id. An invalid invocation is costly precisely because the caller receives an id and
+  # believes work has started; the command only dies later inside the detached child, so the caller
+  # moves on from work that never ran.
   #
-  # An unexpanded shell variable is a CALLER bug, never a task. A wrong quoting pattern can emit a whole run of these, each one a phantom job with an id.
+  # An unexpanded shell variable is a CALLER bug, never a task: a wrong quoting pattern can emit a
+  # whole run of these, each one a phantom job with an id.
   case "${1:-}" in
     '$'*) die "bg: refusing to launch — the first argument is the literal string '$1', which is an unexpanded shell variable, not a task or a verb. Nothing was started. Check the quoting in the command that produced this (a single-quoted \"\$var\" never expands)." ;;
   esac
@@ -2324,6 +2326,23 @@ cmd_bg() {
     esac
   done
   [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
+  # Route preflight: ask the real routing code whether this is even dispatchable, before minting a job.
+  # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
+  # text lane) otherwise produced a job id, a "launched" line, and a failure only the job record ever
+  # saw. Output is discarded on success so the disclosure banner is not printed twice.
+  local _pfout _pfrc=0
+  # --provider must be passed EXPLICITLY: cmd_bg already consumed the flag into a shell variable that a
+  # child process does not inherit, so without this the preflight would silently check the DEFAULT lane
+  # and bless a combination the real run rejects.
+  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 "$SCRIPT_PATH" --provider "$PROVIDER" "$@" 2>&1)" || _pfrc=$?
+  # Fail OPEN on an inconclusive preflight, CLOSED only on a verdict we recognise. The preflight is an
+  # early-warning convenience: the real run still enforces every gate. Treating any non-zero exit as a
+  # refusal would turn an unrelated hiccup in the probe into a launch failure, which is a new failure
+  # mode of exactly the kind this whole change exists to remove.
+  if [ "$_pfrc" -ne 0 ] && printf '%s' "$_pfout" | grep -qaE 'backend-only|image-generation model|unknown provider'; then
+    printf '%s\n' "$_pfout" | grep -a 'ERROR:' | head -3 >&2
+    die "bg: refusing to launch -- this model/lane combination cannot run (see above). Nothing was started."
+  fi
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -4725,6 +4744,15 @@ route_delegate() {
       *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|claudex|local)" ;;
     esac
   fi
+
+  # PREFLIGHT EXIT. Lane resolution is complete and every incompatibility above has either died or
+  # auto-routed, but nothing has been dispatched yet. `bg` re-enters here with OSRC_PREFLIGHT=1 purely
+  # to find out whether this invocation is routable, so an unroutable one dies in the PARENT instead of
+  # minting a job dir, printing an id, and failing later inside a detached child that nobody reads.
+  # Reusing this code path rather than re-implementing the rules is deliberate: a second copy of the
+  # compatibility table would drift from this one, and then the preflight would bless what the real run
+  # rejects.
+  [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 0
 
   # Cloud gate wire-in: cloud disclosure + secret-scan gate. Local lanes were short-circuited above;
   # this is the SINGLE choke point after lane resolution, before delegate_* dispatch (no per-lane

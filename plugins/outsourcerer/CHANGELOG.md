@@ -5,8 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [S
 
 ## [0.4.16] - 2026-07-22
 
-Delegations that fail before they start, and completions that cannot be proven, were costing more than
-any model error. This release targets both.
+Delegations that fail before they start, and completions that cannot be proven, cost more than any
+model error. This release targets both.
 
 ### Fixed
 - **A granted capability silently never arrived.** `--with skills=<name>` resolved only
@@ -21,14 +21,16 @@ any model error. This release targets both.
   visibly, with the full path so the delegate can read the rest itself.
 - **An invalid invocation minted a real job.** `bg` treated anything it did not recognise as a task,
   created the job directory, detached, and printed an id — so the caller received an id, believed work
-  had started, and moved on, while the command died later inside the detached child. A caller whose quoting is wrong can produce a run of these from a literal, unexpanded variable. An
-  unexpanded shell variable, or an invocation with no task text, is now refused in the parent: no job
-  directory, no id, non-zero exit, and an error naming the actual mistake.
+  had started, and moved on, while the command died later inside the detached child. A caller whose
+  quoting is wrong can produce a run of these from a literal, unexpanded variable. An unexpanded shell
+  variable, or an invocation with no task text, is now refused in the parent: no job directory, no id,
+  non-zero exit, and an error naming the actual mistake.
 - **`-m` before the verb is accepted instead of rejected.** It was the second most common caller mistake
   and cost a whole round trip to a usage error. It is unambiguous, so it is now hoisted into place.
 - **`done?` was reported for work that finished and said so.** codex-native and claude-native write
   their log as a JSON event stream, so a perfectly good terminal marker sits inside a string field and
-  never begins a line. The line-anchored reader missed it, so finished work was reported as unverified. A signed marker is now recognised at a line start, a JSON escaped newline, or a
+  never begins a line. The line-anchored reader missed it, so work that had finished and said so was
+  still reported as unverified. A signed marker is now recognised at a line start, a JSON escaped newline, or a
   string boundary. Mid-sentence prose is still refused, and the anti-forgery property is unchanged.
 - **A dead model led the default OpenRouter chain.** `tencent/hy3:free` returns HTTP 404
   `model_not_found`, so every OpenRouter delegation opened by calling a model that no longer exists and
