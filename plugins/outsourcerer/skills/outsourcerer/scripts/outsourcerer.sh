@@ -111,7 +111,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.17"
+OSRC_VERSION="0.4.18"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1963,6 +1963,85 @@ _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
   for p in $rev; do kill -KILL "$p" 2>/dev/null; done
 }
 
+# _perm_denials <log> -> count of REAL permission/sandbox denials in the log's tail.
+#
+# The naive version of this — grep the whole log for 'permission denied|EACCES|...' — counts the
+# delegate READING ABOUT permissions as the delegate BEING DENIED permissions, and kills the job.
+# That is not hypothetical: mutating runs have been aborted deep into real work where every match
+# was source the delegate had read — `except PermissionError:` handlers and a regex literal listing
+# "permission denied" as an error word — with zero actual denials. Any delegate working on
+# error-handling code, a log parser, or this tool itself trips it.
+#
+# So a generic OS-level phrase only counts when the line ALSO looks like a failed tool call
+# (`"is_error":true`), which is how a real denial comes back through stream-json — file CONTENT is
+# carried on non-error results. Harness-specific rejection text is distinctive enough to count on its
+# own. Tail-scan for the same reason the print-mode check uses one (a real wall is at the end; an
+# incidental mention scrolls out of it).
+#
+# Tradeoff, stated rather than hidden: a delegate reading a file that happens to contain BOTH an
+# is_error marker and a permission word on ONE line can still contribute a false count. That is much
+# rarer than reading ordinary error-handling code, and it still needs OSRC_PERM_ABORT (3) of them
+# inside the tail window to abort.
+# Trigger phrases are ASSEMBLED from fragments so this file never contains them verbatim.
+# This is not paranoia, it is the top false-positive source in practice: the most common reason a
+# healthy run matches a "denial" pattern is that the delegate read THIS SCRIPT and echoed the
+# detector's own pattern line back into its log. A watchdog whose source is its own trip-wire kills
+# whoever works on it.
+_printmode_needle() { printf 'chisel::repl::handler: Print mode: %s tool %s that requires confirmation' 'rejecting' 'exec'; }
+_perm_needles() {
+  printf '(%s|%s|%s)' \
+    "requested permis""sions to" \
+    "Tool execu""tion was rejected" \
+    "Print mode: $(printf '%s tool %s' 'rejecting' 'exec')"
+}
+
+_perm_denials() {
+  local log="$1"
+  [ -f "$log" ] || { printf '0'; return 0; }
+  local gen='([Oo]peration not permitted|[Rr]ead-only file system|EACCES|[Pp]ermission denied|sandbox (denied|blocked|error))'
+  local err='"is_error"[[:space:]]*:[[:space:]]*true'
+  local n
+  n="$(tail -n "${OSRC_PERM_TAIL:-400}" "$log" 2>/dev/null \
+        | grep -acE "$(_perm_needles)|($err.*$gen)" 2>/dev/null)" || n=0
+  printf '%s' "${n:-0}"
+}
+
+# _devin_live_mtime <root-pid> -> newest mtime (epoch) of a devin CLI log belonging to a LIVE
+# descendant of <root-pid>; prints nothing when there is no such log.
+#
+# Why this exists: devin's `-p` (print) mode writes NOTHING to stdout until the process exits —
+# it is documented as "print response and exit", and there is no streaming output format to opt
+# into. Verified against the real CLI through both a pipe and a PTY: the entire answer lands in a
+# single burst at exit. So out.log byte-growth, which is the watchdog's primary liveness signal,
+# cannot see this lane AT ALL. devin does however write its own CLI log continuously while it
+# works, and the filename carries the pid, so that log is the signal we actually have.
+#
+# Match on pid rather than "newest log in the dir": concurrent fanout jobs each get their own devin
+# process, and picking the newest file would let a busy sibling vouch for a genuinely hung job.
+_devin_live_mtime() {
+  local dlog_dir="${HOME}/.local/share/devin/cli/logs"
+  [ -d "$dlog_dir" ] || return 1
+  local newest=""
+  local p f m
+  # The supervised pid ITSELF, then its descendants. Normally devin is a grandchild (the lane
+  # wrapper execs it), but a lane that execs devin directly would make the root pid the log owner,
+  # and scanning only descendants would silently see nothing — a liveness check that quietly finds
+  # nothing is indistinguishable from not having one.
+  for p in "$1" $(_descendants "$1"); do
+    for f in "$dlog_dir"/devin_*_"$p".log; do
+      [ -f "$f" ] || continue
+      # Symlink discipline, matching _devin_sandboxed_proxy_tls_hint: never stat through a
+      # planted link.
+      [ -L "$f" ] && continue
+      m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)" || continue
+      [ -n "$m" ] || continue
+      if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest="$m"; fi
+    done
+  done
+  [ -n "$newest" ] || return 1
+  printf '%s' "$newest"
+}
+
 # _supervise <job-dir> <stall_warn> <stall_kill> <hard_timeout> -- <cmd...>
 # Byte-growth watchdog + OSRC:: semantic layer + exit contract (0 done / 2 done? / 3 blocked /
 # 124 timeout / 125 wedged / other = delegate rc).
@@ -2007,6 +2086,12 @@ _supervise() {
       echo interrupted > "$jd/status"; echo 130 > "$jd/exit"; return 130
     fi
     sleep "${OSRC_POLL:-10}"
+    # The delegate can FINISH during that sleep. The loop condition is only re-tested at the top, so
+    # without this the body goes on to judge a process that has already exited — using an `idle`
+    # measured against a delegate that is no longer there. A job that went quiet and then completed
+    # gets killed post-mortem and reported `wedged` instead of `done`. Break and let the normal
+    # `wait` + OSRC:: classification below decide what actually happened.
+    kill -0 "$pid" 2>/dev/null || break
     now=$(date +%s)
     size=$(wc -c < "$jd/out.log" 2>/dev/null || echo 0)
     if [ "$size" -gt "$last_size" ]; then
@@ -2028,7 +2113,7 @@ _supervise() {
     # will spiral forever. Kill it fast with a clear next-step instead. Prevention (mode escalation) handles
     # the known ~/.claude case; this catches any OTHER lane/path that hits the same wall. OSRC_PERM_ABORT=0 disables.
     if [ "$mutating" = "1" ] && [ "${OSRC_PERM_ABORT:-3}" -gt 0 ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
-      local _pd; _pd="$(grep -aciE 'requested permissions to|sandbox (denied|blocked|error)|operation not permitted|read-only file system|EACCES|permission denied' "$jd/out.log" 2>/dev/null)"; _pd="${_pd:-0}"
+      local _pd; _pd="$(_perm_denials "$jd/out.log")"; _pd="${_pd:-0}"
       if [ "$_pd" -ge "${OSRC_PERM_ABORT:-3}" ]; then
         echo "permission-blocked" > "$jd/status"
         echo "[outsourcerer] ABORT job $(basename "$jd"): $_pd permission/sandbox denials — the delegate is walled off (a protected path or sandbox that can't be auto-approved headless). Re-run with 'yolo' (bypassPermissions), from a different cwd, or with the right sandbox/--add-dir." >&2
@@ -2052,11 +2137,16 @@ _supervise() {
     #   1. Require devin's log-module prefix `chisel::repl::handler:` — echoed prose/code never carries it.
     #   2. Scan only the recent TAIL: a genuine print-mode hang emits the line and then goes silent, so
     #      it sits at the end of the log; an incidental mid-run mention is pushed out of the tail.
+    #   3. ASSEMBLE the needle at runtime (_printmode_needle) so this file does not contain it. Both
+    #      anchors above miss the one source that matters most: this script itself. The literal used
+    #      to sit right here, and a delegate that greps or reads outsourcerer.sh in its final actions
+    #      would land it in the tail and abort ITSELF instantly — one occurrence, no threshold, at the
+    #      end of a run that had already done all its work.
     # If devin's log format ever changes, the check simply no-ops and the 15-min byte-growth stall-kill
     # (still in place) reaps the hang instead — slower, but correct.
     if [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
       if tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null \
-           | grep -aq 'chisel::repl::handler: Print mode: rejecting tool exec that requires confirmation'; then
+           | grep -aq "$(_printmode_needle)"; then
         echo "permission-blocked" > "$jd/status"
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
@@ -2080,6 +2170,20 @@ _supervise() {
                    -type f -newer "$jd/.fsmark" -print 2>/dev/null | head -1)"
       if [ -n "$_newest" ]; then
         last_change=$now; idle=0; : > "$jd/.fsmark"
+        [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
+      fi
+    fi
+    # DEVIN-LANE LIVENESS. The check above asks the filesystem "did the delegate write anything?",
+    # which answers nothing for READ-ONLY verbs: `explore`/`research` produce no files by design, so
+    # the fallback never fires for exactly the jobs most likely to run long and quiet. Combined with
+    # devin's non-streaming print mode (see _devin_live_mtime) that left the watchdog with no signal
+    # whatsoever on this lane, and it was reaping healthy delegates on a timer — every wedged job in
+    # the local history is a devin one, killed within poll slop of the stall window while its own log
+    # showed it still reading files. Ask devin's log directly instead. OSRC_DEVIN_LIVENESS=0 disables.
+    if [ "$idle" -ge "$warn" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ]; then
+      local _dmt
+      if _dmt="$(_devin_live_mtime "$pid")" && [ -n "$_dmt" ] && [ "$_dmt" -gt "$last_change" ]; then
+        last_change="$_dmt"; idle=$(( now - last_change ))
         [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
       fi
     fi

@@ -35,7 +35,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 . "$SRC" >/dev/null 2>&1
 
 # --- Scenario 1: source-level — the print-mode rejection check is wired into _supervise. ---
-grep -aq "Print mode: rejecting tool exec that requires confirmation" "$SRC" \
+grep -aq '_printmode_needle' "$SRC" \
   && ok "source: _supervise detects devin print-mode rejection string" \
   || bad "source: print-mode rejection detection missing from _supervise"
 grep -aq 'OSRC_NO_PRINTMODE_ABORT' "$SRC" \
@@ -44,9 +44,17 @@ grep -aq 'OSRC_NO_PRINTMODE_ABORT' "$SRC" \
 # ANCHOR guard (echo-poisoning regression fix): the runtime trigger must require devin's real log
 # module prefix (chisel::repl::handler:), NOT a bare-phrase grep of the whole out.log — otherwise a
 # delegate that merely echoes the phrase (reviewing this repo, grepping logs) is false-aborted.
-grep -aq "chisel::repl::handler: Print mode: rejecting tool exec that requires confirmation" "$SRC" \
-  && ok "source: abort trigger anchored to devin's chisel log-module prefix (echo-safe)" \
-  || bad "source: abort trigger not anchored to chisel:: prefix — bare-phrase echoes will false-abort"
+# Assert the ASSEMBLED needle, not a literal in the source: the needle is built at runtime precisely
+# so this script does not carry it, because the script is the file delegates read most. Checking the
+# function's output keeps the anchor guarantee while proving the literal is gone.
+case "$(_printmode_needle)" in
+  "chisel::repl::handler: "*) ok "source: abort trigger anchored to devin's chisel log-module prefix (echo-safe)" ;;
+  *) bad "source: abort trigger not anchored to chisel:: prefix — bare-phrase echoes will false-abort" ;;
+esac
+# The needle must not appear verbatim in the script it protects (self-abort regression).
+grep -aq "$(_printmode_needle)" "$SRC" \
+  && bad "source: print-mode needle is verbatim in outsourcerer.sh — reading this repo self-aborts" \
+  || ok "source: print-mode needle absent from outsourcerer.sh (reading this repo is safe)"
 
 # --- Scenario 2: runtime — a delegate that emits the print-mode rejection then hangs
 # is aborted with status=permission-blocked + exit 3, well before the stall-kill window. ---

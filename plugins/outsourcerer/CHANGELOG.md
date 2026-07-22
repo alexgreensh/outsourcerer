@@ -3,6 +3,39 @@
 All notable changes to the Outsourcerer plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [0.4.18] - 2026-07-22
+
+The watchdog was killing delegates that were working, including for reading this repo.
+
+### Fixed
+- **Every wedged job was a healthy one.** The devin lane's print mode writes nothing to stdout until
+  it exits — it is documented as "print response and exit", and no streaming output format exists to
+  opt into. The watchdog's liveness signal is stdout byte growth, so it was blind to that lane by
+  construction and reaped every devin job that outlived the stall window no matter how well it was
+  doing. The signature is unmistakable once looked for: wedges occur only on the non-streaming lane
+  and never on the lanes that stream, and start-to-kill times land on the configured stall window
+  rather than on anything the delegate did. A killed job's own log keeps being written right up to
+  the moment it is stopped, mid file-read, which is what a working delegate looks like. The
+  watchdog now reads devin's CLI log, which does grow during a run and is keyed by process id, and
+  credits liveness only up to that log's last write so a genuinely hung job is still reaped on
+  schedule. The filesystem fallback could not cover this: read-only verbs write no files by design,
+  which is exactly the long-and-quiet case. Disable with `OSRC_DEVIN_LIVENESS=0`.
+- **Two abort heuristics were matching their own source code.** The print-mode abort scanned for a
+  literal that lived in `outsourcerer.sh` itself, so a delegate that read or grepped this script
+  aborted itself on a single occurrence, no threshold, at whatever point it happened to read — often
+  near the end of a run that had already done its work. The permission abort had the same flaw and a
+  wider blast radius: it grepped the whole log for bare phrases like "permission denied", so a
+  delegate working on error-handling code, a log parser, or this tool counted the code it read as
+  denials it suffered. Long mutating runs were being killed deep into real edits with no actual
+  rejection anywhere in their logs. Trigger phrases are now
+  assembled at runtime so this script never contains them, generic phrases only count alongside a
+  real error result, and the scan is bounded to the recent tail. Both directions are tested: the
+  suite asserts the guards still fire on genuine devin and Claude rejections.
+- **A job that finished quietly was reported as wedged.** The supervisor's poll loop only re-tests
+  its condition at the top, so a delegate that completed during the sleep was still judged once —
+  against a process that no longer existed — and killed post-mortem with a `wedged` label instead of
+  being classified on its actual exit.
+
 ## [0.4.17] - 2026-07-22
 
 Two guarantees that were not being kept: which model actually ran, and what actually leaves the machine.
