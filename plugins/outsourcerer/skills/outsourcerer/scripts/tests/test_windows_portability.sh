@@ -161,7 +161,7 @@ case "$(uname -s 2>/dev/null)" in
     _mkdir_private "$TMP/posix-priv" >/dev/null 2>&1
     _mkdir_claim   "$TMP/posix-claim" >/dev/null 2>&1
     for d in posix-priv posix-claim; do
-      m="$(stat -f '%Lp' "$TMP/$d" 2>/dev/null || stat -c '%a' "$TMP/$d" 2>/dev/null)"
+      m="$(stat -c '%a' "$TMP/$d" 2>/dev/null || stat -f '%Lp' "$TMP/$d" 2>/dev/null)"
       [ "$m" = "700" ] && ok "POSIX mode still 700 for $d" || bad "POSIX mode for $d is $m, expected 700"
     done
     # The mode must be private from the MOMENT of creation, not merely by the time the helper
@@ -175,11 +175,11 @@ case "$(uname -s 2>/dev/null)" in
     CHSTUB="$TMP/chstub"; mkdir -p "$CHSTUB"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$CHSTUB/chmod"; chmod +x "$CHSTUB/chmod"
     ( PATH="$CHSTUB:$PATH"; umask 000; _mkdir_private "$TMP/posix-born" >/dev/null 2>&1 )
-    m="$(stat -f '%Lp' "$TMP/posix-born" 2>/dev/null || stat -c '%a' "$TMP/posix-born" 2>/dev/null)"
+    m="$(stat -c '%a' "$TMP/posix-born" 2>/dev/null || stat -f '%Lp' "$TMP/posix-born" 2>/dev/null)"
     [ "$m" = "700" ] && ok "directory is born private under a hostile umask (no creation window)" \
                      || bad "born with mode $m under umask 000, expected 700 (creation window open)"
     ( PATH="$CHSTUB:$PATH"; umask 000; _mkdir_claim "$TMP/claim-born" >/dev/null 2>&1 )
-    m="$(stat -f '%Lp' "$TMP/claim-born" 2>/dev/null || stat -c '%a' "$TMP/claim-born" 2>/dev/null)"
+    m="$(stat -c '%a' "$TMP/claim-born" 2>/dev/null || stat -f '%Lp' "$TMP/claim-born" 2>/dev/null)"
     [ "$m" = "700" ] && ok "claimed directory is born private under a hostile umask" \
                      || bad "claimed dir born with mode $m under umask 000, expected 700"
     ;;
