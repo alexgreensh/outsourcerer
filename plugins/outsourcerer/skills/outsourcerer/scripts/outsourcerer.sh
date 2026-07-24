@@ -2893,6 +2893,11 @@ _bg_launch() {
     [ "$tries" -ge 8 ] && { echo "bg: could not allocate a unique job dir under $OSRC_JOBS" >&2; return 1; }
   done
   chmod 700 "$jd" 2>/dev/null
+  # Keep job history bounded even when nobody remembers to run `gc`.  This is
+  # intentionally best-effort and capped: launch latency must never depend on
+  # sweeping a large historical directory.  STDERR preserves this function's
+  # stdout-only job-id contract for command substitutions.
+  cmd_gc --auto >&2 || true
   # If we cannot even record the initial status, the job never really started -- clean up and
   # fail loudly rather than emitting an id for a phantom job (which makes fanout's waiter hang forever).
   # Verify the supervisor binary is actually runnable BEFORE we claim the job
@@ -3509,22 +3514,50 @@ _job_json() {
 cmd_status() {
   _mark_watched "${1:-}"
   local id="${1:-}"
+  # A bare status used to call _status_line for every historical job.  Each line
+  # reconciles state and may inspect logs/PIDs, so a large jobs directory turns a
+  # harmless diagnostic command into a CPU-bound process.  Keep the control-plane
+  # view deliberately small and recent; targeted status remains unrestricted.
+  local max="${OSRC_STATUS_MAX:-40}" deadline="${OSRC_STATUS_DEADLINE:-15}"
+  case "$max" in ''|*[!0-9]*|0) max=40 ;; esac
+  case "$deadline" in ''|*[!0-9]*|0) deadline=15 ;; esac
   # `status --json [id]` / `status [id] --json` -> machine-readable control plane for orchestrators.
   if [ "$id" = "--json" ] || [ "${2:-}" = "--json" ]; then
     [ "$id" = "--json" ] && id="${2:-}"
     have jq || die "status --json needs jq"
     if [ -n "$id" ] && [ "$id" != "--json" ]; then _job_json "$id"; echo; return; fi
-    { printf '{"schema_version":"1","jobs":['; local first=1 d out
-      for d in "$OSRC_JOBS"/*/; do [ -d "$d" ] || continue
+    [ -d "$OSRC_JOBS" ] || { printf '{"schema_version":"1","jobs":[]}\n'; return 0; }
+    { printf '{"schema_version":"1","jobs":['; local first=1 d out t0 now shown=0 total
+      t0=$(date +%s); total=$(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | wc -l | tr -d ' ')
+      while IFS= read -r d; do
+        [ -d "$d" ] || continue
+        now=$(date +%s); [ $(( now - t0 )) -lt "$deadline" ] || break
         out="$(_job_json "$(basename "$d")")" && [ -n "$out" ] || continue
-        [ $first -eq 1 ] || printf ','; first=0; printf '%s' "$out"; done
-      printf ']}\n'; }
+        [ $first -eq 1 ] || printf ','; first=0; printf '%s' "$out"; shown=$((shown+1))
+      done < <(ls -1td "$OSRC_JOBS"/*/ 2>/dev/null | head -n "$max")
+      printf '],"omitted":%s}\n' "$(( total > shown ? total - shown : 0 ))"; }
     return
   fi
   if [ -n "$id" ]; then _status_line "$id"; return; fi
   [ -d "$OSRC_JOBS" ] || { echo "no jobs yet."; return 0; }
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' JOB STATE AGE MODEL ACTS "LAST"
-  local d; for d in "$OSRC_JOBS"/*/; do [ -d "$d" ] || continue; _status_line "$(basename "$d")"; done
+  local d t0 now shown=0 total
+  t0=$(date +%s)
+  total=$(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | wc -l | tr -d ' ')
+  while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    now=$(date +%s)
+    if [ $(( now - t0 )) -ge "$deadline" ]; then
+      printf '[outsourcerer] status deadline (%ss) reached after %s jobs; stopping.\n' "$deadline" "$shown" >&2
+      break
+    fi
+    _status_line "$(basename "$d")"
+    shown=$((shown+1))
+  done < <(ls -1td "$OSRC_JOBS"/*/ 2>/dev/null | head -n "$max")
+  if [ "$total" -gt "$shown" ]; then
+    printf '[outsourcerer] omitted %s older jobs (OSRC_STATUS_MAX=%s); use status <id> for a specific job.\n' \
+      "$(( total - shown ))" "$max"
+  fi
 }
 
 # _watch_digest <id> <interval-secs> <next-label> -> emit a periodic status digest to stdout.
@@ -3555,6 +3588,8 @@ cmd_watch() {
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-60}"
   local t0; t0=$(date +%s); local last="" lastprog=""
+  local deadline="${OSRC_STATUS_DEADLINE:-15}"
+  case "$deadline" in ''|*[!0-9]*|0) deadline=15 ;; esac
   # Periodic digest cadence: even with no state change, report into the running session so a long
   # silent-but-healthy run does not look like a hang. OSRC_WATCH_DIGEST_SECS tunes it (default 420s).
   local digest_secs="${OSRC_WATCH_DIGEST_SECS:-420}"
@@ -3563,6 +3598,11 @@ cmd_watch() {
   case "$digest_secs" in ''|*[!0-9]*|0) digest_secs=420 ;; esac
   local last_digest; last_digest=$t0
   while :; do
+    local elapsed; elapsed=$(( $(date +%s) - t0 ))
+    if [ "$elapsed" -ge "$deadline" ]; then
+      printf '[outsourcerer] watch deadline (%ss) reached for %s; stopping.\n' "$deadline" "$id" >&2
+      break
+    fi
     local st; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
     # HEARTBEAT: print on a status change OR when a NEW OSRC::PROGRESS marker lands.
     # Before this, watch was silent for the entire multi-minute 'running' phase even while the delegate
@@ -3583,8 +3623,14 @@ cmd_watch() {
       _watch_digest "$id" "$digest_secs" "continuing watch; next digest in ${digest_secs}s"
       last_digest=$_now
     fi
-    [ "$forsec" -gt 0 ] && [ $(( $(date +%s) - t0 )) -ge "$forsec" ] && break
-    sleep "${OSRC_POLL:-10}"
+    [ "$forsec" -gt 0 ] && [ "$elapsed" -ge "$forsec" ] && break
+    # A caller can configure a very large poll interval; never let that make
+    # the deadline advisory.  Wake no later than the remaining wall-clock time.
+    local poll="${OSRC_POLL:-10}" remain
+    case "$poll" in ''|*[!0-9]*|0) poll=10 ;; esac
+    remain=$(( deadline - elapsed ))
+    [ "$poll" -gt "$remain" ] && poll=$remain
+    sleep "$poll"
   done
 }
 
@@ -3948,24 +3994,33 @@ _crew_integrate() {
   echo "$crew_id"
 }
 
-# gc --older-than DAYS. Delete completed job dirs whose mtime is older than N days.
+# gc [--older-than DAYS]. Delete completed job dirs whose mtime is older than N days.
 # Only terminal states (done/done?/failed/blocked/timeout/wedged/canceled/permission-blocked)
 # are removed; running/interrupted jobs are left alone.
 cmd_gc() {
-  local days=""
-  if [ "${1:-}" = "--older-than" ]; then
+  local days="${OSRC_JOB_TTL_DAYS:-3}" auto=0 cap=0
+  if [ "${1:-}" = "--auto" ]; then
+    auto=1
+    cap="${OSRC_AUTO_GC_MAX:-20}"
+  elif [ "${1:-}" = "--older-than" ]; then
     [ -n "${2:-}" ] || die "gc --older-than needs a positive integer number of days"
     days="$2"
-  else
-    die "gc: usage: gc --older-than DAYS"
+  elif [ -n "${1:-}" ]; then
+    die "gc: usage: gc [--older-than DAYS]"
   fi
   case "$days" in ''|*[!0-9]*|'0'* ) die "gc --older-than needs a positive integer, got '$days'" ;; esac
+  case "$cap" in 0) ;; *[!0-9]*|'') cap=20 ;; esac
   [ -d "$OSRC_JOBS" ] || { echo "[outsourcerer] no jobs to gc."; return 0; }
-  local removed=0 skipped=0 d st mtime now cutoff
+  local removed=0 skipped=0 checked=0 d st mtime now cutoff
   now=$(date +%s)
   cutoff=$(( now - days * 86400 ))
   for d in "$OSRC_JOBS"/*/; do
     [ -d "$d" ] || continue
+    # Auto-GC examines only a small oldest-first sample.  Manual gc remains a
+    # complete maintenance operation; launch-time housekeeping never becomes a
+    # proportional shell walk as history grows.
+    if [ "$auto" = 1 ] && [ "$checked" -ge "$cap" ]; then break; fi
+    checked=$((checked+1))
     st="$(cat "$d/status" 2>/dev/null || echo running)"
     # Auto-heal: a running job whose PID is dead is reaped.
     if [ "$st" = "running" ]; then
@@ -3988,7 +4043,11 @@ cmd_gc() {
       skipped=$((skipped+1))
     fi
   done
-  echo "[outsourcerer] gc: removed $removed job dirs older than $days days; skipped $skipped (non-terminal or younger)"
+  if [ "$auto" = 1 ]; then
+    echo "[outsourcerer] auto-gc: removed $removed job dirs older than $days days; checked $checked (cap $cap)"
+  else
+    echo "[outsourcerer] gc: removed $removed job dirs older than $days days; skipped $skipped (non-terminal or younger)"
+  fi
 }
 
 # =============================================================================
