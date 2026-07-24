@@ -352,7 +352,9 @@ chmod +x "$SABOTAGED"
 
 # Verify the sabotage worked: the `if _autodetach_should` call is GONE from route_delegate.
 SAB_RD_START=$(grep -n '^route_delegate()' "$SABOTAGED" | head -1 | cut -d: -f1)
-SAB_HAS_AUTODETACH=$(awk -v s="$SAB_RD_START" 'NR>s && NR<s+200 && /if _autodetach_should/{print NR; exit}' "$SABOTAGED")
+# Scan the WHOLE route_delegate body (until the next top-level function definition), not a fixed
+# line window — the function grows over time and a magic +200 silently drifts off the branch.
+SAB_HAS_AUTODETACH=$(awk -v s="$SAB_RD_START" 'NR>s { if (/^[a-zA-Z_][a-zA-Z0-9_]*\(\) *\{/) exit; if (/if _autodetach_should/){print NR; exit} }' "$SABOTAGED")
 if [ -n "$SAB_HAS_AUTODETACH" ]; then
   no "negative control: sabotage failed (auto-detach branch still present in route_delegate)"
 else
@@ -402,7 +404,7 @@ fi
 
 # Also verify the REAL engine still HAS the branch (sabotage didn't affect the original).
 REAL_RD_START=$(grep -n '^route_delegate()' "$ENGINE" | head -1 | cut -d: -f1)
-REAL_HAS_AUTODETACH=$(awk -v s="$REAL_RD_START" 'NR>s && NR<s+200 && /if _autodetach_should/{print NR; exit}' "$ENGINE")
+REAL_HAS_AUTODETACH=$(awk -v s="$REAL_RD_START" 'NR>s { if (/^[a-zA-Z_][a-zA-Z0-9_]*\(\) *\{/) exit; if (/if _autodetach_should/){print NR; exit} }' "$ENGINE")
 if [ -n "$REAL_HAS_AUTODETACH" ]; then
   ok "negative control: real engine still has the auto-detach branch (unaffected by sabotage)"
 else
@@ -431,9 +433,12 @@ grep -q 'route_delegate "auto" "\$cmd"' "$ENGINE" \
   && ok "structural: main() passes verb (\$cmd) to route_delegate" \
   || no "structural: main() missing verb arg to route_delegate"
 
-grep -q '_autodetach_should ccor' "$ENGINE" \
-  && ok "structural: second_opinion has auto-detach branch" \
-  || no "structural: second_opinion missing auto-detach branch"
+# second_opinion is now any-lane (both opinions resolve their own lane/id/tier), so it consults
+# _autodetach_should per opinion lane ($_l1 / $_l2) instead of a hardcoded `ccor`.
+grep -q '_autodetach_should "\$_l1" "\$_id1" "\$_t1"' "$ENGINE" \
+  && grep -q '_autodetach_should "\$_l2" "\$_id2" "\$_t2"' "$ENGINE" \
+  && ok "structural: second_opinion has an auto-detach branch for both opinion lanes" \
+  || no "structural: second_opinion missing per-lane auto-detach branch"
 
 echo ""
 echo "RESULT: $pass passed, $fail failed"

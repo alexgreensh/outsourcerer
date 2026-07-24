@@ -90,16 +90,30 @@ chmod +x "$MOCK"
 s="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "true" --max 3 "task" 2>/dev/null)"; rc=$?
 [ "$s" = blocked ] && [ "$rc" -eq 3 ] && ok "detached delegate -> refuses to grade (blocked), never a false success" || bad "detached delegate produced a verdict anyway (state=$s rc=$rc)"
 
-# 10. --worktree must fail loudly rather than silently verify the wrong tree. The delegate runs in the
-#     foreground and the acceptance check runs in the caller's cwd, so nothing here establishes an
-#     isolated tree; accepting the flag would grade files the delegate never touched.
-e="$( ( cmd_loop verify --worktree --check "true" -m x "task" ) 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$e" | grep -qi 'not supported yet' \
-  && ok "--worktree is refused with a reason, not silently ignored" \
-  || bad "--worktree did not fail loudly (rc=$rc)"
-printf '%s' "$e" | grep -qi 'bg --worktree' \
-  && ok "--worktree refusal names the working alternative" \
-  || bad "--worktree refusal gives no alternative"
+# 10. --worktree must verify EXACTLY the tree it mutated, never the caller's cwd. The loop creates an
+#     isolated git worktree and cd's into it, so BOTH the foreground delegate and the acceptance check
+#     run inside that worktree. Grading the caller's cwd instead would score files the delegate never
+#     touched; refusing the flag outright would make isolated loops impossible. The guarantee under test
+#     is: the acceptance check's cwd is the worktree, not the repo root.
+if command -v git >/dev/null 2>&1; then
+  WTREPO="$TMP/wtrepo"; mkdir -p "$WTREPO"
+  ( cd "$WTREPO" && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init ) 2>/dev/null
+  # test #9 left an auto-detach-emitting mock in place; restore a clean one for this scenario.
+  printf '#!/usr/bin/env bash\necho run >> "$MOCK_CNT"\nexit 0\n' > "$MOCK"; chmod +x "$MOCK"
+  export MOCK_CNT="$TMP/c_wt"; : > "$MOCK_CNT"
+  CHECKCWD="$TMP/checkcwd"; : > "$CHECKCWD"
+  ( cd "$WTREPO" && MOCK_CNT="$MOCK_CNT" cmd_loop verify --worktree --check "pwd > '$CHECKCWD'; true" --max 1 "task" >/dev/null 2>&1 )
+  _cwd="$(cat "$CHECKCWD" 2>/dev/null)"
+  { [ -n "$_cwd" ] && [ "$_cwd" != "$WTREPO" ] && case "$_cwd" in *"/.outsourcerer/worktrees/"*) true ;; *) false ;; esac; } \
+    && ok "--worktree runs the acceptance check inside the isolated worktree (grades the tree it mutated)" \
+    || bad "--worktree did not verify the isolated worktree (check cwd was '$_cwd', repo root '$WTREPO')"
+  [ "$_cwd" != "$WTREPO" ] \
+    && ok "--worktree does not silently grade the caller's repo root" \
+    || bad "--worktree graded the caller's cwd, not the worktree"
+else
+  ok "--worktree worktree-cwd assertion skipped (git unavailable)"
+  ok "--worktree caller-cwd assertion skipped (git unavailable)"
+fi
 
 # 11. Knowing loops exist is not the same as knowing which one to run. Listing the shapes without
 #     selection criteria pushes the hardest decision back onto the user at the exact moment they have

@@ -6429,11 +6429,26 @@ route_delegate() {
       or)  case "$PROVIDER" in
              cc)    disp=ccor ;;
              codex) disp=codexor ;;
-             *)     # An OpenRouter alias always follows its declared lane. Do not silently swap
-                    # `glm`/`deepseek` to Devin based on a transient availability guess: that made
-                    # the same alias order-dependent and printed a fabricated quota assertion.
-                    _or_autoroute_note="-m $MODEL resolves to OpenRouter model $RESOLVED_ID; active provider ($PROVIDER) does not transport OpenRouter models"
-                    PROVIDER=cc; disp=ccor ;;
+             *)     # availability-aware routing: default provider (devin) + an OpenRouter model that
+                    # Devin ALSO serves -> use the Devin lane instead of dying/forcing OpenRouter.
+                    # This is deterministic (keyed on _devin_model_for, not a live guess) and matches
+                    # the documented default: `glm`/`deepseek` are dual-lane and ride Devin by default.
+                    # It fixes `-m glm` hard-failing when the OpenRouter key is out of monthly quota.
+                    local _dvm; _dvm="$(_devin_model_for "$MODEL")"
+                    if [ -n "$_dvm" ]; then
+                      printf '>>> [route] -m %s is served by BOTH OpenRouter and Devin; using the Devin lane (%s) on the default provider. Force OpenRouter with --provider cc|codex.\n' "$MODEL" "$_dvm" >&2
+                      # Rewrite the model token in ORIG so the Devin lane runs the Devin id, not the OR alias.
+                      local _i; for _i in "${!ORIG[@]}"; do
+                        case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac
+                      done
+                      RESOLVED_ID="$_dvm"; disp=devin
+                    else
+                      # AUTO-ROUTE: an OpenRouter-only model the active provider cannot serve should
+                      # FOLLOW its lane automatically -- the SKILL promise is "the alias picks the lane;
+                      # no --provider needed." Route to the cc transport (Claude Code -> OpenRouter) and say so.
+                      _or_autoroute_note="-m $MODEL is an OpenRouter-only model; active provider ($PROVIDER) cannot serve it"
+                      PROVIDER=cc; disp=ccor
+                    fi ;;
            esac ;;
     esac
   else
@@ -7623,7 +7638,11 @@ $feedback"
       printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
       echo "[loop verify] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
     else
-      printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
+      # Compute the failure summary first: grep legitimately finds nothing when the check passed
+      # (empty/clean output), and under `set -o pipefail` that no-match exit-1 would otherwise trip
+      # the write's `|| die`. Only an actual write failure should be fatal.
+      local _lastfail; _lastfail="$(printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1)"
+      printf '%s\n' "$_lastfail" > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
     fi
     # Persist the feedback so a later `loop resume` can pick up exactly where this one stopped.
     printf '%s' "$cout" > "$ldir/feedback" 2>/dev/null || die "loop verify: cannot write feedback"
