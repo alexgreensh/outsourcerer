@@ -29,7 +29,7 @@ _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escal
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default \
          test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
          test_loops test_job_lifecycle test_output_truncation test_lane_accounting \
-         test_selfcontained_hardening test_trusted_lanes test_parity_links \
+         test_selfcontained_hardening test_trusted_lanes test_parity_links test_parity_hermes \
          test_cc_devin_selfheal test_cloud_gate_coverage test_cost_disclosure \
          test_parser_parity test_resolved_lane test_limits_freshness test_gemini_lane test_watcher \
          test_marker_forgery test_loop_resume test_lane_liveness \
