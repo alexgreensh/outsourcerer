@@ -37,3 +37,8 @@ __pycache__/
 plugins/outsourcerer/skills/outsourcerer/scripts/probe_*.sh
 plugins/outsourcerer/skills/outsourcerer/scripts/proof_*.sh
 plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
+
+# Atomic skill-link temp from _osrc_link_skill_into (parity-hermes / parity mirrors). Normally
+# lands in ~/.hermes or the Antigravity skills dir and is consumed by an mv; a run interrupted
+# between ln and mv can leave one behind. Never a tracked artifact.
+.outsourcerer.link.*

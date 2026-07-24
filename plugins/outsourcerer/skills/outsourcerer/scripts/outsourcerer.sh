@@ -81,8 +81,10 @@
 #   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
 #                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
-# Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor teach
-# that host agent to drive outsourcerer, so its users reach Devin/OpenRouter/Claude/local too.
+# Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
+# hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
+# drive outsourcerer, so its users reach Devin/OpenRouter/Claude/local too. `parity` (Devin) also
+# mirrors this skill into Antigravity and Hermes when their skills dirs exist.
 #
 # WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
 # outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
@@ -121,7 +123,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.21"
+OSRC_VERSION="0.4.22"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -2920,6 +2922,29 @@ _osrc_normalize_depth() {
   return 0
 }
 
+# _osrc_normalize_max_depth -> echo the normalized base-10 OUTSOURCERER_MAX_DEPTH, or return 1
+# (malformed). The depth guard normalizes OUTSOURCERER_DEPTH but used to compare it against the
+# RAW maximum: `[ 1 -ge bogus ]` errors ("integer expression expected"), returns false, and the
+# guard falls OPEN -- a delegate could escape the recursion limit merely by poisoning the maximum
+# (OUTSOURCERER_MAX_DEPTH=bogus), since it controls its own environment. Fail CLOSED instead: an
+# unparseable maximum refuses the launch, exactly as an unparseable depth does. Unset/empty keeps
+# the default of 1. Same base-10 leading-zero handling as the depth normalizer so '010' is decimal.
+_osrc_normalize_max_depth() {
+  local _v="${OUTSOURCERER_MAX_DEPTH:-}"
+  [ -z "$_v" ] && { printf '1'; return 0; }
+  case "$_v" in
+    +*[!0-9]*) return 1 ;;
+    +*)        _v="${_v#+}" ;;
+  esac
+  [ -z "$_v" ] && return 1
+  case "$_v" in *[!0-9]*) return 1 ;; esac
+  while [ "${#_v}" -gt 1 ] && [ "${_v#[0]}" != "$_v" ]; do
+    _v="${_v#0}"
+  done
+  printf '%s' "$_v"
+  return 0
+}
+
 # bg [--provider X already parsed] [--worktree] <verb> [flags] "task" -> detach a supervised job, print id.
 cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
@@ -2991,8 +3016,12 @@ cmd_bg() {
   if ! _osrc_normalize_depth; then
     die "bg: refusing to launch -- OUTSOURCERER_DEPTH is unparseable ('$_depth_raw'). An unparseable depth cannot be trusted (a delegate controls its own environment), so the guard refuses rather than fail-open. Set OUTSOURCERER_DEPTH to a non-negative integer or unset it. Nothing was started."
   fi
-  if [ "$OUTSOURCERER_DEPTH" -ge "${OUTSOURCERER_MAX_DEPTH:-1}" ]; then
-    die "bg: refusing to launch -- recursion limit reached (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH >= OUTSOURCERER_MAX_DEPTH=${OUTSOURCERER_MAX_DEPTH:-1}). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N. Nothing was started."
+  local _max_raw="${OUTSOURCERER_MAX_DEPTH:-}" _max
+  if ! _max="$(_osrc_normalize_max_depth)"; then
+    die "bg: refusing to launch -- OUTSOURCERER_MAX_DEPTH is unparseable ('$_max_raw'). A malformed maximum must not let a delegate slip past the recursion guard (a raw comparison would error and fall open), so the guard refuses. Set OUTSOURCERER_MAX_DEPTH to a non-negative integer or unset it. Nothing was started."
+  fi
+  if [ "$OUTSOURCERER_DEPTH" -ge "$_max" ]; then
+    die "bg: refusing to launch -- recursion limit reached (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH >= OUTSOURCERER_MAX_DEPTH=$_max). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N. Nothing was started."
   fi
   # Route preflight: ask the real routing code whether this is even dispatchable, before minting a job.
   # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
@@ -4762,32 +4791,42 @@ delegate_hermes() {
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="${MODEL:-}"
   # Fail FAST on a missing CLI -- before the cloud gate and before auto-detach would bury this
-  # error inside a background job. The headless invocation contract is not yet wired, so even with
-  # the CLI present the lane cannot dispatch; route_delegate checks that condition before this
-  # function is reached, and the die below is a defensive fallback keeping the contract honest if
-  # delegate_hermes is ever called directly.
+  # error inside a background job the caller has to dig out.
   have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure."
 
-  # The headless invocation contract (headless/print flag, model flag, approval/sandbox flags per
-  # tier, output format, exit codes, auth-failure signature) must be probed from the real CLI before
-  # any flag mapping below is filled in. Do NOT guess flags. The block below documents the INTENDED
-  # tier-to-posture mapping as comments only; it is not live until the probe resolves each flag.
-  # When the CLI is available, run `hermes --help` and one smoke run to pin down:
-  #   - the non-interactive/headless flag (e.g. -p/--print, --headless, or equivalent)
-  #   - the model flag (e.g. -m/--model, or equivalent)
-  #   - approval/sandbox flags per tier (auto -> most restrictive; accept-edits/autonomous per
-  #     discovered flags; dangerous = full auto-approve only if offered, else die with a pointer)
-  #   - output format (text/json/stream-json)
-  #   - exit codes (task-failure vs transport-failure)
-  #   - auth-failure signature (for doctor ping triage)
-  # Intended tier postures (commented intent, NOT live flags):
-  #   auto         -> READ-ONLY (most restrictive available posture)
-  #   accept-edits -> MUTATING (per discovered approval flags)
-  #   autonomous   -> MUTATING (per discovered sandbox/approval flags; refuse if no safe posture)
-  #   dangerous    -> DANGER (full auto-approve ONLY if the CLI offers it; else die with a pointer)
-  # Until the probe resolves, the vehicle cannot invoke the CLI. This stub dies with a clear message
-  # so a user who installs hermes sees an actionable error, not a silent no-op.
-  die "hermes lane: the headless invocation contract is not yet wired. The hermes CLI is on PATH but the flag map (headless mode, model flag, tier postures) has not been probed. Run 'hermes --help' to inspect the available flags, then wire the flag mapping in this script."
+  # Scripted one-shot entry point: `hermes -z "<prompt>"` -- "single prompt in, final response text
+  # out, nothing else on stdout or stderr" (Nous CLI reference). That is exactly the delegation
+  # contract, so stdout is the answer and a non-zero exit is the failure signal.
+  #
+  # Approval posture. Hermes' one-shot mode exposes a BINARY approval model, not the graded levels
+  # droid/cursor offer: the default non-interactive posture refuses a dangerous command (surfacing
+  # an error rather than prompting), and `--yolo` bypasses all approval. There is no documented
+  # middle rung, so a mutating verb maps to --yolo -- the same shape as the cursor lane, where
+  # accept-edits already means --force (apply edits and commands without per-step prompts). This is
+  # disclosed in the posture banner so the trade is visible, never silent.
+  local yflag=() posture
+  case "$tier" in
+    auto)         yflag=();         posture="SAFE (hermes default non-interactive posture: dangerous commands are refused, not run)" ;;
+    accept-edits) yflag=(--yolo);   posture="MUTATING (--yolo: hermes one-shot has no graded approval, so edits+commands are auto-approved, like cursor --force)" ;;
+    autonomous)   yflag=(--yolo);   posture="MUTATING (--yolo: auto-approves edits+commands; hermes exposes no separate sandbox posture for one-shot)" ;;
+    dangerous)    yflag=(--yolo);   posture="DANGER (--yolo: all approvals bypassed)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  # Engine lane: -m passes through verbatim (Hermes owns its model/provider catalog; a
+  # "provider/model" string is accepted by --model directly, per the Nous docs).
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(--model "$id"); else id="(hermes default/configured)"; fi
+  [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: hermes one-shot has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
+  # Isolated git worktree when the caller asked for one (`-w` is a hermes global flag).
+  local wflag=(); [ "${OSRC_WORKTREE:-0}" = "1" ] && wflag=(-w)
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-hermes}" "$task" "$ttier")"
+  _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture, bills the provider keys configured in your ~/.hermes setup"
+  local rc=0
+  hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
+  record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] ran on YOUR hermes setup (the provider + keys in ~/.hermes), no Claude tokens spent; real cost is read from ~/.hermes/state.db when available.\n' >&2
+  return "$rc"
 }
 
 cmd_image_codex() {
@@ -5013,6 +5052,87 @@ with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>) as its final line.
 <!-- /OUTSOURCERER:INSOURCE -->
 EOF
   echo "parity-codex: appended insource block to $agents"
+}
+
+# _osrc_realpath <path> -> physical path with all symlinks resolved (portable: macOS ships neither
+# `readlink -f` nor `realpath` by default, so follow the chain by hand). This matters because
+# SCRIPT_PATH may be a PATH launcher symlink (e.g. ~/.local/bin/outsourcerer); walking `..` from the
+# UNresolved path would miss the real skill dir and silently mislink.
+_osrc_realpath() {
+  local p="$1" t i=0
+  [ -n "$p" ] || return 1
+  while [ -L "$p" ] && [ "$i" -lt 40 ]; do
+    t="$(readlink "$p" 2>/dev/null)" || break
+    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    i=$((i+1))
+  done
+  local d b
+  d="$(cd "$(dirname "$p")" 2>/dev/null && pwd -P)" || return 1
+  b="$(basename "$p")"
+  printf '%s/%s' "$d" "$b"
+}
+
+# _osrc_skill_root -> the outsourcerer skill dir that contains SKILL.md, or empty+rc1. Tries, in
+# order: (1) THIS script's PHYSICAL location (<root>/scripts/outsourcerer.sh -> <root>), which is
+# correct for both a packaged-plugin install AND a ~/.claude/skills install even when invoked through
+# a launcher symlink; (2) the canonical Claude skills path; (3) the plugin marketplace/cache. Used by
+# every SKILL.md-host mirror (Hermes, Antigravity) so none of them hardcode a single install layout.
+_osrc_skill_root() {
+  local real cand g
+  real="$(_osrc_realpath "$SCRIPT_PATH" 2>/dev/null)"
+  if [ -n "$real" ]; then
+    cand="$(cd "$(dirname "$real")/.." 2>/dev/null && pwd -P)"
+    [ -n "$cand" ] && [ -f "$cand/SKILL.md" ] && { printf '%s' "$cand"; return 0; }
+  fi
+  cand="$HOME/.claude/skills/outsourcerer"
+  [ -f "$cand/SKILL.md" ] && { printf '%s' "$cand"; return 0; }
+  for g in "$HOME"/.claude/plugins/marketplaces/*/plugins/outsourcerer/skills/outsourcerer \
+           "$HOME"/.claude/plugins/cache/*/outsourcerer/*/skills/outsourcerer; do
+    [ -f "$g/SKILL.md" ] && { printf '%s' "$g"; return 0; }
+  done
+  return 1
+}
+
+# _osrc_link_skill_into <dst_skills_dir> <skill_root> -> install outsourcerer as a SKILL.md skill via
+# an idempotent, collision-safe symlink. Return codes: 0 linked; 2 could not create dir/link;
+# 3 a REAL (non-symlink) file/dir already occupies the destination. rc3 is the important one:
+# `ln -sfn TARGET dst` when `dst` is a real directory does NOT replace it -- it creates a nested link
+# `dst/<basename TARGET>` INSIDE it and returns success, so the bridge would silently no-op while
+# reporting "linked". We refuse that case loudly instead. Replacement of a symlink (incl. a dangling
+# one, from a moved/upgraded skill) is atomic via a temp link + mv, so a crash can't leave a half-state.
+_osrc_link_skill_into() {
+  local dstdir="$1" src="$2" link="$1/outsourcerer"
+  mkdir -p "$dstdir" 2>/dev/null || return 2
+  if [ -e "$link" ] && [ ! -L "$link" ]; then return 3; fi   # real file/dir: never nest or clobber
+  local tmp="$dstdir/.outsourcerer.link.$$"
+  ln -sfn "$src" "$tmp" 2>/dev/null || return 2
+  mv -f "$tmp" "$link" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 2; }
+  return 0
+}
+
+# reverse bridge INTO Hermes. Hermes (NousResearch) discovers SKILL.md-format skills from
+# $HERMES_HOME/skills/*/SKILL.md -- the SAME format Claude/Devin/Antigravity use, NOT an AGENTS.md
+# file. So the correct bridge is a SKILL SYMLINK (like the Devin/Antigravity mirror in parity()),
+# not an AGENTS.md append (codex/droid/cursor). Once outsourcerer is a skill inside Hermes, a Hermes
+# session can call outsourcerer.sh to delegate INTO Claude (run -m fable, verified), Codex, GLM, or
+# any other lane -- closing the second direction so Hermes works BOTH ways.
+parity_hermes() {
+  have hermes || printf '>>> note: hermes CLI not on PATH yet; linking the skill anyway so it works the moment hermes is installed.\n' >&2
+  # INSTALLER semantics, deliberately NOT _hermes_home(): honor $HERMES_HOME even when it does not
+  # exist yet, because the whole point is to install into the user's CONFIGURED home before Hermes
+  # has created it. _hermes_home() is a READER (it falls back to ~/.hermes for an absent dir so cost
+  # lookups read where data actually is); using it here would install into the wrong place. They
+  # converge the moment Hermes runs once. Do not "unify" these — the difference is intentional.
+  local hhome="${HERMES_HOME:-$HOME/.hermes}"
+  local hdst="$hhome/skills"
+  local self; self="$(_osrc_skill_root)" || die "parity-hermes: cannot locate the outsourcerer skill (no SKILL.md found in the running install, ~/.claude/skills, or the plugin cache). Install outsourcerer first, then re-run."
+  _osrc_link_skill_into "$hdst" "$self"; local rc=$?
+  case "$rc" in
+    0) echo "parity-hermes: linked outsourcerer -> $hdst/outsourcerer"
+       echo "  Hermes discovers SKILL.md skills there; a Hermes session can now delegate INTO Claude (run -m fable), Codex, or GLM via outsourcerer.sh -- both directions now covered." ;;
+    3) die "parity-hermes: $hdst/outsourcerer already exists as a real file/directory (not a symlink). Refusing to nest a link inside it or clobber it. Remove or rename it, then re-run:  rm -rf '$hdst/outsourcerer' && $SCRIPT_PATH parity-hermes" ;;
+    *) die "parity-hermes: could not create the symlink in $hdst (permission?). Manual: ln -sfn '$self' '$hdst/outsourcerer'" ;;
+  esac
 }
 
 # delegate_cc <perm-tier> [-m MODEL] "<task>" , Claude Code -> OpenRouter (inherits your CC skills/MCP)
@@ -6014,8 +6134,15 @@ route_delegate() {
   if ! _osrc_normalize_depth; then
     die "recursion guard: OUTSOURCERER_DEPTH is unparseable ('$_depth_raw'). An unparseable depth cannot be trusted (a delegate controls its own environment), so the guard refuses rather than fail-open. Set OUTSOURCERER_DEPTH to a non-negative integer or unset it."
   fi
-  if [ "$OUTSOURCERER_DEPTH" -ge "${OUTSOURCERER_MAX_DEPTH:-1}" ]; then
-    die "recursion guard: already delegating (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N."
+  # Normalize the MAXIMUM too, and fail closed on a malformed one. Comparing against the raw
+  # maximum let a delegate escape the guard by poisoning OUTSOURCERER_MAX_DEPTH (a non-integer
+  # makes `[ n -ge bogus ]` error and return false -> fail-open). Same reasoning as the depth.
+  local _max_raw="${OUTSOURCERER_MAX_DEPTH:-}" _max
+  if ! _max="$(_osrc_normalize_max_depth)"; then
+    die "recursion guard: OUTSOURCERER_MAX_DEPTH is unparseable ('$_max_raw'). A malformed maximum must not let a delegate slip past the guard, so it refuses rather than fail-open. Set OUTSOURCERER_MAX_DEPTH to a non-negative integer or unset it."
+  fi
+  if [ "$OUTSOURCERER_DEPTH" -ge "$_max" ]; then
+    die "recursion guard: already delegating (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH >= OUTSOURCERER_MAX_DEPTH=$_max). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N."
   fi
   export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH + 1))
 
@@ -6077,13 +6204,10 @@ route_delegate() {
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
     esac
-    # Hermes headless invocation contract: not yet wired. The CLI may be on PATH but the flag map
-    # (headless mode, model flag, tier postures) has not been probed from the real CLI, so the lane
-    # cannot dispatch. This check runs BEFORE the preflight exit below, so bg and auto-detach fail
-    # immediately with the same message and no job id -- not a phantom job that surfaces the failure
-    # ~35s later inside a detached child the caller never reads. The foreground path hits the same
-    # die here, so all three paths (foreground, bg, auto-detach) are consistent.
-    [ "$disp" = "hermes" ] && die "hermes lane: the headless invocation contract is not yet wired. The hermes CLI is on PATH but the flag map (headless mode, model flag, tier postures) has not been probed. Run 'hermes --help' to inspect the available flags, then wire the flag mapping in this script."
+    # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
+    # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
+    # becomes a phantom job that surfaces the failure inside a detached child the caller never reads.
+    # With the CLI present, hermes dispatches for real via `hermes -z` in delegate_hermes.
   elif [ "$PROVIDER" = "claudex" ]; then
     # CLAUDEX: a ChatGPT-sub model (sol/terra/luna/gpt-5.5) inside the Claude Code HARNESS via the
     # user's local CLIProxyAPI. Alias resolution DID run above (sol -> gpt-5.6-sol). Guardrails:
@@ -6465,18 +6589,36 @@ parity() {
   # mirror this ONE skill in too, so `agy` sees outsourcerer without a separate import step. Same
   # symlink mechanism as Devin. (Native alternative documented in SKILL.md: `agy plugin import
   # claude-code`.) Non-fatal, additive.
-  local agdst="" self="$HOME/.claude/skills/outsourcerer"
+  # Resolve the running install robustly (plugin OR ~/.claude/skills, even via a launcher symlink)
+  # instead of hardcoding one layout -- otherwise a plugin-only install silently skips these mirrors.
+  local self; self="$(_osrc_skill_root || printf '%s' "$HOME/.claude/skills/outsourcerer")"
+  local agdst="" c
   for c in "$HOME/.gemini/antigravity/skills" "$HOME/.gemini/config/skills"; do
     if [ -d "$c" ] && [ -w "$c" ]; then agdst="$c"; break; fi
   done
   if [ -n "$agdst" ] && [ -f "$self/SKILL.md" ]; then
-    if ln -sfn "$self" "$agdst/outsourcerer" 2>/dev/null; then
-      echo "  linked outsourcerer -> $agdst (Antigravity/agy will discover it)"
-    else
-      echo "  (could not link into Antigravity skills dir $agdst; use: agy plugin import claude-code)"
-    fi
+    _osrc_link_skill_into "$agdst" "$self"
+    case $? in
+      0) echo "  linked outsourcerer -> $agdst (Antigravity/agy will discover it)" ;;
+      3) echo "  (Antigravity: $agdst/outsourcerer is a real dir, not a link; left untouched — use: agy plugin import claude-code)" ;;
+      *) echo "  (could not link into Antigravity skills dir $agdst; use: agy plugin import claude-code)" ;;
+    esac
   else
     echo "  (Antigravity skills dir not found; if you use agy, run: agy plugin import claude-code)"
+  fi
+
+  # Hermes host (bonus): Hermes (NousResearch) also loads SKILL.md-format skills, from
+  # $HERMES_HOME/skills. If that dir exists, mirror this ONE skill in too, so a Hermes session sees
+  # outsourcerer without a separate step. Same symlink mechanism as Devin/Antigravity above; the
+  # dedicated entrypoint is `parity-hermes`. Non-fatal, additive.
+  local hdst="${HERMES_HOME:-$HOME/.hermes}/skills"
+  if [ -d "$hdst" ] && [ -w "$hdst" ] && [ -f "$self/SKILL.md" ]; then
+    _osrc_link_skill_into "$hdst" "$self"
+    case $? in
+      0) echo "  linked outsourcerer -> $hdst (Hermes will discover it)" ;;
+      3) echo "  (Hermes: $hdst/outsourcerer is a real dir, not a link; left untouched — run: outsourcerer.sh parity-hermes after removing it)" ;;
+      *) echo "  (could not link into Hermes skills dir $hdst; use: outsourcerer.sh parity-hermes)" ;;
+    esac
   fi
 
   echo "== MCP servers =="
@@ -7177,6 +7319,7 @@ main() {
     parity-codex)  parity_codex ;;                         # reverse bridge: Codex -> outsourcerer insource
     parity-droid)  parity_droid ;;                         # reverse bridge: Factory droid -> outsourcerer (global ~/.factory/AGENTS.md)
     parity-cursor) parity_cursor ;;                        # reverse bridge: Cursor -> outsourcerer (repo-root AGENTS.md)
+    parity-hermes) parity_hermes ;;                        # reverse bridge: Hermes -> outsourcerer (skill symlink into ~/.hermes/skills)
     continue|cont)
       [ "$PROVIDER" = "devin" ] || die "continue is Devin-only for now (provider=$PROVIDER). For OR interactive follow-ups use the sibling tmux harness: scripts/run-or-{model,codex}.sh"
       continue_turn "$@" ;;
@@ -7191,7 +7334,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor; providers: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
   esac
 }
 main "$@"

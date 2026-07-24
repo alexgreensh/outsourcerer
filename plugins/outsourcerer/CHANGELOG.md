@@ -2,6 +2,25 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.4.22
+
+- **Hermes now works both ways.** The delegation lane (OUT) is wired for real: `delegate_hermes`
+  invokes `hermes -z "<prompt>"` (scripted one-shot: prompt in, final text out), maps the tier to
+  Hermes' binary approval model (`--yolo` for mutating verbs, disclosed in the posture banner),
+  passes `-m` through to `--model` verbatim, and honors `-w` for an isolated worktree. The 0.4.21
+  lane shipped as a stub that died "not yet wired" despite the changelog implying otherwise; this
+  entry makes the code match the claim.
+- **New reverse bridge: `parity-hermes` (IN).** Hermes discovers SKILL.md-format skills from
+  `$HERMES_HOME/skills`, so the bridge is a skill symlink (not an AGENTS.md append like
+  codex/droid/cursor). It is idempotent and self-healing (a dangling link from a moved/upgraded
+  skill is repointed at the live install, the same guard the Devin parity uses). Once linked, a
+  Hermes session can delegate INTO Claude (`run -m fable`, verified), Codex, or GLM. `parity` (the
+  Devin sync) also mirrors this one skill into `$HERMES_HOME/skills` as a bonus, alongside the
+  Antigravity mirror.
+- Harden the recursion-depth *maximum* guard too: `OUTSOURCERER_MAX_DEPTH` is now normalized and
+  fails closed on a malformed value, closing a fail-open path where a delegate could poison the
+  maximum to escape the recursion limit (the depth was already hardened; the ceiling was not).
+
 ## 0.4.21
 
 - Add the Hermes engine delegation lane: `-m` model pass-through, dispatchability preflight that

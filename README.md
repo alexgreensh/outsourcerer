@@ -5,7 +5,7 @@
 [![Version](https://img.shields.io/github/v/release/alexgreensh/outsourcerer?color=8A5CF6&label=version)](https://github.com/alexgreensh/outsourcerer/releases)
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
-![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin-8A5CF6)
+![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin%20·%20Hermes-8A5CF6)
 
 ![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
@@ -257,6 +257,7 @@ Audited by [repo-forensics](https://github.com/alexgreensh/repo-forensics) on ev
 | **Antigravity** | `agy plugin import claude-code` (or let Outsourcerer's `parity` mirror it in) |
 | **Codex** | `outsourcerer parity-codex` (adds the entry point Codex reads) |
 | **Devin** | `outsourcerer parity` (mirrors the skill + your local tools) |
+| **Hermes** | `outsourcerer parity-hermes` (symlinks the skill into `~/.hermes/skills`) |
 
 Then just talk to it. On first use it runs its own health check and tells you if anything needs installing, with the exact command.
 
@@ -284,11 +285,11 @@ The model alias picks the lane automatically; `--provider` is only for the OpenR
 | `tab` / `estimate` | cost ledger + pre-flight quote |
 | `suggest` / `deals` | live cheap & free models available per platform right now |
 | `doctor` / `models` | health check + live model list |
-| `parity` / `parity-codex` | mirror into Devin/Antigravity; reverse-bridge into Codex |
+| `parity` / `parity-codex` / `parity-hermes` | mirror into Devin/Antigravity/Hermes; reverse-bridge into Codex/Droid/Cursor |
 
 **Lanes:** `hy3`/`glm-5.2`/`deepseek-*` (OpenRouter, via `cc` or `codex`) ·
 `sol`/`terra`/`luna` (Codex native) · `fable`/`opus`/`sonnet`/`haiku` (Claude native) ·
-`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
+`gemini-pro`/`gemini-flash` (Antigravity, keyless) · `hermes` / `-m <any>` (your Hermes setup, whatever model + provider keys you've configured) · `ollama:<model>`/`local` (your own machine, keyless, `$0`, private) · `gpt-image`/`nano-banana` (images).
 
 Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
@@ -300,11 +301,11 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 <img src="readme-assets/section-roadmap.png" alt="The sorcerer facing a row of magic portals, two open and two still forming in the distance" width="100%">
 
-**Today it drives like a copilot.** It greets you each session, shows your live token budget, and hands you the wheel: **auto-pilot**, **you-drive**, or **hybrid**, then conserves your limits on its own when the session runs hot. And it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
+**Today it drives like a copilot.** It greets you each session, shows your live token budget, and hands you the wheel: **auto-pilot**, **you-drive**, or **hybrid**, then conserves your limits on its own when the session runs hot. And it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid · Hermes**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
 
 - **Pi** and more harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
-- *Already shipped:* **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, or Cursor too; parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 

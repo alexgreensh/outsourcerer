@@ -46,6 +46,25 @@ outsourcerer.sh parity-codex     # appends a managed insource block to $CODEX_HO
 It documents `outsourcerer.sh run -m fable "…"` (claude-native) and `--provider cc run "…"` for
 Codex to discover. The script itself runs cleanly from a Codex shell.
 
+`parity-droid` and `parity-cursor` do the same for Factory droid (`~/.factory/AGENTS.md`) and Cursor
+(repo-root `AGENTS.md`) — those hosts read AGENTS.md, so the bridge is a managed block appended there.
+
+## Reverse bridge (insourcing): parity-hermes
+
+So a Hermes session can delegate the hard turns back into Claude/Codex/GLM. Hermes (NousResearch)
+discovers **SKILL.md-format** skills from `$HERMES_HOME/skills/*/SKILL.md` (the same format
+Claude/Devin/Antigravity use), NOT an AGENTS.md file — so the bridge is a **skill symlink**, not a
+text block:
+```
+outsourcerer.sh parity-hermes    # symlinks outsourcerer into $HERMES_HOME/skills (idempotent, self-healing)
+```
+Once linked, a Hermes session sees the whole outsourcerer skill and can run
+`outsourcerer.sh run -m fable "…"` (verified Claude), `--provider codex run "…"`, or
+`run -m glm "…"` — the full lane set, from inside Hermes. This is the reverse of the Hermes
+**delegation** lane (`--provider hermes` / `run -m hermes`), so Hermes now works **both ways**.
+`HERMES_HOME` overrides the default `~/.hermes`. `parity` (the Devin sync) also mirrors this one
+skill into `$HERMES_HOME/skills` as a bonus when that dir exists, alongside the Antigravity mirror.
+
 ## Parity (skills + MCPs: Claude → Devin)
 
 So delegated work has the same capabilities as Claude:
@@ -66,6 +85,7 @@ means putting it where that host discovers skills/instructions. Repo for install
 | **Devin** | `~/.config/devin/skills/*` (same `SKILL.md` format) + `devin mcp add` | Run `outsourcerer.sh parity`, it symlinks every Claude skill (incl. outsourcerer) into Devin and ports your local MCPs. | Covered by `parity` |
 | **Antigravity** (`agy`) | SKILL.md skills in `~/.gemini/antigravity/skills` (→ `~/.gemini/config/skills`); plugins via `agy plugin import`/`install` | **Native:** `agy plugin import claude-code` (pulls your Claude skills into Antigravity, this is how Antigravity already imports Claude/Gemini skills). **Or automatic:** `outsourcerer.sh parity` now symlinks outsourcerer into that skills dir when it exists. **Or manual:** `ln -s ~/.claude/skills/outsourcerer ~/.gemini/antigravity/skills/`. | Covered by `parity` + native import |
 | **Codex** | `${CODEX_HOME:-~/.codex}/AGENTS.md` (Codex reads AGENTS.md, not SKILL.md) | Run `outsourcerer.sh parity-codex`, it appends a managed block to `AGENTS.md` documenting how to call `outsourcerer.sh` (both the reverse bridge back into Claude and `--provider cc`). The bash script itself runs unchanged from a Codex shell. | Covered by `parity-codex` |
+| **Hermes** (NousResearch) | `${HERMES_HOME:-~/.hermes}/skills/*/SKILL.md` (Hermes reads SKILL.md, like Claude/Devin) | Run `outsourcerer.sh parity-hermes`, it symlinks the outsourcerer skill into `$HERMES_HOME/skills` (idempotent, self-healing). A Hermes session then drives every lane. Delegation the other way is `--provider hermes` / `run -m hermes`. | Covered by `parity-hermes` (+ `parity` bonus mirror) |
 
 Notes: Antigravity's own skills are `SKILL.md`-format folders (its builtin `antigravity_guide/SKILL.md`
 confirms the format), and `agy plugin list`/`import` manage Claude/Gemini-sourced skills, so no
