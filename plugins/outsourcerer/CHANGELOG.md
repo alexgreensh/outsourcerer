@@ -1,7 +1,27 @@
 # Changelog
 
 All notable changes to the Outsourcerer plugin are documented here.
+
+## 0.4.21
+
+- Add the Hermes engine delegation lane: `-m` model pass-through, dispatchability preflight that
+  fails before minting a job on the foreground, background, and auto-detached paths, and cost
+  receipts read read-only from `~/.hermes/state.db` with an honest empty-else-labeled-estimate
+  fallback (a partial or non-authoritative receipt never masquerades as a measured cost).
+- Harden the recursion-depth guard: depths are normalized as base-10 (leading zeros no longer
+  misparse as octal) and any malformed value is refused rather than failing open.
+- Add the OpenRouter withdrawn free-model translator: a `:free` model that OpenRouter has stopped
+  serving now yields a clear, actionable message naming the paid replacement slug instead of an
+  opaque 404 or a silent retry loop.
+- Internal comment/label cleanup.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
+
+## 0.4.20
+
+- Devin/GLM lane: add a lane-aware stall-kill floor (default 1800s, override `OSRC_DEVIN_STALL_KILL`)
+  so the background watchdog no longer reaps a healthy delegate mid-inference during a long
+  non-streaming completion, where both liveness signals legitimately go quiet at once. The hard
+  timeout remains the backstop for a genuinely wedged run.
 
 ## [0.4.19] - 2026-07-22
 

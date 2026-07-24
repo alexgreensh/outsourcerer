@@ -72,6 +72,12 @@
 #   droid             Factory Droid CLI (`droid exec`). YOUR configured models pass through
 #                     verbatim, incl. free/cheap BYOK customModels in ~/.factory/settings.json.
 #   cursor            Cursor CLI (`cursor-agent -p`). Bills your Cursor subscription credits.
+#   hermes            Hermes agent CLI (NousResearch `hermes-agent`). Engine lane: -m passes
+#                     through verbatim (Hermes owns its model catalog). Real per-run cost is read
+#                     from ~/.hermes/state.db after each run; when unavailable, the labeled token
+#                     estimate is used (never a partial masquerading as exact). doctor reports
+#                     installed / data-dir-only / absent / never-run states honestly. v1 non-goals:
+#                     no advise scoring, no session mode.
 #   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
 #                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
@@ -107,11 +113,15 @@
 #   the capability threshold for the task type. Explains WHY it picked that model. Use --refresh to
 #   pull fresh benchmark data (needs OPENROUTER_API_KEY in ~/.env). Without benchmarks, falls back to
 #   tier-based proxy scores. Pair with `suggest` for price-only discovery, `estimate` for cost quotes.
+#   TRANSPORT FALLBACK (read-only): when run/explore dies on a transport-class failure (429/rate
+#   limit, 5xx, connection error, watchdog timeout) it auto-retries the SAME task down this ranked
+#   shortlist on the next lane, bounded by OSRC_FALLBACK_MAX total attempts (default 3). Content
+#   failures never retrigger; mutating verbs (edit/research/yolo) never auto-retry. OSRC_FALLBACK=0 disables.
 set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.19"
+OSRC_VERSION="0.4.21"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -258,7 +268,7 @@ cmd_consent() {
 # The session-start handshake: the skill greets the user, shows live limits + ready lanes, and
 # offers three ways to drive. Chosen ONCE, remembered forever (ask-once-then-remember). The BASH
 # side only persists + reports; the conversational menu is presented by the orchestrator (SKILL.md
-# contract). SECURITY/ROBUSTNESS (GLM review): brief/mode are READ-ONLY prints — they NEVER prompt
+# contract). SECURITY/ROBUSTNESS: brief/mode are READ-ONLY prints, they NEVER prompt
 # (a prompt would hang bg/CI), always print to stderr-safe channels, and validate the stored value.
 OSRC_MODE_FILE="$OSRC_HOME/mode"
 # Conserve trigger: route grind OFF the Claude session once the 5-hour window crosses this %.
@@ -457,7 +467,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -697,7 +707,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -1099,7 +1109,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -1136,18 +1146,37 @@ record_ledger() {
   _mkdir_private "$OSRC_HOME" || true
   # Restrict the ledger itself: the $OSRC_HOME dir is 700, but if OSRC_HOME is ever
   # pointed at a shared location the ledger (task hashes, costs, model names) should still be 600.
-  [ -e "$OSRC_LEDGER" ] || : > "$OSRC_LEDGER" 2>/dev/null || true
+  # Create private from birth (umask subshell) so there is no world-readable window even on a first
+  # foreground run with a lax umask (pre-existing gap; matters if OSRC_HOME is ever a shared path).
+  [ -e "$OSRC_LEDGER" ] || ( umask 077; : > "$OSRC_LEDGER" ) 2>/dev/null || true
   chmod 600 "$OSRC_LEDGER" 2>/dev/null || true
   local prov="$1" model="$2" tier="$3" verb="$4" task="$5" cost="${6:-}" lane="${7:-}"
   local intok; intok="$(_est_tokens "$task")"
   local ts; ts="$(date +%Y-%m-%dT%H:%M:%S)"
   local hash; hash="$(printf '%s' "$task" | cksum | cut -d' ' -f1)"
+  # Learning keys. run_id joins this cost row to its later outcome row; task_class + repo_key are
+  # the advise-learning bucket. All additive JSON fields (existing readers ignore unknown keys).
+  # Prefer pre-set env (a bg/loop child sets the real task_class before this fires) then derive.
+  local run_id task_class repo_key
+  run_id="${OSRC_RUN_ID:-$(_ensure_run_id)}"
+  task_class="${OSRC_TASK_CLASS:-$(_classify_task "$task")}"
+  # Validate the env overrides so a caller can't defeat the guarantees: repo_key MUST be a cksum
+  # (numeric) or the PII promise breaks (a raw URL/path would be stored verbatim); task_class MUST be
+  # a known bucket or it pollutes learning. Bad value -> derive the safe one.
+  case "$task_class" in code|reasoning|agentic|creative|simple) ;; *) task_class="$(_classify_task "$task")" ;; esac
+  repo_key="${OSRC_REPO_KEY:-}"
+  case "$repo_key" in ''|*[!0-9]*) repo_key="$(_repo_key)" ;; esac
+  # NB: record_ledger exports NOTHING per-call. Exporting per-task values (run_id/task_class/lane/model)
+  # would let a future in-process loop (slice 3 loop-judges) stamp task B with task A's values via a
+  # later record_outcome in the same process. Callers that record an outcome pass every field
+  # EXPLICITLY (see run_job). Env inheritance for threading is done by the caller (run_job), on purpose.
   # lane (resolved lane code: cx/cc/gm/or/dv/local) drives the Tab's plan-vs-cash split. The bg path
   # (run_job) records the RAW provider (e.g. devin) which mislabels a plan lane as cash, so it passes
   # the resolved lane here; cmd_tab's is_sub prefers .lane and falls back to the provider string.
   local _line; _line="$(jq -cn --arg ts "$ts" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
      --arg c "$cost" --argjson it "$intok" --arg h "$hash" --arg lane "$lane" \
-     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h}
+     --arg rid "$run_id" --arg tc "$task_class" --arg rk "$repo_key" \
+     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h,run_id:$rid,task_class:$tc,repo_key:$rk}
       + (if $lane=="" then {} else {lane:$lane} end)')" || return 0
   [ -n "$_line" ] || return 0
   if command -v flock >/dev/null 2>&1; then
@@ -1171,6 +1200,232 @@ record_ledger() {
   else
     printf '%s\n' "$_line" >> "$OSRC_LEDGER" 2>/dev/null || true
   fi
+}
+
+# =============================================================================
+# CREW / LEARNING LEDGER (slice 1+2). Additive: cost rows stay in ledger.jsonl
+# (untouched by these readers); OUTCOME rows live in a SEPARATE outcomes-YYYYMM.jsonl
+# so no existing cost/tab reader ever has to dedupe two shapes. run_id joins them.
+# No flock: every line is short (<512B) and emitted with one printf (atomic under PIPE_BUF).
+# =============================================================================
+
+# _ensure_run_id -> echo a durable run id, minting+exporting one if unset.
+_ensure_run_id() {
+  [ -n "${OSRC_RUN_ID:-}" ] && { printf '%s' "$OSRC_RUN_ID"; return 0; }
+  local rid; rid="$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM:-0}"
+  export OSRC_RUN_ID="$rid"; printf '%s' "$rid"
+}
+
+# _repo_key -> a stable, NON-PII repository identity (cksum only; never the URL/path in plaintext).
+# Prefers the normalized origin remote; falls back to a hash of the repo root, then cwd.
+_repo_key() {
+  local u root
+  u="$(git config --get remote.origin.url 2>/dev/null)"
+  if [ -n "$u" ]; then u="${u%.git}"; printf '%s' "$u" | cksum | cut -d' ' -f1; return 0; fi
+  root="$(git rev-parse --show-toplevel 2>/dev/null)"; [ -n "$root" ] || root="$PWD"
+  printf '%s' "$root" | cksum | cut -d' ' -f1
+}
+
+# Outcome files: current month is written; readers glob all monthly files + a legacy flat file.
+_outcomes_current() { printf '%s/outcomes-%s.jsonl' "$OSRC_HOME" "$(date +%Y%m)"; }
+_outcomes_files()   { ls "$OSRC_HOME"/outcomes.jsonl "$OSRC_HOME"/outcomes-*.jsonl 2>/dev/null; }
+
+# record_outcome <outcome> [reason] [turns] [run_id] [lane] [model] [task_class] [repo_key]
+# Writes ONE terminal outcome row. Denormalized (carries lane/model/task_class/repo_key) so the
+# advise fold needs no join. Only passed/failed/reverted feed learning; everything else is excluded.
+record_outcome() {
+  have jq || return 0
+  local outcome="$1" reason="${2:-}" turns="${3:-}"
+  local rid="${4:-${OSRC_RUN_ID:-}}" lane="${5:-${OSRC_LANE:-}}" model="${6:-${OSRC_MODEL:-}}"
+  local tc="${7:-${OSRC_TASK_CLASS:-}}" rk="${8:-${OSRC_REPO_KEY:-}}"
+  [ -n "$outcome" ] || return 0
+  # Validate the learning-bearing fields so a future caller (slice-3 loop judges) can't poison the fold
+  # or leak task-derived text. Unknown outcome -> `unknown` (recorded, not learnable) + a stderr note.
+  case "$outcome" in
+    passed|failed|reverted|blocked|abandoned|completed_unverified|unknown) ;;
+    *) echo "outsourcerer: record_outcome got non-enum outcome '$outcome' -> recording as 'unknown'" >&2; outcome=unknown ;;
+  esac
+  # reason MUST be a fixed enum (never task text) — an unknown reason is dropped, not stored verbatim.
+  case "$reason" in
+    ''|test_failure|compile_failure|invalid_output|permission_denied|consent_denied|secret_scan|provider_error|timeout|watchdog|merge_conflict|user_cancelled|missing_tool) ;;
+    *) reason="" ;;
+  esac
+  # repo_key MUST be a cksum (numeric) or the PII guarantee breaks; turns MUST be numeric or omitted.
+  case "$rk" in ''|*[!0-9]*) rk="$(_repo_key)" ;; esac
+  case "$turns" in *[!0-9]*) turns="" ;; esac
+  [ -n "$rid" ] || rid="$(_ensure_run_id)"
+  _mkdir_private "$OSRC_HOME" || true
+  local f; f="$(_outcomes_current)"
+  [ -e "$f" ] || ( umask 077; : > "$f" ) 2>/dev/null || true   # private from birth; never truncate an existing file
+  chmod 600 "$f" 2>/dev/null || true
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local line
+  line="$(jq -cn --arg rid "$rid" --arg ts "$ts" --arg lane "$lane" --arg m "$model" \
+     --arg tc "$tc" --arg rk "$rk" --arg o "$outcome" --arg r "$reason" --arg tu "$turns" \
+     '{schema:2,event:"outcome",run_id:$rid,ts:$ts,lane:$lane,model:$m,task_class:$tc,repo_key:$rk,outcome:$o}
+      + (if $r=="" then {} else {reason:$r} end)
+      + (if $tu=="" then {} else {turns_used:($tu|tonumber)} end)')" || return 0
+  [ -n "$line" ] || return 0
+  printf '%s\n' "$line" >> "$f" 2>/dev/null || true
+}
+
+# _status_to_outcome <job-status> <exit-code> -> "outcome<TAB>reason". THE anti-poisoning gate:
+# infra/consent/permission/provider failures map to blocked/abandoned, NEVER a learnable `failed`,
+# and a checkless success is completed_unverified (not `passed`). Only the free gate / future checks
+# write passed/failed/reverted. Extracted so this safety property is unit-testable.
+_status_to_outcome() {
+  local st="$1" sc="${2:-0}" oc rsn=""
+  case "$st" in
+    done)               oc=completed_unverified ;;
+    permission-blocked) oc=blocked;   rsn=permission_denied ;;
+    blocked)            oc=blocked ;;
+    timeout)            oc=abandoned; rsn=timeout ;;
+    wedged)             oc=abandoned; rsn=watchdog ;;
+    interrupted)        oc=abandoned; rsn=user_cancelled ;;
+    failed)             oc=blocked;   rsn=provider_error ;;
+    *)                  if [ "${sc:-0}" -eq 0 ] 2>/dev/null; then oc=completed_unverified; else oc=blocked; rsn=provider_error; fi ;;
+  esac
+  printf '%s\t%s' "$oc" "$rsn"
+}
+
+# _history_mult <lane> <model> <category> -> "mult|n_eff|passed_eff|scope"
+# Bayesian shrinkage toward a fixed neutral prior (0.70), 60-day half-life decay, clamped +/-20%.
+# Zero history -> mult 1.00 by construction (NO cold-start penalty, NO threshold cliff). Buckets:
+# (lane,repo_key,category) when it has n_eff>=3, else (lane,category) global. Portable: jq does the
+# ISO date math, awk does the exponent (^ is POSIX awk, unlike jq's unreliable pow).
+_history_mult() {
+  local lane="$1" model="$2" cat="$3" rk
+  rk="$(_repo_key)"
+  # Collect outcome files into a QUOTED array — an OSRC_HOME with spaces (Git Bash, custom paths)
+  # would word-split an unquoted list and silently disable learning.
+  local -a ofiles=(); local _f
+  while IFS= read -r _f; do [ -n "$_f" ] && ofiles+=("$_f"); done < <(_outcomes_files)
+  { [ "${#ofiles[@]}" -gt 0 ] && have jq; } || { printf '1.00|0.00|0.00|none'; return 0; }
+  # Emit "isrepo<TAB>age_days<TAB>passed" for learning-eligible rows within 90 days.
+  # RESILIENT PARSE (-R + fromjson?): one malformed/partial line can't kill the whole fold.
+  local rows
+  rows="$(jq -rR --arg lane "$lane" --arg cat "$cat" --arg rk "$rk" '
+    fromjson? // empty
+    | select(.event=="outcome" and .lane==$lane and .task_class==$cat
+           and (.outcome=="passed" or .outcome=="failed" or .outcome=="reverted"))
+    # A bad/missing/non-ISO ts must NOT crash jq mid-stream (that silently truncated the fold — the
+    # try/catch is downstream of fromjson? so it needs its own guard). Bad ts -> null -> dropped.
+    | (try (.ts|fromdateiso8601) catch null) as $t
+    | select($t != null)
+    | ((now - $t) / 86400) as $age
+    | select($age <= 90)
+    # Clamp a future ts (clock skew / manual edit) to age 0 so its weight can never exceed 1 (no
+    # phantom amplification of n_eff / bucket selection).
+    | [ (if .repo_key==$rk then 1 else 0 end), (if $age<0 then 0 else $age end), (if .outcome=="passed" then 1 else 0 end) ]
+    | @tsv
+  ' "${ofiles[@]}" 2>/dev/null)"
+  [ -n "$rows" ] || { printf '1.00|0.00|0.00|none'; return 0; }
+  printf '%s\n' "$rows" | awk -F'\t' '
+    # Bucket SELECTION uses the raw observation count (>=3 real repo runs); the shrinkage MATH uses the
+    # decayed sums. (Selecting on the decayed sum would miss "3 fresh runs" whose sum is ~2.9998.)
+    NF<3 { next }   # skip any malformed TSV line (never miscount a partial row as weight-1/passed-0)
+    { w=0.5^($2/60); tw+=w; tp+=w*$3; if($1==1){rw+=w; rp+=w*$3; rc++} }
+    END{
+      K=8; prior=0.70;
+      # Repo bucket needs BOTH >=3 real observations AND >=2.5 effective weight, so 3 FRESH runs
+      # select repo but 3 STALE ones (decayed <2.5) fall back to a rich fresh global set.
+      if(rc>=3 && rw>=2.5){ n=rw; s=rp; scope="repo" } else { n=tw; s=tp; scope="global" }
+      if(n<=0){ printf "1.00|0.00|0.00|none"; exit }
+      mult=((K*prior)+s)/(prior*(K+n));
+      if(mult<0.80)mult=0.80; if(mult>1.20)mult=1.20;
+      printf "%.2f|%.2f|%.2f|%s", mult, n, s, scope;
+    }'
+}
+
+# _free_gate <kind> <payload> -> returns 0 pass / 1 fail / 2 unknown (tri-state; never suppresses
+# escalation on absence of evidence). Zero-LLM, zero-cost, no installs, no state mutation.
+#   kind=json   valid JSON?           kind=nonempty  artifact present?
+#   kind=patch  git apply --check     kind=shell     bash -n on a file path
+# Any unknown kind or missing tool -> 2 (unknown), preserving the paid path.
+_free_gate() {
+  local kind="$1" payload="${2:-}"
+  case "$kind" in
+    nonempty) [ -n "$payload" ] && return 0 || return 1 ;;
+    json)     have jq || return 2; [ -n "$payload" ] || return 1
+              # `jq empty` = parse-only: valid JSON (incl. falsy `false`/`null`) passes. NOT `jq -e .`,
+              # which exits 1 on false/null and would wrongly FAIL a correct falsy answer.
+              printf '%s' "$payload" | jq empty >/dev/null 2>&1 && return 0 || return 1 ;;
+    patch)    have git || return 2; [ -n "$payload" ] || return 1
+              printf '%s' "$payload" | git apply --check - >/dev/null 2>&1 && return 0 || return 1 ;;
+    shell)    have bash || return 2; [ -f "$payload" ] || return 2
+              bash -n -- "$payload" >/dev/null 2>&1 && return 0 || return 1 ;;
+    *)        return 2 ;;
+  esac
+}
+
+# _confident_fail <answer> -> 0 (+ prints a short reason on stdout) when the answer is a DETERMINISTIC
+# reject: a refusal, a truncated artifact, or a violation of a machine-declared output shape. Returns 1
+# otherwise. HARD INVARIANT: this NEVER returns "this answer is good". Absence of a fail signal is
+# "can't tell", not a pass — a clean-looking answer can still be wrong, so it must still escalate. Only
+# a confident fail is allowed to short-circuit a paid judge. Precision over recall, always: every branch
+# is anchored/high-signal so a correct short answer is never rejected for $0 (that failure is invisible).
+# Optional caller knobs (only the caller may declare a contract; NEVER inferred from prompt text):
+#   OSRC_CONTRACT_KEYS  comma-separated required top-level JSON keys (answer must be an object with all)
+#   OSRC_CONTRACT_RE    POSIX ERE the answer must match somewhere
+_confident_fail() {
+  local a="${1:-}" n
+  [ -n "$a" ] || return 1
+  # -- contract (strongest): only fires on a caller-declared shape. A structural miss is a certain fail;
+  #    matching the shape proves nothing about correctness, so there is no "pass" branch here.
+  if [ -n "${OSRC_CONTRACT_KEYS:-}" ] && have jq; then
+    if ! printf '%s' "$a" | jq empty >/dev/null 2>&1; then echo "contract:not-json"; return 0; fi
+    local k _oifs="$IFS"; IFS=,
+    for k in $OSRC_CONTRACT_KEYS; do
+      IFS="$_oifs"; k="$(printf '%s' "$k" | tr -d '[:space:]')"; [ -n "$k" ] || { IFS=,; continue; }
+      printf '%s' "$a" | jq -e --arg k "$k" 'type=="object" and has($k)' >/dev/null 2>&1 \
+        || { echo "contract:missing-key:$k"; return 0; }
+      IFS=,
+    done
+    IFS="$_oifs"
+  fi
+  if [ -n "${OSRC_CONTRACT_RE:-}" ]; then
+    # grep exit: 0=match, 1=no-match (a real violation), >=2=REGEX ERROR (caller typo). Only a clean 1 is
+    # a violation; an invalid ERE is our fault, not the model's — skip it, never fire a misleading
+    # contract:no-match on every call. Probe validity once on empty input first.
+    if printf '' | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null; [ $? -le 1 ]; then
+      printf '%s' "$a" | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null
+      case $? in 1) echo "contract:no-match"; return 0 ;; esac
+    fi
+  fi
+  # -- truncation: an ODD number of LINE-ANCHORED ``` fences is an unterminated code block ≈ a certain
+  #    mid-stream cut. Count only fences that OPEN a line (a real markdown delimiter), so prose or a string
+  #    that merely mentions ``` inline never trips it. (Deliberately NOT general bracket/quote balancing
+  #    across prose — that is a false-positive minefield. And NO trailing-backslash signal — UNC paths /
+  #    LaTeX / regex legitimately end in `\`, far too noisy to treat as a cut.)
+  n="$(printf '%s\n' "$a" | grep -cE '^[[:space:]]*```' 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  if [ $((n % 2)) -eq 1 ]; then echo "truncation:unterminated-fence"; return 0; fi
+  # -- refusal (highest false-positive risk, so the tightest gate): fire ONLY when ALL hold — the answer
+  #    is short, has no code fence, is not JSON, STARTS with a refusal opener, carries a refusal-COMPLETION
+  #    token (help/assist/with that/…), and has NO pivot to content (", but", "however", "the fix", "here",
+  #    "instead", "you can/could/should", "try", or a ":"-led answer). The opener ALONE is not enough:
+  #    "I can't guarantee X, but the fix is Y" and "I can't wait to ship this" are correct answers, not
+  #    refusals — the completion-token requirement plus the no-pivot veto reject them. No "as an AI" opener
+  #    (it fires on "As an AI researcher…"). ERE covers curly-apostrophe (’) variants. "No." and "you
+  #    cannot call X before init" never match (no first-person opener).
+  if [ "${#a}" -lt 400 ] \
+     && ! printf '%s' "$a" | grep -q '```' 2>/dev/null \
+     && ! { have jq && printf '%s' "$a" | jq empty >/dev/null 2>&1; } \
+     && printf '%s' "$a" | grep -iqE "^[[:space:]]*(i['’]?m[[:space:]]+(sorry|afraid|unable)|i[[:space:]]+am[[:space:]]+(sorry|afraid|unable)|i[[:space:]]+(cannot|can['’]?t|won['’]?t|will[[:space:]]+not)|(sorry|unfortunately),?[[:space:]]+i[[:space:]])" 2>/dev/null \
+     && printf '%s' "$a" | grep -iqE "(help|assist|comply|with[[:space:]]+(that|this|your)|do[[:space:]]+(that|this)|provide[[:space:]]+(that|this)|answer[[:space:]]+(that|this)|complete[[:space:]]+(that|this|your)|fulfil)" 2>/dev/null \
+     && ! printf '%s' "$a" | grep -iqE "(,[[:space:]]*but[[:space:]]|[[:space:]]however|the[[:space:]]+fix|fix:|instead|here('| i| is| are|,| you)|you[[:space:]]+(can|could|should)|try[[:space:]]|:[[:space:]]*[^[:space:]])" 2>/dev/null; then
+    echo "refusal:template"; return 0
+  fi
+  return 1
+}
+
+# _gate_resolves <reason> -> 0 only for a reject class SAFE to resolve a second-opinion tie WITHOUT a
+# paid judge. ONLY a caller-declared contract violation qualifies: the loser provably breaks the
+# machine-declared shape and the winner provably matches it. A refusal (may be the correct answer to a
+# harmful/impossible task) or a truncation heuristic (misfires on a legit fence) must ESCALATE instead
+# — never silently hand the win to an unchecked answer.
+_gate_resolves() {
+  case "${1:-}" in contract:*) return 0 ;; *) return 1 ;; esac
 }
 
 refresh_models() {
@@ -1229,6 +1484,105 @@ _or_run_cost() {
   # failed) would masquerade as authoritative and suppress the caller's '~' estimate -> undercount.
   # On any miss, return empty so the caller falls to the clearly-labeled estimate.
   [ "$got" = "1" ] && [ "$miss" = "0" ] && printf '%s' "$sum"
+}
+
+# ---- Hermes real-cost receipt from ~/.hermes/state.db ----
+# Hermes pre-computes estimated_cost_usd + cost_status per session in its own SQLite DB. A guarded
+# read-only query keyed on cwd + launch epoch gives real per-run receipts. Every failure path
+# degrades to empty output (never errors), so the caller falls back to the labeled token estimate
+# when the DB is absent, locked, schema-drifted, or the row has no usable cost -- identical honesty
+# contract to _or_run_cost: a partial figure never masquerades as authoritative.
+
+# _hermes_home -> the Hermes data directory. Honors HERMES_HOME when set, else ~/.hermes.
+_hermes_home() {
+  local raw="${HERMES_HOME:-}"
+  if [ -n "$raw" ] && [ -d "$raw" ]; then printf '%s' "$raw"; else printf '%s/%s' "$HOME" ".hermes"; fi
+}
+
+# _hermes_db -> the path to Hermes's state.db.
+_hermes_db() { printf '%s/state.db' "$(_hermes_home)"; }
+
+# _hermes_run_cost <launch_epoch> -> real cost (6dp) from the single matching Hermes session row, or
+# empty. Matches a sessions row whose cwd == $PWD AND started_at is within this run's window
+# [launch, now + skew]. A row that predates this run's launch cannot authoritatively belong to it:
+# the backward skew that used to be here let a session that started 1s BEFORE the launch epoch be
+# blessed by the "exactly one row" check and its cost reported as this run's. The lower bound is now
+# the launch epoch itself (no backward skew); the forward skew stays so a row recorded slightly after
+# `now` (clock drift) is not excluded. Uses estimated_cost_usd only when the WHOLE value is a
+# well-formed number AND cost_status (normalized case-insensitively, NULL/empty treated as unknown)
+# is anything other than `unknown`; anything else (NULL cost, unknown/Unknown/NULL/empty status, or
+# a malformed cost like `e` `+` `-` `.` `1e`) returns empty so the caller's labeled estimate is
+# used. When two or more rows could plausibly match (a concurrent run in the same directory),
+# returns EMPTY rather than guessing -- a wrong-but-exact cost is worse than no cost. sqlite3 is
+# guarded; absent sqlite3 -> empty, never an error.
+_hermes_run_cost() {
+  local launch="$1"
+  have sqlite3 || return 0
+  local db; db="$(_hermes_db)"
+  [ -f "$db" ] || return 0
+  case "$launch" in ''|*[!0-9]*) return 0 ;; esac
+  # Forward skew only: Hermes records started_at slightly after the launch epoch we captured (CLI
+  # startup overhead), so the upper bound extends past `now`. The lower bound is the launch epoch
+  # itself -- a row that started BEFORE this run's launch is from a PREVIOUS run, not this one, and
+  # must not be admitted. The old backward skew (launch - 5) let a row at launch-1s match.
+  local skew="${OSRC_HERMES_SKEW:-5}"
+  case "$skew" in ''|*[!0-9]*) skew=5 ;; esac
+  local cutoff="$launch"
+  local now; now="$(date +%s)"
+  local upper=$(( now + skew ))
+  # Read-only open so no WAL/SHM side-effect files are created and a DB owned by a running Hermes
+  # process is never locked out. Escape single quotes in PWD (doubling) so a path containing one
+  # cannot break the query -- worst case the query fails and returns empty (correct degradation).
+  local cwd_escaped; cwd_escaped="$(printf '%s' "$PWD" | sed "s/'/''/g")"
+  # Fetch ALL matching rows (not just the newest). A single unambiguous row is the only case that
+  # yields a cost; two or more means the match is ambiguous and a guess would attribute another
+  # run's spend to this one.
+  local rows
+  rows="$(sqlite3 -readonly "$db" \
+    ".timeout ${OSRC_SQLITE_BUSY_TIMEOUT:-3000}" \
+    "SELECT estimated_cost_usd, cost_status FROM sessions WHERE cwd = '${cwd_escaped}' AND started_at >= ${cutoff} AND started_at <= ${upper};" 2>/dev/null)" || return 0
+  [ -n "$rows" ] || return 0
+  # Count matching rows. Two or more plausibly-matching rows -> ambiguous -> empty (estimate).
+  local _nlines
+  _nlines="$(printf '%s\n' "$rows" | grep -c . 2>/dev/null)" || _nlines=0
+  [ "$_nlines" -eq 1 ] || return 0
+  # The row is "cost|status" (pipe-separated by sqlite3's default). Split it.
+  local cost status
+  cost="${rows%%|*}"
+  status="${rows#*|}"
+  # A NULL cost is not authoritative -> empty.
+  [ "$cost" = "" ] && return 0
+  # Authority check: match the bundled reference (hermes_refs/hermes_session.py:402), which uses
+  # the cost whenever `raw_cost is not None and cost_status != "unknown"`. Normalize exactly as
+  # the reference does: `str(row.get("cost_status") or "unknown").lower()` -- NULL/empty becomes
+  # "unknown", and the comparison is case-insensitive. The previous round invented an allowlist of
+  # exactly `complete|final`, which discarded legitimate receipts (e.g. cost_status='calculated'
+  # with a valid cost) and fell back to an estimate. "Not unknown" is the reference bar: a
+  # non-NULL, well-formed cost whose status is anything other than unknown (after normalization)
+  # is authoritative.
+  local _norm_status
+  case "$status" in
+    '') _norm_status="unknown" ;;
+    *)  _norm_status="$(printf '%s' "$status" | tr 'A-Z' 'a-z')" ;;
+  esac
+  [ "$_norm_status" != "unknown" ] || return 0
+  # Validate the WHOLE value is a well-formed number before formatting. The old character-class
+  # check (`*[!0-9.eE+-]**)` admitted `e`, `+`, `-`, `.`, and `1e` because they contain ONLY
+  # characters from the allowed set -- then `printf '%.6f'` coerced each to 0.000000, recording a
+  # fabricated measured cost. This regex requires a proper mantissa (digits with optional dot, or
+  # dot+digits) and a proper exponent (e/E, optional sign, at least one digit) if present.
+  printf '%s' "$cost" | awk '
+    {
+      if ($0 ~ /^([+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?)$/) exit 0
+      exit 1
+    }
+  ' || return 0
+  # Format to 6 decimal places, mirroring _or_run_cost's %.6f so the two lanes
+  # agree on precision. SQLite drops trailing zeros on a REAL (0.077700 -> 0.0777),
+  # which would make the ledger figure disagree with the OpenRouter lane's format.
+  # The empty-return paths above (NULL, non-final status, malformed cost) all `return 0` before
+  # reaching here, so formatting never turns "no authoritative figure" into 0.000000.
+  printf '%.6f' "$cost"
 }
 
 # _est_tokens <text> -> calibrated token estimate (~3.3 chars/token, the Token Optimizer constant;
@@ -1300,7 +1654,7 @@ _codex_quota_line() {
   printf '%s' "$msg"
 }
 
-# ---- SESSION LIMIT AWARENESS (copilot conserve engine). Best-effort, degrade gracefully (GLM review):
+# ---- SESSION LIMIT AWARENESS (copilot conserve engine). Best-effort, degrade gracefully:
 # NEVER die, NEVER block a delegation — a wrong/absent limit signal must only soften a RECOMMENDATION.
 _pct_normalize() {   # echo a 0..100 number, else nothing
   awk -v v="${1:-}" 'BEGIN { if (v ~ /^([0-9]+([.][0-9]+)?|[.][0-9]+)$/ && v>=0 && v<=100) printf "%g", v }' 2>/dev/null
@@ -1523,7 +1877,7 @@ _ready_lanes() {
 # _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
 # OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
 # local($0/private) > Devin GLM/SWE(free) > keyless Gemini > Codex Sol/Terra(only if ChatGPT plan has
-# headroom) > OpenRouter(only if funded). "All lanes tight" is handled first (GLM F6).
+# headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
 _conserve_reco() {
   local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" xstale="" posture lane="" why="" tight=0
   for tok in $limits; do case "$tok" in
@@ -1849,6 +2203,9 @@ cmd_advise() {
     # On explicit --refresh, show diagnostics (don't suppress stderr).
     if [ "$do_refresh" -eq 1 ]; then
       refresh_benchmarks || true
+    elif [ "$json_out" -eq 1 ]; then
+      # --json must emit ONLY JSON: suppress the refresh success line (stdout) too, not just stderr.
+      refresh_benchmarks >/dev/null 2>&1 || true
     else
       refresh_benchmarks 2>/dev/null || true
     fi
@@ -1883,6 +2240,11 @@ cmd_advise() {
         [ -n "$p" ] && price_out="$p"
       fi
     fi
+    # Fold local outcome history into the score BEFORE threshold/value-ratio, so a lane that keeps
+    # failing THIS repo's checks drops out and a proven one rises. Zero history -> mult 1.00 (neutral).
+    local _hm _mult; _hm="$(_history_mult "$lane" "$resolved" "$category")"; _mult="${_hm%%|*}"
+    case "$_mult" in ''|*[!0-9.]*) _mult="1.00" ;; esac
+    score="$(awk -v s="$score" -v m="$_mult" 'BEGIN{printf "%.4f", s*m}')"
     # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
     # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
     case "$lane" in cx|cc|dv|gm) price_in="0"; price_out="0" ;; esac
@@ -1948,15 +2310,54 @@ cmd_advise() {
   # Guard: if no candidates at all (empty model table), fail gracefully.
   [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
 
+  # Recompute the recommended model's history for the human/json explanation (raw + effective).
+  local _rh rec_mult rec_neff rec_peff rec_scope _rhrest
+  _rh="$(_history_mult "$rec_lane" "$rec_resolved" "$category")"
+  rec_mult="${_rh%%|*}"; _rhrest="${_rh#*|}"; rec_neff="${_rhrest%%|*}"; _rhrest="${_rhrest#*|}"; rec_peff="${_rhrest%%|*}"; rec_scope="${_rh##*|}"
+  case "$rec_mult" in ''|*[!0-9.]*) rec_mult="1.00" ;; esac
+  local rec_pct; rec_pct="$(awk -v m="$rec_mult" 'BEGIN{printf "%+.0f", (m-1)*100}')"
+
+  # Ranked fallback shortlist: the SAME preference order the recommendation uses, as an ordered list so
+  # a caller can retry the next candidate when the top pick hits a transport failure (rate limit / 5xx /
+  # timeout). Rank groups mirror the picker exactly — (0) subscription lanes meeting threshold by score,
+  # (1) paid lanes meeting threshold by value ratio, (2) everything else by score — so shortlist[0] IS
+  # the recommendation. Ordering only: this ranks candidates, it never asserts any of them will succeed.
+  local _sl="" _slg _slp
+  while IFS='|' read -r alias resolved lane tier score cost vr meets; do
+    [ -n "$alias" ] || continue
+    case "$meets:$lane" in
+      1:cx|1:cc|1:dv|1:gm) _slg=0; _slp="$score" ;;
+      1:*)                 _slg=1; _slp="$vr" ;;
+      *)                   _slg=2; _slp="$score" ;;
+    esac
+    _sl="$_sl$_slg|$_slp|$alias|$resolved|$lane|$meets|$score|$vr
+"
+  done < <(printf '%s\n' "$results")
+  # group asc, then the group-appropriate primary desc. -s (stable) so ties keep input (table) order,
+  # matching the picker's first-wins on equal score/ratio — this is what makes shortlist[0] == the pick.
+  local _sl_sorted; _sl_sorted="$(printf '%s' "$_sl" | grep -v '^$' | sort -s -t'|' -k1,1n -k2,2rn)"
+  local shortlist_json="[]"
+  if have jq; then
+    shortlist_json="$(printf '%s\n' "$_sl_sorted" \
+      | jq -R 'select(length>0)|split("|")|{alias:.[2],model:.[3],lane:.[4],meets:(.[5]=="1"),score:(.[6]|tonumber?),value_ratio:(.[7]|tonumber?)}' 2>/dev/null \
+      | jq -s '.' 2>/dev/null)"
+    [ -n "$shortlist_json" ] || shortlist_json="[]"
+  fi
+
   if [ "$json_out" -eq 1 ]; then
     jq -n \
       --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
       --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
+      --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
+      --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, reason:$rec_reason},
+        shortlist:$shortlist,
         benchmark_data_available:($has_bench=="1"),
-        benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring)))}'
+        benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
+        history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
+                 passed_effective:($hpeff|tonumber? // 0), scope:$hscope}}'
 
   else
     echo "== outsourcerer advise =="
@@ -1975,6 +2376,10 @@ cmd_advise() {
     echo "   model: $rec_alias ($rec_resolved)"
     echo "   lane:  $rec_lane"
     echo "   why:   $rec_reason"
+    # Show the local-history adjustment when there is any (else stay silent — pure benchmark pick).
+    if [ "$rec_scope" != "none" ] && awk -v n="$rec_neff" 'BEGIN{exit (n+0>0)?0:1}'; then
+      echo "   local: ${rec_pct}% from ${rec_neff} effective runs (${rec_scope}: this ${category})"
+    fi
     echo
     echo "--- all candidates (sorted by value ratio, >> = recommended) ---"
     printf '%s\n' "$results" | sort -t'|' -k7 -rn | while IFS='|' read -r alias resolved lane tier score cost vr meets; do
@@ -2221,6 +2626,20 @@ _supervise() {
     # prevents. The log cannot answer this — a silent delegate emits no tool-call markers either — so
     # ask the filesystem. Bounded and only consulted at the moment of judgement, so healthy jobs never
     # pay for it. OSRC_FS_PROGRESS=0 disables.
+    #
+    # KNOWN LIMITATION (not solved): this check cannot distinguish the delegate's own writes from
+    # any other writer's under the same directory. The orchestrator, a concurrent job, an editor
+    # autosave, or any process with write access to the cwd can touch a file newer than .fsmark and
+    # extend the stall window as if the delegate were working. A previous round attempted to gate
+    # this on the delegate's cumulative CPU (`ps -o time=`) to reject foreign writes, but that was
+    # withdrawn: it killed healthy delegates on hosts where `ps` is denied (sandbox/container),
+    # failed open on exactly those hosts (restoring unlimited foreign-writer liveness), and a
+    # coarse whole-second cumulative CPU reading still killed legitimate low-CPU I/O writers. The
+    # hard timeout remains the backstop for a truly wedged run that foreign writes keep propping
+    # up. A correct fix needs a bounded renewal budget (cap how many times a foreign write can
+    # extend the window) plus an activity counter finer than whole-second cumulative CPU. Until
+    # then, this check accepts any filesystem change as liveness -- the same behavior it had before
+    # the CPU gate was introduced.
     if [ "$idle" -ge "$warn" ] && [ "${OSRC_FS_PROGRESS:-1}" = "1" ] && [ -n "${_jcwd:-}" ] && [ -d "$_jcwd" ]; then
       local _newest
       # `-newer <file>` is POSIX; `-newermt @epoch` is a GNU extension that BSD find silently fails to
@@ -2332,7 +2751,16 @@ _fg_guard() {
   if ! mkfifo "$fifo" 2>/dev/null; then "$fn"; return $?; fi     # no fifo -> never block the user, run inline
   export OSRC_FG_GUARD_ACTIVE=1
   tee "$cap" < "$fifo" & local tp=$!
-  ( "$fn" </dev/null > "$fifo"; echo $? > "$rcf" ) & local prod=$!   # stdout->fifo (streamed+captured); stderr stays on terminal
+  # The rc file is written from an EXIT trap, NOT a follow-up statement: when $fn exits internally
+  # (die is `exit`), a `"$fn"; echo $? > rcf` sequence never reaches the echo, the rc file stays
+  # missing, and the default below reported 124 — indistinguishable from a real hard timeout. Any
+  # caller that treats 124 as retryable infra would then RETRY an internal abort like "not logged
+  # in" instead of surfacing it. The trap fires on plain return AND on internal exit; only a
+  # hard-killed subshell (watchdog SIGKILL) writes nothing, so 124-by-default now means exactly
+  # "killed", and the hard/teardown/interrupt arms below still override rc for their cases.
+  # (TERM/INT are mapped to their conventional codes first: on a bare TERM the EXIT trap would
+  # otherwise record $?=0 — a killed run must never read as success.)
+  ( trap 'exit 143' TERM; trap 'exit 130' INT; trap 'echo $? > "$rcf"' EXIT; "$fn" </dev/null > "$fifo" ) & local prod=$!   # stdout->fifo (streamed+captured); stderr stays on terminal
   ( local t0 now mk=0; t0=$(date +%s)
     while kill -0 "$prod" 2>/dev/null; do
       sleep 2; now=$(date +%s)
@@ -2340,12 +2768,20 @@ _fg_guard() {
       if [ "$mk" != 0 ] && [ $((now-mk)) -ge "$tdl" ]; then echo teardown > "$hit"; _kill_tree "$prod"; break; fi
       if [ $((now-t0)) -ge "$hard" ];               then echo hard     > "$hit"; _kill_tree "$prod"; break; fi
     done ) & local gd=$!
-  trap 'echo interrupt > "'"$hit"'"; _kill_tree "'"$prod"'" 2>/dev/null; kill "'"$gd"'" "'"$tp"'" 2>/dev/null; rm -f "'"$base"'".* 2>/dev/null' INT TERM
+  # NB: the trap must NOT delete the marker files here. It records `interrupt` into $hit and kills the
+  # tree, then control resumes after `wait` and the rc/hval read below turns that into rc=130. Removing
+  # $base.* inside the trap erased BOTH the interrupt marker and the rc file, so the read defaulted to
+  # rc=124 (== hard-timeout) and a caller that retries transport would auto-retry a user Ctrl-C. The
+  # end-of-function cleanup already removes these files on every return path.
+  trap 'echo interrupt > "'"$hit"'"; _kill_tree "'"$prod"'" 2>/dev/null; kill "'"$gd"'" "'"$tp"'" 2>/dev/null' INT TERM
   wait "$prod" 2>/dev/null
   kill "$gd" 2>/dev/null; wait "$gd" 2>/dev/null; wait "$tp" 2>/dev/null
   trap - INT TERM
   export OSRC_FG_GUARD_ACTIVE=0
-  local rc hval lastmark; rc="$(cat "$rcf" 2>/dev/null || echo 124)"; hval="$(cat "$hit" 2>/dev/null || echo)"
+  # Missing OR non-numeric/empty rc file -> 124 (killed). `cat || echo` alone is not enough: an
+  # existing-but-empty file cats successfully and would return an empty rc.
+  local rc hval lastmark; rc="$(cat "$rcf" 2>/dev/null)"; case "$rc" in ''|*[!0-9]*) rc=124 ;; esac
+  hval="$(cat "$hit" 2>/dev/null || echo)"
   lastmark="$(_last_marker "$cap")"
   case "$hval" in
     teardown) printf '>>> [watchdog] work finished (%s) but the process kept running %ss past it — a teardown hang (e.g. codex MCP-auth / Stop-hook loop). Killed the tree. For unattended work use `bg` (auto watchdog + report).\n' "${lastmark:-marker}" "$tdl" >&2
@@ -2439,13 +2875,58 @@ _bg_launch() {
   printf '%s' "$id"
 }
 
+# Normalize OUTSOURCERER_DEPTH for the recursion guard. The guard compares the depth
+# with `[ "$OUTSOURCERER_DEPTH" -ge "$max" ]`. If the depth is a non-integer string
+# ('bogus', '1x', '-1', ' '), that `[` test errors with "integer expression expected",
+# returns false (exit 2), and the guard FAILS OPEN -- the launch goes through, rc=0, a
+# job is minted. A delegate controls its own environment, so poisoning the depth is the
+# easiest way to escape the guard. The fix: normalize before comparing.
+#   unset / empty        -> 0 (the normal top-level case)
+#   well-formed non-neg  -> decimal value (a single leading '+' is stripped, POSIX-legal;
+#                           leading zeros are stripped so later $((...)) arithmetic reads
+#                           the value as base-10, NOT octal -- bash reads a leading-zero
+#                           literal as octal, so 08/09 crash with 'value too great for
+#                           base' and 010 silently becomes 9 instead of 10)
+#   a lone '+'           -> unparseable (a sign with no digits after it is NOT an integer)
+#   ANY other value      -> unparseable, the depth cannot be trusted -> caller REFUSES
+# Returns 0 when OUTSOURCERER_DEPTH is now a usable non-negative integer (set in place),
+# returns 1 when the value is unparseable (caller must refuse without launching).
+_osrc_normalize_depth() {
+  local _v="${OUTSOURCERER_DEPTH:-}"
+  # A genuinely unset or empty ORIGINAL value is the top-level case. This check comes
+  # BEFORE sign-stripping so a lone '+' (which strips to '') is NOT mistaken for top-level.
+  [ -z "$_v" ] && { OUTSOURCERER_DEPTH=0; return 0; }
+  # Strip a single leading '+' (POSIX-legal non-negative sign), but only when digits
+  # follow it. '+*[!0-9]*' catches '+x', '+-1', etc.; the empty-after-strip case ('+'
+  # alone) is refused by the empty check below.
+  case "$_v" in
+    +*[!0-9]*) return 1 ;;   # '+' followed by a non-digit -> unparseable
+    +*)        _v="${_v#+}" ;; # single leading '+', digits follow (checked next)
+  esac
+  # A sign with no digits after it (e.g. bare '+') is NOT a valid integer.
+  [ -z "$_v" ] && return 1
+  # Now _v must be all decimal digits.
+  case "$_v" in
+    *[!0-9]*) return 1 ;;   # unparseable -> caller refuses
+  esac
+  # Strip leading zeros so every later $((OUTSOURCERER_DEPTH + 1)) reads the value as
+  # base-10. Keep a single '0' for the zero case. Without this, route_delegate's
+  # $((OUTSOURCERER_DEPTH + 1)) interprets a leading-zero literal as octal: 08/09 crash
+  # ('value too great for base') and 010 silently becomes 9 instead of 11.
+  while [ "${#_v}" -gt 1 ] && [ "${_v#[0]}" != "$_v" ]; do
+    _v="${_v#0}"
+  done
+  OUTSOURCERER_DEPTH="$_v"
+  return 0
+}
+
 # bg [--provider X already parsed] [--worktree] <verb> [flags] "task" -> detach a supervised job, print id.
 cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -2491,6 +2972,28 @@ cmd_bg() {
     esac
   done
   [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
+  # AUTHORIZATION (separate from the preflight VALIDATION below). The parent must refuse to
+  # launch when the caller's inherited depth is already at the max. The preflight resets
+  # OUTSOURCERER_DEPTH=0 so it can evaluate the dispatch gate without short-circuiting at the
+  # recursion guard -- that is correct for VALIDATION (is the lane wired, is the model valid),
+  # but it is NOT authorization. Without this check, an already-delegated agent (depth >= max)
+  # mints a bg job whose detached child inherits the depth, re-enters route_delegate, and the
+  # guard trips inside the child -- but a job dir was already minted and an id printed, so the
+  # caller believes work started. Worse, the detached child no longer resets depth (see run_job),
+  # so the guard DOES trip there; but the parent-side check fails FIRST, before any job dir is
+  # claimed, so the refusal is clean and no phantom job is left behind. Validation and
+  # authorization are not the same decision: the preflight answers "can this route dispatch?",
+  # this check answers "is this caller allowed to delegate at all?".
+  # Normalize the depth BEFORE comparing (see _osrc_normalize_depth). The old `: "${...:=0}"`
+  # only filled unset/empty; a malformed value ('bogus', '1x', '-1', ' ') slipped through and
+  # `[ "$bad" -ge 1 ]` errored with "integer expression expected", returning false -> fail-open.
+  local _depth_raw="${OUTSOURCERER_DEPTH:-}"
+  if ! _osrc_normalize_depth; then
+    die "bg: refusing to launch -- OUTSOURCERER_DEPTH is unparseable ('$_depth_raw'). An unparseable depth cannot be trusted (a delegate controls its own environment), so the guard refuses rather than fail-open. Set OUTSOURCERER_DEPTH to a non-negative integer or unset it. Nothing was started."
+  fi
+  if [ "$OUTSOURCERER_DEPTH" -ge "${OUTSOURCERER_MAX_DEPTH:-1}" ]; then
+    die "bg: refusing to launch -- recursion limit reached (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH >= OUTSOURCERER_MAX_DEPTH=${OUTSOURCERER_MAX_DEPTH:-1}). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N. Nothing was started."
+  fi
   # Route preflight: ask the real routing code whether this is even dispatchable, before minting a job.
   # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
   # text lane) otherwise produced a job id, a "launched" line, and a failure only the job record ever
@@ -2499,14 +3002,24 @@ cmd_bg() {
   # --provider must be passed EXPLICITLY: cmd_bg already consumed the flag into a shell variable that a
   # child process does not inherit, so without this the preflight would silently check the DEFAULT lane
   # and bless a combination the real run rejects.
-  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 "$SCRIPT_PATH" --provider "$PROVIDER" "$@" 2>&1)" || _pfrc=$?
-  # Fail OPEN on an inconclusive preflight, CLOSED only on a verdict we recognise. The preflight is an
-  # early-warning convenience: the real run still enforces every gate. Treating any non-zero exit as a
-  # refusal would turn an unrelated hiccup in the probe into a launch failure, which is a new failure
-  # mode of exactly the kind this whole change exists to remove.
-  if [ "$_pfrc" -ne 0 ] && printf '%s' "$_pfout" | grep -qaE 'backend-only|image-generation model|unknown provider'; then
+  # OUTSOURCERER_DEPTH=0: the preflight must evaluate the DISPATCH gate (is the lane wired, is the
+  # model valid), NOT the recursion guard. Under nested delegation the parent's OUTSOURCERER_DEPTH is
+  # already exported, and a child that inherits it exits at the recursion guard before ever reaching
+  # the dispatch-gate checks -- so cmd_bg would see an unrecognized error and (under the old fail-open
+  # logic) launch anyway, minting a phantom job. Resetting depth here lets the preflight reach the
+  # real dispatch checks. The recursion guard is enforced SEPARATELY: the parent-side authorization
+  # check above refuses before any job is minted, and the detached __runjob child inherits the
+  # caller's depth (it no longer resets it) so route_delegate's guard trips there too as a backstop.
+  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" --provider "$PROVIDER" "$@" 2>&1)" || _pfrc=$?
+  # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
+  # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
+  # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
+  # preflight only exits non-zero via a `die` in the lane-resolution body (every gate is a die), so a
+  # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
+  # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
+  if [ "$_pfrc" -ne 0 ]; then
     printf '%s\n' "$_pfout" | grep -a 'ERROR:' | head -3 >&2
-    die "bg: refusing to launch -- this model/lane combination cannot run (see above). Nothing was started."
+    die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
@@ -2568,6 +3081,47 @@ _autodetach_run() {
   return 0
 }
 
+# _resolve_run_cost <lane> <launch_epoch> <out.log> -> cost string for the ledger.
+# Priority: OpenRouter per-gen cost (authoritative) > Hermes receipt from state.db > lane default.
+# For the Hermes lane, when no receipt is available the labeled ESTIMATE ("~0") is used -- never a
+# measured "0.000000". A fabricated measured cost is worse than no cost feature: it suppresses the
+# honest "unmeasured" signal and understates real spend. Extracted from run_job so the hermes cost
+# path is unit-testable without launching a full background job.
+_resolve_run_cost() {
+  local lane="$1" launch="$2" log="$3"
+  local real_cost; real_cost="$(_or_run_cost "$log" 2>/dev/null)"
+  if [ -z "$real_cost" ]; then
+    if grep -qE 'gen-[0-9]+-[a-zA-Z0-9]+' "$log" 2>/dev/null; then
+      # per-gen cost is authoritative and per-job; the account-usage delta double-counts under concurrent
+      # fanout (overlapping before/after windows), so drop it -> use the clearly-labeled '~' estimate.
+      local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$log" 2>/dev/null | tail -1)"
+      [ -n "$est" ] && real_cost="~$est"
+    elif [ "$lane" = "hermes" ]; then
+      # Hermes real cost from ~/.hermes/state.db, keyed on cwd + launch epoch. When the receipt is
+      # unavailable (DB absent, locked, schema-drifted, no matching row, or ambiguous), the labeled
+      # ESTIMATE is used -- never a measured 0. The '~' prefix marks it as an estimate so the Tab
+      # never confuses it with a real receipt.
+      local hcost; hcost="$(_hermes_run_cost "$launch" 2>/dev/null)"
+      if [ -n "$hcost" ]; then
+        real_cost="$hcost"
+      else
+        real_cost="~0"
+      fi
+    else
+      # No OpenRouter generation id in the stream. For a NATIVE/keyless/local/plan lane that genuinely
+      # means no cash ($0). But for a CASH OpenRouter lane (or) it means we COULD NOT MEASURE this run
+      # (the Responses stream never surfaced a gen- id and the /generation lookup was empty) -- recording
+      # $0 there would UNDERSTATE real spend (cash-lane under-report guard). Leave it unmeasured so the
+      # Tab counts it under "cash lanes, est-only" (honest) instead of "$0 measured" (false).
+      case "$lane" in
+        or) real_cost="" ;;                 # cash OpenRouter, unmeasurable -> unmeasured, NOT "free"
+        *)  real_cost="0.000000" ;;         # native / keyless / local / plan -> genuinely no cash
+      esac
+    fi
+  fi
+  printf '%s' "$real_cost"
+}
+
 # _worktree_setup <job-id> -> "path<TAB>branch<TAB>base_sha" + rc 0 when OSRC_WORKTREE=1 and we're in a
 # git repo; rc 1 (no output) otherwise so the caller keeps the normal checkout. Opt-in only, never implicit.
 _worktree_setup() {
@@ -2577,7 +3131,13 @@ _worktree_setup() {
   [ -n "$root" ] || { echo "[outsourcerer] --worktree ignored: not inside a git repo (running in the normal checkout)." >&2; return 1; }
   wt="$root/.outsourcerer/worktrees/$id"; br="outsourcerer/$id"
   base="$(git -C "$root" rev-parse HEAD 2>/dev/null)"
-  if ! git -C "$root" worktree add -q -b "$br" "$wt" HEAD 2>/dev/null; then
+  # An explicit pinned base (set by crew) makes ALL workers branch from the SAME commit, avoiding the
+  # base-SHA race where each job would otherwise snapshot repo HEAD at its own launch instant.
+  # Unset/invalid -> HEAD (unchanged legacy behavior).
+  if [ -n "${OSRC_WORKTREE_BASE:-}" ] && git -C "$root" rev-parse --verify "${OSRC_WORKTREE_BASE}^{commit}" >/dev/null 2>&1; then
+    base="$(git -C "$root" rev-parse "${OSRC_WORKTREE_BASE}^{commit}")"
+  fi
+  if ! git -C "$root" worktree add -q -b "$br" "$wt" "$base" 2>/dev/null; then
     echo "[outsourcerer] --worktree setup failed for $id (branch exists / detached?); running in the normal checkout." >&2
     return 1
   fi
@@ -2587,6 +3147,8 @@ _worktree_setup() {
 # __runjob <id> <provider> <verb> [flags] "task"  (internal; run detached by cmd_bg)
 run_job() {
   local id="$1" prov="$2"; shift 2
+  # The job id IS this delegation's durable run_id; the outcome row will join on it.
+  export OSRC_RUN_ID="$id"
   # This detached job process creates last.txt/out.log (incl. the Codex --output-last-message
   # path that writes last.txt DURING _supervise). Set a private umask up front so NONE of them are ever
   # briefly world-readable. No restore needed -- this is a dedicated short-lived process that exits after.
@@ -2613,6 +3175,8 @@ run_job() {
   rm -f "$jd/setup" 2>/dev/null || true   # setup finished; normal launch-grace applies from here
   # peek model/tier for windows + meta (non-fatal)
   _consume_flags "$@" 2>/dev/null || true
+  # Classify from the REAL task text (REST), not the "job:<id>" placeholder record_ledger sees.
+  export OSRC_TASK_CLASS="$(_classify_task "${REST[*]:-}")"
   local row id2 ttier="" tier lane=""
   row="$(resolve_model_row "$MODEL")"; id2="$MODEL"
   # row is "resolved-id|lane|tier" (see resolve_model_row). Capture the LANE (middle field) too --
@@ -2622,12 +3186,27 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
   tier="$(resolve_tier "$id2" "$ttier")"
   local wins warn kill hard; wins="$(_tier_windows "$tier")"; warn="${wins%% *}"; hard="${wins##* }"; kill="$(echo "$wins" | awk '{print $2}')"
+  # LANE-AWARE STALL FLOOR (devin). devin's `-p` print mode is non-streaming: on a single long model
+  # completion it writes NOTHING to stdout AND nothing to its own CLI log while parked on the model API.
+  # A reasoning model generating a large answer has been observed silent for ~1450s on hard tasks --
+  # longer than the tier stall window -- so both liveness signals (out.log byte-growth AND the CLI-log
+  # mtime) freeze together and the watchdog reaps a job that is genuinely mid-inference. No finer signal
+  # exists during that wait (no streaming to opt into, silent log, and a live-but-waiting process is
+  # indistinguishable from a hung one), so the only correct fix is a window wide enough to outlast a
+  # legitimate completion; the HARD cap stays the real backstop for a truly wedged run. The floor never
+  # LOWERS a window a slower tier already set. Override: OSRC_DEVIN_STALL_KILL (0 disables the floor).
+  if [ "$prov" = "devin" ] || [ "$lane" = "dv" ]; then
+    local _dsk="${OSRC_DEVIN_STALL_KILL:-1800}"
+    case "$_dsk" in ''|*[!0-9]*) _dsk=1800 ;; esac
+    [ "$_dsk" -gt 0 ] && [ "$kill" -lt "$_dsk" ] 2>/dev/null && kill="$_dsk"
+    [ "$hard" -lt "$kill" ] 2>/dev/null && hard="$kill"   # hard cap must never sit below the stall floor
+  fi
   # Prefer the start time _bg_launch recorded before detaching (job liveness), so `started` reflects
   # the real launch instant, not the later meta write; fall back to now for a direct (non-bg) call.
   local _started; _started="$(cat "$jd/started_at" 2>/dev/null)"; case "$_started" in ''|*[!0-9]*) _started="$(date +%s)" ;; esac
@@ -2639,7 +3218,13 @@ run_job() {
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
   fi
   # Run the real dispatch (foreground path) under the watchdog, in stream mode so we get last.txt+cost.
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_DEPTH=0 OUTSOURCERER_PROVIDER="$prov" \
+  # OUTSOURCERER_DEPTH is NOT reset here: the detached child inherits the caller's depth so
+  # route_delegate's recursion guard sees it and bounds the delegation chain. Resetting it to 0
+  # (the previous behavior) let an already-delegated agent mint a bg job whose child restarted at
+  # depth 0, defeating the guard entirely and allowing unbounded re-delegation. The parent-side
+  # authorization check in cmd_bg refuses before minting when depth >= max; this guard is the
+  # backstop inside the child.
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --provider "$prov" "$verb" "$@"
   local sc=$?
@@ -2664,34 +3249,22 @@ run_job() {
   [ -s "$jd/last.txt" ] || cp "$jd/out.log" "$jd/last.txt" 2>/dev/null || true
   # last.txt is the result payload; keep it private.
   [ -f "$jd/last.txt" ] && chmod 600 "$jd/last.txt" 2>/dev/null || true
-  # REAL cash, in priority order:
-  #  1. Per-generation cost from OpenRouter's /generation endpoint (authoritative, exact, per-job).
-  #  2. If this WAS an OpenRouter run but the per-gen lookup failed: the harness estimate (labeled "~").
-  #     (The account-usage DELTA was removed -- it double-counted under concurrent fanout.)
-  #  3. No OpenRouter generation at all => native/keyless => $0 cash.
-  local real_cost; real_cost="$(_or_run_cost "$jd/out.log" 2>/dev/null)"
-  if [ -z "$real_cost" ]; then
-    if grep -qE 'gen-[0-9]+-[a-zA-Z0-9]+' "$jd/out.log" 2>/dev/null; then
-      # per-gen cost is authoritative and per-job; the account-usage delta double-counts under concurrent
-      # fanout (overlapping before/after windows), so drop it -> use the clearly-labeled '~' estimate.
-      local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$jd/out.log" 2>/dev/null | tail -1)"
-      [ -n "$est" ] && real_cost="~$est"
-    else
-      # No OpenRouter generation id in the stream. For a NATIVE/keyless/local/plan lane that genuinely
-      # means no cash ($0). But for a CASH OpenRouter lane (or) it means we COULD NOT MEASURE this run
-      # (the Responses stream never surfaced a gen- id and the /generation lookup was empty) -- recording
-      # $0 there would UNDERSTATE real spend (cash-lane under-report guard). Leave it unmeasured so the Tab counts it under
-      # "cash lanes, est-only" (honest) instead of "$0 measured" (false).
-      case "$lane" in
-        or) real_cost="" ;;                 # cash OpenRouter, unmeasurable -> unmeasured, NOT "free"
-        *)  real_cost="0.000000" ;;         # native / keyless / local / plan -> genuinely no cash
-      esac
-    fi
-  fi
+  # REAL cash, resolved by _resolve_run_cost (see its doc comment for the priority order and the
+  # Hermes receipt/estimate contract). Extracted so the hermes cost path is unit-testable.
+  local real_cost; real_cost="$(_resolve_run_cost "$lane" "$_started" "$jd/out.log")"
   # Always record the run (even unmeasured): an empty cost is meaningful (cmd_tab counts it as
   # est-only), and the old `[ -n "$real_cost" ]` guard would DROP an unmeasured cash run entirely,
   # hiding a real offload from the Tab. record_ledger tolerates an empty cost arg.
   OSRC_LEDGER_FORCE=1 record_ledger "$prov" "$id2" "$tier" "$verb" "job:$id" "$real_cost" "$lane"
+  # Record the delegation OUTCOME, correlated by run_id (= job id), for advise learning.
+  # Infra/permission/provider failures map to blocked/abandoned so they NEVER teach model quality
+  # (only passed/failed/reverted feed the fold). A checkless success is completed_unverified (excluded);
+  # true check-backed passed/failed comes from the free gate / loop judges, not from a bare run.
+  local _st _m _oc _rsn
+  _st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null || echo '?')"
+  _m="$(_status_to_outcome "$_st" "$sc")"; _oc="${_m%%$'\t'*}"; _rsn="${_m#*$'\t'}"
+  # Pass EVERY field explicitly — no reliance on exported env (which record_ledger no longer sets).
+  record_outcome "$_oc" "$_rsn" "" "$id" "$lane" "$id2" "${OSRC_TASK_CLASS:-}" "$(_repo_key)"
   return "$sc"
 }
 
@@ -3009,6 +3582,247 @@ cmd_cleanup() {
   fi
   rm -f "$wj"
   echo "[outsourcerer] removed worktree for $target (branch $branch)"
+}
+
+# =============================================================================
+# CREW — turn `fanout --worktree edit` into a SAFE TRANSACTION.
+# Coordinator only: reuses cmd_fanout (launch/wait), _worktree_setup (isolation, pinned base),
+# _loop_check + _check_signature (grading), cmd_cleanup (teardown), record_outcome (history).
+# A merge conflict -> skip that worker, preserve it, record a NON-learnable outcome (no auto-merge).
+# =============================================================================
+
+# _crew_check <dir> <check> <outfile> -> run the frozen check with cwd=<dir>; echo its rc. Reuses the
+# loop family's bounded runner so a hung check can't wedge the crew (stock macOS has no timeout(1)).
+_crew_check() {
+  local dir="$1" check="$2" out="$3" secs="${OSRC_CHECK_TIMEOUT:-${OSRC_CHECK_TIMEOUT_DEFAULT:-300}}"
+  # </dev/null so a check that reads stdin cannot consume the caller's members-list loop.
+  ( cd "$dir" 2>/dev/null && _loop_check "$secs" "$check" "$out" ) </dev/null; return $?
+}
+
+# _crew_worse <base_rc> <base_sig> <post_rc> <post_sig> -> rc 0 if POST is WORSE than baseline.
+# Ladder (v1): post passes -> not worse; baseline passed & post fails -> worse; both fail & signatures
+# differ -> conservative worse (revert ambiguous change); both fail & identical -> not worse (a
+# non-regressing failing baseline). Signature via _check_signature strips volatile tokens.
+_crew_worse() {
+  local brc="$1" bsig="$2" prc="$3" psig="$4"
+  [ "${prc:-1}" -eq 0 ] 2>/dev/null && return 1
+  [ "${brc:-1}" -eq 0 ] 2>/dev/null && return 0
+  diff -q "$bsig" "$psig" >/dev/null 2>&1 && return 1 || return 0
+}
+
+# _crew_worktree_clean <root> -> rc 0 if the caller tree has no TRACKED changes. Ignores our own
+# untracked worktree dir (.outsourcerer/worktrees/ lives inside the repo and would otherwise read as
+# dirty); ff-only promotion only cares about tracked divergence, and untracked files are never clobbered.
+_crew_worktree_clean() {
+  # -uno = ignore ALL untracked (ff-only never clobbers untracked); only tracked divergence matters.
+  [ -z "$(git -C "$1" status --porcelain -uno 2>/dev/null | head -1)" ]
+}
+
+# _crew_scan_staged <dir> -> rc 0 if the STAGED delta contains a live-secret VALUE (block integration).
+# Mirrors the value patterns in _secret_scan (second defense; workers already passed the cloud gate).
+_crew_scan_staged() {
+  # --text/--no-ext-diff/--no-textconv defeat a worker-planted .gitattributes that would hide or
+  # execute during the diff. Patterns cover current key shapes (sk-proj-, github_pat_, xox*, AKIA).
+  git -C "$1" diff --cached --text --no-ext-diff --no-textconv 2>/dev/null \
+    | grep -Eq 'OPENROUTER_API_KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bpoas]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+}
+
+# crew --check '<cmd>' [fanout routing flags] -- "task1" "task2" ...
+cmd_crew() {
+  local check="" a; local -a passthru=() tasks=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --check) [ -n "${2:-}" ] || die "crew --check needs a command"; check="$2"; shift 2 ;;
+      --)      shift; tasks=("$@"); break ;;
+      *)       passthru+=("$1"); shift ;;
+    esac
+  done
+  [ -n "$check" ] || die "crew requires --check '<command>' (run on the baseline and after each worker)"
+  [ "${#tasks[@]}" -gt 0 ] || die "crew needs tasks after -- (e.g. crew --check 'make test' -- \"do X\" \"do Y\")"
+  have git || die "crew needs git"; have jq || die "crew needs jq"
+
+  # --- Preflight: fail closed (R7) ---
+  local root; root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$root" ] || die "crew needs a git repository (cwd is not one). Read-only fanout still works without git."
+  git -C "$root" rev-parse HEAD >/dev/null 2>&1 || die "crew: repo has no HEAD commit — make an initial commit first."
+  git -C "$root" worktree list >/dev/null 2>&1 || die "crew: this git build lacks 'git worktree'."
+  _crew_worktree_clean "$root" || die "crew: caller tree has uncommitted tracked changes — commit or stash first (crew never auto-stashes)."
+  local caller_branch base_sha
+  caller_branch="$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null || echo '')"
+  [ -n "$caller_branch" ] || die "crew: HEAD is detached — check out a branch to promote onto."
+  base_sha="$(git -C "$root" rev-parse HEAD)"
+
+  # --- Crew state + integration worktree at the PINNED base (baseline runs HERE, before launch) ---
+  local crew_id cdir; crew_id="crew-$(_new_job_id)"; cdir="$OSRC_HOME/fanout/$crew_id"
+  _mkdir_private "$cdir" || true; : > "$cdir/verdicts.jsonl"
+  local iwt ibr; iwt="$root/.outsourcerer/worktrees/$crew_id-int"; ibr="outsourcerer/$crew_id-int"
+  git -C "$root" worktree add -q -b "$ibr" "$iwt" "$base_sha" 2>/dev/null \
+    || die "crew: could not create integration worktree at $iwt"
+  echo "[crew] $crew_id: integration worktree at $base_sha (branch $ibr)" >&2
+
+  # --- Baseline (frozen check) in the integration worktree ---
+  local base_rc bsig="$cdir/baseline.sig" bout="$cdir/baseline.out"
+  _crew_check "$iwt" "$check" "$bout"; base_rc=$?
+  _check_signature < "$bout" > "$bsig" 2>/dev/null || : > "$bsig"
+  local promote_ok=1
+  if [ "$base_rc" = "124" ] || [ "$base_rc" = "125" ]; then
+    echo "[crew] baseline check is UNMEASURABLE (rc=$base_rc) — integrating candidates but auto-promotion DISABLED. Fix the check or use a self-contained one." >&2
+    promote_ok=0
+  else
+    echo "[crew] baseline check rc=$base_rc (this is the bar every worker must not worsen)" >&2
+  fi
+
+  # --- Launch workers isolated, all branched from the SAME pinned base ---
+  jq -cn '$ARGS.positional' --args "${tasks[@]}" > "$cdir/tasks.json"   # newline-safe task list
+  local gid
+  gid="$(OSRC_WORKTREE_BASE="$base_sha" cmd_fanout --worktree --verb edit ${passthru[@]+"${passthru[@]}"} -- "${tasks[@]}")" || true
+  gid="$(printf '%s' "$gid" | tail -1)"
+  case "$gid" in fanout-*) ;; *) git -C "$root" worktree remove --force "$iwt" 2>/dev/null; git -C "$root" branch -D "$ibr" 2>/dev/null; die "crew: worker fanout failed to launch (gid='$gid')" ;; esac
+  echo "$gid" > "$cdir/fanout_gid"
+  _fanout_wait "$gid" || true
+
+  _crew_integrate "$root" "$iwt" "$ibr" "$gid" "$crew_id" "$cdir" "$check" "$base_rc" "$bsig" "$base_sha" "$caller_branch" "$promote_ok"
+}
+
+# _crew_integrate <root> <iwt> <ibr> <gid> <crew_id> <cdir> <check> <base_rc> <bsig> <base_sha> <caller_branch> <promote_ok>
+# The post-launch transaction: integrate each worker (squash -> scan -> grade -> keep/revert/skip),
+# ff-only promote from the caller worktree, selective cleanup. Split from the launch so it can be
+# exercised against a pre-built worker group without real delegations. Reads task list from cdir/tasks.json.
+_crew_integrate() {
+  local root="$1" iwt="$2" ibr="$3" gid="$4" crew_id="$5" cdir="$6" check="$7" base_rc="$8" bsig="$9" base_sha="${10}" caller_branch="${11}" promote_ok="${12}"
+  local gd; gd="$(_fanout_dir "$gid")"
+  local -a hooksoff=(-c "core.hooksPath=$cdir/nohooks" -c commit.gpgsign=false -c user.name=outsourcerer-crew -c user.email=crew@outsourcerer.local)
+  mkdir -p "$cdir/nohooks"
+  local jid label idx=0 accepted=0 reverted=0 skipped=0
+  while IFS="$(printf '\t')" read -r jid label; do
+    [ -n "$jid" ] || continue
+    idx=$((idx+1))
+    local wj="$OSRC_JOBS/$jid/worktree.json" wbr lane model tclass pre
+    [ -f "$wj" ] || { echo "[crew] $label: no worktree receipt (worker fell back to shared checkout) — skipping, non-learnable." >&2; record_outcome blocked provider_error "" "$jid" "" ""; skipped=$((skipped+1)); continue; }
+    wbr="$(jq -r '.branch' "$wj" 2>/dev/null)"
+    lane="$(_job_field "$jid" '.lane')"; [ "$lane" = "?" ] && lane=""
+    model="$(_job_field "$jid" '.model')"; [ "$model" = "?" ] && model=""
+    # task_class by the ORIGINAL task index encoded in the label (task-NN); non-numeric label -> position.
+    local _ti="${label##*-}"; case "$_ti" in ''|*[!0-9]*) _ti="$idx" ;; *) _ti="$((10#$_ti))" ;; esac
+    tclass="$(_classify_task "$(jq -r --argjson i "$((_ti-1))" '.[$i] // ""' "$cdir/tasks.json" 2>/dev/null)")"
+    pre="$(git -C "$iwt" rev-parse HEAD)"
+    # squash-merge the worker branch into the integration worktree
+    if ! git -C "$iwt" merge --squash "$wbr" >/dev/null 2>&1; then
+      # CONFLICT (not auto-resolved) -> hard-reset to the pre-worker commit, skip + preserve, non-learnable.
+      git -C "$iwt" reset --merge >/dev/null 2>&1 || true
+      git -C "$iwt" checkout -f . >/dev/null 2>&1 || true
+      git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1 || true
+      git -C "$iwt" clean -fdq >/dev/null 2>&1 || true
+      echo "[crew] $label: MERGE CONFLICT — skipped + preserved (resolve manually), non-learnable." >&2
+      record_outcome blocked merge_conflict "" "$jid" "$lane" "$model" "$tclass"
+      printf '{"worker":"%s","verdict":"conflict"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      skipped=$((skipped+1)); continue
+    fi
+    git -C "$iwt" add -A >/dev/null 2>&1
+    if git -C "$iwt" diff --cached --quiet 2>/dev/null; then
+      git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1 || true
+      # An empty squash may mean the worker left UNCOMMITTED edits — preserve them, never force-delete.
+      local _wp; _wp="$(jq -r '.path' "$wj" 2>/dev/null)"
+      if [ -n "$_wp" ] && [ -n "$(git -C "$_wp" status --porcelain 2>/dev/null | head -1)" ]; then
+        echo "[crew] $label: worker left uncommitted changes — preserved, non-learnable." >&2
+        record_outcome blocked provider_error "" "$jid" "$lane" "$model" "$tclass"
+        printf '{"worker":"%s","verdict":"dirty"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      else
+        echo "[crew] $label: no changes — skipped (non-learnable)." >&2
+        record_outcome completed_unverified "" "" "$jid" "$lane" "$model" "$tclass"
+        printf '{"worker":"%s","verdict":"no_change"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      fi
+      skipped=$((skipped+1)); continue
+    fi
+    if _crew_scan_staged "$iwt"; then
+      git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1 || true
+      echo "[crew] $label: SECRET in staged delta — blocked + preserved, non-learnable." >&2
+      record_outcome blocked secret_scan "" "$jid" "$lane" "$model" "$tclass"
+      printf '{"worker":"%s","verdict":"secret"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      skipped=$((skipped+1)); continue
+    fi
+    # squash commit (hooks off + no gpgsign + explicit identity). A failed commit must NOT cascade:
+    # reset and skip so the next worker's pre-commit baseline stays correct.
+    if ! git -C "$iwt" "${hooksoff[@]}" commit -q -m "crew: $label" >/dev/null 2>&1; then
+      git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1 || true
+      echo "[crew] $label: could not commit the integration squash — skipped, non-learnable." >&2
+      record_outcome blocked provider_error "" "$jid" "$lane" "$model" "$tclass"
+      printf '{"worker":"%s","verdict":"blocked"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      skipped=$((skipped+1)); continue
+    fi
+    # grade against the baseline bar
+    local prc psig="$cdir/w-$idx.sig" pout="$cdir/w-$idx.out"
+    _crew_check "$iwt" "$check" "$pout"; prc=$?
+    _check_signature < "$pout" > "$psig" 2>/dev/null || : > "$psig"
+    # A check that could not RUN (timeout/couldn't-start) is infra, never a learnable quality failure.
+    case "$prc" in
+      124|125) git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1
+               echo "[crew] $label: check could not run (rc=$prc) — reverted, non-learnable." >&2
+               record_outcome blocked timeout "" "$jid" "$lane" "$model" "$tclass"
+               printf '{"worker":"%s","verdict":"reverted"}\n' "$label" >> "$cdir/verdicts.jsonl"
+               skipped=$((skipped+1)); continue ;;
+    esac
+    if _crew_worse "$base_rc" "$bsig" "$prc" "$psig"; then
+      git -C "$iwt" reset --hard "$pre" >/dev/null 2>&1
+      local now; now="$(git -C "$iwt" rev-parse HEAD)"
+      [ "$now" = "$pre" ] || die "crew: revert restoration FAILED for $label (HEAD=$now expected=$pre) — aborting, integration preserved at $iwt."
+      git -C "$iwt" clean -fdq >/dev/null 2>&1 || true
+      echo "[crew] $label: regressed the check -> REVERTED (restored $pre)." >&2
+      # Only a MEASURABLE baseline yields a learnable outcome; otherwise the comparison is meaningless.
+      if [ "$promote_ok" = "1" ]; then record_outcome reverted test_failure "" "$jid" "$lane" "$model" "$tclass"
+      else record_outcome completed_unverified "" "" "$jid" "$lane" "$model" "$tclass"; fi
+      printf '{"worker":"%s","verdict":"reverted"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      reverted=$((reverted+1))
+    else
+      echo "[crew] $label: check holds -> KEPT." >&2
+      if [ "$promote_ok" = "1" ]; then record_outcome passed "" "" "$jid" "$lane" "$model" "$tclass"
+      else record_outcome completed_unverified "" "" "$jid" "$lane" "$model" "$tclass"; fi
+      printf '{"worker":"%s","verdict":"accepted"}\n' "$label" >> "$cdir/verdicts.jsonl"
+      accepted=$((accepted+1))
+    fi
+  done < "$gd/members.tsv"
+
+  # --- Promotion: ff-only from the CALLER's own worktree, after re-verify (R5) ---
+  local ahead; ahead="$(git -C "$iwt" rev-list --count "$base_sha..HEAD" 2>/dev/null || echo 0)"
+  echo "[crew] $crew_id: accepted=$accepted reverted=$reverted skipped=$skipped (integration ahead $ahead)" >&2
+  local promoted=0
+  if [ "$promote_ok" = "1" ] && [ "${ahead:-0}" -gt 0 ]; then
+    if [ "$(git -C "$root" rev-parse HEAD)" != "$base_sha" ] || [ "$(git -C "$root" symbolic-ref --quiet --short HEAD 2>/dev/null)" != "$caller_branch" ]; then
+      echo "[crew] caller branch moved/switched during the run — REFUSING to promote. Integration preserved at $iwt (branch $ibr). Inspect, then merge manually." >&2
+    elif ! _crew_worktree_clean "$root"; then
+      echo "[crew] caller tree has uncommitted tracked changes — REFUSING to promote. Integration preserved at $iwt." >&2
+    else
+      git -C "$root" merge --ff-only "$ibr" >/dev/null 2>&1; local _mrc=$?
+      if [ "$_mrc" = "0" ] && [ "$(git -C "$root" rev-parse HEAD)" = "$(git -C "$iwt" rev-parse HEAD)" ]; then
+        echo "[crew] promoted $accepted worker(s) onto $caller_branch (ff-only)." >&2; promoted=1
+      elif [ "$_mrc" = "0" ]; then
+        echo "[crew] promotion applied but caller advanced again in the gap — verify $caller_branch." >&2; promoted=1
+      else
+        echo "[crew] ff-only promotion refused (caller diverged) — integration preserved at $iwt." >&2
+      fi
+    fi
+  elif [ "${ahead:-0}" -eq 0 ]; then
+    echo "[crew] nothing to promote (no worker was accepted)." >&2
+  else
+    echo "[crew] promotion disabled (unmeasurable baseline) — integration preserved at $iwt (branch $ibr)." >&2
+  fi
+
+  # --- Selective cleanup: remove ONLY accepted/reverted/no_change workers; preserve the rest ---
+  local preserved=""
+  while IFS="$(printf '\t')" read -r jid label; do
+    [ -n "$jid" ] || continue
+    local v; v="$(grep -F "\"worker\":\"$label\"" "$cdir/verdicts.jsonl" 2>/dev/null | tail -1 | jq -r '.verdict' 2>/dev/null)"
+    case "$v" in
+      accepted|reverted|no_change) ( cmd_cleanup "$jid" --force ) >/dev/null 2>&1 || true ;;   # subshell: a die inside can't kill crew
+      *) preserved="$preserved $label"; ;;   # conflict / secret / blocked -> keep evidence
+    esac
+  done < "$gd/members.tsv"
+  if [ "$promoted" = "1" ]; then
+    git -C "$root" worktree remove --force "$iwt" 2>/dev/null || true
+    git -C "$root" branch -D "$ibr" 2>/dev/null || true
+  fi
+  [ -n "$preserved" ] && echo "[crew] preserved for inspection:$preserved  (remove with: $0 cleanup <job-id> --force; integration: $iwt)" >&2
+  echo "$crew_id"
 }
 
 # gc --older-than DAYS. Delete completed job dirs whose mtime is older than N days.
@@ -3363,7 +4177,15 @@ _so_run() {   # <model> <prompt> -> stdout text via the cc/OpenRouter lane (read
     claude -p --bare --permission-mode default "$2" 2>/dev/null
 }
 second_opinion() {
-  local _so_orig=("$@")
+  # --judge-anyway forces the paid adjudication even when the free gate could decide for $0.
+  # Capture _so_orig (the auto-detach replay uses it) WITH the flag preserved, so a forced judge
+  # survives the detached rerun. We re-add it after stripping for local parsing.
+  local _judge_anyway="${OSRC_JUDGE_ANYWAY:-0}" _so_args=()
+  local _a; for _a in "$@"; do
+    case "$_a" in --judge-anyway) _judge_anyway=1 ;; *) _so_args+=("$_a") ;; esac
+  done
+  set -- ${_so_args[@]+"${_so_args[@]}"}
+  local _so_orig=("$@"); [ "$_judge_anyway" = "1" ] && _so_orig+=(--judge-anyway)
   _consume_flags "$@"
   local q="${REST[*]:-}"
   [ -n "$q" ] || die "second-opinion needs a question"
@@ -3400,6 +4222,58 @@ second_opinion() {
   # If one model failed, use the other's answer directly (no point adjudicating against empty).
   if [ -z "$n1" ]; then echo "== $m1 failed, using $m2 ==" >&2; printf '%s\n' "$a2"; return 0; fi
   if [ -z "$n2" ]; then echo "== $m2 failed, using $m1 ==" >&2; printf '%s\n' "$a1"; return 0; fi
+  # FREE GATE before the paid judge. Only when an objective contract is known (caller set
+  # OSRC_EXPECT=json, or the question asks for JSON) do we try a $0 deterministic verdict: if exactly
+  # ONE answer satisfies the required check and the other fails, that IS the answer — skip premium.
+  # pass/pass, fail/fail, or unknown -> fall through to the paid judge (the gate NEVER suppresses
+  # escalation on ambiguity). --judge-anyway forces the paid path regardless.
+  if [ "$_judge_anyway" != "1" ]; then
+    # Only arm on an EXPLICIT declared contract (OSRC_EXPECT=json). We deliberately do NOT sniff the
+    # question for "json": form-validity is not content-correctness, so a valid-but-wrong answer must
+    # never deterministically beat a correct one and suppress the judge on a guess.
+    local _kind=""
+    case "${OSRC_EXPECT:-}" in json) _kind=json ;; esac
+    if [ -n "$_kind" ]; then
+      _free_gate "$_kind" "$a1"; local _g1=$?
+      _free_gate "$_kind" "$a2"; local _g2=$?
+      if [ "$_g1" = "0" ] && [ "$_g2" = "1" ]; then
+        record_ledger cc "$m1" cheap second-opinion-gate "$q"
+        echo "== FREE GATE: $m1 passes the $_kind check, $m2 fails — resolved for \$0, no escalation ==" >&2
+        printf '%s\n' "$a1"; return 0
+      fi
+      if [ "$_g2" = "0" ] && [ "$_g1" = "1" ]; then
+        record_ledger cc "$m2" cheap second-opinion-gate "$q"
+        echo "== FREE GATE: $m2 passes the $_kind check, $m1 fails — resolved for \$0, no escalation ==" >&2
+        printf '%s\n' "$a2"; return 0
+      fi
+    fi
+    # Confident-fail gate. A detector NEVER blesses an answer, and only ONE class of reject is safe to
+    # RESOLVE on for $0: a violation of a caller-DECLARED contract (OSRC_CONTRACT_KEYS/RE). There, the
+    # loser provably breaks the machine-declared shape AND the winner provably matches it, so picking the
+    # winner is safe. A refusal or a truncation is a SOFT reject: it must NOT auto-resolve, because (a) a
+    # refusal can be the CORRECT answer to the task (declining a harmful/impossible request), so silently
+    # returning the other model's compliant-but-unchecked answer is a safety inversion, and (b) a
+    # truncation heuristic (odd fence) misfires on a legitimately fence-containing answer. Both cases
+    # ESCALATE to the paid judge instead — the one model equipped to tell a correct decline / real answer
+    # from a wrong one. So: contract-violation single-fail -> resolve; anything else -> escalate.
+    local _cf1 _cf2 _r1 _r2
+    _r1="$(_confident_fail "$a1")"; _cf1=$?
+    _r2="$(_confident_fail "$a2")"; _cf2=$?
+    if [ "$_cf1" = "0" ] && [ "$_cf2" != "0" ] && _gate_resolves "$_r1"; then
+      record_ledger cc "$m2" cheap "second-opinion-gate:$_r1" "$q"
+      echo "== FREE GATE: $m1 violates the declared contract ($_r1), $m2 matches it — resolved for \$0, no escalation ==" >&2
+      printf '%s\n' "$a2"; return 0
+    fi
+    if [ "$_cf2" = "0" ] && [ "$_cf1" != "0" ] && _gate_resolves "$_r2"; then
+      record_ledger cc "$m1" cheap "second-opinion-gate:$_r2" "$q"
+      echo "== FREE GATE: $m2 violates the declared contract ($_r2), $m1 matches it — resolved for \$0, no escalation ==" >&2
+      printf '%s\n' "$a1"; return 0
+    fi
+    # A soft reject (refusal/truncation) on exactly one side does NOT resolve — note it and escalate.
+    if { [ "$_cf1" = "0" ] && [ "$_cf2" != "0" ]; } || { [ "$_cf2" = "0" ] && [ "$_cf1" != "0" ]; }; then
+      echo "== one answer looks like a soft reject (${_r1:-ok}/${_r2:-ok}) — NOT auto-resolving, escalating to the judge ==" >&2
+    fi
+  fi
   echo "== DISAGREEMENT, escalating to premium ($premium) with both answers ==" >&2
   local esc
   esc="$(_so_run "$premium" "Two cheaper models disagree. Adjudicate and give the single correct answer.
@@ -3877,6 +4751,45 @@ delegate_cursor() {
   return "$rc"
 }
 
+# =============================================================================
+# HERMES LANE (NousResearch hermes-agent). Engine lane: -m passes through verbatim,
+# Hermes owns its model catalog. Real per-run cost is read from ~/.hermes/state.db
+# after the run via _hermes_run_cost; when unavailable, the labeled token estimate is used.
+# =============================================================================
+
+delegate_hermes() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  # Fail FAST on a missing CLI -- before the cloud gate and before auto-detach would bury this
+  # error inside a background job. The headless invocation contract is not yet wired, so even with
+  # the CLI present the lane cannot dispatch; route_delegate checks that condition before this
+  # function is reached, and the die below is a defensive fallback keeping the contract honest if
+  # delegate_hermes is ever called directly.
+  have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure."
+
+  # The headless invocation contract (headless/print flag, model flag, approval/sandbox flags per
+  # tier, output format, exit codes, auth-failure signature) must be probed from the real CLI before
+  # any flag mapping below is filled in. Do NOT guess flags. The block below documents the INTENDED
+  # tier-to-posture mapping as comments only; it is not live until the probe resolves each flag.
+  # When the CLI is available, run `hermes --help` and one smoke run to pin down:
+  #   - the non-interactive/headless flag (e.g. -p/--print, --headless, or equivalent)
+  #   - the model flag (e.g. -m/--model, or equivalent)
+  #   - approval/sandbox flags per tier (auto -> most restrictive; accept-edits/autonomous per
+  #     discovered flags; dangerous = full auto-approve only if offered, else die with a pointer)
+  #   - output format (text/json/stream-json)
+  #   - exit codes (task-failure vs transport-failure)
+  #   - auth-failure signature (for doctor ping triage)
+  # Intended tier postures (commented intent, NOT live flags):
+  #   auto         -> READ-ONLY (most restrictive available posture)
+  #   accept-edits -> MUTATING (per discovered approval flags)
+  #   autonomous   -> MUTATING (per discovered sandbox/approval flags; refuse if no safe posture)
+  #   dangerous    -> DANGER (full auto-approve ONLY if the CLI offers it; else die with a pointer)
+  # Until the probe resolves, the vehicle cannot invoke the CLI. This stub dies with a clear message
+  # so a user who installs hermes sees an actionable error, not a silent no-op.
+  die "hermes lane: the headless invocation contract is not yet wired. The hermes CLI is on PATH but the flag map (headless mode, model flag, tier postures) has not been probed. Run 'hermes --help' to inspect the available flags, then wire the flag mapping in this script."
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -4153,7 +5066,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
-    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|claudex) return 0 ;;
+    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|claudex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -4297,7 +5210,7 @@ _cloud_disclose() {
   # match :free ANYWHERE — the model arg may be a comma-joined pair (second-opinion), so a leading
   # `hy3:free,deepseek/...` must still disclose may-train (an ends-with test missed the joined case).
   case "$model" in *:free*) train="':free' route — PROVIDER MAY TRAIN on your data" ;; esac
-  printf '>>> [outsourcerer] CLOUD DISCLOSURE (U1): delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
+  printf '>>> [outsourcerer] CLOUD DISCLOSURE: delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
   printf '>>>   destination : a third-party API over the network — repo content LEAVES this machine.\n' >&2
   printf '>>>   readable    : this working dir (%s) + any --with files you passed.\n' "$cwd" >&2
   # Some agent CLIs additionally pull "always-on" rule files from $HOME and prepend them to every
@@ -4401,6 +5314,7 @@ delegate_cc() {
     rc=${PIPESTATUS[0]}
     chmod 600 "$cap" 2>/dev/null || true
     if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; last_transport=0; break; fi
+    _or_model_withdrawn "$cap" "$m" || true
     # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
       last_transport=1
@@ -4618,7 +5532,7 @@ _local_agentic_shim() {
     [ "${OSRC_SHIM_NO_LAUNCH:-0}" = "1" ] && die "agentic-local on chat-only server $base needs an Anthropic-compatible proxy. Set OSRC_LOCAL_ANTHROPIC_URL, or unset OSRC_SHIM_NO_LAUNCH to let me launch the vendored shim."
     have python3 || die "the vendored translation shim needs python3."
     local shimf; shimf="$(dirname "$SCRIPT_PATH")/anthropic-openai-shim.py"
-    [ -f "$shimf" ] || die "vendored shim not found at $shimf (build it first, plan U2)."
+    [ -f "$shimf" ] || die "vendored shim not found at $shimf (build it first; the local-bridge plan documents how)."
     local port="${OSRC_SHIM_PORT:-8788}"
     printf '>>> [shim] launching on-demand Anthropic<->OpenAI shim 127.0.0.1:%s -> %s so Claude Code can drive this LOCAL model agentically (torn down after; nothing leaves your machine).\n' "$port" "$base" >&2
     OSRC_SHIM_UPSTREAM="$base" OSRC_SHIM_PORT="$port" OSRC_SHIM_KEY="${OSRC_LOCAL_KEY:-local}" \
@@ -4663,6 +5577,19 @@ _is_tooltype_400() {
 # (must be surfaced, not retried). Returns 0 for connection, HTTP-5xx, 429, 401/403 auth, context
 # length, model_not_found, timeout, or empty-stderr failures. Returns 1 for task failures (e.g., a
 # red test suite, max-turns, or any non-zero exit with normal diagnostic output).
+_or_model_withdrawn() {
+  local capf="$1" mid="${2:-}" line slug
+  [ -f "$capf" ] || return 1
+  line="$(grep -aoiE 'this model is unavailable for free.{0,200}' "$capf" 2>/dev/null | head -1)"
+  [ -n "$line" ] || return 1
+  slug="$(printf '%s' "$line" | grep -aoE 'use this slug instead:[[:space:]]*[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+' | head -1 | sed -E 's/.*:[[:space:]]*//')"
+  [ -n "$slug" ] || slug="${mid%:free}"
+  printf '>>> [openrouter] %s is not being served on the free tier right now (OpenRouter answers 404 and names the paid slug as its replacement).\n' "${mid:-the requested :free model}" >&2
+  [ -n "$slug" ] && printf '>>>   use instead : -m %s   (PAID -- confirm the price first: https://openrouter.ai/%s)\n' "$slug" "$slug" >&2
+  printf '>>>   NOT transient: a withdrawn free variant is a permanent 404, so retrying the same id can never succeed.\n' >&2
+  return 0
+}
+
 _is_transport_failure() {
   local stderr="$1" rc="${2:-0}"
   # Success is never a transport failure.
@@ -4841,6 +5768,7 @@ delegate_codex() {
       printf '>>> [outsourcerer] SECURITY DOWNGRADE: codex->cc self-heal would drop the sandbox; that requires --allow-downgrade. Re-run with --allow-downgrade to enable, or use a different lane/model.\n' >&2
       break
     fi
+    _or_model_withdrawn "$cap" "$m" || true
     # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
       echo "HINT: model '$m' failed (rc=$rc) on a transport/infra error; escalating to next in chain..." >&2
@@ -4861,6 +5789,211 @@ delegate_codex() {
   return "$rc"
 }
 
+# =============================================================================
+# RANKED-SHORTLIST FALLBACK (READ-ONLY one-shots only). On a TRANSPORT-class failure of a
+# read-only (`auto` tier: run/explore) delegation (429/rate-limit, 5xx, connection error, watchdog
+# timeout) the SAME task is retried on the next candidate from `advise --json`'s ordered shortlist
+# — a different lane/model — bounded by OSRC_FALLBACK_MAX total dispatch attempts (default 3).
+# A CONTENT failure (the model produced a real answer that failed, or refused) NEVER falls
+# through: re-asking N lanes a question that was already answered burns the whole shortlist for
+# nothing. MUTATING tiers (edit/research/yolo) never auto-retry AT ALL — a failed mutating run may
+# already have half-applied its changes, and replaying it on another lane has no rollback. When in
+# doubt, classify as content and stop. Disable entirely with OSRC_FALLBACK=0. Degrades to today's
+# single-attempt path when jq / advise / the shortlist is unavailable. Transport failures are already non-learnable
+# (_status_to_outcome maps them to blocked/abandoned), so a hop here never poisons a lane's
+# quality history; each hop IS made visible via a stderr line + a `fallback` ledger row.
+# =============================================================================
+
+# _fallback_enabled -> 0 when the shortlist retry may run for this invocation. Reads $PROVIDER
+# (dynamic scope at the route_delegate call site). Engine lanes (droid/cursor) own their model
+# catalogs and claudex/local are policy/hardware lanes — our shortlist aliases don't map onto
+# them, so they keep the single-attempt path.
+_fallback_enabled() {
+  [ "${OSRC_FALLBACK:-1}" = "1" ] || return 1
+  have jq || return 1
+  case "${PROVIDER:-devin}" in devin|cc|codex) return 0 ;; esac
+  return 1
+}
+
+# _fallback_max_attempts -> sanitized TOTAL dispatch bound (attempts that actually run a model).
+# Non-numeric -> 3; <1 -> 1 (single attempt, i.e. no fallback); hard ceiling 20. Never infinite:
+# on top of this bound, every scanned candidate lands in the tried-list and the shortlist itself
+# is finite (bounded by the alias table).
+_fallback_max_attempts() {
+  local n="${OSRC_FALLBACK_MAX:-3}"
+  case "$n" in ''|*[!0-9]*) n=3 ;; esac
+  [ "$n" -lt 1 ] && n=1
+  [ "$n" -gt 20 ] && n=20
+  printf '%s' "$n"
+}
+
+# _fallback_is_transport <capture-file> <rc> <tier> -> 0 only for a transport-class failure that is
+# safe to retry on another lane. Deliberately narrower than "any infra smell":
+#  - ONLY the read-only tier (`auto`) is ever retryable. A mutating run (edit/research/yolo) that
+#    failed may already have partially mutated the tree, and no text classifier can prove it
+#    didn't: a task's OWN legitimate output can carry transport-shaped strings (an assertion
+#    quoting `HTTP/1.1 503`, a test log printing `(code 500)`, ECONNREFUSED inside a stack trace
+#    under test, `operation timed out after ...` as the tested message). Re-running such a task on
+#    another lane replays a possibly-half-applied mutation with no rollback — worse than any saved
+#    hop. So mutating tiers hard-stop on ANY failure; the error is surfaced, the human decides.
+#  - rc 130 is a user interrupt: the user stopped it, never auto-respend on their behalf.
+#  - rc 124 is the watchdog's hard kill (no error text of its own) -> transport on the read-only tier.
+#  - everything else defers to _is_transport_failure on the combined stdout+stderr capture (its
+#    empty-output-is-NOT-transport default and line-anchored phrase discipline are the
+#    when-in-doubt-stop posture this feature requires, so it is reused, not re-derived).
+_fallback_is_transport() {
+  local cap="$1" rc="$2" tier="$3"
+  [ "$rc" -eq 0 ] 2>/dev/null && return 1
+  [ "$rc" -eq 130 ] 2>/dev/null && return 1
+  [ "$rc" -eq 143 ] 2>/dev/null && return 1   # SIGTERM: a supervisor stopped it; never auto-respend
+  [ "$tier" = "auto" ] || return 1
+  [ "$rc" -eq 124 ] 2>/dev/null && return 0
+  _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"
+}
+
+# _fallback_lane_ready <lane-code> -> 0 if the lane can plausibly take a retry right now (CLI on
+# PATH / key present / logged in). A skipped-unready lane does NOT consume a dispatch attempt —
+# an uninstalled CLI costs nothing, and charging it against the bound would make the bound mean
+# "N minus however many lanes you don't have". Unknown lane codes (incl. image lanes) -> not ready.
+_fallback_lane_ready() {
+  local k=""
+  case "$1" in
+    dv) have devin || return 1
+        # Bounded login probe: delegate() hard-fails on a logged-out devin, which would end the
+        # whole retry walk; screen it here instead. 5s cap so a wedged CLI can't stall the walk.
+        _timeout 5 devin auth status 2>/dev/null | grep -qi "logged in" || return 1 ;;
+    cx) have codex || return 1 ;;
+    cc) have claude || return 1 ;;
+    gm) if have agy; then return 0; fi
+        have gemini || return 1
+        k="$(_extract_kv_value GEMINI_API_KEY)"; [ -n "$k" ] || k="$(_extract_kv_value GOOGLE_API_KEY)"
+        [ -n "$k" ] || return 1 ;;
+    or) k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$k" ] || return 1
+        have claude || have codex || return 1 ;;
+    *)  return 1 ;;
+  esac
+  return 0
+}
+
+# _fallback_shortlist <task> -> ordered "alias|model|lane" lines from advise's ranked shortlist
+# (best first; shortlist[0] is the recommendation). Empty output on ANY failure — the caller
+# treats that as "no fallback available" and keeps the single-attempt behavior. The benchmark
+# file is pinned to an empty placeholder when absent so this path NEVER triggers a network
+# benchmark refresh in the middle of handling a failure (which may itself be network trouble).
+_fallback_shortlist() {
+  have jq || return 0
+  local bj="$OSRC_BENCH_JSON"
+  if [ ! -f "$bj" ]; then
+    bj="$OSRC_HOME/.bench.none.json"
+    ( umask 077; : > "$bj" ) 2>/dev/null || return 0
+  fi
+  ( OSRC_BENCH_JSON="$bj" cmd_advise --json "$1" 2>/dev/null ) \
+    | jq -r '.shortlist[]? | [.alias, .model, .lane] | join("|")' 2>/dev/null
+  return 0
+}
+
+# _fallback_disp_lane <disp> -> the lane code an attempt ACTUALLY ran on, from the dispatch vehicle.
+# Used to record each attempt as a resolved "model@lane" pair so the dedupe below compares what
+# really executed, not what an alias superficially looks like.
+_fallback_disp_lane() {
+  case "$1" in
+    devin)         printf 'dv' ;;
+    cxnative)      printf 'cx' ;;
+    ccnative)      printf 'cc' ;;
+    gmnative)      printf 'gm' ;;
+    ccor|codexor)  printf 'or' ;;
+    *)             printf '%s' "$1" ;;
+  esac
+}
+
+# _fallback_effective <alias> <model> <lane> -> "model@lane" this candidate would ACTUALLY run as
+# under the current provider. Mirrors route_delegate's availability-aware reroute: under the devin
+# provider an OpenRouter alias with a Devin-lane sibling (glm, deepseek) is rerouted onto the
+# Devin lane — so candidate `glm` is REALLY glm-5.2@dv, not z-ai/glm-5.2@or. Without this mapping
+# the dedupe compares surface names and can re-dispatch the exact engine+model that just failed,
+# burning a bounded attempt on a no-op hop.
+_fallback_effective() {
+  local alias="$1" model="$2" lane="$3" dvm
+  if [ "$lane" = "or" ] && [ "${PROVIDER:-devin}" = "devin" ]; then
+    dvm="$(_devin_model_for "$alias")"
+    [ -n "$dvm" ] && { printf '%s@dv' "$dvm"; return 0; }
+  fi
+  printf '%s@%s' "$model" "$lane"
+  return 0
+}
+
+# _fallback_pick <tried-list> <candidate-lines> -> echoes the first "alias|model|lane" whose alias,
+# model id AND effective post-reroute model@lane pair are all untried and whose lane is ready;
+# echoes nothing when the list is exhausted. The tried-list carries plain names AND "model@lane"
+# pairs (pairs can't collide with names: model ids never contain '@').
+_fallback_pick() {
+  local tried=" $1 " alias model lane eff
+  [ -n "${2:-}" ] || return 0
+  while IFS='|' read -r alias model lane; do
+    [ -n "$alias" ] || continue
+    case "$tried" in *" $alias "*) continue ;; esac
+    case "$tried" in *" $model "*) continue ;; esac
+    eff="$(_fallback_effective "$alias" "$model" "$lane")"
+    case "$tried" in *" $eff "*) continue ;; esac
+    _fallback_lane_ready "$lane" || continue
+    printf '%s|%s|%s' "$alias" "$model" "$lane"
+    return 0
+  done <<OSRC_FB_EOF
+$2
+OSRC_FB_EOF
+  return 0
+}
+
+# _fallback_dispatch <tier> <capture-file> -> run the guarded dispatch while MIRRORING both output
+# streams into <capture-file> for failure classification. stdout stays stdout, stderr stays stderr
+# (live, streamed), so callers that capture stdout as the result see exactly what they see today.
+# The exit code lands in $_OSRC_FB_RC via a file: a pipeline would eat it, and PIPESTATUS cannot
+# cross the nested groups. No process substitution (no tee flush race), no flock; bash 3.2 safe.
+# fd map: dispatch stderr -> inner tee -> real stderr; dispatch stdout -> fd3 -> outer tee -> real
+# stdout; both tees append to the same capture (O_APPEND, grep-only consumer).
+# SIGNALS: the pipeline is run as a BACKGROUND job under `wait` so this (main) shell can own an
+# INT/TERM trap for the window. A foreground pipeline would leave the main shell trap-less: a TERM
+# to the script pid (what `timeout` and supervisors send) killed the shell, ORPHANED the delegate
+# subtree, and leaked the capture files; a pid-only INT was simply dropped. With the trap, wait
+# returns on the signal, the trap kills the whole dispatch tree, the caps are removed, and the rc
+# comes back as 130/143 — which the retry logic never treats as transport, so a signal always
+# stops the walk. (The trap is restored to default after the window; the plain un-captured path
+# is unchanged — its signal handling lives inside _fg_guard as before.)
+_OSRC_FB_RC=0
+_OSRC_FB_SIG=0
+_fallback_dispatch() {
+  local tier="$1" cap="$2" rcf="$2.rc"
+  ( umask 077; : > "$cap"; : > "$rcf" ) 2>/dev/null || true
+  _OSRC_FB_SIG=0; _OSRC_FB_JOB=""
+  # Traps go in BEFORE the job is launched (no window where a signal can slip past), so they read
+  # the job pid from a global at FIRE time rather than baking it in at set time.
+  trap '_OSRC_FB_SIG=130; [ -n "${_OSRC_FB_JOB:-}" ] && _kill_tree "$_OSRC_FB_JOB" 2>/dev/null' INT
+  trap '_OSRC_FB_SIG=143; [ -n "${_OSRC_FB_JOB:-}" ] && _kill_tree "$_OSRC_FB_JOB" 2>/dev/null' TERM
+  { { { _fg_guard __osrc_fg_dispatch "$tier" 2>&1 1>&3
+        printf '%s' "$?" > "$rcf"
+      } | tee -a "$cap" >&2
+    } 3>&1 | tee -a "$cap"
+  } &
+  _OSRC_FB_JOB=$!
+  # A signal that landed between trap-set and pid-assignment couldn't kill anything yet: mop up.
+  [ "${_OSRC_FB_SIG:-0}" != "0" ] && _kill_tree "$_OSRC_FB_JOB" 2>/dev/null
+  wait "$_OSRC_FB_JOB" 2>/dev/null   # returns >128 immediately on a trapped signal, then the trap runs
+  # If the trap interrupted the wait without managing a kill, kill now, then reap.
+  [ "${_OSRC_FB_SIG:-0}" != "0" ] && _kill_tree "$_OSRC_FB_JOB" 2>/dev/null
+  wait "$_OSRC_FB_JOB" 2>/dev/null   # reap after a signal (no-op on the normal path)
+  trap - INT TERM
+  _OSRC_FB_JOB=""
+  if [ "${_OSRC_FB_SIG:-0}" != "0" ]; then
+    rm -f "$cap" "$rcf" 2>/dev/null
+    _OSRC_FB_RC="$_OSRC_FB_SIG"
+    return 0
+  fi
+  _OSRC_FB_RC="$(cat "$rcf" 2>/dev/null)"
+  case "$_OSRC_FB_RC" in ''|*[!0-9]*) _OSRC_FB_RC=1 ;; esac
+  rm -f "$rcf" 2>/dev/null
+  return 0
+}
+
 # Route a one-shot delegation. THE MODEL CHOOSES THE LANE: an alias/id in the table
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
@@ -4870,15 +6003,51 @@ route_delegate() {
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1
   # Recursion guard: a delegated model must NOT re-delegate (Sorcerer's-Apprentice fork bomb).
   # The child inherits OUTSOURCERER_DEPTH; if it re-enters this script the guard trips.
-  : "${OUTSOURCERER_DEPTH:=0}"
+  # Normalize the depth BEFORE comparing (see _osrc_normalize_depth). The old `: "${...:=0}"`
+  # only filled unset/empty; a malformed value ('bogus', '1x', '-1', ' ') slipped through and
+  # `[ "$bad" -ge 1 ]` errored with "integer expression expected", returning false -> fail-open,
+  # so a delegate could escape the guard by poisoning its own OUTSOURCERER_DEPTH. This is the
+  # detached-child path: the same fail-open lived here too. An unparseable depth is treated as
+  # AT the limit and refused, because an unparseable depth tells us only that it cannot be
+  # trusted, and a delegate controls its own environment.
+  local _depth_raw="${OUTSOURCERER_DEPTH:-}"
+  if ! _osrc_normalize_depth; then
+    die "recursion guard: OUTSOURCERER_DEPTH is unparseable ('$_depth_raw'). An unparseable depth cannot be trusted (a delegate controls its own environment), so the guard refuses rather than fail-open. Set OUTSOURCERER_DEPTH to a non-negative integer or unset it."
+  fi
   if [ "$OUTSOURCERER_DEPTH" -ge "${OUTSOURCERER_MAX_DEPTH:-1}" ]; then
     die "recursion guard: already delegating (OUTSOURCERER_DEPTH=$OUTSOURCERER_DEPTH). A delegate must not re-delegate. Override with OUTSOURCERER_MAX_DEPTH=N."
   fi
   export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH + 1))
 
+  # Shortlist-fallback state. ARGV is the working argv: attempt 1 is the caller's argv verbatim;
+  # a transport-failure retry rewrites it to pin the next shortlist candidate and loops back
+  # through the FULL resolution body, so every compatibility rule / gate applies to retries too.
+  local ARGV=("$@")
+  # Did the CALLER pin an exact model with -m/--model? Captured ONCE on the original argv, before the
+  # loop, because a fallback hop re-pins each candidate with -m (setting MODEL_EXPLICIT=1) — gating on
+  # MODEL_EXPLICIT itself would kill multi-hop after the first. A pinned model is a deliberate choice
+  # (quality/cost), so a transport failure surfaces and stops rather than silently running a DIFFERENT
+  # model; opt into cross-model resilience for a pinned run with OSRC_FALLBACK_PINNED=1.
+  # Scan LEADING flag positions only (mirroring _consume_flags): stop at the first token that is
+  # neither a known flag nor a flag value, so a task whose TEXT contains a bare "-m" word can
+  # never read as a pin and silently disable the fallback.
+  local _fb_user_pinned=0 _fbp _fb_skipval=0
+  for _fbp in ${ARGV[@]+"${ARGV[@]}"}; do
+    if [ "$_fb_skipval" = "1" ]; then _fb_skipval=0; continue; fi
+    case "$_fbp" in
+      -m|--model) _fb_user_pinned=1; break ;;
+      --tier|--with|--effort|--reasoning|--provider|--trust-lane) _fb_skipval=1 ;;
+      --allow-downgrade|--cloud-ack|--wait|--foreground) : ;;
+      *) break ;;
+    esac
+  done
+  local _fb_tried="" _fb_used=1 _fb_cands="" _fb_loaded=0 _fb_max
+  _fb_max="$(_fallback_max_attempts)"
+  while :; do
+
   # Preserve original argv for the devin lane (kept byte-identical: it re-parses via parse_model).
-  local ORIG=("$@")
-  _consume_flags "$@"   # sets MODEL / MODEL_EXPLICIT / TIER_FLAG / WITH_SPEC / REST (+ OSRC_TIER_OVERRIDE)
+  local ORIG=(${ARGV[@]+"${ARGV[@]}"})
+  _consume_flags ${ARGV[@]+"${ARGV[@]}"}   # sets MODEL / MODEL_EXPLICIT / TIER_FLAG / WITH_SPEC / REST (+ OSRC_TIER_OVERRIDE)
 
   # LOCAL lane short-circuit: a model prefixed ollama:/lmstudio:/lms:/local[:...], or --provider local.
   # Local models aren't in the alias table (they're whatever the user has pulled), so route them here.
@@ -4887,10 +6056,10 @@ route_delegate() {
   esac
 
   RESOLVED_ID="$MODEL"; RESOLVED_LANE=""; TTIER=""
-  # DROID/CURSOR engine lanes skip alias resolution entirely: the engine owns its model catalog
+  # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -4899,14 +6068,22 @@ route_delegate() {
   fi
 
   local disp=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
     case "$disp" in
       droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in." ;;
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
+      hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
     esac
+    # Hermes headless invocation contract: not yet wired. The CLI may be on PATH but the flag map
+    # (headless mode, model flag, tier postures) has not been probed from the real CLI, so the lane
+    # cannot dispatch. This check runs BEFORE the preflight exit below, so bg and auto-detach fail
+    # immediately with the same message and no job id -- not a phantom job that surfaces the failure
+    # ~35s later inside a detached child the caller never reads. The foreground path hits the same
+    # die here, so all three paths (foreground, bg, auto-detach) are consistent.
+    [ "$disp" = "hermes" ] && die "hermes lane: the headless invocation contract is not yet wired. The hermes CLI is on PATH but the flag map (headless mode, model flag, tier postures) has not been probed. Run 'hermes --help' to inspect the available flags, then wire the flag mapping in this script."
   elif [ "$PROVIDER" = "claudex" ]; then
     # CLAUDEX: a ChatGPT-sub model (sol/terra/luna/gpt-5.5) inside the Claude Code HARNESS via the
     # user's local CLIProxyAPI. Alias resolution DID run above (sol -> gpt-5.6-sol). Guardrails:
@@ -4962,7 +6139,7 @@ route_delegate() {
       devin) disp=devin ;;
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
     esac
   fi
 
@@ -4996,6 +6173,14 @@ route_delegate() {
   # forces detach (for testing). See _autodetach_should for the full trigger logic.
   local _ad_model_tier; _ad_model_tier="$(resolve_tier "$RESOLVED_ID" "${TTIER:-}")"
   if _autodetach_should "$disp" "$RESOLVED_ID" "$_ad_model_tier"; then
+    # route_delegate already incremented OUTSOURCERER_DEPTH above. The auto-detached __runjob
+    # child re-enters route_delegate, which would see the already-incremented depth and trip the
+    # recursion guard (the guard is a backstop, not a reason to block a legitimate auto-detach).
+    # Decrement back to the pre-increment value: the bg job IS the delegation this route_delegate
+    # was going to perform, so the child should start at the same depth the parent entered with,
+    # and route_delegate in the child increments it again. Without this, every non-interactive
+    # slow-lane run would die at the guard inside the detached child.
+    export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH - 1))
     _autodetach_run "$verb" ${ORIG[@]+"${ORIG[@]}"}
     return $?
   fi
@@ -5014,10 +6199,71 @@ route_delegate() {
       gmnative) delegate_gmnative "$tier" ;;
       droid)    delegate_droid    "$tier" ;;
       cursor)   delegate_cursor   "$tier" ;;
+      hermes)   delegate_hermes   "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
-  _fg_guard __osrc_fg_dispatch "$tier"
+
+  # Fallback disabled/unavailable, or a MUTATING tier -> the original un-captured dispatch,
+  # byte-identical to before. Mutating tiers (anything but `auto`) never auto-retry: a failed
+  # mutating run may already have half-applied its changes, and replaying it on another lane has
+  # no rollback (see _fallback_is_transport, which enforces the same invariant as a second layer).
+  if ! _fallback_enabled || [ "$tier" != "auto" ] \
+     || { [ "$_fb_user_pinned" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; }; then
+    _fg_guard __osrc_fg_dispatch "$tier"
+    return $?
+  fi
+
+  local _fb_cap="$OSRC_HOME/.fbcap.$$" _fb_rc
+  _fallback_dispatch "$tier" "$_fb_cap"
+  _fb_rc="$_OSRC_FB_RC"
+  if [ "$_fb_rc" -eq 0 ]; then rm -f "$_fb_cap" 2>/dev/null; return 0; fi
+  if ! _fallback_is_transport "$_fb_cap" "$_fb_rc" "$tier"; then
+    # CONTENT/task failure: the model gave a real (failing/refusing) answer. Surfacing it is the
+    # job; retrying other lanes would re-ask an answered question N times. Stop here.
+    rm -f "$_fb_cap" 2>/dev/null
+    return "$_fb_rc"
+  fi
+  rm -f "$_fb_cap" 2>/dev/null
+
+  # Transport-class failure: the task never got a real answer on this lane. Walk the shortlist.
+  # Record the attempt three ways: alias-as-typed, resolved id, and the resolved model@lane pair —
+  # the pair is what stops a later candidate from rerouting back onto this exact engine+model.
+  _fb_tried="$_fb_tried $MODEL $RESOLVED_ID ${RESOLVED_ID}@$(_fallback_disp_lane "${disp:-?}")"
+  if [ "$_fb_used" -ge "$_fb_max" ]; then
+    printf '>>> [fallback] transport failure on %s (rc=%s) and the attempt budget (%s) is spent — stopping. Raise OSRC_FALLBACK_MAX to allow more candidates.\n' "$RESOLVED_ID" "$_fb_rc" "$_fb_max" >&2
+    return "$_fb_rc"
+  fi
+  if [ "$_fb_loaded" -eq 0 ]; then
+    _fb_loaded=1
+    _fb_cands="$(_fallback_shortlist "${REST[*]}")"
+  fi
+  local _fb_next; _fb_next="$(_fallback_pick "$_fb_tried" "$_fb_cands")"
+  if [ -z "$_fb_next" ]; then
+    printf '>>> [fallback] transport failure on %s (rc=%s) and no untried READY candidate remains on the shortlist — stopping.\n' "$RESOLVED_ID" "$_fb_rc" >&2
+    return "$_fb_rc"
+  fi
+  local _fb_alias="${_fb_next%%|*}" _fb_mid _fb_lane _fb_restpart
+  _fb_restpart="${_fb_next#*|}"; _fb_mid="${_fb_restpart%%|*}"; _fb_lane="${_fb_restpart##*|}"
+  _fb_used=$((_fb_used + 1))
+  printf '>>> [fallback] transport failure on %s (lane %s, rc=%s) -> retrying the SAME task on %s (lane %s), attempt %s/%s. Transport failures never count against a model'\''s quality history.\n' \
+    "$RESOLVED_ID" "${disp:-?}" "$_fb_rc" "$_fb_alias" "$_fb_lane" "$_fb_used" "$_fb_max" >&2
+  # Visibility row in the Tab: verb=fallback, cost 0 (this row is bookkeeping, not a spend; the
+  # retry's own run records its real cost). Ledger rows are usage events — learning reads only
+  # outcome rows, so this cannot touch quality history. Forced so bg (stream-mode) children log it.
+  OSRC_LEDGER_FORCE=1 record_ledger "${disp:-?}" "$RESOLVED_ID->$_fb_alias" "" "fallback" "${REST[*]}" "0.000000" "" 2>/dev/null || true
+  # Rebuild argv: pin the candidate (a known alias routes to its native lane via the table), keep
+  # the caller's tier/effort/with/downgrade flags, drop any original -m/--provider. One-shot env
+  # flags already consumed into process state (--cloud-ack, --trust-lane, --wait) carry over as-is.
+  local _fb_new=(-m "$_fb_alias") _fb_w
+  [ -n "${TIER_FLAG:-}" ] && _fb_new+=(--tier "$TIER_FLAG")
+  [ -n "${EFFORT:-}" ] && _fb_new+=(--effort "$EFFORT")
+  [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _fb_new+=(--allow-downgrade)
+  for _fb_w in ${WITH_SPEC:-}; do _fb_new+=(--with "$_fb_w"); done
+  _fb_new+=(${REST[@]+"${REST[@]}"})
+  ARGV=("${_fb_new[@]}")
+
+  done   # while :; (shortlist-fallback retry loop)
 }
 
 # Reset a TUI pane's input BEFORE typing into it. Two real failure modes this guards:
@@ -5338,7 +6584,7 @@ doctor() {
   else echo "  cloud consent: not yet granted — first cloud delegation asks ONCE and remembers ($0 consent grant to pre-grant)"; fi
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -5407,6 +6653,34 @@ doctor() {
   else echo "    droid (Factory): NOT on PATH — install: https://docs.factory.ai/cli (macOS/Linux/Windows-native)"; fi
   if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Bills your Cursor subscription credits."
   else echo "    cursor-agent: NOT on PATH — install: curl https://cursor.com/install -fsS | bash (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
+  echo "  -- Hermes lane (NousResearch hermes-agent, engine lane: -m passes through verbatim) --"
+  # Honest lane states: (a) CLI on PATH + version; (b) CLI absent but ~/.hermes exists (installed
+  # data dir found, CLI not on PATH); (c) neither (lane not installed); (d) state.db present +
+  # guarded session count vs absent (never run — cost receipts use estimates until first session).
+  # NEVER falsely READY; NEVER exit non-zero solely because the lane is absent.
+  if have hermes; then
+    echo "    hermes: $(hermes --version 2>/dev/null | head -1 || echo present) — route: --provider hermes [-m <model>] run \"task\". Engine lane: -m passes through verbatim."
+  else
+    local _hhome; _hhome="$(_hermes_home)"
+    if [ -d "$_hhome" ]; then
+      echo "    hermes: installed data dir found ($_hhome), CLI not on PATH — install the CLI: https://github.com/NousResearch/hermes-agent"
+    else
+      echo "    hermes: lane not installed — install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure)"
+    fi
+  fi
+  # state.db session count (guarded, read-only). Absent -> never run; present -> count sessions.
+  local _hdb; _hdb="$(_hermes_db)"
+  if [ -f "$_hdb" ]; then
+    if have sqlite3; then
+      local _hsess; _hsess="$(sqlite3 -readonly "$_hdb" ".timeout ${OSRC_SQLITE_BUSY_TIMEOUT:-3000}" "SELECT COUNT(*) FROM sessions;" 2>/dev/null)" || _hsess=""
+      case "$_hsess" in ''|*[!0-9]*) echo "    hermes state.db: present but unreadable (schema drift or locked) — cost receipts use estimates" ;;
+        *) echo "    hermes state.db: present, $_hsess session(s), cost receipts available" ;; esac
+    else
+      echo "    hermes state.db: present but sqlite3 not on PATH — cost receipts use estimates"
+    fi
+  else
+    echo "    hermes state.db: absent — never run, cost receipts use estimates until first session"
+  fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
     if _claudex_up 2>/dev/null; then
@@ -5853,7 +7127,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"
                   PROVIDER="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -5885,6 +7159,7 @@ main() {
     yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
     bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
+    crew)        cmd_crew "$@" ;;                          # transactional write-swarm: fanout --worktree edit -> grade -> revert-or-promote
     loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
     watch)       cmd_watch "$@" ;;                         # poll a job until terminal (or --for N)
@@ -5911,12 +7186,12 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
     ""|-h|--help|help)
-      sed -n '2,109p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,113p' "$0" | sed 's/^# \{0,1\}//'
       ;;
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor; providers: devin|cc|codex|droid|cursor|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor; providers: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
   esac
 }
 main "$@"
