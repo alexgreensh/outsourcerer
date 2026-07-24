@@ -19,6 +19,11 @@ mkdir -p "$OSRC_HOME"
 # sourced file, so keep every expansion default-safe.
 . "$SRC" >/dev/null 2>&1
 
+# When sourced (not exec'd), $0 is this test harness, so SCRIPT_PATH resolves to the TEST file
+# and cmd_bg's route preflight re-execs the test (rc=126 / recursion) instead of outsourcerer.sh.
+# Point it back at the real binary so the preflight self-exec targets it, as a real run would.
+SCRIPT_PATH="$SRC"
+
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
 bad() { echo FAIL: $1; fail=$((fail+1)); }

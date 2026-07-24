@@ -123,7 +123,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.22"
+OSRC_VERSION="0.4.23"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -2499,8 +2499,7 @@ _devin_live_mtime() {
       # Symlink discipline, matching _devin_sandboxed_proxy_tls_hint: never stat through a
       # planted link.
       [ -L "$f" ] && continue
-      m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null)" || continue
-      [ -n "$m" ] || continue
+      m="$(_mtime "$f")"; [ -n "$m" ] || continue
       if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest="$m"; fi
     done
   done
@@ -3485,12 +3484,41 @@ cmd_status() {
   local d; for d in "$OSRC_JOBS"/*/; do [ -d "$d" ] || continue; _status_line "$(basename "$d")"; done
 }
 
+# _watch_digest <id> <interval-secs> <next-label> -> emit a periodic status digest to stdout.
+# No new state file, no background process: reads the same status/progress/started_at the watch
+# loop already reads. Gives a watched job a heartbeat into the running session even when nothing
+# has changed, so a long silent-but-healthy run does not look like a hang.
+_watch_digest() {
+  local id="$1" interval="$2" next="$3"
+  local jd="$OSRC_JOBS/$id"
+  local st prog started now elapsed
+  st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+  prog="$(tail -1 "$jd/progress" 2>/dev/null)"
+  case "$prog" in
+    *OSRC::*) prog="OSRC::$(printf '%s' "${prog##*OSRC::}" | tr -d '"\\')" ;;
+    *) prog="(none yet)" ;;
+  esac
+  started="$(cat "$jd/started_at" 2>/dev/null)"
+  case "$started" in ''|*[!0-9]*) started="" ;; esac
+  now=$(date +%s)
+  if [ -n "$started" ]; then elapsed="$(( now - started ))s"; else elapsed="?"; fi
+  printf 'OSRC::PROGRESS watch %s periodic digest\n- state: %s\n- last: %s\n- elapsed: %s\n- next: %s\n' \
+    "$id" "$st" "$prog" "$elapsed" "$next"
+}
+
 cmd_watch() {
   _mark_watched "${1:-}"
   local id="${1:-}"; [ -n "$id" ] || die "watch needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-60}"
   local t0; t0=$(date +%s); local last="" lastprog=""
+  # Periodic digest cadence: even with no state change, report into the running session so a long
+  # silent-but-healthy run does not look like a hang. OSRC_WATCH_DIGEST_SECS tunes it (default 420s).
+  local digest_secs="${OSRC_WATCH_DIGEST_SECS:-420}"
+  # Validate: a non-numeric value would error under set -u arithmetic; 0/negative would emit every
+  # poll (spam). Require a positive integer, else fall back to the default. (Sol review, MEDIUM.)
+  case "$digest_secs" in ''|*[!0-9]*|0) digest_secs=420 ;; esac
+  local last_digest; last_digest=$t0
   while :; do
     local st; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
     # HEARTBEAT: print on a status change OR when a NEW OSRC::PROGRESS marker lands.
@@ -3500,7 +3528,18 @@ cmd_watch() {
     if [ "$st" != "$last" ] || { [ -n "$prog" ] && [ "$prog" != "$lastprog" ]; }; then
       _status_line "$id"; last="$st"; lastprog="$prog"
     fi
-    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) break ;; esac
+    # Terminal state FIRST: emit the final digest and break before a periodic tick could double it,
+    # and before --for could exit without it. (Sol review, both LOWs collapse to this ordering.)
+    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted)
+      _watch_digest "$id" "$digest_secs" "fetch result"
+      break ;; esac
+    # Periodic digest: emit on the interval so the session sees the job is still alive even when
+    # status and progress are unchanged. Only reached while non-terminal, so it never doubles.
+    local _now; _now=$(date +%s)
+    if [ $(( _now - last_digest )) -ge "$digest_secs" ]; then
+      _watch_digest "$id" "$digest_secs" "continuing watch; next digest in ${digest_secs}s"
+      last_digest=$_now
+    fi
     [ "$forsec" -gt 0 ] && [ $(( $(date +%s) - t0 )) -ge "$forsec" ] && break
     sleep "${OSRC_POLL:-10}"
   done

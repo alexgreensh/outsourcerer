@@ -2,6 +2,21 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.4.23
+
+- **Watcher now reports on a cadence.** `cmd_watch` emits a periodic `OSRC::PROGRESS` status digest
+  (state · last marker · elapsed · next) even when nothing changes, so a long silent-but-healthy run
+  no longer looks like a hang and the orchestrator can surface it into the running session without
+  being asked. Tunable via `OSRC_WATCH_DIGEST_SECS` (default 420s); a final digest fires on terminal
+  state. No new process or state file.
+- **Fix a real liveness bug:** `_devin_live_mtime` used a BSD-first `stat -f %m || stat -c %Y` probe
+  that returns garbage and exits 0 on GNU/Linux, so a LIVE devin job's heartbeat was ignored and the
+  watchdog killed it as `wedged`. Now reuses the hardened, portable `_mtime` helper.
+- **Green CI:** fix three failing conformance suites — `test_devin_liveness` (the bug above),
+  `test_windows_portability` (same BSD-first `stat` defect in its mode probes), and `test_cloud_gate`
+  (the cmd_bg preflight self-exec targeted the test harness under `source`; the test now points
+  `SCRIPT_PATH` at the real binary). New `test_watch_digest` locks the digest behavior.
+
 ## 0.4.22
 
 - **Hermes now works both ways.** The delegation lane (OUT) is wired for real: `delegate_hermes`
