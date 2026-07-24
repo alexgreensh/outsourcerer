@@ -11,10 +11,14 @@
 set -uo pipefail
 umask 077
 
+have() { command -v "$1" >/dev/null 2>&1; }
+have winpty || { echo "broker: winpty missing" >&2; exit 1; }
+
 SESS_DIR="${1:-}"
 [ -d "$SESS_DIR" ] || { echo "broker: session dir missing: $SESS_DIR" >&2; exit 1; }
 chmod 600 "$SESS_DIR/launch.bash" 2>/dev/null || true
 source "$SESS_DIR/launch.bash" 2>/dev/null || { echo "broker: launch.bash missing" >&2; exit 1; }
+[ -n "${LAUNCH+x}" ] && [ "${#LAUNCH[@]}" -gt 0 ] || { echo "broker: launch.bash has no LAUNCH array" >&2; exit 1; }
 
 STDIN_FIFO="$SESS_DIR/stdin"
 OUT_LOG="$SESS_DIR/out.log"
@@ -43,17 +47,22 @@ WPID=$!
 echo "$WPID" > "$WINPTY_PID_FILE"
 [ -n "$$" ] && echo "$$" > "$PID_FILE"
 
-# Ignore SIGPIPE so a dead winpty does not kill the broker mid-cleanup.
-trap '' PIPE
-
 # Polled file-mailbox loop. Command files are processed in mtime order and removed.
 while kill -0 "$WPID" 2>/dev/null; do
+  # A long-lived interactive session must not turn its transcript into an
+  # unbounded disk consumer.  Rotation is deliberately simple and portable.
+  if [ "$(wc -c < "$OUT_LOG" 2>/dev/null || echo 0)" -gt 10485760 ] 2>/dev/null; then
+    : > "$OUT_LOG"
+  fi
   files=()
   while IFS= read -r line; do
-    [ -n "$line" ] && files+=("${line#* }")
+    [ -n "$line" ] && files+=("$line")
   done < <(
-    { find "$CMD_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2- ; } \
-    || ( cd "$CMD_DIR" 2>/dev/null && ls -1tr 2>/dev/null | while IFS= read -r name; do printf '%s/%s\n' "$CMD_DIR" "$name"; done )
+    if find "$CMD_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' >/dev/null 2>&1; then
+      find "$CMD_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-
+    else
+      find "$CMD_DIR" -maxdepth 1 -type f -print 2>/dev/null | sort
+    fi
   )
 
   if [ "${#files[@]}" -eq 0 ]; then
@@ -61,25 +70,32 @@ while kill -0 "$WPID" 2>/dev/null; do
     continue
   fi
 
+  # Stop is a control command, not ordinary input: honour it before any send
+  # even when the filesystem gives both files the same timestamp.
   for f in "${files[@]}"; do
-    [ -e "$f" ] || continue
+    case "$(basename "$f")" in stop|stop-*) break 2 ;; esac
+  done
+
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
     base=$(basename "$f")
     case "$base" in
       stop|stop-*)
         break 2
         ;;
-      send-*)
-        [ -s "$f" ] && cat "$f" >&3
+      send-[0-9]*.txt)
+        [ ! -s "$f" ] || cat "$f" >&3 || continue
         printf '\r\n' >&3        # primary Enter
         sleep 0.3
         printf '\r\n' >&3        # second Enter some TUIs need
         ;;
-      clear-*)
+      clear-[0-9]*)
         printf '\x1b\x15' >&3   # Escape then Ctrl-U
         ;;
-      model-*)
+      model-[0-9]*.txt)
         filter=""
-        [ -s "$f" ] && filter=$(cat "$f")
+        [ ! -s "$f" ] || filter=$(cat "$f") || continue
+        filter=$(printf '%s' "$filter" | tr -cd '[:alnum:][:space:]._:/-')
         printf '\x1b\x1bm' >&3   # Escape then Alt-m (Devin model picker)
         sleep 0.5
         [ -n "$filter" ] && { printf '%s' "$filter" >&3; sleep 0.5; }

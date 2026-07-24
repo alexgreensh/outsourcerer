@@ -177,7 +177,10 @@ _harden_dir() {
 _mkdir_private() {
   ( umask 077; mkdir -p "$1" ) 2>/dev/null
   _harden_dir "$1"
-  [ -d "$1" ]
+  [ -d "$1" ] || return 1
+  local probe="$1/.osrc-wtest-$$"
+  ( umask 077; : > "$probe" ) 2>/dev/null || return 1
+  rm -f "$probe" 2>/dev/null || return 1
 }
 
 # _mkdir_claim <dir> -> 0 only if THIS call created <dir>; 1 if it already existed.
@@ -3565,10 +3568,9 @@ cmd_status() {
 # loop already reads. Gives a watched job a heartbeat into the running session even when nothing
 # has changed, so a long silent-but-healthy run does not look like a hang.
 _watch_digest() {
-  local id="$1" interval="$2" next="$3"
+  local id="$1" interval="$2" next="$3" st="$4"
   local jd="$OSRC_JOBS/$id"
-  local st prog started now elapsed
-  st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+  local prog started now elapsed
   prog="$(tail -1 "$jd/progress" 2>/dev/null)"
   case "$prog" in
     *OSRC::*) prog="OSRC::$(printf '%s' "${prog##*OSRC::}" | tr -d '"\\')" ;;
@@ -3596,6 +3598,7 @@ cmd_watch() {
   # Validate: a non-numeric value would error under set -u arithmetic; 0/negative would emit every
   # poll (spam). Require a positive integer, else fall back to the default. (Sol review, MEDIUM.)
   case "$digest_secs" in ''|*[!0-9]*|0) digest_secs=420 ;; esac
+  [ "$digest_secs" -eq 0 ] 2>/dev/null && digest_secs=420
   local last_digest; last_digest=$t0
   while :; do
     local elapsed; elapsed=$(( $(date +%s) - t0 ))
@@ -3614,13 +3617,13 @@ cmd_watch() {
     # Terminal state FIRST: emit the final digest and break before a periodic tick could double it,
     # and before --for could exit without it. (Sol review, both LOWs collapse to this ordering.)
     case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted)
-      _watch_digest "$id" "$digest_secs" "fetch result"
+      _watch_digest "$id" "$digest_secs" "fetch result" "$st"
       break ;; esac
     # Periodic digest: emit on the interval so the session sees the job is still alive even when
     # status and progress are unchanged. Only reached while non-terminal, so it never doubles.
     local _now; _now=$(date +%s)
     if [ $(( _now - last_digest )) -ge "$digest_secs" ]; then
-      _watch_digest "$id" "$digest_secs" "continuing watch; next digest in ${digest_secs}s"
+      _watch_digest "$id" "$digest_secs" "continuing watch; next digest in ${digest_secs}s" "$st"
       last_digest=$_now
     fi
     [ "$forsec" -gt 0 ] && [ "$elapsed" -ge "$forsec" ] && break
@@ -4395,15 +4398,17 @@ second_opinion() {
   _consume_flags "$@"
   local q="${REST[*]:-}"
   [ -n "$q" ] || die "second-opinion needs a question"
-  local pair="${OSRC_SECOND_OPINION_MODELS:-z-ai/glm-5.2,deepseek/deepseek-v4-pro}"
+  local pair="${OSRC_SECOND_OPINION_MODELS:-z-ai/glm-5.2,sol}"
   [ "$MODEL_EXPLICIT" = "1" ] && pair="$MODEL"
   # Keep the adjudicator independent of both default candidates.
   local premium="${OSRC_SECOND_OPINION_PREMIUM:-fable}"
+  case "$pair" in *,*,*|,*|*,'') die "second-opinion needs exactly two non-empty models (use -m a,b)" ;; esac
   local m1 m2; m1="${pair%%,*}"; m2="${pair#*,}"
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
   local _r1 _r2 _id1 _id2 _l1 _l2 _t1 _t2
   _r1="$(_so_resolve "$m1")"; _id1="${_r1%%|*}"; _r1="${_r1#*|}"; _l1="${_r1%%|*}"; _t1="${_r1##*|}"
   _r2="$(_so_resolve "$m2")"; _id2="${_r2%%|*}"; _r2="${_r2#*|}"; _l2="${_r2%%|*}"; _t2="${_r2##*|}"
+  [ "$_id1" != "$_id2" ] || die "second-opinion models resolve to the same model: $_id1"
   echo ">>> second-opinion: $m1 ($_l1)  vs  $m2 ($_l2)" >&2
   # AUTO-DETACH: second-opinion runs 2-3 sequential cloud API calls (can take 2-5 min).
   # If non-interactive AND slow-lane, auto-promote to bg so a harness tool-timeout can't kill it.
@@ -5290,6 +5295,9 @@ _osrc_link_skill_into() {
   # (guarded above by the `! -L` return 3).
   [ -L "$link" ] && rm -f "$link" 2>/dev/null
   local tmp="$dstdir/.outsourcerer.link.$$"
+  # A crash can leave this temp name behind as a real directory.  Do not let
+  # ln follow it and install a nested link as the final destination.
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rm -rf "$tmp" 2>/dev/null || return 2
   ln -sfn "$src" "$tmp" 2>/dev/null || return 2
   mv -f "$tmp" "$link" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 2; }
   return 0
@@ -6637,10 +6645,13 @@ _winpty_session() {
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           _validate_model_token "$cid"
           local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
-          LAUNCH=("codex" "-m" "$cid" "-s" "workspace-write" "${_ccmh[@]}") ;;
+          LAUNCH=("codex" "-s" "workspace-write")
+          [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("-m" "$cid")
+          LAUNCH+=(${_ccmh[@]+"${_ccmh[@]}"}) ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
-          LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude" "--model" "$MODEL") ;;
+          LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
+          [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("--model" "$MODEL") ;;
         droid)
           have droid || die "droid not on PATH (needed for a droid session)"
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("droid" "-m" "$MODEL"); else LAUNCH=("droid"); fi ;;
@@ -6654,13 +6665,13 @@ _winpty_session() {
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
+          [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("$gveh" "--model" "$MODEL"); else LAUNCH=("$gveh"); fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
-      _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || true
-      [ -d "$OSRC_HOME" ] || die "OSRC_HOME not writable: $OSRC_HOME"
+      _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || die "OSRC_HOME not writable: $OSRC_HOME"
 
       if [ -d "$sdir" ] && [ -f "$sdir/broker.pid" ]; then
         local bpid; bpid="$(cat "$sdir/broker.pid" 2>/dev/null)"
@@ -6754,6 +6765,7 @@ _winpty_session() {
 
 # ---- interactive tmux session (opt-in) ----
 session() {
+  _validate_session_name
   if [ "$OSRC_PLATFORM" = "windows" ]; then
     _winpty_session "$@"
     return
@@ -6784,11 +6796,11 @@ session() {
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
           # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
-          launch="codex -m $cid -s workspace-write$ccmh" ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="codex -m $cid -s workspace-write$ccmh"; else launch="codex -s workspace-write$ccmh"; fi ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
-          launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL" ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi ;;
         droid)
           have droid || die "droid not on PATH (needed for a droid session)"
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="droid -m $MODEL"; else launch="droid"; fi ;;
@@ -6802,6 +6814,7 @@ session() {
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
+          [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model $MODEL"; else launch="$gveh"; fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
@@ -6846,7 +6859,10 @@ session() {
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
       tmux send-keys -t "$SESSION_NAME" Escape; sleep 1     # clear any pending input line
       tmux send-keys -t "$SESSION_NAME" M-m;   sleep 1      # opt+m -> open model picker
-      if [ -n "${1:-}" ]; then tmux send-keys -t "$SESSION_NAME" -l "$1"; sleep 1; fi
+      if [ -n "${1:-}" ]; then
+        local filter; filter=$(printf '%s' "$1" | tr -cd '[:alnum:][:space:]._:/-')
+        tmux send-keys -t "$SESSION_NAME" -l "$filter"; sleep 1
+      fi
       tmux send-keys -t "$SESSION_NAME" Enter
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
@@ -7458,6 +7474,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
     # A resumed --worktree loop must run in the same worktree; the existing setup block below will
     # restore the saved path/cd when this flag is set.
     [ -f "$ldir/worktree.json" ] && use_worktree=1
+    grep -qx 'worktree: 1' "$ldir/meta" 2>/dev/null && use_worktree=1
   fi
 
   while [ $# -gt 0 ]; do case "$1" in
@@ -7497,32 +7514,42 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
       awk -v newmax="$max" '/^max: / { print "max: " newmax; next } { print }' "$ldir/meta" > "$_mtmp" &&
         mv "$_mtmp" "$ldir/meta" || { rm -f "$_mtmp"; die "loop resume: cannot update metadata"; }
     fi
-    printf 'resumed: %s\n' "$(date +%s)" >> "$ldir/meta" 2>/dev/null || true
+    printf 'resumed: %s\n' "$(date +%s)" >> "$ldir/meta" 2>/dev/null || die "loop resume: cannot update metadata"
   else
     lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
     _mkdir_private "$ldir" || die "loop: cannot create loop dir under $OSRC_HOME/loops"
-    { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nstarted: %s\n' \
-        "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
+    { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nworktree: %s\nstarted: %s\n' \
+        "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$use_worktree" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || die "loop: cannot write metadata"
   fi
   # --worktree: run the delegate AND the acceptance check inside an isolated git worktree, so the
   # loop verifies exactly the tree it mutated. Reuses _worktree_setup (same as bg/fanout).
   local wt="" wbr="" wbase=""
   if [ "$use_worktree" = "1" ]; then
     if [ -f "$ldir/worktree.json" ]; then
-      have jq || die "loop verify: cannot reuse existing worktree without jq: $ldir/worktree.json"
-      wt="$(jq -r '.path' "$ldir/worktree.json")"; wbr="$(jq -r '.branch' "$ldir/worktree.json")"; wbase="$(jq -r '.base_sha // ""' "$ldir/worktree.json")"
+      if have jq; then
+        wt="$(jq -r '.path' "$ldir/worktree.json")"; wbr="$(jq -r '.branch' "$ldir/worktree.json")"; wbase="$(jq -r '.base_sha // ""' "$ldir/worktree.json")"
+      else
+        wt="$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' "$ldir/worktree.json")"
+        wbr="$(sed -n 's/.*"branch":"\([^"]*\)".*/\1/p' "$ldir/worktree.json")"
+        wbase="$(sed -n 's/.*"base_sha":"\([^"]*\)".*/\1/p' "$ldir/worktree.json")"
+      fi
       [ -n "$wt" ] && [ "$wt" != "null" ] || die "loop verify: existing worktree metadata has no path: $ldir/worktree.json"
     fi
     if [ -z "$wt" ]; then
       local _wl
       if _wl="$(OSRC_WORKTREE=1 _worktree_setup "$lid")"; then
         wt="${_wl%%$'\t'*}"; _wl="${_wl#*$'\t'}"; wbr="${_wl%%$'\t'*}"; wbase="${_wl##*$'\t'}"
-        have jq && jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" '{path:$p,branch:$b,base_sha:$bs}' > "$ldir/worktree.json" 2>/dev/null || true
+        if have jq; then jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" '{path:$p,branch:$b,base_sha:$bs}' > "$ldir/worktree.json"; else printf '{"path":"%s","branch":"%s","base_sha":"%s"}\n' "$wt" "$wbr" "$wbase" > "$ldir/worktree.json"; fi || die "loop verify: cannot record worktree"
       else
         die "loop verify: --worktree setup failed (not in a git repo, or branch exists?)"
       fi
     fi
-    [ -n "$wt" ] && { cd "$wt" 2>/dev/null || die "loop verify: cannot cd into worktree $wt"; }
+    if [ -n "$wt" ] && ! cd "$wt" 2>/dev/null; then
+      _wl="$(OSRC_WORKTREE=1 _worktree_setup "$lid")" || die "loop verify: cannot recreate missing worktree"
+      wt="${_wl%%$'\t'*}"; _wl="${_wl#*$'\t'}"; wbr="${_wl%%$'\t'*}"; wbase="${_wl##*$'\t'}"
+      if have jq; then jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" '{path:$p,branch:$b,base_sha:$bs}' > "$ldir/worktree.json"; else printf '{"path":"%s","branch":"%s","base_sha":"%s"}\n' "$wt" "$wbr" "$wbase" > "$ldir/worktree.json"; fi || die "loop verify: cannot update worktree metadata"
+      cd "$wt" || die "loop verify: cannot cd into recreated worktree $wt"
+    fi
   fi
   local _t0; _t0=$(date +%s)
   echo "[loop $shape] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
@@ -7530,7 +7557,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   # Live state on disk from the FIRST second. A loop that only records its verdict at the end is
   # unobservable exactly while it matters: you cannot tell a loop grinding usefully from one that is
   # stuck, so you cannot decide whether to steer it or kill it.
-  printf 'running\n' > "$ldir/state" 2>/dev/null || true
+  printf 'running\n' > "$ldir/state" 2>/dev/null || die "loop verify: cannot write state"
   local attempt="$(( prior_attempt + 1 ))" last_attempt="$prior_attempt"
   local feedback="" prev_fail="" have_prev=0 state="max_turns" mflag=""
   [ -n "$model" ] && mflag="-m"
@@ -7548,7 +7575,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
 
   while [ "$attempt" -le "$max" ]; do
     last_attempt="$attempt"
-    printf '%s\n' "$attempt" > "$ldir/attempt" 2>/dev/null || true
+    printf '%s\n' "$attempt" > "$ldir/attempt" 2>/dev/null || die "loop verify: cannot write attempt"
     echo "OSRC::PROGRESS $attempt/$max delegate+verify" >&2
     local aprompt="$task"
     [ -n "$feedback" ] && aprompt="$task
@@ -7593,13 +7620,13 @@ $feedback"
     _loop_check "$check_timeout" "$check" "$ldir/check-$attempt.out"; crc=$?
     cout="$(cat "$ldir/check-$attempt.out" 2>/dev/null)"
     if [ "$crc" -eq 124 ]; then
-      printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || true
+      printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
       echo "[loop verify] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
     else
-      printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || true
+      printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1 > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
     fi
     # Persist the feedback so a later `loop resume` can pick up exactly where this one stopped.
-    printf '%s' "$cout" > "$ldir/feedback" 2>/dev/null || true
+    printf '%s' "$cout" > "$ldir/feedback" 2>/dev/null || die "loop verify: cannot write feedback"
     if [ "$crc" -eq 0 ]; then state="success"; echo "[loop verify] $lid: acceptance check PASSED on attempt $attempt." >&2; break; fi
     # Stall guard: byte-identical check output on two consecutive attempts means the feedback is
     # not moving the delegate -> stop rather than burn the remaining budget on a spin. Keyed on a
@@ -7618,7 +7645,7 @@ $feedback"
     fi
     attempt=$(( attempt + 1 ))
   done
-  printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || true
+  printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || die "loop verify: cannot write final state"
   # Report the SPEND even when it is $0. The default lane is a subscription lane, so a dollar figure is
   # always zero there and tells you nothing — while the thing that actually runs out is the plan's rate
   # limit. Attempts and elapsed time are the units that bind on every lane, so they are what a loop
@@ -7638,7 +7665,7 @@ $feedback"
     hsha="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
     [ -n "$(git -C "$wt" status --porcelain 2>/dev/null | head -1)" ] && dirty=true
     ahead="$(git -C "$wt" rev-list --count "${wbase:-HEAD}..HEAD" 2>/dev/null)"; ahead="${ahead:-0}"
-    have jq && jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" --arg hs "$hsha" --argjson d "$dirty" --argjson a "$ahead" '{path:$p,branch:$b,base_sha:$bs,head_sha:$hs,dirty:$d,ahead:$a}' > "$ldir/worktree.json" 2>/dev/null || true
+    if have jq; then jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" --arg hs "$hsha" --argjson d "$dirty" --argjson a "$ahead" '{path:$p,branch:$b,base_sha:$bs,head_sha:$hs,dirty:$d,ahead:$a}' > "$ldir/worktree.json"; else printf '{"path":"%s","branch":"%s","base_sha":"%s","head_sha":"%s","dirty":%s,"ahead":%s}\n' "$wt" "$wbr" "$wbase" "$hsha" "$dirty" "$ahead" > "$ldir/worktree.json"; fi || die "loop verify: cannot update worktree metadata"
     printf '[worktree] loop %s: branch %s at %s (ahead %s, dirty %s) — inspect/merge, then: outsourcerer cleanup %s\n' "$lid" "$wbr" "$wt" "$ahead" "$dirty" "$lid" >&2
   fi
   echo "$state"
@@ -7679,7 +7706,7 @@ main() {
   # tap is exempt too: `tap run` fires on EVERY statusline render and MUST reach its guaranteed
   # passthrough even when OSRC_HOME is unwritable (a preflight die would silently kill the user's
   # real statusline). Its write paths self-guard. brief/mode are read-only/self-guarding likewise.
-  case "$cmd" in ""|-h|--help|help|--version|-V|doctor|brief|mode|tap) ;; *) _state_home_preflight ;; esac
+  case "$cmd" in ""|-h|--help|help|--version|-V|doctor|brief|mode|tap|parity|parity-*) ;; *) _state_home_preflight ;; esac
   case "$cmd" in
     --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)
@@ -7730,7 +7757,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)" ;;
   esac
 }
 main "$@"
