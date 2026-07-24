@@ -1146,6 +1146,7 @@ _effort_thinking_tokens() {
 record_ledger() {
   # bg jobs record the accurate (stream-json) entry from __runjob; skip the child's estimate then.
   [ "${OSRC_STREAM:-0}" = "1" ] && [ "${OSRC_LEDGER_FORCE:-0}" != "1" ] && return 0
+  [ "${OSRC_LEDGER_QUIET:-0}" = "1" ] && [ "${OSRC_LEDGER_FORCE:-0}" != "1" ] && return 0
   have jq || return 0
   _mkdir_private "$OSRC_HOME" || true
   # Restrict the ledger itself: the $OSRC_HOME dir is 700, but if OSRC_HOME is ever
@@ -3617,7 +3618,8 @@ cmd_cleanup() {
     echo "[outsourcerer] cleaned fanout $target"; return 0
   fi
   local wj="$OSRC_JOBS/$target/worktree.json"
-  [ -f "$wj" ] || { echo "[outsourcerer] job $target has no worktree to clean."; return 0; }
+  [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
+  [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
   have jq || die "cleanup needs jq"
   local path branch dirty ahead base
   path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
@@ -4240,11 +4242,35 @@ $body"
 # disagree->escalate to a premium model with both answers attached.
 # =============================================================================
 _so_norm() { tr 'A-Z' 'a-z' | tr -cd 'a-z0-9'; }
-_so_run() {   # <model> <prompt> -> stdout text via the cc/OpenRouter lane (read-only)
-  _or_load_key
-  ANTHROPIC_BASE_URL="https://openrouter.ai/api" ANTHROPIC_AUTH_TOKEN="$OPENROUTER_API_KEY" \
-    ANTHROPIC_API_KEY= ANTHROPIC_MODEL="$1" ANTHROPIC_SMALL_FAST_MODEL="$1" \
-    claude -p --bare --permission-mode default "$2" 2>/dev/null
+_so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
+  local model="$1" row id tlane tier disp elane
+  row="$(resolve_model_row "$model")"
+  if [ -n "$row" ]; then
+    id="${row%%|*}"; row="${row#*|}"; tlane="${row%%|*}"; tier="${row##*|}"
+  else
+    id="$model"; tlane=""; tier=""
+  fi
+  elane="$(_effective_lane "$tlane" "$PROVIDER" "$model" "1")"
+  case "$elane" in
+    local) disp=local ;;
+    cx) disp=cxnative ;;
+    cc) disp=ccnative ;;
+    gm) disp=gmnative ;;
+    dv) disp=devin ;;
+    or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
+    droid|cursor|hermes|claudex) disp="$elane" ;;
+    *) disp="${tlane:-$PROVIDER}" ;;
+  esac
+  if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
+    local dvm; dvm="$(_devin_model_for "$model")"
+    [ -n "$dvm" ] && id="$dvm" || disp=ccor
+  fi
+  [ -n "$tier" ] || tier="$(resolve_tier "$id" "")"
+  printf '%s|%s|%s\n' "$id" "$disp" "$tier"
+}
+_so_run() {   # <model> <prompt> -> stdout text via the same read-only routing as `run`
+  OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 \
+    route_delegate auto run -m "$1" -- "$2"
 }
 second_opinion() {
   # --judge-anyway forces the paid adjudication even when the free gate could decide for $0.
@@ -4264,19 +4290,21 @@ second_opinion() {
   local premium="${OSRC_SECOND_OPINION_PREMIUM:-deepseek/deepseek-v4-pro}"
   local m1 m2; m1="${pair%%,*}"; m2="${pair#*,}"
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
-  echo ">>> second-opinion: $m1  vs  $m2" >&2
-  _cloud_disclose ccor "$m1,$m2" "$q"
+  local _r1 _r2 _id1 _id2 _l1 _l2 _t1 _t2
+  _r1="$(_so_resolve "$m1")"; _id1="${_r1%%|*}"; _r1="${_r1#*|}"; _l1="${_r1%%|*}"; _t1="${_r1##*|}"
+  _r2="$(_so_resolve "$m2")"; _id2="${_r2%%|*}"; _r2="${_r2#*|}"; _l2="${_r2%%|*}"; _t2="${_r2##*|}"
+  echo ">>> second-opinion: $m1 ($_l1)  vs  $m2 ($_l2)" >&2
   # AUTO-DETACH: second-opinion runs 2-3 sequential cloud API calls (can take 2-5 min).
   # If non-interactive AND slow-lane, auto-promote to bg so a harness tool-timeout can't kill it.
-  local _so_tier; _so_tier="$(resolve_tier "$m1" "")"
-  if _autodetach_should ccor "$m1" "$_so_tier"; then
+  if _autodetach_should "$_l1" "$_id1" "$_t1" || _autodetach_should "$_l2" "$_id2" "$_t2"; then
     _autodetach_run second-opinion ${_so_orig[@]+"${_so_orig[@]}"}
     return $?
   fi
   local a1 a2 n1 n2
   a1="$(_so_run "$m1" "$q")"; a2="$(_so_run "$m2" "$q")"
   n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
-  record_ledger cc "$m1,$m2" mixed second-opinion "$q"
+  record_ledger "$_l1" "$_id1" "$_t1" second-opinion "$q"
+  record_ledger "$_l2" "$_id2" "$_t2" second-opinion "$q"
   # Detect upstream failures: empty output means the call failed.
   if [ -z "$n1" ] && [ -z "$n2" ]; then
     die "second-opinion: both cheap models ($m1, $m2) returned empty — upstream failure (check OPENROUTER_API_KEY / network)"
@@ -7264,7 +7292,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   # are wildly different — so a wall-clock bound sits alongside it. A money cap is deliberately absent:
   # the default lane is a subscription lane that reports $0, so a dollar bound would never fire on the
   # path most people use, while time and attempts always bind.
-  local model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}" verb=edit task=""
+  local model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}" verb=edit task="" use_worktree=0
   local original_max="" max_set=0 prior_attempt=0
 
   # On resume the shape of the work is FIXED by the original run. Re-specifying the task, check, model
@@ -7296,7 +7324,8 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
                 [ -n "${2:-}" ] || die "loop verify: --max-minutes needs a number"; maxmin="$2"; shift 2 ;;
     --verb)     [ "$resume" != "1" ] || die "loop resume: the verb is fixed by the original loop"
                 [ -n "${2:-}" ] || die "loop verify: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
-    --worktree) die "loop verify: --worktree is not supported yet. Isolation would have to be established by the loop itself (the delegate runs in the foreground here, and the acceptance check must run inside the same tree), so a half-wired flag would verify the wrong files. Run the loop inside a worktree you created, or use 'bg --worktree' for one-shot isolated work." ;;
+    --worktree) [ "$resume" != "1" ] || die "loop resume: the worktree is fixed by the original loop"
+                use_worktree=1; shift ;;
     --)         shift; task="$*"; break ;;
     -*)         die "loop verify: unknown flag '$1'" ;;
     *)          task="$1"; shift ;;
@@ -7328,6 +7357,24 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
     _mkdir_private "$ldir" || die "loop: cannot create loop dir under $OSRC_HOME/loops"
     { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nstarted: %s\n' \
         "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || true
+  fi
+  # --worktree: run the delegate AND the acceptance check inside an isolated git worktree, so the
+  # loop verifies exactly the tree it mutated. Reuses _worktree_setup (same as bg/fanout).
+  local wt="" wbr="" wbase=""
+  if [ "$use_worktree" = "1" ]; then
+    if [ -f "$ldir/worktree.json" ] && have jq; then
+      wt="$(jq -r '.path' "$ldir/worktree.json")"; wbr="$(jq -r '.branch' "$ldir/worktree.json")"; wbase="$(jq -r '.base_sha // ""' "$ldir/worktree.json")"
+    fi
+    if [ -z "$wt" ]; then
+      local _wl
+      if _wl="$(OSRC_WORKTREE=1 _worktree_setup "$lid")"; then
+        wt="${_wl%%$'\t'*}"; _wl="${_wl#*$'\t'}"; wbr="${_wl%%$'\t'*}"; wbase="${_wl##*$'\t'}"
+        have jq && jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" '{path:$p,branch:$b,base_sha:$bs}' > "$ldir/worktree.json" 2>/dev/null || true
+      else
+        die "loop verify: --worktree setup failed (not in a git repo, or branch exists?)"
+      fi
+    fi
+    [ -n "$wt" ] && { cd "$wt" 2>/dev/null || die "loop verify: cannot cd into worktree $wt"; }
   fi
   local _t0; _t0=$(date +%s)
   echo "[loop $shape] $lid — goal: \`$check\` passes. Guards: up to $max attempts$( [ "$_maxsec" -gt 0 ] && printf ' or %s min' "$maxmin" ), on ${model:-default lane}." >&2
@@ -7438,6 +7485,14 @@ $feedback"
     blocked|max_turns|max_time)
       echo "[loop verify] $lid is resumable — it keeps its task, check and last failure: ./outsourcerer.sh loop resume $lid --max $(( max + 3 ))" >&2 ;;
   esac
+  if [ -n "$wt" ]; then
+    local hsha dirty=false ahead=0
+    hsha="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
+    [ -n "$(git -C "$wt" status --porcelain 2>/dev/null | head -1)" ] && dirty=true
+    ahead="$(git -C "$wt" rev-list --count "${wbase:-HEAD}..HEAD" 2>/dev/null)"; ahead="${ahead:-0}"
+    have jq && jq -cn --arg p "$wt" --arg b "$wbr" --arg bs "$wbase" --arg hs "$hsha" --argjson d "$dirty" --argjson a "$ahead" '{path:$p,branch:$b,base_sha:$bs,head_sha:$hs,dirty:$d,ahead:$a}' > "$ldir/worktree.json" 2>/dev/null || true
+    printf '[worktree] loop %s: branch %s at %s (ahead %s, dirty %s) — inspect/merge, then: outsourcerer cleanup %s\n' "$lid" "$wbr" "$wt" "$ahead" "$dirty" "$lid" >&2
+  fi
   echo "$state"
   case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
