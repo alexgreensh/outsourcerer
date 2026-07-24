@@ -26,7 +26,7 @@ mkdir -p "$CMD_DIR" || { echo "broker: cannot create $CMD_DIR" >&2; exit 1; }
 # Keep a write FD open on the stdin FIFO so winpty never sees EOF.
 rm -f "$STDIN_FIFO"
 mkfifo "$STDIN_FIFO" 2>/dev/null || { echo "broker: mkfifo failed" >&2; exit 1; }
-exec 3>"$STDIN_FIFO"
+exec 3<>"$STDIN_FIFO"
 
 # Probe whether this winpty supports the undocumented flags that allow redirection
 # to a file/pipe. Git for Windows winpty usually does; if not, fall back to none.

@@ -6479,6 +6479,11 @@ _tmux_reset_input() {
 # ---- interactive winpty session broker for Windows ----
 _winpty_session() {
   local sub="${1:-}"; shift || true
+  case "$SESSION_NAME" in
+    ''|*[!A-Za-z0-9._-]*)
+      die "invalid session name '$SESSION_NAME' (OUTSOURCERER_TMUX must be non-empty and match ^[A-Za-z0-9._-]+$)"
+      ;;
+  esac
   local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
   local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
   [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
@@ -6488,34 +6493,34 @@ _winpty_session() {
       parse_model "$@"
       _validate_model_token "$MODEL"
 
-      local launch=()
+      local LAUNCH=()
       case "$PROVIDER" in
         devin|dv)
           need_devin; logged_in || die "Not logged in. Run:  ! devin auth login"
-          launch=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
+          LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           _validate_model_token "$cid"
           local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
-          launch=("codex" "-m" "$cid" "-s" "workspace-write" "${_ccmh[@]}") ;;
+          LAUNCH=("codex" "-m" "$cid" "-s" "workspace-write" "${_ccmh[@]}") ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
-          launch=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude" "--model" "$MODEL") ;;
+          LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude" "--model" "$MODEL") ;;
         droid)
           have droid || die "droid not on PATH (needed for a droid session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("droid" "-m" "$MODEL"); else launch=("droid"); fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("droid" "-m" "$MODEL"); else LAUNCH=("droid"); fi ;;
         cursor)
           have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("cursor-agent" "--model" "$MODEL"); else launch=("cursor-agent"); fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("cursor-agent" "--model" "$MODEL"); else LAUNCH=("cursor-agent"); fi ;;
         hermes)
           have hermes || die "hermes not on PATH (needed for a hermes session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("hermes" "chat" "--model" "$MODEL"); else launch=("hermes" "chat"); fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("hermes" "chat" "--model" "$MODEL"); else LAUNCH=("hermes" "chat"); fi ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("$gveh" "--model" "$MODEL"); else launch=("$gveh"); fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("$gveh" "--model" "$MODEL"); else LAUNCH=("$gveh"); fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
 
@@ -6533,7 +6538,7 @@ _winpty_session() {
       rm -rf "$sdir"
       _mkdir_private "$sdir" || die "cannot create session dir $sdir"
 
-      declare -p launch > "$sdir/launch.bash"
+      declare -p LAUNCH > "$sdir/launch.bash"
       nohup "$broker" "$sdir" > "$sdir/broker.log" 2>&1 &
       bpid=$!
       echo "$bpid" > "$sdir/broker.pid"
@@ -7312,6 +7317,9 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
     case "$prior_attempt" in ''|*[!0-9]*) die "loop resume: corrupt attempt state in '$lid'" ;; esac
     [ -n "$task" ] && [ -n "$check" ] && [ -n "$max" ] && [ -n "$verb" ] ||
       die "loop resume: '$lid' has incomplete metadata and cannot be resumed safely"
+    # A resumed --worktree loop must run in the same worktree; the existing setup block below will
+    # restore the saved path/cd when this flag is set.
+    [ -f "$ldir/worktree.json" ] && use_worktree=1
   fi
 
   while [ $# -gt 0 ]; do case "$1" in
