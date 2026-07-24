@@ -1255,7 +1255,7 @@ record_outcome() {
   esac
   # reason MUST be a fixed enum (never task text) — an unknown reason is dropped, not stored verbatim.
   case "$reason" in
-    ''|test_failure|compile_failure|invalid_output|permission_denied|consent_denied|secret_scan|provider_error|timeout|watchdog|merge_conflict|user_cancelled|missing_tool) ;;
+    ''|test_failure|compile_failure|invalid_output|empty-output|permission_denied|consent_denied|secret_scan|provider_error|timeout|watchdog|merge_conflict|user_cancelled|missing_tool) ;;
     *) reason="" ;;
   esac
   # repo_key MUST be a cksum (numeric) or the PII guarantee breaks; turns MUST be numeric or omitted.
@@ -2551,15 +2551,16 @@ _supervise() {
   # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
-  # byte-growth timer never trips. Track WRITES too; a mutating job with 0 writes past the window is
-  # flagged "exploring?" (visible in status/watch) so the orchestrator can steer instead of cancelling
-  # blind. Not killed — late-writers exist; the hard timeout still backstops.
+  # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
+  # if it then remains both write-free AND output-silent for another bounded window, stop it as a
+  # real stall. An observable warning without a terminal bound left jobs running forever.
   local verb=""; [ -f "$jd/meta.json" ] && verb="$(jq -r '.verb // ""' "$jd/meta.json" 2>/dev/null)"
   [ -f "$jd/meta.json" ] && _jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
   [ -n "$_jcwd" ] || _jcwd="$PWD"
   : > "$jd/.fsmark" 2>/dev/null || true
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
+  local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
@@ -2588,7 +2589,18 @@ _supervise() {
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null || {
         echo "exploring?" > "$jd/status"
-        echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. Steer it or give a tighter 'write file X now' prompt." >&2; }
+        echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. It will be stopped after ${nww_kill}s with no writes and no output growth. Steer it or give a tighter 'write file X now' prompt." >&2; }
+    fi
+    # Once marked exploring, a fresh output line buys the delegate another exploration window, but
+    # neither reading nor an old warning can keep it alive forever. The same content check used for
+    # the warning proves it has still made no write before applying the real stall-kill.
+    if [ "$mutating" = "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "exploring?" ] \
+       && [ "$idle" -ge "$nww_kill" ] \
+       && ! grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null; then
+      echo wedged > "$jd/status"
+      printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
+      echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
+      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     # SELF-HEAL backstop (LANE-AGNOSTIC): a mutating job hitting repeated permission/sandbox denials is
     # walled off — headless delegates (claude/codex/devin/local) cannot answer an interactive prompt, so it
@@ -2705,6 +2717,18 @@ _supervise() {
     fi
   done
   wait "$pid"; local rc=$?; echo "$rc" > "$jd/exit"
+  # A clean process exit is not a successful delegation when it emitted only launcher/disclosure
+  # lines. Use the identical content test as the stall path: those lines begin with `>>> ` and do
+  # not constitute a delegate result. This must run before marker/exit-code classification so an
+  # empty rc=0 cannot masquerade as done? and an empty nonzero cannot hide its actual cause.
+  if ! grep -aqv '^>>> ' "$jd/out.log" 2>/dev/null; then
+    echo failed > "$jd/status"
+    printf 'empty-output\n' > "$jd/reason" 2>/dev/null || true
+    echo "[outsourcerer] job $(basename "$jd") exited without any delegate output beyond launcher/disclosure lines; marking it failed (empty-output). Do not treat this as a result." >&2
+    [ "$rc" -eq 0 ] && rc=1
+    echo "$rc" > "$jd/exit"
+    return "$rc"
+  fi
   # Classify on the LAST OSRC:: terminal marker, not the FIRST appearance. A delegate that ends with
   # OSRC::DONE is done even if "OSRC::BLOCKED" appeared earlier (e.g. it echoed the protocol
   # instructions, or reconsidered mid-run). Only a final BLOCKED/NEED_INPUT means blocked.
@@ -3306,6 +3330,10 @@ run_job() {
   local _st _m _oc _rsn
   _st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null || echo '?')"
   _m="$(_status_to_outcome "$_st" "$sc")"; _oc="${_m%%$'\t'*}"; _rsn="${_m#*$'\t'}"
+  # Preserve the supervised empty-result diagnosis in the durable outcome record. Without this,
+  # `failed` was recorded only as generic provider_error and the actual empty-output failure
+  # vanished as soon as the transient supervisor message scrolled away.
+  [ "$(cat "$jd/reason" 2>/dev/null || true)" = "empty-output" ] && _rsn="empty-output"
   # Pass EVERY field explicitly — no reliance on exported env (which record_ledger no longer sets).
   record_outcome "$_oc" "$_rsn" "" "$id" "$lane" "$id2" "${OSRC_TASK_CLASS:-}" "$(_repo_key)"
   return "$sc"
@@ -3570,6 +3598,12 @@ cmd_result() {
   if [ -s "$jd/last.txt" ]; then shown="$(cat "$jd/last.txt")" || rc=$?
   else shown="$(tail -n 40 "$jd/out.log" 2>/dev/null)" || rc=$?; fi
   printf '%s' "$shown"
+  # An empty-output failure intentionally has no delegate payload to print. Surface its recorded
+  # reason here rather than making `result` look like a successful empty response.
+  if [ "$(cat "$jd/reason" 2>/dev/null || true)" = "empty-output" ]; then
+    printf '\n>>> [outsourcerer] FAILED: empty-output — the delegate exited without output beyond launcher/disclosure lines; there is no result to trust.\n' >&2
+    [ "$rc" -eq 0 ] && rc=1
+  fi
   # Diagnostics-only: if this is a failed devin job and the recognizable TLS/proxy hint is not
   # already in the surfaced text, re-scan devin's own log and append it to STDERR (the cause lives
   # in ~/.local/share/devin/cli/logs/, not out.log; stderr keeps it out of the result payload).
@@ -6286,7 +6320,7 @@ route_delegate() {
     fi
   fi
 
-  local disp="" _or_autoroute_note=""
+  local disp="" _or_autoroute_note="" _or_credit_state=""
   if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
@@ -6328,25 +6362,11 @@ route_delegate() {
       or)  case "$PROVIDER" in
              cc)    disp=ccor ;;
              codex) disp=codexor ;;
-             *)     # availability-aware routing: default provider (devin) + an OpenRouter model that
-                    # Devin ALSO serves -> use the Devin lane (has quota) instead of dying/forcing OpenRouter.
-                    # This fixes `-m glm` hard-failing when the OpenRouter key is out of monthly quota.
-                    local _dvm; _dvm="$(_devin_model_for "$MODEL")"
-                    if [ -n "$_dvm" ]; then
-                      printf '>>> [route] -m %s is served by BOTH OpenRouter and Devin; using the Devin lane (%s) on the default provider (Devin has quota). Force OpenRouter with --provider cc|codex.\n' "$MODEL" "$_dvm" >&2
-                      # Rewrite the model token in ORIG so the Devin lane runs the Devin id, not the OR alias.
-                      local _i; for _i in "${!ORIG[@]}"; do
-                        case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac
-                      done
-                      RESOLVED_ID="$_dvm"; disp=devin
-                    else
-                      # AUTO-ROUTE: an OpenRouter-only model the active provider
-                      # cannot serve should FOLLOW its lane automatically — the SKILL promise is "the
-                      # alias picks the lane; no --provider needed." Don't die and make the user recall
-                      # `--provider cc`; route to the cc transport (Claude Code -> OpenRouter) and say so.
-                      _or_autoroute_note="-m $MODEL is an OpenRouter-only model; active provider ($PROVIDER) cannot serve it"
-                      PROVIDER=cc; disp=ccor
-                    fi ;;
+             *)     # An OpenRouter alias always follows its declared lane. Do not silently swap
+                    # `glm`/`deepseek` to Devin based on a transient availability guess: that made
+                    # the same alias order-dependent and printed a fabricated quota assertion.
+                    _or_autoroute_note="-m $MODEL resolves to OpenRouter model $RESOLVED_ID; active provider ($PROVIDER) does not transport OpenRouter models"
+                    PROVIDER=cc; disp=ccor ;;
            esac ;;
     esac
   else
@@ -6365,12 +6385,25 @@ route_delegate() {
   # behavior, but a numeric zero never becomes a phantom detached job.
   case "$disp" in
     ccor|codexor)
-      if _or_credits_exhausted; then
+      _or_credit_state="$(or_credits 2>/dev/null)"
+      local _or_remaining="${_or_credit_state##*remaining=}"; _or_remaining="${_or_remaining%% *}"
+      if awk -v n="$_or_remaining" 'BEGIN { exit !(n ~ /^[0-9]+([.][0-9]+)?$/ && n <= 0) }' 2>/dev/null; then
         die "OpenRouter reports zero remaining credits; refusing to route this run. Use a subscription/local lane or restore OpenRouter credit first."
       fi
-      [ -n "$_or_autoroute_note" ] && printf '>>> [route] %s — auto-routing to the OpenRouter lane (--provider cc). Force codex with --provider codex.\n' "$_or_autoroute_note" >&2
+      [ -n "$_or_autoroute_note" ] && printf '>>> [route] %s — auto-routing to the OpenRouter lane (--provider cc; credit state: %s). Force codex with --provider codex.\n' "$_or_autoroute_note" "${_or_credit_state:-unavailable}" >&2
       ;;
   esac
+
+  # Devin's swe-1.7 is usable for read-only runs but has repeatedly failed write-enabled verbs.
+  # Keep an explicit user choice intact, while making the limitation impossible to miss before a
+  # mutating dispatch. A write-capable model/lane should be preferred for this work.
+  if [ "$disp" = "devin" ] && [ "$RESOLVED_ID" = "swe-1.7" ]; then
+    case "$verb" in
+      edit|yolo|research)
+        printf '>>> [route] WARNING: Devin swe-1.7 is not reliable for %s (write-enabled) jobs. Prefer a write-capable lane/model before dispatch; continuing only because this route was selected explicitly.\n' "$verb" >&2
+        ;;
+    esac
+  fi
 
   # PREFLIGHT EXIT. Lane resolution is complete and every incompatibility above has either died or
   # auto-routed, but nothing has been dispatched yet. `bg` re-enters here with OSRC_PREFLIGHT=1 purely
