@@ -446,6 +446,9 @@ MODEL_EXPLICIT=0
 _validate_model_token() {
   local token="${1:-}"
   [ -n "$token" ] || die "model token is empty"
+  # A leading dash is syntactically safe for a shell, but becomes an option when
+  # passed to a provider CLI rather than a model id.
+  case "$token" in -*) die "invalid model token (must not begin with '-'): '$token'" ;; esac
   if printf '%s' "$token" | grep -qE '[^A-Za-z0-9._:/-]'; then
     die "invalid model token (shell-injection risk): '$token' — only [A-Za-z0-9._:/-] allowed"
   fi
@@ -1449,6 +1452,15 @@ or_credits() {   # best-effort OpenRouter credit line; never fatal
   _or_load_key 2>/dev/null || return 0
   _curl_with_auth "$OPENROUTER_API_KEY" -fsS -m "${OSRC_CURL_TIMEOUT:-30}" "https://openrouter.ai/api/v1/key" 2>/dev/null \
     | jq -r '.data | "limit=\(.limit // "n/a") usage=\(.usage // 0) remaining=\(.limit_remaining // "n/a")"' 2>/dev/null
+}
+
+# _or_credits_exhausted -> 0 only when the live OpenRouter balance is explicitly numeric and empty.
+# A missing/unknown balance is a probe failure, not proof that a paid lane is usable.
+_or_credits_exhausted() {
+  local cred rem
+  cred="$(or_credits 2>/dev/null)"
+  rem="${cred##*remaining=}"; rem="${rem%% *}"
+  awk -v n="$rem" 'BEGIN { exit !(n ~ /^[0-9]+([.][0-9]+)?$/ && n <= 0) }' 2>/dev/null
 }
 
 # _or_gen_cost <generation-id> -> authoritative real dollar cost of ONE OpenRouter generation, or
@@ -3617,12 +3629,22 @@ cmd_cleanup() {
     done < "$gd/members.tsv"
     echo "[outsourcerer] cleaned fanout $target"; return 0
   fi
+  # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
+  # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
+  local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
+  [ -n "$live_pid" ] && _kill_tree "$live_pid"
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
   have jq || die "cleanup needs jq"
-  local path branch dirty ahead base
+  local path branch dirty ahead base rp worktree_root
   path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
+  # Never trust the serialized path: a lexical glob can be bypassed with
+  # worktrees/../../..., so canonicalize and require strict containment first.
+  case "$path" in *'..'*) die "refusing to remove path containing '..': $path" ;; esac
+  rp="$(cd "$path" 2>/dev/null && pwd -P)" || die "refusing to remove non-canonical worktree path: $path"
+  worktree_root="$(cd "$OSRC_HOME/worktrees" 2>/dev/null && pwd -P)" || die "refusing to resolve worktree root: $OSRC_HOME/worktrees"
+  case "$rp" in "$worktree_root"/*) path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
   # Re-read LIVE git state, not the job-completion snapshot: anything edited after the job (user, hook,
   # another process) must be seen, or --force could destroy it. Fall back to the json only if the worktree
   # is already gone.
@@ -3640,11 +3662,6 @@ cmd_cleanup() {
   fi
   local maindir="${path%/.outsourcerer/worktrees/*}"
   [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
-  # Containment check: refuse to rm -rf anything outside the expected worktree root.
-  case "$path" in
-    */.outsourcerer/worktrees/*) ;;
-    *) die "refusing to remove path outside worktree root: $path" ;;
-  esac
   if [ -n "$maindir" ] && [ -d "$maindir/.git" ]; then
     git -C "$maindir" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
     git -C "$maindir" branch -D "$branch" 2>/dev/null || true
@@ -4287,7 +4304,8 @@ second_opinion() {
   [ -n "$q" ] || die "second-opinion needs a question"
   local pair="${OSRC_SECOND_OPINION_MODELS:-z-ai/glm-5.2,deepseek/deepseek-v4-pro}"
   [ "$MODEL_EXPLICIT" = "1" ] && pair="$MODEL"
-  local premium="${OSRC_SECOND_OPINION_PREMIUM:-deepseek/deepseek-v4-pro}"
+  # Keep the adjudicator independent of both default candidates.
+  local premium="${OSRC_SECOND_OPINION_PREMIUM:-fable}"
   local m1 m2; m1="${pair%%,*}"; m2="${pair#*,}"
   [ "$m1" != "$m2" ] || die "second-opinion needs two different models, got '$pair' (use -m a,b)"
   local _r1 _r2 _id1 _id2 _l1 _l2 _t1 _t2
@@ -5164,7 +5182,7 @@ _osrc_skill_root() {
 
 # _osrc_link_skill_into <dst_skills_dir> <skill_root> -> install outsourcerer as a SKILL.md skill via
 # an idempotent, collision-safe symlink. Return codes: 0 linked; 2 could not create dir/link;
-# 3 a REAL (non-symlink) file/dir already occupies the destination. rc3 is the important one:
+# 3 a directory (real or symlinked) already occupies the destination. rc3 is the important one:
 # `ln -sfn TARGET dst` when `dst` is a real directory does NOT replace it -- it creates a nested link
 # `dst/<basename TARGET>` INSIDE it and returns success, so the bridge would silently no-op while
 # reporting "linked". We refuse that case loudly instead. Replacement of a symlink (incl. a dangling
@@ -5173,6 +5191,11 @@ _osrc_link_skill_into() {
   local dstdir="$1" src="$2" link="$1/outsourcerer"
   mkdir -p "$dstdir" 2>/dev/null || return 2
   if [ -e "$link" ] && [ ! -L "$link" ]; then return 3; fi   # real file/dir: never nest or clobber
+  # A pre-existing SYMLINK (even one resolving to a directory) must be removed first: otherwise
+  # `mv` follows it and nests the new link *inside* the target dir. Removing it keeps re-install
+  # idempotent (a second run just refreshes the link) while still never clobbering a real dir/file
+  # (guarded above by the `! -L` return 3).
+  [ -L "$link" ] && rm -f "$link" 2>/dev/null
   local tmp="$dstdir/.outsourcerer.link.$$"
   ln -sfn "$src" "$tmp" 2>/dev/null || return 2
   mv -f "$tmp" "$link" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 2; }
@@ -6263,7 +6286,7 @@ route_delegate() {
     fi
   fi
 
-  local disp=""
+  local disp="" _or_autoroute_note=""
   if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
@@ -6321,7 +6344,7 @@ route_delegate() {
                       # cannot serve should FOLLOW its lane automatically — the SKILL promise is "the
                       # alias picks the lane; no --provider needed." Don't die and make the user recall
                       # `--provider cc`; route to the cc transport (Claude Code -> OpenRouter) and say so.
-                      printf '>>> [route] -m %s is an OpenRouter-only model; active provider (%s) cannot serve it — auto-routing to the OpenRouter lane (--provider cc). Force codex with --provider codex.\n' "$MODEL" "$PROVIDER" >&2
+                      _or_autoroute_note="-m $MODEL is an OpenRouter-only model; active provider ($PROVIDER) cannot serve it"
                       PROVIDER=cc; disp=ccor
                     fi ;;
            esac ;;
@@ -6332,9 +6355,22 @@ route_delegate() {
       devin) disp=devin ;;
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
+      gemini|gm) disp=gmnative ;;
       *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
     esac
   fi
+
+  # A live zero balance is conclusive: stop before preflight or dispatch rather than announcing a
+  # route which can only fail with 402. Unknown balances remain best-effort and preserve existing
+  # behavior, but a numeric zero never becomes a phantom detached job.
+  case "$disp" in
+    ccor|codexor)
+      if _or_credits_exhausted; then
+        die "OpenRouter reports zero remaining credits; refusing to route this run. Use a subscription/local lane or restore OpenRouter credit first."
+      fi
+      [ -n "$_or_autoroute_note" ] && printf '>>> [route] %s — auto-routing to the OpenRouter lane (--provider cc). Force codex with --provider codex.\n' "$_or_autoroute_note" >&2
+      ;;
+  esac
 
   # PREFLIGHT EXIT. Lane resolution is complete and every incompatibility above has either died or
   # auto-routed, but nothing has been dispatched yet. `bg` re-enters here with OSRC_PREFLIGHT=1 purely
@@ -6476,14 +6512,20 @@ _tmux_reset_input() {
   [ "$aggressive" = "aggressive" ] && tmux send-keys -t "$s" Escape 2>/dev/null || true
 }
 
+# Validate session name before any path construction, tmux, or rm use.
+# Reject empty, '.', '..', and any name containing a character outside [A-Za-z0-9._-].
+_validate_session_name() {
+  case "$SESSION_NAME" in
+    ''|.|..|*[!A-Za-z0-9._-]*)
+      die "invalid session name '$SESSION_NAME' (OUTSOURCERER_TMUX must be non-empty, not '.' or '..', and match ^[A-Za-z0-9._-]+$)"
+      ;;
+  esac
+}
+
 # ---- interactive winpty session broker for Windows ----
 _winpty_session() {
   local sub="${1:-}"; shift || true
-  case "$SESSION_NAME" in
-    ''|*[!A-Za-z0-9._-]*)
-      die "invalid session name '$SESSION_NAME' (OUTSOURCERER_TMUX must be non-empty and match ^[A-Za-z0-9._-]+$)"
-      ;;
-  esac
+  _validate_session_name
   local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
   local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
   [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
@@ -6539,6 +6581,8 @@ _winpty_session() {
       _mkdir_private "$sdir" || die "cannot create session dir $sdir"
 
       declare -p LAUNCH > "$sdir/launch.bash"
+      chmod 600 "$sdir/launch.bash" 2>/dev/null || true
+      _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
       nohup "$broker" "$sdir" > "$sdir/broker.log" 2>&1 &
       bpid=$!
       echo "$bpid" > "$sdir/broker.pid"
@@ -6563,7 +6607,7 @@ _winpty_session() {
       mkdir -p "$sdir/cmd"
       local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
       printf '%s' "$*" > "$tmp"
-      mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$.txt"
+      mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$-$RANDOM.txt"
       sleep 0.4
       echo "sent. Read progress with: $0 session read"
       ;;
@@ -6578,7 +6622,7 @@ _winpty_session() {
     clear)
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
       mkdir -p "$sdir/cmd"
-      : > "$sdir/cmd/clear-$(date +%s)-$$"
+      : > "$sdir/cmd/clear-$(date +%s)-$$-$RANDOM"
       echo "cleared input for '$SESSION_NAME' (Escape + C-u sent). Re-check with: $0 session read"
       ;;
     model)
@@ -6590,7 +6634,7 @@ _winpty_session() {
       mkdir -p "$sdir/cmd"
       local tmp; tmp="$(mktemp "$sdir/cmd/.model.XXXXXX" 2>/dev/null || echo "$sdir/cmd/model.$$")"
       printf '%s' "${1:-}" > "$tmp"
-      mv "$tmp" "$sdir/cmd/model-$(date +%s)-$$.txt"
+      mv "$tmp" "$sdir/cmd/model-$(date +%s)-$$-$RANDOM.txt"
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
     stop)
@@ -6670,6 +6714,8 @@ session() {
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
+      _validate_session_name
+      _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
       if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
         echo "Session '$SESSION_NAME' already exists. Use '$0 session stop' first, or reattach with 'tmux attach -t $SESSION_NAME'."
         return 0
@@ -7370,8 +7416,10 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   # loop verifies exactly the tree it mutated. Reuses _worktree_setup (same as bg/fanout).
   local wt="" wbr="" wbase=""
   if [ "$use_worktree" = "1" ]; then
-    if [ -f "$ldir/worktree.json" ] && have jq; then
+    if [ -f "$ldir/worktree.json" ]; then
+      have jq || die "loop verify: cannot reuse existing worktree without jq: $ldir/worktree.json"
       wt="$(jq -r '.path' "$ldir/worktree.json")"; wbr="$(jq -r '.branch' "$ldir/worktree.json")"; wbase="$(jq -r '.base_sha // ""' "$ldir/worktree.json")"
+      [ -n "$wt" ] && [ "$wt" != "null" ] || die "loop verify: existing worktree metadata has no path: $ldir/worktree.json"
     fi
     if [ -z "$wt" ]; then
       local _wl

@@ -9,9 +9,11 @@
 # NOTE: this path is only executed on OSRC_PLATFORM=windows. It must be verified on a
 # real Windows Git Bash machine; winpty builds and MSYS FIFO semantics vary.
 set -uo pipefail
+umask 077
 
 SESS_DIR="${1:-}"
 [ -d "$SESS_DIR" ] || { echo "broker: session dir missing: $SESS_DIR" >&2; exit 1; }
+chmod 600 "$SESS_DIR/launch.bash" 2>/dev/null || true
 source "$SESS_DIR/launch.bash" 2>/dev/null || { echo "broker: launch.bash missing" >&2; exit 1; }
 
 STDIN_FIFO="$SESS_DIR/stdin"
@@ -22,6 +24,7 @@ WINPTY_PID_FILE="$SESS_DIR/winpty.pid"
 
 mkdir -p "$CMD_DIR" || { echo "broker: cannot create $CMD_DIR" >&2; exit 1; }
 : > "$OUT_LOG"
+chmod 600 "$OUT_LOG" 2>/dev/null || true
 
 # Keep a write FD open on the stdin FIFO so winpty never sees EOF.
 rm -f "$STDIN_FIFO"
@@ -35,7 +38,7 @@ if winpty -Xallow-non-tty -Xplain /bin/sh -c 'exit 0' >/dev/null 2>&1; then
   WP_ARGS=(-Xallow-non-tty -Xplain)
 fi
 
-winpty "${WP_ARGS[@]}" "${LAUNCH[@]}" < "$STDIN_FIFO" > "$OUT_LOG" 2>&1 &
+winpty ${WP_ARGS[@]+"${WP_ARGS[@]}"} "${LAUNCH[@]}" < "$STDIN_FIFO" > "$OUT_LOG" 2>&1 &
 WPID=$!
 echo "$WPID" > "$WINPTY_PID_FILE"
 [ -n "$$" ] && echo "$$" > "$PID_FILE"
@@ -50,7 +53,7 @@ while kill -0 "$WPID" 2>/dev/null; do
     [ -n "$line" ] && files+=("${line#* }")
   done < <(
     { find "$CMD_DIR" -maxdepth 1 -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2- ; } \
-    || ls -1tr "$CMD_DIR" 2>/dev/null
+    || ( cd "$CMD_DIR" 2>/dev/null && ls -1tr 2>/dev/null | while IFS= read -r name; do printf '%s/%s\n' "$CMD_DIR" "$name"; done )
   )
 
   if [ "${#files[@]}" -eq 0 ]; then
