@@ -42,3 +42,4 @@ plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
 # lands in ~/.hermes or the Antigravity skills dir and is consumed by an mv; a run interrupted
 # between ln and mv can leave one behind. Never a tracked artifact.
 .outsourcerer.link.*
+.parity-patches/

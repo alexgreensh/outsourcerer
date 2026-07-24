@@ -88,7 +88,8 @@
 #
 # WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
 # outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
-# Everything works except tmux `session` mode (bg/fanout cover the same ground, supervised).
+# `session` uses winpty instead of tmux on Windows; everything else works (bg/fanout cover
+# the same ground for long or parallel work, supervised).
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
 # deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers.
@@ -127,7 +128,7 @@ OSRC_VERSION="0.4.23"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
-# required: everything except tmux `session` mode works there. See doctor's platform section.
+# required: `session` uses winpty there; everything else works. See doctor's platform section.
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) OSRC_PLATFORM="windows" ;;
   Darwin)               OSRC_PLATFORM="mac" ;;
@@ -208,6 +209,7 @@ case "$SCRIPT_PATH" in
   /*) ;;  # already absolute
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
 esac
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
@@ -469,7 +471,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1111,7 +1113,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -2950,7 +2952,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -6446,10 +6448,148 @@ _tmux_reset_input() {
   [ "$aggressive" = "aggressive" ] && tmux send-keys -t "$s" Escape 2>/dev/null || true
 }
 
+# ---- interactive winpty session broker for Windows ----
+_winpty_session() {
+  local sub="${1:-}"; shift || true
+  local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
+  local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
+  [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
+
+  case "$sub" in
+    start)
+      parse_model "$@"
+      _validate_model_token "$MODEL"
+
+      local launch=()
+      case "$PROVIDER" in
+        devin|dv)
+          need_devin; logged_in || die "Not logged in. Run:  ! devin auth login"
+          launch=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
+        codex|cx)
+          have codex || die "codex not on PATH (needed for a codex session)"
+          local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
+          _validate_model_token "$cid"
+          local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
+          launch=("codex" "-m" "$cid" "-s" "workspace-write" "${_ccmh[@]}") ;;
+        cc|claude)
+          have claude || die "claude not on PATH (needed for a claude session)"
+          launch=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude" "--model" "$MODEL") ;;
+        droid)
+          have droid || die "droid not on PATH (needed for a droid session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("droid" "-m" "$MODEL"); else launch=("droid"); fi ;;
+        cursor)
+          have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("cursor-agent" "--model" "$MODEL"); else launch=("cursor-agent"); fi ;;
+        hermes)
+          have hermes || die "hermes not on PATH (needed for a hermes session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("hermes" "chat" "--model" "$MODEL"); else launch=("hermes" "chat"); fi ;;
+        gemini|gm)
+          local gveh="${OSRC_GEMINI_VEHICLE:-}"
+          if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
+          have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch=("$gveh" "--model" "$MODEL"); else launch=("$gveh"); fi ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
+      esac
+
+      have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
+      _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || true
+      [ -d "$OSRC_HOME" ] || die "OSRC_HOME not writable: $OSRC_HOME"
+
+      if [ -d "$sdir" ] && [ -f "$sdir/broker.pid" ]; then
+        local bpid; bpid="$(cat "$sdir/broker.pid" 2>/dev/null)"
+        if [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; then
+          echo "Session '$SESSION_NAME' already exists. Use '$0 session stop' first, or start from a different directory."
+          return 0
+        fi
+      fi
+      rm -rf "$sdir"
+      _mkdir_private "$sdir" || die "cannot create session dir $sdir"
+
+      declare -p launch > "$sdir/launch.bash"
+      nohup "$broker" "$sdir" > "$sdir/broker.log" 2>&1 &
+      bpid=$!
+      echo "$bpid" > "$sdir/broker.pid"
+
+      local _w=0
+      while [ "$_w" -lt 20 ]; do
+        [ -p "$sdir/stdin" ] && [ -f "$sdir/winpty.pid" ] && break
+        sleep 0.2
+        _w=$((_w + 1))
+      done
+
+      if [ ! -f "$sdir/winpty.pid" ] || ! kill -0 "$(cat "$sdir/winpty.pid" 2>/dev/null)" 2>/dev/null; then
+        echo "WARN: winpty did not start quickly; see $sdir/broker.log" >&2
+      fi
+
+      echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
+      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      ;;
+    send)
+      [ -n "${1:-}" ] || die "session send needs text"
+      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      mkdir -p "$sdir/cmd"
+      local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
+      printf '%s' "$*" > "$tmp"
+      mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$.txt"
+      sleep 0.4
+      echo "sent. Read progress with: $0 session read"
+      ;;
+    read)
+      [ -d "$sdir" ] || { echo "no session '$SESSION_NAME' (run: $0 session start)"; return 0; }
+      if [ -f "$sdir/out.log" ]; then
+        tail -n 200 "$sdir/out.log" | grep -v '^[[:space:]]*$'
+      else
+        echo "(no output yet)"
+      fi
+      ;;
+    clear)
+      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      mkdir -p "$sdir/cmd"
+      : > "$sdir/cmd/clear-$(date +%s)-$$"
+      echo "cleared input for '$SESSION_NAME' (Escape + C-u sent). Re-check with: $0 session read"
+      ;;
+    model)
+      case "$PROVIDER" in
+        devin|dv) : ;;
+        *) die "mid-session model switch is wired for Devin only. For a $PROVIDER session, stop and restart with a new model:  $0 session stop && $0 --provider $PROVIDER session start -m <model>" ;;
+      esac
+      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      mkdir -p "$sdir/cmd"
+      local tmp; tmp="$(mktemp "$sdir/cmd/.model.XXXXXX" 2>/dev/null || echo "$sdir/cmd/model.$$")"
+      printf '%s' "${1:-}" > "$tmp"
+      mv "$tmp" "$sdir/cmd/model-$(date +%s)-$$.txt"
+      echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
+      ;;
+    stop)
+      if [ -d "$sdir" ]; then
+        mkdir -p "$sdir/cmd"
+        : > "$sdir/cmd/stop"
+        if [ -f "$sdir/broker.pid" ]; then
+          local bpid; bpid="$(cat "$sdir/broker.pid" 2>/dev/null)"
+          local _w=0
+          while [ "$_w" -lt 15 ] && [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null; do
+            sleep 0.2
+            _w=$((_w + 1))
+          done
+          [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null && kill -9 "$bpid" 2>/dev/null || true
+        fi
+      fi
+      rm -rf "$sdir"
+      echo "stopped '$SESSION_NAME'."
+      ;;
+    *)
+      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | stop"
+      ;;
+  esac
+}
+
 # ---- interactive tmux session (opt-in) ----
 session() {
+  if [ "$OSRC_PLATFORM" = "windows" ]; then
+    _winpty_session "$@"
+    return
+  fi
   if ! have tmux; then
-    [ "$OSRC_PLATFORM" = "windows" ] && die "interactive 'session' mode needs tmux, which Git Bash doesn't ship. EVERYTHING ELSE works on Windows without WSL: use run/edit/yolo for one-shots and bg/fanout + status/watch for long or parallel work (same capability, supervised). If you really want session mode, install tmux via MSYS2 (pacman -S tmux) or use WSL."
     die "tmux not installed ($( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')). Only 'session' needs it — bg/fanout cover the same ground supervised."
   fi
   local sub="${1:-}"; shift || true
@@ -6480,7 +6620,21 @@ session() {
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
           launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL" ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc)" ;;
+        droid)
+          have droid || die "droid not on PATH (needed for a droid session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="droid -m $MODEL"; else launch="droid"; fi ;;
+        cursor)
+          have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="cursor-agent --model $MODEL"; else launch="cursor-agent"; fi ;;
+        hermes)
+          have hermes || die "hermes not on PATH (needed for a hermes session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="hermes chat --model $MODEL"; else launch="hermes chat"; fi ;;
+        gemini|gm)
+          local gveh="${OSRC_GEMINI_VEHICLE:-}"
+          if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
+          have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model $MODEL"; else launch="$gveh"; fi ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
       if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
@@ -7308,7 +7462,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"
                   PROVIDER="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
