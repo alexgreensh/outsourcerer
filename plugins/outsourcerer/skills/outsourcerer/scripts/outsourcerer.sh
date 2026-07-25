@@ -494,6 +494,26 @@ _devin_model_for() {
   esac
 }
 
+# Resolve a user-facing alias to an id the DEVIN CLI accepts. parse_model() stores -m verbatim, so
+# without this a documented alias reaches `devin --model` raw and the job dies at launch with
+# "Unknown model: 'glm'" -- instantly, before any work, which in a fanout kills every member at once.
+# Order: cross-lane sibling first (glm/deepseek carry an OpenRouter id the table would hand back),
+# then the alias table's target, then the token unchanged (already a literal Devin id, or unknown to
+# us -- let the CLI be the authority on its own catalog rather than guessing).
+_devin_resolve_model() {
+  local m="${1:-}" row target sib
+  [ -n "$m" ] || { printf ''; return; }
+  sib="$(_devin_model_for "$m")"; [ -n "$sib" ] && { printf '%s' "$sib"; return; }
+  row="$(resolve_model_row "$m")"; target="${row%%|*}"
+  if [ -n "$target" ]; then
+    # The table maps OpenRouter-lane aliases to OpenRouter ids (glm -> z-ai/glm-5.2), which Devin
+    # also rejects; run the target back through the sibling map before accepting it.
+    sib="$(_devin_model_for "$target")"; [ -n "$sib" ] && { printf '%s' "$sib"; return; }
+    printf '%s' "$target"; return
+  fi
+  printf '%s' "$m"
+}
+
 # LIVE model list via an intentionally invalid model probe (cheap: errors before running a task).
 # The probe model is invalid ON PURPOSE, so devin exits nonzero, `|| true` keeps pipefail from
 # leaking that expected failure to the caller (otherwise `doctor` exits 1 on a clean run).
@@ -514,6 +534,11 @@ delegate() {
   need_devin
   logged_in || die "Not logged in to Devin. Run interactively:  ! devin auth login"
   local sbx=(); [ -n "$sandbox" ] && sbx=(--sandbox)
+  # Aliases must become real Devin ids here, at the last point before the CLI: parse_model kept the
+  # token verbatim, and `devin --model glm` is a hard launch failure.
+  local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
+  [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
+  MODEL="$_dvmodel"
   echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} -p (offload)" >&2
   local rc=0
   devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} -p "$prompt" </dev/null || rc=$?
@@ -536,6 +561,8 @@ continue_turn() {
   local prompt="${REST[*]}"
   need_devin
   logged_in || die "Not logged in. Run:  ! devin auth login"
+  # Same alias-resolution requirement as delegate(): an unresolved alias fails the continue at launch.
+  MODEL="$(_devin_resolve_model "$MODEL")"
   echo ">>> devin -c --model $MODEL -p (continue)" >&2
   # `continue` must NOT silently escalate a read-only conversation to accept-edits.
   # Devin -c inherits the existing conversation's permission mode; forcing accept-edits here
@@ -2525,6 +2552,31 @@ _devin_live_mtime() {
   printf '%s' "$newest"
 }
 
+# _job_made_writes <job-dir> <job-cwd> -> 0 if the delegate has produced any file write.
+#
+# Two independent signals, because neither alone covers the lanes we run. The log grep only sees
+# STRUCTURED tool calls ('"name":"Write"'), which the claude/codex streams emit -- the Devin stream
+# does not: Devin performs writes through `command_execution` running `/bin/bash -lc`, so a Devin
+# delegate that writes a dozen files still shows ZERO matches. Grepping alone therefore made the
+# exploring? guard impossible to satisfy on the Devin lane, and every mutating Devin job that ran
+# past the no-write window was killed as write-free no matter how much it had actually written.
+# So fall back to asking the filesystem, against the never-moved .startmark.
+#
+# Same known limitation as the stall-path FS check above: this cannot tell the delegate's writes
+# from a concurrent writer's under the same cwd. That trade is deliberate here -- a false "it is
+# working" costs one hard-timeout window, a false "it wrote nothing" kills a healthy job outright.
+_job_made_writes() {
+  local jd="$1" jcwd="${2:-}"
+  grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null && return 0
+  [ "${OSRC_FS_PROGRESS:-1}" = "1" ] && [ -n "$jcwd" ] && [ -d "$jcwd" ] || return 1
+  [ -f "$jd/.startmark" ] || return 1
+  local hit
+  hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+           \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+           -type f -newer "$jd/.startmark" -print 2>/dev/null | head -1)"
+  [ -n "$hit" ]
+}
+
 # _supervise <job-dir> <stall_warn> <stall_kill> <hard_timeout> -- <cmd...>
 # Byte-growth watchdog + OSRC:: semantic layer + exit contract (0 done / 2 done? / 3 blocked /
 # 124 timeout / 125 wedged / other = delegate rc).
@@ -2561,6 +2613,10 @@ _supervise() {
   [ -f "$jd/meta.json" ] && _jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
   [ -n "$_jcwd" ] || _jcwd="$PWD"
   : > "$jd/.fsmark" 2>/dev/null || true
+  # Immutable "job started here" marker. .fsmark is RE-stamped on every sign of life, so it can only
+  # answer "wrote something recently"; the exploring? guard needs "wrote anything at all, ever",
+  # which requires a marker that is never moved.
+  : > "$jd/.startmark" 2>/dev/null || true
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
@@ -2585,21 +2641,21 @@ _supervise() {
       grep -a -E 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$jd/out.log" 2>/dev/null | tail -1 > "$jd/progress"
       case "$(cat "$jd/status" 2>/dev/null)" in
         stalled?) echo running > "$jd/status" ;;
-        exploring?) grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null && echo running > "$jd/status" ;;
+        exploring?) _job_made_writes "$jd" "$_jcwd" && echo running > "$jd/status" ;;
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
-      grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null || {
+      _job_made_writes "$jd" "$_jcwd" || {
         echo "exploring?" > "$jd/status"
-        echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. It will be stopped after ${nww_kill}s with no writes and no output growth. Steer it or give a tighter 'write file X now' prompt." >&2; }
+        echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. It will be stopped after ${nww_kill}s with no writes and no output growth. Only an actual FILE WRITE clears this (progress output alone does not) — give it a tighter 'write file X now' target, or re-run read-only work under 'run'/'explore', which is not subject to this guard." >&2; }
     fi
     # Once marked exploring, a fresh output line buys the delegate another exploration window, but
     # neither reading nor an old warning can keep it alive forever. The same content check used for
     # the warning proves it has still made no write before applying the real stall-kill.
     if [ "$mutating" = "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "exploring?" ] \
        && [ "$idle" -ge "$nww_kill" ] \
-       && ! grep -aq '"name":"\(Write\|Edit\|MultiEdit\)"' "$jd/out.log" 2>/dev/null; then
+       && ! _job_made_writes "$jd" "$_jcwd"; then
       echo wedged > "$jd/status"
       printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
