@@ -4277,12 +4277,13 @@ cmd_fanout() {
     list)    shift; _fanout_list "$@"; return ;;
   esac
   local verb=run maxpar="${OSRC_FANOUT_MAX:-6}" preamble="" tasksfile="" agentsdir="" label_prefix="task"
+  local maxpar_explicit=0
   local g_model="" g_effort="" g_tier="" g_prov="" taskstr="" route_spec=""   # global knobs OVERRIDE per-agent frontmatter
   local -a subs=() fwd=() inline=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --verb)         [ -n "${2:-}" ] || die "--verb needs run|research|edit|yolo"; verb="$2"; shift 2 ;;
-      --max)          [ -n "${2:-}" ] || die "--max needs a number"; maxpar="$2"; shift 2 ;;
+      --max)          [ -n "${2:-}" ] || die "--max needs a number"; maxpar="$2"; maxpar_explicit=1; shift 2 ;;
       -m|--model)     [ -n "${2:-}" ] || die "-m needs a model"; g_model="$2"; shift 2 ;;
       --effort|--reasoning) [ -n "${2:-}" ] || die "--effort needs a level"; g_effort="$2"; shift 2 ;;
       --tier)         [ -n "${2:-}" ] || die "--tier needs a value"; g_tier="$2"; shift 2 ;;
@@ -4302,6 +4303,22 @@ cmd_fanout() {
     esac
   done
   _is_verb "$verb" || die "fanout --verb must be one of: $_OSRC_VERBS (got '$verb')"
+  # DEVIN CONCURRENCY CEILING. Measured, not guessed: a 4-way fanout on this lane reliably loses
+  # members to `exit=141` with an EMPTY log (SIGPIPE before the delegate emits a byte) — 2 of 4 died
+  # in the reference run, and the surviving 2 completed normally. Trivial/instant prompts can slip
+  # past it, which is why a casual 6-way smoke test looks clean and a real 4-way workload does not.
+  # The generic default of 6 therefore silently burns a third to a half of any Devin crew. Cap the
+  # lane at 2 unless the caller asked for a specific number; an explicit --max is still honoured so
+  # this is a safer default, not a new hard limit. OSRC_FANOUT_MAX also still wins.
+  if [ "$maxpar_explicit" = "0" ] && [ -z "${OSRC_FANOUT_MAX:-}" ]; then
+    case "${g_prov:-${PROVIDER:-devin}}" in
+      devin|dv)
+        [ "$maxpar" -gt 2 ] 2>/dev/null && {
+          maxpar=2
+          echo "[outsourcerer] fanout: capping concurrency at 2 on the devin lane (measured ceiling; above it members die with exit=141/empty-output before producing anything). Override with --max N if you want more." >&2; }
+      ;;
+    esac
+  fi
   # Warn on mutating verbs without --worktree.
   case "$verb" in edit|research|yolo)
     [ "${OSRC_WORKTREE:-0}" != "1" ] && echo "[outsourcerer] WARNING: fanout with --verb $verb without --worktree — parallel mutating jobs share \$PWD and may collide. Use --worktree for isolation." >&2
@@ -6893,8 +6910,13 @@ session() {
       _validate_session_name
       _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
       if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
-        echo "Session '$SESSION_NAME' already exists. Use '$0 session stop' first, or reattach with 'tmux attach -t $SESSION_NAME'."
-        return 0
+        # NONZERO on collision. The session name is derived from $PWD, so N concurrent `session start`
+        # calls in one repo all resolve to this same name. Returning 0 here reported "started" to every
+        # one of them: a caller fanning out 6 agents got 1 session and 5 silent successes, with no exit
+        # code to distinguish "yours is running" from "someone else's is". Fail loudly instead; a caller
+        # that wants a second session in the same directory must set OUTSOURCERER_TMUX explicitly.
+        echo "Session '$SESSION_NAME' already exists (name derives from \$PWD, so one session per directory). Use '$0 session stop' first, reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
+        return 4
       fi
       tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD"
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
