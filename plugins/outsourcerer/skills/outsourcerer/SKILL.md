@@ -62,17 +62,34 @@ Pick the shape yourself: a machine can verify it and it's one known target → `
 | `swe` / `swe-1.7` / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
 | `ollama:<m>` / `local:<m>` | local (keyless, PRIVATE, $0) |
 | `gpt-image` / `nano-banana` | image only (`image` subcommand) |
-| any model the USER configured | **droid** / **cursor** (`--provider droid|cursor`) — their CLI, their models (incl. BYOK); `-m` passes through verbatim |
+| any model the USER configured | **droid** / **cursor** / **warp** / **hermes** (`--provider droid\|cursor\|warp\|hermes`) — the user's OWN agent CLIs, THEIR models (incl. BYOK); `-m` passes through verbatim. Warp drives `oz agent run` (models via `oz model list`) and can even host the Claude/Codex harness (`OSRC_WARP_HARNESS=claude\|codex`). **These are easy to forget — the user has warp AND droid installed; when they say "use warp/droid," this is the lane, don't reach for devin.** |
+
+**A pinned Claude/GPT/Gemini model runs on ITS OWN native lane — never Devin.** `-m opus`, `-m fable`, `-m claude-opus-4-8`, `-m claude-opus-4-8[1m]`, any `claude-*`/`gpt-5.*`/`gemini-*` id resolves to the claude/codex/gemini-native lane automatically (the alias picks the lane; no `--provider` needed, and you should NOT add `--provider cc` for a Claude model — that means the OpenRouter transport, not the Claude subscription). If the user says "spin up Fable and Opus 4.8," that is `-m fable` and `-m opus` (or the pinned ids) on the claude-native lane, on their Claude subscription — putting that on Devin burns the wrong limits and is the #1 mistake to avoid.
 
 Full table + image backend order: `references/lanes-and-models.md`.
 
-## Watch what you launch (non-negotiable)
+## Interactive by default, live-steered (non-negotiable)
 
-**Every `bg`/`fanout` job gets a watcher, immediately, in the same turn you launch it.** A detached job
-nobody is observing is the failure this tool exists to prevent: it accepts the work, goes silent, and
-you find out it wedged an hour later. Launch, then `watch` — or `status` on a real cadence if you are
-juggling several. Never launch and wander off. If you genuinely cannot watch it, say so to the user and
-cancel it rather than leaving it running blind.
+**Delegation is INTERACTIVE first. `session` is the default; headless `bg`/`fanout` is the exception you
+justify, not the reflex.** The whole value is that you — the sorcerer — and the main session act AS THE
+USER toward each delegate: `session read` to see its real work, `session send "…"` to guide it, answer
+its approval prompts, correct its course, tell it what to do next, constantly. A headless delegate hits
+an approval wall and dies unseen; an interactive one you steer past it. Reach for headless ONLY when a
+session is genuinely impossible (a non-interactive/CI/detached caller, or a wide fan-out of many
+independent one-shot jobs) — and say so. If you catch yourself writing the work yourself or running a
+one-shot instead of opening a session someone can drive, stop: that is the recurring miss.
+
+## Watch what you launch — and report on a clock (non-negotiable)
+
+**Every delegated run gets a watcher immediately, in the same turn you launch it, AND you report to the
+user on a ~2-minute cadence until it ends.** Continuous monitoring is not optional and not "when asked":
+turn it on the moment work starts. Every ~2 minutes (or when a state changes), post at least a one-line
+status covering **(1) what's happening now, (2) which model(s)/lane(s) are running, (3) which agent is on
+what**. Example: `⏳ 02:14 — GLM(devin) building the auth fix · Fable(cc) reviewing the diff · Sonnet(cc)
+mapping tests · all green, next check ~02:16`. A detached job nobody is observing is the failure this
+tool exists to prevent: it accepts the work, goes silent, and you find out it wedged an hour later.
+Launch, then `watch` — or `status` on that cadence if you are juggling several. Never launch and wander
+off. If you genuinely cannot watch it, say so to the user and cancel it rather than leaving it running blind.
 
 The tool enforces this from its side: a launch prints **NOW WATCH IT**, and any later invocation lists
 jobs that have been running with nobody looking. If you see that warning, you already made this mistake

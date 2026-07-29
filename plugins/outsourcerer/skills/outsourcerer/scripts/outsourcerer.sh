@@ -124,7 +124,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.4.23"
+OSRC_VERSION="0.4.26"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -361,6 +361,11 @@ fable|fable|cc|frontier
 opus|opus|cc|frontier
 sonnet|sonnet|cc|mid
 haiku|haiku|cc|budget
+claude-opus-4-8|claude-opus-4-8|cc|frontier
+claude-opus-5|claude-opus-5|cc|frontier
+claude-fable-5|claude-fable-5|cc|frontier
+claude-sonnet-5|claude-sonnet-5|cc|mid
+claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|cc|budget
 glm|z-ai/glm-5.2|or|capable
 z-ai/glm-5.2|z-ai/glm-5.2|or|capable
 hy3|tencent/hy3:free|or|capable
@@ -452,8 +457,15 @@ _validate_model_token() {
   # A leading dash is syntactically safe for a shell, but becomes an option when
   # passed to a provider CLI rather than a model id.
   case "$token" in -*) die "invalid model token (must not begin with '-'): '$token'" ;; esac
-  if printf '%s' "$token" | grep -qE '[^A-Za-z0-9._:/-]'; then
-    die "invalid model token (shell-injection risk): '$token' — only [A-Za-z0-9._:/-] allowed"
+  # Allow an OPTIONAL trailing context-window selector in square brackets: [1m] / [1M] / [200k] etc.
+  # This is real Claude Code model-id syntax for the extended-context variant (e.g. claude-opus-4-8[1m]),
+  # and rejecting it as "shell-injection" blocked every 1M-window model from every lane. The pattern is
+  # anchored end-to-end (^base(suffix)?$), so the brackets can enclose ONLY [0-9]+ + up to 2 letters —
+  # nothing else, no metacharacters, no second bracket group — can smuggle through. Everything before
+  # the suffix stays the strict [A-Za-z0-9._:/-] set. tmux/shell contexts always quote the token, so a
+  # glob-only '[' ']' pair is inert.
+  if ! printf '%s' "$token" | grep -qE '^[A-Za-z0-9._:/-]+(\[[0-9]+[A-Za-z]{0,2}\])?$'; then
+    die "invalid model token (shell-injection risk): '$token' — only [A-Za-z0-9._:/-] allowed, plus an optional trailing context-window suffix like [1m]"
   fi
 }
 
@@ -477,7 +489,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -709,6 +721,24 @@ tier_from_price() {   # <openrouter-id> -> budget|mid|frontier from cached prici
     'BEGIN{pm=p*1000000; print (pm<b?"budget":(pm<m?"mid":"frontier"))}'
 }
 
+# lane_from_name <model-id> -> cc|cx|gm  (NATIVE lane inferred from the model FAMILY), or nonzero if
+# the family is unrecognized. Sibling of tier_from_name. Consulted ONLY when the alias table has no
+# exact row for an EXPLICIT -m: a recognizable native id (a pinned Claude id like claude-opus-4-8[1m],
+# a future claude-*/gpt-5.*/gemini-* variant we haven't tabled yet) MUST reach its own provider's
+# native lane, never silently fall through to the default provider (devin) and burn the wrong engine's
+# limits. This is the "-m claude-opus-4-8 quietly ran on Devin and ate my Claude-sub tokens" fix.
+# Precision matters: only families that are UNAMBIGUOUSLY native (Claude sub / ChatGPT sub / Gemini)
+# infer here. Open-weight ids (glm/deepseek/kimi/qwen…) are deliberately absent — they are dual-lane
+# and correctly ride the provider default, so they must fall through to the provider router below.
+lane_from_name() {
+  case "$1" in
+    claude-*|*-opus-*|*opus[0-9-]*|opus|fable|fable-*|claude*|*sonnet*|*haiku*) echo cc ;;
+    gpt-[0-9]*|gpt-*|sol|sol-*|terra|terra-*|luna|luna-*|o[0-9]-*|*-codex) echo cx ;;
+    gemini-*|gemini|*-gemini-*) echo gm ;;
+    *) return 1 ;;
+  esac
+}
+
 tier_from_name() {    # <model-id> -> capable|frontier|budget by name regex, or nonzero if unrecognized.
   # CAPABILITY signal, checked BEFORE price: strong open-weight families are budget-PRICED but
   # frontier-CAPABILITY, so name (which knows the family) must beat price (which only knows cost).
@@ -744,7 +774,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|hermes|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|warp|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -1146,7 +1176,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -3053,7 +3083,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -3317,7 +3347,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -4444,7 +4474,7 @@ _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
     gm) disp=gmnative ;;
     dv) disp=devin ;;
     or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
-    droid|cursor|hermes|claudex) disp="$elane" ;;
+    droid|cursor|hermes|warp|claudex) disp="$elane" ;;
     *) disp="${tlane:-$PROVIDER}" ;;
   esac
   if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
@@ -5087,6 +5117,53 @@ delegate_hermes() {
   return "$rc"
 }
 
+# =============================================================================
+# WARP LANE (Warp's Oz agent, `oz agent run`). Engine lane: -m passes through verbatim to Warp's
+# own model catalog (`oz model list`), and Warp can even HOST the Claude or Codex harness via
+# --harness (OSRC_WARP_HARNESS=claude|codex). Autonomy on `oz agent run` is NOT a graded per-run
+# flag; it is governed by the agent PROFILE, so we disclose that honestly and let the user pin one
+# with OSRC_WARP_PROFILE. Cloud lane (Warp's backend + the model API) -> full cloud gate applies.
+# Billing: your Warp plan / the keys configured in your Warp account.
+# =============================================================================
+delegate_warp() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once)."
+  # Warp's autonomy is a PROFILE property, not a per-run flag (`oz agent run` exposes no
+  # off/low/high graded permission switch). We surface that truthfully rather than pretend a
+  # tier maps to a sandbox posture it doesn't have. Pin a profile with OSRC_WARP_PROFILE=<id>
+  # (see `oz agent profile list`); a mutating tier without a pinned profile is disclosed loudly.
+  local pflag=() posture
+  [ -n "${OSRC_WARP_PROFILE:-}" ] && pflag=(--profile "$OSRC_WARP_PROFILE")
+  case "$tier" in
+    auto)         posture="runs under your Warp agent profile's permissions (Warp has no per-run read-only flag)" ;;
+    accept-edits|autonomous)
+                  posture="MUTATING under your Warp profile${OSRC_WARP_PROFILE:+ '$OSRC_WARP_PROFILE'} (Warp governs approvals by profile, not per-run; set OSRC_WARP_PROFILE to pin an auto-approving one)" ;;
+    dangerous)    posture="DANGER: relies on your Warp profile allowing unattended commands; Warp exposes no separate 'bypass all' per-run flag" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  # --harness lets Warp host the Claude or Codex harness with THAT harness's model ids; default is
+  # Warp's own Oz harness. Opt in via OSRC_WARP_HARNESS=claude|codex.
+  local hflag=()
+  case "${OSRC_WARP_HARNESS:-}" in
+    claude|codex) hflag=(--harness "$OSRC_WARP_HARNESS") ;;
+    "") : ;;
+    *) die "OSRC_WARP_HARNESS must be 'claude' or 'codex' (got '$OSRC_WARP_HARNESS')" ;;
+  esac
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(--model "$id"); else id="(warp default/configured)"; fi
+  [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: oz agent run has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-warp}" "$task" "$ttier")"
+  _tier_banner "warp (Oz agent)" "$id" "$ttier" "$posture, bills your Warp plan / your configured Warp keys"
+  local rc=0
+  oz agent run -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${hflag[@]+"${hflag[@]}"} ${pflag[@]+"${pflag[@]}"} -C "$PWD" --output-format text || rc=$?
+  record_ledger warp "${MODEL:-warp-default}" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] ran on YOUR Warp setup (Oz agent, your Warp plan/keys), no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -5452,7 +5529,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
-    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|claudex) return 0 ;;
+    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|claudex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -6452,16 +6529,28 @@ route_delegate() {
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
       RESOLVED_ID="${row%%|*}"; rest2="${row#*|}"; RESOLVED_LANE="${rest2%%|*}"; TTIER="${rest2#*|}"
+    else
+      # No exact table row, but the id may NAME a native family (a pinned Claude id like
+      # claude-opus-4-8[1m], a not-yet-tabled gpt-5.*/gemini-* variant). Infer its OWN native lane so
+      # it can't silently fall through to the default provider (devin) and burn the wrong engine's
+      # limits — THE "-m claude-opus-4-8 ran on Devin" fix. claudex is excluded above's sibling check
+      # (it has its own cc-refusal); only NATIVE families (cc/cx/gm) infer, everything else still
+      # routes by provider below.
+      local _infl
+      if [ "$PROVIDER" != "claudex" ] && _infl="$(lane_from_name "$MODEL")"; then
+        RESOLVED_LANE="$_infl"; RESOLVED_ID="$MODEL"
+        printf '>>> [route] -m %s has no table alias; inferred its native lane (%s) from the model family, NOT the devin default. Force a lane with --provider if this is wrong.\n' "$MODEL" "$_infl" >&2
+      fi
     fi
   fi
 
   local disp="" _or_autoroute_note="" _or_credit_state=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
@@ -6469,6 +6558,7 @@ route_delegate() {
       droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in." ;;
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
+      warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -6531,7 +6621,7 @@ route_delegate() {
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
       gemini|gm) disp=gmnative ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|claudex|local)" ;;
     esac
   fi
 
@@ -6617,6 +6707,7 @@ route_delegate() {
       droid)    delegate_droid    "$tier" ;;
       cursor)   delegate_cursor   "$tier" ;;
       hermes)   delegate_hermes   "$tier" ;;
+      warp)     delegate_warp     "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
@@ -7199,7 +7290,7 @@ doctor() {
   else echo "  cloud consent: not yet granted — first cloud delegation asks ONCE and remembers ($0 consent grant to pre-grant)"; fi
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -7789,7 +7880,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"
                   PROVIDER="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -7854,7 +7945,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
   esac
 }
 main "$@"
