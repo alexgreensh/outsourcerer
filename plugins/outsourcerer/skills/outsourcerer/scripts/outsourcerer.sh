@@ -2656,7 +2656,12 @@ _supervise() {
   # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
   # if it then remains both write-free AND output-silent for another bounded window, stop it as a
   # real stall. An observable warning without a terminal bound left jobs running forever.
-  local verb=""; [ -f "$jd/meta.json" ] && verb="$(jq -r '.verb // ""' "$jd/meta.json" 2>/dev/null)"
+  # Prefer the verb passed by run_job via env (always in scope at the call site); fall back to
+  # meta.json only if it wasn't. Reading it ONLY from meta.json silently disabled the whole
+  # exploring? guard for every mutating verb on a host without jq (or on a failed meta write): no
+  # jq -> empty verb -> mutating=0 -> guard off. The env carry makes the watchdog jq-independent.
+  local verb="${OSRC_JOB_VERB:-}"
+  [ -n "$verb" ] || { [ -f "$jd/meta.json" ] && verb="$(jq -r '.verb // ""' "$jd/meta.json" 2>/dev/null)"; }
   [ -f "$jd/meta.json" ] && _jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
   [ -n "$_jcwd" ] || _jcwd="$PWD"
   : > "$jd/.fsmark" 2>/dev/null || true
@@ -2688,7 +2693,12 @@ _supervise() {
       grep -a -E 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$jd/out.log" 2>/dev/null | tail -1 > "$jd/progress"
       case "$(cat "$jd/status" 2>/dev/null)" in
         stalled?) echo running > "$jd/status" ;;
-        exploring?) _job_made_writes "$jd" "$_jcwd" && echo running > "$jd/status" ;;
+        # A WRITE clears exploring? for edit/yolo (their deliverable IS a file write, so a write-free
+        # spiral must stay flagged). But `research` is a read/tool-exec verb whose deliverable is its
+        # OUTPUT, not a file — so for research, fresh output (we are inside the size>last_size branch)
+        # is real progress and clears the flag, exactly as a write would. Without this a healthy
+        # write-free research job stayed stuck on exploring? and was primed for the kill arm below.
+        exploring?) { [ "$verb" = "research" ] || _job_made_writes "$jd" "$_jcwd"; } && echo running > "$jd/status" ;;
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
@@ -3402,7 +3412,7 @@ run_job() {
   # depth 0, defeating the guard entirely and allowing unbounded re-delegation. The parent-side
   # authorization check in cmd_bg refuses before minting when depth >= max; this guard is the
   # backstop inside the child.
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" \
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_JOB_VERB="$verb" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --provider "$prov" "$verb" "$@"
   local sc=$?
