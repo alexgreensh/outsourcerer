@@ -557,9 +557,16 @@ delegate() {
   local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
   [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
   MODEL="$_dvmodel"
-  echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} -p (offload)" >&2
+  # --respect-workspace-trust false: headless delegation must not die on Devin's untrusted-workspace
+  # prompt (a blocking prompt no `-p` run can answer -> the job fails with "Refusing to run in an
+  # untrusted workspace"). The interactive `session` lane already passes this for the same reason;
+  # run/bg/fanout omitting it is why a delegate launched from a fresh repo silently failed. Safe here
+  # because Outsourcerer already ran its OWN cloud-consent + secret-scan gate on this exact scope
+  # before dispatch (a STRICTER guard than Devin's trust prompt — it blocks real credential files),
+  # so Devin's redundant prompt only ever broke headless runs.
+  echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} --respect-workspace-trust false -p (offload)" >&2
   local rc=0
-  devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} -p "$prompt" </dev/null || rc=$?
+  devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ]; then
     echo "HINT: sandboxed run exited $rc. If a Read/Write scope was denied, retry with 'yolo' (dangerous, no sandbox)." >&2
   fi
