@@ -457,6 +457,12 @@ _validate_model_token() {
   # A leading dash is syntactically safe for a shell, but becomes an option when
   # passed to a provider CLI rather than a model id.
   case "$token" in -*) die "invalid model token (must not begin with '-'): '$token'" ;; esac
+  # Reject ANY control character FIRST, with a whole-string bash test. The `grep -qE '^…$'` below is
+  # LINE-ORIENTED: on a multi-line token it returns 0 as soon as the FIRST line matches, waving through
+  # later lines that carry an injection (e.g. $'claude\n;id' passes because line 1 "claude" matches).
+  # A model id never contains a newline/CR/tab, so reject them up front — this is what stops the token
+  # from later reaching an unquoted "$MODEL" in a launch string as a second shell line.
+  case "$token" in *[$'\n\r\t']*) die "invalid model token (contains a control character): $(printf '%q' "$token")" ;; esac
   # Allow an OPTIONAL trailing context-window selector in square brackets: [1m] / [1M] / [200k] etc.
   # This is real Claude Code model-id syntax for the extended-context variant (e.g. claude-opus-4-8[1m]),
   # and rejecting it as "shell-injection" blocked every 1M-window model from every lane. The pattern is
@@ -1813,15 +1819,19 @@ cmd_tab() {
     def cashnum: (.cost_usd // "") as $c
       | if $c=="" then 0 elif ($c|startswith("~")) then ($c[1:]|tonumber? // 0) else ($c|tonumber? // 0) end;
     # Lane bucket (truthful accounting):
-    #   FREE = local ($0 cash AND $0 plan). PLAN = native cx/cc/gm + keyless gpt-image + Devin-Pro ($0
-    #   cash, spends a subscription/plan). CASH = cc/codex->OpenRouter, gemini API (real dollars).
+    #   FREE = local ($0 cash AND $0 plan). PLAN = native cx/cc/gm + keyless gpt-image + Devin-Pro +
+    #   the ENGINE lanes (droid/cursor/hermes/warp) — all $0 cash from Outsourcerer, spending a
+    #   subscription/plan you already pay for. CASH = cc/codex->OpenRouter, gemini API (real dollars).
     #   devin (dv): PLAN when $0 (Pro tier), but a NONZERO measured/estimated cost = pay-per-use = CASH
     #   (the bucket is decided on the cost axis, not the lane alone, so paid devin is never hidden).
+    #   Engine lanes bill YOUR OWN Factory/Cursor/Hermes/Warp plan or BYOK keys (never Claude tokens,
+    #   never Outsourcerer cash) — labeling a $0 engine run cash-billed-$0 reads as free when it
+    #   actually spent that plan, so they belong in PLAN alongside the native subscriptions.
     def bucket:
       (.lane // "") as $l | (.provider // "") as $p | (.verb // "") as $v
       | if ($l == "local") or ($p == "local") then "free"
         elif $l == "dv" then (if (cashnum > 0) then "cash" else "plan" end)
-        elif ($l | test("^(cx|cc|gm)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
+        elif ($l | test("^(cx|cc|gm|droid|cursor|hermes|warp)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
         else "cash" end;
     def realcost: (.cost_usd // "") as $c
       | if ($c == "") or ($c | startswith("~")) then null else ($c | tonumber? // null) end;
@@ -6538,11 +6548,16 @@ route_delegate() {
       # No exact table row, but the id may NAME a native family (a pinned Claude id like
       # claude-opus-4-8[1m], a not-yet-tabled gpt-5.*/gemini-* variant). Infer its OWN native lane so
       # it can't silently fall through to the default provider (devin) and burn the wrong engine's
-      # limits — THE "-m claude-opus-4-8 ran on Devin" fix. claudex is excluded above's sibling check
-      # (it has its own cc-refusal); only NATIVE families (cc/cx/gm) infer, everything else still
-      # routes by provider below.
+      # limits — THE "-m claude-opus-4-8 ran on Devin" fix. Only NATIVE families (cc/cx/gm) infer;
+      # everything else still routes by provider below.
+      # NOTE: inference MUST run under --provider claudex too. The claudex branch's Claude-subscription
+      # REFUSAL keys on RESOLVED_LANE==cc, which resolve_model_row only sets for TABLED ids; without
+      # inference here an un-tabled Claude id (e.g. claude-opus-4-8[1m], claude-sonnet-6) would leave
+      # RESOLVED_LANE empty, skip the refusal, and route a Claude-sub model through the third-party
+      # CLIProxyAPI — exactly what the refusal exists to block. A GPT id infers cx and still proceeds
+      # (the claudex branch only refuses cc), so claudex's intended GPT-via-proxy use is unaffected.
       local _infl
-      if [ "$PROVIDER" != "claudex" ] && _infl="$(lane_from_name "$MODEL")"; then
+      if _infl="$(lane_from_name "$MODEL")"; then
         RESOLVED_LANE="$_infl"; RESOLVED_ID="$MODEL"
         printf '>>> [route] -m %s has no table alias; inferred its native lane (%s) from the model family, NOT the devin default. Force a lane with --provider if this is wrong.\n' "$MODEL" "$_infl" >&2
       fi
@@ -6965,7 +6980,7 @@ session() {
       case "$PROVIDER" in
         devin|dv)
           need_devin; logged_in || die "Not logged in. Run:  ! devin auth login"
-          launch="devin --model $MODEL --respect-workspace-trust false" ;;   # trust flag skips the blocking gate
+          launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
@@ -6975,26 +6990,26 @@ session() {
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
           # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="codex -m $cid -s workspace-write$ccmh"; else launch="codex -s workspace-write$ccmh"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="codex -m '$cid' -s workspace-write$ccmh"; else launch="codex -s workspace-write$ccmh"; fi ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model $MODEL"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi ;;
         droid)
           have droid || die "droid not on PATH (needed for a droid session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="droid -m $MODEL"; else launch="droid"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="droid -m '$MODEL'"; else launch="droid"; fi ;;
         cursor)
           have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="cursor-agent --model $MODEL"; else launch="cursor-agent"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="cursor-agent --model '$MODEL'"; else launch="cursor-agent"; fi ;;
         hermes)
           have hermes || die "hermes not on PATH (needed for a hermes session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="hermes chat --model $MODEL"; else launch="hermes chat"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="hermes chat --model '$MODEL'"; else launch="hermes chat"; fi ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model $MODEL"; else launch="$gveh"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model '$MODEL'"; else launch="$gveh"; fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
@@ -7233,6 +7248,12 @@ parity() {
 
 doctor() {
   echo "== outsourcerer doctor (v$OSRC_VERSION) =="
+  # OSRC_DOCTOR_OFFLINE=1 skips the LIVE probes (OpenRouter credits, session-limit meter, claudex
+  # proxy ping) so `doctor` returns in well under a second. Without it, those network reads can each
+  # take tens of seconds on a slow/dead backend, which is why the test suite (test_watcher calls
+  # doctor repeatedly) appeared to hang. Everything else — installed-CLI detection, version-drift,
+  # state-home writability, lane inventory — is local and always runs.
+  local _doff="${OSRC_DOCTOR_OFFLINE:-0}"
   echo "  platform: $OSRC_PLATFORM$( [ "$OSRC_PLATFORM" = "windows" ] && echo ' (Git Bash — NO WSL needed. Works: run/edit/yolo/bg/fanout/status/doctor/advise. Not available: tmux session mode.)')"
   # VERSION-DRIFT check: the manifest, THIS running script, and any OTHER installed copy
   # (a stale standalone skill dir) can silently disagree — a user then runs old code missing every
@@ -7289,14 +7310,15 @@ doctor() {
   if [ -f "$OSRC_CONSENT_FILE" ]; then echo "  cloud consent: granted + remembered ($0 consent revoke to undo)"
   else echo "  cloud consent: not yet granted — first cloud delegation asks ONCE and remembers ($0 consent grant to pre-grant)"; fi
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
-  local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
+  if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
+  else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
   echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
   have codex  && echo "    codex  (codex lane): $(codex --version 2>/dev/null | head -1)"  || echo "    codex  (codex lane): NOT on PATH"
   echo "    model chain: ${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}"
-  local cred; cred="$(or_credits)"; [ -n "$cred" ] && echo "    openrouter credits: $cred"
+  if [ "$_doff" != "1" ]; then local cred; cred="$(or_credits)"; [ -n "$cred" ] && echo "    openrouter credits: $cred"; fi
   echo "  -- Native premium lanes (model-selected; ride your own subscription) --"
   echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH')"
   if have codex; then _codex_code_mode_host \
@@ -7388,7 +7410,8 @@ doctor() {
     echo "    hermes state.db: absent — never run, cost receipts use estimates until first session"
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
-  if have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
+  if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
+  elif have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
     if _claudex_up 2>/dev/null; then
       echo "    claudex: READY — proxy answering at $(_claudex_url). Route: --provider claudex run [-m sol|terra|luna] \"task\" (Claude harness UX, bills your ChatGPT plan)."
       echo "      note: UNOFFICIAL community bridge (internal upstream endpoints, no rate limiting — heavy use risks provider-side limits). Claude-sub models are refused here by policy; codex CLI is still the lane for gpt-image."
@@ -7416,7 +7439,8 @@ doctor() {
     # work gets routed to something that cannot answer: agy stays installed and authenticated-looking
     # while every request times out (expired app login, service trouble). A bounded real request is the
     # only thing that distinguishes the two. OSRC_DOCTOR_PROBE=0 skips it.
-    if [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
+    if [ "$_doff" = "1" ]; then echo "    agy liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
+    elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
       local _pt _prc=0
       _pt="$(agy -p "reply with the single word: ok" --model gemini-3.5-flash --effort low \
               --print-timeout "${OSRC_DOCTOR_PROBE_TIMEOUT:-25s}" 2>&1)" || _prc=$?

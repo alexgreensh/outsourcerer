@@ -18,7 +18,10 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-run() { OSRC_HOME="$TMP" bash "$SRC" "$@"; }
+# OSRC_DOCTOR_OFFLINE=1: this test calls `doctor` repeatedly to check watcher-warning behaviour,
+# not lane liveness — the live network probes (OpenRouter credits, session-limit meter, claudex
+# ping) are pure latency here and previously made the test take minutes and wedge the suite.
+run() { OSRC_HOME="$TMP" OSRC_DOCTOR_OFFLINE=1 bash "$SRC" "$@"; }
 mkjob() { mkdir -p "$TMP/jobs/$1"; printf '%s\n' "$2" > "$TMP/jobs/$1/status"
           printf '%s\n' "$(( $(date +%s) - ${3:-600} ))" > "$TMP/jobs/$1/started_at"; }
 

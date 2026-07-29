@@ -130,10 +130,15 @@ check_token "claude-opus-4-8[1m]" ok
 check_token "claude-opus-4-8[200k]" ok
 check_token 'foo[1m];rm -rf /' reject
 check_token 'a$(id)' reject
+# Torture-found regression (lane1 BUG 1.1): a NEWLINE must not slip past the line-oriented grep by
+# making only the first line match ^…$. These are the injection vectors into the session launch string.
+check_token "$(printf 'claude\n;id')" reject
+check_token "$(printf 'opus\nrm -rf /')" reject
+check_token "$(printf 'claude-opus-4-8[1m]\ntouch pwned')" reject
 
 if [ "$fail" -ne 0 ]; then
   echo "RESULT: FAIL ($fail check(s) failed)" >&2
   exit 1
 fi
 
-echo "RESULT: PASS (all 18 checks passed)"
+echo "RESULT: PASS (all 21 checks passed)"
