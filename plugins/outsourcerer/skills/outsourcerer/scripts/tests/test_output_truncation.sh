@@ -25,6 +25,18 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 . "$SRC" >/dev/null 2>&1
 
+wait_for_status() { # <job-dir> <expected-status> <timeout-seconds>
+  local jd="$1" expected="$2" timeout="$3" started now status
+  started="$(date +%s)"
+  while :; do
+    status="$(cat "$jd/status" 2>/dev/null || true)"
+    [ "$status" = "$expected" ] && return 0
+    now="$(date +%s)"
+    [ $((now - started)) -lt "$timeout" ] || return 1
+    sleep 0.1
+  done
+}
+
 run_case() {  # <name> <log-body> <exit-code>  — the delegate emits the body, _supervise classifies it
   local jd="$TMP/job-$1"
   local err; err="$(_supervise "$jd" 60 120 300 -- sh -c "printf '%s\n' \"\$1\"; exit $3" _ "$2" 2>&1 >/dev/null)"
@@ -78,7 +90,9 @@ case "$r" in *output-token-limit*) bad "mid-run mention of truncation mislabelle
 # the failure it causes has to name itself and hand back the fix.
 jd="$TMP/silent"
 # The delegate emits ONLY our own launcher banner (every such line starts with '>>> '), then nothing.
-OSRC_POLL=1 _supervise "$jd" 2 3 30 -- sh -c 'printf "%s\n" ">>> [outsourcerer] launch banner"; sleep 12' >/dev/null 2>&1
+OSRC_POLL=1 _supervise "$jd" 2 3 30 -- sh -c 'printf "%s\n" ">>> [outsourcerer] launch banner"; exec tail -f /dev/null' >/dev/null 2>&1 & silent_supervisor=$!
+wait_for_status "$jd" wedged 10 || true
+wait "$silent_supervisor" 2>/dev/null || true
 st="$(cat "$jd/status" 2>/dev/null)"
 [ "$st" = "wedged" ] && ok "a silent delegate is still stopped (the watchdog still works)" \
   || bad "silent delegate was not stopped (got '$st')"
@@ -89,7 +103,9 @@ st="$(cat "$jd/status" 2>/dev/null)"
 # The discriminator must be CONTENT, not a byte count. A delegate that DID produce work and then hung
 # is a different failure with a different fix, and must not be handed the silent-delegate advice.
 jd2="$TMP/spoke"
-OSRC_POLL=1 _supervise "$jd2" 2 3 30 -- sh -c 'printf "%s\n" ">>> banner" "real work output"; sleep 12' >/dev/null 2>&1
+OSRC_POLL=1 _supervise "$jd2" 2 3 30 -- sh -c 'printf "%s\n" ">>> banner" "real work output"; exec tail -f /dev/null' >/dev/null 2>&1 & spoke_supervisor=$!
+wait_for_status "$jd2" wedged 10 || true
+wait "$spoke_supervisor" 2>/dev/null || true
 [ "$(cat "$jd2/status" 2>/dev/null)" = "wedged" ] && [ -z "$(cat "$jd2/reason" 2>/dev/null)" ] \
   && ok "a delegate that produced output then hung is NOT labelled silent" \
   || bad "work-then-hang was mislabelled as a silent delegate"

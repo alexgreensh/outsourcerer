@@ -448,10 +448,17 @@ logged_in() { devin auth status 2>/dev/null | grep -qi "Logged in"; }
 # (Linux, or macOS with coreutils), else a portable watchdog (works on stock macOS + Git Bash, which
 # ship NO `timeout`). Keeps the interactive `brief` handshake from stalling on a slow Devin backend.
 _timeout() {
-  local secs="$1"; shift
+  local secs="$1" out_file; shift
   if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
   if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
-  "$@" &
+  # Do not let descendants inherit a command-substitution pipe.  Even after
+  # the direct child is killed, one missed grandchild holding that pipe keeps
+  # the caller blocked until it exits.  Capture through a private file instead
+  # and emit it only after the direct child has been reaped.
+  _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || true
+  out_file="$(mktemp "$OSRC_HOME/.timeout.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  chmod 600 "$out_file" 2>/dev/null || true
+  "$@" >"$out_file" 2>&1 &
   local cmd_pid=$!
   # Signal the whole TREE, not just the direct child. Killing only the child leaves grandchildren
   # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
@@ -462,6 +469,8 @@ _timeout() {
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+  cat "$out_file"
+  rm -f "$out_file" 2>/dev/null || true
   return "$rc"
 }
 
@@ -1322,7 +1331,7 @@ record_ledger() {
      '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h,run_id:$rid,task_class:$tc,repo_key:$rk}
       + (if $lane=="" then {} else {lane:$lane} end)')" || return 0
   [ -n "$_line" ] || return 0
-  if command -v flock >/dev/null 2>&1; then
+  if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
     # Wait briefly for the lock; if it genuinely can't be acquired, do NOT silently drop the
     # accounting record -- fall back to a best-effort append (one small line, atomic under PIPE_BUF) and
     # warn once. A possibly-interleaved line beats losing spend/activity data with no signal.
@@ -1498,8 +1507,41 @@ _external_claim_read() {
   jq -e . "$file"
 }
 
+_external_controller_id() {
+  # A CLI action is a short-lived process, so its PID cannot identify the
+  # controller across `claim`, `reply`, and `release`.  Prefer an explicit,
+  # durable caller identity.  In an interactive tmux controller, the tmux
+  # session id is stable across those invocations.  Outside either context the
+  # random claim token is the capability; that is safe only because claim
+  # state is kept under OSRC_HOME (0700) and owner.json is written 0600.
+  local id="${OSRC_CONTROLLER_ID:-}" session_id
+  if [ -z "$id" ] && [ -n "${TMUX_PANE:-}" ] && have tmux; then
+    session_id="$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}' 2>/dev/null)" || session_id=""
+    [ -n "$session_id" ] && id="tmux:$session_id"
+  fi
+  [ -n "$id" ] || id="capability"
+  case "$id" in ''|*[!A-Za-z0-9._:@\$-]*) return 1 ;; esac
+  printf '%s\n' "$id"
+}
+
+_external_claim_authorized() { # <claim-json>
+  local claim="$1" token controller_id claimed_id generation
+  token="$(printf '%s' "$claim" | jq -r '.token // empty')" || return 1
+  claimed_id="$(printf '%s' "$claim" | jq -r '.controller_id // empty')" || return 1
+  controller_id="$(_external_controller_id)" || return 1
+  # OSRC_SESSION_CLAIM_TOKEN is the public cross-invocation capability name.
+  # Keep the older name as an in-process compatibility alias.
+  [ "$token" = "${OSRC_SESSION_CLAIM_TOKEN:-${SESSION_CLAIM_TOKEN:-}}" ] || return 1
+  [ "$claimed_id" = "$controller_id" ] || return 1
+  generation="$(printf '%s' "$claim" | jq -r '.generation // empty')" || return 1
+  [ -n "$generation" ] || return 1
+  SESSION_CLAIM_TOKEN="$token"
+  SESSION_CLAIM_GENERATION="$generation"
+  export SESSION_CLAIM_TOKEN SESSION_CLAIM_GENERATION
+}
+
 _external_session_claim() { # <session-id> <tmux-pane>
-  local id="$1" pane="$2" dir owner pid start token record tmp rc=0
+  local id="$1" pane="$2" dir owner pid start token controller_id generation record tmp rc=0
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   _external_session_id_valid "$id" || return 1
   case "$pane" in ''|*[!A-Za-z0-9:._-]*) return 1 ;; esac
@@ -1507,11 +1549,13 @@ _external_session_claim() { # <session-id> <tmux-pane>
   pid="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)"
   start="$(_pid_start_identity "$pid" 2>/dev/null)" || return 1
   token="$(_heartbeat_token)"; [ -n "$token" ] || return 1
+  controller_id="$(_external_controller_id)" || return 1
+  generation="$(_heartbeat_token)"; [ -n "$generation" ] || return 1
   _mkdir_private "$OSRC_SESSION_CLAIMS" || return 1
   dir="$(_session_claim_path "$id")"
   _mkdir_claim "$dir" || return 1
-  record="$(jq -cn --arg id "$id" --arg endpoint "tmux:$pane" --argjson pid "$pid" --arg start "$start" --arg token "$token" \
-    '{schema_version:"1",session_id:$id,endpoint:$endpoint,pid:$pid,pid_start:$start,token:$token}')" || rc=1
+  record="$(jq -cn --arg id "$id" --arg endpoint "tmux:$pane" --argjson pid "$pid" --arg start "$start" --arg token "$token" --arg controller_id "$controller_id" --arg generation "$generation" \
+    '{schema_version:"3",session_id:$id,endpoint:$endpoint,pid:$pid,pid_start:$start,token:$token,controller_id:$controller_id,generation:$generation}')" || rc=1
   tmp="$dir/.owner.$$.$RANDOM"
   [ "$rc" -ne 0 ] || ( umask 077; printf '%s\n' "$record" > "$tmp" ) || rc=1
   [ "$rc" -ne 0 ] || _state_sync "$tmp" || rc=1
@@ -1520,16 +1564,17 @@ _external_session_claim() { # <session-id> <tmux-pane>
   rm -f "$tmp" 2>/dev/null || true
   if [ "$rc" -ne 0 ]; then rmdir "$dir" 2>/dev/null || true; return 1; fi
   SESSION_CLAIM_TOKEN="$token"
-  export SESSION_CLAIM_TOKEN
+  SESSION_CLAIM_GENERATION="$generation"
+  export SESSION_CLAIM_TOKEN SESSION_CLAIM_GENERATION
   printf '%s\n' "$token"
 }
 
 _external_session_release() { # <session-id>
-  local id="$1" claim pid start token dir
+  local id="$1" claim pid start dir
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || return 1
-  pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; token="$(printf '%s' "$claim" | jq -r '.token')"
-  [ "$token" = "${SESSION_CLAIM_TOKEN:-}" ] || return 1
+  pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"
+  _external_claim_authorized "$claim" || return 1
   [ "$(_pid_start_identity "$pid" 2>/dev/null)" = "$start" ] || return 1
   dir="$(_session_claim_path "$id")"
   rm -f "$dir/owner.json" 2>/dev/null || return 1
@@ -1554,6 +1599,11 @@ _external_receipt_verify() { # <tmux-pane> <obligation-id>
   else
     printf 'unknown\n'
   fi
+}
+
+_external_receipt_valid() { # <receipt> <pane> <obligation-id> <generation>
+  printf '%s' "$1" | jq -e --arg endpoint "tmux:$2" --arg obligation "$3" --arg generation "$4" \
+    '.obligation_id==$obligation and .endpoint==$endpoint and .generation==$generation and .target_transition==true' >/dev/null 2>&1
 }
 
 _obligation_append() { # <id> <session-id> <state> <receipt>
@@ -1605,16 +1655,34 @@ _obligation_delivery_unknown() { # <id> <session-id>
   _wake_append "$(jq -cn --arg event_id "obligation.$id" --arg id "$id" '{event_id:$event_id,kind:"delivery",state:"unknown",task_summary:("delivery unknown: " + $id)}')" >/dev/null 2>&1 || true
 }
 
+_obligation_recover_stranded() {
+  local oid sid
+  while IFS=$'\t' read -r oid sid; do
+    [ -n "$oid" ] && [ -n "$sid" ] && _obligation_delivery_unknown "$oid" "$sid"
+  done < <(_state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r -s 'sort_by(.ts) | group_by(.obligation_id)[] | last | select(.state=="typing_started") | [.obligation_id,.session_id] | @tsv')
+}
+_obligation_guard_begin() { # <id> <session-id>
+  _OBLIGATION_GUARD_EXIT="$(trap -p EXIT)"; _OBLIGATION_GUARD_INT="$(trap -p INT)"; _OBLIGATION_GUARD_TERM="$(trap -p TERM)"
+  trap '_obligation_delivery_unknown "'$1'" "'$2'"; exit 1' EXIT INT TERM
+}
+_obligation_guard_end() {
+  trap - EXIT INT TERM
+  [ -n "${_OBLIGATION_GUARD_EXIT:-}" ] && eval "$_OBLIGATION_GUARD_EXIT"
+  [ -n "${_OBLIGATION_GUARD_INT:-}" ] && eval "$_OBLIGATION_GUARD_INT"
+  [ -n "${_OBLIGATION_GUARD_TERM:-}" ] && eval "$_OBLIGATION_GUARD_TERM"
+  unset _OBLIGATION_GUARD_EXIT _OBLIGATION_GUARD_INT _OBLIGATION_GUARD_TERM
+}
+
 _obligation_latest_state() { # <id>
   _state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r --arg id "$1" 'select(.obligation_id==$id) | .state' | tail -1
 }
 
 _external_reply() { # <session-id> <message>
-  local id="$1" message="$2" claim pane pid start token composer oid latest receipt key
+  local id="$1" message="$2" claim pane pid start generation composer oid latest receipt key
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
-  pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; token="$(printf '%s' "$claim" | jq -r '.token')"
-  [ "$token" = "${SESSION_CLAIM_TOKEN:-}" ] || { echo "external reply requires this controller's claim token" >&2; return 1; }
+  pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; generation="$(printf '%s' "$claim" | jq -r '.generation')"
+  _external_claim_authorized "$claim" || { echo "external reply requires the matching durable controller id and claim token" >&2; return 1; }
   oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
   if [ "$latest" = typing_started ]; then _obligation_delivery_unknown "$oid" "$id"; echo "delivery unknown; no automatic replay" >&2; return 1; fi
@@ -1628,18 +1696,22 @@ _external_reply() { # <session-id> <message>
   # Resolve the pane PID and prove its start marker at the exact mutation endpoint,
   # then make the composer check the final operation before typing.
   _claimed_endpoint_live "$pane" "$pid" "$start" || { _endpoint_mutation_unlock "$key"; return 1; }
-  composer="$(_external_composer_state "$pane" 2>/dev/null)"
-  [ "$composer" = "empty" ] || { _endpoint_mutation_unlock "$key"; echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
   _obligation_append "$oid" "$id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
-  tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
-  tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
+  _obligation_guard_begin "$oid" "$id"
+  # The final composer proof is deliberately the operation immediately before
+  # the first typed byte. Durable crash intent precedes it.
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = "empty" ] || { _obligation_delivery_unknown "$oid" "$id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
+  tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
-  if [ -n "$receipt" ] && [ "$receipt" != "unknown" ]; then
+  if _external_receipt_valid "$receipt" "$pane" "$oid" "$generation"; then
     _obligation_append "$oid" "$id" submitted "$receipt" || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
+    _obligation_guard_end
     _endpoint_mutation_unlock "$key"
     printf 'receipt: %s\n' "$receipt"
   else
-    _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"
+    _obligation_delivery_unknown "$oid" "$id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"
     echo "delivery unknown; no automatic replay" >&2
     return 1
   fi
@@ -1816,15 +1888,55 @@ _heartbeat_token() {
   printf '%s\n' "$token"
 }
 
+# Publish through a durable, identity-bearing sibling. A crash therefore leaves
+# a reclaimable owner record, never an anonymous empty lock directory.
+_heartbeat_pending_dir() { printf '%s.pending.%s.%s\n' "$1" "$2" "${3// /_}"; }
+_heartbeat_pending_identity() { # <dir> -> pid<TAB>start
+  local tail pid encoded
+  tail="${1##*.pending.}"; pid="${tail%%.*}"; encoded="${tail#*.}"
+  case "$pid:$encoded" in *[!A-Za-z0-9._:]*|*:) return 1 ;; esac
+  printf '%s\t%s\n' "$pid" "${encoded//_/ }"
+}
+_heartbeat_reclaim_dead_pending() { # <canonical>
+  local pending ident pid start live rc
+  for pending in "$1".pending.*; do
+    [ -d "$pending" ] || continue
+    ident="$(_heartbeat_pending_identity "$pending")" || continue
+    pid="${ident%%$'\t'*}"; start="${ident#*$'\t'}"
+    _pid_start_valid "$start" || continue
+    live="$(_pid_start_identity "$pid" 2>/dev/null)"; rc=$?
+    [ "$rc" -eq 0 ] && [ "$live" != "$start" ] || continue
+    rm -f "$pending/owner.json" "$pending"/.owner.* 2>/dev/null || return 1
+    rmdir "$pending" 2>/dev/null || return 1
+  done
+}
+_heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
+  local canonical="$1" pid="$2" start="$3" record="$4" pending tmp
+  pending="$(_heartbeat_pending_dir "$canonical" "$pid" "$start")"
+  _heartbeat_reclaim_dead_pending "$canonical" || return 1
+  _mkdir_claim "$pending" || return 1
+  tmp="$pending/.owner.$$.$RANDOM"
+  ( umask 077; printf '%s\n' "$record" > "$tmp" ) 2>/dev/null || { rmdir "$pending" 2>/dev/null || true; return 1; }
+  _state_sync "$tmp" || { rm -f "$tmp"; rmdir "$pending" 2>/dev/null || true; return 1; }
+  mv "$tmp" "$pending/owner.json" || return 1
+  _state_sync "$pending" || return 1
+  # Any contender observes the durable pending owner and yields before this
+  # precondition, so mv cannot nest a directory inside an incumbent.
+  [ ! -e "$canonical" ] || return 1
+  mv "$pending" "$canonical" || return 1
+  _state_sync "$(dirname "$canonical")"
+}
+
 _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
-  local lock="$1" pid="$2" pid_start="$3" tries=0 owner old_pid old_start live rc record tmp
+  local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record
   if command -v flock >/dev/null 2>&1; then
     exec 8>"$lock.flock" 2>/dev/null || return 1
     flock -w 5 8 2>/dev/null || { exec 8>&-; return 1; }
     _HEARTBEAT_ELECTION_KIND=flock
     return 0
   fi
-  while ! _mkdir_claim "$lock"; do
+  _heartbeat_reclaim_dead_pending "$lock" || return 1
+  while [ -d "$lock" ]; do
     owner="$lock/owner.json"
     old_pid="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 1
     old_start="$(jq -r '.pid_start // empty' "$owner" 2>/dev/null)" || return 1
@@ -1838,9 +1950,8 @@ _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
     fi
     return 1
   done
-  record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" '{pid:$pid,pid_start:$pid_start}')" || { rmdir "$lock" 2>/dev/null || true; return 1; }
-  tmp="$lock/.owner.$$.$RANDOM"
-  ( umask 077; printf '%s\n' "$record" > "$tmp" ) 2>/dev/null && _state_sync "$tmp" && mv "$tmp" "$lock/owner.json" && _state_sync "$lock" || { rm -f "$tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+  record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" '{pid:$pid,pid_start:$pid_start}')" || return 1
+  _heartbeat_publish_dir "$lock" "$pid" "$pid_start" "$record" || return 1
   _HEARTBEAT_ELECTION_KIND=mkdir
 }
 _heartbeat_election_release() {
@@ -1852,7 +1963,7 @@ _heartbeat_election_release() {
 _heartbeat_claim() {
   local pid="$1" pid_start="$2" token="$3" sink="${4:-}" lock="$OSRC_HEARTBEAT/.election"
   local leader="$OSRC_HEARTBEAT/leader" owner="$OSRC_HEARTBEAT/leader/owner.json"
-  local tries=0 old_pid old_start live_start record tmp rc=0
+  local old_pid old_start live_start record rc=0
   [ "$OSRC_PLATFORM" != "windows" ] || return 1
   case "$pid:$token" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
   [ -n "$pid_start" ] || return 1
@@ -1883,24 +1994,9 @@ _heartbeat_claim() {
     rm -f "$owner" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
     rmdir "$leader" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
   fi
-  if ! _mkdir_claim "$leader"; then
-    _heartbeat_election_release "$lock"
-    return 1
-  fi
   record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" --arg token "$token" --arg sink "$sink" \
     '{schema_version:"1",pid:$pid,pid_start:$pid_start,token:$token,sink:(if $sink=="" then null else $sink end)}')" || rc=1
-  tmp="$leader/.owner.$$.$RANDOM"
-  if [ "$rc" -eq 0 ]; then
-    ( umask 077; printf '%s\n' "$record" > "$tmp" ) 2>/dev/null || rc=1
-  fi
-  [ "$rc" -ne 0 ] || _state_sync "$tmp" || rc=1
-  [ "$rc" -ne 0 ] || mv "$tmp" "$owner" || rc=1
-  [ "$rc" -ne 0 ] || _state_sync "$leader" || rc=1
-  rm -f "$tmp" 2>/dev/null || true
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$owner" 2>/dev/null || true
-    rmdir "$leader" 2>/dev/null || true
-  fi
+  [ "$rc" -ne 0 ] || _heartbeat_publish_dir "$leader" "$pid" "$pid_start" "$record" || rc=1
   _heartbeat_election_release "$lock"
   [ "$rc" -eq 0 ]
 }
@@ -1996,6 +2092,7 @@ _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
 
 _heartbeat_tick() {
   local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1 pinned_items='[]' pinned
+  _obligation_recover_stranded >/dev/null 2>&1 || true
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   generation="$(printf '%s' "$snapshot" | jq -r '.generation // "unknown"')"
   if ! _fleet_snapshot_write "$snapshot"; then
@@ -2068,6 +2165,17 @@ _heartbeat_is_owner() {
     '.token==$token and .pid==$pid and .pid_start==$pid_start' "$owner" >/dev/null 2>&1
 }
 
+_heartbeat_active_work() {
+  local jd status
+  [ -d "$OSRC_JOBS" ] || return 1
+  for jd in "$OSRC_JOBS"/*; do
+    [ -d "$jd" ] || continue
+    status="$(cat "$jd/status" 2>/dev/null || true)"
+    case "$status" in launching|running|exploring?|stalled?) return 0 ;; esac
+  done
+  return 1
+}
+
 _heartbeat_beacon() {
   local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-300}"
   local pid_start rc
@@ -2089,6 +2197,9 @@ _heartbeat_beacon() {
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
     _heartbeat_tick || true
     [ "${OSRC_HEARTBEAT_ONCE:-0}" = "1" ] && break
+    # A beacon exists only to watch supervised work.  Do not leave a sleeping
+    # 300-second process after the final job finishes.
+    _heartbeat_active_work || break
     sleep "$cadence"
   done
 }
@@ -7848,6 +7959,32 @@ _tmux_reset_input() {
   [ "$aggressive" = "aggressive" ] && tmux send-keys -t "$s" Escape 2>/dev/null || true
 }
 
+_managed_session_send() { # <session-id> <message>
+  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest
+  _managed_endpoint_live "$session_id" "$pane" || return 1
+  oid="send.$session_id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
+  latest="$(_obligation_latest_state "$oid")"
+  [ "$latest" != typing_started ] || { _obligation_delivery_unknown "$oid" "$session_id"; return 1; }
+  _obligation_admit "$oid" "$session_id" || return 1
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
+  _tmux_reset_input "$pane"
+  _obligation_append "$oid" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
+  _obligation_guard_begin "$oid" "$session_id"
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = empty ] || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
+  receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
+  if _external_receipt_valid "$receipt" "$pane" "$oid" "$generation"; then
+    _obligation_append "$oid" "$session_id" submitted "$receipt" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+    _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 0
+  fi
+  _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
+}
+
 # Validate session name before any path construction, tmux, or rm use.
 # Reject empty, '.', '..', and any name containing a character outside [A-Za-z0-9._-].
 _validate_session_name() {
@@ -8043,7 +8180,7 @@ _managed_endpoint_live() { # <session-id> <pane>
 }
 
 _session_model_restore() { # <lane> <endpoint> <requested> <restore-id> <session-id>
-  local lane="$1" endpoint="$2" requested="$3" restore_id="$4" session_id="$5" pane composer receipt key latest
+  local lane="$1" endpoint="$2" requested="$3" restore_id="$4" session_id="$5" pane composer receipt key latest generation
   [ "$OSRC_PLATFORM" != "windows" ] || return 1
   case "$endpoint" in tmux:*) pane="${endpoint#tmux:}" ;; *) return 1 ;; esac
   _managed_endpoint_live "$session_id" "$pane" || return 1
@@ -8052,16 +8189,19 @@ _session_model_restore() { # <lane> <endpoint> <requested> <restore-id> <session
   _endpoint_mutation_lock "$pane" || return 1
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
-  composer="$(_external_composer_state "$pane" 2>/dev/null)"
-  [ "$composer" = empty ] || { _endpoint_mutation_unlock "$key"; return 1; }
   _obligation_append "$restore_id" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
-  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1; } ;; *) _endpoint_mutation_unlock "$key"; return 1 ;; esac
+  _obligation_guard_begin "$restore_id" "$session_id"
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = empty ] || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; } ;; *) _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;; esac
   receipt="$(_session_model_receipt "$lane" "$pane" "$restore_id" 2>/dev/null)"
-  if [ -n "$receipt" ] && [ "$receipt" != unknown ]; then
+  generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
+  if _external_receipt_valid "$receipt" "$pane" "$restore_id" "$generation"; then
     _obligation_append "$restore_id" "$session_id" submitted "$receipt" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1; }
+    _obligation_guard_end
     _endpoint_mutation_unlock "$key"; return 0
   fi
-  _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1
+  _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
 }
 
 _model_pin_append() { # <session-id> <generation> <event> [detail]
@@ -8286,8 +8426,11 @@ session() {
   case "$sub" in
     claim)
       [ "$#" -eq 2 ] || die "session claim needs <external-id> <tmux-pane>"
-      _external_session_claim "$1" "$2" || die "could not establish a verified external-session claim"
+      local claim_token
+      claim_token="$(_external_session_claim "$1" "$2")" || die "could not establish a verified external-session claim"
       echo "claim established for '$1'"
+      echo "claim token: $claim_token"
+      echo "for separate invocations: export OSRC_SESSION_CLAIM_TOKEN='$claim_token'"
       ;;
     release)
       [ "$#" -eq 1 ] || die "session release needs <external-id>"
@@ -8360,11 +8503,7 @@ session() {
     send)
       [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _tmux_reset_input "$SESSION_NAME"          # cancel copy-mode + wipe residual draft, else keys vanish or concatenate
-      tmux send-keys -t "$SESSION_NAME" -l "$*"
-      sleep 0.5                                  # let the TUI debounce the pasted text before submitting
-      tmux send-keys -t "$SESSION_NAME" Enter
-      sleep 0.3; tmux send-keys -t "$SESSION_NAME" Enter 2>/dev/null || true   # second Enter: some TUIs need it to submit
+      _managed_session_send "$SESSION_NAME" "$*" || die "session send was not receipt-verified; delivery marked unknown"
       echo "sent. Read progress with: $0 session read"
       ;;
     read)
@@ -8388,7 +8527,7 @@ session() {
       tmux send-keys -t "$SESSION_NAME" M-m;   sleep 1      # opt+m -> open model picker
       if [ -n "${1:-}" ]; then
         local filter; filter=$(printf '%s' "$1" | tr -cd '[:alnum:][:space:]._:/-')
-        tmux send-keys -t "$SESSION_NAME" -l "$filter"; sleep 1
+        tmux send-keys -t "$SESSION_NAME" -l -- "$filter"; sleep 1
       fi
       tmux send-keys -t "$SESSION_NAME" Enter
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."

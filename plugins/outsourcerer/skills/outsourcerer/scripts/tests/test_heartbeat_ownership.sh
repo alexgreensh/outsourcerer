@@ -74,6 +74,14 @@ else
 fi
 rmdir "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
 
+# Lifecycle: a leader remains only while supervised work exists. This is the
+# condition the beacon checks between ticks before it releases its claim.
+mkdir -p "$OSRC_JOBS/lifecycle"
+printf '%s\n' running > "$OSRC_JOBS/lifecycle/status"
+_heartbeat_active_work && ok "active supervised work keeps the beacon eligible" || bad "active work was not detected"
+printf '%s\n' done > "$OSRC_JOBS/lifecycle/status"
+_heartbeat_active_work && bad "terminal work kept the beacon alive" || ok "beacon exits once supervised work is terminal"
+
 PATH="/usr/bin:/bin:$PATH" _heartbeat_stop recovered >/dev/null 2>&1 || true
 
 echo

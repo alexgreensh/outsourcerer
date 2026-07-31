@@ -6,7 +6,7 @@ OSRC_HOME="$TMP/state"; export OSRC_HOME; set --; . "$SRC" >/dev/null 2>&1; LOG=
 _pid_start_identity(){ printf 'Mon Jan 1 00:00:00 2024\n'; }
 tmux(){ case "$1" in display-message) echo 42;; send-keys) printf '%s\n' "$*" >> "$LOG";; *) return 1;; esac; }
 _external_composer_state(){ echo empty; }; _external_receipt_verify(){ echo unknown; }
-token="$(_external_session_claim external-3 pane:0.0)"; SESSION_CLAIM_TOKEN="$token"
+_external_session_claim external-3 pane:0.0 >/dev/null; token="$(jq -r .token "$OSRC_SESSION_CLAIMS/external-3/owner.json")"; SESSION_CLAIM_TOKEN="$token"; SESSION_CLAIM_GENERATION="$(jq -r .generation "$OSRC_SESSION_CLAIMS/external-3/owner.json")"
 _external_reply external-3 payload >/dev/null 2>&1 && bad "missing receipt was reported sent" || ok "missing receipt fails closed"
 state="$(_obligation_latest_state reply.external-3.$(printf payload | cksum | awk '{print $1}'))"; [ "$state" = delivery_unknown ] && ok "post-submit ambiguity is durable" || bad "ambiguous delivery was not recorded"
 grep -q 'delivery unknown' "$OSRC_WAKE_QUEUE" && ok "ambiguous delivery is escalated" || bad "ambiguous delivery was not escalated"

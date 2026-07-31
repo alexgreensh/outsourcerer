@@ -108,6 +108,10 @@ course-correct or kill a bad run you are not reading.
 
 Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `advise` · `doctor` · `models`. More: `suggest`/`deals` (cheap now) · `estimate` (cost quote) · `tab` (the ledger) · `second-opinion` · `image` · `continue` · `tap` (capture live limits without token-optimizer) · `parity`/`parity-codex`/`parity-droid`/`parity-cursor`/`parity-hermes` (two-way bridges) · `cleanup`/`gc`. Failure states map to one-line user messages (`launching`→`running`→ `done`/`done?`/`blocked`/`permission-blocked`/`interrupted`/`timeout`/`wedged`/`failed`): `references/jobs-and-safety.md`. `permission-blocked` (a headless delegate hit a wall it can't confirm — e.g. devin print-mode) is NOT `blocked`: re-run with `yolo` or restructure the prompt, don't just read the result. `launching` that never becomes `running` → `failed` (stillborn: the environment killed the detached worker — run foreground).
 
+### External-session claims
+
+`session claim <external-id> <tmux-pane>` prints a secret claim token. For a later, separate CLI invocation, pass it as `OSRC_SESSION_CLAIM_TOKEN` to `session reply` or `session release`. Set `OSRC_CONTROLLER_ID` to a durable controller identity when commands are driven outside tmux; inside tmux, the controlling tmux session is used automatically. The controller ID and token must both match the claim record. Without either durable source, the token is the capability, protected by the 0700 state directory and 0600 claim record boundary. Do not place the token in logs or shared shell history.
+
 ## References
 
 - `mechanism.md` — setup, provider flags, verb/tier semantics, `session` mode

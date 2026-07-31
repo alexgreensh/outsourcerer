@@ -6,6 +6,9 @@
 # watch" is exactly the kind of instruction a busy session drops. So the tool tracks attention itself:
 # it demands a watcher at launch, and any later invocation reports jobs nobody has looked at.
 set -uo pipefail
+# Conformance disables WS6 globally for isolation. This suite exercises the
+# auto-arm path itself, so it deliberately opts back in.
+export OSRC_HEARTBEAT_DISABLED=0
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"

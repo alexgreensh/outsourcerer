@@ -17,7 +17,7 @@ KEYS="$TMP/keys"
 _pid_start_identity() { printf '%s\n' 'Mon Jan 1 00:00:00 2024'; }
 tmux() { case "$1" in display-message) printf '42\n' ;; send-keys) printf '%s\n' "$*" >> "$KEYS" ;; *) return 0 ;; esac; }
 _external_composer_state() { printf '%s\n' "${COMPOSER:-unknown}"; }
-_external_receipt_verify() { printf '%s\n' "${RECEIPT:-unknown}"; }
+_external_receipt_verify() { [ "${RECEIPT:-unknown}" = unknown ] && { printf '%s\n' unknown; return; }; jq -cn --arg obligation "$2" --arg endpoint "tmux:$1" --arg generation "1" '{obligation_id:$obligation,endpoint:$endpoint,generation:$generation,target_transition:true}'; }
 
 SESSION_NAME=pin-record
 _session_registry_append start devin fable high started launch

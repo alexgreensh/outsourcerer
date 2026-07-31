@@ -36,13 +36,16 @@ _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escal
          test_with_injection test_no_phantom_jobs test_model_drift test_model_pin_enforcement test_perm_denial_precision test_devin_liveness test_windows_portability \
          test_devin_alias_resolution test_build_target test_mutation_state_durability test_wake_queue \
          test_heartbeat_ownership test_bearings test_external_sessions test_session_claims test_session_reply_safety test_obligations"
+_ALL_SUITES="$_ALL_SUITES test_reverdict_residuals"
 _ALL_SUITES="$_ALL_SUITES test_session_effort"
 _ALL_SUITES="$_ALL_SUITES test_model_selection_parity"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say
     # "test_x FAILED" and nothing else, which is the difference between a fixable report and a mystery.
-    _out="$(bash "$SCRIPT_DIR/$t.sh" 2>&1)"
+    # Static suites must not inherit a live WS6 daemon.  It can outlive a
+    # focused test and perturb unrelated supervisor-label assertions.
+    _out="$(OSRC_HEARTBEAT_DISABLED=1 bash "$SCRIPT_DIR/$t.sh" 2>&1)"
     if [ $? -eq 0 ]; then ok "unit suite $t green"
     else
       bad "unit suite $t FAILED"
