@@ -35,6 +35,12 @@ parse_model -m sol --effort low "t" 2>/dev/null;  pe="$EFFORT"
 _consume_flags -m sol --effort low "t";           ce="$EFFORT"
 [ "$pe" = "low" ] && [ "$ce" = "low" ] && ok "both parsers accept --effort low" || bad "effort divergence (parse_model=$pe consume=$ce)"
 
+# Session effort accepts the same vocabulary as launch-time effort.
+for level in minimal low medium high xhigh max none; do
+  _session_effort_validate "$level" && ok "session effort accepts $level" || bad "session effort rejected $level"
+done
+( _session_effort_validate bogus ) && bad "session effort accepted invalid level" || ok "session effort rejects invalid level"
+
 # Provider provenance follows both parser entry points.
 PROVIDER=devin; PROVIDER_EXPLICIT=0
 parse_model --provider cc "t" 2>/dev/null
