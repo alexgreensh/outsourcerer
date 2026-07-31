@@ -7234,6 +7234,57 @@ _session_shell_command() {
   printf '%s\n' "$out"
 }
 
+_session_effort_validate() {
+  case "${1:-}" in
+    minimal|low|medium|high|xhigh|max|none) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt>
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" now record
+  have jq || return 1
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
+    --arg model "$model" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,effort:$effort,state:$state,receipt:$receipt,ts:$ts}')" || return 1
+  _state_append "$OSRC_SESSION_REGISTRY" "$record"
+}
+
+_session_relaunch_command() { # <provider> <model> <effort>
+  local provider="$1" model="$2" effort="$3" cid tokens de
+  case "$provider" in
+    codex|cx)
+      cid="$(resolve_model_row "$model")"; cid="${cid%%|*}"; [ -n "$cid" ] || cid="$model"
+      _validate_model_token "$cid"
+      printf 'codex -m %q -s workspace-write -c model_reasoning_effort=%q' "$cid" "$effort"
+      ;;
+    cc|claude)
+      tokens="$(_effort_thinking_tokens "$effort")"
+      [ -n "$tokens" ] || return 1
+      printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$model"
+      ;;
+    droid)
+      de="$(_droid_effort "$effort")"; [ -n "$de" ] || return 1
+      printf 'droid --auto medium --model %q -r %q' "$model" "$de"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_session_droid_effort_supported() {
+  local help_text
+  help_text="$(_session_probe_help droid --help)" || return 1
+  printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort'
+}
+
+_session_relaunch_effort() { # <provider> <model> <effort>
+  local provider="$1" model="$2" effort="$3" launch
+  launch="$(_session_relaunch_command "$provider" "$model" "$effort")" || return 1
+  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
+  tmux respawn-pane -k -t "$SESSION_NAME" "$launch" || return 1
+}
+
 # ---- interactive winpty session broker for Windows ----
 _winpty_session() {
   local sub="${1:-}"; shift || true
@@ -7259,10 +7310,12 @@ _winpty_session() {
           local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
           LAUNCH=("codex" "-s" "workspace-write")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("-m" "$cid")
+          [ -n "$EFFORT" ] && LAUNCH+=("-c" "model_reasoning_effort=$EFFORT")
           LAUNCH+=(${_ccmh[@]+"${_ccmh[@]}"}) ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
           LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
+          [ -n "$EFFORT" ] && LAUNCH=("env" "MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("--model" "$MODEL") ;;
         droid|cursor|hermes)
           _session_launch_adapter "$PROVIDER"
@@ -7308,6 +7361,7 @@ _winpty_session() {
       fi
 
       echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
+      _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       ;;
     send)
@@ -7346,6 +7400,18 @@ _winpty_session() {
       mv "$tmp" "$sdir/cmd/model-$(date +%s)-$$-$RANDOM.txt"
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
+    effort)
+      local effort="${1:-}"
+      _session_effort_validate "$effort" || die "session effort requires: minimal|low|medium|high|xhigh|max|none"
+      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      case "$PROVIDER" in
+        devin|dv|gemini|gm)
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
+          ;;
+        *) die "session effort is unavailable for $PROVIDER on Windows (unverified Windows mutation support)" ;;
+      esac
+      ;;
     stop)
       if [ -d "$sdir" ]; then
         mkdir -p "$sdir/cmd"
@@ -7364,7 +7430,7 @@ _winpty_session() {
       echo "stopped '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | stop"
+      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | stop"
       ;;
   esac
 }
@@ -7402,11 +7468,13 @@ session() {
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
           # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="codex -m '$cid' -s workspace-write$ccmh"; else launch="codex -s workspace-write$ccmh"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="codex -m '$cid' -s workspace-write$ccmh"; else launch="codex -s workspace-write$ccmh"; fi
+          [ -n "$EFFORT" ] && launch="$launch -c model_reasoning_effort=$EFFORT" ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi ;;
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi
+          [ -n "$EFFORT" ] && launch="env MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT") $launch" ;;
         droid|cursor|hermes)
           _session_launch_adapter "$PROVIDER"
           launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
@@ -7432,6 +7500,7 @@ session() {
       fi
       tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD"
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
+      _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       ;;
@@ -7471,11 +7540,37 @@ session() {
       tmux send-keys -t "$SESSION_NAME" Enter
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
+    effort)
+      local effort="${1:-}"
+      _session_effort_validate "$effort" || die "session effort requires: minimal|low|medium|high|xhigh|max|none"
+      tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      case "$PROVIDER" in
+        devin|dv|gemini|gm)
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
+          ;;
+        droid)
+          _session_droid_effort_supported || die "session effort relaunch unavailable; droid does not advertise a reasoning-effort control"
+          _session_relaunch_effort droid "$MODEL" "$effort" || die "session effort relaunch failed; the prior session remains active"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch || die "cannot record session effort"
+          echo "receipt: relaunch applied effort $effort to '$SESSION_NAME'."
+          ;;
+        codex|cx|cc|claude)
+          _session_relaunch_effort "$PROVIDER" "$MODEL" "$effort" || die "session effort relaunch failed; the prior session remains active"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch || die "cannot record session effort"
+          echo "receipt: relaunch applied effort $effort to '$SESSION_NAME'."
+          ;;
+        *)
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
+          ;;
+      esac
+      ;;
     stop)
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | stop"
+      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | stop"
       ;;
   esac
 }
