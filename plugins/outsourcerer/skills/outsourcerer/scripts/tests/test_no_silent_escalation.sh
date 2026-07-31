@@ -120,6 +120,17 @@ else
   ok "old self-heal message replaced by SECURITY DOWNGRADE gate"
 fi
 
+# === Scenario 9: an implicit limited route refuses noninteractive launch. ===
+PROVIDER=devin; PROVIDER_EXPLICIT=0; MODEL=glm-5.2; MODEL_EXPLICIT=0
+_route_resolution devin glm-5.2
+if _route_requires_confirmation; then ok "implicit limited route requires confirmation"; else bad "implicit limited route skipped confirmation"; fi
+if ( _route_confirm ) >"$TMP/out9.txt" 2>&1; then
+  bad "noninteractive implicit route was accepted"
+else
+  out="$(cat "$TMP/out9.txt")"
+  case "$out" in *'>>> [route] CONFIRM lane=devin model=glm-5.2'*) ok "confirmation banner names resolved route" ;; *) bad "confirmation banner missing: $out" ;; esac
+fi
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

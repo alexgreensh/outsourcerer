@@ -35,6 +35,16 @@ parse_model -m sol --effort low "t" 2>/dev/null;  pe="$EFFORT"
 _consume_flags -m sol --effort low "t";           ce="$EFFORT"
 [ "$pe" = "low" ] && [ "$ce" = "low" ] && ok "both parsers accept --effort low" || bad "effort divergence (parse_model=$pe consume=$ce)"
 
+# Provider provenance follows both parser entry points.
+PROVIDER=devin; PROVIDER_EXPLICIT=0
+parse_model --provider cc "t" 2>/dev/null
+[ "$PROVIDER" = "cc" ] && [ "$PROVIDER_EXPLICIT" = "1" ] && ok "parse_model: --provider is explicit" || bad "parse_model: provider provenance lost"
+PROVIDER=devin; PROVIDER_EXPLICIT=0
+_consume_flags --provider codex "t"
+[ "$PROVIDER" = "codex" ] && [ "$PROVIDER_EXPLICIT" = "1" ] && ok "consume_flags: --provider is explicit" || bad "consume_flags: provider provenance lost"
+grep -q 'OSRC_PROVIDER:-' "$SRC" && ok "OSRC_PROVIDER is an explicit environment selection" || bad "OSRC_PROVIDER environment selection missing"
+grep -q 'PROVIDER_EXPLICIT=1; shift 2' "$SRC" && ok "global provider flag records provenance" || bad "global provider provenance missing"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

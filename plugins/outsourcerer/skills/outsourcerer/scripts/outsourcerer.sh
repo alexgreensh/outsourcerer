@@ -198,7 +198,15 @@ _mkdir_claim() {
 }
 
 # Offload backend: devin (default) | cc (Claude Code->OpenRouter) | codex (Codex->OpenRouter).
-PROVIDER="${OUTSOURCERER_PROVIDER:-devin}"
+# OSRC_PROVIDER is an explicit caller selection. OUTSOURCERER_PROVIDER is retained for detached jobs.
+PROVIDER="${OSRC_PROVIDER:-${OUTSOURCERER_PROVIDER:-devin}}"
+if [ -n "${OSRC_PROVIDER_EXPLICIT:-}" ]; then
+  PROVIDER_EXPLICIT="$OSRC_PROVIDER_EXPLICIT"
+elif [ -n "${OSRC_PROVIDER:-}" ] || [ -n "${OUTSOURCERER_PROVIDER:-}" ]; then
+  PROVIDER_EXPLICIT=1
+else
+  PROVIDER_EXPLICIT=0
+fi
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -503,7 +511,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1197,7 +1205,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -3296,7 +3304,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -3384,7 +3392,9 @@ cmd_bg() {
   # real dispatch checks. The recursion guard is enforced SEPARATELY: the parent-side authorization
   # check above refuses before any job is minted, and the detached __runjob child inherits the
   # caller's depth (it no longer resets it) so route_delegate's guard trips there too as a backstop.
-  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" --provider "$PROVIDER" "$@" 2>&1)" || _pfrc=$?
+  local -a _pf_provider=()
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _pf_provider=(--provider "$PROVIDER")
+  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -3598,9 +3608,11 @@ run_job() {
   # depth 0, defeating the guard entirely and allowing unbounded re-delegation. The parent-side
   # authorization check in cmd_bg refuses before minting when depth >= max; this guard is the
   # backstop inside the child.
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_JOB_VERB="$verb" \
+  local -a _run_provider=()
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
-    "$SCRIPT_PATH" --provider "$prov" "$verb" "$@"
+    "$SCRIPT_PATH" ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
   # Worktree receipt: record base/head SHA + dirty/ahead so the orchestrator can inspect or integrate
   # deterministically. NEVER auto-remove — the worktree is preserved until an explicit `cleanup`.
@@ -6670,6 +6682,56 @@ _fallback_dispatch() {
   return 0
 }
 
+# Route facts are established once after provider/model resolution and before any side effect.
+_route_resolution() {   # <dispatch-lane> <model>
+  local lane="$1" model="$2"
+  [ -n "$lane" ] && [ -n "$model" ] || die "route resolution is incomplete; refusing to choose a provider"
+  ROUTE_LANE="$lane"; ROUTE_MODEL="$model"
+  ROUTE_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}"
+  ROUTE_MODEL_EXPLICIT="${MODEL_EXPLICIT:-0}"
+  ROUTE_INTERACTION="cloud"
+  ROUTE_EVIDENCE="provider=$PROVIDER model=$MODEL"
+  ROUTE_FALLBACK_ORDER="$lane"
+  case "$lane" in
+    local) ROUTE_COST_CLASS=local; ROUTE_INTERACTION=local ;;
+    ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp) ROUTE_COST_CLASS=limited ;;
+    ccor|codexor|claudex) ROUTE_COST_CLASS=credits ;;
+    *) die "route resolution is ambiguous for lane '$lane'; refusing to launch" ;;
+  esac
+}
+
+_route_requires_confirmation() {
+  [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] && return 1
+  case "${ROUTE_COST_CLASS:-}" in limited|credits) return 0 ;; esac
+  return 1
+}
+
+_route_confirm() {
+  local cash plan selection ans
+  case "$ROUTE_COST_CLASS" in
+    local) cash='$0 cash'; plan='$0 plan limits' ;;
+    credits) cash='may spend credits or cash'; plan='may spend a limited allocation' ;;
+    limited) cash='$0 cash unless your lane bills separately'; plan='may spend subscription or plan limits' ;;
+    *) die "route confirmation cannot classify this route; refusing to launch" ;;
+  esac
+  selection='(none)'
+  [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] && selection="--provider $PROVIDER"
+  printf '>>> [route] CONFIRM lane=%s model=%s cash=%s plan=%s explicit=%s\n' \
+    "$ROUTE_LANE" "$ROUTE_MODEL" "$cash" "$plan" "$selection" >&2
+  if ! [ -t 0 ] || ! [ -t 1 ]; then
+    die "route confirmation required for an implicit provider in a noninteractive call; pass --provider <lane> (or set OSRC_PROVIDER) to select it explicitly. Nothing was launched."
+  fi
+  printf '>>> [route] Continue with this lane? [y/N] ' >&2
+  IFS= read -r ans || die "route confirmation was not received; nothing was launched"
+  case "$ans" in y|Y|yes|YES) ;; *) die "route confirmation declined; nothing was launched" ;; esac
+}
+
+_route_receipt() {
+  [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] || return 0
+  printf '>>> [route] RESOLVED lane=%s model=%s explicit=--provider %s\n' \
+    "$ROUTE_LANE" "$ROUTE_MODEL" "$PROVIDER" >&2
+}
+
 # Route a one-shot delegation. THE MODEL CHOOSES THE LANE: an alias/id in the table
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
@@ -6735,7 +6797,12 @@ route_delegate() {
   # LOCAL lane short-circuit: a model prefixed ollama:/lmstudio:/lms:/local[:...], or --provider local.
   # Local models aren't in the alias table (they're whatever the user has pulled), so route them here.
   case "$PROVIDER:$MODEL" in
-    local:*|*:ollama:*|*:lmstudio:*|*:lms:*|*:local|*:local:*) delegate_local "$tier"; return $? ;;
+    local:*|*:ollama:*|*:lmstudio:*|*:lms:*|*:local|*:local:*)
+      _route_resolution local "$MODEL"
+      _route_requires_confirmation && _route_confirm
+      _route_receipt
+      [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 0
+      delegate_local "$tier"; return $? ;;
   esac
 
   RESOLVED_ID="$MODEL"; RESOLVED_LANE=""; TTIER=""
@@ -6842,6 +6909,10 @@ route_delegate() {
       *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|claudex|local)" ;;
     esac
   fi
+
+  _route_resolution "$disp" "$RESOLVED_ID"
+  _route_requires_confirmation && _route_confirm
+  _route_receipt
 
   # A live zero balance is conclusive: stop before preflight or dispatch rather than announcing a
   # route which can only fail with 402. Unknown balances remain best-effort and preserve existing
@@ -8202,7 +8273,7 @@ main() {
   while :; do
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"
-                  PROVIDER="$2"; shift 2 ;;
+                  PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
     esac

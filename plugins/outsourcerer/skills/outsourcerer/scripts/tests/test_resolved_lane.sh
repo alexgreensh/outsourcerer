@@ -136,6 +136,17 @@ check_token "$(printf 'claude\n;id')" reject
 check_token "$(printf 'opus\nrm -rf /')" reject
 check_token "$(printf 'claude-opus-4-8[1m]\ntouch pwned')" reject
 
+# Explicit providers receive a resolved-lane receipt and never need confirmation.
+PROVIDER=cc; PROVIDER_EXPLICIT=1; MODEL=glm; MODEL_EXPLICIT=1
+_route_resolution ccor z-ai/glm-5.2
+if _route_requires_confirmation; then
+  echo "FAIL: explicit provider unexpectedly needs confirmation"; fail=1
+else
+  echo "PASS: explicit provider bypasses confirmation"
+fi
+receipt="$(_route_receipt 2>&1)"
+case "$receipt" in *'>>> [route] RESOLVED lane=ccor model=z-ai/glm-5.2 explicit=--provider cc'*) echo "PASS: explicit provider receipt names lane and model" ;; *) echo "FAIL: missing resolved-lane receipt: $receipt"; fail=1 ;; esac
+
 if [ "$fail" -ne 0 ]; then
   echo "RESULT: FAIL ($fail check(s) failed)" >&2
   exit 1

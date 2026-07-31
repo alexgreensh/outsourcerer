@@ -30,6 +30,12 @@ parse_model -m glm --tier capable --with skills=x --allow-downgrade --cloud-ack 
 [ "$OSRC_ALLOW_DOWNGRADE" = "1" ] && ok "--allow-downgrade consumed" || bad "--allow-downgrade not set"
 [ "$OSRC_CLOUD_ACK" = "1" ] && ok "--cloud-ack consumed" || bad "--cloud-ack not set"
 
+# A fallback reconstruction must not promote an implicit provider to an explicit one.
+PROVIDER=devin; PROVIDER_EXPLICIT=0
+parse_model -m glm "task body"
+[ "$PROVIDER_EXPLICIT" = "0" ] && ok "model reconstruction preserves implicit provider provenance" || bad "fallback reconstruction changed provider provenance"
+grep -q 'OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}"' "$SRC" && grep -q '_run_provider=()' "$SRC" && ok "detached jobs preserve provider provenance" || bad "detached provider provenance missing"
+
 # --- Scenario 3: _devin_model_for maps the dual-lane model, empty for OR-only. ---
 [ "$(_devin_model_for glm)" = "glm-5.2" ] && ok "glm -> Devin sibling glm-5.2" || bad "glm sibling wrong"
 [ "$(_devin_model_for z-ai/glm-5.2)" = "glm-5.2" ] && ok "z-ai/glm-5.2 -> Devin sibling" || bad "OR-id sibling wrong"
