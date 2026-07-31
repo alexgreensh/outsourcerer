@@ -6,6 +6,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TMP="$(mktemp -d "$PWD/.test-bearings.XXXXXX")"
+HOME="$TMP/home"; export HOME; mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok() { echo "PASS: $1"; pass=$((pass + 1)); }
@@ -20,6 +21,8 @@ date +%s > "$TMP/state/jobs/landed/started_at"
 date +%s > "$TMP/state/jobs/call/started_at"
 date +%s > "$TMP/state/jobs/observed/started_at"
 
+snapshot="$(OSRC_HOME="$TMP/state" bash -c 'src="$1"; set --; . "$src" >/dev/null 2>&1; _fleet_snapshot_collect' bash "$SRC")"
+OSRC_HOME="$TMP/state" bash -c 'src="$1"; snapshot="$2"; set --; . "$src" >/dev/null 2>&1; _fleet_snapshot_write "$snapshot"' bash "$SRC" "$snapshot"
 out="$(run rundown 2>&1)"
 sections="$(printf '%s\n' "$out" | grep -E "^(Captain's Call|Recently Landed|Underway|Charted Next)$")"
 expected="$(printf "%s\n" "Captain's Call" "Recently Landed" Underway "Charted Next")"

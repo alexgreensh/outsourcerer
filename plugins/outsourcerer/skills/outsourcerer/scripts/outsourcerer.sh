@@ -1389,6 +1389,183 @@ _state_jsonl_read() {
   done < "$file"
 }
 
+_external_session_id_valid() {
+  case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
+}
+
+_external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] [pid-start]
+  local items="$1" id="$2" source="$3" endpoint="$4" pid="${5:-}" pid_start="${6:-}" item
+  _external_session_id_valid "$id" || return 1
+  item="$(jq -cn --arg id "$id" --arg source "$source" --arg endpoint "$endpoint" --arg pid "$pid" --arg pid_start "$pid_start" '
+    {schema_version:"1",session_id:$id,owner:"external",harness:$source,lane:null,
+     requested_model:null,observed_model:null,effort:null,endpoint:(if $endpoint=="" then null else $endpoint end),
+     harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),
+     started_at:null,state:"unknown",state_evidence:"read-only observation",composer_state:"unknown",claim:null,
+     task_summary:"external session",last_receipt:null,source_generation:null}')" || return 1
+  jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]'
+}
+
+_external_session_observations() { # <managed-job-items-json>
+  have jq || return 1
+  local items="$1" line id endpoint pid start source path name command
+  # Registry entries prove ownership, not a live terminal state. Preserve the managed record as
+  # an observation only when it is not already represented by a managed job.
+  while IFS= read -r line; do
+    id="$(printf '%s' "$line" | jq -r '.session_id // empty')"
+    _external_session_id_valid "$id" || continue
+    endpoint="$(printf '%s' "$line" | jq -r --arg id "$id" '.endpoint // ("tmux:" + $id)')"
+    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$(printf '%s' "$line" | jq -r '.provider // empty')" '
+      . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
+       requested_model:null,observed_model:null,effort:null,endpoint:$endpoint,harness_pid:null,pid_start:null,
+       started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
+       task_summary:"managed session",last_receipt:null,source_generation:null}]')" || return 1
+  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null)
+
+  # These sources are intentionally evidence-only. Their files, pane titles, and process names do
+  # not establish ownership, activity, or an input-safe composer.
+  for path in "${OSRC_CLAUDE_REGISTRY:-$HOME/.claude/sessions}"/*.jsonl; do
+    [ -f "$path" ] || continue
+    name="$(basename "$path" .jsonl | tr -cd 'A-Za-z0-9._-')"
+    [ -n "$name" ] || continue
+    items="$(_external_session_observation "$items" "claude.$name" claude "file:$path")" || return 1
+  done
+  if [ -d "$HOME/.codex/sessions" ]; then
+    while IFS= read -r path; do
+      name="$(printf '%s' "$path" | cksum | awk '{print $1}')"
+      items="$(_external_session_observation "$items" "codex.$name" codex "file:$path")" || return 1
+    done < <(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -print 2>/dev/null)
+  fi
+  if have tmux; then
+    while IFS=$'\t' read -r endpoint pid command; do
+      [ -n "$endpoint" ] || continue
+      id="tmux.$(printf '%s' "$endpoint" | tr -cd 'A-Za-z0-9._-' | tr ':' '.')"
+      start="$(_pid_start_identity "$pid" 2>/dev/null)" || start=""
+      items="$(_external_session_observation "$items" "$id" tmux "tmux:$endpoint" "$pid" "$start")" || return 1
+    done < <(tmux list-panes -a -F '#S:#I.#P\t#{pane_pid}\t#{pane_current_command}' 2>/dev/null)
+  fi
+  # A process-table sighting is intentionally not an endpoint and therefore cannot be claimed.
+  while IFS= read -r line; do
+    pid="${line%% *}"; command="${line#* }"
+    case "$command" in *codex*|*claude*)
+      start="$(_pid_start_identity "$pid" 2>/dev/null)" || start=""
+      id="proc.$pid"
+      items="$(_external_session_observation "$items" "$id" process "" "$pid" "$start")" || return 1
+      ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null)
+  printf '%s' "$items"
+}
+
+_session_claim_path() { printf '%s/%s' "$OSRC_SESSION_CLAIMS" "$1"; }
+
+_external_claim_read() {
+  local id="$1" file
+  _external_session_id_valid "$id" || return 1
+  file="$(_session_claim_path "$id")/owner.json"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  jq -e . "$file"
+}
+
+_external_session_claim() { # <session-id> <tmux-pane>
+  local id="$1" pane="$2" dir owner pid start token record tmp rc=0
+  [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
+  _external_session_id_valid "$id" || return 1
+  case "$pane" in ''|*[!A-Za-z0-9:._-]*) return 1 ;; esac
+  have tmux && tmux display-message -p -t "$pane" '#{pane_pid}' >/dev/null 2>&1 || return 1
+  pid="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)"
+  start="$(_pid_start_identity "$pid" 2>/dev/null)" || return 1
+  token="$(_heartbeat_token)"; [ -n "$token" ] || return 1
+  _mkdir_private "$OSRC_SESSION_CLAIMS" || return 1
+  dir="$(_session_claim_path "$id")"
+  _mkdir_claim "$dir" || return 1
+  record="$(jq -cn --arg id "$id" --arg endpoint "tmux:$pane" --argjson pid "$pid" --arg start "$start" --arg token "$token" \
+    '{schema_version:"1",session_id:$id,endpoint:$endpoint,pid:$pid,pid_start:$start,token:$token}')" || rc=1
+  tmp="$dir/.owner.$$.$RANDOM"
+  [ "$rc" -ne 0 ] || ( umask 077; printf '%s\n' "$record" > "$tmp" ) || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$tmp" || rc=1
+  [ "$rc" -ne 0 ] || mv "$tmp" "$dir/owner.json" || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$dir" || rc=1
+  rm -f "$tmp" 2>/dev/null || true
+  if [ "$rc" -ne 0 ]; then rmdir "$dir" 2>/dev/null || true; return 1; fi
+  SESSION_CLAIM_TOKEN="$token"
+  export SESSION_CLAIM_TOKEN
+  printf '%s\n' "$token"
+}
+
+_external_session_release() { # <session-id>
+  local id="$1" claim pid start token dir
+  [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
+  claim="$(_external_claim_read "$id")" || return 1
+  pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; token="$(printf '%s' "$claim" | jq -r '.token')"
+  [ "$token" = "${SESSION_CLAIM_TOKEN:-}" ] || return 1
+  [ "$(_pid_start_identity "$pid" 2>/dev/null)" = "$start" ] || return 1
+  dir="$(_session_claim_path "$id")"
+  rm -f "$dir/owner.json" 2>/dev/null || return 1
+  rmdir "$dir" 2>/dev/null
+}
+
+_external_composer_state() { # <tmux-pane>
+  # No generic terminal protocol can prove an arbitrary TUI composer is empty. An adapter must
+  # return exactly "empty" after inspecting this endpoint immediately before input is written.
+  local pane="$1"
+  if [ -n "${OSRC_EXTERNAL_COMPOSER_PROBE:-}" ] && command -v "$OSRC_EXTERNAL_COMPOSER_PROBE" >/dev/null 2>&1; then
+    "$OSRC_EXTERNAL_COMPOSER_PROBE" "$pane" 2>/dev/null
+  else
+    printf 'unknown\n'
+  fi
+}
+
+_external_receipt_verify() { # <tmux-pane> <obligation-id>
+  local pane="$1" obligation="$2"
+  if [ -n "${OSRC_EXTERNAL_RECEIPT_PROBE:-}" ] && command -v "$OSRC_EXTERNAL_RECEIPT_PROBE" >/dev/null 2>&1; then
+    "$OSRC_EXTERNAL_RECEIPT_PROBE" "$pane" "$obligation" 2>/dev/null
+  else
+    printf 'unknown\n'
+  fi
+}
+
+_obligation_append() { # <id> <session-id> <state> <receipt>
+  local id="$1" session_id="$2" state="$3" receipt="$4" now record
+  _external_session_id_valid "$session_id" || return 1
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
+    '{schema_version:"1",obligation_id:$id,session_id:$session,state:$state,receipt:(if $receipt=="" then null else $receipt end),ts:$ts}')" || return 1
+  _state_append "$OSRC_OBLIGATIONS" "$record"
+}
+
+_obligation_latest_state() { # <id>
+  _state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r --arg id "$1" 'select(.obligation_id==$id) | .state' | tail -1
+}
+
+_external_reply() { # <session-id> <message>
+  local id="$1" message="$2" claim pane pid start token composer oid latest receipt
+  [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
+  claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
+  pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; token="$(printf '%s' "$claim" | jq -r '.token')"
+  [ "$token" = "${SESSION_CLAIM_TOKEN:-}" ] || { echo "external reply requires this controller's claim token" >&2; return 1; }
+  [ -n "$pane" ] && tmux display-message -p -t "$pane" '#{pane_pid}' >/dev/null 2>&1 || return 1
+  [ "$(_pid_start_identity "$pid" 2>/dev/null)" = "$start" ] || return 1
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = "empty" ] || { echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
+  oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
+  latest="$(_obligation_latest_state "$oid")"
+  case "$latest" in submitted|delivery_unknown|pending) echo "obligation $oid is pending; automatic replay is disabled" >&2; return 1 ;; esac
+  _obligation_append "$oid" "$id" pending "" || return 1
+  tmux send-keys -t "$pane" -l "$message" || return 1
+  tmux send-keys -t "$pane" Enter || { _obligation_append "$oid" "$id" delivery_unknown ""; return 1; }
+  receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
+  if [ -n "$receipt" ] && [ "$receipt" != "unknown" ]; then
+    _obligation_append "$oid" "$id" submitted "$receipt" || return 1
+    printf 'receipt: %s\n' "$receipt"
+  else
+    _obligation_append "$oid" "$id" delivery_unknown "" || return 1
+    _wake_append "$(jq -cn --arg event_id "obligation.$oid" --arg id "$oid" '{event_id:$event_id,kind:"delivery",state:"unknown",task_summary:("delivery unknown: " + $id)}')" >/dev/null 2>&1 || true
+    echo "delivery unknown; no automatic replay" >&2
+    return 1
+  fi
+}
+
 _fleet_classify() {
   case "$1" in
     running|launching|stalled\?|exploring\?) printf 'working' ;;
@@ -1417,6 +1594,7 @@ _fleet_snapshot_collect() {
       items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
     done < <(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
   fi
+  items="$(_external_session_observations "$items")" || return 1
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   snapshot="$(jq -cn --arg captured_at "$now" --argjson items "$items" \
     '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}')" || return 1
@@ -1755,7 +1933,6 @@ _heartbeat_start() {
 cmd_rundown() {
   local snapshot
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
-  _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   _fleet_digest "$snapshot"
 }
 
@@ -7526,7 +7703,7 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
     --arg model "$model" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,effort:$effort,state:$state,receipt:$receipt,ts:$ts}')" || return 1
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),owner:"managed",ts:$ts}')" || return 1
   _state_append "$OSRC_SESSION_REGISTRY" "$record"
 }
 
@@ -7568,6 +7745,10 @@ _session_relaunch_effort() { # <provider> <model> <effort>
 _winpty_session() {
   local sub="${1:-}"; shift || true
   _validate_session_name
+  if [ "$sub" != "read" ]; then
+    echo "unverified Windows mutation support" >&2
+    return 1
+  fi
   local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
   local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
   [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
@@ -7727,6 +7908,21 @@ session() {
   fi
   local sub="${1:-}"; shift || true
   case "$sub" in
+    claim)
+      [ "$#" -eq 2 ] || die "session claim needs <external-id> <tmux-pane>"
+      _external_session_claim "$1" "$2" || die "could not establish a verified external-session claim"
+      echo "claim established for '$1'"
+      ;;
+    release)
+      [ "$#" -eq 1 ] || die "session release needs <external-id>"
+      _external_session_release "$1" || die "could not release this external-session claim"
+      echo "claim released for '$1'"
+      ;;
+    reply)
+      [ "$#" -ge 2 ] || die "session reply needs <external-id> <text>"
+      local external_id="$1"; shift
+      _external_reply "$external_id" "$*" || return 1
+      ;;
     start)
       parse_model "$@"
       # Validate the model token before it is interpolated into a tmux shell command.
@@ -7851,7 +8047,7 @@ session() {
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | stop"
+      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | claim <external-id> <tmux-pane> | release <external-id> | reply <external-id> <text> | stop"
       ;;
   esac
 }
