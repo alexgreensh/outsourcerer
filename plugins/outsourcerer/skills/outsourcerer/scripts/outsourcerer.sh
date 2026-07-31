@@ -230,6 +230,7 @@ OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
 OSRC_SESSION_REGISTRY="$OSRC_SESSIONS/registry.jsonl"
 OSRC_SESSION_CLAIMS="$OSRC_SESSIONS/claims"
+OSRC_MODEL_PIN_STATE="$OSRC_HOME/model-pin.jsonl"
 OSRC_OBLIGATIONS="$OSRC_HOME/obligations.jsonl"
 OSRC_WAKE_QUEUE="$OSRC_HOME/wake-queue.jsonl"
 OSRC_WAKE_ACK="$OSRC_HOME/wake-acks.jsonl"
@@ -1407,16 +1408,21 @@ _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] 
 
 _external_session_observations() { # <managed-job-items-json>
   have jq || return 1
-  local items="$1" line id endpoint pid start source path name command
+  local items="$1" line id endpoint pid start source path name command lane requested resolved generation observed
   # Registry entries prove ownership, not a live terminal state. Preserve the managed record as
   # an observation only when it is not already represented by a managed job.
   while IFS= read -r line; do
     id="$(printf '%s' "$line" | jq -r '.session_id // empty')"
     _external_session_id_valid "$id" || continue
     endpoint="$(printf '%s' "$line" | jq -r --arg id "$id" '.endpoint // ("tmux:" + $id)')"
-    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$(printf '%s' "$line" | jq -r '.provider // empty')" '
+    lane="$(printf '%s' "$line" | jq -r '.provider // empty')"
+    requested="$(printf '%s' "$line" | jq -r '.requested_model // .model // empty')"
+    resolved="$(printf '%s' "$line" | jq -r '.resolved_model // .model // empty')"
+    generation="$(printf '%s' "$line" | jq -r '.model_generation // 1')"
+    observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
+    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
-       requested_model:null,observed_model:null,effort:null,endpoint:$endpoint,harness_pid:null,pid_start:null,
+       requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:null,pid_start:null,
        started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
        task_summary:"managed session",last_receipt:null,source_generation:null}]')" || return 1
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null)
@@ -1644,11 +1650,15 @@ _fleet_digest() {
 _heartbeat_line() {
   local snapshot="${1:-}"
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
-  printf '%s' "$snapshot" | jq -r '
-    "♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)"
-    + (([.items[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
-        | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"])
-       | if length == 0 then "" else " | " + join(" | ") end)'
+  printf '%s' "$snapshot" | jq -r '[
+    "♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)",
+    ([.items[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
+      | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"]
+     | if length == 0 then "" else " | " + join(" | ") end),
+    ([.items[] | select(.model_pin? != null)
+      | "flip \(.session_id // "unknown") \(.model_pin.requested)->\(.model_pin.observed) [\(.model_pin.result)]"]
+     | if length == 0 then "" else " | " + join(" | ") end)
+  ] | join("")'
 }
 
 _wake_append() {
@@ -1827,8 +1837,46 @@ _heartbeat_emit_attached() {
   fi
 }
 
+_model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
+  local item="$1" snapshot_generation="$2" session_id owner state lane endpoint requested resolved observed model_generation event_id lock restore_id result=reported
+  session_id="$(printf '%s' "$item" | jq -r '.session_id // empty')"
+  owner="$(printf '%s' "$item" | jq -r '.owner // empty')"
+  state="$(printf '%s' "$item" | jq -r '.state // "unknown"')"
+  lane="$(printf '%s' "$item" | jq -r '.lane // empty')"
+  endpoint="$(printf '%s' "$item" | jq -r '.endpoint // empty')"
+  requested="$(printf '%s' "$item" | jq -r '.requested_model // empty')"
+  resolved="$(printf '%s' "$item" | jq -r '.resolved_model // .requested_model // empty')"
+  observed="$(printf '%s' "$item" | jq -r '.observed_model // "unknown"')"
+  model_generation="$(printf '%s' "$item" | jq -r '.model_generation // 1')"
+  [ -n "$session_id" ] && [ -n "$requested" ] && [ "$observed" != unknown ] || { printf '%s' "$item"; return; }
+  _session_model_matches "$requested" "$resolved" "$observed" && { printf '%s' "$item"; return; }
+  event_id="model-drift.$(printf '%s' "$session_id" | tr -cd 'A-Za-z0-9._-').$snapshot_generation"
+  _wake_append "$(jq -cn --arg event_id "$event_id" --arg generation "$snapshot_generation" --arg session_id "$session_id" --arg requested "$requested" --arg observed "$observed" '{event_id:$event_id,kind:"model-drift",generation:$generation,session_id:$session_id,state:"blocked",task_summary:("model drifted " + $requested + "->" + $observed)}')" >/dev/null 2>&1 || result=unknown
+  # Automatic input is restricted to an actively working managed session with both proof adapters.
+  # External, idle, terminal, and unknown sessions are reported only.
+  if [ "$result" = reported ] && [ "$owner" = managed ] && [ "$state" = working ] && [ -n "$lane" ] && [ -n "$endpoint" ] \
+     && _model_pin_restore_allowed "$session_id" "$model_generation"; then
+    lock="$OSRC_SESSIONS/model-pin-${session_id}.${model_generation}.lock"
+    if _mkdir_claim "$lock"; then
+      restore_id="restore.${session_id}.${model_generation}"
+      if _model_pin_append "$session_id" "$model_generation" restore-attempt "$requested->$observed"; then
+        if _session_model_restore "$lane" "$endpoint" "$resolved" "$restore_id"; then
+          _model_pin_append "$session_id" "$model_generation" restore-receipt "$restore_id" >/dev/null 2>&1 || result=unknown
+          [ "$result" = unknown ] || result=restored
+        else
+          result=restore-failed
+        fi
+      else
+        result=unknown
+      fi
+      rmdir "$lock" 2>/dev/null || true
+    fi
+  fi
+  printf '%s' "$item" | jq -c --arg requested "$requested" --arg observed "$observed" --arg result "$result" '. + {task_summary:("model drifted " + $requested + "->" + $observed),model_pin:{requested:$requested,observed:$observed,result:$result}}'
+}
+
 _heartbeat_tick() {
-  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1
+  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1 pinned_items='[]' pinned
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   generation="$(printf '%s' "$snapshot" | jq -r '.generation // "unknown"')"
   if ! _fleet_snapshot_write "$snapshot"; then
@@ -1836,6 +1884,13 @@ _heartbeat_tick() {
     generation="$(printf '%s' "$snapshot" | jq -r '.generation')"
     _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || true
   fi
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    pinned="$(_model_pin_enforce_item "$item" "$generation")" || pinned="$item"
+    pinned_items="$(jq -cn --argjson items "$pinned_items" --argjson item "$pinned" '$items + [$item]')" || return 1
+  done < <(printf '%s' "$snapshot" | jq -c '.items[]')
+  snapshot="$(printf '%s' "$snapshot" | jq -c --argjson items "$pinned_items" '.items=$items')" || return 1
+  _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || true
   wake_cursor="$(_heartbeat_cursor_read wakes 2>/dev/null)"
   if [ "$wake_cursor" != "$generation" ]; then
     while IFS= read -r item; do
@@ -7697,14 +7752,88 @@ _session_effort_validate() {
   esac
 }
 
-_session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt>
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" now record
+_session_resolved_model() { # <provider> <requested-model>
+  local provider="$1" model="$2" row
+  case "$provider" in
+    codex|cx) row="$(resolve_model_row "$model")"; [ -n "$row" ] && { printf '%s\n' "${row%%|*}"; return; } ;;
+  esac
+  printf '%s\n' "$model"
+}
+
+_session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record
   have jq || return 1
+  [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
+  case "$generation" in ''|*[!0-9]*) return 1 ;; esac
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
-    --arg model "$model" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),owner:"managed",ts:$ts}')" || return 1
+    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" --argjson generation "$generation" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),owner:"managed",ts:$ts}')" || return 1
   _state_append "$OSRC_SESSION_REGISTRY" "$record"
+}
+
+# Live model observation is adapter-only. A missing, malformed, or unavailable adapter is not
+# evidence of a match and must remain unknown.
+_session_model_observer_run() { # <lane> <endpoint> <session-id>
+  local lane="$1" endpoint="$2" session_id="$3" observed
+  [ -n "${OSRC_SESSION_MODEL_OBSERVER:-}" ] && command -v "$OSRC_SESSION_MODEL_OBSERVER" >/dev/null 2>&1 || { printf 'unknown\n'; return 0; }
+  observed="$("$OSRC_SESSION_MODEL_OBSERVER" "$lane" "$endpoint" "$session_id" 2>/dev/null)" || { printf 'unknown\n'; return 0; }
+  observed="$(printf '%s' "$observed" | head -1 | tr -d '[:space:]')"
+  case "$observed" in ''|unknown|*[[:space:]]*|*'"'*|*"'"*|*'`'*|*'$'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*) printf 'unknown\n' ;; *) printf '%s\n' "$observed" ;; esac
+}
+_session_model_observe_devin() { _session_model_observer_run devin "$@"; }
+_session_model_observe_codex() { _session_model_observer_run codex "$@"; }
+_session_model_observe_cc() { _session_model_observer_run cc "$@"; }
+_session_model_observe_droid() { _session_model_observer_run droid "$@"; }
+_session_model_observe_cursor() { _session_model_observer_run cursor "$@"; }
+_session_model_observe_hermes() { _session_model_observer_run hermes "$@"; }
+_session_model_observe_gemini() { _session_model_observer_run gemini "$@"; }
+_session_model_observe() { # <lane> <endpoint> <session-id>
+  local lane="$1" endpoint="$2" session_id="$3"
+  case "$lane" in devin|dv) _session_model_observe_devin "$endpoint" "$session_id" ;; codex|cx) _session_model_observe_codex "$endpoint" "$session_id" ;; cc|claude) _session_model_observe_cc "$endpoint" "$session_id" ;; droid) _session_model_observe_droid "$endpoint" "$session_id" ;; cursor) _session_model_observe_cursor "$endpoint" "$session_id" ;; hermes) _session_model_observe_hermes "$endpoint" "$session_id" ;; gemini|gm) _session_model_observe_gemini "$endpoint" "$session_id" ;; *) printf 'unknown\n' ;; esac
+}
+_session_model_matches() { # <requested> <resolved> <observed>
+  local requested="$1" resolved="$2" observed="$3"
+  [ -n "$observed" ] && [ "$observed" != unknown ] || return 1
+  [ "$(printf '%s' "$observed" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$requested" | tr '[:upper:]' '[:lower:]')" ] && return 0
+  [ "$(printf '%s' "$observed" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" ]
+}
+_session_model_receipt_devin() { _external_receipt_verify "$1" "$2"; }
+_session_model_receipt() { # <lane> <pane> <restore-id>
+  case "$1" in devin|dv) _session_model_receipt_devin "$2" "$3" ;; *) printf 'unknown\n' ;; esac
+}
+_session_model_restore_devin() { # <pane> <model>
+  tmux send-keys -t "$1" M-m || return 1
+  tmux send-keys -t "$1" -l "$2" || return 1
+  tmux send-keys -t "$1" Enter
+}
+_session_model_restore() { # <lane> <endpoint> <requested> <restore-id>
+  local lane="$1" endpoint="$2" requested="$3" restore_id="$4" pane composer receipt
+  case "$endpoint" in tmux:*) pane="${endpoint#tmux:}" ;; *) return 1 ;; esac
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = empty ] || return 1
+  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || return 1 ;; *) return 1 ;; esac
+  receipt="$(_session_model_receipt "$lane" "$pane" "$restore_id" 2>/dev/null)"
+  [ -n "$receipt" ] && [ "$receipt" != unknown ]
+}
+
+_model_pin_append() { # <session-id> <generation> <event> [detail]
+  local session_id="$1" generation="$2" event="$3" detail="${4:-}" now epoch record
+  case "$session_id:$generation:$event" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  epoch="$(date +%s)"; case "$epoch" in *[!0-9]*) return 1 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg session_id "$session_id" --arg generation "$generation" --arg event "$event" --arg detail "$detail" --arg ts "$now" --argjson epoch "$epoch" '{schema_version:"1",session_id:$session_id,generation:$generation,event:$event,detail:$detail,ts:$ts,epoch:$epoch}')" || return 1
+  _state_append "$OSRC_MODEL_PIN_STATE" "$record"
+}
+_model_pin_restore_allowed() { # <session-id> <generation>
+  local session_id="$1" generation="$2" max="${OSRC_MODEL_PIN_RESTORE_MAX:-1}" cooldown="${OSRC_MODEL_PIN_COOLDOWN:-300}" count last now
+  case "$max:$cooldown" in *[!0-9:]*|'':*) return 1 ;; esac
+  count="$(_state_jsonl_read "$OSRC_MODEL_PIN_STATE" 2>/dev/null | jq -r --arg id "$session_id" --arg gen "$generation" 'select(.session_id==$id and .generation==$gen and .event=="restore-attempt") | 1' | wc -l | tr -d ' ')"
+  [ "${count:-0}" -lt "$max" ] || return 1
+  last="$(_state_jsonl_read "$OSRC_MODEL_PIN_STATE" 2>/dev/null | jq -r --arg id "$session_id" 'select(.session_id==$id and .event=="restore-attempt") | .epoch // 0' | tail -1)"
+  [ -n "$last" ] || last=0
+  now="$(date +%s)"; case "$last:$now" in *[!0-9:]*|'':*) return 1 ;; esac
+  [ "$last" -eq 0 ] || [ $((now - last)) -ge "$cooldown" ]
 }
 
 _session_relaunch_command() { # <provider> <model> <effort>

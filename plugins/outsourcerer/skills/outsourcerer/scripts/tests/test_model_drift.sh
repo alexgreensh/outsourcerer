@@ -51,6 +51,8 @@ case "$out" in *"after the fact"*) ok "it states the drift was found after the r
   *) bad "the report implies it can intercept drift live" ;; esac
 case "$out" in *"abort instead of drifting"*) bad "promises an abort it cannot deliver post-hoc" ;;
   *) ok "no promise of an abort that cannot happen" ;; esac
+case "$out" in *"restored"*) bad "post-hoc verifier claims a live restore" ;;
+  *) ok "post-hoc verifier remains advisory" ;; esac
 
 # --- wrong model entirely -------------------------------------------------------------------------
 printf '{"modelUsage":{"claude-opus-4-8":{"outputTokens":900}}}\n' > "$TMP/wrong.json"
