@@ -219,6 +219,14 @@ OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
+OSRC_SESSIONS="$OSRC_HOME/sessions"
+OSRC_SESSION_REGISTRY="$OSRC_SESSIONS/registry.jsonl"
+OSRC_SESSION_CLAIMS="$OSRC_SESSIONS/claims"
+OSRC_OBLIGATIONS="$OSRC_HOME/obligations.jsonl"
+OSRC_WAKE_QUEUE="$OSRC_HOME/wake-queue.jsonl"
+OSRC_WAKE_ACK="$OSRC_HOME/wake-acks.jsonl"
+OSRC_FLEET_SNAPSHOT="$OSRC_HOME/fleet-snapshot.json"
+OSRC_HEARTBEAT="$OSRC_HOME/heartbeat"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
 trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr."* 2>/dev/null; fi' EXIT
@@ -1281,6 +1289,184 @@ record_ledger() {
   else
     printf '%s\n' "$_line" >> "$OSRC_LEDGER" 2>/dev/null || true
   fi
+}
+
+_state_sync() {
+  sync -f "$1" 2>/dev/null
+}
+
+_state_lock_acquire() {
+  local file="$1" lock="$file.lock" tries=0
+  _STATE_LOCK_KIND=""
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$file" 2>/dev/null || return 1
+    flock -w 5 9 2>/dev/null || { exec 9>&-; return 1; }
+    _STATE_LOCK_KIND="flock"
+    return 0
+  fi
+  while [ "$tries" -lt 50 ]; do
+    _mkdir_claim "$lock" && { _STATE_LOCK_KIND="mkdir"; return 0; }
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+_state_lock_release() {
+  case "${_STATE_LOCK_KIND:-}" in
+    flock) flock -u 9 2>/dev/null || true; exec 9>&- ;;
+    mkdir) rmdir "$1.lock" 2>/dev/null || true ;;
+  esac
+  _STATE_LOCK_KIND=""
+}
+
+_state_append() {
+  local file="$1" record="$2" size parent rc=0
+  case "$file" in "$OSRC_HOME"/*.jsonl) ;; *) echo "ERROR: invalid state path" >&2; return 1 ;; esac
+  [ ! -L "$file" ] && [ ! -L "$file.lock" ] || { echo "ERROR: unsafe state path" >&2; return 1; }
+  have jq || { echo "ERROR: jq is required for state writes" >&2; return 1; }
+  printf '%s' "$record" | jq -e . >/dev/null 2>&1 || { echo "ERROR: invalid state record" >&2; return 1; }
+  size=$(printf '%s' "$record" | wc -c | tr -d ' ')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le "${OSRC_STATE_RECORD_MAX:-8192}" ] || { echo "ERROR: state record exceeds limit" >&2; return 1; }
+  parent="$(dirname "$file")"
+  _mkdir_private "$parent" || { echo "ERROR: state directory unavailable" >&2; return 1; }
+  ( umask 077; : >> "$file" ) 2>/dev/null || { echo "ERROR: state file unavailable" >&2; return 1; }
+  chmod 600 "$file" 2>/dev/null || true
+  _state_lock_acquire "$file" || { echo "ERROR: state lock unavailable" >&2; return 1; }
+  printf '%s\n' "$record" >> "$file" 2>/dev/null || rc=1
+  [ "$rc" -eq 0 ] && _state_sync "$file" || rc=1
+  _state_lock_release "$file"
+  [ "$rc" -eq 0 ] || { echo "ERROR: state append failed" >&2; return 1; }
+}
+
+_state_jsonl_read() {
+  local file="$1" line complete rows=0
+  [ -e "$file" ] || return 0
+  [ ! -L "$file" ] || { echo "ERROR: unsafe state path" >&2; return 1; }
+  have jq || return 1
+  complete=$(wc -l < "$file" 2>/dev/null | tr -d ' ')
+  case "$complete" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r line || [ -n "$line" ]; do
+    rows=$((rows + 1))
+    if printf '%s' "$line" | jq -e . >/dev/null 2>&1; then
+      printf '%s\n' "$line"
+    elif [ "$rows" -gt "$complete" ]; then
+      echo "outsourcerer: ignored truncated final state record" >&2
+      return 0
+    else
+      echo "ERROR: invalid state record" >&2
+      return 1
+    fi
+  done < "$file"
+}
+
+_fleet_classify() {
+  case "$1" in
+    running|launching|stalled\?|exploring\?) printf 'working' ;;
+    done|done?) printf 'completed' ;;
+    blocked|permission-blocked) printf 'blocked' ;;
+    failed|timeout|wedged|canceled|interrupted) printf 'dead' ;;
+    idle) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+_fleet_snapshot_collect() {
+  have jq || return 1
+  local items='[]' d job state item now
+  if [ -d "$OSRC_JOBS" ]; then
+    while IFS= read -r d; do
+      job="$(_job_json "$(basename "$d")" 2>/dev/null)" || continue
+      state="$(_fleet_classify "$(printf '%s' "$job" | jq -r '.status // "unknown"')")"
+      item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
+        {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
+         requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,
+         harness_pid:null,pid_start:null,started_at:.started,state:$fleet_state,
+         state_evidence:(.status // "unknown"),composer_state:"unknown",claim:null,
+         task_summary:(.label // .verb),last_receipt:null,source_generation:(.job_id // null),
+         job_id:.job_id}')" || return 1
+      items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
+    done < <(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
+  fi
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -cn --arg captured_at "$now" --argjson items "$items" \
+    '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}'
+}
+
+_fleet_snapshot_write() {
+  local snapshot="$1" tmp
+  have jq || return 1
+  printf '%s' "$snapshot" | jq -e '(.schema_version == "1") and ((.items | type) == "array")' >/dev/null 2>&1 || return 1
+  _mkdir_private "$OSRC_HOME" || return 1
+  [ ! -L "$OSRC_FLEET_SNAPSHOT" ] || return 1
+  tmp="$OSRC_HOME/.fleet-snapshot.$$.$RANDOM.tmp"
+  ( umask 077; printf '%s\n' "$snapshot" > "$tmp" ) 2>/dev/null || return 1
+  _state_sync "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$OSRC_FLEET_SNAPSHOT" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$OSRC_FLEET_SNAPSHOT" 2>/dev/null || true
+  _state_sync "$OSRC_HOME" || return 1
+}
+
+_fleet_snapshot_read() {
+  [ -f "$OSRC_FLEET_SNAPSHOT" ] || return 1
+  [ ! -L "$OSRC_FLEET_SNAPSHOT" ] || return 1
+  have jq || return 1
+  jq -e '(.schema_version == "1") and ((.items | type) == "array")' "$OSRC_FLEET_SNAPSHOT" >/dev/null || return 1
+  cat "$OSRC_FLEET_SNAPSHOT"
+}
+
+_fleet_digest() {
+  local snapshot="${1:-}" section filter
+  [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
+  for section in "Captain's Call" "Recently Landed" Underway "Charted Next"; do
+    case "$section" in
+      "Captain's Call") filter='.state == "blocked" or .state == "unknown"' ;;
+      "Recently Landed") filter='.state == "completed" or .state == "dead"' ;;
+      Underway) filter='.state == "working"' ;;
+      "Charted Next") filter='.state == "idle"' ;;
+    esac
+    printf '%s\n' "$section"
+    printf '%s' "$snapshot" | jq -r ".items[] | select($filter) | \"- \(.job_id // .session_id // \"unknown\") [\(.state)] \(.task_summary // \"unknown\")\"" || return 1
+  done
+}
+
+_heartbeat_line() {
+  local snapshot="${1:-}"
+  [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
+  printf '%s' "$snapshot" | jq -r '"♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)"'
+}
+
+_wake_append() {
+  local event="$1" now
+  have jq || return 1
+  printf '%s' "$event" | jq -e '.event_id | type == "string" and test("^[A-Za-z0-9._-]+$")' >/dev/null 2>&1 || return 1
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  event="$(printf '%s' "$event" | jq -c --arg created_at "$now" '. + {schema_version:"1",created_at:$created_at}')" || return 1
+  _state_append "$OSRC_WAKE_QUEUE" "$event"
+}
+
+_wake_ack() {
+  local event_id="$1" now record
+  case "$event_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg id "$event_id" --arg acked_at "$now" '{schema_version:"1",event_id:$id,acked_at:$acked_at}')" || return 1
+  _state_append "$OSRC_WAKE_ACK" "$record"
+}
+
+_wake_drain() {
+  have jq || return 1
+  local acks line id
+  acks="$(_state_jsonl_read "$OSRC_WAKE_ACK" 2>/dev/null | jq -r '.event_id // empty' 2>/dev/null)"
+  while IFS= read -r line; do
+    id="$(printf '%s' "$line" | jq -r '.event_id // empty')"
+    [ -n "$id" ] || continue
+    case "
+$acks
+" in *"
+$id
+"*) ;; *) printf '%s\n' "$line" ;; esac
+  done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE")
 }
 
 # =============================================================================
