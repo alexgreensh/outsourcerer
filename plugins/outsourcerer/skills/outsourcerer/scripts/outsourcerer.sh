@@ -6739,6 +6739,11 @@ _route_resolution() {   # <dispatch-lane> <model>
 }
 
 _route_requires_confirmation() {
+  # Internal continuations of an already-authorized dispatch never re-confirm: the preflight
+  # dry-run, the detached job child, and any nested delegation inherit the top-level decision.
+  [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 1
+  [ "${OSRC_STREAM:-0}" = "1" ] && return 1
+  [ "${OUTSOURCERER_DEPTH:-0}" != "0" ] && return 1
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] && return 1
   case "${ROUTE_COST_CLASS:-}" in limited|credits) return 0 ;; esac
   return 1
