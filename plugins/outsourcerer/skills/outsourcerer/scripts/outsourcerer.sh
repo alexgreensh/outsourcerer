@@ -8,7 +8,7 @@
 #   mode [status|auto|manual|hybrid|reset]   The copilot driving mode (persisted, remembered once).
 #   consent status|grant|revoke    Cloud-disclosure consent, remembered ONCE in ~/.outsourcerer
 #                                  (the secret-scan still runs on every delegation regardless).
-#   models                         Print the LIVE list of selectable Devin models (+ free-lane heuristic)
+#   models                         Print the LIVE list of selectable Devin models (+ plan-cost heuristic)
 #   run     [-m MODEL] "<task>"    One-shot delegation (permission: auto / read-only auto-approve)
 #   explore [-m MODEL] "<task>"    Alias for run, read-only fan-out (NOTE: 'auto' blocks tool EXEC)
 #   research[-m MODEL] "<task>"    Delegation that must RUN tools (recall binary, scripts), uses
@@ -66,11 +66,11 @@
 # OUTSOURCERER_PROVIDER. Backends:
 #   devin  (default)  Devin CLI, sandboxed exec + Devin's own subagent fan-out.
 #   cc                Claude Code -> OpenRouter via ANTHROPIC_BASE_URL (Anthropic-compat, 1 hop).
-#                     Inherits YOUR Claude skills / MCP / Task subagents for free.
+#                     Inherits YOUR Claude skills / MCP / Task subagents without separate setup.
 #   codex             Codex `exec` -> OpenRouter (native OpenAI Responses API, 0 hops; best tool
 #                     fidelity). Runs in Codex's own AGENTS.md + MCP ecosystem, not Claude's.
 #   droid             Factory Droid CLI (`droid exec`). YOUR configured models pass through
-#                     verbatim, incl. free/cheap BYOK customModels in ~/.factory/settings.json.
+#                     verbatim, incl. BYOK customModels in ~/.factory/settings.json.
 #   cursor            Cursor CLI (`cursor-agent -p`). Bills your Cursor subscription credits.
 #   hermes            Hermes agent CLI (NousResearch `hermes-agent`). Engine lane: -m passes
 #                     through verbatim (Hermes owns its model catalog). Real per-run cost is read
@@ -107,7 +107,7 @@
 # CAPABILITY TIER != price: glm-5.2/hy3/deepseek are `capable` (frontier capability, budget price,
 # ~Opus-4.8 class) and get the thin frontier wrapper, not the budget worker-drone scaffold.
 # Model is a parameter everywhere. Default is overridable via OUTSOURCERER_MODEL.
-# Free-model status on Devin CHANGES over time, this script never hardcodes it; use `models`.
+# Plan-limit status on Devin CHANGES over time, this script never hardcodes it; use `models`.
 #
 # MODEL ADVISORY (which model should I use?):
 #   advise [--refresh] [--json] "<task>"   Classifies your task (code/reasoning/agentic/creative/
@@ -583,6 +583,7 @@ delegate() {
   echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} --respect-workspace-trust false -p (offload)" >&2
   local rc=0
   devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure dv)" >&2
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ]; then
     echo "HINT: sandboxed run exited $rc. If a Read/Write scope was denied, retry with 'yolo' (dangerous, no sandbox)." >&2
   fi
@@ -1234,6 +1235,24 @@ _effort_thinking_tokens() {
 # =============================================================================
 # THE TAB: per-run ledger, tab, estimate, credits.
 # =============================================================================
+# _lane_cost_disclosure <lane> -> the user-visible cost class for a resolved lane.
+_lane_cost_disclosure() {
+  case "$1" in
+    local)                         printf '$0 cash + $0 plan' ;;
+    cx|codex-native|claudex|ci)    printf '$0 cash, spends your ChatGPT plan limits' ;;
+    cc|claude-native)              printf '$0 cash, spends your Claude plan limits' ;;
+    gm|antigravity-agy)            printf '$0 cash, spends your Antigravity plan limits' ;;
+    dv|devin)                      printf '$0 cash, spends your Devin plan limits' ;;
+    cursor)                        printf '$0 cash, spends your Cursor plan limits' ;;
+    or|openrouter|ccor|codexor)    printf 'metered cash, measured per run when available, otherwise estimated' ;;
+    gemini|gi)                     printf 'metered cash through your Gemini API key, estimated before the run' ;;
+    hermes)                        printf 'metered cash from your configured provider, measured when available, otherwise estimated' ;;
+    droid)                         printf 'cash depends on your Factory plan or BYOK model; BYOK usage is measured or estimated by its provider' ;;
+    warp)                          printf 'cash depends on your Warp plan or configured keys; key usage is measured or estimated by its provider' ;;
+    *)                             printf 'cash and plan impact unknown for your %s lane' "$1" ;;
+  esac
+}
+
 # record_ledger <provider> <model> <tier> <verb> <task> [cost] [lane]
 record_ledger() {
   # bg jobs record the accurate (stream-json) entry from __runjob; skip the child's estimate then.
@@ -2020,20 +2039,29 @@ cmd_tab() {
     def cashnum: (.cost_usd // "") as $c
       | if $c=="" then 0 elif ($c|startswith("~")) then ($c[1:]|tonumber? // 0) else ($c|tonumber? // 0) end;
     # Lane bucket (truthful accounting):
-    #   FREE = local ($0 cash AND $0 plan). PLAN = native cx/cc/gm + keyless gpt-image + Devin-Pro +
-    #   the ENGINE lanes (droid/cursor/hermes/warp) — all $0 cash from Outsourcerer, spending a
-    #   subscription/plan you already pay for. CASH = cc/codex->OpenRouter, gemini API (real dollars).
+    #   LOCAL uses neither cash nor a plan. PLAN = native cx/cc/gm, keyless gpt-image, Devin Pro,
+    #   and Cursor. CASH = cc/codex->OpenRouter, Gemini API, and engine lanes whose configured
+    #   model may use BYOK billing.
     #   devin (dv): PLAN when $0 (Pro tier), but a NONZERO measured/estimated cost = pay-per-use = CASH
     #   (the bucket is decided on the cost axis, not the lane alone, so paid devin is never hidden).
-    #   Engine lanes bill YOUR OWN Factory/Cursor/Hermes/Warp plan or BYOK keys (never Claude tokens,
-    #   never Outsourcerer cash) — labeling a $0 engine run cash-billed-$0 reads as free when it
-    #   actually spent that plan, so they belong in PLAN alongside the native subscriptions.
     def bucket:
       (.lane // "") as $l | (.provider // "") as $p | (.verb // "") as $v
       | if ($l == "local") or ($p == "local") then "free"
         elif $l == "dv" then (if (cashnum > 0) then "cash" else "plan" end)
-        elif ($l | test("^(cx|cc|gm|droid|cursor|hermes|warp)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
+        elif ($l | test("^(cx|cc|gm|cursor)$"))
+          or ($p | test("^(codex-native|claude-native|antigravity-agy|claudex|cursor)$"))
+          or ($p == "devin" and cashnum == 0)
+          or ($v == "image" and $p == "codex") then "plan"
         else "cash" end;
+    def planname:
+      (.lane // "") as $l | (.provider // "") as $p
+      | if ($l == "cx") or ($p | test("^(codex-native|claudex)$")) then "ChatGPT"
+        elif ($l == "cc") or ($p == "claude-native") then "Claude"
+        elif ($l == "gm") or ($p == "antigravity-agy") then "Antigravity"
+        elif ($l == "cursor") or ($p == "cursor") then "Cursor"
+        elif ($l == "dv") or ($p == "devin") then "Devin"
+        elif (.verb == "image" and $p == "codex") then "ChatGPT"
+        else "unknown" end;
     def realcost: (.cost_usd // "") as $c
       | if ($c == "") or ($c | startswith("~")) then null else ($c | tonumber? // null) end;
     def estcost:  (.cost_usd // "") as $c
@@ -2052,8 +2080,10 @@ cmd_tab() {
       (if $est > 0 then "cash (harness estimate) : ~$\($est)   (bg run offline, could not read OpenRouter; estimate only)" else empty end),
       "cash lanes, cost not captured: \($unmeasured) run(s)   (foreground run — re-run via bg to capture real $)",
       (if $malformed > 0 then "cash lanes, malformed $  : \($malformed) run(s)   (unparseable cost in ledger — inspect \($ARGS.named.led // "the ledger"))" else empty end),
-      "on your subscription    : \($subs) run(s)  , $0 cash, but spent your ChatGPT / Claude / Antigravity / Devin Pro PLAN LIMITS",
-      (if $free > 0 then "on your hardware (local): \($free) run(s)  , $0 cash AND $0 plan, fully private" else empty end),
+      "subscription / included : \($subs) run(s)",
+      ([ .[] | select(bucket=="plan") ] | group_by(planname)[]
+        | "  \(.[0] | planname): \(length) run(s), $0 cash, spends your \(.[0] | planname) plan limits"),
+      (if $free > 0 then "on your hardware (local): \($free) run(s), $0 cash + $0 plan, fully private" else empty end),
       "by model:",
       (group_by(.model)[] | "  \(.[0].model // "(unknown)")  \(length) run(s)")
   ' --arg led "$OSRC_LEDGER" 2>/dev/null || echo "(ledger parse error)"
@@ -2061,7 +2091,7 @@ cmd_tab() {
   # Real ChatGPT-plan headroom (5h + weekly) when Codex has recorded it, the true cost of the
   # "no cash" sub lane. Best-effort; silent if unavailable.
   local ql; ql="$(_codex_quota_line 2>/dev/null)" && [ -n "$ql" ] && echo "  $ql"
-  echo 'note: a $0 cash line is NOT "free", subscription lanes spend finite plan rate limits.'
+  echo 'note: subscription and included-credit lanes have $0 cash cost but spend finite plan limits.'
 }
 
 cmd_estimate() {
@@ -2083,6 +2113,11 @@ cmd_estimate() {
       fi
     done
   fi
+  echo "  ChatGPT native                    $(_lane_cost_disclosure cx)"
+  echo "  Claude native                     $(_lane_cost_disclosure cc)"
+  echo "  Antigravity keyless               $(_lane_cost_disclosure gm)"
+  echo "  Devin                              $(_lane_cost_disclosure dv)"
+  echo "  local                              $(_lane_cost_disclosure local)"
   awk -v i="$intok" 'BEGIN{printf "  %-34s ~$%.4f  (counterfactual @ $15/M in, $75/M out)\n", "OPUS (Claude)", i*0.000015 + 2000*0.000075}'
 }
 
@@ -2094,7 +2129,7 @@ cmd_estimate() {
 cmd_suggest() {
   have jq || die "jq needed for suggest (brew install jq)"
   [ -f "$OSRC_MODELS_JSON" ] || refresh_models >/dev/null 2>&1 || true
-  echo "== outsourcerer suggest, cheap & free models you can use right now =="
+  echo "== outsourcerer suggest, low-cash and plan-included models you can use right now =="
   echo "   surfaced by price/availability (quality not scored yet). Try a cheap pick, then"
   echo "   run 'second-opinion' or an advisor panel to confirm it is good enough for the task."
   echo
@@ -2122,14 +2157,15 @@ cmd_suggest() {
   if have devin; then
     local dlm; dlm="$(live_models 2>/dev/null)"
     if [ -n "$dlm" ]; then
-      echo "-- Devin, live on your plan (ACU/plan-limit, no separate cash) --"
+      echo "-- Devin, live on your plan ($(_lane_cost_disclosure dv)) --"
       printf '%s\n' "$dlm" | tr ',' '\n' | sed 's/^[[:space:]]*/   /' | grep -v '^[[:space:]]*$' | head -20
       echo
     fi
   fi
-  echo "-- On your subscriptions (no cash, spends plan limits) --"
-  echo "   Codex:  sol / terra / luna / gpt-5.x        Claude: fable / opus / sonnet / haiku"
-  echo "   Antigravity (keyless): gemini-pro / gemini-flash / gemini-flash-lite"
+  echo "-- On your subscriptions and included allocations --"
+  echo "   Codex: sol / terra / luna / gpt-5.x, $(_lane_cost_disclosure cx)"
+  echo "   Claude: fable / opus / sonnet / haiku, $(_lane_cost_disclosure cc)"
+  echo "   Antigravity: gemini-pro / gemini-flash / gemini-flash-lite, $(_lane_cost_disclosure gm)"
   echo
   echo "Route one with:  $0 run -m <model> \"<task>\"   (add --provider cc|codex for OpenRouter lanes)"
 }
@@ -2164,7 +2200,7 @@ _ready_lanes() {
 
 # _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
 # OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
-# local($0/private) > Devin GLM/SWE(free) > keyless Gemini > Codex Sol/Terra(only if ChatGPT plan has
+# local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
 _conserve_reco() {
   local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" xstale="" posture lane="" why="" tight=0
@@ -2182,7 +2218,7 @@ _conserve_reco() {
   fi
   case " $lanes " in
     *" local="*)          lane="local";          why="private, \$0 cash + \$0 plan" ;;
-    *" devin=glm/swe "*)  lane="Devin GLM/SWE";   why="free lane, preserves your Claude quota" ;;
+    *" devin=glm/swe "*)  lane="Devin GLM/SWE";   why="$(_lane_cost_disclosure dv), preserves your Claude quota" ;;
     *" gemini=keyless "*) lane="keyless Gemini";  why="Antigravity login, no API key" ;;
   esac
   if [ -z "$lane" ]; then
@@ -2536,13 +2572,13 @@ cmd_advise() {
     # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
     # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
     case "$lane" in cx|cc|dv|gm) price_in="0"; price_out="0" ;; esac
-    # Value ratio = score / max(cost_per_m_input, 0.01). Free models floored to 0.01.
+    # Value ratio = score / max(cost_per_m_input, 0.01). Zero-priced catalog models use a 0.01 floor.
     cost_per_m="$(awk -v p="$price_in" 'BEGIN{printf "%.6f", p*1000000}')"
     value_ratio="$(awk -v s="$score" -v c="$cost_per_m" 'BEGIN{if(c<0.01)c=0.01; printf "%.2f", s/c}')"
     meets=0
     awk -v s="$score" -v t="$threshold" 'BEGIN{exit (s+0 >= t+0) ? 0 : 1}' && meets=1
     # Display label for subscription lanes.
-    case "$lane" in cx|cc|dv|gm) cost_per_m="0 (plan)" ;; esac
+    case "$lane" in cx|cc|dv|gm) cost_per_m="plan limits" ;; esac
     results="$results$alias|$resolved|$lane|$tier|$score|$cost_per_m|$value_ratio|$meets
 "
   done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
@@ -4852,7 +4888,7 @@ delegate_cxnative() {
     *) die "bad tier: $tier" ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
-  _tier_banner "codex-native" "$id" "$ttier" "$posture, draws your ChatGPT subscription limits"
+  _tier_banner "codex-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cx)"
   # SELF-HEAL: codex ships the `code_mode_host` feature ON, but if its host binary is not installed,
   # every file-reading tool call routes through a missing helper and HANGS. Force the feature off for
   # this run so codex falls back to normal tool execution. No effect when the binary IS present.
@@ -4870,10 +4906,9 @@ delegate_cxnative() {
   local rc=0
   codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
   record_ledger codex-native "$id" "$ttier" "$tier" "$task"
-  # Honest receipt: no cash, but this DID spend your ChatGPT plan limits, quote the real numbers.
   if [ "${OSRC_STREAM:-0}" != "1" ]; then
-    local ql; ql="$(_codex_quota_line 2>/dev/null)" && [ -n "$ql" ] && \
-      printf '>>> [receipt] no cash charged, ran on your ChatGPT plan. %s\n' "$ql" >&2
+    local ql; ql="$(_codex_quota_line 2>/dev/null)"
+    printf '>>> [receipt] %s.%s\n' "$(_lane_cost_disclosure cx)" "${ql:+ $ql}" >&2
   fi
   return "$rc"
 }
@@ -4976,7 +5011,7 @@ delegate_ccnative() {
   # This lane instead runs a fresh, ENV-CLEANED `claude -p --model $id` and VERIFIES the model actually
   # used, so it can never mislabel an Opus run as $id. Prefer it when you need a proven, independent run.
   [ -n "${CLAUDECODE:-}" ] && printf '>>> [note] running a VERIFIED, independent %s via the CLI. (An in-session Agent subagent with model=%s is the alternative, but it cannot prove which model ran.)\n' "$id" "$id" >&2
-  _tier_banner "claude-native" "$id" "$ttier" "$posture, draws your Claude subscription limits | env: $load_note"
+  _tier_banner "claude-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cc) | env: $load_note"
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config; aborting to avoid inheriting live MCP — set OSRC_CLAUDE_USER_CONFIG=1 to override)"
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
@@ -5012,6 +5047,7 @@ delegate_ccnative() {
   if [ "$rc" -ne 0 ]; then
     printf '>>> [hint] claude-native exited %s. If it still reports "Not logged in", run `claude` once and /login (headless auth is separate from interactive Claude Code).\n' "$rc" >&2
   fi
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure cc)" >&2
   return "$rc"
 }
 
@@ -5079,7 +5115,7 @@ $wrapped"
       dangerous)               aflag=(--dangerously-skip-permissions);            posture="DANGER (auto-approves ALL tools, no sandbox)" ;;
       *) die "bad tier: $tier" ;;
     esac
-    _tier_banner "antigravity-agy (keyless)" "$atok" "$ttier" "$posture, rides your Antigravity/Google login, NO API key"
+    _tier_banner "antigravity-agy (keyless)" "$atok" "$ttier" "$posture | $(_lane_cost_disclosure gm)"
     # agy has no --output-format json; the supervisor watches plain-stdout byte growth and the bg
     # path derives last.txt from out.log, so no stream flags are needed. --print-timeout caps waits.
     local aeff; aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
@@ -5093,12 +5129,13 @@ $wrapped"
     if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
       printf '>>>   check      : %s doctor  — it probes this lane for real rather than assuming the installed CLI works.\n' "$0" >&2
-      printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm on Devin is free).\n' >&2
+      printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
     fi
     rm -f "$_aerr" 2>/dev/null || true
     record_ledger antigravity-agy "$atok" "$ttier" "$tier" "$task"
+    printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gm)" >&2
     return "$rc"
   fi
 
@@ -5113,7 +5150,7 @@ $wrapped"
     dangerous)    gflag=(--approval-mode yolo);                posture="DANGER (auto-approves ALL tools; sandboxed only if GEMINI_SANDBOX is set)" ;;
     *) die "bad tier: $tier" ;;
   esac
-  _tier_banner "gemini-cli (api key)" "$id" "$ttier" "$posture, draws your GEMINI_API_KEY quota"
+  _tier_banner "gemini-cli (api key)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure gemini)"
   local ofmt=(--output-format text); [ "${OSRC_STREAM:-0}" = "1" ] && ofmt=(--output-format json)
   # ISOLATION (I1, gemini harness parity): gemini-cli loads ~/.gemini/settings.json mcpServers
   # unconditionally; a headless run can wedge on an interactive-auth MCP server. --allowed-mcp-server-names
@@ -5123,6 +5160,7 @@ $wrapped"
   [ "${OSRC_GEMINI_USER_MCP:-0}" = "1" ] || gmcp=(--allowed-mcp-server-names __none__)
   gemini -p "$wrapped" "${gflag[@]}" "${gmcp[@]+"${gmcp[@]}"}" "${ofmt[@]}" --model "$id" || rc=$?
   record_ledger gemini "$id" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gemini)" >&2
   return "$rc"
 }
 
@@ -5176,7 +5214,7 @@ delegate_claudex() {
     *) die "bad tier: $tier" ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
-  _tier_banner "claudex (Claude harness -> CLIProxyAPI)" "$id" "$ttier" "$posture, bills your ChatGPT plan through YOUR local proxy"
+  _tier_banner "claudex (Claude harness -> CLIProxyAPI)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure claudex) through your local proxy"
   # Honest one-time-per-run caveat: unofficial bridge, upstream endpoints are internal/unstable,
   # heavy use without rate limiting has triggered upstream account limits for some users.
   printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
@@ -5213,7 +5251,7 @@ $wrapped"
     rm -f "$tmpj"; umask "$old_umask"
   fi
   [ "$rc" -ne 0 ] && printf '>>> [hint] claudex exited %s. Check the proxy is up (curl %s/v1/models with your api-key) and that cli-proxy-api --codex-login succeeded.\n' "$rc" "$(_claudex_url)" >&2
-  printf '>>> [receipt] no cash charged, ran on your ChatGPT plan via your local CLIProxyAPI (Claude harness UX, zero Claude-sub spend).\n' >&2
+  printf '>>> [receipt] %s, through your local CLIProxyAPI.\n' "$(_lane_cost_disclosure claudex)" >&2
   return "$rc"
 }
 
@@ -5255,11 +5293,11 @@ delegate_droid() {
     [ -n "$de" ] && { eff=(-r "$de"); printf '>>> [effort] reasoning=%s (native: droid exec -r %s)\n' "$EFFORT" "$de" >&2; }; fi
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-droid}" "$task" "$ttier")"
-  _tier_banner "droid (Factory)" "$id" "$ttier" "$posture, bills your Factory plan / your own BYOK keys"
+  _tier_banner "droid (Factory)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure droid)"
   local rc=0
   droid exec ${mflag[@]+"${mflag[@]}"} ${aflag[@]+"${aflag[@]}"} ${eff[@]+"${eff[@]}"} -o text "$wrapped" || rc=$?
   record_ledger droid "${MODEL:-droid-default}" "$ttier" "$tier" "$task"
-  printf '>>> [receipt] ran on YOUR droid setup (Factory plan or the BYOK keys configured in ~/.factory/settings.json), no Claude tokens spent.\n' >&2
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure droid)" >&2
   return "$rc"
 }
 
@@ -5285,11 +5323,11 @@ delegate_cursor() {
   [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: cursor-agent has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-cursor}" "$task" "$ttier")"
-  _tier_banner "cursor-agent" "$id" "$ttier" "$posture, bills your Cursor subscription credits"
+  _tier_banner "cursor-agent" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cursor)"
   local rc=0
   "$cur" -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${fflag[@]+"${fflag[@]}"} --trust --output-format text || rc=$?
   record_ledger cursor "${MODEL:-cursor-default}" "$ttier" "$tier" "$task"
-  printf '>>> [receipt] no cash charged here, ran on your Cursor subscription credits, no Claude tokens spent.\n' >&2
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure cursor)" >&2
   return "$rc"
 }
 
@@ -5334,11 +5372,11 @@ delegate_hermes() {
   local wflag=(); [ "${OSRC_WORKTREE:-0}" = "1" ] && wflag=(-w)
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-hermes}" "$task" "$ttier")"
-  _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture, bills the provider keys configured in your ~/.hermes setup"
+  _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
   local rc=0
   hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
   record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task"
-  printf '>>> [receipt] ran on YOUR hermes setup (the provider + keys in ~/.hermes), no Claude tokens spent; real cost is read from ~/.hermes/state.db when available.\n' >&2
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"
 }
 
@@ -5381,11 +5419,11 @@ delegate_warp() {
   [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: oz agent run has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-warp}" "$task" "$ttier")"
-  _tier_banner "warp (Oz agent)" "$id" "$ttier" "$posture, bills your Warp plan / your configured Warp keys"
+  _tier_banner "warp (Oz agent)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure warp)"
   local rc=0
   oz agent run -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${hflag[@]+"${hflag[@]}"} ${pflag[@]+"${pflag[@]}"} -C "$PWD" --output-format text || rc=$?
   record_ledger warp "${MODEL:-warp-default}" "$ttier" "$tier" "$task"
-  printf '>>> [receipt] ran on YOUR Warp setup (Oz agent, your Warp plan/keys), no Claude tokens spent.\n' >&2
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure warp)" >&2
   return "$rc"
 }
 
@@ -5560,9 +5598,9 @@ _insource_block() {   # <host-label>
 <!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: $1) -->
 ## Outsourcerer: delegate grunt work to cheaper/different engines
 This machine has outsourcerer installed. From this $1 session you can delegate to Devin
-(glm-5.2/swe-1.7, free-lane class), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
+(glm-5.2/swe-1.7, spends Devin plan limits), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
 a VERIFIED Claude model (run -m fable|opus|sonnet|haiku, Claude subscription), ChatGPT-sub
-models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0, private).
+models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0 cash + \$0 plan, private).
   $SCRIPT_PATH doctor                          # what's available right now (run this first)
   $SCRIPT_PATH run -m glm "<read-only task>"   # one-shot; edit/yolo for mutating work
   $SCRIPT_PATH bg run -m hy3 "<long task>"     # supervised background job -> status/result <id>
@@ -6038,7 +6076,7 @@ delegate_cc() {
 
 # =============================================================================
 # LOCAL LANE (Ollama / LM Studio / llama.cpp / any OpenAI-compatible localhost server).
-# KEYLESS, PRIVATE ($0 cash, $0 plan limits, nothing leaves the machine). Driven by `codex exec`
+# KEYLESS, PRIVATE ($0 cash + $0 plan, nothing leaves the machine). Driven by `codex exec`
 # against the local /v1 endpoint (wire_api=chat) so it keeps FULL agentic tool use, that is what
 # makes "run a review skill on freshly-hardened code, privately" work: the delegate reads the repo
 # locally and no code is ever shipped to a cloud model that might train on it.
@@ -6130,7 +6168,7 @@ delegate_local() {
     _local_agentic "$tier" "$base" "$model"; return $?
   fi
   local ttier wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "$task" "${TTIER:-}")"
-  _tier_banner "local ($base)" "$model" "$ttier" "TEXT delegation | PRIVATE: on YOUR hardware, \$0 cash, \$0 plan limits, nothing leaves your machine"
+  _tier_banner "local ($base)" "$model" "$ttier" "TEXT delegation | PRIVATE: on YOUR hardware, $(_lane_cost_disclosure local), nothing leaves your machine"
   local jd="${OSRC_JOB_DIR:-$OSRC_HOME}"; mkdir -p "$jd"
   local capf="$jd/.local.$$.txt"; : > "$capf"
   local payload; payload="$(jq -cn --arg m "$model" --arg c "$wrapped" '{model:$m,stream:true,messages:[{role:"user",content:$c}]}')"
@@ -6195,7 +6233,7 @@ _local_agentic_codex() {
   # user's live ~/.codex mcp_servers would both break that (a cloud MCP server could load) and wedge
   # on interactive MCP auth. Drop the live config; the inline oslocal provider fully defines the lane.
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
-  _tier_banner "local-agentic/codex ($base)" "$model" "$ttier" "$posture | AGENTIC tool use | PRIVATE: on YOUR hardware, \$0 cash, \$0 plan, nothing leaves your machine"
+  _tier_banner "local-agentic/codex ($base)" "$model" "$ttier" "$posture | AGENTIC tool use | PRIVATE: on YOUR hardware, $(_lane_cost_disclosure local), nothing leaves your machine"
   local rc=0
   OSRC_LOCAL_KEY="${OSRC_LOCAL_KEY:-local}" \
   codex exec --skip-git-repo-check ${_iso[@]+"${_iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} \
@@ -6231,7 +6269,7 @@ _local_agentic_shim() {
   fi
   local ttier mode wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "${REST[*]}" "${TTIER:-}")"
   case "$tier" in accept-edits|autonomous) mode=acceptEdits ;; dangerous) mode=bypassPermissions ;; *) mode=default ;; esac
-  _tier_banner "local-agentic/shim ($aurl -> $base)" "$model" "$ttier" "AGENTIC via Claude Code | PRIVATE: on YOUR hardware, \$0, nothing leaves your machine"
+  _tier_banner "local-agentic/shim ($aurl -> $base)" "$model" "$ttier" "AGENTIC via Claude Code | PRIVATE: on YOUR hardware, $(_lane_cost_disclosure local), nothing leaves your machine"
   local rc=0 sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--verbose --output-format stream-json)
   # Small-model reliability: expose only essential tools by default so a 7-13B local model
   # isn't drowned in Claude Code's full tool schema. Override/disable with OSRC_LOCAL_TOOLS.
@@ -7688,11 +7726,11 @@ doctor() {
   echo "    model chain: ${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}"
   if [ "$_doff" != "1" ]; then local cred; cred="$(or_credits)"; [ -n "$cred" ] && echo "    openrouter credits: $cred"; fi
   echo "  -- Native premium lanes (model-selected; ride your own subscription) --"
-  echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH')"
+  echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH'); cost: $(_lane_cost_disclosure cx)"
   if have codex; then _codex_code_mode_host \
     && echo "      code-mode-host: present (codex file-reading tool calls work)" \
     || echo "      code-mode-host: MISSING, self-healed (Outsourcerer runs codex with code_mode_host disabled so file reads do not hang; install codex-code-mode-host to ~/.local/bin to use the feature)"; fi
-  echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH')"
+  echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH'); cost: $(_lane_cost_disclosure cc)"
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."
   if [ "${OSRC_DOCTOR_PING:-0}" = "1" ]; then
     echo "    (pinging native lanes, costs ~1 token each; bounded to ${OSRC_DOCTOR_PING_TIMEOUT:-30}s per lane)"
@@ -7745,9 +7783,9 @@ doctor() {
     echo "    (set OSRC_DOCTOR_PING=1 to probe native lane liveness with a bounded 1-token request; without it, 'present' above means installed + authed-looking, NOT proven to answer)"
   fi
   echo "  -- Engine lanes (YOUR agent CLI + YOUR configured models, incl. BYOK) --"
-  if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Uses your Factory plan / customModels in ~/.factory/settings.json (free/cheap BYOK lanes work as-is)."
+  if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Cost: $(_lane_cost_disclosure droid)."
   else echo "    droid (Factory): NOT on PATH — install: https://docs.factory.ai/cli (macOS/Linux/Windows-native)"; fi
-  if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Bills your Cursor subscription credits."
+  if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Cost: $(_lane_cost_disclosure cursor)."
   else echo "    cursor-agent: NOT on PATH — install: curl https://cursor.com/install -fsS | bash (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
   echo "  -- Hermes lane (NousResearch hermes-agent, engine lane: -m passes through verbatim) --"
   # Honest lane states: (a) CLI on PATH + version; (b) CLI absent but ~/.hermes exists (installed
@@ -7755,7 +7793,7 @@ doctor() {
   # guarded session count vs absent (never run — cost receipts use estimates until first session).
   # NEVER falsely READY; NEVER exit non-zero solely because the lane is absent.
   if have hermes; then
-    echo "    hermes: $(hermes --version 2>/dev/null | head -1 || echo present) — route: --provider hermes [-m <model>] run \"task\". Engine lane: -m passes through verbatim."
+    echo "    hermes: $(hermes --version 2>/dev/null | head -1 || echo present) — route: --provider hermes [-m <model>] run \"task\". Cost: $(_lane_cost_disclosure hermes)."
   else
     local _hhome; _hhome="$(_hermes_home)"
     if [ -d "$_hhome" ]; then
@@ -7781,7 +7819,7 @@ doctor() {
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
   elif have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
     if _claudex_up 2>/dev/null; then
-      echo "    claudex: READY — proxy answering at $(_claudex_url). Route: --provider claudex run [-m sol|terra|luna] \"task\" (Claude harness UX, bills your ChatGPT plan)."
+      echo "    claudex: READY — proxy answering at $(_claudex_url). Route: --provider claudex run [-m sol|terra|luna] \"task\". Cost: $(_lane_cost_disclosure claudex)."
       echo "      note: UNOFFICIAL community bridge (internal upstream endpoints, no rate limiting — heavy use risks provider-side limits). Claude-sub models are refused here by policy; codex CLI is still the lane for gpt-image."
     else
       echo "    claudex: proxy installed but NOT answering at $(_claudex_url) (start it, check api-keys in ~/.cli-proxy-api/config.yaml, or set OSRC_CLAUDEX_URL/OSRC_CLAUDEX_TOKEN)"
@@ -7789,9 +7827,9 @@ doctor() {
   else
     echo "    claudex: not set up (optional). It runs sol/terra/luna INSIDE Claude Code via a self-hosted proxy the USER installs + audits: https://github.com/router-for-me/CLIProxyAPI (then: cli-proxy-api --codex-login). Detect-only: outsourcerer never installs it. Official alternative: openai/codex-plugin-cc."
   fi
-  echo "  -- Local inference lane (Ollama / LM Studio / llama.cpp, KEYLESS, PRIVATE, \$0 cash + \$0 plan) --"
+  echo "  -- Local inference lane (Ollama / LM Studio / llama.cpp, KEYLESS, PRIVATE, $(_lane_cost_disclosure local)) --"
   local _ld; if _ld="$(_local_detect 2>/dev/null)"; then
-    local _lb="${_ld%%|*}" _lr="${_ld#*|}"; echo "    detected: ${_lr##*|} at $_lb (e.g. model '${_lr%%|*}'). Private, \$0. Route: -m ollama:<model> | -m local | --provider local \"<task>\""
+    local _lb="${_ld%%|*}" _lr="${_ld#*|}"; echo "    detected: ${_lr##*|} at $_lb (e.g. model '${_lr%%|*}'). Private, $(_lane_cost_disclosure local). Route: -m ollama:<model> | -m local | --provider local \"<task>\""
     if _local_supports_responses "$_lb" 2>/dev/null; then echo "      agentic (tool use): YES via codex Responses, no install (run: research/edit -m local \"<task>\")"
     else echo "      agentic (tool use): via on-demand Anthropic<->OpenAI shim + Claude Code (lazy-launched only when you use research/edit -m local; needs python3 + a tool-capable model)"; fi
   else
@@ -7802,7 +7840,7 @@ doctor() {
   local gm_default; if [ -n "${OSRC_GEMINI_VEHICLE:-}" ]; then gm_default="$OSRC_GEMINI_VEHICLE (forced via OSRC_GEMINI_VEHICLE)"; elif have agy; then gm_default="agy (keyless)"; elif have gemini; then gm_default="gemini-cli (api key)"; else gm_default="NONE, install one below"; fi
   echo "    text vehicle in use: $gm_default"
   if have agy; then
-    echo "    agy (Antigravity CLI, PRIMARY/keyless): v$(agy --version 2>/dev/null | head -1), auth = your Antigravity/Google app login (no API key)"
+    echo "    agy (Antigravity CLI, PRIMARY/keyless): v$(agy --version 2>/dev/null | head -1), auth = your Antigravity/Google app login; cost: $(_lane_cost_disclosure gm)"
     # INSTALLED IS NOT READY. Reporting a lane as available because its binary prints a version is how
     # work gets routed to something that cannot answer: agy stays installed and authenticated-looking
     # while every request times out (expired app login, service trouble). A bounded real request is the
@@ -7834,7 +7872,7 @@ doctor() {
   fi
   echo "  -- Image generation (backend AUTO-RESOLVED: codex gpt-image-2 > nano-banana > OpenRouter) --"
   if _codex_image_available; then
-    echo "    resolved image backend: codex gpt-image-2 (KEYLESS, your Codex/ChatGPT subscription)"
+    echo "    resolved image backend: codex gpt-image-2 (KEYLESS); cost: $(_lane_cost_disclosure ci)"
   elif have codex; then
     echo "    codex cli present but NOT ready for images -> run 'codex login', check 'codex features list' has image_generation + artifact"
   else
@@ -7861,8 +7899,8 @@ doctor() {
   fi
   # Same lesson as the agy probe, applied to the default lane: `devin auth status` reads a login file,
   # which proves nothing about whether the backend answers. A bounded real request is the only thing
-  # that catches an expired token, an exhausted plan/ACU window, or an outage. glm-5.2 is the free
-  # default (cheapest real request) and `auto` only auto-approves READ-ONLY tools, so the probe cannot
+  # that catches an expired token, an exhausted plan/ACU window, or an outage. glm-5.2 is the lowest
+  # plan-impact probe and `auto` only auto-approves READ-ONLY tools, so the probe cannot
   # edit anything. </dev/null keeps it non-interactive.
   if [ "${OSRC_DOCTOR_PING:-0}" = "1" ] && logged_in; then
     local _dpt _drc=0
@@ -7874,12 +7912,13 @@ doctor() {
         *[Aa]uth*|*401*|*403*|*[Uu]nauthor*|*"ot logged"*)
           echo "  devin liveness: INSTALLED BUT NOT ANSWERING — auth rejected / not logged in. Fix: run 'devin auth login'." ;;
         *429*|*[Rr]ate*|*[Ll]imit*|*[Qq]uota*|*[Ee]xhaust*|*ACU*)
-          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — Devin plan/ACU budget exhausted or rate-limited. Fix: wait for the window to reset, or switch to a free local/OpenRouter lane for now." ;;
+          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — Devin plan/ACU budget exhausted or rate-limited. Fix: wait for the window to reset, use local ($(_lane_cost_disclosure local)), or choose a priced OpenRouter model." ;;
         *)
           echo "  devin liveness: INSTALLED BUT NOT ANSWERING (rc=$_drc) — a real request did not come back. Treat this lane as DOWN, not ready: check your network and any *_PROXY env var (see the proxy note above), then 'devin auth login'." ;;
       esac
     fi
   fi
+  echo "  devin cost: $(_lane_cost_disclosure dv)"
   # Proactive diagnostics: a *_PROXY env var in this shell + devin present means devin's Rust TLS
   # client may reject the proxy cert (rustls OSStatus cert-verify), surfacing as a bare "Connection
   # error" ~100-160s in. Name it now so the failure is recognizable when it happens. Detect-only.
@@ -7910,11 +7949,12 @@ models() {
     || echo "  (probe returned nothing, devin may be offline or changed its 'Available:' output)"
   cat <<'EOF'
 
-Free-lane note (CHANGES OFTEN, verify, never assume):
-  Open-weight models (glm*, deepseek*, kimi*, swe*) are usually the free / low-limit lane.
+Plan-limit note (CHANGES OFTEN, verify, never assume):
+  Open-weight models (glm*, deepseek*, kimi*, swe*) usually use less of the Devin allocation.
   Premium models (claude*, gpt*, gemini*) typically draw your Devin usage/ACUs faster.
   Pricing shifts frequently, confirm current cost at your Devin usage dashboard before
-  routing heavy work to a premium model. Default here is glm-5.2 (currently a free lane).
+  routing heavy work to a premium model. The default is glm-5.2. Every run has
+  $0 cash cost here and spends your Devin plan limits.
 EOF
 }
 
@@ -8025,8 +8065,8 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   # passes, so a cap only ever fires when the work is NOT converging. A round count alone is a poor
   # guard because rounds are not equal work — three attempts at a one-line fix and three at a refactor
   # are wildly different — so a wall-clock bound sits alongside it. A money cap is deliberately absent:
-  # the default lane is a subscription lane that reports $0, so a dollar bound would never fire on the
-  # path most people use, while time and attempts always bind.
+  # subscription lanes consume plan limits rather than metered cash, while time and attempts bind on
+  # every lane.
   local model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}" verb=edit task="" use_worktree=0
   local original_max="" max_set=0 prior_attempt=0
 
@@ -8078,6 +8118,14 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   case "$maxmin" in ''|*[!0-9.]*|*.*.*) die "loop $shape: --max-minutes must be a number of minutes, e.g. 10 or 0.5 (0 = no time bound)" ;; esac
   local _maxsec; _maxsec="$(awk -v m="$maxmin" 'BEGIN{printf "%d", m*60}')"
   case "$verb" in edit|yolo) ;; *) die "loop $shape: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
+  local _loop_table_lane="" _loop_row="" _loop_cost_lane="" _loop_explicit=0
+  if [ -n "$model" ]; then
+    _loop_explicit=1
+    _loop_row="$(resolve_model_row "$model")"
+    [ -n "$_loop_row" ] && { _loop_row="${_loop_row#*|}"; _loop_table_lane="${_loop_row%%|*}"; }
+    [ -n "$_loop_table_lane" ] || _loop_table_lane="$(lane_from_name "$model" 2>/dev/null)"
+  fi
+  _loop_cost_lane="$(_effective_lane "$_loop_table_lane" "${PROVIDER:-devin}" "$model" "$_loop_explicit")"
   # Resuming with the SAME ceiling would start at prior+1 and exit immediately having done nothing,
   # which reads as a second failure rather than a no-op. Demand a strictly larger ceiling instead.
   [ "$resume" != "1" ] || [ "$max_set" != "1" ] || [ "$max" -gt "$original_max" ] 2>/dev/null ||
@@ -8226,14 +8274,10 @@ $feedback"
     attempt=$(( attempt + 1 ))
   done
   printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || die "loop verify: cannot write final state"
-  # Report the SPEND even when it is $0. The default lane is a subscription lane, so a dollar figure is
-  # always zero there and tells you nothing — while the thing that actually runs out is the plan's rate
-  # limit. Attempts and elapsed time are the units that bind on every lane, so they are what a loop
-  # reports back. (Observed: a subscription lane hitting its weekly ceiling mid-session while every
-  # cash figure still read $0.)
+  # Report the selected lane's cost class with attempts and elapsed time. A fallback can change lanes,
+  # and each delegate receipt records that hop separately.
   local _spent=$(( $(date +%s) - _t0 ))
-  printf '>>> [loop verify] used %s attempt(s) over %sm%ss on %s. Every attempt is a delegation and counts against that lane'"'"'s plan limits, even when it bills $0.\n' \
-    "$last_attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "${model:-the default lane}" >&2
+  printf '>>> [loop verify] used %s attempt(s) over %sm%ss on %s. Initial route: %s.\n' "$last_attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "${model:-the default lane}" "$(_lane_cost_disclosure "$_loop_cost_lane")" >&2
   echo "[loop verify] $lid final: $state  ·  attempts + check output in $ldir" >&2
   # A loop that ran out of room is not a dead end: say so, with the exact command, while the state is fresh.
   case "$state" in
@@ -8315,7 +8359,7 @@ main() {
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
-    suggest|deals) cmd_suggest "$@" ;;                     # live cheap/free models per platform right now
+    suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models
     advise)      cmd_advise "$@" ;;                        # task-aware model recommendation with benchmark data
     second-opinion|second) second_opinion "$@" ;;         # 2 cheap models; disagree -> escalate
     image)       cmd_image "$@" ;;                         # Gemini text-to-image (nano-banana default); prints file path

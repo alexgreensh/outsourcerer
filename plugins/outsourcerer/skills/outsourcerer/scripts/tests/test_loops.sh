@@ -213,14 +213,13 @@ printf '%s' "$out" | grep -q 'LAST FAILURE' \
   && ok "loop status surfaces state, attempt, elapsed and the current failure" \
   || bad "loop status does not report live state"
 
-# 18. Spend must be reported in units that BIND. On a subscription lane the dollar figure is always
-#     zero while the plan's rate limit is what actually runs out, so attempts and time are the truth.
+# 18. Spend must name both cash impact and the plan limit that actually binds.
 out="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "true" --max 3 "t" 2>&1 >/dev/null)"
 printf '%s' "$out" | grep -qi 'attempt(s) over' \
   && ok "a finished loop reports what it consumed" || bad "loop does not report its consumption"
-printf '%s' "$out" | grep -qi 'even when it bills' \
-  && ok "the report says a \$0 lane still burns plan limits" \
-  || bad "consumption report implies a \$0 lane costs nothing"
+printf '%s' "$out" | grep -Fq '$0 cash, spends your Devin plan limits' \
+  && ok "the report names Devin plan-limit spend alongside cash cost" \
+  || bad "consumption report omits the Devin plan-limit disclosure"
 
 # 19. The stall normaliser must not rely on GNU-only regex. `\b` is silently IGNORED by BSD sed, so
 #     durations were never stripped on macOS and the guard was weaker than its tests implied — the
