@@ -7019,6 +7019,112 @@ _validate_session_name() {
   esac
 }
 
+SESSION_LAUNCH=()
+
+_session_launch_error() {
+  local provider="$1" reason="$2"
+  die "session start: $provider interactive launch unavailable ($reason). Use '$0 --provider $provider run \"task\"' for one-shot work or '$0 --provider $provider bg run \"task\"' for supervised background work."
+}
+
+_session_probe_help() {
+  local probe_file rc=0
+  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-session-probe.XXXXXX" 2>/dev/null)" || return 1
+  _timeout 3 "$@" > "$probe_file" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
+    rm -f "$probe_file"
+    [ "$rc" -ne 0 ] && return "$rc"
+    return 1
+  fi
+  cat "$probe_file"
+  rm -f "$probe_file"
+}
+
+_session_launch_adapter() {
+  local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli=""
+  SESSION_LAUNCH=()
+
+  case "$provider" in
+    droid)
+      have droid || _session_launch_error "$provider" "droid is not on PATH"
+      help_text="$(_session_probe_help droid --help)" \
+        || _session_launch_error "$provider" "the local help probe failed or timed out"
+      printf '%s\n' "$help_text" | grep -Eqi 'interactive mode.*default|start.*interactive mode' \
+        || _session_launch_error "$provider" "help does not advertise an interactive mode"
+      printf '%s\n' "$help_text" | grep -Eqi 'exec.*non-interactive|exec.*noninteractively|exec.*scripts/automation' \
+        || _session_launch_error "$provider" "help does not distinguish interactive mode from one-shot exec"
+      printf '%s\n' "$help_text" | grep -Eqi -- '--auto.*low.*medium.*high' \
+        || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
+      SESSION_LAUNCH=("droid" "--auto" "medium")
+      if [ "$MODEL_EXPLICIT" = "1" ]; then
+        if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
+          SESSION_LAUNCH+=("--model" "$MODEL")
+        elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$).*model'; then
+          SESSION_LAUNCH+=("-m" "$MODEL")
+        else
+          _session_launch_error "$provider" "help does not advertise an interactive model override"
+        fi
+      fi
+      ;;
+    cursor)
+      if have cursor-agent; then
+        cli="cursor-agent"
+      elif have agent; then
+        cli="agent"
+      else
+        _session_launch_error "$provider" "neither cursor-agent nor agent is on PATH"
+      fi
+      help_text="$(_session_probe_help "$cli" --help)" \
+        || _session_launch_error "$provider" "the local help probe failed or timed out"
+      if [ "$cli" = "agent" ]; then
+        printf '%s\n' "$help_text" | grep -qi 'cursor' \
+          || _session_launch_error "$provider" "the agent executable does not identify itself as Cursor"
+      fi
+      printf '%s\n' "$help_text" | grep -Eqi 'interactive (terminal|mode|session)|chat mode.*default|start.*chat mode' \
+        || _session_launch_error "$provider" "help does not advertise an interactive chat mode"
+      printf '%s\n' "$help_text" | grep -Eqi -- '--print.*non-interactive|-p.*non-interactive' \
+        || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot print mode"
+      SESSION_LAUNCH=("$cli")
+      if [ "$MODEL_EXPLICIT" = "1" ]; then
+        printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)' \
+          || _session_launch_error "$provider" "help does not advertise an interactive model override"
+        SESSION_LAUNCH+=("--model" "$MODEL")
+      fi
+      ;;
+    hermes)
+      have hermes || _session_launch_error "$provider" "hermes is not on PATH"
+      help_text="$(_session_probe_help hermes --help)" \
+        || _session_launch_error "$provider" "the local help probe failed or timed out"
+      chat_help="$(_session_probe_help hermes chat --help)" \
+        || _session_launch_error "$provider" "the local chat help probe failed or timed out"
+      printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'REPL|interactive (chat|mode|session)|chat.*interactive' \
+        || _session_launch_error "$provider" "help does not advertise an interactive REPL or chat"
+      printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'one-shot|non-interactive' \
+        || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot mode"
+      printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:]])chat([[:space:]]|$)' \
+        || _session_launch_error "$provider" "help does not advertise the chat command"
+      SESSION_LAUNCH=("hermes" "chat")
+      if [ "$MODEL_EXPLICIT" = "1" ]; then
+        printf '%s\n' "$chat_help" | grep -Eq -- '--model([ =]|$)' \
+          || _session_launch_error "$provider" "chat help does not advertise a model override"
+        SESSION_LAUNCH+=("--model" "$MODEL")
+      fi
+      ;;
+    *)
+      _session_launch_error "$provider" "no capability adapter is defined"
+      ;;
+  esac
+}
+
+_session_shell_command() {
+  local arg quoted out=""
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    [ -n "$out" ] && out="$out "
+    out="$out$quoted"
+  done
+  printf '%s\n' "$out"
+}
+
 # ---- interactive winpty session broker for Windows ----
 _winpty_session() {
   local sub="${1:-}"; shift || true
@@ -7049,15 +7155,9 @@ _winpty_session() {
           have claude || die "claude not on PATH (needed for a claude session)"
           LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("--model" "$MODEL") ;;
-        droid)
-          have droid || die "droid not on PATH (needed for a droid session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("droid" "-m" "$MODEL"); else LAUNCH=("droid"); fi ;;
-        cursor)
-          have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("cursor-agent" "--model" "$MODEL"); else LAUNCH=("cursor-agent"); fi ;;
-        hermes)
-          have hermes || die "hermes not on PATH (needed for a hermes session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("hermes" "chat" "--model" "$MODEL"); else LAUNCH=("hermes" "chat"); fi ;;
+        droid|cursor|hermes)
+          _session_launch_adapter "$PROVIDER"
+          LAUNCH=("${SESSION_LAUNCH[@]}") ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
@@ -7198,15 +7298,9 @@ session() {
           have claude || die "claude not on PATH (needed for a claude session)"
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi ;;
-        droid)
-          have droid || die "droid not on PATH (needed for a droid session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="droid -m '$MODEL'"; else launch="droid"; fi ;;
-        cursor)
-          have cursor-agent || die "cursor-agent not on PATH (needed for a cursor session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="cursor-agent --model '$MODEL'"; else launch="cursor-agent"; fi ;;
-        hermes)
-          have hermes || die "hermes not on PATH (needed for a hermes session)"
-          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="hermes chat --model '$MODEL'"; else launch="hermes chat"; fi ;;
+        droid|cursor|hermes)
+          _session_launch_adapter "$PROVIDER"
+          launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi

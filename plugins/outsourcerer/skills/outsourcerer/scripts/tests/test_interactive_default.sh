@@ -53,6 +53,17 @@ decide_tools() {
 [[ "$(decide_tools auto)" != *Bash* ]] && ok "run tier -> NO Bash (read-only preserved)" || bad "run tier wrongly got Bash"
 OSRC_ALLOWED_TOOLS="Read" ; [[ "$(decide_tools accept-edits)" == "--allowedTools Read " ]] && ok "OSRC_ALLOWED_TOOLS override wins" || bad "override not honored"; unset OSRC_ALLOWED_TOOLS
 
+# --- interactive session adapters are capability-gated before either transport creates state ---
+grep -q '^_session_launch_adapter()' "$SRC" \
+  && ok "session launch capability adapter is defined" || bad "session launch capability adapter missing"
+n_session_adapter_calls=$(grep -c '_session_launch_adapter' "$SRC")
+[ "$n_session_adapter_calls" -ge 3 ] \
+  && ok "Unix and Windows session transports share the capability adapter" \
+  || bad "capability adapter is not shared by both transports (found $n_session_adapter_calls references)"
+grep -q 'SESSION_LAUNCH=("droid" "--auto" "medium")' "$SRC" \
+  && ok "Droid interactive sessions use the advertised bounded-autonomy launch" \
+  || bad "Droid interactive launch does not select --auto medium"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
