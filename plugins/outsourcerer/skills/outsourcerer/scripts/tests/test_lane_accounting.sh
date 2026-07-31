@@ -57,9 +57,12 @@ ck "bucket {lane:cx}"                "$(bkt '{"lane":"cx"}')"               plan
 ck "bucket {provider:codex-native}"  "$(bkt '{"provider":"codex-native"}')" plan
 ck "bucket {provider:local}"         "$(bkt '{"provider":"local"}')"        free
 ck "bucket {lane:or,cost:0.01}"      "$(bkt '{"lane":"or","cost_usd":"0.01"}')" cash
+ck "bucket {lane:cursor}"            "$(bkt '{"lane":"cursor"}')"          plan
+ck "bucket {lane:droid}"             "$(bkt '{"lane":"droid"}')"           cash
+ck "bucket {lane:hermes}"            "$(bkt '{"lane":"hermes"}')"          cash
+ck "bucket {lane:warp}"              "$(bkt '{"lane":"warp"}')"            cash
 # plan-bucket: devin (dv) is a SUBSCRIPTION/plan lane (Devin Pro): $0 cash but spends plan capacity.
-# It must bucket as PLAN, not cash (was wrongly cash pre-fix, understating nothing but MISLABELING
-# a free-plan run as a paid-lane $0 run).
+# It must bucket as PLAN, not cash.
 ck "bucket {lane:dv} -> plan (plan-lane)" "$(bkt '{"lane":"dv"}')"               plan
 ck "bucket {lane:dv,cost:0.000000}"  "$(bkt '{"lane":"dv","cost_usd":"0.000000"}')" plan
 # a NONZERO cost on a dv row = pay-per-use devin = CASH, not plan (cost-axis guard).
@@ -85,10 +88,10 @@ echo "$TAB_OUT" | grep -qE 'cash lanes, cost not captured[[:space:]]*:[[:space:]
 echo "$TAB_OUT" | grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.002' \
   && echo "PASS: cash-accounting measured cash = \$0.002 (devin \$0 not counted as cash)" \
   || { echo "FAIL: cash-accounting measured-cash line wrong"; echo "$TAB_OUT"; fail=1; }
-# devin run shows on the subscription (plan) line, not cash
-echo "$TAB_OUT" | grep -qE 'on your subscription[[:space:]]*:[[:space:]]*1 run' \
-  && echo "PASS: plan-bucket devin run bucketed as subscription/plan (1)" \
-  || { echo "FAIL: plan-bucket devin not on subscription line"; echo "$TAB_OUT"; fail=1; }
+# Devin gets its named plan-limit disclosure, not a generic free/cash label.
+echo "$TAB_OUT" | grep -qF 'Devin: 1 run(s), $0 cash, spends your Devin plan limits' \
+  && echo "PASS: plan-bucket Devin run has named plan-limit disclosure" \
+  || { echo "FAIL: plan-bucket Devin disclosure missing"; echo "$TAB_OUT"; fail=1; }
 
 # --- D. a PAY-PER-USE devin row (nonzero cost on lane=dv) must count as CASH, not plan. ---
 LED2="$(mktemp "${TMPDIR:-/tmp}/osrc_led2.XXXXXX")"
