@@ -14,7 +14,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 set --; . "$SRC" >/dev/null 2>&1
 mkdir -p "$OSRC_SESSIONS"
 KEYS="$TMP/keys"
-tmux() { case "$1" in send-keys) printf '%s\n' "$*" >> "$KEYS" ;; *) return 0 ;; esac; }
+_pid_start_identity() { printf '%s\n' 'Mon Jan 1 00:00:00 2024'; }
+tmux() { case "$1" in display-message) printf '42\n' ;; send-keys) printf '%s\n' "$*" >> "$KEYS" ;; *) return 0 ;; esac; }
 _external_composer_state() { printf '%s\n' "${COMPOSER:-unknown}"; }
 _external_receipt_verify() { printf '%s\n' "${RECEIPT:-unknown}"; }
 
@@ -30,6 +31,7 @@ _session_model_matches fable claude-fable-5 claude-fable-5 && ok "resolved model
 _session_model_matches fable claude-fable-5 unknown && bad "unknown observation matched" || ok "unknown observation never matches"
 
 item='{"session_id":"pin-one","owner":"managed","state":"working","lane":"devin","endpoint":"tmux:pin-one","requested_model":"fable","resolved_model":"fable","observed_model":"opus","model_generation":7,"task_summary":"work"}'
+SESSION_NAME=pin-one; _session_registry_append start devin fable high started launch
 COMPOSER=empty RECEIPT=receipt-1
 out="$(_model_pin_enforce_item "$item" generation-a)"
 printf '%s' "$out" | jq -e '.model_pin.result == "restored"' >/dev/null && ok "drift with both proofs restores through the bounded path" || bad "eligible drift did not restore: $out"
@@ -42,6 +44,7 @@ after="$(wc -l < "$KEYS" | tr -d ' ')"
 [ "$before" = "$after" ] && ok "generation restore budget prevents repeated input" || bad "same generation restored twice"
 
 busy_item='{"session_id":"pin-busy","owner":"managed","state":"working","lane":"devin","endpoint":"tmux:pin-busy","requested_model":"fable","resolved_model":"fable","observed_model":"opus","model_generation":1}'
+SESSION_NAME=pin-busy; _session_registry_append start devin fable high started launch
 COMPOSER=nonempty
 before="$(wc -l < "$KEYS" | tr -d ' ')"
 out="$(_model_pin_enforce_item "$busy_item" generation-b)"

@@ -61,7 +61,20 @@ else
     || bad "unprovable ownership did not preserve the claim (rc=$rc token=$token)"
 fi
 
-PATH="/usr/bin:/bin:$PATH" _heartbeat_stop takeover >/dev/null 2>&1 || true
+# A stale mkdir-era election directory must not wedge a new owner: the flock
+# lease is tied to the process FD, not directory cleanup by a crashed owner.
+rm -f "$OSRC_HEARTBEAT/leader/owner.json"; rmdir "$OSRC_HEARTBEAT/leader"
+mkdir "$OSRC_HEARTBEAT/.election"
+printf '%s\n' '{"pid":999,"pid_start":"Thu Jul 31 01:02:03 2026"}' > "$OSRC_HEARTBEAT/.election/owner.json"
+printf '%s\n' 'Sat Aug 2 01:02:03 2026' > "$HB_PS_MARKER"
+if PATH="$TMP/bin:$PATH" _heartbeat_claim "$$" 'Sat Aug 2 01:02:03 2026' recovered ""; then
+  ok "stale election directory cannot wedge flock-based recovery"
+else
+  bad "stale election directory wedged heartbeat recovery"
+fi
+rmdir "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
+
+PATH="/usr/bin:/bin:$PATH" _heartbeat_stop recovered >/dev/null 2>&1 || true
 
 echo
 echo "RESULT: $pass passed, $fail failed"

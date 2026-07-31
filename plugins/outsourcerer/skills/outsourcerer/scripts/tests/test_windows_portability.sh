@@ -273,6 +273,18 @@ else
   ok "control skipped: bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]} cannot express the defect (static assertion covers it)"
 fi
 
+OSRC_PLATFORM=windows
+if _heartbeat_claim 123 'Thu Jul 31 01:02:03 2026' win-test "" >/dev/null 2>&1; then
+  bad "Windows heartbeat claim mutated ownership"
+else
+  ok "Windows heartbeat claim is observation-only"
+fi
+if _session_model_restore devin tmux:win fable restore.win win >/dev/null 2>&1; then
+  bad "Windows model restore emitted terminal input"
+else
+  ok "Windows model restore is observation-only"
+fi
+
 echo "---"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

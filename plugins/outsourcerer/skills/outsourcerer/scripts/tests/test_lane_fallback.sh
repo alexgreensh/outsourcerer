@@ -35,6 +35,8 @@ PROVIDER=devin; PROVIDER_EXPLICIT=0
 parse_model -m glm "task body"
 [ "$PROVIDER_EXPLICIT" = "0" ] && ok "model reconstruction preserves implicit provider provenance" || bad "fallback reconstruction changed provider provenance"
 grep -q 'OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}"' "$SRC" && grep -q '_run_provider=()' "$SRC" && ok "detached jobs preserve provider provenance" || bad "detached provider provenance missing"
+grep -q '_fallback_provider_for_lane' "$SRC" && grep -q 'local _fb_new=(--provider "$_fb_provider" -m "$_fb_alias")' "$SRC" \
+  && ok "fallback rebuilds provider and explicit provenance together" || bad "fallback can retain mismatched provider provenance"
 
 # --- Scenario 3: _devin_model_for maps the dual-lane model, empty for OR-only. ---
 [ "$(_devin_model_for glm)" = "glm-5.2" ] && ok "glm -> Devin sibling glm-5.2" || bad "glm sibling wrong"

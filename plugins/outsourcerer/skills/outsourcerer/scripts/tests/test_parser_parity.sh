@@ -51,6 +51,11 @@ _consume_flags --provider codex "t"
 grep -q 'OSRC_PROVIDER:-' "$SRC" && ok "OSRC_PROVIDER is an explicit environment selection" || bad "OSRC_PROVIDER environment selection missing"
 grep -q 'PROVIDER_EXPLICIT=1; shift 2' "$SRC" && ok "global provider flag records provenance" || bad "global provider provenance missing"
 
+parse_model "t" 2>/dev/null
+[ -z "$MODEL" ] && ok "implicit parser model remains empty" || bad "implicit parser inherited a provider model"
+[ "$(_route_provider_default_model gemini)" = gemini-3.1-flash-lite ] && ok "Gemini resolves its own implicit model" || bad "Gemini inherited the Devin default"
+[ "$(_route_provider_default_model local)" = local ] && ok "local resolves its own implicit model" || bad "local inherited the Devin default"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

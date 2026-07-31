@@ -502,7 +502,7 @@ parse_model() {
   # WITH_SPEC) and validates --effort identically, so the two parsers no longer diverge. The Devin lane
   # still ignores tier/with (advisory only); non-Devin callers of parse_model (session, continue) get
   # the correct tier/effort state instead of silently dropping it.
-  MODEL="$DEFAULT_MODEL"; MODEL_EXPLICIT=0; EFFORT="${OUTSOURCERER_EFFORT:-}"; TIER_FLAG=""; WITH_SPEC=""; REST=()
+  MODEL=""; MODEL_EXPLICIT=0; EFFORT="${OUTSOURCERER_EFFORT:-}"; TIER_FLAG=""; WITH_SPEC=""; REST=()
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model)           [ -n "${2:-}" ] || die "-m requires a model name"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
@@ -1222,7 +1222,7 @@ _tier_banner() {
 # MODEL/MODEL_EXPLICIT/TIER_FLAG/WITH_SPEC/REST and OSRC_ALLOW_DOWNGRADE. --tier also sets
 # OSRC_TIER_OVERRIDE so classification honors it.
 _consume_flags() {
-  MODEL="$DEFAULT_MODEL"; MODEL_EXPLICIT=0; TIER_FLAG=""; WITH_SPEC=""; EFFORT="${OUTSOURCERER_EFFORT:-}"; OSRC_ALLOW_DOWNGRADE="${OSRC_ALLOW_DOWNGRADE:-0}"
+  MODEL=""; MODEL_EXPLICIT=0; TIER_FLAG=""; WITH_SPEC=""; EFFORT="${OUTSOURCERER_EFFORT:-}"; OSRC_ALLOW_DOWNGRADE="${OSRC_ALLOW_DOWNGRADE:-0}"
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model) [ -n "${2:-}" ] || die "-m requires a model name"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
@@ -1566,33 +1566,80 @@ _obligation_append() { # <id> <session-id> <state> <receipt>
   _state_append "$OSRC_OBLIGATIONS" "$record"
 }
 
+# The decision to create an obligation is a mutation authority boundary.  A plain
+# read followed by _state_append races under two reply processes, so hold the
+# durable state lock through both the read and the pending record.
+_obligation_admit() { # <id> <session-id>
+  local id="$1" session_id="$2" latest now record rc=0
+  _mkdir_private "$OSRC_HOME" || return 1
+  ( umask 077; : >> "$OSRC_OBLIGATIONS" ) 2>/dev/null || return 1
+  _state_lock_acquire "$OSRC_OBLIGATIONS" || return 1
+  latest="$(_obligation_latest_state "$id")"
+  case "$latest" in submitted|delivery_unknown|pending|typing_started) _state_lock_release "$OSRC_OBLIGATIONS"; return 2 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg ts "$now" '{schema_version:"1",obligation_id:$id,session_id:$session,state:"pending",receipt:null,ts:$ts}')" || rc=1
+  [ "$rc" -ne 0 ] || printf '%s\n' "$record" >> "$OSRC_OBLIGATIONS" 2>/dev/null || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$OSRC_OBLIGATIONS" || rc=1
+  _state_lock_release "$OSRC_OBLIGATIONS"
+  return "$rc"
+}
+
+_endpoint_mutation_lock() { # <pane>; held until _endpoint_mutation_unlock
+  local pane="$1" key
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')" || return 1
+  _mkdir_private "$OSRC_SESSIONS" || return 1
+  _state_lock_acquire "$OSRC_SESSIONS/mutation-$key" || return 1
+}
+_endpoint_mutation_unlock() { _state_lock_release "$OSRC_SESSIONS/mutation-${1}"; }
+
+_claimed_endpoint_live() { # <pane> <claimed-pid> <claimed-start>
+  local pane="$1" pid="$2" start="$3" live
+  live="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" || return 1
+  [ "$live" = "$pid" ] || return 1
+  [ "$(_pid_start_identity "$live" 2>/dev/null)" = "$start" ]
+}
+
+_obligation_delivery_unknown() { # <id> <session-id>
+  local id="$1" session_id="$2"
+  _obligation_append "$id" "$session_id" delivery_unknown "" >/dev/null 2>&1 || true
+  _wake_append "$(jq -cn --arg event_id "obligation.$id" --arg id "$id" '{event_id:$event_id,kind:"delivery",state:"unknown",task_summary:("delivery unknown: " + $id)}')" >/dev/null 2>&1 || true
+}
+
 _obligation_latest_state() { # <id>
   _state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r --arg id "$1" 'select(.obligation_id==$id) | .state' | tail -1
 }
 
 _external_reply() { # <session-id> <message>
-  local id="$1" message="$2" claim pane pid start token composer oid latest receipt
+  local id="$1" message="$2" claim pane pid start token composer oid latest receipt key
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
   pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; token="$(printf '%s' "$claim" | jq -r '.token')"
   [ "$token" = "${SESSION_CLAIM_TOKEN:-}" ] || { echo "external reply requires this controller's claim token" >&2; return 1; }
-  [ -n "$pane" ] && tmux display-message -p -t "$pane" '#{pane_pid}' >/dev/null 2>&1 || return 1
-  [ "$(_pid_start_identity "$pid" 2>/dev/null)" = "$start" ] || return 1
-  composer="$(_external_composer_state "$pane" 2>/dev/null)"
-  [ "$composer" = "empty" ] || { echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
   oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
-  case "$latest" in submitted|delivery_unknown|pending) echo "obligation $oid is pending; automatic replay is disabled" >&2; return 1 ;; esac
-  _obligation_append "$oid" "$id" pending "" || return 1
-  tmux send-keys -t "$pane" -l "$message" || return 1
-  tmux send-keys -t "$pane" Enter || { _obligation_append "$oid" "$id" delivery_unknown ""; return 1; }
+  if [ "$latest" = typing_started ]; then _obligation_delivery_unknown "$oid" "$id"; echo "delivery unknown; no automatic replay" >&2; return 1; fi
+  # A preliminary probe avoids creating a permanent no-replay obligation for an
+  # obviously busy composer.  It grants no authority, the locked final probe below does.
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = "empty" ] || { echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
+  _obligation_admit "$oid" "$id" || { echo "obligation $oid is pending; automatic replay is disabled" >&2; return 1; }
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  # Resolve the pane PID and prove its start marker at the exact mutation endpoint,
+  # then make the composer check the final operation before typing.
+  _claimed_endpoint_live "$pane" "$pid" "$start" || { _endpoint_mutation_unlock "$key"; return 1; }
+  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  [ "$composer" = "empty" ] || { _endpoint_mutation_unlock "$key"; echo "external composer is unverified; no terminal input was sent" >&2; return 1; }
+  _obligation_append "$oid" "$id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
   receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
   if [ -n "$receipt" ] && [ "$receipt" != "unknown" ]; then
-    _obligation_append "$oid" "$id" submitted "$receipt" || return 1
+    _obligation_append "$oid" "$id" submitted "$receipt" || { _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"; return 1; }
+    _endpoint_mutation_unlock "$key"
     printf 'receipt: %s\n' "$receipt"
   else
-    _obligation_append "$oid" "$id" delivery_unknown "" || return 1
-    _wake_append "$(jq -cn --arg event_id "obligation.$oid" --arg id "$oid" '{event_id:$event_id,kind:"delivery",state:"unknown",task_summary:("delivery unknown: " + $id)}')" >/dev/null 2>&1 || true
+    _obligation_delivery_unknown "$oid" "$id"; _endpoint_mutation_unlock "$key"
     echo "delivery unknown; no automatic replay" >&2
     return 1
   fi
@@ -1719,6 +1766,20 @@ $id
   done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE")
 }
 
+_wake_consume() {
+  # The durable log is the authority sink.  Attached output is best-effort but
+  # unacknowledged on failure, so its next heartbeat retries the same wake.
+  local event id line
+  while IFS= read -r event; do
+    [ -n "$event" ] || continue
+    id="$(printf '%s' "$event" | jq -r '.event_id // empty')"; [ -n "$id" ] || continue
+    line="wake[$id] $(printf '%s' "$event" | jq -r '.task_summary // .kind // "unknown"')"
+    _heartbeat_log_append "$line" || return 1
+    _heartbeat_emit_attached "$line" || continue
+    _wake_ack "$id" || return 1
+  done < <(_wake_drain)
+}
+
 _pid_start_valid() {
   local marker="$1" weekday month day clock year
   set -- $marker
@@ -1755,43 +1816,75 @@ _heartbeat_token() {
   printf '%s\n' "$token"
 }
 
+_heartbeat_election_acquire() { # <lock> <pid> <pid-start>
+  local lock="$1" pid="$2" pid_start="$3" tries=0 owner old_pid old_start live rc record tmp
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>"$lock.flock" 2>/dev/null || return 1
+    flock -w 5 8 2>/dev/null || { exec 8>&-; return 1; }
+    _HEARTBEAT_ELECTION_KIND=flock
+    return 0
+  fi
+  while ! _mkdir_claim "$lock"; do
+    owner="$lock/owner.json"
+    old_pid="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 1
+    old_start="$(jq -r '.pid_start // empty' "$owner" 2>/dev/null)" || return 1
+    _pid_start_valid "$old_start" || return 1
+    live="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
+    # Only a positive observation of PID reuse/death can recover a lease.
+    if [ "$rc" -eq 0 ] && [ "$live" != "$old_start" ]; then
+      rm -f "$owner" 2>/dev/null || return 1
+      rmdir "$lock" 2>/dev/null || return 1
+      continue
+    fi
+    return 1
+  done
+  record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" '{pid:$pid,pid_start:$pid_start}')" || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  tmp="$lock/.owner.$$.$RANDOM"
+  ( umask 077; printf '%s\n' "$record" > "$tmp" ) 2>/dev/null && _state_sync "$tmp" && mv "$tmp" "$lock/owner.json" && _state_sync "$lock" || { rm -f "$tmp" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true; return 1; }
+  _HEARTBEAT_ELECTION_KIND=mkdir
+}
+_heartbeat_election_release() {
+  local lock="$1"
+  case "${_HEARTBEAT_ELECTION_KIND:-}" in flock) flock -u 8 2>/dev/null || true; exec 8>&- ;; mkdir) rm -f "$lock/owner.json" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true ;; esac
+  _HEARTBEAT_ELECTION_KIND=""
+}
+
 _heartbeat_claim() {
   local pid="$1" pid_start="$2" token="$3" sink="${4:-}" lock="$OSRC_HEARTBEAT/.election"
   local leader="$OSRC_HEARTBEAT/leader" owner="$OSRC_HEARTBEAT/leader/owner.json"
   local tries=0 old_pid old_start live_start record tmp rc=0
+  [ "$OSRC_PLATFORM" != "windows" ] || return 1
   case "$pid:$token" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
   [ -n "$pid_start" ] || return 1
   _mkdir_private "$OSRC_HEARTBEAT" || return 1
   [ ! -L "$OSRC_HEARTBEAT" ] && [ ! -L "$leader" ] || return 1
-  while ! _mkdir_claim "$lock"; do
-    tries=$((tries + 1))
-    [ "$tries" -lt 50 ] || return 1
-    sleep 0.1
-  done
+  _heartbeat_election_acquire "$lock" "$pid" "$pid_start" || return 1
   if [ -d "$leader" ]; then
     if [ ! -f "$owner" ] || ! old_pid="$(jq -er '.pid | tostring' "$owner" 2>/dev/null)" \
       || ! old_start="$(jq -er '.pid_start | strings | select(length > 0)' "$owner" 2>/dev/null)"; then
-      rmdir "$lock" 2>/dev/null || true
+      _heartbeat_election_release "$lock"
       return 3
     fi
     if ! _pid_start_valid "$old_start"; then
-      rmdir "$lock" 2>/dev/null || true
+      _heartbeat_election_release "$lock"
       return 3
     fi
     live_start="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
     if [ "$rc" -eq 0 ] && [ "$live_start" = "$old_start" ]; then
-      rmdir "$lock" 2>/dev/null || true
+      _heartbeat_election_release "$lock"
       return 2
     fi
-    if [ "$rc" -eq 1 ]; then
-      rmdir "$lock" 2>/dev/null || true
+    # Keep an incumbent unless we positively observed its PID with a different
+    # start marker.  Unsupported/failed identity adapters are never stale proof.
+    if [ "$rc" -ne 0 ]; then
+      _heartbeat_election_release "$lock"
       return 3
     fi
-    rm -f "$owner" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; return 1; }
-    rmdir "$leader" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; return 1; }
+    rm -f "$owner" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
+    rmdir "$leader" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
   fi
   if ! _mkdir_claim "$leader"; then
-    rmdir "$lock" 2>/dev/null || true
+    _heartbeat_election_release "$lock"
     return 1
   fi
   record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" --arg token "$token" --arg sink "$sink" \
@@ -1808,7 +1901,7 @@ _heartbeat_claim() {
     rm -f "$owner" 2>/dev/null || true
     rmdir "$leader" 2>/dev/null || true
   fi
-  rmdir "$lock" 2>/dev/null || true
+  _heartbeat_election_release "$lock"
   [ "$rc" -eq 0 ]
 }
 
@@ -1886,7 +1979,7 @@ _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
     if _mkdir_claim "$lock"; then
       restore_id="restore.${session_id}.${model_generation}"
       if _model_pin_append "$session_id" "$model_generation" restore-attempt "$requested->$observed"; then
-        if _session_model_restore "$lane" "$endpoint" "$resolved" "$restore_id"; then
+        if _session_model_restore "$lane" "$endpoint" "$resolved" "$restore_id" "$session_id"; then
           _model_pin_append "$session_id" "$model_generation" restore-receipt "$restore_id" >/dev/null 2>&1 || result=unknown
           [ "$result" = unknown ] || result=restored
         else
@@ -1937,12 +2030,14 @@ _heartbeat_tick() {
     _heartbeat_emit_attached "$line state=unknown" >/dev/null 2>&1 || true
     return 1
   }
-  _heartbeat_cursor_write render "$generation" || return 1
+  _wake_consume || true
   if ! _heartbeat_emit_attached "$line"; then
     _wake_append "$(jq -cn --arg event_id "heartbeat.$generation.attached" --arg generation "$generation" \
       '{event_id:$event_id,kind:"heartbeat-sink",generation:$generation,state:"unknown",task_summary:"attached heartbeat sink unavailable"}')" >/dev/null 2>&1 || true
     return 1
   fi
+  # render.cursor is a delivery acknowledgement, never an intent marker.
+  _heartbeat_cursor_write render "$generation" || return 1
   [ "$wake_ok" -eq 1 ]
 }
 
@@ -2000,6 +2095,7 @@ _heartbeat_beacon() {
 
 _heartbeat_start() {
   local token executable sink="${OSRC_HEARTBEAT_SINK:-}"
+  [ "$OSRC_PLATFORM" != "windows" ] || return 1
   [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ] && return 0
   _mkdir_private "$OSRC_HEARTBEAT" || return 1
   if [ -z "$sink" ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; }; then sink="/dev/tty"; fi
@@ -3859,7 +3955,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
   printf '%s' "$id"
 }
@@ -4132,8 +4228,8 @@ _resolve_run_cost() {
       # $0 there would UNDERSTATE real spend (cash-lane under-report guard). Leave it unmeasured so the
       # Tab counts it under "cash lanes, est-only" (honest) instead of "$0 measured" (false).
       case "$lane" in
-        or) real_cost="" ;;                 # cash OpenRouter, unmeasurable -> unmeasured, NOT "free"
-        *)  real_cost="0.000000" ;;         # native / keyless / local / plan -> genuinely no cash
+        or|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
   fi
@@ -7233,6 +7329,10 @@ _fallback_disp_lane() {
   esac
 }
 
+_fallback_provider_for_lane() {
+  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp) printf '%s' "$1" ;; *) return 1 ;; esac
+}
+
 # _fallback_effective <alias> <model> <lane> -> "model@lane" this candidate would ACTUALLY run as
 # under the current provider. Mirrors route_delegate's availability-aware reroute: under the devin
 # provider an OpenRouter alias with a Devin-lane sibling (glm, deepseek) is rerouted onto the
@@ -7344,8 +7444,10 @@ _route_requires_confirmation() {
   # dry-run, the detached job child, and any nested delegation inherit the top-level decision.
   [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 1
   [ "${OSRC_STREAM:-0}" = "1" ] && return 1
-  [ "${OUTSOURCERER_DEPTH:-0}" != "0" ] && return 1
+  [ "${_ROUTE_ENTRY_DEPTH:-${OUTSOURCERER_DEPTH:-0}}" != "0" ] && return 1
+  # Naming a provider OR a model is itself an explicit lane choice — only a pure default confirms.
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] && return 1
+  [ "${ROUTE_MODEL_EXPLICIT:-0}" = "1" ] && return 1
   case "${ROUTE_COST_CLASS:-}" in limited|credits) return 0 ;; esac
   return 1
 }
@@ -7376,6 +7478,18 @@ _route_receipt() {
     "$ROUTE_LANE" "$ROUTE_MODEL" "$PROVIDER" >&2
 }
 
+_route_provider_default_model() { # Provider-specific route identity, never parser state.
+  case "$1" in
+    devin) printf '%s' "$DEFAULT_MODEL" ;;
+    gemini|gm) printf 'gemini-3.1-flash-lite' ;;
+    local) printf 'local' ;;
+    cc|codex) printf 'z-ai/glm-5.2' ;;
+    claudex) printf 'gpt-5.6-sol' ;;
+    droid|cursor|hermes|warp) printf '%s-default' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Route a one-shot delegation. THE MODEL CHOOSES THE LANE: an alias/id in the table
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
@@ -7396,6 +7510,8 @@ route_delegate() {
   if ! _osrc_normalize_depth; then
     die "recursion guard: OUTSOURCERER_DEPTH is unparseable ('$_depth_raw'). An unparseable depth cannot be trusted (a delegate controls its own environment), so the guard refuses rather than fail-open. Set OUTSOURCERER_DEPTH to a non-negative integer or unset it."
   fi
+  # Confirmation authorizes this invocation, not the incremented child depth.
+  local _ROUTE_ENTRY_DEPTH="$OUTSOURCERER_DEPTH"
   # Normalize the MAXIMUM too, and fail closed on a malformed one. Comparing against the raw
   # maximum let a delegate escape the guard by poisoning OUTSOURCERER_MAX_DEPTH (a non-integer
   # makes `[ n -ge bogus ]` error and return false -> fail-open). Same reasoning as the depth.
@@ -7437,6 +7553,11 @@ route_delegate() {
   # Preserve original argv for the devin lane (kept byte-identical: it re-parses via parse_model).
   local ORIG=(${ARGV[@]+"${ARGV[@]}"})
   _consume_flags ${ARGV[@]+"${ARGV[@]}"}   # sets MODEL / MODEL_EXPLICIT / TIER_FLAG / WITH_SPEC / REST (+ OSRC_TIER_OVERRIDE)
+  # Parsers preserve absence as empty. Resolve a route identity here, after the
+  # provider is known, so a Devin default never leaks into Gemini or local.
+  if [ "$MODEL_EXPLICIT" != "1" ]; then
+    MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
+  fi
 
   # LOCAL lane short-circuit: a model prefixed ollama:/lmstudio:/lms:/local[:...], or --provider local.
   # Local models aren't in the alias table (they're whatever the user has pulled), so route them here.
@@ -7696,7 +7817,10 @@ route_delegate() {
   # Rebuild argv: pin the candidate (a known alias routes to its native lane via the table), keep
   # the caller's tier/effort/with/downgrade flags, drop any original -m/--provider. One-shot env
   # flags already consumed into process state (--cloud-ack, --trust-lane, --wait) carry over as-is.
-  local _fb_new=(-m "$_fb_alias") _fb_w
+  local _fb_provider; _fb_provider="$(_fallback_provider_for_lane "$_fb_lane")" || return "$_fb_rc"
+  # A fallback is a new resolved route. Rebuild provider and provenance together,
+  # never carry an old explicit provider label onto another lane.
+  local _fb_new=(--provider "$_fb_provider" -m "$_fb_alias") _fb_w
   [ -n "${TIER_FLAG:-}" ] && _fb_new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _fb_new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _fb_new+=(--allow-downgrade)
@@ -7755,7 +7879,7 @@ _session_probe_help() {
 }
 
 _session_launch_adapter() {
-  local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli=""
+  local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli="" resolved_model="" de=""
   SESSION_LAUNCH=()
 
   case "$provider" in
@@ -7770,11 +7894,16 @@ _session_launch_adapter() {
       printf '%s\n' "$help_text" | grep -Eqi -- '--auto.*low.*medium.*high' \
         || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
       SESSION_LAUNCH=("droid" "--auto" "medium")
+      if [ -n "$EFFORT" ]; then
+        de="$(_droid_effort "$EFFORT")"; [ -n "$de" ] || _session_launch_error "$provider" "unsupported reasoning effort"
+        SESSION_LAUNCH+=("-r" "$de")
+      fi
       if [ "$MODEL_EXPLICIT" = "1" ]; then
+        resolved_model="$(_lane_model_for droid "$MODEL")" || _session_launch_error "$provider" "cannot resolve model"
         if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
-          SESSION_LAUNCH+=("--model" "$MODEL")
+          SESSION_LAUNCH+=("--model" "$resolved_model")
         elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$).*model'; then
-          SESSION_LAUNCH+=("-m" "$MODEL")
+          SESSION_LAUNCH+=("-m" "$resolved_model")
         else
           _session_launch_error "$provider" "help does not advertise an interactive model override"
         fi
@@ -7856,14 +7985,18 @@ _session_resolved_model() { # <provider> <requested-model>
 }
 
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start=""
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
   case "$generation" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$event" = start ]; then
+    pid="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null)" || pid=""
+    [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
+  fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
-    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" --argjson generation "$generation" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),owner:"managed",ts:$ts}')" || return 1
+    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg ts "$now" --argjson generation "$generation" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),owner:"managed",ts:$ts}')" || return 1
   _state_append "$OSRC_SESSION_REGISTRY" "$record"
 }
 
@@ -7899,17 +8032,36 @@ _session_model_receipt() { # <lane> <pane> <restore-id>
 }
 _session_model_restore_devin() { # <pane> <model>
   tmux send-keys -t "$1" M-m || return 1
-  tmux send-keys -t "$1" -l "$2" || return 1
+  tmux send-keys -t "$1" -l -- "$2" || return 1
   tmux send-keys -t "$1" Enter
 }
-_session_model_restore() { # <lane> <endpoint> <requested> <restore-id>
-  local lane="$1" endpoint="$2" requested="$3" restore_id="$4" pane composer receipt
+_managed_endpoint_live() { # <session-id> <pane>
+  local session_id="$1" pane="$2" record pid start
+  record="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -c --arg id "$session_id" 'select(.event=="start" and .session_id==$id and (.harness_pid|type)=="string" and (.pid_start|type)=="string")' | tail -1)" || return 1
+  pid="$(printf '%s' "$record" | jq -r '.harness_pid // empty')"; start="$(printf '%s' "$record" | jq -r '.pid_start // empty')"
+  [ -n "$pid" ] && [ -n "$start" ] && _claimed_endpoint_live "$pane" "$pid" "$start"
+}
+
+_session_model_restore() { # <lane> <endpoint> <requested> <restore-id> <session-id>
+  local lane="$1" endpoint="$2" requested="$3" restore_id="$4" session_id="$5" pane composer receipt key latest
+  [ "$OSRC_PLATFORM" != "windows" ] || return 1
   case "$endpoint" in tmux:*) pane="${endpoint#tmux:}" ;; *) return 1 ;; esac
+  _managed_endpoint_live "$session_id" "$pane" || return 1
+  latest="$(_obligation_latest_state "$restore_id")"; [ "$latest" != typing_started ] || { _obligation_delivery_unknown "$restore_id" "$session_id"; return 1; }
+  _obligation_admit "$restore_id" "$session_id" || return 1
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
   composer="$(_external_composer_state "$pane" 2>/dev/null)"
-  [ "$composer" = empty ] || return 1
-  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || return 1 ;; *) return 1 ;; esac
+  [ "$composer" = empty ] || { _endpoint_mutation_unlock "$key"; return 1; }
+  _obligation_append "$restore_id" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
+  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1; } ;; *) _endpoint_mutation_unlock "$key"; return 1 ;; esac
   receipt="$(_session_model_receipt "$lane" "$pane" "$restore_id" 2>/dev/null)"
-  [ -n "$receipt" ] && [ "$receipt" != unknown ]
+  if [ -n "$receipt" ] && [ "$receipt" != unknown ]; then
+    _obligation_append "$restore_id" "$session_id" submitted "$receipt" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1; }
+    _endpoint_mutation_unlock "$key"; return 0
+  fi
+  _obligation_delivery_unknown "$restore_id" "$session_id"; _endpoint_mutation_unlock "$key"; return 1
 }
 
 _model_pin_append() { # <session-id> <generation> <event> [detail]

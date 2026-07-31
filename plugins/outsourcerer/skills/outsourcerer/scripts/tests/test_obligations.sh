@@ -12,4 +12,13 @@ state="$(_obligation_latest_state reply.external-3.$(printf payload | cksum | aw
 grep -q 'delivery unknown' "$OSRC_WAKE_QUEUE" && ok "ambiguous delivery is escalated" || bad "ambiguous delivery was not escalated"
 before="$(wc -l < "$LOG" | tr -d ' ')"; _external_reply external-3 payload >/dev/null 2>&1 || true; after="$(wc -l < "$LOG" | tr -d ' ')"
 [ "$before" = "$after" ] && ok "delivery_unknown never auto-replays" || bad "delivery_unknown replayed"
+( _obligation_admit concurrent-1 external-3 ) & p1=$!
+( _obligation_admit concurrent-1 external-3 ) & p2=$!
+wait "$p1"; r1=$?; wait "$p2"; r2=$?
+rows="$(_state_jsonl_read "$OSRC_OBLIGATIONS" | jq -r 'select(.obligation_id=="concurrent-1" and .state=="pending") | 1' | wc -l | tr -d ' ')"
+[ "$rows" = 1 ] && { [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; } && ok "concurrent admission creates one durable obligation" || bad "concurrent admission was not atomic (rows=$rows rc=$r1/$r2)"
+crash_oid="reply.external-3.$(printf crash-point | cksum | awk '{print $1}')"
+_obligation_append "$crash_oid" external-3 typing_started ""
+before="$(wc -l < "$LOG" | tr -d ' ')"; _external_reply external-3 crash-point >/dev/null 2>&1 || true; after="$(wc -l < "$LOG" | tr -d ' ')"
+[ "$(_obligation_latest_state "$crash_oid")" = delivery_unknown ] && [ "$before" = "$after" ] && ok "post-typing crash recovers as delivery_unknown without replay" || bad "post-typing crash recovery replayed or stayed pending"
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
