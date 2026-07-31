@@ -80,6 +80,11 @@
 #                     no advise scoring, no session mode.
 #   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
 #                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
+#   cline             Cline CLI (https://github.com/cline/cline). Engine lane: -m passes through
+#                     verbatim to cline's own provider/model catalog. The FREE `cline` OAuth provider
+#                     (enabled by `cline auth cline`) serves deepseek-v4-flash + glm-5.2 at $0 cash.
+#                     Posture is binary: --plan = read-only, default act mode auto-approves all tools
+#                     (no OS sandbox, no graded rung); reasoning effort maps to --thinking.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
 # Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
 # hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
@@ -495,7 +500,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -787,7 +792,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|hermes|warp|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|warp|cline|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -1189,7 +1194,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -1838,7 +1843,7 @@ cmd_tab() {
       (.lane // "") as $l | (.provider // "") as $p | (.verb // "") as $v
       | if ($l == "local") or ($p == "local") then "free"
         elif $l == "dv" then (if (cashnum > 0) then "cash" else "plan" end)
-        elif ($l | test("^(cx|cc|gm|droid|cursor|hermes|warp)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
+        elif ($l | test("^(cx|cc|gm|droid|cursor|hermes|warp|cline)$")) or ($p | test("codex-native|claude-native|antigravity")) or ($v == "image" and $p == "codex") then "plan"
         else "cash" end;
     def realcost: (.cost_usd // "") as $c
       | if ($c == "") or ($c | startswith("~")) then null else ($c | tonumber? // null) end;
@@ -1964,6 +1969,7 @@ _ready_lanes() {
   have claude && lanes="$lanes claude=native"
   have droid && lanes="$lanes droid=byok"
   have cursor-agent && lanes="$lanes cursor=subscription"
+  have cline && lanes="$lanes cline=free-oauth"
   _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
   printf '%s\n' "${lanes# }"
 }
@@ -3110,7 +3116,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -3374,7 +3380,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -4501,7 +4507,7 @@ _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
     gm) disp=gmnative ;;
     dv) disp=devin ;;
     or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
-    droid|cursor|hermes|warp|claudex) disp="$elane" ;;
+    droid|cursor|hermes|warp|cline|claudex) disp="$elane" ;;
     *) disp="${tlane:-$PROVIDER}" ;;
   esac
   if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
@@ -5191,6 +5197,61 @@ delegate_warp() {
   return "$rc"
 }
 
+# =============================================================================
+# CLINE LANE (Cline CLI, https://github.com/cline/cline). Engine lane: -m
+# passes through VERBATIM to cline's own provider/model catalog (the user's
+# configured Cline account, incl. the FREE `cline` OAuth provider which currently
+# serves deepseek-v4-flash and glm-5.2 at $0 cash). Cloud lane (Cline's backend +
+# the model API) -> full cloud gate applies. Billing: your Cline plan / the
+# provider keys configured in ~/.cline (the free `cline` provider is OAuth, $0).
+#
+# Cline exposes a BINARY posture, not graded autonomy: `--plan` is read-only (no
+# edits/commands applied), and the default "act" mode auto-approves ALL tools
+# (`--auto-approve` defaults to true). There is no OS sandbox and no middle
+# approval rung, so edit/research/yolo all map to act mode and the trade is
+# disclosed in the posture banner, never silent. Reasoning effort maps natively
+# to `--thinking` (none|low|medium|high|xhigh).
+# =============================================================================
+
+# _cline_effort <ours> -> cline --thinking value. Ours: minimal..max.
+_cline_effort() {
+  case "$1" in minimal) echo "none" ;; low) echo "low" ;; medium) echo "medium" ;;
+    high) echo "high" ;; xhigh|max) echo "xhigh" ;; *) echo "" ;; esac
+}
+
+delegate_cline() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline."
+  # Cline posture: --plan = read-only (no edits/commands applied, but tools auto-approved so they
+  # RUN in non-interactive mode — --auto-approve false would block ALL tools headlessly); default
+  # act mode auto-approves all tools (--auto-approve defaults true). No OS sandbox, no graded rung.
+  local pflag=() posture
+  case "$tier" in
+    auto)         pflag=(--plan);            posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless)" ;;
+    accept-edits) pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true: edits + commands auto-applied)" ;;
+    autonomous)   pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true; cline has no separate OS-sandbox exec mode)" ;;
+    dangerous)    pflag=(--auto-approve true);         posture="DANGER (act mode, --auto-approve true: all tools auto-approved, no sandbox)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  # Engine lane: -m passes through verbatim (Cline owns its provider/model catalog; a
+  # "provider/model" string is accepted by -m directly, e.g. deepseek/deepseek-v4-flash).
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(-m "$id"); else id="(cline default/configured)"; fi
+  local eff=()
+  if [ -n "$EFFORT" ]; then local ce; ce="$(_cline_effort "$EFFORT")"
+    [ -n "$ce" ] && { eff=(--thinking "$ce"); printf '>>> [effort] reasoning=%s (native: cline --thinking %s)\n' "$EFFORT" "$ce" >&2; }; fi
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-cline}" "$task" "$ttier")"
+  _tier_banner "cline (Cline CLI)" "$id" "$ttier" "$posture, bills your Cline plan / the keys in ~/.cline (the 'cline' OAuth provider is FREE: deepseek-v4-flash + glm-5.2 at \$0 cash)"
+  local rc=0
+  cline ${pflag[@]+"${pflag[@]}"} ${mflag[@]+"${mflag[@]}"} ${eff[@]+"${eff[@]}"} "$wrapped" || rc=$?
+  record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task"
+  printf '>>> [receipt] ran on YOUR cline setup (Cline plan / the provider configured in ~/.cline; the free `cline` OAuth provider serves deepseek-v4-flash + glm-5.2 at \$0 cash), no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -5556,7 +5617,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
-    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|claudex) return 0 ;;
+    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline|claudex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -6556,7 +6617,7 @@ route_delegate() {
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -6582,7 +6643,7 @@ route_delegate() {
   fi
 
   local disp="" _or_autoroute_note="" _or_credit_state=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
@@ -6591,6 +6652,7 @@ route_delegate() {
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
+      cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline." ;;
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -6653,7 +6715,7 @@ route_delegate() {
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
       gemini|gm) disp=gmnative ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local)" ;;
     esac
   fi
 
@@ -6740,6 +6802,7 @@ route_delegate() {
       cursor)   delegate_cursor   "$tier" ;;
       hermes)   delegate_hermes   "$tier" ;;
       warp)     delegate_warp     "$tier" ;;
+      cline)    delegate_cline    "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
@@ -6872,13 +6935,16 @@ _winpty_session() {
         hermes)
           have hermes || die "hermes not on PATH (needed for a hermes session)"
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("hermes" "chat" "--model" "$MODEL"); else LAUNCH=("hermes" "chat"); fi ;;
+        cline)
+          have cline || die "cline not on PATH (needed for a cline session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("cline" "-m" "$MODEL"); else LAUNCH=("cline"); fi ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("$gveh" "--model" "$MODEL"); else LAUNCH=("$gveh"); fi ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
@@ -7021,13 +7087,16 @@ session() {
         hermes)
           have hermes || die "hermes not on PATH (needed for a hermes session)"
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="hermes chat --model '$MODEL'"; else launch="hermes chat"; fi ;;
+        cline)
+          have cline || die "cline not on PATH (needed for a cline session)"
+          if [ "$MODEL_EXPLICIT" = "1" ]; then launch="cline -m '$MODEL'"; else launch="cline"; fi ;;
         gemini|gm)
           local gveh="${OSRC_GEMINI_VEHICLE:-}"
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model '$MODEL'"; else launch="$gveh"; fi ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
@@ -7329,7 +7398,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -7425,6 +7494,21 @@ doctor() {
     fi
   else
     echo "    hermes state.db: absent — never run, cost receipts use estimates until first session"
+  fi
+  echo "  -- Cline lane (Cline CLI, engine lane: -m passes through verbatim; FREE `cline` OAuth provider) --"
+  if have cline; then
+    local _cver; _cver="$(cline --version 2>/dev/null | head -1 || echo present)"
+    local _cprov=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cprov="$(jq -r '.lastUsedProvider // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
+    local _cmod=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cmod="$(jq -r --arg p "$_cprov" '.providers[$p].settings.model // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
+    echo "    cline: $_cver — route: --provider cline [-m <model>] run \"task\". Engine lane: -m passes through verbatim to cline's provider/model catalog."
+    if [ -n "$_cprov" ]; then
+      echo "      configured provider: '$_cprov'${_cmod:+ (default model: $_cmod)}"
+      [ "$_cprov" = "cline" ] && echo "      note: the 'cline' OAuth provider is FREE (\$0 cash): serves deepseek-v4-flash + glm-5.2. Pass -m deepseek/deepseek-v4-flash or -m z-ai/glm-5.2 to pin one."
+    else
+      echo "      configured provider: not detected (run 'cline auth cline' once to enable the FREE OAuth provider)"
+    fi
+  else
+    echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' once (FREE OAuth provider: deepseek-v4-flash + glm-5.2 at \$0 cash)"
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
@@ -7921,7 +8005,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
                   PROVIDER="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -7986,7 +8070,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
   esac
 }
 main "$@"

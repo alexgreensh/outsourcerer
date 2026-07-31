@@ -86,6 +86,30 @@ needs no key). Symmetrically `-m fable --provider codex` dies (Claude-backend-on
 "…"` and `run -m sol "…"` need no `--provider` at all. See the full alias/lane/tier map:
 `outsourcerer.sh models --refresh`.
 
+## Cline lane: the FREE `cline` OAuth provider (`--provider cline`)
+
+`--provider cline` delegates through the Cline CLI (https://github.com/cline/cline) the user
+already runs, with the models THEY configured in `~/.cline`. This is the "work with MY tools" lane
+for Cline users, and it is the **free-tier standout**: the `cline` OAuth provider (enabled by
+`cline auth cline`) currently serves **`deepseek/deepseek-v4-flash`** and **`z-ai/glm-5.2`** at
+**$0 cash** — no API key, no OpenRouter credits, no plan-limit spend on Claude/ChatGPT. Full
+outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
+
+- `-m <name>` passes through **verbatim** to cline; the alias table never rewrites it. No `-m` =
+  cline's configured default (read from `~/.cline/data/settings/providers.json`).
+- **Free models:** `-m deepseek/deepseek-v4-flash` and `-m z-ai/glm-5.2` on the `cline` provider.
+  Both are `capable` tier (frontier capability, budget price — here $0).
+- **Posture is BINARY, not graded:** `run`/`explore` → `--plan` (read-only, no edits/commands
+  applied); `edit`/`research`/`yolo` → default act mode with `--auto-approve true` (all tools
+  auto-approved). Cline has **no OS sandbox and no middle approval rung** — the trade is disclosed
+  in the posture banner, never silent. Treat `research`/`yolo` on cline as fully autonomous with no
+  sandbox boundary; prefer `run` (plan mode) for read-only inspection.
+- `--effort` is **native** on cline (`--thinking none|low|medium|high|xhigh`).
+- Billing: your Cline plan / the provider keys in `~/.cline`. The `cline` OAuth provider is $0
+  cash. Cloud lane → full cloud gate + secret-scan apply.
+- Auth: `cline auth cline` once (OAuth, enables the free provider). `doctor` shows install/auth
+  state and reads the configured provider + default model.
+
 ## Gemini / Antigravity lane, text delegation + visual review + image gen
 
 `gemini-pro` / `gemini-flash` / `gemini-flash-lite` are model-alias-selected exactly like
