@@ -129,8 +129,7 @@ if printf '%s' "$out" | jq -e '.category == "simple"' >/dev/null 2>&1; then ok "
 err_msg="$(bash -c '. "$0" >/dev/null 2>&1; cmd_advise "" 2>&1' "$SRC" 2>&1)"
 if printf '%s' "$err_msg" | grep -q 'advise needs a task'; then ok "advise rejects empty task"; else bad "advise accepts empty task: '$err_msg'"; fi
 
-# === 12. cmd_advise recommendation meets threshold (code task, threshold 60). ===
-# With synthetic data, sol (77.4) meets code threshold 60 and should be recommended over haiku (43.9).
+# === 12. cmd_advise recommendation favors capable value above the threshold. ===
 cat > "$TMP/benchmarks.json" <<'BJSON'
 {
   "data": [
@@ -143,9 +142,13 @@ cat > "$TMP/benchmarks.json" <<'BJSON'
 BJSON
 json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
 rec_alias="$(printf '%s' "$json" | jq -r '.recommendation.alias')"
-# sol has the highest coding_index (77.4) among subscription lanes (cost=0, so value ratio = score*100).
-# It should be the recommendation.
-if [ "$rec_alias" = "sol" ] || [ "$rec_alias" = "gpt-5.6-sol" ]; then ok "advise recommends sol for code (score 77.4, meets threshold 60)"; else bad "advise recommended '$rec_alias' instead of sol"; fi
+# The capable GLM lane clears the coding threshold and is preferred over a frontier model that is
+# unnecessary for this medium-effort task.
+if [ "$rec_alias" = "glm" ] || [ "$rec_alias" = "glm-5.2" ] || [ "$rec_alias" = "z-ai/glm-5.2" ]; then
+  ok "advise recommends capable value for ordinary code work"
+else
+  bad "advise recommended '$rec_alias' instead of a capable GLM lane"
+fi
 
 # === 13. Image lanes are excluded from advisory. ===
 out="$(cmd_advise "refactor the authentication module" 2>&1)"

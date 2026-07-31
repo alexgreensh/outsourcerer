@@ -103,17 +103,19 @@
 #
 # REASONING EFFORT is a parameter everywhere: --effort minimal|low|medium|high|xhigh|max (alias
 # --reasoning), or OUTSOURCERER_EFFORT. Native on codex lanes (model_reasoning_effort) and Claude
-# lanes (MAX_THINKING_TOKENS); advisory on gemini. The dispatch banner states which. See effort-and-tiers.md.
-# CAPABILITY TIER != price: glm-5.2/hy3/deepseek are `capable` (frontier capability, budget price,
+# lanes (MAX_THINKING_TOKENS); a prompt input on every lane, with an advisory receipt where no native
+# knob exists. The dispatch banner states which. See effort-and-tiers.md.
+# CAPABILITY TIER != price: glm-5.2/hy3/deepseek/kimi are `capable` (frontier capability, budget price,
 # ~Opus-4.8 class) and get the thin frontier wrapper, not the budget worker-drone scaffold.
 # Model is a parameter everywhere. Default is overridable via OUTSOURCERER_MODEL.
 # Plan-limit status on Devin CHANGES over time, this script never hardcodes it; use `models`.
 #
 # MODEL ADVISORY (which model should I use?):
-#   advise [--refresh] [--json] "<task>"   Classifies your task (code/reasoning/agentic/creative/
+#   advise [--refresh] [--json] [--effort LEVEL] "<task>"   Classifies your task (code/reasoning/agentic/creative/
 #   simple), scores every known model against live benchmark data (OpenRouter benchmarks API:
 #   intelligence/coding/agentic indices + pricing), and recommends the best value model that meets
-#   the capability threshold for the task type. Explains WHY it picked that model. Use --refresh to
+#   the capability threshold for the task type. Capable value leads unless effort/task requirements
+#   call for a frontier. Explains WHY it picked that model. Use --refresh to
 #   pull fresh benchmark data (needs OPENROUTER_API_KEY in ~/.env). Without benchmarks, falls back to
 #   tier-based proxy scores. Pair with `suggest` for price-only discovery, `estimate` for cost quotes.
 #   TRANSPORT FALLBACK (read-only): when run/explore dies on a transport-class failure (429/rate
@@ -352,7 +354,7 @@ cmd_mode() {
 OSRC_TIER_OVERRIDE="${OUTSOURCERER_TIER:-}"
 # Reasoning effort: --effort/--reasoning flag (parsed in _consume_flags) or OUTSOURCERER_EFFORT env.
 # Empty = each lane's own default. Honored natively on codex lanes (model_reasoning_effort) and
-# Claude lanes (MAX_THINKING_TOKENS); advisory (prompt hint) on gemini. NEVER silently dropped.
+# Claude lanes (MAX_THINKING_TOKENS), and included in every dispatched prompt. NEVER silently dropped.
 EFFORT="${OUTSOURCERER_EFFORT:-}"
 
 # ---- Layer-2 model table (A1/A2): "alias|resolved-id|lane|tier".
@@ -393,7 +395,8 @@ glm-5.2|glm-5.2|dv|capable
 swe|swe-1.7|dv|capable
 swe-1.7|swe-1.7|dv|capable
 swe-1.7-lightning|swe-1.7-lightning|dv|mid
-kimi|kimi-k2.7|dv|capable
+kimi|kimi-k3|dv|capable
+kimi-k3|kimi-k3|dv|capable
 kimi-k2.7|kimi-k2.7|dv|capable
 gemini-pro|gemini-3.1-pro-preview|gm|frontier
 gemini-3.1-pro-preview|gemini-3.1-pro-preview|gm|frontier
@@ -525,6 +528,7 @@ _devin_model_for() {
   case "$1" in
     glm|z-ai/glm-5.2|glm-5.2) printf 'glm-5.2' ;;
     deepseek|deepseek/deepseek-v4-pro) printf 'deepseek-v4-pro' ;;
+    kimi|kimi-k3) printf 'kimi-k3' ;;
     *) printf '' ;;
   esac
 }
@@ -549,6 +553,18 @@ _devin_resolve_model() {
   printf '%s' "$m"
 }
 
+# Resolve aliases whose accepted model id differs by engine lane. Unknown model ids remain under
+# the engine's control because Droid and Warp also support user-configured catalogs.
+_lane_model_for() {
+  local lane="${1:-}" model="${2:-}"
+  case "$lane:$model" in
+    devin:kimi|devin:kimi-k3|dv:kimi|dv:kimi-k3|droid:kimi|droid:kimi-k3|warp:kimi|warp:kimi-k3)
+      printf 'kimi-k3' ;;
+    devin:*|dv:*) _devin_resolve_model "$model" ;;
+    *) printf '%s' "$model" ;;
+  esac
+}
+
 # LIVE model list via an intentionally invalid model probe (cheap: errors before running a task).
 # The probe model is invalid ON PURPOSE, so devin exits nonzero, `|| true` keeps pipefail from
 # leaking that expected failure to the caller (otherwise `doctor` exits 1 on a clean run).
@@ -562,10 +578,10 @@ delegate() {
   local sandbox="${1:-}"; shift || true
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
-  local prompt="${REST[*]}"
+  local prompt; prompt="$(_effort_prompt "${REST[*]}")"
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
-  [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory only: Devin lane has no native effort knob; not sent to the CLI)\n' "$EFFORT" >&2
+  [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory: prompt directive; Devin lane has no native effort knob)\n' "$EFFORT" >&2
   need_devin
   logged_in || die "Not logged in to Devin. Run interactively:  ! devin auth login"
   local sbx=(); [ -n "$sandbox" ] && sbx=(--sandbox)
@@ -1175,8 +1191,18 @@ and refine after. A run that only reads/greps and never writes a file has FAILED
 OSRCEOF
 }
 
+_effort_prompt() {
+  local task="$1"
+  if [ -n "${EFFORT:-}" ]; then
+    printf 'Reasoning effort: %s. Match the depth of analysis and thinking to this level.\n\n%s' "$EFFORT" "$task"
+  else
+    printf '%s' "$task"
+  fi
+}
+
 _build_prompt() {
   local id="$1" task="$2" ttier="${3:-}" tier pre disc
+  task="$(_effort_prompt "$task")"
   tier="$(resolve_tier "$id" "$ttier")"
   pre="$(build_with_preamble)"; disc="$(_build_discipline)"
   { [ -n "$pre" ] && printf '%s\n\n' "$pre"; [ -n "$disc" ] && printf '%s\n' "$disc"; wrap_prompt "$tier" "$task"; }
@@ -3003,16 +3029,54 @@ _tier_score_proxy() {
   esac
 }
 
+# _task_difficulty <prompt> -> normal|hard. Several independent work signals indicate that selection
+# should favor a near-frontier capable model instead of treating the request as a single operation.
+_task_difficulty() {
+  local prompt="$*" lc hits
+  lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
+  hits="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CODE|$_TASK_KW_REASONING|$_TASK_KW_AGENTIC" 2>/dev/null | wc -l | tr -d ' ')"
+  hits="${hits:-0}"
+  if [ "$hits" -ge 4 ] || [ "${#prompt}" -ge 240 ]; then printf 'hard'; else printf 'normal'; fi
+}
+
+# _frontier_needed <task> <effort> -> true when the request explicitly calls for the frontier.
+_frontier_needed() {
+  local task="$1" effort="$2" lc
+  [ "$effort" = "max" ] && return 0
+  lc="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
+  printf '%s' "$lc" | grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof'
+}
+
+# _score <base> <tier> <category> <effort> <difficulty> <model> -> selection score.
+# Capable models get a value preference, Kimi K3 gets a hard-work near-frontier adjustment, and an
+# explicit frontier requirement outweighs both. Benchmark and history remain the base evidence.
+_score() {
+  local base="$1" tier="$2" category="$3" effort="$4" difficulty="$5" model="$6"
+  awk -v s="$base" -v t="$tier" -v c="$category" -v e="$effort" -v d="$difficulty" -v m="$model" '
+    BEGIN {
+      if (t == "capable") s += 8
+      if (t == "capable" && (e == "high" || e == "xhigh")) s += 2
+      if (m == "kimi-k3" && d == "hard" && c != "creative") s += 20
+      if (e == "max" && t == "frontier") s += 30
+      printf "%.4f", s
+    }'
+}
+
 # cmd_advise: task-aware model recommendation with benchmark data.
-# Usage: advise [--refresh] [--json] "<task prompt>"
+# Usage: advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
 # Classifies the task, scores all known models, recommends the best value model
 # that meets the capability threshold. Explains WHY it picked that model.
 cmd_advise() {
-  local do_refresh=0 json_out=0 task=""
+  local do_refresh=0 json_out=0 task="" selection_effort="${OUTSOURCERER_EFFORT:-}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --refresh) do_refresh=1; shift ;;
       --json)    json_out=1; shift ;;
+      --effort|--reasoning)
+                 [ -n "${2:-}" ] || die "advise: --effort needs minimal|low|medium|high|xhigh|max|none"
+                 case "$2" in minimal|low|medium|high|xhigh|max|none) selection_effort="$2" ;;
+                   *) die "advise: invalid effort '$2' (use minimal|low|medium|high|xhigh|max|none)" ;; esac
+                 shift 2 ;;
       --)        shift; task="${*:-}"; break ;;
       --*)       task="${task:+$task }$1"; shift ;;   # unknown --flags treated as task text
       *)         task="${task:+$task }$1"; shift ;;
@@ -3036,10 +3100,15 @@ cmd_advise() {
     fi
   fi
 
-  local category field threshold
+  local category field threshold difficulty frontier_needed=0
   category="$(_classify_task "$task")"
   field="$(_bench_score_field "$category")"
   threshold="$(_bench_threshold_for "$category")"
+  difficulty="$(_task_difficulty "$task")"
+  if [ -z "$selection_effort" ]; then
+    case "$difficulty" in hard) selection_effort=high ;; *) selection_effort=medium ;; esac
+  fi
+  _frontier_needed "$task" "$selection_effort" && frontier_needed=1
 
   # Score each candidate from the alias table.
   local results="" has_bench=0 bench_count=0 total_count=0
@@ -3070,6 +3139,7 @@ cmd_advise() {
     local _hm _mult; _hm="$(_history_mult "$lane" "$resolved" "$category")"; _mult="${_hm%%|*}"
     case "$_mult" in ''|*[!0-9.]*) _mult="1.00" ;; esac
     score="$(awk -v s="$score" -v m="$_mult" 'BEGIN{printf "%.4f", s*m}')"
+    score="$(_score "$score" "$tier" "$category" "$selection_effort" "$difficulty" "$resolved")"
     # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
     # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
     case "$lane" in cx|cc|dv|gm) price_in="0"; price_out="0" ;; esac
@@ -3088,7 +3158,9 @@ cmd_advise() {
   # Subscription lanes (cx/cc/dv/gm): ranked by score (cost is plan-limited, not comparable to per-token).
   # Paid lanes (or/codex): ranked by value ratio (score / cost_per_m).
   # Prefer subscription if it meets threshold; else best paid by value ratio; else highest score overall.
-  local rec_alias="" rec_resolved="" rec_lane="" rec_reason=""
+  local rec_alias="" rec_resolved="" rec_lane="" rec_tier="" rec_reason=""
+  local capable_best_alias="" capable_best_resolved="" capable_best_lane="" capable_best_tier="" capable_best_vr=-1
+  local frontier_best_alias="" frontier_best_resolved="" frontier_best_lane="" frontier_best_tier="" frontier_best_score=-1
   local sub_best_alias="" sub_best_resolved="" sub_best_lane="" sub_best_score=-1
   local paid_best_alias="" paid_best_resolved="" paid_best_lane="" paid_best_vr=-1
   local any_best_alias="" any_best_resolved="" any_best_lane="" any_best_score=-1
@@ -3099,6 +3171,18 @@ cmd_advise() {
       any_best_score="$score"; any_best_alias="$alias"; any_best_resolved="$resolved"; any_best_lane="$lane"
     }
     [ "$meets" = "1" ] || continue
+    if [ "$tier" = "capable" ]; then
+      awk -v v="$vr" -v b="$capable_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' && {
+        capable_best_vr="$vr"; capable_best_alias="$alias"; capable_best_resolved="$resolved"
+        capable_best_lane="$lane"; capable_best_tier="$tier"
+      }
+    fi
+    if [ "$tier" = "frontier" ]; then
+      awk -v s="$score" -v b="$frontier_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
+        frontier_best_score="$score"; frontier_best_alias="$alias"; frontier_best_resolved="$resolved"
+        frontier_best_lane="$lane"; frontier_best_tier="$tier"
+      }
+    fi
     case "$lane" in
       cx|cc|dv|gm)
         awk -v s="$score" -v b="$sub_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
@@ -3111,8 +3195,14 @@ cmd_advise() {
     esac
   done < <(printf '%s\n' "$results")
 
-  # Prefer subscription (if it meets threshold), then paid by value ratio, then highest score fallback.
-  if [ -n "$sub_best_alias" ]; then
+  # Prefer capable-tier value unless the task explicitly needs the frontier.
+  if [ "$frontier_needed" = "1" ] && [ -n "$frontier_best_alias" ]; then
+    rec_alias="$frontier_best_alias"; rec_resolved="$frontier_best_resolved"; rec_lane="$frontier_best_lane"; rec_tier="$frontier_best_tier"
+    rec_reason="frontier required (score $frontier_best_score, ${category} threshold $threshold, effort $selection_effort)"
+  elif [ -n "$capable_best_alias" ]; then
+    rec_alias="$capable_best_alias"; rec_resolved="$capable_best_resolved"; rec_lane="$capable_best_lane"; rec_tier="$capable_best_tier"
+    rec_reason="best capable-tier value (ratio $capable_best_vr, meets ${category} threshold $threshold, effort $selection_effort)"
+  elif [ -n "$sub_best_alias" ]; then
     rec_alias="$sub_best_alias"; rec_resolved="$sub_best_resolved"; rec_lane="$sub_best_lane"
     rec_reason="best subscription model (score $sub_best_score, meets ${category} threshold $threshold, plan-limited cost)"
   elif [ -n "$paid_best_alias" ]; then
@@ -3121,6 +3211,9 @@ cmd_advise() {
   else
     rec_alias="$any_best_alias"; rec_resolved="$any_best_resolved"; rec_lane="$any_best_lane"
     rec_reason="highest score (score $any_best_score, no model met ${category} threshold $threshold, consider escalating)"
+  fi
+  if [ -z "$rec_tier" ]; then
+    local _rec_row; _rec_row="$(resolve_model_row "$rec_alias")"; rec_tier="${_rec_row##*|}"
   fi
 
   # Determine benchmark data quality: live (majority), partial, or none.
@@ -3144,17 +3237,17 @@ cmd_advise() {
 
   # Ranked fallback shortlist: the SAME preference order the recommendation uses, as an ordered list so
   # a caller can retry the next candidate when the top pick hits a transport failure (rate limit / 5xx /
-  # timeout). Rank groups mirror the picker exactly — (0) subscription lanes meeting threshold by score,
-  # (1) paid lanes meeting threshold by value ratio, (2) everything else by score — so shortlist[0] IS
+  # timeout). Rank groups mirror the picker exactly: capable value leads normally, frontier leads when
+  # required, and everything below threshold follows by score, so shortlist[0] IS
   # the recommendation. Ordering only: this ranks candidates, it never asserts any of them will succeed.
   local _sl="" _slg _slp
   while IFS='|' read -r alias resolved lane tier score cost vr meets; do
     [ -n "$alias" ] || continue
-    case "$meets:$lane" in
-      1:cx|1:cc|1:dv|1:gm) _slg=0; _slp="$score" ;;
-      1:*)                 _slg=1; _slp="$vr" ;;
-      *)                   _slg=2; _slp="$score" ;;
-    esac
+    if [ "$frontier_needed" = "1" ]; then
+      case "$meets:$tier" in 1:frontier) _slg=0; _slp="$score" ;; 1:capable) _slg=1; _slp="$vr" ;; *) _slg=2; _slp="$score" ;; esac
+    else
+      case "$meets:$tier" in 1:capable) _slg=0; _slp="$vr" ;; 1:*) _slg=1; _slp="$score" ;; *) _slg=2; _slp="$score" ;; esac
+    fi
     _sl="$_sl$_slg|$_slp|$alias|$resolved|$lane|$meets|$score|$vr
 "
   done < <(printf '%s\n' "$results")
@@ -3173,11 +3266,12 @@ cmd_advise() {
     jq -n \
       --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
       --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
+      --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
       --argjson shortlist "$shortlist_json" \
-      '{task:$task, category:$category, score_field:$field, threshold:$threshold,
-        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, reason:$rec_reason},
+      '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
+        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, tier:$rec_tier, reason:$rec_reason},
         shortlist:$shortlist,
         benchmark_data_available:($has_bench=="1"),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
@@ -3188,6 +3282,8 @@ cmd_advise() {
     echo "== outsourcerer advise =="
     echo "   task: $task"
     echo "   category: $category"
+    echo "   difficulty: $difficulty"
+    echo "   effort: $selection_effort"
     echo "   scoring by: $field (threshold: $threshold)"
     if [ "$has_bench" = "1" ]; then
       echo "   benchmark data: live (OpenRouter, $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null), $bench_count/$total_count models)"
@@ -3216,8 +3312,8 @@ cmd_advise() {
         "$([ "$meets" = "1" ] && echo OK || echo 'below threshold')"
     done
     echo
-    echo "Run with:  $0 run -m $rec_alias \"$task\""
-    echo "Override:  $0 run -m <any-model> \"$task\"   (you know better, pick your own)"
+    echo "Run with:  $0 run -m $rec_alias --effort $selection_effort \"$task\""
+    echo "Override:  $0 run -m <any-model> --effort $selection_effort \"$task\"   (you know better, pick your own)"
   fi
 }
 
@@ -5602,12 +5698,8 @@ delegate_gmnative() {
   fi
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   # Effort is NATIVE on agy (it takes --effort and refuses to run without one for these models) and
-  # ADVISORY on gemini-cli, which still has no knob. Injecting the prompt directive on the agy path too
-  # would double-signal, so it is only added for the gemini-cli vehicle.
+  # ADVISORY on gemini-cli, which still has no knob. The shared prompt keeps effort visible to both.
   if [ -n "$EFFORT" ] && [ "$vehicle" != "agy" ]; then
-    wrapped="Reasoning effort: $EFFORT. Match your depth of analysis and thinking to this level.
-
-$wrapped"
     printf '>>> [effort] reasoning=%s (ADVISORY on the gemini lane: injected as a prompt directive; no native knob)\n' "$EFFORT" >&2
   fi
   local rc=0
@@ -5731,9 +5823,6 @@ delegate_claudex() {
   # enabled and the level is ALSO injected as a prompt directive (never silently dropped).
   if [ -n "$EFFORT" ]; then
     clean+=("CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1")
-    wrapped="Reasoning effort: $EFFORT. Match your depth of analysis and thinking to this level.
-
-$wrapped"
     printf '>>> [effort] reasoning=%s (claudex: CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1 + prompt directive)\n' "$EFFORT" >&2
   fi
   local tools=()
@@ -5780,7 +5869,7 @@ _droid_effort() {
 delegate_droid() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
-  local task="${REST[*]}" id="${MODEL:-}"
+  local task="${REST[*]}" id="${MODEL:-}" model_key="${MODEL:-droid}" ledger_model="droid-default"
   have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in."
   # droid exec autonomy: default = read-only; --auto low (read-only + safe cmds) / medium (edits +
   # safe cmds) / high (full auto). --skip-permissions-unsafe is sandbox-only and never used here.
@@ -5793,16 +5882,19 @@ delegate_droid() {
     *) die "bad tier: $tier" ;;
   esac
   local mflag=()
-  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(-m "$id"); else id="(droid default/configured)"; fi
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
+    id="$(_lane_model_for droid "$id")"; model_key="$id"; ledger_model="$id"
+    _validate_model_token "$id"; mflag=(-m "$id")
+  else id="(droid default/configured)"; fi
   local eff=()
   if [ -n "$EFFORT" ]; then local de; de="$(_droid_effort "$EFFORT")"
     [ -n "$de" ] && { eff=(-r "$de"); printf '>>> [effort] reasoning=%s (native: droid exec -r %s)\n' "$EFFORT" "$de" >&2; }; fi
-  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
-  local wrapped; wrapped="$(_build_prompt "${MODEL:-droid}" "$task" "$ttier")"
+  local ttier; ttier="$(resolve_tier "$model_key" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "$model_key" "$task" "$ttier")"
   _tier_banner "droid (Factory)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure droid)"
   local rc=0
   droid exec ${mflag[@]+"${mflag[@]}"} ${aflag[@]+"${aflag[@]}"} ${eff[@]+"${eff[@]}"} -o text "$wrapped" || rc=$?
-  record_ledger droid "${MODEL:-droid-default}" "$ttier" "$tier" "$task"
+  record_ledger droid "$ledger_model" "$ttier" "$tier" "$task"
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure droid)" >&2
   return "$rc"
 }
@@ -5897,7 +5989,7 @@ delegate_hermes() {
 delegate_warp() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
-  local task="${REST[*]}" id="${MODEL:-}"
+  local task="${REST[*]}" id="${MODEL:-}" model_key="${MODEL:-warp}" ledger_model="warp-default"
   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once)."
   # Warp's autonomy is a PROFILE property, not a per-run flag (`oz agent run` exposes no
   # off/low/high graded permission switch). We surface that truthfully rather than pretend a
@@ -5921,14 +6013,17 @@ delegate_warp() {
     *) die "OSRC_WARP_HARNESS must be 'claude' or 'codex' (got '$OSRC_WARP_HARNESS')" ;;
   esac
   local mflag=()
-  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(--model "$id"); else id="(warp default/configured)"; fi
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
+    id="$(_lane_model_for warp "$id")"; model_key="$id"; ledger_model="$id"
+    _validate_model_token "$id"; mflag=(--model "$id")
+  else id="(warp default/configured)"; fi
   [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: oz agent run has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
-  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
-  local wrapped; wrapped="$(_build_prompt "${MODEL:-warp}" "$task" "$ttier")"
+  local ttier; ttier="$(resolve_tier "$model_key" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "$model_key" "$task" "$ttier")"
   _tier_banner "warp (Oz agent)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure warp)"
   local rc=0
   oz agent run -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${hflag[@]+"${hflag[@]}"} ${pflag[@]+"${pflag[@]}"} -C "$PWD" --output-format text || rc=$?
-  record_ledger warp "${MODEL:-warp-default}" "$ttier" "$tier" "$task"
+  record_ledger warp "$ledger_model" "$ttier" "$tier" "$task"
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure warp)" >&2
   return "$rc"
 }

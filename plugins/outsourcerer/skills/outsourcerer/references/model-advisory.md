@@ -7,7 +7,7 @@ recommends the best value model that meets the capability threshold.
 ## Usage
 
 ```
-outsourcerer.sh advise [--refresh] [--json] "<task prompt>"
+outsourcerer.sh advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
 ```
 
 - `--refresh`: pull fresh benchmark data from the OpenRouter benchmarks API before scoring.
@@ -15,6 +15,8 @@ outsourcerer.sh advise [--refresh] [--json] "<task prompt>"
   (`~/.outsourcerer/benchmarks.json`), or falls back to tier proxy scores if no cache exists.
 - `--json`: emit machine-readable JSON instead of the human-readable table. Piped to `jq` for
   script integration.
+- `--effort`: include `minimal|low|medium|high|xhigh|max|none` in selection. Hard tasks default
+  to `high`; other tasks default to `medium`. `max` requests frontier selection.
 - The task prompt is the work you want to do, in natural language. The classifier reads it to
   determine the task category.
 
@@ -48,17 +50,21 @@ For each model in the alias table (`OSRC_MODEL_TABLE`), the advisory:
 2. Extracts the relevant benchmark score (coding_index for code tasks, agentic_index for
    agentic tasks, intelligence_index for everything else) and pricing (prompt + completion
    per token).
-3. Calculates the **value ratio** = score / max(cost_per_m_input, 0.01). Free models (cost=0)
+3. Applies the task difficulty, requested effort, capability tier, and local outcome history to
+   the benchmark score. Capable models receive a value preference; Kimi K3 receives a hard-work
+   near-frontier adjustment; explicit frontier requirements outweigh those adjustments.
+4. Calculates the **value ratio** = score / max(cost_per_m_input, 0.01). Free models (cost=0)
    are floored to $0.01/M so they rank high but don't dominate infinitely.
-4. Subscription lanes (cx/cc/dv/gm) have their price set to $0 BEFORE the value ratio
+5. Subscription lanes (cx/cc/dv/gm) have their price set to $0 BEFORE the value ratio
    calculation, because the user pays plan limits, not per-token. This ensures subscription
    models rank by capability, not by their OpenRouter list price.
 
 ### 3. Recommendation
 
-The recommendation is the model with the **best value ratio among models meeting the threshold**.
-If no model meets the threshold (rare, only with very high bars or missing benchmark data), it
-falls back to the **highest-scoring model regardless of cost** and labels it as an escalation.
+The recommendation is the capable-tier model with the best value ratio among models meeting the
+threshold. A frontier is selected when effort is `max` or the task explicitly requires frontier
+handling. If neither preferred cohort clears the threshold, selection falls back to the best
+qualifying subscription or paid candidate, then the highest score overall.
 
 ### 4. Graceful degradation
 
@@ -90,21 +96,23 @@ cross-referencing are deferred to v2.
 == outsourcerer advise ==
    task: refactor the authentication module to use JWT tokens
    category: code
+   difficulty: normal
+   effort: medium
    scoring by: coding_index (threshold: 60)
    benchmark data: live (OpenRouter, 2026-07-14T12:00:13.353Z)
 
 --- recommendation ---
-   model: sol (gpt-5.6-sol)
-   lane:  cx
-   why:   best value (score 77.4, ratio 7740.00, meets code threshold 60)
+   model: glm-5.2 (glm-5.2)
+   lane:  dv
+   why:   best capable-tier value (meets code threshold 60, effort medium)
 
 --- all candidates (sorted by value ratio, >> = recommended) ---
->> sol              gpt-5.6-sol                  lane=cx  score=77.4  $/M=0 (plan)       ratio=7740.00 OK
-   terra            gpt-5.6-terra                lane=cx  score=76.7  $/M=0 (plan)       ratio=7670.00 OK
+>> glm-5.2          glm-5.2                      lane=dv  score=76.8  $/M=plan limits    ratio=7680.00 OK
+   sol              gpt-5.6-sol                  lane=cx  score=77.4  $/M=plan limits    ratio=7740.00 OK
    ...
 
-Run with:  outsourcerer.sh run -m sol "refactor the authentication module to use JWT tokens"
-Override:  outsourcerer.sh run -m <any-model> "..."   (you know better, pick your own)
+Run with:  outsourcerer.sh run -m glm-5.2 --effort medium "refactor the authentication module to use JWT tokens"
+Override:  outsourcerer.sh run -m <any-model> --effort medium "..."   (you know better, pick your own)
 ```
 
 ### JSON (`--json`)
@@ -113,13 +121,16 @@ Override:  outsourcerer.sh run -m <any-model> "..."   (you know better, pick you
 {
   "task": "refactor the authentication module to use JWT tokens",
   "category": "code",
+  "difficulty": "normal",
+  "effort": "medium",
   "score_field": "coding_index",
   "threshold": "60",
   "recommendation": {
-    "alias": "sol",
-    "model": "gpt-5.6-sol",
-    "lane": "cx",
-    "reason": "best value (score 77.4, ratio 7740.00, meets code threshold 60)"
+    "alias": "glm-5.2",
+    "model": "glm-5.2",
+    "lane": "dv",
+    "tier": "capable",
+    "reason": "best capable-tier value (meets code threshold 60, effort medium)"
   },
   "benchmark_data_available": true
 }

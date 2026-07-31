@@ -50,9 +50,9 @@ grep -q '_devin_model_for "$MODEL"' "$SRC" && ok "route_delegate consults _devin
 grep -q 'served by BOTH OpenRouter and Devin' "$SRC" && ok "reroute prints the dual-lane banner" || bad "reroute banner missing"
 grep -q 'ORIG\[$((_i+1))\]="$_dvm"' "$SRC" && ok "reroute rewrites the model token in ORIG for the Devin lane" || bad "ORIG model rewrite missing"
 
-# --- Scenario 5: Devin effort-advisory wired (consumed, not passed to CLI). ---
-grep -q 'advisory only: Devin lane has no native effort knob' "$SRC" && ok "Devin lane prints effort advisory, does not pass --effort" || bad "Devin effort advisory missing"
-# and the devin CLI invocation must NOT include --effort
+# --- Scenario 5: Devin effort is advisory and never masquerades as a native flag. ---
+grep -q 'advisory: prompt directive; Devin lane has no native effort knob' "$SRC" && ok "Devin lane labels effort advisory" || bad "Devin effort advisory missing"
+# The Devin CLI invocation must NOT include an unsupported --effort flag.
 grep -q 'devin --model "$MODEL" --permission-mode "$perm" ${sbx' "$SRC" && ok "devin CLI invocation unchanged (no --effort arg)" || bad "devin CLI invocation altered unexpectedly"
 
 echo
