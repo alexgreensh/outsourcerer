@@ -30,7 +30,7 @@ ChatGPT / Claude subscription auth, so they are premium and are **never** auto-e
 | `glm-5.2` under `--provider devin` | Devin's id | devin | table/name | Devin path unchanged |
 | `swe` / `swe-1.7` | `swe-1.7` | devin | **capable** | Devin's own SWE agent model (open-weight/free-lane class) |
 | `swe-1.7-lightning` | itself | devin | mid | faster/cheaper SWE variant |
-| `kimi` | `kimi-k2.7` | devin | **capable** | open-weight lane on Devin |
+| `kimi` | `kimi-k3` | devin / droid / warp | **capable** | near-frontier hard-work lane; provider-specific dispatch resolves the accepted K3 id |
 
 **Dual-lane self-heal:** `glm` and `deepseek` exist on BOTH OpenRouter and Devin. With the default
 provider, they route to Devin (which has quota) instead of hard-failing when the OpenRouter key is
