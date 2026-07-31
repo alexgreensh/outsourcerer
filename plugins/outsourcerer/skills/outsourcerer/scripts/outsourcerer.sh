@@ -1507,6 +1507,12 @@ _external_claim_read() {
   jq -e . "$file"
 }
 
+_external_send_enabled() {
+  [ "${OSRC_EXTERNAL_SEND:-0}" = 1 ] && return 0
+  echo "external session mutation is experimental and disabled; set OSRC_EXTERNAL_SEND=1 to opt in" >&2
+  return 1
+}
+
 _external_controller_id() {
   # A CLI action is a short-lived process, so its PID cannot identify the
   # controller across `claim`, `reply`, and `release`.  Prefer an explicit,
@@ -1542,6 +1548,7 @@ _external_claim_authorized() { # <claim-json>
 
 _external_session_claim() { # <session-id> <tmux-pane>
   local id="$1" pane="$2" dir owner pid start token controller_id generation record tmp rc=0
+  _external_send_enabled || return 1
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   _external_session_id_valid "$id" || return 1
   case "$pane" in ''|*[!A-Za-z0-9:._-]*) return 1 ;; esac
@@ -1571,6 +1578,7 @@ _external_session_claim() { # <session-id> <tmux-pane>
 
 _external_session_release() { # <session-id>
   local id="$1" claim pid start dir
+  _external_send_enabled || return 1
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || return 1
   pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"
@@ -1679,6 +1687,7 @@ _obligation_latest_state() { # <id>
 
 _external_reply() { # <session-id> <message>
   local id="$1" message="$2" claim pane pid start generation composer oid latest receipt key
+  _external_send_enabled || return 1
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
   pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; generation="$(printf '%s' "$claim" | jq -r '.generation')"
@@ -1891,6 +1900,13 @@ _heartbeat_token() {
 # Publish through a durable, identity-bearing sibling. A crash therefore leaves
 # a reclaimable owner record, never an anonymous empty lock directory.
 _heartbeat_pending_dir() { printf '%s.pending.%s.%s\n' "$1" "$2" "${3// /_}"; }
+_heartbeat_remove_tree() { # <path>, constrained to a direct heartbeat child
+  local tree="$1"
+  case "$tree" in "$OSRC_HEARTBEAT"/*) ;; *) return 1 ;; esac
+  [ ! -L "$tree" ] || return 1
+  [ -e "$tree" ] || return 0
+  rm -rf -- "$tree"
+}
 _heartbeat_pending_identity() { # <dir> -> pid<TAB>start
   local tail pid encoded
   tail="${1##*.pending.}"; pid="${tail%%.*}"; encoded="${tail#*.}"
@@ -1906,8 +1922,7 @@ _heartbeat_reclaim_dead_pending() { # <canonical>
     _pid_start_valid "$start" || continue
     live="$(_pid_start_identity "$pid" 2>/dev/null)"; rc=$?
     [ "$rc" -eq 0 ] && [ "$live" != "$start" ] || continue
-    rm -f "$pending/owner.json" "$pending"/.owner.* 2>/dev/null || return 1
-    rmdir "$pending" 2>/dev/null || return 1
+    _heartbeat_remove_tree "$pending" || return 1
   done
 }
 _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
@@ -1920,16 +1935,19 @@ _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
   _state_sync "$tmp" || { rm -f "$tmp"; rmdir "$pending" 2>/dev/null || true; return 1; }
   mv "$tmp" "$pending/owner.json" || return 1
   _state_sync "$pending" || return 1
-  # Any contender observes the durable pending owner and yields before this
-  # precondition, so mv cannot nest a directory inside an incumbent.
-  [ ! -e "$canonical" ] || return 1
-  mv "$pending" "$canonical" || return 1
+  # mkdir is the portable atomic directory claim. Do not use `mv pending
+  # canonical`: when canonical appears between the check and mv, mv nests the
+  # pending directory inside it on common hosts and leaves cleanup wedged.
+  mkdir "$canonical" 2>/dev/null || return 1
+  mv "$pending/owner.json" "$canonical/owner.json" || return 1
+  _state_sync "$canonical" || return 1
+  rmdir "$pending" 2>/dev/null || return 1
   _state_sync "$(dirname "$canonical")"
 }
 
 _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
   local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record
-  if command -v flock >/dev/null 2>&1; then
+  if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
     exec 8>"$lock.flock" 2>/dev/null || return 1
     flock -w 5 8 2>/dev/null || { exec 8>&-; return 1; }
     _HEARTBEAT_ELECTION_KIND=flock
@@ -1956,7 +1974,7 @@ _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
 }
 _heartbeat_election_release() {
   local lock="$1"
-  case "${_HEARTBEAT_ELECTION_KIND:-}" in flock) flock -u 8 2>/dev/null || true; exec 8>&- ;; mkdir) rm -f "$lock/owner.json" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true ;; esac
+  case "${_HEARTBEAT_ELECTION_KIND:-}" in flock) flock -u 8 2>/dev/null || true; exec 8>&- ;; mkdir) _heartbeat_remove_tree "$lock" || true ;; esac
   _HEARTBEAT_ELECTION_KIND=""
 }
 
@@ -1973,26 +1991,27 @@ _heartbeat_claim() {
   if [ -d "$leader" ]; then
     if [ ! -f "$owner" ] || ! old_pid="$(jq -er '.pid | tostring' "$owner" 2>/dev/null)" \
       || ! old_start="$(jq -er '.pid_start | strings | select(length > 0)' "$owner" 2>/dev/null)"; then
+      # The canonical directory is created atomically before owner.json is
+      # promoted. A crashed publisher can therefore leave an owner-less tree;
+      # the election lock makes it safe for the next claimant to reclaim it.
+      _heartbeat_remove_tree "$leader" || { _heartbeat_election_release "$lock"; return 1; }
+    elif ! _pid_start_valid "$old_start"; then
       _heartbeat_election_release "$lock"
       return 3
+    else
+      live_start="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
+      if [ "$rc" -eq 0 ] && [ "$live_start" = "$old_start" ]; then
+        _heartbeat_election_release "$lock"
+        return 2
+      fi
+      # Keep an incumbent unless we positively observed its PID with a different
+      # start marker. Unsupported/failed identity adapters are never stale proof.
+      if [ "$rc" -ne 0 ]; then
+        _heartbeat_election_release "$lock"
+        return 3
+      fi
+      _heartbeat_remove_tree "$leader" || { _heartbeat_election_release "$lock"; return 1; }
     fi
-    if ! _pid_start_valid "$old_start"; then
-      _heartbeat_election_release "$lock"
-      return 3
-    fi
-    live_start="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
-    if [ "$rc" -eq 0 ] && [ "$live_start" = "$old_start" ]; then
-      _heartbeat_election_release "$lock"
-      return 2
-    fi
-    # Keep an incumbent unless we positively observed its PID with a different
-    # start marker.  Unsupported/failed identity adapters are never stale proof.
-    if [ "$rc" -ne 0 ]; then
-      _heartbeat_election_release "$lock"
-      return 3
-    fi
-    rm -f "$owner" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
-    rmdir "$leader" 2>/dev/null || { _heartbeat_election_release "$lock"; return 1; }
   fi
   record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" --arg token "$token" --arg sink "$sink" \
     '{schema_version:"1",pid:$pid,pid_start:$pid_start,token:$token,sink:(if $sink=="" then null else $sink end)}')" || rc=1
@@ -2140,21 +2159,17 @@ _heartbeat_tick() {
 
 _heartbeat_stop() {
   local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" owner="$OSRC_HEARTBEAT/leader/owner.json"
-  local saved_token lock="$OSRC_HEARTBEAT/.election" tries=0 rc=0
+  local saved_token lock="$OSRC_HEARTBEAT/.election" pid_start rc=0
   [ -n "$token" ] && [ -f "$owner" ] || return 0
-  while ! _mkdir_claim "$lock"; do
-    tries=$((tries + 1))
-    [ "$tries" -lt 50 ] || return 1
-    sleep 0.1
-  done
+  pid_start="$(_pid_start_identity "$$" 2>/dev/null)" || return 1
+  _heartbeat_election_acquire "$lock" "$$" "$pid_start" || return 1
   saved_token="$(jq -r '.token // empty' "$owner" 2>/dev/null)"
   if [ "$saved_token" != "$token" ]; then
-    rmdir "$lock" 2>/dev/null || true
+    _heartbeat_election_release "$lock"
     return 1
   fi
-  rm -f "$owner" 2>/dev/null || rc=1
-  [ "$rc" -ne 0 ] || rmdir "$OSRC_HEARTBEAT/leader" 2>/dev/null || rc=1
-  rmdir "$lock" 2>/dev/null || true
+  _heartbeat_remove_tree "$OSRC_HEARTBEAT/leader" || rc=1
+  _heartbeat_election_release "$lock"
   [ "$rc" -eq 0 ]
 }
 
@@ -7985,6 +8000,35 @@ _managed_session_send() { # <session-id> <message>
   _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
 }
 
+_managed_session_clear() { # <session-id>
+  local session_id="$1" pane="$1" key
+  _managed_endpoint_live "$session_id" "$pane" || return 1
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
+  _tmux_reset_input "$pane" aggressive
+  _endpoint_mutation_unlock "$key"
+}
+
+_managed_session_model() { # <session-id> [filter]
+  local session_id="$1" filter="${2:-}" pane="$1" key
+  _managed_endpoint_live "$session_id" "$pane" || return 1
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
+  tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }
+  sleep 1
+  tmux send-keys -t "$pane" M-m || { _endpoint_mutation_unlock "$key"; return 1; }
+  sleep 1
+  if [ -n "$filter" ]; then
+    filter="$(printf '%s' "$filter" | tr -cd '[:alnum:][:space:]._:/-')"
+    tmux send-keys -t "$pane" -l -- "$filter" || { _endpoint_mutation_unlock "$key"; return 1; }
+    sleep 1
+  fi
+  tmux send-keys -t "$pane" Enter || { _endpoint_mutation_unlock "$key"; return 1; }
+  _endpoint_mutation_unlock "$key"
+}
+
 # Validate session name before any path construction, tmux, or rm use.
 # Reject empty, '.', '..', and any name containing a character outside [A-Za-z0-9._-].
 _validate_session_name() {
@@ -8511,7 +8555,7 @@ session() {
       ;;
     clear)
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _tmux_reset_input "$SESSION_NAME" aggressive   # explicit reset: also sends Escape (may interrupt an active turn)
+      _managed_session_clear "$SESSION_NAME" || die "session clear refused: managed pane identity could not be proven"
       echo "cleared input for '$SESSION_NAME' (copy-mode canceled + Escape + draft wiped). NOTE: Escape can interrupt an in-progress turn. Re-check with: $0 session read"
       ;;
     model)
@@ -8523,13 +8567,7 @@ session() {
       esac
       # Optional NAME filters the picker (it shows a "Type to search" box); Enter confirms.
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      tmux send-keys -t "$SESSION_NAME" Escape; sleep 1     # clear any pending input line
-      tmux send-keys -t "$SESSION_NAME" M-m;   sleep 1      # opt+m -> open model picker
-      if [ -n "${1:-}" ]; then
-        local filter; filter=$(printf '%s' "$1" | tr -cd '[:alnum:][:space:]._:/-')
-        tmux send-keys -t "$SESSION_NAME" -l -- "$filter"; sleep 1
-      fi
-      tmux send-keys -t "$SESSION_NAME" Enter
+      _managed_session_model "$SESSION_NAME" "${1:-}" || die "session model refused: managed pane identity could not be proven"
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
     effort)

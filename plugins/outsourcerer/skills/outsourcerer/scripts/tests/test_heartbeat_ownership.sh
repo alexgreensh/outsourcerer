@@ -6,8 +6,9 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TMP="$(mktemp -d "$PWD/.test-heartbeat-ownership.XXXXXX")"
+TEST_TMP="$TMP"
 export OSRC_HOME="$TMP/state"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TEST_TMP"' EXIT
 pass=0; fail=0
 ok() { echo "PASS: $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
@@ -63,7 +64,7 @@ fi
 
 # A stale mkdir-era election directory must not wedge a new owner: the flock
 # lease is tied to the process FD, not directory cleanup by a crashed owner.
-rm -f "$OSRC_HEARTBEAT/leader/owner.json"; rmdir "$OSRC_HEARTBEAT/leader"
+rm -rf "$OSRC_HEARTBEAT/leader" "$OSRC_HEARTBEAT/.election"
 mkdir "$OSRC_HEARTBEAT/.election"
 printf '%s\n' '{"pid":999,"pid_start":"Thu Jul 31 01:02:03 2026"}' > "$OSRC_HEARTBEAT/.election/owner.json"
 printf '%s\n' 'Sat Aug 2 01:02:03 2026' > "$HB_PS_MARKER"
@@ -72,7 +73,46 @@ if PATH="$TMP/bin:$PATH" _heartbeat_claim "$$" 'Sat Aug 2 01:02:03 2026' recover
 else
   bad "stale election directory wedged heartbeat recovery"
 fi
-rmdir "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
+rm -rf "$OSRC_HEARTBEAT/leader" "$OSRC_HEARTBEAT/.election"
+
+# The forced mkdir route is the portable election path. It must never silently
+# fall back to flock just because flock happens to be installed on the host.
+OSRC_FORCE_MKDIR_ELECTION=1
+if PATH="$TMP/bin:$PATH" _heartbeat_election_acquire "$OSRC_HEARTBEAT/.election" "$$" 'Sat Aug 2 01:02:03 2026' \
+  && [ "${_HEARTBEAT_ELECTION_KIND:-}" = mkdir ]; then
+  _heartbeat_election_release "$OSRC_HEARTBEAT/.election"
+  ok "OSRC_FORCE_MKDIR_ELECTION exercises the mkdir election path"
+else
+  _heartbeat_election_release "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
+  bad "OSRC_FORCE_MKDIR_ELECTION did not force the mkdir election path"
+fi
+
+# A leader publish can be interrupted after mkdir creates canonical but before
+# owner.json lands. This is recoverable state, not a permanent startup wedge.
+mkdir -p "$OSRC_HEARTBEAT/leader/nested-pending"
+if PATH="$TMP/bin:$PATH" _heartbeat_claim "$$" 'Sat Aug 2 01:02:03 2026' ownerless-recovered ''; then
+  token="$(jq -r '.token' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+  [ "$token" = ownerless-recovered ] && ok "owner-less leader tree is recovered" || bad "owner-less leader recovery wrote the wrong owner"
+else
+  bad "owner-less leader tree wedged heartbeat recovery"
+fi
+
+# Two no-flock contenders must leave one leader, then the winner's stop path
+# removes recursive leader/election state so a later beacon can start cleanly.
+rm -rf "$OSRC_HEARTBEAT/leader" "$OSRC_HEARTBEAT/.election"
+( contender_pid="${BASHPID:-$$}"; PATH="$TMP/bin:$PATH" _heartbeat_claim "$contender_pid" 'Sat Aug 2 01:02:03 2026' contender-a ''; printf '%s\n' "$?" > "$TMP/contender-a.rc" ) & contender_a=$!
+( contender_pid="${BASHPID:-$$}"; PATH="$TMP/bin:$PATH" _heartbeat_claim "$contender_pid" 'Sat Aug 2 01:02:03 2026' contender-b ''; printf '%s\n' "$?" > "$TMP/contender-b.rc" ) & contender_b=$!
+wait "$contender_a"; wait "$contender_b"
+winner_count="$(awk '$1 == 0 { count++ } END { print count + 0 }' "$TMP/contender-a.rc" "$TMP/contender-b.rc")"
+winner_token="$(jq -r '.token // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+if [ "$winner_count" = 1 ] && { [ "$winner_token" = contender-a ] || [ "$winner_token" = contender-b ]; }; then
+  PATH="$TMP/bin:$PATH" _heartbeat_stop "$winner_token" >/dev/null 2>&1
+  [ ! -e "$OSRC_HEARTBEAT/leader" ] && [ ! -e "$OSRC_HEARTBEAT/.election" ] \
+    && ok "two mkdir contenders leave cleanup-safe leader state" || bad "no-flock stop left leader or election state"
+else
+  bad "two mkdir contenders did not elect exactly one leader (wins=$winner_count token=$winner_token)"
+fi
+unset OSRC_FORCE_MKDIR_ELECTION
 
 # Lifecycle: a leader remains only while supervised work exists. This is the
 # condition the beacon checks between ticks before it releases its claim.

@@ -2,8 +2,8 @@
 # Focused kill-window regressions for the remaining re-verdict residuals.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-reverdict.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/state"; pass=0; fail=0
+TMP="$(mktemp -d "$PWD/.test-reverdict.XXXXXX")"; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
+export OSRC_HOME="$TMP/state"; OSRC_EXTERNAL_SEND=1; export OSRC_EXTERNAL_SEND; pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 set --; . "$SRC" >/dev/null 2>&1
 _state_sync(){ return 0; }
@@ -41,6 +41,7 @@ SESSION_CLAIM_TOKEN=stolen; before="$(wc -l < "$TRACE")"; _external_reply proof 
 [ "$before" = "$after" ] && ok "wrong claim token sends no bytes" || bad "wrong token authorized input"
 
 grep -q ' _managed_session_send "\$SESSION_NAME" "\$\*"' "$SRC" && ok "managed session send uses mutation endpoint path" || bad "session send bypasses mutation path"
-grep -q 'send-keys -t "\$SESSION_NAME" -l -- "\$filter"' "$SRC" && ! grep -q 'send-keys -t "\$SESSION_NAME" -l "\$filter"' "$SRC" && ok "arbitrary filter text has tmux delimiter" || bad "filter delimiter missing"
+grep -q ' _managed_session_clear "\$SESSION_NAME"' "$SRC" && grep -q ' _managed_session_model "\$SESSION_NAME"' "$SRC" && ok "manual clear and model use managed mutation paths" || bad "manual clear or model bypasses managed mutation path"
+grep -q 'send-keys -t "\$pane" -l -- "\$filter"' "$SRC" && ! grep -qE 'send-keys -t "\$[A-Za-z_]+" -l "\$filter"' "$SRC" && ok "arbitrary filter text has tmux delimiter" || bad "filter delimiter missing"
 grep -q '_external_receipt_valid' "$SRC" && ok "receipt is target and generation validated" || bad "receipt validation missing"
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

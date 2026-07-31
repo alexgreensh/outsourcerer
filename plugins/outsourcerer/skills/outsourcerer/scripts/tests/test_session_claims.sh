@@ -25,15 +25,15 @@ generation="$(jq -r '.generation' "$OSRC_HOME/sessions/claims/external-reply/own
 jq -cn --arg obligation "$2" --arg endpoint "tmux:$1" --arg generation "$generation" '{obligation_id:$obligation,endpoint:$endpoint,generation:$generation,target_transition:true}'
 EOF
 chmod +x "$TMP/bin/tmux" "$TMP/bin/ps" "$TMP/composer" "$TMP/receipt"
-run_cli(){ PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-A OSRC_TEST_KEYS="$TMP/keys" "$SRC" "$@"; }
+run_cli(){ PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_EXTERNAL_SEND=1 OSRC_CONTROLLER_ID=controller-A OSRC_TEST_KEYS="$TMP/keys" "$SRC" "$@"; }
 
 claim_out="$(run_cli session claim external-release pane:0.0)" && token="$(printf '%s\n' "$claim_out" | sed -n 's/^claim token: //p')" || token=""
 [ -n "$token" ] && [ -f "$TMP/state/sessions/claims/external-release/owner.json" ] && ok "claim records a durable controller identity" || bad "claim was not durable"
-PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN=wrong "$SRC" session release external-release >/dev/null 2>&1 && bad "wrong token released claim" || ok "release requires controller id and token"
-PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN="$token" "$SRC" session release external-release >/dev/null 2>&1 && [ ! -d "$TMP/state/sessions/claims/external-release" ] && ok "separate CLI invocation releases claim" || bad "cross-invocation release failed"
+PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_EXTERNAL_SEND=1 OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN=wrong "$SRC" session release external-release >/dev/null 2>&1 && bad "wrong token released claim" || ok "release requires controller id and token"
+PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_EXTERNAL_SEND=1 OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN="$token" "$SRC" session release external-release >/dev/null 2>&1 && [ ! -d "$TMP/state/sessions/claims/external-release" ] && ok "separate CLI invocation releases claim" || bad "cross-invocation release failed"
 
 claim_out="$(run_cli session claim external-reply pane:0.0)" && token="$(printf '%s\n' "$claim_out" | sed -n 's/^claim token: //p')" || token=""
-PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" OSRC_TEST_KEYS="$TMP/keys" "$SRC" session reply external-reply hello >/dev/null && grep -q 'send-keys' "$TMP/keys" && ok "separate CLI invocation replies with matching controller id and token" || bad "cross-invocation reply failed"
-before="$(wc -l < "$TMP/keys" | tr -d ' ')"; PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-B OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" OSRC_TEST_KEYS="$TMP/keys" "$SRC" session reply external-reply denied >/dev/null 2>&1 || true; after="$(wc -l < "$TMP/keys" | tr -d ' ')"
+PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_EXTERNAL_SEND=1 OSRC_CONTROLLER_ID=controller-A OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" OSRC_TEST_KEYS="$TMP/keys" "$SRC" session reply external-reply hello >/dev/null && grep -q 'send-keys' "$TMP/keys" && ok "separate CLI invocation replies with matching controller id and token" || bad "cross-invocation reply failed"
+before="$(wc -l < "$TMP/keys" | tr -d ' ')"; PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_EXTERNAL_SEND=1 OSRC_CONTROLLER_ID=controller-B OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" OSRC_TEST_KEYS="$TMP/keys" "$SRC" session reply external-reply denied >/dev/null 2>&1 || true; after="$(wc -l < "$TMP/keys" | tr -d ' ')"
 [ "$before" = "$after" ] && ok "mismatched durable controller cannot reply" || bad "mismatched controller wrote keys"
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
