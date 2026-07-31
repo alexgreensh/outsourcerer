@@ -1323,7 +1323,8 @@ _state_sync() {
 }
 
 _state_lock_acquire() {
-  local file="$1" lock="$file.lock" tries=0
+  local file="$1" lock tries=0
+  lock="$file.lock"
   _STATE_LOCK_KIND=""
   if command -v flock >/dev/null 2>&1; then
     exec 9>>"$file" 2>/dev/null || return 1
@@ -1401,10 +1402,10 @@ _fleet_classify() {
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' d job state item now
+  local items='[]' d job state item now snapshot canonical generation
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
-      job="$(_job_json "$(basename "$d")" 2>/dev/null)" || continue
+      job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
       state="$(_fleet_classify "$(printf '%s' "$job" | jq -r '.status // "unknown"')")"
       item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
         {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
@@ -1417,8 +1418,12 @@ _fleet_snapshot_collect() {
     done < <(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
   fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  jq -cn --arg captured_at "$now" --argjson items "$items" \
-    '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}'
+  snapshot="$(jq -cn --arg captured_at "$now" --argjson items "$items" \
+    '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}')" || return 1
+  canonical="$(printf '%s' "$snapshot" | jq -cS '.items | sort_by(.job_id // .session_id // "unknown")')" || return 1
+  generation="$(printf '%s' "$canonical" | cksum | awk '{print $1 "-" $2}')"
+  [ -n "$generation" ] || return 1
+  printf '%s' "$snapshot" | jq -c --arg generation "$generation" '.generation=$generation'
 }
 
 _fleet_snapshot_write() {
@@ -1461,7 +1466,11 @@ _fleet_digest() {
 _heartbeat_line() {
   local snapshot="${1:-}"
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
-  printf '%s' "$snapshot" | jq -r '"♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)"'
+  printf '%s' "$snapshot" | jq -r '
+    "♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)"
+    + (([.items[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
+        | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"])
+       | if length == 0 then "" else " | " + join(" | ") end)'
 }
 
 _wake_append() {
@@ -1494,6 +1503,266 @@ $acks
 $id
 "*) ;; *) printf '%s\n' "$line" ;; esac
   done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE")
+}
+
+_pid_start_valid() {
+  local marker="$1" weekday month day clock year
+  set -- $marker
+  [ "$#" -eq 5 ] || return 1
+  weekday="$1"; month="$2"; day="$3"; clock="$4"; year="$5"
+  case "$weekday:$month" in
+    [[:alpha:]][[:alpha:]][[:alpha:]]:[[:alpha:]][[:alpha:]][[:alpha:]]) ;;
+    *) return 1 ;;
+  esac
+  case "$day" in [0-9]|[0-3][0-9]) ;; *) return 1 ;; esac
+  case "$clock" in [01][0-9]:[0-5][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]:[0-5][0-9]) ;; *) return 1 ;; esac
+  case "$year" in [0-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
+}
+
+_pid_start_identity() {
+  local pid="$1" marker self_marker
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  marker="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  if _pid_start_valid "$marker"; then
+    printf '%s\n' "$marker"
+    return 0
+  fi
+  self_marker="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  if _pid_start_valid "$self_marker"; then
+    return 2
+  fi
+  return 1
+}
+
+_heartbeat_token() {
+  local token
+  token="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ -n "$token" ] || token="$(date +%s)-$$-$RANDOM-$RANDOM"
+  printf '%s\n' "$token"
+}
+
+_heartbeat_claim() {
+  local pid="$1" pid_start="$2" token="$3" sink="${4:-}" lock="$OSRC_HEARTBEAT/.election"
+  local leader="$OSRC_HEARTBEAT/leader" owner="$OSRC_HEARTBEAT/leader/owner.json"
+  local tries=0 old_pid old_start live_start record tmp rc=0
+  case "$pid:$token" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  [ -n "$pid_start" ] || return 1
+  _mkdir_private "$OSRC_HEARTBEAT" || return 1
+  [ ! -L "$OSRC_HEARTBEAT" ] && [ ! -L "$leader" ] || return 1
+  while ! _mkdir_claim "$lock"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || return 1
+    sleep 0.1
+  done
+  if [ -d "$leader" ]; then
+    if [ ! -f "$owner" ] || ! old_pid="$(jq -er '.pid | tostring' "$owner" 2>/dev/null)" \
+      || ! old_start="$(jq -er '.pid_start | strings | select(length > 0)' "$owner" 2>/dev/null)"; then
+      rmdir "$lock" 2>/dev/null || true
+      return 3
+    fi
+    if ! _pid_start_valid "$old_start"; then
+      rmdir "$lock" 2>/dev/null || true
+      return 3
+    fi
+    live_start="$(_pid_start_identity "$old_pid" 2>/dev/null)"; rc=$?
+    if [ "$rc" -eq 0 ] && [ "$live_start" = "$old_start" ]; then
+      rmdir "$lock" 2>/dev/null || true
+      return 2
+    fi
+    if [ "$rc" -eq 1 ]; then
+      rmdir "$lock" 2>/dev/null || true
+      return 3
+    fi
+    rm -f "$owner" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; return 1; }
+    rmdir "$leader" 2>/dev/null || { rmdir "$lock" 2>/dev/null || true; return 1; }
+  fi
+  if ! _mkdir_claim "$leader"; then
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
+  record="$(jq -cn --argjson pid "$pid" --arg pid_start "$pid_start" --arg token "$token" --arg sink "$sink" \
+    '{schema_version:"1",pid:$pid,pid_start:$pid_start,token:$token,sink:(if $sink=="" then null else $sink end)}')" || rc=1
+  tmp="$leader/.owner.$$.$RANDOM"
+  if [ "$rc" -eq 0 ]; then
+    ( umask 077; printf '%s\n' "$record" > "$tmp" ) 2>/dev/null || rc=1
+  fi
+  [ "$rc" -ne 0 ] || _state_sync "$tmp" || rc=1
+  [ "$rc" -ne 0 ] || mv "$tmp" "$owner" || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$leader" || rc=1
+  rm -f "$tmp" 2>/dev/null || true
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$owner" 2>/dev/null || true
+    rmdir "$leader" 2>/dev/null || true
+  fi
+  rmdir "$lock" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+}
+
+_heartbeat_cursor_read() {
+  local name="$1" file="$OSRC_HEARTBEAT/$1.cursor"
+  case "$name" in wakes|render) ;; *) return 1 ;; esac
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  sed -n '1p' "$file"
+}
+
+_heartbeat_cursor_write() {
+  local name="$1" generation="$2" file tmp
+  case "$name" in wakes|render) ;; *) return 1 ;; esac
+  file="$OSRC_HEARTBEAT/$name.cursor"
+  [ ! -L "$file" ] || return 1
+  tmp="$OSRC_HEARTBEAT/.$name.cursor.$$.$RANDOM"
+  ( umask 077; printf '%s\n' "$generation" > "$tmp" ) 2>/dev/null || return 1
+  _state_sync "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  _state_sync "$OSRC_HEARTBEAT"
+}
+
+_heartbeat_log_append() {
+  local line="$1" log="$OSRC_HEARTBEAT/heartbeat.log" rc=0
+  _mkdir_private "$OSRC_HEARTBEAT" || return 1
+  [ ! -L "$log" ] || return 1
+  ( umask 077; : >> "$log" ) 2>/dev/null || return 1
+  _state_lock_acquire "$log" || return 1
+  printf '%s\n' "$line" >> "$log" 2>/dev/null || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$log" || rc=1
+  _state_lock_release "$log"
+  [ "$rc" -eq 0 ]
+}
+
+_heartbeat_unknown_snapshot() {
+  local now generation
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  generation="unknown-$(date +%s)"
+  jq -cn --arg captured_at "$now" --arg generation "$generation" \
+    '{schema_version:"1",generation:$generation,captured_at:$captured_at,items:[{schema_version:"1",session_id:null,owner:null,harness:"heartbeat",lane:null,requested_model:null,observed_model:null,effort:null,endpoint:null,harness_pid:null,pid_start:null,started_at:null,state:"unknown",state_evidence:"snapshot unavailable",composer_state:"unknown",claim:null,task_summary:"fleet state unavailable",last_receipt:null,source_generation:$generation,job_id:null}]}'
+}
+
+_heartbeat_emit_attached() {
+  local line="$1" sink="${OSRC_HEARTBEAT_SINK:-}"
+  [ -n "$sink" ] || return 0
+  if [ "$sink" = "-" ]; then
+    printf '%s\n' "$line"
+  elif [ -e "$sink" ] && [ -w "$sink" ]; then
+    printf '%s\n' "$line" >> "$sink"
+  else
+    return 1
+  fi
+}
+
+_heartbeat_tick() {
+  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1
+  snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
+  generation="$(printf '%s' "$snapshot" | jq -r '.generation // "unknown"')"
+  if ! _fleet_snapshot_write "$snapshot"; then
+    snapshot="$(_heartbeat_unknown_snapshot)" || return 1
+    generation="$(printf '%s' "$snapshot" | jq -r '.generation')"
+    _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || true
+  fi
+  wake_cursor="$(_heartbeat_cursor_read wakes 2>/dev/null)"
+  if [ "$wake_cursor" != "$generation" ]; then
+    while IFS= read -r item; do
+      [ -n "$item" ] || continue
+      event_id="heartbeat.$generation.$(printf '%s' "$item" | jq -r '(.job_id // .session_id // "fleet") | gsub("[^A-Za-z0-9._-]"; "_")').$(printf '%s' "$item" | jq -r '.state')"
+      _wake_append "$(printf '%s' "$item" | jq -c --arg event_id "$event_id" --arg generation "$generation" \
+        '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:.task_summary}')" || wake_ok=0
+    done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(.state == "blocked" or .state == "unknown" or .state == "dead")')
+    [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
+  fi
+  render_cursor="$(_heartbeat_cursor_read render 2>/dev/null)"
+  [ "$render_cursor" != "$generation" ] || return "$((wake_ok == 1 ? 0 : 1))"
+  line="$(_heartbeat_line "$snapshot" 2>/dev/null)" || line='♥ working=0 blocked=0 unknown=1 landed=0'
+  [ "$wake_ok" -eq 1 ] || line="$line state=unknown"
+  _heartbeat_log_append "$line" || {
+    _wake_append "$(jq -cn --arg event_id "heartbeat.$generation.log" --arg generation "$generation" \
+      '{event_id:$event_id,kind:"heartbeat-sink",generation:$generation,state:"unknown",task_summary:"heartbeat log unavailable"}')" >/dev/null 2>&1 || true
+    _heartbeat_emit_attached "$line state=unknown" >/dev/null 2>&1 || true
+    return 1
+  }
+  _heartbeat_cursor_write render "$generation" || return 1
+  if ! _heartbeat_emit_attached "$line"; then
+    _wake_append "$(jq -cn --arg event_id "heartbeat.$generation.attached" --arg generation "$generation" \
+      '{event_id:$event_id,kind:"heartbeat-sink",generation:$generation,state:"unknown",task_summary:"attached heartbeat sink unavailable"}')" >/dev/null 2>&1 || true
+    return 1
+  fi
+  [ "$wake_ok" -eq 1 ]
+}
+
+_heartbeat_stop() {
+  local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" owner="$OSRC_HEARTBEAT/leader/owner.json"
+  local saved_token lock="$OSRC_HEARTBEAT/.election" tries=0 rc=0
+  [ -n "$token" ] && [ -f "$owner" ] || return 0
+  while ! _mkdir_claim "$lock"; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || return 1
+    sleep 0.1
+  done
+  saved_token="$(jq -r '.token // empty' "$owner" 2>/dev/null)"
+  if [ "$saved_token" != "$token" ]; then
+    rmdir "$lock" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$owner" 2>/dev/null || rc=1
+  [ "$rc" -ne 0 ] || rmdir "$OSRC_HEARTBEAT/leader" 2>/dev/null || rc=1
+  rmdir "$lock" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+}
+
+_heartbeat_is_owner() {
+  local token="$1" pid="$2" pid_start="$3" owner="$OSRC_HEARTBEAT/leader/owner.json"
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  jq -e --arg token "$token" --argjson pid "$pid" --arg pid_start "$pid_start" \
+    '.token==$token and .pid==$pid and .pid_start==$pid_start' "$owner" >/dev/null 2>&1
+}
+
+_heartbeat_beacon() {
+  local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-300}"
+  local pid_start rc
+  case "$cadence" in ''|*[!0-9]*|0) cadence=300 ;; esac
+  [ -n "$token" ] || token="$(_heartbeat_token)"
+  pid_start="$(_pid_start_identity "$$")" || {
+    echo "outsourcerer: heartbeat ownership unknown; stable process identity unavailable" >&2
+    return 1
+  }
+  _heartbeat_claim "$$" "$pid_start" "$token" "${OSRC_HEARTBEAT_SINK:-}"; rc=$?
+  case "$rc" in
+    0) ;;
+    2) return 0 ;;
+    *) echo "outsourcerer: heartbeat ownership unknown; preserving the existing leader" >&2; return 1 ;;
+  esac
+  trap '_heartbeat_stop "$token"' EXIT
+  trap 'exit 0' INT TERM
+  while :; do
+    _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
+    _heartbeat_tick || true
+    [ "${OSRC_HEARTBEAT_ONCE:-0}" = "1" ] && break
+    sleep "$cadence"
+  done
+}
+
+_heartbeat_start() {
+  local token executable sink="${OSRC_HEARTBEAT_SINK:-}"
+  [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ] && return 0
+  _mkdir_private "$OSRC_HEARTBEAT" || return 1
+  if [ -z "$sink" ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; }; then sink="/dev/tty"; fi
+  token="$(_heartbeat_token)"
+  executable="${OSRC_HEARTBEAT_EXECUTABLE:-$SCRIPT_PATH}"
+  [ -x "$executable" ] || return 1
+  OSRC_HEARTBEAT_TOKEN="$token" OSRC_HEARTBEAT_SINK="$sink" \
+    nohup "$executable" __heartbeat-beacon "$token" >/dev/null 2>&1 &
+  return 0
+}
+
+cmd_rundown() {
+  local snapshot
+  snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
+  _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
+  _fleet_digest "$snapshot"
+}
+
+cmd_bearings() {
+  local snapshot
+  snapshot="$(_fleet_snapshot_read 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
+  _fleet_digest "$snapshot"
 }
 
 # =============================================================================
@@ -3263,6 +3532,7 @@ _bg_launch() {
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
   nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
   printf '%s' "$id"
 }
 
@@ -3749,7 +4019,10 @@ _reconcile_status() {
           { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
         fi
       fi
-      [ "$_alive" = "0" ] && { echo interrupted > "$jd/status" 2>/dev/null; st="interrupted"; }
+      if [ "$_alive" = "0" ]; then
+        [ "${OSRC_RECONCILE_READ_ONLY:-0}" = "1" ] || echo interrupted > "$jd/status" 2>/dev/null
+        st="interrupted"
+      fi
       ;;
     launching)
       # A launcher that detached and never produced a worker leaves `launching` on disk forever. The
@@ -3761,10 +4034,11 @@ _reconcile_status() {
       _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=$_now2 ;; esac
       _grace="${OSRC_LAUNCH_GRACE:-45}"; [ -f "$jd/setup" ] && _grace="${OSRC_SETUP_GRACE:-900}"
       if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( _now2 - _sa )) -ge "$_grace" ]; then
-        echo failed > "$jd/status" 2>/dev/null; st="failed"
+        [ "${OSRC_RECONCILE_READ_ONLY:-0}" = "1" ] || echo failed > "$jd/status" 2>/dev/null
+        st="failed"
         # The REASON travels with the state change. Writing the status here and the explanation
         # somewhere else means whichever reader gets there first leaves the other empty.
-        if [ ! -s "$jd/error" ]; then
+        if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ] && [ ! -s "$jd/error" ]; then
           local _ph; _ph="$(cat "$jd/setup" 2>/dev/null)"
           if [ -n "$_ph" ]; then
             printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_ph" "$_grace" > "$jd/error" 2>/dev/null || true
@@ -7368,6 +7642,7 @@ _winpty_session() {
       echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
@@ -7508,6 +7783,7 @@ session() {
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
@@ -8408,7 +8684,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|watch|status|result|logs|cancel|gc|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -8434,6 +8710,7 @@ main() {
   case "$cmd" in
     --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)
+    __heartbeat-beacon) _heartbeat_beacon "$@" ;;          # internal: persistent fleet heartbeat leader
     __gencost) _or_gen_cost "$1"; echo ;;                 # internal test: real cost of one generation id
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log
     doctor)   doctor ;;
@@ -8451,6 +8728,8 @@ main() {
     crew)        cmd_crew "$@" ;;                          # transactional write-swarm: fanout --worktree edit -> grade -> revert-or-promote
     loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
+    rundown)     cmd_rundown "$@" ;;                       # refresh discovery, then render the fleet digest
+    bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
     watch)       cmd_watch "$@" ;;                         # poll a job until terminal (or --for N)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
@@ -8481,7 +8760,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
   esac
 }
 main "$@"

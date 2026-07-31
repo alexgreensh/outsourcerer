@@ -21,7 +21,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # OSRC_DOCTOR_OFFLINE=1: this test calls `doctor` repeatedly to check watcher-warning behaviour,
 # not lane liveness — the live network probes (OpenRouter credits, session-limit meter, claudex
 # ping) are pure latency here and previously made the test take minutes and wedge the suite.
-run() { OSRC_HOME="$TMP" OSRC_DOCTOR_OFFLINE=1 bash "$SRC" "$@"; }
+run() { PATH="/usr/bin:/bin" OSRC_HOME="$TMP" OSRC_DOCTOR_OFFLINE=1 /bin/bash "$SRC" "$@"; }
 mkjob() { mkdir -p "$TMP/jobs/$1"; printf '%s\n' "$2" > "$TMP/jobs/$1/status"
           printf '%s\n' "$(( $(date +%s) - ${3:-600} ))" > "$TMP/jobs/$1/started_at"; }
 
@@ -73,6 +73,51 @@ done
 awk '/Surface neglected jobs on EVERY invocation/,/esac/' "$SRC" | grep -q '__runjob' \
   && ok "the detached job process is exempt from its own warning" \
   || bad "a running job would warn about itself"
+
+# --- fleet heartbeat: one collection per tick, generation dedupe, durable and attached sinks ---
+src="$SRC"; set --; . "$src" >/dev/null 2>&1
+trap 'rm -rf "$TMP"' EXIT
+HB_TMP="$(mktemp -d "$PWD/.test-watcher-heartbeat.XXXXXX")"
+old_home="$OSRC_HOME"; OSRC_HOME="$HB_TMP"; OSRC_JOBS="$HB_TMP/jobs"
+OSRC_WAKE_QUEUE="$HB_TMP/wake-queue.jsonl"; OSRC_WAKE_ACK="$HB_TMP/wake-acks.jsonl"
+OSRC_FLEET_SNAPSHOT="$HB_TMP/fleet-snapshot.json"; OSRC_HEARTBEAT="$HB_TMP/heartbeat"
+_state_sync() { return 0; }
+_fleet_snapshot_collect() {
+  count="$(cat "$HB_TMP/collect.count" 2>/dev/null || echo 0)"
+  count=$((count + 1)); printf '%s\n' "$count" > "$HB_TMP/collect.count"
+  jq -cn --arg generation "$(cat "$HB_TMP/generation")" \
+    '{schema_version:"1",generation:$generation,captured_at:"now",items:[]}'
+}
+printf '%s\n' generation-1 > "$HB_TMP/generation"
+OSRC_HEARTBEAT_SINK="$HB_TMP/attached.log"; : > "$OSRC_HEARTBEAT_SINK"
+_heartbeat_tick; _heartbeat_tick
+[ "$(cat "$HB_TMP/collect.count")" = 2 ] \
+  && ok "each heartbeat tick collects exactly one snapshot" \
+  || bad "a heartbeat tick collected more than one snapshot"
+[ "$(wc -l < "$HB_TMP/heartbeat/heartbeat.log" | tr -d ' ')" = 1 ] \
+  && [ "$(wc -l < "$HB_TMP/attached.log" | tr -d ' ')" = 1 ] \
+  && ok "unchanged generations are deduped across durable and attached sinks" \
+  || bad "an unchanged generation emitted more than one line"
+
+printf '%s\n' generation-2 > "$HB_TMP/generation"
+OSRC_HEARTBEAT_SINK="$HB_TMP/missing/sink" _heartbeat_tick >/dev/null 2>&1 || true
+pending="$(_wake_drain)"
+[ "$(wc -l < "$HB_TMP/heartbeat/heartbeat.log" | tr -d ' ')" = 2 ] \
+  && printf '%s' "$pending" | grep -q 'heartbeat-sink' \
+  && ok "attached sink loss preserves the log and records unknown" \
+  || bad "attached sink loss erased delivery or failed to surface unknown"
+rm -rf "$HB_TMP"
+OSRC_HOME="$old_home"
+
+awk '/^_bg_launch\(\)/,/^}/' "$SRC" | grep -q '_heartbeat_start' \
+  && ok "successful background launches auto-arm heartbeat" \
+  || bad "background launch does not auto-arm heartbeat"
+[ "$(grep -c '_heartbeat_start.*supervision state is unknown' "$SRC")" -ge 3 ] \
+  && ok "background and interactive launch paths share heartbeat auto-arm" \
+  || bad "one or more successful launch paths omit heartbeat auto-arm"
+grep -q 'OSRC_HEARTBEAT_CADENCE:-300' "$SRC" \
+  && ok "heartbeat cadence defaults to 300 seconds" \
+  || bad "heartbeat cadence default is not 300 seconds"
 
 echo
 echo "RESULT: $pass passed, $fail failed"
