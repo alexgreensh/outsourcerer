@@ -1833,6 +1833,10 @@ _heartbeat_line() {
           elif $d < 3600 then "\(($d/60)|floor)m"
           else "\(($d/3600)|floor)h\((($d%3600)/60)|floor)m" end
       end;
+    # Free-text fields reach the pulse from job labels. Strip control characters (a stray newline
+    # would split the one-line pulse; an escape sequence could rewrite the terminal) and cap length.
+    def clean(v; d; n): (v // d) | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ")
+      | (if length > n then .[0:n] + "…" else . end);
     (.items | map(select(.owner != "external"))) as $m
     | (.items | map(select(.owner == "external")) | length) as $ext
     | ([$m[] | select(.state == "working")]) as $work
@@ -1843,13 +1847,13 @@ _heartbeat_line() {
     | ([ "♥ " + $lead ]
        + (if ($work|length) > 0 then
             [" · " + ([$work[]
-              | "\(.observed_model // .lane // "job") on '"'"'\(.task_summary // "work")'"'"'"
+              | "\(clean(.observed_model // .lane; "job"; 24)) on '"'"'\(clean(.task_summary; "work"; 60))'"'"'"
               + (human_elapsed(.started_at) as $e | if $e == "" then "" else " (" + $e + ")" end)]
               | join(", "))]
           else [] end)
        + (if ($attn|length) > 0 then
             [" · ⚠ needs you: " + ([$attn[]
-              | "\(.observed_model // .lane // "job") '"'"'\(.task_summary // "work")'"'"' \(.state)"] | join(", "))]
+              | "\(clean(.observed_model // .lane; "job"; 24)) '"'"'\(clean(.task_summary; "work"; 60))'"'"' \(.state)"] | join(", "))]
           elif ($work|length) > 0 then [" · nothing needs you"]
           else [] end)
        + (if $ext > 0 then [" · \($ext) other session\(if $ext == 1 then "" else "s" end) seen"] else [] end)

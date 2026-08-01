@@ -43,3 +43,7 @@ plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
 # between ln and mv can leave one behind. Never a tracked artifact.
 .outsourcerer.link.*
 .parity-patches/
+.test-*/
+.test-*
+.test-heartbeat-*
+.build-notes/

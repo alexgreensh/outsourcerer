@@ -1,2 +1,0 @@
-#!/usr/bin/env bash
-cat "$HB_PS_MARKER"

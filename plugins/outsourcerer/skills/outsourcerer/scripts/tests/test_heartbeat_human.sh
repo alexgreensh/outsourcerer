@@ -36,4 +36,17 @@ snap='{"items":[{"owner":"managed","state":"working","observed_model":"sol","tas
 out="$(line "$snap")"
 case "$out" in *"sol on 'x'"*) ok "missing start time degrades cleanly" ;; *) bad "missing start time broke the line: $out" ;; esac
 
+# A hostile job label (newline, escape sequence, overlong) cannot split the pulse, corrupt the
+# terminal, or blow out the line. Control characters are stripped and the field is capped.
+esc="$(printf '\033')"
+hostile="line1${esc}[31mRED
+line2 $(printf 'A%.0s' $(seq 1 200))"
+snap="$(jq -cn --arg t "$hostile" '{items:[{owner:"managed",state:"working",observed_model:"sol",task_summary:$t}]}')"
+out="$(line "$snap")"
+nlines="$(printf '%s' "$out" | wc -l | tr -d ' ')"
+[ "$nlines" -le 1 ] && ok "hostile label cannot split the one-line pulse" || bad "hostile label split the pulse ($nlines lines)"
+if printf '%s' "$out" | LC_ALL=C grep -q '[[:cntrl:]]'; then bad "control characters survived into the pulse"; else ok "control characters are stripped"; fi
+nchars="$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')"
+[ "$nchars" -le 200 ] && ok "pulse length stays bounded under an overlong label" || bad "overlong label blew out the line ($nchars bytes)"
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

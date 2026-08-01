@@ -1,4 +1,0 @@
-{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"pending","receipt":null,"ts":"2026-07-31T21:23:40Z"}
-{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"typing_started","receipt":null,"ts":"2026-07-31T21:23:40Z"}
-{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"submitted","receipt":"receipt-1","ts":"2026-07-31T21:23:40Z"}
-{"schema_version":"1","obligation_id":"restore.pin-busy.1","session_id":"pin-busy","state":"pending","receipt":null,"ts":"2026-07-31T21:23:42Z"}

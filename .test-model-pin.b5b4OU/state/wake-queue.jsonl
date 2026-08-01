@@ -1,5 +1,0 @@
-{"event_id":"model-drift.pin-one.generation-a","kind":"model-drift","generation":"generation-a","session_id":"pin-one","state":"blocked","task_summary":"model drifted fable->opus","schema_version":"1","created_at":"2026-07-31T22:14:43Z"}
-{"event_id":"model-drift.pin-one.generation-a","kind":"model-drift","generation":"generation-a","session_id":"pin-one","state":"blocked","task_summary":"model drifted fable->opus","schema_version":"1","created_at":"2026-07-31T22:14:44Z"}
-{"event_id":"model-drift.pin-busy.generation-b","kind":"model-drift","generation":"generation-b","session_id":"pin-busy","state":"blocked","task_summary":"model drifted fable->opus","schema_version":"1","created_at":"2026-07-31T22:14:44Z"}
-{"event_id":"obligation.restore.pin-busy.1","kind":"delivery","state":"unknown","task_summary":"delivery unknown: restore.pin-busy.1","schema_version":"1","created_at":"2026-07-31T22:14:45Z"}
-{"event_id":"model-drift.pin-external.generation-d","kind":"model-drift","generation":"generation-d","session_id":"pin-external","state":"blocked","task_summary":"model drifted fable->opus","schema_version":"1","created_at":"2026-07-31T22:14:46Z"}

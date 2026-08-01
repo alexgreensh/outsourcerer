@@ -1,3 +1,0 @@
-{"schema_version":"1","session_id":"pin-one","generation":"7","event":"restore-attempt","detail":"fable->opus","ts":"2026-07-31T22:09:20Z","epoch":1785535760}
-{"schema_version":"1","session_id":"pin-one","generation":"7","event":"restore-receipt","detail":"restore.pin-one.7","ts":"2026-07-31T22:09:21Z","epoch":1785535761}
-{"schema_version":"1","session_id":"pin-busy","generation":"1","event":"restore-attempt","detail":"fable->opus","ts":"2026-07-31T22:09:22Z","epoch":1785535762}

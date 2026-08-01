@@ -1,2 +1,0 @@
-send-keys -t pane:0.0 -l -- hello
-send-keys -t pane:0.0 Enter

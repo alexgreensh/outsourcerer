@@ -1,5 +1,0 @@
-{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"pending","receipt":null,"ts":"2026-07-31T23:50:36Z"}
-{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"typing_started","receipt":null,"ts":"2026-07-31T23:50:36Z"}
-{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"submitted","receipt":"{\"obligation_id\":\"reply.proof.3328554182\",\"endpoint\":\"tmux:pane:0.0\",\"generation\":\"e50781146aca42f2af8a2a0837edab0c\",\"target_transition\":true}","ts":"2026-07-31T23:50:36Z"}
-{"schema_version":"1","obligation_id":"killed","session_id":"proof","state":"typing_started","receipt":null,"ts":"2026-07-31T23:50:36Z"}
-{"schema_version":"1","obligation_id":"killed","session_id":"proof","state":"delivery_unknown","receipt":null,"ts":"2026-07-31T23:50:36Z"}
