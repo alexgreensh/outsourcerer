@@ -2248,6 +2248,8 @@ _heartbeat_start() {
   local token executable sink="${OSRC_HEARTBEAT_SINK:-}"
   [ "$OSRC_PLATFORM" != "windows" ] || return 1
   [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ] && return 0
+  # The background status beacon auto-arms only when supervision is opted into.
+  [ "${OSRC_FLEET_SUPERVISION:-0}" = "1" ] || return 0
   _mkdir_private "$OSRC_HEARTBEAT" || return 1
   if [ -z "$sink" ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; }; then sink="/dev/tty"; fi
   token="$(_heartbeat_token)"
