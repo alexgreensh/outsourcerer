@@ -1429,15 +1429,18 @@ _external_session_id_valid() {
   case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
 
-# Recent, capped list of session-transcript files under a directory. `-mmin -N` keeps only files
-# modified in the last N minutes (default 12h) and the count is capped, so the cost per snapshot is
-# bounded regardless of how much history a directory accumulates. Both bounds are env-tunable.
+# Newest-first, capped list of session-transcript files under a directory (searched recursively).
+# `-mmin -N` keeps files modified in the last N minutes (default 48h); the survivors are ordered
+# most-recently-modified first and capped, so the cost per snapshot stays bounded no matter how
+# much history accumulates while the freshest sessions (the ones most likely to be live or waiting)
+# are never dropped for an arbitrary one. Both bounds are env-tunable.
 _fleet_recent_session_files() { # <dir>
-  local dir="$1" win="${OSRC_FLEET_RECENT_MIN:-720}" cap="${OSRC_FLEET_EXTERNAL_CAP:-40}"
+  local dir="$1" win="${OSRC_FLEET_RECENT_MIN:-2880}" cap="${OSRC_FLEET_EXTERNAL_CAP:-40}"
   [ -d "$dir" ] || return 0
-  case "$win" in ''|*[!0-9]*|0) win=720 ;; esac
+  case "$win" in ''|*[!0-9]*|0) win=2880 ;; esac
   case "$cap" in ''|*[!0-9]*|0) cap=40 ;; esac
-  find "$dir" -type f -name '*.jsonl' -mmin -"$win" -print 2>/dev/null | head -n "$cap"
+  find "$dir" -type f -name '*.jsonl' -mmin -"$win" -print0 2>/dev/null \
+    | xargs -0 ls -1t 2>/dev/null | head -n "$cap"
 }
 
 _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] [pid-start]
