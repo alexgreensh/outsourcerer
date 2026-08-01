@@ -1435,12 +1435,16 @@ _external_session_id_valid() {
 # much history accumulates while the freshest sessions (the ones most likely to be live or waiting)
 # are never dropped for an arbitrary one. Both bounds are env-tunable.
 _fleet_recent_session_files() { # <dir>
-  local dir="$1" win="${OSRC_FLEET_RECENT_MIN:-2880}" cap="${OSRC_FLEET_EXTERNAL_CAP:-40}"
+  local dir="$1" win="${OSRC_FLEET_RECENT_MIN:-2880}" cap="${OSRC_FLEET_EXTERNAL_CAP:-40}" matches
   [ -d "$dir" ] || return 0
   case "$win" in ''|*[!0-9]*|0) win=2880 ;; esac
   case "$cap" in ''|*[!0-9]*|0) cap=40 ;; esac
-  find "$dir" -type f -name '*.jsonl' -mmin -"$win" -print0 2>/dev/null \
-    | xargs -0 ls -1t 2>/dev/null | head -n "$cap"
+  # Guard the empty case explicitly: with no matches, `xargs` on some platforms runs `ls` with
+  # no operands and lists the working directory, which would fabricate observations from unrelated
+  # files. Session transcript names carry no newlines, so a newline-delimited hand-off is safe.
+  matches="$(find "$dir" -type f -name '*.jsonl' -mmin -"$win" 2>/dev/null)"
+  [ -n "$matches" ] || return 0
+  printf '%s\n' "$matches" | tr '\n' '\0' | xargs -0 ls -1t 2>/dev/null | head -n "$cap"
 }
 
 _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] [pid-start]
