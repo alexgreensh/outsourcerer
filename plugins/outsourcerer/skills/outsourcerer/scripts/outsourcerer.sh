@@ -1816,7 +1816,7 @@ _fleet_digest() {
       "Charted Next") filter='.state == "idle"' ;;
     esac
     printf '%s\n' "$section"
-    printf '%s' "$snapshot" | jq -r ".items[] | select($filter) | \"- \(.job_id // .session_id // \"unknown\") [\(.state)] \(.task_summary // \"unknown\")\"" || return 1
+    printf '%s' "$snapshot" | jq -r ".items[] | select($filter) | \"- \(.job_id // .session_id // \"unknown\") [\(.state)] \((.task_summary // \"unknown\") | tostring | gsub(\"[[:cntrl:]]\"; \" \") | .[0:80])\"" || return 1
   done
 }
 
@@ -1826,13 +1826,20 @@ _heartbeat_line() {
   # A human-readable pulse: what is running, for how long, and whether anything needs the user.
   # Read-only external observations are summarized as a count; the rundown details them on demand.
   printf '%s' "$snapshot" | jq -r '
+    # started_at reaches the pulse as epoch seconds from the job lifecycle, but registry-sourced
+    # items may carry an ISO8601 string. Accept both; anything unparseable yields no elapsed rather
+    # than a bogus duration.
     def human_elapsed(s):
-      if s == null then "" else
-        (now - (s|fromdateiso8601? // now)) as $d
-        | if $d < 60 then "just now"
-          elif $d < 3600 then "\(($d/60)|floor)m"
-          else "\(($d/3600)|floor)h\((($d%3600)/60)|floor)m" end
-      end;
+      (if s == null then null
+       elif (s | type) == "number" then s
+       elif (s | tostring | test("^[0-9]+$")) then (s | tonumber)
+       else (s | fromdateiso8601? // null) end) as $t
+      | if $t == null then "" else
+          (now - $t) as $d
+          | if $d < 60 then "just now"
+            elif $d < 3600 then "\(($d/60)|floor)m"
+            else "\(($d/3600)|floor)h\((($d%3600)/60)|floor)m" end
+        end;
     # Free-text fields reach the pulse from job labels. Strip control characters (a stray newline
     # would split the one-line pulse; an escape sequence could rewrite the terminal) and cap length.
     def clean(v; d; n): (v // d) | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ")
@@ -1846,14 +1853,16 @@ _heartbeat_line() {
        else "\($work|length) running" end) as $lead
     | ([ "♥ " + $lead ]
        + (if ($work|length) > 0 then
-            [" · " + ([$work[]
+            [" · " + ([$work[0:4][]
               | "\(clean(.observed_model // .lane; "job"; 24)) on '"'"'\(clean(.task_summary; "work"; 60))'"'"'"
               + (human_elapsed(.started_at) as $e | if $e == "" then "" else " (" + $e + ")" end)]
-              | join(", "))]
+              | join(", "))
+             + (if ($work|length) > 4 then " +\(($work|length) - 4) more" else "" end)]
           else [] end)
        + (if ($attn|length) > 0 then
-            [" · ⚠ needs you: " + ([$attn[]
-              | "\(clean(.observed_model // .lane; "job"; 24)) '"'"'\(clean(.task_summary; "work"; 60))'"'"' \(.state)"] | join(", "))]
+            [" · ⚠ needs you: " + ([$attn[0:4][]
+              | "\(clean(.observed_model // .lane; "job"; 24)) '"'"'\(clean(.task_summary; "work"; 60))'"'"' \(.state)"] | join(", "))
+             + (if ($attn|length) > 4 then " +\(($attn|length) - 4) more" else "" end)]
           elif ($work|length) > 0 then [" · nothing needs you"]
           else [] end)
        + (if $ext > 0 then [" · \($ext) other session\(if $ext == 1 then "" else "s" end) seen"] else [] end)
@@ -1902,7 +1911,7 @@ _wake_consume() {
   while IFS= read -r event; do
     [ -n "$event" ] || continue
     id="$(printf '%s' "$event" | jq -r '.event_id // empty')"; [ -n "$id" ] || continue
-    line="wake[$id] $(printf '%s' "$event" | jq -r '.task_summary // .kind // "unknown"')"
+    line="wake[$id] $(printf '%s' "$event" | jq -r '(.task_summary // .kind // "unknown") | tostring | gsub("[[:cntrl:]]"; " ") | .[0:80]')"
     _heartbeat_log_append "$line" || return 1
     _heartbeat_emit_attached "$line" || continue
     _wake_ack "$id" || return 1
@@ -2053,10 +2062,20 @@ _heartbeat_claim() {
         return 2
       fi
       # Keep an incumbent unless we positively observed its PID with a different
-      # start marker. Unsupported/failed identity adapters are never stale proof.
+      # start marker. Unsupported/failed identity adapters are never stale proof --
+      # EXCEPT for a PID that no longer exists at all, which is provably dead. A dead
+      # owner whose leader is never reclaimed wedges every future claim permanently, so
+      # a beacon that exits without cleaning up (a kill, a power loss) would silently
+      # disable supervision forever. Reclaim only when both liveness probes agree the
+      # PID is gone; a live-but-unreadable identity is still preserved.
       if [ "$rc" -ne 0 ]; then
-        _heartbeat_election_release "$lock"
-        return 3
+        if kill -0 "$old_pid" 2>/dev/null || ps -p "$old_pid" >/dev/null 2>&1; then
+          _heartbeat_election_release "$lock"
+          return 3
+        fi
+        # Provably dead: proceed to reclaim. Reset the identity-probe status so the
+        # publish below is not skipped by the "$rc" already being non-zero.
+        rc=0
       fi
       _heartbeat_remove_tree "$leader" || { _heartbeat_election_release "$lock"; return 1; }
     fi

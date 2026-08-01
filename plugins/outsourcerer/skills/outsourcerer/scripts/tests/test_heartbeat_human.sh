@@ -49,4 +49,16 @@ if printf '%s' "$out" | LC_ALL=C grep -q '[[:cntrl:]]'; then bad "control charac
 nchars="$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')"
 [ "$nchars" -le 200 ] && ok "pulse length stays bounded under an overlong label" || bad "overlong label blew out the line ($nchars bytes)"
 
+# Elapsed must render from EPOCH seconds (the job-lifecycle shape), not only ISO strings.
+epoch14="$(( $(date -u +%s) - 840 ))"
+snap="$(jq -cn --argjson e "$epoch14" '{items:[{owner:"managed",state:"working",observed_model:"sol",task_summary:"x",started_at:$e}]}')"
+out="$(line "$snap")"
+case "$out" in *"(14m)"*) ok "elapsed renders from epoch seconds" ;; *) bad "epoch elapsed missing: $out" ;; esac
+
+# A large fleet is capped, not enumerated in full — the pulse stays one bounded line.
+snap="$(jq -cn '{items:[range(12)|{owner:"managed",state:"working",observed_model:"glm",task_summary:"job\(.)"}]}')"
+out="$(line "$snap")"
+case "$out" in *"more"*) ok "large fleet is capped with a +N more summary" ;; *) bad "large fleet not capped: $out" ;; esac
+[ "$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')" -le 220 ] && ok "capped pulse stays bounded for a big fleet" || bad "big fleet blew out the line"
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
