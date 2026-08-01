@@ -173,7 +173,7 @@ printf '%s' "$out" | grep -qi 'no such job' \
   || bad "unknown job id is indistinguishable from a missing log"
 
 
-# --- findings from the adversarial pass -----------------------------------------------------------
+# --- regression coverage for terminal-state edge cases --------------------------------------------
 # 1. `interrupted` was missing from the fanout waiter's terminal list. Reconciling dead jobs to
 #    `interrupted` made that latent gap reachable: a killed member counted as live forever and
 #    `fanout wait` never returned. A fix that makes a state common must check who consumes it.
