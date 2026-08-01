@@ -1429,6 +1429,17 @@ _external_session_id_valid() {
   case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
 
+# Recent, capped list of session-transcript files under a directory. `-mmin -N` keeps only files
+# modified in the last N minutes (default 12h) and the count is capped, so the cost per snapshot is
+# bounded regardless of how much history a directory accumulates. Both bounds are env-tunable.
+_fleet_recent_session_files() { # <dir>
+  local dir="$1" win="${OSRC_FLEET_RECENT_MIN:-720}" cap="${OSRC_FLEET_EXTERNAL_CAP:-40}"
+  [ -d "$dir" ] || return 0
+  case "$win" in ''|*[!0-9]*|0) win=720 ;; esac
+  case "$cap" in ''|*[!0-9]*|0) cap=40 ;; esac
+  find "$dir" -type f -name '*.jsonl' -mmin -"$win" -print 2>/dev/null | head -n "$cap"
+}
+
 _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] [pid-start]
   local items="$1" id="$2" source="$3" endpoint="$4" pid="${5:-}" pid_start="${6:-}" item
   _external_session_id_valid "$id" || return 1
@@ -1463,19 +1474,20 @@ _external_session_observations() { # <managed-job-items-json>
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null)
 
   # These sources are intentionally evidence-only. Their files, pane titles, and process names do
-  # not establish ownership, activity, or an input-safe composer.
-  for path in "${OSRC_CLAUDE_REGISTRY:-$HOME/.claude/sessions}"/*.jsonl; do
+  # not establish ownership, activity, or an input-safe composer. Discovery is bounded to files
+  # touched recently and capped: a status line reports live sessions, and an unbounded per-tick
+  # scan of a large transcript history would blow past the beacon's cadence on an active machine.
+  while IFS= read -r path; do
     [ -f "$path" ] || continue
     name="$(basename "$path" .jsonl | tr -cd 'A-Za-z0-9._-')"
     [ -n "$name" ] || continue
     items="$(_external_session_observation "$items" "claude.$name" claude "file:$path")" || return 1
-  done
-  if [ -d "$HOME/.codex/sessions" ]; then
-    while IFS= read -r path; do
-      name="$(printf '%s' "$path" | cksum | awk '{print $1}')"
-      items="$(_external_session_observation "$items" "codex.$name" codex "file:$path")" || return 1
-    done < <(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -print 2>/dev/null)
-  fi
+  done < <(_fleet_recent_session_files "${OSRC_CLAUDE_REGISTRY:-$HOME/.claude/sessions}")
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    name="$(printf '%s' "$path" | cksum | awk '{print $1}')"
+    items="$(_external_session_observation "$items" "codex.$name" codex "file:$path")" || return 1
+  done < <(_fleet_recent_session_files "$HOME/.codex/sessions")
   if have tmux; then
     while IFS=$'\t' read -r endpoint pid command; do
       [ -n "$endpoint" ] || continue
@@ -1804,15 +1816,21 @@ _fleet_digest() {
 _heartbeat_line() {
   local snapshot="${1:-}"
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
-  printf '%s' "$snapshot" | jq -r '[
-    "♥ working=\([.items[] | select(.state == "working")] | length) blocked=\([.items[] | select(.state == "blocked")] | length) unknown=\([.items[] | select(.state == "unknown")] | length) landed=\([.items[] | select(.state == "completed" or .state == "dead")] | length)",
-    ([.items[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
-      | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"]
-     | if length == 0 then "" else " | " + join(" | ") end),
-    ([.items[] | select(.model_pin? != null)
-      | "flip \(.session_id // "unknown") \(.model_pin.requested)->\(.model_pin.observed) [\(.model_pin.result)]"]
-     | if length == 0 then "" else " | " + join(" | ") end)
-  ] | join("")'
+  # The pulse summarizes the supervised fleet and enumerates only actionable work. Read-only
+  # external observations are counted compactly as `ext=` and detailed on demand by the rundown,
+  # so a machine with many idle terminals does not bury the one status line in noise.
+  printf '%s' "$snapshot" | jq -r '
+    (.items | map(select(.owner != "external"))) as $m
+    | (.items | map(select(.owner == "external")) | length) as $ext
+    | [
+      "♥ working=\([$m[] | select(.state == "working")] | length) blocked=\([$m[] | select(.state == "blocked")] | length) unknown=\([$m[] | select(.state == "unknown")] | length) landed=\([$m[] | select(.state == "completed" or .state == "dead")] | length)\(if $ext > 0 then " ext=\($ext)" else "" end)",
+      ([$m[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
+        | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"]
+       | if length == 0 then "" else " | " + join(" | ") end),
+      ([.items[] | select(.model_pin? != null)
+        | "flip \(.session_id // "unknown") \(.model_pin.requested)->\(.model_pin.observed) [\(.model_pin.result)]"]
+       | if length == 0 then "" else " | " + join(" | ") end)
+    ] | join("")'
 }
 
 _wake_append() {
@@ -2133,7 +2151,7 @@ _heartbeat_tick() {
       event_id="heartbeat.$generation.$(printf '%s' "$item" | jq -r '(.job_id // .session_id // "fleet") | gsub("[^A-Za-z0-9._-]"; "_")').$(printf '%s' "$item" | jq -r '.state')"
       _wake_append "$(printf '%s' "$item" | jq -c --arg event_id "$event_id" --arg generation "$generation" \
         '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:.task_summary}')" || wake_ok=0
-    done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(.state == "blocked" or .state == "unknown" or .state == "dead")')
+    done < <(printf '%s' "$snapshot" | jq -c '.items[] | select((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead"))')
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi
   render_cursor="$(_heartbeat_cursor_read render 2>/dev/null)"
