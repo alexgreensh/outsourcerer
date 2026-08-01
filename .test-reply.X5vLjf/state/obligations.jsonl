@@ -1,0 +1,3 @@
+{"schema_version":"1","obligation_id":"reply.external-2.3287646509","session_id":"external-2","state":"pending","receipt":null,"ts":"2026-07-31T22:40:10Z"}
+{"schema_version":"1","obligation_id":"reply.external-2.3287646509","session_id":"external-2","state":"typing_started","receipt":null,"ts":"2026-07-31T22:40:10Z"}
+{"schema_version":"1","obligation_id":"reply.external-2.3287646509","session_id":"external-2","state":"submitted","receipt":"{\"obligation_id\":\"reply.external-2.3287646509\",\"endpoint\":\"tmux:pane:0.0\",\"generation\":\"3dc963de0d4e9155a6d1fa842bb6b632\",\"target_transition\":true}","ts":"2026-07-31T22:40:10Z"}

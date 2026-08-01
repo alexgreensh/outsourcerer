@@ -1,0 +1,5 @@
+{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"pending","receipt":null,"ts":"2026-07-31T22:46:50Z"}
+{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"typing_started","receipt":null,"ts":"2026-07-31T22:46:50Z"}
+{"schema_version":"1","obligation_id":"reply.proof.3328554182","session_id":"proof","state":"submitted","receipt":"{\"obligation_id\":\"reply.proof.3328554182\",\"endpoint\":\"tmux:pane:0.0\",\"generation\":\"41d94377d27916402cb3ab08b54dc01e\",\"target_transition\":true}","ts":"2026-07-31T22:46:50Z"}
+{"schema_version":"1","obligation_id":"killed","session_id":"proof","state":"typing_started","receipt":null,"ts":"2026-07-31T22:46:50Z"}
+{"schema_version":"1","obligation_id":"killed","session_id":"proof","state":"delivery_unknown","receipt":null,"ts":"2026-07-31T22:46:50Z"}

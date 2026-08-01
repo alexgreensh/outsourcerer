@@ -1,0 +1,3 @@
+send-keys -t pin-one M-m
+send-keys -t pin-one -l -- fable
+send-keys -t pin-one Enter

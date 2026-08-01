@@ -1,0 +1,6 @@
+{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"pending","receipt":null,"ts":"2026-07-31T22:19:41Z"}
+{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"typing_started","receipt":null,"ts":"2026-07-31T22:19:41Z"}
+{"schema_version":"1","obligation_id":"restore.pin-one.7","session_id":"pin-one","state":"submitted","receipt":"{\"obligation_id\":\"restore.pin-one.7\",\"endpoint\":\"tmux:pin-one\",\"generation\":\"1\",\"target_transition\":true}","ts":"2026-07-31T22:19:41Z"}
+{"schema_version":"1","obligation_id":"restore.pin-busy.1","session_id":"pin-busy","state":"pending","receipt":null,"ts":"2026-07-31T22:19:42Z"}
+{"schema_version":"1","obligation_id":"restore.pin-busy.1","session_id":"pin-busy","state":"typing_started","receipt":null,"ts":"2026-07-31T22:19:43Z"}
+{"schema_version":"1","obligation_id":"restore.pin-busy.1","session_id":"pin-busy","state":"delivery_unknown","receipt":null,"ts":"2026-07-31T22:19:43Z"}
