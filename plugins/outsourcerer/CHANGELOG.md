@@ -2,6 +2,54 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.6.1
+
+- **The heartbeat can finally reach an async orchestrator.** The background beacon used to only WRITE a
+  status pulse (to a tty or a sink file). A message-driven caller that only takes a turn when input
+  arrives (a chat/Slack/Telegram bot, idle between messages) has no polling loop and never reads that
+  tty, so a delegated run went silent until the user pinged. New **`OSRC_HEARTBEAT_WAKE`**: export a notifier command and the beacon TRIGGERS it on
+  every state change (blocked/dead) and on the periodic digest (still-cooking / landed), passing the
+  compact summary as `$1` and the full event JSON on stdin (and `$OSRC_WAKE_EVENT`). The plugin never
+  sends anything itself — it only triggers the caller's own sanctioned notifier. Untrusted event text is
+  passed as an arg / stdin / env only, never interpolated into the command, so a task summary with shell
+  metacharacters cannot inject. Best-effort and time-bounded (`OSRC_HEARTBEAT_WAKE_TIMEOUT`, default 20s):
+  a slow or failing notifier never wedges the beacon or gates a wake ack. Suppress just the periodic push
+  with `OSRC_HEARTBEAT_WAKE_DIGEST=0`. New suite `test_heartbeat_wake_push`.
+- **Async-supervision guard.** A headless `bg`/`fanout` launch (no tty) with no wake and no sink armed now
+  prints an **ASYNC SUPERVISION** warning at launch, naming the exact fix, so an async orchestrator can't
+  launch work and discover the silence an hour later.
+- **Stop re-nagging a remembered org-policy refusal.** When Devin's org policy blocks the sandboxed
+  `autonomous` mode that `research` needs, the tool used to re-attempt it and re-print the scary error on
+  every run, then suggest `yolo` (which is LESS safe and not the fix). It now DETECTS the refusal once,
+  REMEMBERS it (`~/.outsourcerer/lane-posture/devin.autonomous`, 0600, symlink-safe), and preflight-skips
+  the doomed attempt with one clean, routable notice (use Codex for sandboxed exec, or run read-only on
+  Devin) — never silently downgrading to no-sandbox. New `posture` subcommand (`status`/`reset`) and suite
+  `test_devin_org_policy_posture`.
+
+## 0.6.0
+
+- **Human-readable status pulse.** The fleet heartbeat now emits a readable one-line pulse
+  (`♥ working=N blocked=N unknown=N landed=N`) instead of a raw dump, so a running fleet is legible at a glance.
+- **Status beacon auto-arms by default** (`OSRC_FLEET_SUPERVISION=1`; opt out with `=0`), so supervised work
+  is watched from the moment it starts without an explicit arm step.
+- **Harden the fleet:** reclaim dead-owner beacon leaders (fix elapsed/caps), and sanitize free-text fields
+  in the status pulse so a task summary can't corrupt or inject into the digest. Dropped tracked test scratch.
+
+## 0.5.0
+
+- **Auto-armed heartbeat + `bearings`/`rundown`.** A background fleet heartbeat, plus `bearings` (read the
+  last snapshot) and `rundown` (refresh + render), so the orchestrator always has a cheap fleet status read.
+- **External-session discovery + safe claimed replies.** Discover Claude/agent sessions outside the tool and
+  steer them via a claim-token boundary (`session claim`/`reply`/`release`), with the send gated off by
+  default (`OSRC_EXTERNAL_SEND`). Shared session-state, snapshot, and wake-queue primitives underpin it.
+- **Active model-pin enforcement** — detect and correct model drift in a managed session.
+- **Effort-aware model selection** (`advise`) with Kimi K3 across lanes; **change reasoning effort
+  mid-session** (`session effort`); **capability-probed interactive launch** for droid/cursor/hermes.
+- **Honest subscription-limit cost disclosure** in receipts (cash vs plan split); **provider provenance +
+  a pre-dispatch confirmation gate** (internal continuations skip it).
+- **Hardening:** mutation crash-safety, claim identity, election cleanup, gated external send, and a batch
+  of adversarial-audit fixes in the mutation and routing paths.
+
 ## 0.4.23
 
 - **Watcher now reports on a cadence.** `cmd_watch` emits a periodic `OSRC::PROGRESS` status digest

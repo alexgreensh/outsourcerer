@@ -96,6 +96,18 @@ jobs that have been running with nobody looking. If you see that warning, you al
 — watch or cancel before doing anything else. Watching is also what makes loops steerable: you cannot
 course-correct or kill a bad run you are not reading.
 
+**If you are an async / message-driven orchestrator that only takes a turn when input arrives (a
+chat/Slack/Telegram bot, or any assistant that sits idle between messages — even a long-lived process
+counts, because staying alive is not the same as polling), watching-by-polling is impossible: nothing
+gives you a turn between inputs.** The background beacon still records status durably, but it can only
+WRITE a pulse; it cannot wake you. So arm a push: export `OSRC_HEARTBEAT_WAKE="<your notifier command>"` before you
+launch, and the beacon runs it on every state change (blocked/dead) and on the periodic digest
+(still-cooking / landed), passing the compact summary as `$1` and the full event JSON on stdin. Point it
+at whatever re-invokes you or messages the user through your OWN sanctioned send path — the plugin never
+sends anything itself. A headless launch with no wake armed prints an **ASYNC SUPERVISION** warning
+naming the fix; don't ignore it, or your delegate will run silent until the user pings. (Suppress just
+the periodic-digest push with `OSRC_HEARTBEAT_WAKE_DIGEST=0`, keeping only the attention-needed wakes.)
+
 ## Operating rules
 
 - **Cloud consent, once ever.** The first cloud delegation needs consent (repo content leaves the machine; a secret-scan hard-block runs on EVERY delegation regardless). Tell the user in one line, then `consent grant` (or `--cloud-ack`) — remembered in `~/.outsourcerer/cloud-consent`. Never retry a gate refusal blindly; the error names the fix.
@@ -106,7 +118,7 @@ course-correct or kill a bad run you are not reading.
 
 ## Subcommands
 
-Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `advise` · `doctor` · `models`. More: `suggest`/`deals` (cheap now) · `estimate` (cost quote) · `tab` (the ledger) · `second-opinion` · `image` · `continue` · `tap` (capture live limits without token-optimizer) · `parity`/`parity-codex`/`parity-droid`/`parity-cursor`/`parity-hermes` (two-way bridges) · `cleanup`/`gc`. Failure states map to one-line user messages (`launching`→`running`→ `done`/`done?`/`blocked`/`permission-blocked`/`interrupted`/`timeout`/`wedged`/`failed`): `references/jobs-and-safety.md`. `permission-blocked` (a headless delegate hit a wall it can't confirm — e.g. devin print-mode) is NOT `blocked`: re-run with `yolo` or restructure the prompt, don't just read the result. `launching` that never becomes `running` → `failed` (stillborn: the environment killed the detached worker — run foreground).
+Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `advise` · `doctor` · `models`. More: `suggest`/`deals` (cheap now) · `estimate` (cost quote) · `tab` (the ledger) · `second-opinion` · `image` · `continue` · `tap` (capture live limits without token-optimizer) · `parity`/`parity-codex`/`parity-droid`/`parity-cursor`/`parity-hermes` (two-way bridges) · `posture` (show/reset remembered lane org-policy restrictions) · `cleanup`/`gc`. Failure states map to one-line user messages (`launching`→`running`→ `done`/`done?`/`blocked`/`permission-blocked`/`interrupted`/`timeout`/`wedged`/`failed`): `references/jobs-and-safety.md`. `permission-blocked` (a headless delegate hit a wall it can't confirm — e.g. devin print-mode) is NOT `blocked`: re-run with `yolo` or restructure the prompt, don't just read the result. `launching` that never becomes `running` → `failed` (stillborn: the environment killed the detached worker — run foreground).
 
 ### External-session claims
 

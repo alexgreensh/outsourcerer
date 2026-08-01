@@ -290,6 +290,55 @@ cmd_consent() {
   esac
 }
 
+# ---- LANE POSTURE CACHE (remember a lane's org-policy restrictions so we stop re-nagging) ----
+# A delegate lane can refuse a permission mode by ORG POLICY (e.g. Devin: "Mode 'autonomous' is
+# restricted by your organization's policy"). That verdict is stable per account, so re-attempting it
+# on every dispatch just re-prints the same scary error. We remember it (one tiny 0600 file per
+# lane.key under $OSRC_HOME/lane-posture) and preflight-skip the doomed attempt with ONE clean notice.
+# This never LOOSENS anything: it only records a refusal the lane already enforces, and only routes
+# toward a MORE-restrictive posture (or a clean stop), never toward a less-safe one. Reset by deleting
+# the file, or clear all with `posture reset`.
+OSRC_POSTURE_DIR="$OSRC_HOME/lane-posture"
+_posture_get() {  # <lane> <key> -> prints stored value, rc0 if present (rejects symlinks)
+  local f="$OSRC_POSTURE_DIR/$1.$2"
+  [ -L "$f" ] && return 1
+  [ -f "$f" ] || return 1
+  cat "$f" 2>/dev/null
+}
+_posture_set() {  # <lane> <key> <value>  (atomic, private, symlink-safe)
+  _mkdir_private "$OSRC_POSTURE_DIR" || return 1
+  local f="$OSRC_POSTURE_DIR/$1.$2" tmp="$OSRC_POSTURE_DIR/.$1.$2.$$"
+  [ -L "$f" ] && rm -f "$f" 2>/dev/null
+  { umask 077; printf '%s\n' "$3" > "$tmp"; } 2>/dev/null \
+    && mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+cmd_posture() {
+  case "${1:-status}" in
+    status) if [ -d "$OSRC_POSTURE_DIR" ] && ls "$OSRC_POSTURE_DIR"/*.* >/dev/null 2>&1; then
+              echo "remembered lane postures:"
+              for f in "$OSRC_POSTURE_DIR"/*.*; do [ -f "$f" ] || continue
+                printf '  %s = %s\n' "$(basename "$f")" "$(cat "$f" 2>/dev/null)"; done
+            else echo "no lane postures remembered yet."; fi ;;
+    reset)  rm -f "$OSRC_POSTURE_DIR"/*.* 2>/dev/null; echo "lane postures cleared; the next restricted attempt will be re-probed once." ;;
+    *)      die "posture: unknown action '${1:-}' (use: status|reset)" ;;
+  esac
+}
+
+# _devin_autonomous_policy_blocked <capfile> -> rc0 if the capture shows Devin's org-policy refusal
+# of the 'autonomous' permission mode (the sandboxed-exec mode `research` needs).
+_devin_autonomous_policy_blocked() {
+  local cap="${1:-}"
+  [ -n "$cap" ] && [ -f "$cap" ] || return 1
+  grep -qiE "Mode '?autonomous'? is restricted by your organization|autonomous.*restricted by your organization'?s policy" "$cap"
+}
+
+# One clean, actionable line for the known-restricted case. NO scary stack trace, NO "retry with yolo"
+# (yolo is LESS safe, not the fix here). Sandboxed exec is the whole point of `research`, so we route
+# the user to a lane whose sandbox their org allows instead of silently dropping the sandbox.
+_devin_autonomous_restricted_notice() {
+  printf '>>> [devin] sandboxed-autonomous (research) is blocked by your Devin org policy — remembered, so I will not re-attempt it on this lane. For sandboxed exec use Codex (--provider codex research) or run this read-only (run/explore) on Devin. Clear with: %s posture reset\n' "$0" >&2
+}
+
 # ---- COPILOT DRIVING MODE (auto|manual|hybrid), persisted per-user in $OSRC_HOME/mode.
 # The session-start handshake: the skill greets the user, shows live limits + ready lanes, and
 # offers three ways to drive. Chosen ONCE, remembered forever (ask-once-then-remember). The BASH
@@ -607,10 +656,27 @@ delegate() {
   # before dispatch (a STRICTER guard than Devin's trust prompt — it blocks real credential files),
   # so Devin's redundant prompt only ever broke headless runs.
   echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} --respect-workspace-trust false -p (offload)" >&2
-  local rc=0
-  devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+  local rc=0 _policy_blocked=0
+  if [ -n "$sandbox" ]; then
+    # Capture devin's stderr (where the org-policy refusal lands) while still showing it, so a
+    # one-time "autonomous restricted by your org" verdict can be REMEMBERED instead of re-nagged
+    # every research run. Mirrors the agy lane's `2> >(tee ... >&2)` idiom. stdout (the result)
+    # is untouched. $? is devin's, not tee's, because the redirection is on devin, not a pipe.
+    local _dverr="$OSRC_HOME/.dverr.$$"
+    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
+    if [ "$rc" -ne 0 ] && _devin_autonomous_policy_blocked "$_dverr"; then
+      _policy_blocked=1
+      _posture_set devin autonomous restricted
+      _devin_autonomous_restricted_notice
+    fi
+    rm -f "$_dverr" 2>/dev/null
+  else
+    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+  fi
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure dv)" >&2
-  if [ -n "$sandbox" ] && [ "$rc" -ne 0 ]; then
+  # The "retry with yolo" hint is wrong for the org-policy case (yolo is LESS safe and is not the
+  # fix); the clean notice above already gave the right next step. Only hint for OTHER sandbox failures.
+  if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ "$_policy_blocked" -eq 0 ]; then
     echo "HINT: sandboxed run exited $rc. If a Read/Write scope was denied, retry with 'yolo' (dangerous, no sandbox)." >&2
   fi
   # Diagnostics-only: devin prints a bare "Connection error" when its Rust TLS stack rejects a
@@ -1913,6 +1979,7 @@ _wake_consume() {
     id="$(printf '%s' "$event" | jq -r '.event_id // empty')"; [ -n "$id" ] || continue
     line="wake[$id] $(printf '%s' "$event" | jq -r '(.task_summary // .kind // "unknown") | tostring | gsub("[[:cntrl:]]"; " ") | .[0:80]')"
     _heartbeat_log_append "$line" || return 1
+    _wake_notify_external "$event" || true   # ACTIVE push for async orchestrators; best-effort, non-gating
     _heartbeat_emit_attached "$line" || continue
     _wake_ack "$id" || return 1
   done < <(_wake_drain)
@@ -2138,6 +2205,46 @@ _heartbeat_emit_attached() {
   fi
 }
 
+# _wake_notify_external <event-json> — the ACTIVE push an async orchestrator needs.
+# A message-driven caller (a chat/Slack/Telegram bot, or any orchestrator that only takes a turn when
+# input arrives and sits idle in between) has NO polling loop: the beacon can write a pulse to a tty all
+# day and nothing there reads it or wakes the orchestrator. When the caller exports
+# OSRC_HEARTBEAT_WAKE=<command>, the beacon
+# runs that command on each state change / digest so the caller is re-invoked or notified without the
+# user having to ping. The plugin NEVER sends a message itself (it doesn't know the caller's sanctioned
+# send path); it only TRIGGERS the caller's own notifier. Contract: the wake command receives the
+# compact summary as $1 and the full event JSON on stdin AND in $OSRC_WAKE_EVENT. Untrusted event text
+# is passed as a positional arg / stdin / env only — never interpolated into the command string, so a
+# task summary containing shell metacharacters cannot inject. Best-effort and time-bounded: a slow or
+# failing notifier must never wedge the beacon or block the durable wake log (the authority sink), so
+# this never gates an ack.
+_wake_notify_external() {
+  local event="${1:-}" cmd="${OSRC_HEARTBEAT_WAKE:-}" summary np kp
+  [ -n "$cmd" ] || return 0
+  [ -n "$event" ] || return 0
+  summary="$(printf '%s' "$event" | jq -r '(.task_summary // .kind // "update") | tostring | gsub("[[:cntrl:]]"; " ") | .[0:160]' 2>/dev/null)" || summary="update"
+  ( printf '%s\n' "$event" | OSRC_WAKE_EVENT="$event" sh -c "$cmd" osrc-wake "$summary" ) </dev/null >/dev/null 2>&1 &
+  np=$!
+  ( sleep "${OSRC_HEARTBEAT_WAKE_TIMEOUT:-20}"; kill "$np" 2>/dev/null ) >/dev/null 2>&1 &
+  kp=$!
+  wait "$np" 2>/dev/null
+  kill "$kp" 2>/dev/null; wait "$kp" 2>/dev/null
+  return 0
+}
+
+# _async_supervision_notice — the guard that stops "I launched work and it went silent until I pinged."
+# Fires ONLY in a headless context (no tty on any std stream) where nothing can push status: no wake
+# command and no attached sink. The beacon still records status durably, but a message-driven caller
+# (one turn per inbound message) will never see it unattended. Say so at launch, once, with the exact
+# fix — so an async orchestrator arms the push instead of discovering the gap after an hour of silence.
+_async_supervision_notice() {
+  { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } && return 0     # an attached terminal already sees the pulse
+  [ -n "${OSRC_HEARTBEAT_WAKE:-}" ] && return 0          # a wake command is armed → status is pushed
+  [ -n "${OSRC_HEARTBEAT_SINK:-}" ] && return 0          # an explicit sink is armed → caller reads it
+  [ "${OSRC_FLEET_SUPERVISION:-1}" = "0" ] && return 0   # supervision explicitly opted out
+  printf '[outsourcerer] ASYNC SUPERVISION: this run is headless with no wake armed, so its status will NOT reach you until you check. Either run "%s bearings" on your next turn, or export OSRC_HEARTBEAT_WAKE="<your notifier>" so blocked/done/digest events are pushed to you automatically (it gets the summary as $1 and the event JSON on stdin).\n' "$0" >&2
+}
+
 _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
   local item="$1" snapshot_generation="$2" session_id owner state lane endpoint requested resolved observed model_generation event_id lock restore_id result=reported
   session_id="$(printf '%s' "$item" | jq -r '.session_id // empty')"
@@ -2214,6 +2321,15 @@ _heartbeat_tick() {
     return 1
   }
   _wake_consume || true
+  # Periodic digest also goes to the async caller's notifier (still-cooking / landed pulse), gated to
+  # once per generation by the render cursor above, so an async orchestrator gets the same "all green,
+  # next check ~X" pulse an attached terminal would — without the user having to ping. Opt-in via
+  # OSRC_HEARTBEAT_WAKE; a periodic-digest push is suppressed with OSRC_HEARTBEAT_WAKE_DIGEST=0 (leaving
+  # only the attention-needed wakes from _wake_consume).
+  if [ -n "${OSRC_HEARTBEAT_WAKE:-}" ] && [ "${OSRC_HEARTBEAT_WAKE_DIGEST:-1}" = "1" ]; then
+    _wake_notify_external "$(jq -cn --arg gen "$generation" --arg s "$line" \
+      '{event_id:("heartbeat.digest." + $gen),kind:"heartbeat-digest",generation:$gen,state:"working",task_summary:$s}')" || true
+  fi
   if ! _heartbeat_emit_attached "$line"; then
     _wake_append "$(jq -cn --arg event_id "heartbeat.$generation.attached" --arg generation "$generation" \
       '{event_id:$event_id,kind:"heartbeat-sink",generation:$generation,state:"unknown",task_summary:"attached heartbeat sink unavailable"}')" >/dev/null 2>&1 || true
@@ -4340,6 +4456,7 @@ cmd_bg() {
   # about its own routing, so name it as a default and point at the record that is actually true.
   echo "[outsourcerer] job $id launched (default lane: $PROVIDER; a model alias can route it elsewhere, and '$0 status $id' shows the model it really ran)." >&2
   echo "[outsourcerer] NOW WATCH IT: $0 watch $id     (it runs unobserved until you do; status/result: $0 status $id | $0 result $id)" >&2
+  _async_supervision_notice
 }
 
 # AUTO-DETACH: a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
@@ -4386,6 +4503,7 @@ _autodetach_run() {
   printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
   printf '>>>   job id : %s\n' "$id" >&2
   printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
+  _async_supervision_notice
   echo "$id"
   return 0
 }
@@ -7946,7 +8064,13 @@ route_delegate() {
   __osrc_fg_dispatch() {
     case "$disp" in
       devin)
-        if [ "$tier" = "autonomous" ]; then delegate "autonomous" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
+        if [ "$tier" = "autonomous" ]; then
+          # Preflight: if this org already refused sandboxed-autonomous, don't re-attempt + re-nag.
+          # One clean notice + a routable next step (Codex for sandbox, or run/explore read-only).
+          if [ "$(_posture_get devin autonomous 2>/dev/null)" = "restricted" ]; then
+            _devin_autonomous_restricted_notice; return 3
+          fi
+          delegate "autonomous" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
         else delegate "$tier" "" ${ORIG[@]+"${ORIG[@]}"}; fi ;;
       ccor)     delegate_cc     "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
       codexor)  delegate_codex  "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
@@ -9536,6 +9660,7 @@ main() {
     mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
     tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
     consent)  cmd_consent "$@" ;;                          # cloud-consent: status|grant|revoke (remembered ack)
+    posture)  cmd_posture "$@" ;;                          # remembered lane org-policy restrictions: status|reset
     models)   models "$@" ;;
     run|explore) route_delegate "auto" "$cmd" "$@" ;;
     research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
