@@ -72,8 +72,8 @@ if printf '%s' "$digest" | grep -q "Captain's Call" && printf '%s' "$digest" | g
 else
   bad "digest sections are incomplete ($digest)"
 fi
-if _heartbeat_line "$snapshot" | grep -q 'working='; then
-  ok "heartbeat line renders counts"
+if _heartbeat_line "$snapshot" | grep -q '♥'; then
+  ok "heartbeat line renders a pulse"
 else
   bad "heartbeat line did not render"
 fi

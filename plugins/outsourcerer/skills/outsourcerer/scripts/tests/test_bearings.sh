@@ -53,8 +53,8 @@ printf '%s' "$out" | grep -q -- '- unknown \[unknown\] fleet state unavailable' 
 
 line="$(OSRC_HOME="$TMP/line" bash -c 'src="$1"; snapshot="$2"; set --; . "$src" >/dev/null 2>&1; _heartbeat_line "$snapshot"' bash "$SRC" \
   '{"schema_version":"1","generation":"g","captured_at":"now","items":[{"state":"working","job_id":"agent-1","session_id":null,"observed_model":"sol","lane":"cx","task_summary":"map auth"}]}')"
-printf '%s' "$line" | grep -q '▶ agent-1: sol@cx · map auth' \
-  && ok "heartbeat line names the active agent, model, lane, and work" \
+printf '%s' "$line" | grep -q "sol on 'map auth'" \
+  && ok "heartbeat line names the active agent, model, and work" \
   || bad "heartbeat line omitted active work detail"
 
 echo

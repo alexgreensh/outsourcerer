@@ -61,7 +61,7 @@ COMPOSER=empty; before="$(wc -l < "$KEYS" | tr -d ' ')"; _model_pin_enforce_item
 [ "$before" = "$after" ] && ok "unclaimed external drift sends zero keys" || bad "external session was changed"
 
 line="$(_heartbeat_line "{\"items\":[$out]}")"
-case "$line" in *"flip pin-busy fable->opus [reported]"*|*"flip pin-busy fable->opus [restore-failed]"*) ok "heartbeat line reports the observed flip" ;; *) bad "heartbeat flip missing: $line" ;; esac
+case "$line" in *"pinned fable->opus [reported]"*|*"pinned fable->opus [restore-failed]"*) ok "heartbeat line reports the observed flip" ;; *) bad "heartbeat flip missing: $line" ;; esac
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

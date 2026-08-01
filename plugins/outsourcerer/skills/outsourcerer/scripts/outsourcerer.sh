@@ -1823,21 +1823,40 @@ _fleet_digest() {
 _heartbeat_line() {
   local snapshot="${1:-}"
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
-  # The pulse summarizes the supervised fleet and enumerates only actionable work. Read-only
-  # external observations are counted compactly as `ext=` and detailed on demand by the rundown,
-  # so a machine with many idle terminals does not bury the one status line in noise.
+  # A human-readable pulse: what is running, for how long, and whether anything needs the user.
+  # Read-only external observations are summarized as a count; the rundown details them on demand.
   printf '%s' "$snapshot" | jq -r '
+    def human_elapsed(s):
+      if s == null then "" else
+        (now - (s|fromdateiso8601? // now)) as $d
+        | if $d < 60 then "just now"
+          elif $d < 3600 then "\(($d/60)|floor)m"
+          else "\(($d/3600)|floor)h\((($d%3600)/60)|floor)m" end
+      end;
     (.items | map(select(.owner != "external"))) as $m
     | (.items | map(select(.owner == "external")) | length) as $ext
-    | [
-      "♥ working=\([$m[] | select(.state == "working")] | length) blocked=\([$m[] | select(.state == "blocked")] | length) unknown=\([$m[] | select(.state == "unknown")] | length) landed=\([$m[] | select(.state == "completed" or .state == "dead")] | length)\(if $ext > 0 then " ext=\($ext)" else "" end)",
-      ([$m[] | select(.state == "working" or .state == "blocked" or .state == "unknown")
-        | "\(if .state == "working" then "▶" elif .state == "blocked" then "!" else "?" end) \(.job_id // .session_id // "unknown"): \(.observed_model // "unknown")@\(.lane // "unknown") · \(.task_summary // "unknown")"]
-       | if length == 0 then "" else " | " + join(" | ") end),
-      ([.items[] | select(.model_pin? != null)
-        | "flip \(.session_id // "unknown") \(.model_pin.requested)->\(.model_pin.observed) [\(.model_pin.result)]"]
-       | if length == 0 then "" else " | " + join(" | ") end)
-    ] | join("")'
+    | ([$m[] | select(.state == "working")]) as $work
+    | ([$m[] | select(.state == "blocked" or .state == "unknown")]) as $attn
+    | ([.items[] | select(.model_pin? != null)]) as $flips
+    | (if ($work|length) == 0 and ($attn|length) == 0 then "all quiet - nothing running"
+       else "\($work|length) running" end) as $lead
+    | ([ "♥ " + $lead ]
+       + (if ($work|length) > 0 then
+            [" · " + ([$work[]
+              | "\(.observed_model // .lane // "job") on '"'"'\(.task_summary // "work")'"'"'"
+              + (human_elapsed(.started_at) as $e | if $e == "" then "" else " (" + $e + ")" end)]
+              | join(", "))]
+          else [] end)
+       + (if ($attn|length) > 0 then
+            [" · ⚠ needs you: " + ([$attn[]
+              | "\(.observed_model // .lane // "job") '"'"'\(.task_summary // "work")'"'"' \(.state)"] | join(", "))]
+          elif ($work|length) > 0 then [" · nothing needs you"]
+          else [] end)
+       + (if $ext > 0 then [" · \($ext) other session\(if $ext == 1 then "" else "s" end) seen"] else [] end)
+       + (if ($flips|length) > 0 then
+            [" · " + ([$flips[] | "pinned \(.model_pin.requested)->\(.model_pin.observed) [\(.model_pin.result)]"] | join(", "))]
+          else [] end)
+      ) | join("")'
 }
 
 _wake_append() {
