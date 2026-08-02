@@ -126,7 +126,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.6.0"
+OSRC_VERSION="0.6.2"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -591,6 +591,52 @@ _devin_model_for() {
   esac
 }
 
+# _devin_is_free_model <alias-or-devin-id> -> rc0 if it runs on Devin's plan-INCLUDED (free) tier.
+# These do NOT draw on the separate paid ACU balance, so a "0% remaining" figure in Devin's own output
+# (which reports that paid balance) must never be read as blocking them. This is the bug-1 anchor:
+# free-tier models must run regardless of the paid-quota display.
+_devin_is_free_model() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    glm|glm-5.2|z-ai/glm-5.2|swe|swe-1.7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# The OpenRouter ALIAS a free Devin model also runs under (so the advertised fallback resolves to the
+# OpenRouter lane, not back to Devin). Empty when there is no OpenRouter sibling (swe/kimi are Devin-only).
+_devin_free_or_alias() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    glm|glm-5.2|z-ai/glm-5.2) printf 'glm' ;;
+    deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro) printf 'deepseek' ;;
+    *) printf '' ;;
+  esac
+}
+
+# The signature of a Devin refusal that is really a PAID-balance gate (ACU/quota/credits/billing/rate).
+# Kept in one place so the detector and the line-extractor match identically. It is a best-effort FAMILY
+# of phrasings (Devin's exact wording is not pinned in code); it is only ever consulted after a free-tier
+# model already FAILED, and it only upgrades an advisory message. CONTEXT-ANCHORED (v0.6.2 follow-on,
+# per focused torture F1+F2): a money/quota noun only counts as a refusal when it sits beside a refusal
+# verb (limit/cap/exceeded/insufficient/expired/required/remaining...). This both COVERS the canonical
+# wordings the bare list missed (402/payment required/subscription expired/credit limit/usage cap) AND
+# drops the bare-term false positives (a stray "billing"/"quota"/"exhausted all retry attempts" is no
+# longer read as a paid-balance gate). Standalone tokens (0%/402/429/payment required/upgrade your plan)
+# are unambiguous refusals on their own; the rest require the noun+verb pairing.
+_DEVIN_QUOTA_RE='0%[[:space:]]*(remaining|left)|(^|[^0-9])(402|429)([^0-9]|$)|payment required|upgrade your plan|insufficient (funds|credits?|balance|acu|quota)|out of (credits?|acu|quota)|no (credits?|acus?)[[:space:]]*(remaining|left)|subscription (expired|inactive|cancell?ed)|rate[ -]?limit|(credit|usage|billing|spending|token|plan|acu)[ -]?(limit|cap)|(quota|credits?|acus?|balance|allowance)[[:space:]]+(exceeded|exhausted|depleted|reached)'
+# _devin_quota_refusal <errfile> -> rc0 if the captured Devin stderr shows a paid-balance/quota refusal.
+_devin_quota_refusal() {
+  local f="${1:-}"; [ -n "$f" ] && [ -s "$f" ] || return 1
+  grep -qiE "$_DEVIN_QUOTA_RE" "$f" 2>/dev/null
+}
+# _devin_quota_refusal_line <errfile> -> the first matching line (trimmed), so Devin's ACTUAL wording is
+# surfaced to the user. This turns "I don't have Devin's exact 0% string" into self-resolving telemetry:
+# the next real occurrence prints the true text, which is how the family pattern gets tightened.
+_devin_quota_refusal_line() {
+  local f="${1:-}"; [ -n "$f" ] && [ -s "$f" ] || return 0
+  local esc; esc="$(printf '\033')"   # strip ANSI (F3) so the surfaced wording is clean to copy into the regex
+  grep -iE "$_DEVIN_QUOTA_RE" "$f" 2>/dev/null | head -1 | tr -d '\r' \
+    | sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g; s/^[[:space:]]+//" | cut -c1-200
+}
+
 # Resolve a user-facing alias to an id the DEVIN CLI accepts. parse_model() stores -m verbatim, so
 # without this a documented alias reaches `devin --model` raw and the job dies at launch with
 # "Unknown model: 'glm'" -- instantly, before any work, which in a fanout kills every member at once.
@@ -648,6 +694,11 @@ delegate() {
   local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
   [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
   MODEL="$_dvmodel"
+  # Bug-1 clarification: glm/swe (and the other plan-included ids) are FREE-tier on Devin. Devin's own
+  # output shows a paid ACU balance that can read "0% remaining" — that figure is a SEPARATE paid pool
+  # and does not gate a free-tier model. Say so up front so a "0%" line is never misread as a block.
+  local _dv_free=0; _devin_is_free_model "$MODEL" && _dv_free=1
+  [ "$_dv_free" = "1" ] && printf '>>> [free-tier] "%s" runs on Devin'\''s plan-included tier — a paid ACU / "0%% remaining" figure in Devin'\''s output is a separate balance and does NOT gate it.\n' "$MODEL" >&2
   # --respect-workspace-trust false: headless delegation must not die on Devin's untrusted-workspace
   # prompt (a blocking prompt no `-p` run can answer -> the job fails with "Refusing to run in an
   # untrusted workspace"). The interactive `session` lane already passes this for the same reason;
@@ -657,21 +708,21 @@ delegate() {
   # so Devin's redundant prompt only ever broke headless runs.
   echo ">>> devin --model $MODEL --permission-mode $perm ${sbx[*]:-} --respect-workspace-trust false -p (offload)" >&2
   local rc=0 _policy_blocked=0
-  if [ -n "$sandbox" ]; then
-    # Capture devin's stderr (where the org-policy refusal lands) while still showing it, so a
-    # one-time "autonomous restricted by your org" verdict can be REMEMBERED instead of re-nagged
-    # every research run. Mirrors the agy lane's `2> >(tee ... >&2)` idiom. stdout (the result)
-    # is untouched. $? is devin's, not tee's, because the redirection is on devin, not a pipe.
-    local _dverr="$OSRC_HOME/.dverr.$$"
+  # Capture devin's stderr (where org-policy AND paid-balance/quota refusals land) while still showing it,
+  # so a one-time "autonomous restricted" verdict can be REMEMBERED and a free-tier quota refusal can be
+  # DETECTED precisely (bug 1). Mirrors the agy lane's `2> >(tee ... >&2)` idiom. stdout (the result) is
+  # untouched. $? is devin's, not tee's, because the redirection is on devin, not a pipe. Both dispatch
+  # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
+  local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
+  if [ -n "$_dverr" ]; then
     devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
-    if [ "$rc" -ne 0 ] && _devin_autonomous_policy_blocked "$_dverr"; then
-      _policy_blocked=1
-      _posture_set devin autonomous restricted
-      _devin_autonomous_restricted_notice
-    fi
-    rm -f "$_dverr" 2>/dev/null
   else
     devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+  fi
+  if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
+    _policy_blocked=1
+    _posture_set devin autonomous restricted
+    _devin_autonomous_restricted_notice
   fi
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure dv)" >&2
   # The "retry with yolo" hint is wrong for the org-policy case (yolo is LESS safe and is not the
@@ -686,6 +737,31 @@ delegate() {
   # `|| true` keeps the diagnostic line from leaking a non-zero status into delegate()'s return
   # (rc is already captured above; the helper is best-effort and silent on no match).
   [ "$rc" -ne 0 ] && _devin_sandboxed_proxy_tls_hint || true
+  # Bug-1 hint: a FREE-tier model that fails should never leave the user thinking the paid "0%%" gated it.
+  # Now PRECISE — we captured Devin's stderr above, so we can tell a real quota/ACU/billing refusal from
+  # an unrelated failure instead of hedging on every error:
+  #   - quota signature matched -> speak definitively AND print Devin's actual line (self-resolving telemetry)
+  #   - stderr captured, NO quota signature -> stay silent (the failure was something else; don't mislead)
+  #   - stderr could not be captured -> fall back to the old conditional hint
+  # In every case the same-model fallback lane is named rather than auto-routed (a free->cash reroute is
+  # the user's call).
+  if [ "$rc" -ne 0 ] && [ "$_dv_free" = "1" ]; then
+    local _or_alias _fallback
+    _or_alias="$(_devin_free_or_alias "$MODEL")"
+    if [ -n "$_or_alias" ]; then
+      _fallback="The same model also runs on OpenRouter: --provider cc -m $_or_alias (funded/cash lane)."
+    else
+      _fallback="It is Devin-only (no OpenRouter sibling), so switch lanes."
+    fi
+    if [ -n "$_dverr" ] && _devin_quota_refusal "$_dverr"; then
+      printf '>>> [free-tier BLOCKED-IN-ERROR] Devin refused free-tier "%s" citing a paid ACU/quota/billing limit — that balance does NOT gate a plan-included model, so this is a Devin-side mis-gate, not a real limit here. %s Check Devin'\''s own plan with: devin usage.\n' "$MODEL" "$_fallback" >&2
+      local _qline; _qline="$(_devin_quota_refusal_line "$_dverr")"
+      [ -n "$_qline" ] && printf '>>> [free-tier] Devin'\''s exact wording (for tightening this detector): %s\n' "$_qline" >&2
+    elif [ -z "$_dverr" ]; then
+      printf '>>> [free-tier] if that was a plan/quota refusal, note "%s" is free-tier and should not be gated by a paid balance. %s Check Devin'\''s own plan with: devin usage.\n' "$MODEL" "$_fallback" >&2
+    fi
+  fi
+  [ -n "$_dverr" ] && rm -f "$_dverr" 2>/dev/null
   return "$rc"
 }
 
@@ -2223,6 +2299,10 @@ _wake_notify_external() {
   [ -n "$cmd" ] || return 0
   [ -n "$event" ] || return 0
   summary="$(printf '%s' "$event" | jq -r '(.task_summary // .kind // "update") | tostring | gsub("[[:cntrl:]]"; " ") | .[0:160]' 2>/dev/null)" || summary="update"
+  # Emit-guard: this summary is exactly the text that re-invokes a Claude orchestrator on its next turn,
+  # so scrub fallback-trigger vocabulary at the source (references/vocabulary-hygiene.md). Opt out with
+  # OSRC_VOCAB_GUARD=0. The event JSON on stdin is left verbatim for machines; only the human line is calmed.
+  [ "${OSRC_VOCAB_GUARD:-1}" = "0" ] || summary="$(printf '%s' "$summary" | _vocab_sanitize 2>/dev/null)" || summary="$summary"
   ( printf '%s\n' "$event" | OSRC_WAKE_EVENT="$event" sh -c "$cmd" osrc-wake "$summary" ) </dev/null >/dev/null 2>&1 &
   np=$!
   ( sleep "${OSRC_HEARTBEAT_WAKE_TIMEOUT:-20}"; kill "$np" 2>/dev/null ) >/dev/null 2>&1 &
@@ -3190,6 +3270,160 @@ _tap_statusline_cmd() {
   fi
   printf '%s tap run' "$SCRIPT_PATH"
 }
+# =============================================================================
+# VOCABULARY HYGIENE — keep model-facing text out of the Fable->Opus fallback cascade.
+# Full rationale + the canonical map: references/vocabulary-hygiene.md. Mirror any edit there.
+# =============================================================================
+# trigger|replacement, one per line. Lowercase triggers; a Capitalized variant is matched too. Only
+# high-signal, low-false-positive metaphors by default; common tech words (execute/dead/payload/armed)
+# are added ONLY under OSRC_VOCAB_AGGRESSIVE=1 so a default pass never mangles real meaning.
+_vocab_map() {
+  cat <<'EOF'
+kill switch|hold latch
+killed|stopped
+kill|stop
+hijacked|taken over
+hijacking|taking over
+hijack|take over
+hostile|untrusted
+orphaned|stray
+orphan|stray
+corpse|stale record
+nuked|removed
+nuke|remove
+slaughter|clear
+strangled|throttled
+strangle|throttle
+choke point|bottleneck
+choke|bottleneck
+blast radius|scope
+assassinate|cancel
+suicide|self-stop
+war room|situation room
+EOF
+  if [ "${OSRC_VOCAB_AGGRESSIVE:-0}" = "1" ]; then
+    cat <<'EOF'
+payload|parcel
+executor|runner
+dead|ended
+disarm|unset
+armed|set
+EOF
+  fi
+}
+
+# _vocab_cap <word> -> the word with its first letter uppercased (portable, no ${x^}).
+_vocab_cap() { printf '%s' "$1" | awk '{ if (length($0)>0) print toupper(substr($0,1,1)) substr($0,2); else print }'; }
+
+# _vocab_sanitize : stdin -> softened stdout. Word-boundaried, case-aware (lower + Capitalized), and
+# PORTABLE across BSD (macOS) and GNU sed — it avoids \b and the case-insensitive flag, using explicit
+# non-alpha boundaries instead. Prose only: never run this over source (it would touch shell builtins).
+_vocab_sanitize() {
+  local trig repl cap repcap up repup
+  local args=()
+  # ERE (-E): alternation `|` and anchors inside a group work on BOTH BSD (macOS) and GNU sed;
+  # basic-regex `\|` is a GNU-only extension and silently fails on macOS, so it is not used.
+  # Three case variants per term: lowercase, Sentence-case, and ALL-CAPS (so KILL/Kill/kill all match).
+  while IFS='|' read -r trig repl; do
+    [ -n "$trig" ] || continue
+    cap="$(_vocab_cap "$trig")"; repcap="$(_vocab_cap "$repl")"
+    up="$(printf '%s' "$trig" | tr '[:lower:]' '[:upper:]')"; repup="$(printf '%s' "$repl" | tr '[:lower:]' '[:upper:]')"
+    args+=(-e "s/(^|[^A-Za-z])$trig([^A-Za-z]|\$)/\\1$repl\\2/g")
+    args+=(-e "s/(^|[^A-Za-z])$cap([^A-Za-z]|\$)/\\1$repcap\\2/g")
+    args+=(-e "s/(^|[^A-Za-z])$up([^A-Za-z]|\$)/\\1$repup\\2/g")
+  done < <(_vocab_map)
+  [ "${#args[@]}" -gt 0 ] || { cat; return; }
+  # The matched boundary chars are re-emitted (\1,\2) but sed's scan resumes past them, so two adjacent
+  # triggers ("kill kill") need another pass to catch the one that lost its left boundary. Three streaming
+  # passes (bounded, newline-preserving) clear realistic adjacent runs; this is a fixed bound, not true
+  # convergence, so a pathologically long unbroken run of the same trigger could retain a tail term.
+  sed -E "${args[@]}" | sed -E "${args[@]}" | sed -E "${args[@]}"
+}
+
+# _vocab_scan_file <file> -> prints "LINE: <original>" for each line that carries a trigger, else nothing.
+_vocab_scan_file() {
+  local f="$1" ln orig soft n=0
+  n=0
+  while IFS= read -r orig || [ -n "$orig" ]; do
+    n=$((n+1))
+    soft="$(printf '%s' "$orig" | _vocab_sanitize)"
+    [ "$soft" != "$orig" ] && printf '  %s:%d  %s\n' "$(basename "$f")" "$n" "$orig"
+  done < "$f"
+}
+
+# Prose/state files only — refuse obvious source so nobody sanitizes a script's `kill "$pid"` by accident.
+_vocab_is_prose() {
+  case "$1" in
+    *.sh|*.bash|*.py|*.js|*.ts|*.rb|*.go|*.rs|*.c|*.h|*.cpp|*.java|*.php|*.pl) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+cmd_sanitize() {
+  local write=0 targets=() a
+  for a in "$@"; do
+    case "$a" in
+      --write) write=1 ;;
+      --aggressive) OSRC_VOCAB_AGGRESSIVE=1 ;;
+      -*) die "sanitize: unknown flag '$a' (use --write to apply, --aggressive for the maximal pass)" ;;
+      *) targets+=("$a") ;;
+    esac
+  done
+  [ "${#targets[@]}" -gt 0 ] || die "sanitize: give a file or directory. e.g. $0 sanitize decisions.md   |   $0 sanitize ./notes --write"
+  have sed && have awk || die "sanitize needs sed + awk"
+  # Collect prose files from the targets (files as-is; directories walked).
+  local files=() t
+  for t in "${targets[@]}"; do
+    if [ -d "$t" ]; then
+      # -type f (find follows the dir but lists real files); skip symlinks so an atomic rename never
+      # replaces a link with a regular file. NUL-delimited so a filename containing a newline (a valid
+      # POSIX byte) is one path, not two nonexistent ones.
+      while IFS= read -r -d '' f; do [ -L "$f" ] && continue; _vocab_is_prose "$f" && files+=("$f"); done < <(find "$t" -type f -print0 2>/dev/null)
+    elif [ -L "$t" ]; then
+      echo "sanitize: skipping symlink '$t' (rewriting through a link would replace it; point at the real file)" >&2
+    elif [ -f "$t" ]; then
+      _vocab_is_prose "$t" && files+=("$t") || echo "sanitize: skipping '$t' (looks like source code; this tool is for prose/state/commit text)" >&2
+    else
+      echo "sanitize: no such file or directory: $t" >&2
+    fi
+  done
+  [ "${#files[@]}" -gt 0 ] || { echo "sanitize: nothing to scan (no prose files in the target)"; return 0; }
+  local total=0 matched=0 rewritten=0 failed=0 f rep tmp mode dir
+  for f in "${files[@]}"; do
+    rep="$(_vocab_scan_file "$f")"
+    [ -n "$rep" ] || continue
+    total=$((total + $(printf '%s\n' "$rep" | grep -c .)))
+    matched=$((matched + 1))
+    printf '%s\n' "$rep"
+    if [ "$write" = "1" ]; then
+      # Atomic: render into a SAME-DIRECTORY temp, preserve the original's mode, then rename OVER the
+      # original. The original is never truncated before the replacement is complete, so a disk-full /
+      # I/O / interrupt failure leaves the original intact. A file counts as rewritten only after mv.
+      dir="$(dirname "$f")"
+      tmp="$(mktemp "$dir/.san.XXXXXX" 2>/dev/null)" || { failed=$((failed+1)); echo "  (could not create temp for $f — left unchanged)" >&2; continue; }
+      if _vocab_sanitize < "$f" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        # Preserve mode; if the chmod can't set it, say so rather than silently shipping the temp's 0600.
+        mode="$(_portable_mode "$f" 2>/dev/null)"
+        [ -n "$mode" ] && { chmod "$mode" "$tmp" 2>/dev/null || echo "  (note: could not preserve mode $mode on $f; wrote with default temp permissions)" >&2; }
+        if mv -f "$tmp" "$f" 2>/dev/null; then rewritten=$((rewritten+1)); else rm -f "$tmp" 2>/dev/null; failed=$((failed+1)); echo "  (rename failed for $f — left unchanged)" >&2; fi
+      else
+        rm -f "$tmp" 2>/dev/null; failed=$((failed+1)); echo "  (could not rewrite $f — left unchanged)" >&2
+      fi
+    fi
+  done
+  if [ "$total" -eq 0 ]; then
+    echo "sanitize: clean — no fallback-trigger vocabulary found in ${#files[@]} file(s)."
+  elif [ "$write" = "1" ]; then
+    echo "sanitize: $total trigger line(s) across $matched file(s) — rewrote $rewritten, $failed failed."
+    [ "$failed" -eq 0 ] || return 1
+  else
+    echo "sanitize: found $total trigger line(s) across $matched file(s). Re-run with --write to apply."
+  fi
+}
+
+# Portable file mode (octal): GNU `stat -c`, BSD `stat -f`. Empty if neither is available.
+_portable_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+
 cmd_tap() {
   local settings="${OSRC_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
   local stash="$OSRC_HOME/tap-original-statusline.json"
@@ -3469,6 +3703,36 @@ _score() {
     }'
 }
 
+# _lane_conserve_mult <lane> <limits-line> -> a score multiplier in [0.90,1.00] that GENTLY deprioritizes
+# a lane whose live plan window is past the conserve line, so "limits-left" actually steers the pick and
+# not just the separate conserve-routing layer. Only lanes we can MEASURE are penalized (cc=Claude 5h,
+# cx=Codex 5h/weekly, whichever is more spent); unmeasurable lanes (dv/gm/or) return 1.00 so we never
+# invent a limit we cannot read. At/below the conserve line -> 1.00 (headroom); scales linearly to 0.90
+# at 100% used. Deliberately small: it breaks ties and loses close races to a fresher lane, but a ~10%
+# max haircut won't drop a genuinely-capable model below its capability threshold on its own.
+_lane_conserve_mult() {
+  local lane="$1" limits="${2:-}" t="${OSRC_CONSERVE_THRESHOLD:-50}" u="" c5="" x5="" xw="" tok
+  for tok in $limits; do
+    case "$tok" in
+      claude5h=*) c5="${tok#*=}" ;;
+      codex5h=*)  x5="${tok#*=}" ;;
+      codexwk=*)  xw="${tok#*=}" ;;
+    esac
+  done
+  case "$lane" in
+    cc) u="$c5" ;;
+    cx) u="$x5"; [ -n "$xw" ] && awk -v a="$xw" -v b="${x5:-0}" 'BEGIN{exit !(a+0>b+0)}' && u="$xw" ;;
+    *)  u="" ;;
+  esac
+  case "$u" in ''|*[!0-9.]*) printf '1.00'; return ;; esac
+  awk -v u="$u" -v t="$t" 'BEGIN{
+    if (t+0 >= 100 || u+0 < t+0) { printf "1.00"; exit }
+    m = 1 - 0.10*(u - t)/(100 - t)
+    if (m < 0.90) m = 0.90; if (m > 1.00) m = 1.00
+    printf "%.4f", m
+  }'
+}
+
 # cmd_advise: task-aware model recommendation with benchmark data.
 # Usage: advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
 # Classifies the task, scores all known models, recommends the best value model
@@ -3517,6 +3781,11 @@ cmd_advise() {
   fi
   _frontier_needed "$task" "$selection_effort" && frontier_needed=1
 
+  # Live per-lane limits, read once, so a nearly-exhausted subscription lane is deprioritized in the
+  # recommendation itself (not only by the separate conserve-routing layer). Best-effort; empty -> no
+  # penalty anywhere. Opt out with OSRC_ADVISE_CONSERVE=0.
+  local _adv_limits="" conserve_seen="" conserve_notes=""
+  [ "${OSRC_ADVISE_CONSERVE:-1}" != "0" ] && _adv_limits="$(_session_limits 2>/dev/null)"
   # Score each candidate from the alias table.
   local results="" has_bench=0 bench_count=0 total_count=0
   local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
@@ -3547,6 +3816,18 @@ cmd_advise() {
     case "$_mult" in ''|*[!0-9.]*) _mult="1.00" ;; esac
     score="$(awk -v s="$score" -v m="$_mult" 'BEGIN{printf "%.4f", s*m}')"
     score="$(_score "$score" "$tier" "$category" "$selection_effort" "$difficulty" "$resolved")"
+    # Fold live per-lane conservation the SAME way as history: a measurable lane past the conserve line
+    # takes a gentle score haircut so limits-left steers the pick. Neutral (1.00) for unmeasurable lanes.
+    local _cmult; _cmult="$(_lane_conserve_mult "$lane" "$_adv_limits")"
+    case "$_cmult" in ''|*[!0-9.]*) _cmult="1.00" ;; esac
+    if awk -v m="$_cmult" 'BEGIN{exit !(m+0 < 1.0)}'; then
+      score="$(awk -v s="$score" -v m="$_cmult" 'BEGIN{printf "%.4f", s*m}')"
+      case " $conserve_seen " in *" $lane "*) : ;; *)
+        conserve_seen="$conserve_seen $lane"
+        local _clbl; case "$lane" in cc) _clbl="cc/Claude 5h" ;; cx) _clbl="cx/Codex" ;; *) _clbl="$lane" ;; esac
+        conserve_notes="${conserve_notes:+$conserve_notes; }$_clbl past conserve line -> score x$_cmult" ;;
+      esac
+    fi
     # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
     # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
     case "$lane" in cx|cc|dv|gm) price_in="0"; price_out="0" ;; esac
@@ -3676,10 +3957,12 @@ cmd_advise() {
       --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
+      --arg conserve "$conserve_notes" \
       --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, tier:$rec_tier, reason:$rec_reason},
         shortlist:$shortlist,
+        conservation:(if $conserve=="" then null else $conserve end),
         benchmark_data_available:($has_bench=="1"),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
         history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
@@ -3699,6 +3982,7 @@ cmd_advise() {
     else
       echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
     fi
+    [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
     echo
     echo "--- recommendation ---"
     echo "   model: $rec_alias ($rec_resolved)"
@@ -4174,9 +4458,9 @@ _fg_guard() {
   hval="$(cat "$hit" 2>/dev/null || echo)"
   lastmark="$(_last_marker "$cap")"
   case "$hval" in
-    teardown) printf '>>> [watchdog] work finished (%s) but the process kept running %ss past it — a teardown hang (e.g. codex MCP-auth / Stop-hook loop). Killed the tree. For unattended work use `bg` (auto watchdog + report).\n' "${lastmark:-marker}" "$tdl" >&2
+    teardown) printf '>>> [watchdog] work finished (%s) but the process kept running %ss past it — a teardown hang (e.g. codex MCP-auth / Stop-hook loop). Stopped the tree. For unattended work use `bg` (auto watchdog + report).\n' "${lastmark:-marker}" "$tdl" >&2
               case "$lastmark" in OSRC::BLOCKED|OSRC::NEED_INPUT) rc=3 ;; *) rc=0 ;; esac ;;
-    hard)     printf '>>> [watchdog] foreground hit the %ss hard cap and was killed. Raise OSRC_FG_TIMEOUT, or run via `bg` for long unattended work.\n' "$hard" >&2; rc=124 ;;
+    hard)     printf '>>> [watchdog] foreground hit the %ss hard cap and was stopped. Raise OSRC_FG_TIMEOUT, or run via `bg` for long unattended work.\n' "$hard" >&2; rc=124 ;;
     interrupt) rc=130 ;;
   esac
   rm -f "$cap" "$fifo" "$rcf" "$hit" 2>/dev/null
@@ -4780,7 +5064,7 @@ _reconcile_status() {
           if [ -n "$_ph" ]; then
             printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_ph" "$_grace" > "$jd/error" 2>/dev/null || true
           else
-            printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely killed the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "$_grace" > "$jd/error" 2>/dev/null || true
+            printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely reaped the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "$_grace" > "$jd/error" 2>/dev/null || true
           fi
         fi
       fi
@@ -4806,7 +5090,7 @@ _status_line() {
     if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "$_grace" ]; then
       echo failed > "$jd/status"; st="failed"
       [ -n "$_phase" ] && printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_phase" "$_grace" > "$jd/error" 2>/dev/null || \
-      printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely killed the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "${OSRC_LAUNCH_GRACE:-45}" > "$jd/error" 2>/dev/null || true
+      printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely reaped the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "${OSRC_LAUNCH_GRACE:-45}" > "$jd/error" 2>/dev/null || true
     fi
   fi
   model="$(_job_field "$id" '.model')"
@@ -6284,7 +6568,7 @@ delegate_droid() {
   # safe cmds) / high (full auto). --skip-permissions-unsafe is sandbox-only and never used here.
   local aflag=() posture
   case "$tier" in
-    auto)         aflag=();              posture="READ-ONLY (droid exec default: no edits, no unsafe cmds)" ;;
+    auto)         aflag=(--auto low);    posture="READ-ONLY (--auto low: reads + safe read-only cmds, no edits)" ;;
     accept-edits) aflag=(--auto medium); posture="MUTATING (--auto medium: edits + safe commands)" ;;
     autonomous)   aflag=(--auto medium); posture="MUTATING (--auto medium; droid has no separate OS-sandbox exec mode)" ;;
     dangerous)    aflag=(--auto high);   posture="DANGER (--auto high: full autonomy incl. riskier commands)" ;;
@@ -8167,6 +8451,45 @@ _tmux_reset_input() {
   [ "$aggressive" = "aggressive" ] && tmux send-keys -t "$s" Escape 2>/dev/null || true
 }
 
+# ---- delivery reporting for MANAGED sessions -----------------------------------------------------
+# The external composer/receipt probes stay authoritative when configured. Absent them, the original
+# code failed every managed `session send` with "delivery unknown" even though tmux delivered the keys —
+# the exact bug: `session send` looked broken while raw `tmux send-keys` worked. The fix is NOT to fake a
+# receipt (send-keys success only proves tmux queued keystrokes, and pane-scraping can't tell a fresh
+# submission from a prior transcript occurrence or a dialog eating Enter). Instead the send is reported
+# HONESTLY: verified only via a real external receipt adapter; otherwise "sent (unverified)" with the
+# obligation recorded as delivery_unknown. Force the strict external-only regime with
+# OSRC_MANAGED_SEND_BUILTIN=0 (then a send without a usable adapter is a hard failure, not "unverified").
+_managed_provider() { # <session-id> -> the harness this managed session was launched with
+  _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" 'select(.event=="start" and .session_id==$id) | .provider // empty' | tail -1
+}
+# A probe env var that is SET but points at a missing/non-executable command is a broken safety adapter,
+# not a green light to silently weaken verification. Treat it as configured-but-unavailable = fail closed.
+_external_probe_configured() { # <env-value> -> 0 configured+usable, 1 unset, 2 set-but-unusable
+  [ -n "${1:-}" ] || return 1
+  command -v "$1" >/dev/null 2>&1 && return 0
+  return 2
+}
+_managed_composer_state() { # <session-id> <pane> -> empty|unknown
+  local session_id="$1" pane="$2" prov
+  case "$(_external_probe_configured "${OSRC_EXTERNAL_COMPOSER_PROBE:-}"; echo $?)" in
+    0) _external_composer_state "$pane"; return ;;
+    2) printf 'unknown\n'; return ;;   # broken adapter -> fail closed, never fall through to built-in
+  esac
+  [ "${OSRC_MANAGED_SEND_BUILTIN:-1}" = "1" ] || { printf 'unknown\n'; return; }
+  prov="$(_managed_provider "$session_id")"
+  case "$prov" in
+    cc|claude) _cc_composer_empty "$pane" && printf 'empty\n' || printf 'unknown\n' ;;
+    *)         printf 'empty\n' ;;   # managed pane was just _tmux_reset_input'd (C-u clears the line)
+  esac
+}
+
+# Return codes: 0 = VERIFIED submitted (an external receipt adapter proved it); 2 = keys were delivered
+# but delivery is NOT independently verified (no adapter — honest "sent, go look"); 1 = genuine failure
+# (nothing was typed, or the send itself failed). We NEVER forge a receipt from send-keys success or from
+# pane-scraping (a prior transcript occurrence, a wrapped composer, or a dialog eating Enter would all
+# fool a scraper). The obligation log records `submitted` ONLY on a real receipt; otherwise it records
+# `delivery_unknown`, which is both honest and blocks an unsafe auto-replay of an unknown-delivery send.
 _managed_session_send() { # <session-id> <message>
   local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest
   _managed_endpoint_live "$session_id" "$pane" || return 1
@@ -8180,17 +8503,26 @@ _managed_session_send() { # <session-id> <message>
   _tmux_reset_input "$pane"
   _obligation_append "$oid" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
   _obligation_guard_begin "$oid" "$session_id"
-  composer="$(_external_composer_state "$pane" 2>/dev/null)"
+  composer="$(_managed_composer_state "$session_id" "$pane" 2>/dev/null)"
   [ "$composer" = empty ] || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
-  receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
-  if _external_receipt_valid "$receipt" "$pane" "$oid" "$generation"; then
-    _obligation_append "$oid" "$session_id" submitted "$receipt" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
-    _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 0
-  fi
-  _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
+  [ -n "$generation" ] || generation=1
+  # A usable external receipt adapter is the ONLY thing that proves submission -> `submitted` (rc 0). A
+  # set-but-broken adapter fails closed. With no adapter, keys were delivered but not independently
+  # verified: record delivery_unknown (honest, no forged receipt) and return 2 so the caller can say
+  # "sent (unverified)" rather than a scary error or a false "delivered".
+  case "$(_external_probe_configured "${OSRC_EXTERNAL_RECEIPT_PROBE:-}"; echo $?)" in
+    0) receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
+       if _external_receipt_valid "$receipt" "$pane" "$oid" "$generation"; then
+         _obligation_append "$oid" "$session_id" submitted "$receipt" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+         _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 0
+       fi
+       _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;
+    2) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;  # broken adapter: fail closed
+    1) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 2 ;; # delivered, not independently verified
+  esac
 }
 
 _managed_session_clear() { # <session-id>
@@ -8203,23 +8535,44 @@ _managed_session_clear() { # <session-id>
   _endpoint_mutation_unlock "$key"
 }
 
-_managed_session_model() { # <session-id> [filter]
-  local session_id="$1" filter="${2:-}" pane="$1" key
+_managed_session_model() { # <session-id> [model-name/filter]
+  local session_id="$1" filter="${2:-}" pane="$1" key prov rc=0
   _managed_endpoint_live "$session_id" "$pane" || return 1
+  # Switching is TUI-specific, so branch on the harness this session was launched with, not a guess.
+  prov="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .provider // empty' | tail -1)"
+  [ -n "$prov" ] || prov="${PROVIDER:-devin}"
   _endpoint_mutation_lock "$pane" || return 1
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
-  tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }
-  sleep 1
-  tmux send-keys -t "$pane" M-m || { _endpoint_mutation_unlock "$key"; return 1; }
-  sleep 1
-  if [ -n "$filter" ]; then
-    filter="$(printf '%s' "$filter" | tr -cd '[:alnum:][:space:]._:/-')"
-    tmux send-keys -t "$pane" -l -- "$filter" || { _endpoint_mutation_unlock "$key"; return 1; }
-    sleep 1
-  fi
-  tmux send-keys -t "$pane" Enter || { _endpoint_mutation_unlock "$key"; return 1; }
+  case "$prov" in
+    devin|dv)
+      tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }
+      sleep 1
+      tmux send-keys -t "$pane" M-m || { _endpoint_mutation_unlock "$key"; return 1; }
+      sleep 1
+      if [ -n "$filter" ]; then
+        filter="$(printf '%s' "$filter" | tr -cd '[:alnum:][:space:]._:/-')"
+        tmux send-keys -t "$pane" -l -- "$filter" || { _endpoint_mutation_unlock "$key"; return 1; }
+        sleep 1
+      fi
+      tmux send-keys -t "$pane" Enter || { _endpoint_mutation_unlock "$key"; return 1; }
+      ;;
+    cc|claude)
+      # Claude-native uses the /model picker; a target model name is required (there is no blind switch).
+      # ONE clean attempt: Claude Code's /model picker only opens between turns (a mid-turn /model does
+      # not open it), so this reliably flips an IDLE session — which is the drift-correction case, since
+      # an orchestrator notices drift by reading the session's output, i.e. once it is idle. On a busy
+      # session the attempt declines cleanly (no picker -> _session_model_restore_cc dismisses menus,
+      # footer unchanged); the caller retries when the turn is done. We do NOT loop-and-re-type /model,
+      # which risks queuing stray input into a busy composer.
+      [ -n "$filter" ] || { _endpoint_mutation_unlock "$key"; echo "a claude-native session needs a model name to switch to (e.g. session model fable)" >&2; return 1; }
+      _tmux_reset_input "$pane"
+      _session_model_restore_cc "$pane" "$filter" || rc=1
+      ;;
+    *) _endpoint_mutation_unlock "$key"; return 1 ;;
+  esac
   _endpoint_mutation_unlock "$key"
+  return "$rc"
 }
 
 # Validate session name before any path construction, tmux, or rm use.
@@ -8385,7 +8738,16 @@ _session_model_observer_run() { # <lane> <endpoint> <session-id>
 }
 _session_model_observe_devin() { _session_model_observer_run devin "$@"; }
 _session_model_observe_codex() { _session_model_observer_run codex "$@"; }
-_session_model_observe_cc() { _session_model_observer_run cc "$@"; }
+# cc has a BUILT-IN observer (Claude Code footer): an external OSRC_SESSION_MODEL_OBSERVER still wins
+# (authoritative override), but absent one the footer read makes Fable-drift detectable out of the box.
+# Disable the built-in with OSRC_CC_MODEL_OBSERVE=0.
+_session_model_observe_cc() { # <endpoint> <session-id>
+  if [ -n "${OSRC_SESSION_MODEL_OBSERVER:-}" ] && command -v "$OSRC_SESSION_MODEL_OBSERVER" >/dev/null 2>&1; then
+    _session_model_observer_run cc "$@"; return
+  fi
+  [ "${OSRC_CC_MODEL_OBSERVE:-1}" = "1" ] || { printf 'unknown\n'; return 0; }
+  case "${1:-}" in tmux:*) _session_model_observe_cc_builtin "${1#tmux:}" ;; *) printf 'unknown\n' ;; esac
+}
 _session_model_observe_droid() { _session_model_observer_run droid "$@"; }
 _session_model_observe_cursor() { _session_model_observer_run cursor "$@"; }
 _session_model_observe_hermes() { _session_model_observer_run hermes "$@"; }
@@ -8409,6 +8771,132 @@ _session_model_restore_devin() { # <pane> <model>
   tmux send-keys -t "$1" -l -- "$2" || return 1
   tmux send-keys -t "$1" Enter
 }
+
+# ---- Claude-native (cc) live model observe + restore ----------------------------------------------
+# The Fable->Opus fallback cascade this guards against: a Claude-native session launched on Fable can
+# fall back to Opus. The claude-native lane is where `fable` actually runs, but until now BOTH observe
+# and restore were wired for Devin only, so a drifted Fable session was neither seen nor corrected.
+# These adapters close that: read the model off Claude Code's footer, and flip it back via the /model
+# picker. Honesty note: the footer reflects the CONFIGURED model, so this catches a client-visible
+# switch, not a purely per-response server downgrade -- for that, _cc_verify_model's post-hoc modelUsage
+# receipt is the guarantee, and the vocabulary hygiene (references/vocabulary-hygiene.md) is prevention.
+_cc_model_family() { # <alias|id|footer-label> -> fable|opus|sonnet|haiku  (else nonzero)
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *fable*)  printf 'fable'  ;;
+    *opus*)   printf 'opus'   ;;
+    *sonnet*) printf 'sonnet' ;;
+    *haiku*)  printf 'haiku'  ;;
+    *) return 1 ;;
+  esac
+}
+
+# Read the active model off Claude Code's status footer ("<Model> | <effort> | <dir> | ContextQ:...").
+# Conservative: the footer's ContextQ marker is unique to that line, so task text mentioning a model
+# name never gets mistaken for the live model. Returns a normalized family word or "unknown".
+_session_model_observe_cc_builtin() { # <tmux-pane>
+  local pane="$1" cap line fam
+  [ -n "$pane" ] || { printf 'unknown\n'; return 0; }
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { printf 'unknown\n'; return 0; }
+  line="$(printf '%s\n' "$cap" | grep -E 'ContextQ' | tail -1)"
+  [ -n "$line" ] || { printf 'unknown\n'; return 0; }
+  # The model field is everything before the first '|'. `_cc_model_family` matches the FIRST family word
+  # it finds, so an ambiguous field ("Opus Fable") would confidently return the wrong one. Require
+  # EXACTLY one family token in the field; zero or two-or-more -> not confident -> unknown (never invent).
+  local mf lc w famhits=0
+  mf="${line%%|*}"
+  lc="$(printf '%s' "$mf" | tr '[:upper:]' '[:lower:]')"
+  for w in fable opus sonnet haiku; do case "$lc" in *"$w"*) famhits=$((famhits+1)) ;; esac; done
+  [ "$famhits" -eq 1 ] || { printf 'unknown\n'; return 0; }
+  fam="$(_cc_model_family "$mf")" || { printf 'unknown\n'; return 0; }
+  printf '%s\n' "$fam"
+}
+
+# Flip a live Claude Code session back to <requested> via its /model picker. Never touches the GLOBAL
+# default: it navigates to the target row and presses 's' (this-session-only). Returns 0 ONLY when the
+# footer confirms the switch afterward -- a verified restore, not a blind keystroke.
+_session_model_restore_cc() { # <tmux-pane> <requested-model>
+  local pane="$1" requested="$2" fam cap ln n label rownum="" cursornum="" delta i
+  fam="$(_cc_model_family "$requested")" || return 1
+  tmux send-keys -t "$pane" -l -- "/model" || { _cc_dismiss_menus "$pane"; return 1; }
+  tmux send-keys -t "$pane" Enter || { _cc_dismiss_menus "$pane"; return 1; }
+  sleep "${OSRC_CC_PICKER_WAIT:-2}"
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { _cc_dismiss_menus "$pane"; return 1; }
+  # Prove the picker is actually open before navigating (its legend is unique), else abort clean.
+  printf '%s\n' "$cap" | grep -qE 'use this session only|Select model' || { _cc_dismiss_menus "$pane"; return 1; }
+  # Match the target on the LABEL word right after "N." (so family=opus picks the "Opus" row, not the
+  # "Default (recommended) Opus 5" row), and read which row the pointer sits on.
+  while IFS= read -r ln; do
+    n="$(printf '%s' "$ln" | sed -nE 's/^[^0-9]*([0-9]+)\.[[:space:]].*/\1/p')"
+    [ -n "$n" ] || continue
+    label="$(printf '%s' "$ln" | sed -nE 's/^[^0-9]*[0-9]+\.[[:space:]]+([A-Za-z]+).*/\1/p' | tr '[:upper:]' '[:lower:]')"
+    [ "$label" = "$fam" ] && rownum="$n"
+    case "$ln" in *❯*) cursornum="$n" ;; esac
+  done <<EOF
+$cap
+EOF
+  [ -n "$rownum" ] && [ -n "$cursornum" ] || { _cc_dismiss_menus "$pane"; return 1; }
+  delta=$((cursornum - rownum))
+  # Guard each navigation keystroke: a partial move would land the selector on the wrong row, and the
+  # next 's' would switch to the WRONG model. On any failed send, dismiss and decline before selecting.
+  if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Up || { _cc_dismiss_menus "$pane"; return 1; }; i=$((i+1)); done
+  elif [ "$delta" -lt 0 ]; then i=0; while [ "$i" -lt "$((0 - delta))" ]; do tmux send-keys -t "$pane" Down || { _cc_dismiss_menus "$pane"; return 1; }; i=$((i+1)); done; fi
+  sleep "${OSRC_CC_PICKER_NAV_WAIT:-1}"
+  tmux send-keys -t "$pane" -l -- "s" || { _cc_dismiss_menus "$pane"; return 1; }
+  sleep "${OSRC_CC_PICKER_WAIT:-2}"
+  # A session that already holds conversation history triggers a SECOND confirmation ("Switch model? …
+  # This conversation is cached … ❯ 1. Yes, switch / 2. No") because switching forces a history re-read.
+  # A drifted, working session always has history, so this path is the common one — confirm it (cursor
+  # defaults to "Yes"). A fresh session skips the dialog and this is a no-op.
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)"
+  if printf '%s\n' "$cap" | grep -qE 'Switch model\?|Yes, switch to'; then
+    tmux send-keys -t "$pane" Enter || { _cc_dismiss_menus "$pane"; return 1; }
+  fi
+  # Poll the footer rather than reading it once: the confirmation + history re-read settles with a
+  # variable delay, so a single fixed-delay read can miss a switch that DID happen (a false negative).
+  local tries=0
+  while [ "$tries" -lt "${OSRC_CC_VERIFY_TRIES:-8}" ]; do
+    [ "$(_session_model_observe_cc_builtin "$pane")" = "$fam" ] && return 0
+    sleep 1; tries=$((tries + 1))
+  done
+  # Never leave the session stuck in a picker/confirmation because our keystrokes were ignored or the
+  # wording changed: close any lingering menu before reporting failure, so a failed auto-restore cannot
+  # convert the interactive session into a blocking UI state.
+  _cc_dismiss_menus "$pane"
+  return 1
+}
+
+# Leave the session clean after a failed/aborted restore: Escape any open picker/confirmation (bounded),
+# THEN clear the composer line (C-u) so a typed-but-unsubmitted "/model" can't linger or be sent later.
+# Safe when nothing is open (Escape on an empty composer is a no-op; C-u only edits the input line and
+# never interrupts a turn — restore runs against an idle session).
+_cc_dismiss_menus() { # <tmux-pane>
+  local pane="$1" i cap
+  for i in 1 2 3; do
+    cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || break
+    printf '%s\n' "$cap" | grep -qE 'use this session only|Select model|Switch model\?|Yes, switch to|No, go back' || break
+    tmux send-keys -t "$pane" Escape 2>/dev/null || break
+    sleep 1
+  done
+  tmux send-keys -t "$pane" C-u 2>/dev/null || true   # wipe any leftover composer text (e.g. a queued /model)
+}
+
+# 0 only when Claude Code's input line is CONFIDENTLY empty (prompt glyph then whitespace, or the dim
+# placeholder). Used to gate the automatic restore so it never types into a pending composer or
+# interrupts a turn: if this can't prove empty, the auto path reports drift and leaves it to a manual
+# `session model` (which resets input first, a user-initiated action that may interrupt).
+_cc_composer_empty() { # <tmux-pane>
+  local pane="$1" cap line
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || return 1
+  line="$(printf '%s\n' "$cap" | grep -E '^[[:space:]]*❯' | tail -1)"
+  [ -n "$line" ] || return 1
+  case "$line" in
+    *'❯ Try "'*) return 0 ;;                      # dim placeholder -> empty
+    *❯) return 0 ;;                                # glyph at line end -> empty
+    *❯[[:space:]]|*❯[[:space:]][[:space:]]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _managed_endpoint_live() { # <session-id> <pane>
   local session_id="$1" pane="$2" record pid start
   record="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -c --arg id "$session_id" 'select(.event=="start" and .session_id==$id and (.harness_pid|type)=="string" and (.pid_start|type)=="string")' | tail -1)" || return 1
@@ -8428,9 +8916,23 @@ _session_model_restore() { # <lane> <endpoint> <requested> <restore-id> <session
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
   _obligation_append "$restore_id" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
   _obligation_guard_begin "$restore_id" "$session_id"
-  composer="$(_external_composer_state "$pane" 2>/dev/null)"
-  [ "$composer" = empty ] || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
-  case "$lane" in devin|dv) _session_model_restore_devin "$pane" "$requested" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; } ;; *) _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;; esac
+  case "$lane" in
+    devin|dv)
+      composer="$(_external_composer_state "$pane" 2>/dev/null)"
+      [ "$composer" = empty ] || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+      _session_model_restore_devin "$pane" "$requested" || { _obligation_delivery_unknown "$restore_id" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+      ;;
+    cc|claude)
+      # REPORT-ONLY on the automatic path. Typing `/model` into a Claude Code session requires proving no
+      # turn is in flight, and pane-scraping cannot establish that reliably (a turn can sit visually stable
+      # while waiting on a tool/network op, and the interrupt legend can be clipped). Rather than risk
+      # injecting mid-turn, the heartbeat only DETECTS + reports cc drift (the wake event already fired in
+      # _model_pin_enforce_item); the actual flip-back is the user/orchestrator-initiated `session model
+      # fable`, which runs when the orchestrator has a turn and can see the session is idle.
+      _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
+      ;;
+    *) _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;
+  esac
   receipt="$(_session_model_receipt "$lane" "$pane" "$restore_id" 2>/dev/null)"
   generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
   if _external_receipt_valid "$receipt" "$pane" "$restore_id" "$generation"; then
@@ -8740,8 +9242,12 @@ session() {
     send)
       [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _managed_session_send "$SESSION_NAME" "$*" || die "session send was not receipt-verified; delivery marked unknown"
-      echo "sent. Read progress with: $0 session read"
+      _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
+      case "$_send_rc" in
+        0) echo "sent (delivery verified). Read progress with: $0 session read" ;;
+        2) echo "sent — keys delivered, delivery NOT independently verified (no receipt adapter). Confirm it landed with: $0 session read. For verified receipts, set OSRC_EXTERNAL_RECEIPT_PROBE." ;;
+        *) die "session send failed: nothing was typed (the composer was not confirmed ready, or the pane could not be proven live). Re-check with: $0 session read" ;;
+      esac
       ;;
     read)
       tmux capture-pane -t "$SESSION_NAME" -p | grep -v '^[[:space:]]*$'
@@ -8752,15 +9258,18 @@ session() {
       echo "cleared input for '$SESSION_NAME' (copy-mode canceled + Escape + draft wiped). NOTE: Escape can interrupt an in-progress turn. Re-check with: $0 session read"
       ;;
     model)
-      # Mid-session model switch is TUI-specific. Devin uses the opt+m (Meta-m) picker, wired here.
-      # codex/claude have their own in-TUI switchers; for those, restart the session with a new -m.
+      # Mid-session model switch is TUI-specific. Devin uses the opt+m (Meta-m) picker; claude-native
+      # (cc) uses the /model picker, navigated + confirmed session-only. This is the live fix for a
+      # Fable session that fell back to Opus: `session model fable` flips it back, footer-verified.
+      # codex/others aren't wired yet; for those, restart the session with a new -m.
       case "$PROVIDER" in
         devin|dv) : ;;
-        *) die "mid-session model switch is wired for Devin only. For a $PROVIDER session, stop and restart with a new model:  $0 session stop && $0 --provider $PROVIDER session start -m <model>" ;;
+        cc|claude) [ -n "${1:-}" ] || die "a claude-native session needs a target model:  $0 --provider $PROVIDER session model fable" ;;
+        *) die "mid-session model switch is wired for Devin and claude-native only. For a $PROVIDER session, stop and restart with a new model:  $0 session stop && $0 --provider $PROVIDER session start -m <model>" ;;
       esac
-      # Optional NAME filters the picker (it shows a "Type to search" box); Enter confirms.
+      # Optional NAME filters the picker (devin: "Type to search"; cc: the target model, e.g. fable).
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _managed_session_model "$SESSION_NAME" "${1:-}" || die "session model refused: managed pane identity could not be proven"
+      _managed_session_model "$SESSION_NAME" "${1:-}" || die "session model switch did not complete: the model picker did not open + verify. For a claude-native session this usually means a turn is still generating (the /model picker only opens between turns) — read it with '$0 session read' and retry once it's idle. It can also mean the pane could not be proven live."
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."
       ;;
     effort)
@@ -9680,6 +10189,7 @@ main() {
     cleanup)     cmd_cleanup "$@" ;;                       # remove a job/fanout git worktree (conservative)
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
+    sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models
     advise)      cmd_advise "$@" ;;                        # task-aware model recommendation with benchmark data

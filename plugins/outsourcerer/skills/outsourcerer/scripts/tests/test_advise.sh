@@ -166,5 +166,25 @@ grep -q '_NATIVE_BENCH_MAP'          "$SRC" && ok "_NATIVE_BENCH_MAP defined"   
 # Help text includes advise.
 grep -q 'advise'                     "$SRC" && ok "advise in help text"                  || bad "advise not in help text"
 
+# ---- limits-left folded into the recommendation (per-lane conservation) ---------------------------
+# A measurable subscription lane past the conserve line takes a gentle score haircut; unmeasurable lanes
+# never do (we never invent a limit we can't read). At/below the line -> 1.00.
+[ "$(_lane_conserve_mult cc 'claude5h=8')"   = "1.00"   ] && ok "cc at headroom (8%) -> no haircut" || bad "cc penalized below the conserve line"
+[ "$(_lane_conserve_mult cc 'claude5h=50')"  = "1.0000" ] && ok "cc exactly at the line -> no haircut" || bad "cc penalized at the line"
+awk -v m="$(_lane_conserve_mult cc 'claude5h=100')" 'BEGIN{exit !(m<1.0 && m>=0.90)}' && ok "cc fully spent -> capped ~0.90 haircut" || bad "cc full-spend haircut out of range"
+[ "$(_lane_conserve_mult cx 'codex5h=60 codexwk=90')" = "0.9200" ] && ok "cx uses the MORE-spent of 5h/weekly (90%)" || bad "cx did not pick the more-spent window"
+[ "$(_lane_conserve_mult dv 'claude5h=100')" = "1.00" ] && ok "devin lane is never haircut (unmeasured, never invent)" || bad "devin got a fabricated limit penalty"
+[ "$(_lane_conserve_mult or 'claude5h=100')" = "1.00" ] && ok "openrouter lane is never haircut (unmeasured)" || bad "openrouter got a fabricated limit penalty"
+# integration: with a lane forced past the line, advise prints the conservation line; opt-out silences it.
+# Stub _session_limits high, capture output, then restore the real definition.
+_advise_real_limits="$(declare -f _session_limits)"
+_session_limits() { printf 'claude5h=95 codexwk=90\n'; }
+_adv_on="$(cmd_advise "refactor the auth module" 2>/dev/null)"
+_adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/null)"
+[ -n "$_advise_real_limits" ] && eval "$_advise_real_limits"   # restore real limits reader
+printf '%s' "$_adv_on"  | grep -qi 'conservation:' && ok "advise surfaces the conservation line when a lane is past the line" || bad "advise did not surface conservation"
+printf '%s' "$_adv_off" | grep -qi 'conservation:' && bad "OSRC_ADVISE_CONSERVE=0 did not disable the haircut" || ok "OSRC_ADVISE_CONSERVE=0 disables conservation"
+grep -q 'conservation:(if $conserve==""' "$SRC" && ok "conservation exposed in --json output" || bad "conservation missing from json"
+
 if [ "$fail" -ne 0 ]; then echo "RESULT: FAIL ($fail failures)" >&2; exit 1; fi
 echo "RESULT: PASS ($pass checks passed, 0 failures)"

@@ -2,6 +2,66 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.6.2
+
+- **Fable-pin: a claude-native session that falls back to Opus can now be flipped back to Fable, live.**
+  A Claude Code session launched on Fable can drift to Opus (the Fable 5 → Opus 5 → Opus 4.8 tier
+  ladder). The model-drift framework already DETECTED this, but observation needed an external hook and
+  restore was wired for Devin only, so a real Fable session was never seen and never corrected. Now the
+  claude-native lane has a **built-in model observer** (reads Claude Code's status footer; disable with
+  `OSRC_CC_MODEL_OBSERVE=0`) and a **restore adapter**: `session model fable` navigates Claude Code's
+  `/model` picker and re-pins Fable **session-only** (it never changes your global default), then
+  confirms the switch against the footer before reporting success — handling the "this conversation is
+  cached, switch anyway?" confirmation a session with history shows. The picker only opens between turns,
+  so the flip works on an idle session (which is when you notice drift — after output lands) and declines
+  cleanly mid-turn. For cc the heartbeat is **report-only**: it detects drift and wakes the orchestrator
+  rather than typing into the session, so it can never interrupt an in-flight turn (pane-scraping can't
+  prove a turn isn't running); the actual flip is the orchestrator-initiated `session model fable`.
+- **Vocabulary hygiene — keep model-facing text out of the fallback cascade.** Some generations fall
+  back to a heavier tier when the text they READ pairs jargon with a violent-sounding word ("kill
+  switch", "hijack", "orphaned", "blast radius"). New **`sanitize`** subcommand scrubs that vocabulary
+  from any prose/state/todo/memory/commit file (`sanitize <path>` reports; `--write` applies;
+  `--aggressive`/`OSRC_VOCAB_AGGRESSIVE=1` also softens common tech words). It is prose-oriented and
+  refuses source files, so a real `kill "$pid"` syscall is never touched. Outsourcerer also scrubs its
+  OWN async-push summaries at the source (the text that re-invokes an orchestrator; opt out with
+  `OSRC_VOCAB_GUARD=0`) and softened its own watchdog wording. Map + rationale:
+  `references/vocabulary-hygiene.md`.
+- **`session send` to a managed session no longer reports "delivery unknown" when it did deliver.**
+  The composer/receipt check was adapter-only, so without an external probe every managed `session send`
+  failed with "delivery unknown" even though `tmux send-keys` delivered. It now reports HONESTLY instead
+  of failing: delivery is confirmed only by a real external receipt adapter; without one it says "sent —
+  keys delivered, delivery not independently verified" (rc 2) and records `delivery_unknown`. No receipt
+  is ever forged from `send-keys` success (which only proves tmux queued the keys, not that the app
+  consumed them). A broken/misconfigured probe fails closed, and `OSRC_MANAGED_SEND_BUILTIN=0` restores
+  the strict regime where a send without a usable adapter is a hard failure.
+- **droid `explore`/`run` (read-only) is now actually permissioned.** The read-only tier passed no
+  autonomy flag, so `droid exec` refused with "insufficient permission, re-run with --auto medium". It
+  now passes `--auto low` (reads + safe read-only commands, no edits), which is what exploration needs.
+- **Free-tier Devin models are no longer misread as blocked by the paid "0%" display — now with a precise
+  detector.** glm/swe (and the other plan-included ids) run on Devin's free tier; a paid-ACU "0% remaining"
+  figure is a separate balance and does not gate them. Dispatch says so up front, and Devin's stderr is now
+  **captured on both dispatch paths** (the non-sandbox path used to discard it). On a free-model failure the
+  hint is no longer hedged: if the captured output shows a real quota/ACU/billing refusal it says so
+  definitively **and prints Devin's actual wording** (self-resolving telemetry — the exact string surfaces
+  the next time it happens); if the failure was unrelated it stays silent instead of waving the free-tier
+  flag at the wrong error. Cross-lane fallback is named, never auto-routed (a free→cash switch is your call).
+  The matcher is context-anchored (a money/quota noun only counts beside a refusal verb), so it covers the
+  canonical wordings (402, payment required, subscription expired, credit limit, usage cap) while a stray
+  "billing"/"quota" or a transport "exhausted all retry attempts" is not mislabeled a quota gate.
+- **`advise` now folds live limits-left into the recommendation, not just conserve-routing.** A subscription
+  lane past the conserve line (cc = Claude 5h, cx = Codex 5h/weekly, whichever is more spent) takes a gentle
+  score haircut (linear, ≤10% at fully spent), so a nearly-exhausted lane loses close races to a fresher one
+  and the reasoning shows it (`conservation: cc/Claude 5h past conserve line → score x0.91`). Only lanes we
+  can actually measure are touched — Devin/Gemini/OpenRouter stay neutral (we never invent a limit we can't
+  read). Opt out with `OSRC_ADVISE_CONSERVE=0`; exposed in `--json` as `conservation`.
+- **Torture-gauntlet hardening (two MAJOR fixes).** An adversarial fuzz pass found two edge-case
+  defects, both now fixed and regression-tested: (1) `sanitize` on a directory silently skipped a file
+  whose name contains a newline — directory traversal now walks NUL-delimited (`find -print0` /
+  `read -d ''`) so any valid POSIX filename is one path, not two; (2) the Claude footer observer
+  fabricated a model family from an ambiguous footer ("Opus Fable" returned `fable`) — it now requires
+  exactly one family token in the model field and returns `unknown` otherwise, honoring the never-invent
+  guarantee. Valid single-family and ANSI-wrapped footers are unaffected.
+
 ## 0.6.1
 
 - **The heartbeat can finally reach an async orchestrator.** The background beacon used to only WRITE a
