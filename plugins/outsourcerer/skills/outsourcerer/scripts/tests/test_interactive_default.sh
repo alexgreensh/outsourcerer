@@ -64,7 +64,7 @@ grep -q 'SESSION_LAUNCH=("droid" "--auto" "medium")' "$SRC" \
   && ok "Droid interactive sessions use the advertised bounded-autonomy launch" \
   || bad "Droid interactive launch does not select --auto medium"
 
-# --- felt-pain bug 2: `session start -m <native-alias>` must start that model's NATIVE lane, not devin ---
+# --- regression: `session start -m <native-alias>` must start that model's NATIVE lane, not devin ---
 # _session_infer_provider remaps PROVIDER when --provider was not explicit and the alias names a native
 # lane (terra/sol/luna -> codex, opus/fable/sonnet -> cc, gemini-* -> gm); dual-lane open-weight ids stay
 # on the provider default; an explicit --provider always wins.

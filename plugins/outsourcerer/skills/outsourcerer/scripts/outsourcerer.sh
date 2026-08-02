@@ -8606,7 +8606,7 @@ _session_probe_help() {
   rm -f "$probe_file"
 }
 
-# felt-pain bug 2: `session start -m terra` launched DEVIN because PROVIDER defaults to devin and the
+# bug (session routing): `session start -m terra` launched DEVIN because PROVIDER defaults to devin and the
 # session-start paths never applied the alias->lane map — the exact "sol/terra on Devin" mistake the skill
 # warns about. delegate() already honors "the alias picks the lane" (via lane_from_name); session start was
 # the one path that skipped it. This remaps PROVIDER to a model's NATIVE lane when --provider was not given

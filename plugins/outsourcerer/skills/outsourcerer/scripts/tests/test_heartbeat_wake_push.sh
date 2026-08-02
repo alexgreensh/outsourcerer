@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_heartbeat_wake_push.sh — the ACTIVE async push (OSRC_HEARTBEAT_WAKE) and the async-supervision
 # guard. Root cause guarded: the beacon only ever WROTE a pulse to a tty/sink. A message-driven caller
-# (one turn per inbound message, e.g. Miss Chief on WhatsApp) has no turn loop and never reads that tty,
+# (one turn per inbound message, e.g. a WhatsApp/Slack bot) has no turn loop and never reads that tty,
 # so delegated work went silent until the user pinged. The wake hook lets the beacon TRIGGER the caller's
 # own notifier on state changes/digests; the guard warns at launch when a headless run has no push armed.
 #

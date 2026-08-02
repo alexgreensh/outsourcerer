@@ -37,7 +37,7 @@ unset OSRC_EXTERNAL_COMPOSER_PROBE
 # ---- cc auto-restore is REPORT-ONLY (no mid-turn /model injection on the heartbeat path) ----------
 grep -q 'REPORT-ONLY on the automatic path' "$SRC" && ok "cc heartbeat restore is report-only (no auto-typing)" || bad "cc auto-restore still types into the session"
 
-# ---- felt-pain bug 1: for a DEVIN session the text MUST actually land (send-keys -l + Enter), not abort
+# ---- regression: for a DEVIN session the text MUST actually land (send-keys -l + Enter), not abort
 # before typing with "delivery unknown". The 0.6.1 composer guard failed closed for devin and never typed;
 # 0.6.2 makes devin's composer state 'empty' so the send proceeds. This asserts the keys really go out.
 ( TLOG="$TMP/tmux.calls"; : > "$TLOG"
