@@ -4459,6 +4459,25 @@ $body"
     PROVIDER="$_cloud_prov" _bg_cloud_preack "${_pk[@]}"
   fi
 
+  # DISPATCHABILITY PREFLIGHT for engine lanes (droid/cursor/hermes/warp/cline): these lanes
+  # require their CLI on PATH. Without this check, fanout mints jobs that fail in the detached
+  # child (the delegate's `have <cli> || die` fires after launch), producing a batch of phantom
+  # jobs the waiter hangs on. bg has a full route preflight (OSRC_PREFLIGHT=1); fanout does the
+  # lighter `have <cli>` check here since engine lanes are provider==lane and the CLI is the only
+  # dispatchability gate. Local/native lanes (devin/cc/codex/gemini/claudex/local) have their own
+  # auth/credential gates that the bg route preflight covers on the child side.
+  local _dp_prov _dp_cli _pi
+  for _pi in "${!labels[@]}"; do
+    _pep="${g_prov:-${a_prov[$_pi]}}"; _dp_prov="${_pep:-$PROVIDER}"
+    case "$_dp_prov" in
+      droid|cursor|hermes|warp|cline)
+        _dp_cli="$_dp_prov"
+        # claudex is a special case (not an engine lane here); the case above is engine lanes only.
+        have "$_dp_cli" || die "fanout: lane '$_dp_cli' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
+        ;;
+    esac
+  done
+
   local i jid em ee et ep jprov rtag
   local -a jfwd=(); local _fail=0 _ok=0
   for i in "${!labels[@]}"; do
@@ -5211,6 +5230,17 @@ delegate_warp() {
 # approval rung, so edit/research/yolo all map to act mode and the trade is
 # disclosed in the posture banner, never silent. Reasoning effort maps natively
 # to `--thinking` (none|low|medium|high|xhigh).
+#
+# SUPERVISION LIMITATION (disclosed, not silently assumed): Cline's hub/spoke
+# lifecycle can spawn detached child processes (the hub manages spokes that may
+# be reparented to PID 1). _kill_tree walks the process tree via pgrep/ps and
+# signals deepest-first, which reaps the direct tree reliably. But if Cline's
+# hub detaches spokes outside the delegate's process tree, those orphans can
+# outlive a cancel/watchdog kill. This is the same class of limitation as codex's
+# MCP grandchildren on macOS (no setsid/process-group-kill). The watchdog and
+# cancel path do their best-effort reaping via _kill_tree; surviving orphaned
+# cline spokes are a known limitation, not a silent gap. If a cline bg job is
+# cancelled, verify with `ps aux | grep cline` that no spokes linger.
 # =============================================================================
 
 # _cline_effort <ours> -> cline --thinking value. Ours: minimal..max.
@@ -5218,6 +5248,34 @@ _cline_effort() {
   case "$1" in minimal) echo "none" ;; low) echo "low" ;; medium) echo "medium" ;;
     high) echo "high" ;; xhigh|max) echo "xhigh" ;; *) echo "" ;; esac
 }
+
+# _cline_version -> echo the numeric version string from `cline --version` (e.g. "3.0.48"), or empty.
+# Cline's --version output format is "cline 3.0.48" (name + space + semver). We anchor on the
+# `cline` token and extract the version that follows it, so a build date or API version printed
+# elsewhere in the output cannot be mis-read as the CLI version. Empty if cline is absent or
+# output is unparseable.
+_cline_version() {
+  local v; v="$(cline --version 2>/dev/null | head -1)" || return 0
+  # Anchor on the `cline` token, then extract the x.y[.z...] version that follows it.
+  printf '%s' "$v" | grep -oE 'cline[[:space:]]+[0-9]+(\.[0-9]+)+' | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
+}
+
+# _ver_ge <installed> <minimum> -> return 0 if installed >= minimum, 1 otherwise.
+# Uses sort -V (portable: the engine probes for it at load time and falls back to numeric field sort).
+# Both args must be dotted-numeric version strings. Empty/missing installed -> return 1 (fail closed).
+_ver_ge() {
+  local inst="$1" min="$2"
+  [ -n "$inst" ] || return 1
+  [ -n "$min" ] || return 1
+  # sort -V orders oldest-first; if the installed version is the last line, it's >= the minimum.
+  local last; last="$(printf '%s\n%s\n' "$min" "$inst" | _vsort | tail -1)"
+  [ "$last" = "$inst" ]
+}
+
+# Minimum cline version that enforces --plan as genuinely read-only. Pre-3.0.36, Cline's Plan mode
+# could fall back to shell edits (per Cline's changelog), so run/explore (advertised read-only) could
+# mutate on an older CLI. Below this version the --plan guarantee is asserted, not verified.
+_CLINE_MIN_PLAN_VER="3.0.36"
 
 delegate_cline() {
   local tier="$1"
@@ -5229,7 +5287,37 @@ delegate_cline() {
   # act mode auto-approves all tools (--auto-approve defaults true). No OS sandbox, no graded rung.
   local pflag=() posture
   case "$tier" in
-    auto)         pflag=(--plan);            posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless)" ;;
+    auto)
+      # VERSION GATE: --plan is only a verified read-only guarantee on cline >= 3.0.36. On an older
+      # CLI, Plan mode could fall back to shell edits (Cline changelog), so run/explore (advertised
+      # read-only) could silently mutate. Fail CLOSED: refuse the read-only tier on an unverified
+      # CLI rather than assert a guarantee we cannot prove. The user can upgrade cline, or use a
+      # mutating tier (edit/research/yolo) which is honestly labelled as mutating.
+      #
+      # OSRC_CLINE_SKIP_VER_GATE=1 bypasses BOTH failure modes (below-min AND unparseable). It is a
+      # trust-boundary escape hatch: the user asserts their CLI is safe for --plan despite the gate.
+      # The banner honestly labels this as "ASSERTED (version gate skipped)", not "verified".
+      local _cv; _cv="$(_cline_version)"
+      local _gate_bypassed=0
+      if [ -n "$_cv" ] && ! _ver_ge "$_cv" "$_CLINE_MIN_PLAN_VER"; then
+        if [ "${OSRC_CLINE_SKIP_VER_GATE:-0}" = "1" ]; then
+          _gate_bypassed=1
+        else
+          die "cline lane: run/explore (read-only --plan) requires cline >= $_CLINE_MIN_PLAN_VER (Plan mode could fall back to shell edits on older versions). Installed: cline ${_cv:-unknown}. Upgrade: npm i -g cline, use a mutating tier (edit/research/yolo) which is honestly labelled as mutating, or set OSRC_CLINE_SKIP_VER_GATE=1 to bypass if you are certain your cline is safe for --plan."
+        fi
+      fi
+      # If _cv is empty (version unparseable), we cannot verify the gate. Fail closed here too —
+      # an unparseable version is not a verified version, and the read-only guarantee is asserted,
+      # not verified.
+      if [ -z "$_cv" ] && [ "${OSRC_CLINE_SKIP_VER_GATE:-0}" != "1" ]; then
+        die "cline lane: cannot parse cline version from 'cline --version' — cannot verify the --plan read-only guarantee (requires cline >= $_CLINE_MIN_PLAN_VER). Set OSRC_CLINE_SKIP_VER_GATE=1 to bypass if you are certain your cline is >= $_CLINE_MIN_PLAN_VER, or use a mutating tier."
+      fi
+      [ -z "$_cv" ] && _gate_bypassed=1
+      if [ "$_gate_bypassed" = "1" ]; then
+        pflag=(--plan); posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless; ASSERTED cline >= $_CLINE_MIN_PLAN_VER — version gate skipped via OSRC_CLINE_SKIP_VER_GATE=1, not verified)"
+      else
+        pflag=(--plan); posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless; verified cline >= $_CLINE_MIN_PLAN_VER)"
+      fi ;;
     accept-edits) pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true: edits + commands auto-applied)" ;;
     autonomous)   pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true; cline has no separate OS-sandbox exec mode)" ;;
     dangerous)    pflag=(--auto-approve true);         posture="DANGER (act mode, --auto-approve true: all tools auto-approved, no sandbox)" ;;
@@ -5247,7 +5335,10 @@ delegate_cline() {
   _tier_banner "cline (Cline CLI)" "$id" "$ttier" "$posture, bills your Cline plan / the keys in ~/.cline (the 'cline' OAuth provider is FREE: deepseek-v4-flash + glm-5.2 at \$0 cash)"
   local rc=0
   cline ${pflag[@]+"${pflag[@]}"} ${mflag[@]+"${mflag[@]}"} ${eff[@]+"${eff[@]}"} "$wrapped" || rc=$?
-  record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task"
+  # Pass the resolved lane ("cline") as the 7th arg so the Tab's plan-vs-cash split buckets
+  # foreground cline runs correctly. Without it, fg rows carry no .lane field and are
+  # misbucketed as cash (bg rows pass the lane via run_job; fg rows must pass it here).
+  record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task" "" "cline"
   printf '>>> [receipt] ran on YOUR cline setup (Cline plan / the provider configured in ~/.cline; the free `cline` OAuth provider serves deepseek-v4-flash + glm-5.2 at \$0 cash), no Claude tokens spent.\n' >&2
   return "$rc"
 }
@@ -7498,6 +7589,12 @@ doctor() {
   echo "  -- Cline lane (Cline CLI, engine lane: -m passes through verbatim; FREE `cline` OAuth provider) --"
   if have cline; then
     local _cver; _cver="$(cline --version 2>/dev/null | head -1 || echo present)"
+    # BEST-EFFORT schema read: the ~/.cline/data/settings/providers.json shape (lastUsedProvider,
+    # providers[].settings.model) is based on observed Cline 3.0.x layouts and may change in future
+    # Cline versions. Both reads use `// empty` + `2>/dev/null` so an unparseable or reshaped file
+    # degrades to "not detected" rather than crashing doctor. Do not treat the absence of a
+    # configured-provider line as a Cline install failure — only the `have cline` check above is
+    # authoritative for install state.
     local _cprov=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cprov="$(jq -r '.lastUsedProvider // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
     local _cmod=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cmod="$(jq -r --arg p "$_cprov" '.providers[$p].settings.model // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
     echo "    cline: $_cver — route: --provider cline [-m <model>] run \"task\". Engine lane: -m passes through verbatim to cline's provider/model catalog."

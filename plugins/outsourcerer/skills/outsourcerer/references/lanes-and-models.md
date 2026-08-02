@@ -100,7 +100,8 @@ outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
 - **Free models:** `-m deepseek/deepseek-v4-flash` and `-m z-ai/glm-5.2` on the `cline` provider.
   Both are `capable` tier (frontier capability, budget price — here $0).
 - **Posture is BINARY, not graded:** `run`/`explore` → `--plan` (read-only, no edits/commands
-  applied); `edit`/`research`/`yolo` → default act mode with `--auto-approve true` (all tools
+  applied — **version-gated**: requires cline >= 3.0.36, where Plan mode stopped falling back to
+  shell edits; on an older CLI the read-only tier is refused, not silently trusted); `edit`/`research`/`yolo` → default act mode with `--auto-approve true` (all tools
   auto-approved). Cline has **no OS sandbox and no middle approval rung** — the trade is disclosed
   in the posture banner, never silent. Treat `research`/`yolo` on cline as fully autonomous with no
   sandbox boundary; prefer `run` (plan mode) for read-only inspection.
@@ -108,7 +109,14 @@ outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
 - Billing: your Cline plan / the provider keys in `~/.cline`. The `cline` OAuth provider is $0
   cash. Cloud lane → full cloud gate + secret-scan apply.
 - Auth: `cline auth cline` once (OAuth, enables the free provider). `doctor` shows install/auth
-  state and reads the configured provider + default model.
+  state and **best-effort** reads the configured provider + default model from
+  `~/.cline/data/settings/providers.json` (the schema is based on observed Cline 3.0.x layouts and
+  may change in future versions; both reads degrade to "not detected" on an unparseable file).
+- **Supervision limitation (disclosed):** Cline's hub/spoke lifecycle can spawn detached spokes
+  that survive a `cancel`/watchdog kill (same class as codex MCP grandchildren on macOS, which has
+  no `setsid`/process-group-kill). `_kill_tree` does best-effort reaping of the direct process tree;
+  if a cline bg job is cancelled, verify with `ps aux | grep cline` that no spokes linger. This is
+  a known limitation, not a silent gap.
 
 ## Gemini / Antigravity lane, text delegation + visual review + image gen
 

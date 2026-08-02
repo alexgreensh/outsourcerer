@@ -1,2 +1,25 @@
 #!/usr/bin/env bash
-echo "cline 3.0.48"
+# fake-bin/cline — a test stub for the Cline engine lane. Never makes a real API call.
+#
+# Two modes:
+#   1. `cline --version`        -> prints "cline 3.0.48" (a version >= 3.0.36, passes the version gate).
+#   2. `cline [flags] "task"`   -> echoes the flags it received to a capture file, prints a fake result,
+#      and exits 0. The capture file path is read from $OSRC_CLINE_FAKE_CAPTURE (set by the test).
+#
+# CRITICAL: uses `echo` for --version, never executes `cline` (fork bomb trap — a stub that runs
+# `cline 3.0.48` instead of `echo "cline 3.0.48"` would recurse infinitely with fake-bin on PATH).
+if [ "${1:-}" = "--version" ]; then
+  echo "cline 3.0.48"
+  exit 0
+fi
+
+# Dispatch mode: capture the full arg list so the test can assert on the flags cline would receive.
+# All args on one line (space-joined) so a grep for '--auto-approve true' or '--thinking high' matches
+# as a contiguous substring.
+if [ -n "${OSRC_CLINE_FAKE_CAPTURE:-}" ]; then
+  printf '%s\n' "$*" >> "$OSRC_CLINE_FAKE_CAPTURE"
+fi
+
+# Print a fake result so the delegate's output path sees something.
+echo "FAKE CLINE RESULT: task accepted"
+exit 0
