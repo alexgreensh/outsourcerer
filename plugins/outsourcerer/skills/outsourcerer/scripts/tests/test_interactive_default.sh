@@ -64,6 +64,22 @@ grep -q 'SESSION_LAUNCH=("droid" "--auto" "medium")' "$SRC" \
   && ok "Droid interactive sessions use the advertised bounded-autonomy launch" \
   || bad "Droid interactive launch does not select --auto medium"
 
+# --- felt-pain bug 2: `session start -m <native-alias>` must start that model's NATIVE lane, not devin ---
+# _session_infer_provider remaps PROVIDER when --provider was not explicit and the alias names a native
+# lane (terra/sol/luna -> codex, opus/fable/sonnet -> cc, gemini-* -> gm); dual-lane open-weight ids stay
+# on the provider default; an explicit --provider always wins.
+_infer_probe() { # <model> <prov-explicit> <model-explicit> <start-prov> -> resulting PROVIDER
+  local m="$1" pe="$2" me="$3" sp="$4"   # capture BEFORE `set --` wipes the positionals
+  ( export OSRC_HOME="$(mktemp -d)"; set --; . "$SRC" >/dev/null 2>&1
+    PROVIDER="$sp"; PROVIDER_EXPLICIT="$pe"; MODEL_EXPLICIT="$me"; MODEL="$m"
+    _session_infer_provider >/dev/null 2>&1; printf '%s' "$PROVIDER" )
+}
+[ "$(_infer_probe terra 0 1 devin)" = codex ] && ok "session start -m terra -> codex (bug 2 fixed)" || bad "terra still misroutes off codex"
+[ "$(_infer_probe opus 0 1 devin)"  = cc ]    && ok "session start -m opus -> cc (claude native)" || bad "opus does not route to cc"
+[ "$(_infer_probe glm 0 1 devin)"   = devin ] && ok "session start -m glm stays devin (dual-lane default)" || bad "glm wrongly remapped off devin"
+[ "$(_infer_probe terra 1 1 devin)" = devin ] && ok "explicit --provider always wins over the alias" || bad "explicit --provider was overridden"
+[ "$(_infer_probe terra 0 0 devin)" = devin ] && ok "no -m -> no remap (provider default preserved)" || bad "remap fired without an explicit model"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

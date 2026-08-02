@@ -37,6 +37,20 @@ unset OSRC_EXTERNAL_COMPOSER_PROBE
 # ---- cc auto-restore is REPORT-ONLY (no mid-turn /model injection on the heartbeat path) ----------
 grep -q 'REPORT-ONLY on the automatic path' "$SRC" && ok "cc heartbeat restore is report-only (no auto-typing)" || bad "cc auto-restore still types into the session"
 
+# ---- felt-pain bug 1: for a DEVIN session the text MUST actually land (send-keys -l + Enter), not abort
+# before typing with "delivery unknown". The 0.6.1 composer guard failed closed for devin and never typed;
+# 0.6.2 makes devin's composer state 'empty' so the send proceeds. This asserts the keys really go out.
+( TLOG="$TMP/tmux.calls"; : > "$TLOG"
+  tmux() { printf '%s\n' "$*" >> "$TLOG"; case "$1 $2" in "display -p"*) printf '0\n' ;; "capture-pane"*) printf '\n' ;; *) return 0 ;; esac; }
+  _managed_endpoint_live() { return 0; }; _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
+  _obligation_latest_state() { printf ''; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+  _obligation_guard_begin() { return 0; }; _obligation_guard_end() { return 0; }; _obligation_delivery_unknown() { return 0; }
+  _managed_provider() { printf 'devin'; }; _state_jsonl_read() { printf ''; }
+  unset OSRC_EXTERNAL_RECEIPT_PROBE OSRC_EXTERNAL_COMPOSER_PROBE
+  _managed_session_send "sess-dv" "analyze this" ; rc=$?
+  grep -q 'send-keys -t sess-dv -l -- analyze this' "$TLOG" && grep -q 'send-keys -t sess-dv Enter' "$TLOG" && [ "$rc" = 2 ]
+) && ok "devin session send actually types the text + Enter (bug 1: text lands, rc2 honest)" || bad "devin session send did not deliver the keys (bug 1 regressed)"
+
 echo "----"
 echo "managed-send: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -93,10 +93,11 @@
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
 # deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers.
-# INTERACTIVE sessions: `outsourcerer --provider devin|codex|cc session start -m <model>` is the one
-# turnkey path and is provider-aware. NOTE --provider must come BEFORE the `session` subcommand (global
-# flags are parsed before subcommands). --provider codex launches NATIVE codex (sol/terra/luna run on
-# YOUR ChatGPT auth); --provider cc launches native claude (fable/opus/...); devin is the default.
+# INTERACTIVE sessions: `outsourcerer session start -m <model>` is the one turnkey path and is
+# provider-aware. THE ALIAS PICKS THE LANE: `-m terra` (or sol/luna/gpt-5.x) starts NATIVE codex on your
+# ChatGPT auth, `-m opus`/`-m fable` starts native claude, `-m gemini-pro` starts gemini — no --provider
+# needed (open-weight ids like glm/deepseek stay on Devin, the default). Pass --provider ONLY to force a
+# lane against the alias; it must come BEFORE the `session` subcommand (global flags parse first).
 # continue/parity are Devin-only. The sibling scripts/run-or-{model,codex}.sh are ONLY for running
 # arbitrary OpenRouter model ids interactively -- they force provider=openrouter, so bare ChatGPT-sub
 # aliases (sol/terra/luna/gpt-5.x) 400 there; use `--provider codex session start` for those instead.
@@ -126,7 +127,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.6.2"
+OSRC_VERSION="0.6.3"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -8605,6 +8606,33 @@ _session_probe_help() {
   rm -f "$probe_file"
 }
 
+# felt-pain bug 2: `session start -m terra` launched DEVIN because PROVIDER defaults to devin and the
+# session-start paths never applied the alias->lane map — the exact "sol/terra on Devin" mistake the skill
+# warns about. delegate() already honors "the alias picks the lane" (via lane_from_name); session start was
+# the one path that skipped it. This remaps PROVIDER to a model's NATIVE lane when --provider was not given
+# explicitly. Only unambiguously-native families remap (Claude sub->cc, ChatGPT sub->cx/codex, Gemini->gm);
+# open-weight/dual-lane ids (glm/deepseek/kimi...) are intentionally left on the provider default so a bare
+# `-m glm session start` still rides Devin (free). Table lane is authoritative; lane_from_name is the
+# fallback for a native id not yet tabled.
+_session_infer_provider() {
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && return 0        # an explicit --provider always wins
+  [ "${MODEL_EXPLICIT:-0}" = "1" ] || return 0           # only meaningful when a model was named
+  local row rest lane="" newp=""
+  row="$(resolve_model_row "$MODEL" 2>/dev/null)"; rest="${row#*|}"
+  [ -n "$row" ] && [ "$row" != "$rest" ] && lane="${rest%%|*}"
+  [ -n "$lane" ] || lane="$(lane_from_name "$MODEL" 2>/dev/null)" || lane=""
+  case "$lane" in
+    cx) newp=codex ;;
+    cc) newp=cc ;;
+    gm) newp=gemini ;;
+    *)  return 0 ;;                                        # dv/or/engine/unknown -> keep the provider default
+  esac
+  if [ "$newp" != "$PROVIDER" ]; then
+    printf '>>> [route] -m %s is a native %s-lane model; starting the %s session (the alias picks the lane). Override with --provider.\n' "$MODEL" "$lane" "$newp" >&2
+    PROVIDER="$newp"
+  fi
+}
+
 _session_launch_adapter() {
   local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli="" resolved_model="" de=""
   SESSION_LAUNCH=()
@@ -9011,6 +9039,7 @@ _winpty_session() {
   case "$sub" in
     start)
       parse_model "$@"
+      _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
       _validate_model_token "$MODEL"
 
       local LAUNCH=()
@@ -9183,6 +9212,7 @@ session() {
       ;;
     start)
       parse_model "$@"
+      _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
       # Validate the model token before it is interpolated into a tmux shell command.
       _validate_model_token "$MODEL"
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude

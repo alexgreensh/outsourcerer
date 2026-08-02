@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "outsourcerer",
   "displayName": "Outsourcerer",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Delegate the grind, keep the glory. Offload grunt work to a cheaper or different engine (OpenRouter, Codex, keyless Gemini) while Claude orchestrates, or pull a stronger model in as an advisor. Per-model prompting, image gen, consensus second opinions, cost Tab.",
   "author": {
     "name": "Alex Greenshpun",

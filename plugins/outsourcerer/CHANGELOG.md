@@ -2,6 +2,25 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.6.3
+
+- **`session start -m <alias>` now starts the model's NATIVE lane — the alias picks the lane.** A logged
+  felt-pain bug: `session start -m terra` launched the **Devin** CLI with model "terra" instead of
+  codex-native, because the provider defaulted to devin and the session-start paths never applied the
+  alias→lane map (the exact "sol/terra on Devin" mistake the skill warns about). `delegate()` already
+  honored it; `session start` was the one path that skipped it. Now, when `--provider` is not given
+  explicitly, a native-family alias remaps the harness: sol/terra/luna/gpt-5.x → codex, opus/fable/sonnet/
+  haiku → claude, gemini-* → gemini. Open-weight/dual-lane ids (glm/deepseek/kimi) stay on Devin (the free
+  default), and an explicit `--provider` always wins. The docs promised this guarantee; now it holds for
+  `session start` too.
+- **`session send` to a Devin session: confirmed the text actually lands (regression-locked).** A logged
+  felt-pain bug reported `session send` returning "delivery unknown" with the text never appearing (raw
+  `tmux send-keys` worked). Root cause was the 0.6.1 composer guard failing closed for Devin and aborting
+  before typing; the 0.6.2 honest-send rewrite already fixed the delivery (Devin's composer state resolves
+  to `empty`, so the send proceeds to `send-keys` + Enter and reports "sent — unverified"). This release
+  adds a regression test that mocks tmux and asserts the keys are actually delivered, so the "text never
+  lands" class cannot come back silently.
+
 ## 0.6.2
 
 - **Fable-pin: a claude-native session that falls back to Opus can now be flipped back to Fable, live.**
