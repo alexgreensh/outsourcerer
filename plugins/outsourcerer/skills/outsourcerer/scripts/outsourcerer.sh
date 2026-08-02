@@ -4466,16 +4466,30 @@ $body"
   # lighter `have <cli>` check here since engine lanes are provider==lane and the CLI is the only
   # dispatchability gate. Local/native lanes (devin/cc/codex/gemini/claudex/local) have their own
   # auth/credential gates that the bg route preflight covers on the child side.
+  #
+  # CRITICAL: provider name != CLI binary name for two lanes (must match route_delegate's probes):
+  #   cursor → cursor-agent (or agent fallback)
+  #   warp   → oz
+  # Mapping provider==CLI directly would false-positive on warp/cursor (blocks working installs)
+  # and false-negative on cursor (a `cursor` shim can exist while cursor-agent is absent).
   local _dp_prov _dp_cli _pi
   for _pi in "${!labels[@]}"; do
     _pep="${g_prov:-${a_prov[$_pi]}}"; _dp_prov="${_pep:-$PROVIDER}"
     case "$_dp_prov" in
-      droid|cursor|hermes|warp|cline)
-        _dp_cli="$_dp_prov"
-        # claudex is a special case (not an engine lane here); the case above is engine lanes only.
-        have "$_dp_cli" || die "fanout: lane '$_dp_cli' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
-        ;;
+      droid)  _dp_cli="droid" ;;
+      cursor) _dp_cli="cursor-agent" ;;
+      hermes) _dp_cli="hermes" ;;
+      warp)   _dp_cli="oz" ;;
+      cline)  _dp_cli="cline" ;;
+      *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
+    if ! have "$_dp_cli"; then
+      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate)
+      if [ "$_dp_prov" = "cursor" ] && have agent && agent --help 2>/dev/null | grep -qi cursor; then
+        continue
+      fi
+      die "fanout: lane '$_dp_prov' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
+    fi
   done
 
   local i jid em ee et ep jprov rtag
@@ -5255,8 +5269,11 @@ _cline_effort() {
 # elsewhere in the output cannot be mis-read as the CLI version. Empty if cline is absent or
 # output is unparseable.
 _cline_version() {
-  local v; v="$(cline --version 2>/dev/null | head -1)" || return 0
+  local v; v="$(cline --version 2>/dev/null)" || return 0
   # Anchor on the `cline` token, then extract the x.y[.z...] version that follows it.
+  # We scan the full output (not just line 1) so a multi-line --version banner with the
+  # version on a later line still parses. The anchor on `cline` prevents a build date or
+  # API version on an earlier line from being mis-read as the CLI version.
   printf '%s' "$v" | grep -oE 'cline[[:space:]]+[0-9]+(\.[0-9]+)+' | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
 }
 

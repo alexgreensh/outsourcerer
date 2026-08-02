@@ -97,7 +97,6 @@ grep -q 'npm i -g cline' "$SRC" && ok "install instruction uses the real package
 grep -q '\[ "$PROVIDER" != "cline" \]' "$SRC" && ok "cline skips alias resolution (-m passes verbatim)" || bad "cline not in the alias-skip guard"
 
 # --- cline is wired into every provider list (the contract: the alias picks the lane) ---
-_lists='devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local'
 _n=$(grep -c -- "devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local" "$SRC")
 [ "$_n" -ge 4 ] && ok "cline appears in $_n provider-list sites" || bad "cline missing from provider lists (found $_n)"
 # the unknown-provider die must name cline so a typo is self-explanatory
@@ -121,6 +120,13 @@ grep -q 'BEST-EFFORT schema read' "$SRC" && ok "doctor marks the ~/.cline jq sch
 
 # --- fanout preflight: engine-lane CLI availability is checked before minting jobs ---
 grep -q 'DISPATCHABILITY PREFLIGHT' "$SRC" && ok "fanout has a dispatchability preflight for engine lanes" || bad "fanout missing dispatchability preflight"
+# CRITICAL: the preflight must map provider→CLI name correctly, not assume provider==CLI.
+# route_delegate uses: cursor→cursor-agent, warp→oz. The preflight must match.
+grep -q 'cursor) _dp_cli="cursor-agent"' "$SRC" && ok "fanout preflight maps cursor→cursor-agent (not cursor)" || bad "fanout preflight does not map cursor→cursor-agent"
+grep -q 'warp)   _dp_cli="oz"' "$SRC" && ok "fanout preflight maps warp→oz (not warp)" || bad "fanout preflight does not map warp→oz"
+grep -q 'droid)  _dp_cli="droid"' "$SRC" && ok "fanout preflight maps droid→droid" || bad "fanout preflight does not map droid→droid"
+grep -q 'hermes) _dp_cli="hermes"' "$SRC" && ok "fanout preflight maps hermes→hermes" || bad "fanout preflight does not map hermes→hermes"
+grep -q 'cline)  _dp_cli="cline"' "$SRC" && ok "fanout preflight maps cline→cline" || bad "fanout preflight does not map cline→cline"
 
 # --- fg ledger carries the lane (fixes the fg misbucketing nit) ---
 grep -q 'record_ledger cline.*"cline"' "$SRC" && ok "fg record_ledger passes the resolved lane (cline)" || bad "fg record_ledger does not pass the lane"
