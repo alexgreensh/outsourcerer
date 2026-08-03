@@ -5184,6 +5184,20 @@ _job_json() {
 # Reuses _job_made_writes (structured tool-call grep + FS check against .startmark) so the
 # post-hoc verdict uses the SAME liveness definition as the runtime watchdog. The FS check here
 # is run with no time pressure, so it sees writes the watchdog's bounded depth-3 scan could miss.
+#
+# _strip_preamble <file> -> file contents with leading `>>> ` routing notices removed.
+# Outsourcerer prepends routing/receipt/notice lines (`>>> [route]`, `>>> devin --model`,
+# etc.) to last.txt when it falls back to copying out.log. These are metadata, not delegate
+# output. But a delegate's OWN output can legitimately contain `>>> ` lines (Python REPL
+# prompts, doctest examples, markdown blockquotes) -- stripping ALL `>>> ` lines would
+# destroy a REPL-transcript deliverable. So strip only from the HEAD: skip leading `>>> `
+# and blank lines, then once a real content line appears, pass everything through verbatim
+# (including later `>>> ` lines). (Kimi K3 review finding #3: bare `^>>> ` strip destroyed
+# doctest/REPL deliverables.)
+_strip_preamble() {
+  awk 'p==0 && (/^>>> / || /^[[:space:]]*$/){next} {p=1} p==1' "$1" 2>/dev/null
+}
+
 _classify_job() {
   local id="$1" jd="$OSRC_JOBS/$1"
   [ -d "$jd" ] || { printf 'REAL-FAIL\tno-job-dir'; return 0; }
@@ -5200,9 +5214,11 @@ _classify_job() {
   #    reason on a deterministic reject; we treat that as REAL-FAIL, not REUSE-OUTPUT.
   case "$st" in
     done|'done?')
-      # Strip `>>> ` routing lines first: last.txt may contain only the routing preamble if the
-      # delegate produced no real output (same guard as the false-stall:deliverable check below).
-      local _done_body; _done_body="$(grep -avE '^>>> ' "$jd/last.txt" 2>/dev/null | grep -avE '^[[:space:]]*$')"
+      # Strip the routing preamble (leading `>>> ` lines) from last.txt. A completed job
+      # whose last.txt is ONLY routing preamble (delegate produced no real output) is NOT
+      # a success -- fall through. Uses _strip_preamble (head-only) so a deliverable that
+      # contains `>>> ` lines in its body (Python REPL, doctests) is preserved.
+      local _done_body; _done_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
       if [ -n "$_done_body" ] && ! _confident_fail "$_done_body" >/dev/null 2>&1; then
         if [ "$st" = "done" ]; then printf 'REUSE-OUTPUT\tcompleted'
         else printf 'REUSE-OUTPUT\tcompleted-unverified'; fi
@@ -5247,10 +5263,17 @@ _classify_job() {
     return 0
   fi
   if [ "$st" = "permission-blocked" ]; then
-    case "$reason" in
-      *print-mode*|*"Print mode"*) printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang' ;;
-      *) printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked' ;;
-    esac
+    # The supervisor never writes a `reason` file for permission-blocked jobs (both abort paths
+    # write the message to stderr -> out.log, not to $jd/reason). So $reason is always empty here
+    # and the old `case "$reason" in *print-mode*` never matched -- wedge:print-mode-hang was dead
+    # code. Scan out.log tail for the same assembled needle the runtime watchdog uses
+    # (_printmode_needle) so the post-hoc verdict stays consistent with the runtime detection.
+    if [ -s "$jd/out.log" ] && tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null \
+         | grep -aq "$(_printmode_needle)"; then
+      printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang'
+    else
+      printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked'
+    fi
     return 0
   fi
 
@@ -5272,12 +5295,12 @@ _classify_job() {
     fi
   fi
   if [ -s "$jd/last.txt" ]; then
-    # Strip outsourcerer's own `>>> ` routing/receipt/notice lines -- a wedged/timed-out job's
-    # last.txt can contain ONLY the routing preamble (the delegate never produced output before
-    # being killed). Without this guard, 293 bytes of routing noise reads as a "deliverable" and
-    # a real fail is misclassified as a false-stall. If nothing remains after stripping, there is
-    # no delegate output to reuse.
-    local _last_body; _last_body="$(grep -avE '^>>> ' "$jd/last.txt" 2>/dev/null | grep -avE '^[[:space:]]*$')"
+    # Strip the routing preamble (leading `>>> ` lines) from last.txt. A wedged/timed-out
+    # job's last.txt can contain ONLY the routing preamble (the delegate never produced
+    # output before being killed). Without this guard, 293 bytes of routing noise reads
+    # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
+    # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
+    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
     if [ -n "$_last_body" ] && ! _confident_fail "$_last_body" >/dev/null 2>&1; then
       printf 'REUSE-OUTPUT\tfalse-stall:deliverable'; return 0
     fi
