@@ -5201,10 +5201,9 @@ _strip_preamble() {
 _classify_job() {
   local id="$1" jd="$OSRC_JOBS/$1"
   [ -d "$jd" ] || { printf 'REAL-FAIL\tno-job-dir'; return 0; }
-  local st rc reason err jcwd=""
+  local st rc jcwd=""
   st="$(cat "$jd/status" 2>/dev/null || printf '')"
   rc="$(cat "$jd/exit" 2>/dev/null || printf '')"
-  reason="$(cat "$jd/reason" 2>/dev/null || cat "$jd/error" 2>/dev/null || printf '')"
   [ -f "$jd/meta.json" ] && have jq && jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
   [ -n "$jcwd" ] || jcwd="$PWD"
 
@@ -5248,7 +5247,7 @@ _classify_job() {
     _qlines="$(tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null | grep -avE '^>>> ')"
     if printf '%s\n' "$_qlines" | grep -qiE "$_DEVIN_QUOTA_RE" 2>/dev/null; then
       _quota_hit="devin"
-    elif printf '%s\n' "$_qlines" | grep -qiE 'quota|rate[ -]?limit|RESOURCE_EXHAUSTED|insufficient (funds|credits?|balance)|out of credits?|billing' 2>/dev/null; then
+    elif printf '%s\n' "$_qlines" | grep -qiE 'quota.*(exceeded|exhausted|exceeded|depleted|reached|limit)|rate[ -]?limit|RESOURCE_EXHAUSTED|insufficient (funds|credits?|balance)|out of credits?|billing.*(failed|error|declined)|payment required' 2>/dev/null; then
       _quota_hit="generic"
     fi
   fi
@@ -5285,7 +5284,7 @@ _classify_job() {
   #    out.log byte-size is deliberately NOT a signal: 500b of error text is not work.
   if [ -f "$jd/.startmark" ] && [ -d "$jcwd" ]; then
     local _sm_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
-    if [ -n "$_sm_mtime" ] && command -v git >/dev/null 2>&1 && [ -d "$jcwd/.git" ]; then
+    if [ -n "$_sm_mtime" ] && command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
       if git -C "$jcwd" log --since="@$_sm_mtime" --oneline 2>/dev/null | grep -q .; then
         printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
       fi
@@ -5308,10 +5307,13 @@ _classify_job() {
 
   # 4. Real fail: no reusable work, no lane-level block. Surface the watchdog's status + exit
   #    code so the human can decide whether to rerun on a different lane or escalate.
+  #    done/done? reaching here (empty/refusal last.txt, no writes, no commits) is a degenerate
+  #    completed job -- label it explicitly rather than the self-contradictory "watchdog:done".
   case "$st" in
-    interrupted) printf 'REAL-FAIL\tinterrupted' ;;
-    '')          printf 'REAL-FAIL\texit:%s' "${rc:-unknown}" ;;
-    *)           printf 'REAL-FAIL\twatchdog:%s' "$st" ;;
+    done|'done?') printf 'REAL-FAIL\tempty-output' ;;
+    interrupted)  printf 'REAL-FAIL\tinterrupted' ;;
+    '')           printf 'REAL-FAIL\texit:%s' "${rc:-unknown}" ;;
+    *)            printf 'REAL-FAIL\twatchdog:%s' "$st" ;;
   esac
 }
 
