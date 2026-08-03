@@ -2,6 +2,10 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.6.4
+
+- **`classify` subcommand — post-hoc false-stall detector for terminated jobs.** `outsourcerer.sh classify <job-id>` reads the job dir and prints a routing label + reason: `REUSE-OUTPUT` (the job did real work despite being killed — don't rerun), `RETRY-DIFFERENT-LANE` (the lane is blocked — quota/credit/permission — switching models won't help), or `REAL-FAIL` (no reusable work, escalate). Add `--json` for a small object. Deterministic, zero-LLM, zero-cost; reads the same job-dir artifacts the runtime watchdog writes. Replaces the manual cwd/out.log inspection an orchestrator had to do after every wedged/timeout/failed job. Classification order: done → quota → permission-blocked → false-stall signals (commits, writes, deliverable) → real-fail. The false-stall FS/commit window is bounded to the job's own runtime (`.startmark` to `$jd/exit` mtime) so post-termination writes don't count. Reviewed by GLM-5.2 and DeepSeek V4 Flash Free (free lanes); 7 findings, all fixed (print-mode dead code, over-broad `>>>` stripping, worktree `.git` as a file, quota regex matching prose, self-contradictory `watchdog:done` label, dead locals, unbounded post-hoc window).
+
 ## 0.6.3
 
 - **`session start -m <alias>` now starts the model's NATIVE lane — the alias picks the lane.** A logged
