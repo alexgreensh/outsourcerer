@@ -5192,10 +5192,11 @@ _job_json() {
 # prompts, doctest examples, markdown blockquotes) -- stripping ALL `>>> ` lines would
 # destroy a REPL-transcript deliverable. So strip only from the HEAD: skip leading `>>> `
 # and blank lines, then once a real content line appears, pass everything through verbatim
-# (including later `>>> ` lines). (Kimi K3 review finding #3: bare `^>>> ` strip destroyed
-# doctest/REPL deliverables.)
+# (including later `>>> ` lines). Capped at OSRC_PREAMBLE_MAX (default 12) leading matches:
+# the routing block is ~2-6 lines, so 12 is safe headroom; a pure-`>>>` transcript (every
+# line is a REPL prompt) survives because lines past the cap are passed through verbatim.
 _strip_preamble() {
-  awk 'p==0 && (/^>>> / || /^[[:space:]]*$/){next} {p=1} p==1' "$1" 2>/dev/null
+  awk 'p==0 && n<'"${OSRC_PREAMBLE_MAX:-12}"' && (/^>>> / || /^[[:space:]]*$/){n++; next} {p=1} p==1' "$1" 2>/dev/null
 }
 
 _classify_job() {
@@ -5278,19 +5279,33 @@ _classify_job() {
 
   # 3. False-stall: the watchdog killed it (wedged/timeout/failed) but it actually did work.
   #    Three independent signals, strongest first:
-  #      a) commits in the job cwd since .startmark (the deliverable was committed)
-  #      b) file writes newer than .startmark (reuses _job_made_writes -- same definition as runtime)
+  #      a) commits in the job cwd between .startmark and job exit (the deliverable was committed)
+  #      b) file writes newer than .startmark but not newer than job exit (reuses _job_made_writes
+  #         but bounded to the job's own runtime -- post-hoc, an unbounded window would count
+  #         orchestrator commits / editor autosaves / a rerun's writes as the delegate's work)
   #      c) a non-empty last.txt that is not a refusal/truncation (the deliverable IS the output)
   #    out.log byte-size is deliberately NOT a signal: 500b of error text is not work.
-  if [ -f "$jd/.startmark" ] && [ -d "$jcwd" ]; then
-    local _sm_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
-    if [ -n "$_sm_mtime" ] && command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
-      if git -C "$jcwd" log --since="@$_sm_mtime" --oneline 2>/dev/null | grep -q .; then
-        printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
+  #    The window is bounded by $jd/exit's mtime (the job-end sentinel). If $jd/exit is missing
+  #    (e.g. a stillborn job that never wrote it), skip the FS/commit checks rather than run an
+  #    unbounded scan -- a stillborn job did no work.
+  if [ -f "$jd/.startmark" ] && [ -f "$jd/exit" ] && [ -d "$jcwd" ]; then
+    local _sm_mtime _exit_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
+    _exit_mtime="$(_mtime "$jd/exit" 2>/dev/null)"
+    if [ -n "$_sm_mtime" ] && [ -n "$_exit_mtime" ]; then
+      if command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
+        if git -C "$jcwd" log --since="@$_sm_mtime" --until="@$_exit_mtime" --oneline 2>/dev/null | grep -q .; then
+          printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
+        fi
       fi
-    fi
-    if _job_made_writes "$jd" "$jcwd"; then
-      printf 'REUSE-OUTPUT\tfalse-stall:writes'; return 0
+      # Bounded FS scan: files newer than .startmark but NOT newer than $jd/exit. This excludes
+      # any write after the job terminated (orchestrator commits, editor autosaves, a rerun).
+      local _hit
+      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+               \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+               -type f -newer "$jd/.startmark" ! -newer "$jd/exit" -print 2>/dev/null | head -1)"
+      if [ -n "$_hit" ]; then
+        printf 'REUSE-OUTPUT\tfalse-stall:writes'; return 0
+      fi
     fi
   fi
   if [ -s "$jd/last.txt" ]; then
