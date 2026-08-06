@@ -5239,17 +5239,33 @@ _job_json() {
 # the routing block is ~2-6 lines, so 12 is safe headroom; a pure-`>>>` transcript (every
 # line is a REPL prompt) survives because lines past the cap are passed through verbatim.
 _strip_preamble() {
-  awk 'p==0 && n<'"${OSRC_PREAMBLE_MAX:-12}"' && (/^>>> / || /^[[:space:]]*$/){n++; next} {p=1} p==1' "$1" 2>/dev/null
+  # OSRC_PREAMBLE_MAX must be passed as awk DATA (-v), never interpolated into the program text:
+  # a value like '12;system("rm -rf ~")' would otherwise execute. Validate as a plain int first.
+  local _pmax="${OSRC_PREAMBLE_MAX:-12}"; case "$_pmax" in ''|*[!0-9]*) _pmax=12 ;; esac
+  awk -v max="$_pmax" 'p==0 && n<max && (/^>>> / || /^[[:space:]]*$/){n++; next} {p=1} p==1' "$1" 2>/dev/null
 }
 
 _classify_job() {
   local id="$1" jd="$OSRC_JOBS/$1"
   [ -d "$jd" ] || { printf 'REAL-FAIL\tno-job-dir'; return 0; }
+  # Terminal-state guard: never classify a job that is still RUNNING. Its artifacts are partial
+  # (a half-written last.txt, an in-flight commit) and any verdict would be based on incomplete
+  # work. A job is terminal once it has recorded an exit code; if it has NOT and its delegate (or
+  # supervisor) process is still live, report non-terminal and return rather than guessing.
+  if [ ! -f "$jd/exit" ]; then
+    local _gp _gs
+    _gp="$(cat "$jd/pid" 2>/dev/null)"; _gs="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+    if { [ -n "$_gp" ] && kill -0 "$_gp" 2>/dev/null; } || { [ -n "$_gs" ] && kill -0 "$_gs" 2>/dev/null; }; then
+      printf 'REAL-FAIL\tjob-not-terminal'; return 0
+    fi
+  fi
   local st rc jcwd=""
   st="$(cat "$jd/status" 2>/dev/null || printf '')"
   rc="$(cat "$jd/exit" 2>/dev/null || printf '')"
   [ -f "$jd/meta.json" ] && have jq && jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
-  [ -n "$jcwd" ] || jcwd="$PWD"
+  # NO `|| jcwd="$PWD"` fallback: if meta.json recorded no .cwd, leave jcwd EMPTY so the false-stall
+  # scan's `[ -d "$jcwd" ]` guard skips it — scanning the ORCHESTRATOR's $PWD would mis-attribute its
+  # commits/writes to the delegate and manufacture a false REUSE-OUTPUT.
 
   # 1. Successful completion -> reuse. Covers `done` (watchdog agrees) and `done?` (checkless
   #    success, a.k.a. completed_unverified). A completed job with a refusal-only (or routing-only)
@@ -5271,7 +5287,58 @@ _classify_job() {
       ;;
   esac
 
-  # 2. Lane-level blocks (switching models on the same lane won't help). Quota/credit scan first
+  # 2. False-stall / usable-work check — RUNS BEFORE the quota scan by design. A job that produced a
+  #    committed, written, or non-refusal deliverable is REUSE-OUTPUT even if its log narrates "429 Too
+  #    Many Requests" / "Retry-After" (a task ABOUT rate limiting, or a transient 429 the delegate
+  #    recovered from). Only a job with NO usable work should fall through to quota classification and
+  #    be re-dispatched. Ordering this AFTER quota discarded real deliverables whenever quota-vocab
+  #    appeared in otherwise-successful output (integration torture reproduced exactly that discard).
+  #    Three independent signals, strongest first:
+  #      a) commits in the job cwd between .startmark and job exit (the deliverable was committed)
+  #      b) file writes newer than .startmark but not newer than job exit (reuses _job_made_writes
+  #         but bounded to the job's own runtime -- post-hoc, an unbounded window would count
+  #         orchestrator commits / editor autosaves / a rerun's writes as the delegate's work)
+  #      c) a non-empty last.txt that is not a refusal/truncation (the deliverable IS the output)
+  #    out.log byte-size is deliberately NOT a signal: 500b of error text is not work.
+  #    The window is bounded by $jd/exit's mtime (the job-end sentinel). If $jd/exit is missing
+  #    (e.g. a stillborn job that never wrote it), skip the FS/commit checks rather than run an
+  #    unbounded scan -- a stillborn job did no work.
+  if [ -f "$jd/.startmark" ] && [ -f "$jd/exit" ] && [ -d "$jcwd" ]; then
+    local _sm_mtime _exit_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
+    _exit_mtime="$(_mtime "$jd/exit" 2>/dev/null)"
+    if [ -n "$_sm_mtime" ] && [ -n "$_exit_mtime" ]; then
+      if command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
+        # Capture to a var first — never `grep -q` on the git pipe: under `set -o pipefail` a
+        # short-circuit read SIGPIPEs `git log` and fails the pipeline even on a real match.
+        local _commits; _commits="$(git -C "$jcwd" log --since="@$_sm_mtime" --until="@$_exit_mtime" --oneline 2>/dev/null)"
+        if [ -n "$_commits" ]; then
+          printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
+        fi
+      fi
+      # Bounded FS scan: files newer than .startmark but NOT newer than $jd/exit. This excludes
+      # any write after the job terminated (orchestrator commits, editor autosaves, a rerun).
+      local _hit
+      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+               \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+               -type f -newer "$jd/.startmark" ! -newer "$jd/exit" -print 2>/dev/null | head -1)"
+      if [ -n "$_hit" ]; then
+        printf 'REUSE-OUTPUT\tfalse-stall:writes'; return 0
+      fi
+    fi
+  fi
+  if [ -s "$jd/last.txt" ]; then
+    # Strip the routing preamble (leading `>>> ` lines) from last.txt. A wedged/timed-out
+    # job's last.txt can contain ONLY the routing preamble (the delegate never produced
+    # output before being killed). Without this guard, 293 bytes of routing noise reads
+    # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
+    # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
+    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
+    if [ -n "$_last_body" ] && ! _confident_fail "$_last_body" >/dev/null 2>&1; then
+      printf 'REUSE-OUTPUT\tfalse-stall:deliverable'; return 0
+    fi
+  fi
+
+  # 3. Lane-level blocks (switching models on the same lane won't help). Quota/credit scan first
   #    because a permission-blocked job can ALSO have quota text in its log from an earlier retry
   #    attempt -- the money gate is the root cause if present.
   #
@@ -5330,49 +5397,6 @@ _classify_job() {
       printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked'
     fi
     return 0
-  fi
-
-  # 3. False-stall: the watchdog killed it (wedged/timeout/failed) but it actually did work.
-  #    Three independent signals, strongest first:
-  #      a) commits in the job cwd between .startmark and job exit (the deliverable was committed)
-  #      b) file writes newer than .startmark but not newer than job exit (reuses _job_made_writes
-  #         but bounded to the job's own runtime -- post-hoc, an unbounded window would count
-  #         orchestrator commits / editor autosaves / a rerun's writes as the delegate's work)
-  #      c) a non-empty last.txt that is not a refusal/truncation (the deliverable IS the output)
-  #    out.log byte-size is deliberately NOT a signal: 500b of error text is not work.
-  #    The window is bounded by $jd/exit's mtime (the job-end sentinel). If $jd/exit is missing
-  #    (e.g. a stillborn job that never wrote it), skip the FS/commit checks rather than run an
-  #    unbounded scan -- a stillborn job did no work.
-  if [ -f "$jd/.startmark" ] && [ -f "$jd/exit" ] && [ -d "$jcwd" ]; then
-    local _sm_mtime _exit_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
-    _exit_mtime="$(_mtime "$jd/exit" 2>/dev/null)"
-    if [ -n "$_sm_mtime" ] && [ -n "$_exit_mtime" ]; then
-      if command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
-        if git -C "$jcwd" log --since="@$_sm_mtime" --until="@$_exit_mtime" --oneline 2>/dev/null | grep -q .; then
-          printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
-        fi
-      fi
-      # Bounded FS scan: files newer than .startmark but NOT newer than $jd/exit. This excludes
-      # any write after the job terminated (orchestrator commits, editor autosaves, a rerun).
-      local _hit
-      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
-               \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
-               -type f -newer "$jd/.startmark" ! -newer "$jd/exit" -print 2>/dev/null | head -1)"
-      if [ -n "$_hit" ]; then
-        printf 'REUSE-OUTPUT\tfalse-stall:writes'; return 0
-      fi
-    fi
-  fi
-  if [ -s "$jd/last.txt" ]; then
-    # Strip the routing preamble (leading `>>> ` lines) from last.txt. A wedged/timed-out
-    # job's last.txt can contain ONLY the routing preamble (the delegate never produced
-    # output before being killed). Without this guard, 293 bytes of routing noise reads
-    # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
-    # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
-    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
-    if [ -n "$_last_body" ] && ! _confident_fail "$_last_body" >/dev/null 2>&1; then
-      printf 'REUSE-OUTPUT\tfalse-stall:deliverable'; return 0
-    fi
   fi
 
   # 4. Real fail: no reusable work, no lane-level block. Surface the watchdog's status + exit

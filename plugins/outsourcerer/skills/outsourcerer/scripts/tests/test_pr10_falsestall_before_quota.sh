@@ -108,6 +108,44 @@ grep -q '_classify_quota_confirm' "$SRC" \
   && ok "false-stall-before-quota fix present: _classify_quota_confirm gates the prose scan" \
   || bad "_classify_quota_confirm not wired into classify"
 
+# ---- case 6: REORDER — a REAL deliverable wins over quota-prose even when the out.log carries a ----
+# GENUINE quota refusal signature. This is the torture repro the PR#10 confirm-gate did NOT fix: the
+# out.log here WOULD classify as quota (bare 429 beside a refusal marker), but last.txt is a usable
+# deliverable that also happens to narrate "429 Too Many Requests". Because the false-stall/deliverable
+# block now runs BEFORE the quota block, the committed/written/non-refusal work is REUSE-OUTPUT, never
+# discarded to RETRY-DIFFERENT-LANE. A reorder-only fix is required; the confirm gate alone cannot see
+# this (the out.log token DOES sit beside a refusal marker).
+w6="$(mkjob deliverable-wins wedged devin)"
+cat > "$JOBS/deliverable-wins/last.txt" <<'EOF'
+# Rate limiter module (delivered)
+
+Implemented a token-bucket limiter that handles the API's "429 Too Many Requests"
+responses with exponential backoff and Retry-After parsing. Working code:
+
+    def handle_429(resp):
+        wait = int(resp.headers.get("Retry-After", "1"))
+        time.sleep(wait); return retry()
+
+Verified against 429 Too Many Requests; recovers cleanly.
+EOF
+cat > "$JOBS/deliverable-wins/out.log" <<'EOF'
+Working the task.
+Error: 429 Too Many Requests -- rate limit exceeded; quota exhausted, upgrade your plan.
+EOF
+rm -f "$JOBS/deliverable-wins/.startmark"   # no in-window writes/commits -> deliverable signal decides
+v6="$(_classify_job deliverable-wins)"
+case "$v6" in
+  RETRY-DIFFERENT-LANE*) bad "case6 REORDER FAILED: real deliverable discarded to lane-block over quota-prose (got: $v6)" ;;
+  REUSE-OUTPUT*)         ok "case6 real deliverable containing '429 Too Many Requests' -> REUSE-OUTPUT (reorder: work wins over quota-prose)" ;;
+  *)                     bad "case6 unexpected verdict: $v6" ;;
+esac
+# Source cross-check: the false-stall/deliverable block must physically precede the quota block.
+_fs_line="$(grep -n 'false-stall:deliverable' "$SRC" | head -1 | cut -d: -f1)"
+_qz_line="$(grep -n 'if \[ -n "\$_quota_hit" \]' "$SRC" | head -1 | cut -d: -f1)"
+{ [ -n "$_fs_line" ] && [ -n "$_qz_line" ] && [ "$_fs_line" -lt "$_qz_line" ]; } \
+  && ok "source order: deliverable block precedes the quota block (line $_fs_line < $_qz_line)" \
+  || bad "source order wrong: deliverable=$_fs_line quota=$_qz_line (deliverable must come first)"
+
 echo "----"
 echo "pr10-falsestall-before-quota: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
