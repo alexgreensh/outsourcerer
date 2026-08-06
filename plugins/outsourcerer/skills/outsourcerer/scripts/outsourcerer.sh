@@ -638,6 +638,34 @@ _devin_quota_refusal_line() {
     | sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g; s/^[[:space:]]+//" | cut -c1-200
 }
 
+# POST-HOC (classify) prose gate for the two regexes above. _DEVIN_QUOTA_RE treats a BARE 402/429
+# and a bare `rate limit` as standalone refusals -- correct when it reads a CAPTURED Devin stderr
+# refusal file (_devin_quota_refusal), WRONG when classify scans a free-prose out.log where a task
+# ABOUT HTTP 429 / rate limiting narrates those very tokens in legitimate output. That misroute
+# discards real work: a wedged job that WROTE a file on a 429-handling task was labelled
+# credit-exhausted because the quota scan ran on prose and returned before the false-stall check.
+# Fix (context-anchoring, the same principle _DEVIN_QUOTA_RE's own comment already applies to money
+# nouns): in the post-hoc path the bare 402/429/rate-limit tokens only count when they co-occur with
+# a real refusal/error marker. The ANCHORED subset below is _DEVIN_QUOTA_RE minus the two bare
+# tokens -- those signatures already carry their own refusal verb and stay trustworthy in prose, so
+# they pass on their own. Keep this subset in sync with _DEVIN_QUOTA_RE when either changes.
+_DEVIN_QUOTA_ANCHORED_RE='0%[[:space:]]*(remaining|left)|payment required|upgrade your plan|insufficient (funds|credits?|balance|acu|quota)|out of (credits?|acu|quota)|no (credits?|acus?)[[:space:]]*(remaining|left)|subscription (expired|inactive|cancell?ed)|(credit|usage|billing|spending|token|plan|acu)[ -]?(limit|cap)|(quota|credits?|acus?|balance|allowance)[[:space:]]+(exceeded|exhausted|depleted|reached)'
+# Refusal/error markers that separate a genuine lane block ("Error: 429 rate limit exceeded") from
+# narration ("add backoff for 429 responses"). Only ever tested against lines that ALREADY matched a
+# quota regex, so it can be generous without leaking into unrelated prose.
+_QUOTA_REFUSAL_CTX_RE='error|fail(ed|ure|s)?|cannot|can.?t|unable|refus|denied?|declin|abort|blocked|exceed|exhaust|deplet|insufficient|required|expired|too many requests|retry[ -]?after|resource_exhausted'
+
+# _classify_quota_confirm <quota-matching-lines> -> rc0 if those lines are a REAL lane refusal (not
+# prose narrating 402/429/rate-limit). A line qualifies via an already-anchored signature, or via a
+# bare token sitting beside a refusal/error marker. Callers pass a var (not a pipe) so `grep` reads
+# it whole -- no `grep -q` short-circuit that could SIGPIPE the upstream under `set -o pipefail`.
+_classify_quota_confirm() {
+  local lines="$1"
+  [ -n "$(printf '%s\n' "$lines" | grep -iE "$_DEVIN_QUOTA_ANCHORED_RE" 2>/dev/null)" ] && return 0
+  [ -n "$(printf '%s\n' "$lines" | grep -iE "$_QUOTA_REFUSAL_CTX_RE" 2>/dev/null)" ] && return 0
+  return 1
+}
+
 # Resolve a user-facing alias to an id the DEVIN CLI accepts. parse_model() stores -m verbatim, so
 # without this a documented alias reaches `devin --model` raw and the job dies at launch with
 # "Unknown model: 'glm'" -- instantly, before any work, which in a fanout kills every member at once.
@@ -5242,14 +5270,26 @@ _classify_job() {
   #    "429" or "rate limit" in its output (e.g. a test report citing an upstream API's 429) without
   #    that being the lane's quota refusal. Quota exhaustion means the job DID NOT complete because
   #    of quota; if the watchdog says it finished, the mention is incidental.
+  #    PROSE GATE: a bare 402/429 or `rate limit` in the out.log tail counts as a lane block only when
+  #    _classify_quota_confirm sees it beside a real refusal/error marker (or an already-anchored quota
+  #    signature). Without this, a task ABOUT HTTP 429 / rate limiting that narrates those tokens in
+  #    legit output is misrouted to credit-exhausted -- and because the quota scan returns before the
+  #    false-stall check below, a wedged job that DID real work has that work discarded. The captured-
+  #    stderr path (_devin_quota_refusal) keeps the bare-token match; only this free-prose scan is gated.
   local _quota_hit=""
   if [ -s "$jd/out.log" ] && case "$st" in done|'done?') false ;; *) true ;; esac; then
-    local _qlines
+    local _qlines _qhit _ghit
     _qlines="$(tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null | grep -avE '^>>> ')"
-    if printf '%s\n' "$_qlines" | grep -qiE "$_DEVIN_QUOTA_RE" 2>/dev/null; then
+    # Capture the quota-signature lines to a var first, then confirm -- never `grep -q` on the pipe
+    # (a short-circuit read can SIGPIPE the upstream under `set -o pipefail`).
+    _qhit="$(printf '%s\n' "$_qlines" | grep -iE "$_DEVIN_QUOTA_RE" 2>/dev/null)"
+    if [ -n "$_qhit" ] && _classify_quota_confirm "$_qhit"; then
       _quota_hit="devin"
-    elif printf '%s\n' "$_qlines" | grep -qiE 'quota.*(exceeded|exhausted|exceeded|depleted|reached|limit)|rate[ -]?limit|RESOURCE_EXHAUSTED|insufficient (funds|credits?|balance)|out of credits?|billing.*(failed|error|declined)|payment required' 2>/dev/null; then
-      _quota_hit="generic"
+    else
+      _ghit="$(printf '%s\n' "$_qlines" | grep -iE 'quota.*(exceeded|exhausted|exceeded|depleted|reached|limit)|rate[ -]?limit|RESOURCE_EXHAUSTED|insufficient (funds|credits?|balance)|out of credits?|billing.*(failed|error|declined)|payment required' 2>/dev/null)"
+      if [ -n "$_ghit" ] && _classify_quota_confirm "$_ghit"; then
+        _quota_hit="generic"
+      fi
     fi
   fi
   if [ -n "$_quota_hit" ]; then
