@@ -133,7 +133,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.6.5"
+OSRC_VERSION="0.6.4"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL

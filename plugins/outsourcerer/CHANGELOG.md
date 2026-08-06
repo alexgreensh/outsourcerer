@@ -2,10 +2,6 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
-## 0.6.5
-
-- **Corrected the Cline lane's cost framing (accuracy fix).** 0.6.4 described the `cline` lane as serving specific models (`deepseek-v4-flash`, `glm-5.2`) "at $0 cash / free". That was wrong: access to open-weight models through Cline is a **ClinePass subscription** (~$9.99/mo) or your own API keys, not free. Removed every "$0 cash"/"free" claim and the hardcoded model snapshot from all user-facing surfaces (doctor, brief, receipts, tier banners, install hints, `SKILL.md`, the lanes reference, README). The lane bills your Cline setup, the Tab tracks the spend, and the model roster + pricing are cline's own (read from your config, never pinned by us). Use `suggest`/`deals` for what is genuinely cheap or free right now, they read each catalog live. Added a regression guard so the free/$0 claim can't return.
-
 ## 0.6.4
 
 - **Parity self-heal: dead skill links repair themselves.** Plugin caches are version-pinned (`.../<plugin>/<version>/skills/...`), so every plugin upgrade deletes the directory an earlier `parity` symlinked to — the Devin skills mirror stayed full while the delegate silently ran without skills the host believed it had (one user hit 59 of 83 dead). `brief` now re-pins dead links to their source's current location on every session, on every host — dependency-free (no devin/jq/network/prompt), silent when healthy, capped on the hot path (`OSRC_BRIEF_HEAL_MAX`, default 25) with the overflow deferred to `doctor --fix`, opt out with `OSRC_BRIEF_NO_HEAL=1`. `doctor --fix` repairs in place and prunes truly-gone links, instead of only advising "Re-run: parity". Re-pin follows the dead link's own plugin lineage (a same-named skill from another plugin can't hijack it) and picks the newest version that actually **contains** the skill (real caches carry non-semver `unknown`/hash siblings that a naive `tail -1` would wrongly pick — `parity`'s net-new linker was fixed for the same class, so plugins like compound-engineering now link at all).
