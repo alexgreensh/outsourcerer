@@ -5588,6 +5588,13 @@ cmd_cancel() {
   local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
   [ -n "$pid" ] && _kill_tree "$pid"
   echo canceled > "$jd/status"; echo "canceled $id"
+  # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
+  # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
+  # Cline's spokes is out of scope; warn so the operator can check for survivors.
+  local _clane; _clane="$(jq -r '.lane // .provider // ""' "$jd/meta.json" 2>/dev/null)"
+  case "$_clane" in
+    cline) echo "  warning: Cline uses detached hub/spoke processes — a spoke may survive this cancel. Check with: pgrep -fl cline" >&2 ;;
+  esac
 }
 
 # cleanup <job-id|fanout-gid> [--force] -> remove a job's (or a whole fanout's) git worktree(s).
@@ -7044,7 +7051,10 @@ _cline_effort() {
 # elsewhere in the output cannot be mis-read as the CLI version. Empty if cline is absent or
 # output is unparseable.
 _cline_version() {
-  local v; v="$(cline --version 2>/dev/null)" || return 0
+  # Bound the external CLI call: a hung `cline --version` would otherwise hang the launch. Same
+  # _timeout wrapper the devin/probe paths use. Still fail-closed — a timeout yields empty output,
+  # which the version gate treats as unparseable (die or bypass via OSRC_CLINE_SKIP_VER_GATE).
+  local v; v="$(_timeout "${OSRC_CLINE_VER_TIMEOUT:-5}" cline --version 2>/dev/null)" || return 0
   # Anchor on the `cline` token, then extract the x.y[.z...] version that follows it.
   # We scan the full output (not just line 1) so a multi-line --version banner with the
   # version on a later line still parses. The anchor on `cline` prevents a build date or
@@ -8341,7 +8351,7 @@ _fallback_disp_lane() {
 }
 
 _fallback_provider_for_lane() {
-  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp) printf '%s' "$1" ;; *) return 1 ;; esac
+  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp|cline) printf '%s' "$1" ;; *) return 1 ;; esac
 }
 
 # _fallback_effective <alias> <model> <lane> -> "model@lane" this candidate would ACTUALLY run as
@@ -8444,7 +8454,7 @@ _route_resolution() {   # <dispatch-lane> <model>
   ROUTE_FALLBACK_ORDER="$lane"
   case "$lane" in
     local) ROUTE_COST_CLASS=local; ROUTE_INTERACTION=local ;;
-    ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp) ROUTE_COST_CLASS=limited ;;
+    ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline) ROUTE_COST_CLASS=limited ;;
     ccor|codexor|claudex) ROUTE_COST_CLASS=credits ;;
     *) die "route resolution is ambiguous for lane '$lane'; refusing to launch" ;;
   esac
@@ -8496,7 +8506,7 @@ _route_provider_default_model() { # Provider-specific route identity, never pars
     local) printf 'local' ;;
     cc|codex) printf 'z-ai/glm-5.2' ;;
     claudex) printf 'gpt-5.6-sol' ;;
-    droid|cursor|hermes|warp) printf '%s-default' "$1" ;;
+    droid|cursor|hermes|warp|cline) printf '%s-default' "$1" ;;
     *) return 1 ;;
   esac
 }

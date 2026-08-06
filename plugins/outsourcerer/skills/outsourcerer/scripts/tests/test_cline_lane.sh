@@ -314,6 +314,39 @@ else
   bad "behavioral: _cline_version did not anchor on 'cline' token (got '$_av', expected 3.0.48)"
 fi
 
+# ============================================================================
+# LAYER 3: ROUTER-SEAM DISPATCH (regression guard for the dead-on-dispatch defect)
+# ============================================================================
+# Every behavioral check above calls delegate_cline DIRECTLY, so 53/53 passed even while dispatch
+# was DEAD: cline was missing from the route cost-class, provider-default-model, and lane-abbrev case
+# arms, so `run --provider cline` died with "unknown provider" / "route resolution ambiguous" long
+# before reaching the lane. Drive the REAL dispatch path via the CLI so any future drop-out of a case
+# arm fails HERE. cline must NOT be on PATH (a clean PATH, no fake stubs) so a router that DOES reach
+# the lane lands on the lane's own "cline CLI not on PATH" error — that error is the proof of dispatch.
+# An earlier no-command `PATH=... _lanes=...` line leaked fake-bin into this shell's PATH globally, so
+# strip it for the seam run (otherwise the fake cline answers and we never see the lane error).
+_SEAM_PATH="${PATH//$SCRIPT_DIR\/fake-bin:/}"; _SEAM_PATH="${_SEAM_PATH//:$SCRIPT_DIR\/fake-bin/}"; _SEAM_PATH="${_SEAM_PATH//$SCRIPT_DIR\/fake-bin/}"
+# --cloud-ack clears the one-time cloud-consent gate (the fresh test $OSRC_HOME has no stored consent)
+# and --wait forces foreground (a non-interactive slow-lane run would otherwise auto-detach to bg and
+# print a job receipt instead of the lane error). Routing (where the dead-lane defect died) runs BEFORE
+# both, so a regressed cline still fails with "unknown provider"/"ambiguous" here regardless.
+_seam_no_m="$( PATH="$_SEAM_PATH" bash "$SRC" run --provider cline --cloud-ack --wait "x" </dev/null 2>&1 || true )"
+case "$_seam_no_m" in
+  *"unknown provider"*|*"route resolution is ambiguous"*|*"route resolution ambiguous"*)
+    bad "router seam (no -m): dispatch died before the lane -> [$_seam_no_m]" ;;
+  *"cline CLI not on PATH"*)
+    ok "router seam: run --provider cline (no -m) reaches the cline lane" ;;
+  *) bad "router seam (no -m): unexpected output -> [$_seam_no_m]" ;;
+esac
+_seam_m="$( PATH="$_SEAM_PATH" bash "$SRC" run --provider cline -m glm --cloud-ack --wait "x" </dev/null 2>&1 || true )"
+case "$_seam_m" in
+  *"unknown provider"*|*"route resolution is ambiguous"*|*"route resolution ambiguous"*)
+    bad "router seam (-m glm): dispatch died before the lane -> [$_seam_m]" ;;
+  *"cline CLI not on PATH"*)
+    ok "router seam: run --provider cline -m glm reaches the cline lane" ;;
+  *) bad "router seam (-m glm): unexpected output -> [$_seam_m]" ;;
+esac
+
 echo
 if [ "$fail" -gt 0 ]; then echo "RESULT: $fail FAIL(S), $pass pass"; exit 1; fi
 echo "RESULT: $pass pass, 0 fail"
