@@ -66,7 +66,10 @@ val="$(_posture_get devin autonomous 2>/dev/null)"
 # stored file must be private and NOT a symlink target we honor
 pf="$OSRC_HOME/lane-posture/devin.autonomous"
 [ -f "$pf" ] && ok "posture stored as a real file" || bad "posture file missing after set"
-mode="$(stat -f '%Lp' "$pf" 2>/dev/null || stat -c '%a' "$pf" 2>/dev/null)"
+# GNU stat (-c) first: on Linux `stat -f '%Lp'` is a filesystem query that can exit 0 with junk,
+# so the BSD form must be the FALLBACK, not the primary, or CI reads a bogus mode. macOS lacks -c
+# (errors to /dev/null) and correctly falls through to the BSD -f form.
+mode="$(stat -c '%a' "$pf" 2>/dev/null || stat -f '%Lp' "$pf" 2>/dev/null)"
 [ "$mode" = "600" ] && ok "posture file is 0600" || bad "posture file mode is '$mode', expected 600"
 
 # symlink defense: a planted symlink must NOT be read as a stored posture
