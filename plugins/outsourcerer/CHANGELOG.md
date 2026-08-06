@@ -4,7 +4,11 @@ All notable changes to the Outsourcerer plugin are documented here.
 
 ## 0.6.4
 
-- **`classify` subcommand — post-hoc false-stall detector for terminated jobs.** `outsourcerer.sh classify <job-id>` reads the job dir and prints a routing label + reason: `REUSE-OUTPUT` (the job did real work despite being killed — don't rerun), `RETRY-DIFFERENT-LANE` (the lane is blocked — quota/credit/permission — switching models won't help), or `REAL-FAIL` (no reusable work, escalate). Add `--json` for a small object. Deterministic, zero-LLM, zero-cost; reads the same job-dir artifacts the runtime watchdog writes. Replaces the manual cwd/out.log inspection an orchestrator had to do after every wedged/timeout/failed job. Classification order: done → quota → permission-blocked → false-stall signals (commits, writes, deliverable) → real-fail. The false-stall FS/commit window is bounded to the job's own runtime (`.startmark` to `$jd/exit` mtime) so post-termination writes don't count. Reviewed by GLM-5.2 and DeepSeek V4 Flash Free (free lanes); 7 findings, all fixed (print-mode dead code, over-broad `>>>` stripping, worktree `.git` as a file, quota regex matching prose, self-contradictory `watchdog:done` label, dead locals, unbounded post-hoc window).
+- **Parity self-heal: dead skill links repair themselves.** Plugin caches are version-pinned (`.../<plugin>/<version>/skills/...`), so every plugin upgrade deletes the directory an earlier `parity` symlinked to — the Devin skills mirror stayed full while the delegate silently ran without skills the host believed it had (one user hit 59 of 83 dead). `brief` now re-pins dead links to their source's current location on every session, on every host — dependency-free (no devin/jq/network/prompt), silent when healthy, capped on the hot path (`OSRC_BRIEF_HEAL_MAX`, default 25) with the overflow deferred to `doctor --fix`, opt out with `OSRC_BRIEF_NO_HEAL=1`. `doctor --fix` repairs in place and prunes truly-gone links, instead of only advising "Re-run: parity". Re-pin follows the dead link's own plugin lineage (a same-named skill from another plugin can't hijack it) and picks the newest version that actually **contains** the skill (real caches carry non-semver `unknown`/hash siblings that a naive `tail -1` would wrongly pick — `parity`'s net-new linker was fixed for the same class, so plugins like compound-engineering now link at all).
+- **New lane: Cline (`--provider cline`).** Cline CLI is a first-class engine lane alongside droid/cursor/hermes/warp. `-m` passes through **verbatim** to cline's own catalog. The `cline` OAuth provider (`cline auth cline`) serves `deepseek/deepseek-v4-flash` and `z-ai/glm-5.2` at **$0 cash** — a genuine free-tier lane with full supervision (bg/fanout/watchdog/ledger/cloud-gate). `run`/`explore` → `--plan` (read-only, **version-gated** ≥ 3.0.36); `edit`/`research`/`yolo` → act mode with `--auto-approve true` (cline has no OS sandbox). `--effort` maps to `--thinking`. Wired into every provider list, the router cost-class + default-model + lane-map seams (so dispatch actually reaches the lane on both the `-m` and no-`-m` paths), the cloud gate, session start, and ledger bucketing; `cline --version` gate is timeout-bounded. **Supervision limitation (disclosed):** cline's hub/spoke can spawn detached spokes that survive a cancel/watchdog kill (same class as codex MCP grandchildren on macOS); `_kill_tree` reaps best-effort and warns.
+- **`classify` subcommand — post-hoc false-stall detector for terminated jobs.** `classify <job-id>` reads the job dir and prints a routing label + reason: `REUSE-OUTPUT` (did real work despite being killed — don't rerun), `RETRY-DIFFERENT-LANE` (lane blocked — quota/credit/permission), or `REAL-FAIL` (escalate). `--json` for a small object. Deterministic, zero-LLM, zero-cost. Classification order: done → **usable work wins (commits / writes / non-refusal deliverable) → quota → permission-blocked → real-fail** — a job that produced a real deliverable is REUSE-OUTPUT even if its log narrates "429 Too Many Requests", so genuine work is never discarded as credit-exhausted (quota is read from `out.log`, the deliverable from `last.txt`; when `meta.json` records no cwd the scan is skipped rather than run against the orchestrator's own repo). The false-stall window is bounded to the job's own runtime (`.startmark` → `$jd/exit` mtime). Hardened against a `grep -q`/pipefail SIGPIPE that dropped the commit signal and an `OSRC_PREAMBLE_MAX` awk-program injection.
+- **Fixed a RED CI on `main`:** `test_devin_org_policy_posture` read the file mode with BSD `stat -f` first, which on Linux is a filesystem query that exits 0 with junk — swapped to GNU `-c` first, BSD fallback.
+- **Torture-room hardening pass.** A full 13-agent multi-phase gauntlet on this release caught and closed 2 CRITICAL (cline dead-on-dispatch; parity net-new skipping non-semver plugins) + several HIGH before ship; conformance suite 81 passed / 0 failed. PR #9 (Cline lane) and PR #10 (classify) by @danikdanik.
 
 ## 0.6.3
 
@@ -132,37 +136,6 @@ All notable changes to the Outsourcerer plugin are documented here.
   a pre-dispatch confirmation gate** (internal continuations skip it).
 - **Hardening:** mutation crash-safety, claim identity, election cleanup, gated external send, and a batch
   of adversarial-audit fixes in the mutation and routing paths.
-## 0.6.4
-
-- **New lane: Cline (`--provider cline`).** Cline CLI (https://github.com/cline/cline) is now a
-  first-class engine lane alongside droid/cursor/hermes/warp. `-m` passes through **verbatim** to
-  cline's own provider/model catalog (the engine owns its models, the alias table never rewrites
-  them). The standout: the `cline` OAuth provider (enabled by `cline auth cline`) currently serves
-  **`deepseek/deepseek-v4-flash`** and **`z-ai/glm-5.2`** at **$0 cash** — no API key, no OpenRouter
-  credits, no Claude/ChatGPT plan-limit spend — so this is a genuine free-tier delegation lane with
-  full supervision (bg/fanout/watchdog/ledger/cloud-gate). Posture is binary and disclosed honestly
-  in the banner: `run`/`explore` → `--plan` (read-only, no edits/commands applied — **version-gated**:
-  requires cline >= 3.0.36, where Plan mode stopped falling back to shell edits; older CLIs are
-  refused on the read-only tier rather than silently trusted); `edit`/`research`/
-  `yolo` → act mode with `--auto-approve true` (cline has **no OS sandbox and no graded approval
-  rung**). The `run` tier uses `--plan` alone (NOT `--auto-approve false`, which blocks ALL tools
-  in non-interactive mode and would paralyze the delegate headlessly — plan mode provides the
-  read-only guarantee while letting tools run). `--effort` maps natively to `--thinking none|low|medium|high|xhigh`. Auto-detected via
-  `command -v cline` (same `have` probe as every other lane) — `doctor` reports install state and
-  **best-effort** reads the configured provider + default model from `~/.cline/data/settings/providers.json`
-  (the schema is based on observed Cline 3.0.x layouts and may change; both reads degrade to "not
-  detected" on an unparseable or reshaped file); `brief`
-  lists `cline=free-oauth` when the CLI is on PATH. Wired into every provider list, the alias-skip
-  guard, `_effective_lane`, the cloud-gate lane set, session start, and the ledger bucketing (fg
-  rows now carry the resolved lane so the Tab's plan-vs-cash split buckets them correctly).
-  **Supervision limitation (disclosed):** Cline's hub/spoke lifecycle can spawn detached spokes
-  that survive a cancel/watchdog kill (same class as codex MCP grandchildren on macOS, which has no
-  setsid/process-group-kill). `_kill_tree` does best-effort reaping; if a cline bg job is cancelled,
-  verify with `ps aux | grep cline` that no spokes linger. `fanout` now preflight-checks engine-lane
-  CLI availability before minting jobs (prevents phantom-job batches on a missing CLI). New
-  `test_cline_lane.sh` locks the effort mapping, flag presence, provider-list coverage,
-  auto-detection, the version gate, and behavioral dispatch via a fake-bin stub.
-
 ## 0.4.23
 
 - **Watcher now reports on a cadence.** `cmd_watch` emits a periodic `OSRC::PROGRESS` status digest
