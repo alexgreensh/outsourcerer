@@ -128,6 +128,36 @@ All notable changes to the Outsourcerer plugin are documented here.
   a pre-dispatch confirmation gate** (internal continuations skip it).
 - **Hardening:** mutation crash-safety, claim identity, election cleanup, gated external send, and a batch
   of adversarial-audit fixes in the mutation and routing paths.
+## 0.6.4
+
+- **New lane: Cline (`--provider cline`).** Cline CLI (https://github.com/cline/cline) is now a
+  first-class engine lane alongside droid/cursor/hermes/warp. `-m` passes through **verbatim** to
+  cline's own provider/model catalog (the engine owns its models, the alias table never rewrites
+  them). The standout: the `cline` OAuth provider (enabled by `cline auth cline`) currently serves
+  **`deepseek/deepseek-v4-flash`** and **`z-ai/glm-5.2`** at **$0 cash** — no API key, no OpenRouter
+  credits, no Claude/ChatGPT plan-limit spend — so this is a genuine free-tier delegation lane with
+  full supervision (bg/fanout/watchdog/ledger/cloud-gate). Posture is binary and disclosed honestly
+  in the banner: `run`/`explore` → `--plan` (read-only, no edits/commands applied — **version-gated**:
+  requires cline >= 3.0.36, where Plan mode stopped falling back to shell edits; older CLIs are
+  refused on the read-only tier rather than silently trusted); `edit`/`research`/
+  `yolo` → act mode with `--auto-approve true` (cline has **no OS sandbox and no graded approval
+  rung**). The `run` tier uses `--plan` alone (NOT `--auto-approve false`, which blocks ALL tools
+  in non-interactive mode and would paralyze the delegate headlessly — plan mode provides the
+  read-only guarantee while letting tools run). `--effort` maps natively to `--thinking none|low|medium|high|xhigh`. Auto-detected via
+  `command -v cline` (same `have` probe as every other lane) — `doctor` reports install state and
+  **best-effort** reads the configured provider + default model from `~/.cline/data/settings/providers.json`
+  (the schema is based on observed Cline 3.0.x layouts and may change; both reads degrade to "not
+  detected" on an unparseable or reshaped file); `brief`
+  lists `cline=free-oauth` when the CLI is on PATH. Wired into every provider list, the alias-skip
+  guard, `_effective_lane`, the cloud-gate lane set, session start, and the ledger bucketing (fg
+  rows now carry the resolved lane so the Tab's plan-vs-cash split buckets them correctly).
+  **Supervision limitation (disclosed):** Cline's hub/spoke lifecycle can spawn detached spokes
+  that survive a cancel/watchdog kill (same class as codex MCP grandchildren on macOS, which has no
+  setsid/process-group-kill). `_kill_tree` does best-effort reaping; if a cline bg job is cancelled,
+  verify with `ps aux | grep cline` that no spokes linger. `fanout` now preflight-checks engine-lane
+  CLI availability before minting jobs (prevents phantom-job batches on a missing CLI). New
+  `test_cline_lane.sh` locks the effort mapping, flag presence, provider-list coverage,
+  auto-detection, the version gate, and behavioral dispatch via a fake-bin stub.
 
 ## 0.4.23
 
