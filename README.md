@@ -5,7 +5,7 @@
 [![Version](https://img.shields.io/github/v/release/alexgreensh/outsourcerer?color=8A5CF6&label=version)](https://github.com/alexgreensh/outsourcerer/releases)
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
-![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin%20·%20Hermes-8A5CF6)
+![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin%20·%20Hermes%20·%20Warp%20·%20Cline-8A5CF6)
 
 ![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
@@ -305,7 +305,7 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 - **Pi** and more harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
-- *Already shipped:* **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* the **Cline** engine lane in v0.6.4 — its `cline auth cline` OAuth provider serves `deepseek-v4-flash` and `glm-5.2` at **$0 cash**, a genuine free delegation lane with full supervision; **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 
