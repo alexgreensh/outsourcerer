@@ -27,12 +27,14 @@ C="$H/.claude/plugins/cache"
 mkdir -p "$H/.config/devin/skills" "$H/.claude/skills/realskill" \
          "$C/mp/myplugin/0.10.0/skills/plugskill" \
          "$C/every/ce/3.21.4/skills/ceplan" "$C/every/ce/unknown" \
-         "$C/pa/pluginA/2.0.0/skills/dupskill" "$C/pb/pluginB/9.9.9/skills/dupskill"
+         "$C/pa/pluginA/2.0.0/skills/dupskill" "$C/pb/pluginB/9.9.9/skills/dupskill" \
+         "$C/py/pluginY/1.0.0/skills/orphan"
 touch "$H/.claude/skills/realskill/SKILL.md" \
       "$C/mp/myplugin/0.10.0/skills/plugskill/SKILL.md" \
       "$C/every/ce/3.21.4/skills/ceplan/SKILL.md" \
       "$C/pa/pluginA/2.0.0/skills/dupskill/SKILL.md" \
-      "$C/pb/pluginB/9.9.9/skills/dupskill/SKILL.md"
+      "$C/pb/pluginB/9.9.9/skills/dupskill/SKILL.md" \
+      "$C/py/pluginY/1.0.0/skills/orphan/SKILL.md"
 # rotted plugin link: pointed at a deleted 0.9.0 -> must re-pin to 0.10.0
 ln -sfn "$C/mp/myplugin/0.9.0/skills/plugskill" "$H/.config/devin/skills/plugskill"
 # THE non-semver repro: link pointed at deleted ce/3.20.0; live version is 3.21.4, and `unknown` (empty)
@@ -40,6 +42,10 @@ ln -sfn "$C/mp/myplugin/0.9.0/skills/plugskill" "$H/.config/devin/skills/plugski
 ln -sfn "$C/every/ce/3.20.0/skills/ceplan" "$H/.config/devin/skills/ceplan"
 # lineage: link belonged to pluginA; pluginB ALSO has a `dupskill`. Must re-pin within pluginA.
 ln -sfn "$C/pa/pluginA/1.0.0/skills/dupskill" "$H/.config/devin/skills/dupskill"
+# NO-HIJACK (step-3 removed): link belonged to pluginX, which is ENTIRELY GONE. pluginY has a same-named
+# `orphan` skill. With the old step-3 global fallback this would HIJACK to pluginY; now it must stay DEAD
+# on brief (repair-only, no cross-plugin hijack) and be pruned only by doctor --fix.
+ln -sfn "$C/px/pluginX/1.0.0/skills/orphan" "$H/.config/devin/skills/orphan"
 # dead top-level link: re-resolve to ~/.claude/skills
 ln -sfn "/nonexistent/realskill" "$H/.config/devin/skills/realskill"
 # truly gone: default(brief) call LEAVES it; prune call removes it
@@ -61,14 +67,21 @@ case "$(readlink "$H/.config/devin/skills/dupskill")" in *pluginA*) ok "lineage:
 [ -e "$H/.config/devin/skills/realskill" ] && ok "dead top-level link re-resolved to ~/.claude/skills" || bad "top-level link still dead"
 [ -e "$H/.config/devin/skills/healthy" ] && ok "healthy link left untouched" || bad "healthy link was clobbered"
 
-# ---- prune is OPT-IN: brief-style call must NOT delete the truly-gone link ----------------------
+# ---- NO-HIJACK: step-3 removed, so an own-plugin-gone link must NOT be re-pinned to another plugin --
+[ -e "$H/.config/devin/skills/orphan" ] && bad "HIJACK: own-plugin-gone link re-pinned to another plugin (step-3 not removed)" || ok "no-hijack: own-plugin-gone link stays DEAD on brief (step-3 removed)"
+case "$(readlink "$H/.config/devin/skills/orphan")" in *pluginY*) bad "HIJACK: orphan re-pinned to pluginY" ;; *) ok "no-hijack: orphan link not repointed at pluginY" ;; esac
+
+# ---- prune is OPT-IN: brief-style call must NOT delete the truly-gone links ----------------------
 [ -L "$H/.config/devin/skills/ghost" ] && ok "brief-style call leaves truly-gone link (never deletes on hot path)" || bad "brief-style call deleted a link (should not prune)"
 printf '%s' "$out" | grep -q 'parity self-heal: re-pinned 4, pruned 0' && ok "brief-style summary: re-pinned 4, pruned 0" || bad "summary wrong: [$out]"
+# SIGNAL (observability): brief left unrepairable dead links (ghost + orphan) -> one advisory line.
+printf '%s' "$out" | grep -q 'dead skill link(s) not repaired on the hot path' && ok "brief signals unrepaired dead links + points at doctor --fix" || bad "no hot-path advisory printed: [$out]"
 
-# ---- explicit prune (doctor --fix / parity) removes the truly-gone link -------------------------
+# ---- explicit prune (doctor --fix / parity) removes ALL truly-gone links (ghost + orphan) --------
 out_p="$(HOME="$H" _parity_repair_deadlinks prune)"
-[ -L "$H/.config/devin/skills/ghost" ] && bad "prune call did NOT remove the truly-gone link" || ok "prune call removes the truly-gone link"
-printf '%s' "$out_p" | grep -q 'pruned 1' && ok "prune summary reports pruned 1" || bad "prune summary wrong: [$out_p]"
+[ -L "$H/.config/devin/skills/ghost" ] && bad "prune call did NOT remove the truly-gone ghost link" || ok "prune call removes the truly-gone ghost link"
+[ -L "$H/.config/devin/skills/orphan" ] && bad "prune call did NOT remove the own-plugin-gone orphan link" || ok "prune call removes the own-plugin-gone orphan link"
+printf '%s' "$out_p" | grep -q 'pruned 2' && ok "prune summary reports pruned 2 (ghost + orphan)" || bad "prune summary wrong: [$out_p]"
 
 # ---- healthy mirror is a silent no-op (zero added tokens on brief's hot path) -------------------
 out2="$(HOME="$H" _parity_repair_deadlinks)"
@@ -97,6 +110,28 @@ mkdir -p "$H/.claude/skills/brandnew"; touch "$H/.claude/skills/brandnew/SKILL.m
 HOME="$H" _parity_repair_deadlinks >/dev/null
 after="$(ls -1 "$H/.config/devin/skills" | wc -l | tr -d ' ')"
 [ "$before" = "$after" ] && ok "heal does not add net-new links (that stays \`parity\`'s job)" || bad "heal added net-new links ($before -> $after)"
+
+# ---- source-level: step-3 global fallback removed + cap present ----------------------------------
+heal_body="$(awk '/^_parity_repair_deadlinks\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC")"
+case "$heal_body" in *'for plug in "$pcache"/*/*/'*) bad "step-3 global cross-plugin search still present in heal (hijack + O(N*M) perf)" ;; *) ok "step-3 global cross-plugin search removed from heal" ;; esac
+case "$heal_body" in *'OSRC_BRIEF_HEAL_MAX'*) ok "hot-path repair cap present (OSRC_BRIEF_HEAL_MAX)" ;; *) bad "no repair cap on the hot path" ;; esac
+case "$heal_body" in *'"$pcache"/*/skills/'*) ok "lineage anchored to the real cache root (\$pcache), not a loose */plugins/cache/*" ;; *) bad "lineage case not anchored to \$pcache" ;; esac
+
+# ---- behavioural: cap bounds the hot path; explicit prune (doctor --fix) is unbounded ------------
+CH="$TMP/caphome"; CC="$CH/.claude/plugins/cache"; CD="$CH/.config/devin/skills"
+mkdir -p "$CD"
+for i in 1 2 3 4; do
+  mkdir -p "$CC/mp/cap$i/2.0.0/skills/cap$i"; touch "$CC/mp/cap$i/2.0.0/skills/cap$i/SKILL.md"
+  ln -sfn "$CC/mp/cap$i/1.0.0/skills/cap$i" "$CD/cap$i"   # dead: points at a deleted 1.0.0
+done
+cap_out="$(HOME="$CH" OSRC_BRIEF_HEAL_MAX=2 _parity_repair_deadlinks)"
+repinned=0; for i in 1 2 3 4; do [ -e "$CD/cap$i" ] && repinned=$((repinned+1)); done
+[ "$repinned" -eq 2 ] && ok "cap: brief handled exactly OSRC_BRIEF_HEAL_MAX=2 dead links, deferred the rest" || bad "cap not enforced (re-pinned $repinned of 4, expected 2)"
+printf '%s' "$cap_out" | grep -q '2 more dead skill link(s) not repaired on the hot path' && ok "cap: deferred remainder is signalled with a doctor --fix pointer" || bad "cap deferral not signalled: [$cap_out]"
+# prune (doctor --fix) is unbounded: it must finish ALL four regardless of the cap.
+HOME="$CH" OSRC_BRIEF_HEAL_MAX=2 _parity_repair_deadlinks prune >/dev/null
+allrep=0; for i in 1 2 3 4; do [ -e "$CD/cap$i" ] && allrep=$((allrep+1)); done
+[ "$allrep" -eq 4 ] && ok "prune (doctor --fix) ignores the cap and repairs all 4" || bad "prune respected the cap (only $allrep of 4 repaired)"
 
 echo "----"
 echo "parity self-heal: $pass passed, $fail failed"

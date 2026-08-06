@@ -62,6 +62,40 @@ for l in "$dst"/*; do [ -L "$l" ] || continue; [ -e "$l" ] && continue; rm -f "$
   && ok "prune removes only the unresolvable links, leaving live ones intact" \
   || bad "prune removed the wrong thing (stale=$stale)"
 
+# ---- CRITICAL: parity's NET-NEW linker must skip non-semver siblings that carry no skills ---------
+# Real caches carry non-semver dirs (`unknown`, content-hash) that sort LAST under _vsort but hold no
+# skills/. The old net-new pick (`ls | _vsort | tail -1`) grabbed that empty dir, so a plugin whose
+# highest SEMVER version has skills (compound-engineering: 3.21.4 + `unknown`) never got linked. The
+# fixed pick walks ascending and keeps the highest version whose skills/ EXISTS.
+# Source-level: the net-new block must no longer end on a bare `| _vsort | tail -1` version pick.
+parity_body="$(awk '/^parity\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC")"
+case "$parity_body" in
+  *'ls -1 "$plug" 2>/dev/null | _vsort | tail -1'*) bad "parity net-new still uses tail -1 (picks empty non-semver dir)" ;;
+  *) ok "parity net-new no longer uses the tail -1 pick" ;;
+esac
+case "$parity_body" in
+  *'[ -d "${plug}${_pv}/skills" ] && ver="$_pv"'*) ok "parity net-new keeps the highest version whose skills/ exists" ;;
+  *) bad "parity net-new does not use the skills-carrying ascending walk" ;;
+esac
+
+# Behavioural: reproduce the exact selection over a compound-engineering-shaped cache and assert the
+# SEMVER dir with skills wins over the alphabetically-last empty `unknown`.
+# (This test does not source the script, so mirror its _vsort: version sort, letters sort after digits.)
+_vsort() { sort -V 2>/dev/null || sort -t. -k1,1n -k2,2n -k3,3n -k4,4n; }
+pc="$TMP/pcache/every/ce"; mkdir -p "$pc/3.21.4/skills/ce-plan" "$pc/unknown"
+: > "$pc/3.21.4/skills/ce-plan/SKILL.md"
+# _vsort orders `3.21.4` before `unknown` (letters sort after digits), so `unknown` is the tail.
+sel=""
+while IFS= read -r _pv; do
+  [ -n "$_pv" ] || continue
+  [ -d "$pc/$_pv/skills" ] && sel="$_pv"
+done <<EOF
+$(ls -1 "$pc" 2>/dev/null | _vsort)
+EOF
+[ "$sel" = "3.21.4" ] \
+  && ok "net-new pick selects 3.21.4 (skills-carrying) over the empty 'unknown' tail" \
+  || bad "net-new pick chose '$sel' instead of 3.21.4"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

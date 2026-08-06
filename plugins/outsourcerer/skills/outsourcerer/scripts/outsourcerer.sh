@@ -9865,30 +9865,35 @@ _parity_repair_deadlinks() {
   local dst="$HOME/.config/devin/skills"
   [ -d "$dst" ] || return 0
   local ucache="$HOME/.claude/skills" pcache="$HOME/.claude/plugins/cache"
-  local repaired=0 pruned=0 l name old src plugroot plug
+  local repaired=0 pruned=0 l name old src plugroot
+  # CAP the hot path: after a mass plugin upgrade the mirror can hold dozens of dead links, and each
+  # re-pin walks its plugin's cache. brief must never spend seconds here (measured 18-21s before the
+  # step-3 removal). Bound the dead links handled per NON-prune call; explicit repair (doctor --fix /
+  # parity, which pass `prune`) stays unbounded. Once the cap is reached we stop and signal the rest.
+  local cap="${OSRC_BRIEF_HEAL_MAX:-25}" handled=0 _deferred=0
   for l in "$dst"/*; do
     [ -L "$l" ] || continue          # only manage symlinks we own; never touch real dirs
     [ -e "$l" ] && continue          # resolves fine — leave it alone
+    if [ "$prune" != "1" ] && [ "$handled" -ge "$cap" ]; then _deferred=1; break; fi
+    handled=$((handled+1))
     name="$(basename "$l")"
     old="$(readlink "$l" 2>/dev/null)"
     src=""
     # 1) Lineage: the dead link pointed into a specific plugin's cache. Re-pin within THAT plugin so a
-    #    same-named skill from an unrelated plugin can never hijack the link.
+    #    same-named skill from an unrelated plugin can never hijack the link. Anchored to the REAL cache
+    #    root ($pcache) — a crafted readlink into some other /tmp/.../plugins/cache/... tree must NOT
+    #    match and be treated as lineage.
     case "$old" in
-      */plugins/cache/*/skills/"$name")
+      "$pcache"/*/skills/"$name")
         plugroot="${old%/*/skills/$name}/"          # .../cache/<mp>/<plugin>/
         src="$(_plugin_skill_src "$plugroot" "$name")" || src="" ;;
     esac
     # 2) A top-level Claude skill of the same name (also the natural target for ~/.claude/skills links).
     [ -n "$src" ] || { [ -f "$ucache/$name/SKILL.md" ] && src="$ucache/$name"; }
-    # 3) Last resort: the original plugin is gone entirely — search all plugins for a same-named skill.
-    if [ -z "$src" ] && [ -d "$pcache" ]; then
-      for plug in "$pcache"/*/*/; do
-        [ -d "$plug" ] || continue
-        src="$(_plugin_skill_src "$plug" "$name")" && [ -n "$src" ] && break
-        src=""
-      done
-    fi
+    # (No step-3 global fallback: searching ALL plugins for a same-named skill violated the
+    #  no-cross-plugin-hijack property AND was the O(N*M) perf detonator on the hot path. If the link's
+    #  OWN plugin is gone entirely, re-pin fails: the link stays dead on brief and is pruned only by an
+    #  explicit `doctor --fix`/`parity` — never hijacked to an unrelated plugin's same-named skill.)
     if [ -n "$src" ]; then
       ln -sfn "$src" "$l" 2>/dev/null && repaired=$((repaired+1))
     elif [ "$prune" = "1" ]; then
@@ -9902,6 +9907,19 @@ _parity_repair_deadlinks() {
   if [ "$repaired" -gt 0 ] || [ "$pruned" -gt 0 ]; then
     printf '  parity self-heal: re-pinned %d, pruned %d dead skill link(s) (plugin upgrade orphaned them)\n' "$repaired" "$pruned"
   fi
+  # SIGNAL (non-prune only): if we hit the cap OR left unrepairable dead links, one observability line
+  # points at the explicit repair. Count what is STILL dead after this pass (covers both cap-deferred
+  # and lineage-unrepairable). A healthy mirror reports nothing.
+  if [ "$prune" != "1" ]; then
+    local _remaining=0 _r
+    for _r in "$dst"/*; do
+      [ -L "$_r" ] || continue
+      [ -e "$_r" ] && continue
+      _remaining=$((_remaining+1))
+    done
+    [ "$_remaining" -gt 0 ] && printf '  parity: %d more dead skill link(s) not repaired on the hot path — run: %s doctor --fix\n' "$_remaining" "$0"
+  fi
+  : "$_deferred"   # cap-deferral flag (remaining count above covers both cap and lineage-unrepairable)
   return 0
 }
 
@@ -9925,10 +9943,20 @@ parity() {
   # LATEST version of each plugin's skills too. Top-level skills win on name collision.
   local pcache="$HOME/.claude/plugins/cache" plinked=0
   if [ -d "$pcache" ]; then
-    local plug ver vdir sk name
+    local plug ver vdir sk name _pv
     for plug in "$pcache"/*/*/; do            # <marketplace>/<plugin>/
       [ -d "$plug" ] || continue
-      ver="$(ls -1 "$plug" 2>/dev/null | _vsort | tail -1)"   # latest semver dir
+      # Newest version that actually carries a skills/ payload. Caches are NOT all semver: 'unknown'
+      # and content-hash dirs sort last under _vsort but hold no skills, so `tail -1` picks an empty
+      # dir and the plugin's skills never link (compound-engineering hit exactly this). Walk ascending,
+      # keep the highest version whose skills/ exists.
+      ver=""
+      while IFS= read -r _pv; do
+        [ -n "$_pv" ] || continue
+        [ -d "${plug}${_pv}/skills" ] && ver="$_pv"
+      done <<EOF
+$(ls -1 "$plug" 2>/dev/null | _vsort)
+EOF
       [ -n "$ver" ] || continue
       vdir="${plug}${ver}/skills"
       [ -d "$vdir" ] || continue
