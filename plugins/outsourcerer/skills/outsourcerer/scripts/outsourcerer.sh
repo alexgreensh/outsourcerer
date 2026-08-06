@@ -3515,6 +3515,15 @@ cmd_brief() {
   _conserve_reco "$limits" "$lanes"
   if mode="$(_mode_read)"; then printf 'driving mode : %s — %s\n' "$mode" "$(_mode_meaning "$mode")"
   else printf -- '---\n'; _mode_menu; fi
+  # Self-heal the Devin skills mirror. `brief` runs at session start on EVERY host, so this closes the
+  # loop the user hit: plugin upgrades orphan version-pinned skill links, doctor detected but never
+  # repaired them, and nothing else ran parity. On this hot path it ONLY re-pins already-dead links to
+  # their source's current location (no `prune` arg -> it never DELETES here, and never adds net-new).
+  # So brief's read-only-in-spirit contract holds: it makes reality match the state brief already
+  # reports, deletes nothing, and prints nothing when the mirror is healthy. Pruning of truly-gone
+  # links is left to the explicit `doctor --fix`/`parity`. Opt out with OSRC_BRIEF_NO_HEAL=1 (e.g. a
+  # strictly read-only audit). Never fatal.
+  [ "${OSRC_BRIEF_NO_HEAL:-0}" = "1" ] || _parity_repair_deadlinks 2>/dev/null || true
 }
 
 # =============================================================================
@@ -9372,6 +9381,90 @@ _warn_unwatched() {
   printf '>>>   An unwatched job is how a wedge becomes a lost hour. Watch it, or cancel it.\n' >&2
 }
 
+# _plugin_skill_src <plugin_version_root/> <skill_name>: print the path to the skill under the NEWEST
+# plugin version that actually contains it, or nothing. Plugin caches are NOT all semver: real ones
+# carry `unknown` and content-hash sibling dirs (e.g. compound-engineering has `3.21.4` alongside
+# `unknown`; context7 has only a hash dir + `unknown`). `unknown` sorts LAST under `sort -V` yet holds
+# zero skills, so a naive `tail -1` picks the empty dir and misses the live skill. We instead walk
+# versions ascending and keep the LAST one that has skills/<name>/SKILL.md — the highest real version
+# that carries the skill. Empty/non-semver dirs are skipped for free (they don't contain the skill).
+_plugin_skill_src() {
+  local plug="$1" name="$2" ver vdir best=""
+  while IFS= read -r ver; do
+    [ -n "$ver" ] || continue
+    vdir="${plug}${ver}/skills/$name"
+    [ -f "$vdir/SKILL.md" ] && best="$vdir"   # ascending -> last match is the newest version present
+  done <<EOF
+$(ls -1 "$plug" 2>/dev/null | _vsort)
+EOF
+  [ -n "$best" ] || return 1
+  printf '%s' "$best"
+}
+
+# _parity_repair_deadlinks [prune]: silent, dependency-free self-heal for the Devin skills mirror.
+# The bug it closes: plugin caches are version-pinned (.../<plugin>/<version>/skills/...), so every
+# plugin upgrade deletes the exact directory an earlier `parity` run symlinked to. The skills dir
+# then stays FULL of links that resolve to nothing — the host believes the delegate is equipped
+# while it silently runs without those skills. `doctor` already DETECTS this; nothing repaired it.
+#
+# Scoped so it is safe to call on the hot path (session brief, all hosts):
+#   - NO need_devin, NO network, NO prompt, NO jq — pure filesystem, safe in bg/CI.
+#   - Repairs ONLY links that are currently DEAD, and re-pins each to its OWN lineage first: the dead
+#     link's readlink tells us which plugin it belonged to, so we re-pin within THAT plugin's newest
+#     version that still carries the skill (never a same-named skill from a different plugin unless the
+#     original plugin is entirely gone). Falls back to a top-level Claude skill, then a global search.
+#   - Does NOT create net-new links — adding skills the host never linked is `parity`'s job, not a
+#     silent side effect of `brief`. It only restores links the host already advertised.
+#   - PRUNE IS OPT-IN. Without the `prune` arg (how `brief` calls it) a link whose source cannot be
+#     found is LEFT ALONE — the hot path never deletes. Only explicit repair (`doctor --fix`, `parity`)
+#     passes `prune`, so a mis-resolved "latest version" can never silently delete a live skill's link.
+#   - Fails safe: every ln/rm is best-effort; an unwritable mirror just leaves the counts at 0.
+# Returns 0 always. Prints a single line ONLY when it actually changed something.
+_parity_repair_deadlinks() {
+  local prune=0; [ "${1:-}" = "prune" ] && prune=1
+  local dst="$HOME/.config/devin/skills"
+  [ -d "$dst" ] || return 0
+  local ucache="$HOME/.claude/skills" pcache="$HOME/.claude/plugins/cache"
+  local repaired=0 pruned=0 l name old src plugroot plug
+  for l in "$dst"/*; do
+    [ -L "$l" ] || continue          # only manage symlinks we own; never touch real dirs
+    [ -e "$l" ] && continue          # resolves fine — leave it alone
+    name="$(basename "$l")"
+    old="$(readlink "$l" 2>/dev/null)"
+    src=""
+    # 1) Lineage: the dead link pointed into a specific plugin's cache. Re-pin within THAT plugin so a
+    #    same-named skill from an unrelated plugin can never hijack the link.
+    case "$old" in
+      */plugins/cache/*/skills/"$name")
+        plugroot="${old%/*/skills/$name}/"          # .../cache/<mp>/<plugin>/
+        src="$(_plugin_skill_src "$plugroot" "$name")" || src="" ;;
+    esac
+    # 2) A top-level Claude skill of the same name (also the natural target for ~/.claude/skills links).
+    [ -n "$src" ] || { [ -f "$ucache/$name/SKILL.md" ] && src="$ucache/$name"; }
+    # 3) Last resort: the original plugin is gone entirely — search all plugins for a same-named skill.
+    if [ -z "$src" ] && [ -d "$pcache" ]; then
+      for plug in "$pcache"/*/*/; do
+        [ -d "$plug" ] || continue
+        src="$(_plugin_skill_src "$plug" "$name")" && [ -n "$src" ] && break
+        src=""
+      done
+    fi
+    if [ -n "$src" ]; then
+      ln -sfn "$src" "$l" 2>/dev/null && repaired=$((repaired+1))
+    elif [ "$prune" = "1" ]; then
+      # Source genuinely gone (skill uninstalled) AND caller opted into pruning. A stale link is worse
+      # than a missing one — it makes the delegate look equipped when it is not.
+      rm -f "$l" 2>/dev/null && pruned=$((pruned+1))
+    fi
+    # Without `prune`: an unresolvable dead link is left in place. `doctor` still flags it; only an
+    # explicit `doctor --fix`/`parity` removes it. The hot path never deletes.
+  done
+  if [ "$repaired" -gt 0 ] || [ "$pruned" -gt 0 ]; then
+    printf '  parity self-heal: re-pinned %d, pruned %d dead skill link(s) (plugin upgrade orphaned them)\n' "$repaired" "$pruned"
+  fi
+  return 0
+}
+
 # ---- parity: sync Claude skills + local MCPs into Devin ----
 parity() {
   need_devin
@@ -9510,6 +9603,10 @@ parity() {
 }
 
 doctor() {
+  # doctor --fix: don't just diagnose the parity mirror — repair dead skill links in place (same
+  # in-place re-pin `brief` runs). Everything else stays read-only diagnosis.
+  local _dfix=0 _a
+  for _a in "$@"; do case "$_a" in --fix) _dfix=1 ;; esac; done
   echo "== outsourcerer doctor (v$OSRC_VERSION) =="
   # OSRC_DOCTOR_OFFLINE=1 skips the LIVE probes (OpenRouter credits, session-limit meter, claudex
   # proxy ping) so `doctor` returns in well under a second. Without it, those network reads can each
@@ -9564,7 +9661,20 @@ doctor() {
         _tot=$((_tot+1)); [ -e "$_l" ] || _dead=$((_dead+1))
       done
       if [ "$_dead" -gt 0 ]; then
-        echo "  parity: $_dead of $_tot linked skill(s) are DEAD links — the delegate cannot see them. Re-run: $0 parity"
+        if [ "$_dfix" = "1" ]; then
+          echo "  parity: $_dead of $_tot linked skill(s) were DEAD — repairing (--fix):"
+          _parity_repair_deadlinks prune || true   # explicit repair: re-pin what we can, prune the rest
+          # Re-count so the readout reflects the repaired state, not the pre-repair one.
+          local _d2=0 _t2=0 _l2
+          for _l2 in "$_pd"/*; do [ -e "$_l2" ] || [ -L "$_l2" ] || continue; _t2=$((_t2+1)); [ -e "$_l2" ] || _d2=$((_d2+1)); done
+          if [ "$_d2" -gt 0 ]; then
+            echo "  parity: $_d2 of $_t2 still dead (source uninstalled and no same-named skill found) — run '$0 parity' to re-sync fully"
+          else
+            echo "  parity: all $_t2 link(s) now resolve"
+          fi
+        else
+          echo "  parity: $_dead of $_tot linked skill(s) are DEAD links — the delegate cannot see them. Repair now: $0 doctor --fix  (or full re-sync: $0 parity)"
+        fi
       else
         echo "  parity: $_tot skill(s) linked into the devin lane, all resolving"
       fi
@@ -10194,7 +10304,7 @@ main() {
     __heartbeat-beacon) _heartbeat_beacon "$@" ;;          # internal: persistent fleet heartbeat leader
     __gencost) _or_gen_cost "$1"; echo ;;                 # internal test: real cost of one generation id
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log
-    doctor)   doctor ;;
+    doctor)   doctor "$@" ;;                               # health probe; `doctor --fix` also repairs dead parity links
     brief)    cmd_brief ;;                                 # session-start handshake: lanes + limits + conserve + mode
     mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
     tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
