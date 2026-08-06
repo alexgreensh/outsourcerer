@@ -5157,6 +5157,201 @@ _job_json() {
      }'
 }
 
+# _classify_job <job-id> -> "ROUTING-LABEL<TAB>reason" on stdout.
+#
+# Post-hoc classifier for a TERMINATED job: was the watchdog's verdict correct, or did the job
+# actually produce work it missed? Answers the question the orchestrator had to answer by hand
+# (26 times in one week of review-router runs): "wedged vs. real fail vs. quota." Deterministic,
+# zero-LLM, zero-cost -- reads the same job-dir artifacts _supervise already writes.
+#
+# Three ROUTING labels (drive the orchestrator's next action); the reason string carries the
+# 5-way diagnostic for humans/logs:
+#   REUSE-OUTPUT         -- the job's deliverable is usable; do not rerun.
+#                          reasons: completed | completed-unverified |
+#                                   false-stall:commits | false-stall:writes |
+#                                   false-stall:deliverable
+#   RETRY-DIFFERENT-LANE -- the LANE is blocked; switching models on it won't help.
+#                          reasons: quota-exhausted | credit-exhausted |
+#                                   wedge:permission-blocked | wedge:print-mode-hang
+#   REAL-FAIL            -- no work done, no lane-level block; escalate to a human.
+#                          reasons: no-job-dir | empty-output | interrupted |
+#                                   watchdog:<status> | exit:<code>
+#
+# Order matters: lane-level blocks are checked BEFORE false-stall, because a permission-blocked
+# job can still have partial writes in the cwd -- those writes are not reusable, the lane is the
+# problem. A `done` job short-circuits to REUSE-OUTPUT immediately.
+#
+# Reuses _job_made_writes (structured tool-call grep + FS check against .startmark) so the
+# post-hoc verdict uses the SAME liveness definition as the runtime watchdog. The FS check here
+# is run with no time pressure, so it sees writes the watchdog's bounded depth-3 scan could miss.
+#
+# _strip_preamble <file> -> file contents with leading `>>> ` routing notices removed.
+# Outsourcerer prepends routing/receipt/notice lines (`>>> [route]`, `>>> devin --model`,
+# etc.) to last.txt when it falls back to copying out.log. These are metadata, not delegate
+# output. But a delegate's OWN output can legitimately contain `>>> ` lines (Python REPL
+# prompts, doctest examples, markdown blockquotes) -- stripping ALL `>>> ` lines would
+# destroy a REPL-transcript deliverable. So strip only from the HEAD: skip leading `>>> `
+# and blank lines, then once a real content line appears, pass everything through verbatim
+# (including later `>>> ` lines). Capped at OSRC_PREAMBLE_MAX (default 12) leading matches:
+# the routing block is ~2-6 lines, so 12 is safe headroom; a pure-`>>>` transcript (every
+# line is a REPL prompt) survives because lines past the cap are passed through verbatim.
+_strip_preamble() {
+  awk 'p==0 && n<'"${OSRC_PREAMBLE_MAX:-12}"' && (/^>>> / || /^[[:space:]]*$/){n++; next} {p=1} p==1' "$1" 2>/dev/null
+}
+
+_classify_job() {
+  local id="$1" jd="$OSRC_JOBS/$1"
+  [ -d "$jd" ] || { printf 'REAL-FAIL\tno-job-dir'; return 0; }
+  local st rc jcwd=""
+  st="$(cat "$jd/status" 2>/dev/null || printf '')"
+  rc="$(cat "$jd/exit" 2>/dev/null || printf '')"
+  [ -f "$jd/meta.json" ] && have jq && jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
+  [ -n "$jcwd" ] || jcwd="$PWD"
+
+  # 1. Successful completion -> reuse. Covers `done` (watchdog agrees) and `done?` (checkless
+  #    success, a.k.a. completed_unverified). A completed job with a refusal-only (or routing-only)
+  #    last.txt is NOT a success -- fall through to REAL-FAIL. _confident_fail returns 0 + prints a
+  #    reason on a deterministic reject; we treat that as REAL-FAIL, not REUSE-OUTPUT.
+  case "$st" in
+    done|'done?')
+      # Strip the routing preamble (leading `>>> ` lines) from last.txt. A completed job
+      # whose last.txt is ONLY routing preamble (delegate produced no real output) is NOT
+      # a success -- fall through. Uses _strip_preamble (head-only) so a deliverable that
+      # contains `>>> ` lines in its body (Python REPL, doctests) is preserved.
+      local _done_body; _done_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
+      if [ -n "$_done_body" ] && ! _confident_fail "$_done_body" >/dev/null 2>&1; then
+        if [ "$st" = "done" ]; then printf 'REUSE-OUTPUT\tcompleted'
+        else printf 'REUSE-OUTPUT\tcompleted-unverified'; fi
+        return 0
+      fi
+      # else: empty/refusal last.txt -- fall through to REAL-FAIL
+      ;;
+  esac
+
+  # 2. Lane-level blocks (switching models on the same lane won't help). Quota/credit scan first
+  #    because a permission-blocked job can ALSO have quota text in its log from an earlier retry
+  #    attempt -- the money gate is the root cause if present.
+  #
+  #    SCOPE: scan only the TAIL of out.log (a quota failure lands at the END, as the delegate's
+  #    final error) and skip lines starting with `>>> ` (outsourcerer's own routing/receipt/notice
+  #    prefix -- e.g. ">>> [receipt] $0 cash, spends your Devin plan limits" contains "plan limits"
+  #    and would false-positive without this guard). _DEVIN_QUOTA_RE was built for captured stderr,
+  #    not the full out.log; the tail + prefix guards adapt it to post-hoc use without weakening it.
+  #
+  #    STATUS GATE: skip this branch entirely when status=done/done? -- a COMPLETED job may mention
+  #    "429" or "rate limit" in its output (e.g. a test report citing an upstream API's 429) without
+  #    that being the lane's quota refusal. Quota exhaustion means the job DID NOT complete because
+  #    of quota; if the watchdog says it finished, the mention is incidental.
+  local _quota_hit=""
+  if [ -s "$jd/out.log" ] && case "$st" in done|'done?') false ;; *) true ;; esac; then
+    local _qlines
+    _qlines="$(tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null | grep -avE '^>>> ')"
+    if printf '%s\n' "$_qlines" | grep -qiE "$_DEVIN_QUOTA_RE" 2>/dev/null; then
+      _quota_hit="devin"
+    elif printf '%s\n' "$_qlines" | grep -qiE 'quota.*(exceeded|exhausted|exceeded|depleted|reached|limit)|rate[ -]?limit|RESOURCE_EXHAUSTED|insufficient (funds|credits?|balance)|out of credits?|billing.*(failed|error|declined)|payment required' 2>/dev/null; then
+      _quota_hit="generic"
+    fi
+  fi
+  if [ -n "$_quota_hit" ]; then
+    # Distinguish plan-quota (Devin free-tier, wait/reset) from paid-credit exhaustion by whether
+    # the lane is a free-tier lane. Both route the same way; the distinction is for the human.
+    local _lane; _lane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
+    case "$_lane" in
+      devin|dv) printf 'RETRY-DIFFERENT-LANE\tquota-exhausted' ;;
+      *)        printf 'RETRY-DIFFERENT-LANE\tcredit-exhausted' ;;
+    esac
+    return 0
+  fi
+  if [ "$st" = "permission-blocked" ]; then
+    # The supervisor never writes a `reason` file for permission-blocked jobs (both abort paths
+    # write the message to stderr -> out.log, not to $jd/reason). So $reason is always empty here
+    # and the old `case "$reason" in *print-mode*` never matched -- wedge:print-mode-hang was dead
+    # code. Scan out.log tail for the same assembled needle the runtime watchdog uses
+    # (_printmode_needle) so the post-hoc verdict stays consistent with the runtime detection.
+    if [ -s "$jd/out.log" ] && tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null \
+         | grep -aq "$(_printmode_needle)"; then
+      printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang'
+    else
+      printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked'
+    fi
+    return 0
+  fi
+
+  # 3. False-stall: the watchdog killed it (wedged/timeout/failed) but it actually did work.
+  #    Three independent signals, strongest first:
+  #      a) commits in the job cwd between .startmark and job exit (the deliverable was committed)
+  #      b) file writes newer than .startmark but not newer than job exit (reuses _job_made_writes
+  #         but bounded to the job's own runtime -- post-hoc, an unbounded window would count
+  #         orchestrator commits / editor autosaves / a rerun's writes as the delegate's work)
+  #      c) a non-empty last.txt that is not a refusal/truncation (the deliverable IS the output)
+  #    out.log byte-size is deliberately NOT a signal: 500b of error text is not work.
+  #    The window is bounded by $jd/exit's mtime (the job-end sentinel). If $jd/exit is missing
+  #    (e.g. a stillborn job that never wrote it), skip the FS/commit checks rather than run an
+  #    unbounded scan -- a stillborn job did no work.
+  if [ -f "$jd/.startmark" ] && [ -f "$jd/exit" ] && [ -d "$jcwd" ]; then
+    local _sm_mtime _exit_mtime; _sm_mtime="$(_mtime "$jd/.startmark" 2>/dev/null)"
+    _exit_mtime="$(_mtime "$jd/exit" 2>/dev/null)"
+    if [ -n "$_sm_mtime" ] && [ -n "$_exit_mtime" ]; then
+      if command -v git >/dev/null 2>&1 && [ -e "$jcwd/.git" ]; then
+        if git -C "$jcwd" log --since="@$_sm_mtime" --until="@$_exit_mtime" --oneline 2>/dev/null | grep -q .; then
+          printf 'REUSE-OUTPUT\tfalse-stall:commits'; return 0
+        fi
+      fi
+      # Bounded FS scan: files newer than .startmark but NOT newer than $jd/exit. This excludes
+      # any write after the job terminated (orchestrator commits, editor autosaves, a rerun).
+      local _hit
+      _hit="$(find "$jcwd" -maxdepth "${OSRC_FS_PROGRESS_DEPTH:-3}" \
+               \( -name .git -o -name node_modules -o -name .venv -o -name target -o -name dist \) -prune -o \
+               -type f -newer "$jd/.startmark" ! -newer "$jd/exit" -print 2>/dev/null | head -1)"
+      if [ -n "$_hit" ]; then
+        printf 'REUSE-OUTPUT\tfalse-stall:writes'; return 0
+      fi
+    fi
+  fi
+  if [ -s "$jd/last.txt" ]; then
+    # Strip the routing preamble (leading `>>> ` lines) from last.txt. A wedged/timed-out
+    # job's last.txt can contain ONLY the routing preamble (the delegate never produced
+    # output before being killed). Without this guard, 293 bytes of routing noise reads
+    # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
+    # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
+    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
+    if [ -n "$_last_body" ] && ! _confident_fail "$_last_body" >/dev/null 2>&1; then
+      printf 'REUSE-OUTPUT\tfalse-stall:deliverable'; return 0
+    fi
+  fi
+
+  # 4. Real fail: no reusable work, no lane-level block. Surface the watchdog's status + exit
+  #    code so the human can decide whether to rerun on a different lane or escalate.
+  #    done/done? reaching here (empty/refusal last.txt, no writes, no commits) is a degenerate
+  #    completed job -- label it explicitly rather than the self-contradictory "watchdog:done".
+  case "$st" in
+    done|'done?') printf 'REAL-FAIL\tempty-output' ;;
+    interrupted)  printf 'REAL-FAIL\tinterrupted' ;;
+    '')           printf 'REAL-FAIL\texit:%s' "${rc:-unknown}" ;;
+    *)            printf 'REAL-FAIL\twatchdog:%s' "$st" ;;
+  esac
+}
+
+# cmd_classify <job-id> -> prints "ROUTING-LABEL<TAB>reason" for a terminated job.
+# The orchestrator reads column 1 to decide its next action; humans/logs read both.
+# Add --json for a small object: {"label":..., "reason":..., "job_id":...}.
+cmd_classify() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "classify needs a job id"
+  [ "$id" = "--json" ] && die "classify needs a job id (try: classify <id> [--json])"
+  local want_json=0
+  [ "${2:-}" = "--json" ] && want_json=1
+  local out; out="$(_classify_job "$id")"
+  if [ "$want_json" = "1" ]; then
+    have jq || die "classify --json needs jq"
+    local lbl rsn; lbl="${out%%$'\t'*}"; rsn="${out#*$'\t'}"
+    [ "$lbl" = "$rsn" ] && rsn=""  # no tab -> no reason
+    jq -nc --arg id "$id" --arg lbl "$lbl" --arg rsn "$rsn" '{job_id:$id, label:$lbl, reason:$rsn}'
+  else
+    printf '%s\n' "$out"
+  fi
+}
+
 cmd_status() {
   _mark_watched "${1:-}"
   local id="${1:-}"
@@ -10210,6 +10405,7 @@ main() {
     crew)        cmd_crew "$@" ;;                          # transactional write-swarm: fanout --worktree edit -> grade -> revert-or-promote
     loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
+    classify)    cmd_classify "$@" ;;                       # post-hoc verdict: REUSE-OUTPUT | RETRY-DIFFERENT-LANE | REAL-FAIL
     rundown)     cmd_rundown "$@" ;;                       # refresh discovery, then render the fleet digest
     bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
     watch)       cmd_watch "$@" ;;                         # poll a job until terminal (or --for N)
@@ -10243,7 +10439,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
   esac
 }
 main "$@"

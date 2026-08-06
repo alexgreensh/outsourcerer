@@ -47,6 +47,54 @@ a terminal state. Terminals: `done` · `done?` · `blocked` · `permission-block
   records an actionable reason; re-run in the foreground (`--wait`) or a shell that allows background
   processes. A stillborn/meta-less job still appears in `status --json` (never silently dropped).
 
+## Post-hoc classification (classify)
+
+After a job terminates — especially a `wedged`/`timeout`/`failed` one — the orchestrator needs to
+decide: is the output reusable, is the lane dead, or did nothing happen? `classify` answers that
+deterministically, reading the same job-dir artifacts the watchdog wrote:
+
+```
+outsourcerer.sh classify <job-id>           # -> ROUTING-LABEL<TAB>reason
+outsourcerer.sh classify <job-id> --json    # -> {"job_id":..., "label":..., "reason":...}
+```
+
+Three routing labels (the orchestrator reads column 1 for its next action); the reason string
+carries the diagnostic for humans/logs:
+
+| Label | Action | Reasons |
+|---|---|---|
+| `REUSE-OUTPUT` | Use the job output; do not rerun | `completed`, `completed-unverified`, `false-stall:commits`, `false-stall:writes`, `false-stall:deliverable` |
+| `RETRY-DIFFERENT-LANE` | Switch lanes; same-lane model swap will not help | `quota-exhausted`, `credit-exhausted`, `wedge:permission-blocked`, `wedge:print-mode-hang` |
+| `REAL-FAIL` | No reusable work; escalate to human | `no-job-dir`, `empty-output`, `interrupted`, `watchdog:<status>`, `exit:<code>` |
+
+**Classification order** (strongest first):
+1. `done`/`done?` with a real deliverable in last.txt (not a refusal, not just routing preamble) → `REUSE-OUTPUT`.
+2. Lane-level block: quota/credit signature in out.log tail, or `permission-blocked` status → `RETRY-DIFFERENT-LANE`.
+3. False-stall: the watchdog killed it but it did work — commits between `.startmark` and `$jd/exit`, file writes in the same window, or a non-refusal last.txt → `REUSE-OUTPUT`.
+4. None of the above → `REAL-FAIL`.
+
+**Bounded post-hoc window.** The false-stall FS/commit checks are bounded to the job's own runtime
+(`.startmark` to `$jd/exit` mtime). Without this bound, any write/commit after job termination — an
+orchestrator committing a fix, an editor autosave, a rerun's writes — would be counted as the
+delegate's work. If `$jd/exit` is missing (stillborn job), the FS/commit checks are skipped entirely.
+
+**Quota scan scoping.** Scans only the tail of out.log (default 200 lines, `OSRC_CLASSIFY_TAIL`),
+with `>>> `-prefixed routing lines stripped, and is skipped entirely for `done`/`done?` jobs — a
+completed job may mention "429" or "rate limit" in its output (a test report citing an upstream API)
+without that being the lane's quota refusal. The generic (non-Devin) regex is tightened to
+refusal-context forms to avoid matching prose.
+
+**Routing preamble stripping.** last.txt may contain only the routing preamble (`>>> [route]…`) if
+the delegate produced no output before being killed. `_strip_preamble` skips leading `>>> ` and
+blank lines (capped at `OSRC_PREAMBLE_MAX`, default 12 — the routing block is ~2-6 lines), then
+passes everything through verbatim. A pure-`>>>` transcript (Python REPL, doctests) survives because
+lines past the cap are preserved.
+
+**Print-mode detection.** The supervisor never writes a `reason` file for `permission-blocked` jobs
+(both abort paths write to stderr → out.log). `classify` scans out.log tail for `_printmode_needle`
+— the same assembled needle the runtime watchdog uses — to distinguish `wedge:print-mode-hang` from
+`wedge:permission-blocked`.
+
 ## Cloud gate + one-time consent
 
 Every cloud lane (devin/cc/codex/native/gemini/droid/cursor) runs two independent protections
