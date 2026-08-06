@@ -80,6 +80,11 @@
 #                     no advise scoring, no session mode.
 #   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
 #                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
+#   cline             Cline CLI (https://github.com/cline/cline). Engine lane: -m passes through
+#                     verbatim to cline's own provider/model catalog. The FREE `cline` OAuth provider
+#                     (enabled by `cline auth cline`) serves deepseek-v4-flash + glm-5.2 at $0 cash.
+#                     Posture is binary: --plan = read-only, default act mode auto-approves all tools
+#                     (no OS sandbox, no graded rung); reasoning effort maps to --thinking.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
 # Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
 # hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
@@ -574,7 +579,7 @@ parse_model() {
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1001,7 +1006,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|hermes|warp|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|warp|cline|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -1413,7 +1418,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -3237,6 +3242,7 @@ _ready_lanes() {
   have claude && lanes="$lanes claude=native"
   have droid && lanes="$lanes droid=byok"
   have cursor-agent && lanes="$lanes cursor=subscription"
+  have cline && lanes="$lanes cline=free-oauth"
   _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
   printf '%s\n' "${lanes# }"
 }
@@ -4667,7 +4673,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -4935,7 +4941,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -6227,6 +6233,39 @@ $body"
     PROVIDER="$_cloud_prov" _bg_cloud_preack "${_pk[@]}"
   fi
 
+  # DISPATCHABILITY PREFLIGHT for engine lanes (droid/cursor/hermes/warp/cline): these lanes
+  # require their CLI on PATH. Without this check, fanout mints jobs that fail in the detached
+  # child (the delegate's `have <cli> || die` fires after launch), producing a batch of phantom
+  # jobs the waiter hangs on. bg has a full route preflight (OSRC_PREFLIGHT=1); fanout does the
+  # lighter `have <cli>` check here since engine lanes are provider==lane and the CLI is the only
+  # dispatchability gate. Local/native lanes (devin/cc/codex/gemini/claudex/local) have their own
+  # auth/credential gates that the bg route preflight covers on the child side.
+  #
+  # CRITICAL: provider name != CLI binary name for two lanes (must match route_delegate's probes):
+  #   cursor → cursor-agent (or agent fallback)
+  #   warp   → oz
+  # Mapping provider==CLI directly would false-positive on warp/cursor (blocks working installs)
+  # and false-negative on cursor (a `cursor` shim can exist while cursor-agent is absent).
+  local _dp_prov _dp_cli _pi
+  for _pi in "${!labels[@]}"; do
+    _pep="${g_prov:-${a_prov[$_pi]}}"; _dp_prov="${_pep:-$PROVIDER}"
+    case "$_dp_prov" in
+      droid)  _dp_cli="droid" ;;
+      cursor) _dp_cli="cursor-agent" ;;
+      hermes) _dp_cli="hermes" ;;
+      warp)   _dp_cli="oz" ;;
+      cline)  _dp_cli="cline" ;;
+      *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
+    esac
+    if ! have "$_dp_cli"; then
+      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate)
+      if [ "$_dp_prov" = "cursor" ] && have agent && agent --help 2>/dev/null | grep -qi cursor; then
+        continue
+      fi
+      die "fanout: lane '$_dp_prov' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
+    fi
+  done
+
   local i jid em ee et ep jprov rtag
   local -a jfwd=(); local _fail=0 _ok=0
   for i in "${!labels[@]}"; do
@@ -6275,7 +6314,7 @@ _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
     gm) disp=gmnative ;;
     dv) disp=devin ;;
     or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
-    droid|cursor|hermes|warp|claudex) disp="$elane" ;;
+    droid|cursor|hermes|warp|cline|claudex) disp="$elane" ;;
     *) disp="${tlane:-$PROVIDER}" ;;
   esac
   if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
@@ -6966,6 +7005,136 @@ delegate_warp() {
   return "$rc"
 }
 
+# =============================================================================
+# CLINE LANE (Cline CLI, https://github.com/cline/cline). Engine lane: -m
+# passes through VERBATIM to cline's own provider/model catalog (the user's
+# configured Cline account, incl. the FREE `cline` OAuth provider which currently
+# serves deepseek-v4-flash and glm-5.2 at $0 cash). Cloud lane (Cline's backend +
+# the model API) -> full cloud gate applies. Billing: your Cline plan / the
+# provider keys configured in ~/.cline (the free `cline` provider is OAuth, $0).
+#
+# Cline exposes a BINARY posture, not graded autonomy: `--plan` is read-only (no
+# edits/commands applied), and the default "act" mode auto-approves ALL tools
+# (`--auto-approve` defaults to true). There is no OS sandbox and no middle
+# approval rung, so edit/research/yolo all map to act mode and the trade is
+# disclosed in the posture banner, never silent. Reasoning effort maps natively
+# to `--thinking` (none|low|medium|high|xhigh).
+#
+# SUPERVISION LIMITATION (disclosed, not silently assumed): Cline's hub/spoke
+# lifecycle can spawn detached child processes (the hub manages spokes that may
+# be reparented to PID 1). _kill_tree walks the process tree via pgrep/ps and
+# signals deepest-first, which reaps the direct tree reliably. But if Cline's
+# hub detaches spokes outside the delegate's process tree, those orphans can
+# outlive a cancel/watchdog kill. This is the same class of limitation as codex's
+# MCP grandchildren on macOS (no setsid/process-group-kill). The watchdog and
+# cancel path do their best-effort reaping via _kill_tree; surviving orphaned
+# cline spokes are a known limitation, not a silent gap. If a cline bg job is
+# cancelled, verify with `ps aux | grep cline` that no spokes linger.
+# =============================================================================
+
+# _cline_effort <ours> -> cline --thinking value. Ours: minimal..max.
+_cline_effort() {
+  case "$1" in minimal) echo "none" ;; low) echo "low" ;; medium) echo "medium" ;;
+    high) echo "high" ;; xhigh|max) echo "xhigh" ;; *) echo "" ;; esac
+}
+
+# _cline_version -> echo the numeric version string from `cline --version` (e.g. "3.0.48"), or empty.
+# Cline's --version output format is "cline 3.0.48" (name + space + semver). We anchor on the
+# `cline` token and extract the version that follows it, so a build date or API version printed
+# elsewhere in the output cannot be mis-read as the CLI version. Empty if cline is absent or
+# output is unparseable.
+_cline_version() {
+  local v; v="$(cline --version 2>/dev/null)" || return 0
+  # Anchor on the `cline` token, then extract the x.y[.z...] version that follows it.
+  # We scan the full output (not just line 1) so a multi-line --version banner with the
+  # version on a later line still parses. The anchor on `cline` prevents a build date or
+  # API version on an earlier line from being mis-read as the CLI version.
+  printf '%s' "$v" | grep -oE 'cline[[:space:]]+[0-9]+(\.[0-9]+)+' | grep -oE '[0-9]+(\.[0-9]+)+' | head -1
+}
+
+# _ver_ge <installed> <minimum> -> return 0 if installed >= minimum, 1 otherwise.
+# Uses sort -V (portable: the engine probes for it at load time and falls back to numeric field sort).
+# Both args must be dotted-numeric version strings. Empty/missing installed -> return 1 (fail closed).
+_ver_ge() {
+  local inst="$1" min="$2"
+  [ -n "$inst" ] || return 1
+  [ -n "$min" ] || return 1
+  # sort -V orders oldest-first; if the installed version is the last line, it's >= the minimum.
+  local last; last="$(printf '%s\n%s\n' "$min" "$inst" | _vsort | tail -1)"
+  [ "$last" = "$inst" ]
+}
+
+# Minimum cline version that enforces --plan as genuinely read-only. Pre-3.0.36, Cline's Plan mode
+# could fall back to shell edits (per Cline's changelog), so run/explore (advertised read-only) could
+# mutate on an older CLI. Below this version the --plan guarantee is asserted, not verified.
+_CLINE_MIN_PLAN_VER="3.0.36"
+
+delegate_cline() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline."
+  # Cline posture: --plan = read-only (no edits/commands applied, but tools auto-approved so they
+  # RUN in non-interactive mode — --auto-approve false would block ALL tools headlessly); default
+  # act mode auto-approves all tools (--auto-approve defaults true). No OS sandbox, no graded rung.
+  local pflag=() posture
+  case "$tier" in
+    auto)
+      # VERSION GATE: --plan is only a verified read-only guarantee on cline >= 3.0.36. On an older
+      # CLI, Plan mode could fall back to shell edits (Cline changelog), so run/explore (advertised
+      # read-only) could silently mutate. Fail CLOSED: refuse the read-only tier on an unverified
+      # CLI rather than assert a guarantee we cannot prove. The user can upgrade cline, or use a
+      # mutating tier (edit/research/yolo) which is honestly labelled as mutating.
+      #
+      # OSRC_CLINE_SKIP_VER_GATE=1 bypasses BOTH failure modes (below-min AND unparseable). It is a
+      # trust-boundary escape hatch: the user asserts their CLI is safe for --plan despite the gate.
+      # The banner honestly labels this as "ASSERTED (version gate skipped)", not "verified".
+      local _cv; _cv="$(_cline_version)"
+      local _gate_bypassed=0
+      if [ -n "$_cv" ] && ! _ver_ge "$_cv" "$_CLINE_MIN_PLAN_VER"; then
+        if [ "${OSRC_CLINE_SKIP_VER_GATE:-0}" = "1" ]; then
+          _gate_bypassed=1
+        else
+          die "cline lane: run/explore (read-only --plan) requires cline >= $_CLINE_MIN_PLAN_VER (Plan mode could fall back to shell edits on older versions). Installed: cline ${_cv:-unknown}. Upgrade: npm i -g cline, use a mutating tier (edit/research/yolo) which is honestly labelled as mutating, or set OSRC_CLINE_SKIP_VER_GATE=1 to bypass if you are certain your cline is safe for --plan."
+        fi
+      fi
+      # If _cv is empty (version unparseable), we cannot verify the gate. Fail closed here too —
+      # an unparseable version is not a verified version, and the read-only guarantee is asserted,
+      # not verified.
+      if [ -z "$_cv" ] && [ "${OSRC_CLINE_SKIP_VER_GATE:-0}" != "1" ]; then
+        die "cline lane: cannot parse cline version from 'cline --version' — cannot verify the --plan read-only guarantee (requires cline >= $_CLINE_MIN_PLAN_VER). Set OSRC_CLINE_SKIP_VER_GATE=1 to bypass if you are certain your cline is >= $_CLINE_MIN_PLAN_VER, or use a mutating tier."
+      fi
+      [ -z "$_cv" ] && _gate_bypassed=1
+      if [ "$_gate_bypassed" = "1" ]; then
+        pflag=(--plan); posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless; ASSERTED cline >= $_CLINE_MIN_PLAN_VER — version gate skipped via OSRC_CLINE_SKIP_VER_GATE=1, not verified)"
+      else
+        pflag=(--plan); posture="READ-ONLY (--plan: no edits or commands applied; tools auto-approved so they run headless; verified cline >= $_CLINE_MIN_PLAN_VER)"
+      fi ;;
+    accept-edits) pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true: edits + commands auto-applied)" ;;
+    autonomous)   pflag=(--auto-approve true);         posture="MUTATING (act mode, --auto-approve true; cline has no separate OS-sandbox exec mode)" ;;
+    dangerous)    pflag=(--auto-approve true);         posture="DANGER (act mode, --auto-approve true: all tools auto-approved, no sandbox)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  # Engine lane: -m passes through verbatim (Cline owns its provider/model catalog; a
+  # "provider/model" string is accepted by -m directly, e.g. deepseek/deepseek-v4-flash).
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(-m "$id"); else id="(cline default/configured)"; fi
+  local eff=()
+  if [ -n "$EFFORT" ]; then local ce; ce="$(_cline_effort "$EFFORT")"
+    [ -n "$ce" ] && { eff=(--thinking "$ce"); printf '>>> [effort] reasoning=%s (native: cline --thinking %s)\n' "$EFFORT" "$ce" >&2; }; fi
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-cline}" "$task" "$ttier")"
+  _tier_banner "cline (Cline CLI)" "$id" "$ttier" "$posture, bills your Cline plan / the keys in ~/.cline (the 'cline' OAuth provider is FREE: deepseek-v4-flash + glm-5.2 at \$0 cash)"
+  local rc=0
+  cline ${pflag[@]+"${pflag[@]}"} ${mflag[@]+"${mflag[@]}"} ${eff[@]+"${eff[@]}"} "$wrapped" || rc=$?
+  # Pass the resolved lane ("cline") as the 7th arg so the Tab's plan-vs-cash split buckets
+  # foreground cline runs correctly. Without it, fg rows carry no .lane field and are
+  # misbucketed as cash (bg rows pass the lane via run_job; fg rows must pass it here).
+  record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task" "" "cline"
+  printf '>>> [receipt] ran on YOUR cline setup (Cline plan / the provider configured in ~/.cline; the free `cline` OAuth provider serves deepseek-v4-flash + glm-5.2 at \$0 cash), no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
 cmd_image_codex() {
   local prompt="$1" out="$2" ttier="$3"
   have codex || die "codex CLI not on PATH (needed for the codex/gpt-image backend)"
@@ -7331,7 +7500,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
-    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|claudex) return 0 ;;
+    ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline|claudex) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -8416,7 +8585,7 @@ route_delegate() {
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -8442,7 +8611,7 @@ route_delegate() {
   fi
 
   local disp="" _or_autoroute_note="" _or_credit_state=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
@@ -8451,6 +8620,7 @@ route_delegate() {
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
+      cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline." ;;
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -8513,7 +8683,7 @@ route_delegate() {
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
       gemini|gm) disp=gmnative ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local)" ;;
     esac
   fi
 
@@ -8610,6 +8780,7 @@ route_delegate() {
       cursor)   delegate_cursor   "$tier" ;;
       hermes)   delegate_hermes   "$tier" ;;
       warp)     delegate_warp     "$tier" ;;
+      cline)    delegate_cline    "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
@@ -8950,6 +9121,30 @@ _session_launch_adapter() {
         printf '%s\n' "$chat_help" | grep -Eq -- '--model([ =]|$)' \
           || _session_launch_error "$provider" "chat help does not advertise a model override"
         SESSION_LAUNCH+=("--model" "$MODEL")
+      fi
+      ;;
+    cline)
+      # Cline's interactive REPL is bare `cline`; the one-shot/headless path is driven by --plan and
+      # --auto-approve (the same flags the delegate_cline lane uses). Probe help before launching so we
+      # only start an interactive session on a CLI that advertises an interactive mode distinct from
+      # headless one-shot, and (when -m is given) a model override — matching the bar droid/cursor/hermes
+      # already clear. A failed/timed-out probe or a missing capability falls through to the one-shot lane.
+      have cline || _session_launch_error "$provider" "cline is not on PATH"
+      help_text="$(_session_probe_help cline --help)" \
+        || _session_launch_error "$provider" "the local help probe failed or timed out"
+      printf '%s\n' "$help_text" | grep -Eqi 'interactive|plan mode|act mode|repl|chat' \
+        || _session_launch_error "$provider" "help does not advertise an interactive mode"
+      printf '%s\n' "$help_text" | grep -Eqi -- '--plan|--auto-approve|non-interactive|headless' \
+        || _session_launch_error "$provider" "help does not distinguish interactive mode from headless one-shot"
+      SESSION_LAUNCH=("cline")
+      if [ "$MODEL_EXPLICIT" = "1" ]; then
+        if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
+          SESSION_LAUNCH+=("--model" "$MODEL")
+        elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$)'; then
+          SESSION_LAUNCH+=("-m" "$MODEL")
+        else
+          _session_launch_error "$provider" "help does not advertise an interactive model override"
+        fi
       fi
       ;;
     *)
@@ -9305,7 +9500,7 @@ _winpty_session() {
           LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ -n "$EFFORT" ] && LAUNCH=("env" "MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("--model" "$MODEL") ;;
-        droid|cursor|hermes)
+        droid|cursor|hermes|cline)
           _session_launch_adapter "$PROVIDER"
           LAUNCH=("${SESSION_LAUNCH[@]}") ;;
         gemini|gm)
@@ -9314,7 +9509,7 @@ _winpty_session() {
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("$gveh" "--model" "$MODEL"); else LAUNCH=("$gveh"); fi ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
@@ -9483,7 +9678,7 @@ session() {
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi
           [ -n "$EFFORT" ] && launch="env MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT") $launch" ;;
-        droid|cursor|hermes)
+        droid|cursor|hermes|cline)
           _session_launch_adapter "$PROVIDER"
           launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
         gemini|gm)
@@ -9492,7 +9687,7 @@ session() {
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model '$MODEL'"; else launch="$gveh"; fi ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
@@ -9920,7 +10115,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -10016,6 +10211,27 @@ doctor() {
     fi
   else
     echo "    hermes state.db: absent — never run, cost receipts use estimates until first session"
+  fi
+  echo "  -- Cline lane (Cline CLI, engine lane: -m passes through verbatim; FREE `cline` OAuth provider) --"
+  if have cline; then
+    local _cver; _cver="$(cline --version 2>/dev/null | head -1 || echo present)"
+    # BEST-EFFORT schema read: the ~/.cline/data/settings/providers.json shape (lastUsedProvider,
+    # providers[].settings.model) is based on observed Cline 3.0.x layouts and may change in future
+    # Cline versions. Both reads use `// empty` + `2>/dev/null` so an unparseable or reshaped file
+    # degrades to "not detected" rather than crashing doctor. Do not treat the absence of a
+    # configured-provider line as a Cline install failure — only the `have cline` check above is
+    # authoritative for install state.
+    local _cprov=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cprov="$(jq -r '.lastUsedProvider // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
+    local _cmod=""; [ -f "$HOME/.cline/data/settings/providers.json" ] && _cmod="$(jq -r --arg p "$_cprov" '.providers[$p].settings.model // empty' "$HOME/.cline/data/settings/providers.json" 2>/dev/null)"
+    echo "    cline: $_cver — route: --provider cline [-m <model>] run \"task\". Engine lane: -m passes through verbatim to cline's provider/model catalog."
+    if [ -n "$_cprov" ]; then
+      echo "      configured provider: '$_cprov'${_cmod:+ (default model: $_cmod)}"
+      [ "$_cprov" = "cline" ] && echo "      note: the 'cline' OAuth provider is FREE (\$0 cash): serves deepseek-v4-flash + glm-5.2. Pass -m deepseek/deepseek-v4-flash or -m z-ai/glm-5.2 to pin one."
+    else
+      echo "      configured provider: not detected (run 'cline auth cline' once to enable the FREE OAuth provider)"
+    fi
+  else
+    echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' once (FREE OAuth provider: deepseek-v4-flash + glm-5.2 at \$0 cash)"
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
@@ -10518,7 +10734,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
                   PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -10589,7 +10805,8 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+
   esac
 }
 main "$@"
