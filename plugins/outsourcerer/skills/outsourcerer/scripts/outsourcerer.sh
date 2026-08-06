@@ -81,8 +81,9 @@
 #   claudex           GPT-5.6 Sol/Terra/Luna INSIDE the Claude Code harness via YOUR local
 #                     CLIProxyAPI (detect-only; unofficial bridge; Claude-sub models refused).
 #   cline             Cline CLI (https://github.com/cline/cline). Engine lane: -m passes through
-#                     verbatim to cline's own provider/model catalog. The FREE `cline` OAuth provider
-#                     (enabled by `cline auth cline`) serves deepseek-v4-flash + glm-5.2 at $0 cash.
+#                     verbatim to cline's own provider/model catalog. The `cline` login bills a
+#                     ClinePass subscription (discounted open-weight models); or configure your own
+#                     keys in ~/.cline. The roster and pricing are cline's, not ours -- we do not pin them.
 #                     Posture is binary: --plan = read-only, default act mode auto-approves all tools
 #                     (no OS sandbox, no graded rung); reasoning effort maps to --thinking.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
@@ -132,7 +133,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.6.4"
+OSRC_VERSION="0.6.5"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1461,6 +1462,7 @@ _lane_cost_disclosure() {
     hermes)                        printf 'metered cash from your configured provider, measured when available, otherwise estimated' ;;
     droid)                         printf 'cash depends on your Factory plan or BYOK model; BYOK usage is measured or estimated by its provider' ;;
     warp)                          printf 'cash depends on your Warp plan or configured keys; key usage is measured or estimated by its provider' ;;
+    cline)                         printf 'cash depends on your ClinePass subscription or the keys configured in ~/.cline; usage is measured or estimated by its provider' ;;
     *)                             printf 'cash and plan impact unknown for your %s lane' "$1" ;;
   esac
 }
@@ -3242,7 +3244,7 @@ _ready_lanes() {
   have claude && lanes="$lanes claude=native"
   have droid && lanes="$lanes droid=byok"
   have cursor-agent && lanes="$lanes cursor=subscription"
-  have cline && lanes="$lanes cline=free-oauth"
+  have cline && lanes="$lanes cline=clinepass-or-byok"
   _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
   printf '%s\n' "${lanes# }"
 }
@@ -7039,10 +7041,10 @@ delegate_warp() {
 # =============================================================================
 # CLINE LANE (Cline CLI, https://github.com/cline/cline). Engine lane: -m
 # passes through VERBATIM to cline's own provider/model catalog (the user's
-# configured Cline account, incl. the FREE `cline` OAuth provider which currently
-# serves deepseek-v4-flash and glm-5.2 at $0 cash). Cloud lane (Cline's backend +
-# the model API) -> full cloud gate applies. Billing: your Cline plan / the
-# provider keys configured in ~/.cline (the free `cline` provider is OAuth, $0).
+# configured Cline account, incl. the `cline` login that bills a ClinePass
+# subscription for discounted open-weight models). Cloud lane (Cline's backend +
+# the model API) -> full cloud gate applies. Billing: your ClinePass subscription
+# or the provider keys configured in ~/.cline. The roster and pricing are cline's.
 #
 # Cline exposes a BINARY posture, not graded autonomy: `--plan` is read-only (no
 # edits/commands applied), and the default "act" mode auto-approves ALL tools
@@ -7107,7 +7109,7 @@ delegate_cline() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="${MODEL:-}"
-  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline."
+  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend."
   # Cline posture: --plan = read-only (no edits/commands applied, but tools auto-approved so they
   # RUN in non-interactive mode — --auto-approve false would block ALL tools headlessly); default
   # act mode auto-approves all tools (--auto-approve defaults true). No OS sandbox, no graded rung.
@@ -7158,14 +7160,14 @@ delegate_cline() {
     [ -n "$ce" ] && { eff=(--thinking "$ce"); printf '>>> [effort] reasoning=%s (native: cline --thinking %s)\n' "$EFFORT" "$ce" >&2; }; fi
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-cline}" "$task" "$ttier")"
-  _tier_banner "cline (Cline CLI)" "$id" "$ttier" "$posture, bills your Cline plan / the keys in ~/.cline (the 'cline' OAuth provider is FREE: deepseek-v4-flash + glm-5.2 at \$0 cash)"
+  _tier_banner "cline (Cline CLI)" "$id" "$ttier" "$posture, bills your ClinePass subscription or the keys configured in ~/.cline"
   local rc=0
   cline ${pflag[@]+"${pflag[@]}"} ${mflag[@]+"${mflag[@]}"} ${eff[@]+"${eff[@]}"} "$wrapped" || rc=$?
   # Pass the resolved lane ("cline") as the 7th arg so the Tab's plan-vs-cash split buckets
   # foreground cline runs correctly. Without it, fg rows carry no .lane field and are
   # misbucketed as cash (bg rows pass the lane via run_job; fg rows must pass it here).
   record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task" "" "cline"
-  printf '>>> [receipt] ran on YOUR cline setup (Cline plan / the provider configured in ~/.cline; the free `cline` OAuth provider serves deepseek-v4-flash + glm-5.2 at \$0 cash), no Claude tokens spent.\n' >&2
+  printf '>>> [receipt] ran on YOUR cline setup (your ClinePass subscription or the keys configured in ~/.cline), no Claude tokens spent.\n' >&2
   return "$rc"
 }
 
@@ -8654,7 +8656,7 @@ route_delegate() {
       cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
-      cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then run 'cline auth cline' once to enable the FREE OAuth provider (serves deepseek-v4-flash + glm-5.2 at \$0 cash). -m passes through verbatim; model catalog is yours to configure in ~/.cline." ;;
+      cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend." ;;
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -10274,7 +10276,7 @@ doctor() {
   else
     echo "    hermes state.db: absent — never run, cost receipts use estimates until first session"
   fi
-  echo "  -- Cline lane (Cline CLI, engine lane: -m passes through verbatim; FREE `cline` OAuth provider) --"
+  echo "  -- Cline lane (Cline CLI, engine lane: -m passes through verbatim; ClinePass subscription or your own keys) --"
   if have cline; then
     local _cver; _cver="$(cline --version 2>/dev/null | head -1 || echo present)"
     # BEST-EFFORT schema read: the ~/.cline/data/settings/providers.json shape (lastUsedProvider,
@@ -10288,12 +10290,12 @@ doctor() {
     echo "    cline: $_cver — route: --provider cline [-m <model>] run \"task\". Engine lane: -m passes through verbatim to cline's provider/model catalog."
     if [ -n "$_cprov" ]; then
       echo "      configured provider: '$_cprov'${_cmod:+ (default model: $_cmod)}"
-      [ "$_cprov" = "cline" ] && echo "      note: the 'cline' OAuth provider is FREE (\$0 cash): serves deepseek-v4-flash + glm-5.2. Pass -m deepseek/deepseek-v4-flash or -m z-ai/glm-5.2 to pin one."
+      [ "$_cprov" = "cline" ] && echo "      note: the 'cline' provider bills your ClinePass subscription (discounted open-weight models). Pass -m <provider/model> to pin one; the roster and pricing are cline's, not ours."
     else
-      echo "      configured provider: not detected (run 'cline auth cline' once to enable the FREE OAuth provider)"
+      echo "      configured provider: not detected (run 'cline auth cline' to sign in to ClinePass, or set your own keys in ~/.cline)"
     fi
   else
-    echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' once (FREE OAuth provider: deepseek-v4-flash + glm-5.2 at \$0 cash)"
+    echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' to sign in to ClinePass (discounted open-weight models), or configure your own keys in ~/.cline"
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"

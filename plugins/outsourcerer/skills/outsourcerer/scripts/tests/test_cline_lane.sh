@@ -4,8 +4,8 @@
 # version-gate the --plan read-only guarantee, and dispatch correctly through a behavioral test.
 #
 # Cline (https://github.com/cline/cline) is an engine lane like droid/cursor/hermes/warp:
-# -m passes through VERBATIM (cline owns its provider/model catalog), and the FREE `cline` OAuth
-# provider serves deepseek-v4-flash + glm-5.2 at $0 cash. Posture is binary (--plan = read-only,
+# -m passes through VERBATIM (cline owns its provider/model catalog); billing is the user's ClinePass
+# subscription or their own keys in ~/.cline (roster + pricing are cline's). Posture is binary (--plan = read-only,
 # act mode = --auto-approve true); there is no OS sandbox and no graded approval rung.
 #
 # This test has TWO layers:
@@ -113,9 +113,16 @@ grep -q 'cline|claudex) return 0' "$SRC" && ok "cline is in the _is_cloud_lane s
 PATH="$SCRIPT_DIR/fake-bin:$PATH" _lanes="$(PATH="$SCRIPT_DIR/fake-bin:$PATH" _ready_lanes 2>/dev/null)"
 case "$_lanes" in *cline=*) ok "brief lists cline when the CLI is on PATH" ;; *) bad "brief does not advertise cline: $_lanes" ;; esac
 
-# --- doctor has a dedicated cline section (install + free-provider guidance) ---
+# --- doctor has a dedicated cline section (install + auth guidance) ---
 grep -q 'Cline lane' "$SRC" && ok "doctor has a Cline lane section" || bad "doctor has no Cline section"
-grep -q 'cline auth cline' "$SRC" && ok "doctor points at the free-provider auth step" || bad "doctor missing the auth guidance"
+grep -q 'cline auth cline' "$SRC" && ok "doctor points at the cline auth step" || bad "doctor missing the auth guidance"
+
+# --- honesty guard: NEVER claim the cline lane is "$0 cash" or "free". It bills a ClinePass
+#     subscription or the user's own keys; "free"/"$0" reads as no-cost when a sub is paid. Also do
+#     not hardcode a specific cline model as free (the roster/pricing are cline's and change). ---
+_cline_ctx="$(grep -niE 'cline' "$SRC" | grep -iE '\$0 cash|free.?oauth|oauth.*free|FREE.*(provider|deepseek|glm)|serves deepseek-v4-flash' || true)"
+[ -z "$_cline_ctx" ] && ok "no '\$0 cash'/'free' claim attached to the cline lane" \
+  || bad "cline lane still claims free/\$0 cash: $_cline_ctx"
 grep -q 'BEST-EFFORT schema read' "$SRC" && ok "doctor marks the ~/.cline jq schema as best-effort" || bad "doctor does not mark the schema as best-effort"
 
 # --- fanout preflight: engine-lane CLI availability is checked before minting jobs ---

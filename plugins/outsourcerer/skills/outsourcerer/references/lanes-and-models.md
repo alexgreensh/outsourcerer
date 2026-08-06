@@ -86,19 +86,21 @@ needs no key). Symmetrically `-m fable --provider codex` dies (Claude-backend-on
 "…"` and `run -m sol "…"` need no `--provider` at all. See the full alias/lane/tier map:
 `outsourcerer.sh models --refresh`.
 
-## Cline lane: the FREE `cline` OAuth provider (`--provider cline`)
+## Cline lane (`--provider cline`)
 
 `--provider cline` delegates through the Cline CLI (https://github.com/cline/cline) the user
-already runs, with the models THEY configured in `~/.cline`. This is the "work with MY tools" lane
-for Cline users, and it is the **free-tier standout**: the `cline` OAuth provider (enabled by
-`cline auth cline`) currently serves **`deepseek/deepseek-v4-flash`** and **`z-ai/glm-5.2`** at
-**$0 cash** — no API key, no OpenRouter credits, no plan-limit spend on Claude/ChatGPT. Full
+already runs, with the provider and models THEY configured in `~/.cline`. This is the "work with MY
+tools" lane for Cline users. Billing is theirs: a **ClinePass subscription** (~$9.99/mo, discounted
+access to open-weight models like GLM, DeepSeek, and Kimi) or their own API keys — the roster and
+pricing are cline's, not ours, so do NOT hardcode or promise a specific model or price. Full
 outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
 
 - `-m <name>` passes through **verbatim** to cline; the alias table never rewrites it. No `-m` =
   cline's configured default (read from `~/.cline/data/settings/providers.json`).
-- **Free models:** `-m deepseek/deepseek-v4-flash` and `-m z-ai/glm-5.2` on the `cline` provider.
-  Both are `capable` tier (frontier capability, budget price — here $0).
+- **Models are cline's, discovered live, not ours:** pass whatever cline is set up with via
+  `-m provider/model` (e.g. `-m z-ai/glm-5.2`). To see what is genuinely cheap or free RIGHT NOW
+  across all lanes, use `suggest`/`deals` (they read each catalog live) rather than trusting a
+  hardcoded list.
 - **Posture is BINARY, not graded:** `run`/`explore` → `--plan` (read-only, no edits/commands
   applied — **version-gated**: requires cline >= 3.0.36, where Plan mode stopped falling back to
   shell edits; on an older CLI the read-only tier is refused, not silently trusted); `edit`/`research`/`yolo` → default act mode with `--auto-approve true` (all tools
@@ -106,9 +108,9 @@ outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
   in the posture banner, never silent. Treat `research`/`yolo` on cline as fully autonomous with no
   sandbox boundary; prefer `run` (plan mode) for read-only inspection.
 - `--effort` is **native** on cline (`--thinking none|low|medium|high|xhigh`).
-- Billing: your Cline plan / the provider keys in `~/.cline`. The `cline` OAuth provider is $0
-  cash. Cloud lane → full cloud gate + secret-scan apply.
-- Auth: `cline auth cline` once (OAuth, enables the free provider). `doctor` shows install/auth
+- Billing: your ClinePass subscription or the provider keys in `~/.cline`. Cloud lane → full cloud
+  gate + secret-scan apply.
+- Auth: `cline auth cline` to sign in to ClinePass, or configure your own keys. `doctor` shows install/auth
   state and **best-effort** reads the configured provider + default model from
   `~/.cline/data/settings/providers.json` (the schema is based on observed Cline 3.0.x layouts and
   may change in future versions; both reads degrade to "not detected" on an unparseable file).
