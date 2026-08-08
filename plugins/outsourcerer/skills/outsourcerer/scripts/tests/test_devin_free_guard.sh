@@ -70,7 +70,7 @@ stdin_out="$(printf 'image prompt' | _timeout 2 sh -c 'IFS= read -r value; print
 # A timer racing a child at the exact boundary must distinguish a zombie from
 # a genuinely running process and preserve the child's successful status.
 boundary_rc=0
-OSRC_TEST_PS_STATE=Z _timeout 1 sh -c 'sleep 1; exit 0' >/dev/null || boundary_rc=$?
+OSRC_TEST_MODE=1 OSRC_TEST_PS_STATE=Z _timeout 1 sh -c 'sleep 1; exit 0' >/dev/null || boundary_rc=$?
 [ "$boundary_rc" = 0 ] \
   && ok "timeout boundary preserves an already-successful child exit" \
   || bad "successful boundary child was overwritten with rc=$boundary_rc"
@@ -78,7 +78,7 @@ OSRC_TEST_PS_STATE=Z _timeout 1 sh -c 'sleep 1; exit 0' >/dev/null || boundary_r
 # Once the watchdog finds a live child at expiry, a TERM trap cannot turn that
 # timeout into a false success by exiting zero.
 term_trap_rc=0
-OSRC_TEST_PS_STATE=S _timeout 1 sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >/dev/null || term_trap_rc=$?
+OSRC_TEST_MODE=1 OSRC_TEST_PS_STATE=S _timeout 1 sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >/dev/null || term_trap_rc=$?
 [ "$term_trap_rc" = 124 ] \
   && ok "timeout reports 124 when an expired child traps TERM and exits zero" \
   || bad "TERM-trapping expired child returned rc=$term_trap_rc instead of 124"

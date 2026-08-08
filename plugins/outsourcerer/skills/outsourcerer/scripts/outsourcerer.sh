@@ -538,13 +538,16 @@ _timeout() {
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
   # which is the same reason it exists for the job supervisor.
   ( sleep "$secs" 2>/dev/null
-    # OSRC_TEST_PS_STATE is a test-only seam that injects the process state so the
-    # zombie-vs-live discriminator can be exercised deterministically; it is never
-    # set in production, where the real ps(1) snapshot is used.
-    if [ -n "${OSRC_TEST_PS_STATE:-}" ]; then
+    # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
+    # discriminator can be exercised deterministically. It is honored ONLY under
+    # OSRC_TEST_MODE=1 so a stray export can never disable production timeouts.
+    if [ "${OSRC_TEST_MODE:-0}" = 1 ] && [ -n "${OSRC_TEST_PS_STATE:-}" ]; then
       state="${OSRC_TEST_PS_STATE//[[:space:]]/}"
     else
       state=$(ps -o state= -p "$cmd_pid" 2>/dev/null | tr -d '[:space:]')
+      # ps without -o state= (busybox/Alpine) yields nothing even for a live PID.
+      # Fall back to the portable kill -0 liveness probe so the bound still fires.
+      if [ -z "$state" ] && kill -0 "$cmd_pid" 2>/dev/null; then state="R"; fi
     fi
     case "$state" in Z*|"" ) exit 0 ;; esac
     : > "$expired_file"
@@ -5247,8 +5250,8 @@ _delegate_has_model_output() { # <out.log> <progress>
   [ -f "$log" ] || return 1
   awk '
     /^[[:space:]]*$/ { next }
-    # POSITIVE 1: our own orchestrator progress markers
-    /OSRC::(PROGRESS|PLAN|DONE|NEED_INPUT)/ { found=1; exit }
+    # POSITIVE 1: our own orchestrator progress markers (same set the progress-file check accepts)
+    /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
     # POSITIVE 2: explicit assistant role provenance
     /"role"[[:space:]]*:[[:space:]]*"assistant"/ { found=1; exit }
     # POSITIVE 3: real token/content stream event TYPES (NOT bare "message", NOT lifecycle)
