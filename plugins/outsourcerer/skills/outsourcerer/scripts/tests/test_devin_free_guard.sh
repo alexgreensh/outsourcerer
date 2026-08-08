@@ -46,6 +46,13 @@ probe_state="$(_devin_probe_classify "$probe_rc" "$probe_out")"
 [ "$probe_state" = "up" ] && ok "bounded glm-5-2 probe response classifies the free lane UP" \
   || bad "probe classified '$probe_state' (rc=$probe_rc, output=$probe_out), expected up"
 
+# The image lane sends its prompt over stdin. Bash normally redirects an async
+# command's stdin to /dev/null, so the native bound must preserve fd 0 explicitly.
+stdin_out="$(printf 'image prompt' | _timeout 2 sh -c 'IFS= read -r value; printf "%s" "$value"')"
+[ "$stdin_out" = "image prompt" ] \
+  && ok "bash-native bound preserves piped stdin for Codex prompt consumers" \
+  || bad "bash-native bound dropped piped stdin (got: $stdin_out)"
+
 # Deterministic process-table input: an old devin process with no live job owner
 # must be identified. The detector only lists it here, so the test never signals $$.
 printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model glm-5-2 -p task" > "$TEST_ROOT/ps.rows"

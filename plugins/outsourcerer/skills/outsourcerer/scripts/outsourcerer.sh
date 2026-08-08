@@ -527,7 +527,10 @@ _timeout() {
   out_file="$(mktemp "$OSRC_HOME/.bound.XXXXXX" 2>/dev/null)" || return 1
   expired_file="$out_file.expired"
   chmod 600 "$out_file" 2>/dev/null || true
-  "$@" >"$out_file" 2>&1 &
+  # Bash otherwise gives an asynchronous command /dev/null on fd 0 when job
+  # control is off. Make the caller's stdin explicit so bounded commands that
+  # consume a pipe (for example codex exec -) receive their prompt unchanged.
+  "$@" <&0 >"$out_file" 2>&1 &
   local cmd_pid=$!
   # Signal the whole TREE, not just the direct child. Killing only the child leaves grandchildren
   # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
