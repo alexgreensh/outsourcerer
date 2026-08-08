@@ -100,5 +100,16 @@ OSRC_CC_SPAWN_PROBE_TICKS=999 _session_registry_append start cc sonnet high runn
   && ok "CC spawn probe is capped at ten 100ms ticks" \
   || bad "CC spawn probe exceeded its one-second tick budget"
 
+claude(){ printf 'called\n' > "$FIXTURE/claude-called"; printf '[]\n'; }
+rm -f "$FIXTURE/claude-called"
+_fleet_cc_peer_observations >/dev/null
+[ ! -e "$FIXTURE/claude-called" ] \
+  && ok "background collection skips the Claude CLI reconcile" \
+  || bad "background collection invoked the unbounded Claude CLI"
+OSRC_FLEET_CLI_RECONCILE=1 _fleet_cc_peer_observations >/dev/null
+[ -e "$FIXTURE/claude-called" ] \
+  && ok "interactive collection can request Claude CLI reconciliation" \
+  || bad "interactive Claude CLI reconciliation was not wired"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

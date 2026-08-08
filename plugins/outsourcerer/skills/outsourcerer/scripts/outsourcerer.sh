@@ -2113,7 +2113,11 @@ _fleet_cc_peer_observations() {
        last_receipt:null,source_generation:null}')" || return 1
     items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
   done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
-  _fleet_cc_cli_reconcile "$items"
+  if [ "${OSRC_FLEET_CLI_RECONCILE:-0}" = 1 ]; then
+    _fleet_cc_cli_reconcile "$items"
+  else
+    printf '%s' "$items"
+  fi
 }
 
 _fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1] [alive:0|1|unknown]
@@ -2850,7 +2854,7 @@ cmd_fleet_ls() {
     esac
     shift
   done
-  snapshot="$(_fleet_snapshot_refresh)" || die "fleet ls: could not collect or persist a snapshot"
+  snapshot="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh)" || die "fleet ls: could not collect or persist a snapshot"
   if [ "$include_self" != 1 ]; then
     snapshot="$(printf '%s' "$snapshot" | jq -c '.items |= map(select((.self // 0) == 0))')" || return 1
   fi
@@ -2896,7 +2900,7 @@ cmd_fleet_show() {
     shift
   done
   [ -n "$selector" ] || die "fleet show needs <name|short-session-id|pid|jobId>"
-  snapshot="$(_fleet_snapshot_refresh)" || die "fleet show: could not collect or persist a snapshot"
+  snapshot="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh)" || die "fleet show: could not collect or persist a snapshot"
   matches="$(_fleet_selector_matches "$snapshot" "$selector")" || return 1
   count="$(printf '%s\n' "$matches" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
   if [ "$count" -eq 0 ]; then echo "fleet show: no session matches '$selector'" >&2; return 1; fi
