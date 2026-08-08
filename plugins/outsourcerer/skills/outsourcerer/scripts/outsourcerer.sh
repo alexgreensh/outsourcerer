@@ -542,7 +542,10 @@ _timeout() {
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
   cat "$out_file"
-  if [ -f "$expired_file" ]; then rc=124; fi
+  # A successful child owns its real result even if the watchdog marker landed
+  # at the same boundary instant. The marker proves the timer woke, not that it
+  # killed a still-running command.
+  if [ -f "$expired_file" ] && [ "$rc" -ne 0 ]; then rc=124; fi
   rm -f "$out_file" "$expired_file" 2>/dev/null || true
   return "$rc"
 }

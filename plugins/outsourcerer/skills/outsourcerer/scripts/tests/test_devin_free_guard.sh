@@ -57,6 +57,15 @@ stdin_out="$(printf 'image prompt' | _timeout 2 sh -c 'IFS= read -r value; print
   && ok "bash-native bound preserves piped stdin for Codex prompt consumers" \
   || bad "bash-native bound dropped piped stdin (got: $stdin_out)"
 
+# A timer marker racing with an already-successful child must not overwrite rc=0.
+boundary_rc=0
+for _boundary_i in 1 2 3 4 5; do
+  _timeout 0 true >/dev/null || boundary_rc=$?
+done
+[ "$boundary_rc" = 0 ] \
+  && ok "timeout boundary preserves an already-successful child exit" \
+  || bad "successful boundary child was overwritten with rc=$boundary_rc"
+
 # A manual old process, including the --model= form, is not outsourcerer's to reap.
 printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model=glm-5-2 -p task" > "$TEST_ROOT/ps.rows"
 orphans="$(OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_orphan_pids)"
