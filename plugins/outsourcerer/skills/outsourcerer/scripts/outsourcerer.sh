@@ -245,6 +245,12 @@ OSRC_WAKE_QUEUE="$OSRC_HOME/wake-queue.jsonl"
 OSRC_WAKE_ACK="$OSRC_HOME/wake-acks.jsonl"
 OSRC_FLEET_SNAPSHOT="$OSRC_HOME/fleet-snapshot.json"
 OSRC_HEARTBEAT="$OSRC_HOME/heartbeat"
+OSRC_CLAUDE_SESSIONS_DIR="${OSRC_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}"
+OSRC_CLAUDE_PROJECTS_DIR="${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+OSRC_STALL_SECS="${OSRC_STALL_SECS:-600}"
+OSRC_FLEET_SUPERVISION="${OSRC_FLEET_SUPERVISION:-1}"
+OSRC_FLEET_FORCE="${OSRC_FLEET_FORCE:-0}"
+OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
 trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr."* 2>/dev/null; fi' EXIT
@@ -1921,6 +1927,63 @@ _external_reply() { # <session-id> <message>
     echo "delivery unknown; no automatic replay" >&2
     return 1
   fi
+}
+
+# Files are the primary CC peer registry: they are local, cheap to read, and carry fresher
+# statusUpdatedAt data than a subprocess snapshot. A peer survives enumeration when its PID is
+# live OR its own updatedAt is fresh. File mtime is deliberately not evidence of liveness.
+_fleet_cc_peer_observations() {
+  have jq || return 1
+  local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
+  local status updated status_updated socket now_ms fresh_ms alive item
+  [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
+  now_ms=$(( $(date +%s) * 1000 ))
+  fresh_ms=$(( ${OSRC_FLEET_RECENT_MIN:-2880} * 60 * 1000 ))
+  while IFS= read -r path; do
+    [ -f "$path" ] && [ ! -L "$path" ] || continue
+    raw="$(jq -c . "$path" 2>/dev/null)" || continue
+    pid="$(printf '%s' "$raw" | jq -r '.pid // empty')"
+    session_id="$(printf '%s' "$raw" | jq -r '.sessionId // empty')"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    _external_session_id_valid "$session_id" || continue
+    updated="$(printf '%s' "$raw" | jq -r '.updatedAt // 0')"
+    case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+    alive=0
+    kill -0 "$pid" 2>/dev/null && alive=1
+    [ "$updated" -gt 0 ] && [ $(( now_ms - updated )) -le "$fresh_ms" ] 2>/dev/null && alive=1
+    [ "$alive" = 1 ] || continue
+    cwd="$(printf '%s' "$raw" | jq -r '.cwd // ""')"
+    started="$(printf '%s' "$raw" | jq -r '.startedAt // 0')"
+    proc_start="$(printf '%s' "$raw" | jq -r '.procStart // ""')"
+    version="$(printf '%s' "$raw" | jq -r '.version // ""')"
+    kind="$(printf '%s' "$raw" | jq -r '.kind // "interactive"')"
+    name="$(printf '%s' "$raw" | jq -r '.name // "(unnamed)"')"; [ -n "$name" ] || name="(unnamed)"
+    job_id="$(printf '%s' "$raw" | jq -r '.jobId // ""')"
+    status="$(printf '%s' "$raw" | jq -r '.status // "unknown"')"
+    status_updated="$(printf '%s' "$raw" | jq -r '.statusUpdatedAt // .updatedAt // 0')"
+    case "$status_updated" in ''|*[!0-9]*) status_updated=0 ;; esac
+    socket="$(printf '%s' "$raw" | jq -r '.messagingSocketPath // ""')"
+    if [ "$status_updated" -gt 0 ] && [ "$now_ms" -ge "$status_updated" ]; then
+      status_updated=$(( (now_ms - status_updated) / 1000 ))
+    else
+      status_updated=0
+    fi
+    case "$started" in ''|*[!0-9]*) started=0 ;; esac
+    item="$(jq -cn --arg session_id "$session_id" --arg endpoint "cc:$pid" --arg cwd "$cwd" \
+      --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
+      --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "?" \
+      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_updated" '
+      {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
+       observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
+       status_age:$status_age,occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
+       self:$self,transcript_bytes:0,kind:$kind,cc_version:$version,
+       job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
+       state:"unknown",state_evidence:("CC status=" + $status),composer_state:"unknown",claim:null,
+       requested_model:null,lane:null,effort:null,harness_pid:$pid,pid_start:$proc_start,
+       last_receipt:null,source_generation:null}')" || return 1
+    items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
+  done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
+  printf '%s' "$items"
 }
 
 _fleet_classify() {
