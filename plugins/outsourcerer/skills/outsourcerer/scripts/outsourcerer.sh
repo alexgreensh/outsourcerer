@@ -2136,15 +2136,41 @@ _fleet_name_batch_line() { # <index>; stdin batch model output, print one cleane
 }
 
 _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fallbacks
-  local prompt="$1" model output
+  local prompt="$1" model output bound="${OSRC_FLEET_NAME_TIMEOUT:-90}"
+  case "$bound" in ''|*[!0-9]*|0) bound=90 ;; esac
+  local out_file pid rc waited
   for model in glm-5-2 swe-1-7 haiku sol; do
     case "$model" in
       glm-5-2|swe-1-7) have devin || continue ;;
       haiku) have claude || continue ;;
       sol) have codex || continue ;;
     esac
-    output="$(OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 OSRC_CLOUD_ACK=1 OSRC_HEARTBEAT_DISABLED=1 \
-      "$SCRIPT_PATH" run -m "$model" "$prompt" 2>/dev/null)" || continue
+    # BOUNDED per attempt. A hung lane (devin cloud parked on a dead backend) never EXITS, so a
+    # bare `|| continue` can never fire and naming hung on the first lane forever — the haiku/sol
+    # fallbacks were unreachable exactly when they were needed. Background the attempt, poll for
+    # exit, and past the bound kill the whole tree and try the next lane. No `timeout` binary
+    # (stock macOS ships none). Capture through a private file, not a command substitution — a
+    # missed grandchild holding the substitution pipe would keep this function blocked long after
+    # the kill (same reason _timeout does it).
+    out_file="$(mktemp "${OSRC_HOME:-${TMPDIR:-/tmp}}/.fleetname.XXXXXX" 2>/dev/null || mktemp)" || continue
+    chmod 600 "$out_file" 2>/dev/null || true
+    OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 OSRC_CLOUD_ACK=1 OSRC_HEARTBEAT_DISABLED=1 \
+      "$SCRIPT_PATH" run -m "$model" "$prompt" > "$out_file" 2>/dev/null &
+    pid=$!
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$bound" ]; do
+      sleep 1; waited=$((waited+1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      _kill_tree "$pid"
+      wait "$pid" 2>/dev/null
+      rm -f "$out_file" 2>/dev/null || true
+      continue
+    fi
+    rc=0; wait "$pid" 2>/dev/null || rc=$?
+    output="$(cat "$out_file" 2>/dev/null)"
+    rm -f "$out_file" 2>/dev/null || true
+    [ "$rc" -eq 0 ] || continue
     printf '%s' "$output" | grep -q '[^[:space:]]' || continue
     printf '%s' "$output"
     return 0
