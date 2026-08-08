@@ -5172,8 +5172,14 @@ _delegate_has_model_output() { # <out.log> <progress>
     /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
     /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
+    /^[[:space:]]*(Connecting|Connection error|Retrying|Waiting|Initializing|Starting)([.[:space:]:]|$)/ { next }
+    /^[[:space:]]*[|\\\/-][[:space:]]*$/ { next }
+    /^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][[:space:]]*/ { next }
+    /^[[:space:]]*(Hook|Tool|SessionStart|PreToolUse|PostToolUse)(:|[[:space:]])/ { next }
     /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
-    /"(role|type)"[[:space:]]*:[[:space:]]*"(assistant|agent_message|assistant_message|model_output|item\.completed)"/ { found=1; exit }
+    /^\{.*"role"[[:space:]]*:[[:space:]]*"assistant".*"content"[[:space:]]*:/ { found=1; exit }
+    /^\{.*"type"[[:space:]]*:[[:space:]]*"(message|agent_message|assistant_message|model_output|item\.completed)".*("content"|"text"|"delta")[[:space:]]*:/ { found=1; exit }
+    /^[[:space:]]*[\{\[]/ { next }
     { found=1; exit }
     END { exit(found ? 0 : 1) }
   ' "$log" 2>/dev/null

@@ -39,6 +39,20 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 . "$SRC" >/dev/null 2>&1
 type _devin_live_mtime >/dev/null 2>&1 || { echo "FAIL: _devin_live_mtime not defined"; exit 1; }
 
+# Cold-start chatter, spinner frames, hook notices, and untyped streaming JSON
+# must leave the no-init watchdog armed. Only positive assistant output disarms it.
+noise="$TMP/no-init-noise.log"; progress="$TMP/no-init-progress"
+printf '%s\n' 'Connecting...' '⠋' 'Connection error: retrying' 'Hook: SessionStart' '{"delta":"warming up"}' > "$noise"
+if _delegate_has_model_output "$noise" "$progress"; then
+  bad "cold-start noise falsely proves model initialization"
+else
+  ok "cold-start noise leaves the no-init watchdog armed"
+fi
+printf '%s\n' '{"role":"assistant","content":"ready"}' >> "$noise"
+_delegate_has_model_output "$noise" "$progress" \
+  && ok "structured assistant content proves model initialization" \
+  || bad "structured assistant content did not initialize the model"
+
 # ---------------------------------------------------------------- unit
 # A log belonging to a LIVE descendant is found.
 sleep 60 & child=$!; kids="$kids $child"
