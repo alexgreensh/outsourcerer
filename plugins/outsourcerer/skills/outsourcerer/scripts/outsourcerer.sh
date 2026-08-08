@@ -1933,6 +1933,49 @@ _external_reply() { # <session-id> <message>
   fi
 }
 
+# Print this controller's CC occupancy key. The current shell walks upward because Claude Code is
+# the ancestor that launched it; child-process scans point the wrong way. A tied best match prints
+# "?" and returns 2 so callers can fail closed for actions while still tagging the listing honestly.
+_fleet_self_key() {
+  local current="${OSRC_FLEET_SELF_PID:-$$}" ancestors="" hops=0 parent path pid cwd real_cwd
+  local started proc_start session_id now_ms delta score best_score="" best_key="" ambiguous=0 distance p
+  case "$current" in ''|*[!0-9]*) printf '?\n'; return 2 ;; esac
+  real_cwd="$(pwd -P 2>/dev/null || printf '%s' "$PWD")"
+  while [ "$current" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
+    ancestors="$ancestors $current"
+    current="$(ps -o ppid= -p "$current" 2>/dev/null | tr -d ' ')"
+    case "$current" in ''|*[!0-9]*) break ;; esac
+    hops=$((hops + 1))
+  done
+  [ -n "$ancestors" ] || return 1
+  now_ms=$(( $(date +%s) * 1000 ))
+  while IFS= read -r path; do
+    pid="$(jq -r '.pid // empty' "$path" 2>/dev/null)"
+    case " $ancestors " in *" $pid "*) ;; *) continue ;; esac
+    cwd="$(jq -r '.cwd // empty' "$path" 2>/dev/null)"
+    [ -n "$cwd" ] || continue
+    cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || continue
+    [ "$cwd" = "$real_cwd" ] || continue
+    started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
+    case "$started" in ''|*[!0-9]*) started=0 ;; esac
+    proc_start="$(jq -r '.procStart // ""' "$path" 2>/dev/null)"
+    session_id="$(jq -r '.sessionId // empty' "$path" 2>/dev/null)"
+    _external_session_id_valid "$session_id" || continue
+    distance=0
+    for p in $ancestors; do [ "$p" = "$pid" ] && break; distance=$((distance + 1)); done
+    delta=$(( now_ms - started )); [ "$delta" -ge 0 ] || delta=$(( -delta ))
+    score=$(( distance * 10000000000000 + delta ))
+    if [ -z "$best_score" ] || [ "$score" -lt "$best_score" ]; then
+      best_score="$score"; best_key="$pid:$session_id:$proc_start"; ambiguous=0
+    elif [ "$score" = "$best_score" ] && [ "$best_key" != "$pid:$session_id:$proc_start" ]; then
+      ambiguous=1
+    fi
+  done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
+  [ -n "$best_key" ] || return 1
+  if [ "$ambiguous" = 1 ]; then printf '?\n'; return 2; fi
+  printf '%s\n' "$best_key"
+}
+
 # Files are the primary CC peer registry: they are local, cheap to read, and carry fresher
 # statusUpdatedAt data than a subprocess snapshot. A peer survives enumeration when its PID is
 # live OR its own updatedAt is fresh. File mtime is deliberately not evidence of liveness.
@@ -1940,8 +1983,9 @@ _fleet_cc_peer_observations() {
   have jq || return 1
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
   local status updated status_updated status_age socket waiting_for now_ms fresh_ms alive item
-  local fleet_state evidence worked
+  local fleet_state evidence worked self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
+  self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
   now_ms=$(( $(date +%s) * 1000 ))
   fresh_ms=$(( ${OSRC_FLEET_RECENT_MIN:-2880} * 60 * 1000 ))
   while IFS= read -r path; do
@@ -1978,15 +2022,21 @@ _fleet_cc_peer_observations() {
     worked=0; [ "$updated" -gt "$started" ] 2>/dev/null && worked=1
     fleet_state="$(_fleet_classify "$status" "$status_age" "$worked")"
     evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for")"
+    self_value=0
+    if [ "$self_rc" = 2 ] || [ "$self_key" = "?" ]; then
+      self_value="?"
+    elif [ "$self_key" = "$pid:$session_id:$proc_start" ]; then
+      self_value=1
+    fi
     item="$(jq -cn --arg session_id "$session_id" --arg endpoint "cc:$pid" --arg cwd "$cwd" \
       --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
-      --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "?" \
+      --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "$self_value" \
       --arg fleet_state "$fleet_state" --arg evidence "$evidence" --arg waiting_for "$waiting_for" \
       --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" '
       {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
        observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
        status_age:$status_age,occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
-       self:$self,transcript_bytes:0,kind:$kind,cc_version:$version,
+       self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:0,kind:$kind,cc_version:$version,
        job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
        state:$fleet_state,state_evidence:$evidence,
        waiting_for:(if $waiting_for=="" then null else $waiting_for end),composer_state:"unknown",claim:null,
