@@ -2237,13 +2237,11 @@ _fleet_cc_peer_observations() {
     if kill -0 "$pid" 2>/dev/null; then
       alive=1
       liveness_evidence="PID $pid is live"
-      if _pid_start_valid "$proc_start"; then
-        live_proc_start="$(_pid_start_identity "$pid" 2>/dev/null)" || live_proc_start=""
-        if _pid_start_valid "$live_proc_start" && [ "$live_proc_start" != "$proc_start" ]; then
-          alive=0
-          liveness_evidence="PID $pid start identity changed (PID reuse)"
-        fi
-      fi
+      # PID-reuse guard intentionally omitted: CC writes procStart in UTC (e.g. "Sat Aug  8
+      # 09:16:53") while `ps -o lstart` reports LOCAL time ("Sat Aug 8 12:16:53"), with different
+      # spacing too, so a string compare never matches and forced every live session to alive=0
+      # ("Done"). kill -0 is the liveness truth here; a real reuse guard needs epoch-normalized
+      # comparison (parse json as UTC, ps as local) or a command-name check — tracked, not string==.
     fi
     [ "$updated" -gt 0 ] && [ $(( now_ms - updated )) -le "$fresh_ms" ] 2>/dev/null && fresh=1
     [ "$alive" = 1 ] || [ "$fresh" = 1 ] || continue
