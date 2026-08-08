@@ -538,7 +538,14 @@ _timeout() {
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
   # which is the same reason it exists for the job supervisor.
   ( sleep "$secs" 2>/dev/null
-    state=$(ps -o state= -p "$cmd_pid" 2>/dev/null | tr -d '[:space:]')
+    # OSRC_TEST_PS_STATE is a test-only seam that injects the process state so the
+    # zombie-vs-live discriminator can be exercised deterministically; it is never
+    # set in production, where the real ps(1) snapshot is used.
+    if [ -n "${OSRC_TEST_PS_STATE:-}" ]; then
+      state="${OSRC_TEST_PS_STATE//[[:space:]]/}"
+    else
+      state=$(ps -o state= -p "$cmd_pid" 2>/dev/null | tr -d '[:space:]')
+    fi
     case "$state" in Z*|"" ) exit 0 ;; esac
     : > "$expired_file"
     _kill_tree "$cmd_pid" 2>/dev/null
