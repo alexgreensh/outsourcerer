@@ -9641,6 +9641,7 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
 
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
   local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0
+  local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
   case "$generation" in ''|*[!0-9]*) return 1 ;; esac
@@ -9649,8 +9650,11 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
     [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
     case "$provider" in
       cc|claude)
-        while [ "$tries" -lt "${OSRC_CC_SPAWN_PROBE_TICKS:-50}" ]; do
-          cc_match="$(_fleet_cc_session_for_pane "$pid" "$PWD" 2>/dev/null)" && break
+        case "$probe_ticks" in ''|*[!0-9]*) probe_ticks=10 ;; esac
+        [ "$probe_ticks" -le 10 ] 2>/dev/null || probe_ticks=10
+        physical_cwd="$(pwd -P 2>/dev/null || printf '%s' "$PWD")"
+        while [ "$tries" -lt "$probe_ticks" ]; do
+          cc_match="$(_fleet_cc_session_for_pane "$pid" "$physical_cwd" 2>/dev/null)" && break
           sleep 0.1
           tries=$((tries + 1))
         done

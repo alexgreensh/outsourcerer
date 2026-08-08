@@ -88,5 +88,17 @@ printf '%s' "$snapshot" | jq -e '
   && ok "corrupt registry PIDs degrade to null without aborting collection" \
   || bad "corrupt registry PID aborted or poisoned the snapshot"
 
+probe_sleeps=0
+SESSION_NAME="probe-bound"
+tmux(){ printf '%s\n' "$$"; }
+_pid_start_identity(){ printf 'fixture-start\n'; }
+_fleet_cc_session_for_pane(){ return 1; }
+sleep(){ probe_sleeps=$((probe_sleeps + 1)); }
+_state_append(){ return 0; }
+OSRC_CC_SPAWN_PROBE_TICKS=999 _session_registry_append start cc sonnet high running receipt sonnet 1
+[ "$probe_sleeps" -eq 10 ] \
+  && ok "CC spawn probe is capped at ten 100ms ticks" \
+  || bad "CC spawn probe exceeded its one-second tick budget"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
