@@ -30,12 +30,12 @@ peers="$(_fleet_cc_peer_observations)"
 printf '%s' "$peers" | jq -e '
   .[] | select(.session_id=="dead-waiting" and .state=="ended" and .state_label=="Ended")
   | select(.state_evidence | contains("not live"))' >/dev/null \
-  && ok "fresh waiting file with a dead PID classifies dead" \
+  && ok "fresh waiting file with an ended PID classifies Ended" \
   || bad "dead PID was promoted to needs-you state"
 dead_listing="$(_fleet_ls_group "$(jq -cn --argjson items "$peers" '{items:$items}')" cc-peer Peers)"
 ! printf '%s' "$dead_listing" | grep -q 'needs-you' \
-  && ok "dead waiting peers never render a needs-you flag" \
-  || bad "dead waiting peer still rendered as needs-you"
+  && ok "ended waiting peers never render a needs-you flag" \
+  || bad "ended waiting peer still rendered as needs-you"
 
 [ "$(_fleet_classify idle 7200 1 1)" = idle ] \
   && ok "long-idle transcript activity remains idle" \

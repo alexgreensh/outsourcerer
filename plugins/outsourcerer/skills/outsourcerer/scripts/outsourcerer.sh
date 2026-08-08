@@ -29,8 +29,9 @@
 #                                  (session read) and steers it mid-flight (session send), switches
 #                                  its model, or stops it. A real feedback loop headless lacks. tmux.
 #                                  'model [NAME]' switches the live model mid-session (drives opt+m).
-#   fleet [ls|show] [args]         Unified managed-job + Claude Code peer view. `ls` is default;
-#                                  `show <name|short-id|pid|jobId>` explains one session's state.
+#   fleet [ls|show|name] [args]    Unified managed-job + Claude Code peer view. `ls` is default;
+#                                  `ls --names` lazily names uncached sessions; `name --refresh`
+#                                  refreshes the bounded cache; `show <selector>` explains one.
 #   parity                         Sync Claude skills + local MCP servers into Devin (skip cloud)
 #   image   [-m MODEL] "<prompt>" [out.png]   Text-to-image, backend AUTO-RESOLVED (never hardcode
 #                                  which is "installed", detect it): codex gpt-image-2 (KEYLESS,
@@ -246,6 +247,9 @@ OSRC_OBLIGATIONS="$OSRC_HOME/obligations.jsonl"
 OSRC_WAKE_QUEUE="$OSRC_HOME/wake-queue.jsonl"
 OSRC_WAKE_ACK="$OSRC_HOME/wake-acks.jsonl"
 OSRC_FLEET_SNAPSHOT="$OSRC_HOME/fleet-snapshot.json"
+OSRC_FLEET_DIR="${OSRC_FLEET_DIR:-$OSRC_HOME/fleet}"
+OSRC_FLEET_NAMES="${OSRC_FLEET_NAMES:-$OSRC_FLEET_DIR/names.jsonl}"
+OSRC_FLEET_NAME_LIMIT="${OSRC_FLEET_NAME_LIMIT:-12}"
 OSRC_HEARTBEAT="$OSRC_HOME/heartbeat"
 OSRC_CLAUDE_SESSIONS_DIR="${OSRC_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}"
 OSRC_CLAUDE_PROJECTS_DIR="${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
@@ -2058,6 +2062,80 @@ _fleet_transcript_path() { # <session-id> <cwd>
   printf '%s/%s/%s.jsonl\n' "$OSRC_CLAUDE_PROJECTS_DIR" "$slug" "$session_id"
 }
 
+_fleet_transcript_mtime() { # <session-id> <cwd>
+  local path value
+  path="$(_fleet_transcript_path "$1" "$2")"
+  [ -f "$path" ] && [ ! -L "$path" ] || { printf '0'; return 0; }
+  value="$(stat -f '%m' "$path" 2>/dev/null)" || value="$(stat -c '%Y' "$path" 2>/dev/null)" || value=0
+  case "$value" in ''|*[!0-9]*) value=0 ;; esac
+  printf '%s' "$value"
+}
+
+_fleet_name_cache_get() { # <session-id> <transcript-mtime>
+  local session_id="$1" mtime="$2"
+  [ -f "$OSRC_FLEET_NAMES" ] && [ ! -L "$OSRC_FLEET_NAMES" ] || return 1
+  jq -rR --arg id "$session_id" --argjson mtime "$mtime" '
+    fromjson? | select(.session_id==$id and .transcript_mtime==$mtime) | .display_name // empty
+  ' "$OSRC_FLEET_NAMES" 2>/dev/null | tail -1
+}
+
+_fleet_name_cache_append() { # <record-json>
+  local record="$1" rc=0
+  printf '%s' "$record" | jq -e '
+    (.session_id|type)=="string" and (.transcript_mtime|type)=="number" and
+    (.display_name|type)=="string" and (.display_name|length)>0' >/dev/null 2>&1 || return 1
+  _mkdir_private "$OSRC_FLEET_DIR" || return 1
+  [ ! -L "$OSRC_FLEET_NAMES" ] && [ ! -L "$OSRC_FLEET_NAMES.lock" ] || return 1
+  ( umask 077; : >> "$OSRC_FLEET_NAMES" ) 2>/dev/null || return 1
+  chmod 600 "$OSRC_FLEET_NAMES" 2>/dev/null || true
+  _state_lock_acquire "$OSRC_FLEET_NAMES" || return 1
+  printf '%s\n' "$record" >> "$OSRC_FLEET_NAMES" 2>/dev/null || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$OSRC_FLEET_NAMES" || rc=1
+  _state_lock_release "$OSRC_FLEET_NAMES"
+  return "$rc"
+}
+
+_fleet_name_signals() { # <session-id> <cwd>; JSON with bounded first/last text
+  local path
+  path="$(_fleet_transcript_path "$1" "$2")"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  jq -sr '
+    def role: .message.role? // .role? // "";
+    def text:
+      (.message.content? // .content? // null) as $c
+      | if ($c|type)=="string" then $c
+        elif ($c|type)=="array" then [$c[]? | select(.type?=="text") | .text? // ""] | join(" ")
+        else "" end
+      | gsub("[[:cntrl:]]"; " ") | gsub("[[:space:]]+"; " ");
+    [ .[] | select(type=="object" and role=="user") | text | select(length>0) ] as $users
+    | [ .[] | select(type=="object" and role=="assistant") | text | select(length>0) ] as $assistants
+    | {first_task:(($users[0] // "")[0:600]),latest_activity:(($assistants[-1] // "")[0:400])}
+    | select((.first_task|length)>0 or (.latest_activity|length)>0)' "$path" 2>/dev/null
+}
+
+_fleet_name_clean() { # stdin model output; accept one safe 4-8 word line
+  tr '\r\t' '  ' | sed -E '/^[[:space:]]*(OSRC::|>>>|\[outsourcerer\]|```)/d; s/^[[:space:]"'"'"']+//; s/[[:space:]"'"'"']+$//' |
+    awk 'NF>=4 && NF<=8 && length($0)<=100 && $0 !~ /[{}<>]/ {print; exit}' | sed 's/[[:cntrl:]]/ /g'
+}
+
+_fleet_name_model() { # <prompt>; cheap lane first, then native fallbacks
+  local prompt="$1" model output name
+  for model in glm-5.2 haiku sol; do
+    case "$model" in
+      glm-5.2) have devin || continue ;;
+      haiku) have claude || continue ;;
+      sol) have codex || continue ;;
+    esac
+    output="$(OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 OSRC_CLOUD_ACK=1 OSRC_HEARTBEAT_DISABLED=1 \
+      "$SCRIPT_PATH" run -m "$model" "$prompt" 2>/dev/null)" || continue
+    name="$(printf '%s\n' "$output" | _fleet_name_clean)"
+    [ -n "$name" ] || continue
+    printf '%s' "$name"
+    return 0
+  done
+  return 1
+}
+
 _fleet_ended_state() { # <session-id> <cwd>; print done|stopped|failed|ended
   local path
   path="$(_fleet_transcript_path "$1" "$2")"
@@ -2076,7 +2154,7 @@ _fleet_ended_state() { # <session-id> <cwd>; print done|stopped|failed|ended
     | ($rows | to_entries | map(select(.value | role=="assistant")) | last) as $assistant
     | ($rows | to_entries | map(select(.value | role=="user")) | last) as $user
     | ($rows | last // {}) as $last
-    | (($last.type? // "") | ascii_downcase) as $last_type
+    | (((($last.type? // "") + " " + ($last.subtype? // ""))) | ascii_downcase) as $last_type
     | (($last | text) | ascii_downcase) as $last_text
     | if ($last | has_tool_error)
           or ($last_type | test("error|abort|failure"))
@@ -2085,13 +2163,32 @@ _fleet_ended_state() { # <session-id> <cwd>; print done|stopped|failed|ended
       elif $assistant != null and ($assistant.value | has_tool_use)
            and ($user == null or $user.key < $assistant.key)
       then "stopped"
-      elif $user != null and ($user.value | text | length) > 0
-           and ($assistant == null or $user.key > $assistant.key)
+      elif $user != null and ($assistant == null or $user.key > $assistant.key)
       then "stopped"
       elif $assistant != null and ($assistant.value | text | length) > 0
            and (($assistant.value | has_tool_use) | not)
       then "done"
       else "ended" end' 2>/dev/null || printf 'ended'
+}
+
+_fleet_transcript_waiting() { # <session-id> <cwd>; true for an unanswered permission/question prompt
+  local path
+  path="$(_fleet_transcript_path "$1" "$2")"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  tail -n 32 "$path" 2>/dev/null | jq -es '
+    def role: .message.role? // .role? // "";
+    def content: .message.content? // .content? // null;
+    map(select(type=="object")) as $rows
+    | ($rows | to_entries | map(select(.value | role=="assistant")) | last) as $assistant
+    | ($rows | to_entries | map(select(.value | role=="user")) | last) as $user
+    | ($rows | last // {}) as $last
+    | (((($last.type? // "") + " " + ($last.subtype? // "")) | ascii_downcase | test("permission.*(request|prompt|waiting)"))
+      or ($assistant != null
+          and ($user == null or $user.key < $assistant.key)
+          and (($assistant.value | content) as $c
+               | ($c|type)=="array"
+               and any($c[]?; .type?=="tool_use" and (.name?=="AskUserQuestion" or (.name?|test("permission"; "i")))))))' \
+    >/dev/null 2>&1
 }
 
 _fleet_state_label() { # <machine-state>
@@ -2116,7 +2213,7 @@ _fleet_cc_peer_observations() {
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
   local status updated status_updated status_age socket waiting_for now_ms fresh_min fresh_ms alive fresh item
   local live_proc_start liveness_evidence
-  local fleet_state state_label evidence worked transcript_bytes self_key="" self_rc=0 self_value
+  local fleet_state state_label evidence worked transcript_bytes transcript_mtime cached_name display_name self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
   local self_ancestors=" $(_fleet_self_ancestors 2>/dev/null) "
@@ -2155,12 +2252,20 @@ _fleet_cc_peer_observations() {
     version="$(printf '%s' "$raw" | jq -r '.version // ""')"
     kind="$(printf '%s' "$raw" | jq -r '.kind // "interactive"')"
     name="$(printf '%s' "$raw" | jq -r '.name // "(unnamed)"')"; [ -n "$name" ] || name="(unnamed)"
+    transcript_mtime="$(_fleet_transcript_mtime "$session_id" "$cwd")"
+    cached_name="$(_fleet_name_cache_get "$session_id" "$transcript_mtime")" || cached_name=""
+    if [ -n "$cached_name" ]; then display_name="$cached_name"
+    elif [ "$name" = "(unnamed)" ]; then display_name="$name"
+    else display_name="$name (unnamed)"; fi
     job_id="$(printf '%s' "$raw" | jq -r '.jobId // ""')"
     status="$(printf '%s' "$raw" | jq -r '.status // "unknown"')"
     status_updated="$(printf '%s' "$raw" | jq -r '.statusUpdatedAt // .updatedAt // 0')"
     case "$status_updated" in ''|*[!0-9]*) status_updated=0 ;; esac
     socket="$(printf '%s' "$raw" | jq -r '.messagingSocketPath // ""')"
     waiting_for="$(printf '%s' "$raw" | jq -r '.waitingFor // ""')"
+    if [ -z "$waiting_for" ] && [ "$alive" = 1 ] && _fleet_transcript_waiting "$session_id" "$cwd"; then
+      waiting_for="transcript permission prompt"
+    fi
     if [ "$status_updated" -gt 0 ] && [ "$now_ms" -ge "$status_updated" ]; then
       status_age=$(( (now_ms - status_updated) / 1000 ))
     else
@@ -2169,13 +2274,10 @@ _fleet_cc_peer_observations() {
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
     transcript_bytes="$(_fleet_transcript_bytes "$session_id" "$cwd")"
     worked=0; [ "$transcript_bytes" -gt 0 ] 2>/dev/null && worked=1
-    if [ "$alive" = 0 ]; then
-      fleet_state="$(_fleet_ended_state "$session_id" "$cwd")"
-    else
-      fleet_state="$(_fleet_classify "$status" "$status_age" "$worked" "$alive" "$waiting_for")"
-    fi
+    fleet_state="$(_fleet_classify "$status" "$status_age" "$worked" "$alive" "$waiting_for" "$session_id" "$cwd")"
     state_label="$(_fleet_state_label "$fleet_state")"
     evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for" "$transcript_bytes" "$alive" "$liveness_evidence")"
+    [ "$alive" != 0 ] || evidence="$evidence; transcript tail=$fleet_state"
     self_value=0
     if [ "$self_rc" = 0 ] && [ "$self_key" = "$pid:$session_id:$proc_start" ]; then
       self_value=1
@@ -2187,15 +2289,15 @@ _fleet_cc_peer_observations() {
       esac
     fi
     item="$(jq -cn --arg session_id "$session_id" --arg endpoint "cc:$pid" --arg cwd "$cwd" \
-      --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
+      --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" --arg display_name "$display_name" \
       --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "$self_value" \
       --arg fleet_state "$fleet_state" --arg state_label "$state_label" --arg evidence "$evidence" --arg waiting_for "$waiting_for" \
       --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" \
-      --argjson transcript_bytes "$transcript_bytes" --argjson alive "$alive" '
+      --argjson transcript_bytes "$transcript_bytes" --argjson transcript_mtime "$transcript_mtime" --argjson alive "$alive" '
       {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
-       observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
+       observed_model:"",task_summary:$name,display_name:$display_name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
        status_age:$status_age,alive:($alive == 1),occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
-       self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:$transcript_bytes,kind:$kind,cc_version:$version,
+       self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:$transcript_bytes,transcript_mtime:$transcript_mtime,kind:$kind,cc_version:$version,
        job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
        state:$fleet_state,state_label:$state_label,state_evidence:$evidence,
        waiting_for:(if $waiting_for=="" then null else $waiting_for end),composer_state:"unknown",claim:null,
@@ -2210,11 +2312,16 @@ _fleet_cc_peer_observations() {
   fi
 }
 
-_fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1] [alive:0|1|unknown] [waiting-for]
-  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" alive="${4:-unknown}" waiting_for="${5:-}" stall="${OSRC_STALL_SECS:-600}"
+_fleet_classify() { # <raw-status> [age] [worked] [alive] [waiting-for] [session-id] [cwd]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" alive="${4:-unknown}" waiting_for="${5:-}"
+  local session_id="${6:-}" cwd="${7:-}" stall="${OSRC_STALL_SECS:-600}"
   case "$age" in ''|*[!0-9]*) age=0 ;; esac
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
-  [ "$alive" != 0 ] || { printf 'dead'; return 0; }
+  if [ "$alive" = 0 ]; then
+    if [ -n "$session_id" ] && [ -n "$cwd" ]; then _fleet_ended_state "$session_id" "$cwd"
+    else printf 'ended'; fi
+    return 0
+  fi
   [ -z "$waiting_for" ] || { printf 'blocked?'; return 0; }
   case "$status" in
     waiting|permission-waiting|needs-input|needs_you) printf 'blocked?' ;;
@@ -2331,7 +2438,8 @@ _fleet_snapshot_collect() {
           cc_session_id:$peer.session_id,cc_pid:$peer.pid,cc_status:$peer.cc_status,
           cc_alive:$peer.alive,cc_state:$peer.state,cc_state_label:$peer.state_label,cc_state_evidence:$peer.state_evidence,
           status_age:$peer.status_age,occ_key:$peer.occ_key,self:$peer.self,
-          transcript_bytes:$peer.transcript_bytes,cwd:$peer.cwd,socket:$peer.socket,
+          transcript_bytes:$peer.transcript_bytes,transcript_mtime:$peer.transcript_mtime,
+          display_name:$peer.display_name,cwd:$peer.cwd,socket:$peer.socket,
           kind:$peer.kind,cc_version:$peer.cc_version
         } + (if $peer.alive == true and ($peer.status_age // ($stall + 1)) <= $stall then {
           state:$peer.state,state_label:$peer.state_label,state_evidence:$peer.state_evidence,
@@ -2987,7 +3095,7 @@ _fleet_ls_group() { # <snapshot-json> <owner> <heading>
     [ "$needs" = 1 ] && needs='⚠needs-you' || needs=''
     printf '%-24.24s %-11.11s %-15.15s %-16.16s %-8.8s %-34.34s %s\n' "$name" "$kind" "$model" "$state" "$age" "$cwd" "$needs"
   done < <(printf '%s' "$snapshot" | jq -r --arg owner "$owner" '.items[] | select(.owner==$owner) |
-    [(.task_summary // .job_id // .session_id // "(unnamed)"),(.kind // .harness // "-"),
+    [(.display_name // .task_summary // .job_id // .session_id // "(unnamed)"),(.kind // .harness // "-"),
      (if ((.observed_model // "")|length)>0 then .observed_model elif ((.requested_model // "")|length)>0 then .requested_model else (.lane // "-") end),
      (.state_label // .state // "unknown"),(.status_age // 0),(.started_at // 0),(.cwd // "-"),
      (if (.state_label=="Waiting on you" or .state_label=="Maybe stuck") then 1 else 0 end),(.self // 0)]
@@ -2996,16 +3104,21 @@ _fleet_ls_group() { # <snapshot-json> <owner> <heading>
 }
 
 cmd_fleet_ls() {
-  local include_self=0 json=0 snapshot
+  local include_self=0 json=0 names=0 snapshot
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --include-self) include_self=1 ;;
       --json) json=1 ;;
-      *) die "fleet ls: unknown argument '$1' (use --json or --include-self)" ;;
+      --names) names=1 ;;
+      *) die "fleet ls: unknown argument '$1' (use --json, --include-self, or --names)" ;;
     esac
     shift
   done
   snapshot="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh)" || die "fleet ls: could not collect or persist a snapshot"
+  if [ "$names" = 1 ]; then
+    _fleet_names_refresh "$snapshot" 0 "${OSRC_FLEET_NAME_LIMIT:-12}" 1 || true
+    snapshot="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh)" || die "fleet ls: could not refresh names"
+  fi
   if [ "$include_self" != 1 ]; then
     snapshot="$(printf '%s' "$snapshot" | jq -c '.items |= map(select((.self // 0) == 0))')" || return 1
   fi
@@ -3015,11 +3128,70 @@ cmd_fleet_ls() {
   _fleet_ls_group "$snapshot" external "Observed external"
 }
 
+_fleet_names_refresh() { # <snapshot-json> <force:0|1> <limit> <quiet:0|1>
+  local snapshot="$1" force="${2:-0}" limit="${3:-12}" quiet="${4:-0}"
+  local item session_id cwd raw_name mtime cached signals first latest prompt display record
+  local candidates=0 attempted=0 named=0 unavailable=0 capped=0 now
+  case "$limit" in ''|*[!0-9]*|0) limit=12 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%SZ)"
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    session_id="$(printf '%s' "$item" | jq -r '.cc_session_id // .session_id // empty')"
+    cwd="$(printf '%s' "$item" | jq -r '.cwd // empty')"
+    raw_name="$(printf '%s' "$item" | jq -r '.task_summary // "(unnamed)"')"
+    [ -n "$session_id" ] && [ -n "$cwd" ] || continue
+    mtime="$(_fleet_transcript_mtime "$session_id" "$cwd")"
+    [ "$mtime" -gt 0 ] 2>/dev/null || continue
+    cached="$(_fleet_name_cache_get "$session_id" "$mtime")" || cached=""
+    [ "$force" = 1 ] || [ -z "$cached" ] || continue
+    candidates=$((candidates + 1))
+    if [ "$attempted" -ge "$limit" ]; then capped=$((capped + 1)); continue; fi
+    signals="$(_fleet_name_signals "$session_id" "$cwd")" || continue
+    first="$(printf '%s' "$signals" | jq -r '.first_task // ""')"
+    latest="$(printf '%s' "$signals" | jq -r '.latest_activity // ""')"
+    prompt="In 4-8 words, name what this coding session is working on. First task: $first. Latest activity: $latest. Reply with ONLY the name, no quotes."
+    attempted=$((attempted + 1))
+    display="$(_fleet_name_model "$prompt")" || display=""
+    if [ -z "$display" ]; then
+      unavailable=$((unavailable + 1))
+      continue
+    fi
+    record="$(jq -cn --arg id "$session_id" --argjson mtime "$mtime" --arg name "$display" --arg raw "$raw_name" --arg ts "$now" \
+      '{schema_version:"1",session_id:$id,transcript_mtime:$mtime,display_name:$name,raw_name:$raw,created_at:$ts}')" || continue
+    _fleet_name_cache_append "$record" || continue
+    named=$((named + 1))
+    [ "$quiet" = 1 ] || printf '%s  %s\n' "$session_id" "$display"
+  done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(.owner=="cc-peer" or (.cc_session_id // "")!="")')
+  if [ "$capped" -gt 0 ]; then
+    printf 'fleet name: capped at %s sessions; %s eligible session(s) remain\n' "$limit" "$capped" >&2
+  fi
+  if [ "$unavailable" -gt 0 ]; then
+    printf 'fleet name: naming lane unavailable for %s session(s); keeping raw names marked (unnamed)\n' "$unavailable" >&2
+  fi
+  [ "$quiet" = 1 ] || printf 'fleet name: %s named, %s model attempt(s), %s eligible\n' "$named" "$attempted" "$candidates"
+  return 0
+}
+
+cmd_fleet_name() {
+  local force=0 limit="${OSRC_FLEET_NAME_LIMIT:-12}" snapshot
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --refresh) force=1 ;;
+      --limit) [ -n "${2:-}" ] || die "fleet name --limit needs a number"; limit="$2"; shift ;;
+      *) die "fleet name: unknown argument '$1' (use --refresh or --limit N)" ;;
+    esac
+    shift
+  done
+  case "$limit" in ''|*[!0-9]*|0) die "fleet name: --limit must be a positive whole number" ;; esac
+  snapshot="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh)" || die "fleet name: could not collect sessions"
+  _fleet_names_refresh "$snapshot" "$force" "$limit" 0
+}
+
 _fleet_selector_matches() { # <snapshot-json> <selector>
   local snapshot="$1" selector="$2"
   printf '%s' "$snapshot" | jq -c --arg selector "$selector" --arg q "$(printf '%s' "$selector" | tr '[:upper:]' '[:lower:]')" '
     .items[] | . as $item
-    | ((.task_summary // "") | tostring | ascii_downcase) as $name
+    | (((.display_name // "") + " " + (.task_summary // "")) | tostring | ascii_downcase) as $name
     | ((.session_id // "") | tostring) as $sid
     | ((.cc_session_id // "") | tostring) as $ccsid
     | ((.job_id // "") | tostring) as $job
@@ -3067,7 +3239,7 @@ cmd_fleet_show() {
   if [ "$json" = 1 ]; then printf '%s\n' "$item"; return 0; fi
   printf '%s' "$item" | jq -r '
     def clean(v; d): (v // d) | tostring | gsub("[[:cntrl:]]"; " ");
-    "Name: \(clean(.task_summary // .job_id // .session_id; "(unnamed)"))" +
+    "Name: \(clean(.display_name // .task_summary // .job_id // .session_id; "(unnamed)"))" +
     "\nKind: \(.owner // "unknown") / \(.kind // .harness // "unknown")" +
     "\nSession: \(.cc_session_id // .session_id // "-")" +
     "\nPID/job: \(.pid // .cc_pid // .harness_pid // "-") / \(.job_id // "-")" +
@@ -3095,7 +3267,7 @@ cmd_fleet() {
     adopt) _fleet_todo "$sub" ;;
     compact) _fleet_todo "$sub" ;;
     ls) cmd_fleet_ls "$@" ;;
-    name) _fleet_todo "$sub" ;;
+    name) cmd_fleet_name "$@" ;;
     sent) _fleet_todo "$sub" ;;
     show) cmd_fleet_show "$@" ;;
     supervise) _fleet_todo "$sub" ;;

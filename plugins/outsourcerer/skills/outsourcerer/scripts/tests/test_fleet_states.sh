@@ -30,6 +30,20 @@ printf '%s' "$peers" | jq -e '.[] | select(.session_id=="odd-start" and .alive==
   && ok "kill -0 wins when procStart cannot be safely compared" \
   || bad "odd procStart mislabeled a live process as ended"
 
+jq -cn --argjson pid "$live_pid" --argjson now "$now_ms" '
+  {pid:$pid,sessionId:"permission-wait",cwd:"/work",startedAt:$now,updatedAt:$now,
+   status:"working",statusUpdatedAt:$now,name:"prompt"}' \
+  > "$OSRC_CLAUDE_SESSIONS_DIR/permission-wait.json"
+jq -cn '{type:"assistant",message:{role:"assistant",content:[
+  {type:"tool_use",id:"ask-1",name:"AskUserQuestion",input:{question:"Approve the change?"}}
+]}}' > "$OSRC_CLAUDE_PROJECTS_DIR/-work/permission-wait.jsonl"
+peers="$(_fleet_cc_peer_observations)"
+printf '%s' "$peers" | jq -e '
+  .[] | select(.session_id=="permission-wait" and .state=="blocked?" and .state_label=="Waiting on you")
+  | select(.waiting_for=="transcript permission prompt")' >/dev/null \
+  && ok "unanswered transcript permission prompt maps to Waiting on you" \
+  || bad "permission prompt was not recognized as waiting"
+
 labels="$(_fleet_state_label working)|$(_fleet_state_label blocked?)|$(_fleet_state_label unresponsive?)|$(_fleet_state_label idle)|$(_fleet_state_label done)|$(_fleet_state_label stopped)|$(_fleet_state_label failed)|$(_fleet_state_label ended)"
 [ "$labels" = "Working|Waiting on you|Maybe stuck|Idle|Done|Stopped mid-task|Failed|Ended" ] \
   && ok "machine states map to the complete human vocabulary" \
@@ -38,6 +52,7 @@ labels="$(_fleet_state_label working)|$(_fleet_state_label blocked?)|$(_fleet_st
 [ "$(_fleet_classify working 1 1 1 approval)" = 'blocked?' ] \
   && [ "$(_fleet_classify working 601 1 1)" = 'unresponsive?' ] \
   && [ "$(_fleet_classify idle 9999 1 1)" = idle ] \
+  && [ "$(_fleet_classify waiting 1 1 0)" = ended ] \
   && ok "waitingFor, stale working, and idle classify distinctly" \
   || bad "live state classification collapsed distinct cases"
 
