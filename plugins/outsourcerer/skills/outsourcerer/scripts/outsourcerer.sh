@@ -1670,7 +1670,14 @@ _external_session_observations() { # <managed-job-items-json>
        task_summary:"managed session",last_receipt:null,source_generation:null,
        cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
        cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end)}]')" || return 1
-  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs 'sort_by(.ts // "") | group_by(.session_id)[] | last')
+  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs '
+    sort_by(.session_id, .ts // "") | group_by(.session_id)[]
+    | . as $events | ($events | last) + {
+        cc_session_id: ([$events[] | .cc_session_id // empty] | last // null),
+        cc_pid: ([$events[] | .cc_pid // empty] | last // null),
+        harness_pid: ([$events[] | .harness_pid // empty] | last // null),
+        pid_start: ([$events[] | .pid_start // empty] | last // null)
+      }')
 
   # These sources are intentionally evidence-only. Their files, pane titles, and process names do
   # not establish ownership, activity, or an input-safe composer. Discovery is bounded to files
@@ -2023,12 +2030,14 @@ _fleet_cc_cli_reconcile() { # <files-first-items-json>
 _fleet_cc_peer_observations() {
   have jq || return 1
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
-  local status updated status_updated status_age socket waiting_for now_ms fresh_ms alive item
+  local status updated status_updated status_age socket waiting_for now_ms fresh_min fresh_ms alive item
   local fleet_state evidence worked transcript_bytes self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
   now_ms=$(( $(date +%s) * 1000 ))
-  fresh_ms=$(( ${OSRC_FLEET_RECENT_MIN:-2880} * 60 * 1000 ))
+  fresh_min="${OSRC_FLEET_RECENT_MIN:-2880}"
+  case "$fresh_min" in ''|*[!0-9]*|0) fresh_min=2880 ;; esac
+  fresh_ms=$(( fresh_min * 60 * 1000 ))
   while IFS= read -r path; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
     raw="$(jq -c . "$path" 2>/dev/null)" || continue
