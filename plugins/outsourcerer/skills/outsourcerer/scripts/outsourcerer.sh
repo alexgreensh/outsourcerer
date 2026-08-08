@@ -1939,7 +1939,8 @@ _external_reply() { # <session-id> <message>
 _fleet_cc_peer_observations() {
   have jq || return 1
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
-  local status updated status_updated socket now_ms fresh_ms alive item
+  local status updated status_updated status_age socket waiting_for now_ms fresh_ms alive item
+  local fleet_state evidence worked
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   now_ms=$(( $(date +%s) * 1000 ))
   fresh_ms=$(( ${OSRC_FLEET_RECENT_MIN:-2880} * 60 * 1000 ))
@@ -1967,22 +1968,28 @@ _fleet_cc_peer_observations() {
     status_updated="$(printf '%s' "$raw" | jq -r '.statusUpdatedAt // .updatedAt // 0')"
     case "$status_updated" in ''|*[!0-9]*) status_updated=0 ;; esac
     socket="$(printf '%s' "$raw" | jq -r '.messagingSocketPath // ""')"
+    waiting_for="$(printf '%s' "$raw" | jq -r '.waitingFor // ""')"
     if [ "$status_updated" -gt 0 ] && [ "$now_ms" -ge "$status_updated" ]; then
-      status_updated=$(( (now_ms - status_updated) / 1000 ))
+      status_age=$(( (now_ms - status_updated) / 1000 ))
     else
-      status_updated=0
+      status_age=0
     fi
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
+    worked=0; [ "$updated" -gt "$started" ] 2>/dev/null && worked=1
+    fleet_state="$(_fleet_classify "$status" "$status_age" "$worked")"
+    evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for")"
     item="$(jq -cn --arg session_id "$session_id" --arg endpoint "cc:$pid" --arg cwd "$cwd" \
       --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
       --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "?" \
-      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_updated" '
+      --arg fleet_state "$fleet_state" --arg evidence "$evidence" --arg waiting_for "$waiting_for" \
+      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" '
       {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
        observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
        status_age:$status_age,occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
        self:$self,transcript_bytes:0,kind:$kind,cc_version:$version,
        job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
-       state:"unknown",state_evidence:("CC status=" + $status),composer_state:"unknown",claim:null,
+       state:$fleet_state,state_evidence:$evidence,
+       waiting_for:(if $waiting_for=="" then null else $waiting_for end),composer_state:"unknown",claim:null,
        requested_model:null,lane:null,effort:null,harness_pid:$pid,pid_start:$proc_start,
        last_receipt:null,source_generation:null}')" || return 1
     items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
@@ -1990,14 +1997,44 @@ _fleet_cc_peer_observations() {
   printf '%s' "$items"
 }
 
-_fleet_classify() {
-  case "$1" in
+_fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" stall="${OSRC_STALL_SECS:-600}"
+  case "$age" in ''|*[!0-9]*) age=0 ;; esac
+  case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
+  case "$status" in
+    waiting|permission-waiting|needs-input|needs_you) printf 'blocked?' ;;
+    working|busy)
+      if [ "$age" -gt "$stall" ]; then printf 'unresponsive?'; else printf 'working'; fi ;;
+    idle)
+      if [ "$worked" = 1 ] && [ "$age" -gt "$stall" ]; then printf 'blocked?'; else printf 'idle'; fi ;;
     running|launching|stalled\?|exploring\?) printf 'working' ;;
     done|done?) printf 'completed' ;;
     blocked|permission-blocked) printf 'blocked' ;;
     failed|timeout|wedged|canceled|interrupted) printf 'dead' ;;
-    idle) printf 'idle' ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+_fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [waiting-for]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" waiting_for="${4:-}" stall="${OSRC_STALL_SECS:-600}"
+  case "$age" in ''|*[!0-9]*) age=0 ;; esac
+  case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
+  case "$status" in
+    waiting|permission-waiting|needs-input|needs_you)
+      printf 'CC status=%s%s' "$status" "${waiting_for:+: $waiting_for}" ;;
+    working|busy)
+      if [ "$age" -gt "$stall" ]; then
+        printf 'CC status=%s unchanged for %ss; long turn or approval wall' "$status" "$age"
+      else
+        printf 'CC status=%s, updated %ss ago' "$status" "$age"
+      fi ;;
+    idle)
+      if [ "$worked" = 1 ] && [ "$age" -gt "$stall" ]; then
+        printf 'CC status=idle after recorded activity, unchanged for %ss; may be blocked' "$age"
+      else
+        printf 'CC status=idle, updated %ss ago' "$age"
+      fi ;;
+    *) printf 'raw status=%s' "$status" ;;
   esac
 }
 
