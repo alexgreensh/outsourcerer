@@ -2100,10 +2100,11 @@ _fleet_cc_peer_observations() {
       --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
       --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "$self_value" \
       --arg fleet_state "$fleet_state" --arg evidence "$evidence" --arg waiting_for "$waiting_for" \
-      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" --argjson transcript_bytes "$transcript_bytes" '
+      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" \
+      --argjson transcript_bytes "$transcript_bytes" --argjson alive "$alive" '
       {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
        observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
-       status_age:$status_age,occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
+       status_age:$status_age,alive:($alive == 1),occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
        self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:$transcript_bytes,kind:$kind,cc_version:$version,
        job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
        state:$fleet_state,state_evidence:$evidence,
@@ -2154,7 +2155,8 @@ _fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' d job state item now snapshot canonical generation
+  local items='[]' cc_items='[]' d job state item now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}"
+  case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
@@ -2174,7 +2176,7 @@ _fleet_snapshot_collect() {
   # A managed Claude lane has both a tmux registry identity and a CC peer identity. Merge the
   # CC observation into the managed row when spawn-time sessionId (preferred) or PID matches;
   # ownership and lane stay managed, while the fresher CC status fields win.
-  items="$(jq -cn --argjson items "$items" --argjson peers "$cc_items" '
+  items="$(jq -cn --argjson items "$items" --argjson peers "$cc_items" --argjson stall "$stall" '
     reduce $peers[] as $peer ($items;
       ([range(0; length) as $i
         | select((.[$i].cc_session_id // "") == $peer.session_id
@@ -2184,11 +2186,14 @@ _fleet_snapshot_collect() {
       | if $match == null then . + [$peer]
         else .[$match] = (.[$match] + {
           cc_session_id:$peer.session_id,cc_pid:$peer.pid,cc_status:$peer.cc_status,
+          cc_alive:$peer.alive,cc_state:$peer.state,cc_state_evidence:$peer.state_evidence,
           status_age:$peer.status_age,occ_key:$peer.occ_key,self:$peer.self,
           transcript_bytes:$peer.transcript_bytes,cwd:$peer.cwd,socket:$peer.socket,
-          kind:$peer.kind,cc_version:$peer.cc_version,state:$peer.state,
-          state_evidence:$peer.state_evidence,started_at:($peer.started_at // .[$match].started_at)
-        })
+          kind:$peer.kind,cc_version:$peer.cc_version
+        } + (if $peer.alive == true and ($peer.status_age // ($stall + 1)) <= $stall then {
+          state:$peer.state,state_evidence:$peer.state_evidence,
+          started_at:($peer.started_at // .[$match].started_at)
+        } else {} end))
         end)
     | map(select(.owner != "external" or
         ((.harness_pid | tonumber? // -1) as $pid | all($peers[]; .pid != $pid))))')" || return 1
@@ -2234,7 +2239,7 @@ _fleet_digest() {
       "Charted Next") filter='.state == "idle"' ;;
     esac
     printf '%s\n' "$section"
-    printf '%s' "$snapshot" | jq -r ".items[] | select($filter) | \"- \(.job_id // .session_id // \"unknown\") [\(.state)] \((.task_summary // \"unknown\") | tostring | gsub(\"[[:cntrl:]]\"; \" \") | .[0:80])\"" || return 1
+    printf '%s' "$snapshot" | jq -r ".items[] | select(.owner != \"cc-peer\") | select($filter) | \"- \(.job_id // .session_id // \"unknown\") [\(.state)] \((.task_summary // \"unknown\") | tostring | gsub(\"[[:cntrl:]]\"; \" \") | .[0:80])\"" || return 1
   done
 }
 
@@ -2262,8 +2267,8 @@ _heartbeat_line() {
     # would split the one-line pulse; an escape sequence could rewrite the terminal) and cap length.
     def clean(v; d; n): (v // d) | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ")
       | (if length > n then .[0:n] + "…" else . end);
-    (.items | map(select(.owner != "external"))) as $m
-    | (.items | map(select(.owner == "external")) | length) as $ext
+    (.items | map(select(.owner != "external" and .owner != "cc-peer"))) as $m
+    | (.items | map(select(.owner == "external" or .owner == "cc-peer")) | length) as $ext
     | ([$m[] | select(.state == "working")]) as $work
     | ([$m[] | select(.state == "blocked" or .state == "unknown")]) as $attn
     | ([.items[] | select(.model_pin? != null)]) as $flips
