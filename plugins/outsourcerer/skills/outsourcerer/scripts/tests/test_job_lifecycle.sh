@@ -146,6 +146,40 @@ OSRC_POLL=1 _supervise "$jdb" 1 3 30 -- sh -c 'printf "%s\n" ">>> banner"; for i
   && ok "a delegate writing files survives the stall window while silent" \
   || bad "silent-but-working delegate was killed (got '$(cat "$jdb/status" 2>/dev/null)')"
 
+# --- A live process that never initializes gets its own short, lane-agnostic deadline. ------------
+# Launch reconciliation only catches jobs with no process. A delegate can be alive but stuck before
+# its first model turn (for example in a SessionStart hook or parked cloud backend), leaving only the
+# disclosure header forever. That is not an after-init stall and must not inherit its much longer
+# lane/tier window.
+jdni="$OSRC_HOME/jobs/no-init"; mkdir -p "$jdni"; printf '{"cwd":"%s"}' "$W" > "$jdni/meta.json"
+OSRC_NOINIT_SECS=2 OSRC_POLL=1 _supervise "$jdni" 3 4 30 -- sh -c \
+  'printf "%s\n" ">>> disclosure" "    tier=capable, wrapper metadata"; sleep 30 & printf "%s\n" "$!" > "$1"; wait' sh \
+  "$jdni/child-pid" >/dev/null 2>&1
+ni_pid="$(cat "$jdni/pid" 2>/dev/null)"
+ni_child="$(cat "$jdni/child-pid" 2>/dev/null)"
+[ "$(cat "$jdni/status" 2>/dev/null)" = "wedged" ] \
+  && ok "a live delegate with no first output is marked wedged at the no-init deadline" \
+  || bad "no-init delegate status is '$(cat "$jdni/status" 2>/dev/null)'"
+kill -0 "$ni_pid" 2>/dev/null \
+  && bad "the no-init delegate process survived its deadline" \
+  || ok "the no-init delegate process is killed"
+kill -0 "$ni_child" 2>/dev/null \
+  && bad "a no-init delegate descendant survived its deadline" \
+  || ok "the no-init delegate process tree is killed"
+ni_reason='no-init: delegate never started within 2s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot'
+[ "$(cat "$jdni/reason" 2>/dev/null)" = "$ni_reason" ] \
+  && ok "the no-init failure records the actionable reason" \
+  || bad "no-init reason is '$(cat "$jdni/reason" 2>/dev/null)'"
+
+# Once the delegate emits real output, only the existing after-init watchdog applies. This child
+# runs beyond OSRC_NOINIT_SECS after speaking, proving the no-init arm is permanently disarmed.
+jdok="$OSRC_HOME/jobs/init-ok"; mkdir -p "$jdok"; printf '{"cwd":"%s"}' "$W" > "$jdok/meta.json"
+OSRC_NOINIT_SECS=2 OSRC_POLL=1 _supervise "$jdok" 10 15 30 -- sh -c \
+  'printf "%s\n" ">>> disclosure" "model turn started"; sleep 3; printf "%s\n" "OSRC::DONE"' >/dev/null 2>&1
+[ "$(cat "$jdok/status" 2>/dev/null)" = "done" ] \
+  && ok "a promptly initialized delegate is not killed by the no-init watchdog" \
+  || bad "initialized delegate was marked '$(cat "$jdok/status" 2>/dev/null)'"
+
 # The check must use POSIX -newer: -newermt @epoch is a GNU extension that BSD find fails to parse,
 # which would make this guard quietly dead on macOS — passing tests, protecting nothing.
 grep -v '^[[:space:]]*#' "$SRC" | grep -q -- '-newermt' && bad "filesystem-progress check uses the GNU-only -newermt" \

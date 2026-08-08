@@ -5038,6 +5038,11 @@ _supervise() {
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
+  # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
+  # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
+  # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
+  # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
@@ -5068,6 +5073,21 @@ _supervise() {
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
+    # Launcher/disclosure lines begin with `>>> `, except the capable/frontier detail emitted by
+    # _tier_banner. Anything else is real delegate output and proves initialization. Re-check the
+    # content rather than trusting byte growth, because headers grow out.log without a model turn.
+    if [ "$initialized" = "0" ] \
+       && grep -aqv -e '^>>> ' -e '^    tier=\(frontier\|capable\),' "$jd/out.log" 2>/dev/null; then
+      initialized=1
+    fi
+    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then
+      local _noinit_reason
+      _noinit_reason="no-init: delegate never started within ${noinit}s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
+      echo wedged > "$jd/status"
+      printf '%s\n' "$_noinit_reason" > "$jd/reason" 2>/dev/null || true
+      echo "[outsourcerer] job $(basename "$jd"): $_noinit_reason" >&2
+      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+    fi
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       _job_made_writes "$jd" "$_jcwd" || {
         echo "exploring?" > "$jd/status"
