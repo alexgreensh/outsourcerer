@@ -27,6 +27,8 @@ eval "$(sed -n '/^_timeout() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_elapsed_secs() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_descends_from() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_owned_by_live_job() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_pid_start_valid() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_pid_start_identity() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_owned_by_dead_job() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_process_rows() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_orphan_pids() {/,/^}/p' "$SRC")"
@@ -66,6 +68,14 @@ done
   && ok "timeout boundary preserves an already-successful child exit" \
   || bad "successful boundary child was overwritten with rc=$boundary_rc"
 
+# Once the watchdog finds a live child at expiry, a TERM trap cannot turn that
+# timeout into a false success by exiting zero.
+term_trap_rc=0
+_timeout 1 sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >/dev/null || term_trap_rc=$?
+[ "$term_trap_rc" = 124 ] \
+  && ok "timeout reports 124 when an expired child traps TERM and exits zero" \
+  || bad "TERM-trapping expired child returned rc=$term_trap_rc instead of 124"
+
 # A manual old process, including the --model= form, is not outsourcerer's to reap.
 printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model=glm-5-2 -p task" > "$TEST_ROOT/ps.rows"
 orphans="$(OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_orphan_pids)"
@@ -86,6 +96,8 @@ printf '%s %s %s %s %s\n' 424242 1 3600 devin 'devin --model glm-5-2 -p task' > 
 mkdir -p "$OSRC_JOBS/dead-job"
 printf '%s\n' 424242 > "$OSRC_JOBS/dead-job/pid"
 printf '%s\n' 999999 > "$OSRC_JOBS/dead-job/supervisor_pid"
+_pid_start_identity(){ printf '%s\n' 'Sun Aug 9 12:34:56 2026'; }
+_pid_start_identity 424242 > "$OSRC_JOBS/dead-job/pid_start"
 : > "$OSRC_JOBS/dead-job/out.log"
 touch -t 202001010000 "$OSRC_JOBS/dead-job/out.log"
 _kill_tree(){ printf '%s\n' "$1" >> "$TEST_ROOT/killed-pids"; }
@@ -93,6 +105,15 @@ OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_
 [ "$(cat "$TEST_ROOT/killed-pids" 2>/dev/null)" = 424242 ] \
   && ok "zombie preflight reaps only the mocked old unowned Devin model PID" \
   || bad "zombie preflight did not invoke bounded cleanup for the mocked orphan"
+
+# A stale dead-job record must not claim a different process that reused its PID.
+: > "$TEST_ROOT/killed-pids"
+printf '%s\n' 'Mon Jan 1 00:00:00 2001' > "$OSRC_JOBS/dead-job/pid_start"
+OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_preflight 2>/dev/null
+[ ! -s "$TEST_ROOT/killed-pids" ] \
+  && ok "dead-job PID reuse with a different start time is never reaped" \
+  || bad "stale dead-job record reaped a PID-reused process"
+_pid_start_identity 424242 > "$OSRC_JOBS/dead-job/pid_start"
 
 # Even proven ownership cannot override current output activity.
 : > "$TEST_ROOT/killed-pids"
@@ -114,6 +135,12 @@ own_quota_state="$(_devin_probe_classify 1 "$own_quota_text")"
 [ "$own_quota_state" = "free-model-quota-exhausted" ] \
   && ok "glm own weekly quota exhaustion selects another free model" \
   || bad "free-model quota classified '$own_quota_state'"
+
+retargeted_quota_text='The weekly quota for swe-1-7 has been exhausted'
+retargeted_quota_state="$(_devin_probe_classify 1 "$retargeted_quota_text" swe-1-7)"
+[ "$retargeted_quota_state" = "free-model-quota-exhausted" ] \
+  && ok "retargeted SWE probe classifies quota against its actual model" \
+  || bad "retargeted SWE probe classified '$retargeted_quota_state'"
 
 # The persisted-job classifier must make the same distinction. Historically it
 # converted this exact paid message into RETRY-DIFFERENT-LANE/quota-exhausted

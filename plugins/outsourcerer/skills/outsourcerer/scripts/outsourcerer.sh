@@ -537,15 +537,19 @@ _timeout() {
   # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
   # which is the same reason it exists for the job supervisor.
-  ( sleep "$secs" 2>/dev/null; : > "$expired_file"; _kill_tree "$cmd_pid" 2>/dev/null ) &
+  ( sleep "$secs" 2>/dev/null
+    if kill -0 "$cmd_pid" 2>/dev/null; then
+      : > "$expired_file"
+      _kill_tree "$cmd_pid" 2>/dev/null
+    fi
+  ) &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
   cat "$out_file"
-  # A successful child owns its real result even if the watchdog marker landed
-  # at the same boundary instant. The marker proves the timer woke, not that it
-  # killed a still-running command.
-  if [ -f "$expired_file" ] && [ "$rc" -ne 0 ]; then rc=124; fi
+  # The marker is written only after the timer proves the child is still live.
+  # Once that happens, the timeout owns the result even if a TERM trap exits 0.
+  if [ -f "$expired_file" ]; then rc=124; fi
   rm -f "$out_file" "$expired_file" 2>/dev/null || true
   return "$rc"
 }
@@ -602,7 +606,7 @@ _devin_pid_owned_by_live_job() {
 # Prove that candidate is the recorded delegate child of an outsourcerer job
 # whose supervisor is gone. Unknown/unrecorded processes are never ours to reap.
 _devin_pid_owned_by_dead_job() {
-  local candidate="${1:-}" jd child supervisor
+  local candidate="${1:-}" jd child supervisor recorded_start current_start
   [ -d "$OSRC_JOBS" ] || return 1
   for jd in "$OSRC_JOBS"/*; do
     [ -d "$jd" ] && [ -s "$jd/pid" ] && [ -s "$jd/supervisor_pid" ] || continue
@@ -611,6 +615,11 @@ _devin_pid_owned_by_dead_job() {
     [ "$child" = "$candidate" ] || continue
     case "$supervisor" in ''|*[!0-9]*) continue ;; esac
     kill -0 "$supervisor" 2>/dev/null && continue
+    [ -s "$jd/pid_start" ] || continue
+    recorded_start="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$jd/pid_start" 2>/dev/null)"
+    [ -n "$recorded_start" ] || continue
+    current_start="$(_pid_start_identity "$candidate" 2>/dev/null)" || continue
+    [ "$current_start" = "$recorded_start" ] || continue
     printf '%s\n' "$jd"
     return 0
   done
@@ -677,9 +686,9 @@ _devin_zombie_preflight() {
 # Convert a bounded glm probe result into a lane verdict. Paid quota language is
 # deliberately a separate state, never a free-lane-down result.
 _devin_probe_classify() {
-  local rc="${1:-1}" text="${2:-}"
+  local rc="${1:-1}" text="${2:-}" model="${3:-${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}}"
   if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s' "$text" | grep -qi 'pong'; then printf 'up'; return; fi
-  if _devin_free_own_quota 'glm-5-2' "$text"; then printf 'free-model-quota-exhausted'; return; fi
+  if _devin_free_own_quota "$model" "$text"; then printf 'free-model-quota-exhausted'; return; fi
   if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)'; then
     printf 'paid-tier-exhausted'; return
   fi
@@ -698,8 +707,9 @@ _devin_free_own_quota() { # <model> <text>
 # A real, minimal request against the known plan-included model. _timeout is
 # bash-native, captures output safely, and returns 124 when the bound fires.
 _devin_free_probe() {
+  local model="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
   _timeout "${OSRC_DEVIN_PROBE_SECS:-30}" \
-    devin --model glm-5-2 --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
+    devin --model "$model" --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
 }
 
 # Required before every Devin launch path. Reaping comes before even auth status,
@@ -2570,9 +2580,15 @@ _fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [
 }
 
 _fleet_peer_state_authoritative() { # <state> <peer-observation-age> <alive>
-  local state="${1:-}" age="${2:-0}" alive="${3:-false}" stall="${OSRC_STALL_SECS:-600}"
+  local state="${1:-}" age="${2:-0}" alive="${3:-false}" stall="${OSRC_STALL_SECS:-600}" blocked_ttl="${OSRC_PEER_BLOCKED_TTL:-3600}"
   [ "$alive" = true ] || [ "$alive" = 1 ] || return 1
-  case "$state" in blocked|blocked\?) return 0 ;; esac
+  case "$state" in
+    blocked|blocked\?)
+      case "$age:$blocked_ttl" in *[!0-9:]*) return 1 ;; esac
+      [ "$age" -le "$blocked_ttl" ]
+      return
+      ;;
+  esac
   case "$age:$stall" in *[!0-9:]*) return 1 ;; esac
   [ "$age" -le "$stall" ]
 }
@@ -5224,19 +5240,22 @@ _delegate_has_model_output() { # <out.log> <progress>
   [ -f "$log" ] || return 1
   awk '
     /^[[:space:]]*$/ { next }
+    /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
+    /"type"[[:space:]]*:[[:space:]]*"(message|agent_message|assistant_message|model_output|item\.completed|text|content_block_delta|content_block_start|output_text)"/ { found=1; exit }
+    /"role"[[:space:]]*:[[:space:]]*"assistant"/ { found=1; exit }
+    /"(text|content)"[[:space:]]*:[[:space:]]*"[^"[:space:]][^"]*"/ { found=1; exit }
     /^>>>[[:space:]]/ { next }
     /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
     /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
-    /^[[:space:]]*(Connecting|Connection error|Retrying|Waiting|Initializing|Starting)([.[:space:]:]|$)/ { next }
-    /^[[:space:]]*[|\\\/-][[:space:]]*$/ { next }
+    /^[[:space:]]*(Connecting|connecting|Connection|Authenticating|Loading|Starting|Initializing|Warming)([.[:space:]:]|$)/ { next }
     /^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][[:space:]]*/ { next }
-    /^[[:space:]]*(Hook|Tool|SessionStart|PreToolUse|PostToolUse)(:|[[:space:]])/ { next }
-    /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
-    /^\{.*"role"[[:space:]]*:[[:space:]]*"assistant".*"content"[[:space:]]*:/ { found=1; exit }
-    /^\{.*"type"[[:space:]]*:[[:space:]]*"(message|agent_message|assistant_message|model_output|item\.completed)".*("content"|"text"|"delta")[[:space:]]*:/ { found=1; exit }
-    /^[[:space:]]*[\{\[]/ { next }
-    { found=1; exit }
+    $0 !~ /^[[:space:]]*[\{\[]/ {
+      text=$0
+      gsub(/[[:space:]]/, "", text)
+      if (text ~ /^[[:punct:]]*$/) next
+      if (length(text) >= 24) { found=1; exit }
+    }
     END { exit(found ? 0 : 1) }
   ' "$log" 2>/dev/null
 }

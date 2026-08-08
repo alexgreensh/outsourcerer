@@ -42,16 +42,31 @@ type _devin_live_mtime >/dev/null 2>&1 || { echo "FAIL: _devin_live_mtime not de
 # Cold-start chatter, spinner frames, hook notices, and untyped streaming JSON
 # must leave the no-init watchdog armed. Only positive assistant output disarms it.
 noise="$TMP/no-init-noise.log"; progress="$TMP/no-init-progress"
-printf '%s\n' 'Connecting...' '⠋' 'Connection error: retrying' 'Hook: SessionStart' '{"delta":"warming up"}' > "$noise"
-if _delegate_has_model_output "$noise" "$progress"; then
-  bad "cold-start noise falsely proves model initialization"
-else
-  ok "cold-start noise leaves the no-init watchdog armed"
-fi
-printf '%s\n' '{"role":"assistant","content":"ready"}' >> "$noise"
-_delegate_has_model_output "$noise" "$progress" \
-  && ok "structured assistant content proves model initialization" \
-  || bad "structured assistant content did not initialize the model"
+for line in \
+  'Authenticating credentials' \
+  'connecting...' \
+  'Connection error' \
+  '⠋' \
+  '{"foo":1}'
+do
+  printf '%s\n' "$line" > "$noise"
+  if _delegate_has_model_output "$noise" "$progress"; then
+    bad "no-init noise falsely proves model initialization: $line"
+  else
+    ok "no-init noise leaves watchdog armed: $line"
+  fi
+done
+for line in \
+  '{"type":"text","text":"Here is the fix"}' \
+  '{"type":"content_block_delta","delta":{"text":"x"}}' \
+  '{"role":"assistant","content":"hello there this is real output"}' \
+  'This is substantial plaintext model output.'
+do
+  printf '%s\n' "$line" > "$noise"
+  _delegate_has_model_output "$noise" "$progress" \
+    && ok "known model-output signal initializes: $line" \
+    || bad "known model-output signal was ignored: $line"
+done
 
 # ---------------------------------------------------------------- unit
 # A log belonging to a LIVE descendant is found.
