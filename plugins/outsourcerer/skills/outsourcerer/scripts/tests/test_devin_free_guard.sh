@@ -31,6 +31,8 @@ eval "$(sed -n '/^_devin_pid_owned_by_dead_job() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_process_rows() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_orphan_pids() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_zombie_preflight() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_devin_is_free_model() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_devin_free_own_quota() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_probe_classify() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_free_probe() {/,/^}/p' "$SRC")"
 
@@ -98,6 +100,12 @@ quota_state="$(_devin_probe_classify 1 "$quota_text")"
   && ok "paid weekly quota exhaustion does not classify free GLM as down" \
   || bad "paid quota classified '$quota_state', expected paid-tier-exhausted"
 
+own_quota_text='The weekly quota for glm-5-2 has been exhausted'
+own_quota_state="$(_devin_probe_classify 1 "$own_quota_text")"
+[ "$own_quota_state" = "free-model-quota-exhausted" ] \
+  && ok "glm own weekly quota exhaustion selects another free model" \
+  || bad "free-model quota classified '$own_quota_state'"
+
 # The persisted-job classifier must make the same distinction. Historically it
 # converted this exact paid message into RETRY-DIFFERENT-LANE/quota-exhausted
 # for every Devin model, including free GLM.
@@ -112,6 +120,19 @@ classify_out="$(OSRC_HOME="$OSRC_HOME" OSRC_JOBS="$OSRC_JOBS" bash "$SRC" classi
 case "$classify_out" in
   RETRY-DIFFERENT-LANE*) bad "post-hoc classifier marked free GLM quota-exhausted ($classify_out)" ;;
   *) ok "post-hoc classifier does not gate free GLM on paid quota text" ;;
+esac
+
+own_quota_job="$OSRC_JOBS/own-quota-on-free-glm"
+mkdir -p "$own_quota_job"
+printf '%s\n' '{"id":"own-quota-on-free-glm","lane":"dv","provider":"devin","model":"glm-5.2","cwd":""}' > "$own_quota_job/meta.json"
+printf '%s\n' failed > "$own_quota_job/status"
+printf '%s\n' 1 > "$own_quota_job/exit"
+printf '%s\n' 'Error: The weekly quota for glm-5.2 has been exhausted' > "$own_quota_job/out.log"
+: > "$own_quota_job/last.txt"
+own_classify_out="$(OSRC_HOME="$OSRC_HOME" OSRC_JOBS="$OSRC_JOBS" bash "$SRC" classify own-quota-on-free-glm 2>/dev/null)"
+case "$own_classify_out" in
+  RETRY-DIFFERENT-LANE*$'\t'free-model-quota-exhausted) ok "free model own-quota retries on the other free lane" ;;
+  *) bad "free model own-quota classified '$own_classify_out'" ;;
 esac
 
 grep -q '_devin_guard_before_delegation "$MODEL"' "$SRC" \

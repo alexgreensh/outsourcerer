@@ -676,11 +676,20 @@ _devin_zombie_preflight() {
 _devin_probe_classify() {
   local rc="${1:-1}" text="${2:-}"
   if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s' "$text" | grep -qi 'pong'; then printf 'up'; return; fi
-  if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|quota.*exhausted'; then
+  if _devin_free_own_quota 'glm-5-2' "$text"; then printf 'free-model-quota-exhausted'; return; fi
+  if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)'; then
     printf 'paid-tier-exhausted'; return
   fi
   [ "$rc" -eq 124 ] 2>/dev/null && { printf 'down-timeout'; return; }
   printf 'down-error'
+}
+
+_devin_free_own_quota() { # <model> <text>
+  local model="${1:-}" text="${2:-}" normalized
+  _devin_is_free_model "$model" || return 1
+  normalized="$(printf '%s' "$model" | tr '._' '--')"
+  printf '%s' "$text" | grep -qiE "(weekly|free)[ -]?(usage[ -]?)?quota.{0,80}(${model//./\\.}|$normalized)|(${model//./\\.}|$normalized).{0,80}(weekly|free)[ -]?(usage[ -]?)?quota" \
+    && printf '%s' "$text" | grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)'
 }
 
 # A real, minimal request against the known plan-included model. _timeout is
@@ -6445,6 +6454,10 @@ _classify_job() {
     case "$_lane" in
       devin|dv)
         if _devin_is_free_model "$_jmodel"; then
+          if _devin_free_own_quota "$_jmodel" "$_qlines"; then
+            printf 'RETRY-DIFFERENT-LANE\tfree-model-quota-exhausted'
+            return 0
+          fi
           printf 'REAL-FAIL\tpaid-quota-signal-does-not-gate-free-tier'
           return 0
         fi ;;
