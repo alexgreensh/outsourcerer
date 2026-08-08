@@ -1958,6 +1958,21 @@ _fleet_transcript_bytes() { # <CC-session-id> <cwd>
   printf '%s\n' "$bytes"
 }
 
+# Ancestor PID chain of this controller process. Independent of cwd/procStart, so a peer whose PID
+# is one of these is always a self-CANDIDATE (tag "?" fail-closed) even when unique confirmation
+# fails; a peer whose PID is NOT here is definitively not us and lists normally. This is what keeps
+# an unconfirmed self from blanket-hiding the whole fleet.
+_fleet_self_ancestors() {
+  local current="${OSRC_FLEET_SELF_PID:-$$}" out="" hops=0
+  while [ "$current" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
+    out="$out $current"
+    current="$(ps -o ppid= -p "$current" 2>/dev/null | tr -d ' ')"
+    case "$current" in ''|*[!0-9]*) break ;; esac
+    hops=$((hops + 1))
+  done
+  printf '%s' "$out"
+}
+
 # Print this controller's CC occupancy key. The current shell walks upward because Claude Code is
 # the ancestor that launched it; child-process scans point the wrong way. A tied best match prints
 # "?" and returns 2 so callers can fail closed for actions while still tagging the listing honestly.
@@ -2041,6 +2056,7 @@ _fleet_cc_peer_observations() {
   local fleet_state evidence worked transcript_bytes self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
+  local self_ancestors=" $(_fleet_self_ancestors 2>/dev/null) "
   now_ms=$(( $(date +%s) * 1000 ))
   fresh_min="${OSRC_FLEET_RECENT_MIN:-2880}"
   case "$fresh_min" in ''|*[!0-9]*|0) fresh_min=2880 ;; esac
@@ -2093,10 +2109,14 @@ _fleet_cc_peer_observations() {
     fleet_state="$(_fleet_classify "$status" "$status_age" "$worked" "$alive")"
     evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for" "$transcript_bytes" "$alive" "$liveness_evidence")"
     self_value=0
-    if [ "$self_rc" = 2 ] || [ "$self_key" = "?" ]; then
-      self_value="?"
-    elif [ "$self_key" = "$pid:$session_id:$proc_start" ]; then
+    if [ "$self_rc" = 0 ] && [ "$self_key" = "$pid:$session_id:$proc_start" ]; then
       self_value=1
+    else
+      # Only a peer whose PID is an ancestor of this process is a self-candidate; tag it "?"
+      # (fail-closed for actions). Everything else is definitively not us and lists normally.
+      case "$self_ancestors" in
+        *" $pid "*) self_value="?" ;;
+      esac
     fi
     item="$(jq -cn --arg session_id "$session_id" --arg endpoint "cc:$pid" --arg cwd "$cwd" \
       --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
