@@ -514,19 +514,18 @@ need_devin() {
 
 logged_in() { devin auth status 2>/dev/null | grep -qi "Logged in"; }
 
-# _timeout <secs> <cmd...> -> run with a wall-clock cap. Uses coreutils timeout/gtimeout when present
-# (Linux, or macOS with coreutils), else a portable watchdog (works on stock macOS + Git Bash, which
-# ship NO `timeout`). Keeps the interactive `brief` handshake from stalling on a slow Devin backend.
+# _timeout <secs> <cmd...> -> run with a wall-clock cap using only bash process control.
+# The same implementation runs on Linux, stock macOS, and Git Bash, so lane health never
+# depends on an optional platform executable being installed.
 _timeout() {
-  local secs="$1" out_file; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
-  if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
+  local secs="$1" out_file expired_file; shift
   # Do not let descendants inherit a command-substitution pipe.  Even after
   # the direct child is killed, one missed grandchild holding that pipe keeps
   # the caller blocked until it exits.  Capture through a private file instead
   # and emit it only after the direct child has been reaped.
-  _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || true
-  out_file="$(mktemp "$OSRC_HOME/.timeout.XXXXXX" 2>/dev/null || mktemp)" || return 1
+  _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || return 1
+  out_file="$(mktemp "$OSRC_HOME/.bound.XXXXXX" 2>/dev/null)" || return 1
+  expired_file="$out_file.expired"
   chmod 600 "$out_file" 2>/dev/null || true
   "$@" >"$out_file" 2>&1 &
   local cmd_pid=$!
@@ -535,13 +534,127 @@ _timeout() {
   # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
   # which is the same reason it exists for the job supervisor.
-  ( sleep "$secs" 2>/dev/null; _kill_tree "$cmd_pid" 2>/dev/null ) &
+  ( sleep "$secs" 2>/dev/null; : > "$expired_file"; _kill_tree "$cmd_pid" 2>/dev/null ) &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
   cat "$out_file"
-  rm -f "$out_file" 2>/dev/null || true
+  if [ -f "$expired_file" ]; then rc=124; fi
+  rm -f "$out_file" "$expired_file" 2>/dev/null || true
   return "$rc"
+}
+
+# Convert ps(1)'s portable [[days-]hours:]minutes:seconds elapsed field to seconds.
+_devin_elapsed_secs() {
+  local elapsed="${1//[[:space:]]/}" days=0 clock h=0 m=0 s=0
+  [ -n "$elapsed" ] || { printf '0'; return; }
+  case "$elapsed" in *-*) days="${elapsed%%-*}"; clock="${elapsed#*-}" ;; *) clock="$elapsed" ;; esac
+  local oldifs="$IFS" parts=()
+  IFS=:; parts=($clock); IFS="$oldifs"
+  case "${#parts[@]}" in
+    3) h="${parts[0]}"; m="${parts[1]}"; s="${parts[2]}" ;;
+    2) m="${parts[0]}"; s="${parts[1]}" ;;
+    1) s="${parts[0]}" ;;
+    *) printf '0'; return ;;
+  esac
+  printf '%s' $((10#$days * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s))
+}
+
+# rc0 when candidate is the owner itself or a descendant of it. The depth cap
+# prevents a corrupt/cyclic process table from making a health check unbounded.
+_devin_pid_descends_from() {
+  local candidate="${1:-}" owner="${2:-}" depth=0 parent
+  case "$candidate:$owner" in *[!0-9:]*|:*) return 1 ;; esac
+  while [ "$candidate" -gt 1 ] 2>/dev/null && [ "$depth" -lt 64 ]; do
+    [ "$candidate" = "$owner" ] && return 0
+    parent="$(ps -o ppid= -p "$candidate" 2>/dev/null | tr -d '[:space:]')"
+    case "$parent" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$parent" = "$candidate" ] && return 1
+    candidate="$parent"; depth=$((depth+1))
+  done
+  return 1
+}
+
+# A devin process is owned only when a currently-live outsourcerer delegate or
+# supervisor PID in jobs/* is itself the process or one of its ancestors.
+_devin_pid_owned_by_live_job() {
+  local candidate="${1:-}" jd owner_file owner
+  [ -d "$OSRC_JOBS" ] || return 1
+  for jd in "$OSRC_JOBS"/*; do
+    [ -d "$jd" ] || continue
+    for owner_file in "$jd/pid" "$jd/supervisor_pid"; do
+      [ -s "$owner_file" ] || continue
+      owner="$(cat "$owner_file" 2>/dev/null | tr -d '[:space:]')"
+      case "$owner" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$owner" 2>/dev/null || continue
+      _devin_pid_descends_from "$candidate" "$owner" && return 0
+    done
+  done
+  return 1
+}
+
+# Emit normalized rows: pid ppid elapsed-seconds executable full-command.
+# OSRC_DEVIN_PS_FILE is a deterministic test seam, never used in normal runs.
+_devin_process_rows() {
+  if [ -n "${OSRC_DEVIN_PS_FILE:-}" ]; then cat "$OSRC_DEVIN_PS_FILE" 2>/dev/null; return; fi
+  local pid ppid elapsed executable command age
+  while read -r pid ppid elapsed executable command; do
+    case "$pid:$ppid" in *[!0-9:]*|:*) continue ;; esac
+    age="$(_devin_elapsed_secs "$elapsed")"
+    printf '%s %s %s %s %s\n' "$pid" "$ppid" "$age" "$executable" "$command"
+  done < <(ps -axo pid=,ppid=,etime=,comm=,command= 2>/dev/null)
+}
+
+# List old devin --model processes which have no live outsourcerer job owner.
+# Output is intentionally machine-readable for doctor diagnostics and regression tests.
+_devin_orphan_pids() {
+  local min_age=$(( ${OSRC_DEVIN_ZOMBIE_MINS:-30} * 60 ))
+  local pid ppid age executable command base
+  while read -r pid ppid age executable command; do
+    case "$pid:$ppid:$age" in *[!0-9:]*|:*|*::* ) continue ;; esac
+    base="${executable##*/}"
+    [ "$base" = "devin" ] || continue
+    case " $command " in *" --model "*) ;; *) continue ;; esac
+    [ "$age" -ge "$min_age" ] 2>/dev/null || continue
+    _devin_pid_owned_by_live_job "$pid" && continue
+    printf '%s %s %s\n' "$pid" "$age" "$command"
+  done < <(_devin_process_rows)
+}
+
+# Reap lane-blocking orphan processes before probing or dispatching. Each tree
+# gets the existing TERM/grace/KILL treatment, and only positively identified
+# old, unowned devin model processes are touched.
+_devin_zombie_preflight() {
+  local rows pid age command count=0
+  rows="$(_devin_orphan_pids)"
+  [ -n "$rows" ] || return 0
+  while read -r pid age command; do
+    [ -n "$pid" ] || continue
+    printf '>>> [devin preflight] reaping orphaned lane-blocker PID %s (age=%sm, no live outsourcerer job): %s\n' \
+      "$pid" "$((age / 60))" "$command" >&2
+    _kill_tree "$pid"
+    count=$((count+1))
+  done <<< "$rows"
+  printf '>>> [devin preflight] reaped %s orphaned devin process(es); continuing with a bounded free-tier probe.\n' "$count" >&2
+}
+
+# Convert a bounded glm probe result into a lane verdict. Paid quota language is
+# deliberately a separate state, never a free-lane-down result.
+_devin_probe_classify() {
+  local rc="${1:-1}" text="${2:-}"
+  if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s' "$text" | grep -qi 'pong'; then printf 'up'; return; fi
+  if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|quota.*exhausted'; then
+    printf 'paid-tier-exhausted'; return
+  fi
+  [ "$rc" -eq 124 ] 2>/dev/null && { printf 'down-timeout'; return; }
+  printf 'down-error'
+}
+
+# A real, minimal request against the known plan-included model. _timeout is
+# bash-native, captures output safely, and returns 124 when the bound fires.
+_devin_free_probe() {
+  _timeout "${OSRC_DEVIN_PROBE_SECS:-30}" \
+    devin --model glm-5-2 --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
 }
 
 # Extract an optional leading "-m MODEL" / "--model MODEL"; echoes MODEL, sets REST via global.
@@ -619,7 +732,7 @@ _devin_model_for() {
 # free-tier models must run regardless of the paid-quota display.
 _devin_is_free_model() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|swe|swe-1.7|swe-1-7|swe-1.7-lightning) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -628,7 +741,6 @@ _devin_is_free_model() {
 _devin_free_or_alias() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     glm|glm-5.2|z-ai/glm-5.2) printf 'glm' ;;
-    deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro) printf 'deepseek' ;;
     *) printf '' ;;
   esac
 }
