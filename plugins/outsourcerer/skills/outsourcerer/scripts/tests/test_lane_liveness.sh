@@ -64,18 +64,24 @@ esac
   || bad "the probe ran unbounded (${el}s)"
 
 # --- source-level: the three lanes must actually be probed, and honestly labelled ----------------
-for lane in 'codex-native luna' 'claude-native haiku' 'devin liveness'; do
+for lane in 'codex-native luna' 'claude-native haiku'; do
   grep -q "$lane: READY" "$SRC" && grep -q "$lane: INSTALLED BUT NOT ANSWERING" "$SRC" \
     && ok "$lane distinguishes READY from INSTALLED BUT NOT ANSWERING" \
     || bad "$lane has no real liveness classification"
 done
+grep -q 'Devin GLM (free): UP' "$SRC" && grep -q 'Devin GLM (free): GENUINELY DOWN' "$SRC" \
+  && ok "Devin GLM free lane distinguishes UP from a timed-out genuinely-down probe" \
+  || bad "Devin GLM free lane has no explicit UP/genuinely-down classification"
+grep -q 'Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available' "$SRC" \
+  && ok "doctor separates paid-tier exhaustion from free GLM/SWE availability" \
+  || bad "doctor still exposes a blanket Devin quota/down verdict"
 
 grep -q 'NOT probed for liveness' "$SRC" \
   && ok "the unprobed lane lines say so instead of implying readiness" \
   || bad "lanes are still described as ready from binary existence alone"
 
 # The devin probe must send a REAL request rather than re-reading the login file.
-grep -q 'devin --model glm-5.2 --permission-mode auto -p "reply PONG"' "$SRC" \
+grep -q 'devin --model glm-5-2 --permission-mode auto --respect-workspace-trust false -p PONG' "$SRC" \
   && ok "the devin lane is probed with a real bounded request" \
   || bad "the devin lane still reports readiness from a login-file check only"
 

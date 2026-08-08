@@ -512,7 +512,7 @@ need_devin() {
   have devin || die "devin CLI not on PATH (~/.local/bin). Install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"
 }
 
-logged_in() { devin auth status 2>/dev/null | grep -qi "Logged in"; }
+logged_in() { _timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null | grep -qi "Logged in"; }
 
 # _timeout <secs> <cmd...> -> run with a wall-clock cap using only bash process control.
 # The same implementation runs on Linux, stock macOS, and Git Bash, so lane health never
@@ -602,7 +602,7 @@ _devin_process_rows() {
     case "$pid:$ppid" in *[!0-9:]*|:*) continue ;; esac
     age="$(_devin_elapsed_secs "$elapsed")"
     printf '%s %s %s %s %s\n' "$pid" "$ppid" "$age" "$executable" "$command"
-  done < <(ps -axo pid=,ppid=,etime=,comm=,command= 2>/dev/null)
+  done < <(ps -axo pid=,ppid=,etime=,ucomm=,command= 2>/dev/null)
 }
 
 # List old devin --model processes which have no live outsourcerer job owner.
@@ -655,6 +655,14 @@ _devin_probe_classify() {
 _devin_free_probe() {
   _timeout "${OSRC_DEVIN_PROBE_SECS:-30}" \
     devin --model glm-5-2 --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
+}
+
+# Required before every Devin launch path. Reaping comes before even auth status,
+# because an orphaned model process can wedge all CLI subcommands. Availability
+# reporting is handled separately by the mandatory bounded GLM probe in doctor.
+_devin_guard_before_delegation() {
+  _devin_zombie_preflight
+  logged_in || die "Not logged in to Devin, or bounded auth status did not answer. Run interactively: ! devin auth login"
 }
 
 # Extract an optional leading "-m MODEL" / "--model MODEL"; echoes MODEL, sets REST via global.
@@ -737,7 +745,7 @@ _devin_is_free_model() {
   esac
 }
 # The OpenRouter ALIAS a free Devin model also runs under (so the advertised fallback resolves to the
-# OpenRouter lane, not back to Devin). Empty when there is no OpenRouter sibling (swe/kimi are Devin-only).
+# OpenRouter lane, not back to Devin). Empty when there is no OpenRouter sibling (SWE is Devin-only).
 _devin_free_or_alias() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     glm|glm-5.2|z-ai/glm-5.2) printf 'glm' ;;
@@ -835,7 +843,10 @@ _lane_model_for() {
 # The probe model is invalid ON PURPOSE, so devin exits nonzero, `|| true` keeps pipefail from
 # leaking that expected failure to the caller (otherwise `doctor` exits 1 on a clean run).
 live_models() {
-  { devin --model "__list__" -p "x" </dev/null 2>&1 | grep -i "^Available:" | sed 's/^Available:[[:space:]]*//'; } || true
+  local out rc=0
+  out="$(_timeout "${OSRC_DEVIN_PROBE_SECS:-30}" devin --model "__list__" -p "x" </dev/null 2>&1)" || rc=$?
+  [ "$rc" -eq 124 ] && return 0
+  printf '%s\n' "$out" | grep -i "^Available:" | sed 's/^Available:[[:space:]]*//' || true
 }
 
 # delegate <perm> <sandbox-flag-or-empty> [-m MODEL] "<task>"
@@ -849,13 +860,13 @@ delegate() {
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
   [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory: prompt directive; Devin lane has no native effort knob)\n' "$EFFORT" >&2
   need_devin
-  logged_in || die "Not logged in to Devin. Run interactively:  ! devin auth login"
   local sbx=(); [ -n "$sandbox" ] && sbx=(--sandbox)
   # Aliases must become real Devin ids here, at the last point before the CLI: parse_model kept the
   # token verbatim, and `devin --model glm` is a hard launch failure.
   local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
   [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
   MODEL="$_dvmodel"
+  _devin_guard_before_delegation "$MODEL"
   # Bug-1 clarification: glm/swe (and the other plan-included ids) are FREE-tier on Devin. Devin's own
   # output shows a paid ACU balance that can read "0% remaining" — that figure is a SEPARATE paid pool
   # and does not gate a free-tier model. Say so up front so a "0%" line is never misread as a block.
@@ -923,6 +934,9 @@ delegate() {
       printf '>>> [free-tier] if that was a plan/quota refusal, note "%s" is free-tier and should not be gated by a paid balance. %s Check Devin'\''s own plan with: devin usage.\n' "$MODEL" "$_fallback" >&2
     fi
   fi
+  if [ "$rc" -ne 0 ] && [ "$_dv_free" = "0" ] && [ -n "$_dverr" ] && _devin_quota_refusal "$_dverr"; then
+    printf '>>> [devin quota] paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still available. Retry on one of those plan-included models.\n' >&2
+  fi
   [ -n "$_dverr" ] && rm -f "$_dverr" 2>/dev/null
   return "$rc"
 }
@@ -932,9 +946,9 @@ continue_turn() {
   [ "${#REST[@]}" -gt 0 ] || die "no follow-up prompt given"
   local prompt="${REST[*]}"
   need_devin
-  logged_in || die "Not logged in. Run:  ! devin auth login"
   # Same alias-resolution requirement as delegate(): an unresolved alias fails the continue at launch.
   MODEL="$(_devin_resolve_model "$MODEL")"
+  _devin_guard_before_delegation "$MODEL"
   echo ">>> devin -c --model $MODEL -p (continue)" >&2
   # `continue` must NOT silently escalate a read-only conversation to accept-edits.
   # Devin -c inherits the existing conversation's permission mode; forcing accept-edits here
@@ -6311,9 +6325,19 @@ _classify_job() {
     fi
   fi
   if [ -n "$_quota_hit" ]; then
-    # Distinguish plan-quota (Devin free-tier, wait/reset) from paid-credit exhaustion by whether
-    # the lane is a free-tier lane. Both route the same way; the distinction is for the human.
-    local _lane; _lane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
+    # A paid ACU refusal is not a lane block for plan-included GLM/SWE. The old
+    # provider-only check labelled these jobs quota-exhausted and routed away
+    # from a free lane that a bounded probe could still prove healthy.
+    local _lane _jmodel
+    _lane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
+    _jmodel="$(jq -r '.model // ""' "$jd/meta.json" 2>/dev/null)"
+    case "$_lane" in
+      devin|dv)
+        if _devin_is_free_model "$_jmodel"; then
+          printf 'REAL-FAIL\tpaid-quota-signal-does-not-gate-free-tier'
+          return 0
+        fi ;;
+    esac
     case "$_lane" in
       devin|dv) printf 'RETRY-DIFFERENT-LANE\tquota-exhausted' ;;
       *)        printf 'RETRY-DIFFERENT-LANE\tcredit-exhausted' ;;
@@ -10496,7 +10520,7 @@ _winpty_session() {
       local LAUNCH=()
       case "$PROVIDER" in
         devin|dv)
-          need_devin; logged_in || die "Not logged in. Run:  ! devin auth login"
+          need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
           LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
@@ -10672,7 +10696,7 @@ session() {
       local launch
       case "$PROVIDER" in
         devin|dv)
-          need_devin; logged_in || die "Not logged in. Run:  ! devin auth login"
+          need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
           launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
@@ -11350,31 +11374,45 @@ doctor() {
   echo "    tier cache: $( [ -f "$OSRC_MODELS_JSON" ] && echo "$OSRC_MODELS_JSON (refresh: $0 models --refresh)" || echo 'none, run: $0 models --refresh (name-regex fallback in use)')"
   echo "  -- Devin lane --"
   if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
+  _devin_zombie_preflight
+  local _dauth=0
   if logged_in; then
-    echo "  auth:  $(devin auth status 2>/dev/null | awk -F: '/Tier/{gsub(/^[ \t]+/,"",$2);print "logged in ("$2" tier)"}')  [status check only — NOT probed for liveness; set OSRC_DOCTOR_PING=1 to verify it answers]"
+    _dauth=1
+    echo "  auth: logged in (bounded status check answered)"
   else
     echo "  auth:  NOT logged in -> run:  ! devin auth login"
   fi
-  # Same lesson as the agy probe, applied to the default lane: `devin auth status` reads a login file,
-  # which proves nothing about whether the backend answers. A bounded real request is the only thing
-  # that catches an expired token, an exhausted plan/ACU window, or an outage. glm-5.2 is the lowest
-  # plan-impact probe and `auto` only auto-approves READ-ONLY tools, so the probe cannot
-  # edit anything. </dev/null keeps it non-interactive.
-  if [ "${OSRC_DOCTOR_PING:-0}" = "1" ] && logged_in; then
-    local _dpt _drc=0
-    _dpt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT_DEVIN:-45}" devin --model glm-5.2 --permission-mode auto -p "reply PONG" </dev/null 2>&1)" || _drc=$?
-    if [ "$_drc" -eq 0 ] && printf '%s' "$_dpt" | grep -qi 'pong'; then
-      echo "  devin liveness: READY (probed just now with glm-5.2, answered)"
-    else
-      case "$_dpt" in
-        *[Aa]uth*|*401*|*403*|*[Uu]nauthor*|*"ot logged"*)
-          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — auth rejected / not logged in. Fix: run 'devin auth login'." ;;
-        *429*|*[Rr]ate*|*[Ll]imit*|*[Qq]uota*|*[Ee]xhaust*|*ACU*)
-          echo "  devin liveness: INSTALLED BUT NOT ANSWERING — Devin plan/ACU budget exhausted or rate-limited. Fix: wait for the window to reset, use local ($(_lane_cost_disclosure local)), or choose a priced OpenRouter model." ;;
-        *)
-          echo "  devin liveness: INSTALLED BUT NOT ANSWERING (rc=$_drc) — a real request did not come back. Treat this lane as DOWN, not ready: check your network and any *_PROXY env var (see the proxy note above), then 'devin auth login'." ;;
-      esac
+  # Free GLM health and paid ACU quota are independent states. Only a timed-out
+  # real glm-5-2 request earns the GENUINELY DOWN verdict.
+  if [ "$_doff" = "1" ]; then
+    echo "  Devin GLM (free): probe skipped (OSRC_DOCTOR_OFFLINE)"
+    echo "  Devin paid tier: usage check skipped (OSRC_DOCTOR_OFFLINE); free tier remains separate"
+  elif [ "$_dauth" = "1" ]; then
+    local _dpt _drc=0 _dstate _du="" _durc=0
+    _dpt="$(_devin_free_probe 2>&1)" || _drc=$?
+    _dstate="$(_devin_probe_classify "$_drc" "$_dpt")"
+    case "$_dstate" in
+      up)
+        echo "  Devin GLM (free): UP — glm-5-2 plan-included probe answered within ${OSRC_DEVIN_PROBE_SECS:-30}s" ;;
+      paid-tier-exhausted)
+        echo "  Devin GLM (free): NOT MARKED DOWN — probe returned a paid-tier quota signal, which cannot gate glm-5-2/swe-1-7"
+        echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available" ;;
+      down-timeout)
+        echo "  Devin GLM (free): GENUINELY DOWN — glm-5-2 probe timed out after ${OSRC_DEVIN_PROBE_SECS:-30}s after orphan reap preflight" ;;
+      *)
+        echo "  Devin GLM (free): UNCONFIRMED (bounded probe rc=$_drc, did not time out) — not reporting the free lane unavailable without a timed-out probe" ;;
+    esac
+    _du="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin usage 2>&1)" || _durc=$?
+    if [ "$_dstate" != "paid-tier-exhausted" ]; then
+      if [ "$(_devin_probe_classify "$_durc" "$_du")" = "paid-tier-exhausted" ]; then
+        echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available"
+      else
+        echo "  Devin paid tier: no exhaustion signal detected (bounded usage check; free-tier verdict is independent)"
+      fi
     fi
+  else
+    echo "  Devin GLM (free): UNCONFIRMED — bounded auth status did not report logged in"
+    echo "  Devin paid tier: unknown; free-tier availability was not inferred from quota text"
   fi
   echo "  devin cost: $(_lane_cost_disclosure dv)"
   # Proactive diagnostics: a *_PROXY env var in this shell + devin present means devin's Rust TLS
@@ -11386,9 +11424,14 @@ doctor() {
   echo "  default model: $DEFAULT_MODEL"
   have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: jobs/status/advise/parity)" || echo "  jq:   not installed -> $( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || { [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install jq' || echo 'apt/dnf install jq'; }) (jobs/status/advise need it)"
   have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' unavailable; bg/fanout cover it" || echo "brew/apt install tmux — only needed for 'session'"))"
-  local lm; lm="$(live_models)"
-  if [ -n "$lm" ]; then echo "  live models:"; printf '%s\n' "$lm" | tr ',' '\n' | sed 's/^/    /'
-  else echo "  live models: (probe returned nothing, devin may be offline or changed its 'Available:' output)"; fi
+  local lm=""
+  if [ "$_doff" = "1" ]; then
+    echo "  live models: skipped (OSRC_DOCTOR_OFFLINE)"
+  else
+    lm="$(live_models)"
+    if [ -n "$lm" ]; then echo "  live models:"; printf '%s\n' "$lm" | tr ',' '\n' | sed 's/^/    /'
+    else echo "  live models: (bounded probe returned nothing; devin may be offline or changed its 'Available:' output)"; fi
+  fi
   return 0
 }
 
