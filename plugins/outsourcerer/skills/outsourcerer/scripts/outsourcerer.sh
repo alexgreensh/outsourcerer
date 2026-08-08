@@ -1992,6 +1992,31 @@ _fleet_self_key() {
   printf '%s\n' "$best_key"
 }
 
+_fleet_cc_cli_reconcile() { # <files-first-items-json>
+  local items="$1" agents
+  have claude || { printf '%s' "$items"; return 0; }
+  agents="$(claude agents --json --all 2>/dev/null)" || { printf '%s' "$items"; return 0; }
+  printf '%s' "$agents" | jq -e 'type=="array"' >/dev/null 2>&1 || { printf '%s' "$items"; return 0; }
+  # The CLI is authoritative only for terminal outcomes. For activity fields, the files retain
+  # precedence because statusUpdatedAt and waitingFor are fresher and more detailed there.
+  jq -cn --argjson items "$items" --argjson agents "$agents" '
+    reduce ($agents[]
+      | select((.sessionId // "") != "")
+      | select((.state // "") as $s | ["done","completed","stopped","failed","canceled","cancelled"] | index($s))) as $agent ($items;
+        ([range(0; length) as $i
+          | select(.[$i].session_id == $agent.sessionId
+                or (($agent.pid // -1) == (.[$i].pid // -2)))
+          | $i] | first) as $match
+        | if $match == null then .
+          else ($agent.state // "unknown") as $terminal
+          | .[$match] = (.[$match] + {
+              cli_state:$terminal,
+              state:(if ($terminal=="done" or $terminal=="completed") then "completed" else "dead" end),
+              state_evidence:("claude agents state=" + $terminal + " (authoritative terminal state)")
+            })
+          end)'
+}
+
 # Files are the primary CC peer registry: they are local, cheap to read, and carry fresher
 # statusUpdatedAt data than a subprocess snapshot. A peer survives enumeration when its PID is
 # live OR its own updatedAt is fresh. File mtime is deliberately not evidence of liveness.
@@ -2061,7 +2086,7 @@ _fleet_cc_peer_observations() {
        last_receipt:null,source_generation:null}')" || return 1
     items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
   done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
-  printf '%s' "$items"
+  _fleet_cc_cli_reconcile "$items"
 }
 
 _fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
