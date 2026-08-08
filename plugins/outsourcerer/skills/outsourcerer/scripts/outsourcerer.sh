@@ -136,7 +136,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.7.0"
+OSRC_VERSION="0.7.1"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -10367,7 +10367,7 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
 
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
   local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0
-  local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd
+  local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd=""
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
   case "$generation" in ''|*[!0-9]*) return 1 ;; esac

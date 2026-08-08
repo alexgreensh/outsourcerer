@@ -2,6 +2,10 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.7.1
+
+- **Fix (Linux): `fleet` and session tracking no longer crash under bash 5.** `_session_registry_append` referenced an uninitialized local (`physical_cwd`) that only bash 3.2 (macOS) tolerated; on Linux bash under `set -u` it aborted the session-effort path. Initialized it so the session registry records correctly on every platform.
+
 ## 0.7.0
 
 - **New: `fleet` — one view of every session you're running.** `fleet ls` prints a single honest list of every AI coding session Outsourcerer can see on this machine: your live **Claude Code** sessions plus **every job you delegated** through Outsourcerer, across all lanes (Codex, Devin/GLM, Fable, droid, cursor, warp, cline). No more tab-hunting to find which session is waiting on you.
