@@ -81,7 +81,10 @@ grep -q 'NOT probed for liveness' "$SRC" \
   || bad "lanes are still described as ready from binary existence alone"
 
 # The devin probe must send a REAL request rather than re-reading the login file.
-grep -q 'devin --model glm-5-2 --permission-mode auto --respect-workspace-trust false -p PONG' "$SRC" \
+# Model is parameterized ("$model") so a retargeted probe isn't misclassified as
+# paid-exhausted; the assertion still fails if the real PONG request is ever
+# replaced by a login-file check.
+grep -qE 'devin --model .+ --permission-mode auto --respect-workspace-trust false -p PONG' "$SRC" \
   && ok "the devin lane is probed with a real bounded request" \
   || bad "the devin lane still reports readiness from a login-file check only"
 
