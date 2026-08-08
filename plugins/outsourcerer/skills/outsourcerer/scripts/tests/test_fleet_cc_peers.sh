@@ -28,7 +28,7 @@ jq -cn --argjson pid "$dead_pid" --argjson now "$now_ms" '
 
 peers="$(_fleet_cc_peer_observations)"
 printf '%s' "$peers" | jq -e '
-  .[] | select(.session_id=="dead-waiting" and .state=="dead")
+  .[] | select(.session_id=="dead-waiting" and .state=="ended" and .state_label=="Ended")
   | select(.state_evidence | contains("not live"))' >/dev/null \
   && ok "fresh waiting file with a dead PID classifies dead" \
   || bad "dead PID was promoted to needs-you state"
@@ -80,7 +80,7 @@ snapshot="$(_fleet_snapshot_collect)"
 printf '%s' "$snapshot" | jq -e '
   [.items[] | select(.session_id=="stale-merged")] as $rows
   | ($rows|length)==1 and $rows[0].owner=="managed"
-    and $rows[0].state=="unknown" and $rows[0].cc_state=="dead"' >/dev/null \
+    and $rows[0].state=="unknown" and $rows[0].cc_state=="ended"' >/dev/null \
   && ok "stale CC state annotates but does not clobber a managed row" \
   || bad "stale CC state clobbered or duplicated a managed row"
 
