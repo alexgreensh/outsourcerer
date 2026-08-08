@@ -9677,7 +9677,7 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
     pid="$(jq -r '.pid // empty' "$path" 2>/dev/null)"
     cwd="$(jq -r '.cwd // empty' "$path" 2>/dev/null)"
     started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
-    case "$pid:$started" in *[!0-9:]*|:*) continue ;; esac
+    case "$pid:$started" in *[!0-9:]*|:*|*:) continue ;; esac
     [ "$cwd" = "$wanted_cwd" ] || continue
     parent="$pid"; hops=0
     while [ "$parent" != "$pane_pid" ] && [ "$parent" -gt 1 ] 2>/dev/null && [ "$hops" -lt 32 ]; do
