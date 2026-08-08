@@ -56,6 +56,15 @@ labels="$(_fleet_state_label working)|$(_fleet_state_label blocked?)|$(_fleet_st
   && ok "waitingFor, stale working, and idle classify distinctly" \
   || bad "live state classification collapsed distinct cases"
 
+OSRC_STALL_SECS=600 _fleet_peer_state_authoritative 'blocked?' 99999 true \
+  && ok "live peer blocked state remains authoritative beyond managed stall age" \
+  || bad "stale managed age dropped an authoritative needs-you observation"
+if OSRC_STALL_SECS=600 _fleet_peer_state_authoritative working 99999 true; then
+  bad "stale non-blocked peer state was treated as authoritative"
+else
+  ok "non-blocked peer observations still honor the freshness window"
+fi
+
 write_transcript(){
   local id="$1" body="$2"
   printf '%s\n' "$body" > "$OSRC_CLAUDE_PROJECTS_DIR/-work/$id.jsonl"

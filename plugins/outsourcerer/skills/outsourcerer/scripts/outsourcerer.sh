@@ -2557,6 +2557,14 @@ _fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [
   esac
 }
 
+_fleet_peer_state_authoritative() { # <state> <peer-observation-age> <alive>
+  local state="${1:-}" age="${2:-0}" alive="${3:-false}" stall="${OSRC_STALL_SECS:-600}"
+  [ "$alive" = true ] || [ "$alive" = 1 ] || return 1
+  case "$state" in blocked|blocked\?) return 0 ;; esac
+  case "$age:$stall" in *[!0-9:]*) return 1 ;; esac
+  [ "$age" -le "$stall" ]
+}
+
 _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
   local items="$1" current="$2" peer_cwd="$3" peer_real parent hops=0 candidate endpoint managed_cwd managed_real saved_start live_start
   case "$current" in ''|*[!0-9]*) return 1 ;; esac
@@ -2616,6 +2624,12 @@ _fleet_snapshot_collect() {
     [ -n "$peer" ] || continue
     peer_pid="$(printf '%s' "$peer" | jq -r '.pid // empty')"
     peer_cwd="$(printf '%s' "$peer" | jq -r '.cwd // empty')"
+    if _fleet_peer_state_authoritative \
+      "$(printf '%s' "$peer" | jq -r '.state // "unknown"')" \
+      "$(printf '%s' "$peer" | jq -r '.status_age // 0')" \
+      "$(printf '%s' "$peer" | jq -r '.alive // false')"; then
+      peer="$(printf '%s' "$peer" | jq -c '.state_authoritative=true')" || return 1
+    fi
     pane_pid="$(_fleet_managed_pane_for_peer "$items" "$peer_pid" "$peer_cwd" 2>/dev/null)" || pane_pid=""
     if [ -n "$pane_pid" ]; then
       peer="$(printf '%s' "$peer" | jq -c --argjson pane_pid "$pane_pid" '.managed_pane_pid=$pane_pid')" || return 1
@@ -2643,7 +2657,7 @@ _fleet_snapshot_collect() {
           transcript_bytes:$peer.transcript_bytes,transcript_mtime:$peer.transcript_mtime,
           display_name:$peer.display_name,cwd:$peer.cwd,socket:$peer.socket,
           kind:$peer.kind,cc_version:$peer.cc_version
-        } + (if $peer.alive == true and ($peer.status_age // ($stall + 1)) <= $stall then {
+        } + (if $peer.state_authoritative == true then {
           state:$peer.state,state_label:$peer.state_label,state_evidence:$peer.state_evidence,
           started_at:($peer.started_at // .[$match].started_at)
         } else {} end))
