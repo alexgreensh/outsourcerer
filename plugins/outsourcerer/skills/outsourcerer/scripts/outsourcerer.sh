@@ -2106,8 +2106,7 @@ _fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
     waiting|permission-waiting|needs-input|needs_you) printf 'blocked?' ;;
     working|busy)
       if [ "$age" -gt "$stall" ]; then printf 'unresponsive?'; else printf 'working'; fi ;;
-    idle)
-      if [ "$worked" = 1 ] && [ "$age" -gt "$stall" ]; then printf 'blocked?'; else printf 'idle'; fi ;;
+    idle) printf 'idle' ;;
     running|launching|stalled\?|exploring\?) printf 'working' ;;
     done|done?) printf 'completed' ;;
     blocked|permission-blocked) printf 'blocked' ;;
@@ -2129,12 +2128,7 @@ _fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [
       else
         printf 'CC status=%s, updated %ss ago' "$status" "$age"
       fi ;;
-    idle)
-      if [ "$worked" = 1 ] && [ "$age" -gt "$stall" ]; then
-        printf 'CC status=idle after transcript activity (%s bytes), unchanged for %ss; may be blocked' "$bytes" "$age"
-      else
-        printf 'CC status=idle, updated %ss ago' "$age"
-      fi ;;
+    idle) printf 'CC status=idle, updated %ss ago' "$age" ;;
     *) printf 'raw status=%s' "$status" ;;
   esac
 }
