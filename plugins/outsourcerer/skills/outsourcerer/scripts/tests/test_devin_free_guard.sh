@@ -107,7 +107,9 @@ grep -q 'paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still availab
   || bad "paid quota failure still presents as blanket Devin exhaustion"
 
 # The implementation must be bash-native even on hosts where coreutils is installed.
-if grep -Eq 'command -v (g?timeout)|then (g?timeout)[[:space:]]' "$SRC"; then
+# Match executable invocations, including a command at the start of a line or after a pipe,
+# while allowing the internal _timeout helper and prose that merely says "timeout".
+if grep -Eq '(^|[;&|[:space:]])g?timeout[[:space:]]+[0-9]' "$SRC"; then
   bad "outsourcerer still invokes an external timeout/gtimeout binary"
 else
   ok "no external timeout/gtimeout binary is used"

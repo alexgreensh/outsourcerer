@@ -8205,11 +8205,7 @@ cmd_image_codex() {
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
   local codex_cmd=(codex exec --cd "$rundir" --sandbox workspace-write --skip-git-repo-check ${_iso[@]+"${_iso[@]}"} ${_cmh[@]+"${_cmh[@]}"} --enable artifact -)
   local out_log rc=0
-  if have timeout; then
-    out_log="$(printf '%s' "$stdin_prompt" | timeout 600 "${codex_cmd[@]}" 2>&1)" || rc=$?
-  else
-    out_log="$(printf '%s' "$stdin_prompt" | "${codex_cmd[@]}" 2>&1)" || rc=$?
-  fi
+  out_log="$(printf '%s' "$stdin_prompt" | _timeout 600 "${codex_cmd[@]}" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     rm -f "$marker"
     die "codex exec exited $rc: $(printf '%s' "$out_log" | head -c 300)"
