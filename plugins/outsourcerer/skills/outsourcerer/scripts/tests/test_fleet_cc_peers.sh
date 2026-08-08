@@ -88,6 +88,35 @@ printf '%s' "$snapshot" | jq -e '
   && ok "corrupt registry PIDs degrade to null without aborting collection" \
   || bad "corrupt registry PID aborted or poisoned the snapshot"
 
+if (
+  lazy="$FIXTURE/lazy"; mkdir -p "$lazy/state/sessions" "$lazy/claude-sessions" "$lazy/claude-projects" "$lazy/home"
+  export HOME="$lazy/home" OSRC_HOME="$lazy/state"
+  export OSRC_CLAUDE_SESSIONS_DIR="$lazy/claude-sessions" OSRC_CLAUDE_PROJECTS_DIR="$lazy/claude-projects"
+  export OSRC_FLEET_SELF_PID=999998
+  set --; . "$SRC" >/dev/null 2>&1
+  tmux(){ return 1; }
+  pane_pid="$(sh -c 'printf "%s\n" "$PPID"')"
+  command sleep 30 & peer_pid=$!
+  trap 'kill "$peer_pid" 2>/dev/null || true' EXIT
+  peer_start="$(_pid_start_identity "$peer_pid")"
+  physical_cwd="$(pwd -P)"
+  jq -cn --argjson pane "$pane_pid" --arg cwd "$physical_cwd" '
+    {event:"start",session_id:"legacy-managed",provider:"cc",endpoint:"tmux:legacy-managed",
+     harness_pid:$pane,cwd:$cwd,ts:"2026-08-08T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
+  jq -cn --argjson pid "$peer_pid" --arg now "$now_ms" --arg start "$peer_start" --arg cwd "$physical_cwd" '
+    {pid:$pid,sessionId:"lazy-peer",cwd:$cwd,procStart:$start,startedAt:($now|tonumber),
+     updatedAt:($now|tonumber),status:"idle",statusUpdatedAt:($now|tonumber)}' \
+    > "$OSRC_CLAUDE_SESSIONS_DIR/lazy-peer.json"
+  lazy_snapshot="$(_fleet_snapshot_collect)"
+  printf '%s' "$lazy_snapshot" | jq -e '
+    [.items[] | select(.session_id=="legacy-managed" or .session_id=="lazy-peer")] as $rows
+    | ($rows|length)==1 and $rows[0].owner=="managed" and $rows[0].cc_session_id=="lazy-peer"' >/dev/null
+); then
+  ok "lazy ancestor reconciliation de-duplicates pre-existing managed peers"
+else
+  bad "lazy ancestor reconciliation left managed and peer rows duplicated"
+fi
+
 probe_sleeps=0
 SESSION_NAME="probe-bound"
 tmux(){ printf '%s\n' "$$"; }
