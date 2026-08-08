@@ -5022,7 +5022,15 @@ _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
 # by leaving the launcher's process tree.
 _kill_process_group() { # <pgid> <root-pid>
   local pgid="${1:-}" root="${2:-}" shell_pgid survivors tries=0
-  case "$pgid:$root" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  case "$root" in ''|*[!0-9]*)
+    echo "[outsourcerer] WARN: bounded helper cleanup lost its root PID; an orphan may remain" >&2
+    return 1 ;;
+  esac
+  case "$pgid" in ''|*[!0-9]*)
+    echo "[outsourcerer] WARN: bounded helper PID $root has no valid process group; an orphan may remain after process-tree cleanup" >&2
+    _kill_tree "$root"
+    return 1 ;;
+  esac
   shell_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
   if [ "$pgid" -le 1 ] 2>/dev/null || [ "$pgid" = "$shell_pgid" ]; then
     echo "[outsourcerer] WARN: bounded helper PID $root was not isolated in a safe process group; falling back to process-tree cleanup" >&2

@@ -19,6 +19,22 @@ if [ "${OSRC_TEST_FLEET_NAME_RUNNER:-0}" = 1 ]; then
   exit 0
 fi
 
+if [ "${OSRC_TEST_FLEET_NAME_GROUP_RUNNER:-0}" = 1 ]; then
+  model=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -m) model="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ "$model" = glm-5-2 ] || exit 1
+  # The intermediate shell exits immediately, reparenting sleep away from this
+  # runner's process tree while preserving the runner's isolated process group.
+  sh -c 'sleep 30 & printf "%s\n" "$!" > "$1"' sh "$GROUP_CHILD_FILE"
+  sleep 30
+  exit 0
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 FIXTURE="$(mktemp -d "$PWD/.test-fleet-names.XXXXXX")"
@@ -36,11 +52,12 @@ mkdir -p "$OSRC_HOME" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_CLAUDE_PROJECTS_DIR/-pr
 
 set --
 . "$SRC" >/dev/null 2>&1
+real_fleet_name_model="$(declare -f _fleet_name_model)"
 
 model_calls="$FIXTURE/model-calls"
 saved_script_path="$SCRIPT_PATH"
 saved_have="$(declare -f have)"
-SCRIPT_PATH="$0"
+SCRIPT_PATH="$HERE/test_fleet_names.sh"
 have(){ return 0; }
 export MODEL_CALLS="$model_calls" OSRC_TEST_FLEET_NAME_RUNNER=1
 fallback_output="$(_fleet_name_model 'batch prompt')"; fallback_rc=$?
@@ -162,26 +179,38 @@ printf '%s' "$signals" | jq -e '
   && ok "naming signals use first user task and latest assistant activity" \
   || bad "transcript naming signals selected the wrong messages"
 
-# A naming attempt can leave a delegate reparented away from its launcher. It remains in the
-# launcher's process group, so the bounded cleanup must reap it by PGID even after the leader exits.
-if declare -F _kill_process_group >/dev/null 2>&1; then
-  orphan_pid_file="$FIXTURE/group-orphan.pid"
-  set -m
-  ( sh -c 'sleep 30 & printf "%s\n" "$!" > "$1"; sleep 1' sh "$orphan_pid_file" ) &
-  group_leader=$!
-  group_pgid="$(ps -o pgid= -p "$group_leader" 2>/dev/null | tr -d ' ')"
-  set +m
-  tries=0
-  while [ ! -s "$orphan_pid_file" ] && [ "$tries" -lt 20 ]; do sleep 0.1; tries=$((tries+1)); done
-  group_orphan="$(cat "$orphan_pid_file" 2>/dev/null)"
-  wait "$group_leader" 2>/dev/null || true
-  _kill_process_group "$group_pgid" "$group_leader"
-  kill -0 "$group_orphan" 2>/dev/null \
-    && { kill -KILL "$group_orphan" 2>/dev/null || true; bad "process-group cleanup left a reparented naming delegate alive"; } \
-    || ok "process-group cleanup reaps a reparented naming delegate"
-else
-  bad "bounded naming attempts have no process-group cleanup helper"
+# Drive the real bounded naming path with a fake runner. Its intermediate shell reparents a child
+# before the deadline, so a process-tree-only cleanup cannot find it; the launch PGID must reap it.
+group_child_file="$FIXTURE/group-orphan.pid"
+eval "$real_fleet_name_model"
+saved_script_path="$SCRIPT_PATH"
+saved_have="$(declare -f have)"
+SCRIPT_PATH="$HERE/test_fleet_names.sh"
+have(){ [ "$1" = devin ]; }
+export OSRC_TEST_FLEET_NAME_GROUP_RUNNER=1 GROUP_CHILD_FILE="$group_child_file"
+OSRC_FLEET_NAME_TIMEOUT=1 _fleet_name_model 'bounded group fixture' >/dev/null 2>&1; group_rc=$?
+SCRIPT_PATH="$saved_script_path"
+eval "$saved_have"
+unset OSRC_TEST_FLEET_NAME_GROUP_RUNNER GROUP_CHILD_FILE
+group_orphan="$(cat "$group_child_file" 2>/dev/null)"
+orphan_live=0
+if kill -0 "$group_orphan" 2>/dev/null; then
+  orphan_stat="$(ps -o stat= -p "$group_orphan" 2>/dev/null | tr -d ' ')"
+  case "$orphan_stat" in Z*) ;; *) orphan_live=1 ;; esac
 fi
+[ "$group_rc" -ne 0 ] && [ -n "$group_orphan" ] && [ "$orphan_live" -eq 0 ] \
+  && ok "bounded naming launch reaps a reparented delegate through its process group" \
+  || { [ -n "$group_orphan" ] && kill -KILL "$group_orphan" 2>/dev/null || true; bad "bounded naming launch left a reparented delegate alive"; }
+
+# PGID discovery is best-effort. A missing value must still kill the root tree and log the orphan risk
+# rather than returning silently and blocking forever in the caller's wait.
+sleep 30 & fallback_root=$!
+_kill_process_group "" "$fallback_root" 2> "$FIXTURE/group-fallback.err" || true
+kill -0 "$fallback_root" 2>/dev/null \
+  && { kill -KILL "$fallback_root" 2>/dev/null || true; bad "missing-PGID fallback left the naming root alive"; } \
+  || grep -q 'orphan may remain' "$FIXTURE/group-fallback.err" \
+    && ok "missing-PGID cleanup falls back to the root tree and logs orphan risk" \
+    || bad "missing-PGID cleanup did not report orphan risk"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
