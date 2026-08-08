@@ -1645,7 +1645,7 @@ _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] 
 
 _external_session_observations() { # <managed-job-items-json>
   have jq || return 1
-  local items="$1" line id endpoint pid start source path name command lane requested resolved generation observed
+  local items="$1" line id endpoint pid start source path name command lane requested resolved generation observed cc_session_id cc_pid
   # Registry entries prove ownership, not a live terminal state. Preserve the managed record as
   # an observation only when it is not already represented by a managed job.
   while IFS= read -r line; do
@@ -1656,13 +1656,17 @@ _external_session_observations() { # <managed-job-items-json>
     requested="$(printf '%s' "$line" | jq -r '.requested_model // .model // empty')"
     resolved="$(printf '%s' "$line" | jq -r '.resolved_model // .model // empty')"
     generation="$(printf '%s' "$line" | jq -r '.model_generation // 1')"
+    cc_session_id="$(printf '%s' "$line" | jq -r '.cc_session_id // empty')"
+    cc_pid="$(printf '%s' "$line" | jq -r '.cc_pid // empty')"
     observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
-    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --argjson model_generation "$generation" '
+    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
        requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:null,pid_start:null,
        started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
-       task_summary:"managed session",last_receipt:null,source_generation:null}]')" || return 1
-  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null)
+       task_summary:"managed session",last_receipt:null,source_generation:null,
+       cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
+       cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end)}]')" || return 1
+  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs 'sort_by(.ts // "") | group_by(.session_id)[] | last')
 
   # These sources are intentionally evidence-only. Their files, pane titles, and process names do
   # not establish ownership, activity, or an input-safe composer. Discovery is bounded to files
@@ -1999,7 +2003,7 @@ _fleet_classify() {
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' d job state item now snapshot canonical generation
+  local items='[]' cc_items='[]' d job state item now snapshot canonical generation
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
@@ -2015,6 +2019,26 @@ _fleet_snapshot_collect() {
     done < <(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
   fi
   items="$(_external_session_observations "$items")" || return 1
+  cc_items="$(_fleet_cc_peer_observations)" || return 1
+  # A managed Claude lane has both a tmux registry identity and a CC peer identity. Merge the
+  # CC observation into the managed row when spawn-time sessionId (preferred) or PID matches;
+  # ownership and lane stay managed, while the fresher CC status fields win.
+  items="$(jq -cn --argjson items "$items" --argjson peers "$cc_items" '
+    reduce $peers[] as $peer ($items;
+      ([range(0; length) as $i
+        | select((.[$i].cc_session_id // "") == $peer.session_id
+              or (.[$i].session_id // "") == $peer.session_id
+              or ((.[$i].cc_pid // .[$i].harness_pid // -1) == $peer.pid))
+        | $i] | first) as $match
+      | if $match == null then . + [$peer]
+        else .[$match] = (.[$match] + {
+          cc_session_id:$peer.session_id,cc_pid:$peer.pid,cc_status:$peer.cc_status,
+          status_age:$peer.status_age,occ_key:$peer.occ_key,self:$peer.self,
+          transcript_bytes:$peer.transcript_bytes,cwd:$peer.cwd,socket:$peer.socket,
+          kind:$peer.kind,cc_version:$peer.cc_version,state:$peer.state,
+          state_evidence:$peer.state_evidence,started_at:($peer.started_at // .[$match].started_at)
+        })
+        end)')" || return 1
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   snapshot="$(jq -cn --arg captured_at "$now" --argjson items "$items" \
     '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}')" || return 1
@@ -9277,19 +9301,57 @@ _session_resolved_model() { # <provider> <requested-model>
   printf '%s\n' "$model"
 }
 
+_fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
+  local pane_pid="$1" wanted_cwd="$2" path pid cwd started now_ms delta best_delta="" best="" parent hops
+  case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || return 1
+  now_ms=$(( $(date +%s) * 1000 ))
+  while IFS= read -r path; do
+    pid="$(jq -r '.pid // empty' "$path" 2>/dev/null)"
+    cwd="$(jq -r '.cwd // empty' "$path" 2>/dev/null)"
+    started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
+    case "$pid:$started" in *[!0-9:]*|:*) continue ;; esac
+    [ "$cwd" = "$wanted_cwd" ] || continue
+    parent="$pid"; hops=0
+    while [ "$parent" != "$pane_pid" ] && [ "$parent" -gt 1 ] 2>/dev/null && [ "$hops" -lt 32 ]; do
+      parent="$(ps -o ppid= -p "$parent" 2>/dev/null | tr -d ' ')"
+      case "$parent" in ''|*[!0-9]*) parent=0 ;; esac
+      hops=$((hops + 1))
+    done
+    [ "$parent" = "$pane_pid" ] || continue
+    delta=$(( now_ms - started )); [ "$delta" -ge 0 ] || delta=$(( -delta ))
+    if [ -z "$best_delta" ] || [ "$delta" -lt "$best_delta" ]; then
+      best_delta="$delta"
+      best="$(jq -r '.sessionId // empty' "$path" 2>/dev/null)"$'\t'"$pid"
+    fi
+  done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start=""
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
   case "$generation" in ''|*[!0-9]*) return 1 ;; esac
   if [ "$event" = start ]; then
     pid="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null)" || pid=""
     [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
+    case "$provider" in
+      cc|claude)
+        while [ "$tries" -lt "${OSRC_CC_SPAWN_PROBE_TICKS:-50}" ]; do
+          cc_match="$(_fleet_cc_session_for_pane "$pid" "$PWD" 2>/dev/null)" && break
+          sleep 0.1
+          tries=$((tries + 1))
+        done
+        if [ -n "$cc_match" ]; then cc_session_id="${cc_match%%$'\t'*}"; cc_pid="${cc_match##*$'\t'}"; fi
+        ;;
+    esac
   fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
-    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg ts "$now" --argjson generation "$generation" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),owner:"managed",ts:$ts}')" || return 1
+    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg ts "$now" --argjson generation "$generation" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),owner:"managed",ts:$ts}')" || return 1
   _state_append "$OSRC_SESSION_REGISTRY" "$record"
 }
 
