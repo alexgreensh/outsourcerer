@@ -38,6 +38,14 @@ eval "$(sed -n '/^_devin_free_own_quota() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_probe_classify() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_free_probe() {/,/^}/p' "$SRC")"
 
+# Restricted sandboxes can deny process-table reads. Inject only the state
+# discriminator in that environment so the timeout branches remain testable.
+timeout_ps_mock=0
+if ! ps -o state= -p "$$" >/dev/null 2>&1; then
+  timeout_ps_mock=1
+  ps() { printf '%s\n' "${OSRC_TEST_PS_STATE:-}"; }
+fi
+
 # A real fake executable exercises the bash-native bound and exact glm-5-2 call.
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -59,11 +67,10 @@ stdin_out="$(printf 'image prompt' | _timeout 2 sh -c 'IFS= read -r value; print
   && ok "bash-native bound preserves piped stdin for Codex prompt consumers" \
   || bad "bash-native bound dropped piped stdin (got: $stdin_out)"
 
-# A timer marker racing with an already-successful child must not overwrite rc=0.
+# A timer racing a child at the exact boundary must distinguish a zombie from
+# a genuinely running process and preserve the child's successful status.
 boundary_rc=0
-for _boundary_i in 1 2 3 4 5; do
-  _timeout 0 true >/dev/null || boundary_rc=$?
-done
+OSRC_TEST_PS_STATE=Z _timeout 1 sh -c 'sleep 1; exit 0' >/dev/null || boundary_rc=$?
 [ "$boundary_rc" = 0 ] \
   && ok "timeout boundary preserves an already-successful child exit" \
   || bad "successful boundary child was overwritten with rc=$boundary_rc"
@@ -71,10 +78,18 @@ done
 # Once the watchdog finds a live child at expiry, a TERM trap cannot turn that
 # timeout into a false success by exiting zero.
 term_trap_rc=0
-_timeout 1 sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >/dev/null || term_trap_rc=$?
+OSRC_TEST_PS_STATE=S _timeout 1 sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >/dev/null || term_trap_rc=$?
 [ "$term_trap_rc" = 124 ] \
   && ok "timeout reports 124 when an expired child traps TERM and exits zero" \
   || bad "TERM-trapping expired child returned rc=$term_trap_rc instead of 124"
+
+# A fast successful child is never converted into a timeout result.
+fast_rc=0
+_timeout 2 true >/dev/null || fast_rc=$?
+[ "$fast_rc" = 0 ] \
+  && ok "fast successful child is never reported as timed out" \
+  || bad "fast successful child returned rc=$fast_rc instead of 0"
+[ "$timeout_ps_mock" = 0 ] || unset -f ps
 
 # A manual old process, including the --model= form, is not outsourcerer's to reap.
 printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model=glm-5-2 -p task" > "$TEST_ROOT/ps.rows"

@@ -538,10 +538,10 @@ _timeout() {
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
   # which is the same reason it exists for the job supervisor.
   ( sleep "$secs" 2>/dev/null
-    if kill -0 "$cmd_pid" 2>/dev/null; then
-      : > "$expired_file"
-      _kill_tree "$cmd_pid" 2>/dev/null
-    fi
+    state=$(ps -o state= -p "$cmd_pid" 2>/dev/null | tr -d '[:space:]')
+    case "$state" in Z*|"" ) exit 0 ;; esac
+    : > "$expired_file"
+    _kill_tree "$cmd_pid" 2>/dev/null
   ) &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
