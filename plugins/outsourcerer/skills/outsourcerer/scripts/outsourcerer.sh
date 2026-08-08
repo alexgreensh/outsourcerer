@@ -2928,7 +2928,11 @@ _fleet_selector_matches() { # <snapshot-json> <selector>
 }
 
 _fleet_show_candidates() {
-  jq -sr '.[] | "- \(.task_summary // .job_id // .session_id // "(unnamed)")  id=\((.cc_session_id // .session_id // "-")|tostring|.[0:12])  pid=\(.pid // .cc_pid // .harness_pid // "-")  state=\(.state // "unknown")"'
+  jq -sr '
+    def line: "- \(.task_summary // .job_id // .session_id // "(unnamed)")  id=\((.cc_session_id // .session_id // "-")|tostring|.[0:12])  pid=\(.pid // .cc_pid // .harness_pid // "-")  state=\(.state // "unknown")";
+    . as $all
+    | ($all[0:20][] | line),
+      (if ($all|length) > 20 then "- … \(($all|length) - 20) more matches; use a longer selector" else empty end)'
 }
 
 _fleet_transcript_tail() { # <session-id> <cwd>
