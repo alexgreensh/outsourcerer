@@ -127,6 +127,25 @@ down_peers="$(_fleet_cc_peer_observations)"
   && ok "lane failure is non-fatal and falls back to marked raw name" \
   || bad "lane failure blocked listing or lost the raw name"
 
+jq -cn --argjson pid "$live_pid" --argjson now "$now_ms" '
+  {pid:$pid,sessionId:"bad-line",cwd:"/project",startedAt:$now,updatedAt:$now,
+   status:"idle",statusUpdatedAt:$now,name:"raw-q4"}' \
+  > "$OSRC_CLAUDE_SESSIONS_DIR/bad-line.json"
+jq -cn '{type:"user",message:{role:"user",content:[{type:"text",text:"Keep malformed batch names nonfatal"}]}}' \
+  > "$OSRC_CLAUDE_PROJECTS_DIR/-project/bad-line.jsonl"
+_fleet_name_model(){ printf '1: Too Short'; }
+bad_snapshot="$(jq -cn '{items:[{owner:"cc-peer",session_id:"bad-line",cwd:"/project",task_summary:"raw-q4"}]}')"
+_fleet_names_refresh "$bad_snapshot" 0 12 1 >/dev/null 2> "$FIXTURE/bad-line.err"; bad_rc=$?
+bad_mtime="$(_fleet_transcript_mtime bad-line /project)"
+bad_cached="$(_fleet_name_cache_get bad-line "$bad_mtime")" || bad_cached=""
+bad_peers="$(_fleet_cc_peer_observations)"
+[ "$bad_rc" -eq 0 ] \
+  && [ -z "$bad_cached" ] \
+  && printf '%s' "$bad_peers" | jq -e '.[] | select(.session_id=="bad-line" and .display_name=="raw-q4 (unnamed)")' >/dev/null \
+  && grep -q 'could not parse 1 session name' "$FIXTURE/bad-line.err" \
+  && ok "unparseable batch line stays uncached and marked unnamed without crashing" \
+  || bad "unparseable batch line was cached or made refresh fail"
+
 rm -f "$model_marker"
 _fleet_name_model(){ printf 'called\n' >> "$model_marker"; return 1; }
 _fleet_snapshot_refresh(){ printf '%s' "$down_snapshot"; }

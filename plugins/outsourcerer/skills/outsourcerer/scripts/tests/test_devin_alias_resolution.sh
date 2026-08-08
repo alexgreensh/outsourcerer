@@ -62,9 +62,11 @@ check() {
 }
 
 check glm glm-5.2
+check glm-5-2 glm-5.2
 check sol gpt-5.6-sol
 check terra gpt-5.6-terra
 check swe swe-1.7
+check swe-1-7 swe-1.7
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
