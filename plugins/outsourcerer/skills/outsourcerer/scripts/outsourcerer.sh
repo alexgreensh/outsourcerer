@@ -596,6 +596,24 @@ _devin_pid_owned_by_live_job() {
   return 1
 }
 
+# Prove that candidate is the recorded delegate child of an outsourcerer job
+# whose supervisor is gone. Unknown/unrecorded processes are never ours to reap.
+_devin_pid_owned_by_dead_job() {
+  local candidate="${1:-}" jd child supervisor
+  [ -d "$OSRC_JOBS" ] || return 1
+  for jd in "$OSRC_JOBS"/*; do
+    [ -d "$jd" ] && [ -s "$jd/pid" ] && [ -s "$jd/supervisor_pid" ] || continue
+    child="$(tr -d '[:space:]' < "$jd/pid" 2>/dev/null)"
+    supervisor="$(tr -d '[:space:]' < "$jd/supervisor_pid" 2>/dev/null)"
+    [ "$child" = "$candidate" ] || continue
+    case "$supervisor" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$supervisor" 2>/dev/null && continue
+    printf '%s\n' "$jd"
+    return 0
+  done
+  return 1
+}
+
 # Emit normalized rows: pid ppid elapsed-seconds executable full-command.
 # OSRC_DEVIN_PS_FILE is a deterministic test seam, never used in normal runs.
 _devin_process_rows() {
@@ -612,14 +630,26 @@ _devin_process_rows() {
 # Output is intentionally machine-readable for doctor diagnostics and regression tests.
 _devin_orphan_pids() {
   local min_age=$(( ${OSRC_DEVIN_ZOMBIE_MINS:-30} * 60 ))
-  local pid ppid age executable command base
+  local active_secs="${OSRC_DEVIN_ACTIVE_SECS:-60}" now pid ppid age executable command base jd mtime
+  now="$(date +%s)"
   while read -r pid ppid age executable command; do
     case "$pid:$ppid:$age" in *[!0-9:]*|:*|*::* ) continue ;; esac
     base="${executable##*/}"
     [ "$base" = "devin" ] || continue
-    case " $command " in *" --model "*) ;; *) continue ;; esac
+    case " $command " in *" --model "*|*" --model="*) ;; *) continue ;; esac
     [ "$age" -ge "$min_age" ] 2>/dev/null || continue
     _devin_pid_owned_by_live_job "$pid" && continue
+    jd="$(_devin_pid_owned_by_dead_job "$pid")" || {
+      printf '>>> [devin preflight] skipping unowned PID %s: no dead outsourcerer job proves ownership\n' "$pid" >&2
+      continue
+    }
+    if [ -f "$jd/out.log" ]; then
+      mtime="$(_mtime "$jd/out.log")"
+      [ -n "$mtime" ] && [ $((now - mtime)) -lt "$active_secs" ] 2>/dev/null && {
+        printf '>>> [devin preflight] preserving PID %s: output is still active\n' "$pid" >&2
+        continue
+      }
+    fi
     printf '%s %s %s\n' "$pid" "$age" "$command"
   done < <(_devin_process_rows)
 }

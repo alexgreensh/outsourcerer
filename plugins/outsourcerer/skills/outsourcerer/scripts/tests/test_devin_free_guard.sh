@@ -22,10 +22,12 @@ mkdir -p "$OSRC_JOBS" "$TEST_ROOT/bin"
 # the test does not exercise them directly.
 _mkdir_private() { mkdir -p "$1"; }
 _kill_tree() { kill -TERM "$1" 2>/dev/null || true; }
+eval "$(sed -n '/^_mtime() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_timeout() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_elapsed_secs() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_descends_from() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_owned_by_live_job() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_devin_pid_owned_by_dead_job() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_process_rows() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_orphan_pids() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_zombie_preflight() {/,/^}/p' "$SRC")"
@@ -53,13 +55,12 @@ stdin_out="$(printf 'image prompt' | _timeout 2 sh -c 'IFS= read -r value; print
   && ok "bash-native bound preserves piped stdin for Codex prompt consumers" \
   || bad "bash-native bound dropped piped stdin (got: $stdin_out)"
 
-# Deterministic process-table input: an old devin process with no live job owner
-# must be identified. The detector only lists it here, so the test never signals $$.
-printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model glm-5-2 -p task" > "$TEST_ROOT/ps.rows"
+# A manual old process, including the --model= form, is not outsourcerer's to reap.
+printf '%s %s %s %s %s\n' "$$" "1" "3600" "devin" "devin --model=glm-5-2 -p task" > "$TEST_ROOT/ps.rows"
 orphans="$(OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_orphan_pids)"
-printf '%s\n' "$orphans" | awk -v p="$$" '$1 == p { found=1 } END { exit !found }' \
-  && ok "orphan detection identifies an aged unowned devin PID" \
-  || bad "orphan detection missed unowned PID $$ (rows: $orphans)"
+[ -z "$orphans" ] \
+  && ok "old manual devin --model= process is never claimed or reaped" \
+  || bad "manual PID $$ was falsely claimed as an outsourcerer orphan (rows: $orphans)"
 mkdir -p "$OSRC_JOBS/live-job"
 printf '%s\n' "$$" > "$OSRC_JOBS/live-job/pid"
 owned_rows="$(OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_orphan_pids)"
@@ -71,11 +72,24 @@ owned_rows="$(OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 
 # Devin process or real PID is started or signaled by this unit test.
 rm -rf "$OSRC_JOBS/live-job"
 printf '%s %s %s %s %s\n' 424242 1 3600 devin 'devin --model glm-5-2 -p task' > "$TEST_ROOT/ps.rows"
+mkdir -p "$OSRC_JOBS/dead-job"
+printf '%s\n' 424242 > "$OSRC_JOBS/dead-job/pid"
+printf '%s\n' 999999 > "$OSRC_JOBS/dead-job/supervisor_pid"
+: > "$OSRC_JOBS/dead-job/out.log"
+touch -t 202001010000 "$OSRC_JOBS/dead-job/out.log"
 _kill_tree(){ printf '%s\n' "$1" >> "$TEST_ROOT/killed-pids"; }
 OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_preflight 2>/dev/null
 [ "$(cat "$TEST_ROOT/killed-pids" 2>/dev/null)" = 424242 ] \
   && ok "zombie preflight reaps only the mocked old unowned Devin model PID" \
   || bad "zombie preflight did not invoke bounded cleanup for the mocked orphan"
+
+# Even proven ownership cannot override current output activity.
+: > "$TEST_ROOT/killed-pids"
+touch "$OSRC_JOBS/dead-job/out.log"
+OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_preflight 2>/dev/null
+[ ! -s "$TEST_ROOT/killed-pids" ] \
+  && ok "proven orphan with fresh out.log is preserved as active" \
+  || bad "actively-producing proven orphan was reaped"
 
 # The canonical paid-ACU refusal is not a free-lane-down verdict.
 quota_text='Your weekly usage quota has been exhausted'
