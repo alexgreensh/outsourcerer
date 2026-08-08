@@ -80,5 +80,13 @@ printf '%s' "$snapshot" | jq -e '
   && ok "stale CC state annotates but does not clobber a managed row" \
   || bad "stale CC state clobbered or duplicated a managed row"
 
+printf '%s\n' '{"event":"start","session_id":"corrupt-pids","provider":"cc","harness_pid":"bad","cc_pid":"also-bad"}' \
+  >> "$OSRC_SESSION_REGISTRY"
+snapshot="$(_fleet_snapshot_collect)"
+printf '%s' "$snapshot" | jq -e '
+  .items[] | select(.session_id=="corrupt-pids" and .harness_pid==null and .cc_pid==null)' >/dev/null \
+  && ok "corrupt registry PIDs degrade to null without aborting collection" \
+  || bad "corrupt registry PID aborted or poisoned the snapshot"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

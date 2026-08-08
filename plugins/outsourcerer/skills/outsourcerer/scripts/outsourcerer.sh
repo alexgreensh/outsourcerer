@@ -1665,11 +1665,11 @@ _external_session_observations() { # <managed-job-items-json>
     observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
     items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
-       requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:(if $pid=="" then null else ($pid|tonumber) end),pid_start:(if $start=="" then null else $start end),
+       requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:(if $pid=="" then null else ($pid|tonumber? // null) end),pid_start:(if $start=="" then null else $start end),
        started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
        task_summary:"managed session",last_receipt:null,source_generation:null,
        cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
-       cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end)}]')" || return 1
+       cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber? // null) end)}]')" || return 1
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs '
     sort_by(.session_id, .ts // "") | group_by(.session_id)[]
     | . as $events | ($events | last) + {
