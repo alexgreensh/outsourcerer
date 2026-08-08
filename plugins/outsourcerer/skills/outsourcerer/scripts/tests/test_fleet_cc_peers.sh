@@ -140,5 +140,19 @@ OSRC_FLEET_CLI_RECONCILE=1 _fleet_cc_peer_observations >/dev/null
   && ok "interactive collection can request Claude CLI reconciliation" \
   || bad "interactive Claude CLI reconciliation was not wired"
 
+show_output="$( (
+  set --; . "$SRC" >/dev/null 2>&1
+  hostile="$(jq -cn '{schema_version:"1",items:[{owner:"cc-peer",session_id:"safe-id",pid:42,
+    task_summary:"evil\nname",state:"idle",state_evidence:"line\rbreak",cwd:"/safe\npath",
+    socket:"sock\tpath",cc_status:"idle"}]}')"
+  _fleet_snapshot_refresh(){ printf '%s' "$hostile"; }
+  cmd_fleet_show evil
+) )"
+[ "$(printf '%s\n' "$show_output" | wc -l | tr -d ' ')" -eq 11 ] \
+  && ! printf '%s' "$show_output" | grep -q $'\r\|\t' \
+  && printf '%s' "$show_output" | grep -q '^Name: evil name$' \
+  && ok "fleet show strips control characters from peer-controlled headers" \
+  || bad "fleet show allowed peer-controlled header injection"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

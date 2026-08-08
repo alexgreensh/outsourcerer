@@ -2962,16 +2962,17 @@ cmd_fleet_show() {
   item="$matches"
   if [ "$json" = 1 ]; then printf '%s\n' "$item"; return 0; fi
   printf '%s' "$item" | jq -r '
-    "Name: \(.task_summary // .job_id // .session_id // "(unnamed)")" +
+    def clean(v; d): (v // d) | tostring | gsub("[[:cntrl:]]"; " ");
+    "Name: \(clean(.task_summary // .job_id // .session_id; "(unnamed)"))" +
     "\nKind: \(.owner // "unknown") / \(.kind // .harness // "unknown")" +
     "\nSession: \(.cc_session_id // .session_id // "-")" +
     "\nPID/job: \(.pid // .cc_pid // .harness_pid // "-") / \(.job_id // "-")" +
     "\nState: \(.state // "unknown")\(if (.self // 0)==1 then " [self]" elif (.self // 0)=="?" then " [self?]" else "" end)" +
-    "\nEvidence: \(.state_evidence // "none")" +
+    "\nEvidence: \(clean(.state_evidence; "none"))" +
     "\nRaw CC status: \(.cc_status // "-")" +
     "\nStatus age: \(.status_age // 0)s" +
-    "\nCWD: \(.cwd // "-")" +
-    "\nSocket: \(.socket // "-")" +
+    "\nCWD: \(clean(.cwd; "-"))" +
+    "\nSocket: \(clean(.socket; "-"))" +
     "\nTranscript: \(.transcript_bytes // 0) bytes"'
   session_id="$(printf '%s' "$item" | jq -r '.cc_session_id // .session_id // empty')"
   cwd="$(printf '%s' "$item" | jq -r '.cwd // empty')"
