@@ -29,6 +29,8 @@
 #                                  (session read) and steers it mid-flight (session send), switches
 #                                  its model, or stops it. A real feedback loop headless lacks. tmux.
 #                                  'model [NAME]' switches the live model mid-session (drives opt+m).
+#   fleet [ls|show] [args]         Unified managed-job + Claude Code peer view. `ls` is default;
+#                                  `show <name|short-id|pid|jobId>` explains one session's state.
 #   parity                         Sync Claude skills + local MCP servers into Devin (skip cloud)
 #   image   [-m MODEL] "<prompt>" [out.png]   Text-to-image, backend AUTO-RESOLVED (never hardcode
 #                                  which is "installed", detect it): codex gpt-image-2 (KEYLESS,
@@ -1652,6 +1654,8 @@ _external_session_observations() { # <managed-job-items-json>
     id="$(printf '%s' "$line" | jq -r '.session_id // empty')"
     _external_session_id_valid "$id" || continue
     endpoint="$(printf '%s' "$line" | jq -r --arg id "$id" '.endpoint // ("tmux:" + $id)')"
+    pid="$(printf '%s' "$line" | jq -r '.harness_pid // empty')"
+    start="$(printf '%s' "$line" | jq -r '.pid_start // empty')"
     lane="$(printf '%s' "$line" | jq -r '.provider // empty')"
     requested="$(printf '%s' "$line" | jq -r '.requested_model // .model // empty')"
     resolved="$(printf '%s' "$line" | jq -r '.resolved_model // .model // empty')"
@@ -1659,9 +1663,9 @@ _external_session_observations() { # <managed-job-items-json>
     cc_session_id="$(printf '%s' "$line" | jq -r '.cc_session_id // empty')"
     cc_pid="$(printf '%s' "$line" | jq -r '.cc_pid // empty')"
     observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
-    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --argjson model_generation "$generation" '
+    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
-       requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:null,pid_start:null,
+       requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:(if $pid=="" then null else ($pid|tonumber) end),pid_start:(if $start=="" then null else $start end),
        started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
        task_summary:"managed session",last_receipt:null,source_generation:null,
        cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
@@ -2138,7 +2142,9 @@ _fleet_snapshot_collect() {
           kind:$peer.kind,cc_version:$peer.cc_version,state:$peer.state,
           state_evidence:$peer.state_evidence,started_at:($peer.started_at // .[$match].started_at)
         })
-        end)')" || return 1
+        end)
+    | map(select(.owner != "external" or
+        ((.harness_pid | tonumber? // -1) as $pid | all($peers[]; .pid != $pid))))')" || return 1
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   snapshot="$(jq -cn --arg captured_at "$now" --argjson items "$items" \
     '{schema_version:"1",generation:null,captured_at:$captured_at,items:$items}')" || return 1
@@ -2731,6 +2737,158 @@ cmd_bearings() {
   local snapshot
   snapshot="$(_fleet_snapshot_read 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   _fleet_digest "$snapshot"
+}
+
+_fleet_todo() {
+  echo "fleet ${1:-command} is reserved for a sibling track and is not available in this build" >&2
+  return 2
+}
+
+_fleet_snapshot_refresh() {
+  local snapshot
+  snapshot="$(_fleet_snapshot_collect)" || return 1
+  _fleet_snapshot_write "$snapshot" || return 1
+  printf '%s' "$snapshot"
+}
+
+_fleet_human_age() {
+  local seconds="${1:-0}"
+  case "$seconds" in ''|*[!0-9]*) printf '?'; return ;; esac
+  if [ "$seconds" -lt 60 ]; then printf '%ss' "$seconds"
+  elif [ "$seconds" -lt 3600 ]; then printf '%sm' "$((seconds / 60))"
+  elif [ "$seconds" -lt 86400 ]; then printf '%sh%sm' "$((seconds / 3600))" "$(((seconds % 3600) / 60))"
+  else printf '%sd%sh' "$((seconds / 86400))" "$(((seconds % 86400) / 3600))"; fi
+}
+
+_fleet_ls_group() { # <snapshot-json> <owner> <heading>
+  local snapshot="$1" owner="$2" heading="$3" row name kind model state age cwd needs now started self_tag count
+  count="$(printf '%s' "$snapshot" | jq -r --arg owner "$owner" '[.items[] | select(.owner==$owner)] | length')"
+  [ "$count" -gt 0 ] || return 0
+  printf '%s (%s)\n' "$heading" "$count"
+  printf '%-24s %-11s %-15s %-14s %-8s %-34s %s\n' NAME KIND MODEL/LANE STATE AGE CWD NEEDS-YOU
+  now="$(date +%s)"
+  while IFS=$'\t' read -r name kind model state age started cwd needs self_tag; do
+    [ -n "$name" ] || name="(unnamed)"
+    [ "$self_tag" = 0 ] || name="$name [$([ "$self_tag" = 1 ] && printf self || printf 'self?')]"
+    if [ -z "$age" ] || [ "$age" = 0 ]; then
+      case "$started" in ''|0|*[!0-9]*) age=0 ;; *)
+        if [ "$started" -gt 100000000000 ]; then started=$((started / 1000)); fi
+        age=$((now - started)); [ "$age" -ge 0 ] || age=0 ;;
+      esac
+    fi
+    age="$(_fleet_human_age "$age")"
+    [ "$needs" = 1 ] && needs='⚠needs-you' || needs=''
+    printf '%-24.24s %-11.11s %-15.15s %-14.14s %-8.8s %-34.34s %s\n' "$name" "$kind" "$model" "$state" "$age" "$cwd" "$needs"
+  done < <(printf '%s' "$snapshot" | jq -r --arg owner "$owner" '.items[] | select(.owner==$owner) |
+    [(.task_summary // .job_id // .session_id // "(unnamed)"),(.kind // .harness // "-"),
+     (if ((.observed_model // "")|length)>0 then .observed_model elif ((.requested_model // "")|length)>0 then .requested_model else (.lane // "-") end),
+     (.state // "unknown"),(.status_age // 0),(.started_at // 0),(.cwd // "-"),
+     (if (.state=="blocked?" or .state=="unresponsive?" or .cc_status=="waiting") then 1 else 0 end),(.self // 0)]
+    | map(tostring | gsub("[[:cntrl:]]"; " ")) | @tsv')
+  printf '\n'
+}
+
+cmd_fleet_ls() {
+  local include_self=0 json=0 snapshot
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --include-self) include_self=1 ;;
+      --json) json=1 ;;
+      *) die "fleet ls: unknown argument '$1' (use --json or --include-self)" ;;
+    esac
+    shift
+  done
+  snapshot="$(_fleet_snapshot_refresh)" || die "fleet ls: could not collect or persist a snapshot"
+  if [ "$include_self" != 1 ]; then
+    snapshot="$(printf '%s' "$snapshot" | jq -c '.items |= map(select((.self // 0) == 0))')" || return 1
+  fi
+  if [ "$json" = 1 ]; then printf '%s\n' "$snapshot"; return 0; fi
+  _fleet_ls_group "$snapshot" cc-peer "Claude Code peers"
+  _fleet_ls_group "$snapshot" managed "Managed"
+  _fleet_ls_group "$snapshot" external "Observed external"
+}
+
+_fleet_selector_matches() { # <snapshot-json> <selector>
+  local snapshot="$1" selector="$2"
+  printf '%s' "$snapshot" | jq -c --arg selector "$selector" --arg q "$(printf '%s' "$selector" | tr '[:upper:]' '[:lower:]')" '
+    .items[] | . as $item
+    | ((.task_summary // "") | tostring | ascii_downcase) as $name
+    | ((.session_id // "") | tostring) as $sid
+    | ((.cc_session_id // "") | tostring) as $ccsid
+    | ((.job_id // "") | tostring) as $job
+    | ((.pid // .cc_pid // .harness_pid // "") | tostring) as $pid
+    | select($pid==$selector or $job==$selector or ($sid|startswith($selector)) or ($ccsid|startswith($selector)) or ($name|contains($q)))
+    | $item'
+}
+
+_fleet_show_candidates() {
+  jq -sr '.[] | "- \(.task_summary // .job_id // .session_id // "(unnamed)")  id=\((.cc_session_id // .session_id // "-")|tostring|.[0:12])  pid=\(.pid // .cc_pid // .harness_pid // "-")  state=\(.state // "unknown")"'
+}
+
+_fleet_transcript_tail() { # <session-id> <cwd>
+  local session_id="$1" cwd="$2" slug path
+  slug="$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9' '-')"
+  path="$OSRC_CLAUDE_PROJECTS_DIR/$slug/$session_id.jsonl"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 0
+  tail -n 24 "$path" 2>/dev/null | jq -r '
+    (.message.content? // .content? // empty) as $c
+    | if ($c|type)=="string" then $c
+      elif ($c|type)=="array" then $c[]? | select(.type?=="text") | .text // empty
+      else empty end' 2>/dev/null | tail -n 6 | tr '\r\t' '  ' | sed 's/[[:cntrl:]]/ /g'
+}
+
+cmd_fleet_show() {
+  local selector="" json=0 snapshot matches count item session_id cwd tail_text
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --json) json=1 ;; *) [ -z "$selector" ] || die "fleet show needs one selector"; selector="$1" ;; esac
+    shift
+  done
+  [ -n "$selector" ] || die "fleet show needs <name|short-session-id|pid|jobId>"
+  snapshot="$(_fleet_snapshot_refresh)" || die "fleet show: could not collect or persist a snapshot"
+  matches="$(_fleet_selector_matches "$snapshot" "$selector")" || return 1
+  count="$(printf '%s\n' "$matches" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  if [ "$count" -eq 0 ]; then echo "fleet show: no session matches '$selector'" >&2; return 1; fi
+  if [ "$count" -gt 1 ]; then
+    printf "fleet show: '%s' is ambiguous; candidates:\n" "$selector" >&2
+    printf '%s\n' "$matches" | _fleet_show_candidates >&2
+    return 2
+  fi
+  item="$matches"
+  if [ "$json" = 1 ]; then printf '%s\n' "$item"; return 0; fi
+  printf '%s' "$item" | jq -r '
+    "Name: \(.task_summary // .job_id // .session_id // "(unnamed)")" +
+    "\nKind: \(.owner // "unknown") / \(.kind // .harness // "unknown")" +
+    "\nSession: \(.cc_session_id // .session_id // "-")" +
+    "\nPID/job: \(.pid // .cc_pid // .harness_pid // "-") / \(.job_id // "-")" +
+    "\nState: \(.state // "unknown")\(if (.self // 0)==1 then " [self]" elif (.self // 0)=="?" then " [self?]" else "" end)" +
+    "\nEvidence: \(.state_evidence // "none")" +
+    "\nRaw CC status: \(.cc_status // "-")" +
+    "\nStatus age: \(.status_age // 0)s" +
+    "\nCWD: \(.cwd // "-")" +
+    "\nSocket: \(.socket // "-")" +
+    "\nTranscript: \(.transcript_bytes // 0) bytes"'
+  session_id="$(printf '%s' "$item" | jq -r '.cc_session_id // .session_id // empty')"
+  cwd="$(printf '%s' "$item" | jq -r '.cwd // empty')"
+  if [ -n "$session_id" ] && [ -n "$cwd" ]; then
+    tail_text="$(_fleet_transcript_tail "$session_id" "$cwd")"
+    if [ -n "$tail_text" ]; then printf 'Recent transcript data:\n%s\n' "$tail_text"; fi
+  fi
+}
+
+cmd_fleet() {
+  local sub="${1:-ls}"
+  case "$sub" in --*) sub=ls ;; *) [ "$#" -gt 0 ] && shift ;; esac
+  case "$sub" in
+    adopt) _fleet_todo "$sub" ;;
+    compact) _fleet_todo "$sub" ;;
+    ls) cmd_fleet_ls "$@" ;;
+    name) _fleet_todo "$sub" ;;
+    sent) _fleet_todo "$sub" ;;
+    show) cmd_fleet_show "$@" ;;
+    supervise) _fleet_todo "$sub" ;;
+    tell) _fleet_todo "$sub" ;;
+    *) die "fleet subcommand: ls | show | supervise | tell | name | compact | adopt | sent" ;;
+  esac
 }
 
 # =============================================================================
@@ -11015,7 +11173,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -11057,6 +11215,7 @@ main() {
     yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
     bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
+    fleet)       cmd_fleet "$@" ;;                         # unified managed + independent Claude Code fleet
     crew)        cmd_crew "$@" ;;                          # transactional write-swarm: fanout --worktree edit -> grade -> revert-or-promote
     loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
@@ -11094,7 +11253,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
 
   esac
 }
