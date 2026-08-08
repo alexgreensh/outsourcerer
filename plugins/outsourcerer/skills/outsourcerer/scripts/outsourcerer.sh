@@ -740,15 +740,16 @@ _devin_model_for() {
 # free-tier models must run regardless of the paid-quota display.
 _devin_is_free_model() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|swe|swe-1.7|swe-1-7|swe-1.7-lightning) return 0 ;;
+    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
     *) return 1 ;;
   esac
 }
 # The OpenRouter ALIAS a free Devin model also runs under (so the advertised fallback resolves to the
-# OpenRouter lane, not back to Devin). Empty when there is no OpenRouter sibling (SWE is Devin-only).
+# OpenRouter lane, not back to Devin). Empty when there is no OpenRouter sibling (SWE/Kimi are Devin-only).
 _devin_free_or_alias() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     glm|glm-5.2|z-ai/glm-5.2) printf 'glm' ;;
+    deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro) printf 'deepseek' ;;
     *) printf '' ;;
   esac
 }
