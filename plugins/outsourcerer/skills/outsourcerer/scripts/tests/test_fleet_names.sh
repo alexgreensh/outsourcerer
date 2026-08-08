@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
+if [ "${OSRC_TEST_FLEET_NAME_RUNNER:-0}" = 1 ]; then
+  printf '%s\n' "$*" >> "$MODEL_CALLS"
+  model=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -m) model="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "$model" in
+    glm-5-2) exit 1 ;;
+    swe-1-7) printf '   \n'; exit 0 ;;
+    haiku) printf '%s\n' '1: Cache Human Fleet Names' '2: Repair Fleet Fallback Order' ;;
+    *) exit 91 ;;
+  esac
+  exit 0
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 FIXTURE="$(mktemp -d "$PWD/.test-fleet-names.XXXXXX")"
@@ -19,6 +37,26 @@ mkdir -p "$OSRC_HOME" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_CLAUDE_PROJECTS_DIR/-pr
 set --
 . "$SRC" >/dev/null 2>&1
 
+model_calls="$FIXTURE/model-calls"
+saved_script_path="$SCRIPT_PATH"
+saved_have="$(declare -f have)"
+SCRIPT_PATH="$0"
+have(){ return 0; }
+export MODEL_CALLS="$model_calls" OSRC_TEST_FLEET_NAME_RUNNER=1
+fallback_output="$(_fleet_name_model 'batch prompt')"; fallback_rc=$?
+SCRIPT_PATH="$saved_script_path"
+eval "$saved_have"
+unset MODEL_CALLS OSRC_TEST_FLEET_NAME_RUNNER
+[ "$fallback_rc" -eq 0 ] \
+  && [ "$(printf '%s\n' "$fallback_output" | wc -l | tr -d ' ')" -eq 2 ] \
+  && [ "$(wc -l < "$model_calls" | tr -d ' ')" -eq 3 ] \
+  && sed -n '1p' "$model_calls" | grep -q '^run -m glm-5-2 batch prompt$' \
+  && sed -n '2p' "$model_calls" | grep -q '^run -m swe-1-7 batch prompt$' \
+  && sed -n '3p' "$model_calls" | grep -q '^run -m haiku batch prompt$' \
+  && ! grep -q -- '--provider' "$model_calls" \
+  && ok "batch model uses free Devin aliases before native fallbacks without --provider" \
+  || bad "batch model fallback order or provider isolation was wrong"
+
 command sleep 30 & live_pid=$!
 now_ms="$(date +%s)000"
 jq -cn --argjson pid "$live_pid" --argjson now "$now_ms" '
@@ -30,17 +68,37 @@ jq -cn --argjson pid "$live_pid" --argjson now "$now_ms" '
   jq -cn '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:"Implemented the cache and now checking tests"}]}}'
 } > "$OSRC_CLAUDE_PROJECTS_DIR/-project/name-one.jsonl"
 
+jq -cn --argjson pid "$live_pid" --argjson now "$now_ms" '
+  {pid:$pid,sessionId:"name-two",cwd:"/project",startedAt:$now,updatedAt:$now,
+   status:"working",statusUpdatedAt:$now,name:"gambit-c8"}' \
+  > "$OSRC_CLAUDE_SESSIONS_DIR/name-two.json"
+{
+  jq -cn '{type:"user",message:{role:"user",content:[{type:"text",text:"Repair fallback lane ordering for fleet names"}]}}'
+  jq -cn '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:"Added the Devin lane fixture and assertions"}]}}'
+} > "$OSRC_CLAUDE_PROJECTS_DIR/-project/name-two.jsonl"
+
 model_marker="$FIXTURE/model-called"
-_fleet_name_model(){ printf 'called\n' >> "$model_marker"; printf 'Cache Human Fleet Session Names'; }
-snapshot="$(jq -cn '{items:[{owner:"cc-peer",session_id:"name-one",cwd:"/project",task_summary:"gambit-b7"}]}')"
+model_prompt="$FIXTURE/model-prompt"
+printf '%s\n' '1: Cache Human Fleet Session Names' '2: Repair Fleet Naming Fallback Order' > "$FIXTURE/model-output"
+_fleet_name_model(){ printf 'called\n' >> "$model_marker"; printf '%s' "$1" > "$model_prompt"; command cat "$FIXTURE/model-output"; }
+snapshot="$(jq -cn '{items:[
+  {owner:"cc-peer",session_id:"name-one",cwd:"/project",task_summary:"gambit-b7"},
+  {owner:"cc-peer",session_id:"name-two",cwd:"/project",task_summary:"gambit-c8"}
+]}')"
 _fleet_names_refresh "$snapshot" 0 12 1
 mtime="$(_fleet_transcript_mtime name-one /project)"
 cached="$(_fleet_name_cache_get name-one "$mtime")"
+mtime_two="$(_fleet_transcript_mtime name-two /project)"
+cached_two="$(_fleet_name_cache_get name-two "$mtime_two")"
 [ "$cached" = "Cache Human Fleet Session Names" ] \
+  && [ "$cached_two" = "Repair Fleet Naming Fallback Order" ] \
   && [ "$(wc -l < "$model_marker" | tr -d ' ')" -eq 1 ] \
+  && grep -q '^Name each coding session in 4-8 words\.' "$model_prompt" \
+  && grep -q '^1) task=Fix fleet session names using transcript context activity=Implemented the cache and now checking tests$' "$model_prompt" \
+  && grep -q '^2) task=Repair fallback lane ordering for fleet names activity=Added the Devin lane fixture and assertions$' "$model_prompt" \
   && [ "$(_portable_mode "$OSRC_FLEET_NAMES")" = 600 ] \
-  && ok "uncached session is named once and cached in a 0600 file" \
-  || bad "first naming pass did not persist a private cache record"
+  && ok "one batch model output names and caches every uncached session in a 0600 file" \
+  || bad "batch naming did not make one call and persist both fixture names"
 
 rm -f "$model_marker"
 _fleet_names_refresh "$snapshot" 0 12 1

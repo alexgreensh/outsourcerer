@@ -460,8 +460,10 @@ tencent/hy3:free|tencent/hy3:free|or|capable
 deepseek|deepseek/deepseek-v4-pro|or|capable
 deepseek/deepseek-v4-pro|deepseek/deepseek-v4-pro|or|capable
 glm-5.2|glm-5.2|dv|capable
+glm-5-2|glm-5.2|dv|capable
 swe|swe-1.7|dv|capable
 swe-1.7|swe-1.7|dv|capable
+swe-1-7|swe-1.7|dv|capable
 swe-1.7-lightning|swe-1.7-lightning|dv|mid
 kimi|kimi-k3|dv|capable
 kimi-k3|kimi-k3|dv|capable
@@ -603,7 +605,8 @@ parse_model() {
 # GLM and DeepSeek are dual-lane today (OpenRouter id <-> Devin id). hy3 is OpenRouter-only.
 _devin_model_for() {
   case "$1" in
-    glm|z-ai/glm-5.2|glm-5.2) printf 'glm-5.2' ;;
+    glm|z-ai/glm-5.2|glm-5.2|glm-5-2) printf 'glm-5.2' ;;
+    swe|swe-1.7|swe-1-7) printf 'swe-1.7' ;;
     deepseek|deepseek/deepseek-v4-pro) printf 'deepseek-v4-pro' ;;
     kimi|kimi-k3) printf 'kimi-k3' ;;
     *) printf '' ;;
@@ -616,7 +619,7 @@ _devin_model_for() {
 # free-tier models must run regardless of the paid-quota display.
 _devin_is_free_model() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    glm|glm-5.2|z-ai/glm-5.2|swe|swe-1.7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -2118,19 +2121,32 @@ _fleet_name_clean() { # stdin model output; accept one safe 4-8 word line
     awk 'NF>=4 && NF<=8 && length($0)<=100 && $0 !~ /[{}<>]/ {print; exit}' | sed 's/[[:cntrl:]]/ /g'
 }
 
-_fleet_name_model() { # <prompt>; cheap lane first, then native fallbacks
-  local prompt="$1" model output name
-  for model in glm-5.2 haiku sol; do
+_fleet_name_batch_line() { # <index>; stdin batch model output, print one cleaned name
+  local index="$1"
+  awk -v wanted="$index" '
+    {
+      line=$0
+      sub(/^[[:space:]]*/, "", line)
+      colon=index(line, ":")
+      if (colon > 0 && substr(line, 1, colon - 1) == wanted) {
+        print substr(line, colon + 1)
+        exit
+      }
+    }' | _fleet_name_clean
+}
+
+_fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fallbacks
+  local prompt="$1" model output
+  for model in glm-5-2 swe-1-7 haiku sol; do
     case "$model" in
-      glm-5.2) have devin || continue ;;
+      glm-5-2|swe-1-7) have devin || continue ;;
       haiku) have claude || continue ;;
       sol) have codex || continue ;;
     esac
     output="$(OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 OSRC_CLOUD_ACK=1 OSRC_HEARTBEAT_DISABLED=1 \
       "$SCRIPT_PATH" run -m "$model" "$prompt" 2>/dev/null)" || continue
-    name="$(printf '%s\n' "$output" | _fleet_name_clean)"
-    [ -n "$name" ] || continue
-    printf '%s' "$name"
+    printf '%s' "$output" | grep -q '[^[:space:]]' || continue
+    printf '%s' "$output"
     return 0
   done
   return 1
@@ -3128,10 +3144,11 @@ cmd_fleet_ls() {
 
 _fleet_names_refresh() { # <snapshot-json> <force:0|1> <limit> <quiet:0|1>
   local snapshot="$1" force="${2:-0}" limit="${3:-12}" quiet="${4:-0}"
-  local item session_id cwd raw_name mtime cached signals first latest prompt display record
-  local candidates=0 attempted=0 named=0 unavailable=0 capped=0 now
+  local item session_id cwd raw_name mtime cached signals first latest prompt output display record index batch
+  local candidates=0 attempted=0 named=0 unavailable=0 unparseable=0 capped=0 now
   case "$limit" in ''|*[!0-9]*|0) limit=12 ;; esac
   now="$(date -u +%Y-%m-%dT%H:%SZ)"
+  batch='[]'
   while IFS= read -r item; do
     [ -n "$item" ] || continue
     session_id="$(printf '%s' "$item" | jq -r '.cc_session_id // .session_id // empty')"
@@ -3147,26 +3164,57 @@ _fleet_names_refresh() { # <snapshot-json> <force:0|1> <limit> <quiet:0|1>
     signals="$(_fleet_name_signals "$session_id" "$cwd")" || continue
     first="$(printf '%s' "$signals" | jq -r '.first_task // ""')"
     latest="$(printf '%s' "$signals" | jq -r '.latest_activity // ""')"
-    prompt="In 4-8 words, name what this coding session is working on. First task: $first. Latest activity: $latest. Reply with ONLY the name, no quotes."
     attempted=$((attempted + 1))
-    display="$(_fleet_name_model "$prompt")" || display=""
-    if [ -z "$display" ]; then
-      unavailable=$((unavailable + 1))
-      continue
-    fi
-    record="$(jq -cn --arg id "$session_id" --argjson mtime "$mtime" --arg name "$display" --arg raw "$raw_name" --arg ts "$now" \
-      '{schema_version:"1",session_id:$id,transcript_mtime:$mtime,display_name:$name,raw_name:$raw,created_at:$ts}')" || continue
-    _fleet_name_cache_append "$record" || continue
-    named=$((named + 1))
-    [ "$quiet" = 1 ] || printf '%s  %s\n' "$session_id" "$display"
+    batch="$(printf '%s' "$batch" | jq -c \
+      --arg id "$session_id" --argjson mtime "$mtime" --arg raw "$raw_name" \
+      --arg first "$first" --arg latest "$latest" \
+      '. + [{session_id:$id,transcript_mtime:$mtime,raw_name:$raw,first_task:$first,latest_activity:$latest}]')" || continue
   done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(.owner=="cc-peer" or (.cc_session_id // "")!="")')
+
+  if [ "$attempted" -gt 0 ]; then
+    prompt='Name each coding session in 4-8 words. Reply with exactly one line per session, format `<N>: <name>`, nothing else.'
+    index=0
+    while IFS= read -r item; do
+      index=$((index + 1))
+      first="$(printf '%s' "$item" | jq -r '.first_task')"
+      latest="$(printf '%s' "$item" | jq -r '.latest_activity')"
+      prompt="${prompt}
+${index}) task=${first} activity=${latest}"
+    done < <(printf '%s' "$batch" | jq -c '.[]')
+
+    output="$(_fleet_name_model "$prompt")" || output=""
+    if [ -z "$output" ]; then
+      unavailable="$attempted"
+    else
+      index=0
+      while IFS= read -r item; do
+        index=$((index + 1))
+        display="$(printf '%s\n' "$output" | _fleet_name_batch_line "$index")" || display=""
+        if [ -z "$display" ]; then
+          unparseable=$((unparseable + 1))
+          continue
+        fi
+        session_id="$(printf '%s' "$item" | jq -r '.session_id')"
+        mtime="$(printf '%s' "$item" | jq -r '.transcript_mtime')"
+        raw_name="$(printf '%s' "$item" | jq -r '.raw_name')"
+        record="$(jq -cn --arg id "$session_id" --argjson mtime "$mtime" --arg name "$display" --arg raw "$raw_name" --arg ts "$now" \
+          '{schema_version:"1",session_id:$id,transcript_mtime:$mtime,display_name:$name,raw_name:$raw,created_at:$ts}')" || continue
+        _fleet_name_cache_append "$record" || continue
+        named=$((named + 1))
+        [ "$quiet" = 1 ] || printf '%s  %s\n' "$session_id" "$display"
+      done < <(printf '%s' "$batch" | jq -c '.[]')
+    fi
+  fi
   if [ "$capped" -gt 0 ]; then
     printf 'fleet name: capped at %s sessions; %s eligible session(s) remain\n' "$limit" "$capped" >&2
   fi
   if [ "$unavailable" -gt 0 ]; then
     printf 'fleet name: naming lane unavailable for %s session(s); keeping raw names marked (unnamed)\n' "$unavailable" >&2
   fi
-  [ "$quiet" = 1 ] || printf 'fleet name: %s named, %s model attempt(s), %s eligible\n' "$named" "$attempted" "$candidates"
+  if [ "$unparseable" -gt 0 ]; then
+    printf 'fleet name: could not parse %s session name(s); keeping raw names marked (unnamed)\n' "$unparseable" >&2
+  fi
+  [ "$quiet" = 1 ] || printf 'fleet name: %s named, %s in model batch, %s eligible\n' "$named" "$attempted" "$candidates"
   return 0
 }
 
