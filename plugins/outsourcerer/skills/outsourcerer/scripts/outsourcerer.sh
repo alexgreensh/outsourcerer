@@ -1933,6 +1933,18 @@ _external_reply() { # <session-id> <message>
   fi
 }
 
+_fleet_transcript_bytes() { # <CC-session-id> <cwd>
+  local session_id="${1:-}" cwd="${2:-}" slug path bytes
+  _external_session_id_valid "$session_id" || { printf '0\n'; return 0; }
+  [ -n "$cwd" ] || { printf '0\n'; return 0; }
+  slug="$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9' '-')"
+  path="$OSRC_CLAUDE_PROJECTS_DIR/$slug/$session_id.jsonl"
+  [ -f "$path" ] && [ ! -L "$path" ] || { printf '0\n'; return 0; }
+  bytes="$(wc -c < "$path" 2>/dev/null | tr -d ' ')"
+  case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+  printf '%s\n' "$bytes"
+}
+
 # Print this controller's CC occupancy key. The current shell walks upward because Claude Code is
 # the ancestor that launched it; child-process scans point the wrong way. A tied best match prints
 # "?" and returns 2 so callers can fail closed for actions while still tagging the listing honestly.
@@ -1983,7 +1995,7 @@ _fleet_cc_peer_observations() {
   have jq || return 1
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
   local status updated status_updated status_age socket waiting_for now_ms fresh_ms alive item
-  local fleet_state evidence worked self_key="" self_rc=0 self_value
+  local fleet_state evidence worked transcript_bytes self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
   now_ms=$(( $(date +%s) * 1000 ))
@@ -2019,9 +2031,10 @@ _fleet_cc_peer_observations() {
       status_age=0
     fi
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
-    worked=0; [ "$updated" -gt "$started" ] 2>/dev/null && worked=1
+    transcript_bytes="$(_fleet_transcript_bytes "$session_id" "$cwd")"
+    worked=0; [ "$transcript_bytes" -gt 0 ] 2>/dev/null && worked=1
     fleet_state="$(_fleet_classify "$status" "$status_age" "$worked")"
-    evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for")"
+    evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for" "$transcript_bytes")"
     self_value=0
     if [ "$self_rc" = 2 ] || [ "$self_key" = "?" ]; then
       self_value="?"
@@ -2032,11 +2045,11 @@ _fleet_cc_peer_observations() {
       --arg proc_start "$proc_start" --arg version "$version" --arg kind "$kind" --arg name "$name" \
       --arg job_id "$job_id" --arg status "$status" --arg socket "$socket" --arg self "$self_value" \
       --arg fleet_state "$fleet_state" --arg evidence "$evidence" --arg waiting_for "$waiting_for" \
-      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" '
+      --argjson pid "$pid" --argjson started_at "$started" --argjson status_age "$status_age" --argjson transcript_bytes "$transcript_bytes" '
       {schema_version:"1",owner:"cc-peer",harness:"cc",session_id:$session_id,endpoint:$endpoint,
        observed_model:"",task_summary:$name,pid:$pid,cwd:$cwd,socket:$socket,cc_status:$status,
        status_age:$status_age,occ_key:(($pid|tostring) + ":" + $session_id + ":" + $proc_start),
-       self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:0,kind:$kind,cc_version:$version,
+       self:(if $self=="0" then 0 elif $self=="1" then 1 else "?" end),transcript_bytes:$transcript_bytes,kind:$kind,cc_version:$version,
        job_id:(if $job_id=="" then null else $job_id end),started_at:$started_at,
        state:$fleet_state,state_evidence:$evidence,
        waiting_for:(if $waiting_for=="" then null else $waiting_for end),composer_state:"unknown",claim:null,
@@ -2065,8 +2078,8 @@ _fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
   esac
 }
 
-_fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [waiting-for]
-  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" waiting_for="${4:-}" stall="${OSRC_STALL_SECS:-600}"
+_fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [waiting-for] [transcript-bytes]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" waiting_for="${4:-}" bytes="${5:-0}" stall="${OSRC_STALL_SECS:-600}"
   case "$age" in ''|*[!0-9]*) age=0 ;; esac
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   case "$status" in
@@ -2080,7 +2093,7 @@ _fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [
       fi ;;
     idle)
       if [ "$worked" = 1 ] && [ "$age" -gt "$stall" ]; then
-        printf 'CC status=idle after recorded activity, unchanged for %ss; may be blocked' "$age"
+        printf 'CC status=idle after transcript activity (%s bytes), unchanged for %ss; may be blocked' "$bytes" "$age"
       else
         printf 'CC status=idle, updated %ss ago' "$age"
       fi ;;
