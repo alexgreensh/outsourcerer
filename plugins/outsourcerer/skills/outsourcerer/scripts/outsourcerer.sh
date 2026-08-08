@@ -2030,7 +2030,8 @@ _fleet_cc_cli_reconcile() { # <files-first-items-json>
 _fleet_cc_peer_observations() {
   have jq || return 1
   local items='[]' path raw pid session_id cwd started proc_start version kind name job_id
-  local status updated status_updated status_age socket waiting_for now_ms fresh_min fresh_ms alive item
+  local status updated status_updated status_age socket waiting_for now_ms fresh_min fresh_ms alive fresh item
+  local live_proc_start liveness_evidence
   local fleet_state evidence worked transcript_bytes self_key="" self_rc=0 self_value
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || { printf '%s' "$items"; return 0; }
   self_key="$(_fleet_self_key 2>/dev/null)" || self_rc=$?
@@ -2047,13 +2048,25 @@ _fleet_cc_peer_observations() {
     _external_session_id_valid "$session_id" || continue
     updated="$(printf '%s' "$raw" | jq -r '.updatedAt // 0')"
     case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
+    proc_start="$(printf '%s' "$raw" | jq -r '.procStart // ""')"
     alive=0
-    kill -0 "$pid" 2>/dev/null && alive=1
-    [ "$updated" -gt 0 ] && [ $(( now_ms - updated )) -le "$fresh_ms" ] 2>/dev/null && alive=1
-    [ "$alive" = 1 ] || continue
+    fresh=0
+    liveness_evidence="PID $pid is not live"
+    if kill -0 "$pid" 2>/dev/null; then
+      alive=1
+      liveness_evidence="PID $pid is live"
+      if [ -n "$proc_start" ]; then
+        live_proc_start="$(_pid_start_identity "$pid" 2>/dev/null)" || live_proc_start=""
+        if [ -n "$live_proc_start" ] && [ "$live_proc_start" != "$proc_start" ]; then
+          alive=0
+          liveness_evidence="PID $pid start identity changed (PID reuse)"
+        fi
+      fi
+    fi
+    [ "$updated" -gt 0 ] && [ $(( now_ms - updated )) -le "$fresh_ms" ] 2>/dev/null && fresh=1
+    [ "$alive" = 1 ] || [ "$fresh" = 1 ] || continue
     cwd="$(printf '%s' "$raw" | jq -r '.cwd // ""')"
     started="$(printf '%s' "$raw" | jq -r '.startedAt // 0')"
-    proc_start="$(printf '%s' "$raw" | jq -r '.procStart // ""')"
     version="$(printf '%s' "$raw" | jq -r '.version // ""')"
     kind="$(printf '%s' "$raw" | jq -r '.kind // "interactive"')"
     name="$(printf '%s' "$raw" | jq -r '.name // "(unnamed)"')"; [ -n "$name" ] || name="(unnamed)"
@@ -2071,8 +2084,8 @@ _fleet_cc_peer_observations() {
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
     transcript_bytes="$(_fleet_transcript_bytes "$session_id" "$cwd")"
     worked=0; [ "$transcript_bytes" -gt 0 ] 2>/dev/null && worked=1
-    fleet_state="$(_fleet_classify "$status" "$status_age" "$worked")"
-    evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for" "$transcript_bytes")"
+    fleet_state="$(_fleet_classify "$status" "$status_age" "$worked" "$alive")"
+    evidence="$(_fleet_state_evidence "$status" "$status_age" "$worked" "$waiting_for" "$transcript_bytes" "$alive" "$liveness_evidence")"
     self_value=0
     if [ "$self_rc" = 2 ] || [ "$self_key" = "?" ]; then
       self_value="?"
@@ -2098,10 +2111,11 @@ _fleet_cc_peer_observations() {
   _fleet_cc_cli_reconcile "$items"
 }
 
-_fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
-  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" stall="${OSRC_STALL_SECS:-600}"
+_fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1] [alive:0|1|unknown]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" alive="${4:-unknown}" stall="${OSRC_STALL_SECS:-600}"
   case "$age" in ''|*[!0-9]*) age=0 ;; esac
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
+  [ "$alive" != 0 ] || { printf 'dead'; return 0; }
   case "$status" in
     waiting|permission-waiting|needs-input|needs_you) printf 'blocked?' ;;
     working|busy)
@@ -2115,10 +2129,11 @@ _fleet_classify() { # <raw-status> [status-age-secs] [worked-before:0|1]
   esac
 }
 
-_fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [waiting-for] [transcript-bytes]
-  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" waiting_for="${4:-}" bytes="${5:-0}" stall="${OSRC_STALL_SECS:-600}"
+_fleet_state_evidence() { # <raw-status> [status-age-secs] [worked-before:0|1] [waiting-for] [transcript-bytes] [alive] [liveness-evidence]
+  local status="${1:-unknown}" age="${2:-0}" worked="${3:-0}" waiting_for="${4:-}" bytes="${5:-0}" alive="${6:-unknown}" liveness="${7:-}" stall="${OSRC_STALL_SECS:-600}"
   case "$age" in ''|*[!0-9]*) age=0 ;; esac
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
+  [ "$alive" != 0 ] || { printf '%s' "${liveness:-process is not live}"; return 0; }
   case "$status" in
     waiting|permission-waiting|needs-input|needs_you)
       printf 'CC status=%s%s' "$status" "${waiting_for:+: $waiting_for}" ;;
