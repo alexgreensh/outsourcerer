@@ -2889,7 +2889,7 @@ _fleet_ls_group() { # <snapshot-json> <owner> <heading>
     [(.task_summary // .job_id // .session_id // "(unnamed)"),(.kind // .harness // "-"),
      (if ((.observed_model // "")|length)>0 then .observed_model elif ((.requested_model // "")|length)>0 then .requested_model else (.lane // "-") end),
      (.state // "unknown"),(.status_age // 0),(.started_at // 0),(.cwd // "-"),
-     (if (.state=="blocked?" or .state=="unresponsive?" or .cc_status=="waiting") then 1 else 0 end),(.self // 0)]
+     (if (.state=="blocked?" or .state=="unresponsive?") then 1 else 0 end),(.self // 0)]
     | map(tostring | gsub("[[:cntrl:]]"; " ")) | @tsv')
   printf '\n'
 }
