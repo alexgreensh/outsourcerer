@@ -153,7 +153,7 @@ OSRC_POLL=1 _supervise "$jdb" 1 3 30 -- sh -c 'printf "%s\n" ">>> banner"; for i
 # lane/tier window.
 jdni="$OSRC_HOME/jobs/no-init"; mkdir -p "$jdni"; printf '{"cwd":"%s"}' "$W" > "$jdni/meta.json"
 OSRC_NOINIT_SECS=2 OSRC_POLL=1 _supervise "$jdni" 3 4 30 -- sh -c \
-  'printf "%s\n" ">>> disclosure" "    tier=capable, wrapper metadata"; sleep 30 & printf "%s\n" "$!" > "$1"; wait' sh \
+  'printf "%s\n" ">>> disclosure" "" "    tier=swe-1.7-lightning, wrapper metadata" "ERROR backend handshake pending" ""; sleep 30 & printf "%s\n" "$!" > "$1"; wait' sh \
   "$jdni/child-pid" >/dev/null 2>&1
 ni_pid="$(cat "$jdni/pid" 2>/dev/null)"
 ni_child="$(cat "$jdni/child-pid" 2>/dev/null)"
@@ -168,7 +168,7 @@ kill -0 "$ni_child" 2>/dev/null \
   || ok "the no-init delegate process tree is killed"
 ni_reason='no-init: delegate never started within 2s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot'
 [ "$(cat "$jdni/reason" 2>/dev/null)" = "$ni_reason" ] \
-  && ok "the no-init failure records the actionable reason" \
+  && ok "header, blank, ERROR, and mid-tier lines do not disarm the no-init watchdog" \
   || bad "no-init reason is '$(cat "$jdni/reason" 2>/dev/null)'"
 
 # Once the delegate emits real output, only the existing after-init watchdog applies. This child

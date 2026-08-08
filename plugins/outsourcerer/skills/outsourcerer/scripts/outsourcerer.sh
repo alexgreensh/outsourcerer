@@ -2111,7 +2111,7 @@ _fleet_self_ancestors() {
 # "?" and returns 2 so callers can fail closed for actions while still tagging the listing honestly.
 _fleet_self_key() {
   local current="${OSRC_FLEET_SELF_PID:-$$}" ancestors="" hops=0 parent path pid cwd real_cwd
-  local started proc_start live_proc_start session_id now_ms delta score best_score="" best_key="" ambiguous=0 distance p
+  local started proc_start session_id now_ms delta score best_score="" best_key="" ambiguous=0 distance p
   case "$current" in ''|*[!0-9]*) printf '?\n'; return 2 ;; esac
   real_cwd="$(pwd -P 2>/dev/null || printf '%s' "$PWD")"
   while [ "$current" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
@@ -2132,10 +2132,8 @@ _fleet_self_key() {
     started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
     proc_start="$(jq -r '.procStart // ""' "$path" 2>/dev/null)"
-    if [ -n "$proc_start" ]; then
-      live_proc_start="$(_pid_start_identity "$pid" 2>/dev/null)" || live_proc_start=""
-      [ -z "$live_proc_start" ] || [ "$live_proc_start" = "$proc_start" ] || continue
-    fi
+    # CC procStart is UTC while ps lstart is local time, so these strings are
+    # not comparable. Ancestor PID plus physical cwd are the self identity.
     session_id="$(jq -r '.sessionId // empty' "$path" 2>/dev/null)"
     _external_session_id_valid "$session_id" || continue
     distance=0
@@ -2264,7 +2262,7 @@ _fleet_name_batch_line() { # <index>; stdin batch model output, print one cleane
 _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fallbacks
   local prompt="$1" model output bound="${OSRC_FLEET_NAME_TIMEOUT:-90}"
   case "$bound" in ''|*[!0-9]*|0) bound=90 ;; esac
-  local out_file pid rc waited
+  local out_file pid pgid rc waited monitor_was_on
   for model in glm-5-2 swe-1-7 haiku sol; do
     case "$model" in
       glm-5-2|swe-1-7) have devin || continue ;;
@@ -2280,15 +2278,19 @@ _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fall
     # the kill (same reason _timeout does it).
     out_file="$(mktemp "${OSRC_HOME:-${TMPDIR:-/tmp}}/.fleetname.XXXXXX" 2>/dev/null || mktemp)" || continue
     chmod 600 "$out_file" 2>/dev/null || true
+    monitor_was_on=0; case "$-" in *m*) monitor_was_on=1 ;; esac
+    set -m
     OSRC_NO_AUTODETACH=1 OSRC_STREAM=0 OSRC_LEDGER_QUIET=1 OSRC_CLOUD_ACK=1 OSRC_HEARTBEAT_DISABLED=1 \
       "$SCRIPT_PATH" run -m "$model" "$prompt" > "$out_file" 2>/dev/null &
     pid=$!
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ "$monitor_was_on" = 1 ] || set +m
     waited=0
     while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$bound" ]; do
       sleep 1; waited=$((waited+1))
     done
     if kill -0 "$pid" 2>/dev/null; then
-      _kill_tree "$pid"
+      _kill_process_group "$pgid" "$pid" || true
       wait "$pid" 2>/dev/null
       rm -f "$out_file" 2>/dev/null || true
       continue
@@ -2662,7 +2664,7 @@ _fleet_digest() {
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
   for section in "Captain's Call" "Recently Landed" Underway "Charted Next"; do
     case "$section" in
-      "Captain's Call") filter='.state == "blocked" or .state == "unknown"' ;;
+      "Captain's Call") filter='.state == "blocked" or .state == "blocked?" or .state == "unresponsive?" or .state == "unknown"' ;;
       "Recently Landed") filter='.state == "completed" or .state == "dead"' ;;
       Underway) filter='.state == "working"' ;;
       "Charted Next") filter='.state == "idle"' ;;
@@ -2699,7 +2701,7 @@ _heartbeat_line() {
     (.items | map(select(.owner != "external" and .owner != "cc-peer"))) as $m
     | (.items | map(select(.owner == "external" or .owner == "cc-peer")) | length) as $ext
     | ([$m[] | select(.state == "working")]) as $work
-    | ([$m[] | select(.state == "blocked" or .state == "unknown")]) as $attn
+    | ([$m[] | select(.state == "blocked" or .state == "blocked?" or .state == "unresponsive?" or .state == "unknown")]) as $attn
     | ([.items[] | select(.model_pin? != null)]) as $flips
     | (if ($work|length) == 0 and ($attn|length) == 0 then "all quiet - nothing running"
        else "\($work|length) running" end) as $lead
@@ -5013,6 +5015,34 @@ _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
   for p in $rev; do kill -KILL "$p" 2>/dev/null; done
 }
 
+# Kill an isolated process group created for a bounded helper attempt. Unlike a
+# parent/child walk, PGID membership survives ordinary reparenting (including a
+# launcher handing its delegate to tmux), so the delegate cannot escape merely
+# by leaving the launcher's process tree.
+_kill_process_group() { # <pgid> <root-pid>
+  local pgid="${1:-}" root="${2:-}" shell_pgid survivors tries=0
+  case "$pgid:$root" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  shell_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
+  if [ "$pgid" -le 1 ] 2>/dev/null || [ "$pgid" = "$shell_pgid" ]; then
+    echo "[outsourcerer] WARN: bounded helper PID $root was not isolated in a safe process group; falling back to process-tree cleanup" >&2
+    _kill_tree "$root"
+    return 1
+  fi
+  kill -TERM -- "-$pgid" 2>/dev/null || true
+  sleep 2
+  kill -KILL -- "-$pgid" 2>/dev/null || true
+  # Give the OS a brief chance to reap killed members, then report any live
+  # (non-zombie) orphan explicitly instead of claiming cleanup succeeded.
+  while [ "$tries" -lt 10 ]; do
+    survivors="$(ps -axo pid=,pgid=,stat=,command= 2>/dev/null | awk -v g="$pgid" '$2 == g && $3 !~ /^Z/ {print}')"
+    [ -z "$survivors" ] && return 0
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  printf '[outsourcerer] WARN: bounded helper process-group %s still has orphaned member(s):\n%s\n' "$pgid" "$survivors" >&2
+  return 1
+}
+
 # _perm_denials <log> -> count of REAL permission/sandbox denials in the log's tail.
 #
 # The naive version of this — grep the whole log for 'permission denied|EACCES|...' — counts the
@@ -5116,6 +5146,27 @@ _job_made_writes() {
   [ -n "$hit" ]
 }
 
+# Positive initialization proof for the supervisor. A line is accepted only
+# when it can be real agent/model output: semantic progress, a structured
+# assistant/model event, or non-empty plain model text. Launcher disclosure,
+# tier banners (for every tier), and stderr diagnostics never initialize a job.
+_delegate_has_model_output() { # <out.log> <progress>
+  local log="$1" progress="${2:-}"
+  [ -s "$progress" ] && grep -aqE '^OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$progress" 2>/dev/null && return 0
+  [ -f "$log" ] || return 1
+  awk '
+    /^[[:space:]]*$/ { next }
+    /^>>>[[:space:]]/ { next }
+    /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
+    /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
+    /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
+    /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
+    /"(role|type)"[[:space:]]*:[[:space:]]*"(assistant|agent_message|assistant_message|model_output|item\.completed)"/ { found=1; exit }
+    { found=1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$log" 2>/dev/null
+}
+
 # _supervise <job-dir> <stall_warn> <stall_kill> <hard_timeout> -- <cmd...>
 # Byte-growth watchdog + OSRC:: semantic layer + exit contract (0 done / 2 done? / 3 blocked /
 # 124 timeout / 125 wedged / other = delegate rc).
@@ -5199,11 +5250,9 @@ _supervise() {
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
-    # Launcher/disclosure lines begin with `>>> `, except the capable/frontier detail emitted by
-    # _tier_banner. Anything else is real delegate output and proves initialization. Re-check the
-    # content rather than trusting byte growth, because headers grow out.log without a model turn.
-    if [ "$initialized" = "0" ] \
-       && grep -aqv -e '^>>> ' -e '^    tier=\(frontier\|capable\),' "$jd/out.log" 2>/dev/null; then
+    # Require positive proof of a model/agent turn. Byte growth alone includes
+    # launcher headers, blank lines, stderr diagnostics, and every tier banner.
+    if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
     fi
     if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then

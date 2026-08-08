@@ -162,5 +162,26 @@ printf '%s' "$signals" | jq -e '
   && ok "naming signals use first user task and latest assistant activity" \
   || bad "transcript naming signals selected the wrong messages"
 
+# A naming attempt can leave a delegate reparented away from its launcher. It remains in the
+# launcher's process group, so the bounded cleanup must reap it by PGID even after the leader exits.
+if declare -F _kill_process_group >/dev/null 2>&1; then
+  orphan_pid_file="$FIXTURE/group-orphan.pid"
+  set -m
+  ( sh -c 'sleep 30 & printf "%s\n" "$!" > "$1"; sleep 1' sh "$orphan_pid_file" ) &
+  group_leader=$!
+  group_pgid="$(ps -o pgid= -p "$group_leader" 2>/dev/null | tr -d ' ')"
+  set +m
+  tries=0
+  while [ ! -s "$orphan_pid_file" ] && [ "$tries" -lt 20 ]; do sleep 0.1; tries=$((tries+1)); done
+  group_orphan="$(cat "$orphan_pid_file" 2>/dev/null)"
+  wait "$group_leader" 2>/dev/null || true
+  _kill_process_group "$group_pgid" "$group_leader"
+  kill -0 "$group_orphan" 2>/dev/null \
+    && { kill -KILL "$group_orphan" 2>/dev/null || true; bad "process-group cleanup left a reparented naming delegate alive"; } \
+    || ok "process-group cleanup reaps a reparented naming delegate"
+else
+  bad "bounded naming attempts have no process-group cleanup helper"
+fi
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

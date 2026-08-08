@@ -50,6 +50,21 @@ self_key="$(OSRC_FLEET_SELF_PID="$$" _fleet_self_key)"; self_rc=$?
   && ok "unresolved self match fails closed with self?" \
   || bad "unresolved self match was treated as a peer"
 
+# CC procStart is UTC while ps lstart is local time. Ancestor PID + physical cwd identify self;
+# the incomparable timestamp strings must not veto that otherwise exact match.
+rm -f "$OSRC_CLAUDE_SESSIONS_DIR"/*.json
+physical_cwd="$(pwd -P)"
+jq -cn --argjson pid "$$" --arg now "$now_ms" --arg cwd "$physical_cwd" \
+  '{pid:$pid,sessionId:"timezone-self",cwd:$cwd,procStart:"Sat Aug  8 09:16:53 2026",startedAt:$now,updatedAt:$now,status:"idle"}' \
+  > "$OSRC_CLAUDE_SESSIONS_DIR/timezone-self.json"
+saved_pid_start_identity="$(declare -f _pid_start_identity)"
+_pid_start_identity(){ printf '%s\n' 'Sat Aug  8 12:16:53 2026'; }
+self_key="$(OSRC_FLEET_SELF_PID="$$" _fleet_self_key)"; self_rc=$?
+eval "$saved_pid_start_identity"
+[ "$self_rc" -eq 0 ] && [ "${self_key%%:*}" = "$$" ] && printf '%s' "$self_key" | grep -q ':timezone-self:' \
+  && ok "self match relies on ancestor PID and physical cwd despite timezone-mismatched procStart" \
+  || bad "timezone-mismatched procStart rejected a real self match ($self_key, rc=$self_rc)"
+
 rm -f "$OSRC_CLAUDE_SESSIONS_DIR"/*.json
 mkdir -p "$OSRC_JOBS/healthy" "$(dirname "$OSRC_SESSION_REGISTRY")"
 printf '%s\n' running > "$OSRC_JOBS/healthy/status"

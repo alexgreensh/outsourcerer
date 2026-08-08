@@ -31,6 +31,14 @@ snap='{"items":[{"owner":"managed","state":"blocked","observed_model":"glm","tas
 out="$(line "$snap")"
 case "$out" in *"⚠ needs you"*"glm 'migrate db' blocked"*) ok "blocked work is flagged as needing you" ;; *) bad "blocked not surfaced: $out" ;; esac
 
+# CC-overlay vocabulary must remain attention-worthy for managed lanes. The merge can annotate a
+# managed job with blocked?/unresponsive?, and readers must not silently drop either from the pulse.
+snap='{"items":[{"owner":"managed","state":"blocked?","observed_model":"sonnet","task_summary":"approve migration"},{"owner":"managed","state":"unresponsive?","observed_model":"sonnet","task_summary":"stuck deploy"}]}'
+out="$(line "$snap")"
+case "$out" in *"⚠ needs you"*"approve migration"*"stuck deploy"*) ok "CC needs-you and stuck managed states remain visible in the pulse" ;; *) bad "CC attention states vanished from pulse: $out" ;; esac
+digest="$(_fleet_digest "$snap")"
+case "$digest" in *"Captain's Call"*"approve migration"*"stuck deploy"*) ok "CC needs-you and stuck managed states remain visible in bearings" ;; *) bad "CC attention states vanished from bearings: $digest" ;; esac
+
 # A missing started_at degrades to no elapsed, never to a crash or a bogus duration.
 snap='{"items":[{"owner":"managed","state":"working","observed_model":"sol","task_summary":"x"}]}'
 out="$(line "$snap")"
