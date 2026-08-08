@@ -43,11 +43,14 @@ type _devin_live_mtime >/dev/null 2>&1 || { echo "FAIL: _devin_live_mtime not de
 # must leave the no-init watchdog armed. Only positive assistant output disarms it.
 noise="$TMP/no-init-noise.log"; progress="$TMP/no-init-progress"
 for line in \
-  'Authenticating credentials' \
-  'connecting...' \
-  'Connection error' \
-  '⠋' \
-  '{"foo":1}'
+  'Retrying connection attempt 1 of 5' \
+  'Waiting for Devin to respond' \
+  'SessionStart: loading project config' \
+  'PostToolUse: bash returned 0' \
+  'Hook: PreToolUse matched' \
+  '{"type":"message","subtype":"init"}' \
+  '{"text":"Connection error"}' \
+  '⠋'
 do
   printf '%s\n' "$line" > "$noise"
   if _delegate_has_model_output "$noise" "$progress"; then
@@ -57,10 +60,9 @@ do
   fi
 done
 for line in \
-  '{"type":"text","text":"Here is the fix"}' \
   '{"type":"content_block_delta","delta":{"text":"x"}}' \
-  '{"role":"assistant","content":"hello there this is real output"}' \
-  'This is substantial plaintext model output.'
+  '{"role":"assistant","content":"here is the plan"}' \
+  'Here is the fix you asked for'
 do
   printf '%s\n' "$line" > "$noise"
   _delegate_has_model_output "$noise" "$progress" \

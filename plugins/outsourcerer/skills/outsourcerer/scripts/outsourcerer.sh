@@ -5240,21 +5240,34 @@ _delegate_has_model_output() { # <out.log> <progress>
   [ -f "$log" ] || return 1
   awk '
     /^[[:space:]]*$/ { next }
-    /OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)/ { found=1; exit }
-    /"type"[[:space:]]*:[[:space:]]*"(message|agent_message|assistant_message|model_output|item\.completed|text|content_block_delta|content_block_start|output_text)"/ { found=1; exit }
+    # POSITIVE 1: our own orchestrator progress markers
+    /OSRC::(PROGRESS|PLAN|DONE|NEED_INPUT)/ { found=1; exit }
+    # POSITIVE 2: explicit assistant role provenance
     /"role"[[:space:]]*:[[:space:]]*"assistant"/ { found=1; exit }
-    /"(text|content)"[[:space:]]*:[[:space:]]*"[^"[:space:]][^"]*"/ { found=1; exit }
+    # POSITIVE 3: real token/content stream event TYPES (NOT bare "message", NOT lifecycle)
+    /"type"[[:space:]]*:[[:space:]]*"(content_block_delta|content_block_start|output_text|output_text_delta|assistant_message|agent_message|model_output|item\.completed)"/ { found=1; exit }
+    # From here down: definitely-not-output. Skip diagnostics/lifecycle/chatter, never set found.
     /^>>>[[:space:]]/ { next }
     /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
     /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
-    /^[[:space:]]*(Connecting|connecting|Connection|Authenticating|Loading|Starting|Initializing|Warming)([.[:space:]:]|$)/ { next }
-    /^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏][[:space:]]*/ { next }
-    $0 !~ /^[[:space:]]*[\{\[]/ {
-      text=$0
-      gsub(/[[:space:]]/, "", text)
-      if (text ~ /^[[:punct:]]*$/) next
-      if (length(text) >= 24) { found=1; exit }
+    # hardened diagnostic-verb denylist (adds Retrying|Waiting|Reconnecting|Resuming|Connected|Authenticated|Ready)
+    /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected|Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ { next }
+    # hook/tool/session lifecycle lines
+    /^[[:space:]]*(Hook|Tool|SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|Notification|Stop|SubagentStop|PreCompact)(:|[[:space:]])/ { next }
+    # generic "Word:" log-prefix (SessionStart: , Foo: ) and [bracketed] log prefixes
+    /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*:[[:space:]]/ { next }
+    /^[[:space:]]*\[[^]]*\][[:space:]]*/ { next }
+    # spinner glyphs
+    /^[[:space:]]*[|\\\/⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏-][[:space:]]*$/ { next }
+    # any JSON/structural line that did NOT match the assistant-provenance positives above: NOT output
+    /^[[:space:]]*[\{\[]/ { next }
+    # POSITIVE 4 (last resort): substantive assistant PLAINTEXT — must contain a real
+    # alpha word of >=3 letters AND total alpha>=16, after passing every denylist above.
+    {
+      alpha=$0; gsub(/[^A-Za-z]/,"",alpha)
+      if (length(alpha) >= 16 && $0 ~ /[A-Za-z]{3,}/) { found=1; exit }
+      next
     }
     END { exit(found ? 0 : 1) }
   ' "$log" 2>/dev/null
