@@ -1961,7 +1961,7 @@ _fleet_transcript_bytes() { # <CC-session-id> <cwd>
 # "?" and returns 2 so callers can fail closed for actions while still tagging the listing honestly.
 _fleet_self_key() {
   local current="${OSRC_FLEET_SELF_PID:-$$}" ancestors="" hops=0 parent path pid cwd real_cwd
-  local started proc_start session_id now_ms delta score best_score="" best_key="" ambiguous=0 distance p
+  local started proc_start live_proc_start session_id now_ms delta score best_score="" best_key="" ambiguous=0 distance p
   case "$current" in ''|*[!0-9]*) printf '?\n'; return 2 ;; esac
   real_cwd="$(pwd -P 2>/dev/null || printf '%s' "$PWD")"
   while [ "$current" -gt 1 ] 2>/dev/null && [ "$hops" -lt 64 ]; do
@@ -1982,6 +1982,10 @@ _fleet_self_key() {
     started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
     case "$started" in ''|*[!0-9]*) started=0 ;; esac
     proc_start="$(jq -r '.procStart // ""' "$path" 2>/dev/null)"
+    if [ -n "$proc_start" ]; then
+      live_proc_start="$(_pid_start_identity "$pid" 2>/dev/null)" || live_proc_start=""
+      [ -z "$live_proc_start" ] || [ "$live_proc_start" = "$proc_start" ] || continue
+    fi
     session_id="$(jq -r '.sessionId // empty' "$path" 2>/dev/null)"
     _external_session_id_valid "$session_id" || continue
     distance=0
@@ -1994,7 +1998,7 @@ _fleet_self_key() {
       ambiguous=1
     fi
   done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
-  [ -n "$best_key" ] || return 1
+  [ -n "$best_key" ] || { printf '?\n'; return 2; }
   if [ "$ambiguous" = 1 ]; then printf '?\n'; return 2; fi
   printf '%s\n' "$best_key"
 }

@@ -37,5 +37,14 @@ printf '%s' "$peers" | jq -e '
   && ok "long-idle transcript activity remains idle" \
   || bad "long-idle transcript activity became needs-you"
 
+rm -f "$OSRC_CLAUDE_SESSIONS_DIR"/*.json
+jq -cn --argjson pid "$$" --argjson now "$now_ms" '
+  {pid:$pid,sessionId:"cwd-mismatch",cwd:"/",startedAt:$now,updatedAt:$now,status:"idle"}' \
+  > "$OSRC_CLAUDE_SESSIONS_DIR/cwd-mismatch.json"
+self_key="$(OSRC_FLEET_SELF_PID="$$" _fleet_self_key)"; self_rc=$?
+[ "$self_key" = "?" ] && [ "$self_rc" -eq 2 ] \
+  && ok "unresolved self match fails closed with self?" \
+  || bad "unresolved self match was treated as a peer"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
