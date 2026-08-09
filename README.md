@@ -233,6 +233,28 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 ---
 
+## See your whole fleet in one honest view
+
+<img src="readme-assets/section-fleet.png" alt="The little wizard reviewing rows of his hat-tipped helper sprites, each holding a glowing gold name-card, one topped with a gold bell because it is waiting on him, with constellation-creature crew working at desks in the corners" width="100%">
+
+**Your AI sessions work in separate rooms.** A Claude Code tab here, three jobs you handed to cheaper engines there, one of them quietly waiting on your approval. Every tool shows you its own sessions. None of them show you all of them at once. `fleet` does.
+
+```bash
+outsourcerer fleet ls      # every session you're running, one honest list
+outsourcerer fleet name    # real names from real work, not "session-a3f2"
+outsourcerer fleet show <id>
+```
+
+**One list, and it tells the truth.** Every Claude Code session plus every job Outsourcerer ran for you, each with a status read from the live process and its own transcript, never a spinner that lies. A session is **Working**, **Waiting on you**, **Done**, or **Stopped mid-task**, so you walk straight to the one that needs you instead of hunting through tabs.
+
+**Real names, not hashes.** `fleet name` reads what each session is actually working on and names it, so `alexgreenshpun-71` reads as `Update feedback skill for Gambit`, cached so the list stays instant.
+
+**It catches the stuck ones.** Turn on supervision and a background heartbeat watches the fleet, spots a delegate that stalled or never started, and steps in instead of letting it sit silent for half an hour.
+
+Today it covers your Claude Code sessions and the jobs Outsourcerer runs. Seeing sessions other tools launched on their own is next.
+
+---
+
 ## Handled with gloves (security)
 
 <img src="readme-assets/section-security.png" alt="The sorcerer in protective gloves guarding a single glowing key behind a ward, keeping it away from open lanes" width="100%">
@@ -305,7 +327,7 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 - **Pi** and more harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and completion events so an orchestrator wakes on a job's state change instead of polling.
-- *Already shipped:* the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* the **`fleet`** view (one honest list of every session you're running, with real names and honest states) in v0.7.0; the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 
