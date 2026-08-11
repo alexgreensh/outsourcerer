@@ -59,6 +59,8 @@ _ALL_SUITES="$_ALL_SUITES test_fleet_cc_peers"
 _ALL_SUITES="$_ALL_SUITES test_fleet_states"
 _ALL_SUITES="$_ALL_SUITES test_fleet_names"
 _ALL_SUITES="$_ALL_SUITES test_devin_free_guard"
+_ALL_SUITES="$_ALL_SUITES test_fg_guard_forgery test_fanout_json test_version_gate test_explain"
+_ALL_SUITES="$_ALL_SUITES test_detection test_pane_state test_wait test_feature_fixes test_droid_session"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say
