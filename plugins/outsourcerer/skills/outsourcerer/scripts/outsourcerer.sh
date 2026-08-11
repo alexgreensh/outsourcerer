@@ -1857,12 +1857,14 @@ _pane_state_json() { # <state> <evidence>  -> {"state","evidence"}
     jq -cn --arg s "$state" --arg e "$evidence" '{state:$s,evidence:$e}'
     return 0
   fi
-  evidence="${evidence//\\/\\\\}"
-  evidence="${evidence//\"/\\\"}"
-  evidence="${evidence//$'\t'/\\t}"
-  evidence="${evidence//$'\r'/}"
-  evidence="${evidence//$'\n'/ }"
-  state="${state//\\/\\\\}"; state="${state//\"/\\\"}"
+  evidence="$(printf '%s' "$evidence" | LC_ALL=C awk '
+    BEGIN { for (i=1; i<32; i++) ctrl[sprintf("%c", i)]=sprintf("\\u%04X", i); ctrl["\t"]="\\t"; ctrl["\r"]="\\r" }
+    { if (NR>1) printf "\\n"; for (i=1; i<=length($0); i++) { c=substr($0,i,1); if (c=="\\") printf "\\\\"; else if (c=="\"") printf "\\\""; else if (c in ctrl) printf "%s", ctrl[c]; else printf "%s", c } }
+  ')"
+  state="$(printf '%s' "$state" | LC_ALL=C awk '
+    BEGIN { for (i=1; i<32; i++) ctrl[sprintf("%c", i)]=sprintf("\\u%04X", i); ctrl["\t"]="\\t"; ctrl["\r"]="\\r" }
+    { if (NR>1) printf "\\n"; for (i=1; i<=length($0); i++) { c=substr($0,i,1); if (c=="\\") printf "\\\\"; else if (c=="\"") printf "\\\""; else if (c in ctrl) printf "%s", ctrl[c]; else printf "%s", c } }
+  ')"
   printf '{"state":"%s","evidence":"%s"}' "$state" "$evidence"
 }
 
@@ -7493,7 +7495,7 @@ _fanout_wait() {
   while IFS="$(printf '\t')" read -r _jid _; do
     [ -n "$_jid" ] || continue
     _st="$(_reconcile_status "$_jid" 2>/dev/null || echo '?')"
-    case "$_st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
+    case "$_st" in failed|blocked|timeout|wedged|permission-blocked|interrupted|canceled) _fail=$((_fail+1)) ;; esac
   done < "$gd/members.tsv"
   echo "[outsourcerer] fanout $gid: $(_fanout_running "$gid") still running, $_fail failed." >&2
   [ "$_fail" -eq 0 ] || return 1
@@ -7522,7 +7524,7 @@ _fanout_collect() {
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
     st="$(_reconcile_status "$jid" 2>/dev/null || echo '?')"
-    case "$st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
+    case "$st" in failed|blocked|timeout|wedged|permission-blocked|interrupted|canceled) _fail=$((_fail+1)) ;; esac
   done < "$gd/members.tsv"
   echo "[outsourcerer] collected $n agent outputs -> $out  ($_fail failed)  (per-agent: $gd/findings/)" >&2
   [ "$_fail" -eq 0 ] || return 1
@@ -11866,7 +11868,7 @@ doctor() {
   echo "    image lane (nano-banana): REST + GEMINI_API_KEY (no keyless path) -> $0 image -m nano-banana \"...\" out.png"
   echo "    tier cache: $( [ -f "$OSRC_MODELS_JSON" ] && echo "$OSRC_MODELS_JSON (refresh: $0 models --refresh)" || echo 'none, run: $0 models --refresh (name-regex fallback in use)')"
   echo "  -- Devin lane --"
-  if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
+  if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"; if [ "$_dstrict" = "1" ] && [ -n "$_drift" ]; then return 1; fi; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
   _devin_zombie_preflight
   local _dauth=0
   if logged_in; then

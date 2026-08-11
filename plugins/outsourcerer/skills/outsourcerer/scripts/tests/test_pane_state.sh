@@ -79,4 +79,24 @@ sj="$(session read --state)"
 echo "$sj" | jq -e '.state == "waiting-approval" and (.evidence | type == "string")' >/dev/null \
   && ok "session read --state classifies the pane" || bad "session read --state failed: $sj"
 
+# 8. No-jq fallback must JSON-escape raw ANSI ESC bytes from a real pane capture.
+tmux(){ case "$1" in capture-pane) printf '\033[31mThinking\n';; *) return 1;; esac; }
+have(){ [ "${1:-}" = tmux ]; } # force only jq absent; session still sees the stubbed tmux lane.
+sj="$(session read --state)"; rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$sj" | LC_ALL=C grep "$(printf '\033')" >/dev/null 2>&1 \
+   && printf '%s' "$sj" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+  ok "session read --state no-jq output escapes ANSI ESC and is valid JSON"
+else
+  bad "session read --state no-jq output contains raw ESC, is invalid JSON, or returned rc=$rc"
+fi
+
+# 9. Capture failure is intentionally a successful, valid unknown-state observation.
+tmux(){ return 1; }
+sj="$(session read --state)"; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$sj" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["state"] == "unknown"' >/dev/null 2>&1; then
+  ok "session read --state capture failure emits valid unknown JSON with rc 0"
+else
+  bad "session read --state capture failure returned rc=$rc or invalid/non-unknown JSON: $sj"
+fi
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

@@ -102,6 +102,23 @@ _gate "$TMP/.claude-plugin/does-not-exist.json" 1; rc=$?
 [ "$rc" -eq 0 ] && ok "missing plugin.json + --strict -> no false failure (rc 0)" \
                  || bad "missing plugin.json + --strict returned rc=$rc (expected 0)"
 
+# --- cases 6-7: the real doctor path must apply the gate before its devin-missing return ----------
+mkdir -p "$TMP/plugins/outsourcerer/skills/outsourcerer/scripts" "$TMP/plugins/outsourcerer/.claude-plugin" "$TMP/home"
+SCRIPT_PATH="$TMP/plugins/outsourcerer/skills/outsourcerer/scripts/outsourcerer.sh"
+HOME="$TMP/home"; OSRC_HOME="$TMP/state"; PROVIDER=cc; OSRC_DOCTOR_OFFLINE=1
+export HOME OSRC_HOME OSRC_DOCTOR_OFFLINE
+have(){ [ "${1:-}" = jq ]; } # jq exists for drift detection; devin and every other optional CLI do not.
+
+printf '{"name":"outsourcerer","version":"%s"}\n' "$_mismatch_ver" > "$TMP/plugins/outsourcerer/.claude-plugin/plugin.json"
+doctor --strict >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 1 ] && ok "real doctor: drift + strict + devin absent -> drift wins (rc 1)" \
+                 || bad "real doctor: drift + strict + devin absent returned rc=$rc (expected 1)"
+
+printf '{"name":"outsourcerer","version":"%s"}\n' "$OSRC_VERSION" > "$TMP/plugins/outsourcerer/.claude-plugin/plugin.json"
+doctor --strict >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "real doctor: no drift + strict + devin absent + provider cc -> rc 0" \
+                 || bad "real doctor: no drift + strict + devin absent + provider cc returned rc=$rc (expected 0)"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

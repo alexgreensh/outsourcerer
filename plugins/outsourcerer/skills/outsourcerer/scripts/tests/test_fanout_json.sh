@@ -47,7 +47,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 GID="grp-test"
 GD="$OSRC_HOME/fanout/$GID"
-mkdir -p "$GD"
+mkdir -p "$GD/findings"
 
 # A pid this high is guaranteed not to exist on macOS/Linux, so kill -0 fails and
 # _reconcile_status cannot keep the job alive via the delegate pid. We also write a stale
@@ -117,6 +117,14 @@ jobs_count="$(printf '%s' "$out" | jq -r '.jobs | length')"
 job2_status="$(printf '%s' "$out" | jq -r '.jobs[] | select(.job_id=="job2") | .status')"
 [ "$job2_status" = "interrupted" ] && ok "job2 reported as interrupted in jobs[]" \
                                     || bad "job2 reported as [$job2_status] in jobs[], expected interrupted"
+
+# wait and collect must agree with status: a canceled member is a failed fanout outcome.
+_fanout_wait "$GID" >/dev/null 2>&1; wait_rc=$?
+[ "$wait_rc" -ne 0 ] && ok "fanout wait returns nonzero for canceled member" \
+                       || bad "fanout wait returned 0 despite canceled member"
+_fanout_collect "$GID" >/dev/null 2>&1; collect_rc=$?
+[ "$collect_rc" -ne 0 ] && ok "fanout collect returns nonzero for canceled member" \
+                          || bad "fanout collect returned 0 despite canceled member"
 
 echo
 echo "RESULT: $pass passed, $fail failed"
