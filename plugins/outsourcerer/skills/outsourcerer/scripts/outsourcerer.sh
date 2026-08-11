@@ -40,6 +40,10 @@
 #                                  OPENROUTER_API_KEY). Prints the written file path. `doctor` reports
 #                                  which one resolves right now; force one with -m gpt-image / -m
 #                                  nano-banana / -m <openrouter-image-id>.
+#   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
+#                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
+#                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   wait <job-id> [--for N]        BLOCK until a job is terminal; exit 0 done|done?, 3 blocked|permission-blocked, 1 other failure (failed|wedged|timeout|interrupted|canceled), 124 --for N elapsed while still live. Unlike watch (a bounded ~15s status poll), wait blocks to terminal by default.
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
@@ -136,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.7.1"
+OSRC_VERSION="0.7.2"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1832,14 +1836,90 @@ _fleet_recent_session_files() { # <dir>
   printf '%s\n' "$matches" | tr '\n' '\0' | xargs -0 ls -1t 2>/dev/null | head -n "$cap"
 }
 
+# ---- pane-state classification (P2c) ----
+# _pane_state_classify: read pane/log text on STDIN, echo a small JSON object
+# {"state":"...","evidence":"..."} where state is one of:
+#   waiting-approval | working | idle | unknown
+# Precedence is approval BEFORE busy: a delegate parked on a yes/no prompt is the
+# actionable signal (it needs a human), so it wins over a concurrent spinner glyph.
+# Patterns are matched against the LATEST interaction region (the tail of non-empty
+# lines), not the whole scrollback: a prompt string buried high in history that the
+# agent already answered is NOT a current block, and matching it would cry wolf.
+# Conservative by design — when in doubt, label "unknown" rather than fabricate a
+# waiting-approval verdict that would summon a human for nothing. No jq dependency:
+# the session read path must work without it (the fleet path already requires jq).
+_pane_state_json() { # <state> <evidence>  -> {"state","evidence"}
+  local state="$1" evidence="$2"
+  # jq does correct, complete JSON escaping (quotes, backslash, AND control chars like tab) —
+  # a hand-rolled escaper kept missing control chars, producing invalid JSON. Prefer jq; fall
+  # back to a manual escaper (backslash, quote, tab->\t, drop CR, newline->space) only if jq is absent.
+  if have jq; then
+    jq -cn --arg s "$state" --arg e "$evidence" '{state:$s,evidence:$e}'
+    return 0
+  fi
+  evidence="${evidence//\\/\\\\}"
+  evidence="${evidence//\"/\\\"}"
+  evidence="${evidence//$'\t'/\\t}"
+  evidence="${evidence//$'\r'/}"
+  evidence="${evidence//$'\n'/ }"
+  state="${state//\\/\\\\}"; state="${state//\"/\\\"}"
+  printf '{"state":"%s","evidence":"%s"}' "$state" "$evidence"
+}
+
+_pane_state_classify() {
+  local text tail_region last evidence
+  text="$(cat)"
+  # The latest interaction region: the last N non-empty lines. A prompt buried deeper
+  # than this in scrollback is history the agent moved past, not a current block.
+  tail_region="$(printf '%s\n' "$text" | grep -v '^[[:space:]]*$' | tail -n "${OSRC_PANE_STATE_TAIL:-30}")"
+  [ -n "$tail_region" ] || { _pane_state_json unknown "empty pane capture"; return 0; }
+
+  # Approval needles, reusing the vocabulary this script already keys on elsewhere
+  # (the cc /model picker's "Switch model?"/"Yes, switch to", the [y/N] consent prompts
+  # the cloud/route gates use, and "requires confirmation" from the print-mode hang
+  # detector). Matched on the tail only — a buried prompt is not a current block.
+  local approval_re='(\[y/N\]|\(y/n\)|Do you want to (proceed|continue)|❯[[:space:]]*[0-9]+\.[[:space:]]*Yes|Allow\?|approve|requires confirmation|Switch model\?|Yes, switch to|proceed\?)'
+  if evidence="$(printf '%s\n' "$tail_region" | grep -Ei "$approval_re" | tail -1)" && [ -n "$evidence" ]; then
+    _pane_state_json waiting-approval "$evidence"; return 0
+  fi
+
+  # Busy signals: Claude Code's "esc to interrupt", "Thinking"/"Running" labels, and
+  # the braille spinner glyphs ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏.
+  local busy_re='(esc to interrupt|Thinking|Running|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏)'
+  if evidence="$(printf '%s\n' "$tail_region" | grep -E "$busy_re" | tail -1)" && [ -n "$evidence" ]; then
+    _pane_state_json working "$evidence"; return 0
+  fi
+
+  # Idle: a bare shell/agent prompt at the bottom with no busy/approval signal above it.
+  last="$(printf '%s\n' "$tail_region" | tail -1)"
+  if printf '%s' "$last" | grep -qE '[$%>❯][[:space:]]*$'; then
+    _pane_state_json idle "$last"; return 0
+  fi
+
+  _pane_state_json unknown "no recognized signal in tail"; return 0
+}
+
 _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] [pid-start]
   local items="$1" id="$2" source="$3" endpoint="$4" pid="${5:-}" pid_start="${6:-}" item
   _external_session_id_valid "$id" || return 1
-  item="$(jq -cn --arg id "$id" --arg source "$source" --arg endpoint "$endpoint" --arg pid "$pid" --arg pid_start "$pid_start" '
+  # Default is the honest "unknown" for sources with no readable pane (transcript files,
+  # process-table sightings). For a tmux: endpoint whose capture SUCCEEDS, replace it with
+  # _pane_state_classify's verdict + evidence so a delegate stuck at an approval prompt is
+  # visible. A failed capture stays "unknown" (no pane to read), never a fabricated verdict.
+  local state="unknown" state_evidence="read-only observation" pane cap verdict
+  if [ "${endpoint#tmux:}" != "$endpoint" ] && [ -n "${endpoint#tmux:}" ]; then
+    pane="${endpoint#tmux:}"
+    if have tmux && cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" && [ -n "$cap" ] \
+       && verdict="$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)" && [ -n "$verdict" ]; then
+      state="$(printf '%s' "$verdict" | jq -r '.state // "unknown"' 2>/dev/null)"; [ -n "$state" ] || state="unknown"
+      state_evidence="$(printf '%s' "$verdict" | jq -r '.evidence // "tmux pane capture"' 2>/dev/null)"; [ -n "$state_evidence" ] || state_evidence="tmux pane capture"
+    fi
+  fi
+  item="$(jq -cn --arg id "$id" --arg source "$source" --arg endpoint "$endpoint" --arg pid "$pid" --arg pid_start "$pid_start" --arg state "$state" --arg state_evidence "$state_evidence" '
     {schema_version:"1",session_id:$id,owner:"external",harness:$source,lane:null,
      requested_model:null,observed_model:null,effort:null,endpoint:(if $endpoint=="" then null else $endpoint end),
      harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),
-     started_at:null,state:"unknown",state_evidence:"read-only observation",composer_state:"unknown",claim:null,
+     started_at:null,state:$state,state_evidence:$state_evidence,composer_state:"unknown",claim:null,
      task_summary:"external session",last_receipt:null,source_generation:null}')" || return 1
   jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]'
 }
@@ -4495,7 +4575,17 @@ cmd_tap() {
       fi
       # passthrough: run the original statusline command with the same stdin, else a minimal line.
       local orig=""; [ -f "$stash" ] && have jq && orig="$(jq -r '.command // ""' "$stash" 2>/dev/null)"
-      if [ -n "$orig" ]; then printf '%s' "$input" | sh -c "$orig"
+      if [ -n "$orig" ]; then
+        # Defense-in-depth: refuse to exec the stashed command if the stash is group/world-writable,
+        # so a perms mistake can't become silent command execution. Skip the exec and fall through.
+        # Portable + output-based: `-perm +022` is BSD-only (GNU removed it) and testing find's
+        # EXIT status is wrong (find exits 0 whether or not it matched). `-perm -g+w`/`-perm -o+w`
+        # work on both BSD and GNU; a non-empty find OUTPUT means the stash is group/world-writable.
+        if [ -f "$stash" ] && [ -z "$(find "$stash" \( -perm -g+w -o -perm -o+w \) 2>/dev/null)" ]; then
+          printf '%s' "$input" | sh -c "$orig"
+        else
+          echo "tap: refusing to run stashed statusline: $stash is group/world-writable; fix with 'chmod 0600 $stash'" >&2
+        fi
       else printf '%s' "$input" | { have jq && jq -r '[(.model.display_name // "claude"), (.workspace.current_dir // "" | split("/") | last)] | map(select(. != "")) | join(" · ")' 2>/dev/null || echo "claude"; }; fi ;;
     install)
       have jq || die "tap install needs jq ($( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || echo 'brew/apt install jq'))"
@@ -4506,6 +4596,7 @@ cmd_tap() {
       mkdir -p "$OSRC_HOME" 2>/dev/null
       # Stash the WHOLE original statusLine object (type/command/padding/…), not just .command.
       jq -c '.statusLine // {}' "$settings" > "$stash" 2>/dev/null
+      chmod 0600 "$stash" 2>/dev/null   # defense-in-depth: stash holds a command string, keep it owner-only
       local orig; orig="$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)"
       cp "$settings" "$settings.bak-osrc-tap" 2>/dev/null
       jq --arg cmd "$(_tap_statusline_cmd)" '.statusLine = {type:"command", command:$cmd}' "$settings" > "$settings.tmp.$$" 2>/dev/null \
@@ -5310,7 +5401,7 @@ _supervise() {
   local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
-  trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; exit 130' TERM INT
+  trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
   # if it then remains both write-free AND output-silent for another bounded window, stop it as a
@@ -5341,7 +5432,7 @@ _supervise() {
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
-      echo interrupted > "$jd/status"; echo 130 > "$jd/exit"; return 130
+      echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
     fi
     sleep "${OSRC_POLL:-10}"
     # The delegate can FINISH during that sleep. The loop condition is only re-tested at the top, so
@@ -5403,6 +5494,7 @@ _supervise() {
       local _pd; _pd="$(_perm_denials "$jd/out.log")"; _pd="${_pd:-0}"
       if [ "$_pd" -ge "${OSRC_PERM_ABORT:-3}" ]; then
         echo "permission-blocked" > "$jd/status"
+        printf 'permission-blocked:denials=%s\n' "$_pd" > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): $_pd permission/sandbox denials — the delegate is walled off (a protected path or sandbox that can't be auto-approved headless). Re-run with 'yolo' (bypassPermissions), from a different cwd, or with the right sandbox/--add-dir." >&2
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
       fi
@@ -5435,12 +5527,13 @@ _supervise() {
       if tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null \
            | grep -aq "$(_printmode_needle)"; then
         echo "permission-blocked" > "$jd/status"
+        printf 'permission-blocked:print-mode-hang\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
     if [ "$age" -ge "$hard" ]; then
-      echo timeout > "$jd/status"; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
+      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
     fi
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
     # while writing files is working, and killing it is the failure this watchdog causes rather than
@@ -5501,6 +5594,10 @@ _supervise() {
       if ! grep -aqv '^>>> ' "$jd/out.log" 2>/dev/null; then
         printf 'silent-delegate\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] job $(basename "$jd") produced NO output for ${idle}s and was stopped. It never printed anything past the launch banner, so there was no way to tell work from a hang. If you told the delegate to write to a file and print only at the end, ask it to also emit a periodic 'OSRC::PROGRESS <what it is doing>' line — that is what keeps the watchdog fed. If the work is genuinely long and silent, raise the stall window: OSRC_STALL_KILL=<seconds>." >&2
+      else
+        # Spoke then went silent: a real stall, not a silent-by-instruction run. Record the cause so
+        # `explain`/`status` can show it instead of a bare `wedged` verdict.
+        printf 'stall-kill\n' > "$jd/reason" 2>/dev/null || true
       fi
       _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
     fi
@@ -5532,7 +5629,17 @@ _supervise() {
   # signature matched anywhere in a log is one the delegate can forge just by quoting it.
   local last; last="$(_last_marker "$jd/out.log")"
   case "$last" in
-    OSRC::BLOCKED|OSRC::NEED_INPUT) echo blocked > "$jd/status"; return 3 ;;
+    OSRC::BLOCKED|OSRC::NEED_INPUT)
+      echo blocked > "$jd/status"
+      # Persist the delegate's own blocked/need-input text (the bit after the marker) so a bare
+      # `blocked` verdict carries its reason. Bounded + best-effort: fall back to a marker token
+      # if no trailing text is extractable. The reason file is private to the job dir (600).
+      local _btxt
+      _btxt="$(grep -aoE 'OSRC::(BLOCKED|NEED_INPUT)(#[0-9A-Fa-f]+)?[[:space:]].+' "$jd/out.log" 2>/dev/null | tail -1 \
+              | sed -E 's/^OSRC::(BLOCKED|NEED_INPUT)(#[0-9A-Fa-f]+)?[[:space:]]*//' | cut -c1-200)"
+      [ -n "$_btxt" ] || _btxt='blocked:delegate-marker'
+      printf '%s\n' "$_btxt" > "$jd/reason" 2>/dev/null || true
+      return 3 ;;
   esac
   # Output-token exhaustion is a distinct, recoverable failure, but engines report it as a generic
   # non-zero exit with the partial answer still sitting in the log. Left unnamed it reads as "the run
@@ -5546,10 +5653,14 @@ _supervise() {
     echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything — in that case also ask it to print a periodic 'OSRC::PROGRESS <step>' line, or a long silent run looks identical to a hang and gets stopped." >&2
     return "$rc"
   fi
-  if [ "$rc" -ne 0 ]; then echo failed > "$jd/status"; return "$rc"
+  if [ "$rc" -ne 0 ]; then
+    echo failed > "$jd/status"
+    printf 'exit-nonzero:rc=%s\n' "$rc" > "$jd/reason" 2>/dev/null || true
+    return "$rc"
   elif [ "$last" = "OSRC::DONE" ]; then echo done > "$jd/status"; return 0
   else
     echo "done?" > "$jd/status"
+    printf 'exited-0-without-OSRC-DONE\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] WARN: delegate exited 0 without OSRC::DONE, verify before trusting" >&2
     return 2
   fi
@@ -5574,6 +5685,25 @@ _tier_windows() {   # <tier> -> "warn kill hard" seconds (env overrides win)
 # that never finishes, and a short TEARDOWN cap that starts the moment a DONE/BLOCKED marker appears
 # (catches the wedge fast without killing a legit long think). Only the OUTERMOST foreground route
 # guards: bg jobs (OSRC_STREAM=1) and self-heal re-invocations (OSRC_FG_GUARD_ACTIVE=1) run inline.
+# Strict terminal-marker parser for the foreground teardown path. Unlike _last_marker, this NEVER
+# falls back to an UNSIGNED anchored marker when OSRC_MARK is set: a terminal is trusted ONLY if it
+# carries the #${OSRC_MARK} signature. The unsigned anchored form is accepted solely when OSRC_MARK
+# is genuinely empty. This keeps the teardown timer keyed to the delegate's own trusted completion
+# signal rather than marker text it merely echoed. Both the teardown TRIGGER and the rc MAPPING in
+# _fg_guard derive from this.
+_fg_teardown_seen() {  # $1 = capture file; echoes non-empty iff a TRUSTED terminal marker present
+  local cap="$1"
+  if [ -n "${OSRC_MARK:-}" ]; then
+    # Anchor exactly like _last_marker: the signed marker must BEGIN a line, follow an escaped
+    # newline (JSON event stream), or follow a quote — so a signed marker echoed MID-PROSE
+    # ("I'll print OSRC::DONE#<mark> when done") does NOT arm the teardown kill. The trailing
+    # ([^0-9A-Za-z]|$) keeps a short mark from matching a longer token as a prefix.
+    grep -aoE "(^|\\\\n|\")[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)#${OSRC_MARK}([^0-9A-Za-z]|$)" "$cap" 2>/dev/null | tail -1
+  else
+    grep -aoE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)([^#]|$)' "$cap" 2>/dev/null | tail -1
+  fi
+}
+
 _fg_guard() {
   local fn="$1" tier="$2"
   if [ "${OSRC_STREAM:-0}" = "1" ] || [ "${OSRC_FG_GUARD:-1}" = "0" ] || [ "${OSRC_FG_GUARD_ACTIVE:-0}" = "1" ]; then
@@ -5597,7 +5727,7 @@ _fg_guard() {
   ( local t0 now mk=0; t0=$(date +%s)
     while kill -0 "$prod" 2>/dev/null; do
       sleep 2; now=$(date +%s)
-      [ "$mk" = 0 ] && grep -qaE '^[[:space:]]*OSRC::(DONE|BLOCKED|NEED_INPUT)' "$cap" 2>/dev/null && mk=$now
+      [ "$mk" = 0 ] && [ -n "$(_fg_teardown_seen "$cap")" ] && mk=$now
       if [ "$mk" != 0 ] && [ $((now-mk)) -ge "$tdl" ]; then echo teardown > "$hit"; _kill_tree "$prod"; break; fi
       if [ $((now-t0)) -ge "$hard" ];               then echo hard     > "$hit"; _kill_tree "$prod"; break; fi
     done ) & local gd=$!
@@ -5618,7 +5748,15 @@ _fg_guard() {
   lastmark="$(_last_marker "$cap")"
   case "$hval" in
     teardown) printf '>>> [watchdog] work finished (%s) but the process kept running %ss past it — a teardown hang (e.g. codex MCP-auth / Stop-hook loop). Stopped the tree. For unattended work use `bg` (auto watchdog + report).\n' "${lastmark:-marker}" "$tdl" >&2
-              case "$lastmark" in OSRC::BLOCKED|OSRC::NEED_INPUT) rc=3 ;; *) rc=0 ;; esac ;;
+              # rc derives from the SAME trusted source as the trigger, NOT _last_marker (which falls
+              # back to UNSIGNED anchored markers when OSRC_MARK is set and would read a forge as DONE).
+              # A kill must NEVER return 0 without a trusted DONE; no trusted marker -> 124.
+              local tmark; tmark="$(_fg_teardown_seen "$cap")"
+              case "$tmark" in
+                *OSRC::DONE*)       rc=0 ;;
+                *OSRC::BLOCKED*|*OSRC::NEED_INPUT*) rc=3 ;;
+                *)                  rc=124 ;;
+              esac ;;
     hard)     printf '>>> [watchdog] foreground hit the %ss hard cap and was stopped. Raise OSRC_FG_TIMEOUT, or run via `bg` for long unattended work.\n' "$hard" >&2; rc=124 ;;
     interrupt) rc=130 ;;
   esac
@@ -6200,7 +6338,10 @@ _reconcile_status() {
         fi
       fi
       if [ "$_alive" = "0" ]; then
-        [ "${OSRC_RECONCILE_READ_ONLY:-0}" = "1" ] || echo interrupted > "$jd/status" 2>/dev/null
+        if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
+          echo interrupted > "$jd/status" 2>/dev/null
+          [ -s "$jd/reason" ] || printf 'interrupted:dead-running-job\n' > "$jd/reason" 2>/dev/null || true
+        fi
         st="interrupted"
       fi
       ;;
@@ -6560,6 +6701,80 @@ cmd_classify() {
   fi
 }
 
+# _explain_redact : stdin -> stdout with credential/token patterns redacted. Logs can carry
+# credentials or task data, so the explain evidence excerpt NEVER prints raw log lines. There is
+# no shared redaction helper in this script, so this is the minimum key/token scrub. Portable
+# (no GNU-only sed flags): case-insensitivity on the keyword is handled via per-letter brackets.
+_explain_redact() {
+  sed -E \
+    -e 's/sk-[A-Za-z0-9_-]{8,}/[REDACTED-KEY]/g' \
+    -e 's/Bearer [A-Za-z0-9._~+\/=-]{8,}/[REDACTED-BEARER]/g' \
+    -e 's/xox[bp]-[A-Za-z0-9-]{8,}/[REDACTED-SLACK]/g' \
+    -e 's/gh[pousr]_[A-Za-z0-9]{8,}/[REDACTED-GITHUB]/g' \
+    -e 's/AKIA[0-9A-Z]{16}/[REDACTED-AWS]/g' \
+    -e 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/:@[:space:]]+:[^/@[:space:]]+@#\1[REDACTED-AUTH]@#g' \
+    -e 's/([Aa][Pp][Ii][-_]?[Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss]([Ww][Oo][Rr][Dd]|[Ww][Dd])?|[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn])([[:space:]]*[=:][[:space:]]*"?)([^[:space:]"]{4,})/\1\3[REDACTED]/g'
+}
+
+# _explain_evidence <log> -> print a SANITIZED excerpt (line numbers + redacted text) of the
+# permission/denial lines, so a permission-blocked job shows the wall it hit without leaking
+# raw log content. Bounded by OSRC_EXPLAIN_EVIDENCE_LINES (default 20).
+_explain_evidence() {
+  local log="$1" max
+  max="${OSRC_EXPLAIN_EVIDENCE_LINES:-20}"; case "$max" in ''|*[!0-9]*) max=20 ;; esac
+  echo "evidence:  (sanitized excerpt; line numbers from $(basename "$log"))"
+  grep -anE "$(_perm_needles)|permission|denied|sandbox (denied|blocked|error)|EACCES|is_error" "$log" 2>/dev/null \
+    | tail -n "$max" | _explain_redact | sed 's/^/  /'
+}
+
+# cmd_explain <job-id> -> human-readable diagnosis of a job's terminal state.
+# Composes EXISTING helpers only (no new detection logic): _job_field for verb/model/provider,
+# _reconcile_status for the live state, _last_marker for the genuine terminal marker, _classify_job
+# for the routing verdict. Degrades gracefully: missing jq/meta.json/out.log/reason -> prints
+# "(not recorded)" / "(none)" rather than erroring. Reconciles READ-ONLY so a read never mutates
+# the job dir. rc 0 on success, non-zero only for a missing job id (die).
+cmd_explain() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "explain needs a job id"
+  local jd="$OSRC_JOBS/$id"
+  [ -d "$jd" ] || die "no such job: $id"
+  # State via _reconcile_status, READ-ONLY so `explain` is a pure read (never flips status).
+  local st; st="$(OSRC_RECONCILE_READ_ONLY=1 _reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null || printf '?')"
+  local exitc; exitc="$(cat "$jd/exit" 2>/dev/null || printf '?')"
+  # verb/model/provider via the jq-backed accessor; degrade to '?' without jq or meta.json.
+  local verb model provider
+  if have jq && [ -f "$jd/meta.json" ]; then
+    verb="$(_job_field "$id" '.verb')"
+    model="$(_job_field "$id" '.model')"
+    provider="$(_job_field "$id" '.provider')"
+  else
+    verb="?"; model="?"; provider="?"
+  fi
+  # reason / error verbatim (empty -> "(not recorded)" so an old job with no reason file is not
+  # mistaken for a crash).
+  local reason error
+  # reason/error are DELEGATE-controlled text (a blocked delegate's own words are persisted), so
+  # run them through the secret redactor before printing — an injected key must not leak via explain.
+  reason="$(_explain_redact < "$jd/reason" 2>/dev/null || printf '')"
+  error="$(_explain_redact < "$jd/error" 2>/dev/null || printf '')"
+  local last; last="$(_last_marker "$jd/out.log" 2>/dev/null || printf '')"
+  local verdict; verdict="$(_classify_job "$id" 2>/dev/null || printf '')"
+  printf 'job:       %s\n' "$id"
+  printf 'verb:      %s\n' "$verb"
+  printf 'model:     %s\n' "$model"
+  printf 'provider:  %s\n' "$provider"
+  printf 'state:     %s\n' "$st"
+  printf 'exit:      %s\n' "$exitc"
+  if [ -n "$reason" ]; then printf 'reason:    %s\n' "$reason"; else printf 'reason:    (not recorded)\n'; fi
+  if [ -n "$error" ];  then printf 'error:     %s\n' "$error";  else printf 'error:     (not recorded)\n'; fi
+  printf 'marker:    %s\n' "${last:-(none)}"
+  printf 'verdict:   %s\n' "${verdict:-(none)}"
+  # A permission-blocked job carries its best evidence in out.log; show a sanitized excerpt.
+  if [ "$st" = "permission-blocked" ] && [ -s "$jd/out.log" ]; then
+    _explain_evidence "$jd/out.log"
+  fi
+}
+
 cmd_status() {
   _mark_watched "${1:-}"
   local id="${1:-}"
@@ -6683,6 +6898,94 @@ cmd_watch() {
   done
 }
 
+# cmd_wait <job-id> [--for N] -> BLOCK until <job-id> reaches a terminal state, then exit with an
+# HONEST code. Unlike cmd_watch (a bounded ~15s status poll that stops at OSRC_STATUS_DEADLINE
+# regardless of liveness), wait keeps polling until the job is actually done. The RETURN CODE is
+# the contract:
+#   0   done | done?                                              (terminal success, incl. unverified)
+#   3   blocked | permission-blocked                              (needs input)
+#   1   failed | wedged | timeout | interrupted | canceled        (other terminal failure)
+#   124 the optional --for N seconds cap elapsed while STILL LIVE (non-terminal)
+# Without --for, wait blocks indefinitely for terminal (that is the point). Reuses cmd_watch's
+# poll cadence (OSRC_POLL) and heartbeat helpers (_status_line / _watch_digest). State is read
+# via _reconcile_status, NEVER a raw `cat status` — reconciliation is what flips a dead job out
+# of `running`. No separate stall detector: the lane-aware watchdog already handles healthy
+# long inference, and second-guessing it here would re-introduce the false-stall class.
+cmd_wait() {
+  # Parse args in any order: the first non-flag is the job id; `--for N` (or --for=N) may appear
+  # anywhere. --for 0 means "check once now" (return 124 immediately if still live), not "wait
+  # forever". Absent --for = block until terminal.
+  local id="" forsec=0 forset=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --for)   forset=1; forsec="${2:-}"; case "$forsec" in ''|*[!0-9]*) die "wait --for needs a non-negative integer (got: '${2:-}')" ;; esac; shift 2 ;;
+      --for=*) forset=1; forsec="${1#--for=}"; case "$forsec" in ''|*[!0-9]*) die "wait --for needs a non-negative integer (got: '${1#--for=}')" ;; esac; shift ;;
+      --)      shift; [ -z "$id" ] && { id="${1:-}"; shift || true; } ;;
+      -*)      die "wait: unknown flag '$1' (usage: wait <job-id> [--for N])" ;;
+      *)       [ -z "$id" ] && id="$1"; shift ;;
+    esac
+  done
+  [ -n "$id" ] || die "wait needs a job id"
+  _mark_watched "$id"
+  local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
+  local t0; t0=$(date +%s); local last="" lastprog=""
+  local digest_secs="${OSRC_WATCH_DIGEST_SECS:-420}"
+  case "$digest_secs" in ''|*[!0-9]*|0) digest_secs=420 ;; esac
+  local last_digest; last_digest=$t0
+  local st elapsed poll _now prog remain
+  while :; do
+    st="$(_reconcile_status "$id" 2>/dev/null || printf '?')"
+    # HEARTBEAT (to stderr so a caller's captured stdout stays clean): print on a state change
+    # or when a NEW OSRC::PROGRESS marker lands, exactly like cmd_watch. The return code, not
+    # the heartbeat, is what callers contract on.
+    prog="$(tail -1 "$jd/progress" 2>/dev/null)"
+    if [ "$st" != "$last" ] || { [ -n "$prog" ] && [ "$prog" != "$lastprog" ]; }; then
+      _status_line "$id" >&2; last="$st"; lastprog="$prog"
+    fi
+    # Terminal FIRST: map to the honest exit code before any periodic tick or --for check.
+    # `'done?'` is quoted so the `?` is a LITERAL, not a glob (bare done? would match doneX).
+    case "$st" in
+      done|'done?')              return 0 ;;
+      blocked|permission-blocked) return 3 ;;
+      failed|wedged|timeout|interrupted|canceled) return 1 ;;
+    esac
+    # Orphan guard (F1): _reconcile_status normally flips a dead job to a terminal state, but if a
+    # non-terminal state (stalled?/exploring?/running) persists on a job whose worker AND supervisor
+    # are BOTH dead, it is a dead orphan — do not wait forever. A recorded-but-dead pid is required
+    # (a still-launching job with no pid yet is skipped, not orphan-killed). Conservative: a live or
+    # pid-recycled process keeps us waiting rather than falsely bailing.
+    local _jp _sp
+    _jp="$(cat "$jd/pid" 2>/dev/null)"; _sp="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+    if { [ -n "$_jp" ] || [ -n "$_sp" ]; } \
+       && ! { [ -n "$_jp" ] && kill -0 "$_jp" 2>/dev/null; } \
+       && ! { [ -n "$_sp" ] && kill -0 "$_sp" 2>/dev/null; }; then
+      printf '[outsourcerer] wait: job %s is a dead orphan at state %s (no live worker/supervisor); giving up.\n' "$id" "$st" >&2
+      return 1
+    fi
+    # Still live: check the optional --for cap BEFORE sleeping. The cap is wall-clock from
+    # invocation; hitting it while non-terminal is 124 (the honest "still running, gave up
+    # waiting" code), never a success.
+    elapsed=$(( $(date +%s) - t0 ))
+    if [ "$forset" = 1 ] && { [ "$forsec" -eq 0 ] || [ "$elapsed" -ge "$forsec" ]; }; then
+      printf '[outsourcerer] wait --for %ss elapsed for %s; still %s (non-terminal).\n' "$forsec" "$id" "$st" >&2
+      return 124
+    fi
+    _now=$(date +%s)
+    if [ $(( _now - last_digest )) -ge "$digest_secs" ]; then
+      _watch_digest "$id" "$digest_secs" "continuing wait; next digest in ${digest_secs}s" "$st" >&2
+      last_digest=$_now
+    fi
+    poll="${OSRC_POLL:-10}"
+    case "$poll" in ''|*[!0-9]*|0) poll=10 ;; esac
+    # Never let a large poll interval overshoot the remaining --for window.
+    if [ "$forsec" -gt 0 ]; then
+      remain=$(( forsec - elapsed )); [ "$remain" -lt 1 ] && remain=1
+      [ "$poll" -gt "$remain" ] && poll=$remain
+    fi
+    sleep "$poll"
+  done
+}
+
 cmd_result() {
   _mark_watched "${1:-}"
   local id="${1:-}"; [ -n "$id" ] || die "result needs a job id"
@@ -6740,7 +7043,7 @@ cmd_cancel() {
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
   [ -n "$pid" ] && _kill_tree "$pid"
-  echo canceled > "$jd/status"; echo "canceled $id"
+  echo canceled > "$jd/status"; printf 'canceled:operator\n' > "$jd/reason" 2>/dev/null || true; echo "canceled $id"
   # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
   # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
   # Cline's spokes is out of scope; warn so the operator can check for survivors.
@@ -7082,7 +7385,9 @@ cmd_gc() {
     if [ "$st" = "running" ]; then
       local _gpid; _gpid="$(cat "$d/pid" 2>/dev/null)"
       if [ -n "$_gpid" ] && ! kill -0 "$_gpid" 2>/dev/null; then
-        echo interrupted > "$d/status"; st="interrupted"
+        echo interrupted > "$d/status"
+        [ -s "$d/reason" ] || printf 'interrupted:gc-reaped-dead-running\n' > "$d/reason" 2>/dev/null || true
+        st="interrupted"
       fi
     fi
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
@@ -7140,12 +7445,15 @@ _fanout_status() {
   # `fanout status <gid> --json` -> the crew envelope an orchestrator parses (schema v1).
   if [ "$json" = "1" ]; then
     have jq || die "fanout status --json needs jq"
+    # summary.done counts terminal success INCLUDING unverified (`done?`); the exact per-job status
+    # stays in jobs[]. Reconcile each member so a dead process whose on-disk status still says
+    # `running` is flipped to `interrupted` and counted as failed, not inflated into `running`.
     local jid label first=1 tot=0 run=0 done_=0 blk=0 fail=0 st jobs=""
     while IFS="$(printf '\t')" read -r jid label; do
       [ -n "$jid" ] || continue; tot=$((tot+1))
-      st="$(cat "$OSRC_JOBS/$jid/status" 2>/dev/null || echo running)"
-      case "$st" in done) done_=$((done_+1)) ;; blocked|permission-blocked) blk=$((blk+1)) ;;
-        failed|timeout|wedged|canceled) fail=$((fail+1)) ;; *) run=$((run+1)) ;; esac
+      st="$(_reconcile_status "$jid" 2>/dev/null || echo running)"
+      case "$st" in done|done\?) done_=$((done_+1)) ;; blocked|permission-blocked) blk=$((blk+1)) ;;
+        failed|timeout|wedged|canceled|interrupted) fail=$((fail+1)) ;; *) run=$((run+1)) ;; esac
       local oj; oj="$(_job_json "$jid" "$label")" && [ -n "$oj" ] || continue
       [ $first -eq 1 ] || jobs="$jobs,"; first=0
       jobs="$jobs$oj"
@@ -7158,7 +7466,7 @@ _fanout_status() {
   local jid label jd st started now age prog
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
-    jd="$OSRC_JOBS/$jid"; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+    jd="$OSRC_JOBS/$jid"; st="$(_reconcile_status "$jid" 2>/dev/null || echo '?')"
     # start time: meta.started -> started_at sentinel -> unknown (never epoch 0 => no meaningless huge age from an epoch-0 fallback).
     started="$(_job_field "$jid" '.started')"; case "$started" in ''|'?'|*[!0-9]*) started="$(cat "$jd/started_at" 2>/dev/null)" ;; esac
     now=$(date +%s); local agetxt; case "$started" in ''|*[!0-9]*) age=0; agetxt="?" ;; *) age=$(( now - started )); agetxt="${age}s" ;; esac
@@ -7184,7 +7492,7 @@ _fanout_wait() {
   local _fail=0 _jid _st
   while IFS="$(printf '\t')" read -r _jid _; do
     [ -n "$_jid" ] || continue
-    _st="$(cat "$OSRC_JOBS/$_jid/status" 2>/dev/null || echo '?')"
+    _st="$(_reconcile_status "$_jid" 2>/dev/null || echo '?')"
     case "$_st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
   done < "$gd/members.tsv"
   echo "[outsourcerer] fanout $gid: $(_fanout_running "$gid") still running, $_fail failed." >&2
@@ -7201,7 +7509,7 @@ _fanout_collect() {
   local jid label jd st dst n=0
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
-    n=$((n+1)); jd="$OSRC_JOBS/$jid"; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
+    n=$((n+1)); jd="$OSRC_JOBS/$jid"; st="$(_reconcile_status "$jid" 2>/dev/null || echo '?')"
     dst="$gd/findings/$(printf '%02d' "$n")-$label.md"
     if [ -s "$jd/last.txt" ]; then cp "$jd/last.txt" "$dst" 2>/dev/null
     else tail -n 80 "$jd/out.log" 2>/dev/null > "$dst"; fi
@@ -7213,7 +7521,7 @@ _fanout_collect() {
   local _fail=0
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
-    st="$(cat "$OSRC_JOBS/$jid/status" 2>/dev/null || echo '?')"
+    st="$(_reconcile_status "$jid" 2>/dev/null || echo '?')"
     case "$st" in failed|blocked|timeout|wedged|permission-blocked|interrupted) _fail=$((_fail+1)) ;; esac
   done < "$gd/members.tsv"
   echo "[outsourcerer] collected $n agent outputs -> $out  ($_fail failed)  (per-agent: $gd/findings/)" >&2
@@ -8042,7 +8350,7 @@ delegate_cursor() {
   local task="${REST[*]}" id="${MODEL:-}"
   local cur=""
   if have cursor-agent; then cur="cursor-agent"; elif have agent && agent --help 2>/dev/null | grep -qi cursor; then cur="agent"; fi
-  [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)."
+  [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)."
   # cursor-agent autonomy: default headless = propose-only; -f/--force = apply edits/commands.
   # --trust skips the workspace-trust prompt that would wedge a headless run.
   local fflag=() posture
@@ -9776,7 +10084,7 @@ route_delegate() {
     # otherwise bury this error inside a background job the user has to go dig out.
     case "$disp" in
       droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in." ;;
-      cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl https://cursor.com/install -fsS | bash after inspecting; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
+      cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
       cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend." ;;
@@ -10229,13 +10537,13 @@ _session_launch_adapter() {
       fi
       if [ "$MODEL_EXPLICIT" = "1" ]; then
         resolved_model="$(_lane_model_for droid "$MODEL")" || _session_launch_error "$provider" "cannot resolve model"
-        if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
-          SESSION_LAUNCH+=("--model" "$resolved_model")
-        elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$).*model'; then
-          SESSION_LAUNCH+=("-m" "$resolved_model")
-        else
-          _session_launch_error "$provider" "help does not advertise an interactive model override"
-        fi
+        # droid's TOP-LEVEL `droid --help` omits the model flag (that was the "droid can't be
+        # interactive" bug — the old code required it there). The flag is documented under
+        # `droid exec --help` as `-m, --model <id>` and interactive `droid` accepts `--model` too;
+        # delegate_droid already relies on that flag. Use it DIRECTLY rather than probing
+        # `droid exec --help` — that probe measured ~2.6s, right against the 3s cap, so it timed
+        # out on a cold droid and wrongly forced the session headless. Parity with codex/cc/devin.
+        SESSION_LAUNCH+=("--model" "$resolved_model")
       fi
       ;;
     cursor)
@@ -10760,11 +11068,22 @@ _winpty_session() {
       echo "sent. Read progress with: $0 session read"
       ;;
     read)
+      local _want_state=0
+      while [ "$#" -gt 0 ]; do case "$1" in --state) _want_state=1; shift;; *) shift;; esac; done
       [ -d "$sdir" ] || { echo "no session '$SESSION_NAME' (run: $0 session start)"; return 0; }
-      if [ -f "$sdir/out.log" ]; then
-        tail -n 200 "$sdir/out.log" | grep -v '^[[:space:]]*$'
+      if [ "$_want_state" = "1" ]; then
+        # WITH --state: classify the log tail. The no-flag path below stays byte-identical.
+        if [ -f "$sdir/out.log" ]; then
+          tail -n 200 "$sdir/out.log" | _pane_state_classify
+        else
+          _pane_state_json unknown "no output yet"
+        fi
       else
-        echo "(no output yet)"
+        if [ -f "$sdir/out.log" ]; then
+          tail -n 200 "$sdir/out.log" | grep -v '^[[:space:]]*$'
+        else
+          echo "(no output yet)"
+        fi
       fi
       ;;
     clear)
@@ -10920,7 +11239,16 @@ session() {
       esac
       ;;
     read)
-      tmux capture-pane -t "$SESSION_NAME" -p | grep -v '^[[:space:]]*$'
+      local _want_state=0
+      while [ "$#" -gt 0 ]; do case "$1" in --state) _want_state=1; shift;; *) shift;; esac; done
+      if [ "$_want_state" = "1" ]; then
+        # WITH --state: classify the captured pane. The no-flag path below stays byte-identical.
+        local _cap; _cap="$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null)" \
+          && [ -n "$_cap" ] && { printf '%s\n' "$_cap" | _pane_state_classify; } \
+          || _pane_state_json unknown "capture failed"
+      else
+        tmux capture-pane -t "$SESSION_NAME" -p | grep -v '^[[:space:]]*$'
+      fi
       ;;
     clear)
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
@@ -11264,8 +11592,8 @@ EOF
 doctor() {
   # doctor --fix: don't just diagnose the parity mirror — repair dead skill links in place (same
   # in-place re-pin `brief` runs). Everything else stays read-only diagnosis.
-  local _dfix=0 _a
-  for _a in "$@"; do case "$_a" in --fix) _dfix=1 ;; esac; done
+  local _dfix=0 _dstrict=0 _a
+  for _a in "$@"; do case "$_a" in --fix) _dfix=1 ;; --strict) _dstrict=1 ;; esac; done
   echo "== outsourcerer doctor (v$OSRC_VERSION) =="
   # OSRC_DOCTOR_OFFLINE=1 skips the LIVE probes (OpenRouter credits, session-limit meter, claudex
   # proxy ping) so `doctor` returns in well under a second. Without it, those network reads can each
@@ -11412,7 +11740,7 @@ doctor() {
   if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Cost: $(_lane_cost_disclosure droid)."
   else echo "    droid (Factory): NOT on PATH — install: https://docs.factory.ai/cli (macOS/Linux/Windows-native)"; fi
   if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Cost: $(_lane_cost_disclosure cursor)."
-  else echo "    cursor-agent: NOT on PATH — install: curl https://cursor.com/install -fsS | bash (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
+  else echo "    cursor-agent: NOT on PATH — install: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
   echo "  -- Hermes lane (NousResearch hermes-agent, engine lane: -m passes through verbatim) --"
   # Honest lane states: (a) CLI on PATH + version; (b) CLI absent but ~/.hermes exists (installed
   # data dir found, CLI not on PATH); (c) neither (lane not installed); (d) state.db present +
@@ -11596,6 +11924,14 @@ doctor() {
     lm="$(live_models)"
     if [ -n "$lm" ]; then echo "  live models:"; printf '%s\n' "$lm" | tr ',' '\n' | sed 's/^/    /'
     else echo "  live models: (bounded probe returned nothing; devin may be offline or changed its 'Available:' output)"; fi
+  fi
+  # --strict: promote version drift from a printed warning to a FAILING gate (rc=1). Default
+  # behavior (no --strict) is unchanged — warn-only, rc stays 0. Only a non-empty _drift flips
+  # the exit code; every other doctor check remains diagnostic (report, don't die). _drift is
+  # function-local (declared in the drift-check block above, which is a command group, not a
+  # subshell), so it is still in scope here.
+  if [ "$_dstrict" = "1" ] && [ -n "$_drift" ]; then
+    return 1
   fi
   return 0
 }
@@ -12021,9 +12357,11 @@ main() {
     loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
     classify)    cmd_classify "$@" ;;                       # post-hoc verdict: REUSE-OUTPUT | RETRY-DIFFERENT-LANE | REAL-FAIL
+    explain)     cmd_explain "$@" ;;                        # diagnose a job's terminal state: state + reason + marker + verdict
     rundown)     cmd_rundown "$@" ;;                       # refresh discovery, then render the fleet digest
     bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
-    watch)       cmd_watch "$@" ;;                         # poll a job until terminal (or --for N)
+    watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
+    wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
@@ -12049,13 +12387,13 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
     ""|-h|--help|help)
-      sed -n '2,113p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,117p' "$0" | sed 's/^# \{0,1\}//'
       ;;
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|rundown|bearings|watch|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
 
   esac
 }
-main "$@"
+[ "${OSRC_SOURCED:-}" = "1" ] || main "$@"
