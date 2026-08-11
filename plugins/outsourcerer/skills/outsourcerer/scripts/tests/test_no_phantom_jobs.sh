@@ -21,12 +21,12 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # Each case runs in its own OSRC_HOME so "did a job dir appear?" is an exact question.
 # cmd_bg is invoked in a SUBSHELL because it `die`s, and die exits the process.
 try_bg() {   # <desc> -> echoes "<exit>|<jobdirs>"
-  local home; home="$(mktemp -d)"
+  local sandbox; sandbox="$(mktemp -d)"
   local out rc
-  out="$( OSRC_HOME="$home" bash "$SRC" bg "$@" 2>&1 )"; rc=$?
-  local n; n="$(ls -1d "$home"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
+  out="$( OSRC_HOME="$sandbox" bash "$SRC" bg "$@" 2>&1 )"; rc=$?
+  local n; n="$(ls -1d "$sandbox"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
   printf '%s|%s|%s' "$rc" "$n" "$out"
-  rm -rf "$home"
+  [ -n "$sandbox" ] && [ -d "$sandbox" ] && [ "$sandbox" != "$HOME" ] && rm -rf "$sandbox"
 }
 
 # --- the literal unexpanded variable: a classic quoting bug, and a phantom-job source ---------------
@@ -61,14 +61,14 @@ esac
 # caller got an id and a "launched" line for a combination that could never run. Only invalid cases are
 # exercised here — they die before any dispatch, so this suite never spends quota or touches the network.
 try_bg_acked() {   # <args...> -> "<exit>|<jobdirs>|<output>"
-  local home; home="$(mktemp -d)"
+  local sandbox; sandbox="$(mktemp -d)"
   local out rc
-  out="$( OSRC_HOME="$home" OSRC_CLOUD_ACK=1 bash "$SRC" bg "$@" 2>&1 )"; rc=$?
-  local n; n="$(ls -1d "$home"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
+  out="$( OSRC_HOME="$sandbox" OSRC_CLOUD_ACK=1 bash "$SRC" bg "$@" 2>&1 )"; rc=$?
+  local n; n="$(ls -1d "$sandbox"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
   # Safety net: if a case ever DOES dispatch, do not leave it running.
-  local d; for d in "$home"/jobs/*/; do [ -d "$d" ] && kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; done
+  local d; for d in "$sandbox"/jobs/*/; do [ -d "$d" ] && kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; done
   printf '%s|%s|%s' "$rc" "$n" "$out"
-  rm -rf "$home"
+  [ -n "$sandbox" ] && [ -d "$sandbox" ] && [ "$sandbox" != "$HOME" ] && rm -rf "$sandbox"
 }
 
 check_unroutable() {  # <desc> <expected-substring> <args...>

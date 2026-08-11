@@ -1,0 +1,37 @@
+# repo-forensics suppressions. Syntax: rule:<rule-id>[:<path-glob>]
+# Reviewed and verified benign 2026-08-11. These are the highest-volume rule classes that match
+# ordinary shell idioms in this repo (a CLI whose job is orchestrating other CLIs) rather than
+# real issues. Genuinely security-relevant rules (eval, injection, dataflow, workflow triggers)
+# are deliberately LEFT VISIBLE so real findings in those classes still surface.
+
+# SA-SH-004  Nested Command Substitution — 100% `$(( $(date +%s) - t0 ))` / `"$(cd "$(dirname "$0")")"`
+#            idioms; a pure-syntax detector with ~0 true-positive value on shell. No tainted input.
+rule:SA-SH-004
+
+# ST-ST-003  Stderr suppression + background exec — `... 2>/dev/null && ...` fallbacks and the
+#            product's OWN supervised-background delegation (jobs are logged to $OSRC_HOME/jobs/*).
+rule:ST-ST-003
+
+# ST-ST-004  Full output suppression + background — same supervised-bg nature; the one sh -c site
+#            (OSRC_HEARTBEAT_WAKE) takes untrusted text only via $1/stdin/env, never the command
+#            string, and sanitizes control chars (traced in the code's own comment).
+rule:ST-ST-004
+
+# SC-NET-001 Hardcoded IP — every hit is loopback (127.0.0.1 / ::1). Loopback-only binding IS the
+#            security control; the translation shim now also validates its upstream is loopback.
+rule:SC-NET-001
+
+# SC-SEC-007 Fake API-key fixtures — clearly-fake, non-rotatable values that EXIST to exercise the
+#            repo's own secret-scan / cloud-gate / redaction. Scoped to the test files only.
+rule:SC-SEC-007:plugins/outsourcerer/skills/outsourcerer/scripts/tests
+
+# ---------------------------------------------------------------------------------------------
+# LEFT VISIBLE (NOT suppressed) and accepted-with-reason — real findings in these classes must stay
+# surfaced, so we do NOT spend a suppression slot on them:
+#   * SA-SH-001 eval — trap -p save/restore + tests eval-ing the repo's OWN source; individually
+#     audited. A future eval of untrusted data SHOULD still flag, so this stays visible.
+#   * dataflow / exfiltration (shim) — operator-set config -> localhost proxy; now loopback-guarded.
+#   * ci-cd (GHA pull_request_target in cla.yml) — correctly built: workflow-level permissions:{},
+#     SHA-pinned action, and NO checkout of PR head code. Invariant, accepted.
+#   * ST-PI-005 / ST-MH-003 — prose/comments in CHANGELOG/README/mechanism matched as "directives".
+#   * SA-SH-004-adjacent: the tap `sh -c "$orig"` is now perms-guarded (0600 + world-writable refuse).

@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import urllib.request
+from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = os.environ.get("OSRC_SHIM_UPSTREAM", "").rstrip("/")
@@ -285,6 +286,16 @@ def main():
     if not UPSTREAM:
         sys.stderr.write("OSRC_SHIM_UPSTREAM is required (e.g. http://localhost:11434/v1)\n")
         sys.exit(2)
+    # Loopback guard: the shim's contract is "nothing leaves your machine", so refuse a
+    # non-loopback upstream host unless OSRC_SHIM_ALLOW_REMOTE=1 explicitly opts out.
+    if os.environ.get("OSRC_SHIM_ALLOW_REMOTE", "") != "1":
+        parsed = urlparse(UPSTREAM if "://" in UPSTREAM else "http://" + UPSTREAM)
+        host = (parsed.hostname or "").lower()
+        if host not in ("localhost", "127.0.0.1", "::1"):
+            sys.stderr.write(
+                "[shim] refusing non-loopback upstream %r (host=%s). Set OSRC_SHIM_ALLOW_REMOTE=1 to opt out.\n"
+                % (UPSTREAM, host))
+            sys.exit(2)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)  # localhost only
     sys.stderr.write("[shim] 127.0.0.1:%d -> %s\n" % (PORT, UPSTREAM))
     try:

@@ -17,6 +17,11 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Sweep stale scratch dirs from crashed runs so they don't accumulate across runs (only inside our tests dir).
+if [ -d "$SCRIPT_DIR" ] && [ "$(cd "$SCRIPT_DIR" && pwd)" = "$SCRIPT_DIR" ]; then
+  find "$SCRIPT_DIR" -maxdepth 1 -type d \( -name '.test-*' -o -name '.conformance-run-*' \) -exec rm -rf {} + 2>/dev/null
+fi
+
 pass=0; fail=0; skip=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
 bad()  { echo "FAIL: $1"; fail=$((fail+1)); }
