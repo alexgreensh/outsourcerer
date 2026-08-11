@@ -124,11 +124,11 @@ else
 fi
 
 out="$(adapter_output droid 1 unavailable-model)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'model' \
-   && printf '%s' "$out" | grep -q ' run ' && printf '%s' "$out" | grep -q ' bg '; then
-  ok "Droid rejects an unadvertised interactive model flag with supported alternatives"
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '<droid>' \
+   && printf '%s' "$out" | grep -q '<--model>' && printf '%s' "$out" | grep -q '<unavailable-model>'; then
+  ok "Droid preserves a pinned model override"
 else
-  bad "Droid accepted or poorly explained an unsupported model override: rc=$rc out=$out"
+  bad "Droid pinned model override did not produce the interactive launch: rc=$rc out=$out"
 fi
 
 for fixture in 'droid:DROID_HELP_MODE' 'cursor:CURSOR_HELP_MODE' 'hermes:HERMES_HELP_MODE'; do

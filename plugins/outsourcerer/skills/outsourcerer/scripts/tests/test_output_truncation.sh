@@ -106,8 +106,8 @@ jd2="$TMP/spoke"
 OSRC_POLL=1 _supervise "$jd2" 2 3 30 -- sh -c 'printf "%s\n" ">>> banner" "real work output"; exec tail -f /dev/null' >/dev/null 2>&1 & spoke_supervisor=$!
 wait_for_status "$jd2" wedged 10 || true
 wait "$spoke_supervisor" 2>/dev/null || true
-[ "$(cat "$jd2/status" 2>/dev/null)" = "wedged" ] && [ -z "$(cat "$jd2/reason" 2>/dev/null)" ] \
-  && ok "a delegate that produced output then hung is NOT labelled silent" \
+[ "$(cat "$jd2/status" 2>/dev/null)" = "wedged" ] && [ "$(cat "$jd2/reason" 2>/dev/null)" = "stall-kill" ] \
+  && ok "a delegate that produced output then hung is recorded as a stall-kill" \
   || bad "work-then-hang was mislabelled as a silent delegate"
 
 # The remedy this tool prints for output-token exhaustion must not tell users to do the thing that
