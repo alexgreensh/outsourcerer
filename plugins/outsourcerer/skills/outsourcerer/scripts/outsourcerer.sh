@@ -140,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.8.0"
+OSRC_VERSION="0.8.1"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1021,6 +1021,12 @@ live_models() {
 # of model-id strings; TTL is OSRC_CATALOG_TTL seconds (default 300 = 5 min). Fetch is bounded by
 # OSRC_CATALOG_FETCH_TIMEOUT (default 10s). A fetch failure is NON-FATAL: soft-warn and let the
 # CLI reject at launch -- never block dispatch on a catalog probe failure.
+# OSRC_ADVISE_DYNAMIC_POOL=0 confines `advise` to the static OSRC_MODEL_TABLE candidate set (the
+# pre-dynamic behavior). Default 1: advise also scores every benchmarked OpenRouter id in the
+# already-cached models.json, so a new provider model is recommendable on merit with no manual table
+# edit. Enumeration is cache-only (never triggers a fetch on the advise path) and adds only ids that
+# carry a benchmark score. OSRC_ADVISE_DYNAMIC_MAX (default 25) caps how many of the strongest-scoring
+# discovered ids are added, bounding the candidate count and the advise runtime.
 
 # Lane whitelist: only the two lanes that HAVE a live catalog. A literal set closes any latent
 # path-traversal from a future caller passing an attacker-influenced lane string.
@@ -5082,6 +5088,18 @@ _THRESH_REASONING=45
 _THRESH_AGENTIC=35
 _THRESH_CREATIVE=45
 
+# Score-band edges for deriving a capability tier from a LIVE benchmark score (_tier_from_score).
+# Kept beside the _THRESH_* knobs so every score-scale constant lives in one place. Calibrated
+# against the live intelligence_index distribution so the budget-price/frontier-capability models
+# land in `capable`: gpt-5.6-sol (58.9) -> frontier, grok-4.5 (53.8) / glm-5.2 (51.1) /
+# deepseek-v4-pro (44.3) -> capable, deepseek-flash (40.3) / glm-5.1 (40.2) -> mid, haiku (29.6)
+# -> budget. The capable floor sits below deepseek-v4-pro (44.3) and above the flash/5.1 mid cluster
+# (~40). A score below BUDGET or none at all -> raw (in the pool, ranks low, never silently promoted).
+_TIER_BAND_FRONTIER=55
+_TIER_BAND_CAPABLE=44
+_TIER_BAND_MID=38
+_TIER_BAND_BUDGET=28
+
 # refresh_benchmarks: fetch benchmark data from OpenRouter API, cache locally.
 # Needs OPENROUTER_API_KEY. Graceful failure: returns 1, caller falls back to tier proxy.
 refresh_benchmarks() {
@@ -5197,6 +5215,26 @@ _tier_score_proxy() {
   esac
 }
 
+# _tier_from_score <score> -> capability tier derived from a LIVE benchmark score, the inverse of
+# _tier_score_proxy. Used for dynamic pool candidates that have no hand-set tier in OSRC_MODEL_TABLE:
+# a never-before-seen model gets ranked by the same capability bands as the curated ones, so a new
+# strong model is recommendable on merit the day it appears. Empty/non-numeric -> raw (present in
+# the pool, ranks low, never silently promoted). awk does the numeric compare so a non-numeric
+# string can't crash under `set -u` or leak a shell error.
+_tier_from_score() {
+  local s="${1:-}"
+  case "$s" in ''|*[!0-9.-]*) printf 'raw'; return 0 ;; esac
+  awk -v s="$s" -v f="$_TIER_BAND_FRONTIER" -v c="$_TIER_BAND_CAPABLE" \
+          -v m="$_TIER_BAND_MID" -v b="$_TIER_BAND_BUDGET" '
+    BEGIN {
+      if (s+0 >= f+0)      print "frontier"
+      else if (s+0 >= c+0) print "capable"
+      else if (s+0 >= m+0) print "mid"
+      else if (s+0 >= b+0) print "budget"
+      else                 print "raw"
+    }'
+}
+
 # _task_difficulty <prompt> -> normal|hard. Several independent work signals indicate that selection
 # should favor a near-frontier capable model instead of treating the request as a single operation.
 _task_difficulty() {
@@ -5260,10 +5298,97 @@ _lane_conserve_mult() {
   }'
 }
 
+# _advise_candidate_rows [field] -> emit `alias|resolved|lane|tier` rows for the advise ranking
+# loop, replacing the old static-only `printf '%s\n' "$OSRC_MODEL_TABLE"` source. The pool is the
+# UNION of:
+#   1. OSRC_MODEL_TABLE verbatim   -- curated: lane+tier authoritative, and the offline fallback.
+#   2. live OpenRouter ids         -- from the cached models.json (.data[].id), SCORED-ONLY.
+# Static rows WIN on dedup: a resolved id present in OSRC_MODEL_TABLE is emitted from the static
+# row only, so curated lane routing (e.g. deepseek -> or vs dv) and hand-set tiers are preserved.
+# A dynamic id absent from the static table gets a tier DERIVED from its live benchmark score via
+# _tier_from_score, so a never-before-seen strong model is recommendable on merit the day it shows
+# up in the catalog, with zero manual table edits.
+#
+# Only OpenRouter ids are enumerated, and only those that CARRY a benchmark score. The Devin catalog
+# is deliberately NOT enumerated: its uids (glm-5-2, deepseek-v4-pro-high) do not match the
+# OpenRouter-keyed benchmark data, so every one would score empty and rank as raw -- pure noise and
+# a needless jq storm. Merit-based discovery only works where a score exists (OpenRouter); the
+# curated Devin models are already routed through OSRC_MODEL_TABLE. An id with no score has no merit
+# signal to be "recommended on merit" and is skipped.
+#
+# Cache-only and fail-open: reads the already-cached benchmarks.json + models.json DIRECTLY (never a
+# refresh/fetch -- that would block advise on the network). Missing/empty caches -> zero dynamic
+# rows and the static pool carries, byte-for-byte the offline behavior. Escape hatch
+# OSRC_ADVISE_DYNAMIC_POOL=0 forces the static-only pool. OSRC_ADVISE_DYNAMIC_MAX (default 25) caps
+# how many of the strongest-scoring discovered ids are added, bounding both the pool and the
+# downstream ranking cost. The optional <field> is the score field for the task category.
+_advise_candidate_rows() {
+  local field="${1:-intelligence_index}"
+  local _nl=$'\n' _tab; _tab="$(printf '\t')"
+  local seen="$_nl" alias resolved lane tier id sc bench_map or_ids scored
+  local max="${OSRC_ADVISE_DYNAMIC_MAX:-25}" added=0
+  case "$max" in ''|*[!0-9]*) max=25 ;; esac   # empty/non-numeric/negative -> safe default; 0 means none
+  # Static rows first. Iterate via process substitution (not a pipe) so `seen` accumulates in this
+  # shell and the dynamic pass can dedup against it without associative arrays (bash-3.2 safe).
+  while IFS='|' read -r alias resolved lane tier; do
+    [ -n "$alias" ] || continue
+    printf '%s|%s|%s|%s\n' "$alias" "$resolved" "$lane" "$tier"
+    seen="$seen$resolved$_nl"
+  done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
+  [ "${OSRC_ADVISE_DYNAMIC_POOL:-1}" = "0" ] && return 0
+  { [ -f "$OSRC_BENCH_JSON" ] && [ -f "$OSRC_MODELS_JSON" ] && have jq; } || return 0
+  # ONE jq pass builds a "permaslug<TAB>score" map; a SINGLE awk then joins EVERY OpenRouter id
+  # against it in-process. A per-id awk/subprocess lookup would reintroduce an O(N) latency cliff as
+  # the catalog grows -- the whole join runs in one awk instead. The match is boundary-aware: an id
+  # matches a permaslug only on an exact hit or at a '-' segment boundary, so a short id like
+  # openai/gpt-5 cannot steal a longer model's score (openai/gpt-5.6-...); ties break to the shortest
+  # (canonical) permaslug, mirroring _bench_lookup. Ids are charset-filtered (a third-party catalog id
+  # with a '|' or a shell metachar can't corrupt the alias|resolved|lane|tier row or reach any eval).
+  # The ranking loop recomputes the authoritative score, so this only gates scored-vs-not, the tier
+  # band, and the top-N selection.
+  bench_map="$(jq -r --arg f "$field" '.data[]? | select(.[$f] != null) | "\(.model_permaslug)\t\(.[$f])"' "$OSRC_BENCH_JSON" 2>/dev/null)"
+  [ -n "$bench_map" ] || return 0
+  or_ids="$(jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null)"
+  scored="$(awk -F"$_tab" '
+    # canon(): drop a trailing -<digits> release-date segment so a dated permaslug reduces to the
+    # bare model id (z-ai/glm-5.2-20260616 -> z-ai/glm-5.2). Matching is then an O(1) hash lookup,
+    # exact then canonical -- O(N+M) overall, and a short id can only match its OWN canonical id,
+    # never borrow a longer siblings score.
+    function canon(p,   c) { c=p; sub(/-[0-9]+$/, "", c); return c }
+    NR==FNR {
+      if (!($1 in exact)) exact[$1]=$2
+      c=canon($1); if (!(c in cano)) cano[c]=$2
+      next
+    }
+    {
+      id=$1
+      if (id !~ "^[A-Za-z0-9._/-]+$") next
+      s=id; sub(/:free$/, "", s)
+      if (s in exact)     print id "\t" exact[s]
+      else if (s in cano) print id "\t" cano[s]
+    }
+  ' <(printf '%s\n' "$bench_map") <(printf '%s\n' "$or_ids") | sort -t"$_tab" -k2 -rn)"
+  while IFS="$_tab" read -r id sc; do
+    [ "$added" -ge "$max" ] && break
+    [ -n "$id" ] || continue
+    case "$seen" in *"$_nl$id$_nl"*) continue ;; esac
+    printf '%s|%s|or|%s\n' "$id" "$id" "$(_tier_from_score "$sc")"
+    seen="$seen$id$_nl"
+    added=$((added + 1))
+  done <<EOF
+$scored
+EOF
+  return 0
+}
+
 # cmd_advise: task-aware model recommendation with benchmark data.
 # Usage: advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
 # Classifies the task, scores all known models, recommends the best value model
 # that meets the capability threshold. Explains WHY it picked that model.
+# The candidate pool is the curated OSRC_MODEL_TABLE UNIONED with the live catalog (cached
+# dv.raw.json + models.json); see _advise_candidate_rows. OSRC_ADVISE_DYNAMIC_POOL=0 falls back to
+# the static-only pool. Cost-safety is unchanged: the winning id still flows through
+# _devin_resolve_model / _catalog_validate at delegate time.
 cmd_advise() {
   local do_refresh=0 json_out=0 task="" selection_effort="${OUTSOURCERER_EFFORT:-}"
   while [ $# -gt 0 ]; do
@@ -5367,7 +5492,7 @@ cmd_advise() {
     case "$lane" in cx|cc|dv|gm) cost_per_m="plan limits" ;; esac
     results="$results$alias|$resolved|$lane|$tier|$score|$cost_per_m|$value_ratio|$meets
 "
-  done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
+  done < <(_advise_candidate_rows "$field")
 
   # Pick recommendation in two cohorts to avoid subscription lanes dominating value ratio.
   # Subscription lanes (cx/cc/dv/gm): ranked by score (cost is plan-limited, not comparable to per-token).

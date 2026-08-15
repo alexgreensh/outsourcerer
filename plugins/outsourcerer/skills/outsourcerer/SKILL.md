@@ -35,7 +35,7 @@ Set it with `mode auto|manual|hybrid` (A/B/C accepted). The user re-steers anyti
 
 ## Pick the model with data, not vibes
 
-When the user hasn't named a model, **always run `advise`** — it classifies the task, takes reasoning effort as a selection input, pulls live benchmark scores, and returns the best capable-tier value that clears the bar unless the work requires a frontier. This is the model-selection brain in **every** mode; the mode only decides whether you ask first (auto-pilot: take the winner + proceed; you-drive/hybrid: present it and wait). Cheap ≠ dumb: `glm`/`hy3`/`deepseek`/`kimi` are `capable` tier (frontier capability, budget price) and get flagship-grade prompting. Details: `references/model-advisory.md`, `references/effort-and-tiers.md`.
+When the user hasn't named a model, **always run `advise`** — it classifies the task, takes reasoning effort as a selection input, pulls live benchmark scores, and returns the best capable-tier value that clears the bar unless the work requires a frontier. The candidate pool is the curated table plus every benchmarked model in the live OpenRouter catalog, so a brand-new model is recommendable on merit the day it appears, no manual list update. This is the model-selection brain in **every** mode; the mode only decides whether you ask first (auto-pilot: take the winner + proceed; you-drive/hybrid: present it and wait). Cheap ≠ dumb: `glm`/`hy3`/`deepseek`/`kimi` are `capable` tier (frontier capability, budget price) and get flagship-grade prompting. Details: `references/model-advisory.md`, `references/effort-and-tiers.md`.
 
 ## The verbs (verb = permission mode)
 
