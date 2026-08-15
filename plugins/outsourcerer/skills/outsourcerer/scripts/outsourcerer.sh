@@ -140,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.8.1"
+OSRC_VERSION="0.8.2"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1027,6 +1027,11 @@ live_models() {
 # edit. Enumeration is cache-only (never triggers a fetch on the advise path) and adds only ids that
 # carry a benchmark score. OSRC_ADVISE_DYNAMIC_MAX (default 25) caps how many of the strongest-scoring
 # discovered ids are added, bounding the candidate count and the advise runtime.
+# OSRC_ADVISE_ROUTER=0 disables cross-provider lane routing: advise keeps the model on the lane the
+# ranking picked instead of moving it to its cheapest available lane. Default 1: the chosen model
+# runs on the lowest effective-marginal-cost lane that serves it (a free/plan lane beats a per-token
+# cash lane; a cost-unknown BYOK lane never wins on cost). OSRC_ADVISE_VALUE_BIAS (default `quality`)
+# reserves a future `savings` mode; today selection is quality-first with cost breaking the lane tie.
 
 # Lane whitelist: only the two lanes that HAVE a live catalog. A literal set closes any latent
 # path-traversal from a future caller passing an attacker-influenced lane string.
@@ -5235,6 +5240,31 @@ _tier_from_score() {
     }'
 }
 
+# _model_canon_key <id-or-permaslug> -> canonical model identity key. The same model is
+# referenced under different id forms across OpenRouter (vendor-prefixed, dotted versions,
+# release-date suffixes) and Devin (hyphenated versions, effort suffixes). Collapsing those
+# surface differences to one bare family+version token lets a model match itself across
+# providers and across id forms, so dedup and routing treat one model as one model. Only
+# cosmetic shape is folded: a leading vendor prefix segment, a trailing release date, a
+# trailing effort suffix, and the . vs - separator inside a version token. Variant and
+# family segments are preserved, so gpt-5.6-sol and gpt-5 stay distinct keys.
+_model_canon_key() {
+  local k="${1:-}"
+  k="$(printf '%s' "$k" | tr '[:upper:]' '[:lower:]')"
+  # Strip ANY leading vendor prefix (everything up to the first "/"), not a fixed vendor list, so a
+  # brand-new provider's OpenRouter id (vendor/model) still collapses onto the bare Devin/Warp uid.
+  k="${k#*/}"
+  k="$(printf '%s' "$k" | sed -E 's/-[0-9]{6,}$//')"
+  while :; do
+    case "$k" in
+      *-high|*-low|*-max|*-medium) k="${k%-*}" ;;
+      *) break ;;
+    esac
+  done
+  k="$(printf '%s' "$k" | tr '.' '-')"
+  printf '%s' "$k"
+}
+
 # _task_difficulty <prompt> -> normal|hard. Several independent work signals indicate that selection
 # should favor a near-frontier capable model instead of treating the request as a single operation.
 _task_difficulty() {
@@ -5379,6 +5409,142 @@ _advise_candidate_rows() {
 $scored
 EOF
   return 0
+}
+
+# _model_lanes <canon-key> -> echo the space-separated set of lane codes whose CACHED catalog
+# contains a model whose _model_canon_key equals <canon-key>. Cache-only: it reads the three
+# already-on-disk artifacts and NEVER triggers a fetch, so a routing decision can ask "which
+# lanes can run this model" without a network round-trip or a CLI probe. A missing/unreadable
+# source is skipped cleanly (no error, no partial lane). Each lane is emitted at most once.
+#
+# Each source is ONE jq pass to pull ids + ONE awk pass to canon-collapse and match, mirroring
+# _model_canon_key inside awk (lowercase, drop the known vendor prefix segment, strip a trailing
+# -<6+digit> release date, strip -high/-low/-max/-medium effort suffixes, then '.'->'-'). A
+# per-id _model_canon_key subprocess loop would reintroduce an O(catalog) latency cliff as the
+# catalog grows; the in-awk canon keeps each source a single subprocess and exits on first hit.
+_model_lanes() {
+  local key="${1:-}" f ids hit out=""
+  [ -n "$key" ] || { printf '\n'; return 0; }
+  have jq || { printf '\n'; return 0; }
+  # or: OpenRouter cached models.json (.data[].id). First match prints a marker and exits.
+  f="$OSRC_MODELS_JSON"
+  if [ -f "$f" ]; then
+    ids="$(jq -r '.data[]?.id // empty' "$f" 2>/dev/null)"
+    if [ -n "$ids" ]; then
+      hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
+        function canon(s,   c) {
+          c = tolower(s)
+          sub(/^[^\/]*\//, "", c)
+          sub(/-[0-9]{6,}$/, "", c)
+          while (sub(/-(high|low|max|medium)$/, "", c)) {}
+          gsub(/\./, "-", c)
+          return c
+        }
+        { if (canon($0) == k) { print "1"; exit } }
+      ' 2>/dev/null)"
+      [ -n "$hit" ] && out="$out or"
+    fi
+  fi
+  # dv: the STRUCTURED catalog (dv.raw.json), not the flat dv.json. variants[].model_uid is the
+  # launchable id form; family_uid/aliases collapse to the same canon key in practice and would
+  # only add duplicate hits, so variants alone are the faithful, dedup-clean source. The
+  # ${f%.json}.raw.json derivation mirrors _devin_catalog_raw so the path stays in lockstep.
+  f="$(_catalog_path dv 2>/dev/null)" || f=""
+  if [ -n "$f" ]; then
+    f="${f%.json}.raw.json"
+    if [ -f "$f" ]; then
+      ids="$(jq -r '.families[]?.variants[]?.model_uid // empty' "$f" 2>/dev/null)"
+      if [ -n "$ids" ]; then
+        hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
+          function canon(s,   c) {
+            c = tolower(s)
+            sub(/^[^\/]*\//, "", c)
+            sub(/-[0-9]{6,}$/, "", c)
+            while (sub(/-(high|low|max|medium)$/, "", c)) {}
+            gsub(/\./, "-", c)
+            return c
+          }
+          { if (canon($0) == k) { print "1"; exit } }
+        ' 2>/dev/null)"
+        [ -n "$hit" ] && out="$out dv"
+      fi
+    fi
+  fi
+  # warp: flat JSON array of id strings (one id per element). Same single-awk canon pass.
+  f="$(_catalog_path warp 2>/dev/null)" || f=""
+  if [ -n "$f" ] && [ -f "$f" ]; then
+    ids="$(jq -r '.[] // empty' "$f" 2>/dev/null)"
+    if [ -n "$ids" ]; then
+      hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
+        function canon(s,   c) {
+          c = tolower(s)
+          sub(/^[^\/]*\//, "", c)
+          sub(/-[0-9]{6,}$/, "", c)
+          while (sub(/-(high|low|max|medium)$/, "", c)) {}
+          gsub(/\./, "-", c)
+          return c
+        }
+        { if (canon($0) == k) { print "1"; exit } }
+      ' 2>/dev/null)"
+      [ -n "$hit" ] && out="$out warp"
+    fi
+  fi
+  out="${out# }"
+  printf '%s\n' "$out"
+}
+
+# _lane_marginal_cost <lane> <resolved-id> [est_tokens] -> echo two space-separated fields:
+# a numeric comparable cost and a basis label. Pure-read: consults only cached prices and the
+# existing conserve read, never a fetch. The cost is what a value-ranking caller compares to
+# pick the cheapest lane that can run a model; the basis label says HOW the number was derived
+# so a caller never mistakes an estimate for a metered price or a sentinel for a real zero.
+#
+#   or                -> est_tokens * cached OpenRouter per-token prompt price; basis "est".
+#                       No price on file -> "0 unknown" (an unpriced id must not win on cost it
+#                       cannot prove). est_tokens defaults to 1000.
+#   cc/cx/dv/gm/warp/  -> "0 plan" (subscription/keyless: cost is quota-limited, not per-token,
+#   gemini              so the comparable cost is zero for value ranking) UNLESS the lane is past
+#                       its conserve line, in which case "999 overage" forces value routing OFF a
+#                       nearly-exhausted sub. Reuses _lane_conserve_mult: a multiplier <1 means a
+#                       measurable lane is past the conserve line; unmeasurable lanes return 1.00
+#                       and stay "0 plan" (we never invent a limit we cannot read).
+#   local             -> "0 free" (local inference: no per-token cost, no sub quota to exhaust).
+#   droid/cline/cursor -> "-1 unknown" sentinel: pass-through BYOK bills the caller's own key, so
+#                       this lane has no comparable cost HERE. Callers MUST treat -1 as "not
+#                       comparable / never wins on value", never as the cheapest lane.
+_lane_marginal_cost() {
+  local lane="${1:-}" id="${2:-}" est price cost mult
+  case "$lane" in
+    or)
+      est="${3:-1000}"
+      case "$est" in ''|*[!0-9.]*) est="1000" ;; esac
+      if [ -f "$OSRC_MODELS_JSON" ] && have jq; then
+        price="$(jq -r --arg id "$id" '.data[]|select(.id==$id)|.pricing.prompt // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
+      fi
+      case "$price" in ''|*[!0-9.-]*) printf '0 unknown\n'; return ;; esac
+      cost="$(awk -v e="$est" -v p="$price" 'BEGIN{printf "%g", e*p}')"
+      printf '%s est\n' "$cost"
+      ;;
+    cc|cx|dv|gm|warp|gemini)
+      mult="$(_lane_conserve_mult "$lane" "$(_session_limits 2>/dev/null)" 2>/dev/null)"
+      case "$mult" in ''|*[!0-9.-]*) mult="1.00" ;; esac
+      if awk -v m="$mult" 'BEGIN{exit !(m+0 < 1.0)}'; then
+        printf '999 overage\n'
+      else
+        printf '0 plan\n'
+      fi
+      ;;
+    local)
+      printf '0 free\n'
+      ;;
+    droid|cline|cursor)
+      printf -- '-1 unknown\n'
+      ;;
+    *)
+      # Unknown lane: no basis to compare. Same unknown sentinel, never a zero that would win.
+      printf -- '-1 unknown\n'
+      ;;
+  esac
 }
 
 # cmd_advise: task-aware model recommendation with benchmark data.
@@ -5556,6 +5722,33 @@ cmd_advise() {
     local _rec_row; _rec_row="$(resolve_model_row "$rec_alias")"; rec_tier="${_rec_row##*|}"
   fi
 
+  # Lane routing: the quality logic above chose the MODEL; keep it, but run it on its cheapest
+  # AVAILABLE lane. The same model often lives on a per-token cash lane (OpenRouter) AND a plan lane
+  # the user already pays for (a free Devin tier, a Warp/Claude/Codex sub), whose marginal cost is
+  # ~0 -- so a sunk subscription is spent before real cash. Only the lane moves; the winning model is
+  # never downgraded. A cost-unknown (BYOK) lane never wins on cost. OSRC_ADVISE_ROUTER=0 keeps the
+  # pre-router lane.
+  local rec_cost_basis=""
+  if [ "${OSRC_ADVISE_ROUTER:-1}" != "0" ] && [ -n "$rec_resolved" ]; then
+    local _rk _rlanes _l _lc _lcost _lbasis
+    _rk="$(_model_canon_key "$rec_resolved" 2>/dev/null)"
+    _rlanes="$(_model_lanes "$_rk" 2>/dev/null)"
+    # Seed with the current pick's own marginal cost so a tie keeps the originally-chosen lane.
+    _lc="$(_lane_marginal_cost "$rec_lane" "$rec_resolved" 2>/dev/null)"
+    _lcost="${_lc%% *}"; rec_cost_basis="${_lc##* }"
+    case "$_lcost" in ''|-1|*[!0-9.]*) _lcost="" ; rec_cost_basis="${_lc##* }" ;; esac
+    local _bestcost="$_lcost"
+    for _l in $_rlanes; do
+      [ "$_l" = "$rec_lane" ] && continue
+      _lc="$(_lane_marginal_cost "$_l" "$rec_resolved" 2>/dev/null)"
+      _lcost="${_lc%% *}"; _lbasis="${_lc##* }"
+      case "$_lcost" in ''|-1|*[!0-9.]*) continue ;; esac   # unknown/BYOK never wins on cost
+      if [ -z "$_bestcost" ] || awk -v a="$_lcost" -v b="$_bestcost" 'BEGIN{exit (a+0 < b+0)?0:1}'; then
+        _bestcost="$_lcost"; rec_lane="$_l"; rec_cost_basis="$_lbasis"
+      fi
+    done
+  fi
+
   # Determine benchmark data quality: live (majority), partial, or none.
   if [ "$bench_count" -gt 0 ] && [ "$total_count" -gt 0 ] && [ "$bench_count" -ge $((total_count / 2)) ]; then
     has_bench=1
@@ -5606,13 +5799,14 @@ cmd_advise() {
     jq -n \
       --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
       --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
+      --arg rec_cost_basis "$rec_cost_basis" \
       --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
       --arg conserve "$conserve_notes" \
       --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
-        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, tier:$rec_tier, reason:$rec_reason},
+        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
         shortlist:$shortlist,
         conservation:(if $conserve=="" then null else $conserve end),
         benchmark_data_available:($has_bench=="1"),
@@ -5638,7 +5832,7 @@ cmd_advise() {
     echo
     echo "--- recommendation ---"
     echo "   model: $rec_alias ($rec_resolved)"
-    echo "   lane:  $rec_lane"
+    echo "   lane:  $rec_lane${rec_cost_basis:+ (cost: $rec_cost_basis)}"
     echo "   why:   $rec_reason"
     # Show the local-history adjustment when there is any (else stay silent — pure benchmark pick).
     if [ "$rec_scope" != "none" ] && awk -v n="$rec_neff" 'BEGIN{exit (n+0>0)?0:1}'; then
