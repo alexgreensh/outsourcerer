@@ -14,6 +14,9 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # Extract + eval only the pure functions (avoid running main).
 eval "$(sed -n '/^parse_model() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_model_for() {/,/^}/p' "$SRC")"
+# _devin_model_for's deepseek arm now folds the run's effort into the launchable variant id,
+# so its helper must be in scope too or the suffix comes back empty.
+eval "$(sed -n '/^_deepseek_effort_suffix() {/,/^}/p' "$SRC")"
 DEFAULT_MODEL="glm-5.2"; OUTSOURCERER_EFFORT=""
 die(){ echo "unexpected die: $*" >&2; return 1; }
 
@@ -42,8 +45,11 @@ grep -q '_fallback_provider_for_lane' "$SRC" && grep -q 'local _fb_new=(--provid
 [ "$(_devin_model_for glm)" = "glm-5.2" ] && ok "glm -> Devin sibling glm-5.2" || bad "glm sibling wrong"
 [ "$(_devin_model_for z-ai/glm-5.2)" = "glm-5.2" ] && ok "z-ai/glm-5.2 -> Devin sibling" || bad "OR-id sibling wrong"
 [ -z "$(_devin_model_for hy3)" ] && ok "hy3 has no Devin sibling (OR-only)" || bad "hy3 wrongly mapped"
-# deepseek became dual-lane when Devin added deepseek-v4-pro (verified via the live model probe, 2026-07).
-[ "$(_devin_model_for deepseek)" = "deepseek-v4-pro" ] && ok "deepseek maps to Devin sibling deepseek-v4-pro" || bad "deepseek Devin sibling wrong: '$(_devin_model_for deepseek)'"
+# deepseek became dual-lane when Devin added deepseek-v4-pro. The static sibling now names a
+# LAUNCHABLE EFFORT VARIANT rather than the bare family id: Devin ships DeepSeek V4 Pro as
+# -low/-high/-max, so the family id launches on whichever effort Devin picks. With no effort
+# pinned the sibling folds to -high (verified against `devin models list --format json`, 2026-08-15).
+[ "$(_devin_model_for deepseek)" = "deepseek-v4-pro-high" ] && ok "deepseek maps to Devin variant deepseek-v4-pro-high" || bad "deepseek Devin sibling wrong: '$(_devin_model_for deepseek)'"
 [ -z "$(_devin_model_for hy3)" ] && ok "hy3 has no Devin sibling (OR-only)" || bad "hy3 wrongly mapped"
 [ -z "$(_devin_model_for sol)" ] && ok "sol (single-lane) no Devin sibling" || bad "sol wrongly mapped"
 

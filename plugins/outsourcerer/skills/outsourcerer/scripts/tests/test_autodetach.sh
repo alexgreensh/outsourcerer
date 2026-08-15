@@ -184,11 +184,17 @@ mkdir -p -m 700 "$REENTRY_HOME"
 # OSRC_FORCE_AUTODETACH=1 ensures detach even if the test runner has a TTY on stdout.
 # OSRC_POLL=1 makes _supervise poll every 1s so the job finishes quickly for the test.
 # The fake devin exits 7 (nonzero) so we can test the exit-status contract in Part 4.
+# OSRC_CATALOG_VALIDATE=0: this test's fake devin stubs `auth status` + the model call but NOT
+# `devin models list --format json` (the catalog probe). With the gate on, the child's
+# extra `devin models list` call to the fake binary disrupts the re-entry flow the test is
+# asserting. Catalog validation has its own coverage; disable it here so this test isolates the
+# autodetach/re-entry mechanics. (In production the real `devin models list` works fine.)
 REENTRY_OUTPUT="$(HOME="$FAKE_HOME" \
   OSRC_HOME="$REENTRY_HOME" \
   OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 \
   OSRC_FORCE_AUTODETACH=1 \
   OSRC_POLL=1 \
+  OSRC_CATALOG_VALIDATE=0 \
   OUTSOURCERER_DEPTH=0 \
   bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_AD/reentry-stderr" </dev/null)"
 REENTRY_RC=$?

@@ -140,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.7.2"
+OSRC_VERSION="0.8.0"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -782,6 +782,7 @@ parse_model() {
                               *) die "--effort '$2' invalid (use: minimal|low|medium|high|xhigh|max)" ;; esac
                             shift 2 ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
       --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
@@ -793,14 +794,93 @@ parse_model() {
 
 # Which Devin model serves an OpenRouter-lane alias (cross-lane sibling), empty if none.
 # GLM and DeepSeek are dual-lane today (OpenRouter id <-> Devin id). hy3 is OpenRouter-only.
+# This is now the OFFLINE FALLBACK only: _devin_resolve_model consults the live catalog first.
+# `deepseek-v4-pro` is a family id — Devin ships DeepSeek V4 Pro as effort variants
+# (deepseek-v4-pro-low/-high/-max), so the bare family id launches on whichever effort Devin
+# chooses. The sibling map returns an effort-suffixed id instead, tracking the run's EFFORT via
+# _deepseek_effort_suffix and defaulting to `high` when no effort is pinned. `deepseek-v4-pro`
+# (the family id passed directly) is matched too, so `-m deepseek-v4-pro` also pins a variant.
 _devin_model_for() {
   case "$1" in
     glm|z-ai/glm-5.2|glm-5.2|glm-5-2) printf 'glm-5.2' ;;
     swe|swe-1.7|swe-1-7) printf 'swe-1.7' ;;
-    deepseek|deepseek/deepseek-v4-pro) printf 'deepseek-v4-pro' ;;
+    deepseek|deepseek/deepseek-v4-pro|deepseek-v4-pro) printf 'deepseek-v4-pro-%s' "$(_deepseek_effort_suffix)" ;;
     kimi|kimi-k3) printf 'kimi-k3' ;;
     *) printf '' ;;
   esac
+}
+
+# _deepseek_effort_suffix -> low|high|max derived from the run's EFFORT (default high).
+# DeepSeek V4 Pro ships as effort variants; outsourcerer's effort ladder (minimal|low|medium|high|
+# xhigh|max) folds onto DeepSeek's three rungs. Reads the global $EFFORT (set by parse_model/
+# _consume_flags before any dispatch resolution), so the resolver knows the run's effort.
+_deepseek_effort_suffix() {
+  case "${EFFORT:-}" in
+    minimal|low) printf 'low' ;;
+    medium|high) printf 'high' ;;
+    xhigh|max)   printf 'max' ;;
+    *)           printf 'high' ;;   # no effort pinned -> safe default
+  esac
+}
+
+# _devin_catalog_raw -> the cached STRUCTURED Devin catalog JSON, refreshing via the normal catalog
+# path (so it shares the TTL, single-flight lock, and fail-open of the validation cache). Empty when
+# the catalog is unavailable (offline / old CLI) -> callers fall back to the static map.
+_devin_catalog_raw() {
+  local f rawf
+  f="$(_catalog_path dv)" || return 1
+  rawf="${f%.json}.raw.json"
+  _catalog_load dv >/dev/null 2>&1    # triggers a fresh fetch that repopulates BOTH artifacts if stale
+  [ -f "$rawf" ] && cat "$rawf" 2>/dev/null
+}
+
+# _devin_resolve_dynamic <token> -> a launchable Devin variant resolved from the LIVE catalog, or
+# empty if unresolvable/offline. This is what lets a NEW or renamed Devin model work with no
+# hand-edited table: an exact variant id passes through; a family id or short alias (glm/deepseek/
+# kimi/swe...) resolves to the effort-appropriate variant, COST-AWARE (prefers Free/plan-included,
+# skips paid *-lightning/*-fast and *-max unless the run's effort asks) and VERSION-AWARE (newest
+# family wins for an ambiguous alias). Effort folds via _deepseek_effort_suffix (low|high|max).
+#
+# Deliberately matches on family_uid ONLY, never on the catalog's `aliases`. Devin's own aliases are
+# not cost-safe: live, `swe` is an alias of the PAID swe-1.7-lightning family ($2.5/$12.5 MTok)
+# while the free swe-1.7 family carries no alias at all. Resolving by family prefix + cost rank
+# picks the free rung; honoring the alias would silently bill.
+_devin_resolve_dynamic() {
+  local tok="${1:-}" eff cat
+  [ -n "$tok" ] || return 1
+  have jq || return 1
+  [ "${OSRC_DEVIN_DYNAMIC_RESOLVE:-1}" = "0" ] && return 1    # escape hatch -> static path only
+  [ "${OSRC_CATALOG_VALIDATE:-1}" = "0" ] && return 1         # same knob that skips the live catalog gate
+  eff="$(_deepseek_effort_suffix)"
+  cat="$(_devin_catalog_raw)"; [ -n "$cat" ] || return 1
+  # costrank reads cost_tier AND cost_summary. The LIVE catalog puts "Free" in cost_tier and leaves
+  # cost_summary null on plan-included models (verified against `devin models list --format json`,
+  # 2026-08-15), so keying on cost_summary alone would rank every free variant as paid and fall back
+  # to the shortest-name tiebreak by luck rather than by cost.
+  printf '%s' "$cat" | jq -r --arg tok "$tok" --arg eff "$eff" '
+    def vernums: [ scan("[0-9]+") | tonumber ];
+    def costrank: if ((((.cost_tier // "") + " " + (.cost_summary // "")))|test("free";"i")) then 0 else 1 end;
+    ( [ .families[]?.variants[]?.model_uid ] ) as $allvars
+    | if ($allvars | index($tok)) then $tok
+      else
+        ( [ .families[]?
+            | select( (.family_uid|ascii_downcase) == ($tok|ascii_downcase)
+                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+"-"))
+                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+".")) ) ] ) as $fams
+        | if ($fams|length)==0 then ""
+          else
+            ( ($fams | map(select(.family_uid | test("flash|fast|lightning";"i")|not))) as $nf
+              | (if ($nf|length)>0 then $nf else $fams end) ) as $cand
+            | ( $cand | sort_by(.family_uid|vernums) | reverse | .[0] ) as $fam
+            | ( ($fam.variants // []) | map(select(.model_uid | test("-(1m|none)$";"i")|not)) ) as $vars
+            | if ($vars|length)==0 then ""
+              else
+                ( $vars | map(select(.model_uid | endswith("-"+$eff))) ) as $esfx
+                | if ($esfx|length)>0 then ($esfx | sort_by(costrank,(.model_uid|length)) | .[0].model_uid)
+                  else ($vars | sort_by(costrank,(.model_uid|length)) | .[0].model_uid) end
+              end
+          end
+      end' 2>/dev/null
 }
 
 # _devin_is_free_model <alias-or-devin-id> -> rc0 if it runs on Devin's plan-INCLUDED (free) tier.
@@ -880,20 +960,29 @@ _classify_quota_confirm() {
 # Resolve a user-facing alias to an id the DEVIN CLI accepts. parse_model() stores -m verbatim, so
 # without this a documented alias reaches `devin --model` raw and the job dies at launch with
 # "Unknown model: 'glm'" -- instantly, before any work, which in a fanout kills every member at once.
-# Order: cross-lane sibling first (glm/deepseek carry an OpenRouter id the table would hand back),
-# then the alias table's target, then the token unchanged (already a literal Devin id, or unknown to
-# us -- let the CLI be the authority on its own catalog rather than guessing).
+# LIVE catalog first (self-updating, cost-aware); the static map is only the offline/cross-lane
+# fallback. Ordering matters: the static table is hand-edited and goes stale, so consulting it first
+# would pin a renamed id even when the live catalog already knows the right one.
 _devin_resolve_model() {
-  local m="${1:-}" row target sib
+  local m="${1:-}" row target sib dyn
   [ -n "$m" ] || { printf ''; return; }
-  sib="$(_devin_model_for "$m")"; [ -n "$sib" ] && { printf '%s' "$sib"; return; }
+  # 1) Dynamic resolution from the live catalog — the primary path.
+  dyn="$(_devin_resolve_dynamic "$m")"; [ -n "$dyn" ] && { printf '%s' "$dyn"; return; }
+  # 2) Static cross-lane sibling (e.g. the OpenRouter id z-ai/glm-5.2 that Devin rejects). Sharpen a
+  #    family id it returns to a launchable variant via the catalog when possible.
+  sib="$(_devin_model_for "$m")"
+  if [ -n "$sib" ]; then
+    dyn="$(_devin_resolve_dynamic "$sib")"; [ -n "$dyn" ] && { printf '%s' "$dyn"; return; }
+    printf '%s' "$sib"; return
+  fi
+  # 3) Alias table (maps OpenRouter-lane aliases to ids); run its target back through the same steps.
   row="$(resolve_model_row "$m")"; target="${row%%|*}"
   if [ -n "$target" ]; then
-    # The table maps OpenRouter-lane aliases to OpenRouter ids (glm -> z-ai/glm-5.2), which Devin
-    # also rejects; run the target back through the sibling map before accepting it.
+    dyn="$(_devin_resolve_dynamic "$target")"; [ -n "$dyn" ] && { printf '%s' "$dyn"; return; }
     sib="$(_devin_model_for "$target")"; [ -n "$sib" ] && { printf '%s' "$sib"; return; }
     printf '%s' "$target"; return
   fi
+  # 4) Unknown to us -> hand it to the CLI unchanged (it is the authority on its own catalog).
   printf '%s' "$m"
 }
 
@@ -919,6 +1008,271 @@ live_models() {
   printf '%s\n' "$out" | grep -i "^Available:" | sed 's/^Available:[[:space:]]*//' || true
 }
 
+# ---- Dynamic catalog validation ----------------------------------------
+# The alias->id table is static; the live catalog changes ~daily. Nothing validated a resolved -m
+# against the live `devin models list` / `oz model list` catalog, so a stale/renamed id launched
+# blind (root cause of the Warp/DeepSeek gap). This block adds a pre-dispatch gate for
+# the Devin (dv) and Warp (warp) lanes: resolve -> check live catalog (cached, short TTL) -> on an
+# unknown id, FAIL LOUD with the closest matches, never launch. Lanes that own their catalog
+# (droid, cursor, hermes, cc, codex, gm, claudex, cline, local) skip validation -- the engine is the
+# authority on its own catalog, and OpenRouter ids are validated by the OpenRouter API at call time.
+# Escape hatch: OSRC_CATALOG_VALIDATE=0 skips the gate (transient catalog glitch or a known-new
+# model not yet in the probe). Cache lives at $OSRC_HOME/catalogs/<lane>.json as a flat JSON array
+# of model-id strings; TTL is OSRC_CATALOG_TTL seconds (default 300 = 5 min). Fetch is bounded by
+# OSRC_CATALOG_FETCH_TIMEOUT (default 10s). A fetch failure is NON-FATAL: soft-warn and let the
+# CLI reject at launch -- never block dispatch on a catalog probe failure.
+
+# Lane whitelist: only the two lanes that HAVE a live catalog. A literal set closes any latent
+# path-traversal from a future caller passing an attacker-influenced lane string.
+_catalog_path() { case "${1:-}" in dv|warp) printf '%s/catalogs/%s.json' "$OSRC_HOME" "$1" ;; *) return 1 ;; esac; }
+
+# _catalog_fresh <lane> -> rc 0 if cache exists and is younger than TTL, rc 1 otherwise.
+# stat portability: macOS BSD stat takes -f %m (mtime epoch); GNU stat takes -c %Y. Try both.
+_catalog_fresh() {
+  local f now age mtime
+  f="$(_catalog_path "$1")" || return 1
+  [ -f "$f" ] || return 1
+  now="$(date +%s 2>/dev/null)" || return 1
+  mtime="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+  case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
+  age=$(( now - mtime ))
+  [ "$age" -lt "${OSRC_CATALOG_TTL:-300}" ] 2>/dev/null
+}
+
+# _catalog_normalize <lane> <raw> -> flat JSON array of model-id strings ("["id",...]").
+# Lane-aware, because each CLI has its OWN wire format (verified live 2026-08-15):
+#   dv:   `devin models list --format json` is an OBJECT, not an array:
+#         {"families":[{"family_uid":"glm-5.2","aliases":["glm"],"variants":[{"model_uid":"glm-5-2"},...]}]}
+#         Devin's --model accepts a variant model_uid, a family_uid, OR an alias, so the catalog is the
+#         UNION of all three. (Verified live: the CLI's own "Available:" error list prints family ids,
+#         AND a variant id such as `swe-1-7` launches, so both forms are legal.) The gate is a
+#         typo/staleness guard ("does Devin know this id?"), NOT a variant enforcer — that dissolves
+#         the family-vs-variant tension (glm-5.2 AND glm-5-2 both pass).
+#   warp: `oz model list` has NO --format json (the flag is a clap error); plain output is a Unicode
+#         box table (│ MODEL ID │ header, │ <id> │ rows, box-drawing separators). Strip the chrome.
+#   else: a generic JSON array (strings or {.id/.name} objects) or a comma/newline id list.
+_catalog_normalize() {
+  local lane="$1" raw="$2"
+  have jq || return 1
+  # Devin object shape -> union of family_uid + aliases[] + variants[].model_uid.
+  if [ "$lane" = "dv" ] && printf '%s' "$raw" | jq -e '(.families? // empty) | type == "array"' >/dev/null 2>&1; then
+    # Guard aliases/variants to arrays (a scalar would make jq error and leak past 2>/dev/null on odd
+    # shapes), and charset-filter to real model-id tokens (same discipline as the warp/text branch) so
+    # a label-like family_uid ("Claude Haiku 4.5", live in the real catalog) never enters the gate.
+    printf '%s' "$raw" | jq -c '
+      [ .families[]
+        | ( .family_uid,
+            ( .aliases  | if type=="array" then .[] else empty end),
+            ( .variants | if type=="array" then .[].model_uid else empty end) ) ]
+      | map(select(type=="string" and test("^[A-Za-z0-9._/-]+$")))
+      | unique'
+    return
+  fi
+  # Generic JSON array (strings, or objects carrying .id/.name).
+  if printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    if printf '%s' "$raw" | jq -e '.[0] | type == "object"' >/dev/null 2>&1; then
+      printf '%s' "$raw" | jq -c '[.[] | (.id // .name // empty)]'
+    else
+      printf '%s' "$raw" | jq -c '.'
+    fi
+    return
+  fi
+  # Plain text: strip box-drawing chrome (│ and friends), drop the "MODEL ID" header, then take the
+  # FIRST whitespace-delimited token of each line — the id column. Taking column 1 (not requiring the
+  # whole line to be a bare id) means a MULTI-column `oz model list` table ("<id>  <description>")
+  # still yields its ids instead of dropping every row (which would silently disable warp validation).
+  # The final charset filter drops rule rows and anything that isn't a model id.
+  printf '%s' "$raw" \
+    | sed 's/[│┃|]/ /g' \
+    | tr ',' '\n' \
+    | grep -viE 'MODEL[[:space:]]*ID' \
+    | awk '{print $1}' \
+    | grep -E '^[A-Za-z0-9._/-]+$' \
+    | jq -R -s -c 'split("\n") | map(select(. != ""))'
+}
+
+# _catalog_fetch <lane> -> fetch live catalog, normalize, cache atomically. rc 0 on success.
+# Portable single-flight (macOS has NO flock): one process wins an atomic mkdir lock and runs the
+# live probe; others wait briefly for its fresh cache instead of each firing a duplicate
+# `devin models list`/`oz model list` (the fanout thundering herd). A stale lock (owner stopped
+# mid-fetch) is reclaimed after ~fetch-timeout so the gate can never wedge. The inner fn keeps the
+# real work + its early returns; the wrapper owns exactly one lock acquire/release.
+_catalog_fetch() {
+  local lane="$1" f lock _rc _w _max
+  # Negative memo, per PROCESS. One dispatch consults the catalog up to four times (the resolver
+  # tries the token and then its static sibling; the validator checks, force-fetches, then re-checks).
+  # With a reachable CLI those are cheap cache reads. With an UNREACHABLE one every call re-probes
+  # and each probe costs up to OSRC_CATALOG_FETCH_TIMEOUT, so an offline/broken devin added tens of
+  # seconds of dead wait to a dispatch that was always going to fail open anyway. Remember the first
+  # failure and short-circuit the rest. Scoped to this process on purpose: it is not persisted, so a
+  # transient outage never survives past the run that saw it.
+  case " ${_CATALOG_FETCH_FAILED:-} " in *" $lane "*) return 1 ;; esac
+  f="$(_catalog_path "$lane")" || return 1
+  _mkdir_private "$(dirname "$f")" || return 1
+  lock="${f}.lock.d"
+  if ! mkdir "$lock" 2>/dev/null; then
+    _max=$(( ${OSRC_CATALOG_FETCH_TIMEOUT:-10} + 2 )); _w=0
+    while [ "$_w" -lt "$_max" ]; do
+      _catalog_fresh "$lane" && return 0            # winner published a fresh cache -> use it
+      mkdir "$lock" 2>/dev/null && break             # winner vanished (stale lock) -> take over
+      sleep 1; _w=$(( _w + 1 ))
+    done
+    _catalog_fresh "$lane" && { rmdir "$lock" 2>/dev/null; return 0; }
+    [ -d "$lock" ] || mkdir "$lock" 2>/dev/null      # last resort: probe unlocked rather than skip
+  fi
+  _catalog_fetch_inner "$lane"; _rc=$?
+  rmdir "$lock" 2>/dev/null
+  [ "$_rc" -eq 0 ] || _CATALOG_FETCH_FAILED="${_CATALOG_FETCH_FAILED:-} $lane"
+  return "$_rc"
+}
+
+# _catalog_fetch_inner <lane> -> the actual probe + normalize + atomic cache write. Bounded by
+# _timeout so a hung CLI cannot stall dispatch; atomic tmp+mv so a concurrent read never tears.
+_catalog_fetch_inner() {
+  local lane="$1" f tmp raw norm
+  f="$(_catalog_path "$lane")" || return 1
+  _mkdir_private "$(dirname "$f")" || return 1
+  tmp="${f}.tmp.$$"
+  case "$lane" in
+    dv)
+      # Structured CLI, _timeout-bounded. NO live_models fallback: that probe runs `devin --model
+      # __list__ -p` UNBOUNDED (_timeout can't portably wrap a bash function, since `timeout`
+      # needs an external command on Linux), which could hang dispatch forever. If the structured
+      # call fails (empty/invalid, e.g. an old CLI without --format json), leave raw empty -> fetch
+      # returns 1 -> _catalog_validate soft-warns and lets the CLI reject at launch (fail-open).
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" devin models list --format json 2>/dev/null)"
+      printf '%s' "$raw" | jq -e '.' >/dev/null 2>&1 || raw=""
+      ;;
+    warp)
+      # `oz model list` has no --format json today (verified live: clap "unexpected argument").
+      # Try it anyway so a future oz that gains the flag is used automatically, then fall back to
+      # the box table. The failed attempt costs one bounded, output-discarded call.
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" oz model list --format json 2>/dev/null)"
+      if [ -z "$raw" ] || ! printf '%s' "$raw" | jq -e '.' >/dev/null 2>&1; then
+        raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" oz model list 2>/dev/null)"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$raw" ] || return 1
+  norm="$(_catalog_normalize "$lane" "$raw")"
+  [ -n "$norm" ] || return 1
+  # Never cache an EMPTY catalog. A transient {"families":[]}, an `oz` list with no rows, or a parse
+  # that dropped everything would write `[]` — and since `[]` is "fresh", _catalog_validate would then
+  # die on EVERY model for the whole TTL, inverting the fail-open contract. An empty result is a fetch
+  # FAILURE: return 1 so the validator soft-warns and lets the CLI reject at launch instead.
+  printf '%s' "$norm" | jq -e 'type=="array" and length>0' >/dev/null 2>&1 || return 1
+  printf '%s' "$norm" > "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  # dv: also cache the STRUCTURED catalog (families/variants/cost) from the SAME probe — one fetch,
+  # two artifacts. The flat list ($f) drives validation; the raw ($rawf) drives the dynamic
+  # alias->variant resolver, so a new/renamed Devin model needs no hand-edited table.
+  if [ "$lane" = "dv" ]; then
+    local rawf rtmp; rawf="${f%.json}.raw.json"; rtmp="${rawf}.tmp.$$"
+    printf '%s' "$raw" > "$rtmp" && mv -f "$rtmp" "$rawf" 2>/dev/null || rm -f "$rtmp" 2>/dev/null
+  fi
+  return 0
+}
+
+# _catalog_load <lane> -> echo model ids (one per line), fetching if stale. Empty output on failure.
+_catalog_load() {
+  local lane="$1" f
+  have jq || return 1
+  if _catalog_fresh "$lane"; then
+    f="$(_catalog_path "$lane")" || return 1
+    [ -f "$f" ] && jq -r '.[]' "$f" 2>/dev/null
+    return $?
+  fi
+  _catalog_fetch "$lane" || return 1
+  f="$(_catalog_path "$lane")" || return 1
+  [ -f "$f" ] && jq -r '.[]' "$f" 2>/dev/null
+}
+
+# _catalog_contains <lane> <model> -> rc 0 if model is in the live catalog, rc 1 otherwise.
+# Load into a var and match via a here-string, NOT `load | grep -q`: under `pipefail`, grep -q
+# exits on first match and SIGPIPEs the upstream jq/cat (141), so the pipeline reports failure and
+# a PRESENT model reads as absent (a flaky false-negative on small catalogs). The here-string has no
+# upstream process to signal.
+_catalog_contains() {
+  local lane="$1" model="$2" _cat
+  _cat="$(_catalog_load "$lane" 2>/dev/null)"
+  grep -qxF "$model" <<<"$_cat"
+}
+
+# _levenshtein <a> <b> -> edit distance (integer). Pure bash, O(n*m). Catalogs are ~40 families so
+# the per-model cost is fine at this scale. bash 3.2 supports C-style arithmetic on flat arrays.
+_levenshtein() {
+  local a="$1" b="$2" alen blen i j cost
+  alen=${#a}; blen=${#b}
+  local d=()
+  i=0; while [ "$i" -le "$alen" ]; do d[$((i*(blen+1)))]=$i; i=$((i+1)); done
+  j=0; while [ "$j" -le "$blen" ]; do d[$j]=$j; j=$((j+1)); done
+  i=1; while [ "$i" -le "$alen" ]; do
+    j=1; while [ "$j" -le "$blen" ]; do
+      if [ "${a:$((i-1)):1}" = "${b:$((j-1)):1}" ]; then cost=0; else cost=1; fi
+      local u l ul
+      u="${d[$(((i-1)*(blen+1)+j))]}"
+      l="${d[$((i*(blen+1)+j-1))]}"
+      ul="${d[$(((i-1)*(blen+1)+j-1))]}"
+      local best; [ "$u" -le "$l" ] && [ "$u" -le "$ul" ] && best=$u || { [ "$l" -le "$ul" ] && best=$l || best=$ul; }
+      d[$((i*(blen+1)+j))]=$(( best + cost ))
+      j=$((j+1))
+    done
+    i=$((i+1))
+  done
+  printf '%d' "${d[$((alen*(blen+1)+blen))]}"
+}
+
+# _catalog_closest <lane> <model> -> top 3 closest matches (one per line, closest first).
+_catalog_closest() {
+  local lane="$1" model="$2" m dist
+  _catalog_load "$lane" 2>/dev/null | while IFS= read -r m; do
+    [ -n "$m" ] || continue
+    dist="$(_levenshtein "$model" "$m")"
+    printf '%d %s\n' "$dist" "$m"
+  done | sort -n | head -3 | while read -r _d _m; do printf '%s\n' "$_m"; done
+}
+
+# _catalog_validate <lane> <model> -> rc 0 if valid/unknown-catalog/skipped; dies on a confirmed
+# unknown id. The gate runs on the RESOLVED id, not the alias. A catalog-fetch failure is NON-FATAL
+# (soft-warn + return 0) so a probe outage cannot block dispatch -- the CLI still rejects at launch.
+_catalog_validate() {
+  local lane="$1" model="$2" closest
+  [ "${OSRC_CATALOG_VALIDATE:-1}" = "0" ] && return 0   # escape hatch
+  [ -n "$model" ] || return 0
+  if _catalog_contains "$lane" "$model"; then
+    return 0
+  fi
+  # Catalog unavailable (offline / CLI broken) -> soft-warn, don't block. The CLI is the final
+  # authority; if the id is genuinely unknown it errors at launch with a real cause.
+  if ! _catalog_fresh "$lane" && ! _catalog_fetch "$lane" 2>/dev/null; then
+    printf '>>> [catalog] %s catalog unavailable (offline?); skipping live validation for "%s". The CLI will reject it if unknown.\n' "$lane" "$model" >&2
+    return 0
+  fi
+  # Re-check after a forced fetch (the contains check above may have run against a stale/empty cache).
+  if _catalog_contains "$lane" "$model"; then
+    return 0
+  fi
+  # Fail OPEN on an EMPTY catalog. A fresh-but-empty cache (a transient upstream, or a `[]` written
+  # before the non-empty fetch guard existed) has nothing to validate against — blocking every model
+  # then would invert the fail-open contract and brick the lane for the whole TTL. If the loaded
+  # catalog is empty, soft-warn and let the CLI be the authority, exactly like an unavailable probe.
+  if [ -z "$(_catalog_load "$lane" 2>/dev/null | head -1)" ]; then
+    printf '>>> [catalog] %s catalog is empty; skipping live validation for "%s". The CLI will reject it if unknown.\n' "$lane" "$model" >&2
+    return 0
+  fi
+  closest="$(_catalog_closest "$lane" "$model")"
+  local cands=""
+  while IFS= read -r c; do [ -n "$c" ] && cands="$cands  $c"; done <<EOF
+$closest
+EOF
+  die "Unknown model '${model}' for the ${lane} lane (checked against the live catalog). Closest matches:${cands}
+
+The static alias table resolved to '${model}', but this id is NOT in the live catalog.
+  - If the model was renamed, update _devin_model_for() / OSRC_MODEL_TABLE with the new id.
+  - If this is a transient catalog glitch, retry with OSRC_CATALOG_VALIDATE=0 (escape hatch).
+  - Force a fresh catalog fetch: rm -f $(_catalog_path "$lane") (it re-fetches on the next run)."
+}
+
 # delegate <perm> <sandbox-flag-or-empty> [-m MODEL] "<task>"
 delegate() {
   local perm="$1"; shift
@@ -936,6 +1290,11 @@ delegate() {
   local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
   [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
   MODEL="$_dvmodel"
+  # live-catalog gate. Validate the RESOLVED id against Devin's live catalog (cached, short
+  # TTL) BEFORE the devin call, so a stale/renamed id dies loud with closest matches instead of
+  # launching blind. The gate is here (dispatch site), NOT in _devin_resolve_model, so advise
+  # (which calls the resolver) stays network-free. OSRC_CATALOG_VALIDATE=0 skips.
+  _catalog_validate dv "$MODEL"
   _devin_guard_before_delegation "$MODEL"
   # Bug-1 clarification: glm/swe (and the other plan-included ids) are FREE-tier on Devin. Devin's own
   # output shows a paid ACU balance that can read "0% remaining" — that figure is a SEPARATE paid pool
@@ -1008,6 +1367,18 @@ delegate() {
     printf '>>> [devin quota] paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still available. Retry on one of those plan-included models.\n' >&2
   fi
   [ -n "$_dverr" ] && rm -f "$_dverr" 2>/dev/null
+  # record a foreground ledger row for the Devin lane (plan lane -> $0 cash, lane=dv). The bg
+  # path records via run_job with OSRC_LEDGER_FORCE; this plain call is skipped under OSRC_STREAM=1
+  # (bg re-entry) so it never double-records, and only fires for a true foreground run, where the
+  # Tab previously saw NO devin-fg activity at all. $tier here is the perm tier (auto/accept-edits/
+  # autonomous/dangerous), matching the native lanes' verb-field convention.
+  # read $tier defensively. delegate() never declares it; today both call sites happen to have a
+  # `local tier` in scope, but a future direct caller (or a test harness) without one would trip
+  # `set -u` ("tier: unbound variable") and the trailing `|| true` would SILENTLY swallow it — the
+  # ledger row never writes, i.e. the undercount reappears invisibly. Default instead.
+  # devin is a PLAN lane ($0 cash is genuinely true), so a real 0 cost is honest here.
+  local _tier="${tier:-auto}"
+  record_ledger devin "$MODEL" "$_tier" "$_tier" "$prompt" "0.000000" dv 2>/dev/null || true
   return "$rc"
 }
 
@@ -1626,6 +1997,7 @@ _consume_flags() {
       --tier)     [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --no-advise) OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise model selection on a bare run
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
@@ -6124,12 +6496,40 @@ _resolve_run_cost() {
       # $0 there would UNDERSTATE real spend (cash-lane under-report guard). Leave it unmeasured so the
       # Tab counts it under "cash lanes, est-only" (honest) instead of "$0 measured" (false).
       case "$lane" in
-        or|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        # `gi` is the Gemini-API-key lane code (see _lane_cost_disclosure's gemini|gi arm). The
+        # foreground gemini path records under that code, so without it here a metered API-key run
+        # would take the `*)` arm and log a FALSE measured $0.
+        or|gi|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
         *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
   fi
   printf '%s' "$real_cost"
+}
+
+# _fg_run_cost <lane> <launch_epoch> <log> -> a NON-EMPTY cost string for a FOREGROUND run, mirroring
+# the bg path's _resolve_run_cost but guaranteeing non-empty output for the ledger (the fg
+# path previously passed NO cost arg, so cost_usd was empty and foreground metered spend was
+# undercounted in the Tab). Reuses _resolve_run_cost for the real measurement logic (gen-id sum,
+# stream-json total_cost_usd, Hermes receipt, $0 for plan/native/local). _resolve_run_cost leaves an
+# UNMEASURABLE cash lane as "" (honest in bg, where the Tab then counts it est-only); for the fg
+# ledger we fall back to a clearly-labeled '~0' estimate so the row's cost_usd is non-empty
+# (acceptance: a foreground metered-lane run writes a non-empty cost_usd) without ever recording a
+# false measured $0. launch_epoch is 0 when the caller has no capture (non-stream fg); _resolve_run_cost
+# only uses it for the Hermes lane, so 0 is safe for the other lanes.
+_fg_run_cost() {
+  local lane="$1" launch="${2:-0}" log="$3"
+  local c; c="$(_resolve_run_cost "$lane" "$launch" "$log" 2>/dev/null)"
+  [ -n "$c" ] && { printf '%s' "$c"; return 0; }
+  # _resolve_run_cost leaves an unmeasurable cash OpenRouter run as "" (it only consumes
+  # total_cost_usd when gen- ids are present). The foreground cc/codex stream emits total_cost_usd
+  # in the result event WITHOUT necessarily surfacing OpenRouter gen- ids, so try it directly here,
+  # labeled '~' so it never reads as a measured receipt. Keeps cost_usd non-empty either way.
+  if [ -n "$log" ] && [ -s "$log" ] && have jq; then
+    local est; est="$(jq -r 'select(.type=="result")|.total_cost_usd // empty' "$log" 2>/dev/null | tail -1)"
+    case "$est" in ''|*[!0-9.]*) ;; *) printf '~%s' "$est"; return 0 ;; esac
+  fi
+  printf '~0'
 }
 
 # _worktree_setup <job-id> -> "path<TAB>branch<TAB>base_sha" + rc 0 when OSRC_WORKTREE=1 and we're in a
@@ -7768,6 +8168,87 @@ $body"
 # disagree->escalate to a premium model with both answers attached.
 # =============================================================================
 _so_norm() { tr 'A-Z' 'a-z' | tr -cd 'a-z0-9'; }
+# _so_tokens -> the answer as a sorted-unique stream of lowercase alphanumeric tokens, one per
+# line. Splits on every non-alnum byte (punctuation/markdown/whitespace all vanish), so two
+# phrasings of the same answer produce nearly identical token sets even when their bytes differ.
+_so_tokens() { tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '\n' | sed '/^$/d' | sort -u; }
+# _so_nums -> sorted-unique numeric tokens, compared VERBATIM. No trailing-zero normalization: it
+# wrongly equated version strings ("1.10" -> "1.1"), a false CONSENSUS in the dangerous direction.
+# Keeping them distinct means at worst "42.0" vs "42" over-escalates to the judge — the safe
+# direction, since a false reading must only ever escalate.
+_so_nums() { grep -oE '[0-9]+([.][0-9]+)?' 2>/dev/null | sort -u; }
+# _so_has_neg -> rc 0 if the text carries a negation cue. STRIPS the apostrophe first so a
+# contraction joins into one word (can't->cant, won't->wont, don't->dont) and the word-match
+# catches it. A check that tokenized on every non-alnum byte would split can't->can+t, so the
+# veto set ("cant","wont") would never match and a direct contradiction ("you can deploy" vs "you
+# can't deploy") would score as agreement — the exact unsafe false-agree this guards against.
+_so_has_neg() {
+  tr 'A-Z' 'a-z' | tr -d "'’" \
+    | grep -qwE 'no|not|never|none|cannot|cant|dont|doesnt|wont|isnt|arent|wasnt|werent|shouldnt|wouldnt|couldnt|didnt|hasnt|havent|hadnt|without|avoid|refuse|deny|denies|disable|disabled|false|incorrect'
+}
+# _so_agree <answer1> <answer2> -> 0 when the two answers are the SAME answer (safe to return
+# without the paid judge), 1 when they materially differ (escalate). Deterministic, $0, no LLM.
+# Ordered rules, each tuned so a false reading only ever goes toward ESCALATE (the old
+# always-escalate behavior), never toward a wrong agreement:
+#   0. byte-normalized equality                 -> agree (fast path, the old exact match)
+#   1. numeric conflict: both sides carry numbers and the sets differ ("30s" vs "60s")
+#                                               -> disagree. Numbers are the load-bearing content
+#      of most technical answers; a high word overlap must never paper over a changed quantity.
+#   2. negation conflict: the no/not/never/cannot/don't sets differ ("delete it" vs "do NOT
+#      delete it")                             -> disagree. Containment alone flips meaning here.
+#   3. token containment >= OSRC_AGREE_SIM (default 0.85) AND Jaccard >= OSRC_AGREE_JACCARD
+#      (default 0.7) -> agree. Containment (not Jaccard alone) so "yes, use 30 retries" and "use
+#      30 retries" agree: extra framing around the same content is verbosity, not disagreement.
+# Anything ambiguous (empty token set, unparseable threshold) returns 1 — "can't tell" escalates,
+# preserving the safety bias; the bug being fixed is that it NEVER agreed, not that ties escalate.
+_so_agree() {
+  local a1="${1:-}" a2="${2:-}" n1 n2
+  n1="$(printf '%s' "$a1" | _so_norm)"; n2="$(printf '%s' "$a2" | _so_norm)"
+  if [ -n "$n1" ] && [ "$n1" = "$n2" ]; then return 0; fi
+  local nums1 nums2
+  nums1="$(printf '%s\n' "$a1" | _so_nums)"; nums2="$(printf '%s\n' "$a2" | _so_nums)"
+  if [ -n "$nums1" ] && [ -n "$nums2" ] && [ "$nums1" != "$nums2" ]; then
+    echo ">>> second-opinion: numeric tokens differ, that is a material disagreement" >&2
+    return 1
+  fi
+  # Negation PRESENCE must match. If one answer negates and the other does not, they contradict —
+  # escalate. Compared as a boolean (not the exact cue set) so "do not" vs "never" still counts as
+  # both-negated; the safe bias is that a mismatch escalates.
+  local h1 h2
+  printf '%s' "$a1" | _so_has_neg && h1=1 || h1=0
+  printf '%s' "$a2" | _so_has_neg && h2=1 || h2=0
+  if [ "$h1" != "$h2" ]; then
+    echo ">>> second-opinion: negation presence differs (one answer negates, the other does not) — treating as disagreement" >&2
+    return 1
+  fi
+  local t1 t2 s1 s2 both min sim thr
+  t1="$(printf '%s\n' "$a1" | _so_tokens)"; t2="$(printf '%s\n' "$a2" | _so_tokens)"
+  s1="$(printf '%s\n' "$t1" | grep -c . 2>/dev/null)"; s2="$(printf '%s\n' "$t2" | grep -c . 2>/dev/null)"
+  case "$s1" in ''|*[!0-9]*) s1=0 ;; esac; case "$s2" in ''|*[!0-9]*) s2=0 ;; esac
+  [ "$s1" -ge 1 ] && [ "$s2" -ge 1 ] || return 1
+  both="$(comm -12 <(printf '%s\n' "$t1") <(printf '%s\n' "$t2") | grep -c . 2>/dev/null)"
+  case "$both" in ''|*[!0-9]*) both=0 ;; esac
+  min="$s1"; [ "$s2" -lt "$s1" ] && min="$s2"
+  local uni jac jthr
+  uni=$(( s1 + s2 - both )); [ "$uni" -ge 1 ] || uni=1
+  sim="$(awk -v b="$both" -v m="$min" 'BEGIN{printf "%.3f", b/m}')"        # containment (subset overlap)
+  jac="$(awk -v b="$both" -v u="$uni" 'BEGIN{printf "%.3f", b/u}')"        # Jaccard (union overlap)
+  thr="${OSRC_AGREE_SIM:-0.85}"
+  awk -v t="$thr" 'BEGIN{exit !(t+0 > 0 && t+0 <= 1)}' 2>/dev/null || thr=0.85
+  jthr="${OSRC_AGREE_JACCARD:-0.7}"
+  awk -v t="$jthr" 'BEGIN{exit !(t+0 > 0 && t+0 <= 1)}' 2>/dev/null || jthr=0.7
+  # Agree only when containment is high AND Jaccard is not tiny. Containment alone declared a
+  # SUPERSET "the same answer" ("delete the file" vs "delete the file and the backup and the logs"
+  # -> containment 1.0), skipping the judge on a materially larger answer. The Jaccard floor sees
+  # the extra tokens the longer answer adds and escalates; pure verbosity ("use 30 retries then
+  # stop" vs "30 retries then stop") stays high-Jaccard and still agrees.
+  if awk -v s="$sim" -v t="$thr" 'BEGIN{exit !(s+0 >= t+0)}' && awk -v j="$jac" -v t="$jthr" 'BEGIN{exit !(j+0 >= t+0)}'; then
+    echo ">>> second-opinion: containment $sim >= $thr and Jaccard $jac >= $jthr — same answer, differently worded" >&2
+    return 0
+  fi
+  echo ">>> second-opinion: containment $sim / Jaccard $jac below threshold — material disagreement" >&2
+  return 1
+}
 _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
   local model="$1" row id tlane tier disp elane
   row="$(resolve_model_row "$model")"
@@ -7842,8 +8323,13 @@ second_opinion() {
     local _fail_model="$m2"; [ -z "$n1" ] && _fail_model="$m1"
     echo ">>> [WARNING] $_fail_model returned empty (upstream failure), using the other model's answer" >&2
   fi
-  if [ -n "$n1" ] && [ -n "$n2" ] && [ "$n1" = "$n2" ]; then
-    echo "== CONSENSUS ($m1 == $m2), no escalation =="
+  # SEMANTIC agreement, not byte equality: exact-normalized match was the bug (any wording or
+  # whitespace difference read as "disagreement", so EVERY pair escalated and the premium judge
+  # ran every time — the cost saving that is this verb's whole point). _so_agree is a $0
+  # deterministic check (numeric-conflict veto, negation veto, then normalized-token containment);
+  # the premium judge below stays as the tie decider for real disagreements, not the comparator.
+  if [ -n "$n1" ] && [ -n "$n2" ] && _so_agree "$a1" "$a2"; then
+    echo "== CONSENSUS ($m1 ~= $m2, semantically the same answer), no escalation =="
     printf '%s\n' "$a1"; return 0
   fi
   # If one model failed, use the other's answer directly (no point adjudicating against empty).
@@ -7954,7 +8440,7 @@ delegate_cxnative() {
   local iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || iso=(--ignore-user-config)
   local rc=0
   codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
-  record_ledger codex-native "$id" "$ttier" "$tier" "$task"
+  record_ledger codex-native "$id" "$ttier" "$tier" "$task" "0.000000" cx
   if [ "${OSRC_STREAM:-0}" != "1" ]; then
     local ql; ql="$(_codex_quota_line 2>/dev/null)"
     printf '>>> [receipt] %s.%s\n' "$(_lane_cost_disclosure cx)" "${ql:+ $ql}" >&2
@@ -8080,13 +8566,13 @@ delegate_ccnative() {
   if [ "${OSRC_STREAM:-0}" = "1" ]; then
     # bg/stream path: stream-json carries modelUsage (verify from the captured out.log downstream).
     "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
-    record_ledger claude-native "$id" "$ttier" "$tier" "$task"
+    record_ledger claude-native "$id" "$ttier" "$tier" "$task" "0.000000" cc
   else
     # foreground: capture JSON, print the result text, then VERIFY the real model from modelUsage.
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.ccnative.$$.json"
     local old_umask; old_umask="$(umask)"; umask 077
     "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
-    record_ledger claude-native "$id" "$ttier" "$tier" "$task"
+    record_ledger claude-native "$id" "$ttier" "$tier" "$task" "0.000000" cc
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
     chmod 600 "$tmpj" 2>/dev/null || true
@@ -8179,7 +8665,7 @@ delegate_gmnative() {
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
     fi
     rm -f "$_aerr" 2>/dev/null || true
-    record_ledger antigravity-agy "$atok" "$ttier" "$tier" "$task"
+    record_ledger antigravity-agy "$atok" "$ttier" "$tier" "$task" "0.000000" gm
     printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gm)" >&2
     return "$rc"
   fi
@@ -8204,7 +8690,7 @@ delegate_gmnative() {
   local gmcp=()
   [ "${OSRC_GEMINI_USER_MCP:-0}" = "1" ] || gmcp=(--allowed-mcp-server-names __none__)
   gemini -p "$wrapped" "${gflag[@]}" "${gmcp[@]+"${gmcp[@]}"}" "${ofmt[@]}" --model "$id" || rc=$?
-  record_ledger gemini "$id" "$ttier" "$tier" "$task"
+  record_ledger gemini "$id" "$ttier" "$tier" "$task" "$(_fg_run_cost gi 0 "")" gi
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gemini)" >&2
   return "$rc"
 }
@@ -8282,12 +8768,12 @@ delegate_claudex() {
   local rc=0
   if [ "${OSRC_STREAM:-0}" = "1" ]; then
     "${clean[@]}" claude -p --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
-    record_ledger claudex "$id" "$ttier" "$tier" "$task"
+    record_ledger claudex "$id" "$ttier" "$tier" "$task" "0.000000" claudex
   else
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.claudex.$$.json"
     local old_umask; old_umask="$(umask)"; umask 077
     "${clean[@]}" claude -p --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
-    record_ledger claudex "$id" "$ttier" "$tier" "$task"
+    record_ledger claudex "$id" "$ttier" "$tier" "$task" "0.000000" claudex
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
     rm -f "$tmpj"; umask "$old_umask"
@@ -8341,7 +8827,7 @@ delegate_droid() {
   _tier_banner "droid (Factory)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure droid)"
   local rc=0
   droid exec ${mflag[@]+"${mflag[@]}"} ${aflag[@]+"${aflag[@]}"} ${eff[@]+"${eff[@]}"} -o text "$wrapped" || rc=$?
-  record_ledger droid "$ledger_model" "$ttier" "$tier" "$task"
+  record_ledger droid "$ledger_model" "$ttier" "$tier" "$task" "$(_fg_run_cost droid 0 "")" droid
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure droid)" >&2
   return "$rc"
 }
@@ -8371,7 +8857,7 @@ delegate_cursor() {
   _tier_banner "cursor-agent" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cursor)"
   local rc=0
   "$cur" -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${fflag[@]+"${fflag[@]}"} --trust --output-format text || rc=$?
-  record_ledger cursor "${MODEL:-cursor-default}" "$ttier" "$tier" "$task"
+  record_ledger cursor "${MODEL:-cursor-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost cursor 0 "")" cursor
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure cursor)" >&2
   return "$rc"
 }
@@ -8418,9 +8904,10 @@ delegate_hermes() {
   local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
   local wrapped; wrapped="$(_build_prompt "${MODEL:-hermes}" "$task" "$ttier")"
   _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
+  local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for the Hermes receipt lookup
   local rc=0
   hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
-  record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task"
+  record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost hermes "$_fg_launch" "")" hermes
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"
 }
@@ -8462,7 +8949,12 @@ delegate_warp() {
   local mflag=()
   if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
     id="$(_lane_model_for warp "$id")"; model_key="$id"; ledger_model="$id"
-    _validate_model_token "$id"; mflag=(--model "$id")
+    _validate_model_token "$id"
+    # live-catalog gate for the Warp lane. Validate the resolved id against `oz model list`
+    # (cached, short TTL) before dispatch. OSRC_CATALOG_VALIDATE=0 skips. A fetch failure is
+    # non-fatal (soft-warn + let oz reject at launch).
+    _catalog_validate warp "$id"
+    mflag=(--model "$id")
   else id="(warp default/configured)"; fi
   [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: oz agent run has no effort flag; folded into the prompt)\n' "$EFFORT" >&2
   local ttier; ttier="$(resolve_tier "$model_key" "${TTIER:-}")" || ttier="capable"
@@ -8470,7 +8962,7 @@ delegate_warp() {
   _tier_banner "warp (Oz agent)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure warp)"
   local rc=0
   oz agent run -p "$wrapped" ${mflag[@]+"${mflag[@]}"} ${hflag[@]+"${hflag[@]}"} ${pflag[@]+"${pflag[@]}"} -C "$PWD" --output-format text || rc=$?
-  record_ledger warp "$ledger_model" "$ttier" "$tier" "$task"
+  record_ledger warp "$ledger_model" "$ttier" "$tier" "$task" "$(_fg_run_cost warp 0 "")" warp
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure warp)" >&2
   return "$rc"
 }
@@ -9116,6 +9608,11 @@ _cloud_disclose() {
   printf '>>> [outsourcerer] CLOUD DISCLOSURE: delegating to a CLOUD lane (%s / %s).\n' "$lane" "$model" >&2
   printf '>>>   destination : a third-party API over the network — repo content LEAVES this machine.\n' >&2
   printf '>>>   readable    : this working dir (%s) + any --with files you passed.\n' "$cwd" >&2
+  # Kill the recurring misread: "content leaves the machine" is a PRIVACY disclosure, NOT a claim
+  # that the delegate works on a remote copy. The delegate runs with THIS directory as its CWD and
+  # reads AND EDITS files here IN PLACE. A cloud lane does NOT need you to push, commit, or clone
+  # anything for it to work on local files — just launch from the dir (or a worktree) you want edited.
+  printf '>>>   local edits : the delegate edits files in THIS dir in place — no push/commit/clone needed for a cloud lane to work on local files.\n' >&2
   # Some agent CLIs additionally pull "always-on" rule files from $HOME and prepend them to every
   # session. That is outside the working dir, so the line above would otherwise be a promise this gate
   # cannot keep. Naming it matters twice over: those files leave the machine, and because they are
@@ -9192,6 +9689,7 @@ delegate_cc() {
   local old_umask; old_umask="$(umask)"; umask 077
   cap="$OSRC_HOME/.ccerr-$$"
   local last_transport=0
+  local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for fg cost resolution
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
     wrapped="$(_build_prompt "$m" "$prompt" "")"
@@ -9216,7 +9714,7 @@ delegate_cc() {
     "${envp[@]}" claude -p ${bare[@]+"${bare[@]}"} ${sfx[@]+"${sfx[@]}"} ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" 2>&1 | tee "$cap"
     rc=${PIPESTATUS[0]}
     chmod 600 "$cap" 2>/dev/null || true
-    if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt"; last_transport=0; break; fi
+    if [ "$rc" -eq 0 ]; then record_ledger cc "$m" "$ttier" "$tier" "$prompt" "$(_fg_run_cost or "$_fg_launch" "$cap")" or; last_transport=0; break; fi
     _or_model_withdrawn "$cap" "$m" || true
     # Only escalate on transport/infra failures; task failures (red tests, max-turns, etc.) stop here.
     if _is_transport_failure "$(cat "$cap" 2>/dev/null)" "$rc"; then
@@ -9642,6 +10140,7 @@ delegate_codex() {
   { [ -d "$capdir" ] && [ -w "$capdir" ]; } || die "delegate_codex: capture dir not writable: $capdir — refusing (cannot capture output / classify transport failures reliably). Set OSRC_JOB_DIR/OSRC_HOME to a writable path."
   local cap="$capdir/.cxcap.$$"
   local m rc=1 ttier wrapped healed=0
+  local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for fg cost resolution
   local _or_iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _or_iso=(--ignore-user-config)
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
@@ -9660,7 +10159,7 @@ delegate_codex() {
          -c 'model_providers.openrouter.wire_api="responses"' \
          -m "$m" "$wrapped" 2>&1 | tee "$cap"
     rc=${PIPESTATUS[0]}
-    if [ "$rc" -eq 0 ]; then record_ledger codex "$m" "$ttier" "$tier" "$prompt"; break; fi
+    if [ "$rc" -eq 0 ]; then record_ledger codex "$m" "$ttier" "$tier" "$prompt" "$(_fg_run_cost or "$_fg_launch" "$cap")" or; break; fi
     if _is_tooltype_400 "$cap"; then
       # codex->cc drops the Codex OS sandbox (cc has none). Gate this downgrade exactly like
       # acceptEdits->bypassPermissions: explicit --allow-downgrade / OSRC_ALLOW_DOWNGRADE=1.
@@ -9792,6 +10291,26 @@ _fallback_shortlist() {
   fi
   ( OSRC_BENCH_JSON="$bj" cmd_advise --json "$1" 2>/dev/null ) \
     | jq -r '.shortlist[]? | [.alias, .model, .lane] | join("|")' 2>/dev/null
+  return 0
+}
+
+# _advise_pick_model <task> -> "alias<TAB>model<TAB>lane<TAB>reason" from cmd_advise's recommendation,
+# WITHOUT a network refresh. Mirrors _fallback_shortlist's cache pinning: if the benchmark cache is
+# absent, pin an empty placeholder so cmd_advise's `[ ! -f ] -> refresh_benchmarks` arm NEVER fires
+# (a refresh could hang a non-interactive run on slow/unreachable network, defeating the gate).
+# Empty output on any failure -> the caller falls back to the provider default unchanged.
+_advise_pick_model() {
+  have jq || return 0
+  local bj="$OSRC_BENCH_JSON"
+  if [ ! -f "$bj" ]; then
+    bj="$OSRC_HOME/.bench.none.json"
+    ( umask 077; : > "$bj" ) 2>/dev/null || return 0
+  fi
+  local out
+  out="$(OSRC_BENCH_JSON="$bj" cmd_advise --json "$1" 2>/dev/null)" || return 0
+  [ -n "$out" ] || return 0
+  printf '%s' "$out" \
+    | jq -r '[.recommendation.alias, .recommendation.model, .recommendation.lane, .recommendation.reason] | @tsv' 2>/dev/null
   return 0
 }
 
@@ -10027,6 +10546,7 @@ route_delegate() {
     esac
   done
   local _fb_tried="" _fb_used=1 _fb_cands="" _fb_loaded=0 _fb_max
+  local _adv_done=0   # auto-advise runs at most once per route_delegate call
   _fb_max="$(_fallback_max_attempts)"
   while :; do
 
@@ -10147,6 +10667,35 @@ route_delegate() {
     esac
   else
     # no explicit -m (use provider default / chain) OR unknown id: route by --provider.
+    # (auto-advise): when the caller pinned NO model, consult cmd_advise to pick one from the
+    # task text instead of silently falling back to the provider default. Gated to interactive runs
+    # (a TTY on stdin+stdout) or OSRC_ADVISE=1 so a piped/CI run NEVER blocks on advise; --no-advise
+    # / OSRC_NO_ADVISE=1 opts out entirely. advise is cache-pinned (_advise_pick_model) so it cannot
+    # hit the network and hang. On success we inject `-m <alias>` into ARGV and re-enter the loop so
+    # the recommended model flows through the SAME alias-resolution + lane-routing as an explicit -m
+    # (incl. dual-lane reroute and catalog validation). A failure/empty result is non-fatal: we just
+    # proceed with the provider default below.
+    if [ "$MODEL_EXPLICIT" != "1" ] && [ "${PROVIDER_EXPLICIT:-0}" != "1" ] && [ "$_adv_done" = "0" ] && [ "${OSRC_NO_ADVISE:-0}" != "1" ] \
+       && { { [ -t 0 ] && [ -t 1 ]; } || [ "${OSRC_ADVISE:-0}" = "1" ]; }; then
+      _adv_done=1
+      local _adv_alias _adv_model _adv_lane _adv_reason _adv_out
+      _adv_out="$(_advise_pick_model "${REST[*]:-}")"
+      if [ -n "$_adv_out" ]; then
+        _adv_alias="${_adv_out%%$'\t'*}"; _adv_out="${_adv_out#*$'\t'}"
+        _adv_model="${_adv_out%%$'\t'*}"; _adv_out="${_adv_out#*$'\t'}"
+        _adv_lane="${_adv_out%%$'\t'*}"; _adv_reason="${_adv_out#*$'\t'}"
+        if [ -n "$_adv_alias" ]; then
+          printf '>>> [advise] picked %s because %s\n' "$_adv_alias" "${_adv_reason:-no reason returned}" >&2
+          # Rebuild argv: pin the advised alias ahead of the caller's flags so _consume_flags sees -m.
+          # Keep the original task text and any tier/effort/with flags verbatim; drop nothing else.
+          # the expansion MUST be inside the array literal. `local arr=(...) w1 w2`
+          # treats trailing words as more local var NAMES, silently dropping the task + flags.
+          local _adv_new=(-m "$_adv_alias" ${ARGV[@]+"${ARGV[@]}"})
+          ARGV=("${_adv_new[@]}")
+          continue   # re-enter the loop; MODEL_EXPLICIT becomes 1, so advise won't re-fire
+        fi
+      fi
+    fi
     case "$PROVIDER" in
       devin) disp=devin ;;
       cc)    disp=ccor ;;
@@ -12034,6 +12583,7 @@ cmd_loop() {
       done
       return 0 ;;
     verify) ;;
+    escalate) cmd_loop_escalate "$@"; return $? ;;
     resume)
       # A loop that stopped without converging still holds everything needed to continue: the task,
       # the check, and the accumulated failure feedback. Restarting from attempt 1 throws that away and
@@ -12049,13 +12599,20 @@ cmd_loop() {
         success) die "loop resume: '$lid' already succeeded; refusing to rerun a successful loop" ;;
         blocked|max_turns|max_time) ;;
         *) die "loop resume: '$lid' is not a resumable terminal loop (state: $(cat "$ldir/state" 2>/dev/null || echo '?'))" ;;
-      esac ;;
-    ''|-h|--help|help) die "loop: the built-in shapes are 'verify' and 'resume'. Usage:
+      esac
+      # An escalate loop's rung position and per-tier stall budget are not saved, so resuming one
+      # would silently grade a fresh ladder against old feedback. Refuse, loudly, with the fix.
+      grep -qx 'shape: escalate' "$ldir/meta" 2>/dev/null &&
+        die "loop resume: '$lid' is an escalate loop and those are not resumable — start a fresh one (the cheap rung makes that inexpensive): loop escalate --check \"<cmd>\" \"<task>\"" ;;
+    ''|-h|--help|help) die "loop: the built-in shapes are 'verify', 'escalate' and 'resume'. Usage:
   loop verify -m <model> --check \"<cmd>\" [--max N] [--verb edit|yolo] \"<task>\"
+  loop escalate [-m <cheap>] [--ladder \"m1,m2,m3\"] --check \"<cmd>\" [--max N] [--per-tier R] \"<task>\"
   loop resume <loop-id> [--max N]
 
 Which loop do you want?
   a machine can verify it (tests/lint/build), one known target  -> loop verify   (this one)
+  a machine can verify it; try the CHEAP model first and pay    -> loop escalate (built in:
+    for a pricier tier only when the check fails below            cheap -> capable -> frontier)
   continue a stopped loop using its saved feedback              -> loop resume
   a machine can verify it, but you do not know how much work    -> sweep         (recipe)
   no checker, but you can compare candidates                    -> best-of-N     (recipe)
@@ -12063,7 +12620,7 @@ Which loop do you want?
   the PLAN is the risky part, not the code                      -> council-build (recipe)
 If nothing can verify the result, do not loop at all — delegate once and read it yourself.
 Recipes are composed from the existing verbs, not a workflow engine: see references/loops.md." ;;
-    *) die "loop: unknown shape '$shape' (only 'verify' and 'resume' are built in; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
+    *) die "loop: unknown shape '$shape' (the built-ins are 'verify', 'escalate' and 'resume'; sweep/best-of-N/council-build are recipes in references/loops.md)." ;;
   esac
   # The CHECK is the goal; these are runaway guards, not targets. The loop ends the moment the check
   # passes, so a cap only ever fires when the work is NOT converging. A round count alone is a poor
@@ -12300,6 +12857,274 @@ $feedback"
   case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
+# ==========================================================================
+# loop escalate -- the cheap->expensive loop shape. loop verify spends ONE model's price on every
+# attempt; escalate spends the CHEAPEST rung's price until the external check proves that rung
+# cannot do the job, and only then pays for the rung above. When the cheap model passes, the
+# expensive ones never run at all — that non-event is the entire saving, so it is reported as
+# loudly as a spend.
+# ==========================================================================
+# _escalate_tier_rank <tier> -> escalation-worthiness rank (higher = the pricier last resort).
+# The ladder climbs the model table's CAPABILITY classes: budget (genuinely small) < mid (solid
+# mid) < capable (frontier-capability at budget price) < frontier (premium flagship). Unknown tiers
+# rank 0, so a rung the table does not know can only ever sit at the bottom of a ladder, never
+# masquerade as an upgrade.
+_escalate_tier_rank() {
+  case "$1" in budget) echo 1 ;; mid) echo 2 ;; capable) echo 3 ;; frontier) echo 4 ;; *) echo 0 ;; esac
+}
+
+# _escalate_ladder [ladder-csv] [start-model] -> the rungs, one per line, cheapest first.
+# Precedence: an explicit --ladder wins whole; -m pins the FIRST rung and keeps the default tail
+# above it (exact duplicate rungs dropped); otherwise OSRC_ESCALATE_LADDER, else the built-in
+# default haiku -> glm-5.2 -> fable (budget -> capable -> frontier, each rung a real step up in
+# price class, each on a subscription/default lane).
+_escalate_ladder() {
+  local lad="${1:-}" m="${2:-}"
+  if [ -z "$lad" ]; then
+    if [ -n "$m" ]; then lad="$m,${OSRC_ESCALATE_LADDER:-glm-5.2,fable}"
+    else lad="${OSRC_ESCALATE_LADDER:-haiku,glm-5.2,fable}"; fi
+  fi
+  printf '%s\n' "$lad" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' | awk '!seen[$0]++'
+}
+
+# _escalate_ladder_report [ladder-csv] [start-model] -> "rung<TAB>model<TAB>id<TAB>lane<TAB>tier"
+# per rung, cheapest first. Validates EVERY rung against the model table before anything runs:
+# discovering a typo'd rung 3 only after paying for rungs 1-2 would bill the bottom rungs for the
+# top rung's mistake, so an unknown rung is a fatal error HERE, not a mid-loop surprise.
+_escalate_ladder_report() {
+  local _lad _r _row _id _lane _tier _i=0
+  _lad="$(_escalate_ladder "${1:-}" "${2:-}")"
+  [ -n "$_lad" ] || die "loop escalate: the ladder is empty"
+  while IFS= read -r _r; do
+    _i=$(( _i + 1 ))
+    _row="$(resolve_model_row "$_r")"
+    [ -n "$_row" ] || die "loop escalate: ladder rung $_i '$_r' is not a known model (run \`outsourcerer models\` for the live list). Every rung is validated BEFORE anything runs, so a typo at the top can never bill the bottom."
+    _id="${_row%%|*}"; _row="${_row#*|}"; _lane="${_row%%|*}"; _tier="${_row##*|}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$_i" "$_r" "$_id" "$_lane" "$_tier"
+  done <<EOF
+$_lad
+EOF
+}
+
+# cmd_loop_escalate -- bounded loop, cheap->expensive. Same contract as `loop verify`: the EXTERNAL
+# --check is the judge and the goal, --max/--max-minutes are runaway guards rather than targets,
+# the model never marks its own homework, and the loop ends in exactly one honest state
+# (success | blocked | max_turns | max_time) with every attempt + check output on disk. The one
+# difference is WHICH model pays: attempts run on the cheapest ladder rung until the check fails
+# --per-tier times there (or the identical failure repeats, i.e. that model is stuck), and only
+# then does the next rung up get delegated, with the last failure carried across as feedback.
+# Receipts: every attempt appends one row to $ldir/receipts.tsv
+# (attempt<TAB>rung<TAB>model<TAB>tier<TAB>lane<TAB>pass|fail|blocked<TAB>seconds) and each
+# delegation records its own metered entry in the Tab as usual — so "the cheap tier passed and the
+# expensive one never ran" is a visible fact, not an assumption.
+cmd_loop_escalate() {
+  local ladder_arg="" model="" check="" max="${OSRC_LOOP_MAX:-6}" maxmin="${OSRC_LOOP_MAX_MINUTES:-0}"
+  local pertier="${OSRC_ESCALATE_PER_TIER:-2}" verb=edit task=""
+  while [ $# -gt 0 ]; do case "$1" in
+    -m|--model)  [ -n "${2:-}" ] || die "loop escalate: -m needs a model"; model="$2"; shift 2 ;;
+    --ladder)    [ -n "${2:-}" ] || die "loop escalate: --ladder needs a comma-separated model list, cheapest first"; ladder_arg="$2"; shift 2 ;;
+    --check)     [ -n "${2:-}" ] || die "loop escalate: --check needs a command"; check="$2"; shift 2 ;;
+    --max)       [ -n "${2:-}" ] || die "loop escalate: --max needs a number"; max="$2"; shift 2 ;;
+    --max-minutes) [ -n "${2:-}" ] || die "loop escalate: --max-minutes needs a number"; maxmin="$2"; shift 2 ;;
+    --per-tier)  [ -n "${2:-}" ] || die "loop escalate: --per-tier needs a number"; pertier="$2"; shift 2 ;;
+    --verb)      [ -n "${2:-}" ] || die "loop escalate: --verb needs edit|yolo"; verb="$2"; shift 2 ;;
+    --)          shift; task="$*"; break ;;
+    -*)          die "loop escalate: unknown flag '$1'" ;;
+    *)           task="$1"; shift ;;
+  esac; done
+  [ -n "$task" ]  || die "loop escalate needs a task, e.g.: loop escalate --check \"npm test\" \"make the auth tests pass\""
+  [ -n "$check" ] || die "loop escalate needs a --check command. External verification is MANDATORY — the check is the only thing that makes the cheap rung safe to trust, and the only thing that justifies paying for the next one."
+  case "$max" in ''|*[!0-9]*) die "loop escalate: --max must be a positive integer" ;; esac
+  [ "$max" -ge 1 ] 2>/dev/null || die "loop escalate: --max must be >= 1"
+  case "$maxmin" in ''|*[!0-9.]*|*.*.*) die "loop escalate: --max-minutes must be a number of minutes, e.g. 10 or 0.5 (0 = no time bound)" ;; esac
+  case "$pertier" in ''|*[!0-9]*) die "loop escalate: --per-tier must be a positive integer" ;; esac
+  [ "$pertier" -ge 1 ] 2>/dev/null || die "loop escalate: --per-tier must be >= 1"
+  case "$verb" in edit|yolo) ;; *) die "loop escalate: --verb must be edit or yolo (the loop mutates files to fix them)" ;; esac
+  local _maxsec; _maxsec="$(awk -v m="$maxmin" 'BEGIN{printf "%d", m*60}')"
+
+  # Resolve and validate the WHOLE ladder before spending anything on rung 1.
+  # The `|| die` is load-bearing, not decorative: _escalate_ladder_report's own `die` runs inside
+  # this command substitution, so its `exit 1` kills only the SUBSHELL. Without re-raising here the
+  # parent would sail on with a truncated ladder and fail later with the wrong message ("needs at
+  # least 2 rungs") instead of the real one ("rung 2 'nope-9x' is not a known model").
+  local _rep; _rep="$(_escalate_ladder_report "$ladder_arg" "$model")" \
+    || die "loop escalate: ladder validation failed (the rung is named above) — nothing was delegated."
+  local RUNGS=() RIDS=() RLANES=() RTIERS=()
+  local _tab _rn _rm _rid _rl _rt; _tab="$(printf '\t')"
+  while IFS="$_tab" read -r _rn _rm _rid _rl _rt; do
+    RUNGS+=("$_rm"); RIDS+=("$_rid"); RLANES+=("$_rl"); RTIERS+=("$_rt")
+  done <<EOF
+$_rep
+EOF
+  local nrung=${#RUNGS[@]}
+  [ "$nrung" -ge 2 ] || die "loop escalate: the ladder needs at least 2 rungs (a cheap one and a pricier tier above it) — with one model, use loop verify"
+  [ "$nrung" -le 4 ] || die "loop escalate: $nrung rungs is a spend plan, not an escalation ladder — keep it to 4 or fewer (cheap -> capable -> frontier is usually 3)"
+  # A ladder that climbs DOWN in capability is almost certainly a mistake: warn loudly, but still
+  # run — the check is the real safety net and the user may know something the table does not.
+  local _i=1 _prank _rank
+  _prank="$(_escalate_tier_rank "${RTIERS[0]}")"
+  while [ "$_i" -lt "$nrung" ]; do
+    _rank="$(_escalate_tier_rank "${RTIERS[$_i]}")"
+    if [ "$_rank" -lt "$_prank" ]; then
+      echo ">>> [loop escalate] warning: rung $(( _i + 1 )) (${RUNGS[$_i]}, tier ${RTIERS[$_i]}) is a step DOWN from rung $_i (${RUNGS[$(( _i - 1 ))]}, tier ${RTIERS[$(( _i - 1 ))]}) — an escalation ladder should climb; check --ladder" >&2
+    fi
+    _prank="$_rank"; _i=$(( _i + 1 ))
+  done
+
+  local lid ldir _ladcsv
+  lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
+  _mkdir_private "$ldir" || die "loop escalate: cannot create loop dir under $OSRC_HOME/loops"
+  _ladcsv="$(printf '%s,' "${RUNGS[@]}")"; _ladcsv="${_ladcsv%,}"
+  { umask 077; printf 'shape: escalate\ntask: %s\ncheck: %s\nladder: %s\nmax: %s\nmax-minutes: %s\nper-tier: %s\nverb: %s\nstarted: %s\n' \
+      "$task" "$check" "$_ladcsv" "$max" "$maxmin" "$pertier" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || die "loop escalate: cannot write metadata"
+
+  local _t0; _t0=$(date +%s)
+  echo "[loop escalate] $lid — goal: \`$check\` passes on the CHEAPEST rung that can do it. Ladder: $_ladcsv. Guards: $max attempt(s) total, $pertier failure(s) per tier$( [ "$_maxsec" -gt 0 ] && printf ', %s min' "$maxmin" )." >&2
+  # Live state on disk from the FIRST second, same as loop verify: a loop you cannot observe
+  # mid-run is a loop you cannot steer or stop.
+  printf 'running\n' > "$ldir/state" 2>/dev/null || die "loop escalate: cannot write state"
+
+  local attempt=1 last_attempt=0 rung=0 fails_on_rung=0 feedback="" prev_fail="" have_prev=0 state="max_turns"
+  while [ "$attempt" -le "$max" ] && [ "$rung" -lt "$nrung" ]; do
+    last_attempt="$attempt"
+    printf '%s\n' "$attempt" > "$ldir/attempt" 2>/dev/null || die "loop escalate: cannot write attempt"
+    printf '%s\n' "$(( rung + 1 ))" > "$ldir/rung" 2>/dev/null || die "loop escalate: cannot write rung"
+    echo "OSRC::PROGRESS $attempt/$max tier $(( rung + 1 ))/$nrung (${RUNGS[$rung]}) delegate+verify" >&2
+    local aprompt="$task"
+    [ -n "$feedback" ] && aprompt="$task
+
+The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
+$feedback"
+    # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so
+    # the check would grade files that have not been written yet — and on THIS loop a false failure
+    # would also spend the next rung's money. The loop is its own supervisor; it always waits.
+    local _a0 _ael; _a0=$(date +%s)
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    _ael=$(( $(date +%s) - _a0 ))
+    local _skip_check=0 _result=fail cout="" crc=0
+    if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
+      state="blocked"; _skip_check=1; _result=blocked
+      echo "[loop escalate] $lid: attempt $attempt detached to the background, so the acceptance check would grade work that has not happened yet. Refusing to grade. Inspect $ldir/attempt-$attempt.out." >&2
+    elif [ "$(_last_marker "$ldir/attempt-$attempt.out")" = "OSRC::BLOCKED" ] || \
+         [ "$(_last_marker "$ldir/attempt-$attempt.out")" = "OSRC::NEED_INPUT" ]; then
+      # A human-needed block is not a capability gap: a pricier model hits the SAME wall, so there
+      # is nothing to escalate. Surface it, same as loop verify.
+      state="blocked"; _skip_check=1; _result=blocked
+      echo "[loop escalate] $lid: delegate reported BLOCKED on attempt $attempt (tier $(( rung + 1 )), ${RUNGS[$rung]}) — stopping for a human." >&2
+    fi
+    if [ "$_skip_check" = "0" ]; then
+      # EXTERNAL verification, identical to loop verify: the model never judges itself, and the
+      # check runs under a wall-clock cap clamped to the time left in --max-minutes, so a hung
+      # check can never eat the whole run.
+      local check_timeout remaining
+      if [ -n "${OSRC_CHECK_TIMEOUT:-}" ]; then
+        case "$OSRC_CHECK_TIMEOUT" in ''|*[!0-9]*) die "OSRC_CHECK_TIMEOUT must be a positive whole number of seconds" ;; esac
+        [ "$OSRC_CHECK_TIMEOUT" -ge 1 ] 2>/dev/null || die "OSRC_CHECK_TIMEOUT must be >= 1"
+        check_timeout="$OSRC_CHECK_TIMEOUT"
+      else
+        check_timeout="${OSRC_CHECK_TIMEOUT_DEFAULT:-300}"
+        if [ "$_maxsec" -gt 0 ]; then
+          remaining=$(( _maxsec - ( $(date +%s) - _t0 ) ))
+          [ "$remaining" -ge 1 ] || remaining=1
+          [ "$remaining" -lt "$check_timeout" ] && check_timeout="$remaining"
+        fi
+      fi
+      _loop_check "$check_timeout" "$check" "$ldir/check-$attempt.out"; crc=$?
+      cout="$(cat "$ldir/check-$attempt.out" 2>/dev/null)"
+      if [ "$crc" -eq 124 ]; then
+        printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || die "loop escalate: cannot write failure state"
+        echo "[loop escalate] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
+      else
+        # Compute the failure summary first: grep legitimately finds nothing when the check passed
+        # (empty/clean output), and under `set -o pipefail` that no-match exit-1 would otherwise
+        # trip the write's `|| die`. Only an actual write failure should be fatal.
+        local _lastfail; _lastfail="$(printf '%s' "$cout" | grep -aiE 'fail|error|assert' | head -1)"
+        printf '%s\n' "$_lastfail" > "$ldir/last_fail" 2>/dev/null || die "loop escalate: cannot write failure state"
+      fi
+      printf '%s' "$cout" > "$ldir/feedback" 2>/dev/null || die "loop escalate: cannot write feedback"
+      [ "$crc" -eq 0 ] && _result=pass
+    fi
+    # Per-attempt receipt: which tier ran, on which model and lane, pass/fail, seconds. The
+    # delegation itself records its metered cost to the Tab; this row is the loop-level view that
+    # makes the SAVING visible — a run that ends on tier 1 shows one row and the pricier rungs
+    # nowhere in it.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$attempt" "$(( rung + 1 ))" "${RUNGS[$rung]}" "${RTIERS[$rung]}" "${RLANES[$rung]}" "$_result" "$_ael" >> "$ldir/receipts.tsv" 2>/dev/null || die "loop escalate: cannot write receipt"
+    printf '>>> [loop escalate] receipt: attempt %s · tier %s/%s %s (%s lane) · %s in %ss · %s\n' \
+      "$attempt" "$(( rung + 1 ))" "$nrung" "${RUNGS[$rung]}" "${RLANES[$rung]}" \
+      "$(printf '%s' "$_result" | tr 'a-z' 'A-Z')" "$_ael" "$(_lane_cost_disclosure "${RLANES[$rung]}")" >&2
+    [ "$_result" = "blocked" ] && break
+    if [ "$crc" -eq 0 ]; then
+      state="success"
+      echo "[loop escalate] $lid: acceptance check PASSED on attempt $attempt (tier $(( rung + 1 ))/$nrung, ${RUNGS[$rung]})." >&2
+      break
+    fi
+    # Failed. Two escalation triggers, both meaning "THIS tier is not converging":
+    #   stall  — the identical check failure twice on this rung (timestamps/run-ids normalized away
+    #            by _check_signature, same as loop verify): the feedback is not moving this model.
+    #   budget — --per-tier failures spent on this rung.
+    # The response is ESCALATION, not blocked, because the loop still has untried capability above;
+    # only the last rung failing turns it into blocked. The newest check output always becomes the
+    # feedback for whoever runs next, so a fresh rung inherits exactly where the last one got to.
+    local csig _esc_why=""; csig="$(printf '%s' "$cout" | _check_signature)"
+    if [ "$have_prev" = "1" ] && [ "$csig" = "$prev_fail" ]; then
+      _esc_why="the check reported the same failures twice on tier $(( rung + 1 )) (${RUNGS[$rung]}) — this model is stuck"
+    fi
+    fails_on_rung=$(( fails_on_rung + 1 ))
+    if [ -z "$_esc_why" ] && [ "$fails_on_rung" -ge "$pertier" ]; then
+      _esc_why="$pertier failed attempt(s) on tier $(( rung + 1 )) (${RUNGS[$rung]})"
+    fi
+    feedback="$cout"
+    if [ -n "$_esc_why" ]; then
+      if [ $(( rung + 1 )) -lt "$nrung" ]; then
+        echo "[loop escalate] $lid: $_esc_why — escalating to tier $(( rung + 2 )) (${RUNGS[$(( rung + 1 ))]})." >&2
+        rung=$(( rung + 1 )); fails_on_rung=0; have_prev=0; prev_fail=""
+      else
+        state="blocked"
+        echo "[loop escalate] $lid: $_esc_why, and there is no rung left — every tier on the ladder failed the check. Stopping for a human. Inspect $ldir — the last check output shows how close the top rung got." >&2
+        break
+      fi
+    else
+      prev_fail="$csig"; have_prev=1
+    fi
+    # Time guard: checked BETWEEN attempts so a run in progress is never abandoned half-done.
+    if [ "$_maxsec" -gt 0 ] && [ $(( $(date +%s) - _t0 )) -ge "$_maxsec" ]; then
+      state="max_time"
+      echo "[loop escalate] $lid: hit the ${maxmin}-minute time bound after $attempt attempt(s), still failing on tier $(( rung + 1 )). Stopping. Inspect $ldir — the last check output shows how close it got." >&2
+      break
+    fi
+    attempt=$(( attempt + 1 ))
+  done
+  printf '%s\n' "$state" > "$ldir/state" 2>/dev/null || die "loop escalate: cannot write final state"
+
+  # The receipt tells the cost story per tier: what ran, what passed, and — the whole point — what
+  # NEVER ran. A cheap pass leaves the pricier rungs untouched; say so explicitly, because the
+  # saving is a non-event and non-events are invisible unless someone narrates them.
+  local _spent=$(( $(date +%s) - _t0 ))
+  if [ -f "$ldir/receipts.tsv" ]; then
+    echo ">>> [loop escalate] per-tier receipts ($ldir/receipts.tsv):" >&2
+    awk -F"$_tab" '{ n[$2]++; m[$2]=$3; t[$2]=$4; l[$2]=$5; if ($6=="pass") p[$2]=1 }
+      END { for (r in n) printf "%s\t%s\t%s\t%s\t%s\t%s\n", r, m[r], t[r], l[r], n[r], (r in p ? "pass" : "fail") }' "$ldir/receipts.tsv" | sort -n |
+    while IFS="$_tab" read -r _rn _rm _rt _rl _rc _rp; do
+      printf '>>>   tier %s: %s (%s, %s lane) — %s attempt(s), check %s · %s\n' \
+        "$_rn" "$_rm" "$_rt" "$_rl" "$_rc" "$_rp" "$(_lane_cost_disclosure "$_rl")" >&2
+    done
+  fi
+  local _top=0
+  [ -f "$ldir/receipts.tsv" ] && _top="$(awk -F"$_tab" '{ if ($2+0 > m) m=$2+0 } END { print m+0 }' "$ldir/receipts.tsv")"
+  case "$state" in
+    success)
+      if [ "$_top" -lt "$nrung" ]; then
+        printf '>>> [loop escalate] done in %sm%ss: the check passed on tier %s of %s — the pricier rung(s) never ran. That non-event is the saving.\n' "$(( _spent / 60 ))" "$(( _spent % 60 ))" "$_top" "$nrung" >&2
+      else
+        printf '>>> [loop escalate] done in %sm%ss: every rung was needed; the check passed only at the top of the ladder (tier %s of %s).\n' "$(( _spent / 60 ))" "$(( _spent % 60 ))" "$_top" "$nrung" >&2
+      fi ;;
+    *) printf '>>> [loop escalate] %s after %s attempt(s) over %sm%ss (reached tier %s of %s).\n' "$state" "$last_attempt" "$(( _spent / 60 ))" "$(( _spent % 60 ))" "$_top" "$nrung" >&2 ;;
+  esac
+  echo "[loop escalate] $lid final: $state  ·  attempts + check output + receipts in $ldir" >&2
+  echo "$state"
+  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
+}
+
 main() {
   # Mint this run's marker id once, and export it so the prompt the delegate receives and every
   # supervisor that grades its output agree on the same value. A detached bg job re-enters this
@@ -12341,6 +13166,11 @@ main() {
     __heartbeat-beacon) _heartbeat_beacon "$@" ;;          # internal: persistent fleet heartbeat leader
     __gencost) _or_gen_cost "$1"; echo ;;                 # internal test: real cost of one generation id
     __runcost) _or_run_cost "$1"; echo ;;                 # internal test: real cost of a bg out.log
+    __so-agree)                                           # internal test: semantic-compare two answer files
+      [ -f "${1:-}" ] && [ -f "${2:-}" ] || die "__so-agree needs two answer files"
+      if _so_agree "$(cat "$1")" "$(cat "$2")"; then echo agree; else echo disagree; exit 1; fi ;;
+    __escalate-ladder)                                    # internal test: resolve + validate an escalation ladder
+      _escalate_ladder_report "${1:-}" "" ;;
     doctor)   doctor "$@" ;;                               # health probe; `doctor --fix` also repairs dead parity links
     brief)    cmd_brief ;;                                 # session-start handshake: lanes + limits + conserve + mode
     mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
@@ -12356,7 +13186,7 @@ main() {
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
     fleet)       cmd_fleet "$@" ;;                         # unified managed + independent Claude Code fleet
     crew)        cmd_crew "$@" ;;                          # transactional write-swarm: fanout --worktree edit -> grade -> revert-or-promote
-    loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loop (loop verify); recipes in references/loops.md
+    loop)        cmd_loop "$@" ;;                          # bounded delegate->check->retry loops (loop verify | loop escalate); recipes in references/loops.md
     status)      cmd_status "$@" ;;                        # job table / one job's state
     classify)    cmd_classify "$@" ;;                       # post-hoc verdict: REUSE-OUTPUT | RETRY-DIFFERENT-LANE | REAL-FAIL
     explain)     cmd_explain "$@" ;;                        # diagnose a job's terminal state: state + reason + marker + verdict
