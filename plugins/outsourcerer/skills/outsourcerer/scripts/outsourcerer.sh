@@ -6112,14 +6112,25 @@ _supervise() {
   # answer "wrote something recently"; the exploring? guard needs "wrote anything at all, ever",
   # which requires a marker that is never moved.
   : > "$jd/.startmark" 2>/dev/null || true
-  local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
+  # research is READ-ONLY by design (deliverable is OUTPUT, not files), so it must NOT be held to
+  # the write-requirement exploring? guard — v0.8.2 exempted only the clear branch, leaving research
+  # still killable by the flip+kill arms below. Removing it here retires that false-kill entirely;
+  # research rides the same liveness path as run/explore (byte-growth stall-kill + devin-liveness +
+  # FS-progress + hard timeout, with the proper tier window).
+  local mutating=0; case "$verb" in edit|yolo) mutating=1 ;; esac
+  local _exploring_warned=0   # emit the exploring? WARN once per episode, not every poll (see clear/warn below)
   local nww="${OSRC_NOWRITE_WARN:-180}"
   local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
   # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0
+  local noinit="${OSRC_NOINIT_SECS:-300}" initialized=0
+  # Silence window for the no-init kill: a boot still emitting output within this window is alive and
+  # must not be reaped. Capped at noinit itself so a totally-silent boot (idle==age) still fires at the
+  # noinit deadline rather than waiting an extra idle-window — otherwise a small noinit lets the generic
+  # stall-kill pre-empt this arm and the reason/diagnostic would be wrong.
+  local _ni_idle="${OSRC_NOINIT_IDLE:-60}"; [ "$_ni_idle" -gt "$noinit" ] 2>/dev/null && _ni_idle="$noinit"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
@@ -6141,12 +6152,14 @@ _supervise() {
       grep -a -E 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$jd/out.log" 2>/dev/null | tail -1 > "$jd/progress"
       case "$(cat "$jd/status" 2>/dev/null)" in
         stalled?) echo running > "$jd/status" ;;
-        # A WRITE clears exploring? for edit/yolo (their deliverable IS a file write, so a write-free
-        # spiral must stay flagged). But `research` is a read/tool-exec verb whose deliverable is its
-        # OUTPUT, not a file — so for research, fresh output (we are inside the size>last_size branch)
-        # is real progress and clears the flag, exactly as a write would. Without this a healthy
-        # write-free research job stayed stuck on exploring? and was primed for the kill arm below.
-        exploring?) { [ "$verb" = "research" ] || _job_made_writes "$jd" "$_jcwd"; } && echo running > "$jd/status" ;;
+        # We are inside the size>last_size branch: the delegate just produced OUTPUT, which IS a sign
+        # of life. Clear exploring? back to running on output growth for ALL mutating verbs (edit/yolo),
+        # not only on a file write. This is the reported false-kill: a yolo/edit job doing legit
+        # read-only investigation before its first write was flagged exploring? and killed while output
+        # flowed. The real kill below still fires only when the job is BOTH write-free AND output-silent
+        # (idle >= nww_kill), so a genuine write-free spiral that goes quiet still dies. Reset the
+        # once-per-episode WARN flag so a later genuine stall re-warns.
+        exploring?) echo running > "$jd/status"; _exploring_warned=0 ;;
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
@@ -6155,9 +6168,14 @@ _supervise() {
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
     fi
-    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then
+    # A slow SessionStart cold-boot (large CLAUDE.md + memories + hooks) can run past noinit while
+    # STILL emitting boot output. Killing it there is a false-kill of a demonstrably-alive process.
+    # Gate the kill on log-silence too: only reap a pre-init job that has ALSO gone quiet for
+    # OSRC_NOINIT_IDLE seconds. A boot that keeps bleeding output lives until it either produces model
+    # output (initialized=1) or hits the hard timeout (the true upper bound). idle is computed above.
+    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ] && [ "$idle" -ge "$_ni_idle" ]; then
       local _noinit_reason
-      _noinit_reason="no-init: delegate never started within ${noinit}s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
+      _noinit_reason="no-init: delegate never produced model output within ${noinit}s and its log went silent (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
       echo wedged > "$jd/status"
       printf '%s\n' "$_noinit_reason" > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd"): $_noinit_reason" >&2
@@ -6166,7 +6184,10 @@ _supervise() {
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       _job_made_writes "$jd" "$_jcwd" || {
         echo "exploring?" > "$jd/status"
-        echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. It will be stopped after ${nww_kill}s with no writes and no output growth. Only an actual FILE WRITE clears this (progress output alone does not) — give it a tighter 'write file X now' target, or re-run read-only work under 'run'/'explore', which is not subject to this guard." >&2; }
+        # Warn ONCE per exploration episode. After the clear-on-output-growth fix above, status
+        # oscillates running<->exploring? every poll while output flows; without this flag the WARN
+        # would spam every ~10s for the whole run. The flag is reset when the clear branch fires.
+        [ "$_exploring_warned" = "0" ] && { echo "[outsourcerer] WARN job $(basename "$jd"): ${age}s on a mutating verb ($verb) with ZERO file writes — likely exploring, not producing. It will be stopped after ${nww_kill}s with no writes AND no output growth. A file write OR sustained output growth clears this — give it a tighter 'write file X now' target, or re-run read-only work under 'run'/'explore', which is not subject to this guard." >&2; _exploring_warned=1; }; }
     fi
     # Once marked exploring, a fresh output line buys the delegate another exploration window, but
     # neither reading nor an old warning can keep it alive forever. The same content check used for
