@@ -8948,20 +8948,19 @@ delegate_cxnative() {
   # which blocks the browser and any web fetch. But turning network ON for EVERY sandboxed job is an
   # exfiltration regression (a prompt-injected job could POST readable workspace data out), so network
   # stays OFF by default and is enabled only by an EXPLICIT opt-in:
-  #   OSRC_NET=1     -> enable network in the workspace-write sandbox (curl/fetch work; FS still scoped).
-  #   OSRC_BROWSER=1 -> network AND load the user's codex config so the browser tool/MCP is available
-  #                     (a real browser needs its MCP, which --ignore-user-config below otherwise strips).
-  # Browser mode is best driven from an interactive session (a headless job cannot answer an MCP OAuth
-  # prompt — the reason --ignore-user-config exists). Default (neither set) keeps full isolation.
-  local _net=0 _browser=0
+  #   OSRC_NET=1 / OSRC_BROWSER=1 -> enable network in the workspace-write sandbox (curl/fetch/web
+  #                     browsing work; FS writes still scoped to the workspace).
+  # A real interactive browser TOOL (MCP) additionally needs OSRC_CODEX_USER_CONFIG=1 — a SEPARATE,
+  # deliberate opt-in, because loading the user config is all-or-nothing and pulls in EVERY MCP server
+  # (see the iso guard below). Default (none set) keeps full network isolation.
+  local _net=0
   [ "${OSRC_NET:-0}" = "1" ] && _net=1
-  [ "${OSRC_BROWSER:-0}" = "1" ] && { _net=1; _browser=1; }
+  [ "${OSRC_BROWSER:-0}" = "1" ] && _net=1
   case "$tier" in
     accept-edits|autonomous)
       if [ "$_net" = "1" ]; then
         sflag+=(-c 'sandbox_workspace_write.network_access=true')
-        [ "$_browser" = "1" ] && posture="WORKSPACE-WRITE sandbox + network + browser config" \
-                              || posture="WORKSPACE-WRITE sandbox + network (OSRC_NET)"
+        posture="WORKSPACE-WRITE sandbox + network (OSRC_NET/OSRC_BROWSER)"
       fi ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
@@ -8979,10 +8978,13 @@ delegate_cxnative() {
   # surface; per `codex exec --help` auth still uses CODEX_HOME, so your ChatGPT-sub login (Sol/Terra/
   # Luna) keeps working. Verified live: luna answers PONG with the flag on. Escape hatch: set
   # OSRC_CODEX_USER_CONFIG=1 to deliberately ride your full live config (e.g. to reuse an MCP server).
-  # Browser mode (OSRC_BROWSER=1, sets _browser above) needs the user's codex config for the browser
-  # MCP/tool, so it does NOT pass --ignore-user-config. OSRC_CODEX_USER_CONFIG=1 forces the full config
-  # for any run. Otherwise stay isolated (drop user MCP servers to avoid a mid-run OAuth wedge).
-  local iso=(); { [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || [ "$_browser" = "1" ]; } || iso=(--ignore-user-config)
+  # SECURITY: OSRC_BROWSER only enables NETWORK (above). It must NOT auto-load the user config, because
+  # --ignore-user-config is all-or-nothing: dropping it loads EVERY user MCP server (incl. credential-
+  # backed ones) and ships them to the cloud delegate, re-introducing the OAuth-wedge this flag prevents.
+  # A real interactive browser TOOL needs its MCP, so that stays a deliberate, separate opt-in:
+  # OSRC_CODEX_USER_CONFIG=1 (which knowingly loads the full config). Network-based fetching/browsing
+  # works with OSRC_BROWSER/OSRC_NET alone.
+  local iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || iso=(--ignore-user-config)
   local rc=0
   codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
   record_ledger codex-native "$id" "$ttier" "$tier" "$task" "0.000000" cx
@@ -11352,7 +11354,7 @@ route_delegate() {
           else
             # DEFAULT: keep the OS sandbox (secure). It is READ + EXEC only — headless file writes are
             # blocked. Say so up front and point to the two ways to write, so a research job that needs to
-            # save output does not silently die at its first write the way the council jobs did.
+            # save output does not silently die at its first write.
             if [ "$(_posture_get devin autonomous 2>/dev/null)" = "restricted" ]; then
               _devin_autonomous_restricted_notice; return 3
             fi

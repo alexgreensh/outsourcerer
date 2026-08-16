@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_watchdog_orphan_cap.sh — two preexisting bugs surfaced by the council:
+# test_watchdog_orphan_cap.sh — two preexisting watchdog/dispatch bugs:
 #   FIX 7 (orphan): a LIVE delegate whose SUPERVISOR is dead is unguarded and never gets a terminal
 #     status; _reconcile_status must detect the dead-supervisor-live-orphan, reap the delegate, and
 #     mark the job interrupted instead of reporting it 'running' forever (which stalls fanout waiters).
@@ -70,7 +70,7 @@ else
   bad "cap recompute is not after a_prov resolution (aprov=$aprov_line cap=$cap_line)"
 fi
 
-# FIX 6 (model->lane, torture T3-HIGH): the cap must count a member whose MODEL resolves to the dv lane,
+# FIX 6 (model->lane): the cap must count a member whose MODEL resolves to the dv lane,
 # not only an explicit devin provider — else --route/frontmatter models bypass it. Prove the foundation:
 # resolve_model_row maps a glm alias to the dv lane, and the cap block resolves the model (not just prov).
 row="$(resolve_model_row glm-5.2 2>/dev/null)"; lane="${row#*|}"; lane="${lane%%|*}"
