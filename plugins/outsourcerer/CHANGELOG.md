@@ -2,6 +2,10 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## Unreleased
+
+- **New lane: TokenRouter (`--provider tokenrouter`).** TokenRouter (https://www.tokenrouter.com) is an OpenAI-compatible model gateway; the lane is a direct streaming call to the gateway's `/v1/chat/completions` (curl + jq, no extra install, no harness), keyed by `TOKENROUTER_API_KEY` in `~/.env` (single-key extraction, never `set -a`; the key rides a 0600 temp-file header via `_curl_with_auth`, never a process arg). `-m` is **REQUIRED** and passes through **verbatim** to the gateway's own catalog (their models, not a hardcoded list, and NO hardcoded default — the roster is the gateway's, discovered live). It is a CLOUD lane, so it flows through the same cloud-consent gate + secret-scan hard-block as every other cloud lane; streaming feeds the liveness watchdog, so it works under `bg`/`fanout` (the fanout preflight gates on the key AND a per-job model up front, so a missing key or model never mints phantom jobs). Wired into every provider list, the router cost-class + lane-map seams, the cloud gate, `doctor` (key presence + bounded liveness probe), `brief`, and the fallback machinery. **Cost honesty:** the roster and pricing are TokenRouter's and change; some models are a $0 promo RIGHT NOW, confirmed at RUNTIME by billing/quota errors (402/429), never by a hardcoded date or a static "free" claim — the Tab records the run as unmeasured cash. New conformance suite `test_tokenrouter_lane.sh` (static wiring + behavioral dispatch against a fake loopback gateway).
+
 ## 0.7.1
 
 - **Fix (Linux): `fleet` and session tracking no longer crash under bash 5.** `_session_registry_append` referenced an uninitialized local (`physical_cwd`) that only bash 3.2 (macOS) tolerated; on Linux bash under `set -u` it aborted the session-effort path. Initialized it so the session registry records correctly on every platform.

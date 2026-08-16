@@ -192,6 +192,37 @@ outsourcerer.sh --provider local run -m <model> "..."
 - **Tier**: classified by model name (a local `qwen2.5-coder`/`llama-4` reads as `capable`; a small
   `*-mini`/`*-lite` as `budget`). Local model quality varies wildly, so pass `--tier` to correct it.
 
+## TokenRouter lane (`--provider tokenrouter`) — OpenAI-compatible gateway
+
+`--provider tokenrouter` delegates through [TokenRouter](https://www.tokenrouter.com), an
+OpenAI-compatible model gateway, using the key in `TOKENROUTER_API_KEY` (`~/.env`, single-key
+extraction, never `set -a`). This is the "any OpenAI-compatible cloud gateway" lane: a direct
+streaming call to the gateway's `/v1/chat/completions` (curl + jq, no extra install, no harness).
+
+```
+outsourcerer.sh run --provider tokenrouter -m <gateway-model-id> "summarize these release notes"
+```
+
+- **`-m` is REQUIRED and passes through VERBATIM** to the gateway's own catalog; the alias table
+  never rewrites it. There is NO hardcoded default model — the roster is TokenRouter's, discovered
+  live, not ours. List it with
+  `curl -s -H "Authorization: Bearer ***" https://api.tokenrouter.com/v1/models`.
+- **It is a CLOUD lane**: the prompt LEAVES the machine, so it flows through the same cloud-consent
+  gate + secret-scan hard-block as every other cloud lane. Override the endpoint with
+  `OSRC_TOKENROUTER_URL` (default `https://api.tokenrouter.com/v1`).
+- **It is TEXT delegation** (same contract as the local lane's text path): the model reasons over the
+  prompt you hand it (inject files with `--with` or inline). It does NOT autonomously read the repo
+  or run tools. Reasoning models consume tokens on reasoning before visible content, so the timeout
+  is generous (`OSRC_TOKENROUTER_TIMEOUT`, default 900s).
+- **Streaming** feeds the liveness watchdog, so tokenrouter works under `bg` and `fanout` too.
+- **COST HONESTY (do not hardcode):** the roster and pricing are TokenRouter's and change. Some
+  models are a **$0 promo RIGHT NOW**; that is confirmed at RUNTIME by
+  billing/quota errors (402/429), never by a hardcoded date or a static "free" claim. The Tab records
+  the run as unmeasured cash (per-run gateway cost is not captured here); treat a $0 promo as a
+  runtime fact, not a promise.
+- **Auth:** add `TOKENROUTER_API_KEY=*** to `~/.env` (get a key: https://www.tokenrouter.com).
+  `doctor` reports key presence and runs a bounded liveness probe against the gateway's `/models`.
+
 ## Image generation, GPT-image preferred, backend AUTO-RESOLVED
 
 `image` is a **dedicated subcommand**, not a text-delegation lane, routing an image model through

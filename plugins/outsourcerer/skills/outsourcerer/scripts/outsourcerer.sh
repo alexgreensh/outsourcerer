@@ -93,6 +93,13 @@
 #                     keys in ~/.cline. The roster and pricing are cline's, not ours -- we do not pin them.
 #                     Posture is binary: --plan = read-only, default act mode auto-approves all tools
 #                     (no OS sandbox, no graded rung); reasoning effort maps to --thinking.
+#   tokenrouter       TokenRouter (https://www.tokenrouter.com), an OpenAI-compatible model gateway.
+#                     Engine lane: -m is REQUIRED and passes through VERBATIM to the gateway's own
+#                     catalog (no hardcoded default model -- the roster is the gateway's, discovered
+#                     live). Key TOKENROUTER_API_KEY in ~/.env
+#                     (single-key extraction). TEXT delegation only (no agentic tool exec); CLOUD
+#                     lane (cloud-consent gate + secret-scan). Some models are a $0 promo RIGHT NOW
+#                     -- confirmed at runtime by billing/quota errors (402/429), never a hardcoded date.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
 # Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
 # hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
@@ -785,7 +792,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1448,6 +1455,16 @@ _gm_load_key() {
   export GEMINI_API_KEY
 }
 
+# ---- TokenRouter lane key (OpenAI-compatible gateway, https://api.tokenrouter.com/v1) ----
+_tr_load_key() {
+  # Extract ONLY the TokenRouter key. NEVER `set -a; . ~/.env`, same single-key-only rule as
+  # _or_load_key above — allexport would push every other secret in ~/.env into the delegate's
+  # environment, exposing them to a third-party model. An already-exported TOKENROUTER_API_KEY wins.
+  [ -n "${TOKENROUTER_API_KEY:-}" ] || TOKENROUTER_API_KEY="$(_extract_kv_value TOKENROUTER_API_KEY)"
+  [ -n "$TOKENROUTER_API_KEY" ] || die "TOKENROUTER_API_KEY not found in ~/.env (needed for --provider tokenrouter). Get a key: https://www.tokenrouter.com (add TOKENROUTER_API_KEY=sk-... to ~/.env)"
+  export TOKENROUTER_API_KEY
+}
+
 # ---- Secure curl header helper: pass API keys via temp file, not process args (ps table) ----
 # Usage: _curl_with_key <header_value> <curl args...>
 # Writes the header to a 0600 temp file and uses curl -H @file to avoid exposing the key in ps.
@@ -1600,7 +1617,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|hermes|warp|cline|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|warp|cline|claudex|tokenrouter) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -2013,7 +2030,7 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -2057,6 +2074,7 @@ _lane_cost_disclosure() {
     droid)                         printf 'cash depends on your Factory plan or BYOK model; BYOK usage is measured or estimated by its provider' ;;
     warp)                          printf 'cash depends on your Warp plan or configured keys; key usage is measured or estimated by its provider' ;;
     cline)                         printf 'cash depends on your ClinePass subscription or the keys configured in ~/.cline; usage is measured or estimated by its provider' ;;
+    tokenrouter)                   printf 'metered cash through your TokenRouter key (some models are a $0 promo right now — confirmed at runtime by billing errors, never by a hardcoded date)' ;;
     *)                             printf 'cash and plan impact unknown for your %s lane' "$1" ;;
   esac
 }
@@ -4649,6 +4667,7 @@ cmd_estimate() {
   echo "  Antigravity keyless               $(_lane_cost_disclosure gm)"
   echo "  Devin                              $(_lane_cost_disclosure dv)"
   echo "  local                              $(_lane_cost_disclosure local)"
+  echo "  TokenRouter                        $(_lane_cost_disclosure tokenrouter)"
   awk -v i="$intok" 'BEGIN{printf "  %-34s ~$%.4f  (counterfactual @ $15/M in, $75/M out)\n", "OPUS (Claude)", i*0.000015 + 2000*0.000075}'
 }
 
@@ -4726,6 +4745,9 @@ _ready_lanes() {
   have droid && lanes="$lanes droid=byok"
   have cursor-agent && lanes="$lanes cursor=subscription"
   have cline && lanes="$lanes cline=clinepass-or-byok"
+  if [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ]; then
+    lanes="$lanes tokenrouter=keyed"
+  fi
   _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
   printf '%s\n' "${lanes# }"
 }
@@ -6619,7 +6641,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -6818,7 +6840,10 @@ _resolve_run_cost() {
         # `gi` is the Gemini-API-key lane code (see _lane_cost_disclosure's gemini|gi arm). The
         # foreground gemini path records under that code, so without it here a metered API-key run
         # would take the `*)` arm and log a FALSE measured $0.
-        or|gi|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        # `tokenrouter` is a metered gateway lane: no receipt means we COULD NOT MEASURE the run,
+        # never that it cost $0 (some models are a $0 promo, but that is a runtime fact, not a
+        # ledger default — recording $0 here would understate spend the same way the or guard does).
+        or|gi|gemini|gm|gmnative|droid|warp|tokenrouter) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
         *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
@@ -6916,6 +6941,9 @@ run_job() {
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
     droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
+    # this lane always carries an explicit model; just record the lane.
+    tokenrouter)  lane="tokenrouter" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -8444,6 +8472,19 @@ $body"
       hermes) _dp_cli="hermes" ;;
       warp)   _dp_cli="oz" ;;
       cline)  _dp_cli="cline" ;;
+      tokenrouter)
+        # No CLI: the KEY is the dispatchability gate. Check it here (cheap, local, no network) so a
+        # missing key fails the WHOLE fanout up front instead of minting phantom jobs that die in the
+        # detached child (route_delegate's fail-fast would fire, but only after launch).
+        [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ] \
+          || die "fanout: lane 'tokenrouter' requires TOKENROUTER_API_KEY in ~/.env — not found. Add it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
+        # The lane has NO default model: every job must resolve one via the same precedence the
+        # launch loop uses (-m > --route > agent frontmatter), or the batch dies up front.
+        _pem="$g_model"
+        [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"
+        [ -z "$_pem" ] && _pem="${a_model[$_pi]}"
+        [ -n "$_pem" ] || die "fanout: lane 'tokenrouter' needs a model for every job (-m <gateway-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."
+        continue ;;
       *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
@@ -8584,7 +8625,7 @@ _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
     gm) disp=gmnative ;;
     dv) disp=devin ;;
     or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
-    droid|cursor|hermes|warp|cline|claudex) disp="$elane" ;;
+    droid|cursor|hermes|warp|cline|claudex|tokenrouter) disp="$elane" ;;
     *) disp="${tlane:-$PROVIDER}" ;;
   esac
   if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
@@ -9781,6 +9822,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 _is_cloud_lane() {
   case "$1" in
     ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline|claudex) return 0 ;;
+    tokenrouter) return 0 ;;   # cloud gateway: prompt leaves the machine -> full cloud gate + secret-scan
     *) return 1 ;;
   esac
 }
@@ -10285,6 +10327,70 @@ _local_agentic_shim() {
   return "$rc"
 }
 
+# =============================================================================
+# TOKENROUTER LANE (OpenAI-compatible gateway, https://api.tokenrouter.com/v1).
+# A CLOUD lane: the prompt LEAVES the machine, so dispatch flows through the same
+# _cloud_disclose choke point + secret-scan as every other cloud lane (route_delegate
+# gates it BEFORE this delegate runs — never short-circuit ahead of the gate).
+# -m is REQUIRED and passes through VERBATIM to TokenRouter's own catalog (their models, not a
+# hardcoded list, and NO hardcoded default — the roster is the gateway's, discovered live).
+# The driver mirrors delegate_local's direct
+# streaming curl to /v1/chat/completions, with two deliberate differences: the key rides
+# _curl_with_auth (0600 temp-file header, never a process arg in the ps table), and there is
+# NO loopback guard — this is a remote gateway, not a local server.
+# TEXT delegation (same contract as the local lane's text path): the model reasons over the
+# prompt you hand it (inject files with --with or inline); it does NOT autonomously read the
+# repo or run tools. Reasoning models consume tokens on reasoning before visible content, so
+# the timeout is generous (OSRC_TOKENROUTER_TIMEOUT, default 900s).
+# COST HONESTY: the roster and pricing are TokenRouter's, not ours. Some models are a $0 promo
+# RIGHT NOW; that is confirmed at RUNTIME by billing/quota errors (402/429), never by a
+# hardcoded date or a static "free" claim. The ledger records no fabricated cost (empty =
+# unmeasured; the Tab reports it honestly).
+# =============================================================================
+_tr_base_url() { printf '%s' "${OSRC_TOKENROUTER_URL:-https://api.tokenrouter.com/v1}"; }
+
+delegate_tokenrouter() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}"
+  have curl || die "curl not on PATH (the tokenrouter lane needs it)"
+  have jq   || die "jq not on PATH (the tokenrouter lane needs it; brew install jq)"
+  _tr_load_key
+  # -m is REQUIRED: there is NO hardcoded default model (the roster is the gateway's, discovered
+  # live). route_delegate enforces this before dispatch; this is the defense-in-depth backstop.
+  [ -n "${MODEL:-}" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
+  local model="$MODEL"
+  local ttier wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "$task" "${TTIER:-}")"
+  _tier_banner "tokenrouter ($(_tr_base_url))" "$model" "$ttier" "TEXT delegation | CLOUD: $(_lane_cost_disclosure tokenrouter)"
+  local jd="${OSRC_JOB_DIR:-$OSRC_HOME}"; mkdir -p "$jd"
+  local capf="$jd/.tokenrouter.$$.txt"; : > "$capf"
+  local payload; payload="$(jq -cn --arg m "$model" --arg c "$wrapped" '{model:$m,stream:true,messages:[{role:"user",content:$c}]}')"
+  # Stream so the liveness watchdog (bg/fanout) sees byte growth, and the user sees tokens live.
+  local line data tok rc=0
+  _curl_with_auth "$TOKENROUTER_API_KEY" -sN --fail-with-body -m "${OSRC_TOKENROUTER_TIMEOUT:-900}" "$(_tr_base_url)/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "$payload" 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      data:*) data="${line#data:}"; data="${data# }"
+        [ "$data" = "[DONE]" ] && continue
+        tok="$(printf '%s' "$data" | jq -r '(.choices[0].delta.content // .choices[0].message.content // .message.content // empty)' 2>/dev/null)"
+        [ -n "$tok" ] && { printf '%s' "$tok"; printf '%s' "$tok" >> "$capf"; } ;;
+    esac
+  done
+  rc=${PIPESTATUS[0]}
+  printf '\n'
+  if [ ! -s "$capf" ]; then
+    rm -f "$capf"
+    die "TokenRouter at $(_tr_base_url) returned no completion for model '$model' (curl rc=$rc). Check: 401 = TOKENROUTER_API_KEY missing/invalid; 404 = model id not in the gateway's catalog (list: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models); 402/429 = balance/quota exhausted, fall through to another lane."
+  fi
+  [ "${OSRC_STREAM:-0}" = "1" ] && cp "$capf" "$jd/last.txt" 2>/dev/null
+  rm -f "$capf"
+  # Empty cost (not "0.000000"): per-run gateway cost is unmeasured here; a fabricated zero would
+  # understate spend the same way a fabricated estimate would. The Tab shows it as unmeasured cash.
+  record_ledger tokenrouter "$model" "$ttier" "$tier" "$task" "" "tokenrouter"
+  return 0
+}
+
 # _is_tooltype_400 <capture-file> -> true if the run died because the OpenRouter model's upstream
 # provider rejected one of Codex's native tool types (the `namespace`/custom tool grouping Codex
 # 0.144 emits; provider-routing dependent, NOT a toggleable feature). This is the signal to self-heal
@@ -10591,6 +10697,8 @@ _fallback_lane_ready() {
         [ -n "$k" ] || return 1 ;;
     or) k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$k" ] || return 1
         have claude || have codex || return 1 ;;
+    tokenrouter) k="${TOKENROUTER_API_KEY:-}"; [ -n "$k" ] || k="$(_extract_kv_value TOKENROUTER_API_KEY)"
+        [ -n "$k" ] || return 1 ;;
     *)  return 1 ;;
   esac
   return 0
@@ -10648,7 +10756,7 @@ _fallback_disp_lane() {
 }
 
 _fallback_provider_for_lane() {
-  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp|cline) printf '%s' "$1" ;; *) return 1 ;; esac
+  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp|cline|tokenrouter) printf '%s' "$1" ;; *) return 1 ;; esac
 }
 
 # _fallback_effective <alias> <model> <lane> -> "model@lane" this candidate would ACTUALLY run as
@@ -10752,7 +10860,7 @@ _route_resolution() {   # <dispatch-lane> <model>
   case "$lane" in
     local) ROUTE_COST_CLASS=local; ROUTE_INTERACTION=local ;;
     ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline) ROUTE_COST_CLASS=limited ;;
-    ccor|codexor|claudex) ROUTE_COST_CLASS=credits ;;
+    ccor|codexor|claudex|tokenrouter) ROUTE_COST_CLASS=credits ;;
     *) die "route resolution is ambiguous for lane '$lane'; refusing to launch" ;;
   esac
 }
@@ -10875,6 +10983,9 @@ route_delegate() {
   # Parsers preserve absence as empty. Resolve a route identity here, after the
   # provider is known, so a Devin default never leaks into Gemini or local.
   if [ "$MODEL_EXPLICIT" != "1" ]; then
+    # tokenrouter has NO default model: the roster is the gateway's (discovered live), so a run
+    # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
+    [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
     MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
   fi
 
@@ -10893,7 +11004,7 @@ route_delegate() {
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ] && [ "$PROVIDER" != "tokenrouter" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -10919,7 +11030,7 @@ route_delegate() {
   fi
 
   local disp="" _or_autoroute_note="" _or_credit_state=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ] || [ "$PROVIDER" = "tokenrouter" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
@@ -10929,6 +11040,7 @@ route_delegate() {
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
       cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend." ;;
+      tokenrouter) _tr_load_key ;;  # no CLI to probe: the KEY is the dispatchability gate. Fail fast (pre-cloud-gate, pre-auto-detach) so a missing key is an instant pointer, not an error buried in a detached job.
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -11020,7 +11132,7 @@ route_delegate() {
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
       gemini|gm) disp=gmnative ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter)" ;;
     esac
   fi
 
@@ -11118,6 +11230,7 @@ route_delegate() {
       hermes)   delegate_hermes   "$tier" ;;
       warp)     delegate_warp     "$tier" ;;
       cline)    delegate_cline    "$tier" ;;
+      tokenrouter) delegate_tokenrouter "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
@@ -12542,7 +12655,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -12679,6 +12792,25 @@ doctor() {
     else echo "      agentic (tool use): via on-demand Anthropic<->OpenAI shim + Claude Code (lazy-launched only when you use research/edit -m local; needs python3 + a tool-capable model)"; fi
   else
     echo "    none detected (probed Ollama :11434, LM Studio :1234, llama.cpp :8080). Start one (e.g. 'ollama serve' + 'ollama pull qwen2.5-coder') or set OSRC_LOCAL_URL=http://host:port/v1. Driver: curl+jq (built in), TEXT delegation, no extra install."
+  fi
+  echo "  -- TokenRouter lane (OpenAI-compatible gateway, $(_lane_cost_disclosure tokenrouter)) --"
+  if [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ]; then
+    echo "    tokenrouter: KEY present (TOKENROUTER_API_KEY). Route: --provider tokenrouter run -m <gateway-model-id> \"task\" (-m is REQUIRED; the roster is the gateway's, discovered live). -m passes through verbatim to the gateway's catalog."
+    if [ "$_doff" = "1" ]; then echo "    tokenrouter liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
+    elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
+      # Bounded live probe: list the gateway's models with the key. Distinguishes READY (key valid,
+      # gateway answering) from key-invalid/down without spending a completion. Never prints the key.
+      local _trc _trcode
+      _trcode="$(_curl_with_auth "${TOKENROUTER_API_KEY:-$(_extract_kv_value TOKENROUTER_API_KEY)}" -s -o /dev/null -w '%{http_code}' -m "${OSRC_DOCTOR_PROBE_TIMEOUT_SECS:-8}" "$(_tr_base_url)/models" 2>/dev/null)"
+      case "$_trcode" in
+        200) echo "    tokenrouter liveness: RESPONDS — gateway answering at $(_tr_base_url), key accepted (probed just now)" ;;
+        401|403) echo "    tokenrouter liveness: KEY REJECTED (HTTP $_trcode) — TOKENROUTER_API_KEY is missing/invalid/expired. Fix the key in ~/.env." ;;
+        000) echo "    tokenrouter liveness: NOT ANSWERING at $(_tr_base_url) (timeout/unreachable). Treat as DOWN, not ready." ;;
+        *) echo "    tokenrouter liveness: UNCLEAR (HTTP $_trcode) — gateway reachable but returned an unexpected status." ;;
+      esac
+    fi
+  else
+    echo "    tokenrouter: TOKENROUTER_API_KEY MISSING from ~/.env. Get a key: https://www.tokenrouter.com, then add TOKENROUTER_API_KEY=sk-... to ~/.env (single-key extraction, never set -a). Cost: $(_lane_cost_disclosure tokenrouter)."
   fi
   echo "  -- Gemini / Antigravity lane (gemini-pro/gemini-flash/gemini-flash-lite text, nano-banana image) --"
   # PRIMARY vehicle: agy (keyless). Detect + guide setup per this skill's revision.
@@ -13464,7 +13596,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"
                   PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -13543,7 +13675,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
 
   esac
 }
