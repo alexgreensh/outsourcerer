@@ -39,7 +39,7 @@ When the user hasn't named a model, **always run `advise`** — it classifies th
 
 ## The verbs (verb = permission mode)
 
-`run`/`explore` (read-only) · `research` (sandboxed exec, devin/codex) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox — sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs.
+`run`/`explore` (read-only) · `research` (sandboxed exec — read/exec by default; **codex** writes inside the sandbox, **devin** headless writes are blocked under `--sandbox` so they need `OSRC_DEVIN_RESEARCH_WRITE=1`, which trades the sandbox for accept-edits) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox — sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs.
 
 **Loops**: for work that has to be *checked*, not just done, offer a bounded delegate→check→retry cycle that runs on a cheap external model while you orchestrate. **OFFER IT, don't wait to be asked and don't make the user name a shape.** When a task fits one, say so in plain language before running: what it will do, what counts as done, what stops it. "That's a build-until-the-tests-pass job — want me to hand it to GLM and keep re-running your suite until it's green? I'll stop if it stalls or after 20 minutes." The user should never learn a flag, a shape name, or a subcommand; they say yes.
 
@@ -52,7 +52,7 @@ Pick the shape yourself: a machine can verify it and it's one known target → `
 **`session` is the DEFAULT delegation mode — reach for it first, not `bg`.** It's a persistent interactive TUI you drive programmatically: `session read` shows the delegate's actual work as it happens, `session send "…"` steers it mid-flight (including **answering an approval/permission prompt so the delegate doesn't stall**), `session model <name>` switches its model, `session stop` ends it. **Fable-pin:** a claude-native session launched on Fable can fall back to Opus; watch the running model (`session read`, or the built-in footer observer that feeds `bearings`/the heartbeat) and flip it back when it drifts — `session model fable` navigates Claude Code's picker and re-pins Fable session-only (footer-verified, never touching your global default). The picker only opens between turns, so run the flip when the session is idle (which is exactly when you notice drift — after it produces output); a mid-turn attempt declines cleanly and you retry.
 The heartbeat is REPORT-ONLY for cc drift — it wakes you rather than typing into the session itself, so it can never interrupt an in-flight turn. This is the one mode with a real feedback loop, and it is the fix for the recurring headless failure class: a `bg`/`fanout` delegate that hits an approval wall goes `permission-blocked` and dies unseen, or stalls silently — a session lets you SEE it and steer past. **Default to `session` for any delegation that mutates, is long/complex/exploratory, or could hit an approval prompt.** Fall back to headless `bg`/`fanout` ONLY when a session is genuinely not viable: a non-interactive/CI/detached caller that cannot drive a TUI, or a wide parallel fan-out of many independent one-shot jobs. `run`/`bg`/`fanout` are fire-and-forget — progress markers or a final result, never the chance to course-correct. The read→steer→read loop is the whole value; use it by default. (tmux on Mac/Linux; **winpty broker on Windows Git Bash** — `session` now works on all three.) Full semantics + tiers: `references/mechanism.md`, `references/jobs-and-safety.md`.
 
-**The runtime now ENFORCES this default (v0.8.3).** A mutating/approval-prone verb (`edit`/`yolo`/`research`) on a lane that has a real session transport auto-opens a steerable session instead of a headless bg job — you no longer have to remember to reach for `session`. It stays headless bg (the exception) for the callers that genuinely cannot drive a TUI: `CI`/`GITHUB_ACTIONS`, a fanout member, inside an existing bg job, a preflight probe, a caller asserting a foreground-completion contract with `OSRC_NO_AUTODETACH=1` (this is what keeps `loop verify`/`escalate` grading the real result, not a session that returned early), a host without tmux, and the OpenRouter/claudex lanes (which have no faithful session mode). Escape hatches: **`OSRC_NO_SESSION=1`** forces a self-completing headless bg job (use it for automation that cannot drive the session — otherwise a non-steering caller can strand an idle session); **`OSRC_FORCE_SESSION=1`** (or `OSRC_MAX_MINUTES`) promotes read-only `run`/`explore` too.
+**The runtime now ENFORCES this default (v0.8.4).** A mutating/approval-prone verb (`edit`/`yolo`) on a lane that has a real session transport auto-opens a steerable session instead of a headless bg job — you no longer have to remember to reach for `session`. This holds for **every** promotable lane, the managed native ones (`claude`/`codex`/`gemini`) included: a promoted session inherits your real MCP servers + settings, which is the point of a *watched* session — you drive it and answer its prompts (the MCP isolation stays on the headless/bg path, which is unattended). **Never a dead end:** if a session cannot start or receive the task (a missing CLI, a TUI that rejects a flag, a tmux hiccup), the run automatically falls back to a headless bg job so the work still happens — interactive is the default, headless is the automatic fallback. The one verb that never auto-promotes is **`research`**: a session carries no verb and would drop the OS sandbox that defines research (cursor/gemini would run unsandboxed; codex would lose its network isolation), so research always takes the sandbox-aware dispatch path (observable via `bg`+`status`; use codex research for sandboxed writes). `warp` stays bg too (no interactive session adapter yet). It stays headless bg (the exception) for the callers that genuinely cannot drive a TUI: `CI`/`GITHUB_ACTIONS`, a fanout member, inside an existing bg job, a preflight probe, a caller asserting a foreground-completion contract with `OSRC_NO_AUTODETACH=1` (this is what keeps `loop verify`/`escalate` grading the real result, not a session that returned early), a host without tmux, and the OpenRouter/claudex lanes (which have no faithful session mode). Escape hatches: **`OSRC_NO_SESSION=1`** forces a self-completing headless bg job (use it for automation that cannot drive the session — otherwise a non-steering caller can strand an idle session); **`OSRC_FORCE_SESSION=1`** promotes read-only `run`/`explore` too — and it is the *only* thing that does, because a session's posture is often broader than the read-only dispatch, so promoting a read-only verb is an explicit authority opt-in, never an automatic one (a long `run` under `OSRC_MAX_MINUTES` stays a read-only bg job — a duration must not silently grant write/MCP authority).
 
 ## Model alias → lane (the alias picks the lane; no `--provider` needed)
 
@@ -102,14 +102,21 @@ course-correct or kill a bad run you are not reading.
 **If you are an async / message-driven orchestrator that only takes a turn when input arrives (a
 chat/Slack/Telegram bot, or any assistant that sits idle between messages — even a long-lived process
 counts, because staying alive is not the same as polling), watching-by-polling is impossible: nothing
-gives you a turn between inputs.** The background beacon still records status durably, but it can only
-WRITE a pulse; it cannot wake you. So arm a push: export `OSRC_HEARTBEAT_WAKE="<your notifier command>"` before you
-launch, and the beacon runs it on every state change (blocked/dead) and on the periodic digest
-(still-cooking / landed), passing the compact summary as `$1` and the full event JSON on stdin. Point it
-at whatever re-invokes you or messages the user through your OWN sanctioned send path — the plugin never
-sends anything itself. A headless launch with no wake armed prints an **ASYNC SUPERVISION** warning
-naming the fix; don't ignore it, or your delegate will run silent until the user pings. (Suppress just
-the periodic-digest push with `OSRC_HEARTBEAT_WAKE_DIGEST=0`, keeping only the attention-needed wakes.)
+gives you a turn between inputs.**
+
+**Status push is ON BY DEFAULT — you no longer have to arm it.** On every state change (blocked/done/
+stalled) and on a ~2-minute pulse (still-cooking / landed), the beacon pushes automatically: if you've
+armed a custom `OSRC_HEARTBEAT_WAKE="<cmd>"` it runs that (compact summary as `$1`, full event JSON on
+stdin — point it at whatever re-invokes you or messages the user through your OWN sanctioned send path);
+otherwise it uses the **built-in LOCAL push** — it appends the pulse to `~/.outsourcerer/heartbeat/pulse.log`
+(durable and tailable, so an orchestrator can read it to report proactively) and fires a **desktop
+notification** so the user sees it without asking. The local push is strictly local: external sends
+(WhatsApp/Slack) still require your own wake command — the plugin never messages a contact itself.
+Knobs: quiet just the desktop popup with `OSRC_HEARTBEAT_NOTIFY=0` (the pulse log still writes); change
+the pulse interval with `OSRC_HEARTBEAT_CADENCE=<secs>`; suppress only the periodic push with
+`OSRC_HEARTBEAT_WAKE_DIGEST=0` (keeping attention-needed wakes); turn the push off entirely with
+`OSRC_HEARTBEAT_WAKE=off` (a headless run then prints an **ASYNC SUPERVISION** warning, since its status
+won't reach you until you run `bearings`).
 
 ## Operating rules
 

@@ -118,9 +118,9 @@ awk '/^_bg_launch\(\)/,/^}/' "$SRC" | grep -q '_heartbeat_start' \
 [ "$(grep -c '_heartbeat_start.*supervision state is unknown' "$SRC")" -ge 3 ] \
   && ok "background and interactive launch paths share heartbeat auto-arm" \
   || bad "one or more successful launch paths omit heartbeat auto-arm"
-grep -q 'OSRC_HEARTBEAT_CADENCE:-300' "$SRC" \
-  && ok "heartbeat cadence defaults to 300 seconds" \
-  || bad "heartbeat cadence default is not 300 seconds"
+grep -q 'OSRC_HEARTBEAT_CADENCE:-120' "$SRC" \
+  && ok "heartbeat cadence defaults to 120 seconds (~2min pulse; push-on-by-default)" \
+  || bad "heartbeat cadence default is not 120 seconds"
 
 echo
 echo "RESULT: $pass passed, $fail failed"

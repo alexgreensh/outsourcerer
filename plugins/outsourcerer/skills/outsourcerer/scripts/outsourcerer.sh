@@ -140,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.8.3"
+OSRC_VERSION="0.8.4"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -190,6 +190,14 @@ _harden_dir() {
 
 # _mkdir_private <dir> -> 0 when <dir> exists and is as private as the filesystem allows.
 # Use for state directories, where "already exists" is success.
+# _dir_is_private <dir> -> 0 if the dir mode is exactly 700 (or platform is Windows, where POSIX modes
+# don't apply). Used to FAIL CLOSED before storing a bearer capability in a directory whose only
+# protection is that mode (S4.5).
+_dir_is_private() {
+  [ "${OSRC_PLATFORM:-}" = "windows" ] && return 0
+  local m; m="$(stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null)"
+  case "$m" in 700) return 0 ;; *) return 1 ;; esac
+}
 _mkdir_private() {
   ( umask 077; mkdir -p "$1" ) 2>/dev/null
   _harden_dir "$1"
@@ -326,7 +334,12 @@ _posture_get() {  # <lane> <key> -> prints stored value, rc0 if present (rejects
   local f="$OSRC_POSTURE_DIR/$1.$2"
   [ -L "$f" ] && return 1
   [ -f "$f" ] || return 1
-  cat "$f" 2>/dev/null
+  # Return the FIRST line, whitespace-trimmed (S5.9): a corrupted/multi-line value (e.g. "restricted\njunk")
+  # cat'd whole would never equal-match "restricted" at the call site, silently ignoring a remembered
+  # restriction (fail OPEN). First-line + trim keeps the exact-compare honest against trailing garbage.
+  local _v; IFS= read -r _v < "$f" 2>/dev/null || return 1
+  _v="${_v#"${_v%%[![:space:]]*}"}"; _v="${_v%"${_v##*[![:space:]]}"}"
+  printf '%s' "$_v"
 }
 _posture_set() {  # <lane> <key> <value>  (atomic, private, symlink-safe)
   _mkdir_private "$OSRC_POSTURE_DIR" || return 1
@@ -2443,6 +2456,13 @@ _external_session_claim() { # <session-id> <tmux-pane>
   controller_id="$(_external_controller_id)" || return 1
   generation="$(_heartbeat_token)"; [ -n "$generation" ] || return 1
   _mkdir_private "$OSRC_SESSION_CLAIMS" || return 1
+  # FAIL CLOSED (S4.5): the claim token is a bearer capability whose ONLY protection is the 0700 claims
+  # dir. If hardening could not make it private, refuse to mint — do not drop a token into a directory
+  # other local users can read. (_harden_dir is best-effort and only warns, so verify the mode here.)
+  if ! _dir_is_private "$OSRC_SESSION_CLAIMS"; then
+    echo "[outsourcerer] session claim REFUSED: $OSRC_SESSION_CLAIMS is not private (needs mode 700). A claim token must not be stored where other local users can read it — fix the directory permissions or point OSRC_HOME at a private path." >&2
+    return 1
+  fi
   dir="$(_session_claim_path "$id")"
   _mkdir_claim "$dir" || return 1
   record="$(jq -cn --arg id "$id" --arg endpoint "tmux:$pane" --argjson pid "$pid" --arg start "$start" --arg token "$token" --arg controller_id "$controller_id" --arg generation "$generation" \
@@ -3557,18 +3577,63 @@ _heartbeat_emit_attached() {
 # task summary containing shell metacharacters cannot inject. Best-effort and time-bounded: a slow or
 # failing notifier must never wedge the beacon or block the durable wake log (the authority sink), so
 # this never gates an ack.
+# _wake_notify_local <event-json> <summary> — the BUILT-IN default push, used when the orchestrator armed
+# no OSRC_HEARTBEAT_WAKE. Two sinks, both LOCAL (never an external send — whatsapp/slack still require the
+# caller's own wake command): (1) append the pulse to a durable, tailable log the orchestrator can read to
+# report proactively; (2) fire a local desktop notification so the user SEES it without polling. Best-
+# effort, never blocks. Injection-safe: the notification text is stripped of quotes/backslashes/backticks
+# (the summary is already control-char-scrubbed + vocab-sanitized + capped upstream).
+_wake_notify_local() {
+  local event="$1" summary="$2" log="$OSRC_HEARTBEAT/pulse.log" ts nsum
+  _mkdir_private "$OSRC_HEARTBEAT" 2>/dev/null || true
+  ts="$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)" || ts="?"
+  printf '%s  %s\n' "$ts" "$summary" >> "$log" 2>/dev/null || true
+  # BOUND GROWTH: keep only the newest OSRC_PULSE_MAX lines (default 500). Trim only when the file is 2x
+  # over the cap so the cost is amortized (not every append), and never on a symlink (write-through guard).
+  local cap="${OSRC_PULSE_MAX:-500}" lc
+  case "$cap" in ''|*[!0-9]*) cap=500 ;; esac
+  if [ ! -L "$log" ] && [ "$cap" -gt 0 ] 2>/dev/null; then
+    lc="$(wc -l < "$log" 2>/dev/null | tr -d ' ')" || lc=0
+    if [ "${lc:-0}" -gt "$((cap*2))" ] 2>/dev/null; then
+      tail -n "$cap" "$log" > "$log.tmp" 2>/dev/null && mv -f "$log.tmp" "$log" 2>/dev/null || rm -f "$log.tmp" 2>/dev/null
+    fi
+  fi
+  # desktop notification (opt out of just the popup with OSRC_HEARTBEAT_NOTIFY=0; the pulse log still writes)
+  [ "${OSRC_HEARTBEAT_NOTIFY:-1}" = "0" ] && return 0
+  nsum="${summary//\"/}"; nsum="${nsum//\\/}"; nsum="${nsum//\`/}"
+  [ -n "$nsum" ] || return 0
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      if command -v terminal-notifier >/dev/null 2>&1; then
+        ( terminal-notifier -title "outsourcerer" -message "$nsum" ) >/dev/null 2>&1 &
+      elif command -v osascript >/dev/null 2>&1; then
+        ( osascript -e "display notification \"$nsum\" with title \"outsourcerer\"" ) >/dev/null 2>&1 &
+      fi ;;
+    Linux) command -v notify-send >/dev/null 2>&1 && ( notify-send "outsourcerer" "$nsum" ) >/dev/null 2>&1 & ;;
+  esac
+  return 0
+}
+
 _wake_notify_external() {
   local event="${1:-}" cmd="${OSRC_HEARTBEAT_WAKE:-}" summary np kp
-  [ -n "$cmd" ] || return 0
   [ -n "$event" ] || return 0
   summary="$(printf '%s' "$event" | jq -r '(.task_summary // .kind // "update") | tostring | gsub("[[:cntrl:]]"; " ") | .[0:160]' 2>/dev/null)" || summary="update"
   # Emit-guard: this summary is exactly the text that re-invokes a Claude orchestrator on its next turn,
   # so scrub fallback-trigger vocabulary at the source (references/vocabulary-hygiene.md). Opt out with
   # OSRC_VOCAB_GUARD=0. The event JSON on stdin is left verbatim for machines; only the human line is calmed.
   [ "${OSRC_VOCAB_GUARD:-1}" = "0" ] || summary="$(printf '%s' "$summary" | _vocab_sanitize 2>/dev/null)" || summary="$summary"
+  # PUSH ON BY DEFAULT: with no custom wake armed, use the built-in LOCAL notifier so status still reaches
+  # the user automatically (the old behavior was a silent no-op that forced manual polling). Explicit
+  # OSRC_HEARTBEAT_WAKE=off|0|none disables the push entirely.
+  case "$cmd" in
+    off|0|none|disabled) return 0 ;;
+    "") _wake_notify_local "$event" "$summary"; return 0 ;;
+  esac
   ( printf '%s\n' "$event" | OSRC_WAKE_EVENT="$event" sh -c "$cmd" osrc-wake "$summary" ) </dev/null >/dev/null 2>&1 &
   np=$!
-  ( sleep "${OSRC_HEARTBEAT_WAKE_TIMEOUT:-20}"; kill "$np" 2>/dev/null ) >/dev/null 2>&1 &
+  # Time-bound the notifier so a slow OR TERM-ignoring custom wake cannot wedge the beacon: send TERM at
+  # the timeout, then escalate to KILL (uncatchable) after a short grace, so `wait "$np"` always returns.
+  ( sleep "${OSRC_HEARTBEAT_WAKE_TIMEOUT:-20}"; kill "$np" 2>/dev/null; sleep 2; kill -9 "$np" 2>/dev/null ) >/dev/null 2>&1 &
   kp=$!
   wait "$np" 2>/dev/null
   kill "$kp" 2>/dev/null; wait "$kp" 2>/dev/null
@@ -3582,10 +3647,17 @@ _wake_notify_external() {
 # fix — so an async orchestrator arms the push instead of discovering the gap after an hour of silence.
 _async_supervision_notice() {
   { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } && return 0     # an attached terminal already sees the pulse
-  [ -n "${OSRC_HEARTBEAT_WAKE:-}" ] && return 0          # a wake command is armed → status is pushed
   [ -n "${OSRC_HEARTBEAT_SINK:-}" ] && return 0          # an explicit sink is armed → caller reads it
   [ "${OSRC_FLEET_SUPERVISION:-1}" = "0" ] && return 0   # supervision explicitly opted out
-  printf '[outsourcerer] ASYNC SUPERVISION: this run is headless with no wake armed, so its status will NOT reach you until you check. Either run "%s bearings" on your next turn, or export OSRC_HEARTBEAT_WAKE="<your notifier>" so blocked/done/digest events are pushed to you automatically (it gets the summary as $1 and the event JSON on stdin).\n' "$0" >&2
+  # PUSH ON BY DEFAULT changes this from an alarm to an FYI. State changes + a ~2min pulse now push
+  # automatically: a custom OSRC_HEARTBEAT_WAKE if armed, otherwise the built-in LOCAL notifier (durable
+  # pulse log + desktop notification). Only warn when push was explicitly turned OFF.
+  case "${OSRC_HEARTBEAT_WAKE:-}" in
+    off|0|none|disabled)
+      printf '[outsourcerer] ASYNC SUPERVISION: push is OFF (OSRC_HEARTBEAT_WAKE=%s) and this run is headless, so status will NOT reach you until you run "%s bearings". Re-enable the default local push by unsetting OSRC_HEARTBEAT_WAKE, or point it at your own notifier.\n' "${OSRC_HEARTBEAT_WAKE}" "$0" >&2 ;;
+    "")
+      printf '[outsourcerer] status push is ON by default: state changes + a ~2min pulse write to %s/pulse.log and fire a desktop notification. Route it to your own notifier with OSRC_HEARTBEAT_WAKE="<cmd>", quiet the popup with OSRC_HEARTBEAT_NOTIFY=0, or turn it off with OSRC_HEARTBEAT_WAKE=off.\n' "$OSRC_HEARTBEAT" >&2 ;;
+  esac
 }
 
 _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
@@ -3610,6 +3682,11 @@ _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
     lock="$OSRC_SESSIONS/model-pin-${session_id}.${model_generation}.lock"
     if _mkdir_claim "$lock"; then
       restore_id="restore.${session_id}.${model_generation}"
+      # NOTE (S4.4, considered + declined): a guard refusing to restore a "paid model onto devin" was tried
+      # and reverted — `lane` here is the session TRANSPORT (a managed fixture legitimately pairs lane=devin
+      # with a non-devin pinned model), and _devin_is_free_model over-matched, blocking valid restores.
+      # Restore always re-pins toward the user's OWN requested/resolved model, so the real risk (a corrupt
+      # row whose resolved_model differs from what requested resolves to) is narrow; left as-is deliberately.
       if _model_pin_append "$session_id" "$model_generation" restore-attempt "$requested->$observed"; then
         if _session_model_restore "$lane" "$endpoint" "$resolved" "$restore_id" "$session_id"; then
           _model_pin_append "$session_id" "$model_generation" restore-receipt "$restore_id" >/dev/null 2>&1 || result=unknown
@@ -3664,12 +3741,13 @@ _heartbeat_tick() {
     return 1
   }
   _wake_consume || true
-  # Periodic digest also goes to the async caller's notifier (still-cooking / landed pulse), gated to
-  # once per generation by the render cursor above, so an async orchestrator gets the same "all green,
-  # next check ~X" pulse an attached terminal would — without the user having to ping. Opt-in via
-  # OSRC_HEARTBEAT_WAKE; a periodic-digest push is suppressed with OSRC_HEARTBEAT_WAKE_DIGEST=0 (leaving
-  # only the attention-needed wakes from _wake_consume).
-  if [ -n "${OSRC_HEARTBEAT_WAKE:-}" ] && [ "${OSRC_HEARTBEAT_WAKE_DIGEST:-1}" = "1" ]; then
+  # Periodic digest push (still-cooking / landed pulse), once per generation via the render cursor above,
+  # so the user gets the same "all green, next check ~X" pulse without pinging. PUSH ON BY DEFAULT: this
+  # routes through _wake_notify_external, which fires the caller's custom OSRC_HEARTBEAT_WAKE if armed and
+  # otherwise the built-in LOCAL push (pulse.log + desktop notification). It is NOT gated on a custom wake
+  # being set — that was the bug where the default config never got a periodic pulse. Suppress just the
+  # periodic push with OSRC_HEARTBEAT_WAKE_DIGEST=0; OSRC_HEARTBEAT_WAKE=off disables all pushes.
+  if [ "${OSRC_HEARTBEAT_WAKE_DIGEST:-1}" = "1" ]; then
     _wake_notify_external "$(jq -cn --arg gen "$generation" --arg s "$line" \
       '{event_id:("heartbeat.digest." + $gen),kind:"heartbeat-digest",generation:$gen,state:"working",task_summary:$s}')" || true
   fi
@@ -3718,9 +3796,12 @@ _heartbeat_active_work() {
 }
 
 _heartbeat_beacon() {
-  local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-300}"
+  # PUSH ON BY DEFAULT: a ~2min pulse cadence so "still cooking" reaches the user often enough that they
+  # never have to ask (was 300s). Tune with OSRC_HEARTBEAT_CADENCE; a state change pushes immediately
+  # regardless of this interval.
+  local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-120}"
   local pid_start rc
-  case "$cadence" in ''|*[!0-9]*|0) cadence=300 ;; esac
+  case "$cadence" in ''|*[!0-9]*|0) cadence=120 ;; esac
   [ -n "$token" ] || token="$(_heartbeat_token)"
   pid_start="$(_pid_start_identity "$$")" || {
     echo "outsourcerer: heartbeat ownership unknown; stable process identity unavailable" >&2
@@ -4306,7 +4387,18 @@ _or_run_cost() {
   local log="$1"; [ -s "$log" ] || return 0
   have grep || return 0
   local ids id sum="" got=0
-  ids="$(grep -oE 'gen-[0-9]+-[a-zA-Z0-9]+' "$log" 2>/dev/null | sort -u)"
+  # ATTACH GUARD (S5.2): only trust a gen-id that appears as the VALUE of a structured id field the OR
+  # transport emits (`"id":"gen-…"` / `"gen_id":…` / `"generation_id":…`), NOT a bare token anywhere in
+  # the log — otherwise a delegate whose output merely quotes a real gen-id (a review of OR code/logs)
+  # would attach that other run's settled cost to THIS job's ledger. A format mismatch fails SAFE: no id
+  # matched -> caller falls to the clearly-labeled '~' estimate, never a wrong charge. (A fully robust fix
+  # separates the transport log from delegate stdout; this closes the common accidental-prose case.)
+  if [ "${OSRC_OR_COST_LOOSE:-0}" = "1" ]; then
+    ids="$(grep -oE 'gen-[0-9]+-[a-zA-Z0-9]+' "$log" 2>/dev/null | sort -u)"   # legacy loose match (opt-in)
+  else
+    ids="$(grep -oE '"(id|gen_id|generation_id)"[[:space:]]*:[[:space:]]*"gen-[0-9]+-[a-zA-Z0-9]+"' "$log" 2>/dev/null \
+           | grep -oE 'gen-[0-9]+-[a-zA-Z0-9]+' | sort -u)"
+  fi
   [ -n "$ids" ] || return 0
   sum=0; local miss=0
   for id in $ids; do
@@ -4376,6 +4468,14 @@ _hermes_run_cost() {
     ".timeout ${OSRC_SQLITE_BUSY_TIMEOUT:-3000}" \
     "SELECT estimated_cost_usd, cost_status FROM sessions WHERE cwd = '${cwd_escaped}' AND started_at >= ${cutoff} AND started_at <= ${upper};" 2>/dev/null)" || return 0
   [ -n "$rows" ] || return 0
+  # KNOWN LIMITATION (S5.7, considered + declined): matching is cwd + integer-second window, with no
+  # hermes session/run id available at cost-resolution time. Two sessions in the SAME cwd during the SAME
+  # epoch second can collide: if the earlier run's row is visible but THIS run's row is not yet written,
+  # the "exactly one row" test below passes and attributes the earlier run's cost here. Fixing it cleanly
+  # needs a per-run id in the query; the only id-free guard — forcing an estimate on any same-second single
+  # row — would break the COMMON case (one session whose row lands the same second it launched). Impact is
+  # a local cost ESTIMATE only (never billing/security), and the 2+-row ambiguity guard below already
+  # covers the frequent case, so this is left as-is deliberately.
   # Count matching rows. Two or more plausibly-matching rows -> ambiguous -> empty (estimate).
   local _nlines
   _nlines="$(printf '%s\n' "$rows" | grep -c . 2>/dev/null)" || _nlines=0
@@ -4849,6 +4949,20 @@ _vocab_sanitize() {
     args+=(-e "s/(^|[^A-Za-z])$trig([^A-Za-z]|\$)/\\1$repl\\2/g")
     args+=(-e "s/(^|[^A-Za-z])$cap([^A-Za-z]|\$)/\\1$repcap\\2/g")
     args+=(-e "s/(^|[^A-Za-z])$up([^A-Za-z]|\$)/\\1$repup\\2/g")
+    # MIXED-CASE catch-all (S2.4): "kIlL"/"DeAd" match none of the three variants above and survived.
+    # Build a case-insensitive char class per letter ([kK][iI][lL][lL]) — portably, without GNU-only
+    # \U/\L — and apply it LAST with the lowercase replacement, so the three case-PRESERVING patterns
+    # still handle clean cases (Kill->Stop) and only irregular casing falls through to this one.
+    local _ci="" _n=${#trig} _i=0 _c _lc _uc
+    while [ "$_i" -lt "$_n" ]; do
+      _c="${trig:$_i:1}"
+      case "$_c" in
+        [A-Za-z]) _lc="$(printf '%s' "$_c" | tr '[:upper:]' '[:lower:]')"; _uc="$(printf '%s' "$_c" | tr '[:lower:]' '[:upper:]')"; _ci="$_ci[$_lc$_uc]" ;;
+        *) _ci="$_ci$_c" ;;
+      esac
+      _i=$((_i+1))
+    done
+    args+=(-e "s/(^|[^A-Za-z])$_ci([^A-Za-z]|\$)/\\1$repl\\2/g")
   done < <(_vocab_map)
   [ "${#args[@]}" -gt 0 ] || { cat; return; }
   # The matched boundary chars are re-emitted (\1,\2) but sed's scan resumes past them, so two adjacent
@@ -5876,6 +5990,13 @@ _kill_tree() {   # TERM the whole subtree deepest-first, then KILL survivors.
   # macOS has no setsid/process-group-kill and `pkill -P` is only ONE level, so a hung codex's MCP
   # grandchildren survive it. Walk the full tree and signal deepest-first so parents
   # can't re-fork a reaped child. TERM, brief grace, then KILL anything still standing.
+  # KNOWN LIMITATION (S3.4): a descendant that REPARENTS (its parent exits, so it is adopted by init and
+  # its ppid becomes 1) is no longer under this root in the ppid tree, so a purely tree-walk reap cannot
+  # find it. The robust fix is to launch every bg delegate in its OWN process group and group-reap via
+  # _kill_process_group — but that needs a platform-sensitive launch change (macOS has no setsid) that
+  # must be live-tested across lanes, so it is scoped as a follow-up, not hacked in here. Today: a
+  # reparented delegate whose supervisor also died can outlive reconciliation (status is corrected, the
+  # process is not). Tracked in the session triage.
   local pid="$1" all rev p
   all="$pid $(_descendants "$pid")"
   rev=""; for p in $all; do rev="$p $rev"; done          # reverse -> deepest child first, root last
@@ -6047,6 +6168,10 @@ _delegate_has_model_output() { # <out.log> <progress>
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
     # hardened diagnostic-verb denylist (adds Retrying|Waiting|Reconnecting|Resuming|Connected|Authenticated|Ready)
     /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected|Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ { next }
+    # setup/dependency chatter (S3.7): package/registry/build progress from a PRE-MODEL hook is NOT model
+    # output; without these a line like "Downloading dependencies from configured registry" hit the
+    # plaintext last-resort below and permanently flipped `initialized`, disabling the no-init deadline.
+    /^[[:space:]]*(Downloading|Downloaded|Installing|Installed|Fetching|Fetched|Building|Built|Compiling|Compiled|Cloning|Cloned|Pulling|Pulled|Updating|Updated|Resolving|Resolved|Syncing|Synced|Indexing|Scanning|Restoring|Extracting|Unpacking|Checking|Verifying)([.[:space:]:]|$)/ { next }
     # hook/tool/session lifecycle lines
     /^[[:space:]]*(Hook|Tool|SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|Notification|Stop|SubagentStop|PreCompact)(:|[[:space:]])/ { next }
     # generic "Word:" log-prefix (SessionStart: , Foo: ) and [bracketed] log prefixes
@@ -6177,8 +6302,20 @@ _supervise() {
         # once-per-episode.
         exploring?) echo running > "$jd/status" ;;
       esac
+    elif [ "$size" -lt "$last_size" ]; then
+      # SHRINK = the log was truncated or rotated in place. That is activity, not a stall; reset the
+      # baseline so post-truncation output (which may never re-exceed the old size) still counts as
+      # liveness. Without this, a rotating delegate could be false-killed as wedged while actively writing (S3.6).
+      last_size=$size; last_change=$now
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
+    # HARD TIMEOUT FIRST (S3.8): the absolute upper bound outranks every softer arm (noinit / exploring /
+    # stall). If two become eligible on the SAME poll, a softer branch would return wedged/125 and the
+    # configured deadline would be mislabeled (wrong state, reason, and exit code). Check it up front so
+    # `timeout`/124 always wins the boundary.
+    if [ "$age" -ge "$hard" ]; then
+      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
+    fi
     # Require positive proof of a model/agent turn. Byte growth alone includes
     # launcher headers, blank lines, stderr diagnostics, and every tier banner.
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
@@ -6220,7 +6357,11 @@ _supervise() {
     # walled off — headless delegates (claude/codex/devin/local) cannot answer an interactive prompt, so it
     # will spiral forever. Kill it fast with a clear next-step instead. Prevention (mode escalation) handles
     # the known ~/.claude case; this catches any OTHER lane/path that hits the same wall. OSRC_PERM_ABORT=0 disables.
-    if [ "$mutating" = "1" ] && [ "${OSRC_PERM_ABORT:-3}" -gt 0 ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
+    # NOT gated on `mutating` (S3.5): a read-only run/explore/research delegate hits the SAME headless
+    # permission/sandbox wall (a protected ~/.claude path, a devin tool-confirmation reject) and spirals
+    # exactly the same way — leaving it to stall->wedged/timeout hides the real cause. The decision is the
+    # denial COUNT (content-based), so a verb with zero real denials never trips this.
+    if [ "${OSRC_PERM_ABORT:-3}" -gt 0 ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
       local _pd; _pd="$(_perm_denials "$jd/out.log")"; _pd="${_pd:-0}"
       if [ "$_pd" -ge "${OSRC_PERM_ABORT:-3}" ]; then
         echo "permission-blocked" > "$jd/status"
@@ -6262,9 +6403,7 @@ _supervise() {
         _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
-    if [ "$age" -ge "$hard" ]; then
-      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
-    fi
+    # (hard-timeout is now checked at the TOP of the poll — S3.8 — so a same-poll tie can't mislabel it.)
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
     # while writing files is working, and killing it is the failure this watchdog causes rather than
     # prevents. The log cannot answer this — a silent delegate emits no tool-call markers either — so
@@ -6312,6 +6451,24 @@ _supervise() {
       fi
     fi
     if [ "$idle" -ge "$kill_after" ]; then
+      # TERMINAL MARKER FIRST (S3.1). A delegate that already emitted OSRC::DONE/BLOCKED has FINISHED its
+      # work and is only LINGERING (a hung Stop hook, an MCP worker, a telemetry thread, CLI teardown).
+      # Killing it to reclaim the process is correct, but it must NOT be mislabeled `wedged` with the
+      # result thrown away. Classify by the marker exactly as the natural-exit path below, reap, return.
+      local _sm; _sm="$(_last_marker "$jd/out.log")"
+      case "$_sm" in
+        OSRC::DONE)
+          echo done > "$jd/status"; printf 'done-then-lingered\n' > "$jd/reason" 2>/dev/null || true
+          _kill_tree "$pid"; echo 0 > "$jd/exit"; return 0 ;;
+        OSRC::BLOCKED|OSRC::NEED_INPUT)
+          echo blocked > "$jd/status"
+          local _sbtxt
+          _sbtxt="$(grep -aoE 'OSRC::(BLOCKED|NEED_INPUT)(#[0-9A-Fa-f]+)?[[:space:]].+' "$jd/out.log" 2>/dev/null | tail -1 \
+                   | sed -E 's/^OSRC::(BLOCKED|NEED_INPUT)(#[0-9A-Fa-f]+)?[[:space:]]*//' | cut -c1-200)"
+          [ -n "$_sbtxt" ] || _sbtxt='blocked:delegate-marker'
+          printf '%s\n' "$_sbtxt" > "$jd/reason" 2>/dev/null || true
+          _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3 ;;
+      esac
       # A job that never emitted ANYTHING past the launch banner is a different failure from one that
       # produced work and then went quiet, and it has a different fix. The usual cause is a prompt that
       # told the delegate to stay silent (write to a file, print only at the end) — advice this tool
@@ -6842,8 +6999,11 @@ _session_provider_for_disp() {
     ccnative)                       printf cc ;;
     gmnative)                       printf gemini ;;
     devin)                          printf devin ;;
-    droid|cursor|hermes|warp|cline) printf '%s' "$1" ;;
-    *)                              printf '' ;;   # ccor / codexor / claudex / unknown -> not promotable
+    droid|cursor|hermes|cline)      printf '%s' "$1" ;;
+    *)                              printf '' ;;   # ccor / codexor / claudex / WARP / unknown -> not promotable
+    # WARP is deliberately NOT promotable: `session start` has no warp adapter (its provider case dies
+    # with "provider not supported for interactive sessions"), so promoting warp edit/yolo would kill the
+    # run at launch instead of steering it. Warp stays a bg/fanout lane until an interactive adapter exists.
   esac
 }
 
@@ -6865,9 +7025,36 @@ _session_should() {
   _session_backend_available || return 1
   # Only promote a lane that session start can run faithfully; OpenRouter/claudex fall through to bg.
   [ -n "$(_session_provider_for_disp "$disp")" ] || return 1
+  # RESEARCH NEVER PROMOTES TO A SESSION — any lane. research's defining property is OS-SANDBOXED exec,
+  # and that sandbox is applied ONLY in the fg/bg dispatch block (per lane: cursor `--force --sandbox
+  # enabled`, gemini sandbox flags, codex `--sandbox workspace-write` + network isolation + --ignore-
+  # user-config, devin `--sandbox` read/exec-only). `_session_run` starts the session with just `-m`
+  # and carries NO verb, so a promoted research session runs with the interactive DEFAULT posture and
+  # silently DROPS the sandbox (cursor/gemini run unsandboxed; codex loses network/MCP isolation). That
+  # is a security regression, not steering convenience, so research always takes the sandbox-aware
+  # dispatch path (still observable via bg+status). edit/yolo keep session promotion: their session
+  # default is narrower than the requested tier and you approve prompts live — the point of a session.
+  [ "$verb" = "research" ] && return 1
+  # INTERACTIVE IS THE DEFAULT for edit/yolo on EVERY promotable lane (owner decision 2026-08-16). A
+  # promoted session inherits the user's REAL MCP servers + settings by design — for a WATCHED, steerable
+  # session that is the desired behavior, not a leak: the orchestrator drives it (`session read`/`send`)
+  # and answers prompts. (This differs from the HEADLESS path, which strips MCP because an unattended
+  # auto-accept delegate with credential tools is unsafe when nobody is looking — that isolation stays on
+  # the bg/dispatch path only.) Accepted residual: between orchestrator polls an auto-accept/yolo delegate
+  # can invoke a credential MCP tool before it is seen; mitigated by the session being watched + the
+  # supervisor heartbeat. Robustness is enforced downstream: if a promoted session cannot START or receive
+  # the task, _session_run returns the fallback sentinel and route_delegate runs the work headless instead
+  # (interactive is the default, headless is the automatic fallback — never a dead end).
   case "$verb" in
-    edit|yolo|research) return 0 ;;                    # mutating / approval-prone -> steerable session
-    run|explore)        { [ "${OSRC_FORCE_SESSION:-0}" = "1" ] || [ -n "${OSRC_MAX_MINUTES:-}" ]; } && return 0; return 1 ;;
+    edit|yolo)   return 0 ;;                           # mutating / approval-prone -> steerable session
+    # run/explore are READ-ONLY verbs. A session's default posture is often BROADER than the read-only
+    # dispatch (codex session = workspace-write + full MCP config vs read-only isolated dispatch; droid
+    # session `--auto medium` vs dispatch `--auto low`; cline interactive-act vs read-only `--plan`), so
+    # auto-promoting them would silently grant WRITE/MCP authority the verb never asked for. Only an
+    # EXPLICIT opt-in promotes them: OSRC_FORCE_SESSION=1 is the user knowingly accepting a broader
+    # steerable session. OSRC_MAX_MINUTES is a DURATION, not an authority grant — a long read-only job is
+    # still read-only, so it must NOT widen posture on its own (that was a silent least-privilege break).
+    run|explore) [ "${OSRC_FORCE_SESSION:-0}" = "1" ] && return 0; return 1 ;;
   esac
   return 1
 }
@@ -6885,8 +7072,10 @@ _session_backend_available() {
 # _session_run <verb> [flags] "task" -> open a steerable session for this delegation and hand the task
 # to it, reusing the script's OWN `session start` + `session send` (the fully-tested path — no reaching
 # into session internals). Returns the session receipt; the orchestrator drives it with session read/
-# send/stop. On any failure to start, we DIE clearly rather than silently doing nothing (the caller can
-# set OSRC_NO_SESSION=1 to force the bg path). The cloud preack already ran in _cloud_disclose.
+# send/stop. NEVER a dead end: if the session cannot START or RECEIVE the task, this returns the sentinel
+# OSRC_SESSION_FALLBACK_RC (97) so route_delegate runs the work HEADLESS instead — interactive is the
+# default, headless is the automatic fallback. The cloud preack already ran in _cloud_disclose.
+OSRC_SESSION_FALLBACK_RC=97
 _session_run() {
   local verb="$1"; shift
   local task="${REST[*]:-}"
@@ -6895,21 +7084,36 @@ _session_run() {
   # what keeps `edit -m opus` on claude-native instead of misrouting to devin. _session_should already
   # rejected any lane with no faithful session transport, so a non-empty mapping is guaranteed here.
   local _sprov; _sprov="$(_session_provider_for_disp "$disp")"
-  [ -n "$_sprov" ] || die "session-default: no session transport for lane '$disp' (should have fallen back to bg)."
+  # Should never be empty (guaranteed by _session_should), but if it somehow is, fall back rather than die.
+  [ -n "$_sprov" ] || { printf '>>> [interactive-default] no session transport for lane %s; falling back to headless bg.\n' "$disp" >&2; return "$OSRC_SESSION_FALLBACK_RC"; }
   # `session` is a separate subcommand (never re-enters route_delegate) -> no recursion. --provider must
-  # precede the subcommand (global flags parse first).
+  # precede the subcommand (global flags parse first). A START failure (CLI missing, an interactive flag
+  # the lane's TUI rejects, a tmux hiccup) must NOT kill the delegation — fall back to headless so the
+  # work still runs. This is what makes "interactive by default" safe to turn on for every lane.
   local _start_out
-  _start_out="$("$SCRIPT_PATH" --provider "$_sprov" session start -m "$RESOLVED_ID" 2>&1)" \
-    || die "session-default: 'session start' failed -- $_start_out"
-  printf '%s\n' "$_start_out" >&2
-  # Hand the task to the session. A send FAILURE means the delegate never received the work, so tear
-  # the empty session down and fail loudly instead of printing a false success receipt (which would
-  # leave an idle session and make the caller believe the task is running).
-  local _send_out
-  if ! _send_out="$("$SCRIPT_PATH" session send "$task" 2>&1)"; then
-    "$SCRIPT_PATH" session stop >/dev/null 2>&1 || true
-    die "session-default: task delivery failed -- $_send_out (the empty session was stopped; re-run, or set OSRC_NO_SESSION=1 for a headless bg job)."
+  if ! _start_out="$("$SCRIPT_PATH" --provider "$_sprov" session start -m "$RESOLVED_ID" 2>&1)"; then
+    printf '>>> [interactive-default] session start failed on lane %s (%s); falling back to a headless bg job so the work still runs.\n' "$_sprov" "$(printf '%s' "$_start_out" | tail -1)" >&2
+    return "$OSRC_SESSION_FALLBACK_RC"
   fi
+  printf '%s\n' "$_start_out" >&2
+  # Hand the task to the session. A SLOW-BOOT TUI (devin advertises ~8s to become composer-ready) is not
+  # ready to receive on the first try, so a one-shot send would fail and drop the job to headless — i.e.
+  # interactive-default would degrade to headless for exactly the slow lanes it most needs to steer (S1.3).
+  # Retry the send on a bounded schedule; only fall back after the whole window is exhausted. Tune with
+  # OSRC_SESSION_SEND_TRIES / OSRC_SESSION_SEND_DELAY (default 6 x 2s = ~12s, covers an ~8s cold boot).
+  local _send_out _try=0 _max="${OSRC_SESSION_SEND_TRIES:-6}" _delay="${OSRC_SESSION_SEND_DELAY:-2}"
+  case "$_max" in ''|*[!0-9]*) _max=6 ;; esac
+  case "$_delay" in ''|*[!0-9]*) _delay=2 ;; esac
+  while :; do
+    if _send_out="$("$SCRIPT_PATH" session send "$task" 2>&1)"; then break; fi
+    _try=$((_try+1))
+    if [ "$_try" -ge "$_max" ]; then
+      "$SCRIPT_PATH" session stop >/dev/null 2>&1 || true
+      printf '>>> [interactive-default] task delivery failed after %s tries over ~%ss (%s); the empty session was stopped, falling back to a headless bg job.\n' "$_max" "$((_max*_delay))" "$(printf '%s' "$_send_out" | tail -1)" >&2
+      return "$OSRC_SESSION_FALLBACK_RC"
+    fi
+    sleep "$_delay"   # composer not ready yet (cold TUI boot); wait and retry before giving up
+  done
   printf '>>> [interactive-default] mutating/approval-prone delegation opened as a STEERABLE session (not headless bg).\n' >&2
   printf '>>>   lane : %s   read: %s session read   steer: %s session send "…"   stop: %s session stop\n' "$_sprov" "$0" "$0" "$0" >&2
   printf '>>>   (opt out with OSRC_NO_SESSION=1 for a self-completing headless bg job; a non-steering\n' >&2
@@ -6953,7 +7157,10 @@ _resolve_run_cost() {
         # `gi` is the Gemini-API-key lane code (see _lane_cost_disclosure's gemini|gi arm). The
         # foreground gemini path records under that code, so without it here a metered API-key run
         # would take the `*)` arm and log a FALSE measured $0.
-        or|gi|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        # BYOK/metered-capable vehicles: no receipt is NOT a measured zero. cursor (subscription OR BYOK
+        # key) and cline (ClinePass sub OR own keys) are ambiguous per their own cost disclosures, so a
+        # keyed run can incur cash — recording $0 would understate spend and mis-bucket cash as plan (S5.1).
+        or|gi|gemini|gm|gmnative|droid|warp|cursor|cline) real_cost="" ;;
         *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
@@ -7176,12 +7383,17 @@ _reconcile_status() {
   # would otherwise keep that flag forever because nothing writes a terminal status for it.
   case "$st" in
     running|stalled\?|exploring\?)
-      local _jpid _spid _alive=0 _live_stime _saved_stime
+      local _jpid _spid _alive=0 _live_stime _saved_stime _jpid_verified=0
       _jpid="$(cat "$jd/pid" 2>/dev/null)"
       if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
         _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
         _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
-        { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+        # VERIFIED alive only when a saved identity exists AND matches the live one. A MISSING saved
+        # identity (legacy job) still counts as alive so we don't false-reap, but it is UNVERIFIED — the
+        # orphan guard below must NOT _kill_tree an unverified pid (it could be a recycled number). S3.3.
+        if [ -n "$_saved_stime" ] && [ "$_live_stime" = "$_saved_stime" ]; then _alive=1; _jpid_verified=1
+        elif [ -z "$_saved_stime" ]; then _alive=1
+        fi
       fi
       if [ "$_alive" = "0" ]; then
         _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
@@ -7219,9 +7431,15 @@ _reconcile_status() {
           fi
           if [ "$_sup_alive" = "0" ]; then
             if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
-              _kill_tree "$_jpid" 2>/dev/null || true
+              # Only reap the delegate tree if its identity was VERIFIED (S3.3). With a missing pid_start
+              # the live pid may be a recycled, unrelated process — mark the job interrupted (its status
+              # was stale regardless) but do NOT kill an unverifiable pid.
+              [ "$_jpid_verified" = "1" ] && { _kill_tree "$_jpid" 2>/dev/null || true; }
               echo interrupted > "$jd/status" 2>/dev/null
-              [ -s "$jd/reason" ] || printf 'interrupted:dead-supervisor-live-orphan\n' > "$jd/reason" 2>/dev/null || true
+              if [ ! -s "$jd/reason" ]; then
+                [ "$_jpid_verified" = "1" ] && printf 'interrupted:dead-supervisor-live-orphan\n' > "$jd/reason" 2>/dev/null \
+                  || printf 'interrupted:dead-supervisor-unverified-pid\n' > "$jd/reason" 2>/dev/null || true
+              fi
             fi
             _alive=0; st="interrupted"
           fi
@@ -7244,7 +7462,10 @@ _reconcile_status() {
       local _sa _grace _now2; _now2=$(date +%s)
       _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=$_now2 ;; esac
       _grace="${OSRC_LAUNCH_GRACE:-45}"; [ -f "$jd/setup" ] && _grace="${OSRC_SETUP_GRACE:-900}"
-      if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( _now2 - _sa )) -ge "$_grace" ]; then
+      # "No worker output" means NOTHING beyond our own `>>> ` launcher/disclosure banners — a banner byte
+      # written before the worker starts must NOT keep a stillborn job `launching` forever (S3.2). Same
+      # content test the stall/empty-output paths use.
+      if ! grep -aqv '^>>> ' "$jd/out.log" 2>/dev/null && [ ! -f "$jd/pid" ] && [ $(( _now2 - _sa )) -ge "$_grace" ]; then
         [ "${OSRC_RECONCILE_READ_ONLY:-0}" = "1" ] || echo failed > "$jd/status" 2>/dev/null
         st="failed"
         # The REASON travels with the state change. Writing the status here and the explanation
@@ -7277,7 +7498,8 @@ _status_line() {
     # still BOUNDED — a setup that hangs forever must not become a permanent phantom.
     local _grace="${OSRC_LAUNCH_GRACE:-45}" _phase=""
     if [ -f "$jd/setup" ]; then _grace="${OSRC_SETUP_GRACE:-900}"; _phase="$(cat "$jd/setup" 2>/dev/null)"; fi
-    if [ ! -s "$jd/out.log" ] && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "$_grace" ]; then
+    # A `>>> ` banner byte must not mask a stillborn worker (S3.2): "no output" = nothing past our banners.
+    if ! grep -aqv '^>>> ' "$jd/out.log" 2>/dev/null && [ ! -f "$jd/pid" ] && [ $(( now - _sa )) -ge "$_grace" ]; then
       echo failed > "$jd/status"; st="failed"
       [ -n "$_phase" ] && printf 'stillborn: the job never got past its %s setup phase (no process or output within %ss). Setup itself is stuck — check for a hung git operation or a lock left behind by an interrupted run.\n' "$_phase" "$_grace" > "$jd/error" 2>/dev/null || \
       printf 'stillborn: the launcher detached but the worker never started (no process or output within %ss). The environment likely reaped the background process — e.g. a sandbox that reaps detached jobs. Re-run in the foreground (--wait) or a shell that allows background processes.\n' "${OSRC_LAUNCH_GRACE:-45}" > "$jd/error" 2>/dev/null || true
@@ -7928,11 +8150,29 @@ cmd_logs() {
   return "$rc"
 }
 
+# _kill_job_pid <job-dir> — kill the job's recorded pid tree, but REFUSE when that pid has been recycled
+# to an unrelated process (S5.5). Mirrors _reconcile_status's discipline: skip ONLY on a CONFIRMED identity
+# mismatch (saved start present AND live start readable AND they differ). A missing/unreadable identity
+# falls through to the kill so legacy jobs stay cancellable. Used by cancel + cleanup.
+_kill_job_pid() {
+  local jd="$1" pid saved live
+  pid="$(cat "$jd/pid" 2>/dev/null)"; [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  saved="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
+  if [ -n "$saved" ]; then
+    live="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')"
+    if [ -n "$live" ] && [ "$live" != "$saved" ]; then
+      echo "[outsourcerer] cleanup/cancel: pid $pid was recycled to an unrelated process; not killing it." >&2
+      return 0
+    fi
+  fi
+  _kill_tree "$pid"
+}
+
 cmd_cancel() {
   local id="${1:-}"; [ -n "$id" ] || die "cancel needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
-  local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
-  [ -n "$pid" ] && _kill_tree "$pid"
+  _kill_job_pid "$jd"
   echo canceled > "$jd/status"; printf 'canceled:operator\n' > "$jd/reason" 2>/dev/null || true; echo "canceled $id"
   # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
   # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
@@ -7952,16 +8192,22 @@ cmd_cleanup() {
   [ -n "$target" ] || die "cleanup needs a job id or fanout group id (add --force to remove dirty/unmerged worktrees)"
   local gd; gd="$(_fanout_dir "$target")"
   if [ -f "$gd/members.tsv" ]; then       # a fanout gid -> clean each member
-    local jid label; while IFS="$(printf '\t')" read -r jid label; do
+    local jid label _cfail=0; while IFS="$(printf '\t')" read -r jid label; do
       [ -n "$jid" ] || continue
-      if [ "$force" = 1 ]; then cmd_cleanup "$jid" --force; else cmd_cleanup "$jid"; fi
+      # Propagate a member refusal (S5.6): a conservative cleanup of a dirty/ahead member returns
+      # nonzero; ignoring it printed "cleaned" + exit 0 while the worktree survived. Count and surface it.
+      if [ "$force" = 1 ]; then cmd_cleanup "$jid" --force || _cfail=$((_cfail+1)); else cmd_cleanup "$jid" || _cfail=$((_cfail+1)); fi
     done < "$gd/members.tsv"
+    if [ "$_cfail" -gt 0 ]; then
+      echo "[outsourcerer] fanout $target: $_cfail member(s) NOT cleaned (dirty/unmerged — re-run with --force to remove)." >&2
+      return 1
+    fi
     echo "[outsourcerer] cleaned fanout $target"; return 0
   fi
   # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
   # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
-  local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
-  [ -n "$live_pid" ] && _kill_tree "$live_pid"
+  # Identity-guarded so a recycled pid on a stale job dir can't kill an unrelated process (S5.5).
+  _kill_job_pid "$OSRC_JOBS/$target"
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
@@ -8283,6 +8529,14 @@ cmd_gc() {
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
       *) skipped=$((skipped+1)); continue ;;
     esac
+    # LIVE-WRITER GUARD (S5.4): a terminal status can be on disk while run_job is STILL post-processing the
+    # dir (worktree.json, last.txt, OpenRouter cost). If the supervisor or delegate pid is still alive, skip
+    # this round so GC can't delete a directory a live process is writing — it's collected next pass. A
+    # recycled-pid false positive only DEFERS deletion (safe), never causes a wrong delete.
+    local _gsp _gdp; _gsp="$(cat "$d/supervisor_pid" 2>/dev/null)"; _gdp="$(cat "$d/pid" 2>/dev/null)"
+    if { [ -n "$_gsp" ] && kill -0 "$_gsp" 2>/dev/null; } || { [ -n "$_gdp" ] && kill -0 "$_gdp" 2>/dev/null; }; then
+      skipped=$((skipped+1)); continue
+    fi
     mtime="$(_mtime "$d")"
     if [ -z "$mtime" ] || ! printf '%s\n' "$mtime" | grep -q '^[0-9][0-9]*$'; then
       skipped=$((skipped+1)); continue
@@ -8372,9 +8626,9 @@ _fanout_wait() {
   local gid="${1:-}"; [ -n "$gid" ] || die "fanout wait needs a group id"
   local gd; gd="$(_fanout_dir "$gid")"; [ -d "$gd" ] || die "no fanout group: $gid"
   local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-0}"
-  local t0; t0=$(date +%s)
+  local t0 _timed_out=0; t0=$(date +%s)
   while [ "$(_fanout_running "$gid")" -gt 0 ]; do
-    [ "$forsec" -gt 0 ] && [ $(( $(date +%s) - t0 )) -ge "$forsec" ] && break
+    if [ "$forsec" -gt 0 ] && [ $(( $(date +%s) - t0 )) -ge "$forsec" ]; then _timed_out=1; break; fi
     sleep "${OSRC_POLL:-10}"
   done
   _fanout_status "$gid" >&2
@@ -8385,7 +8639,12 @@ _fanout_wait() {
     _st="$(_reconcile_status "$_jid" 2>/dev/null || echo '?')"
     case "$_st" in failed|blocked|timeout|wedged|permission-blocked|interrupted|canceled) _fail=$((_fail+1)) ;; esac
   done < "$gd/members.tsv"
-  echo "[outsourcerer] fanout $gid: $(_fanout_running "$gid") still running, $_fail failed." >&2
+  local _running_now; _running_now="$(_fanout_running "$gid")"
+  echo "[outsourcerer] fanout $gid: $_running_now still running, $_fail failed." >&2
+  # --for elapsed with members STILL LIVE is NOT success: return 124 (the honest "gave up waiting, still
+  # running" code), matching single-job `wait --for`. Automation keying on exit 0 must not treat an
+  # incomplete fanout as done (S5.3).
+  [ "$_timed_out" = 1 ] && [ "$_running_now" -gt 0 ] && return 124
   [ "$_fail" -eq 0 ] || return 1
 }
 
@@ -8394,6 +8653,15 @@ _fanout_wait() {
 _fanout_collect() {
   local gid="${1:-}"; [ -n "$gid" ] || die "fanout collect needs a group id"
   local gd; gd="$(_fanout_dir "$gid")"; [ -d "$gd" ] || die "no fanout group: $gid"
+  # SERIALIZE collectors (S5.8): two concurrent `fanout collect` calls both truncated COLLECTED.md and
+  # overwrote the same numbered finding files with no lock, yielding mixed/torn output while each exited 0.
+  # A single-holder mkdir lock (auto-released; stale-claim reclaimed by _mkdir_claim) makes collect atomic.
+  local _clk="$gd/.collect.lock"
+  if ! _mkdir_claim "$_clk"; then
+    echo "[outsourcerer] fanout $gid: another collect is in progress; skipping to avoid a torn COLLECTED.md." >&2
+    return 1
+  fi
+  trap 'rmdir "$_clk" 2>/dev/null || true' RETURN
   local out="$gd/COLLECTED.md"; : > "$out"
   printf '# Fanout %s — collected findings\n\n' "$gid" >> "$out"
   local jid label jd st dst n=0
@@ -10008,7 +10276,12 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 _is_cloud_lane() {
   case "$1" in
+    # resolved DISP names
     ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline|claudex) return 0 ;;
+    # PROVIDER aliases too — `session start` gates on $PROVIDER (codex/cc/gemini/…), not the disp. Without
+    # these, an interactive cloud session (`session start --provider codex` from a repo with a .env) slipped
+    # past _secret_scan + the cloud disclosure entirely (CRITICAL). All of these ship data off-machine.
+    codex|cx|cc|claude|gemini|gm|dv) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -10076,8 +10349,8 @@ _secret_scan() {
     # Validate depth to an integer -- a bogus OSRC_SECRET_SCAN_DEPTH made `find`
     # error out, the read loop saw nothing, and the scan FAILED OPEN (no die). Never fail open on a scan
     # we cannot run: sanitize to the default, and if find itself errors, refuse the cloud route.
-    local _depth="${OSRC_SECRET_SCAN_DEPTH:-4}"
-    case "$_depth" in ''|*[!0-9]*) _depth=4 ;; esac
+    local _depth="${OSRC_SECRET_SCAN_DEPTH:-6}"   # was 4: a credential at a/b/c/d/e/.env (depth 5) slipped past (S4.3)
+    case "$_depth" in ''|*[!0-9]*) _depth=6 ;; esac
     [ "$_depth" -gt 12 ] 2>/dev/null && _depth=12   # cap: an unbounded walk is a DoS/hang, not security
     # Process substitution DISCARDS find's exit status, so a find that fails
     # to run scans nothing and the gate fails OPEN. Run find into a private temp file, CHECK its status,
@@ -10086,7 +10359,11 @@ _secret_scan() {
     local _sf _ef
     _sf="$(mktemp "${TMPDIR:-/tmp}/osrc.scan.XXXXXX" 2>/dev/null)" || die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."
     _ef="$(mktemp "${TMPDIR:-/tmp}/osrc.scanerr.XXXXXX" 2>/dev/null)" || { rm -f "$_sf"; die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."; }
-    find "$PWD" -maxdepth "$_depth" \
+    # -L FOLLOWS SYMLINKS (S4.3): a symlinked `.env` (or a symlinked dir holding one) was invisible to a
+    # plain find, yet the cloud delegate reads through it. -maxdepth bounds symlink cycles. (Vendored dirs
+    # stay pruned by design — un-pruning them makes every cloud call a full-tree walk; a credential inside
+    # node_modules/build is the documented residual, override with OSRC_SECRET_SCAN_DEPTH if needed.)
+    find -L "$PWD" -maxdepth "$_depth" \
                \( -name .git -o -name node_modules -o -name vendor -o -name .venv -o -name venv \
                   -o -name target -o -name dist -o -name build -o -name .terraform \) -prune -o \
                -type f \( -name '.env' -o -name '.env.*' -o -name 'credentials' -o -name 'id_rsa' \
@@ -11313,7 +11590,12 @@ route_delegate() {
   if _session_should "$verb" "$disp"; then
     export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH - 1))   # the session IS this delegation (mirror auto-detach)
     _session_run "$verb" ${ORIG[@]+"${ORIG[@]}"}
-    return $?
+    _sr_rc=$?
+    # NEVER a dead end: if the session could not start/deliver, _session_run returns the fallback
+    # sentinel. Restore the depth it borrowed and fall through to the headless bg/dispatch path so the
+    # work still runs (interactive is the default, headless is the automatic fallback).
+    if [ "$_sr_rc" != "${OSRC_SESSION_FALLBACK_RC:-97}" ]; then return "$_sr_rc"; fi
+    export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH + 1))
   fi
 
   # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to the bg path so a harness

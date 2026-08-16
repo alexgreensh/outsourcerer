@@ -32,11 +32,24 @@ done
 
 evt='{"event_id":"e1","kind":"fleet-state","state":"blocked","task_summary":"GLM wedged at step 2/4"}'
 
-# ---------------------------------------------------------------- no-op when unset
+# --------------------------------------------------- PUSH ON BY DEFAULT (no custom wake armed)
+# With no OSRC_HEARTBEAT_WAKE, the beacon no longer goes silent: it uses the built-in LOCAL push, which
+# appends the pulse to $OSRC_HEARTBEAT/pulse.log (the durable, tailable sink). OSRC_HEARTBEAT_NOTIFY=0
+# suppresses the desktop popup so the test never fires a real notification.
+export OSRC_HEARTBEAT_NOTIFY=0
 unset OSRC_HEARTBEAT_WAKE
-rm -f "$TMP/fired"
+rm -f "$OSRC_HEARTBEAT/pulse.log"
 _wake_notify_external "$evt"
-[ -e "$TMP/fired" ] && bad "notifier ran with OSRC_HEARTBEAT_WAKE unset" || ok "notifier is a no-op when no wake command is armed"
+if grep -q "GLM wedged at step 2/4" "$OSRC_HEARTBEAT/pulse.log" 2>/dev/null; then
+  ok "default LOCAL push writes the pulse to pulse.log when no custom wake is armed (no more silent no-op)"
+else bad "default local push did not write pulse.log (status would go silent)"; fi
+
+# Explicit OSRC_HEARTBEAT_WAKE=off disables the push entirely (no pulse, no popup).
+export OSRC_HEARTBEAT_WAKE=off
+rm -f "$OSRC_HEARTBEAT/pulse.log"
+_wake_notify_external "$evt"
+[ -e "$OSRC_HEARTBEAT/pulse.log" ] && bad "OSRC_HEARTBEAT_WAKE=off still wrote a pulse" || ok "OSRC_HEARTBEAT_WAKE=off disables the push entirely"
+unset OSRC_HEARTBEAT_WAKE
 
 # ---------------------------------------------------------------- fires + receives contract
 export OSRC_HEARTBEAT_WAKE='printf "%s\n" "$1" > "$OSRC_HOME/arg1"; cat > "$OSRC_HOME/stdin"'
@@ -61,13 +74,19 @@ sleep 0.6
 # ---------------------------------------------------------------- async-supervision guard
 # Guard is about the headless case; under a tty it must stay quiet. In this test harness stdin/out/err
 # are pipes (not ttys), so the headless branch is exercised directly.
+# With push ON BY DEFAULT, the unset case is now an FYI (push is on), NOT an alarm. The alarm fires only
+# when push is explicitly turned OFF.
 unset OSRC_HEARTBEAT_WAKE OSRC_HEARTBEAT_SINK
 out="$(_async_supervision_notice 2>&1)"
-case "$out" in *"ASYNC SUPERVISION"*) ok "guard warns when headless with no wake/sink armed" ;; *) bad "guard did not warn in the headless no-wake case: '$out'" ;; esac
+case "$out" in *"push is ON by default"*) ok "guard confirms default push is on when no wake armed (not an alarm)" ;; *) bad "guard did not confirm default push in the unset case: '$out'" ;; esac
+
+export OSRC_HEARTBEAT_WAKE=off
+out="$(_async_supervision_notice 2>&1)"
+case "$out" in *"ASYNC SUPERVISION"*) ok "guard warns loudly ONLY when push is explicitly OFF" ;; *) bad "guard did not warn when push was turned off: '$out'" ;; esac
 
 export OSRC_HEARTBEAT_WAKE='true'
 out="$(_async_supervision_notice 2>&1)"
-[ -z "$out" ] && ok "guard is silent once a wake command is armed" || bad "guard still warned with a wake armed: '$out'"
+[ -z "$out" ] && ok "guard is silent once a custom wake command is armed" || bad "guard still warned with a wake armed: '$out'"
 
 unset OSRC_HEARTBEAT_WAKE
 export OSRC_HEARTBEAT_SINK="$TMP/sink"; : > "$OSRC_HEARTBEAT_SINK"

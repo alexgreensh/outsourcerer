@@ -35,6 +35,12 @@ TMP="$(mktemp -d)"
 # --- Scenario 1: local lanes classified non-cloud; skip the gate entirely. ---
 if ! _is_cloud_lane "local" >/dev/null 2>&1; then ok "local lane classified non-cloud"; else bad "local lane mis-classified as cloud"; fi
 if ! _is_cloud_lane "ollama" >/dev/null 2>&1 && ! _is_cloud_lane "lmstudio" >/dev/null 2>&1; then ok "ollama/lmstudio classified non-cloud"; else bad "ollama/lmstudio mis-classified as cloud"; fi
+# CRITICAL regression guard: `session start` gates the secret-scan/disclosure on the PROVIDER name
+# (codex/cc/gemini/…), not the resolved disp. If _is_cloud_lane doesn't recognize those, an interactive
+# cloud session skips the secret scan entirely. Every provider alias a cloud session can carry must classify cloud.
+for _p in codex cx cc claude gemini gm dv devin; do
+  _is_cloud_lane "$_p" >/dev/null 2>&1 && ok "provider alias '$_p' classified cloud (session-start secret gate fires)" || bad "provider alias '$_p' NOT classified cloud — interactive session would skip _secret_scan"
+done
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _cloud_disclose "local" "llama3" "do thing" ) 2>&1 )"
 [ $? -eq 0 ] && ok "non-cloud _cloud_disclose returns 0" || bad "non-cloud _cloud_disclose nonzero"
 echo "$out" | grep -qi 'CLOUD' && bad "non-cloud lane printed a cloud disclosure" || ok "non-cloud lane prints no disclosure"
