@@ -8943,16 +8943,26 @@ delegate_cxnative() {
     dangerous)               sflag=(--dangerously-bypass-approvals-and-sandbox); posture="DANGER (no sandbox/approvals)" ;;
     *) die "bad tier: $tier" ;;
   esac
-  # BROWSER/NETWORK (fixes "sandboxed sol can't use the browser"): codex's workspace-write sandbox
-  # DISABLES network by default (verified live: curl -> HTTP:000 without this, HTTP:200 with it), which
-  # blocks the browser and any web fetch a research task needs. Turn network ON for the workspace-write
-  # sandbox so sandboxed exec keeps its FILESYSTEM write-scoping but can reach the network. The stronger
-  # FS isolation the sandbox exists for is unchanged. Opt out with OSRC_NO_NET=1 for a task that must be
-  # network-isolated (e.g. handling untrusted input where exfiltration is the concern).
+  # BROWSER / NETWORK (fixes "sandboxed sol can't use the browser"). codex's workspace-write sandbox
+  # DISABLES network by default (verified live: curl -> HTTP:000 without the override, HTTP:200 with it),
+  # which blocks the browser and any web fetch. But turning network ON for EVERY sandboxed job is an
+  # exfiltration regression (a prompt-injected job could POST readable workspace data out), so network
+  # stays OFF by default and is enabled only by an EXPLICIT opt-in:
+  #   OSRC_NET=1     -> enable network in the workspace-write sandbox (curl/fetch work; FS still scoped).
+  #   OSRC_BROWSER=1 -> network AND load the user's codex config so the browser tool/MCP is available
+  #                     (a real browser needs its MCP, which --ignore-user-config below otherwise strips).
+  # Browser mode is best driven from an interactive session (a headless job cannot answer an MCP OAuth
+  # prompt — the reason --ignore-user-config exists). Default (neither set) keeps full isolation.
+  local _net=0 _browser=0
+  [ "${OSRC_NET:-0}" = "1" ] && _net=1
+  [ "${OSRC_BROWSER:-0}" = "1" ] && { _net=1; _browser=1; }
   case "$tier" in
-    accept-edits|autonomous) [ "${OSRC_NO_NET:-0}" = "1" ] \
-      && posture="WORKSPACE-WRITE sandbox (network OFF: OSRC_NO_NET)" \
-      || { sflag+=(-c 'sandbox_workspace_write.network_access=true'); posture="WORKSPACE-WRITE sandbox + network (browser-capable; OSRC_NO_NET=1 to isolate)"; } ;;
+    accept-edits|autonomous)
+      if [ "$_net" = "1" ]; then
+        sflag+=(-c 'sandbox_workspace_write.network_access=true')
+        [ "$_browser" = "1" ] && posture="WORKSPACE-WRITE sandbox + network + browser config" \
+                              || posture="WORKSPACE-WRITE sandbox + network (OSRC_NET)"
+      fi ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   _tier_banner "codex-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cx)"
@@ -8969,7 +8979,10 @@ delegate_cxnative() {
   # surface; per `codex exec --help` auth still uses CODEX_HOME, so your ChatGPT-sub login (Sol/Terra/
   # Luna) keeps working. Verified live: luna answers PONG with the flag on. Escape hatch: set
   # OSRC_CODEX_USER_CONFIG=1 to deliberately ride your full live config (e.g. to reuse an MCP server).
-  local iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || iso=(--ignore-user-config)
+  # Browser mode (OSRC_BROWSER=1, sets _browser above) needs the user's codex config for the browser
+  # MCP/tool, so it does NOT pass --ignore-user-config. OSRC_CODEX_USER_CONFIG=1 forces the full config
+  # for any run. Otherwise stay isolated (drop user MCP servers to avoid a mid-run OAuth wedge).
+  local iso=(); { [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || [ "$_browser" = "1" ]; } || iso=(--ignore-user-config)
   local rc=0
   codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
   record_ledger codex-native "$id" "$ttier" "$tier" "$task" "0.000000" cx
@@ -11326,9 +11339,16 @@ route_delegate() {
     case "$disp" in
       devin)
         if [ "$tier" = "autonomous" ]; then
-          # Preflight: if this org already refused sandboxed-autonomous, don't re-attempt + re-nag.
-          # One clean notice + a routable next step (Codex for sandbox, or run/explore read-only).
-          if [ "$(_posture_get devin autonomous 2>/dev/null)" = "restricted" ]; then
+          # Resolve + VALIDATE the effective sandboxed-research mode BEFORE the posture preflight, so the
+          # check keys on the mode we will actually run — not a hardcoded 'autonomous'. Otherwise a cached
+          # 'devin.autonomous restricted' verdict would keep blocking research even after we switched the
+          # default to 'smart', and a typo'd override would reach the CLI and fail late.
+          local _drm="${OSRC_DEVIN_RESEARCH_MODE:-smart}"
+          case "$_drm" in auto|accept-edits|smart|dangerous) ;; *)
+            die "OSRC_DEVIN_RESEARCH_MODE must be one of: auto | accept-edits | smart | dangerous (got '$_drm'). devin has no 'autonomous' mode." ;;
+          esac
+          # Preflight: if this org already refused THIS sandboxed mode, don't re-attempt + re-nag.
+          if [ "$(_posture_get devin "$_drm" 2>/dev/null)" = "restricted" ]; then
             _devin_autonomous_restricted_notice; return 3
           fi
           # WRITE FIX: devin's `autonomous` auto-approves EXEC but still gates file WRITES ("rejected a
@@ -11337,9 +11357,9 @@ route_delegate() {
           # (auto-approves workspace edits) AND auto-runs actions a fast model judges safe — i.e. read +
           # exec + WRITE, still under the OS sandbox (--sandbox scopes writes to the workspace). Default
           # to it so sandboxed research can actually produce files; OSRC_DEVIN_RESEARCH_MODE overrides
-          # (e.g. `dangerous` for full auto-approval within the sandbox, or `autonomous` for the old
-          # exec-only behavior). Kept sandboxed either way — that is what distinguishes research from yolo.
-          delegate "${OSRC_DEVIN_RESEARCH_MODE:-smart}" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
+          # (e.g. `dangerous` for full auto-approval within the sandbox). Kept sandboxed either way — that
+          # is what distinguishes research from yolo.
+          delegate "$_drm" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
         else delegate "$tier" "" ${ORIG[@]+"${ORIG[@]}"}; fi ;;
       ccor)     delegate_cc     "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
       codexor)  delegate_codex  "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
