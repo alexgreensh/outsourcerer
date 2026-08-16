@@ -7155,6 +7155,32 @@ _reconcile_status() {
           { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
         fi
       fi
+      # ORPHAN GUARD: a LIVE delegate whose SUPERVISOR (watchdog) is recorded-but-dead is unguarded —
+      # no stall/timeout/print-mode arm can fire and nothing will ever write its terminal status, so it
+      # would read "running" forever and block fanout waiters. The supervisor only leaves a non-running
+      # status on a clean exit, so a still-running status + a dead supervisor is a genuine orphan (not a
+      # normal completion), which keeps false positives near zero. Reap the orphan and mark it
+      # interrupted instead of trusting the live delegate pid. Same pid-reuse discipline as above; only
+      # acts when a supervisor pid was actually recorded (legacy jobs without one are left untouched).
+      if [ "$_alive" = "1" ]; then
+        local _sup_pid _sup_alive=0 _sup_live_stime _sup_saved_stime
+        _sup_pid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+        if [ -n "$_sup_pid" ]; then
+          if kill -0 "$_sup_pid" 2>/dev/null; then
+            _sup_live_stime="$(ps -o lstart= -p "$_sup_pid" 2>/dev/null | tr -s ' ')"
+            _sup_saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
+            { [ -z "$_sup_saved_stime" ] || [ "$_sup_live_stime" = "$_sup_saved_stime" ]; } && _sup_alive=1
+          fi
+          if [ "$_sup_alive" = "0" ]; then
+            if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
+              _kill_tree "$_jpid" 2>/dev/null || true
+              echo interrupted > "$jd/status" 2>/dev/null
+              [ -s "$jd/reason" ] || printf 'interrupted:dead-supervisor-live-orphan\n' > "$jd/reason" 2>/dev/null || true
+            fi
+            _alive=0; st="interrupted"
+          fi
+        fi
+      fi
       if [ "$_alive" = "0" ]; then
         if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
           echo interrupted > "$jd/status" 2>/dev/null
@@ -8492,6 +8518,23 @@ $body"
     die "fanout needs a source: --agents DIR | --tasks FILE | -- \"task1\" \"task2\" ..."
   fi
   [ "${#labels[@]}" -gt 0 ] || die "fanout: no tasks found in the given source."
+
+  # FANOUT DEVIN CAP (per-agent aware). The early cap above only saw the GLOBAL provider, but per-agent
+  # frontmatter (provider:/lane:) or --route can route individual members to the devin lane even under a
+  # non-devin global provider — and the early cap misses them, so up to 6 devin jobs run and >=2 die with
+  # exit=141/empty-output. Now that a_prov is resolved, recompute against each member's EFFECTIVE lane
+  # (same precedence the preack/launch loops use). Explicit --max / OSRC_FANOUT_MAX still win.
+  if [ "$maxpar_explicit" = "0" ] && [ -z "${OSRC_FANOUT_MAX:-}" ] && [ "$maxpar" -gt 2 ] 2>/dev/null; then
+    local _ndevin=0 _ei _el
+    for (( _ei=0; _ei<${#labels[@]}; _ei++ )); do
+      _el="${g_prov:-${a_prov[$_ei]}}"; _el="${_el:-$PROVIDER}"
+      case "$_el" in devin|dv) _ndevin=$((_ndevin+1)) ;; esac
+    done
+    if [ "$_ndevin" -gt 2 ]; then
+      maxpar=2
+      echo "[outsourcerer] fanout: $_ndevin members route to the devin lane (per-agent) — capping concurrency at 2 (measured ceiling; above it members die exit=141/empty-output before producing a byte). Override with --max N." >&2
+    fi
+  fi
 
   local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
   printf 'provider=%s verb=%s max=%s model=%s effort=%s tier=%s with=[%s] count=%s cwd=%s\n' \
