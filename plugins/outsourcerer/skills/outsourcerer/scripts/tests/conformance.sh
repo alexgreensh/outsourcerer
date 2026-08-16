@@ -33,7 +33,7 @@ echo "=== STATIC gate: Phase-0 invariants wired ==="
 _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default test_session_capabilities \
          test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
-         test_loops test_job_lifecycle test_watchdog_falsekill test_session_default test_watchdog_orphan_cap test_output_truncation test_lane_accounting \
+         test_loops test_job_lifecycle test_watchdog_falsekill test_session_default test_watchdog_orphan_cap test_sandbox_capability test_output_truncation test_lane_accounting \
          test_selfcontained_hardening test_trusted_lanes test_parity_links test_parity_hermes test_watch_digest \
          test_cc_devin_selfheal test_cloud_gate_coverage test_cost_disclosure \
          test_parser_parity test_resolved_lane test_limits_freshness test_gemini_lane test_watcher \

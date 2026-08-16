@@ -8943,6 +8943,17 @@ delegate_cxnative() {
     dangerous)               sflag=(--dangerously-bypass-approvals-and-sandbox); posture="DANGER (no sandbox/approvals)" ;;
     *) die "bad tier: $tier" ;;
   esac
+  # BROWSER/NETWORK (fixes "sandboxed sol can't use the browser"): codex's workspace-write sandbox
+  # DISABLES network by default (verified live: curl -> HTTP:000 without this, HTTP:200 with it), which
+  # blocks the browser and any web fetch a research task needs. Turn network ON for the workspace-write
+  # sandbox so sandboxed exec keeps its FILESYSTEM write-scoping but can reach the network. The stronger
+  # FS isolation the sandbox exists for is unchanged. Opt out with OSRC_NO_NET=1 for a task that must be
+  # network-isolated (e.g. handling untrusted input where exfiltration is the concern).
+  case "$tier" in
+    accept-edits|autonomous) [ "${OSRC_NO_NET:-0}" = "1" ] \
+      && posture="WORKSPACE-WRITE sandbox (network OFF: OSRC_NO_NET)" \
+      || { sflag+=(-c 'sandbox_workspace_write.network_access=true'); posture="WORKSPACE-WRITE sandbox + network (browser-capable; OSRC_NO_NET=1 to isolate)"; } ;;
+  esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   _tier_banner "codex-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cx)"
   # SELF-HEAL: codex ships the `code_mode_host` feature ON, but if its host binary is not installed,
@@ -11320,7 +11331,15 @@ route_delegate() {
           if [ "$(_posture_get devin autonomous 2>/dev/null)" = "restricted" ]; then
             _devin_autonomous_restricted_notice; return 3
           fi
-          delegate "autonomous" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
+          # WRITE FIX: devin's `autonomous` auto-approves EXEC but still gates file WRITES ("rejected a
+          # tool call that requires confirmation" mid-run), so a headless research job that reads/execs
+          # fine dies the moment it tries to save output. Devin's `smart` mode inherits accept-edits
+          # (auto-approves workspace edits) AND auto-runs actions a fast model judges safe — i.e. read +
+          # exec + WRITE, still under the OS sandbox (--sandbox scopes writes to the workspace). Default
+          # to it so sandboxed research can actually produce files; OSRC_DEVIN_RESEARCH_MODE overrides
+          # (e.g. `dangerous` for full auto-approval within the sandbox, or `autonomous` for the old
+          # exec-only behavior). Kept sandboxed either way — that is what distinguishes research from yolo.
+          delegate "${OSRC_DEVIN_RESEARCH_MODE:-smart}" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
         else delegate "$tier" "" ${ORIG[@]+"${ORIG[@]}"}; fi ;;
       ccor)     delegate_cc     "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
       codexor)  delegate_codex  "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
