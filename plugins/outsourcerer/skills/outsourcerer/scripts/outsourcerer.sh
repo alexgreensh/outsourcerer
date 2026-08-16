@@ -6812,6 +6812,73 @@ _autodetach_run() {
   return 0
 }
 
+# _session_should <verb> <disp> -> return 0 if this delegation should open a STEERABLE session
+# instead of detaching to headless bg; 1 otherwise. INTERACTIVE-DEFAULT (D4): the SKILL says session
+# is the default for mutating/approval-prone work, but the runtime never enforced it — non-TTY callers
+# (an orchestrator like Claude's shell tool) were shoved to headless bg by _autodetach_should, where a
+# delegate that hits an approval/sandbox wall dies unseen. This gate runs BEFORE _autodetach_should so
+# the tested auto-detach behavior is untouched; it only intercepts first for the verbs that benefit.
+#
+# The safety line the old [ -t 1 ] proxy got wrong: "non-TTY" is not "cannot steer." A CI/detached/
+# fanout caller genuinely cannot drive a TUI (headless is correct there); an orchestrator is non-TTY
+# but CAN drive `session read`/`session send`. So we exclude the genuinely-headless cases explicitly
+# and treat the rest as steerable. Escape hatches: OSRC_NO_SESSION=1 forces headless bg (for automation
+# that wants a self-completing job); OSRC_FORCE_SESSION=1 promotes read-only run/explore too.
+_session_should() {
+  local verb="$1" disp="$2"
+  [ "${OSRC_NO_SESSION:-0}" = "1" ] && return 1        # explicit opt-out -> headless bg
+  [ "${OSRC_STREAM:-0}" = "1" ] && return 1            # already inside a bg job
+  [ -n "${OSRC_JOB_DIR:-}" ] && return 1               # already inside a bg job
+  [ -n "${OSRC_FANOUT_CHILD:-}" ] && return 1          # a fanout member -> stays a headless one-shot
+  [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 1         # preflight probe must not mint a session
+  [ "${CI:-}" = "true" ] && return 1                   # CI cannot drive a TUI
+  [ -n "${GITHUB_ACTIONS:-}" ] && return 1
+  [ "${OSRC_CI:-0}" = "1" ] && return 1
+  # Session backend must actually be available, or we cannot open one -> fall through to bg.
+  _session_backend_available || return 1
+  case "$verb" in
+    edit|yolo|research) return 0 ;;                    # mutating / approval-prone -> steerable session
+    run|explore)        [ "${OSRC_FORCE_SESSION:-0}" = "1" ] && return 0; return 1 ;;
+  esac
+  return 1
+}
+
+# _session_backend_available -> 0 if a session transport is usable on this host (tmux on mac/linux;
+# winpty broker on Windows git bash), 1 otherwise. Kept tiny + side-effect-free so _session_should
+# can consult it cheaply, and so the whole feature degrades to bg on a host without tmux.
+_session_backend_available() {
+  case "$(uname -s 2>/dev/null)" in
+    *NT*|*MINGW*|*MSYS*|*CYGWIN*) [ -f "$SCRIPT_DIR/outsourcerer-winpty-broker.sh" ] && return 0; return 1 ;;
+    *) command -v tmux >/dev/null 2>&1 && return 0; return 1 ;;
+  esac
+}
+
+# _session_run <verb> [flags] "task" -> open a steerable session for this delegation and hand the task
+# to it, reusing the script's OWN `session start` + `session send` (the fully-tested path — no reaching
+# into session internals). Returns the session receipt; the orchestrator drives it with session read/
+# send/stop. On any failure to start, we DIE clearly rather than silently doing nothing (the caller can
+# set OSRC_NO_SESSION=1 to force the bg path). The cloud preack already ran in _cloud_disclose.
+_session_run() {
+  local verb="$1"; shift
+  local task="${REST[*]:-}"
+  [ -n "$task" ] || die "session-default: no task to run (nothing started)."
+  # Start the session for the SAME resolved model/provider this delegation chose. `session` is a
+  # separate subcommand (never re-enters route_delegate), so there is no recursion. --provider must
+  # precede the subcommand (global flags parse first).
+  local _prov_flag=(); [ -n "${PROVIDER:-}" ] && _prov_flag=(--provider "$PROVIDER")
+  local _start_out
+  _start_out="$("$SCRIPT_PATH" ${_prov_flag[@]+"${_prov_flag[@]}"} session start -m "$RESOLVED_ID" 2>&1)" \
+    || die "session-default: 'session start' failed -- $_start_out"
+  printf '%s\n' "$_start_out" >&2
+  # Hand the task to the freshly-started session. tmux buffers keystrokes, so send-after-start lands
+  # even while the delegate boots (verified live). session send resolves the session by cwd.
+  "$SCRIPT_PATH" session send "$task" >&2 2>&1 || true
+  printf '>>> [interactive-default] mutating/approval-prone delegation opened as a STEERABLE session (not headless bg).\n' >&2
+  printf '>>>   read : %s session read     steer: %s session send "…"     stop: %s session stop\n' "$0" "$0" "$0" >&2
+  printf '>>>   (opt out with OSRC_NO_SESSION=1 for a self-completing headless bg job)\n' >&2
+  return 0
+}
+
 # _resolve_run_cost <lane> <launch_epoch> <out.log> -> cost string for the ledger.
 # Priority: OpenRouter per-gen cost (authoritative) > Hermes receipt from state.db > lane default.
 # For the Hermes lane, when no receipt is available the labeled ESTIMATE ("~0") is used -- never a
@@ -11105,6 +11172,18 @@ route_delegate() {
   # Fail with the clean contract message instead of a raw unbound-variable crash.
   [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
+
+  # INTERACTIVE-DEFAULT (D4): mutating/approval-prone work (edit/yolo/research) opens a STEERABLE
+  # session by default instead of headless bg, so a delegate that hits an approval/sandbox wall can be
+  # seen and steered past instead of dying unseen — the SKILL's documented default, now enforced in
+  # code. _session_should excludes the genuinely-headless callers (CI/detached/fanout/inside-a-job) and
+  # falls through to the auto-detach/bg path below for them; OSRC_NO_SESSION=1 forces bg for automation.
+  # This runs BEFORE _autodetach_should so that function's tested behavior is unchanged.
+  if _session_should "$verb" "$disp"; then
+    export OUTSOURCERER_DEPTH=$((OUTSOURCERER_DEPTH - 1))   # the session IS this delegation (mirror auto-detach)
+    _session_run "$verb" ${ORIG[@]+"${ORIG[@]}"}
+    return $?
+  fi
 
   # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to the bg path so a harness
   # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
