@@ -11339,27 +11339,26 @@ route_delegate() {
     case "$disp" in
       devin)
         if [ "$tier" = "autonomous" ]; then
-          # Resolve + VALIDATE the effective sandboxed-research mode BEFORE the posture preflight, so the
-          # check keys on the mode we will actually run — not a hardcoded 'autonomous'. Otherwise a cached
-          # 'devin.autonomous restricted' verdict would keep blocking research even after we switched the
-          # default to 'smart', and a typo'd override would reach the CLI and fail late.
-          local _drm="${OSRC_DEVIN_RESEARCH_MODE:-smart}"
-          case "$_drm" in auto|accept-edits|smart|dangerous) ;; *)
-            die "OSRC_DEVIN_RESEARCH_MODE must be one of: auto | accept-edits | smart | dangerous (got '$_drm'). devin has no 'autonomous' mode." ;;
-          esac
-          # Preflight: if this org already refused THIS sandboxed mode, don't re-attempt + re-nag.
-          if [ "$(_posture_get devin "$_drm" 2>/dev/null)" = "restricted" ]; then
-            _devin_autonomous_restricted_notice; return 3
+          # HARD DEVIN CONSTRAINT (verified live): `--sandbox` ALWAYS forces the `autonomous` permission
+          # mode and IGNORES `--permission-mode` (it prints "--sandbox always uses the autonomous
+          # permission mode; ignoring --permission-mode X"), and `autonomous` GATES file writes headless
+          # ("rejected a tool call that requires confirmation"). So on devin there is NO sandboxed +
+          # headless-write mode — sandbox and writes are mutually exclusive. Two honest paths:
+          if [ "${OSRC_DEVIN_RESEARCH_WRITE:-0}" = "1" ]; then
+            # WRITE mode: drop --sandbox and use accept-edits (read + exec + WRITE all work). NOT
+            # OS-sandboxed. For sandboxed writes, codex research (workspace-write) is the right lane.
+            printf '>>> [devin] research WRITE mode (OSRC_DEVIN_RESEARCH_WRITE=1): dropping --sandbox and using accept-edits so file writes work. This run is NOT OS-sandboxed. For sandboxed-write research use --provider codex.\n' >&2
+            delegate "accept-edits" "" ${ORIG[@]+"${ORIG[@]}"}
+          else
+            # DEFAULT: keep the OS sandbox (secure). It is READ + EXEC only — headless file writes are
+            # blocked. Say so up front and point to the two ways to write, so a research job that needs to
+            # save output does not silently die at its first write the way the council jobs did.
+            if [ "$(_posture_get devin autonomous 2>/dev/null)" = "restricted" ]; then
+              _devin_autonomous_restricted_notice; return 3
+            fi
+            printf '>>> [devin] sandboxed research is READ/EXEC only — headless file WRITES are blocked (devin forces autonomous under --sandbox). To WRITE files: use --provider codex (sandboxed writes), or set OSRC_DEVIN_RESEARCH_WRITE=1 (unsandboxed accept-edits on devin).\n' >&2
+            delegate "autonomous" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
           fi
-          # WRITE FIX: devin's `autonomous` auto-approves EXEC but still gates file WRITES ("rejected a
-          # tool call that requires confirmation" mid-run), so a headless research job that reads/execs
-          # fine dies the moment it tries to save output. Devin's `smart` mode inherits accept-edits
-          # (auto-approves workspace edits) AND auto-runs actions a fast model judges safe — i.e. read +
-          # exec + WRITE, still under the OS sandbox (--sandbox scopes writes to the workspace). Default
-          # to it so sandboxed research can actually produce files; OSRC_DEVIN_RESEARCH_MODE overrides
-          # (e.g. `dangerous` for full auto-approval within the sandbox). Kept sandboxed either way — that
-          # is what distinguishes research from yolo.
-          delegate "$_drm" "--sandbox" ${ORIG[@]+"${ORIG[@]}"}   # OS sandbox, see header
         else delegate "$tier" "" ${ORIG[@]+"${ORIG[@]}"}; fi ;;
       ccor)     delegate_cc     "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;
       codexor)  delegate_codex  "$tier" ${ORIG[@]+"${ORIG[@]}"} ;;

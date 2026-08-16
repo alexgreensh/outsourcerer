@@ -32,27 +32,27 @@ grep -q '\[ "\$_browser" = "1" \]; } || iso=(--ignore-user-config)' "$SRC" \
   && ok "OSRC_BROWSER loads the user config so the browser MCP is available" \
   || bad "OSRC_BROWSER does not restore the browser MCP (still stripped by --ignore-user-config)"
 
-# P2-2: devin research no longer maps to the write-gating 'autonomous'; defaults to a write-capable mode.
-grep -q 'OSRC_DEVIN_RESEARCH_MODE:-smart' "$SRC" \
-  && ok "devin research defaults to a write-capable sandboxed mode (smart), overridable" \
-  || bad "devin research still uses the write-gating mode — files cannot be saved headless"
-# the old hardcoded write-gating call must be gone.
+# P2-2: devin --sandbox and headless writes are mutually exclusive (verified live), so writes are an
+# explicit opt-in that DROPS the sandbox; the secure default keeps the sandbox (read/exec) and warns.
+grep -q 'OSRC_DEVIN_RESEARCH_WRITE' "$SRC" \
+  && ok "devin research WRITE is an explicit opt-in (OSRC_DEVIN_RESEARCH_WRITE)" \
+  || bad "no OSRC_DEVIN_RESEARCH_WRITE opt-in — write-needing research still dies silently on devin"
+# write mode drops --sandbox and uses accept-edits (the only headless-write combo on devin).
+grep -q 'delegate "accept-edits" "" ' "$SRC" \
+  && ok "devin research WRITE mode uses accept-edits WITHOUT --sandbox (the combo that actually writes)" \
+  || bad "devin write mode does not use accept-edits-no-sandbox — writes will not work"
+# secure default keeps the OS sandbox (autonomous).
 grep -q 'delegate "autonomous" "--sandbox"' "$SRC" \
-  && bad "devin research still hardcodes 'autonomous' (writes gated)" \
-  || ok "the hardcoded write-gating 'autonomous' devin research call is removed"
-# still sandboxed (research != yolo).
+  && ok "devin research default keeps the OS sandbox (autonomous, read/exec)" \
+  || bad "devin research default lost its --sandbox (secure default broken)"
+# the misleading 'smart --sandbox' no-op must be gone (it printed 'ignoring --permission-mode smart').
 grep -q 'delegate "$_drm" "--sandbox"' "$SRC" \
-  && ok "devin research stays OS-sandboxed (--sandbox preserved)" \
-  || bad "devin research lost its --sandbox (would be indistinguishable from yolo)"
-# the override must be VALIDATED (a typo / the invalid 'autonomous' must not reach the CLI).
-grep -qE 'OSRC_DEVIN_RESEARCH_MODE must be one of' "$SRC" \
-  && ok "OSRC_DEVIN_RESEARCH_MODE is validated against auto|accept-edits|smart|dangerous" \
-  || bad "the research-mode override is unvalidated (a typo reaches the devin CLI and fails late)"
-# the posture preflight must key on the EFFECTIVE mode, not a hardcoded 'autonomous' (else a cached
-# autonomous restriction defeats the smart fix).
-grep -q '_posture_get devin "$_drm"' "$SRC" \
-  && ok "the devin posture preflight keys on the effective research mode, not hardcoded autonomous" \
-  || bad "posture preflight still hardcodes autonomous — a cached restriction blocks the smart fix"
+  && bad "the broken 'smart --sandbox' devin research call is still present (it does not write)" \
+  || ok "the broken 'smart --sandbox' no-op is removed"
+# the default path must WARN that writes are blocked + name the two ways to write.
+grep -q 'sandboxed research is READ/EXEC only' "$SRC" \
+  && ok "devin sandboxed research warns writes are blocked and points to codex / the write opt-in" \
+  || bad "no upfront warning — a write-needing devin research job dies silently at its first write"
 
 echo
 echo "RESULT: $pass passed, $fail failed"
