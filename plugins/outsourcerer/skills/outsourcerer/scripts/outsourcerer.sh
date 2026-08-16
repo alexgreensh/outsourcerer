@@ -6120,7 +6120,16 @@ _supervise() {
   local mutating=0; case "$verb" in edit|yolo) mutating=1 ;; esac
   local _exploring_warned=0   # emit the exploring? WARN once per episode, not every poll (see clear/warn below)
   local nww="${OSRC_NOWRITE_WARN:-180}"
-  local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
+  # REPORTED FALSE-KILL FIX: the exploring? kill must NOT fire faster than the normal stall-kill.
+  # A mutating job doing legit read-only investigation (read source, grep, query sqlite, reason) is
+  # write-free AND often output-silent for minutes before its first write — genuinely working, not
+  # wedged. The old default (nww_kill=nww=180s) reaped it at 3 minutes, far sooner than the tier's
+  # own silence budget (kill_after, e.g. 900s capable), so a write-free job died faster than an
+  # identical read-only job. Default the KILL window to the tier stall window instead: a write-free
+  # silent job now gets the SAME grace as any silent job, and the exploring? arm keeps only its
+  # early advisory WARN (at nww=180s) plus its write-awareness (a job that DID write is cleared and
+  # never reaches this kill). Tune explicitly with OSRC_NOWRITE_KILL / OSRC_STALL_KILL.
+  local nww_kill="${OSRC_NOWRITE_KILL:-$kill_after}"
   # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
