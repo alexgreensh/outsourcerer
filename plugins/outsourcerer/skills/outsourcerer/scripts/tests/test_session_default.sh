@@ -16,16 +16,17 @@ bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 # with tmux forced "available" via a stub on PATH (the tests assert routing logic, not tmux itself).
 STUB="$(mktemp -d)"; printf '#!/bin/sh\nexit 0\n' > "$STUB/tmux"; chmod +x "$STUB/tmux"
 trap 'rm -rf "$STUB"' EXIT
-_should() { # <verb> <env-assignments...> -> rc of _session_should (0=session, 1=bg)
+_should() { # <verb> <env-assignments...> -> rc of _session_should (0=session, 1=bg); DISP env sets the lane
   local verb="$1"; shift
   local envs=( "$@" )
   ( PATH="$STUB:$PATH"; SCRIPT_DIR="$HERE/.."
     set --                       # clear positionals so sourcing doesn't try to dispatch a subcommand
     . "$SRC" >/dev/null 2>&1
     # neutralize any ambient exclusions unless the case sets them
-    unset OSRC_NO_SESSION OSRC_STREAM OSRC_JOB_DIR OSRC_FANOUT_CHILD OSRC_PREFLIGHT OSRC_CI OSRC_FORCE_SESSION CI GITHUB_ACTIONS 2>/dev/null || true
-    for e in ${envs[@]+"${envs[@]}"}; do export "$e"; done
-    _session_should "$verb" devin; echo $? ) 2>/dev/null | tail -1
+    unset OSRC_NO_SESSION OSRC_NO_AUTODETACH OSRC_STREAM OSRC_JOB_DIR OSRC_FANOUT_CHILD OSRC_PREFLIGHT OSRC_CI OSRC_FORCE_SESSION OSRC_MAX_MINUTES CI GITHUB_ACTIONS 2>/dev/null || true
+    local _disp=devin
+    for e in ${envs[@]+"${envs[@]}"}; do case "$e" in DISP=*) _disp="${e#DISP=}" ;; *) export "$e" ;; esac; done
+    _session_should "$verb" "$_disp"; echo $? ) 2>/dev/null | tail -1
 }
 
 [ "$(_should edit)" = 0 ]     && ok "edit -> session by default" || bad "edit did not promote to session"
@@ -34,6 +35,18 @@ _should() { # <verb> <env-assignments...> -> rc of _session_should (0=session, 1
 [ "$(_should run)" = 1 ]      && ok "run (read-only) stays bg by default" || bad "run wrongly promoted to session"
 [ "$(_should explore)" = 1 ]  && ok "explore (read-only) stays bg by default" || bad "explore wrongly promoted"
 [ "$(_should run OSRC_FORCE_SESSION=1)" = 0 ] && ok "run + OSRC_FORCE_SESSION -> session" || bad "OSRC_FORCE_SESSION did not force run into a session"
+[ "$(_should run OSRC_MAX_MINUTES=10)" = 0 ] && ok "run + OSRC_MAX_MINUTES -> session (long work)" || bad "OSRC_MAX_MINUTES did not promote run"
+
+# Loop foreground-completion contract: OSRC_NO_AUTODETACH=1 must stay headless (loops grade synchronously).
+[ "$(_should edit OSRC_NO_AUTODETACH=1)" = 1 ] && ok "OSRC_NO_AUTODETACH=1 (loop contract) stays headless" || bad "OSRC_NO_AUTODETACH did not force headless — loops would grade stale files"
+
+# Lane faithfulness: only lanes with a real session transport promote; OpenRouter/claudex fall to bg.
+[ "$(_should edit DISP=ccnative)" = 0 ] && ok "ccnative (claude native) -> session" || bad "ccnative did not promote"
+[ "$(_should edit DISP=cxnative)" = 0 ] && ok "cxnative (codex native) -> session" || bad "cxnative did not promote"
+[ "$(_should edit DISP=ccor)" = 1 ]     && ok "ccor (OpenRouter) has no session transport -> bg" || bad "ccor wrongly promoted (would misroute to claude-native)"
+[ "$(_should edit DISP=codexor)" = 1 ]  && ok "codexor (OpenRouter) -> bg" || bad "codexor wrongly promoted"
+[ "$(_should edit DISP=claudex)" = 1 ]  && ok "claudex has no session transport -> bg" || bad "claudex wrongly promoted"
+[ "$(_should edit DISP=droid)" = 0 ]    && ok "droid -> session" || bad "droid did not promote"
 
 # Exclusions: the genuinely-headless callers + opt-out must stay bg even for a mutating verb.
 [ "$(_should edit OSRC_NO_SESSION=1)" = 1 ]  && ok "OSRC_NO_SESSION=1 forces headless bg" || bad "OSRC_NO_SESSION not honored"

@@ -51,6 +51,16 @@ D="$( TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"; mkdir -p "$OSRC_HOME/jobs"
   printf '%s|%s' "$(cat "$jd/status" 2>/dev/null)" "$(cat "$jd/reason" 2>/dev/null)"; rm -rf "$TMP" )"
 case "$D" in *no-init*) bad "D1: a still-emitting cold-boot was falsely no-init-killed ($D)";; *) ok "D1: a cold-boot still emitting output past the deadline is not reaped ($D)";; esac
 
+# D1-PERIODIC (torture T1-HIGH): a boot that emits every 4s with noinit=10 (idle floor now DEFAULTS to
+# noinit=10, so each emission renews a full window). gap 4 < 10 -> must survive, not be no-init-killed.
+# Under the old 60s idle floor this class died once noinit exceeded 60. OSRC_NOINIT_IDLE left unset.
+P="$( TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"; mkdir -p "$OSRC_HOME/jobs"
+  . "$SRC" >/dev/null 2>&1; OSRC_JOBS="$OSRC_HOME/jobs"; jd="$OSRC_JOBS/p"; mkdir -p "$jd"
+  OSRC_JOB_VERB=run OSRC_NOINIT_SECS=10 OSRC_POLL=1 \
+    _supervise "$jd" 100 100 100 -- sh -c 'for i in 1 2 3 4 5; do printf "%s\n" ">>> boot phase $i"; sleep 4; done' >/dev/null 2>&1
+  printf '%s|%s' "$(cat "$jd/status" 2>/dev/null)" "$(cat "$jd/reason" 2>/dev/null)"; rm -rf "$TMP" )"
+case "$P" in *no-init*) bad "D1: a periodically-emitting boot (gap<noinit) was falsely no-init-killed ($P)";; *) ok "D1: a periodically-emitting cold-boot survives (idle floor defaults to noinit) ($P)";; esac
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

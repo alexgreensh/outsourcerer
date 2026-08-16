@@ -70,6 +70,17 @@ else
   bad "cap recompute is not after a_prov resolution (aprov=$aprov_line cap=$cap_line)"
 fi
 
+# FIX 6 (model->lane, torture T3-HIGH): the cap must count a member whose MODEL resolves to the dv lane,
+# not only an explicit devin provider — else --route/frontmatter models bypass it. Prove the foundation:
+# resolve_model_row maps a glm alias to the dv lane, and the cap block resolves the model (not just prov).
+row="$(resolve_model_row glm-5.2 2>/dev/null)"; lane="${row#*|}"; lane="${lane%%|*}"
+case "$lane" in dv|devin) ok "resolve_model_row maps glm-5.2 to the dv lane (cap can detect it)" ;; *) bad "glm-5.2 did not resolve to dv (got lane '$lane') — cap model->lane detection would miss it" ;; esac
+if grep -q 'resolve_model_row "\$_cm"' "$SRC"; then
+  ok "the fanout cap recompute resolves each member's MODEL to a lane (closes the --route/frontmatter-model bypass)"
+else
+  bad "the fanout cap does not resolve model->lane — --route/frontmatter-model devin routing still bypasses the cap"
+fi
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

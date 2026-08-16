@@ -6136,10 +6136,12 @@ _supervise() {
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
   local noinit="${OSRC_NOINIT_SECS:-300}" initialized=0
   # Silence window for the no-init kill: a boot still emitting output within this window is alive and
-  # must not be reaped. Capped at noinit itself so a totally-silent boot (idle==age) still fires at the
-  # noinit deadline rather than waiting an extra idle-window — otherwise a small noinit lets the generic
-  # stall-kill pre-empt this arm and the reason/diagnostic would be wrong.
-  local _ni_idle="${OSRC_NOINIT_IDLE:-60}"; [ "$_ni_idle" -gt "$noinit" ] 2>/dev/null && _ni_idle="$noinit"
+  # must not be reaped. It DEFAULTS to noinit itself so that ANY observed boot output renews a full
+  # no-init window — a boot that emits periodically (e.g. every 70s during a 300s cold start) stays
+  # alive, not just a continuously-chatty one. A totally-silent boot has idle==age, so it still fires
+  # exactly at the noinit deadline. Capped at noinit so an explicit smaller OSRC_NOINIT_IDLE can tighten
+  # it but never let the generic stall-kill pre-empt this arm (which would give a wrong reason).
+  local _ni_idle="${OSRC_NOINIT_IDLE:-$noinit}"; [ "$_ni_idle" -gt "$noinit" ] 2>/dev/null && _ni_idle="$noinit"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
@@ -6168,7 +6170,12 @@ _supervise() {
         # flowed. The real kill below still fires only when the job is BOTH write-free AND output-silent
         # (idle >= nww_kill), so a genuine write-free spiral that goes quiet still dies. Reset the
         # once-per-episode WARN flag so a later genuine stall re-warns.
-        exploring?) echo running > "$jd/status"; _exploring_warned=0 ;;
+        # Clear exploring? on output growth (liveness), but do NOT reset the warn flag here: this branch
+        # fires every output-bearing poll and the no-write arm below re-flips to exploring? in the SAME
+        # iteration, so resetting here would re-warn on every poll. The flag is reset only when a real
+        # write ends the exploration episode (see the write-detected clear elsewhere), keeping it truly
+        # once-per-episode.
+        exploring?) echo running > "$jd/status" ;;
       esac
     fi
     idle=$(( now - last_change )); age=$(( now - t0 ))
@@ -6824,9 +6831,29 @@ _autodetach_run() {
 # but CAN drive `session read`/`session send`. So we exclude the genuinely-headless cases explicitly
 # and treat the rest as steerable. Escape hatches: OSRC_NO_SESSION=1 forces headless bg (for automation
 # that wants a self-completing job); OSRC_FORCE_SESSION=1 promotes read-only run/explore too.
+# _session_provider_for_disp <disp> -> the `session start` provider that runs this RESOLVED dispatch
+# lane FAITHFULLY, or empty if none exists. Deriving the session lane from the resolved disp (not the
+# stale global PROVIDER) is what keeps `edit -m opus` on claude-native instead of misrouting to devin.
+# OpenRouter transports (ccor/codexor) and claudex have NO equivalent interactive session mode, so they
+# return empty and must fall through to bg rather than silently run a different lane.
+_session_provider_for_disp() {
+  case "$1" in
+    cxnative)                       printf codex ;;
+    ccnative)                       printf cc ;;
+    gmnative)                       printf gemini ;;
+    devin)                          printf devin ;;
+    droid|cursor|hermes|warp|cline) printf '%s' "$1" ;;
+    *)                              printf '' ;;   # ccor / codexor / claudex / unknown -> not promotable
+  esac
+}
+
 _session_should() {
   local verb="$1" disp="$2"
   [ "${OSRC_NO_SESSION:-0}" = "1" ] && return 1        # explicit opt-out -> headless bg
+  # A caller that set OSRC_NO_AUTODETACH=1 is asserting a FOREGROUND-COMPLETION contract (loop verify/
+  # escalate do exactly this so they can grade the result synchronously). A session returns immediately,
+  # which would make the loop grade stale files -> honor the contract and stay headless/foreground.
+  [ "${OSRC_NO_AUTODETACH:-0}" = "1" ] && return 1
   [ "${OSRC_STREAM:-0}" = "1" ] && return 1            # already inside a bg job
   [ -n "${OSRC_JOB_DIR:-}" ] && return 1               # already inside a bg job
   [ -n "${OSRC_FANOUT_CHILD:-}" ] && return 1          # a fanout member -> stays a headless one-shot
@@ -6836,9 +6863,11 @@ _session_should() {
   [ "${OSRC_CI:-0}" = "1" ] && return 1
   # Session backend must actually be available, or we cannot open one -> fall through to bg.
   _session_backend_available || return 1
+  # Only promote a lane that session start can run faithfully; OpenRouter/claudex fall through to bg.
+  [ -n "$(_session_provider_for_disp "$disp")" ] || return 1
   case "$verb" in
     edit|yolo|research) return 0 ;;                    # mutating / approval-prone -> steerable session
-    run|explore)        [ "${OSRC_FORCE_SESSION:-0}" = "1" ] && return 0; return 1 ;;
+    run|explore)        { [ "${OSRC_FORCE_SESSION:-0}" = "1" ] || [ -n "${OSRC_MAX_MINUTES:-}" ]; } && return 0; return 1 ;;
   esac
   return 1
 }
@@ -6862,20 +6891,29 @@ _session_run() {
   local verb="$1"; shift
   local task="${REST[*]:-}"
   [ -n "$task" ] || die "session-default: no task to run (nothing started)."
-  # Start the session for the SAME resolved model/provider this delegation chose. `session` is a
-  # separate subcommand (never re-enters route_delegate), so there is no recursion. --provider must
+  # Start the session on the RESOLVED lane (mapped from disp), NOT the stale global PROVIDER — that is
+  # what keeps `edit -m opus` on claude-native instead of misrouting to devin. _session_should already
+  # rejected any lane with no faithful session transport, so a non-empty mapping is guaranteed here.
+  local _sprov; _sprov="$(_session_provider_for_disp "$disp")"
+  [ -n "$_sprov" ] || die "session-default: no session transport for lane '$disp' (should have fallen back to bg)."
+  # `session` is a separate subcommand (never re-enters route_delegate) -> no recursion. --provider must
   # precede the subcommand (global flags parse first).
-  local _prov_flag=(); [ -n "${PROVIDER:-}" ] && _prov_flag=(--provider "$PROVIDER")
   local _start_out
-  _start_out="$("$SCRIPT_PATH" ${_prov_flag[@]+"${_prov_flag[@]}"} session start -m "$RESOLVED_ID" 2>&1)" \
+  _start_out="$("$SCRIPT_PATH" --provider "$_sprov" session start -m "$RESOLVED_ID" 2>&1)" \
     || die "session-default: 'session start' failed -- $_start_out"
   printf '%s\n' "$_start_out" >&2
-  # Hand the task to the freshly-started session. tmux buffers keystrokes, so send-after-start lands
-  # even while the delegate boots (verified live). session send resolves the session by cwd.
-  "$SCRIPT_PATH" session send "$task" >&2 2>&1 || true
+  # Hand the task to the session. A send FAILURE means the delegate never received the work, so tear
+  # the empty session down and fail loudly instead of printing a false success receipt (which would
+  # leave an idle session and make the caller believe the task is running).
+  local _send_out
+  if ! _send_out="$("$SCRIPT_PATH" session send "$task" 2>&1)"; then
+    "$SCRIPT_PATH" session stop >/dev/null 2>&1 || true
+    die "session-default: task delivery failed -- $_send_out (the empty session was stopped; re-run, or set OSRC_NO_SESSION=1 for a headless bg job)."
+  fi
   printf '>>> [interactive-default] mutating/approval-prone delegation opened as a STEERABLE session (not headless bg).\n' >&2
-  printf '>>>   read : %s session read     steer: %s session send "…"     stop: %s session stop\n' "$0" "$0" "$0" >&2
-  printf '>>>   (opt out with OSRC_NO_SESSION=1 for a self-completing headless bg job)\n' >&2
+  printf '>>>   lane : %s   read: %s session read   steer: %s session send "…"   stop: %s session stop\n' "$_sprov" "$0" "$0" "$0" >&2
+  printf '>>>   (opt out with OSRC_NO_SESSION=1 for a self-completing headless bg job; a non-steering\n' >&2
+  printf '>>>    automation caller that cannot drive the session should set OSRC_NO_SESSION=1.)\n' >&2
   return 0
 }
 
@@ -7167,9 +7205,17 @@ _reconcile_status() {
         _sup_pid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
         if [ -n "$_sup_pid" ]; then
           if kill -0 "$_sup_pid" 2>/dev/null; then
+            # kill -0 succeeded: the pid is live. Only declare it a DIFFERENT (reused) process when we
+            # have BOTH a saved identity AND a successfully-read live identity that actually differ. A
+            # transient/denied `ps` (empty live stime) is identity-UNAVAILABLE, not proof of death, and
+            # must be treated as alive — otherwise a momentary ps hiccup would false-reap a HEALTHY job.
             _sup_live_stime="$(ps -o lstart= -p "$_sup_pid" 2>/dev/null | tr -s ' ')"
             _sup_saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
-            { [ -z "$_sup_saved_stime" ] || [ "$_sup_live_stime" = "$_sup_saved_stime" ]; } && _sup_alive=1
+            if [ -n "$_sup_saved_stime" ] && [ -n "$_sup_live_stime" ] && [ "$_sup_live_stime" != "$_sup_saved_stime" ]; then
+              _sup_alive=0    # confirmed a different process now holds the pid (reuse) -> supervisor is gone
+            else
+              _sup_alive=1    # live pid, identity matches or is unavailable -> treat as alive
+            fi
           fi
           if [ "$_sup_alive" = "0" ]; then
             if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
@@ -8526,9 +8572,25 @@ $body"
   # (same precedence the preack/launch loops use). Explicit --max / OSRC_FANOUT_MAX still win.
   if [ "$maxpar_explicit" = "0" ] && [ -z "${OSRC_FANOUT_MAX:-}" ] && [ "$maxpar" -gt 2 ] 2>/dev/null; then
     local _ndevin=0 _ei _el
+    local _cp _cm _row _lane _rd
     for (( _ei=0; _ei<${#labels[@]}; _ei++ )); do
-      _el="${g_prov:-${a_prov[$_ei]}}"; _el="${_el:-$PROVIDER}"
-      case "$_el" in devin|dv) _ndevin=$((_ndevin+1)) ;; esac
+      # Effective provider (explicit --provider/frontmatter wins over the default) AND effective model
+      # (g_model > --route > a_model), the SAME precedence the preack/launch loops use. A member routes
+      # to devin when its provider IS devin OR its resolved model's native lane is dv (a dv-lane model
+      # dispatches through Devin regardless of a non-devin provider). Resolving the MODEL, not just the
+      # provider, closes the --route/frontmatter-model bypass. Over-counting (capping a non-devin batch)
+      # is the safe direction; under-counting brings back the exit=141/empty-output deaths.
+      _cp="${g_prov:-${a_prov[$_ei]}}"; _cp="${_cp:-$PROVIDER}"
+      _cm="$g_model"
+      [ -z "$_cm" ] && [ -n "$route_spec" ] && _cm="$(_route_match "${labels[$_ei]}" "$route_spec")"
+      [ -z "$_cm" ] && _cm="${a_model[$_ei]}"
+      _rd=0
+      case "$_cp" in devin|dv) _rd=1 ;; esac
+      if [ "$_rd" = "0" ] && [ -n "$_cm" ]; then
+        _row="$(resolve_model_row "$_cm" 2>/dev/null)"; _lane="${_row#*|}"; _lane="${_lane%%|*}"
+        case "$_lane" in dv|devin) _rd=1 ;; esac
+      fi
+      [ "$_rd" = "1" ] && _ndevin=$((_ndevin+1))
     done
     if [ "$_ndevin" -gt 2 ]; then
       maxpar=2
