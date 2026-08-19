@@ -2,6 +2,15 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.9.0
+
+- **New: per-model daily quota — spread work across free tiers, skip an at-cap model _before_ it fails.** Many strong models sit behind a free daily request cap (hy3, DeepSeek v4 Pro, Qwen, Gemini's free tier, Devin's plan-included GLM/SWE…). Outsourcerer now knows each cap, tracks usage, and routes around an exhausted one proactively instead of only reacting to a 429.
+  - **Declare a cap:** `outsourcerer limits set <lane> <model> 50/day [--reset utc|local]`, inspect with `limits status`, remove with `limits clear`. Lane names are normalized (`devin`→`dv`, `gemini`→`gm`, `cc`/`codex`→`or`) so the cap you set is the cap that fires; `any` sets a bare-model cap on every lane. Introduce a new provider by adding its key to `~/.env` and declaring its cap — no failure needed to learn the limit.
+  - **How it counts:** usage is derived from the existing `ledger.jsonl` (every run is already recorded there), so there is no separate counter file to corrupt or reset. A new `epoch` field on ledger rows makes the daily window exact. **No `quota.json` = unlimited = unchanged behavior**, byte-for-byte.
+  - **How it routes:** at dispatch, an at-cap model is skipped for the next free candidate (free-before-paid), falling through to a paid lane only when the frees are spent. A model you pinned with `-m` refuses loudly with the reset time rather than silently switching (opt into auto-hop with `OSRC_FALLBACK_PINNED=1`); a mutating run never silently switches models. A real provider quota refusal writes an "exhausted-until" marker that reconciles the count with reality.
+  - **Hardened** through two independent code reviews, a multi-agent torture pass, and a final cross-model review: fail-open modes on malformed config / torn ledger lines / float caps are closed, the counter is resilient to interleaved writes, and the Gemini free tier counts correctly across both CLI vehicles.
+- **Fix (lane routing): an explicit `--provider` is now authoritative in the `bg` lane, wherever it sits.** `bg run --provider droid -m kimi-k3` (provider after the verb, or the `--provider=droid` equals form) silently fell back to the Devin default — recording the wrong lane, applying the wrong stall-floor, and resolving open-weight aliases to a Devin id. The provider is now captured from anywhere in the argv (foreground, `bg`, and `fanout`), so the lane you name is the lane that runs.
+
 ## 0.7.1
 
 - **Fix (Linux): `fleet` and session tracking no longer crash under bash 5.** `_session_registry_append` referenced an uninitialized local (`physical_cwd`) that only bash 3.2 (macOS) tolerated; on Linux bash under `set -u` it aborted the session-effort path. Initialized it so the session registry records correctly on every platform.
