@@ -1376,6 +1376,9 @@ delegate() {
   fi
   if [ "$rc" -ne 0 ] && [ "$_dv_free" = "0" ] && [ -n "$_dverr" ] && _devin_quota_refusal "$_dverr"; then
     printf '>>> [devin quota] paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still available. Retry on one of those plan-included models.\n' >&2
+    # Reconcile a declared daily cap with reality: a real refusal means this model is spent until the
+    # next reset, even if our ledger count hasn't reached the cap. No-op unless a cap is declared.
+    _quota_note_refusal dv "$MODEL" 2>/dev/null || true
   fi
   [ -n "$_dverr" ] && rm -f "$_dverr" 2>/dev/null
   # record a foreground ledger row for the Devin lane (plan lane -> $0 cash, lane=dv). The bg
@@ -2014,6 +2017,9 @@ _consume_flags() {
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
+      # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -2077,6 +2083,10 @@ record_ledger() {
   local prov="$1" model="$2" tier="$3" verb="$4" task="$5" cost="${6:-}" lane="${7:-}"
   local intok; intok="$(_est_tokens "$task")"
   local ts; ts="$(date +%Y-%m-%dT%H:%M:%S)"
+  # epoch: an absolute UTC-comparable timestamp. `ts` is local-time with NO offset, so it cannot answer
+  # "was this run today in UTC?" — the per-model daily-quota counter (_quota_used_today) needs a real
+  # epoch. Additive field; existing readers ignore it, and pre-epoch rows fall back to parsing `ts`.
+  local epoch; epoch="$(date +%s)"
   local hash; hash="$(printf '%s' "$task" | cksum | cut -d' ' -f1)"
   # Learning keys. run_id joins this cost row to its later outcome row; task_class + repo_key are
   # the advise-learning bucket. All additive JSON fields (existing readers ignore unknown keys).
@@ -2097,10 +2107,10 @@ record_ledger() {
   # lane (resolved lane code: cx/cc/gm/or/dv/local) drives the Tab's plan-vs-cash split. The bg path
   # (run_job) records the RAW provider (e.g. devin) which mislabels a plan lane as cash, so it passes
   # the resolved lane here; cmd_tab's is_sub prefers .lane and falls back to the provider string.
-  local _line; _line="$(jq -cn --arg ts "$ts" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
+  local _line; _line="$(jq -cn --arg ts "$ts" --argjson ep "$epoch" --arg p "$prov" --arg m "$model" --arg t "$tier" --arg v "$verb" \
      --arg c "$cost" --argjson it "$intok" --arg h "$hash" --arg lane "$lane" \
      --arg rid "$run_id" --arg tc "$task_class" --arg rk "$repo_key" \
-     '{ts:$ts,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h,run_id:$rid,task_class:$tc,repo_key:$rk}
+     '{ts:$ts,epoch:$ep,provider:$p,model:$m,tier:$t,verb:$v,in_tokens:$it,cost_usd:$c,task_hash:$h,run_id:$rid,task_class:$tc,repo_key:$rk}
       + (if $lane=="" then {} else {lane:$lane} end)')" || return 0
   [ -n "$_line" ] || return 0
   if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
@@ -2124,6 +2134,213 @@ record_ledger() {
   else
     printf '%s\n' "$_line" >> "$OSRC_LEDGER" 2>/dev/null || true
   fi
+}
+
+# ============================ PER-MODEL DAILY QUOTA (proactive) ==================================
+# Know each free model's daily request cap, count usage from the ledger (no separate counter file),
+# and skip an at-cap model BEFORE dispatch so work spreads across free tiers and only falls through to
+# paid when the frees are spent. Absent config = unlimited = today's behavior, byte-for-byte. Design:
+# PROJECTS/outsourcerer-quota/PLAN.md (fable-5 brief). The daily count is DERIVED from ledger.jsonl at
+# gate time (crash-safe, lock-free reads); a real quota-refusal writes an "exhausted-until" marker in
+# the posture cache that overrides the count in the restrictive direction only.
+OSRC_QUOTA_FILE="$OSRC_HOME/quota.json"
+# The ONE place that says which ledger verbs do NOT count as a dispatch. `fallback` rows are cost-0
+# bookkeeping (see the shortlist-fallback loop). Both _quota_countable and the counting jq read this,
+# so a new verb can't silently inflate or escape the count (guarded by test_quota's unknown-verb case).
+OSRC_QUOTA_NONCOUNT_VERBS="fallback"
+_quota_countable() {  # <verb> -> rc0 if this ledger verb counts toward the daily cap
+  local v="${1:-}" nc
+  for nc in $OSRC_QUOTA_NONCOUNT_VERBS; do [ "$v" = "$nc" ] && return 1; done
+  return 0
+}
+# Normalize a lane to the ledger `lane` CODE so the gate/count and a user-declared cap agree. Accepts a
+# dispatch name (disp: ccor/gmnative/…), a user-facing provider name (devin/cc/codex/gemini — what
+# someone types in `limits set`), or an already-normalized code — all fold to the same code the ledger
+# records. Without this, `limits set devin …` (key devin:…) and the gate (disp devin -> dv) diverged and
+# the cap silently never fired (P2-1). cc/codex providers dispatch OpenRouter, so they fold to `or`.
+_quota_lane_key() {  # <disp|provider|code> -> lane code (dv|or|cc|cx|gm|local|<engine>)
+  case "${1:-}" in
+    devin|dv)                printf dv ;;
+    cc|ccor|codex|codexor|or) printf or ;;
+    ccnative)                printf cc ;;
+    cxnative|cx)             printf cx ;;
+    gemini|gm|gmnative|gi)   printf gm ;;   # gi = the gemini-cli text vehicle's ledger code; fold to gm so a gemini cap matches both vehicles
+    local)                   printf local ;;
+    ''|'?')                  printf '?' ;;
+    *)                       printf '%s' "$1" ;;   # engine lanes (droid/warp/cline/cursor/hermes/claudex) = own name
+  esac
+}
+_quota_slug() {  # <string> -> filesystem-safe token for a posture key (model ids carry / and :)
+  printf '%s' "${1:-}" | tr -c 'A-Za-z0-9._-' '-'
+}
+# Start-of-today epoch for the reset zone. UTC is `now - now%86400` (epoch is UTC-anchored; exact).
+# Local subtracts the local H/M/S (base-10 forced; BSD date has no %-H) — portable across BSD/GNU/GitBash,
+# and exact except on the two DST-transition days, when the day's offset changed since midnight so the
+# result can be off by ±3600s at the count boundary. `reset=utc` (the default) has no such edge; use it
+# for anything cap-sensitive, and treat `reset=local` as approximate on DST days.
+_quota_day_start() {  # <reset:utc|local> -> epoch of the current day's start
+  local now; now="$(date +%s)"
+  case "${1:-utc}" in
+    local) local h m s; h="$((10#$(date +%H)))"; m="$((10#$(date +%M)))"; s="$((10#$(date +%S)))"
+           printf '%s' "$(( now - h*3600 - m*60 - s ))" ;;
+    *)     printf '%s' "$(( now - now % 86400 ))" ;;
+  esac
+}
+# Declared cap for a model. Looks up "lane:model" first (quotas belong to provider accounts, so Devin
+# GLM and OpenRouter GLM are separate pools), then a bare "model" key (any lane). Prints "<per_day> <reset>"
+# and rc0, or rc1 when no cap is declared (== unlimited). Absent file short-circuits with no jq cost.
+_quota_cap() {  # <lanekey> <model>
+  [ -f "$OSRC_QUOTA_FILE" ] || return 1
+  have jq || return 1
+  local key="$1:$2" out
+  # `per_day|floor`: a hand-edited FLOAT cap (e.g. 1.5) is a valid JSON number but makes the gate's
+  # integer `-ge` compare error out, get swallowed by 2>/dev/null, and fall through to GO — a silent
+  # fail-OPEN (torture F1). Flooring at the source hands the gate/reason a clean integer (1.5->1).
+  out="$(jq -r --arg k "$key" --arg m "$2" '
+      (.models[$k] // .models[$m]) as $e
+      | if ($e|type)=="object" and ($e.per_day|type)=="number"
+        then "\($e.per_day|floor) \($e.reset // "utc")" else empty end' "$OSRC_QUOTA_FILE" 2>/dev/null)"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+# Count today's COUNTABLE dispatches of <model> on <lanekey>. Derived from ledger.jsonl: rows with an
+# epoch >= day-start, plus legacy rows (no epoch) whose local ts-date matches today (the <=24h upgrade
+# window). Lane match tolerates the ledger's provider-string fallback for rows written without .lane.
+_quota_used_today() {  # <lanekey> <model> <reset> -> integer count (0 if none / no ledger)
+  [ -f "$OSRC_LEDGER" ] || { printf 0; return; }
+  have jq || { printf 0; return; }
+  local start today; start="$(_quota_day_start "${3:-utc}")"; today="$(date +%Y-%m-%d)"
+  # -Rn + `inputs | fromjson?`: parse the ledger LINE BY LINE and SKIP any torn/interleaved line rather
+  # than `-rs` slurp, which aborts on one bad line and (via the numeric guard below) would zero the count
+  # — a fail-OPEN that dispatches an at-cap model. The no-flock append path can produce such a line under
+  # heavy fan-out, so resilience here is load-bearing, not cosmetic (P2-2).
+  local n; n="$(jq -Rn --argjson start "$start" --arg today "$today" --arg lane "$1" --arg model "$2" \
+     --arg noncount "$OSRC_QUOTA_NONCOUNT_VERBS" '
+       ($noncount | split(" ")) as $nc
+       | [ inputs | fromjson? // empty
+           | objects
+           | select(.model == $model)
+           | select( ((.lane // .provider) | if . == "gi" then "gm" else . end) == $lane )
+           | select((.verb // "") as $v | ($nc | index($v)) | not)
+           | select( ((.epoch | numbers) // null) as $e
+                     | if $e != null then ($e >= $start) else ((.ts // "") | startswith($today)) end )
+         ] | length' "$OSRC_LEDGER" 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*) printf 0 ;; *) printf '%s' "$n" ;; esac
+}
+# Exhausted-until marker (posture cache). A real quota refusal writes the next-reset epoch here; the
+# gate treats a future marker as authoritative "at cap" even when the derived count is under. Strict
+# direction only (posture contract): forces at-cap, never forces available. Expired markers self-purge.
+_quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exists
+  local slug; slug="$(_quota_slug "$2")"
+  local v; v="$(_posture_get "$1" "quota-$slug" 2>/dev/null)" || return 1
+  case "$v" in ''|*[!0-9]*) return 1 ;; esac
+  local now; now="$(date +%s)"
+  if [ "$v" -gt "$now" ]; then return 0; fi
+  # Expired -> purge on read, but VALUE-MATCHED: only delete if the file still holds the same expired
+  # value we read. A sibling child can write a FRESH (future) refusal marker in the window between our
+  # read and this rm; a blind delete-by-path would silently drop that refusal signal (torture #2). The
+  # re-read shrinks the race to a microsecond and never deletes a value we didn't confirm expired.
+  local cur; cur="$(_posture_get "$1" "quota-$slug" 2>/dev/null)"
+  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$1.quota-$slug" 2>/dev/null
+  return 1
+}
+# Mark <model> on <lane> exhausted until the next reset, from a REAL provider quota refusal. No-op
+# unless a cap is declared (the marker only reconciles a declared cap; cap-first _quota_gate would
+# ignore it otherwise, and writing one would just litter the posture dir). Reset zone follows the cap.
+# Takes an OSRC-lane code (dv/or/...) OR a dispatch name; normalizes via _quota_lane_key either way.
+_quota_note_refusal() {  # <lane-or-disp> <model> [reset]
+  local lane; lane="$(_quota_lane_key "$1")"
+  local cap; cap="$(_quota_cap "$lane" "$2")" || return 0
+  local reset="${3:-${cap##* }}"; reset="${reset:-utc}"
+  local start; start="$(_quota_day_start "$reset")"
+  _posture_set "$lane" "quota-$(_quota_slug "$2")" "$(( start + 86400 ))"
+}
+# THE GATE. rc0 = go, rc1 = at cap (skip/refuse upstream). No declared cap -> always rc0 (default path).
+# CONCURRENCY (by design): the count is read here but each run's ledger row lands only when it FINISHES,
+# so a concurrent wave of the same lane:model can overshoot the cap by up to (wave_size - remaining) —
+# bounded by OSRC_FANOUT_MAX for one fanout (~5), or by the caller's burst size for independent bg runs.
+# The error is always UNDER-enforcement (never wrongly refuses a model with headroom) and self-heals as
+# the rows land. A lock-free derived counter cannot prevent this; a parent-side reservation would be the
+# only real fix, deferred as not worth the lock complexity for a soft daily cap.
+# Cap-existence is checked FIRST: a model with no declared cap is unlimited, so a leftover exhausted
+# marker (e.g. from a refusal on a model the user never capped) can never block it. The marker only
+# reconciles a DECLARED cap — it overrides the derived count in the restrictive direction when the
+# provider actually refused before our count reached the cap.
+_quota_gate() {  # <disp> <model>
+  local lane; lane="$(_quota_lane_key "$1")"
+  local cap; cap="$(_quota_cap "$lane" "$2")" || return 0     # no cap declared == unlimited (markers irrelevant)
+  _quota_marker_active "$lane" "$2" && return 1               # real refusal overrides the derived count
+  local per_day="${cap%% *}" reset="${cap##* }" used
+  used="$(_quota_used_today "$lane" "$2" "$reset")"
+  [ "$used" -ge "$per_day" ] 2>/dev/null && return 1
+  return 0
+}
+# Human-readable at-cap reason for messages/annotations, e.g. "at 50/50 for today, resets 00:00 UTC".
+_quota_reason() {  # <disp> <model>
+  local lane; lane="$(_quota_lane_key "$1")"
+  local cap; cap="$(_quota_cap "$lane" "$2")" || { printf 'at its daily cap'; return; }
+  local per_day="${cap%% *}" reset="${cap##* }" used
+  used="$(_quota_used_today "$lane" "$2" "$reset")"
+  printf 'at %s/%s for today, resets 00:00 %s' "$used" "$per_day" "$(printf '%s' "$reset" | tr '[:lower:]' '[:upper:]')"
+}
+
+# ---- `limits` subcommand: declare / inspect / clear per-model daily caps -------------------------
+# Introduce a provider: put its key in ~/.env (read elsewhere via _extract_kv_value, never sourced),
+# then `outsourcerer limits set <lane> <model> 50/day` — no failure needed to learn the cap.
+cmd_limits() {
+  case "${1:-status}" in
+    set)         shift; _limits_set "$@" ;;
+    list|status) _limits_status ;;
+    clear|rm)    shift; _limits_clear "$@" ;;
+    *)           die "limits: unknown action '${1:-}' (use: set <lane> <model> <N>/day [--reset utc|local] | status | clear <lane> <model>)" ;;
+  esac
+}
+_limits_set() {
+  have jq || die "limits needs jq"
+  local lane="${1:-}" model="${2:-}" spec="${3:-}"; [ "$#" -ge 3 ] && shift 3 || shift "$#"
+  [ -n "$lane" ] && [ -n "$model" ] && [ -n "$spec" ] || die "usage: limits set <lane> <model> <N>/day [--reset utc|local]  (lane 'any' = a bare-model cap on every lane)"
+  local n="${spec%%/*}"; case "$n" in ''|*[!0-9]*) die "per-day must be a number, e.g. 50 or 50/day (got '$spec')" ;; esac
+  local reset=utc
+  while [ "$#" -gt 0 ]; do case "$1" in
+    --reset) [ -n "${2:-}" ] || die "--reset needs utc|local"; reset="$2"; shift 2 ;;
+    *) die "limits set: unexpected arg '$1'" ;;
+  esac; done
+  case "$reset" in utc|local) ;; *) die "--reset must be utc or local (got '$reset')" ;; esac
+  # Normalize the lane to the ledger CODE so the stored key matches what _quota_gate looks up (P2-1).
+  local key; case "$lane" in any|'*') key="$model" ;; *) key="$(_quota_lane_key "$lane"):$model" ;; esac
+  _mkdir_private "$OSRC_HOME" || die "cannot write state home $OSRC_HOME"
+  [ -f "$OSRC_QUOTA_FILE" ] || { ( umask 077; printf '{"models":{}}\n' > "$OSRC_QUOTA_FILE" ) 2>/dev/null; }
+  local tmp="$OSRC_QUOTA_FILE.tmp.$$"; [ -L "$tmp" ] && rm -f "$tmp" 2>/dev/null   # symlink-guard parity with _posture_set
+  if jq --arg k "$key" --argjson n "$n" --arg r "$reset" '.models[$k] = {per_day:$n, reset:$r}' "$OSRC_QUOTA_FILE" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null; mv -f "$tmp" "$OSRC_QUOTA_FILE" || { rm -f "$tmp"; die "limits set: could not update $OSRC_QUOTA_FILE"; }
+  else rm -f "$tmp"; die "limits set: jq failed (is $OSRC_QUOTA_FILE valid JSON?)"; fi
+  printf 'limits: %s = %s/day (reset %s)\n' "$key" "$n" "$reset"
+}
+_limits_status() {
+  [ -f "$OSRC_QUOTA_FILE" ] || { echo "no per-model daily caps declared (every model is unlimited). Declare one: $0 limits set <lane> <model> 50/day"; return 0; }
+  have jq || die "limits needs jq"
+  echo "declared per-model daily caps (used today / cap):"
+  local key per reset lane model used
+  while IFS="$(printf '\t')" read -r key per reset; do
+    [ -n "$key" ] || continue
+    case "$key" in *:*) lane="${key%%:*}"; model="${key#*:}" ;; *) lane=""; model="$key" ;; esac
+    if [ -n "$lane" ]; then used="$(_quota_used_today "$lane" "$model" "$reset")"; else used="?"; fi
+    printf '  %-42s %s/%s  (reset %s)\n' "$key" "$used" "$per" "$reset"
+  done <<EOF
+$(jq -r '.models | to_entries[] | "\(.key)\t\(.value.per_day)\t\(.value.reset // "utc")"' "$OSRC_QUOTA_FILE" 2>/dev/null)
+EOF
+}
+_limits_clear() {
+  have jq || die "limits needs jq"
+  local lane="${1:-}" model="${2:-}"
+  [ -n "$model" ] || die "usage: limits clear <lane> <model>  (lane 'any' for a bare-model cap)"
+  [ -f "$OSRC_QUOTA_FILE" ] || { echo "no caps declared; nothing to clear."; return 0; }
+  local key; case "$lane" in any|'*') key="$model" ;; *) key="$(_quota_lane_key "$lane"):$model" ;; esac
+  local tmp="$OSRC_QUOTA_FILE.tmp.$$"; [ -L "$tmp" ] && rm -f "$tmp" 2>/dev/null   # symlink-guard parity with _posture_set
+  if jq --arg k "$key" 'del(.models[$k])' "$OSRC_QUOTA_FILE" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null; mv -f "$tmp" "$OSRC_QUOTA_FILE" || { rm -f "$tmp"; die "limits clear: could not update $OSRC_QUOTA_FILE"; }
+  else rm -f "$tmp"; die "limits clear: jq failed"; fi
+  printf 'limits: cleared %s\n' "$key"
 }
 
 _state_sync() {
@@ -6614,6 +6831,44 @@ _osrc_normalize_max_depth() {
 }
 
 # bg [--provider X already parsed] [--worktree] <verb> [flags] "task" -> detach a supervised job, print id.
+# _bg_capture_provider <argv...> -> set PROVIDER/PROVIDER_EXPLICIT from a --provider ANYWHERE in the argv
+# (before OR after the verb), and leave the argv WITHOUT that flag in the global array _BG_ARGV.
+#
+# Why cmd_bg must pre-capture it here, not defer to the leaf: cmd_bg records the run's identity for the
+# DETACHED child — meta.json (provider/lane), the route preflight, the devin stall-floor, and the ledger
+# row are all computed from $PROVIDER in the parent, before the child ever re-parses the argv. cmd_bg's
+# leading-flag loop only saw a --provider written BEFORE the verb, so `bg run --provider droid -m kimi-k3`
+# left PROVIDER at the devin DEFAULT: meta.json said provider=devin / lane=dv, the devin stall-floor and a
+# devin ledger row were applied, and the open-weight alias kimi-k3 resolved to a Devin id — the user's
+# explicit lane choice was silently lost (in the field, onto an exhausted Devin quota). The claude/codex
+# aliases hard-die on the wrong lane, so open-weight aliases silently falling back to devin was the
+# asymmetry. Stripping the flag here (like the leading loop does) keeps it single: _pf_provider /
+# _run_provider re-add exactly one --provider downstream, so it is never dropped OR duplicated.
+# Last --provider wins, matching the "a later flag overrides" convention of the main parser.
+_BG_ARGV=()
+_bg_capture_provider() {
+  _BG_ARGV=(); local _tok _want_val=0
+  for _tok in ${1+"$@"}; do
+    if [ "$_want_val" = "1" ]; then
+      # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
+      # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
+      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+      PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; _want_val=0; continue
+    fi
+    case "$_tok" in
+      --provider)   _want_val=1 ;;
+      # `--provider=X` must NOT slip through: unmatched, it would stay in the argv, reach the leaf as
+      # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
+      # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
+      --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1
+                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+      *)            _BG_ARGV+=("$_tok") ;;
+    esac
+  done
+  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+  return 0   # never inherit the trailing test's exit status (a bare `&& die` would return 1 on the happy path)
+}
+
 cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
   while :; do case "${1:-}" in
@@ -6623,6 +6878,10 @@ cmd_bg() {
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
+  # flag-placement tolerance (part 2): --provider is ALSO legal AFTER the verb (`bg run --provider droid …`),
+  # matching the main parser's documented "before OR after the subcommand" rule (see line ~2016). See
+  # _bg_capture_provider for why cmd_bg must PRE-CAPTURE the provider rather than leave it to the leaf.
+  _bg_capture_provider "$@"; set -- ${_BG_ARGV[@]+"${_BG_ARGV[@]}"}
   # PARENT-SIDE VALIDATION. Everything below must fail HERE, before _bg_launch mints a job dir and
   # prints an id. An invalid invocation is costly precisely because the caller receives an id and
   # believes work has started; the command only dies later inside the detached child, so the caller
@@ -7362,13 +7621,18 @@ _classify_job() {
       devin|dv)
         if _devin_is_free_model "$_jmodel"; then
           if _devin_free_own_quota "$_jmodel" "$_qlines"; then
+            # The free model's OWN daily quota is genuinely spent -> reconcile a declared cap (no-op otherwise).
+            _quota_note_refusal "$_lane" "$_jmodel" 2>/dev/null || true
             printf 'RETRY-DIFFERENT-LANE\tfree-model-quota-exhausted'
             return 0
           fi
+          # A PAID ACU signal does NOT gate a plan-included model -> this is a mis-gate, do NOT mark exhausted.
           printf 'REAL-FAIL\tpaid-quota-signal-does-not-gate-free-tier'
           return 0
         fi ;;
     esac
+    # Real quota/credit exhaustion on this lane -> reconcile a declared cap for this model (no-op otherwise).
+    _quota_note_refusal "$_lane" "$_jmodel" 2>/dev/null || true
     case "$_lane" in
       devin|dv) printf 'RETRY-DIFFERENT-LANE\tquota-exhausted' ;;
       *)        printf 'RETRY-DIFFERENT-LANE\tcredit-exhausted' ;;
@@ -8314,6 +8578,7 @@ cmd_fanout() {
       --effort|--reasoning) [ -n "${2:-}" ] || die "--effort needs a level"; g_effort="$2"; shift 2 ;;
       --tier)         [ -n "${2:-}" ] || die "--tier needs a value"; g_tier="$2"; shift 2 ;;
       --provider)     [ -n "${2:-}" ] || die "--provider needs a lane"; g_prov="$2"; shift 2 ;;
+      --provider=*)   g_prov="${1#--provider=}"; [ -n "$g_prov" ] || die "--provider needs a lane"; shift ;;  # equals spelling: don't let it fall through and silently use the default lane
       --task)         [ -n "${2:-}" ] || die "--task needs a string"; taskstr="$2"; shift 2 ;;
       --route)        [ -n "${2:-}" ] || die "--route needs 'pattern=model,...'"; route_spec="$2"; shift 2 ;;
       --worktree)     export OSRC_WORKTREE=1; shift ;;
@@ -10808,6 +11073,26 @@ _route_provider_default_model() { # Provider-specific route identity, never pars
   esac
 }
 
+# Parse a _fallback_pick result ("alias|mid|lane") and rebuild ARGV to re-enter route_delegate's loop
+# pinned to that candidate: --provider <lane's provider> -m <alias> + the caller's tier/effort/with/
+# downgrade flags + the task (REST). Runs INSIDE route_delegate, so it reads/writes that call's locals
+# (ARGV, _fb_alias/_fb_mid/_fb_lane, TIER_FLAG, EFFORT, WITH_SPEC, REST) by dynamic scope. rc1 if the
+# lane has no provider mapping. Shared by the transport-failure hop and the quota-skip hop so the
+# rebuild lives in ONE place — a second copy would drift the moment either path changed.
+_fb_rebuild_argv() {  # <_fb_next>
+  local _next="$1" _restpart _provider _w
+  _fb_alias="${_next%%|*}"; _restpart="${_next#*|}"; _fb_mid="${_restpart%%|*}"; _fb_lane="${_restpart##*|}"
+  _provider="$(_fallback_provider_for_lane "$_fb_lane")" || return 1
+  local _new=(--provider "$_provider" -m "$_fb_alias")
+  [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
+  [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
+  [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
+  for _w in ${WITH_SPEC:-}; do _new+=(--with "$_w"); done
+  _new+=(${REST[@]+"${REST[@]}"})
+  ARGV=("${_new[@]}")
+  return 0
+}
+
 # Route a one-shot delegation. THE MODEL CHOOSES THE LANE: an alias/id in the table
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
@@ -10860,7 +11145,12 @@ route_delegate() {
     case "$_fbp" in
       -m|--model) _fb_user_pinned=1; break ;;
       --tier|--with|--effort|--reasoning|--provider|--trust-lane) _fb_skipval=1 ;;
-      --allow-downgrade|--cloud-ack|--wait|--foreground) : ;;
+      # This scanner MUST recognize exactly the leading flags _consume_flags consumes, or a `-m` that
+      # follows an unrecognized-but-valid flag reads as `*) break` (pinned=0) while _consume_flags still
+      # sets MODEL_EXPLICIT=1 — and the quota gate would then SILENTLY switch a pinned model. Kept in
+      # sync with _consume_flags: --provider=X (equals form) and --no-advise are consumed there too.
+      --provider=*) : ;;
+      --allow-downgrade|--cloud-ack|--wait|--foreground|--no-advise) : ;;
       *) break ;;
     esac
   done
@@ -11024,6 +11314,42 @@ route_delegate() {
     esac
   fi
 
+  # QUOTA GATE: skip a model that's at its declared daily cap BEFORE we announce/dispatch this route, so
+  # work spreads across free tiers and only falls through to paid when the frees are spent. No quota.json
+  # (or no entry for this model) -> _quota_gate rc0 and this whole block is a no-op: the default routing
+  # path is untouched, byte-for-byte. See the PER-MODEL DAILY QUOTA section / PLAN.md.
+  if [ -f "$OSRC_QUOTA_FILE" ] && ! _quota_gate "$disp" "$RESOLVED_ID"; then
+    local _qreason; _qreason="$(_quota_reason "$disp" "$RESOLVED_ID")"
+    # Pinned model at cap: refuse loudly with the reset time; never silently switch a deliberate choice.
+    # Opt into hopping a pinned model with OSRC_FALLBACK_PINNED=1 (same knob as transport fallback).
+    if [ "$_fb_user_pinned" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
+      die "-m $RESOLVED_ID is $_qreason on the ${disp:-?} lane. It's a pinned choice, so I won't silently switch models. Wait for the reset, pick another -m, raise the cap (outsourcerer limits set ...), or set OSRC_FALLBACK_PINNED=1 to auto-hop."
+    fi
+    # Unpinned + auto + fallback on: hop to the next untried READY candidate. ZERO-COST skip (no dispatch
+    # happened), so it does NOT consume the attempt budget (_fb_used). Free-before-paid falls out of the
+    # shortlist ranking; an exhausted shortlist stops with the reset time rather than dispatching at-cap.
+    if _fallback_enabled && [ "$tier" = "auto" ]; then
+      _fb_tried="$_fb_tried $MODEL $RESOLVED_ID ${RESOLVED_ID}@$(_fallback_disp_lane "${disp:-?}")"
+      if [ "$_fb_loaded" -eq 0 ]; then _fb_loaded=1; _fb_cands="$(_fallback_shortlist "${REST[*]}")"; fi
+      local _fb_next _fb_alias _fb_mid _fb_lane
+      _fb_next="$(_fallback_pick "$_fb_tried" "$_fb_cands")"
+      if [ -n "$_fb_next" ] && _fb_rebuild_argv "$_fb_next"; then
+        # We are now auto-SELECTING the model, not honoring a user pin. The rewritten argv carries
+        # `-m <candidate>`, which would read as a user pin in an auto-detached child (ORIG feeds
+        # _autodetach_run); without this that child would DIE "pinned choice" instead of re-hopping if
+        # the candidate flips at-cap in the launch window. Marking hop-mode lets this process and its
+        # detached child keep hopping. (Fixes the P3-a auto-detach pin-inheritance edge.)
+        export OSRC_FALLBACK_PINNED=1
+        printf '>>> [quota] %s is %s on the %s lane; skipping to %s (lane %s) — no dispatch, so this skip is free of the attempt budget.\n' \
+          "$RESOLVED_ID" "$_qreason" "${disp:-?}" "$_fb_alias" "$_fb_lane" >&2
+        continue
+      fi
+      die "route resolved to $RESOLVED_ID, which is $_qreason, and no other READY candidate is under its daily cap. Wait for a reset, raise a cap (outsourcerer limits set ...), or pass -m for a lane with headroom."
+    fi
+    # Mutating tier or fallback disabled (unpinned): can't safely auto-hop; refuse with the reset time.
+    die "-m $RESOLVED_ID is $_qreason on the ${disp:-?} lane, and auto-fallback isn't available for a '$tier' run. Wait for the reset or pass another -m."
+  fi
+
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
   _route_receipt
@@ -11161,28 +11487,18 @@ route_delegate() {
     printf '>>> [fallback] transport failure on %s (rc=%s) and no untried READY candidate remains on the shortlist — stopping.\n' "$RESOLVED_ID" "$_fb_rc" >&2
     return "$_fb_rc"
   fi
-  local _fb_alias="${_fb_next%%|*}" _fb_mid _fb_lane _fb_restpart
-  _fb_restpart="${_fb_next#*|}"; _fb_mid="${_fb_restpart%%|*}"; _fb_lane="${_fb_restpart##*|}"
+  # Rebuild argv pinned to the picked candidate (see _fb_rebuild_argv). A known alias routes to its
+  # native lane via the table; the caller's tier/effort/with/downgrade flags carry over; any original
+  # -m/--provider is dropped. rc1 (no provider for the lane) surfaces the original failure rc.
+  local _fb_alias _fb_mid _fb_lane
   _fb_used=$((_fb_used + 1))
+  _fb_rebuild_argv "$_fb_next" || return "$_fb_rc"
   printf '>>> [fallback] transport failure on %s (lane %s, rc=%s) -> retrying the SAME task on %s (lane %s), attempt %s/%s. Transport failures never count against a model'\''s quality history.\n' \
     "$RESOLVED_ID" "${disp:-?}" "$_fb_rc" "$_fb_alias" "$_fb_lane" "$_fb_used" "$_fb_max" >&2
   # Visibility row in the Tab: verb=fallback, cost 0 (this row is bookkeeping, not a spend; the
   # retry's own run records its real cost). Ledger rows are usage events — learning reads only
   # outcome rows, so this cannot touch quality history. Forced so bg (stream-mode) children log it.
   OSRC_LEDGER_FORCE=1 record_ledger "${disp:-?}" "$RESOLVED_ID->$_fb_alias" "" "fallback" "${REST[*]}" "0.000000" "" 2>/dev/null || true
-  # Rebuild argv: pin the candidate (a known alias routes to its native lane via the table), keep
-  # the caller's tier/effort/with/downgrade flags, drop any original -m/--provider. One-shot env
-  # flags already consumed into process state (--cloud-ack, --trust-lane, --wait) carry over as-is.
-  local _fb_provider; _fb_provider="$(_fallback_provider_for_lane "$_fb_lane")" || return "$_fb_rc"
-  # A fallback is a new resolved route. Rebuild provider and provenance together,
-  # never carry an old explicit provider label onto another lane.
-  local _fb_new=(--provider "$_fb_provider" -m "$_fb_alias") _fb_w
-  [ -n "${TIER_FLAG:-}" ] && _fb_new+=(--tier "$TIER_FLAG")
-  [ -n "${EFFORT:-}" ] && _fb_new+=(--effort "$EFFORT")
-  [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _fb_new+=(--allow-downgrade)
-  for _fb_w in ${WITH_SPEC:-}; do _fb_new+=(--with "$_fb_w"); done
-  _fb_new+=(${REST[@]+"${REST[@]}"})
-  ARGV=("${_fb_new[@]}")
 
   done   # while :; (shortlist-fallback retry loop)
 }
@@ -13496,6 +13812,7 @@ main() {
     tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
     consent)  cmd_consent "$@" ;;                          # cloud-consent: status|grant|revoke (remembered ack)
     posture)  cmd_posture "$@" ;;                          # remembered lane org-policy restrictions: status|reset
+    limits)   cmd_limits "$@" ;;                            # per-model daily caps: set <lane> <model> N/day | status | clear
     models)   models "$@" ;;
     run|explore) route_delegate "auto" "$cmd" "$@" ;;
     research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
