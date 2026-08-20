@@ -236,52 +236,170 @@ live_models() {
 # _utf8_guard <string> -> prints <string> on stdout, lossy-decoded to valid UTF-8 if it
 # contained invalid bytes. The devin CLI (a Rust+clap binary) rejects any arg whose OsString
 # is not valid UTF-8 with "error: invalid UTF-8 was detected in one or more arguments" (rc=2)
-# — an opaque crash that does not name the prompt as the cause. The usual source is
+# -- an opaque crash that does not name the prompt as the cause. The usual source is
 # byte-truncation upstream of outsourcerer: `awk substr` / `cut -c` slicing a multibyte
 # character mid-sequence leaves a lone start/continuation byte (e.g. em-dash E2 80 94 cut at
 # byte 7 yields a lone E2), which is invalid UTF-8. We catch it at the dispatch boundary so
 # the run proceeds with a visible warning instead of dying on an unattributed clap error.
-# Note: devin's --prompt-file does NOT avoid this — its file-read also rejects invalid UTF-8
+# Note: devin's --prompt-file does NOT avoid this -- its file-read also rejects invalid UTF-8
 # ("stream did not contain valid UTF-8"), so the guard is needed regardless of channel.
 #
-# Happy path (valid UTF-8) returns the input UNTOUCHED via `printf '%s'` — no command-
-# substitution newline stripping, no warning. Callers that want zero happy-path change should
-# gate the call (see delegate/continue_turn): only route through `$(_utf8_guard ...)` when a
-# strict iconv check fails, so valid prompts never pass through a `$(...)`.
+# Two detection paths, picked per-host by a one-time probe (cached in OSRC_UTF8_PROBE):
+#   - iconv strict: `iconv -f UTF-8 -t UTF-8` exits non-zero on invalid input. Works on
+#     glibc and Apple/BSD libiconv. NOT on musl, whose iconv treats UTF-8->UTF-8 as a
+#     permissive passthrough (exits 0 on a lone E2) and lacks //IGNORE. On musl we fall back
+#     to a pure-shell byte validator (od + shell; no perl/python/iconv needed -- musl base
+#     Alpine ships neither perl nor python3).
+#   - shell: a POSIX UTF-8 framing check over `od -tu1` bytes. Portable everywhere od exists
+#     (od is already a dependency -- see _new_job_id). Used as the musl fallback for BOTH
+#     detection and the lossy strip (drop the invalid bytes), since musl has no //IGNORE.
 #
-# Opt out: OSRC_UTF8_GUARD=0. No iconv, or a libiconv without the //IGNORE extension (musl,
-# some BSDs) -> best-effort passthrough (the strict check is portable; the lossy decode
-# degrades to passthrough rather than corrupting).
+# Happy path (valid UTF-8) returns the input UNTOUCHED via `printf '%s'` -- no command-
+# substitution newline stripping, no warning, no subshell. Only an invalid prompt routes
+# through `$()` for the lossy decode. Opt out: OSRC_UTF8_GUARD=0.
 _utf8_guard() {
   [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && { printf '%s' "$1"; return 0; }
-  command -v iconv >/dev/null 2>&1 || { printf '%s' "$1"; return 0; }
-  # Happy path: strict UTF-8->UTF-8 round-trip exits 0 only on valid input. Portable
-  # everywhere iconv exists (no //IGNORE needed). Returns input verbatim, no $() stripping.
-  printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && { printf '%s' "$1"; return 0; }
-  # Invalid UTF-8: lossy-decode so dispatch proceeds instead of dying on clap's opaque rc=2.
+  _utf8_valid "$1" && { printf '%s' "$1"; return 0; }
+  # Invalid: lossy-decode so dispatch proceeds instead of dying on clap's opaque rc=2.
   local clean
-  clean="$(printf '%s' "$1" | iconv -f UTF-8 -t UTF-8//IGNORE 2>/dev/null)"
-  # //IGNORE unsupported (musl/some BSDs) -> iconv errors, clean is empty -> passthrough the
-  # original so the real clap error surfaces (no silent corruption, just no guard here).
-  # All-invalid input also lands here -> same honest passthrough.
+  clean="$(_utf8_lossy "$1")"
+  # All-invalid input, or a platform that can't strip -> lossy returns empty. Don't swap in
+  # an empty prompt; let the real error surface honestly. The guard's job is partial
+  # corruption, not a totally mangled payload.
   [ -z "$clean" ] && { printf '%s' "$1"; return 0; }
-  printf '>>> [utf8] prompt contained invalid UTF-8 bytes — lossy-decoded so dispatch proceeds. Common cause: byte-truncation upstream (awk substr / cut -c slicing a multibyte character mid-sequence, leaving a lone continuation byte that the devin CLI rejects with "invalid UTF-8 was detected in one or more arguments"). Fix the upstream truncation (truncate by codepoint, not byte) to avoid garbled content. Suppress: OSRC_UTF8_GUARD=0.\n' >&2
+  # Re-validate the cleaned output before trusting it: an iconv that stops at the first bad
+  # byte (rather than skip-and-resume) would return only the valid PREFIX, silently
+  # truncating everything after the corruption. If clean isn't itself valid UTF-8, the
+  # decode is untrustworthy -- passthrough the original so the clap error surfaces instead
+  # of shipping a truncated prompt.
+  _utf8_valid "$clean" || { printf '%s' "$1"; return 0; }
+  printf '>>> [utf8] prompt contained invalid UTF-8 bytes -- lossy-decoded so dispatch proceeds. Common cause: byte-truncation upstream (awk substr / cut -c slicing a multibyte character mid-sequence, leaving a lone continuation byte that the devin CLI rejects with "invalid UTF-8 was detected in one or more arguments"). Fix the upstream truncation (truncate by codepoint, not byte) to avoid garbled content. Suppress: OSRC_UTF8_GUARD=0.\n' >&2
   printf '%s' "$clean"
   return 0
 }
 
-# _utf8_guard_prompt <varname> : guard IN PLACE — reassign the named var only when its value
+# _utf8_probe -> echoes "iconv" if `iconv -f UTF-8 -t UTF-8` actually rejects invalid UTF-8
+# (glibc/Apple/BSD), else "shell" (musl: permissive passthrough). Cached in OSRC_UTF8_PROBE
+# so the one-time bad-byte probe runs once per process. No iconv at all -> "shell" if od is
+# available, else "none" (guard is inert; the clap error surfaces, as it did before this).
+_utf8_probe() {
+  [ -n "${OSRC_UTF8_PROBE:-}" ] && { printf '%s' "$OSRC_UTF8_PROBE"; return 0; }
+  if command -v iconv >/dev/null 2>&1; then
+    # A lone 0xE2 (a 3-byte start with no continuation) is invalid UTF-8. If iconv's strict
+    # identity round-trip exits non-zero on it, iconv validates -- use it. musl exits 0.
+    if printf '\xe2' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+      OSRC_UTF8_PROBE=shell
+    else
+      OSRC_UTF8_PROBE=iconv
+    fi
+  elif command -v od >/dev/null 2>&1; then
+    OSRC_UTF8_PROBE=shell
+  else
+    OSRC_UTF8_PROBE=none
+  fi
+  printf '%s' "$OSRC_UTF8_PROBE"
+}
+
+# _utf8_valid <string> -> rc0 if valid UTF-8, rc1 otherwise. Uses the probed path.
+_utf8_valid() {
+  local p; p="$(_utf8_probe)"
+  case "$p" in
+    iconv) printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ;;
+    shell) _utf8_valid_shell "$1" ;;
+    *) return 0 ;;   # none: cannot check, assume valid (honest passthrough)
+  esac
+}
+
+# _utf8_lossy <string> -> prints input with invalid UTF-8 bytes dropped (valid bytes kept).
+# Uses iconv //IGNORE where the probe confirmed iconv validates (glibc/Apple/BSD support
+# //IGNORE); on the shell path, strips via the byte validator. Empty output = all-invalid or
+# unsupported strip.
+_utf8_lossy() {
+  local p; p="$(_utf8_probe)"
+  case "$p" in
+    iconv) printf '%s' "$1" | iconv -f UTF-8 -t UTF-8//IGNORE 2>/dev/null ;;
+    shell) _utf8_lossy_shell "$1" ;;
+    *) printf '%s' "$1" ;;   # none: passthrough verbatim
+  esac
+}
+
+# _utf8_valid_shell <string> -> rc0 if valid UTF-8, rc1 otherwise. Pure POSIX (od + shell):
+# validates UTF-8 byte framing -- 1/2/3/4-byte sequences with correct continuation bytes,
+# rejects lone continuations, overlong starts (C0/C1), >0xF4, and truncated sequences. No
+# perl/python/iconv (musl base Alpine has none of those).
+_utf8_valid_shell() {
+  local b state need
+  state=0; need=0
+  # `od -tu1` emits bytes as decimal, one per line after tr. read -u3 avoids a pipe (pipefail
+  # would leak the reader's nonzero exit into our return).
+  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
+  while IFS= read -r b <&3; do
+    if [ "$state" = "0" ]; then
+      if [ "$b" -lt 128 ]; then :
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3
+      else exec 3<&-; return 1  # lone continuation (80-BF), C0/C1, or F5+
+      fi
+    else
+      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+        need=$((need-1)); [ "$need" = "0" ] && state=0
+      else exec 3<&-; return 1  # expected continuation, got something else
+      fi
+    fi
+  done
+  exec 3<&-
+  [ "$state" = "0" ]
+}
+
+# _utf8_lossy_shell <string> -> prints input with invalid bytes dropped. Walks the same UTF-8
+# framing as _utf8_valid_shell; on a framing error, drops the offending start/continuation
+# byte and resyncs (a start byte that doesn't begin a valid sequence, or a continuation that
+# doesn't follow one, is dropped). Valid bytes and complete multibyte chars are kept. Bytes
+# are reconstructed via printf octal escapes (\NNN) -- reliable across bash/dash/busybox,
+# unlike \xNN which needs two-digit hex and varies by shell.
+_utf8_lossy_shell() {
+  local b state need out char
+  state=0; need=0; out=""; char=""
+  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
+  while IFS= read -r b <&3; do
+    if [ "$state" = "0" ]; then
+      if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+      fi  # else: lone continuation / bad start -> drop (resync)
+    else
+      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+        char="$char$(printf "\\$(printf '%03o' "$b")")"
+        need=$((need-1)); [ "$need" = "0" ] && { out="$out$char"; char=""; state=0; }
+      else
+        # Expected a continuation but got a new start/bad byte: drop the partial char,
+        # reprocess this byte as a fresh start.
+        char=""; state=0; need=0
+        if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+        fi
+      fi
+    fi
+  done
+  exec 3<&-
+  printf '%s' "$out"
+}
+
+# _utf8_guard_prompt <varname> : guard IN PLACE -- reassign the named var only when its value
 # is not valid UTF-8, so the happy path (valid prompt) is never touched by command
 # substitution (no trailing-newline stripping, no subshell). The invalid path routes through
 # _utf8_guard for the lossy decode + warning. Bash 3.2-safe (no nameref); uses eval with a
 # controlled var name only.
 _utf8_guard_prompt() {
   [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && return 0
-  command -v iconv >/dev/null 2>&1 || return 0
   local _v _val
   _v="$1"; eval "_val=\"\${$_v}\""
   [ -n "$_val" ] || return 0
-  printf '%s' "$_val" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && return 0
+  _utf8_valid "$_val" && return 0
   eval "$_v=\"\$(_utf8_guard \"\$_val\")\""
 }
 

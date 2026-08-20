@@ -101,6 +101,35 @@ P=""
 _utf8_guard_prompt P
 [ -z "$P" ] && ok "_utf8_guard_prompt is a no-op on an empty prompt var" || bad "_utf8_guard_prompt altered an empty var: [$P]"
 
+# --- Scenario 13: the shell fallback path (musl: no //IGNORE, permissive strict iconv)
+# works end-to-end. Force the probe to "shell" to exercise the pure-shell validator + lossy
+# stripper regardless of host iconv. This is what runs on Alpine/musl. ---
+SAVE_PROBE="${OSRC_UTF8_PROBE:-}"
+OSRC_UTF8_PROBE=shell
+out="$(OSRC_UTF8_PROBE=shell _utf8_guard "$INVALID" 2>/dev/null)"
+[ "$out" = "hello  world" ] && ok "shell path: invalid UTF-8 lossy-decoded (musl fallback)" || bad "shell path lossy-decode wrong: got [$out]"
+OSRC_UTF8_PROBE=shell _utf8_guard "$VALID" 2>"$TMP_ERR" > "$TMP/shell-valid"
+cmp -s "$TMP/shell-valid" <(printf '%s' "$VALID") && ok "shell path: valid non-ASCII passes unchanged" || bad "shell path altered valid input"
+warn="$(cat "$TMP_ERR" 2>/dev/null)"; [ -z "$warn" ] && ok "shell path: no false warning on valid input" || bad "shell path false warning: $warn"
+# 4-byte valid char (U+10308 = F0 90 8C 88) preserved through the shell path.
+out="$(OSRC_UTF8_PROBE=shell _utf8_lossy $'x\xf0\x90\x8c\x88y' 2>/dev/null)"
+[ "$out" = $'x\xf0\x90\x8c\x88y' ] && ok "shell path: 4-byte valid char preserved" || bad "shell path dropped a valid 4-byte char: got [$out]"
+OSRC_UTF8_PROBE="$SAVE_PROBE"
+
+# --- Scenario 14: invalid byte at END of prompt (not just mid-string). ---
+# A lone E2 with no following bytes at EOF is a truncated 3-byte sequence.
+ENDBAD=$'hello world\xe2'
+out="$(_utf8_guard "$ENDBAD" 2>/dev/null)"
+[ "$out" = "hello world" ] && ok "invalid byte at end-of-prompt is stripped" || bad "end-of-prompt byte not stripped: got [$out]"
+
+# --- Scenario 15: the probe picks iconv on a validating iconv, shell on a permissive one. ---
+# We can't force musl here, but we CAN confirm the probe returns a non-empty known value and
+# that forcing it to "none" makes the guard inert (honest passthrough, no corruption).
+p="$(_utf8_probe)"
+case "$p" in iconv|shell|none) ok "probe returns a known value ($p)" ;; *) bad "probe returned unknown value: [$p]" ;; esac
+out="$(OSRC_UTF8_PROBE=none _utf8_guard "$INVALID" 2>/dev/null)"
+[ "$out" = "$INVALID" ] && ok "probe=none: guard is inert (honest passthrough, no corruption)" || bad "probe=none altered input: got [$out]"
+
 echo "---"
 echo "utf8_guard: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
