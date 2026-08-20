@@ -77,6 +77,65 @@ awk '/timeout waiting for response/,/rm -f "\$_aerr"/' "$SRC" | grep -q 'rc=124'
   && ok "a lane that never answered exits non-zero (never mistaken for success)" \
   || bad "an unanswered request could still exit 0"
 
+# --- an explicit, serveable model choice must never be rewritten ---
+# The substring arms in _agy_model_token translate gemini-API-only ids into agy's catalog, but they
+# used to match on SUBSTRING alone, so they also swallowed ids that were ALREADY valid agy tokens:
+# `-m gemini-3.7-flash` dispatched gemini-3.5-flash, silently, with nothing in the output saying a
+# substitution had happened. Every newer release agy adds hits the same path, so this worsens over
+# time, and the caller's own effort/cost reasoning is made against a model that never ran.
+[ "$(_agy_model_token gemini-3.7-flash)" = "gemini-3.7-flash" ] \
+  && ok "an explicit newer flash release is dispatched as asked, not collapsed to the default" \
+  || bad "an explicit -m gemini-3.7-flash is still silently rewritten to another model"
+[ "$(_agy_model_token gemini-3.6-flash-high)" = "gemini-3.6-flash-high" ] \
+  && ok "an effort-suffixed agy id survives (agy serves these; they are not API-only forms)" \
+  || bad "an effort-suffixed agy id was rewritten"
+
+# ...but the translation those arms exist for must SURVIVE. agy does not silently fall back on an
+# unknown token, it hard-errors ("--effort is not supported for model X"), so passing an API-only
+# id straight through would turn the documented gemini-pro / gemini-flash-lite aliases into a hard
+# failure. These two are the ids the alias table actually resolves to.
+[ "$(_agy_model_token gemini-3.1-pro-preview)" = "gemini-3.1-pro" ] \
+  && ok "the -preview suffix is still stripped (agy rejects preview ids outright)" \
+  || bad "gemini-pro now resolves to a token agy refuses to run"
+[ "$(_agy_model_token gemini-3.1-flash-lite)" = "gemini-3.5-flash" ] \
+  && ok "flash-lite still collapses to flash (agy has no lite tier)" \
+  || bad "gemini-flash-lite now resolves to a token agy refuses to run"
+
+# --- passing an id through is only half the job: it must then be sent WITHOUT --effort ---
+# Found by running the real CLI rather than a fake one. Letting an explicit id survive the token map
+# (above) makes it reach agy for the first time, and agy refuses a model that already names its
+# effort if --effort is also present: "--model gemini-3.7-flash-high conflicts with --effort=medium".
+# This is the normal case, not an edge case — EVERY id in agy's published catalog carries a
+# -low/-medium/-high suffix, so before this, pinning any real model id was a guaranteed hard failure.
+for suffixed in gemini-3.7-flash-high gemini-3.6-flash-medium gemini-3.5-flash-low gemini-3.1-pro-low; do
+  [ -z "$(_agy_effort "$suffixed" medium 2>/dev/null)" ] \
+    && ok "$suffixed carries its own effort, so no --effort is produced for it" \
+    || bad "$suffixed would still be sent with --effort, the pair agy rejects"
+done
+
+# The bare-family path must be untouched by that: those ids carry no level, and agy refuses them
+# with an EMPTY effort just as hard, so dropping the flag everywhere would break the common case.
+[ -n "$(_agy_effort gemini-3.5-flash medium 2>/dev/null)" ] \
+  && ok "a bare family id still gets an effort (the flag is dropped only when the id names one)" \
+  || bad "the bare family id lost its --effort, which agy also refuses"
+
+# Assert the call site actually honours the empty return. The function can be right while the
+# dispatch still interpolates --effort unconditionally, which is exactly how this shipped.
+if grep -q -- '--model "$atok" ${aeffflag\[@\]+"${aeffflag\[@\]}"}' "$SRC"; then
+  ok "the agy dispatch builds --effort conditionally instead of always interpolating it"
+else
+  bad "the agy dispatch still passes --effort unconditionally"
+fi
+
+# The bare family defaults stay overridable: agy's catalog gains new dated releases, so a hardcoded
+# default goes stale and a caller needs a way to move it without waiting on this table.
+[ "$(OSRC_AGY_FLASH_DEFAULT=gemini-3.7-flash _agy_model_token flash)" = "gemini-3.7-flash" ] \
+  && ok "the bare flash default can be repinned without editing the table" \
+  || bad "OSRC_AGY_FLASH_DEFAULT does not move the bare flash default"
+[ "$(_agy_model_token flash)" = "gemini-3.5-flash" ] \
+  && ok "with the override unset the bare flash default is unchanged" \
+  || bad "the bare flash default changed when no override was set"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

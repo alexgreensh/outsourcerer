@@ -9172,24 +9172,56 @@ delegate_ccnative() {
 
 # _agy_model_token <gemini-cli/api id> -> the token the Antigravity `agy` CLI accepts. agy exposes
 # its own curated (keyless) model set (see `agy models`); it has no flash-lite and uses non-preview
-# ids. agy is lenient (falls back to its default on an unknown token), so this is best-effort.
+# ids.
+#
+# NOTE: agy does NOT silently fall back on an unknown token -- it hard-errors
+# ("invalid model selection (--model X --effort Y)"), so a token this function emits must be one
+# agy actually serves.
+#
+# The `*flash*`/`*pro*` substring arms exist to translate gemini-API-only ids into agy's catalog
+# (strip `-preview`, collapse `flash-lite` since agy has no lite tier). But they matched on
+# SUBSTRING, so they also swallowed an id that was ALREADY a valid agy token: `-m gemini-3.7-flash`
+# dispatched gemini-3.5-flash instead, silently, with no indication a substitution had happened.
+# Any newer release agy adds hits the same path.
+#
+# So: an id already shaped like agy's catalog (`gemini-<ver>-flash[...]` / `gemini-<ver>-pro[...]`,
+# incl. effort-suffixed forms like gemini-3.6-flash-high) passes through unchanged -- EXCEPT the
+# `-preview`/`-lite` API-only suffixes, which agy rejects outright and which therefore must still
+# fall through to a family default. The two defaults are overridable because agy's catalog gains
+# new dated releases and a hardcoded default goes stale.
 _agy_model_token() {
   case "$1" in
-    *pro*)   echo "gemini-3.1-pro" ;;
-    *flash*) echo "gemini-3.5-flash" ;;   # covers flash + flash-lite (agy has no lite tier)
+    # API-only suffixes agy's catalog does not carry: must fall through to a family default below.
+    *-preview|*-lite) : ;;
+    # Already a valid agy token -> never rewrite an explicit, serveable model choice.
+    gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*) echo "$1"; return 0 ;;
+  esac
+  case "$1" in
+    *pro*)   echo "${OSRC_AGY_PRO_DEFAULT:-gemini-3.1-pro}" ;;
+    *flash*) echo "${OSRC_AGY_FLASH_DEFAULT:-gemini-3.5-flash}" ;;   # covers flash + flash-lite (agy has no lite tier)
     *)       echo "$1" ;;
   esac
 }
 
 # _agy_effort <agy-model-token> <requested-effort> -> an effort level that model actually accepts.
-# agy REQUIRES --effort for these models and rejects the run outright without it
+# agy REQUIRES --effort for a BARE family id and rejects the run outright without it
 # ("invalid model selection (--model X --effort \"\"): requires --effort"), and the accepted set is
 # per-model: pro offers low|high with NO medium, flash offers low|medium|high. An unsupported level is
 # rounded UP rather than down, because silently giving less thinking than asked for is the failure the
 # caller cannot see; the clamp is announced.
+# The mirror image also holds and is easy to miss: an id that already NAMES its effort must be sent
+# with NO --effort at all, because agy rejects that pair just as hard ("--model gemini-3.7-flash-high
+# conflicts with --effort=medium"). Returning empty here is the signal to drop the flag.
 _agy_effort() {
   local tok="$1" want="${2:-medium}" out
   case "$want" in low|medium|high) ;; *) want=medium ;; esac
+  case "$tok" in
+    # An id that already NAMES its effort takes no --effort flag: agy rejects the pair outright
+    # ("--model gemini-3.7-flash-high conflicts with --effort=medium"). Every id in agy's catalog is
+    # of this form, so this is the normal case for an explicitly pinned model, not an edge case.
+    # Emit nothing and let the caller omit the flag.
+    *-low|*-medium|*-high) return 0 ;;
+  esac
   case "$tok" in
     *pro*)   case "$want" in medium) out=high ;; *) out="$want" ;; esac ;;
     *flash*) out="$want" ;;
@@ -9233,13 +9265,18 @@ delegate_gmnative() {
     _tier_banner "antigravity-agy (keyless)" "$atok" "$ttier" "$posture | $(_lane_cost_disclosure gm)"
     # agy has no --output-format json; the supervisor watches plain-stdout byte growth and the bg
     # path derives last.txt from out.log, so no stream flags are needed. --print-timeout caps waits.
-    local aeff; aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
+    local aeff aeffflag=(); aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
+    if [ -n "$aeff" ]; then
+      aeffflag=(--effort "$aeff")
+    elif [ -n "${EFFORT:-}" ]; then
+      printf '>>> [effort] %s already names its effort, so --effort %s is dropped instead of sent (agy refuses the pair). Pick the -low/-medium/-high variant of the id to change it.\n' "$atok" "$EFFORT" >&2
+    fi
     # Capture stderr so a "timeout waiting for response" can be TRANSLATED. agy reports a dead lane the
     # same way it reports a slow one, and at the default 5m print-timeout that costs five minutes per
     # attempt to learn nothing. The distinguishing fact is that agy's own auth/model resolution
     # succeeded and only the generation never returned, which points at the backend, not the request.
     local _aerr; _aerr="$(mktemp -t osrc-agy)"
-    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" --effort "$aeff" \
+    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> >(tee "$_aerr" >&2) || rc=$?
     if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
