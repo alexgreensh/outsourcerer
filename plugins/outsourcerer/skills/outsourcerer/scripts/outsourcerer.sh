@@ -2266,6 +2266,23 @@ _quota_note_refusal() {  # <lane-or-disp> <model> [reset]
 # marker (e.g. from a refusal on a model the user never capped) can never block it. The marker only
 # reconciles a DECLARED cap — it overrides the derived count in the restrictive direction when the
 # provider actually refused before our count reached the cap.
+# _model_denied <resolved-id> -> 0 (denied) / 1 (allowed). OSRC_MODEL_DENYLIST is a comma/space
+# -separated list of exact resolved ids or glob patterns (e.g. "gemini-3.5-flash,gpt-5.5" or
+# "gemini-3.5-*"), matched against the RESOLVED model id -- never the alias -- so a denied model
+# stays denied no matter which alias resolves to it. Checked in two places: cmd_advise's candidate
+# scoring (so advise never RECOMMENDS a denied model) and the single choke point in route_delegate
+# before dispatch (so nothing denied ever runs, whether picked by advise or pinned with -m). Absent
+# or empty OSRC_MODEL_DENYLIST is a no-op -- default behavior is completely unchanged.
+_model_denied() {
+  local id="$1" list="${OSRC_MODEL_DENYLIST:-}" pat
+  [ -n "$list" ] || return 1
+  local IFS=', '
+  for pat in $list; do
+    case "$id" in $pat) return 0 ;; esac
+  done
+  return 1
+}
+
 _quota_gate() {  # <disp> <model>
   local lane; lane="$(_quota_lane_key "$1")"
   local cap; cap="$(_quota_cap "$lane" "$2")" || return 0     # no cap declared == unlimited (markers irrelevant)
@@ -5827,6 +5844,7 @@ cmd_advise() {
   while IFS='|' read -r alias resolved lane tier; do
     [ -n "$alias" ] || continue
     case "$lane" in gi|ci) continue ;; esac   # skip image lanes
+    _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
     total_count=$((total_count + 1))
     bench_line="$(_bench_lookup "$resolved" "$field")"
     if [ -n "$bench_line" ]; then
@@ -11348,6 +11366,14 @@ route_delegate() {
     fi
     # Mutating tier or fallback disabled (unpinned): can't safely auto-hop; refuse with the reset time.
     die "-m $RESOLVED_ID is $_qreason on the ${disp:-?} lane, and auto-fallback isn't available for a '$tier' run. Wait for the reset or pass another -m."
+  fi
+
+  # DENYLIST GATE: refuse before announcing a route that must not dispatch, same placement as the
+  # quota gate above. Enforced here (not only in cmd_advise's candidate scoring) so an explicit -m
+  # pin cannot bypass it -- filtering advise alone only stops auto-selection from RECOMMENDING a
+  # denied model, it does nothing for a caller who names one directly.
+  if _model_denied "$RESOLVED_ID"; then
+    die "-m $RESOLVED_ID is on OSRC_MODEL_DENYLIST and will not be dispatched. Pick another -m, or unset/edit OSRC_MODEL_DENYLIST if this is unwanted."
   fi
 
   _route_resolution "$disp" "$RESOLVED_ID"
