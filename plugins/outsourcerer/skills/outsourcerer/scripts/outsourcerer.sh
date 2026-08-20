@@ -233,6 +233,58 @@ live_models() {
   { devin --model "__list__" -p "x" </dev/null 2>&1 | grep -i "^Available:" | sed 's/^Available:[[:space:]]*//'; } || true
 }
 
+# _utf8_guard <string> -> prints <string> on stdout, lossy-decoded to valid UTF-8 if it
+# contained invalid bytes. The devin CLI (a Rust+clap binary) rejects any arg whose OsString
+# is not valid UTF-8 with "error: invalid UTF-8 was detected in one or more arguments" (rc=2)
+# — an opaque crash that does not name the prompt as the cause. The usual source is
+# byte-truncation upstream of outsourcerer: `awk substr` / `cut -c` slicing a multibyte
+# character mid-sequence leaves a lone start/continuation byte (e.g. em-dash E2 80 94 cut at
+# byte 7 yields a lone E2), which is invalid UTF-8. We catch it at the dispatch boundary so
+# the run proceeds with a visible warning instead of dying on an unattributed clap error.
+# Note: devin's --prompt-file does NOT avoid this — its file-read also rejects invalid UTF-8
+# ("stream did not contain valid UTF-8"), so the guard is needed regardless of channel.
+#
+# Happy path (valid UTF-8) returns the input UNTOUCHED via `printf '%s'` — no command-
+# substitution newline stripping, no warning. Callers that want zero happy-path change should
+# gate the call (see delegate/continue_turn): only route through `$(_utf8_guard ...)` when a
+# strict iconv check fails, so valid prompts never pass through a `$(...)`.
+#
+# Opt out: OSRC_UTF8_GUARD=0. No iconv, or a libiconv without the //IGNORE extension (musl,
+# some BSDs) -> best-effort passthrough (the strict check is portable; the lossy decode
+# degrades to passthrough rather than corrupting).
+_utf8_guard() {
+  [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && { printf '%s' "$1"; return 0; }
+  command -v iconv >/dev/null 2>&1 || { printf '%s' "$1"; return 0; }
+  # Happy path: strict UTF-8->UTF-8 round-trip exits 0 only on valid input. Portable
+  # everywhere iconv exists (no //IGNORE needed). Returns input verbatim, no $() stripping.
+  printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && { printf '%s' "$1"; return 0; }
+  # Invalid UTF-8: lossy-decode so dispatch proceeds instead of dying on clap's opaque rc=2.
+  local clean
+  clean="$(printf '%s' "$1" | iconv -f UTF-8 -t UTF-8//IGNORE 2>/dev/null)"
+  # //IGNORE unsupported (musl/some BSDs) -> iconv errors, clean is empty -> passthrough the
+  # original so the real clap error surfaces (no silent corruption, just no guard here).
+  # All-invalid input also lands here -> same honest passthrough.
+  [ -z "$clean" ] && { printf '%s' "$1"; return 0; }
+  printf '>>> [utf8] prompt contained invalid UTF-8 bytes — lossy-decoded so dispatch proceeds. Common cause: byte-truncation upstream (awk substr / cut -c slicing a multibyte character mid-sequence, leaving a lone continuation byte that the devin CLI rejects with "invalid UTF-8 was detected in one or more arguments"). Fix the upstream truncation (truncate by codepoint, not byte) to avoid garbled content. Suppress: OSRC_UTF8_GUARD=0.\n' >&2
+  printf '%s' "$clean"
+  return 0
+}
+
+# _utf8_guard_prompt <varname> : guard IN PLACE — reassign the named var only when its value
+# is not valid UTF-8, so the happy path (valid prompt) is never touched by command
+# substitution (no trailing-newline stripping, no subshell). The invalid path routes through
+# _utf8_guard for the lossy decode + warning. Bash 3.2-safe (no nameref); uses eval with a
+# controlled var name only.
+_utf8_guard_prompt() {
+  [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && return 0
+  command -v iconv >/dev/null 2>&1 || return 0
+  local _v _val
+  _v="$1"; eval "_val=\"\${$_v}\""
+  [ -n "$_val" ] || return 0
+  printf '%s' "$_val" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && return 0
+  eval "$_v=\"\$(_utf8_guard \"\$_val\")\""
+}
+
 # delegate <perm> <sandbox-flag-or-empty> [-m MODEL] "<task>"
 delegate() {
   local perm="$1"; shift
@@ -240,6 +292,7 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt="${REST[*]}"
+  _utf8_guard_prompt prompt
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
   [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory only: Devin lane has no native effort knob; not sent to the CLI)\n' "$EFFORT" >&2
@@ -259,6 +312,7 @@ continue_turn() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no follow-up prompt given"
   local prompt="${REST[*]}"
+  _utf8_guard_prompt prompt
   need_devin
   logged_in || die "Not logged in. Run:  ! devin auth login"
   echo ">>> devin -c --model $MODEL -p (continue)" >&2
