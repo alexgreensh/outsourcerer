@@ -6138,6 +6138,58 @@ _kill_process_group() { # <pgid> <root-pid>
   return 1
 }
 
+# _kill_job <job-dir> <root-pid> — tear down a supervised job's whole tree, reaching
+# grandchildren that the ppid walk cannot. _supervise launches its delegate as its own
+# process-group leader and records that PGID in <job-dir>/pgid. PGID membership survives
+# reparenting: when the direct child dies on SIGTERM, a grandchild that ignored TERM is
+# re-parented to PID 1, leaves the process tree, and the SECOND _descendants snapshot
+# (the one _kill_tree takes for its KILL pass) no longer sees it — so the grandchild
+# keeps its inherited socket/file and the kill floor never reaps. Incident: a wedged
+# `devin acp` held an ESTABLISHED TCP to the model backend for 4h21m (15,660s), 8.7x past
+# the 1800s devin stall-kill floor, because its parent `devin -p` died on TERM and it
+# re-parented out of the tree before the KILL pass re-discovered it. Killing the process
+# group by negative PGID reaches every member regardless of reparenting; SIGKILL on the
+# group cannot be caught, so a grandchild that ignores SIGTERM still dies. Falls back to
+# _kill_tree when no isolated PGID was recorded, so a launch that could not be isolated
+# (or an old job dir written before this fix) degrades to the prior behaviour instead of
+# signalling the wrong group.
+_kill_job() {
+  local jd="${1:-}" pid="${2:-}" pgid="" _live_pgid=""
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$jd" ] && [ -f "$jd/pgid" ] && pgid="$(cat "$jd/pgid" 2>/dev/null | tr -d '[:space:]')"
+  case "$pgid" in ''|*[!0-9]*) pgid="" ;; esac
+  if [ -n "$pgid" ]; then
+    # PID-reuse / stale-PGID guard: the recorded PGID is only safe to kill by negative
+    # ID when the root PID is still alive AND still in that group. A job dir from a
+    # long-finished job (cmd_cleanup can be called days later) may hold a PGID that the
+    # OS has since recycled into an unrelated group — killing `-PGID` then hits an
+    # innocent process group. Verify the live process's PGID matches the record; if the
+    # PID is dead, has a different PGID, or ps is unavailable, fall back to the tree
+    # walk (which is harmless on a dead PID). This collapses the recycling risk to
+    # "both the PID and its PGID were recycled together", which requires the group
+    # leader to be reborn in the same group.
+    _live_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    case "$_live_pgid" in ''|*[!0-9]*) pgid="" ;; *[!0-9]*) pgid="" ;; esac
+    [ -n "$pgid" ] && [ "$_live_pgid" = "$pgid" ] || pgid=""
+  fi
+  if [ -n "$pgid" ]; then
+    _kill_process_group "$pgid" "$pid"
+    local _krc=$?
+    # _kill_process_group returns 1 when live survivors remain after the KILL pass.
+    # That is the one signal that answers "did the kill actually land?" — discarding
+    # it silently (the prior behaviour at every call site) is exactly the incident
+    # pattern: the watchdog believed it had reaped the job for 4h21m. Record it so a
+    # recurrence is loud instead of silent. The caller's exit code (125/124/3) is
+    # unchanged — this is diagnostic, not a new exit path.
+    if [ "$_krc" -ne 0 ] && [ -n "$jd" ] && [ -d "$jd" ]; then
+      printf 'kill-survivors-remain\n' >> "$jd/reason" 2>/dev/null || true
+    fi
+    return "$_krc"
+  else
+    _kill_tree "$pid"
+  fi
+}
+
 # _perm_denials <log> -> count of REAL permission/sandbox denials in the log's tail.
 #
 # The naive version of this — grep the whole log for 'permission denied|EACCES|...' — counts the
@@ -6297,8 +6349,36 @@ _supervise() {
   _mkdir_private "$jd"
   : > "$jd/out.log"; chmod 600 "$jd/out.log" 2>/dev/null || true
   echo running > "$jd/status"
+  # Launch the delegate as its OWN process-group leader so a wedged descendant that
+  # re-parents to PID 1 when its parent dies can still be reached by `kill -- -PGID`.
+  # The ppid tree walk alone misses exactly that case: a grandchild immune to SIGTERM
+  # survives the TERM pass, its parent dies on TERM, it re-parents out of the tree, and
+  # the KILL pass's re-snapshot never re-discovers it — so it keeps its inherited
+  # socket/file and the stall-kill floor never reaps (incident: devin acp held an
+  # ESTABLISHED TCP to the model backend 8.7x past the 1800s floor). PGID membership does
+  # not change on reparenting, so a negative-PGID kill reaches it wherever it lands.
+  # `set -m` makes a backgrounded job a group leader portably — macOS ships no `setsid` —
+  # and the prior monitor state is restored so job control never leaks into the caller.
+  # Same pattern as _fleet_name_model's bounded helper. The PGID is only acted on by
+  # _kill_process_group (via _kill_job), which re-validates it is a real group and NOT
+  # this shell's own, and falls back to a tree walk when isolation did not take; a
+  # mis-recorded value therefore degrades to the old behaviour instead of mis-killing.
+  local _mon=0; case "$-" in *m*) _mon=1 ;; esac
+  [ "$_mon" = 1 ] || set -m
   ( exec "$@" </dev/null >> "$jd/out.log" 2>&1 ) &
-  local pid=$! t0 last_size=0 last_change now size idle age _jcwd=""
+  local pid=$! _pgid="" _shell_pgid=""
+  _pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ "$_mon" = 1 ] || set +m
+  case "$_pgid" in ''|*[!0-9]*) _pgid="" ;; esac
+  _shell_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
+  case "$_shell_pgid" in ''|*[!0-9]*) _shell_pgid="" ;; esac
+  # Record the PGID only when it is a genuine isolated group (>1 and not our own), so the
+  # file's presence means "kill this group" and a failed isolation leaves it absent and
+  # _kill_job falls back to the tree walk instead of signalling the supervisor's group.
+  if [ -n "$_pgid" ] && [ "$_pgid" -gt 1 ] 2>/dev/null && [ "$_pgid" != "$_shell_pgid" ]; then
+    printf '%s\n' "$_pgid" > "$jd/pgid" 2>/dev/null || true
+  fi
+  local t0 last_size=0 last_change now size idle age _jcwd=""
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
   # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
@@ -6311,7 +6391,7 @@ _supervise() {
   local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
-  trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
+  trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
   # if it then remains both write-free AND output-silent for another bounded window, stop it as a
@@ -6378,7 +6458,7 @@ _supervise() {
       echo wedged > "$jd/status"
       printf '%s\n' "$_noinit_reason" > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd"): $_noinit_reason" >&2
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       _job_made_writes "$jd" "$_jcwd" || {
@@ -6394,7 +6474,7 @@ _supervise() {
       echo wedged > "$jd/status"
       printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     # SELF-HEAL backstop (LANE-AGNOSTIC): a mutating job hitting repeated permission/sandbox denials is
     # walled off — headless delegates (claude/codex/devin/local) cannot answer an interactive prompt, so it
@@ -6406,7 +6486,7 @@ _supervise() {
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:denials=%s\n' "$_pd" > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): $_pd permission/sandbox denials — the delegate is walled off (a protected path or sandbox that can't be auto-approved headless). Re-run with 'yolo' (bypassPermissions), from a different cwd, or with the right sandbox/--add-dir." >&2
-        _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
+        _kill_job "$jd" "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
     # DEVIN PRINT-MODE HANG (LANE-AGNOSTIC, immediate): a headless devin (`-p` / print mode) that
@@ -6439,11 +6519,11 @@ _supervise() {
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:print-mode-hang\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
-        _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
+        _kill_job "$jd" "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
     if [ "$age" -ge "$hard" ]; then
-      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
+      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_job "$jd" "$pid"; echo 124 > "$jd/exit"; return 124
     fi
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
     # while writing files is working, and killing it is the failure this watchdog causes rather than
@@ -6509,7 +6589,7 @@ _supervise() {
         # `explain`/`status` can show it instead of a bare `wedged` verdict.
         printf 'stall-kill\n' > "$jd/reason" 2>/dev/null || true
       fi
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     if [ "$idle" -ge "$warn" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       echo "stalled?" > "$jd/status"
@@ -8027,7 +8107,7 @@ cmd_cancel() {
   local id="${1:-}"; [ -n "$id" ] || die "cancel needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
-  [ -n "$pid" ] && _kill_tree "$pid"
+  [ -n "$pid" ] && _kill_job "$jd" "$pid"
   echo canceled > "$jd/status"; printf 'canceled:operator\n' > "$jd/reason" 2>/dev/null || true; echo "canceled $id"
   # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
   # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
@@ -8056,7 +8136,7 @@ cmd_cleanup() {
   # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
   # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
   local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
-  [ -n "$live_pid" ] && _kill_tree "$live_pid"
+  [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
