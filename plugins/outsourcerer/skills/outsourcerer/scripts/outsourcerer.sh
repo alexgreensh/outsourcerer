@@ -2680,7 +2680,21 @@ _external_session_claim() { # <session-id> <tmux-pane>
   generation="$(_heartbeat_token)"; [ -n "$generation" ] || return 1
   _mkdir_private "$OSRC_SESSION_CLAIMS" || return 1
   dir="$(_session_claim_path "$id")"
-  _mkdir_claim "$dir" || return 1
+  if ! _mkdir_claim "$dir"; then
+    # A controller that crashed without releasing leaves a claim dir that blocks EVERY
+    # future claim to this session id forever. Evict it, but only when its recorded pid
+    # is PROVABLY gone (both liveness probes fail) — mirrors the heartbeat-leader reclaim.
+    # A live or unreadable owner is preserved: a wrong eviction would let two controllers
+    # drive one session, the very thing the claim prevents.
+    local _op
+    _op="$(jq -er '.pid | tostring' "$dir/owner.json" 2>/dev/null)" || _op=""
+    if [ -n "$_op" ] && ! kill -0 "$_op" 2>/dev/null && ! ps -p "$_op" >/dev/null 2>&1; then
+      rm -f "$dir/owner.json" 2>/dev/null || true; rmdir "$dir" 2>/dev/null || true
+      _mkdir_claim "$dir" || return 1
+    else
+      return 1
+    fi
+  fi
   record="$(jq -cn --arg id "$id" --arg endpoint "tmux:$pane" --argjson pid "$pid" --arg start "$start" --arg token "$token" --arg controller_id "$controller_id" --arg generation "$generation" \
     '{schema_version:"3",session_id:$id,endpoint:$endpoint,pid:$pid,pid_start:$start,token:$token,controller_id:$controller_id,generation:$generation}')" || rc=1
   tmp="$dir/.owner.$$.$RANDOM"
@@ -10020,11 +10034,16 @@ parity_hermes() {
 # config dir. Headless `claude -p` cannot auto-approve edits to these (Claude Code treats its config dir as
 # a "sensitive file" needing an interactive prompt), so acceptEdits silently wedges. Extend via OSRC_PROTECTED_PATHS.
 _protected_scope() {
-  local prompt="${1:-}" d _ifs_save="$IFS"
+  local prompt="${1:-}" d _ifs_save="$IFS" here
+  # Match the symlink-RESOLVED cwd, not just the logical $PWD: a cwd that is a symlink
+  # into ~/.claude (e.g. `ln -s ~/.claude /tmp/x; cd /tmp/x`) has a logical path that
+  # never matches, so an unresolved check waves the guarded dir through.
+  here="$(cd "$PWD" 2>/dev/null && pwd -P)" || here="$PWD"
   # Colon-separated like PATH, so paths with spaces work correctly.
   IFS=':'
   for d in ${OSRC_PROTECTED_PATHS:-"$HOME/.claude:$HOME/.codex:$HOME/.config"}; do
     case "$PWD/" in "$d"/*) IFS="$_ifs_save"; return 0 ;; esac
+    case "$here/" in "$d"/*) IFS="$_ifs_save"; return 0 ;; esac
     case "$prompt" in *"$d"*) IFS="$_ifs_save"; return 0 ;; esac
   done
   IFS="$_ifs_save"

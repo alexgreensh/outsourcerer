@@ -2,6 +2,11 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.9.2
+
+- **Hardening (protected paths): the config-dir guard now resolves symlinks.** A working directory that is a symlink into `~/.claude` / `~/.codex` / `~/.config` used to slip past the guard because only the logical `$PWD` was matched; the resolved path is now checked too, so a headless `acceptEdits` run can't reach a harness-protected dir through a symlink.
+- **Fix (session claims): a crashed controller no longer blocks a session forever.** A controller that died without releasing left a claim directory that made every future claim to that session id fail. A stale claim is now evicted, but only when its recorded PID is provably gone, so a live controller's claim is never stolen.
+
 ## 0.9.1
 
 - **Fix (parallel sessions): two Claude Code sessions in the same directory no longer collide on one interactive session.** The tmux session name is now scoped by the owning Claude Code session, so `session read`/`send`/`stop` from one session can never drive another session's agent. Set `OUTSOURCERER_TMUX` to deliberately share or isolate a session by hand.
