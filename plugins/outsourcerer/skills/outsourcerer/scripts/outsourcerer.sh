@@ -1843,6 +1843,10 @@ wrap_prompt() {
 # Plugin caches are version-scoped, so the newest version wins rather than whichever glob sorts first.
 _resolve_skill_file() {
   local name="$1" p
+  # A skill name is a single path component, never a traversal. Reject anything with a slash or
+  # other path metacharacter so `name` cannot be spliced into a parent directory (e.g.
+  # `../../projects/evil`) and pull an arbitrary SKILL.md into the delegate prompt.
+  case "$name" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   for p in "$HOME/.claude/skills/$name/SKILL.md" \
            "$HOME/.config/devin/skills/$name/SKILL.md"; do
     [ -f "$p" ] && { printf '%s' "$p"; return 0; }
@@ -5209,7 +5213,9 @@ cmd_tap() {
         rm -f "$OSRC_HOME/.rl.tmp.$$" 2>/dev/null
       fi
       # passthrough: run the original statusline command with the same stdin, else a minimal line.
-      local orig=""; [ -f "$stash" ] && have jq && orig="$(jq -r '.command // ""' "$stash" 2>/dev/null)"
+      # Refuse a symlinked stash outright: its command string is handed to `sh -c` on every render, so a
+      # planted symlink to an attacker-controlled file would be silent, persistent code execution.
+      local orig=""; [ ! -L "$stash" ] && [ -f "$stash" ] && have jq && orig="$(jq -r '.command // ""' "$stash" 2>/dev/null)"
       if [ -n "$orig" ]; then
         # Defense-in-depth: refuse to exec the stashed command if the stash is group/world-writable,
         # so a perms mistake can't become silent command execution. Skip the exec and fall through.
@@ -6209,8 +6215,11 @@ _perm_denials() {
   local gen='([Oo]peration not permitted|[Rr]ead-only file system|EACCES|[Pp]ermission denied|sandbox (denied|blocked|error))'
   local err='"is_error"[[:space:]]*:[[:space:]]*true'
   local n
+  # Match is_error and the denial phrase in EITHER order: JSON key order is not guaranteed across
+  # lanes/stream-json versions, so a real denial like {"error":"Permission denied","is_error":true}
+  # (phrase before the flag) must still count, not slip through and let the job spiral.
   n="$(tail -n "${OSRC_PERM_TAIL:-400}" "$log" 2>/dev/null \
-        | grep -acE "$(_perm_needles)|($err.*$gen)" 2>/dev/null)" || n=0
+        | grep -acE "$(_perm_needles)|($err.*$gen|$gen.*$err)" 2>/dev/null)" || n=0
   printf '%s' "${n:-0}"
 }
 
@@ -6550,6 +6559,12 @@ _supervise() {
     fi
   done
   wait "$pid"; local rc=$?; echo "$rc" > "$jd/exit"
+  # `cancel` kills the delegate out of band and writes `canceled` as the authoritative terminal state.
+  # When the loop above exits on that kill, don't overwrite it with a post-mortem verdict (`failed`/
+  # `done?`) — that would misreport a user cancel as a provider failure in the outcome ledger.
+  case "$(cat "$jd/status" 2>/dev/null)" in
+    canceled) return "$rc" ;;
+  esac
   # A clean process exit is not a successful delegation when it emitted only launcher/disclosure
   # lines. Use the identical content test as the stall path: those lines begin with `>>> ` and do
   # not constitute a delegate result. This must run before marker/exit-code classification so an
@@ -8448,7 +8463,10 @@ _fanout_running() {
   [ -f "$gd/members.tsv" ] || { printf 0; return; }
   while IFS="$(printf '\t')" read -r jid label; do
     [ -n "$jid" ] || continue
-    st="$(_reconcile_status "$jid" 2>/dev/null || echo running)"
+    # `_reconcile_status` returns nonzero ONLY when the job dir is gone (e.g. gc removed it). A missing
+    # dir is conclusive: the job cannot still be running, so treat it as terminal (`interrupted`), not
+    # live — otherwise a gc'd member is counted forever and `fanout wait` never returns.
+    st="$(_reconcile_status "$jid" 2>/dev/null || echo interrupted)"
     # `interrupted` is terminal. Reconciliation flips dead jobs to it, so omitting it here means a
     # killed member is counted as live forever and `fanout wait` never returns.
     case "$st" in done|done\?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;; *) n=$((n+1)) ;; esac
@@ -8471,7 +8489,7 @@ _fanout_status() {
     local jid label first=1 tot=0 run=0 done_=0 blk=0 fail=0 st jobs=""
     while IFS="$(printf '\t')" read -r jid label; do
       [ -n "$jid" ] || continue; tot=$((tot+1))
-      st="$(_reconcile_status "$jid" 2>/dev/null || echo running)"
+      st="$(_reconcile_status "$jid" 2>/dev/null || echo interrupted)"
       case "$st" in done|done\?) done_=$((done_+1)) ;; blocked|permission-blocked) blk=$((blk+1)) ;;
         failed|timeout|wedged|canceled|interrupted) fail=$((fail+1)) ;; *) run=$((run+1)) ;; esac
       local oj; oj="$(_job_json "$jid" "$label")" && [ -n "$oj" ] || continue
@@ -9804,7 +9822,16 @@ cmd_image_openrouter() {
   [ -n "$url" ] || die "no image returned from OpenRouter (check OPENROUTER_API_KEY / model id). Raw response (truncated): $(printf '%s' "$resp" | head -c 300)"
   case "$url" in
     data:*base64,*) printf '%s' "${url#*base64,}" | base64 -d > "$out" 2>/dev/null || die "failed to decode/write image to $out" ;;
-    https://*)      curl -fsS -m "${OSRC_IMAGE_TIMEOUT:-180}" "$url" -o "$out" 2>/dev/null || die "failed to download image from $url" ;;
+    https://*)
+      # The URL is fully model-controlled. Refuse hosts that are loopback / private / link-local literal
+      # IPs so a malicious model cannot turn this fetch into an SSRF probe of the user's internal network
+      # (e.g. a metadata endpoint at 169.254.169.254). Hostnames still resolve normally for real CDNs.
+      local _ihost; _ihost="${url#https://}"; _ihost="${_ihost%%/*}"; _ihost="${_ihost%%:*}"; _ihost="${_ihost#[}"; _ihost="${_ihost%]}"
+      case "$_ihost" in
+        localhost|127.*|0.0.0.0|10.*|169.254.*|192.168.*|::1|fc??:*|fd??:*|fe80:*) die "refusing to fetch image from a loopback/private/link-local host (SSRF risk): $_ihost" ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) die "refusing to fetch image from a private host (SSRF risk): $_ihost" ;;
+      esac
+      curl -fsS -m "${OSRC_IMAGE_TIMEOUT:-180}" "$url" -o "$out" 2>/dev/null || die "failed to download image from $url" ;;
     http://*)       die "refusing to fetch non-HTTPS image URL from API response (SSRF risk): $(printf '%s' "$url" | head -c 100)" ;;
     *)               die "unrecognized image URL format from OpenRouter: $(printf '%s' "$url" | head -c 100)" ;;
   esac
@@ -10444,6 +10471,10 @@ _local_resolve() {
     local det dm; det="$(_local_detect)" || return 1
     base="${base:-${det%%|*}}"; dm="${det#*|}"; model="${model:-${dm%%|*}}"
   fi
+  # The prefixed-model path (`-m ollama:x` with OSRC_LOCAL_URL set) resolves `base` directly from the
+  # env and skips the auto-detect probe that validates it. Enforce the loopback guard here too, so the
+  # "nothing leaves your machine" lane cannot be pointed at a remote endpoint via OSRC_LOCAL_URL.
+  _is_loopback_url "$base" || die "local base URL must point to localhost/127.0.0.1 (got: $base). Set OSRC_LOCAL_ALLOW_REMOTE=1 to override."
   printf '%s|%s' "$base" "$model"
 }
 
@@ -10553,6 +10584,10 @@ _local_agentic_shim() {
   local tier="$1" base="$2" model="$3"
   have claude || die "agentic-local via the shim drives 'claude -p' (Claude Code); claude not on PATH."
   local aurl="${OSRC_LOCAL_ANTHROPIC_URL:-}" shim_pid=""
+  # A caller-supplied proxy URL becomes ANTHROPIC_BASE_URL for `claude -p` (prompt + auth token go to
+  # it), so it must satisfy the same loopback guard as every other local endpoint. The shim we launch
+  # ourselves is already 127.0.0.1.
+  [ -n "$aurl" ] && { _is_loopback_url "$aurl" || die "OSRC_LOCAL_ANTHROPIC_URL must point to localhost/127.0.0.1 (got: $aurl). Set OSRC_LOCAL_ALLOW_REMOTE=1 to override."; }
   if [ -z "$aurl" ]; then
     [ "${OSRC_SHIM_NO_LAUNCH:-0}" = "1" ] && die "agentic-local on chat-only server $base needs an Anthropic-compatible proxy. Set OSRC_LOCAL_ANTHROPIC_URL, or unset OSRC_SHIM_NO_LAUNCH to let me launch the vendored shim."
     have python3 || die "the vendored translation shim needs python3."

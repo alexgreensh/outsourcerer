@@ -2,6 +2,18 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.9.3
+
+Hardening pass from a multi-angle adversarial audit. Seven fixes.
+
+- **A user cancel is no longer misreported as a provider failure.** When `cancel` killed a job, the supervisor could overwrite the `canceled` status with a post-mortem `failed`/`done?`; the authoritative `canceled` state is now preserved in the outcome ledger.
+- **A garbage-collected fanout member can no longer hang `fanout wait` forever.** A member whose job directory was removed is now counted as `interrupted` (terminal), not `running`.
+- **The local ("nothing leaves your machine") lane enforces its loopback guarantee on every path.** A prefixed model with `OSRC_LOCAL_URL`, and `OSRC_LOCAL_ANTHROPIC_URL`, are now checked against the loopback guard, not just the auto-detect path. Override with `OSRC_LOCAL_ALLOW_REMOTE=1`.
+- **Image generation refuses SSRF-shaped URLs.** A model-returned image URL pointing at a loopback / private / link-local literal IP (e.g. a metadata endpoint) is rejected before fetch; real CDN hostnames are unaffected.
+- **A skill name can no longer traverse directories.** `_resolve_skill_file` rejects any name containing a slash or path metacharacter, so a crafted name can't pull an arbitrary `SKILL.md` into a delegate prompt.
+- **A symlinked statusline stash is refused before its command is run.** The stashed command is handed to `sh -c` on every render, so a planted symlink can no longer become persistent code execution.
+- **Permission-denial detection is order-independent.** A real denial whose stream-json puts the message before the `is_error` flag is now counted, so a genuinely walled-off job aborts cleanly instead of spiraling.
+
 ## 0.9.2
 
 - **Hardening (protected paths): the config-dir guard now resolves symlinks.** A working directory that is a symlink into `~/.claude` / `~/.codex` / `~/.config` used to slip past the guard because only the logical `$PWD` was matched; the resolved path is now checked too, so a headless `acceptEdits` run can't reach a harness-protected dir through a symlink.
