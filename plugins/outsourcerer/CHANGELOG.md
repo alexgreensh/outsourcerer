@@ -2,6 +2,13 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.9.1
+
+- **Fix (parallel sessions): two Claude Code sessions in the same directory no longer collide on one interactive session.** The tmux session name is now scoped by the owning Claude Code session, so `session read`/`send`/`stop` from one session can never drive another session's agent. Set `OUTSOURCERER_TMUX` to deliberately share or isolate a session by hand.
+- **Fix (session start): a lost start race is caught, not injected.** When two `session start` calls raced for the same name, the loser's `tmux new-session` failed silently and its launch command was typed into the winner's pane. `session start` now checks that exit code and returns cleanly on a lost race.
+- **Fix (interactivity): a run you watch through a pipe stays in the foreground.** Auto-detach now treats an interactive stdin as watching too, not just stdout, so `outsourcerer run … | tee log` no longer detaches to the background and strands your pipe.
+- **Fix (permissions): a trusted read lane can shell out without a false "no permission".** Inside your own Claude Code with driving mode `auto`, the read-only Claude lane also grants Bash, so a headless read/audit task that runs a command no longer dies with a confusing permission refusal. Every other context stays strict Read/Grep/Glob; opt out with `OSRC_LANE_READ_TRUST=0`.
+
 ## 0.9.0
 
 - **New: per-model daily quota — spread work across free tiers, skip an at-cap model _before_ it fails.** Many strong models sit behind a free daily request cap (hy3, DeepSeek v4 Pro, Qwen, Gemini's free tier, Devin's plan-included GLM/SWE…). Outsourcerer now knows each cap, tracks usage, and routes around an exhausted one proactively instead of only reacting to a 429.

@@ -389,6 +389,19 @@ _mode_read() {
   case "$mode" in auto|manual|hybrid) printf '%s' "$mode" ;; *) return 1 ;; esac
 }
 
+# _lane_read_trusted -> 0 when the read-only Claude lane may ALSO grant Bash. Gated to the
+# one context where the operator has vouched for the harness: running inside their own
+# Claude Code (CLAUDECODE) AND driving mode = auto. Without this, a headless read/audit task
+# that shells out dies with a confusing "no permission" (Claude Code denies an un-allowlisted
+# tool in a non-interactive run). Any other context stays strict Read/Grep/Glob. Opt out with
+# OSRC_LANE_READ_TRUST=0.
+_lane_read_trusted() {
+  [ "${OSRC_LANE_READ_TRUST:-1}" = "0" ] && return 1
+  [ -n "${CLAUDECODE:-}" ] || return 1
+  [ "$(_mode_read 2>/dev/null)" = "auto" ] || return 1
+  return 0
+}
+
 _mode_menu() {
   printf 'driving mode: NOT SET — pick once (remembered after):\n'
   printf '  A) auto   — %s\n' "$(_mode_meaning auto)"
@@ -485,17 +498,23 @@ codex-image|gpt-image-2|ci|budget
 gpt-image-2|gpt-image-2|ci|budget
 "
 
-# Interactive tmux session name. SEPARATE TASKS GET SEPARATE SESSIONS: the name
-# is derived from the working directory, so a GLM session started in repo A can
-# never `session start` (which kills its own name first) clobber a concurrent
-# session in repo B. `read`/`send`/`model`/`stop` run from the same $PWD, so they
-# resolve the same session automatically. Override explicitly with
-# OUTSOURCERER_TMUX (e.g. to run two isolated sessions in ONE directory).
+# Interactive tmux session name, derived from the working directory AND, when set,
+# the owning Claude Code session id. Deriving it from the cwd alone means two
+# Claude Code sessions working in the same directory resolve to one name and can
+# drive each other's session; including CLAUDE_CODE_SESSION_ID gives each its own.
+# That id is stable across a session's start and its later read/send/model/stop
+# calls (they inherit the same environment), so resolution stays automatic; outside
+# Claude Code the name falls back to cwd-only. Override with OUTSOURCERER_TMUX to
+# force a specific name (two isolated sessions in one shell, or one session
+# deliberately shared across callers).
 _sess_slug() {
-  local base hash
+  local base hash owner=""
   base=$(basename "$PWD" | tr -c 'A-Za-z0-9' '-' | cut -c1-24)
   hash=$(printf '%s' "$PWD" | cksum | cut -d' ' -f1)
-  printf 'outsourcerer-%s-%s' "$base" "$hash"
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    owner="-$(printf '%s' "$CLAUDE_CODE_SESSION_ID" | tr -cd 'A-Za-z0-9' | cut -c1-8)"
+  fi
+  printf 'outsourcerer-%s-%s%s' "$base" "$hash" "$owner"
 }
 SESSION_NAME="${OUTSOURCERER_TMUX:-$(_sess_slug)}"
 
@@ -7015,8 +7034,10 @@ _autodetach_should() {
   [ -n "${OSRC_JOB_DIR:-}" ] && return 1
   # Escape hatch: explicit force -> always detach (even interactive, for testing).
   [ "${OSRC_FORCE_AUTODETACH:-0}" = "1" ] && return 0
-  # Interactive (stdout is a TTY) -> stay foreground (a human wants to watch).
-  [ -t 1 ] && return 1
+  # Interactive (a human is watching) -> stay foreground. Check stdin too, not just
+  # stdout: a user piping output (`| tee`, `| head`) from an interactive shell still
+  # wants to watch, and detaching to bg would strand their pipe with only a job id.
+  { [ -t 1 ] || [ -t 0 ]; } && return 1
   # Local lanes are fast (no network) -> stay foreground.
   case "$disp" in local) return 1 ;; esac
   # Budget tier (quick models) -> stay foreground even if cloud (they're fast).
@@ -9143,7 +9164,7 @@ delegate_ccnative() {
   local tools=()
   if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
   else case "$tier" in
-    auto)                   tools=(--allowedTools Read Grep Glob) ;;
+    auto)                   tools=(--allowedTools Read Grep Glob); _lane_read_trusted && tools=(--allowedTools Read Grep Glob Bash) ;;
     accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
   esac; fi
   local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
@@ -9345,7 +9366,7 @@ delegate_claudex() {
   local tools=()
   if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
   else case "$tier" in
-    auto)                   tools=(--allowedTools Read Grep Glob) ;;
+    auto)                   tools=(--allowedTools Read Grep Glob); _lane_read_trusted && tools=(--allowedTools Read Grep Glob Bash) ;;
     accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
   esac; fi
   local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
@@ -10265,7 +10286,7 @@ delegate_cc() {
   local tools=()
   if [ -n "${OSRC_ALLOWED_TOOLS:-}" ]; then read -ra _at <<< "$OSRC_ALLOWED_TOOLS"; tools=(--allowedTools "${_at[@]}")
   else case "$tier" in
-    auto)                   tools=(--allowedTools Read Grep Glob) ;;
+    auto)                   tools=(--allowedTools Read Grep Glob); _lane_read_trusted && tools=(--allowedTools Read Grep Glob Bash) ;;
     accept-edits|dangerous) tools=(--allowedTools Read Edit Write Bash Grep Glob) ;;
   esac; fi
   local think=""; if [ -n "$EFFORT" ]; then think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; fi
@@ -12407,7 +12428,16 @@ session() {
         echo "Session '$SESSION_NAME' already exists (name derives from \$PWD, so one session per directory). Use '$0 session stop' first, reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
         return 4
       fi
-      tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD"
+      # The has-session check above is a TOCTOU: a concurrent `session start` on the
+      # same name can create the session between that check and here. tmux serializes
+      # new-session, so a duplicate name fails nonzero. Must catch it: without the
+      # guard, execution falls through to send-keys below and types THIS call's launch
+      # command into the OTHER session's pane (cross-session command injection). On a
+      # lost race, treat it exactly like the has-session hit above: report and return 4.
+      if ! tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD" 2>/dev/null; then
+        echo "Session '$SESSION_NAME' was created concurrently (name derives from \$PWD + Claude session; a parallel 'session start' in this same context won the race). Reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
+        return 4
+      fi
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
