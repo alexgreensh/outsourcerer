@@ -2,6 +2,25 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.0
+
+Five community contributions add new ways to route work, more precise model selection, and more resilient long-running jobs. Thank you to everyone who contributed.
+
+### New
+
+- **TokenRouter lane (`--provider tokenrouter`).** Connect any OpenAI-compatible gateway with a single key (`TOKENROUTER_API_KEY` in `~/.env`) and run any model from its live catalog: `--provider tokenrouter -m <model>`. `-m` is required and passes through verbatim to the gateway's own roster (no hardcoded default). Responses stream, so the lane works under `bg` and `fanout`, and it flows through the same cloud-consent and secret-scan checks as every other cloud lane. Thanks @danikdanik. (#11)
+- **`OSRC_MODEL_DENYLIST` keeps specific models out of both recommendation and dispatch.** A comma- or space-separated list of exact model ids or `*` family patterns, enforced in `advise` (never recommended) and at dispatch (an explicit `-m` cannot bypass it). Matched on the resolved model id, so an excluded model stays excluded no matter which alias points at it. Thanks @lufzle. (#13)
+
+### Improved
+
+- **The Antigravity (Gemini) lane honors your exact model choice.** An explicit `-m gemini-3.7-flash` (or any current catalog id) now runs as-is instead of being narrowed to a default, and an id that already names its effort is sent in the form the CLI expects. Family defaults stay configurable via `OSRC_AGY_FLASH_DEFAULT` / `OSRC_AGY_PRO_DEFAULT`. Thanks @lufzle. (#12)
+- **Prompts with malformed characters no longer interrupt a delegation.** A prompt truncated mid-character is cleaned at the dispatch boundary with a clear notice so the run continues, with a portable fallback for systems without `iconv`. Thanks @danikdanik. (#14)
+- **Long-running jobs shut down cleanly.** Each delegate now runs in its own process group and is torn down as a unit on stop, so a stray child that outlives its parent is reliably cleaned up, with safeguards against signalling an unrelated process. Thanks @danikdanik. (#15)
+
+### Housekeeping
+
+- Internal version reporting is aligned with the release version.
+
 ## 0.9.3
 
 Hardening pass from a multi-angle adversarial audit. Seven fixes.

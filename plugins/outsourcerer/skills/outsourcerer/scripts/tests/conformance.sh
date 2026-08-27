@@ -55,6 +55,7 @@ _ALL_SUITES="$_ALL_SUITES test_managed_send"
 _ALL_SUITES="$_ALL_SUITES test_parity_autoheal"
 _ALL_SUITES="$_ALL_SUITES test_pr10_falsestall_before_quota"
 _ALL_SUITES="$_ALL_SUITES test_cline_lane"
+_ALL_SUITES="$_ALL_SUITES test_tokenrouter_lane"
 _ALL_SUITES="$_ALL_SUITES test_fleet_cc_peers"
 _ALL_SUITES="$_ALL_SUITES test_fleet_states"
 _ALL_SUITES="$_ALL_SUITES test_fleet_names"
@@ -66,6 +67,9 @@ _ALL_SUITES="$_ALL_SUITES test_value_router"
 _ALL_SUITES="$_ALL_SUITES test_advise_dynamic_pool"
 _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_quota"
+_ALL_SUITES="$_ALL_SUITES test_model_denylist"
+_ALL_SUITES="$_ALL_SUITES test_utf8_guard"
+_ALL_SUITES="$_ALL_SUITES test_supervise_pgroup_kill"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say

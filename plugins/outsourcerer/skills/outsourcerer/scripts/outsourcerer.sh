@@ -93,6 +93,13 @@
 #                     keys in ~/.cline. The roster and pricing are cline's, not ours -- we do not pin them.
 #                     Posture is binary: --plan = read-only, default act mode auto-approves all tools
 #                     (no OS sandbox, no graded rung); reasoning effort maps to --thinking.
+#   tokenrouter       TokenRouter (https://www.tokenrouter.com), an OpenAI-compatible model gateway.
+#                     Engine lane: -m is REQUIRED and passes through VERBATIM to the gateway's own
+#                     catalog (no hardcoded default model -- the roster is the gateway's, discovered
+#                     live). Key TOKENROUTER_API_KEY in ~/.env
+#                     (single-key extraction). TEXT delegation only (no agentic tool exec); CLOUD
+#                     lane (cloud-consent gate + secret-scan). Some models are a $0 promo RIGHT NOW
+#                     -- confirmed at runtime by billing/quota errors (402/429), never a hardcoded date.
 #   local             Ollama / LM Studio / llama.cpp (also selectable via -m ollama:<m> etc).
 # Reverse bridges (work FROM the other tool): parity-codex | parity-droid | parity-cursor (AGENTS.md
 # hosts) and parity-hermes (SKILL.md host, symlink into ~/.hermes/skills) teach that host agent to
@@ -140,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.8.2"
+OSRC_VERSION="0.10.0"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -804,7 +811,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1303,6 +1310,179 @@ The static alias table resolved to '${model}', but this id is NOT in the live ca
   - Force a fresh catalog fetch: rm -f $(_catalog_path "$lane") (it re-fetches on the next run)."
 }
 
+# _utf8_guard <string> -> prints <string> on stdout, lossy-decoded to valid UTF-8 if it
+# contained invalid bytes. The devin CLI (a Rust+clap binary) rejects any arg whose OsString
+# is not valid UTF-8 with "error: invalid UTF-8 was detected in one or more arguments" (rc=2)
+# -- an opaque crash that does not name the prompt as the cause. The usual source is
+# byte-truncation upstream of outsourcerer: `awk substr` / `cut -c` slicing a multibyte
+# character mid-sequence leaves a lone start/continuation byte (e.g. em-dash E2 80 94 cut at
+# byte 7 yields a lone E2), which is invalid UTF-8. We catch it at the dispatch boundary so
+# the run proceeds with a visible warning instead of dying on an unattributed clap error.
+# Note: devin's --prompt-file does NOT avoid this -- its file-read also rejects invalid UTF-8
+# ("stream did not contain valid UTF-8"), so the guard is needed regardless of channel.
+#
+# Two detection paths, picked per-host by a one-time probe (cached in OSRC_UTF8_PROBE):
+#   - iconv strict: `iconv -f UTF-8 -t UTF-8` exits non-zero on invalid input. Works on
+#     glibc and Apple/BSD libiconv. NOT on musl, whose iconv treats UTF-8->UTF-8 as a
+#     permissive passthrough (exits 0 on a lone E2) and lacks //IGNORE. On musl we fall back
+#     to a pure-shell byte validator (od + shell; no perl/python/iconv needed -- musl base
+#     Alpine ships neither perl nor python3).
+#   - shell: a POSIX UTF-8 framing check over `od -tu1` bytes. Portable everywhere od exists
+#     (od is already a dependency -- see _new_job_id). Used as the musl fallback for BOTH
+#     detection and the lossy strip (drop the invalid bytes), since musl has no //IGNORE.
+#
+# Happy path (valid UTF-8) returns the input UNTOUCHED via `printf '%s'` -- no command-
+# substitution newline stripping, no warning, no subshell. Only an invalid prompt routes
+# through `$()` for the lossy decode. Opt out: OSRC_UTF8_GUARD=0.
+_utf8_guard() {
+  [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && { printf '%s' "$1"; return 0; }
+  _utf8_valid "$1" && { printf '%s' "$1"; return 0; }
+  # Invalid: lossy-decode so dispatch proceeds instead of dying on clap's opaque rc=2.
+  local clean
+  clean="$(_utf8_lossy "$1")"
+  # All-invalid input, or a platform that can't strip -> lossy returns empty. Don't swap in
+  # an empty prompt; let the real error surface honestly. The guard's job is partial
+  # corruption, not a totally mangled payload.
+  [ -z "$clean" ] && { printf '%s' "$1"; return 0; }
+  # Re-validate the cleaned output before trusting it: an iconv that stops at the first bad
+  # byte (rather than skip-and-resume) would return only the valid PREFIX, silently
+  # truncating everything after the corruption. If clean isn't itself valid UTF-8, the
+  # decode is untrustworthy -- passthrough the original so the clap error surfaces instead
+  # of shipping a truncated prompt.
+  _utf8_valid "$clean" || { printf '%s' "$1"; return 0; }
+  printf '>>> [utf8] prompt contained invalid UTF-8 bytes -- lossy-decoded so dispatch proceeds. Common cause: byte-truncation upstream (awk substr / cut -c slicing a multibyte character mid-sequence, leaving a lone continuation byte that the devin CLI rejects with "invalid UTF-8 was detected in one or more arguments"). Fix the upstream truncation (truncate by codepoint, not byte) to avoid garbled content. Suppress: OSRC_UTF8_GUARD=0.\n' >&2
+  printf '%s' "$clean"
+  return 0
+}
+
+# _utf8_probe -> echoes "iconv" if `iconv -f UTF-8 -t UTF-8` actually rejects invalid UTF-8
+# (glibc/Apple/BSD), else "shell" (musl: permissive passthrough). Cached in OSRC_UTF8_PROBE
+# so the one-time bad-byte probe runs once per process. No iconv at all -> "shell" if od is
+# available, else "none" (guard is inert; the clap error surfaces, as it did before this).
+_utf8_probe() {
+  [ -n "${OSRC_UTF8_PROBE:-}" ] && { printf '%s' "$OSRC_UTF8_PROBE"; return 0; }
+  if command -v iconv >/dev/null 2>&1; then
+    # A lone 0xE2 (a 3-byte start with no continuation) is invalid UTF-8. If iconv's strict
+    # identity round-trip exits non-zero on it, iconv validates -- use it. musl exits 0.
+    if printf '\xe2' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+      OSRC_UTF8_PROBE=shell
+    else
+      OSRC_UTF8_PROBE=iconv
+    fi
+  elif command -v od >/dev/null 2>&1; then
+    OSRC_UTF8_PROBE=shell
+  else
+    OSRC_UTF8_PROBE=none
+  fi
+  printf '%s' "$OSRC_UTF8_PROBE"
+}
+
+# _utf8_valid <string> -> rc0 if valid UTF-8, rc1 otherwise. Uses the probed path.
+_utf8_valid() {
+  # Probe in the CURRENT shell (not `$(...)`) so _utf8_probe's OSRC_UTF8_PROBE assignment actually
+  # persists and caches — a command-substitution call ran the one-time probe in a subshell that
+  # discarded the cache, re-running the iconv probe on every validation.
+  _utf8_probe >/dev/null
+  case "${OSRC_UTF8_PROBE:-}" in
+    iconv) printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 ;;
+    shell) _utf8_valid_shell "$1" ;;
+    *) return 0 ;;   # none: cannot check, assume valid (honest passthrough)
+  esac
+}
+
+# _utf8_lossy <string> -> prints input with invalid UTF-8 bytes dropped (valid bytes kept).
+# Uses iconv //IGNORE where the probe confirmed iconv validates (glibc/Apple/BSD support
+# //IGNORE); on the shell path, strips via the byte validator. Empty output = all-invalid or
+# unsupported strip.
+_utf8_lossy() {
+  _utf8_probe >/dev/null   # in-shell so the probe result caches (see _utf8_valid)
+  case "${OSRC_UTF8_PROBE:-}" in
+    iconv) printf '%s' "$1" | iconv -f UTF-8 -t UTF-8//IGNORE 2>/dev/null ;;
+    shell) _utf8_lossy_shell "$1" ;;
+    *) printf '%s' "$1" ;;   # none: passthrough verbatim
+  esac
+}
+
+# _utf8_valid_shell <string> -> rc0 if valid UTF-8, rc1 otherwise. Pure POSIX (od + shell):
+# validates UTF-8 byte framing -- 1/2/3/4-byte sequences with correct continuation bytes,
+# rejects lone continuations, overlong starts (C0/C1), >0xF4, and truncated sequences. No
+# perl/python/iconv (musl base Alpine has none of those).
+_utf8_valid_shell() {
+  local b state need
+  state=0; need=0
+  # `od -tu1` emits bytes as decimal, one per line after tr. read -u3 avoids a pipe (pipefail
+  # would leak the reader's nonzero exit into our return).
+  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
+  while IFS= read -r b <&3; do
+    if [ "$state" = "0" ]; then
+      if [ "$b" -lt 128 ]; then :
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3
+      else exec 3<&-; return 1  # lone continuation (80-BF), C0/C1, or F5+
+      fi
+    else
+      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+        need=$((need-1)); [ "$need" = "0" ] && state=0
+      else exec 3<&-; return 1  # expected continuation, got something else
+      fi
+    fi
+  done
+  exec 3<&-
+  [ "$state" = "0" ]
+}
+
+# _utf8_lossy_shell <string> -> prints input with invalid bytes dropped. Walks the same UTF-8
+# framing as _utf8_valid_shell; on a framing error, drops the offending start/continuation
+# byte and resyncs (a start byte that doesn't begin a valid sequence, or a continuation that
+# doesn't follow one, is dropped). Valid bytes and complete multibyte chars are kept. Bytes
+# are reconstructed via printf octal escapes (\NNN) -- reliable across bash/dash/busybox,
+# unlike \xNN which needs two-digit hex and varies by shell.
+_utf8_lossy_shell() {
+  local b state need out char
+  state=0; need=0; out=""; char=""
+  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
+  while IFS= read -r b <&3; do
+    if [ "$state" = "0" ]; then
+      if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+      fi  # else: lone continuation / bad start -> drop (resync)
+    else
+      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
+        char="$char$(printf "\\$(printf '%03o' "$b")")"
+        need=$((need-1)); [ "$need" = "0" ] && { out="$out$char"; char=""; state=0; }
+      else
+        # Expected a continuation but got a new start/bad byte: drop the partial char,
+        # reprocess this byte as a fresh start.
+        char=""; state=0; need=0
+        if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
+        elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+        fi
+      fi
+    fi
+  done
+  exec 3<&-
+  printf '%s' "$out"
+}
+
+# _utf8_guard_prompt <varname> : guard IN PLACE -- reassign the named var only when its value
+# is not valid UTF-8, so the happy path (valid prompt) is never touched by command
+# substitution (no trailing-newline stripping, no subshell). The invalid path routes through
+# _utf8_guard for the lossy decode + warning. Bash 3.2-safe (no nameref); uses eval with a
+# controlled var name only.
+_utf8_guard_prompt() {
+  [ "${OSRC_UTF8_GUARD:-1}" = "0" ] && return 0
+  local _v _val
+  _v="$1"; eval "_val=\"\${$_v}\""
+  [ -n "$_val" ] || return 0
+  _utf8_valid "$_val" && return 0
+  eval "$_v=\"\$(_utf8_guard \"\$_val\")\""
+}
+
 # delegate <perm> <sandbox-flag-or-empty> [-m MODEL] "<task>"
 delegate() {
   local perm="$1"; shift
@@ -1310,6 +1490,7 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
+  _utf8_guard_prompt prompt   # sanitize invalid UTF-8 in the effort-wrapped prompt before it reaches the devin CLI
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
   [ -n "${EFFORT:-}" ] && printf '>>> [effort] reasoning=%s (advisory: prompt directive; Devin lane has no native effort knob)\n' "$EFFORT" >&2
@@ -1419,6 +1600,7 @@ continue_turn() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no follow-up prompt given"
   local prompt="${REST[*]}"
+  _utf8_guard_prompt prompt
   need_devin
   # Same alias-resolution requirement as delegate(): an unresolved alias fails the continue at launch.
   MODEL="$(_devin_resolve_model "$MODEL")"
@@ -1468,6 +1650,16 @@ _gm_load_key() {
   fi
   [ -n "$GEMINI_API_KEY" ] || die "GEMINI_API_KEY (or GOOGLE_API_KEY) not found in ~/.env (needed for gemini-pro/gemini-flash/nano-banana). Get a key: https://aistudio.google.com/apikey"
   export GEMINI_API_KEY
+}
+
+# ---- TokenRouter lane key (OpenAI-compatible gateway, https://api.tokenrouter.com/v1) ----
+_tr_load_key() {
+  # Extract ONLY the TokenRouter key. NEVER `set -a; . ~/.env`, same single-key-only rule as
+  # _or_load_key above — allexport would push every other secret in ~/.env into the delegate's
+  # environment, exposing them to a third-party model. An already-exported TOKENROUTER_API_KEY wins.
+  [ -n "${TOKENROUTER_API_KEY:-}" ] || TOKENROUTER_API_KEY="$(_extract_kv_value TOKENROUTER_API_KEY)"
+  [ -n "$TOKENROUTER_API_KEY" ] || die "TOKENROUTER_API_KEY not found in ~/.env (needed for --provider tokenrouter). Get a key: https://www.tokenrouter.com (add TOKENROUTER_API_KEY=sk-... to ~/.env)"
+  export TOKENROUTER_API_KEY
 }
 
 # ---- Secure curl header helper: pass API keys via temp file, not process args (ps table) ----
@@ -1622,7 +1814,7 @@ resolve_tier() {
 _effective_lane() {
   case "${3:-}" in local|ollama:*|lmstudio:*|lms:*|local:*) printf 'local'; return ;; esac
   [ "$2" = "local" ] && { printf 'local'; return; }
-  case "$2" in droid|cursor|hermes|warp|cline|claudex) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
+  case "$2" in droid|cursor|hermes|warp|cline|claudex|tokenrouter) printf '%s' "$2"; return ;; esac   # engine lanes: provider IS the lane
   if [ "${4:-1}" != "1" ]; then                    # implicit model -> provider's default lane
     case "$2" in cc|codex) printf 'or' ;; *) printf 'dv' ;; esac; return
   fi
@@ -2039,10 +2231,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -2086,6 +2278,7 @@ _lane_cost_disclosure() {
     droid)                         printf 'cash depends on your Factory plan or BYOK model; BYOK usage is measured or estimated by its provider' ;;
     warp)                          printf 'cash depends on your Warp plan or configured keys; key usage is measured or estimated by its provider' ;;
     cline)                         printf 'cash depends on your ClinePass subscription or the keys configured in ~/.cline; usage is measured or estimated by its provider' ;;
+    tokenrouter)                   printf 'metered cash through your TokenRouter key (some models are a $0 promo right now — confirmed at runtime by billing errors, never by a hardcoded date)' ;;
     *)                             printf 'cash and plan impact unknown for your %s lane' "$1" ;;
   esac
 }
@@ -2289,6 +2482,29 @@ _quota_note_refusal() {  # <lane-or-disp> <model> [reset]
 # marker (e.g. from a refusal on a model the user never capped) can never block it. The marker only
 # reconciles a DECLARED cap — it overrides the derived count in the restrictive direction when the
 # provider actually refused before our count reached the cap.
+# _model_denied <resolved-id> -> 0 (denied) / 1 (allowed). OSRC_MODEL_DENYLIST is a comma/space
+# -separated list of exact resolved ids or glob patterns (e.g. "gemini-3.5-flash,gpt-5.5" or
+# "gemini-3.5-*"), matched against the RESOLVED model id -- never the alias -- so a denied model
+# stays denied no matter which alias resolves to it. Checked in two places: cmd_advise's candidate
+# scoring (so advise never RECOMMENDS a denied model) and the single choke point in route_delegate
+# before dispatch (so nothing denied ever runs, whether picked by advise or pinned with -m). Absent
+# or empty OSRC_MODEL_DENYLIST is a no-op -- default behavior is completely unchanged.
+_model_denied() {
+  local id="$1" list="${OSRC_MODEL_DENYLIST:-}" pat
+  [ -n "$list" ] || return 1
+  local IFS=', '
+  for pat in $list; do
+    # Exact match first, so a literal id containing glob metachars is honored as itself. Real model
+    # ids carry brackets (e.g. claude-opus-4-8[1m]); an unquoted `case $id in $pat` reads `[1m]` as a
+    # character class, which both fails to deny the id's own literal string AND over-matches unrelated
+    # ids like claude-opus-4-81. Glob is applied ONLY to an entry that uses '*' (the documented family
+    # form, e.g. gemini-3.5-*), so bracket-bearing ids stay literal.
+    [ "$id" = "$pat" ] && return 0
+    case "$pat" in *'*'*) case "$id" in $pat) return 0 ;; esac ;; esac
+  done
+  return 1
+}
+
 _quota_gate() {  # <disp> <model>
   local lane; lane="$(_quota_lane_key "$1")"
   local cap; cap="$(_quota_cap "$lane" "$2")" || return 0     # no cap declared == unlimited (markers irrelevant)
@@ -4903,6 +5119,7 @@ cmd_estimate() {
   echo "  Antigravity keyless               $(_lane_cost_disclosure gm)"
   echo "  Devin                              $(_lane_cost_disclosure dv)"
   echo "  local                              $(_lane_cost_disclosure local)"
+  echo "  TokenRouter                        $(_lane_cost_disclosure tokenrouter)"
   awk -v i="$intok" 'BEGIN{printf "  %-34s ~$%.4f  (counterfactual @ $15/M in, $75/M out)\n", "OPUS (Claude)", i*0.000015 + 2000*0.000075}'
 }
 
@@ -4980,6 +5197,9 @@ _ready_lanes() {
   have droid && lanes="$lanes droid=byok"
   have cursor-agent && lanes="$lanes cursor=subscription"
   have cline && lanes="$lanes cline=clinepass-or-byok"
+  if [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ]; then
+    lanes="$lanes tokenrouter=keyed"
+  fi
   _claudex_up 2>/dev/null && lanes="$lanes claudex=proxy"
   printf '%s\n' "${lanes# }"
 }
@@ -5866,6 +6086,7 @@ cmd_advise() {
   while IFS='|' read -r alias resolved lane tier; do
     [ -n "$alias" ] || continue
     case "$lane" in gi|ci) continue ;; esac   # skip image lanes
+    _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
     total_count=$((total_count + 1))
     bench_line="$(_bench_lookup "$resolved" "$field")"
     if [ -n "$bench_line" ]; then
@@ -6177,6 +6398,58 @@ _kill_process_group() { # <pgid> <root-pid>
   return 1
 }
 
+# _kill_job <job-dir> <root-pid> — tear down a supervised job's whole tree, reaching
+# grandchildren that the ppid walk cannot. _supervise launches its delegate as its own
+# process-group leader and records that PGID in <job-dir>/pgid. PGID membership survives
+# reparenting: when the direct child dies on SIGTERM, a grandchild that ignored TERM is
+# re-parented to PID 1, leaves the process tree, and the SECOND _descendants snapshot
+# (the one _kill_tree takes for its KILL pass) no longer sees it — so the grandchild
+# keeps its inherited socket/file and the kill floor never reaps. Incident: a wedged
+# `devin acp` held an ESTABLISHED TCP to the model backend for 4h21m (15,660s), 8.7x past
+# the 1800s devin stall-kill floor, because its parent `devin -p` died on TERM and it
+# re-parented out of the tree before the KILL pass re-discovered it. Killing the process
+# group by negative PGID reaches every member regardless of reparenting; SIGKILL on the
+# group cannot be caught, so a grandchild that ignores SIGTERM still dies. Falls back to
+# _kill_tree when no isolated PGID was recorded, so a launch that could not be isolated
+# (or an old job dir written before this fix) degrades to the prior behaviour instead of
+# signalling the wrong group.
+_kill_job() {
+  local jd="${1:-}" pid="${2:-}" pgid="" _live_pgid=""
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$jd" ] && [ -f "$jd/pgid" ] && pgid="$(cat "$jd/pgid" 2>/dev/null | tr -d '[:space:]')"
+  case "$pgid" in ''|*[!0-9]*) pgid="" ;; esac
+  if [ -n "$pgid" ]; then
+    # PID-reuse / stale-PGID guard: the recorded PGID is only safe to kill by negative
+    # ID when the root PID is still alive AND still in that group. A job dir from a
+    # long-finished job (cmd_cleanup can be called days later) may hold a PGID that the
+    # OS has since recycled into an unrelated group — killing `-PGID` then hits an
+    # innocent process group. Verify the live process's PGID matches the record; if the
+    # PID is dead, has a different PGID, or ps is unavailable, fall back to the tree
+    # walk (which is harmless on a dead PID). This collapses the recycling risk to
+    # "both the PID and its PGID were recycled together", which requires the group
+    # leader to be reborn in the same group.
+    _live_pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    case "$_live_pgid" in ''|*[!0-9]*) pgid="" ;; *[!0-9]*) pgid="" ;; esac
+    [ -n "$pgid" ] && [ "$_live_pgid" = "$pgid" ] || pgid=""
+  fi
+  if [ -n "$pgid" ]; then
+    _kill_process_group "$pgid" "$pid"
+    local _krc=$?
+    # _kill_process_group returns 1 when live survivors remain after the KILL pass.
+    # That is the one signal that answers "did the kill actually land?" — discarding
+    # it silently (the prior behaviour at every call site) is exactly the incident
+    # pattern: the watchdog believed it had reaped the job for 4h21m. Record it so a
+    # recurrence is loud instead of silent. The caller's exit code (125/124/3) is
+    # unchanged — this is diagnostic, not a new exit path.
+    if [ "$_krc" -ne 0 ] && [ -n "$jd" ] && [ -d "$jd" ]; then
+      printf 'kill-survivors-remain\n' >> "$jd/reason" 2>/dev/null || true
+    fi
+    return "$_krc"
+  else
+    _kill_tree "$pid"
+  fi
+}
+
 # _perm_denials <log> -> count of REAL permission/sandbox denials in the log's tail.
 #
 # The naive version of this — grep the whole log for 'permission denied|EACCES|...' — counts the
@@ -6339,8 +6612,36 @@ _supervise() {
   _mkdir_private "$jd"
   : > "$jd/out.log"; chmod 600 "$jd/out.log" 2>/dev/null || true
   echo running > "$jd/status"
+  # Launch the delegate as its OWN process-group leader so a wedged descendant that
+  # re-parents to PID 1 when its parent dies can still be reached by `kill -- -PGID`.
+  # The ppid tree walk alone misses exactly that case: a grandchild immune to SIGTERM
+  # survives the TERM pass, its parent dies on TERM, it re-parents out of the tree, and
+  # the KILL pass's re-snapshot never re-discovers it — so it keeps its inherited
+  # socket/file and the stall-kill floor never reaps (incident: devin acp held an
+  # ESTABLISHED TCP to the model backend 8.7x past the 1800s floor). PGID membership does
+  # not change on reparenting, so a negative-PGID kill reaches it wherever it lands.
+  # `set -m` makes a backgrounded job a group leader portably — macOS ships no `setsid` —
+  # and the prior monitor state is restored so job control never leaks into the caller.
+  # Same pattern as _fleet_name_model's bounded helper. The PGID is only acted on by
+  # _kill_process_group (via _kill_job), which re-validates it is a real group and NOT
+  # this shell's own, and falls back to a tree walk when isolation did not take; a
+  # mis-recorded value therefore degrades to the old behaviour instead of mis-killing.
+  local _mon=0; case "$-" in *m*) _mon=1 ;; esac
+  [ "$_mon" = 1 ] || set -m
   ( exec "$@" </dev/null >> "$jd/out.log" 2>&1 ) &
-  local pid=$! t0 last_size=0 last_change now size idle age _jcwd=""
+  local pid=$! _pgid="" _shell_pgid=""
+  _pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [ "$_mon" = 1 ] || set +m
+  case "$_pgid" in ''|*[!0-9]*) _pgid="" ;; esac
+  _shell_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')"
+  case "$_shell_pgid" in ''|*[!0-9]*) _shell_pgid="" ;; esac
+  # Record the PGID only when it is a genuine isolated group (>1 and not our own), so the
+  # file's presence means "kill this group" and a failed isolation leaves it absent and
+  # _kill_job falls back to the tree walk instead of signalling the supervisor's group.
+  if [ -n "$_pgid" ] && [ "$_pgid" -gt 1 ] 2>/dev/null && [ "$_pgid" != "$_shell_pgid" ]; then
+    printf '%s\n' "$_pgid" > "$jd/pgid" 2>/dev/null || true
+  fi
+  local t0 last_size=0 last_change now size idle age _jcwd=""
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
   # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
@@ -6353,7 +6654,7 @@ _supervise() {
   local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
-  trap '_kill_tree "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
+  trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
   # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
   # if it then remains both write-free AND output-silent for another bounded window, stop it as a
@@ -6420,7 +6721,7 @@ _supervise() {
       echo wedged > "$jd/status"
       printf '%s\n' "$_noinit_reason" > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd"): $_noinit_reason" >&2
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     if [ "$mutating" = "1" ] && [ "$age" -ge "$nww" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       _job_made_writes "$jd" "$_jcwd" || {
@@ -6436,7 +6737,7 @@ _supervise() {
       echo wedged > "$jd/status"
       printf 'exploring-timeout\n' > "$jd/reason" 2>/dev/null || true
       echo "[outsourcerer] job $(basename "$jd") stayed in exploring? for ${nww_kill}s with ZERO file writes and no output growth; stopped as stalled. Re-run with a tighter write target if more exploration is genuinely needed." >&2
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     # SELF-HEAL backstop (LANE-AGNOSTIC): a mutating job hitting repeated permission/sandbox denials is
     # walled off — headless delegates (claude/codex/devin/local) cannot answer an interactive prompt, so it
@@ -6448,7 +6749,7 @@ _supervise() {
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:denials=%s\n' "$_pd" > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): $_pd permission/sandbox denials — the delegate is walled off (a protected path or sandbox that can't be auto-approved headless). Re-run with 'yolo' (bypassPermissions), from a different cwd, or with the right sandbox/--add-dir." >&2
-        _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
+        _kill_job "$jd" "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
     # DEVIN PRINT-MODE HANG (LANE-AGNOSTIC, immediate): a headless devin (`-p` / print mode) that
@@ -6481,11 +6782,11 @@ _supervise() {
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:print-mode-hang\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
-        _kill_tree "$pid"; echo 3 > "$jd/exit"; return 3
+        _kill_job "$jd" "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
     if [ "$age" -ge "$hard" ]; then
-      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_tree "$pid"; echo 124 > "$jd/exit"; return 124
+      echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_job "$jd" "$pid"; echo 124 > "$jd/exit"; return 124
     fi
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
     # while writing files is working, and killing it is the failure this watchdog causes rather than
@@ -6551,7 +6852,7 @@ _supervise() {
         # `explain`/`status` can show it instead of a bare `wedged` verdict.
         printf 'stall-kill\n' > "$jd/reason" 2>/dev/null || true
       fi
-      _kill_tree "$pid"; echo 125 > "$jd/exit"; return 125
+      _kill_job "$jd" "$pid"; echo 125 > "$jd/exit"; return 125
     fi
     if [ "$idle" -ge "$warn" ] && [ "$(cat "$jd/status" 2>/dev/null)" = "running" ]; then
       echo "stalled?" > "$jd/status"
@@ -6922,7 +7223,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -7127,7 +7428,10 @@ _resolve_run_cost() {
         # `gi` is the Gemini-API-key lane code (see _lane_cost_disclosure's gemini|gi arm). The
         # foreground gemini path records under that code, so without it here a metered API-key run
         # would take the `*)` arm and log a FALSE measured $0.
-        or|gi|gemini|gm|gmnative|droid|warp) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        # `tokenrouter` is a metered gateway lane: no receipt means we COULD NOT MEASURE the run,
+        # never that it cost $0 (some models are a $0 promo, but that is a runtime fact, not a
+        # ledger default — recording $0 here would understate spend the same way the or guard does).
+        or|gi|gemini|gm|gmnative|droid|warp|tokenrouter) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
         *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
@@ -7225,6 +7529,9 @@ run_job() {
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
     droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
+    # this lane always carries an explicit model; just record the lane.
+    tokenrouter)  lane="tokenrouter" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -8077,7 +8384,7 @@ cmd_cancel() {
   local id="${1:-}"; [ -n "$id" ] || die "cancel needs a job id"
   local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
   local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
-  [ -n "$pid" ] && _kill_tree "$pid"
+  [ -n "$pid" ] && _kill_job "$jd" "$pid"
   echo canceled > "$jd/status"; printf 'canceled:operator\n' > "$jd/reason" 2>/dev/null || true; echo "canceled $id"
   # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
   # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
@@ -8106,7 +8413,7 @@ cmd_cleanup() {
   # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
   # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
   local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
-  [ -n "$live_pid" ] && _kill_tree "$live_pid"
+  [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
@@ -8762,6 +9069,19 @@ $body"
       hermes) _dp_cli="hermes" ;;
       warp)   _dp_cli="oz" ;;
       cline)  _dp_cli="cline" ;;
+      tokenrouter)
+        # No CLI: the KEY is the dispatchability gate. Check it here (cheap, local, no network) so a
+        # missing key fails the WHOLE fanout up front instead of minting phantom jobs that die in the
+        # detached child (route_delegate's fail-fast would fire, but only after launch).
+        [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ] \
+          || die "fanout: lane 'tokenrouter' requires TOKENROUTER_API_KEY in ~/.env — not found. Add it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
+        # The lane has NO default model: every job must resolve one via the same precedence the
+        # launch loop uses (-m > --route > agent frontmatter), or the batch dies up front.
+        _pem="$g_model"
+        [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"
+        [ -z "$_pem" ] && _pem="${a_model[$_pi]}"
+        [ -n "$_pem" ] || die "fanout: lane 'tokenrouter' needs a model for every job (-m <gateway-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."
+        continue ;;
       *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
@@ -8902,7 +9222,7 @@ _so_resolve() {  # <model> -> "resolved_id|disp|tier" (mirrors run-verb routing)
     gm) disp=gmnative ;;
     dv) disp=devin ;;
     or) case "$PROVIDER" in cc) disp=ccor ;; codex) disp=codexor ;; *) disp=ccor ;; esac ;;
-    droid|cursor|hermes|warp|cline|claudex) disp="$elane" ;;
+    droid|cursor|hermes|warp|cline|claudex|tokenrouter) disp="$elane" ;;
     *) disp="${tlane:-$PROVIDER}" ;;
   esac
   if [ "$elane" = "dv" ] && [ "$PROVIDER" = "devin" ]; then
@@ -9225,24 +9545,56 @@ delegate_ccnative() {
 
 # _agy_model_token <gemini-cli/api id> -> the token the Antigravity `agy` CLI accepts. agy exposes
 # its own curated (keyless) model set (see `agy models`); it has no flash-lite and uses non-preview
-# ids. agy is lenient (falls back to its default on an unknown token), so this is best-effort.
+# ids.
+#
+# NOTE: agy does NOT silently fall back on an unknown token -- it hard-errors
+# ("invalid model selection (--model X --effort Y)"), so a token this function emits must be one
+# agy actually serves.
+#
+# The `*flash*`/`*pro*` substring arms exist to translate gemini-API-only ids into agy's catalog
+# (strip `-preview`, collapse `flash-lite` since agy has no lite tier). But they matched on
+# SUBSTRING, so they also swallowed an id that was ALREADY a valid agy token: `-m gemini-3.7-flash`
+# dispatched gemini-3.5-flash instead, silently, with no indication a substitution had happened.
+# Any newer release agy adds hits the same path.
+#
+# So: an id already shaped like agy's catalog (`gemini-<ver>-flash[...]` / `gemini-<ver>-pro[...]`,
+# incl. effort-suffixed forms like gemini-3.6-flash-high) passes through unchanged -- EXCEPT the
+# `-preview`/`-lite` API-only suffixes, which agy rejects outright and which therefore must still
+# fall through to a family default. The two defaults are overridable because agy's catalog gains
+# new dated releases and a hardcoded default goes stale.
 _agy_model_token() {
   case "$1" in
-    *pro*)   echo "gemini-3.1-pro" ;;
-    *flash*) echo "gemini-3.5-flash" ;;   # covers flash + flash-lite (agy has no lite tier)
+    # API-only suffixes agy's catalog does not carry: must fall through to a family default below.
+    *-preview|*-lite) : ;;
+    # Already a valid agy token -> never rewrite an explicit, serveable model choice.
+    gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*) echo "$1"; return 0 ;;
+  esac
+  case "$1" in
+    *pro*)   echo "${OSRC_AGY_PRO_DEFAULT:-gemini-3.1-pro}" ;;
+    *flash*) echo "${OSRC_AGY_FLASH_DEFAULT:-gemini-3.5-flash}" ;;   # covers flash + flash-lite (agy has no lite tier)
     *)       echo "$1" ;;
   esac
 }
 
 # _agy_effort <agy-model-token> <requested-effort> -> an effort level that model actually accepts.
-# agy REQUIRES --effort for these models and rejects the run outright without it
+# agy REQUIRES --effort for a BARE family id and rejects the run outright without it
 # ("invalid model selection (--model X --effort \"\"): requires --effort"), and the accepted set is
 # per-model: pro offers low|high with NO medium, flash offers low|medium|high. An unsupported level is
 # rounded UP rather than down, because silently giving less thinking than asked for is the failure the
 # caller cannot see; the clamp is announced.
+# The mirror image also holds and is easy to miss: an id that already NAMES its effort must be sent
+# with NO --effort at all, because agy rejects that pair just as hard ("--model gemini-3.7-flash-high
+# conflicts with --effort=medium"). Returning empty here is the signal to drop the flag.
 _agy_effort() {
   local tok="$1" want="${2:-medium}" out
   case "$want" in low|medium|high) ;; *) want=medium ;; esac
+  case "$tok" in
+    # An id that already NAMES its effort takes no --effort flag: agy rejects the pair outright
+    # ("--model gemini-3.7-flash-high conflicts with --effort=medium"). Every id in agy's catalog is
+    # of this form, so this is the normal case for an explicitly pinned model, not an edge case.
+    # Emit nothing and let the caller omit the flag.
+    *-low|*-medium|*-high) return 0 ;;
+  esac
   case "$tok" in
     *pro*)   case "$want" in medium) out=high ;; *) out="$want" ;; esac ;;
     *flash*) out="$want" ;;
@@ -9286,13 +9638,18 @@ delegate_gmnative() {
     _tier_banner "antigravity-agy (keyless)" "$atok" "$ttier" "$posture | $(_lane_cost_disclosure gm)"
     # agy has no --output-format json; the supervisor watches plain-stdout byte growth and the bg
     # path derives last.txt from out.log, so no stream flags are needed. --print-timeout caps waits.
-    local aeff; aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
+    local aeff aeffflag=(); aeff="$(_agy_effort "$atok" "${EFFORT:-medium}")"
+    if [ -n "$aeff" ]; then
+      aeffflag=(--effort "$aeff")
+    elif [ -n "${EFFORT:-}" ]; then
+      printf '>>> [effort] %s already names its effort, so --effort %s is dropped instead of sent (agy refuses the pair). Pick the -low/-medium/-high variant of the id to change it.\n' "$atok" "$EFFORT" >&2
+    fi
     # Capture stderr so a "timeout waiting for response" can be TRANSLATED. agy reports a dead lane the
     # same way it reports a slow one, and at the default 5m print-timeout that costs five minutes per
     # attempt to learn nothing. The distinguishing fact is that agy's own auth/model resolution
     # succeeded and only the generation never returned, which points at the backend, not the request.
     local _aerr; _aerr="$(mktemp -t osrc-agy)"
-    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" --effort "$aeff" \
+    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> >(tee "$_aerr" >&2) || rc=$?
     if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
@@ -10113,6 +10470,7 @@ _perm_refuse_msg="edit target is under a harness-protected config dir (~/.claude
 _is_cloud_lane() {
   case "$1" in
     ccor|codexor|ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline|claudex) return 0 ;;
+    tokenrouter) return 0 ;;   # cloud gateway: prompt leaves the machine -> full cloud gate + secret-scan
     *) return 1 ;;
   esac
 }
@@ -10625,6 +10983,78 @@ _local_agentic_shim() {
   return "$rc"
 }
 
+# =============================================================================
+# TOKENROUTER LANE (OpenAI-compatible gateway, https://api.tokenrouter.com/v1).
+# A CLOUD lane: the prompt LEAVES the machine, so dispatch flows through the same
+# _cloud_disclose choke point + secret-scan as every other cloud lane (route_delegate
+# gates it BEFORE this delegate runs — never short-circuit ahead of the gate).
+# -m is REQUIRED and passes through VERBATIM to TokenRouter's own catalog (their models, not a
+# hardcoded list, and NO hardcoded default — the roster is the gateway's, discovered live).
+# The driver mirrors delegate_local's direct
+# streaming curl to /v1/chat/completions, with two deliberate differences: the key rides
+# _curl_with_auth (0600 temp-file header, never a process arg in the ps table), and there is
+# NO loopback guard — this is a remote gateway, not a local server.
+# TEXT delegation (same contract as the local lane's text path): the model reasons over the
+# prompt you hand it (inject files with --with or inline); it does NOT autonomously read the
+# repo or run tools. Reasoning models consume tokens on reasoning before visible content, so
+# the timeout is generous (OSRC_TOKENROUTER_TIMEOUT, default 900s).
+# COST HONESTY: the roster and pricing are TokenRouter's, not ours. Some models are a $0 promo
+# RIGHT NOW; that is confirmed at RUNTIME by billing/quota errors (402/429), never by a
+# hardcoded date or a static "free" claim. The ledger records no fabricated cost (empty =
+# unmeasured; the Tab reports it honestly).
+# =============================================================================
+_tr_base_url() { printf '%s' "${OSRC_TOKENROUTER_URL:-https://api.tokenrouter.com/v1}"; }
+
+delegate_tokenrouter() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}"
+  have curl || die "curl not on PATH (the tokenrouter lane needs it)"
+  have jq   || die "jq not on PATH (the tokenrouter lane needs it; brew install jq)"
+  _tr_load_key
+  # -m is REQUIRED: there is NO hardcoded default model (the roster is the gateway's, discovered
+  # live). route_delegate enforces this before dispatch; this is the defense-in-depth backstop.
+  [ -n "${MODEL:-}" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
+  local model="$MODEL"
+  local ttier wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "$task" "${TTIER:-}")"
+  _tier_banner "tokenrouter ($(_tr_base_url))" "$model" "$ttier" "TEXT delegation | CLOUD: $(_lane_cost_disclosure tokenrouter)"
+  local jd="${OSRC_JOB_DIR:-$OSRC_HOME}"; mkdir -p "$jd"
+  local capf="$jd/.tokenrouter.$$.txt"; : > "$capf"
+  local payload; payload="$(jq -cn --arg m "$model" --arg c "$wrapped" '{model:$m,stream:true,messages:[{role:"user",content:$c}]}')"
+  # Stream so the liveness watchdog (bg/fanout) sees byte growth, and the user sees tokens live.
+  local line data tok rc=0
+  _curl_with_auth "$TOKENROUTER_API_KEY" -sN --fail-with-body -m "${OSRC_TOKENROUTER_TIMEOUT:-900}" "$(_tr_base_url)/chat/completions" \
+       -H 'Content-Type: application/json' \
+       -d "$payload" 2>/dev/null | while IFS= read -r line; do
+    case "$line" in
+      data:*) data="${line#data:}"; data="${data# }"
+        [ "$data" = "[DONE]" ] && continue
+        tok="$(printf '%s' "$data" | jq -r '(.choices[0].delta.content // .choices[0].message.content // .message.content // empty)' 2>/dev/null)"
+        [ -n "$tok" ] && { printf '%s' "$tok"; printf '%s' "$tok" >> "$capf"; } ;;
+    esac
+  done
+  rc=${PIPESTATUS[0]}
+  printf '\n'
+  if [ ! -s "$capf" ]; then
+    rm -f "$capf"
+    die "TokenRouter at $(_tr_base_url) returned no completion for model '$model' (curl rc=$rc). Check: 401 = TOKENROUTER_API_KEY missing/invalid; 404 = model id not in the gateway's catalog (list: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models); 402/429 = balance/quota exhausted, fall through to another lane."
+  fi
+  # Partial-stream honesty: curl's exit was captured above but only ever reached the no-output error.
+  # A stream that carried SOME tokens and THEN failed (mid-stream TCP drop, -m timeout after partial
+  # output, a 5xx after the first chunk) left non-empty $capf, so the function returned success and the
+  # caller trusted a TRUNCATED answer as complete. Surface it: the content is still shown (it may be
+  # usable), but the run is flagged so a cut-off response is visible instead of silent.
+  if [ "$rc" -ne 0 ]; then
+    printf '>>> [tokenrouter] WARNING: the stream ended abnormally (curl rc=%s) after partial output — the response above may be TRUNCATED, not complete. Re-run if it looks cut off.\n' "$rc" >&2
+  fi
+  [ "${OSRC_STREAM:-0}" = "1" ] && cp "$capf" "$jd/last.txt" 2>/dev/null
+  rm -f "$capf"
+  # Empty cost (not "0.000000"): per-run gateway cost is unmeasured here; a fabricated zero would
+  # understate spend the same way a fabricated estimate would. The Tab shows it as unmeasured cash.
+  record_ledger tokenrouter "$model" "$ttier" "$tier" "$task" "" "tokenrouter"
+  return 0
+}
+
 # _is_tooltype_400 <capture-file> -> true if the run died because the OpenRouter model's upstream
 # provider rejected one of Codex's native tool types (the `namespace`/custom tool grouping Codex
 # 0.144 emits; provider-routing dependent, NOT a toggleable feature). This is the signal to self-heal
@@ -10931,6 +11361,8 @@ _fallback_lane_ready() {
         [ -n "$k" ] || return 1 ;;
     or) k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$k" ] || return 1
         have claude || have codex || return 1 ;;
+    tokenrouter) k="${TOKENROUTER_API_KEY:-}"; [ -n "$k" ] || k="$(_extract_kv_value TOKENROUTER_API_KEY)"
+        [ -n "$k" ] || return 1 ;;
     *)  return 1 ;;
   esac
   return 0
@@ -10988,7 +11420,7 @@ _fallback_disp_lane() {
 }
 
 _fallback_provider_for_lane() {
-  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp|cline) printf '%s' "$1" ;; *) return 1 ;; esac
+  case "$1" in dv) printf devin ;; cc|or) printf cc ;; cx) printf codex ;; gm) printf gemini ;; droid|cursor|hermes|warp|cline|tokenrouter) printf '%s' "$1" ;; *) return 1 ;; esac
 }
 
 # _fallback_effective <alias> <model> <lane> -> "model@lane" this candidate would ACTUALLY run as
@@ -11092,7 +11524,7 @@ _route_resolution() {   # <dispatch-lane> <model>
   case "$lane" in
     local) ROUTE_COST_CLASS=local; ROUTE_INTERACTION=local ;;
     ccnative|cxnative|gmnative|devin|droid|cursor|hermes|warp|cline) ROUTE_COST_CLASS=limited ;;
-    ccor|codexor|claudex) ROUTE_COST_CLASS=credits ;;
+    ccor|codexor|claudex|tokenrouter) ROUTE_COST_CLASS=credits ;;
     *) die "route resolution is ambiguous for lane '$lane'; refusing to launch" ;;
   esac
 }
@@ -11240,6 +11672,9 @@ route_delegate() {
   # Parsers preserve absence as empty. Resolve a route identity here, after the
   # provider is known, so a Devin default never leaks into Gemini or local.
   if [ "$MODEL_EXPLICIT" != "1" ]; then
+    # tokenrouter has NO default model: the roster is the gateway's (discovered live), so a run
+    # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
+    [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
     MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
   fi
 
@@ -11258,7 +11693,7 @@ route_delegate() {
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
-  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ]; then
+  if [ "$MODEL_EXPLICIT" = "1" ] && [ "$PROVIDER" != "droid" ] && [ "$PROVIDER" != "cursor" ] && [ "$PROVIDER" != "hermes" ] && [ "$PROVIDER" != "warp" ] && [ "$PROVIDER" != "cline" ] && [ "$PROVIDER" != "tokenrouter" ]; then
     local row rest2
     row="$(resolve_model_row "$MODEL")"
     if [ -n "$row" ]; then
@@ -11284,7 +11719,7 @@ route_delegate() {
   fi
 
   local disp="" _or_autoroute_note="" _or_credit_state=""
-  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ]; then
+  if [ "$PROVIDER" = "droid" ] || [ "$PROVIDER" = "cursor" ] || [ "$PROVIDER" = "hermes" ] || [ "$PROVIDER" = "warp" ] || [ "$PROVIDER" = "cline" ] || [ "$PROVIDER" = "tokenrouter" ]; then
     disp="$PROVIDER"
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
@@ -11294,6 +11729,7 @@ route_delegate() {
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
       cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend." ;;
+      tokenrouter) _tr_load_key ;;  # no CLI to probe: the KEY is the dispatchability gate. Fail fast (pre-cloud-gate, pre-auto-detach) so a missing key is an instant pointer, not an error buried in a detached job.
     esac
     # The engine CLI presence is the dispatchability gate for these lanes: the check above fails
     # fast (before the cloud gate and before auto-detach would mint a job), so a missing CLI never
@@ -11385,7 +11821,7 @@ route_delegate() {
       cc)    disp=ccor ;;
       codex) disp=codexor ;;
       gemini|gm) disp=gmnative ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter)" ;;
     esac
   fi
 
@@ -11423,6 +11859,14 @@ route_delegate() {
     fi
     # Mutating tier or fallback disabled (unpinned): can't safely auto-hop; refuse with the reset time.
     die "-m $RESOLVED_ID is $_qreason on the ${disp:-?} lane, and auto-fallback isn't available for a '$tier' run. Wait for the reset or pass another -m."
+  fi
+
+  # DENYLIST GATE: refuse before announcing a route that must not dispatch, same placement as the
+  # quota gate above. Enforced here (not only in cmd_advise's candidate scoring) so an explicit -m
+  # pin cannot bypass it -- filtering advise alone only stops auto-selection from RECOMMENDING a
+  # denied model, it does nothing for a caller who names one directly.
+  if _model_denied "$RESOLVED_ID"; then
+    die "-m $RESOLVED_ID is on OSRC_MODEL_DENYLIST and will not be dispatched. Pick another -m, or unset/edit OSRC_MODEL_DENYLIST if this is unwanted."
   fi
 
   _route_resolution "$disp" "$RESOLVED_ID"
@@ -11519,6 +11963,7 @@ route_delegate() {
       hermes)   delegate_hermes   "$tier" ;;
       warp)     delegate_warp     "$tier" ;;
       cline)    delegate_cline    "$tier" ;;
+      tokenrouter) delegate_tokenrouter "$tier" ;;
       claudex)  delegate_claudex  "$tier" ;;
     esac
   }
@@ -12942,7 +13387,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -13079,6 +13524,25 @@ doctor() {
     else echo "      agentic (tool use): via on-demand Anthropic<->OpenAI shim + Claude Code (lazy-launched only when you use research/edit -m local; needs python3 + a tool-capable model)"; fi
   else
     echo "    none detected (probed Ollama :11434, LM Studio :1234, llama.cpp :8080). Start one (e.g. 'ollama serve' + 'ollama pull qwen2.5-coder') or set OSRC_LOCAL_URL=http://host:port/v1. Driver: curl+jq (built in), TEXT delegation, no extra install."
+  fi
+  echo "  -- TokenRouter lane (OpenAI-compatible gateway, $(_lane_cost_disclosure tokenrouter)) --"
+  if [ -n "${TOKENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value TOKENROUTER_API_KEY 2>/dev/null)" ]; then
+    echo "    tokenrouter: KEY present (TOKENROUTER_API_KEY). Route: --provider tokenrouter run -m <gateway-model-id> \"task\" (-m is REQUIRED; the roster is the gateway's, discovered live). -m passes through verbatim to the gateway's catalog."
+    if [ "$_doff" = "1" ]; then echo "    tokenrouter liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
+    elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
+      # Bounded live probe: list the gateway's models with the key. Distinguishes READY (key valid,
+      # gateway answering) from key-invalid/down without spending a completion. Never prints the key.
+      local _trc _trcode
+      _trcode="$(_curl_with_auth "${TOKENROUTER_API_KEY:-$(_extract_kv_value TOKENROUTER_API_KEY)}" -s -o /dev/null -w '%{http_code}' -m "${OSRC_DOCTOR_PROBE_TIMEOUT_SECS:-8}" "$(_tr_base_url)/models" 2>/dev/null)"
+      case "$_trcode" in
+        200) echo "    tokenrouter liveness: RESPONDS — gateway answering at $(_tr_base_url), key accepted (probed just now)" ;;
+        401|403) echo "    tokenrouter liveness: KEY REJECTED (HTTP $_trcode) — TOKENROUTER_API_KEY is missing/invalid/expired. Fix the key in ~/.env." ;;
+        000) echo "    tokenrouter liveness: NOT ANSWERING at $(_tr_base_url) (timeout/unreachable). Treat as DOWN, not ready." ;;
+        *) echo "    tokenrouter liveness: UNCLEAR (HTTP $_trcode) — gateway reachable but returned an unexpected status." ;;
+      esac
+    fi
+  else
+    echo "    tokenrouter: TOKENROUTER_API_KEY MISSING from ~/.env. Get a key: https://www.tokenrouter.com, then add TOKENROUTER_API_KEY=sk-... to ~/.env (single-key extraction, never set -a). Cost: $(_lane_cost_disclosure tokenrouter)."
   fi
   echo "  -- Gemini / Antigravity lane (gemini-pro/gemini-flash/gemini-flash-lite text, nano-banana image) --"
   # PRIMARY vehicle: agy (keyless). Detect + guide setup per this skill's revision.
@@ -13864,7 +14328,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"
                   PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -13944,7 +14408,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
 
   esac
 }
