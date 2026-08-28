@@ -2049,17 +2049,27 @@ _resolve_skill_file() {
   return 1
 }
 
-# _validate_with_token <tok> -> die unless tok is a recognized --with form (skills=... | mcp=...).
+# _validate_with_token <arg> -> die unless every whitespace-separated token in <arg> is a
+# recognized --with form (skills=<names> | mcp=<names>, both requiring a non-empty value).
 # A non-empty but unrecognized spec (e.g. a bare file path someone passes expecting file-attach)
 # used to be stored into WITH_SPEC and then silently dropped during capability injection: only
 # skills= and mcp= are honored there, so the delegate ran with none of the intended context and
 # nothing told the caller. Reject unrecognized forms at parse time so the footgun is loud, not
 # silent. The empty-arg die at each parse site stays; this adds the non-empty-but-bad die.
+#
+# WITH_SPEC is space-delimited and iterated unquoted at injection time (for tok in $WITH_SPEC),
+# so a single --with argument containing whitespace (e.g. "skills=a,b /tmp/brief.txt") is split
+# into multiple tokens. Validating only the prefix would let an invalid trailing token pass and
+# still silently drop at injection — the exact footgun this fixes. Validate EVERY token. Also
+# reject empty values (skills= / mcp=) since those are silent no-ops of the same class.
 _validate_with_token() {
-  case "$1" in
-    skills=*|mcp=*) return 0 ;;
-    *) die "--with requires e.g. skills=a,b or mcp=x (got '$1'); an unrecognized spec is rejected rather than silently dropped" ;;
-  esac
+  local tok
+  for tok in ${1:-}; do
+    case "$tok" in
+      skills=?*|mcp=?*) ;;
+      *) die "--with requires e.g. skills=a,b or mcp=x (got '$tok'); an unrecognized spec is rejected rather than silently dropped" ;;
+    esac
+  done
 }
 
 build_with_preamble() {
@@ -10585,6 +10595,10 @@ _secret_scan() {
   fi
   fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
+  # After _validate_with_token (parse time), every WITH_SPEC token is a skills=… or mcp=… form,
+  # so the `*=*) continue` branch always fires and the bare-file `[ -f "$tok" ]` path below is
+  # now unreachable. Kept as defensive coverage in case a future code path sets WITH_SPEC without
+  # going through the parse-site validators.
   if [ -n "${WITH_SPEC:-}" ]; then
     local tok; local -a _ws; IFS=' ' read -ra _ws <<< "$WITH_SPEC"
     for tok in "${_ws[@]}"; do

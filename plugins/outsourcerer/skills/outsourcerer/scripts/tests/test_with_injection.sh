@@ -41,6 +41,20 @@ _werr="$( ( _validate_with_token "/tmp/brief.txt" ) 2>&1 >/dev/null )"
 case "$_werr" in *"skills=a,b"*"mcp=x"*"/tmp/brief.txt"*) ok "the rejection names the spec and the valid forms" ;;
   *) bad "rejection message is missing guidance/spec: $_werr" ;; esac
 
+# --- empty values (skills= / mcp=) are silent no-ops of the same class — must be rejected -------
+( _validate_with_token "skills=" ) >/dev/null 2>&1 && bad "empty skills= was accepted (silent no-op)" || ok "empty skills= is rejected"
+( _validate_with_token "mcp=" )    >/dev/null 2>&1 && bad "empty mcp= was accepted (silent no-op)"    || ok "empty mcp= is rejected"
+
+# --- whitespace smuggling: a multi-token --with arg with an invalid trailing token -------------
+# WITH_SPEC is space-delimited and iterated unquoted at injection time, so "skills=a,b /tmp/brief.txt"
+# splits into two tokens. Validating only the prefix would let the bare path through and silently drop
+# it at injection — the exact footgun this fix targets. Every token must be validated.
+( _validate_with_token "skills=a,b mcp=x" ) >/dev/null 2>&1 && ok "a multi-token spec with all valid forms is accepted" || bad "a valid multi-token spec was wrongly rejected"
+( _validate_with_token "skills=a,b /tmp/brief.txt" ) >/dev/null 2>&1 && bad "a multi-token spec with an invalid trailing token was accepted" || ok "a multi-token spec with an invalid trailing token is rejected"
+_wsmerr="$( ( _validate_with_token "skills=a,b /tmp/brief.txt" ) 2>&1 >/dev/null )"
+case "$_wsmerr" in *"/tmp/brief.txt"*) ok "the whitespace-smuggling rejection names the bad token, not just the prefix" ;;
+  *) bad "whitespace-smuggling rejection does not name the bad token: $_wsmerr" ;; esac
+
 # --- resolution must cover more than the user's own skills dir ------------------------------------
 # Fixture: a plugin-cache layout and a parity dir, neither of which the old resolver looked at.
 mkdir -p "$TMP/home/.claude/skills/mine" \
