@@ -25,6 +25,21 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 . "$SRC" >/dev/null 2>&1
 type -t _resolve_skill_file  >/dev/null || { echo "FAIL: _resolve_skill_file not loaded"; exit 1; }
 type -t build_with_preamble  >/dev/null || { echo "FAIL: build_with_preamble not loaded"; exit 1; }
+type -t _validate_with_token >/dev/null || { echo "FAIL: _validate_with_token not loaded"; exit 1; }
+
+# --- an unrecognized --with spec must be REJECTED at parse time, not silently dropped ----------
+# Only skills= and mcp= are honored at injection time. Anything else (e.g. a bare file path someone
+# passes expecting file-attach) used to be stored and then dropped with NO error and NO warning, so
+# the delegate ran with none of the intended context and nothing told the caller. _validate_with_token
+# makes the footgun loud. die exits the process, so each check runs in a subshell.
+( _validate_with_token "skills=a,b" ) >/dev/null 2>&1 && ok "skills= spec accepted" || bad "skills= spec wrongly rejected"
+( _validate_with_token "mcp=x" )     >/dev/null 2>&1 && ok "mcp= spec accepted"     || bad "mcp= spec wrongly rejected"
+( _validate_with_token "/tmp/brief.txt" ) >/dev/null 2>&1 && bad "a bare file path was accepted (silent no-op returns)" || ok "a bare file path is rejected, not silently dropped"
+( _validate_with_token "attach=/tmp/brief.txt" ) >/dev/null 2>&1 && bad "an unknown form= spec was accepted" || ok "an unrecognized form= spec is rejected"
+# The rejection message must name the spec and point at the valid forms, so the caller can fix it.
+_werr="$( ( _validate_with_token "/tmp/brief.txt" ) 2>&1 >/dev/null )"
+case "$_werr" in *"skills=a,b"*"mcp=x"*"/tmp/brief.txt"*) ok "the rejection names the spec and the valid forms" ;;
+  *) bad "rejection message is missing guidance/spec: $_werr" ;; esac
 
 # --- resolution must cover more than the user's own skills dir ------------------------------------
 # Fixture: a plugin-cache layout and a parity dir, neither of which the old resolver looked at.
