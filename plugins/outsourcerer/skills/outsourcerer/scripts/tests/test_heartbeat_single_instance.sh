@@ -162,6 +162,88 @@ SH
 ) && ok "fleet reader is one grouping pass; dead sessions cost zero per-session jq" \
   || bad "fleet reader spawned excessive jq or did not drop dead sessions"
 
+# ---------------------------------------------------------------------------
+# 4. (BUG 2c) A live interactive session counts as active work, so the beacon does not exit on
+#    the first tick when only interactive sessions are live. _heartbeat_active_work used to scan
+#    ONLY $OSRC_JOBS for bg/fanout job statuses; interactive `session start` sessions are not jobs
+#    and were invisible, so the beacon started, counted zero work, broke, and exited immediately.
+#    This is critical because interactive is now the mandatory mode for delegates (c19dd73).
+(
+  set --
+  . "$SRC" >/dev/null 2>&1
+  _pid_start_identity(){ printf 'Mon Jan 1 00:00:00 2024\n'; }
+  tmux(){ return 1; }
+  # No jobs directory at all — the interactive-only case.
+  rm -rf "$OSRC_JOBS" 2>/dev/null || true
+  : > "$OSRC_SESSION_REGISTRY"
+  # No live sessions -> active_work must return false (beacon should exit when nothing is live).
+  _heartbeat_active_work && { echo "FAIL: active_work returned true with no jobs and no sessions"; exit 1; }
+  # One live interactive session (harness_pid = $$) -> active_work must return true.
+  jq -cn --argjson live "$$" --arg ts "2020-01-01T00:00:00Z" \
+    '{schema_version:"1",event:"start",session_id:"interactive-1",provider:"cc",model:"sonnet",
+      requested_model:"sonnet",resolved_model:"sonnet",model_generation:1,effort:"high",
+      state:"running",receipt:"receipt",endpoint:"tmux:interactive-1",harness_pid:$live,
+      pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:$ts}' >> "$OSRC_SESSION_REGISTRY"
+  _heartbeat_active_work || { echo "FAIL: active_work returned false with a live interactive session"; exit 1; }
+  # A dead interactive session (harness_pid = dead_pid) -> active_work must return false.
+  : > "$OSRC_SESSION_REGISTRY"
+  jq -cn --argjson pid "$dead_pid" --arg ts "2020-01-01T00:00:00Z" \
+    '{schema_version:"1",event:"start",session_id:"interactive-dead",provider:"cc",model:"sonnet",
+      requested_model:"sonnet",resolved_model:"sonnet",model_generation:1,effort:"high",
+      state:"running",receipt:"receipt",endpoint:"tmux:interactive-dead",harness_pid:$pid,
+      pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:$ts}' >> "$OSRC_SESSION_REGISTRY"
+  _heartbeat_active_work && { echo "FAIL: active_work returned true with only a dead session"; exit 1; }
+  # An ended session (event=end) -> active_work must return false even if the pid is somehow live.
+  : > "$OSRC_SESSION_REGISTRY"
+  jq -cn --argjson live "$$" --arg ts "2020-01-01T00:00:00Z" \
+    '{schema_version:"1",event:"end",session_id:"interactive-ended",provider:"cc",model:"sonnet",
+      requested_model:"sonnet",resolved_model:"sonnet",model_generation:1,effort:"high",
+      state:"ended",receipt:"stop",endpoint:"tmux:interactive-ended",harness_pid:$live,
+      pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:$ts}' >> "$OSRC_SESSION_REGISTRY"
+  _heartbeat_active_work && { echo "FAIL: active_work returned true for an ended session"; exit 1; }
+  # A session with no harness_pid (unprovably dead) -> active_work must return true (honest unknown).
+  : > "$OSRC_SESSION_REGISTRY"
+  jq -cn --arg ts "2020-01-01T00:00:00Z" \
+    '{schema_version:"1",event:"start",session_id:"interactive-nopid",provider:"cc",model:"sonnet",
+      requested_model:"sonnet",resolved_model:"sonnet",model_generation:1,effort:"high",
+      state:"running",receipt:"receipt",endpoint:"tmux:interactive-nopid",harness_pid:null,
+      pid_start:null,owner:"managed",ts:$ts}' >> "$OSRC_SESSION_REGISTRY"
+  _heartbeat_active_work || { echo "FAIL: active_work returned false for an unprovably-dead session (should keep beacon alive)"; exit 1; }
+  exit 0
+) && ok "active_work counts live interactive sessions; exits on dead/ended/empty" \
+  || bad "active_work is blind to interactive sessions or does not exit when nothing is live"
+
+# ---------------------------------------------------------------------------
+# 5. (BUG 2d) A stale leader claim (dead pid in owner.json) is evicted by _heartbeat_start, while
+#    a live leader claim is respected. The beacon is spawned with nohup but can die when its
+#    parent shell exits, leaving owner.json holding a dead pid that wedges future arming.
+(
+  set --
+  . "$SRC" >/dev/null 2>&1
+  _state_sync(){ return 0; }
+  _pid_start_identity(){ printf 'Thu Jul 31 01:02:03 2026\n'; }
+  rm -rf "$OSRC_HEARTBEAT/leader" 2>/dev/null || true
+  # Plant a stale claim with a dead pid.
+  owner="$OSRC_HEARTBEAT/leader/owner.json"
+  mkdir -p "$(dirname "$owner")"
+  jq -cn --argjson pid "$dead_pid" --arg pid_start "Thu Jul 31 01:02:03 2026" --arg token stale \
+    '{pid:$pid,pid_start:$pid_start,token:$token}' > "$owner"
+  # _heartbeat_leader_alive must return false (dead pid).
+  _heartbeat_leader_alive && { echo "FAIL: leader reported alive for a dead pid"; exit 1; }
+  # _heartbeat_leader_evict_stale must remove the stale claim.
+  _heartbeat_leader_evict_stale
+  [ -f "$owner" ] && { echo "FAIL: stale leader claim was not evicted"; exit 1; }
+  # Now plant a LIVE claim ($$) and verify it is NOT evicted.
+  start="$(_pid_start_identity "$$")"
+  _heartbeat_claim "$$" "$start" live-token "" >/dev/null || { echo "FAIL: could not claim leadership"; exit 1; }
+  _heartbeat_leader_evict_stale
+  [ -f "$owner" ] || { echo "FAIL: live leader claim was evicted"; exit 1; }
+  # And _heartbeat_leader_alive must still return true for the live claim.
+  _heartbeat_leader_alive || { echo "FAIL: live leader reported not alive after eviction check"; exit 1; }
+  exit 0
+) && ok "stale leader claim evicted (dead pid); live leader respected" \
+  || bad "stale leader claim not evicted or live leader was evicted"
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

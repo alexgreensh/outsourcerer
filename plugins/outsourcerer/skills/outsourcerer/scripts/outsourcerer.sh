@@ -3994,12 +3994,44 @@ _heartbeat_is_owner() {
 
 _heartbeat_active_work() {
   local jd status
-  [ -d "$OSRC_JOBS" ] || return 1
-  for jd in "$OSRC_JOBS"/*; do
-    [ -d "$jd" ] || continue
-    status="$(cat "$jd/status" 2>/dev/null || true)"
-    case "$status" in launching|running|exploring?|stalled?) return 0 ;; esac
-  done
+  # bg/fanout jobs: a job in a non-terminal status is active work.
+  if [ -d "$OSRC_JOBS" ]; then
+    for jd in "$OSRC_JOBS"/*; do
+      [ -d "$jd" ] || continue
+      status="$(cat "$jd/status" 2>/dev/null || true)"
+      case "$status" in launching|running|exploring?|stalled?) return 0 ;; esac
+    done
+  fi
+  # Interactive `session start` sessions are not jobs — they live in the session registry, not
+  # $OSRC_JOBS. Without this check the beacon would count zero work, break, and exit on the first
+  # tick even when five interactive sessions are live. This is now critical because interactive is
+  # the mandatory mode for delegates (c19dd73 routes would-be headless runs into tmux sessions),
+  # so every session the tool creates is invisible to the old jobs-only check. The registry is the
+  # source of truth, with the same dead-PID liveness rule the fleet reader uses: a session whose
+  # harness_pid is provably gone is ended, not active. A session with no harness_pid recorded
+  # cannot be proven dead and is kept (honest unknown), so the beacon does not prematurely exit on
+  # a session whose pane probe has not landed yet.
+  _heartbeat_interactive_work && return 0
+  return 1
+}
+
+# Scan the session registry for any LIVE interactive session (harness alive, last event not `end`).
+# Single jq grouping pass + kill -0 (builtin) per session — the same shape as the fleet reader's
+# dead-pid filter. Returns 0 if at least one live session exists, 1 otherwise.
+_heartbeat_interactive_work() {
+  have jq || return 1
+  [ -f "$OSRC_SESSION_REGISTRY" ] || return 1
+  [ ! -L "$OSRC_SESSION_REGISTRY" ] || return 1
+  local id pid pid_start event
+  while IFS=$'\x1f' read -r id pid pid_start event; do
+    [ -n "$id" ] || continue
+    [ "$event" != end ] || continue
+    _session_harness_alive "$pid" "$pid_start" && return 0
+  done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs '
+    sort_by(.session_id, (.ts // "")) | group_by(.session_id)
+    | map(sort_by(.ts // "") | last)
+    | .[] | [ (.session_id // ""), ((.harness_pid // "")|tostring), (.pid_start // ""),
+              (.event // "") ] | join("\u001f")' 2>/dev/null)
   return 1
 }
 
@@ -4038,6 +4070,25 @@ _heartbeat_leader_alive() {
   [ "$lrc" -eq 0 ] && [ "$live" = "$ls" ] && return 0
   [ "$lrc" -ne 0 ] && return 0
   return 1
+}
+
+# Evict a stale leader claim when its recorded pid is PROVABLY gone. The beacon is spawned with
+# nohup but can die when its parent shell exits, leaving owner.json holding a dead pid. That stale
+# claim then blocks a new beacon from arming: _heartbeat_claim has reclaim logic, but edge cases
+# (an unsupported identity adapter returning rc=3, a pid_start_valid failure on the recorded
+# marker) can make the claim return 3 and exit without reclaiming, wedging supervision silently.
+# This is the same bug class 0.9.2 fixed for session claims: evict only when the recorded pid is
+# provably dead (kill -0 fails), never when a live leader holds it. Called from _heartbeat_start
+# AFTER _heartbeat_leader_alive returns false, so a live leader is never touched.
+_heartbeat_leader_evict_stale() {
+  local owner="$OSRC_HEARTBEAT/leader/owner.json" leader="$OSRC_HEARTBEAT/leader" lp
+  [ -f "$owner" ] && [ ! -L "$owner" ] || return 0
+  [ ! -L "$leader" ] || return 0
+  lp="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 0
+  case "$lp" in ''|*[!0-9]*) return 0 ;; esac
+  # Provably dead: kill -0 fails. Evict the stale claim so a new beacon can claim cleanly.
+  kill -0 "$lp" 2>/dev/null && return 0
+  _heartbeat_remove_tree "$leader" 2>/dev/null || true
 }
 
 _heartbeat_beacon() {
@@ -4080,6 +4131,12 @@ _heartbeat_start() {
   # nested __heartbeat-beacon processes were observed alive at once. The election would eventually
   # serialize them, but each duplicate ran the full tick until it lost the claim.
   _heartbeat_leader_alive && return 0
+  # Stale-claim eviction (BUG 2d): a beacon that died when its parent shell exited leaves
+  # owner.json holding a dead pid. That stale claim can wedge _heartbeat_claim's reclaim path
+  # (edge cases return 3 and exit without reclaiming), silently disabling supervision. Evict the
+  # stale claim NOW, before spawning, so the new beacon finds no incumbent and claims cleanly.
+  # Safe because _heartbeat_leader_alive already returned false — a live leader is never touched.
+  _heartbeat_leader_evict_stale
   if [ -z "$sink" ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; }; then sink="/dev/tty"; fi
   token="$(_heartbeat_token)"
   executable="${OSRC_HEARTBEAT_EXECUTABLE:-$SCRIPT_PATH}"
