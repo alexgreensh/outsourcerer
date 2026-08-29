@@ -140,7 +140,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.8.2"
+OSRC_VERSION="0.10.1"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -11712,14 +11712,311 @@ _managed_composer_state() { # <session-id> <pane> -> empty|unknown
   esac
 }
 
-# Return codes: 0 = VERIFIED submitted (an external receipt adapter proved it); 2 = keys were delivered
-# but delivery is NOT independently verified (no adapter — honest "sent, go look"); 1 = genuine failure
-# (nothing was typed, or the send itself failed). We NEVER forge a receipt from send-keys success or from
-# pane-scraping (a prior transcript occurrence, a wrapped composer, or a dialog eating Enter would all
-# fool a scraper). The obligation log records `submitted` ONLY on a real receipt; otherwise it records
-# `delivery_unknown`, which is both honest and blocks an unsafe auto-replay of an unknown-delivery send.
+# ---- submission verification for MANAGED session send (Bug A) -----------------------------------
+# `session send` used to type a prompt into the composer and report "sent" without ever proving the
+# text left the input line. An Enter eaten by a dialog, a composer that wasn't ready, or a multi-line
+# input left the typed text sitting unsubmitted while the receipt said "sent", so a delegation could
+# sit unsent indefinitely while looking dispatched. The fix is a direct, immediate observation of the
+# composer at the mutation endpoint: snapshot the pane tail WITH the typed text resting in the composer
+# (captured between the text send and the Enter), then poll until the pane changes away from that
+# snapshot. A successful submit always changes the pane (the text moves into the transcript, or the
+# composer clears, or a spinner appears); an Enter that was eaten leaves the pane byte-identical to
+# the text-in-composer snapshot, so the check fails closed. This is NOT the old pane-scraping receipt
+# (which matched a transcript occurrence and was forgeable): it observes the composer state in the
+# bounded window right after the send. Verified against real tmux 3.6a: a typed-but-unsubmitted line
+# sits on the bottom input line of `capture-pane -p`; after Enter it moves into history and the bottom
+# line clears.
+_managed_pane_tail() { # <pane> -> last N non-empty lines (the comparison snapshot)
+  local pane="$1"
+  tmux capture-pane -t "$pane" -p 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "${OSRC_SEND_VERIFY_TAIL:-12}"
+}
+
+# 0 = submitted (the pane changed away from the text-in-composer snapshot); 1 = not submitted (the
+# pane is still byte-identical to the moment the text sat typed in the composer — Enter was eaten);
+# 2 = the pane could not be read. Bounded poll (condition-based, not one fixed sleep): a real submit
+# clears the composer in well under a second; a stuck composer never changes, so the loop exits on the
+# real state change.
+_managed_send_submitted() { # <pane> <typed-tail-snapshot>
+  local pane="$1" typed="$2" polls="${OSRC_SEND_VERIFY_POLLS:-15}" i cur
+  i=0
+  while [ "$i" -lt "$polls" ]; do
+    cur="$(_managed_pane_tail "$pane")"
+    # A blanked pane (empty capture) means the text left the composer -> submitted.
+    [ -n "$cur" ] || return 0
+    # The pane changed away from the text-in-composer snapshot -> submitted.
+    [ "$cur" != "$typed" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# ---- interactive menu / choice-prompt detection (Bug A) -----------------------------------------
+# When a delegate is showing an interactive choice menu, `session send` refused with "nothing was
+# typed", leaving NO way to answer the menu through the session API. `session answer` and the helpful
+# send-refusal below need a detector that reads the pane tail and reports the visible options. Prints
+# a small line-based report:
+#   MENU none
+#   MENU consent
+#   PROMPT <the consent prompt line>
+#   MENU numbered
+#   OPT <idx> <label>
+#   ...
+#   MENU cursor
+#   SEL <pos> <label>      <- the row currently marked with ❯
+#   OPT <pos> <label>
+#   ...
+# Consent ([y/N], (y/n)) is checked first (single-key answer). Numbered options ("N. label" / "N)
+# label") and ❯-marked cursor lists are matched on the tail region only, so a menu buried in
+# scrollback history is not mistaken for a current prompt. Conservative: when in doubt, "none" (a
+# false "menu" would block a legitimate send).
+_managed_menu_detect() { # <pane>
+  local pane="$1" cap tail_region
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { printf 'MENU none\n'; return 0; }
+  tail_region="$(printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -n "${OSRC_MENU_TAIL:-20}")"
+  [ -n "$tail_region" ] || { printf 'MENU none\n'; return 0; }
+
+  local consent_re='(\[y/N\]|\(y/n\)|\[Y/n\]|\[y/n\])'
+  if printf '%s\n' "$tail_region" | grep -Eq "$consent_re"; then
+    printf 'MENU consent\n'
+    printf 'PROMPT %s\n' "$(printf '%s\n' "$tail_region" | grep -E "$consent_re" | tail -1)"
+    return 0
+  fi
+
+  # Numbered options. Require >=2 numbered rows so a single numbered prose line is not mistaken for
+  # a menu.
+  local nums count=0 idx lab
+  nums="$(printf '%s\n' "$tail_region" | grep -E '^[[:space:]]*[0-9]+[.)][[:space:]]+')"
+  if [ -n "$nums" ]; then
+    while IFS= read -r ln; do
+      [ -n "$ln" ] || continue
+      idx="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
+      lab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
+      [ -n "$idx" ] && [ -n "$lab" ] && count=$((count + 1))
+    done < <(printf '%s\n' "$nums")
+    if [ "$count" -ge 2 ]; then
+      printf 'MENU numbered\n'
+      while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        idx="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
+        lab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
+        [ -n "$idx" ] && [ -n "$lab" ] && printf 'OPT %s %s\n' "$idx" "$lab"
+      done < <(printf '%s\n' "$nums")
+      return 0
+    fi
+  fi
+
+  # Cursor list: a ❯-marked selected row among sibling indented rows. Candidate rows are indented
+  # (with or without a ❯ marker); a column-0 prose header is not an option. Require >=2 candidate
+  # rows and >=1 marked row, so a single ❯ prompt glyph is not mistaken for a list.
+  if printf '%s\n' "$tail_region" | grep -qE '^[[:space:]]*[❯]?[[:space:]]+'; then
+    local pos=0 sel=0 is_sel cand
+    cand="$(printf '%s\n' "$tail_region" | grep -E '^[[:space:]]*[❯]?[[:space:]]+')"
+    # First pass: count candidates and locate the ❯-marked row.
+    while IFS= read -r ln; do
+      [ -n "$ln" ] || continue
+      pos=$((pos + 1))
+      if printf '%s' "$ln" | grep -qE '^[[:space:]]*❯[[:space:]]+'; then sel=$pos; fi
+    done < <(printf '%s\n' "$cand")
+    if [ "$pos" -ge 2 ] && [ "$sel" -ge 1 ]; then
+      printf 'MENU cursor\n'
+      pos=0
+      while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        pos=$((pos + 1))
+        if printf '%s' "$ln" | grep -qE '^[[:space:]]*❯[[:space:]]+'; then is_sel=1; else is_sel=0; fi
+        lab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[❯]?[[:space:]]+//')"
+        [ -n "$lab" ] || continue
+        if [ "$is_sel" = 1 ]; then printf 'SEL %d %s\n' "$pos" "$lab"; else printf 'OPT %d %s\n' "$pos" "$lab"; fi
+      done < <(printf '%s\n' "$cand")
+      return 0
+    fi
+  fi
+
+  printf 'MENU none\n'
+}
+
+# Answer a detected menu. <pane> <selector>: y|n|yes|no (consent), a numeric index (numbered), or a
+# label substring (cursor — navigate Up/Down from the ❯ row to the match, then Enter). Verifies the
+# menu closed (a follow-up detect returns "none"). 0 = answered + verified closed; 1 = could not
+# answer or the menu did not close. Sends ONLY the answer keys, never chat.
+_managed_menu_answer() { # <pane> <selector>
+  local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i
+  report="$(_managed_menu_detect "$pane")"
+  kind="$(printf '%s\n' "$report" | head -1 | awk '{print $2}')"
+  case "$kind" in
+    none) echo "no interactive menu detected in the pane. Re-check with: $0 session read" >&2; return 1 ;;
+    consent)
+      case "$sel" in
+        y|yes|Y) tmux send-keys -t "$pane" -l -- "y" 2>/dev/null || return 1 ;;
+        n|no|N)  tmux send-keys -t "$pane" -l -- "n" 2>/dev/null || return 1 ;;
+        *) echo "consent prompt needs y|yes or n|no" >&2; return 1 ;;
+      esac
+      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      ;;
+    numbered)
+      case "$sel" in *[!0-9]*) echo "numbered menu needs a numeric index" >&2; return 1 ;; esac
+      printf '%s\n' "$report" | grep -qE "^OPT $sel " || { echo "index $sel is not one of the offered options" >&2; return 1; }
+      tmux send-keys -t "$pane" -l -- "$sel" 2>/dev/null || return 1
+      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      ;;
+    cursor)
+      target_pos=0; sel_pos=0
+      while IFS= read -r line; do
+        case "$line" in
+          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}" ;;
+          OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
+        esac
+      done < <(printf '%s\n' "$report")
+      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no cursor-list option matches '$sel'" >&2; return 1; }
+      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected (❯) row found" >&2; return 1; }
+      delta=$((target_pos - sel_pos))
+      if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || return 1; i=$((i+1)); done
+      elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || return 1; i=$((i+1)); done; fi
+      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      ;;
+    *) echo "unrecognized menu kind '$kind'" >&2; return 1 ;;
+  esac
+  # Verify the menu closed: bounded poll until the follow-up detect returns "none".
+  i=0
+  while [ "$i" -lt "${OSRC_MENU_CLOSE_POLLS:-15}" ]; do
+    [ "$(_managed_menu_detect "$pane" | head -1 | awk '{print $2}')" = "none" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  echo "answer sent but the menu did not close (still detected). Re-check with: $0 session read" >&2
+  return 1
+}
+
+# ---- control plane: lifecycle keys, strictly separate from `session send` (Bug B) ----------------
+# Lifecycle control (interrupt/exit/relaunch) and conversation shared one channel. Driving a
+# delegate's lifecycle through `session send` made the keystrokes chat the delegate reasoned about
+# instead of executing, and lifecycle sent as text was unverifiable. `session control` owns the
+# per-lane mechanics, sends ONLY lifecycle keys (never a prompt the delegate would read as chat),
+# verifies each action took effect, and never tears down or discards work (no kill-session, no
+# worktree mutation). Verified against real tmux 3.6a: respawn-pane -k changes #{pane_pid};
+# display-message -p -t <pane> '#{pane_pid}' reads the live PID; capture-pane -p reads the pane.
+
+# interrupt: cancel the in-flight turn. Provider-aware keystroke (cc/claude use Escape, the "esc to
+# interrupt" legend; others use Ctrl-C). Verified by polling the pane until the busy signal is gone.
+# Prints a receipt + the resulting pane-state JSON on success. Never tears down.
+_session_control_interrupt() { # <pane> <provider>
+  local pane="$1" prov="$2" i cap state key
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  case "$prov" in
+    cc|claude) tmux send-keys -t "$pane" Escape 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; } ;;
+    *)         tmux send-keys -t "$pane" C-c 2>/dev/null    || { _endpoint_mutation_unlock "$key"; return 1; } ;;
+  esac
+  _endpoint_mutation_unlock "$key"
+  i=0
+  while [ "$i" -lt "${OSRC_CONTROL_VERIFY_POLLS:-20}" ]; do
+    cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || break
+    state="$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)"
+    case "$(printf '%s' "$state" | jq -r '.state // "unknown"' 2>/dev/null)" in
+      working) : ;;
+      *) printf 'receipt: interrupt sent; the busy signal cleared. Pane state: %s\n' "$state"; return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { _pane_state_json unknown "capture failed"; return 1; }
+  printf 'receipt: interrupt sent but the busy signal did NOT clear. Pane state: %s\n' "$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)" >&2
+  return 1
+}
+
+# exit: ask the delegate to quit gracefully. Provider-aware quit keystroke (cc/claude: /exit + Enter;
+# devin/codex/others: Ctrl-D). Verified by polling until the pane returns to a shell prompt (the TUI
+# is gone). Does NOT kill the tmux session and does NOT discard work (the worktree is untouched).
+_session_control_exit() { # <pane> <provider>
+  local pane="$1" prov="$2" i cap bottom trim key
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  case "$prov" in
+    cc|claude)
+      _tmux_reset_input "$pane"   # wipe any draft so /exit is not concatenated onto stale input
+      tmux send-keys -t "$pane" -l -- "/exit" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      ;;
+    *)
+      tmux send-keys -t "$pane" C-d 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      ;;
+  esac
+  _endpoint_mutation_unlock "$key"
+  i=0
+  while [ "$i" -lt "${OSRC_CONTROL_VERIFY_POLLS:-30}" ]; do
+    cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || break
+    bottom="$(printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -1)"
+    trim="$(printf '%s' "$bottom" | sed -E 's/[[:space:]]+$//')"
+    case "$trim" in
+      *[$%#]) printf 'receipt: exit sent; the delegate returned to a shell. Pane state: %s\n' "$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)"; return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { _pane_state_json unknown "capture failed"; return 1; }
+  printf 'receipt: exit sent but the delegate did NOT return to a shell. Pane state: %s\n' "$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)" >&2
+  return 1
+}
+
+# relaunch: restart the in-pane delegate with the SAME provider/model/effort it was launched with.
+# Uses tmux respawn-pane (the pane process is replaced; the tmux session, the worktree, and all work
+# are preserved). Verified by the pane PID changing. A new `start` registry record is appended with
+# an incremented generation so _managed_endpoint_live keeps proving the endpoint live against the new
+# process. Never tears down or discards work.
+_session_control_relaunch() { # <pane> <provider> <model> <effort>
+  local pane="$1" prov="$2" model="$3" effort="${4:-}" launch pid_before pid_after gen i
+  case "$prov" in
+    codex|cx|cc|claude|droid)
+      launch="$(_session_relaunch_command "$prov" "$model" "$effort")" || return 1 ;;
+    devin|dv)
+      _validate_model_token "$model"
+      launch="devin --model '$model' --respect-workspace-trust false" ;;
+    *)
+      echo "control relaunch is not wired for provider '$prov'. Stop and restart with:  $0 session stop && $0 --provider $prov session start -m $model" >&2
+      return 1 ;;
+  esac
+  tmux has-session -t "$pane" 2>/dev/null || return 1
+  pid_before="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" || return 1
+  tmux respawn-pane -k -t "$pane" "$launch" || return 1
+  pid_after=""
+  i=0
+  while [ "$i" -lt "${OSRC_CONTROL_VERIFY_POLLS:-20}" ]; do
+    pid_after="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" || break
+    [ -n "$pid_after" ] && [ "$pid_after" != "$pid_before" ] && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ -z "$pid_after" ] || [ "$pid_after" = "$pid_before" ]; then
+    echo "relaunch sent but the pane PID did not change; the delegate may not have restarted." >&2
+    return 1
+  fi
+  gen="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .model_generation // 1' | tail -1)"
+  case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
+  gen=$((gen + 1))
+  SESSION_NAME="$pane" _session_registry_append start "$prov" "$model" "$effort" started relaunch "" "$gen" || true
+  printf 'receipt: relaunch applied to %s (provider=%s, model=%s, effort=%s). New pane PID %s (was %s).\n' "$pane" "$prov" "$model" "${effort:-none}" "$pid_after" "$pid_before"
+  return 0
+}
+
+# Read a session's latest start record: "provider<TAB>model<TAB>effort<TAB>generation".
+_session_record() { # <session-id>
+  _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" \
+    'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring)] | @tsv' | tail -1
+}
+
+# Return codes: 0 = VERIFIED submitted (an external receipt adapter proved delivery to the model);
+# 2 = submitted (the text left the composer, verified by pane-content change) but model delivery is
+# NOT independently verified (no receipt adapter — honest "submitted, model delivery unverified");
+# 1 = genuine failure (nothing was typed, the send itself failed, OR the text was typed but never left
+# the composer — Enter was eaten by a dialog or the composer was not ready). We NEVER forge a receipt
+# from send-keys success: an external receipt adapter is the only thing that proves delivery to the
+# model. Submission (the text left the composer) is proven by the pane-content change above, which is
+# a direct composer observation, not a transcript scrape. The obligation log records `submitted` ONLY
+# on a real receipt; otherwise it records `delivery_unknown`, which is both honest and blocks an
+# unsafe auto-replay of an unknown-delivery send.
 _managed_session_send() { # <session-id> <message>
-  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest
+  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest typed_tail sub_rc
   _managed_endpoint_live "$session_id" "$pane" || return 1
   oid="send.$session_id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
@@ -11734,13 +12031,25 @@ _managed_session_send() { # <session-id> <message>
   composer="$(_managed_composer_state "$session_id" "$pane" 2>/dev/null)"
   [ "$composer" = empty ] || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  # Snapshot the pane tail WITH the typed text resting in the composer, BEFORE Enter. This is the
+  # text-in-composer state; a successful submit changes the pane away from it. Captured between the
+  # two sends so the snapshot is exactly the moment the text sat typed.
+  typed_tail="$(_managed_pane_tail "$pane" 2>/dev/null)"
   tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  # Bug A: prove the text left the composer. Without this, an Enter eaten by a dialog left the typed
+  # prompt sitting unsubmitted while the receipt said "sent". A bounded poll waits for the real state
+  # change; a stuck composer never changes and fails the check (rc 1, never "sent").
+  _managed_send_submitted "$pane" "$typed_tail"; sub_rc=$?
+  case "$sub_rc" in
+    0) : ;;   # submitted — the text left the composer
+    *) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;
+  esac
   generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
   [ -n "$generation" ] || generation=1
-  # A usable external receipt adapter is the ONLY thing that proves submission -> `submitted` (rc 0). A
-  # set-but-broken adapter fails closed. With no adapter, keys were delivered but not independently
-  # verified: record delivery_unknown (honest, no forged receipt) and return 2 so the caller can say
-  # "sent (unverified)" rather than a scary error or a false "delivered".
+  # A usable external receipt adapter is the ONLY thing that proves delivery to the model -> `submitted`
+  # (rc 0). A set-but-broken adapter fails closed. With no adapter, submission is proven (the text left
+  # the composer) but model delivery is not independently verified: record delivery_unknown (honest,
+  # no forged receipt) and return 2 so the caller says "submitted, model delivery unverified".
   case "$(_external_probe_configured "${OSRC_EXTERNAL_RECEIPT_PROBE:-}"; echo $?)" in
     0) receipt="$(_external_receipt_verify "$pane" "$oid" 2>/dev/null)"
        if _external_receipt_valid "$receipt" "$pane" "$oid" "$generation"; then
@@ -11749,7 +12058,7 @@ _managed_session_send() { # <session-id> <message>
        fi
        _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;
     2) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;  # broken adapter: fail closed
-    1) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 2 ;; # delivered, not independently verified
+    1) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 2 ;; # submitted, model delivery not independently verified
   esac
 }
 
@@ -12579,17 +12888,68 @@ session() {
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
-      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session answer [y|n|<i>|<label>]   |   $0 session control <interrupt|exit|relaunch>   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      local _menu_kind _send_rc _st
+      # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
+      # helpfully with the options + the answer command instead of typing into the menu. Typing
+      # chat into a menu either vanishes or selects the wrong option; the menu needs `session answer`.
+      _menu_kind="$(_managed_menu_detect "$SESSION_NAME" | head -1 | awk '{print $2}')"
+      if [ "$_menu_kind" != "none" ]; then
+        _managed_menu_detect "$SESSION_NAME"
+        case "$_menu_kind" in
+          consent)  echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
+          numbered) echo "answer with:  $0 session answer <index>   (one of the OPT indexes above)" ;;
+          cursor)   echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
+        esac
+        die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
+      fi
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
       case "$_send_rc" in
         0) echo "sent (delivery verified). Read progress with: $0 session read" ;;
-        2) echo "sent — keys delivered, delivery NOT independently verified (no receipt adapter). Confirm it landed with: $0 session read. For verified receipts, set OSRC_EXTERNAL_RECEIPT_PROBE." ;;
-        *) die "session send failed: nothing was typed (the composer was not confirmed ready, or the pane could not be proven live). Re-check with: $0 session read" ;;
+        2) echo "sent (submitted, text left the composer; model delivery NOT independently verified — no receipt adapter). Confirm with: $0 session read. For verified receipts, set OSRC_EXTERNAL_RECEIPT_PROBE." ;;
+        *) # Genuine failure: nothing was typed, or the text never left the composer (Enter was
+           # eaten). Report the ACTUAL pane state, not a generic guess, so the orchestrator can
+           # see what the delegate is doing instead of re-sending blind.
+           _st="$(tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null | _pane_state_classify 2>/dev/null)"
+           if [ -n "$_st" ]; then die "session send failed: nothing was submitted. Pane state: $_st. Re-check with: $0 session read"
+           else die "session send failed: nothing was submitted (the pane could not be read). Re-check with: $0 session read" ; fi ;;
+      esac
+      ;;
+    answer)
+      tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      local _arep _akind
+      if [ "$#" -eq 0 ]; then
+        # No selector: detect the menu, report the visible options, print exactly how to answer.
+        _arep="$(_managed_menu_detect "$SESSION_NAME")"
+        _akind="$(printf '%s\n' "$_arep" | head -1 | awk '{print $2}')"
+        case "$_akind" in
+          none) die "no interactive menu detected in '$SESSION_NAME'. Re-check with: $0 session read" ;;
+          consent)  printf '%s\n' "$_arep"; echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
+          numbered) printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <index>   (one of the OPT indexes above)" ;;
+          cursor)   printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
+        esac
+      else
+        _managed_menu_answer "$SESSION_NAME" "$1" || die "session answer failed: the menu did not close. Re-check with: $0 session read"
+        echo "answered. Re-check with: $0 session read"
+      fi
+      ;;
+    control)
+      tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      local _ctrl _rec _cprov _cmodel _ceffort
+      _ctrl="${1:-}"; shift || true
+      _rec="$(_session_record "$SESSION_NAME")"
+      _cprov="$(printf '%s' "$_rec" | cut -f1)"; _cmodel="$(printf '%s' "$_rec" | cut -f2)"; _ceffort="$(printf '%s' "$_rec" | cut -f3)"
+      [ -n "$_cprov" ] || die "no start record for '$SESSION_NAME' (cannot determine provider). Re-start with: $0 session start"
+      case "$_ctrl" in
+        interrupt) _session_control_interrupt "$SESSION_NAME" "$_cprov" || die "control interrupt did not verify: the busy signal did not clear. Re-check with: $0 session read" ;;
+        exit)      _session_control_exit "$SESSION_NAME" "$_cprov" || die "control exit did not verify: the delegate did not return to a shell. Re-check with: $0 session read" ;;
+        relaunch)  _session_control_relaunch "$SESSION_NAME" "$_cprov" "$_cmodel" "$_ceffort" || die "control relaunch failed: the pane PID did not change. Re-check with: $0 session read" ;;
+        *) die "session control needs: interrupt | exit | relaunch" ;;
       esac
       ;;
     read)
@@ -12654,7 +13014,7 @@ session() {
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | claim <external-id> <tmux-pane> | release <external-id> | reply <external-id> <text> | stop"
+      die "session subcommand: start | send \"text\" | answer [y|n|<index>|<label>] | read | clear | model [NAME] | effort <level> | control <interrupt|exit|relaunch> | claim <external-id> <tmux-pane> | release <external-id> | reply <external-id> <text> | stop"
       ;;
   esac
 }
