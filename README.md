@@ -209,13 +209,13 @@ Under the robe it's deliberately boring: a self-contained bash script you can re
 
 ## Bring your own orchestrator
 
-<img src="readme-assets/section-orchestrator.png" alt="The ink-drop sorcerer as a captain directing a crew of neon constellation creatures on gold connecting lines" width="100%">
+<img src="readme-assets/section-orchestrator.png" alt="The ink-drop sorcerer directing a circle of neon constellation creatures on gold connecting lines" width="100%">
 
-Outsourcerer captains its own crew. It decides what to delegate, picks the lane and model on live benchmarks, keeps every delegate interactive and steerable, supervises the fleet, and refuses to end a turn while work is live and waiting on you. The orchestrator contract lives in the skill, so the session you talk to owns the plan and the outcome rather than handing choices back to you.
+Outsourcerer runs the whole summoning itself. It decides what to delegate, picks the lane and model on live benchmarks, keeps every delegate interactive and steerable, supervises the fleet, and refuses to end a turn while work is live and waiting on you. The orchestrator contract lives in the skill, so the session you talk to owns the plan and the outcome rather than handing choices back to you.
 
-**It also runs under someone else's captain.** If you already have a multi-agent orchestrator, yours or a framework, point it at Outsourcerer and keep it: your orchestrator decides what to delegate and how results get approved, and Outsourcerer runs the assignments underneath. It dispatches each crew member across any provider, supervises them, tracks the spend, and hands the results back as parsable state. One dependable dispatch layer, whoever is holding the wheel.
+**It also works underneath an orchestrator you already have.** Point yours at Outsourcerer and keep it: your orchestrator decides what to delegate and how results get approved, and Outsourcerer runs the assignments. It dispatches each specialist across any provider, supervises them, tracks the spend, and hands the results back as parsable state. One dependable dispatch layer, whoever is casting.
 
-**Point it at any agent library and it just works.** A folder of role definitions, your own or a library like [agency-agents](https://github.com/msitarzewski/agency-agents), runs as a crew with `fanout --agents ./crew`, one supervised job per specialist. You never have to edit those files. The whole crew runs on a sensible cheap lane by default, and you add routing only if you want it, three ways, editing files last:
+**Point it at any agent library and it just works.** A folder of role definitions, your own or a library like [agency-agents](https://github.com/msitarzewski/agency-agents), runs as a squad with `fanout --agents ./crew`, one supervised job per specialist. You never have to edit those files. The whole crew runs on a sensible cheap lane by default, and you add routing only if you want it, three ways, editing files last:
 
 - **Nothing** — any library runs unmodified on the default lane, one receipt, one `status --json`.
 - **A one-line name map** — `--route 'security-*=glm-5.2, *architect*=sol, *=haiku'` sends each specialist to its own engine by name, no file edits.
@@ -225,19 +225,19 @@ Precedence is unambiguous: global `-m` wins, then `--route`, then frontmatter, t
 
 ```bash
 outsourcerer fanout --agents ./engineering --route 'security-*=glm-5.2, *=haiku' --task "audit auth" --worktree
-outsourcerer fanout status <id> --json      # crew state as a stable JSON envelope your code parses
+outsourcerer fanout status <id> --json      # squad state as a stable JSON envelope your code parses
 outsourcerer fanout collect <id>            # every result in one place, then: outsourcerer cleanup <id>
 ```
 
-`--worktree` runs each editing crew member in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills and MCP via `--with`, and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
+`--worktree` runs each editing specialist in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills and MCP via `--with`, and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
-**On the roadmap:** **completion events** so the captain wakes on a state change instead of polling, and a richer receipt (cost + branch/SHA) in that same JSON.
+**On the roadmap:** **completion events** so the orchestrator wakes on a state change instead of polling, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---
 
 ## See your whole fleet in one honest view
 
-<img src="readme-assets/section-fleet.png" alt="The little wizard reviewing rows of his hat-tipped helper sprites, each holding a glowing gold name-card, one topped with a gold bell because it is waiting on him, with constellation-creature crew working at desks in the corners" width="100%">
+<img src="readme-assets/section-fleet.png" alt="The little wizard reviewing rows of his hat-tipped helper sprites, each holding a glowing gold name-card, one topped with a gold bell because it is waiting on him, with constellation creatures working at desks in the corners" width="100%">
 
 **Your AI sessions work in separate rooms.** A Claude Code tab here, three jobs you handed to cheaper engines there, one of them quietly waiting on your approval. Every tool shows you its own sessions. None of them show you all of them at once. `fleet` does.
 
