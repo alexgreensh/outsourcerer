@@ -26,7 +26,16 @@ EOF
 cat > "$BIN/droid" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = "--help" ]; then
-  printf '%s\n' '  -r, --reasoning <level>  Reasoning effort'
+  # Matches the REAL `droid --help` (verified live): top-level -r is RESUME, not reasoning-effort.
+  # `-r, --reasoning-effort <level>` exists ONLY under `droid exec --help`. The old fake lied with
+  # `-r, --reasoning <level>`, which masked the effort/resume collision bug.
+  cat <<'HELP'
+Usage: droid [options] [command] [prompt...]
+  -r, --resume [sessionId]            Resume a session (defaults to last modified)
+  --auto <level>                      Autonomy level: low|medium|high
+  exec [options] [prompt]             Run non-interactively (for scripts/automation)
+  droid                               Start interactive mode (default)
+HELP
 fi
 EOF
 chmod +x "$BIN/tmux"
@@ -74,12 +83,16 @@ fi
 PROVIDER=droid
 : > "$TMUX_LOG"
 out="$(session effort xhigh 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'receipt.*relaunch' \
-   && grep -q -- '-r high' "$TMUX_LOG" \
-   && tail -1 "$OSRC_SESSION_REGISTRY" | jq -e '.effort == "xhigh" and .receipt == "relaunch"' >/dev/null; then
-  ok "Droid relaunch uses its advertised effort control"
+# Droid interactive has NO reasoning-effort flag: top-level `-r, --resume [sessionId]` means
+# RESUME a session, not effort (`-r, --reasoning-effort` is exec-only). A relaunch with `-r high`
+# would try to RESUME a session named "high", find none, and exit 0 to a bare shell. So the
+# effort relaunch must REFUSE (rc!=0), must NOT emit `-r` to tmux, and must NOT record a relaunch
+# receipt (the prior session is left intact, per the relaunch contract).
+if [ "$rc" -ne 0 ] && ! grep -q -- '-r ' "$TMUX_LOG" \
+   && ! tail -1 "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -e '.receipt == "relaunch"' >/dev/null 2>&1; then
+  ok "Droid effort relaunch REFUSES (no -r reasoning-effort at top level; -r = resume), leaves the session intact"
 else
-  bad "Droid effort relaunch was not recorded truthfully: rc=$rc out=$out"
+  bad "Droid effort relaunch did not refuse correctly: rc=$rc out=$out tmux=$(cat "$TMUX_LOG" 2>/dev/null)"
 fi
 
 PROVIDER=gemini

@@ -12421,8 +12421,46 @@ _session_infer_provider() {
   fi
 }
 
+# _session_help_has_model_flag <help-text> -> 0 if a model override flag is documented in the FULL
+# help text, 1 otherwise. Matches both long (--model <id> / --model=<id>) and short (-m <id> /
+# -m, --model <id>) forms, delimited so a flag like --mode or -mode cannot false-positive. This is
+# the evidence-based proof behind the general model-pin guard: a lane may only append a model flag
+# to an interactive launch when its own CLI documents that flag at the level being invoked. The
+# droid bug was an unverified COMMENT asserting "interactive droid accepts --model too" — the flag
+# was never in `droid --help`, fell through into the prompt, and the run billed Claude quota on the
+# DEFAULT model (claude-opus-5). Verifying the real --help (never truncated) is the only proof.
+_session_help_has_model_flag() {
+  printf '%s\n' "$1" | grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)'
+}
+
+# _session_assert_model_pinnable <provider> <cli> [help-args...] -> probe the real CLI help and
+# REFUSE (via _session_launch_error) if no model override flag is documented at the level being
+# invoked. Returns 0 silently when the flag is proven present. This is the general guard: a lane
+# that cannot PROVE it honors an explicit model must fail loudly, never start on the lane default
+# and bill silently. A failed/timed-out probe is also a refusal — "could not prove it" is not "it
+# is supported". <help-args> are the subcommand/help args to probe (e.g. `hermes chat --help`).
+#
+# Uses a GENEROUS timeout (OSRC_SESSION_MODEL_PROBE_SECS, default 8) rather than the 3s
+# _session_probe_help cap: this is a once-per-session safety check, and heavy node CLIs (e.g.
+# gemini-cli) can take ~5s to print --help on a cold start. A 3s cap falsely refused a lane that
+# DOES document -m/--model, which is its own kind of silent breakage. The cost is paid only when a
+# model is explicitly pinned (MODEL_EXPLICIT=1), not on every session start.
+_session_assert_model_pinnable() {
+  local provider="$1" cli="$2"; shift 2
+  local help_text probe_file rc=0
+  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-mpg.XXXXXX" 2>/dev/null)" || _session_launch_error "$provider" "model-flag probe: could not create a temp file"
+  _timeout "${OSRC_SESSION_MODEL_PROBE_SECS:-8}" "$cli" "$@" > "$probe_file" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
+    rm -f "$probe_file"
+    _session_launch_error "$provider" "the model-flag help probe for \`$cli $*\` failed or timed out (rc=$rc) — cannot prove interactive model pinning, refusing rather than billing on the lane default"
+  fi
+  help_text="$(cat "$probe_file")"; rm -f "$probe_file"
+  _session_help_has_model_flag "$help_text" \
+    || _session_launch_error "$provider" "interactive $provider has no model override in \`$cli $*\` (verified against the real CLI --help). A --model/-m token would not be honored and the run would proceed on the lane DEFAULT model, billing silently. Drop -m to use the lane's configured model, or use the lane's exec/delegate path (e.g. '$0 --provider $provider run -m <model> \"task\"') where the flag is documented."
+}
+
 _session_launch_adapter() {
-  local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli="" resolved_model="" de=""
+  local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli="" de=""
   SESSION_LAUNCH=()
 
   case "$provider" in
@@ -12438,18 +12476,37 @@ _session_launch_adapter() {
         || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
       SESSION_LAUNCH=("droid" "--auto" "medium")
       if [ -n "$EFFORT" ]; then
-        de="$(_droid_effort "$EFFORT")"; [ -n "$de" ] || _session_launch_error "$provider" "unsupported reasoning effort"
-        SESSION_LAUNCH+=("-r" "$de")
+        # VERIFIED against the live CLI (full `droid --help`, never truncated): the TOP-LEVEL
+        # `droid` documents `-r, --resume [sessionId]` (Resume a session), NOT reasoning effort.
+        # `-r, --reasoning-effort <level>` exists ONLY under `droid exec --help`. Same bug class
+        # as the --model leak: this launch was assembled from the EXEC flag set. Passing
+        # `droid --auto medium -r <effort>` does NOT set effort — it tries to RESUME a session
+        # named "<effort>" (off/none/low/medium/high, none of which is a real session id), finds
+        # none, and EXITS SILENTLY TO A BARE SHELL with exit code 0 and no error. That is how
+        # every droid interactive lane died invisibly tonight. Interactive droid has NO reasoning-
+        # effort flag, so an explicit --effort on a droid session is REFUSED loudly (not silently
+        # dropped — a dropped effort is how this stayed invisible), naming the verified reason
+        # and pointing at the exec/delegate path where `-r` does mean reasoning-effort. Do NOT
+        # re-add `-r` behind a probe.
+        _session_launch_error "$provider" "interactive droid has NO reasoning-effort flag in \`droid --help\` (verified against the live CLI: top-level \`-r, --resume [sessionId]\` means RESUME a session, not effort; \`-r, --reasoning-effort <level>\` exists ONLY under \`droid exec --help\`). \`droid --auto medium -r <effort>\` would try to RESUME a session named \"<effort>\", find none, and exit 0 to a bare shell with no error — an invisible non-start. Drop --effort to start interactive droid on its default reasoning, or use '$0 --provider droid run --effort <level> -m <model> \"task\"' (or bg/delegate) which sets effort via \`droid exec -r\`."
       fi
       if [ "$MODEL_EXPLICIT" = "1" ]; then
-        resolved_model="$(_lane_model_for droid "$MODEL")" || _session_launch_error "$provider" "cannot resolve model"
-        # droid's TOP-LEVEL `droid --help` omits the model flag (that was the "droid can't be
-        # interactive" bug — the old code required it there). The flag is documented under
-        # `droid exec --help` as `-m, --model <id>` and interactive `droid` accepts `--model` too;
-        # delegate_droid already relies on that flag. Use it DIRECTLY rather than probing
-        # `droid exec --help` — that probe measured ~2.6s, right against the 3s cap, so it timed
-        # out on a cold droid and wrongly forced the session headless. Parity with codex/cc/devin.
-        SESSION_LAUNCH+=("--model" "$resolved_model")
+        # VERIFIED against the live CLI (full `droid --help`, never truncated): the TOP-LEVEL
+        # `droid` documents NO model flag. Usage is `droid [options] [prompt...]`, so a `--model`
+        # token falls through into the PROMPT and the run proceeds on droid's DEFAULT model
+        # (claude-opus-5), silently billing Claude quota. `-m, --model <id>` exists ONLY under
+        # `droid exec --help`, which delegate_droid uses correctly (`droid exec -m <id>`).
+        # The previous comment claimed "interactive droid accepts --model too" — that was an
+        # unverified assertion (it said the probe was skipped because it was slow) and it was
+        # FALSE. Do NOT re-add the flag behind a probe: interactive droid has no model override,
+        # so a pinned-model interactive session is REFUSED loudly rather than billing on the
+        # default. The honest alternatives for a pinned-model droid run are the exec/delegate
+        # paths (run / delegate / bg), which pin via `droid exec -m`. Refusing here (rather than
+        # falling back to exec) is deliberate: `session start` is for a steerable interactive
+        # REPL, and a headless `droid exec` in a pane exits on completion and breaks the
+        # send/read contract — silently converting an interactive request to headless would be
+        # a different surprise. Name the lane, state the verified reason, point at exec.
+        _session_launch_error "$provider" "interactive droid has NO model override in \`droid --help\` (verified against the live CLI: \`-m, --model <id>\` exists ONLY under \`droid exec --help\`). A --model token falls through into the prompt and the run bills on droid's DEFAULT model (claude-opus-5). Drop -m to start interactive droid on its configured model, or use '$0 --provider droid run -m <model> \"task\"' (or bg/delegate) which pins via \`droid exec -m\`."
       fi
       ;;
     cursor)
@@ -12534,6 +12591,54 @@ _session_shell_command() {
     out="$out$quoted"
   done
   printf '%s\n' "$out"
+}
+
+# _session_launch_liveness_check <session-name> <provider> <launch-cmd> -> after send-keys, poll
+# the pane for a few seconds and confirm the engine STAYED UP rather than exiting to a bare shell.
+# Returns 0 if the pane's current command is NOT the login shell (an engine is running, or booting
+# in a subshell), 1 if it degraded to a bare shell (the engine exited, possibly silently with rc=0).
+# This is the guard against the droid -r/resume bug class: `droid --auto medium -r high` tried to
+# RESUME a session named "high", found none, and EXITED SILENTLY TO A BARE SHELL with exit code 0
+# and no error — `session start` reported "Started" while the pane was a dead shell. An engine
+# that exits 0 immediately is NOT a started session. tmux's #{pane_current_command} reports the
+# foreground process of the pane; right after send-keys the shell is still foreground while the
+# engine boots, so the check waits for the engine to take over OR the shell to come back idle.
+# Bounded by OSRC_SESSION_LIVENESS_SECS (default 6); opt out with OSRC_SESSION_LIVENESS_SECS=0.
+# Never touches the heartbeat/registry, session send, or the turn-end guard — this is launch
+# verification only, run once at session start.
+_session_launch_liveness_check() {
+  local sess="$1" provider="$2" launch="$3"
+  local secs="${OSRC_SESSION_LIVENESS_SECS:-6}"
+  case "$secs" in 0) return 0 ;; ''|*[!0-9]*) secs=6 ;; esac
+  have tmux || return 0
+  tmux has-session -t "$sess" 2>/dev/null || return 0   # nothing to verify; let the caller's own checks speak
+  local cmd="" i=0
+  # Give the engine a moment to take over the pane (send-keys just typed the command; the shell
+  # is still foreground while the engine process forks/boots). Poll until the foreground command
+  # is NOT the shell, or the budget elapses.
+  for i in $(seq 1 "$secs" 2>/dev/null || seq 1 6); do
+    sleep 1
+    cmd="$(tmux display-message -p -t "$sess" '#{pane_current_command}' 2>/dev/null)" || cmd=""
+    case "$cmd" in
+      bash|zsh|sh|dash|fish|ksh|tcsh|csh|"")
+        # Still the shell (or empty). Keep polling — the engine may not have taken over yet.
+        continue
+        ;;
+      *)
+        # A non-shell foreground command means the engine took over the pane. Healthy start.
+        return 0
+        ;;
+    esac
+  done
+  # Budget elapsed and the pane is STILL a bare shell: the engine exited (silently, with rc=0 in
+  # the droid -r case) and dropped back to the shell. That is an invisible non-start, not a
+  # started session. Die loudly so the user knows the session is NOT live and can investigate
+  # (the most common cause is a flag that means something different in interactive mode, e.g.
+  # droid -r meaning resume rather than reasoning-effort).
+  echo "ERROR: session start: $provider interactive launch did NOT stay up — the pane is a bare shell ($cmd) after ${secs}s. The engine exited (likely silently with exit code 0) instead of entering its interactive REPL. The most common cause is a flag that means something DIFFERENT in interactive mode than in exec/headless mode (e.g. droid -r means RESUME a session at the top level, not reasoning-effort). Launch was: $launch. Re-check the lane's real \`<cli> --help\` (top-level, not exec), or start without the offending flag." >&2
+  # Kill the dead session so a retry isn't blocked by a has-session collision on the PWD-derived name.
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  return 1
 }
 
 _session_effort_validate() {
@@ -13005,7 +13110,7 @@ _model_pin_restore_allowed() { # <session-id> <generation>
 }
 
 _session_relaunch_command() { # <provider> <model> <effort>
-  local provider="$1" model="$2" effort="$3" cid tokens de
+  local provider="$1" model="$2" effort="$3" cid tokens
   case "$provider" in
     codex|cx)
       cid="$(resolve_model_row "$model")"; cid="${cid%%|*}"; [ -n "$cid" ] || cid="$model"
@@ -13018,8 +13123,15 @@ _session_relaunch_command() { # <provider> <model> <effort>
       printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$model"
       ;;
     droid)
-      de="$(_droid_effort "$effort")"; [ -n "$de" ] || return 1
-      printf 'droid --auto medium --model %q -r %q' "$model" "$de"
+      # VERIFIED against the live CLI: interactive `droid` has NO reasoning-effort flag
+      # (top-level `-r, --resume [sessionId]` means RESUME, not effort; `-r, --reasoning-effort`
+      # is exec-only) and NO model flag (`--model` is exec-only). A relaunch command built from
+      # the exec flag set would (1) drop --model into the prompt and bill on the default, and
+      # (2) try to RESUME a session named "<effort>" and exit 0 to a bare shell. Same bug class
+      # as the session-start leak. Refuse here so the bug class cannot recur on the relaunch
+      # path even if the upstream _session_droid_effort_supported guard is ever loosened. The
+      # caller dies with a clear message; the prior session is left intact.
+      return 1
       ;;
     *) return 1 ;;
   esac
@@ -13060,11 +13172,13 @@ _winpty_session() {
       case "$PROVIDER" in
         devin|dv)
           need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
           LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           _validate_model_token "$cid"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable codex codex --help
           local _ccmh=(); _ccmh=("-c" "features.code_mode_host=$(_codex_code_mode_host_flag)")
           LAUNCH=("codex" "-s" "workspace-write")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("-m" "$cid")
@@ -13072,6 +13186,7 @@ _winpty_session() {
           LAUNCH+=(${_ccmh[@]+"${_ccmh[@]}"}) ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable cc claude --help
           LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ -n "$EFFORT" ] && LAUNCH=("env" "MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("--model" "$MODEL") ;;
@@ -13083,6 +13198,7 @@ _winpty_session() {
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable gemini "$gveh" --help
           if [ "$MODEL_EXPLICIT" = "1" ]; then LAUNCH=("$gveh" "--model" "$MODEL"); else LAUNCH=("$gveh"); fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
@@ -13248,12 +13364,14 @@ session() {
       case "$PROVIDER" in
         devin|dv)
           need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
           launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           # The resolved codex model id is what enters the tmux command.
           _validate_model_token "$cid"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable codex codex --help
           local ccmh=""; ccmh=" -c features.code_mode_host=$(_codex_code_mode_host_flag)"  # self-heal in the TUI too (bidirectional: =true overrides a stale config=false)
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
@@ -13262,6 +13380,7 @@ session() {
           [ -n "$EFFORT" ] && launch="$launch -c model_reasoning_effort=$EFFORT" ;;
         cc|claude)
           have claude || die "claude not on PATH (needed for a claude session)"
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable cc claude --help
           # strip nested Claude Code env so a nested interactive claude authenticates via OAuth (same fix as the -p lane)
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model '$MODEL'"; else launch="env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude"; fi
           [ -n "$EFFORT" ] && launch="env MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT") $launch" ;;
@@ -13273,6 +13392,7 @@ session() {
           if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
           have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
           [ "$gveh" != "gemini" ] || _gm_load_key
+          [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable gemini "$gveh" --help
           if [ "$MODEL_EXPLICIT" = "1" ]; then launch="$gveh --model '$MODEL'"; else launch="$gveh"; fi ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
       esac
@@ -13299,6 +13419,14 @@ session() {
         return 4
       fi
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
+      # LIVENESS: confirm the engine STAYED UP rather than exiting to a bare shell. Catches the
+      # droid -r/resume bug class (an engine that exits 0 silently is NOT a started session) and
+      # any future flag that means something different in interactive mode. Bounded; opt out with
+      # OSRC_SESSION_LIVENESS_SECS=0. Run BEFORE the registry append so a non-start is not recorded
+      # as a healthy session start. Does not touch heartbeat/send/turn-end.
+      if ! _session_launch_liveness_check "$SESSION_NAME" "$PROVIDER" "$launch"; then
+        die "session start: $PROVIDER interactive launch did not stay up (bare shell after the liveness budget). See the message above."
+      fi
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
