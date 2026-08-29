@@ -1525,6 +1525,14 @@ _codex_image_available() {
 # INLINE (no file reads) sidesteps it. We can't fix the install, but a hardened lane WARNS up front
 # instead of letting the delegate discover it. Checks PATH + the conventional ~/.local/bin location.
 # Returns 0 if found. Cached per process.
+#
+# The INVERSE also bites: the binary IS installed but the user's ~/.codex/config.toml says
+# `code_mode_host = false` (a stale or hand-edited config). Codex 0.150 routes the shell tool through
+# code mode, so every command fails with `code-mode host is disabled` and the delegate cannot read a
+# file or run a test. The headless delegate paths pass --ignore-user-config (so they don't inherit the
+# stale config), but the INTERACTIVE session lane does NOT — it inherits the user's config. The fix is
+# bidirectional: ALWAYS pass -c features.code_mode_host=<true|false> explicitly so neither direction
+# can be silently wrong. _codex_code_mode_host_flag echoes the right value for building that arg.
 _OSRC_CODEMODE=""
 _codex_code_mode_host() {
   if [ -n "$_OSRC_CODEMODE" ]; then [ "$_OSRC_CODEMODE" = "1" ]; return; fi
@@ -1533,6 +1541,13 @@ _codex_code_mode_host() {
     _OSRC_CODEMODE=1; return 0
   fi
   return 1
+}
+# _codex_code_mode_host_flag -> echoes "true" if the binary is present, "false" if absent. Used to
+# build `-c features.code_mode_host=<flag>` so a stale user config cannot fail the shell closed in
+# EITHER direction: =true when the binary IS present (overrides a stale config=false), =false when
+# the binary is absent (so file reads don't hang). The explicit -c wins over ~/.codex/config.toml.
+_codex_code_mode_host_flag() {
+  _codex_code_mode_host && printf 'true' || printf 'false'
 }
 # Models to try. Explicit -m -> that model only. Otherwise the escalation chain, BUT only for
 # read-only work ('auto'). Mutating tiers must NEVER re-run against an already-mutated tree, so
@@ -9122,11 +9137,15 @@ delegate_cxnative() {
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   _tier_banner "codex-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cx)"
-  # SELF-HEAL: codex ships the `code_mode_host` feature ON, but if its host binary is not installed,
-  # every file-reading tool call routes through a missing helper and HANGS. Force the feature off for
-  # this run so codex falls back to normal tool execution. No effect when the binary IS present.
-  local cmh=()
-  _codex_code_mode_host || { cmh=(-c features.code_mode_host=false); printf '>>> [self-heal] codex-code-mode-host binary missing; running with code_mode_host disabled so file reads do not hang.\n' >&2; }
+  # SELF-HEAL (bidirectional): codex ships the `code_mode_host` feature ON, but if its host binary
+  # is not installed, every file-reading tool call routes through a missing helper and HANGS. Force
+  # the feature off for this run so codex falls back to normal tool execution. The INVERSE also
+  # bites: the binary IS present but a stale ~/.codex/config.toml says code_mode_host=false — the
+  # explicit -c features.code_mode_host=true overrides it so the shell tool stays open. Both
+  # directions are handled by always passing the flag explicitly.
+  local _cmh_flag; _cmh_flag="$(_codex_code_mode_host_flag)"
+  local cmh=(-c "features.code_mode_host=$_cmh_flag")
+  [ "$_cmh_flag" = "false" ] && printf '>>> [self-heal] codex-code-mode-host binary missing; running with code_mode_host disabled so file reads do not hang.\n' >&2
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
   # ISOLATION (I1): a delegated headless run must NOT inherit your live, interactive ~/.codex config
@@ -9809,8 +9828,9 @@ cmd_image_codex() {
   : > "$marker"
   local stdin_prompt
   stdin_prompt="$(printf '%s\n\nUse your built-in image generation tool to create the image and write it to %s, overwriting any existing file.' "$prompt" "$out")"
-  # SELF-HEAL: disable code_mode_host when its binary is missing (else tool calls can hang, see delegate_cxnative).
-  local _cmh=(); _codex_code_mode_host || _cmh=(-c features.code_mode_host=false)
+  # SELF-HEAL (bidirectional): always pass -c features.code_mode_host=<flag> explicitly so neither
+  # direction is silently wrong (binary missing -> false; binary present but stale config -> true).
+  local _cmh=(); _cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   # ISOLATION (I1): don't inherit the user's live ~/.codex MCP surface for a headless image job
   # (auth survives --ignore-user-config; escape hatch OSRC_CODEX_USER_CONFIG=1).
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
@@ -10617,7 +10637,7 @@ _local_agentic_codex() {
     *)                       sflag=(--sandbox read-only); posture="READ-ONLY sandbox" ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "${REST[*]}" "${TTIER:-}")"
-  local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
+  local cmh=(); cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   local eff=(); [ -n "$EFFORT" ] && { eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native)\n' "$EFFORT" >&2; }
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
   # ISOLATION (I1): the local lane's whole promise is "nothing leaves your machine" -- inheriting the
@@ -10847,8 +10867,10 @@ delegate_codex() {
     *) die "bad tier: $tier" ;;
   esac
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
-  # code_mode_host self-heal: disable when the host binary is absent (else file reads can hang).
-  local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
+  # code_mode_host self-heal (bidirectional): always pass -c features.code_mode_host=<flag> so
+  # neither direction is silently wrong (binary absent -> false; binary present but stale config
+  # says false -> true, overriding it so the shell tool stays open).
+  local cmh=(); cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
   # Guarantee the capture's parent dir exists and is private BEFORE the tee, else on a fresh
   # $OSRC_HOME the very first delegation's `tee "$cap"` fails, the capture is empty, and a real transport
@@ -12322,7 +12344,7 @@ _winpty_session() {
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           _validate_model_token "$cid"
-          local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
+          local _ccmh=(); _ccmh=("-c" "features.code_mode_host=$(_codex_code_mode_host_flag)")
           LAUNCH=("codex" "-s" "workspace-write")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("-m" "$cid")
           [ -n "$EFFORT" ] && LAUNCH+=("-c" "model_reasoning_effort=$EFFORT")
@@ -12510,7 +12532,7 @@ session() {
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           # The resolved codex model id is what enters the tmux command.
           _validate_model_token "$cid"
-          local ccmh=""; _codex_code_mode_host || ccmh=" -c features.code_mode_host=false"  # self-heal in the TUI too
+          local ccmh=""; ccmh=" -c features.code_mode_host=$(_codex_code_mode_host_flag)"  # self-heal in the TUI too (bidirectional: =true overrides a stale config=false)
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
           # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
@@ -13014,7 +13036,7 @@ doctor() {
   echo "  -- Native premium lanes (model-selected; ride your own subscription) --"
   echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH'); cost: $(_lane_cost_disclosure cx)"
   if have codex; then _codex_code_mode_host \
-    && echo "      code-mode-host: present (codex file-reading tool calls work)" \
+    && echo "      code-mode-host: present (codex file-reading tool calls work; Outsourcerer passes -c features.code_mode_host=true so a stale config=false cannot fail the shell closed)" \
     || echo "      code-mode-host: MISSING, self-healed (Outsourcerer runs codex with code_mode_host disabled so file reads do not hang; install codex-code-mode-host to ~/.local/bin to use the feature)"; fi
   echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH'); cost: $(_lane_cost_disclosure cc)"
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."
