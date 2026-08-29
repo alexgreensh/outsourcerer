@@ -1717,6 +1717,14 @@ _codex_image_available() {
 # INLINE (no file reads) sidesteps it. We can't fix the install, but a hardened lane WARNS up front
 # instead of letting the delegate discover it. Checks PATH + the conventional ~/.local/bin location.
 # Returns 0 if found. Cached per process.
+#
+# The INVERSE also bites: the binary IS installed but the user's ~/.codex/config.toml says
+# `code_mode_host = false` (a stale or hand-edited config). Codex 0.150 routes the shell tool through
+# code mode, so every command fails with `code-mode host is disabled` and the delegate cannot read a
+# file or run a test. The headless delegate paths pass --ignore-user-config (so they don't inherit the
+# stale config), but the INTERACTIVE session lane does NOT — it inherits the user's config. The fix is
+# bidirectional: ALWAYS pass -c features.code_mode_host=<true|false> explicitly so neither direction
+# can be silently wrong. _codex_code_mode_host_flag echoes the right value for building that arg.
 _OSRC_CODEMODE=""
 _codex_code_mode_host() {
   if [ -n "$_OSRC_CODEMODE" ]; then [ "$_OSRC_CODEMODE" = "1" ]; return; fi
@@ -1725,6 +1733,13 @@ _codex_code_mode_host() {
     _OSRC_CODEMODE=1; return 0
   fi
   return 1
+}
+# _codex_code_mode_host_flag -> echoes "true" if the binary is present, "false" if absent. Used to
+# build `-c features.code_mode_host=<flag>` so a stale user config cannot fail the shell closed in
+# EITHER direction: =true when the binary IS present (overrides a stale config=false), =false when
+# the binary is absent (so file reads don't hang). The explicit -c wins over ~/.codex/config.toml.
+_codex_code_mode_host_flag() {
+  _codex_code_mode_host && printf 'true' || printf 'false'
 }
 # Models to try. Explicit -m -> that model only. Otherwise the escalation chain, BUT only for
 # read-only work ('auto'). Mutating tiers must NEVER re-run against an already-mutated tree, so
@@ -7344,13 +7359,19 @@ cmd_bg() {
 # AUTO-DETACH: a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
 # for frontier/reasoning). When invoked through a harness shell tool with a ~2-min timeout, the call is
 # KILLED mid-run (observed twice on Sol gates). When non-interactive AND slow-lane, auto-promote the run
-# to the existing bg path: launch detached under the bg watchdog, print the job id + poll command, return
-# in <1s. The caller polls status/watch. This is ROUTING — it reuses _bg_launch (same watchdog, same
-# status receipt, same result retrieval as `bg`), NOT new infra.
+# to an INTERACTIVE tmux session by default (OSRC_REQUIRE_INTERACTIVE=1, ON): the same machinery
+# `session start` uses (tmux new-session + send-keys), NOT a headless bg job. Absence of a TTY is NOT
+# evidence that nobody is watching — every agent harness (Claude Code, Codex, etc.) has NO TTY on either
+# stream, so the old TTY check detached EVERY cloud/frontier run to headless bg. The user steers the
+# session via:  OUTSOURCERER_TMUX=<name> $0 session read | session send "..." | session stop.
+# Set OSRC_REQUIRE_INTERACTIVE=0 to opt out to the headless bg path (via _bg_launch, same watchdog/
+# status/result as `bg`). If tmux is genuinely unavailable under the default, the run FAILS LOUDLY
+# rather than silently falling back to headless.
 #
 # Escape hatches (both directions):
 #   OSRC_NO_AUTODETACH=1 / --wait / --foreground : forces foreground even for slow lanes.
 #   OSRC_FORCE_AUTODETACH=1                       : forces detach even interactively (for testing).
+#   OSRC_REQUIRE_INTERACTIVE=0                    : allows the headless bg path instead of tmux.
 #
 # _autodetach_should <disp> <model-id> <model-tier> -> return 0 if the run should auto-detach, 1 if not.
 # Trigger: non-interactive (stdout not a TTY) AND slow lane (any cloud lane OR frontier/reasoning tier).
@@ -7376,19 +7397,74 @@ _autodetach_should() {
   return 0
 }
 
-# _autodetach_run <verb> [flags] "task" -> launch via the existing bg machinery, print receipt, return 0.
-# Reuses _bg_launch (same watchdog, same status, same result retrieval as `bg`). The cloud preack is
-# already satisfied: _cloud_disclose ran BEFORE this and set OSRC_CLOUD_ACKED=1, so _bg_cloud_preack
-# returns early (the ack propagates to the detached child via OSRC_CLOUD_ACK).
+# _autodetach_run <verb> [flags] "task" -> route a would-be headless dispatch to an INTERACTIVE
+# tmux session by default (OSRC_REQUIRE_INTERACTIVE=1, ON), NOT a headless bg job. Absence of a TTY
+# is NOT evidence that nobody is watching: every agent-driven run (Claude Code, Codex, any harness)
+# has NO TTY on either stream, so the old TTY check detached EVERY cloud/frontier run to headless bg.
+# The interactive path uses the SAME machinery `session start` uses (tmux new-session + send-keys),
+# and the user steers via the session subcommand with OUTSOURCERER_TMUX=<name>.
+#
+# OSRC_REQUIRE_INTERACTIVE=0 opts out to the headless bg path (via _bg_launch, same watchdog/status/
+# result retrieval as `bg`). The cloud preack is already satisfied: _cloud_disclose ran BEFORE this
+# and set OSRC_CLOUD_ACKED=1 (route_delegate path), or _bg_cloud_preack acquires it here (second-
+# opinion path), so _bg_cloud_preack returns early and the ack propagates to the child/tmux pane.
 _autodetach_run() {
-  _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
-  local id; id="$(_bg_launch "$@")"
-  [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
-  printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
-  printf '>>>   job id : %s\n' "$id" >&2
-  printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
-  _async_supervision_notice
-  echo "$id"
+  local _ar_verb="$1"; shift
+  # HEADLESS BG PATH (explicit opt-out). Also the path the bg re-entry tests exercise.
+  if [ "${OSRC_REQUIRE_INTERACTIVE:-1}" != "1" ]; then
+    _bg_cloud_preack "$_ar_verb" "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+    local id; id="$(_bg_launch "$_ar_verb" "$@")"
+    [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
+    printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
+    printf '>>>   job id : %s\n' "$id" >&2
+    printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
+    _async_supervision_notice
+    echo "$id"
+    return 0
+  fi
+  # INTERACTIVE TMUX PATH (default). Route the would-be headless dispatch to a tmux session so a
+  # human can watch/steer it. Same machinery `session start` uses (new-session + send-keys). Never
+  # silently fall back to headless: if tmux is genuinely unavailable, FAIL LOUDLY with the reason.
+  have tmux || die "auto-detach: OSRC_REQUIRE_INTERACTIVE=1 but tmux is not installed ($( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')). A non-interactive slow-lane run must NOT go headless. Set OSRC_REQUIRE_INTERACTIVE=0 to allow the headless bg path, or install tmux."
+  _bg_cloud_preack "$_ar_verb" "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+  # Unique per-run session name (collision-safe for concurrent auto-detaches in the same directory;
+  # the PWD-derived SESSION_NAME is one-per-dir). OUTSOURCERER_TMUX overrides SESSION_NAME at source
+  # time, so the user steers via:  OUTSOURCERER_TMUX=<name> $0 session read | session send "..." | session stop
+  local _ad_sess _ad_full _a
+  _ad_sess="osrc-ad-$(_new_job_id)"
+  case "$_ad_sess" in
+    ''|.|..|*[!A-Za-z0-9._-]*) die "auto-detach: generated invalid session name '$_ad_sess'" ;;
+  esac
+  # Build the foreground command: re-run the engine with OSRC_NO_AUTODETACH=1 so the in-pane
+  # re-entry runs foreground (no re-detach / fork-bomb — same role OSRC_STREAM=1 plays in the bg
+  # child). Quote every arg with printf %q so the user's task text can't break out of the send-keys
+  # shell string (injection-safe; the codebase uses the same pattern at the model-token guard).
+  # Pass OUTSOURCERER_DEPTH so the pane's route_delegate guard sees the same delegation chain the
+  # parent is part of (the call site decremented it back to the pre-increment value, matching the
+  # bg child's inherited depth). Pass cloud ack so the pane's _cloud_disclose / _bg_cloud_preack
+  # return early (the parent already acquired consent).
+  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}")"
+  [ -n "${OUTSOURCERER_MAX_DEPTH:-}" ] && _ad_full="$_ad_full OUTSOURCERER_MAX_DEPTH=$(printf '%q' "$OUTSOURCERER_MAX_DEPTH")"
+  _ad_full="$_ad_full $(printf '%q' "$SCRIPT_PATH")"
+  # Re-add --provider if it was a GLOBAL flag consumed by main() (not in ORIG). Mirrors run_job's
+  # _run_provider logic. A duplicate (when --provider IS in ORIG) is harmless: both are consumed.
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full --provider $(printf '%q' "$PROVIDER")"
+  _ad_full="$_ad_full $(printf '%q' "$_ar_verb")"
+  for _a in "$@"; do
+    _ad_full="$_ad_full $(printf '%q' "$_a")"
+  done
+  # Create the tmux session (same shape as `session start`). Handle failure: a unique name makes
+  # collision astronomically unlikely, but tmux serializes new-session and a duplicate fails nonzero.
+  # Die loudly rather than silently fall back to headless — that is the whole point of this gate.
+  if ! tmux new-session -d -s "$_ad_sess" -x 200 -y 50 -c "$PWD" 2>/dev/null; then
+    die "auto-detach: tmux new-session failed for '$_ad_sess' (tmux server error or session name collision). Set OSRC_REQUIRE_INTERACTIVE=0 to allow the headless bg path, or check tmux."
+  fi
+  tmux send-keys -t "$_ad_sess" "$_ad_full" Enter
+  printf '>>> [auto-detach] non-interactive slow-lane run routed to INTERACTIVE tmux session (not headless bg).\n' >&2
+  printf '>>>   session : %s\n' "$_ad_sess" >&2
+  printf '>>>   WATCH  : tmux attach -t %s\n' "$_ad_sess" >&2
+  printf '>>>   STEER  : OUTSOURCERER_TMUX=%s %s session read   |   OUTSOURCERER_TMUX=%s %s session send "..."   |   OUTSOURCERER_TMUX=%s %s session stop\n' "$_ad_sess" "$0" "$_ad_sess" "$0" "$_ad_sess" "$0" >&2
+  echo "$_ad_sess"
   return 0
 }
 
@@ -9381,11 +9457,15 @@ delegate_cxnative() {
   esac
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
   _tier_banner "codex-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cx)"
-  # SELF-HEAL: codex ships the `code_mode_host` feature ON, but if its host binary is not installed,
-  # every file-reading tool call routes through a missing helper and HANGS. Force the feature off for
-  # this run so codex falls back to normal tool execution. No effect when the binary IS present.
-  local cmh=()
-  _codex_code_mode_host || { cmh=(-c features.code_mode_host=false); printf '>>> [self-heal] codex-code-mode-host binary missing; running with code_mode_host disabled so file reads do not hang.\n' >&2; }
+  # SELF-HEAL (bidirectional): codex ships the `code_mode_host` feature ON, but if its host binary
+  # is not installed, every file-reading tool call routes through a missing helper and HANGS. Force
+  # the feature off for this run so codex falls back to normal tool execution. The INVERSE also
+  # bites: the binary IS present but a stale ~/.codex/config.toml says code_mode_host=false — the
+  # explicit -c features.code_mode_host=true overrides it so the shell tool stays open. Both
+  # directions are handled by always passing the flag explicitly.
+  local _cmh_flag; _cmh_flag="$(_codex_code_mode_host_flag)"
+  local cmh=(-c "features.code_mode_host=$_cmh_flag")
+  [ "$_cmh_flag" = "false" ] && printf '>>> [self-heal] codex-code-mode-host binary missing; running with code_mode_host disabled so file reads do not hang.\n' >&2
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
   # ISOLATION (I1): a delegated headless run must NOT inherit your live, interactive ~/.codex config
@@ -10105,8 +10185,9 @@ cmd_image_codex() {
   : > "$marker"
   local stdin_prompt
   stdin_prompt="$(printf '%s\n\nUse your built-in image generation tool to create the image and write it to %s, overwriting any existing file.' "$prompt" "$out")"
-  # SELF-HEAL: disable code_mode_host when its binary is missing (else tool calls can hang, see delegate_cxnative).
-  local _cmh=(); _codex_code_mode_host || _cmh=(-c features.code_mode_host=false)
+  # SELF-HEAL (bidirectional): always pass -c features.code_mode_host=<flag> explicitly so neither
+  # direction is silently wrong (binary missing -> false; binary present but stale config -> true).
+  local _cmh=(); _cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   # ISOLATION (I1): don't inherit the user's live ~/.codex MCP surface for a headless image job
   # (auth survives --ignore-user-config; escape hatch OSRC_CODEX_USER_CONFIG=1).
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
@@ -10914,7 +10995,7 @@ _local_agentic_codex() {
     *)                       sflag=(--sandbox read-only); posture="READ-ONLY sandbox" ;;
   esac
   local ttier wrapped; ttier="$(resolve_tier "$model" "${TTIER:-}")"; wrapped="$(_build_prompt "$model" "${REST[*]}" "${TTIER:-}")"
-  local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
+  local cmh=(); cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   local eff=(); [ -n "$EFFORT" ] && { eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native)\n' "$EFFORT" >&2; }
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
   # ISOLATION (I1): the local lane's whole promise is "nothing leaves your machine" -- inheriting the
@@ -11216,8 +11297,10 @@ delegate_codex() {
     *) die "bad tier: $tier" ;;
   esac
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--json --output-last-message "${OSRC_JOB_DIR:-$OSRC_HOME}/last.txt")
-  # code_mode_host self-heal: disable when the host binary is absent (else file reads can hang).
-  local cmh=(); _codex_code_mode_host || cmh=(-c features.code_mode_host=false)
+  # code_mode_host self-heal (bidirectional): always pass -c features.code_mode_host=<flag> so
+  # neither direction is silently wrong (binary absent -> false; binary present but stale config
+  # says false -> true, overriding it so the shell tool stays open).
+  local cmh=(); cmh=(-c "features.code_mode_host=$(_codex_code_mode_host_flag)")
   local eff=(); if [ -n "$EFFORT" ]; then eff=(-c "model_reasoning_effort=$EFFORT"); printf '>>> [effort] reasoning=%s (native: -c model_reasoning_effort)\n' "$EFFORT" >&2; fi
   # Guarantee the capture's parent dir exists and is private BEFORE the tee, else on a fresh
   # $OSRC_HOME the very first delegation's `tee "$cap"` fails, the capture is empty, and a real transport
@@ -11921,11 +12004,12 @@ route_delegate() {
   [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
 
-  # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to the bg path so a harness
-  # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
-  # The model tier (frontier/capable/mid/budget) drives the "slow" decision, NOT the verb tier.
+  # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to an INTERACTIVE tmux session by
+  # default (OSRC_REQUIRE_INTERACTIVE=1), NOT a headless bg job. Reuses the session-start machinery
+  # (tmux new-session + send-keys). The model tier (frontier/capable/mid/budget) drives the "slow"
+  # decision, NOT the verb tier. Set OSRC_REQUIRE_INTERACTIVE=0 to opt out to the bg path.
   # Escape hatches: OSRC_NO_AUTODETACH=1 / --wait / --foreground forces foreground; OSRC_FORCE_AUTODETACH=1
-  # forces detach (for testing). See _autodetach_should for the full trigger logic.
+  # forces detach (for testing). See _autodetach_should / _autodetach_run for the full trigger logic.
   local _ad_model_tier; _ad_model_tier="$(resolve_tier "$RESOLVED_ID" "${TTIER:-}")"
   if _autodetach_should "$disp" "$RESOLVED_ID" "$_ad_model_tier"; then
     # route_delegate already incremented OUTSOURCERER_DEPTH above. The auto-detached __runjob
@@ -12705,7 +12789,7 @@ _winpty_session() {
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           _validate_model_token "$cid"
-          local _ccmh=(); _codex_code_mode_host || _ccmh=("-c" "features.code_mode_host=false")
+          local _ccmh=(); _ccmh=("-c" "features.code_mode_host=$(_codex_code_mode_host_flag)")
           LAUNCH=("codex" "-s" "workspace-write")
           [ "$MODEL_EXPLICIT" = "1" ] && LAUNCH+=("-m" "$cid")
           [ -n "$EFFORT" ] && LAUNCH+=("-c" "model_reasoning_effort=$EFFORT")
@@ -12893,7 +12977,7 @@ session() {
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
           # The resolved codex model id is what enters the tmux command.
           _validate_model_token "$cid"
-          local ccmh=""; _codex_code_mode_host || ccmh=" -c features.code_mode_host=false"  # self-heal in the TUI too
+          local ccmh=""; ccmh=" -c features.code_mode_host=$(_codex_code_mode_host_flag)"  # self-heal in the TUI too (bidirectional: =true overrides a stale config=false)
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
           # Interpolating $PWD into this shell-command string was a directory-name injection vector
           # (a dir named `x"; touch /tmp/pwn; #` would break out when send-keys hands it to the shell).
@@ -13397,7 +13481,7 @@ doctor() {
   echo "  -- Native premium lanes (model-selected; ride your own subscription) --"
   echo "    codex-native (sol/terra/luna/gpt-5.5): $(have codex && echo 'codex present (installed + ChatGPT-authed-looking; NOT probed for liveness)' || echo 'codex NOT on PATH'); cost: $(_lane_cost_disclosure cx)"
   if have codex; then _codex_code_mode_host \
-    && echo "      code-mode-host: present (codex file-reading tool calls work)" \
+    && echo "      code-mode-host: present (codex file-reading tool calls work; Outsourcerer passes -c features.code_mode_host=true so a stale config=false cannot fail the shell closed)" \
     || echo "      code-mode-host: MISSING, self-healed (Outsourcerer runs codex with code_mode_host disabled so file reads do not hang; install codex-code-mode-host to ~/.local/bin to use the feature)"; fi
   echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH'); cost: $(_lane_cost_disclosure cc)"
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."

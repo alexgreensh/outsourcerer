@@ -189,10 +189,15 @@ mkdir -p -m 700 "$REENTRY_HOME"
 # extra `devin models list` call to the fake binary disrupts the re-entry flow the test is
 # asserting. Catalog validation has its own coverage; disable it here so this test isolates the
 # autodetach/re-entry mechanics. (In production the real `devin models list` works fine.)
+# OSRC_REQUIRE_INTERACTIVE=0: the default (ON) routes auto-detach to an interactive tmux session,
+# not the bg path. This test exercises the bg re-entry path (fork-bomb guard, exit contract,
+# status/result/watch), so it needs the headless bg opt-out. The interactive tmux path has its
+# own dedicated suite (test_require_interactive.sh).
 REENTRY_OUTPUT="$(HOME="$FAKE_HOME" \
   OSRC_HOME="$REENTRY_HOME" \
   OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 \
   OSRC_FORCE_AUTODETACH=1 \
+  OSRC_REQUIRE_INTERACTIVE=0 \
   OSRC_POLL=1 \
   OSRC_CATALOG_VALIDATE=0 \
   OUTSOURCERER_DEPTH=0 \
@@ -377,6 +382,7 @@ else
     OSRC_HOME="$SAB_HOME" \
     OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 \
     OSRC_FORCE_AUTODETACH=1 \
+    OSRC_REQUIRE_INTERACTIVE=0 \
     OUTSOURCERER_DEPTH=0 \
     OSRC_FG_GUARD=0 \
     bash "$SABOTAGED" run -m glm-5.2 "test task" 2>"$TMPDIR_AD/sab-stderr" </dev/null)"
