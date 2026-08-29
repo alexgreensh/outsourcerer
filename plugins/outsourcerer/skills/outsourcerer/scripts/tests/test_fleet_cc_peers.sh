@@ -83,9 +83,9 @@ printf '%s' "$snapshot" | jq -e '.items[] | select(.job_id=="healthy" and .state
   && ok "stale CC peers do not alter managed bearings or running count" \
   || bad "stale CC peer leaked into existing managed readers"
 
-printf '%s\n' "$(jq -cn --argjson pid "$dead_pid" '
+printf '%s\n' "$(jq -cn --argjson live "$$" --argjson pid "$dead_pid" '
   {event:"start",session_id:"stale-merged",provider:"cc",endpoint:"tmux:stale-merged",
-   harness_pid:$pid,cc_session_id:"stale-merged",cc_pid:$pid,ts:"2026-08-08T00:00:00Z"}')" \
+   harness_pid:$live,cc_session_id:"stale-merged",cc_pid:$pid,ts:"2026-08-08T00:00:00Z"}')" \
   > "$OSRC_SESSION_REGISTRY"
 jq -cn --argjson pid "$dead_pid" --argjson now "$now_ms" '
   {pid:$pid,sessionId:"stale-merged",cwd:"/",startedAt:$now,updatedAt:$now,
