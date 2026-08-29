@@ -11915,8 +11915,19 @@ _session_launch_adapter() {
         || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
       SESSION_LAUNCH=("droid" "--auto" "medium")
       if [ -n "$EFFORT" ]; then
-        de="$(_droid_effort "$EFFORT")"; [ -n "$de" ] || _session_launch_error "$provider" "unsupported reasoning effort"
-        SESSION_LAUNCH+=("-r" "$de")
+        # VERIFIED against the live CLI (full `droid --help`, never truncated): the TOP-LEVEL
+        # `droid` documents `-r, --resume [sessionId]` (Resume a session), NOT reasoning effort.
+        # `-r, --reasoning-effort <level>` exists ONLY under `droid exec --help`. Same bug class
+        # as the --model leak: this launch was assembled from the EXEC flag set. Passing
+        # `droid --auto medium -r <effort>` does NOT set effort — it tries to RESUME a session
+        # named "<effort>" (off/none/low/medium/high, none of which is a real session id), finds
+        # none, and EXITS SILENTLY TO A BARE SHELL with exit code 0 and no error. That is how
+        # every droid interactive lane died invisibly tonight. Interactive droid has NO reasoning-
+        # effort flag, so an explicit --effort on a droid session is REFUSED loudly (not silently
+        # dropped — a dropped effort is how this stayed invisible), naming the verified reason
+        # and pointing at the exec/delegate path where `-r` does mean reasoning-effort. Do NOT
+        # re-add `-r` behind a probe.
+        _session_launch_error "$provider" "interactive droid has NO reasoning-effort flag in \`droid --help\` (verified against the live CLI: top-level \`-r, --resume [sessionId]\` means RESUME a session, not effort; \`-r, --reasoning-effort <level>\` exists ONLY under \`droid exec --help\`). \`droid --auto medium -r <effort>\` would try to RESUME a session named \"<effort>\", find none, and exit 0 to a bare shell with no error — an invisible non-start. Drop --effort to start interactive droid on its default reasoning, or use '$0 --provider droid run --effort <level> -m <model> \"task\"' (or bg/delegate) which sets effort via \`droid exec -r\`."
       fi
       if [ "$MODEL_EXPLICIT" = "1" ]; then
         # VERIFIED against the live CLI (full `droid --help`, never truncated): the TOP-LEVEL
@@ -12019,6 +12030,54 @@ _session_shell_command() {
     out="$out$quoted"
   done
   printf '%s\n' "$out"
+}
+
+# _session_launch_liveness_check <session-name> <provider> <launch-cmd> -> after send-keys, poll
+# the pane for a few seconds and confirm the engine STAYED UP rather than exiting to a bare shell.
+# Returns 0 if the pane's current command is NOT the login shell (an engine is running, or booting
+# in a subshell), 1 if it degraded to a bare shell (the engine exited, possibly silently with rc=0).
+# This is the guard against the droid -r/resume bug class: `droid --auto medium -r high` tried to
+# RESUME a session named "high", found none, and EXITED SILENTLY TO A BARE SHELL with exit code 0
+# and no error — `session start` reported "Started" while the pane was a dead shell. An engine
+# that exits 0 immediately is NOT a started session. tmux's #{pane_current_command} reports the
+# foreground process of the pane; right after send-keys the shell is still foreground while the
+# engine boots, so the check waits for the engine to take over OR the shell to come back idle.
+# Bounded by OSRC_SESSION_LIVENESS_SECS (default 6); opt out with OSRC_SESSION_LIVENESS_SECS=0.
+# Never touches the heartbeat/registry, session send, or the turn-end guard — this is launch
+# verification only, run once at session start.
+_session_launch_liveness_check() {
+  local sess="$1" provider="$2" launch="$3"
+  local secs="${OSRC_SESSION_LIVENESS_SECS:-6}"
+  case "$secs" in 0) return 0 ;; ''|*[!0-9]*) secs=6 ;; esac
+  have tmux || return 0
+  tmux has-session -t "$sess" 2>/dev/null || return 0   # nothing to verify; let the caller's own checks speak
+  local cmd="" i=0
+  # Give the engine a moment to take over the pane (send-keys just typed the command; the shell
+  # is still foreground while the engine process forks/boots). Poll until the foreground command
+  # is NOT the shell, or the budget elapses.
+  for i in $(seq 1 "$secs" 2>/dev/null || seq 1 6); do
+    sleep 1
+    cmd="$(tmux display-message -p -t "$sess" '#{pane_current_command}' 2>/dev/null)" || cmd=""
+    case "$cmd" in
+      bash|zsh|sh|dash|fish|ksh|tcsh|csh|"")
+        # Still the shell (or empty). Keep polling — the engine may not have taken over yet.
+        continue
+        ;;
+      *)
+        # A non-shell foreground command means the engine took over the pane. Healthy start.
+        return 0
+        ;;
+    esac
+  done
+  # Budget elapsed and the pane is STILL a bare shell: the engine exited (silently, with rc=0 in
+  # the droid -r case) and dropped back to the shell. That is an invisible non-start, not a
+  # started session. Die loudly so the user knows the session is NOT live and can investigate
+  # (the most common cause is a flag that means something different in interactive mode, e.g.
+  # droid -r meaning resume rather than reasoning-effort).
+  echo "ERROR: session start: $provider interactive launch did NOT stay up — the pane is a bare shell ($cmd) after ${secs}s. The engine exited (likely silently with exit code 0) instead of entering its interactive REPL. The most common cause is a flag that means something DIFFERENT in interactive mode than in exec/headless mode (e.g. droid -r means RESUME a session at the top level, not reasoning-effort). Launch was: $launch. Re-check the lane's real \`<cli> --help\` (top-level, not exec), or start without the offending flag." >&2
+  # Kill the dead session so a retry isn't blocked by a has-session collision on the PWD-derived name.
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  return 1
 }
 
 _session_effort_validate() {
@@ -12330,7 +12389,7 @@ _model_pin_restore_allowed() { # <session-id> <generation>
 }
 
 _session_relaunch_command() { # <provider> <model> <effort>
-  local provider="$1" model="$2" effort="$3" cid tokens de
+  local provider="$1" model="$2" effort="$3" cid tokens
   case "$provider" in
     codex|cx)
       cid="$(resolve_model_row "$model")"; cid="${cid%%|*}"; [ -n "$cid" ] || cid="$model"
@@ -12343,8 +12402,15 @@ _session_relaunch_command() { # <provider> <model> <effort>
       printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$model"
       ;;
     droid)
-      de="$(_droid_effort "$effort")"; [ -n "$de" ] || return 1
-      printf 'droid --auto medium --model %q -r %q' "$model" "$de"
+      # VERIFIED against the live CLI: interactive `droid` has NO reasoning-effort flag
+      # (top-level `-r, --resume [sessionId]` means RESUME, not effort; `-r, --reasoning-effort`
+      # is exec-only) and NO model flag (`--model` is exec-only). A relaunch command built from
+      # the exec flag set would (1) drop --model into the prompt and bill on the default, and
+      # (2) try to RESUME a session named "<effort>" and exit 0 to a bare shell. Same bug class
+      # as the session-start leak. Refuse here so the bug class cannot recur on the relaunch
+      # path even if the upstream _session_droid_effort_supported guard is ever loosened. The
+      # caller dies with a clear message; the prior session is left intact.
+      return 1
       ;;
     *) return 1 ;;
   esac
@@ -12631,6 +12697,14 @@ session() {
         return 4
       fi
       tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
+      # LIVENESS: confirm the engine STAYED UP rather than exiting to a bare shell. Catches the
+      # droid -r/resume bug class (an engine that exits 0 silently is NOT a started session) and
+      # any future flag that means something different in interactive mode. Bounded; opt out with
+      # OSRC_SESSION_LIVENESS_SECS=0. Run BEFORE the registry append so a non-start is not recorded
+      # as a healthy session start. Does not touch heartbeat/send/turn-end.
+      if ! _session_launch_liveness_check "$SESSION_NAME" "$PROVIDER" "$launch"; then
+        die "session start: $PROVIDER interactive launch did not stay up (bare shell after the liveness budget). See the message above."
+      fi
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
