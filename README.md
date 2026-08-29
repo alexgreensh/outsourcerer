@@ -211,7 +211,9 @@ Under the robe it's deliberately boring: a self-contained bash script you can re
 
 <img src="readme-assets/section-orchestrator.png" alt="The ink-drop sorcerer as a captain directing a crew of neon constellation creatures on gold connecting lines" width="100%">
 
-Outsourcerer is the crew engine, not the captain. If you run a multi-agent orchestrator, a "talk to one agent, ship with a crew" framework like [firstmate](https://github.com/kunchenguid/firstmate), or your own, **it** decides what to delegate, who speaks to you, and how results get approved. Outsourcerer runs the assignments underneath: dispatches each crew member across any provider, supervises them, tracks the spend, hands the results back. One dependable dispatch layer under whatever captain you like.
+Outsourcerer captains its own crew. It decides what to delegate, picks the lane and model on live benchmarks, keeps every delegate interactive and steerable, supervises the fleet, and refuses to end a turn while work is live and waiting on you. The orchestrator contract lives in the skill, so the session you talk to owns the plan and the outcome rather than handing choices back to you.
+
+**It also runs under someone else's captain.** If you already have a multi-agent orchestrator, yours or a framework, point it at Outsourcerer and keep it: your orchestrator decides what to delegate and how results get approved, and Outsourcerer runs the assignments underneath. It dispatches each crew member across any provider, supervises them, tracks the spend, and hands the results back as parsable state. One dependable dispatch layer, whoever is holding the wheel.
 
 **Point it at any agent library and it just works.** A folder of role definitions, your own or a library like [agency-agents](https://github.com/msitarzewski/agency-agents), runs as a crew with `fanout --agents ./crew`, one supervised job per specialist. You never have to edit those files. The whole crew runs on a sensible cheap lane by default, and you add routing only if you want it, three ways, editing files last:
 
@@ -229,7 +231,7 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 `--worktree` runs each editing crew member in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills and MCP via `--with`, and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
-**On the roadmap** (firstmate-inspired): **completion events** so the captain wakes on a state change instead of polling, and a richer receipt (cost + branch/SHA) in that same JSON.
+**On the roadmap:** **completion events** so the captain wakes on a state change instead of polling, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---
 
