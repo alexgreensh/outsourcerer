@@ -7043,13 +7043,19 @@ cmd_bg() {
 # AUTO-DETACH: a non-interactive slow-lane foreground run blocks until the model finishes (3-5 min
 # for frontier/reasoning). When invoked through a harness shell tool with a ~2-min timeout, the call is
 # KILLED mid-run (observed twice on Sol gates). When non-interactive AND slow-lane, auto-promote the run
-# to the existing bg path: launch detached under the bg watchdog, print the job id + poll command, return
-# in <1s. The caller polls status/watch. This is ROUTING — it reuses _bg_launch (same watchdog, same
-# status receipt, same result retrieval as `bg`), NOT new infra.
+# to an INTERACTIVE tmux session by default (OSRC_REQUIRE_INTERACTIVE=1, ON): the same machinery
+# `session start` uses (tmux new-session + send-keys), NOT a headless bg job. Absence of a TTY is NOT
+# evidence that nobody is watching — every agent harness (Claude Code, Codex, etc.) has NO TTY on either
+# stream, so the old TTY check detached EVERY cloud/frontier run to headless bg. The user steers the
+# session via:  OUTSOURCERER_TMUX=<name> $0 session read | session send "..." | session stop.
+# Set OSRC_REQUIRE_INTERACTIVE=0 to opt out to the headless bg path (via _bg_launch, same watchdog/
+# status/result as `bg`). If tmux is genuinely unavailable under the default, the run FAILS LOUDLY
+# rather than silently falling back to headless.
 #
 # Escape hatches (both directions):
 #   OSRC_NO_AUTODETACH=1 / --wait / --foreground : forces foreground even for slow lanes.
 #   OSRC_FORCE_AUTODETACH=1                       : forces detach even interactively (for testing).
+#   OSRC_REQUIRE_INTERACTIVE=0                    : allows the headless bg path instead of tmux.
 #
 # _autodetach_should <disp> <model-id> <model-tier> -> return 0 if the run should auto-detach, 1 if not.
 # Trigger: non-interactive (stdout not a TTY) AND slow lane (any cloud lane OR frontier/reasoning tier).
@@ -7075,19 +7081,74 @@ _autodetach_should() {
   return 0
 }
 
-# _autodetach_run <verb> [flags] "task" -> launch via the existing bg machinery, print receipt, return 0.
-# Reuses _bg_launch (same watchdog, same status, same result retrieval as `bg`). The cloud preack is
-# already satisfied: _cloud_disclose ran BEFORE this and set OSRC_CLOUD_ACKED=1, so _bg_cloud_preack
-# returns early (the ack propagates to the detached child via OSRC_CLOUD_ACK).
+# _autodetach_run <verb> [flags] "task" -> route a would-be headless dispatch to an INTERACTIVE
+# tmux session by default (OSRC_REQUIRE_INTERACTIVE=1, ON), NOT a headless bg job. Absence of a TTY
+# is NOT evidence that nobody is watching: every agent-driven run (Claude Code, Codex, any harness)
+# has NO TTY on either stream, so the old TTY check detached EVERY cloud/frontier run to headless bg.
+# The interactive path uses the SAME machinery `session start` uses (tmux new-session + send-keys),
+# and the user steers via the session subcommand with OUTSOURCERER_TMUX=<name>.
+#
+# OSRC_REQUIRE_INTERACTIVE=0 opts out to the headless bg path (via _bg_launch, same watchdog/status/
+# result retrieval as `bg`). The cloud preack is already satisfied: _cloud_disclose ran BEFORE this
+# and set OSRC_CLOUD_ACKED=1 (route_delegate path), or _bg_cloud_preack acquires it here (second-
+# opinion path), so _bg_cloud_preack returns early and the ack propagates to the child/tmux pane.
 _autodetach_run() {
-  _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
-  local id; id="$(_bg_launch "$@")"
-  [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
-  printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
-  printf '>>>   job id : %s\n' "$id" >&2
-  printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
-  _async_supervision_notice
-  echo "$id"
+  local _ar_verb="$1"; shift
+  # HEADLESS BG PATH (explicit opt-out). Also the path the bg re-entry tests exercise.
+  if [ "${OSRC_REQUIRE_INTERACTIVE:-1}" != "1" ]; then
+    _bg_cloud_preack "$_ar_verb" "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+    local id; id="$(_bg_launch "$_ar_verb" "$@")"
+    [ -n "$id" ] || die "auto-detach: launch failed -- no job id was minted (nothing was started)."
+    printf '>>> [auto-detach] non-interactive slow-lane run detached to bg to avoid a caller tool-timeout.\n' >&2
+    printf '>>>   job id : %s\n' "$id" >&2
+    printf '>>>   NOW WATCH IT: %s watch %s   (unobserved until you do; status: %s status %s | result: %s result %s)\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2
+    _async_supervision_notice
+    echo "$id"
+    return 0
+  fi
+  # INTERACTIVE TMUX PATH (default). Route the would-be headless dispatch to a tmux session so a
+  # human can watch/steer it. Same machinery `session start` uses (new-session + send-keys). Never
+  # silently fall back to headless: if tmux is genuinely unavailable, FAIL LOUDLY with the reason.
+  have tmux || die "auto-detach: OSRC_REQUIRE_INTERACTIVE=1 but tmux is not installed ($( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')). A non-interactive slow-lane run must NOT go headless. Set OSRC_REQUIRE_INTERACTIVE=0 to allow the headless bg path, or install tmux."
+  _bg_cloud_preack "$_ar_verb" "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
+  # Unique per-run session name (collision-safe for concurrent auto-detaches in the same directory;
+  # the PWD-derived SESSION_NAME is one-per-dir). OUTSOURCERER_TMUX overrides SESSION_NAME at source
+  # time, so the user steers via:  OUTSOURCERER_TMUX=<name> $0 session read | session send "..." | session stop
+  local _ad_sess _ad_full _a
+  _ad_sess="osrc-ad-$(_new_job_id)"
+  case "$_ad_sess" in
+    ''|.|..|*[!A-Za-z0-9._-]*) die "auto-detach: generated invalid session name '$_ad_sess'" ;;
+  esac
+  # Build the foreground command: re-run the engine with OSRC_NO_AUTODETACH=1 so the in-pane
+  # re-entry runs foreground (no re-detach / fork-bomb — same role OSRC_STREAM=1 plays in the bg
+  # child). Quote every arg with printf %q so the user's task text can't break out of the send-keys
+  # shell string (injection-safe; the codebase uses the same pattern at the model-token guard).
+  # Pass OUTSOURCERER_DEPTH so the pane's route_delegate guard sees the same delegation chain the
+  # parent is part of (the call site decremented it back to the pre-increment value, matching the
+  # bg child's inherited depth). Pass cloud ack so the pane's _cloud_disclose / _bg_cloud_preack
+  # return early (the parent already acquired consent).
+  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}")"
+  [ -n "${OUTSOURCERER_MAX_DEPTH:-}" ] && _ad_full="$_ad_full OUTSOURCERER_MAX_DEPTH=$(printf '%q' "$OUTSOURCERER_MAX_DEPTH")"
+  _ad_full="$_ad_full $(printf '%q' "$SCRIPT_PATH")"
+  # Re-add --provider if it was a GLOBAL flag consumed by main() (not in ORIG). Mirrors run_job's
+  # _run_provider logic. A duplicate (when --provider IS in ORIG) is harmless: both are consumed.
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full --provider $(printf '%q' "$PROVIDER")"
+  _ad_full="$_ad_full $(printf '%q' "$_ar_verb")"
+  for _a in "$@"; do
+    _ad_full="$_ad_full $(printf '%q' "$_a")"
+  done
+  # Create the tmux session (same shape as `session start`). Handle failure: a unique name makes
+  # collision astronomically unlikely, but tmux serializes new-session and a duplicate fails nonzero.
+  # Die loudly rather than silently fall back to headless — that is the whole point of this gate.
+  if ! tmux new-session -d -s "$_ad_sess" -x 200 -y 50 -c "$PWD" 2>/dev/null; then
+    die "auto-detach: tmux new-session failed for '$_ad_sess' (tmux server error or session name collision). Set OSRC_REQUIRE_INTERACTIVE=0 to allow the headless bg path, or check tmux."
+  fi
+  tmux send-keys -t "$_ad_sess" "$_ad_full" Enter
+  printf '>>> [auto-detach] non-interactive slow-lane run routed to INTERACTIVE tmux session (not headless bg).\n' >&2
+  printf '>>>   session : %s\n' "$_ad_sess" >&2
+  printf '>>>   WATCH  : tmux attach -t %s\n' "$_ad_sess" >&2
+  printf '>>>   STEER  : OUTSOURCERER_TMUX=%s %s session read   |   OUTSOURCERER_TMUX=%s %s session send "..."   |   OUTSOURCERER_TMUX=%s %s session stop\n' "$_ad_sess" "$0" "$_ad_sess" "$0" "$_ad_sess" "$0" >&2
+  echo "$_ad_sess"
   return 0
 }
 
@@ -11477,11 +11538,12 @@ route_delegate() {
   [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
 
-  # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to the bg path so a harness
-  # tool-timeout can't kill the call mid-run. Reuses _bg_launch (same watchdog/status/result as `bg`).
-  # The model tier (frontier/capable/mid/budget) drives the "slow" decision, NOT the verb tier.
+  # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to an INTERACTIVE tmux session by
+  # default (OSRC_REQUIRE_INTERACTIVE=1), NOT a headless bg job. Reuses the session-start machinery
+  # (tmux new-session + send-keys). The model tier (frontier/capable/mid/budget) drives the "slow"
+  # decision, NOT the verb tier. Set OSRC_REQUIRE_INTERACTIVE=0 to opt out to the bg path.
   # Escape hatches: OSRC_NO_AUTODETACH=1 / --wait / --foreground forces foreground; OSRC_FORCE_AUTODETACH=1
-  # forces detach (for testing). See _autodetach_should for the full trigger logic.
+  # forces detach (for testing). See _autodetach_should / _autodetach_run for the full trigger logic.
   local _ad_model_tier; _ad_model_tier="$(resolve_tier "$RESOLVED_ID" "${TTIER:-}")"
   if _autodetach_should "$disp" "$RESOLVED_ID" "$_ad_model_tier"; then
     # route_delegate already incremented OUTSOURCERER_DEPTH above. The auto-detached __runjob

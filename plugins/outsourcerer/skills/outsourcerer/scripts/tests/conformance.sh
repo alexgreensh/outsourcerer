@@ -65,6 +65,7 @@ _ALL_SUITES="$_ALL_SUITES test_loop_escalate test_second_opinion_agree test_cata
 _ALL_SUITES="$_ALL_SUITES test_value_router"
 _ALL_SUITES="$_ALL_SUITES test_advise_dynamic_pool"
 _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
+_ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_quota"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
