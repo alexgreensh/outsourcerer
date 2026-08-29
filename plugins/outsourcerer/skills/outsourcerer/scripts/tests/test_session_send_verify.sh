@@ -216,6 +216,174 @@ else
   bad "answer cursor failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
 fi
 
+# ---- infra F3 / static F2: capture FAILURE must never be read as submission success ------------
+# _managed_pane_tail pipes capture-pane through grep|tail, which masks the capture exit status. A
+# capture failure (rc 1 from tmux) produced an empty string that _managed_send_submitted treated as
+# "composer cleared = submitted". The fix preserves capture failure as rc 2 and fails closed.
+CAPTURE_FILE="$TMP/fail"; printf '❯ analyze this\n' > "$CAPTURE_FILE"
+CLOSED=0
+tmux() {
+  case "$1" in
+    capture-pane) return 1 ;;   # capture ALWAYS fails — the pane is unreadable
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG" ;;
+    *) return 0 ;;
+  esac
+}
+: > "$SEND_LOG"
+typed="$(_managed_pane_tail "$PANE" 2>/dev/null)"; _trc=$?
+# A capture failure must surface as rc 2 from _managed_pane_tail (not rc 0 with empty output).
+[ "$_trc" = 2 ] && ok "capture failure -> _managed_pane_tail rc 2 (distinct from blank pane)" || bad "capture failure masked (rc=$_trc)"
+OSRC_SEND_VERIFY_POLLS=3 _managed_send_submitted "$PANE" "anything"; rc=$?
+[ "$rc" = 2 ] && ok "capture failure during poll -> _managed_send_submitted rc 2 (fail closed, never submitted)" || bad "capture failure forged submission (rc=$rc)"
+
+# End-to-end: _managed_session_send on a pane whose post-Enter capture fails -> rc 1, never "sent".
+CAPTURE_FILE="$TMP/fail-e2e"; printf '❯ analyze this\n' > "$CAPTURE_FILE"
+CLOSED=0
+tmux() {
+  case "$1" in
+    # Pre-Enter snapshot succeeds (CLOSED=0); post-Enter capture fails (CLOSED=1 -> return 1).
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then return 1; else cat "$CAPTURE_FILE"; fi ;;
+    display) printf '0\n' ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+: > "$SEND_LOG"
+OSRC_SEND_VERIFY_POLLS=3 _managed_session_send "$PANE" "analyze this"; rc=$?
+if [ "$rc" = 1 ]; then
+  ok "managed send with post-Enter capture failure -> rc 1 (genuine failure, never 'sent')"
+else
+  bad "managed send forged success on capture failure (rc=$rc)"
+fi
+
+# Pre-Enter capture failure -> rc 1 (no valid baseline to prove submission against).
+CAPTURE_FILE="$TMP/fail-pre"; printf '❯ analyze this\n' > "$CAPTURE_FILE"
+CLOSED=0
+tmux() {
+  case "$1" in
+    capture-pane) return 1 ;;   # even the pre-Enter snapshot cannot be read
+    display) printf '0\n' ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG" ;;
+    *) return 0 ;;
+  esac
+}
+: > "$SEND_LOG"
+OSRC_SEND_VERIFY_POLLS=3 _managed_session_send "$PANE" "analyze this"; rc=$?
+[ "$rc" = 1 ] && ok "managed send with pre-Enter capture failure -> rc 1 (no baseline, fail closed)" || bad "pre-Enter capture failure not handled (rc=$rc)"
+
+# ---- static F3: an unrelated pane redraw must NOT forge submission ------------------------------
+# The typed composer line stays unchanged (Enter eaten) while a progress line higher in the tail
+# changes. The old whole-tail diff (cur != typed) saw the redraw as submission. The fix compares
+# only the composer (bottom) line, so the redraw cannot forge success while the text sits unsent.
+CAPTURE_FILE="$TMP/redraw"; printf 'Working...\n❯ analyze this\n' > "$CAPTURE_FILE"
+CLOSED=0
+REDRAWN=0
+tmux() {
+  case "$1" in
+    # Enter is eaten (composer line unchanged), but a progress redraw changes the line above it.
+    capture-pane)
+      if [ "${REDRAWN:-0}" = 1 ]; then printf 'Working..\n❯ analyze this\n'; else cat "$CAPTURE_FILE"; fi
+      ;;
+    send-keys) case " $* " in *" Enter "*) REDRAWN=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+typed="$(_managed_pane_tail "$PANE")"
+tmux send-keys -t "$PANE" Enter
+OSRC_SEND_VERIFY_POLLS=3 _managed_send_submitted "$PANE" "$typed"; rc=$?
+if [ "$rc" = 1 ]; then
+  ok "unrelated redraw with composer unchanged -> NOT submitted (rc 1), redraw no longer forges success"
+else
+  bad "unrelated redraw forged submission (rc=$rc)"
+fi
+
+# Contrast: a real submit (composer line changes) IS detected even when a redraw also happens.
+CAPTURE_FILE="$TMP/redraw-real"; printf 'Working...\n❯ analyze this\n' > "$CAPTURE_FILE"
+CLOSED=0
+REDRAWN=0
+tmux() {
+  case "$1" in
+    capture-pane)
+      if [ "${CLOSED:-0}" = 1 ]; then printf 'Working..\nanalyze this\n❯\n'; else cat "$CAPTURE_FILE"; fi
+      ;;
+    send-keys) case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+typed="$(_managed_pane_tail "$PANE")"
+tmux send-keys -t "$PANE" Enter
+OSRC_SEND_VERIFY_POLLS=3 _managed_send_submitted "$PANE" "$typed"; rc=$?
+[ "$rc" = 0 ] && ok "real submit (composer line changed) detected despite a concurrent redraw" || bad "real submit missed with redraw (rc=$rc)"
+
+# ---- static F10: menu answers must hold the endpoint mutation lock -----------------------------
+# _managed_menu_answer navigates + presses Enter without the lock, so it can race a concurrent
+# send/clear/control on the same pane. The fix acquires the lock before detection, revalidates under
+# it, and holds it through all keystrokes. Three cases: lock-acquire-gated, under-lock revalidation,
+# and the happy path still works under the real lock stubs.
+
+# (a) If the lock cannot be acquired, NO keystrokes are sent (the answer does not mutate without it).
+CAPTURE_FILE="$TMP/lock-fail"; printf 'Proceed? [y/N]\n' > "$CAPTURE_FILE"; CLOSED=0
+: > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_endpoint_mutation_lock() { return 1; }   # lock contention -> refuse
+_endpoint_mutation_unlock() { return 0; }
+_managed_menu_answer "$PANE" y; rc=$?
+if [ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ]; then
+  ok "menu answer refused when the endpoint lock is unavailable (no keystrokes sent)"
+else
+  bad "menu answer mutated without the lock (rc=$rc, sent=$(cat "$SEND_LOG" 2>/dev/null))"
+fi
+
+# (b) Under-lock revalidation: a concurrent op closed the menu before the answer acquired the lock.
+# The re-detect returns "none" -> the answer refuses without typing into the now-empty composer.
+CAPTURE_FILE="$TMP/lock-reval"; printf 'Proceed? [y/N]\n' > "$CAPTURE_FILE"; CLOSED=1
+: > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    # CLOSED=1 from the start: the menu was already closed by a concurrent op.
+    capture-pane) printf '❯\n' ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG" ;;
+    *) return 0 ;;
+  esac
+}
+_endpoint_mutation_lock() { return 0; }
+_endpoint_mutation_unlock() { return 0; }
+_managed_menu_answer "$PANE" y; rc=$?
+if [ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ]; then
+  ok "menu answer revalidates under the lock: gone menu -> refuse, no keystrokes into the composer"
+else
+  bad "menu answer typed into a gone menu (rc=$rc, sent=$(cat "$SEND_LOG" 2>/dev/null))"
+fi
+
+# (c) Happy path: the lock is acquired, the answer is sent, the menu closes. Verifies the lock
+# acquisition did not break the normal flow, and that the lock is RELEASED after Enter (the
+# close-verification poll runs without holding it).
+CAPTURE_FILE="$TMP/lock-ok"; printf 'Proceed? [y/N]\n' > "$CAPTURE_FILE"; CLOSED=0
+: > "$SEND_LOG"
+LOCK_ACQUIRED=0; LOCK_RELEASED=0
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_endpoint_mutation_lock() { LOCK_ACQUIRED=1; return 0; }
+_endpoint_mutation_unlock() { LOCK_RELEASED=1; return 0; }
+_managed_menu_answer "$PANE" y; rc=$?
+if [ "$rc" = 0 ] && [ "$LOCK_ACQUIRED" = 1 ] && [ "$LOCK_RELEASED" = 1 ] \
+   && grep -q 'send-keys -t sess-sv -l -- y' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
+  ok "menu answer happy path: lock acquired + released, y + Enter sent, menu closed"
+else
+  bad "menu answer happy path broken (rc=$rc, lock=$LOCK_ACQUIRED/$LOCK_RELEASED)"
+fi
+
 # ---- static: the dispatch wires menu refusal + the new rc messages + control/answer subcommands -
 grep -q 'session send refused: the pane is showing an interactive choice menu' "$SRC" && ok "send refuses helpfully on a menu pane" || bad "no helpful menu refusal in send"
 grep -q 'Use '"'"'session answer'"'"' to select an option' "$SRC" && ok "send refusal names session answer" || bad "send refusal does not name session answer"

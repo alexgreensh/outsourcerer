@@ -12287,25 +12287,47 @@ _managed_composer_state() { # <session-id> <pane> -> empty|unknown
 # bounded window right after the send. Verified against real tmux 3.6a: a typed-but-unsubmitted line
 # sits on the bottom input line of `capture-pane -p`; after Enter it moves into history and the bottom
 # line clears.
-_managed_pane_tail() { # <pane> -> last N non-empty lines (the comparison snapshot)
-  local pane="$1"
-  tmux capture-pane -t "$pane" -p 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "${OSRC_SEND_VERIFY_TAIL:-12}"
+_managed_pane_tail() { # <pane> -> last N non-empty lines; rc 0 ok, 2 capture failed
+  # Capture into a variable FIRST so the capture exit status is preserved. A pipeline
+  # (capture-pane | grep | tail) loses the capture status behind tail's, so a capture
+  # failure looked identical to a blank pane and forged submission success (infra F3 /
+  # static F2). A genuinely blank pane is rc 0 with empty output; a capture failure is
+  # rc 2 with empty output — the caller fails closed on 2.
+  local pane="$1" cap
+  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || return 2
+  [ -n "$cap" ] || return 0
+  printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -n "${OSRC_SEND_VERIFY_TAIL:-12}"
 }
 
-# 0 = submitted (the pane changed away from the text-in-composer snapshot); 1 = not submitted (the
-# pane is still byte-identical to the moment the text sat typed in the composer — Enter was eaten);
+# 0 = submitted (positive evidence the typed text left the composer); 1 = not submitted (the
+# composer line is still byte-identical to the moment the text sat typed — Enter was eaten);
 # 2 = the pane could not be read. Bounded poll (condition-based, not one fixed sleep): a real submit
 # clears the composer in well under a second; a stuck composer never changes, so the loop exits on the
 # real state change.
+#
+# The proof is the COMPOSER LINE (the bottom non-empty line), not the whole tail. An unrelated
+# redraw/scroll higher in the pane changes the tail without the message being sent; comparing only
+# the composer line means that redraw cannot forge submission while the typed text still sits unsent
+# in the composer (static F3). A capture failure (rc 2 from _managed_pane_tail) is never submission:
+# it fails closed so a dead/unreadable pane is never reported as "sent" (infra F3 / static F2).
 _managed_send_submitted() { # <pane> <typed-tail-snapshot>
-  local pane="$1" typed="$2" polls="${OSRC_SEND_VERIFY_POLLS:-15}" i cur
+  local pane="$1" typed="$2" polls="${OSRC_SEND_VERIFY_POLLS:-15}" i cur tail_rc typed_composer cur_composer
+  # The composer line is the last non-empty line of the text-in-composer snapshot — the typed
+  # message resting on the bottom input line at the moment Enter was pressed.
+  typed_composer="$(printf '%s\n' "$typed" | grep -v '^[[:space:]]*$' | tail -1)"
   i=0
   while [ "$i" -lt "$polls" ]; do
-    cur="$(_managed_pane_tail "$pane")"
-    # A blanked pane (empty capture) means the text left the composer -> submitted.
+    cur="$(_managed_pane_tail "$pane")"; tail_rc=$?
+    # Capture failure is NOT submission: fail closed with a distinct code so the caller can
+    # report the pane was unreadable rather than forging a success.
+    [ "$tail_rc" -ne 2 ] || return 2
+    # A blanked pane (empty capture, rc 0) means the composer cleared -> submitted.
     [ -n "$cur" ] || return 0
-    # The pane changed away from the text-in-composer snapshot -> submitted.
-    [ "$cur" != "$typed" ] && return 0
+    # Positive evidence: the composer (bottom) line changed away from the typed message. An
+    # unrelated redraw higher in the tail does not count — the typed text must have left the
+    # composer line itself.
+    cur_composer="$(printf '%s\n' "$cur" | grep -v '^[[:space:]]*$' | tail -1)"
+    [ "$cur_composer" != "$typed_composer" ] && return 0
     sleep 0.1
     i=$((i + 1))
   done
@@ -12401,25 +12423,37 @@ _managed_menu_detect() { # <pane>
 # label substring (cursor — navigate Up/Down from the ❯ row to the match, then Enter). Verifies the
 # menu closed (a follow-up detect returns "none"). 0 = answered + verified closed; 1 = could not
 # answer or the menu did not close. Sends ONLY the answer keys, never chat.
+#
+# Holds the endpoint mutation lock across menu detection + revalidation + all navigation + Enter, so
+# a concurrent `session send`/`clear`/`control` on the same pane cannot interleave keystrokes with
+# the multi-key menu selection (static F10). The menu is re-detected UNDER the lock: a concurrent op
+# may have closed it between the caller's detect and this answer, and answering a gone menu would
+# type into a composer. The lock is released after Enter, before the read-only close-verification
+# poll (holding it across a 1.5s poll would block sibling mutations for no safety benefit).
 _managed_menu_answer() { # <pane> <selector>
-  local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i
+  local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i key
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  # Revalidate the menu UNDER the lock — a concurrent send/control may have closed it since the
+  # caller's detect. Detecting again here is the revalidation: "none" means the menu is gone and
+  # answering would type into a composer, so refuse without sending any keys.
   report="$(_managed_menu_detect "$pane")"
   kind="$(printf '%s\n' "$report" | head -1 | awk '{print $2}')"
   case "$kind" in
-    none) echo "no interactive menu detected in the pane. Re-check with: $0 session read" >&2; return 1 ;;
+    none) echo "no interactive menu detected in the pane. Re-check with: $0 session read" >&2; _endpoint_mutation_unlock "$key"; return 1 ;;
     consent)
       case "$sel" in
-        y|yes|Y) tmux send-keys -t "$pane" -l -- "y" 2>/dev/null || return 1 ;;
-        n|no|N)  tmux send-keys -t "$pane" -l -- "n" 2>/dev/null || return 1 ;;
-        *) echo "consent prompt needs y|yes or n|no" >&2; return 1 ;;
+        y|yes|Y) tmux send-keys -t "$pane" -l -- "y" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; } ;;
+        n|no|N)  tmux send-keys -t "$pane" -l -- "n" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; } ;;
+        *) echo "consent prompt needs y|yes or n|no" >&2; _endpoint_mutation_unlock "$key"; return 1 ;;
       esac
-      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
     numbered)
-      case "$sel" in *[!0-9]*) echo "numbered menu needs a numeric index" >&2; return 1 ;; esac
-      printf '%s\n' "$report" | grep -qE "^OPT $sel " || { echo "index $sel is not one of the offered options" >&2; return 1; }
-      tmux send-keys -t "$pane" -l -- "$sel" 2>/dev/null || return 1
-      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      case "$sel" in *[!0-9]*) echo "numbered menu needs a numeric index" >&2; _endpoint_mutation_unlock "$key"; return 1 ;; esac
+      printf '%s\n' "$report" | grep -qE "^OPT $sel " || { echo "index $sel is not one of the offered options" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      tmux send-keys -t "$pane" -l -- "$sel" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
     cursor)
       target_pos=0; sel_pos=0
@@ -12429,16 +12463,18 @@ _managed_menu_answer() { # <pane> <selector>
           OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
         esac
       done < <(printf '%s\n' "$report")
-      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no cursor-list option matches '$sel'" >&2; return 1; }
-      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected (❯) row found" >&2; return 1; }
+      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no cursor-list option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected (❯) row found" >&2; _endpoint_mutation_unlock "$key"; return 1; }
       delta=$((target_pos - sel_pos))
-      if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || return 1; i=$((i+1)); done
-      elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || return 1; i=$((i+1)); done; fi
-      tmux send-keys -t "$pane" Enter 2>/dev/null || return 1
+      if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done
+      elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done; fi
+      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
-    *) echo "unrecognized menu kind '$kind'" >&2; return 1 ;;
+    *) echo "unrecognized menu kind '$kind'" >&2; _endpoint_mutation_unlock "$key"; return 1 ;;
   esac
-  # Verify the menu closed: bounded poll until the follow-up detect returns "none".
+  _endpoint_mutation_unlock "$key"
+  # Verify the menu closed: bounded poll until the follow-up detect returns "none". Read-only — the
+  # lock is no longer held (the mutation is complete).
   i=0
   while [ "$i" -lt "${OSRC_MENU_CLOSE_POLLS:-15}" ]; do
     [ "$(_managed_menu_detect "$pane" | head -1 | awk '{print $2}')" = "none" ] && return 0
@@ -12577,7 +12613,7 @@ _session_record() { # <session-id>
 # on a real receipt; otherwise it records `delivery_unknown`, which is both honest and blocks an
 # unsafe auto-replay of an unknown-delivery send.
 _managed_session_send() { # <session-id> <message>
-  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest typed_tail sub_rc
+  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation latest typed_tail sub_rc tail_rc
   _managed_endpoint_live "$session_id" "$pane" || return 1
   oid="send.$session_id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
@@ -12593,16 +12629,23 @@ _managed_session_send() { # <session-id> <message>
   [ "$composer" = empty ] || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   # Snapshot the pane tail WITH the typed text resting in the composer, BEFORE Enter. This is the
-  # text-in-composer state; a successful submit changes the pane away from it. Captured between the
-  # two sends so the snapshot is exactly the moment the text sat typed.
-  typed_tail="$(_managed_pane_tail "$pane" 2>/dev/null)"
+  # text-in-composer state; a successful submit changes the composer line away from it. Captured
+  # between the two sends so the snapshot is exactly the moment the text sat typed. If the pre-Enter
+  # capture fails there is no valid baseline to prove submission against, so fail closed rather than
+  # proceed to an Enter whose effect cannot be verified (infra F3 / static F2).
+  typed_tail="$(_managed_pane_tail "$pane" 2>/dev/null)"; tail_rc=$?
+  if [ "$tail_rc" -eq 2 ]; then
+    _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
+  fi
   tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   # Bug A: prove the text left the composer. Without this, an Enter eaten by a dialog left the typed
   # prompt sitting unsubmitted while the receipt said "sent". A bounded poll waits for the real state
-  # change; a stuck composer never changes and fails the check (rc 1, never "sent").
+  # change; a stuck composer never changes and fails the check (rc 1, never "sent"). A capture
+  # failure during the poll returns 2 and is handled as a fail-closed error, never "sent".
   _managed_send_submitted "$pane" "$typed_tail"; sub_rc=$?
   case "$sub_rc" in
     0) : ;;   # submitted — the text left the composer
+    2) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;  # capture failed: fail closed, never "sent"
     *) _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1 ;;
   esac
   generation="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$session_id" 'select(.event=="start" and .session_id==$id) | .model_generation // empty' | tail -1)"
