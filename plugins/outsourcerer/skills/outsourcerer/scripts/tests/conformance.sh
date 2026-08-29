@@ -68,6 +68,7 @@ _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_codex_code_mode_host"
 _ALL_SUITES="$_ALL_SUITES test_quota"
+_ALL_SUITES="$_ALL_SUITES test_session_model_pin_guard"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say
