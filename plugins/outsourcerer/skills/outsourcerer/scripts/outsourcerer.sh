@@ -13139,6 +13139,81 @@ _warn_unwatched() {
   printf '>>>   An unwatched job is how a wedge becomes a lost hour. Watch it, or cancel it.\n' >&2
 }
 
+# ---- blind-turn guard ------------------------------------------------------------------
+# The failure this closes: four delegated sessions sat parked on approval prompts for over an
+# hour while the orchestrator's turn ended silently and nobody looked. The wake queue was healthy
+# (43,855 entries, 43,270 acks) — nothing was broken, the orchestrator simply walked away from live
+# work without checking, and the user found it by accident. Supervision that depends on the
+# orchestrator remembering to look is not supervision.
+#
+# _blind_turn_guard runs at the END of the orchestrating turn — the moment the CLI is about to exit
+# and the orchestrator would walk away. It reads the fleet view (the snapshot the heartbeat already
+# collects) in a SINGLE bounded pass: one jq over the snapshot file, never the per-session
+# ~11-jq-subprocess fleet reader. It refuses to let the turn end blind while delegated work is live
+# and needs a human, naming what is live and what to do about it:
+#   blocked? / blocked  -> "WAITING ON YOU"  (alive, awaiting input: approval/choice/trust prompt)
+#   unresponsive?       -> "MAYBE STUCK"     (alive, no progress for > OSRC_STALL_SECS)
+#   working             -> healthy, NOT surfaced (silence on a healthy fleet — never block working work)
+#   idle/done/stopped/failed/ended/completed/dead -> terminal or parked, not live-needs-input
+# A blocked delegate is reported DISTINCTLY from a working one (silence) and from a stalled one
+# (maybe-stuck). A quiet pane with a live process is NOT healthy when it is parked on a prompt.
+#
+# BACKSTOP, not the only mechanism: the heartbeat watches on a cadence, _warn_unwatched nags at next
+# contact, and wait/watch/rundown exist for active supervision. This is the one that fires at the
+# exact moment of walking away. Silence when everything is genuinely working. OSRC_BLIND_TURN_GUARD=0
+# disables it (escape hatch for tests / headless pipelines that don't want a turn-end refusal).
+#
+# Reads the snapshot AS-IS. It does NOT re-collect: it assumes the heartbeat (and the registry fix
+# on fix/0.10.1-hb that records end events and filters dead PIDs) keeps the fleet view fresh. This
+# guard never touches the registry writer. Returns 0 (healthy / no view / disabled) or 7 (refuse).
+_blind_turn_guard() {
+  [ "${OSRC_BLIND_TURN_GUARD:-1}" = "0" ] && return 0
+  have jq || return 0
+  local snapshot needs
+  snapshot="$(_fleet_snapshot_read 2>/dev/null)" || return 0   # no view yet -> heartbeat owns collection
+  # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
+  needs="$(printf '%s' "$snapshot" | jq -r '
+    def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
+    .items[]
+    | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")
+    | (if (.state == "blocked?" or .state == "blocked") then "needs-you" else "maybe-stuck" end) + "\t"
+      + (.owner // "unknown") + "\t"
+      + ((.job_id // .session_id // "unknown") | tostring) + "\t"
+      + clean(.display_name // .task_summary // "(unnamed)") + "\t"
+      + clean(.waiting_for // "") + "\t"
+      + clean(.cwd // "-")' 2>/dev/null)" || return 0
+  [ -n "$needs" ] || return 0
+  local n
+  n="$(printf '%s\n' "$needs" | grep -c .)"
+  printf '>>> [outsourcerer] blind-turn guard: %s live delegate(s) need you before you walk away:\n' "$n" >&2
+  local cls owner id name why cwd
+  while IFS=$'\t' read -r cls owner id name why cwd; do
+    [ -n "$id" ] || continue
+    case "$cls" in
+      needs-you)
+        printf '>>>   %s  WAITING ON YOU  %s' "$id" "$name" >&2
+        [ -n "$why" ] && printf '  (awaiting: %s)' "$why" >&2
+        printf '\n' >&2
+        case "$owner" in
+          managed) printf '>>>     answer it in its pane, or look: %s watch %s  /  %s explain %s\n' "$0" "$id" "$0" "$id" >&2 ;;
+          *) printf '>>>     answer it: %s session reply %s "<your answer>"  /  inspect: %s fleet show %s\n' "$0" "$id" "$0" "$id" >&2 ;;
+        esac
+        ;;
+      maybe-stuck)
+        printf '>>>   %s  MAYBE STUCK   %s  (no progress for >%ss)\n' "$id" "$name" "${OSRC_STALL_SECS:-600}" >&2
+        case "$owner" in
+          managed) printf '>>>     check: %s explain %s  /  resume: %s watch %s  /  kill: %s cancel %s\n' "$0" "$id" "$0" "$id" "$0" "$id" >&2 ;;
+          *) printf '>>>     inspect: %s fleet show %s  /  resume: %s session reply %s "<go on>"\n' "$0" "$id" "$0" "$id" >&2 ;;
+        esac
+        ;;
+    esac
+  done <<EOF
+$needs
+EOF
+  printf '>>>   Do not end your turn with live work parked on a prompt. Answer it, watch it, or cancel it.\n' >&2
+  return 7   # refuse to end blind: a non-zero turn-end forces the harness to surface this
+}
+
 # _plugin_skill_src <plugin_version_root/> <skill_name>: print the path to the skill under the NEWEST
 # plugin version that actually contains it, or nothing. Plugin caches are NOT all semver: real ones
 # carry `unknown` and content-hash sibling dirs (e.g. compound-engineering has `3.21.4` alongside
@@ -14495,5 +14570,31 @@ main() {
        die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
 
   esac
+  # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a
+  # human. Fires at the exact moment of walking away. Suppressed for internal commands (the detached
+  # job IS the work; the heartbeat IS the watcher) and for commands whose whole purpose is already to
+  # look (watch/status/result/logs/rundown/bearings/fleet/wait/explain/classify/session) — the
+  # orchestrator running those is actively supervising, not walking away blind. Silence on a healthy
+  # fleet; OSRC_BLIND_TURN_GUARD=0 disables. See _blind_turn_guard for the failure it closes.
+  # Two tiers: a DELEGATING command (run/bg/fanout/...) that walks away from delegated work propagates
+  # the guard's refusal (return 7) so the harness surfaces it — that is the exact failure this closes.
+  # A NON-delegating command (doctor/tab/models/parity-*/...) surfaces the guard as a turn-end backstop
+  # notice but NEVER overrides the command's own exit code: a successful utility command must not turn
+  # non-zero because of unrelated parked fleet state (that broke idempotency contracts on parity-*).
+  local _cmd_rc=$?
+  case "$cmd" in
+    __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|fleet|wait|explain|classify|session|\
+    ""|-h|--help|help|--version|-V) ;;
+    run|explore|research|edit|yolo|bg|fanout|crew|loop|continue)
+      if ! _blind_turn_guard; then
+        return 7   # delegating + needs-attention live work — refuse to end blind
+      fi
+      ;;
+    *)
+      _blind_turn_guard || true   # backstop notice only; preserve the command's exit code
+      ;;
+  esac
+  return $_cmd_rc
 }
 [ "${OSRC_SOURCED:-}" = "1" ] || main "$@"

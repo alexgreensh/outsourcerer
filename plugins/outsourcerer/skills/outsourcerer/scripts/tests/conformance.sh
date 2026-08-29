@@ -68,6 +68,7 @@ _ALL_SUITES="$_ALL_SUITES test_advise_dynamic_pool"
 _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_codex_code_mode_host"
+_ALL_SUITES="$_ALL_SUITES test_blind_turn_guard"
 _ALL_SUITES="$_ALL_SUITES test_quota"
 _ALL_SUITES="$_ALL_SUITES test_model_denylist"
 _ALL_SUITES="$_ALL_SUITES test_utf8_guard"
@@ -99,6 +100,9 @@ grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach 
 grep -q '_lane_trusted_for_pwd'                    "$SRC" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
 grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation trust grant is exported (child jobs would inherit it)" || ok "trust grant is never exported (no inheritance)"
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
+grep -q '_blind_turn_guard'                          "$SRC" && ok "blind-turn guard present (refuses to end blind on live work)" || bad "blind-turn guard missing"
+grep -q 'OSRC_BLIND_TURN_GUARD'                      "$SRC" && ok "blind-turn guard has an escape hatch"                  || bad "blind-turn guard escape hatch missing"
+awk '/^main\(\)/,0' "$SRC" | grep -q '_blind_turn_guard' && ok "blind-turn guard is wired at turn-end in main"        || bad "blind-turn guard not wired in main"
 
 # 2a. TEST REGISTRATION: a suite that exists but is not in the list above never runs. Four suites sat
 # unregistered in this directory for a full release cycle, green locally and never executed by the
