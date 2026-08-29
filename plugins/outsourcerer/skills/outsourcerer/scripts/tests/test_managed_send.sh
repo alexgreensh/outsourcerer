@@ -22,7 +22,11 @@ grep -q '_managed_receipt' "$SRC" && bad "built-in receipt minter still present 
 
 # ---- honest reporting contract in the dispatch (rc 0 verified / 2 unverified / else real failure) -
 grep -q 'delivery NOT independently verified' "$SRC" && ok "dispatch reports 'sent (unverified)' honestly" || bad "no honest unverified message"
-grep -q 'session send failed: nothing was typed' "$SRC" && ok "dispatch distinguishes a genuine send failure" || bad "no genuine-failure message"
+grep -q 'session send failed: nothing was submitted' "$SRC" && ok "dispatch distinguishes a genuine send failure (nothing was submitted)" || bad "no genuine-failure message"
+# Bug A: a genuine failure must report the ACTUAL pane state, not a generic guess, and must NEVER
+# print "sent" on the not-submitted path.
+grep -q 'Pane state:' "$SRC" && ok "genuine-failure message carries the real pane state" || bad "failure message omits the pane state"
+grep -q 'submitted, text left the composer' "$SRC" && ok "rc 2 message states submission was verified (text left the composer)" || bad "rc 2 message does not state submission was verified"
 
 # ---- _external_probe_configured: unset=1, usable=0, set-but-missing=2 (fail closed) ---------------
 ( _external_probe_configured ""; [ $? -eq 1 ] ) && ok "unset probe -> unset(1)" || bad "unset probe rc wrong"
