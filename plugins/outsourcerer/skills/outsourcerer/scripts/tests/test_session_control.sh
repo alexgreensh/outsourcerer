@@ -138,6 +138,33 @@ else
   bad "exit forced a kill or falsely verified (rc=$rc, kill=$KILL_CALLED)"
 fi
 
+# F4: a verified control exit is terminal lifecycle state, not only a pane receipt. It must end the
+# registry entry so heartbeat active-work and fleet observations stop waking on the dead delegate.
+(
+  set --
+  export OSRC_HOME="$TMP/control-exit-home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+  mkdir -p "$OSRC_HOME/sessions"
+  . "$SRC" >/dev/null 2>&1
+  SESSION_NAME=control-exit
+  jq -cn '{schema_version:"1",event:"start",session_id:"control-exit",provider:"devin",model:"glm",requested_model:"glm",resolved_model:"glm",model_generation:1,effort:"high",state:"running",receipt:"receipt",endpoint:"tmux:control-exit",harness_pid:null,pid_start:null,owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
+  EXITED=0
+  tmux() {
+    case "${1:-}" in
+      capture-pane) if [ "$EXITED" = 1 ]; then printf 'user@host:repo$\n'; else printf 'devin\n❯\n'; fi ;;
+      send-keys) case " $* " in *" C-d "*) EXITED=1 ;; esac ;;
+      *) return 0 ;;
+    esac
+  }
+  _endpoint_mutation_lock() { return 0; }
+  _endpoint_mutation_unlock() { return 0; }
+  _session_control_exit "$SESSION_NAME" devin >/dev/null 2>&1 || exit 1
+  last="$(jq -rs 'last' "$OSRC_SESSION_REGISTRY")"
+  [ "$(printf '%s' "$last" | jq -r '.event')" = end ] || exit 1
+  [ "$(printf '%s' "$last" | jq -r '.receipt')" = control-exit ] || exit 1
+  ! _heartbeat_interactive_work
+) && ok "control exit appends end and stops heartbeat active-work wakes" \
+  || bad "control exit returned without terminal registry state"
+
 # ---- relaunch (respawn-pane changes #{pane_pid}; new start record appended) --------------------
 # Fake tmux returns PID 11101 before respawn and 22202 after. respawn-pane flips the PID.
 PID_NOW=11101

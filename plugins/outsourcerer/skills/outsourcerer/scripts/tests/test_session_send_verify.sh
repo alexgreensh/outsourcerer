@@ -387,18 +387,20 @@ fi
 # ---- Codex approval menu: detection + label-based answering (format-agnostic across families) ---
 # Verified live: a Codex fix session sat blocked on its approval menu and supervision was blind to
 # it (the numbered "1. Yes, proceed" rows have no ❯ marker, and the "Press enter to confirm or esc
-# to cancel" footer was not in the detector). The default highlight is option 1 and plain Enter
-# selects it, so answering the default is Enter alone; a non-default option needs Up/Down nav.
+# to cancel" footer was not in the detector). The selected row is encoded by the terminal highlight,
+# so answering must begin from the detected row, not an assumed option 1.
 
 # Detection: a Codex fixture is detected as kind "codex" with its numbered options listed.
 CAPTURE_FILE="$TMP/codex-menu"; CLOSED=0
-printf 'Applying patch to src/main.rs\n1. Yes, proceed\n2. Yes, and don'"'"'t ask again for this project\n3. No, skip this command\nPress enter to confirm or esc to cancel\n' > "$CAPTURE_FILE"
+printf 'Applying patch to src/main.rs\n\033[7m1. Yes, proceed\033[0m\n  2. Yes, and don'"'"'t ask again for this project\n  3. No, skip this command\nPress enter to confirm or esc to cancel\n' > "$CAPTURE_FILE"
 tmux() { case "$1" in capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;; *) return 0 ;; esac; }
 out="$(_managed_menu_detect "$PANE")"
 k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
 [ "$k" = codex ] && ok "detect Codex approval menu (kind codex, not blind)" || bad "Codex menu not detected as codex ($k)"
-printf '%s\n' "$out" | grep -q '^OPT 1 Yes, proceed' && printf '%s\n' "$out" | grep -q '^OPT 2 Yes, and don'"'"'t ask again' \
+printf '%s\n' "$out" | grep -qE '^(SEL|OPT) 1 Yes, proceed' && printf '%s\n' "$out" | grep -qE '^(SEL|OPT) 2 Yes, and don'"'"'t ask again' \
   && ok "Codex report lists the numbered options by index + label" || bad "Codex report missing options: $out"
+printf '%s\n' "$out" | grep -q '^SEL 1 Yes, proceed' && [ "$(printf '%s\n' "$out" | grep -c '^SEL ')" = 1 ] \
+  && ok "Codex report identifies exactly one highlighted option" || bad "Codex report did not prove the highlighted option: $out"
 
 # Answering the DEFAULT (option 1, "Yes, proceed") -> Enter ALONE (no nav keys): the default
 # highlight is option 1 and plain Enter selects it.
@@ -435,6 +437,25 @@ if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Down' "$SEND_LOG" && grep -q '
   ok "answer Codex non-default by label 'don't ask again' -> 1 Down + Enter (label, not index)"
 else
   bad "answer Codex non-default failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# The highlighted row can be option 2. Selecting option 1 must navigate UP once; assuming option 1
+# as the starting point would press Enter on the wrong option.
+CAPTURE_FILE="$TMP/codex-selected-2"; CLOSED=0
+printf 'Applying patch to src/main.rs\n  1. Yes, proceed\n\033[7m2. Yes, and don'"'"'t ask again for this project\033[0m\n  3. No, skip this command\nPress enter to confirm or esc to cancel\n' > "$CAPTURE_FILE"
+SEND_LOG="$TMP/codex-selected-2-log"; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "Yes, proceed"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Up' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
+  ok "answer Codex from highlighted option 2 -> Up + Enter"
+else
+  bad "Codex highlighted-row navigation failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
 fi
 
 # A label that matches no option is refused, nothing typed.
@@ -509,6 +530,13 @@ if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv -l -- 2' "$SEND_LOG" && grep -
   ok "numbered menu accepts a label substring 'Commit' -> resolves to index 2 + Enter"
 else
   bad "numbered menu label match failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# LOW: selectors are literal substrings. A glob selector must not match every ordinary label.
+if _managed_label_contains_literal 'literal * option' '*' && ! _managed_label_contains_literal 'ordinary option' '*'; then
+  ok "menu label selectors treat glob characters literally"
+else
+  bad "menu label selector glob characters were interpreted as patterns"
 fi
 
 # ---- static: the dispatch wires menu refusal + the new rc messages + control/answer subcommands -

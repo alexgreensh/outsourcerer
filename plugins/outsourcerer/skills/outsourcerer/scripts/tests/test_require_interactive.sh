@@ -53,7 +53,7 @@ case "${1:-}" in
     ;;
   display-message)
     case "$*" in
-      *'#{pane_pid}'*) ps -o ppid= -p "$PPID" | tr -d ' ' ;;
+      *'#{pane_pid}'*) printf '%s\n' "$OSRC_FAKE_PANE_PID" ;;
       *'#{pane_current_command}'*) printf 'devin\n' ;;
     esac
     exit 0
@@ -79,6 +79,7 @@ echo "=== (a) Default OSRC_REQUIRE_INTERACTIVE=1 → interactive tmux, no bg job
     OSRC_HEARTBEAT_DISABLED=1 \
     OSRC_CATALOG_VALIDATE=0 \
     OUTSOURCERER_DEPTH=0 \
+    OSRC_FAKE_PANE_PID="$$" \
     OSRC_FAKE_TMUX_DIR="$RI_TMUX_A" \
     bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_RI/a-stderr" </dev/null)"
   RI_A_RC=$?

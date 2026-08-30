@@ -244,6 +244,38 @@ SH
 ) && ok "stale leader claim evicted (dead pid); live leader respected" \
   || bad "stale leader claim not evicted or live leader was evicted"
 
+# LOW: after spawning, an owner PID whose start identity cannot be read is unknown, not verified
+# live. _heartbeat_start must fail closed instead of accepting the unreadable identity.
+(
+  set --
+  export OSRC_HOME="$TMP/unreadable-owner-home" OSRC_HEARTBEAT="$TMP/unreadable-owner-home/heartbeat" OSRC_HEARTBEAT_DISABLED=0 OSRC_SOURCED=1
+  . "$SRC" >/dev/null 2>&1
+  _pid_start_identity() {
+    if [ "$1" = "$$" ]; then printf 'Mon Jan 1 00:00:00 2024\n'; return 0; fi
+    return 1
+  }
+  _heartbeat_leader_alive() { return 1; }
+  _heartbeat_leader_evict_stale() { return 0; }
+  fake="$TMP/unreadable-beacon"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+mkdir -p "$OSRC_HEARTBEAT/leader"
+printf '%s\n' "$$" > "$HB_CHILD_PID"
+jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" '{pid:$pid,pid_start:$start,token:"unreadable"}' > "$OSRC_HEARTBEAT/leader/owner.json"
+sleep 5
+SH
+  chmod +x "$fake"
+  export OSRC_HEARTBEAT_EXECUTABLE="$fake" OSRC_HEARTBEAT_START_TIMEOUT=1 HB_CHILD_PID="$TMP/unreadable-child-pid"
+  set +e
+  _heartbeat_start >/dev/null 2>&1
+  rc=$?
+  set -e
+  child="$(cat "$HB_CHILD_PID" 2>/dev/null || true)"
+  [ -n "$child" ] && kill "$child" 2>/dev/null || true
+  [ "$rc" -ne 0 ]
+) && ok "heartbeat spawn refuses an owner with unreadable pid_start" \
+  || bad "heartbeat spawn accepted an unreadable owner identity"
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

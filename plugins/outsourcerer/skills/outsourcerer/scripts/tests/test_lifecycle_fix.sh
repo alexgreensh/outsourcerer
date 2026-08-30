@@ -183,6 +183,49 @@ SH
 ) && ok "relaunch fails loudly and cleans up when registry persistence fails" \
   || bad "relaunch claimed success after registry persistence failure"
 
+# F6: effort relaunch must use the same finalizer as control relaunch. Otherwise respawn-pane -k
+# kills the old pane shell, leaves the old dead identity as the newest registry record, and the next
+# reap writes crash-reap over the live new engine.
+(
+  set --
+  export OSRC_HOME="$TMP/effort-relaunch-home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+  mkdir -p "$OSRC_HOME/sessions"
+  . "$SRC" >/dev/null 2>&1
+  SESSION_NAME=effort-relaunch
+  dead_pid=999999
+  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+  jq -cn --argjson pid "$dead_pid" '{schema_version:"1",event:"start",session_id:"effort-relaunch",provider:"codex",model:"sol",requested_model:"sol",resolved_model:"sol",model_generation:1,effort:"medium",state:"running",receipt:"receipt",endpoint:"tmux:effort-relaunch",harness_pid:($pid|tostring),pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
+  PANE_PID="${BASHPID:-$$}"
+  sleep 30 & NEW_PANE_PID=$!
+  trap 'kill "$NEW_PANE_PID" 2>/dev/null || true; wait "$NEW_PANE_PID" 2>/dev/null || true' EXIT
+  PID_NOW="$PANE_PID"
+  tmux() {
+    case "${1:-}" in
+      has-session) return 0 ;;
+      respawn-pane) PID_NOW="$NEW_PANE_PID"; return 0 ;;
+      display-message)
+        case " $* " in
+          *" #{pane_pid} "*) printf '%s\n' "$PID_NOW" ;;
+          *" #{pane_current_command} "*) printf 'codex\n' ;;
+          *) return 1 ;;
+        esac ;;
+      *) return 0 ;;
+    esac
+  }
+  _session_relaunch_command() { printf 'codex\n'; }
+  _session_launch_liveness_check() { return 0; }
+  _heartbeat_start() { return 0; }
+  _managed_endpoint_live() { return 0; }
+  _session_relaunch_effort codex sol high >/dev/null 2>&1 || exit 1
+  latest="$(jq -rs --arg id "$SESSION_NAME" '[.[] | select(.session_id==$id)] | sort_by(.ts) | last' "$OSRC_SESSION_REGISTRY")"
+  [ "$(printf '%s' "$latest" | jq -r '.event')" = start ] || exit 1
+  [ "$(printf '%s' "$latest" | jq -r '.model_generation')" = 2 ] || exit 1
+  _session_registry_reap_dead >/dev/null 2>&1
+  [ "$(jq -rs --arg id "$SESSION_NAME" '[.[] | select(.session_id==$id)] | sort_by(.ts) | last | .event' "$OSRC_SESSION_REGISTRY")" = start ] || exit 1
+  ! grep -q '"receipt":"crash-reap"' "$OSRC_SESSION_REGISTRY"
+) && ok "effort relaunch records a live generation before reap and remains steerable" \
+  || bad "effort relaunch left the old dead generation for the reaper"
+
 # Every non-start registry event must preserve the last known process identity.
 (
   set --

@@ -98,6 +98,40 @@ while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
 ) && ok "reap writes crash-reap for a dead harness and leaves a live one alone (idempotent)" \
   || bad "reap did not correctly end a dead harness / spare a live one"
 
+# F4: the pane_pid is the shell, not the delegate engine. If the engine child exits while that shell
+# remains alive, supervision must use the recorded engine identity and append crash-reap.
+(
+  set --
+  export OSRC_HOME="$TMP/engine-child-home" OSRC_SOURCED=1
+  mkdir -p "$OSRC_HOME/sessions"
+  . "$SRC" >/dev/null 2>&1
+  SESSION_NAME=engine-child
+  ENGINE_FILE="$TMP/engine-child-pid"
+  bash -c 'sleep 30 & printf "%s\n" "$!" > "$1"; wait' _ "$ENGINE_FILE" &
+  PANE_PID=$!
+  ENGINE_PID=""
+  while [ ! -s "$ENGINE_FILE" ] && [ -n "$PANE_PID" ]; do sleep 0.1; done
+  ENGINE_PID="$(cat "$ENGINE_FILE" 2>/dev/null || true)"
+  trap 'kill "$PANE_PID" "$ENGINE_PID" 2>/dev/null || true; wait "$PANE_PID" 2>/dev/null || true' EXIT
+  tmux() {
+    case "${1:-}" in
+      display-message) printf '%s\n' "$PANE_PID" ;;
+      *) return 0 ;;
+    esac
+  }
+  _session_registry_append start devin glm high running receipt glm 1 >/dev/null 2>&1 || exit 1
+  recorded="$(jq -rs 'last' "$OSRC_SESSION_REGISTRY")"
+  [ "$(printf '%s' "$recorded" | jq -r '.harness_pid')" = "$PANE_PID" ] || exit 1
+  [ "$(printf '%s' "$recorded" | jq -r '.engine_pid')" = "$ENGINE_PID" ] || exit 1
+  kill "$ENGINE_PID" 2>/dev/null || true
+  wait "$ENGINE_PID" 2>/dev/null || true
+  _session_registry_reap_dead >/dev/null 2>&1
+  last="$(jq -rs 'last' "$OSRC_SESSION_REGISTRY")"
+  [ "$(printf '%s' "$last" | jq -r '.event')" = end ] || exit 1
+  [ "$(printf '%s' "$last" | jq -r '.receipt')" = crash-reap ]
+) && ok "engine-child exit is reaped even while the pane shell remains alive" \
+  || bad "reaper trusted the live pane shell instead of the dead engine child"
+
 # ---------------------------------------------------------------------------
 # 3. The fleet reader DROPS a session whose harness_pid is provably dead, and KEEPS a live one.
 (

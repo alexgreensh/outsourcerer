@@ -2799,7 +2799,7 @@ _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] 
 
 _external_session_observations() { # <managed-job-items-json>
   have jq || return 1
-  local items="$1" id endpoint pid start lane requested resolved generation cc_session_id cc_pid registry_cwd observed
+  local items="$1" id endpoint pid start engine_pid engine_pid_start lane requested resolved generation cc_session_id cc_pid registry_cwd observed
   local source path name command
   # Registry entries prove ownership, not a live terminal state. Preserve the managed record as
   # an observation only when it is not already represented by a managed job.
@@ -2813,14 +2813,15 @@ _external_session_observations() { # <managed-job-items-json>
   # builtin, no spawn) per session to drop provably-dead harnesses BEFORE any per-session jq, so a
   # dead session costs nothing and a live one costs one observe + one item-build jq. A dead pid is
   # ended, not "unknown".
-  while IFS=$'\x1f' read -r id endpoint pid start lane requested resolved generation cc_session_id cc_pid registry_cwd; do
+  while IFS=$'\x1f' read -r id endpoint pid start engine_pid engine_pid_start lane requested resolved generation cc_session_id cc_pid registry_cwd; do
     [ -n "$id" ] || continue
     _external_session_id_valid "$id" || continue
-    _session_harness_alive "$pid" "$start" || continue
+    _session_engine_alive "$endpoint" "$pid" "$start" "$engine_pid" "$engine_pid_start" || continue
     observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
-    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$registry_cwd" --argjson model_generation "$generation" '
+    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$registry_cwd" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
        requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:(if $pid=="" then null else ($pid|tonumber? // null) end),pid_start:(if $start=="" then null else $start end),
+       engine_pid:(if $engine_pid=="" then null else ($engine_pid|tonumber? // null) end),engine_pid_start:(if $engine_pid_start=="" then null else $engine_pid_start end),
        started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
        task_summary:"managed session",last_receipt:null,source_generation:null,cwd:(if $cwd=="" then null else $cwd end),
        cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
@@ -2833,6 +2834,8 @@ _external_session_observations() { # <managed-job-items-json>
         endpoint: ($last.endpoint // ("tmux:" + ($last.session_id // ""))),
         harness_pid: ([$events[] | .harness_pid // empty] | last // ""),
         pid_start: ([$events[] | .pid_start // empty] | last // ""),
+        engine_pid: ([$events[] | .engine_pid // empty] | last // ""),
+        engine_pid_start: ([$events[] | .engine_pid_start // empty] | last // ""),
         lane: ($last.provider // ""),
         requested: ($last.requested_model // $last.model // ""),
         resolved: ($last.resolved_model // $last.model // ""),
@@ -2842,7 +2845,7 @@ _external_session_observations() { # <managed-job-items-json>
         cwd: ([$events[] | .cwd // empty] | last // "")
       })
     | map(select(.event != "end"))
-    | .[] | [ .session_id, .endpoint, (.harness_pid|tostring), .pid_start, .lane, .requested, .resolved, (.generation|tostring), .cc_session_id, (.cc_pid|tostring), .cwd ] | join("\u001f")')
+    | .[] | [ .session_id, .endpoint, (.harness_pid|tostring), .pid_start, (.engine_pid|tostring), .engine_pid_start, .lane, .requested, .resolved, (.generation|tostring), .cc_session_id, (.cc_pid|tostring), .cwd ] | join("\u001f")')
 
   # These sources are intentionally evidence-only. Their files, pane titles, and process names do
   # not establish ownership, activity, or an input-safe composer. Discovery is bounded to files
@@ -4282,16 +4285,18 @@ _heartbeat_interactive_work() {
   have jq || return 1
   [ -f "$OSRC_SESSION_REGISTRY" ] || return 1
   [ ! -L "$OSRC_SESSION_REGISTRY" ] || return 1
-  local id pid pid_start event
-  while IFS=$'\x1f' read -r id pid pid_start event; do
+  local id endpoint pid pid_start engine_pid engine_pid_start event
+  while IFS=$'\x1f' read -r id endpoint pid pid_start engine_pid engine_pid_start event; do
     [ -n "$id" ] || continue
     [ "$event" != end ] || continue
-    _session_harness_alive "$pid" "$pid_start" && return 0
+    _session_engine_alive "$endpoint" "$pid" "$pid_start" "$engine_pid" "$engine_pid_start" && return 0
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs '
     sort_by(.session_id, (.ts // "")) | group_by(.session_id)
     | map(sort_by(.ts // "") | last)
-    | .[] | [ (.session_id // ""), ((.harness_pid // "")|tostring), (.pid_start // ""),
-              (.event // "") ] | join("\u001f")' 2>/dev/null)
+    | .[] | [ (.session_id // ""), (.endpoint // ("tmux:" + (.session_id // ""))),
+              ((.harness_pid // "")|tostring), (.pid_start // ""),
+              ((.engine_pid // "")|tostring), (.engine_pid_start // ""), (.event // "") ]
+              | join("\u001f")' 2>/dev/null)
   return 1
 }
 
@@ -4311,6 +4316,62 @@ _session_harness_alive() { # <pid> <pid_start>
   live="$(_pid_start_identity "$pid" 2>/dev/null)"; rc=$?
   if [ "$rc" -eq 0 ] && [ "$live" != "$pid_start" ]; then return 1; fi
   return 0
+}
+
+_session_command_is_shell() { # <command>
+  local command="$1" name="${1##*/}"
+  name="${name%% *}"
+  case "$name" in
+    ''|bash|zsh|sh|dash|fish|ksh|tcsh|csh|-bash|-zsh|-sh|-dash|-fish|-ksh|-tcsh|-csh|login) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Find the delegate engine below the tmux pane shell. tmux's pane_pid identifies that shell, so it
+# stays live after a foreground engine exits. The launch commands here exec the provider directly
+# from that shell, making its first non-shell child the engine identity we need for reaping.
+_session_engine_pid() { # <pane> <harness-pid>
+  local pane="$1" harness_pid="$2" pid ppid command
+  case "$harness_pid" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS=' ' read -r pid ppid command; do
+    case "$pid:$ppid" in ''|*[!0-9:]*|*:|:*) continue ;; esac
+    [ "$ppid" = "$harness_pid" ] || continue
+    _session_command_is_shell "$command" && continue
+    printf '%s\n' "$pid"
+    return 0
+  done < <(ps -axo pid=,ppid=,command= 2>/dev/null)
+  return 1
+}
+
+# <endpoint> <harness-pid> <harness-start> [engine-pid] [engine-start] -> 0 when the actual
+# delegate is live. Older records have no engine identity, so use the pane's foreground command as
+# a conservative compatibility proof. An unreadable pane probe stays unknown/live; a proven shell
+# foreground command means the engine exited even though the pane shell itself survived.
+_session_engine_alive() { # <endpoint> <harness-pid> <harness-start> [engine-pid] [engine-start]
+  local endpoint="$1" harness_pid="$2" harness_start="$3" engine_pid="${4:-}" engine_start="${5:-}"
+  local pane current
+  if [ -n "$engine_pid" ]; then
+    _session_harness_alive "$engine_pid" "$engine_start" || return 1
+    return 0
+  fi
+  case "$endpoint" in
+    tmux:*)
+      pane="${endpoint#tmux:}"
+      if have tmux; then
+        current="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null)" || {
+          _session_harness_alive "$harness_pid" "$harness_start"
+          return $?
+        }
+        [ -n "$current" ] || {
+          _session_harness_alive "$harness_pid" "$harness_start"
+          return $?
+        }
+        _session_command_is_shell "$current" && return 1
+        return 0
+      fi
+      ;;
+  esac
+  _session_harness_alive "$harness_pid" "$harness_start"
 }
 
 # _heartbeat_leader_alive -> 0 if a verified-live beacon leader already holds the heartbeat,
@@ -4448,7 +4509,7 @@ _heartbeat_start() {
       if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && _pid_start_valid "$owner_start" && kill -0 "$owner_pid" 2>/dev/null; then
         live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
         live_rc=$?
-        if [ "$live_rc" -ne 0 ] || [ "$live_start" = "$owner_start" ]; then
+        if [ "$live_rc" -eq 0 ] && [ "$live_start" = "$owner_start" ]; then
           return 0
         fi
       fi
@@ -12457,9 +12518,33 @@ _managed_send_submitted() { # <pane> <typed-tail-snapshot>
 # label") and ❯-marked cursor lists are matched on the tail region only, so a menu buried in
 # scrollback history is not mistaken for a current prompt. Conservative: when in doubt, "none" (a
 # false "menu" would block a legitimate send).
+_managed_strip_ansi() {
+  local esc
+  esc="$(printf '\033')"
+  sed "s/$esc\\[[0-9;]*[[:alpha:]]//g"
+}
+
+_managed_line_selected() {
+  local line="$1" esc
+  case "$line" in *❯*) return 0 ;; esac
+  esc="$(printf '\033')"
+  printf '%s' "$line" | grep -Eq "$esc\\[([0-9]+;)*7(;[0-9]+)*m" && return 0
+  printf '%s' "$line" | grep -Eq "$esc\\[([0-9]+;)*(4[0-9]|48)(;[0-9]+)*m"
+}
+
+_managed_label_contains_literal() {
+  local label="$1" selector="$2"
+  [ -n "$selector" ] || return 1
+  printf '%s\n' "$label" | grep -F -q -- "$selector"
+}
+
 _managed_menu_detect() { # <pane>
-  local pane="$1" cap tail_region
-  cap="$(tmux capture-pane -t "$pane" -p 2>/dev/null)" || { printf 'MENU none\n'; return 0; }
+  local pane="$1" cap tail_region raw_cap raw_tail_region menu_tail
+  menu_tail="${OSRC_MENU_TAIL:-20}"
+  cap="$(tmux capture-pane -e -t "$pane" -p 2>/dev/null)" || { printf 'MENU none\n'; return 0; }
+  raw_cap="$cap"
+  cap="$(printf '%s\n' "$cap" | _managed_strip_ansi)"
+  raw_tail_region="$(printf '%s\n' "$raw_cap" | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")"
   tail_region="$(printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -n "${OSRC_MENU_TAIL:-20}")"
   [ -n "$tail_region" ] || { printf 'MENU none\n'; return 0; }
 
@@ -12470,16 +12555,12 @@ _managed_menu_detect() { # <pane>
     return 0
   fi
 
-  # Codex approval menu: numbered option rows ("1. Yes, proceed", "2. Yes, and don't ask again ...")
-  # plus the signature footer "Press enter to confirm or esc to cancel". The default highlight is
-  # option 1 and plain Enter selects it, so this is a cursor-like list whose default is position 1
-  # (not a type-the-number numbered menu). Detected BEFORE the generic numbered branch because a
-  # Codex approval menu can have a single numbered option (the generic branch requires >=2), and the
-  # footer is the reliable discriminator. Verified live: a Codex fix session sat blocked on this menu
-  # and supervision was blind to it (the footer + label were not in the classifier vocabulary).
+  # Codex approval menu: numbered option rows plus the signature footer. The selected row must be
+  # visible in the retained ANSI capture, so a plain option list cannot silently default to row 1.
+  # Detected BEFORE the generic numbered branch because a Codex approval menu can have one row.
   local codex_footer_re='Press enter to confirm or esc to cancel'
   if printf '%s\n' "$tail_region" | grep -Eq "$codex_footer_re"; then
-    local cnums ccount=0 cidx clab
+    local cnums ccount=0 cidx clab csel_count=0 csel_idx=0 clean_ln
     cnums="$(printf '%s\n' "$tail_region" | grep -E '^[[:space:]]*[0-9]+[.)][[:space:]]+')"
     if [ -n "$cnums" ]; then
       while IFS= read -r ln; do
@@ -12489,12 +12570,25 @@ _managed_menu_detect() { # <pane>
         [ -n "$cidx" ] && [ -n "$clab" ] && ccount=$((ccount + 1))
       done < <(printf '%s\n' "$cnums")
       if [ "$ccount" -ge 1 ]; then
+        while IFS= read -r ln; do
+          clean_ln="$(printf '%s\n' "$ln" | _managed_strip_ansi)"
+          cidx="$(printf '%s' "$clean_ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
+          clab="$(printf '%s' "$clean_ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
+          if [ -n "$cidx" ] && [ -n "$clab" ] && _managed_line_selected "$ln"; then
+            csel_count=$((csel_count + 1))
+            csel_idx="$cidx"
+          fi
+        done < <(printf '%s\n' "$raw_tail_region")
+      fi
+      if [ "$ccount" -ge 1 ] && [ "$csel_count" -eq 1 ]; then
         printf 'MENU codex\n'
         while IFS= read -r ln; do
           [ -n "$ln" ] || continue
           cidx="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
           clab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
-          [ -n "$cidx" ] && [ -n "$clab" ] && printf 'OPT %s %s\n' "$cidx" "$clab"
+          if [ -n "$cidx" ] && [ -n "$clab" ]; then
+            if [ "$cidx" = "$csel_idx" ]; then printf 'SEL %s %s\n' "$cidx" "$clab"; else printf 'OPT %s %s\n' "$cidx" "$clab"; fi
+          fi
         done < <(printf '%s\n' "$cnums")
         return 0
       fi
@@ -12596,7 +12690,7 @@ _managed_menu_answer() { # <pane> <selector>
           local _nidx=""
           while IFS= read -r line; do
             case "$line" in
-              OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) _nidx="${line#OPT }"; _nidx="${_nidx%% *}" ;; esac ;;
+              OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then _nidx="${line#OPT }"; _nidx="${_nidx%% *}"; fi ;;
             esac
           done < <(printf '%s\n' "$report")
           [ -n "$_nidx" ] || { echo "no numbered option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
@@ -12612,13 +12706,15 @@ _managed_menu_answer() { # <pane> <selector>
       # Enter selects it. Match the label, navigate from position 1 to the target with
       # Up/Down, then Enter (Enter alone if the target IS option 1). Navigation uses
       # standard TUI arrow keys; the default-option-1 + Enter path is the verified one.
-      target_pos=0; sel_pos=1
+      target_pos=0; sel_pos=0
       while IFS= read -r line; do
         case "$line" in
-          OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
+          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="$sel_pos"; fi ;;
+          OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="${line#OPT }"; target_pos="${target_pos%% *}"; fi ;;
         esac
       done < <(printf '%s\n' "$report")
       [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no codex option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected codex row found" >&2; _endpoint_mutation_unlock "$key"; return 1; }
       delta=$((target_pos - sel_pos))
       if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done
       elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done; fi
@@ -12628,8 +12724,8 @@ _managed_menu_answer() { # <pane> <selector>
       target_pos=0; sel_pos=0
       while IFS= read -r line; do
         case "$line" in
-          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="$sel_pos" ;; esac ;;
-          OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
+          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="$sel_pos"; fi ;;
+          OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="${line#OPT }"; target_pos="${target_pos%% *}"; fi ;;
         esac
       done < <(printf '%s\n' "$report")
       [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no cursor-list option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
@@ -12715,7 +12811,14 @@ _session_control_exit() { # <pane> <provider>
     bottom="$(printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -1)"
     trim="$(printf '%s' "$bottom" | sed -E 's/[[:space:]]+$//')"
     case "$trim" in
-      *[$%#]) printf 'receipt: exit sent; the delegate returned to a shell. Pane state: %s\n' "$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)"; return 0 ;;
+      *[$%#])
+        SESSION_NAME="$pane" _session_registry_end control-exit || {
+          printf 'receipt: exit sent, but the terminal registry event could not be persisted.\n' >&2
+          return 1
+        }
+        printf 'receipt: exit sent; the delegate returned to a shell. Pane state: %s\n' "$(printf '%s\n' "$cap" | _pane_state_classify 2>/dev/null)"
+        return 0
+        ;;
     esac
     sleep 0.1
     i=$((i + 1))
@@ -13239,7 +13342,7 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
 }
 
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation] [lock-held]
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" lock_held="${9:-0}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0 previous=""
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" lock_held="${9:-0}" now record pid="" pid_start="" engine_pid="" engine_pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0 previous=""
   local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd=""
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
@@ -13247,6 +13350,10 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
   if [ "$event" = start ]; then
     pid="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null)" || pid=""
     [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
+    if [ -n "$pid" ]; then
+      engine_pid="$(_session_engine_pid "$SESSION_NAME" "$pid" 2>/dev/null)" || engine_pid=""
+      [ -n "$engine_pid" ] && engine_pid_start="$(_pid_start_identity "$engine_pid" 2>/dev/null)" || engine_pid_start=""
+    fi
     physical_cwd="$(pwd -P 2>/dev/null || printf '%s' "$PWD")"
     case "$provider" in
       cc|claude)
@@ -13269,19 +13376,23 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
       [.[] | select(.session_id == $id)] | sort_by(.ts // "")
       | {pid: ([.[] | .harness_pid // empty] | last // ""),
          pid_start: ([.[] | .pid_start // empty] | last // ""),
+         engine_pid: ([.[] | .engine_pid // empty] | last // ""),
+         engine_pid_start: ([.[] | .engine_pid_start // empty] | last // ""),
          cwd: ([.[] | .cwd // empty] | last // ""),
          cc_session_id: ([.[] | .cc_session_id // empty] | last // ""),
          cc_pid: ([.[] | .cc_pid // empty] | last // "")}')" || return 1
     pid="$(printf '%s' "$previous" | jq -r '.pid // empty')"
     pid_start="$(printf '%s' "$previous" | jq -r '.pid_start // empty')"
+    engine_pid="$(printf '%s' "$previous" | jq -r '.engine_pid // empty')"
+    engine_pid_start="$(printf '%s' "$previous" | jq -r '.engine_pid_start // empty')"
     physical_cwd="$(printf '%s' "$previous" | jq -r '.cwd // empty')"
     cc_session_id="$(printf '%s' "$previous" | jq -r '.cc_session_id // empty')"
     cc_pid="$(printf '%s' "$previous" | jq -r '.cc_pid // empty')"
   fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
-    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$physical_cwd" --arg ts "$now" --argjson generation "$generation" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),cwd:(if $cwd=="" then null else $cwd end),owner:"managed",ts:$ts}')" || return 1
+    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$physical_cwd" --arg ts "$now" --argjson generation "$generation" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),engine_pid:(if $engine_pid=="" then null else $engine_pid end),engine_pid_start:(if $engine_pid_start=="" then null else $engine_pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),cwd:(if $cwd=="" then null else $cwd end),owner:"managed",ts:$ts}')" || return 1
   if [ "$lock_held" = 1 ]; then
     _state_append_locked "$OSRC_SESSION_REGISTRY" "$record"
   else
@@ -13289,12 +13400,12 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
   fi
 }
 
-# ---- session registry lifecycle: end events, dead-harness reap, crash-safe compaction --------
+# ---- session registry lifecycle: end events, dead-engine reap, crash-safe compaction -----------
 # The registry used to grow forever with `start`/`effort` events and ZERO `end` events: nothing
 # recorded a teardown on any path, so the fleet reader counted 150 provably-dead sessions as live
 # forever (the "+149 more" noise) and the beacon burned a core churning jq over them. The helpers
 # below close the lifecycle: an explicit `end` on `session stop`, a reap that writes `end` for any
-# harness whose pid is provably gone (the catch-all for natural exit, external kill, watchdog kill,
+# engine whose pid is provably gone (the catch-all for natural exit, external kill, watchdog kill,
 # cancel, and reboot — paths that run no outsourcerer code), and crash-safe compaction that keeps
 # only the last event per live session so the file stops appending forever.
 
@@ -13325,11 +13436,10 @@ _session_registry_end() { # <reason>
   _session_registry_append end "$provider" "$model" "$effort" ended "$reason" "$resolved" "$generation"
 }
 
-# Reap dead harnesses: for every session whose last event is NOT `end` and whose harness_pid is
-# provably gone, write an `end` event (reason crash-reap). This is the single teardown path that
-# covers every exit we cannot instrument directly — the tmux pane process finishing, a kill -9, a
-# machine reboot, a watchdog or cancel that tears down the harness without running our stop code.
-# A dead pid is ended, not unknown. Single jq grouping pass; liveness is the kill -0 builtin.
+# Reap dead engines: for every session whose last event is NOT `end` and whose engine is provably
+# gone, write an `end` event (reason crash-reap). The tmux pane shell can survive after its
+# foreground engine exits, so the engine identity is the liveness proof. Older records fall back
+# to the pane's foreground command. A dead engine is ended, not unknown.
 _session_registry_reap_one_if_current() { # <id> <pid> <pid-start> <generation>
   local id="$1" expected_pid="$2" expected_start="$3" expected_generation="$4"
   local latest event pid pid_start generation provider model effort resolved rc=0
@@ -13358,16 +13468,18 @@ _session_registry_reap_dead() {
   have jq || return 1
   [ -f "$OSRC_SESSION_REGISTRY" ] || return 0
   [ ! -L "$OSRC_SESSION_REGISTRY" ] || return 1
-  local id pid pid_start provider model effort resolved generation
-  while IFS=$'\x1f' read -r id pid pid_start provider model effort resolved generation; do
+  local id endpoint pid pid_start engine_pid engine_pid_start provider model effort resolved generation
+  while IFS=$'\x1f' read -r id endpoint pid pid_start engine_pid engine_pid_start provider model effort resolved generation; do
     [ -n "$id" ] || continue
-    _session_harness_alive "$pid" "$pid_start" && continue
+    _session_engine_alive "$endpoint" "$pid" "$pid_start" "$engine_pid" "$engine_pid_start" && continue
     _session_registry_reap_one_if_current "$id" "$pid" "$pid_start" "$generation" >/dev/null 2>&1 || true
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs '
     sort_by(.session_id, (.ts // "")) | group_by(.session_id)
     | map(sort_by(.ts // "") | last)
     | map(select(.event != "end"))
-    | .[] | [ (.session_id // ""), ((.harness_pid // "")|tostring), (.pid_start // ""),
+    | .[] | [ (.session_id // ""), (.endpoint // ("tmux:" + (.session_id // ""))),
+              ((.harness_pid // "")|tostring), (.pid_start // ""),
+              ((.engine_pid // "")|tostring), (.engine_pid_start // ""),
               (.provider // ""), (.model // ""), (.effort // ""),
               (.resolved_model // .model // ""), ((.model_generation // 1)|tostring) ] | join("\u001f")' 2>/dev/null)
 }
@@ -13644,10 +13756,13 @@ _cc_composer_empty() { # <tmux-pane>
 }
 
 _managed_endpoint_live() { # <session-id> <pane>
-  local session_id="$1" pane="$2" record pid start
+  local session_id="$1" pane="$2" record pid start engine_pid engine_start
   record="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -c --arg id "$session_id" 'select(.event=="start" and .session_id==$id and (.harness_pid|type)=="string" and (.pid_start|type)=="string")' | tail -1)" || return 1
   pid="$(printf '%s' "$record" | jq -r '.harness_pid // empty')"; start="$(printf '%s' "$record" | jq -r '.pid_start // empty')"
-  [ -n "$pid" ] && [ -n "$start" ] && _claimed_endpoint_live "$pane" "$pid" "$start"
+  engine_pid="$(printf '%s' "$record" | jq -r '.engine_pid // empty')"
+  engine_start="$(printf '%s' "$record" | jq -r '.engine_pid_start // empty')"
+  [ -n "$pid" ] && [ -n "$start" ] && _claimed_endpoint_live "$pane" "$pid" "$start" || return 1
+  _session_engine_alive "tmux:$pane" "$pid" "$start" "$engine_pid" "$engine_start"
 }
 
 _session_model_restore() { # <lane> <endpoint> <requested> <restore-id> <session-id>
@@ -13744,10 +13859,12 @@ _session_droid_effort_supported() {
 }
 
 _session_relaunch_effort() { # <provider> <model> <effort>
-  local provider="$1" model="$2" effort="$3" launch
-  launch="$(_session_relaunch_command "$provider" "$model" "$effort")" || return 1
-  tmux has-session -t "$SESSION_NAME" 2>/dev/null || return 1
-  tmux respawn-pane -k -t "$SESSION_NAME" "$launch" || return 1
+  local provider="$1" model="$2" effort="$3"
+  # Effort changes replace the pane process just like control relaunch. Reuse that complete
+  # lifecycle path so the new generation is proved live, persisted, supervised, and endpoint-verified
+  # before the caller records the effort event. A bare respawn leaves the old dead identity current,
+  # so the next registry reap can append crash-reap over the healthy replacement.
+  _session_control_relaunch "$SESSION_NAME" "$provider" "$model" "$effort" >/dev/null
 }
 
 # ---- interactive winpty session broker for Windows ----

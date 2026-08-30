@@ -7,7 +7,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 
 TMP="$(mktemp -d)"
 export HOME="$TMP/home"
-export OSRC_HOME="$TMP/state"
+export OSRC_HOME="$TMP/state" OSRC_SESSION_LIVENESS_SECS=0
 BIN="$TMP/bin"
 mkdir -p "$HOME" "$BIN"
 cleanup() { rm -rf "$TMP"; }
@@ -20,7 +20,16 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 cat > "$BIN/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TMUX_LOG"
-case "${1:-}" in has-session) exit 0 ;; esac
+case "${1:-}" in
+  has-session) exit 0 ;;
+  respawn-pane) printf '222\n' > "$TMUX_LOG.pid" ;;
+  display-message)
+    case " $* " in
+      *" #{pane_pid} "*) cat "$TMUX_LOG.pid" ;;
+      *" #{pane_current_command} "*) printf 'codex\n' ;;
+    esac
+    ;;
+esac
 exit 0
 EOF
 cat > "$BIN/droid" <<'EOF'
@@ -42,9 +51,11 @@ chmod +x "$BIN/tmux"
 chmod +x "$BIN/droid"
 export PATH="$BIN:$PATH"
 export TMUX_LOG="$TMP/tmux.log"
+printf '111\n' > "$TMUX_LOG.pid"
 
 set --
 . "$SRC" >/dev/null 2>&1
+_pid_start_identity() { printf 'Mon Jan 1 00:00:00 2024\n'; }
 trap cleanup EXIT
 
 SESSION_NAME=effort-test
