@@ -119,17 +119,19 @@ else
   no "droid adapter errored unexpectedly during the no-flag launch: $(cat "$TMP/err6" 2>/dev/null)"
 fi
 
-# --- 7. source-level: the liveness check is wired into session start AFTER send-keys and BEFORE
-#        the registry append, so a non-start is not recorded as a healthy session. Extract the
-#        session-start send-keys block and confirm the liveness call sits between send-keys and
-#        the registry append (ordering matters: a non-start must not be recorded as healthy). ---
-_block="$(awk '/tmux send-keys -t "\$SESSION_NAME" "export PATH/{f=1} f{print} /_session_registry_append start "\$PROVIDER"/{if(f)exit}' "$SRC")"
-if printf '%s\n' "$_block" | grep -q '_session_launch_liveness_check' \
+# --- 7. source-level: session start invokes the shared finalizer after send-keys, and the finalizer
+#        itself checks liveness before writing the registry start event. ---
+_block="$(awk '/tmux send-keys -t "\$SESSION_NAME" "export PATH/{f=1} f{print} /_session_launch_finalize "\$SESSION_NAME"/{if(f)exit}' "$SRC")"
+_finalizer="$(awk '/^_session_launch_finalize\(\)/,/^}/' "$SRC")"
+_live_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_launch_liveness_check' | head -1 | cut -d: -f1)"
+_registry_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_registry_append start' | head -1 | cut -d: -f1)"
+if printf '%s\n' "$_block" | grep -q '_session_launch_finalize' \
    && printf '%s\n' "$_block" | grep -q 'tmux send-keys' \
-   && printf '%s\n' "$_block" | grep -q '_session_registry_append start'; then
-  ok "liveness check wired into session start between send-keys and the registry append"
+   && printf '%s\n' "$_finalizer" | grep -q '_session_registry_append start' \
+   && [ -n "$_live_line" ] && [ -n "$_registry_line" ] && [ "$_live_line" -lt "$_registry_line" ]; then
+  ok "shared finalizer is wired into session start and checks liveness before registry append"
 else
-  no "liveness check not wired into session start before the registry append"
+  no "shared finalizer does not enforce liveness before the registry append"
 fi
 
 echo

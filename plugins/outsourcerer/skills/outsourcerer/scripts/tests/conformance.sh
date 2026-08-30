@@ -79,6 +79,7 @@ _ALL_SUITES="$_ALL_SUITES test_utf8_guard"
 _ALL_SUITES="$_ALL_SUITES test_supervise_pgroup_kill"
 _ALL_SUITES="$_ALL_SUITES test_session_model_pin_guard"
 _ALL_SUITES="$_ALL_SUITES test_session_exit_liveness"
+_ALL_SUITES="$_ALL_SUITES test_lifecycle_fix"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say

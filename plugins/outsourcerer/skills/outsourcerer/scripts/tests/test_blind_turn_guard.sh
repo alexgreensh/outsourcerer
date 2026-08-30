@@ -44,7 +44,7 @@ snapshot_with() { # <item-json>...
     items="$items$it"
   done
   items="$items]"
-  jq -cn --argjson items "$items" '{schema_version:"1",generation:"g",captured_at:"now",items:$items}'
+  jq -cn --argjson items "$items" '{schema_version:"1",generation:"g",captured_at:(now|todateiso8601),items:$items}'
 }
 
 # Item builders. The guard keys off .state (and .owner for the action wording).

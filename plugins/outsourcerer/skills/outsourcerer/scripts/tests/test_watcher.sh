@@ -115,9 +115,14 @@ OSRC_HOME="$old_home"
 awk '/^_bg_launch\(\)/,/^}/' "$SRC" | grep -q '_heartbeat_start' \
   && ok "successful background launches auto-arm heartbeat" \
   || bad "background launch does not auto-arm heartbeat"
-[ "$(grep -c '_heartbeat_start.*supervision state is unknown' "$SRC")" -ge 3 ] \
-  && ok "background and interactive launch paths share heartbeat auto-arm" \
-  || bad "one or more successful launch paths omit heartbeat auto-arm"
+if grep -q '_session_launch_finalize "\$_ad_sess"' "$SRC" \
+   && grep -q '_session_launch_finalize "\$SESSION_NAME"' "$SRC" \
+   && grep -q '_session_launch_finalize "\$pane"' "$SRC" \
+   && awk '/^_session_launch_finalize\(\)/,/^}/' "$SRC" | grep -q '_heartbeat_start'; then
+  ok "background and every interactive launch path share heartbeat auto-arm"
+else
+  bad "one or more successful launch paths omit shared heartbeat auto-arm"
+fi
 grep -q 'OSRC_HEARTBEAT_CADENCE:-300' "$SRC" \
   && ok "heartbeat cadence defaults to 300 seconds" \
   || bad "heartbeat cadence default is not 300 seconds"

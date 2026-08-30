@@ -51,6 +51,13 @@ case "${1:-}" in
     [ -n "${OSRC_FAKE_TMUX_FAIL_NEW:-}" ] && exit 1
     exit 0
     ;;
+  display-message)
+    case "$*" in
+      *'#{pane_pid}'*) ps -o ppid= -p "$PPID" | tr -d ' ' ;;
+      *'#{pane_current_command}'*) printf 'devin\n' ;;
+    esac
+    exit 0
+    ;;
   *)
     exit 0
     ;;

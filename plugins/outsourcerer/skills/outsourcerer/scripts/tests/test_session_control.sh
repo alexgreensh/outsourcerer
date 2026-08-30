@@ -28,6 +28,9 @@ PANE="sess-ctrl"
 # Shared stubs for the mutation lock (the control functions hold it around the keystroke).
 _endpoint_mutation_lock() { return 0; }
 _endpoint_mutation_unlock() { return 0; }
+# Relaunch lifecycle mechanics are isolated here. The launch finalizer has its own coverage.
+_heartbeat_start() { return 0; }
+_managed_endpoint_live() { return 0; }
 
 # ---- interrupt (cc/claude -> Escape; others -> C-c) --------------------------------------------
 # Before: a busy pane ("esc to interrupt"). After the keystroke: an idle prompt. The verify loop

@@ -2606,7 +2606,8 @@ _state_lock_acquire() {
   lock="$file.lock"
   _STATE_LOCK_KIND=""
   if command -v flock >/dev/null 2>&1; then
-    exec 9>>"$file" 2>/dev/null || return 1
+    [ ! -L "$lock" ] || return 1
+    exec 9>>"$lock" 2>/dev/null || return 1
     flock -w 5 9 2>/dev/null || { exec 9>&-; return 1; }
     _STATE_LOCK_KIND="flock"
     return 0
@@ -2627,6 +2628,20 @@ _state_lock_release() {
   _STATE_LOCK_KIND=""
 }
 
+_state_append_locked() {
+  local file="$1" record="$2" size rc=0
+  case "$file" in "$OSRC_HOME"/*.jsonl) ;; *) echo "ERROR: invalid state path" >&2; return 1 ;; esac
+  [ ! -L "$file" ] && [ ! -L "$file.lock" ] || { echo "ERROR: unsafe state path" >&2; return 1; }
+  have jq || { echo "ERROR: jq is required for state writes" >&2; return 1; }
+  printf '%s' "$record" | jq -e . >/dev/null 2>&1 || { echo "ERROR: invalid state record" >&2; return 1; }
+  size=$(printf '%s' "$record" | wc -c | tr -d ' ')
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$size" -le "${OSRC_STATE_RECORD_MAX:-8192}" ] || { echo "ERROR: state record exceeds limit" >&2; return 1; }
+  printf '%s\n' "$record" >> "$file" 2>/dev/null || rc=1
+  [ "$rc" -eq 0 ] && _state_sync "$file" || rc=1
+  return "$rc"
+}
+
 _state_append() {
   local file="$1" record="$2" size parent rc=0
   case "$file" in "$OSRC_HOME"/*.jsonl) ;; *) echo "ERROR: invalid state path" >&2; return 1 ;; esac
@@ -2641,8 +2656,7 @@ _state_append() {
   ( umask 077; : >> "$file" ) 2>/dev/null || { echo "ERROR: state file unavailable" >&2; return 1; }
   chmod 600 "$file" 2>/dev/null || true
   _state_lock_acquire "$file" || { echo "ERROR: state lock unavailable" >&2; return 1; }
-  printf '%s\n' "$record" >> "$file" 2>/dev/null || rc=1
-  [ "$rc" -eq 0 ] && _state_sync "$file" || rc=1
+  _state_append_locked "$file" "$record" || rc=1
   _state_lock_release "$file"
   [ "$rc" -eq 0 ] || { echo "ERROR: state append failed" >&2; return 1; }
 }
@@ -2812,6 +2826,7 @@ _external_session_observations() { # <managed-job-items-json>
     sort_by(.session_id, (.ts // "")) | group_by(.session_id)
     | map(. as $events | ($events | last) as $last | {
         session_id: ($last.session_id // ""),
+        event: ($last.event // ""),
         endpoint: ($last.endpoint // ("tmux:" + ($last.session_id // ""))),
         harness_pid: ([$events[] | .harness_pid // empty] | last // ""),
         pid_start: ([$events[] | .pid_start // empty] | last // ""),
@@ -2823,6 +2838,7 @@ _external_session_observations() { # <managed-job-items-json>
         cc_pid: ([$events[] | .cc_pid // empty] | last // ""),
         cwd: ([$events[] | .cwd // empty] | last // "")
       })
+    | map(select(.event != "end"))
     | .[] | [ .session_id, .endpoint, (.harness_pid|tostring), .pid_start, .lane, .requested, .resolved, (.generation|tostring), .cc_session_id, (.cc_pid|tostring), .cwd ] | join("\u001f")')
 
   # These sources are intentionally evidence-only. Their files, pane titles, and process names do
@@ -3704,6 +3720,15 @@ _fleet_snapshot_read() {
   cat "$OSRC_FLEET_SNAPSHOT"
 }
 
+_fleet_snapshot_fresh() { # <snapshot-json>
+  local snapshot="$1" max="${OSRC_BLIND_TURN_SNAPSHOT_MAX_AGE:-600}"
+  case "$max" in ''|*[!0-9]*) max=600 ;; esac
+  printf '%s' "$snapshot" | jq -e --argjson max "$max" '
+    (.captured_at | fromdateiso8601?) as $captured
+    | ($captured != null and ((now - $captured) >= 0) and ((now - $captured) <= $max))
+  ' >/dev/null 2>&1
+}
+
 _fleet_digest() {
   local snapshot="${1:-}" section filter
   [ -n "$snapshot" ] || snapshot="$(_fleet_snapshot_read)" || return 1
@@ -3905,6 +3930,7 @@ _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
 _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
   local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record
   if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
+    [ ! -L "$lock.flock" ] || return 1
     exec 8>"$lock.flock" 2>/dev/null || return 1
     flock -w 5 8 2>/dev/null || { exec 8>&-; return 1; }
     _HEARTBEAT_ELECTION_KIND=flock
@@ -4120,17 +4146,32 @@ _model_pin_enforce_item() { # <fleet-item> <snapshot-generation>
   printf '%s' "$item" | jq -c --arg requested "$requested" --arg observed "$observed" --arg result "$result" '. + {task_summary:("model drifted " + $requested + "->" + $observed),model_pin:{requested:$requested,observed:$observed,result:$result}}'
 }
 
+_heartbeat_housekeeping_failure() { # <operation> <path>
+  local operation="$1" path="$2"
+  printf 'outsourcerer: heartbeat housekeeping failed, operation=%s path=%s state=unknown\n' "$operation" "$path" >&2
+  _heartbeat_log_append "heartbeat housekeeping failed operation=$operation path=$path state=unknown" >/dev/null 2>&1 || true
+}
+
 _heartbeat_tick() {
-  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1 pinned_items='[]' pinned
+  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1 maintenance_ok=1 pinned_items='[]' pinned
   _obligation_recover_stranded >/dev/null 2>&1 || true
   # Session lifecycle housekeeping (P0): reap dead harnesses (writes the `end` event every
   # uninstrumented teardown leaves behind), then compact the registry + wake queues and rotate
   # the heartbeat log so none of them append forever. All are crash-safe and no-op below their
   # thresholds; ordering is reap-then-compact so ended sessions are written before they are dropped.
-  _session_registry_reap_dead >/dev/null 2>&1 || true
-  _session_registry_compact >/dev/null 2>&1 || true
-  _wake_queue_compact >/dev/null 2>&1 || true
-  _heartbeat_log_rotate >/dev/null 2>&1 || true
+  if ! _session_registry_reap_dead >/dev/null 2>&1; then
+    maintenance_ok=0; _heartbeat_housekeeping_failure registry-reap "$OSRC_SESSION_REGISTRY"
+  fi
+  if ! _session_registry_compact >/dev/null 2>&1; then
+    maintenance_ok=0; _heartbeat_housekeeping_failure registry-compact "$OSRC_SESSION_REGISTRY"
+  fi
+  if ! _wake_queue_compact >/dev/null 2>&1; then
+    maintenance_ok=0; _heartbeat_housekeeping_failure wake-queue-compact "$OSRC_WAKE_QUEUE"
+  fi
+  if ! _heartbeat_log_rotate >/dev/null 2>&1; then
+    maintenance_ok=0; _heartbeat_housekeeping_failure heartbeat-log-rotate "$OSRC_HEARTBEAT/heartbeat.log"
+  fi
+  [ "$maintenance_ok" -eq 1 ] || wake_ok=0
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   generation="$(printf '%s' "$snapshot" | jq -r '.generation // "unknown"')"
   if ! _fleet_snapshot_write "$snapshot"; then
@@ -4156,7 +4197,7 @@ _heartbeat_tick() {
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi
   render_cursor="$(_heartbeat_cursor_read render 2>/dev/null)"
-  [ "$render_cursor" != "$generation" ] || return "$((wake_ok == 1 ? 0 : 1))"
+  [ "$render_cursor" != "$generation" ] || return "$((wake_ok == 1 && maintenance_ok == 1 ? 0 : 1))"
   line="$(_heartbeat_line "$snapshot" 2>/dev/null)" || line='♥ working=0 blocked=0 unknown=1 landed=0'
   [ "$wake_ok" -eq 1 ] || line="$line state=unknown"
   _heartbeat_log_append "$line" || {
@@ -4297,14 +4338,29 @@ _heartbeat_leader_alive() {
 # provably dead (kill -0 fails), never when a live leader holds it. Called from _heartbeat_start
 # AFTER _heartbeat_leader_alive returns false, so a live leader is never touched.
 _heartbeat_leader_evict_stale() {
-  local owner="$OSRC_HEARTBEAT/leader/owner.json" leader="$OSRC_HEARTBEAT/leader" lp
-  [ -f "$owner" ] && [ ! -L "$owner" ] || return 0
-  [ ! -L "$leader" ] || return 0
-  lp="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 0
-  case "$lp" in ''|*[!0-9]*) return 0 ;; esac
-  # Provably dead: kill -0 fails. Evict the stale claim so a new beacon can claim cleanly.
-  kill -0 "$lp" 2>/dev/null && return 0
-  _heartbeat_remove_tree "$leader" 2>/dev/null || true
+  local owner="$OSRC_HEARTBEAT/leader/owner.json" leader="$OSRC_HEARTBEAT/leader" lp old_start
+  local lock="$OSRC_HEARTBEAT/.election" acquired=0 pid_start rc=0
+  if [ -z "${_HEARTBEAT_ELECTION_KIND:-}" ]; then
+    pid_start="$(_pid_start_identity "$$" 2>/dev/null)" || return 1
+    _heartbeat_election_acquire "$lock" "$$" "$pid_start" || return 1
+    acquired=1
+  fi
+  if [ ! -f "$owner" ] || [ -L "$owner" ] || [ -L "$leader" ]; then
+    [ "$acquired" -eq 1 ] && _heartbeat_election_release "$lock"
+    return 0
+  fi
+  lp="$(jq -er '.pid | tostring' "$owner" 2>/dev/null)" || rc=3
+  old_start="$(jq -er '.pid_start | strings | select(length > 0)' "$owner" 2>/dev/null)" || rc=3
+  [ "$rc" -ne 0 ] || _pid_start_valid "$old_start" || rc=3
+  if [ "$rc" -eq 0 ]; then
+    # The caller holds the election lock, so this liveness observation and the removal decision
+    # cannot race a new leader publishing a replacement owner.
+    kill -0 "$lp" 2>/dev/null || _heartbeat_remove_tree "$leader" 2>/dev/null || rc=1
+  fi
+  if [ "$acquired" -eq 1 ]; then
+    _heartbeat_election_release "$lock" || [ "$rc" -ne 0 ] || rc=1
+  fi
+  return "$rc"
 }
 
 _heartbeat_beacon() {
@@ -4336,30 +4392,70 @@ _heartbeat_beacon() {
 }
 
 _heartbeat_start() {
-  local token executable sink="${OSRC_HEARTBEAT_SINK:-}"
+  local token executable sink="${OSRC_HEARTBEAT_SINK:-}" lock="$OSRC_HEARTBEAT/.election"
+  local pid_start child_pid evict_rc owner_pid owner_start i timeout loops live_start live_rc
   [ "$OSRC_PLATFORM" != "windows" ] || return 1
   [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ] && return 0
   # The background status beacon auto-arms by default; opt out with OSRC_FLEET_SUPERVISION=0.
   [ "${OSRC_FLEET_SUPERVISION:-1}" = "1" ] || return 0
   _mkdir_private "$OSRC_HEARTBEAT" || return 1
+  pid_start="$(_pid_start_identity "$$" 2>/dev/null)" || return 1
+  _heartbeat_election_acquire "$lock" "$$" "$pid_start" || return 1
   # Single-instance: a verified-live leader means a beacon is already watching this home. Do not
   # spawn another — repeated `session start`/`bg` calls each used to fork a fresh beacon, and three
   # nested __heartbeat-beacon processes were observed alive at once. The election would eventually
   # serialize them, but each duplicate ran the full tick until it lost the claim.
-  _heartbeat_leader_alive && return 0
+  if _heartbeat_leader_alive; then
+    _heartbeat_election_release "$lock"
+    return 0
+  fi
   # Stale-claim eviction (BUG 2d): a beacon that died when its parent shell exited leaves
   # owner.json holding a dead pid. That stale claim can wedge _heartbeat_claim's reclaim path
   # (edge cases return 3 and exit without reclaiming), silently disabling supervision. Evict the
   # stale claim NOW, before spawning, so the new beacon finds no incumbent and claims cleanly.
-  # Safe because _heartbeat_leader_alive already returned false — a live leader is never touched.
-  _heartbeat_leader_evict_stale
+  # The election lock is held from the liveness read through this removal and the spawn.
+  _heartbeat_leader_evict_stale; evict_rc=$?
+  if [ "$evict_rc" -ne 0 ]; then
+    _heartbeat_election_release "$lock"
+    printf 'outsourcerer: heartbeat arm refused, incumbent ownership is not safely verifiable\n' >&2
+    return 1
+  fi
   if [ -z "$sink" ] && { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; }; then sink="/dev/tty"; fi
   token="$(_heartbeat_token)"
   executable="${OSRC_HEARTBEAT_EXECUTABLE:-$SCRIPT_PATH}"
-  [ -x "$executable" ] || return 1
+  if [ ! -x "$executable" ]; then
+    _heartbeat_election_release "$lock"
+    return 1
+  fi
   OSRC_HEARTBEAT_TOKEN="$token" OSRC_HEARTBEAT_SINK="$sink" \
     nohup "$executable" __heartbeat-beacon "$token" >/dev/null 2>&1 &
-  return 0
+  child_pid=$!
+  if ! _heartbeat_election_release "$lock"; then
+    kill "$child_pid" 2>/dev/null || true
+    return 1
+  fi
+  timeout="${OSRC_HEARTBEAT_START_TIMEOUT:-5}"
+  case "$timeout" in ''|*[!0-9]*) timeout=5 ;; esac
+  loops=$((timeout * 10))
+  i=0
+  while [ "$i" -lt "$loops" ]; do
+    if [ -f "$OSRC_HEARTBEAT/leader/owner.json" ] && [ ! -L "$OSRC_HEARTBEAT/leader/owner.json" ]; then
+      owner_pid="$(jq -er '.pid | tostring' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)" || owner_pid=""
+      owner_start="$(jq -er '.pid_start | strings | select(length > 0)' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)" || owner_start=""
+      if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && _pid_start_valid "$owner_start" && kill -0 "$owner_pid" 2>/dev/null; then
+        live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
+        live_rc=$?
+        if [ "$live_rc" -ne 0 ] || [ "$live_start" = "$owner_start" ]; then
+          return 0
+        fi
+      fi
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill "$child_pid" 2>/dev/null || true
+  printf 'outsourcerer: heartbeat arm failed, no valid live owner was confirmed\n' >&2
+  return 1
 }
 
 cmd_rundown() {
@@ -7575,7 +7671,12 @@ _autodetach_run() {
   if ! tmux new-session -d -s "$_ad_sess" -x 200 -y 50 -c "$PWD" 2>/dev/null; then
     die "auto-detach: tmux new-session failed for '$_ad_sess' (tmux server error or session name collision). Set OSRC_REQUIRE_INTERACTIVE=0 to allow the headless bg path, or check tmux."
   fi
-  tmux send-keys -t "$_ad_sess" "$_ad_full" Enter
+  if ! tmux send-keys -t "$_ad_sess" "$_ad_full" Enter; then
+    _session_launch_cleanup "$_ad_sess" send-failed
+    die "auto-detach: tmux send-keys failed for '$_ad_sess'; the interactive command was not submitted."
+  fi
+  _session_launch_finalize "$_ad_sess" "$PROVIDER" "$MODEL" "${EFFORT:-}" "$_ad_full" || \
+    die "auto-detach: interactive launch did not become a supervised live session."
   printf '>>> [auto-detach] non-interactive slow-lane run routed to INTERACTIVE tmux session (not headless bg).\n' >&2
   printf '>>>   session : %s\n' "$_ad_sess" >&2
   printf '>>>   WATCH  : tmux attach -t %s\n' "$_ad_sess" >&2
@@ -12555,7 +12656,7 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
   gen="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .model_generation // 1' | tail -1)"
   case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
   gen=$((gen + 1))
-  SESSION_NAME="$pane" _session_registry_append start "$prov" "$model" "$effort" started relaunch "" "$gen" || true
+  _session_launch_finalize "$pane" "$prov" "$model" "$effort" "$launch" "$gen" || return 1
   printf 'receipt: relaunch applied to %s (provider=%s, model=%s, effort=%s). New pane PID %s (was %s).\n' "$pane" "$prov" "$model" "${effort:-none}" "$pid_after" "$pid_before"
   return 0
 }
@@ -12950,6 +13051,39 @@ _session_launch_liveness_check() {
   return 1
 }
 
+_session_launch_cleanup() { # <session-id> <reason>
+  local sess="$1" reason="${2:-launch-failed}"
+  tmux kill-session -t "$sess" 2>/dev/null || true
+  SESSION_NAME="$sess" _session_registry_end "$reason" >/dev/null 2>&1 || true
+}
+
+_session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch> [generation]
+  local sess="$1" provider="$2" model="$3" effort="$4" launch="$5" generation="${6:-1}"
+  # This is the one completion gate for interactive launches. A receipt is emitted only after the
+  # provider stayed in the pane, its endpoint identity was persisted, heartbeat supervision armed,
+  # and the persisted identity still matches the pane.
+  if ! _session_launch_liveness_check "$sess" "$provider" "$launch"; then
+    _session_launch_cleanup "$sess" liveness-failed
+    return 1
+  fi
+  if ! SESSION_NAME="$sess" _session_registry_append start "$provider" "$model" "$effort" started launch "" "$generation"; then
+    _session_launch_cleanup "$sess" registry-failed
+    printf 'outsourcerer: interactive launch failed, could not persist the session registry record\n' >&2
+    return 1
+  fi
+  if ! _heartbeat_start >/dev/null 2>&1; then
+    _session_launch_cleanup "$sess" heartbeat-failed
+    printf 'outsourcerer: interactive launch failed, heartbeat supervision could not be armed\n' >&2
+    return 1
+  fi
+  if ! _managed_endpoint_live "$sess" "$sess"; then
+    _session_launch_cleanup "$sess" endpoint-failed
+    printf 'outsourcerer: interactive launch failed, the persisted endpoint identity did not match the pane\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 _session_effort_validate() {
   case "${1:-}" in
     minimal|low|medium|high|xhigh|max|none) return 0 ;;
@@ -12993,8 +13127,8 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
   printf '%s\n' "$best"
 }
 
-_session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation]
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0
+_session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation] [lock-held]
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" lock_held="${9:-0}" now record pid="" pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0 previous=""
   local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd=""
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
@@ -13015,12 +13149,33 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
         if [ -n "$cc_match" ]; then cc_session_id="${cc_match%%$'\t'*}"; cc_pid="${cc_match##*$'\t'}"; fi
         ;;
     esac
+  else
+    # Non-start events are terminal-state updates, not a new process identity. Coalesce the last
+    # non-null identity across the session's history so effort/end records cannot erase the
+    # liveness proof that reaping and heartbeat use. This also repairs registries written by older
+    # versions whose latest non-start event carried null identity fields.
+    previous="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs --arg id "$SESSION_NAME" '
+      [.[] | select(.session_id == $id)] | sort_by(.ts // "")
+      | {pid: ([.[] | .harness_pid // empty] | last // ""),
+         pid_start: ([.[] | .pid_start // empty] | last // ""),
+         cwd: ([.[] | .cwd // empty] | last // ""),
+         cc_session_id: ([.[] | .cc_session_id // empty] | last // ""),
+         cc_pid: ([.[] | .cc_pid // empty] | last // "")}')" || return 1
+    pid="$(printf '%s' "$previous" | jq -r '.pid // empty')"
+    pid_start="$(printf '%s' "$previous" | jq -r '.pid_start // empty')"
+    physical_cwd="$(printf '%s' "$previous" | jq -r '.cwd // empty')"
+    cc_session_id="$(printf '%s' "$previous" | jq -r '.cc_session_id // empty')"
+    cc_pid="$(printf '%s' "$previous" | jq -r '.cc_pid // empty')"
   fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
     --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$physical_cwd" --arg ts "$now" --argjson generation "$generation" \
     '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),cwd:(if $cwd=="" then null else $cwd end),owner:"managed",ts:$ts}')" || return 1
-  _state_append "$OSRC_SESSION_REGISTRY" "$record"
+  if [ "$lock_held" = 1 ]; then
+    _state_append_locked "$OSRC_SESSION_REGISTRY" "$record"
+  else
+    _state_append "$OSRC_SESSION_REGISTRY" "$record"
+  fi
 }
 
 # ---- session registry lifecycle: end events, dead-harness reap, crash-safe compaction --------
@@ -13064,6 +13219,30 @@ _session_registry_end() { # <reason>
 # covers every exit we cannot instrument directly — the tmux pane process finishing, a kill -9, a
 # machine reboot, a watchdog or cancel that tears down the harness without running our stop code.
 # A dead pid is ended, not unknown. Single jq grouping pass; liveness is the kill -0 builtin.
+_session_registry_reap_one_if_current() { # <id> <pid> <pid-start> <generation>
+  local id="$1" expected_pid="$2" expected_start="$3" expected_generation="$4"
+  local latest event pid pid_start generation provider model effort resolved rc=0
+  _state_lock_acquire "$OSRC_SESSION_REGISTRY" || return 1
+  latest="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -cs --arg id "$id" '
+    [.[] | select(.session_id == $id)] | sort_by(.ts // "") | last // empty')" || rc=1
+  if [ "$rc" -eq 0 ] && [ -n "$latest" ]; then
+    event="$(printf '%s' "$latest" | jq -r '.event // empty')"
+    pid="$(printf '%s' "$latest" | jq -r '.harness_pid // empty')"
+    pid_start="$(printf '%s' "$latest" | jq -r '.pid_start // empty')"
+    generation="$(printf '%s' "$latest" | jq -r '.model_generation // 1')"
+    if [ "$event" != end ] && [ "$pid" = "$expected_pid" ] && [ "$pid_start" = "$expected_start" ] \
+       && [ "$generation" = "$expected_generation" ]; then
+      provider="$(printf '%s' "$latest" | jq -r '.provider // empty')"
+      model="$(printf '%s' "$latest" | jq -r '.model // .requested_model // empty')"
+      effort="$(printf '%s' "$latest" | jq -r '.effort // empty')"
+      resolved="$(printf '%s' "$latest" | jq -r '.resolved_model // .model // empty')"
+      SESSION_NAME="$id" _session_registry_append end "$provider" "$model" "$effort" ended crash-reap "$resolved" "$generation" 1 || rc=1
+    fi
+  fi
+  _state_lock_release "$OSRC_SESSION_REGISTRY"
+  return "$rc"
+}
+
 _session_registry_reap_dead() {
   have jq || return 1
   [ -f "$OSRC_SESSION_REGISTRY" ] || return 0
@@ -13072,7 +13251,7 @@ _session_registry_reap_dead() {
   while IFS=$'\x1f' read -r id pid pid_start provider model effort resolved generation; do
     [ -n "$id" ] || continue
     _session_harness_alive "$pid" "$pid_start" && continue
-    SESSION_NAME="$id" _session_registry_append end "$provider" "$model" "$effort" ended crash-reap "$resolved" "$generation" >/dev/null 2>&1 || true
+    _session_registry_reap_one_if_current "$id" "$pid" "$pid_start" "$generation" >/dev/null 2>&1 || true
   done < <(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs '
     sort_by(.session_id, (.ts // "")) | group_by(.session_id)
     | map(sort_by(.ts // "") | last)
@@ -13419,12 +13598,13 @@ _model_pin_restore_allowed() { # <session-id> <generation>
 }
 
 _session_relaunch_command() { # <provider> <model> <effort>
-  local provider="$1" model="$2" effort="$3" cid tokens
+  local provider="$1" model="$2" effort="$3" cid tokens code_mode_host
   case "$provider" in
     codex|cx)
       cid="$(resolve_model_row "$model")"; cid="${cid%%|*}"; [ -n "$cid" ] || cid="$model"
       _validate_model_token "$cid"
-      printf 'codex -m %q -s workspace-write -c model_reasoning_effort=%q' "$cid" "$effort"
+      code_mode_host="$(_codex_code_mode_host_flag)" || return 1
+      printf 'codex -m %q -s workspace-write -c features.code_mode_host=%q -c model_reasoning_effort=%q' "$cid" "$code_mode_host" "$effort"
       ;;
     cc|claude)
       tokens="$(_effort_thinking_tokens "$effort")"
@@ -13727,19 +13907,15 @@ session() {
         echo "Session '$SESSION_NAME' was created concurrently (name derives from \$PWD + Claude session; a parallel 'session start' in this same context won the race). Reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
         return 4
       fi
-      tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter
-      # LIVENESS: confirm the engine STAYED UP rather than exiting to a bare shell. Catches the
-      # droid -r/resume bug class (an engine that exits 0 silently is NOT a started session) and
-      # any future flag that means something different in interactive mode. Bounded; opt out with
-      # OSRC_SESSION_LIVENESS_SECS=0. Run BEFORE the registry append so a non-start is not recorded
-      # as a healthy session start. Does not touch heartbeat/send/turn-end.
-      if ! _session_launch_liveness_check "$SESSION_NAME" "$PROVIDER" "$launch"; then
-        die "session start: $PROVIDER interactive launch did not stay up (bare shell after the liveness budget). See the message above."
+      if ! tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter; then
+        _session_launch_cleanup "$SESSION_NAME" send-failed
+        die "session start: tmux send-keys failed; the interactive command was not submitted."
       fi
-      _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
+      # The shared finalizer verifies liveness, persistence, supervision, and endpoint identity.
+      _session_launch_finalize "$SESSION_NAME" "$PROVIDER" "$MODEL" "${EFFORT:-}" "$launch" || \
+        die "session start: interactive launch did not become a supervised live session."
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session answer [y|n|<i>|<label>]   |   $0 session control <interrupt|exit|relaunch>   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
-      _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
@@ -13937,6 +14113,10 @@ _blind_turn_guard() {
   have jq || return 0
   local snapshot needs
   snapshot="$(_fleet_snapshot_read 2>/dev/null)" || return 0   # no view yet -> heartbeat owns collection
+  if ! _fleet_snapshot_fresh "$snapshot"; then
+    printf '>>> [outsourcerer] blind-turn guard: fleet snapshot freshness is UNKNOWN, so stale blocked state was not used. Refresh supervision before relying on this view.\n' >&2
+    return 0
+  fi
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
   needs="$(printf '%s' "$snapshot" | jq -r '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
