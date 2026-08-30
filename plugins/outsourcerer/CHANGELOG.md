@@ -2,6 +2,24 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.1
+
+A supervision-hardening release: every path that could report a delegate as launched, steered, or watched while it was actually stalled, unsupervised, or on the wrong model is now closed. Found and fixed through an adversarial multi-agent review of the 0.10.0 supervision code, with a regression test for each finding.
+
+### Fixed
+
+- **A missing terminal no longer means nobody is watching.** Inside an agent harness there is no TTY, so slow-lane delegations were auto-detached to a headless background job even though a supervisor was present. They now run as steerable interactive sessions, and a lane that cannot honor an explicit model choice refuses loudly instead of silently running its default.
+- **The droid interactive lane no longer bills the wrong model.** Interactive `droid` ignores `--model` (it exists only under `droid exec`) and reads `-r` as `--resume`, not reasoning effort — so a pinned model fell through to droid's default and an effort flag silently resumed a phantom session. Both are now refused with a clear reason, pointing at the exec path where the flags work.
+- **`session send` proves delivery.** A prompt that was typed but never submitted, or a pane that could not be read back, is no longer reported as sent; capture failure and unrelated pane redraws can no longer forge a submission. Lifecycle control (`interrupt`/`exit`/`relaunch`) is now a separate plane from message text, and interactive approval menus — including the numbered Codex style — are detected and answered by option label.
+- **The heartbeat keeps beating for interactive work and can't be wedged.** An interactive-only fleet now keeps the beacon alive; a leader record left by a dead process, including a malformed one, is recovered instead of blocking every future beacon; and heartbeat housekeeping failures surface instead of being swallowed.
+- **The session registry records ends and never reaps a live session.** Every teardown path writes an end event, a dead session is dropped from supervision by process-liveness (not guesswork), non-start events keep the engine identity, and the dead-session reaper re-checks generation under lock so it can never end a session that was just relaunched. Engine liveness is tracked rather than the shell it runs in, and `session control exit` writes a terminal end.
+- **A turn can't end blind.** A guard refuses to end while live delegated work is waiting on you, and distinguishes a delegate that is blocked-awaiting-input from one that is merely quiet — using only fresh fleet state, never an arbitrarily stale snapshot.
+- **Codex file reads no longer fail closed.** When the code-mode host binary is present, it is enabled explicitly so a stale local setting can't make every shell and file tool fail.
+
+### Housekeeping
+
+- Version reporting aligned to 0.10.1. Conformance suite expanded to cover each of the above.
+
 ## 0.10.0
 
 Five community contributions add new ways to route work, more precise model selection, and more resilient long-running jobs. Thank you to everyone who contributed.
