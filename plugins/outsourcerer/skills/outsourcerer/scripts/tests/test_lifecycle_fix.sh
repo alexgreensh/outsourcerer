@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression coverage for the 0.10.1 lifecycle / registry / heartbeat torture findings.
+# Regression coverage for the 0.10.1 lifecycle / registry / heartbeat supervision fixes.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
