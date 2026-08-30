@@ -99,4 +99,32 @@ else
   bad "session read --state capture failure returned rc=$rc or invalid/non-unknown JSON: $sj"
 fi
 
+# 10. Codex approval menu -> waiting-approval. Verified live: a Codex fix session sat blocked on
+#     this menu and supervision was blind to it (the footer + label were not in the vocabulary),
+#     stalling silently for 16 minutes. The numbered "1. Yes, proceed" rows have NO ❯ marker, so the
+#     old ❯-keyed pattern missed them; the "Press enter to confirm or esc to cancel" footer is the
+#     reliable Codex signature.
+codex_ap='Applying patch to src/main.rs
+1. Yes, proceed
+2. Yes, and don'"'"'t ask again for this project
+3. No, skip this command
+Press enter to confirm or esc to cancel'
+[ "$(state_of "$codex_ap")" = "waiting-approval" ] && ok "Codex approval menu -> waiting-approval" || bad "Codex approval menu misclassified (blind to the footer)"
+
+# 10b. A single-option Codex approval (just "1. Yes, proceed" + footer) is still waiting-approval.
+codex_one='Running: rm -rf target/
+1. Yes, proceed
+Press enter to confirm or esc to cancel'
+[ "$(state_of "$codex_one")" = "waiting-approval" ] && ok "single-option Codex approval -> waiting-approval" || bad "single-option Codex approval misclassified"
+
+# 11. Claude/Devin approval menu with a scoped-allow option -> waiting-approval (the scoped
+#     "always allow ... in <proj>" label is the Claude/Devin approval signature; the ❯-marked row
+#     is already covered by the existing pattern, this confirms the scoped-allow variant). Real
+#     Claude/Devin menus use ARROW-MARKER rows (❯) WITHOUT numbers (unlike Codex's numbered rows).
+claude_ap='Claude Code wants to run: bash test.sh
+❯ Approve once
+  always allow bash test.sh in /home/user/repo
+  No, don'"'"'t run this command'
+[ "$(state_of "$claude_ap")" = "waiting-approval" ] && ok "Claude/Devin scoped-allow approval -> waiting-approval" || bad "Claude/Devin scoped-allow approval misclassified"
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

@@ -384,6 +384,133 @@ else
   bad "menu answer happy path broken (rc=$rc, lock=$LOCK_ACQUIRED/$LOCK_RELEASED)"
 fi
 
+# ---- Codex approval menu: detection + label-based answering (format-agnostic across families) ---
+# Verified live: a Codex fix session sat blocked on its approval menu and supervision was blind to
+# it (the numbered "1. Yes, proceed" rows have no ❯ marker, and the "Press enter to confirm or esc
+# to cancel" footer was not in the detector). The default highlight is option 1 and plain Enter
+# selects it, so answering the default is Enter alone; a non-default option needs Up/Down nav.
+
+# Detection: a Codex fixture is detected as kind "codex" with its numbered options listed.
+CAPTURE_FILE="$TMP/codex-menu"; CLOSED=0
+printf 'Applying patch to src/main.rs\n1. Yes, proceed\n2. Yes, and don'"'"'t ask again for this project\n3. No, skip this command\nPress enter to confirm or esc to cancel\n' > "$CAPTURE_FILE"
+tmux() { case "$1" in capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;; *) return 0 ;; esac; }
+out="$(_managed_menu_detect "$PANE")"
+k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
+[ "$k" = codex ] && ok "detect Codex approval menu (kind codex, not blind)" || bad "Codex menu not detected as codex ($k)"
+printf '%s\n' "$out" | grep -q '^OPT 1 Yes, proceed' && printf '%s\n' "$out" | grep -q '^OPT 2 Yes, and don'"'"'t ask again' \
+  && ok "Codex report lists the numbered options by index + label" || bad "Codex report missing options: $out"
+
+# Answering the DEFAULT (option 1, "Yes, proceed") -> Enter ALONE (no nav keys): the default
+# highlight is option 1 and plain Enter selects it.
+SEND_LOG="$TMP/codex-default"; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_endpoint_mutation_lock() { return 0; }
+_endpoint_mutation_unlock() { return 0; }
+_managed_menu_answer "$PANE" "Yes, proceed"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG" && ! grep -qE 'send-keys -t sess-sv (Up|Down)' "$SEND_LOG"; then
+  ok "answer Codex default 'Yes, proceed' -> Enter alone (no nav), menu closes"
+else
+  bad "answer Codex default failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# Answering a NON-DEFAULT option by LABEL ("don't ask again" = option 2) -> 1 Down + Enter. This is
+# the format-agnostic guarantee: the two families order options differently, so the label (not a
+# row index) picks the right one.
+CLOSED=0; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "don't ask again"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Down' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
+  ok "answer Codex non-default by label 'don't ask again' -> 1 Down + Enter (label, not index)"
+else
+  bad "answer Codex non-default failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# A label that matches no option is refused, nothing typed.
+CLOSED=0; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) cat "$CAPTURE_FILE" ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG" ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "nonsense label"; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ] && ok "Codex answer with no label match -> refused, nothing typed" || bad "Codex no-match typed something (rc=$rc)"
+
+# ---- Claude/Devin approval menu: ❯-marked cursor list, answered by label (Approve once / scoped) -
+# Claude/Devin approval menus use ARROW-MARKER rows (❯) WITHOUT numbers (unlike Codex's numbered
+# rows), so the cursor branch detects them. The ❯ marks the default ("Approve once").
+CAPTURE_FILE="$TMP/claude-menu"; CLOSED=0
+printf 'Claude Code wants to run: bash test.sh\n❯ Approve once\n  always allow bash test.sh in /home/user/repo\n  No, don'"'"'t run this command\n' > "$CAPTURE_FILE"
+tmux() { case "$1" in capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;; *) return 0 ;; esac; }
+out="$(_managed_menu_detect "$PANE")"
+k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
+[ "$k" = cursor ] && ok "detect Claude/Devin approval menu (kind cursor)" || bad "Claude/Devin approval not detected as cursor ($k)"
+printf '%s\n' "$out" | grep -q '^SEL 1 Approve once' && printf '%s\n' "$out" | grep -q '^OPT 2 always allow' \
+  && ok "Claude/Devin report marks the ❯ default + lists the scoped-allow option" || bad "Claude/Devin report wrong: $out"
+
+# Answer "Approve once" (the ❯ default, position 1) -> Enter alone (already on it, delta 0).
+SEND_LOG="$TMP/claude-approve"; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "Approve once"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG" && ! grep -qE 'send-keys -t sess-sv (Up|Down)' "$SEND_LOG"; then
+  ok "answer Claude/Devin default 'Approve once' -> Enter alone (already on the ❯ row)"
+else
+  bad "answer Claude/Devin default failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# Answer the scoped-allow by label ("always allow" = position 2) -> 1 Down + Enter.
+CLOSED=0; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "always allow"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Down' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
+  ok "answer Claude/Devin scoped-allow by label 'always allow' -> 1 Down + Enter"
+else
+  bad "answer Claude/Devin scoped-allow failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
+# ---- numbered menu now accepts a LABEL substring too (format-agnostic, not just a row index) -----
+CAPTURE_FILE="$TMP/num-label"; printf '1. Run tests\n2. Commit\n3. Cancel\n' > "$CAPTURE_FILE"; CLOSED=0
+SEND_LOG="$TMP/num-lbl"; : > "$SEND_LOG"
+tmux() {
+  case "$1" in
+    capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\n'; else cat "$CAPTURE_FILE"; fi ;;
+    send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; case " $* " in *" Enter "*) CLOSED=1 ;; esac ;;
+    *) return 0 ;;
+  esac
+}
+_managed_menu_answer "$PANE" "Commit"; rc=$?
+# "Commit" is option 2 -> types "2" + Enter (numbered menus select by typing the index).
+if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv -l -- 2' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
+  ok "numbered menu accepts a label substring 'Commit' -> resolves to index 2 + Enter"
+else
+  bad "numbered menu label match failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+fi
+
 # ---- static: the dispatch wires menu refusal + the new rc messages + control/answer subcommands -
 grep -q 'session send refused: the pane is showing an interactive choice menu' "$SRC" && ok "send refuses helpfully on a menu pane" || bad "no helpful menu refusal in send"
 grep -q 'Use '"'"'session answer'"'"' to select an option' "$SRC" && ok "send refusal names session answer" || bad "send refusal does not name session answer"

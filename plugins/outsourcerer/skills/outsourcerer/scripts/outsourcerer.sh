@@ -2734,7 +2734,10 @@ _pane_state_classify() {
   # (the cc /model picker's "Switch model?"/"Yes, switch to", the [y/N] consent prompts
   # the cloud/route gates use, and "requires confirmation" from the print-mode hang
   # detector). Matched on the tail only — a buried prompt is not a current block.
-  local approval_re='(\[y/N\]|\(y/n\)|Do you want to (proceed|continue)|❯[[:space:]]*[0-9]+\.[[:space:]]*Yes|Allow\?|approve|requires confirmation|Switch model\?|Yes, switch to|proceed\?)'
+  # Codex approval menus show numbered "1. Yes, proceed" rows WITHOUT a ❯ marker plus a
+  # "Press enter to confirm or esc to cancel" footer — both are listed so a Codex delegate
+  # parked on its approval menu is flagged waiting-approval (not silently stalled).
+  local approval_re='(\[y/N\]|\(y/n\)|Do you want to (proceed|continue)|❯[[:space:]]*[0-9]+\.[[:space:]]*Yes|Allow\?|approve|requires confirmation|Switch model\?|Yes, switch to|proceed\?|Yes, proceed|Press enter to confirm or esc to cancel)'
   if evidence="$(printf '%s\n' "$tail_region" | grep -Ei "$approval_re" | tail -1)" && [ -n "$evidence" ]; then
     _pane_state_json waiting-approval "$evidence"; return 0
   fi
@@ -12366,6 +12369,37 @@ _managed_menu_detect() { # <pane>
     return 0
   fi
 
+  # Codex approval menu: numbered option rows ("1. Yes, proceed", "2. Yes, and don't ask again ...")
+  # plus the signature footer "Press enter to confirm or esc to cancel". The default highlight is
+  # option 1 and plain Enter selects it, so this is a cursor-like list whose default is position 1
+  # (not a type-the-number numbered menu). Detected BEFORE the generic numbered branch because a
+  # Codex approval menu can have a single numbered option (the generic branch requires >=2), and the
+  # footer is the reliable discriminator. Verified live: a Codex fix session sat blocked on this menu
+  # and supervision was blind to it (the footer + label were not in the classifier vocabulary).
+  local codex_footer_re='Press enter to confirm or esc to cancel'
+  if printf '%s\n' "$tail_region" | grep -Eq "$codex_footer_re"; then
+    local cnums ccount=0 cidx clab
+    cnums="$(printf '%s\n' "$tail_region" | grep -E '^[[:space:]]*[0-9]+[.)][[:space:]]+')"
+    if [ -n "$cnums" ]; then
+      while IFS= read -r ln; do
+        [ -n "$ln" ] || continue
+        cidx="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
+        clab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
+        [ -n "$cidx" ] && [ -n "$clab" ] && ccount=$((ccount + 1))
+      done < <(printf '%s\n' "$cnums")
+      if [ "$ccount" -ge 1 ]; then
+        printf 'MENU codex\n'
+        while IFS= read -r ln; do
+          [ -n "$ln" ] || continue
+          cidx="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*([0-9]+)[.)][[:space:]]+.*/\1/')"
+          clab="$(printf '%s' "$ln" | sed -E 's/^[[:space:]]*[0-9]+[.)][[:space:]]+//')"
+          [ -n "$cidx" ] && [ -n "$clab" ] && printf 'OPT %s %s\n' "$cidx" "$clab"
+        done < <(printf '%s\n' "$cnums")
+        return 0
+      fi
+    fi
+  fi
+
   # Numbered options. Require >=2 numbered rows so a single numbered prose line is not mistaken for
   # a menu.
   local nums count=0 idx lab
@@ -12419,7 +12453,9 @@ _managed_menu_detect() { # <pane>
   printf 'MENU none\n'
 }
 
-# Answer a detected menu. <pane> <selector>: y|n|yes|no (consent), a numeric index (numbered), or a
+# Answer a detected menu. <pane> <selector>: y|n|yes|no (consent), a numeric index OR a label
+# substring (numbered — the two provider families order options differently, so match the label),
+# a label substring (codex — navigate from the option-1 default to the match, then Enter), or a
 # label substring (cursor — navigate Up/Down from the ❯ row to the match, then Enter). Verifies the
 # menu closed (a follow-up detect returns "none"). 0 = answered + verified closed; 1 = could not
 # answer or the menu did not close. Sends ONLY the answer keys, never chat.
@@ -12450,16 +12486,48 @@ _managed_menu_answer() { # <pane> <selector>
       tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
     numbered)
-      case "$sel" in *[!0-9]*) echo "numbered menu needs a numeric index" >&2; _endpoint_mutation_unlock "$key"; return 1 ;; esac
+      # Format-agnostic: accept EITHER a numeric index (backward compat) OR a label
+      # substring. The two provider families order options differently, so a hardcoded
+      # row index picks the wrong option across families; matching the label is safe.
+      case "$sel" in
+        *[!0-9]*)
+          # Label substring: resolve to the matching option's index, then type it.
+          local _nidx=""
+          while IFS= read -r line; do
+            case "$line" in
+              OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) _nidx="${line#OPT }"; _nidx="${_nidx%% *}" ;; esac ;;
+            esac
+          done < <(printf '%s\n' "$report")
+          [ -n "$_nidx" ] || { echo "no numbered option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+          sel="$_nidx"
+          ;;
+      esac
       printf '%s\n' "$report" | grep -qE "^OPT $sel " || { echo "index $sel is not one of the offered options" >&2; _endpoint_mutation_unlock "$key"; return 1; }
       tmux send-keys -t "$pane" -l -- "$sel" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+      ;;
+    codex)
+      # Codex approval menu: cursor-like, but the default highlight is option 1 and plain
+      # Enter selects it. Match the label, navigate from position 1 to the target with
+      # Up/Down, then Enter (Enter alone if the target IS option 1). Navigation uses
+      # standard TUI arrow keys; the default-option-1 + Enter path is the verified one.
+      target_pos=0; sel_pos=1
+      while IFS= read -r line; do
+        case "$line" in
+          OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
+        esac
+      done < <(printf '%s\n' "$report")
+      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no codex option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      delta=$((target_pos - sel_pos))
+      if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done
+      elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done; fi
       tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
     cursor)
       target_pos=0; sel_pos=0
       while IFS= read -r line; do
         case "$line" in
-          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}" ;;
+          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="$sel_pos" ;; esac ;;
           OPT*) lab="${line#OPT }"; lab="${lab#* }"; case "$lab" in *"$sel"*) target_pos="${line#OPT }"; target_pos="${target_pos%% *}" ;; esac ;;
         esac
       done < <(printf '%s\n' "$report")
@@ -13796,7 +13864,8 @@ session() {
         _managed_menu_detect "$SESSION_NAME"
         case "$_menu_kind" in
           consent)  echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
-          numbered) echo "answer with:  $0 session answer <index>   (one of the OPT indexes above)" ;;
+          numbered) echo "answer with:  $0 session answer <index|label-substring>   (one of the OPT indexes/labels above)" ;;
+          codex)    echo "answer with:  $0 session answer <label-substring>   (matches an OPT label above; Enter confirms the option-1 default)" ;;
           cursor)   echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
         esac
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
@@ -13823,7 +13892,8 @@ session() {
         case "$_akind" in
           none) die "no interactive menu detected in '$SESSION_NAME'. Re-check with: $0 session read" ;;
           consent)  printf '%s\n' "$_arep"; echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
-          numbered) printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <index>   (one of the OPT indexes above)" ;;
+          numbered) printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <index|label-substring>   (one of the OPT indexes/labels above)" ;;
+          codex)    printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <label-substring>   (matches an OPT label above; Enter confirms the option-1 default)" ;;
           cursor)   printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
         esac
       else
