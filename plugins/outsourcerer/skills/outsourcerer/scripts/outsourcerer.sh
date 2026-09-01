@@ -2505,10 +2505,21 @@ _quota_note_refusal() {  # <lane-or-disp> <model> [reset]
 # before dispatch (so nothing denied ever runs, whether picked by advise or pinned with -m). Absent
 # or empty OSRC_MODEL_DENYLIST is a no-op -- default behavior is completely unchanged.
 _model_denied() {
-  local id="$1" list="${OSRC_MODEL_DENYLIST:-}" pat
+  local id="$1" list="${OSRC_MODEL_DENYLIST:-}" pat _osrc_had_f=0
   [ -n "$list" ] || return 1
   local IFS=', '
-  for pat in $list; do
+  # A '*' family entry (e.g. gemini-3.5-*) must not undergo PATHNAME expansion while we split the
+  # unquoted list: in a cwd that happens to hold a matching file, the glob rewrites the pattern to
+  # that filename and the deny silently misses. Split once with globbing disabled, then restore the
+  # caller's glob state. `_osrc_had_f` records whether the caller ALREADY had `set -f`, so we only
+  # re-enable globbing (`set +f`) when the caller didn't. (The `case "$id" in $pat` match below is
+  # pattern matching, not filename expansion, so it keeps working regardless -- bracket ids stay
+  # literal as before.)
+  case "$-" in *f*) _osrc_had_f=1 ;; esac
+  set -f
+  set -- $list
+  [ "$_osrc_had_f" = 0 ] && set +f
+  for pat in "$@"; do
     # Exact match first, so a literal id containing glob metachars is honored as itself. Real model
     # ids carry brackets (e.g. claude-opus-4-8[1m]); an unquoted `case $id in $pat` reads `[1m]` as a
     # character class, which both fails to deny the id's own literal string AND over-matches unrelated
