@@ -57,7 +57,7 @@ machine, and when.* The answer is explicit and enforced:
   directory's content leaves the machine over the network, and whether a `:free` route may train on
   your data — *before* it goes. Non-interactive cloud runs refuse unless you explicitly acknowledge
   (`--cloud-ack` / `OSRC_CLOUD_ACK=1`).
-- **Secrets are counted, never printed.** Detected credential patterns in a prompt or `--with` file
+- **Secrets are counted, never printed.** Detected credential patterns in a prompt or an injected `--with skills=` file
   surface as a redacted count, never the value, so a warning can't itself leak the key.
 
 ## Reporting a vulnerability

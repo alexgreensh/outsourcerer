@@ -13,6 +13,10 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 # Extract + eval only the pure functions (avoid running main).
 eval "$(sed -n '/^parse_model() {/,/^}/p' "$SRC")"
+# parse_model calls the --with validator; extract it (and the noglob splitter it uses) too, otherwise
+# the guard is silently undefined here and the suite stays green with it inert.
+eval "$(sed -n '/^_words_noglob() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_validate_with_token() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_model_for() {/,/^}/p' "$SRC")"
 # _devin_model_for's deepseek arm now folds the run's effort into the launchable variant id,
 # so its helper must be in scope too or the suffix comes back empty.

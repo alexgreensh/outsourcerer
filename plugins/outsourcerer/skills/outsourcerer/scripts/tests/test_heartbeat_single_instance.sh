@@ -276,6 +276,40 @@ SH
 ) && ok "heartbeat spawn refuses an owner with unreadable pid_start" \
   || bad "heartbeat spawn accepted an unreadable owner identity"
 
+# The companion guarantee: an owner whose start identity IS readable but DIFFERENT from the recorded
+# one is a reused pid, never our beacon. Refuse it and kill the child we spawned.
+(
+  set --
+  export OSRC_HOME="$TMP/reused-owner-home" OSRC_HEARTBEAT="$TMP/reused-owner-home/heartbeat" OSRC_HEARTBEAT_DISABLED=0 OSRC_SOURCED=1
+  . "$SRC" >/dev/null 2>&1
+  _pid_start_identity() {
+    if [ "$1" = "$$" ]; then printf 'Mon Jan 1 00:00:00 2024\n'; return 0; fi
+    printf 'Tue Feb 2 00:00:00 2025\n'; return 0
+  }
+  _heartbeat_leader_alive() { return 1; }
+  _heartbeat_leader_evict_stale() { return 0; }
+  fake="$TMP/reused-beacon"
+  cat > "$fake" <<'SH'
+#!/usr/bin/env bash
+mkdir -p "$OSRC_HEARTBEAT/leader"
+printf '%s\n' "$$" > "$HB_CHILD_PID"
+jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" '{pid:$pid,pid_start:$start,token:"reused"}' > "$OSRC_HEARTBEAT/leader/owner.json"
+sleep 5
+SH
+  chmod +x "$fake"
+  export OSRC_HEARTBEAT_EXECUTABLE="$fake" OSRC_HEARTBEAT_START_TIMEOUT=1 HB_CHILD_PID="$TMP/reused-child-pid"
+  set +e
+  _heartbeat_start >/dev/null 2>&1
+  rc=$?
+  set -e
+  child="$(cat "$HB_CHILD_PID" 2>/dev/null || true)"
+  sleep 0.3
+  alive=0; [ -n "$child" ] && kill -0 "$child" 2>/dev/null && alive=1
+  [ -n "$child" ] && kill "$child" 2>/dev/null || true
+  [ "$rc" -ne 0 ] && [ "$alive" -eq 0 ]
+) && ok "heartbeat spawn refuses an owner whose readable identity differs (pid reuse) and kills the child" \
+  || bad "heartbeat spawn accepted a reused pid as its beacon, or left the child running"
+
 echo "----"
 echo "PASS=$pass FAIL=$fail"
 [ "$fail" -eq 0 ]

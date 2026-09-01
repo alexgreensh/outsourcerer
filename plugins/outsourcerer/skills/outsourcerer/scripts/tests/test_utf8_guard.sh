@@ -130,6 +130,85 @@ case "$p" in iconv|shell|none) ok "probe returns a known value ($p)" ;; *) bad "
 out="$(OSRC_UTF8_PROBE=none _utf8_guard "$INVALID" 2>/dev/null)"
 [ "$out" = "$INVALID" ] && ok "probe=none: guard is inert (honest passthrough, no corruption)" || bad "probe=none altered input: got [$out]"
 
+# --- Scenario 16: the shell validator rejects sequences that are well-FRAMED but illegal. ---
+# Framing alone (start byte + N continuations) accepts three classes of bytes that are not valid
+# UTF-8 and that a strict downstream decoder (Rust/clap) refuses: an overlong encoding (E0 80 AF
+# encodes U+002F in 3 bytes), a UTF-16 surrogate half (ED A0 80 = U+D800), and a code point past
+# the Unicode maximum (F4 90 80 80 = U+110000). The second-byte lo/hi bounds are what catch them.
+SAVE_PROBE="${OSRC_UTF8_PROBE:-}"
+OSRC_UTF8_PROBE=shell
+OVERLONG=$'\340\200\257'; SURROGATE=$'\355\240\200'; ABOVEMAX=$'\364\220\200\200'
+_utf8_valid_shell "$OVERLONG"  && bad "shell validator accepted an overlong encoding (E0 80 AF)"        || ok "shell validator rejects an overlong encoding (E0 80 AF)"
+_utf8_valid_shell "$SURROGATE" && bad "shell validator accepted a UTF-16 surrogate half (ED A0 80)"     || ok "shell validator rejects a UTF-16 surrogate half (ED A0 80)"
+_utf8_valid_shell "$ABOVEMAX"  && bad "shell validator accepted a code point > U+10FFFF (F4 90 80 80)"  || ok "shell validator rejects a code point > U+10FFFF (F4 90 80 80)"
+
+# --- Scenario 17: the lossy decoder DROPS those same three, it does not re-emit them. ---
+# If sanitation rebuilt a sequence the validator just flagged, dispatch would hand the strict CLI
+# the exact bytes the guard exists to remove. Zero output bytes is the only correct result here.
+_utf8_lossy_shell "$OVERLONG"  > "$TMP/lossy-overlong"
+[ -s "$TMP/lossy-overlong" ]  && bad "lossy decoder re-emitted an overlong encoding"       || ok "lossy decoder emits zero bytes for an overlong encoding"
+_utf8_lossy_shell "$SURROGATE" > "$TMP/lossy-surrogate"
+[ -s "$TMP/lossy-surrogate" ] && bad "lossy decoder re-emitted a UTF-16 surrogate half"    || ok "lossy decoder emits zero bytes for a UTF-16 surrogate half"
+_utf8_lossy_shell "$ABOVEMAX"  > "$TMP/lossy-abovemax"
+[ -s "$TMP/lossy-abovemax" ]  && bad "lossy decoder re-emitted a code point > U+10FFFF"    || ok "lossy decoder emits zero bytes for a code point > U+10FFFF"
+
+# --- Scenario 18: a newline SURVIVES the lossy decoder (0x0A is not eaten as a byte). ---
+# The old per-byte `$(printf ...)` reconstruction stripped a trailing 0x0A, collapsing multi-line
+# prompts. Compare decimal bytes via od (not $(...)), so nothing in the harness hides a lost \n.
+# Input A <FF> \n B -> A \n B, i.e. bytes 65 10 66.
+_utf8_lossy_shell $'\101\377\012\102' > "$TMP/nl-actual"
+od -An -tu1 -v < "$TMP/nl-actual" | tr -s '[:space:]' ' ' > "$TMP/nl-actual-od"
+printf '\101\012\102' > "$TMP/nl-expected"
+od -An -tu1 -v < "$TMP/nl-expected" | tr -s '[:space:]' ' ' > "$TMP/nl-expected-od"
+cmp -s "$TMP/nl-actual-od" "$TMP/nl-expected-od" \
+  && ok "lossy decoder keeps a newline (A <FF> LF B -> bytes 65 10 66)" \
+  || bad "lossy decoder lost the newline: got bytes [$(cat "$TMP/nl-actual-od")]"
+
+# --- Scenario 19: the legal boundary code points still validate AND round-trip byte-exact. ---
+# The lo/hi bounds that reject Scenario 16's bytes sit one step away from these: U+0800 (E0 A0 80,
+# the first legal 3-byte char), U+D7FF (ED 9F BF, the last before the surrogate block), U+10FFFF
+# (F4 8F BF BF, the Unicode maximum) and a plain 2-byte é. Over-tightening the bounds would eat
+# real characters, so each must pass the validator and come back out of the decoder unchanged.
+for _bname in U+0800 U+D7FF U+10FFFF two-byte-e-acute; do
+  case "$_bname" in
+    U+0800)            _b=$'\340\240\200' ;;
+    U+D7FF)            _b=$'\355\237\277' ;;
+    U+10FFFF)          _b=$'\364\217\277\277' ;;
+    two-byte-e-acute)  _b=$'\303\251' ;;
+  esac
+  _utf8_valid_shell "$_b" && ok "shell validator accepts boundary char $_bname" || bad "shell validator rejected a legal boundary char: $_bname"
+  printf '%s' "$_b" > "$TMP/bound-expected"
+  _utf8_lossy_shell "$_b" > "$TMP/bound-actual"
+  cmp -s "$TMP/bound-expected" "$TMP/bound-actual" \
+    && ok "lossy decoder round-trips boundary char $_bname byte-exact" \
+    || bad "lossy decoder altered boundary char $_bname"
+done
+
+# --- Scenario 20: neither helper clobbers the caller's fd 3. ---
+# Both read their byte stream from a process-substitution REDIRECT for exactly this reason; an
+# `exec 3< …` implementation would silently steal fd 3 from whatever the caller had open on it
+# (outsourcerer uses spare fds around dispatch), so guard the fd, not just the bytes.
+printf 'fd3-canary\n' > "$TMP/fd3-file"
+exec 3< "$TMP/fd3-file"
+_utf8_valid_shell $'hello \xe2 world' >/dev/null 2>&1
+_utf8_lossy_shell $'hello \xe2 world' >/dev/null 2>&1
+fd3_line=""; IFS= read -r fd3_line <&3 2>/dev/null
+exec 3<&-
+[ "$fd3_line" = "fd3-canary" ] && ok "the shell helpers leave the caller's fd 3 intact" || bad "fd 3 was clobbered by the shell helpers: read back [$fd3_line]"
+OSRC_UTF8_PROBE="$SAVE_PROBE"
+
+# --- Scenario 21: a TRAILING newline survives _utf8_guard_prompt on the lossy shell path -----------
+# The decoder keeps every 0x0A, but the callers wrap it in $(...), which strips trailing newlines;
+# the sentinel idiom in _utf8_guard / _utf8_guard_prompt keeps the prompt's last line break.
+SAVE_PROBE="${OSRC_UTF8_PROBE:-}"; OSRC_UTF8_PROBE=shell
+printf -v _tn_in 'line1\n\377\n'
+_tn_var="$_tn_in"
+_utf8_guard_prompt _tn_var 2>/dev/null
+_tn_got="$(printf '%s' "$_tn_var" | od -An -tu1 -v | tr -s ' \n' ' ')"
+case "$_tn_got" in *" 49 10 10 "*|*" 49 10 10") ok "a trailing newline survives _utf8_guard_prompt on the lossy path" ;;
+  *) bad "trailing newline lost through _utf8_guard_prompt: bytes [$_tn_got]" ;; esac
+OSRC_UTF8_PROBE="$SAVE_PROBE"
+
 echo "---"
 echo "utf8_guard: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1
