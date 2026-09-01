@@ -4491,8 +4491,13 @@ _heartbeat_start() {
     _heartbeat_election_release "$lock"
     return 1
   fi
+  # 8>&- : the caller still holds the election flock on fd 8. A backgrounded child inherits open
+  # fds, so without this the beacon would carry a duplicate of the election-lock fd for its whole
+  # life -- a stale handle that keeps the lock's open-file-description referenced and can briefly
+  # contend a concurrent re-election until the parent's own release. Close it in the child; the
+  # beacon opens its own election fd when it needs one.
   OSRC_HEARTBEAT_TOKEN="$token" OSRC_HEARTBEAT_SINK="$sink" \
-    nohup "$executable" __heartbeat-beacon "$token" >/dev/null 2>&1 &
+    nohup "$executable" __heartbeat-beacon "$token" 8>&- >/dev/null 2>&1 &
   child_pid=$!
   if ! _heartbeat_election_release "$lock"; then
     kill "$child_pid" 2>/dev/null || true
@@ -4509,7 +4514,13 @@ _heartbeat_start() {
       if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && _pid_start_valid "$owner_start" && kill -0 "$owner_pid" 2>/dev/null; then
         live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
         live_rc=$?
-        if [ "$live_rc" -eq 0 ] && [ "$live_start" = "$owner_start" ]; then
+        # The owner pid is already proven live by the kill -0 above. Confirm it is really OUR beacon
+        # via the start-time identity when we can read it (the PID-reuse guard), but fall back to that
+        # liveness when the identity re-read is unsupported or fails -- exactly as _heartbeat_leader_alive
+        # does. The old check required live_rc == 0, so a transient/unsupported _pid_start_identity made
+        # the loop time out and kill a healthy, freshly-armed beacon. Only reject on a real mismatch:
+        # identity readable AND different (a genuinely reused pid).
+        if [ "$live_rc" -ne 0 ] || [ "$live_start" = "$owner_start" ]; then
           return 0
         fi
       fi
