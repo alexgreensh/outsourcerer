@@ -1456,8 +1456,12 @@ _utf8_valid_shell() {
 # are reconstructed via printf octal escapes (\NNN) -- reliable across bash/dash/busybox,
 # unlike \xNN which needs two-digit hex and varies by shell.
 _utf8_lossy_shell() {
-  local b state need out char tmp lo hi
-  state=0; need=0; out=""; char=""; lo=128; hi=191
+  local b state need char tmp lo hi _n=0 _oifs
+  local -a _acc
+  state=0; need=0; char=""; lo=128; hi=191
+  # Output is accumulated in an array and joined once: `out="$out$tmp"` per byte reallocates the
+  # whole string every time (quadratic), which turned a 500KB corrupted prompt into a 40-minute
+  # stall on the musl path. Array append is linear; the join below is one printf.
   # Walks the SAME framing AND second-byte validation as _utf8_valid_shell (the lo/hi bounds), so a
   # sequence the validator rejects -- overlong, UTF-16 surrogate, or > U+10FFFF -- is DROPPED here
   # too, not reconstructed and re-emitted. Without that, sanitation would hand the strict downstream
@@ -1468,7 +1472,7 @@ _utf8_lossy_shell() {
   # process-substitution redirect (no pipe -> no pipefail leak; no clobbered caller fd).
   while IFS= read -r b; do
     if [ "$state" = "0" ]; then
-      if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; out="$out$tmp"
+      if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; _acc[_n]="$tmp"; _n=$((_n+1))
       elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; lo=128; hi=191; _utf8_emit_byte "$b" char
       elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
         state=1; need=2; lo=128; hi=191
@@ -1485,12 +1489,12 @@ _utf8_lossy_shell() {
       if [ "$b" -ge "$lo" ] && [ "$b" -le "$hi" ]; then
         _utf8_emit_byte "$b" tmp; char="$char$tmp"
         need=$((need-1)); lo=128; hi=191
-        [ "$need" = "0" ] && { out="$out$char"; char=""; state=0; }
+        [ "$need" = "0" ] && { _acc[_n]="$char"; _n=$((_n+1)); char=""; state=0; }
       else
         # Bad continuation (out of range OR violates the 2nd-byte constraint): drop the partial char
         # and reprocess THIS byte as a fresh start.
         char=""; state=0; need=0; lo=128; hi=191
-        if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; out="$out$tmp"
+        if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; _acc[_n]="$tmp"; _n=$((_n+1))
         elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; _utf8_emit_byte "$b" char
         elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
           state=1; need=2; lo=128; hi=191
@@ -1506,7 +1510,7 @@ _utf8_lossy_shell() {
       fi
     fi
   done < <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
-  printf '%s' "$out"
+  _oifs="$IFS"; IFS=""; printf '%s' ${_acc[*]+"${_acc[*]}"}; IFS="$_oifs"
 }
 
 # _utf8_guard_prompt <varname> : guard IN PLACE -- reassign the named var only when its value
