@@ -802,7 +802,7 @@ parse_model() {
     case "$1" in
       -m|--model)           [ -n "${2:-}" ] || die "-m requires a model name"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
       --tier)               [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
-      --with)               [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
+      --with)               [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; _validate_with_token "$2"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --effort|--reasoning) [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
                             case "$2" in minimal|low|medium|high|xhigh|max|none) EFFORT="$2" ;;
                               *) die "--effort '$2' invalid (use: minimal|low|medium|high|xhigh|max)" ;; esac
@@ -2100,6 +2100,29 @@ _resolve_skill_file() {
   return 1
 }
 
+# _validate_with_token <arg> -> die unless every whitespace-separated token in <arg> is a
+# recognized --with form (skills=<names> | mcp=<names>, both requiring a non-empty value).
+# A non-empty but unrecognized spec (e.g. a bare file path someone passes expecting file-attach)
+# used to be stored into WITH_SPEC and then silently dropped during capability injection: only
+# skills= and mcp= are honored there, so the delegate ran with none of the intended context and
+# nothing told the caller. Reject unrecognized forms at parse time so the footgun is loud, not
+# silent. The empty-arg die at each parse site stays; this adds the non-empty-but-bad die.
+#
+# WITH_SPEC is space-delimited and iterated unquoted at injection time (for tok in $WITH_SPEC),
+# so a single --with argument containing whitespace (e.g. "skills=a,b /tmp/brief.txt") is split
+# into multiple tokens. Validating only the prefix would let an invalid trailing token pass and
+# still silently drop at injection — the exact footgun this fixes. Validate EVERY token. Also
+# reject empty values (skills= / mcp=) since those are silent no-ops of the same class.
+_validate_with_token() {
+  local tok
+  for tok in ${1:-}; do
+    case "$tok" in
+      skills=?*|mcp=?*) ;;
+      *) die "--with requires e.g. skills=a,b or mcp=x (got '$tok'); an unrecognized spec is rejected rather than silently dropped" ;;
+    esac
+  done
+}
+
 build_with_preamble() {
   [ -n "${WITH_SPEC:-}" ] || return 0
   local tok val name f out=""
@@ -2275,7 +2298,7 @@ _consume_flags() {
     case "$1" in
       -m|--model) [ -n "${2:-}" ] || die "-m requires a model name"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
       --tier)     [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
-      --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
+      --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; _validate_with_token "$2"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --no-advise) OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise model selection on a bare run
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
@@ -9346,7 +9369,7 @@ cmd_fanout() {
       --task)         [ -n "${2:-}" ] || die "--task needs a string"; taskstr="$2"; shift 2 ;;
       --route)        [ -n "${2:-}" ] || die "--route needs 'pattern=model,...'"; route_spec="$2"; shift 2 ;;
       --worktree)     export OSRC_WORKTREE=1; shift ;;
-      --with)         [ -n "${2:-}" ] || die "--with needs a spec"; fwd+=(--with "$2"); shift 2 ;;
+      --with)         [ -n "${2:-}" ] || die "--with needs a spec"; _validate_with_token "$2"; fwd+=(--with "$2"); shift 2 ;;
       --preamble)     [ -n "${2:-}" ] || die "--preamble needs a file"; preamble="$2"; shift 2 ;;
       --tasks)        [ -n "${2:-}" ] || die "--tasks needs a file"; tasksfile="$2"; shift 2 ;;
       --agents)       [ -n "${2:-}" ] || die "--agents needs a dir"; agentsdir="$2"; shift 2 ;;
@@ -10981,6 +11004,10 @@ _secret_scan() {
   fi
   fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
+  # After _validate_with_token (parse time), every WITH_SPEC token is a skills=… or mcp=… form,
+  # so the `*=*) continue` branch always fires and the bare-file `[ -f "$tok" ]` path below is
+  # now unreachable. Kept as defensive coverage in case a future code path sets WITH_SPEC without
+  # going through the parse-site validators.
   if [ -n "${WITH_SPEC:-}" ]; then
     local tok; local -a _ws; IFS=' ' read -ra _ws <<< "$WITH_SPEC"
     for tok in "${_ws[@]}"; do
