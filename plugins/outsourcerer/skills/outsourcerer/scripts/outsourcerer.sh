@@ -147,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.10.1"
+OSRC_VERSION="0.10.2"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1339,7 +1339,9 @@ _utf8_guard() {
   _utf8_valid "$1" && { printf '%s' "$1"; return 0; }
   # Invalid: lossy-decode so dispatch proceeds instead of dying on clap's opaque rc=2.
   local clean
-  clean="$(_utf8_lossy "$1")"
+  # Sentinel: command substitution strips trailing newlines, which would silently drop a prompt's
+  # final line break on the lossy path even though the decoder itself now preserves it.
+  clean="$(_utf8_lossy "$1"; printf X)"; clean="${clean%X}"
   # All-invalid input, or a platform that can't strip -> lossy returns empty. Don't swap in
   # an empty prompt; let the real error surface honestly. The guard's job is partial
   # corruption, not a totally mangled payload.
@@ -1369,7 +1371,9 @@ _utf8_probe() {
     else
       OSRC_UTF8_PROBE=iconv
     fi
-  elif command -v od >/dev/null 2>&1; then
+  elif command -v od >/dev/null 2>&1 && command -v tr >/dev/null 2>&1 && command -v grep >/dev/null 2>&1; then
+    # The shell path needs all three; with any missing the byte pipeline is empty and the
+    # validator would fail OPEN (no bytes seen = "valid"), handing raw invalid input downstream.
     OSRC_UTF8_PROBE=shell
   else
     OSRC_UTF8_PROBE=none
@@ -1516,7 +1520,8 @@ _utf8_guard_prompt() {
   _v="$1"; eval "_val=\"\${$_v}\""
   [ -n "$_val" ] || return 0
   _utf8_valid "$_val" && return 0
-  eval "$_v=\"\$(_utf8_guard \"\$_val\")\""
+  eval "$_v=\"\$(_utf8_guard \"\$_val\"; printf X)\""   # sentinel: keep a trailing newline
+  eval "$_v=\"\${$_v%X}\""
 }
 
 # delegate <perm> <sandbox-flag-or-empty> [-m MODEL] "<task>"
@@ -2113,20 +2118,42 @@ _resolve_skill_file() {
 # into multiple tokens. Validating only the prefix would let an invalid trailing token pass and
 # still silently drop at injection — the exact footgun this fixes. Validate EVERY token. Also
 # reject empty values (skills= / mcp=) since those are silent no-ops of the same class.
+# _words_noglob <string>: split <string> on the current IFS WITHOUT pathname expansion, into the
+# global WORDS array. An unquoted `for tok in $spec` globs every token against the cwd, so a file
+# named `skills=x` turns `--with '*'` into a valid-looking spec and a denylist family pattern into
+# a filename. Every splitter over user-provided lists (--with, --route, OSRC_MODEL_DENYLIST) goes
+# through here so validation and consumption see the same tokens. Its own positional params absorb
+# the `set --`, so the caller's "$@" is untouched; the caller's glob state is restored.
+_words_noglob() {
+  local _had_f=0
+  case "$-" in *f*) _had_f=1 ;; esac
+  set -f
+  set -- ${1:-}
+  [ "$_had_f" = 0 ] && set +f
+  WORDS=("$@")
+}
+
 _validate_with_token() {
-  local tok
-  for tok in ${1:-}; do
+  local tok n=0
+  local IFS=$' \t\n'
+  _words_noglob "${1:-}"
+  for tok in ${WORDS[@]+"${WORDS[@]}"}; do
+    n=$((n + 1))
     case "$tok" in
       skills=?*|mcp=?*) ;;
       *) die "--with requires e.g. skills=a,b or mcp=x (got '$tok'); an unrecognized spec is rejected rather than silently dropped" ;;
     esac
   done
+  # A whitespace-only spec is non-empty (the parse-site die does not fire) but splits to nothing,
+  # which is the same silent no-op this validator exists to make loud.
+  [ "$n" -gt 0 ] || die "--with requires e.g. skills=a,b or mcp=x (got a whitespace-only spec); an unrecognized spec is rejected rather than silently dropped"
 }
 
 build_with_preamble() {
   [ -n "${WITH_SPEC:-}" ] || return 0
   local tok val name f out=""
-  for tok in $WITH_SPEC; do
+  _words_noglob "$WITH_SPEC"
+  for tok in ${WORDS[@]+"${WORDS[@]}"}; do
     case "$tok" in
       skills=*) val="${tok#skills=}"
         for name in $(printf '%s' "$val" | tr ',' ' '); do
@@ -2203,7 +2230,8 @@ build_mcp_flags_cc() {
   # --with mcp=a,b -> extract ONLY the named servers (original opt-in path, unchanged).
   if [ -n "${WITH_SPEC:-}" ] && printf '%s' "$WITH_SPEC" | grep -q 'mcp=' && have jq; then
     local tok mspec=""
-    for tok in $WITH_SPEC; do case "$tok" in mcp=*) mspec="${tok#mcp=}" ;; esac; done
+    _words_noglob "$WITH_SPEC"
+    for tok in ${WORDS[@]+"${WORDS[@]}"}; do case "$tok" in mcp=*) mspec="${tok#mcp=}" ;; esac; done
     if [ -n "$mspec" ]; then
       local cj="$HOME/.claude.json"
       if [ -f "$cj" ]; then
@@ -3112,13 +3140,54 @@ _obligation_admit() { # <id> <session-id>
   return "$rc"
 }
 
+# The endpoint mutation lock deliberately does NOT reuse _state_lock_acquire. That primitive is one
+# global fd 9 plus one global kind variable, so a state write inside the critical section (send
+# appends an obligation record while holding this lock) clobbered it: on flock hosts the mutation
+# lock was silently released before send-keys ran, and on mkdir hosts (stock macOS, no flock) the
+# unlock became a no-op and the lock directory leaked forever, wedging every later mutation on that
+# pane with a 5s stall. Own descriptor (fd 7), own kind, and a bounded stale breaker so a directory
+# already leaked by 0.10.1 recovers on the next attempt instead of never.
+_ENDPOINT_MUTATION_KIND=""
 _endpoint_mutation_lock() { # <pane>; held until _endpoint_mutation_unlock
-  local pane="$1" key
+  local pane="$1" key lock tries=0
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')" || return 1
   _mkdir_private "$OSRC_SESSIONS" || return 1
-  _state_lock_acquire "$OSRC_SESSIONS/mutation-$key" || return 1
+  lock="$OSRC_SESSIONS/mutation-$key.lock"
+  _ENDPOINT_MUTATION_KIND=""
+  if [ "${OSRC_FORCE_MKDIR_LOCK:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
+    [ ! -L "$lock" ] || return 1
+    exec 7>>"$lock" 2>/dev/null || return 1
+    flock -w 5 7 2>/dev/null || { exec 7>&-; return 1; }
+    _ENDPOINT_MUTATION_KIND="flock"
+    return 0
+  fi
+  while [ "$tries" -lt 50 ]; do
+    _mkdir_claim "$lock" && { _ENDPOINT_MUTATION_KIND="mkdir"; return 0; }
+    [ "$tries" -eq 0 ] && _endpoint_mutation_reclaim_stale "$lock"
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+  return 1
 }
-_endpoint_mutation_unlock() { _state_lock_release "$OSRC_SESSIONS/mutation-${1}"; }
+# A mutation window is sub-second (one send-keys, one respawn), so a lock directory older than
+# OSRC_MUTATION_LOCK_STALE_MIN minutes (default 2) is a leak from an interrupted process or from the
+# 0.10.1 clobber bug, not a live holder. Reclaim it once; the caller's retry loop takes it from there.
+# `find -mmin` is the one portable mtime test (BSD, GNU and busybox); if find is missing or fails
+# nothing is reclaimed, which is the fail-closed direction.
+_endpoint_mutation_reclaim_stale() { # <lockdir>
+  local stale_min="${OSRC_MUTATION_LOCK_STALE_MIN:-2}"
+  case "$stale_min" in ''|*[!0-9]*) stale_min=2 ;; esac
+  [ -d "$1" ] || return 0
+  [ -n "$(find "$1" -maxdepth 0 -type d -mmin "+$stale_min" -print 2>/dev/null)" ] || return 0
+  rmdir "$1" 2>/dev/null || true
+}
+_endpoint_mutation_unlock() { # <key>
+  case "${_ENDPOINT_MUTATION_KIND:-}" in
+    flock) flock -u 7 2>/dev/null || true; exec 7>&- ;;
+    mkdir) rmdir "$OSRC_SESSIONS/mutation-${1}.lock" 2>/dev/null || true ;;
+  esac
+  _ENDPOINT_MUTATION_KIND=""
+}
 
 _claimed_endpoint_live() { # <pane> <claimed-pid> <claimed-start>
   local pane="$1" pid="$2" start="$3" live
@@ -4561,13 +4630,15 @@ _heartbeat_start() {
     _heartbeat_election_release "$lock"
     return 1
   fi
-  # 8>&- : the caller still holds the election flock on fd 8. A backgrounded child inherits open
-  # fds, so without this the beacon would carry a duplicate of the election-lock fd for its whole
-  # life -- a stale handle that keeps the lock's open-file-description referenced and can briefly
-  # contend a concurrent re-election until the parent's own release. Close it in the child; the
-  # beacon opens its own election fd when it needs one.
+  # 7>&- 8>&- 9>&- : the caller holds the election flock on fd 8, and fds 7 (endpoint mutation
+  # lock) and 9 (state lock) are this process's other lock descriptors. A backgrounded child
+  # inherits open fds, so without this the beacon would carry a duplicate of a lock fd for its
+  # whole life. That is worse than hygiene: if the parent dies between the spawn and its own
+  # release, the inherited handle keeps the election flock held for as long as the beacon lives and
+  # supervision can never re-arm. Close them all in the child; the beacon opens its own when it
+  # needs one. (No-op on hosts without flock, where the election is a directory claim.)
   OSRC_HEARTBEAT_TOKEN="$token" OSRC_HEARTBEAT_SINK="$sink" \
-    nohup "$executable" __heartbeat-beacon "$token" 8>&- >/dev/null 2>&1 &
+    nohup "$executable" __heartbeat-beacon "$token" 7>&- 8>&- 9>&- >/dev/null 2>&1 &
   child_pid=$!
   if ! _heartbeat_election_release "$lock"; then
     kill "$child_pid" 2>/dev/null || true
@@ -4584,13 +4655,14 @@ _heartbeat_start() {
       if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && _pid_start_valid "$owner_start" && kill -0 "$owner_pid" 2>/dev/null; then
         live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
         live_rc=$?
-        # The owner pid is already proven live by the kill -0 above. Confirm it is really OUR beacon
-        # via the start-time identity when we can read it (the PID-reuse guard), but fall back to that
-        # liveness when the identity re-read is unsupported or fails -- exactly as _heartbeat_leader_alive
-        # does. The old check required live_rc == 0, so a transient/unsupported _pid_start_identity made
-        # the loop time out and kill a healthy, freshly-armed beacon. Only reject on a real mismatch:
-        # identity readable AND different (a genuinely reused pid).
-        if [ "$live_rc" -ne 0 ] || [ "$live_start" = "$owner_start" ]; then
+        # Confirm this is OUR beacon: the start-time identity must be readable AND equal. A failed
+        # read is never proof of liveness. _pid_start_identity returns 2 when ps works on this host
+        # but the pid has no row, which here means the beacon died between the kill -0 above and
+        # now (a zombie still passes kill -0); rc 1 (adapter unsupported) cannot reach this loop
+        # because the function bails on it before spawning. A transient read failure is absorbed
+        # by the next 0.1s iteration, so failing open buys nothing and would report supervision as
+        # armed against a dead beacon. tests/test_heartbeat_single_instance.sh pins this.
+        if [ "$live_rc" -eq 0 ] && [ "$live_start" = "$owner_start" ]; then
           return 0
         fi
       fi
@@ -9346,7 +9418,10 @@ _agent_route() {
 _route_match() {
   local label="$1" spec="$2" pair pat val oldifs="$IFS"
   IFS=','
-  for pair in $spec; do
+  # --route patterns are documented globs (gemini-3.5-*=glm); split without pathname expansion so
+  # a matching filename in the cwd cannot rewrite the pattern and make the route silently miss.
+  _words_noglob "$spec"
+  for pair in ${WORDS[@]+"${WORDS[@]}"}; do
     case "$pair" in *=*) ;; *) continue ;; esac   # skip a malformed pair with no '='
     pat="${pair%%=*}"; val="${pair#*=}"
     [ -n "$(printf '%s' "$pat" | tr -d '[:space:]')" ] || continue   # skip empty pattern (e.g. trailing comma)
@@ -11015,13 +11090,14 @@ _secret_scan() {
   fi
   fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
-  # After _validate_with_token (parse time), every WITH_SPEC token is a skills=… or mcp=… form,
-  # so the `*=*) continue` branch always fires and the bare-file `[ -f "$tok" ]` path below is
-  # now unreachable. Kept as defensive coverage in case a future code path sets WITH_SPEC without
-  # going through the parse-site validators.
+  # Every WITH_SPEC token that went through _validate_with_token is a skills=… or mcp=… form, so
+  # the `*=*) continue` branch fires and the bare-file `[ -f "$tok" ]` path below is not expected
+  # to run. Kept as defensive coverage for any path that sets WITH_SPEC without the validator.
+  # `${_ws[@]:-}` is required: a whitespace-only spec yields an empty array, and "${_ws[@]}" on an
+  # empty array is a fatal unbound-variable error under bash 3.2 + set -u.
   if [ -n "${WITH_SPEC:-}" ]; then
     local tok; local -a _ws; IFS=' ' read -ra _ws <<< "$WITH_SPEC"
-    for tok in "${_ws[@]}"; do
+    for tok in "${_ws[@]:-}"; do
       case "$tok" in *=*) continue ;; esac          # skills=a,b / mcp=x are not file paths
       [ -f "$tok" ] && scan="$scan
 $(cat "$tok" 2>/dev/null)"
@@ -11285,7 +11361,7 @@ _local_resolve() {
 
 # delegate_local <perm-tier>, direct streaming call to a local OpenAI-compatible /v1/chat/completions.
 # Universal (Ollama / LM Studio / llama.cpp / any), keyless, no harness dependency. This is TEXT
-# delegation: the local model reasons over the prompt you hand it (inject files with --with or inline).
+# delegation: the local model reasons over the prompt you hand it (inject skills with --with skills=... or inline).
 # It does NOT autonomously read your repo or run tools, agentic local tool-use needs a Responses-API
 # server (Codex 0.144 dropped chat wire_api, so it can't drive Ollama), see references/lanes-and-models.
 delegate_local() {
@@ -11442,7 +11518,7 @@ _local_agentic_shim() {
 # _curl_with_auth (0600 temp-file header, never a process arg in the ps table), and there is
 # NO loopback guard — this is a remote gateway, not a local server.
 # TEXT delegation (same contract as the local lane's text path): the model reasons over the
-# prompt you hand it (inject files with --with or inline); it does NOT autonomously read the
+# prompt you hand it (inject skills with --with skills=... or inline); it does NOT autonomously read the
 # repo or run tools. Reasoning models consume tokens on reasoning before visible content, so
 # the timeout is generous (OSRC_TOKENROUTER_TIMEOUT, default 900s).
 # COST HONESTY: the roster and pricing are TokenRouter's, not ours. Some models are a $0 promo
@@ -12043,7 +12119,8 @@ _fb_rebuild_argv() {  # <_fb_next>
   [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
-  for _w in ${WITH_SPEC:-}; do _new+=(--with "$_w"); done
+  _words_noglob "${WITH_SPEC:-}"
+  for _w in ${WORDS[@]+"${WORDS[@]}"}; do _new+=(--with "$_w"); done
   _new+=(${REST[@]+"${REST[@]}"})
   ARGV=("${_new[@]}")
   return 0
@@ -12948,9 +13025,19 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
   gen="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .model_generation // 1' | tail -1)"
   case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
   gen=$((gen + 1))
-  _session_launch_finalize "$pane" "$prov" "$model" "$effort" "$launch" "$gen" || return 1
+  _session_launch_finalize "$pane" "$prov" "$model" "$effort" "$launch" "$gen" 1 || return 1
   printf 'receipt: relaunch applied to %s (provider=%s, model=%s, effort=%s). New pane PID %s (was %s).\n' "$pane" "$prov" "$model" "${effort:-none}" "$pid_after" "$pid_before"
   return 0
+}
+
+# The current model generation of a managed session, from its latest start record (1 if none).
+# Non-start events must carry this forward: _session_registry_append defaults generation to 1, and
+# an `effort` record stamped with 1 over a generation-3 session rewinds the model-pin lock key.
+_session_current_generation() { # <session-id>
+  local gen
+  gen="$(_session_record "$1" 2>/dev/null | cut -f4)"
+  case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
+  printf '%s' "$gen"
 }
 
 # Read a session's latest start record: "provider<TAB>model<TAB>effort<TAB>generation".
@@ -13356,11 +13443,18 @@ _session_launch_cleanup() { # <session-id> <reason>
   SESSION_NAME="$sess" _session_registry_end "$reason" >/dev/null 2>&1 || true
 }
 
-_session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch> [generation]
-  local sess="$1" provider="$2" model="$3" effort="$4" launch="$5" generation="${6:-1}"
+_session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch> [generation] [keep-on-heartbeat-failure]
+  local sess="$1" provider="$2" model="$3" effort="$4" launch="$5" generation="${6:-1}" keep="${7:-0}"
   # This is the one completion gate for interactive launches. A receipt is emitted only after the
   # provider stayed in the pane, its endpoint identity was persisted, heartbeat supervision armed,
   # and the persisted identity still matches the pane.
+  # keep=1 is the relaunch contract: the pane already holds a live engine the user is working in.
+  # A heartbeat arm failure is bookkeeping, not the pane, and the registry already carries the new
+  # generation's identity, so the session is kept, the call still fails, and the message says the
+  # pane is live and unsupervised. A registry write failure is different: a live pane whose registry
+  # record still names the OLD process is exactly the "crash-reap over a healthy replacement" hazard
+  # 0.10.1 closed (test_lifecycle_fix pins it), so that path tears down even on a relaunch. Liveness
+  # and endpoint failures mean the pane itself is wrong and are torn down regardless.
   if ! _session_launch_liveness_check "$sess" "$provider" "$launch"; then
     _session_launch_cleanup "$sess" liveness-failed
     return 1
@@ -13371,6 +13465,10 @@ _session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch>
     return 1
   fi
   if ! _heartbeat_start >/dev/null 2>&1; then
+    if [ "$keep" = 1 ]; then
+      printf 'outsourcerer: relaunch respawned the pane but heartbeat supervision could not be armed; the pane is LIVE and UNSUPERVISED. Arm it with: %s heartbeat start\n' "$0" >&2
+      return 1
+    fi
     _session_launch_cleanup "$sess" heartbeat-failed
     printf 'outsourcerer: interactive launch failed, heartbeat supervision could not be armed\n' >&2
     return 1
@@ -14094,7 +14192,7 @@ _winpty_session() {
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
       case "$PROVIDER" in
         devin|dv|gemini|gm)
-          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory "" "$(_session_current_generation "$SESSION_NAME")" || die "cannot record session effort"
           echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
           ;;
         *) die "session effort is unavailable for $PROVIDER on Windows (unverified Windows mutation support)" ;;
@@ -14289,7 +14387,7 @@ session() {
       case "$_ctrl" in
         interrupt) _session_control_interrupt "$SESSION_NAME" "$_cprov" || die "control interrupt did not verify: the busy signal did not clear. Re-check with: $0 session read" ;;
         exit)      _session_control_exit "$SESSION_NAME" "$_cprov" || die "control exit did not verify: the delegate did not return to a shell. Re-check with: $0 session read" ;;
-        relaunch)  _session_control_relaunch "$SESSION_NAME" "$_cprov" "$_cmodel" "$_ceffort" || die "control relaunch failed: the pane PID did not change. Re-check with: $0 session read" ;;
+        relaunch)  _session_control_relaunch "$SESSION_NAME" "$_cprov" "$_cmodel" "$_ceffort" || die "control relaunch did not complete (see the reason above; if none was printed, the pane PID did not change). Re-check with: $0 session read" ;;
         *) die "session control needs: interrupt | exit | relaunch" ;;
       esac
       ;;
@@ -14331,22 +14429,22 @@ session() {
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
       case "$PROVIDER" in
         devin|dv|gemini|gm)
-          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory "" "$(_session_current_generation "$SESSION_NAME")" || die "cannot record session effort"
           echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
           ;;
         droid)
           _session_droid_effort_supported || die "session effort relaunch unavailable; droid does not advertise a reasoning-effort control"
-          _session_relaunch_effort droid "$MODEL" "$effort" || die "session effort relaunch failed; the prior session remains active"
-          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch || die "cannot record session effort"
+          _session_relaunch_effort droid "$MODEL" "$effort" || die "session effort relaunch did not complete (see the reason above). If the pane was respawned but not supervised, arm it with: $0 heartbeat start"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch "" "$(_session_current_generation "$SESSION_NAME")" || die "cannot record session effort"
           echo "receipt: relaunch applied effort $effort to '$SESSION_NAME'."
           ;;
         codex|cx|cc|claude)
-          _session_relaunch_effort "$PROVIDER" "$MODEL" "$effort" || die "session effort relaunch failed; the prior session remains active"
-          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch || die "cannot record session effort"
+          _session_relaunch_effort "$PROVIDER" "$MODEL" "$effort" || die "session effort relaunch did not complete (see the reason above). If the pane was respawned but not supervised, arm it with: $0 heartbeat start"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" running relaunch "" "$(_session_current_generation "$SESSION_NAME")" || die "cannot record session effort"
           echo "receipt: relaunch applied effort $effort to '$SESSION_NAME'."
           ;;
         *)
-          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory || die "cannot record session effort"
+          _session_registry_append effort "$PROVIDER" "$MODEL" "$effort" advisory advisory "" "$(_session_current_generation "$SESSION_NAME")" || die "cannot record session effort"
           echo "effort recorded as advisory for $PROVIDER; the running session was not changed."
           ;;
       esac
