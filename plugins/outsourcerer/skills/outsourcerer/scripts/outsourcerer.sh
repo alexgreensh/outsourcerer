@@ -1407,28 +1407,41 @@ _utf8_lossy() {
 # validates UTF-8 byte framing -- 1/2/3/4-byte sequences with correct continuation bytes,
 # rejects lone continuations, overlong starts (C0/C1), >0xF4, and truncated sequences. No
 # perl/python/iconv (musl base Alpine has none of those).
+# _utf8_emit_byte <decimal-byte> <target-var>: set <target-var> to that single raw byte, IN-PROCESS.
+# Uses printf -v (no command substitution), so a 0x0A byte is NOT lost to trailing-newline stripping
+# and no subshell is forked per byte.
+_utf8_emit_byte() { local _o; printf -v _o '%03o' "$1"; printf -v "$2" "\\$_o"; }
+
 _utf8_valid_shell() {
-  local b state need
-  state=0; need=0
-  # `od -tu1` emits bytes as decimal, one per line after tr. read -u3 avoids a pipe (pipefail
-  # would leak the reader's nonzero exit into our return).
-  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
-  while IFS= read -r b <&3; do
+  local b state need lo hi
+  state=0; need=0; lo=128; hi=191
+  # `od -tu1` emits bytes as decimal, one per line after tr. The loop is fed by a process-substitution
+  # REDIRECT (not a pipe), so pipefail cannot leak the reader's nonzero exit into our return -- and,
+  # unlike `exec 3< …`, it clobbers no caller file descriptor. `lo`/`hi` bound the NEXT continuation
+  # byte: the second byte of certain lead bytes is range-restricted to reject overlong encodings,
+  # UTF-16 surrogates, and code points past U+10FFFF (which the old framing-only check accepted).
+  while IFS= read -r b; do
     if [ "$state" = "0" ]; then
       if [ "$b" -lt 128 ]; then :
-      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1
-      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2
-      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3
-      else exec 3<&-; return 1  # lone continuation (80-BF), C0/C1, or F5+
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; lo=128; hi=191
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
+        state=1; need=2; lo=128; hi=191
+        [ "$b" -eq 224 ] && lo=160   # E0: 2nd byte must be A0-BF, else overlong
+        [ "$b" -eq 237 ] && hi=159   # ED: 2nd byte must be 80-9F, else a UTF-16 surrogate half
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then
+        state=1; need=3; lo=128; hi=191
+        [ "$b" -eq 240 ] && lo=144   # F0: 2nd byte must be 90-BF, else overlong
+        [ "$b" -eq 244 ] && hi=143   # F4: 2nd byte must be 80-8F, else > U+10FFFF
+      else return 1  # lone continuation (80-BF), C0/C1, or F5+
       fi
     else
-      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
-        need=$((need-1)); [ "$need" = "0" ] && state=0
-      else exec 3<&-; return 1  # expected continuation, got something else
+      if [ "$b" -ge "$lo" ] && [ "$b" -le "$hi" ]; then
+        need=$((need-1)); lo=128; hi=191   # the 2nd-byte constraint applies once; later bytes are 80-BF
+        [ "$need" = "0" ] && state=0
+      else return 1  # bad continuation: out of range, or violates the 2nd-byte constraint
       fi
     fi
-  done
-  exec 3<&-
+  done < <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
   [ "$state" = "0" ]
 }
 
@@ -1439,33 +1452,56 @@ _utf8_valid_shell() {
 # are reconstructed via printf octal escapes (\NNN) -- reliable across bash/dash/busybox,
 # unlike \xNN which needs two-digit hex and varies by shell.
 _utf8_lossy_shell() {
-  local b state need out char
-  state=0; need=0; out=""; char=""
-  exec 3< <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
-  while IFS= read -r b <&3; do
+  local b state need out char tmp lo hi
+  state=0; need=0; out=""; char=""; lo=128; hi=191
+  # Walks the SAME framing AND second-byte validation as _utf8_valid_shell (the lo/hi bounds), so a
+  # sequence the validator rejects -- overlong, UTF-16 surrogate, or > U+10FFFF -- is DROPPED here
+  # too, not reconstructed and re-emitted. Without that, sanitation would hand the strict downstream
+  # CLI (e.g. devin) the very bytes the validator just flagged, and the crash the guard exists to
+  # prevent would still happen. Bytes are rebuilt with _utf8_emit_byte (printf -v): the old
+  # `$(printf "\\$(printf '%03o' "$b")")` stripped any trailing 0x0A (dropping a newline and
+  # collapsing multi-line prompts) and forked two subshells PER BYTE; printf -v does neither. Fed by a
+  # process-substitution redirect (no pipe -> no pipefail leak; no clobbered caller fd).
+  while IFS= read -r b; do
     if [ "$state" = "0" ]; then
-      if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
-      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
-      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
-      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+      if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; out="$out$tmp"
+      elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; lo=128; hi=191; _utf8_emit_byte "$b" char
+      elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
+        state=1; need=2; lo=128; hi=191
+        [ "$b" -eq 224 ] && lo=160
+        [ "$b" -eq 237 ] && hi=159
+        _utf8_emit_byte "$b" char
+      elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then
+        state=1; need=3; lo=128; hi=191
+        [ "$b" -eq 240 ] && lo=144
+        [ "$b" -eq 244 ] && hi=143
+        _utf8_emit_byte "$b" char
       fi  # else: lone continuation / bad start -> drop (resync)
     else
-      if [ "$b" -ge 128 ] && [ "$b" -le 191 ]; then
-        char="$char$(printf "\\$(printf '%03o' "$b")")"
-        need=$((need-1)); [ "$need" = "0" ] && { out="$out$char"; char=""; state=0; }
+      if [ "$b" -ge "$lo" ] && [ "$b" -le "$hi" ]; then
+        _utf8_emit_byte "$b" tmp; char="$char$tmp"
+        need=$((need-1)); lo=128; hi=191
+        [ "$need" = "0" ] && { out="$out$char"; char=""; state=0; }
       else
-        # Expected a continuation but got a new start/bad byte: drop the partial char,
-        # reprocess this byte as a fresh start.
-        char=""; state=0; need=0
-        if [ "$b" -lt 128 ]; then out="$out$(printf "\\$(printf '%03o' "$b")")"
-        elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; char="$(printf "\\$(printf '%03o' "$b")")"
-        elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then state=1; need=2; char="$(printf "\\$(printf '%03o' "$b")")"
-        elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then state=1; need=3; char="$(printf "\\$(printf '%03o' "$b")")"
+        # Bad continuation (out of range OR violates the 2nd-byte constraint): drop the partial char
+        # and reprocess THIS byte as a fresh start.
+        char=""; state=0; need=0; lo=128; hi=191
+        if [ "$b" -lt 128 ]; then _utf8_emit_byte "$b" tmp; out="$out$tmp"
+        elif [ "$b" -ge 194 ] && [ "$b" -le 223 ]; then state=1; need=1; _utf8_emit_byte "$b" char
+        elif [ "$b" -ge 224 ] && [ "$b" -le 239 ]; then
+          state=1; need=2; lo=128; hi=191
+          [ "$b" -eq 224 ] && lo=160
+          [ "$b" -eq 237 ] && hi=159
+          _utf8_emit_byte "$b" char
+        elif [ "$b" -ge 240 ] && [ "$b" -le 244 ]; then
+          state=1; need=3; lo=128; hi=191
+          [ "$b" -eq 240 ] && lo=144
+          [ "$b" -eq 244 ] && hi=143
+          _utf8_emit_byte "$b" char
         fi
       fi
     fi
-  done
-  exec 3<&-
+  done < <(printf '%s' "$1" | od -An -tu1 -v | tr -s '[:space:]' '\n' | grep -v '^$')
   printf '%s' "$out"
 }
 
