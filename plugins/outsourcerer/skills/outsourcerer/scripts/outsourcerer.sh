@@ -2836,10 +2836,10 @@ _external_session_observations() { # <managed-job-items-json>
         pid_start: ([$events[] | .pid_start // empty] | last // ""),
         engine_pid: ([$events[] | .engine_pid // empty] | last // ""),
         engine_pid_start: ([$events[] | .engine_pid_start // empty] | last // ""),
-        lane: ($last.provider // ""),
-        requested: ($last.requested_model // $last.model // ""),
-        resolved: ($last.resolved_model // $last.model // ""),
-        generation: ($last.model_generation // 1),
+        lane: ([$events[] | .provider // empty] | last // ""),
+        requested: ([$events[] | .requested_model // .model // empty] | last // ""),
+        resolved: ([$events[] | .resolved_model // .model // empty] | last // ""),
+        generation: ([$events[] | .model_generation // empty] | last // 1),
         cc_session_id: ([$events[] | .cc_session_id // empty] | last // ""),
         cc_pid: ([$events[] | .cc_pid // empty] | last // ""),
         cwd: ([$events[] | .cwd // empty] | last // "")
@@ -7739,8 +7739,13 @@ _autodetach_run() {
     _session_launch_cleanup "$_ad_sess" send-failed
     die "auto-detach: tmux send-keys failed for '$_ad_sess'; the interactive command was not submitted."
   fi
-  _session_launch_finalize "$_ad_sess" "$PROVIDER" "$MODEL" "${EFFORT:-}" "$_ad_full" || \
+  if ! _session_launch_finalize "$_ad_sess" "$PROVIDER" "$MODEL" "${EFFORT:-}" "$_ad_full"; then
+    # Tear down the tmux session we just created. The send-keys failure path above already cleans up;
+    # finalize failure left it running detached and unmonitored -- a leaked session that no `session`
+    # command tracks. Mirror the sibling cleanup before dying.
+    _session_launch_cleanup "$_ad_sess" finalize-failed
     die "auto-detach: interactive launch did not become a supervised live session."
+  fi
   printf '>>> [auto-detach] non-interactive slow-lane run routed to INTERACTIVE tmux session (not headless bg).\n' >&2
   printf '>>>   session : %s\n' "$_ad_sess" >&2
   printf '>>>   WATCH  : tmux attach -t %s\n' "$_ad_sess" >&2
@@ -12834,7 +12839,7 @@ _session_control_exit() { # <pane> <provider>
 # an incremented generation so _managed_endpoint_live keeps proving the endpoint live against the new
 # process. Never tears down or discards work.
 _session_control_relaunch() { # <pane> <provider> <model> <effort>
-  local pane="$1" prov="$2" model="$3" effort="${4:-}" launch pid_before pid_after gen i
+  local pane="$1" prov="$2" model="$3" effort="${4:-}" launch pid_before pid_after gen i key
   case "$prov" in
     codex|cx|cc|claude|droid)
       launch="$(_session_relaunch_command "$prov" "$model" "$effort")" || return 1 ;;
@@ -12845,9 +12850,18 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
       echo "control relaunch is not wired for provider '$prov'. Stop and restart with:  $0 session stop && $0 --provider $prov session start -m $model" >&2
       return 1 ;;
   esac
-  tmux has-session -t "$pane" 2>/dev/null || return 1
-  pid_before="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" || return 1
-  tmux respawn-pane -k -t "$pane" "$launch" || return 1
+  # Hold the endpoint mutation lock across the respawn ONLY -- the same window interrupt/exit lock,
+  # so a concurrent `session send` cannot be typing into the pane while respawn-pane -k kills and
+  # replaces it (its keystrokes would land in the dying shell, then _managed_send_submitted would see
+  # the fresh pane change and falsely record "submitted"). Release BEFORE the PID poll and the
+  # registry finalize below: finalize takes the state lock, and this lock is built on that same lock,
+  # so holding it across finalize would collide -- exactly why interrupt/exit release before verifying.
+  _endpoint_mutation_lock "$pane" || return 1
+  key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
+  tmux has-session -t "$pane" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
+  pid_before="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)" || { _endpoint_mutation_unlock "$key"; return 1; }
+  tmux respawn-pane -k -t "$pane" "$launch" || { _endpoint_mutation_unlock "$key"; return 1; }
+  _endpoint_mutation_unlock "$key"
   pid_after=""
   i=0
   while [ "$i" -lt "${OSRC_CONTROL_VERIFY_POLLS:-20}" ]; do
