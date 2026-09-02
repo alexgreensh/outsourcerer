@@ -87,6 +87,7 @@ rmdir "$lockdir" 2>/dev/null || true
 #    is released by the unlock, observed from an independent process.
 if command -v flock >/dev/null 2>&1; then
   unset OSRC_FORCE_MKDIR_LOCK
+  rmdir "$lockdir" 2>/dev/null || true   # no leftover directory from the mkdir-path blocks
   if ! _endpoint_mutation_lock "$pane"; then bad "flock path: could not take the mutation lock"; else
   [ "${_ENDPOINT_MUTATION_KIND:-}" = flock ] && ok "flock path: kind recorded as flock" || bad "flock path: kind is [${_ENDPOINT_MUTATION_KIND:-}]"
   _obligation_append "send.test.2" "$pane" typing_started "" || bad "nested obligation append failed"
@@ -102,6 +103,9 @@ if command -v flock >/dev/null 2>&1; then
     bad "flock path: lock still held after unlock"
   fi
   fi
+  # The flock branch leaves a regular file at the lock path (flock keeps the file; only the
+  # descriptor is released). Remove it so the mkdir-path block below can claim the directory.
+  rm -f "$lockdir"
 else
   echo "SKIP: flock not on this host; flock-path cases not run"
 fi
