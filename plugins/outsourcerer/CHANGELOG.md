@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.4
+
+### Fixed
+
+- **Live model catalogs now work on Linux.** The catalog cache freshness check tried BSD `stat -f %m` first; on GNU/Linux that call does not fail, it prints the mount point, which read as a non-numeric mtime and made every cached catalog look stale. So on Linux the cache was never used: the Devin and Warp catalog gate re-probed on every call, the new Gemini resolver fell back to its last-known id, and three test suites (`test_catalog_validation`, `test_advise_dynamic_pool`, `test_gemini_catalog`) were red on the Ubuntu runner. GNU `stat -c %Y` is tried first now. Verified in an Ubuntu 24.04 container and on macOS.
+
 ## 0.10.3
 
 ### Fixed

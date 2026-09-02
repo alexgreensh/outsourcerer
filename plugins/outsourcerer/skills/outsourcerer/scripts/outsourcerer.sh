@@ -147,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.10.3"
+OSRC_VERSION="0.10.4"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1079,13 +1079,16 @@ live_models() {
 _catalog_path() { case "${1:-}" in dv|warp|gm|gi) printf '%s/catalogs/%s.json' "$OSRC_HOME" "$1" ;; *) return 1 ;; esac; }
 
 # _catalog_fresh <lane> -> rc 0 if cache exists and is younger than TTL, rc 1 otherwise.
-# stat portability: macOS BSD stat takes -f %m (mtime epoch); GNU stat takes -c %Y. Try both.
+# stat portability: GNU stat takes -c %Y (mtime epoch); macOS BSD stat takes -f %m. GNU MUST be
+# tried first: on Linux `stat -f %m` does not fail, it prints the MOUNT POINT ("/"), which read as
+# a non-numeric mtime and made every cached catalog look stale on Linux, so the cache was never
+# used there and a fixture catalog (tests) or an offline run never resolved.
 _catalog_fresh() {
   local f now age mtime
   f="$(_catalog_path "$1")" || return 1
   [ -f "$f" ] || return 1
   now="$(date +%s 2>/dev/null)" || return 1
-  mtime="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+  mtime="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
   case "$mtime" in ''|*[!0-9]*) return 1 ;; esac
   age=$(( now - mtime ))
   [ "$age" -lt "${OSRC_CATALOG_TTL:-300}" ] 2>/dev/null
