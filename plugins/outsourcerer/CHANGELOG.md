@@ -2,6 +2,19 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.3
+
+### Fixed
+
+- **The keyless Gemini lane no longer dies when Google retires a model id (#21, reported by @asafbendor).** `gemini-flash` resolved through a static table to `gemini-3.5-flash`; Antigravity retired that id, every Google delegation failed with "not recognized as a known model", `doctor` reported a healthy lane as UNCLEAR, and the documented `OSRC_AGY_FLASH_DEFAULT` override never applied because the table had already produced a dated id. By the time this fix was written the live catalog was at 3.8, one release past the id the report suggested pinning. So the family aliases (`gemini-flash`, `gemini-pro`, `gemini-flash-lite`) are now symbolic, and each vehicle picks the newest family member it actually serves at dispatch time: `agy` reads `agy models`, gemini-cli reads the Gemini API model list, both cached for `OSRC_CATALOG_TTL` seconds. An explicit dated id is sent untouched while the catalog serves it; once retired it moves to the newest member of its family and says so, naming the retired id and every pin mechanism. A model `agy` still refuses drops the cached catalog so the next run re-reads it. Both liveness probes and `doctor` go through the same resolver. A regression test drives the resolver against a stub `agy` and greps the source so no dated Gemini id can reach a dispatch or probe again.
+- **`~/.outsourcerer/models.local` overrides the built-in model table.** Same `alias|id|lane|tier` rows, `#` comments allowed; its rows win on every lane and survive plugin updates, so a retired or renamed id anywhere is a one-line user fix instead of a patch to the installed script. Rows are charset-checked: the file can add table rows, never shell.
+- **Benchmark lookups for the Gemini family aliases follow the release train.** `advise` mapped `gemini-flash` to a fixed OpenRouter slug; it now takes the newest `google/gemini-*-<family>` slug in the cached catalog.
+
+### Changed
+
+- **Install instructions point at each vendor's official guide** instead of a `curl … | sh` style one-liner (Devin, Antigravity, Factory Droid, Cursor), in the reference docs and in every error and `doctor` message. Nothing in the shipped plugin now tells you to pipe a remote script into a shell.
+- **Public copy describes the product, not one lane.** The skill card, README, and plugin manifest now say what Outsourcerer is (a cross-harness orchestrator that routes to the best-value capable lane and carries your setup with the job) rather than leading with the GLM default. Every trigger phrase is kept.
+
 ## 0.10.2
 
 A correctness release built from five community pull requests by @danikdanik and an adversarial multi-agent review of them (11 reviewers, 3 independent fuzz runs, every finding reproduced before it was fixed). Three PRs merged as-is, one merged in part, one was returned with findings; the review also surfaced two 0.10.1 bugs that were worse than anything in the PRs, both fixed here with regression tests.

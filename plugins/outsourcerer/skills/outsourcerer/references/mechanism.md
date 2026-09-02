@@ -12,11 +12,11 @@ The skill is self-contained bash, but it drives external tools. Before first use
 | Dependency | Required for | Install |
 |---|---|---|
 | **bash** | everything | preinstalled on macOS/Linux (works on macOS's bash 3.2) |
-| **Devin CLI + login** | `--provider devin` | `curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh` then inspect and `bash devin-install.sh`, then `! devin auth login` (interactive browser flow, run it yourself) |
+| **Devin CLI + login** | `--provider devin` | Follow the [official Devin CLI installation guide](https://docs.devin.ai/cli), then run `! devin auth login` (interactive browser flow, run it yourself) |
 | **`OPENROUTER_API_KEY`** | `--provider cc` / `codex` | add `OPENROUTER_API_KEY=<your-key>` to `~/.env` (sourced at call time; never written into the skill) |
 | **claude CLI** | `--provider cc` | Claude Code (`claude` on PATH) |
 | **codex CLI + login** | `--provider codex`; also the **PREFERRED, keyless `image` backend** (`gpt-image`) | OpenAI Codex CLI (`codex` on PATH), then `codex login` (interactive, run it yourself) |
-| **`agy` (Antigravity CLI)**, PRIMARY, keyless | `gemini-pro` / `gemini-flash` / `gemini-flash-lite` text lane | `curl -fsSL https://antigravity.google/cli/install.sh -o agy-install.sh` then inspect and `bash agy-install.sh`, then open Antigravity / sign in once so `agy` inherits your Google login (no API key) |
+| **`agy` (Antigravity CLI)**, PRIMARY, keyless | `gemini-pro` / `gemini-flash` / `gemini-flash-lite` text lane | Follow the [official Antigravity CLI installation and authentication guide](https://antigravity.google/docs/cli/install/), then open Antigravity and sign in once so `agy` inherits your Google login (no API key) |
 | **`gemini` CLI + `GEMINI_API_KEY`**, FALLBACK | same aliases when you'd rather use an API key (`OSRC_GEMINI_VEHICLE=gemini`), and needed for `image`/nano-banana **only when the codex backend isn't ready** | `npm install -g @google/gemini-cli` + add `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) to `~/.env` (same single-key sourcing as `OPENROUTER_API_KEY`; never written into the skill). Key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
 | **jq** | `parity`, `image` (gemini/OpenRouter backends) | `brew install jq` (macOS) / `apt install jq` (Linux) |
 | **tmux** | `session` + interactive OR launchers | `brew install tmux` / `apt install tmux` |

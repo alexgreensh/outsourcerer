@@ -147,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.10.2"
+OSRC_VERSION="0.10.3"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -492,18 +492,32 @@ swe-1.7-lightning|swe-1.7-lightning|dv|mid
 kimi|kimi-k3|dv|capable
 kimi-k3|kimi-k3|dv|capable
 kimi-k2.7|kimi-k2.7|dv|capable
-gemini-pro|gemini-3.1-pro-preview|gm|frontier
-gemini-3.1-pro-preview|gemini-3.1-pro-preview|gm|frontier
-gemini-flash|gemini-3.5-flash|gm|mid
-gemini-3.5-flash|gemini-3.5-flash|gm|mid
-gemini-flash-lite|gemini-3.1-flash-lite|gm|budget
-gemini-3.1-flash-lite|gemini-3.1-flash-lite|gm|budget
-nano-banana|gemini-2.5-flash-image|gi|budget
-gemini-2.5-flash-image|gemini-2.5-flash-image|gi|budget
+gemini-pro|gemini-pro|gm|frontier
+gemini-flash|gemini-flash|gm|mid
+gemini-flash-lite|gemini-flash-lite|gm|budget
+nano-banana|nano-banana|gi|budget
 gpt-image|gpt-image-2|ci|budget
 codex-image|gpt-image-2|ci|budget
 gpt-image-2|gpt-image-2|ci|budget
 "
+# The Gemini family rows above are SYMBOLIC on purpose (gemini-flash -> gemini-flash): Google
+# retires dated ids every few weeks, so the concrete id is picked at dispatch time from the vehicle's
+# LIVE catalog (`agy models` / the Gemini API model list) by _agy_model_token / _gemini_api_id, newest
+# family member wins. Nothing in this table should ever name a dated Gemini release again.
+#
+# USER OVERRIDE: $OSRC_HOME/models.local. Same `alias|id|lane|tier` rows, `#` comments allowed, and
+# its rows WIN over the built-in table (prepended; resolve_model_row is first-hit). A retired or
+# renamed id on ANY lane is then a one-line user fix that survives plugin updates, instead of a patch
+# to this file that the next update reverts. Rows are charset-checked so the file can only ever add
+# table rows, never shell.
+if [ -f "$OSRC_HOME/models.local" ]; then
+  # LC_ALL=C: a bare LC_CTYPE=UTF-8 (stock macOS Terminal) makes BSD sed/grep reject ASCII files.
+  _osrc_ml="$(LC_ALL=C awk '{ sub(/#.*/, ""); gsub(/[ \t\r]/, ""); if ($0 != "") print }' "$OSRC_HOME/models.local" 2>/dev/null \
+             | LC_ALL=C grep -E '^[A-Za-z0-9._:/@+-]+\|[]A-Za-z0-9._:/@+[-]+\|[a-z]+\|[a-z]+$')"
+  [ -n "$_osrc_ml" ] && OSRC_MODEL_TABLE="$_osrc_ml
+$OSRC_MODEL_TABLE"
+  unset _osrc_ml
+fi
 
 # Interactive tmux session name, derived from the working directory AND, when set,
 # the owning Claude Code session id. Deriving it from the cwd alone means two
@@ -539,7 +553,7 @@ _OSRC_VERBS="run explore research edit yolo"
 _is_verb() { case " $_OSRC_VERBS " in *" ${1:-} "*) return 0 ;; *) return 1 ;; esac; }
 
 need_devin() {
-  have devin || die "devin CLI not on PATH (~/.local/bin). Install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"
+  have devin || die "devin CLI not on PATH (~/.local/bin). Install it using the official guide: https://docs.devin.ai/cli"
 }
 
 logged_in() { _timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null | grep -qi "Logged in"; }
@@ -1059,9 +1073,10 @@ live_models() {
 # cash lane; a cost-unknown BYOK lane never wins on cost). OSRC_ADVISE_VALUE_BIAS (default `quality`)
 # reserves a future `savings` mode; today selection is quality-first with cost breaking the lane tie.
 
-# Lane whitelist: only the two lanes that HAVE a live catalog. A literal set closes any latent
-# path-traversal from a future caller passing an attacker-influenced lane string.
-_catalog_path() { case "${1:-}" in dv|warp) printf '%s/catalogs/%s.json' "$OSRC_HOME" "$1" ;; *) return 1 ;; esac; }
+# Lane whitelist: only the lanes that HAVE a live catalog (dv, warp, gm = Antigravity `agy models`,
+# gi = the Gemini API model list). A literal set closes any latent path-traversal from a future
+# caller passing an attacker-influenced lane string.
+_catalog_path() { case "${1:-}" in dv|warp|gm|gi) printf '%s/catalogs/%s.json' "$OSRC_HOME" "$1" ;; *) return 1 ;; esac; }
 
 # _catalog_fresh <lane> -> rc 0 if cache exists and is younger than TTL, rc 1 otherwise.
 # stat portability: macOS BSD stat takes -f %m (mtime epoch); GNU stat takes -c %Y. Try both.
@@ -1103,6 +1118,20 @@ _catalog_normalize() {
             ( .variants | if type=="array" then .[].model_uid else empty end) ) ]
       | map(select(type=="string" and test("^[A-Za-z0-9._/-]+$")))
       | unique'
+    return
+  fi
+  # gm: `agy models` is plain text, "<id><TAB><label>" rows behind a "Fetching available models..."
+  # status line. The status line has no tab, so a tab split drops it and keeps only real rows. If a
+  # future agy stops tab-separating, fall through to the generic text branch below minus any
+  # "..."-terminated status line, so the lane never silently loses its catalog.
+  if [ "$lane" = "gm" ]; then
+    local _gm; _gm="$(printf '%s' "$raw" | awk -F'\t' 'NF>=2{print $1}' | grep -E '^[A-Za-z0-9._/-]+$')"
+    if [ -n "$_gm" ]; then printf '%s' "$_gm" | jq -R -s -c 'split("\n") | map(select(. != ""))'; return; fi
+    raw="$(printf '%s' "$raw" | grep -v '\.\.\.[[:space:]]*$')"
+  fi
+  # gi: the Gemini API lists {"models":[{"name":"models/gemini-x"}]}; strip the "models/" prefix.
+  if [ "$lane" = "gi" ] && printf '%s' "$raw" | jq -e '(.models? // empty) | type == "array"' >/dev/null 2>&1; then
+    printf '%s' "$raw" | jq -c '[.models[] | (.name // empty) | sub("^models/"; "")] | map(select(test("^[A-Za-z0-9._/-]+$"))) | unique'
     return
   fi
   # Generic JSON array (strings, or objects carrying .id/.name).
@@ -1178,6 +1207,24 @@ _catalog_fetch_inner() {
       # call fails (empty/invalid, e.g. an old CLI without --format json), leave raw empty -> fetch
       # returns 1 -> _catalog_validate soft-warns and lets the CLI reject at launch (fail-open).
       raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" devin models list --format json 2>/dev/null)"
+      printf '%s' "$raw" | jq -e '.' >/dev/null 2>&1 || raw=""
+      ;;
+    gm)
+      # Antigravity's own catalog. This is the ONLY source of truth for which Gemini ids the keyless
+      # lane serves: the ids rotate (3.5 -> 3.7 -> 3.8 flash within weeks) and agy hard-errors on a
+      # retired one, so nothing downstream may hardcode a dated id.
+      have agy || return 1
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" agy models 2>/dev/null)"
+      ;;
+    gi)
+      # Gemini API model list for the gemini-cli (API key) vehicle, which has no list command of its
+      # own. Key goes in a header, never the URL (process lists and proxies see URLs).
+      local _gk="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}"
+      [ -n "$_gk" ] || _gk="$(_extract_kv_value GEMINI_API_KEY 2>/dev/null)"
+      [ -n "$_gk" ] || _gk="$(_extract_kv_value GOOGLE_API_KEY 2>/dev/null)"
+      [ -n "$_gk" ] && have curl || return 1
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" curl -fsS -H "x-goog-api-key: $_gk" \
+              'https://generativelanguage.googleapis.com/v1beta/models?pageSize=500' 2>/dev/null)"
       printf '%s' "$raw" | jq -e '.' >/dev/null 2>&1 || raw=""
       ;;
     warp)
@@ -6001,9 +6048,19 @@ gpt-5.6-terra|openai/gpt-5.6-terra
 gpt-5.6-luna|openai/gpt-5.6-luna
 gpt-5.5|openai/gpt-5.5
 glm-5.2|z-ai/glm-5.2
-gemini-3.1-pro-preview|google/gemini-3.1-pro
-gemini-3.5-flash|google/gemini-3.5-flash
 "
+# Symbolic Gemini family aliases map to the NEWEST google/gemini-<ver>-<family> slug in the cached
+# OpenRouter catalog, so a benchmark lookup for gemini-flash follows the release train instead of a
+# row that goes stale. Empty when the catalog is not cached (the caller then has no score, as before).
+_gemini_bench_slug() {
+  local fam="$1"
+  [ -f "$OSRC_MODELS_JSON" ] && have jq || return 1
+  jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null \
+    | LC_ALL=C sed -n -E "s#^(google/gemini-[0-9]+(\.[0-9]+)?-${fam})(-preview)?\$#\1\3 \3#p" \
+    | awk '{ split($1, f, "-"); split(f[2], v, "."); pre=($2=="" ? 0 : 1);
+             printf "%d %d %d %s\n", v[1], (v[2]=="" ? 0 : v[2]), pre, $1 }' \
+    | sort -k1,1nr -k2,2nr -k3,3n | awk 'NR==1{print $4}'
+}
 
 # Task classification keywords, pipe-separated phrases. Category with most hits wins; default: simple.
 _TASK_KW_CODE='function|class method|bug|fix|refactor|implement|compile|error|stack trace|debug|unit test|api endpoint|sql query|regex|algorithm|data structure|code review|pull request|merge conflict|lint|type error|import|module|package|deploy|ci/cd|docker|kubernetes'
@@ -6104,7 +6161,12 @@ _bench_threshold_for() {
 # Checks native map first, then strips :free and uses the id directly.
 _resolve_bench_slug() {
   local mapped
-  mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')"
+  case "$1" in
+    gemini-flash-lite) mapped="$(_gemini_bench_slug flash-lite)" ;;
+    gemini-flash)      mapped="$(_gemini_bench_slug flash)" ;;
+    gemini-pro)        mapped="$(_gemini_bench_slug pro)" ;;
+    *) mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')" ;;
+  esac
   [ -n "$mapped" ] && { printf '%s' "$mapped"; return 0; }
   printf '%s' "${1%:free}"
 }
@@ -10064,36 +10126,108 @@ delegate_ccnative() {
   return "$rc"
 }
 
-# _agy_model_token <gemini-cli/api id> -> the token the Antigravity `agy` CLI accepts. agy exposes
-# its own curated (keyless) model set (see `agy models`); it has no flash-lite and uses non-preview
-# ids.
-#
-# NOTE: agy does NOT silently fall back on an unknown token -- it hard-errors
-# ("invalid model selection (--model X --effort Y)"), so a token this function emits must be one
-# agy actually serves.
-#
-# The `*flash*`/`*pro*` substring arms exist to translate gemini-API-only ids into agy's catalog
-# (strip `-preview`, collapse `flash-lite` since agy has no lite tier). But they matched on
-# SUBSTRING, so they also swallowed an id that was ALREADY a valid agy token: `-m gemini-3.7-flash`
-# dispatched gemini-3.5-flash instead, silently, with no indication a substitution had happened.
-# Any newer release agy adds hits the same path.
-#
-# So: an id already shaped like agy's catalog (`gemini-<ver>-flash[...]` / `gemini-<ver>-pro[...]`,
-# incl. effort-suffixed forms like gemini-3.6-flash-high) passes through unchanged -- EXCEPT the
-# `-preview`/`-lite` API-only suffixes, which agy rejects outright and which therefore must still
-# fall through to a family default. The two defaults are overridable because agy's catalog gains
-# new dated releases and a hardcoded default goes stale.
+# ---- Gemini family resolution: LIVE catalog first, never a dated literal ---------------------
+# Google retires dated Gemini ids every few weeks (3.5-flash was gone within a month of 0.10.1 and
+# agy hard-errors on a retired id: "invalid model selection"/"not recognized as a known model"). So
+# the family aliases (gemini-flash / gemini-pro / gemini-flash-lite) are SYMBOLIC in the table and
+# resolve here, at dispatch time, to the NEWEST family member the vehicle actually serves:
+#   1. an explicit pin wins: OSRC_AGY_{FLASH,PRO}_DEFAULT / OSRC_GEMINI_{FLASH,PRO,FLASH_LITE}_API_ID
+#      (or a models.local row that maps the alias to a concrete id);
+#   2. else the newest matching id in the live catalog (`agy models`, cached OSRC_CATALOG_TTL secs);
+#   3. else, catalog unreachable, a LAST-KNOWN id so an offline run still has something to send.
+# The last-known constants below are the only dated ids left in this file. They are a fallback for a
+# vehicle we cannot ask, never the first choice, and a test pins that ordering.
+_AGY_FLASH_LASTKNOWN="gemini-3.8-flash"
+_AGY_PRO_LASTKNOWN="gemini-3.1-pro"
+_GI_FLASH_LASTKNOWN="gemini-3.5-flash"
+_GI_PRO_LASTKNOWN="gemini-3.1-pro-preview"
+_GI_FLASH_LITE_LASTKNOWN="gemini-3.1-flash-lite"
+_GI_IMAGE_LASTKNOWN="gemini-2.5-flash-image"
+
+# _gemini_newest <lane gm|gi> <family flash|pro|flash-lite|flash-image> -> newest family id in that
+# lane's live catalog (agy effort suffixes stripped; a -preview id is kept as named but loses to a GA
+# id of the same version), or empty.
+# Version order is numeric on major.minor, so 3.10 beats 3.8 and a two-digit minor never sorts wrong.
+_gemini_newest() {
+  local lane="$1" fam="$2" _cat
+  _cat="$(_catalog_load "$lane" 2>/dev/null)"; [ -n "$_cat" ] || return 1
+  printf '%s\n' "$_cat" \
+    | LC_ALL=C sed -n -E "s/^(gemini-[0-9]+(\.[0-9]+)?-${fam})(-(low|medium|high))?(-preview)?$/\1\5 \5/p" \
+    | awk '{ split($1, f, "-"); split(f[2], v, "."); pre=($2=="" ? 0 : 1);
+             printf "%d %d %d %s\n", v[1], (v[2]=="" ? 0 : v[2]), pre, $1 }' \
+    | sort -k1,1nr -k2,2nr -k3,3n | awk 'NR==1{print $4}'
+}
+
+# _agy_catalog_knows <token> -> 0 served (exactly, or as the bare family of an effort-suffixed id),
+# 1 NOT served by a reachable catalog, 2 catalog unreachable (the caller must fail OPEN on 2).
+_agy_catalog_knows() {
+  local tok="$1" _cat v
+  _cat="$(_catalog_load gm 2>/dev/null)"; [ -n "$_cat" ] || return 2
+  for v in "$tok" "$tok-low" "$tok-medium" "$tok-high"; do
+    grep -qxF "$v" <<<"$_cat" && return 0
+  done
+  return 1
+}
+
+# _agy_family_default <flash|pro> -> the id agy should run for a bare family request (see the
+# precedence above). agy has no flash-lite tier, so lite callers ask for flash.
+_agy_family_default() {
+  local fam="$1" pin="" live=""
+  case "$fam" in pro) pin="${OSRC_AGY_PRO_DEFAULT:-}" ;; *) fam=flash; pin="${OSRC_AGY_FLASH_DEFAULT:-}" ;; esac
+  [ -n "$pin" ] && { printf '%s' "$pin"; return 0; }
+  live="$(_gemini_newest gm "$fam")" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
+  case "$fam" in pro) printf '%s' "$_AGY_PRO_LASTKNOWN" ;; *) printf '%s' "$_AGY_FLASH_LASTKNOWN" ;; esac
+}
+
+# _agy_model_token <alias or id> -> the token the Antigravity `agy` CLI accepts.
+#   - a symbolic family alias (gemini-flash, gemini-pro, gemini-flash-lite, or an API-only
+#     -preview/-lite id) -> _agy_family_default;
+#   - an id already shaped like agy's catalog (gemini-<ver>-flash[...] / -pro[...], incl. the
+#     effort-suffixed forms) passes through UNCHANGED when the live catalog serves it, or when the
+#     catalog cannot be read (agy is the authority; it will say so itself);
+#   - an id the live catalog confirms is RETIRED is replaced by the family's newest member, LOUDLY,
+#     with the retired id named and every pin mechanism listed. Silent substitution was the 0.10.0
+#     bug (`-m gemini-3.7-flash` ran 3.5 with no notice); a hard failure on a retired default was
+#     the 0.10.1 bug (issue #21). Announced self-healing is the middle that keeps both promises.
 _agy_model_token() {
-  case "$1" in
-    # API-only suffixes agy's catalog does not carry: must fall through to a family default below.
+  local want="$1" fam tok
+  case "$want" in
     *-preview|*-lite) : ;;
-    # Already a valid agy token -> never rewrite an explicit, serveable model choice.
-    gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*) echo "$1"; return 0 ;;
+    gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*|gemini-[0-9]*-flash*|gemini-[0-9]*-pro*)
+      _agy_catalog_knows "$want"
+      case $? in 0|2) printf '%s' "$want"; return 0 ;; esac
+      case "$want" in *pro*) fam=pro ;; *) fam=flash ;; esac
+      tok="$(_agy_family_default "$fam")"
+      printf '>>> [gemini] agy no longer serves "%s" (its live catalog is `agy models`); running %s, the newest %s it serves. To pin a different id: -m <id>, OSRC_AGY_%s_DEFAULT=<id>, or a "%s|<id>|gm|<tier>" row in %s/models.local.\n' \
+        "$want" "$tok" "$fam" "$(printf '%s' "$fam" | tr a-z A-Z)" "$want" "$OSRC_HOME" >&2
+      printf '%s' "$tok"; return 0 ;;
   esac
-  case "$1" in
-    *pro*)   echo "${OSRC_AGY_PRO_DEFAULT:-gemini-3.1-pro}" ;;
-    *flash*) echo "${OSRC_AGY_FLASH_DEFAULT:-gemini-3.5-flash}" ;;   # covers flash + flash-lite (agy has no lite tier)
-    *)       echo "$1" ;;
+  case "$want" in
+    *pro*)   _agy_family_default pro ;;
+    *flash*) _agy_family_default flash ;;   # covers flash + flash-lite (agy has no lite tier)
+    *)       printf '%s' "$want" ;;
+  esac
+}
+
+# _gemini_api_id <alias or id> -> a concrete id for the gemini-cli (API key) vehicle. Same
+# precedence as agy: env pin > newest in the live API model list > last-known. Explicit dated ids
+# pass through untouched (the API is the authority on its own catalog).
+_gemini_api_id() {
+  local want="$1" fam pin live
+  case "$want" in
+    gemini-flash-lite)             fam=flash-lite;  pin="${OSRC_GEMINI_FLASH_LITE_API_ID:-}" ;;
+    gemini-flash)                  fam=flash;       pin="${OSRC_GEMINI_FLASH_API_ID:-}" ;;
+    gemini-pro)                    fam=pro;         pin="${OSRC_GEMINI_PRO_API_ID:-}" ;;
+    nano-banana|gemini-flash-image) fam=flash-image; pin="${OSRC_GEMINI_IMAGE_API_ID:-}" ;;
+    *) printf '%s' "$want"; return 0 ;;
+  esac
+  [ -n "$pin" ] && { printf '%s' "$pin"; return 0; }
+  live="$(_gemini_newest gi "$fam")" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
+  case "$fam" in
+    pro)         printf '%s' "$_GI_PRO_LASTKNOWN" ;;
+    flash-lite)  printf '%s' "$_GI_FLASH_LITE_LASTKNOWN" ;;
+    flash-image) printf '%s' "$_GI_IMAGE_LASTKNOWN" ;;
+    *)           printf '%s' "$_GI_FLASH_LASTKNOWN" ;;
   esac
 }
 
@@ -10136,7 +10270,7 @@ delegate_gmnative() {
   local vehicle="${OSRC_GEMINI_VEHICLE:-}"
   if [ -z "$vehicle" ]; then
     if have agy; then vehicle=agy; elif have gemini; then vehicle=gemini; else
-      die "Gemini lane needs a CLI. PRIMARY (keyless): install Antigravity CLI -> curl -fsSL https://antigravity.google/cli/install.sh -o agy-install.sh (inspect it, then run: bash agy-install.sh)  (then open Antigravity / sign in once so 'agy' inherits your login). FALLBACK (API key): npm install -g @google/gemini-cli  + add GEMINI_API_KEY to ~/.env (https://aistudio.google.com/apikey)."
+      die "Gemini lane needs a CLI. PRIMARY (keyless): install Antigravity CLI using https://antigravity.google/docs/cli/install/, then open Antigravity and sign in once so 'agy' inherits your login. FALLBACK (API key): npm install -g @google/gemini-cli + add GEMINI_API_KEY to ~/.env (https://aistudio.google.com/apikey)."
     fi
   fi
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}")"
@@ -10148,7 +10282,7 @@ delegate_gmnative() {
   local rc=0
 
   if [ "$vehicle" = "agy" ]; then
-    have agy || die "OSRC_GEMINI_VEHICLE=agy but 'agy' not on PATH. Install: curl -fsSL https://antigravity.google/cli/install.sh -o agy-install.sh (inspect it, then run: bash agy-install.sh)"
+    have agy || die "OSRC_GEMINI_VEHICLE=agy but 'agy' not on PATH. Install it using the official guide: https://antigravity.google/docs/cli/install/"
     local atok aflag posture; atok="$(_agy_model_token "$id")"
     case "$tier" in
       auto)                    aflag=();                                          posture="READ-ONLY (headless -p; no auto-approve)" ;;
@@ -10178,6 +10312,13 @@ delegate_gmnative() {
       printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
+    elif grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
+      # agy refused the id. Its catalog moved under us (or a pin names a retired id): drop the cached
+      # catalog so the NEXT run re-reads `agy models` and self-heals, and say how to pin.
+      rm -f "$(_catalog_path gm)" 2>/dev/null || true
+      printf '>>> [gemini] agy refused model "%s". Its live catalog is `agy models`; this run cleared the cached copy so the next dispatch re-reads it.\n' "$atok" >&2
+      printf '>>>   pin        : -m <served id>, OSRC_AGY_FLASH_DEFAULT / OSRC_AGY_PRO_DEFAULT=<id>, or a "gemini-flash|<id>|gm|mid" row in %s/models.local (wins over the built-in table, survives updates).\n' "$OSRC_HOME" >&2
+      [ "${rc:-0}" = "0" ] && rc=2
     fi
     rm -f "$_aerr" 2>/dev/null || true
     record_ledger antigravity-agy "$atok" "$ttier" "$tier" "$task" "0.000000" gm
@@ -10188,6 +10329,7 @@ delegate_gmnative() {
   # FALLBACK: gemini CLI + API key.
   have gemini || die "OSRC_GEMINI_VEHICLE=gemini but 'gemini' CLI not on PATH. Install: npm install -g @google/gemini-cli  (https://geminicli.com/docs/get-started/installation/). Then set GEMINI_API_KEY in ~/.env."
   _gm_load_key
+  id="$(_gemini_api_id "$id")"
   local gflag posture
   case "$tier" in
     auto)         gflag=(--approval-mode default);            posture="READ-ONLY (headless denies tool-exec approval)" ;;
@@ -10318,7 +10460,7 @@ delegate_droid() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="${MODEL:-}" model_key="${MODEL:-droid}" ledger_model="droid-default"
-  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in."
+  have droid || die "droid CLI not on PATH (Factory Droid lane). Install it using the official guide: https://docs.factory.ai/cli. Then run 'droid' once to log in."
   # droid exec autonomy: default = read-only; --auto low (read-only + safe cmds) / medium (edits +
   # safe cmds) / high (full auto). --skip-permissions-unsafe is sandbox-only and never used here.
   local aflag=() posture
@@ -10353,7 +10495,7 @@ delegate_cursor() {
   local task="${REST[*]}" id="${MODEL:-}"
   local cur=""
   if have cursor-agent; then cur="cursor-agent"; elif have agent && agent --help 2>/dev/null | grep -qi cursor; then cur="agent"; fi
-  [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)."
+  [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install it using the official guide: https://cursor.com/docs/cli/installation. Then run 'cursor-agent login' once (or set CURSOR_API_KEY)."
   # cursor-agent autonomy: default headless = propose-only; -f/--force = apply edits/commands.
   # --trust skips the workspace-trust prompt that would wedge a headless run.
   local fflag=() posture
@@ -10753,7 +10895,7 @@ cmd_image() {
     else
       case "$MODEL" in
         gpt-image*|codex-image) backend="codex"; id="gpt-image-2" ;;
-        *flash-image*|*nano-banana*) backend="gemini"; id="$MODEL" ;;
+        *flash-image*|*nano-banana*) backend="gemini"; id="$(_gemini_api_id "$MODEL")" ;;
         *) backend="openrouter"; id="$MODEL" ;;
       esac
     fi
@@ -10761,7 +10903,7 @@ cmd_image() {
     if _codex_image_available; then
       backend="codex"; id="gpt-image-2"
     elif [ -f "$HOME/.env" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(GEMINI_API_KEY|GOOGLE_API_KEY)=' "$HOME/.env" 2>/dev/null; then
-      backend="gemini"; id="gemini-2.5-flash-image"
+      backend="gemini"; id="$(_gemini_api_id nano-banana)"
     elif [ -f "$HOME/.env" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null; then
       backend="openrouter"; id="x-ai/grok-imagine-image-quality"
     else
@@ -12100,7 +12242,7 @@ _route_receipt() {
 _route_provider_default_model() { # Provider-specific route identity, never parser state.
   case "$1" in
     devin) printf '%s' "$DEFAULT_MODEL" ;;
-    gemini|gm) printf 'gemini-3.1-flash-lite' ;;
+    gemini|gm) printf 'gemini-flash-lite' ;;
     local) printf 'local' ;;
     cc|codex) printf 'z-ai/glm-5.2' ;;
     claudex) printf 'gpt-5.6-sol' ;;
@@ -12254,8 +12396,8 @@ route_delegate() {
     # Fail FAST on a missing engine CLI -- before the cloud gate and before auto-detach would
     # otherwise bury this error inside a background job the user has to go dig out.
     case "$disp" in
-      droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install: https://docs.factory.ai/cli  (macOS/Linux: curl -fsSL https://app.factory.ai/cli -o droid-install.sh, inspect, run; Windows: native PowerShell installer). Then run 'droid' once to log in." ;;
-      cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install: macOS/Linux: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh; Windows (native, no WSL): irm 'https://cursor.com/install?win32=true' | iex. Then 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
+      droid)  have droid || die "droid CLI not on PATH (Factory Droid lane). Install it using the official guide: https://docs.factory.ai/cli. Then run 'droid' once to log in." ;;
+      cursor) have cursor-agent || have agent || die "cursor-agent CLI not on PATH (Cursor lane). Install it using the official guide: https://cursor.com/docs/cli/installation. Then run 'cursor-agent login' once (or set CURSOR_API_KEY)." ;;
       hermes) have hermes || die "hermes CLI not on PATH (Hermes agent lane). Install: https://github.com/NousResearch/hermes-agent  (then run 'hermes' once to configure). -m passes through verbatim; model catalog is yours to configure." ;;
       warp)   have oz || die "oz CLI not on PATH (Warp lane). It ships INSIDE Warp.app at Contents/Resources/bin/oz — symlink it: ln -s '/Applications/Warp.app/Contents/Resources/bin/oz' ~/.local/bin/oz  (then 'oz login' once). -m passes through verbatim to 'oz model list'; use --harness via OSRC_WARP_HARNESS=claude|codex to host that harness instead of the default Oz one." ;;
       cline)  have cline || die "cline CLI not on PATH (Cline lane). Install: npm i -g cline  (or see https://github.com/cline/cline), then set up cline: sign in to ClinePass (~\$9.99/mo for discounted open-weight models) or configure your own keys in ~/.cline. -m passes through verbatim to whatever provider/model cline is set to; the Tab tracks the spend." ;;
@@ -14968,8 +15110,8 @@ doctor() {
         esac
       fi
     fi
-    if have agy; then agy -p "reply PONG" --model "gemini-3.5-flash" --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
-    have gemini && { gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model gemini-3.1-flash-lite >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
+    if have agy; then agy -p "reply PONG" --model "$(_agy_model_token gemini-flash)" --effort low --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
+    have gemini && { gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model "$(_gemini_api_id gemini-flash-lite)" >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; }
   else
     echo "    (set OSRC_DOCTOR_PING=1 to probe native lane liveness with a bounded 1-token request; without it, 'present' above means installed + authed-looking, NOT proven to answer)"
   fi
@@ -14977,7 +15119,7 @@ doctor() {
   if have droid; then echo "    droid (Factory): $(droid --version 2>/dev/null | head -1 || echo present) — route: --provider droid [-m <your-model-name>] run \"task\". Cost: $(_lane_cost_disclosure droid)."
   else echo "    droid (Factory): NOT on PATH — install: https://docs.factory.ai/cli (macOS/Linux/Windows-native)"; fi
   if have cursor-agent; then echo "    cursor-agent: $(cursor-agent --version 2>/dev/null | head -1 || echo present) — route: --provider cursor [-m <model>] run \"task\". Cost: $(_lane_cost_disclosure cursor)."
-  else echo "    cursor-agent: NOT on PATH — install: curl -fsSL https://cursor.com/install -o cursor-install.sh; less cursor-install.sh; bash cursor-install.sh (Windows native: irm 'https://cursor.com/install?win32=true' | iex), then cursor-agent login"; fi
+  else echo "    cursor-agent: NOT on PATH — install using https://cursor.com/docs/cli/installation, then run cursor-agent login"; fi
   echo "  -- Hermes lane (NousResearch hermes-agent, engine lane: -m passes through verbatim) --"
   # Honest lane states: (a) CLI on PATH + version; (b) CLI absent but ~/.hermes exists (installed
   # data dir found, CLI not on PATH); (c) neither (lane not installed); (d) state.db present +
@@ -15079,7 +15221,7 @@ doctor() {
     if [ "$_doff" = "1" ]; then echo "    agy liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
     elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
       local _pt _prc=0
-      _pt="$(agy -p "reply with the single word: ok" --model gemini-3.5-flash --effort low \
+      _pt="$(agy -p "reply with the single word: ok" --model "$(_agy_model_token gemini-flash)" --effort low \
               --print-timeout "${OSRC_DOCTOR_PROBE_TIMEOUT:-25s}" 2>&1)" || _prc=$?
       case "$_pt" in
         *[Oo][Kk]*) echo "    agy liveness: RESPONDS (probed just now with a real request)" ;;
@@ -15089,7 +15231,7 @@ doctor() {
     fi
   else
     echo "    agy (Antigravity CLI, PRIMARY/keyless): NOT on PATH"
-    echo "      install: curl -fsSL https://antigravity.google/cli/install.sh -o agy-install.sh (inspect it, then run: bash agy-install.sh)   (then open Antigravity once to sign in)"
+    echo "      install using https://antigravity.google/docs/cli/install/, then open Antigravity once to sign in"
   fi
   if have gemini; then
     echo "    gemini CLI (FALLBACK/api key): v$(gemini --version 2>/dev/null | head -1)"
@@ -15111,7 +15253,7 @@ doctor() {
   fi
   if ! _codex_image_available; then
     if [ -f "$HOME/.env" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(GEMINI_API_KEY|GOOGLE_API_KEY)=' "$HOME/.env" 2>/dev/null; then
-      echo "    resolved image backend: nano-banana / gemini-2.5-flash-image (GEMINI_API_KEY present)"
+      echo "    resolved image backend: nano-banana / $(_gemini_api_id nano-banana) (GEMINI_API_KEY present)"
     elif [ -f "$HOME/.env" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null; then
       echo "    resolved image backend: OpenRouter image model (OPENROUTER_API_KEY present, no Gemini key) -> x-ai/grok-imagine-image-quality"
     else
@@ -15122,7 +15264,7 @@ doctor() {
   echo "    image lane (nano-banana): REST + GEMINI_API_KEY (no keyless path) -> $0 image -m nano-banana \"...\" out.png"
   echo "    tier cache: $( [ -f "$OSRC_MODELS_JSON" ] && echo "$OSRC_MODELS_JSON (refresh: $0 models --refresh)" || echo 'none, run: $0 models --refresh (name-regex fallback in use)')"
   echo "  -- Devin lane --"
-  if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install: curl -fsSL https://cli.devin.ai/install.sh -o devin-install.sh (inspect it, then run: bash devin-install.sh)"; if [ "$_dstrict" = "1" ] && [ -n "$_drift" ]; then return 1; fi; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
+  if have devin; then echo "  devin: $(devin --version 2>/dev/null)"; else echo "  devin: NOT INSTALLED"; echo "    install using the official guide: https://docs.devin.ai/cli"; if [ "$_dstrict" = "1" ] && [ -n "$_drift" ]; then return 1; fi; [ "$PROVIDER" = "devin" ] && return 1 || return 0; fi
   _devin_zombie_preflight
   local _dauth=0
   if logged_in; then

@@ -18,11 +18,11 @@ ChatGPT / Claude subscription auth, so they are premium and are **never** auto-e
 | `gpt-5.5` | `gpt-5.5` | codex-native | frontier | ChatGPT sub |
 | `fable` / `opus` | same | claude-native | frontier | Claude sub |
 | `sonnet` / `haiku` | same | claude-native | mid / budget | Claude sub |
-| `gemini-pro` | `gemini-3.1-pro-preview` (agy: `gemini-3.1-pro`) | gemini | frontier | PRIMARY = agy keyless (Antigravity login); fallback = gemini-cli + key |
-| `gemini-flash` | `gemini-3.5-flash` | gemini | mid | strong agentic/coding default; keyless via agy |
-| `gemini-flash-lite` | `gemini-3.1-flash-lite` (agy: flash) | gemini | budget | cheapest Gemini text tier |
+| `gemini-pro` | newest `gemini-*-pro` the vehicle serves (live) | gemini | frontier | PRIMARY = agy keyless (Antigravity login); fallback = gemini-cli + key |
+| `gemini-flash` | newest `gemini-*-flash` the vehicle serves (live) | gemini | mid | strong agentic/coding default; keyless via agy |
+| `gemini-flash-lite` | newest `gemini-*-flash-lite` (live; agy has no lite tier, so flash there) | gemini | budget | cheapest Gemini text tier |
 | `gpt-image` / `codex-image` | `gpt-image-2` | codex-image | budget | **PREFERRED** image backend, **NOT** a text lane, use `image`; KEYLESS (Codex/ChatGPT sub) |
-| `nano-banana` | `gemini-2.5-flash-image` | gemini-image | budget | image FALLBACK #2, **NOT** a text lane, use `image`; needs `GEMINI_API_KEY` |
+| `nano-banana` | newest `gemini-*-flash-image` the API serves (live) | gemini-image | budget | image FALLBACK #2, **NOT** a text lane, use `image`; needs `GEMINI_API_KEY` |
 | `glm` | `z-ai/glm-5.2` | OpenRouter | **capable** | frontier CAPABILITY, budget PRICE (~Opus-4.8 class); default cheap lane (`--provider cc`/`codex`) |
 | `hy3` | `tencent/hy3:free` | OpenRouter | **capable** | ~Opus-4.8 class; `:free` = provider may train on inputs |
 | `deepseek` | `deepseek/deepseek-v4-pro` | OpenRouter | **capable** | strongest cheap lane, pro reasoning flagship |
@@ -155,12 +155,29 @@ outsourcerer.sh run -m gemini-flash --with skills=impeccable "Review screenshot.
 outsourcerer.sh run -m gemini-pro "Critique this onboarding flow for cognitive load and hierarchy: <screenshot path/description>"
 ```
 
-**Model IDs (verified against Google's docs + live `agy models` at write time, re-verify
-periodically, IDs shift):** text/agentic aliases resolve to `gemini-3.1-pro-preview` (frontier),
-`gemini-3.5-flash` (mid, GA), `gemini-3.1-flash-lite` (budget, GA) for the gemini-cli/API path;
-the agy vehicle maps these to its own curated keyless set (`gemini-3.1-pro`, `gemini-3.5-flash` , 
-agy has no flash-lite tier, so flash-lite falls to flash there; agy is lenient and falls back to
-its default on an unknown token).
+**Model IDs are resolved LIVE, never from a table.** Google retires dated Gemini ids every few
+weeks and `agy` hard-errors on a retired one, so the three family aliases are symbolic and each
+vehicle picks the newest family member it actually serves at dispatch time: `agy` from `agy models`,
+gemini-cli from the Gemini API model list (both cached for `OSRC_CATALOG_TTL` seconds, default 300).
+An explicit `-m gemini-3.7-flash` is sent as-is while the catalog serves it; once the catalog says
+it is retired, the run moves to the newest member of that family and says so on stderr, naming the
+retired id. If `agy` refuses a model anyway, the cached catalog is dropped so the next run re-reads
+it. Precedence, highest first:
+
+1. an env pin: `OSRC_AGY_FLASH_DEFAULT` / `OSRC_AGY_PRO_DEFAULT` (agy) and
+   `OSRC_GEMINI_FLASH_API_ID` / `OSRC_GEMINI_PRO_API_ID` / `OSRC_GEMINI_FLASH_LITE_API_ID` (gemini-cli);
+2. a row in `~/.outsourcerer/models.local` (see below) that maps the alias to a concrete id;
+3. the newest matching id in the live catalog;
+4. a last-known id, used only when the catalog cannot be read at all.
+
+**`~/.outsourcerer/models.local`** holds your own `alias|id|lane|tier` rows (same shape as the
+built-in table, `#` comments allowed). Its rows win over the built-in table on every lane, so a
+retired or renamed id anywhere is a one-line fix that survives plugin updates. Example:
+
+```
+# pin the keyless flash lane to a specific release
+gemini-flash|gemini-3.7-flash|gm|mid
+```
 
 ## Local lane, Ollama / LM Studio / llama.cpp (KEYLESS, PRIVATE, $0)
 
