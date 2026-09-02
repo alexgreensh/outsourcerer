@@ -1,13 +1,13 @@
 ---
 name: outsourcerer
-description: 'Interactive copilot that offloads grunt work to a cheaper engine while Claude orchestrates. Greets each session with your live token limits and a driving mode (auto-pilot / you-drive / hybrid), auto-conserves when your Claude window runs hot, and picks models by live benchmarks. Triggers: outsource, offload, delegate, conserve tokens, use GLM/Devin/Codex, or get a second opinion.'
+description: 'Cross-harness orchestrator for AI coding work. Routes tasks across Claude Code, Codex, Cursor, Devin, Gemini, OpenRouter, and local models; carries the user''s skills, plugins, and MCP setup into delegated jobs; tracks cash and plan limits; and can convene multi-model reviews. Use when the user asks to outsource, offload, delegate, conserve limits, compare models, get a second opinion, use another coding harness, or run work in parallel.'
 ---
 
 # Outsourcerer
 
 **Created by**: [Alex Greenshpun](https://linkedin.com/in/alexgreensh)
 
-Delegate the work Claude would hand its own subagents to a cheaper or different engine instead. Model-agnostic; default `glm-5.2` (a free Devin lane). One entrypoint:
+Make your AI coding tools work as one team. Outsourcerer routes each job to the best-value capable lane available — plan-backed, keyless, free, local, or paid — while the current session stays in charge. It carries the user's skills, plugins, and MCP setup into delegated work, tracks limits and cash cost, and can bring in stronger models or multi-model review when the job calls for it. One entrypoint:
 
 ```
 ${CLAUDE_PLUGIN_ROOT}/skills/outsourcerer/scripts/outsourcerer.sh <subcommand> [args]

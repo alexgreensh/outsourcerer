@@ -6,16 +6,26 @@
     "url": "https://github.com/alexgreensh"
   },
   "metadata": {
-    "description": "The Outsourcerer marketplace: delegate coding grunt-work to cheaper or different backends while Claude orchestrates.",
+    "description": "The Outsourcerer marketplace: make your AI coding tools work as one team, with your current session staying the orchestrator.",
     "pluginRoot": "./plugins"
   },
   "plugins": [
     {
       "name": "outsourcerer",
       "source": "./plugins/outsourcerer",
-      "description": "Delegate the grind, keep the glory. Offload subagent-style work to OpenRouter / Codex / native premium lanes / Gemini, with tier-aware prompting, a liveness watchdog, a cost ledger, and second opinions.",
+      "description": "Make your AI coding tools work as one team. Route jobs across Claude Code, Codex, Cursor, Devin, Gemini, OpenRouter, and local models; carry the user's setup into delegated work; track limits and cash cost; and convene multi-model reviews.",
       "category": "productivity",
-      "tags": ["delegation", "offload", "openrouter", "codex", "gemini", "cost-optimization"]
+      "tags": [
+        "delegation",
+        "offload",
+        "orchestration",
+        "codex",
+        "cursor",
+        "devin",
+        "gemini",
+        "openrouter",
+        "cost-optimization"
+      ]
     }
   ]
 }

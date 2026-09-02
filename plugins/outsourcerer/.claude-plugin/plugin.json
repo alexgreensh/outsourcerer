@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "outsourcerer",
   "displayName": "Outsourcerer",
-  "version": "0.10.2",
-  "description": "Delegate the grind, keep the glory. Offload grunt work to a cheaper or different engine (OpenRouter, Codex, keyless Gemini) while Claude orchestrates, or pull a stronger model in as an advisor. Per-model prompting, image gen, consensus second opinions, cost Tab.",
+  "version": "0.10.3",
+  "description": "Make your AI coding tools work as one team. Route jobs across Claude Code, Codex, Cursor, Devin, Gemini, OpenRouter, and local models; carry the user's setup into delegated work; track limits and cash cost; and convene multi-model reviews.",
   "author": {
     "name": "Alex Greenshpun",
     "url": "https://github.com/alexgreensh"

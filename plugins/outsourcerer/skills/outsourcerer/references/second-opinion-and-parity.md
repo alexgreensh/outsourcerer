@@ -101,6 +101,9 @@ Quick pointer to where each env var is documented in full:
 | `OUTSOURCERER_PROVIDER` | default `--provider` | `references/mechanism.md` (Providers) |
 | `OR_OFFLOAD_CHAIN` | OpenRouter escalation chain when no `-m` given | `references/mechanism.md` (Providers) |
 | `OSRC_GEMINI_VEHICLE` | force `agy` vs `gemini` CLI vehicle | `references/lanes-and-models.md` (Gemini/Antigravity lane) |
+| `OSRC_AGY_FLASH_DEFAULT` / `OSRC_AGY_PRO_DEFAULT` | pin the id `agy` runs for `gemini-flash` / `gemini-pro` instead of the newest served member of the family (live from `agy models`) |
+| `OSRC_GEMINI_FLASH_API_ID` / `OSRC_GEMINI_PRO_API_ID` / `OSRC_GEMINI_FLASH_LITE_API_ID` | same pins for the gemini-cli (API key) vehicle, which otherwise reads the Gemini API model list |
+| `~/.outsourcerer/models.local` | your own `alias\|id\|lane\|tier` rows; they win over the built-in model table on every lane and survive plugin updates |
 | `OSRC_TIER_BUDGET_MAX_USD_M` / `OSRC_TIER_MID_MAX_USD_M` | tier price cutoffs | `references/mechanism.md` (Tier-aware prompt wrapping) |
 | `OUTSOURCERER_TIER` | force `--tier` | `references/mechanism.md` (Tier-aware prompt wrapping) |
 | `OSRC_STALL_WARN` / `OSRC_STALL_KILL` / `OSRC_TIMEOUT` | stall/kill/timeout windows | `references/jobs-and-safety.md` (Liveness + background jobs) |

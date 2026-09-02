@@ -15,13 +15,13 @@
 
 ### Your frontier model is doing grep.
 
-Outsourcerer hands the grunt work to the cheapest engine you already pay for, brings in a stronger one (or a whole panel of them) when it matters, and shows you the receipt.
+Outsourcerer routes each job to the best-value capable lane available, brings in a stronger model (or a whole panel of them) when it matters, and shows you the receipt.
 
 </div>
 
 ---
 
-You already pay for a fleet of AIs: Claude, Codex, Gemini, maybe Devin, a stack of OpenRouter credits. Each is brilliant at something the others aren't, and they sit in separate rooms. **Outsourcerer makes them work as one team.** It sends the boring work to the cheapest engine that can nail it, pulls a top-tier model in when the job actually needs a big brain, keeps a running receipt of what that saved you, and, uniquely, clones **your** setup onto whichever engine runs the job.
+You already pay for a fleet of AIs: Claude, Codex, Gemini, maybe Devin, a stack of OpenRouter credits. Each is brilliant at something the others aren't, and they sit in separate rooms. **Outsourcerer makes them work as one team.** It sends the boring work to the best-value capable lane available — plan-backed, keyless, free, local, or paid, pulls a top-tier model in when the job actually needs a big brain, keeps a running receipt of what that saved you, and, uniquely, clones **your** setup onto whichever engine runs the job.
 
 ## It doesn't just call another model. It brings your whole workshop.
 

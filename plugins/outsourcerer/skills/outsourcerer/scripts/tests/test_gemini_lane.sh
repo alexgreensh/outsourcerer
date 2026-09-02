@@ -16,6 +16,11 @@ set -uo pipefail
 # defaults, so a developer (or CI) that exports one would flip the "with the override unset" assertions
 # below into false failures. Unset them here; the override IS exercised inline where it belongs.
 unset OSRC_AGY_FLASH_DEFAULT OSRC_AGY_PRO_DEFAULT
+# Hermetic catalog: the ids below are what this test names, so the resolver treats them as served
+# (a retired id would otherwise be healed to the newest member, which is the newer test's job).
+TMP_CAT="$(mktemp -d)"; trap 'rm -rf "$TMP_CAT"' EXIT
+export OSRC_HOME="$TMP_CAT"; mkdir -p "$OSRC_HOME/catalogs"
+printf '["gemini-3.7-flash-high","gemini-3.7-flash-medium","gemini-3.7-flash-low","gemini-3.6-flash-high","gemini-3.6-flash-medium","gemini-3.5-flash-low","gemini-3.1-pro-high","gemini-3.1-pro-low"]' > "$OSRC_HOME/catalogs/gm.json"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
@@ -99,10 +104,10 @@ awk '/timeout waiting for response/,/rm -f "\$_aerr"/' "$SRC" | grep -q 'rc=124'
 # unknown token, it hard-errors ("--effort is not supported for model X"), so passing an API-only
 # id straight through would turn the documented gemini-pro / gemini-flash-lite aliases into a hard
 # failure. These two are the ids the alias table actually resolves to.
-[ "$(_agy_model_token gemini-3.1-pro-preview)" = "gemini-3.1-pro" ] \
+[ "$(_agy_model_token gemini-3.1-pro-preview 2>/dev/null)" = "$(_agy_family_default pro)" ] \
   && ok "the -preview suffix is still stripped (agy rejects preview ids outright)" \
   || bad "gemini-pro now resolves to a token agy refuses to run"
-[ "$(_agy_model_token gemini-3.1-flash-lite)" = "gemini-3.5-flash" ] \
+[ "$(_agy_model_token gemini-3.1-flash-lite 2>/dev/null)" = "$(_agy_family_default flash)" ] \
   && ok "flash-lite still collapses to flash (agy has no lite tier)" \
   || bad "gemini-flash-lite now resolves to a token agy refuses to run"
 
@@ -137,7 +142,7 @@ fi
 [ "$(OSRC_AGY_FLASH_DEFAULT=gemini-3.7-flash _agy_model_token flash)" = "gemini-3.7-flash" ] \
   && ok "the bare flash default can be repinned without editing the table" \
   || bad "OSRC_AGY_FLASH_DEFAULT does not move the bare flash default"
-[ "$(_agy_model_token flash)" = "gemini-3.5-flash" ] \
+[ "$(_agy_model_token flash 2>/dev/null)" = "$(_agy_family_default flash)" ] \
   && ok "with the override unset the bare flash default is unchanged" \
   || bad "the bare flash default changed when no override was set"
 

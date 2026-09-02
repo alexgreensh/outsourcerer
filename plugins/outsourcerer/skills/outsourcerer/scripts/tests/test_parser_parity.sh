@@ -53,7 +53,7 @@ grep -q 'PROVIDER_EXPLICIT=1; shift 2' "$SRC" && ok "global provider flag record
 
 parse_model "t" 2>/dev/null
 [ -z "$MODEL" ] && ok "implicit parser model remains empty" || bad "implicit parser inherited a provider model"
-[ "$(_route_provider_default_model gemini)" = gemini-3.1-flash-lite ] && ok "Gemini resolves its own implicit model" || bad "Gemini inherited the Devin default"
+[ "$(_route_provider_default_model gemini)" = gemini-flash-lite ] && ok "Gemini resolves its own implicit model (symbolic; the concrete id is picked from the live catalog)" || bad "Gemini inherited the Devin default"
 [ "$(_route_provider_default_model local)" = local ] && ok "local resolves its own implicit model" || bad "local inherited the Devin default"
 
 echo
