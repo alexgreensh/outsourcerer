@@ -211,7 +211,7 @@ outsourcerer.sh run --provider tokenrouter -m <gateway-model-id> "summarize thes
   gate + secret-scan hard-block as every other cloud lane. Override the endpoint with
   `OSRC_TOKENROUTER_URL` (default `https://api.tokenrouter.com/v1`).
 - **It is TEXT delegation** (same contract as the local lane's text path): the model reasons over the
-  prompt you hand it (inject files with `--with` or inline). It does NOT autonomously read the repo
+  prompt you hand it (inject skills with `--with skills=…` or inline). It does NOT autonomously read the repo
   or run tools. Reasoning models consume tokens on reasoning before visible content, so the timeout
   is generous (`OSRC_TOKENROUTER_TIMEOUT`, default 900s).
 - **Streaming** feeds the liveness watchdog, so tokenrouter works under `bg` and `fanout` too.

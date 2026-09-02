@@ -78,6 +78,52 @@ OSRC_MODEL_DENYLIST="gemini-3.5-*" _model_denied "gemini-3.5-flash" \
   && ok "a '*' family glob still matches after the bracket fix" \
   || bad "the '*' family glob stopped working"
 
+# --- the list is split with globbing OFF, so the cwd cannot rewrite an entry (torture regression) ---
+# Splitting an unquoted list performs PATHNAME expansion as well as word splitting. Run from a
+# directory that happens to hold a file matching the pattern and `gemini-3.5-*` becomes that
+# filename, so the family entry silently stops denying its family — a deny that fails only on some
+# machines, in some directories. The fix splits under `set -f`.
+mkdir -p "$TMP/globdir"
+touch "$TMP/globdir/gemini-3.5-oops"
+if ( cd "$TMP/globdir" && OSRC_MODEL_DENYLIST='gemini-3.5-*' _model_denied gemini-3.5-flash ); then
+  ok "a '*' family entry still denies from a cwd holding a file that matches the pattern"
+else
+  bad "the cwd's files rewrote the '*' family entry and the model was not denied"
+fi
+
+# --- and the caller's glob state comes back exactly as it was ---
+# `set -f` is process-wide: leaving it on would break every later unquoted expansion in the script
+# (path globs in dispatch, receipts, log rotation), and turning it off would silently re-enable
+# globbing for a caller that deliberately disabled it.
+OSRC_MODEL_DENYLIST='gemini-3.5-*' _model_denied gemini-3.5-flash
+case "$-" in
+  *f*) bad "_model_denied left globbing disabled (-f leaked into the caller)" ;;
+  *)   ok "_model_denied restores globbing for a caller that had it on" ;;
+esac
+set -f
+OSRC_MODEL_DENYLIST='gemini-3.5-*' _model_denied gemini-3.5-flash
+case "$-" in
+  *f*) ok "_model_denied preserves a caller's own 'set -f'" ;;
+  *)   bad "_model_denied re-enabled globbing for a caller that had set -f" ;;
+esac
+set +f
+
+# --- bracket ids stay literal even from a cwd that could expand them ---
+# The exact-match-first pass and the -f split have to hold together: with a file named
+# claude-opus-4-81 sitting in the cwd, an unguarded split expands `claude-opus-4-8[1m]` to that
+# filename, which both loses the deny on the real id and invents one on its neighbour.
+touch "$TMP/globdir/claude-opus-4-81"
+if ( cd "$TMP/globdir" && OSRC_MODEL_DENYLIST='claude-opus-4-8[1m]' _model_denied 'claude-opus-4-8[1m]' ); then
+  ok "a bracket-bearing id is denied by its literal string even from a cwd holding a matching file"
+else
+  bad "the cwd's files rewrote the bracket entry and the id was not denied"
+fi
+if ( cd "$TMP/globdir" && OSRC_MODEL_DENYLIST='claude-opus-4-8[1m]' _model_denied 'claude-opus-4-81' ); then
+  bad "the bracket entry over-matched claude-opus-4-81 from a cwd holding that filename"
+else
+  ok "a bracket entry does not over-match a neighbouring id from such a cwd"
+fi
+
 # --- matched against the RESOLVED id, never the alias ---
 # An alias is a nickname; several can point at one model, and new ones get added. Denying the alias
 # would leave every other route to the same model open, which is a denylist that does not deny.
