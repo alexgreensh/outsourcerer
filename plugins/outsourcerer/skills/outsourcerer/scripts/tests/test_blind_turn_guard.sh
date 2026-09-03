@@ -134,10 +134,17 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
   || bad "the escape hatch did not silence the guard (rc=$rc)"
 
 # --- end-to-end through main: a DELEGATING command refuses to end blind (rc=7) when work is blocked.
-# OSRC_PREFLIGHT=1 makes route_delegate return 0 without dispatching, so `run` reaches the turn-end
-# hook cleanly — the guard then refuses because the snapshot has a blocked delegate. ---
+# route_delegate is stubbed to a no-op so `run` dispatches instantly (no network) and reaches the
+# turn-end hook cleanly — the guard then refuses because the snapshot has a blocked delegate.
+# NOTE: OSRC_PREFLIGHT=1 can no longer stand in as the dispatch shortcut here — a route preflight is
+# now (correctly) EXEMPT from the blind-turn guard, so exercising the guard must reach main by a real
+# delegating dispatch, which the stub provides without a network call. ---
 write_snapshot "$(snapshot_with "$managed_blocked")"
-out="$(OSRC_HEARTBEAT_DISABLED=1 OSRC_PREFLIGHT=1 OUTSOURCERER_DEPTH=0 bash "$SRC" run "x" 2>&1)"; rc=$?
+out="$(OSRC_HEARTBEAT_DISABLED=1 OUTSOURCERER_DEPTH=0 bash -c '
+  S="$1"; set --; . "$S" >/dev/null 2>&1
+  route_delegate() { return 0; }   # no-op dispatch: reach the turn-end guard without a real run
+  main run "x"
+' _ "$SRC" 2>&1)"; rc=$?
 [ "$rc" = 7 ] \
   && ok "main returns 7 (refuse to end blind) after a DELEGATING command with blocked work" \
   || bad "a delegating command did not refuse (rc=$rc) with blocked work present"
