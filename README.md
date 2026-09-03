@@ -249,7 +249,7 @@ outsourcerer fleet show <id>
 
 **One list, and it tells the truth.** Every Claude Code session plus every job Outsourcerer ran for you, each with a status read from the live process and its own transcript, never a spinner that lies. A session is **Working**, **Waiting on you**, **Done**, or **Stopped mid-task**, so you walk straight to the one that needs you instead of hunting through tabs.
 
-**Real names, not hashes.** `fleet name` reads what each session is actually working on and names it, so `alexgreenshpun-71` reads as `Update feedback skill for Gambit`, cached so the list stays instant.
+**Real names, not hashes.** `fleet name` reads what each session is actually working on and names it, so `session-71` reads as `Refactor the auth retry path`, cached so the list stays instant.
 
 **It catches the stuck ones.** Turn on supervision and a background heartbeat watches the fleet, spots a delegate that stalled or never started, and steps in instead of letting it sit silent for half an hour.
 

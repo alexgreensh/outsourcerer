@@ -2754,7 +2754,7 @@ _state_sync() {
 }
 
 _state_lock_acquire() {
-  local file="$1" lock tries=0
+  local file="$1" lock tries=0 owner o_pid o_start cur_start _idrc dead corpse
   lock="$file.lock"
   _STATE_LOCK_KIND=""
   if command -v flock >/dev/null 2>&1; then
@@ -2764,8 +2764,39 @@ _state_lock_acquire() {
     _STATE_LOCK_KIND="flock"
     return 0
   fi
+  # No flock (the default on stock macOS): a crash while holding a mkdir lock used to leave the `.lock`
+  # dir behind forever, wedging EVERY subsequent state write (registry, obligations, wake-queue, fleet
+  # names) with a permanent "state lock unavailable". Record the holder's identity on claim so a later
+  # waiter can prove death and break a stale lock — unlike an age timer, this never steals a live lock.
+  owner="$lock/owner"
   while [ "$tries" -lt 50 ]; do
-    _mkdir_claim "$lock" && { _STATE_LOCK_KIND="mkdir"; return 0; }
+    if _mkdir_claim "$lock"; then
+      printf '%s %s\n' "$$" "$(_pid_start_identity "$$" 2>/dev/null)" > "$owner" 2>/dev/null || true
+      _STATE_LOCK_KIND="mkdir"; return 0
+    fi
+    # Contention: break the lock ONLY if its recorded owner is provably dead. Never break on a live
+    # owner, an absent/unreadable owner (the winner may not have written it yet), or an unprovable read
+    # (`ps` itself failing) — every one of those falls through to sleep-and-retry, failing safe.
+    if [ -f "$owner" ]; then
+      o_pid=""; o_start=""
+      read -r o_pid o_start < "$owner" 2>/dev/null || true
+      case "$o_pid" in
+        ''|*[!0-9]*) ;;
+        *)
+          cur_start="$(_pid_start_identity "$o_pid" 2>/dev/null)"; _idrc=$?
+          dead=0
+          if [ "$_idrc" -eq 2 ]; then dead=1                                                   # ps works, pid gone
+          elif [ "$_idrc" -eq 0 ] && [ -n "$o_start" ] && [ "$cur_start" != "$o_start" ]; then dead=1; fi  # pid reused
+          if [ "$dead" -eq 1 ]; then
+            # Claim the corpse by atomic rename: only ONE waiter can win the mv, so no waiter can ever
+            # delete another waiter's freshly acquired lock. The winner discards it; the next iteration
+            # re-races the normal atomic mkdir. A losing mv just falls through and retries.
+            corpse="$lock.stale.$$.$RANDOM"
+            mv "$lock" "$corpse" 2>/dev/null && rm -rf "$corpse" 2>/dev/null
+          fi
+          ;;
+      esac
+    fi
     sleep 0.1
     tries=$((tries + 1))
   done
@@ -2775,7 +2806,7 @@ _state_lock_acquire() {
 _state_lock_release() {
   case "${_STATE_LOCK_KIND:-}" in
     flock) flock -u 9 2>/dev/null || true; exec 9>&- ;;
-    mkdir) rmdir "$1.lock" 2>/dev/null || true ;;
+    mkdir) rm -f "$1.lock/owner" 2>/dev/null; rmdir "$1.lock" 2>/dev/null || true ;;
   esac
   _STATE_LOCK_KIND=""
 }
@@ -4454,7 +4485,13 @@ _heartbeat_active_work() {
   if [ -d "$OSRC_JOBS" ]; then
     for jd in "$OSRC_JOBS"/*; do
       [ -d "$jd" ] || continue
-      status="$(cat "$jd/status" 2>/dev/null || true)"
+      # Reconcile before trusting the status. A job whose worker PID is provably dead but whose status
+      # file was never flipped to a terminal state (kill -9, crash, machine sleep) reads `running`
+      # forever, and the raw-status check below would keep the beacon alive for that flatlined job
+      # indefinitely — the immortal-beacon bug. _reconcile_status re-derives the real state from PID +
+      # start-time liveness; READ-ONLY so this hot-path scan never mutates job state as a side effect
+      # (the flip happens under the normal status/result reconcile paths, not inside the heartbeat).
+      status="$(OSRC_RECONCILE_READ_ONLY=1 _reconcile_status "$(basename "$jd")" 2>/dev/null || cat "$jd/status" 2>/dev/null || true)"
       case "$status" in launching|running|exploring?|stalled?) return 0 ;; esac
     done
   fi
@@ -10316,13 +10353,23 @@ delegate_gmnative() {
     local _aerr; _aerr="$(mktemp -t osrc-agy)"
     agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> >(tee "$_aerr" >&2) || rc=$?
+    # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
+    # as effort-less and hard-reject the --effort pair ("--effort is not supported for model ..."). The
+    # model itself is valid; only the flag is wrong, so clearing the catalog (below) would be wrong and
+    # giving up wastes a healthy lane. Retry ONCE with the flag dropped — the model runs at its default.
+    if [ "${#aeffflag[@]}" -gt 0 ] && grep -qi 'not supported for model' "$_aerr" 2>/dev/null; then
+      printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
+      aeffflag=(); rc=0; : > "$_aerr"
+      agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+          --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> >(tee "$_aerr" >&2) || rc=$?
+    fi
     if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
       printf '>>>   check      : %s doctor  — it probes this lane for real rather than assuming the installed CLI works.\n' "$0" >&2
       printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
-    elif grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
+    elif grep -qiE 'invalid model selection|not recognized as a known model' "$_aerr" 2>/dev/null; then
       # agy refused the id. Its catalog moved under us (or a pin names a retired id): drop the cached
       # catalog so the NEXT run re-reads `agy models` and self-heals, and say how to pin.
       rm -f "$(_catalog_path gm)" 2>/dev/null || true

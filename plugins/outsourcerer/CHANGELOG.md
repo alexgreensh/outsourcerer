@@ -2,6 +2,14 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.6
+
+### Fixed
+
+- **The keyless Gemini lane no longer dies when `agy` rejects `--effort` for a model.** A resolved flash id (e.g. a concrete `gemini-3.5-flash`) is treated as effort-less by some `agy` builds, which hard-reject the `--effort` pair with "not supported for model …". The old code lumped that in with "invalid model selection", cleared the healthy catalog, and gave up — so a default `run` on the Gemini lane failed outright. The lane now retries once with the effort flag dropped (the model runs at its own default), and the effort error is no longer misclassified as an invalid-model error. Regression test drives the real delegate through a stub `agy`.
+- **The heartbeat beacon no longer beats forever for a flatlined job (the immortal-beacon bug).** `_heartbeat_active_work` read each job's `status` file raw, so a delegate killed after `running` was written (kill -9, crash, machine sleep) left that word on disk and counted as perpetual active work. The check now routes the status through `_reconcile_status` (read-only on this hot path), which re-derives the real state from pid + process-start liveness, consistent with every other reader. A dead job stops holding the beacon open; a live job still counts. Regression test added.
+- **A crashed lock holder no longer wedges every state write on hosts without `flock` (the default on stock macOS).** The mkdir-based state lock left its `.lock` directory behind on a crash, and from then on every registry/obligation/wake-queue/fleet-name write failed closed with "state lock unavailable". The lock now records the holder's identity (pid + process-start marker) on claim, and a later waiter breaks it only when that owner is provably dead — never a live owner, an unwritten owner, or an unprovable `ps`. The break is an atomic rename, so two waiters can never delete each other's freshly acquired lock. Regression test covers break, safety, and end-to-end recovery.
+
 ## 0.10.5
 
 ### Fixed
@@ -124,7 +132,7 @@ Hardening pass from a multi-angle adversarial audit. Seven fixes.
 
 - **New: `fleet` — one view of every session you're running.** `fleet ls` prints a single honest list of every AI coding session Outsourcerer can see on this machine: your live **Claude Code** sessions plus **every job you delegated** through Outsourcerer, across all lanes (Codex, Devin/GLM, Fable, droid, cursor, warp, cline). No more tab-hunting to find which session is waiting on you.
   - **Honest states, not "dead."** Each session is classified from its live process (`kill -0` truth, not a fragile timestamp compare) and its transcript tail into `Working` / `Waiting on you` / `Maybe stuck` / `Idle` / `Done` / `Stopped mid-task` / `Failed`. The "waiting on you" signal survives a long approval wait instead of being clobbered by a stale status.
-  - **`fleet name` — real names from real work.** Reads each session's transcript and names it via the free GLM lane (cached at `fleet/names.jsonl`), so `alexgreenshpun-71` becomes `Update feedback skill for Gambit`. Naming is bounded per lane and falls back cleanly when a lane is slow.
+  - **`fleet name` — real names from real work.** Reads each session's transcript and names it via the free GLM lane (cached at `fleet/names.jsonl`), so `session-71` becomes `Refactor the auth retry path`. Naming is bounded per lane and falls back cleanly when a lane is slow.
   - **`fleet supervise` — a background heartbeat that catches the stuck ones.** Auto-armed with `OSRC_FLEET_SUPERVISION=1`. Bounds a delegate that never initializes or stalls, instead of letting it sit silent. Backed by the byte-growth stall watchdog and a hard-timeout so a hang is always eventually caught.
   - **Scope (honest):** Claude Code sessions + Outsourcerer's own delegated jobs. It does not yet enumerate sessions other tools started independently of Outsourcerer; unified cross-tool enumeration is planned for a later release.
 - **Delegation-robustness hardening (the plumbing behind `fleet` and every long job).** A four-round adversarial gauntlet (independent judge + torture lanes) drove these to green: a **no-init watchdog** that bounds a delegate which never produces model output (positive-output detection, not a permissive catch-all); a **Devin free-lane guard** that reaps only provably-orphaned processes (never a healthy manual or reparented delegate) and never falsely reports the free `glm-5-2`/`swe-1-7` lanes as unavailable; **free-tier own-quota exhaustion retries the other free lane** instead of hard-failing; and a **bash-native `_timeout`** (no external `timeout`/`gtimeout` binary) with a zombie-vs-live discriminator and a busybox `ps` fallback.

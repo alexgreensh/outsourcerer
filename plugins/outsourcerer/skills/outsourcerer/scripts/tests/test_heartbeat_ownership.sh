@@ -118,6 +118,13 @@ unset OSRC_FORCE_MKDIR_ELECTION
 # condition the beacon checks between ticks before it releases its claim.
 mkdir -p "$OSRC_JOBS/lifecycle"
 printf '%s\n' running > "$OSRC_JOBS/lifecycle/status"
+# A REAL running job always records its worker pid at launch (run_job writes it the moment it starts),
+# so the fixture must too: _heartbeat_active_work now routes the status through _reconcile_status, which
+# (correctly, and consistently with every other reader) treats a `running` job whose pid is not live as
+# a dead/interrupted job — that is the immortal-beacon fix. An empty pid_start means "legacy/unknown
+# start", so reconcile trusts the live kill -0; this process stands in for a live delegate.
+printf '%s\n' "$$" > "$OSRC_JOBS/lifecycle/pid"
+: > "$OSRC_JOBS/lifecycle/pid_start"
 _heartbeat_active_work && ok "active supervised work keeps the beacon eligible" || bad "active work was not detected"
 printf '%s\n' done > "$OSRC_JOBS/lifecycle/status"
 _heartbeat_active_work && bad "terminal work kept the beacon alive" || ok "beacon exits once supervised work is terminal"
