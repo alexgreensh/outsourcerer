@@ -10372,7 +10372,13 @@ delegate_gmnative() {
     # as effort-less and hard-reject the --effort pair ("--effort is not supported for model ..."). The
     # model itself is valid; only the flag is wrong, so clearing the catalog (below) would be wrong and
     # giving up wastes a healthy lane. Retry ONCE with the flag dropped — the model runs at its default.
-    if [ "${rc:-0}" -ne 0 ] && [ "${#aeffflag[@]}" -gt 0 ] && grep -qi 'not supported for model' "$_aerr" 2>/dev/null; then
+    # The match is ANCHORED to require `--effort` on the SAME stderr line as "not supported for model"
+    # (either order), not a bare substring: a bare "not supported for model" can appear in a MID-run
+    # capability warning, and re-running then would re-execute an already-started task — doubling file
+    # edits in a mutating tier (--dangerously-skip-permissions). The real rejection is a single
+    # pre-execution line naming --effort, so the anchor fires only on it, never on a mid-run diagnostic.
+    if [ "${rc:-0}" -ne 0 ] && [ "${#aeffflag[@]}" -gt 0 ] \
+       && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
       agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \

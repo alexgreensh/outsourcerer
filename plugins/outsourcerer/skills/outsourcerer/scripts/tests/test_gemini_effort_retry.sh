@@ -81,6 +81,27 @@ printf '%s' "$out" | grep -q 'REVIEW_OK' && ok "delegate returned the retried ru
 # 4. It did NOT nuke the healthy catalog for what was only a flag error.
 grep -qi 'refused model' "$TMP/err.txt" && bad "treated the effort error as an invalid-model error (would clear the catalog)" || ok "effort error is not misclassified as an invalid-model error"
 
+# 5. NEGATIVE (locks in a torture-room finding): a BARE "not supported for model" that does NOT name
+#    --effort is a mid-run capability warning, not the pre-execution effort rejection. The match is
+#    anchored to require --effort on the same line, so this must NOT trigger a retry — otherwise a
+#    mutating task that already ran would be re-executed, doubling its file edits.
+cat > "$TMP/bin/agy" <<'STUB2'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'gemini-3.8-flash\tGemini 3.8 Flash\n'; exit 0; fi
+case " $* " in *" --effort "*) echo "call effort=yes" >> "$AGY_CALLS" ;; *) echo "call effort=no" >> "$AGY_CALLS" ;; esac
+# A mid-run diagnostic mentioning a model capability, with NO --effort token, then an unrelated failure.
+echo 'warning: streaming is not supported for model gemini-3.5-flash in headless mode' >&2
+exit 1
+STUB2
+chmod +x "$TMP/bin/agy"
+: > "$AGY_CALLS"
+REST=(review the code); RESOLVED_ID="gemini-flash"; EFFORT="medium"; TTIER=""
+rc2=0
+delegate_gmnative auto >/dev/null 2>&1 || rc2=$?
+calls2="$(wc -l < "$AGY_CALLS" | tr -d ' ')"
+[ "$calls2" = "1" ] && ok "a bare 'not supported for model' (no --effort) does NOT trigger a retry" \
+  || bad "bare capability warning wrongly triggered a retry ($calls2 calls) — would double-run a mutating task"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
