@@ -102,6 +102,26 @@ calls2="$(wc -l < "$AGY_CALLS" | tr -d ' ')"
 [ "$calls2" = "1" ] && ok "a bare 'not supported for model' (no --effort) does NOT trigger a retry" \
   || bad "bare capability warning wrongly triggered a retry ($calls2 calls) — would double-run a mutating task"
 
+# 6. NEGATIVE (spec-conformance finding): a SUCCESSFUL run (exit 0) that merely emits a 'not supported
+#    for model' capability warning must NOT be reclassified as a failure or wipe the cached catalog —
+#    the catalog-clear branch is gated on a nonzero exit.
+cat > "$TMP/bin/agy" <<'STUB3'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'gemini-3.8-flash\tGemini 3.8 Flash\n'; exit 0; fi
+echo 'note: streaming is not supported for model gemini-3.5-flash in headless mode' >&2
+echo 'REVIEW_OK'   # real deliverable on stdout
+exit 0             # SUCCESS
+STUB3
+chmod +x "$TMP/bin/agy"
+mkdir -p "$OSRC_HOME/catalog"; : > "$OSRC_HOME/catalog/gm.txt"   # a cached catalog that must survive
+REST=(review the code); RESOLVED_ID="gemini-flash"; EFFORT="medium"; TTIER=""
+rc3=0; out3="$(delegate_gmnative auto 2>"$TMP/err3.txt")" || rc3=$?
+printf '%s' "$out3" | grep -q 'REVIEW_OK' && ok "a successful run with a capability warning still returns its output" \
+  || bad "a successful run's output was lost: $out3"
+grep -qi 'refused model' "$TMP/err3.txt" \
+  && bad "a SUCCESSFUL run's warning wrongly cleared the catalog (would thrash the catalog on every run)" \
+  || ok "a successful run's 'not supported' warning does not clear the catalog"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

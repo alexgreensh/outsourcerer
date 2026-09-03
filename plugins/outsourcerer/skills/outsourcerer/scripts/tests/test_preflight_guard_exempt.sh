@@ -34,11 +34,14 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # to poison the preflight.
 _blind_turn_guard() { return 1; }
 
-# A preflight of a delegating command (routable cloud model) must NOT come back as 7. In preflight mode
-# the dispatch gate returns before any real work, so this makes no network call and mutates nothing.
-export OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1
+# A preflight of a delegating command (routable cloud model) must NOT come back as 7. Preflight is
+# signaled ONLY by the private argv sentinel `--osrc-preflight-internal` (an inherited env var is now
+# unset and ignored — see test_preflight_env_isolation), so we drive main() with the sentinel exactly
+# as the bg/fanout re-exec does. In preflight mode the dispatch gate returns before any real work, so
+# this makes no network call and mutates nothing.
+export OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1
 rc=0
-( main run -m glm-5.2 "preflight probe" ) >/dev/null 2>&1 || rc=$?
+( main --osrc-preflight-internal run -m glm-5.2 "preflight probe" ) >/dev/null 2>&1 || rc=$?
 if [ "$rc" = "7" ]; then
   bad "preflight of a delegating command still returns 7 (blind-turn guard poisons the preflight)"
 else

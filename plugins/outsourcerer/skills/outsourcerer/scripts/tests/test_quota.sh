@@ -127,7 +127,7 @@ case "$_bad_out" in *"must be a number"*) ok "limits set rejects non-numeric cap
 # INTEGRATION: the route gate via a real preflight (fake droid so nothing dispatches)
 # ---------------------------------------------------------------------------------------------------
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
-run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" run --provider droid -m kimi-k3 "hi" 2>&1; }
+run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 "hi" 2>&1; }
 
 # no quota.json -> normal routing (regression: default path untouched)
 H3="$TMP/h3"; mkdir -p "$H3"
@@ -145,7 +145,7 @@ run_pf "$H5" | grep -q 'RESOLVED lane=droid' && ok "integration: under-cap model
 
 # Pin-scanner parity: a `-m` after --no-advise or --provider= must still count as PINNED, so an at-cap
 # pinned model REFUSES ("pinned choice") instead of silently hopping (torture HIGH: scanner divergence).
-run_pf_flags() { local h="$1"; shift; PATH="$FAKEBIN:$PATH" OSRC_HOME="$h" OSRC_SOURCED= OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" run "$@" 2>&1; }
+run_pf_flags() { local h="$1"; shift; PATH="$FAKEBIN:$PATH" OSRC_HOME="$h" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run "$@" 2>&1; }
 H10="$TMP/h10"; mkdir -p "$H10"; printf '{"models":{"droid:kimi-k3":{"per_day":1,"reset":"utc"}}}\n' > "$H10/quota.json"
 OSRC_HOME="$H10" OSRC_LEDGER_FORCE=1 OSRC_SOURCED=1 bash -c ". \"$SRC\" >/dev/null 2>&1; record_ledger droid kimi-k3 capable run t 0.0 droid"
 out="$(run_pf_flags "$H10" --no-advise --provider droid -m kimi-k3 "hi")"

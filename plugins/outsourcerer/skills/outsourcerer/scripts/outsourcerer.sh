@@ -10439,7 +10439,7 @@ delegate_gmnative() {
       printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
-    elif grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
+    elif [ "${rc:-0}" -ne 0 ] && grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
       # agy refused the id. Its catalog moved under us (or a pin names a retired id): drop the cached
       # catalog so the NEXT run re-reads `agy models` and self-heals, and say how to pin.
       rm -f "$(_catalog_path gm)" 2>/dev/null || true
