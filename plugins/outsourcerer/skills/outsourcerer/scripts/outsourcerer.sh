@@ -16144,6 +16144,14 @@ main() {
   # notice but NEVER overrides the command's own exit code: a successful utility command must not turn
   # non-zero because of unrelated parked fleet state (that broke idempotency contracts on parity-*).
   local _cmd_rc=$?
+  # A route preflight (bg/fanout re-enter the script with OSRC_PREFLIGHT=1) is a DRY dispatch check,
+  # not a real turn end. It must never run the blind-turn guard: doing so made a PASSING preflight
+  # return 7 the moment any delegate needed attention, so accumulated parked work wedged every future
+  # bg/fanout launch with "route preflight returned non-zero" — the tool refusing to start the very
+  # work that would clear the backlog. Preflight returns its own dispatch rc untouched.
+  if [ "${OSRC_PREFLIGHT:-0}" = "1" ]; then
+    return "$_cmd_rc"
+  fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
     watch|status|result|logs|cancel|gc|rundown|bearings|fleet|wait|explain|classify|session|\
