@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.10.5
+
+### Fixed
+
+- **`tab` no longer crashes on an empty-but-existing ledger (#21 follow-up, reported by @asafbendor).** `grep -c` prints `0` and also exits 1 when nothing matches, so the `|| echo 0` after it produced two lines and the arithmetic that followed died with `0\n0: arithmetic syntax error`. A ledger can sit at zero length for a while (a broken `jq` shim makes `record_ledger` return early), and from then on every `tab` failed instead of printing the empty-Tab message. Both counters take the first line and default to 0, a zero-row ledger prints the empty-Tab message, and the same trap in the code-fence counter is closed too. Regression test added.
+
 ## 0.10.4
 
 ### Fixed

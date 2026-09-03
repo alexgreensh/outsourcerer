@@ -147,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.10.4"
+OSRC_VERSION="0.10.5"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -5190,7 +5190,8 @@ _confident_fail() {
   #    that merely mentions ``` inline never trips it. (Deliberately NOT general bracket/quote balancing
   #    across prose — that is a false-positive minefield. And NO trailing-backslash signal — UNC paths /
   #    LaTeX / regex legitimately end in `\`, far too noisy to treat as a cut.)
-  n="$(printf '%s\n' "$a" | grep -cE '^[[:space:]]*```' 2>/dev/null || echo 0)"
+  # grep -c prints "0" AND exits 1 on no match; an "or echo 0" fallback would yield "0\n0" and break arithmetic.
+  n="$(printf '%s\n' "$a" | grep -cE '^[[:space:]]*```' 2>/dev/null | head -1)"; n="${n:-0}"
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   if [ $((n % 2)) -eq 1 ]; then echo "truncation:unterminated-fence"; return 0; fi
   # -- refusal (highest false-positive risk, so the tightest gate): fire ONLY when ALL hold — the answer
@@ -5529,9 +5530,15 @@ cmd_tab() {
   # ledger line (plausible under the flock-fallback append warned about in record_ledger) drops just
   # that row instead of failing the whole `jq -rs` slurp and blanking the entire Tab. Warn on stderr
   # if rows were dropped so a corrupted ledger is visible, not silent.
+  # NOTE: grep -c prints "0" AND exits 1 when nothing matches, so an or-echo-0 fallback after it produced
+  # "0\n0" on an empty-but-existing ledger and the arithmetic below crashed the whole Tab (#21
+  # follow-up). Take the first line and default to 0 instead; an empty ledger is an empty Tab.
   local _tot _good _bad
-  _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null || echo 0)"
-  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null || echo 0)"
+  _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null | head -1)"; _tot="${_tot:-0}"
+  case "$_tot" in ''|*[!0-9]*) _tot=0 ;; esac
+  [ "$_tot" -eq 0 ] && { echo "The Tab is empty (no offloads recorded yet)."; return 0; }
+  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null | head -1)"; _good="${_good:-0}"
+  case "$_good" in ''|*[!0-9]*) _good=0 ;; esac
   _bad=$(( _tot - _good )); [ "$_bad" -lt 0 ] && _bad=0
   jq -R 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | jq -rs '
     # cashnum: numeric magnitude of the cost, treating "~est" as its number and blank/garbage as 0.
@@ -8350,7 +8357,7 @@ _job_json() {
   local st exitc last r=0 w=0 b=0 rp=""
   st="$(_reconcile_status "$id" 2>/dev/null || echo unknown)"
   exitc="$(cat "$jd/exit" 2>/dev/null || true)"; case "$exitc" in ''|*[!0-9-]*) exitc=null ;; esac
-  if [ -s "$L" ]; then   # grep -c already prints a count (incl. 0); no `|| echo 0` (would double-print)
+  if [ -s "$L" ]; then   # grep -c already prints a count (incl. 0); no or-echo-0 fallback (would double-print)
     r=$(grep -aco '"name":"\(Read\|Grep\|Glob\)"' "$L" 2>/dev/null); r=${r:-0}
     w=$(grep -aco '"name":"\(Write\|Edit\|MultiEdit\|NotebookEdit\)"' "$L" 2>/dev/null); w=${w:-0}
     b=$(grep -aco '"name":"Bash"' "$L" 2>/dev/null); b=${b:-0}
