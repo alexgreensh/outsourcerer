@@ -63,6 +63,16 @@ else
   bad "beacon missed a live job — would exit while real work runs"
 fi
 
+# 4. Lost-update guard: a dead-pid job whose status was ALREADY written terminal (the supervisor won
+#    the race and wrote `done`) must NOT be reconciled back to `interrupted`. Reconcile re-reads before
+#    flipping, so a genuinely-finished job is never mislabeled failed by a late reconciler or gc pass.
+mkdir -p "$JOBS/finishedjob"
+echo done   > "$JOBS/finishedjob/status"   # supervisor already wrote the terminal verdict
+echo 999999 > "$JOBS/finishedjob/pid"       # delegate pid is long dead
+got="$(_reconcile_status finishedjob 2>/dev/null || echo '?')"
+[ "$got" = "done" ] && ok "a dead-pid job already marked terminal stays 'done' (no interrupted clobber)" \
+  || bad "reconcile clobbered a terminal 'done' with '$got' (lost update)"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

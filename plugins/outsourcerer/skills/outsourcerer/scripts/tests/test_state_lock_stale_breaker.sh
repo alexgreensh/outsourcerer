@@ -75,6 +75,23 @@ else
 fi
 rm -rf "$lock"
 
+# 4b. OWNERLESS lock (holder killed between mkdir and publishing its owner) is reclaimed once it has
+#     sat past the grace window — the death-proof path can't judge it, so age is the only recourse.
+rm -rf "$lock"; mkdir "$lock"           # a lock dir with NO owner file inside
+touch -t 202001010000 "$lock" 2>/dev/null || true   # backdate well past any grace
+if OSRC_STATE_LOCK_STALE_SECS=1 _state_lock_acquire "$file"; then ok "an aged ownerless lock is reclaimed"; _state_lock_release "$file"; else bad "an aged ownerless lock stayed wedged forever"; fi
+
+# 4c. SAFETY: a FRESH ownerless lock (a winner that just claimed and has not published yet) is NOT
+#     stolen — acquire must fail rather than rob a live, mid-publish winner.
+rm -rf "$lock"; mkdir "$lock"           # brand-new, age ~0, no owner yet
+if OSRC_STATE_LOCK_STALE_SECS=30 _state_lock_acquire "$file"; then
+  bad "a fresh ownerless lock was stolen before its grace elapsed (would rob a live winner)"
+  _state_lock_release "$file"
+else
+  ok "a fresh ownerless lock is respected until its grace elapses"
+fi
+rm -rf "$lock"
+
 # 5. End-to-end: a crashed holder's residue does not stop a real state append from landing.
 mkdir "$lock"; printf '%s %s\n' 999999 'Thu Jan  1 00:00:00 2020' > "$lock/owner"
 if _state_append "$file" '{"probe":1}'; then

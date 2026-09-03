@@ -2755,6 +2755,7 @@ _state_sync() {
 
 _state_lock_acquire() {
   local file="$1" lock tries=0 owner o_pid o_start cur_start _idrc dead corpse
+  local _ownpid _otmp v_pid v_start _lage _grace
   lock="$file.lock"
   _STATE_LOCK_KIND=""
   if command -v flock >/dev/null 2>&1; then
@@ -2769,6 +2770,15 @@ _state_lock_acquire() {
   # names) with a permanent "state lock unavailable". Record the holder's identity on claim so a later
   # waiter can prove death and break a stale lock — unlike an age timer, this never steals a live lock.
   owner="$lock/owner"
+  # Grace window for reclaiming an OWNERLESS lock (holder killed between the mkdir claim and publishing
+  # its owner file). Must exceed the worst-case time a healthy winner takes to publish (a few syscalls,
+  # microseconds normally); the default is deliberately generous so a preempted-but-live winner is never
+  # robbed. Only the ownerless corpse uses it; a lock with a live owner is never age-broken.
+  _grace="${OSRC_STATE_LOCK_STALE_SECS:-30}"
+  # This process's real pid, resolved once: used both to publish our own owner record and to name the
+  # disposable corpse dir when breaking someone else's. Set before the loop so the contention path
+  # (where the claim block never runs) still has it under `set -u`.
+  _ownpid="${BASHPID:-$$}"
   while [ "$tries" -lt 50 ]; do
     if _mkdir_claim "$lock"; then
       # Record the REAL holder pid, not $$: inside a subshell (a command substitution, say) $$ is still
@@ -2777,13 +2787,17 @@ _state_lock_acquire() {
       # ${BASHPID:-$$} is the subshell's own pid on bash 4+ (fully subshell-safe) and degrades to $$ on
       # bash 3.2 (macOS default, which has no BASHPID) — still a strict improvement, since a crashed
       # main process's $$ is genuinely dead and therefore breakable. This matches the codebase idiom.
-      local _ownpid="${BASHPID:-$$}"
-      printf '%s %s\n' "$_ownpid" "$(_pid_start_identity "$_ownpid" 2>/dev/null)" > "$owner" 2>/dev/null || true
+      _ownpid="${BASHPID:-$$}"
+      # Publish the owner record ATOMICALLY (write a sibling temp, then rename into place): a concurrent
+      # waiter's `read` of $owner must never observe a half-written line and misjudge a live holder.
+      _otmp="$lock.own.$_ownpid.$RANDOM"
+      if printf '%s %s\n' "$_ownpid" "$(_pid_start_identity "$_ownpid" 2>/dev/null)" > "$_otmp" 2>/dev/null; then
+        mv -f "$_otmp" "$owner" 2>/dev/null || rm -f "$_otmp" 2>/dev/null
+      fi
       _STATE_LOCK_KIND="mkdir"; return 0
     fi
-    # Contention: break the lock ONLY if its recorded owner is provably dead. Never break on a live
-    # owner, an absent/unreadable owner (the winner may not have written it yet), or an unprovable read
-    # (`ps` itself failing) — every one of those falls through to sleep-and-retry, failing safe.
+    # Contention: break the lock ONLY if we can PROVE it is abandoned. Never break a live owner or a
+    # just-claimed lock whose winner has not published yet — those fall through to sleep-and-retry.
     if [ -f "$owner" ]; then
       o_pid=""; o_start=""
       read -r o_pid o_start < "$owner" 2>/dev/null || true
@@ -2795,14 +2809,31 @@ _state_lock_acquire() {
           if [ "$_idrc" -eq 2 ]; then dead=1                                                   # ps works, pid gone
           elif [ "$_idrc" -eq 0 ] && [ -n "$o_start" ] && [ "$cur_start" != "$o_start" ]; then dead=1; fi  # pid reused
           if [ "$dead" -eq 1 ]; then
-            # Claim the corpse by atomic rename: only ONE waiter can win the mv, so no waiter can ever
-            # delete another waiter's freshly acquired lock. The winner discards it; the next iteration
-            # re-races the normal atomic mkdir. A losing mv just falls through and retries.
-            corpse="$lock.stale.$$.$RANDOM"
-            mv "$lock" "$corpse" 2>/dev/null && rm -rf "$corpse" 2>/dev/null
+            # RE-READ the owner immediately before breaking. Between the death proof above (a slow `ps`
+            # fork, milliseconds) and this mv, another waiter may have already broken the lock and a
+            # THIRD process legitimately re-claimed it — its fresh owner record differs from the dead one
+            # we judged. Abort unless the owner is STILL the exact dead record, so we never rename away a
+            # live lock. (Path rename has no CAS; this shrinks the residual race to a local re-read.)
+            v_pid=""; v_start=""
+            read -r v_pid v_start < "$owner" 2>/dev/null || true
+            if [ "$v_pid" = "$o_pid" ] && [ "$v_start" = "$o_start" ]; then
+              corpse="$lock.stale.$_ownpid.$RANDOM"
+              mv "$lock" "$corpse" 2>/dev/null && rm -rf "$corpse" 2>/dev/null
+            fi
           fi
           ;;
       esac
+    else
+      # OWNERLESS lock: a holder killed in the gap between `_mkdir_claim` and publishing its owner file
+      # leaves a dir that the death-proof branch above can never reclaim (no owner to judge). Break it
+      # only once it has sat ownerless past the grace window — a healthy winner publishes far faster, so
+      # its brand-new, not-yet-published lock is younger than the grace and is never stolen.
+      _lage="$(_mtime "$lock" 2>/dev/null || echo 0)"
+      case "$_lage" in ''|*[!0-9]*) _lage=0 ;; esac
+      if [ "$_lage" -gt 0 ] && [ "$(( $(date +%s) - _lage ))" -ge "$_grace" ]; then
+        corpse="$lock.stale.$_ownpid.$RANDOM"
+        mv "$lock" "$corpse" 2>/dev/null && rm -rf "$corpse" 2>/dev/null
+      fi
     fi
     sleep 0.1
     tries=$((tries + 1))
@@ -7881,7 +7912,13 @@ cmd_bg() {
   # caller's depth (it no longer resets it) so route_delegate's guard trips there too as a backstop.
   local -a _pf_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _pf_provider=(--provider "$PROVIDER")
-  _pfout="$(OSRC_PREFLIGHT=1 OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
+  # Signal preflight via a PRIVATE ARGV SENTINEL, not an env var. An env `OSRC_PREFLIGHT=1` would be
+  # INHERITED by a normal top-level invocation (dotfiles, direnv, CI, a wrapper) and silently turn a
+  # real run into a dispatch-suppressing no-op that skips the cloud/secret gate and reports fake
+  # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
+  # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
+  # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
+  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -8306,18 +8343,31 @@ _reconcile_status() {
           _live_stime="$(ps -o lstart= -p "$_spid" 2>/dev/null | tr -s ' ')"
           _saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
           # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
-        # pid REUSE. So an empty live start-time (a transient `ps` glitch on a genuinely live pid) must
-        # NOT flip it to dead — that would fail-unsafe, letting the heartbeat abandon live work on a
-        # momentary ps hiccup. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT start time.
-        { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+          # pid REUSE. An empty live start-time (a transient `ps` glitch, or a host whose `ps` cannot
+          # report lstart at all) must NOT flip a kill-0-alive pid to dead — that fail-unsafe would let
+          # the heartbeat abandon live work. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT
+          # start time. (On a ps-less host, saved_stime is empty too, so the first clause keeps it alive
+          # via kill -0 alone — pid-reuse detection is simply unavailable there, an accepted platform limit.)
+          { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
         fi
       fi
       if [ "$_alive" = "0" ]; then
-        if [ "${OSRC_RECONCILE_READ_ONLY:-0}" != "1" ]; then
-          echo interrupted > "$jd/status" 2>/dev/null
-          [ -s "$jd/reason" ] || printf 'interrupted:dead-running-job\n' > "$jd/reason" 2>/dev/null || true
-        fi
-        st="interrupted"
+        # Re-read the status immediately before flipping it. Since `st` was sampled at the top, the
+        # job's own supervisor may have written a real terminal verdict (done/failed/blocked) in the
+        # window while we ran the ps/kill probes — its process death is exactly what made _alive=0.
+        # Overwrite ONLY if the status is STILL a non-terminal running-state; otherwise honor the fresh
+        # verdict, so a genuinely-successful job is never mislabeled `interrupted` (lost update).
+        local _now_st; _now_st="$(cat "$jd/status" 2>/dev/null || echo running)"
+        case "$_now_st" in
+          running|stalled\?|exploring\?)
+            [ "${OSRC_RECONCILE_READ_ONLY:-0}" = "1" ] || {
+              echo interrupted > "$jd/status" 2>/dev/null
+              [ -s "$jd/reason" ] || printf 'interrupted:dead-running-job\n' > "$jd/reason" 2>/dev/null || true
+            }
+            st="interrupted"
+            ;;
+          *) st="$_now_st" ;;
+        esac
       fi
       ;;
     launching)
@@ -9361,15 +9411,14 @@ cmd_gc() {
     if [ "$auto" = 1 ] && [ "$checked" -ge "$cap" ]; then break; fi
     checked=$((checked+1))
     st="$(cat "$d/status" 2>/dev/null || echo running)"
-    # Auto-heal: a running job whose PID is dead is reaped.
-    if [ "$st" = "running" ]; then
-      local _gpid; _gpid="$(cat "$d/pid" 2>/dev/null)"
-      if [ -n "$_gpid" ] && ! kill -0 "$_gpid" 2>/dev/null; then
-        echo interrupted > "$d/status"
-        [ -s "$d/reason" ] || printf 'interrupted:gc-reaped-dead-running\n' > "$d/reason" 2>/dev/null || true
-        st="interrupted"
-      fi
-    fi
+    # Auto-heal a stale non-terminal job through the SHARED reconciler instead of an ad-hoc pid check.
+    # The old inline check looked at the delegate pid only (never the supervisor) and wrote `interrupted`
+    # without re-reading — so a job whose supervisor wrote `done` in the same instant got its success
+    # clobbered to a bogus `interrupted` (a lost update that misreported a good job as failed). The
+    # reconciler checks both pids and re-reads before flipping, so it can only reap a truly-dead job.
+    case "$st" in
+      running|stalled\?|exploring\?|launching) st="$(_reconcile_status "$(basename "$d")" 2>/dev/null || echo "$st")" ;;
+    esac
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
       *) skipped=$((skipped+1)); continue ;;
     esac
@@ -10390,7 +10439,7 @@ delegate_gmnative() {
       printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
-    elif grep -qiE 'invalid model selection|not recognized as a known model' "$_aerr" 2>/dev/null; then
+    elif grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
       # agy refused the id. Its catalog moved under us (or a pin names a retired id): drop the cached
       # catalog so the NEXT run re-reads `agy models` and self-heals, and say how to pin.
       rm -f "$(_catalog_path gm)" 2>/dev/null || true
@@ -16057,6 +16106,15 @@ main() {
   # prompt/reader in THAT process still match each other.
   [ -n "${OSRC_MARK:-}" ] || OSRC_MARK="$(_new_mark)"
   export OSRC_MARK
+  # SECURITY: preflight is signaled ONLY by our own re-exec's private argv sentinel, never a trusted
+  # env var. OSRC_PREFLIGHT gates a dispatch-suppressing no-op that returns 0 BEFORE the cloud/secret
+  # gate and before dispatch; an INHERITED `OSRC_PREFLIGHT=1` (dotfiles, direnv, CI, a wrapper) would
+  # silently turn every real run into a fake-success no-op that skips the credential hard-block — the
+  # inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. So: drop any inherited
+  # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
+  # inspection below so the sentinel is consumed and the real subcommand lands in $1.
+  unset OSRC_PREFLIGHT
+  if [ "${1:-}" = "--osrc-preflight-internal" ]; then OSRC_PREFLIGHT=1; shift; fi
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
