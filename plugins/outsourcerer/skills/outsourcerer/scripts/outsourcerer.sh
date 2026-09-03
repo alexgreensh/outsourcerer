@@ -2771,7 +2771,14 @@ _state_lock_acquire() {
   owner="$lock/owner"
   while [ "$tries" -lt 50 ]; do
     if _mkdir_claim "$lock"; then
-      printf '%s %s\n' "$$" "$(_pid_start_identity "$$" 2>/dev/null)" > "$owner" 2>/dev/null || true
+      # Record the REAL holder pid, not $$: inside a subshell (a command substitution, say) $$ is still
+      # the PARENT pid, so a subshell that acquired the lock then crashed would name the long-lived
+      # parent as owner — waiters would see it alive and never break the lock, recreating the wedge.
+      # ${BASHPID:-$$} is the subshell's own pid on bash 4+ (fully subshell-safe) and degrades to $$ on
+      # bash 3.2 (macOS default, which has no BASHPID) — still a strict improvement, since a crashed
+      # main process's $$ is genuinely dead and therefore breakable. This matches the codebase idiom.
+      local _ownpid="${BASHPID:-$$}"
+      printf '%s %s\n' "$_ownpid" "$(_pid_start_identity "$_ownpid" 2>/dev/null)" > "$owner" 2>/dev/null || true
       _STATE_LOCK_KIND="mkdir"; return 0
     fi
     # Contention: break the lock ONLY if its recorded owner is provably dead. Never break on a live
@@ -8285,7 +8292,11 @@ _reconcile_status() {
       if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
         _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
         _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
-        { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+        # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
+        # pid REUSE. So an empty live start-time (a transient `ps` glitch on a genuinely live pid) must
+        # NOT flip it to dead — that would fail-unsafe, letting the heartbeat abandon live work on a
+        # momentary ps hiccup. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT start time.
+        { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
       fi
       if [ "$_alive" = "0" ]; then
         _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
@@ -8294,7 +8305,11 @@ _reconcile_status() {
           # a dead job just because some unrelated process now holds that number.
           _live_stime="$(ps -o lstart= -p "$_spid" 2>/dev/null | tr -s ' ')"
           _saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
-          { [ -z "$_saved_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+          # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
+        # pid REUSE. So an empty live start-time (a transient `ps` glitch on a genuinely live pid) must
+        # NOT flip it to dead — that would fail-unsafe, letting the heartbeat abandon live work on a
+        # momentary ps hiccup. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT start time.
+        { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
         fi
       fi
       if [ "$_alive" = "0" ]; then
@@ -10357,7 +10372,7 @@ delegate_gmnative() {
     # as effort-less and hard-reject the --effort pair ("--effort is not supported for model ..."). The
     # model itself is valid; only the flag is wrong, so clearing the catalog (below) would be wrong and
     # giving up wastes a healthy lane. Retry ONCE with the flag dropped — the model runs at its default.
-    if [ "${#aeffflag[@]}" -gt 0 ] && grep -qi 'not supported for model' "$_aerr" 2>/dev/null; then
+    if [ "${rc:-0}" -ne 0 ] && [ "${#aeffflag[@]}" -gt 0 ] && grep -qi 'not supported for model' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
       agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
