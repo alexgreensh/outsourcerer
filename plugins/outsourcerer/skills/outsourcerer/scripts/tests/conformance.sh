@@ -89,14 +89,21 @@ _ALL_SUITES="$_ALL_SUITES test_gemini_effort_retry"
 _ALL_SUITES="$_ALL_SUITES test_preflight_guard_exempt"
 _ALL_SUITES="$_ALL_SUITES test_preflight_env_isolation"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_arm_liveness test_heartbeat_autoarm test_heartbeat_stale_alarm test_heartbeat_rearm_command"
+_ALL_SUITES="$_ALL_SUITES test_tier_churn"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say
     # "test_x FAILED" and nothing else, which is the difference between a fixable report and a mystery.
     # Static suites must not inherit a live status beacon.  It can outlive a
     # focused test and perturb unrelated supervisor-label assertions.
-    _out="$(OSRC_HEARTBEAT_DISABLED=1 bash "$SCRIPT_DIR/$t.sh" 2>&1)"
-    if [ $? -eq 0 ]; then ok "unit suite $t green"
+    # Fresh OSRC_HOME per suite: a shared home let one suite's jobs/sessions/locks/registry state
+    # perturb a later tmux/session-heavy suite, so suites that pass standalone failed only in the
+    # aggregate. Isolate the state (a suite that sets its own OSRC_HOME still overrides this).
+    _sh="$(mktemp -d)"
+    _out="$(OSRC_HOME="$_sh" OSRC_HEARTBEAT_DISABLED=1 bash "$SCRIPT_DIR/$t.sh" 2>&1)"
+    _rc=$?
+    rm -rf "$_sh" 2>/dev/null
+    if [ "$_rc" -eq 0 ]; then ok "unit suite $t green"
     else
       bad "unit suite $t FAILED"
       printf '%s\n' "$_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
