@@ -44,6 +44,10 @@ while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
   # the same fixed identity (a PATH wrapper on ps would not reach _heartbeat_leader_alive, which
   # calls _pid_start_identity without a PATH prefix).
   _pid_start_identity(){ printf 'Thu Jul 31 01:02:03 2026\n'; }
+  # binds liveness to the beacon IDENTITY too: the recorded pid's ps command must carry
+  # the __heartbeat-beacon argv marker. This block's claims are made for $$ (a plain bash), so the
+  # OSRC_TEST_PS_ARGV injection seam (OSRC_TEST_MODE=1 only) stands in for a real beacon argv.
+  export OSRC_TEST_MODE=1 OSRC_TEST_PS_ARGV="/bin/bash $SRC __heartbeat-beacon first"
   start="$(_pid_start_identity "$$")"
   # No leader yet -> not alive.
   _heartbeat_leader_alive && { echo "FAIL: leader reported alive with no owner.json"; exit 1; }
@@ -69,6 +73,9 @@ while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
   . "$SRC" >/dev/null 2>&1
   _state_sync(){ return 0; }
   _pid_start_identity(){ printf 'Thu Jul 31 01:02:03 2026\n'; }
+  # the live leader claim is for $$, so the beacon-argv identity check is satisfied
+  # through the OSRC_TEST_PS_ARGV injection seam (OSRC_TEST_MODE=1 only).
+  export OSRC_TEST_MODE=1 OSRC_TEST_PS_ARGV="/bin/bash $SRC __heartbeat-beacon single-instance"
   # Clean up any leader from the previous test block (subshells share OSRC_HOME).
   rm -rf "$OSRC_HEARTBEAT/leader" 2>/dev/null || true
   start="$(_pid_start_identity "$$")"
@@ -222,6 +229,10 @@ SH
   . "$SRC" >/dev/null 2>&1
   _state_sync(){ return 0; }
   _pid_start_identity(){ printf 'Thu Jul 31 01:02:03 2026\n'; }
+  # the live claim below is for $$, so the beacon-argv identity check is satisfied
+  # through the OSRC_TEST_PS_ARGV injection seam (OSRC_TEST_MODE=1 only). The zombie rejection
+  # is a real-ps check and is not affected by the argv seam.
+  export OSRC_TEST_MODE=1 OSRC_TEST_PS_ARGV="/bin/bash $SRC __heartbeat-beacon eviction"
   rm -rf "$OSRC_HEARTBEAT/leader" 2>/dev/null || true
   # Plant a stale claim with a dead pid.
   owner="$OSRC_HEARTBEAT/leader/owner.json"
@@ -261,7 +272,7 @@ SH
 #!/usr/bin/env bash
 mkdir -p "$OSRC_HEARTBEAT/leader"
 printf '%s\n' "$$" > "$HB_CHILD_PID"
-jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" '{pid:$pid,pid_start:$start,token:"unreadable"}' > "$OSRC_HEARTBEAT/leader/owner.json"
+jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" --arg token "${OSRC_HEARTBEAT_TOKEN:-unreadable}" '{pid:$pid,pid_start:$start,token:$token}' > "$OSRC_HEARTBEAT/leader/owner.json"
 sleep 5
 SH
   chmod +x "$fake"
@@ -293,7 +304,7 @@ SH
 #!/usr/bin/env bash
 mkdir -p "$OSRC_HEARTBEAT/leader"
 printf '%s\n' "$$" > "$HB_CHILD_PID"
-jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" '{pid:$pid,pid_start:$start,token:"reused"}' > "$OSRC_HEARTBEAT/leader/owner.json"
+jq -cn --argjson pid "$$" --arg start "Mon Jan 1 00:00:00 2024" --arg token "${OSRC_HEARTBEAT_TOKEN:-reused}" '{pid:$pid,pid_start:$start,token:$token}' > "$OSRC_HEARTBEAT/leader/owner.json"
 sleep 5
 SH
   chmod +x "$fake"

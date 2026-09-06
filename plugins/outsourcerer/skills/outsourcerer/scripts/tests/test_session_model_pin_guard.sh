@@ -51,12 +51,12 @@ Usage: has-short [options]
   -h, --help   Show help
 HELP
 EOF
-# no-flag: documents NO model flag (the droid shape)
-cat > "$BIN/no-flag" <<'EOF'
+# noflag: documents NO model flag (the droid shape)
+cat > "$BIN/noflag" <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" = "--help" ] || exit 0
 cat <<'HELP'
-Usage: no-flag [options] [prompt...]
+Usage: noflag [options] [prompt...]
   --auto <level>   Autonomy
   -h, --help       Show help
 HELP
@@ -118,7 +118,7 @@ else
   no "assert_model_pinnable: lane with -m only wrongly refused: $(cat "$TMP/e2")"
 fi
 # REFUSES when no model flag is documented (the droid shape), naming the lane + "model".
-_rc=0; ( _session_assert_model_pinnable droid no-flag --help ) >"$TMP/o3" 2>"$TMP/e3" || _rc=$?
+_rc=0; ( _session_assert_model_pinnable droid noflag --help ) >"$TMP/o3" 2>"$TMP/e3" || _rc=$?
 if [ "$_rc" -ne 0 ] && grep -qi 'droid' "$TMP/e3" && grep -qi 'model' "$TMP/e3"; then
   ok "assert_model_pinnable: lane with NO model flag REFUSES naming the lane + model"
 else

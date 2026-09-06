@@ -376,8 +376,9 @@ _devin_autonomous_restricted_notice() {
 # contract). SECURITY/ROBUSTNESS: brief/mode are READ-ONLY prints, they NEVER prompt
 # (a prompt would hang bg/CI), always print to stderr-safe channels, and validate the stored value.
 OSRC_MODE_FILE="$OSRC_HOME/mode"
-# Conserve trigger: route grind OFF the Claude session once the 5-hour window crosses this %.
-# Default 50% (conserve once the window is half-spent). Tunable per-user/CI.
+# Conserve trigger: route grind OFF the Claude session once EITHER Claude window (5-hour OR weekly/7d,
+# whichever is more-spent) crosses this %. Weekly is usually the binding cap, so a fresh 5h window can't
+# hide a nearly-gone week. Default 50% (conserve once the binding window is half-spent). Tunable per-user/CI.
 OSRC_CONSERVE_THRESHOLD="${OSRC_CONSERVE_THRESHOLD:-50}"
 
 _mode_meaning() {
@@ -475,6 +476,7 @@ haiku|haiku|cc|budget
 claude-opus-4-8|claude-opus-4-8|cc|frontier
 claude-opus-5|claude-opus-5|cc|frontier
 claude-fable-5|claude-fable-5|cc|frontier
+claude-fable-5-1|claude-fable-5-1|cc|frontier
 claude-sonnet-5|claude-sonnet-5|cc|mid
 claude-haiku-4-5-20251001|claude-haiku-4-5-20251001|cc|budget
 glm|z-ai/glm-5.2|or|capable
@@ -830,6 +832,7 @@ parse_model() {
       *)                    REST+=("$1"); shift ;;
     esac
   done
+  _floor_effort_for_model   # GPT-6/Astra: floor none|minimal -> low (they hard-error otherwise)
 }
 
 # Which Devin model serves an OpenRouter-lane alias (cross-lane sibling), empty if none.
@@ -860,6 +863,23 @@ _deepseek_effort_suffix() {
     medium|high) printf 'high' ;;
     xhigh|max)   printf 'max' ;;
     *)           printf 'high' ;;   # no effort pinned -> safe default
+  esac
+}
+
+# GPT-6 / Astra dropped `none` and `minimal` reasoning effort — codex hard-errors on them ("--effort
+# is not supported ..."). Floor those two to `low` when the target model is that family, so
+# `-m gpt-6 --effort minimal` runs instead of failing. Keyed on model FAMILY (version-agnostic:
+# gpt-6/astra and any future codename), so it never touches Claude (whose MAX_THINKING_TOKENS map
+# handles minimal=0) or other codex models that still accept minimal. Mutates the global EFFORT once
+# in the parser, so every downstream `-c model_reasoning_effort=` site inherits the safe value.
+_floor_effort_for_model() {
+  case "${MODEL:-}" in
+    *astra*|*gpt-6*)
+      case "${EFFORT:-}" in
+        none|minimal)
+          printf '>>> [effort] %s unsupported on %s; floored to low\n' "$EFFORT" "$MODEL" >&2
+          EFFORT=low ;;
+      esac ;;
   esac
 }
 
@@ -947,7 +967,7 @@ _devin_free_or_alias() {
 # Kept in one place so the detector and the line-extractor match identically. It is a best-effort FAMILY
 # of phrasings (Devin's exact wording is not pinned in code); it is only ever consulted after a free-tier
 # model already FAILED, and it only upgrades an advisory message. CONTEXT-ANCHORED (v0.6.2 follow-on,
-# per focused torture F1+F2): a money/quota noun only counts as a refusal when it sits beside a refusal
+# per hardening): a money/quota noun only counts as a refusal when it sits beside a refusal
 # verb (limit/cap/exceeded/insufficient/expired/required/remaining...). This both COVERS the canonical
 # wordings the bare list missed (402/payment required/subscription expired/credit limit/usage cap) AND
 # drops the bare-term false positives (a stray "billing"/"quota"/"exhausted all retry attempts" is no
@@ -1892,10 +1912,15 @@ lane_from_name() {
 tier_from_name() {    # <model-id> -> capable|frontier|budget by name regex, or nonzero if unrecognized.
   # CAPABILITY signal, checked BEFORE price: strong open-weight families are budget-PRICED but
   # frontier-CAPABILITY, so name (which knows the family) must beat price (which only knows cost).
+  # Size suffix (mini/lite/nano/...) is checked FIRST and OUTRANKS family: a mini/lite variant of
+  # ANY family is a small model and gets the budget scaffold, so a new frontier family can't be
+  # mis-promoted (gpt-6-mini stays budget, not frontier). Family tokens are version-AGNOSTIC globs
+  # (hy[0-9], gpt-6, astra) so genuinely new releases route correctly with no table edit: this is
+  # the churn seam — a new hy4/hy5 or a GPT-6 codename tiers right the day it ships.
   case "$1" in
-    *glm*|*deepseek*|*kimi*|*qwen*|*minimax*|*hy3*|*hunyuan*|*llama-4*|*mistral-large*) echo capable ;;
-    *opus*|*fable*|*gpt-5.6*|*sol*|*terra*|*o1-pro*|*o3-pro*) echo frontier ;;
     *mini*|*lite*|*nano*|*tiny*|*micro*|*flash-lite*|*swe-*|*haiku*) echo budget ;;
+    *glm*|*deepseek*|*kimi*|*qwen*|*minimax*|*hy[0-9]*|*hunyuan*|*llama-4*|*mistral-large*) echo capable ;;
+    *opus*|*fable*|*gpt-5.6*|*gpt-6*|*astra*|*sol*|*terra*|*o1-pro*|*o3-pro*) echo frontier ;;
     *) return 1 ;;   # unrecognized -> caller falls through to price, then default mid
   esac
 }
@@ -2039,6 +2064,18 @@ any lines starting with OSRC::.
 <task>
 {{TASK}}
 </task>
+
+Completion (finish the whole task, do not just plan it):
+- Complete this end to end. Make routine, reversible decisions yourself.
+  Treat the request as authorization: do the authorized work, THEN report.
+- Do NOT stop after describing a plan, and do NOT ask permission for steps
+  already included in the task. Ask only for a destructive/irreversible
+  action, a material scope change, or information only the user can provide.
+  (Newer frontier models default to asking too early; override that here.)
+- Before finishing, verify your own work (run it, re-read the diff, or
+  cross-check against the source) and state what you checked. Report any
+  failed, skipped, or unverified work plainly; never a confident claim
+  without evidence behind it.
 
 Liveness protocol (monitoring, not hand-holding):
 - When you start a distinct phase of work, print one line: OSRC::PROGRESS <short phase note>
@@ -2401,6 +2438,7 @@ _consume_flags() {
     esac
   done
   REST=("$@")
+  _floor_effort_for_model   # GPT-6/Astra: floor none|minimal -> low (parity with parse_model)
 }
 
 # _effort_thinking_tokens <effort> -> MAX_THINKING_TOKENS budget for the Claude (cc/native) lanes.
@@ -2567,7 +2605,7 @@ _quota_cap() {  # <lanekey> <model>
   local key="$1:$2" out
   # `per_day|floor`: a hand-edited FLOAT cap (e.g. 1.5) is a valid JSON number but makes the gate's
   # integer `-ge` compare error out, get swallowed by 2>/dev/null, and fall through to GO — a silent
-  # fail-OPEN (torture F1). Flooring at the source hands the gate/reason a clean integer (1.5->1).
+  # fail-OPEN (hardening). Flooring at the source hands the gate/reason a clean integer (1.5->1).
   out="$(jq -r --arg k "$key" --arg m "$2" '
       (.models[$k] // .models[$m]) as $e
       | if ($e|type)=="object" and ($e.per_day|type)=="number"
@@ -2610,7 +2648,7 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
   if [ "$v" -gt "$now" ]; then return 0; fi
   # Expired -> purge on read, but VALUE-MATCHED: only delete if the file still holds the same expired
   # value we read. A sibling child can write a FRESH (future) refusal marker in the window between our
-  # read and this rm; a blind delete-by-path would silently drop that refusal signal (torture #2). The
+  # read and this rm; a blind delete-by-path would silently drop that refusal signal (hardening). The
   # re-read shrinks the race to a microsecond and never deletes a value we didn't confirm expired.
   local cur; cur="$(_posture_get "$1" "quota-$slug" 2>/dev/null)"
   [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$1.quota-$slug" 2>/dev/null
@@ -4096,6 +4134,27 @@ $id
   done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE")
 }
 
+# _wake_pending <event_id> -> 0 if an UNACKED event with this id is already in the wake queue.
+# Used by the stale-signature wake pass (generation-independent event ids): one pending alarm per
+# (session, state) -- the event stays queued until delivered, and re-fires after ack if the session
+# is still stale on a later generation. Same queue/ack read pattern as _wake_drain; bash 3.2-safe.
+_wake_pending() {
+  local event_id="$1" acks line id
+  case "$event_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  acks="$(_state_jsonl_read "$OSRC_WAKE_ACK" 2>/dev/null | jq -r '.event_id // empty' 2>/dev/null)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id="$(printf '%s' "$line" | jq -r '.event_id // empty')"
+    [ "$id" = "$event_id" ] || continue
+    case "
+$acks
+" in *"
+$event_id
+"*) ;; *) return 0 ;; esac
+  done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE")
+  return 1
+}
+
 _wake_consume() {
   # The durable log is the authority sink.  Attached output is best-effort but
   # unacknowledged on failure, so its next heartbeat retries the same wake.
@@ -4109,6 +4168,48 @@ _wake_consume() {
     _heartbeat_emit_attached "$line" || continue
     _wake_ack "$id" || return 1
   done < <(_wake_drain)
+}
+
+# _wake_rearm_id <event_id>: retire the delivered (acked) traces of a generation-independent stale
+# event id so a fresh alarm under the SAME id is deliverable and deduped correctly. Ack records are
+# per-id -- one logical event per id -- so a re-arm CONSUMES the ack: without this, _wake_drain
+# would suppress the fresh event by id for as long as the delivered copies linger in the queue
+# (compaction is threshold-gated), and every tick would append another undeliverable copy. Other
+# events' queue lines and acks are untouched. Crash-safe ordering: the ack is dropped BEFORE the
+# queue lines, so an interrupted re-arm can only lose an ack (re-delivery), never trap an event
+# behind a dead ack. Same locked-rewrite pattern as _wake_queue_compact: the QUEUE snapshot and
+# its rewrite BOTH run under the WAKE_QUEUE lock -- reading the queue before the lock
+# let a concurrently appended wake land between snapshot and rewrite and be clobbered by the
+# stale-snapshot rewrite, silently dropping a live alarm. Under the lock, an append either lands
+# before the drain (included in the kept set) or after the rename (appended to the new file).
+_wake_rearm_id() {
+  local event_id="$1" kept_q="" kept_a="" id line rc=0
+  have jq || return 1
+  case "$event_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -f "$OSRC_WAKE_QUEUE" ] && [ ! -L "$OSRC_WAKE_QUEUE" ] || return 0
+  if [ -f "$OSRC_WAKE_ACK" ] && [ ! -L "$OSRC_WAKE_ACK" ]; then
+    # F3.1: read INSIDE the lock (mirrors the queue path below) so a concurrent _wake_ack
+    # landing between read and rewrite is not clobbered.
+    _state_lock_acquire "$OSRC_WAKE_ACK" || return 1
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      id="$(printf '%s' "$line" | jq -r '.event_id // empty' 2>/dev/null)"
+      [ "$id" = "$event_id" ] || kept_a="${kept_a:+$kept_a
+}$line"
+    done < <(_state_jsonl_read "$OSRC_WAKE_ACK" 2>/dev/null)
+    _state_file_rewrite_locked "$OSRC_WAKE_ACK" "$kept_a" || rc=1
+    _state_lock_release "$OSRC_WAKE_ACK" || rc=1
+  fi
+  _state_lock_acquire "$OSRC_WAKE_QUEUE" || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id="$(printf '%s' "$line" | jq -r '.event_id // empty' 2>/dev/null)"
+    [ "$id" = "$event_id" ] || kept_q="${kept_q:+$kept_q
+}$line"
+  done < <(_state_jsonl_read "$OSRC_WAKE_QUEUE" 2>/dev/null)
+  _state_file_rewrite_locked "$OSRC_WAKE_QUEUE" "$kept_q" || rc=1
+  _state_lock_release "$OSRC_WAKE_QUEUE" || rc=1
+  return "$rc"
 }
 
 _pid_start_valid() {
@@ -4137,6 +4238,36 @@ _pid_start_identity() {
   if _pid_start_valid "$self_marker"; then
     return 2
   fi
+  return 1
+}
+
+_heartbeat_pid_state() { # <pid> -> prints the ps stat= marker (empty on unreadable/unsupported)
+  local pid="$1" state
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live discriminators
+  # (_heartbeat_leader_alive, _heartbeat_leader_evict_stale, the _heartbeat_start confirm loop)
+  # can be exercised deterministically without forking real corpses. Honored ONLY under
+  # OSRC_TEST_MODE=1, same discipline as the _timeout injection seam: a stray export can never
+  # reach a production liveness decision.
+  if [ "${OSRC_TEST_MODE:-0}" = 1 ] && [ -n "${OSRC_TEST_PS_STATE:-}" ]; then
+    printf '%s\n' "${OSRC_TEST_PS_STATE//[[:space:]]/}"
+    return 0
+  fi
+  state="$(LC_ALL=C ps -o stat= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$state" ] || return 1
+  printf '%s\n' "$state"
+}
+
+_heartbeat_pid_is_beacon() { # <pid> -> 0 if the pid's ps command carries the __heartbeat-beacon marker
+  local pid="$1" cmd
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  # OSRC_TEST_PS_ARGV injects the command line (same seam discipline: OSRC_TEST_MODE=1 only).
+  if [ "${OSRC_TEST_MODE:-0}" = 1 ] && [ -n "${OSRC_TEST_PS_ARGV:-}" ]; then
+    cmd="$OSRC_TEST_PS_ARGV"
+  else
+    cmd="$(LC_ALL=C ps -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  fi
+  case "$cmd" in *"__heartbeat-beacon"*) return 0 ;; esac
   return 1
 }
 
@@ -4196,7 +4327,7 @@ _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
 }
 
 _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
-  local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record
+  local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record grace lage corpse
   if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
     [ ! -L "$lock.flock" ] || return 1
     exec 8>"$lock.flock" 2>/dev/null || return 1
@@ -4205,8 +4336,27 @@ _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
     return 0
   fi
   _heartbeat_reclaim_dead_pending "$lock" || return 1
+  # a crash (SIGKILL, power loss) between the mkdir claim and the owner.json publish
+  # leaves the canonical election dir OWNERLESS. The pending-sibling reclaim above never touches
+  # it, and on no-flock hosts (stock macOS) this mkdir path has no other recovery: every later
+  # acquire returned 1 here forever, wedging the election -- and supervision -- permanently.
+  # Reuse the _state_lock_acquire stale-breaker pattern: break an ownerless dir ONLY once it has
+  # sat ownerless past the grace window (a healthy winner publishes in microseconds, so its
+  # brand-new, not-yet-published claim is younger than the grace and is never stolen). A dir with
+  # a LIVE owner's record is still only recoverable by the positive death-proof below, never by age.
+  grace="${OSRC_STATE_LOCK_STALE_SECS:-30}"
   while [ -d "$lock" ]; do
     owner="$lock/owner.json"
+    if [ ! -f "$owner" ] || [ -L "$owner" ]; then
+      lage="$(_mtime "$lock" 2>/dev/null || echo 0)"
+      case "$lage" in ''|*[!0-9]*) lage=0 ;; esac
+      if [ "$lage" -gt 0 ] && [ "$(( $(date +%s) - lage ))" -ge "$grace" ]; then
+        corpse="$lock.stale.$$.$RANDOM"
+        mv "$lock" "$corpse" 2>/dev/null && _heartbeat_remove_tree "$corpse" 2>/dev/null
+        continue
+      fi
+      return 1
+    fi
     old_pid="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 1
     old_start="$(jq -r '.pid_start // empty' "$owner" 2>/dev/null)" || return 1
     _pid_start_valid "$old_start" || return 1
@@ -4421,7 +4571,7 @@ _heartbeat_housekeeping_failure() { # <operation> <path>
 }
 
 _heartbeat_tick() {
-  local snapshot generation wake_cursor render_cursor item event_id line wake_ok=1 maintenance_ok=1 pinned_items='[]' pinned
+  local snapshot generation wake_cursor render_cursor item event_id line state wake_ok=1 maintenance_ok=1 pinned_items='[]' pinned
   _obligation_recover_stranded >/dev/null 2>&1 || true
   # Session lifecycle housekeeping (P0): reap dead harnesses (writes the `end` event every
   # uninstrumented teardown leaves behind), then compact the registry + wake queues and rotate
@@ -4455,13 +4605,43 @@ _heartbeat_tick() {
   snapshot="$(printf '%s' "$snapshot" | jq -c --argjson items "$pinned_items" '.items=$items')" || return 1
   _fleet_snapshot_write "$snapshot" >/dev/null 2>&1 || true
   wake_cursor="$(_heartbeat_cursor_read wakes 2>/dev/null)"
+  # The wake pass runs on EVERY tick (hardening): the generation is content-derived (captured_at
+  # excluded by design), so a quiescent fleet holding one wedged job freezes the generation at the
+  # same value forever. Gating the WHOLE pass on `wake_cursor != generation` meant that after the
+  # first tick -- and permanently after the stale alarm was acked -- the gate never opened again
+  # and an acked stale alarm never re-fired. The generation-embedded states below still honor the
+  # cursor gate (their event ids change per generation anyway); the stale-signature states run
+  # unconditionally, where the generation-independent event id + _wake_pending makes the append
+  # idempotent while unacked and re-arms on the very next tick after ack while still stale.
+  while IFS= read -r item; do
+    [ -n "$item" ] || continue
+    state="$(printf '%s' "$item" | jq -r '.state')"
+    case "$state" in
+      unresponsive\?|blocked\?)
+        # Stale-signature states (SPEC heartbeat-liveness C): the session is parked past the
+        # stall window (long turn or approval wall). Alarm with a generation-INDEPENDENT event
+        # id so a session stale across N generations alarms once, stays queued until delivered,
+        # and re-alarms after ack if still stale later. The evidence string says WHY.
+        event_id="$(printf '%s' "$item" | jq -r '("heartbeat.stale." + ((.job_id // .session_id // "fleet") | gsub("[^A-Za-z0-9._-]"; "_")) + "." + (.state | gsub("[^A-Za-z0-9._-]"; "_")))')"
+        if _wake_pending "$event_id"; then
+          continue   # already queued unacked: alarm once, not once per generation
+        fi
+        # Re-arm after ack (hardening): acks are per-id, so retire the delivered copies of this id
+        # first or the fresh alarm would be suppressed by _wake_drain and re-appended, undeliverable,
+        # on every tick.
+        _wake_rearm_id "$event_id" || wake_ok=0
+        _wake_append "$(printf '%s' "$item" | jq -c --arg event_id "$event_id" --arg generation "$generation" \
+          '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:(((.task_summary // "unknown") | tostring) + "; " + ((.state_evidence // "no evidence") | tostring))}')" || wake_ok=0
+        ;;
+      *)
+        [ "$wake_cursor" != "$generation" ] || continue
+        event_id="heartbeat.$generation.$(printf '%s' "$item" | jq -r '(.job_id // .session_id // "fleet") | gsub("[^A-Za-z0-9._-]"; "_")').$(printf '%s' "$item" | jq -r '.state')"
+        _wake_append "$(printf '%s' "$item" | jq -c --arg event_id "$event_id" --arg generation "$generation" \
+          '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:.task_summary}')" || wake_ok=0
+        ;;
+    esac
+  done < <(printf '%s' "$snapshot" | jq -c '.items[] | select((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead" or .state == "unresponsive?" or .state == "blocked?"))')
   if [ "$wake_cursor" != "$generation" ]; then
-    while IFS= read -r item; do
-      [ -n "$item" ] || continue
-      event_id="heartbeat.$generation.$(printf '%s' "$item" | jq -r '(.job_id // .session_id // "fleet") | gsub("[^A-Za-z0-9._-]"; "_")').$(printf '%s' "$item" | jq -r '.state')"
-      _wake_append "$(printf '%s' "$item" | jq -c --arg event_id "$event_id" --arg generation "$generation" \
-        '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:.task_summary}')" || wake_ok=0
-    done < <(printf '%s' "$snapshot" | jq -c '.items[] | select((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead"))')
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi
   render_cursor="$(_heartbeat_cursor_read render 2>/dev/null)"
@@ -4648,12 +4828,31 @@ _session_engine_alive() { # <endpoint> <harness-pid> <harness-start> [engine-pid
 # one election token; the election serializes leadership, but spawning unconditionally still forks
 # N watchers that each run the (formerly O(sessions)) tick. Stop the duplicate at the source.
 _heartbeat_leader_alive() {
-  local owner="$OSRC_HEARTBEAT/leader/owner.json" lp ls live lrc
+  local owner="$OSRC_HEARTBEAT/leader/owner.json" lp ls live lrc pst
   [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
   lp="$(jq -r '.pid // empty' "$owner" 2>/dev/null)" || return 1
   ls="$(jq -r '.pid_start // empty' "$owner" 2>/dev/null)" || return 1
   [ -n "$lp" ] || return 1
   kill -0 "$lp" 2>/dev/null || return 1
+  # Zombie rejection (hardening, empirically verified on macOS): an unreaped corpse KEEPS its ps
+  # row, PASSES kill -0, and its lstart still equals the recorded pid_start (same process -- no
+  # recycling involved). kill -0 + identity therefore prove nothing about a zombie, and a zombie
+  # leader here would wedge every re-arm behind a false "verified live". A zombie's ps state
+  # begins with Z, so reject on that. An unreadable state fails OPEN, preserving the documented
+  # fail-open adapter limit below -- only a positive zombie read is proof of death.
+  pst="$(_heartbeat_pid_state "$lp" 2>/dev/null)" || pst=""
+  case "$pst" in Z*) return 1 ;; esac
+  # identity binding: a live pid with a matching start time is still not proof of a
+  # BEACON. A pid + start-time match is not unique to a beacon -- any owner.json naming an
+  # unrelated live pid with a matching `ps -o lstart=` (a stale record, or a hand-written one)
+  # satisfies the pid+start-time proof alone, which then reports a non-beacon "verified live" at
+  # every claim site and silently disarms supervision. Bind the proof to the beacon IDENTITY: the
+  # recorded pid must actually be running this script's __heartbeat-beacon argv, which only the
+  # spawn in _heartbeat_start creates. This is
+  # a plain ps read, not the pid-identity adapter, so it does not narrow the documented
+  # fail-open adapter limit below -- only that limit's behavior is preserved, and now it still
+  # requires a beacon process.
+  _heartbeat_pid_is_beacon "$lp" || return 1
   [ -n "$ls" ] || return 0
   live="$(_pid_start_identity "$lp" 2>/dev/null)"; lrc=$?
   [ "$lrc" -eq 0 ] && [ "$live" = "$ls" ] && return 0
@@ -4670,7 +4869,7 @@ _heartbeat_leader_alive() {
 # provably dead (kill -0 fails), never when a live leader holds it. Called from _heartbeat_start
 # AFTER _heartbeat_leader_alive returns false, so a live leader is never touched.
 _heartbeat_leader_evict_stale() {
-  local owner="$OSRC_HEARTBEAT/leader/owner.json" leader="$OSRC_HEARTBEAT/leader" lp old_start
+  local owner="$OSRC_HEARTBEAT/leader/owner.json" leader="$OSRC_HEARTBEAT/leader" lp old_start pst
   local lock="$OSRC_HEARTBEAT/.election" acquired=0 pid_start rc=0
   if [ -z "${_HEARTBEAT_ELECTION_KIND:-}" ]; then
     pid_start="$(_pid_start_identity "$$" 2>/dev/null)" || return 1
@@ -4687,7 +4886,16 @@ _heartbeat_leader_evict_stale() {
   if [ "$rc" -eq 0 ]; then
     # The caller holds the election lock, so this liveness observation and the removal decision
     # cannot race a new leader publishing a replacement owner.
-    kill -0 "$lp" 2>/dev/null || _heartbeat_remove_tree "$leader" 2>/dev/null || rc=1
+    # an unreaped zombie PASSES kill -0 and keeps its lstart, so kill -0 alone never
+    # evicts it, _heartbeat_claim preserves it as a live incumbent, and every re-arm forks a
+    # doomed beacon -- supervision wedged NOT-ARMED forever. A zombie's ps stat= begins with Z
+    # (the same positive observation _heartbeat_leader_alive uses to reject one), so treat it as
+    # provably dead here. An unreadable state fails OPEN to the kill -0 probe, never to removal.
+    pst="$(_heartbeat_pid_state "$lp" 2>/dev/null)" || pst=""
+    case "$pst" in
+      Z*) _heartbeat_remove_tree "$leader" 2>/dev/null || rc=1 ;;
+      *) kill -0 "$lp" 2>/dev/null || _heartbeat_remove_tree "$leader" 2>/dev/null || rc=1 ;;
+    esac
   fi
   if [ "$acquired" -eq 1 ]; then
     _heartbeat_election_release "$lock" || [ "$rc" -ne 0 ] || rc=1
@@ -4725,7 +4933,7 @@ _heartbeat_beacon() {
 
 _heartbeat_start() {
   local token executable sink="${OSRC_HEARTBEAT_SINK:-}" lock="$OSRC_HEARTBEAT/.election"
-  local pid_start child_pid evict_rc owner_pid owner_start i timeout loops live_start live_rc
+  local pid_start child_pid evict_rc owner_pid owner_start owner_token i timeout loops live_start live_rc pst confirmed
   [ "$OSRC_PLATFORM" != "windows" ] || return 1
   [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ] && return 0
   # The background status beacon auto-arms by default; opt out with OSRC_FLEET_SUPERVISION=0.
@@ -4778,30 +4986,138 @@ _heartbeat_start() {
   loops=$((timeout * 10))
   i=0
   while [ "$i" -lt "$loops" ]; do
+    confirmed=0
     if [ -f "$OSRC_HEARTBEAT/leader/owner.json" ] && [ ! -L "$OSRC_HEARTBEAT/leader/owner.json" ]; then
       owner_pid="$(jq -er '.pid | tostring' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)" || owner_pid=""
       owner_start="$(jq -er '.pid_start | strings | select(length > 0)' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)" || owner_start=""
       if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && _pid_start_valid "$owner_start" && kill -0 "$owner_pid" 2>/dev/null; then
-        live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
-        live_rc=$?
-        # Confirm this is OUR beacon: the start-time identity must be readable AND equal. A failed
-        # read is never proof of liveness. _pid_start_identity returns 2 when ps works on this host
-        # but the pid has no row, which here means the beacon died between the kill -0 above and
-        # now (a zombie still passes kill -0); rc 1 (adapter unsupported) cannot reach this loop
-        # because the function bails on it before spawning. A transient read failure is absorbed
-        # by the next 0.1s iteration, so failing open buys nothing and would report supervision as
-        # armed against a dead beacon. tests/test_heartbeat_single_instance.sh pins this.
-        if [ "$live_rc" -eq 0 ] && [ "$live_start" = "$owner_start" ]; then
-          return 0
-        fi
+        # Zombie rejection: a corpse keeps its ps row, PASSES kill -0, and its lstart
+        # still equals the recorded pid_start (same process), so kill -0 + a matching start time
+        # CANNOT catch one -- only a `ps -o stat=` beginning with Z is proof of death here. Never
+        # confirm "armed" over a zombie; the loop simply keeps polling (and kills the child below
+        # when it gives up).
+        pst="$(_heartbeat_pid_state "$owner_pid" 2>/dev/null)" || pst=""
+        case "$pst" in
+          Z*) : ;;
+          *)
+            if [ "$owner_pid" = "$child_pid" ]; then
+              # Fresh-spawn path: the claim must be OUR child's, bound BOTH by pid and
+              # by the token this call generated and passed to the child via OSRC_HEARTBEAT_TOKEN.
+              # A forged owner.json naming a live pid cannot satisfy the pid binding on
+              # this path, and even a record naming OUR child pid cannot satisfy it without the
+              # unguessable token.
+              owner_token="$(jq -er '.token | strings | select(length > 0)' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)" || owner_token=""
+              if [ "$owner_token" = "$token" ]; then
+                live_start="$(_pid_start_identity "$owner_pid" 2>/dev/null)"
+                live_rc=$?
+                # Confirm this is OUR beacon: the start-time identity must be readable AND equal. A failed
+                # read is never proof of liveness. _pid_start_identity returns 2 when ps works on this host
+                # but the pid has no row, which here means the beacon died between the kill -0 above and
+                # now; rc 1 (adapter unsupported) cannot reach this loop because the function bails on it
+                # before spawning. NOTE (hardening, empirically verified on macOS): this start-time
+                # compare defends against pid RECYCLING only. A zombie keeps its ps row AND its readable
+                # lstart, so kill -0 + a matching start time CANNOT catch one -- the zombie defense lives
+                # in the `ps -o stat=` state check above and inside _heartbeat_leader_alive, the gate
+                # every arm verification funnels through. A transient read failure is absorbed
+                # by the next 0.1s iteration, so failing open buys nothing and would report supervision as
+                # armed against a dead beacon. tests/test_heartbeat_single_instance.sh pins this.
+                if [ "$live_rc" -eq 0 ] && [ "$live_start" = "$owner_start" ]; then
+                  confirmed=1
+                fi
+              fi
+            else
+              # Join path: the claim came from a process other than this call's child --
+              # a pre-existing leader from an earlier arm won the election while our child joined
+              # (its claim returned rc 2). A pre-existing leader carries a DIFFERENT token, so no
+              # token compare is possible here; instead accept it ONLY through the same
+              # argv-bound liveness gate every arm claim funnels through (owner.json + kill -0 +
+              # zombie check + pid_start identity + __heartbeat-beacon argv match). That keeps the
+              # join case working while a forged owner naming a live non-beacon pid is rejected.
+              if _heartbeat_leader_alive; then
+                confirmed=1
+              fi
+            fi
+            ;;
+        esac
       fi
     fi
+    [ "$confirmed" -eq 1 ] && return 0
     sleep 0.1
     i=$((i + 1))
   done
   kill "$child_pid" 2>/dev/null || true
   printf 'outsourcerer: heartbeat arm failed, no valid live owner was confirmed\n' >&2
   return 1
+}
+
+# _heartbeat_arm_verify -> 0 armed+verified | 1 NOT-ARMED (loud) | 2 explicitly opted out.
+# The single liveness gate every "supervision is on" claim must pass (SPEC heartbeat-liveness A):
+# arm (or join) the beacon, then PROVE a live leader with _heartbeat_leader_alive (owner.json +
+# kill -0 + zombie state check + pid_start identity). On a dead watcher it re-arms exactly once
+# and re-verifies -- safe
+# because _heartbeat_start no-ops when a verified-live leader exists (single-instance), so the
+# retry can only spawn when no live leader holds the claim. On failure it prints a loud, greppable
+# NOT-ARMED line and NEVER any "armed"/"supervised" claim.
+# Platform limit (fail-open adapter): when the pid-identity adapter is unsupported,
+# _heartbeat_leader_alive returns alive on kill -0 alone -- an accepted, documented limit. Do NOT
+# "fix" this helper into a fail-closed regression on hosts without ps identity.
+# rc 2 covers deliberate declines, never failures: OSRC_FLEET_SUPERVISION=0, and
+# OSRC_HEARTBEAT_DISABLED=1 (the beacon is switched off by configuration -- the same silent success
+# _heartbeat_start has always reported there; a beacon disabled by config is not NOT-ARMED).
+# The two escape hatches are distinct knobs, so rc 2 also records WHICH one declined in
+# $_heartbeat_arm_optout (hardening) -- callers render the actual cause, never a guessed knob.
+_heartbeat_arm_verify() {
+  _heartbeat_arm_optout=""
+  if [ "${OSRC_FLEET_SUPERVISION:-1}" = "0" ]; then
+    _heartbeat_arm_optout="OSRC_FLEET_SUPERVISION=0"
+    return 2
+  fi
+  if [ "${OSRC_HEARTBEAT_DISABLED:-0}" = "1" ]; then
+    _heartbeat_arm_optout="OSRC_HEARTBEAT_DISABLED=1"
+    return 2
+  fi
+  _heartbeat_start >/dev/null 2>&1
+  _heartbeat_leader_alive && return 0
+  _heartbeat_start >/dev/null 2>&1   # re-arm once; single-instance makes this double-spawn-safe
+  _heartbeat_leader_alive && return 0
+  printf '%s\n' "[outsourcerer] NOT-ARMED: supervision watcher is NOT live (kill -0 failed after re-arm). This run is UNSUPERVISED; check '$0 fleet ls' / '$0 bearings' on your next turn." >&2
+  return 1
+}
+
+cmd_heartbeat() { # start | status -- the manual arm/remediation command the NOT-ARMED and
+  # relaunch messages point at. start runs the same verified gate every launcher uses.
+  local sub="${1:-status}"
+  case "$sub" in
+    start)
+      local rc=0 pid
+      _heartbeat_arm_verify || rc=$?
+      case "$rc" in
+        0)
+          pid="$(jq -r '.pid // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+          echo "supervision armed, beacon pid ${pid:-?} verified live"
+          ;;
+        1) : ;;  # the helper already printed the loud NOT-ARMED line
+        2) echo "supervision opted out via ${_heartbeat_arm_optout:-OSRC_FLEET_SUPERVISION=0}" ;;
+      esac
+      return "$rc"
+      ;;
+    status)
+      local pid
+      if _heartbeat_leader_alive; then
+        pid="$(jq -r '.pid // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+        echo "heartbeat leader pid ${pid:-?} verified live"
+        return 0
+      fi
+      echo "no verified-live heartbeat leader (arm it with: $0 heartbeat start)"
+      return 1
+      ;;
+    -h|--help|help)
+      echo "usage: $0 heartbeat start|status"
+      ;;
+    *)
+      die "heartbeat subcommand: start | status"
+      ;;
+  esac
 }
 
 cmd_rundown() {
@@ -5064,7 +5380,7 @@ cmd_fleet() {
     name) cmd_fleet_name "$@" ;;
     sent) _fleet_todo "$sub" ;;
     show) cmd_fleet_show "$@" ;;
-    supervise) _fleet_todo "$sub" ;;
+    supervise) cmd_heartbeat start ;;
     tell) _fleet_todo "$sub" ;;
     *) die "fleet subcommand: ls | show | supervise | tell | name | compact | adopt | sent" ;;
   esac
@@ -5789,15 +6105,21 @@ _ready_lanes() {
 # local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
 _conserve_reco() {
-  local limits="${1:-}" lanes="${2:-}" tok c5="" x5="" xw="" xstale="" posture lane="" why="" tight=0
+  local limits="${1:-}" lanes="${2:-}" tok c5="" c7="" x5="" xw="" xstale="" posture lane="" why="" tight=0
   for tok in $limits; do case "$tok" in
-    claude5h=*) c5="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
+    claude5h=*) c5="${tok#*=}" ;; claude7d=*) c7="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
     codexage=*) xstale="${tok#*=}" ;;
   esac; done
-  if [ -n "$c5" ]; then
-    posture="Claude 5h at ${c5}%"
-    awk -v n="$c5" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n >= t) }' 2>/dev/null && tight=1
-  else posture="Claude 5h unknown"; fi
+  # Claude has TWO windows and the WEEKLY (7d) cap is the binding one in practice — a freshly-reset 5h
+  # window must NEVER mask a nearly-exhausted week. Bind to the MORE-spent of the two (closest to the
+  # cap), conserve if EITHER crosses the line, and report both so the 5h number can't hide the weekly.
+  if [ -n "$c5" ] || [ -n "$c7" ]; then
+    local bind="" bindpct=""
+    [ -n "$c7" ] && { bind="weekly"; bindpct="$c7"; }
+    [ -n "$c5" ] && awk -v a="$c5" -v b="${bindpct:-0}" 'BEGIN{exit !(a>b)}' 2>/dev/null && { bind="5h"; bindpct="$c5"; }
+    posture="Claude weekly ${c7:-?}% / 5h ${c5:-?}% (binding: ${bind} ${bindpct}%)"
+    awk -v n="${bindpct:-0}" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n >= t) }' 2>/dev/null && tight=1
+  else posture="Claude limits unknown"; fi
   if [ "$tight" = "0" ]; then
     printf 'HEADROOM: %s (< %s%% conserve line) — route by best-fit; no forced conservation.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"
     return 0
@@ -6371,22 +6693,23 @@ _score() {
 
 # _lane_conserve_mult <lane> <limits-line> -> a score multiplier in [0.90,1.00] that GENTLY deprioritizes
 # a lane whose live plan window is past the conserve line, so "limits-left" actually steers the pick and
-# not just the separate conserve-routing layer. Only lanes we can MEASURE are penalized (cc=Claude 5h,
-# cx=Codex 5h/weekly, whichever is more spent); unmeasurable lanes (dv/gm/or) return 1.00 so we never
+# not just the separate conserve-routing layer. Only lanes we can MEASURE are penalized (cc=Claude
+# 5h/weekly, cx=Codex 5h/weekly, whichever is more spent); unmeasurable lanes (dv/gm/or) return 1.00 so we never
 # invent a limit we cannot read. At/below the conserve line -> 1.00 (headroom); scales linearly to 0.90
 # at 100% used. Deliberately small: it breaks ties and loses close races to a fresher lane, but a ~10%
 # max haircut won't drop a genuinely-capable model below its capability threshold on its own.
 _lane_conserve_mult() {
-  local lane="$1" limits="${2:-}" t="${OSRC_CONSERVE_THRESHOLD:-50}" u="" c5="" x5="" xw="" tok
+  local lane="$1" limits="${2:-}" t="${OSRC_CONSERVE_THRESHOLD:-50}" u="" c5="" c7="" x5="" xw="" tok
   for tok in $limits; do
     case "$tok" in
       claude5h=*) c5="${tok#*=}" ;;
+      claude7d=*) c7="${tok#*=}" ;;
       codex5h=*)  x5="${tok#*=}" ;;
       codexwk=*)  xw="${tok#*=}" ;;
     esac
   done
   case "$lane" in
-    cc) u="$c5" ;;
+    cc) u="$c5"; [ -n "$c7" ] && awk -v a="$c7" -v b="${c5:-0}" 'BEGIN{exit !(a+0>b+0)}' && u="$c7" ;;  # weekly binds when more-spent
     cx) u="$x5"; [ -n "$xw" ] && awk -v a="$xw" -v b="${x5:-0}" 'BEGIN{exit !(a+0>b+0)}' && u="$xw" ;;
     *)  u="" ;;
   esac
@@ -6892,6 +7215,7 @@ cmd_advise() {
     echo "   category: $category"
     echo "   difficulty: $difficulty"
     echo "   effort: $selection_effort"
+    echo "   effort tip: start at this level, re-run the same task one rung lower; if quality holds, keep the cheaper rung (medium often matches high at lower cost)."
     echo "   scoring by: $field (threshold: $threshold)"
     if [ "$has_bench" = "1" ]; then
       echo "   benchmark data: live (OpenRouter, $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null), $bench_count/$total_count models)"
@@ -7668,7 +7992,7 @@ _bg_launch() {
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
   _mkdir_private "$OSRC_JOBS" || true
-  local id jd tries=0
+  local id jd tries=0 _arm_rc=0 _bpid
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
   # concurrent launches that mint the same id can never share one directory; regenerate on collision.
   while :; do
@@ -7702,7 +8026,25 @@ _bg_launch() {
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
   OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
-  _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
+  # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
+  # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
+  # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
+  # (already printed by the helper) plus a durable marker so status keeps surfacing it; rc 2 =
+  # supervision deliberately declined, silent. The launch itself is never failed: the job is
+  # already detached and alive -- the spec requires a loud warning, not a fake failure.
+  _heartbeat_arm_verify || _arm_rc=$?
+  case "$_arm_rc" in
+    0)
+      # A later successful arm supersedes any prior durable marker (hardening): without this, a
+      # job whose first launch failed to arm kept the false !SUPERVISION:NOT-ARMED flag forever
+      # even after supervision came back. Clear, don't just overwrite -- rc 0 means verified live.
+      rm -f "$jd/supervision" 2>/dev/null || true
+      _bpid="$(jq -r '.pid // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+      [ -n "$_bpid" ] && echo "[outsourcerer] supervision armed (beacon pid $_bpid verified live)" >&2
+      ;;
+    1) echo not-armed > "$jd/supervision" 2>/dev/null || true ;;
+    2) echo opted-out > "$jd/supervision" 2>/dev/null || true ;;
+  esac
   printf '%s' "$id"
 }
 
@@ -8432,6 +8774,15 @@ _status_line() {
     _w="${acts#*W}"; _w="${_w%% *}"; case "$_w" in ''|*[!0-9]*) _w=1 ;; esac
     [ "$_w" = "0" ] && [ "$agenum" -gt "${OSRC_NOWRITE_WARN:-180}" ] && [ "$st" = "running" ] && flag=" !exploring(0-writes)" ;;
   esac
+  # Durable NOT-ARMED marker (bg launch arm failure), RE-EVALUATED on every render (hardening):
+  # the marker alone would keep the flag visible forever, including after a later arm succeeded
+  # by a path that never touches this job's marker (`heartbeat start`, a session finalize). So the
+  # flag renders only while supervision is genuinely still not armed: a stale marker is suppressed
+  # the moment _heartbeat_leader_alive verifies a live leader. (A failed arm in _bg_launch itself
+  # clears the marker outright on its next rc-0 arm.)
+  if [ "$(cat "$jd/supervision" 2>/dev/null)" = "not-armed" ] && ! _heartbeat_leader_alive; then
+    flag="$flag !SUPERVISION:NOT-ARMED"
+  fi
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
@@ -8573,7 +8924,7 @@ _classify_job() {
   #    Many Requests" / "Retry-After" (a task ABOUT rate limiting, or a transient 429 the delegate
   #    recovered from). Only a job with NO usable work should fall through to quota classification and
   #    be re-dispatched. Ordering this AFTER quota discarded real deliverables whenever quota-vocab
-  #    appeared in otherwise-successful output (integration torture reproduced exactly that discard).
+  # appeared in otherwise-successful output (hardening reproduced exactly that discard).
   #    Three independent signals, strongest first:
   #      a) commits in the job cwd between .startmark and job exit (the deliverable was committed)
   #      b) file writes newer than .startmark but not newer than job exit (reuses _job_made_writes
@@ -9736,6 +10087,12 @@ $body"
     local -a _pk=("$verb"); [ -n "$_cloud_model" ] && _pk+=(-m "$_cloud_model")
     PROVIDER="$_cloud_prov" _bg_cloud_preack "${_pk[@]}"
   fi
+
+  # Arm supervision ONCE in the parent turn, mirroring the _bg_cloud_preack pattern above: the
+  # per-member _bg_launch calls each run inside a command substitution, where a failed arm could
+  # hide. On rc 1 the helper's loud NOT-ARMED stands and members still launch (each _bg_launch
+  # retries the arm); rc 2 (opted out) is silent by contract.
+  _heartbeat_arm_verify || true
 
   # DISPATCHABILITY PREFLIGHT for engine lanes (droid/cursor/hermes/warp/cline): these lanes
   # require their CLI on PATH. Without this check, fanout mints jobs that fail in the detached
@@ -13717,7 +14074,7 @@ _session_launch_cleanup() { # <session-id> <reason>
 }
 
 _session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch> [generation] [keep-on-heartbeat-failure]
-  local sess="$1" provider="$2" model="$3" effort="$4" launch="$5" generation="${6:-1}" keep="${7:-0}"
+  local sess="$1" provider="$2" model="$3" effort="$4" launch="$5" generation="${6:-1}" keep="${7:-0}" _arm_rc=0
   # This is the one completion gate for interactive launches. A receipt is emitted only after the
   # provider stayed in the pane, its endpoint identity was persisted, heartbeat supervision armed,
   # and the persisted identity still matches the pane.
@@ -13728,6 +14085,7 @@ _session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch>
   # record still names the OLD process is exactly the "crash-reap over a healthy replacement" hazard
   # 0.10.1 closed (test_lifecycle_fix pins it), so that path tears down even on a relaunch. Liveness
   # and endpoint failures mean the pane itself is wrong and are torn down regardless.
+  # The arm gate is _heartbeat_arm_verify: it re-arms once and re-verifies before reporting failure.
   if ! _session_launch_liveness_check "$sess" "$provider" "$launch"; then
     _session_launch_cleanup "$sess" liveness-failed
     return 1
@@ -13737,7 +14095,12 @@ _session_launch_finalize() { # <session-id> <provider> <model> <effort> <launch>
     printf 'outsourcerer: interactive launch failed, could not persist the session registry record\n' >&2
     return 1
   fi
-  if ! _heartbeat_start >/dev/null 2>&1; then
+  # _heartbeat_arm_verify re-arms once and re-verifies. rc 2 is a deliberate opt-out
+  # (OSRC_FLEET_SUPERVISION=0): supervision was declined, not failed -- do not tear down the pane.
+  _heartbeat_arm_verify || _arm_rc=$?
+  if [ "$_arm_rc" -eq 2 ]; then
+    :
+  elif [ "$_arm_rc" -ne 0 ]; then
     if [ "$keep" = 1 ]; then
       printf 'outsourcerer: relaunch respawned the pane but heartbeat supervision could not be armed; the pane is LIVE and UNSUPERVISED. Arm it with: %s heartbeat start\n' "$0" >&2
       return 1
@@ -14339,18 +14702,24 @@ _winpty_session() {
     start)
       parse_model "$@"
       _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
-      _validate_model_token "$MODEL"
+      # Validate only when a token was given: droid/cursor/warp/hermes/cline interactive sessions have
+      # no model override and run on the lane default with an EMPTY MODEL — an unconditional validate
+      # killed them with a bogus "model token is empty". Non-empty tokens are still validated.
+      [ -n "$MODEL" ] && _validate_model_token "$MODEL"
 
       local LAUNCH=()
       case "$PROVIDER" in
         devin|dv)
           need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
+          # Effort is NOT silently dropped (see the tmux devin case): Devin's interactive TUI has no
+          # reasoning control this tool can set, so a requested --effort cannot be enforced here.
+          [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r).\n' "$EFFORT" "$0" "$EFFORT" >&2
           LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
-          _validate_model_token "$cid"
+          [ -n "$cid" ] && _validate_model_token "$cid"   # empty = codex default; don't die on no-model session
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable codex codex --help
           local _ccmh=(); _ccmh=("-c" "features.code_mode_host=$(_codex_code_mode_host_flag)")
           LAUNCH=("codex" "-s" "workspace-write")
@@ -14407,10 +14776,27 @@ _winpty_session() {
         echo "WARN: winpty did not start quickly; see $sdir/broker.log" >&2
       fi
 
-      echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
+      # Windows arm gate (SPEC heartbeat-liveness A): arm+verify BEFORE the success claim, mirroring
+      # the tmux path's finalize gate. A "running" claim must never be emitted over an unverified
+      # watcher. rc 2 (opted out) keeps the plain success line; rc 1 says the session is live but
+      # UNSUPERVISED (the helper's loud NOT-ARMED goes to stderr).
+      _winpty_arm_rc=0
+      _heartbeat_arm_verify || _winpty_arm_rc=$?
+      # Durable supervision marker, winpty parity with _bg_launch (hardening): the session path
+      # used to leave NO durable trace of a failed arm -- its NOT-ARMED state was visible once at
+      # launch and never again. Record it in the session dir, and clear it on a verified arm.
+      case "$_winpty_arm_rc" in
+        0) rm -f "$sdir/supervision" 2>/dev/null || true ;;
+        1) echo not-armed > "$sdir/supervision" 2>/dev/null || true ;;
+        2) echo opted-out > "$sdir/supervision" 2>/dev/null || true ;;
+      esac
+      if [ "$_winpty_arm_rc" -eq 1 ]; then
+        echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD. The session is LIVE and UNSUPERVISED (heartbeat arm failed after re-arm). Arm it with: $0 heartbeat start"
+      else
+        echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
+      fi
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
-      _heartbeat_start >/dev/null 2>&1 || echo "outsourcerer: heartbeat auto-arm unavailable; supervision state is unknown" >&2
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
@@ -14528,8 +14914,10 @@ session() {
     start)
       parse_model "$@"
       _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
-      # Validate the model token before it is interpolated into a tmux shell command.
-      _validate_model_token "$MODEL"
+      # Validate the model token before it is interpolated into a tmux shell command — but only when
+      # one was given. droid/cursor/warp/hermes/cline interactive sessions run on the lane default with
+      # an EMPTY MODEL; an unconditional validate killed them with a bogus "model token is empty".
+      [ -n "$MODEL" ] && _validate_model_token "$MODEL"
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude
       # (fable/opus/...), not just Devin. Each launches its own interactive TUI inside tmux; the generic
       # send/read/stop below drive any of them. Switch lane with --provider devin|codex|cc.
@@ -14538,12 +14926,16 @@ session() {
         devin|dv)
           need_devin; MODEL="$(_devin_resolve_model "$MODEL")"; _devin_guard_before_delegation "$MODEL"
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
+          # Effort is NOT silently dropped: the Devin interactive TUI exposes no reasoning control this
+          # tool can drive, so a requested --effort cannot be enforced on a session. Say so loudly rather
+          # than running Low while the receipt implies otherwise, and name the paths that DO honor it.
+          [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r), or a lane that supports interactive effort.\n' "$EFFORT" "$0" "$EFFORT" >&2
           launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
         codex|cx)
           have codex || die "codex not on PATH (needed for a codex session)"
           local crow cid; crow="$(resolve_model_row "$MODEL")"; cid="${crow%%|*}"; [ -n "$cid" ] || cid="$MODEL"
-          # The resolved codex model id is what enters the tmux command.
-          _validate_model_token "$cid"
+          # The resolved codex model id is what enters the tmux command (empty = codex default).
+          [ -n "$cid" ] && _validate_model_token "$cid"
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable codex codex --help
           local ccmh=""; ccmh=" -c features.code_mode_host=$(_codex_code_mode_host_flag)"  # self-heal in the TUI too (bidirectional: =true overrides a stale config=false)
           # No `--cd "$PWD"` -- tmux new-session already starts the pane in $PWD (-c "$PWD").
@@ -16176,6 +16568,7 @@ main() {
     explain)     cmd_explain "$@" ;;                        # diagnose a job's terminal state: state + reason + marker + verdict
     rundown)     cmd_rundown "$@" ;;                       # refresh discovery, then render the fleet digest
     bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
+    heartbeat)   cmd_heartbeat "$@" ;;                     # verified supervision arm: start|status
     watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
@@ -16208,7 +16601,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|models|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a
@@ -16233,7 +16626,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|fleet|wait|explain|classify|session|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue)
       if ! _blind_turn_guard; then

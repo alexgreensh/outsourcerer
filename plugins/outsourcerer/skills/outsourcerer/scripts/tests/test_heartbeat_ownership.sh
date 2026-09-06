@@ -114,6 +114,39 @@ else
 fi
 unset OSRC_FORCE_MKDIR_ELECTION
 
+# an OWNERLESS .election dir (a crash between the mkdir claim and the owner.json
+# publish) used to wedge the mkdir election forever on no-flock hosts — every later acquire read
+# the missing owner.json and returned 1. The stale-dir breaker (the _state_lock_acquire pattern)
+# must (a) never steal a FRESH ownerless dir and (b) break one that sat ownerless past the grace.
+OSRC_FORCE_MKDIR_ELECTION=1
+rm -rf "$OSRC_HEARTBEAT/leader" "$OSRC_HEARTBEAT/.election"
+mkdir "$OSRC_HEARTBEAT/.election"   # ownerless: no owner.json, mtime = now
+if PATH="$TMP/bin:$PATH" _heartbeat_election_acquire "$OSRC_HEARTBEAT/.election" "$$" 'Sat Aug 2 01:02:03 2026'; then
+  _heartbeat_election_release "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
+  bad "a fresh ownerless election dir was stolen before the grace window"
+else
+  if [ -d "$OSRC_HEARTBEAT/.election" ]; then
+    ok "fresh ownerless election dir is never age-broken (grace respected)"
+  else
+    bad "fresh ownerless election dir was destroyed without acquiring"
+  fi
+fi
+# Past the grace window (OSRC_STATE_LOCK_STALE_SECS=0 collapses it in-test), the breaker fires and
+# the election acquires cleanly instead of wedging forever.
+export OSRC_STATE_LOCK_STALE_SECS=0
+if PATH="$TMP/bin:$PATH" _heartbeat_election_acquire "$OSRC_HEARTBEAT/.election" "$$" 'Sat Aug 2 01:02:03 2026' \
+  && [ "${_HEARTBEAT_ELECTION_KIND:-}" = mkdir ]; then
+  owner_pid="$(jq -r '.pid' "$OSRC_HEARTBEAT/.election/owner.json" 2>/dev/null)"
+  _heartbeat_election_release "$OSRC_HEARTBEAT/.election"
+  [ "$owner_pid" = "$$" ] && ok "stale ownerless election dir is broken and the election recovers" \
+    || bad "stale-breaker recovery published the wrong owner record"
+else
+  _heartbeat_election_release "$OSRC_HEARTBEAT/.election" 2>/dev/null || true
+  bad "stale ownerless election dir still wedges the mkdir election"
+fi
+unset OSRC_STATE_LOCK_STALE_SECS OSRC_FORCE_MKDIR_ELECTION
+rm -rf "$OSRC_HEARTBEAT/leader" "$OSRC_HEARTBEAT/.election"
+
 # Lifecycle: a leader remains only while supervised work exists. This is the
 # condition the beacon checks between ticks before it releases its claim.
 mkdir -p "$OSRC_JOBS/lifecycle"
