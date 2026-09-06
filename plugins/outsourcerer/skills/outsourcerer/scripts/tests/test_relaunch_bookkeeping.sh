@@ -50,7 +50,7 @@ SESSION_NAME=gen-test
 # (a) finalize teardown contract. tmux is shadowed by a function that records every call.
 tmux() { printf '%s\n' "$*" >> "$TMUX_LOG"; return 0; }
 _session_launch_liveness_check() { return 0; }
-_heartbeat_start() { return 0; }
+_heartbeat_arm_verify() { return 0; }
 _managed_endpoint_live() { return 0; }
 _session_registry_end() { return 0; }
 
@@ -70,7 +70,7 @@ _session_registry_append() { return 1; }
 
 # heartbeat arm fails
 _session_registry_append() { return 0; }
-_heartbeat_start() { return 1; }
+_heartbeat_arm_verify() { return 1; }
   : > "$TMUX_LOG"
   _session_launch_finalize s1 cc m "" launch 2 1 >/dev/null 2>&1; rc=$?
   [ "$rc" -ne 0 ] && ok "relaunch: heartbeat failure is still reported (rc=$rc)" || bad "relaunch: heartbeat failure returned success"
@@ -82,7 +82,7 @@ _heartbeat_start() { return 1; }
   [ "$(killed)" -ge 1 ] && ok "fresh launch: heartbeat failure still tears down" || bad "fresh launch: heartbeat failure left the session up"
 
 # the pane itself is wrong: torn down even for a relaunch
-_heartbeat_start() { return 0; }
+_heartbeat_arm_verify() { return 0; }
 _session_registry_append() { return 0; }
 _session_launch_liveness_check() { return 1; }
   : > "$TMUX_LOG"

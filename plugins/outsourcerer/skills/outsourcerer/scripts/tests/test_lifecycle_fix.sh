@@ -22,7 +22,7 @@ bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
   order=""
   _session_launch_liveness_check() { order="$order liveness"; return 0; }
   _session_registry_append() { [ "${SESSION_NAME:-}" = finalize ] || return 1; order="$order registry"; return 0; }
-  _heartbeat_start() { order="$order heartbeat"; return 0; }
+  _heartbeat_arm_verify() { order="$order heartbeat"; return 0; }
   _managed_endpoint_live() { [ "${1:-}" = finalize ] && [ "${2:-}" = finalize ] || return 1; order="$order endpoint"; return 0; }
   _session_launch_finalize finalize devin glm high 'devin --model glm'
   [ "$order" = ' liveness registry heartbeat endpoint' ]
@@ -331,7 +331,7 @@ SH
 #!/usr/bin/env bash
 mkdir -p "$OSRC_HEARTBEAT/leader"
 start="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
-jq -cn --argjson pid "$$" --arg start "$start" --arg token "${1:-}" '{schema_version:"1",pid:$pid,pid_start:$start,token:$token,sink:null}' > "$OSRC_HEARTBEAT/leader/owner.json"
+jq -cn --argjson pid "$$" --arg start "$start" --arg token "${OSRC_HEARTBEAT_TOKEN:-${2:-}}" '{schema_version:"1",pid:$pid,pid_start:$start,token:$token,sink:null}' > "$OSRC_HEARTBEAT/leader/owner.json"
 sleep 1
 SH
   chmod +x "$fake"
