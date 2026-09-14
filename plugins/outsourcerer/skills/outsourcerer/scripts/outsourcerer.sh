@@ -270,7 +270,7 @@ OSRC_FLEET_FORCE="${OSRC_FLEET_FORCE:-0}"
 OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
-trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr."* 2>/dev/null; fi' EXIT
+trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
 # ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
 # (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
 # lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One
@@ -1246,7 +1246,7 @@ _catalog_fetch_inner() {
       [ -n "$_gk" ] || _gk="$(_extract_kv_value GEMINI_API_KEY 2>/dev/null)"
       [ -n "$_gk" ] || _gk="$(_extract_kv_value GOOGLE_API_KEY 2>/dev/null)"
       [ -n "$_gk" ] && have curl || return 1
-      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" curl -fsS -H "x-goog-api-key: $_gk" \
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" _curl_with_gemini_key "$_gk" -fsS \
               'https://generativelanguage.googleapis.com/v1beta/models?pageSize=500' 2>/dev/null)"
       printf '%s' "$raw" | jq -e '.' >/dev/null 2>&1 || raw=""
       ;;
@@ -1783,7 +1783,7 @@ _tr_load_key() {
 _curl_hdr_tmp=""
 _curl_with_auth() {
   local _hdr_val="$1"; shift
-  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null || mktemp)"
+  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.$$.XXXXXX" 2>/dev/null || mktemp)"
   chmod 600 "$_curl_hdr_tmp" 2>/dev/null || true
   printf 'Authorization: Bearer %s\n' "$_hdr_val" > "$_curl_hdr_tmp"
   curl -H @"$_curl_hdr_tmp" "$@"
@@ -1793,7 +1793,7 @@ _curl_with_auth() {
 }
 _curl_with_gemini_key() {
   local _hdr_val="$1"; shift
-  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null || mktemp)"
+  _curl_hdr_tmp="$(mktemp "$OSRC_HOME/.hdr.$$.XXXXXX" 2>/dev/null || mktemp)"
   chmod 600 "$_curl_hdr_tmp" 2>/dev/null || true
   printf 'x-goog-api-key: %s\n' "$_hdr_val" > "$_curl_hdr_tmp"
   curl -H @"$_curl_hdr_tmp" "$@"
@@ -2247,7 +2247,8 @@ build_with_preamble() {
   for tok in ${WORDS[@]+"${WORDS[@]}"}; do
     case "$tok" in
       skills=*) val="${tok#skills=}"
-        for name in $(printf '%s' "$val" | tr ',' ' '); do
+        _words_noglob "$(printf '%s' "$val" | tr ',' ' ')"
+        for name in ${WORDS[@]+"${WORDS[@]}"}; do
           # Resolve across every place a skill really lives, not just the user's own skills dir.
           # Only ~/.claude/skills was searched before, so every PLUGIN skill (the whole ce-* family)
           # silently resolved to "NOT FOUND" and the delegate ran without the capability the caller
@@ -6000,7 +6001,8 @@ cmd_estimate() {
     echo "  (no cached pricing; run: $0 models --refresh)"
   else
     local m pp pc
-    for m in $(printf '%s' "${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}" | tr ',' ' '); do
+    _words_noglob "$(printf '%s' "${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}" | tr ',' ' ')"
+    for m in ${WORDS[@]+"${WORDS[@]}"}; do
       pp="$(jq -r --arg id "$m" '.data[]|select(.id==$id)|.pricing.prompt' "$OSRC_MODELS_JSON" 2>/dev/null)"
       pc="$(jq -r --arg id "$m" '.data[]|select(.id==$id)|.pricing.completion' "$OSRC_MODELS_JSON" 2>/dev/null)"
       if [ -n "$pp" ] && [ "$pp" != "null" ]; then
@@ -6503,7 +6505,7 @@ refresh_benchmarks() {
   local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"
   [ -n "$_k" ] || { echo "OPENROUTER_API_KEY needed for benchmark data (put it in ~/.env)" >&2; return 1; }
   # Pass key via temp file to avoid exposure in process args (ps table).
-  local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
+  local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.$$.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
   printf 'Authorization: Bearer %s\n' "$_k" > "$_hdr"; chmod 600 "$_hdr"
   local _tmp; _tmp="$(mktemp "$OSRC_HOME/.bench.XXXXXX" 2>/dev/null)" || { rm -f "$_hdr"; echo "cannot create temp file" >&2; return 1; }
   if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" -H @"$_hdr" \
@@ -10865,7 +10867,7 @@ _claudex_up() {   # is a CLIProxyAPI answering with our token? (authenticated /v
   local url tok hdr; url="$(_claudex_url)"; tok="$(_claudex_token)"
   [ -n "$tok" ] || return 1
   mkdir -p "$OSRC_HOME" 2>/dev/null
-  hdr="$OSRC_HOME/.hdr.claudex.$$"; { umask 077; printf 'Authorization: Bearer %s\n' "$tok" > "$hdr"; } 2>/dev/null || return 1
+  hdr="$OSRC_HOME/.hdr.$$.claudex"; { umask 077; printf 'Authorization: Bearer %s\n' "$tok" > "$hdr"; } 2>/dev/null || return 1
   curl -fsS -m 4 -H @"$hdr" "$url/v1/models" >/dev/null 2>&1; local rc=$?
   rm -f "$hdr" 2>/dev/null
   return "$rc"
