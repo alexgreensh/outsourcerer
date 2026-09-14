@@ -8798,8 +8798,8 @@ _job_json() {
   if [ ! -f "$jd/meta.json" ]; then
     local _st _sa; _st="$(_reconcile_status "$id" 2>/dev/null || echo unknown)"
     _sa="$(cat "$jd/started_at" 2>/dev/null)"; case "$_sa" in ''|*[!0-9]*) _sa=null ;; esac
-    jq -n --arg id "$id" --arg status "$_st" --arg label "$lbl" --argjson started "${_sa:-null}" \
-      '{schema_version:"1", job_id:$id, label:(if $label=="" then null else $label end),
+    jq -n --arg id "$id" --arg status "$_st" --arg lbl "$lbl" --argjson started "${_sa:-null}" \
+      '{schema_version:"1", job_id:$id, label:(if $lbl=="" then null else $lbl end),
         provider:null, verb:null, shape:null, model:null, tier:null, effort:null,
         status:$status, exit:null, started:$started, cwd:null,
         progress:{last_marker:null, reads:0, writes:0, bash:0},
@@ -8820,10 +8820,10 @@ _job_json() {
   jq -n --slurpfile m "$jd/meta.json" \
     --arg status "$st" --argjson exit "${exitc:-null}" \
     --argjson reads "${r:-0}" --argjson writes "${w:-0}" --argjson bash "${b:-0}" \
-    --arg last "$last" --arg label "$lbl" --arg result_path "$rp" --arg log_path "$L" \
+    --arg last "$last" --arg lbl "$lbl" --arg result_path "$rp" --arg log_path "$L" \
     '($m[0] // {}) as $me | {
        schema_version:"1", job_id:($me.id // null),
-       label:(if $label=="" then ($me.label // null) else $label end),
+       label:(if $lbl=="" then ($me.label // null) else $lbl end),
        provider:($me.provider // null), verb:($me.verb // null), shape:($me.shape // null),
        model:($me.model // null), tier:($me.tier // null), effort:($me.effort // null),
        status:$status, exit:$exit, started:($me.started // null), cwd:($me.cwd // null),
