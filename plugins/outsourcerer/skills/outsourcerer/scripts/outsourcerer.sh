@@ -9457,14 +9457,17 @@ cmd_cleanup() {
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
   have jq || die "cleanup needs jq"
-  local path branch dirty ahead base rp worktree_root
+  local path branch dirty ahead base rp
   path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
   # Never trust the serialized path: a lexical glob can be bypassed with
   # worktrees/../../..., so canonicalize and require strict containment first.
+  # Worktrees live at <repo>/.outsourcerer/worktrees/<id> (see _worktree_setup), NOT
+  # under $OSRC_HOME — anchor on the canonical path's own shape, with the trailing
+  # component bound to the id being cleaned so one job's receipt cannot point at
+  # another job's worktree.
   case "$path" in *'..'*) die "refusing to remove path containing '..': $path" ;; esac
   rp="$(cd "$path" 2>/dev/null && pwd -P)" || die "refusing to remove non-canonical worktree path: $path"
-  worktree_root="$(cd "$OSRC_HOME/worktrees" 2>/dev/null && pwd -P)" || die "refusing to resolve worktree root: $OSRC_HOME/worktrees"
-  case "$rp" in "$worktree_root"/*) path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
+  case "$rp" in */.outsourcerer/worktrees/"$target") path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
   # Re-read LIVE git state, not the job-completion snapshot: anything edited after the job (user, hook,
   # another process) must be seen, or --force could destroy it. Fall back to the json only if the worktree
   # is already gone.
