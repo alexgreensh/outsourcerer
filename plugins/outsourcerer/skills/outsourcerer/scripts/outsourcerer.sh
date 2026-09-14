@@ -11735,7 +11735,7 @@ $(cat "$tok" 2>/dev/null)"
   fi
   # Count distinct high-signal matches; do NOT retain the matched secret text (only a count is
   # surfaced downstream, so the raw credential fragments never live in a variable or reach stderr/logs).
-  OSRC_SECRET_HIT_COUNT="$(printf '%s\n' "$scan" | grep -Eoi 'OPENROUTER_API_KEY|sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' 2>/dev/null | sort -u | grep -c . )"
+  OSRC_SECRET_HIT_COUNT="$(printf '%s\n' "$scan" | grep -Eoi '(^|[^A-Za-z0-9])(OPENROUTER_API_KEY|sk-[A-Za-z0-9._-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----)' 2>/dev/null | sort -u | grep -c . )"
   OSRC_SECRET_HIT_COUNT="${OSRC_SECRET_HIT_COUNT:-0}"
   # (3) VALUE hard-block: a real high-entropy secret VALUE pasted into the prompt / --with
   # files (not merely a keyword like the bare name OPENROUTER_API_KEY, which appears in normal code
@@ -11744,7 +11744,7 @@ $(cat "$tok" 2>/dev/null)"
   # default. Opt out with OSRC_SECRET_ALLOW_VALUE=1 for the rare deliberate case. The value itself is
   # never printed (only the refusal). Reference secrets by NAME, not value, when delegating.
   if [ "${OSRC_SECRET_ALLOW_VALUE:-0}" != "1" ] \
-     && printf '%s\n' "$scan" | grep -Eq 'sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+     && printf '%s\n' "$scan" | grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
     die "CLOUD GATE: a live secret VALUE (API key / token / private key) is in the prompt or a --with file — refusing the cloud route so it doesn't leave your machine. Reference the secret by NAME instead of pasting its value, or set OSRC_SECRET_ALLOW_VALUE=1 if you truly intend to send it."
   fi
 }
