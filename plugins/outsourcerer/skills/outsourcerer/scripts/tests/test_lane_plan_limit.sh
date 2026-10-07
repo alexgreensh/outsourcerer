@@ -136,6 +136,9 @@ _lane_down_clear cx; _before=$(date +%s)
 _out="$(_lane_plan_limit_block cx "$FX/cx-hit" gpt-5.6 'Route to Claude Code or a plan lane that is up.' 2>&1)"
 _lane_down_active cx && ok "block cx: lane DOWN after meter confirmation" || bad "block cx: lane not down"
 [ "$(_lane_down_reason cx)" = "plan limit exhausted" ] && ok "block cx: reason recorded" || bad "block cx: reason '$(_lane_down_reason cx)'"
+_ev="$(_posture_get cx down-evidence 2>/dev/null)"
+printf '%s' "$_ev" | grep -q 'usage limit' && ok "block cx: down-evidence keeps the refusal wording" || bad "block cx: down-evidence '$_ev'"
+printf '%s' "$_ev" | grep -q 'probe: codex5h=100' && ok "block cx: down-evidence keeps the probe/meter proof" || bad "block cx: evidence missing probe half '$_ev'"
 _until="$(_posture_get cx down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
 [ "$_ttl" -ge 8160 ] && [ "$_ttl" -le 8170 ] && ok "block cx: window = Codex's own 2h 15m (+slack), got ${_ttl}s" || bad "block cx: TTL ${_ttl}s"
 printf '%s' "$_out" | grep -q 'Codex (ChatGPT plan) refused "gpt-5.6"' && ok "block cx: names lane + model" || bad "block cx: header missing"

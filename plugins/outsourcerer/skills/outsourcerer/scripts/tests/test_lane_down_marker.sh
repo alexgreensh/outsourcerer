@@ -37,9 +37,27 @@ _posture_set cx down 1   # epoch 1 (1970) -> long expired
 if _lane_down_active cx; then bad "expired: cx still reported down"; else ok "expired: cx not active"; fi
 if [ -e "$OSRC_POSTURE_DIR/cx.down" ]; then bad "expired: marker file not purged on read"; else ok "expired: marker file purged on read"; fi
 
+# Expiry purges the marker's reason/evidence too (same file set as _lane_down_clear): a down
+# explanation must not outlive the mark it explains or `posture status` shows stale quota wording.
+_posture_set cx down 1; _posture_set cx down-reason "plan quota exhausted"; _posture_set cx down-evidence "Error: quota"
+_lane_down_active cx || true
+if [ -e "$OSRC_POSTURE_DIR/cx.down-reason" ] || [ -e "$OSRC_POSTURE_DIR/cx.down-evidence" ]; then bad "expired: reason/evidence outlived the purged marker"; else ok "expired: reason+evidence purged with the marker"; fi
+
 # Junk value never reads as down (hardening: non-numeric posture value).
 _posture_set gm down "not-a-number"
 if _lane_down_active gm; then bad "junk: non-numeric marker read as down"; else ok "junk: non-numeric marker ignored"; fi
+
+# An unexpired LONGER mark wins: a bare short re-mark (doctor/TLS verdict inside a confirmed quota
+# window) must not cut the window or erase its reason/evidence; a LONGER re-mark still extends the
+# mark and re-asserts/drops aux files per its own args.
+_lane_down_mark dv 3000 "plan quota exhausted" "Error: Your daily usage quota has been exhausted"
+_kept="$(_posture_get dv down 2>/dev/null)"
+_lane_down_mark dv    # bare transport re-mark (300s) -> must be a no-op against the 3000s mark
+[ "$(_posture_get dv down 2>/dev/null)" = "$_kept" ] && ok "guard: bare short re-mark is a no-op on a longer mark" || bad "guard: shorter re-mark overwrote the marker"
+[ -f "$OSRC_POSTURE_DIR/dv.down-reason" ] && [ -f "$OSRC_POSTURE_DIR/dv.down-evidence" ] && ok "guard: reason+evidence kept under the longer mark" || bad "guard: bare re-mark erased aux files"
+_lane_down_mark dv 9000
+_nu="$(_posture_get dv down 2>/dev/null)"; [ "${_nu:-0}" -gt "${_kept:-0}" ] && ok "guard: longer re-mark still extends the window" || bad "guard: longer re-mark blocked (${_nu} vs ${_kept})"
+[ ! -e "$OSRC_POSTURE_DIR/dv.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/dv.down-evidence" ] && ok "guard: extending bare re-mark drops stale aux (fresh verdict wins)" || bad "guard: stale aux survived a longer bare re-mark"
 
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

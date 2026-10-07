@@ -1292,7 +1292,7 @@ _devin_plan_quota_block() {
       [ -n "$_pq_pline" ] || _pq_pline="$(_devin_quota_refusal_line "$(_lane_probe_file dv)")"
       printf '>>> [devin plan quota] probe: CONFIRMED — free model "%s" was refused with a limit too, so the shared %s plan quota is exhausted — this blocks ALL plan-included models (glm/swe/kimi), %s. %s\n' "$_pq_probe" "$_pq_period" "$scope" "$advice" >&2
       [ -n "$_pq_pline" ] && printf '>>> [devin plan quota] probe: Devin'\''s exact wording on the probe: %s\n' "$_pq_pline" >&2
-      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" "${_pq_line}${_pq_pline:+ | probe: $_pq_pline}" || true
+      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" "${_pq_line}${_pq_pline:+${_pq_line:+ | }probe: $_pq_pline}" || true
       if [ -n "$_pq_secs" ]; then
         printf '>>> [devin plan quota] dv lane marked DOWN for %s, until Devin'\''s stated reset (clear early with: %s posture reset). Dispatch + fallback skip Devin until then.\n' "$(_fmt_secs_human "$_pq_ttl")" "$0" >&2
       else
@@ -1474,7 +1474,7 @@ _lane_meter_saturated() {
 #      self-healing transport window (OSRC_LANE_DOWN_TTL, 300s), never a day-long block on a guess;
 #   4. reconcile a declared daily cap (no-op unless declared).
 _lane_plan_limit_block() {
-  local lane f="${2:-}" model="${3:-}" advice="${4:-}" name line reset secs="" ttl psecs verdict prc=0 short
+  local lane f="${2:-}" model="${3:-}" advice="${4:-}" name line reset secs="" ttl psecs verdict prc=0 short pline
   lane="$(_lane_plan_key "${1:-}")"; [ -n "$lane" ] || return 0
   if [ "$lane" = dv ]; then
     _devin_plan_quota_block "$f" "$model" "not just \"$model\"" \
@@ -1502,10 +1502,13 @@ _lane_plan_limit_block() {
   verdict="$(_lane_free_probe "$lane")"; prc=$?
   case "$verdict:$prc" in
     limit-refused:*)
+      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
       printf '>>> [%s plan limit] probe: CONFIRMED — %s. %s lane marked DOWN for %s%s (clear early with: %s posture reset). Dispatch + fallback skip it until then. %s\n' \
-        "$lane" "$( [ -s "$(_lane_probe_file "$lane")" ] && head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//' || printf 'the lane refused the probe with a limit too')" \
+        "$lane" "${pline:-the lane refused the probe with a limit too}" \
         "$lane" "$(_fmt_secs_human "$ttl")" "$( [ -n "$secs" ] && printf ', until its stated reset' || printf ' (an ESTIMATE: no parseable reset; override OSRC_LANE_PLAN_DOWN_TTL)')" "$0" "$advice" >&2
-      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" "${line:-}" || true ;;
+      # Evidence = the refused run's own wording + the probe's, same shape as the dv branch: the probe
+      # file is consumed below, so this is the only surviving record of what confirmed the lane down.
+      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" "${line:-}${pline:+${line:+ | }probe: $pline}" || true ;;
     answered:*)
       printf '>>> [%s plan limit] probe: NOT confirmed — the lane still answers, so it stays UP and nothing is marked; "%s" was refused on this run only. %s\n' "$lane" "$model" "$advice" >&2
       _lane_down_clear "$lane" ;;
@@ -4993,15 +4996,29 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
 # A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
 # ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
 # the run's stderr capture is consumed by then, so this is the only surviving record.
+# An unexpired LONGER mark wins over a shorter re-mark: a bare transport verdict (doctor/TLS) firing
+# inside a confirmed quota window would otherwise cut the TTL and erase the reason/evidence that
+# justify it. Extending past the current mark still works (new until > old), and posture reset /
+# _lane_down_clear remain the early-clear paths.
 _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
   local ttl="${2:-${OSRC_LANE_DOWN_TTL:-300}}"
   case "$ttl" in ''|*[!0-9]*) ttl=300 ;; esac
   local until; until="$(( $(date +%s) + ttl ))"
+  local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
+  case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
   if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
-  if [ -n "${4:-}" ]; then _posture_set "$lane" "down-evidence" "$4" 2>/dev/null || true
+  # Evidence is sanitized at the sink (ANSI CSI strip, control bytes, 400c cap) so anything a future
+  # caller passes stays safe for `posture status` to cat raw; the *_line extractors already clean
+  # their own output, this just cannot regress behind their backs.
+  local ev=""
+  if [ -n "${4:-}" ]; then
+    local esc; esc="$(printf '\033')"
+    ev="$(printf '%s' "$4" | sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | tr -d '\000-\010\013-\037\177' | head -c 400)"
+  fi
+  if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
   _posture_set "$lane" "down" "$until"
 }
@@ -5035,8 +5052,10 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
   if [ "$v" -gt "$now" ]; then return 0; fi
   # Expired -> purge on read, VALUE-MATCHED (same hardening as _quota_marker_active): only delete if
   # the file still holds the expired value we read, so a sibling's fresh marker in the race is kept.
+  # Reason/evidence ride along (same set as _lane_down_clear): a down explanation must not outlive
+  # the mark it explains, or `posture status` keeps showing stale quota wording for an up lane.
   local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$lane.down" 2>/dev/null
+  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null
   return 1
 }
 # Clear a lane's down marker early — used when an authoritative live probe (doctor) just proved the
