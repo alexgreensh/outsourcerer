@@ -1292,7 +1292,7 @@ _devin_plan_quota_block() {
       [ -n "$_pq_pline" ] || _pq_pline="$(_devin_quota_refusal_line "$(_lane_probe_file dv)")"
       printf '>>> [devin plan quota] probe: CONFIRMED — free model "%s" was refused with a limit too, so the shared %s plan quota is exhausted — this blocks ALL plan-included models (glm/swe/kimi), %s. %s\n' "$_pq_probe" "$_pq_period" "$scope" "$advice" >&2
       [ -n "$_pq_pline" ] && printf '>>> [devin plan quota] probe: Devin'\''s exact wording on the probe: %s\n' "$_pq_pline" >&2
-      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" || true
+      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" "${_pq_line}${_pq_pline:+ | probe: $_pq_pline}" || true
       if [ -n "$_pq_secs" ]; then
         printf '>>> [devin plan quota] dv lane marked DOWN for %s, until Devin'\''s stated reset (clear early with: %s posture reset). Dispatch + fallback skip Devin until then.\n' "$(_fmt_secs_human "$_pq_ttl")" "$0" >&2
       else
@@ -1306,7 +1306,7 @@ _devin_plan_quota_block() {
     *)
       _failover_signal_write dv "$model" inconclusive "refused \"$model\" citing its plan quota, and the free probe did not answer" "$_pq_secs"
       printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, so it gets the short self-healing transport window (~%s; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_fmt_secs_human "${OSRC_LANE_DOWN_TTL:-300}")" "$0" "$0" "$advice" >&2
-      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" || true ;;
+      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" "${_pq_line:-}" || true ;;
   esac
   rm -f "$(_lane_probe_file dv)" 2>/dev/null   # consumed: quoted above; no per-PID litter in $OSRC_HOME
   _quota_note_refusal dv "$model" 2>/dev/null || true
@@ -1505,16 +1505,16 @@ _lane_plan_limit_block() {
       printf '>>> [%s plan limit] probe: CONFIRMED — %s. %s lane marked DOWN for %s%s (clear early with: %s posture reset). Dispatch + fallback skip it until then. %s\n' \
         "$lane" "$( [ -s "$(_lane_probe_file "$lane")" ] && head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//' || printf 'the lane refused the probe with a limit too')" \
         "$lane" "$(_fmt_secs_human "$ttl")" "$( [ -n "$secs" ] && printf ', until its stated reset' || printf ' (an ESTIMATE: no parseable reset; override OSRC_LANE_PLAN_DOWN_TTL)')" "$0" "$advice" >&2
-      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" || true ;;
+      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" "${line:-}" || true ;;
     answered:*)
       printf '>>> [%s plan limit] probe: NOT confirmed — the lane still answers, so it stays UP and nothing is marked; "%s" was refused on this run only. %s\n' "$lane" "$model" "$advice" >&2
       _lane_down_clear "$lane" ;;
     *:2)
       printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. Marking it DOWN only for the short self-healing window (~%s) so dispatch + fallback skip a lane that just refused; if the refusal repeats it re-marks. %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" "${line:-}" || true ;;
     *)
       printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Short self-healing window only (~%s). %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" "${line:-}" || true ;;
   esac
   case "$verdict:$prc" in
     limit-refused:*) _failover_signal_write "$lane" "$model" confirmed "plan limit spent${secs:+ (resets in $(_fmt_secs_human "$secs"))}" "$secs" ;;
@@ -4990,7 +4990,10 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
 # so the gate refusal, brief and status can say what took the lane down and for how long, instead of
 # the generic "probe/transport verdict" + a fixed 300s that is wrong for a day-long quota window. No
 # reason -> any stale reason file is dropped so a later transport outage is never labeled a quota block.
-_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason]
+# A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
+# ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
+# the run's stderr capture is consumed by then, so this is the only surviving record.
+_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
   local ttl="${2:-${OSRC_LANE_DOWN_TTL:-300}}"
@@ -4998,6 +5001,8 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason]
   local until; until="$(( $(date +%s) + ttl ))"
   if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
+  if [ -n "${4:-}" ]; then _posture_set "$lane" "down-evidence" "$4" 2>/dev/null || true
+  else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
   _posture_set "$lane" "down" "$until"
 }
 _lane_down_reason() {  # <lane-or-disp> -> the recorded reason, or the generic transport wording
@@ -5040,7 +5045,7 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
 _lane_down_clear() {  # <lane-or-disp>
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
-  rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null
+  rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null
 }
 
 # Mark <model> on <lane> exhausted until the next reset, from a REAL provider quota refusal. No-op
