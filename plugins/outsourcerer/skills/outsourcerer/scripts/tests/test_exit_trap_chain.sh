@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression for the trap-then-source leak (sessions/2026-10-09-pr-sweep/tasks/b-round3.md).
+# Regression for the trap-then-source leak.
 # A caller that arms `trap 'rm -rf "$fixture"' EXIT` before sourcing outsourcerer.sh must
 # not lose its cleanup to the engine's own EXIT trap, which is installed at source time.
 # Required chain semantics:

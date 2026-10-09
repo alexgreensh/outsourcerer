@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # test_conformance_suite_timeout.sh — conformance.sh's per-suite wall-clock bound.
 #
-# A wedged suite must fail the gate loudly, not park it: one contributor run sat for 16+ hours on
-# ~7 cores because a busy-spinning suite had no time bound. The bound is only worth something if
+# A wedged suite must fail the gate loudly, not park it: without a bound a busy-spinning suite
+# would hold the gate indefinitely. The bound is only worth something if
 # the kill reaches the suite's whole tree (forked racers and background jobs) and leaves nothing
 # behind, so these cases drive the runner's real bounded-run function, extracted from
 # conformance.sh itself rather than a paraphrase, against throwaway suites in a temp dir. That
@@ -32,8 +32,8 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# Record what _suite_kill_tree is aimed at: a regression once glued the pidfile's two numbers
-# ("PID PPID") into one bogus pid and aimed a post-timeout walk at an unrelated process. The
+# Record what _suite_kill_tree is aimed at: the pidfile's two numbers ("PID PPID") must never be
+# fused into one pid, or a post-timeout walk could be aimed at an unrelated process. The
 # real implementation is kept intact under a new name; the wrapper only logs its argument.
 _kt_log="$TMP/kt.log"; : > "$_kt_log"
 KTBODY="$(declare -f _suite_kill_tree | sed 's/^_suite_kill_tree ()/_suite_kill_tree_impl ()/')"
@@ -76,8 +76,8 @@ _capture_report() {   # <suite-name>
 W="$TMP/wedge"; mkdir -p "$W"
 cat > "$W/wedged.sh" <<EOF
 #!/usr/bin/env bash
-# Incident shape: parent plus 3 forked children, all busy-spinning. Killing only the direct child
-# leaves the spinners burning CPU for hours, so every pid must be recorded and re-checked.
+# Parent plus 3 forked children, all busy-spinning. Killing only the direct child
+# leaves the spinners running, so every pid must be recorded and re-checked.
 spin() { while :; do :; done; }
 P="$W"
 spin & echo \$! >> "\$P/pids"

@@ -635,16 +635,15 @@ _timeout() {
   # which is the same reason it exists for the job supervisor. The watchdog's own stdout/stderr go to
   # /dev/null for the same reason: `kill` below reaps the subshell but ORPHANS its `sleep`, and an
   # inherited capture pipe would stay open until that sleep ended, making every captured or piped
-  # `_timeout` call cost the full bound no matter how fast the child was (measured: `x="$(_timeout 5
-  # true)"` took 5.03s on bash 3.2).
+  # `_timeout` call cost the full bound no matter how fast the child was.
   # The watchdog owns its timer: the TERM trap kills `$_wd_sleep` itself, so reaping the
   # watchdog from the caller takes the timer down with it and no enumeration is needed.
-  # The earlier approach (enumerate the watchdog's children with _descendants, then kill
-  # the list) had a pid-reuse window: the timer could exit naturally between enumeration
-  # and the kill, and the kill would land on whatever process recycled the pid. Letting
-  # the watchdog kill the pid it spawned closes the window by construction and costs no
-  # subprocess per call. TERM before the trap installs hits a subshell with no sleep yet,
-  # so nothing leaks. Same trap pattern as conformance.sh's _run_unit_suite_bounded.
+  # Enumerating the watchdog's children and killing the list would leave a pid-reuse
+  # window: the timer can exit naturally between enumeration and the kill, and the kill
+  # would land on whatever process recycled the pid. Letting the watchdog kill the pid it
+  # spawned closes the window by construction and costs no subprocess per call. TERM
+  # before the trap installs hits a subshell with no sleep yet, so nothing leaks. Same
+  # trap pattern as conformance.sh's _run_unit_suite_bounded.
   ( trap '[ -n "${_wd_sleep:-}" ] && kill "$_wd_sleep" 2>/dev/null; exit 0' TERM
     sleep "$secs" 2>/dev/null & _wd_sleep=$!
     wait "$_wd_sleep" 2>/dev/null
@@ -5197,7 +5196,7 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
 
 # Remove an expired down mark + its aux files for a purge that already read value <v>. Two gates
 # keep it safe against a concurrent _lane_down_mark, which writes .down FIRST and aux after:
-#   1) value-match: .down is unlinked only while it still holds the expired value we saw (same
+#   1) value-match: .down is unlinked only while it still holds the expired value it read (same
 #      hardening as _quota_marker_active), so a fresh mark whose .down already landed is never
 #      deleted by a stale read;
 #   2) aux gate: reason/evidence are dropped only when .down is still ABSENT at re-check. Under

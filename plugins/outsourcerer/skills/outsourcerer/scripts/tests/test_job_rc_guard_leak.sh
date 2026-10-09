@@ -176,11 +176,11 @@ st="$(cat "$jd/status")"; xr="$(cat "$jd/exit")"
   && ok "nonzero devin exit with reject in tail keeps exit-nonzero, not permission-blocked" \
   || bad "nonzero+reject gave status=$st exit=$xr rc=$rc"
 
-# --- hostile renderings of the same warning must still map (torture findings):
-# a colorized `warning:` span inserts ANSI bytes INSIDE the needle and used to
-# defeat the contiguous -F match; an inherited provider env carrying case or
-# whitespace variants missed the exact lane compare; a non-numeric
-# OSRC_PRINTMODE_TAIL made tail itself fail. ---
+# --- hostile renderings of the same warning must still map:
+# a colorized `warning:` span inserts ANSI bytes INSIDE the needle, which a
+# contiguous -F match would miss; an inherited provider env carrying case or
+# whitespace variants must not break the exact lane compare; a non-numeric
+# OSRC_PRINTMODE_TAIL must not make tail itself fail. ---
 esc="$(printf '\033')"
 printf 'work\n%s[33mwarning:%s[0m%s\n' "$esc" "$esc" "${recorded#warning:}" > "$FIX/ansi-reject.delegate.txt"
 jd="$(newjob ansi)"

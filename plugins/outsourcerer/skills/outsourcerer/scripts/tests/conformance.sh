@@ -106,13 +106,12 @@ _ALL_SUITES="$_ALL_SUITES test_timeout_capture"
 _ALL_SUITES="$_ALL_SUITES test_session_probe_sigpipe"
 _ALL_SUITES="$_ALL_SUITES test_exit_trap_chain"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
-# it: one contributor run sat for 16+ hours on ~7 cores because a busy-spinning suite had no time
-# bound. Default 600s, override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a
-# non-numeric value falls back to the default). The kill reuses outsourcerer.sh's _kill_tree
-# technique (recursive ppid walk, TERM, grace, KILL; no setsid, no `kill -- -PGID`, no `timeout`
-# binary), because killing only the direct child leaves a suite's forked racers and background
-# jobs spinning, and that is the incident itself. The engine is NOT sourced; the walk is mirrored
-# here so the gate stays independent of the code it gates.
+# it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
+# override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
+# back to the default). The kill reuses outsourcerer.sh's _kill_tree technique (recursive ppid
+# walk, TERM, grace, KILL; no setsid, no `kill -- -PGID`, no `timeout` binary), because killing
+# only the direct child leaves a suite's forked racers and background jobs spinning. The engine
+# is NOT sourced; the walk is mirrored here so the gate stays independent of the code it gates.
 _SUITE_TIMEOUT_DEFAULT=600
 _suite_descendants() {   # echo ALL descendant pids of $1 (recursive, parent-before-child order)
   local p
@@ -221,9 +220,9 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   if [ -n "$wd_pid" ] && [ -f "$expired" ]; then
     # Timer won: let the watchdog finish its kill, then walk the tree once more so a descendant
     # that ignored TERM (the wedged-tool shape) is KILLed rather than left spinning. The pidfile
-    # is read exactly the way the watchdog reads it: it holds TWO numbers ("PID PPID"), and a
-    # plain tr-glue once fused them into one bogus pid and aimed the walk at an unrelated
-    # process. The same launch-ppid guard applies, and a root that is already gone is left alone.
+    # is read exactly the way the watchdog reads it: it holds TWO numbers ("PID PPID"), so a
+    # read that fused them into one pid would aim the walk at an unrelated process. The same
+    # launch-ppid guard applies, and a root that is already gone is left alone.
     wait "$wd_pid" 2>/dev/null
     root=""; pp0=""
     [ -f "$pid_file" ] && read -r root pp0 < "$pid_file" 2>/dev/null
