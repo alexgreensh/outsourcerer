@@ -123,10 +123,10 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
   && ok "silence when only terminal (done) work exists" \
   || bad "terminal work triggered the guard (rc=$rc)"
 
-# --- a TERMINAL blocked job is not "waiting on you" (reviewer finding: a devin job that ended
-# permission-blocked tripped the guard on every run/edit/bg/loop call until its dir was cleaned).
+# --- a TERMINAL blocked job is not "waiting on you" (a devin job that ended permission-blocked
+# would otherwise trip the guard on every run/edit/bg/loop call until its dir was cleaned).
 # These cases drive the REAL path (job dir -> _fleet_snapshot_collect -> _fleet_snapshot_write ->
-# _blind_turn_guard) because the fix lives in collection, not in the guard's selection.
+# _blind_turn_guard) because the behaviour lives in collection, not in the guard's selection.
 newjob() { # <id> - minimal managed-job dir for collection
   local jd="$OSRC_JOBS/$1"; mkdir -p -m 700 "$jd"
   jq -cn --arg id "$1" '{id:$id,provider:"devin",verb:"run",model:"swe-2-high",lane:"dv"}' > "$jd/meta.json"
@@ -204,9 +204,9 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
 rm -rf "$OSRC_JOBS/unproven-blk"
 
 # A pid file whose content is not exactly one unsigned integer is not liveness
-# evidence at all, so it cannot prove the job dead either (torture finding:
-# garbage/multiline pid files used to read as "dead" and hide the job as
-# `stopped`). Each corrupt shape must keep the job reported.
+# evidence at all, so it cannot prove the job dead either: garbage or multiline pid
+# file content must never read as "dead" and hide the job as `stopped`. Each corrupt
+# shape must keep the job reported.
 for shape in garbage multiline negative; do
   newjob "corrupt-$shape"
   echo blocked > "$OSRC_JOBS/corrupt-$shape/status"
@@ -278,7 +278,7 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
 far_pid=999999; while kill -0 "$far_pid" 2>/dev/null; do far_pid=$((far_pid - 1)); done
 # The real caller row: same sid as the env var AND a pid that sits in our ancestry.
 peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
-# The reviewer case: same sid, but a pid that is NOT an ancestor (the actual stuck peer).
+# A peer whose sid matches but whose pid is NOT an ancestor (the actual stuck peer).
 peer_sid_only_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
 # A sid-matched row with no pid at all cannot be disproven; it stays excluded.
 peer_nopid_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'

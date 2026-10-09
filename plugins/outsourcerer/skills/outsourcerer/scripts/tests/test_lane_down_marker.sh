@@ -103,9 +103,9 @@ _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
 [ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
 
 # ---- expiry purge vs in-flight mark (deterministic losing-order simulation) ----
-# The reported race: a purge on a just-expired mark deleted a CONCURRENT mark's fresh
-# reason/evidence, because marks used to write aux BEFORE .down so the purge's value-match
-# could not see the in-flight write. Under the .down-first order the fresh .down lands before
+# The race shape: a purge on a just-expired mark could delete a CONCURRENT mark's fresh
+# reason/evidence when aux lands BEFORE .down, because the purge's value-match
+# cannot see the in-flight write. Under the .down-first order the fresh .down lands before
 # its aux and the purge drops aux only when .down is still absent at re-check. Each step below
 # is invoked by hand in the exact losing interleaving -- no sleeps, no real races needed.
 _posture_set cx down 1   # the expired mark a purging reader had just read

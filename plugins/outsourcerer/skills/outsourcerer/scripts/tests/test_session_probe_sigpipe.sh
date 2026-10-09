@@ -6,8 +6,8 @@
 # SIGPIPE (rc 141) when grep exits on its first match while more than the pipe buffer
 # (~16-64KB) is still unwritten, and pipefail turns the pipeline non-zero. The probe sites
 # consume that rc directly (`|| _session_launch_error`, `|| continue`), so an oversized but
-# perfectly good input took the FAILURE branch: an interactive lane launch was refused, and a
-# valid fleet name reply was discarded. These cases feed >128KB producers (with every needed
+# perfectly good input would take the FAILURE branch: an interactive lane launch would be
+# refused, and a valid fleet name reply discarded. These cases feed >128KB producers (with every needed
 # pattern present) through the real functions and assert the success branch.
 set -uo pipefail
 
@@ -37,8 +37,7 @@ for fn in _session_probe_help _session_launch_droid _session_launch_cursor _sess
 done
 
 # >128KB so the producer provably outgrows any pipe buffer the OS may use (XNU grows pipes
-# to ~64KB; GNU/Linux stays at 16KB) — past the size where the b-sigpipe measurements showed
-# the race is deterministic.
+# to ~64KB; GNU/Linux stays at 16KB), past the size where the race is deterministic.
 _base="$(printf 'x%.0s' $(seq 1 300))"
 _help_body=""
 i=0

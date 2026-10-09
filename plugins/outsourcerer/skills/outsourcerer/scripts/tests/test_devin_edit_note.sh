@@ -80,8 +80,8 @@ grep -qE '^[[:space:]]+edit\)[[:space:]]+route_delegate "accept-edits"' "$SRC" \
   || bad "the edit verb no longer dispatches with accept-edits; the note would silently stop attaching"
 
 # The appended note is dispatch plumbing, not task text: its own wording ("make the code
-# changes", "verify", "run the relevant checks") used to reach record_ledger and flip a SIMPLE
-# edit task's task_class to code. The recorded class must be the bare task's class, while the
+# changes", "verify", "run the relevant checks") would otherwise reach record_ledger and flip
+# a SIMPLE edit task's task_class to code. The recorded class must be the bare task's class, while the
 # prompt devin actually receives still carries task + note together.
 cl="$(ledger_class_for accept-edits "say hi")"
 case "$cl" in
