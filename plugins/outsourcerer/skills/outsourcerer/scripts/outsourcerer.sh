@@ -3043,11 +3043,16 @@ _session_launch_droid() {
   have droid || _session_launch_error "$provider" "droid is not on PATH"
   help_text="$(_session_probe_help droid --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive mode.*default|start.*interactive mode' \
+  # Every capability check below runs grep on a here-string, never a pipeline: under
+  # pipefail, `printf | grep -q` gets SIGPIPE (rc 141) when grep exits on its first match
+  # while the help text still has more than a pipe buffer (~16-64KB) unwritten, which
+  # flipped a healthy probe to the refusal arm. The same shape is used by the cursor,
+  # hermes and cline adapters below.
+  grep -Eqi 'interactive mode.*default|start.*interactive mode' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive mode"
-  printf '%s\n' "$help_text" | grep -Eqi 'exec.*non-interactive|exec.*noninteractively|exec.*scripts/automation' \
+  grep -Eqi 'exec.*non-interactive|exec.*noninteractively|exec.*scripts/automation' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive mode from one-shot exec"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--auto.*low.*medium.*high' \
+  grep -Eqi -- '--auto.*low.*medium.*high' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
   SESSION_LAUNCH=("droid" "--auto" "medium")
   if [ -n "$EFFORT" ]; then
@@ -3125,16 +3130,16 @@ _session_launch_cursor() {
   help_text="$(_session_probe_help "$cli" --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
   if [ "$cli" = "agent" ]; then
-    printf '%s\n' "$help_text" | grep -qi 'cursor' \
+    grep -qi 'cursor' <<<"$help_text" \
       || _session_launch_error "$provider" "the agent executable does not identify itself as Cursor"
   fi
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive (terminal|mode|session)|chat mode.*default|start.*chat mode' \
+  grep -Eqi 'interactive (terminal|mode|session)|chat mode.*default|start.*chat mode' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive chat mode"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--print.*non-interactive|-p.*non-interactive' \
+  grep -Eqi -- '--print.*non-interactive|-p.*non-interactive' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot print mode"
   SESSION_LAUNCH=("$cli")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)' \
+    grep -Eq -- '--model([ =]|$)' <<<"$help_text" \
       || _session_launch_error "$provider" "help does not advertise an interactive model override"
     SESSION_LAUNCH+=("--model" "$MODEL")
   fi
@@ -3171,15 +3176,15 @@ _session_launch_hermes() {
     || _session_launch_error "$provider" "the local help probe failed or timed out"
   chat_help="$(_session_probe_help hermes chat --help)" \
     || _session_launch_error "$provider" "the local chat help probe failed or timed out"
-  printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'REPL|interactive (chat|mode|session)|chat.*interactive' \
+  grep -Eqi 'REPL|interactive (chat|mode|session)|chat.*interactive' <<<"$help_text"$'\n'"$chat_help" \
     || _session_launch_error "$provider" "help does not advertise an interactive REPL or chat"
-  printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'one-shot|non-interactive' \
+  grep -Eqi 'one-shot|non-interactive' <<<"$help_text"$'\n'"$chat_help" \
     || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot mode"
-  printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:]])chat([[:space:]]|$)' \
+  grep -Eqi '(^|[[:space:]])chat([[:space:]]|$)' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise the chat command"
   SESSION_LAUNCH=("hermes" "chat")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    printf '%s\n' "$chat_help" | grep -Eq -- '--model([ =]|$)' \
+    grep -Eq -- '--model([ =]|$)' <<<"$chat_help" \
       || _session_launch_error "$provider" "chat help does not advertise a model override"
     SESSION_LAUNCH+=("--model" "$MODEL")
   fi
@@ -3244,15 +3249,15 @@ _session_launch_cline() {
   have cline || _session_launch_error "$provider" "cline is not on PATH"
   help_text="$(_session_probe_help cline --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive|plan mode|act mode|repl|chat' \
+  grep -Eqi 'interactive|plan mode|act mode|repl|chat' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive mode"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--plan|--auto-approve|non-interactive|headless' \
+  grep -Eqi -- '--plan|--auto-approve|non-interactive|headless' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive mode from headless one-shot"
   SESSION_LAUNCH=("cline")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
+    if grep -Eq -- '--model([ =]|$)' <<<"$help_text"; then
       SESSION_LAUNCH+=("--model" "$MODEL")
-    elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$)'; then
+    elif grep -Eq '(^|[[:space:],])-m([[:space:],]|$)' <<<"$help_text"; then
       SESSION_LAUNCH+=("-m" "$MODEL")
     else
       _session_launch_error "$provider" "help does not advertise an interactive model override"
@@ -6069,7 +6074,9 @@ _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fall
     output="$(cat "$out_file" 2>/dev/null)"
     rm -f "$out_file" 2>/dev/null || true
     [ "$rc" -eq 0 ] || continue
-    printf '%s' "$output" | grep -q '[^[:space:]]' || continue
+    # here-string, not a pipeline: the emptiness check must not inherit pipefail's rc 141
+    # (SIGPIPE once the reply outgrows the pipe buffer) and `continue` away a valid name.
+    grep -q '[^[:space:]]' <<<"$output" || continue
     printf '%s' "$output"
     return 0
   done
