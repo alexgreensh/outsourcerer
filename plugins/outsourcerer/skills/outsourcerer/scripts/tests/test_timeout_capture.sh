@@ -92,6 +92,27 @@ else
     || bad "stray sleep child(ren) of the test shell: pids$own"
 fi
 
+# --- the reap must not trust enumerated pids ---
+# The child-enumeration fix had a pid-reuse window: between reading the watchdog's
+# descendants and killing them, the timer could exit naturally and its pid could be
+# recycled, so `kill` would land on an innocent process. Reaping must be
+# self-contained: TERM the watchdog, and the watchdog's own trap kills the timer it
+# spawned. Prove it by poisoning _descendants: if the reap consulted the enumeration,
+# these innocent pids would die.
+sleep 63.1 & sentinel_a=$!
+sleep 63.2 & sentinel_b=$!
+sleep 0.2
+( _descendants() { printf '%s\n%s\n' "$sentinel_a" "$sentinel_b"; }
+  x="$(_timeout 5 true)" )
+sleep 0.5
+ok_a=0; ok_b=0
+kill -0 "$sentinel_a" 2>/dev/null && ok_a=1
+kill -0 "$sentinel_b" 2>/dev/null && ok_b=1
+[ "$ok_a" = 1 ] && [ "$ok_b" = 1 ] \
+  && ok "reap ignores enumerated pids: innocent processes survive" \
+  || bad "reap killed processes named by the enumeration (pid-reuse kill window)"
+kill "$sentinel_a" "$sentinel_b" 2>/dev/null; wait "$sentinel_a" "$sentinel_b" 2>/dev/null
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

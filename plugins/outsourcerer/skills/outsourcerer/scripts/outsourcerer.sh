@@ -592,7 +592,17 @@ _timeout() {
   # inherited capture pipe would stay open until that sleep ended, making every captured or piped
   # `_timeout` call cost the full bound no matter how fast the child was (measured: `x="$(_timeout 5
   # true)"` took 5.03s on bash 3.2).
-  ( sleep "$secs" 2>/dev/null
+  # The watchdog owns its timer: the TERM trap kills `$_wd_sleep` itself, so reaping the
+  # watchdog from the caller takes the timer down with it and no enumeration is needed.
+  # The earlier approach (enumerate the watchdog's children with _descendants, then kill
+  # the list) had a pid-reuse window: the timer could exit naturally between enumeration
+  # and the kill, and the kill would land on whatever process recycled the pid. Letting
+  # the watchdog kill the pid it spawned closes the window by construction and costs no
+  # subprocess per call. TERM before the trap installs hits a subshell with no sleep yet,
+  # so nothing leaks. Same trap pattern as conformance.sh's _run_unit_suite_bounded.
+  ( trap '[ -n "${_wd_sleep:-}" ] && kill "$_wd_sleep" 2>/dev/null; exit 0' TERM
+    sleep "$secs" 2>/dev/null & _wd_sleep=$!
+    wait "$_wd_sleep" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
     # discriminator can be exercised deterministically. It is honored ONLY under
     # OSRC_TEST_MODE=1 so a stray export can never disable production timeouts.
@@ -610,14 +620,9 @@ _timeout() {
   ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
-  # The watchdog's `sleep` survives a TERM to its subshell: the subshell dies,
-  # the timer reparents to init, and it burns the rest of the bound detached,
-  # one orphan per fast call even though it no longer holds anyone's pipe.
-  # Enumerate the watchdog's children while it is still alive (the timer is
-  # its only child) and kill the timer with the watchdog.
-  local wd_kids; wd_kids="$(_descendants "$wd_pid" 2>/dev/null)"
+  # TERM fires the watchdog's trap, which reaps the timer itself. No orphan can form:
+  # either the trap ran (timer dead) or the kill landed before `sleep` spawned at all.
   kill "$wd_pid" 2>/dev/null
-  [ -n "$wd_kids" ] && kill $wd_kids 2>/dev/null   # unquoted: pid list
   wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.
