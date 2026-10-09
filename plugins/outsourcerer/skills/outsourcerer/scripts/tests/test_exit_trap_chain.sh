@@ -33,6 +33,7 @@ run_child() {
     set --
     case "$scen" in
       bare) ;;
+      rcsave) trap "rc=\$?; echo \"saw=\$rc\" >> \"$sb/saw\"; exit \$rc" EXIT ;;
       *)    trap "rm -rf \"$sb/fx\"; echo fired >> \"$sb/count\"" EXIT ;;
     esac
     . "$src" >/dev/null 2>&1
@@ -77,6 +78,18 @@ SB="$BASE/e"; run_child resource "$SB" 0; rc=$?
 [ "$rc" -eq 0 ] && ok "re-source: exits normally (no self-recursive chain)" || bad "re-source: rc=$rc"
 fx_gone "$SB" && ok "re-source: caller handler still fires once" || bad "re-source: fixture leaked"
 count_is "$SB" 1 && ok "re-source: handler ran exactly once" || bad "re-source: handler fired '$(wc -l < "$SB/count" 2>/dev/null | tr -d " ")' times"
+
+# --- (f) a caller handler that reads $? must see the PENDING status --------------
+# The engine cleanup's own last-command status must not leak into the caller's view:
+# with `trap 'rc=$?; ...; exit $rc'` a failing script must stay failing.
+SB="$BASE/f"; run_child rcsave "$SB" 3; rc=$?
+[ "$rc" -eq 3 ] && ok "rcsave: exit 3 survives a handler that exits with \$?" || bad "rcsave: rc=$rc want 3"
+[ "$(cat "$SB/saw" 2>/dev/null)" = "saw=3" ] && ok "rcsave: handler read \$? = 3 (pending, not engine cleanup's)" || bad "rcsave: handler saw '$(cat "$SB/saw" 2>/dev/null)' want saw=3"
+
+# --- (g) same handler shape, exit 0: unchanged -----------------------------------
+SB="$BASE/g"; run_child rcsave "$SB" 0; rc=$?
+[ "$rc" -eq 0 ] && ok "rcsave: exit 0 unchanged" || bad "rcsave: rc=$rc want 0"
+[ "$(cat "$SB/saw" 2>/dev/null)" = "saw=0" ] && ok "rcsave: handler read \$? = 0" || bad "rcsave: saw '$(cat "$SB/saw" 2>/dev/null)' want saw=0"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -276,11 +276,18 @@ OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 # first and re-asserted after both halves, so neither cleanup clobbers the status the script was
 # already exiting with, and the caller's handler still sees that same status in $?.
 _OSRC_CALLER_EXIT="${_OSRC_CALLER_EXIT:-}"
+_osrc_rc_restore() { return "${1:-0}"; }   # set $? to the captured pending status
 _osrc_engine_exit() {
   [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
   _devin_skills_lock_release 2>/dev/null
   rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null
-  [ -n "$_OSRC_CALLER_EXIT" ] && eval "$_OSRC_CALLER_EXIT"
+  if [ -n "$_OSRC_CALLER_EXIT" ]; then
+    # Re-assert the pending status the script was exiting with: the caller's handler must
+    # see it in $? (e.g. `rc=$?; ...; exit $rc`), not the engine cleanup's last-command
+    # status, or a handler that exits with $? would turn a failing script into exit 0.
+    _osrc_rc_restore "${_osrc_rc:-0}"
+    eval "$_OSRC_CALLER_EXIT"
+  fi
   return 0
 }
 # _osrc_exit_chain <action>: arm an EXIT trap that runs <action> first and then the
