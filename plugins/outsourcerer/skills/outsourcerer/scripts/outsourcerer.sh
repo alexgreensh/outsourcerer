@@ -1502,7 +1502,9 @@ _lane_plan_limit_block() {
   verdict="$(_lane_free_probe "$lane")"; prc=$?
   case "$verdict:$prc" in
     limit-refused:*)
-      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+      # _utf8_sanitize after the byte cap: head -c can split a multi-byte character at 160 and the
+      # raw probe file can carry invalid bytes; both would make downstream sed/printf see bad UTF-8.
+      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(LC_ALL=C head -c 160 "$(_lane_probe_file "$lane")" | LC_ALL=C tr '\n' ' ' | _utf8_sanitize | LC_ALL=C sed -E 's/[[:space:]]+$//')"
       printf '>>> [%s plan limit] probe: CONFIRMED — %s. %s lane marked DOWN for %s%s (clear early with: %s posture reset). Dispatch + fallback skip it until then. %s\n' \
         "$lane" "${pline:-the lane refused the probe with a limit too}" \
         "$lane" "$(_fmt_secs_human "$ttl")" "$( [ -n "$secs" ] && printf ', until its stated reset' || printf ' (an ESTIMATE: no parseable reset; override OSRC_LANE_PLAN_DOWN_TTL)')" "$0" "$advice" >&2
@@ -4990,6 +4992,41 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
   return 1
 }
 
+# _utf8_sanitize : stdin bytes -> stdout containing only VALID UTF-8. ASCII passes through,
+# complete multi-byte sequences pass, anything else (stray continuation bytes, invalid leads,
+# overlong encodings, a sequence split by a preceding `head -c` cap) is dropped, so callers can
+# byte-cap a string without storing a partial character. Byte-exact under LC_ALL=C on BSD + GNU:
+# `od -tu1` emits decimal bytes and awk's `%c` re-emits each kept byte raw.
+_utf8_sanitize() {
+  LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    { for (i = 1; i <= NF; i++) b[++k] = $i + 0 }
+    END {
+      i = 1
+      while (i <= k) {
+        c = b[i]
+        if (c < 128) { out = out sprintf("%c", c); i++; continue }
+        need = 0
+        if (c >= 194 && c <= 223) need = 2
+        else if (c >= 224 && c <= 239) need = 3
+        else if (c >= 240 && c <= 244) need = 4
+        if (need == 0) { i++; continue }
+        if (i + need - 1 > k) break
+        # Restricted second byte: reject overlongs (E0<A0, F0<90), UTF-16 surrogates
+        # (ED>A0) and the >U+10FFFF cap (F4>8F) so only strictly valid UTF-8 survives.
+        lo = 128; hi = 191
+        if (c == 224) lo = 160; else if (c == 237) hi = 159
+        if (c == 240) lo = 144; else if (c == 244) hi = 143
+        ok = 1
+        if (b[i+1] < lo || b[i+1] > hi) ok = 0
+        for (j = 2; ok && j < need; j++) if (b[i+j] < 128 || b[i+j] > 191) { ok = 0; break }
+        if (!ok) { i++; continue }
+        for (j = 0; j < need; j++) out = out sprintf("%c", b[i+j])
+        i += need
+      }
+      printf "%s", out
+    }'
+}
+
 # ---- LANE-DOWN marker (sibling of the quota exhausted-until marker) ----------------------------
 # A lane can be UNREACHABLE without being at-cap: the Devin free GLM probe times out, or a
 # sandboxed-proxy TLS reject makes the whole devin lane unusable. doctor already detects this, but
@@ -5024,13 +5061,19 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   fi
   if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
-  # Evidence is sanitized at the sink (ANSI CSI strip, control bytes, 400c cap) so anything a future
-  # caller passes stays safe for `posture status` to cat raw; the *_line extractors already clean
-  # their own output, this just cannot regress behind their backs.
+  # Evidence is sanitized at the sink so anything a future caller passes stays safe for
+  # `posture status` to cat raw; the *_line extractors already clean their own output, this just
+  # cannot regress behind their backs. LC_ALL=C throughout: under a UTF-8 locale BSD sed aborts
+  # ("illegal byte sequence") on hostile input and the evidence vanished. Order matters: ANSI CSI
+  # strip first (the control-byte strip would eat the ESC byte and break detection); fold
+  # newline/CR/tab to spaces (a raw newline would let evidence forge extra posture rows); strip
+  # remaining control bytes; _explain_redact secrets (evidence is quoted provider stderr and can
+  # carry tokens); 400-byte cap; _utf8_sanitize so the cap or hostile input never leaves a split
+  # or invalid byte sequence in the stored value.
   local ev=""
   if [ -n "${4:-}" ]; then
     local esc; esc="$(printf '\033')"
-    ev="$(printf '%s' "$4" | sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | tr -d '\000-\010\013-\037\177' | head -c 400)"
+    ev="$(printf '%s' "$4" | LC_ALL=C sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | LC_ALL=C tr '\011\012\015' '   ' | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C _explain_redact | LC_ALL=C head -c 400 | _utf8_sanitize)"
   fi
   if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi

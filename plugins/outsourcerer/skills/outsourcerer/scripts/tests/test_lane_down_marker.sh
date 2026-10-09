@@ -77,5 +77,30 @@ _kept2="$(_posture_get or down 2>/dev/null)"
 _lane_down_mark or
 [ "$(_posture_get or down 2>/dev/null)" = "$_kept2" ] && [ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: bare re-mark still no-ops on the reasoned window" || bad "reset: bare re-mark clobbered the reasoned mark"
 
+# ---- evidence hygiene (stored value must be one line, secret-free, valid UTF-8) ----
+# Multi-line evidence folds to ONE line: a raw newline would let stored evidence forge extra
+# rows in `posture status` (which cats these files raw), or a second fake "marker" line.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf 'line one\nline two\ttabbed\r\nend')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+printf '%s' "$_ev" | grep -q 'line one' && printf '%s' "$_ev" | grep -q 'end' && [ "$(printf '%s' "$_ev" | wc -l | tr -d ' ')" = "0" ] && ok "sanitize: multi-line evidence stored as one line" || bad "sanitize: multi-line evidence mangled ($_ev)"
+# Invalid UTF-8 input is kept in sanitized form (not dropped): under a UTF-8 locale BSD sed used
+# to abort on the bad byte and the evidence vanished entirely.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf 'bad\xffrawbytes')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ -n "$_ev" ] && printf '%s' "$_ev" | grep -q 'badrawbytes' && ok "sanitize: invalid-UTF-8 evidence kept (bad byte dropped)" || bad "sanitize: invalid-UTF-8 evidence lost ($_ev)"
+# A 3-byte character straddling the 400-byte cap leaves no partial sequence at the tail.
+_pad="$(printf '%*s' 398 '' | tr ' ' 'a')"
+_lane_down_mark gm 300 "plan limit exhausted" "${_pad}"$'\xe2\x82\xac'"tail"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ "$(printf '%s' "$_ev" | wc -c | tr -d ' ')" = "398" ] && [ "$_ev" = "$_pad" ] && ok "sanitize: cap drops a straddling 3-byte char cleanly" || bad "sanitize: cap left a partial sequence (len $(printf '%s' "$_ev" | wc -c | tr -d ' '))"
+# Token-shaped evidence is redacted on the way in (evidence is quoted provider stderr).
+_lane_down_mark gm 300 "plan limit exhausted" "denied with key sk-abcdef0123456789 embedded"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+case "$_ev" in *"sk-abcdef0123456789"*) bad "sanitize: raw token survived into evidence" ;; *"REDACTED"*) ok "sanitize: token-shaped evidence redacted" ;; *) bad "sanitize: unexpected evidence ($_ev)" ;; esac
+# ANSI colouring still cannot reach the stored value.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf '\033[31mred\033[0m word')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
