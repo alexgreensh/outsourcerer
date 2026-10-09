@@ -270,7 +270,45 @@ OSRC_FLEET_FORCE="${OSRC_FLEET_FORCE:-0}"
 OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
-trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
+# The trap CHAINS a pre-existing caller handler instead of replacing it: a suite or wrapper that
+# armed `trap 'rm -rf "$fixture"' EXIT` before sourcing would otherwise lose its cleanup entirely
+# (the leaked-fixture class documented in the test suite). The pending exit status is captured
+# first and re-asserted after both halves, so neither cleanup clobbers the status the script was
+# already exiting with, and the caller's handler still sees that same status in $?.
+_OSRC_CALLER_EXIT="${_OSRC_CALLER_EXIT:-}"
+_osrc_engine_exit() {
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  _devin_skills_lock_release 2>/dev/null
+  rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null
+  [ -n "$_OSRC_CALLER_EXIT" ] && eval "$_OSRC_CALLER_EXIT"
+  return 0
+}
+# _osrc_exit_chain <action>: arm an EXIT trap that runs <action> first and then the
+# engine-cleanup tail (which ends by eval'ing whatever handler the caller armed before we were
+# sourced). A pre-existing foreign handler is captured into _OSRC_CALLER_EXIT as its bare
+# action text; when the engine handler is already in place the new action composes over its
+# tail, so a re-source or a later engine re-arm never wraps the chain in itself and no handler
+# runs twice.
+_osrc_exit_chain() {  # <action>
+  local _prev
+  _prev="$(trap -p EXIT)"
+  case "$_prev" in
+    *'_osrc_engine_exit'*)
+      [ "$1" = "_osrc_engine_exit" ] && return 0
+      trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
+    '')
+      trap '_osrc_rc=$?; '"$1"'; exit "$_osrc_rc"' EXIT ;;
+    *)
+      _prev="${_prev#trap -- }"; _prev="${_prev#trap }"; _prev="${_prev% EXIT}"
+      # _prev is trap -p's single-quoted, eval-safe rendering of the action; decode it to the
+      # bare action text (eval + printf %s is quoting-proof) so it can be run by eval later.
+      _OSRC_CALLER_EXIT="$(eval "printf '%s' $_prev")"
+      [ "$1" = "_osrc_engine_exit" ] \
+        && trap '_osrc_rc=$?; _osrc_engine_exit; exit "$_osrc_rc"' EXIT \
+        || trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
+  esac
+}
+_osrc_exit_chain '_osrc_engine_exit'
 # ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
 # (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
 # lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One
@@ -7458,7 +7496,7 @@ _heartbeat_beacon() {
     2) return 0 ;;
     *) echo "outsourcerer: heartbeat ownership unknown; preserving the existing leader" >&2; return 1 ;;
   esac
-  trap '_heartbeat_stop "$token"' EXIT
+  _osrc_exit_chain '_heartbeat_stop "$token"'
   trap 'exit 0' INT TERM
   while :; do
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
