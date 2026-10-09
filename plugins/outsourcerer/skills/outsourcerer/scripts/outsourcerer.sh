@@ -6362,12 +6362,36 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}"
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
-      state="$(_fleet_classify "$(printf '%s' "$job" | jq -r '.status // "unknown"')")"
+      jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      state="$(_fleet_classify "$jstatus")"
+      if [ "$state" = "blocked" ]; then
+        # `blocked` in the fleet vocabulary means "LIVE, parked on a prompt". The job
+        # statuses that map there are written only as a job dies (post-wait, or between
+        # _kill_job and the exit file landing), so they usually describe a TERMINAL job
+        # and a dead process is not waiting on anyone. Reporting it live makes the
+        # blind-turn guard tell the user to answer a pane for a process that already
+        # exited, on every run/edit/bg/loop call until the job dir is cleaned. Show it
+        # as `stopped` (the fleet's existing stopped-needs-a-look state); state_evidence
+        # keeps the raw status so fleet ls still says WHAT it stopped on. Terminality
+        # needs positive evidence: an exit file, or every recorded process pid gone.
+        # When neither is provable (no exit file, no pid recorded, or a pid still live)
+        # keep `blocked`: the fleet errs toward reporting possibly-live work.
+        if [ -f "$d/exit" ]; then
+          state=stopped
+        else
+          _jpid="$(cat "$d/pid" 2>/dev/null)"; _jspid="$(cat "$d/supervisor_pid" 2>/dev/null)"
+          if [ -n "$_jpid$_jspid" ]; then
+            { [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; } \
+              || { [ -n "$_jspid" ] && kill -0 "$_jspid" 2>/dev/null; } \
+              || state=stopped
+          fi
+        fi
+      fi
       item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
         {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
          requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,

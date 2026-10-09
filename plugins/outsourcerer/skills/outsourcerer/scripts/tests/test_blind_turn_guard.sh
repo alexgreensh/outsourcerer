@@ -20,9 +20,13 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 FIXTURE="$(mktemp -d "$PWD/.test-blind-turn.XXXXXX")"
-trap 'rm -rf "$FIXTURE"' EXIT
+trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
-mkdir -p "$OSRC_HOME"
+# The real-collect cases below must not fold this host's actual Claude sessions
+# into the fixture's fleet view.
+export OSRC_CLAUDE_SESSIONS_DIR="$FIXTURE/claude-sessions"
+export OSRC_CLAUDE_PROJECTS_DIR="$FIXTURE/claude-projects"
+mkdir -p "$OSRC_HOME" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_CLAUDE_PROJECTS_DIR"
 
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
@@ -118,6 +122,86 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] \
   && ok "silence when only terminal (done) work exists" \
   || bad "terminal work triggered the guard (rc=$rc)"
+
+# --- a TERMINAL blocked job is not "waiting on you" (reviewer finding: a devin job that ended
+# permission-blocked tripped the guard on every run/edit/bg/loop call until its dir was cleaned).
+# These cases drive the REAL path (job dir -> _fleet_snapshot_collect -> _fleet_snapshot_write ->
+# _blind_turn_guard) because the fix lives in collection, not in the guard's selection.
+newjob() { # <id> - minimal managed-job dir for collection
+  local jd="$OSRC_JOBS/$1"; mkdir -p -m 700 "$jd"
+  jq -cn --arg id "$1" '{id:$id,provider:"devin",verb:"run",model:"swe-2-high",lane:"dv"}' > "$jd/meta.json"
+  : > "$jd/.startmark"; : > "$jd/.fsmark"; : > "$jd/out.log"
+}
+dead_pid=999999; while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+dead_spid=$dead_pid; while kill -0 "$dead_spid" 2>/dev/null; do dead_spid=$((dead_spid - 1)); done
+collect_and_write() { _fleet_snapshot_write "$(_fleet_snapshot_collect)"; }
+job_state() { jq -r --arg j "$1" '.items[] | select(.job_id==$j) | .state' "$SNAP"; }
+
+# permission-blocked verdict, exit recorded, process gone: parked-looking but terminal.
+newjob term-pb
+echo permission-blocked > "$OSRC_JOBS/term-pb/status"; echo 3 > "$OSRC_JOBS/term-pb/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-pb/pid"; echo "$dead_spid" > "$OSRC_JOBS/term-pb/supervisor_pid"
+collect_and_write
+[ "$(job_state term-pb)" = "stopped" ] \
+  && ok "terminal permission-blocked job shows as 'stopped', not a live prompt" \
+  || bad "terminal permission-blocked job state is '$(job_state term-pb)' (expected stopped)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+  && ok "a terminal permission-blocked job does NOT trip the guard" \
+  || bad "terminal permission-blocked job still trips the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-pb"
+
+# OSRC::BLOCKED is stored as status `blocked`; a dead one is the same terminal class.
+newjob term-blk
+echo blocked > "$OSRC_JOBS/term-blk/status"; echo 3 > "$OSRC_JOBS/term-blk/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-blk/pid"
+collect_and_write
+[ "$(job_state term-blk)" = "stopped" ] \
+  && ok "terminal blocked (OSRC::BLOCKED) job shows as 'stopped'" \
+  || bad "terminal blocked job state is '$(job_state term-blk)' (expected stopped)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+  && ok "a terminal OSRC::BLOCKED job does NOT trip the guard" \
+  || bad "terminal OSRC::BLOCKED job still trips the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-blk"
+
+# The same dir shape with status done? is terminal too; it must stay silent end to end.
+newjob term-done
+echo 'done?' > "$OSRC_JOBS/term-done/status"; echo 2 > "$OSRC_JOBS/term-done/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-done/pid"
+collect_and_write
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "a terminal done? job stays silent through the real collect path" \
+  || bad "terminal done? job triggered the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-done"
+
+# ...but a job that is genuinely ALIVE and parked on a prompt must still be reported exactly
+# as before: status blocked, no exit file, and a live delegate pid.
+sleep 60 & live_pid=$!
+newjob live-blk
+echo blocked > "$OSRC_JOBS/live-blk/status"; echo "$live_pid" > "$OSRC_JOBS/live-blk/pid"
+collect_and_write
+[ "$(job_state live-blk)" = "blocked" ] \
+  && ok "a live blocked job keeps the 'blocked' fleet state" \
+  || bad "live blocked job state is '$(job_state live-blk)' (expected blocked)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'live-blk' && printf '%s' "$out" | grep -q 'WAITING ON YOU' \
+  && ok "a LIVE blocked job still refuses (rc=7) and is named WAITING ON YOU" \
+  || bad "live blocked job was not reported (rc=$rc): $out"
+kill "$live_pid" 2>/dev/null; live_pid=""; rm -rf "$OSRC_JOBS/live-blk"
+
+# A blocked dir with NO recorded pid and NO exit file cannot be proven terminal, so the fleet
+# errs toward reporting it rather than hiding possibly-live work (the same convention
+# _reconcile_status uses: no liveness evidence is not proof of death).
+newjob unproven-blk
+echo blocked > "$OSRC_JOBS/unproven-blk/status"
+collect_and_write
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'unproven-blk' \
+  && ok "an unverifiably-terminal blocked job still refuses (fails toward reporting)" \
+  || bad "unverifiable blocked job was hidden (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/unproven-blk"
 
 # --- silence when there is no fleet view yet (the heartbeat owns collection; guard does not collect) ---
 rm -f "$SNAP"
