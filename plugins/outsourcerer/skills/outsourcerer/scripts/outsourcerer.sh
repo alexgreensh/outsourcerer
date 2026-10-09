@@ -9945,6 +9945,9 @@ _kill_job() {
 # detector's own pattern line back into its log. A watchdog whose source is its own trip-wire kills
 # whoever works on it.
 _printmode_needle() { printf 'chisel::repl::handler: Print mode: %s tool %s that requires confirmation' 'rejecting' 'exec'; }
+# Newer devin CLIs (observed on 3000.11) no longer hang on that reject: they print this warning to
+# stderr, end the session, and exit 0. Assembled at runtime for the same self-match reason as above.
+_noninteractive_reject_needle() { printf 'warning: %s a tool call that requires confirmation. Running in %s mode' 'rejected' 'non-interactive'; }
 _perm_needles() {
   printf '(%s|%s|%s)' \
     "requested permis""sions to" \
@@ -10443,6 +10446,26 @@ _supervise() {
       printf '%s\n' "$_btxt" > "$jd/reason" 2>/dev/null || true
       return 3 ;;
   esac
+  # DEVIN NON-INTERACTIVE REJECT (post-exit). A current devin CLI that rejects a tool call needing
+  # confirmation prints _noninteractive_reject_needle, ends the session and exits 0, so without this
+  # the job reads as `done?` and nothing says the delegate stopped before its remaining steps (usually
+  # the verification run). That is the permission-blocked state. Anchoring mirrors the print-mode
+  # check: tail only, devin lane only (another lane quoting the line is not devin stopping), exit-0
+  # only (a nonzero child keeps its real code on the exit-nonzero path below), and a delegate that
+  # went on to sign OSRC::DONE is taken at its word. The lane comes from meta.json when it exists;
+  # meta.json is jq-written, so without jq it is absent -- fall back to the provider env run_job
+  # exports or the mapping silently never fires.
+  local _jlane=""; [ -f "$jd/meta.json" ] && have jq && _jlane="$(jq -r '(.lane // .provider // "")' "$jd/meta.json" 2>/dev/null)"
+  _jlane="${_jlane:-${OUTSOURCERER_PROVIDER:-}}"
+  if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
+     && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
+     && tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null | grep -aqF "$(_noninteractive_reject_needle)"; then
+    echo "permission-blocked" > "$jd/status"
+    printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
+    echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
+    echo 3 > "$jd/exit"
+    return 3
+  fi
   # Output-token exhaustion is a distinct, recoverable failure, but engines report it as a generic
   # non-zero exit with the partial answer still sitting in the log. Left unnamed it reads as "the run
   # broke"; the operator keeps the truncated output and never learns the result was cut, not wrong.
@@ -11224,7 +11247,7 @@ run_job() {
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
   OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
-    "$SCRIPT_PATH" ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
+    "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
   # Worktree receipt: record base/head SHA + dirty/ahead so the orchestrator can inspect or integrate
   # deterministically. NEVER auto-remove — the worktree is preserved until an explicit `cleanup`.
@@ -19483,6 +19506,14 @@ main() {
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
   unset OSRC_PREFLIGHT
   if [ "${1:-}" = "--osrc-preflight-internal" ]; then OSRC_PREFLIGHT=1; shift; fi
+  # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
+  # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
+  # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
+  # child, so a delegate that runs outsourcerer itself would see its guard silently disabled; and
+  # delegate_codex's own error text tells users to export it, which would switch the guard off for
+  # every run they launch after. A private argv sentinel cannot leak through the environment.
+  local _job_child=0
+  if [ "${1:-}" = "--osrc-job-child-internal" ]; then _job_child=1; shift; fi
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
@@ -19598,6 +19629,15 @@ main() {
   # bg/fanout launch with "route preflight returned non-zero" — the tool refusing to start the very
   # work that would clear the backlog. Preflight returns its own dispatch rc untouched.
   if [ "${OSRC_PREFLIGHT:-0}" = "1" ]; then
+    return "$_cmd_rc"
+  fi
+  # Same for the child a supervised job runs (run_job re-enters this script as `<verb> ...` under
+  # _supervise, flagged by the --osrc-job-child-internal sentinel consumed above). That child IS
+  # the delegated work, not an orchestrator turn ending, and _supervise reads its exit code as the
+  # delegate's. Running the guard here let a finished delegate exit 7 whenever unrelated fleet
+  # state needed attention, so a job with a complete deliverable was recorded as failed with
+  # reason exit-nonzero:rc=7.
+  if [ "$_job_child" = "1" ]; then
     return "$_cmd_rc"
   fi
   case "$cmd" in

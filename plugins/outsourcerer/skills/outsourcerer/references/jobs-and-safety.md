@@ -58,6 +58,12 @@ distinct handling:
   and aborts fast instead of waiting out the 15-min stall-kill. Next step: re-run with `yolo`
   (bypassPermissions) or restructure the prompt so the delegate ENDS on a file write and the orchestrator
   does the validation/commit/PR. Opt out with `OSRC_NO_PRINTMODE_ABORT=1` (the stall-kill still backstops).
+  Newer devin CLIs don't hang on that reject: they print a warning that they rejected a tool call
+  needing confirmation because they run non-interactively, and exit 0. When that line is in the log tail and the
+  delegate did not end on `OSRC::DONE`, the job is `permission-blocked` (reason
+  `permission-blocked:noninteractive-reject`) instead of `done?`. Edits made before the reject are
+  kept, so `classify` still reports them as `REUSE-OUTPUT`; the step it was attempting did not run.
+  Devin lane only. `OSRC_NO_PRINTMODE_ABORT=1` turns this mapping off too.
 - **`launching` that never reaches `running` → `failed` (stillborn).** The launcher detached but the
   worker never wrote a process/log within the grace window (`OSRC_LAUNCH_GRACE`, default 45s) — usually a
   sandbox that reaps detached background jobs (e.g. running inside another agent's exec sandbox). `status`

@@ -99,6 +99,7 @@ _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota test_nowrite_watchdog test_advis
 _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota_probe"
 _ALL_SUITES="$_ALL_SUITES test_lane_plan_limit"
 _ALL_SUITES="$_ALL_SUITES test_failover_pick"
+_ALL_SUITES="$_ALL_SUITES test_job_rc_guard_leak"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say

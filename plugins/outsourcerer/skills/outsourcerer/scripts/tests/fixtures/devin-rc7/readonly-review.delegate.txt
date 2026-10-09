@@ -1,0 +1,7 @@
+Reviewing the diff against the shared types.VERDICT: ready-with-fixes
+
+[P1] parser.ts:101 — a missing confidence field is silently repaired to '1.00' instead of being flagged — input: `{confidence: undefined}` → stored as 1.00 — fix: emit a MISSING_FIELD issue and store null.
+
+[P2] parser.ts:152 — the reported item count is never reconciled against the parsed list, so dropped rows produce a clean draft — input: `count: 5, items: [a, b]` → no issue — fix: emit an issue when the counts differ.
+
+[P3] parser.ts:190 — `draft.version` is the literal 1 for every draft, so the stale-draft test cannot exercise a stale draft — fix: add a per-draft revision.
