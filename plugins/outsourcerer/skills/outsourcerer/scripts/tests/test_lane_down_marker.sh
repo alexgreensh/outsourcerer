@@ -135,6 +135,12 @@ case "$_ev" in *"sk-abcdef0123456789"*) bad "sanitize: raw token survived into e
 _lane_down_mark gm 300 "plan limit exhausted" "$(printf '\033[31mred\033[0m word')"
 _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
 [ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
+# NUL bytes are dropped deterministically. The evidence path already strips \000 upstream via
+# tr, so this pins the contract on _utf8_sanitize itself: leaving NUL to sprintf("%c", 0) is
+# unspecified across awks (BSD awk emits nothing, gawk emits a raw NUL that truncates the value
+# for downstream readers).
+_ev="$(printf 'a\0b' | _utf8_sanitize)"
+[ "$_ev" = "ab" ] && ok "sanitize: NUL byte dropped by _utf8_sanitize" || bad "sanitize: NUL byte survived ($_ev)"
 
 # ---- expiry purge vs in-flight mark (deterministic losing-order simulation) ----
 # The race shape: a purge on a just-expired mark could delete a CONCURRENT mark's fresh

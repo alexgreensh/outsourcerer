@@ -5102,6 +5102,10 @@ _utf8_sanitize() {
       i = 1
       while (i <= k) {
         c = b[i]
+        # NUL is dropped explicitly rather than left to sprintf("%c", 0): what that
+        # emits is unspecified across awks (BSD awk emits nothing, gawk emits a raw
+        # NUL), and a stored NUL silently truncates evidence on downstream readers.
+        if (c == 0) { i++; continue }
         if (c < 128) { out = out sprintf("%c", c); i++; continue }
         need = 0
         if (c >= 194 && c <= 223) need = 2
