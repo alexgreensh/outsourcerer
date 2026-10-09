@@ -103,7 +103,10 @@ printf '%s' "$out" | grep -q 'removed 1' && ok "gc reports 1 removed" || bad "gc
 # prints filesystem info. So `stat -f ... || stat -c ...` never falls through on Linux and hands back
 # a block-device dump where a number was expected, which then fails every numeric test silently. This
 # broke `gc` on Linux completely: it could never parse an mtime, so it removed nothing, ever.
-if grep -v '^[[:space:]]*#' "$SRC" | grep -q 'stat -f [^|]*|| *stat -c'; then
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+if grep -q 'stat -f [^|]*|| *stat -c' <<<"$_noc"; then
   bad "BSD-first stat ordering found: the GNU fallback is unreachable on Linux"
 else
   ok "stat calls try GNU first, so the BSD fallback is actually reachable on both"

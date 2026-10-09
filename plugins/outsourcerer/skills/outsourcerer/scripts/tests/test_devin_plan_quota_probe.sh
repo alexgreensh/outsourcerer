@@ -139,7 +139,10 @@ printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && bad "unreacha
 _lane_down_clear dv
 
 # === (f) structural ==============================================================================
-grep -v '^[[:space:]]*#' "$SRC" | grep -q 'do NOT retry them' && bad "structure: 'do NOT retry them' still in a user-facing line" || ok "structure: 'do NOT retry them' gone from user-facing lines"
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+grep -q 'do NOT retry them' <<<"$_noc" && bad "structure: 'do NOT retry them' still in a user-facing line" || ok "structure: 'do NOT retry them' gone from user-facing lines"
 grep -q '_pq_verdict="$(_lane_free_probe dv "$_pq_probe")"' "$SRC" && ok "structure: the block probes before deciding" || bad "structure: block does not call _lane_free_probe"
 _pre="$(awk '/^_devin_plan_quota_block\(\)/{f=1} f&&/_lane_down_mark dv/{print NR; exit}' "$SRC")"
 _prb="$(awk '/^_devin_plan_quota_block\(\)/{f=1} f&&/_lane_free_probe dv/{print NR; exit}' "$SRC")"

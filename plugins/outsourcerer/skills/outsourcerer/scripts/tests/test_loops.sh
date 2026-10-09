@@ -224,7 +224,10 @@ printf '%s' "$out" | grep -Fq '$0 cash, spends your Devin plan limits' \
 # 19. The stall normaliser must not rely on GNU-only regex. `\b` is silently IGNORED by BSD sed, so
 #     durations were never stripped on macOS and the guard was weaker than its tests implied — the
 #     third GNU-vs-BSD divergence found in this codebase, so it gets a permanent check.
-grep -v '^[[:space:]]*#' "$SRC" | grep -q '\\b' \
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+grep -q '\\b' <<<"$_noc" \
   && bad "a GNU-only \\b word boundary is back in the source (BSD sed ignores it silently)" \
   || ok "no GNU-only word boundaries in the source"
 a="$(printf 'FAIL auth took 0.42s\n' | _check_signature)"

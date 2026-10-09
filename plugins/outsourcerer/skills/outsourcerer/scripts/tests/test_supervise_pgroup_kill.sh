@@ -89,27 +89,29 @@ if [ "$_have_kill_job" = "1" ] && grep -aqE '^_kill_job\(\)' "$SRC"; then
 else
   bad "source: _kill_job helper missing"
 fi
-# Capture function bodies in variables rather than piping awk -> grep: under
-# `set -o pipefail`, `grep -q` closing the pipe early sends SIGPIPE to awk (rc=141),
-# which makes the pipeline fail even when the pattern IS present.
+# Capture function bodies in variables and match via here-strings rather than
+# piping awk/printf -> grep -q: under `set -o pipefail`, `grep -q` closing the
+# pipe early sends SIGPIPE to the writer (rc=141), which makes the pipeline fail
+# even when the pattern IS present. The _supervise body is ~32KB, past the 16KB
+# macOS pipe buffer, so the printf form flaked on CI.
 _killjob_body="$(awk '/^_kill_job\(\)/{f=1} f{print} f&&/^}/{exit}' "$SRC" 2>/dev/null)"
-printf '%s' "$_killjob_body" | grep -q _kill_process_group \
+grep -q _kill_process_group <<<"$_killjob_body" \
   && ok "source: _kill_job routes through _kill_process_group" \
   || bad "source: _kill_job does not call _kill_process_group"
 # _supervise records an isolated PGID for the job and uses _kill_job on every exit arm.
 _supervise_body="$(awk '/^_supervise\(\)/{f=1} f{print} f&&/^}/{exit}' "$SRC" 2>/dev/null)"
-printf '%s' "$_supervise_body" | grep -aq '\$jd/pgid' \
+grep -aq '\$jd/pgid' <<<"$_supervise_body" \
   && ok "source: _supervise records the delegate PGID in \$jd/pgid" \
   || bad "source: _supervise does not record a job PGID"
-printf '%s' "$_supervise_body" | grep -aq '_kill_job "\$jd" "\$pid"' \
+grep -aq '_kill_job "\$jd" "\$pid"' <<<"$_supervise_body" \
   && ok "source: _supervise tear-down uses _kill_job (not a bare _kill_tree)" \
   || bad "source: _supervise still tears down with _kill_tree directly"
 # The portable isolation primitive is `set -m`, not setsid (macOS ships none).
-printf '%s' "$_supervise_body" | grep -aq 'set -m' \
+grep -aq 'set -m' <<<"$_supervise_body" \
   && ok "source: _supervise isolates the delegate via set -m (portable, no setsid)" \
   || bad "source: _supervise does not use set -m for process-group isolation"
 # No _kill_tree "$pid" should remain inside _supervise (the whole point of the fix).
-if printf '%s' "$_supervise_body" | grep -aq '_kill_tree "\$pid"'; then
+if grep -aq '_kill_tree "\$pid"' <<<"$_supervise_body"; then
   bad "source: a direct _kill_tree \"\$pid\" survives inside _supervise — kill can still miss the grandchild"
 else
   ok "source: no direct _kill_tree \"\$pid\" remains inside _supervise"

@@ -182,7 +182,10 @@ OSRC_NOINIT_SECS=2 OSRC_POLL=1 _supervise "$jdok" 10 15 30 -- sh -c \
 
 # The check must use POSIX -newer: -newermt @epoch is a GNU extension that BSD find fails to parse,
 # which would make this guard quietly dead on macOS — passing tests, protecting nothing.
-grep -v '^[[:space:]]*#' "$SRC" | grep -q -- '-newermt' && bad "filesystem-progress check uses the GNU-only -newermt" \
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+grep -q -- '-newermt' <<<"$_noc" && bad "filesystem-progress check uses the GNU-only -newermt" \
   || ok "filesystem-progress check is POSIX (-newer), so it works on BSD find too"
 
 
