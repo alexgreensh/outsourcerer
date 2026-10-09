@@ -6442,7 +6442,7 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _lst _sst
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
@@ -6480,11 +6480,11 @@ _fleet_snapshot_collect() {
             for _p in "$_jpid" "$_jspid"; do
               [ -n "$_p" ] || continue
               kill -0 "$_p" 2>/dev/null || continue
-              _lst="$(ps -o lstart= -p "$_p" 2>/dev/null | tr -s ' ')"
+              _lst="$(_pid_start_identity "$_p" 2>/dev/null)"
               if [ "$_p" = "$_jpid" ]; then
-                _sst="$(cat "$d/pid_start" 2>/dev/null | tr -s ' ')"
+                _sst="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$d/pid_start" 2>/dev/null)"
               else
-                _sst="$(cat "$d/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
+                _sst="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$d/supervisor_pid_start" 2>/dev/null)"
               fi
               { [ -z "$_sst" ] || [ -z "$_lst" ] || [ "$_lst" = "$_sst" ]; } && _alive=1
             done
@@ -10644,7 +10644,7 @@ _supervise() {
   local _esc; _esc="$(printf '\033')"
   if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
      && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
-     && tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" | grep -aqF "$(_noninteractive_reject_needle)"; then
+     && tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | LC_ALL=C sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" | grep -aqF "$(_noninteractive_reject_needle)"; then
     echo "permission-blocked" > "$jd/status"
     printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
