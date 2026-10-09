@@ -21,7 +21,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # nobody could tell which. The regex is single-quoted and spliced: on bash 3.2 a double-quoted
 # "${fn}()" inside a command substitution is misparsed (the () reads as function-definition
 # syntax) and sed receives a mangled script.
-for fn in _suite_descendants _suite_kill_tree _run_unit_suite_bounded _report_unit_suite_result; do
+for fn in _suite_descendants _suite_kill_tree _suite_ppid_of _run_unit_suite_bounded _report_unit_suite_result; do
   eval "$(sed -n '/^'"${fn}"'() {/,/^}/p' "$CONF")"
   type "$fn" >/dev/null 2>&1 || { echo "FAIL: could not extract $fn from $CONF"; exit 1; }
 done
@@ -82,7 +82,7 @@ EOF
 # The scenario is itself bounded: if the bound regresses, this suite reports a failure and stops
 # instead of hanging the gate it is supposed to protect.
 ( OSRC_SUITE_TIMEOUT=2 _run_unit_suite_bounded "$W/wedged.sh"
-  printf '%s\n' "$_suite_timed_out" "$_suite_rc" > "$W/result" ) & wrap=$!
+  printf '%s\n' "$_suite_timed_out" "$_suite_rc" > "$W/result" ) 2>"$W/werr" & wrap=$!
 deadline=$(( SECONDS + 20 ))
 while kill -0 "$wrap" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2; done
 if kill -0 "$wrap" 2>/dev/null; then
@@ -112,6 +112,8 @@ while :; do
 done
 [ "$alive" = 0 ] && ok "no process from the wedged suite survived (all recorded pids dead)" \
                  || bad "processes from the wedged suite survived the kill: $(tr '\n' ' ' < "$W/pids")"
+grep -q 'Terminated' "$W/werr" 2>/dev/null && bad "watchdog kill printed 'Terminated' noise into the log: $(head -1 "$W/werr")" \
+                                       || ok "watchdog kill is silent (no 'Terminated' in the log)"
 # Drive the report from the wedged run's real recorded state (the run happened in a subshell).
 _suite_timed_out="$_t"; _suite_rc="$_r"; _suite_secs="2"; _suite_out=""
 rep="$(_capture_report wedged)"; rep_f="$(cat "$TMP/rep")"
@@ -183,7 +185,58 @@ OSRC_SUITE_TIMEOUT=abc _run_unit_suite_bounded "$TMP/slow.sh"
                        || bad "non-numeric bound broke the run (rc=$_suite_rc timed_out=$_suite_timed_out)"
 [ "$_suite_secs" = "$_SUITE_TIMEOUT_DEFAULT" ] && ok "non-numeric bound resolves to the default (${_SUITE_TIMEOUT_DEFAULT}s)" \
                        || bad "non-numeric bound resolved to $_suite_secs, expected $_SUITE_TIMEOUT_DEFAULT"
+rep="$(_capture_report slow)"; rep_f="$(cat "$TMP/rep")"
+case "$rep_f" in *"TIMED OUT after 0s"*) bad "report says TIMED OUT after 0s on the unbounded path" ;; *) ok "report never says TIMED OUT after 0s" ;; esac
+case "$rep_f" in *"OK:unit suite slow green"*) ok "unbounded run reports green" ;; *) bad "unbounded run not reported green: $rep_f" ;; esac
 unset OSRC_SUITE_TIMEOUT
+
+# ------------------------------------------------- 5. INT disposition: suite traps must still work
+# A background-job suite starts with SIGINT ignored at entry, and a shell cannot trap or reset a
+# signal that was ignored there, so every INT trap in a suite or in the engine (_supervise, the
+# obligation guard, the fifo streamer) would silently never install. This suite arms an INT trap
+# and signals itself; it exits 1 exactly when the trap did not fire.
+cat > "$TMP/int_trap.sh" <<'EOF'
+#!/usr/bin/env bash
+trap 'echo INT-TRAPPED; exit 0' INT
+kill -INT $$
+sleep 5
+echo "trap did not fire"
+exit 1
+EOF
+unset OSRC_SUITE_TIMEOUT
+_run_unit_suite_bounded "$TMP/int_trap.sh"
+[ "$_suite_rc" -eq 0 ] && ok "suite keeps default INT dispositions (self-trapped INT, rc 0)" \
+                       || bad "suite INT trap did not fire through the runner (rc=$_suite_rc out=$_suite_out)"
+case "$_suite_out" in *"INT-TRAPPED"*) ok "INT-TRAPPED observed in the suite's captured output" ;; *) bad "INT-TRAPPED missing from captured output: $_suite_out" ;; esac
+
+# ------------------------------------------------- 6. mktemp failure: fail the suite, run nothing
+# An unchecked 'mktemp -d' would leave OSRC_HOME empty and run the suite against the user's real
+# ~/.outsourcerer. A counting stub fails on the second call (the OSRC_HOME allocation) and, after
+# a reset, on the first (the capture file); the suite must never run in either case.
+cat > "$TMP/mkprobe.sh" <<EOF
+#!/usr/bin/env bash
+echo ran > "$TMP/mk-ran"
+EOF
+REAL_MKTEMP="$(command -v mktemp)"
+STUB="$TMP/stub"; mkdir -p "$STUB"
+cat > "$STUB/mktemp" <<EOF
+#!/usr/bin/env bash
+n=\$(( \$(cat "$STUB/count" 2>/dev/null || echo 0) + 1 ))
+echo "\$n" > "$STUB/count"
+[ "\$n" -ge 2 ] && exit 1
+exec "$REAL_MKTEMP" "\$@"
+EOF
+chmod +x "$STUB/mktemp"
+rm -f "$TMP/mk-ran"
+PATH="$STUB:$PATH" _run_unit_suite_bounded "$TMP/mkprobe.sh"
+[ "$_suite_rc" -eq 127 ] || bad "OSRC_HOME mktemp failure did not report rc 127 (got $_suite_rc)"
+[ -f "$TMP/mk-ran" ] && bad "suite RAN against an empty OSRC_HOME" \
+                    || ok "suite never ran when the OSRC_HOME mktemp failed"
+echo 1 > "$STUB/count"
+PATH="$STUB:$PATH" _run_unit_suite_bounded "$TMP/mkprobe.sh"
+[ "$_suite_rc" -eq 127 ] || bad "capture-file mktemp failure did not report rc 127 (got $_suite_rc)"
+[ -f "$TMP/mk-ran" ] && bad "suite RAN with a broken temp allocator" \
+                    || ok "suite never ran when the first mktemp failed"
 
 echo "---"
 echo "passed=$pass failed=$fail"
