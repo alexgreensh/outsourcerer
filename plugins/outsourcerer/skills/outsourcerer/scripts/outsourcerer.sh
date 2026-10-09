@@ -290,21 +290,25 @@ _osrc_engine_exit() {
   fi
   return 0
 }
-# _osrc_exit_chain <action>: arm an EXIT trap that runs <action> first and then the
-# engine-cleanup tail (which ends by eval'ing whatever handler the caller armed before we were
-# sourced). A pre-existing foreign handler is captured into _OSRC_CALLER_EXIT as its bare
-# action text; when the engine handler is already in place the new action composes over its
-# tail, so a re-source or a later engine re-arm never wraps the chain in itself and no handler
-# runs twice.
+# _osrc_exit_chain <action>: with no pre-existing EXIT trap, arm <action> plainly (the engine's
+# own cleanup trap verbatim); with a foreign handler, capture it into _OSRC_CALLER_EXIT as its
+# bare action text and arm a chain that runs <action>, then _osrc_engine_exit, which ends by
+# eval'ing the captured handler. When an engine EXIT trap is already in place (either form)
+# the new action composes over its tail, so a re-source or a later engine re-arm never wraps
+# the chain in itself and no handler runs twice.
 _osrc_exit_chain() {  # <action>
   local _prev
   _prev="$(trap -p EXIT)"
   case "$_prev" in
-    *'_osrc_engine_exit'*)
+    *'_osrc_engine_exit'*|*'with-mcp'*)
       [ "$1" = "_osrc_engine_exit" ] && return 0
       trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
     '')
-      trap '_osrc_rc=$?; '"$1"'; exit "$_osrc_rc"' EXIT ;;
+      if [ "$1" = "_osrc_engine_exit" ]; then
+        trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
+      else
+        trap "$1" EXIT
+      fi ;;
     *)
       _prev="${_prev#trap -- }"; _prev="${_prev#trap }"; _prev="${_prev% EXIT}"
       # _prev is trap -p's single-quoted, eval-safe rendering of the action; decode it to the
@@ -5944,6 +5948,11 @@ _obligation_guard_begin() { # <id> <session-id>
 }
 _obligation_guard_end() {
   trap - EXIT INT TERM
+  # Never re-arm the saved traps inside a subshell: `trap -p` there reports the
+  # parent's handlers as an inherited view, so eval'ing the saved text would arm
+  # them in a shell that exits at once, firing engine cleanup and any chained
+  # caller handler in the wrong process.
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
   [ -n "${_OBLIGATION_GUARD_EXIT:-}" ] && eval "$_OBLIGATION_GUARD_EXIT"
   [ -n "${_OBLIGATION_GUARD_INT:-}" ] && eval "$_OBLIGATION_GUARD_INT"
   [ -n "${_OBLIGATION_GUARD_TERM:-}" ] && eval "$_OBLIGATION_GUARD_TERM"
@@ -7534,7 +7543,13 @@ _heartbeat_beacon() {
     2) return 0 ;;
     *) echo "outsourcerer: heartbeat ownership unknown; preserving the existing leader" >&2; return 1 ;;
   esac
-  _osrc_exit_chain '_heartbeat_stop "$token"'
+  # A plain heartbeat-stop trap unless a foreign caller handler was captured at
+  # source time; the chain composes stop with that handler when one exists.
+  if [ -n "$_OSRC_CALLER_EXIT" ]; then
+    _osrc_exit_chain '_heartbeat_stop "$token"'
+  else
+    trap '_heartbeat_stop "$token"' EXIT
+  fi
   trap 'exit 0' INT TERM
   while :; do
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0

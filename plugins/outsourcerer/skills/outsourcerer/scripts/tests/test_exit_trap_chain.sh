@@ -33,13 +33,17 @@ run_child() {
     set --
     case "$scen" in
       bare) ;;
+      notrap) ;;
       rcsave) trap "rc=\$?; echo \"saw=\$rc\" >> \"$sb/saw\"; exit \$rc" EXIT ;;
       *)    trap "rm -rf \"$sb/fx\"; echo fired >> \"$sb/count\"" EXIT ;;
     esac
     . "$src" >/dev/null 2>&1
     touch "$OSRC_HOME/with-mcp-$$.json"
     case "$scen" in
+      notrap)   trap -p EXIT > "$sb/trapout" ;;
       save)     _obligation_guard_begin oid sid; _obligation_guard_end ;;
+      cs)       _csout="$(_obligation_guard_begin oid sid; _obligation_guard_end; echo inner)"
+                [ -d "$sb/fx" ] && : > "$sb/csalive" ;;
       resource) . "$src" >/dev/null 2>&1 ;;
     esac
     exit "$rc"
@@ -68,6 +72,14 @@ SB="$BASE/c"; run_child bare "$SB" 0; rc=$?
 mcp_gone "$SB" && ok "bare: engine cleanup runs unchanged with no caller trap" || bad "bare: with-mcp file leaked"
 [ ! -f "$SB/count" ] && ok "bare: nothing phantom-fired without a caller trap" || bad "bare: count file appeared"
 
+# --- (c2) no prior trap: the armed EXIT trap is the engine's plain cleanup trap,
+# byte-identical to the pre-chain form (no _osrc_rc capture, no trailing exit) --
+exp='trap -- '"'"'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi'"'"' EXIT'
+SB="$BASE/c2"; run_child notrap "$SB" 0
+[ "$(cat "$SB/trapout" 2>/dev/null)" = "$exp" ] \
+  && ok "notrap: trap -p is byte-identical to the plain engine cleanup trap" \
+  || bad "notrap: trap -p gave '$(cat "$SB/trapout" 2>/dev/null)'"
+
 # --- (d) a save/restore function leaves the chain armed ----------------------------
 SB="$BASE/d"; run_child save "$SB" 0; rc=$?
 fx_gone "$SB" && ok "save/restore: caller handler survives the obligation guard" || bad "save/restore: fixture leaked after guard end"
@@ -90,6 +102,16 @@ SB="$BASE/f"; run_child rcsave "$SB" 3; rc=$?
 SB="$BASE/g"; run_child rcsave "$SB" 0; rc=$?
 [ "$rc" -eq 0 ] && ok "rcsave: exit 0 unchanged" || bad "rcsave: rc=$rc want 0"
 [ "$(cat "$SB/saw" 2>/dev/null)" = "saw=0" ] && ok "rcsave: handler read \$? = 0" || bad "rcsave: saw '$(cat "$SB/saw" 2>/dev/null)' want saw=0"
+
+# --- (h) a save/restore inside $( ) must not run the caller handler there --------
+# _obligation_guard_end evals the saved `trap -p` output; inside a command
+# substitution that arms the chain in the subshell, and bash reports
+# BASH_SUBSHELL=0 while that trap fires at subshell exit. The caller's handler
+# belongs to the sourcing shell only.
+SB="$BASE/h"; run_child cs "$SB" 0; rc=$?
+[ -f "$SB/csalive" ] && ok "cs: caller handler did not fire inside \$( )" || bad "cs: \$( ) ran the caller handler early"
+fx_gone "$SB" && ok "cs: caller handler still fires at real exit" || bad "cs: fixture leaked"
+count_is "$SB" 1 && ok "cs: handler ran exactly once" || bad "cs: handler fired '$(wc -l < "$SB/count" 2>/dev/null | tr -d " ")' times"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
