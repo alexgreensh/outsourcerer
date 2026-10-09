@@ -176,6 +176,30 @@ st="$(cat "$jd/status")"; xr="$(cat "$jd/exit")"
   && ok "nonzero devin exit with reject in tail keeps exit-nonzero, not permission-blocked" \
   || bad "nonzero+reject gave status=$st exit=$xr rc=$rc"
 
+# --- hostile renderings of the same warning must still map (torture findings):
+# a colorized `warning:` span inserts ANSI bytes INSIDE the needle and used to
+# defeat the contiguous -F match; an inherited provider env carrying case or
+# whitespace variants missed the exact lane compare; a non-numeric
+# OSRC_PRINTMODE_TAIL made tail itself fail. ---
+esc="$(printf '\033')"
+printf 'work\n%s[33mwarning:%s[0m%s\n' "$esc" "$esc" "${recorded#warning:}" > "$FIX/ansi-reject.delegate.txt"
+jd="$(newjob ansi)"
+OSRC_POLL=1 _supervise "$jd" 30 60 120 -- cat "$FIX/ansi-reject.delegate.txt" >/dev/null 2>&1
+[ "$(cat "$jd/status")" = "permission-blocked" ] \
+  && ok "a colorized 'warning:' span (ANSI inside the needle) still maps" \
+  || bad "ANSI-split needle gave status $(cat "$jd/status")"
+jd="$OSRC_JOBS/lanevar"; mkdir -p -m 700 "$jd"
+: > "$jd/.startmark"; : > "$jd/.fsmark"
+OUTSOURCERER_PROVIDER='Devin ' OSRC_POLL=1 _supervise "$jd" 30 60 120 -- cat "$FIX/edit-reject.delegate.txt" >/dev/null 2>&1
+[ "$(cat "$jd/status")" = "permission-blocked" ] \
+  && ok "an unnormalized provider env ('Devin ') still maps the reject" \
+  || bad "unnormalized provider env gave status $(cat "$jd/status")"
+jd="$(newjob badtail)"
+OSRC_PRINTMODE_TAIL=abc OSRC_POLL=1 _supervise "$jd" 30 60 120 -- cat "$FIX/edit-reject.delegate.txt" >/dev/null 2>&1
+[ "$(cat "$jd/status")" = "permission-blocked" ] \
+  && ok "a non-numeric OSRC_PRINTMODE_TAIL falls back to the default tail" \
+  || bad "hostile OSRC_PRINTMODE_TAIL gave status $(cat "$jd/status")"
+
 # --- the needle is assembled, never verbatim in the script (reading the script must not trip it) ---
 grep -aqF "$(_noninteractive_reject_needle)" "$SRC" \
   && bad "the non-interactive reject needle is verbatim in outsourcerer.sh" \

@@ -592,7 +592,17 @@ _timeout() {
   # inherited capture pipe would stay open until that sleep ended, making every captured or piped
   # `_timeout` call cost the full bound no matter how fast the child was (measured: `x="$(_timeout 5
   # true)"` took 5.03s on bash 3.2).
-  ( sleep "$secs" 2>/dev/null
+  # The watchdog owns its timer: the TERM trap kills `$_wd_sleep` itself, so reaping the
+  # watchdog from the caller takes the timer down with it and no enumeration is needed.
+  # The earlier approach (enumerate the watchdog's children with _descendants, then kill
+  # the list) had a pid-reuse window: the timer could exit naturally between enumeration
+  # and the kill, and the kill would land on whatever process recycled the pid. Letting
+  # the watchdog kill the pid it spawned closes the window by construction and costs no
+  # subprocess per call. TERM before the trap installs hits a subshell with no sleep yet,
+  # so nothing leaks. Same trap pattern as conformance.sh's _run_unit_suite_bounded.
+  ( trap '[ -n "${_wd_sleep:-}" ] && kill "$_wd_sleep" 2>/dev/null; exit 0' TERM
+    sleep "$secs" 2>/dev/null & _wd_sleep=$!
+    wait "$_wd_sleep" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
     # discriminator can be exercised deterministically. It is honored ONLY under
     # OSRC_TEST_MODE=1 so a stray export can never disable production timeouts.
@@ -610,14 +620,9 @@ _timeout() {
   ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
-  # The watchdog's `sleep` survives a TERM to its subshell: the subshell dies,
-  # the timer reparents to init, and it burns the rest of the bound detached,
-  # one orphan per fast call even though it no longer holds anyone's pipe.
-  # Enumerate the watchdog's children while it is still alive (the timer is
-  # its only child) and kill the timer with the watchdog.
-  local wd_kids; wd_kids="$(_descendants "$wd_pid" 2>/dev/null)"
+  # TERM fires the watchdog's trap, which reaps the timer itself. No orphan can form:
+  # either the trap ran (timer dead) or the kill landed before `sleep` spawned at all.
   kill "$wd_pid" 2>/dev/null
-  [ -n "$wd_kids" ] && kill $wd_kids 2>/dev/null   # unquoted: pid list
   wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.
@@ -6443,6 +6448,7 @@ _fleet_snapshot_collect() {
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
       jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      jstatus="${jstatus#"${jstatus%%[![:space:]]*}"}"; jstatus="${jstatus%"${jstatus##*[![:space:]]}"}"
       state="$(_fleet_classify "$jstatus")"
       if [ "$state" = "blocked" ]; then
         # `blocked` in the fleet vocabulary means "LIVE, parked on a prompt". The job
@@ -6455,15 +6461,34 @@ _fleet_snapshot_collect() {
         # keeps the raw status so fleet ls still says WHAT it stopped on. Terminality
         # needs positive evidence: an exit file, or every recorded process pid gone.
         # When neither is provable (no exit file, no pid recorded, or a pid still live)
-        # keep `blocked`: the fleet errs toward reporting possibly-live work.
+        # keep `blocked`: the fleet errs toward reporting possibly-live work. A pid file
+        # must hold exactly one unsigned integer to count as evidence: garbage or
+        # multi-line content is unverifiable, and unverifiable is not dead.
         if [ -f "$d/exit" ]; then
           state=stopped
         else
           _jpid="$(cat "$d/pid" 2>/dev/null)"; _jspid="$(cat "$d/supervisor_pid" 2>/dev/null)"
+          _jpid="${_jpid#"${_jpid%%[![:space:]]*}"}"; _jpid="${_jpid%"${_jpid##*[![:space:]]}"}"
+          _jspid="${_jspid#"${_jspid%%[![:space:]]*}"}"; _jspid="${_jspid%"${_jspid##*[![:space:]]}"}"
+          case "$_jpid" in ''|*[!0-9]*) _jpid="" ;; esac
+          case "$_jspid" in ''|*[!0-9]*) _jspid="" ;; esac
           if [ -n "$_jpid$_jspid" ]; then
-            { [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; } \
-              || { [ -n "$_jspid" ] && kill -0 "$_jspid" 2>/dev/null; } \
-              || state=stopped
+            # Same liveness discipline as _reconcile_status: kill -0 can match a recycled
+            # pid, so a live pid is only the job's process while its recorded *_start
+            # agrees with the live start time. Empty on either side cannot disprove.
+            _alive=0
+            for _p in "$_jpid" "$_jspid"; do
+              [ -n "$_p" ] || continue
+              kill -0 "$_p" 2>/dev/null || continue
+              _lst="$(ps -o lstart= -p "$_p" 2>/dev/null | tr -s ' ')"
+              if [ "$_p" = "$_jpid" ]; then
+                _sst="$(cat "$d/pid_start" 2>/dev/null | tr -s ' ')"
+              else
+                _sst="$(cat "$d/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
+              fi
+              { [ -z "$_sst" ] || [ -z "$_lst" ] || [ "$_lst" = "$_sst" ]; } && _alive=1
+            done
+            [ "$_alive" = 0 ] && state=stopped
           fi
         fi
       fi
@@ -10607,9 +10632,19 @@ _supervise() {
   # exports or the mapping silently never fires.
   local _jlane=""; [ -f "$jd/meta.json" ] && have jq && _jlane="$(jq -r '(.lane // .provider // "")' "$jd/meta.json" 2>/dev/null)"
   _jlane="${_jlane:-${OUTSOURCERER_PROVIDER:-}}"
+  # Normalize the lane token before comparing: the env fallback can carry a case/whitespace
+  # variant (an inherited OUTSOURCERER_PROVIDER is not guaranteed jq-clean), and a variant that
+  # fails the exact match silently disables the mapping on the very job that needs it.
+  _jlane="$(printf '%s' "$_jlane" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  local _pm_tail="${OSRC_PRINTMODE_TAIL:-25}"; case "$_pm_tail" in ''|*[!0-9]*) _pm_tail=25 ;; esac
+  # Strip ANSI CSI before the fixed-string match: a colorized warning styles `warning:` as its
+  # own span (ESC[33m ... ESC[0m), which inserts escape bytes INSIDE the needle and makes a
+  # contiguous -F needle miss it entirely -- the blocked run then reads as done?. The same
+  # strip the down-evidence sanitizer uses.
+  local _esc; _esc="$(printf '\033')"
   if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
      && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
-     && tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null | grep -aqF "$(_noninteractive_reject_needle)"; then
+     && tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" | grep -aqF "$(_noninteractive_reject_needle)"; then
     echo "permission-blocked" > "$jd/status"
     printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
@@ -19668,7 +19703,6 @@ main() {
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
   unset OSRC_PREFLIGHT
-  if [ "${1:-}" = "--osrc-preflight-internal" ]; then OSRC_PREFLIGHT=1; shift; fi
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19676,7 +19710,16 @@ main() {
   # delegate_codex's own error text tells users to export it, which would switch the guard off for
   # every run they launch after. A private argv sentinel cannot leak through the environment.
   local _job_child=0
-  if [ "${1:-}" = "--osrc-job-child-internal" ]; then _job_child=1; shift; fi
+  # Consume leading internal sentinels in ANY order. Each emitter adds exactly one today, but a
+  # caller composing both (or adding a third later) must not strand the second sentinel at $1,
+  # where it falls through to "looks like a flag, not a subcommand".
+  while :; do
+    case "${1:-}" in
+      --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
+      --osrc-job-child-internal)   _job_child=1; shift ;;
+      *) break ;;
+    esac
+  done
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the

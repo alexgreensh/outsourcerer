@@ -203,6 +203,56 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
   || bad "unverifiable blocked job was hidden (rc=$rc): $out"
 rm -rf "$OSRC_JOBS/unproven-blk"
 
+# A pid file whose content is not exactly one unsigned integer is not liveness
+# evidence at all, so it cannot prove the job dead either (torture finding:
+# garbage/multiline pid files used to read as "dead" and hide the job as
+# `stopped`). Each corrupt shape must keep the job reported.
+for shape in garbage multiline negative; do
+  newjob "corrupt-$shape"
+  echo blocked > "$OSRC_JOBS/corrupt-$shape/status"
+  case "$shape" in
+    garbage)   printf 'not-a-pid' > "$OSRC_JOBS/corrupt-$shape/pid" ;;
+    multiline) printf '11111\n22222\n' > "$OSRC_JOBS/corrupt-$shape/pid" ;;
+    negative)  printf -- '-1' > "$OSRC_JOBS/corrupt-$shape/pid" ;;
+  esac
+  collect_and_write
+  [ "$(job_state "corrupt-$shape")" = "blocked" ] \
+    && ok "blocked job with $shape pid file stays 'blocked' (corrupt is not dead)" \
+    || bad "blocked job with $shape pid file shows '$(job_state corrupt-$shape)' (corrupt data must not prove death)"
+  rm -rf "$OSRC_JOBS/corrupt-$shape"
+done
+
+# A live pid is only the job's process while its start time agrees with the
+# recorded pid_start (the _reconcile_status discipline): a mismatched start
+# means the recorded pid was recycled by an unrelated process, and a recycled
+# pid must not keep a dead job "blocked" forever.
+sleep 60 & live_pid=$!
+newjob recycled-pid
+echo blocked > "$OSRC_JOBS/recycled-pid/status"; echo "$live_pid" > "$OSRC_JOBS/recycled-pid/pid"
+echo 'Sun Jan  1 00:00:00 1990' > "$OSRC_JOBS/recycled-pid/pid_start"
+collect_and_write
+[ "$(job_state recycled-pid)" = "stopped" ] \
+  && ok "a recycled (start-time-mismatched) live pid counts as dead: job shows 'stopped'" \
+  || bad "recycled-pid job state is '$(job_state recycled-pid)' (expected stopped)"
+# ...while a live pid whose recorded start matches the real start stays live.
+ps -o lstart= -p "$live_pid" 2>/dev/null | tr -s ' ' > "$OSRC_JOBS/recycled-pid/pid_start"
+collect_and_write
+[ "$(job_state recycled-pid)" = "blocked" ] \
+  && ok "a live pid whose pid_start matches stays 'blocked'" \
+  || bad "start-matched live pid shows '$(job_state recycled-pid)' (expected blocked)"
+kill "$live_pid" 2>/dev/null; live_pid=""; rm -rf "$OSRC_JOBS/recycled-pid"
+
+# A status file carrying a stray CR (foreign writer, Windows edit) still names
+# the blocked family: whitespace around the token must not change classification
+# into 'unknown' and hide live blocked work.
+newjob crlf-status
+printf 'blocked\r\n' > "$OSRC_JOBS/crlf-status/status"; echo "$dead_pid" > "$OSRC_JOBS/crlf-status/pid"
+collect_and_write
+[ "$(job_state crlf-status)" = "stopped" ] \
+  && ok "a CRLF 'blocked' status still classifies (terminal -> stopped)" \
+  || bad "CRLF status shows '$(job_state crlf-status)' (whitespace changed classification)"
+rm -rf "$OSRC_JOBS/crlf-status"
+
 # --- silence when there is no fleet view yet (the heartbeat owns collection; guard does not collect) ---
 rm -f "$SNAP"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
