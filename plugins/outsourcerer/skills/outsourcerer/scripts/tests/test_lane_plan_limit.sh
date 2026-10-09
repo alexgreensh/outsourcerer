@@ -134,13 +134,17 @@ _session_limits() { :; }
 _session_limits() { printf 'codex5h=100 codexwk=42\n'; }
 _lane_down_clear cx; _before=$(date +%s)
 _out="$(_lane_plan_limit_block cx "$FX/cx-hit" gpt-5.6 'Route to Claude Code or a plan lane that is up.' 2>&1)"
+_after=$(date +%s)
 _lane_down_active cx && ok "block cx: lane DOWN after meter confirmation" || bad "block cx: lane not down"
 [ "$(_lane_down_reason cx)" = "plan limit exhausted" ] && ok "block cx: reason recorded" || bad "block cx: reason '$(_lane_down_reason cx)'"
 _ev="$(_posture_get cx down-evidence 2>/dev/null)"
 printf '%s' "$_ev" | grep -q 'usage limit' && ok "block cx: down-evidence keeps the refusal wording" || bad "block cx: down-evidence '$_ev'"
 printf '%s' "$_ev" | grep -q 'probe: codex5h=100' && ok "block cx: down-evidence keeps the probe/meter proof" || bad "block cx: evidence missing probe half '$_ev'"
+# Same shape everywhere below: the mark lands inside the call, so until-before = window + (mark -
+# before). Floor = the window the block is supposed to write; ceiling = that plus MEASURED elapsed,
+# never a magic headroom a legitimate probe could overflow.
 _until="$(_posture_get cx down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 8160 ] && [ "$_ttl" -le 8170 ] && ok "block cx: window = Codex's own 2h 15m (+slack), got ${_ttl}s" || bad "block cx: TTL ${_ttl}s"
+[ "$_ttl" -ge 8160 ] && [ "$_ttl" -le $(( 8160 + _after - _before )) ] && ok "block cx: window = Codex's own 2h 15m (+slack), got ${_ttl}s" || bad "block cx: TTL ${_ttl}s"
 printf '%s' "$_out" | grep -q 'Codex (ChatGPT plan) refused "gpt-5.6"' && ok "block cx: names lane + model" || bad "block cx: header missing"
 printf '%s' "$_out" | grep -q 'says "Try again in 2h 15m"' && ok "block cx: quotes the lane's own reset" || bad "block cx: reset not quoted"
 printf '%s' "$_out" | grep -q 'CONFIRMED' && ok "block cx: CONFIRMED verdict" || bad "block cx: verdict missing"
@@ -151,17 +155,19 @@ _lane_down_clear cx
 _session_limits() { printf 'codex5h=40\n'; }
 _before=$(date +%s)
 _out="$(_lane_plan_limit_block cx "$FX/cx-reached" gpt-5.6 2>&1)"
+_after=$(date +%s)
 _until="$(_posture_get cx down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 1 ] && [ "$_ttl" -le 310 ] && ok "block cx (meter 40%): INCONCLUSIVE -> short window only (${_ttl}s; 300s + probe time)" || bad "block cx inconclusive: TTL ${_ttl}s"
+[ "$_ttl" -ge 300 ] && [ "$_ttl" -le $(( 300 + _after - _before )) ] && ok "block cx (meter 40%): INCONCLUSIVE -> short window only (${_ttl}s; 300s + elapsed)" || bad "block cx inconclusive: TTL ${_ttl}s"
 case "$(_lane_down_reason cx)" in *"probe inconclusive"*) ok "block cx inconclusive: honest reason" ;; *) bad "block cx inconclusive: reason '$(_lane_down_reason cx)'" ;; esac
 printf '%s' "$_out" | grep -q 'INCONCLUSIVE' && ok "block cx inconclusive: says so" || bad "block cx inconclusive: verdict missing"
 printf '%s' "$_out" | grep -q 'gave no reset time' && ok "block cx inconclusive: no reset -> says so, no invented time" || bad "block cx: invented a reset"
 _lane_down_clear cx
 _before=$(date +%s)
 _out="$(OSRC_LANE_PLAN_DOWN_TTL=9999 _lane_plan_limit_block warp "$FX/warp-credit" auto 2>&1)"
+_after=$(date +%s)
 _lane_down_active warp && ok "block warp: refused lane gets a marker" || bad "block warp: no marker"
 _until="$(_posture_get warp down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 1 ] && [ "$_ttl" -le 310 ] && ok "block warp (no recipe): UNVERIFIED -> short window (${_ttl}s; 300s + probe time), never the plan TTL" || bad "block warp: TTL ${_ttl}s"
+[ "$_ttl" -ge 300 ] && [ "$_ttl" -le $(( 300 + _after - _before )) ] && ok "block warp (no recipe): UNVERIFIED -> short window (${_ttl}s; 300s + elapsed), never the plan TTL" || bad "block warp: TTL ${_ttl}s"
 case "$(_lane_down_reason warp)" in *"unverified: no probe recipe"*) ok "block warp: reason says unverified/no recipe" ;; *) bad "block warp: reason '$(_lane_down_reason warp)'" ;; esac
 printf '%s' "$_out" | grep -q 'Warp (Oz) refused "auto"' && ok "block warp: display name" || bad "block warp: header missing"
 printf '%s' "$_out" | grep -q 'UNVERIFIED' && ok "block warp: UNVERIFIED verdict" || bad "block warp: verdict missing"
@@ -173,9 +179,10 @@ printf '#!/usr/bin/env bash\nprintf "Error: Your daily usage quota has been exha
 chmod +x "$FB/devin"; export PATH="$FB:$PATH"
 _lane_down_clear dv; _before=$(date +%s)
 _out="$(_lane_plan_limit_block dv "$FX/dv-daily" glm-5.2 2>&1)"
+_after=$(date +%s)
 _lane_down_active dv && ok "block dv: routes to the Devin block (lane down after a refused probe)" || bad "block dv: not down"
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 41160 ] && [ "$_ttl" -le 41230 ] && ok "block dv: Devin's 11h26m window (+slack)" || bad "block dv: TTL ${_ttl}s"
+[ "$_ttl" -ge 41220 ] && [ "$_ttl" -le $(( 41220 + _after - _before )) ] && ok "block dv: Devin's 11h26m window (+slack)" || bad "block dv: TTL ${_ttl}s"
 printf '%s' "$_out" | grep -q 'Switch lanes OFF Devin' && ok "block dv: default OFF-Devin advice" || bad "block dv: advice missing"
 _lane_down_clear dv
 _lane_plan_limit_block nope "$FX/cx-hit" m 2>/dev/null; _lane_down_active nope && bad "block: unknown lane got a marker" || ok "block: unknown lane -> no-op"

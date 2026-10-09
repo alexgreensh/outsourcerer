@@ -587,7 +587,11 @@ _timeout() {
   # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
   # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
-  # which is the same reason it exists for the job supervisor.
+  # which is the same reason it exists for the job supervisor. The watchdog's own stdout/stderr go to
+  # /dev/null for the same reason: `kill` below reaps the subshell but ORPHANS its `sleep`, and an
+  # inherited capture pipe would stay open until that sleep ended, making every captured or piped
+  # `_timeout` call cost the full bound no matter how fast the child was (measured: `x="$(_timeout 5
+  # true)"` took 5.03s on bash 3.2).
   ( sleep "$secs" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
     # discriminator can be exercised deterministically. It is honored ONLY under
@@ -603,7 +607,7 @@ _timeout() {
     case "$state" in Z*|"" ) exit 0 ;; esac
     : > "$expired_file"
     _kill_tree "$cmd_pid" 2>/dev/null
-  ) &
+  ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
@@ -840,8 +844,13 @@ _devin_plan_probe_model() {
   # tier), falling back to swe-2 (the known Free model) when the catalog is unavailable or the env
   # override is unset.
   probe="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
-  alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; alt="${alt:-swe-2}"
-  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then probe="$alt"; fi
+  # The alt lookup is a live (bounded) catalog refresh, so it is evaluated only when it will actually
+  # be used: a refusal from any model other than the default probe keeps the default and never needs
+  # the catalog. Evaluating it eagerly made every plan-quota block spend a `devin models list` fetch
+  # on a value it then discarded.
+  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then
+    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2}"
+  fi
   printf '%s' "$probe"
 }
 
