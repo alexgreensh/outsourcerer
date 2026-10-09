@@ -101,6 +101,7 @@ _ALL_SUITES="$_ALL_SUITES test_lane_plan_limit"
 _ALL_SUITES="$_ALL_SUITES test_failover_pick"
 _ALL_SUITES="$_ALL_SUITES test_job_rc_guard_leak"
 _ALL_SUITES="$_ALL_SUITES test_devin_edit_note"
+_ALL_SUITES="$_ALL_SUITES test_timeout_capture"
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     # Capture rather than discard: a failing suite whose output went to /dev/null makes a CI log say

@@ -610,7 +610,15 @@ _timeout() {
   ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
-  kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+  # The watchdog's `sleep` survives a TERM to its subshell: the subshell dies,
+  # the timer reparents to init, and it burns the rest of the bound detached,
+  # one orphan per fast call even though it no longer holds anyone's pipe.
+  # Enumerate the watchdog's children while it is still alive (the timer is
+  # its only child) and kill the timer with the watchdog.
+  local wd_kids; wd_kids="$(_descendants "$wd_pid" 2>/dev/null)"
+  kill "$wd_pid" 2>/dev/null
+  [ -n "$wd_kids" ] && kill $wd_kids 2>/dev/null   # unquoted: pid list
+  wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.
   # Once that happens, the timeout owns the result even if a TERM trap exits 0.
