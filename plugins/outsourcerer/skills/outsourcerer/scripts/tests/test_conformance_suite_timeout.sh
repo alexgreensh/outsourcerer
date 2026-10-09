@@ -189,6 +189,66 @@ OSRC_SUITE_TIMEOUT=2 _run_unit_suite_bounded "$TMP/timeout-leak.sh"
 [ "$pp0" = "SENTINEL-NOT-A-PID" ] && ok "the pidfile scratch var stays local to the runner" \
                                 || bad "runner's pp0 leaked into the caller (pp0=$pp0)"
 
+# The watchdog's TERM trap must name its timer via jobs -p, not a captured $!: a TERM landing
+# between `sleep &` and the `_wd_sleep=$!` assignment would find the variable still empty and exit
+# leaving the timer orphaned for the full bound. jobs -p knows the child the moment it forks.
+grep -qF "trap 'kill \$(jobs -p) 2>/dev/null; exit 0' TERM" "$CONF" \
+  && ok "watchdog TERM trap reaps its timer via jobs -p (no \`& -> \$!\` window)" \
+  || bad "watchdog TERM trap still keys on a captured \$! (micro-window orphan)"
+
+# The behavioral half of the same guarantee, asserted by recorded pid rather than name: while
+# each run is in flight the test notes the timer's pid from its parentage -- the watchdog
+# subshell is the runner's direct child whose argv does NOT name the suite file under $TMP
+# (the suite root is launched as `bash $TMP/<name>.sh`), and the timer is that subshell's only
+# child -- then the recorded pid must be dead within 1s of the gate returning. Both return
+# paths are exercised: the timer expiring (bound < suite) and the suite finishing first, where
+# the gate TERM's the watchdog mid-sleep.
+_wd_timer_pid() {   # <runner-subshell-pid> -> echo the watchdog's timer pid once it exists
+  local rp="$1" p pp cmd wsub wdesc
+  wsub=""
+  wdesc="$(_suite_descendants "$rp")"
+  for p in $wdesc; do
+    [ "$(_suite_ppid_of "$p")" = "$rp" ] || continue
+    cmd="$(_cmd_of "$p")"
+    case "$cmd" in *"$TMP"*) : ;; *) wsub="$p" ;; esac
+  done
+  [ -n "$wsub" ] || return 1
+  for p in $wdesc; do
+    [ "$(_suite_ppid_of "$p")" = "$wsub" ] && { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+_wd_assert_dead() {   # <label> <bound-secs> <suite.sh>; asserts the watchdog's timer dies
+  local label="$1" bound="$2" suite="$3" wrp wdt dln
+  ( OSRC_SUITE_TIMEOUT="$bound" _run_unit_suite_bounded "$suite" ) & wrp=$!
+  wdt=""; dln=$(( SECONDS + 3 ))
+  while [ -z "$wdt" ] && kill -0 "$wrp" 2>/dev/null && [ "$SECONDS" -lt "$dln" ]; do
+    wdt="$(_wd_timer_pid "$wrp" 2>/dev/null)"
+    [ -z "$wdt" ] && sleep 0.1
+  done
+  if [ -z "$wdt" ]; then
+    bad "watchdog timer was never observable during the $label run (cannot assert its death)"
+  else
+    wait "$wrp" 2>/dev/null
+    sleep 1
+    kill -0 "$wdt" 2>/dev/null \
+      && bad "watchdog timer $wdt survived the gate's return on the $label path" \
+      || ok "watchdog timer $wdt dead within 1s of the gate returning ($label path)"
+  fi
+}
+cat > "$TMP/outlives-bound.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 8
+EOF
+cat > "$TMP/finishes-first.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 2
+echo "fast suite done"
+EOF
+_wd_assert_dead "timeout" 2  "$TMP/outlives-bound.sh"
+_wd_assert_dead "TERM"    60 "$TMP/finishes-first.sh"
+unset OSRC_SUITE_TIMEOUT
+
 # ------------------------------------------------------- 3. failing suite: ordinary failure, not timeout
 cat > "$TMP/failing.sh" <<'EOF'
 #!/usr/bin/env bash

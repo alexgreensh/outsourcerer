@@ -638,7 +638,7 @@ _timeout() {
   # /dev/null for the same reason: `kill` below reaps the subshell but ORPHANS its `sleep`, and an
   # inherited capture pipe would stay open until that sleep ended, making every captured or piped
   # `_timeout` call cost the full bound no matter how fast the child was.
-  # The watchdog owns its timer: the TERM trap kills `$_wd_sleep` itself, so reaping the
+  # The watchdog owns its timer: the TERM trap kills the `sleep` itself, so reaping the
   # watchdog from the caller takes the timer down with it and no enumeration is needed.
   # Enumerating the watchdog's children and killing the list would leave a pid-reuse
   # window: the timer can exit naturally between enumeration and the kill, and the kill
@@ -646,7 +646,11 @@ _timeout() {
   # spawned closes the window by construction and costs no subprocess per call. TERM
   # before the trap installs hits a subshell with no sleep yet, so nothing leaks. Same
   # trap pattern as conformance.sh's _run_unit_suite_bounded.
-  ( trap '[ -n "${_wd_sleep:-}" ] && kill "$_wd_sleep" 2>/dev/null; exit 0' TERM
+  # The trap reaps via jobs -p rather than the captured $!: a TERM landing between `sleep &` and
+  # `_wd_sleep=$!` would find the variable still empty and exit leaving the timer orphaned for
+  # the full bound; the jobs table knows the child the moment it forks, so the trap reaps it in
+  # either order.
+  ( trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
     sleep "$secs" 2>/dev/null & _wd_sleep=$!
     wait "$_wd_sleep" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live

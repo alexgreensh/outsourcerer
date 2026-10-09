@@ -113,6 +113,24 @@ kill -0 "$sentinel_b" 2>/dev/null && ok_b=1
   || bad "reap killed processes named by the enumeration (pid-reuse kill window)"
 kill "$sentinel_a" "$sentinel_b" 2>/dev/null; wait "$sentinel_a" "$sentinel_b" 2>/dev/null
 
+# --- the TERM trap must reap the timer even if TERM lands between `sleep &` and `$!` ---
+# A kill delivered in that microsecond window found _wd_sleep still empty and exited the
+# watchdog leaving the timer orphaned for the full bound. The trap is lifted VERBATIM from
+# the engine and run with the timer spawned but its $! deliberately never recorded -- the
+# exact losing interleaving. Whatever trap text the engine carries is what gets exercised.
+STRAY2=51.37
+trapline="$(awk '/^_timeout\(\)/{f=1} f && /^[[:space:]]*\( trap/{sub(/^[[:space:]]*\([[:space:]]*/,""); print; exit}' "$SRC")"
+case "$trapline" in trap*TERM*) : ;; *) { echo "FAIL: could not extract the watchdog trap from $SRC"; exit 1; } ;; esac
+( eval "$trapline"; sleep "$STRAY2" & wait ) & wd2=$!
+sleep 0.4
+kill "$wd2" 2>/dev/null; wait "$wd2" 2>/dev/null
+sleep 0.5
+stray="$(ps -ef 2>/dev/null | awk -v s="$STRAY2" '$NF==s && $(NF-1) ~ /(^|\/)sleep$/ {print $2}')"
+[ -z "$stray" ] \
+  && ok "watchdog TERM reaps its timer even when \$! was never recorded (jobs -p trap)" \
+  || bad "TERM in the & -> \$! window orphaned the timer: pids $stray"
+[ -n "$stray" ] && kill $stray 2>/dev/null
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
