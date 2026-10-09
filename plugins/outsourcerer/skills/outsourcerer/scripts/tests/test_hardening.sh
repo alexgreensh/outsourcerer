@@ -68,7 +68,7 @@ if grep -qE 'set -a|source .*~/.env|\..*~/.env' "$RUN_OR_CODEX"; then bad "run-o
 # build_mcp_flags_cc needs a real MCP config that isn't present in this test env, so it returns
 # empty. Assert the hardening is present in source instead of a full runtime exercise.
 if grep -qE 'umask 077|chmod 600' "$SRC" && grep -q 'build_mcp_flags_cc' "$SRC"; then ok "mcp temp file uses umask 077 or chmod 600"; else bad "mcp temp file missing umask 077 / chmod 600"; fi
-if grep -q 'with-mcp-.*\$\$' "$SRC" && grep -q 'rm -f .*with-mcp' "$SRC" && grep -qE 'trap .*_osrc_engine_exit.* EXIT' "$SRC"; then ok "mcp temp file has an EXIT trap rm"; else bad "mcp temp file missing EXIT trap rm"; fi
+if grep -q 'with-mcp-.*\$\$' "$SRC" && grep -q 'rm -f .*with-mcp' "$SRC" && grep -qE 'trap .*rm -f .*with-mcp.* EXIT|trap .*_osrc_engine_exit.* EXIT' "$SRC"; then ok "mcp temp file has an EXIT trap rm"; else bad "mcp temp file missing EXIT trap rm"; fi
 
 # --- Scenario 5: new job dir is 700 and out.log is 600. ---
 jd="$TMP/jobs/testjob"
