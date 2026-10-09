@@ -59,5 +59,23 @@ _lane_down_mark dv 9000
 _nu="$(_posture_get dv down 2>/dev/null)"; [ "${_nu:-0}" -gt "${_kept:-0}" ] && ok "guard: longer re-mark still extends the window" || bad "guard: longer re-mark blocked (${_nu} vs ${_kept})"
 [ ! -e "$OSRC_POSTURE_DIR/dv.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/dv.down-evidence" ] && ok "guard: extending bare re-mark drops stale aux (fresh verdict wins)" || bad "guard: stale aux survived a longer bare re-mark"
 
+# A REASONED shorter re-mark is authoritative fresher information (the provider's own stated
+# reset): it replaces the current mark as a unit -- window, reason, evidence together. The
+# keep-longer guard exists only for bare transport verdicts and must not absorb it.
+_lane_down_mark or 3600 "plan quota exhausted" "estimate: reset unknown"
+_lane_down_mark or 780 "plan quota exhausted" "plan resets in 13m (provider stated)"
+_now="$(date +%s)"; _u="$(_posture_get or down 2>/dev/null)"
+{ [ "${_u:-0}" -ge "$((_now + 700))" ] && [ "${_u:-0}" -le "$((_now + 800))" ]; } && ok "reset: reasoned shorter mark writes its own window" || bad "reset: shorter reasoned mark kept the old window (delta $(( ${_u:-0} - _now ))s)"
+[ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: reason carried through" || bad "reset: reason wrong"
+[ "$(cat "$OSRC_POSTURE_DIR/or.down-evidence" 2>/dev/null)" = "plan resets in 13m (provider stated)" ] && ok "reset: evidence replaced with the new mark" || bad "reset: stale evidence kept"
+# A reasoned LONGER re-mark extends normally too (same replace-unit path, just a bigger window).
+_lane_down_mark or 7200 "plan quota exhausted" "plan resets in 2h"
+_u="$(_posture_get or down 2>/dev/null)"
+[ "${_u:-0}" -gt "$((_now + 3600))" ] && ok "reset: reasoned longer mark extends" || bad "reset: reasoned longer mark blocked"
+# ...and once a reasoned mark owns the window, a bare shorter verdict is still a no-op on it.
+_kept2="$(_posture_get or down 2>/dev/null)"
+_lane_down_mark or
+[ "$(_posture_get or down 2>/dev/null)" = "$_kept2" ] && [ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: bare re-mark still no-ops on the reasoned window" || bad "reset: bare re-mark clobbered the reasoned mark"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

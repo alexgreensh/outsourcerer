@@ -5006,10 +5006,12 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
 # A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
 # ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
 # the run's stderr capture is consumed by then, so this is the only surviving record.
-# An unexpired LONGER mark wins over a shorter re-mark: a bare transport verdict (doctor/TLS) firing
-# inside a confirmed quota window would otherwise cut the TTL and erase the reason/evidence that
-# justify it. Extending past the current mark still works (new until > old), and posture reset /
-# _lane_down_clear remain the early-clear paths.
+# An unexpired LONGER mark wins over a shorter BARE re-mark (no reason): a transport verdict
+# (doctor/TLS) firing inside a confirmed quota window would otherwise cut the TTL and erase the
+# reason/evidence that justify it. Extending past the current mark still works (new until > old),
+# and posture reset / _lane_down_clear remain the early-clear paths. A reasoned re-mark is
+# authoritative fresher information -- e.g. the provider's own stated reset -- and always replaces
+# the current mark as a unit (window, reason, evidence together).
 _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
@@ -5017,7 +5019,9 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   case "$ttl" in ''|*[!0-9]*) ttl=300 ;; esac
   local until; until="$(( $(date +%s) + ttl ))"
   local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
+  if [ -z "${3:-}" ]; then
+    case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
+  fi
   if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
   # Evidence is sanitized at the sink (ANSI CSI strip, control bytes, 400c cap) so anything a future
