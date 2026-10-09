@@ -217,11 +217,18 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   _suite_pid_file=""
   if [ -n "$wd_pid" ] && [ -f "$expired" ]; then
     # Timer won: let the watchdog finish its kill, then walk the tree once more so a descendant
-    # that ignored TERM (the wedged-tool shape) is KILLed rather than left spinning.
+    # that ignored TERM (the wedged-tool shape) is KILLed rather than left spinning. The pidfile
+    # is read exactly the way the watchdog reads it: it holds TWO numbers ("PID PPID"), and a
+    # plain tr-glue once fused them into one bogus pid and aimed the walk at an unrelated
+    # process. The same launch-ppid guard applies, and a root that is already gone is left alone.
     wait "$wd_pid" 2>/dev/null
-    root=""
-    [ -f "$pid_file" ] && root="$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')"
-    case "$root" in *[!0-9]*|"") root="" ;; *) _suite_kill_tree "$root" 2>/dev/null ;; esac
+    root=""; pp0=""
+    [ -f "$pid_file" ] && read -r root pp0 < "$pid_file" 2>/dev/null
+    case "$root" in ''|*[!0-9]*) root="" ;; esac
+    case "${pp0:-}" in ''|*[!0-9]*) root="" ;; esac
+    if [ -n "$root" ] && [ "$(_suite_ppid_of "$root")" = "$pp0" ]; then
+      _suite_kill_tree "$root" 2>/dev/null
+    fi
     _suite_timed_out=1
     _suite_rc=124
   elif [ -n "$wd_pid" ]; then

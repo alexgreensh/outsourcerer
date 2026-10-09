@@ -32,6 +32,14 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
+# Record what _suite_kill_tree is aimed at: a regression once glued the pidfile's two numbers
+# ("PID PPID") into one bogus pid and aimed a post-timeout walk at an unrelated process. The
+# real implementation is kept intact under a new name; the wrapper only logs its argument.
+_kt_log="$TMP/kt.log"; : > "$_kt_log"
+KTBODY="$(declare -f _suite_kill_tree | sed 's/^_suite_kill_tree ()/_suite_kill_tree_impl ()/')"
+case "$KTBODY" in _suite_kill_tree_impl*) eval "$KTBODY" ;; *) echo "FAIL: could not rename _suite_kill_tree for recording"; exit 1 ;; esac
+_suite_kill_tree() { printf '%s\n' "$1" >> "$_kt_log"; _suite_kill_tree_impl "$@"; }
+
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
@@ -114,6 +122,21 @@ done
                  || bad "processes from the wedged suite survived the kill: $(tr '\n' ' ' < "$W/pids")"
 grep -q 'Terminated' "$W/werr" 2>/dev/null && bad "watchdog kill printed 'Terminated' noise into the log: $(head -1 "$W/werr")" \
                                        || ok "watchdog kill is silent (no 'Terminated' in the log)"
+# Every kill-tree target must be a pid the suite itself recorded (root or descendants); the
+# post-timeout walk must never aim at a glued "PID PPID" concatenation or any recycled pid.
+kt_ok=1; kt_n=0
+while IFS= read -r a; do
+  [ -z "$a" ] && continue
+  kt_n=$((kt_n+1))
+  grep -Fqx "$a" "$W/pids" 2>/dev/null || kt_ok=0
+done < "$_kt_log"
+[ "$kt_n" -gt 0 ] || kt_ok=0
+[ "$kt_ok" = 1 ] && ok "kill-tree targeted only real suite pids ($kt_n target(s): $(tr '\n' ' ' < "$_kt_log"))" \
+                 || bad "kill-tree aimed at a pid outside the suite's recorded tree: $(tr '\n' ' ' < "$_kt_log")"
+kt_root="$(sed -n '$p' "$W/pids")"
+kt_last="$(tail -1 "$_kt_log")"
+[ "$kt_last" = "$kt_root" ] && ok "the post-timeout walk targeted the suite root ($kt_root)" \
+                             || bad "post-timeout walk targeted '$kt_last', expected the suite root $kt_root"
 # Drive the report from the wedged run's real recorded state (the run happened in a subshell).
 _suite_timed_out="$_t"; _suite_rc="$_r"; _suite_secs="2"; _suite_out=""
 rep="$(_capture_report wedged)"; rep_f="$(cat "$TMP/rep")"
