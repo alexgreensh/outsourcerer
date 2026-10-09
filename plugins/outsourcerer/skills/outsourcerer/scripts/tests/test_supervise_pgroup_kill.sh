@@ -142,9 +142,21 @@ chmod +x "$GRANDCHILD"
 FAKE_WEDGE="$TMP/fake-wedge.sh"
 cat > "$FAKE_WEDGE" <<EOF
 #!/usr/bin/env bash
-# The delegate: fork the wedged grandchild, then block on wait. Emits NOTHING to stdout
-# so the byte-growth watchdog sees a stall and fires the kill floor.
+# The delegate: fork the wedged grandchild, hold the stall clock open until the
+# grandchild's identity files are fully written, then go silent so the byte-growth
+# watchdog sees a stall and fires the kill floor.
 "$GRANDCHILD" "$TMP/wedge.pid" "$TMP/wedge.pgid" "$TMP/wedge.start" &
+# Readiness hold: the kill floor fires on SILENCE (3s without output growth), so one
+# byte per poll guarantees the kill can only happen after the grandchild finished
+# recording pid/pgid/lstart — deterministic even when fork/exec/ps are slow under
+# load. Bounded at 30s; past that, silence reaches the same kill floor and the
+# missing-identity assertions report it.
+i=0
+while [ ! -s "$TMP/wedge.start" ] && [ "\$i" -lt 60 ]; do
+  echo "grandchild starting"
+  sleep 0.5
+  i="\$((i+1))"
+done
 wait
 EOF
 chmod +x "$FAKE_WEDGE"
@@ -176,9 +188,12 @@ if [ -n "$job_pgid" ] && [ -n "$gc_pgid" ] && [ "$job_pgid" = "$gc_pgid" ]; then
 else
   bad "wedge: grandchild pgid=${gc_pgid:-<none>} != job pgid=${job_pgid:-<none>} — the grandchild was NOT in the isolated group"
 fi
+if [ -z "$gc_pgid" ]; then
+  bad "wedge: grandchild identity incomplete (pgid/start never written) — the kill floor fired before the readiness hold in fake-wedge.sh finished (slow fork/exec/ps under load)"
+fi
 
 if [ -z "$gp" ]; then
-  bad "wedge: grandchild never wrote its pid (test setup did not run it)"
+  bad "wedge: grandchild never wrote its pid — the delegate was killed before the readiness hold completed (see fake-wedge.sh)"
 elif _wait_gone "$gp"; then
   # Rule out PID reuse: only call it dead if the live process (if any) is NOT our
   # grandchild. A recycled PID will have a different start time and a different pgid.
@@ -224,6 +239,15 @@ FAKE_COOP="$TMP/fake-coop.sh"
 cat > "$FAKE_COOP" <<EOF
 #!/usr/bin/env bash
 "$COOP_GC" "$TMP/coop.term" "$TMP/coop.pid" &
+# Readiness hold: coop.pid is written AFTER the grandchild's traps are installed, so
+# holding the stall clock open until it exists guarantees the TERM pass lands on an
+# armed trap instead of racing the grandchild's bash startup under load. Bounded at 30s.
+i=0
+while [ ! -s "$TMP/coop.pid" ] && [ "\$i" -lt 60 ]; do
+  echo "grandchild arming"
+  sleep 0.5
+  i="\$((i+1))"
+done
 wait
 EOF
 chmod +x "$FAKE_COOP"
