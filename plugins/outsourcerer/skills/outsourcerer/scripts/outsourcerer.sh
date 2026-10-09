@@ -19618,7 +19618,6 @@ main() {
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
   unset OSRC_PREFLIGHT
-  if [ "${1:-}" = "--osrc-preflight-internal" ]; then OSRC_PREFLIGHT=1; shift; fi
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19626,7 +19625,16 @@ main() {
   # delegate_codex's own error text tells users to export it, which would switch the guard off for
   # every run they launch after. A private argv sentinel cannot leak through the environment.
   local _job_child=0
-  if [ "${1:-}" = "--osrc-job-child-internal" ]; then _job_child=1; shift; fi
+  # Consume leading internal sentinels in ANY order. Each emitter adds exactly one today, but a
+  # caller composing both (or adding a third later) must not strand the second sentinel at $1,
+  # where it falls through to "looks like a flag, not a subcommand".
+  while :; do
+    case "${1:-}" in
+      --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
+      --osrc-job-child-internal)   _job_child=1; shift ;;
+      *) break ;;
+    esac
+  done
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
