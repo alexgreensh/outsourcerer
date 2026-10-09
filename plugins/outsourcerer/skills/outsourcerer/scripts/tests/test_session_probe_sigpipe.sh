@@ -172,6 +172,166 @@ else
   bad "_fleet_name_model: >128KB reply discarded by the rc-141 continue (rc=$rc out-len=${#out})"
 fi
 
+# ------------------------------------------------ C. same-shape sites fixed in the follow-up sweep
+# Every verdict-consuming match below used to sit at the end of a `producer | grep -q` pipeline.
+# With a producer larger than the pipe buffer and the needle on the FIRST line, grep exits early,
+# the producer dies on SIGPIPE (rc 141), and pipefail flips the verdict to a miss.
+
+# _session_droid_effort_supported: >128KB droid --help whose first line documents effort support.
+{ printf '%s\n' "  -r, --reason <effort>  reasoning effort"; cat "$TMP/big.txt"; } > "$BIN/droid.help"
+if _session_droid_effort_supported; then
+  ok "_session_droid_effort_supported: ${BYSZ}B help with -r/reason present -> supported"
+else
+  bad "_session_droid_effort_supported: >128KB help misjudged as unsupported (rc-141 flip)"
+fi
+{ cat "$TMP/big.txt"; } > "$BIN/droid.help"   # restore the launch-test help body
+
+# _devin_probe_classify: a >128KB probe reply whose FIRST line says pong must classify up.
+_big_text="pong
+$(cat "$TMP/big.txt")"
+out="$(_devin_probe_classify 0 "$_big_text")"
+if [ "$out" = "up" ]; then
+  ok "_devin_probe_classify: ${BYSZ}B reply with pong -> up"
+else
+  bad "_devin_probe_classify: >128KB pong reply classified '$out' (rc-141 flip)"
+fi
+
+# _devin_free_own_quota: free-model name + quota-exhausted phrasing on line 1 of a >128KB reply.
+_big_text="weekly usage quota for glm-5-2 exhausted
+$(cat "$TMP/big.txt")"
+if _devin_free_own_quota "glm-5-2" "$_big_text"; then
+  ok "_devin_free_own_quota: ${BYSZ}B reply with the free-model quota phrase -> matched"
+else
+  bad "_devin_free_own_quota: >128KB quota reply missed (rc-141 flip)"
+fi
+
+# _frontier_needed: 'mission-critical' on line 1 of a >128KB task text must request the frontier.
+_big_text="mission-critical refactor
+$(cat "$TMP/big.txt")"
+if _frontier_needed "$_big_text" ""; then
+  ok "_frontier_needed: ${BYSZ}B task with the cue present -> frontier"
+else
+  bad "_frontier_needed: >128KB task misjudged (rc-141 flip)"
+fi
+
+# _so_has_neg: a negation cue on line 1 of a >128KB answer must read as negated. A miss here is
+# the unsafe direction (a contradiction scoring as agreement skips the judge).
+_big_text="cannot deploy this
+$(cat "$TMP/big.txt")"
+if printf '%s' "$_big_text" | _so_has_neg; then
+  ok "_so_has_neg: ${BYSZ}B answer with a negation cue -> negation"
+else
+  bad "_so_has_neg: >128KB answer read as no-negation (rc-141 false-agree)"
+fi
+
+# _is_transport_failure: a line-anchored transport signature on line 1 of >128KB stderr.
+_big_text="error: connection refused
+$(cat "$TMP/big.txt")"
+if _is_transport_failure "$_big_text" 1; then
+  ok "_is_transport_failure: ${BYSZ}B stderr with the signature -> transport"
+else
+  bad "_is_transport_failure: >128KB stderr misclassified as task failure (rc-141 flip)"
+fi
+
+# _is_sandboxed_proxy_tls_failure: both machine tokens present early in a >128KB devin log.
+_big_text="rustls_platform_verifier OSStatus -67808
+$(cat "$TMP/big.txt")"
+if _is_sandboxed_proxy_tls_failure "$_big_text"; then
+  ok "_is_sandboxed_proxy_tls_failure: ${BYSZ}B log with both tokens -> tls failure"
+else
+  bad "_is_sandboxed_proxy_tls_failure: >128KB log missed (rc-141 flip)"
+fi
+
+# _session_help_has_model_flag: --model on line 1 of a >128KB help must read as pinnable.
+_big_text="--model <id>
+$(cat "$TMP/big.txt")"
+if _session_help_has_model_flag "$_big_text"; then
+  ok "_session_help_has_model_flag: ${BYSZ}B help with --model -> pinnable"
+else
+  bad "_session_help_has_model_flag: >128KB help misjudged (rc-141 flip)"
+fi
+
+# _secret_scan VALUE hard-block: a real key VALUE on line 1 of a >128KB prompt must still die.
+# A miss here is the dangerous direction (a live credential shipped to a cloud lane).
+_big_text="sk-AbCdEfGhIjKlMnOpQrStUvWx
+$(cat "$TMP/big.txt")"
+_out="$(cd "$TMP" && OSRC_SECRET_SCAN_DEEP=0 _secret_scan "$_big_text" dv 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'CLOUD GATE' <<<"$_out"; then
+  ok "_secret_scan: ${BYSZ}B prompt carrying a key VALUE -> hard-blocked"
+else
+  bad "_secret_scan: >128KB prompt with a live key passed the VALUE gate (rc-141 fail-open)"
+fi
+
+# _crew_scan_staged: a staged diff whose first hunk plants a key must read as dirty even when the
+# diff outgrows the pipe buffer (git would take the SIGPIPE on grep's early exit).
+if have git; then
+  GIT_DIR_T="$TMP/crewg"; mkdir -p "$GIT_DIR_T"
+  git -C "$GIT_DIR_T" init -q 2>/dev/null
+  git -C "$GIT_DIR_T" config user.email t@t 2>/dev/null; git -C "$GIT_DIR_T" config user.name t 2>/dev/null
+  printf 'baseline\n' > "$GIT_DIR_T/f.txt"
+  git -C "$GIT_DIR_T" add f.txt 2>/dev/null && git -C "$GIT_DIR_T" commit -qm base 2>/dev/null
+  { printf 'sk-AbCdEfGhIjKlMnOpQrStUvWx\n'; cat "$TMP/big.txt"; } > "$GIT_DIR_T/f.txt"
+  git -C "$GIT_DIR_T" add f.txt 2>/dev/null
+  if _crew_scan_staged "$GIT_DIR_T"; then
+    ok "_crew_scan_staged: ${BYSZ}B staged diff carrying a key -> detected"
+  else
+    bad "_crew_scan_staged: >128KB staged diff read as clean (rc-141 fail-open)"
+  fi
+else
+  echo "SKIP: git not on PATH; _crew_scan_staged untested"
+fi
+
+# _codex_image_available: `codex features list` >128KB with both features on the first lines.
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'if [ "$1" = "login" ]; then printf "logged in\\n"; exit 0; fi\n'
+  printf 'if [ "$1" = "features" ]; then printf "image_generation\\nartifact\\n"; cat "%s"; exit 0; fi\n' "$TMP/big.txt"
+  printf 'exit 0\n'
+} > "$BIN/codex"
+chmod +x "$BIN/codex"
+_OSRC_CODEX_IMG=""
+if _codex_image_available; then
+  ok "_codex_image_available: ${BYSZ}B features list with both tokens -> available"
+else
+  bad "_codex_image_available: >128KB features list misjudged (rc-141 flip)"
+fi
+
+# logged_in / _fallback_lane_ready(dv) / _ready_lanes: `devin auth status` >128KB with the
+# "Logged in" marker on the first line.
+# Note: the stub ends on `cat` with no trailing `exit 0` so a SIGPIPE kill of the producer
+# propagates as the stub's real exit status (141) instead of being masked by the wrapper.
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'if [ "$1" = "auth" ]; then printf "Logged in as t\\n"; cat "%s"; fi\n' "$TMP/big.txt"
+  printf 'if [ "$1" = "--model" ]; then printf "Available: glm-5-2, swe-2\\n"; exit 0; fi\n'
+} > "$BIN/devin"
+chmod +x "$BIN/devin"
+if logged_in; then
+  ok "logged_in: ${BYSZ}B auth status with the marker -> logged in"
+else
+  bad "logged_in: >128KB auth status read as logged out (rc-141 flip)"
+fi
+if _fallback_lane_ready dv; then
+  ok "_fallback_lane_ready dv: ${BYSZ}B auth status -> lane ready"
+else
+  bad "_fallback_lane_ready dv: >128KB auth status read as not ready (rc-141 flip)"
+fi
+lanes="$(_ready_lanes 2>/dev/null)"
+case " $lanes " in
+  *" devin="*) ok "_ready_lanes: ${BYSZ}B auth status -> devin lane listed" ;;
+  *)           bad "_ready_lanes: >128KB auth status dropped the devin lane (rc-141 flip): '$lanes'" ;;
+esac
+
+# _devin_probe_classify free-model quota path through the classifier: paid phrasing on line 1.
+_big_text="weekly usage quota has been exhausted
+$(cat "$TMP/big.txt")"
+out="$(_devin_probe_classify 1 "$_big_text")"
+if [ "$out" = "paid-tier-exhausted" ]; then
+  ok "_devin_probe_classify: ${BYSZ}B refusal -> paid-tier-exhausted"
+else
+  bad "_devin_probe_classify: >128KB refusal classified '$out' (rc-141 flip)"
+fi
+
 echo "---"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

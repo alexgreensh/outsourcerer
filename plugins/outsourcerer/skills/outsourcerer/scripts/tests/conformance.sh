@@ -157,7 +157,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   # jobs/sessions/locks/registry state perturb a later tmux/session-heavy suite, so suites that
   # pass standalone failed only in the aggregate. Isolate the state (a suite that sets its own
   # OSRC_HOME still overrides this).
-  local suite="$1" secs out_file pid_file expired _home root wd_pid _st
+  local suite="$1" secs out_file pid_file expired _home root wd_pid _st pp0
   _suite_out=""; _suite_rc=0; _suite_timed_out=0; _suite_secs=""
   case "${OSRC_SUITE_TIMEOUT:-}" in
     0) secs=0 ;;                                   # 0 explicitly disables the bound
@@ -185,8 +185,10 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
     # When the suite finishes first, TERM makes this subshell kill its own sleep and exit, so no
     # stray sleep outlives the suite. When the timer wins, the suite is killed WITH its whole tree.
     (
-      _wd_sleep=""
-      trap '[ -n "$_wd_sleep" ] && kill "$_wd_sleep" 2>/dev/null; exit 0' TERM
+      # jobs -p, not a captured $!: a TERM landing between `sleep &` and `_wd_sleep=$!` would see
+      # the variable still empty and exit leaving the timer orphaned for the full bound. The jobs
+      # table knows the child the moment it forks, so the trap reaps it in either order.
+      trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
       sleep "$secs" & _wd_sleep=$!
       wait "$_wd_sleep"
       # Tolerate a pidfile that does not exist yet, or a suite already gone.

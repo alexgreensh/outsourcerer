@@ -77,6 +77,40 @@ _kept2="$(_posture_get or down 2>/dev/null)"
 _lane_down_mark or
 [ "$(_posture_get or down 2>/dev/null)" = "$_kept2" ] && [ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: bare re-mark still no-ops on the reasoned window" || bad "reset: bare re-mark clobbered the reasoned mark"
 
+# A reasoned re-mark with NO explicit TTL is NOT authoritative: the inconclusive probe callers
+# ("free probe unreachable", "unverified: no probe recipe", "probe inconclusive") pass a reason
+# with an empty ttl, so a non-empty reason alone must not bypass keep-longer -- otherwise an
+# inconclusive verdict silently cuts a confirmed 11h provider-stated window to the 300s default
+# and swaps its evidence for a weaker explanation.
+_lane_down_mark dv 40000 "plan quota exhausted" "devin says quota resets in 11h"
+_kept3="$(_posture_get dv down 2>/dev/null)"
+_lane_down_mark dv "" "plan quota refusal; free probe unreachable" "refused again"
+[ "$(_posture_get dv down 2>/dev/null)" = "$_kept3" ] \
+  && ok "inconclusive: a reasoned ttl-less re-mark keeps the confirmed window" \
+  || bad "inconclusive: reasoned ttl-less re-mark cut the confirmed window"
+[ "${_lane_down_mark_result:-}" = kept ] \
+  && ok "inconclusive: result flag says kept (callers print the kept-window message)" \
+  || bad "inconclusive: result flag is '${_lane_down_mark_result:-unset}', expected kept"
+[ "$(cat "$OSRC_POSTURE_DIR/dv.down-reason" 2>/dev/null)" = "plan quota exhausted" ] \
+  && ok "inconclusive: the confirmed reason is kept" \
+  || bad "inconclusive: re-mark replaced the confirmed reason"
+# ...and the same ttl-less mark still wins when the current window is SHORTER than 300s (the
+# guard only protects a longer confirmed mark, it never blocks a normal re-mark).
+_lane_down_mark dv 60 "plan quota exhausted"
+_lane_down_mark dv "" "plan quota refusal; free probe unreachable" "refused again"
+_now="$(date +%s)"; _u="$(_posture_get dv down 2>/dev/null)"
+{ [ "${_u:-0}" -ge "$((_now + 250))" ] && [ "${_u:-0}" -le "$((_now + 350))" ]; } \
+  && ok "inconclusive: ttl-less reasoned re-mark still applies to a shorter window" \
+  || bad "inconclusive: ttl-less re-mark blocked on a shorter window (delta $(( ${_u:-0} - _now ))s)"
+[ "${_lane_down_mark_result:-}" = set ] \
+  && ok "inconclusive: result flag says set on the shorter-window apply path" \
+  || bad "inconclusive: result flag is '${_lane_down_mark_result:-unset}', expected set"
+# And an authoritative re-mark (ttl + reason) reports set as well.
+_lane_down_mark dv 7200 "plan quota exhausted" "provider stated reset"
+[ "${_lane_down_mark_result:-}" = set ] \
+  && ok "authoritative: result flag says set on a ttl+reason mark" \
+  || bad "authoritative: result flag is '${_lane_down_mark_result:-unset}', expected set"
+
 # ---- evidence hygiene (stored value must be one line, secret-free, valid UTF-8) ----
 # Multi-line evidence folds to ONE line: a raw newline would let stored evidence forge extra
 # rows in `posture status` (which cats these files raw), or a second fake "marker" line.
@@ -101,6 +135,12 @@ case "$_ev" in *"sk-abcdef0123456789"*) bad "sanitize: raw token survived into e
 _lane_down_mark gm 300 "plan limit exhausted" "$(printf '\033[31mred\033[0m word')"
 _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
 [ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
+# NUL bytes are dropped deterministically. The evidence path already strips \000 upstream via
+# tr, so this pins the contract on _utf8_sanitize itself: leaving NUL to sprintf("%c", 0) is
+# unspecified across awks (BSD awk emits nothing, gawk emits a raw NUL that truncates the value
+# for downstream readers).
+_ev="$(printf 'a\0b' | _utf8_sanitize)"
+[ "$_ev" = "ab" ] && ok "sanitize: NUL byte dropped by _utf8_sanitize" || bad "sanitize: NUL byte survived ($_ev)"
 
 # ---- expiry purge vs in-flight mark (deterministic losing-order simulation) ----
 # The race shape: a purge on a just-expired mark could delete a CONCURRENT mark's fresh
