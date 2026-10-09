@@ -59,5 +59,74 @@ _lane_down_mark dv 9000
 _nu="$(_posture_get dv down 2>/dev/null)"; [ "${_nu:-0}" -gt "${_kept:-0}" ] && ok "guard: longer re-mark still extends the window" || bad "guard: longer re-mark blocked (${_nu} vs ${_kept})"
 [ ! -e "$OSRC_POSTURE_DIR/dv.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/dv.down-evidence" ] && ok "guard: extending bare re-mark drops stale aux (fresh verdict wins)" || bad "guard: stale aux survived a longer bare re-mark"
 
+# A REASONED shorter re-mark is authoritative fresher information (the provider's own stated
+# reset): it replaces the current mark as a unit -- window, reason, evidence together. The
+# keep-longer guard exists only for bare transport verdicts and must not absorb it.
+_lane_down_mark or 3600 "plan quota exhausted" "estimate: reset unknown"
+_lane_down_mark or 780 "plan quota exhausted" "plan resets in 13m (provider stated)"
+_now="$(date +%s)"; _u="$(_posture_get or down 2>/dev/null)"
+{ [ "${_u:-0}" -ge "$((_now + 700))" ] && [ "${_u:-0}" -le "$((_now + 800))" ]; } && ok "reset: reasoned shorter mark writes its own window" || bad "reset: shorter reasoned mark kept the old window (delta $(( ${_u:-0} - _now ))s)"
+[ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: reason carried through" || bad "reset: reason wrong"
+[ "$(cat "$OSRC_POSTURE_DIR/or.down-evidence" 2>/dev/null)" = "plan resets in 13m (provider stated)" ] && ok "reset: evidence replaced with the new mark" || bad "reset: stale evidence kept"
+# A reasoned LONGER re-mark extends normally too (same replace-unit path, just a bigger window).
+_lane_down_mark or 7200 "plan quota exhausted" "plan resets in 2h"
+_u="$(_posture_get or down 2>/dev/null)"
+[ "${_u:-0}" -gt "$((_now + 3600))" ] && ok "reset: reasoned longer mark extends" || bad "reset: reasoned longer mark blocked"
+# ...and once a reasoned mark owns the window, a bare shorter verdict is still a no-op on it.
+_kept2="$(_posture_get or down 2>/dev/null)"
+_lane_down_mark or
+[ "$(_posture_get or down 2>/dev/null)" = "$_kept2" ] && [ "$(cat "$OSRC_POSTURE_DIR/or.down-reason" 2>/dev/null)" = "plan quota exhausted" ] && ok "reset: bare re-mark still no-ops on the reasoned window" || bad "reset: bare re-mark clobbered the reasoned mark"
+
+# ---- evidence hygiene (stored value must be one line, secret-free, valid UTF-8) ----
+# Multi-line evidence folds to ONE line: a raw newline would let stored evidence forge extra
+# rows in `posture status` (which cats these files raw), or a second fake "marker" line.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf 'line one\nline two\ttabbed\r\nend')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+printf '%s' "$_ev" | grep -q 'line one' && printf '%s' "$_ev" | grep -q 'end' && [ "$(printf '%s' "$_ev" | wc -l | tr -d ' ')" = "0" ] && ok "sanitize: multi-line evidence stored as one line" || bad "sanitize: multi-line evidence mangled ($_ev)"
+# Invalid UTF-8 input is kept in sanitized form (not dropped): under a UTF-8 locale BSD sed used
+# to abort on the bad byte and the evidence vanished entirely.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf 'bad\xffrawbytes')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ -n "$_ev" ] && printf '%s' "$_ev" | grep -q 'badrawbytes' && ok "sanitize: invalid-UTF-8 evidence kept (bad byte dropped)" || bad "sanitize: invalid-UTF-8 evidence lost ($_ev)"
+# A 3-byte character straddling the 400-byte cap leaves no partial sequence at the tail.
+_pad="$(printf '%*s' 398 '' | tr ' ' 'a')"
+_lane_down_mark gm 300 "plan limit exhausted" "${_pad}"$'\xe2\x82\xac'"tail"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ "$(printf '%s' "$_ev" | wc -c | tr -d ' ')" = "398" ] && [ "$_ev" = "$_pad" ] && ok "sanitize: cap drops a straddling 3-byte char cleanly" || bad "sanitize: cap left a partial sequence (len $(printf '%s' "$_ev" | wc -c | tr -d ' '))"
+# Token-shaped evidence is redacted on the way in (evidence is quoted provider stderr).
+_lane_down_mark gm 300 "plan limit exhausted" "denied with key sk-abcdef0123456789 embedded"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+case "$_ev" in *"sk-abcdef0123456789"*) bad "sanitize: raw token survived into evidence" ;; *"REDACTED"*) ok "sanitize: token-shaped evidence redacted" ;; *) bad "sanitize: unexpected evidence ($_ev)" ;; esac
+# ANSI colouring still cannot reach the stored value.
+_lane_down_mark gm 300 "plan limit exhausted" "$(printf '\033[31mred\033[0m word')"
+_ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
+[ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
+
+# ---- expiry purge vs in-flight mark (deterministic losing-order simulation) ----
+# The reported race: a purge on a just-expired mark deleted a CONCURRENT mark's fresh
+# reason/evidence, because marks used to write aux BEFORE .down so the purge's value-match
+# could not see the in-flight write. Under the .down-first order the fresh .down lands before
+# its aux and the purge drops aux only when .down is still absent at re-check. Each step below
+# is invoked by hand in the exact losing interleaving -- no sleeps, no real races needed.
+_posture_set cx down 1   # the expired mark a purging reader had just read
+# B's mark is mid-flight under the new order: .down FIRST, aux still pending.
+_fut=$(( $(date +%s) + 600 )); _posture_set cx down "$_fut"
+# The purge continues on its stale read: the value-match sees the fresh value and must keep all.
+_lane_down_purge_expired cx 1
+[ "$(_posture_get cx down 2>/dev/null)" = "$_fut" ] && ok "race: stale purge keeps the fresh .down" || bad "race: purge deleted the fresh .down"
+# B completes: aux lands after .down.
+_posture_set cx down-reason "plan limit exhausted"; _posture_set cx down-evidence "resets in 10m"
+_lane_down_active cx && ok "race: fresh mark still down after the interleaved purge" || bad "race: fresh mark lost"
+[ "$(cat "$OSRC_POSTURE_DIR/cx.down-reason" 2>/dev/null)" = "plan limit exhausted" ] && [ "$(cat "$OSRC_POSTURE_DIR/cx.down-evidence" 2>/dev/null)" = "resets in 10m" ] && ok "race: aux files intact under the live mark" || bad "race: aux deleted under a live mark"
+# The other branch of the same gate: a purge while .down is genuinely absent drops stale aux
+# (covers a clear/reset landing mid-mark too -- aux can never outlive its mark).
+_posture_set cx down-reason "stale"; _posture_set cx down-evidence "stale"; rm -f "$OSRC_POSTURE_DIR/cx.down"
+_lane_down_purge_expired cx 1
+[ ! -e "$OSRC_POSTURE_DIR/cx.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-evidence" ] && ok "race: stale aux purged when .down absent" || bad "race: orphan aux left behind"
+# And the ordinary expired purge still removes all three together.
+_posture_set cx down 1; _posture_set cx down-reason "stale"; _posture_set cx down-evidence "stale"
+_lane_down_active cx || true
+[ ! -e "$OSRC_POSTURE_DIR/cx.down" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-evidence" ] && ok "race: expired mark still purges all three" || bad "race: expired purge incomplete"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

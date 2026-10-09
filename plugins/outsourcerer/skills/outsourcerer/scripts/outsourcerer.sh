@@ -1519,7 +1519,9 @@ _lane_plan_limit_block() {
   verdict="$(_lane_free_probe "$lane")"; prc=$?
   case "$verdict:$prc" in
     limit-refused:*)
-      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//')"
+      # _utf8_sanitize after the byte cap: head -c can split a multi-byte character at 160 and the
+      # raw probe file can carry invalid bytes; both would make downstream sed/printf see bad UTF-8.
+      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(LC_ALL=C head -c 160 "$(_lane_probe_file "$lane")" | LC_ALL=C tr '\n' ' ' | _utf8_sanitize | LC_ALL=C sed -E 's/[[:space:]]+$//')"
       printf '>>> [%s plan limit] probe: CONFIRMED — %s. %s lane marked DOWN for %s%s (clear early with: %s posture reset). Dispatch + fallback skip it until then. %s\n' \
         "$lane" "${pline:-the lane refused the probe with a limit too}" \
         "$lane" "$(_fmt_secs_human "$ttl")" "$( [ -n "$secs" ] && printf ', until its stated reset' || printf ' (an ESTIMATE: no parseable reset; override OSRC_LANE_PLAN_DOWN_TTL)')" "$0" "$advice" >&2
@@ -2359,6 +2361,11 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
+  # The ledger row must classify the task the USER wrote: $prompt also carries the with-pre skill
+  # bundle and (for accept-edits) the non-interactive verification note, whose own wording
+  # ("make the code changes", "verify") flips a simple edit task to code. Same convention as
+  # run_job's "classify from the REAL task text (REST)".
+  local _ledger_task="${REST[*]}"
   _devin_with_prepare   # per-dispatch skill sync for this lane (dies loud on an unhonorable grant)
   [ -n "$DEVIN_WITH_PRE" ] && prompt="$DEVIN_WITH_PRE$prompt"
   # accept-edits (the `edit` verb) auto-approves file edits, and devin still runs simple read-only
@@ -2512,7 +2519,7 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # ledger row never writes, i.e. the undercount reappears invisibly. Default instead.
   # devin is a PLAN lane ($0 cash is genuinely true), so a real 0 cost is honest here.
   local _tier="${tier:-auto}"
-  record_ledger devin "$MODEL" "$_tier" "$_tier" "$prompt" "0.000000" dv 2>/dev/null || true
+  record_ledger devin "$MODEL" "$_tier" "$_tier" "$_ledger_task" "0.000000" dv 2>/dev/null || true
   return "$rc"
 }
 
@@ -5007,6 +5014,41 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
   return 1
 }
 
+# _utf8_sanitize : stdin bytes -> stdout containing only VALID UTF-8. ASCII passes through,
+# complete multi-byte sequences pass, anything else (stray continuation bytes, invalid leads,
+# overlong encodings, a sequence split by a preceding `head -c` cap) is dropped, so callers can
+# byte-cap a string without storing a partial character. Byte-exact under LC_ALL=C on BSD + GNU:
+# `od -tu1` emits decimal bytes and awk's `%c` re-emits each kept byte raw.
+_utf8_sanitize() {
+  LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    { for (i = 1; i <= NF; i++) b[++k] = $i + 0 }
+    END {
+      i = 1
+      while (i <= k) {
+        c = b[i]
+        if (c < 128) { out = out sprintf("%c", c); i++; continue }
+        need = 0
+        if (c >= 194 && c <= 223) need = 2
+        else if (c >= 224 && c <= 239) need = 3
+        else if (c >= 240 && c <= 244) need = 4
+        if (need == 0) { i++; continue }
+        if (i + need - 1 > k) break
+        # Restricted second byte: reject overlongs (E0<A0, F0<90), UTF-16 surrogates
+        # (ED>A0) and the >U+10FFFF cap (F4>8F) so only strictly valid UTF-8 survives.
+        lo = 128; hi = 191
+        if (c == 224) lo = 160; else if (c == 237) hi = 159
+        if (c == 240) lo = 144; else if (c == 244) hi = 143
+        ok = 1
+        if (b[i+1] < lo || b[i+1] > hi) ok = 0
+        for (j = 2; ok && j < need; j++) if (b[i+j] < 128 || b[i+j] > 191) { ok = 0; break }
+        if (!ok) { i++; continue }
+        for (j = 0; j < need; j++) out = out sprintf("%c", b[i+j])
+        i += need
+      }
+      printf "%s", out
+    }'
+}
+
 # ---- LANE-DOWN marker (sibling of the quota exhausted-until marker) ----------------------------
 # A lane can be UNREACHABLE without being at-cap: the Devin free GLM probe times out, or a
 # sandboxed-proxy TLS reject makes the whole devin lane unusable. doctor already detects this, but
@@ -5023,10 +5065,12 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
 # A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
 # ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
 # the run's stderr capture is consumed by then, so this is the only surviving record.
-# An unexpired LONGER mark wins over a shorter re-mark: a bare transport verdict (doctor/TLS) firing
-# inside a confirmed quota window would otherwise cut the TTL and erase the reason/evidence that
-# justify it. Extending past the current mark still works (new until > old), and posture reset /
-# _lane_down_clear remain the early-clear paths.
+# An unexpired LONGER mark wins over a shorter BARE re-mark (no reason): a transport verdict
+# (doctor/TLS) firing inside a confirmed quota window would otherwise cut the TTL and erase the
+# reason/evidence that justify it. Extending past the current mark still works (new until > old),
+# and posture reset / _lane_down_clear remain the early-clear paths. A reasoned re-mark is
+# authoritative fresher information -- e.g. the provider's own stated reset -- and always replaces
+# the current mark as a unit (window, reason, evidence together).
 _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
@@ -5034,20 +5078,34 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   case "$ttl" in ''|*[!0-9]*) ttl=300 ;; esac
   local until; until="$(( $(date +%s) + ttl ))"
   local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
-  if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
-  else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
-  # Evidence is sanitized at the sink (ANSI CSI strip, control bytes, 400c cap) so anything a future
-  # caller passes stays safe for `posture status` to cat raw; the *_line extractors already clean
-  # their own output, this just cannot regress behind their backs.
+  if [ -z "${3:-}" ]; then
+    case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
+  fi
+  # Evidence is sanitized at the sink so anything a future caller passes stays safe for
+  # `posture status` to cat raw; the *_line extractors already clean their own output, this just
+  # cannot regress behind their backs. LC_ALL=C throughout: under a UTF-8 locale BSD sed aborts
+  # ("illegal byte sequence") on hostile input and the evidence vanished. Order matters: ANSI CSI
+  # strip first (the control-byte strip would eat the ESC byte and break detection); fold
+  # newline/CR/tab to spaces (a raw newline would let evidence forge extra posture rows); strip
+  # remaining control bytes; _explain_redact secrets (evidence is quoted provider stderr and can
+  # carry tokens); 400-byte cap; _utf8_sanitize so the cap or hostile input never leaves a split
+  # or invalid byte sequence in the stored value.
   local ev=""
   if [ -n "${4:-}" ]; then
     local esc; esc="$(printf '\033')"
-    ev="$(printf '%s' "$4" | sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | tr -d '\000-\010\013-\037\177' | head -c 400)"
+    ev="$(printf '%s' "$4" | LC_ALL=C sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | LC_ALL=C tr '\011\012\015' '   ' | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C _explain_redact | LC_ALL=C head -c 400 | _utf8_sanitize)"
   fi
+  # Write .down FIRST, aux after: _lane_down_purge_expired drops aux only when .down is absent at
+  # re-check, and .down landing before aux is what makes that check safe -- an absent .down proves
+  # no in-flight mark has committed aux yet (they land after it), so aux deleted there can only be
+  # the stale set being replaced. (Crash-mid-mark can still leave .down without aux; that residual
+  # is unavoidable without a single-file mark and is the benign direction: the lane is skipped
+  # with the generic reason rather than aux orphaned under a different mark's .down.)
+  _posture_set "$lane" "down" "$until"
+  if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
+  else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
   if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
-  _posture_set "$lane" "down" "$until"
 }
 _lane_down_reason() {  # <lane-or-disp> -> the recorded reason, or the generic transport wording
   local lane v; lane="$(_quota_lane_key "$1")"
@@ -5077,13 +5135,30 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
   case "$v" in ''|*[!0-9]*) return 1 ;; esac
   local now; now="$(date +%s)"
   if [ "$v" -gt "$now" ]; then return 0; fi
-  # Expired -> purge on read, VALUE-MATCHED (same hardening as _quota_marker_active): only delete if
-  # the file still holds the expired value we read, so a sibling's fresh marker in the race is kept.
-  # Reason/evidence ride along (same set as _lane_down_clear): a down explanation must not outlive
-  # the mark it explains, or `posture status` keeps showing stale quota wording for an up lane.
-  local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null
+  # Expired -> purge on read (gates + rationale live with _lane_down_purge_expired).
+  _lane_down_purge_expired "$lane" "$v"
   return 1
+}
+
+# Remove an expired down mark + its aux files for a purge that already read value <v>. Two gates
+# keep it safe against a concurrent _lane_down_mark, which writes .down FIRST and aux after:
+#   1) value-match: .down is unlinked only while it still holds the expired value we saw (same
+#      hardening as _quota_marker_active), so a fresh mark whose .down already landed is never
+#      deleted by a stale read;
+#   2) aux gate: reason/evidence are dropped only when .down is still ABSENT at re-check. Under
+#      the .down-first order an absent .down proves no in-flight mark has committed aux yet (aux
+#      lands after .down), so whatever aux is removed belongs to the mark being purged -- a fresh
+#      mark's aux can never be deleted from under its live .down, and an explanation never
+#      outlives the mark it explains (stale quota wording on an up lane).
+# Residual (the same check-then-delete limit _quota_marker_active accepts): a fresh .down landing
+# in the microsecond between the value-match re-read and the rm can still be unlinked -- losing
+# the WHOLE mark, fail-open, self-heals on the next refusal -- but it can never leave a live mark
+# stripped of its aux. _lane_down_clear and `posture reset` remove .down too, so a race with
+# either can only leave aux orphans, which this gate re-cleans on the next expired purge.
+_lane_down_purge_expired() {  # <lane> <expired-value-we-read>
+  local cur; cur="$(_posture_get "$1" "down" 2>/dev/null)"
+  [ "$cur" = "$2" ] && rm -f "$OSRC_POSTURE_DIR/$1.down" 2>/dev/null
+  _posture_get "$1" "down" >/dev/null 2>&1 || rm -f "$OSRC_POSTURE_DIR/$1.down-reason" "$OSRC_POSTURE_DIR/$1.down-evidence" 2>/dev/null
 }
 # Clear a lane's down marker early — used when an authoritative live probe (doctor) just proved the
 # lane answers, so a still-unexpired marker from an earlier verdict doesn't outlive reality. The TTL

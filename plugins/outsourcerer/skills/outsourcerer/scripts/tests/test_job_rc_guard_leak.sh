@@ -15,7 +15,7 @@ FIX="$HERE/fixtures/devin-rc7"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "$PWD/.test-rc-guard.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/test-rc-guard.XXXXXX")"
 trap 'rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 mkdir -p "$OSRC_HOME"
@@ -30,6 +30,9 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 set --; . "$SRC" >/dev/null 2>&1
+# Re-arm AFTER sourcing: the engine installs its own EXIT trap, which replaces this one --
+# without it the whole fixture (decoded reject line + job logs) leaks onto disk after the run.
+trap 'rm -rf "$FIXTURE"' EXIT
 
 # The recorded devin warning lives here only rot13'd -- no repo file may carry the literal (a
 # delegate reading fixtures or sources must not look like devin stopping; see fixtures/devin-rc7/
