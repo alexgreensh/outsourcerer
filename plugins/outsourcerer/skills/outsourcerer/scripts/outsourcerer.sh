@@ -10557,9 +10557,19 @@ _supervise() {
   # exports or the mapping silently never fires.
   local _jlane=""; [ -f "$jd/meta.json" ] && have jq && _jlane="$(jq -r '(.lane // .provider // "")' "$jd/meta.json" 2>/dev/null)"
   _jlane="${_jlane:-${OUTSOURCERER_PROVIDER:-}}"
+  # Normalize the lane token before comparing: the env fallback can carry a case/whitespace
+  # variant (an inherited OUTSOURCERER_PROVIDER is not guaranteed jq-clean), and a variant that
+  # fails the exact match silently disables the mapping on the very job that needs it.
+  _jlane="$(printf '%s' "$_jlane" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  local _pm_tail="${OSRC_PRINTMODE_TAIL:-25}"; case "$_pm_tail" in ''|*[!0-9]*) _pm_tail=25 ;; esac
+  # Strip ANSI CSI before the fixed-string match: a colorized warning styles `warning:` as its
+  # own span (ESC[33m ... ESC[0m), which inserts escape bytes INSIDE the needle and makes a
+  # contiguous -F needle miss it entirely -- the blocked run then reads as done?. The same
+  # strip the down-evidence sanitizer uses.
+  local _esc; _esc="$(printf '\033')"
   if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
      && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
-     && tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null | grep -aqF "$(_noninteractive_reject_needle)"; then
+     && tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" | grep -aqF "$(_noninteractive_reject_needle)"; then
     echo "permission-blocked" > "$jd/status"
     printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
