@@ -587,7 +587,11 @@ _timeout() {
   # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
   # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
-  # which is the same reason it exists for the job supervisor.
+  # which is the same reason it exists for the job supervisor. The watchdog's own stdout/stderr go to
+  # /dev/null for the same reason: `kill` below reaps the subshell but ORPHANS its `sleep`, and an
+  # inherited capture pipe would stay open until that sleep ended, making every captured or piped
+  # `_timeout` call cost the full bound no matter how fast the child was (measured: `x="$(_timeout 5
+  # true)"` took 5.03s on bash 3.2).
   ( sleep "$secs" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
     # discriminator can be exercised deterministically. It is honored ONLY under
@@ -603,10 +607,18 @@ _timeout() {
     case "$state" in Z*|"" ) exit 0 ;; esac
     : > "$expired_file"
     _kill_tree "$cmd_pid" 2>/dev/null
-  ) &
+  ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
-  kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+  # The watchdog's `sleep` survives a TERM to its subshell: the subshell dies,
+  # the timer reparents to init, and it burns the rest of the bound detached,
+  # one orphan per fast call even though it no longer holds anyone's pipe.
+  # Enumerate the watchdog's children while it is still alive (the timer is
+  # its only child) and kill the timer with the watchdog.
+  local wd_kids; wd_kids="$(_descendants "$wd_pid" 2>/dev/null)"
+  kill "$wd_pid" 2>/dev/null
+  [ -n "$wd_kids" ] && kill $wd_kids 2>/dev/null   # unquoted: pid list
+  wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.
   # Once that happens, the timeout owns the result even if a TERM trap exits 0.
@@ -840,8 +852,13 @@ _devin_plan_probe_model() {
   # tier), falling back to swe-2 (the known Free model) when the catalog is unavailable or the env
   # override is unset.
   probe="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
-  alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; alt="${alt:-swe-2}"
-  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then probe="$alt"; fi
+  # The alt lookup is a live (bounded) catalog refresh, so it is evaluated only when it will actually
+  # be used: a refusal from any model other than the default probe keeps the default and never needs
+  # the catalog. Evaluating it eagerly made every plan-quota block spend a `devin models list` fetch
+  # on a value it then discarded.
+  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then
+    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2}"
+  fi
   printf '%s' "$probe"
 }
 
@@ -6345,12 +6362,36 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}"
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
-      state="$(_fleet_classify "$(printf '%s' "$job" | jq -r '.status // "unknown"')")"
+      jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      state="$(_fleet_classify "$jstatus")"
+      if [ "$state" = "blocked" ]; then
+        # `blocked` in the fleet vocabulary means "LIVE, parked on a prompt". The job
+        # statuses that map there are written only as a job dies (post-wait, or between
+        # _kill_job and the exit file landing), so they usually describe a TERMINAL job
+        # and a dead process is not waiting on anyone. Reporting it live makes the
+        # blind-turn guard tell the user to answer a pane for a process that already
+        # exited, on every run/edit/bg/loop call until the job dir is cleaned. Show it
+        # as `stopped` (the fleet's existing stopped-needs-a-look state); state_evidence
+        # keeps the raw status so fleet ls still says WHAT it stopped on. Terminality
+        # needs positive evidence: an exit file, or every recorded process pid gone.
+        # When neither is provable (no exit file, no pid recorded, or a pid still live)
+        # keep `blocked`: the fleet errs toward reporting possibly-live work.
+        if [ -f "$d/exit" ]; then
+          state=stopped
+        else
+          _jpid="$(cat "$d/pid" 2>/dev/null)"; _jspid="$(cat "$d/supervisor_pid" 2>/dev/null)"
+          if [ -n "$_jpid$_jspid" ]; then
+            { [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; } \
+              || { [ -n "$_jspid" ] && kill -0 "$_jspid" 2>/dev/null; } \
+              || state=stopped
+          fi
+        fi
+      fi
       item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
         {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
          requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,
@@ -18203,16 +18244,29 @@ _blind_turn_guard() {
   # The caller's own Claude Code session is in the snapshot too, as a cc-peer, and while it waits on
   # a long tool call it can read as unresponsive?. The guard must not tell the orchestrator that its
   # own session needs it. The snapshot's `self` field is relative to whichever process collected it
-  # (usually the heartbeat beacon), so identify the caller here: by CLAUDE_CODE_SESSION_ID when the
-  # host exports it, else by the peer's PID being one of this process's ancestors.
-  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc=""
-  case "$snapshot" in *'"cc-peer"'*) self_anc=" $(_fleet_self_ancestors 2>/dev/null) " ;; esac
+  # (usually the heartbeat beacon), so identify the caller here: by the peer's PID being one of this
+  # process's ancestors, or by CLAUDE_CODE_SESSION_ID. A bare sid match is NOT proof of self when the
+  # ancestor walk works: the env var is inherited by every process the session spawns (a tmux server,
+  # later panes), so a shell in such a pane shares the sid while the real session is a different,
+  # possibly stuck, peer. With a usable walk, require the sid-matched row's pid to also be an
+  # ancestor (or the row to have no pid) before excluding it.
+  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc="" self_anc_usable=false
+  case "$snapshot" in *'"cc-peer"'*)
+    self_anc=" $(_fleet_self_ancestors 2>/dev/null) "
+    # A usable walk yields real ancestors beyond the starting pid itself. Where `ps -o ppid=` is
+    # unsupported (Git Bash) it returns only the starting pid, which can prove nothing about a
+    # row's pid; there the sid match alone must keep excluding, as before.
+    [ "$(printf '%s' "$self_anc" | wc -w | tr -d ' ')" -ge 2 ] 2>/dev/null && self_anc_usable=true ;;
+  esac
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
-  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" '
+  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" --argjson self_anc_usable "$self_anc_usable" '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
     def caller: (.pid // null) as $p | .owner == "cc-peer"
-      and (($self_sid != "" and .session_id == $self_sid)
-           or ($p != null and ($self_anc | contains(" " + ($p | tostring) + " "))));
+      and (($p != null and ($self_anc | contains(" " + ($p | tostring) + " ")))
+           or ($self_sid != "" and .session_id == $self_sid
+               and ($self_anc_usable == false
+                    or $p == null
+                    or ($self_anc | contains(" " + ($p | tostring) + " ")))));
     .items[]
     | select(caller | not)
     | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")

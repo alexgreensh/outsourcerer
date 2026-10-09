@@ -102,6 +102,7 @@ _ALL_SUITES="$_ALL_SUITES test_failover_pick"
 _ALL_SUITES="$_ALL_SUITES test_job_rc_guard_leak"
 _ALL_SUITES="$_ALL_SUITES test_devin_edit_note"
 _ALL_SUITES="$_ALL_SUITES test_conformance_suite_timeout"
+_ALL_SUITES="$_ALL_SUITES test_timeout_capture"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: one contributor run sat for 16+ hours on ~7 cores because a busy-spinning suite had no time
 # bound. Default 600s, override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a

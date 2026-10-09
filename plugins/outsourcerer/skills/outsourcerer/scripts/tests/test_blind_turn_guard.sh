@@ -20,9 +20,13 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 FIXTURE="$(mktemp -d "$PWD/.test-blind-turn.XXXXXX")"
-trap 'rm -rf "$FIXTURE"' EXIT
+trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
-mkdir -p "$OSRC_HOME"
+# The real-collect cases below must not fold this host's actual Claude sessions
+# into the fixture's fleet view.
+export OSRC_CLAUDE_SESSIONS_DIR="$FIXTURE/claude-sessions"
+export OSRC_CLAUDE_PROJECTS_DIR="$FIXTURE/claude-projects"
+mkdir -p "$OSRC_HOME" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_CLAUDE_PROJECTS_DIR"
 
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
@@ -119,6 +123,86 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
   && ok "silence when only terminal (done) work exists" \
   || bad "terminal work triggered the guard (rc=$rc)"
 
+# --- a TERMINAL blocked job is not "waiting on you" (reviewer finding: a devin job that ended
+# permission-blocked tripped the guard on every run/edit/bg/loop call until its dir was cleaned).
+# These cases drive the REAL path (job dir -> _fleet_snapshot_collect -> _fleet_snapshot_write ->
+# _blind_turn_guard) because the fix lives in collection, not in the guard's selection.
+newjob() { # <id> - minimal managed-job dir for collection
+  local jd="$OSRC_JOBS/$1"; mkdir -p -m 700 "$jd"
+  jq -cn --arg id "$1" '{id:$id,provider:"devin",verb:"run",model:"swe-2-high",lane:"dv"}' > "$jd/meta.json"
+  : > "$jd/.startmark"; : > "$jd/.fsmark"; : > "$jd/out.log"
+}
+dead_pid=999999; while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+dead_spid=$dead_pid; while kill -0 "$dead_spid" 2>/dev/null; do dead_spid=$((dead_spid - 1)); done
+collect_and_write() { _fleet_snapshot_write "$(_fleet_snapshot_collect)"; }
+job_state() { jq -r --arg j "$1" '.items[] | select(.job_id==$j) | .state' "$SNAP"; }
+
+# permission-blocked verdict, exit recorded, process gone: parked-looking but terminal.
+newjob term-pb
+echo permission-blocked > "$OSRC_JOBS/term-pb/status"; echo 3 > "$OSRC_JOBS/term-pb/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-pb/pid"; echo "$dead_spid" > "$OSRC_JOBS/term-pb/supervisor_pid"
+collect_and_write
+[ "$(job_state term-pb)" = "stopped" ] \
+  && ok "terminal permission-blocked job shows as 'stopped', not a live prompt" \
+  || bad "terminal permission-blocked job state is '$(job_state term-pb)' (expected stopped)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+  && ok "a terminal permission-blocked job does NOT trip the guard" \
+  || bad "terminal permission-blocked job still trips the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-pb"
+
+# OSRC::BLOCKED is stored as status `blocked`; a dead one is the same terminal class.
+newjob term-blk
+echo blocked > "$OSRC_JOBS/term-blk/status"; echo 3 > "$OSRC_JOBS/term-blk/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-blk/pid"
+collect_and_write
+[ "$(job_state term-blk)" = "stopped" ] \
+  && ok "terminal blocked (OSRC::BLOCKED) job shows as 'stopped'" \
+  || bad "terminal blocked job state is '$(job_state term-blk)' (expected stopped)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+  && ok "a terminal OSRC::BLOCKED job does NOT trip the guard" \
+  || bad "terminal OSRC::BLOCKED job still trips the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-blk"
+
+# The same dir shape with status done? is terminal too; it must stay silent end to end.
+newjob term-done
+echo 'done?' > "$OSRC_JOBS/term-done/status"; echo 2 > "$OSRC_JOBS/term-done/exit"
+echo "$dead_pid" > "$OSRC_JOBS/term-done/pid"
+collect_and_write
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "a terminal done? job stays silent through the real collect path" \
+  || bad "terminal done? job triggered the guard (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/term-done"
+
+# ...but a job that is genuinely ALIVE and parked on a prompt must still be reported exactly
+# as before: status blocked, no exit file, and a live delegate pid.
+sleep 60 & live_pid=$!
+newjob live-blk
+echo blocked > "$OSRC_JOBS/live-blk/status"; echo "$live_pid" > "$OSRC_JOBS/live-blk/pid"
+collect_and_write
+[ "$(job_state live-blk)" = "blocked" ] \
+  && ok "a live blocked job keeps the 'blocked' fleet state" \
+  || bad "live blocked job state is '$(job_state live-blk)' (expected blocked)"
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'live-blk' && printf '%s' "$out" | grep -q 'WAITING ON YOU' \
+  && ok "a LIVE blocked job still refuses (rc=7) and is named WAITING ON YOU" \
+  || bad "live blocked job was not reported (rc=$rc): $out"
+kill "$live_pid" 2>/dev/null; live_pid=""; rm -rf "$OSRC_JOBS/live-blk"
+
+# A blocked dir with NO recorded pid and NO exit file cannot be proven terminal, so the fleet
+# errs toward reporting it rather than hiding possibly-live work (the same convention
+# _reconcile_status uses: no liveness evidence is not proof of death).
+newjob unproven-blk
+echo blocked > "$OSRC_JOBS/unproven-blk/status"
+collect_and_write
+out="$(_blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'unproven-blk' \
+  && ok "an unverifiably-terminal blocked job still refuses (fails toward reporting)" \
+  || bad "unverifiable blocked job was hidden (rc=$rc): $out"
+rm -rf "$OSRC_JOBS/unproven-blk"
+
 # --- silence when there is no fleet view yet (the heartbeat owns collection; guard does not collect) ---
 rm -f "$SNAP"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
@@ -136,20 +220,49 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
 # --- the caller's own Claude Code session is not a delegate. Recorded case: every outsourcerer call
 # from one session printed "1 live delegate(s) need you ... <that session's id> MAYBE STUCK", because
 # the orchestrator shows up in the snapshot as a cc-peer that reads unresponsive? while it waits on a
-# long tool call. It is excluded by CLAUDE_CODE_SESSION_ID, or by its PID being our ancestor. ---
+# long tool call. It is excluded by its PID being one of this process's ancestors, or by
+# CLAUDE_CODE_SESSION_ID. A bare sid match is not proof of self: the env var is inherited by every
+# process the session spawns (a tmux server, later panes), so a shell in such a pane shares the sid
+# while the real session with that sid is a DIFFERENT, possibly stuck, peer. When the ancestor walk
+# is usable, a sid-matched row must also prove it by pid ancestry. ---
 far_pid=999999; while kill -0 "$far_pid" 2>/dev/null; do far_pid=$((far_pid - 1)); done
-peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# The real caller row: same sid as the env var AND a pid that sits in our ancestry.
+peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# The reviewer case: same sid, but a pid that is NOT an ancestor (the actual stuck peer).
+peer_sid_only_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# A sid-matched row with no pid at all cannot be disproven; it stays excluded.
+peer_nopid_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
 write_snapshot "$(snapshot_with "$peer_self_stuck")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] \
-  && ok "the caller's own session (CLAUDE_CODE_SESSION_ID) is not reported as a stuck delegate" \
+  && ok "the caller's own session (sid match + ancestor pid) is not reported as a stuck delegate" \
   || bad "the guard flagged the caller's own session (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
+if ps -o ppid= -p "$$" >/dev/null 2>&1; then
+  out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+  [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
+    && ok "a sid-matched peer whose pid is not our ancestor is still reported (sid alone is not proof of self)" \
+    || bad "a sid-matched non-ancestor peer was wrongly hidden (rc=$rc): $out"
+else
+  echo "SKIP: ancestor walk unusable on this host; non-ancestor sid-match case not exercised"
+fi
+# A dead start pid makes the walk yield itself alone, so sid-only exclusion is the fallback.
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess OSRC_FLEET_SELF_PID=$far_pid _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "with no usable ancestor walk, a sid match still excludes (the Git Bash fallback)" \
+  || bad "the sid-only fallback did not exclude the caller (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_nopid_stuck")"
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "a sid-matched peer with no pid cannot be disproven and stays excluded" \
+  || bad "a pid-less sid-matched peer was wrongly reported (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
 out="$(CLAUDE_CODE_SESSION_ID=some-other-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
   && ok "a different session with the same state is still reported" \
   || bad "a non-caller stuck peer was not reported (rc=$rc)"
 peer_ancestor_stuck='{"owner":"cc-peer","job_id":null,"session_id":"ancestor-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
-peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
+peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
 write_snapshot "$(snapshot_with "$peer_self_waiting" "$managed_blocked")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'job-7' && ! printf '%s' "$out" | grep -q 'caller-sess' \
