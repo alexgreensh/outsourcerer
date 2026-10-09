@@ -684,7 +684,7 @@ _devin_pid_owned_by_live_job() {
 # Prove that candidate is the recorded delegate child of an outsourcerer job
 # whose supervisor is gone. Unknown/unrecorded processes are never ours to reap.
 _devin_pid_owned_by_dead_job() {
-  local candidate="${1:-}" jd child supervisor recorded_start current_start
+  local candidate="${1:-}" jd child supervisor
   [ -d "$OSRC_JOBS" ] || return 1
   for jd in "$OSRC_JOBS"/*; do
     [ -d "$jd" ] && [ -s "$jd/pid" ] && [ -s "$jd/supervisor_pid" ] || continue
@@ -694,10 +694,12 @@ _devin_pid_owned_by_dead_job() {
     case "$supervisor" in ''|*[!0-9]*) continue ;; esac
     kill -0 "$supervisor" 2>/dev/null && continue
     [ -s "$jd/pid_start" ] || continue
-    recorded_start="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$jd/pid_start" 2>/dev/null)"
-    [ -n "$recorded_start" ] || continue
-    current_start="$(_pid_start_identity "$candidate" 2>/dev/null)" || continue
-    [ "$current_start" = "$recorded_start" ] || continue
+    # Identity check, locale-consistent both ways (C-locale record from the current writer or
+    # a plain-locale record from the previous release): rc 0 = the live candidate IS the
+    # recorded job child and its supervisor is dead -> it is our orphaned lane-blocker;
+    # rc 1 = pid recycled -> not ours; rc 2 = cannot tell (garbled/absent record, ps hiccup,
+    # ps-less host) -> leave it alone rather than reap on a guess.
+    _pid_start_file_match "$candidate" "$jd/pid_start" || continue
     printf '%s\n' "$jd"
     return 0
   done
@@ -6449,7 +6451,7 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _lst _sst
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _sf _mrc
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
@@ -6482,18 +6484,17 @@ _fleet_snapshot_collect() {
           if [ -n "$_jpid$_jspid" ]; then
             # Same liveness discipline as _reconcile_status: kill -0 can match a recycled
             # pid, so a live pid is only the job's process while its recorded *_start
-            # agrees with the live start time. Empty on either side cannot disprove.
+            # matches the live start time. _pid_start_file_match is locale-consistent both
+            # ways (C-locale records from the current writer, plain-locale records from the
+            # previous release) and returns 2 when identity cannot be decided at all —
+            # unreadable record, ps hiccup, ps-less host — which keeps the job reported.
             _alive=0
             for _p in "$_jpid" "$_jspid"; do
               [ -n "$_p" ] || continue
               kill -0 "$_p" 2>/dev/null || continue
-              _lst="$(_pid_start_identity "$_p" 2>/dev/null)"
-              if [ "$_p" = "$_jpid" ]; then
-                _sst="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$d/pid_start" 2>/dev/null)"
-              else
-                _sst="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$d/supervisor_pid_start" 2>/dev/null)"
-              fi
-              { [ -z "$_sst" ] || [ -z "$_lst" ] || [ "$_lst" = "$_sst" ]; } && _alive=1
+              if [ "$_p" = "$_jpid" ]; then _sf="$d/pid_start"; else _sf="$d/supervisor_pid_start"; fi
+              _mrc=0; _pid_start_file_match "$_p" "$_sf" || _mrc=$?
+              [ "$_mrc" != 1 ] && _alive=1   # 0 = same process; 2 = cannot disprove -> alive
             done
             [ "$_alive" = 0 ] && state=stopped
           fi
@@ -6811,6 +6812,53 @@ _pid_start_identity() {
     return 2
   fi
   return 1
+}
+
+# _pid_start_projection <lstart-line> -> "day|clock|year", the locale-independent identity core.
+# ps localizes the weekday/month NAMES (and some locales reorder day and month), but the clock,
+# the day-of-month number and the year are the same tokens in every locale — and they carry
+# exactly lstart's 1-second resolution, so two renders of the same process always agree on this
+# triple and a genuinely different start time always differs. Empty output = nothing usable.
+_pid_start_projection() {
+  local t day="" clock="" year=""
+  set -- $1
+  for t in "$@"; do
+    case "$t" in
+      [0-9][0-9]:[0-9][0-9]:[0-9][0-9]) clock="$t" ;;
+      [0-9][0-9][0-9][0-9]) year="$t" ;;
+      [0-9]|[0-9].|[0-9][0-9]|[0-9][0-9].) day="${t%%[!0-9]*}" ;;
+    esac
+  done
+  printf '%s|%s|%s' "$day" "$clock" "$year"
+}
+
+# _pid_start_file_match <pid> <start-file> -> 0 same process; 1 provably different (pid reused);
+# 2 cannot tell. Locale-consistent reader for $jd/pid_start and $jd/supervisor_pid_start: the
+# file may hold the LC_ALL=C rendering (what _supervise writes) OR a plain-locale rendering of
+# the SAME process (job dirs written by the previous release; possibly under a DIFFERENT locale
+# than the reader's env), so identity is decided on the locale-independent projection first and
+# the raw either-rendering comparison is kept as the fallback for records the projection cannot
+# parse. rc 2 covers absent/empty/garbled records and hosts whose `ps` cannot report lstart at
+# all: callers must keep counting the pid as alive (identity cannot disprove). Compare with
+# _pid_start_identity, whose callers store and compare their OWN C-locale values in memory; this
+# helper is only for the two on-disk job files.
+_pid_start_file_match() {
+  local pid="$1" file="$2" rec live_c live_plain prec lc pl
+  local norm='s/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g'
+  [ -n "$pid" ] && [ -f "$file" ] || return 2
+  rec="$(sed "$norm" "$file" 2>/dev/null)"
+  [ -n "$rec" ] || return 2
+  live_c="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  if [ -z "$live_c" ] && [ -z "$live_plain" ]; then return 2; fi
+  prec="$(_pid_start_projection "$rec")"
+  lc="$(_pid_start_projection "$live_c")"
+  pl="$(_pid_start_projection "$live_plain")"
+  if [ -n "$prec" ]; then
+    if [ -n "$lc" ] && [ "$prec" = "$lc" ]; then return 0; fi
+    if [ -n "$pl" ] && [ "$prec" = "$pl" ]; then return 0; fi
+  fi
+  [ "$rec" = "$live_c" ] || [ "$rec" = "$live_plain" ]
 }
 
 _heartbeat_pid_state() { # <pid> -> prints the ps stat= marker (empty on unreadable/unsupported)
@@ -10318,9 +10366,16 @@ _supervise() {
   # guards below can fire — and _status_line's delegate-pid `kill -0` would still report "running".
   # Recording the supervisor pid lets _status_line detect a dead watchdog over a live orphan.
   echo "$$" > "$jd/supervisor_pid"
-  ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ' > "$jd/supervisor_pid_start" 2>/dev/null || true
+  # Both start-time files are written under LC_ALL=C in the exact normalized form
+  # _pid_start_identity produces, so every reader agrees regardless of the user's locale
+  # (ps localizes lstart; a plain-locale write vs a C-locale read never matches). Job dirs
+  # written by the previous release (plain-locale records) are still read correctly: the
+  # readers go through _pid_start_file_match, which accepts either rendering of the SAME
+  # live process.
+  LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
   # Record start time for PID-reuse detection.
-  local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
+  local _stime; _stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  _stime="${_stime:-$t0}"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
@@ -10376,7 +10431,7 @@ _supervise() {
   local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
-    local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
+    local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
       echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
@@ -11528,31 +11583,28 @@ _reconcile_status() {
   # while flagged would otherwise keep that flag forever because nothing writes a terminal status for it.
   case "$st" in
     running|stalled\?|exploring\?|no-progress-writes)
-      local _jpid _spid _alive=0 _live_stime _saved_stime
+      local _jpid _spid _alive=0 _mrc
       _jpid="$(cat "$jd/pid" 2>/dev/null)"
       if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
-        _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
-        _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
         # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
-        # pid REUSE. So an empty live start-time (a transient `ps` glitch on a genuinely live pid) must
-        # NOT flip it to dead — that would fail-unsafe, letting the heartbeat abandon live work on a
-        # momentary ps hiccup. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT start time.
-        { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+        # pid REUSE. _pid_start_file_match is locale-consistent both ways (C-locale record from the
+        # current writer, plain-locale record from the previous release) and returns 2 when identity
+        # cannot be decided — an empty/garbled saved record, a transient `ps` glitch on a genuinely
+        # live pid, or a host whose `ps` cannot report lstart at all. Any of those must NOT flip a
+        # kill-0-alive pid to dead: that would fail-unsafe, letting the heartbeat abandon live work
+        # on a momentary ps hiccup. Declare dead only on rc 1 (ps returned a DIFFERENT start time).
+        _mrc=0; _pid_start_file_match "$_jpid" "$jd/pid_start" || _mrc=$?
+        [ "$_mrc" != 1 ] && _alive=1
       fi
       if [ "$_alive" = "0" ]; then
         _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
         if [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null; then
           # Same pid-reuse discipline as the delegate: a recycled supervisor pid must not resurrect
-          # a dead job just because some unrelated process now holds that number.
-          _live_stime="$(ps -o lstart= -p "$_spid" 2>/dev/null | tr -s ' ')"
-          _saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
-          # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
-          # pid REUSE. An empty live start-time (a transient `ps` glitch, or a host whose `ps` cannot
-          # report lstart at all) must NOT flip a kill-0-alive pid to dead — that fail-unsafe would let
-          # the heartbeat abandon live work. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT
-          # start time. (On a ps-less host, saved_stime is empty too, so the first clause keeps it alive
-          # via kill -0 alone — pid-reuse detection is simply unavailable there, an accepted platform limit.)
-          { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+          # a dead job just because some unrelated process now holds that number. Same fail-safe
+          # direction: rc 2 (identity undecidable, incl. ps-less hosts where the record is empty)
+          # keeps the kill-0-alive supervisor counting as ours.
+          _mrc=0; _pid_start_file_match "$_spid" "$jd/supervisor_pid_start" || _mrc=$?
+          [ "$_mrc" != 1 ] && _alive=1
         fi
       fi
       if [ "$_alive" = "0" ]; then

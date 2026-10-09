@@ -29,6 +29,8 @@ eval "$(sed -n '/^_devin_pid_descends_from() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_owned_by_live_job() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_pid_start_valid() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_pid_start_identity() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_pid_start_projection() {/,/^}/p' "$SRC")"
+eval "$(sed -n '/^_pid_start_file_match() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_owned_by_dead_job() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_process_rows() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_orphan_pids() {/,/^}/p' "$SRC")"
@@ -111,8 +113,11 @@ printf '%s %s %s %s %s\n' 424242 1 3600 devin 'devin --model glm-5-2 -p task' > 
 mkdir -p "$OSRC_JOBS/dead-job"
 printf '%s\n' 424242 > "$OSRC_JOBS/dead-job/pid"
 printf '%s\n' 999999 > "$OSRC_JOBS/dead-job/supervisor_pid"
-_pid_start_identity(){ printf '%s\n' 'Sun Aug 9 12:34:56 2026'; }
-_pid_start_identity 424242 > "$OSRC_JOBS/dead-job/pid_start"
+_pid_start_file_match(){ [ "$(cat "$2" 2>/dev/null)" = 'Sun Aug 9 12:34:56 2026' ]; }
+# Ownership is proven through _pid_start_file_match now: fake the LIVE identity the same way the
+# old _pid_start_identity stub did, by comparing the record against the faked value, so the
+# reuse case below (a different recorded start) still reads as "not ours".
+printf '%s\n' 'Sun Aug 9 12:34:56 2026' > "$OSRC_JOBS/dead-job/pid_start"
 : > "$OSRC_JOBS/dead-job/out.log"
 touch -t 202001010000 "$OSRC_JOBS/dead-job/out.log"
 _kill_tree(){ printf '%s\n' "$1" >> "$TEST_ROOT/killed-pids"; }
@@ -128,7 +133,7 @@ OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_
 [ ! -s "$TEST_ROOT/killed-pids" ] \
   && ok "dead-job PID reuse with a different start time is never reaped" \
   || bad "stale dead-job record reaped a PID-reused process"
-_pid_start_identity 424242 > "$OSRC_JOBS/dead-job/pid_start"
+printf '%s\n' 'Sun Aug 9 12:34:56 2026' > "$OSRC_JOBS/dead-job/pid_start"
 
 # Even proven ownership cannot override current output activity.
 : > "$TEST_ROOT/killed-pids"
@@ -137,6 +142,11 @@ OSRC_DEVIN_PS_FILE="$TEST_ROOT/ps.rows" OSRC_DEVIN_ZOMBIE_MINS=30 _devin_zombie_
 [ ! -s "$TEST_ROOT/killed-pids" ] \
   && ok "proven orphan with fresh out.log is preserved as active" \
   || bad "actively-producing proven orphan was reaped"
+
+# The identity mock above must not leak into the ownership cases below: restore the real
+# helper from the source.
+unset -f _pid_start_file_match
+eval "$(sed -n '/^_pid_start_file_match() {/,/^}/p' "$SRC")"
 
 # The canonical paid-ACU refusal is not a free-lane-down verdict.
 quota_text='Your weekly usage quota has been exhausted'
@@ -207,6 +217,46 @@ if grep -Eq '(^|[;&|[:space:]])g?timeout[[:space:]]+[0-9]' "$SRC"; then
 else
   ok "no external timeout/gtimeout binary is used"
 fi
+
+# --- dead-job ownership must be locale-consistent: ps LOCALIZES lstart, so a pid_start written
+# by the previous release under a non-English locale must still prove the candidate IS that
+# job's recorded child (else the orphan reaper misses its own lane-blocker, or worse, claims a
+# recycled pid). Real sleep, killed by pid. Not `locale -a | grep -q`: under pipefail the
+# early-exiting grep SIGPIPEs the large output; capture and match instead.
+sleep 60 & _ow_pid=$!
+_ow_dead=$((_ow_pid - 1)); while kill -0 "$_ow_dead" 2>/dev/null; do _ow_dead=$((_ow_dead - 1)); done
+_locs="$(locale -a 2>/dev/null)"
+case "$_locs" in
+  *"fr_FR.UTF-8"*)
+    mkdir -p "$OSRC_JOBS/ow-fr"
+    echo "$_ow_pid" > "$OSRC_JOBS/ow-fr/pid"
+    echo "$_ow_dead" > "$OSRC_JOBS/ow-fr/supervisor_pid"
+    LC_TIME=fr_FR.UTF-8 ps -o lstart= -p "$_ow_pid" 2>/dev/null | tr -s ' ' > "$OSRC_JOBS/ow-fr/pid_start"
+    got="$(_devin_pid_owned_by_dead_job "$_ow_pid" 2>/dev/null)"
+    [ "$got" = "$OSRC_JOBS/ow-fr" ] \
+      && ok "a plain-locale (fr_FR) pid_start still proves dead-job ownership" \
+      || bad "fr_FR pid_start did not match its own live process (got '$got') — the reaper would miss its own lane-blocker"
+    rm -rf "$OSRC_JOBS/ow-fr"
+    ;;
+  *) echo "SKIP: fr_FR.UTF-8 locale not installed; plain-locale ownership case not exercised" ;;
+esac
+mkdir -p "$OSRC_JOBS/ow-c"
+echo "$_ow_pid" > "$OSRC_JOBS/ow-c/pid"; echo "$_ow_dead" > "$OSRC_JOBS/ow-c/supervisor_pid"
+LC_ALL=C ps -o lstart= -p "$_ow_pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$OSRC_JOBS/ow-c/pid_start"
+got="$(_devin_pid_owned_by_dead_job "$_ow_pid" 2>/dev/null)"
+[ "$got" = "$OSRC_JOBS/ow-c" ] \
+  && ok "a C-locale pid_start (current writer) proves dead-job ownership" \
+  || bad "C-locale pid_start did not match (got '$got')"
+rm -rf "$OSRC_JOBS/ow-c"
+mkdir -p "$OSRC_JOBS/ow-rec"
+echo "$_ow_pid" > "$OSRC_JOBS/ow-rec/pid"; echo "$_ow_dead" > "$OSRC_JOBS/ow-rec/supervisor_pid"
+printf 'Thu Jan  1 00:00:00 2020\n' > "$OSRC_JOBS/ow-rec/pid_start"
+got="$(_devin_pid_owned_by_dead_job "$_ow_pid" 2>/dev/null)"
+[ -z "$got" ] \
+  && ok "a recorded start that differs (recycled pid) is NOT claimed as ours" \
+  || bad "differing start record claimed the candidate: '$got'"
+rm -rf "$OSRC_JOBS/ow-rec"
+kill -KILL "$_ow_pid" 2>/dev/null; wait "$_ow_pid" 2>/dev/null; _ow_pid=""
 
 echo
 echo "RESULT: $pass passed, $fail failed"
