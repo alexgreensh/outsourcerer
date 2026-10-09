@@ -5170,7 +5170,11 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
 _lane_down_purge_expired() {  # <lane> <expired-value-we-read>
   local cur; cur="$(_posture_get "$1" "down" 2>/dev/null)"
   [ "$cur" = "$2" ] && rm -f "$OSRC_POSTURE_DIR/$1.down" 2>/dev/null
-  _posture_get "$1" "down" >/dev/null 2>&1 || rm -f "$OSRC_POSTURE_DIR/$1.down-reason" "$OSRC_POSTURE_DIR/$1.down-evidence" 2>/dev/null
+  # Explicit existence test, NOT _posture_get's exit status: a read FAILURE (permissions,
+  # transient I/O) on a marker that still exists must not be treated as "absent" — aux files
+  # of a live marker must survive. Only a genuinely absent .down (purged above, or never
+  # re-written by an in-flight mark) justifies dropping the aux records.
+  [ -f "$OSRC_POSTURE_DIR/$1.down" ] || rm -f "$OSRC_POSTURE_DIR/$1.down-reason" "$OSRC_POSTURE_DIR/$1.down-evidence" 2>/dev/null
 }
 # Clear a lane's down marker early — used when an authoritative live probe (doctor) just proved the
 # lane answers, so a still-unexpired marker from an earlier verdict doesn't outlive reality. The TTL

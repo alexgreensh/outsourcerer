@@ -128,5 +128,22 @@ _posture_set cx down 1; _posture_set cx down-reason "stale"; _posture_set cx dow
 _lane_down_active cx || true
 [ ! -e "$OSRC_POSTURE_DIR/cx.down" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-evidence" ] && ok "race: expired mark still purges all three" || bad "race: expired purge incomplete"
 
+# ---- a read FAILURE on an existing marker is not "absent" -------------------------------
+# _posture_get can fail for reasons other than absence (unreadable file: permissions or a
+# transient I/O error). The purge's aux cleanup must key on the .down file's EXISTENCE, not on
+# _posture_get's exit status, or a failing read strips the reason/evidence of a live marker.
+_lane_down_mark dvx 300 "reason here" "evidence here"
+_exp_val="$(_posture_get dvx down)"
+printf '%s\n' "$(( $(date +%s) - 10 ))" > "$OSRC_POSTURE_DIR/dvx.down"   # expired
+chmod 000 "$OSRC_POSTURE_DIR/dvx.down"                                   # read now fails; file exists
+_lane_down_purge_expired dvx "$_exp_val" 2>/dev/null
+if [ -e "$OSRC_POSTURE_DIR/dvx.down-reason" ] && [ -e "$OSRC_POSTURE_DIR/dvx.down-evidence" ]; then
+  ok "purge: a failing marker read keeps the aux records of an existing .down"
+else
+  bad "purge: a failing marker read was treated as absent and stripped aux from a live marker"
+fi
+chmod 644 "$OSRC_POSTURE_DIR/dvx.down" 2>/dev/null
+_lane_down_clear dvx
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
