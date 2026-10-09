@@ -157,7 +157,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   # jobs/sessions/locks/registry state perturb a later tmux/session-heavy suite, so suites that
   # pass standalone failed only in the aggregate. Isolate the state (a suite that sets its own
   # OSRC_HOME still overrides this).
-  local suite="$1" secs out_file pid_file expired _home root wd_pid _st
+  local suite="$1" secs out_file pid_file expired _home root wd_pid _st pp0
   _suite_out=""; _suite_rc=0; _suite_timed_out=0; _suite_secs=""
   case "${OSRC_SUITE_TIMEOUT:-}" in
     0) secs=0 ;;                                   # 0 explicitly disables the bound

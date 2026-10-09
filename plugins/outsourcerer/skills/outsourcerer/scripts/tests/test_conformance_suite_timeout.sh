@@ -174,6 +174,21 @@ OSRC_SUITE_TIMEOUT=37 _run_unit_suite_bounded "$TMP/passing.sh"
 if _leftover_free; then ok "no leftover sleep/watchdog/suite process after a suite finishes"
 else bad "leftover process after a normal suite run: $_leftover"; fi
 
+# Scratch variables in the post-timeout cleanup must stay function-local: an un-local'd pp0
+# written by the pidfile re-read leaks into the caller (and a caller's own $pp0 is silently
+# clobbered), which is exactly the class of coupling the gate's subshell isolation exists to stop.
+# The write lives on the timed-out path only, so the check needs a suite that actually hits the
+# bound: a 2s bound on a 5s suite reaches the post-timeout pidfile re-read where pp0 is assigned.
+cat > "$TMP/timeout-leak.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 5
+EOF
+pp0="SENTINEL-NOT-A-PID"
+OSRC_SUITE_TIMEOUT=2 _run_unit_suite_bounded "$TMP/timeout-leak.sh"
+[ "$_suite_timed_out" -eq 1 ] || bad "leak-check suite did not time out (timed_out=$_suite_timed_out)"
+[ "$pp0" = "SENTINEL-NOT-A-PID" ] && ok "the pidfile scratch var stays local to the runner" \
+                                || bad "runner's pp0 leaked into the caller (pp0=$pp0)"
+
 # ------------------------------------------------------- 3. failing suite: ordinary failure, not timeout
 cat > "$TMP/failing.sh" <<'EOF'
 #!/usr/bin/env bash
