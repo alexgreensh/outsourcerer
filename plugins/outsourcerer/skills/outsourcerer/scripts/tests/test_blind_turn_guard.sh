@@ -191,6 +191,56 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
   || bad "live blocked job was not reported (rc=$rc): $out"
 kill "$live_pid" 2>/dev/null; live_pid=""; rm -rf "$OSRC_JOBS/live-blk"
 
+# --- start-time identity is locale-consistent: ps LOCALIZES lstart ("Sat Oct 10 ..." under C,
+# "sam. 10 oct. ..." under fr_FR), so the recorded pid_start may be the LC_ALL=C rendering
+# (the current _supervise writer) or the plain-locale rendering of the SAME process (job dirs
+# written by the previous release). A live blocked job must stay reported under either; only a
+# genuinely different start time (recycled pid) may prove death. Real sleep, killed by pid.
+sleep 60 & loc_pid=$!
+# Not `locale -a | grep -q`: under pipefail the early-exiting grep SIGPIPEs locale's large
+# output (rc 141) and the check would read as "not installed". Capture, then match.
+_locs="$(locale -a 2>/dev/null)"
+_locale_fr=0; case "$_locs" in *"fr_FR.UTF-8"*) _locale_fr=1 ;; esac
+# Each <locale> x <writer> pair: the record must match the live process either way.
+newjob loc-c-new
+echo blocked > "$OSRC_JOBS/loc-c-new/status"; echo "$loc_pid" > "$OSRC_JOBS/loc-c-new/pid"
+LC_ALL=C ps -o lstart= -p "$loc_pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$OSRC_JOBS/loc-c-new/pid_start"
+collect_and_write
+[ "$(job_state loc-c-new)" = "blocked" ] \
+  && ok "C-locale record (current writer) keeps a live blocked job reported" \
+  || bad "C-locale record flipped a live job to '$(job_state loc-c-new)' (expected blocked)"
+rm -rf "$OSRC_JOBS/loc-c-new"
+if [ "$_locale_fr" = 1 ]; then
+  newjob loc-fr-old
+  echo blocked > "$OSRC_JOBS/loc-fr-old/status"; echo "$loc_pid" > "$OSRC_JOBS/loc-fr-old/pid"
+  LC_TIME=fr_FR.UTF-8 ps -o lstart= -p "$loc_pid" 2>/dev/null | tr -s ' ' > "$OSRC_JOBS/loc-fr-old/pid_start"
+  collect_and_write
+  [ "$(job_state loc-fr-old)" = "blocked" ] \
+    && ok "fr_FR plain-locale record (previous-release writer) still matches its live process" \
+    || bad "fr_FR record flipped a LIVE job to '$(job_state loc-fr-old)' (expected blocked — locale mismatch killed the identity match)"
+  rm -rf "$OSRC_JOBS/loc-fr-old"
+  newjob loc-fr-new
+  echo blocked > "$OSRC_JOBS/loc-fr-new/status"; echo "$loc_pid" > "$OSRC_JOBS/loc-fr-new/pid"
+  LC_ALL=C LC_TIME=fr_FR.UTF-8 ps -o lstart= -p "$loc_pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$OSRC_JOBS/loc-fr-new/pid_start"
+  collect_and_write
+  [ "$(job_state loc-fr-new)" = "blocked" ] \
+    && ok "C-locale record written under a fr_FR env (LC_ALL wins) keeps the job reported" \
+    || bad "fr_FR-env C record flipped a live job to '$(job_state loc-fr-new)' (expected blocked)"
+  rm -rf "$OSRC_JOBS/loc-fr-new"
+else
+  echo "SKIP: fr_FR.UTF-8 locale not installed; plain-locale record cases not exercised"
+fi
+# A recorded start that truly differs proves a RECYCLED pid: the only case allowed to stop it.
+newjob loc-recycled
+echo blocked > "$OSRC_JOBS/loc-recycled/status"; echo "$loc_pid" > "$OSRC_JOBS/loc-recycled/pid"
+printf 'Thu Jan  1 00:00:00 2020\n' > "$OSRC_JOBS/loc-recycled/pid_start"
+collect_and_write
+[ "$(job_state loc-recycled)" = "stopped" ] \
+  && ok "a recorded start that differs from the live process (recycled pid) proves death" \
+  || bad "differing start record left the job '$(job_state loc-recycled)' (expected stopped)"
+rm -rf "$OSRC_JOBS/loc-recycled"
+kill "$loc_pid" 2>/dev/null; loc_pid=""
+
 # A blocked dir with NO recorded pid and NO exit file cannot be proven terminal, so the fleet
 # errs toward reporting it rather than hiding possibly-live work (the same convention
 # _reconcile_status uses: no liveness evidence is not proof of death).

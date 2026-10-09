@@ -58,14 +58,19 @@ _timeout 2 sleep 30 >/dev/null 2>&1; rc=$?
 # --- no stray timer sleep survives a fast call ---
 # The child sleeps 0.5s so the watchdog is deterministically inside `sleep`
 # when it is reaped. With an instant child the kill can land before the timer
-# even execs, which makes this check racy. A duration nobody else plausibly
-# launches pins the scan to THIS call. The leaked sleep reparents to init when
-# its watchdog subshell dies, so a literal child-of-$$ check can never see it,
-# scan the whole table, and ALSO check direct children so a future structure
+# even execs, which makes this check racy. The duration is derived from THIS
+# shell's pid so two runs of the suite never share it: the old fixed 44.4 made
+# the scan machine-global, and an orphan legitimately leaked by an earlier run
+# (e.g. the fail-before leg of a bisection, against the pre-reap engine) would
+# still be alive ~44s later and false-fail the next run's scan. With a
+# $$-unique duration, any process matching the scan belongs to THIS run by
+# construction. The leaked sleep reparents to init when its watchdog subshell
+# dies, so a literal child-of-$$ check can never see it — scan the whole table
+# for our unique duration, and ALSO check direct children so a future structure
 # that leaves the timer as our own child is caught the same way. `ps -ef` is
 # what _descendants itself falls back to when pgrep is absent: same layout
 # caveat, same availability story on Git Bash.
-STRAY_SECS=44.4
+STRAY_SECS="44.$$"
 SECONDS=0
 x="$(_timeout "$STRAY_SECS" sleep 0.5)"
 [ "$SECONDS" -lt 5 ] \
@@ -76,7 +81,7 @@ scan="$(ps -ef 2>/dev/null | awk -v pp="$$" -v s="$STRAY_SECS" '
   NR==1 { for(i=1;i<=NF;i++){u=toupper($i); if(u=="PID")pc=i; else if(u=="PPID")ppc=i} next }
   pc {
     if ($NF==s && $(NF-1) ~ /(^|\/)sleep$/) stray=stray" "$pc
-    if (ppc && $ppc==pp && ($NF ~ /(^|\/)sleep$/ || $(NF-1) ~ /(^|\/)sleep$/)) own=own" "$pc
+    if (ppc && $ppc==pp && ($NF==s || $(NF-1)==s) && ($NF ~ /(^|\/)sleep$/ || $(NF-1) ~ /(^|\/)sleep$/)) own=own" "$pc
   }
   END { print "stray:" stray; print "own:" own }')"
 if [ -z "$scan" ]; then
