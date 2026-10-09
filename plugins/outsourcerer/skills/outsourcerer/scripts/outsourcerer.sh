@@ -6373,6 +6373,7 @@ _fleet_snapshot_collect() {
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
       jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      jstatus="${jstatus#"${jstatus%%[![:space:]]*}"}"; jstatus="${jstatus%"${jstatus##*[![:space:]]}"}"
       state="$(_fleet_classify "$jstatus")"
       if [ "$state" = "blocked" ]; then
         # `blocked` in the fleet vocabulary means "LIVE, parked on a prompt". The job
@@ -6385,15 +6386,34 @@ _fleet_snapshot_collect() {
         # keeps the raw status so fleet ls still says WHAT it stopped on. Terminality
         # needs positive evidence: an exit file, or every recorded process pid gone.
         # When neither is provable (no exit file, no pid recorded, or a pid still live)
-        # keep `blocked`: the fleet errs toward reporting possibly-live work.
+        # keep `blocked`: the fleet errs toward reporting possibly-live work. A pid file
+        # must hold exactly one unsigned integer to count as evidence: garbage or
+        # multi-line content is unverifiable, and unverifiable is not dead.
         if [ -f "$d/exit" ]; then
           state=stopped
         else
           _jpid="$(cat "$d/pid" 2>/dev/null)"; _jspid="$(cat "$d/supervisor_pid" 2>/dev/null)"
+          _jpid="${_jpid#"${_jpid%%[![:space:]]*}"}"; _jpid="${_jpid%"${_jpid##*[![:space:]]}"}"
+          _jspid="${_jspid#"${_jspid%%[![:space:]]*}"}"; _jspid="${_jspid%"${_jspid##*[![:space:]]}"}"
+          case "$_jpid" in ''|*[!0-9]*) _jpid="" ;; esac
+          case "$_jspid" in ''|*[!0-9]*) _jspid="" ;; esac
           if [ -n "$_jpid$_jspid" ]; then
-            { [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; } \
-              || { [ -n "$_jspid" ] && kill -0 "$_jspid" 2>/dev/null; } \
-              || state=stopped
+            # Same liveness discipline as _reconcile_status: kill -0 can match a recycled
+            # pid, so a live pid is only the job's process while its recorded *_start
+            # agrees with the live start time. Empty on either side cannot disprove.
+            _alive=0
+            for _p in "$_jpid" "$_jspid"; do
+              [ -n "$_p" ] || continue
+              kill -0 "$_p" 2>/dev/null || continue
+              _lst="$(ps -o lstart= -p "$_p" 2>/dev/null | tr -s ' ')"
+              if [ "$_p" = "$_jpid" ]; then
+                _sst="$(cat "$d/pid_start" 2>/dev/null | tr -s ' ')"
+              else
+                _sst="$(cat "$d/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
+              fi
+              { [ -z "$_sst" ] || [ -z "$_lst" ] || [ "$_lst" = "$_sst" ]; } && _alive=1
+            done
+            [ "$_alive" = 0 ] && state=stopped
           fi
         fi
       fi
