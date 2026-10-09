@@ -18244,16 +18244,29 @@ _blind_turn_guard() {
   # The caller's own Claude Code session is in the snapshot too, as a cc-peer, and while it waits on
   # a long tool call it can read as unresponsive?. The guard must not tell the orchestrator that its
   # own session needs it. The snapshot's `self` field is relative to whichever process collected it
-  # (usually the heartbeat beacon), so identify the caller here: by CLAUDE_CODE_SESSION_ID when the
-  # host exports it, else by the peer's PID being one of this process's ancestors.
-  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc=""
-  case "$snapshot" in *'"cc-peer"'*) self_anc=" $(_fleet_self_ancestors 2>/dev/null) " ;; esac
+  # (usually the heartbeat beacon), so identify the caller here: by the peer's PID being one of this
+  # process's ancestors, or by CLAUDE_CODE_SESSION_ID. A bare sid match is NOT proof of self when the
+  # ancestor walk works: the env var is inherited by every process the session spawns (a tmux server,
+  # later panes), so a shell in such a pane shares the sid while the real session is a different,
+  # possibly stuck, peer. With a usable walk, require the sid-matched row's pid to also be an
+  # ancestor (or the row to have no pid) before excluding it.
+  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc="" self_anc_usable=false
+  case "$snapshot" in *'"cc-peer"'*)
+    self_anc=" $(_fleet_self_ancestors 2>/dev/null) "
+    # A usable walk yields real ancestors beyond the starting pid itself. Where `ps -o ppid=` is
+    # unsupported (Git Bash) it returns only the starting pid, which can prove nothing about a
+    # row's pid; there the sid match alone must keep excluding, as before.
+    [ "$(printf '%s' "$self_anc" | wc -w | tr -d ' ')" -ge 2 ] 2>/dev/null && self_anc_usable=true ;;
+  esac
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
-  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" '
+  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" --argjson self_anc_usable "$self_anc_usable" '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
     def caller: (.pid // null) as $p | .owner == "cc-peer"
-      and (($self_sid != "" and .session_id == $self_sid)
-           or ($p != null and ($self_anc | contains(" " + ($p | tostring) + " "))));
+      and (($p != null and ($self_anc | contains(" " + ($p | tostring) + " ")))
+           or ($self_sid != "" and .session_id == $self_sid
+               and ($self_anc_usable == false
+                    or $p == null
+                    or ($self_anc | contains(" " + ($p | tostring) + " ")))));
     .items[]
     | select(caller | not)
     | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")

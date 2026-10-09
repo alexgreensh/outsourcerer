@@ -220,20 +220,49 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
 # --- the caller's own Claude Code session is not a delegate. Recorded case: every outsourcerer call
 # from one session printed "1 live delegate(s) need you ... <that session's id> MAYBE STUCK", because
 # the orchestrator shows up in the snapshot as a cc-peer that reads unresponsive? while it waits on a
-# long tool call. It is excluded by CLAUDE_CODE_SESSION_ID, or by its PID being our ancestor. ---
+# long tool call. It is excluded by its PID being one of this process's ancestors, or by
+# CLAUDE_CODE_SESSION_ID. A bare sid match is not proof of self: the env var is inherited by every
+# process the session spawns (a tmux server, later panes), so a shell in such a pane shares the sid
+# while the real session with that sid is a DIFFERENT, possibly stuck, peer. When the ancestor walk
+# is usable, a sid-matched row must also prove it by pid ancestry. ---
 far_pid=999999; while kill -0 "$far_pid" 2>/dev/null; do far_pid=$((far_pid - 1)); done
-peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# The real caller row: same sid as the env var AND a pid that sits in our ancestry.
+peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# The reviewer case: same sid, but a pid that is NOT an ancestor (the actual stuck peer).
+peer_sid_only_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+# A sid-matched row with no pid at all cannot be disproven; it stays excluded.
+peer_nopid_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
 write_snapshot "$(snapshot_with "$peer_self_stuck")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 0 ] && [ -z "$out" ] \
-  && ok "the caller's own session (CLAUDE_CODE_SESSION_ID) is not reported as a stuck delegate" \
+  && ok "the caller's own session (sid match + ancestor pid) is not reported as a stuck delegate" \
   || bad "the guard flagged the caller's own session (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
+if ps -o ppid= -p "$$" >/dev/null 2>&1; then
+  out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+  [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
+    && ok "a sid-matched peer whose pid is not our ancestor is still reported (sid alone is not proof of self)" \
+    || bad "a sid-matched non-ancestor peer was wrongly hidden (rc=$rc): $out"
+else
+  echo "SKIP: ancestor walk unusable on this host; non-ancestor sid-match case not exercised"
+fi
+# A dead start pid makes the walk yield itself alone, so sid-only exclusion is the fallback.
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess OSRC_FLEET_SELF_PID=$far_pid _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "with no usable ancestor walk, a sid match still excludes (the Git Bash fallback)" \
+  || bad "the sid-only fallback did not exclude the caller (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_nopid_stuck")"
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "a sid-matched peer with no pid cannot be disproven and stays excluded" \
+  || bad "a pid-less sid-matched peer was wrongly reported (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
 out="$(CLAUDE_CODE_SESSION_ID=some-other-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
   && ok "a different session with the same state is still reported" \
   || bad "a non-caller stuck peer was not reported (rc=$rc)"
 peer_ancestor_stuck='{"owner":"cc-peer","job_id":null,"session_id":"ancestor-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
-peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
+peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
 write_snapshot "$(snapshot_with "$peer_self_waiting" "$managed_blocked")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'job-7' && ! printf '%s' "$out" | grep -q 'caller-sess' \
