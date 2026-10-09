@@ -102,5 +102,31 @@ _lane_down_mark gm 300 "plan limit exhausted" "$(printf '\033[31mred\033[0m word
 _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
 [ "$_ev" = "red word" ] && ok "sanitize: ANSI CSI stripped" || bad "sanitize: ANSI bytes survived ($_ev)"
 
+# ---- expiry purge vs in-flight mark (deterministic losing-order simulation) ----
+# The reported race: a purge on a just-expired mark deleted a CONCURRENT mark's fresh
+# reason/evidence, because marks used to write aux BEFORE .down so the purge's value-match
+# could not see the in-flight write. Under the .down-first order the fresh .down lands before
+# its aux and the purge drops aux only when .down is still absent at re-check. Each step below
+# is invoked by hand in the exact losing interleaving -- no sleeps, no real races needed.
+_posture_set cx down 1   # the expired mark a purging reader had just read
+# B's mark is mid-flight under the new order: .down FIRST, aux still pending.
+_fut=$(( $(date +%s) + 600 )); _posture_set cx down "$_fut"
+# The purge continues on its stale read: the value-match sees the fresh value and must keep all.
+_lane_down_purge_expired cx 1
+[ "$(_posture_get cx down 2>/dev/null)" = "$_fut" ] && ok "race: stale purge keeps the fresh .down" || bad "race: purge deleted the fresh .down"
+# B completes: aux lands after .down.
+_posture_set cx down-reason "plan limit exhausted"; _posture_set cx down-evidence "resets in 10m"
+_lane_down_active cx && ok "race: fresh mark still down after the interleaved purge" || bad "race: fresh mark lost"
+[ "$(cat "$OSRC_POSTURE_DIR/cx.down-reason" 2>/dev/null)" = "plan limit exhausted" ] && [ "$(cat "$OSRC_POSTURE_DIR/cx.down-evidence" 2>/dev/null)" = "resets in 10m" ] && ok "race: aux files intact under the live mark" || bad "race: aux deleted under a live mark"
+# The other branch of the same gate: a purge while .down is genuinely absent drops stale aux
+# (covers a clear/reset landing mid-mark too -- aux can never outlive its mark).
+_posture_set cx down-reason "stale"; _posture_set cx down-evidence "stale"; rm -f "$OSRC_POSTURE_DIR/cx.down"
+_lane_down_purge_expired cx 1
+[ ! -e "$OSRC_POSTURE_DIR/cx.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-evidence" ] && ok "race: stale aux purged when .down absent" || bad "race: orphan aux left behind"
+# And the ordinary expired purge still removes all three together.
+_posture_set cx down 1; _posture_set cx down-reason "stale"; _posture_set cx down-evidence "stale"
+_lane_down_active cx || true
+[ ! -e "$OSRC_POSTURE_DIR/cx.down" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-reason" ] && [ ! -e "$OSRC_POSTURE_DIR/cx.down-evidence" ] && ok "race: expired mark still purges all three" || bad "race: expired purge incomplete"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

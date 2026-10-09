@@ -5059,8 +5059,6 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   if [ -z "${3:-}" ]; then
     case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
   fi
-  if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
-  else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
   # Evidence is sanitized at the sink so anything a future caller passes stays safe for
   # `posture status` to cat raw; the *_line extractors already clean their own output, this just
   # cannot regress behind their backs. LC_ALL=C throughout: under a UTF-8 locale BSD sed aborts
@@ -5075,9 +5073,17 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
     local esc; esc="$(printf '\033')"
     ev="$(printf '%s' "$4" | LC_ALL=C sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | LC_ALL=C tr '\011\012\015' '   ' | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C _explain_redact | LC_ALL=C head -c 400 | _utf8_sanitize)"
   fi
+  # Write .down FIRST, aux after: _lane_down_purge_expired drops aux only when .down is absent at
+  # re-check, and .down landing before aux is what makes that check safe -- an absent .down proves
+  # no in-flight mark has committed aux yet (they land after it), so aux deleted there can only be
+  # the stale set being replaced. (Crash-mid-mark can still leave .down without aux; that residual
+  # is unavoidable without a single-file mark and is the benign direction: the lane is skipped
+  # with the generic reason rather than aux orphaned under a different mark's .down.)
+  _posture_set "$lane" "down" "$until"
+  if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
+  else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
   if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
-  _posture_set "$lane" "down" "$until"
 }
 _lane_down_reason() {  # <lane-or-disp> -> the recorded reason, or the generic transport wording
   local lane v; lane="$(_quota_lane_key "$1")"
@@ -5107,13 +5113,30 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
   case "$v" in ''|*[!0-9]*) return 1 ;; esac
   local now; now="$(date +%s)"
   if [ "$v" -gt "$now" ]; then return 0; fi
-  # Expired -> purge on read, VALUE-MATCHED (same hardening as _quota_marker_active): only delete if
-  # the file still holds the expired value we read, so a sibling's fresh marker in the race is kept.
-  # Reason/evidence ride along (same set as _lane_down_clear): a down explanation must not outlive
-  # the mark it explains, or `posture status` keeps showing stale quota wording for an up lane.
-  local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null
+  # Expired -> purge on read (gates + rationale live with _lane_down_purge_expired).
+  _lane_down_purge_expired "$lane" "$v"
   return 1
+}
+
+# Remove an expired down mark + its aux files for a purge that already read value <v>. Two gates
+# keep it safe against a concurrent _lane_down_mark, which writes .down FIRST and aux after:
+#   1) value-match: .down is unlinked only while it still holds the expired value we saw (same
+#      hardening as _quota_marker_active), so a fresh mark whose .down already landed is never
+#      deleted by a stale read;
+#   2) aux gate: reason/evidence are dropped only when .down is still ABSENT at re-check. Under
+#      the .down-first order an absent .down proves no in-flight mark has committed aux yet (aux
+#      lands after .down), so whatever aux is removed belongs to the mark being purged -- a fresh
+#      mark's aux can never be deleted from under its live .down, and an explanation never
+#      outlives the mark it explains (stale quota wording on an up lane).
+# Residual (the same check-then-delete limit _quota_marker_active accepts): a fresh .down landing
+# in the microsecond between the value-match re-read and the rm can still be unlinked -- losing
+# the WHOLE mark, fail-open, self-heals on the next refusal -- but it can never leave a live mark
+# stripped of its aux. _lane_down_clear and `posture reset` remove .down too, so a race with
+# either can only leave aux orphans, which this gate re-cleans on the next expired purge.
+_lane_down_purge_expired() {  # <lane> <expired-value-we-read>
+  local cur; cur="$(_posture_get "$1" "down" 2>/dev/null)"
+  [ "$cur" = "$2" ] && rm -f "$OSRC_POSTURE_DIR/$1.down" 2>/dev/null
+  _posture_get "$1" "down" >/dev/null 2>&1 || rm -f "$OSRC_POSTURE_DIR/$1.down-reason" "$OSRC_POSTURE_DIR/$1.down-evidence" 2>/dev/null
 }
 # Clear a lane's down marker early — used when an authoritative live probe (doctor) just proved the
 # lane answers, so a still-unexpired marker from an earlier verdict doesn't outlive reality. The TTL
