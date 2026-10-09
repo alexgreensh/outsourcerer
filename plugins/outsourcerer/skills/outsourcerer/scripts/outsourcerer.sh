@@ -2344,6 +2344,11 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
+  # The ledger row must classify the task the USER wrote: $prompt also carries the with-pre skill
+  # bundle and (for accept-edits) the non-interactive verification note, whose own wording
+  # ("make the code changes", "verify") flips a simple edit task to code. Same convention as
+  # run_job's "classify from the REAL task text (REST)".
+  local _ledger_task="${REST[*]}"
   _devin_with_prepare   # per-dispatch skill sync for this lane (dies loud on an unhonorable grant)
   [ -n "$DEVIN_WITH_PRE" ] && prompt="$DEVIN_WITH_PRE$prompt"
   # accept-edits (the `edit` verb) auto-approves file edits, and devin still runs simple read-only
@@ -2497,7 +2502,7 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # ledger row never writes, i.e. the undercount reappears invisibly. Default instead.
   # devin is a PLAN lane ($0 cash is genuinely true), so a real 0 cost is honest here.
   local _tier="${tier:-auto}"
-  record_ledger devin "$MODEL" "$_tier" "$_tier" "$prompt" "0.000000" dv 2>/dev/null || true
+  record_ledger devin "$MODEL" "$_tier" "$_tier" "$_ledger_task" "0.000000" dv 2>/dev/null || true
   return "$rc"
 }
 
