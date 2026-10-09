@@ -1375,8 +1375,12 @@ _devin_plan_quota_block() {
       _failover_signal_write dv "$model" answered "free model $_pq_probe still answers" "" ;;
     *)
       _failover_signal_write dv "$model" inconclusive "refused \"$model\" citing its plan quota, and the free probe did not answer" "$_pq_secs"
-      printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, so it gets the short self-healing transport window (~%s; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_fmt_secs_human "${OSRC_LANE_DOWN_TTL:-300}")" "$0" "$0" "$advice" >&2
-      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" "${_pq_line:-}" || true ;;
+      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" "${_pq_line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, but it keeps the already-confirmed down mark (%s remaining; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_lane_down_remaining dv)" "$0" "$0" "$advice" >&2
+      else
+        printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, so it gets the short self-healing transport window (~%s; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_fmt_secs_human "${OSRC_LANE_DOWN_TTL:-300}")" "$0" "$0" "$advice" >&2
+      fi ;;
   esac
   rm -f "$(_lane_probe_file dv)" 2>/dev/null   # consumed: quoted above; no per-PID litter in $OSRC_HOME
   _quota_note_refusal dv "$model" 2>/dev/null || true
@@ -1585,11 +1589,19 @@ _lane_plan_limit_block() {
       printf '>>> [%s plan limit] probe: NOT confirmed — the lane still answers, so it stays UP and nothing is marked; "%s" was refused on this run only. %s\n' "$lane" "$model" "$advice" >&2
       _lane_down_clear "$lane" ;;
     *:2)
-      printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. Marking it DOWN only for the short self-healing window (~%s) so dispatch + fallback skip a lane that just refused; if the refusal repeats it re-marks. %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" "${line:-}" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" "${line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. It was already marked DOWN for a longer confirmed window (%s remaining) — keeping that; dispatch + fallback skip it meanwhile. %s\n' "$lane" "$(_lane_down_remaining "$lane")" "$advice" >&2
+      else
+        printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. Marking it DOWN only for the short self-healing window (~%s) so dispatch + fallback skip a lane that just refused; if the refusal repeats it re-marks. %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
+      fi ;;
     *)
-      printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Short self-healing window only (~%s). %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" "${line:-}" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" "${line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Already marked DOWN for a longer confirmed window (%s remaining) — keeping that, not downgrading to the self-healing window. %s\n' "$lane" "$(_lane_down_remaining "$lane")" "$advice" >&2
+      else
+        printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Short self-healing window only (~%s). %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
+      fi ;;
   esac
   case "$verdict:$prc" in
     limit-refused:*) _failover_signal_write "$lane" "$model" confirmed "plan limit spent${secs:+ (resets in $(_fmt_secs_human "$secs"))}" "$secs" ;;
@@ -5125,21 +5137,30 @@ _utf8_sanitize() {
 # A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
 # ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
 # the run's stderr capture is consumed by then, so this is the only surviving record.
-# An unexpired LONGER mark wins over a shorter BARE re-mark (no reason): a transport verdict
-# (doctor/TLS) firing inside a confirmed quota window would otherwise cut the TTL and erase the
-# reason/evidence that justify it. Extending past the current mark still works (new until > old),
-# and posture reset / _lane_down_clear remain the early-clear paths. A reasoned re-mark is
-# authoritative fresher information -- e.g. the provider's own stated reset -- and always replaces
-# the current mark as a unit (window, reason, evidence together).
-_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
+# An unexpired LONGER mark wins over a shorter UNATTRIBUTED re-mark: a transport verdict
+# (doctor/TLS) or an inconclusive probe firing inside a confirmed quota window would otherwise cut
+# the TTL and erase the reason/evidence that justify it. Keep-longer yields only to a re-mark
+# carrying BOTH an explicit ttl AND a reason -- the provider's own stated reset -- which replaces
+# the current mark as a unit (window, reason, evidence together). Extending past the current mark
+# still works (new until > old), and posture reset / _lane_down_clear remain the early-clear
+# paths. Callers that print the outcome read _lane_down_mark_result (set/kept/noop).
+_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]; result in _lane_down_mark_result
   local lane; lane="$(_quota_lane_key "$1")"
+  _lane_down_mark_result="noop"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
   local ttl="${2:-${OSRC_LANE_DOWN_TTL:-300}}"
   case "$ttl" in ''|*[!0-9]*) ttl=300 ;; esac
   local until; until="$(( $(date +%s) + ttl ))"
   local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  if [ -z "${3:-}" ]; then
-    case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && return 0 ;; esac
+  # Keep-longer yields only to an AUTHORITATIVE re-mark: an explicit TTL AND a reason together
+  # mean the provider stated the reset itself. A reason alone is not authority -- the
+  # inconclusive probe callers pass a reason with NO ttl ("free probe unreachable",
+  # "unverified: no probe recipe", "probe inconclusive"), and letting those replace a confirmed
+  # window would silently downgrade an 11h provider-stated quota mark to the 300s default and
+  # swap its evidence for a weaker explanation. _lane_down_mark_result=kept lets the caller's
+  # printed line stay true: no new mark was written, the longer one still stands.
+  if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
+    case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && { _lane_down_mark_result="kept"; return 0; } ;; esac
   fi
   # Evidence is sanitized at the sink so anything a future caller passes stays safe for
   # `posture status` to cat raw; the *_line extractors already clean their own output, this just
@@ -5166,6 +5187,7 @@ _lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
   if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
+  _lane_down_mark_result="set"
 }
 _lane_down_reason() {  # <lane-or-disp> -> the recorded reason, or the generic transport wording
   local lane v; lane="$(_quota_lane_key "$1")"
