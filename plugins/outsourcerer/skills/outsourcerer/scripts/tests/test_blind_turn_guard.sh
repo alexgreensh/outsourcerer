@@ -133,6 +133,42 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
   && ok "OSRC_BLIND_TURN_GUARD=0 silences the guard (escape hatch)" \
   || bad "the escape hatch did not silence the guard (rc=$rc)"
 
+# --- the caller's own Claude Code session is not a delegate. Recorded case: every outsourcerer call
+# from one session printed "1 live delegate(s) need you ... <that session's id> MAYBE STUCK", because
+# the orchestrator shows up in the snapshot as a cc-peer that reads unresponsive? while it waits on a
+# long tool call. It is excluded by CLAUDE_CODE_SESSION_ID, or by its PID being our ancestor. ---
+far_pid=999999; while kill -0 "$far_pid" 2>/dev/null; do far_pid=$((far_pid - 1)); done
+peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+write_snapshot "$(snapshot_with "$peer_self_stuck")"
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "the caller's own session (CLAUDE_CODE_SESSION_ID) is not reported as a stuck delegate" \
+  || bad "the guard flagged the caller's own session (rc=$rc): $out"
+out="$(CLAUDE_CODE_SESSION_ID=some-other-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
+  && ok "a different session with the same state is still reported" \
+  || bad "a non-caller stuck peer was not reported (rc=$rc)"
+peer_ancestor_stuck='{"owner":"cc-peer","job_id":null,"session_id":"ancestor-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
+peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$far_pid"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
+write_snapshot "$(snapshot_with "$peer_self_waiting" "$managed_blocked")"
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'job-7' && ! printf '%s' "$out" | grep -q 'caller-sess' \
+  && printf '%s' "$out" | grep -q '1 live delegate' \
+  && ok "the caller is also excluded on the needs-you path, and real blocked work still refuses" \
+  || bad "caller exclusion on the needs-you path is wrong (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_ancestor_stuck")"
+# OSRC_FLEET_SELF_PID pins the walk's start so this does not depend on `ps` being allowed here.
+out="$(unset CLAUDE_CODE_SESSION_ID; OSRC_FLEET_SELF_PID=$$ _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$out" ] \
+  && ok "without the env var, a peer whose PID is our ancestor is treated as the caller" \
+  || bad "the ancestor-PID fallback did not exclude the caller (rc=$rc): $out"
+write_snapshot "$(snapshot_with "$peer_self_stuck" "$peer_blocked")"
+out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'sess-42' && ! printf '%s' "$out" | grep -q 'caller-sess' \
+  && printf '%s' "$out" | grep -q '1 live delegate' \
+  && ok "real delegates are still reported alongside an excluded caller, and the count drops the caller" \
+  || bad "caller exclusion hid or miscounted real delegates (rc=$rc): $out"
+
 # --- end-to-end through main: a DELEGATING command refuses to end blind (rc=7) when work is blocked.
 # route_delegate is stubbed to a no-op so `run` dispatches instantly (no network) and reaches the
 # turn-end hook cleanly — the guard then refuses because the snapshot has a blocked delegate.

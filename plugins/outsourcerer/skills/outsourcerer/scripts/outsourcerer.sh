@@ -18143,10 +18143,21 @@ _blind_turn_guard() {
     printf '>>> [outsourcerer] blind-turn guard: fleet snapshot freshness is UNKNOWN, so stale blocked state was not used. Refresh supervision before relying on this view.\n' >&2
     return 0
   fi
+  # The caller's own Claude Code session is in the snapshot too, as a cc-peer, and while it waits on
+  # a long tool call it can read as unresponsive?. The guard must not tell the orchestrator that its
+  # own session needs it. The snapshot's `self` field is relative to whichever process collected it
+  # (usually the heartbeat beacon), so identify the caller here: by CLAUDE_CODE_SESSION_ID when the
+  # host exports it, else by the peer's PID being one of this process's ancestors.
+  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc=""
+  case "$snapshot" in *'"cc-peer"'*) self_anc=" $(_fleet_self_ancestors 2>/dev/null) " ;; esac
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
-  needs="$(printf '%s' "$snapshot" | jq -r '
+  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
+    def caller: (.pid // null) as $p | .owner == "cc-peer"
+      and (($self_sid != "" and .session_id == $self_sid)
+           or ($p != null and ($self_anc | contains(" " + ($p | tostring) + " "))));
     .items[]
+    | select(caller | not)
     | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")
     | (if (.state == "blocked?" or .state == "blocked") then "needs-you" else "maybe-stuck" end) + "\t"
       + (.owner // "unknown") + "\t"
