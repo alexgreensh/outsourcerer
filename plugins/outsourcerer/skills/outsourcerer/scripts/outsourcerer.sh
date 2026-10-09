@@ -2341,6 +2341,16 @@ delegate() {
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
   _devin_with_prepare   # per-dispatch skill sync for this lane (dies loud on an unhonorable grant)
   [ -n "$DEVIN_WITH_PRE" ] && prompt="$DEVIN_WITH_PRE$prompt"
+  # accept-edits (the `edit` verb) auto-approves file edits, and devin still runs simple read-only
+  # commands, but any exec it wants confirmed is refused in -p mode and the run ends right there
+  # (devin 3000.11: warning on stderr, exit 0). That usually lands on the delegate's own test/build
+  # step after its edits, so say it up front: edits first, and hand verification back instead of
+  # attempting it. OSRC_DEVIN_EDIT_NOTE=0 leaves the prompt untouched.
+  if [ "$perm" = "accept-edits" ] && [ "${OSRC_DEVIN_EDIT_NOTE:-1}" != "0" ]; then
+    prompt="$prompt
+
+Note on this run: it is non-interactive and only file edits are auto-approved. Simple read-only shell commands (cat, ls, grep) run, but any command that needs confirmation (test runners, builds, package managers, deletes, chained cd ... && commands) is refused and ends the run immediately, skipping every remaining step. Make all of your file edits first. Do not run tests or builds; end your reply with the exact verification commands you would run."
+  fi
   _utf8_guard_prompt prompt   # sanitize invalid UTF-8 in the effort-wrapped prompt before it reaches the devin CLI
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
