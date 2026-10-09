@@ -5944,6 +5944,11 @@ _obligation_guard_begin() { # <id> <session-id>
 }
 _obligation_guard_end() {
   trap - EXIT INT TERM
+  # Never re-arm the saved traps inside a subshell: `trap -p` there reports the
+  # parent's handlers as an inherited view, so eval'ing the saved text would arm
+  # them in a shell that exits at once, firing engine cleanup and any chained
+  # caller handler in the wrong process.
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
   [ -n "${_OBLIGATION_GUARD_EXIT:-}" ] && eval "$_OBLIGATION_GUARD_EXIT"
   [ -n "${_OBLIGATION_GUARD_INT:-}" ] && eval "$_OBLIGATION_GUARD_INT"
   [ -n "${_OBLIGATION_GUARD_TERM:-}" ] && eval "$_OBLIGATION_GUARD_TERM"

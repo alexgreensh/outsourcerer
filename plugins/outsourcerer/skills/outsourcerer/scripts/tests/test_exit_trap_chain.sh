@@ -40,6 +40,8 @@ run_child() {
     touch "$OSRC_HOME/with-mcp-$$.json"
     case "$scen" in
       save)     _obligation_guard_begin oid sid; _obligation_guard_end ;;
+      cs)       _csout="$(_obligation_guard_begin oid sid; _obligation_guard_end; echo inner)"
+                [ -d "$sb/fx" ] && : > "$sb/csalive" ;;
       resource) . "$src" >/dev/null 2>&1 ;;
     esac
     exit "$rc"
@@ -90,6 +92,16 @@ SB="$BASE/f"; run_child rcsave "$SB" 3; rc=$?
 SB="$BASE/g"; run_child rcsave "$SB" 0; rc=$?
 [ "$rc" -eq 0 ] && ok "rcsave: exit 0 unchanged" || bad "rcsave: rc=$rc want 0"
 [ "$(cat "$SB/saw" 2>/dev/null)" = "saw=0" ] && ok "rcsave: handler read \$? = 0" || bad "rcsave: saw '$(cat "$SB/saw" 2>/dev/null)' want saw=0"
+
+# --- (h) a save/restore inside $( ) must not run the caller handler there --------
+# _obligation_guard_end evals the saved `trap -p` output; inside a command
+# substitution that arms the chain in the subshell, and bash reports
+# BASH_SUBSHELL=0 while that trap fires at subshell exit. The caller's handler
+# belongs to the sourcing shell only.
+SB="$BASE/h"; run_child cs "$SB" 0; rc=$?
+[ -f "$SB/csalive" ] && ok "cs: caller handler did not fire inside \$( )" || bad "cs: \$( ) ran the caller handler early"
+fx_gone "$SB" && ok "cs: caller handler still fires at real exit" || bad "cs: fixture leaked"
+count_is "$SB" 1 && ok "cs: handler ran exactly once" || bad "cs: handler fired '$(wc -l < "$SB/count" 2>/dev/null | tr -d " ")' times"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
