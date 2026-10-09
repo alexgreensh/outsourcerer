@@ -2,6 +2,24 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.13.5
+
+### Fixed
+
+- **A finished background job keeps its own exit code.** The blind-turn guard no longer runs inside a job's child process, so a delegate that finished cleanly is not recorded as failed with exit 7 because something else in the fleet needed attention. (#37, thanks @danikdanik)
+- **The guard no longer reports your own session as a stuck delegate.** The calling Claude Code session is recognized and skipped; other sessions are still reported. (#36, thanks @danikdanik)
+- **Devin's newer "rejected a tool call that requires confirmation" exit is named for what it is.** The job ends `permission-blocked` instead of `done?`, and a job that has already ended this way is shown as stopped, not as a live prompt waiting for an answer. (#37, thanks @danikdanik)
+- **Devin `edit` runs are told up front that confirmation-needing commands end the run,** so the delegate makes its edits first and hands the verification commands back. `OSRC_DEVIN_EDIT_NOTE=0` turns the note off. (#38, thanks @danikdanik)
+- **A lane-down mark keeps the provider's own wording.** `posture status` shows the refusal line that took the lane down (`<lane>.down-evidence`), sanitized and redacted, and a later mark with the provider's stated reset replaces an earlier estimate. (#40, thanks @danikdanik)
+- **Bounded commands return as soon as they finish.** A captured or piped call through the built-in timeout used to wait out its full bound even when the command returned instantly, which slowed catalog and login checks on every run.
+- **Interactive sessions for Droid, Cursor, Hermes and Cline launch reliably when the CLI's help text is long,** and fleet naming keeps long replies instead of discarding them.
+- **Process identity checks agree across system locales,** so a live job is not mistaken for a dead one on a machine with non-English date formatting.
+
+### Tests
+
+- **The conformance gate bounds every suite** (`OSRC_SUITE_TIMEOUT`, default 600s; `0` disables), so a suite that never exits fails loudly with its output instead of parking the run. The race-round barrier that could spin forever is bounded too. (#39, thanks @danikdanik)
+- Removed two classes of intermittent failure from the suites (early-closing pipes under `pipefail`, and a wall-clock window that assumed a fixed run time), and made the supervisor wedge tests deterministic under load.
+
 ## 0.13.4
 
 ### Added
