@@ -200,6 +200,35 @@ OSRC_PRINTMODE_TAIL=abc OSRC_POLL=1 _supervise "$jd" 30 60 120 -- cat "$FIX/edit
   && ok "a non-numeric OSRC_PRINTMODE_TAIL falls back to the default tail" \
   || bad "hostile OSRC_PRINTMODE_TAIL gave status $(cat "$jd/status")"
 
+# --- the tail scan itself must not flip on SIGPIPE: the needle on the FIRST line of a tail
+# larger than the pipe buffer makes grep -q exit early, which SIGPIPEs tail/sed and pipefail
+# reports a miss. Fixture: the recorded warning line, then 24 x 20KB padding lines (~480KB tail).
+{
+  printf '%s\n' "$recorded"
+  i=0; while [ "$i" -lt 24 ]; do printf 'x%.0s' $(seq 1 20000); printf '\n'; i=$((i+1)); done
+} > "$FIX/bigtail-reject.delegate.txt"
+jd="$(newjob bigtail)"
+OSRC_POLL=1 _supervise "$jd" 30 60 120 -- cat "$FIX/bigtail-reject.delegate.txt" >/dev/null 2>&1
+[ "$(cat "$jd/status")" = "permission-blocked" ] \
+  && ok "the reject on line 1 of a >128KB tail still maps (no producer-SIGPIPE miss)" \
+  || bad ">128KB tail gave status $(cat "$jd/status")"
+
+# --- _classify_job's post-hoc print-mode check is the same shape: a print-mode needle on line 1
+# of a >128KB out.log tail must still read as wedge:print-mode-hang, not the generic wedge. ---
+jd="$OSRC_JOBS/cls-tail"; mkdir -p -m 700 "$jd"
+jq -cn '{id:"cls-tail",provider:"devin",verb:"run",model:"swe-2-high",lane:"dv"}' > "$jd/meta.json"
+: > "$jd/.startmark"; : > "$jd/.fsmark"
+echo permission-blocked > "$jd/status"; echo 3 > "$jd/exit"
+# last.txt stays empty: a non-empty one would trip the earlier false-stall:deliverable branch
+# before classify ever reaches the permission-blocked tail scan under test.
+{
+  _printmode_needle
+  i=0; while [ "$i" -lt 24 ]; do printf 'x%.0s' $(seq 1 20000); printf '\n'; i=$((i+1)); done
+} > "$jd/out.log"
+[ "$(_classify_job cls-tail)" = "$(printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang')" ] \
+  && ok "classify: print-mode needle on line 1 of a >128KB tail still maps" \
+  || bad "classify: >128KB tail said '$(_classify_job cls-tail)'"
+
 # --- the needle is assembled, never verbatim in the script (reading the script must not trip it) ---
 grep -aqF "$(_noninteractive_reject_needle)" "$SRC" \
   && bad "the non-interactive reject needle is verbatim in outsourcerer.sh" \

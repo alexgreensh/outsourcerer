@@ -608,7 +608,9 @@ need_devin() {
   have devin || die "devin CLI not on PATH (~/.local/bin). Install it using the official guide: https://docs.devin.ai/cli"
 }
 
-logged_in() { _timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null | grep -qi "Logged in"; }
+# Capture before matching (here-string): under pipefail a `| grep -q` takes the producer's
+# SIGPIPE (141) as a false negative once the output outgrows the pipe buffer.
+logged_in() { local _au; _au="$(_timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null)" || return 1; grep -qi "Logged in" <<<"$_au"; }
 
 # _timeout <secs> <cmd...> -> run with a wall-clock cap using only bash process control.
 # The same implementation runs on Linux, stock macOS, and Git Bash, so lane health never
@@ -809,9 +811,11 @@ _devin_zombie_preflight() {
 # deliberately a separate state, never a free-lane-down result.
 _devin_probe_classify() {
   local rc="${1:-1}" text="${2:-}" model="${3:-${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}}"
-  if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s' "$text" | grep -qi 'pong'; then printf 'up'; return; fi
+  # Here-strings, not pipelines: the probe text can outgrow the pipe buffer, and under pipefail
+  # `printf | grep -q` then returns grep's early-exit SIGPIPE (141), flipping a real match to a miss.
+  if [ "$rc" -eq 0 ] 2>/dev/null && grep -qi 'pong' <<<"$text"; then printf 'up'; return; fi
   if _devin_free_own_quota "$model" "$text"; then printf 'free-model-quota-exhausted'; return; fi
-  if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)'; then
+  if grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)' <<<"$text"; then
     printf 'paid-tier-exhausted'; return
   fi
   [ "$rc" -eq 124 ] 2>/dev/null && { printf 'down-timeout'; return; }
@@ -822,8 +826,8 @@ _devin_free_own_quota() { # <model> <text>
   local model="${1:-}" text="${2:-}" normalized
   _devin_is_free_model "$model" || return 1
   normalized="$(printf '%s' "$model" | tr '._' '--')"
-  printf '%s' "$text" | grep -qiE "(weekly|free)[ -]?(usage[ -]?)?quota.{0,80}(${model//./\\.}|$normalized)|(${model//./\\.}|$normalized).{0,80}(weekly|free)[ -]?(usage[ -]?)?quota" \
-    && printf '%s' "$text" | grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)'
+  grep -qiE "(weekly|free)[ -]?(usage[ -]?)?quota.{0,80}(${model//./\\.}|$normalized)|(${model//./\\.}|$normalized).{0,80}(weekly|free)[ -]?(usage[ -]?)?quota" <<<"$text" \
+    && grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)' <<<"$text"
 }
 
 # A real, minimal request against the known plan-included model. _timeout is
@@ -2678,10 +2682,12 @@ _codex_image_available() {
   have codex || return 1
   local out
   out="$(codex login status 2>&1)" || return 1
-  printf '%s' "$out" | grep -qi "logged in" || return 1
+  grep -qi "logged in" <<<"$out" || return 1
   out="$(codex features list 2>&1)" || return 1
-  printf '%s' "$out" | grep -qi "image_generation" || return 1
-  printf '%s' "$out" | grep -qi "artifact" || return 1
+  # Here-strings, not pipelines: a feature list longer than the pipe buffer makes
+  # `printf | grep -q` take grep's early-exit SIGPIPE (141) under pipefail, a false miss.
+  grep -qi "image_generation" <<<"$out" || return 1
+  grep -qi "artifact" <<<"$out" || return 1
   _OSRC_CODEX_IMG=1
   return 0
 }
@@ -8188,7 +8194,9 @@ _confident_fail() {
     # a violation; an invalid ERE is our fault, not the model's — skip it, never fire a misleading
     # contract:no-match on every call. Probe validity once on empty input first.
     if printf '' | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null; [ $? -le 1 ]; then
-      printf '%s' "$a" | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null
+      # Here-string: the answer is unbounded, and `printf | grep -q` would take grep's early-exit
+      # SIGPIPE (141) under pipefail, turning a matched contract into a spurious clean bill.
+      grep -Eq -- "$OSRC_CONTRACT_RE" <<<"$a" 2>/dev/null
       case $? in 1) echo "contract:no-match"; return 0 ;; esac
     fi
   fi
@@ -8694,11 +8702,13 @@ cmd_suggest() {
 # Only ready lanes are ever offered to the user (Terra UX: never tour install paths for a lane they
 # lack). Best-effort + fast; a slow probe (OpenRouter credits) is time-capped.
 _ready_lanes() {
-  local lanes="" ld dlm cred rem _rp
+  local lanes="" ld dlm cred rem _rp _au
   _rp="$(_lane_ready_probe local 2>/dev/null)" && lanes="$lanes $_rp"
   # Devin probes (auth + live model list) hit the network; cap them so `brief` can't stall the
   # handshake for 10-30s on a slow backend. OSRC_BRIEF_TIMEOUT overrides (default 5s each).
-  if have devin && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null | grep -qi "Logged in"; then
+  # The auth output is captured before matching: `cmd | grep -q` under pipefail returns grep's
+  # early-exit SIGPIPE (141) as a miss once the reply outgrows the pipe buffer.
+  if have devin && _au="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null)" && grep -qi "Logged in" <<<"$_au"; then
     dlm="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" bash -c 'devin --model "__list__" -p "x" </dev/null 2>&1 | grep -i "^Available:"' 2>/dev/null)"
     printf '%s' "$dlm" | grep -qiE 'glm|swe' && lanes="$lanes devin=glm/swe"
   fi
@@ -9341,7 +9351,9 @@ _frontier_needed() {
   local task="$1" effort="$2" lc
   [ "$effort" = "max" ] && return 0
   lc="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
-  printf '%s' "$lc" | grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof'
+  # Here-string, not `printf | grep -q`: the task text is unbounded, and once it outgrows the pipe
+  # buffer grep's early exit SIGPIPEs printf, which pipefail reports as a miss on a present cue.
+  grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof' <<<"$lc"
 }
 
 # _score <base> <tier> <category> <effort> <difficulty> <model> -> selection score.
@@ -10549,8 +10561,11 @@ _supervise() {
     # If devin's log format ever changes, the check simply no-ops and the 15-min byte-growth stall-kill
     # (still in place) reaps the hang instead — slower, but correct.
     if [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
-      if tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null \
-           | grep -aq "$(_printmode_needle)"; then
+      # Capture the tail before matching: log lines are unbounded, so once the tail outgrows the
+      # pipe buffer `tail | grep -q` takes grep's early-exit SIGPIPE (141) under pipefail and a
+      # real print-mode hang reads as a miss.
+      local _pm_scan; _pm_scan="$(tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null)"
+      if grep -aq "$(_printmode_needle)" <<<"$_pm_scan"; then
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:print-mode-hang\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
@@ -10693,9 +10708,12 @@ _supervise() {
   # contiguous -F needle miss it entirely -- the blocked run then reads as done?. The same
   # strip the down-evidence sanitizer uses.
   local _esc; _esc="$(printf '\033')"
+  # The tail is captured before the -q match: log lines are unbounded, so `tail | sed | grep -q`
+  # can SIGPIPE the producers on grep's early exit and pipefail turns a real reject into a miss.
+  local _pm_scan; _pm_scan="$(tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | LC_ALL=C sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g")"
   if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
      && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
-     && tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | LC_ALL=C sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g" | grep -aqF "$(_noninteractive_reject_needle)"; then
+     && grep -aqF "$(_noninteractive_reject_needle)" <<<"$_pm_scan"; then
     echo "permission-blocked" > "$jd/status"
     printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
@@ -10708,7 +10726,9 @@ _supervise() {
   # Scanned in the TAIL only: a real cut-off is the LAST thing in the log, whereas prose that merely
   # mentions truncation (a delegate discussing an API response, or reading a log containing the phrase)
   # lands mid-run and gets pushed out. Same anchoring discipline as the print-mode detector.
-  if [ "$rc" -ne 0 ] && tail -n 15 "$jd/out.log" 2>/dev/null | grep -aqiE 'response truncated|max output token limit|finish_reason.*length'; then
+  # Same capture-then-match: a 15-line tail of long log lines can still exceed the pipe buffer,
+  # and `tail | grep -q` would then miss a real token-limit cut via producer SIGPIPE (141).
+  if [ "$rc" -ne 0 ] && grep -aqiE 'response truncated|max output token limit|finish_reason.*length' <<<"$(tail -n 15 "$jd/out.log" 2>/dev/null)"; then
     echo failed > "$jd/status"
     printf 'output-token-limit\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything — in that case also ask it to print a periodic 'OSRC::PROGRESS <step>' line, or a long silent run looks identical to a hang and gets stopped." >&2
@@ -11953,8 +11973,9 @@ _classify_job() {
     # and the old `case "$reason" in *print-mode*` never matched -- wedge:print-mode-hang was dead
     # code. Scan out.log tail for the same assembled needle the runtime watchdog uses
     # (_printmode_needle) so the post-hoc verdict stays consistent with the runtime detection.
-    if [ -s "$jd/out.log" ] && tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null \
-         | grep -aq "$(_printmode_needle)"; then
+    # Captured before matching for the same reason as the runtime check above: pipefail turns
+    # `tail | grep -q` producer SIGPIPE (141) into a miss on a log tail with long lines.
+    if [ -s "$jd/out.log" ] && grep -aq "$(_printmode_needle)" <<<"$(tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null)"; then
       printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang'
     else
       printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked'
@@ -12448,8 +12469,11 @@ _crew_worktree_clean() {
 _crew_scan_staged() {
   # --text/--no-ext-diff/--no-textconv defeat a worker-planted .gitattributes that would hide or
   # execute during the diff. Patterns cover current key shapes (sk-proj-, github_pat_, xox*, AKIA).
-  git -C "$1" diff --cached --text --no-ext-diff --no-textconv 2>/dev/null \
-    | grep -Eq 'OPENROUTER_API_KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bpoas]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  # The diff is captured before matching: a staged diff larger than the pipe buffer would SIGPIPE
+  # git on grep's early exit, and pipefail would then report a planted key as "clean" (rc 141).
+  local _sd
+  _sd="$(git -C "$1" diff --cached --text --no-ext-diff --no-textconv 2>/dev/null)" || return 1
+  grep -Eq 'OPENROUTER_API_KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bpoas]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' <<<"$_sd"
 }
 
 # crew --check '<cmd>' [fanout routing flags] -- "task1" "task2" ...
@@ -13043,7 +13067,7 @@ $body"
   #   warp   → oz
   # Mapping provider==CLI directly would false-positive on warp/cursor (blocks working installs)
   # and false-negative on cursor (a `cursor` shim can exist while cursor-agent is absent).
-  local _dp_prov _dp_cli _pi
+  local _dp_prov _dp_cli _pi _dp_ahelp=""
   for _pi in "${!labels[@]}"; do
     _pep="${g_prov:-${a_prov[$_pi]}}"; _dp_prov="${_pep:-$PROVIDER}"
     case "$_dp_prov" in
@@ -13068,8 +13092,11 @@ $body"
       *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
-      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate)
-      if [ "$_dp_prov" = "cursor" ] && have agent && agent --help 2>/dev/null | grep -qi cursor; then
+      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate).
+      # The help text is captured first and matched via a here-string: under pipefail a
+      # `cmd | grep -q` pipeline reports grep's early-exit SIGPIPE (141) as a miss once the
+      # help output outgrows the pipe buffer, and a real Cursor agent would be refused.
+      if [ "$_dp_prov" = "cursor" ] && have agent && _dp_ahelp="$(agent --help 2>/dev/null)" && grep -qi cursor <<<"$_dp_ahelp"; then
         continue
       fi
       die "fanout: lane '$_dp_prov' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
@@ -13123,8 +13150,11 @@ _so_nums() { grep -oE '[0-9]+([.][0-9]+)?' 2>/dev/null | sort -u; }
 # veto set ("cant","wont") would never match and a direct contradiction ("you can deploy" vs "you
 # can't deploy") would score as agreement — the exact unsafe false-agree this guards against.
 _so_has_neg() {
-  tr 'A-Z' 'a-z' | tr -d "'’" \
-    | grep -qwE 'no|not|never|none|cannot|cant|dont|doesnt|wont|isnt|arent|wasnt|werent|shouldnt|wouldnt|couldnt|didnt|hasnt|havent|hadnt|without|avoid|refuse|deny|denies|disable|disabled|false|incorrect'
+  # Slurp stdin before the -q match: the answers piped in are unbounded, and once the stream
+  # outgrows the pipe buffer grep's early exit SIGPIPEs tr, which pipefail reports as "no
+  # negation" -- a false-agreement in the unsafe direction.
+  local _t; _t="$(tr 'A-Z' 'a-z' | tr -d "'’")"
+  grep -qwE 'no|not|never|none|cannot|cant|dont|doesnt|wont|isnt|arent|wasnt|werent|shouldnt|wouldnt|couldnt|didnt|hasnt|havent|hadnt|without|avoid|refuse|deny|denies|disable|disabled|false|incorrect' <<<"$_t"
 }
 # _so_agree <answer1> <answer2> -> 0 when the two answers are the SAME answer (safe to return
 # without the paid judge), 1 when they materially differ (escalate). Deterministic, $0, no LLM.
@@ -13933,8 +13963,11 @@ delegate_cursor() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="${MODEL:-}"
-  local cur=""
-  if have cursor-agent; then cur="cursor-agent"; elif have agent && agent --help 2>/dev/null | grep -qi cursor; then cur="agent"; fi
+  local cur="" _cahelp=""
+  # The `agent` fallback probe captures --help before matching (here-string): under pipefail,
+  # `agent --help | grep -q` returns grep's early-exit SIGPIPE (141) once help outgrows the
+  # pipe buffer, misidentifying a real Cursor agent as foreign and refusing the lane.
+  if have cursor-agent; then cur="cursor-agent"; elif have agent && _cahelp="$(agent --help 2>/dev/null)" && grep -qi cursor <<<"$_cahelp"; then cur="agent"; fi
   [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install it using the official guide: https://cursor.com/docs/cli/installation. Then run 'cursor-agent login' once (or set CURSOR_API_KEY)."
   # cursor-agent autonomy: default headless = propose-only; -f/--force = apply edits/commands.
   # --trust skips the workspace-trust prompt that would wedge a headless run.
@@ -14727,8 +14760,11 @@ _OSRC_GATE_SPECS
   # never legitimately pasted, so — unlike the count-only keyword scan above — they HARD-BLOCK by
   # default. Opt out with OSRC_SECRET_ALLOW_VALUE=1 for the rare deliberate case. The value itself is
   # never printed (only the refusal). Reference secrets by NAME, not value, when delegating.
+  # Here-string, not `printf | grep -q`: $scan is the whole prompt + --with files (unbounded), and
+  # once it outgrows the pipe buffer grep's early exit SIGPIPEs printf, which pipefail reports as
+  # "no secret" -- the hard-block would wave a real credential through to a cloud lane.
   if [ "${OSRC_SECRET_ALLOW_VALUE:-0}" != "1" ] \
-     && printf '%s\n' "$scan" | grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
+     && grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' <<<"$scan"; then
     die "CLOUD GATE: a live secret VALUE (API key / token / private key) is in the prompt or a --with file — refusing the cloud route so it doesn't leave your machine. Reference the secret by NAME instead of pasting its value, or set OSRC_SECRET_ALLOW_VALUE=1 if you truly intend to send it."
   fi
 }
@@ -15238,7 +15274,10 @@ _is_transport_failure() {
   # router telling us the lane is gone. Same words, opposite meaning, and no regex separates them —
   # so name the resource kinds that make it task output and take them off the table first.
   local _scan="$stderr"
-  if printf '%s' "$_scan" | grep -qiE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/'; then
+  # Every match below runs on a here-string, not `printf | grep -q`: stderr is unbounded, and once
+  # it outgrows the pipe buffer grep's early exit SIGPIPEs the producer, which pipefail reports as
+  # a miss (rc 141) -- a real transport signature would classify as a task failure.
+  if grep -qiE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/' <<<"$_scan"; then
     _scan="$(printf '%s' "$_scan" | grep -viE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/')"
   fi
 
@@ -15252,16 +15291,16 @@ _is_transport_failure() {
   #  the real cause. (2) Phrases made of ordinary English ("no endpoints found", "key limit exceeded")
   #  are things a DELEGATED TASK legitimately prints — kubectl output, a KV-store test — so they are
   #  either line-anchored or shaped tightly enough that task prose cannot satisfy them.
-  if printf '%s' "$_scan" | grep -qiE \
-'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found for [a-z0-9._-]+/[a-z0-9._:-]+$|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|^[[:space:]]*(error: )?(key|credit) limit exceeded|insufficient credits|requires more credits|api error:? *\(?(408|409|425|429|5[0-9][0-9])'; then
+  if grep -qiE \
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found for [a-z0-9._-]+/[a-z0-9._:-]+$|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|^[[:space:]]*(error: )?(key|credit) limit exceeded|insufficient credits|requires more credits|api error:? *\(?(408|409|425|429|5[0-9][0-9])' <<<"$_scan"; then
     return 0
   fi
   #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
   #  optionally behind a bare "error: " wrapper); ordinary failed-task stderr only ever EMBEDS them mid-sentence
   #  ("AssertionError: connection refused should be rendered..."). So every one is LINE-ANCHORED. This is what
   #  stops the prose-false-positive class wholesale (a false positive here would blind-RETRY a mutating task).
-  if printf '%s' "$_scan" | grep -qiE \
-'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?(408|409|425|429|5[0-9][0-9])|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
+  if grep -qiE \
+'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?(408|409|425|429|5[0-9][0-9])|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))' <<<"$_scan"; then
     return 0
   fi
   return 1
@@ -15279,18 +15318,21 @@ _is_transport_failure() {
 # ordinary task/test prose, so an anywhere-in-text match is false-positive-safe.
 _is_sandboxed_proxy_tls_failure() {
   local text="$1"
+  # Here-strings, not `printf | grep -q` pipelines: a devin CLI log can far outgrow the pipe
+  # buffer, and grep's early exit would then SIGPIPE the producer, which pipefail turns into a
+  # miss (rc 141) on a present signature.
   # PASS 1 (machine tokens, anywhere in text): rustls_platform_verifier + an OSStatus cert-verify
   # code on the same log scan. Both tokens are emitted only by devin's TLS verify path against an
   # untrusted peer cert and never appear in task/test output.
-  if printf '%s' "$text" | grep -qiE 'rustls_platform_verifier' && \
-     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+  if grep -qiE 'rustls_platform_verifier' <<<"$text" && \
+     grep -qiE 'OSStatus -[0-9]+' <<<"$text"; then
     return 0
   fi
   # PASS 2 (corroborated): chisel_cloud_bridge handoff retries + an OSStatus cert-verify code.
   # The chisel tunnel is devin's cloud ACP transport; an OSStatus cert failure there is the same
   # root cause surfaced through a different log line. Require BOTH tokens to stay narrow.
-  if printf '%s' "$text" | grep -qiE 'chisel_cloud_bridge' && \
-     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+  if grep -qiE 'chisel_cloud_bridge' <<<"$text" && \
+     grep -qiE 'OSStatus -[0-9]+' <<<"$text"; then
     return 0
   fi
   return 1
@@ -15492,7 +15534,7 @@ _fallback_is_transport() {
 # an uninstalled CLI costs nothing, and charging it against the bound would make the bound mean
 # "N minus however many lanes you don't have". Unknown lane codes (incl. image lanes) -> not ready.
 _fallback_lane_ready() {
-  local k="" _fl _ff=""
+  local k="" _fl _ff="" _au=""
   # A lane marked DOWN (probe/transport verdict, self-healing TTL) is not a retry target — the whole
   # point of the marker is that this lane cannot answer right now regardless of CLI/key presence.
   # Checked BEFORE the descriptor delegation so a DOWN lane is refused even when it is ported (its
@@ -15505,7 +15547,9 @@ _fallback_lane_ready() {
     dv) have devin || return 1
         # Bounded login probe: delegate() hard-fails on a logged-out devin, which would end the
         # whole retry walk; screen it here instead. 5s cap so a wedged CLI can't stall the walk.
-        _timeout 5 devin auth status 2>/dev/null | grep -qi "logged in" || return 1 ;;
+        # Capture-then-match (here-string) so a large reply cannot turn grep's early exit into a
+        # pipefail SIGPIPE miss.
+        _au="$(_timeout 5 devin auth status 2>/dev/null)" && grep -qi "logged in" <<<"$_au" || return 1 ;;
     tokenrouter) k="${TOKENROUTER_API_KEY:-}"; [ -n "$k" ] || k="$(_extract_kv_value TOKENROUTER_API_KEY)"
         [ -n "$k" ] || return 1 ;;
     *)  return 1 ;;
@@ -17205,7 +17249,9 @@ _session_infer_provider() {
 # was never in `droid --help`, fell through into the prompt, and the run billed Claude quota on the
 # DEFAULT model (claude-opus-5). Verifying the real --help (never truncated) is the only proof.
 _session_help_has_model_flag() {
-  printf '%s\n' "$1" | grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)'
+  # Here-string, not a pipeline: help text is never truncated, so it can outgrow the pipe buffer
+  # and `printf | grep -q` would take grep's early-exit SIGPIPE (141) under pipefail as a miss.
+  grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)' <<<"$1"
 }
 
 # _session_assert_model_pinnable <provider> <cli> [help-args...] -> probe the real CLI help and
@@ -17929,7 +17975,9 @@ _session_relaunch_command() { # <provider> <model> <effort>
 _session_droid_effort_supported() {
   local help_text
   help_text="$(_session_probe_help droid --help)" || return 1
-  printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort'
+  # Here-string, not a pipeline: under pipefail a `printf | grep -q` reports grep's early-exit
+  # SIGPIPE as a false negative once the help text outgrows the pipe buffer.
+  grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort' <<<"$help_text"
 }
 
 _session_relaunch_effort() { # <provider> <model> <effort>
@@ -18688,7 +18736,7 @@ EOF
   [ -n "$names" ] || { echo "  no local MCP servers found in ~/.claude.json (any scope)"; return 0; }
   local s def type url cmd
   for s in $names; do
-    if printf '%s\n' "$existing" | grep -qx "$s"; then echo "  = $s (already in Devin)"; continue; fi
+    if grep -qx "$s" <<<"$existing"; then echo "  = $s (already in Devin)"; continue; fi
     def="$(printf '%s' "$merged" | jq -c --arg s "$s" '.[$s]')"
     type="$(printf '%s' "$def" | jq -r 'if .type then .type elif .url then "http" else "stdio" end')"
     if [ "$type" = "http" ] || [ "$type" = "sse" ]; then
@@ -18831,7 +18879,9 @@ doctor() {
     if have codex; then
       _ppt=""; _prc=0
       _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" 2>&1)" || _prc=$?
-      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+      # The reply is captured, so match it via a here-string: a reply larger than the pipe buffer
+      # would otherwise make `printf | grep -q` take SIGPIPE (141) under pipefail and read as "down".
+      if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
         echo "      codex-native luna: READY (probed just now, answered)"
       else
         case "$_ppt" in
@@ -18847,7 +18897,7 @@ doctor() {
     if have claude; then
       _ppt=""; _prc=0
       _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" 2>&1)" || _prc=$?
-      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+      if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
         echo "      claude-native haiku: READY (probed just now, answered)"
       else
         case "$_ppt" in
@@ -19056,7 +19106,7 @@ doctor() {
     # until then say plainly that the plan/ACU figure lives on the web dashboard.
     local _dhelp=""
     _dhelp="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin help 2>/dev/null)" || true
-    if printf '%s\n' "$_dhelp" | grep -qwE '^[[:space:]]+usage'; then
+    if grep -qwE '^[[:space:]]+usage' <<<"$_dhelp"; then
       _du="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin usage 2>&1)" || _durc=$?
       if [ "$_dstate" != "paid-tier-exhausted" ]; then
         if [ "$(_devin_probe_classify "$_durc" "$_du")" = "paid-tier-exhausted" ]; then
