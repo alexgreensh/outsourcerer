@@ -68,7 +68,7 @@ if grep -qE 'set -a|source .*~/.env|\..*~/.env' "$RUN_OR_CODEX"; then bad "run-o
 # build_mcp_flags_cc needs a real MCP config that isn't present in this test env, so it returns
 # empty. Assert the hardening is present in source instead of a full runtime exercise.
 if grep -qE 'umask 077|chmod 600' "$SRC" && grep -q 'build_mcp_flags_cc' "$SRC"; then ok "mcp temp file uses umask 077 or chmod 600"; else bad "mcp temp file missing umask 077 / chmod 600"; fi
-if grep -q 'with-mcp-.*\$\$' "$SRC" && grep -qE "trap .*rm -f .*with-mcp|trap .*rm -f .*\$\$" "$SRC"; then ok "mcp temp file has an EXIT trap rm"; else bad "mcp temp file missing EXIT trap rm"; fi
+if grep -q 'with-mcp-.*\$\$' "$SRC" && grep -q 'rm -f .*with-mcp' "$SRC" && grep -qE 'trap .*rm -f .*with-mcp.* EXIT|trap .*_osrc_engine_exit.* EXIT' "$SRC"; then ok "mcp temp file has an EXIT trap rm"; else bad "mcp temp file missing EXIT trap rm"; fi
 
 # --- Scenario 5: new job dir is 700 and out.log is 600. ---
 jd="$TMP/jobs/testjob"
@@ -103,7 +103,10 @@ printf '%s' "$out" | grep -q 'removed 1' && ok "gc reports 1 removed" || bad "gc
 # prints filesystem info. So `stat -f ... || stat -c ...` never falls through on Linux and hands back
 # a block-device dump where a number was expected, which then fails every numeric test silently. This
 # broke `gc` on Linux completely: it could never parse an mtime, so it removed nothing, ever.
-if grep -v '^[[:space:]]*#' "$SRC" | grep -q 'stat -f [^|]*|| *stat -c'; then
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+if grep -q 'stat -f [^|]*|| *stat -c' <<<"$_noc"; then
   bad "BSD-first stat ordering found: the GNU fallback is unreachable on Linux"
 else
   ok "stat calls try GNU first, so the BSD fallback is actually reachable on both"

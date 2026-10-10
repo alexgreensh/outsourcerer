@@ -113,10 +113,13 @@ _lane_down_active dv && bad "sibling: lane down although swe-2 answered" || ok "
 refuse claude-opus-5 glm-5-2
 _lane_down_clear dv; _before=$(date +%s)
 _out="$(_devin_plan_quota_block "$FX/daily" claude-opus-5 'including the free-tier ones you would otherwise fall back to (the probe was refused as well)' 'Switch lanes OFF Devin: --provider cc -m glm (OpenRouter) or a native lane.' 2>&1)"
+_after=$(date +%s)
 _lane_down_active dv && ok "confirmed: dv lane marked DOWN after the probe was refused too" || bad "confirmed: dv lane NOT down"
 [ "$(_lane_down_reason dv)" = "plan quota exhausted" ] && ok "confirmed: down-reason recorded" || bad "confirmed: reason '$(_lane_down_reason dv)'"
+# The mark lands inside the call, so until-before = reset+slack + (mark-before): the ceiling adds the
+# MEASURED elapsed, never a magic headroom a legitimate bounded probe could overflow.
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 41160 ] && [ "$_ttl" -le 41230 ] && ok "confirmed: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "confirmed: TTL ${_ttl}s is not Devin's stated reset"
+[ "$_ttl" -ge 41220 ] && [ "$_ttl" -le $(( 41220 + _after - _before )) ] && ok "confirmed: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "confirmed: TTL ${_ttl}s is not Devin's stated reset"
 [ "$(calls)" = "glm-5-2" ] && ok "confirmed: exactly one bounded probe was sent" || bad "confirmed: devin calls were '$(calls)'"
 printf '%s' "$_out" | grep -q 'CONFIRMED' && ok "confirmed: says the probe CONFIRMED the block" || bad "confirmed: verdict missing"
 printf '%s' "$_out" | grep -q 'shared DAILY plan quota is exhausted' && ok "confirmed: says the SHARED DAILY bucket is exhausted" || bad "confirmed: honest daily wording missing"
@@ -130,16 +133,20 @@ _lane_down_clear dv
 # === (e) probe unreachable -> short transport window only, never the quota window ================
 refuse claude-opus-5; _before=$(date +%s)
 _out="$(FAKE_DEVIN_SLEEP=20 OSRC_LANE_PROBE_SECS=1 _devin_plan_quota_block "$FX/daily" claude-opus-5 'scope' 'advice' 2>&1)"
+_after=$(date +%s)
 _lane_down_active dv && ok "unreachable: lane gets a down marker (it is not answering)" || bad "unreachable: no down marker"
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 1 ] && [ "$_ttl" -le 310 ] && ok "unreachable: short transport TTL (${_ttl}s; 300s + probe bound), not the 11h quota window" || bad "unreachable: TTL ${_ttl}s"
+[ "$_ttl" -ge 300 ] && [ "$_ttl" -le $(( 300 + _after - _before )) ] && ok "unreachable: short transport TTL (${_ttl}s; 300s + probe bound), not the 11h quota window" || bad "unreachable: TTL ${_ttl}s"
 case "$(_lane_down_reason dv)" in *"probe unreachable"*) ok "unreachable: reason says the probe was unreachable" ;; *) bad "unreachable: reason '$(_lane_down_reason dv)'" ;; esac
 printf '%s' "$_out" | grep -q 'INCONCLUSIVE' && ok "unreachable: says INCONCLUSIVE" || bad "unreachable: verdict missing"
 printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && bad "unreachable: claims ALL plan-included models blocked without proof" || ok "unreachable: no unproven all-models claim"
 _lane_down_clear dv
 
 # === (f) structural ==============================================================================
-grep -v '^[[:space:]]*#' "$SRC" | grep -q 'do NOT retry them' && bad "structure: 'do NOT retry them' still in a user-facing line" || ok "structure: 'do NOT retry them' gone from user-facing lines"
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+grep -q 'do NOT retry them' <<<"$_noc" && bad "structure: 'do NOT retry them' still in a user-facing line" || ok "structure: 'do NOT retry them' gone from user-facing lines"
 grep -q '_pq_verdict="$(_lane_free_probe dv "$_pq_probe")"' "$SRC" && ok "structure: the block probes before deciding" || bad "structure: block does not call _lane_free_probe"
 _pre="$(awk '/^_devin_plan_quota_block\(\)/{f=1} f&&/_lane_down_mark dv/{print NR; exit}' "$SRC")"
 _prb="$(awk '/^_devin_plan_quota_block\(\)/{f=1} f&&/_lane_free_probe dv/{print NR; exit}' "$SRC")"

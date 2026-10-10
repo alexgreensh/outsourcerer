@@ -55,6 +55,20 @@ rc=0
 ( OSRC_NO_AUTODETACH=1; main status ) >/dev/null 2>&1 || rc=$?   # a LOOK command: guard is backstop-only, never overrides
 [ "$rc" != "7" ] && ok "a supervising command (status) is never turned into a 7 by parked work" || bad "status was poisoned to 7"
 
+# The internal sentinels must be consumable in EITHER order: consuming only the
+# first of `--osrc-job-child-internal --osrc-preflight-internal` would strand the
+# preflight sentinel at $1 and die as "looks like a flag, not a subcommand".
+# Drive both orders through main() against a LOOK command: it must parse and
+# return rather than error on a stranded sentinel.
+out="$(main --osrc-job-child-internal --osrc-preflight-internal fleet 2>&1)"; rc=$?
+printf '%s' "$out" | grep -q 'looks like a flag' \
+  && bad "sentinel order job-child+preflight stranded the second sentinel: $(printf '%s' "$out" | head -1)" \
+  || ok "job-child then preflight sentinel order parses and dispatches (rc=$rc)"
+out="$(main --osrc-preflight-internal --osrc-job-child-internal fleet 2>&1)"; rc=$?
+printf '%s' "$out" | grep -q 'looks like a flag' \
+  && bad "sentinel order preflight+job-child broke: $(printf '%s' "$out" | head -1)" \
+  || ok "preflight then job-child sentinel order parses and dispatches (rc=$rc)"
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

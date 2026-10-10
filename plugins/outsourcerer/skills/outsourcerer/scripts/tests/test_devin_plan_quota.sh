@@ -91,10 +91,17 @@ chmod +x "$FB/devin"; export PATH="$FB:$PATH"
 _lane_down_clear dv
 _before=$(date +%s)
 _out="$(_devin_plan_quota_block "$FX/daily" glm-5.2 'not just "glm-5.2"' 'Switch lanes OFF Devin: --provider cc -m glm (OpenRouter) or a native lane.' 2>&1)"
+_after=$(date +%s)
 _lane_down_active dv && ok "block: dv lane marked DOWN after a daily exhaustion" || bad "block: dv lane NOT down"
 [ "$(_lane_down_reason dv)" = "plan quota exhausted" ] && ok "block: down-reason recorded" || bad "block: reason '$(_lane_down_reason dv)'"
+_ev="$(_posture_get dv down-evidence 2>/dev/null)"
+printf '%s' "$_ev" | grep -q 'daily usage quota has been exhausted' && ok "block: down-evidence keeps the refusal wording" || bad "block: down-evidence '$_ev'"
+printf '%s' "$_ev" | grep -q ' | probe: ' && ok "block: down-evidence keeps the probe wording too" || bad "block: down-evidence missing probe half '$_ev'"
+# The mark lands somewhere inside the call, so until-before = reset+slack + (mark-before): the floor
+# is Devin's stated reset plus the product's 60s slack, and the ceiling adds only the elapsed time the
+# call measurably took, never a magic headroom a legitimate probe could overflow.
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
-[ "$_ttl" -ge 41160 ] && [ "$_ttl" -le 41230 ] && ok "block: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "block: TTL ${_ttl}s is not Devin's stated reset"
+[ "$_ttl" -ge 41220 ] && [ "$_ttl" -le $(( 41220 + _after - _before )) ] && ok "block: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "block: TTL ${_ttl}s is not Devin's stated reset"
 printf '%s' "$_out" | grep -q 'shared DAILY plan quota is exhausted' && ok "block: says the SHARED DAILY bucket is exhausted" || bad "block: missing honest daily wording"
 printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && ok "block: says it blocks ALL plan-included models" || bad "block: missing all-models wording"
 printf '%s' "$_out" | grep -q 'Devin says it resets in 11h26m' && ok "block: quotes Devin's reset" || bad "block: reset not quoted"
@@ -107,14 +114,17 @@ printf '%s' "$_out" | grep -v '\] probe:' | grep -qE 'swe-1-7|glm-5-2\)|Retry on
 # Weekly + unparseable reset -> lane still down, but the window is a LABELED estimate.
 _lane_down_clear dv
 printf 'Error: weekly usage quota exhausted, resets at soon.\n' > "$FX/weekly-vague"
+_before=$(date +%s)
 _out="$(OSRC_DEVIN_PLAN_DOWN_TTL=1234 _devin_plan_quota_block "$FX/weekly-vague" swe-1.7 'scope' 'advice' 2>&1)"
+_after=$(date +%s)
 printf '%s' "$_out" | grep -q 'shared WEEKLY plan quota' && ok "block: WEEKLY period read from Devin's line" || bad "block: weekly not detected"
 printf '%s' "$_out" | grep -q 'ESTIMATE' && ok "block: unparseable reset -> window labeled an ESTIMATE" || bad "block: estimate label missing"
 printf '%s' "$_out" | grep -q 'app.devin.ai/settings/usage' && ok "block: points at the dashboard when no reset parsed" || bad "block: dashboard URL missing"
-_until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - $(date +%s) ))
-[ "$_ttl" -ge 1225 ] && [ "$_ttl" -le 1234 ] && ok "block: fallback TTL honors OSRC_DEVIN_PLAN_DOWN_TTL (${_ttl}s)" || bad "block: fallback TTL ${_ttl}s"
+_until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
+[ "$_ttl" -ge 1234 ] && [ "$_ttl" -le $(( 1234 + _after - _before )) ] && ok "block: fallback TTL honors OSRC_DEVIN_PLAN_DOWN_TTL (${_ttl}s)" || bad "block: fallback TTL ${_ttl}s"
 _lane_down_clear dv
 [ -e "$OSRC_POSTURE_DIR/dv.down-reason" ] && bad "clear: reason file survived _lane_down_clear" || ok "clear: reason file removed with the marker"
+[ -e "$OSRC_POSTURE_DIR/dv.down-evidence" ] && bad "clear: evidence file survived _lane_down_clear" || ok "clear: evidence file removed with the marker"
 
 # Structural: the delegate failure branches check the PLAN matcher before the ACU matcher (the daily
 # wording also trips the ACU family), and the plan-branch advice never names a Devin plan model.

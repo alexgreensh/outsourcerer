@@ -147,7 +147,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.13.4"
+OSRC_VERSION="0.13.5"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -270,7 +270,56 @@ OSRC_FLEET_FORCE="${OSRC_FLEET_FORCE:-0}"
 OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 # Any per-run MCP config temp is removed at script exit (only in the main shell, not in
 # command-substitution subshells where the file may still be needed by a later claude invocation).
-trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
+# The trap CHAINS a pre-existing caller handler instead of replacing it: a suite or wrapper that
+# armed `trap 'rm -rf "$fixture"' EXIT` before sourcing would otherwise lose its cleanup entirely
+# (the leaked-fixture class documented in the test suite). The pending exit status is captured
+# first and re-asserted after both halves, so neither cleanup clobbers the status the script was
+# already exiting with, and the caller's handler still sees that same status in $?.
+_OSRC_CALLER_EXIT="${_OSRC_CALLER_EXIT:-}"
+_osrc_rc_restore() { return "${1:-0}"; }   # set $? to the captured pending status
+_osrc_engine_exit() {
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  _devin_skills_lock_release 2>/dev/null
+  rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null
+  if [ -n "$_OSRC_CALLER_EXIT" ]; then
+    # Re-assert the pending status the script was exiting with: the caller's handler must
+    # see it in $? (e.g. `rc=$?; ...; exit $rc`), not the engine cleanup's last-command
+    # status, or a handler that exits with $? would turn a failing script into exit 0.
+    _osrc_rc_restore "${_osrc_rc:-0}"
+    eval "$_OSRC_CALLER_EXIT"
+  fi
+  return 0
+}
+# _osrc_exit_chain <action>: with no pre-existing EXIT trap, arm <action> plainly (the engine's
+# own cleanup trap verbatim); with a foreign handler, capture it into _OSRC_CALLER_EXIT as its
+# bare action text and arm a chain that runs <action>, then _osrc_engine_exit, which ends by
+# eval'ing the captured handler. When an engine EXIT trap is already in place (either form)
+# the new action composes over its tail, so a re-source or a later engine re-arm never wraps
+# the chain in itself and no handler runs twice.
+_osrc_exit_chain() {  # <action>
+  local _prev
+  _prev="$(trap -p EXIT)"
+  case "$_prev" in
+    *'_osrc_engine_exit'*|*'with-mcp'*)
+      [ "$1" = "_osrc_engine_exit" ] && return 0
+      trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
+    '')
+      if [ "$1" = "_osrc_engine_exit" ]; then
+        trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
+      else
+        trap "$1" EXIT
+      fi ;;
+    *)
+      _prev="${_prev#trap -- }"; _prev="${_prev#trap }"; _prev="${_prev% EXIT}"
+      # _prev is trap -p's single-quoted, eval-safe rendering of the action; decode it to the
+      # bare action text (eval + printf %s is quoting-proof) so it can be run by eval later.
+      _OSRC_CALLER_EXIT="$(eval "printf '%s' $_prev")"
+      [ "$1" = "_osrc_engine_exit" ] \
+        && trap '_osrc_rc=$?; _osrc_engine_exit; exit "$_osrc_rc"' EXIT \
+        || trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
+  esac
+}
+_osrc_exit_chain '_osrc_engine_exit'
 # ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
 # (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
 # lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One
@@ -563,7 +612,9 @@ need_devin() {
   have devin || die "devin CLI not on PATH (~/.local/bin). Install it using the official guide: https://docs.devin.ai/cli"
 }
 
-logged_in() { _timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null | grep -qi "Logged in"; }
+# Capture before matching (here-string): under pipefail a `| grep -q` takes the producer's
+# SIGPIPE (141) as a false negative once the output outgrows the pipe buffer.
+logged_in() { local _au; _au="$(_timeout "${OSRC_DEVIN_AUTH_SECS:-10}" devin auth status 2>/dev/null)" || return 1; grep -qi "Logged in" <<<"$_au"; }
 
 # _timeout <secs> <cmd...> -> run with a wall-clock cap using only bash process control.
 # The same implementation runs on Linux, stock macOS, and Git Bash, so lane health never
@@ -587,8 +638,25 @@ _timeout() {
   # running, and a survivor still holding the inherited stdout keeps a `$(_timeout ...)` capture
   # blocked long after the bound fired — so the timeout appears to work and the caller hangs anyway.
   # A bounded call could therefore block far past its limit. _kill_tree walks the tree deepest-first,
-  # which is the same reason it exists for the job supervisor.
-  ( sleep "$secs" 2>/dev/null
+  # which is the same reason it exists for the job supervisor. The watchdog's own stdout/stderr go to
+  # /dev/null for the same reason: `kill` below reaps the subshell but ORPHANS its `sleep`, and an
+  # inherited capture pipe would stay open until that sleep ended, making every captured or piped
+  # `_timeout` call cost the full bound no matter how fast the child was.
+  # The watchdog owns its timer: the TERM trap kills the `sleep` itself, so reaping the
+  # watchdog from the caller takes the timer down with it and no enumeration is needed.
+  # Enumerating the watchdog's children and killing the list would leave a pid-reuse
+  # window: the timer can exit naturally between enumeration and the kill, and the kill
+  # would land on whatever process recycled the pid. Letting the watchdog kill the pid it
+  # spawned closes the window by construction and costs no subprocess per call. TERM
+  # before the trap installs hits a subshell with no sleep yet, so nothing leaks. Same
+  # trap pattern as conformance.sh's _run_unit_suite_bounded.
+  # The trap reaps via jobs -p rather than the captured $!: a TERM landing between `sleep &` and
+  # `_wd_sleep=$!` would find the variable still empty and exit leaving the timer orphaned for
+  # the full bound; the jobs table knows the child the moment it forks, so the trap reaps it in
+  # either order.
+  ( trap 'kill $(jobs -p) 2>/dev/null; exit 0' TERM
+    sleep "$secs" 2>/dev/null & _wd_sleep=$!
+    wait "$_wd_sleep" 2>/dev/null
     # OSRC_TEST_PS_STATE injects the process state so the zombie-vs-live
     # discriminator can be exercised deterministically. It is honored ONLY under
     # OSRC_TEST_MODE=1 so a stray export can never disable production timeouts.
@@ -603,10 +671,13 @@ _timeout() {
     case "$state" in Z*|"" ) exit 0 ;; esac
     : > "$expired_file"
     _kill_tree "$cmd_pid" 2>/dev/null
-  ) &
+  ) >/dev/null 2>&1 &
   local wd_pid=$!
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
-  kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
+  # TERM fires the watchdog's trap, which reaps the timer itself. No orphan can form:
+  # either the trap ran (timer dead) or the kill landed before `sleep` spawned at all.
+  kill "$wd_pid" 2>/dev/null
+  wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.
   # Once that happens, the timeout owns the result even if a TERM trap exits 0.
@@ -667,7 +738,7 @@ _devin_pid_owned_by_live_job() {
 # Prove that candidate is the recorded delegate child of an outsourcerer job
 # whose supervisor is gone. Unknown/unrecorded processes are never ours to reap.
 _devin_pid_owned_by_dead_job() {
-  local candidate="${1:-}" jd child supervisor recorded_start current_start
+  local candidate="${1:-}" jd child supervisor
   [ -d "$OSRC_JOBS" ] || return 1
   for jd in "$OSRC_JOBS"/*; do
     [ -d "$jd" ] && [ -s "$jd/pid" ] && [ -s "$jd/supervisor_pid" ] || continue
@@ -677,10 +748,12 @@ _devin_pid_owned_by_dead_job() {
     case "$supervisor" in ''|*[!0-9]*) continue ;; esac
     kill -0 "$supervisor" 2>/dev/null && continue
     [ -s "$jd/pid_start" ] || continue
-    recorded_start="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' "$jd/pid_start" 2>/dev/null)"
-    [ -n "$recorded_start" ] || continue
-    current_start="$(_pid_start_identity "$candidate" 2>/dev/null)" || continue
-    [ "$current_start" = "$recorded_start" ] || continue
+    # Identity check, locale-consistent both ways (C-locale record from the current writer or
+    # a plain-locale record from the previous release): rc 0 = the live candidate IS the
+    # recorded job child and its supervisor is dead -> it is our orphaned lane-blocker;
+    # rc 1 = pid recycled -> not ours; rc 2 = cannot tell (garbled/absent record, ps hiccup,
+    # ps-less host) -> leave it alone rather than reap on a guess.
+    _pid_start_file_match "$candidate" "$jd/pid_start" || continue
     printf '%s\n' "$jd"
     return 0
   done
@@ -748,9 +821,11 @@ _devin_zombie_preflight() {
 # deliberately a separate state, never a free-lane-down result.
 _devin_probe_classify() {
   local rc="${1:-1}" text="${2:-}" model="${3:-${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}}"
-  if [ "$rc" -eq 0 ] 2>/dev/null && printf '%s' "$text" | grep -qi 'pong'; then printf 'up'; return; fi
+  # Here-strings, not pipelines: the probe text can outgrow the pipe buffer, and under pipefail
+  # `printf | grep -q` then returns grep's early-exit SIGPIPE (141), flipping a real match to a miss.
+  if [ "$rc" -eq 0 ] 2>/dev/null && grep -qi 'pong' <<<"$text"; then printf 'up'; return; fi
   if _devin_free_own_quota "$model" "$text"; then printf 'free-model-quota-exhausted'; return; fi
-  if printf '%s' "$text" | grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)'; then
+  if grep -qiE 'weekly usage quota has been exhausted|paid[- ]?(acu|tier).*(exhausted|depleted)|acu.*(exhausted|depleted)' <<<"$text"; then
     printf 'paid-tier-exhausted'; return
   fi
   [ "$rc" -eq 124 ] 2>/dev/null && { printf 'down-timeout'; return; }
@@ -761,8 +836,8 @@ _devin_free_own_quota() { # <model> <text>
   local model="${1:-}" text="${2:-}" normalized
   _devin_is_free_model "$model" || return 1
   normalized="$(printf '%s' "$model" | tr '._' '--')"
-  printf '%s' "$text" | grep -qiE "(weekly|free)[ -]?(usage[ -]?)?quota.{0,80}(${model//./\\.}|$normalized)|(${model//./\\.}|$normalized).{0,80}(weekly|free)[ -]?(usage[ -]?)?quota" \
-    && printf '%s' "$text" | grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)'
+  grep -qiE "(weekly|free)[ -]?(usage[ -]?)?quota.{0,80}(${model//./\\.}|$normalized)|(${model//./\\.}|$normalized).{0,80}(weekly|free)[ -]?(usage[ -]?)?quota" <<<"$text" \
+    && grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)' <<<"$text"
 }
 
 # A real, minimal request against the known plan-included model. _timeout is
@@ -840,8 +915,13 @@ _devin_plan_probe_model() {
   # tier), falling back to swe-2 (the known Free model) when the catalog is unavailable or the env
   # override is unset.
   probe="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
-  alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; alt="${alt:-swe-2}"
-  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then probe="$alt"; fi
+  # The alt lookup is a live (bounded) catalog refresh, so it is evaluated only when it will actually
+  # be used: a refusal from any model other than the default probe keeps the default and never needs
+  # the catalog. Evaluating it eagerly made every plan-quota block spend a `devin models list` fetch
+  # on a value it then discarded.
+  if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then
+    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2}"
+  fi
   printf '%s' "$probe"
 }
 
@@ -1292,7 +1372,7 @@ _devin_plan_quota_block() {
       [ -n "$_pq_pline" ] || _pq_pline="$(_devin_quota_refusal_line "$(_lane_probe_file dv)")"
       printf '>>> [devin plan quota] probe: CONFIRMED — free model "%s" was refused with a limit too, so the shared %s plan quota is exhausted — this blocks ALL plan-included models (glm/swe/kimi), %s. %s\n' "$_pq_probe" "$_pq_period" "$scope" "$advice" >&2
       [ -n "$_pq_pline" ] && printf '>>> [devin plan quota] probe: Devin'\''s exact wording on the probe: %s\n' "$_pq_pline" >&2
-      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" || true
+      _lane_down_mark dv "$_pq_ttl" "plan quota exhausted" "${_pq_line}${_pq_pline:+${_pq_line:+ | }probe: $_pq_pline}" || true
       if [ -n "$_pq_secs" ]; then
         printf '>>> [devin plan quota] dv lane marked DOWN for %s, until Devin'\''s stated reset (clear early with: %s posture reset). Dispatch + fallback skip Devin until then.\n' "$(_fmt_secs_human "$_pq_ttl")" "$0" >&2
       else
@@ -1305,8 +1385,12 @@ _devin_plan_quota_block() {
       _failover_signal_write dv "$model" answered "free model $_pq_probe still answers" "" ;;
     *)
       _failover_signal_write dv "$model" inconclusive "refused \"$model\" citing its plan quota, and the free probe did not answer" "$_pq_secs"
-      printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, so it gets the short self-healing transport window (~%s; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_fmt_secs_human "${OSRC_LANE_DOWN_TTL:-300}")" "$0" "$0" "$advice" >&2
-      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" || true ;;
+      _lane_down_mark dv "" "plan quota refusal; free probe unreachable" "${_pq_line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, but it keeps the already-confirmed down mark (%s remaining; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_lane_down_remaining dv)" "$0" "$0" "$advice" >&2
+      else
+        printf '>>> [devin plan quota] probe: INCONCLUSIVE — free model "%s" gave no answer within %ss and no limit wording, so nothing is proven about the shared bucket. Not marking the day-long quota window; the lane is not answering right now, so it gets the short self-healing transport window (~%s; clear early with: %s posture reset). Re-check with: %s doctor. %s\n' "$_pq_probe" "$_pq_probe_secs" "$(_fmt_secs_human "${OSRC_LANE_DOWN_TTL:-300}")" "$0" "$0" "$advice" >&2
+      fi ;;
   esac
   rm -f "$(_lane_probe_file dv)" 2>/dev/null   # consumed: quoted above; no per-PID litter in $OSRC_HOME
   _quota_note_refusal dv "$model" 2>/dev/null || true
@@ -1474,7 +1558,7 @@ _lane_meter_saturated() {
 #      self-healing transport window (OSRC_LANE_DOWN_TTL, 300s), never a day-long block on a guess;
 #   4. reconcile a declared daily cap (no-op unless declared).
 _lane_plan_limit_block() {
-  local lane f="${2:-}" model="${3:-}" advice="${4:-}" name line reset secs="" ttl psecs verdict prc=0 short
+  local lane f="${2:-}" model="${3:-}" advice="${4:-}" name line reset secs="" ttl psecs verdict prc=0 short pline
   lane="$(_lane_plan_key "${1:-}")"; [ -n "$lane" ] || return 0
   if [ "$lane" = dv ]; then
     _devin_plan_quota_block "$f" "$model" "not just \"$model\"" \
@@ -1502,19 +1586,32 @@ _lane_plan_limit_block() {
   verdict="$(_lane_free_probe "$lane")"; prc=$?
   case "$verdict:$prc" in
     limit-refused:*)
+      # _utf8_sanitize after the byte cap: head -c can split a multi-byte character at 160 and the
+      # raw probe file can carry invalid bytes; both would make downstream sed/printf see bad UTF-8.
+      pline=""; [ -s "$(_lane_probe_file "$lane")" ] && pline="$(LC_ALL=C head -c 160 "$(_lane_probe_file "$lane")" | LC_ALL=C tr '\n' ' ' | _utf8_sanitize | LC_ALL=C sed -E 's/[[:space:]]+$//')"
       printf '>>> [%s plan limit] probe: CONFIRMED — %s. %s lane marked DOWN for %s%s (clear early with: %s posture reset). Dispatch + fallback skip it until then. %s\n' \
-        "$lane" "$( [ -s "$(_lane_probe_file "$lane")" ] && head -c 160 "$(_lane_probe_file "$lane")" | tr '\n' ' ' | sed -E 's/[[:space:]]+$//' || printf 'the lane refused the probe with a limit too')" \
+        "$lane" "${pline:-the lane refused the probe with a limit too}" \
         "$lane" "$(_fmt_secs_human "$ttl")" "$( [ -n "$secs" ] && printf ', until its stated reset' || printf ' (an ESTIMATE: no parseable reset; override OSRC_LANE_PLAN_DOWN_TTL)')" "$0" "$advice" >&2
-      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" || true ;;
+      # Evidence = the refused run's own wording + the probe's, same shape as the dv branch: the probe
+      # file is consumed below, so this is the only surviving record of what confirmed the lane down.
+      _lane_down_mark "$lane" "$ttl" "plan limit exhausted" "${line:-}${pline:+${line:+ | }probe: $pline}" || true ;;
     answered:*)
       printf '>>> [%s plan limit] probe: NOT confirmed — the lane still answers, so it stays UP and nothing is marked; "%s" was refused on this run only. %s\n' "$lane" "$model" "$advice" >&2
       _lane_down_clear "$lane" ;;
     *:2)
-      printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. Marking it DOWN only for the short self-healing window (~%s) so dispatch + fallback skip a lane that just refused; if the refusal repeats it re-marks. %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal (unverified: no probe recipe)" "${line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. It was already marked DOWN for a longer confirmed window (%s remaining) — keeping that; dispatch + fallback skip it meanwhile. %s\n' "$lane" "$(_lane_down_remaining "$lane")" "$advice" >&2
+      else
+        printf '>>> [%s plan limit] probe: UNVERIFIED — no cheap probe recipe for this lane yet, so I am not assuming its whole plan window is spent. Marking it DOWN only for the short self-healing window (~%s) so dispatch + fallback skip a lane that just refused; if the refusal repeats it re-marks. %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
+      fi ;;
     *)
-      printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Short self-healing window only (~%s). %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
-      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" || true ;;
+      _lane_down_mark "$lane" "" "plan limit refusal; probe inconclusive" "${line:-}" || true
+      if [ "${_lane_down_mark_result:-}" = kept ]; then
+        printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Already marked DOWN for a longer confirmed window (%s remaining) — keeping that, not downgrading to the self-healing window. %s\n' "$lane" "$(_lane_down_remaining "$lane")" "$advice" >&2
+      else
+        printf '>>> [%s plan limit] probe: INCONCLUSIVE — the meter/probe proved nothing either way. Short self-healing window only (~%s). %s\n' "$lane" "$(_fmt_secs_human "$short")" "$advice" >&2
+      fi ;;
   esac
   case "$verdict:$prc" in
     limit-refused:*) _failover_signal_write "$lane" "$model" confirmed "plan limit spent${secs:+ (resets in $(_fmt_secs_human "$secs"))}" "$secs" ;;
@@ -2339,8 +2436,23 @@ delegate() {
   parse_model "$@"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
+  # The ledger row must classify the task the USER wrote: $prompt also carries the with-pre skill
+  # bundle and (for accept-edits) the non-interactive verification note, whose own wording
+  # ("make the code changes", "verify") flips a simple edit task to code. Same convention as
+  # run_job's "classify from the REAL task text (REST)".
+  local _ledger_task="${REST[*]}"
   _devin_with_prepare   # per-dispatch skill sync for this lane (dies loud on an unhonorable grant)
   [ -n "$DEVIN_WITH_PRE" ] && prompt="$DEVIN_WITH_PRE$prompt"
+  # accept-edits (the `edit` verb) auto-approves file edits, and devin still runs simple read-only
+  # commands, but any exec it wants confirmed is refused in -p mode and the run ends right there
+  # (devin 3000.11: warning on stderr, exit 0). That usually lands on the delegate's own test/build
+  # step after its edits, so say it up front: edits first, and hand verification back instead of
+  # attempting it. OSRC_DEVIN_EDIT_NOTE=0 leaves the prompt untouched.
+  if [ "$perm" = "accept-edits" ] && [ "${OSRC_DEVIN_EDIT_NOTE:-1}" != "0" ]; then
+    prompt="$prompt
+
+Note on this run: it is non-interactive and only file edits are auto-approved. Simple read-only shell commands (cat, ls, grep) run, but any command that needs confirmation (test runners, builds, package managers, deletes, chained cd ... && commands) is refused and ends the run immediately, skipping every remaining step. Make all of your file edits first. Do not run tests or builds; end your reply with the exact verification commands you would run."
+  fi
   _utf8_guard_prompt prompt   # sanitize invalid UTF-8 in the effort-wrapped prompt before it reaches the devin CLI
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
   # ONLY (it is consumed by parse_model, never passed to the devin CLI, which would 'unexpected argument').
@@ -2482,7 +2594,7 @@ delegate() {
   # ledger row never writes, i.e. the undercount reappears invisibly. Default instead.
   # devin is a PLAN lane ($0 cash is genuinely true), so a real 0 cost is honest here.
   local _tier="${tier:-auto}"
-  record_ledger devin "$MODEL" "$_tier" "$_tier" "$prompt" "0.000000" dv 2>/dev/null || true
+  record_ledger devin "$MODEL" "$_tier" "$_tier" "$_ledger_task" "0.000000" dv 2>/dev/null || true
   return "$rc"
 }
 
@@ -2592,10 +2704,12 @@ _codex_image_available() {
   have codex || return 1
   local out
   out="$(codex login status 2>&1)" || return 1
-  printf '%s' "$out" | grep -qi "logged in" || return 1
+  grep -qi "logged in" <<<"$out" || return 1
   out="$(codex features list 2>&1)" || return 1
-  printf '%s' "$out" | grep -qi "image_generation" || return 1
-  printf '%s' "$out" | grep -qi "artifact" || return 1
+  # Here-strings, not pipelines: a feature list longer than the pipe buffer makes
+  # `printf | grep -q` take grep's early-exit SIGPIPE (141) under pipefail, a false miss.
+  grep -qi "image_generation" <<<"$out" || return 1
+  grep -qi "artifact" <<<"$out" || return 1
   _OSRC_CODEX_IMG=1
   return 0
 }
@@ -3030,11 +3144,16 @@ _session_launch_droid() {
   have droid || _session_launch_error "$provider" "droid is not on PATH"
   help_text="$(_session_probe_help droid --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive mode.*default|start.*interactive mode' \
+  # Every capability check below runs grep on a here-string, never a pipeline: under
+  # pipefail, `printf | grep -q` gets SIGPIPE (rc 141) when grep exits on its first match
+  # while the help text still has more than a pipe buffer (~16-64KB) unwritten, which
+  # flipped a healthy probe to the refusal arm. The same shape is used by the cursor,
+  # hermes and cline adapters below.
+  grep -Eqi 'interactive mode.*default|start.*interactive mode' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive mode"
-  printf '%s\n' "$help_text" | grep -Eqi 'exec.*non-interactive|exec.*noninteractively|exec.*scripts/automation' \
+  grep -Eqi 'exec.*non-interactive|exec.*noninteractively|exec.*scripts/automation' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive mode from one-shot exec"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--auto.*low.*medium.*high' \
+  grep -Eqi -- '--auto.*low.*medium.*high' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise bounded interactive autonomy"
   SESSION_LAUNCH=("droid" "--auto" "medium")
   if [ -n "$EFFORT" ]; then
@@ -3112,16 +3231,16 @@ _session_launch_cursor() {
   help_text="$(_session_probe_help "$cli" --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
   if [ "$cli" = "agent" ]; then
-    printf '%s\n' "$help_text" | grep -qi 'cursor' \
+    grep -qi 'cursor' <<<"$help_text" \
       || _session_launch_error "$provider" "the agent executable does not identify itself as Cursor"
   fi
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive (terminal|mode|session)|chat mode.*default|start.*chat mode' \
+  grep -Eqi 'interactive (terminal|mode|session)|chat mode.*default|start.*chat mode' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive chat mode"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--print.*non-interactive|-p.*non-interactive' \
+  grep -Eqi -- '--print.*non-interactive|-p.*non-interactive' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot print mode"
   SESSION_LAUNCH=("$cli")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)' \
+    grep -Eq -- '--model([ =]|$)' <<<"$help_text" \
       || _session_launch_error "$provider" "help does not advertise an interactive model override"
     SESSION_LAUNCH+=("--model" "$MODEL")
   fi
@@ -3158,15 +3277,15 @@ _session_launch_hermes() {
     || _session_launch_error "$provider" "the local help probe failed or timed out"
   chat_help="$(_session_probe_help hermes chat --help)" \
     || _session_launch_error "$provider" "the local chat help probe failed or timed out"
-  printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'REPL|interactive (chat|mode|session)|chat.*interactive' \
+  grep -Eqi 'REPL|interactive (chat|mode|session)|chat.*interactive' <<<"$help_text"$'\n'"$chat_help" \
     || _session_launch_error "$provider" "help does not advertise an interactive REPL or chat"
-  printf '%s\n%s\n' "$help_text" "$chat_help" | grep -Eqi 'one-shot|non-interactive' \
+  grep -Eqi 'one-shot|non-interactive' <<<"$help_text"$'\n'"$chat_help" \
     || _session_launch_error "$provider" "help does not distinguish interactive chat from one-shot mode"
-  printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:]])chat([[:space:]]|$)' \
+  grep -Eqi '(^|[[:space:]])chat([[:space:]]|$)' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise the chat command"
   SESSION_LAUNCH=("hermes" "chat")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    printf '%s\n' "$chat_help" | grep -Eq -- '--model([ =]|$)' \
+    grep -Eq -- '--model([ =]|$)' <<<"$chat_help" \
       || _session_launch_error "$provider" "chat help does not advertise a model override"
     SESSION_LAUNCH+=("--model" "$MODEL")
   fi
@@ -3231,15 +3350,15 @@ _session_launch_cline() {
   have cline || _session_launch_error "$provider" "cline is not on PATH"
   help_text="$(_session_probe_help cline --help)" \
     || _session_launch_error "$provider" "the local help probe failed or timed out"
-  printf '%s\n' "$help_text" | grep -Eqi 'interactive|plan mode|act mode|repl|chat' \
+  grep -Eqi 'interactive|plan mode|act mode|repl|chat' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not advertise an interactive mode"
-  printf '%s\n' "$help_text" | grep -Eqi -- '--plan|--auto-approve|non-interactive|headless' \
+  grep -Eqi -- '--plan|--auto-approve|non-interactive|headless' <<<"$help_text" \
     || _session_launch_error "$provider" "help does not distinguish interactive mode from headless one-shot"
   SESSION_LAUNCH=("cline")
   if [ "$MODEL_EXPLICIT" = "1" ]; then
-    if printf '%s\n' "$help_text" | grep -Eq -- '--model([ =]|$)'; then
+    if grep -Eq -- '--model([ =]|$)' <<<"$help_text"; then
       SESSION_LAUNCH+=("--model" "$MODEL")
-    elif printf '%s\n' "$help_text" | grep -Eq '(^|[[:space:],])-m([[:space:],]|$)'; then
+    elif grep -Eq '(^|[[:space:],])-m([[:space:],]|$)' <<<"$help_text"; then
       SESSION_LAUNCH+=("-m" "$MODEL")
     else
       _session_launch_error "$provider" "help does not advertise an interactive model override"
@@ -4977,6 +5096,45 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
   return 1
 }
 
+# _utf8_sanitize : stdin bytes -> stdout containing only VALID UTF-8. ASCII passes through,
+# complete multi-byte sequences pass, anything else (stray continuation bytes, invalid leads,
+# overlong encodings, a sequence split by a preceding `head -c` cap) is dropped, so callers can
+# byte-cap a string without storing a partial character. Byte-exact under LC_ALL=C on BSD + GNU:
+# `od -tu1` emits decimal bytes and awk's `%c` re-emits each kept byte raw.
+_utf8_sanitize() {
+  LC_ALL=C od -An -v -tu1 | LC_ALL=C awk '
+    { for (i = 1; i <= NF; i++) b[++k] = $i + 0 }
+    END {
+      i = 1
+      while (i <= k) {
+        c = b[i]
+        # NUL is dropped explicitly rather than left to sprintf("%c", 0): what that
+        # emits is unspecified across awks (BSD awk emits nothing, gawk emits a raw
+        # NUL), and a stored NUL silently truncates evidence on downstream readers.
+        if (c == 0) { i++; continue }
+        if (c < 128) { out = out sprintf("%c", c); i++; continue }
+        need = 0
+        if (c >= 194 && c <= 223) need = 2
+        else if (c >= 224 && c <= 239) need = 3
+        else if (c >= 240 && c <= 244) need = 4
+        if (need == 0) { i++; continue }
+        if (i + need - 1 > k) break
+        # Restricted second byte: reject overlongs (E0<A0, F0<90), UTF-16 surrogates
+        # (ED>A0) and the >U+10FFFF cap (F4>8F) so only strictly valid UTF-8 survives.
+        lo = 128; hi = 191
+        if (c == 224) lo = 160; else if (c == 237) hi = 159
+        if (c == 240) lo = 144; else if (c == 244) hi = 143
+        ok = 1
+        if (b[i+1] < lo || b[i+1] > hi) ok = 0
+        for (j = 2; ok && j < need; j++) if (b[i+j] < 128 || b[i+j] > 191) { ok = 0; break }
+        if (!ok) { i++; continue }
+        for (j = 0; j < need; j++) out = out sprintf("%c", b[i+j])
+        i += need
+      }
+      printf "%s", out
+    }'
+}
+
 # ---- LANE-DOWN marker (sibling of the quota exhausted-until marker) ----------------------------
 # A lane can be UNREACHABLE without being at-cap: the Devin free GLM probe times out, or a
 # sandboxed-proxy TLS reject makes the whole devin lane unusable. doctor already detects this, but
@@ -4990,15 +5148,60 @@ _quota_marker_active() {  # <lanekey> <model> -> rc0 if an unexpired marker exis
 # so the gate refusal, brief and status can say what took the lane down and for how long, instead of
 # the generic "probe/transport verdict" + a fixed 300s that is wrong for a day-long quota window. No
 # reason -> any stale reason file is dropped so a later transport outage is never labeled a quota block.
-_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason]
+# A fourth arg preserves the matched refusal line itself as `<lane>.down-evidence`, so a later dispute
+# ("was the lane really down?") can read the provider's own words instead of trusting a bare label;
+# the run's stderr capture is consumed by then, so this is the only surviving record.
+# An unexpired LONGER mark wins over a shorter UNATTRIBUTED re-mark: a transport verdict
+# (doctor/TLS) or an inconclusive probe firing inside a confirmed quota window would otherwise cut
+# the TTL and erase the reason/evidence that justify it. Keep-longer yields only to a re-mark
+# carrying BOTH an explicit ttl AND a reason -- the provider's own stated reset -- which replaces
+# the current mark as a unit (window, reason, evidence together). Extending past the current mark
+# still works (new until > old), and posture reset / _lane_down_clear remain the early-clear
+# paths. Callers that print the outcome read _lane_down_mark_result (set/kept/noop).
+_lane_down_mark() {  # <lane-or-disp> [ttl-secs] [reason] [evidence]; result in _lane_down_mark_result
   local lane; lane="$(_quota_lane_key "$1")"
+  _lane_down_mark_result="noop"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
   local ttl="${2:-${OSRC_LANE_DOWN_TTL:-300}}"
   case "$ttl" in ''|*[!0-9]*) ttl=300 ;; esac
   local until; until="$(( $(date +%s) + ttl ))"
+  local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
+  # Keep-longer yields only to an AUTHORITATIVE re-mark: an explicit TTL AND a reason together
+  # mean the provider stated the reset itself. A reason alone is not authority -- the
+  # inconclusive probe callers pass a reason with NO ttl ("free probe unreachable",
+  # "unverified: no probe recipe", "probe inconclusive"), and letting those replace a confirmed
+  # window would silently downgrade an 11h provider-stated quota mark to the 300s default and
+  # swap its evidence for a weaker explanation. _lane_down_mark_result=kept lets the caller's
+  # printed line stay true: no new mark was written, the longer one still stands.
+  if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
+    case "$cur" in ''|*[!0-9]*) ;; *) [ "$cur" -gt "$until" ] && { _lane_down_mark_result="kept"; return 0; } ;; esac
+  fi
+  # Evidence is sanitized at the sink so anything a future caller passes stays safe for
+  # `posture status` to cat raw; the *_line extractors already clean their own output, this just
+  # cannot regress behind their backs. LC_ALL=C throughout: under a UTF-8 locale BSD sed aborts
+  # ("illegal byte sequence") on hostile input and the evidence vanished. Order matters: ANSI CSI
+  # strip first (the control-byte strip would eat the ESC byte and break detection); fold
+  # newline/CR/tab to spaces (a raw newline would let evidence forge extra posture rows); strip
+  # remaining control bytes; _explain_redact secrets (evidence is quoted provider stderr and can
+  # carry tokens); 400-byte cap; _utf8_sanitize so the cap or hostile input never leaves a split
+  # or invalid byte sequence in the stored value.
+  local ev=""
+  if [ -n "${4:-}" ]; then
+    local esc; esc="$(printf '\033')"
+    ev="$(printf '%s' "$4" | LC_ALL=C sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" | LC_ALL=C tr '\011\012\015' '   ' | LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C _explain_redact | LC_ALL=C head -c 400 | _utf8_sanitize)"
+  fi
+  # Write .down FIRST, aux after: _lane_down_purge_expired drops aux only when .down is absent at
+  # re-check, and .down landing before aux is what makes that check safe -- an absent .down proves
+  # no in-flight mark has committed aux yet (they land after it), so aux deleted there can only be
+  # the stale set being replaced. (Crash-mid-mark can still leave .down without aux; that residual
+  # is unavoidable without a single-file mark and is the benign direction: the lane is skipped
+  # with the generic reason rather than aux orphaned under a different mark's .down.)
+  _posture_set "$lane" "down" "$until"
   if [ -n "${3:-}" ]; then _posture_set "$lane" "down-reason" "$3" 2>/dev/null || true
   else rm -f "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null; fi
-  _posture_set "$lane" "down" "$until"
+  if [ -n "$ev" ]; then _posture_set "$lane" "down-evidence" "$ev" 2>/dev/null || true
+  else rm -f "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null; fi
+  _lane_down_mark_result="set"
 }
 _lane_down_reason() {  # <lane-or-disp> -> the recorded reason, or the generic transport wording
   local lane v; lane="$(_quota_lane_key "$1")"
@@ -5028,11 +5231,34 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
   case "$v" in ''|*[!0-9]*) return 1 ;; esac
   local now; now="$(date +%s)"
   if [ "$v" -gt "$now" ]; then return 0; fi
-  # Expired -> purge on read, VALUE-MATCHED (same hardening as _quota_marker_active): only delete if
-  # the file still holds the expired value we read, so a sibling's fresh marker in the race is kept.
-  local cur; cur="$(_posture_get "$lane" "down" 2>/dev/null)"
-  [ "$cur" = "$v" ] && rm -f "$OSRC_POSTURE_DIR/$lane.down" 2>/dev/null
+  # Expired -> purge on read (gates + rationale live with _lane_down_purge_expired).
+  _lane_down_purge_expired "$lane" "$v"
   return 1
+}
+
+# Remove an expired down mark + its aux files for a purge that already read value <v>. Two gates
+# keep it safe against a concurrent _lane_down_mark, which writes .down FIRST and aux after:
+#   1) value-match: .down is unlinked only while it still holds the expired value it read (same
+#      hardening as _quota_marker_active), so a fresh mark whose .down already landed is never
+#      deleted by a stale read;
+#   2) aux gate: reason/evidence are dropped only when .down is still ABSENT at re-check. Under
+#      the .down-first order an absent .down proves no in-flight mark has committed aux yet (aux
+#      lands after .down), so whatever aux is removed belongs to the mark being purged -- a fresh
+#      mark's aux can never be deleted from under its live .down, and an explanation never
+#      outlives the mark it explains (stale quota wording on an up lane).
+# Residual (the same check-then-delete limit _quota_marker_active accepts): a fresh .down landing
+# in the microsecond between the value-match re-read and the rm can still be unlinked -- losing
+# the WHOLE mark, fail-open, self-heals on the next refusal -- but it can never leave a live mark
+# stripped of its aux. _lane_down_clear and `posture reset` remove .down too, so a race with
+# either can only leave aux orphans, which this gate re-cleans on the next expired purge.
+_lane_down_purge_expired() {  # <lane> <expired-value-we-read>
+  local cur; cur="$(_posture_get "$1" "down" 2>/dev/null)"
+  [ "$cur" = "$2" ] && rm -f "$OSRC_POSTURE_DIR/$1.down" 2>/dev/null
+  # Explicit existence test, NOT _posture_get's exit status: a read FAILURE (permissions,
+  # transient I/O) on a marker that still exists must not be treated as "absent" — aux files
+  # of a live marker must survive. Only a genuinely absent .down (purged above, or never
+  # re-written by an in-flight mark) justifies dropping the aux records.
+  [ -f "$OSRC_POSTURE_DIR/$1.down" ] || rm -f "$OSRC_POSTURE_DIR/$1.down-reason" "$OSRC_POSTURE_DIR/$1.down-evidence" 2>/dev/null
 }
 # Clear a lane's down marker early — used when an authoritative live probe (doctor) just proved the
 # lane answers, so a still-unexpired marker from an earlier verdict doesn't outlive reality. The TTL
@@ -5040,7 +5266,7 @@ _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exist
 _lane_down_clear() {  # <lane-or-disp>
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 0
-  rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" 2>/dev/null
+  rm -f "$OSRC_POSTURE_DIR/$lane.down" "$OSRC_POSTURE_DIR/$lane.down-reason" "$OSRC_POSTURE_DIR/$lane.down-evidence" 2>/dev/null
 }
 
 # Mark <model> on <lane> exhausted until the next reset, from a REAL provider quota refusal. No-op
@@ -5764,6 +5990,11 @@ _obligation_guard_begin() { # <id> <session-id>
 }
 _obligation_guard_end() {
   trap - EXIT INT TERM
+  # Never re-arm the saved traps inside a subshell: `trap -p` there reports the
+  # parent's handlers as an inherited view, so eval'ing the saved text would arm
+  # them in a shell that exits at once, firing engine cleanup and any chained
+  # caller handler in the wrong process.
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
   [ -n "${_OBLIGATION_GUARD_EXIT:-}" ] && eval "$_OBLIGATION_GUARD_EXIT"
   [ -n "${_OBLIGATION_GUARD_INT:-}" ] && eval "$_OBLIGATION_GUARD_INT"
   [ -n "${_OBLIGATION_GUARD_TERM:-}" ] && eval "$_OBLIGATION_GUARD_TERM"
@@ -6035,7 +6266,9 @@ _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fall
     output="$(cat "$out_file" 2>/dev/null)"
     rm -f "$out_file" 2>/dev/null || true
     [ "$rc" -eq 0 ] || continue
-    printf '%s' "$output" | grep -q '[^[:space:]]' || continue
+    # here-string, not a pipeline: the emptiness check must not inherit pipefail's rc 141
+    # (SIGPIPE once the reply outgrows the pipe buffer) and `continue` away a valid name.
+    grep -q '[^[:space:]]' <<<"$output" || continue
     printf '%s' "$output"
     return 0
   done
@@ -6311,12 +6544,55 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}"
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _sf _mrc
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
-      state="$(_fleet_classify "$(printf '%s' "$job" | jq -r '.status // "unknown"')")"
+      jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      jstatus="${jstatus#"${jstatus%%[![:space:]]*}"}"; jstatus="${jstatus%"${jstatus##*[![:space:]]}"}"
+      state="$(_fleet_classify "$jstatus")"
+      if [ "$state" = "blocked" ]; then
+        # `blocked` in the fleet vocabulary means "LIVE, parked on a prompt". The job
+        # statuses that map there are written only as a job dies (post-wait, or between
+        # _kill_job and the exit file landing), so they usually describe a TERMINAL job
+        # and a dead process is not waiting on anyone. Reporting it live makes the
+        # blind-turn guard tell the user to answer a pane for a process that already
+        # exited, on every run/edit/bg/loop call until the job dir is cleaned. Show it
+        # as `stopped` (the fleet's existing stopped-needs-a-look state); state_evidence
+        # keeps the raw status so fleet ls still says WHAT it stopped on. Terminality
+        # needs positive evidence: an exit file, or every recorded process pid gone.
+        # When neither is provable (no exit file, no pid recorded, or a pid still live)
+        # keep `blocked`: the fleet errs toward reporting possibly-live work. A pid file
+        # must hold exactly one unsigned integer to count as evidence: garbage or
+        # multi-line content is unverifiable, and unverifiable is not dead.
+        if [ -f "$d/exit" ]; then
+          state=stopped
+        else
+          _jpid="$(cat "$d/pid" 2>/dev/null)"; _jspid="$(cat "$d/supervisor_pid" 2>/dev/null)"
+          _jpid="${_jpid#"${_jpid%%[![:space:]]*}"}"; _jpid="${_jpid%"${_jpid##*[![:space:]]}"}"
+          _jspid="${_jspid#"${_jspid%%[![:space:]]*}"}"; _jspid="${_jspid%"${_jspid##*[![:space:]]}"}"
+          case "$_jpid" in ''|*[!0-9]*) _jpid="" ;; esac
+          case "$_jspid" in ''|*[!0-9]*) _jspid="" ;; esac
+          if [ -n "$_jpid$_jspid" ]; then
+            # Same liveness discipline as _reconcile_status: kill -0 can match a recycled
+            # pid, so a live pid is only the job's process while its recorded *_start
+            # matches the live start time. _pid_start_file_match is locale-consistent both
+            # ways (C-locale records from the current writer, plain-locale records from the
+            # previous release) and returns 2 when identity cannot be decided at all —
+            # unreadable record, ps hiccup, ps-less host — which keeps the job reported.
+            _alive=0
+            for _p in "$_jpid" "$_jspid"; do
+              [ -n "$_p" ] || continue
+              kill -0 "$_p" 2>/dev/null || continue
+              if [ "$_p" = "$_jpid" ]; then _sf="$d/pid_start"; else _sf="$d/supervisor_pid_start"; fi
+              _mrc=0; _pid_start_file_match "$_p" "$_sf" || _mrc=$?
+              [ "$_mrc" != 1 ] && _alive=1   # 0 = same process; 2 = cannot disprove -> alive
+            done
+            [ "$_alive" = 0 ] && state=stopped
+          fi
+        fi
+      fi
       item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
         {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
          requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,
@@ -6629,6 +6905,53 @@ _pid_start_identity() {
     return 2
   fi
   return 1
+}
+
+# _pid_start_projection <lstart-line> -> "day|clock|year", the locale-independent identity core.
+# ps localizes the weekday/month NAMES (and some locales reorder day and month), but the clock,
+# the day-of-month number and the year are the same tokens in every locale — and they carry
+# exactly lstart's 1-second resolution, so two renders of the same process always agree on this
+# triple and a genuinely different start time always differs. Empty output = nothing usable.
+_pid_start_projection() {
+  local t day="" clock="" year=""
+  set -- $1
+  for t in "$@"; do
+    case "$t" in
+      [0-9][0-9]:[0-9][0-9]:[0-9][0-9]) clock="$t" ;;
+      [0-9][0-9][0-9][0-9]) year="$t" ;;
+      [0-9]|[0-9].|[0-9][0-9]|[0-9][0-9].) day="${t%%[!0-9]*}" ;;
+    esac
+  done
+  printf '%s|%s|%s' "$day" "$clock" "$year"
+}
+
+# _pid_start_file_match <pid> <start-file> -> 0 same process; 1 provably different (pid reused);
+# 2 cannot tell. Locale-consistent reader for $jd/pid_start and $jd/supervisor_pid_start: the
+# file may hold the LC_ALL=C rendering (what _supervise writes) OR a plain-locale rendering of
+# the SAME process (job dirs written by the previous release; possibly under a DIFFERENT locale
+# than the reader's env), so identity is decided on the locale-independent projection first and
+# the raw either-rendering comparison is kept as the fallback for records the projection cannot
+# parse. rc 2 covers absent/empty/garbled records and hosts whose `ps` cannot report lstart at
+# all: callers must keep counting the pid as alive (identity cannot disprove). Compare with
+# _pid_start_identity, whose callers store and compare their OWN C-locale values in memory; this
+# helper is only for the two on-disk job files.
+_pid_start_file_match() {
+  local pid="$1" file="$2" rec live_c live_plain prec lc pl
+  local norm='s/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g'
+  [ -n "$pid" ] && [ -f "$file" ] || return 2
+  rec="$(sed "$norm" "$file" 2>/dev/null)"
+  [ -n "$rec" ] || return 2
+  live_c="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  if [ -z "$live_c" ] && [ -z "$live_plain" ]; then return 2; fi
+  prec="$(_pid_start_projection "$rec")"
+  lc="$(_pid_start_projection "$live_c")"
+  pl="$(_pid_start_projection "$live_plain")"
+  if [ -n "$prec" ]; then
+    if [ -n "$lc" ] && [ "$prec" = "$lc" ]; then return 0; fi
+    if [ -n "$pl" ] && [ "$prec" = "$pl" ]; then return 0; fi
+  fi
+  [ "$rec" = "$live_c" ] || [ "$rec" = "$live_plain" ]
 }
 
 _heartbeat_pid_state() { # <pid> -> prints the ps stat= marker (empty on unreadable/unsupported)
@@ -7308,7 +7631,13 @@ _heartbeat_beacon() {
     2) return 0 ;;
     *) echo "outsourcerer: heartbeat ownership unknown; preserving the existing leader" >&2; return 1 ;;
   esac
-  trap '_heartbeat_stop "$token"' EXIT
+  # A plain heartbeat-stop trap unless a foreign caller handler was captured at
+  # source time; the chain composes stop with that handler when one exists.
+  if [ -n "$_OSRC_CALLER_EXIT" ]; then
+    _osrc_exit_chain '_heartbeat_stop "$token"'
+  else
+    trap '_heartbeat_stop "$token"' EXIT
+  fi
   trap 'exit 0' INT TERM
   while :; do
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
@@ -7962,7 +8291,9 @@ _confident_fail() {
     # a violation; an invalid ERE is our fault, not the model's — skip it, never fire a misleading
     # contract:no-match on every call. Probe validity once on empty input first.
     if printf '' | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null; [ $? -le 1 ]; then
-      printf '%s' "$a" | grep -Eq -- "$OSRC_CONTRACT_RE" 2>/dev/null
+      # Here-string: the answer is unbounded, and `printf | grep -q` would take grep's early-exit
+      # SIGPIPE (141) under pipefail, turning a matched contract into a spurious clean bill.
+      grep -Eq -- "$OSRC_CONTRACT_RE" <<<"$a" 2>/dev/null
       case $? in 1) echo "contract:no-match"; return 0 ;; esac
     fi
   fi
@@ -8468,11 +8799,13 @@ cmd_suggest() {
 # Only ready lanes are ever offered to the user (Terra UX: never tour install paths for a lane they
 # lack). Best-effort + fast; a slow probe (OpenRouter credits) is time-capped.
 _ready_lanes() {
-  local lanes="" ld dlm cred rem _rp
+  local lanes="" ld dlm cred rem _rp _au
   _rp="$(_lane_ready_probe local 2>/dev/null)" && lanes="$lanes $_rp"
   # Devin probes (auth + live model list) hit the network; cap them so `brief` can't stall the
   # handshake for 10-30s on a slow backend. OSRC_BRIEF_TIMEOUT overrides (default 5s each).
-  if have devin && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null | grep -qi "Logged in"; then
+  # The auth output is captured before matching: `cmd | grep -q` under pipefail returns grep's
+  # early-exit SIGPIPE (141) as a miss once the reply outgrows the pipe buffer.
+  if have devin && _au="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null)" && grep -qi "Logged in" <<<"$_au"; then
     dlm="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" bash -c 'devin --model "__list__" -p "x" </dev/null 2>&1 | grep -i "^Available:"' 2>/dev/null)"
     printf '%s' "$dlm" | grep -qiE 'glm|swe' && lanes="$lanes devin=glm/swe"
   fi
@@ -9115,7 +9448,9 @@ _frontier_needed() {
   local task="$1" effort="$2" lc
   [ "$effort" = "max" ] && return 0
   lc="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
-  printf '%s' "$lc" | grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof'
+  # Here-string, not `printf | grep -q`: the task text is unbounded, and once it outgrows the pipe
+  # buffer grep's early exit SIGPIPEs printf, which pipefail reports as a miss on a present cue.
+  grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof' <<<"$lc"
 }
 
 # _score <base> <tier> <category> <effort> <difficulty> <model> -> selection score.
@@ -9945,6 +10280,9 @@ _kill_job() {
 # detector's own pattern line back into its log. A watchdog whose source is its own trip-wire kills
 # whoever works on it.
 _printmode_needle() { printf 'chisel::repl::handler: Print mode: %s tool %s that requires confirmation' 'rejecting' 'exec'; }
+# Newer devin CLIs (observed on 3000.11) no longer hang on that reject: they print this warning to
+# stderr, end the session, and exit 0. Assembled at runtime for the same self-match reason as above.
+_noninteractive_reject_needle() { printf 'warning: %s a tool call that requires confirmation. Running in %s mode' 'rejected' 'non-interactive'; }
 _perm_needles() {
   printf '(%s|%s|%s)' \
     "requested permis""sions to" \
@@ -10133,9 +10471,16 @@ _supervise() {
   # guards below can fire — and _status_line's delegate-pid `kill -0` would still report "running".
   # Recording the supervisor pid lets _status_line detect a dead watchdog over a live orphan.
   echo "$$" > "$jd/supervisor_pid"
-  ps -o lstart= -p "$$" 2>/dev/null | tr -s ' ' > "$jd/supervisor_pid_start" 2>/dev/null || true
+  # Both start-time files are written under LC_ALL=C in the exact normalized form
+  # _pid_start_identity produces, so every reader agrees regardless of the user's locale
+  # (ps localizes lstart; a plain-locale write vs a C-locale read never matches). Job dirs
+  # written by the previous release (plain-locale records) are still read correctly: the
+  # readers go through _pid_start_file_match, which accepts either rendering of the SAME
+  # live process.
+  LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
   # Record start time for PID-reuse detection.
-  local _stime; _stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '%s' "$t0")"
+  local _stime; _stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  _stime="${_stime:-$t0}"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
@@ -10191,7 +10536,7 @@ _supervise() {
   local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
-    local _live_stime; _live_stime="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ' || printf '')"
+    local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
       echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
@@ -10320,8 +10665,11 @@ _supervise() {
     # If devin's log format ever changes, the check simply no-ops and the 15-min byte-growth stall-kill
     # (still in place) reaps the hang instead — slower, but correct.
     if [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] && [ "$(cat "$jd/status" 2>/dev/null)" != "permission-blocked" ]; then
-      if tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null \
-           | grep -aq "$(_printmode_needle)"; then
+      # Capture the tail before matching: log lines are unbounded, so once the tail outgrows the
+      # pipe buffer `tail | grep -q` takes grep's early-exit SIGPIPE (141) under pipefail and a
+      # real print-mode hang reads as a miss.
+      local _pm_scan; _pm_scan="$(tail -n "${OSRC_PRINTMODE_TAIL:-25}" "$jd/out.log" 2>/dev/null)"
+      if grep -aq "$(_printmode_needle)" <<<"$_pm_scan"; then
         echo "permission-blocked" > "$jd/status"
         printf 'permission-blocked:print-mode-hang\n' > "$jd/reason" 2>/dev/null || true
         echo "[outsourcerer] ABORT job $(basename "$jd"): devin print-mode rejected a tool exec that requires confirmation — a headless delegate cannot prompt, so it will hang silently. Re-run with 'yolo' (bypassPermissions), or restructure the prompt so the delegate ends on a file write (move validation/commit/PR creation to the orchestrator)." >&2
@@ -10443,13 +10791,48 @@ _supervise() {
       printf '%s\n' "$_btxt" > "$jd/reason" 2>/dev/null || true
       return 3 ;;
   esac
+  # DEVIN NON-INTERACTIVE REJECT (post-exit). A current devin CLI that rejects a tool call needing
+  # confirmation prints _noninteractive_reject_needle, ends the session and exits 0, so without this
+  # the job reads as `done?` and nothing says the delegate stopped before its remaining steps (usually
+  # the verification run). That is the permission-blocked state. Anchoring mirrors the print-mode
+  # check: tail only, devin lane only (another lane quoting the line is not devin stopping), exit-0
+  # only (a nonzero child keeps its real code on the exit-nonzero path below), and a delegate that
+  # went on to sign OSRC::DONE is taken at its word. The lane comes from meta.json when it exists;
+  # meta.json is jq-written, so without jq it is absent -- fall back to the provider env run_job
+  # exports or the mapping silently never fires.
+  local _jlane=""; [ -f "$jd/meta.json" ] && have jq && _jlane="$(jq -r '(.lane // .provider // "")' "$jd/meta.json" 2>/dev/null)"
+  _jlane="${_jlane:-${OUTSOURCERER_PROVIDER:-}}"
+  # Normalize the lane token before comparing: the env fallback can carry a case/whitespace
+  # variant (an inherited OUTSOURCERER_PROVIDER is not guaranteed jq-clean), and a variant that
+  # fails the exact match silently disables the mapping on the very job that needs it.
+  _jlane="$(printf '%s' "$_jlane" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  local _pm_tail="${OSRC_PRINTMODE_TAIL:-25}"; case "$_pm_tail" in ''|*[!0-9]*) _pm_tail=25 ;; esac
+  # Strip ANSI CSI before the fixed-string match: a colorized warning styles `warning:` as its
+  # own span (ESC[33m ... ESC[0m), which inserts escape bytes INSIDE the needle and makes a
+  # contiguous -F needle miss it entirely -- the blocked run then reads as done?. The same
+  # strip the down-evidence sanitizer uses.
+  local _esc; _esc="$(printf '\033')"
+  # The tail is captured before the -q match: log lines are unbounded, so `tail | sed | grep -q`
+  # can SIGPIPE the producers on grep's early exit and pipefail turns a real reject into a miss.
+  local _pm_scan; _pm_scan="$(tail -n "$_pm_tail" "$jd/out.log" 2>/dev/null | LC_ALL=C sed -E "s/${_esc}\\[[0-9;]*[A-Za-z]//g")"
+  if [ "$rc" -eq 0 ] && [ "$last" != "OSRC::DONE" ] && [ "${OSRC_NO_PRINTMODE_ABORT:-0}" != "1" ] \
+     && { [ "$_jlane" = "dv" ] || [ "$_jlane" = "devin" ]; } \
+     && grep -aqF "$(_noninteractive_reject_needle)" <<<"$_pm_scan"; then
+    echo "permission-blocked" > "$jd/status"
+    printf 'permission-blocked:noninteractive-reject\n' > "$jd/reason" 2>/dev/null || true
+    echo "[outsourcerer] job $(basename "$jd"): devin rejected a tool call that needs confirmation and ended the run (non-interactive mode). Work before that point may have landed; the step it was attempting did not run. Run that step yourself, re-run with 'yolo', or use 'session' when the delegate must run tests." >&2
+    echo 3 > "$jd/exit"
+    return 3
+  fi
   # Output-token exhaustion is a distinct, recoverable failure, but engines report it as a generic
   # non-zero exit with the partial answer still sitting in the log. Left unnamed it reads as "the run
   # broke"; the operator keeps the truncated output and never learns the result was cut, not wrong.
   # Scanned in the TAIL only: a real cut-off is the LAST thing in the log, whereas prose that merely
   # mentions truncation (a delegate discussing an API response, or reading a log containing the phrase)
   # lands mid-run and gets pushed out. Same anchoring discipline as the print-mode detector.
-  if [ "$rc" -ne 0 ] && tail -n 15 "$jd/out.log" 2>/dev/null | grep -aqiE 'response truncated|max output token limit|finish_reason.*length'; then
+  # Same capture-then-match: a 15-line tail of long log lines can still exceed the pipe buffer,
+  # and `tail | grep -q` would then miss a real token-limit cut via producer SIGPIPE (141).
+  if [ "$rc" -ne 0 ] && grep -aqiE 'response truncated|max output token limit|finish_reason.*length' <<<"$(tail -n 15 "$jd/out.log" 2>/dev/null)"; then
     echo failed > "$jd/status"
     printf 'output-token-limit\n' > "$jd/reason" 2>/dev/null || true
     echo "[outsourcerer] job $(basename "$jd") hit the model's OUTPUT-TOKEN limit — the answer in out.log is CUT SHORT, not complete. Do not treat it as the result. Re-run split into smaller batches, or tell the delegate to WRITE ITS FINDINGS TO A FILE and end with a short summary instead of printing everything — in that case also ask it to print a periodic 'OSRC::PROGRESS <step>' line, or a long silent run looks identical to a hang and gets stopped." >&2
@@ -11224,7 +11607,7 @@ run_job() {
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
   OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
-    "$SCRIPT_PATH" ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
+    "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
   # Worktree receipt: record base/head SHA + dirty/ahead so the orchestrator can inspect or integrate
   # deterministically. NEVER auto-remove — the worktree is preserved until an explicit `cleanup`.
@@ -11313,31 +11696,28 @@ _reconcile_status() {
   # while flagged would otherwise keep that flag forever because nothing writes a terminal status for it.
   case "$st" in
     running|stalled\?|exploring\?|no-progress-writes)
-      local _jpid _spid _alive=0 _live_stime _saved_stime
+      local _jpid _spid _alive=0 _mrc
       _jpid="$(cat "$jd/pid" 2>/dev/null)"
       if [ -n "$_jpid" ] && kill -0 "$_jpid" 2>/dev/null; then
-        _live_stime="$(ps -o lstart= -p "$_jpid" 2>/dev/null | tr -s ' ')"
-        _saved_stime="$(cat "$jd/pid_start" 2>/dev/null | tr -s ' ')"
         # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
-        # pid REUSE. So an empty live start-time (a transient `ps` glitch on a genuinely live pid) must
-        # NOT flip it to dead — that would fail-unsafe, letting the heartbeat abandon live work on a
-        # momentary ps hiccup. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT start time.
-        { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+        # pid REUSE. _pid_start_file_match is locale-consistent both ways (C-locale record from the
+        # current writer, plain-locale record from the previous release) and returns 2 when identity
+        # cannot be decided — an empty/garbled saved record, a transient `ps` glitch on a genuinely
+        # live pid, or a host whose `ps` cannot report lstart at all. Any of those must NOT flip a
+        # kill-0-alive pid to dead: that would fail-unsafe, letting the heartbeat abandon live work
+        # on a momentary ps hiccup. Declare dead only on rc 1 (ps returned a DIFFERENT start time).
+        _mrc=0; _pid_start_file_match "$_jpid" "$jd/pid_start" || _mrc=$?
+        [ "$_mrc" != 1 ] && _alive=1
       fi
       if [ "$_alive" = "0" ]; then
         _spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
         if [ -n "$_spid" ] && kill -0 "$_spid" 2>/dev/null; then
           # Same pid-reuse discipline as the delegate: a recycled supervisor pid must not resurrect
-          # a dead job just because some unrelated process now holds that number.
-          _live_stime="$(ps -o lstart= -p "$_spid" 2>/dev/null | tr -s ' ')"
-          _saved_stime="$(cat "$jd/supervisor_pid_start" 2>/dev/null | tr -s ' ')"
-          # kill -0 above already PROVED this pid is alive; the start-time compare only defends against
-          # pid REUSE. An empty live start-time (a transient `ps` glitch, or a host whose `ps` cannot
-          # report lstart at all) must NOT flip a kill-0-alive pid to dead — that fail-unsafe would let
-          # the heartbeat abandon live work. Declare dead only when ps SUCCESSFULLY returns a DIFFERENT
-          # start time. (On a ps-less host, saved_stime is empty too, so the first clause keeps it alive
-          # via kill -0 alone — pid-reuse detection is simply unavailable there, an accepted platform limit.)
-          { [ -z "$_saved_stime" ] || [ -z "$_live_stime" ] || [ "$_live_stime" = "$_saved_stime" ]; } && _alive=1
+          # a dead job just because some unrelated process now holds that number. Same fail-safe
+          # direction: rc 2 (identity undecidable, incl. ps-less hosts where the record is empty)
+          # keeps the kill-0-alive supervisor counting as ours.
+          _mrc=0; _pid_start_file_match "$_spid" "$jd/supervisor_pid_start" || _mrc=$?
+          [ "$_mrc" != 1 ] && _alive=1
         fi
       fi
       if [ "$_alive" = "0" ]; then
@@ -11694,8 +12074,9 @@ _classify_job() {
     # and the old `case "$reason" in *print-mode*` never matched -- wedge:print-mode-hang was dead
     # code. Scan out.log tail for the same assembled needle the runtime watchdog uses
     # (_printmode_needle) so the post-hoc verdict stays consistent with the runtime detection.
-    if [ -s "$jd/out.log" ] && tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null \
-         | grep -aq "$(_printmode_needle)"; then
+    # Captured before matching for the same reason as the runtime check above: pipefail turns
+    # `tail | grep -q` producer SIGPIPE (141) into a miss on a log tail with long lines.
+    if [ -s "$jd/out.log" ] && grep -aq "$(_printmode_needle)" <<<"$(tail -n "${OSRC_CLASSIFY_TAIL:-200}" "$jd/out.log" 2>/dev/null)"; then
       printf 'RETRY-DIFFERENT-LANE\twedge:print-mode-hang'
     else
       printf 'RETRY-DIFFERENT-LANE\twedge:permission-blocked'
@@ -12189,8 +12570,11 @@ _crew_worktree_clean() {
 _crew_scan_staged() {
   # --text/--no-ext-diff/--no-textconv defeat a worker-planted .gitattributes that would hide or
   # execute during the diff. Patterns cover current key shapes (sk-proj-, github_pat_, xox*, AKIA).
-  git -C "$1" diff --cached --text --no-ext-diff --no-textconv 2>/dev/null \
-    | grep -Eq 'OPENROUTER_API_KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bpoas]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  # The diff is captured before matching: a staged diff larger than the pipe buffer would SIGPIPE
+  # git on grep's early exit, and pipefail would then report a planted key as "clean" (rc 141).
+  local _sd
+  _sd="$(git -C "$1" diff --cached --text --no-ext-diff --no-textconv 2>/dev/null)" || return 1
+  grep -Eq 'OPENROUTER_API_KEY|sk-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bpoas]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AWS_SECRET[_A-Z]*|-----BEGIN [A-Z ]*PRIVATE KEY-----' <<<"$_sd"
 }
 
 # crew --check '<cmd>' [fanout routing flags] -- "task1" "task2" ...
@@ -12784,7 +13168,7 @@ $body"
   #   warp   → oz
   # Mapping provider==CLI directly would false-positive on warp/cursor (blocks working installs)
   # and false-negative on cursor (a `cursor` shim can exist while cursor-agent is absent).
-  local _dp_prov _dp_cli _pi
+  local _dp_prov _dp_cli _pi _dp_ahelp=""
   for _pi in "${!labels[@]}"; do
     _pep="${g_prov:-${a_prov[$_pi]}}"; _dp_prov="${_pep:-$PROVIDER}"
     case "$_dp_prov" in
@@ -12809,8 +13193,11 @@ $body"
       *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
-      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate)
-      if [ "$_dp_prov" = "cursor" ] && have agent && agent --help 2>/dev/null | grep -qi cursor; then
+      # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate).
+      # The help text is captured first and matched via a here-string: under pipefail a
+      # `cmd | grep -q` pipeline reports grep's early-exit SIGPIPE (141) as a miss once the
+      # help output outgrows the pipe buffer, and a real Cursor agent would be refused.
+      if [ "$_dp_prov" = "cursor" ] && have agent && _dp_ahelp="$(agent --help 2>/dev/null)" && grep -qi cursor <<<"$_dp_ahelp"; then
         continue
       fi
       die "fanout: lane '$_dp_prov' requires the $_dp_cli CLI on PATH — not found. Install it before launching a fanout on this lane, or pick a different --provider. Nothing was started."
@@ -12864,8 +13251,11 @@ _so_nums() { grep -oE '[0-9]+([.][0-9]+)?' 2>/dev/null | sort -u; }
 # veto set ("cant","wont") would never match and a direct contradiction ("you can deploy" vs "you
 # can't deploy") would score as agreement — the exact unsafe false-agree this guards against.
 _so_has_neg() {
-  tr 'A-Z' 'a-z' | tr -d "'’" \
-    | grep -qwE 'no|not|never|none|cannot|cant|dont|doesnt|wont|isnt|arent|wasnt|werent|shouldnt|wouldnt|couldnt|didnt|hasnt|havent|hadnt|without|avoid|refuse|deny|denies|disable|disabled|false|incorrect'
+  # Slurp stdin before the -q match: the answers piped in are unbounded, and once the stream
+  # outgrows the pipe buffer grep's early exit SIGPIPEs tr, which pipefail reports as "no
+  # negation" -- a false-agreement in the unsafe direction.
+  local _t; _t="$(tr 'A-Z' 'a-z' | tr -d "'’")"
+  grep -qwE 'no|not|never|none|cannot|cant|dont|doesnt|wont|isnt|arent|wasnt|werent|shouldnt|wouldnt|couldnt|didnt|hasnt|havent|hadnt|without|avoid|refuse|deny|denies|disable|disabled|false|incorrect' <<<"$_t"
 }
 # _so_agree <answer1> <answer2> -> 0 when the two answers are the SAME answer (safe to return
 # without the paid judge), 1 when they materially differ (escalate). Deterministic, $0, no LLM.
@@ -13674,8 +14064,11 @@ delegate_cursor() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="${MODEL:-}"
-  local cur=""
-  if have cursor-agent; then cur="cursor-agent"; elif have agent && agent --help 2>/dev/null | grep -qi cursor; then cur="agent"; fi
+  local cur="" _cahelp=""
+  # The `agent` fallback probe captures --help before matching (here-string): under pipefail,
+  # `agent --help | grep -q` returns grep's early-exit SIGPIPE (141) once help outgrows the
+  # pipe buffer, misidentifying a real Cursor agent as foreign and refusing the lane.
+  if have cursor-agent; then cur="cursor-agent"; elif have agent && _cahelp="$(agent --help 2>/dev/null)" && grep -qi cursor <<<"$_cahelp"; then cur="agent"; fi
   [ -n "$cur" ] || die "cursor-agent CLI not on PATH (Cursor lane). Install it using the official guide: https://cursor.com/docs/cli/installation. Then run 'cursor-agent login' once (or set CURSOR_API_KEY)."
   # cursor-agent autonomy: default headless = propose-only; -f/--force = apply edits/commands.
   # --trust skips the workspace-trust prompt that would wedge a headless run.
@@ -14468,8 +14861,11 @@ _OSRC_GATE_SPECS
   # never legitimately pasted, so — unlike the count-only keyword scan above — they HARD-BLOCK by
   # default. Opt out with OSRC_SECRET_ALLOW_VALUE=1 for the rare deliberate case. The value itself is
   # never printed (only the refusal). Reference secrets by NAME, not value, when delegating.
+  # Here-string, not `printf | grep -q`: $scan is the whole prompt + --with files (unbounded), and
+  # once it outgrows the pipe buffer grep's early exit SIGPIPEs printf, which pipefail reports as
+  # "no secret" -- the hard-block would wave a real credential through to a cloud lane.
   if [ "${OSRC_SECRET_ALLOW_VALUE:-0}" != "1" ] \
-     && printf '%s\n' "$scan" | grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'; then
+     && grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' <<<"$scan"; then
     die "CLOUD GATE: a live secret VALUE (API key / token / private key) is in the prompt or a --with file — refusing the cloud route so it doesn't leave your machine. Reference the secret by NAME instead of pasting its value, or set OSRC_SECRET_ALLOW_VALUE=1 if you truly intend to send it."
   fi
 }
@@ -14979,7 +15375,10 @@ _is_transport_failure() {
   # router telling us the lane is gone. Same words, opposite meaning, and no regex separates them —
   # so name the resource kinds that make it task output and take them off the table first.
   local _scan="$stderr"
-  if printf '%s' "$_scan" | grep -qiE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/'; then
+  # Every match below runs on a here-string, not `printf | grep -q`: stderr is unbounded, and once
+  # it outgrows the pipe buffer grep's early exit SIGPIPEs the producer, which pipefail reports as
+  # a miss (rc 141) -- a real transport signature would classify as a task failure.
+  if grep -qiE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/' <<<"$_scan"; then
     _scan="$(printf '%s' "$_scan" | grep -viE 'no endpoints found for (service|svc|endpoints|ep|pod|po|deployment|deploy|statefulset|daemonset|ds|ingress|node|job|cronjob)/')"
   fi
 
@@ -14993,16 +15392,16 @@ _is_transport_failure() {
   #  the real cause. (2) Phrases made of ordinary English ("no endpoints found", "key limit exceeded")
   #  are things a DELEGATED TASK legitimately prints — kubectl output, a KV-store test — so they are
   #  either line-anchored or shaped tightly enough that task prose cannot satisfy them.
-  if printf '%s' "$_scan" | grep -qiE \
-'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found for [a-z0-9._-]+/[a-z0-9._:-]+$|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|^[[:space:]]*(error: )?(key|credit) limit exceeded|insufficient credits|requires more credits|api error:? *\(?(408|409|425|429|5[0-9][0-9])'; then
+  if grep -qiE \
+'econnrefused|etimedout|econnreset|enetunreach|ehostunreach|(name or service not known|temporary failure in name resolution)|authentication_error|overloaded_error|model_not_found|context_length_exceeded|no endpoints found for [a-z0-9._-]+/[a-z0-9._:-]+$|http/[0-9.]+ [45][0-9][0-9]|\(code [45][0-9][0-9]\)|[45][0-9][0-9] server error.{0,40}for url|operation timed out after|429 .{0,20}rate.?limit|^[[:space:]]*(error: )?(key|credit) limit exceeded|insufficient credits|requires more credits|api error:? *\(?(408|409|425|429|5[0-9][0-9])' <<<"$_scan"; then
     return 0
   fi
   #  PASS 2 -- HUMAN-READABLE phrases. A real CLI emits these as their OWN diagnostic line (leading the line,
   #  optionally behind a bare "error: " wrapper); ordinary failed-task stderr only ever EMBEDS them mid-sentence
   #  ("AssertionError: connection refused should be rendered..."). So every one is LINE-ANCHORED. This is what
   #  stops the prose-false-positive class wholesale (a false positive here would blind-RETRY a mutating task).
-  if printf '%s' "$_scan" | grep -qiE \
-'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?(408|409|425|429|5[0-9][0-9])|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))'; then
+  if grep -qiE \
+'^[[:space:]]*(error: )?(connection (refused|reset|error|failed|closed|timed ?out)|could(n.t| not) connect|network (error|is unreachable|is down)|no route to host|(ssh: )?could not resolve host:|curl: \([0-9]+\)|(tls|ssl) (handshake|error|certificate|routines|alert)|error sending request|http (error |status )?[45][0-9][0-9]|[45][0-9][0-9] (too many requests|unauthorized|forbidden|bad gateway|service unavailable|gateway time-?out|internal server error)|api error:? *\(?(408|409|425|429|5[0-9][0-9])|authentication[ _]?(required|failed|error)|status[ _]?code[:= ]+[45][0-9][0-9]|(invalid|expired|missing|no valid).{0,15}(api.?key|auth token|bearer token|credential|authorization header)|rate.?limit(ed)?[ :]+(error|exceeded|reached|hit)|quota (exceeded|exhausted)|provider returned error|context.?length (exceeded|too long)|maximum context length|token limit exceeded|(request|read|connect) timed out|socket hang up$|gateway time-?out|deadline (has )?(elapsed|exceeded)|upstream (error|timed out|connect error)|stream disconnected|stream reset by peer|stream (closed|interrupted|ended) (before|unexpectedly|prematurely|during)|empty response from (the )?(server|upstream|api)|no response from (the )?(server|model|upstream)|model not found|model (is )?(unavailable|not available|does not exist|overloaded))' <<<"$_scan"; then
     return 0
   fi
   return 1
@@ -15020,18 +15419,21 @@ _is_transport_failure() {
 # ordinary task/test prose, so an anywhere-in-text match is false-positive-safe.
 _is_sandboxed_proxy_tls_failure() {
   local text="$1"
+  # Here-strings, not `printf | grep -q` pipelines: a devin CLI log can far outgrow the pipe
+  # buffer, and grep's early exit would then SIGPIPE the producer, which pipefail turns into a
+  # miss (rc 141) on a present signature.
   # PASS 1 (machine tokens, anywhere in text): rustls_platform_verifier + an OSStatus cert-verify
   # code on the same log scan. Both tokens are emitted only by devin's TLS verify path against an
   # untrusted peer cert and never appear in task/test output.
-  if printf '%s' "$text" | grep -qiE 'rustls_platform_verifier' && \
-     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+  if grep -qiE 'rustls_platform_verifier' <<<"$text" && \
+     grep -qiE 'OSStatus -[0-9]+' <<<"$text"; then
     return 0
   fi
   # PASS 2 (corroborated): chisel_cloud_bridge handoff retries + an OSStatus cert-verify code.
   # The chisel tunnel is devin's cloud ACP transport; an OSStatus cert failure there is the same
   # root cause surfaced through a different log line. Require BOTH tokens to stay narrow.
-  if printf '%s' "$text" | grep -qiE 'chisel_cloud_bridge' && \
-     printf '%s' "$text" | grep -qiE 'OSStatus -[0-9]+'; then
+  if grep -qiE 'chisel_cloud_bridge' <<<"$text" && \
+     grep -qiE 'OSStatus -[0-9]+' <<<"$text"; then
     return 0
   fi
   return 1
@@ -15233,7 +15635,7 @@ _fallback_is_transport() {
 # an uninstalled CLI costs nothing, and charging it against the bound would make the bound mean
 # "N minus however many lanes you don't have". Unknown lane codes (incl. image lanes) -> not ready.
 _fallback_lane_ready() {
-  local k="" _fl _ff=""
+  local k="" _fl _ff="" _au=""
   # A lane marked DOWN (probe/transport verdict, self-healing TTL) is not a retry target — the whole
   # point of the marker is that this lane cannot answer right now regardless of CLI/key presence.
   # Checked BEFORE the descriptor delegation so a DOWN lane is refused even when it is ported (its
@@ -15246,7 +15648,9 @@ _fallback_lane_ready() {
     dv) have devin || return 1
         # Bounded login probe: delegate() hard-fails on a logged-out devin, which would end the
         # whole retry walk; screen it here instead. 5s cap so a wedged CLI can't stall the walk.
-        _timeout 5 devin auth status 2>/dev/null | grep -qi "logged in" || return 1 ;;
+        # Capture-then-match (here-string) so a large reply cannot turn grep's early exit into a
+        # pipefail SIGPIPE miss.
+        _au="$(_timeout 5 devin auth status 2>/dev/null)" && grep -qi "logged in" <<<"$_au" || return 1 ;;
     tokenrouter) k="${TOKENROUTER_API_KEY:-}"; [ -n "$k" ] || k="$(_extract_kv_value TOKENROUTER_API_KEY)"
         [ -n "$k" ] || return 1 ;;
     *)  return 1 ;;
@@ -16946,7 +17350,9 @@ _session_infer_provider() {
 # was never in `droid --help`, fell through into the prompt, and the run billed Claude quota on the
 # DEFAULT model (claude-opus-5). Verifying the real --help (never truncated) is the only proof.
 _session_help_has_model_flag() {
-  printf '%s\n' "$1" | grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)'
+  # Here-string, not a pipeline: help text is never truncated, so it can outgrow the pipe buffer
+  # and `printf | grep -q` would take grep's early-exit SIGPIPE (141) under pipefail as a miss.
+  grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)' <<<"$1"
 }
 
 # _session_assert_model_pinnable <provider> <cli> [help-args...] -> probe the real CLI help and
@@ -17670,7 +18076,9 @@ _session_relaunch_command() { # <provider> <model> <effort>
 _session_droid_effort_supported() {
   local help_text
   help_text="$(_session_probe_help droid --help)" || return 1
-  printf '%s\n' "$help_text" | grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort'
+  # Here-string, not a pipeline: under pipefail a `printf | grep -q` reports grep's early-exit
+  # SIGPIPE as a false negative once the help text outgrows the pipe buffer.
+  grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort' <<<"$help_text"
 }
 
 _session_relaunch_effort() { # <provider> <model> <effort>
@@ -18143,10 +18551,34 @@ _blind_turn_guard() {
     printf '>>> [outsourcerer] blind-turn guard: fleet snapshot freshness is UNKNOWN, so stale blocked state was not used. Refresh supervision before relying on this view.\n' >&2
     return 0
   fi
+  # The caller's own Claude Code session is in the snapshot too, as a cc-peer, and while it waits on
+  # a long tool call it can read as unresponsive?. The guard must not tell the orchestrator that its
+  # own session needs it. The snapshot's `self` field is relative to whichever process collected it
+  # (usually the heartbeat beacon), so identify the caller here: by the peer's PID being one of this
+  # process's ancestors, or by CLAUDE_CODE_SESSION_ID. A bare sid match is NOT proof of self when the
+  # ancestor walk works: the env var is inherited by every process the session spawns (a tmux server,
+  # later panes), so a shell in such a pane shares the sid while the real session is a different,
+  # possibly stuck, peer. With a usable walk, require the sid-matched row's pid to also be an
+  # ancestor (or the row to have no pid) before excluding it.
+  local self_sid="${CLAUDE_CODE_SESSION_ID:-}" self_anc="" self_anc_usable=false
+  case "$snapshot" in *'"cc-peer"'*)
+    self_anc=" $(_fleet_self_ancestors 2>/dev/null) "
+    # A usable walk yields real ancestors beyond the starting pid itself. Where `ps -o ppid=` is
+    # unsupported (Git Bash) it returns only the starting pid, which can prove nothing about a
+    # row's pid; there the sid match alone must keep excluding, as before.
+    [ "$(printf '%s' "$self_anc" | wc -w | tr -d ' ')" -ge 2 ] 2>/dev/null && self_anc_usable=true ;;
+  esac
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
-  needs="$(printf '%s' "$snapshot" | jq -r '
+  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" --argjson self_anc_usable "$self_anc_usable" '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
+    def caller: (.pid // null) as $p | .owner == "cc-peer"
+      and (($p != null and ($self_anc | contains(" " + ($p | tostring) + " ")))
+           or ($self_sid != "" and .session_id == $self_sid
+               and ($self_anc_usable == false
+                    or $p == null
+                    or ($self_anc | contains(" " + ($p | tostring) + " ")))));
     .items[]
+    | select(caller | not)
     | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")
     | (if (.state == "blocked?" or .state == "blocked") then "needs-you" else "maybe-stuck" end) + "\t"
       + (.owner // "unknown") + "\t"
@@ -18405,7 +18837,7 @@ EOF
   [ -n "$names" ] || { echo "  no local MCP servers found in ~/.claude.json (any scope)"; return 0; }
   local s def type url cmd
   for s in $names; do
-    if printf '%s\n' "$existing" | grep -qx "$s"; then echo "  = $s (already in Devin)"; continue; fi
+    if grep -qx "$s" <<<"$existing"; then echo "  = $s (already in Devin)"; continue; fi
     def="$(printf '%s' "$merged" | jq -c --arg s "$s" '.[$s]')"
     type="$(printf '%s' "$def" | jq -r 'if .type then .type elif .url then "http" else "stdio" end')"
     if [ "$type" = "http" ] || [ "$type" = "sse" ]; then
@@ -18548,7 +18980,9 @@ doctor() {
     if have codex; then
       _ppt=""; _prc=0
       _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" 2>&1)" || _prc=$?
-      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+      # The reply is captured, so match it via a here-string: a reply larger than the pipe buffer
+      # would otherwise make `printf | grep -q` take SIGPIPE (141) under pipefail and read as "down".
+      if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
         echo "      codex-native luna: READY (probed just now, answered)"
       else
         case "$_ppt" in
@@ -18564,7 +18998,7 @@ doctor() {
     if have claude; then
       _ppt=""; _prc=0
       _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" 2>&1)" || _prc=$?
-      if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+      if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
         echo "      claude-native haiku: READY (probed just now, answered)"
       else
         case "$_ppt" in
@@ -18773,7 +19207,7 @@ doctor() {
     # until then say plainly that the plan/ACU figure lives on the web dashboard.
     local _dhelp=""
     _dhelp="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin help 2>/dev/null)" || true
-    if printf '%s\n' "$_dhelp" | grep -qwE '^[[:space:]]+usage'; then
+    if grep -qwE '^[[:space:]]+usage' <<<"$_dhelp"; then
       _du="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin usage 2>&1)" || _durc=$?
       if [ "$_dstate" != "paid-tier-exhausted" ]; then
         if [ "$(_devin_probe_classify "$_durc" "$_du")" = "paid-tier-exhausted" ]; then
@@ -19471,7 +19905,23 @@ main() {
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
   unset OSRC_PREFLIGHT
-  if [ "${1:-}" = "--osrc-preflight-internal" ]; then OSRC_PREFLIGHT=1; shift; fi
+  # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
+  # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
+  # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
+  # child, so a delegate that runs outsourcerer itself would see its guard silently disabled; and
+  # delegate_codex's own error text tells users to export it, which would switch the guard off for
+  # every run they launch after. A private argv sentinel cannot leak through the environment.
+  local _job_child=0
+  # Consume leading internal sentinels in ANY order. Each emitter adds exactly one today, but a
+  # caller composing both (or adding a third later) must not strand the second sentinel at $1,
+  # where it falls through to "looks like a flag, not a subcommand".
+  while :; do
+    case "${1:-}" in
+      --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
+      --osrc-job-child-internal)   _job_child=1; shift ;;
+      *) break ;;
+    esac
+  done
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
@@ -19587,6 +20037,15 @@ main() {
   # bg/fanout launch with "route preflight returned non-zero" — the tool refusing to start the very
   # work that would clear the backlog. Preflight returns its own dispatch rc untouched.
   if [ "${OSRC_PREFLIGHT:-0}" = "1" ]; then
+    return "$_cmd_rc"
+  fi
+  # Same for the child a supervised job runs (run_job re-enters this script as `<verb> ...` under
+  # _supervise, flagged by the --osrc-job-child-internal sentinel consumed above). That child IS
+  # the delegated work, not an orchestrator turn ending, and _supervise reads its exit code as the
+  # delegate's. Running the guard here let a finished delegate exit 7 whenever unrelated fleet
+  # state needed attention, so a job with a complete deliverable was recorded as failed with
+  # reason exit-nonzero:rc=7.
+  if [ "$_job_child" = "1" ]; then
     return "$_cmd_rc"
   fi
   case "$cmd" in

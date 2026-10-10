@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# test_timeout_capture.sh : a fast `_timeout` child must not cost the full bound,
+# and a reaped watchdog must not leave its timer process behind.
+#
+# The diagnosed failure: the watchdog subshell inherited the caller's
+# stdout/stderr. `kill` reaped the subshell but ORPHANED its `sleep`, and the
+# orphan held a captured or piped stdout open until the bound elapsed, so every
+# `x="$(_timeout N ...)"` measured N seconds (5.03s on bash 3.2 for N=5),
+# which is what pushed the lane-down TTL 10s late in CI.
+#
+# The second pin: the orphaned `sleep` itself. Even with its output detached it
+# still burns the rest of the bound as a child of init: one orphan per fast
+# call. _timeout must kill its timer, not just its watchdog shell.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$HERE/../outsourcerer.sh"
+[ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
+
+FIXTURE="$(mktemp -d "$PWD/.test-timeout-capture.XXXXXX")"
+trap 'rm -rf "$FIXTURE"' EXIT
+export OSRC_HOME="$FIXTURE/home"
+mkdir -p "$OSRC_HOME"
+
+pass=0; fail=0
+ok()  { echo "PASS: $1"; pass=$((pass+1)); }
+bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+
+set --; . "$SRC" >/dev/null 2>&1
+
+# --- captured fast call returns well under the bound ---
+SECONDS=0
+x="$(_timeout 5 true)"
+[ "$SECONDS" -lt 3 ] \
+  && ok "captured \`_timeout 5 true\` returns in ${SECONDS}s (<3s), not the bound" \
+  || bad "captured _timeout took ${SECONDS}s, the watchdog still holds the caller's pipe open"
+
+# --- captured output survives the private file round-trip ---
+out="$(_timeout 5 echo hello)"
+[ "$out" = hello ] \
+  && ok "captured output is intact" \
+  || bad "captured output mangled: '$out'"
+
+# --- piped form gets the same treatment ---
+out="$(_timeout 5 echo hi | cat)"
+[ "$out" = hi ] \
+  && ok "piped _timeout output is intact" \
+  || bad "piped output mangled: '$out'"
+
+# --- the bound still fires: rc=124, and the child does not outrun its kill ---
+SECONDS=0
+_timeout 2 sleep 30 >/dev/null 2>&1; rc=$?
+[ "$rc" = 124 ] && [ "$SECONDS" -lt 8 ] \
+  && ok "the bound still fires: rc=124 in ${SECONDS}s, child reaped" \
+  || bad "bound misfired: rc=$rc elapsed=${SECONDS}s"
+
+# --- no stray timer sleep survives a fast call ---
+# The child sleeps 0.5s so the watchdog is deterministically inside `sleep`
+# when it is reaped. With an instant child the kill can land before the timer
+# even execs, which makes this check racy. The duration is derived from THIS
+# shell's pid so two runs of the suite never share it: the old fixed 44.4 made
+# the scan machine-global, and an orphan legitimately leaked by an earlier run
+# (e.g. the fail-before leg of a bisection, against the pre-reap engine) would
+# still be alive ~44s later and false-fail the next run's scan. With a
+# $$-unique duration, any process matching the scan belongs to THIS run by
+# construction. The leaked sleep reparents to init when its watchdog subshell
+# dies, so a literal child-of-$$ check can never see it — scan the whole table
+# for our unique duration, and ALSO check direct children so a future structure
+# that leaves the timer as our own child is caught the same way. `ps -ef` is
+# what _descendants itself falls back to when pgrep is absent: same layout
+# caveat, same availability story on Git Bash.
+STRAY_SECS="44.$$"
+SECONDS=0
+x="$(_timeout "$STRAY_SECS" sleep 0.5)"
+[ "$SECONDS" -lt 5 ] \
+  && ok "a captured call returns when its CHILD exits (${SECONDS}s), not when the bound does" \
+  || bad "captured call stalled ${SECONDS}s, an orphan is still holding the pipe"
+sleep 1
+scan="$(ps -ef 2>/dev/null | awk -v pp="$$" -v s="$STRAY_SECS" '
+  NR==1 { for(i=1;i<=NF;i++){u=toupper($i); if(u=="PID")pc=i; else if(u=="PPID")ppc=i} next }
+  pc {
+    if ($NF==s && $(NF-1) ~ /(^|\/)sleep$/) stray=stray" "$pc
+    if (ppc && $ppc==pp && ($NF==s || $(NF-1)==s) && ($NF ~ /(^|\/)sleep$/ || $(NF-1) ~ /(^|\/)sleep$/)) own=own" "$pc
+  }
+  END { print "stray:" stray; print "own:" own }')"
+if [ -z "$scan" ]; then
+  echo "SKIP: process table unreadable here; stray-sleep leak check not exercised"
+else
+  stray="$(printf '%s\n' "$scan" | sed -n 's/^stray: *//p')"
+  own="$(printf '%s\n' "$scan" | sed -n 's/^own: *//p')"
+  [ -z "$stray" ] \
+    && ok "no \`sleep $STRAY_SECS\` survives a fast call (timer killed, not orphaned to init)" \
+    || bad "orphan timer sleep leaked per call: pids$stray"
+  [ -z "$own" ] \
+    && ok "no stray sleep left as a child of the test shell" \
+    || bad "stray sleep child(ren) of the test shell: pids$own"
+fi
+
+# --- the reap must not trust enumerated pids ---
+# The child-enumeration fix had a pid-reuse window: between reading the watchdog's
+# descendants and killing them, the timer could exit naturally and its pid could be
+# recycled, so `kill` would land on an innocent process. Reaping must be
+# self-contained: TERM the watchdog, and the watchdog's own trap kills the timer it
+# spawned. Prove it by poisoning _descendants: if the reap consulted the enumeration,
+# these innocent pids would die.
+sleep 63.1 & sentinel_a=$!
+sleep 63.2 & sentinel_b=$!
+sleep 0.2
+( _descendants() { printf '%s\n%s\n' "$sentinel_a" "$sentinel_b"; }
+  x="$(_timeout 5 true)" )
+sleep 0.5
+ok_a=0; ok_b=0
+kill -0 "$sentinel_a" 2>/dev/null && ok_a=1
+kill -0 "$sentinel_b" 2>/dev/null && ok_b=1
+[ "$ok_a" = 1 ] && [ "$ok_b" = 1 ] \
+  && ok "reap ignores enumerated pids: innocent processes survive" \
+  || bad "reap killed processes named by the enumeration (pid-reuse kill window)"
+kill "$sentinel_a" "$sentinel_b" 2>/dev/null; wait "$sentinel_a" "$sentinel_b" 2>/dev/null
+
+# --- the TERM trap must reap the timer even if TERM lands between `sleep &` and `$!` ---
+# A kill delivered in that microsecond window found _wd_sleep still empty and exited the
+# watchdog leaving the timer orphaned for the full bound. The trap is lifted VERBATIM from
+# the engine and run with the timer spawned but its $! deliberately never recorded -- the
+# exact losing interleaving. Whatever trap text the engine carries is what gets exercised.
+STRAY2=51.37
+trapline="$(awk '/^_timeout\(\)/{f=1} f && /^[[:space:]]*\( trap/{sub(/^[[:space:]]*\([[:space:]]*/,""); print; exit}' "$SRC")"
+case "$trapline" in trap*TERM*) : ;; *) { echo "FAIL: could not extract the watchdog trap from $SRC"; exit 1; } ;; esac
+( eval "$trapline"; sleep "$STRAY2" & wait ) & wd2=$!
+sleep 0.4
+kill "$wd2" 2>/dev/null; wait "$wd2" 2>/dev/null
+sleep 0.5
+stray="$(ps -ef 2>/dev/null | awk -v s="$STRAY2" '$NF==s && $(NF-1) ~ /(^|\/)sleep$/ {print $2}')"
+[ -z "$stray" ] \
+  && ok "watchdog TERM reaps its timer even when \$! was never recorded (jobs -p trap)" \
+  || bad "TERM in the & -> \$! window orphaned the timer: pids $stray"
+[ -n "$stray" ] && kill $stray 2>/dev/null
+
+echo
+echo "RESULT: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

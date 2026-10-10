@@ -83,6 +83,28 @@ got="$(_reconcile_status dead-suprecycle)"
   && ok "a recycled supervisor pid does not resurrect a dead job" \
   || bad "recycled supervisor pid reported the job as '$got' (liveness fails open)"
 
+# Start-time identity must be locale-consistent: ps LOCALIZES lstart, so a pid_start written by
+# the previous release under a non-English locale (plain `ps -o lstart=`) must still match the
+# live process it recorded; only a genuinely different start time proves death. Real sleep,
+# killed by pid. Not `locale -a | grep -q`: under pipefail the early-exiting grep SIGPIPEs the
+# large output; capture and match instead.
+sleep 60 & _rl_pid=$!
+_locs="$(locale -a 2>/dev/null)"
+case "$_locs" in
+  *"fr_FR.UTF-8"*)
+    mkjob rl-fr-live running
+    echo "$_rl_pid" > "$OSRC_JOBS/rl-fr-live/pid"
+    LC_TIME=fr_FR.UTF-8 ps -o lstart= -p "$_rl_pid" 2>/dev/null | tr -s ' ' > "$OSRC_JOBS/rl-fr-live/pid_start"
+    got="$(_reconcile_status rl-fr-live)"
+    [ "$got" = "running" ] \
+      && ok "a plain-locale (fr_FR) pid_start still matches its live process through reconciliation" \
+      || bad "fr_FR pid_start flipped a LIVE job to '$got' (locale mismatch killed the identity match)"
+    rm -rf "$OSRC_JOBS/rl-fr-live"
+    ;;
+  *) echo "SKIP: fr_FR.UTF-8 locale not installed; plain-locale reconcile case not exercised" ;;
+esac
+kill -KILL "$_rl_pid" 2>/dev/null; wait "$_rl_pid" 2>/dev/null; _rl_pid=""
+
 
 # --- A slow setup phase is not a dead job. --------------------------------------------------------
 # `git worktree add` on a large repo runs BEFORE the supervisor writes a pid or out.log, which is the
@@ -182,7 +204,10 @@ OSRC_NOINIT_SECS=2 OSRC_POLL=1 _supervise "$jdok" 10 15 30 -- sh -c \
 
 # The check must use POSIX -newer: -newermt @epoch is a GNU extension that BSD find fails to parse,
 # which would make this guard quietly dead on macOS — passing tests, protecting nothing.
-grep -v '^[[:space:]]*#' "$SRC" | grep -q -- '-newermt' && bad "filesystem-progress check uses the GNU-only -newermt" \
+# Capture-then-grep (never `| grep -q`): under `set -o pipefail`, grep -q closing the pipe early can
+# SIGPIPE a producer the size of this de-commented source and flip the pipeline status.
+_noc="$(grep -v '^[[:space:]]*#' "$SRC")"
+grep -q -- '-newermt' <<<"$_noc" && bad "filesystem-progress check uses the GNU-only -newermt" \
   || ok "filesystem-progress check is POSIX (-newer), so it works on BSD find too"
 
 
