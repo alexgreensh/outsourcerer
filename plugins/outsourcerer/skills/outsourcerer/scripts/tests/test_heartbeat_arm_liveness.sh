@@ -265,14 +265,14 @@ chmod +x "$FAKE_JOB"
   ZOMB_SH="$zomb_dir/zombifier.sh"
   cat > "$ZOMB_SH" <<'SH'
 #!/usr/bin/env bash
-( exit 0 ) &                     # exits immediately; the exec'd parent below never reaps it
+( sleep 1; exit 0 ) &            # outlives the exec below, so bash is gone before it exits and cannot reap it
 printf '%s\n' "$!" > "$ZPID_FILE"
 exec sleep 20                    # sleep cannot wait(): the exited child stays a zombie
 SH
   chmod +x "$ZOMB_SH"
-  # The fixture is racy under load: the exiting subshell can be reaped by its parent bash before
-  # the exec'd sleep takes over, leaving no corpse. Retry with a fresh zombifier until one
-  # materializes (up to 5 attempts x ~5s of condition polling each).
+  # The child must exit AFTER the parent has exec'd sleep: a child that exits first is reaped by
+  # its parent bash and leaves no corpse. The retry stays as a backstop (up to 5 attempts x ~5s
+  # of condition polling each).
   zomb_proc=""; zomb_pid=""
   attempt=0
   while [ "$attempt" -lt 5 ]; do
