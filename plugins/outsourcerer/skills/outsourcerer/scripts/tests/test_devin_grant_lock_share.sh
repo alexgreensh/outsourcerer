@@ -17,7 +17,11 @@
 #   - a dead joiner never keeps the lock alive, and pid-less debris (a holder killed between
 #     mkdir and its pid write) is reaped once it is old, never left to wedge the lane;
 #   - a queued job writes $OSRC_JOB_DIR/lockwait while waiting and removes it once it holds the lock;
-#   - classify never treats a job-control notice, or a no-init job, as a deliverable.
+#   - the bg watchdog, driven for real, does not count a lock queue as no-init, and the hard timeout
+#     still fires while queued;
+#   - a contended lock writes nothing stray into the job log;
+#   - classify never treats a job-control notice, an engine shell diagnostic, or a no-init job as a
+#     deliverable.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -136,9 +140,28 @@ if wait_for "$TD/jobq/lockwait"; then ok "a queued job writes lockwait while it 
 touch "$TD/release-D"; wait "$DPID"; wait "$QPID"; qrc=$?
 [ "$qrc" -eq 0 ] && [ ! -e "$TD/jobq/lockwait" ] && ok "lockwait is removed once the job holds the lock" \
   || bad "lockwait left behind or queued job failed (rc=$qrc)"
-grep -q '\[ "\$initialized" = "0" \] && \[ -f "\$jd/lockwait" \] && { qt0=\$now; last_change=\$now; }' "$SRC" \
-  && ok "the bg watchdog restarts its clocks while lockwait is present" \
-  || bad "watchdog does not honor lockwait (a queued job would be killed as no-init)"
+
+# --- 7a. the bg watchdog, driven for real: a lock queue is not a no-init, the hard bound still is -----
+# A fake delegate stands in for a queued dispatch: it writes lockwait, stays silent past the no-init
+# deadline, clears lockwait, then answers. Same _supervise call shape as test_nowrite_watchdog.sh.
+mkjd() { local jd="$OSRC_HOME/jobs/$1"; mkdir -p "$jd" "$TD/w-$1"
+  printf '{"verb":"run","lane":"dv","cwd":"%s","model":"x","started":%s}' "$TD/w-$1" "$(date +%s)" > "$jd/meta.json"
+  printf '%s' "$jd"; }
+supq() { # <jd> <hard> <script>   (the script gets the job dir as $1)
+  env OSRC_POLL=1 OSRC_NOINIT_SECS=3 OSRC_HEARTBEAT_DISABLED=1 OSRC_JOB_VERB=run bash -c '
+    set -uo pipefail; export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1
+    _supervise "$1" 30 60 "$2" -- sh -c "$3" _ "$1"' "$SRC" "$1" "$2" "$3" >/dev/null 2>"$1/sup.err"; }
+QUEUED='touch "$1/lockwait"; sleep 6; rm -f "$1/lockwait"; echo "hello from the model"; sleep 1; echo "OSRC::DONE"'
+jd="$(mkjd wq)"; supq "$jd" 60 "$QUEUED"
+case "$(cat "$jd/reason" 2>/dev/null)" in no-init:*) bad "a job queued on the grant lock past OSRC_NOINIT_SECS was killed as no-init" ;;
+  *) case "$(cat "$jd/status" 2>/dev/null)" in ''|running|wedged) false ;; esac && grep -q 'OSRC::DONE' "$jd/out.log" && ok "the bg watchdog does not kill a lock-queued job as no-init (status $(cat "$jd/status"))" \
+       || bad "a lock-queued job was wedged ($(cat "$jd/reason" 2>/dev/null))" ;; esac
+jd="$(mkjd wn)"; supq "$jd" 60 'sleep 6; echo "hello from the model"'
+case "$(cat "$jd/reason" 2>/dev/null)" in no-init:*) ok "control: the same silence WITHOUT lockwait is still a no-init kill" ;;
+  *) bad "control: a silent job without lockwait was not killed as no-init (status $(cat "$jd/status"), reason $(cat "$jd/reason" 2>/dev/null))" ;; esac
+jd="$(mkjd wh)"; supq "$jd" 4 'touch "$1/lockwait"; sleep 20'
+grep -q '^hard-timeout:' "$jd/reason" 2>/dev/null && ok "lockwait never suspends the hard timeout" \
+  || bad "a job parked in lockwait outlived the hard timeout (status $(cat "$jd/status"), reason $(cat "$jd/reason" 2>/dev/null))"
 
 # --- 7b. a queued different-set waiter stops new same-set joiners from starving it ---------------
 rm -rf "$SKH"; rm -f "$TD"/held-* "$TD"/release-*
@@ -237,6 +260,24 @@ wait "$W2"; w2rc=$?
   || bad "same-set waiters blocked each other (rc=$w1rc/$w2rc)"
 kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
 
+# --- 7g. a contended lock never writes stray diagnostics into the job log ------------------------
+# The debris probe read a mutex pid file that its holder had just released, and `read < f 2>/dev/null`
+# applies the input redirect before the stderr one, so bash printed "No such file or directory" on
+# the dispatch's stderr (about 1 in 4 dispatches under a 10-wide fanout). That line lands in out.log,
+# and classify then read it as a deliverable. Behavioral check plus a source guard for the shape.
+rm -rf "$SKH"; mkdir -p "$TD/err"
+for r in 1 2 3; do
+  for w in 1 2 3 4 5 6 7 8; do
+    ( WITH_SPEC='' _devin_with_prepare >/dev/null 2>>"$TD/err/$r.$w"; _devin_skills_lock_release 2>>"$TD/err/$r.$w" ) &
+  done; wait
+done
+stray="$(cat "$TD"/err/* 2>/dev/null | grep -v 'waiting for the Devin skills-home grant lock')"
+[ -z "$stray" ] && ok "24 contended same-set dispatches print nothing but the documented wait line" \
+  || bad "stray stderr from contended dispatches: $(printf '%s' "$stray" | head -n 2)"
+leaky="$(grep -nE '^[^#]*read( -r)? [A-Za-z_ ]+ < "[^"]+" 2>/dev/null' "$SRC")"
+[ -z "$leaky" ] && ok "no 'read < file 2>/dev/null' (the redirect error escapes it; group with braces)" \
+  || bad "leaky read redirect(s): $leaky"
+
 # --- 8. classify: job-control notices and no-init jobs are not deliverables ----------------------
 JOBS="$OSRC_HOME/jobs"
 mkjob() {
@@ -268,6 +309,12 @@ printf '%s: line 88: 4242 Abort trap: 6           devin -p x\n>>> [devin] waitin
 v="$(_classify_job jc-abrt)"
 case "$v" in REUSE-OUTPUT*) bad "an Abort trap notice or the lock-wait line was classified as a deliverable ($v)" ;;
   *) ok "other signal notices and the lock-wait line are not deliverables ($v)" ;; esac
+mkjob jc-diag
+printf 'stall-kill\n' > "$JOBS/jc-diag/reason"
+printf '%s: line 2339: %s/.outsourcerer-grants.lock.d.mx/pid: No such file or directory\n' "$SRC" "$SKH" >> "$JOBS/jc-diag/last.txt"
+v="$(_classify_job jc-diag)"
+case "$v" in REUSE-OUTPUT*) bad "an engine shell diagnostic was classified as a deliverable ($v)" ;;
+  *) ok "any engine shell diagnostic (<path>/outsourcerer.sh: line N: ...) is not a deliverable ($v)" ;; esac
 mkjob jc-real
 printf 'stall-kill\n' > "$JOBS/jc-real/reason"
 printf 'Here is the finished audit: three stale references fixed in README.md.\n' >> "$JOBS/jc-real/last.txt"

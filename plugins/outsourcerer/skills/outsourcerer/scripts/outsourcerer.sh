@@ -2311,7 +2311,7 @@ _bashpid_into() {
   if [ -n "${BASHPID:-}" ]; then _BASHPID="$BASHPID"; return; fi
   local _tf; _tf="$(mktemp "${TMPDIR:-/tmp}/.osrc-pid.XXXXXX" 2>/dev/null)" || _tf="${TMPDIR:-/tmp}/.osrc-pid.$$.$RANDOM"
   sh -c 'echo $PPID' > "$_tf" 2>/dev/null
-  _BASHPID=""; read -r _BASHPID < "$_tf" 2>/dev/null; rm -f "$_tf" 2>/dev/null
+  _BASHPID=""; { read -r _BASHPID < "$_tf"; } 2>/dev/null; rm -f "$_tf" 2>/dev/null
   [ -n "$_BASHPID" ] || _BASHPID="$$"
 }
 
@@ -2335,8 +2335,11 @@ _devin_grants_canon() { printf '%s\n' "$1" | { grep -v '^$' || true; } | LC_ALL=
 # it has no pid and is over a minute old (its creator died between mkdir and the pid write; a live
 # one carries its pid within milliseconds). Without the age arm a pid-less dir is never reaped and
 # wedges every later Devin dispatch.
+# The braces matter: in `read < f 2>/dev/null` the input redirect is applied first, so a missing f
+# (a mutex released between our failed mkdir and this read) prints "No such file or directory" on
+# the dispatch's stderr, which lands in the job log. Grouped, the error is silenced too.
 _devin_lock_debris() {
-  local o=""; read -r o < "$1/pid" 2>/dev/null
+  local o=""; { read -r o < "$1/pid"; } 2>/dev/null
   if [ -n "$o" ]; then ! kill -0 "$o" 2>/dev/null; return; fi
   [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
 }
@@ -2460,8 +2463,10 @@ _devin_skills_lock_acquire() { # [grant-set]
     # waiter that arrives while the creator is still scoping must queue too - otherwise same-set
     # joiners could starve it once the set is published. The dir is a sibling of lock.d, so
     # reaping the lock does not take the queue with it.
+    # Written to a dot-temp (the ticket glob skips it) and renamed, so a joiner scanning the queue
+    # never reads a half-written ticket as the empty set.
     mkdir -p "$lock.pending" 2>/dev/null
-    _devin_grants_canon "$want" > "$lock.pending/$me" 2>/dev/null
+    { _devin_grants_canon "$want" > "$lock.pending/.$me.tmp" && mv -f "$lock.pending/.$me.tmp" "$lock.pending/$me"; } 2>/dev/null
     if [ "$tries" = "0" ]; then
       # Say why we are silent. The line also reaches the job log, and the lockwait file tells the
       # bg watchdog this is a queue wait, not a delegate that failed to boot.
@@ -5618,7 +5623,7 @@ _state_lock_acquire() {
     # just-claimed lock whose winner has not published yet — those fall through to sleep-and-retry.
     if [ -f "$owner" ]; then
       o_pid=""; o_start=""
-      read -r o_pid o_start < "$owner" 2>/dev/null || true
+      { read -r o_pid o_start < "$owner"; } 2>/dev/null || true
       case "$o_pid" in
         ''|*[!0-9]*) ;;
         *)
@@ -5633,7 +5638,7 @@ _state_lock_acquire() {
             # we judged. Abort unless the owner is STILL the exact dead record, so we never rename away a
             # live lock. (Path rename has no CAS; this shrinks the residual race to a local re-read.)
             v_pid=""; v_start=""
-            read -r v_pid v_start < "$owner" 2>/dev/null || true
+            { read -r v_pid v_start < "$owner"; } 2>/dev/null || true
             if [ "$v_pid" = "$o_pid" ] && [ "$v_start" = "$o_start" ]; then
               corpse="$lock.stale.$_ownpid.$RANDOM"
               mv "$lock" "$corpse" 2>/dev/null && rm -rf "$corpse" 2>/dev/null
@@ -12169,9 +12174,12 @@ _classify_job() {
     # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
     # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
     # Bash's own job-control notices ("...: line N: PID Terminated: 15  sleep 1") land in the log
-    # when the watchdog kills the job; they are our shell talking, not the delegate. And a no-init
-    # job is by definition one whose delegate never produced output, so it has nothing to reuse.
+    # when the watchdog kills the job; they are our shell talking, not the delegate. So does any
+    # other diagnostic the engine's shell prints ("<path>/outsourcerer.sh: line N: ..."), whatever
+    # its wording. And a no-init job is by definition one whose delegate never produced output, so
+    # it has nothing to reuse.
     local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$' \
+      | grep -avE '^[^[:space:]]*outsourcerer\.sh: line [0-9]+: ' \
       | grep -avE '^[^[:space:]].*: line [0-9]+: +[0-9]+ (Terminated|Killed|Hangup|Interrupt|Quit|Abort trap|Segmentation fault|Bus error|Illegal instruction|Floating point exception|Trace/BPT trap|Broken pipe|Alarm clock|User defined signal [12]|Exit [0-9]+|Done)(: [0-9]+)?([[:space:]]|$)' \
       | grep -avF '>>> [devin] waiting for the Devin skills-home grant lock' \
       | grep -avF 'ERROR: --with: another Devin dispatch has held the skills-home grant lock')"
