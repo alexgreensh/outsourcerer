@@ -2315,36 +2315,185 @@ _bashpid_into() {
   [ -n "$_BASHPID" ] || _BASHPID="$$"
 }
 
-_DEVIN_LOCK_DIR=""
-_devin_skills_lock_acquire() {
-  local dst="$HOME/.config/devin/skills" lock="$dst/.outsourcerer-grants.lock.d" owner tries=0
+# Shared by grant set: the lock only has to keep DIFFERENT grant sets apart. Dispatches with the
+# SAME set (the common case: every ungranted run has the empty set) need the home in the same
+# state, so they join the current holder instead of waiting out its whole run. Before this, one
+# long ungranted Devin job blocked every other Devin dispatch, and a fanout of N Devin jobs ran
+# one at a time; each waiter sat silent behind the disclosure banner until the no-init watchdog
+# killed it as "never started".
+# Layout: lock.d/pid (the dispatch that scoped the home), lock.d/holders/<pid> (every live
+# dispatch on it, creator included), lock.d/grants (the scoped set, published only AFTER scoping
+# finishes, so a joiner never sees a half-built home). Joins, stale reaps and releases run under
+# a short mkdir mutex so a join cannot land between the last holder leaving and the lock going.
+# lock.d.pending/<pid> is a different-set waiter's queue ticket: while one is live the join
+# branch is refused, so a steady stream of same-set joiners cannot starve the waiter.
+_DEVIN_LOCK_DIR=""; _DEVIN_LOCK_SHARED=0
+_devin_grants_canon() { printf '%s\n' "$1" | { grep -v '^$' || true; } | LC_ALL=C sort -u; }
+# _devin_lock_debris <dir> -> rc0 when a mutex/lock dir is abandoned: its recorded pid is dead, or
+# it has no pid and is over a minute old (its creator died between mkdir and the pid write; a live
+# one carries its pid within milliseconds). Without the age arm a pid-less dir is never reaped and
+# wedges every later Devin dispatch.
+_devin_lock_debris() {
+  local o; o="$(cat "$1/pid" 2>/dev/null)"
+  if [ -n "$o" ]; then ! kill -0 "$o" 2>/dev/null; return; fi
+  [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
+}
+# Callers set _BASHPID (via _bashpid_into) first; it is the mutex's owner key.
+_devin_lock_mutex_acquire() { # <lock>
+  local mx="$1.mx" n=0 dead
+  while ! mkdir "$mx" 2>/dev/null; do
+    if _devin_lock_debris "$mx"; then
+      # Claim by rename, then re-judge what was claimed: two reapers can no longer both delete it,
+      # and a fresh mutex that replaced the debris in between is put back, not destroyed.
+      dead="$mx.dead.${_BASHPID:-$$}.$RANDOM"
+      if mv "$mx" "$dead" 2>/dev/null; then
+        if _devin_lock_debris "$dead"; then rm -rf "$dead" 2>/dev/null
+        elif [ ! -e "$mx" ]; then mv "$dead" "$mx" 2>/dev/null || rm -rf "$dead" 2>/dev/null
+        else rm -rf "$dead" 2>/dev/null; fi
+      fi
+      continue
+    fi
+    n=$((n + 1)); [ "$n" -ge 100 ] && return 1
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  printf '%s\n' "${_BASHPID:-$$}" > "$mx/pid" 2>/dev/null
+  return 0
+}
+_devin_lock_mutex_release() { rm -rf "$1.mx" 2>/dev/null; }
+# _devin_lock_stale <lock> -> rc0 when nobody live holds it (dead holder files are pruned). A lock
+# with neither holders/ nor pid is mid-creation (a pre-share outsourcerer creates it without the
+# mutex) unless it is over a minute old. A legacy pid-only lock is judged by its pid alone.
+_devin_lock_stale() {
+  local lock="$1" h p live=0
+  [ -d "$lock/holders" ] || [ -s "$lock/pid" ] || { _devin_lock_debris "$lock"; return; }
+  for h in "$lock"/holders/*; do
+    [ -e "$h" ] || continue
+    p="${h##*/}"
+    case "$p" in ''|*[!0-9]*) rm -f "$h" 2>/dev/null; continue ;; esac
+    if kill -0 "$p" 2>/dev/null; then live=1; else rm -f "$h" 2>/dev/null; fi
+  done
+  p="$(cat "$lock/pid" 2>/dev/null)"
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && live=1
+  [ "$live" = "0" ]
+}
+_devin_skills_lock_acquire() { # [grant-set]
+  local dst="$HOME/.config/devin/skills" lock="$dst/.outsourcerer-grants.lock.d" owner tries=0 since
+  local want; want="$(_devin_grants_canon "${1-}")"
   # Ownership key: this subshell's own live pid (see _bashpid_into) — $$ alone does not differ per
   # subshell on bash 3.2, which would let two backgrounded prepares through "together" or deadlock a
   # sequential one.
   _bashpid_into; local me="$_BASHPID"
   local max="${OSRC_DEVIN_LOCK_WAIT_MAX:-1800}"; case "$max" in ''|*[!0-9]*) max=1800 ;; esac
+  local lw=""; [ -n "${OSRC_JOB_DIR:-}" ] && lw="$OSRC_JOB_DIR/lockwait"
   mkdir -p "$dst" 2>/dev/null || die "--with: cannot create $dst for the Devin grant lock."
   # Re-entrant: one process may prepare repeatedly (tests, multi-grant flows) without deadlocking
-  # on its own held lock.
-  [ "$(cat "$lock/pid" 2>/dev/null)" = "$me" ] && { _DEVIN_LOCK_DIR="$lock"; return 0; }
-  while ! mkdir "$lock" 2>/dev/null; do
+  # on its own held lock. A JOINED holder re-enters only for the same set; another set must wait
+  # for the other holders like anyone else.
+  if [ "$(cat "$lock/pid" 2>/dev/null)" = "$me" ]; then
+    _DEVIN_LOCK_DIR="$lock"; _DEVIN_LOCK_SHARED=0
+    # Same set: the home is already scoped to it. Do not re-link under joined delegates.
+    [ -f "$lock/grants" ] && [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ] && { _DEVIN_LOCK_SHARED=1; return 0; }
+    # Re-scoping to a new set: close the lock to joiners first, and only when nobody joined.
+    if _devin_lock_mutex_acquire "$lock"; then
+      local h others=0
+      for h in "$lock"/holders/*; do
+        [ -e "$h" ] && [ "${h##*/}" != "$me" ] && kill -0 "${h##*/}" 2>/dev/null && others=1
+      done
+      [ "$others" = "0" ] && rm -f "$lock/grants" 2>/dev/null
+      _devin_lock_mutex_release "$lock"
+      [ "$others" = "0" ] && return 0
+    fi
+    _devin_skills_lock_release
+  fi
+  if [ -e "$lock/holders/$me" ]; then
+    _DEVIN_LOCK_DIR="$lock"
+    [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ] && { _DEVIN_LOCK_SHARED=1; return 0; }
+    _devin_skills_lock_release
+  fi
+  since=$(date +%s)
+  while :; do
+    # Creation runs under the mutex too: a stale check that ran between `mkdir holders` and the
+    # holder file landing would see an empty lock and reap a live creator.
+    if _devin_lock_mutex_acquire "$lock"; then
+      if mkdir "$lock" 2>/dev/null; then
+        mkdir "$lock/holders" 2>/dev/null; : > "$lock/holders/$me"
+        printf '%s\n' "$me" > "$lock/pid" 2>/dev/null
+        _devin_lock_mutex_release "$lock"; _DEVIN_LOCK_SHARED=0; break
+      fi
+      if _devin_lock_stale "$lock"; then
+        rm -rf "$lock" 2>/dev/null   # stale: every holder died without releasing
+        _devin_lock_mutex_release "$lock"
+        # A dir that survived the rm was lost to a race; take the bounded wait below rather than
+        # loop straight back and spin on a lock we cannot clear.
+        [ -d "$lock" ] || continue
+      elif [ -d "$lock/holders" ] && [ -f "$lock/grants" ] && [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ]; then
+        # A different-set waiter's pending entry goes first: joining past a live one is what let
+        # a joiner stream starve it forever. Dead entries (kill -0) are pruned as we scan, and
+        # our own never blocks us.
+        local qp busy=0
+        for qp in "$lock.pending/"*; do
+          [ -e "$qp" ] || continue
+          [ "${qp##*/}" = "$me" ] && continue
+          if kill -0 "${qp##*/}" 2>/dev/null; then busy=1; else rm -f "$qp" 2>/dev/null; fi
+        done
+        if [ "$busy" = "0" ]; then
+          : > "$lock/holders/$me"
+          _devin_lock_mutex_release "$lock"; _DEVIN_LOCK_SHARED=1; break
+        fi
+        _devin_lock_mutex_release "$lock"
+      else
+        _devin_lock_mutex_release "$lock"
+      fi
+    fi
     owner="$(cat "$lock/pid" 2>/dev/null)"
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$lock" 2>/dev/null   # stale: the holder died without releasing
-      continue
+    if [ "$tries" = "0" ]; then
+      # A waiter for a different set files itself in $lock.pending so later same-set joiners
+      # queue behind it (the join branch above). The dir is a sibling of lock.d so reaping the
+      # lock does not take the queue with it.
+      [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ] \
+        || { mkdir -p "$lock.pending" 2>/dev/null; : > "$lock.pending/$me" 2>/dev/null; }
+      # Say why we are silent. The line also reaches the job log, and the lockwait file tells the
+      # bg watchdog this is a queue wait, not a delegate that failed to boot.
+      printf '>>> [devin] waiting for the Devin skills-home grant lock: pid %s holds it for a different skill grant set, or is still scoping the home (dispatches with the same set share it). Waiting up to %ss.\n' "${owner:-unknown}" "$max" >&2
+      [ -n "$lw" ] && printf '%s\n' "${owner:-unknown}" > "$lw" 2>/dev/null
     fi
     tries=$((tries + 1))
-    [ "$tries" -ge "$max" ] && die "--with: another Devin dispatch has held the skills-home grant lock for ${max}s+ (pid ${owner:-unknown}, lock $lock). Two grant sets never overlap on one shared skills home; wait for that run, or kill it if hung. Refusing to dispatch."
+    # Wall clock, not iterations: each pass can also spend up to ~10s on a busy mutex.
+    if [ $(( $(date +%s) - since )) -ge "$max" ]; then
+      [ -n "$lw" ] && rm -f "$lw" 2>/dev/null
+      rm -f "$lock.pending/$me" 2>/dev/null
+      die "--with: another Devin dispatch has held the skills-home grant lock for ${max}s+ (pid ${owner:-unknown}, lock $lock). Two grant sets never overlap on one shared skills home; wait for that run, or kill it if hung. Refusing to dispatch."
+    fi
     sleep 1
   done
-  printf '%s\n' "$me" > "$lock/pid" 2>/dev/null
+  rm -f "$lock.pending/$me" 2>/dev/null
+  [ -n "$lw" ] && rm -f "$lw" 2>/dev/null
   _DEVIN_LOCK_DIR="$lock"
 }
+# _devin_skills_lock_publish <grant-set> -> the creator records the set it scoped, which opens the
+# lock to same-set joiners. Called only after scoping is complete.
+_devin_skills_lock_publish() {
+  [ -n "$_DEVIN_LOCK_DIR" ] && [ "$_DEVIN_LOCK_SHARED" = "0" ] || return 0
+  local t="$_DEVIN_LOCK_DIR/grants.tmp.${_BASHPID:-$$}"
+  _devin_grants_canon "${1-}" > "$t" 2>/dev/null && mv -f "$t" "$_DEVIN_LOCK_DIR/grants" 2>/dev/null || rm -f "$t" 2>/dev/null
+}
 _devin_skills_lock_release() {
-  [ -n "$_DEVIN_LOCK_DIR" ] && [ -d "$_DEVIN_LOCK_DIR" ] || return 0
+  [ -n "$_DEVIN_LOCK_DIR" ] && [ -d "$_DEVIN_LOCK_DIR" ] || { _DEVIN_LOCK_DIR=""; _DEVIN_LOCK_SHARED=0; return 0; }
   _bashpid_into
-  [ "$(cat "$_DEVIN_LOCK_DIR/pid" 2>/dev/null)" = "$_BASHPID" ] && rm -rf "$_DEVIN_LOCK_DIR" 2>/dev/null
-  _DEVIN_LOCK_DIR=""
+  local lock="$_DEVIN_LOCK_DIR" mine=0
+  [ -e "$lock/holders/$_BASHPID" ] && mine=1
+  [ "$(cat "$lock/pid" 2>/dev/null)" = "$_BASHPID" ] && mine=1
+  if [ "$mine" = "1" ]; then
+    if _devin_lock_mutex_acquire "$lock"; then
+      rm -f "$lock/holders/$_BASHPID" 2>/dev/null
+      [ "$(cat "$lock/pid" 2>/dev/null)" = "$_BASHPID" ] && rm -f "$lock/pid" 2>/dev/null
+      _devin_lock_stale "$lock" && rm -rf "$lock" 2>/dev/null   # last holder out removes it
+      _devin_lock_mutex_release "$lock"
+    else
+      rm -f "$lock/holders/$_BASHPID" 2>/dev/null   # a later stale check reaps the rest
+    fi
+  fi
+  _DEVIN_LOCK_DIR=""; _DEVIN_LOCK_SHARED=0
 }
 
 _devin_with_prepare() {
@@ -2362,44 +2511,48 @@ _devin_with_prepare() {
   # skills home to exactly this dispatch's grant set (an empty set removes every prior grant).
   # Otherwise an ungranted run would silently inherit the previous dispatch's links, and two
   # overlapping dispatches would leak each other's skills while each prompt claims only its own.
-  _devin_skills_lock_acquire
-  # Marker safety: a PLANTED symlink at $marker would make the write below clobber a victim file
-  # (arbitrary overwrite via the skills home). Never follow it: remove the link itself, then
-  # write privately + atomically, and only read a marker that is a regular file we own.
+  # Same set as the live holders: join without touching the home (it is already scoped to
+  # exactly this set, and re-linking would briefly unlink a skill under a running delegate).
+  _devin_skills_lock_acquire "$names"
   local marker="$dst/.outsourcerer-grants" prev
-  if [ -L "$marker" ]; then
-    rm -f "$marker" 2>/dev/null || die "--with: $marker is a symlink and cannot be removed - refusing to dispatch (possible planted-symlink attack)."
+  if [ "$_DEVIN_LOCK_SHARED" = "0" ]; then
+    # Marker safety: a PLANTED symlink at $marker would make the write below clobber a victim file
+    # (arbitrary overwrite via the skills home). Never follow it: remove the link itself, then
+    # write privately + atomically, and only read a marker that is a regular file we own.
+    if [ -L "$marker" ]; then
+      rm -f "$marker" 2>/dev/null || die "--with: $marker is a symlink and cannot be removed - refusing to dispatch (possible planted-symlink attack)."
+    fi
+    # Per-dispatch scoping: links from earlier dispatches that are not in THIS grant are removed
+    # (only ever symlinks - a real directory the user placed is never touched). With an empty
+    # grant this removes every prior outsourcerer-managed link.
+    if [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ]; then
+      while IFS= read -r prev; do
+        [ -n "$prev" ] || continue
+        # A marker line is UNTRUSTED input: anyone who can write the skills home can write the
+        # marker, and a line like ../../victim would point the removal below at $dst/../../victim,
+        # deleting any user-owned symlink reachable from there. Only a name that passes grant
+        # validation is ever acted on; such a name is exactly one path component, so the parent of
+        # $dst/$prev is always $dst itself and nothing outside the skills home can be reached.
+        if ! _with_skill_name_ok "$prev"; then
+          printf '>>> [with] ignoring an unsafe line in the Devin grant marker %s (not a valid skill name; nothing removed for it).\n' "$marker" >&2
+          continue
+        fi
+        printf '%s\n' "$names" | grep -Fxq -- "$prev" && continue
+        [ -L "$dst/$prev" ] && rm -f "$dst/$prev"
+      done < "$marker"
+    fi
+    # Publish the marker for THIS grant set (possibly empty): mktemp creates the temp file ITSELF
+    # (O_EXCL, non-following, unpredictable name) so a pre-planted symlink is never followed;
+    # verify regular+owned before writing, then rename.
+    local mtmp=""
+    mtmp="$(umask 077; mktemp "$dst/.outsourcerer-grants.tmp.XXXXXX" 2>/dev/null)"
+    if [ -n "$mtmp" ] && [ -f "$mtmp" ] && [ ! -L "$mtmp" ] && [ -O "$mtmp" ] \
+       && ( umask 077; printf '%s\n' "$names" > "$mtmp" ) && mv -f "$mtmp" "$marker" 2>/dev/null; then :; else
+      [ -n "$mtmp" ] && rm -f "$mtmp" 2>/dev/null
+      printf '>>> [with] could not update the Devin grant marker %s; stale-grant cleanup may be skipped next dispatch.\n' "$marker" >&2
+    fi
   fi
-  # Per-dispatch scoping: links from earlier dispatches that are not in THIS grant are removed
-  # (only ever symlinks - a real directory the user placed is never touched). With an empty
-  # grant this removes every prior outsourcerer-managed link.
-  if [ -f "$marker" ] && [ ! -L "$marker" ] && [ -O "$marker" ]; then
-    while IFS= read -r prev; do
-      [ -n "$prev" ] || continue
-      # A marker line is UNTRUSTED input: anyone who can write the skills home can write the
-      # marker, and a line like ../../victim would point the removal below at $dst/../../victim,
-      # deleting any user-owned symlink reachable from there. Only a name that passes grant
-      # validation is ever acted on; such a name is exactly one path component, so the parent of
-      # $dst/$prev is always $dst itself and nothing outside the skills home can be reached.
-      if ! _with_skill_name_ok "$prev"; then
-        printf '>>> [with] ignoring an unsafe line in the Devin grant marker %s (not a valid skill name; nothing removed for it).\n' "$marker" >&2
-        continue
-      fi
-      printf '%s\n' "$names" | grep -Fxq -- "$prev" && continue
-      [ -L "$dst/$prev" ] && rm -f "$dst/$prev"
-    done < "$marker"
-  fi
-  # Publish the marker for THIS grant set (possibly empty): mktemp creates the temp file ITSELF
-  # (O_EXCL, non-following, unpredictable name) so a pre-planted symlink is never followed;
-  # verify regular+owned before writing, then rename.
-  local mtmp=""
-  mtmp="$(umask 077; mktemp "$dst/.outsourcerer-grants.tmp.XXXXXX" 2>/dev/null)"
-  if [ -n "$mtmp" ] && [ -f "$mtmp" ] && [ ! -L "$mtmp" ] && [ -O "$mtmp" ] \
-     && ( umask 077; printf '%s\n' "$names" > "$mtmp" ) && mv -f "$mtmp" "$marker" 2>/dev/null; then :; else
-    [ -n "$mtmp" ] && rm -f "$mtmp" 2>/dev/null
-    printf '>>> [with] could not update the Devin grant marker %s; stale-grant cleanup may be skipped next dispatch.\n' "$marker" >&2
-  fi
-  [ -n "$names" ] || return 0   # no skills granted: home scoped, empty marker published
+  [ -n "$names" ] || { _devin_skills_lock_publish ""; return 0; }   # no skills granted: home scoped, empty marker published
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     dir="$(_resolve_skill_dir "$name" 2>/dev/null)"
@@ -2410,13 +2563,14 @@ _devin_with_prepare() {
     mkdir -p "$dst" || die "--with skills=$name: cannot create $dst for the per-dispatch Devin skill sync."
     # Symlink (never a copy): plugin upgrades move the target, and the parity healer re-pins these
     # exact links. A failed link is a loud dispatch refusal, not a quietly absent capability.
-    ln -sfn "$dir" "$dst/$name" 2>/dev/null       || die "--with skills=$name: could not link $dir into $dst - refusing to dispatch with the capability silently absent. Fix the permissions on $dst, or drop the grant."
+    [ "$_DEVIN_LOCK_SHARED" = "1" ] || ln -sfn "$dir" "$dst/$name" 2>/dev/null       || die "--with skills=$name: could not link $dir into $dst - refusing to dispatch with the capability silently absent. Fix the permissions on $dst, or drop the grant."
     [ -e "$dst/$name/SKILL.md" ]       || die "--with skills=$name: linked into $dst but $dst/$name/SKILL.md does not resolve - refusing to dispatch with the capability silently absent."
     ok="${ok}${name}
 "
   done <<_OSRC_DEVIN_NAMES
 $names
 _OSRC_DEVIN_NAMES
+  _devin_skills_lock_publish "$names"
   [ -n "$ok" ] && DEVIN_WITH_PRE="You have been granted the following skill(s). Each was synced into your skills home with its FULL directory contents (SKILL.md plus references/, scripts/, assets/) just before this run:
 $(while IFS= read -r name; do [ -n "$name" ] && printf '  %s (%s)\n' "$name" "$dst/$name"; done <<_OSRC_DEVIN_OK
 $ok
@@ -10533,7 +10687,7 @@ _supervise() {
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
@@ -10564,7 +10718,13 @@ _supervise() {
         no-progress-writes) _job_made_writes "$jd" "$_jcwd" && echo running > "$jd/status" ;;
       esac
     fi
-    idle=$(( now - last_change )); age=$(( now - t0 ))
+    # A Devin dispatch queued on the skills-home grant lock (lockwait present) has not started its
+    # delegate yet: the soft clocks (no-init, no-write, stall) start once it holds the lock. Honored
+    # only before the delegate's first output, so a lockwait file left behind (or written by the
+    # delegate itself) cannot disarm a running job; the hard timeout always counts from launch (t0).
+    # The queue wait has its own bound (OSRC_DEVIN_LOCK_WAIT_MAX) and its log line names the holder.
+    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; }
+    idle=$(( now - last_change )); age=$(( now - qt0 ))
     # Require positive proof of a model/agent turn. Byte growth alone includes
     # launcher headers, blank lines, stderr diagnostics, and every tier banner.
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
@@ -10676,7 +10836,7 @@ _supervise() {
         _kill_job "$jd" "$pid"; echo 3 > "$jd/exit"; return 3
       fi
     fi
-    if [ "$age" -ge "$hard" ]; then
+    if [ $(( now - t0 )) -ge "$hard" ]; then
       echo timeout > "$jd/status"; printf 'hard-timeout:%ss\n' "$hard" > "$jd/reason" 2>/dev/null || true; _kill_job "$jd" "$pid"; echo 124 > "$jd/exit"; return 124
     fi
     # Before declaring a stall, look for progress the LOG cannot show. A delegate that prints nothing
@@ -11997,7 +12157,14 @@ _classify_job() {
     # output before being killed). Without this guard, 293 bytes of routing noise reads
     # as a "deliverable" and a real fail is misclassified as a false-stall. Head-only
     # stripping via _strip_preamble preserves `>>> ` lines in the body (Python REPL, etc.).
-    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$')"
+    # Bash's own job-control notices ("...: line N: PID Terminated: 15  sleep 1") land in the log
+    # when the watchdog kills the job; they are our shell talking, not the delegate. And a no-init
+    # job is by definition one whose delegate never produced output, so it has nothing to reuse.
+    local _last_body; _last_body="$(_strip_preamble "$jd/last.txt" | grep -avE '^[[:space:]]*$' \
+      | grep -avE '^[^[:space:]].*: line [0-9]+: +[0-9]+ (Terminated|Killed|Hangup|Interrupt|Quit|Abort trap|Segmentation fault|Bus error|Illegal instruction|Floating point exception|Trace/BPT trap|Broken pipe|Alarm clock|User defined signal [12]|Exit [0-9]+|Done)(: [0-9]+)?([[:space:]]|$)' \
+      | grep -avF '>>> [devin] waiting for the Devin skills-home grant lock' \
+      | grep -avF 'ERROR: --with: another Devin dispatch has held the skills-home grant lock')"
+    case "$(head -n1 "$jd/reason" 2>/dev/null)" in no-init:*) _last_body="" ;; esac
     if [ -n "$_last_body" ] && ! _confident_fail "$_last_body" >/dev/null 2>&1; then
       printf 'REUSE-OUTPUT\tfalse-stall:deliverable'; return 0
     fi
