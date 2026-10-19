@@ -18,9 +18,14 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
 TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+trap 'TMUX_TMPDIR="$TMP/tmux" tmux kill-server >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
-mkdir -p "$OSRC_HOME" "$HOME"
+mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
+# Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
+# inherits the server's env (real HOME, real PATH): it scoped the real Devin skills home and
+# launched the real devin CLI on a cloud model. A private server plus a stub devin keep it here.
+export TMUX_TMPDIR="$TMP/tmux"; unset TMUX TMUX_PANE
+printf '#!/bin/sh\necho hi\n' > "$TMP/bin/devin"; chmod +x "$TMP/bin/devin"; export PATH="$TMP/bin:$PATH"
 
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }

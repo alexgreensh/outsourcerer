@@ -268,7 +268,16 @@ _gate_int_sweep() {
   [ "$(_suite_ppid_of "$root")" = "$pp0" ] || return 0
   _suite_kill_tree "$root" 2>/dev/null
 }
-trap '_gate_int_sweep; exit 130' INT
+# Unit suites talk to a PRIVATE tmux server. The engine uses tmux's default socket, and a pane
+# opened on the developer's own server inherits THAT server's environment (the real HOME and
+# PATH), not the suite's sandbox: a suite whose run auto-detached into a session was scoping the
+# developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
+# default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
+_conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
+_conf_tmux_end() { TMUX_TMPDIR="$_conf_tmux_dir" tmux kill-server >/dev/null 2>&1; rm -rf "$_conf_tmux_dir"; }
+_conf_tmux_had="${TMUX_TMPDIR+1}"; _conf_tmux_prev="${TMUX_TMPDIR-}"
+export TMUX_TMPDIR="$_conf_tmux_dir"; unset TMUX TMUX_PANE
+trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
 for t in $_ALL_SUITES; do
   if [ -f "$SCRIPT_DIR/$t.sh" ]; then
     _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
@@ -318,6 +327,10 @@ for f in "$SRC" "$SCRIPT_DIR"/../run-or-model.sh "$SCRIPT_DIR"/../run-or-codex.s
   [ -f "$f" ] || continue
   if bash -n "$f" 2>/dev/null; then ok "bash -n clean: $(basename "$f")"; else bad "bash -n FAILED: $(basename "$f")"; fi
 done
+
+_conf_tmux_end
+if [ -n "$_conf_tmux_had" ]; then export TMUX_TMPDIR="$_conf_tmux_prev"; else unset TMUX_TMPDIR; fi
+trap '_gate_int_sweep; exit 130' INT
 
 echo
 echo "=== LIVE lane matrix (effort x tools x real-repo) ==="
