@@ -2325,8 +2325,10 @@ _bashpid_into() {
 # dispatch on it, creator included), lock.d/grants (the scoped set, published only AFTER scoping
 # finishes, so a joiner never sees a half-built home). Joins, stale reaps and releases run under
 # a short mkdir mutex so a join cannot land between the last holder leaving and the lock going.
-# lock.d.pending/<pid> is a different-set waiter's queue ticket: while one is live the join
-# branch is refused, so a steady stream of same-set joiners cannot starve the waiter.
+# lock.d.pending/<pid> is a waiter's queue ticket and carries its wanted set: while a live
+# different-set ticket exists the join branch is refused, so a steady stream of same-set joiners
+# cannot starve it. A same-set ticket never blocks, and the waiter refreshes its ticket on every
+# pass, so one over a minute old is pruned even if its pid was reused.
 _DEVIN_LOCK_DIR=""; _DEVIN_LOCK_SHARED=0
 _devin_grants_canon() { printf '%s\n' "$1" | { grep -v '^$' || true; } | LC_ALL=C sort -u; }
 # _devin_lock_debris <dir> -> rc0 when a mutex/lock dir is abandoned: its recorded pid is dead, or
@@ -2334,7 +2336,7 @@ _devin_grants_canon() { printf '%s\n' "$1" | { grep -v '^$' || true; } | LC_ALL=
 # one carries its pid within milliseconds). Without the age arm a pid-less dir is never reaped and
 # wedges every later Devin dispatch.
 _devin_lock_debris() {
-  local o; o="$(cat "$1/pid" 2>/dev/null)"
+  local o=""; read -r o < "$1/pid" 2>/dev/null
   if [ -n "$o" ]; then ! kill -0 "$o" 2>/dev/null; return; fi
   [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
 }
@@ -2359,6 +2361,7 @@ _devin_lock_mutex_acquire() { # <lock>
   printf '%s\n' "${_BASHPID:-$$}" > "$mx/pid" 2>/dev/null
   return 0
 }
+# It does not check ownership; it is only safe because every caller holds the mutex it releases.
 _devin_lock_mutex_release() { rm -rf "$1.mx" 2>/dev/null; }
 # _devin_lock_stale <lock> -> rc0 when nobody live holds it (dead holder files are pruned). A lock
 # with neither holders/ nor pid is mid-creation (a pre-share outsourcerer creates it without the
@@ -2377,7 +2380,8 @@ _devin_lock_stale() {
   [ "$live" = "0" ]
 }
 _devin_skills_lock_acquire() { # [grant-set]
-  local dst="$HOME/.config/devin/skills" lock="$dst/.outsourcerer-grants.lock.d" owner tries=0 since
+  local dst="$HOME/.config/devin/skills"
+  local lock="$dst/.outsourcerer-grants.lock.d" owner tries=0 since
   local want; want="$(_devin_grants_canon "${1-}")"
   # Ownership key: this subshell's own live pid (see _bashpid_into) — $$ alone does not differ per
   # subshell on bash 3.2, which would let two backgrounded prepares through "together" or deadlock a
@@ -2427,14 +2431,18 @@ _devin_skills_lock_acquire() { # [grant-set]
         # loop straight back and spin on a lock we cannot clear.
         [ -d "$lock" ] || continue
       elif [ -d "$lock/holders" ] && [ -f "$lock/grants" ] && [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ]; then
-        # A different-set waiter's pending entry goes first: joining past a live one is what let
-        # a joiner stream starve it forever. Dead entries (kill -0) are pruned as we scan, and
-        # our own never blocks us.
+        # A different-set waiter's pending ticket goes first: joining past a live one is what let
+        # a joiner stream starve it forever. The ticket carries the waiter's set, so a same-set
+        # ticket never blocks (two waiters for one set must not refuse each other), and our own
+        # never blocks us. Dead pids and tickets over a minute old are pruned as we scan - a live
+        # waiter refreshes its ticket every pass, so an old one is gone even if its pid was reused.
         local qp busy=0
         for qp in "$lock.pending/"*; do
           [ -e "$qp" ] || continue
           [ "${qp##*/}" = "$me" ] && continue
-          if kill -0 "${qp##*/}" 2>/dev/null; then busy=1; else rm -f "$qp" 2>/dev/null; fi
+          if kill -0 "${qp##*/}" 2>/dev/null && [ -z "$(find "$qp" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+            [ "$(cat "$qp" 2>/dev/null)" = "$want" ] || busy=1
+          else rm -f "$qp" 2>/dev/null; fi
         done
         if [ "$busy" = "0" ]; then
           : > "$lock/holders/$me"
@@ -2446,12 +2454,15 @@ _devin_skills_lock_acquire() { # [grant-set]
       fi
     fi
     owner="$(cat "$lock/pid" 2>/dev/null)"
+    # The ticket carries this waiter's set and is rewritten on every pass, so its mtime stays
+    # fresh and a joiner can tell a different-set ticket (blocks) from a same-set one (does not).
+    # Filed unconditionally: a missing grants file reads as "" like the empty set, so an empty-set
+    # waiter that arrives while the creator is still scoping must queue too - otherwise same-set
+    # joiners could starve it once the set is published. The dir is a sibling of lock.d, so
+    # reaping the lock does not take the queue with it.
+    mkdir -p "$lock.pending" 2>/dev/null
+    _devin_grants_canon "$want" > "$lock.pending/$me" 2>/dev/null
     if [ "$tries" = "0" ]; then
-      # A waiter for a different set files itself in $lock.pending so later same-set joiners
-      # queue behind it (the join branch above). The dir is a sibling of lock.d so reaping the
-      # lock does not take the queue with it.
-      [ "$(cat "$lock/grants" 2>/dev/null)" = "$want" ] \
-        || { mkdir -p "$lock.pending" 2>/dev/null; : > "$lock.pending/$me" 2>/dev/null; }
       # Say why we are silent. The line also reaches the job log, and the lockwait file tells the
       # bg watchdog this is a queue wait, not a delegate that failed to boot.
       printf '>>> [devin] waiting for the Devin skills-home grant lock: pid %s holds it for a different skill grant set, or is still scoping the home (dispatches with the same set share it). Waiting up to %ss.\n' "${owner:-unknown}" "$max" >&2

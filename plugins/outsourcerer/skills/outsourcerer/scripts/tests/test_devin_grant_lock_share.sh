@@ -193,6 +193,50 @@ wait "$EPID"; erc=$?
   || bad "the creator re-scoped the home under a live joiner"
 touch "$TD/release-F"; wait "$FPID" 2>/dev/null
 
+# --- 7e. a waiter filed while the creator is still scoping cannot be starved by joiners ---------
+# Hand-build a creator mid-scoping (holders + pid, no grants yet), then queue an EMPTY-set waiter.
+# A missing grants file reads as "" - the empty set - so before the ticket carried a set and was
+# filed unconditionally, this waiter never queued and same-set joiners starved it after publish.
+rm -rf "$SKH"
+sleep 300 & SPID=$!
+mkdir -p "$LOCK/holders"; : > "$LOCK/holders/$SPID"; printf '%s\n' "$SPID" > "$LOCK/pid"
+( WITH_SPEC='' OSRC_DEVIN_LOCK_WAIT_MAX=8 _devin_with_prepare >/dev/null 2>&1 \
+    && _devin_skills_lock_release ) &
+WPID=$!
+wait_for "$LOCK.pending/$WPID" || bad "setup: the pre-publish waiter never filed a pending ticket"
+ln -sfn "$SK" "$SKH/confskill"; printf 'confskill\n' > "$LOCK/grants"   # the creator finishes scoping
+sleep 2   # give the waiter another pass so its ticket is live and refreshed
+# It must fail on the lock wait itself, not on some other prepare check.
+( WITH_SPEC='skills=confskill' OSRC_DEVIN_LOCK_WAIT_MAX=1 _devin_with_prepare ) >/dev/null 2>"$TD/7e.err"
+[ $? -ne 0 ] && grep -q 'held the skills-home grant lock' "$TD/7e.err" \
+  && ok "a joiner cannot cut ahead of a different-set waiter filed before publish" \
+  || bad "a joiner cut the line ahead of a waiter that queued while the creator was still scoping"
+kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+wait "$WPID"; wrc=$?
+[ "$wrc" -eq 0 ] && [ ! -e "$LOCK.pending/$WPID" ] \
+  && ok "the pre-publish waiter gets the lock once the holder dies and drops its ticket" \
+  || bad "pre-publish waiter failed after the holder died (rc=$wrc) or left pending debris"
+
+# Two waiters for the SAME set queued before publish must not refuse each other once it lands.
+rm -rf "$SKH"
+sleep 300 & SPID=$!
+mkdir -p "$LOCK/holders"; : > "$LOCK/holders/$SPID"; printf '%s\n' "$SPID" > "$LOCK/pid"
+( WITH_SPEC='' OSRC_DEVIN_LOCK_WAIT_MAX=8 _devin_with_prepare >/dev/null 2>&1 \
+    && _devin_skills_lock_release ) &
+W1=$!
+( WITH_SPEC='' OSRC_DEVIN_LOCK_WAIT_MAX=8 _devin_with_prepare >/dev/null 2>&1 \
+    && _devin_skills_lock_release ) &
+W2=$!
+wait_for "$LOCK.pending/$W1" && wait_for "$LOCK.pending/$W2" \
+  || bad "setup: a same-set waiter never filed a pending ticket"
+: > "$LOCK/grants"
+wait "$W1"; w1rc=$?
+wait "$W2"; w2rc=$?
+[ "$w1rc" -eq 0 ] && [ "$w2rc" -eq 0 ] \
+  && ok "two same-set waiters queued before publish both join once the empty set lands" \
+  || bad "same-set waiters blocked each other (rc=$w1rc/$w2rc)"
+kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null
+
 # --- 8. classify: job-control notices and no-init jobs are not deliverables ----------------------
 JOBS="$OSRC_HOME/jobs"
 mkjob() {
