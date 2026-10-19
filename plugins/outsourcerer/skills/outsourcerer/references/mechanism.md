@@ -149,10 +149,15 @@ DIES with the precise reason - no truncation - and scripts/assets are called out
 TRANSFERRED instead of silently dropped. On the Devin lane the tree is linked into the Devin skills home before
 dispatch, scoped per dispatch: links from earlier grants that are not in the current one are
 removed, so the skills home holds exactly what the prompt claims. EVERY Devin dispatch - with or without
---with - SERIALIZES on a skills-home lock (mkdir-based, stale-pid breaking, held from prepare
-until the synchronous delegate run ends) and scopes the home to exactly that dispatch's grant
-set, so an ungranted run never inherits a previous dispatch's links and two grant sets never
-overlap on the shared home. The stale-link prune validates every marker line with the same grant
+--with - takes a skills-home lock (mkdir-based, held from prepare until the synchronous delegate
+run ends) and runs with the home scoped to exactly its grant set, so an ungranted run never
+inherits a previous dispatch's links and two grant sets never overlap on the shared home. The
+lock is shared BY GRANT SET: a dispatch whose set matches the live holders' joins at once without
+touching the home (every ungranted run has the empty set, so Devin fanouts run in parallel); a
+different set waits until the last holder leaves, prints which pid it is waiting on, and has the
+bg watchdog's soft clocks paused while it queues (the hard timeout still counts from launch;
+the wait itself is bounded by `OSRC_DEVIN_LOCK_WAIT_MAX`, default 1800s). A queued different set
+blocks new same-set joiners, so it cannot be starved. Dead holders are pruned by pid. The stale-link prune validates every marker line with the same grant
 name rules before acting on it - an attacker-written line like `../../victim` is ignored with a
 stderr note, so the marker can never point a deletion outside the skills home. Skill trees whose
 file or directory names contain control characters (CR/LF/TAB) are refused at every staging

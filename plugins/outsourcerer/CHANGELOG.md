@@ -2,6 +2,20 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.13.6
+
+### Fixed
+
+- **Devin dispatches no longer queue behind each other for nothing.** Every Devin dispatch took the skills-home grant lock for its whole run, even with no `--with` grant, so one long Devin job blocked every other Devin dispatch on the machine and a Devin fanout ran one job at a time. Waiting jobs sat silent after the disclosure banner until the watchdog killed them as `no-init`. The lock is now shared by grant set: dispatches with the same set (including every ungranted run) run side by side, and different sets still never share the skills home. (#43, thanks @danikdanik)
+- **A job waiting on the grant lock says so.** It prints which pid holds the lock, and the background watchdog does not count the queue time against the no-init, no-write or stall clocks. The hard timeout still counts from launch. (#43, thanks @danikdanik)
+- **A waiting grant set is not starved.** Once a dispatch is queued for a different set, new same-set dispatches queue behind it instead of joining ahead of it. (#43, thanks @danikdanik)
+- **`classify` no longer reports a killed job as having a deliverable** because of the shell's own lines in its log ("Terminated: 15", other job-control notices, engine diagnostics, the lock wait line). A job killed as `no-init` never counts as having one. (#43, thanks @danikdanik)
+- **Lock and state-lock checks no longer print "No such file or directory" into job logs** when another dispatch releases a lock at the same moment.
+
+### Upgrade note
+
+- **Do not mix pre- and post-0.13.6 dispatches against the same Devin skills home.** Finish or cancel Devin jobs started by an older Outsourcerer before dispatching with this one. In the rare case that a 0.13.6 dispatch is killed hard while others share its lock, an older dispatch can take the lock over underneath them.
+
 ## 0.13.5
 
 ### Fixed
