@@ -263,6 +263,11 @@ _report_unit_suite_result() {   # <suite-name>; reads the _suite_* state _run_un
   else
     bad "unit suite $1 FAILED"
     printf '%s\n' "$_suite_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
+    # On CI there is no machine to rerun the suite on, so keep its last lines in the log.
+    if [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${OSRC_CONFORMANCE_VERBOSE:-}" ]; then
+      echo "      --- last 60 lines of $1 ---"
+      printf '%s\n' "$_suite_out" | tail -n 60 | sed 's/^/      | /'
+    fi
   fi
 }
 # Ctrl-C must still stop everything, including a suite that ignores INT: the terminal already
