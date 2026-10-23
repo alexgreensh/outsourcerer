@@ -361,9 +361,12 @@ else
     done
     _moved=0
     for _k in $(seq 0 $((_l - 1))); do
-      # A worker that died without a result (killed from outside) is a failure, never a hang.
+      # A worker that died without a result (killed from outside) is a failure, never a hang. The
+      # result file is checked again AFTER ps: bash reaps finished jobs on its own, so a worker can
+      # write its result and vanish between the first check and ps.
       if [ -z "${_par_done[$_k]:-}" ] && [ ! -f "$_par_dir/${_par_order[$_k]}.meta" ] && [ "$_moved" = 0 ] \
-         && case "$(ps -o state= -p "${_par_pid[$_k]}" 2>/dev/null | tr -d '[:space:]')" in Z*|'') true ;; *) false ;; esac; then
+         && case "$(ps -o state= -p "${_par_pid[$_k]}" 2>/dev/null | tr -d '[:space:]')" in Z*|'') true ;; *) false ;; esac \
+         && [ ! -f "$_par_dir/${_par_order[$_k]}.meta" ]; then
         echo "FAIL: the worker running ${_par_order[$_k]} exited without a result" > "$_par_dir/${_par_order[$_k]}.out"
         echo "1 0 0" > "$_par_dir/${_par_order[$_k]}.meta"
       fi
