@@ -336,6 +336,15 @@ PATH="$STUB:$PATH" _run_unit_suite_bounded "$TMP/mkprobe.sh"
 [ -f "$TMP/mk-ran" ] && bad "suite RAN with a broken temp allocator" \
                     || ok "suite never ran when the first mktemp failed"
 
+# ------------------------------------------------------- a suite that prints FAIL but exits 0
+_suite_timed_out=0; _suite_rc=0; _suite_out="$(printf 'PASS: a\nFAIL: b\nRESULT: 1 passed, 1 failed')"
+_capture_report silentfail >/dev/null
+grep -q '^BAD:unit suite silentfail printed FAIL lines but exited 0' "$TMP/rep" 2>/dev/null \
+  && ok "a suite that prints FAIL but exits 0 is reported as failed" || bad "exit-0 suite with FAIL lines read as green: $(cat "$TMP/rep" 2>/dev/null)"
+_suite_out="$(printf 'PASS: a\nPASS: b')"
+_capture_report allgreen >/dev/null
+grep -q '^OK:unit suite allgreen green' "$TMP/rep" 2>/dev/null && ok "a clean suite is still green" || bad "clean suite misreported: $(cat "$TMP/rep" 2>/dev/null)"
+
 echo "---"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

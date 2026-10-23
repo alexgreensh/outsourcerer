@@ -260,6 +260,10 @@ _report_unit_suite_result() {   # <suite-name>; reads the _suite_* state _run_un
   if [ "$_suite_timed_out" -eq 1 ]; then
     bad "unit suite $1 TIMED OUT after ${_suite_secs}s"
     printf '%s\n' "$_suite_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
+  elif [ "$_suite_rc" -eq 0 ] && printf '%s\n' "$_suite_out" | grep -q '^FAIL'; then
+    # A suite that prints failures but exits 0 would otherwise read as green forever.
+    bad "unit suite $1 printed FAIL lines but exited 0 (its last line must exit non-zero on failure)"
+    printf '%s\n' "$_suite_out" | grep -E '^FAIL' | sed 's/^/      /'
   elif [ "$_suite_rc" -eq 0 ]; then ok "unit suite $1 green"
   else
     bad "unit suite $1 FAILED"
