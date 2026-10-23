@@ -110,7 +110,14 @@ A worker saying "done" is a claim. The factory checks it and writes the verdict 
 
 The evidence file records the job, base and head commits, the check's exit code and output tail, the
 secret scan result, and a one-line reason. A failed ship task with retries left goes back to `todo` with
-the failure note added to its next brief. Out of retries, it goes to Captain's Call.
+the failure note added to its next brief. The retry depends on why it failed: a launch or network blip
+retries the same model, a model or lane problem moves to the next model on the task's list, and a run that timed out or wedged is
+asked for a smaller, verifiable piece. The same model or too-big failure twice in a row comes to Captain's
+Call for a re-plan. Out of retries, it goes to Captain's Call.
+
+Before any worker starts, the brief itself is checked. A ship task you add by hand needs a spec, a check,
+a task it builds on, or a captain's answer (flow stages follow their template), so the worker knows when it is done. A brief that fails this is held with the
+reason, and no attempt is spent.
 
 ## Held decisions
 
@@ -121,6 +128,17 @@ shape. Make that a task.
 outsourcerer.sh task hold t4 --reason "Pick the winning candidate"
 outsourcerer.sh task release t4 --answer "Use t2, it keeps the public API unchanged"
 ```
+
+A hold can carry a default for when nobody answers in time, so an unattended plan does not stall overnight:
+
+```
+outsourcerer.sh task hold t4 --reason "Postgres or SQLite?" --default "SQLite" --until +2h
+```
+
+`--until` takes `+30m`, `+2h`, `+1d` or a UTC time like `2026-10-24T09:00Z`, and is required with `--default`.
+If the deadline passes with no answer, `plan run` releases the task with the default, marks it as defaulted in
+`task show`, and keeps going. While only that deadline is left, `plan run` waits for it, up to its
+`--max-minutes` cap (240 by default); after that, the next `plan run` applies it. Answering first always wins.
 
 A flow stage with `"hold": true` becomes a held task as soon as its deps finish. `plan run` raises a wake
 event when a task is held or fails, so an async orchestrator gets pinged (`OSRC_HEARTBEAT_WAKE`). The

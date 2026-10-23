@@ -307,12 +307,12 @@ else
   check "plan run without factory-flow.sh says what is missing" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'factory-flow.sh'"
 fi
 check "ship task in a plan without a repo fails closed" \
-  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\" | grep -q 'no repo'"
+  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship --check true >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\" | grep -q 'no repo'"
 
 # ---- end to end through the REAL bg path (fake droid binary, no model call)
 FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
 (cd "$REPO" && O plan new e2e --goal 'real launch' >/dev/null 2>&1)
-O task add 'real ship' --shape ship --provider droid --plan e2e >/dev/null 2>&1
+O task add 'real ship' --shape ship --check true --provider droid --plan e2e >/dev/null 2>&1
 jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O task start t1 --plan e2e 2>/dev/null | head -1)"
 i=0; while [ "$i" -lt 100 ]; do [ -f "$OSRC_HOME/jobs/$jid/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
 ej="$OSRC_HOME/plans/e2e/tasks/t1.json"
@@ -784,7 +784,7 @@ check 'R3 D4 jq normalization preserves false and parse-error exit statuses' r3_
 r3_early_receipt() (
   . "$LIB"
   local id job=20261022-120000-early; id="$(r3_task)"
-  _task_update r3 "$id" '.shape="ship"' || exit 1
+  _task_update r3 "$id" '.shape="ship" | .check="true"' || exit 1
   _task_bg_launch() {
     _task_get r3 "$id" | jq -e --arg s "$OSRC_WORKTREE_BASE" '.base_sha==$s' >/dev/null || return 1
     mkdir -p "$OSRC_JOBS/$job"

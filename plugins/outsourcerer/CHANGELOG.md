@@ -2,6 +2,14 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.1
+
+### Added
+
+- **Decisions can go ahead without you.** `task hold t4 --reason "Postgres or SQLite?" --default SQLite --until +2h` gives a held decision a fallback answer. If nobody answers by the deadline, `plan run` uses the default and keeps going, so a plan left running doesn't stall on a question that already had a sensible answer. Answering first always wins.
+- **Retries that fit the failure.** A launch or network blip retries on the same model. A model or lane problem moves to the next model on the task's list. A run that timed out or wedged comes back asking for the smallest piece the worker can finish and verify, with the rest listed as open items. The same model or too-big failure twice in a row comes to you for a re-plan, instead of a third identical try.
+- **Thin briefs never spend a worker.** A ship task you add with no spec, no check and nothing it builds on is held with the missing piece named before any worker starts, and no attempt is used. Flow stages follow their template.
+
 ## 0.15.0
 
 ### Added

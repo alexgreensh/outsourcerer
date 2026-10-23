@@ -20,12 +20,29 @@ Drives a plan until it is finished or needs you. Each pass ("tick") does two thi
    - Job failed (or its worker died): if attempts remain (`retries`, default 1), the task is reset the way
      `task retry` does it and `.result` becomes "previous attempt failed because ...", which the next brief shows
      under "Earlier attempt". Otherwise the task is failed with the reason (the task store wakes the heartbeat).
+   - How it retries depends on why it failed (`.last_fail_class`):
+     - **work** (the done check said no, or nothing more specific): next model, with the reason. "Next model" here
+       and below means the next one in the task's `fallback` list; a task without one keeps its model.
+     - **transient** (a claimed worker that never appeared, network, rate limit, 429/5xx): same model, told it was not the work. A second
+       transient failure in a row moves to the next model.
+     - **model** (unknown model, empty answer, quota, auth, a launch the lane refused): next model.
+     - **too_big** (timeout, wedged, stalled, context or output limit): same model, told to finish and verify the
+       smallest piece it can and list the rest under OPEN ITEMS.
+     - **too_big** twice in a row is held for you to re-plan (split the task, or answer to try once more), even on the
+       last attempt. **model** twice in a row is held the same way while retries remain; out of retries it fails.
+   - Held decisions with a default (`task hold --default ... --until ...`) whose deadline has passed are released
+     with that default at the start of each pass, exactly as if you had answered. While such a deadline is still
+     ahead and nothing else can move, `plan run` waits for it instead of stopping (within `--max-minutes`); `--once` stops (exit 3) and
+     names when the default applies.
    - Job blocked (worker needs input): the task is held for you, with a wake event and the exact command
      (`task release tX --answer "..." --plan p`; a new worker starts with your answer).
    - A captain's decision or a land step found running a worker (someone ran `task start` on it) is held: a
      worker's output never completes a decision or a land.
 2. **Start ready work**, up to `--max-parallel` (default 3) at once, counting what is already running.
    - A launch failure counts as a failed attempt and is retried within the task's `retries`.
+   - A brief too thin to act on is held before any worker starts, without using an attempt: a task with no prompt
+     or title, or a hand-added ship task (not a flow stage) with no spec, no check, no dependency and no captain's
+     answer. Release it with the missing detail as the answer.
    - Model: a flow task keeps its stage's model list (`fallback`). At dispatch a model now on the exclude list is
      skipped for the next allowed one; each retry moves to the next allowed model.
    - A decision or land that finishes in a pass frees its dependents in the same pass.

@@ -334,38 +334,90 @@ _ff_attempts() {
   printf '%s' "$1" | _ff_jq -r '([(.attempts // 0), ((.jobs // []) | length)] | max) - (.attempt_base // 0) | if . < 0 then 0 else . end'
 }
 
+# _ff_fail_class <reason> -> why an attempt failed, which decides how the retry differs:
+#   work       the done check said no (or nothing more specific is known): retry with the reason
+#   transient  a launch, network or rate-limit problem: retry the same model, the task was never tried
+#   model      the model, its plan or its lane failed (unknown model, empty answer, quota, auth, a
+#              launch the lane refused): switch model
+#   too_big    the run timed out, wedged, stalled or ran out of room: retry asking for a smaller piece
+_ff_fail_class() {
+  local r
+  # Job ids carry digits (20261023-131700-a503b) that could look like an HTTP code, so drop them first.
+  r="$(printf '%s' "$1" | sed -E 's/[0-9]{8}-[0-9]{6}-[0-9A-Za-z]+/JOB/g' | tr '[:upper:]' '[:lower:]')"
+  case "$r" in
+    "the done check said no"*) echo work; return ;;
+  esac
+  if printf '%s' "$r" | grep -Eq 'rate[ _-]?limit|too many requests|(^|[^0-9])(429|50[234])([^0-9]|$)|overloaded|network|connection (reset|refused|closed)|econn|temporar(il)?y unavailable|service unavailable'; then echo transient; return; fi
+  if printf '%s' "$r" | grep -Eq 'context (length|window)|too long|max(imum)?[ _-]?tokens|token limit|output limit|truncat|wedged|timeout|timed out|(^|[^a-z])stall'; then echo too_big; return; fi
+  if printf '%s' "$r" | grep -Eq 'model (not found|unavailable|is not|not supported|error)|unknown model|invalid model|unsupported model|empty (output|answer|response|result)|no output|quota|usage limit|plan limit|credits?|billing|unauthori[sz]ed|(^|[^0-9])40[13]([^0-9]|$)|did not launch|launch failure'; then echo model; return; fi
+  if printf '%s' "$r" | grep -Eq 'never launched|never got a worker|no job was recorded|no record on disk|ended interrupted'; then echo transient; return; fi
+  echo work
+}
+
 # _ff_fail_or_retry <plan> <tid> <reason> [guard-jq]: retry while attempts remain, putting the reason
 # into the task so the next brief says why the last try failed; otherwise fail and call the captain.
+# How it retries depends on _ff_fail_class: same model for a launch or network blip, the next model
+# for a model or lane problem, a smaller piece for a run that was too big. The same model or too-big
+# failure twice in a row is held for the captain to re-plan, since another identical try rarely helps.
 # The guard (default: always) makes the change only if the task is still in the state this pass saw.
 _ff_fail_or_retry() {
-  local plan="$1" tid="$2" reason="$3" guard="${4:-true}" t n retries m
+  local plan="$1" tid="$2" reason="$3" guard="${4:-true}" t n retries m cur cls prev note
   t="$(_task_get "$plan" "$tid")" || return 1
   n="$(_ff_num "$(_ff_attempts "$t")" 0)"
   retries="$(_ff_num "$(printf '%s' "$t" | _ff_jq -r '.retries // 0')" 0)"
+  cls="$(_ff_fail_class "$reason")"
+  prev="$(printf '%s' "$t" | _ff_jq -r '.last_fail_class // ""')"
+  cur="$(printf '%s' "$t" | _ff_jq -r '.model // ""')"
+  # Too big twice is held even on the last attempt: a re-plan beats a bare "failed". Model twice is
+  # held only while retries remain; out of budget it fails as usual.
+  if [ "$cls" = "$prev" ] && { [ "$cls" = too_big ] || { [ "$cls" = model ] && [ "$n" -le "$retries" ]; }; }; then
+    case "$cls" in
+      too_big) note="it failed twice for being too big to finish in one run ($reason). Split it into smaller tasks, or answer to try once more" ;;
+      model)   note="two attempts in a row failed on a model or lane problem ($reason). Check that lane and its plan, or answer to try once more" ;;
+    esac
+    _task_update "$plan" "$tid" "if ($guard) | not then error(\"moved\") else .last_fail_class = \$c end" --arg c "$cls" >/dev/null 2>&1 || return 1
+    _ff_hold "$plan" "$tid" "$note: $(_ff_cmd "$plan" task release "$tid" --answer '"<what to change>"')" "$guard" || return 1
+    _ff_event "$plan" "$tid" retry "attempt $n failed ($cls, twice in a row): held for a re-plan"
+    return 0
+  fi
   if [ "$n" -le "$retries" ]; then
-    m="$(_ff_next_model "$t" retry)"
+    case "$cls" in
+      transient) m="$cur"
+                 [ "$prev" = transient ] && m="$(_ff_next_model "$t" retry)"
+                 note="previous attempt failed because $reason. That was a launch or network problem, not the work itself, so start the task fresh." ;;
+      model)     m="$(_ff_next_model "$t" retry)"
+                 note="previous attempt failed because $reason. That was a problem with the model or its lane, not the task." ;;
+      too_big)   m="$cur"
+                 note="previous attempt failed because $reason. The task was too big to finish in one run: this time do the smallest piece you can finish and verify, commit it, and list everything left under OPEN ITEMS in your final message." ;;
+      *)         m="$(_ff_next_model "$t" retry)"
+                 note="previous attempt failed because $reason" ;;
+    esac
     # Same reset as `task retry`; .result carries the reason, which the next brief prints under
     # "Earlier attempt", so the next worker knows what went wrong.
-    FACTORY_EVENT_NOTE="retry: $reason" _task_update "$plan" "$tid" \
+    FACTORY_EVENT_NOTE="retry ($cls): $reason" _task_update "$plan" "$tid" \
       "if ($guard) | not then error(\"moved\") else . end
        | .state = \"todo\" | .job = \"\" | .worktree = \"\" | .branch = \"\" | .base_sha = \"\" | .head_sha = \"\" | .evidence = \"\"
        | del(.launch_failed, .auto_land_pending, .auto_land_complete) | del(.verifying_at) | del(.verifying_pid, .verifying_start, .verifying_token)
        | (if ((.fallback // []) | length) > 0 then .model = \$m else . end)
-       | .result = (\"previous attempt failed because \" + \$r)" \
-      --arg r "$reason" --arg m "$m" >/dev/null 2>&1 || return 1
-    _ff_event "$plan" "$tid" retry "attempt $n failed: $reason"
-    printf '  %s: retrying%s (attempt %s failed: %s)\n' "$tid" \
-      "$( [ -n "$m" ] && [ "$m" != "$(printf '%s' "$t" | _ff_jq -r '.model // ""')" ] && printf ' on %s' "$m")" "$n" "$reason"
+       | .last_fail_class = \$c | .result = \$note" \
+      --arg note "$note" --arg m "$m" --arg c "$cls" >/dev/null 2>&1 || return 1
+    _ff_event "$plan" "$tid" retry "attempt $n failed ($cls): $reason"
+    printf '  %s: retrying%s (attempt %s failed, %s: %s)\n' "$tid" \
+      "$( [ -n "$m" ] && [ "$m" != "$cur" ] && printf ' on %s' "$m")" "$n" "$(_ff_class_words "$cls")" "$reason"
   else
     FACTORY_EVENT_NOTE="failed: $reason" _task_update "$plan" "$tid" \
       "if ($guard) | not then error(\"moved\") else . end
-       | .state = \"failed\" | .result = (\"failed after \" + \$n + \" attempt(s): \" + \$r)
+       | .state = \"failed\" | .last_fail_class = \$c | .result = (\"failed after \" + \$n + \" attempt(s): \" + \$r)
        | del(.verifying_at) | del(.verifying_pid, .verifying_start, .verifying_token)
        | .hold = ((.hold // {}) + {reason: (\"failed after \" + \$n + \" attempt(s): \" + \$r + \". Run it again: \" + \$retry + \" (or cancel it: \" + \$cancel + \")\")})" \
-      --arg r "$reason" --arg n "$n" --arg retry "$(_ff_cmd "$plan" task retry "$tid")" --arg cancel "$(_ff_cmd "$plan" task cancel "$tid")" \
+      --arg r "$reason" --arg n "$n" --arg c "$cls" --arg retry "$(_ff_cmd "$plan" task retry "$tid")" --arg cancel "$(_ff_cmd "$plan" task cancel "$tid")" \
       >/dev/null 2>&1 || return 1
     printf '  %s: failed for good after %s attempt(s): %s. Next: %s\n' "$tid" "$n" "$reason" "$(_ff_cmd "$plan" task retry "$tid")"
   fi
+}
+
+_ff_class_words() {
+  case "$1" in transient) echo "launch or network problem" ;; model) echo "model or lane problem" ;; too_big) echo "too big for one run" ;; *) echo "the work fell short" ;; esac
 }
 
 _ff_hold() {   # <plan> <tid> <reason> [guard-jq]   (the task store sends the wake)
@@ -373,7 +425,7 @@ _ff_hold() {   # <plan> <tid> <reason> [guard-jq]   (the task store sends the wa
   FACTORY_EVENT_NOTE="$reason" _task_update "$plan" "$tid" \
     "if ($guard) | not then error(\"moved\") else . end
      | .state = \"held\" | .hold_after_deps = false | del(.verifying_at) | del(.verifying_pid, .verifying_start, .verifying_token)
-     | .hold = ((.hold // {}) + {reason: \$r, answer: \"\"})" \
+     | .hold = ((.hold // {}) + {reason: \$r, answer: \"\", until: \"\", until_epoch: 0, default: \"\", defaulted: false})" \
     --arg r "$reason" >/dev/null 2>&1 || return 1
   printf '  %s: held for the captain: %s\n' "$tid" "$reason"
 }
@@ -695,6 +747,32 @@ _ff_land_stage_recover() {
 
 # ---------------------------------------------------------------- scheduler: reconcile
 
+# _ff_apply_defaults <plan>: a held decision with a default answer and a deadline that has passed is
+# released with that default, exactly as if the captain had answered it, so an unattended plan does
+# not stall overnight on a question that already had a sensible answer. Guarded per task.
+# _ff_next_default <plan> -> "<epoch> <tid>" for the held decision whose default fires soonest, or
+# nothing when no held task has a default waiting.
+_ff_next_default() {
+  _task_list "$1" | _ff_jq -r '[.[] | select(.state == "held" and ((.hold.default // "") | test("\\S"))
+      and ((.hold.until_epoch // 0) | type == "number") and (.hold.until_epoch // 0) > 0)]
+    | sort_by(.hold.until_epoch) | first // empty | "\(.hold.until_epoch | floor) \(.id)"' 2>/dev/null
+}
+
+_ff_apply_defaults() {
+  local plan="$1" tid now d
+  now="$(date +%s)"
+  for tid in $(_task_list "$plan" | _ff_jq -r --argjson now "$now" '.[]
+      | select(.state == "held" and ((.hold.default // "") | test("\\S")) and ((.hold.until_epoch // 0) | type == "number")
+               and (.hold.until_epoch // 0) > 0 and (.hold.until_epoch // 0) <= $now) | .id'); do
+    d="$(_task_get "$plan" "$tid" | _ff_jq -r '.hold.default // ""')"
+    FACTORY_EVENT_NOTE="no answer by the deadline; used the default: $d" _task_update "$plan" "$tid" \
+      'if .state != "held" or ((.hold.until_epoch // 0) > $now) or (.hold.until_epoch // 0) <= 0 or (.hold.default // "") == "" then error("moved")
+       else .state = "todo" | .hold.answer = .hold.default | .hold.defaulted = true | .hold.until_epoch = 0 end' \
+      --argjson now "$now" >/dev/null 2>&1 || continue
+    printf '  %s: nobody answered by the deadline, so it goes ahead with the default: %s\n' "$tid" "$d"
+  done
+}
+
 _ff_reconcile() {   # <plan>
   local plan="$1" tasks tid t st job grace age now vstale vpid j tok guard me ident vtoken old target head reviewed receipt w br base rc
   _plan_lock "$plan" || return 1
@@ -704,6 +782,7 @@ _ff_reconcile() {   # <plan>
   fi
   _ff_pair_recover "$plan" || { _plan_unlock "$plan"; return 1; }
   _plan_unlock "$plan"
+  _ff_apply_defaults "$plan"
   tasks="$(_task_list "$plan")" || return 1
   # Invalidate an approval before any dependent land step is dispatched.
   for tid in $(printf '%s' "$tasks" | _ff_jq -r '.[] | select(.state == "done" and .require_verdict == true and has("reviewed_head")) | .id'); do
@@ -897,6 +976,7 @@ _ff_dispatch() {   # <plan> <max-parallel>
         else
           printf '  %s: could not start: %s\n' "$tid" "$out"
         fi
+      elif [ "$st" = held ]; then printf '  %s: held for the captain: %s\n' "$tid" "$(printf '%s' "$t" | _ff_jq -r '.hold.reason // ""')"
       else printf '  %s: not started this pass (%s); will try again\n' "$tid" "$out"; fi
     fi
   done
@@ -979,7 +1059,7 @@ _ff_on_signal() {   # <exit-code>: stop now, release the lock, put the caller's 
 _ff_sleep() { sleep "$1" & _FF_SLEEPER=$!; wait "$_FF_SLEEPER" 2>/dev/null; _FF_SLEEPER=""; }
 
 cmd_plan_run() {
-  local plan="" max=3 once=0 interval=30 maxmin=240 a pd t0 tick=0 c total done_n canceled failed held running ready todo landfail why sl rc pass
+  local plan="" max=3 once=0 interval=30 maxmin=240 a pd t0 tick=0 c total done_n canceled failed held running ready todo landfail why sl rc pass pend="" lastpend=""
   _FF_AUTO_LAND=0; _FF_SETUP=""
   while [ "$#" -gt 0 ]; do
     a="$1"
@@ -1040,7 +1120,7 @@ cmd_plan_run() {
     _ff_summary "$plan" "$tick"
     c="$(_ff_counts "$plan")" || { _ff_lock_release; _ff_restore_traps; die "could not read the tasks of $plan"; }
     set -- $c; total=$1 done_n=$2 canceled=$3 failed=$4 held=$5 running=$6 ready=$7 todo=$9 landfail=${10}
-    rc=""
+    rc=""; pend=""
     if [ "$total" -eq 0 ]; then
       echo "stopped: $plan has no tasks yet; add some with 'task add' or 'flow run'."; rc=0
     elif [ "$running" -eq 0 ] && [ "$ready" -eq 0 ]; then
@@ -1050,9 +1130,17 @@ cmd_plan_run() {
         _ff_wake_finished "$plan" "$done_n"
         rc=0
       else
-        why="$(_ff_why_stuck "$plan")"
-        echo "stopped: $plan needs the captain, nothing else can move. ${why}"
-        rc=3
+        pend="$(_ff_next_default "$plan")"
+        if [ -n "$pend" ] && [ "$once" != 1 ] && ! _ff_out_of_time; then
+          # A held decision has a default with a deadline still ahead: wait for it instead of stopping.
+          [ "$pend" = "$lastpend" ] || printf '  waiting: %s goes ahead with its default at %s unless you answer first\n' "${pend#* }" "$(_ff_jq -nr --argjson e "${pend%% *}" '$e | todate')"
+          lastpend="$pend"
+        else
+          why="$(_ff_why_stuck "$plan")"
+          echo "stopped: $plan needs the captain, nothing else can move. ${why}"
+          [ -n "$pend" ] && echo "  ${pend#* } goes ahead with its default at $(_ff_jq -nr --argjson e "${pend%% *}" '$e | todate') unless you answer first; the next plan run after that applies it."
+          rc=3
+        fi
       fi
     elif _ff_out_of_time; then
       echo "stopped: time cap of $maxmin minutes reached with $running still underway (their jobs keep running). Run 'plan run $plan' again to pick up where this left off."
@@ -1066,6 +1154,7 @@ cmd_plan_run() {
     fi
     sl="$interval"
     [ $(( _FF_DEADLINE - $(date +%s) )) -lt "$sl" ] && sl=$(( _FF_DEADLINE - $(date +%s) ))
+    if [ -n "$pend" ] && [ $(( ${pend%% *} - $(date +%s) + 1 )) -lt "$sl" ]; then sl=$(( ${pend%% *} - $(date +%s) + 1 )); fi
     [ "$sl" -lt 1 ] && sl=1
     _ff_sleep "$sl"
   done

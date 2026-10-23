@@ -587,6 +587,21 @@ _task_deps_blocking() {
 # (attempts+1, job cleared, claimed_at/claimed_by recorded). Caller holds the lock. Prints the refusal
 # reason on stderr otherwise. Captain decisions, decision gates and land steps are never dispatched
 # as workers: plan run (or land) handles those.
+# _task_brief_lint <task-json> -> prints what is missing when a brief is too thin for a worker to
+# act on, nothing when it is fine. Every task needs words (a prompt or a title). A ship task changes
+# code, so it also needs a way to tell when it is done: a spec, a check, finished work it builds on
+# (dependencies), or a captain's answer. Flow stages are exempt from the ship rule: their templates
+# set what done means (best-of-n candidates, for one, may run with no check on purpose).
+_task_brief_lint() {
+  printf '%s' "$1" | _ft_jq -r '
+    def has_text(f): ((f // "") | tostring | test("\\S"));
+    if (has_text(.prompt) or has_text(.title) or has_text(.hold.answer)) | not then "it has no prompt or title"
+    elif (.shape // "scout") == "ship" and ((.flow.name // "") == "")
+         and ((has_text(.spec) or has_text(.check) or ((.deps // []) | length > 0) or has_text(.hold.answer)) | not)
+      then "a ship task needs a spec, a check, or a task it builds on, so the worker knows when it is done"
+    else empty end' 2>/dev/null
+}
+
 _task_claim_locked() {
   local plan="$1" tid="$2" claimer="${3:-}" t st bl kind
   t="$(_task_get "$plan" "$tid")" || return 1
@@ -613,6 +628,16 @@ _task_claim_locked() {
   bl="$(_task_deps_blocking "$plan" "$t")" || { echo "outsourcerer: cannot read the dependencies of $tid (a task file is damaged). See: outsourcerer task ls --plan $plan" >&2; return 1; }
   if [ -n "$bl" ]; then
     echo "outsourcerer: $tid is not ready; it waits on $bl." >&2; return 1
+  fi
+  # A brief too thin to act on is held before a worker is spent on it (no attempt is used).
+  local thin; thin="$(_task_brief_lint "$t")"
+  if [ -n "$thin" ]; then
+    FACTORY_EVENT_NOTE="brief too thin: $thin" _task_update_locked "$plan" "$tid" \
+      'if .state != "todo" then error("not todo") else .state = "held"
+         | .hold = ((.hold // {}) + {reason: ("the brief is too thin to start a worker: " + $w), answer: "", until: "", until_epoch: 0, default: ""}) end' \
+      --arg w "$thin. Add it with: outsourcerer task release $tid --plan $plan --answer \"<what done looks like and how to check it>\"" >/dev/null 2>&1 || true
+    echo "outsourcerer: $tid was not started because its brief is too thin: $thin. It is held; add the detail with: outsourcerer task release $tid --plan $plan --answer \"...\"" >&2
+    return 1
   fi
   if [ -z "$claimer" ]; then
     _factory_self_pid "$(_plan_dir "$plan")"
@@ -997,7 +1022,7 @@ _plan_cli_show() {
       + [""]
       + bucket("Captain'"'"'s Call";
           [ $all[] | select(.state == "held")
-            | line("held") + " - needs a decision: \(first(.hold.reason))" + (if (.hold.until // "") != "" then " (by \(.hold.until))" else "" end)
+            | line("held") + " - needs a decision: \(first(.hold.reason))" + (if (.hold.until // "") != "" then " (by \(.hold.until))" else "" end) + (if (.hold.default // "") != "" then "; default if no answer: \(.hold.default)" else "" end)
               + "\n      answer with: outsourcerer task release \(.id) --plan \($p.name) --answer \"...\"" ]
           + [ $all[] | select(.state == "failed")
             | line("failed") + (if (.result // "") != "" then " - \(first(.result))" else "" end)
@@ -1179,7 +1204,8 @@ _task_cli_show() {
     (if .job != "" then "  job:      \(.job)   (all: \(.jobs | join(", ")))" else empty end),
     (if .branch != "" then "  branch:   \(.branch) at \(.worktree)\(if .base_sha != "" then " (base " + .base_sha[0:12] + ")" else "" end)" else empty end),
     (if .hold.reason != "" then "  question: \(.hold.reason)\(if .hold.until != "" then " (by " + .hold.until + ")" else "" end)" else empty end),
-    (if .hold.answer != "" then "  answer:   \(.hold.answer)" else empty end),
+    (if (.hold.default // "") != "" and .state == "held" then "  default:  \(.hold.default) (used if nobody answers by \(.hold.until))" else empty end),
+    (if .hold.answer != "" then "  answer:   \(.hold.answer)\(if (.hold.defaulted // false) then " (the default; nobody answered in time)" else "" end)" else empty end),
     (if .result != "" then "  result:   \(.result)" else empty end),
     (if .evidence != "" then "  evidence: \(.evidence)" else empty end),
     (if .landed == true then "  landed:   yes\(if (.landed_into // "") != "" then " into " + .landed_into else "" end)\(if (.landed_sha // "") != "" then " at " + (.landed_sha | tostring | .[0:12]) else "" end)" else empty end),
@@ -1216,20 +1242,55 @@ _task_cli_start() {
   echo "$_TASK_TID started as job $jid. Its brief: $(_task_dir "$_TASK_PLAN" "$_TASK_TID")/brief.md. Watch it: outsourcerer watch $jid" >&2
 }
 
+# _task_deadline <when> -> "<epoch> <ISO-UTC>" for +30m / +2h / +1d (also s and w) or an ISO time
+# like 2026-10-24T09:00Z or 2026-10-24T09:00:00Z. Fails on anything else. jq does the date math, so
+# it behaves the same on macOS and Linux.
+_task_deadline() {
+  local w="$1" n u e now
+  now="$(date +%s)"
+  case "$w" in
+    +[0-9]*[smhdw])
+      n="${w#+}"; u="${n##*[0-9]}"; n="${n%"$u"}"
+      case "$n" in ''|*[!0-9]*) return 1 ;; esac
+      case "$u" in s) e=$((now + n)) ;; m) e=$((now + n * 60)) ;; h) e=$((now + n * 3600)) ;; d) e=$((now + n * 86400)) ;; w) e=$((now + n * 604800)) ;; *) return 1 ;; esac ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z) e="$(_ft_jq -nr --arg t "${w%Z}:00Z" '$t | fromdateiso8601' 2>/dev/null)" || return 1 ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) e="$(_ft_jq -nr --arg t "$w" '$t | fromdateiso8601' 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$e" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s\n' "$e" "$(_ft_jq -nr --argjson e "$e" '$e | todate')"
+}
+
 _task_cli_hold() {
   _task_cli_args "$@"; set -- ${_TASK_ARGV[@]+"${_TASK_ARGV[@]}"}
-  local tid="" reason="" until=""
+  local tid="" reason="" until="" def="" dl="" ue=0
   while [ $# -gt 0 ]; do
-    case "$1" in --reason) _factory_optval "$1" $#; reason="$2"; shift 2 ;; --until) _factory_optval "$1" $#; until="$2"; shift 2 ;; -*) die "task hold: unknown option '$1'" ;; *) tid="$1"; shift ;; esac
+    case "$1" in
+      --reason) _factory_optval "$1" $#; reason="$2"; shift 2 ;;
+      --until) _factory_optval "$1" $#; until="$2"; shift 2 ;;
+      --default) _factory_optval "$1" $#; def="$2"; shift 2 ;;
+      -*) die "task hold: unknown option '$1'" ;;
+      *) tid="$1"; shift ;;
+    esac
   done
   _task_id_ok "$tid" || die "task hold needs a task id, e.g. outsourcerer task hold t3 --plan $_TASK_PLAN --reason \"pick A or B\""
   [ -n "$reason" ] || die "task hold needs --reason \"<the question for the captain>\"."
+  if [ -n "$until" ]; then
+    if dl="$(_task_deadline "$until")"; then ue="${dl%% *}"; until="${dl#* }"
+    elif [ -n "$def" ]; then die "task hold: --until '$until' is not a time. Use +30m, +2h, +1d, or an ISO time like 2026-10-24T09:00Z."
+    fi
+  fi
+  if [ -n "$def" ] && [ "$ue" -eq 0 ]; then
+    die "task hold: --default needs --until, so the captain knows when the default kicks in (e.g. --until +2h)."
+  fi
   FACTORY_EVENT_NOTE="$reason" _task_update "$_TASK_PLAN" "$tid" \
     'if (.state == "todo" or .state == "failed" or .state == "verifying" or .state == "held") | not
-       then error("bad state") else .state = "held" | .hold = {reason:$r, until:$u, answer:""} end' \
-    --arg r "$reason" --arg u "$until" \
+       then error("bad state") else .state = "held" | .hold = {reason:$r, until:$u, until_epoch:$ue, default:$d, answer:""} end' \
+    --arg r "$reason" --arg u "$until" --argjson ue "$ue" --arg d "$def" \
     || die "$tid can be held only while it waits, is being checked, or has failed. If it is running, cancel it first."
   echo "$tid is held for a decision ($reason). Answer with: outsourcerer task release $tid --plan $_TASK_PLAN --answer \"...\""
+  [ -n "$def" ] && echo "With no answer by $until, plan run goes ahead with the default: $def"
+  return 0
 }
 
 _task_cli_release() {
@@ -1242,12 +1303,12 @@ _task_cli_release() {
   [ -n "$answer" ] || die "task release needs --answer \"<your decision>\". It is handed to this task and the ones after it."
   if [ "$mkdone" = 1 ]; then
     FACTORY_EVENT_NOTE="$answer" _task_update "$_TASK_PLAN" "$tid" \
-      'if .state != "held" then error("not held") else .state = "done" | .hold.answer = $a | .result = $a end' --arg a "$answer" \
+      'if .state != "held" then error("not held") else .state = "done" | .hold.answer = $a | .hold.defaulted = false | .hold.until_epoch = 0 | .result = $a end' --arg a "$answer" \
       || die "$tid is not held, so there is nothing to release."
     echo "$tid is done with your decision; the tasks after it now see it."
   else
     FACTORY_EVENT_NOTE="$answer" _task_update "$_TASK_PLAN" "$tid" \
-      'if .state != "held" then error("not held") else .state = "todo" | .hold.answer = $a end' --arg a "$answer" \
+      'if .state != "held" then error("not held") else .state = "todo" | .hold.answer = $a | .hold.defaulted = false | .hold.until_epoch = 0 end' --arg a "$answer" \
       || die "$tid is not held, so there is nothing to release."
     echo "$tid released with your answer; it goes back in line to run."
   fi

@@ -155,7 +155,7 @@ $line
 EOF
     jq -n --arg id "$tid" --arg plan "$plan" --arg deps "$deps" --arg shape "${shape:-scout}" --argjson r "${retries:-1}" \
       '{schema:1,id:$id,plan:$plan,title:("task " + $id),shape:$shape,state:"todo",deps:($deps | split(",") | map(select(. != ""))),
-        prompt:("do " + $id),spec:"",check:"",verb:"run",model:"",provider:"",deliver:"local",retries:$r,attempts:0,
+        prompt:("do " + $id),spec:(if $shape == "ship" then "change a.txt" else "" end),check:"",verb:"run",model:"",provider:"",deliver:"local",retries:$r,attempts:0,
         job:"",jobs:[],worktree:"",branch:"",base_sha:"",head_sha:"",hold:{reason:"",until:"",answer:""},result:"",evidence:"",
         flow:{name:"",stage:""},created:"x",updated:"x"}' > "$OSRC_HOME/plans/$plan/tasks/$tid.json"
   done
@@ -413,7 +413,7 @@ out="$( date() { if [ "${1:-}" = +%s ]; then local c; c=$(( $(cat "$TMP/clock") 
 [ "$rc" = 2 ] && printf '%s' "$out" | grep -q "time cap of 1 minutes reached" && ok "runaway guard: time cap exits 2 with a plain reason" || bad "time cap rc=$rc: $out"
 mkplan p8 't1||scout|1'; touch "$TMP/dispatch-refuse-t1"
 out="$( cmd_plan_run p8 --interval 1 2>&1 )"; rc=$?
-[ "$rc" = 3 ] && [ "$(st p8 t1)" = failed ] && printf '%s' "$out" | grep -q "retrying (attempt 1 failed: the worker did not launch" \
+[ "$rc" = 3 ] && [ "$(st p8 t1)" = failed ] && printf '%s' "$out" | grep -q "retrying (attempt 1 failed, model or lane problem: the worker did not launch" \
   && printf '%s' "$out" | grep -q "failed for good after 2 attempt" && ok "launch failure is retried within the budget, then fails closed" || bad "dispatch refusal rc=$rc: $out"
 rm -f "$TMP/dispatch-refuse-t1"
 mkplan p9
