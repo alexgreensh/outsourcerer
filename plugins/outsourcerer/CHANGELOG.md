@@ -2,6 +2,13 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.2
+
+### Fixed
+
+- **New runs aren't called dead in their first seconds.** A status check that landed between a run starting and it recording its process marked the run interrupted, and supervision stopped watching it. Runs now get the same short launch grace there that they already had before starting. (#48)
+- **Time limits only cost what the work takes.** Under load, about one bounded call in a hundred (lane health checks, login probes) waited out its whole time limit even when the command had already finished. Bash sometimes misses the signal that stops the timer, so the timer is now stopped directly as well.
+
 ## 0.15.1
 
 ### Added
