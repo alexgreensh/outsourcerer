@@ -15,17 +15,19 @@ pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "$PWD/.test-reconcile-grace.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-reconcile-grace.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/sessions"
 
+# Set a path's mtime to an epoch: GNU touch takes -d @epoch, BSD/macOS touch needs -t.
+age_path() { touch -d "@$1" "$2" 2>/dev/null || touch -t "$(date -r "$1" +%Y%m%d%H%M.%S)" "$2"; }
 mkjob() { # <id> <age_seconds|now> -> job dir with status=running, empty out.log, no pid files
   local id="$1" age="$2" jd="$OSRC_HOME/jobs/$1" sa
   mkdir -p "$jd"; : > "$jd/out.log"; echo running > "$jd/status"
   if [ "$age" = now ]; then sa=$(date +%s); else sa=$(( $(date +%s) - age )); fi
   echo "$sa" > "$jd/started_at"
-  [ "$age" = now ] || touch -d "@$sa" "$jd" 2>/dev/null || true
+  [ "$age" = now ] || age_path "$sa" "$jd"
 }
 rc_of() { local id="$1"; ( set --; OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1; _reconcile_status "$id" ); }
 rc_ro() { local id="$1"; ( set --; OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1; OSRC_RECONCILE_READ_ONLY=1 _reconcile_status "$id" ); }
@@ -64,7 +66,7 @@ v="$(rc_of J-nodate)"
 
 # 7. ...and a pid-less job whose dir is OLD flips even without a parseable started_at (no immortality)
 mkjob J-oldnodate now; echo garbage > "$OSRC_HOME/jobs/J-oldnodate/started_at"
-touch -d '1 hour ago' "$OSRC_HOME/jobs/J-oldnodate"
+age_path "$(( $(date +%s) - 3600 ))" "$OSRC_HOME/jobs/J-oldnodate"
 v="$(rc_of J-oldnodate)"
 [ "$v" = interrupted ] && ok "corrupt started_at + old dir flips via dir mtime (bounded, no immortal unknown)" || bad "corrupt started_at + old dir verdict '$v', want interrupted"
 
@@ -89,8 +91,9 @@ mkjob J-reuse now
 sleep 2; ( sleep 30 ) & faker=$!
 echo "$faker" > "$OSRC_HOME/jobs/J-reuse/pid"
 LC_ALL=C ps -o lstart= -p 1 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$OSRC_HOME/jobs/J-reuse/pid_start"
-v="$(rc_of J-reuse)"; kill "$faker" 2>/dev/null
+v="$(rc_of J-reuse)"; kill "$faker" 2>/dev/null; wait "$faker" 2>/dev/null
 [ "$v" = interrupted ] && ok "recycled pid with mismatched start still reconciles interrupted" || bad "pid-reuse job verdict '$v', want interrupted"
 
 echo "----"
-echo "PASS=$pass FAIL=$fail"
+echo "RESULT: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

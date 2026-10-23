@@ -12807,7 +12807,7 @@ _reconcile_status() {
         # pid/supervisor_pid, and the delegate can print its first bytes before either pid file
         # lands. A reconcile (status/result/watch, or the heartbeat's read-only _heartbeat_active_work
         # scan) landing in that gap found no pid to prove life and flipped the launching job to
-        # interrupted -- the fleet then rendered it dead and the beacon disarmed supervision while
+        # interrupted, so the fleet then rendered it dead and the beacon disarmed supervision while
         # the run was healthy (issue #48 family). A pid-less running job is only stillborn once the
         # launch is PROVABLY stuck: no pid files at all AND older than the bounded launch grace.
         # Age comes from started_at when it parses, else the job dir's mtime (always available for
@@ -12819,7 +12819,7 @@ _reconcile_status() {
         _lw_sa="$(cat "$jd/started_at" 2>/dev/null)"
         case "$_lw_sa" in
           ''|*[!0-9]*)
-            _lw_sa="$(stat -c %Y "$jd" 2>/dev/null || stat -f %m "$jd" 2>/dev/null)"
+            _lw_sa="$(_mtime "$jd")"
             case "$_lw_sa" in ''|*[!0-9]*) _lw_sa="$_lw_now" ;; esac
             ;;
         esac
