@@ -10,6 +10,8 @@ heuristics.
 - Claudex lane: GPT-5.6 Sol/Terra inside the Claude Code harness
 - Engine lanes: droid (Factory) + cursor
 - Cline lane
+- Pi lane
+- Grok Bot lane
 - Gemini / Antigravity lane
 - Local lane (Ollama / LM Studio / llama.cpp)
 - TokenRouter lane
@@ -139,6 +141,58 @@ outsourcerer supervision (bg/fanout/watchdog/ledger/cloud-gate) applies.
   no `setsid`/process-group-kill). `_kill_tree` does best-effort reaping of the direct process tree;
   if a cline bg job is cancelled, verify with `ps aux | grep cline` that no spokes linger. This is
   a known limitation, not a silent gap.
+
+## Pi lane (`--provider pi`)
+
+`--provider pi` delegates through Pi (https://github.com/earendil-works/pi), the open-source coding
+agent, with whatever the user signed it in to. Pi's `/login` covers Claude Pro/Max, ChatGPT, GitHub
+Copilot, OpenRouter, Kimi, xAI and others, or it uses provider API keys. Billing is theirs; the roster
+is Pi's, so do NOT promise a model or price.
+
+- `-m <name>` passes through **verbatim** to `pi --model` (`provider/id`, a fuzzy name like `sonnet`,
+  or a `:thinking` suffix). No `-m` = Pi's configured default.
+- `--effort` is **native**: `--thinking minimal|low|medium|high|xhigh|max`.
+- Runs headless as `pi -p --no-session`, so delegated runs stay out of Pi's session history.
+- **Posture:** Pi never asks before a tool runs and has **no sandbox**. `run`/`explore` are read-only
+  by tool list (`--tools read,grep,find,ls`). `edit`, `research` and `yolo` get Pi's default tools
+  (read, bash, edit, write) and are fully autonomous. The banner says so.
+- **Context:** Pi reads `AGENTS.md` and `CLAUDE.md`, and skills from `~/.pi/agent/skills` and
+  `~/.agents/skills`, but not `~/.claude/skills`. `--with` grants travel in the prompt, as on Cursor.
+  Pi has its own MCP config (`pi mcp add`).
+- Install: `npm i -g @earendil-works/pi-coding-agent` (or the installer on https://pi.dev), then run
+  `pi` and `/login` once. `doctor` shows whether it is on PATH. `session start --provider pi` opens
+  Pi's TUI in tmux.
+
+## Grok Bot lane (`--provider grokbot`)
+
+Grok Bot (xAI's always-on agents, each with its own cloud computer) has **no chat API**. A bot
+**routine** can be started by a webhook, so this lane posts the task to the user's routine and the
+bot delivers by **pushing a git branch** to the repo's origin. The lane waits for that branch, prints
+`OUTSOURCERER_RESULT.md` from it, and names the branch. Nothing is merged: review it, or `land` it.
+
+- Setup, once: in Grok Bot create a routine with a **Webhook** trigger and the instruction "Follow
+  the instructions in the webhook payload exactly". Put its URL and key in `~/.env` as
+  `GROKBOT_WEBHOOK_URL` and `GROKBOT_WEBHOOK_KEY`. The URL must be https. The bot needs push access to
+  the repo (its GitHub connection).
+- Run it inside a git repo with an `origin`. The bot clones origin, so uncommitted or unpushed work
+  is invisible to it (the lane warns).
+- `run`/`explore` ask the bot to change nothing but its result file. This is an **instruction, not
+  an enforced mode**: Grok Bot has no read-only switch. `edit`/`research`/`yolo` let it edit, on its
+  own branch only.
+- `-m` and `--effort` have no effect: the bot picks its own model.
+- Waiting: polls origin every `OSRC_GROKBOT_POLL` seconds (default 20) for up to
+  `OSRC_GROKBOT_TIMEOUT` (default 3600). Past the deadline it exits 124; the routine may still finish
+  later, so check Grok Bot. Each poll prints a progress line, so the watchdog never reads it as hung.
+- Billing: the bot's weekly allowance. Cloud lane: the full cloud gate applies.
+- **Beta.** Built to the documented webhook, not yet run against a live bot. Community reports say
+  webhook payloads sometimes arrive empty; if no branch ever appears, open the routine's run in Grok
+  Bot and check what it received.
+
+**Running Outsourcerer ON a Grok Bot.** The repo ships a Cursor plugin manifest (`.cursor-plugin/`),
+so a bot can install the skill from the plugin marketplace (a team admin can import the repo). The
+bot's computer is Linux and usually has no tmux, so slow runs fall back to the headless `bg` path.
+Two cautions: a computer reset wipes installed CLIs (keep keys as Grok Bot secrets, never in shell
+profiles), and idle computers can pause, so prefer short jobs or a routine that checks back.
 
 ## Gemini / Antigravity lane, text delegation + visual review + image gen
 
@@ -395,7 +449,7 @@ message; it never quietly runs an excluded model.
   excluded, or when none is configured and the list covers a model of that family; pass `-m`;
 - a session is never relaunched (`session control relaunch`, `session effort`) or drift-restored onto a
   model you have since excluded;
-- engine lanes run without `-m` (droid, cursor, hermes, cline, a Devin session) use the model the
+- engine lanes run without `-m` (droid, cursor, hermes, cline, pi, a Devin session) use the model the
   engine is configured with, which outsourcerer cannot see; they print one line saying so. Pass `-m`
   to be sure;
 - a background job whose `-m` was excluded after it was queued fails with reason `excluded-model`.
@@ -502,6 +556,6 @@ capacity; both are described in `jobs-and-safety.md`.
 | `ollama:<m>` / `local:<m>` | local (keyless, PRIVATE, $0) |
 | any TokenRouter gateway id | **tokenrouter** (`--provider tokenrouter`): OpenAI-compatible cloud gateway, key `TOKENROUTER_API_KEY` in `~/.env`; `-m` is REQUIRED and passes through verbatim to the gateway's own catalog (no hardcoded default; the roster is the gateway's, discovered live; some models are a $0 promo RIGHT NOW, confirmed at runtime by billing errors, never a hardcoded date). TEXT delegation, cloud-gated. |
 | `gpt-image` / `nano-banana` | image only (`image` subcommand) |
-| any model the USER configured | **droid** / **cursor** / **warp** / **hermes** / **cline** (`--provider droid\|cursor\|warp\|hermes\|cline`): the user's OWN agent CLIs, THEIR models (incl. BYOK); `-m` passes through verbatim. Warp drives `oz agent run` (models via `oz model list`) and can even host the Claude/Codex harness (`OSRC_WARP_HARNESS=claude\|codex`). **Cline** runs on the user's own Cline setup: a ClinePass subscription (discounted open-weight models) or their own keys in `~/.cline`; `-m` passes through verbatim (the roster + pricing are cline's, not ours). **These are easy to forget; the user has warp AND droid AND cline installed; when they say "use warp/droid/cline," this is the lane, don't reach for devin.** |
+| any model the USER configured | **droid** / **cursor** / **warp** / **hermes** / **cline** / **pi** / **grokbot** (`--provider droid\|cursor\|warp\|hermes\|cline\|pi\|grokbot`): the user's OWN agent CLIs, THEIR models (incl. BYOK); `-m` passes through verbatim. Warp drives `oz agent run` (models via `oz model list`) and can even host the Claude/Codex harness (`OSRC_WARP_HARNESS=claude\|codex`). **Cline** runs on the user's own Cline setup: a ClinePass subscription (discounted open-weight models) or their own keys in `~/.cline`; `-m` passes through verbatim (the roster + pricing are cline's, not ours). **These are easy to forget; the user has warp AND droid AND cline installed; when they say "use warp/droid/cline," this is the lane, don't reach for devin.** |
 
 **A pinned Claude/GPT/Gemini model runs on ITS OWN native lane, never Devin.** `-m opus`, `-m fable`, `-m claude-opus-5-5`, `-m claude-opus-5-5[1m]`, any `claude-*`/`gpt-5.*`/`gemini-*` id resolves to the claude/codex/gemini-native lane automatically (the alias picks the lane; no `--provider` needed, and you should NOT add `--provider cc` for a Claude model; that means the OpenRouter transport, not the Claude subscription). If the user says "spin up Fable and Opus 5.5," that is `-m fable` and `-m opus` (or the pinned ids) on the claude-native lane, on their Claude subscription, putting that on Devin burns the wrong limits and is the #1 mistake to avoid.

@@ -152,7 +152,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.14.2"
+OSRC_VERSION="0.15.0"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -1019,7 +1019,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1549,8 +1549,8 @@ _lane_plan_display() {
   case "$(_lane_plan_key "${1:-}")" in
     dv) printf 'Devin' ;; cx) printf 'Codex (ChatGPT plan)' ;; cc) printf 'Claude Code (Claude plan)' ;;
     warp) printf 'Warp (Oz)' ;; droid) printf 'Droid (Factory)' ;; cursor) printf 'Cursor' ;;
-    cline) printf 'Cline' ;; gm) printf 'Gemini CLI' ;; or) printf 'OpenRouter (cash)' ;;
-    tokenrouter) printf 'TokenRouter (cash)' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;;
+    cline) printf 'Cline' ;; pi) printf 'Pi' ;; gm) printf 'Gemini CLI' ;; or) printf 'OpenRouter (cash)' ;;
+    tokenrouter) printf 'TokenRouter (cash)' ;; grokbot) printf 'Grok Bot' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;;
     *) printf '%s' "${1:-?}" ;;
   esac
 }
@@ -1562,6 +1562,8 @@ _lane_plan_usage_hint() {
     droid)  printf 'Live figure: /limits inside droid (toggle Droid Core / Extra Usage there), or Settings > Usage.' ;;
     cursor) printf 'Live figure: the Cursor dashboard (Settings > Usage).' ;;
     cline)  printf 'Live figure: your Cline account / provider dashboard.' ;;
+    pi)     printf 'Live figure: the dashboard of whatever Pi is signed in to.' ;;
+    grokbot) printf 'Live figure: Grok Bot settings > Usage (weekly allowance).' ;;
     *)      printf '' ;;
   esac
 }
@@ -3062,9 +3064,9 @@ resolve_tier() {
 # disclosure but provider-cc -> or for quota/default-model; "codex" is cx's
 # native provider for session observation but or's transport provider elsewhere;
 # "gemini" is the paid-API lane gi for disclosure but gm's provider for routing):
-#   provider  (--provider):  devin|cc|codex|gemini|gm|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter
-#   lane code (internal):    dv|or|cc|cx|gm|gi|ci|local|droid|cursor|hermes|warp|cline|claudex|tokenrouter
-#   disp      (vehicle):     devin|ccor|codexor|ccnative|cxnative|gmnative|claudex|droid|cursor|hermes|warp|cline|tokenrouter|local
+#   provider  (--provider):  devin|cc|codex|gemini|gm|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter
+#   lane code (internal):    dv|or|cc|cx|gm|gi|ci|local|droid|cursor|hermes|warp|cline|pi|claudex|tokenrouter
+#   disp      (vehicle):     devin|ccor|codexor|ccnative|cxnative|gmnative|claudex|droid|cursor|hermes|warp|cline|pi|tokenrouter|local
 #
 # Three resolvers keep the contexts honest:
 #   _lane_by_token    — lane codes + disp vehicles + legacy names (name/aliases/disp)
@@ -3131,7 +3133,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline claudex tokenrouter"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot"
 
 # _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
 _lane_field() {
@@ -3582,6 +3584,83 @@ _session_launch_cline() {
       _session_launch_error "$provider" "help does not advertise an interactive model override"
     fi
   fi
+}
+
+# ---- pi (Pi coding agent — whatever Pi is signed in to) ---------------------
+# Pi (https://github.com/earendil-works/pi) is an engine lane: -m passes through verbatim to Pi's own
+# model catalog (`provider/id`, fuzzy names, `:thinking` suffix). Billing is whatever Pi is signed in
+# to: a subscription through its /login (Claude Pro/Max, ChatGPT, Copilot, Kimi, xAI...) or API keys.
+lane_descriptor_pi() {
+  printf '%s\n' \
+    "name=pi" \
+    "providers=pi" \
+    "provider_is_lane=yes" \
+    "owns_catalog=yes" \
+    "cli=pi" \
+    "cli_missing_hint=pi CLI not on PATH (Pi lane). Install: npm i -g @earendil-works/pi-coding-agent  (or see https://pi.dev for the official installer), then run 'pi' and /login once (Claude, ChatGPT, Copilot and more), or set a provider API key. -m passes through verbatim to Pi's model catalog." \
+    "ready_fn=_ready_probe_pi" \
+    "disp=pi" \
+    "dispatch=delegate_pi" \
+    "default_model=pi-default" \
+    "effort_fn=_pi_effort" \
+    "session_fn=_session_launch_pi" \
+    "quota_key=pi" \
+    "cost_class=limited" \
+    "cost_disclosure=billed to whatever Pi is signed in to (a subscription via its /login, or your API keys); usage is measured by that provider" \
+    "is_cloud=yes" \
+    "fallback_provider=pi" \
+    "participates_health=yes"
+}
+_ready_probe_pi() { have pi && printf 'pi=subscription-or-keys'; }
+
+# _session_launch_pi — Pi's interactive TUI is bare `pi` (dynamic scope as documented on
+# _session_launch_droid). -m maps to --model, which Pi accepts in the TUI too.
+_session_launch_pi() {
+  local provider="${provider:-$PROVIDER}"
+  have pi || _session_launch_error "$provider" "pi is not on PATH"
+  help_text="$(_session_probe_help pi --help)" \
+    || _session_launch_error "$provider" "the local help probe failed or timed out"
+  grep -Eqi -- '--print' <<<"$help_text" \
+    || _session_launch_error "$provider" "help does not distinguish interactive mode from print mode"
+  SESSION_LAUNCH=("pi")
+  if [ "$MODEL_EXPLICIT" = "1" ]; then
+    grep -Eq -- '--model([ =]|$)' <<<"$help_text" \
+      || _session_launch_error "$provider" "help does not advertise --model"
+    SESSION_LAUNCH+=("--model" "$MODEL")
+  fi
+  local pe; pe="$(_pi_effort "${EFFORT:-}")"
+  [ -n "$pe" ] && grep -Eq -- '--thinking' <<<"$help_text" && SESSION_LAUNCH+=("--thinking" "$pe")
+  return 0
+}
+
+# ---- grokbot (xAI Grok Bot — webhook in, git branch out) ---------------------
+# Grok Bot has no chat API. A bot ROUTINE can be started by a webhook (POST + Bearer key), so this
+# lane posts the task to the user's routine and the bot delivers by pushing a git branch to the
+# repo's origin. The lane waits for that branch and prints the bot's result file. No CLI: the
+# webhook URL + key are the dispatchability gate. Billing is the bot's weekly allowance.
+lane_descriptor_grokbot() {
+  printf '%s\n' \
+    "name=grokbot" \
+    "providers=grokbot" \
+    "provider_is_lane=yes" \
+    "owns_catalog=yes" \
+    "gate_fn=_gb_load" \
+    "ready_fn=_ready_probe_grokbot" \
+    "disp=grokbot" \
+    "dispatch=delegate_grokbot" \
+    "default_model=grokbot-default" \
+    "quota_key=grokbot" \
+    "cost_class=limited" \
+    "cost_disclosure=\$0 cash, spends your Grok Bot weekly allowance" \
+    "is_cloud=yes" \
+    "fallback_provider=grokbot" \
+    "participates_health=no"
+}
+_ready_probe_grokbot() {
+  { [ -n "${GROKBOT_WEBHOOK_URL:-}" ] || [ -n "$(_extract_kv_value GROKBOT_WEBHOOK_URL 2>/dev/null)" ]; } \
+    && { [ -n "${GROKBOT_WEBHOOK_KEY:-}" ] || [ -n "$(_extract_kv_value GROKBOT_WEBHOOK_KEY 2>/dev/null)" ]; } \
+    || return 1
+  printf 'grokbot=webhook'
 }
 
 # ---- tokenrouter (TokenRouter gateway — keyed, no CLI) -----------------------
@@ -4975,10 +5054,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -9662,7 +9741,9 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe droid 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe cursor 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe cline 2>/dev/null)" && lanes="$lanes $_rp"
+  _rp="$(_lane_ready_probe pi 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe tokenrouter 2>/dev/null)" && lanes="$lanes $_rp"
+  _rp="$(_lane_ready_probe grokbot 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
 }
@@ -11235,7 +11316,7 @@ _job_made_writes() {
 _lane_text_only() {
   local l="${1:-}" x
   [ -n "$l" ] || return 1
-  case "$l" in local|tokenrouter) return 0 ;; esac
+  case "$l" in local|tokenrouter|grokbot) return 0 ;; esac
   for x in ${OSRC_TEXT_LANES:-}; do [ "$l" = "$x" ] && return 0; done
   return 1
 }
@@ -12031,7 +12112,7 @@ _bg_capture_provider() {
     if [ "$_want_val" = "1" ]; then
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
-      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
       PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; _want_val=0; continue
     fi
     case "$_tok" in
@@ -12040,11 +12121,11 @@ _bg_capture_provider() {
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
       --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1
-                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)" ;;
+                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
   done
-  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local)"
+  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
   return 0   # never inherit the trailing test's exit status (a bare `&& die` would return 1 on the happy path)
 }
 
@@ -12053,7 +12134,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -12558,10 +12639,11 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp|cline) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline|pi|pi) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
     # this lane always carries an explicit model; just record the lane.
     tokenrouter)  lane="tokenrouter" ;;
+    grokbot)      lane="grokbot" ;;
     claudex)      lane="claudex"; [ "$MODEL_EXPLICIT" = "1" ] || id2="gpt-5.6-sol" ;;
   esac
   lane="$(_effective_lane "$lane" "$prov" "$MODEL" "$MODEL_EXPLICIT")"
@@ -14289,6 +14371,7 @@ $body"
       hermes) _dp_cli="hermes" ;;
       warp)   _dp_cli="oz" ;;
       cline)  _dp_cli="cline" ;;
+      pi)     _dp_cli="pi" ;;
       tokenrouter)
         # No CLI: the KEY is the dispatchability gate. Check it here (cheap, local, no network) so a
         # missing key fails the WHOLE fanout up front instead of minting phantom jobs that die in the
@@ -14301,6 +14384,11 @@ $body"
         [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"
         [ -z "$_pem" ] && _pem="${a_model[$_pi]}"
         [ -n "$_pem" ] || die "fanout: lane 'tokenrouter' needs a model for every job (-m <gateway-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."
+        continue ;;
+      grokbot)
+        # No CLI: the webhook URL + key are the gate. Fail the whole fanout up front without them.
+        _ready_probe_grokbot >/dev/null 2>&1 \
+          || die "fanout: lane 'grokbot' needs GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY (env or ~/.env). Nothing was started."
         continue ;;
       *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
@@ -15494,6 +15582,146 @@ delegate_cline() {
   # misbucketed as cash (bg rows pass the lane via run_job; fg rows must pass it here).
   record_ledger cline "${MODEL:-cline-default}" "$ttier" "$tier" "$task" "" "cline"
   printf '>>> [receipt] ran on YOUR cline setup (your ClinePass subscription or the keys configured in ~/.cline), no Claude tokens spent.\n' >&2
+  return "$rc"
+}
+
+# =============================================================================
+# PI LANE (Pi coding agent, https://github.com/earendil-works/pi). Engine lane: -m passes
+# through verbatim to Pi's catalog. Pi never asks before running a tool and has no sandbox, so
+# the read-only tier is enforced by the tool list (read, grep, find, ls), not by an approval mode.
+# Print mode writes only the final answer; the watchdog's CPU check keeps a quiet run alive.
+# =============================================================================
+
+# =============================================================================
+# GROK BOT LANE. Grok Bot (xAI) has no API for chatting with a bot. A bot routine CAN be started by
+# a webhook, so: POST the task to the user's routine, the bot does the work on its own computer and
+# pushes a branch to this repo's origin, and we wait for that branch. Results come back as the
+# branch plus OUTSOURCERER_RESULT.md at its root. Nothing is merged here: review or `land` it.
+# Setup: in Grok Bot, create a routine with a Webhook trigger whose instructions say "Follow the
+# instructions in the webhook payload exactly", then put its URL and key in ~/.env as
+# GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY. The bot needs push access to the repo.
+# =============================================================================
+
+_gb_load() {
+  [ -n "${GROKBOT_WEBHOOK_URL:-}" ] || GROKBOT_WEBHOOK_URL="$(_extract_kv_value GROKBOT_WEBHOOK_URL)"
+  [ -n "${GROKBOT_WEBHOOK_KEY:-}" ] || GROKBOT_WEBHOOK_KEY="$(_extract_kv_value GROKBOT_WEBHOOK_KEY)"
+  [ -n "$GROKBOT_WEBHOOK_URL" ] && [ -n "$GROKBOT_WEBHOOK_KEY" ] || die "the grokbot lane needs GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY in ~/.env (or the environment). In Grok Bot: create a routine with a Webhook trigger, instructions \"Follow the instructions in the webhook payload exactly\", then copy its URL and key."
+  case "$GROKBOT_WEBHOOK_URL" in
+    https://*) ;;
+    http://127.0.0.1*|http://localhost*) ;;   # local test endpoints only
+    *) die "GROKBOT_WEBHOOK_URL must be an https:// URL (got a non-https value); the key is sent with it." ;;
+  esac
+}
+
+delegate_grokbot() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}"
+  have curl || die "curl not on PATH (the grokbot lane needs it)"
+  have jq   || die "jq not on PATH (the grokbot lane needs it)"
+  have git  || die "git not on PATH (the grokbot lane delivers through a git branch)"
+  _gb_load
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "the grokbot lane runs inside a git repo: the bot delivers by pushing a branch to its origin."
+  local repo base branch mode posture
+  repo="$(git remote get-url origin 2>/dev/null)" || die "this repo has no 'origin' remote; the bot needs one to clone and push to."
+  base="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"; [ "$base" != "HEAD" ] || base="$(git rev-parse HEAD)"
+  branch="osrc/grokbot-$(_new_job_id)"
+  case "$tier" in
+    auto) mode="read-only"; posture="READ-ONLY by instruction (the bot is asked to change nothing but its result file; Grok Bot has no enforced read-only mode)" ;;
+    accept-edits|autonomous|dangerous) mode="edit"; posture="MUTATING on its own branch (the bot edits a clone and pushes $branch; nothing is merged here)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  if [ -n "$(git status --porcelain 2>/dev/null)" ] || [ -n "$(git log --oneline "@{u}..HEAD" 2>/dev/null)" ]; then
+    printf '>>> [grokbot] NOTE: you have uncommitted or unpushed work. The bot clones %s from origin, so it will not see it.\n' "$base" >&2
+  fi
+  [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: Grok Bot has no effort setting; folded into the prompt)\n' "$EFFORT" >&2
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  _with_preamble_render "bundle"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-grokbot}" "$task" "$ttier" "bundle")"
+  local delivery
+  delivery="DELIVERY (required): clone $repo, check out $base, and create the branch $branch. Do the task there."
+  if [ "$mode" = "read-only" ]; then
+    delivery="$delivery This is a read-only task: change no files except OUTSOURCERER_RESULT.md."
+  fi
+  delivery="$delivery Write your final message to OUTSOURCERER_RESULT.md at the repo root, commit, and push $branch to origin. Pushing that branch is the only way your result is collected."
+  _tier_banner "grokbot (Grok Bot routine)" "grokbot-default" "$ttier" "$posture | $(_lane_cost_disclosure grokbot)"
+  local body resp code
+  body="$(mktemp "$OSRC_HOME/.gb.$$.XXXXXX")"; resp="$(mktemp "$OSRC_HOME/.gbr.$$.XXXXXX")"
+  chmod 600 "$body" "$resp" 2>/dev/null || true
+  jq -n --arg repo "$repo" --arg base "$base" --arg branch "$branch" --arg mode "$mode" \
+        --arg delivery "$delivery" --arg task "$wrapped" \
+        '{source:"outsourcerer", repo:$repo, base:$base, branch:$branch, mode:$mode, instructions:($delivery + "\n\n" + $task)}' > "$body"
+  code="$(_curl_with_auth "$GROKBOT_WEBHOOK_KEY" -sS --max-time 30 -o "$resp" -w '%{http_code}' \
+            -X POST -H 'Content-Type: application/json' --data @"$body" "$GROKBOT_WEBHOOK_URL" 2>/dev/null)" || code="000"
+  rm -f "$body" 2>/dev/null
+  case "$code" in
+    2??) printf '>>> [grokbot] routine started (HTTP %s). Waiting for the bot to push %s.\n' "$code" "$branch" >&2 ;;
+    *) local why; why="$(head -c 300 "$resp" 2>/dev/null | tr -d '\r')"; rm -f "$resp"
+       die "grokbot: the webhook did not start the routine (HTTP $code). ${why:+Response: $why}" ;;
+  esac
+  rm -f "$resp" 2>/dev/null
+  local timeout="${OSRC_GROKBOT_TIMEOUT:-3600}" poll="${OSRC_GROKBOT_POLL:-20}" t0 sha="" elapsed=0
+  case "$timeout" in ''|*[!0-9]*) timeout=3600 ;; esac
+  case "$poll" in ''|*[!0-9]*|0) poll=20 ;; esac
+  t0=$(date +%s)
+  while :; do
+    sha="$(git ls-remote --heads origin "$branch" 2>/dev/null | awk 'NR==1{print $1}')"
+    [ -n "$sha" ] && break
+    elapsed=$(( $(date +%s) - t0 ))
+    if [ "$elapsed" -ge "$timeout" ]; then
+      record_ledger grokbot "grokbot-default" "$ttier" "$tier" "$task" "" grokbot
+      printf '>>> [grokbot] no branch after %ss. The routine may still be running: check Grok Bot, then look for %s on origin.\n' "$elapsed" "$branch" >&2
+      return 124
+    fi
+    # Keep the watchdog fed: this lane is waiting on a remote machine, not hung.
+    printf 'OSRC::PROGRESS#%s waiting for Grok Bot to push %s (%ss)\n' "${OSRC_MARK:-}" "$branch" "$elapsed"
+    sleep "$poll"
+  done
+  git fetch -q origin "refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+  local result; result="$(git show "$sha:OUTSOURCERER_RESULT.md" 2>/dev/null)" || result=""
+  if [ -n "$result" ]; then printf '%s\n' "$result"
+  else printf '(the bot pushed %s without OUTSOURCERER_RESULT.md; its last commit says:)\n%s\n' "$branch" "$(git log -1 --format=%B "$sha" 2>/dev/null)"; fi
+  printf '>>> [grokbot] delivered on branch %s (%s). Review: git diff %s...origin/%s\n' "$branch" "${sha:0:12}" "$base" "$branch" >&2
+  record_ledger grokbot "grokbot-default" "$ttier" "$tier" "$task" "" grokbot
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure grokbot)" >&2
+  return 0
+}
+
+# _pi_effort <ours> -> pi --thinking value. Pi: off|minimal|low|medium|high|xhigh|max.
+_pi_effort() {
+  case "$1" in minimal) echo "minimal" ;; low) echo "low" ;; medium) echo "medium" ;;
+    high) echo "high" ;; xhigh) echo "xhigh" ;; max) echo "max" ;; none|off) echo "off" ;; *) echo "" ;; esac
+}
+
+delegate_pi() {
+  local tier="$1"
+  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
+  local task="${REST[*]}" id="${MODEL:-}"
+  have pi || die "pi CLI not on PATH (Pi lane). Install: npm i -g @earendil-works/pi-coding-agent  (or see https://pi.dev for the official installer), then run 'pi' and /login once, or set a provider API key."
+  local tflag=() posture
+  case "$tier" in
+    auto)         tflag=(--tools read,grep,find,ls); posture="READ-ONLY (--tools read,grep,find,ls: no edit, write or shell tools)" ;;
+    accept-edits) tflag=();                          posture="MUTATING (Pi's default tools: read, bash, edit, write; Pi never asks before a tool runs)" ;;
+    autonomous)   tflag=();                          posture="MUTATING (Pi's default tools; Pi has no sandbox, so this is the same as edit)" ;;
+    dangerous)    tflag=();                          posture="DANGER (Pi's default tools, no sandbox)" ;;
+    *) die "bad tier: $tier" ;;
+  esac
+  local mflag=()
+  if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then _validate_model_token "$id"; mflag=(--model "$id"); else id="(pi default/configured)"; fi
+  local eff=()
+  if [ -n "$EFFORT" ]; then local pe; pe="$(_pi_effort "$EFFORT")"
+    [ -n "$pe" ] && { eff=(--thinking "$pe"); printf '>>> [effort] reasoning=%s (native: pi --thinking %s)\n' "$EFFORT" "$pe" >&2; }; fi
+  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
+  _with_preamble_render "bundle"
+  local wrapped; wrapped="$(_build_prompt "${MODEL:-pi}" "$task" "$ttier" "bundle")"
+  _tier_banner "pi (Pi coding agent)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure pi)"
+  local rc=0 _lerr; _lerr="$(_lane_errfile)"
+  # --no-session: delegated runs do not pile up in Pi's session history. `--` keeps a prompt that
+  # starts with '-' from being read as a flag.
+  _run_tee_stderr "$_lerr" pi -p --no-session ${mflag[@]+"${mflag[@]}"} ${eff[@]+"${eff[@]}"} ${tflag[@]+"${tflag[@]}"} -- "$wrapped" || rc=$?
+  [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
+  record_ledger pi "${MODEL:-pi-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost pi 0 "")" pi
+  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure pi)" >&2
   return "$rc"
 }
 
@@ -17122,7 +17350,7 @@ _gate_hop() {
 # =============================================================================
 # Lane preference order for a hop: plan/subscription lanes first, cash lanes last. `local` is left
 # out on purpose (no model-equivalence claim can be made for whatever the user pulled locally).
-OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline or tokenrouter claudex"
+OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline pi or tokenrouter claudex"
 _FAILOVER_CASH_SKIPPED=""   # in-process mirror; the file below is the source of truth across $(...)
 _FO_LANE=""; _FO_MODEL=""; _FO_VERDICT=""; _FO_REASON=""; _FO_RESET=""
 
@@ -17591,7 +17819,7 @@ route_delegate() {
     else
     case "$PROVIDER" in
       devin) disp=devin ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter|grokbot)" ;;
     esac
     fi
   fi
@@ -19301,11 +19529,11 @@ _winpty_session() {
           # reasoning control this tool can set, so a requested --effort cannot be enforced here.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r).\n' "$EFFORT" "$0" "$EFFORT" >&2
           LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
-        codex|cx|droid|cursor|hermes|cline|gemini|gm|cc|claude)
+        codex|cx|droid|cursor|hermes|cline|pi|gemini|gm|cc|claude)
           _exclude_session_default_guard "$PROVIDER"
           _session_launch_adapter "$PROVIDER"
           LAUNCH=("${SESSION_LAUNCH[@]}") ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
@@ -19496,11 +19724,11 @@ session() {
           # than running Low while the receipt implies otherwise, and name the paths that DO honor it.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r), or a lane that supports interactive effort.\n' "$EFFORT" "$0" "$EFFORT" >&2
           launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
-        codex|cx|droid|cursor|hermes|cline|gemini|gm|cc|claude)
+        codex|cx|droid|cursor|hermes|cline|pi|gemini|gm|cc|claude)
           _exclude_session_default_guard "$PROVIDER"
           _session_launch_adapter "$PROVIDER"
           launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
-        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|gemini)" ;;
+        *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
@@ -20247,7 +20475,7 @@ doctor() {
   local _dm; if _dm="$(_mode_read 2>/dev/null)"; then echo "  driving mode: $_dm ($0 mode status)"; else echo "  driving mode: NOT SET — the session-start menu will show (set: $0 mode auto|manual|hybrid)"; fi
   if [ "$_doff" = "1" ]; then echo "  session limits: skipped (OSRC_DOCTOR_OFFLINE)  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"
   else local _lim; _lim="$(_session_limits 2>/dev/null)"; echo "  session limits: ${_lim:-unavailable (no readable meter)}  · conserve line: ${OSRC_CONSERVE_THRESHOLD}% of the 5h window"; fi
-  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
+  echo "  active provider: $PROVIDER  (switch with --provider devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter or OUTSOURCERER_PROVIDER)"
   echo "  -- OpenRouter lanes (cc / codex) --"
   if [ -f "$HOME/.env" ] && grep -q "OPENROUTER_API_KEY" "$HOME/.env" 2>/dev/null; then echo "    openrouter key: present in ~/.env"; else echo "    openrouter key: MISSING from ~/.env"; fi
   have claude && echo "    claude (cc lane):    $(claude --version 2>/dev/null | head -1)" || echo "    claude (cc lane):    NOT on PATH"
@@ -20376,6 +20604,11 @@ doctor() {
     fi
   else
     echo "    cline: NOT on PATH — install: npm i -g cline  (or see https://github.com/cline/cline), then 'cline auth cline' to sign in to ClinePass (discounted open-weight models), or configure your own keys in ~/.cline"
+  fi
+  if have pi; then
+    echo "    pi: $(pi --version 2>/dev/null | head -1 || echo present). Route: --provider pi [-m <provider/model>] run \"task\". Engine lane: -m passes through to Pi's catalog; it bills whatever Pi is signed in to."
+  else
+    echo "    pi: NOT on PATH. Install: npm i -g @earendil-works/pi-coding-agent (or see https://pi.dev), then run pi and /login once."
   fi
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
@@ -21281,7 +21514,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
                   PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
@@ -21369,7 +21602,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

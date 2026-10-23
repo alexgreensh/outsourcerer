@@ -2,6 +2,14 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.0
+
+### Added
+
+- **Pi lane.** `--provider pi` hands work to the Pi coding agent with whatever it is signed in to (Claude, ChatGPT, Copilot and more through its `/login`, or API keys). `-m` passes straight through to Pi's catalog and `--effort` maps to its thinking level. `run` and `explore` are read-only by tool list, because Pi never asks before a tool runs. `session start --provider pi` opens Pi in tmux.
+- **Grok Bot lane.** `--provider grokbot` sends a task to your Grok Bot through a routine's webhook. The bot works on its own cloud computer and pushes a branch to your repo; Outsourcerer waits for it and prints the bot's result. Nothing is merged for you. Setup: one webhook routine in Grok Bot and two lines in `~/.env`. Beta: built to the documented webhook, not yet run against a live bot.
+- **Install on Cursor and Grok Bot.** The repo now ships a Cursor plugin manifest, so Cursor, and Grok Bot through its plugin marketplace, can install Outsourcerer. Not yet tried on a live bot.
+
 ## 0.14.2
 
 ### Added

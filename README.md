@@ -5,7 +5,7 @@
 [![Version](https://img.shields.io/github/v/release/alexgreensh/outsourcerer?color=8A5CF6&label=version)](https://github.com/alexgreensh/outsourcerer/releases)
 [![Security: repo-forensics](https://img.shields.io/badge/security-repo--forensics%20·%20500%2B%20patterns-2ea44f)](https://github.com/alexgreensh/repo-forensics)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)](LICENSE)
-![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin%20·%20Hermes%20·%20Warp%20·%20Cline-8A5CF6)
+![Works across](https://img.shields.io/badge/works%20across-Claude%20Code%20·%20Codex%20·%20Cursor%20·%20Droid%20·%20Antigravity%20·%20Devin%20·%20Hermes%20·%20Warp%20·%20Cline%20·%20Pi%20·%20Grok%20Bot-8A5CF6)
 
 ![macOS](https://img.shields.io/badge/macOS-supported-000000?logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
@@ -27,7 +27,7 @@ The session you're talking to becomes the lead. It hands the grind to a budget m
 
 ## Three things a router can't do
 
-**It orchestrates.** One crew across Claude Code, Codex, Cursor, Droid, Antigravity, Devin, Hermes, Warp and Cline. Specialists run side by side, advisors argue out a plan before anyone builds, and every job is watched until it ends with a clear result.
+**It orchestrates.** One crew across Claude Code, Codex, Cursor, Droid, Antigravity, Devin, Hermes, Warp, Cline, Pi and even your Grok Bot. Specialists run side by side, advisors argue out a plan before anyone builds, and every job is watched until it ends with a clear result.
 
 **It runs long.** A big job lives on disk as a plan, not in a chat. Close the laptop, lose the session, come back tomorrow: the plan picks up where it stopped. Decisions that are yours wait for you, and a watcher can wake you when something needs you.
 
@@ -95,6 +95,8 @@ A second, differently-wired head at the right moment is where the real leverage 
 Outsourcerer runs the whole summoning itself. It decides what to delegate, picks the lane and model on live benchmarks, keeps every delegate interactive and steerable, supervises the fleet, and refuses to end a turn while work is live and waiting on you. The orchestrator contract lives in the skill, so the session you talk to owns the plan and the outcome rather than handing choices back to you.
 
 **It also works underneath an orchestrator you already have.** Point yours at Outsourcerer and keep it: your orchestrator decides what to delegate and how results get approved, and Outsourcerer runs the assignments. It dispatches each specialist across any provider, then watchdog-supervises every job through to a **classified** end (done / blocked / timed-out) instead of a silent exit, salvages the recoverable ones with a bounded verify→retry loop, tracks the spend, and hands the results back as parsable state. Not just a router: a layer that dispatches, verifies, and accounts for every delegate, whoever is casting.
+
+**Your Grok Bot can join the crew (beta).** Grok Bot has no chat API, but its routines take a webhook. Give Outsourcerer the webhook and `--provider grokbot` hands the bot a task. The bot works on its own cloud computer, pushes a branch to your repo, and Outsourcerer brings the result back. Nothing merges until you say so. The repo also ships a Cursor plugin manifest, so a bot can install Outsourcerer and hand work to the lanes set up on its computer. This direction is new and not yet proven on a live bot.
 
 **Point it at any agent library and it just works.** A folder of role definitions, your own or a library like [agency-agents](https://github.com/msitarzewski/agency-agents), runs as a squad with `fanout --agents ./crew`, one supervised job per specialist. You never have to edit those files. The whole crew runs on a sensible cheap lane by default, and you add routing only if you want it, three ways, editing files last:
 
@@ -281,7 +283,7 @@ Under the robe it's deliberately boring: a self-contained bash script you can re
 
 | | Claude's own subagents | Router / proxy (claude-code-router, LiteLLM) | 🧙 Outsourcerer |
 |---|:---:|:---:|:---:|
-| Crosses *agents*, not just models | Claude only | model-swap inside one harness | **Codex · Antigravity · Claude Code · Devin** |
+| Crosses *agents*, not just models | Claude only | model-swap inside one harness | **Codex · Antigravity · Claude Code · Devin · Pi · Grok Bot** |
 | Multi-step plans that outlive the session | ✗ | ✗ | ✅ task graph on disk, context hand-off, evidence-checked merge gate |
 | Carries your skills to the delegate | ✗ | ✗ | ✅ whole skill bundles on tool lanes; complete docs on text lanes (executables marked NOT TRANSFERRED); MCP on request (Claude lanes) |
 | Advisor panel + consensus | ✗ | ✗ | ✅ several top-tier models, act only when they agree |
@@ -318,6 +320,7 @@ Audited by [repo-forensics](https://github.com/alexgreensh/repo-forensics) on ev
 | **Codex** | `outsourcerer parity-codex` (adds the entry point Codex reads) |
 | **Devin** | `outsourcerer parity` (mirrors the skill + your local tools) |
 | **Hermes** | `outsourcerer parity-hermes` (symlinks the skill into `~/.hermes/skills`) |
+| **Cursor** and **Grok Bot** (beta) | the repo ships a `.cursor-plugin` manifest; a team admin can import the repo into your team plugin marketplace |
 
 Then just talk to it. On first use it runs its own health check and tells you if anything needs installing, with the exact command.
 
@@ -363,9 +366,9 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 **Today it drives like a copilot.** It greets you each session, shows your live token budget, and hands you the wheel: **auto-pilot**, **you-drive**, or **hybrid**, then conserves your limits on its own when the session runs hot. And it works across **Claude Code · Codex · Antigravity · Devin · Cursor · Droid · Hermes**, on Mac, Linux, and Windows (Git Bash, no WSL). Next up:
 
-- **Pi** and more harnesses as the frontier expands.
+- More harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and pushed completion events for chat-bot orchestrators.
-- *Already shipped:* the **software factory** (durable plans, automatic context hand-off, a done contract, a serialized merge gate, and ready-made flows) plus a saved model exclude list in v0.14.0; the **`fleet`** view (one honest list of every session you're running, with real names and honest states) in v0.7.0; the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* the **Pi** and **Grok Bot** lanes plus Cursor plugin packaging in v0.15.0; the **software factory** (durable plans, automatic context hand-off, a done contract, a serialized merge gate, and ready-made flows) plus a saved model exclude list in v0.14.0; the **`fleet`** view (one honest list of every session you're running, with real names and honest states) in v0.7.0; the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
 

@@ -61,7 +61,7 @@ fi
   && ok "tokenrouter skips alias resolution (-m passes verbatim)" || bad "tokenrouter descriptor lacks owns_catalog=yes"
 
 # --- tokenrouter is wired into every provider list (the contract: --provider tokenrouter works) ---
-_n=$(grep -c -- "devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local|tokenrouter" "$SRC")
+_n=$(grep -c -- "devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter" "$SRC")
 [ "$_n" -ge 4 ] && ok "tokenrouter appears in $_n provider-list sites" || bad "tokenrouter missing from provider lists (found $_n)"
 grep -q "unknown provider.*tokenrouter" "$SRC" && ok "unknown-provider error names tokenrouter" || bad "tokenrouter not in unknown-provider message"
 

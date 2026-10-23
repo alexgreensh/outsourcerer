@@ -1,0 +1,27 @@
+{
+  "name": "outsourcerer",
+  "displayName": "Outsourcerer",
+  "version": "0.15.0",
+  "description": "Make your AI coding tools work as one team. Route jobs across Claude Code, Codex, Cursor, Devin, Gemini, OpenRouter, and local models; carry the user's setup into delegated work; track limits and cash cost; and convene multi-model reviews.",
+  "author": {
+    "name": "Alex Greenshpun",
+    "url": "https://github.com/alexgreensh"
+  },
+  "homepage": "https://github.com/alexgreensh/outsourcerer",
+  "repository": "https://github.com/alexgreensh/outsourcerer",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "keywords": [
+    "delegation",
+    "offload",
+    "openrouter",
+    "codex",
+    "gemini",
+    "subagents",
+    "cost-optimization",
+    "claude-code",
+    "cursor",
+    "grok-bot",
+    "orchestration"
+  ],
+  "skills": "./skills/"
+}

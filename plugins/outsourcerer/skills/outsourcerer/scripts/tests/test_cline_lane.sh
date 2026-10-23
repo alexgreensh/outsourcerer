@@ -100,7 +100,7 @@ grep -q 'npm i -g cline' "$SRC" && ok "install instruction uses the real package
   && ok "cline skips alias resolution (-m passes verbatim)" || bad "cline descriptor lacks owns_catalog=yes"
 
 # --- cline is wired into every provider list (the contract: the alias picks the lane) ---
-_n=$(grep -c -- "devin|cc|codex|droid|cursor|hermes|warp|cline|gemini|gm|claudex|local" "$SRC")
+_n=$(grep -c -- "devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local" "$SRC")
 [ "$_n" -ge 4 ] && ok "cline appears in $_n provider-list sites" || bad "cline missing from provider lists (found $_n)"
 # the unknown-provider die must name cline so a typo is self-explanatory
 grep -q "unknown provider.*cline" "$SRC" && ok "unknown-provider error names cline" || bad "cline not in unknown-provider message"
