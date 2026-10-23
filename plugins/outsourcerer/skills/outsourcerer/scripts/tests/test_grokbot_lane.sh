@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 command -v python3 >/dev/null || { echo "SKIP: python3 missing"; exit 0; }
+for t in jq git curl; do command -v "$t" >/dev/null || { echo "FAIL: $t is required"; exit 1; }; done
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-gb.XXXXXX")"; SRV=""
 trap '[ -n "$SRV" ] && kill "$SRV" 2>/dev/null; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME"

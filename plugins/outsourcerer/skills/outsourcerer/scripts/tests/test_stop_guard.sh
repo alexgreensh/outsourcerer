@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 HOOKS="$SCRIPT_DIR/../../../../hooks/hooks.json"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
+command -v jq >/dev/null || { echo "FAIL: jq is required (the guard and these checks read JSON)"; exit 1; }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-sg.XXXXXX")"
 PIDS=""
