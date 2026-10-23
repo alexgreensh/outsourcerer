@@ -10,6 +10,8 @@
 #
 # Run:  bash conformance.sh            # static gate only
 #       OSRC_CONFORMANCE_LIVE=1 bash conformance.sh   # + live lane probes (uses quota/tokens)
+#       OSRC_CONFORMANCE_JOBS=1 bash conformance.sh   # suites one at a time (default: up to 4 at once)
+#       OSRC_CONFORMANCE_VERBOSE=1 bash conformance.sh # print the tail of any failed suite
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -295,16 +297,98 @@ _gate_int_sweep() {
 # developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
 # default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
 _conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
-_conf_tmux_end() { TMUX_TMPDIR="$_conf_tmux_dir" tmux kill-server >/dev/null 2>&1; rm -rf "$_conf_tmux_dir"; }
+_conf_tmux_end() {
+  local d
+  TMUX_TMPDIR="$_conf_tmux_dir" tmux kill-server >/dev/null 2>&1
+  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && TMUX_TMPDIR="${d%/}" tmux kill-server >/dev/null 2>&1; done
+  rm -rf "$_conf_tmux_dir"
+}
 _conf_tmux_had="${TMUX_TMPDIR+1}"; _conf_tmux_prev="${TMUX_TMPDIR-}"
 export TMUX_TMPDIR="$_conf_tmux_dir"; unset TMUX TMUX_PANE
-trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
-for t in $_ALL_SUITES; do
-  if [ -f "$SCRIPT_DIR/$t.sh" ]; then
-    _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
-    _report_unit_suite_result "$t"
-  else note "unit suite $t absent"; fi
-done
+# How many suites run at once. 1 is the original one-at-a-time gate. Suites share nothing but the
+# machine: each already gets its own OSRC_HOME, and in parallel each also gets its own tmux server.
+_conf_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+case "$_conf_cpus" in ''|*[!0-9]*) _conf_cpus=1 ;; esac
+case "${OSRC_CONFORMANCE_JOBS:-}" in
+  ''|auto) _JOBS=4; [ "$_conf_cpus" -lt 4 ] && _JOBS="$_conf_cpus" ;;
+  *[!0-9]*|0) _JOBS=1 ;;
+  *) _JOBS="$OSRC_CONFORMANCE_JOBS" ;;
+esac
+[ "$_JOBS" -ge 1 ] 2>/dev/null || _JOBS=1
+
+if [ "$_JOBS" -le 1 ]; then
+  trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
+  for t in $_ALL_SUITES; do
+    if [ -f "$SCRIPT_DIR/$t.sh" ]; then
+      _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+      _report_unit_suite_result "$t"
+    else note "unit suite $t absent"; fi
+  done
+else
+  # Parallel pool. Job control (set -m) is what keeps a suite's signal handling the same as in the
+  # foreground: without it, bash starts background jobs with SIGINT ignored, and every INT trap in
+  # a suite or the engine would silently never install. Each worker runs the usual bounded runner
+  # and leaves its result in files; results are reported in registry order, as soon as the next
+  # suite in order is done, so the log reads the same as a serial run.
+  _par_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
+  _par_order=(); for t in $_ALL_SUITES; do _par_order+=("$t"); done
+  _par_n=${#_par_order[@]}; _par_pid=(); _par_done=()
+  _par_sweep() {
+    local k
+    for k in "${!_par_pid[@]}"; do
+      [ -n "${_par_pid[$k]}" ] && [ -z "${_par_done[$k]:-}" ] && _suite_kill_tree "${_par_pid[$k]}" 2>/dev/null
+    done
+  }
+  trap '_par_sweep; _conf_tmux_end; rm -rf "$_par_dir"; exit 130' INT
+  set -m
+  _i=0; _l=0; _active=0
+  while [ "$_i" -lt "$_par_n" ]; do
+    while [ "$_l" -lt "$_par_n" ] && [ "$_active" -lt "$_JOBS" ]; do
+      t="${_par_order[$_l]}"
+      if [ -f "$SCRIPT_DIR/$t.sh" ]; then
+        mkdir -p "$_conf_tmux_dir/$t"
+        ( export TMUX_TMPDIR="$_conf_tmux_dir/$t"
+          _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+          printf '%s' "$_suite_out" > "$_par_dir/$t.out"
+          printf '%s %s %s\n' "$_suite_rc" "$_suite_timed_out" "$_suite_secs" > "$_par_dir/$t.meta.tmp"
+          mv -f "$_par_dir/$t.meta.tmp" "$_par_dir/$t.meta"
+          tmux kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
+        _par_pid[$_l]=$!; _active=$((_active + 1))
+      else
+        echo absent > "$_par_dir/$t.meta"; _par_done[$_l]=1
+      fi
+      _l=$((_l + 1))
+    done
+    _moved=0
+    for _k in $(seq 0 $((_l - 1))); do
+      # A worker that died without a result (killed from outside) is a failure, never a hang. The
+      # result file is checked again AFTER ps: bash reaps finished jobs on its own, so a worker can
+      # write its result and vanish between the first check and ps.
+      if [ -z "${_par_done[$_k]:-}" ] && [ ! -f "$_par_dir/${_par_order[$_k]}.meta" ] && [ "$_moved" = 0 ] \
+         && case "$(ps -o state= -p "${_par_pid[$_k]}" 2>/dev/null | tr -d '[:space:]')" in Z*|'') true ;; *) false ;; esac \
+         && [ ! -f "$_par_dir/${_par_order[$_k]}.meta" ]; then
+        echo "FAIL: the worker running ${_par_order[$_k]} exited without a result" > "$_par_dir/${_par_order[$_k]}.out"
+        echo "1 0 0" > "$_par_dir/${_par_order[$_k]}.meta"
+      fi
+      if [ -z "${_par_done[$_k]:-}" ] && [ -f "$_par_dir/${_par_order[$_k]}.meta" ]; then
+        wait "${_par_pid[$_k]}" 2>/dev/null; _par_done[$_k]=1; _active=$((_active - 1)); _moved=1
+      fi
+    done
+    while [ "$_i" -lt "$_par_n" ] && [ -f "$_par_dir/${_par_order[$_i]}.meta" ]; do
+      t="${_par_order[$_i]}"
+      if [ "$(cat "$_par_dir/$t.meta")" = absent ]; then note "unit suite $t absent"
+      else
+        read -r _suite_rc _suite_timed_out _suite_secs < "$_par_dir/$t.meta"
+        _suite_out="$(cat "$_par_dir/$t.out" 2>/dev/null)"
+        _report_unit_suite_result "$t"
+      fi
+      _i=$((_i + 1)); _moved=1
+    done
+    [ "$_moved" = 1 ] || sleep 0.2
+  done
+  set +m
+  rm -rf "$_par_dir"
+fi
 
 # 2. Security choke points present in source (defense-in-depth cross-check).
 grep -q '_cloud_disclose "$disp"'                 "$SRC" && ok "U1 cloud gate wired at route_delegate choke point" || bad "U1 gate missing"
