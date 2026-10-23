@@ -399,13 +399,20 @@ check "#1 ... and says the option needs a value" "[ -z \"$quiet\" ]"
 check "#1 a half-parsed plan new left nothing behind" "[ ! -e \"$OSRC_HOME/plans/zz1\" ]"
 
 # ---- #5 / review-3 #2: the plan lock never robs a LIVE holder, however old the lock
-sleep 30 & HOLDER=$!
+# The holder must outlive the whole blocked attempt: 150 tries with a ps call each took 18s on a
+# fast Mac and over 30s on a CI runner, where a `sleep 30` holder died mid-wait and the lock was
+# then (correctly) reclaimed. It is killed explicitly below, so a long life costs nothing.
+sleep 600 & HOLDER=$!
 HID="$(L "_pid_start_identity $HOLDER")"
 LK="$OSRC_HOME/plans/fx/.lock"; mkdir -p "$LK"; printf '%s %s\n' "$HOLDER" "$HID" > "$LK/owner"
 touch -t 200001010000 "$LK" 2>/dev/null
-fxt1="$(O task add 'lock target' --plan fx 2>/dev/null)"; rc=$?
+fxt1="$(OSRC_PLAN_LOCK_TRIES=30 O task add 'lock target' --plan fx 2>/dev/null)"; rc=$?
 check "#5 a live holder's lock is not stolen even when it is very old" \
   "[ $rc -ne 0 ] && [ -z \"$fxt1\" ] && [ \"\$(cat \"$LK/owner\" 2>/dev/null)\" = \"$HOLDER $HID\" ]"
+if [ -n "$fxt1" ]; then   # diagnostics for a stolen lock: what ps says about the holder now
+  echo "  holder=$HOLDER recorded=[$HID] now=[$(L "_pid_start_identity $HOLDER"; echo " rc=$?")] alive=$(kill -0 "$HOLDER" 2>/dev/null && echo yes || echo no)"
+  echo "  ps: [$(LC_ALL=C ps -o lstart= -p "$HOLDER" 2>&1)] tz=[${TZ:-unset}]"
+fi
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
 fxt1="$(O task add 'lock target' --plan fx 2>/dev/null)"; rc=$?
 check "#5 once that holder is dead its lock is reclaimed" "[ $rc -eq 0 ] && [ \"$fxt1\" = t1 ] && [ ! -d \"$LK\" ]"

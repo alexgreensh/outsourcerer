@@ -692,7 +692,11 @@ _timeout() {
   local rc=0; wait "$cmd_pid" 2>/dev/null || rc=$?
   # TERM fires the watchdog's trap, which reaps the timer itself. No orphan can form:
   # either the trap ran (timer dead) or the kill landed before `sleep` spawned at all.
+  # Bash 3.2 occasionally drops that TERM under load (about 1 call in 100), and then the
+  # `wait` below sat out the whole bound. So the timer is also stopped directly: the watchdog
+  # is not reaped yet, so its pid cannot be reused, and only its own children match -P.
   kill "$wd_pid" 2>/dev/null
+  pkill -TERM -P "$wd_pid" 2>/dev/null
   wait "$wd_pid" 2>/dev/null
   cat "$out_file"
   # The marker is written only after the timer proves the child is still live.

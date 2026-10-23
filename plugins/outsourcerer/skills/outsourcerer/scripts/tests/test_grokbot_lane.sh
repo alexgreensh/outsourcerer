@@ -50,7 +50,11 @@ s = http.server.HTTPServer(('127.0.0.1', 0), H)
 open(os.path.join(TMP, 'port'), 'w').write(str(s.server_port))
 s.serve_forever()
 PY
-start_bot() { rm -f "$TMP/port"; python3 "$TMP/bot.py" "$TMP" "$1" "$2" & SRV=$!; for _ in $(seq 1 50); do [ -s "$TMP/port" ] && break; sleep 0.1; done; }
+# A cold python3 on a CI runner can take several seconds to start, so wait up to 30s, and keep the
+# bot's own errors so a crash shows up in the log instead of as a missing port.
+start_bot() { rm -f "$TMP/port"; python3 "$TMP/bot.py" "$TMP" "$1" "$2" 2>"$TMP/bot.err" & SRV=$!
+  for _ in $(seq 1 300); do [ -s "$TMP/port" ] && return 0; kill -0 "$SRV" 2>/dev/null || break; sleep 0.1; done
+  echo "FAIL: the fake bot did not start: $(tail -5 "$TMP/bot.err" 2>/dev/null)"; fail=$((fail+1)); }
 stop_bot() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""; }
 gb() { ( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 OSRC_GROKBOT_POLL=1 OSRC_GROKBOT_TIMEOUT="${TO:-30}" \
          GROKBOT_WEBHOOK_URL="http://127.0.0.1:$(cat "$TMP/port")/hook" GROKBOT_WEBHOOK_KEY="${KEYUSE:-crsr_test}" \
