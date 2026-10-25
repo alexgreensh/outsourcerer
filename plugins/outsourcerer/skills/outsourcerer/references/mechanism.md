@@ -240,7 +240,7 @@ Pick a different model for a single call (flexible, overrides the default):
 
 **When to prefer it over headless:** long, complex, exploratory, or high-stakes delegations where an early correction saves a whole wasted run, or where the delegate is likely to need a clarifying answer. For short, well-scoped, obviously-correct work, headless is cheaper and fine.
 
-**tmux is used by the `session` subcommand ONLY** (`run`/`research`/`edit`/`continue` are plain `devin -p`/`-c`, no tmux), and on Windows `session` runs through the bundled winpty broker instead. Provider-aware, and **the alias picks the lane**: `session start -m terra` (or sol/luna/gpt-5.x) starts native codex, `-m opus`/`-m fable` starts native claude, `-m gemini-pro` starts gemini, with no `--provider` needed. Open-weight ids (glm/deepseek/kimi) stay on Devin, the default. `--provider` only forces a lane against the alias.
+**tmux is used by the `session` subcommand ONLY** (`run`/`research`/`edit`/`continue` are plain `devin -p`/`-c`, no tmux), and on Windows `session start` is not supported (only `session read` uses the winpty broker). Provider-aware, and **the alias picks the lane**: `session start -m terra` (or sol/luna/gpt-5.x) starts native codex, `-m opus`/`-m fable` starts native claude, `-m gemini-pro` starts gemini, with no `--provider` needed. Open-weight ids (glm/deepseek/kimi) stay on Devin, the default. `--provider` only forces a lane against the alias.
 
 **Separate tasks get separate sessions.** The tmux session name is derived from the working directory, so a `session start` in one repo can never clobber a concurrent live session in another (each `start` kills only its own name). `read`/`send`/`model`/`stop` run from the same `$PWD` and resolve the same session automatically. To run two isolated sessions in ONE directory, set `OUTSOURCERER_TMUX=<name>` explicitly for each. (`-p` modes were always isolated, each call is its own process.)
 ```
@@ -268,8 +268,8 @@ Default to `session` for any delegation that mutates, is long, complex, or explo
 approval prompt. Use headless `bg`/`fanout` only when a session is not viable (a non-interactive, CI, or
 detached caller that cannot drive a TUI, or a wide fan-out of many independent one-shot jobs) and say
 so. If you catch yourself writing the work yourself, or running a one-shot where a session someone can
-drive would fit, switch to a session. It runs on tmux on Mac/Linux and the winpty broker on Windows Git
-Bash. Job states and supervision: `jobs-and-safety.md`.
+drive would fit, switch to a session. It runs on tmux on Mac/Linux; on Windows Git
+Bash use headless `run`/`edit`/`bg`. Job states and supervision: `jobs-and-safety.md`.
 
 **Fable-pin.** A claude-native session launched on Fable can fall back to Opus. Watch the running model
 (`session read`, or the built-in footer observer that feeds `bearings` and the heartbeat) and flip it back
