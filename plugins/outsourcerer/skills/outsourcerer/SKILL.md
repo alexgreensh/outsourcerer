@@ -111,7 +111,7 @@ Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEART
 - **Cost honesty.** Split cash from plan limits. A subscription or keyless run is $0 cash but spends finite plan limits, so say both. Only the local lane is truly free. Details: `references/tab.md`.
 - **"state home NOT WRITABLE"** means the sandbox denies `~/.outsourcerer`. The error spells out the two fixes (allowWrite, or `OSRC_HOME=`); apply one before rerunning.
 - **Missing CLI?** Say what's missing in one line, suggest the fastest ready lane, keep going.
-- **Windows: no WSL.** Runs under Git Bash; `outsourcerer.cmd`/`.ps1` launch it. `session` runs through the bundled winpty broker instead of tmux.
+- **Windows: no WSL.** Runs under Git Bash; `outsourcerer.cmd`/`.ps1` launch it. `session start` is not supported on Windows (only `session read` goes through the winpty broker); use `run`/`edit`/`bg`/`fanout` there.
 
 ## Subcommands
 

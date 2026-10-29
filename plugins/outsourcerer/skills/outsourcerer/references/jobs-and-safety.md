@@ -231,8 +231,12 @@ bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
 
 `run`/`edit`/`yolo`/`bg`/`fanout`/`status`/`doctor`/`advise`/`consent` all work under Git Bash
 (ships with Git for Windows). `scripts/outsourcerer.cmd` / `scripts/outsourcerer.ps1` launch it
-from cmd/PowerShell and find Git Bash automatically. `session` uses the bundled winpty broker
-(`scripts/outsourcerer-winpty-broker.sh`) in place of tmux. `jq` on Windows: `winget install jqlang.jq`.
+from cmd/PowerShell and find Git Bash automatically. `session start` is not supported on Windows
+(it exits with `unverified Windows mutation support`); only `session read` uses the bundled winpty broker
+(`scripts/outsourcerer-winpty-broker.sh`). `run`/`edit`/`bg`/`fanout` cover the same ground headless.
+Isolated codex runs (`--ignore-user-config`) keep only your `[windows] sandbox` mode (and
+`[features] prefer_mxc`) from `~/.codex/config.toml` (or `$CODEX_HOME`); nothing else is loaded. Without
+a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. `jq` on Windows: `winget install jqlang.jq`.
 
 ## Orchestration rules while this skill is active
 

@@ -113,8 +113,8 @@
 #
 # WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
 # outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
-# `session` uses winpty instead of tmux on Windows; everything else works (bg/fanout cover
-# the same ground for long or parallel work, supervised).
+# `session` start is not supported on Windows (only `session read` goes through the winpty broker);
+# everything else works (bg/fanout cover the same ground for long or parallel work, supervised).
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
 # deepseek/deepseek-v4-pro) on hard failure. run/research/edit/yolo work on all three providers.
@@ -156,7 +156,7 @@ OSRC_VERSION="0.15.2"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
-# required: `session` uses winpty there; everything else works. See doctor's platform section.
+# required: `session` start is unavailable there (read only); everything else works. See doctor's platform section.
 case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) OSRC_PLATFORM="windows" ;;
   Darwin)               OSRC_PLATFORM="mac" ;;
@@ -2963,6 +2963,72 @@ _codex_code_mode_host() {
 # the binary is absent (so file reads don't hang). The explicit -c wins over ~/.codex/config.toml.
 _codex_code_mode_host_flag() {
   _codex_code_mode_host && printf 'true' || printf 'false'
+}
+
+# WINDOWS SANDBOX CARRY-OVER. `--ignore-user-config` drops the WHOLE ~/.codex/config.toml, including
+# the one setting codex's Windows sandbox cannot run without: `[windows] sandbox = "elevated"` (or
+# "unelevated" / "mxc"). With it gone, a `--sandbox workspace-write` run on Windows has no usable
+# sandbox mode, so every command and patch is rejected and the job ends "done" with nothing changed.
+# We re-supply ONLY that setting (plus `[features] prefer_mxc`, the other key that selects the Windows
+# sandbox implementation) as explicit -c overrides. Both are read with a strict allowlist, so no other
+# key, no MCP server and no free-form value from the user config is re-imported. Windows only.
+_codex_user_config_file() {  # -> echoes the first existing codex config.toml; nonzero if none
+  local d f
+  for d in "${CODEX_HOME:-}" "${HOME:-}/.codex" "${USERPROFILE:-}/.codex"; do
+    [ -n "$d" ] && [ "$d" != "/.codex" ] || continue
+    f="$d/config.toml"
+    [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  done
+  return 1
+}
+# _codex_win_sandbox_read -> prints `sandbox=<elevated|unelevated|mxc>` and/or `prefer_mxc=<true|false>`
+# for the values the user config sets (and that pass the allowlist). Prints nothing otherwise.
+_codex_win_sandbox_read() {
+  local f; f="$(_codex_user_config_file)" || return 0
+  # sed drops a UTF-8 BOM on line 1 (Windows editors add one); LC_ALL=C keeps it byte-wise.
+  LC_ALL=C sed "1s/^$(printf '\357\273\277')//" "$f" 2>/dev/null | awk -v sq="'" '
+    function unq(v) {
+      sub(/[ \t]*#.*$/, "", v); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+      sub(/^"/, "", v); sub(/"$/, "", v); sub("^" sq, "", v); sub(sq "$", "", v)
+      return v
+    }
+    # value of KEY inside an inline table body like { a = "x", KEY = "v" }; "" when absent
+    function inl(body, key,    r) {
+      if (!match(body, "[{,][ \t]*" key "[ \t]*=[ \t]*(\"[^\"]*\"|" sq "[^" sq "]*" sq "|[A-Za-z0-9_]+)")) return ""
+      r = substr(body, RSTART, RLENGTH); sub(/^[^=]*=[ \t]*/, "", r)
+      return unq(r)
+    }
+    { sub(/\r$/, ""); line = $0; sub(/^[ \t]+/, "", line) }
+    line ~ /^\[\[/ { tbl = "#array"; next }
+    line ~ /^\[/ { t = line; sub(/^\[[ \t]*/, "", t); sub(/[ \t]*\].*$/, "", t); gsub(/[ \t"]/, "", t); gsub(sq, "", t); tbl = t; next }
+    index(line, "=") == 0 { next }
+    {
+      key = line; sub(/[ \t]*=.*$/, "", key); gsub(/[ \t]/, "", key)
+      val = line; sub(/^[^=]*=[ \t]*/, "", val)
+      full = (tbl == "" ? key : tbl "." key)
+      if (full == "windows" && val ~ /^\{/) { v = inl(val, "sandbox"); if (v != "") s = v }
+      else if (full == "features" && val ~ /^\{/) { v = inl(val, "prefer_mxc"); if (v != "") m = v }
+      else if (full == "windows.sandbox") s = unq(val)
+      else if (full == "features.prefer_mxc") m = unq(val)
+    }
+    END {
+      if (s ~ /^(elevated|unelevated|mxc)$/) print "sandbox=" s
+      if (m ~ /^(true|false)$/) print "prefer_mxc=" m
+    }'
+}
+# _codex_win_sandbox_args -> sets global array _CODEX_WIN_ARGS (empty off Windows or when the user
+# config sets neither key). Callers append it ONLY when they pass --ignore-user-config.
+_codex_win_sandbox_args() {
+  _CODEX_WIN_ARGS=()
+  [ "${OSRC_PLATFORM:-}" = "windows" ] || return 0
+  local kv
+  while IFS= read -r kv; do
+    case "$kv" in
+      sandbox=*)    _CODEX_WIN_ARGS+=(-c "windows.sandbox=${kv#sandbox=}") ;;
+      prefer_mxc=*) _CODEX_WIN_ARGS+=(-c "features.prefer_mxc=${kv#prefer_mxc=}") ;;
+    esac
+  done < <(_codex_win_sandbox_read)
+  return 0
 }
 # Models to try. Explicit -m -> that model only. Otherwise the escalation chain, BUT only for
 # read-only work ('auto'). Mutating tiers must NEVER re-run against an already-mutated tree, so
@@ -12347,8 +12413,12 @@ _autodetach_run() {
       die "auto-detach: tmux is not installed and OSRC_REQUIRE_TMUX=1 ($( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')). Install tmux, or unset OSRC_REQUIRE_TMUX to allow the headless bg fallback, or set OSRC_REQUIRE_INTERACTIVE=0."
     fi
     _use_headless=1
+    if [ "$OSRC_PLATFORM" = "windows" ]; then
+      printf '>>> [auto-detach] Git Bash has no tmux and interactive `session` start is not supported on Windows, so there is nothing to install. Running the HEADLESS bg path (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0.\n' >&2
+    else
     printf '>>> [auto-detach] tmux is not installed. RECOMMENDED: install tmux (%s) — it is the basic requirement for steerable interactive `session` mode; without it you can run/fanout headless but cannot watch or steer a live delegate. Falling back to the HEADLESS bg path now (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0; fail instead of falling back with OSRC_REQUIRE_TMUX=1.\n' \
       "$( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')" >&2
+    fi
   fi
   # HEADLESS BG PATH (explicit opt-out, or the tmux-absent fallback above). Also the path the bg
   # re-entry tests exercise.
@@ -14790,6 +14860,7 @@ delegate_cxnative() {
   # Luna) keeps working. Verified live: luna answers PONG with the flag on. Escape hatch: set
   # OSRC_CODEX_USER_CONFIG=1 to deliberately ride your full live config (e.g. to reuse an MCP server).
   local iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || iso=(--ignore-user-config)
+  _codex_win_sandbox_args; [ "${#iso[@]}" -eq 0 ] || iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   local rc=0 _lerr; _lerr="$(_lane_errfile)"
   _run_tee_stderr "$_lerr" codex exec --skip-git-repo-check ${iso[@]+"${iso[@]}"} ${cmh[@]+"${cmh[@]}"} ${eff[@]+"${eff[@]}"} "${sflag[@]}" ${sfx[@]+"${sfx[@]}"} -m "$id" "$wrapped" || rc=$?
   _lane_plan_limit_after_run cx "$_lerr" "$id" "$rc"; [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
@@ -15772,6 +15843,7 @@ cmd_image_codex() {
   # ISOLATION (I1): don't inherit the user's live ~/.codex MCP surface for a headless image job
   # (auth survives --ignore-user-config; escape hatch OSRC_CODEX_USER_CONFIG=1).
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
+  _codex_win_sandbox_args; [ "${#_iso[@]}" -eq 0 ] || _iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   local codex_cmd=(codex exec --cd "$rundir" --sandbox workspace-write --skip-git-repo-check ${_iso[@]+"${_iso[@]}"} ${_cmh[@]+"${_cmh[@]}"} --enable artifact -)
   local out_log rc=0
   out_log="$(printf '%s' "$stdin_prompt" | _timeout 600 "${codex_cmd[@]}" 2>&1)" || rc=$?
@@ -16616,6 +16688,7 @@ _local_agentic_codex() {
   # user's live ~/.codex mcp_servers would both break that (a cloud MCP server could load) and wedge
   # on interactive MCP auth. Drop the live config; the inline oslocal provider fully defines the lane.
   local _iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _iso=(--ignore-user-config)
+  _codex_win_sandbox_args; [ "${#_iso[@]}" -eq 0 ] || _iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   _tier_banner "local-agentic/codex ($base)" "$model" "$ttier" "$posture | AGENTIC tool use | PRIVATE: on YOUR hardware, $(_lane_cost_disclosure local), nothing leaves your machine"
   local rc=0
   OSRC_LOCAL_KEY="${OSRC_LOCAL_KEY:-local}" \
@@ -16936,6 +17009,7 @@ delegate_codex() {
   local m rc=1 ttier wrapped healed=0
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for fg cost resolution
   local _or_iso=(); [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ] || _or_iso=(--ignore-user-config)
+  _codex_win_sandbox_args; [ "${#_or_iso[@]}" -eq 0 ] || _or_iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   _or_chain "$tier" >/dev/null   # in-process first: an all-excluded chain dies HERE, not inside $(...)
   for m in $(_or_chain "$tier"); do
     ttier="$(resolve_tier "$m" "")"
@@ -20517,6 +20591,16 @@ doctor() {
   if have codex; then _codex_code_mode_host \
     && echo "      code-mode-host: present (codex file-reading tool calls work; Outsourcerer passes -c features.code_mode_host=true so a stale config=false cannot fail the shell closed)" \
     || echo "      code-mode-host: MISSING, self-healed (Outsourcerer runs codex with code_mode_host disabled so file reads do not hang; install codex-code-mode-host to ~/.local/bin to use the feature)"; fi
+  if have codex && [ "$OSRC_PLATFORM" = "windows" ]; then
+    _codex_win_sandbox_args
+    if [ "${#_CODEX_WIN_ARGS[@]}" -gt 0 ]; then
+      echo "      windows-sandbox: carried into isolated runs (${_CODEX_WIN_ARGS[*]}); nothing else from your codex config is loaded"
+    elif [ "${OSRC_CODEX_USER_CONFIG:-0}" = "1" ]; then
+      echo "      windows-sandbox: your codex config is loaded as-is (OSRC_CODEX_USER_CONFIG=1)"
+    else
+      echo "      windows-sandbox: WARNING no [windows] sandbox setting that Outsourcerer can read (a plain [windows] table with sandbox = "...", or the inline-table form) in $(_codex_user_config_file 2>/dev/null || echo "${CODEX_HOME:-~/.codex}/config.toml"). Isolated codex runs drop your config, and without a Windows sandbox mode codex can block every write (the job ends 'done' with nothing changed). Fix: add [windows] sandbox = \"elevated\" (or \"unelevated\") to that file, then re-run doctor."
+    fi
+  fi
   echo "    claude-native (fable/opus/sonnet/haiku): $(have claude && echo 'claude present (installed + Claude-authed-looking; NOT probed for liveness)' || echo 'claude NOT on PATH'); cost: $(_lane_cost_disclosure cc)"
   [ -n "${CLAUDECODE:-}" ] && echo "      note: inside Claude Code, this lane still runs a VERIFIED specific Claude model (env-cleaned, model checked against modelUsage). Safer than a native subagent, which can silently fall back to your default with no way to verify."
   if [ "${OSRC_DOCTOR_PING:-0}" = "1" ]; then
@@ -20535,7 +20619,8 @@ doctor() {
     _model_excluded gpt-5.6-luna && echo "      codex-native luna: ping skipped (on your exclude list)"
     if have codex && ! _model_excluded gpt-5.6-luna; then
       _ppt=""; _prc=0
-      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" codex exec --ignore-user-config --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" 2>&1)" || _prc=$?
+      _codex_win_sandbox_args   # same Windows sandbox carry-over as the delegate paths
+      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" codex exec --ignore-user-config ${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"} --skip-git-repo-check --sandbox read-only -m gpt-5.6-luna "reply PONG" 2>&1)" || _prc=$?
       # The reply is captured, so match it via a here-string: a reply larger than the pipe buffer
       # would otherwise make `printf | grep -q` take SIGPIPE (141) under pipefail and read as "down".
       if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
