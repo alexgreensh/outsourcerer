@@ -152,7 +152,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.15.2"
+OSRC_VERSION="0.15.3"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -7848,15 +7848,49 @@ _pid_start_valid() {
   case "$year" in [0-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
 }
 
+# _ps_o <lstart|stat|command> <pid> -> what `LC_ALL=C ps -o <field>= -p <pid>` prints, on every host.
+# Git Bash / MSYS2 (and busybox, or a box without procps) ship a `ps` with no -o at all, so every
+# identity read came back empty: the supervision beacon could not record its own start time, exited
+# at once, and every Windows run reported NOT-ARMED. Those hosts all have /proc, so when ps -o itself
+# errors, read the same facts there. lstart is rebuilt the way procps does it (boot time + start
+# ticks / CLK_TCK) so the marker keeps the "Wkd Mon dd hh:mm:ss yyyy" shape _pid_start_valid expects.
+# Decided per call (no cached probe): whenever ps -o succeeds its answer wins, so macOS and Linux
+# behave exactly as before. Empty output when the pid is gone.
+_ps_o() {
+  local f="$1" pid="$2" out rc=0 st rest hz bt ticks
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  out="$(LC_ALL=C ps -o "$f=" -p "$pid" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] || [ ! -r "/proc/$pid/stat" ]; then
+    [ "$rc" -eq 0 ] && [ -n "$out" ] && printf '%s\n' "$out"
+    return 0
+  fi
+  case "$f" in
+    command)
+      tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//'; echo ;;
+    stat|lstart)
+      st="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 0
+      rest="${st##*) }"   # comm may hold spaces or ')': the fields that matter follow the LAST ") "
+      [ "$rest" != "$st" ] || return 0
+      set -- $rest        # $1 = state (field 3), $20 = starttime (field 22)
+      if [ "$f" = stat ]; then printf '%s\n' "$1"; return 0; fi
+      ticks="${20:-}"; case "$ticks" in ''|*[!0-9]*) return 0 ;; esac
+      bt="$(sed -n 's/^btime[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/stat 2>/dev/null)"
+      case "$bt" in ''|*[!0-9]*) return 0 ;; esac
+      hz="$(getconf CLK_TCK 2>/dev/null)"; case "$hz" in ''|*[!0-9]*|0) hz=100 ;; esac
+      LC_ALL=C date -d "@$(( bt + ticks / hz ))" '+%a %b %e %H:%M:%S %Y' 2>/dev/null ;;
+  esac
+  return 0
+}
+
 _pid_start_identity() {
   local pid="$1" marker self_marker
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  marker="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  marker="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   if _pid_start_valid "$marker"; then
     printf '%s\n' "$marker"
     return 0
   fi
-  self_marker="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  self_marker="$(_ps_o lstart "$$" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   if _pid_start_valid "$self_marker"; then
     return 2
   fi
@@ -7897,8 +7931,9 @@ _pid_start_file_match() {
   [ -n "$pid" ] && [ -f "$file" ] || return 2
   rec="$(sed "$norm" "$file" 2>/dev/null)"
   [ -n "$rec" ] || return 2
-  live_c="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
-  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  live_c="$(_ps_o lstart "$pid" | sed "$norm")"
+  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null)" || live_plain=""   # a ps without -o: no plain rendering
+  live_plain="$(printf '%s' "$live_plain" | sed "$norm")"
   if [ -z "$live_c" ] && [ -z "$live_plain" ]; then return 2; fi
   prec="$(_pid_start_projection "$rec")"
   lc="$(_pid_start_projection "$live_c")"
@@ -7922,7 +7957,7 @@ _heartbeat_pid_state() { # <pid> -> prints the ps stat= marker (empty on unreada
     printf '%s\n' "${OSRC_TEST_PS_STATE//[[:space:]]/}"
     return 0
   fi
-  state="$(LC_ALL=C ps -o stat= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  state="$(_ps_o stat "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -n "$state" ] || return 1
   printf '%s\n' "$state"
 }
@@ -7934,7 +7969,7 @@ _heartbeat_pid_is_beacon() { # <pid> -> 0 if the pid's ps command carries the __
   if [ "${OSRC_TEST_MODE:-0}" = 1 ] && [ -n "${OSRC_TEST_PS_ARGV:-}" ]; then
     cmd="$OSRC_TEST_PS_ARGV"
   else
-    cmd="$(LC_ALL=C ps -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    cmd="$(_ps_o command "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   fi
   case "$cmd" in *"__heartbeat-beacon"*) return 0 ;; esac
   return 1
@@ -11490,9 +11525,9 @@ _supervise() {
   # written by the previous release (plain-locale records) are still read correctly: the
   # readers go through _pid_start_file_match, which accepts either rendering of the SAME
   # live process.
-  LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
+  _ps_o lstart "$$" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
   # Record start time for PID-reuse detection.
-  local _stime; _stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  local _stime; _stime="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   _stime="${_stime:-$t0}"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
@@ -11549,7 +11584,7 @@ _supervise() {
   local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
-    local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
+    local _live_stime; _live_stime="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
       echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
@@ -12761,6 +12796,14 @@ run_job() {
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
+  # The child may have auto-isolated itself (issue #51, _cloud_autoisolate): it left the initial
+  # receipt in the job dir. Adopt it so the job gets the same receipt and cleanup as --worktree.
+  if [ -z "$wt" ] && [ -f "$jd/worktree.json" ] && have jq; then
+    wt="$(jq -r '.path // ""' "$jd/worktree.json" 2>/dev/null)"
+    wbr="$(jq -r '.branch // ""' "$jd/worktree.json" 2>/dev/null)"
+    wbase="$(jq -r '.base_sha // ""' "$jd/worktree.json" 2>/dev/null)"
+    [ -d "$wt" ] || wt=""
+  fi
   # Worktree receipt: record base/head SHA + dirty/ahead so the orchestrator can inspect or integrate
   # deterministically. NEVER auto-remove — the worktree is preserved until an explicit `cleanup`.
   if [ -n "$wt" ]; then
@@ -13749,6 +13792,7 @@ cmd_cleanup() {
   [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
+  [ -f "$wj" ] || wj="$OSRC_HOME/isolated/$target/worktree.json"   # foreground auto-isolated run
   [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
   have jq || die "cleanup needs jq"
   local path branch dirty ahead base rp
@@ -16262,25 +16306,22 @@ _lane_trusted_for_pwd() {
   return 1
 }
 
-# _secret_scan <prompt> -> best-effort, gitignore-aware (KTD2). Hard-dies if a REAL credential
-# file sits inside the delegated scope (cwd top-level + .aws). Reports (via OSRC_SECRET_HIT_COUNT) any
-# high-signal pattern found in the prompt or a --with file, but does NOT hard-block on a regex
-# hit alone (avoid crying wolf); only an actual credential FILE hard-blocks.
-_secret_scan() {
-  local prompt="${1:-}" f scan="$1" lane="${2:-}" trusted=0
-  if _lane_trusted_for_pwd "$lane"; then trusted=1; fi
-  # (1) hard block: an actual credential file in scope. Skipped ONLY for a lane explicitly trusted for
-  # THIS repo. The pattern scan (2) and the pasted-VALUE block (3) below still run either way: trusting
-  # a lane with the credentials a repo already contains is a different decision from letting a live
-  # secret VALUE be pasted into a prompt, and the second is never implied by the first.
-  if [ "$trusted" = "0" ]; then
+# _cred_file_hits -> fills the global array _CRED_HITS with every credential FILE the cloud gate blocks
+# on inside the delegated scope ($PWD), in gate order (fixed top-level names, top-level .env.*, then the
+# bounded deep sweep). Sets _CRED_SCAN_RC: 0 = scan complete, else the find rc of a scan that could not
+# complete (the caller must fail CLOSED). Called directly, never in $(...), so the globals survive.
+# One rule set shared by the hard-block in _secret_scan and the auto-isolate in _cloud_autoisolate.
+_cred_file_hits() {
+  _CRED_HITS=(); _CRED_SCAN_RC=0
+  local f
   for f in "$PWD/.env" "$PWD/.env.local" "$PWD/credentials" "$PWD/id_rsa" "$PWD/id_ed25519" "$PWD/.aws/credentials"; do
-    [ -f "$f" ] && die "CLOUD GATE: real credential file in delegated scope: $f — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine."
+    [ -f "$f" ] && _CRED_HITS+=("$f")
   done
   # dotenv variants (.env.*), excluding obvious templates (.example/.sample/.template/.dist).
   while IFS= read -r f; do
     case "$f" in *.example|*.sample|*.template|*.dist) continue ;; esac
-    [ -f "$f" ] && die "CLOUD GATE: real credential file in delegated scope: $f — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane."
+    [ "$f" = "$PWD/.env.local" ] && continue   # already listed above
+    [ -f "$f" ] && _CRED_HITS+=("$f")
   done < <(compgen -G "$PWD/.env.*" 2>/dev/null)
   # (1b) A cloud delegate can read the WHOLE workspace, not just its root, so a nested
   # credential file (services/prod/.env, deploy/.env.production, config/id_rsa) is just as exfiltrable.
@@ -16295,7 +16336,7 @@ _secret_scan() {
     [ "$_depth" -gt 12 ] 2>/dev/null && _depth=12   # cap: an unbounded walk is a DoS/hang, not security
     # Process substitution DISCARDS find's exit status, so a find that fails
     # to run scans nothing and the gate fails OPEN. Run find into a private temp file, CHECK its status,
-    # and hard-die (fail CLOSED) if the scan could not complete. A cloud delegate runs with our own repo
+    # and fail CLOSED if the scan could not complete. A cloud delegate runs with our own repo
     # privileges, so paths find can read are exactly the paths the delegate can read.
     local _sf _ef
     _sf="$(mktemp "${TMPDIR:-/tmp}/osrc.scan.XXXXXX" 2>/dev/null)" || die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."
@@ -16311,17 +16352,122 @@ _secret_scan() {
     # that's NOT an exfil gap -- process the readable results and proceed. Fail CLOSED only on a REAL scan
     # failure (bad invocation/syntax/tool error): i.e. stderr has a line that is NOT a permission diagnostic.
     if [ "$_fs" -ne 0 ] && [ -s "$_ef" ] && grep -qvE 'Permission denied|Operation not permitted|Not a directory|No such file' "$_ef"; then
-      rm -f "$_sf" "$_ef"; die "CLOUD GATE: workspace credential scan could not complete (find rc=$_fs) — refusing cloud route (fail closed). Fix the scan or set OSRC_SECRET_SCAN_DEEP=0 to skip it (NOT recommended for cloud lanes)."
+      rm -f "$_sf" "$_ef"; _CRED_SCAN_RC="$_fs"; return 0
     fi
-    local _hit=""
+    local _seen
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       case "$f" in *.example|*.sample|*.template|*.dist) continue ;; esac
-      _hit="$f"; break
+      for _seen in ${_CRED_HITS[@]+"${_CRED_HITS[@]}"}; do [ "$_seen" = "$f" ] && continue 2; done
+      _CRED_HITS+=("$f")
     done < "$_sf"
     rm -f "$_sf" "$_ef"
-    [ -n "$_hit" ] && die "CLOUD GATE: real credential file in delegated scope: $_hit — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine."
   fi
+  return 0
+}
+
+# _cred_hit_ignored_untracked <path> -> 0 when <path> is gitignored AND not tracked by git, i.e. a
+# `git worktree add` (or any clone) of this repo will never contain it. Fails closed (rc 1) outside a
+# repo or on any git error.
+_cred_hit_ignored_untracked() {
+  local p="$1" d b
+  d="$(dirname "$p")"; b="$(basename "$p")"
+  git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  git -C "$d" ls-files --error-unmatch -- "$b" >/dev/null 2>&1 && return 1   # tracked -> ships with the repo
+  git -C "$d" check-ignore -q -- "$b" 2>/dev/null
+}
+
+# _cloud_autoisolate <disp> -> issue #51. A cloud delegation whose ONLY credential-file hits are
+# gitignored and untracked (web/.env.local and friends) used to die at the gate, leaving the operator to
+# snapshot the tree into a worktree by hand and relaunch. Do that here instead: snapshot the checkout
+# (tracked + untracked files, uncommitted changes included, everything gitignored left out) into a fresh
+# worktree on branch outsourcerer/<id>, and cd into it. The full gate (_secret_scan) still runs
+# afterwards, on the isolated tree, so this never weakens it: a tracked .env still blocks, a pasted
+# secret value still blocks. rc 0 = isolated (PWD changed); rc 1 = nothing done, the gate decides as
+# before. Must be called directly (never in $(...)) by the process that then launches the delegate.
+# Off switch: OSRC_CLOUD_AUTOISOLATE=0.
+_cloud_autoisolate() {
+  local lane="${1:-}"
+  [ "${OSRC_CLOUD_AUTOISOLATE:-1}" = "1" ] || return 1
+  _is_cloud_lane "$lane" || return 1
+  _lane_trusted_for_pwd "$lane" && return 1          # trusted lane: the file scan is skipped anyway
+  _cred_file_hits
+  [ "$_CRED_SCAN_RC" = "0" ] || return 1             # scan failed: let the gate fail closed
+  [ "${#_CRED_HITS[@]}" -gt 0 ] || return 1          # nothing to keep out
+  local h
+  for h in "${_CRED_HITS[@]}"; do
+    _cred_hit_ignored_untracked "$h" || return 1     # a tracked/unignored secret: the gate blocks it
+  done
+  local root rel id jd wt br base tree snap idx gidx
+  root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
+  rel="$(git rev-parse --show-prefix 2>/dev/null)"   # resume in the same subdir of the snapshot
+  if [ -n "${OSRC_JOB_DIR:-}" ]; then id="$(basename "$OSRC_JOB_DIR")"; jd="$OSRC_JOB_DIR"
+  # A foreground run is not a job: keep its receipt out of the jobs dir so `status` lists no ghost row.
+  else id="run-$(date +%Y%m%d-%H%M%S)-$$"; jd="$OSRC_HOME/isolated/$id"; fi
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  wt="$root/.outsourcerer/worktrees/$id"; br="outsourcerer/$id"
+  _osrc_git_exclude_state "$root"                    # keep .outsourcerer/ out of the snapshot itself
+  # Snapshot through a PRIVATE copy of the index, so the user's staging area is never touched.
+  idx="$(mktemp "${TMPDIR:-/tmp}/osrc.idx.XXXXXX" 2>/dev/null)" || return 1
+  gidx="$(git -C "$root" rev-parse --git-path index 2>/dev/null)"
+  case "$gidx" in /*|[A-Za-z]:[/\\]*) ;; *) gidx="$root/$gidx" ;; esac
+  # cp -p keeps the index mtime: git trusts an entry's stat data only when the file is older than the
+  # index, so a fresh mtime would hide a same-size edit made in the same second ("racily clean").
+  if [ -f "$gidx" ]; then cp -p "$gidx" "$idx" 2>/dev/null || { rm -f "$idx"; return 1; }; else rm -f "$idx"; fi
+  if ! GIT_INDEX_FILE="$idx" git -C "$root" add -A -- . >/dev/null 2>&1 \
+     || ! tree="$(GIT_INDEX_FILE="$idx" git -C "$root" write-tree 2>/dev/null)"; then
+    rm -f "$idx"; echo "[outsourcerer] cloud gate: could not snapshot the checkout for isolation; falling back to the normal gate." >&2; return 1
+  fi
+  rm -f "$idx"
+  base="$(git -C "$root" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null)"
+  local -a _par=(); [ -n "$base" ] && _par=(-p "$base")
+  local _msg="outsourcerer: snapshot of the working tree for $id (gitignored files left out)"
+  # commit-tree runs no hooks. Use the user's identity when set, else a neutral local one.
+  snap="$(git -C "$root" commit-tree "$tree" ${_par[@]+"${_par[@]}"} -m "$_msg" 2>/dev/null)" \
+    || snap="$(git -C "$root" -c user.name=outsourcerer -c user.email=outsourcerer@localhost commit-tree "$tree" ${_par[@]+"${_par[@]}"} -m "$_msg" 2>/dev/null)" \
+    || { echo "[outsourcerer] cloud gate: could not snapshot the checkout for isolation; falling back to the normal gate." >&2; return 1; }
+  if ! git -C "$root" worktree add -q -b "$br" "$wt" "$snap" >/dev/null 2>&1; then
+    echo "[outsourcerer] cloud gate: could not create the isolated worktree $wt; falling back to the normal gate." >&2; return 1
+  fi
+  cd "$wt/$rel" 2>/dev/null || cd "$wt" 2>/dev/null || return 1
+  # Receipt in the job dir, so `status`/`cleanup <id>` find the worktree like a --worktree job's.
+  _mkdir_private "$jd" 2>/dev/null || true
+  if have jq; then
+    jq -cn --arg p "$wt" --arg b "$br" --arg bs "$snap" '{path:$p,branch:$b,base_sha:$bs,auto_isolated:true}' > "$jd/worktree.json" 2>/dev/null || true
+  else
+    printf '{"path":"%s","branch":"%s","base_sha":"%s","auto_isolated":true}\n' "$wt" "$br" "$snap" > "$jd/worktree.json" 2>/dev/null || true
+  fi
+  printf '>>> [outsourcerer] cloud gate: %s gitignored secret file(s) (e.g. %s) stay in your checkout. The delegate runs in an isolated copy instead:\n' "${#_CRED_HITS[@]}" "${_CRED_HITS[0]#"$root"/}" >&2
+  printf '>>>   isolated    : %s (branch %s; includes your uncommitted work, minus gitignored files)\n' "$wt" "$br" >&2
+  printf '>>>   bring back  : (cd "%s" && git add -A && git diff --cached --binary %s) | git -C "%s" apply\n' "$wt" "${snap:0:12}" "$root" >&2
+  printf '>>>   then        : %s cleanup %s --force   (turn this off with OSRC_CLOUD_AUTOISOLATE=0)\n' "$0" "$id" >&2
+  return 0
+}
+
+# _secret_scan <prompt> -> best-effort, gitignore-aware (KTD2). Hard-dies if a REAL credential
+# file sits inside the delegated scope (cwd top-level + .aws). Reports (via OSRC_SECRET_HIT_COUNT) any
+# high-signal pattern found in the prompt or a --with file, but does NOT hard-block on a regex
+# hit alone (avoid crying wolf); only an actual credential FILE hard-blocks.
+# Issue #51: run/edit/bg/fanout call _cloud_autoisolate BEFORE this, so a checkout whose only hits are
+# gitignored never reaches the block below; it runs in a secret-free snapshot worktree instead.
+_secret_scan() {
+  local prompt="${1:-}" f scan="$1" lane="${2:-}" trusted=0
+  if _lane_trusted_for_pwd "$lane"; then trusted=1; fi
+  # (1) hard block: an actual credential file in scope. Skipped ONLY for a lane explicitly trusted for
+  # THIS repo. The pattern scan (2) and the pasted-VALUE block (3) below still run either way: trusting
+  # a lane with the credentials a repo already contains is a different decision from letting a live
+  # secret VALUE be pasted into a prompt, and the second is never implied by the first.
+  if [ "$trusted" = "0" ]; then
+    _cred_file_hits
+    [ "$_CRED_SCAN_RC" = "0" ] || die "CLOUD GATE: workspace credential scan could not complete (find rc=$_CRED_SCAN_RC) — refusing cloud route (fail closed). Fix the scan or set OSRC_SECRET_SCAN_DEEP=0 to skip it (NOT recommended for cloud lanes)."
+    if [ "${#_CRED_HITS[@]}" -gt 0 ]; then
+      local _hit="${_CRED_HITS[0]}" _hint=""
+      # Name the way out when the file is only local (gitignored, untracked): the delegate can still
+      # read it from THIS checkout, but a worktree of the repo never contains it.
+      _cred_hit_ignored_untracked "$_hit" \
+        && _hint=" It is gitignored, so a fresh worktree never contains it: start the delegate from one (git worktree add <dir> HEAD), or let run/edit/bg/fanout do that for you (on unless OSRC_CLOUD_AUTOISOLATE=0)."
+      die "CLOUD GATE: real credential file in delegated scope: $_hit — refusing cloud route. Remove it, or delegate to a local (ollama/lmstudio) lane which never leaves the machine.$_hint"
+    fi
   fi
   # (2) best-effort pattern scan over prompt + --with files (report only, never hard-blocks).
   # Every WITH_SPEC token that went through _validate_with_token is a skills=… or mcp=… form, so
@@ -18060,6 +18206,10 @@ route_delegate() {
   # Guard the no-task case: on bash 3.2 (macOS default) "${REST[*]}" on an empty array trips `set -u`.
   # Fail with the clean contract message instead of a raw unbound-variable crash.
   [ "${#REST[@]}" -gt 0 ] || die "no task given (e.g. $0 $verb -m <model> \"<task>\")"
+  # Issue #51: when the only credential files in scope are gitignored, move into a secret-free snapshot
+  # worktree first, so the gate below scans (and the delegate reads) the tree the repo actually holds.
+  # Same process as the dispatch, so the cd sticks. `continue` resumes a session tied to this cwd: skip.
+  [ "$verb" = "continue" ] || _cloud_autoisolate "$disp" || true
   _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
 
   # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to an INTERACTIVE tmux session by

@@ -2,6 +2,15 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.3
+
+### Fixed
+
+- **A gitignored `.env.local` no longer stops cloud jobs.** When the only credential files in your checkout are gitignored, `run`, `edit`, `bg` and `fanout` now run the delegate in a clean copy of your checkout (uncommitted work included, those files left out) instead of refusing. One notice shows where it ran and the command that brings the edits back. A tracked `.env` or a pasted secret still blocks. Off switch: `OSRC_CLOUD_AUTOISOLATE=0`. (#51)
+- **Codex can write on Windows.** Isolated Codex runs now keep your `[windows] sandbox` setting, so edit jobs change files instead of ending with every write blocked. `doctor` warns when the setting is missing. (#52, #53)
+- **Supervision arms on Windows.** Git Bash's `ps` can't report a process's start time, so the watcher used to exit at once and every run said NOT-ARMED. It now reads the same facts from `/proc`. (#52)
+- **Windows docs match reality.** `session start` isn't available on Windows; the docs and the no-tmux hint now say so and point to `run`, `edit` and `bg`.
+
 ## 0.15.2
 
 ### Fixed

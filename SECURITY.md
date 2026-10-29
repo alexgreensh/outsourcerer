@@ -53,6 +53,14 @@ machine, and when.* The answer is explicit and enforced:
   like `.env.example` excepted), `credentials`, `id_rsa`, `id_ed25519`, `.aws/credentials` — at the
   **root or nested** anywhere below it. It names the offending file and stops. This scan runs on
   **every** cloud call (no acknowledgement can skip it) and **fails closed** if it cannot complete.
+- **Gitignored secrets stay home, the work still runs.** When the only credential files are
+  gitignored and untracked (a local `web/.env.local`), `run`/`edit`/`bg`/`fanout` snapshot your
+  checkout, uncommitted work included, into a fresh git worktree that never contains them, and run
+  the delegate there. The full scan then runs again on that tree, so a tracked `.env` or a pasted
+  secret still blocks. You get one notice with the worktree path and the command that brings the
+  edits back. Turn it off with `OSRC_CLOUD_AUTOISOLATE=0`. The copy lives under your repo
+  (`.outsourcerer/worktrees/`), so a delegate that deliberately leaves its folder could still reach
+  the original file; if that matters, move the file out of the repo or use the local lane.
 - **Full disclosure on every cloud dispatch.** You are told the destination lane, that this working
   directory's content leaves the machine over the network, and whether a `:free` route may train on
   your data — *before* it goes. Non-interactive cloud runs refuse unless you explicitly acknowledge

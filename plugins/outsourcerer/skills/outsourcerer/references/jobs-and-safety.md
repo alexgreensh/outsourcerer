@@ -141,6 +141,18 @@ before dispatch; local ollama/lmstudio lanes skip both (nothing leaves the machi
    `.aws/credentials`, nested variants) kills the run REGARDLESS of any consent. Runs on every
    single delegation, always. Not skippable by ack, consent file, or env.
 
+   **Gitignored-only hits isolate instead of dying** (`run`/`edit`/`bg`/`fanout`). When every hit is
+   gitignored AND untracked (a local `web/.env.local`), the job first snapshots the checkout (tracked
+   + untracked files, uncommitted edits included, everything gitignored left out) into
+   `<repo>/.outsourcerer/worktrees/<id>` on branch `outsourcerer/<id>`, and runs there. The full scan
+   then runs on that tree, so this never weakens the block: any tracked or unignored credential file
+   still kills the run. The notice prints the worktree and the one-line command that applies the
+   delegate's edits back to your checkout; `cleanup <id> --force` removes it after. `continue`,
+   `session start` and `image` keep the plain block (they are tied to this directory); the refusal
+   says when the file is gitignored. Off switch: `OSRC_CLOUD_AUTOISOLATE=0`. The worktree sits inside
+   the repo, so this keeps the file out of the delegate's tree, not out of reach of a delegate that
+   deliberately climbs out of it.
+
    The one exception is explicit, narrow, and per-repo. Some people trust a given cloud lane the way
    they trust Claude Code, but only for particular repos. `~/.config/outsourcerer/trusted-lanes.json`
    expresses exactly that and nothing wider:
@@ -236,7 +248,9 @@ from cmd/PowerShell and find Git Bash automatically. `session start` is not supp
 (`scripts/outsourcerer-winpty-broker.sh`). `run`/`edit`/`bg`/`fanout` cover the same ground headless.
 Isolated codex runs (`--ignore-user-config`) keep only your `[windows] sandbox` mode (and
 `[features] prefer_mxc`) from `~/.codex/config.toml` (or `$CODEX_HOME`); nothing else is loaded. Without
-a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. `jq` on Windows: `winget install jqlang.jq`.
+a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. Git Bash's
+`ps` has no `-o`, so process identity (supervision beacon, job liveness) is read from `/proc` there.
+`jq` on Windows: `winget install jqlang.jq`.
 
 ## Orchestration rules while this skill is active
 
