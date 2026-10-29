@@ -159,8 +159,8 @@ rmc droid
 [ "$(grep -c '_failover_hop "$tier" "$verb"' "$SRC")" = 2 ] && ok "structure: route_delegate calls _failover_hop on both dispatch paths" || bad "structure: hop call count $(grep -c '_failover_hop "$tier" "$verb"' "$SRC")"
 [ "$(grep -cE '^ +_failover_signal_clear$' "$SRC")" -ge 2 ] && ok "structure: signal cleared before each dispatch" || bad "structure: signal clear count"
 grep -q 'local _fo_hops=0' "$SRC" && ok "structure: hop counter initialized per route_delegate call" || bad "structure: hop counter missing"
-awk '/^_failover_rebuild_argv\(\)/,/^}/' "$SRC" | grep -qiE 'resume|continue-session' && bad "structure: rebuild references a resume" || ok "structure: rebuild has no resume path"
-awk '/^_failover_hop\(\)/,/^}/' "$SRC" | grep -q '_failover_pick "$src"' && ok "structure: hop delegates the choice to _failover_pick" || bad "structure: hop bypasses the picker"
+grep -qiE 'resume|continue-session' <<<"$(awk '/^_failover_rebuild_argv\(\)/,/^}/' "$SRC")" && bad "structure: rebuild references a resume" || ok "structure: rebuild has no resume path"
+grep -q '_failover_pick "$src"' <<<"$(awk '/^_failover_hop\(\)/,/^}/' "$SRC")" && ok "structure: hop delegates the choice to _failover_pick" || bad "structure: hop bypasses the picker"
 grep -q '_failover_signal_write dv "$model" confirmed' "$SRC" && grep -q '_failover_signal_write "$lane" "$model" confirmed' "$SRC" && ok "structure: both blocks signal a confirmed limit" || bad "structure: a block does not signal"
 
 echo "== $pass passed, $fail failed =="

@@ -80,7 +80,7 @@ _route_resolution tokenrouter some-model 2>/dev/null
 [ "$ROUTE_COST_CLASS" = "credits" ] && ok "route cost class wired for tokenrouter" || bad "tokenrouter missing from route cost class"
 
 # --- the lane has NO hardcoded default model: -m is REQUIRED (the roster is the gateway's) ---
-if awk '/^_route_provider_default_model\(\)/,/^}/' "$SRC" | grep -q 'tokenrouter'; then
+if grep -q 'tokenrouter' <<<"$(awk '/^_route_provider_default_model\(\)/,/^}/' "$SRC")"; then
   bad "_route_provider_default_model still has a tokenrouter arm (hardcoded default model)"
 else
   ok "no hardcoded default model for tokenrouter (-m is required)"
@@ -266,8 +266,8 @@ kill "$FAKE_PID" 2>/dev/null || true; FAKE_PID=""
 # curl's exit code is captured after the stream loop; a mid-stream failure that still delivered SOME
 # tokens must NOT be reported as a clean success. Assert the lane warns on a non-zero curl rc after
 # partial output instead of silently returning 0 on a truncated response.
-if awk '/^delegate_tokenrouter\(\)/,/^}/' "$SRC" | grep -q 'rc.*-ne 0' \
-   && awk '/^delegate_tokenrouter\(\)/,/^}/' "$SRC" | grep -qi 'TRUNCATED'; then
+if grep -q 'rc.*-ne 0' <<<"$(awk '/^delegate_tokenrouter\(\)/,/^}/' "$SRC")" \
+   && grep -qi 'TRUNCATED' <<<"$(awk '/^delegate_tokenrouter\(\)/,/^}/' "$SRC")"; then
   ok "a truncated stream (non-zero curl rc after partial output) is flagged, not silently succeeded"
 else
   bad "a mid-stream failure with partial output is still reported as a clean success"

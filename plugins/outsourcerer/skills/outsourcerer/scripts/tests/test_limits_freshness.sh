@@ -56,7 +56,7 @@ grep -q 'Run codex once to refresh' "$SRC" \
 # Source-level: the age must travel in the RETURN STRING. An exported variable would die in the
 # command substitution the caller uses — the same defect that left the 0-writes flag dead for its
 # whole life, and the reason this bug was invisible.
-awk '/^_codex_rate_limits\(\)/,/^}/' "$SRC" | grep -q 'export OSRC_CODEX_READING_AGE' \
+grep -q 'export OSRC_CODEX_READING_AGE' <<<"$(awk '/^_codex_rate_limits\(\)/,/^}/' "$SRC")" \
   && bad "the reading age is exported from a function read via command substitution (it will be lost)" \
   || ok "the reading age travels in the return string, not an export"
 

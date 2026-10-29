@@ -98,7 +98,9 @@ grep -q 'credential-file scan SKIPPED' "$SRC" \
   || bad "no disclosure line when the scan is skipped"
 # Trust covers the repo's own credential FILES. It must not also wave through a live secret VALUE
 # pasted into a prompt — a different decision the operator never made.
-awk '/^_secret_scan\(\)/,/^}/' "$SRC" | grep -q 'OSRC_SECRET_ALLOW_VALUE' \
+# Here-string, not a pipe: grep -q quits on the first match and, under pipefail, awk's SIGPIPE
+# would read as "missing".
+grep -q 'OSRC_SECRET_ALLOW_VALUE' <<<"$(awk '/^_secret_scan\(\)/,/^}/' "$SRC")" \
   && ok "pasted-VALUE hard-block still present in _secret_scan (not covered by trust)" \
   || bad "value hard-block missing from _secret_scan"
 

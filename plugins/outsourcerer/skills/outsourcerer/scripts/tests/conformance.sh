@@ -407,7 +407,7 @@ grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
 grep -q '_blind_turn_guard'                          "$SRC" && ok "blind-turn guard present (refuses to end blind on live work)" || bad "blind-turn guard missing"
 grep -q 'OSRC_BLIND_TURN_GUARD'                      "$SRC" && ok "blind-turn guard has an escape hatch"                  || bad "blind-turn guard escape hatch missing"
-awk '/^main\(\)/,0' "$SRC" | grep -q '_blind_turn_guard' && ok "blind-turn guard is wired at turn-end in main"        || bad "blind-turn guard not wired in main"
+grep -q '_blind_turn_guard' <<<"$(awk '/^main\(\)/,0' "$SRC")" && ok "blind-turn guard is wired at turn-end in main"        || bad "blind-turn guard not wired in main"
 
 # 2a. TEST REGISTRATION: a suite that exists but is not in the list above never runs. Four suites sat
 # unregistered in this directory for a full release cycle, green locally and never executed by the

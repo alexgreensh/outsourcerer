@@ -74,10 +74,10 @@ env bash -c 'f="$1"; m="$2"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; _pi
 [ -z "$(via proc lstart 999999999)" ] && ok "a gone pid reads empty" || bad "gone pid returned data"
 
 echo "=== (2) supervision arms when ps has no -o (the Windows NOT-ARMED symptom) ==="
-out="$(env PATH="$NOPS_PATH" OSRC_HOME="$TMP/hb" bash "$SRC" heartbeat start 2>&1)"; rc=$?
+out="$(env -u OSRC_HEARTBEAT_DISABLED PATH="$NOPS_PATH" OSRC_HOME="$TMP/hb" bash "$SRC" heartbeat start 2>&1)"; rc=$?
 case "$out" in *"verified live"*) ok "heartbeat start: beacon verified live" ;; *) bad "arm failed (rc $rc): $(printf '%s' "$out" | tail -2)" ;; esac
 case "$out" in *NOT-ARMED*) bad "printed NOT-ARMED" ;; *) ok "no NOT-ARMED line" ;; esac
-st="$(env PATH="$NOPS_PATH" OSRC_HOME="$TMP/hb" bash "$SRC" heartbeat status 2>&1)"
+st="$(env -u OSRC_HEARTBEAT_DISABLED PATH="$NOPS_PATH" OSRC_HOME="$TMP/hb" bash "$SRC" heartbeat status 2>&1)"
 case "$st" in *"verified live"*) ok "heartbeat status re-verifies the leader through /proc" ;; *) bad "status: $(printf '%s' "$st" | tail -2)" ;; esac
 for lp in $(cat "$TMP"/hb/*/leader/owner.json "$TMP"/hb/leader/owner.json 2>/dev/null | jq -r .pid 2>/dev/null); do kill "$lp" 2>/dev/null; done
 

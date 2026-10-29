@@ -53,7 +53,7 @@ kill_beacon() {
   # The messages that point at `$0 heartbeat start` still exist...
   grep -q 'Arm it with: %s heartbeat start' "$SRC" || { echo "FAIL: remediation messages were removed"; exit 1; }
   # ...and the command they name is dispatched (not a dead pointer).
-  awk '/^main\(\)/,0' "$SRC" | grep -q 'heartbeat)[[:space:]]*cmd_heartbeat' \
+  grep -q 'heartbeat)[[:space:]]*cmd_heartbeat' <<<"$(awk '/^main\(\)/,0' "$SRC")" \
     || { echo "FAIL: heartbeat is not wired into the main dispatch"; exit 1; }
   grep -q 'supervise) cmd_heartbeat start' "$SRC" || { echo "FAIL: fleet supervise does not route to the arm path"; exit 1; }
   exit 0

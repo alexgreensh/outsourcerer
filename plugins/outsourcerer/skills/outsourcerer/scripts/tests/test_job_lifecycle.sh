@@ -241,7 +241,7 @@ for st in interrupted done failed blocked timeout wedged canceled permission-blo
     *" $st "*) ;; *) bad "state '$st' missing from the terminal vocabulary" ;;
   esac
 done
-awk '/^_fanout_running\(\)/,/^}/' "$SRC" | grep -q 'interrupted' \
+grep -q 'interrupted' <<<"$(awk '/^_fanout_running\(\)/,/^}/' "$SRC")" \
   && ok "the fanout waiter treats interrupted as terminal (cannot hang on a killed member)" \
   || bad "fanout waiter would count an interrupted member as still running"
 
