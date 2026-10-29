@@ -375,9 +375,20 @@ Issues and PRs welcome.
 
 ## License
 
-Outsourcerer is available under the [PolyForm Noncommercial 1.0.0](LICENSE)
-license. Commercial use requires a separate license from Alex Greenshpun. Contact
-[me@alexgreenshpun.com](mailto:me@alexgreenshpun.com) to discuss commercial licensing.
+**PolyForm Noncommercial 1.0.0**, plus a written [small business permission](LICENSE-SMALL-BUSINESS.md). Personal, research, education: free. Companies with fewer than 5 people and under $20k/month revenue (whole company, not seats): free. Commercial: [reach out](mailto:me@alexgreenshpun.com).
+
+<details>
+<summary>License FAQ</summary>
+
+**Personal / hobby / research / education?** Go for it. No license purchase needed, including your own open-source side projects. What counts is who the work is for, not where it runs: work for your employer is your employer's use, even from home.
+
+**Small business?** If your **whole company** has fewer than 5 people **and** under $20k/month revenue, you get a no-cost commercial license, in writing: [LICENSE-SMALL-BUSINESS.md](LICENSE-SMALL-BUSINESS.md). Both limits apply to the entire organization (including any parent or sister companies), not to how many people install it, so a larger company does not qualify by limiting it to a handful of users. It covers use inside your own business, not reselling it or running it as a service for others.
+
+**Growing into a business?** You get 32 days after you stop qualifying to sort out a commercial license. Past use is fine.
+
+**Larger company?** Contact [Alex Greenshpun](https://linkedin.com/in/alexgreensh) or [me@alexgreenshpun.com](mailto:me@alexgreenshpun.com).
+
+</details>
 
 ---
 
