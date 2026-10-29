@@ -311,6 +311,12 @@ if _session_model_restore devin tmux:win fable restore.win win >/dev/null 2>&1; 
 else
   ok "Windows model restore is observation-only"
 fi
+# The shared watcher is off on Windows by design: arming is a platform decline (rc 2), never a loud
+# NOT-ARMED that tells the user a supervised run is unsupervised.
+_arm_err="$( (unset OSRC_HEARTBEAT_DISABLED; OSRC_FLEET_SUPERVISION=1; _heartbeat_arm_verify; echo "rc=$?") 2>&1 )"
+case "$_arm_err" in *NOT-ARMED*) bad "Windows arm printed a false NOT-ARMED: $_arm_err" ;; *rc=2*) ok "Windows arm is a quiet platform decline (rc 2)" ;; *) bad "Windows arm: $_arm_err" ;; esac
+_hb_out="$( (unset OSRC_HEARTBEAT_DISABLED; cmd_heartbeat start) 2>&1 )"
+case "$_hb_out" in *"not available on Windows"*"its own supervisor"*) ok "heartbeat start explains the Windows setup" ;; *) bad "heartbeat start on Windows: $_hb_out" ;; esac
 
 echo "---"
 echo "passed=$pass failed=$fail"

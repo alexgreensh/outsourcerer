@@ -248,9 +248,9 @@ from cmd/PowerShell and find Git Bash automatically. `session start` is not supp
 (`scripts/outsourcerer-winpty-broker.sh`). `run`/`edit`/`bg`/`fanout` cover the same ground headless.
 Isolated codex runs (`--ignore-user-config`) keep only your `[windows] sandbox` mode (and
 `[features] prefer_mxc`) from `~/.codex/config.toml` (or `$CODEX_HOME`); nothing else is loaded. Without
-a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. Git Bash's
-`ps` has no `-o`, so process identity (supervision beacon, job liveness) is read from `/proc` there.
-`jq` on Windows: `winget install jqlang.jq`.
+a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. The shared
+supervision watcher (heartbeat) is off on Windows; each `bg`/`fanout` job is still watched by its own
+supervisor, and `heartbeat status` says so instead of reporting NOT-ARMED. `jq` on Windows: `winget install jqlang.jq`.
 
 ## Orchestration rules while this skill is active
 

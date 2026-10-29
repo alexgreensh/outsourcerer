@@ -7848,49 +7848,15 @@ _pid_start_valid() {
   case "$year" in [0-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
 }
 
-# _ps_o <lstart|stat|command> <pid> -> what `LC_ALL=C ps -o <field>= -p <pid>` prints, on every host.
-# Git Bash / MSYS2 (and busybox, or a box without procps) ship a `ps` with no -o at all, so every
-# identity read came back empty: the supervision beacon could not record its own start time, exited
-# at once, and every Windows run reported NOT-ARMED. Those hosts all have /proc, so when ps -o itself
-# errors, read the same facts there. lstart is rebuilt the way procps does it (boot time + start
-# ticks / CLK_TCK) so the marker keeps the "Wkd Mon dd hh:mm:ss yyyy" shape _pid_start_valid expects.
-# Decided per call (no cached probe): whenever ps -o succeeds its answer wins, so macOS and Linux
-# behave exactly as before. Empty output when the pid is gone.
-_ps_o() {
-  local f="$1" pid="$2" out rc=0 st rest hz bt ticks
-  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
-  out="$(LC_ALL=C ps -o "$f=" -p "$pid" 2>/dev/null)" || rc=$?
-  if [ "$rc" -eq 0 ] || [ ! -r "/proc/$pid/stat" ]; then
-    [ "$rc" -eq 0 ] && [ -n "$out" ] && printf '%s\n' "$out"
-    return 0
-  fi
-  case "$f" in
-    command)
-      tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | sed 's/[[:space:]]*$//'; echo ;;
-    stat|lstart)
-      st="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 0
-      rest="${st##*) }"   # comm may hold spaces or ')': the fields that matter follow the LAST ") "
-      [ "$rest" != "$st" ] || return 0
-      set -- $rest        # $1 = state (field 3), $20 = starttime (field 22)
-      if [ "$f" = stat ]; then printf '%s\n' "$1"; return 0; fi
-      ticks="${20:-}"; case "$ticks" in ''|*[!0-9]*) return 0 ;; esac
-      bt="$(sed -n 's/^btime[[:space:]]*\([0-9][0-9]*\).*/\1/p' /proc/stat 2>/dev/null)"
-      case "$bt" in ''|*[!0-9]*) return 0 ;; esac
-      hz="$(getconf CLK_TCK 2>/dev/null)"; case "$hz" in ''|*[!0-9]*|0) hz=100 ;; esac
-      LC_ALL=C date -d "@$(( bt + ticks / hz ))" '+%a %b %e %H:%M:%S %Y' 2>/dev/null ;;
-  esac
-  return 0
-}
-
 _pid_start_identity() {
   local pid="$1" marker self_marker
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  marker="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  marker="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   if _pid_start_valid "$marker"; then
     printf '%s\n' "$marker"
     return 0
   fi
-  self_marker="$(_ps_o lstart "$$" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  self_marker="$(LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   if _pid_start_valid "$self_marker"; then
     return 2
   fi
@@ -7931,9 +7897,8 @@ _pid_start_file_match() {
   [ -n "$pid" ] && [ -f "$file" ] || return 2
   rec="$(sed "$norm" "$file" 2>/dev/null)"
   [ -n "$rec" ] || return 2
-  live_c="$(_ps_o lstart "$pid" | sed "$norm")"
-  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null)" || live_plain=""   # a ps without -o: no plain rendering
-  live_plain="$(printf '%s' "$live_plain" | sed "$norm")"
+  live_c="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
+  live_plain="$(ps -o lstart= -p "$pid" 2>/dev/null | sed "$norm")"
   if [ -z "$live_c" ] && [ -z "$live_plain" ]; then return 2; fi
   prec="$(_pid_start_projection "$rec")"
   lc="$(_pid_start_projection "$live_c")"
@@ -7957,7 +7922,7 @@ _heartbeat_pid_state() { # <pid> -> prints the ps stat= marker (empty on unreada
     printf '%s\n' "${OSRC_TEST_PS_STATE//[[:space:]]/}"
     return 0
   fi
-  state="$(_ps_o stat "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  state="$(LC_ALL=C ps -o stat= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   [ -n "$state" ] || return 1
   printf '%s\n' "$state"
 }
@@ -7969,7 +7934,7 @@ _heartbeat_pid_is_beacon() { # <pid> -> 0 if the pid's ps command carries the __
   if [ "${OSRC_TEST_MODE:-0}" = 1 ] && [ -n "${OSRC_TEST_PS_ARGV:-}" ]; then
     cmd="$OSRC_TEST_PS_ARGV"
   else
-    cmd="$(_ps_o command "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    cmd="$(LC_ALL=C ps -o command= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
   fi
   case "$cmd" in *"__heartbeat-beacon"*) return 0 ;; esac
   return 1
@@ -8813,6 +8778,13 @@ _heartbeat_arm_verify() {
     _heartbeat_arm_optout="OSRC_HEARTBEAT_DISABLED=1"
     return 2
   fi
+  # Windows: the shared watcher is off by design (its ownership checks are unverified there, so
+  # _heartbeat_start/_heartbeat_claim refuse). That is a platform decline, not a failed arm: each job
+  # is still watched by its own supervisor, so never print NOT-ARMED or flag the run unsupervised.
+  if [ "${OSRC_PLATFORM:-}" = "windows" ]; then
+    _heartbeat_arm_optout="windows"
+    return 2
+  fi
   # Keep the start attempts quiet on success, but remember why they failed: "kill -0 failed" alone
   # sent people hunting for a dead process when the real reason was e.g. a non-executable script.
   local _hb_why
@@ -8838,7 +8810,11 @@ cmd_heartbeat() { # start | status -- the manual arm/remediation command the NOT
           echo "supervision armed, beacon pid ${pid:-?} verified live"
           ;;
         1) : ;;  # the helper already printed the loud NOT-ARMED line
-        2) echo "supervision opted out via ${_heartbeat_arm_optout:-OSRC_FLEET_SUPERVISION=0}" ;;
+        2) if [ "${_heartbeat_arm_optout:-}" = "windows" ]; then
+             echo "the shared supervision watcher is not available on Windows (Git Bash); each job is still watched by its own supervisor. Check jobs with: $0 status"
+           else
+             echo "supervision opted out via ${_heartbeat_arm_optout:-OSRC_FLEET_SUPERVISION=0}"
+           fi ;;
       esac
       return "$rc"
       ;;
@@ -11525,9 +11501,9 @@ _supervise() {
   # written by the previous release (plain-locale records) are still read correctly: the
   # readers go through _pid_start_file_match, which accepts either rendering of the SAME
   # live process.
-  _ps_o lstart "$$" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
+  LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
   # Record start time for PID-reuse detection.
-  local _stime; _stime="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
+  local _stime; _stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
   _stime="${_stime:-$t0}"
   printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
@@ -11584,7 +11560,7 @@ _supervise() {
   local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
-    local _live_stime; _live_stime="$(_ps_o lstart "$pid" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
+    local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
       echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
