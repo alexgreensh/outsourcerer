@@ -134,7 +134,8 @@ R="$TMP/r7"; mkdir -p "$R/web"
   && printf 'S=1\n' > web/.env.local && printf 'a2\n' > same.txt )
 cap="$TMP/devin.cap"
 # Through the real `edit` command, so route_delegate's gate is in the path (delegate() sits below it).
-e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1)"
+# Foreground on purpose: swe-2 is a capable-tier (slow-lane) model, so a no-TTY run would auto-detach.
+e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1)"
 if [ -s "$cap" ]; then ok "delegate launched (no gate kill)"; else bad "delegate never launched: $(printf '%s' "$e2e" | grep -m2 'CLOUD GATE\|error')"; fi
 grep -q "^cwd=$R/.outsourcerer/worktrees/run-" "$cap" 2>/dev/null && ok "delegate cwd is the isolated worktree" || bad "delegate cwd: $(head -1 "$cap" 2>/dev/null)"
 grep -q '^secret=absent' "$cap" 2>/dev/null && ok "delegate cannot see web/.env.local" || bad "delegate saw the secret"
