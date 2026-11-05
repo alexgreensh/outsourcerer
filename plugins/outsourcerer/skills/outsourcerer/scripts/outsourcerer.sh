@@ -152,7 +152,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.15.3"
+OSRC_VERSION="0.15.4"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -546,9 +546,13 @@ glm-5-3|glm-5-3|dv|capable
 glm-5.3-high|glm-5-3-high|dv|capable
 glm-5.3-flash|glm-5-3-flash|dv|capable
 glm-5.3-flash-high|glm-5-3-flash-high|dv|capable
-swe|swe-1.7|dv|capable
-swe-1.7|swe-1.7|dv|capable
-swe-1-7|swe-1.7|dv|capable
+swe|swe-2-flash-high|dv|capable
+swe-2|swe-2-flash-high|dv|capable
+swe-1.7|swe-2-flash-high|dv|capable
+swe-1-7|swe-2-flash-high|dv|capable
+swe-2-flash-medium|swe-2-flash-medium|dv|capable
+swe-2-flash-high|swe-2-flash-high|dv|capable
+swe-2-flash-max|swe-2-flash-max|dv|capable
 swe-1.7-lightning|swe-1.7-lightning|dv|mid
 kimi|kimi-k3|dv|capable
 kimi-k3|kimi-k3|dv|capable
@@ -584,7 +588,7 @@ fi
 # list (#45) to decide whether excluding a specific version also refuses the bare alias: excluding an
 # OLD model (claude-opus-4-8) must leave `-m opus` usable. UPDATE THIS LINE ON EVERY CLAUDE RELEASE.
 # Other aliases need no entry: the model table above already maps them (sol -> gpt-5.6-sol, glm ->
-# z-ai/glm-5.2, swe -> swe-1.7); Gemini family aliases pick their id live and fail closed.
+# z-ai/glm-5.2, swe -> swe-2-flash-high); Gemini family aliases pick their id live and fail closed.
 OSRC_CLAUDE_CURRENT_IDS="fable|claude-fable-5-1 opus|claude-opus-5-5 sonnet|claude-sonnet-5-5 haiku|claude-haiku-5-5"
 # Point releases, "<point release>:<its parent>". Excluding the parent also refuses a bare alias whose
 # current id is listed here (exclude claude-fable-5 -> -m fable refused). Never inferred from version
@@ -865,7 +869,7 @@ _devin_free_own_quota() { # <model> <text>
 # rc1 when every candidate is excluded (the caller then skips the probe).
 _devin_probe_pick() {
   local c skip="${OSRC_DEVIN_PROBE_SKIP:-}"
-  for c in "$@" glm-5-2 swe-2 swe-1-7 kimi-k3; do
+  for c in "$@" glm-5-2 swe-2-flash-high swe-2 kimi-k3; do
     [ -n "$c" ] || continue
     [ -n "$skip" ] && [ "$(printf '%s' "$c" | tr '[:upper:]._' '[:lower:]--')" = "$skip" ] && continue
     _model_excluded "$c" && continue
@@ -938,26 +942,26 @@ _lane_free_probe() {
 }
 # _devin_plan_probe_model <refused-model> -> the free model to probe after a plan-quota refusal. The
 # default probe model (OSRC_DEVIN_PROBE_MODEL, glm-5-2) unless THAT is the model Devin just refused,
-# in which case the alternate plan-included model (OSRC_DEVIN_PROBE_MODEL_ALT, swe-1-7) is used:
+# in which case the alternate free model (OSRC_DEVIN_PROBE_MODEL_ALT, swe-2-flash-high) is used:
 # re-asking the refused model proves nothing about the "shared bucket" claim, a sibling does.
 _devin_plan_probe_model() {
   local refused probe alt
   refused="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '._' '--')"
-  # The alt probe is swe-2, NOT swe-1-7. swe-1-7 shares the same daily plan bucket as glm/kimi, so
-  # probing it after a glm refusal just re-confirms the bucket is spent. swe-2 is a SEPARATE Free tier
+  # The alt probe is the Free SWE-2 Flash tier (swe-2-flash-high), NOT swe-1-7. swe-1-7 shares the
+  # same daily plan bucket as glm/kimi, so probing it after a glm refusal just re-confirms the bucket is spent. swe-2 is a SEPARATE Free tier
   # (Devin catalog cost_tier=Free; verified live 2026-09-18: swe-2 answered while glm-5-2 was daily-
   # capped) — so probing it discovers whether free work can still run on the lane, which is the whole
   # point of the "one refusal does not prove every model is spent" check.
   # alt = a truly-Free model discovered from the live catalog (self-heals as Devin changes its Free
-  # tier), falling back to swe-2 (the known Free model) when the catalog is unavailable or the env
-  # override is unset.
+  # tier), falling back to swe-2-flash-high (the default Free SWE model) when the catalog is
+  # unavailable or the env override is unset.
   probe="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
   # The alt lookup is a live (bounded) catalog refresh, so it is evaluated only when it will actually
   # be used: a refusal from any model other than the default probe keeps the default and never needs
   # the catalog. Evaluating it eagerly made every plan-quota block spend a `devin models list` fetch
   # on a value it then discarded.
   if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then
-    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2}"
+    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2-flash-high}"
   fi
   # #45: never probe a model the user excluded; pick the next allowed one that is not the refused model.
   if _model_excluded "$probe"; then probe="$(OSRC_DEVIN_PROBE_SKIP="$refused" _devin_probe_pick)" || probe=""; fi
@@ -1045,7 +1049,7 @@ _devin_model_for() {
     glm-5.3|glm-5-3|z-ai/glm-5.3) printf 'glm-5-3' ;;
     glm-5.3-flash|glm-5-3-flash|z-ai/glm-5.3-flash) printf 'glm-5-3-flash' ;;
     glm-5.3-*) printf 'glm-5-3-%s' "${1#glm-5.3-}" ;;   # glm-5.3-high / glm-5.3-flash-high -> Devin's dashed variant uid
-    swe|swe-1.7|swe-1-7) printf 'swe-1.7' ;;
+    swe|swe-2|swe-1.7|swe-1-7) printf 'swe-2-flash-high' ;;
     deepseek|deepseek/deepseek-v4-pro|deepseek-v4-pro) printf 'deepseek-v4-pro-%s' "$(_deepseek_effort_suffix)" ;;
     kimi|kimi-k3) printf 'kimi-k3' ;;
     *) printf '' ;;
@@ -1186,8 +1190,9 @@ _devin_resolve_dynamic() {
 # These do NOT draw on the separate paid ACU balance, so a "0% remaining" figure in Devin's own output
 # (which reports that paid balance) must never be read as blocking them. This is the bug-1 anchor:
 # free-tier models must run regardless of the paid-quota display.
-# swe-2 is added because Devin's live catalog marks it cost_tier="Free" (its own separate tier, outside
-# the shared glm/swe-1.7/kimi daily plan bucket). It was previously unrecognized, so a swe-2 dispatch —
+# swe-2 and the SWE-2 Flash family (swe-2-flash-medium/-high/-max, the swe default) are listed because
+# Devin's live catalog marks them cost_tier="Free" (a separate tier, outside the shared glm/swe-1.7/kimi
+# daily plan bucket). It was previously unrecognized, so a swe-2 dispatch —
 # the escape when the shared bucket is spent — was treated as a paid model.
 _devin_is_free_model() {
   local t; t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
@@ -1195,7 +1200,7 @@ _devin_is_free_model() {
   # non-plan pay-as-you-go price), so they can't be discovered from cost_tier and must be named here.
   # Also the offline fallback for the catalog-Free models (so swe-2 is still recognized with no network).
   case "$t" in
-    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|glm-5.3*|glm-5-3*|z-ai/glm-5.3*|swe-2|swe-2-high|swe-2-medium|swe-2-max|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|glm-5.3*|glm-5-3*|z-ai/glm-5.3*|swe-2|swe-2-high|swe-2-medium|swe-2-max|swe-2-flash|swe-2-flash-medium|swe-2-flash-high|swe-2-flash-max|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
   esac
   # Catalog-driven union: any model the LIVE catalog marks cost_tier="Free" is free, so a newly added
   # or renamed Free model is recognized with no code change — this is what stops the list from drifting.
@@ -1728,6 +1733,11 @@ _classify_quota_confirm() {
 _devin_resolve_model() {
   local m="${1:-}" row target sib dyn
   [ -n "$m" ] || { printf ''; return; }
+  # 0) Pinned SWE default: the short swe aliases always run the Free SWE-2 Flash model, never whatever
+  #    family the live catalog ranks newest. Fully-qualified ids (swe-2-high, ...) are not rewritten.
+  case "$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')" in
+    swe|swe-2|swe-1.7|swe-1-7) m="$(_devin_model_for swe)" ;;
+  esac
   # 1) Dynamic resolution from the live catalog — the primary path.
   dyn="$(_devin_resolve_dynamic "$m")"; [ -n "$dyn" ] && { printf '%s' "$dyn"; return; }
   # 2) Static cross-lane sibling (e.g. the OpenRouter id z-ai/glm-5.2 that Devin rejects). Sharpen a
@@ -2788,7 +2798,7 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
         "Switch lanes OFF Devin: OpenRouter (--provider cc -m glm | -m deepseek) for grind, or a native lane (Claude Code / Codex / Gemini) for judgment work."
     elif _devin_quota_refusal "$_dverr"; then
       # A pure ACU/paid block: the free-tier-still-available line IS valid here (separate pool).
-      printf '>>> [devin quota] paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still available. Retry on one of those plan-included models.\n' >&2
+      printf '>>> [devin quota] paid Devin models exhausted; free tier (glm-5-2, swe-2-flash-high) still available. Retry on one of those plan-included models.\n' >&2
       # Reconcile a declared daily cap with reality: a real refusal means this model is spent until the
       # next reset, even if our ledger count hasn't reached the cap. No-op unless a cap is declared.
       _quota_note_refusal dv "$MODEL" 2>/dev/null || true
@@ -7185,10 +7195,10 @@ _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fall
   local prompt="$1" model output bound="${OSRC_FLEET_NAME_TIMEOUT:-90}"
   case "$bound" in ''|*[!0-9]*|0) bound=90 ;; esac
   local out_file pid pgid rc waited monitor_was_on
-  for model in glm-5-2 swe-1-7 haiku sol; do
+  for model in glm-5-2 swe-2-flash-high haiku sol; do
     _model_excluded "$model" && continue   # user exclude list (#45)
     case "$model" in
-      glm-5-2|swe-1-7) have devin || continue ;;
+      glm-5-2|swe-2-flash-high) have devin || continue ;;
       haiku) have claude || continue ;;
       sol) have codex || continue ;;
     esac
@@ -16035,7 +16045,7 @@ _insource_block() {   # <host-label>
 <!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: $1) -->
 ## Outsourcerer: delegate grunt work to cheaper/different engines
 This machine has outsourcerer installed. From this $1 session you can delegate to Devin
-(glm-5.2/swe-1.7, spends Devin plan limits), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
+(glm-5.2 spends Devin plan limits; swe = swe-2-flash-high, free), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
 a VERIFIED Claude model (run -m fable|opus|sonnet|haiku, Claude subscription), ChatGPT-sub
 models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0 cash + \$0 plan, private).
   $SCRIPT_PATH doctor                          # what's available right now (run this first)
@@ -18141,6 +18151,8 @@ route_delegate() {
   fi
 
   # Devin's swe-1.7 is usable for read-only runs but has repeatedly failed write-enabled verbs.
+  # Only an id that RESOLVES to literally swe-1.7 (a models.local override) trips it: the swe aliases
+  # now resolve to swe-2-flash-high, so the default never warns.
   # Keep an explicit user choice intact, while making the limitation impossible to miss before a
   # mutating dispatch. A write-capable model/lane should be preferred for this work.
   # Descriptor-first: a lane may declare warn_model/warn_verbs/warn_msg; the literal
@@ -20979,8 +20991,8 @@ doctor() {
         _lane_down_clear dv   # authoritative probe answered: drop any still-unexpired down marker
         echo "  Devin GLM (free): UP — glm-5-2 plan-included probe answered within ${OSRC_DEVIN_PROBE_SECS:-30}s" ;;
       paid-tier-exhausted)
-        echo "  Devin GLM (free): NOT MARKED DOWN — probe returned a paid-tier quota signal, which cannot gate glm-5-2/swe-1-7"
-        echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available" ;;
+        echo "  Devin GLM (free): NOT MARKED DOWN — probe returned a paid-tier quota signal, which cannot gate glm-5-2/swe-2-flash-high"
+        echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-2-flash-high) still available" ;;
       down-timeout)
         _lane_down_mark dv   # close the doctor->dispatch loop: the dispatch gate skips a marked lane
         echo "  Devin GLM (free): GENUINELY DOWN — glm-5-2 probe timed out after ${OSRC_DEVIN_PROBE_SECS:-30}s after orphan reap preflight" ;;
@@ -21001,7 +21013,7 @@ doctor() {
       _du="$(_timeout "${OSRC_DEVIN_USAGE_SECS:-10}" devin usage 2>&1)" || _durc=$?
       if [ "$_dstate" != "paid-tier-exhausted" ]; then
         if [ "$(_devin_probe_classify "$_durc" "$_du")" = "paid-tier-exhausted" ]; then
-          echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available"
+          echo "  Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-2-flash-high) still available"
         else
           echo "  Devin paid tier: no exhaustion signal detected (bounded usage check; free-tier verdict is independent)"
         fi

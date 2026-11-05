@@ -50,7 +50,8 @@ ChatGPT / Claude subscription auth, so they are premium and are **never** auto-e
 | `glm-5.3-high` | `glm-5-3-high` | devin | **capable** | GLM-5.3 at the high rung |
 | `glm-5.3-flash` | `glm-5-3-flash` (Devin family; rungs `-low/-high/-max`) | devin | **capable** | lighter GLM-5.3; `advise` prefers this family over full-size 5.3 below `--effort max` |
 | `glm-5.3-flash-high` | `glm-5-3-flash-high` | devin | **capable** | the cheaper capable variant `advise` recommends for agentic/edit work at `--effort high` |
-| `swe` / `swe-1.7` | `swe-1.7` | devin | **capable** | Devin's own SWE agent model (open-weight/free-lane class) |
+| `swe` / `swe-2` / `swe-1.7` / `swe-1-7` | `swe-2-flash-high` | devin | **capable** | Devin's SWE-2 Flash, Free tier, 262K context (the default for every SWE lane) |
+| `swe-2-flash-medium` / `swe-2-flash-high` / `swe-2-flash-max` | itself | devin | **capable** | SWE-2 Flash effort rungs, all Free; exact ids (`swe-2-high`, `swe-2-max`, ...) are never rewritten |
 | `swe-1.7-lightning` | itself | devin | mid | faster/cheaper SWE variant |
 | `kimi` | `kimi-k3` | devin / droid / warp | **capable** | near-frontier hard-work lane; provider-specific dispatch resolves the accepted K3 id |
 
@@ -552,7 +553,7 @@ capacity; both are described in `jobs-and-safety.md`.
 | `fable` / `opus` / `sonnet` / `haiku` | claude-native (Claude sub) |
 | `gemini-pro` / `gemini-flash` / `gemini-flash-lite` | gemini (agy keyless) |
 | `glm` / `hy3` / `deepseek` / any OpenRouter id | OpenRouter (`--provider cc`/`codex`); `capable` tier |
-| `swe` / `swe-1.7` / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
+| `swe` (= `swe-2-flash-high`, free) / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
 | `ollama:<m>` / `local:<m>` | local (keyless, PRIVATE, $0) |
 | any TokenRouter gateway id | **tokenrouter** (`--provider tokenrouter`): OpenAI-compatible cloud gateway, key `TOKENROUTER_API_KEY` in `~/.env`; `-m` is REQUIRED and passes through verbatim to the gateway's own catalog (no hardcoded default; the roster is the gateway's, discovered live; some models are a $0 promo RIGHT NOW, confirmed at runtime by billing errors, never a hardcoded date). TEXT delegation, cloud-gated. |
 | `gpt-image` / `nano-banana` | image only (`image` subcommand) |

@@ -72,7 +72,7 @@ done
 grep -q 'Devin GLM (free): UP' "$SRC" && grep -q 'Devin GLM (free): GENUINELY DOWN' "$SRC" \
   && ok "Devin GLM free lane distinguishes UP from a timed-out genuinely-down probe" \
   || bad "Devin GLM free lane has no explicit UP/genuinely-down classification"
-grep -q 'Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-1-7) still available' "$SRC" \
+grep -q 'Devin paid tier: EXHAUSTED; free tier (glm-5-2, swe-2-flash-high) still available' "$SRC" \
   && ok "doctor separates paid-tier exhaustion from free GLM/SWE availability" \
   || bad "doctor still exposes a blanket Devin quota/down verdict"
 

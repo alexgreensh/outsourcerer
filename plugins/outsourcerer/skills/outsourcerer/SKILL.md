@@ -89,7 +89,7 @@ Skip the loop when nothing external can verify the result (a model would be mark
 | `fable` / `opus` / `sonnet` / `haiku` | claude-native (Claude sub) |
 | `gemini-pro` / `gemini-flash` / `gemini-flash-lite` | gemini (agy keyless) |
 | `glm` / `hy3` / `deepseek` / any OpenRouter id | OpenRouter (`--provider cc`/`codex`); `capable` tier |
-| `swe` / `swe-1.7` / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
+| `swe` (= `swe-2-flash-high`, free) / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
 | `ollama:<m>` / `local:<m>` | local (keyless, private, $0) |
 | any TokenRouter gateway id | **tokenrouter** (`--provider tokenrouter`): cloud gateway, `-m` required and passed verbatim; key `TOKENROUTER_API_KEY` |
 | `gpt-image` / `nano-banana` | image only (`image` subcommand) |

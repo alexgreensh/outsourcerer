@@ -16,7 +16,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 set --; . "$SRC" >/dev/null 2>&1
 
 # ---- bug 1: free-tier detection ----------------------------------------------------------------
-for m in glm glm-5.2 swe-2 swe-2-high swe-2-max swe swe-1.7 swe-1.7-lightning deepseek deepseek-v4-pro kimi kimi-k3; do
+for m in glm glm-5.2 swe-2 swe-2-high swe-2-max swe-2-flash-medium swe-2-flash-high swe-2-flash-max swe swe-1.7 swe-1.7-lightning deepseek deepseek-v4-pro kimi kimi-k3; do
   _devin_is_free_model "$m" && ok "free-tier: $m recognized" || bad "free-tier: $m NOT recognized"
 done
 for m in opus fable claude-opus-4-8 gpt-5.6 sonnet; do

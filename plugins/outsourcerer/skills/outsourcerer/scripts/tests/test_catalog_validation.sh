@@ -71,6 +71,8 @@ cat > "$T/catalogs/dv.raw.json" <<'RAW'
  {"family_uid":"kimi-k2.7","aliases":[],"variants":[{"model_uid":"kimi-k2-7","cost_summary":"$0.95 / MTok In"}]},
  {"family_uid":"swe-1.7","aliases":[],"variants":[{"model_uid":"swe-1-7","cost_summary":"Free"}]},
  {"family_uid":"swe-1.7-lightning","aliases":["swe"],"variants":[{"model_uid":"swe-1-7-lightning","cost_summary":"$2.5 / MTok In"}]},
+ {"family_uid":"swe-2","aliases":[],"variants":[{"model_uid":"swe-2-medium","cost_summary":"Free"},{"model_uid":"swe-2-high","cost_summary":"Free"},{"model_uid":"swe-2-max","cost_summary":"Free"}]},
+ {"family_uid":"swe-2-flash","aliases":[],"variants":[{"model_uid":"swe-2-flash-medium","cost_tier":"Free"},{"model_uid":"swe-2-flash-high","cost_tier":"Free"},{"model_uid":"swe-2-flash-max","cost_tier":"Free"}]},
  {"family_uid":"brandnew-v1","aliases":[],"variants":[{"model_uid":"brandnew-v1-low","cost_summary":"Free"},{"model_uid":"brandnew-v1-high","cost_summary":"Free"}]}
 ]}
 RAW
@@ -85,7 +87,12 @@ rchk deepseek deepseek-v4-pro-max max         # effort folds to the -max variant
 rchk glm glm-5-2                              # Free base, NOT the paid -max / special -1m
 rchk glm glm-5-2-max max                      # max effort -> max variant
 rchk kimi kimi-k3-high                        # newest family (k3, not k2.7)
-rchk swe swe-1-7                              # Free swe-1.7, NOT the paid -lightning
+rchk swe swe-2-flash-high                     # pinned SWE default, NOT the newest non-flash swe-2 or paid -lightning
+rchk swe-2 swe-2-flash-high                   # short swe-2 alias pinned too
+rchk swe-1-7 swe-2-flash-high                 # legacy swe-1.7 alias moves to the default
+rchk swe-2-high swe-2-high                    # exact id never rewritten
+rchk swe-2-flash-max swe-2-flash-max          # exact flash rung passes through
+rchk swe-1-7-lightning swe-1-7-lightning      # exact (paid) variant typed explicitly is kept
 rchk deepseek-v4-pro deepseek-v4-pro-high    # family id -> variant
 rchk glm-5-2-max glm-5-2-max                 # exact variant passes through
 rchk brandnew-v1 brandnew-v1-high            # A NEW MODEL resolves with ZERO code change

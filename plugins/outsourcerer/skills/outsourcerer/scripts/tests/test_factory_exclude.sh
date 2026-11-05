@@ -247,17 +247,17 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
 (
   export OSRC_HOME; OSRC_HOME="$(xh f3)"
   r=0
-  o="$(OSRC_EXCLUDE_MODELS=swe-1.8 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
+  o="$(OSRC_EXCLUDE_MODELS=kimi-k9 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     _devin_with_prepare() { DEVIN_WITH_PRE=""; }; need_devin() { :; }; _catalog_validate() { :; }
-    _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = swe ] && printf swe-1-8; }
+    _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = kimi ] && printf kimi-k9; }
     devin() { echo ran; }
-    delegate auto "" -m swe "hi"; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q "'swe' resolves to swe-1-8, which you excluded" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  delegate: $o"; r=1; }
-  o="$(OSRC_EXCLUDE_MODELS=swe-1.8 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
-    need_devin() { :; }; _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = swe ] && printf swe-1-8; }
+    delegate auto "" -m kimi "hi"; echo survived' bash "$SRC" 2>&1)"
+  printf '%s' "$o" | grep -q "'kimi' resolves to kimi-k9, which you excluded" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  delegate: $o"; r=1; }
+  o="$(OSRC_EXCLUDE_MODELS=kimi-k9 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
+    need_devin() { :; }; _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = kimi ] && printf kimi-k9; }
     devin() { echo ran; }
-    continue_turn -m swe "next"; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q "continue: 'swe' resolves to swe-1-8" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  continue: $o"; r=1; }
+    continue_turn -m kimi "next"; echo survived' bash "$SRC" 2>&1)"
+  printf '%s' "$o" | grep -q "continue: 'kimi' resolves to kimi-k9" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  continue: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=gemini-3.4-pro OSRC_AGY_PRO_DEFAULT=gemini-3.4-pro OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     _exclude_refuse_resolved gemini-pro "$(_agy_model_token gemini-pro)"; echo survived' bash "$SRC" 2>&1)"
   printf '%s' "$o" | grep -q "'gemini-pro' resolves to gemini-3.4-pro" && ! printf '%s' "$o" | grep -q survived || { echo "  agy: $o"; r=1; }
@@ -266,7 +266,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
     grep -qF -- "$site" "$SRC" || { echo "  missing gate: $site"; r=1; }
   done
   exit "$r"
-) && ok "F3: Devin live-catalog, continue and agy family resolution re-check the final id (swe -> swe-1-8, gemini-pro -> dated id)" || bad "F3 resolved-id gate"
+) && ok "F3: Devin live-catalog, continue and agy family resolution re-check the final id (kimi -> kimi-k9, gemini-pro -> dated id)" || bad "F3 resolved-id gate"
 
 # ---- F4: version-prefix over-match (a sibling release is never wrongly blocked)
 (
@@ -367,7 +367,7 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f11)"
   r="$(OSRC_EXCLUDE_MODELS=glm lib '_devin_probe_pick glm-5-2; echo; OSRC_DEVIN_PROBE_MODEL_ALT=swe-2 _devin_plan_probe_model kimi-k3; echo; _devin_probe_pick glm-5-2 >/dev/null; echo rc=$?' 2>/dev/null | tr '\n' ' ')"
-  [ "$r" = "swe-2 swe-2 rc=0 " ] || { echo "  pick: '$r'"; exit 1; }
+  [ "$r" = "swe-2-flash-high swe-2-flash-high rc=0 " ] || { echo "  pick: '$r'"; exit 1; }
   r="$(OSRC_EXCLUDE_MODELS='glm swe kimi' lib '_devin_probe_pick glm-5-2; echo "rc=$?"; _lane_free_probe dv' 2>/dev/null | tr '\n' ' ')"
   [ "$r" = "rc=1 unreachable" ] || { echo "  all excluded: '$r'"; exit 1; }
 ) && ok "F11: Devin probes pick the next allowed model and never request an excluded one" || bad "F11 devin probes"

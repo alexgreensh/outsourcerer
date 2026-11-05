@@ -65,8 +65,43 @@ check glm glm-5.2
 check glm-5-2 glm-5.2
 check sol gpt-5.6-sol
 check terra gpt-5.6-terra
-check swe swe-1.7
-check swe-1-7 swe-1.7
+# Owner decision 2026-11-05: every short SWE alias runs Devin's free swe-2-flash-high.
+check swe swe-2-flash-high
+check swe-2 swe-2-flash-high
+check swe-1.7 swe-2-flash-high
+check swe-1-7 swe-2-flash-high
+check SWE swe-2-flash-high
+
+# An exact (fully-qualified) id is never rewritten.
+exact() {
+  local id="$1" got capture="$TMP/exact-$1.model"
+  DEVIN_CAPTURE="$capture" delegate auto "" -m "$id" "reply PONG" >/dev/null 2>&1
+  got="$(cat "$capture" 2>/dev/null)"
+  [ "$got" = "$id" ] && ok "exact id -m $id launches itself" || bad "exact id -m $id launched '${got:-<nothing>}'"
+}
+for id in swe-2-flash-medium swe-2-flash-high swe-2-flash-max swe-2-high swe-2-medium swe-2-max swe-1.7-lightning; do
+  exact "$id"
+done
+
+# Alias table rows (what route_delegate sets RESOLVED_ID/lane/tier from).
+row() { [ "$(resolve_model_row "$1")" = "$2" ] && ok "table: $1 -> $2" || bad "table: $1 -> '$(resolve_model_row "$1")' (want $2)"; }
+for a in swe swe-2 swe-1.7 swe-1-7; do row "$a" "swe-2-flash-high|dv|capable"; done
+for id in swe-2-flash-medium swe-2-flash-high swe-2-flash-max; do row "$id" "$id|dv|capable"; done
+row swe-1.7-lightning "swe-1.7-lightning|dv|mid"
+[ "$(_devin_model_for swe)" = "swe-2-flash-high" ] && ok "sibling map: swe -> swe-2-flash-high" || bad "sibling map: swe -> '$(_devin_model_for swe)'"
+[ -z "$(_devin_model_for swe-2-high)" ] && ok "sibling map leaves exact swe-2-high alone" || bad "sibling map rewrote swe-2-high"
+
+# The swe-1.7 write-verb warning must not fire for the new default, through the real `edit` command.
+R="$TMP/repo"; mkdir -p "$R"
+( cd "$R" && git init -q && printf 'x\n' > a.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm init )
+warn_out="$(cd "$R" && DEVIN_CAPTURE="$TMP/e2e.model" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 bash "$SRC" --provider devin edit -m swe "fix it" </dev/null 2>&1)"
+[ "$(cat "$TMP/e2e.model" 2>/dev/null)" = "swe-2-flash-high" ] && ok "edit -m swe launches swe-2-flash-high" || bad "edit -m swe launched '$(cat "$TMP/e2e.model" 2>/dev/null)': $warn_out"
+printf '%s' "$warn_out" | grep -q 'not reliable for edit' && bad "swe-1.7 write warning fired for the swe default" || ok "no swe-1.7 write warning for the swe default"
+# Control: the warning still fires for an id that resolves to literally swe-1.7 (models.local override).
+mkdir -p "$OSRC_HOME"; printf 'swe-1.7|swe-1.7|dv|capable\n' > "$OSRC_HOME/models.local"
+warn_out="$(cd "$R" && DEVIN_CAPTURE="$TMP/e2e2.model" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 bash "$SRC" --provider devin edit -m swe-1.7 "fix it" </dev/null 2>&1)"
+printf '%s' "$warn_out" | grep -q 'not reliable for edit' && ok "control: warning still fires for a literal swe-1.7 route" || bad "control: warning missing for literal swe-1.7: $warn_out"
+rm -f "$OSRC_HOME/models.local"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

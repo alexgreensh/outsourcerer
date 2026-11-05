@@ -92,7 +92,7 @@ This is the bulk of the duplication the contract targets.
 
 | file:line | function | lanes | what it special-cases |
 |---|---|---|---|
-| `outsourcerer.sh:846` | `_devin_model_for` | devin/dv (+droid/warp for kimi) | Alias->Devin id: glm->glm-5.2, swe->swe-1.7, deepseek->deepseek-v4-pro-<effort>, kimi->kimi-k3. |
+| `outsourcerer.sh:846` | `_devin_model_for` | devin/dv (+droid/warp for kimi) | Alias->Devin id: glm->glm-5.2, swe/swe-2/swe-1.7->swe-2-flash-high, deepseek->deepseek-v4-pro-<effort>, kimi->kimi-k3. |
 | `outsourcerer.sh:1026` | `_devin_resolve_model` | devin | Full Devin resolution: live catalog -> sibling -> alias table -> passthrough. |
 | `outsourcerer.sh:1051` | `_lane_model_for` | devin/dv/droid/warp | Cross-lane alias: kimi special-case for devin/dv/droid/warp; devin/dv -> `_devin_resolve_model`; else passthrough. |
 | `outsourcerer.sh:10683` | `_gemini_api_id` | gm/gi | Gemini id by family (pro/flash/flash-lite/flash-image) with pin/env/live/lastknown fallback. |

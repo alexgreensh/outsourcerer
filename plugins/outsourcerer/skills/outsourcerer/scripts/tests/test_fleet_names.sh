@@ -12,7 +12,7 @@ if [ "${OSRC_TEST_FLEET_NAME_RUNNER:-0}" = 1 ]; then
   done
   case "$model" in
     glm-5-2) exit 1 ;;
-    swe-1-7) printf '   \n'; exit 0 ;;
+    swe-2-flash-high) printf '   \n'; exit 0 ;;
     haiku) printf '%s\n' '1: Cache Human Fleet Names' '2: Repair Fleet Fallback Order' ;;
     *) exit 91 ;;
   esac
@@ -68,7 +68,7 @@ unset MODEL_CALLS OSRC_TEST_FLEET_NAME_RUNNER
   && [ "$(printf '%s\n' "$fallback_output" | wc -l | tr -d ' ')" -eq 2 ] \
   && [ "$(wc -l < "$model_calls" | tr -d ' ')" -eq 3 ] \
   && sed -n '1p' "$model_calls" | grep -q '^run -m glm-5-2 batch prompt$' \
-  && sed -n '2p' "$model_calls" | grep -q '^run -m swe-1-7 batch prompt$' \
+  && sed -n '2p' "$model_calls" | grep -q '^run -m swe-2-flash-high batch prompt$' \
   && sed -n '3p' "$model_calls" | grep -q '^run -m haiku batch prompt$' \
   && ! grep -q -- '--provider' "$model_calls" \
   && ok "batch model uses free Devin aliases before native fallbacks without --provider" \

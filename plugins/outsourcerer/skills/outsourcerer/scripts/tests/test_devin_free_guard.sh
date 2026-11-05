@@ -207,7 +207,7 @@ grep -q '_devin_guard_before_delegation "$MODEL"' "$SRC" \
 grep -q '^  _devin_zombie_preflight$' "$SRC" \
   && ok "doctor invokes the zombie reap preflight" \
   || bad "doctor does not invoke the zombie reap preflight"
-grep -q 'paid Devin models exhausted; free tier (glm-5-2, swe-1-7) still available' "$SRC" \
+grep -q 'paid Devin models exhausted; free tier (glm-5-2, swe-2-flash-high) still available' "$SRC" \
   && ok "paid-model failures explicitly preserve the free GLM/SWE tier" \
   || bad "paid quota failure still presents as blanket Devin exhaustion"
 

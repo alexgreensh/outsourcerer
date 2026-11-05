@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.4
+
+### Changed
+
+- **Every SWE lane runs Devin's free `swe-2-flash-high`.** `-m swe`, `swe-2`, `swe-1.7` and `swe-1-7` now launch `swe-2-flash-high` (SWE-2 Flash, Free tier, 262K context), even when the live catalog ranks another SWE family newer. `swe-2-flash-medium`, `swe-2-flash-high` and `swe-2-flash-max` are recognized as free, and the free fallback probe uses `swe-2-flash-high`. Fully-qualified ids such as `swe-2-high`, `swe-2-max` and `swe-1.7-lightning` still run exactly as typed.
+
 ## 0.15.3
 
 ### Fixed
