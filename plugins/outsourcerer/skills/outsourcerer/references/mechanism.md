@@ -30,6 +30,7 @@ The skill is self-contained bash, but it drives external tools. **`doctor` repor
 | **codex CLI + login** | `--provider codex`; also the **PREFERRED, keyless `image` backend** (`gpt-image`) | OpenAI Codex CLI (`codex` on PATH), then `codex login` (interactive, run it yourself) |
 | **`agy` (Antigravity CLI)**, PRIMARY, keyless | `gemini-pro` / `gemini-flash` / `gemini-flash-lite` text lane | Follow the [official Antigravity CLI installation and authentication guide](https://antigravity.google/docs/cli/install/), then open Antigravity and sign in once so `agy` inherits your Google login (no API key) |
 | **`gemini` CLI + `GEMINI_API_KEY`**, FALLBACK | same aliases when you'd rather use an API key (`OSRC_GEMINI_VEHICLE=gemini`), and needed for `image`/nano-banana **only when the codex backend isn't ready** | `npm install -g @google/gemini-cli` + add `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) to `~/.env` (same single-key sourcing as `OPENROUTER_API_KEY`; never written into the skill). Key: [aistudio.google.com/apikey](https://aistudio.google.com/apikey) |
+| **opencode CLI + OpenCode Go login** | `--provider opencode` | Install per https://opencode.ai/docs (`brew install opencode-ai/tap/opencode` or `npm i -g opencode-ai`), then `opencode auth login` and choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work). Some Go models are region-restricted: select Global at the console's Privacy > Regions settings if a run refuses with that message |
 | **jq** | `parity`, `image` (gemini/OpenRouter backends) | `brew install jq` (macOS) / `apt install jq` (Linux) |
 | **tmux** | `session` + interactive OR launchers | `brew install tmux` / `apt install tmux` |
 
@@ -75,7 +76,7 @@ commands have their own parsers: use `task add ... --provider NAME` to persist a
 A leading provider flag does not populate that task field. Put `--cloud-ack` before factory
 subcommands. Default is `devin`. Usually you pass no `--provider` at
 all, because the model alias picks the lane (`SKILL.md`). The table covers the agentic backends; the
-gemini, local, tokenrouter, warp, hermes, and cline lanes are in `lanes-and-models.md`.
+gemini, local, tokenrouter, warp, hermes, cline, pi, and opencode lanes are in `lanes-and-models.md`.
 
 | Provider | Engine | Protocol | Inherits | Sandbox | Best for |
 |---|---|---|---|---|---|

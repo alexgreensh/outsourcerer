@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.0
+
+### Added
+
+- **OpenCode Go lane.** `--provider opencode` hands work to the `opencode` CLI on your OpenCode Go subscription (`opencode run`). `-m` is required and is a Go model id — a bare `glm-5.3-flash` becomes `opencode-go/glm-5.3-flash`, and a full `opencode-go/<id>` passes verbatim. `run`/`explore` are read-only by `--agent plan` plus a per-run permission config that denies edits, bash and paths outside the job dir; `edit`/`research`/`yolo` run the build agent with `--auto`. Stdin is always closed (a non-TTY `opencode run` with open stdin hangs). Region refusals classify per-model, an expired Go key classifies as an auth failure, and neither silently reroutes a Go request to Zen pay-as-you-go. Opt-in escape hatches: `OSRC_OPENCODE_ALLOW_NONGO=1` for a non-Go id, `OSRC_FAILOVER_LANES` can now be extended (e.g. to include `opencode` as a hop target).
+
 ## 0.15.3
 
 ### Fixed

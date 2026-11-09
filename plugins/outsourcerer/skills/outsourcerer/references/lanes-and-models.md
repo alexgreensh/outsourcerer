@@ -163,6 +163,42 @@ is Pi's, so do NOT promise a model or price.
   `pi` and `/login` once. `doctor` shows whether it is on PATH. `session start --provider pi` opens
   Pi's TUI in tmux.
 
+## OpenCode Go lane (`--provider opencode`)
+
+`--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) on your **OpenCode
+Go** subscription. Billing is the Go plan: **$0 cash, spends plan limits** (per-model monthly
+allowance plus 20%-per-5h and 50%-per-week windows — the live figure is in the OpenCode Console;
+there is no usage API). The roster is opencode's (`opencode models`), not ours.
+
+- **`-m` is REQUIRED and is a Go model id.** A bare id (`-m glm-5.3-flash`) becomes
+  `opencode-go/glm-5.3-flash`; a full `opencode-go/<id>` passes verbatim. There is no default —
+  without `-m`, `opencode run` would silently use whatever model you configured, which may not bill
+  your Go plan. `opencode models` lists the Go catalog.
+- **Zen is refused, never silently used.** `-m opencode/<id>` (OpenCode Zen pay-as-you-go balance)
+  or any other `provider/id` dies with the reason unless you set `OSRC_OPENCODE_ALLOW_NONGO=1`.
+  `opencode/<id>-free` (Zen's free tier) passes, since it is still $0.
+- **Posture is enforced per-run, never by editing your config.** `run`/`explore` get `--agent plan`
+  PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies edit/write/patch/bash and paths outside the
+  job dir — read-only holds even if your global config allows everything. `edit`/`research`/`yolo`
+  get `--agent build --auto` (the editing agent; `--auto` auto-approves the `ask` prompts a headless
+  run cannot answer). Your `~/.config/opencode/opencode.json` is never rewritten.
+- **stdin is always closed** (`</dev/null`): a non-TTY `opencode run` with open stdin blocks waiting
+  for input and would hang until the watchdog kills it.
+- `--effort` maps to `--variant` (minimal/low/medium/high/max; `xhigh`→`high`).
+- **Failures classify honestly.** A per-model region refusal ("hosted outside Europe and the United
+  States — select Global in the console's privacy settings") is a model refusal, NOT a lane outage:
+  the console instruction is surfaced and failover may pick another model. An expired Go API key is
+  an auth failure — the lane is marked down with the renewal instruction, never a rate limit, and
+  other lanes are unaffected. Plan-limit phrasing goes through the shared probe-then-block path.
+- **Failover targets are opt-in.** `opencode` is not in `OSRC_FAILOVER_LANES` by default; add it
+  there to let the hop machinery pick a Go model after another lane's refusal.
+- **Context:** `--with skills=…` travels via the standard staged bundle (the bundle dir is carved
+  out as an allow exception inside the read-only deny config). `mcp=` is refused — opencode's MCP
+  semantics differ from the repo's; use your own `~/.config/opencode` MCP setup instead.
+- Install: https://opencode.ai/docs (brew or `npm i -g opencode-ai`), then `opencode auth login` and
+  choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work).
+  `doctor` probes `opencode-go/glm-5.3-flash` read-only and classifies ready / region / expired-key.
+
 ## Grok Bot lane (`--provider grokbot`)
 
 Grok Bot (xAI's always-on agents, each with its own cloud computer) has **no chat API**. A bot
