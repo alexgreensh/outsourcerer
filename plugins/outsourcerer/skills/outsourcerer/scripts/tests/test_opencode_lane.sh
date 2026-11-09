@@ -90,7 +90,8 @@ case "$a" in *"--agent plan"*"opencode-go/glm-5.3-flash"*|*"opencode-go/glm-5.3-
   ok "run dispatches 'opencode run --agent plan -m opencode-go/<id>'" ;; *) no "run argv wrong: [$a]" ;; esac
 grep -qx -- '--' "$TMP/argv" && ok "the prompt is protected by a -- separator" || no "no -- before the prompt"
 cfg="$(cat "$TMP/occfg" 2>/dev/null)"
-case "$cfg" in *'"action":"*","resource":"*","effect":"deny"'*'"action":"read","resource":"*","effect":"allow"'*) ok "read-only config denies EVERYTHING then re-allows the read family" ;; *) no "read-only config lacks the deny-all+read-allow ruleset: [$cfg]" ;; esac
+printf '%s' "$cfg" | jq -e '.permissions[0]=={"action":"*","resource":"*","effect":"deny"} and ([.permissions[]|select(.action=="read" and .resource=="*" and .effect=="allow")]|length>0)' >/dev/null 2>&1 \
+  && ok "read-only config denies EVERYTHING then re-allows the read family" || no "read-only config lacks the deny-all+read-allow ruleset: [$cfg]"
 # the policies layer (applied AFTER agent rules + saved approvals) carries the same deny/allow set
 printf '%s' "$cfg" | jq -e '[.policies[]]|.[0]=={"action":"tool.use","resource":"*","effect":"deny"}' >/dev/null 2>&1 \
   && ok "policies opens with a tool.use deny-all (agent rules cannot reopen writes)" || no "policies deny-all missing: [$cfg]"
@@ -105,7 +106,8 @@ rm -f "$TMP/argv" "$TMP/occfg"
 run edit -m glm-5.3-flash "fix it" >/dev/null; a="$(argv)"
 case "$a" in *"--agent build"*"--auto"*) ok "edit uses the build agent with --auto" ;; *) no "edit argv wrong: [$a]" ;; esac
 cfg="$(cat "$TMP/occfg" 2>/dev/null)"
-case "$cfg" in *'"action":"*","resource":"*","effect":"allow"'*'"action":"external_directory","resource":"*","effect":"deny"'*) ok "edit is scoped: everything allowed INSIDE the job dir, outside denied" ;; *) no "edit config wrong: [$cfg]" ;; esac
+printf '%s' "$cfg" | jq -e '([.permissions[]|select(.action=="*" and .resource=="*" and .effect=="allow")]|length>0) and ([.permissions[]|select(.action=="external_directory" and .resource=="*" and .effect=="deny")]|length>0)' >/dev/null 2>&1 \
+  && ok "edit is scoped: everything allowed INSIDE the job dir, outside denied" || no "edit config wrong: [$cfg]"
 printf '%s' "$cfg" | jq -e '[.policies[]|select(.action=="tool.use" and .effect=="deny")|.resource]|index("external_directory:*") != null' >/dev/null 2>&1 \
   && ok "edit hard-denies external_directory at the policy layer (agent rules cannot reopen it)" || no "edit policies external_directory deny missing: [$cfg]"
 printf '%s' "$cfg" | jq -e '[.policies[].resource]|index("read:*.env") != null and index("read:*.env.example") != null' >/dev/null 2>&1 \
@@ -116,7 +118,9 @@ out="$(run research -m glm-5.3-flash 'x' 2>&1)"; rc=$?
 rm -f "$TMP/argv"
 run yolo -m glm-5.3-flash "go" >/dev/null 2>&1; a="$(argv)"
 case "$a" in *"--agent build"*"--auto"*) ok "yolo also dispatches build + --auto" ;; *) no "yolo argv wrong: [$a]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"effect":"deny"'*) no "yolo must not carry any deny" ;; *'"action":"*","resource":"*","effect":"allow"'*) ok "yolo pre-allows all permissions in the per-run config" ;; *) no "yolo config: [$(cat "$TMP/occfg" 2>/dev/null)]" ;; esac
+cfg="$(cat "$TMP/occfg" 2>/dev/null)"
+printf '%s' "$cfg" | jq -e '([..|objects|select(.effect?=="deny")]|length==0) and ([.permissions[]?|select(.action=="*" and .resource=="*" and .effect=="allow")]|length>0)' >/dev/null 2>&1 \
+  && ok "yolo pre-allows all permissions with no deny anywhere" || no "yolo config wrong: [$cfg]"
 
 echo "=== effort -> model#variant (v2) ==="
 rm -f "$TMP/argv"
@@ -176,8 +180,25 @@ rm -f "$TMP/argv" "$TMP/occfg" "$TMP/rawargv"
 out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=1.19.5 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash --effort high 'x' 2>&1 )"
 ! head -1 "$TMP/rawargv" 2>/dev/null | grep -qx -- '--standalone' && ok "v1 dispatch has no --standalone" || no "v1 wrongly used --standalone"
 case "$(argv)" in *"--variant high"*) ok "v1 maps effort to --variant" ;; *) no "v1 effort missing: [$(argv)]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"permission":'*'deny'*) ok "v1 emits the permission-map schema" ;; *) no "v1 config wrong: [$(cat "$TMP/occfg" 2>/dev/null | head -c 120)]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'policies'*) no "v1 must not emit policies" ;; *) ok "v1 config carries no policies key (that layer does not exist)" ;; esac
+cfg="$(cat "$TMP/occfg" 2>/dev/null)"
+printf '%s' "$cfg" | jq -e '.permission|type=="object" and ([..|strings|select(.=="deny")]|length>0)' >/dev/null 2>&1 \
+  && ok "v1 emits the permission-map schema" || no "v1 config wrong: [$(printf '%s' "$cfg" | head -c 120)]"
+printf '%s' "$cfg" | jq -e 'has("policies")|not' >/dev/null 2>&1 \
+  && ok "v1 config carries no policies key (that layer does not exist)" || no "v1 must not emit policies"
+
+echo "=== config builder emits parseable JSON on every branch ==="
+# Behavioral check, not substring: a jq program that fails to compile (the scoped+root .env.example
+# typo class of bug) emits nothing and the fail-closed guard then refuses every run silently.
+for _v in 1.19.5 2.2.6; do
+  for _m in readonly scoped allowall; do
+    for _r in "" "$TMP/work"; do
+      _j="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER="$_v" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_config_json '$_m' '$_r'" )"
+      [ -n "$_j" ] && printf '%s' "$_j" | jq -e . >/dev/null 2>&1 \
+        && ok "config builder: $_m root=${_r:-none} v${_v%%.*} emits valid non-empty JSON" \
+        || no "config builder: $_m root=${_r:-none} v${_v%%.*} -> [$(printf '%s' "$_j" | head -c 80)]"
+    done
+  done
+done
 
 echo "=== jq guards fail closed ==="
 grep -q '! have jq' "$SCRIPT_DIR/../lane-opencode.sh" && ok "the bundle-carving jq requirement is in the source" || no "missing the jq requirement for staged bundles"

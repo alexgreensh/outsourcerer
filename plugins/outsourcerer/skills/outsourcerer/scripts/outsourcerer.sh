@@ -1745,8 +1745,8 @@ _lane_errfile() {
 }
 # _run_tee_stderr <errfile|""> <cmd...> -> run the command with stderr STILL shown live and also captured
 # to the file. stdout is untouched; $? is the command's. With an empty file the command runs plain.
-# bash sets $! to the process substitution's pid, so `wait` blocks until tee finishes flushing —
-# post-run classifiers cannot race a still-flushing tee (the old bare procsub could miss tail lines).
+# the procsub itself touches a sentinel right after tee exits; we poll it (bounded ~1s), so post-run
+# classifiers can't race a still-flushing tee — bash<4.4 never sets procsub $!, `wait` could hang.
 _run_tee_stderr() {
   local f="${1:-}"; shift
   # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
