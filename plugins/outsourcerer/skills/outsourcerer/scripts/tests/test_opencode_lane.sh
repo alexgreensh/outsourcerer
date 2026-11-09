@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 bash -n "$SCRIPT_DIR/../lane-opencode.sh" || { echo "FAIL: lane-opencode.sh bash -n failed"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-oc.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work"
+export OSRC_HOME="$TMP/home" OSRC_HEARTBEAT_DISABLED=1; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work" "$TMP/nohome"
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
@@ -21,10 +21,12 @@ no(){ echo "FAIL: $1"; fail=$((fail+1)); }
 # OSRC_FAKE_OC_NOAUTH=1 makes `auth list` show only the Zen credential.
 cat > "$TMP/bin/opencode" <<EOF
 #!/usr/bin/env bash
+printf '%s\n' "\$@" > "$TMP/rawargv"
+[ "\$1" = "--standalone" ] && shift   # v2.x private-server flag before the subcommand
 case "\$1" in
-  --version|-v) echo "1.19.5"; exit 0 ;;
+  --version|-v) echo "2.2.6"; exit 0 ;;
   auth) [ "\${2:-}" = "list" ] && { if [ "\${OSRC_FAKE_OC_NOAUTH:-0}" = "1" ]; then echo "OpenCode api"; else echo "OpenCode Go api"; fi; exit 0; } ;;
-  models) echo "opencode-go/glm-5.3"; echo "opencode-go/glm-5.3-flash"; exit 0 ;;
+  models) echo "opencode-go/glm-5.3"; echo "opencode-go/glm-5.3-flash"; echo "opencode/some-free"; exit 0 ;;
   run)
     printf '%s\n' "\$@" > "$TMP/argv"
     printf '%s' "\${OPENCODE_CONFIG_CONTENT:-UNSET}" > "$TMP/occfg"
@@ -42,7 +44,7 @@ chmod +x "$TMP/bin/opencode"
 
 run() { ( cd "$TMP/work" && env -u OSRC_FAKE_OC_MODE -u OSRC_FAKE_OC_NOAUTH PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode "$@" 2>"$TMP/err" ); }
 argv() { tr '\n' ' ' < "$TMP/argv" 2>/dev/null; }
-src_fn() { ( export OSRC_SOURCED=1; source "$SRC" >/dev/null 2>&1; "$@" ); }
+src_fn() { ( export OSRC_SOURCED=1 PATH="$TMP/bin:$PATH"; source "$SRC" >/dev/null 2>&1; "$@" ); }
 
 echo "=== registration ==="
 ( export OSRC_SOURCED=1; source "$SRC" >/dev/null 2>&1
@@ -57,6 +59,9 @@ echo "=== model normalization (the Go billing guarantee) ==="
 [ "$(src_fn _opencode_model glm-5.3-flash)" = "opencode-go/glm-5.3-flash" ] && ok "a bare Go id gets the opencode-go/ prefix" || no "bare-id prefixing wrong"
 [ "$(src_fn _opencode_model opencode-go/kimi-k3.1-pro)" = "opencode-go/kimi-k3.1-pro" ] && ok "a full opencode-go/ id passes verbatim" || no "full id rewritten"
 [ "$(src_fn _opencode_model opencode/some-free)" = "opencode/some-free" ] && ok "a Zen -free id stays verbatim (still \$0)" || no "-free id mishandled"
+src_fn _opencode_model 'opencode-go/' >/dev/null 2>&1 && no "an empty opencode-go/ id normalized" || ok "opencode-go/ with an empty id is refused"
+src_fn _opencode_model 'a//b' >/dev/null 2>&1 && no "a // path normalized" || ok "a token with // is refused"
+src_fn _opencode_model 'opencode/nothere-free' >/dev/null 2>&1 && no "an unlisted -free id passed on suffix trust" || ok "a -free id not in the live catalog is refused (suffix is not a billing guarantee)"
 rm -f "$TMP/argv"
 out="$(run run -m opencode/glm-5.3 'x' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'not an OpenCode Go model' "$TMP/err" && [ ! -f "$TMP/argv" ] \
@@ -65,6 +70,8 @@ out="$(run run -m opencode/glm-5.3 'x' 2>&1)"; rc=$?
 out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 OSRC_OPENCODE_ALLOW_NONGO=1 "$SRC" --provider opencode run -m opencode/glm-5.3 'x' 2>"$TMP/err" )"
 case "$(argv)" in *"-m opencode/glm-5.3"*) ok "OSRC_OPENCODE_ALLOW_NONGO=1 is the explicit opt-in (verbatim id)" ;; *) no "opt-in did not pass the id: [$(argv)]" ;; esac
 [ "$(src_fn lane_from_name opencode-go/deepseek-v4.1-flash)" = "opencode" ] && ok "an explicit opencode-go/ model routes to the lane without --provider" || no "family_globs routing missing"
+[ "$(src_fn lane_from_name opencode-go/claude-sonnet-4.6)" = "opencode" ] && ok "an opencode-go/ id whose tail matches another lane's family still routes to opencode" || no "opencode-go/ id shadowed by a substring glob"
+[ "$(src_fn lane_from_name opencode/mega-free)" = "opencode" ] && ok "an explicit opencode/ Zen id also routes here (to be refused or allowed correctly)" || no "opencode/ prefix does not route to the lane"
 
 echo "=== no -m is a user error, not a silent default ==="
 out="$(run run 'x' 2>&1)"; rc=$?
@@ -75,28 +82,31 @@ rm -f "$TMP/argv" "$TMP/occfg" "$TMP/stdinrc"
 out="$(run run -m glm-5.3-flash 'reply ok')"; rc=$?
 [ "$rc" -eq 0 ] && case "$out" in *OPENCODE_OK*) true ;; *) false ;; esac && ok "a run returns opencode's answer" || no "run rc=$rc out=[$(printf '%s' "$out" | tail -3)] err=$(tail -3 "$TMP/err")"
 a="$(argv)"
-case "$a" in *"run --agent plan -m opencode-go/glm-5.3-flash"*|*"run -m opencode-go/glm-5.3-flash --agent plan"*|*"--agent plan"*"opencode-go/glm-5.3-flash"*|*"opencode-go/glm-5.3-flash"*"--agent plan"*)
+head -1 "$TMP/rawargv" 2>/dev/null | grep -qx -- '--standalone' && ok "v2 dispatch uses --standalone (the shared server would ignore the per-run config)" || no "missing --standalone: [$(tr '\n' ' ' < "$TMP/rawargv" 2>/dev/null | head -c 80)]"
+case "$a" in *"--agent plan"*"opencode-go/glm-5.3-flash"*|*"opencode-go/glm-5.3-flash"*"--agent plan"*)
   ok "run dispatches 'opencode run --agent plan -m opencode-go/<id>'" ;; *) no "run argv wrong: [$a]" ;; esac
+grep -qx -- '--' "$TMP/argv" && ok "the prompt is protected by a -- separator" || no "no -- before the prompt"
 cfg="$(cat "$TMP/occfg" 2>/dev/null)"
-case "$cfg" in *'"bash":"deny"'*'"edit":"deny"'*|*'"edit":"deny"'*'"bash":"deny"'*) ok "per-run config denies edit+write+patch+bash on read-only tiers" ;; *) no "read-only config lacks denies: [$cfg]" ;; esac
-case "$cfg" in *'"external_directory"'*) ok "read-only config also denies paths outside the job dir" ;; *) no "external_directory deny missing" ;; esac
+case "$cfg" in *'"action":"*","resource":"*","effect":"deny"'*'"action":"read","resource":"*","effect":"allow"'*) ok "read-only config denies EVERYTHING then re-allows the read family" ;; *) no "read-only config lacks the deny-all+read-allow ruleset: [$cfg]" ;; esac
 [ "$(cat "$TMP/stdinrc" 2>/dev/null)" = "1" ] && ok "stdin is closed (</dev/null) — the non-TTY hang is impossible" || no "stdin not closed (read rc=$(cat "$TMP/stdinrc" 2>/dev/null))"
 
-echo "=== edit / yolo: build agent + --auto, never the deny config ==="
+echo "=== edit / yolo: build agent + --auto; research refuses (no sandbox) ==="
 rm -f "$TMP/argv" "$TMP/occfg"
 run edit -m glm-5.3-flash "fix it" >/dev/null; a="$(argv)"
 case "$a" in *"--agent build"*"--auto"*) ok "edit uses the build agent with --auto" ;; *) no "edit argv wrong: [$a]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"bash":"deny"'*) no "edit must not carry the read-only deny config" ;; *) ok "edit carries no read-only denies" ;; esac
+case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"action":"*","resource":"*","effect":"allow"'*'"action":"external_directory","resource":"*","effect":"deny"'*) ok "edit is scoped: everything allowed INSIDE the job dir, outside denied" ;; *) no "edit config wrong: [$(cat "$TMP/occfg" 2>/dev/null)]" ;; esac
 grep -q "MUTATING" "$TMP/err" && ok "the banner says edit mutates" || no "banner lacks MUTATING"
+out="$(run research -m glm-5.3-flash 'x' 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'NO OS sandbox' "$TMP/err" && ok "research refuses honestly (opencode has no sandbox)" || no "research not refused rc=$rc"
 rm -f "$TMP/argv"
 run yolo -m glm-5.3-flash "go" >/dev/null 2>&1; a="$(argv)"
 case "$a" in *"--agent build"*"--auto"*) ok "yolo also dispatches build + --auto" ;; *) no "yolo argv wrong: [$a]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"*":"allow"'*) ok "yolo pre-allows all permissions in the per-run config" ;; *) no "yolo config: [$(cat "$TMP/occfg" 2>/dev/null)]" ;; esac
+case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"effect":"deny"'*) no "yolo must not carry any deny" ;; *'"action":"*","resource":"*","effect":"allow"'*) ok "yolo pre-allows all permissions in the per-run config" ;; *) no "yolo config: [$(cat "$TMP/occfg" 2>/dev/null)]" ;; esac
 
-echo "=== effort -> --variant ==="
+echo "=== effort -> model#variant (v2) ==="
 rm -f "$TMP/argv"
 run run -m glm-5.3-flash --effort high "x" >/dev/null
-case "$(argv)" in *"--variant high"*) ok "--effort high maps to --variant high" ;; *) no "variant missing: [$(argv)]" ;; esac
+case "$(argv)" in *"-m opencode-go/glm-5.3-flash#high"*) ok "--effort high maps to -m <id>#high on v2" ;; *) no "variant missing: [$(argv)]" ;; esac
 [ "$(src_fn _opencode_effort max)" = "max" ] && [ "$(src_fn _opencode_effort junk)" = "" ] && ok "the effort map itself is sane" || no "effort map wrong"
 
 echo "=== failure classification ==="
@@ -126,9 +136,9 @@ printf '%s' "$dout" | grep -q 'OpenCode Go lane' && ok "doctor has an OpenCode G
 printf '%s' "$dout" | grep -q 'credential present' && ok "doctor sees the Go credential" || no "doctor missed the credential"
 dout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_DOCTOR_OFFLINE=1 "$SRC" doctor 2>&1 )"
 printf '%s' "$dout" | grep -q 'NO OpenCode Go credential' && ok "doctor distinguishes a missing Go credential from a Zen one" || no "doctor missed the noauth state"
-dout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" "$SRC" doctor 2>&1 )"
+dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" doctor 2>&1 )"
 printf '%s' "$dout" | grep -q 'liveness: READY' && ok "doctor probes glm-5.3-flash and reports READY" || no "doctor probe did not report READY"
-bout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" "$SRC" brief 2>&1 )"
+bout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" brief 2>&1 )"
 printf '%s' "$bout" | grep -q 'opencode=go' && ok "brief advertises opencode=go when authed" || no "brief lacks the ready entry: $(printf '%s' "$bout" | tail -5)"
 
 echo "=== auth gate ==="

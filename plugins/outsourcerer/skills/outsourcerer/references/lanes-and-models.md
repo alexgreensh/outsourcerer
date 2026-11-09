@@ -176,22 +176,28 @@ there is no usage API). The roster is opencode's (`opencode models`), not ours.
   your Go plan. `opencode models` lists the Go catalog.
 - **Zen is refused, never silently used.** `-m opencode/<id>` (OpenCode Zen pay-as-you-go balance)
   or any other `provider/id` dies with the reason unless you set `OSRC_OPENCODE_ALLOW_NONGO=1`.
-  `opencode/<id>-free` (Zen's free tier) passes, since it is still $0.
+  `opencode/<id>-free` (Zen's free tier) passes only when the id is really in the live
+  `opencode models` catalog — the suffix alone is never trusted as a billing guarantee.
 - **Posture is enforced per-run, never by editing your config.** `run`/`explore` get `--agent plan`
-  PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies edit/write/patch/bash and paths outside the
-  job dir — read-only holds even if your global config allows everything. `edit`/`research`/`yolo`
-  get `--agent build --auto` (the editing agent; `--auto` auto-approves the `ask` prompts a headless
-  run cannot answer). Your `~/.config/opencode/opencode.json` is never rewritten.
-- **stdin is always closed** (`</dev/null`): a non-TTY `opencode run` with open stdin blocks waiting
-  for input and would hang until the watchdog kills it.
-- `--effort` maps to `--variant` (minimal/low/medium/high/max; `xhigh`→`high`).
+  PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies every action, then re-allows only the read
+  family (read/glob/grep/question) — a named deny list can never cover task/subagent, webfetch,
+  skill, MCP and plugin tools. `edit` gets `--agent build --auto` with writes scoped to the job dir
+  (external_directory deny + the skill-bundle exception). `research` REFUSES: opencode has no OS
+  sandbox (same answer as claude-native/cc). `yolo` pre-allows everything. Your
+  `~/.config/opencode/opencode.json` is never rewritten. On opencode v2.x the run uses
+  `--standalone`: a shared background server never sees the CLI's env, so the per-run permission
+  rules only reach a private one.
+- **stdin is always closed** (`</dev/null`), and the prompt is separated by `--` so a task starting
+  with `-` is never parsed as flags.
+- `--effort` maps to the thinking variant (`--variant` on v1, `-m <id>#<variant>` on v2).
 - **Failures classify honestly.** A per-model region refusal ("hosted outside Europe and the United
   States — select Global in the console's privacy settings") is a model refusal, NOT a lane outage:
   the console instruction is surfaced and failover may pick another model. An expired Go API key is
   an auth failure — the lane is marked down with the renewal instruction, never a rate limit, and
   other lanes are unaffected. Plan-limit phrasing goes through the shared probe-then-block path.
-- **Failover targets are opt-in.** `opencode` is not in `OSRC_FAILOVER_LANES` by default; add it
-  there to let the hop machinery pick a Go model after another lane's refusal.
+- **Not a failover target.** `opencode` is not in `OSRC_FAILOVER_LANES`, and adding it does nothing:
+  a hop can only rebuild argv without `-m` (it cannot name a model on the target lane), and this
+  lane requires `-m` by design — the picker skips it rather than mint a job that dies at the gate.
 - **Context:** `--with skills=…` travels via the standard staged bundle (the bundle dir is carved
   out as an allow exception inside the read-only deny config). `mcp=` is refused — opencode's MCP
   semantics differ from the repo's; use your own `~/.config/opencode` MCP setup instead.
