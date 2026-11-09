@@ -1671,11 +1671,11 @@ _lane_errfile() {
 }
 # _run_tee_stderr <errfile|""> <cmd...> -> run the command with stderr STILL shown live and also captured
 # to the file. stdout is untouched; $? is the command's. With an empty file the command runs plain.
-# bash sets $! to the process substitution's pid, so `wait` blocks until tee finishes flushing —
-# post-run classifiers cannot race a still-flushing tee (the old bare procsub could miss tail lines).
+# the procsub itself touches a sentinel right after tee exits; we poll it (bounded ~1s), so post-run
+# classifiers can't race a still-flushing tee — bash<4.4 never sets procsub $!, `wait` could hang.
 _run_tee_stderr() {
-  local f="${1:-}" rc; shift
-  if [ -n "$f" ]; then "$@" 2> >(tee "$f" >&2); rc=$?; [ -n "${!:-}" ] && wait "$!" 2>/dev/null || true; return "$rc"; else "$@"; fi
+  local f="${1:-}" rc i; shift
+  if [ -n "$f" ]; then rm -f "$f.teedone"; "$@" 2> >(tee "$f" >&2; : > "$f.teedone"); rc=$?; i=0; while [ ! -e "$f.teedone" ] && [ "$i" -lt 100 ]; do sleep 0.01 2>/dev/null || i=$((i+30)); i=$((i+1)); done; rm -f "$f.teedone"; return "$rc"; else "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which

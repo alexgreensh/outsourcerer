@@ -247,5 +247,28 @@ done
 [ "$(grep -c '_plan_lanes_meter' "$SRC")" -ge 3 ] && ok "structure: brief + status call the plan-lanes iterator" || bad "structure: iterator not wired"
 grep -q '_lane_plan_key "${1:-}")"' "$SRC" && ok "structure: _lane_free_probe keys on the plan-lane resolver" || bad "structure: probe resolver not generalized"
 
+# === (h) _run_tee_stderr under /bin/bash 3.2: $! there is an UNRELATED bg job, never the procsub ====
+# Regression: `wait "$!"` blocked until the caller's previous `&` job exited (timers/beacons make one
+# almost always exist). The helper must return promptly, keep the command rc, and still land stderr.
+if [ -x /bin/bash ]; then
+  mkdir -p "$TMP/tee-home"
+  _o="$(/bin/bash -c '
+    export OSRC_HOME="$2/tee-home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+    . "$1" >/dev/null 2>&1
+    sleep 30 &
+    t0=$SECONDS
+    _run_tee_stderr "$2/err" /bin/sh -c "echo e >&2; exit 3"
+    rc=$?; kill $! 2>/dev/null
+    grep -qx e "$2/err" && cap=yes || cap=no
+    printf "%s %s %s" "$rc" "$((SECONDS-t0))" "$cap"
+  ' _ "$SRC" "$TMP" 2>/dev/null)"
+  _rc="$(printf '%s' "$_o" | awk '{print $1}')"; _t="$(printf '%s' "$_o" | awk '{print $2}')"; _cap="$(printf '%s' "$_o" | awk '{print $3}')"
+  [ "$_rc" = "3" ] && [ "${_t:-9}" -lt 3 ] && [ "$_cap" = "yes" ] \
+    && ok "_run_tee_stderr on /bin/bash 3.2: unrelated bg job does not stall it (rc=$_rc, ${_t}s, stderr captured)" \
+    || bad "_run_tee_stderr bash-3.2 regression: rc=$_rc elapsed=${_t}s cap=$_cap (want 3 <3s yes)"
+else
+  ok "_run_tee_stderr bash-3.2 regression: /bin/bash absent, skipped"
+fi
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]
