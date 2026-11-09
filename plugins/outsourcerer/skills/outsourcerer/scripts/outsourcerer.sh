@@ -1624,7 +1624,7 @@ _lane_plan_limit_block() {
   printf '>>> [%s plan limit] %s refused "%s" citing its plan/usage limit. %s %s\n' "$lane" "$name" "$model" "$reset" "$(_lane_plan_usage_hint "$lane")" >&2
   [ -n "$line" ] && printf '>>> [%s plan limit] exact wording (for tightening this detector): %s\n' "$lane" "$line" >&2
   printf '>>> [%s plan limit] probe: a refusal from one request does not prove the lane is spent — verifying (bounded, %ss) before deciding anything.\n' "$lane" "$psecs" >&2
-  verdict="$(_lane_free_probe "$lane")"; prc=$?
+  verdict="$(_lane_free_probe "$lane" "$model")"; prc=$?
   case "$verdict:$prc" in
     limit-refused:*)
       # _utf8_sanitize after the byte cap: head -c can split a multi-byte character at 160 and the
@@ -3080,11 +3080,11 @@ tier_from_price() {   # <openrouter-id> -> budget|mid|frontier from cached prici
 # infer here. Open-weight ids (glm/deepseek/kimi/qwen…) are deliberately absent — they are dual-lane
 # and correctly ride the provider default, so they must fall through to the provider router below.
 lane_from_name() {
-  # Descriptor-first: family_globs on each native lane (cc/cx/gm). The iteration order
-  # is the old case's first-match order (cc, cx, gm) — NOT registry order — because a
-  # token matching two lanes' globs must resolve the same way it did before.
+  # Descriptor-first: family_globs on each native lane. opencode runs FIRST: its
+  # `opencode-go/`/`opencode/` provider prefixes are unambiguous and must beat cc/cx
+  # substring globs (a Go id like opencode-go/claude-* is still an opencode model).
   local _l _g
-  for _l in cc cx gm opencode; do
+  for _l in opencode cc cx gm; do
     _words_noglob "$(_lane_field "$_l" family_globs 2>/dev/null)"   # split WITHOUT globbing the patterns against cwd
     for _g in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$1" in $_g) echo "$_l"; return ;; esac
@@ -11397,7 +11397,7 @@ _job_made_writes() {
 _lane_text_only() {
   local l="${1:-}" x
   [ -n "$l" ] || return 1
-  case "$l" in local|tokenrouter|grokbot|opencode) return 0 ;; esac
+  case "$l" in local|tokenrouter|grokbot) return 0 ;; esac
   for x in ${OSRC_TEXT_LANES:-}; do [ "$l" = "$x" ] && return 0; done
   return 1
 }
@@ -14510,7 +14510,7 @@ $body"
         _ready_probe_grokbot >/dev/null 2>&1 \
           || die "fanout: lane 'grokbot' needs GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY (env or ~/.env). Nothing was started."
         continue ;;
-      opencode) _pem="$g_model"; [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"; [ -z "$_pem" ] && _pem="${a_model[$_pi]}"; [ -n "$_pem" ] || die "fanout: lane 'opencode' needs a model for every job (-m <go-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."; _opencode_go_authed || die "fanout: lane 'opencode' needs OpenCode Go credentials — run 'opencode auth login' -> OpenCode Go. Nothing was started."; _dp_cli="opencode" ;; *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
+      opencode) _pem="$g_model"; [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"; [ -z "$_pem" ] && _pem="${a_model[$_pi]}"; [ -n "$_pem" ] || die "fanout: lane 'opencode' needs a model for every job (-m <go-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."; have opencode || die "fanout: lane 'opencode' needs the opencode CLI — install: https://opencode.ai/docs. Nothing was started."; _opencode_go_authed || die "fanout: lane 'opencode' needs OpenCode Go credentials — run 'opencode auth login' -> OpenCode Go. Nothing was started."; _dp_cli="opencode" ;; *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
       # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate).
@@ -17713,7 +17713,7 @@ _failover_pick() {
 $OSRC_MODEL_TABLE
 _OSRC_FO_T
   for l in $OSRC_FAILOVER_LANES; do
-    [ "$l" != "$src" ] && [ "$(_lane_field "$l" owns_catalog 2>/dev/null)" = "yes" ] || continue
+    [ "$l" != "$src" ] && [ "$(_lane_field "$l" owns_catalog 2>/dev/null)" = "yes" ] && [ -n "$(_lane_field "$l" default_model 2>/dev/null)" ] || continue
     tier="$(resolve_tier "$(_lane_field "$l" default_model 2>/dev/null)" 2>/dev/null)"; case "$tier" in frontier|capable|mid|budget) ;; *) tier=mid ;; esac
     d="$(_tier_dist "$want" "$tier")"; ti="$(_tier_index "$tier")"; seq=$((seq + 1))
     rows="$rows$(printf '%s%s%02d%04d|%s||%s' "$d" "$((3 - ti))" "$(_failover_lane_rank "$l")" "$seq" "$l" "$tier")
