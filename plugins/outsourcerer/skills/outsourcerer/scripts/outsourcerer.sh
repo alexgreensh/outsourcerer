@@ -959,7 +959,7 @@ _lane_free_probe() {
       fi
       if _lane_meter_saturated "$lane"; then printf 'limit-refused'; else printf 'unreachable'; fi
       return 0 ;;
-    *) printf 'unreachable'; return 2 ;;
+    opencode) _opencode_free_probe "$2"; return $? ;; *) printf 'unreachable'; return 2 ;;
   esac
   if _mkdir_private "$OSRC_HOME" >/dev/null 2>&1; then
     out="$(_lane_probe_file "$lane")"
@@ -1565,7 +1565,7 @@ _lane_plan_limit_re() {
     cursor) printf '%s' "$_CURSOR_PLAN_LIMIT_RE" ;;
     warp)   printf '%s' "$_WARP_PLAN_LIMIT_RE" ;;
     droid)  printf '%s' "$_DROID_PLAN_LIMIT_RE" ;;
-    cline)  printf '%s' "$_CLINE_PLAN_LIMIT_RE" ;;
+    cline)  printf '%s' "$_CLINE_PLAN_LIMIT_RE" ;; opencode) printf '%s' "$_OPENCODE_PLAN_LIMIT_RE" ;;
     *)      printf '' ;;
   esac
 }
@@ -1628,7 +1628,7 @@ _lane_plan_display() {
     dv) printf 'Devin' ;; cx) printf 'Codex (ChatGPT plan)' ;; cc) printf 'Claude Code (Claude plan)' ;;
     warp) printf 'Warp (Oz)' ;; droid) printf 'Droid (Factory)' ;; cursor) printf 'Cursor' ;;
     cline) printf 'Cline' ;; pi) printf 'Pi' ;; gm) printf 'Gemini CLI' ;; or) printf 'OpenRouter (cash)' ;;
-    tokenrouter) printf 'TokenRouter (cash)' ;; grokbot) printf 'Grok Bot' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;;
+    tokenrouter) printf 'TokenRouter (cash)' ;; grokbot) printf 'Grok Bot' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;; opencode) printf 'OpenCode Go' ;;
     *) printf '%s' "${1:-?}" ;;
   esac
 }
@@ -1641,7 +1641,7 @@ _lane_plan_usage_hint() {
     cursor) printf 'Live figure: the Cursor dashboard (Settings > Usage).' ;;
     cline)  printf 'Live figure: your Cline account / provider dashboard.' ;;
     pi)     printf 'Live figure: the dashboard of whatever Pi is signed in to.' ;;
-    grokbot) printf 'Live figure: Grok Bot settings > Usage (weekly allowance).' ;;
+    grokbot) printf 'Live figure: Grok Bot settings > Usage (weekly allowance).' ;; opencode) printf 'Live figure: OpenCode Console (per-model monthly + 5h/weekly windows).' ;;
     *)      printf '' ;;
   esac
 }
@@ -3116,7 +3116,7 @@ lane_from_name() {
   # is the old case's first-match order (cc, cx, gm) — NOT registry order — because a
   # token matching two lanes' globs must resolve the same way it did before.
   local _l _g
-  for _l in cc cx gm; do
+  for _l in cc cx gm opencode; do
     _words_noglob "$(_lane_field "$_l" family_globs 2>/dev/null)"   # split WITHOUT globbing the patterns against cwd
     for _g in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$1" in $_g) echo "$_l"; return ;; esac
@@ -3236,7 +3236,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"
 
 # _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
 _lane_field() {
@@ -9648,7 +9648,7 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe pi 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe tokenrouter 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe grokbot 2>/dev/null)" && lanes="$lanes $_rp"
-  _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
+  _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"; _rp="$(_lane_ready_probe opencode 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
 }
 
@@ -11072,7 +11072,7 @@ _job_made_writes() {
 _lane_text_only() {
   local l="${1:-}" x
   [ -n "$l" ] || return 1
-  case "$l" in local|tokenrouter|grokbot) return 0 ;; esac
+  case "$l" in local|tokenrouter|grokbot|opencode) return 0 ;; esac
   for x in ${OSRC_TEXT_LANES:-}; do [ "$l" = "$x" ] && return 0; done
   return 1
 }
@@ -11978,7 +11978,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp|cline|pi|pi) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline|pi|opencode) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
     # this lane always carries an explicit model; just record the lane.
     tokenrouter)  lane="tokenrouter" ;;
@@ -13596,7 +13596,7 @@ $body"
         _ready_probe_grokbot >/dev/null 2>&1 \
           || die "fanout: lane 'grokbot' needs GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY (env or ~/.env). Nothing was started."
         continue ;;
-      *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
+      opencode) _pem="$g_model"; [ -z "$_pem" ] && [ -n "$route_spec" ] && _pem="$(_route_match "${labels[$_pi]}" "$route_spec")"; [ -z "$_pem" ] && _pem="${a_model[$_pi]}"; [ -n "$_pem" ] || die "fanout: lane 'opencode' needs a model for every job (-m <go-model-id>, --route, or agent frontmatter) — the lane has no hardcoded default. Nothing was started."; _opencode_go_authed || die "fanout: lane 'opencode' needs OpenCode Go credentials — run 'opencode auth login' -> OpenCode Go. Nothing was started."; _dp_cli="opencode" ;; *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
     esac
     if ! have "$_dp_cli"; then
       # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate).
@@ -16550,7 +16550,7 @@ route_delegate() {
   if [ "$MODEL_EXPLICIT" != "1" ]; then
     # tokenrouter has NO default model: the roster is the gateway's (discovered live), so a run
     # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
-    [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
+    [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"; [ "$PROVIDER" != "opencode" ] || die "the opencode lane needs -m <go-model-id> (e.g. glm-5.3-flash or opencode-go/glm-5.3-flash — a bare run would fall back to opencode's configured model, which may not bill your Go plan)"
     MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
     # A provider's built-in default can be a model the user excluded (e.g. --provider codex -> sol).
     # Never run it silently: say which default it is and how to pick another.
@@ -16679,7 +16679,7 @@ route_delegate() {
     else
     case "$PROVIDER" in
       devin) disp=devin ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter|grokbot)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter|grokbot|opencode)" ;;
     esac
     fi
   fi
@@ -18971,7 +18971,7 @@ doctor() {
     echo "    pi: $(pi --version 2>/dev/null | head -1 || echo present). Route: --provider pi [-m <provider/model>] run \"task\". Engine lane: -m passes through to Pi's catalog; it bills whatever Pi is signed in to."
   else
     echo "    pi: NOT on PATH. Install: npm i -g @earendil-works/pi-coding-agent (or see https://pi.dev), then run pi and /login once."
-  fi
+  fi; _doctor_opencode
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
   elif have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then

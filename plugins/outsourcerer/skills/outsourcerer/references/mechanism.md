@@ -75,7 +75,7 @@ commands have their own parsers: use `task add ... --provider NAME` to persist a
 A leading provider flag does not populate that task field. Put `--cloud-ack` before factory
 subcommands. Default is `devin`. Usually you pass no `--provider` at
 all, because the model alias picks the lane (`SKILL.md`). The table covers the agentic backends; the
-gemini, local, tokenrouter, warp, hermes, and cline lanes are in `lanes-and-models.md`.
+gemini, local, tokenrouter, warp, hermes, cline, pi, and opencode lanes are in `lanes-and-models.md`.
 
 | Provider | Engine | Protocol | Inherits | Sandbox | Best for |
 |---|---|---|---|---|---|
