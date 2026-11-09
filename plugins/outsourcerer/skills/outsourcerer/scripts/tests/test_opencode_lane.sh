@@ -17,14 +17,15 @@ pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-# Fake opencode. Behavior knobs (env): OSRC_FAKE_OC_MODE = ok|region|expired|limit,
-# OSRC_FAKE_OC_NOAUTH=1 makes `auth list` show only the Zen credential.
+# Fake opencode. Behavior knobs (env): OSRC_FAKE_OC_MODE = ok|region|expired|limit|limitacct|t429,
+# OSRC_FAKE_OC_NOAUTH=1 makes `auth list` show only the Zen credential,
+# OSRC_FAKE_OC_VER overrides --version output (default 2.2.6; set '' for unparseable).
 cat > "$TMP/bin/opencode" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$@" > "$TMP/rawargv"
 [ "\$1" = "--standalone" ] && shift   # v2.x private-server flag before the subcommand
 case "\$1" in
-  --version|-v) echo "2.2.6"; exit 0 ;;
+  --version|-v) echo "\${OSRC_FAKE_OC_VER-2.2.6}"; exit 0 ;;
   auth) [ "\${2:-}" = "list" ] && { if [ "\${OSRC_FAKE_OC_NOAUTH:-0}" = "1" ]; then echo "OpenCode api"; else echo "OpenCode Go api"; fi; exit 0; } ;;
   models) echo "opencode-go/glm-5.3"; echo "opencode-go/glm-5.3-flash"; echo "opencode/some-free"; exit 0 ;;
   run)
@@ -32,10 +33,12 @@ case "\$1" in
     printf '%s' "\${OPENCODE_CONFIG_CONTENT:-UNSET}" > "$TMP/occfg"
     read -t 1 -r _x <&0 2>/dev/null; printf '%s' "\$?" > "$TMP/stdinrc"
     case "\${OSRC_FAKE_OC_MODE:-ok}" in
-      region)  echo "This Go model is hosted outside Europe and the United States. Select Global at https://opencode.ai/console/.../settings/privacy#regions to use it." >&2; exit 1 ;;
-      expired) echo "This API key has expired. Create a new API key in OpenCode Console." >&2; exit 1 ;;
-      limit)   echo "error: rate limit reached: usage limit exceeded" >&2; exit 1 ;;
-      *)       echo "OPENCODE_OK"; exit 0 ;;
+      region)    echo "This Go model is hosted outside Europe and the United States. Select Global at https://opencode.ai/console/.../settings/privacy#regions to use it." >&2; exit 1 ;;
+      expired)   echo "This API key has expired. Create a new API key in OpenCode Console." >&2; exit 1 ;;
+      limit)     echo "error: usage limit exceeded for this model; try another" >&2; exit 1 ;;
+      limitacct) echo "error: account-wide 5-hour usage limit exceeded across all models; resets in 3h" >&2; exit 1 ;;
+      t429)      echo "Error: HTTP 429 too many requests" >&2; exit 1 ;;
+      *)         echo "OPENCODE_OK"; exit 0 ;;
     esac ;;
 esac
 echo "opencode stub: unhandled args: \$*" >&2; exit 2
@@ -58,10 +61,10 @@ src_fn _lane_field opencode is_cloud | grep -q '^yes$' && ok "lane is marked clo
 echo "=== model normalization (the Go billing guarantee) ==="
 [ "$(src_fn _opencode_model glm-5.3-flash)" = "opencode-go/glm-5.3-flash" ] && ok "a bare Go id gets the opencode-go/ prefix" || no "bare-id prefixing wrong"
 [ "$(src_fn _opencode_model opencode-go/kimi-k3.1-pro)" = "opencode-go/kimi-k3.1-pro" ] && ok "a full opencode-go/ id passes verbatim" || no "full id rewritten"
-[ "$(src_fn _opencode_model opencode/some-free)" = "opencode/some-free" ] && ok "a Zen -free id stays verbatim (still \$0)" || no "-free id mishandled"
+src_fn _opencode_model 'opencode/some-free' >/dev/null 2>&1 && no "a Zen -free id passed without the opt-in" || ok "a Zen -free id is refused without OSRC_OPENCODE_ALLOW_NONGO (catalog membership is not a \$0 price)"
 src_fn _opencode_model 'opencode-go/' >/dev/null 2>&1 && no "an empty opencode-go/ id normalized" || ok "opencode-go/ with an empty id is refused"
 src_fn _opencode_model 'a//b' >/dev/null 2>&1 && no "a // path normalized" || ok "a token with // is refused"
-src_fn _opencode_model 'opencode/nothere-free' >/dev/null 2>&1 && no "an unlisted -free id passed on suffix trust" || ok "a -free id not in the live catalog is refused (suffix is not a billing guarantee)"
+src_fn _opencode_model 'opencode/nothere-free' >/dev/null 2>&1 && no "an unlisted -free id passed on suffix trust" || ok "every opencode/* id is refused without the opt-in (suffix is not a billing guarantee)"
 rm -f "$TMP/argv"
 out="$(run run -m opencode/glm-5.3 'x' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'not an OpenCode Go model' "$TMP/err" && [ ! -f "$TMP/argv" ] \
@@ -88,14 +91,26 @@ case "$a" in *"--agent plan"*"opencode-go/glm-5.3-flash"*|*"opencode-go/glm-5.3-
 grep -qx -- '--' "$TMP/argv" && ok "the prompt is protected by a -- separator" || no "no -- before the prompt"
 cfg="$(cat "$TMP/occfg" 2>/dev/null)"
 case "$cfg" in *'"action":"*","resource":"*","effect":"deny"'*'"action":"read","resource":"*","effect":"allow"'*) ok "read-only config denies EVERYTHING then re-allows the read family" ;; *) no "read-only config lacks the deny-all+read-allow ruleset: [$cfg]" ;; esac
+# the policies layer (applied AFTER agent rules + saved approvals) carries the same deny/allow set
+printf '%s' "$cfg" | jq -e '[.policies[]]|.[0]=={"action":"tool.use","resource":"*","effect":"deny"}' >/dev/null 2>&1 \
+  && ok "policies opens with a tool.use deny-all (agent rules cannot reopen writes)" || no "policies deny-all missing: [$cfg]"
+printf '%s' "$cfg" | jq -e '[.policies[].resource]|index("read:*") < index("read:*.env") and index("read:*.env") < index("read:*.env.example")' >/dev/null 2>&1 \
+  && ok "policies: read:* allow is followed by *.env denies then the .env.example exception" || no "policies env ordering wrong: [$cfg]"
+printf '%s' "$cfg" | jq -e '[.permissions[]|select(.action=="read")|.resource]|index("*") < index("*.env") and index("*.env") < index("*.env.example")' >/dev/null 2>&1 \
+  && ok "permissions: *.env re-denied after the broad read allow (the built-in ask is restored as a deny)" || no "permissions env ordering wrong: [$cfg]"
 [ "$(cat "$TMP/stdinrc" 2>/dev/null)" = "1" ] && ok "stdin is closed (</dev/null) — the non-TTY hang is impossible" || no "stdin not closed (read rc=$(cat "$TMP/stdinrc" 2>/dev/null))"
 
 echo "=== edit / yolo: build agent + --auto; research refuses (no sandbox) ==="
 rm -f "$TMP/argv" "$TMP/occfg"
 run edit -m glm-5.3-flash "fix it" >/dev/null; a="$(argv)"
 case "$a" in *"--agent build"*"--auto"*) ok "edit uses the build agent with --auto" ;; *) no "edit argv wrong: [$a]" ;; esac
-case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"action":"*","resource":"*","effect":"allow"'*'"action":"external_directory","resource":"*","effect":"deny"'*) ok "edit is scoped: everything allowed INSIDE the job dir, outside denied" ;; *) no "edit config wrong: [$(cat "$TMP/occfg" 2>/dev/null)]" ;; esac
-grep -q "MUTATING" "$TMP/err" && ok "the banner says edit mutates" || no "banner lacks MUTATING"
+cfg="$(cat "$TMP/occfg" 2>/dev/null)"
+case "$cfg" in *'"action":"*","resource":"*","effect":"allow"'*'"action":"external_directory","resource":"*","effect":"deny"'*) ok "edit is scoped: everything allowed INSIDE the job dir, outside denied" ;; *) no "edit config wrong: [$cfg]" ;; esac
+printf '%s' "$cfg" | jq -e '[.policies[]|select(.action=="tool.use" and .effect=="deny")|.resource]|index("external_directory:*") != null' >/dev/null 2>&1 \
+  && ok "edit hard-denies external_directory at the policy layer (agent rules cannot reopen it)" || no "edit policies external_directory deny missing: [$cfg]"
+printf '%s' "$cfg" | jq -e '[.policies[].resource]|index("read:*.env") != null and index("read:*.env.example") != null' >/dev/null 2>&1 \
+  && ok "edit keeps *.env denied but .env.example readable" || no "edit policies env rules missing: [$cfg]"
+grep -q "MUTATING" "$TMP/err" && grep -q "shell runs with full user rights" "$TMP/err" && ok "the banner says edit mutates and shell is NOT contained" || no "banner honesty missing: $(grep MUTATING "$TMP/err" | head -1)"
 out="$(run research -m glm-5.3-flash 'x' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'NO OS sandbox' "$TMP/err" && ok "research refuses honestly (opencode has no sandbox)" || no "research not refused rc=$rc"
 rm -f "$TMP/argv"
@@ -123,6 +138,58 @@ out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=expired OSRC_F
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'expired' && ok "an expired key surfaces the renewal instruction" || no "expired key handling rc=$rc"
 [ -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "expired key marks THIS lane down (auth failure, other lanes unaffected)" || no "expired key did not mark the lane down"
 rm -f "$OSRC_HOME/lane-posture/opencode.down" 2>/dev/null
+
+echo "=== plan-limit: per-model semantics ==="
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limit OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'plan limit' && ok "a per-model limit refusal reaches the plan-limit path" || no "limit refusal unclassified rc=$rc out=$(printf '%s' "$out" | tail -3)"
+[ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "refused model + refused probe stays a MODEL refusal — lane NOT marked down" || no "per-model limit wrongly marked the lane down"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limitacct OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && [ -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "an account-wide window confirmed by the probe marks the lane DOWN" || no "account-wide limit did not mark the lane rc=$rc"
+rm -f "$OSRC_HOME/lane-posture/opencode.down" 2>/dev/null
+
+echo "=== generic 429 is transport, not a plan limit ==="
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=t429 OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && ! printf '%s' "$out" | grep -qi 'plan limit' && [ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] \
+  && ok "a bare 429/throttle is left to transport handling (no probe, no mark)" || no "429 misclassified rc=$rc out=$(printf '%s' "$out" | tail -2)"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=ok OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'assert that the rate limit should be rendered' 2>&1 )"
+! printf '%s' "$out" | grep -qi 'plan limit' && ok "task prose about rate limits never triggers the detector" || no "task prose false-positive"
+
+echo "=== probe verdicts (model-scoped refusals) ==="
+[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=region OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "model-refused" ] \
+  && ok "a region-refused probe returns model-refused (never lane-down)" || no "probe region verdict wrong"
+[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limit OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "model-refused" ] \
+  && ok "a per-model-limited probe returns model-refused" || no "probe per-model verdict wrong"
+[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limitacct OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "limit-refused" ] \
+  && ok "an account-wide-worded probe returns limit-refused" || no "probe account-wide verdict wrong"
+[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=ok OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "answered" ] \
+  && ok "a healthy probe returns answered" || no "probe answered verdict wrong"
+
+echo "=== version handling ==="
+rm -f "$TMP/argv"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unparseable\|cannot parse' && [ ! -f "$TMP/argv" ] \
+  && ok "an unparseable version refuses the read-only tier (fail closed)" || no "unparseable version fell open rc=$rc"
+rm -f "$TMP/argv"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=3.0.0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$TMP/argv" ] && ok "an unknown v3 also refuses read-only (unknown major is not guessed)" || no "v3 fell open rc=$rc"
+rm -f "$TMP/argv" "$TMP/occfg" "$TMP/rawargv"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=1.19.5 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash --effort high 'x' 2>&1 )"
+! head -1 "$TMP/rawargv" 2>/dev/null | grep -qx -- '--standalone' && ok "v1 dispatch has no --standalone" || no "v1 wrongly used --standalone"
+case "$(argv)" in *"--variant high"*) ok "v1 maps effort to --variant" ;; *) no "v1 effort missing: [$(argv)]" ;; esac
+case "$(cat "$TMP/occfg" 2>/dev/null)" in *'"permission":'*'deny'*) ok "v1 emits the permission-map schema" ;; *) no "v1 config wrong: [$(cat "$TMP/occfg" 2>/dev/null | head -c 120)]" ;; esac
+case "$(cat "$TMP/occfg" 2>/dev/null)" in *'policies'*) no "v1 must not emit policies" ;; *) ok "v1 config carries no policies key (that layer does not exist)" ;; esac
+
+echo "=== jq guards fail closed ==="
+grep -q '! have jq' "$SCRIPT_DIR/../lane-opencode.sh" && ok "the bundle-carving jq requirement is in the source" || no "missing the jq requirement for staged bundles"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/jq" && chmod +x "$TMP/bin/jq"
+rm -f "$TMP/argv"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unenforced\|not valid JSON' && [ ! -f "$TMP/argv" ] && ok "a failing jq on the config validator refuses before dispatch" || no "broken-jq fell open rc=$rc out=$(printf '%s' "$out" | tail -3)"
+rm -f "$TMP/bin/jq"
+
+echo "=== non-Go opt-in does not need Go credentials ==="
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_OPENCODE_ALLOW_NONGO=1 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m opencode/some-free 'x' 2>&1 )"; rc=$?
+[ "$rc" -eq 0 ] && ok "ALLOW_NONGO=1 + no Go credential still dispatches (the opt-in provider's own auth applies)" || no "non-Go opt-in wrongly demanded Go auth rc=$rc out=$(printf '%s' "$out" | tail -2)"
 
 echo "=== ledger ==="
 rm -f "$OSRC_HOME/ledger.jsonl"

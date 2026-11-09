@@ -893,7 +893,7 @@ _devin_free_probe() {
 #   limit-refused  the probe's output carries a daily/weekly plan-quota refusal, or it FAILED with a
 #                  paid-quota / rate-limit signature: the model is being refused by a limit right now
 #   answered       the request completed (rc 0) with no limit refusal: the model is usable
-#   unreachable    timeout (124), CLI missing, or any other non-limit failure: nothing proven either way
+#   unreachable    timeout (124), CLI missing, or any other non-limit failure: nothing proven either way (per-model lanes may also emit model-refused — model-scoped, never a lane mark)
 # The captured output is left at $(_lane_probe_file <lane>) — PID-scoped like .dverr.$$, so two
 # concurrent probes on the same lane (fanout, parallel bg jobs) never clobber each other — so the
 # caller can quote the lane's exact wording. Recipes: dv = a real bounded request; cx/cc = the lane's own plan meter (confirms only,
@@ -1670,12 +1670,12 @@ _lane_errfile() {
   f="$OSRC_HOME/.lerr.$$"; : > "$f" 2>/dev/null && chmod 600 "$f" 2>/dev/null && printf '%s' "$f" || printf ''
 }
 # _run_tee_stderr <errfile|""> <cmd...> -> run the command with stderr STILL shown live and also captured
-# to the file (the dv lane's `2> >(tee ...)` idiom). stdout is untouched; $? is the command's. With an
-# empty file the command runs plain. Best-effort: a still-flushing tee can leave the file short, which
-# can only MISS a detection, never invent one.
+# to the file. stdout is untouched; $? is the command's. With an empty file the command runs plain.
+# bash sets $! to the process substitution's pid, so `wait` blocks until tee finishes flushing —
+# post-run classifiers cannot race a still-flushing tee (the old bare procsub could miss tail lines).
 _run_tee_stderr() {
-  local f="${1:-}"; shift
-  if [ -n "$f" ]; then "$@" 2> >(tee "$f" >&2); else "$@"; fi
+  local f="${1:-}" rc; shift
+  if [ -n "$f" ]; then "$@" 2> >(tee "$f" >&2); rc=$?; [ -n "${!:-}" ] && wait "$!" 2>/dev/null || true; return "$rc"; else "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
