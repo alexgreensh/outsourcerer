@@ -24,8 +24,9 @@ _delegate_has_model_output() { # <out.log> <progress>
     /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
     /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
-    # hardened diagnostic-verb denylist (adds Retrying|Waiting|Reconnecting|Resuming|Connected|Authenticated|Ready)
-    /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected|Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ { next }
+    # Short status lines and retry churn are not model output.
+    /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected)([.[:space:]:]|$)/ { next }
+    /^[[:space:]]*(Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ && (length($0) < 120 || /attempt [0-9]+ *of *[0-9]+|backoff [0-9]+s|will keep trying/) { next }
     # hook/tool/session lifecycle lines
     /^[[:space:]]*(Hook|Tool|SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|Notification|Stop|SubagentStop|PreCompact)(:|[[:space:]])/ { next }
     # generic "Word:" log-prefix (SessionStart: , Foo: ) and [bracketed] log prefixes
@@ -88,7 +89,7 @@ _supervise() {
   if [ -n "$_pgid" ] && [ "$_pgid" -gt 1 ] 2>/dev/null && [ "$_pgid" != "$_shell_pgid" ]; then
     printf '%s\n' "$_pgid" > "$jd/pgid" 2>/dev/null || true
   fi
-  local t0 last_size=0 last_change now size idle age _jcwd=""
+  local t0 last_size=0 last_change now size idle age _jcwd="" _idmt=""
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
   # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
@@ -178,7 +179,7 @@ _supervise() {
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(_pid_start_identity "$pid" 2>/dev/null || printf '')"
@@ -222,14 +223,16 @@ _supervise() {
     # only before the delegate's first output, so a lockwait file left behind (or written by the
     # delegate itself) cannot disarm a running job; the hard timeout always counts from launch (t0).
     # The queue wait has its own bound (OSRC_DEVIN_LOCK_WAIT_MAX) and its log line names the holder.
-    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; }
+    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; ni0=$now; }
     idle=$(( now - last_change )); age=$(( now - qt0 ))
     # Require positive proof of a model/agent turn. Byte growth alone includes
     # launcher headers, blank lines, stderr diagnostics, and every tier banner.
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
+    elif [ "$initialized" = "0" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ] && _idmt="$(_devin_live_mtime "$pid")" && [ -n "$_idmt" ] && [ "$_idmt" -gt "$ni0" ] && [ "$_idmt" -le "$(date +%s)" ]; then
+      ni0="$_idmt"
     fi
-    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then
+    if [ "$initialized" = "0" ] && [ $(( now - ni0 )) -ge "$noinit" ]; then
       local _noinit_reason
       _noinit_reason="no-init: delegate never started within ${noinit}s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
       echo wedged > "$jd/status"
@@ -380,7 +383,7 @@ _supervise() {
     # showed it still reading files. Ask devin's log directly instead. OSRC_DEVIN_LIVENESS=0 disables.
     if [ "$idle" -ge "$warn" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ]; then
       local _dmt
-      if _dmt="$(_devin_live_mtime "$pid")" && [ -n "$_dmt" ] && [ "$_dmt" -gt "$last_change" ]; then
+      if _dmt="$(_devin_live_mtime "$pid")" && [ -n "$_dmt" ] && [ "$_dmt" -gt "$last_change" ] && [ "$_dmt" -le "$(date +%s)" ]; then
         last_change="$_dmt"; idle=$(( now - last_change ))
         [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
       fi
