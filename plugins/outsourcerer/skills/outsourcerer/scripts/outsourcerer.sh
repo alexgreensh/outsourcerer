@@ -16025,68 +16025,68 @@ cmd_image() {
 # =============================================================================
 # reverse bridge (insourcerer): let a Codex session delegate INTO claude.
 # =============================================================================
-# Reverse bridge INTO droid / cursor: teach the HOST agent (Factory droid, Cursor CLI) to drive
-# outsourcerer from ITS side — someone living in droid/cursor gets Devin/OpenRouter/Claude/Codex/
-# local lanes + bg/fanout supervision without leaving their tool. Blocks are idempotent
-# (marker-guarded, same OUTSOURCERER:INSOURCE marker as parity-codex).
-_insource_block() {   # <host-label>
+# Reverse bridge INTO droid/cursor/codex: teach the HOST agent to drive outsourcerer from ITS side.
+# parity-* REWRITES the OUTSOURCERER:INSOURCE block on every run (issue #62): append-once kept
+# retired model names and a versioned script path the next plugin upgrade deletes.
+_insource_write() {   # <file> <host-label> [codex]
+  local f="$1"; shift; local b="" s="" e=""
+  b="$(mktemp "${TMPDIR:-/tmp}/osrc-ins.XXXXXX")" || die "parity: mktemp failed"
+  _insource_block "$@" > "$b" || { rm -f "$b"; die "parity: cannot render insource block"; }
+  eval "$(awk '/^<!-- OUTSOURCERER:INSOURCE/ && !s { s=NR } s && /^<!-- \/OUTSOURCERER:INSOURCE -->/ && NR > s && !e { e=NR } END { if (s) print "s=" s " e=" e }' "$f" 2>/dev/null)"
+  if [ -n "$s" ] && [ -n "$e" ]; then
+    { head -n "$((s-1))" "$f"; cat "$b"; tail -n "+$((e+1))" "$f"; } > "$b.out" \
+      && mv "$b.out" "$f" || { rm -f "$b" "$b.out"; die "parity: cannot rewrite $f"; }
+  else
+    [ -n "$s" ] && sed "${s}d" "$f" > "$b.out" && mv "$b.out" "$f"   # dangling start marker: drop it
+    { [ -s "$f" ] && printf '\n'; cat "$b"; } >> "$f" || { rm -f "$b"; die "parity: cannot write $f"; }
+  fi
+  rm -f "$b"
+}
+# _insource_block <host-label> [codex]: emit the block. Model-agnostic (hardcoded ids went stale); cache
+# installs resolve the NEWEST version at read time (numeric sort — no GNU sort -V on macOS).
+_insource_block() {
+  local OLINE="  O=\"$SCRIPT_PATH\"" vroot=""
+  case "$SCRIPT_PATH" in */plugins/cache/*/*/*/skills/outsourcerer/scripts/outsourcerer.sh)
+    vroot="$(cd "$(dirname "$SCRIPT_PATH")/../../../.." 2>/dev/null && pwd)" || vroot="" ;; esac
+  case "$vroot::$SCRIPT_PATH" in *[\'\"\$\`\\]*) ;;   # unsafe to embed in the emitted command: keep pinned
+    *) [ -z "$vroot" ] || OLINE="  O=\"\$(ls -d \"$vroot\"/*/skills/outsourcerer/scripts/outsourcerer.sh 2>/dev/null | awk -F/ '{print \$(NF-4), \$0}' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1 | cut -d' ' -f2-)\"; [ -n \"\$O\" ] || O=\"$SCRIPT_PATH\"" ;; esac
+  [ "${2:-}" != "codex" ] || {
+    cat <<EOF
+<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity-codex) -->
+## Insourcing to Claude from this Codex session (outsourcerer reverse bridge)
+$OLINE
+  "\$O" run -m <claude-model> "<task>"  # Claude-native (your Claude subscription); or --provider cc for a cheap Claude-compatible
+Delegates end with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>); read only the final message.
+<!-- /OUTSOURCERER:INSOURCE -->
+EOF
+    return; }
   cat <<EOF
-
 <!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: $1) -->
 ## Outsourcerer: delegate grunt work to cheaper/different engines
-This machine has outsourcerer installed. From this $1 session you can delegate to Devin
-(glm-5.2/swe-1.7, spends Devin plan limits), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
-a VERIFIED Claude model (run -m fable|opus|sonnet|haiku, Claude subscription), ChatGPT-sub
-models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0 cash + \$0 plan, private).
-  $SCRIPT_PATH doctor                          # what's available right now (run this first)
-  $SCRIPT_PATH run -m glm "<read-only task>"   # one-shot; edit/yolo for mutating work
-  $SCRIPT_PATH bg run -m hy3 "<long task>"     # supervised background job -> status/result <id>
-  $SCRIPT_PATH fanout --max 6 -m glm --verb run -- "t1" "t2"   # parallel multi-agent
-First cloud delegation needs a one-time consent: $SCRIPT_PATH consent grant (remembered after).
-Read only the final message; delegates end with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>).
+This machine has outsourcerer installed — delegate from this $1 session to Devin, OpenRouter,
+Claude-subscription, ChatGPT-sub, keyless-Gemini or local-Ollama (\$0 cash + \$0 plan, private) lanes.
+$OLINE
+  "\$O" doctor && "\$O" models             # what's live + current model ids (ids churn: pick live)
+  "\$O" run -m <model> "<read-only task>"  # one-shot; edit/yolo for mutating work
+  "\$O" bg run -m <model> "<long task>"    # supervised background job -> status/result <id>
+First cloud delegation: "\$O" consent grant (one-time, remembered). Delegates end with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>); read only the final message.
 <!-- /OUTSOURCERER:INSOURCE -->
 EOF
 }
-
 parity_droid() {
   have droid || printf '>>> note: droid CLI not on PATH yet; writing the bridge anyway so it works the moment droid is installed.\n' >&2
-  local fhome="${FACTORY_HOME:-$HOME/.factory}" agents; agents="$fhome/AGENTS.md"
-  mkdir -p "$fhome"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-droid: insource block already present in $agents"; return 0
-  fi
-  _insource_block "Factory droid" >> "$agents" || die "parity-droid: cannot write $agents"
-  echo "parity-droid: appended insource block to $agents (droid loads ~/.factory/AGENTS.md globally)"
+  mkdir -p "${FACTORY_HOME:-$HOME/.factory}"
+  _insource_write "${FACTORY_HOME:-$HOME/.factory}/AGENTS.md" "Factory droid"
+  echo "parity-droid: insource block written to ${FACTORY_HOME:-$HOME/.factory}/AGENTS.md (refreshed on every run; droid loads ~/.factory/AGENTS.md globally)"
 }
-
 parity_cursor() {
-  local agents="$PWD/AGENTS.md"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-cursor: insource block already present in $agents"; return 0
-  fi
-  _insource_block "Cursor" >> "$agents" || die "parity-cursor: cannot write $agents"
-  echo "parity-cursor: appended insource block to $agents (cursor-agent auto-loads repo-root AGENTS.md; repo-level by design — commit or gitignore as you prefer)"
+  _insource_write "$PWD/AGENTS.md" "Cursor"
+  echo "parity-cursor: insource block written to $PWD/AGENTS.md (refreshed on every run; repo-level by design — commit or gitignore as you prefer)"
 }
-
 parity_codex() {
-  local codex_home="${CODEX_HOME:-$HOME/.codex}" agents
-  agents="$codex_home/AGENTS.md"
-  mkdir -p "$codex_home"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-codex: insource block already present in $agents"; return 0
-  fi
-  cat >> "$agents" <<EOF
-
-<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity-codex) -->
-## Insourcing to Claude (outsourcerer reverse bridge)
-For turns needing Claude-grade judgment, delegate INTO Claude from this Codex session:
-  $SCRIPT_PATH run -m fable "<task>"     # Claude-native (uses your Claude subscription)
-  $SCRIPT_PATH --provider cc run "<task>"  # OpenRouter cc lane (a cheap Claude-compatible model)
-Read only the final message; the delegate signals liveness with OSRC::PROGRESS lines and ends
-with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>) as its final line.
-<!-- /OUTSOURCERER:INSOURCE -->
-EOF
-  echo "parity-codex: appended insource block to $agents"
+  local codex_home="${CODEX_HOME:-$HOME/.codex}"; mkdir -p "$codex_home"
+  _insource_write "$codex_home/AGENTS.md" "Codex" codex
+  echo "parity-codex: insource block written to $codex_home/AGENTS.md (refreshed on every run)"
 }
 
 # _osrc_realpath <path> -> physical path with all symlinks resolved (portable: macOS ships neither
