@@ -247,10 +247,13 @@ done
 [ "$(grep -c '_plan_lanes_meter' "$SRC")" -ge 3 ] && ok "structure: brief + status call the plan-lanes iterator" || bad "structure: iterator not wired"
 grep -q '_lane_plan_key "${1:-}")"' "$SRC" && ok "structure: _lane_free_probe keys on the plan-lane resolver" || bad "structure: probe resolver not generalized"
 
-# === (h) _run_tee_stderr under /bin/bash 3.2: $! there is an UNRELATED bg job, never the procsub ====
+# === (h) _run_tee_stderr under bash 3.2: $! there is an UNRELATED bg job, never the procsub ========
 # Regression: `wait "$!"` blocked until the caller's previous `&` job exited (timers/beacons make one
 # almost always exist). The helper must return promptly, keep the command rc, and still land stderr.
-if [ -x /bin/bash ]; then
+# Only meaningful on a real 3.2 binary (macOS /bin/bash): on bash >=4.4 the procsub sets $! and the
+# bug shape is different — off 3.2 this is an explicit SKIP, not a silent pass.
+_b32v="$(/bin/bash --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)"
+if [ "$_b32v" = "3.2" ]; then
   mkdir -p "$TMP/tee-home"
   _o="$(/bin/bash -c '
     export OSRC_HOME="$2/tee-home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
@@ -267,7 +270,7 @@ if [ -x /bin/bash ]; then
     && ok "_run_tee_stderr on /bin/bash 3.2: unrelated bg job does not stall it (rc=$_rc, ${_t}s, stderr captured)" \
     || bad "_run_tee_stderr bash-3.2 regression: rc=$_rc elapsed=${_t}s cap=$_cap (want 3 <3s yes)"
 else
-  ok "_run_tee_stderr bash-3.2 regression: /bin/bash absent, skipped"
+  echo "SKIP: _run_tee_stderr bash-3.2 regression — /bin/bash reports '${_b32v:-missing}' (need 3.2; only macOS ships it)"
 fi
 
 echo "== $pass passed, $fail failed =="

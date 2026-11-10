@@ -168,7 +168,8 @@ is Pi's, so do NOT promise a model or price.
 `--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) on your **OpenCode
 Go** subscription. Billing is the Go plan: **$0 cash, spends plan limits** (per-model monthly
 allowance plus 20%-per-5h and 50%-per-week windows — the live figure is in the OpenCode Console;
-there is no usage API). The roster is opencode's (`opencode models`), not ours.
+there is no usage API, so the lane is deliberately not in `OSRC_PLAN_LANES`, same as
+pi/tokenrouter/grokbot). The roster is opencode's (`opencode models`), not ours.
 
 - **`-m` is REQUIRED and is a Go model id.** A bare id (`-m glm-5.3-flash`) becomes
   `opencode-go/glm-5.3-flash`; a full `opencode-go/<id>` passes verbatim. There is no default —
@@ -183,11 +184,17 @@ there is no usage API). The roster is opencode's (`opencode models`), not ours.
   family (read/glob/grep/question) — a named deny list can never cover task/subagent, webfetch,
   skill, MCP and plugin tools. On v2.x the same rules are additionally asserted as `policies`
   (tool.use statements), the layer applied AFTER agent rules and saved approvals — without it a
-  user's `agents.plan.permissions` allow-all would silently reopen writes. The broad read allow
+  user's `agents.plan.permissions` allow-all would silently reopen writes. Policies are still not
+  the last word: a project `opencode.json(c)`/`.opencode/` loads after the inline config and its
+  own policies evaluate last, so read-only runs also set `OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+  ignore project config entirely (verified on v2.2.6: a hostile project's `policies` +
+  `agents.plan` allow-all reopened writes through both the root `opencode.json` and
+  `.opencode/opencode.json` forms; the env var denied both). The broad read allow
   would mask opencode's built-in `*.env`/`*.env.*` ask, so those stay denied (`.env.example`
   excepted). `edit` gets `--agent build --auto`: file tools are scoped to the job dir
   (hard external_directory deny + the skill-bundle exception), but **shell is not contained** —
-  command-directory inference is best-effort, so a shell command keeps your full user rights.
+  command-directory inference is best-effort, so a shell command keeps your full user rights —
+  and mutating tiers honour project config, so the project's own `opencode.json` can widen them.
   `research` REFUSES: opencode has no OS sandbox (same answer as claude-native/cc). `yolo`
   pre-allows everything. Your `~/.config/opencode/opencode.json` is never rewritten. On opencode
   v2.x the run uses `--standalone`: a shared background server never sees the CLI's env, so the
@@ -212,7 +219,10 @@ there is no usage API). The roster is opencode's (`opencode models`), not ours.
   out as an external_directory allow in both the permissions and policies layers; jq is required
   for that carving). `mcp=` is refused — opencode's MCP semantics differ from the repo's; use your
   own `~/.config/opencode` MCP setup instead.
-- Install: https://opencode.ai/docs (brew or `npm i -g opencode-ai`), then `opencode auth login` and
+- Install: `brew install opencode` (or `brew install anomalyco/tap/opencode-v2`,
+  `npm i -g @opencode/cli@latest`; the old `opencode-ai/tap/opencode` formula is 0.x and the
+  `opencode-ai` npm package is 1.x, both predate the 2.x policies layer), then
+  `opencode auth login` and
   choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work).
   `doctor` probes `opencode-go/glm-5.3-flash` read-only and classifies ready / region / expired-key.
 
