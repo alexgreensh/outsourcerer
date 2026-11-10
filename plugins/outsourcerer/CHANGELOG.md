@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.15.4
+
+### Fixed
+
+- **Healthy devin jobs are no longer killed mid-test-suite as `exploring-timeout`.** The no-write watchdog judged only on output growth and file writes, and both stay dark during one long quiet devin command (print mode streams nothing; a test suite's temp files live outside the watched directory), so its small default window pre-empted the devin stall window that already accounts for this. On the devin lane the no-write kill now waits for the stall window, and a silent job gets the stall verdict and advice instead of a write-target scolding. Flagging still surfaces early; other lanes are unchanged. Override: `OSRC_DEVIN_NOWRITE_KILL` (`0` restores the old bound). (#58)
+
 ## 0.15.3
 
 ### Fixed

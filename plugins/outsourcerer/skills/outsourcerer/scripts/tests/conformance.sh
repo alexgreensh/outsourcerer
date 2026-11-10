@@ -105,6 +105,7 @@ _ALL_SUITES="$_ALL_SUITES test_heartbeat_arm_liveness test_heartbeat_autoarm tes
 _ALL_SUITES="$_ALL_SUITES test_tier_churn"
 _ALL_SUITES="$_ALL_SUITES test_lane_down_marker test_lane_down_gate test_delegate_attribution"
 _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota test_nowrite_watchdog test_advise_task_shape"
+_ALL_SUITES="$_ALL_SUITES test_devin_nowrite_floor"
 _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota_probe"
 _ALL_SUITES="$_ALL_SUITES test_lane_plan_limit"
 _ALL_SUITES="$_ALL_SUITES test_failover_pick"
