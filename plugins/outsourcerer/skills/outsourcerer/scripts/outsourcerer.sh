@@ -16034,7 +16034,7 @@ _insource_write() {   # <file> <host-label> [codex]
   _insource_block "$@" > "$b" || { rm -f "$b"; die "parity: cannot render insource block"; }
   eval "$(awk '/^<!-- OUTSOURCERER:INSOURCE/ && !s { s=NR } s && /^<!-- \/OUTSOURCERER:INSOURCE -->/ && NR > s && !e { e=NR } END { if (s) print "s=" s " e=" e }' "$f" 2>/dev/null)"
   if [ -n "$s" ] && [ -n "$e" ]; then
-    { head -n "$((s-1))" "$f"; cat "$b"; tail -n "+$((e+1))" "$f"; } > "$b.out" \
+    { [ "$s" -eq 1 ] || head -n "$((s-1))" "$f"; cat "$b"; tail -n "+$((e+1))" "$f"; } > "$b.out" \
       && mv "$b.out" "$f" || { rm -f "$b" "$b.out"; die "parity: cannot rewrite $f"; }
   else
     [ -n "$s" ] && sed "${s}d" "$f" > "$b.out" && mv "$b.out" "$f"   # dangling start marker: drop it

@@ -16,7 +16,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-parity-insource.XXXXXX")"
+TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/test-parity-insource.XXXXXX")" && pwd)"  # canonicalize: macOS TMPDIR has a trailing slash
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
 export OSRC_HOME="$TMP/state"
