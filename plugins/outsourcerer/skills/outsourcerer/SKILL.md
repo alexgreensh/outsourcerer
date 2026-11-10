@@ -92,8 +92,9 @@ Skip the loop when nothing external can verify the result (a model would be mark
 | `swe` / `swe-1.7` / `kimi` / any Devin id | devin (default); glm/deepseek self-heal here when OpenRouter is out of credits |
 | `ollama:<m>` / `local:<m>` | local (keyless, private, $0) |
 | any TokenRouter gateway id | **tokenrouter** (`--provider tokenrouter`): cloud gateway, `-m` required and passed verbatim; key `TOKENROUTER_API_KEY` |
+| any OpenCode Go id (`glm-5.3-flash`, `opencode-go/<id>`) | **opencode** (`--provider opencode`): your Go subscription via the `opencode` CLI; `-m` required, `opencode/<id>` (Zen pay-as-you-go) refused unless `OSRC_OPENCODE_ALLOW_NONGO=1` |
 | `gpt-image` / `nano-banana` | image only (`image` subcommand) |
-| any model the user configured | **droid** / **cursor** / **warp** / **hermes** / **cline** / **pi** / **grokbot** (`--provider …`): the user's own agent CLIs and models, `-m` verbatim. When they say "use warp/droid/cline", this is the lane, not devin. |
+| any model the user configured | **droid** / **cursor** / **warp** / **hermes** / **cline** / **pi** / **opencode** / **grokbot** (`--provider …`): the user's own agent CLIs and models, `-m` verbatim. When they say "use warp/droid/cline", this is the lane, not devin. |
 
 **A pinned Claude, GPT, or Gemini model runs on its own native lane, not Devin.** `-m opus`, `-m fable`, `-m claude-opus-5-5`, `-m claude-opus-5-5[1m]`, and any `claude-*`/`gpt-5.*`/`gemini-*` id resolve to the claude/codex/gemini-native lane by themselves. Leave out `--provider cc` for a Claude model: that flag means the OpenRouter transport, not the Claude subscription. "Spin up Fable and Opus 5.5" is `-m fable` and `-m opus` (or the pinned ids) on the claude-native lane, on the user's Claude subscription. Putting that on Devin burns the wrong limits, and it is the most common routing mistake. Full table and image backend order: `references/lanes-and-models.md`.
 

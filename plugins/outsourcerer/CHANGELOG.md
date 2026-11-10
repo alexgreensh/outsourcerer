@@ -2,6 +2,12 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.0
+
+### Added
+
+- **OpenCode Go lane.** `--provider opencode` hands work to the `opencode` CLI on your OpenCode Go subscription (`opencode run`). `-m` is required and is a Go model id — a bare `glm-5.3-flash` becomes `opencode-go/glm-5.3-flash`, and a full `opencode-go/<id>` passes verbatim. `run`/`explore` are read-only by `--agent plan` plus a per-run config that denies every action then re-allows only reads/globs/greps/questions — on opencode v2.x that is additionally asserted as hard `policies`, the layer applied after agent rules, so user agent overrides cannot reopen writes; `edit`/`yolo` run the build agent with `--auto` (file tools scoped to the job dir; shell is not contained), and `research` refuses because opencode has no OS sandbox. Stdin is always closed (a non-TTY `opencode run` with open stdin hangs). Region refusals classify per-model, an expired Go key classifies as an auth failure, plan/usage limits stay model-scoped unless the refusal names an account-wide window, and no path silently reroutes a Go request to Zen pay-as-you-go — every non-`opencode-go/*` id needs `OSRC_OPENCODE_ALLOW_NONGO=1`. `*.env`/`*.env.*` stays denied even under the broad read allow (`.env.example` excepted), and read-only/edit tiers refuse outright when `opencode --version` cannot be parsed.
+
 ## 0.15.3
 
 ### Fixed

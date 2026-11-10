@@ -163,6 +163,69 @@ is Pi's, so do NOT promise a model or price.
   `pi` and `/login` once. `doctor` shows whether it is on PATH. `session start --provider pi` opens
   Pi's TUI in tmux.
 
+## OpenCode Go lane (`--provider opencode`)
+
+`--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) on your **OpenCode
+Go** subscription. Billing is the Go plan: **$0 cash, spends plan limits** (per-model monthly
+allowance plus 20%-per-5h and 50%-per-week windows — the live figure is in the OpenCode Console;
+there is no usage API, so the lane is deliberately not in `OSRC_PLAN_LANES`, same as
+pi/tokenrouter/grokbot). The roster is opencode's (`opencode models`), not ours.
+
+- **`-m` is REQUIRED and is a Go model id.** A bare id (`-m glm-5.3-flash`) becomes
+  `opencode-go/glm-5.3-flash`; a full `opencode-go/<id>` passes verbatim. There is no default —
+  without `-m`, `opencode run` would silently use whatever model you configured, which may not bill
+  your Go plan. `opencode models` lists the Go catalog.
+- **Zen is refused, never silently used.** `-m opencode/<id>` (OpenCode Zen pay-as-you-go or free
+  tier) or any other `provider/id` dies with the reason unless you set
+  `OSRC_OPENCODE_ALLOW_NONGO=1`. There is no `-free` exception: catalog membership does not prove
+  a $0 price, so even Zen's free tier needs the explicit opt-in.
+- **Posture is enforced per-run, never by editing your config.** `run`/`explore` get `--agent plan`
+  PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies every action, then re-allows only the read
+  family (read/glob/grep/question) — a named deny list can never cover task/subagent, webfetch,
+  skill, MCP and plugin tools. On v2.x the same rules are additionally asserted as `policies`
+  (tool.use statements), the layer applied AFTER agent rules and saved approvals — without it a
+  user's `agents.plan.permissions` allow-all would silently reopen writes. Policies are still not
+  the last word: a project `opencode.json(c)`/`.opencode/` loads after the inline config and its
+  own policies evaluate last, so read-only runs also set `OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+  ignore project config entirely (verified on v2.2.6: a hostile project's `policies` +
+  `agents.plan` allow-all reopened writes through both the root `opencode.json` and
+  `.opencode/opencode.json` forms; the env var denied both). The broad read allow
+  would mask opencode's built-in `*.env`/`*.env.*` ask, so those stay denied (`.env.example`
+  excepted). `edit` gets `--agent build --auto`: file tools are scoped to the job dir
+  (hard external_directory deny + the skill-bundle exception), but **shell is not contained** —
+  command-directory inference is best-effort, so a shell command keeps your full user rights —
+  and mutating tiers honour project config, so the project's own `opencode.json` can widen them.
+  `research` REFUSES: opencode has no OS sandbox (same answer as claude-native/cc). `yolo`
+  pre-allows everything. Your `~/.config/opencode/opencode.json` is never rewritten. On opencode
+  v2.x the run uses `--standalone`: a shared background server never sees the CLI's env, so the
+  per-run permission rules only reach a private one. Read-only and edit tiers refuse outright when
+  `opencode --version` cannot be parsed (guessing the v1 schema at a v2 install would launch
+  unenforced).
+- **stdin is always closed** (`</dev/null`), and the prompt is separated by `--` so a task starting
+  with `-` is never parsed as flags.
+- `--effort` maps to the thinking variant (`--variant` on v1, `-m <id>#<variant>` on v2).
+- **Failures classify honestly.** A per-model region refusal ("hosted outside Europe and the United
+  States — select Global in the console's privacy settings") is a model refusal, NOT a lane outage:
+  the console instruction is surfaced and failover may pick another model. An expired Go API key is
+  an auth failure — the lane is marked down with the renewal instruction, never a rate limit, and
+  other lanes are unaffected. A plan/usage-limit refusal is verified against a sibling model, but
+  Go limits are per model: the lane is only marked down when the probe's own refusal names an
+  account-wide window — two models at their own limits is a model hop, not a lane outage. Bare
+  429/throttling classifies as transport, never a plan limit.
+- **Not a failover target.** `opencode` is not in `OSRC_FAILOVER_LANES`, and adding it does nothing:
+  a hop can only rebuild argv without `-m` (it cannot name a model on the target lane), and this
+  lane requires `-m` by design — the picker skips it rather than mint a job that dies at the gate.
+- **Context:** `--with skills=…` travels via the standard staged bundle (the bundle dir is carved
+  out as an external_directory allow in both the permissions and policies layers; jq is required
+  for that carving). `mcp=` is refused — opencode's MCP semantics differ from the repo's; use your
+  own `~/.config/opencode` MCP setup instead.
+- Install: `brew install opencode` (or `brew install anomalyco/tap/opencode-v2`,
+  `npm i -g @opencode/cli@latest`; the old `opencode-ai/tap/opencode` formula is 0.x and the
+  `opencode-ai` npm package is 1.x, both predate the 2.x policies layer), then
+  `opencode auth login` and
+  choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work).
+  `doctor` probes `opencode-go/glm-5.3-flash` read-only and classifies ready / region / expired-key.
+
 ## Grok Bot lane (`--provider grokbot`)
 
 Grok Bot (xAI's always-on agents, each with its own cloud computer) has **no chat API**. A bot
