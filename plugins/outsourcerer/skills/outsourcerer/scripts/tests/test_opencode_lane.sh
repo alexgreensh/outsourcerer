@@ -31,6 +31,7 @@ case "\$1" in
   run)
     printf '%s\n' "\$@" > "$TMP/argv"
     printf '%s' "\${OPENCODE_CONFIG_CONTENT:-UNSET}" > "$TMP/occfg"
+    printf '%s' "\${OPENCODE_DISABLE_PROJECT_CONFIG:-UNSET}" > "$TMP/ocdispc"
     read -t 1 -r _x <&0 2>/dev/null; printf '%s' "\$?" > "$TMP/stdinrc"
     case "\${OSRC_FAKE_OC_MODE:-ok}" in
       region)    echo "This Go model is hosted outside Europe and the United States. Select Global at https://opencode.ai/console/.../settings/privacy#regions to use it." >&2; exit 1 ;;
@@ -38,6 +39,8 @@ case "\$1" in
       limit)     echo "error: usage limit exceeded for this model; try another" >&2; exit 1 ;;
       limitacct) echo "error: account-wide 5-hour usage limit exceeded across all models; resets in 3h" >&2; exit 1 ;;
       t429)      echo "Error: HTTP 429 too many requests" >&2; exit 1 ;;
+      noise200)  printf 'HTTP/1.1 200 OK\n{"error":"upstream proxy failure"}\n'; exit 0 ;;
+      plainok)   echo "OK"; exit 0 ;;
       *)         echo "OPENCODE_OK"; exit 0 ;;
     esac ;;
 esac
@@ -100,6 +103,7 @@ printf '%s' "$cfg" | jq -e '[.policies[].resource]|index("read:*") < index("read
 printf '%s' "$cfg" | jq -e '[.permissions[]|select(.action=="read")|.resource]|index("*") < index("*.env") and index("*.env") < index("*.env.example")' >/dev/null 2>&1 \
   && ok "permissions: *.env re-denied after the broad read allow (the built-in ask is restored as a deny)" || no "permissions env ordering wrong: [$cfg]"
 [ "$(cat "$TMP/stdinrc" 2>/dev/null)" = "1" ] && ok "stdin is closed (</dev/null) — the non-TTY hang is impossible" || no "stdin not closed (read rc=$(cat "$TMP/stdinrc" 2>/dev/null))"
+[ "$(cat "$TMP/ocdispc" 2>/dev/null)" = "1" ] && ok "read-only sets OPENCODE_DISABLE_PROJECT_CONFIG=1 (a project opencode.json(c)/.opencode/ cannot lift the inline deny)" || no "read-only run did not disable project config: [$(cat "$TMP/ocdispc" 2>/dev/null)]"
 
 echo "=== edit / yolo: build agent + --auto; research refuses (no sandbox) ==="
 rm -f "$TMP/argv" "$TMP/occfg"
@@ -113,6 +117,7 @@ printf '%s' "$cfg" | jq -e '[.policies[]|select(.action=="tool.use" and .effect=
 printf '%s' "$cfg" | jq -e '[.policies[].resource]|index("read:*.env") != null and index("read:*.env.example") != null' >/dev/null 2>&1 \
   && ok "edit keeps *.env denied but .env.example readable" || no "edit policies env rules missing: [$cfg]"
 grep -q "MUTATING" "$TMP/err" && grep -q "shell runs with full user rights" "$TMP/err" && ok "the banner says edit mutates and shell is NOT contained" || no "banner honesty missing: $(grep MUTATING "$TMP/err" | head -1)"
+[ "$(cat "$TMP/ocdispc" 2>/dev/null)" != "1" ] && ok "edit does NOT set OPENCODE_DISABLE_PROJECT_CONFIG (mutating tiers honour the project's own opencode.json)" || no "edit wrongly disabled project config"
 out="$(run research -m glm-5.3-flash 'x' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'NO OS sandbox' "$TMP/err" && ok "research refuses honestly (opencode has no sandbox)" || no "research not refused rc=$rc"
 rm -f "$TMP/argv"
@@ -226,6 +231,10 @@ dout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_DOCT
 printf '%s' "$dout" | grep -q 'NO OpenCode Go credential' && ok "doctor distinguishes a missing Go credential from a Zen one" || no "doctor missed the noauth state"
 dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" doctor 2>&1 )"
 printf '%s' "$dout" | grep -q 'liveness: READY' && ok "doctor probes glm-5.3-flash and reports READY" || no "doctor probe did not report READY"
+dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb OSRC_FAKE_OC_MODE=noise200 "$SRC" doctor 2>&1 )"
+printf '%s' "$dout" | grep -q 'opencode liveness: READY' && no "an HTTP '200 OK' status line inside error output read as READY" || ok "probe output 'HTTP/1.1 200 OK' + error body (rc=0) is NOT READY"
+dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb OSRC_FAKE_OC_MODE=plainok "$SRC" doctor 2>&1 )"
+printf '%s' "$dout" | grep -q 'opencode liveness: READY' && ok "a plain 'OK' probe reply is READY" || no "plain OK did not report READY: $(printf '%s' "$dout" | grep 'opencode liveness')"
 bout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" brief 2>&1 )"
 printf '%s' "$bout" | grep -q 'opencode=go' && ok "brief advertises opencode=go when authed" || no "brief lacks the ready entry: $(printf '%s' "$bout" | tail -5)"
 

@@ -26,27 +26,34 @@
 # the v1 shape at a real v2 install would launch unenforced.
 #
 # Posture is enforced by a PER-RUN config: OPENCODE_CONFIG_CONTENT carries an
-# inline JSON merged over global/project config for that invocation only — the
-# user's ~/.config/opencode is never written. run/explore deny EVERYTHING and
-# re-allow only the read family (read/glob/grep/question): a named deny list can
-# never be complete (task/subagent, webfetch, websearch, skill, MCP and plugin
-# tools all have their own actions). On v2 this is also asserted as `policies`
+# inline JSON merged over the user's global config for that invocation only —
+# ~/.config/opencode is never written. run/explore deny EVERYTHING and re-allow
+# only the read family (read/glob/grep/question): a named deny list can never
+# be complete (task/subagent, webfetch, websearch, skill, MCP and plugin tools
+# all have their own actions). On v2 this is also asserted as `policies`
 # (tool.use statements), the layer applied AFTER agent rules and saved
 # approvals — without it the shipped `plan` agent (which may write under
 # ~/.opencode/plan) or a user's `agents.plan.permissions` allow-all silently
-# re-opens writes; verified on v2.2.6 against a hostile project opencode.json.
-# v1 has no hard policy layer, so a user's own agent-level permission overrides
-# remain the residual gap there (v1 is deprecated). The broad read allow would
-# otherwise mask opencode's built-in *.env/*.env.* "ask" — sensitive files are
-# re-denied after the allows (.env.example stays readable). The staged skill
-# bundle lives outside the job dir, so its root is carved back as an
-# external_directory allow or --with would be unreadable on a read-only run.
-# edit gets `--agent build --auto`: file tools are scoped to the job dir (hard
-# external_directory deny + bundle exception) but SHELL IS NOT CONTAINED —
-# opencode's own docs call command-directory inference best-effort, so a shell
-# command can still touch anything your user can. research/autonomous REFUSES:
-# opencode has no OS sandbox (same answer as claude-native/cc). yolo pre-allows
-# everything, by definition.
+# re-opens writes. Policies are still not the last word: a project
+# opencode.json(c)/.opencode/ loads AFTER the inline config and its own
+# policies evaluate last — verified on v2.2.6 that a hostile project
+# `policies` + `agents.plan` allow-all reopened writes through both the root
+# opencode.json and .opencode/opencode.json forms — so read-only runs also set
+# OPENCODE_DISABLE_PROJECT_CONFIG=1 and skip the project layer entirely
+# (verified on v2.2.6: with the var set the same hostile configs denied the
+# write again). v1 has no hard policy layer, so a user's own agent-level
+# permission overrides remain the residual gap there (v1 is deprecated). The
+# broad read allow would otherwise mask opencode's built-in *.env/*.env.* "ask"
+# — sensitive files are re-denied after the allows (.env.example stays
+# readable). The staged skill bundle lives outside the job dir, so its root is
+# carved back as an external_directory allow or --with would be unreadable on a
+# read-only run. edit gets `--agent build --auto`: file tools are scoped to the
+# job dir (hard external_directory deny + bundle exception) but SHELL IS NOT
+# CONTAINED — opencode's own docs call command-directory inference best-effort,
+# so a shell command can still touch anything your user can — and mutating
+# tiers HONOUR project config, so the project's own opencode.json can widen
+# them further. research/autonomous REFUSES: opencode has no OS sandbox (same
+# answer as claude-native/cc). yolo pre-allows everything, by definition.
 #
 # Failure classes (repo conventions: lane-down markers + refusal evidence):
 #   * region refusal ("hosted outside Europe and the United States") — PER-MODEL
@@ -86,7 +93,7 @@ _opencode_go_authed() {
 }
 
 _opencode_cli_missing() {
-  die "opencode CLI not on PATH (OpenCode Go lane). Install: https://opencode.ai/docs (brew install opencode-ai/tap/opencode or npm i -g opencode-ai), then 'opencode auth login' and pick OpenCode Go. -m is a Go model id (glm-5.3-flash, kimi-k3.1-pro, ...); 'opencode models' lists them under opencode-go/."
+  die "opencode CLI not on PATH (OpenCode Go lane). Install: https://opencode.ai/docs (brew install opencode — or brew install anomalyco/tap/opencode-v2 — or npm i -g @opencode/cli@latest), then 'opencode auth login' and pick OpenCode Go. -m is a Go model id (glm-5.3-flash, kimi-k3.1-pro, ...); 'opencode models' lists them under opencode-go/."
 }
 
 # _opencode_ver -> '1' | '2' | '' (unparseable), parsed ONCE per process. The
@@ -166,7 +173,13 @@ _opencode_probe_model() {
 # the layer applied AFTER agent rules and saved approvals — top-level
 # permissions alone lose to `agents.<id>.permissions` appended later (the
 # shipped `plan` agent can write under ~/.opencode/plan; a user allow-all agent
-# silently re-opens everything). Both shapes verified enforced on v2.2.6.
+# silently re-opens everything). A PROJECT config (opencode.json(c)/.opencode/)
+# loads after this inline one and its own policies evaluate last, so it can
+# still reopen everything — read-only callers set
+# OPENCODE_DISABLE_PROJECT_CONFIG=1 on the opencode invocation to skip the
+# project layer entirely (verified on v2.2.6: hostile project
+# policies+agents.plan allow-all reopened writes via both the root
+# opencode.json and .opencode/opencode.json forms; the env var denied both).
 #
 # The broad read allow (and scoped `*` allow) masks opencode's built-in
 # `*.env`/`*.env.*` "ask" — sensitive files are re-denied AFTER the allows in
@@ -299,7 +312,7 @@ _opencode_free_probe() {
   fi
   if ! have opencode; then [ -n "$out" ] && printf 'opencode CLI not on PATH\n' > "$out"; printf 'unreachable'; return 0; fi
   [ "$(_opencode_ver)" = "2" ] && sa=(--standalone)
-  _timeout "$secs" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" opencode ${sa[@]+"${sa[@]}"} run --agent plan -m "$(_opencode_probe_model "$1")" "reply OK" </dev/null > "${out:-/dev/null}" 2>&1 || rc=$?
+  _timeout "$secs" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode ${sa[@]+"${sa[@]}"} run --agent plan -m "$(_opencode_probe_model "$1")" "reply OK" </dev/null > "${out:-/dev/null}" 2>&1 || rc=$?
   po=""; [ -n "$out" ] && po="$(LC_ALL=C tr -d '\033' < "$out" 2>/dev/null | LC_ALL=C sed 's/\[[0-9;]*[A-Za-z]//g')"
   if printf '%s' "$po" | grep -qi 'hosted outside Europe and the United States\|Select Global at ' 2>/dev/null; then printf 'model-refused'; return 0; fi
   if printf '%s' "$po" | grep -qiE "$_OPENCODE_PLAN_LIMIT_RE" 2>/dev/null; then
@@ -327,7 +340,7 @@ delegate_opencode() {
     *) die "delegate_opencode: bad tier: $tier" ;;
   esac
   case "$tier:$v" in auto:|accept-edits:)
-    die "opencode lane: cannot parse 'opencode --version' — the permission surface differs between v1 and v2 and an unparseable version cannot be trusted, so refusing to run '$tier' unenforced (same fail-closed posture as the cline lane). Nothing was run." ;; esac
+    die "opencode lane: cannot parse 'opencode --version' — supported majors are 1.x (read-only posture enforced; user agent-rule overrides remain a residual gap) and 2.x (recommended, adds the hard policies layer). A 0.x install (brew install opencode-ai/tap/opencode, npm i -g opencode-ai) predates both — upgrade with brew install opencode or npm i -g @opencode/cli@latest. Guessing the schema would launch '$tier' unenforced, so refusing (same fail-closed posture as the cline lane). Nothing was run." ;; esac
   local eff=() oe=""
   if [ -n "${EFFORT:-}" ]; then
     oe="$(_opencode_effort "$EFFORT")"
@@ -345,9 +358,13 @@ delegate_opencode() {
   [ -n "$oc_cfg" ] || die "opencode: refusing to run unenforced — the per-run permission config came out empty. Nothing was run."
   if have jq && ! printf '%s' "$oc_cfg" | jq -e . >/dev/null 2>&1; then die "opencode: refusing to run unenforced — the per-run permission config is not valid JSON. Nothing was run."; fi
   _tier_banner "opencode (OpenCode Go)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure opencode)"
-  local rc=0 _lerr sa=(); _lerr="$(_lane_errfile)"
+  local rc=0 _lerr sa=() pcenv=(); _lerr="$(_lane_errfile)"
   [ "$v" = "2" ] && sa=(--standalone)   # the shared background server ignores the per-run env config; a private one reads it
-  OPENCODE_CONFIG_CONTENT="$oc_cfg" _run_tee_stderr "$_lerr" opencode ${sa[@]+"${sa[@]}"} run ${aflag[@]+"${aflag[@]}"} -m "$id" ${eff[@]+"${eff[@]}"} -- "$wrapped" </dev/null || rc=$?
+  # A project opencode.json(c)/.opencode/ loads AFTER the inline config and its own policies
+  # evaluate last, so a hostile project reopens the denies (verified on v2.2.6). Read-only runs
+  # skip the project layer entirely; mutating tiers honour it by design.
+  [ "$cfg" = "readonly" ] && pcenv=(OPENCODE_DISABLE_PROJECT_CONFIG=1)
+  _run_tee_stderr "$_lerr" env OPENCODE_CONFIG_CONTENT="$oc_cfg" ${pcenv[@]+"${pcenv[@]}"} opencode ${sa[@]+"${sa[@]}"} run ${aflag[@]+"${aflag[@]}"} -m "$id" ${eff[@]+"${eff[@]}"} -- "$wrapped" </dev/null || rc=$?
   _opencode_classify "$_lerr" "$id" "$rc" || true
   [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
   record_ledger opencode "$id" "$ttier" "$tier" "$task" "$(_fg_run_cost opencode 0 "")" opencode
@@ -383,10 +400,10 @@ lane_descriptor_opencode() {
 _doctor_opencode() {
   echo "  -- OpenCode Go lane (opencode CLI + OpenCode Go subscription, $(_lane_cost_disclosure opencode)) --"
   if ! have opencode; then
-    echo "    opencode: NOT on PATH — install: https://opencode.ai/docs (brew install opencode-ai/tap/opencode or npm i -g opencode-ai), then 'opencode auth login' -> OpenCode Go"
+    echo "    opencode: NOT on PATH — install: https://opencode.ai/docs (brew install opencode or anomalyco/tap/opencode-v2 or npm i -g @opencode/cli@latest), then 'opencode auth login' -> OpenCode Go"
     return 0
   fi
-  echo "    opencode: $(opencode --version 2>/dev/null | head -1 || echo present)$([ -n "$(_opencode_ver)" ] || printf ' — WARNING: version unparseable, read-only/edit tiers will refuse until resolved') — route: --provider opencode run -m <go-model-id> \"task\" (a bare id becomes opencode-go/<id>; 'opencode models' lists them)"
+  echo "    opencode: $(opencode --version 2>/dev/null | head -1 || echo present)$([ -n "$(_opencode_ver)" ] || printf ' — WARNING: version unparseable (supported majors: 1.x, 2.x), read-only/edit tiers will refuse until resolved') — route: --provider opencode run -m <go-model-id> \"task\" (a bare id becomes opencode-go/<id>; 'opencode models' lists them)"
   if ! _opencode_go_authed; then
     echo "    opencode Go: NO OpenCode Go credential — run 'opencode auth login' and choose OpenCode Go (a plain 'OpenCode' entry is Zen pay-as-you-go, not Go)"
     return 0
@@ -394,26 +411,34 @@ _doctor_opencode() {
   echo "    opencode Go: credential present. Models: opencode models | grep '^opencode-go/'"
   if [ "$_doff" = "1" ]; then echo "    opencode liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
   elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
-    local _pt _prc=0 _dps="${OSRC_DOCTOR_PROBE_TIMEOUT_SECS:-30}" _dsa=()
+    local _pt _pte _prc=0 _dps="${OSRC_DOCTOR_PROBE_TIMEOUT_SECS:-30}" _dsa=()
     case "$_dps" in ''|*[!0-9]*) _dps=30 ;; esac
     _opencode_v2 && _dsa=(--standalone)
-    _pt="$(_timeout "$_dps" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" opencode ${_dsa[@]+"${_dsa[@]}"} run --agent plan -m opencode-go/glm-5.3-flash "Reply with exactly: OK" </dev/null 2>&1)" || _prc=$?
+    _pt="$(_timeout "$_dps" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode ${_dsa[@]+"${_dsa[@]}"} run --agent plan -m opencode-go/glm-5.3-flash "Reply with exactly: OK" </dev/null 2>&1)" || _prc=$?
     case "$_pt" in
       *"hosted outside Europe"*|*"Select Global"*)
         echo "    opencode liveness: LANE UP, probe model region-refused — glm-5.3-flash is hosted outside Europe/US; select Global at https://opencode.ai/console -> Settings > Privacy > Regions, or run with another Go model" ;;
       *"API key has expired"*|*"Create a new API key"*)
         echo "    opencode liveness: AUTH FAILURE — the Go API key has expired; create a new key in OpenCode Console and re-login: opencode auth login"
         _lane_down_mark opencode "${OSRC_LANE_DOWN_TTL:-300}" "OpenCode Go API key expired" 2>/dev/null || true ;;
-      *OK*|*Ok*)
-        if [ "$_prc" -eq 0 ]; then echo "    opencode liveness: READY — opencode-go/glm-5.3-flash answered (plan agent, read-only config, stdin closed)"; else echo "    opencode liveness: probe echoed OK but exited rc=$_prc — Go lane suspect"; fi ;;
       *)
+        # READY needs the same anchored word-boundary OK _opencode_free_probe uses, anchored to
+        # the END of the ANSI-stripped output (its last line): an HTTP "200 OK" status line or an
+        # OK substring inside an error page must never read as a healthy answer (the probe asks
+        # for exactly: OK). Portable ERE grep — no \b, no grep -w.
+        _pte="$(printf '%s' "$_pt" | LC_ALL=C tr -d '\033' | LC_ALL=C sed 's/\[[0-9;]*[A-Za-z]//g')"
+        _pte="${_pte%"${_pte##*[![:space:]]}"}"
         if printf '%s' "$_pt" | grep -qiE "$_OPENCODE_PLAN_LIMIT_RE"; then
           echo "    opencode liveness: lane UP but Go plan allowance spent on the probe model (per-model monthly + 5h/weekly windows — OpenCode Console has the live figure)"
-        elif [ "$_prc" -ne 0 ]; then
+        elif [ "$_prc" -eq 0 ] && printf '%s\n' "$_pte" | tail -1 | grep -qiE '(^|[^A-Za-z])OK[[:space:]]*$' 2>/dev/null; then
+          echo "    opencode liveness: READY — opencode-go/glm-5.3-flash answered (plan agent, read-only config, stdin closed)"
+        elif [ "$_prc" -eq 0 ]; then
+          echo "    opencode liveness: probe returned but did not echo OK — Go lane suspect"
+        elif printf '%s' "$_pte" | grep -qiE '(^|[^A-Za-z])OK([^A-Za-z]|$)' 2>/dev/null; then
+          echo "    opencode liveness: probe echoed OK but exited rc=$_prc — Go lane suspect"
+        else
           echo "    opencode liveness: NOT ANSWERING (rc=$_prc) — try a manual 'opencode run -m opencode-go/glm-5.3-flash \"reply OK\" </dev/null'"
           _lane_down_mark opencode "${OSRC_LANE_DOWN_TTL:-300}" "doctor probe rc=$_prc" 2>/dev/null || true
-        else
-          echo "    opencode liveness: probe returned but did not echo OK — Go lane suspect"
         fi ;;
     esac
   fi
