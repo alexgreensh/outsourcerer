@@ -11502,10 +11502,9 @@ _supervise() {
   # readers go through _pid_start_file_match, which accepts either rendering of the SAME
   # live process.
   LC_ALL=C ps -o lstart= -p "$$" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' > "$jd/supervisor_pid_start" 2>/dev/null || true
-  # Record start time for PID-reuse detection.
-  local _stime; _stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
-  _stime="${_stime:-$t0}"
-  printf '%s\n' "$_stime" > "$jd/pid_start"
+  # Record start time for PID-reuse detection; NO epoch fallback: a failed read leaves the baseline UNKNOWN until a real lstart latches it in-loop — an epoch placeholder can never equal a real lstart, so the first recovering poll would kill a healthy child as a reused pid (#60). Missing pid_start reads as "cannot tell" (rc 2), the fail-safe direction.
+  local _stime; _stime="$(_pid_start_identity "$pid" 2>/dev/null)" || _stime=""
+  [ -n "$_stime" ] && printf '%s\n' "$_stime" > "$jd/pid_start"
   # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
@@ -11560,7 +11559,8 @@ _supervise() {
   local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
-    local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
+    local _live_stime; _live_stime="$(_pid_start_identity "$pid" 2>/dev/null || printf '')"
+    [ -n "$_live_stime" ] && [ -z "$_stime" ] && { _stime="$_live_stime"; printf '%s\n' "$_stime" > "$jd/pid_start" 2>/dev/null || true; } # baseline unknown at spawn (#60): latch the first real read and heal pid_start; a pid recycled pre-latch is indistinguishable from the child — detected late (stall/hard-timeout bound it), never falsely
     if [ -n "$_live_stime" ] && [ "$_live_stime" != "$_stime" ]; then
       echo "[outsourcerer] WARN: PID $pid reused by another process, treating job as dead" >&2
       echo interrupted > "$jd/status"; printf 'interrupted:pid-reuse\n' > "$jd/reason" 2>/dev/null || true; echo 130 > "$jd/exit"; return 130
