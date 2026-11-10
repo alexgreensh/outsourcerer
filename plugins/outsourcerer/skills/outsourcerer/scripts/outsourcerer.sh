@@ -152,7 +152,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.15.3"
+OSRC_VERSION="0.15.4"
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -11509,13 +11509,10 @@ _supervise() {
   # Signal trap: kill the delegate tree if the supervisor is signaled.
   trap '_kill_job "$jd" "$pid"; echo interrupted > "$jd/status"; printf "interrupted:signal\n" > "$jd/reason" 2>/dev/null || true; exit 130' TERM INT
   # Exploration-spiral guard: a mutating verb that reads/greps forever grows the log, so the
-  # byte-growth timer never trips. Track WRITES too. First expose "exploring?" so it can be steered;
-  # if it then remains both write-free AND output-silent for another bounded window, stop it as a
-  # real stall. An observable warning without a terminal bound left jobs running forever.
-  # Prefer the verb passed by run_job via env (always in scope at the call site); fall back to
-  # meta.json only if it wasn't. Reading it ONLY from meta.json silently disabled the whole
-  # exploring? guard for every mutating verb on a host without jq (or on a failed meta write): no
-  # jq -> empty verb -> mutating=0 -> guard off. The env carry makes the watchdog jq-independent.
+  # byte-growth timer never trips. Track WRITES too: first expose "exploring?" so it can be
+  # steered; if it then stays write-free AND output-silent for a bounded window, stop it as a real
+  # stall. Prefer verb/lane via env (OSRC_JOB_VERB/OSRC_JOB_LANE) with meta.json as fallback:
+  # meta-only reading silently disabled these guards on jq-less hosts (no jq -> guard off).
   local verb="${OSRC_JOB_VERB:-}"
   [ -n "$verb" ] || { [ -f "$jd/meta.json" ] && verb="$(jq -r '.verb // ""' "$jd/meta.json" 2>/dev/null)"; }
   [ -f "$jd/meta.json" ] && _jcwd="$(jq -r '.cwd // ""' "$jd/meta.json" 2>/dev/null)"
@@ -11528,31 +11525,33 @@ _supervise() {
   local mutating=0; case "$verb" in edit|research|yolo) mutating=1 ;; esac
   local nww="${OSRC_NOWRITE_WARN:-180}"
   local nww_kill="${OSRC_NOWRITE_KILL:-$nww}"
-  # ZERO-WRITE WATCHDOG (progress, not silence). Every timer above measures SILENCE: byte growth,
-  # idle, the exploring? kill arm (idle >= nww_kill). A model that streams reasoning tokens for 15
-  # minutes while writing nothing keeps the log growing and trips none of them — the incident: a
-  # delegate burned its whole output budget twice on pure reasoning with zero files, flagged
-  # exploring? at 3 min but never bounded, and was only swapped by hand ~35 min in. This arm tracks
-  # the NO-WRITE AGE instead: time since .startmark with still zero qualifying writes while alive.
+  # ZERO-WRITE WATCHDOG (progress, not silence). Every timer above measures SILENCE, so a model
+  # that streams reasoning for 15 minutes while writing nothing trips none of them (incident: two
+  # ~17-min zero-write burns, flagged exploring? at 3 min, swapped by hand ~35 min in). This arm
+  # tracks the NO-WRITE AGE instead: time since .startmark with still zero qualifying writes.
   #   - past OSRC_NOPROGRESS_SECS (default 600; 0 disables) the job enters the DISTINCT state
   #     `no-progress-writes` — not stalled? (it is talking), not wedged (it is alive) — so status/
   #     heartbeat/the orchestrator see a live-but-unproductive burn and can steer or swap it;
-  #   - it is SURFACE-ONLY by default. Only an explicit OSRC_NOPROGRESS_KILL_SECS (unset/0 = off) hard-
-  #     bounds it like a stall, and only while still write-free. A legitimately thinking model is
-  #     never killed early by default; the goal is to make the zero-write burn visible in ~10 min.
-  #   - WRITE-EXPECTING verbs only: edit/yolo (their deliverable IS a file). `run`/`explore` are
-  #     read-only and `research` is an output-deliverable verb (the exploring? guard already treats a
-  #     write-free research job with fresh output as healthy) — none of them is ever flagged. TEXT-
-  #     delegation lanes (local/tokenrouter, see _lane_text_only) never write by design: exempt.
-  #   - a qualifying write (same _job_made_writes primitive, structured tool call OR a file newer than
-  #     .startmark) clears the state back to running; the check runs each poll only while flagged.
+  #   - SURFACE-ONLY by default: only an explicit OSRC_NOPROGRESS_KILL_SECS (unset/0 = off) hard-
+  #     bounds it, and only while still write-free; a thinking model is never killed by default;
+  #   - WRITE-EXPECTING verbs only (edit/yolo): run/explore are read-only, research's deliverable
+  #     is its output, and TEXT-delegation lanes (see _lane_text_only) never write by design: exempt;
+  #     a qualifying write (same _job_made_writes primitive) clears the state back to running.
   local nowrite_secs="${OSRC_NOPROGRESS_SECS:-600}" nowrite_kill="${OSRC_NOPROGRESS_KILL_SECS:-0}"
   case "$nowrite_secs" in ''|*[!0-9]*) nowrite_secs=600 ;; esac
   case "$nowrite_kill" in ''|*[!0-9]*) nowrite_kill=0 ;; esac
-  local _jlane=""; [ -f "$jd/meta.json" ] && _jlane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
+  local _jlane="${OSRC_JOB_LANE:-$([ -f "$jd/meta.json" ] && jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)}"
   local write_expecting=0; case "$verb" in edit|yolo) write_expecting=1 ;; esac
   _lane_text_only "$_jlane" && write_expecting=0
   [ "$nowrite_secs" -gt 0 ] || write_expecting=0
+  # LANE-AWARE NO-WRITE FLOOR (devin): the no-write kill's only inputs (out.log growth,
+  # _job_made_writes) stay dark during any single long quiet dv command, so its small default window
+  # pre-empted the widened dv stall window and reaped healthy delegates mid-test-suite (issue #58).
+  # Floor nww_kill up to the stall-kill window, which owns the silence verdict on this lane.
+  # WARN/flag clocks unchanged; never lowers a higher window. OSRC_DEVIN_NOWRITE_KILL (0=off).
+  [ "$_jlane" = "dv" ] && [ "${OSRC_DEVIN_NOWRITE_KILL:-$kill_after}" -gt 0 ] 2>/dev/null \
+    && [ "$nww_kill" -lt "${OSRC_DEVIN_NOWRITE_KILL:-$kill_after}" ] 2>/dev/null \
+    && nww_kill="${OSRC_DEVIN_NOWRITE_KILL:-$kill_after}"
   # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
@@ -11649,7 +11648,8 @@ _supervise() {
     # the warning proves it has still made no write before applying the real stall-kill. The same
     # silence bound applies once the job has moved on to no-progress-writes (a superset state: still
     # write-free), so the new state is never LESS bounded than exploring? was.
-    if [ "$mutating" = "1" ] && [ "$idle" -ge "$nww_kill" ] \
+    # dv: at a tie with the floored window the stall-kill below owns the silence verdict (issue #58).
+    if [ "$mutating" = "1" ] && [ "$idle" -ge "$nww_kill" ] && { [ "$_jlane" != "dv" ] || [ "$nww_kill" -lt "$kill_after" ]; } \
        && { [ "$(cat "$jd/status" 2>/dev/null)" = "exploring?" ] || [ "$(cat "$jd/status" 2>/dev/null)" = "no-progress-writes" ]; } \
        && ! _job_made_writes "$jd" "$_jcwd"; then
       echo wedged > "$jd/status"
@@ -12768,7 +12768,7 @@ run_job() {
   # backstop inside the child.
   local -a _run_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" \
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
