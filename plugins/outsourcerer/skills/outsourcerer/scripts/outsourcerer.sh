@@ -11402,10 +11402,9 @@ _lane_text_only() {
   return 1
 }
 
-# Positive initialization proof for the supervisor. A line is accepted only
-# when it can be real agent/model output: semantic progress, a structured
-# assistant/model event, or non-empty plain model text. Launcher disclosure,
-# tier banners (for every tier), and stderr diagnostics never initialize a job.
+# Positive initialization proof for the supervisor: a line is accepted only when it can be real
+# agent/model output — semantic progress, a structured assistant/model event, or plain model text.
+# Launcher disclosure, tier banners and stderr diagnostics never initialize a job.
 _delegate_has_model_output() { # <out.log> <progress>
   local log="$1" progress="${2:-}"
   [ -s "$progress" ] && grep -aqE '^OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$progress" 2>/dev/null && return 0
@@ -11423,9 +11422,10 @@ _delegate_has_model_output() { # <out.log> <progress>
     /^[[:space:]]*tier=[^,[:space:]]+([,[:space:]]|$)/ { next }
     /^[[:space:]]*(ERROR|ERR|FATAL|WARN|WARNING)(:|[[:space:]])/ { next }
     /^[[:space:]]*\[[^]]*(ERROR|ERR|FATAL|WARN|WARNING)[^]]*\]/ { next }
-    # hardened diagnostic-verb denylist (adds Retrying|Waiting|Reconnecting|Resuming|Connected|Authenticated|Ready)
-    /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected|Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ { next }
-    # hook/tool/session lifecycle lines
+    # status-opener denylist: machine-state verbs denied at ANY length; conversational verbs denied
+    # when short (<120 — a real devin -p reply can open "Starting the fix round...") or churn-phrased
+    /^[[:space:]]*(Connecting|connecting|Connection|Reconnecting|Retrying|Waiting|Resuming|Authenticating|Authenticated|Connected)([.[:space:]:]|$)/ { next }
+    /^[[:space:]]*(Loading|Starting|Initializing|Initialized|Warming|Ready|Preparing|Spawning|Launching)([.[:space:]:]|$)/ && (length($0) < 120 || /attempt [0-9]+ *of *[0-9]+|backoff [0-9]+s|will keep trying/) { next }
     /^[[:space:]]*(Hook|Tool|SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|Notification|Stop|SubagentStop|PreCompact)(:|[[:space:]])/ { next }
     # generic "Word:" log-prefix (SessionStart: , Foo: ) and [bracketed] log prefixes
     /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*:[[:space:]]/ { next }
@@ -11487,7 +11487,7 @@ _supervise() {
   if [ -n "$_pgid" ] && [ "$_pgid" -gt 1 ] 2>/dev/null && [ "$_pgid" != "$_shell_pgid" ]; then
     printf '%s\n' "$_pgid" > "$jd/pgid" 2>/dev/null || true
   fi
-  local t0 last_size=0 last_change now size idle age _jcwd=""
+  local t0 last_size=0 last_change now size idle age _jcwd="" _idmt=""
   t0=$(date +%s); last_change=$t0
   echo "$pid" > "$jd/pid"
   # Persist the SUPERVISOR's own pid + start-time too. If this watchdog process is killed
@@ -11553,11 +11553,10 @@ _supervise() {
   local write_expecting=0; case "$verb" in edit|yolo) write_expecting=1 ;; esac
   _lane_text_only "$_jlane" && write_expecting=0
   [ "$nowrite_secs" -gt 0 ] || write_expecting=0
-  # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
-  # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
-  # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
-  # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0"
+  # A live process is not proof that the delegate reached its first model turn: SessionStart hooks
+  # and parked lanes can keep the child alive on disclosure-header noise alone. Initialization gets
+  # its own deadline and its own clock (ni0); real output hands off to the stall/false-stall logic.
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0"
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g' || printf '')"
@@ -11593,14 +11592,15 @@ _supervise() {
     # only before the delegate's first output, so a lockwait file left behind (or written by the
     # delegate itself) cannot disarm a running job; the hard timeout always counts from launch (t0).
     # The queue wait has its own bound (OSRC_DEVIN_LOCK_WAIT_MAX) and its log line names the holder.
-    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; }
+    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; ni0=$now; }
     idle=$(( now - last_change )); age=$(( now - qt0 ))
-    # Require positive proof of a model/agent turn. Byte growth alone includes
-    # launcher headers, blank lines, stderr diagnostics, and every tier banner.
+    # Positive proof a turn started (byte growth alone is launcher noise); devin -p prints nothing
+    # until exit, so each fresh devin-log mtime advances ni0 — the no-init clock ONLY, kept off qt0
+    # (which also clocks the no-write arms) so a warm log cannot hide a write-free burn. OSRC_DEVIN_LIVENESS=0.
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
-    fi
-    if [ "$initialized" = "0" ] && [ "$age" -ge "$noinit" ]; then
+    elif [ "$initialized" = "0" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ] && _idmt="$(_devin_live_mtime "$pid")" && [ -n "$_idmt" ] && [ "$_idmt" -gt "$ni0" ] && [ "$_idmt" -le "$(date +%s)" ]; then ni0="$_idmt"; fi
+    if [ "$initialized" = "0" ] && [ $(( now - ni0 )) -ge "$noinit" ]; then
       local _noinit_reason
       _noinit_reason="no-init: delegate never started within ${noinit}s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot"
       echo wedged > "$jd/status"
@@ -11747,10 +11747,10 @@ _supervise() {
     # devin's non-streaming print mode (see _devin_live_mtime) that left the watchdog with no signal
     # whatsoever on this lane, and it was reaping healthy delegates on a timer — every wedged job in
     # the local history is a devin one, killed within poll slop of the stall window while its own log
-    # showed it still reading files. Ask devin's log directly instead. OSRC_DEVIN_LIVENESS=0 disables.
+    # showed it still reading files. Ask devin's log directly instead. OSRC_DEVIN_LIVENESS=0 disables; mtimes ahead of now are distrusted.
     if [ "$idle" -ge "$warn" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ]; then
       local _dmt
-      if _dmt="$(_devin_live_mtime "$pid")" && [ -n "$_dmt" ] && [ "$_dmt" -gt "$last_change" ]; then
+      if _dmt="$(_devin_live_mtime "$pid")" && [ -n "$_dmt" ] && [ "$_dmt" -gt "$last_change" ] && [ "$_dmt" -le "$(date +%s)" ]; then
         last_change="$_dmt"; idle=$(( now - last_change ))
         [ "$(cat "$jd/status" 2>/dev/null)" = "stalled?" ] && echo running > "$jd/status"
       fi
