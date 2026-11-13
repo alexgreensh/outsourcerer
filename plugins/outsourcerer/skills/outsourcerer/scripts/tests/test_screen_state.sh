@@ -107,6 +107,10 @@ CAP="$FX/cc-reply-numbered-list.ansi"; [ "$(_managed_menu_detect p 2>/dev/null |
 CAP="$FX/cc-idle-after-work.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "idle cc pane read as a menu"
 CAP="$FX/cc-permission-bash.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "real cc permission prompt not detected as a menu"
 CAP="$FX/cc-askuserquestion.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "cc question picker not detected as a menu"
+# Unknown lane, unrecognised layout: the legacy path must still not call a composer box a menu.
+_managed_provider() { printf droid; }
+printf '%s\n' '────────────────────' '❯ hello there' '────────────────────' '  model x | ctx 3%' '  shift+p to plan' > "$TMP/generic-composer.txt"
+CAP="$TMP/generic-composer.txt"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "legacy path read a composer box as a menu"
 _managed_provider() { printf devin; }
 CAP="$FX/dv-approval.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "devin approval not detected as a menu"
 
@@ -163,5 +167,14 @@ _osrc_session_adopt_record
 [ "$PROVIDER" = cc ] && [ "$MODEL" = claude-fable-5-2 ] && ok || bad "effort lane resolution: PROVIDER=$PROVIDER MODEL=$MODEL"
 PROVIDER=codex; PROVIDER_EXPLICIT=1; _osrc_session_adopt_record
 [ "$PROVIDER" = codex ] && ok || bad "an explicit --provider was overridden"
+
+# ---- tmux isolation guard (2026-11-13 incident: a bare server kill run from inside a pane took down
+# the user's REAL tmux server, because $TMUX wins over TMUX_TMPDIR). Any test that kills a tmux
+# server without -L/-S must unset TMUX first.
+KS="kill""-server"
+for t in "$HERE"/test_*.sh "$HERE"/conformance.sh; do
+  grep -v '^[[:space:]]*#' "$t" | grep -q "tmux $KS" || continue
+  grep -qE 'unset TMUX( |$)' "$t" && ok || bad "$(basename "$t") kills a tmux server without unsetting TMUX (hits the real server from inside a pane)"
+done
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

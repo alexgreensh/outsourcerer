@@ -17,6 +17,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 TMP="$(mktemp -d /tmp/osrc-wl.XXXXXX)"
 export TMUX_TMPDIR="$TMP/t"; mkdir -p "$TMUX_TMPDIR"
+# Inside a tmux pane $TMUX wins over TMUX_TMPDIR, so the cleanup trap would hit the REAL server.
+unset TMUX TMUX_PANE
 trap 'tmux kill-server 2>/dev/null; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090

@@ -37,10 +37,34 @@ _managed_menu_detect() { # <pane>
   local LC_ALL; LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL
   # Gate (L3): a recognised engine layout decides. Composer, idle, working = no menu, whatever rows
   # happen to sit in the tail.
-  _osrc_screen_analyze_text "$(_osrc_screen_engine_of "$pane")" <<<"$raw_cap"
+  local _eng _settle=0 _i
+  _eng="$(_osrc_screen_engine_of "$pane")"
+  _osrc_screen_analyze_text "$_eng" <<<"$raw_cap"
+  # A known engine mid-redraw (e.g. Claude Code restarting after the trust prompt) can show a
+  # partial frame. Give it a moment to settle before falling back to the legacy heuristics, which
+  # misread a half-drawn composer as a cursor menu (seen live 2026-11-13).
+  case "$(_osrc_scr_engine_norm "$_eng")" in cc|codex|devin|agy|gemini) _settle=1 ;; esac
+  while [ "$_settle" = 1 ] && [ "${OSRC_SCR_GENERIC:-1}" = 1 ] && [ "${_i:-0}" -lt "${OSRC_MENU_SETTLE_POLLS:-4}" ]; do
+    sleep 0.5; _i=$(( ${_i:-0} + 1 ))
+    cap="$(tmux capture-pane -e -t "$pane" -p 2>/dev/null)" || break
+    raw_cap="$cap"; cap="$(printf '%s\n' "$cap" | _managed_strip_ansi)"
+    raw_tail_region="$(printf '%s\n' "$raw_cap" | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")"
+    tail_region="$(printf '%s\n' "$cap" | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")"
+    _osrc_screen_analyze_text "$_eng" <<<"$raw_cap"
+  done
   if [ "${OSRC_SCR_GENERIC:-1}" != 1 ]; then
     case "$OSRC_SCR_STATE" in approval|question) ;; *) printf 'MENU none\n'; return 0 ;; esac
   fi
+  # Legacy path guard: a prompt-glyph row that sits directly between two horizontal rules is a
+  # composer box, and a `❯ Try "…"` row is Claude Code's composer placeholder. Neither is a menu.
+  local _j=1
+  while [ "$_j" -lt $((_SCR_N - 1)) ]; do
+    case "${_SCR_L[$_j]}" in
+      '❯ Try "'*) printf 'MENU none\n'; return 0 ;;
+      '❯'*|'❭'*|'>'*|'›'*) _osrc_scr_is_rule "${_SCR_L[$((_j - 1))]}" && _osrc_scr_is_rule "${_SCR_L[$((_j + 1))]}" && { printf 'MENU none\n'; return 0; } ;;
+    esac
+    _j=$((_j + 1))
+  done
 
   local consent_re='(\[y/N\]|\(y/n\)|\[Y/n\]|\[y/n\])'
   if printf '%s\n' "$tail_region" | grep -Eq "$consent_re"; then

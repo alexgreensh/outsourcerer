@@ -67,7 +67,10 @@ ARM_LOG="$TMP/arm-log"; : > "$ARM_LOG"
 _heartbeat_arm_verify() { echo arm >> "$ARM_LOG"; return 0; }
 
 SESSION_NAME=effort-test
+# Each case below stands for `--provider <lane>` on the command line. Since L3, a session subcommand
+# without --provider resolves the lane from the session's start record, so mark the lane explicit.
 PROVIDER=codex
+PROVIDER_EXPLICIT=1
 MODEL=sol
 MODEL_EXPLICIT=1
 EFFORT=""

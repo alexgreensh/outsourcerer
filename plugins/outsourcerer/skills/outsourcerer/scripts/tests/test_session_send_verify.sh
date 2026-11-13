@@ -544,7 +544,7 @@ grep -q 'session send refused: the pane is showing an interactive choice menu' "
 grep -q 'Use '"'"'session answer'"'"' to select an option' "$SRC" && ok "send refusal names session answer" || bad "send refusal does not name session answer"
 grep -q 'EVENT failed %s %s send did not land' "$SRC" && ok "send failure is an EVENT failed line, never 'sent' (L3)" || bad "send failure message wrong"
 grep -q 'Pane state:' "$SRC" && ok "send failure carries the real pane state" || bad "send failure omits pane state"
-grep -q 'sent (submitted: ' "$SRC" && ok "rc 2 message states the submission evidence" || bad "rc 2 message wrong"
+grep -q 'sent (submitted, text left the composer; model delivery NOT independently verified' "$SRC" && ok "rc 2 message states the submission evidence" || bad "rc 2 message wrong"
 grep -q 'session control <interrupt|exit|relaunch>' "$SRC" && ok "control subcommand advertised in usage" || bad "control not in usage"
 grep -q 'answer \[y|n|<index>|<label>\]' "$SRC" && ok "answer subcommand advertised in usage" || bad "answer not in usage"
 # The control plane must be strictly separate from send: lifecycle text must never be delivered as chat.
