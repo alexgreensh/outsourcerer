@@ -180,6 +180,10 @@ LIB="$HERE/../lib"
 grep -q 'src="http\|href="https://fonts\|jsdelivr\|googleapis\|gstatic' "$PAGE" \
   && bad "third-party script/font URL still in page" || ok "no third-party script or font URL in page"
 grep -q 'const ICONS' "$PAGE" && ok "icons inlined (no lucide script needed)" || bad "ICONS map missing"
+grep -q '@font-face' "$PAGE" && grep -q 'assets/fonts/poppins-400.woff2' "$PAGE" \
+  && ok "vendored font @font-face blocks wired" || bad "font-face blocks missing"
+grep -q '"Poppins"' "$PAGE" && grep -q -- '--mono: var(--sans)' "$PAGE" && grep -q -- '--code: ui-monospace' "$PAGE" \
+  && ok "Poppins everywhere, real mono only for code (v22)" || bad "v22 font stack missing"
 for f in poppins-400 poppins-500 poppins-600 poppins-700 noto-sans-hebrew; do
   [ -f "$LIB/hub-assets/fonts/$f.woff2" ] && head -c4 "$LIB/hub-assets/fonts/$f.woff2" | grep -q 'wOF2' \
     && ok "$f.woff2 vendored and valid" || bad "$f.woff2 missing/corrupt"
