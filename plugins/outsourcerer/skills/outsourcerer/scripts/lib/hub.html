@@ -15,23 +15,23 @@
   --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
   color-scheme: light;
 }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --paper: #18191c; --ink: #f5f5f6; --line: #5c5f68; --thumb: #3a3c43; --card: #232428;
-  --hi: #ffe866; --hi-soft: #2a2a2e; --hi-line: #ffe866; --mark: transparent; --on-hi: #1f1f1c;
-  --up: #c4f2d0; --up-bg: #1d4a2c; --down: #ffd0c7; --down-bg: #5a2219;
-  --blob: #0e0f11; --eye: #fff8e1; --shadow: #000000; --pop: #2e3035; --hov-fill: var(--thumb); --edge: #a8a59c; --track: #55524b; --focus: #ffe866; --dot-ok: #6fcf8e; --dot-out: #ef8a7a; color-scheme: dark; } }
-:root[data-theme="dark"] { --paper: #18191c; --ink: #f5f5f6; --line: #5c5f68; --thumb: #3a3c43; --card: #232428;
-  --hi: #ffe866; --hi-soft: #2a2a2e; --hi-line: #ffe866; --mark: transparent; --on-hi: #1f1f1c;
-  --up: #c4f2d0; --up-bg: #1d4a2c; --down: #ffd0c7; --down-bg: #5a2219;
-  --blob: #0e0f11; --eye: #fff8e1; --shadow: #000000; --pop: #2e3035; --hov-fill: var(--thumb); --edge: #a8a59c; --track: #55524b; --focus: #ffe866; --dot-ok: #6fcf8e; --dot-out: #ef8a7a; color-scheme: dark; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --paper: #16171a; --ink: #ededf0; --line: #34363d; --thumb: #2b2d33; --card: #1f2024;
+  --hi: #ffe866; --hi-soft: #24241f; --hi-line: #e8d45a; --mark: transparent; --on-hi: #1f1f1c;
+  --up: #9fe3b4; --up-bg: #173a24; --down: #ffb4a6; --down-bg: #3f1c16;
+  --blob: #0e0f11; --eye: #fff8e1; --shadow: transparent; --pop: #27292e; --hov-fill: var(--thumb); --edge: #3a3d45; --track: #34363d; --focus: #ffe866; --dot-ok: #9fe3b4; --dot-out: #ffb4a6; color-scheme: dark; } }
+:root[data-theme="dark"] { --paper: #16171a; --ink: #ededf0; --line: #34363d; --thumb: #2b2d33; --card: #1f2024;
+  --hi: #ffe866; --hi-soft: #24241f; --hi-line: #e8d45a; --mark: transparent; --on-hi: #1f1f1c;
+  --up: #9fe3b4; --up-bg: #173a24; --down: #ffb4a6; --down-bg: #3f1c16;
+  --blob: #0e0f11; --eye: #fff8e1; --shadow: transparent; --pop: #27292e; --hov-fill: var(--thumb); --edge: #3a3d45; --track: #34363d; --focus: #ffe866; --dot-ok: #9fe3b4; --dot-out: #ffb4a6; color-scheme: dark; }
 /* The page's own switch wins over the host theme: same specificity, later in the cascade. */
 :root[data-osrc-theme="light"] { --paper: #fbfaf7; --ink: #1f1f1c; --line: #8f8a7e; --thumb: #efede7; --card: #ffffff;
   --hi: #ffe866; --hi-soft: #fff7c7; --hi-line: #1f1f1c; --mark: #ffe866; --on-hi: #1f1f1c;
   --up: #10331a; --up-bg: #dff5e3; --down: #5c1a12; --down-bg: #fbe3dc;
   --blob: #1f1f1c; --eye: #fff8e1; --shadow: #1f1f1c; --pop: #ffffff; --hov-fill: var(--card); --edge: #1f1f1c; --track: #cbc7bd; --focus: #1f1f1c; --dot-ok: #2f8f4e; --dot-out: #c2412d; color-scheme: light; }
-:root[data-osrc-theme="dark"] { --paper: #18191c; --ink: #f5f5f6; --line: #5c5f68; --thumb: #3a3c43; --card: #232428;
-  --hi: #ffe866; --hi-soft: #2a2a2e; --hi-line: #ffe866; --mark: transparent; --on-hi: #1f1f1c;
-  --up: #c4f2d0; --up-bg: #1d4a2c; --down: #ffd0c7; --down-bg: #5a2219;
-  --blob: #0e0f11; --eye: #fff8e1; --shadow: #000000; --pop: #2e3035; --hov-fill: var(--thumb); --edge: #a8a59c; --track: #55524b; --focus: #ffe866; --dot-ok: #6fcf8e; --dot-out: #ef8a7a; color-scheme: dark; }
+:root[data-osrc-theme="dark"] { --paper: #16171a; --ink: #ededf0; --line: #34363d; --thumb: #2b2d33; --card: #1f2024;
+  --hi: #ffe866; --hi-soft: #24241f; --hi-line: #e8d45a; --mark: transparent; --on-hi: #1f1f1c;
+  --up: #9fe3b4; --up-bg: #173a24; --down: #ffb4a6; --down-bg: #3f1c16;
+  --blob: #0e0f11; --eye: #fff8e1; --shadow: transparent; --pop: #27292e; --hov-fill: var(--thumb); --edge: #3a3d45; --track: #34363d; --focus: #ffe866; --dot-ok: #9fe3b4; --dot-out: #ffb4a6; color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body { background: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.5; }
@@ -177,8 +177,7 @@ section > h2 { margin: 0; font-size: 1.5rem; font-weight: 600; text-wrap: balanc
 .theme { display: flex; flex-direction: column; gap: 12px; }
 .theme h3 { margin: 0; font-size: 1.15rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .theme .lanes { grid-template-columns: 1fr; }
-.themes > :last-child:nth-child(odd) { grid-column: 1 / -1; }
-.themes > :last-child:nth-child(odd) .lanes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tcol { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .decs > :only-child { grid-column: 1 / -1; max-width: 70ch; }
 .refs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .refs a { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: .75rem; font-weight: 700; color: var(--ink); text-decoration: none; padding: 0 7px; border: 1.5px solid var(--line); border-radius: 999px; background: var(--paper); }
@@ -669,7 +668,16 @@ a.pill svg { width: 13px; height: 13px; }
       });
       const orphans = (p.themes && p.themes.length) ? lanes.filter((l) => !p.themes.some((th) => th.k === l.theme)) : [];
       if (orphans.length) { const box = el('div', 'card theme'); box.append(el('h3', null, 'Other')); const grid = el('div', 'lanes'); orphans.forEach((l) => grid.appendChild(laneTile(l))); box.appendChild(grid); wrap.appendChild(box); }
-      if (wrap.children.length === 1) wrap.style.gridTemplateColumns = '1fr';
+      // Balanced two-column packing (Alex 18:40): each card joins the shorter column, so a short theme never leaves a hole beside a tall one.
+      const cards = [...wrap.children];
+      if (cards.length > 1) {
+        const cols = [el('div', 'tcol'), el('div', 'tcol')], hgt = [0, 0];
+        cards.forEach((c) => {
+          const w = 1.2 + [...c.querySelectorAll('.tile')].reduce((a, t) => a + 1 + Math.floor(t.querySelectorAll('.refs > *').length / 4) * 0.4, 0);
+          const i = hgt[0] <= hgt[1] ? 0 : 1; cols[i].appendChild(c); hgt[i] += w;
+        });
+        wrap.replaceChildren(...cols.filter((c) => c.children.length));
+      } else wrap.style.gridTemplateColumns = '1fr';
       sec2.appendChild(wrap); main.appendChild(sec2);
     }
     if (!ds.length) decSec();

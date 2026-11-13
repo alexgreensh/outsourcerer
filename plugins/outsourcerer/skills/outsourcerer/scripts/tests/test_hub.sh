@@ -130,7 +130,10 @@ grep -q "Show ' + rest" "$PAGE" && ok "folded panel has 'Show N more' button" ||
 grep -q 'LSTATE = {' "$PAGE" && grep -q "unknown:" "$PAGE" && ok "limit states incl. unknown" || bad "LSTATE/unknown missing"
 grep -q 'HICONS' "$PAGE" && grep -q 'HALIAS' "$PAGE" && grep -q 'function hlogo' "$PAGE" && ok "harness icons via HICONS/HALIAS/hlogo" || bad "harness icon system missing"
 grep -q 'wiz-bob' "$PAGE" && grep -q 'prefers-reduced-motion' "$PAGE" && ok "animated wizard logo + reduced-motion gate" || bad "wizard animation missing"
-grep -q '#18191c' "$PAGE" && grep -q '#232428' "$PAGE" && grep -q '#5c5f68' "$PAGE" && ok "dark tokens present" || bad "dark tokens missing"
+grep -q '#16171a' "$PAGE" && grep -q '#1f2024' "$PAGE" && grep -q '#34363d' "$PAGE" && ok "dark v2 tokens present" || bad "dark v2 tokens missing"
+grep -cq '#18191c' "$PAGE" && bad "old dark tokens still present" || ok "old dark tokens fully replaced"
+grep -q "el('div', 'tcol')" "$PAGE" && grep -q '^\.tcol ' "$PAGE" && ok "balanced .tcol theme packing" || bad ".tcol packing missing"
+grep -q 'hgt\[0\] <= hgt\[1\]' "$PAGE" && ok "theme cards join the shorter column" || bad "column balance check missing"
 grep -q '100dvh' "$PAGE" && grep -q 'rail-top' "$PAGE" && grep -q 'rail-mid' "$PAGE" && ok "rail layout (rail-top/rail-mid/100dvh)" || bad "rail layout missing"
 grep -q 'mask' "$PAGE" && grep -q 'data:image/png;base64' "$PAGE" && ok "wordmark css mask (inlined asset)" || bad "wordmark mask missing"
 
