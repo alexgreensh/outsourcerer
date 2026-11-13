@@ -142,7 +142,8 @@ fi
 # --- source-level: the guard is wired into BOTH session-start switches for the lanes that build
 #     their launch inline (devin/codex/cc/gemini), so a future CLI dropping --model can't bill
 #     silently on those lanes either. droid refuses unconditionally inside the adapter. ---
-_n_assert=$(grep -c '_session_assert_model_pinnable' "$SRC")
+# The helper's definition moved to scripts/lib/perm.sh (file-size ratchet); count both files.
+_n_assert=$(cat "$SRC" "$SCRIPT_DIR/../lib/perm.sh" | grep -c '_session_assert_model_pinnable')
 [ "$_n_assert" -ge 7 ] \
   && ok "guard wired in >=7 sites (helper def + droid-refuse comment-free + devin x2 switches + codex/cc/gemini via descriptor session_fn): $_n_assert" \
   || no "guard not wired into all session-start switches (found $_n_assert references, want >=7)"
