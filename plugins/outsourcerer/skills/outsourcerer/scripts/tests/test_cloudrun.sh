@@ -249,6 +249,45 @@ out="$(start_cloud t-claude-nogate --repo "$WORK" --base main --brief "$BRIEF" -
 [ $rc -eq 0 ] && echo "$out" | grep -q 'spend gate not loaded' \
   && ok "spend: claude subscription lane proceeds with note" || bad "spend: claude no-gate path (rc=$rc): $out"
 
+# ---- finding C: --spend-ok exports OSRC_SPEND_OK, devin always asks, OSRC_SPEND_NEXT set ----
+# gate loaded AND permissive: devin STILL refuses without the flag (gate is additive, not a substitute)
+out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
+  source "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate() { echo "GATE|$1|$2|$3|$4|SPEND_OK=${OSRC_SPEND_OK:-unset}|NEXT=${OSRC_SPEND_NEXT:-unset}" >> "'"$OSRC_STUB_LOG"'"; return 0; }
+  SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-dvgate --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin
+' 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q -- '--spend-ok' \
+  && ok "spend: devin refuses without --spend-ok even when gate loaded" || bad "spend: gate substituted for flag (rc=$rc): $out"
+grep -q 'GATE|dv||devin|cloud session t-dvgate' "$OSRC_STUB_LOG" \
+  && ok "spend: gate still called for devin (additive)" || bad "spend: gate not called for devin"
+# --spend-ok exports OSRC_SPEND_OK=1 + OSRC_SPEND_NEXT carries the runnable line
+: > "$OSRC_STUB_LOG"
+out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
+  source "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate() { echo "GATE|SPEND_OK=${OSRC_SPEND_OK:-unset}|NEXT=${OSRC_SPEND_NEXT:-unset}" >> "'"$OSRC_STUB_LOG"'"; return 0; }
+  SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-dvok --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin --spend-ok
+' 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && grep -q 'GATE|SPEND_OK=1|' "$OSRC_STUB_LOG" \
+  && ok "spend: --spend-ok exports OSRC_SPEND_OK=1 to the gate" || bad "spend: OSRC_SPEND_OK not exported (rc=$rc): $out"
+grep 'GATE|' "$OSRC_STUB_LOG" | grep -q 'NEXT=.*cloud start t-dvok' \
+  && ok "spend: OSRC_SPEND_NEXT carries the runnable cloud start line" || bad "spend: OSRC_SPEND_NEXT wrong: $(grep GATE "$OSRC_STUB_LOG")"
+# inherited OSRC_SPEND_OK=1 WITHOUT the flag does not satisfy the devin check
+out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 OSRC_SPEND_OK=1 bash -c '
+  source "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-dvenv --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin
+' 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q -- '--spend-ok' \
+  && ok "spend: inherited OSRC_SPEND_OK=1 does not approve devin" || bad "spend: env var approved devin (rc=$rc)"
+# heavy-* lane ids refuse to run without --sha (pack cannot drift from the offer)
+out="$(start_cloud heavy-1-deadbeef --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q -- '--sha' \
+  && ok "sha: heavy-* id refuses without --sha" || bad "sha: heavy id ran without --sha (rc=$rc): $out"
+out="$(start_cloud heavy-2-deadbeef --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude --sha "$(git -C "$WORK" rev-parse HEAD)" 2>&1)"; rc=$?
+[ $rc -eq 0 ] && ok "sha: heavy-* id + --sha launches" || bad "sha: heavy id + --sha failed (rc=$rc): $out"
+
 # ============================== URL credential stripping ==============================
 cu="$(_osrc_url_clean 'https://x-access-token:TOK123@github.com/acme/widgets.git')"
 [ "$cu" = "https://github.com/acme/widgets.git" ] \

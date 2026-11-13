@@ -450,7 +450,7 @@ _cloudrun_start() {
       --env)        env="${2:-}"; shift 2 ;;
       --claude-env) claudeenv="${2:-}"; shift 2 ;;
       --model)      model="${2:-}"; shift 2 ;;
-      --spend-ok)   spendok=1; shift ;;
+      --spend-ok)   spendok=1; OSRC_SPEND_OK=1; export OSRC_SPEND_OK; shift ;;
       --sha)        pinsha="${2:-}"; shift 2 ;;
       *) die "cloud start: unknown option '$1'" ;;
     esac
@@ -497,6 +497,10 @@ _cloudrun_start() {
     local pinunp; pinunp="$(git -C "$top" rev-list --count "$pinsha" --not --remotes 2>/dev/null)"
     case "$pinunp" in ''|*[!0-9]*) pinunp=1 ;; esac
     [ "$pinunp" = "0" ] || die "cloud: --sha '$pinsha' has commits not on any remote — the hosted session could never see it"
+  elif [ "${id#heavy-}" != "$id" ]; then
+    # heavy-gate lanes embed the offered sha in their id; without --sha the pack would pin
+    # whatever HEAD happens to be at approval time and the RESULT could describe other code
+    die "cloud: lane id '$id' came from a heavy-check offer — pass --sha <the offered commit> so the pack cannot drift"
   fi
   # preflight: pushed base + no unpushed work + repo match (above)
   _cloudrun_preflight "$fetch" "$base" "$top"
@@ -511,18 +515,29 @@ _cloudrun_start() {
   local veh; veh="$(_cloudrun_pick_vehicle "$vehicle" "$env")" \
     || die "cloud: no usable hosted-session vehicle"
   [ "$veh" = codex ] && [ -z "$env" ] && die "cloud: codex vehicle needs --env <id> or OSRC_CODEX_CLOUD_ENV"
-  # Spend gate, FAIL CLOSED (L10-r2 verdict finding A): L7's `_osrc_spend_gate` does not
-  # exist on any branch yet, so "not loaded" must not mean "billing unchecked". Interface
-  # agreed in CONTRACT.md: `_osrc_spend_gate <lane> <model> <vehicle> <desc>` rc0=allow.
-  # Until L7 ships it: Devin cloud bills metered ACU and ALWAYS asks — this one command
-  # needs --spend-ok. Claude/Codex are flat subscription lanes; they proceed with a note.
+  # Spend gate, FAIL CLOSED + per-launch consent export (L10-r3 verdict finding C):
+  # --spend-ok exports OSRC_SPEND_OK=1 for THIS process so L7's gate (which consents on
+  # that var) sees this command's approval; OSRC_SPEND_NEXT carries the runnable `cloud
+  # start` line so a gate refusal can print it. Devin cloud is metered: it ALWAYS
+  # requires --spend-ok whether or not a gate is loaded — the gate is called in
+  # addition, never instead. Interface agreed in CONTRACT.md.
+  local _sp_lane spendnext
+  case "$veh" in claude) _sp_lane=cc ;; devin) _sp_lane=dv ;; codex) _sp_lane=cx ;; *) _sp_lane="$veh" ;; esac
+  spendnext="\"${SCRIPT_PATH:-$0}\" cloud start $id --repo $(printf '%q' "$repo") --base $(printf '%q' "$base") --brief $(printf '%q' "$brief") --vehicle $veh --where cloud"
+  [ -n "$env" ] && spendnext="$spendnext --env $(printf '%q' "$env")"
+  [ -n "$claudeenv" ] && spendnext="$spendnext --claude-env $(printf '%q' "$claudeenv")"
+  [ -n "$model" ] && spendnext="$spendnext --model $(printf '%q' "$model")"
+  [ -n "$pinsha" ] && spendnext="$spendnext --sha $pinsha"
+  [ -n "$donewhen" ] && spendnext="$spendnext --done-when $(printf '%q' "check:$donewhen")"
+  [ "$spendok" = "1" ] && spendnext="$spendnext --spend-ok"
+  OSRC_SPEND_NEXT="$spendnext"; export OSRC_SPEND_NEXT
   if declare -F _osrc_spend_gate >/dev/null 2>&1; then
-    local _sp_lane; case "$veh" in claude) _sp_lane=cc ;; devin) _sp_lane=dv ;; codex) _sp_lane=cx ;; *) _sp_lane="$veh" ;; esac
     _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \
-      || die "cloud: spend gate refused the hosted-session launch"
-  elif [ "$veh" = "devin" ]; then
-    [ "$spendok" = "1" ] || die "cloud: devin cloud bills metered usage and no spend gate is loaded — re-run with --spend-ok to approve THIS launch only"
-  else
+      || die "cloud: spend gate refused the hosted-session launch (NEXT: $OSRC_SPEND_NEXT)"
+  fi
+  if [ "$veh" = "devin" ]; then
+    [ "$spendok" = "1" ] || die "cloud: devin cloud bills metered usage — re-run with --spend-ok to approve THIS launch only"
+  elif ! declare -F _osrc_spend_gate >/dev/null 2>&1; then
     printf '>>> [cloud] note: L7 spend gate not loaded — %s is a subscription lane; per-launch billing unchecked\n' "$veh" >&2
   fi
   _cloudrun_consent "$veh" "$(_cloudrun_vehicle_quota "$veh")"

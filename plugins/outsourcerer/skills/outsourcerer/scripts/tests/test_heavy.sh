@@ -134,6 +134,14 @@ hv 1 "light: python -m compileall"    "python -m compileall src/"
 hv 1 "light: uv run python app"       "uv run python app.py"
 hv 1 "light: npm run lint"            "npm run lint"
 hv 1 "light: sh -c echo"              'sh -c "echo hi"'
+# --- round-4 classifier edges ---
+hv 0 "heavy: bash -x -c npm test"     'bash -x -c "npm test"'
+hv 0 "heavy: xargs -n1 npm test"      "xargs -n1 npm test"
+hv 0 "heavy: xargs -P4 ls"            "xargs -P4 ls"
+hv 0 "heavy: xargs -P 4 ls"           "xargs -P 4 ls"
+hv 1 "light: xargs ls"                "xargs ls"
+hv 1 "light: xargs -0 rm"             "xargs -0 rm"
+hv 1 "light: yarn --version"          "yarn --version"
 OSRC_HEAVY=1; osrc_heavy "ls" 2>/dev/null; rc=$?
 [ "$rc" = 0 ] && ok "heavy: OSRC_HEAVY=1 forces" || bad "heavy: OSRC_HEAVY=1 (rc=$rc)"
 OSRC_HEAVY=0; osrc_heavy "cargo build" 2>/dev/null; rc=$?
@@ -225,6 +233,21 @@ git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
 : > "$ERRF"
 ( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout2" ) 2>"$ERRF"; rc=$?
 [ "$rc" = 3 ] && ok "gate: lane RESULT rc propagates as check rc" || bad "gate: RESULT rc=$rc want 3"
+# rc=256 wraps to 0 at the OS boundary — must be rejected as NOT RUN, never a pass
+printf 'sha=%s\nrc=256\nwrapped output\n' "$SHA2" > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm rc256
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout2b" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && ok "gate: RESULT rc=256 rejected (stays NOT RUN)" || bad "gate: rc=256 leaked as rc=$rc"
+# CRLF line endings must not read as a sha mismatch
+printf 'sha=%s\r\nrc=0\r\ncrlf output\r\n' "$SHA2" > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm crlf
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout2c" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 0 ] && grep -q 'crlf output' "$TMP/rout2c" \
+  && ok "gate: CRLF RESULT accepted" || bad "gate: CRLF RESULT rc=$rc"
 # a RESULT for the WRONG sha is rejected -> still NOT RUN (125)
 printf 'sha=0000000000000000000000000000000000000000\nrc=0\nstale result\n' > "$TMP/cloudclone/$ID2.RESULT"
 git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm stale
@@ -233,6 +256,21 @@ git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
 ( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout3" ) 2>"$ERRF"; rc=$?
 [ "$rc" = 125 ] && grep -q 'different commit' "$TMP/rout3" \
   && ok "gate: RESULT sha mismatch rejected, stays NOT RUN" || bad "gate: mismatch rc=$rc out=$(cat "$TMP/rout3" 2>/dev/null)"
+# repeat the rejected check -> ONE failed event per id, outfile explains re-offer
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout4" ) 2>"$ERRF"; rc=$?
+NFAIL="$(grep -F "\"target\":\"$ID2\"" "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -c '"kind":"failed"')"
+[ "$rc" = 125 ] && [ "$NFAIL" = "1" ] && grep -q 'retire the lane' "$TMP/rout4" \
+  && ok "gate: rejected RESULT -> one failed event + re-offer path" || bad "gate: failed dedupe NFAIL=$NFAIL rc=$rc"
+# pack pinned at a DIFFERENT commit than the check -> drift rejected even if RESULT echoes it
+printf 'pinned commit: ffffffffffffffffffffffffffffffffffffffff\n' > "$OSRC_HOME/cloud/$ID2.pack.md"
+printf 'sha=ffffffffffffffffffffffffffffffffffffffff\nrc=0\ndrifted result\n' > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm drift
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout5" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && grep -q 'not trusted' "$TMP/rout5" \
+  && ok "gate: pack-pin drift rejected (RESULT for other commit)" || bad "gate: drift accepted rc=$rc out=$(cat "$TMP/rout5" 2>/dev/null)"
 rm -f "$OSRC_HOME/remote/$ID2.json"
 
 # ---------- 5. gate: dirty or unpushed tree -> NO cloud offer, local rules apply ----------

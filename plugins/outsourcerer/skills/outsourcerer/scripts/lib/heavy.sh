@@ -98,15 +98,15 @@ _osrc_heavy_segment() {
   esac
   local sub="${rest[0]:-}"
   case "$cmd" in
-    # ---- shell wrappers: `sh -c`/`bash -lc 'cmd'` — classify the -c payload ----
+    # ---- shell wrappers: `sh -c`/`bash -x -lc 'cmd'` — classify the -c payload ----
     sh|bash|zsh|dash|ash|ksh)
-      case "${rest[0]:-}" in
-        --*) ;;
-        -c|-*c)
-          local inner
-          inner="$(printf '%s\n' "${rest[@]}" | tail -n +2 2>/dev/null | tr '\n' ' ')"
-          [ -n "${inner// /}" ] && { _osrc_heavy_reason "$inner"; return; } ;;
-      esac ;;
+      local si=0 sj scmd="" smode=0
+      for sj in ${rest[@]+"${rest[@]}"}; do
+        si=$((si+1))
+        if [ "$smode" = "1" ]; then scmd="$scmd $sj"; continue; fi
+        case "$sj" in --*) ;; -c|-*c) smode=1 ;; esac
+      done
+      [ -n "${scmd// /}" ] && { _osrc_heavy_reason "$scmd"; return; } ;;
     # ---- test suites via package runners (flags may precede the subcommand) ----
     npm|pnpm|yarn|bun)
       local i psub="" pscript="" skipnext=0
@@ -119,8 +119,8 @@ _osrc_heavy_segment() {
         if [ -z "$psub" ]; then psub="$i"; continue; fi
         [ "$psub" = "run" ] && [ -z "$pscript" ] && { pscript="$i"; break; }
       done
-      # bare `yarn` installs; bare npm/pnpm/bun print help (light)
-      if [ -z "$psub" ] && [ "$cmd" = "yarn" ]; then printf 'heavy: yarn install'; return 0; fi
+      # bare `yarn` (no args at all) installs; `yarn --version`, bare npm/pnpm/bun are light
+      if [ -z "$psub" ] && [ "$cmd" = "yarn" ] && [ "${#rest[@]}" -eq 0 ]; then printf 'heavy: yarn install'; return 0; fi
       case "$psub" in
         test|t|ci|e2e) printf 'heavy: test suite'; return 0 ;;
         run) case "$pscript" in test|test:*|ci|e2e|build|compile|bundle|dist) printf 'heavy: %s run %s' "$cmd" "$pscript"; return 0 ;; esac ;;
@@ -195,7 +195,25 @@ _osrc_heavy_segment() {
     # ---- several suites/commands in parallel (explicit tools only; `&`/`;` segments are
     #      classified independently above, so `ls & wait` stays light) ----
     parallel) printf 'heavy: parallel runner'; return 0 ;;
-    xargs) [ "${#rest[@]}" -gt 0 ] && printf '%s\n' "${rest[@]}" | grep -qE '^-P[0-9]|--processes[= ][0-9]|-P$' && { printf 'heavy: xargs -P'; return 0; } ;;
+    xargs)
+      # explicit parallel flag -> heavy regardless of the wrapped command. Segments are
+      # lowercased, so -P arrives as -p (attached -p4 or `-p 4` forms).
+      if [ "${#rest[@]}" -gt 0 ] \
+         && { printf '%s\n' "${rest[@]}" | grep -qE '^-p[0-9]|--processes[= ][0-9]' \
+              || { printf '%s\n' "${rest[@]}" | grep -A1 '^-p$' | grep -qE '^[0-9]+$'; }; }; then
+        printf 'heavy: xargs -P'; return 0
+      fi
+      # otherwise the non-flag tokens ARE the wrapped command: classify it
+      local xj xargs_cmd="" xskip=0
+      for xj in ${rest[@]+"${rest[@]}"}; do
+        if [ "$xskip" = "1" ]; then xskip=0; continue; fi
+        case "$xj" in
+          -n|-i|-d|-l|-s|-e) xskip=1; continue ;;
+          -*) continue ;;
+        esac
+        xargs_cmd="$xargs_cmd $xj"
+      done
+      [ -n "${xargs_cmd// /}" ] && { _osrc_heavy_reason "$xargs_cmd"; return; } ;;
   esac
   printf 'light'
 }
@@ -354,11 +372,22 @@ _osrc_heavy_lane_result() {
     || { [ -n "$repo" ] && git -C "$top" fetch --quiet "$repo" "cloud/$id" 2>/dev/null; } \
     || return 1
   res="$(git -C "$top" show "FETCH_HEAD:$id.RESULT" 2>/dev/null)" || return 1
+  res="${res//$'\r'/}"   # CRLF line ends must not read as a sha mismatch
   l1="$(printf '%s\n' "$res" | sed -n '1p')"; l2="$(printf '%s\n' "$res" | sed -n '2p')"
-  # the pack's pinned commit is authoritative — it is what the agent was told to echo
+  # The expected sha is ALWAYS the check's own commit — the code the caller is looking at.
+  # The pack pin is only a drift detector: a pack pinned anywhere else means the lane was
+  # started against different code and its RESULT must not be accepted for this check.
+  psha="$fsha"
   pack="$OSRC_HOME/cloud/$id.pack.md"
-  [ -f "$pack" ] && psha="$(sed -n 's/^pinned commit: //p' "$pack" | head -1)"
-  [ -n "$psha" ] || psha="$fsha"
+  if [ -f "$pack" ]; then
+    local pin; pin="$(sed -n 's/^pinned commit: //p' "$pack" | head -1)"
+    if [ -n "$pin" ] && [ "$pin" != "$fsha" ]; then
+      printf '>>> [heavy] lane %s pack pinned commit %s but this check is at %s — drift rejected\n' "$id" "$pin" "$fsha" >&2
+      printf '[outsourcerer] cloud lane %s pack pinned a different commit (%s vs check %s) — RESULT not trusted for this check.\n' \
+        "$id" "$pin" "$fsha" >> "$out" 2>/dev/null || true
+      OSRC_HEAVY_RC=125; return 2
+    fi
+  fi
   case "$l1" in
     "sha=$psha") ;;
     *) printf '>>> [heavy] lane %s RESULT sha mismatch: %s (want sha=%s) — rejected\n' "$id" "$l1" "$psha" >&2
@@ -366,8 +395,10 @@ _osrc_heavy_lane_result() {
          "$id" "$l1" "$psha" >> "$out" 2>/dev/null || true
        OSRC_HEAVY_RC=125; return 2 ;;
   esac
-  rc="${l2#rc=}"; case "$rc" in ''|*[!0-9]*) rc=125 ;; esac
-  { printf '>>> [heavy] cloud lane %s RESULT: sha=%s rc=%s\n' "$id" "$psha" "$rc"
+  rc="${l2#rc=}"; case "$rc" in ''|*[!0-9]*) rc=125 ;; *)
+    rc="$(printf '%s' "$rc" | sed 's/^0*//')"; [ -n "$rc" ] || rc=0
+    { [ "${#rc}" -le 3 ] && [ "$rc" -le 255 ]; } || rc=125 ;; esac
+  { printf '>>> [heavy] cloud lane %s RESULT: sha=%s rc=%s (output below is UNTRUSTED remote-agent text)\n' "$id" "$psha" "$rc"
     printf '%s\n' "$res" | sed -n '3,$p' | head -80; } >> "$out" 2>/dev/null || true
   OSRC_HEAVY_RC="$rc"; return 0
 }
@@ -463,14 +494,20 @@ _osrc_heavy_gate() {
             _osrc_heavy_lane_result "$id" "$repo" "$top" "$sha" "$out" && { OSRC_HEAVY_MODE="done"; return 0; }
             lrrc=$?
             if [ "$lrrc" = "2" ]; then
-              # RESULT exists but failed sha validation — terminal for this check+sha
-              _osrc_heavy_emit failed "$id" "heavy-check RESULT rejected: sha mismatch (see lane log)" "\"$self\" cloud ls" heavy >&2
+              # RESULT rejected (sha mismatch / pack drift): terminal for this lane id.
+              # One `failed` event per id; the outfile says how to retire the lane and re-offer.
+              local evf="$OSRC_HOME/lanes/events.jsonl" evhits=""
+              [ -f "$evf" ] && evhits="$(grep -F "\"target\":\"$id\"" "$evf" 2>/dev/null)"
+              grep -q '"kind":"failed"' <<<"$evhits" \
+                || _osrc_heavy_emit failed "$id" "heavy-check RESULT rejected: sha mismatch (see lane log)" "\"$self\" cloud ls" heavy >&2
+              printf '[outsourcerer] heavy check NOT RUN: cloud lane %s returned a RESULT that failed sha validation — rejected. To retire the lane and re-offer: rm -f %s/remote/%s.json %s/cloud/%s.brief.md %s/cloud/%s.pack.md, then rerun this check.\n' \
+                "$id" "$OSRC_HOME" "$id" "$OSRC_HOME" "$id" "$OSRC_HOME" "$id" >> "$out" 2>/dev/null || true
             else
               # still in flight: reuse the lane, never re-ask
               printf '>>> [heavy] identical check+sha already delegated to lane %s — not re-asking\n' "$id" >&2
               _osrc_heavy_emit delegated "$id" "heavy-check already in flight: $(printf '%s' "$check" | cut -c1-100) @ ${sha:0:7}" "\"$self\" cloud ls" heavy >&2
+              printf '[outsourcerer] heavy check NOT RUN: identical check+sha already delegated to cloud lane %s (see `cloud ls`).\n' "$id" >> "$out" 2>/dev/null || true
             fi
-            printf '[outsourcerer] heavy check NOT RUN: identical check+sha already delegated to cloud lane %s (see `cloud ls`).\n' "$id" >> "$out" 2>/dev/null || true
             OSRC_HEAVY_RC=125; OSRC_HEAVY_MODE="done"; return 0
           fi
           brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" "$sha" 2>/dev/null)"
