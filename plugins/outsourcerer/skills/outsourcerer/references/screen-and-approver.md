@@ -53,6 +53,9 @@ How the reader works:
   `session state`.
 - If a prompt opens while the text is being typed, the keys went into the prompt. Enter is not
   pressed and the send fails.
+- If an approval or question box is already open, the send is refused before ANY key (not even
+  `C-u`), under the endpoint lock: `EVENT failed <session> <ts> send refused: modal open …` then
+  `NEXT … session answer`. On Devin a typed `e` would open edit mode on the pending command.
 - On failure it prints `EVENT failed <session> <ts> send did not land: …` plus a NEXT line and
   exits non-zero. If the text was still in the composer after Enter, it pressed Enter once more
   before failing.
@@ -98,7 +101,8 @@ reads untrusted input (issues, web pages, other people's code), keep the policy 
 engine's own sandbox.
 
 **Approved** (every flag must be on that command's allowlist, else hold):
-- Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/cut/jq/find (allowlisted
+- Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/uniq and xxd (one file, a
+  second is an output)/stat/cut/jq (no `env`, `$ENV`, `input`)/find (allowlisted
   predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs,
   `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
   `--no-index`, `-O`), `gh pr|issue|run view|list` (no `--web`), `--help`/`--version` on known
@@ -108,7 +112,7 @@ engine's own sandbox.
   `make test`, `bash tests/…`, ruff check, tsc, eslint (no `--fix`, `-o`, `--outDir`). Every path
   argument must be inside the worktree.
 - Writes (mkdir/touch/cp/mv/rm, redirects, `sed -i`, `chmod` with a plain 3-digit or symbolic
-  mode, git add/commit, `git switch <name>` / `-c <name>`, file-create prompts) only when every
+  mode, git add/commit (`git add .` included), `git switch <name>` / `-c <name>`, file-create prompts) only when every
   target is inside the delegate's worktree and not `.git` or anything under it. The worktree is
   the git toplevel of the pane's cwd. Add more dirs with `OSRC_APPROVER_EXTRA_DIRS=dir1:dir2`.
 - `env -u TMUX -u TMUX_PANE …` (and CLAUDECODE, NO_COLOR) in front of an approved command.
@@ -120,7 +124,8 @@ engine's own sandbox.
   `unset OSRC_HOME`, `export OSRC_HOME=…`, or the word OSRC_HOME anywhere in the command.
 - Any other environment prefix (`PATH=`, `HOME=`, `BASH_ENV=`, `GIT_*`, `*_OPTIONS`, …) unless it
   is on the short harmless list.
-- Any `$` (variables, `$?`, `$HOME`), `~user`/`~+`/`~-`, brace expansion `{a,b}`, `…`, a trailing
+- Any `$` outside single quotes (variables, `$?`, `$HOME`; `awk '{print $1}'` is fine, the shell
+  expands nothing inside '…'), `~user`/`~+`/`~-`, brace expansion `{a,b}`, `…`, a trailing
   `&&`/`||`/`|`/`;`, and multi-line commands (Devin's and Claude's wrapped rows are joined first).
 - git push, reset --hard, any force/-D flag, checkout/restore that discards work, commit
   `--amend`/`--no-verify`, `git stash` other than list/show (the stash is shared by every
@@ -129,7 +134,11 @@ engine's own sandbox.
 - `gh api` (every form), `gh pr create/merge`, `gh … --web`, sudo, `curl|wget … | sh`, any network
   tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
 - Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
-  printenv/env), whatever reads them (cat, jq, cut, awk, column, xargs).
+  printenv/env, shell rc files like `.zshrc`/`.bash_profile` and history files `*_history`),
+  whatever reads them (cat, jq, cut, awk, column, xargs).
+- Any read under the home folder outside the worktree (and the extra dirs), or one that covers
+  the home folder (`find ~`, `find /`, `ls /Users`). System paths (`/usr`, `/opt`, `/etc`,
+  `/tmp`) stay readable.
 - ~/.outsourcerer, ~/.claude, $OSRC_HOME, or another git worktree.
 - Command substitution, heredocs, subshells, background `&`, eval/source, xargs.
 - tmux/kill/launchctl, interpreters (`python -c`), pagers and endless output (`less`, `more`,
@@ -145,6 +154,11 @@ against the git toplevel of the pane's current directory. Claude Code shows no w
 in its prompt. Codex and Devin can run a command in a different directory from their own, and
 their prompts do not always show it. When they do not, `rm -rf build` is judged as if it ran in
 the worktree. Absolute and `~` paths are always checked exactly.
+
+**One press per prompt.** supervise and the beacon may both tick the same pane. The tick holds
+the endpoint lock from the re-read through the close check, and claims a per-pane, per-prompt
+stamp atomically before pressing. A second caller never presses the same prompt again within
+`OSRC_APPROVER_REPRESS_SECS` (default 15); it returns 3 (nothing to report).
 
 A held prompt is reported once. If it is still open after `OSRC_HOLD_MIN` minutes (default 30),
 `EVENT approval … still held after Nm` is re-emitted so it cannot sleep overnight.

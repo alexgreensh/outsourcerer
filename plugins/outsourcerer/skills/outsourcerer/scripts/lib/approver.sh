@@ -89,7 +89,7 @@ _osrc_approver_classify() { # <root> <kind> <path> <cmd> -> "approve <rule>" | "
     IFS="$old_ifs"
   fi
   [ -r "$_OSRC_LIB_DIR/approver_classify.py" ] || { printf 'hold classifier missing\n'; return 0; }
-  printf '%s' "$4" | (cd "$1" 2>/dev/null && python3 -I "$_OSRC_LIB_DIR/approver_classify.py" "${args[@]}") 2>/dev/null \
+  printf '%s' "$4" | (cd "$1" 2>/dev/null && OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}" python3 -I "$_OSRC_LIB_DIR/approver_classify.py" "${args[@]}") 2>/dev/null \
     || printf 'hold classifier failed\n'
 }
 
@@ -148,8 +148,22 @@ osrc_approver_tick() { # <pane> [session-id]
       [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
       return 1
     fi
+    # One press per prompt (L1 review finding 2): supervise and the beacon both tick every poll. The
+    # lock is now held through the close-verify below, and a press is stamped per pane + prompt key,
+    # so a second caller that re-reads the same not-yet-redrawn prompt never presses again.
+    local pkey pdir pf pts; pkey="$(printf '%s|%s|%s' "$OSRC_SCR_KIND" "$want_path" "$want_cmd" | cksum | awk '{print $1}')"
+    pdir="$(_osrc_approver_dir)/pressed"; pf="$pdir/$(printf '%s' "$pane" | cksum | awk '{print $1}').$pkey"
+    mkdir -p "$pdir" 2>/dev/null
+    find "$pdir" -type f -mmin +60 -exec rm -f {} + 2>/dev/null
+    # Atomic claim (noclobber = O_EXCL): of two callers, exactly one creates the stamp and presses.
+    if ! ( set -C; printf '%s\n' "$now" > "$pf" ) 2>/dev/null; then
+      read -r pts < "$pf" 2>/dev/null; case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
+      if [ $((now - pts)) -lt "${OSRC_APPROVER_REPRESS_SECS:-15}" ] || ! { rm -f "$pf"; ( set -C; printf '%s\n' "$now" > "$pf" ) 2>/dev/null; }; then
+        [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
+        return 3
+      fi
+    fi
     tmux send-keys -t "$pane" Enter 2>/dev/null; i=$?
-    [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
     if [ "$i" -eq 0 ]; then
       i=0
       while [ "$i" -lt "${OSRC_APPROVER_VERIFY_POLLS:-25}" ]; do
@@ -157,6 +171,7 @@ osrc_approver_tick() { # <pane> [session-id]
         cap="$(_osrc_screen_capture "$pane")" || break
         _osrc_screen_analyze_text "$eng" <<<"$cap"
         if [ "$OSRC_SCR_STATE" != approval ] || [ "$OSRC_SCR_CMD" != "$want_cmd" ] || [ "$OSRC_SCR_PATH" != "$want_path" ]; then
+          [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
           _osrc_approver_log "$sid" "$eng" "${cmd1:-$want_path}" approve "$rule" "$root" "$OSRC_SCR_KIND" "$want_path"
           printf 'EVENT approved %s %s approved once by policy safe (%s): %s\n' "$sid" "$now" "$rule" "${cmd1:-$want_path}"
           printf 'NEXT OUTSOURCERER_TMUX=%s %s session read\n' "$sid" "${SCRIPT_PATH:-outsourcerer.sh}"
@@ -165,6 +180,7 @@ osrc_approver_tick() { # <pane> [session-id]
         i=$((i + 1))
       done
     fi
+    [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
     decision=hold; rule="approver pressed Enter but the prompt did not close"
   fi
   # Held: report once, then again only after OSRC_HOLD_MIN minutes so a hold cannot sleep overnight.

@@ -83,6 +83,45 @@ rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; CAP="$FX/cc-permission-bash.ansi
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "unknown worktree did not hold (rc=$rc)"
 
+# round-2 review finding 4: a custom OSRC_HOME reaches the classifier and is protected
+v="$(export -n OSRC_HOME; _osrc_approver_classify "$ROOT" shell "" "cat $OSRC_HOME/approvals.log")"   # set, NOT exported (as in outsourcerer.sh)
+case "$v" in "hold protected location"*) ok ;; *) bad "custom OSRC_HOME not passed to the classifier: $v" ;; esac
+
+# ---- L1 review finding 2: two callers (supervise + beacon) on one prompt press Enter ONCE ---------
+# Two real processes, the real endpoint lock, and a slow redraw: after Enter the pane keeps showing
+# the same prompt for 2s. Run 3 ways so each layer is proven on its own.
+cat > "$TMP/caller.sh" <<'CALLER'
+#!/bin/bash
+# caller.sh <src> <fx> <state-dir> <root> <stub-lock 0|1>
+SRC="$1"; FX="$2"; D="$3"; ROOT="$4"; STUB="$5"
+OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
+[ "$STUB" = 1 ] && { _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }; }
+_managed_provider() { printf cc; }
+tmux() {
+  case "$1" in
+    capture-pane) t="$(cat "$D/pressed-at" 2>/dev/null)"
+      if [ -n "$t" ] && [ $(( $(date +%s) - t )) -ge 2 ]; then cat "$FX/cc-idle-after-work.ansi"; else cat "$FX/cc-permission-bash.ansi"; fi ;;
+    display-message) printf '%s\n' "$ROOT" ;;
+    send-keys) printf '%s\n' "$*" >> "$D/keys"; [ -f "$D/pressed-at" ] || date +%s > "$D/pressed-at" ;;
+    *) return 0 ;;
+  esac
+}
+osrc_approver_tick sess sess >/dev/null 2>&1; echo "$?" >> "$D/rcs"
+CALLER
+two_callers() { # <label> <stub-lock> [env...]
+  local d="$TMP/dbl-$1" lbl="$1" stub="$2"; shift 2
+  rm -rf "$d"; mkdir -p "$d/home"; : > "$d/keys"
+  SESSION_NAME=sess OSRC_HOME="$d/home" _osrc_cmd_approve_policy safe >/dev/null
+  env OSRC_HOME="$d/home" OSRC_APPROVER_VERIFY_POLLS=25 "$@" bash "$TMP/caller.sh" "$SRC" "$FX" "$d" "$ROOT" "$stub" &
+  env OSRC_HOME="$d/home" OSRC_APPROVER_VERIFY_POLLS=25 "$@" bash "$TMP/caller.sh" "$SRC" "$FX" "$d" "$ROOT" "$stub" &
+  wait
+  n="$(grep -c 'Enter' "$d/keys")"
+  [ "$n" = 1 ] && ok || bad "two callers [$lbl]: Enter pressed $n times (rcs: $(tr '\n' ' ' < "$d/rcs"))"
+}
+two_callers both 0
+two_callers lock-only 0 OSRC_APPROVER_REPRESS_SECS=0
+two_callers stamp-only 1
+
 # empty / dotted session id never acts and never deletes another session's held record (finding 13)
 mkdir -p "$OSRC_HOME/approver/held"; : > "$OSRC_HOME/approver/held/.keep"; : > "$OSRC_HOME/approver/held/other.cmd"; : > "$KEYS"
 osrc_approver_tick "" "" >/dev/null 2>&1; rc1=$?; osrc_approver_tick sess ".." >/dev/null 2>&1; rc2=$?

@@ -19549,6 +19549,7 @@ session() {
       if [ "$_menu_kind" != "none" ]; then
         _managed_menu_detect "$SESSION_NAME"
         _osrc_menu_how "$_menu_kind"
+        printf 'EVENT failed %s %s send refused: modal open (%s menu); nothing typed\nNEXT OUTSOURCERER_TMUX=%s %s session answer\n' "$SESSION_NAME" "$(date +%s)" "$_menu_kind" "$SESSION_NAME" "$0"
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
@@ -19557,7 +19558,7 @@ session() {
         2) echo "sent (submitted, text left the composer; model delivery NOT independently verified: ${OSRC_SEND_EVIDENCE:-no reaction seen yet}). Confirm with: $0 session state" ;;
         *) # Genuine failure: report it as an EVENT plus the actual pane state, never as "sent".
            _st="$(osrc_screen_state "$SESSION_NAME" | tr '\n' ' ')"
-           printf 'EVENT failed %s %s send did not land: %s | pane: %s\nNEXT OUTSOURCERER_TMUX=%s %s session state\n' "$SESSION_NAME" "$(date +%s)" "${OSRC_SEND_EVIDENCE:-nothing was submitted}" "$_st" "$SESSION_NAME" "$0"
+           printf 'EVENT failed %s %s send did not land: %s | pane: %s\nNEXT OUTSOURCERER_TMUX=%s %s session %s\n' "$SESSION_NAME" "$(date +%s)" "${OSRC_SEND_EVIDENCE:-nothing was submitted}" "$_st" "$SESSION_NAME" "$0" "$([ "${OSRC_SEND_MODAL:-0}" = 1 ] && echo answer || echo state)"
            die "session send failed: nothing was submitted (${OSRC_SEND_EVIDENCE:-no evidence}). Pane state: $_st. Re-check with: $0 session state" ;;
       esac
       ;;

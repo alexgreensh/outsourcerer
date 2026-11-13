@@ -225,6 +225,21 @@ OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "brand new words here" idl
   _managed_session_send p "1 yes go ahead"; rc=$?
   [ "$rc" = 1 ] && ! grep -q ' Enter$' "$TMP/fkeys" && case "$OSRC_SEND_EVIDENCE" in *"Enter NOT pressed"*) true ;; *) false ;; esac
 ) && ok || bad "send into a prompt that opened while typing pressed Enter or reported success: $(tr '\n' '|' < "$TMP/fkeys")"
+# round-2 review finding 1: an open modal gets ZERO keys (not even C-u), refused inside the lock
+for spec in devin:dv-approval codex:cx-approval agy:agy-approval cc:cc-permission-bash-rm cc:cc-askuserquestion devin:dv-approval-wrapped; do
+  (
+    _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+    _obligation_guard_begin() { :; }; _obligation_guard_end() { :; }; _obligation_delivery_unknown() { :; }
+    LOCKED=0; _endpoint_mutation_lock() { LOCKED=1; return 0; }; _endpoint_mutation_unlock() { LOCKED=0; return 0; }
+    _managed_composer_state() { printf empty; }; _osrc_screen_engine_of() { printf '%s' "${spec%%:*}"; }
+    CAP="$FX/${spec#*:}.ansi"; : > "$TMP/mkeys"
+    tmux() { case "$1" in capture-pane) [ "$LOCKED" = 1 ] || echo "unlocked-read" >> "$TMP/mkeys"; cat "$CAP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/mkeys" ;; *) return 0 ;; esac; }
+    _managed_session_send p "e please also run rm -rf ~"; rc=$?
+    [ "$rc" = 1 ] && [ ! -s "$TMP/mkeys" ] && [ "$OSRC_SEND_MODAL" = 1 ] && [ "$LOCKED" = 0 ] && case "$OSRC_SEND_EVIDENCE" in "modal open"*) true ;; *) false ;; esac
+  ) && ok || bad "send into open modal ${spec}: keys/reads=[$(tr '\n' '|' < "$TMP/mkeys")]"
+done
+grep -q 'send refused: modal open' "$HERE/../outsourcerer.sh" && grep -q 'OSRC_SEND_MODAL:-0}" = 1 ] && echo answer' "$HERE/../outsourcerer.sh" && ok || bad "session send does not print EVENT failed ... modal open + NEXT answer"
+
 # spill after admit: a refused send leaves no spill file behind
 (
   _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }

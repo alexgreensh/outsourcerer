@@ -187,18 +187,25 @@ _managed_session_send() { # <session-id> <message>
   _endpoint_mutation_lock "$pane" || { OSRC_SEND_EVIDENCE="endpoint lock busy"; [ -n "$spillf" ] && rm -f "$spillf"; return 1; }
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; [ -n "$spillf" ] && rm -f "$spillf"; OSRC_SEND_EVIDENCE="session endpoint not provably live"; return 1; }
+  # One read, under the lock, BEFORE any key (round-2 review finding 1). It is both the modal guard
+  # and the send baseline (round-1 finding 8: what is on screen now proves nothing about this send).
+  # An open approval/question with no composer gets zero keys, not even C-u: on Devin a typed `e`
+  # opens edit mode and the text lands in the pending command.
+  eng="$(_osrc_screen_engine_of "$pane")"
+  snip="$(printf '%s' "$message" | tr -s ' \t\n' '   ' | cut -c1-24)"
+  base="unknown"; bhist=""; OSRC_SEND_MODAL=0
+  if cap="$(_osrc_screen_capture "$pane")"; then
+    _osrc_screen_analyze_text "$eng" <<<"$cap"; base="$OSRC_SCR_STATE"; bhist="$(_osrc_scr_history_count "$snip")"
+    if [ "${OSRC_SCR_COMPOSER_FOUND:-0}" != 1 ] && { [ "$base" = approval ] || [ "$base" = question ]; }; then
+      OSRC_SEND_MODAL=1; OSRC_SEND_EVIDENCE="modal open ($base): $OSRC_SCR_EVIDENCE; nothing typed"
+      [ -n "$spillf" ] && rm -f "$spillf"; _endpoint_mutation_unlock "$key"; return 1
+    fi
+  fi
   _tmux_reset_input "$pane"
   _obligation_append "$oid" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; [ -n "$spillf" ] && rm -f "$spillf"; return 1; }
   _obligation_guard_begin "$oid" "$session_id"
   composer="$(_managed_composer_state "$session_id" "$pane" 2>/dev/null)"
   [ "$composer" = empty ] || { OSRC_SEND_EVIDENCE="composer not empty before typing (unsent text or unreadable)"; [ -n "$spillf" ] && rm -f "$spillf"; _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
-  # Baseline before typing (finding 8): what is on screen now proves nothing about this send.
-  eng="$(_osrc_screen_engine_of "$pane")"
-  snip="$(printf '%s' "$message" | tr -s ' \t\n' '   ' | cut -c1-24)"
-  base="unknown"; bhist=""
-  if cap="$(_osrc_screen_capture "$pane")"; then
-    _osrc_screen_analyze_text "$eng" <<<"$cap"; base="$OSRC_SCR_STATE"; bhist="$(_osrc_scr_history_count "$snip")"
-  fi
   tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
   # Before Enter: did the text land in the composer, or did a prompt open and take the keys?
   seen=0

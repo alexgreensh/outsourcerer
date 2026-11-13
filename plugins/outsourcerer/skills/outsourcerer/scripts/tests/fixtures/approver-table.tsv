@@ -192,3 +192,40 @@ approve	shell		chmod 755 scripts/run.sh
 approve	shell		rg --files src
 hold	write	{ROOT}/.git/hooks/post-checkout	
 hold	write	~root/x	
+# ---- Round 3: reviews/L3-VERDICT.md round 2 findings 2, 3, 5 ----
+hold	shell		uniq src/a /tmp/x
+hold	shell		uniq -c src/a ~/out.txt
+hold	shell		xxd src/a /tmp/x
+hold	shell		xxd -l 16 src/a ~/out.bin
+approve	shell		uniq -c src/a
+approve	shell		xxd -l 16 src/a
+hold	shell		cat ~/.zshrc
+hold	shell		cat ~/.bash_profile
+hold	shell		head -n 50 ~/.zsh_history
+hold	shell		cat src/.bash_history
+hold	shell		cat .zshrc
+hold	shell		grep -r password ~/Documents
+hold	shell		rg -u token ~
+hold	shell		find ~ -name id_rsa
+hold	shell		find / -name credentials
+hold	shell		cd ~ && cat .zshrc
+hold	shell		cp -R ~/Documents src/
+hold	shell		ls ~/Downloads
+hold	shell		ls /Users
+approve	shell		ls /usr/local/bin
+approve	shell		cat /etc/hosts
+approve	shell		ls -la /tmp
+approve	shell		git add .
+approve	shell		git add -A .
+hold	shell		git add ..
+approve	shell		awk '{print $1}' src/a
+approve	shell		grep -E '^foo$' src/a
+approve	shell		stat -f %z src/a
+hold	shell		awk "{print $1}" src/a
+hold	shell		echo "$HOME"
+hold	shell		jq -n '$ENV.GH_TOKEN'
+hold	shell		jq 'env.GH_TOKEN' src/a.json
+hold	shell		jq -n 'input' src/a.json
+approve	shell		jq '.name' src/a.json
+hold	shell		awk '{system("rm -rf /")}' src/a
+hold	shell		find src -name '{a,b}' -exec rm {} ;
