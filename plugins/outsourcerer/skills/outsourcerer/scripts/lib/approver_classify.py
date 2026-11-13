@@ -357,6 +357,8 @@ def awk_rule(args, cwd, roots):
         raise Hold("awk without a program")
     if re.search(r"system|getline|ENVIRON|\||>|close|fflush", pos[0]):
         raise Hold("awk program writes, executes or reads the environment")
+    if re.search(r"@|ARGV|ARGC", pos[0]):   # gawk @f() indirect calls, @load; ARGV/ARGC read any file
+        raise Hold("awk program uses @ (indirect call / @load) or rewrites ARGV/ARGC")
     for f in pos[1:]:
         check_path(f, cwd, roots, write=False)
     return "read-only:awk"

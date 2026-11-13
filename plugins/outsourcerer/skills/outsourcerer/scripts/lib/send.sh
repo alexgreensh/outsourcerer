@@ -13,7 +13,7 @@
 # - Long messages (> OSRC_SEND_MAX_CHARS, default 1500) are written to <delegate cwd>/.osrc-msgs/ and
 #   the delegate is sent a one-line "read <file>" instead, so nothing lands as an unsubmitted paste.
 
-_managed_composer_state() { # <session-id> <pane> -> empty|unknown
+_managed_composer_state() { # <session-id> <pane> -> empty|unknown|unreadable (a prompt is open)
   local session_id="$1" pane="$2" prov
   case "$(_external_probe_configured "${OSRC_EXTERNAL_COMPOSER_PROBE:-}"; echo $?)" in
     0) _external_composer_state "$pane"; return ;;
@@ -31,6 +31,8 @@ _managed_composer_state() { # <session-id> <pane> -> empty|unknown
       [ -z "$OSRC_SCR_COMPOSER" ] && printf 'empty\n' || printf 'unknown\n'
       return
     fi
+    # No composer and a prompt on screen: the keys would go into the prompt (review round 3, #2).
+    case "$OSRC_SCR_STATE" in approval|question) printf 'unreadable\n'; return ;; esac
   fi
   case "$prov" in
     cc|claude) _cc_composer_empty "$pane" && printf 'empty\n' || printf 'unknown\n' ;;
@@ -212,7 +214,7 @@ _managed_session_send() { # <session-id> <message>
   if cap="$(_osrc_screen_capture "$pane")"; then
     _osrc_screen_analyze_text "$eng" <<<"$cap"
     if [ "$OSRC_SCR_COMPOSER_FOUND" != 1 ] && { [ "$OSRC_SCR_STATE" = approval ] || [ "$OSRC_SCR_STATE" = question ]; }; then
-      OSRC_SEND_EVIDENCE="a $OSRC_SCR_STATE prompt opened while typing, so the keys went into it; Enter NOT pressed: $OSRC_SCR_EVIDENCE"
+      OSRC_SEND_MODAL=1; OSRC_SEND_EVIDENCE="a $OSRC_SCR_STATE prompt opened while typing, so the keys went into it; Enter NOT pressed: $OSRC_SCR_EVIDENCE"
       _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
     fi
     case "$(printf '%s' "$OSRC_SCR_COMPOSER" | tr -s ' \t\n' '   ')" in

@@ -103,7 +103,7 @@ engine's own sandbox.
 **Approved** (every flag must be on that command's allowlist, else hold):
 - Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/uniq and xxd (one file, a
   second is an output)/stat/cut/jq (no `env`, `$ENV`, `input`)/find (allowlisted
-  predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs,
+  predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs (no `system`, `getline`, `ENVIRON`, pipes, `>`, `@`, `ARGV`/`ARGC`),
   `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
   `--no-index`, `-O`), `gh pr|issue|run view|list` (no `--web`), `--help`/`--version` on known
   commands.
@@ -158,7 +158,8 @@ the worktree. Absolute and `~` paths are always checked exactly.
 **One press per prompt.** supervise and the beacon may both tick the same pane. The tick holds
 the endpoint lock from the re-read through the close check, and claims a per-pane, per-prompt
 stamp atomically before pressing. A second caller never presses the same prompt again within
-`OSRC_APPROVER_REPRESS_SECS` (default 15); it returns 3 (nothing to report).
+`OSRC_APPROVER_REPRESS_SECS` (default 15); it returns 3 (nothing to report). The other side of that: the same command asked twice in a row waits quietly up to 15 s
+before the second prompt is pressed.
 
 A held prompt is reported once. If it is still open after `OSRC_HOLD_MIN` minutes (default 30),
 `EVENT approval … still held after Nm` is re-emitted so it cannot sleep overnight.

@@ -229,3 +229,8 @@ hold	shell		jq -n 'input' src/a.json
 approve	shell		jq '.name' src/a.json
 hold	shell		awk '{system("rm -rf /")}' src/a
 hold	shell		find src -name '{a,b}' -exec rm {} ;
+# ---- Round 4: review round 3 finding 1 (gawk indirect calls, @load, ARGV/ARGC) ----
+hold	shell		gawk 'BEGIN{f="sys" "tem"; @f("touch /tmp/osrc-x")}'
+hold	shell		gawk '@load "filefuncs"; BEGIN{}' src/a
+hold	shell		awk 'BEGIN{ARGV[1]="~/.ssh/id_rsa";ARGC=2}{print}'
+approve	shell		gawk '{print $1}' src/a

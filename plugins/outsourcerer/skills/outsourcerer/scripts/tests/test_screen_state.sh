@@ -223,7 +223,7 @@ OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "brand new words here" idl
   CAP="$FX/cc-idle-after-work.ansi"; : > "$TMP/fkeys"
   tmux() { case "$1" in capture-pane) cat "$CAP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/fkeys"; CAP="$FX/cc-permission-bash-rm.ansi" ;; *) return 0 ;; esac; }
   _managed_session_send p "1 yes go ahead"; rc=$?
-  [ "$rc" = 1 ] && ! grep -q ' Enter$' "$TMP/fkeys" && case "$OSRC_SEND_EVIDENCE" in *"Enter NOT pressed"*) true ;; *) false ;; esac
+  [ "$rc" = 1 ] && [ "$OSRC_SEND_MODAL" = 1 ] && ! grep -q ' Enter$' "$TMP/fkeys" && case "$OSRC_SEND_EVIDENCE" in *"Enter NOT pressed"*) true ;; *) false ;; esac
 ) && ok || bad "send into a prompt that opened while typing pressed Enter or reported success: $(tr '\n' '|' < "$TMP/fkeys")"
 # round-2 review finding 1: an open modal gets ZERO keys (not even C-u), refused inside the lock
 for spec in devin:dv-approval codex:cx-approval agy:agy-approval cc:cc-permission-bash-rm cc:cc-askuserquestion devin:dv-approval-wrapped; do
@@ -237,6 +237,12 @@ for spec in devin:dv-approval codex:cx-approval agy:agy-approval cc:cc-permissio
     _managed_session_send p "e please also run rm -rf ~"; rc=$?
     [ "$rc" = 1 ] && [ ! -s "$TMP/mkeys" ] && [ "$OSRC_SEND_MODAL" = 1 ] && [ "$LOCKED" = 0 ] && case "$OSRC_SEND_EVIDENCE" in "modal open"*) true ;; *) false ;; esac
   ) && ok || bad "send into open modal ${spec}: keys/reads=[$(tr '\n' '|' < "$TMP/mkeys")]"
+done
+# review round 3 #2: with no composer and a prompt open, the composer state is never "empty"
+for spec in devin:dv-approval codex:cx-approval agy:agy-approval; do
+  ( _managed_provider() { printf '%s' "${spec%%:*}"; }; unset OSRC_EXTERNAL_COMPOSER_PROBE
+    tmux() { case "$1" in capture-pane) cat "$FX/${spec#*:}.ansi" ;; *) return 0 ;; esac; }
+    [ "$(_managed_composer_state s p)" = unreadable ] ) && ok || bad "composer state on an open ${spec} prompt is not 'unreadable'"
 done
 grep -q 'send refused: modal open' "$HERE/../outsourcerer.sh" && grep -q 'OSRC_SEND_MODAL:-0}" = 1 ] && echo answer' "$HERE/../outsourcerer.sh" && ok || bad "session send does not print EVENT failed ... modal open + NEXT answer"
 
