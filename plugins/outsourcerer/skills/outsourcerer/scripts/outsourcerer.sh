@@ -15694,80 +15694,6 @@ _gb_load() {
   esac
 }
 
-delegate_grokbot() {
-  local tier="$1"
-  [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
-  local task="${REST[*]}"
-  have curl || die "curl not on PATH (the grokbot lane needs it)"
-  have jq   || die "jq not on PATH (the grokbot lane needs it)"
-  have git  || die "git not on PATH (the grokbot lane delivers through a git branch)"
-  _gb_load
-  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "the grokbot lane runs inside a git repo: the bot delivers by pushing a branch to its origin."
-  local repo base branch mode posture
-  repo="$(git remote get-url origin 2>/dev/null)" || die "this repo has no 'origin' remote; the bot needs one to clone and push to."
-  base="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"; [ "$base" != "HEAD" ] || base="$(git rev-parse HEAD)"
-  branch="osrc/grokbot-$(_new_job_id)"
-  case "$tier" in
-    auto) mode="read-only"; posture="READ-ONLY by instruction (the bot is asked to change nothing but its result file; Grok Bot has no enforced read-only mode)" ;;
-    accept-edits|autonomous|dangerous) mode="edit"; posture="MUTATING on its own branch (the bot edits a clone and pushes $branch; nothing is merged here)" ;;
-    *) die "bad tier: $tier" ;;
-  esac
-  if [ -n "$(git status --porcelain 2>/dev/null)" ] || [ -n "$(git log --oneline "@{u}..HEAD" 2>/dev/null)" ]; then
-    printf '>>> [grokbot] NOTE: you have uncommitted or unpushed work. The bot clones %s from origin, so it will not see it.\n' "$base" >&2
-  fi
-  [ -n "$EFFORT" ] && printf '>>> [effort] reasoning=%s (advisory only: Grok Bot has no effort setting; folded into the prompt)\n' "$EFFORT" >&2
-  local ttier; ttier="$(resolve_tier "${MODEL:-}" "${TTIER:-}")" || ttier="capable"
-  _with_preamble_render "bundle"
-  local wrapped; wrapped="$(_build_prompt "${MODEL:-grokbot}" "$task" "$ttier" "bundle")"
-  local delivery
-  delivery="DELIVERY (required): clone $repo, check out $base, and create the branch $branch. Do the task there."
-  if [ "$mode" = "read-only" ]; then
-    delivery="$delivery This is a read-only task: change no files except OUTSOURCERER_RESULT.md."
-  fi
-  delivery="$delivery Write your final message to OUTSOURCERER_RESULT.md at the repo root, commit, and push $branch to origin. Pushing that branch is the only way your result is collected."
-  _tier_banner "grokbot (Grok Bot routine)" "grokbot-default" "$ttier" "$posture | $(_lane_cost_disclosure grokbot)"
-  local body resp code
-  body="$(mktemp "$OSRC_HOME/.gb.$$.XXXXXX")"; resp="$(mktemp "$OSRC_HOME/.gbr.$$.XXXXXX")"
-  chmod 600 "$body" "$resp" 2>/dev/null || true
-  jq -n --arg repo "$repo" --arg base "$base" --arg branch "$branch" --arg mode "$mode" \
-        --arg delivery "$delivery" --arg task "$wrapped" \
-        '{source:"outsourcerer", repo:$repo, base:$base, branch:$branch, mode:$mode, instructions:($delivery + "\n\n" + $task)}' > "$body"
-  code="$(_curl_with_auth "$GROKBOT_WEBHOOK_KEY" -sS --max-time 30 -o "$resp" -w '%{http_code}' \
-            -X POST -H 'Content-Type: application/json' --data @"$body" "$GROKBOT_WEBHOOK_URL" 2>/dev/null)" || code="000"
-  rm -f "$body" 2>/dev/null
-  case "$code" in
-    2??) printf '>>> [grokbot] routine started (HTTP %s). Waiting for the bot to push %s.\n' "$code" "$branch" >&2 ;;
-    *) local why; why="$(head -c 300 "$resp" 2>/dev/null | tr -d '\r')"; rm -f "$resp"
-       die "grokbot: the webhook did not start the routine (HTTP $code). ${why:+Response: $why}" ;;
-  esac
-  rm -f "$resp" 2>/dev/null
-  local timeout="${OSRC_GROKBOT_TIMEOUT:-3600}" poll="${OSRC_GROKBOT_POLL:-20}" t0 sha="" elapsed=0
-  case "$timeout" in ''|*[!0-9]*) timeout=3600 ;; esac
-  case "$poll" in ''|*[!0-9]*|0) poll=20 ;; esac
-  t0=$(date +%s)
-  while :; do
-    sha="$(git ls-remote --heads origin "$branch" 2>/dev/null | awk 'NR==1{print $1}')"
-    [ -n "$sha" ] && break
-    elapsed=$(( $(date +%s) - t0 ))
-    if [ "$elapsed" -ge "$timeout" ]; then
-      record_ledger grokbot "grokbot-default" "$ttier" "$tier" "$task" "" grokbot
-      printf '>>> [grokbot] no branch after %ss. The routine may still be running: check Grok Bot, then look for %s on origin.\n' "$elapsed" "$branch" >&2
-      return 124
-    fi
-    # Keep the watchdog fed: this lane is waiting on a remote machine, not hung.
-    printf 'OSRC::PROGRESS#%s waiting for Grok Bot to push %s (%ss)\n' "${OSRC_MARK:-}" "$branch" "$elapsed"
-    sleep "$poll"
-  done
-  git fetch -q origin "refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
-  local result; result="$(git show "$sha:OUTSOURCERER_RESULT.md" 2>/dev/null)" || result=""
-  if [ -n "$result" ]; then printf '%s\n' "$result"
-  else printf '(the bot pushed %s without OUTSOURCERER_RESULT.md; its last commit says:)\n%s\n' "$branch" "$(git log -1 --format=%B "$sha" 2>/dev/null)"; fi
-  printf '>>> [grokbot] delivered on branch %s (%s). Review: git diff %s...origin/%s\n' "$branch" "${sha:0:12}" "$base" "$branch" >&2
-  record_ledger grokbot "grokbot-default" "$ttier" "$tier" "$task" "" grokbot
-  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure grokbot)" >&2
-  return 0
-}
-
 # _pi_effort <ours> -> pi --thinking value. Pi: off|minimal|low|medium|high|xhigh|max.
 _pi_effort() {
   case "$1" in minimal) echo "minimal" ;; low) echo "low" ;; medium) echo "medium" ;;
@@ -21277,7 +21203,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|lane|review|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -21343,6 +21269,7 @@ main() {
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
+    lane) cmd_lane "$@" ;; review) cmd_review "$@" ;;   # remote lanes + single-reviewer queue (lib/remote.sh, lib/review.sh)
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
@@ -21375,7 +21302,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a
@@ -21409,7 +21336,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|explain|classify|session|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|lane|review|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue)
       if ! _blind_turn_guard; then
