@@ -1082,7 +1082,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -5249,10 +5249,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -11492,14 +11492,14 @@ _bg_capture_provider() {
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
       [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
-      PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; _want_val=0; continue
+      PROVIDER="$_tok"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; _want_val=0; continue
     fi
     case "$_tok" in
       --provider)   _want_val=1 ;;
       # `--provider=X` must NOT slip through: unmatched, it would stay in the argv, reach the leaf as
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
-      --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1
+      --provider=*) PROVIDER="${_tok#--provider=}"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1
                     [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
@@ -11516,7 +11516,7 @@ cmd_bg() {
     --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent for THIS bg command (lib/spend.sh)
     --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
     --cap=*)     OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -11950,7 +11950,7 @@ _factory_global_flags() {
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --provider)
         [ -n "${2:-}" ] || die "--provider needs a value (a lane name, e.g. droid)"
-        PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
+        PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       *) _FGF_ARGS+=("$1"); shift ;;
     esac
   done
@@ -19972,7 +19972,7 @@ main() {
   while :; do
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
-                  PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
+                  PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent, argv-only, one command (lib/spend.sh)
       --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
