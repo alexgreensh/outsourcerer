@@ -432,11 +432,14 @@ tmux() {
     *) return 0 ;;
   esac
 }
-_managed_menu_answer "$PANE" "don't ask again"; rc=$?
+_managed_menu_answer "$PANE" "don't ask again" 2>/dev/null; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ] && ok "Codex: a permission-widening row ('don't ask again') is refused by label, nothing typed (L3 finding 7)" || bad "Codex: 'don't ask again' picked by label (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+CLOSED=0; : > "$SEND_LOG"
+_managed_menu_answer "$PANE" 2; rc=$?
 if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Down' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
-  ok "answer Codex non-default by label 'don't ask again' -> 1 Down + Enter (label, not index)"
+  ok "Codex: the same row by explicit index 2 -> 1 Down + Enter"
 else
-  bad "answer Codex non-default failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+  bad "Codex: index 2 failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
 fi
 
 # The highlighted row can be option 2. Selecting option 1 must navigate UP once; assuming option 1
@@ -507,11 +510,14 @@ tmux() {
     *) return 0 ;;
   esac
 }
-_managed_menu_answer "$PANE" "always allow"; rc=$?
+_managed_menu_answer "$PANE" "always allow" 2>/dev/null; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ] && ok "Claude/Devin: a permission-widening row ('always allow') is refused by label, nothing typed (L3 finding 7)" || bad "Claude/Devin: 'always allow' picked by label (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+CLOSED=0; : > "$SEND_LOG"
+_managed_menu_answer "$PANE" 2; rc=$?
 if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-sv Down' "$SEND_LOG" && grep -q 'send-keys -t sess-sv Enter' "$SEND_LOG"; then
-  ok "answer Claude/Devin scoped-allow by label 'always allow' -> 1 Down + Enter"
+  ok "Claude/Devin: the same row by explicit index 2 -> 1 Down + Enter"
 else
-  bad "answer Claude/Devin scoped-allow failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
+  bad "Claude/Devin: index 2 failed (rc=$rc): $(cat "$SEND_LOG" 2>/dev/null)"
 fi
 
 # ---- numbered menu now accepts a LABEL substring too (format-agnostic, not just a row index) -----
@@ -542,9 +548,9 @@ fi
 # ---- static: the dispatch wires menu refusal + the new rc messages + control/answer subcommands -
 grep -q 'session send refused: the pane is showing an interactive choice menu' "$SRC" && ok "send refuses helpfully on a menu pane" || bad "no helpful menu refusal in send"
 grep -q 'Use '"'"'session answer'"'"' to select an option' "$SRC" && ok "send refusal names session answer" || bad "send refusal does not name session answer"
-grep -q 'session send failed: nothing was submitted' "$SRC" && ok "send failure message says 'nothing was submitted'" || bad "send failure message wrong"
+grep -q 'EVENT failed %s %s send did not land' "$SRC" && ok "send failure is an EVENT failed line, never 'sent' (L3)" || bad "send failure message wrong"
 grep -q 'Pane state:' "$SRC" && ok "send failure carries the real pane state" || bad "send failure omits pane state"
-grep -q 'submitted, text left the composer' "$SRC" && ok "rc 2 message states submission verified" || bad "rc 2 message wrong"
+grep -q 'sent (submitted, text left the composer; model delivery NOT independently verified' "$SRC" && ok "rc 2 message states the submission evidence" || bad "rc 2 message wrong"
 grep -q 'session control <interrupt|exit|relaunch>' "$SRC" && ok "control subcommand advertised in usage" || bad "control not in usage"
 grep -q 'answer \[y|n|<index>|<label>\]' "$SRC" && ok "answer subcommand advertised in usage" || bad "answer not in usage"
 # The control plane must be strictly separate from send: lifecycle text must never be delivered as chat.

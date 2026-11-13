@@ -128,6 +128,7 @@ For multi-step work, use a **plan**: disk-backed tasks receive a supplied spec a
 - `references/mechanism.md`: setup, provider flags, tier wrapping, `--with` injection, `session` mode
 - `references/lanes-and-models.md`: full alias/lane table, native and engine lanes, image backends, exclude list, failover
 - `references/jobs-and-safety.md`: background jobs, watchdog, exit codes, cloud gate, watching, `fleet`
+- `references/screen-and-approver.md`: `session state`, verified `session send`, `approve-policy safe`
 - `references/parallel-and-fanout.md`: `fanout`, per-agent routing, gauntlet recipe, self-heal
 - `references/effort-and-tiers.md`: `--effort` per lane, capability-vs-price tiers
 - `references/tab.md`: cash vs plan-limit accounting, estimates
