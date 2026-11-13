@@ -116,7 +116,7 @@ Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEART
 
 ## Subcommands
 
-Core: `brief` · `mode` · `consent` · `cloud` (hosted sessions: `start`/`where`/`ls`) · `run`/`explore`/`research`/`edit`/`yolo` · `session` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `loop` · `fleet` (`ls`/`show`/`name`/`supervise`: your Claude Code sessions plus Outsourcerer's own jobs, not other tools' independent sessions) · `advise` · `doctor` · `models`. Factory: `plan` · `task` · `land` · `flow` · `exclude`. Remote lanes (cloud sessions, CI branches) + one-reviewer queue: `lane` · `review` (`references/remote-and-review.md`). More: `suggest`/`deals` · `estimate` · `tab` · `second-opinion` · `image` · `continue` · `tap` · `sanitize` · `parity*` · `posture` · `classify` · `cleanup`/`gc`. Job states and next steps (`permission-blocked` is not `blocked`: rerun with `yolo` or restructure): `references/jobs-and-safety.md`.
+Core: `brief` · `mode` · `consent` · `cloud` (hosted sessions: `start`/`where`/`ls`) · `run`/`explore`/`research`/`edit`/`yolo` · `session` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `loop` · `fleet` (`ls`/`show`/`name`/`supervise`: your Claude Code sessions plus Outsourcerer's own jobs, not other tools' independent sessions) · `advise` · `doctor` · `models`. Factory: `plan` · `task` · `land` · `flow` · `exclude`. Remote lanes (cloud sessions, CI branches) + one-reviewer queue: `lane` · `review` (`references/remote-and-review.md`). More: `suggest`/`deals` · `estimate` · `tab` · `second-opinion` · `image` · `continue` · `tap` · `sanitize` · `parity*` · `posture` · `classify` · `hub` · `cleanup`/`gc`. Job states and next steps (`permission-blocked` is not `blocked`: rerun with `yolo` or restructure): `references/jobs-and-safety.md`.
 
 ## Factory: plans for multi-step work
 
@@ -139,6 +139,7 @@ For multi-step work, use a **plan**: disk-backed tasks receive a supplied spec a
 - `references/agentic-local.md`: local models driven inside the harness
 - `references/vocabulary-hygiene.md`: `sanitize` and fallback-trigger vocabulary
 - `references/factory.md`: plans, done contract, held decisions, merge gate, flows, crash recovery
+- `references/hub.md`: `hub export`/`hub serve`: Mission Control state, loopback token server, answer files
 - `references/factory-tasks-cli.md`: every `plan` and `task` flag, the brief, plan files
 - `references/factory-land-cli.md`: every `land` flag, done-contract rules, `evidence.json`
 - `references/factory-flow-cli.md`: `plan run`, `flow`, and the flow JSON format

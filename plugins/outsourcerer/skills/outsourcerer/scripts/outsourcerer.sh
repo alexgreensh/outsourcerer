@@ -56,6 +56,8 @@
 #                                  <old-sid> moves that session's owned targets into THIS session.
 #   handover [--out FILE]          Write the markdown brief (targets, kind, state, model, cwd,
 #                                  adopt + wait commands) the NEXT session runs to pick up the fleet.
+#   hub export|serve [--port N]    Mission Control: SCHEMA project docs as JSON (export), or the
+#                                  same page served on 127.0.0.1 behind a token (serve). See references/hub.md.
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
@@ -19347,8 +19349,8 @@ _warn_unwatched() {
 # allows the stop.
 # (_owner_sid/_owner_record/_waited_ids moved to lib/handover.sh; _owned_live_state stays here.)
 
-# _owned_live_state lives in lib/hub.sh (moved there for the file-size ratchet; hub
-# lanes consume it for liveness and stop-guard still calls it after the lib load).
+# _owned_live_state lives in lib/owner_state.sh (moved for the file-size ratchet; the
+# hub and stop-guard both call it after the lib load).
 
 cmd_stop_guard() {
   [ "${OSRC_STOP_GUARD:-1}" = "0" ] && return 0
@@ -20987,7 +20989,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

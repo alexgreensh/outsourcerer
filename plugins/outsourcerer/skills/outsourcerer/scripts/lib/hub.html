@@ -558,7 +558,7 @@ section > h2 { margin: 0; font-size: 1.5rem; font-weight: 600; }
       go2.disabled = true; st.textContent = 'Saving…';
       try {
         await db.doc('answers/' + p.id + '--' + d.id).set({ project: p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
-        st.textContent = 'Sent. The orchestrator picks it up at its next check.';
+        st.textContent = 'Saved. Your orchestrator reads it when it checks Mission Control.';
       } catch (e) { st.textContent = 'Not saved: ' + ((e && e.message) || 'try again'); sync(); }
     });
     a.append(opts, ta, go2, st); c.appendChild(a);

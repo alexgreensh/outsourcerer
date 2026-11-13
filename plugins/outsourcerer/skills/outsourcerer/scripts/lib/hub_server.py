@@ -21,7 +21,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 REFRESH_SECS = 30
 ANSWER_MAX = 16384
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-ALLOWED_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 
 class Hub:
@@ -129,31 +128,49 @@ def make_handler(hub):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):
-            # Never log the token: strip the query string off the request line first.
-            line = re.sub(r"[?&]t=[^&\s]*", "", fmt % args)
+            # Never log the token: strip the WHOLE query string off the request
+            # line (a %-encoded key would dodge a literal 't=' scrub).
+            line = re.sub(r"\?\S*", "", fmt % args)
             sys.stderr.write("[hub] %s\n" % line)
 
         def _host_ok(self):
-            host = (self.headers.get("Host") or "").split(",")[0].strip()
-            if not host:
-                return False
-            if host.startswith("["):
-                name = host.split("]")[0] + "]"
-            else:
-                name = host.split(":")[0]
-            return name in ALLOWED_HOSTS
+            # Exact host:port match, lower-cased first: "LOCALHOST" passes, a
+            # missing port or a userinfo trick ("127.0.0.1:P@evil") does not.
+            host = (self.headers.get("Host") or "").split(",")[0].strip().lower()
+            port = self.server.server_address[1]
+            return host in ("127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port)
 
         def _token_ok(self):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             t = (q.get("t") or [""])[0]
+            via = "query" if t else ""
             if not t:
                 t = self.headers.get("X-OSRC-Token", "")
+                via = "header" if t else ""
+            if not t:
+                for part in (self.headers.get("Cookie") or "").split(";"):
+                    name, _, val = part.strip().partition("=")
+                    if name == "osrc_hub_t":
+                        t, via = val, "cookie"
+                        break
             # compare_digest needs bytes on both sides; a non-ASCII token must not raise.
-            return hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
+            ok = hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
+            # A tokened GET that did NOT use the cookie plants one, so the bare
+            # URL (page strips ?t= for the address bar) still works on reload.
+            self._want_cookie = ok and via in ("query", "header") and self.command == "GET"
+            return ok
+
+        def _send_cookie(self):
+            if getattr(self, "_want_cookie", False):
+                self.send_header(
+                    "Set-Cookie",
+                    "osrc_hub_t=%s; Path=/; HttpOnly; SameSite=Strict" % hub.token,
+                )
 
         def _send_json(self, obj, code=200):
             data = json.dumps(obj).encode()
             self.send_response(code)
+            self._send_cookie()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
@@ -175,6 +192,7 @@ def make_handler(hub):
                 except OSError:
                     return self._send_json({"error": "page missing"}, 500)
                 self.send_response(200)
+                self._send_cookie()
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
