@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # Guard against OSRC_VERSION drifting from plugin.json. The version literal in outsourcerer.sh and the
 # "version" in .claude-plugin/plugin.json are two hand-maintained copies; a release that bumps one and
 # not the other makes `doctor` report a drift and `--version` lie. This test fails when they diverge,

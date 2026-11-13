@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_parser_parity.sh — T4: parse_model and _consume_flags must not diverge on the shared flag
 # namespace (-m/--tier/--with/--effort). parse_model historically dropped --tier/--with and skipped
 # --effort validation; this asserts parity. Run: bash test_parser_parity.sh

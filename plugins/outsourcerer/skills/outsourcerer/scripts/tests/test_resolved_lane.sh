@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # Test for the "resolved lane" accounting feature of outsourcerer.sh.
 #
 # Validates:
@@ -25,7 +27,7 @@ fi
 # FILE (not process substitution) is required: this bash does not define
 # functions when `source`-ing from a <() pipe.
 TMP_MAIN="$(mktemp "${TMPDIR:-/tmp}/outsourcerer_src.XXXXXX")"
-trap 'rm -f "$TMP_MAIN"' EXIT
+trap 'rm -f "$TMP_MAIN"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 set +e
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$MAIN_SCRIPT" > "$TMP_MAIN"
 # shellcheck disable=SC1090

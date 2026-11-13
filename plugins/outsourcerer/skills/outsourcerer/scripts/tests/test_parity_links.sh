@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_parity_links.sh — parity must be able to REPAIR itself.
 #
 # The failure this guards is the quiet kind. Plugin caches are versioned, so upgrading a plugin
@@ -27,7 +29,7 @@ grep -q 'pruned %s dead link\|pruned $_stale dead link' "$SRC" \
   || bad "dead-link pruning is not reported"
 
 # Behavioural: reproduce the version-bump that broke it, using parity's own linking logic.
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 dst="$TMP/skills"; mkdir -p "$dst"
 old="$TMP/cache/plug/1.0.0/skills/ce-debug"; mkdir -p "$old"; : > "$old/SKILL.md"
 new="$TMP/cache/plug/2.0.0/skills/ce-debug"; mkdir -p "$new"; : > "$new/SKILL.md"

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -7,7 +9,7 @@ SRC="$HERE/../outsourcerer.sh"
 
 TMP="$(mktemp "${TMPDIR:-/tmp}/osrc-cost.XXXXXX")"
 FIX="$(mktemp -d "${TMPDIR:-/tmp}/osrc-cost-fixture.XXXXXX")"
-trap 'rm -f "$TMP"; rm -rf "$FIX"' EXIT
+trap 'rm -f "$TMP"; rm -rf "$FIX"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$TMP"
 set +e
 # shellcheck disable=SC1090
