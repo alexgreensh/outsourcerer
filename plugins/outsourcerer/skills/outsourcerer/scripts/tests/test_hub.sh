@@ -262,6 +262,27 @@ dotpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$
 badhost="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' "$BASE/api/projects?t=$TOK")"
 [ "$badhost" = "403" ] && ok "foreign Host header refused" || bad "foreign Host got $badhost"
 
+# Review A1: the reload cookie is a credential for the page document ONLY;
+# POSTs need a same-origin Origin/Sec-Fetch-Site whatever carried the token.
+ck="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/")"
+[ "$ck" = "200" ] && ok "cookie alone serves GET /" || bad "cookie GET / got $ck"
+ck2="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/api/projects")"
+[ "$ck2" = "403" ] && ok "cookie alone refused on /api/projects" || bad "cookie api got $ck2"
+ck3="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" -X POST "$BASE/api/answers" \
+  -H 'Content-Type: application/json' -d '{"id":"ck--D1","choice":"x"}')"
+[ "$ck3" = "403" ] && ok "cookie alone refused on POST" || bad "cookie POST got $ck3"
+or1="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+  -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
+[ "$or1" = "403" ] && ok "POST with foreign Origin refused" || bad "foreign Origin POST got $or1"
+or2="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+  -H 'Origin: https://evil.example' -H 'Sec-Fetch-Site: cross-site' \
+  -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
+[ "$or2" = "403" ] && ok "POST with cross-site headers refused" || bad "cross-site POST got $or2"
+or3="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+  -H "Origin: http://127.0.0.1:${PORT}" -H 'Sec-Fetch-Site: same-origin' \
+  -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
+[ "$or3" = "200" ] && ok "POST with same-origin Origin accepted" || bad "same-origin POST got $or3"
+
 r0="$(curl -s "$BASE/api/projects?t=$TOK" | jq -r '.generated_at')"
 sleep 1
 rf="$(curl -s -X POST "$BASE/api/refresh?t=$TOK")"

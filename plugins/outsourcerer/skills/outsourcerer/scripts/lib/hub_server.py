@@ -184,10 +184,32 @@ def make_handler(hub):
                         break
             # compare_digest needs bytes on both sides; a non-ASCII token must not raise.
             ok = hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
+            # The cookie exists ONLY so the stripped-?t= URL survives a reload of
+            # the page document. It is not a credential anywhere else — every API
+            # call the page makes carries ?t= itself, so a stray page on another
+            # localhost port cannot spend it (review A1).
+            if ok and via == "cookie":
+                path = urllib.parse.urlparse(self.path).path
+                ok = self.command == "GET" and path in ("/", "/index.html")
             # A tokened GET that did NOT use the cookie plants one, so the bare
             # URL (page strips ?t= for the address bar) still works on reload.
             self._want_cookie = ok and via in ("query", "header") and self.command == "GET"
             return ok
+
+        def _post_origin_ok(self):
+            # A browser POST must come from this server's own page. Origin is the
+            # strong signal; Sec-Fetch-Site catches browsers that omit it. Absent
+            # headers pass: non-browser clients send neither and the token gates.
+            origin = (self.headers.get("Origin") or "").strip().lower()
+            port = self.server.server_address[1]
+            if origin and origin not in ("http://127.0.0.1:%d" % port,
+                                         "http://localhost:%d" % port,
+                                         "http://[::1]:%d" % port):
+                return False
+            sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            if sfs and sfs not in ("same-origin", "none"):
+                return False
+            return True
 
         def _send_cookie(self):
             if getattr(self, "_want_cookie", False):
@@ -239,7 +261,7 @@ def make_handler(hub):
                 self._send_json({"error": "not found"}, 404)
 
         def do_POST(self):
-            if not self._host_ok() or not self._token_ok():
+            if not self._host_ok() or not self._token_ok() or not self._post_origin_ok():
                 return self._deny()
             hub.last_poll = time.time()
             u = urllib.parse.urlparse(self.path)
