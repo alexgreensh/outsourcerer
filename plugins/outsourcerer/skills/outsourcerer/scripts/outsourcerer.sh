@@ -153,6 +153,13 @@
 # Model is a parameter everywhere. Default is overridable via OUTSOURCERER_MODEL.
 # Plan-limit status on Devin CHANGES over time, this script never hardcodes it; use `models`.
 #
+# PLAN-METER GATE: brief/advise read live plan windows (claude5h/claude7d/codex5h/codexwk). A lane
+# at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH reading is never dispatched to: advise
+# excludes it, unpinned runs hop to the next ready lane for free, pinned -m and `session start`
+# refuse loudly. Stale readings (> OSRC_LIMITS_STALE_SECS, default 6h) warn only. Consent:
+# --force-lane, or --provider typed on the command line (env-selected providers do NOT count).
+# Kill switch: OSRC_LANE_LIMIT_GATE=0.
+#
 # MODEL ADVISORY (which model should I use?):
 #   advise [--refresh] [--json] [--effort LEVEL] "<task>"   Classifies your task (code/reasoning/agentic/creative/
 #   simple), scores every known model against live benchmark data (OpenRouter benchmarks API:
@@ -252,6 +259,13 @@ elif [ -n "${OSRC_PROVIDER:-}" ] || [ -n "${OUTSOURCERER_PROVIDER:-}" ]; then
 else
   PROVIDER_EXPLICIT=0
 fi
+# OSRC_PROVIDER_ARG is the limit gate's consent signal: 1 only when --provider was typed on a USER
+# command line (argv parses below set it; env-selected providers never do). Internal re-dispatchers
+# that inject --provider into a child's argv (_pf_provider/_run_provider/_ad_full) export
+# OSRC_PROVIDER_INJECTED=1 so that parse cannot counterfeit a user pin — snapshot it here and unset
+# the env copy so the marker can never leak into this process's own children.
+_OSRC_PROVIDER_INJECTED="${OSRC_PROVIDER_INJECTED:-0}"
+unset OSRC_PROVIDER_INJECTED
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -260,27 +274,12 @@ OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
-# BASH_SOURCE[0] is preferred over $0: identical when this file is EXECUTED, but when it is SOURCED
-# (tests, OSRC_SOURCED=1) $0 is the caller and would point SCRIPT_DIR at the wrong directory — which
-# would keep scripts/lib/*.sh from loading. See the factory-file loader for the same fix.
-# When SOURCED, SCRIPT_DIR/SCRIPT_PATH are the CALLER's globals: stash them now and restore them at
-# the bottom of this file (after the lib + factory loaders have consumed the engine's own values),
-# so a sourced engine never clobbers the caller's SCRIPT_DIR — test fixtures resolve
-# $SCRIPT_DIR/... paths after sourcing. Detected by BASH_SOURCE vs $0: identical when executed.
-_osrc_restore_sd=0
-if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
-  _osrc_restore_sd=1
-  _osrc_caller_sd="${SCRIPT_DIR-}"; _osrc_caller_sp="${SCRIPT_PATH-}"
-fi
-SCRIPT_PATH="$(command -v -- "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]:-$0}")"
+SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
 case "$SCRIPT_PATH" in
   /*) ;;  # already absolute
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
 esac
-# Canonicalize: a SOURCED caller may hand us a path containing `..` (tests do `. "$DIR/../outsourcerer.sh"`),
-# and a literal `..` in SCRIPT_DIR both looks wrong and leaks into every $SCRIPT_DIR-relative path.
-SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)" || SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
-SCRIPT_PATH="$SCRIPT_DIR/$(basename "$SCRIPT_PATH")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
@@ -1066,7 +1065,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -5179,10 +5178,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -11300,7 +11299,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -11414,14 +11413,14 @@ _bg_capture_provider() {
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
       [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
-      PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; _want_val=0; continue
+      PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; _want_val=0; continue
     fi
     case "$_tok" in
       --provider)   _want_val=1 ;;
       # `--provider=X` must NOT slip through: unmatched, it would stay in the argv, reach the leaf as
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
-      --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1
+      --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1
                     [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
@@ -11435,7 +11434,7 @@ cmd_bg() {
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -11529,13 +11528,17 @@ cmd_bg() {
   # caller's depth (it no longer resets it) so route_delegate's guard trips there too as a backstop.
   local -a _pf_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _pf_provider=(--provider "$PROVIDER")
+  # OSRC_PROVIDER_ARG carries whether --provider was typed on the user's command line (the limit
+  # gate's consent signal); OSRC_PROVIDER_INJECTED marks the injected --provider so the preflight
+  # child's argv parse cannot counterfeit that pin. Both mirror _run_provider's logic below.
+  local _pf_inj=0; [ "${#_pf_provider[@]}" -gt 0 ] && _pf_inj=1
   # Signal preflight via a PRIVATE ARGV SENTINEL, not an env var. An env `OSRC_PREFLIGHT=1` would be
   # INHERITED by a normal top-level invocation (dotfiles, direnv, CI, a wrapper) and silently turn a
   # real run into a dispatch-suppressing no-op that skips the cloud/secret gate and reports fake
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
+  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11681,8 +11684,11 @@ _autodetach_run() {
   # parent is part of (the call site decremented it back to the pre-increment value, matching the
   # bg child's inherited depth). Pass cloud ack so the pane's _cloud_disclose / _bg_cloud_preack
   # return early (the parent already acquired consent).
-  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}")"
+  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}") OSRC_PROVIDER_ARG=$(printf '%q' "${OSRC_PROVIDER_ARG:-0}")"
   [ -n "${OUTSOURCERER_MAX_DEPTH:-}" ] && _ad_full="$_ad_full OUTSOURCERER_MAX_DEPTH=$(printf '%q' "$OUTSOURCERER_MAX_DEPTH")"
+  # When --provider is re-injected below it is machine-derived, not a user pin: mark it so the
+  # pane's argv parse cannot set OSRC_PROVIDER_ARG (the env value above already carries provenance).
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full OSRC_PROVIDER_INJECTED=1"
   _ad_full="$_ad_full $(printf '%q' "$SCRIPT_PATH")"
   # Re-add --provider if it was a GLOBAL flag consumed by main() (not in ORIG). Mirrors run_job's
   # _run_provider logic. A duplicate (when --provider IS in ORIG) is harmless: both are consumed.
@@ -11841,7 +11847,7 @@ _factory_global_flags() {
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --provider)
         [ -n "${2:-}" ] || die "--provider needs a value (a lane name, e.g. droid)"
-        PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+        PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
       *) _FGF_ARGS+=("$1"); shift ;;
     esac
   done
@@ -11996,7 +12002,12 @@ run_job() {
   # backstop inside the child.
   local -a _run_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
+  # OSRC_PROVIDER_ARG propagates whether --provider was typed on the USER's command line (the
+  # limit gate's consent signal) into the job child; OSRC_PROVIDER_INJECTED marks the re-injected
+  # --provider below so the child's argv parse cannot counterfeit that pin. Same pair as the bg
+  # preflight child (_pf_provider) and the auto-detach pane (_ad_full).
+  local _run_inj=0; [ "${#_run_provider[@]}" -gt 0 ] && _run_inj=1
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
@@ -17917,6 +17928,10 @@ _winpty_session() {
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
 
+      # L7 LIMIT GATE (session form, winpty parity with the tmux path): refuse an exhausted lane
+      # BEFORE the session dir/broker is created; consent proceeds with the warning already printed.
+      _osrc_session_limit_gate
+
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
       _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || die "OSRC_HOME not writable: $OSRC_HOME"
 
@@ -18131,6 +18146,11 @@ session() {
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
+      # L7 LIMIT GATE (session form): the lane is resolved and the launch vector built, but no tmux
+      # session exists yet. Interactive sessions cannot hop — consent (--force-lane / argv
+      # --provider) proceeds with the warning already printed, anything else refuses loudly naming
+      # the fallback lane. This is the path that used to park a Terra lane on a plan-limit banner.
+      _osrc_session_limit_gate
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
       _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
@@ -19817,7 +19837,7 @@ main() {
   while :; do
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
-                  PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+                  PROVIDER="$2"; PROVIDER_EXPLICIT=1; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       *) break ;;
     esac
@@ -19958,13 +19978,4 @@ main() {
   esac
   return $_cmd_rc
 }
-# Hand the caller's SCRIPT_* globals back when this file was SOURCED (stash is at the top of the
-# file). Everything that needed the engine's own values — the lib loader, the factory loader — has
-# already run; runtime users of SCRIPT_DIR (_winpty_session) resolve it the same wrong/right way
-# they did before this file was ever sourced, matching pre-change behavior.
-if [ "${_osrc_restore_sd:-0}" = "1" ]; then
-  [ -n "${_osrc_caller_sd:-}" ] && SCRIPT_DIR="$_osrc_caller_sd"
-  [ -n "${_osrc_caller_sp:-}" ] && SCRIPT_PATH="$_osrc_caller_sp"
-  unset _osrc_caller_sd _osrc_caller_sp _osrc_restore_sd
-fi
 [ "${OSRC_SOURCED:-}" = "1" ] || main "$@"

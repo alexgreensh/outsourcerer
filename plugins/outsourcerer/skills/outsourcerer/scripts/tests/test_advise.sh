@@ -173,6 +173,12 @@ grep -q 'advise'                     "$SRC" && ok "advise in help text"         
 [ "$(_lane_conserve_mult cc 'claude5h=50')"  = "1.0000" ] && ok "cc exactly at the line -> no haircut" || bad "cc penalized at the line"
 awk -v m="$(_lane_conserve_mult cc 'claude5h=100')" 'BEGIN{exit !(m<1.0 && m>=0.90)}' && ok "cc fully spent -> capped ~0.90 haircut" || bad "cc full-spend haircut out of range"
 [ "$(_lane_conserve_mult cx 'codex5h=60 codexwk=90')" = "0.9200" ] && ok "cx uses the MORE-spent of 5h/weekly (90%)" || bad "cx did not pick the more-spent window"
+# 89 sits under the 90 exclusion line: haircut still applies AND the limit gate does not exclude —
+# the boundary between spend-aware scoring and hard exclusion (test_limit_gate owns >=90).
+[ "$(_lane_conserve_mult cc 'claude5h=89')" = "0.9220" ] && ok "cc at 89% -> haircut, below exclusion line" || bad "cc 89% boundary wrong: $(_lane_conserve_mult cc 'claude5h=89')"
+_osrc_limit_exceeded cc 'claude5h=89' 2>/dev/null \
+  && bad "cc at 89% wrongly excluded by the limit gate" \
+  || ok "cc at 89% is under the exclusion line (haircut zone, not excluded)"
 [ "$(_lane_conserve_mult dv 'claude5h=100')" = "1.00" ] && ok "devin lane is never haircut (unmeasured, never invent)" || bad "devin got a fabricated limit penalty"
 [ "$(_lane_conserve_mult or 'claude5h=100')" = "1.00" ] && ok "openrouter lane is never haircut (unmeasured)" || bad "openrouter got a fabricated limit penalty"
 # integration: with a lane forced past the line, advise prints the conservation line; opt-out silences it.

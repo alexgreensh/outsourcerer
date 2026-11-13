@@ -9,6 +9,7 @@ orchestration rules that govern how you drive jobs once dispatched.
 - Post-hoc classification (`classify`)
 - Cloud gate + one-time consent
 - Plan-limit failover
+- Plan-meter gate (pre-dispatch)
 - Windows (Git Bash, no WSL)
 - Orchestration rules while this skill is active
 - Watch what you launch, and report on a clock
@@ -238,6 +239,17 @@ the job, the line names it and the consent switch (`OSRC_FAILOVER_CASH_OK=1`) in
 silently. A pinned `-m` that can only move to a different model is refused the same loud way
 (override: `OSRC_FALLBACK_PINNED=1`). Each hop records a `fallback` row in the Tab ($0,
 bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
+
+## Plan-meter gate (pre-dispatch)
+
+`brief`/`advise` read live plan windows (`claude5h`/`claude7d`/`codex5h`/`codexwk`). A lane at or
+over `OSRC_LANE_LIMIT_PCT` (default 90) on a FRESH reading is never dispatched to: `advise`
+excludes it, an unpinned run hops to the next ready lane for free, a pinned `-m` refuses loudly,
+and `session start` refuses before tmux exists. Stale readings (older than
+`OSRC_LIMITS_STALE_SECS`, default 6h) are "unknown, not exhausted": warn only, never block.
+Consent to proceed anyway: `--force-lane`, or `--provider` typed on the command line —
+env-selected providers (`OSRC_PROVIDER`, `OUTSOURCERER_PROVIDER`, `OSRC_PROVIDER_EXPLICIT`) pick
+the lane but do NOT count as consent. Kill switch: `OSRC_LANE_LIMIT_GATE=0`.
 
 ## Windows (Git Bash, no WSL)
 

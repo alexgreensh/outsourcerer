@@ -346,6 +346,10 @@ _osrc_limit_lane_ready() {
 # order (local -> Devin -> Gemini -> Codex -> OpenRouter) filtered to lanes that are READY
 # right now and not themselves over the limit line. Prints the lane code; rc1 when nothing
 # qualifies (caller renders "none ready").
+# Devin's daily plan bucket has no proactive meter (Devin exposes no reading; exhaustion is only
+# learned from an API refusal), so dv is gated here only indirectly: a CONFIRMED quota refusal
+# marks the lane DOWN (_lane_down_mark, self-healing TTL) and _fallback_lane_ready refuses DOWN
+# lanes — the same net that covers every other plan lane's post-dispatch limit signal.
 _osrc_limit_fallback() {
   local limits="${1:-}" l
   [ -n "$limits" ] || limits="$(_session_limits 2>/dev/null)"
@@ -373,15 +377,16 @@ _osrc_limits_snapshot() {
   printf '%s' "$_OSRC_LIMITS_SNAP"
 }
 
-# _osrc_limit_gate <disp> -> the pre-dispatch plan-meter gate. Called from route_delegate
+# _osrc_limit_gate <disp> [nohop] -> the pre-dispatch plan-meter gate. Called from route_delegate
 # AFTER the lane-down gate and before _route_resolution, in dynamic scope: it reads
 # tier/PROVIDER_EXPLICIT/_fb_user_pinned/OSRC_FORCE_LANE and, on the hop path, shares
-# route_delegate's _fb_* locals exactly like _gate_hop does.
+# route_delegate's _fb_* locals exactly like _gate_hop does. `nohop` (interactive sessions, which
+# have no fallback argv to rebuild) skips the hop branch so every non-consented refusal dies.
 #   rc0  -> proceed (clear, consented, stale-warn-only, or OSRC_LANE_LIMIT_GATE=0)
 #   rc10 -> a zero-cost hop was armed; the caller MUST `continue` the route loop
-#   dies -> refused (pinned -m, non-auto tier, or no fallback left)
+#   dies -> refused (pinned -m, non-auto tier, nohop, or no fallback left)
 _osrc_limit_gate() {
-  local _ol_disp="${1:-}" _ol_lane _ol_limits _ol_rd _ol_pct _ol_thr _ol_fb _ol_name _ol_stale=0
+  local _ol_disp="${1:-}" _ol_nohop="${2:-}" _ol_lane _ol_limits _ol_rd _ol_pct _ol_thr _ol_fb _ol_name _ol_stale=0
   local _fb_alias _fb_mid _fb_lane
   [ "${OSRC_LANE_LIMIT_GATE:-1}" = "0" ] && return 0
   _ol_lane="$(_quota_lane_key "$_ol_disp" 2>/dev/null)"; [ -n "$_ol_lane" ] || return 0
@@ -404,16 +409,20 @@ _osrc_limit_gate() {
   fi
   printf '>>> [limit] %s lane meter %s is at/over OSRC_LANE_LIMIT_PCT=%s — suggested fallback: %s.\n' \
     "$_ol_name" "$_ol_rd" "$_ol_thr" "$_ol_fb" >&2
-  # Consent: --force-lane, or a USER --provider pin. A hop-injected provider is not consent —
-  # _gate_hop exports OSRC_FALLBACK_PINNED=1 when it rewrites ARGV, and that mark must keep the
-  # gate enforcing on the candidate it selected.
+  # Consent: --force-lane, or a --provider typed on THIS command line. PROVIDER_EXPLICIT alone is
+  # NOT enough: env-selected providers (OSRC_PROVIDER / OUTSOURCERER_PROVIDER / OSRC_PROVIDER_EXPLICIT)
+  # are ambient config that propagates silently into detached jobs — an orchestrator's exported
+  # variable must not read as per-launch consent. OSRC_PROVIDER_ARG is set only by argv --provider
+  # parses (outsourcerer.sh) and propagated explicitly through internal re-dispatch; internal
+  # --provider injection is suppressed via OSRC_PROVIDER_INJECTED. A hop-injected provider is not
+  # consent either — _gate_hop exports OSRC_FALLBACK_PINNED=1 when it rewrites ARGV.
   [ "${OSRC_FORCE_LANE:-0}" = "1" ] && return 0
-  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ] && return 0
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && [ "${OSRC_PROVIDER_ARG:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ] && return 0
   # Pinned -m is a deliberate model choice: refuse loudly, never silently switch it.
   if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
     die "limit gate: ${_ol_name} lane meter ${_ol_rd} is at/over OSRC_LANE_LIMIT_PCT=${_ol_thr} — the plan window is nearly spent and the delegate would sit on a limit banner. Suggested fallback: ${_ol_fb}. This run pinned -m ${MODEL:-?}; re-run with --force-lane to proceed anyway, --provider <lane> to pin a lane explicitly, or pick another -m."
   fi
-  if _fallback_enabled && [ "${tier:-auto}" = "auto" ]; then
+  if [ "$_ol_nohop" != "nohop" ] && _fallback_enabled && [ "${tier:-auto}" = "auto" ]; then
     if _gate_hop "$_ol_disp"; then
       printf '>>> [limit] %s lane meter %s at/over OSRC_LANE_LIMIT_PCT=%s — skipping to %s (lane %s); no dispatch, so this skip is free of the attempt budget.\n' \
         "$_ol_name" "$_ol_rd" "$_ol_thr" "${_fb_alias:-?}" "${_fb_lane:-?}" >&2
@@ -421,4 +430,26 @@ _osrc_limit_gate() {
     fi
   fi
   die "limit gate: ${_ol_name} lane meter ${_ol_rd} is at/over OSRC_LANE_LIMIT_PCT=${_ol_thr} — the plan window is nearly spent and the delegate would sit on a limit banner. Suggested fallback: ${_ol_fb}. Wait for the window to reset, re-run with --force-lane, or pin another lane with --provider."
+}
+
+# _osrc_session_limit_gate -> the interactive-session form of the plan-meter gate, called from
+# session() start and _winpty_session() start AFTER the lane is resolved and BEFORE the tmux /
+# winpty session is created. A session has no fallback hop and no route loop, so the gate runs in
+# `nohop` mode: consent (--force-lane or argv --provider, i.e. OSRC_PROVIDER_ARG=1) proceeds with
+# the warning already printed; anything else refuses loudly naming the fallback lane.
+#
+# Session PROVIDER tokens mean the NATIVE lane here (codex->cx, claude->cc, gemini->gm), NOT the
+# dispatch transport — _quota_lane_key would fold `codex`/`cc` to `or`. Resolve via _lane_by_native
+# first (the same resolution _session_launch_adapter uses), then _lane_by_token, and hand the gate
+# the lane's `disp` token so _quota_lane_key lands on the right lane code.
+# MODEL_EXPLICIT plays the pinned-role route_delegate gives _fb_user_pinned: an interactive
+# `session start -m <model>` is a deliberate model choice and refuses loudly rather than hinting
+# at a switch it cannot perform.
+_osrc_session_limit_gate() {
+  local _sl_p="${PROVIDER:-}" _sl_lane="" _sl_disp=""
+  _sl_lane="$(_lane_by_native "$_sl_p" 2>/dev/null)" || _sl_lane="$(_lane_by_token "$_sl_p" 2>/dev/null)" || _sl_lane=""
+  [ -n "$_sl_lane" ] && _sl_disp="$(_lane_field "$_sl_lane" disp 2>/dev/null)"
+  [ -n "$_sl_disp" ] || _sl_disp="$_sl_p"
+  local _fb_user_pinned="${MODEL_EXPLICIT:-0}"
+  _osrc_limit_gate "$_sl_disp" nohop
 }

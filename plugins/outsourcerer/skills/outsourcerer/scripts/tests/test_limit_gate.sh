@@ -33,12 +33,11 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-limitgate.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
-SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
-# The sourced copy resolves SCRIPT_DIR to $TMP; give it a lib/ sibling so the module loader finds
-# the real limits.sh (same trick the other copy-sourcing suites need for moved functions).
-ln -s "$SCRIPT_DIR/../lib" "$TMP/lib"
+# Source the REAL script (OSRC_SOURCED=1 skips main). $0 is this test, so SCRIPT_DIR resolves to
+# the tests dir and loader 1 finds nothing — loader 2 (_OSRC_FACTORY_DIR, symlinks followed)
+# must find lib/; that is exactly the path the symlink cases below also prove.
 # shellcheck disable=SC1090
-. "$SRC_ONLY" >/dev/null 2>&1
+. "$SRC" >/dev/null 2>&1
 type -t _osrc_limit_gate >/dev/null || { echo "FAIL: _osrc_limit_gate not defined (lib not loaded?)"; exit 1; }
 type -t _session_limits >/dev/null || { echo "FAIL: _session_limits not defined (lib not loaded?)"; exit 1; }
 # The gate reads meters through a 60s snapshot cache; every stub change below must drop it.
@@ -135,11 +134,19 @@ out="$( OSRC_FORCE_LANE=1 _fb_user_pinned=1 MODEL=kimi-k3 RESOLVED_ID=kimi-k3 PR
   *) bad "unit: --force-lane path wrong (rc=$rc): $out" ;;
 esac
 
-# User --provider pin consents (explicit lane choice); a hop-injected provider (FALLBACK_PINNED=1)
-# does NOT.
-out="$( PROVIDER_EXPLICIT=1 _fb_user_pinned=0 PROVIDER=devin tier=auto
+# User --provider pin consents (explicit lane choice) — but ONLY when it came from argv:
+# OSRC_PROVIDER_ARG=1 marks a typed --provider; PROVIDER_EXPLICIT alone (env-selected provider)
+# is ambient config and must NOT consent. A hop-injected provider (FALLBACK_PINNED=1) does NOT.
+out="$( PROVIDER_EXPLICIT=1 OSRC_PROVIDER_ARG=1 _fb_user_pinned=0 PROVIDER=devin tier=auto
         _osrc_limit_gate cxnative 2>&1 )"; rc=$?
-[ $rc -eq 0 ] && case "$out" in *"[limit]"*) ok "unit: --provider pin consents" ;; *) bad "unit: provider-pin consent wrong (rc=$rc): $out" ;; esac
+[ $rc -eq 0 ] && case "$out" in *"[limit]"*) ok "unit: argv --provider pin consents" ;; *) bad "unit: provider-pin consent wrong (rc=$rc): $out" ;; esac
+out="$( PROVIDER_EXPLICIT=1 _fb_user_pinned=1 MODEL=m RESOLVED_ID=m PROVIDER=devin tier=edit
+        _fallback_enabled() { return 1; }
+        _osrc_limit_gate cxnative 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"limit gate"*) ok "unit: env-selected provider (PROVIDER_EXPLICIT, no OSRC_PROVIDER_ARG) is NOT consent" ;; 
+  *) bad "unit: env provider leaked consent (rc=$rc): $out" ;;
+esac
 out="$( PROVIDER_EXPLICIT=1 OSRC_FALLBACK_PINNED=1 _fb_user_pinned=1 MODEL=m RESOLVED_ID=m PROVIDER=devin tier=auto
         _fallback_enabled() { return 1; }
         _osrc_limit_gate cxnative 2>&1 )"; rc=$?
@@ -178,6 +185,68 @@ out="$( _session_limits() { printf 'codexwk=100\n'; }
 out="$( _session_limits() { printf 'codexwk=100\n'; }
         _osrc_limit_gate devin 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && [ -z "$out" ] && ok "unit: unmetered lane never gated" || bad "unit: unmetered lane gated (rc=$rc): $out"
+
+# ---------------------------------------------------------------------------------------------------
+# UNIT: _osrc_session_limit_gate — the interactive session-start form. Sessions have NO fallback
+# hop: consent proceeds, everything else refuses loudly naming the fallback (rc10 is impossible).
+# Session PROVIDER tokens resolve to NATIVE lanes (codex->cx, claude->cc), not the or transport.
+# ---------------------------------------------------------------------------------------------------
+_session_limits() { printf 'codexwk=98 claude5h=40 claude7d=20\n'; }
+
+# `session start -m terra`: PROVIDER inferred codex (native cx), MODEL_EXPLICIT=1 plays the pinned
+# role -> loud refusal naming the meter + fallback; rc must be a refusal, never a hop (10).
+out="$( PROVIDER=codex MODEL=terra MODEL_EXPLICIT=1 PROVIDER_EXPLICIT=0 OSRC_PROVIDER_ARG=0 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && [ $rc -ne 10 ] && case "$out" in
+  *"limit gate"*"codexwk=98"*"fallback"*) ok "unit: session start -m on exhausted cx refuses, names fallback, no hop" ;; 
+  *) bad "unit: session gate refusal wrong (rc=$rc): $out" ;;
+esac
+
+# Same lane, unpinned provider but NO consent of any kind -> still refuses (nohop), never hops.
+# The fallback stubs prove the hop path is unreachable even when fully armed.
+out="$( _fallback_enabled() { return 0; }; _gate_hop() { return 0; }
+        PROVIDER=codex MODEL= PROVIDER_EXPLICIT=0 OSRC_PROVIDER_ARG=0 OSRC_FORCE_LANE=0 tier=auto \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && [ $rc -ne 10 ] && case "$out" in
+  *"limit gate"*) ok "unit: unpinned session on exhausted lane refuses (hop path unreachable)" ;;
+  *) bad "unit: unpinned session should refuse not hop (rc=$rc): $out" ;;
+esac
+
+# argv --provider consent: PROVIDER_EXPLICIT=1 + OSRC_PROVIDER_ARG=1 -> warn once, rc0.
+out="$( PROVIDER=codex MODEL= PROVIDER_EXPLICIT=1 OSRC_PROVIDER_ARG=1 OSRC_FORCE_LANE=0 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && case "$out" in
+  *"[limit]"*"codexwk=98"*) ok "unit: session --provider pin warns once and proceeds" ;;
+  *) bad "unit: session provider consent wrong (rc=$rc): $out" ;;
+esac
+
+# --force-lane consent on a session.
+out="$( PROVIDER=codex MODEL=terra MODEL_EXPLICIT=1 PROVIDER_EXPLICIT=0 OSRC_FORCE_LANE=1 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && case "$out" in *"[limit]"*) ok "unit: session --force-lane warns and proceeds" ;; *) bad "unit: session force-lane wrong (rc=$rc): $out" ;; esac
+
+# claude-native session: PROVIDER=claude resolves to lane cc -> claude5h=98 gates it.
+out="$( _session_limits() { printf 'claude5h=98 claude7d=20 codexwk=10\n'; }
+        PROVIDER=claude MODEL=opus MODEL_EXPLICIT=1 PROVIDER_EXPLICIT=0 OSRC_PROVIDER_ARG=0 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"limit gate"*"claude5h=98"*) ok "unit: session start on exhausted cc refuses (native resolution)" ;;
+  *) bad "unit: cc session gate wrong (rc=$rc): $out" ;;
+esac
+
+# env-selected provider is NOT consent for sessions either (same rule as headless).
+out="$( PROVIDER=codex MODEL= PROVIDER_EXPLICIT=1 OSRC_PROVIDER_ARG=0 OSRC_FORCE_LANE=0 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"limit gate"*) ok "unit: session env-provider does not consent" ;;
+  *) bad "unit: session env provider leaked consent (rc=$rc): $out" ;;
+esac
+
+# Unmetered session lane (devin) -> silent rc0, no meter read.
+out="$( _session_limits() { printf 'codexwk=100\n'; }
+        PROVIDER=devin MODEL=swe PROVIDER_EXPLICIT=0 OSRC_PROVIDER_ARG=0 \
+        _osrc_session_limit_gate 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && [ -z "$out" ] && ok "unit: devin session never gated" || bad "unit: devin session gated (rc=$rc): $out"
 
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: real --osrc-preflight-internal route against a fake codex rollout. The meter is
@@ -266,6 +335,102 @@ case "$rec_lane" in
   "lane=cx"|"lane=cxnative") bad "integration: advise still recommends exhausted cx ($rec_lane)" ;;
   *) ok "integration: advise recommendation is not the exhausted lane" ;;
 esac
+
+# ---------------------------------------------------------------------------------------------------
+# INTEGRATION: `bg run` with the provider coming from the ENVIRONMENT must still be gated. Env
+# selection (OUTSOURCERER_PROVIDER) sets PROVIDER_EXPLICIT but NOT OSRC_PROVIDER_ARG — ambient
+# config is not a --provider pin — and the preflight/job-child re-dispatch injects --provider
+# under OSRC_PROVIDER_INJECTED so it cannot counterfeit one either. Assert refusal BEFORE a job
+# id is minted; the --provider control proves consent still flows when the user actually typed it.
+# ---------------------------------------------------------------------------------------------------
+H7="$TMP/ih7"; HH7="$TMP/hh7"; BGCWD="$TMP/bgcwd"; mkdir -p "$H7" "$HH7" "$BGCWD"
+fake_codex_rollout "$HH7" 98
+out="$( cd "$BGCWD" && PATH="$FAKEBIN:$PATH" HOME="$HH7" OSRC_HOME="$H7" OSRC_SOURCED= \
+    OUTSOURCERER_PROVIDER=codex OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    bash "$SRC" bg run -m sol "hi" 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"limit gate"*|*"refusing to launch"*)
+    if [ ! -d "$H7/jobs" ] || [ -z "$(ls -A "$H7/jobs" 2>/dev/null)" ]; then
+      ok "integration: bg run + env provider on exhausted lane refused before minting a job"
+    else
+      bad "integration: env-provider bg run minted a job anyway: $(ls "$H7/jobs")"
+    fi ;;
+  *) bad "integration: env-provider bg run neither refused nor gated (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+# Control: the same launch with --provider typed on the command line consents -> job id minted.
+out="$( cd "$BGCWD" && PATH="$FAKEBIN:$PATH" HOME="$HH7" OSRC_HOME="$H7" OSRC_SOURCED= \
+    OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    bash "$SRC" bg run --provider codex -m sol "hi" 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && printf '%s' "$out" | grep -qE '^[A-Za-z0-9_-]+$' \
+  && ok "integration: bg run --provider (argv pin) consents and mints a job" \
+  || bad "integration: argv --provider bg run did not mint (rc=$rc): $(printf '%s' "$out" | head -5)"
+
+# ---------------------------------------------------------------------------------------------------
+# INTEGRATION: `session start` on an exhausted lane creates NO tmux session — this is the path that
+# used to park a Terra lane on a plan-limit banner. A tmux spy proves the gate fires after lane
+# resolution and before `tmux new-session`; the --force-lane control proves consent reaches it.
+# ---------------------------------------------------------------------------------------------------
+SFBIN="$TMP/sfbin"; mkdir -p "$SFBIN"
+cat > "$SFBIN/tmux" <<'EOF'
+#!/usr/bin/env bash
+echo "tmux $*" >> "${TMUX_SPY:?}"
+case "${1:-}" in has-session) exit 1 ;; esac   # report "no session" so new-session is reachable
+exit 0
+EOF
+chmod +x "$SFBIN/tmux"
+cat > "$SFBIN/codex" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in --help|-h|help) printf 'Usage: codex [options]\n  -m, --model <id>   model override\n';; esac
+exit 0
+EOF
+chmod +x "$SFBIN/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$SFBIN/devin"; chmod +x "$SFBIN/devin"
+SPY="$TMP/tmux.spy"; : > "$SPY"
+
+H8="$TMP/ih8"; HH8="$TMP/hh8"; SFCWD="$TMP/sfcwd"; mkdir -p "$H8" "$HH8" "$SFCWD"
+fake_codex_rollout "$HH8" 98
+out="$( cd "$SFCWD" && TMUX_SPY="$SPY" PATH="$SFBIN:$FAKEBIN:$PATH" HOME="$HH8" OSRC_HOME="$H8" \
+    OSRC_SOURCED= OUTSOURCERER_TMUX=l7sess OSRC_NO_ADVISE=1 \
+    bash "$SRC" session start -m terra 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"limit gate"*"codexwk=98"*) ok "integration: session start -m on exhausted cx refuses loudly" ;; 
+  *) bad "integration: session start refusal wrong (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+if grep -q 'new-session' "$SPY" 2>/dev/null; then
+  bad "integration: refused session start still created a tmux session: $(cat "$SPY")"
+else
+  ok "integration: refused session start created no tmux session"
+fi
+# Consent control: --force-lane lets the launch reach tmux new-session (the gate warns, proceeds;
+# what tmux does after is the spy's problem, not the gate's).
+: > "$SPY"
+out="$( cd "$SFCWD" && TMUX_SPY="$SPY" PATH="$SFBIN:$FAKEBIN:$PATH" HOME="$HH8" OSRC_HOME="$H8" \
+    OSRC_SOURCED= OUTSOURCERER_TMUX=l7sess OSRC_NO_ADVISE=1 \
+    bash "$SRC" session start --force-lane -m terra 2>&1 )"
+grep -q 'new-session' "$SPY" 2>/dev/null \
+  && ok "integration: --force-lane session start reaches tmux new-session (gate consented)" \
+  || bad "integration: --force-lane session start blocked before new-session: $(printf '%s' "$out" | head -5)"
+
+# ---------------------------------------------------------------------------------------------------
+# SYMLINK (LOADER.md): $0-based SCRIPT_DIR points at the LINK's directory, so loader 1 finds
+# nothing; the second loader resolves _OSRC_FACTORY_DIR from BASH_SOURCE (symlinks followed)
+# and must still find lib/. Prove it both executed (brief calls _session_limits/_conserve_reco,
+# both lib functions) and sourced (type -t on the gate itself).
+# ---------------------------------------------------------------------------------------------------
+LINKDIR="$TMP/linkdir"; mkdir -p "$LINKDIR"
+ln -s "$SRC" "$LINKDIR/outsourcerer.sh"
+H6="$TMP/ih6"; HH6="$TMP/hh6"; mkdir -p "$H6" "$HH6"
+out="$( PATH="$FAKEBIN:$PATH" HOME="$HH6" OSRC_HOME="$H6" OSRC_SOURCED= OUTSOURCERER_DEPTH=0 \
+    bash "$LINKDIR/outsourcerer.sh" brief 2>&1 )"; rc=$?
+case "$out" in
+  *"command not found"*) bad "symlink: lib functions missing through symlinked launch" ;;
+  *) [ $rc -eq 0 ] && printf '%s' "$out" | grep -q 'outsourcerer session brief' \
+       && ok "symlink: brief through a symlinked script finds lib/limits.sh" \
+       || bad "symlink: brief through link failed (rc=$rc): $(printf '%s' "$out" | head -3)" ;;
+esac
+out="$( OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; type -t _osrc_limit_gate' _ "$LINKDIR/outsourcerer.sh" 2>/dev/null )"
+[ "$out" = "function" ] && ok "symlink: sourced load through link defines _osrc_limit_gate" \
+  || bad "symlink: sourced load through link did not define _osrc_limit_gate (got '$out')"
 
 echo
 echo "RESULT: $pass passed, $fail failed"
