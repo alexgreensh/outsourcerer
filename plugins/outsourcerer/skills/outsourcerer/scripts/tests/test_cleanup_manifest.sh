@@ -60,7 +60,7 @@ R="$TMP/repo"; mkrepo "$R"
 # only (disposable cache -> does not block SAFE). Owner has a done job record.
 git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/wt-safe" -b outsourcerer/wt-safe HEAD
 WT_SAFE="$R/.outsourcerer/worktrees/wt-safe"
-mkdir -p "$WT_SAFE/node_modules/pkg"
+mkdir -p "$WT_SAFE/node_modules/pkg"; printf 'module.exports=1\n' > "$WT_SAFE/node_modules/pkg/i.js"
 owner wt-safe
 
 # ASK worktree: one commit ahead of main, unmerged.

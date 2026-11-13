@@ -265,9 +265,12 @@ _osrc_cleanup_verdict() {
         || { printf 'ASK\tworktree has uncommitted changes\n'; return 0; }
       # Ignored files are invisible to the check above: a .env or a gitignored
       # deliverable would die with a "clean" worktree. Disposable caches only;
-      # .env* and anything else is ASK, named (review finding 1).
+      # .env* and anything else is ASK, named (review finding 1). This call uses
+      # --untracked-files=normal, not =all: it still overrides a user's
+      # showUntrackedFiles=no but keeps ignored dirs collapsed to '!! dir/', so
+      # an allowlisted cache like node_modules/ matches whole (finding 1, r3).
       local ig ifile igbad=""
-      ig="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null | sed -n 's/^!! //p')"
+      ig="$(git -C "$pp" status --porcelain --ignored --untracked-files=normal 2>/dev/null | sed -n 's/^!! //p')"
       if [ -n "$ig" ]; then
         while IFS= read -r ifile; do
           [ -n "$ifile" ] || continue
@@ -327,7 +330,8 @@ _osrc_cleanup_verdict() {
       # exit code; only a 0 exit is a clean finish. A missing marker means the
       # run never finished reporting — that log is evidence, not trash.
       local arc
-      arc="$(tr -dc '0-9' < "$OSRC_HOME/autodetach/$sess.rc" 2>/dev/null)"
+      [ -f "$OSRC_HOME/autodetach/$sess.rc" ] \
+        && arc="$(tr -dc '0-9' < "$OSRC_HOME/autodetach/$sess.rc")" || arc=""
       case "$arc" in
         0)
           _osrc_job_collected "$sess" \

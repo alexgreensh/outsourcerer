@@ -8242,10 +8242,8 @@ _heartbeat_tick() {
   if ! _heartbeat_log_rotate >/dev/null 2>&1; then
     maintenance_ok=0; _heartbeat_housekeeping_failure heartbeat-log-rotate "$OSRC_HEARTBEAT/heartbeat.log"
   fi
-  # Manifest cleanup: hourly dry scan in a detached child (never stalls the beacon);
-  # it never deletes anything itself — it writes state.json and wakes the
-  # orchestrator when ASK items exist or free space is low. The only deletion
-  # path is a typed `cleanup --apply`.
+  # Manifest cleanup: hourly dry scan in a detached child (never stalls the beacon).
+  # It never deletes — typed `cleanup --apply` is the only path; ASK/low-space wakes.
   _osrc_cleanup_tick >/dev/null 2>&1 || true
   [ "$maintenance_ok" -eq 1 ] || wake_ok=0
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
