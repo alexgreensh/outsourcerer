@@ -104,6 +104,19 @@ _osrc_scr_any() { # <glob> [lo] [hi] -> 0 when some line in range matches
   [ "$(_osrc_scr_last "$@")" -ge 0 ]
 }
 _osrc_scr_trim() { local s="$1"; s="${s#"${s%%[! ]*}"}"; printf '%s' "${s%"${s##*[! ]}"}"; }
+# Claude Code's mode status line under the composer ("⏵⏵ auto mode on (shift+tab to cycle)",
+# "⏸ plan mode on", "⏵⏵ bypass permissions on", "⏵⏵ accept edits on", "⏸ manual mode on"). It is
+# drawn only beside a live composer: no Claude modal (permission, picker, trust) shows it, and each
+# of those ends in its own footer. Seen live 2026-11-13: read as a choice menu, send refused to type.
+_osrc_scr_cc_status_row() { # <row>
+  local t; t="$(_osrc_scr_trim "$1")"
+  case "$t" in
+    *"(shift+tab to cycle)"*) return 0 ;;
+    "⏵⏵ "*" on"*|"⏵ "*" on"*|"⏸ "*" on"*) return 0 ;;
+  esac
+  return 1
+}
+
 _osrc_scr_is_rule() { # a horizontal rule (Claude/Devin/agy composer box), possibly with a title
   case "$(_osrc_scr_trim "$1")" in "──"*) return 0 ;; esac
   return 1

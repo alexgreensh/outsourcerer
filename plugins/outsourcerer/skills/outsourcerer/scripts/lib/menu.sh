@@ -133,7 +133,7 @@ _managed_menu_detect() { # <pane>
   local LC_ALL; LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL
   # Gate (L3): a recognised engine layout decides. Composer, idle, working = no menu, whatever rows
   # happen to sit in the tail.
-  local _eng _settle=0 _i
+  local _eng _settle=0 _i _j
   _eng="$(_osrc_screen_engine_of "$pane")"
   _osrc_screen_analyze_text "$_eng" <<<"$raw_cap"
   # A known engine mid-redraw (e.g. Claude Code restarting after the trust prompt) can show a
@@ -157,9 +157,16 @@ _managed_menu_detect() { # <pane>
     # The reader knows this layout: list the options from its rows (row 1 included, no history).
     _osrc_menu_from_screen && return 0
   fi
+  # Claude's mode status line in the last rows means a live composer, never a modal, even when the
+  # composer box itself was not recognised (half-drawn frame, odd width).
+  _j=$((_SCR_N - 3)); [ "$_j" -ge 0 ] || _j=0
+  while [ "$_j" -lt "$_SCR_N" ]; do
+    _osrc_scr_cc_status_row "${_SCR_L[$_j]}" && { printf 'MENU none\n'; return 0; }
+    _j=$((_j + 1))
+  done
   # Legacy path guard: a prompt-glyph row that sits directly between two horizontal rules is a
   # composer box, and a `❯ Try "…"` row is Claude Code's composer placeholder. Neither is a menu.
-  local _j=1
+  _j=1
   while [ "$_j" -lt $((_SCR_N - 1)) ]; do
     case "${_SCR_L[$_j]}" in
       '❯ Try "'*) printf 'MENU none\n'; return 0 ;;

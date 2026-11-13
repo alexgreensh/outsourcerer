@@ -41,6 +41,10 @@ dv-working|devin|working||
 dv-idle-after-work|devin|idle||
 dv-approval|devin|approval|shell|touch made-by-devin.txt && ls
 dv-approval-wrapped|devin|approval|shell|
+cc-idle-status-auto|cc|idle||
+cc-idle-status-bypass|cc|idle||
+cc-idle-status-plan|cc|idle||
+cc-idle-status-accept-edits|cc|idle||
 agy-idle|agy|composer||
 agy-working|agy|working||
 agy-idle-after-work|agy|idle||
@@ -245,6 +249,38 @@ for spec in devin:dv-approval codex:cx-approval agy:agy-approval; do
     [ "$(_managed_composer_state s p)" = unreadable ] ) && ok || bad "composer state on an open ${spec} prompt is not 'unreadable'"
 done
 grep -q 'send refused: modal open' "$HERE/../outsourcerer.sh" && grep -q 'OSRC_SEND_MODAL:-0}" = 1 ] && echo answer' "$HERE/../outsourcerer.sh" && ok || bad "session send does not print EVENT failed ... modal open + NEXT answer"
+
+# ---- Claude's mode status line is never a modal (TR orchestrator report): idle, no menu, send types
+menu_head() { # <provider> <capture-file>: first line of the menu report (bash 3.2: no case inside $( ))
+  _managed_provider() { printf '%s' "$MH_PROV"; }; OSRC_MENU_SETTLE_POLLS=0
+  tmux() { case "$1" in capture-pane) cat "$MH_FILE" ;; *) return 0 ;; esac; }
+  _managed_menu_detect p 2>/dev/null | head -1
+}
+for m in auto bypass plan accept-edits; do
+  f="$FX/cc-idle-status-$m.ansi"
+  python3 -c 'import re,sys
+s=open(sys.argv[1]).read().split("\n")
+open(sys.argv[2],"w").write("\n".join(l for l in s if not re.sub(r"\x1b\[[0-9;?]*[A-Za-z]","",l).strip().startswith("──")))' "$f" "$TMP/norule-$m.ansi"
+  for c in "$f" "$TMP/norule-$m.ansi"; do
+    r="$(MH_PROV=cc MH_FILE="$c" menu_head)"
+    [ "$r" = "MENU none" ] && ok || bad "cc status line ($m, $(basename "$c")) read as a menu: $r"
+  done
+  (
+    _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+    _obligation_guard_begin() { :; }; _obligation_guard_end() { :; }; _obligation_delivery_unknown() { :; }
+    _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
+    _managed_provider() { printf cc; }; _osrc_screen_engine_of() { printf cc; }; _state_jsonl_read() { :; }
+    unset OSRC_EXTERNAL_RECEIPT_PROBE OSRC_EXTERNAL_COMPOSER_PROBE
+    : > "$TMP/skeys"; tmux() { case "$1" in capture-pane) cat "$f" ;; send-keys) printf '%s\n' "$*" >> "$TMP/skeys" ;; *) return 0 ;; esac; }
+    OSRC_SEND_VERIFY_SECS=1 _managed_session_send p "status line test"
+    grep -q -- '-l -- status line test' "$TMP/skeys" && grep -q ' Enter$' "$TMP/skeys" && [ "${OSRC_SEND_MODAL:-0}" = 0 ]
+  ) && ok || bad "send did not type into an idle cc pane with the $m status line: $(tr '\n' '|' < "$TMP/skeys")"
+done
+# every real approval/question capture is still a modal with the guard in place
+for spec in cc:cc-permission-bash cc:cc-permission-bash-1 cc:cc-permission-bash-rm cc:cc-permission-write cc:cc-askuserquestion cc:cc-trust-folder-menu codex:cx-approval codex:cx-trust-folder-menu devin:dv-approval devin:dv-approval-wrapped agy:agy-approval agy:agy-file-approval agy:agy-trust-folder-menu gemini:gm-trust-folder-menu; do
+  r="$(MH_PROV="${spec%%:*}" MH_FILE="$FX/${spec#*:}.ansi" menu_head)"
+  [ "$r" != "MENU none" ] && ok || bad "real prompt ${spec} no longer detected as a menu"
+done
 
 # spill after admit: a refused send leaves no spill file behind
 (
