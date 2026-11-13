@@ -609,12 +609,14 @@ a.pill svg { width: 13px; height: 13px; }
   function renderLimits() {
     const box = $('llist'); if (!box) return; box.replaceChildren();
     if (!limits.length) { box.appendChild(el('p', 'lnone', db ? 'No limits reported yet. Orchestrators add each harness here.' : 'Sign in on claude.ai to see limits.')); $('lstamp').textContent = ''; return; }
-    const newest = limits.map((l) => l.updated || '').sort().pop();
     const open = limitsOpen(); const fb = $('lfold'); if (fb) fb.setAttribute('aria-expanded', String(open));
     const working = limits.filter((l) => ['ok', 'low'].includes(l.state || 'ok'));
     const shown = open ? limits : working;
-    const ls = $('lstamp'); ls.textContent = newest ? 'Checked ' + newest.replace(/^[A-Z][a-z]{2} /, '') : '';
+    // Newest working-row updatedAt decides both the stamp text and its stale
+    // state — sorting HH:MM strings goes wrong across midnight (finding 5).
     const at = Math.max(...working.map((l) => Date.parse(l.updatedAt || '') || 0));
+    const utcHM = (ms) => { const d = new Date(ms); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC'; };
+    const ls = $('lstamp'); ls.textContent = at > 0 ? 'Checked ' + utcHM(at) : '';
     ls.dataset.at = at > 0 ? new Date(at).toISOString() : ''; ls.dataset.live = '1'; staleCheck();
     if (!open && !working.length) box.appendChild(el('p', 'lnone', 'Nothing has room right now.'));
     shown.forEach((l) => {

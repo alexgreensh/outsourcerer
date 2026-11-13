@@ -362,8 +362,12 @@ _osrc_hub_unowned_project() {
 _osrc_hh_mm() {
   case "${1:-}" in ''|*[!0-9]*) printf ''; return 0 ;; esac
   local now=$(( $(date +%s) ))
-  if [ $(( $1 - now )) -le 129600 ]; then date -r "$1" '+%H:%M' 2>/dev/null
-  else date -r "$1" '+%a %H:%M' 2>/dev/null; fi
+  # One clock across the page: everything displayed is UTC (review finding 5).
+  if [ $(( $1 - now )) -le 129600 ]; then
+    date -u -r "$1" '+%H:%M' 2>/dev/null || date -u -d "@$1" '+%H:%M' 2>/dev/null
+  else
+    date -u -r "$1" '+%a %H:%M' 2>/dev/null || date -u -d "@$1" '+%a %H:%M' 2>/dev/null
+  fi
 }
 
 # _osrc_limit_state <pct-used> [resets_at-epoch] -> ok|low|out|wait|unknown.
@@ -405,7 +409,7 @@ _osrc_hub_limits() {
     local lsum; lsum="$(osrc_limits_summary --json 2>/dev/null)"
     if [ -n "$lsum" ] && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$lsum"; then
       jq -c '[.[] | . + {updatedAt: (.updatedAt // .updated // "")}
-               | (if (.updated | type == "string") and (.updated | test("T")) then .updated = .updated[11:16] else . end)]' <<<"$lsum"
+               | (if (.updated | type == "string") and (.updated | test("T")) then .updated = (.updated[11:16] + " UTC") else . end)]' <<<"$lsum"
       return 0
     fi
   fi
@@ -437,7 +441,7 @@ EOF
     case "$c7r" in ''|*[!0-9]*) : ;; *) [ "$c7r" -lt "$now" ] && c7="" ;; esac
     case "$ts_ms" in ''|*[!0-9]*) stale=1; upd=""; upda="" ;;
       *) [ $(( now - ts_ms / 1000 )) -gt 600 ] && stale=1 || stale=0
-         upd="$(date -r $(( ts_ms / 1000 )) '+%H:%M' 2>/dev/null)"
+         upd="$(date -u -r $(( ts_ms / 1000 )) '+%H:%M UTC' 2>/dev/null || date -u -d "@$(( ts_ms / 1000 ))" '+%H:%M UTC' 2>/dev/null)"
          upda="$(date -u -r $(( ts_ms / 1000 )) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$(( ts_ms / 1000 ))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" ;;
     esac
     [ -n "$c5$c7" ] || stale=1
@@ -525,7 +529,7 @@ cmd_hub_export() {
   while [ "$#" -gt 0 ]; do case "$1" in --project) proj="${2:-}"; shift 2 ;; *) shift ;; esac; done
   [ -z "$proj" ] || _osrc_hub_slug_ok "$proj" || die "hub export: bad project slug '$proj'"
   local now upd projects='[]' slug found=0
-  now="$(date +%s)"; upd="$(date '+%a %d %b, %H:%M')"
+  now="$(date +%s)"; upd="$(date -u '+%a %d %b, %H:%M UTC')"
   # Slugs: every owner session + every decisions/projects file + unowned.
   local slugs=""
   local d f
