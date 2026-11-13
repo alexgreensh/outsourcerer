@@ -23,6 +23,9 @@ mkdir -p "$OSRC_JOBS" "$TEST_ROOT/bin"
 _mkdir_private() { mkdir -p "$1"; }
 _kill_tree() { kill -TERM "$1" 2>/dev/null || true; }
 eval "$(sed -n '/^_mtime() {/,/^}/p' "$SRC")"
+# _mtime lives in lib/limits.sh (extracted from the engine); pull it from there too so the
+# orphan-freshness check below has a real definition regardless of which file currently owns it.
+eval "$(sed -n '/^_mtime() {/,/^}/p' "$SCRIPT_DIR/../lib/limits.sh")"
 eval "$(sed -n '/^_timeout() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_elapsed_secs() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_descends_from() {/,/^}/p' "$SRC")"

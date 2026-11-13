@@ -260,12 +260,27 @@ OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
-SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
+# BASH_SOURCE[0] is preferred over $0: identical when this file is EXECUTED, but when it is SOURCED
+# (tests, OSRC_SOURCED=1) $0 is the caller and would point SCRIPT_DIR at the wrong directory — which
+# would keep scripts/lib/*.sh from loading. See the factory-file loader for the same fix.
+# When SOURCED, SCRIPT_DIR/SCRIPT_PATH are the CALLER's globals: stash them now and restore them at
+# the bottom of this file (after the lib + factory loaders have consumed the engine's own values),
+# so a sourced engine never clobbers the caller's SCRIPT_DIR — test fixtures resolve
+# $SCRIPT_DIR/... paths after sourcing. Detected by BASH_SOURCE vs $0: identical when executed.
+_osrc_restore_sd=0
+if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
+  _osrc_restore_sd=1
+  _osrc_caller_sd="${SCRIPT_DIR-}"; _osrc_caller_sp="${SCRIPT_PATH-}"
+fi
+SCRIPT_PATH="$(command -v -- "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]:-$0}")"
 case "$SCRIPT_PATH" in
   /*) ;;  # already absolute
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
 esac
-SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+# Canonicalize: a SOURCED caller may hand us a path containing `..` (tests do `. "$DIR/../outsourcerer.sh"`),
+# and a literal `..` in SCRIPT_DIR both looks wrong and leaks into every $SCRIPT_DIR-relative path.
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" 2>/dev/null && pwd)" || SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+SCRIPT_PATH="$SCRIPT_DIR/$(basename "$SCRIPT_PATH")"
 
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
@@ -1047,6 +1062,7 @@ parse_model() {
                               *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
                             PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --force-lane)         OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
@@ -5157,6 +5173,7 @@ _consume_flags() {
                     *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
                   PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --force-lane) OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT (lib/limits.sh)
       --no-advise) OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise model selection on a bare run
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
@@ -9474,135 +9491,6 @@ _hermes_run_cost() {
 # as such everywhere, provider-reported usage (bg stream cost, codex rate-limits) is preferred.
 _est_tokens() { local n=${#1}; echo $(( n * 10 / 33 )); }
 
-# _mtime <path> -> file modification time as a unix epoch, on both GNU and BSD.
-# ORDER MATTERS AND IS NOT INTERCHANGEABLE. `stat -f` means "modification time" on BSD/macOS but
-# "filesystem status" on GNU/Linux, where it SUCCEEDS and prints filesystem info — so a
-# `stat -f ... || stat -c ...` fallback is unreachable on Linux and yields garbage that silently fails
-# every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
-# GNU FIRST is the only ordering where the fallback actually happens on both.
-_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
-
-# _codex_rate_limits -> "5h%|wk%|5h_reset_epoch|wk_reset_epoch" from the newest Codex session
-# rollout. Codex records the ChatGPT-plan rate-limit windows the API returns into every rollout, so
-# this is the REAL cost of a "no cash" ChatGPT-sub run: it spends your finite 5-hour and weekly
-# limits. Best-effort; empty when codex/jq/rollout unavailable.
-_codex_rate_limits() {
-  have jq || return 1
-  local sdir="$HOME/.codex/sessions"; [ -d "$sdir" ] || return 1
-  local newest; newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
-  [ -n "$newest" ] || return 1
-  # How OLD this reading is matters more than the number. Codex only records rate limits while it is
-  # RUNNING, so with no recent codex session the newest rollout can be days old. Usage only ever rises
-  # within a window, so a stale reading is a FLOOR, never a current value — and reporting it as current
-  # overstates headroom in the one direction that hurts: work gets routed to an exhausted lane.
-  # The age travels in the RETURN STRING. This function is read through a command substitution, so an
-  # exported variable would die with the subshell and the caller would silently see nothing — the same
-  # defect that left the 0-writes flag dead for its entire life.
-  local _mt; _mt="$(_mtime "$newest")"; case "$_mt" in ''|*[!0-9]*) _mt="$(date +%s)" ;; esac
-  local _age; _age=$(( $(date +%s) - _mt ))
-  local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
-  [ -n "$line" ] || return 1
-  # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
-  # .primary (observed: primary.window_minutes=10080 = weekly, secondary=null). Classify each present
-  # slot by its window (<=360min -> 5h/short, else weekly/long) so codex5h/codexwk are never swapped.
-  printf '%s' "$line" | jq -r '
-    ([.. | objects | select(has("rate_limits")) | .rate_limits] | last) as $r
-    | select($r != null)
-    | [ $r.primary, $r.secondary ] | map(select(. != null)) as $slots
-    | ( [ $slots[] | select((.window_minutes // 100000) <= 360) ] | first ) as $sh
-    | ( [ $slots[] | select((.window_minutes // 0)      >  360) ] | first ) as $wk
-    | "\($sh.used_percent // "")|\($wk.used_percent // "")|\($sh.resets_at // "")|\($wk.resets_at // "")"
-  ' 2>/dev/null | head -1 | sed "s/\$/|$_age/"
-}
-
-# _human_eta <epoch> -> "3h 12m" remaining until epoch, or "" if past/unknown.
-_human_eta() {
-  local target="$1" now
-  case "$target" in ''|*[!0-9]*) return 0 ;; esac
-  now="$(date +%s 2>/dev/null)" || return 0
-  local d=$(( target - now )); [ "$d" -gt 0 ] || return 0
-  printf '%dh %dm' $(( d / 3600 )) $(( (d % 3600) / 60 ))
-}
-
-# _codex_quota_line -> honest one-liner on ChatGPT-plan headroom after a codex-native run.
-_codex_quota_line() {
-  local raw; raw="$(_codex_rate_limits)" || return 1
-  [ -n "$raw" ] || return 1
-  local p s pr sr; IFS='|' read -r p s pr sr <<< "$raw"
-  [ -n "$p$s" ] || return 1
-  local pe se; pe="$(_human_eta "$pr")"; se="$(_human_eta "$sr")"
-  local msg="ChatGPT plan usage, 5h window: ${p:-?}%"
-  [ -n "$pe" ] && msg="$msg (resets in $pe)"
-  msg="$msg · weekly: ${s:-?}%"
-  [ -n "$se" ] && msg="$msg (resets in $se)"
-  printf '%s' "$msg"
-}
-
-# ---- SESSION LIMIT AWARENESS (copilot conserve engine). Best-effort, degrade gracefully:
-# NEVER die, NEVER block a delegation — a wrong/absent limit signal must only soften a RECOMMENDATION.
-_pct_normalize() {   # echo a 0..100 number, else nothing
-  awk -v v="${1:-}" 'BEGIN { if (v ~ /^([0-9]+([.][0-9]+)?|[.][0-9]+)$/ && v>=0 && v<=100) printf "%g", v }' 2>/dev/null
-}
-_window_pct() {   # <pct> <resets_at-epoch> -> pct if the window is still live, else nothing (drop expired)
-  local pct reset="${2:-}" now
-  pct="$(_pct_normalize "${1:-}")"; [ -n "$pct" ] || return 1
-  case "$reset" in ''|null) ;; *[!0-9]*) return 1 ;;
-    *) now="$(date +%s 2>/dev/null)" || return 1; [ "$reset" -gt "$now" ] || return 1 ;; esac
-  printf '%s' "$pct"
-}
-# _session_limits -> normalized one-liner "claude5h=95 claude7d=38 codex5h=.. codexwk=.." (omits unknown).
-# Claude source = the token-optimizer statusline artifact (the only readable 5h/7d signal Claude Code
-# exposes; ADVISORY — it's derived + only fresh while a statusline renders). We drop stale (>10min) and
-# expired-window values rather than trust them, and honor OSRC_CC_PRESSURE as an explicit override.
-_session_limits() {
-  # Claude 5h/7d source precedence: explicit override > outsourcerer's own statusline tap
-  # (universal, `tap install`) > the token-optimizer statusline artifact (if that plugin is present).
-  local cand raw c5="" c7="" c5r="" c7r="" ts="" nowms line=""
-  if [ -n "${OSRC_CC_PRESSURE:-}" ]; then
-    c5="$(_pct_normalize "$OSRC_CC_PRESSURE")"       # explicit orchestrator override wins
-  else
-    # Try each candidate in precedence order; a STALE/expired/invalid one is SKIPPED so we fall
-    # through to the next fresh source (fixes: a frozen $OSRC_HOME artifact shadowing token-optimizer's
-    # fresh file forever). tap file first (universal), then token-optimizer's.
-    for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
-      [ -f "$cand" ] && have jq && jq -e . "$cand" >/dev/null 2>&1 || continue
-      raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
-      IFS='|' read -r c5 c5r c7 c7r ts <<EOF
-$raw
-EOF
-      # Freshness gate: fail CLOSED. A statusline artifact older than 10min — OR one whose timestamp is
-      # missing/non-integer (can't prove freshness) — is treated as stale and skipped.
-      nowms="$(date +%s 2>/dev/null)"; [ -n "$nowms" ] && nowms=$((nowms*1000))
-      case "$ts" in
-        ''|*[!0-9]*) c5=""; c7="" ;;                                             # unprovable -> stale
-        *) [ -n "$nowms" ] && [ $((nowms - ts)) -gt 600000 ] && { c5=""; c7=""; } ;;
-      esac
-      c5="$(_window_pct "$c5" "$c5r" 2>/dev/null)" || c5=""
-      c7="$(_window_pct "$c7" "$c7r" 2>/dev/null)" || c7=""
-      [ -n "$c5$c7" ] && break                                                   # got fresh data -> stop
-    done
-  fi
-  raw="$(_codex_rate_limits 2>/dev/null)" || raw=""
-  local x5="" xw="" x5r="" xwr="" xage=""
-  if [ -n "$raw" ]; then
-    IFS='|' read -r x5 xw x5r xwr xage <<EOF
-$raw
-EOF
-    x5="$(_window_pct "$x5" "$x5r" 2>/dev/null)" || x5=""
-    xw="$(_window_pct "$xw" "$xwr" 2>/dev/null)" || xw=""
-  fi
-  [ -n "$c5" ] && line="$line claude5h=$c5"
-  [ -n "$c7" ] && line="$line claude7d=$c7"
-  [ -n "$x5" ] && line="$line codex5h=$x5"
-  [ -n "$xw" ] && line="$line codexwk=$xw"
-  # Mark the codex figures stale rather than dropping them: a floor with its age attached is useful,
-  # a confident wrong number is not.
-  case "$xage" in ''|*[!0-9]*) xage=0 ;; esac
-  { [ -n "$x5" ] || [ -n "$xw" ]; } && [ "$xage" -gt "${OSRC_LIMITS_MAX_AGE:-7200}" ] \
-    && line="$line codexage=${xage}"
-  printf '%s\n' "${line# }"
-}
-
 cmd_tab() {
   # An empty or absent ledger is an empty Tab. Decide BEFORE printing the header so the render is
   # identical whether the file is missing, zero-length, or whitespace-only (the normal state between
@@ -9794,71 +9682,6 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe grokbot 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
-}
-
-# _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
-# OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
-# local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
-# headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
-_conserve_reco() {
-  local limits="${1:-}" lanes="${2:-}" tok c5="" c7="" x5="" xw="" xstale="" posture lane="" why="" tight=0
-  for tok in $limits; do case "$tok" in
-    claude5h=*) c5="${tok#*=}" ;; claude7d=*) c7="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
-    codexage=*) xstale="${tok#*=}" ;;
-  esac; done
-  # Claude has TWO windows and the WEEKLY (7d) cap is the binding one in practice — a freshly-reset 5h
-  # window must NEVER mask a nearly-exhausted week. Bind to the MORE-spent of the two (closest to the
-  # cap), conserve if EITHER crosses the line, and report both so the 5h number can't hide the weekly.
-  if [ -n "$c5" ] || [ -n "$c7" ]; then
-    local bind="" bindpct=""
-    [ -n "$c7" ] && { bind="weekly"; bindpct="$c7"; }
-    [ -n "$c5" ] && awk -v a="$c5" -v b="${bindpct:-0}" 'BEGIN{exit !(a>b)}' 2>/dev/null && { bind="5h"; bindpct="$c5"; }
-    posture="Claude weekly ${c7:-?}% / 5h ${c5:-?}% (binding: ${bind} ${bindpct}%)"
-    awk -v n="${bindpct:-0}" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n >= t) }' 2>/dev/null && tight=1
-  else posture="Claude limits unknown"; fi
-  if [ "$tight" = "0" ]; then
-    printf 'HEADROOM: %s (< %s%% conserve line) — route by best-fit; no forced conservation.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"
-    return 0
-  fi
-  # Descriptor-first: conserve_match holds the lane's _ready_lanes token (leading-space
-  # prefix match), conserve_name the display label, conserve_why/conserve_why_fn the reason.
-  # The case below is the unported tail — the priority order itself is routing policy.
-  local _cl _cm
-  for _cl in local dv gm; do
-    _cm="$(_lane_field "$_cl" conserve_match 2>/dev/null)"
-    if [ -n "$_cm" ] && case " $lanes " in *"$_cm"*) true ;; *) false ;; esac; then
-      lane="$(_lane_field "$_cl" conserve_name 2>/dev/null)"
-      local _cwf; _cwf="$(_lane_field "$_cl" conserve_why_fn 2>/dev/null)"
-      if [ -n "$_cwf" ]; then why="$("$_cwf")"; else why="$(_lane_field "$_cl" conserve_why 2>/dev/null)"; fi
-      break
-    fi
-  done
-  [ -n "$lane" ] || case " $lanes " in
-    *" devin=glm/swe "*)  lane="Devin GLM/SWE";   why="$(_lane_cost_disclosure dv), preserves your Claude quota" ;;
-  esac
-  if [ -z "$lane" ]; then
-    local codex_ok=0 seen=0 blocked=0 v
-    case " $lanes " in *" codex=sol/terra "*)
-      # A stale reading is a FLOOR, not a measurement: usage only rises within a window, so an old
-      # low number is exactly how work gets routed to a lane that is already exhausted. Fail closed,
-      # the same way the Claude freshness gate does.
-      [ -n "$xstale" ] && blocked=1 && seen=1
-      for v in "$x5" "$xw"; do [ -n "$v" ] || continue; seen=1
-        awk -v n="$v" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n < t) }' 2>/dev/null || blocked=1; done
-      [ "$seen" = "1" ] && [ "$blocked" = "0" ] && codex_ok=1 ;;
-    esac
-    if [ "$codex_ok" = "1" ]; then lane="Codex Sol/Terra"; why="your ChatGPT plan is below the conserve line in every known window"
-    elif [ -n "$xstale" ]; then : # codex deliberately skipped: its usage reading is too old to trust
-    else
-      _cm="$(_lane_field or conserve_match 2>/dev/null)"
-      if [ -n "$_cm" ] && case " $lanes " in *"$_cm"*) true ;; *) false ;; esac; then
-        lane="$(_lane_field or conserve_name 2>/dev/null)"
-        why="$(_lane_field or conserve_why 2>/dev/null)"
-      fi
-    fi
-  fi
-  if [ -n "$lane" ]; then printf 'CONSERVE: %s (>= %s%%) — route grind to %s (%s); keep Claude for judgment.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD" "$lane" "$why"
-  else printf 'CONSERVE: %s (>= %s%%) — but no lower-cost lane is ready. Start local inference (ollama) or log into Devin; meanwhile throttle and keep judgment on Claude.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"; fi
 }
 
 # ---- LIMITS TAP: universal session-limit capture (works WITHOUT token-optimizer).
@@ -10429,52 +10252,6 @@ _variant_weight() {
   printf '%s' $(( w + d ))
 }
 
-# _lane_conserve_mult <lane> <limits-line> -> a score multiplier in [0.90,1.00] that GENTLY deprioritizes
-# a lane whose live plan window is past the conserve line, so "limits-left" actually steers the pick and
-# not just the separate conserve-routing layer. Only lanes we can MEASURE are penalized (cc=Claude
-# 5h/weekly, cx=Codex 5h/weekly, whichever is more spent); unmeasurable lanes (dv/gm/or) return 1.00 so we never
-# invent a limit we cannot read. At/below the conserve line -> 1.00 (headroom); scales linearly to 0.90
-# at 100% used. Deliberately small: it breaks ties and loses close races to a fresher lane, but a ~10%
-# max haircut won't drop a genuinely-capable model below its capability threshold on its own.
-_lane_conserve_mult() {
-  local lane="$1" limits="${2:-}" t="${OSRC_CONSERVE_THRESHOLD:-50}" u="" c5="" c7="" x5="" xw="" tok
-  for tok in $limits; do
-    case "$tok" in
-      claude5h=*) c5="${tok#*=}" ;;
-      claude7d=*) c7="${tok#*=}" ;;
-      codex5h=*)  x5="${tok#*=}" ;;
-      codexwk=*)  xw="${tok#*=}" ;;
-    esac
-  done
-  # Descriptor-first: conserve_windows names the limit tokens a lane is measured by
-  # (cc: claude5h claude7d — the MORE-spent binds; cx: codex5h codexwk). The case below
-  # is the unported-lane fallback.
-  local _cl _cw="" _w _wv
-  _cl="$(_lane_by_token "$lane" 2>/dev/null)" && _cw="$(_lane_field "$_cl" conserve_windows 2>/dev/null)"
-  if [ -n "$_cw" ]; then
-    u=""
-    for tok in $limits; do
-      for _w in $_cw; do
-        case "$tok" in
-          "$_w="*) _wv="${tok#*=}"
-            case "$_wv" in ''|*[!0-9.]*) ;; *)
-              { [ -z "$u" ] || awk -v a="$_wv" -v b="$u" 'BEGIN{exit !(a+0>b+0)}'; } && u="$_wv" ;;
-            esac ;;
-        esac
-      done
-    done
-  else
-    u=""
-  fi
-  case "$u" in ''|*[!0-9.]*) printf '1.00'; return ;; esac
-  awk -v u="$u" -v t="$t" 'BEGIN{
-    if (t+0 >= 100 || u+0 < t+0) { printf "1.00"; exit }
-    m = 1 - 0.10*(u - t)/(100 - t)
-    if (m < 0.90) m = 0.90; if (m > 1.00) m = 1.00
-    printf "%.4f", m
-  }'
-}
-
 # _advise_candidate_rows [field] -> emit `alias|resolved|lane|tier` rows for the advise ranking
 # loop, replacing the old static-only `printf '%s\n' "$OSRC_MODEL_TABLE"` source. The pool is the
 # UNION of:
@@ -10761,6 +10538,11 @@ cmd_advise() {
   # penalty anywhere. Opt out with OSRC_ADVISE_CONSERVE=0.
   local _adv_limits="" conserve_seen="" conserve_notes=""
   [ "${OSRC_ADVISE_CONSERVE:-1}" != "0" ] && _adv_limits="$(_session_limits 2>/dev/null)"
+  # L7 LIMIT GATE: a lane at/over OSRC_LANE_LIMIT_PCT on a FRESH meter is excluded outright — the
+  # hard edge, independent of the soft conserve haircut below. Stale readings count as unknown.
+  # OSRC_LANE_LIMIT_GATE=0 disables. Read once here, shared by every candidate in the loop.
+  local _gate_limits="" _limit_notes=""
+  [ "${OSRC_LANE_LIMIT_GATE:-1}" != "0" ] && _gate_limits="$(_session_limits 2>/dev/null)"
   # Score each candidate from the alias table.
   local results="" has_bench=0 bench_count=0 total_count=0
   local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
@@ -10770,6 +10552,12 @@ cmd_advise() {
     if _lane_flag "$lane" image_lane; then continue; fi
     _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
     _model_excluded "$alias" && continue      # user exclude list (#45), alias form (resolved form is in _model_denied)
+    # L7 LIMIT GATE: never pick a lane whose fresh meter is at/over OSRC_LANE_LIMIT_PCT.
+    if [ -n "$_gate_limits" ] && _osrc_limit_exceeded "$lane" "$_gate_limits" 2>/dev/null; then
+      local _olr; _olr="$(_osrc_lane_limit "$lane" "$_gate_limits" 2>/dev/null)"
+      _limit_notes="${_limit_notes:+$_limit_notes; }${_olr:-$lane} >= $(_osrc_limit_threshold)% -> $lane excluded"
+      continue
+    fi
     total_count=$((total_count + 1))
     bench_line="$(_bench_lookup "$resolved" "$field")"
     if [ -n "$bench_line" ]; then
@@ -10958,6 +10746,9 @@ cmd_advise() {
   fi
 
   # Guard: if no candidates at all (empty model table), fail gracefully.
+  if [ -z "$rec_alias" ] && [ -n "$_limit_notes" ]; then
+    die "advise: every candidate lane is at/over OSRC_LANE_LIMIT_PCT (${_limit_notes}). Wait for a window reset, or set OSRC_LANE_LIMIT_GATE=0."
+  fi
   [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
 
   # Recompute the recommended model's history for the human/json explanation (raw + effective).
@@ -11008,12 +10799,13 @@ cmd_advise() {
       --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
-      --arg conserve "$conserve_notes" \
+      --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
       --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
         shortlist:$shortlist,
         conservation:(if $conserve=="" then null else $conserve end),
+        limit_gate:(if $limit_gate=="" then null else $limit_gate end),
         benchmark_data_available:($has_bench=="1"),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
         history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
@@ -11035,6 +10827,7 @@ cmd_advise() {
       echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
     fi
     [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
+    [ -n "$_limit_notes" ] && echo "   limit-gate: $_limit_notes (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"
     echo
     echo "--- recommendation ---"
     echo "   model: $rec_alias ($rec_resolved)"
@@ -16323,6 +16116,7 @@ _fb_rebuild_argv() {  # <_fb_next>
   [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
+  [ "${OSRC_FORCE_LANE:-0}" = "1" ] && _new+=(--force-lane)   # keep lane-limit consent through hop rebuilds
   _words_noglob "${WITH_SPEC:-}"
   for _w in ${WORDS[@]+"${WORDS[@]}"}; do _new+=(--with "$_w"); done
   _new+=(${REST[@]+"${REST[@]}"})
@@ -16562,6 +16356,7 @@ _failover_rebuild_argv() {
   [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
+  [ "${OSRC_FORCE_LANE:-0}" = "1" ] && _new+=(--force-lane)   # keep lane-limit consent through hop rebuilds
   _words_noglob "${WITH_SPEC:-}"
   for _w in ${WORDS[@]+"${WORDS[@]}"}; do _new+=(--with "$_w"); done
   [ "$mutating" = "1" ] && _new+=("$(_failover_handoff_note "${4:-}" "${5:-}")")
@@ -16699,7 +16494,7 @@ route_delegate() {
       # sets MODEL_EXPLICIT=1 — and the quota gate would then SILENTLY switch a pinned model. Kept in
       # sync with _consume_flags: --provider=X (equals form) and --no-advise are consumed there too.
       --provider=*) : ;;
-      --allow-downgrade|--cloud-ack|--wait|--foreground|--no-advise) : ;;
+      --allow-downgrade|--cloud-ack|--wait|--foreground|--no-advise|--force-lane) : ;;
       *) break ;;
     esac
   done
@@ -16914,6 +16709,16 @@ route_delegate() {
   if _model_denied "$RESOLVED_ID"; then
     die "-m $RESOLVED_ID is on OSRC_MODEL_DENYLIST and will not be dispatched. Pick another -m, or unset/edit OSRC_MODEL_DENYLIST if this is unwanted."
   fi
+
+  # L7 LIMIT GATE: a lane whose plan meter is at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH
+  # reading is nearly spent — routing there parks the delegate on a limit banner (the
+  # ChatGPT-weekly-at-98% failure). Fresh readings gate; stale (>6h) readings warn only.
+  # --force-lane or an explicit --provider consents; unpinned auto runs take a zero-cost hop;
+  # pins refuse loudly. Implemented in lib/limits.sh (_osrc_limit_gate).
+  local _olrc=0
+  _osrc_limit_gate "$disp" || _olrc=$?
+  if [ "$_olrc" = "10" ]; then continue; fi
+  [ "$_olrc" != "0" ] && die "internal: _osrc_limit_gate returned $_olrc"
 
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
@@ -20153,4 +19958,13 @@ main() {
   esac
   return $_cmd_rc
 }
+# Hand the caller's SCRIPT_* globals back when this file was SOURCED (stash is at the top of the
+# file). Everything that needed the engine's own values — the lib loader, the factory loader — has
+# already run; runtime users of SCRIPT_DIR (_winpty_session) resolve it the same wrong/right way
+# they did before this file was ever sourced, matching pre-change behavior.
+if [ "${_osrc_restore_sd:-0}" = "1" ]; then
+  [ -n "${_osrc_caller_sd:-}" ] && SCRIPT_DIR="$_osrc_caller_sd"
+  [ -n "${_osrc_caller_sp:-}" ] && SCRIPT_PATH="$_osrc_caller_sp"
+  unset _osrc_caller_sd _osrc_caller_sp _osrc_restore_sd
+fi
 [ "${OSRC_SOURCED:-}" = "1" ] || main "$@"

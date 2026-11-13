@@ -177,8 +177,10 @@ awk -v m="$(_lane_conserve_mult cc 'claude5h=100')" 'BEGIN{exit !(m<1.0 && m>=0.
 [ "$(_lane_conserve_mult or 'claude5h=100')" = "1.00" ] && ok "openrouter lane is never haircut (unmeasured)" || bad "openrouter got a fabricated limit penalty"
 # integration: with a lane forced past the line, advise prints the conservation line; opt-out silences it.
 # Stub _session_limits high, capture output, then restore the real definition.
+# Values sit ABOVE the 50% conserve line (haircut applies) but BELOW the 90% L7 limit gate — at/over
+# 90 the lane is hard-EXCLUDED instead of haircut (test_limit_gate.sh owns that contract).
 _advise_real_limits="$(declare -f _session_limits)"
-_session_limits() { printf 'claude5h=95 codexwk=90\n'; }
+_session_limits() { printf 'claude5h=60 codexwk=70\n'; }
 _adv_on="$(cmd_advise "refactor the auth module" 2>/dev/null)"
 _adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/null)"
 [ -n "$_advise_real_limits" ] && eval "$_advise_real_limits"   # restore real limits reader
