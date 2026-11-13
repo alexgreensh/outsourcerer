@@ -58,6 +58,9 @@
 #                                  adopt + wait commands) the NEXT session runs to pick up the fleet.
 #   hub export|serve [--port N]    Mission Control: SCHEMA project docs as JSON (export), or the
 #                                  same page served on 127.0.0.1 behind a token (serve). See references/hub.md.
+#   cleanup [<id> [--force]]       Manifest dry run over $OSRC_HOME/created.jsonl (SAFE/ASK verdicts);
+#                                  --apply deletes SAFE only, --ack acknowledges ASK; <id> removes a
+#                                  job/fanout git worktree (conservative, unchanged).
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
@@ -8239,6 +8242,9 @@ _heartbeat_tick() {
   if ! _heartbeat_log_rotate >/dev/null 2>&1; then
     maintenance_ok=0; _heartbeat_housekeeping_failure heartbeat-log-rotate "$OSRC_HEARTBEAT/heartbeat.log"
   fi
+  # Manifest cleanup: hourly dry scan in a detached child (never stalls the beacon);
+  # under 15GB free it applies SAFE items itself and wakes the orchestrator on ASK.
+  _osrc_cleanup_tick >/dev/null 2>&1 || true
   [ "$maintenance_ok" -eq 1 ] || wake_ok=0
   snapshot="$(_fleet_snapshot_collect 2>/dev/null)" || snapshot="$(_heartbeat_unknown_snapshot)" || return 1
   generation="$(printf '%s' "$snapshot" | jq -r '.generation // "unknown"')"
@@ -12011,6 +12017,9 @@ _bg_launch() {
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
   _mkdir_private "$OSRC_JOBS" || true
+  # Disk-pressure gate: under OSRC_DISK_MIN_GB free, refuse new lanes until the cleanup ASK list
+  # is answered (cleanup --apply / --ack). Runs before the job-dir claim so a refusal leaves nothing.
+  type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   local id jd tries=0 _arm_rc=0 _bpid
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
   # concurrent launches that mint the same id can never share one directory; regenerate on collision.
@@ -12022,6 +12031,7 @@ _bg_launch() {
   done
   _owner_record "$id"
   chmod 700 "$jd" 2>/dev/null
+  type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$jd" job "$id" "$(git rev-parse --show-toplevel 2>/dev/null)" || true
   # A factory task launch links the job to its task the moment the job exists, so a launcher killed
   # before it records the job id still leaves a job the scheduler can find and adopt.
   case "${OSRC_TASK_REF:-}" in ?*/?*) printf '%s\n' "$OSRC_TASK_REF" > "$jd/task_ref" 2>/dev/null || true ;; esac
@@ -12453,6 +12463,10 @@ _autodetach_run() {
   mkdir -p "$_ad_dir" 2>/dev/null || true
   _ad_rc="$_ad_dir/$_ad_sess.rc"; _ad_log="$_ad_dir/$_ad_sess.log"
   rm -f "$_ad_rc" "$_ad_log" 2>/dev/null || true
+  type _osrc_created_record >/dev/null 2>&1 && {
+    _osrc_created_record "$_ad_log" autodetach "$_ad_sess" "" || true
+    _osrc_created_record "$_ad_rc" autodetach "$_ad_sess" "" || true
+  }
   tmux pipe-pane -t "$_ad_sess" -o "cat >> $(printf '%q' "$_ad_log")" 2>/dev/null || true
   _ad_full="$_ad_full; printf '%s\\n' \"\$?\" > $(printf '%q' "$_ad_rc")"
   if ! tmux send-keys -t "$_ad_sess" "$_ad_full" Enter; then
@@ -12612,6 +12626,10 @@ _worktree_setup() {
     echo "[outsourcerer] --worktree setup failed for $id (branch exists / detached?); running in the normal checkout." >&2
     return 1
   fi
+  type _osrc_created_record >/dev/null 2>&1 && {
+    _osrc_created_record "$wt" worktree "$id" "$root" || true
+    _osrc_created_record "$br" branch "$id" "$root" || true
+  }
   printf '%s\t%s\t%s' "$wt" "$br" "$base"
 }
 
@@ -13716,68 +13734,10 @@ cmd_cancel() {
   esac
 }
 
-# cleanup <job-id|fanout-gid> [--force] -> remove a job's (or a whole fanout's) git worktree(s).
-# CONSERVATIVE: refuses to delete a worktree with uncommitted (dirty) or unmerged (ahead>0) work unless
-# --force. Isolation is automatic; destruction is deliberate.
-cmd_cleanup() {
-  local force=0 target="" a
-  for a in "$@"; do case "$a" in --force) force=1 ;; *) target="$a" ;; esac; done
-  [ -n "$target" ] || die "cleanup needs a job id or fanout group id (add --force to remove dirty/unmerged worktrees)"
-  local gd; gd="$(_fanout_dir "$target")"
-  if [ -f "$gd/members.tsv" ]; then       # a fanout gid -> clean each member
-    local jid label; while IFS="$(printf '\t')" read -r jid label; do
-      [ -n "$jid" ] || continue
-      if [ "$force" = 1 ]; then cmd_cleanup "$jid" --force; else cmd_cleanup "$jid"; fi
-    done < "$gd/members.tsv"
-    echo "[outsourcerer] cleaned fanout $target"; return 0
-  fi
-  # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
-  # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
-  local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
-  [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
-  local wj="$OSRC_JOBS/$target/worktree.json"
-  [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
-  [ -f "$wj" ] || wj="$OSRC_HOME/isolated/$target/worktree.json"   # foreground auto-isolated run
-  [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
-  have jq || die "cleanup needs jq"
-  local path branch dirty ahead base rp
-  path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
-  # Never trust the serialized path: a lexical glob can be bypassed with
-  # worktrees/../../..., so canonicalize and require strict containment first.
-  # Worktrees live at <repo>/.outsourcerer/worktrees/<id> (see _worktree_setup), NOT
-  # under $OSRC_HOME — anchor on the canonical path's own shape, with the trailing
-  # component bound to the id being cleaned so one job's receipt cannot point at
-  # another job's worktree.
-  case "$path" in *'..'*) die "refusing to remove path containing '..': $path" ;; esac
-  rp="$(cd "$path" 2>/dev/null && pwd -P)" || die "refusing to remove non-canonical worktree path: $path"
-  case "$rp" in */.outsourcerer/worktrees/"$target") path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
-  # Re-read LIVE git state, not the job-completion snapshot: anything edited after the job (user, hook,
-  # another process) must be seen, or --force could destroy it. Fall back to the json only if the worktree
-  # is already gone.
-  if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    [ -n "$(git -C "$path" status --porcelain 2>/dev/null | head -1)" ] && dirty=true || dirty=false
-    ahead="$(git -C "$path" rev-list --count "${base:-HEAD}..HEAD" 2>/dev/null)"; ahead="${ahead:-0}"
-  else
-    dirty="$(jq -r '.dirty' "$wj")"; ahead="$(jq -r '.ahead // 0' "$wj")"
-  fi
-  if [ "$force" != 1 ] && { [ "$dirty" = "true" ] || [ "${ahead:-0}" -gt 0 ]; }; then
-    echo "[outsourcerer] REFUSING to remove $target: branch '$branch' has unmerged work (dirty=$dirty ahead=$ahead)." >&2
-    echo "  inspect: git -C \"$path\" log --oneline; git -C \"$path\" status" >&2
-    echo "  integrate e.g.: git cherry-pick $branch   OR force-remove: outsourcerer cleanup $target --force" >&2
-    return 1
-  fi
-  local maindir="${path%/.outsourcerer/worktrees/*}"
-  [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
-  if [ -n "$maindir" ] && [ -d "$maindir/.git" ]; then
-    git -C "$maindir" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
-    git -C "$maindir" branch -D "$branch" 2>/dev/null || true
-    git -C "$maindir" worktree prune 2>/dev/null || true
-  else
-    rm -rf "$path"
-  fi
-  rm -f "$wj"
-  echo "[outsourcerer] removed worktree for $target (branch $branch)"
-}
+# cleanup <job-id|fanout-gid> [--force] -> remove a job's git worktree(s); bare
+# `cleanup` is the manifest dry run, --apply deletes SAFE items, --ack acknowledges ASK.
+# cmd_cleanup/cmd_gc live in lib/cleanup.sh (loaded below); the target-removal path is
+# preserved verbatim as _cmd_cleanup_target.
 
 # =============================================================================
 # CREW — turn `fanout --worktree edit` into a SAFE TRANSACTION.
@@ -14058,62 +14018,7 @@ _crew_integrate() {
   echo "$crew_id"
 }
 
-# gc [--older-than DAYS]. Delete completed job dirs whose mtime is older than N days.
-# Only terminal states (done/done?/failed/blocked/timeout/wedged/canceled/permission-blocked)
-# are removed; running/interrupted jobs are left alone.
-cmd_gc() {
-  local days="${OSRC_JOB_TTL_DAYS:-3}" auto=0 cap=0
-  if [ "${1:-}" = "--auto" ]; then
-    auto=1
-    cap="${OSRC_AUTO_GC_MAX:-20}"
-  elif [ "${1:-}" = "--older-than" ]; then
-    [ -n "${2:-}" ] || die "gc --older-than needs a positive integer number of days"
-    days="$2"
-  elif [ -n "${1:-}" ]; then
-    die "gc: usage: gc [--older-than DAYS]"
-  fi
-  case "$days" in ''|*[!0-9]*|'0'* ) die "gc --older-than needs a positive integer, got '$days'" ;; esac
-  case "$cap" in 0) ;; *[!0-9]*|'') cap=20 ;; esac
-  [ -d "$OSRC_JOBS" ] || { echo "[outsourcerer] no jobs to gc."; return 0; }
-  local removed=0 skipped=0 checked=0 d st mtime now cutoff
-  now=$(date +%s)
-  cutoff=$(( now - days * 86400 ))
-  for d in "$OSRC_JOBS"/*/; do
-    [ -d "$d" ] || continue
-    # Auto-GC examines only a small oldest-first sample.  Manual gc remains a
-    # complete maintenance operation; launch-time housekeeping never becomes a
-    # proportional shell walk as history grows.
-    if [ "$auto" = 1 ] && [ "$checked" -ge "$cap" ]; then break; fi
-    checked=$((checked+1))
-    st="$(cat "$d/status" 2>/dev/null || echo running)"
-    # Auto-heal a stale non-terminal job through the SHARED reconciler instead of an ad-hoc pid check.
-    # The old inline check looked at the delegate pid only (never the supervisor) and wrote `interrupted`
-    # without re-reading — so a job whose supervisor wrote `done` in the same instant got its success
-    # clobbered to a bogus `interrupted` (a lost update that misreported a good job as failed). The
-    # reconciler checks both pids and re-reads before flipping, so it can only reap a truly-dead job.
-    case "$st" in
-      running|stalled\?|exploring\?|no-progress-writes|launching) st="$(_reconcile_status "$(basename "$d")" 2>/dev/null || echo "$st")" ;;
-    esac
-    case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) ;;
-      *) skipped=$((skipped+1)); continue ;;
-    esac
-    mtime="$(_mtime "$d")"
-    if [ -z "$mtime" ] || ! printf '%s\n' "$mtime" | grep -q '^[0-9][0-9]*$'; then
-      skipped=$((skipped+1)); continue
-    fi
-    if [ "$mtime" -lt "$cutoff" ]; then
-      rm -rf "$d"
-      removed=$((removed+1))
-    else
-      skipped=$((skipped+1))
-    fi
-  done
-  if [ "$auto" = 1 ]; then
-    echo "[outsourcerer] auto-gc: removed $removed job dirs older than $days days; checked $checked (cap $cap)"
-  else
-    echo "[outsourcerer] gc: removed $removed job dirs older than $days days; skipped $skipped (non-terminal or younger)"
-  fi
-}
+# gc [--older-than DAYS] lives in lib/cleanup.sh (moved for the size ratchet; unchanged).
 
 # =============================================================================
 # FANOUT (parallel multi-subagent): run N delegations in parallel across ANY provider, each as a
@@ -14407,6 +14312,7 @@ $body"
   fi
 
   local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
+  type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$gd" fanout "$gid" "$PWD" || true
   printf 'provider=%s verb=%s max=%s model=%s effort=%s tier=%s with=[%s] count=%s cwd=%s\n' \
     "${g_prov:-$PROVIDER}" "$verb" "$maxpar" "${g_model:-<per-agent|default>}" "${g_effort:-<per-agent|lane>}" "${g_tier:-<auto>}" "${fwd[*]-}" "${#labels[@]}" "$PWD" > "$gd/manifest.txt"
   echo "[outsourcerer] fanout $gid: ${#labels[@]} agents, provider=${g_prov:-$PROVIDER} verb=$verb max-parallel=$maxpar" >&2
@@ -17407,6 +17313,9 @@ _failover_notice() {
 # Tiers: auto|accept-edits|autonomous|dangerous
 route_delegate() {
   local tier="$1" verb="$2"; shift 2
+  # Disk-pressure gate: refuse new lane launches while free disk is under
+  # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
+  type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   # Mutating verbs get the BUILD DISCIPLINE preamble (write early, don't over-explore). See _build_discipline.
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1
   # Recursion guard: a delegated model must NOT re-delegate (Sorcerer's-Apprentice fork bomb).
@@ -19102,6 +19011,9 @@ session() {
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude
       # (fable/opus/...), not just Devin. Each launches its own interactive TUI inside tmux; the generic
       # send/read/stop below drive any of them. Switch lane with --provider devin|codex|cc.
+      # Disk-pressure gate: refuse new lane launches while free disk is under
+      # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
+      type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
       local launch
       case "$PROVIDER" in
         devin|dv)
@@ -20399,6 +20311,7 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
   else
     lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
     _mkdir_private "$ldir" || die "loop: cannot create loop dir under $OSRC_HOME/loops"
+    type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$ldir" loop "$lid" "" || true
     { umask 077; printf 'task: %s\ncheck: %s\nmodel: %s\nmax: %s\nmax-minutes: %s\nverb: %s\nworktree: %s\nstarted: %s\n' \
         "$task" "$check" "${model:-<default>}" "$max" "$maxmin" "$verb" "$use_worktree" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || die "loop: cannot write metadata"
   fi
@@ -20691,6 +20604,7 @@ EOF
   local lid ldir _ladcsv
   lid="$(_new_job_id)"; ldir="$OSRC_HOME/loops/$lid"
   _mkdir_private "$ldir" || die "loop escalate: cannot create loop dir under $OSRC_HOME/loops"
+  type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$ldir" loop "$lid" "" || true
   _ladcsv="$(printf '%s,' "${RUNGS[@]}")"; _ladcsv="${_ladcsv%,}"
   { umask 077; printf 'shape: escalate\ntask: %s\ncheck: %s\nladder: %s\nmax: %s\nmax-minutes: %s\nper-tier: %s\nverb: %s\nstarted: %s\n' \
       "$task" "$check" "$_ladcsv" "$max" "$maxmin" "$pertier" "$verb" "$(date +%s)" > "$ldir/meta"; } 2>/dev/null || die "loop escalate: cannot write metadata"
@@ -20960,7 +20874,7 @@ main() {
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
-    cleanup)     cmd_cleanup "$@" ;;                       # remove a job/fanout git worktree (conservative)
+    cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     hub)         cmd_hub "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
@@ -20989,7 +20903,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|gc|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

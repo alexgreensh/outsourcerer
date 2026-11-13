@@ -118,6 +118,10 @@ Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEART
 
 Core: `brief` · `mode` · `consent` · `cloud` (hosted sessions: `start`/`where`/`ls`) · `run`/`explore`/`research`/`edit`/`yolo` · `session` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `loop` · `fleet` (`ls`/`show`/`name`/`supervise`: your Claude Code sessions plus Outsourcerer's own jobs, not other tools' independent sessions) · `advise` · `doctor` · `models`. Factory: `plan` · `task` · `land` · `flow` · `exclude`. Remote lanes (cloud sessions, CI branches) + one-reviewer queue: `lane` · `review` (`references/remote-and-review.md`). More: `suggest`/`deals` · `estimate` · `tab` · `second-opinion` · `image` · `continue` · `tap` · `sanitize` · `parity*` · `posture` · `classify` · `hub` · `cleanup`/`gc`. Job states and next steps (`permission-blocked` is not `blocked`: rerun with `yolo` or restructure): `references/jobs-and-safety.md`.
 
+## Mission Control (`hub`)
+
+`hub export` prints the project docs the Mission Control page renders, built from live state (owners, jobs, sessions, remote lanes, done contracts, review verdicts). `hub serve` runs the same page locally on `127.0.0.1` behind a random token and opens it. `cleanup` (no args) is a dry run over the created-manifest with SAFE/ASK verdicts; `--apply` deletes SAFE only, `--ack` acknowledges ASK, `<id> [--force]` removes a worktree as before. Guide: `references/hub.md`.
+
 ## Factory: plans for multi-step work
 
 For multi-step work, use a **plan**: disk-backed tasks receive a supplied spec and bounded results from direct dependencies (`plan new` → `task add` → `plan run`). Mark each task `ship` (commits plus the done contract) or `scout` (report only, no shell check). Ship checks are optional; configure `--check` to require one. Human decisions become **held tasks**; release them with an answer. **`land`** serializes delivery and re-runs configured checks on the merged result, protecting local changes while allowing a clean target checkout to advance. Remote publication requires `--pr` or task `--deliver pr`. After a crash, rerun `plan run --plan <name>`. Guide: `references/factory.md`.
@@ -143,3 +147,4 @@ For multi-step work, use a **plan**: disk-backed tasks receive a supplied spec a
 - `references/factory-tasks-cli.md`: every `plan` and `task` flag, the brief, plan files
 - `references/factory-land-cli.md`: every `land` flag, done-contract rules, `evidence.json`
 - `references/factory-flow-cli.md`: `plan run`, `flow`, and the flow JSON format
+- `references/hub.md`: Mission Control `hub export`/`hub serve`, the cleanup manifest, SAFE/ASK rules, disk gate
