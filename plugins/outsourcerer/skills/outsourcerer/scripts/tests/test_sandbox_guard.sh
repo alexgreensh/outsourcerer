@@ -11,6 +11,10 @@ root = pathlib.Path(sys.argv[1])
 paths = [pathlib.Path(p) for p in sys.argv[2:]] or sorted(root.glob('test_*.sh'))
 source = re.compile(r'''(?:^|[;\s(])(?:source|\.)\s+["']?([^\s;"']+)''')
 assignment = re.compile(r'\b([A-Za-z_][A-Za-z_0-9]*)=(.*)')
+value = r'''(?:"[^"]*"|'[^']*'|[^\s;]+)'''
+home_assignment = re.compile(
+    r'''(?:^|;)\s*\(?\s*(?:export\s+(?:[A-Za-z_]\w*=''' + value + r'''\s+)*OSRC_HOME=(''' + value +
+    r''')|OSRC_HOME=(''' + value + r''')(?:\s*(?:;|$)))''')
 bad = []
 for path in paths:
     safe = False
@@ -41,15 +45,16 @@ for path in paths:
                 safe = True
             continue
         hit = source.search(line)
+        prefix = line[:hit.start()] if hit else line
+        for home in home_assignment.finditer(prefix):
+            value_text = home.group(1) or home.group(2)
+            safe = not re.search(r'\$HOME|\$\{HOME(?:\}|[:?+/-])|~', value_text)
         if hit:
             target = hit.group(1)
             var = re.match(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', target)
             engine = 'outsourcerer.sh' in line[hit.start():] or (var and var.group(1) in aliases)
-            before = line[:hit.start()]
-            if engine and not (safe or re.search(r'\bOSRC_HOME=', before)):
+            if engine and not safe:
                 bad.append(f'{path}:{number}: sources outsourcerer.sh before sandbox')
-        if re.search(r'\bOSRC_HOME=', line):
-            safe = True
         a = assignment.search(line)
         if a:
             name, value = a.groups()
@@ -81,4 +86,15 @@ if [ "$#" -eq 0 ]; then
   fi
   grep -q 'must stop on failure' "$OSRC_TEST_ROOT/unchecked.out"
   echo 'PASS: guard rejects unchecked sandbox setup'
+  for setup in 'OSRC_HOME=/tmp/x bash "$SRC" doctor' \
+    'echo "set OSRC_HOME=/x first"' 'f() { OSRC_HOME=/x; }' \
+    'export OSRC_HOME="$HOME/.outsourcerer"' 'export OSRC_HOME=~/.outsourcerer'; do
+    printf '%s\n' 'SRC="../outsourcerer.sh"' "$setup" '. "$SRC"' > "$OSRC_TEST_ROOT/unsafe.sh"
+    if bash "$0" "$OSRC_TEST_ROOT/unsafe.sh" > "$OSRC_TEST_ROOT/unsafe.out" 2>&1; then
+      echo "FAIL: guard accepted unsafe setup: $setup" >&2
+      exit 1
+    fi
+    grep -q 'before sandbox' "$OSRC_TEST_ROOT/unsafe.out"
+  done
+  echo 'PASS: guard rejects nonpersistent and real-home settings'
 fi
