@@ -12203,7 +12203,7 @@ run_job() {
   # backstop inside the child.
   local -a _run_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" \
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
   local sc=$?
