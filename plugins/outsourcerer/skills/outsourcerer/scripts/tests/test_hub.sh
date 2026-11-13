@@ -97,6 +97,21 @@ outs="$(run hub export 2>/dev/null)"
 echo "$outs" | jq -e '.projects[] | select(.id=="shipped-1") | .status == "shipped"' >/dev/null \
   && ok "shipped status flows through the export" || bad "shipped-1 status wrong"
 
+# Item 16: Hebrew + CJK must round-trip the export as real UTF-8 (not \uXXXX-escaped
+# bytes that jq -r can't render or a mangled latin-1 pass-through).
+cat > "$OSRC_HOME/hub/projects/i18n-1.json" <<'EOF'
+{"name":"שליטה ミッション","tagline":"한 페이지 — 每条通道","order":7,"status":"building","pct":12}
+EOF
+cat > "$OSRC_HOME/hub/decisions/i18n-1.json" <<'EOF'
+[{"id":"DI1","q":"לשלוח עכשיו?","short":"送る?","options":["כן","아직","まだ"],"weight":"High","affects":["דף","ページ"]}]
+EOF
+outs="$(run hub export 2>/dev/null)"
+iproj="$(echo "$outs" | jq -c '.projects[] | select(.id=="i18n-1")')"
+echo "$iproj" | jq -e '.name == "שליטה ミッション" and .tagline == "한 페이지 — 每条通道"' >/dev/null \
+  && ok "Hebrew+Japanese+Korean+Chinese round-trip as UTF-8" || bad "i18n name/tagline mangled: $(echo "$iproj" | jq -c '{name,tagline}')"
+echo "$iproj" | jq -e '.decisions[0].q == "לשלוח עכשיו?" and .decisions[0].options == ["כן","아직","まだ"]' >/dev/null \
+  && ok "decision Hebrew/Japanese/Korean round-trips" || bad "i18n decision mangled: $(echo "$iproj" | jq -c '.decisions')"
+
 echo "=== hub export: limits ==="
 lim="$(echo "$out" | jq -c '.limits')"
 echo "$lim" | jq -e 'type == "array" and length >= 4' >/dev/null && ok "limits array present" || bad "limits missing: $lim"
@@ -191,6 +206,17 @@ grep -q 'done.some((p) => p.id === current)' "$PAGE" \
 grep -q 'lst.stale' "$PAGE" && grep -q "stamp-top, .lst" "$PAGE" \
   && grep -q 'l.updatedAt' "$PAGE" && grep -q "ls.dataset.live = '1'" "$PAGE" \
   && ok "limits stamp joins staleCheck (.lst.stale, updatedAt feed)" || bad "limits stale stamp missing"
+# Item 16: Hebrew + CJK support.
+head -c 400 "$PAGE" | grep -q 'charset="utf-8"' \
+  && ok "page declares utf-8 charset (item 16)" || bad "no charset meta in hub.html"
+grep -q "Noto Sans Hebrew" "$PAGE" && grep -q -- "--cjk" "$PAGE" && grep -q "PingFang SC" "$PAGE" \
+  && ok "Hebrew + CJK font stacks wired (item 16)" || bad "i18n fonts missing"
+grep -q 'unicode-bidi: plaintext' "$PAGE" && grep -q "dir', 'auto'" "$PAGE" \
+  && grep -q 'text-align: start' "$PAGE" \
+  && ok "dir=auto + unicode-bidi on built elements (item 16)" || bad "bidi support missing"
+grep -q 'overflow-wrap: break-word' "$PAGE" && grep -q 'line-break: strict' "$PAGE" \
+  && ! grep -q 'break-all' "$PAGE" \
+  && ok "CJK-safe word wrapping, no break-all (item 16)" || bad "word-wrap rules wrong"
 
 one="$(run hub export --project sess-1 2>/dev/null)"
 echo "$one" | jq -e '(.projects | length) == 1 and (.projects[0].id == "sess-1")' >/dev/null \

@@ -1,8 +1,9 @@
+<meta charset="utf-8">
 <title>Outsourcerer Mission Control</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&family=Noto+Sans+Hebrew:wght@400;500;600;700&display=swap">
 <script src="https://cdn.jsdelivr.net/npm/lucide@0.469.0/dist/umd/lucide.min.js"></script>
 <style>
 /* Layout: app shell in Alex's site style. Left rail (brand, projects with their open decisions, credits), one project in the main pane, hover cards for detail. Paper and ink, yellow highlighter as the one accent; light and dark. */
@@ -11,8 +12,9 @@
   --hi: #ffe866; --hi-soft: #fff7c7; --hi-line: #1f1f1c; --mark: #ffe866; --on-hi: #1f1f1c;
   --up: #10331a; --up-bg: #dff5e3; --down: #5c1a12; --down-bg: #fbe3dc;
   --blob: #1f1f1c; --eye: #fff8e1; --shadow: #1f1f1c; --pop: #ffffff; --hov-fill: var(--card); --edge: #1f1f1c; --track: #cbc7bd; --focus: #1f1f1c; --dot-ok: #2f8f4e; --dot-out: #c2412d;
-  --sans: "Outfit", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --cjk: "PingFang SC", "Hiragino Sans", "Apple SD Gothic Neo", "Microsoft YaHei", "Yu Gothic UI", "Malgun Gothic", "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Sans CJK KR";
+  --sans: "Outfit", ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans Hebrew", var(--cjk), sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, "Noto Sans Hebrew", var(--cjk), monospace;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --paper: #16171a; --ink: #ededf0; --line: #34363d; --thumb: #2b2d33; --card: #1f2024;
@@ -34,7 +36,9 @@
   --blob: #0e0f11; --eye: #fff8e1; --shadow: transparent; --pop: #27292e; --hov-fill: var(--thumb); --edge: #3a3d45; --track: #34363d; --focus: #ffe866; --dot-ok: #9fe3b4; --dot-out: #ffb4a6; color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
-body { background: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.5; }
+/* Hebrew/CJK: wrap at word boundaries only; mid-word breaking shreds CJK (item 16). */
+body { background: var(--paper); color: var(--ink); font-family: var(--sans); font-size: 16px; line-height: 1.5; overflow-wrap: break-word; word-break: normal; line-break: strict; }
+[dir="auto"] { unicode-bidi: plaintext; text-align: start; }
 body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--paper); }
 .app { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 100%; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
@@ -323,7 +327,7 @@ a.pill svg { width: 13px; height: 13px; }
 })();
 (function () {
   const $ = (id) => document.getElementById(id);
-  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const el = (tag, cls, text) => { const e = document.createElement(tag); e.setAttribute('dir', 'auto'); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const NS = 'http://www.w3.org/2000/svg';
   const ORDER = ['Critical', 'High', 'Medium', 'Low'];
   const byWeight = (a, b) => ORDER.indexOf(a.weight) - ORDER.indexOf(b.weight);
@@ -721,7 +725,7 @@ a.pill svg { width: 13px; height: 13px; }
       b.addEventListener('click', () => { f.choice = f.choice === o ? '' : o; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
       f.btns.push(b); opts.appendChild(b);
     });
-    const ta = document.createElement('textarea'); ta.id = 'note-' + p.id + '-' + d.id; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note');
+    const ta = document.createElement('textarea'); ta.id = 'note-' + p.id + '-' + d.id; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note'); ta.setAttribute('dir', 'auto');
     const go2 = el('button', 'go'); go2.append(ic('send'), document.createTextNode('Send answer')); go2.type = 'button'; go2.id = 'send-' + p.id + '-' + d.id;
     const st = el('span', 'saved'); st.setAttribute('aria-live', 'polite');
     const sync = () => { go2.disabled = !db || (!f.choice && !ta.value.trim()); };
