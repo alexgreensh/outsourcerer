@@ -248,7 +248,9 @@ _osrc_cleanup_verdict() {
       local jstat
       jstat="$(_reconcile_status "$sess" 2>/dev/null || printf '?')"
       case "$jstat" in
-        done|'done?')
+        # 'done?' means finished-but-unverified: it keeps evidence like any
+        # other non-clean status until the TTL, never cleans up early (B4).
+        done)
           _osrc_job_collected "$sess" \
             || { printf 'ASK\tjob done but result not collected\n'; return 0; } ;;
         *) [ $(( now - newest )) -ge "${OSRC_CLEANUP_JOB_TTL:-259200}" ] \

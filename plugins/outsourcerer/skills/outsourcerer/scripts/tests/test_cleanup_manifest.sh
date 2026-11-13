@@ -130,6 +130,9 @@ mkdir -p "$OSRC_HOME/jobs/job-uncollected"; echo done > "$OSRC_HOME/jobs/job-unc
 mkdir -p "$OSRC_HOME/owners/sess-x"; : > "$OSRC_HOME/owners/sess-x/job-uncollected"
 # job-blocked: terminal-but-not-done evidence, kept until the 3d TTL (finding 4).
 mkdir -p "$OSRC_HOME/jobs/job-blocked"; echo blocked > "$OSRC_HOME/jobs/job-blocked/status"
+# B4: 'done?' means finished-but-unverified — collected or not, it keeps
+# evidence until the TTL just like blocked.
+mkdir -p "$OSRC_HOME/jobs/job-unver"; echo 'done?' > "$OSRC_HOME/jobs/job-unver/status"
 # B2: loop dirs and autodetach log/rc get the same evidence rule as jobs.
 # loop-ok: success + collected -> SAFE. loop-blocked: 2h-old blocked -> ASK.
 # loop-uncol: success but an owner record still points at it -> ASK.
@@ -165,6 +168,7 @@ manifest "$OSRC_HOME/jobs/job-old" job job-old ""
 manifest "$OSRC_HOME/jobs/job-busy" job job-busy ""
 manifest "$OSRC_HOME/jobs/job-uncollected" job job-uncollected ""
 manifest "$OSRC_HOME/jobs/job-blocked" job job-blocked ""
+manifest "$OSRC_HOME/jobs/job-unver" job job-unver ""
 manifest "$OSRC_HOME/jobs/job-liveowner" job job-liveowner ""
 manifest "$OSRC_HOME/loops/loop-ok" loop loop-ok ""
 manifest "$OSRC_HOME/loops/loop-blocked" loop loop-blocked ""
@@ -187,7 +191,7 @@ age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" "$WT_HID" "$WT_DIST" \
 # job-blocked, the blocked/uncollected loop, and the non-zero/no-marker
 # autodetach logs are old enough to pass the 1h gate but young enough that the
 # 3d evidence TTL still protects them.
-age2h "$OSRC_HOME/jobs/job-blocked" "$OSRC_HOME/loops/loop-blocked" \
+age2h "$OSRC_HOME/jobs/job-blocked" "$OSRC_HOME/jobs/job-unver" "$OSRC_HOME/loops/loop-blocked" \
   "$OSRC_HOME/loops/loop-uncol" "$OSRC_HOME/autodetach/ad-fail.log" \
   "$OSRC_HOME/autodetach/ad-fail.rc" "$OSRC_HOME/autodetach/ad-noex.log"
 
@@ -202,6 +206,7 @@ echo "$out" | grep -q "ASK.*wt-hidden" && ok "hidden untracked file makes worktr
 echo "$out" | grep -q "ASK.*wt-dist" && ok "ignored dist/target build output ASK (B3)" || bad "wt-dist not ASK: $(echo "$out" | grep wt-dist)"
 echo "$out" | grep -q "ASK.*pr-old" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
 echo "$out" | grep -q "ASK.*job-blocked" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
+echo "$out" | grep -q "ASK.*job-unver" && ok "unverified done? job keeps evidence until TTL (B4)" || bad "job-unver not ASK: $(echo "$out" | grep job-unver)"
 echo "$out" | grep -q "ASK.*job-uncollected" && ok "done-but-uncollected job ASK (finding 4)" || bad "job-uncollected not ASK"
 echo "$out" | grep -q "ASK.*outside-dir" && ok "outside-root path ASK" || bad "outside-dir not ASK"
 echo "$out" | grep -q "ASK.*job-liveowner" && ok "live-owner item ASK" || bad "live-owner not ASK"
@@ -262,6 +267,7 @@ git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/pr-old >/dev/null 2>&1
 [ -f "$WT_DIST/dist/app.js" ] && [ -f "$WT_DIST/target/bin" ] && ok "worktree with ignored dist/target preserved (B3)" || bad "wt-dist deleted with its build output!"
 [ -d "$OSRC_HOME/jobs/job-uncollected" ] && ok "uncollected job preserved (finding 4)" || bad "job-uncollected deleted!"
 [ -d "$OSRC_HOME/jobs/job-blocked" ] && ok "blocked job evidence preserved (finding 4)" || bad "job-blocked deleted!"
+[ -d "$OSRC_HOME/jobs/job-unver" ] && ok "unverified done? job preserved (B4)" || bad "job-unver deleted!"
 [ ! -d "$OSRC_HOME/loops/loop-ok" ] && ok "collected success loop removed (B2)" || bad "loop-ok survived"
 [ -d "$OSRC_HOME/loops/loop-blocked" ] && ok "blocked loop evidence preserved (B2)" || bad "loop-blocked deleted!"
 [ -d "$OSRC_HOME/loops/loop-uncol" ] && ok "uncollected loop preserved (B2)" || bad "loop-uncol deleted!"
