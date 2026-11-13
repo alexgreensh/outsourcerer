@@ -278,3 +278,18 @@ hold	shell		gawk 'BEGIN{e="ENVI" "RON"; print SYMTAB[e]["GH_TOKEN"]}'
 hold	shell		gawk 'BEGIN{for(k in SYMTAB) print k, SYMTAB[k]}'
 hold	shell		gawk 'BEGIN{print PROCINFO["pid"]}'
 hold	shell		gawk 'BEGIN{for(f in FUNCTAB) print f}'
+# ---- Round 5: review round 4 D (git config can hold tokens) ----
+hold	shell		git config --list
+hold	shell		git config -l
+hold	shell		git config --get http.extraheader
+hold	shell		git config --get-all credential.helper
+hold	shell		git config --get remote.origin.url
+hold	shell		git config --global --list
+hold	shell		git config --get http.https://github.com/.extraheader
+hold	shell		git config user.name x
+hold	shell		git config --get user.name extra
+approve	shell		git config --get user.name
+approve	shell		git config --get user.email
+approve	shell		git config --get core.autocrlf
+approve	shell		git config --get branch.main.remote
+approve	shell		git config --get init.defaultBranch

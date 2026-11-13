@@ -438,8 +438,14 @@ def git_rule(rest, cwd, roots):
         raise Hold("git stash changes the shared stash stack (only list/show approve)")
     if sub == "worktree" and sargs == ["list"]:
         return "read-only:git worktree list"
-    if sub == "config" and sargs[:1] in (["--get"], ["--list"], ["-l"], ["--get-all"]):
-        return "read-only:git config"
+    if sub == "config":
+        # Config can hold an http.extraheader AUTHORIZATION line or a token-bearing URL (CI checkouts
+        # write both), so --list/--get-all/remote URLs hold. One --get of a harmless key approves.
+        if len(sargs) == 2 and sargs[0] == "--get" and re.fullmatch(
+                r"(?i)user\.(name|email)|core\.[a-z]+|branch\.[A-Za-z0-9._/-]+\.(remote|merge|rebase)|"
+                r"init\.defaultbranch|pull\.rebase|push\.default", sargs[1]):
+            return "read-only:git config --get " + sargs[1]
+        raise Hold("git config: only --get of a harmless key approves (config can hold tokens)")
     if sub == "switch":
         if (len(sargs) == 1 and not sargs[0].startswith("-")) or \
            (len(sargs) == 2 and sargs[0] == "-c" and not sargs[1].startswith("-")):

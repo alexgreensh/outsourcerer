@@ -131,6 +131,9 @@ engine's own sandbox.
   `--amend`/`--no-verify`, `git stash` other than list/show (the stash is shared by every
   worktree), `git switch -C`/`--discard-changes`, `git init`, any git global flag except
   `--no-pager` (`--git-dir`, `--work-tree`, `-C`, `-c`).
+- `git config --list`/`--get-all`/`--get remote.*.url` and any key off a short harmless list
+  (`user.name`, `user.email`, `core.*`, `branch.*.remote|merge|rebase`, …): config can hold an
+  `http.extraheader` token or a token-bearing URL.
 - `gh api` (every form), `gh pr create/merge`, `gh … --web`, sudo, `curl|wget … | sh`, any network
   tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
 - Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
