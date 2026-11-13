@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_tap_statusline.sh — the statusline command a versioned plugin-cache install emits must
 # resolve the NEWEST installed version at render time, so it survives a plugin update+prune that
 # deletes the version it was pinned to. And it must never embed a path it cannot safely single-quote

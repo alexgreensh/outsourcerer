@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_lane_fallback.sh — availability-aware routing + --effort strip (no CLI leak).
 # Exercises the pure helpers offline + asserts the routing wire-in via source inspection.
 set -uo pipefail

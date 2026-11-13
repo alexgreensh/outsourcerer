@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_parity_links.sh — parity must be able to REPAIR itself.
 #
 # The failure this guards is the quiet kind. Plugin caches are versioned, so upgrading a plugin

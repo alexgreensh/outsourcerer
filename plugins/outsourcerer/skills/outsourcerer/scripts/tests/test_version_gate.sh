@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_version_gate.sh — `doctor --strict` must FAIL on version drift, not just warn.
 #
 # OSRC_VERSION in outsourcerer.sh can drift from plugin.json. Without --strict, doctor only prints

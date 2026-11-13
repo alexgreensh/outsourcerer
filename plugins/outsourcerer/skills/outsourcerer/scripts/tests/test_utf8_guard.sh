@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_utf8_guard.sh — U? conformance: the devin dispatch boundary must not die on the opaque
 # clap error "invalid UTF-8 was detected in one or more arguments" when a prompt contains
 # broken bytes (the real-world source is byte-truncation upstream: awk substr / cut -c slicing

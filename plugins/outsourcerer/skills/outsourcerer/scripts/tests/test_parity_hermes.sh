@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_parity_hermes.sh — the Hermes reverse bridge must work, and keep working.
 #
 # Hermes (NousResearch) discovers SKILL.md-format skills from $HERMES_HOME/skills/*/SKILL.md — the
@@ -46,14 +46,14 @@ chmod +x "$skill/scripts/outsourcerer.sh"
 hhome="$TMP/hermeshome"                            # HERMES_HOME with no skills dir yet
 
 # First run: must create the dir and a resolvable link.
-OSRC_SOURCED=0 HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1
+HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1
 link="$hhome/skills/outsourcerer"
 { [ -L "$link" ] && [ -f "$link/SKILL.md" ]; } \
   && ok "first run creates a symlink that resolves to a real SKILL.md" \
   || bad "first run did not produce a resolvable skill symlink"
 
 # Idempotent: a second run leaves exactly one resolvable link, exit 0.
-if OSRC_SOURCED=0 HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1; then
+if HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1; then
   { [ -L "$link" ] && [ -f "$link/SKILL.md" ]; } \
     && ok "second run is idempotent (still one resolvable link, exit 0)" \
     || bad "second run broke the link"
@@ -67,7 +67,7 @@ ln -sfn "$TMP/gone/skills/outsourcerer" "$link"    # dangling on purpose
 { [ -L "$link" ] && [ ! -e "$link" ]; } \
   && ok "fixture reproduces a dangling link (target does not exist)" \
   || bad "could not build a dangling-link fixture"
-OSRC_SOURCED=0 HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1
+HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1
 [ -f "$link/SKILL.md" ] \
   && ok "parity-hermes self-heals a dangling link (repoints at the live skill)" \
   || bad "parity-hermes did not repair the dangling link"
@@ -77,7 +77,7 @@ OSRC_SOURCED=0 HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity
 # reporting "linked". parity-hermes must REFUSE this (rc != 0), never nest, never falsely succeed.
 rm -f "$link"
 mkdir -p "$link/somefile.d"; : > "$link/real-marker"      # a genuine directory occupies the slot
-if OSRC_SOURCED=0 HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1; then
+if HERMES_HOME="$hhome" bash "$skill/scripts/outsourcerer.sh" parity-hermes >/dev/null 2>&1; then
   bad "parity-hermes falsely succeeded over a real directory (nested-link bug not guarded)"
 else
   { [ -f "$link/real-marker" ] && [ ! -L "$link" ] && [ ! -e "$link/outsourcerer" ]; } \
@@ -92,7 +92,7 @@ rm -rf "$link"
 bindir="$TMP/bin"; mkdir -p "$bindir"
 ln -sfn "$skill/scripts/outsourcerer.sh" "$bindir/outsourcerer"
 hhome2="$TMP/hermeshome2"
-OSRC_SOURCED=0 HERMES_HOME="$hhome2" bash "$bindir/outsourcerer" parity-hermes >/dev/null 2>&1
+HERMES_HOME="$hhome2" bash "$bindir/outsourcerer" parity-hermes >/dev/null 2>&1
 link2="$hhome2/skills/outsourcerer"
 { [ -L "$link2" ] && [ -f "$link2/SKILL.md" ]; } \
   && ok "parity-hermes resolves a launcher symlink and links the real skill root" \

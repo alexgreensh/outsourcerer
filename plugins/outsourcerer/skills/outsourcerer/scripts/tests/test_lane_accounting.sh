@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # Tests the truthful lane-accounting: _effective_lane mapping + cmd_tab three-way FREE/PLAN/CASH
 # bucket. Sources the main script with the `main "$@"` dispatcher stripped (side-effect-free).
 set -euo pipefail

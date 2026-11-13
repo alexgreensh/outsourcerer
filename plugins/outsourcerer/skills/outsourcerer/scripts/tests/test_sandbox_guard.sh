@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
-osrc_test_sandbox
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 set -eu
 TESTS="$(cd "$(dirname "$0")" && pwd)"
 # An optional path lets the negative control and callers check individual files.
@@ -14,6 +14,7 @@ assignment = re.compile(r'\b([A-Za-z_][A-Za-z_0-9]*)=(.*)')
 bad = []
 for path in paths:
     safe = False
+    sandbox_loaded = False
     aliases = set()
     heredoc = None
     for number, line in enumerate(path.read_text().splitlines(), 1):
@@ -28,6 +29,16 @@ for path in paths:
         if h:
             heredoc = h.group(1)
         if 'lib_sandbox.sh' in line and source.search(line):
+            if not re.search(r'\|\|\s*\{.*\bexit\s+1\s*;', line):
+                bad.append(f'{path}:{number}: sandbox library load must stop on failure')
+            else:
+                sandbox_loaded = True
+            continue
+        if re.match(r'\s*osrc_test_sandbox(?:\s|$)', line):
+            if not sandbox_loaded or not re.search(r'\|\|\s*\{.*\bexit\s+1\s*;', line):
+                bad.append(f'{path}:{number}: sandbox must stop on failure')
+            else:
+                safe = True
             continue
         hit = source.search(line)
         if hit:
@@ -37,7 +48,7 @@ for path in paths:
             before = line[:hit.start()]
             if engine and not (safe or re.search(r'\bOSRC_HOME=', before)):
                 bad.append(f'{path}:{number}: sources outsourcerer.sh before sandbox')
-        if re.search(r'\bOSRC_HOME=', line) or re.match(r'\s*osrc_test_sandbox(?:\s|$)', line):
+        if re.search(r'\bOSRC_HOME=', line):
             safe = True
         a = assignment.search(line)
         if a:
@@ -63,4 +74,11 @@ if [ "$#" -eq 0 ]; then
   printf '%s\n' 'SRC="../outsourcerer.sh"' 'OSRC_HOME=/isolated' '. "$SRC"' > "$OSRC_TEST_ROOT/good.sh"
   bash "$0" "$OSRC_TEST_ROOT/good.sh"
   echo 'PASS: guard rejects an unsandboxed temporary test'
+  printf '%s\n' '. "lib_sandbox.sh"' 'osrc_test_sandbox' > "$OSRC_TEST_ROOT/unchecked.sh"
+  if bash "$0" "$OSRC_TEST_ROOT/unchecked.sh" > "$OSRC_TEST_ROOT/unchecked.out" 2>&1; then
+    echo 'FAIL: guard accepted unchecked sandbox setup' >&2
+    exit 1
+  fi
+  grep -q 'must stop on failure' "$OSRC_TEST_ROOT/unchecked.out"
+  echo 'PASS: guard rejects unchecked sandbox setup'
 fi
