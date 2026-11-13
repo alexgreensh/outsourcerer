@@ -346,43 +346,48 @@ _osrc_hh_mm() {
   else date -r "$1" '+%a %H:%M' 2>/dev/null; fi
 }
 
-# _osrc_limit_state <pct-used> -> ok|low|out. Boundaries mirror L7: <50 working,
-# 50-89 running low, >=90 out (the launch gate would already refuse it).
+# _osrc_limit_state <pct-used> [resets_at-epoch] -> ok|low|out|wait|unknown.
+# Boundaries mirror L7: <50 working, 50-89 running low, >=90 spent — `wait`
+# (waiting for reset) when the window publishes a reset time, else `out`.
+# Anything unreadable is `unknown`, never invented.
 _osrc_limit_state() {
-  case "${1:-}" in ''|*[!0-9.]*) printf 'wait'; return 0 ;; esac
-  awk -v p="$1" 'BEGIN{ if (p>=90) print "out"; else if (p>=50) print "low"; else print "ok" }'
+  case "${1:-}" in ''|*[!0-9.]*) printf 'unknown'; return 0 ;; esac
+  if awk -v p="$1" 'BEGIN{ exit !(p>=90) }'; then
+    case "${2:-}" in ''|*[!0-9]*) printf 'out' ;; *) printf 'wait' ;; esac
+  elif awk -v p="$1" 'BEGIN{ exit !(p>=50) }'; then printf 'low'; else printf 'ok'; fi
 }
 
-# _osrc_limit_row <id> <name> <state> <left> <renews> <models> <note> <paid> <order> <updated>
+# _osrc_limit_row <id> <name> <state> <left> <renews> <models> <note> <paid> <order> <updated> [source]
 _osrc_limit_row() {
   jq -cn --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$5" \
-        --arg models "$6" --arg note "$7" --argjson paid "${8:-false}" --argjson order "${9:-99}" --arg updated "${10}" \
+        --arg models "$6" --arg note "$7" --argjson paid "${8:-false}" --argjson order "${9:-99}" --arg updated "${10}" --arg source "${11:-}" \
     '{id:$id,name:$name,state:$state,order:$order}
      + (if $left=="" then {} else {left:$left} end)
      + (if $renews=="" then {} else {renews:$renews} end)
      + (if $models=="" then {} else {models:$models} end)
      + (if $note=="" then {} else {note:$note} end)
      + (if $updated=="" then {} else {updated:$updated} end)
+     + (if $source=="" then {} else {source:$source} end)
      + (if $paid then {paid:true} else {} end)'
 }
 
-# _osrc_hub_limits -> JSON array for the rail's "Lanes and limits" panel. Built
-# from L7's meter sources where present: the claude rate-limits artifact
-# ($OSRC_HOME/rate-limits.json, then the token-optimizer copy — same precedence,
-# 10-min freshness gate) for Claude 5h/weekly, and L7's own _session_limits /
-# _codex_rate_limits when lib/limits.sh is loaded for the ChatGPT windows.
-# Unmetered lanes are honest rows (no invented percentages); OpenRouter carries
-# the paid tag.
+# _osrc_hub_limits -> JSON array for the rail's "Lanes and limits" panel. Rows
+# exist only for lanes detected for this user (installed AND logged in — the
+# meter artifacts are themselves login evidence). Metered rows read L7's
+# sources: the claude rate-limits artifact ($OSRC_HOME/rate-limits.json, then
+# the token-optimizer copy — same precedence, 10-min freshness gate), and L7's
+# _session_limits/_codex_rate_limits when lib/limits.sh is loaded for the
+# ChatGPT windows. A stale or missing reading is `unknown`, never invented;
+# Gemini CLI is retired and never listed. OpenRouter carries the paid tag.
 _osrc_hub_limits() {
   have jq 2>/dev/null || { printf '[]'; return 0; }
-  local now ts_ms stale c5 c5r c7 c7r cand raw arr='[]' upd=''
+  local now ts_ms stale c5 c5r c7 c7r cand raw arr='[]' upd='' src='statusline'
   now="$(date +%s)"
-  # Claude windows: first fresh artifact wins; a stale one still emits rows in
-  # `wait` so the panel shows the reading is unprovable, not absent.
+  # Claude windows: first fresh artifact wins.
   for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
     [ -f "$cand" ] && jq -e . "$cand" >/dev/null 2>&1 || continue
-    raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
-    IFS='|' read -r c5 c5r c7 c7r ts_ms <<EOF
+    raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")|\(.source // "statusline")"' "$cand" 2>/dev/null)"
+    IFS='|' read -r c5 c5r c7 c7r ts_ms src <<EOF
 $raw
 EOF
     # Expired windows reset the reading rather than report an old percentage.
@@ -395,51 +400,65 @@ EOF
     [ -n "$c5$c7" ] || stale=1
     [ "$stale" = 0 ] && break
   done
+  local st leftr
   if [ -n "$c5$c7" ]; then
-    local st leftr note5 note7
+    local note5 note7
     note5="Session window, resets every 5 hours."
     note7="Weekly window — the binding cap in practice."
-    [ "${stale:-1}" = 1 ] && { note5="$note5 Last reading is stale — treated as unknown, not exhausted."; note7="$note7 Last reading is stale — treated as unknown, not exhausted."; }
+    [ "${stale:-1}" = 1 ] && { note5="$note5 Last reading is stale — treated as not checked, not exhausted."; note7="$note7 Last reading is stale — treated as not checked, not exhausted."; }
     if [ -n "$c5" ]; then
-      st="$(_osrc_limit_state "$c5")"; [ "$stale" = 1 ] && st=wait
+      st="$(_osrc_limit_state "$c5" "$c5r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c5%.*} ))% left"; [ "${c5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd" "$src")" '$a+[$b]')"
     fi
     if [ -n "$c7" ]; then
-      st="$(_osrc_limit_state "$c7")"; [ "$stale" = 1 ] && st=wait
+      st="$(_osrc_limit_state "$c7" "$c7r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c7%.*} ))% left"; [ "${c7%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd" "$src")" '$a+[$b]')"
     fi
-  else
-    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude 'Claude Code' wait '' '' 'claude-* on your Claude subscription' 'No fresh limit reading — the statusline artifact is missing or over 10 minutes old.' false 1 '')" '$a+[$b]')"
+  elif command -v claude >/dev/null 2>&1 || [ -d "$HOME/.claude" ]; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude 'Claude Code' unknown '' '' 'claude-* on your Claude subscription' 'Installed but no fresh limit reading — the statusline artifact is missing or over 10 minutes old.' false 1 '' '')" '$a+[$b]')"
   fi
   # ChatGPT windows via L7's normalized reader when it is loaded; codexage marks
   # a stale reading (a floor, never a measurement).
+  local lim tok x5='' xw='' xage='' xraw x5r='' xwr=''
   if type _session_limits >/dev/null 2>&1; then
-    local lim tok x5='' xw='' xage='' xraw x5r xwr xa
     lim="$(_session_limits 2>/dev/null)"
     for tok in $lim; do case "$tok" in codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;; codexage=*) xage="${tok#*=}" ;; esac; done
-    x5r=''; xwr=''
     if type _codex_rate_limits >/dev/null 2>&1; then
       xraw="$(_codex_rate_limits 2>/dev/null)" || xraw=''
       case "$xraw" in *\|*) x5r="$(printf '%s' "$xraw" | cut -d'|' -f3)"; xwr="$(printf '%s' "$xraw" | cut -d'|' -f4)" ;; esac
     fi
+  fi
+  if [ -n "$x5$xw" ]; then
     if [ -n "$x5" ]; then
-      st="$(_osrc_limit_state "$x5")"; [ -n "$xage" ] && st=wait
+      st="$(_osrc_limit_state "$x5" "$x5r")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${x5%.*} ))% left"; [ "${x5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd" 'codex rollout')" '$a+[$b]')"
     fi
     if [ -n "$xw" ]; then
-      st="$(_osrc_limit_state "$xw")"; [ -n "$xage" ] && st=wait
+      st="$(_osrc_limit_state "$xw" "$xwr")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${xw%.*} ))% left"; [ "${xw%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd" 'codex rollout')" '$a+[$b]')"
     fi
+  elif command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ]; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt 'ChatGPT (Codex)' unknown '' '' 'sol, terra, gpt-5.* on your ChatGPT plan' 'Codex installed but no limit reading yet.' false 3 '' '')" '$a+[$b]')"
   fi
-  # Unmetered lanes: honest rows, nothing invented. paid marks per-use billing.
-  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row devin 'Devin' ok 'plan quota, no meter' '' 'glm, swe, devin-* on your Devin plan' 'A plan refusal is only detectable when a run hits it.' false 5 '')" '$a+[$b]')"
-  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row gemini 'Gemini' ok 'keyless, Google acct' '' 'gemini-*, nano-banana' 'No published meter.' false 6 '')" '$a+[$b]')"
-  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row openrouter 'OpenRouter' ok 'paid per use' '' 'OpenRouter model ids' 'Billed from your balance — outsourcerer asks before every run.' true 7 '')" '$a+[$b]')"
-  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row local 'Local' ok 'free, your hardware' '' 'ollama:*, lmstudio:*, local:*' 'No meter, no bill.' false 8 '')" '$a+[$b]')"
+  # Unmetered lanes, only when detected installed: nothing invented about their
+  # quota, so they read unknown (Devin/Antigravity) or trivially ok (paid/local).
+  if command -v devin >/dev/null 2>&1; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row devin 'Devin' unknown 'plan quota, no meter' '' 'glm, swe, devin-* on your Devin plan' 'A plan refusal is only detectable when a run hits it.' false 5 '' '')" '$a+[$b]')"
+  fi
+  if command -v agy >/dev/null 2>&1; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row agy 'Antigravity' unknown 'keyless, Google acct' '' 'gemini-*, nano-banana' 'No published meter.' false 6 '' '')" '$a+[$b]')"
+  fi
+  if [ -n "${OPENROUTER_API_KEY:-}" ] || grep -qs '^OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row openrouter 'OpenRouter' ok 'paid per use' '' 'OpenRouter model ids' 'Billed from your balance — outsourcerer asks before every run.' true 7 '' '')" '$a+[$b]')"
+  fi
+  if command -v ollama >/dev/null 2>&1 || [ -d "$HOME/.lmstudio" ]; then
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row local 'Local' ok 'free, your hardware' '' 'ollama:*, lmstudio:*, local:*' 'No meter, no bill.' false 8 '' '')" '$a+[$b]')"
+  fi
+  # Gemini CLI is retired — never listed.
   printf '%s' "$arr"
 }
 

@@ -14,27 +14,42 @@ overrides (short/note/issues/theme) come from `$OSRC_HOME/hub/projects/<slug>.js
 `extraLinks` entries are kept only when their `url` starts with `https://`.
 
 The document also carries a top-level `limits` array — the rows behind the rail's
-"Lanes and limits" panel — built from L7's meter sources where they exist:
+"Lanes and limits" panel — built from L7's meter sources. A row exists only for a
+lane detected for this user: installed AND logged in (the meter artifacts are
+themselves login evidence; CLIs are probed with `command -v`, the OpenRouter key
+with `OPENROUTER_API_KEY`/`~/.env`). Undetected lanes are simply absent. Gemini
+CLI is retired and is never listed.
 
-- `id`, `name` — the lane/window (`claude-5h`, `claude-weekly`, `chatgpt-5h`,
-  `chatgpt-weekly`, `devin`, `gemini`, `openrouter`, `local`).
-- `state` — `ok` (<50% used), `low` (50–89), `out` (>=90, the launch-gate
-  threshold), or `wait` (no fresh reading; never presented as exhausted).
+- `id`, `name` — the lane/window (`claude-5h`, `claude-weekly`, `claude`,
+  `chatgpt-5h`, `chatgpt-weekly`, `chatgpt`, `devin`, `agy`, `openrouter`,
+  `local`). `id` also drives the row's official harness mark through the page's
+  `HICONS`/`HALIAS` (`chatgpt*` → OpenAI, `agy` → Antigravity).
+- `state` — `ok` (<50% used), `low` (50–89), `wait` (>=90, the launch-gate
+  threshold, with a published reset — "waiting for reset"), `out` (>=90 with no
+  reset info), `unknown` (installed but no fresh reading; a stale or missing
+  meter is always unknown, never presented as exhausted).
 - `left` — human string, e.g. `60% left`, or a disposition like `paid per use`.
 - `renews` — `HH:MM` within 36h, else `Fri HH:MM`, from the window's `resets_at`.
 - `models` — which model ids draw on that lane.
 - `cap` — the cap description when a source publishes one.
-- `note` — honest caveat (e.g. "Last reading is stale — treated as unknown").
+- `note` — honest caveat (e.g. "Last reading is stale — treated as not checked").
 - `paid` — present and `true` only for per-use billing lanes (OpenRouter);
   the panel shows a `paid` tag on those rows.
 - `order` — rail sort order. `updated` — `HH:MM` of the source reading.
+- `source` — where the reading came from (`statusline`, `codex rollout`).
 
 Sources, same precedence and freshness gates as L7: `$OSRC_HOME/rate-limits.json`
 then `$HOME/.claude/token-optimizer/rate-limits.json` for the Claude windows
 (dropped when the reading is over 10 minutes old), and L7's `_session_limits` /
 `_codex_rate_limits` when `lib/limits.sh` is loaded for the ChatGPT windows
 (`codexage` marks a stale reading — a floor, not a measurement — so the row goes
-to `wait`). With no meters at all the unmetered lanes still emit honest rows.
+to `unknown`).
+
+In the page, the panel is folded by default: its header is a disclosure button
+and folded it lists only rows with room (`ok`/`low`) plus a
+"Show N more (out or not checked)" button; the choice is remembered per browser
+in `localStorage`. Rows open a detail card (models, cap, renews, note, source,
+checked-at) on click/Enter/Space — no hover cards.
 
 To publish it as an artifact, the orchestrator:
 

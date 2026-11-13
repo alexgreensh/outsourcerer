@@ -51,6 +51,12 @@ NOW="$(date +%s)"
 jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
   > "$OSRC_HOME/rate-limits.json"
+# Detection is per-user (installed AND logged in): fake binaries + ~/.env so the
+# limits rows are deterministic regardless of what this machine really has.
+mkdir -p "$TMP/bin"
+for b in claude devin agy ollama; do printf '#!/bin/sh\nexit 0\n' > "$TMP/bin/$b"; chmod +x "$TMP/bin/$b"; done
+export PATH="$TMP/bin:$PATH"
+echo 'OPENROUTER_API_KEY=test-only' > "$HOME/.env"
 
 echo "=== hub export ==="
 out="$(run hub export 2>"$TMP/export.err")" || { bad "hub export exited nonzero: $(cat "$TMP/export.err")"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
@@ -72,10 +78,10 @@ echo "$proj" | jq -e '.exported_at | type == "number"' >/dev/null && ok "project
 echo "=== hub export: limits ==="
 lim="$(echo "$out" | jq -c '.limits')"
 echo "$lim" | jq -e 'type == "array" and length >= 4' >/dev/null && ok "limits array present" || bad "limits missing: $lim"
-echo "$lim" | jq -e 'all(.[]; (.name | type == "string") and (.state | IN("ok","low","out","wait")) and (.order | type == "number"))' >/dev/null \
-  && ok "every limit row has name/state ok|low|out|wait/order" || bad "limit row shape wrong: $lim"
-echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .state == "out" and (.left | test("left")) and (.renews | type == "string") and (.updated | type == "string")' >/dev/null \
-  && ok "claude-5h: 95% used -> out with left/renews/updated" || bad "claude-5h row wrong: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")')"
+echo "$lim" | jq -e 'all(.[]; (.name | type == "string") and (.state | IN("ok","low","out","wait","unknown")) and (.order | type == "number"))' >/dev/null \
+  && ok "every limit row has name/state ok|low|out|wait|unknown/order" || bad "limit row shape wrong: $lim"
+echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .state == "wait" and (.left | test("left")) and (.renews | type == "string") and (.updated | type == "string")' >/dev/null \
+  && ok "claude-5h: 95% used with reset -> wait with left/renews/updated" || bad "claude-5h row wrong: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")')"
 echo "$lim" | jq -e '.[] | select(.id=="claude-weekly") | .state == "ok"' >/dev/null \
   && ok "claude-weekly: 40% used -> ok" || bad "claude-weekly row wrong"
 echo "$lim" | jq -e '.[] | select(.id=="openrouter") | .paid == true' >/dev/null \
@@ -84,24 +90,49 @@ echo "$lim" | jq -e '[.[] | select(.paid == true)] | length == 1' >/dev/null \
   && ok "exactly one paid lane" || bad "paid lane count wrong"
 echo "$lim" | jq -e '.[] | select(.id=="openrouter") | (.models | type == "string") and (.note | type == "string")' >/dev/null \
   && ok "limit rows carry models+note" || bad "models/note missing"
-# A stale artifact (>10min old) must degrade to wait, never fake a reading.
+echo "$lim" | jq -e '[.[] | select(.id=="gemini" or .id=="gemini-cli")] | length == 0' >/dev/null \
+  && ok "Gemini CLI never listed (retired)" || bad "gemini row present — retired lane must not be listed"
+echo "$lim" | jq -e '.[] | select(.id=="devin") | .state == "unknown"' >/dev/null \
+  && ok "detected unmetered lane (devin) -> unknown row" || bad "devin row missing/wrong"
+echo "$lim" | jq -e '.[] | select(.id=="local") | .state == "ok"' >/dev/null \
+  && ok "detected local lane -> ok row" || bad "local row missing/wrong"
+# A stale artifact (>10min old) must degrade to unknown, never fake a reading.
 jq -cn --argjson t "$(( (${NOW} - 1200) * 1000 ))" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
   > "$OSRC_HOME/rate-limits.json"
 out2="$(run hub export 2>/dev/null)"
-echo "$out2" | jq -e '[.limits[] | select(.id | startswith("claude")) | .state] | all(. == "wait")' >/dev/null \
-  && ok "stale artifact -> claude rows wait" || bad "stale artifact not wait: $(echo "$out2" | jq -c '.limits[]|select(.id|startswith("claude"))')"
-# No artifact at all -> still a valid array with a wait row and the unmetered lanes.
+echo "$out2" | jq -e '[.limits[] | select(.id | startswith("claude")) | .state] | all(. == "unknown")' >/dev/null \
+  && ok "stale artifact -> claude rows unknown" || bad "stale artifact not unknown: $(echo "$out2" | jq -c '.limits[]|select(.id|startswith("claude"))')"
+# No artifact but claude installed -> still an unknown row (detected, unchecked).
 rm -f "$OSRC_HOME/rate-limits.json"
 out3="$(run hub export 2>/dev/null)"
-echo "$out3" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="claude") | .state == "wait")' >/dev/null \
-  && ok "missing artifact -> claude wait row, array still valid" || bad "missing-artifact limits wrong"
+echo "$out3" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="claude") | .state == "unknown")' >/dev/null \
+  && ok "missing artifact -> claude unknown row, array still valid" || bad "missing-artifact limits wrong"
 echo "$out3" | jq -e '.limits[] | select(.id=="openrouter") | .paid == true' >/dev/null \
   && ok "paid lane present without meters" || bad "unmetered rows missing"
+# Undetected lanes are omitted: without the fake binaries, no devin/agy/local row.
+JQDIR="$(dirname "$(command -v jq)")"
+out4="$(PATH="/usr/bin:/bin:$JQDIR" run hub export 2>/dev/null)"
+echo "$out4" | jq -e '[.limits[] | select(.id=="devin" or .id=="agy" or .id=="local")] | length == 0' >/dev/null \
+  && ok "undetected lanes omitted from limits" || bad "undetected lanes listed"
 # Restore the fresh fixture for the serve checks below.
 jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
   > "$OSRC_HOME/rate-limits.json"
+
+echo "=== page structure (design port contract) ==="
+PAGE="$HERE/../lib/hub.html"
+grep -q 'lucide@0\.469\.0' "$PAGE" && ok "lucide pinned at 0.469.0" || bad "lucide pin missing"
+grep -q 'aria-expanded' "$PAGE" && grep -q 'id="lfold"' "$PAGE" && ok "limits rail is a disclosure (lfold aria-expanded)" || bad "limits disclosure missing"
+grep -q 'mc-limits-open' "$PAGE" && ok "limits fold persists via localStorage" || bad "fold persistence missing"
+grep -q "ok', 'low'" "$PAGE" && ok "folded panel filters to ok|low" || bad "fold predicate missing"
+grep -q "Show ' + rest" "$PAGE" && ok "folded panel has 'Show N more' button" || bad "show-more button missing"
+grep -q 'LSTATE = {' "$PAGE" && grep -q "unknown:" "$PAGE" && ok "limit states incl. unknown" || bad "LSTATE/unknown missing"
+grep -q 'HICONS' "$PAGE" && grep -q 'HALIAS' "$PAGE" && grep -q 'function hlogo' "$PAGE" && ok "harness icons via HICONS/HALIAS/hlogo" || bad "harness icon system missing"
+grep -q 'wiz-bob' "$PAGE" && grep -q 'prefers-reduced-motion' "$PAGE" && ok "animated wizard logo + reduced-motion gate" || bad "wizard animation missing"
+grep -q '#18191c' "$PAGE" && grep -q '#232428' "$PAGE" && grep -q '#5c5f68' "$PAGE" && ok "dark tokens present" || bad "dark tokens missing"
+grep -q '100dvh' "$PAGE" && grep -q 'rail-top' "$PAGE" && grep -q 'rail-mid' "$PAGE" && ok "rail layout (rail-top/rail-mid/100dvh)" || bad "rail layout missing"
+grep -q 'mask' "$PAGE" && grep -q 'data:image/png;base64' "$PAGE" && ok "wordmark css mask (inlined asset)" || bad "wordmark mask missing"
 
 one="$(run hub export --project sess-1 2>/dev/null)"
 echo "$one" | jq -e '(.projects | length) == 1 and (.projects[0].id == "sess-1")' >/dev/null \
