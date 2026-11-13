@@ -2,7 +2,7 @@
 # L3 approver policy table: every row of fixtures/approver-table.tsv must classify exactly as
 # expected (approve|hold). Rows are real commands from orchestrator sessions (FINDINGS 2026-11-13)
 # plus the dangerous shapes that must HOLD: rm outside the worktree, redirects out, $(...),
-# backticks, git push/reset --hard, tmux kill-server, multi-line (continuation) commands, secrets,
+# backticks, git push/reset --hard, stopping the whole tmux server, multi-line (continuation) commands, secrets,
 # installs, publishing, another worktree. "⏎" in a row stands for a newline in the command.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
