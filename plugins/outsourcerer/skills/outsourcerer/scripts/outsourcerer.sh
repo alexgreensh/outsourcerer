@@ -49,6 +49,10 @@
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
 #   wait <job-id> [--for N]        BLOCK until a job is terminal; exit 0 done|done?, 3 blocked|permission-blocked, 1 other failure (failed|wedged|timeout|interrupted|canceled), 124 --for N elapsed while still live. Unlike watch (a bounded ~15s status poll), wait blocks to terminal by default.
+#   adopt --list | adopt <sid>     Session handover: --list shows every owners/ session dir; adopt
+#                                  <old-sid> moves that session's owned targets into THIS session.
+#   handover [--out FILE]          Write the markdown brief (targets, kind, state, model, cwd,
+#                                  adopt + wait commands) the NEXT session runs to pick up the fleet.
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
@@ -20172,18 +20176,7 @@ _warn_unwatched() {
 # Loop safety: the same unwaited set is blocked at most OSRC_STOP_GUARD_MAX times (default 2), then
 # the stop is allowed. A new set blocks again. OSRC_STOP_GUARD=0 turns the guard off. Any error
 # allows the stop.
-
-_owner_sid() { # [session-id] -> sanitized session id, or nothing
-  printf '%s' "${1:-${CLAUDE_CODE_SESSION_ID:-}}" | tr -cd 'A-Za-z0-9._-' | cut -c1-128
-}
-
-_owner_record() { # <job-or-session-id>
-  local s; s="$(_owner_sid)"
-  [ -n "$s" ] && [ -n "${1:-}" ] || return 0
-  case "$1" in */*|.|..) return 0 ;; esac
-  mkdir -p "$OSRC_HOME/owners/$s" 2>/dev/null && : > "$OSRC_HOME/owners/$s/$1" 2>/dev/null
-  return 0
-}
+# (_owner_sid/_owner_record/_waited_ids moved to lib/handover.sh; _owned_live_state stays here.)
 
 # _owned_live_state <id> -> prints live|done|gone. done/gone mean the owner record can go.
 _owned_live_state() {
@@ -20209,21 +20202,6 @@ _owned_live_state() {
     return 0
   fi
   printf 'gone'
-}
-
-# _waited_ids -> ids that a running `wait` / `fanout wait` already covers, one per line.
-_waited_ids() {
-  local line rest gid
-  ps -axo command= 2>/dev/null | grep -E 'outsourcerer(\.sh)?[^ ]* (.* )?wait( |$)' | grep -v 'stop-guard' | while IFS= read -r line; do
-    rest="${line##* wait }"
-    case "$line" in
-      *" fanout wait "*)
-        gid="${line##* fanout wait }"; gid="${gid%% *}"
-        [ -f "$(_fanout_dir "$gid" 2>/dev/null)/members.tsv" ] && cut -f1 "$(_fanout_dir "$gid")/members.tsv" 2>/dev/null
-        ;;
-      *) printf '%s\n' "${rest%% *}" ;;
-    esac
-  done
 }
 
 cmd_stop_guard() {
@@ -21810,6 +21788,8 @@ main() {
     heartbeat)   cmd_heartbeat "$@" ;;                     # verified supervision arm: start|status
     watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
+    adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
+    handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
@@ -21842,7 +21822,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|exclude|models|plan|task|land|flow|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

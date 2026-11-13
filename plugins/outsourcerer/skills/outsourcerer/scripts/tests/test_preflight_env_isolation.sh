@@ -17,14 +17,22 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")"
-trap 'env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMP/tmux" tmux kill-server >/dev/null 2>&1; rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
+trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
 # Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
 # inherits the server's env (real HOME, real PATH): it scoped the real Devin skills home and
 # launched the real devin CLI on a cloud model. A private server plus a stub devin keep it here.
 export TMUX_TMPDIR="$TMP/tmux"; unset TMUX TMUX_PANE
+[ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
+# Route every tmux call — the test's and the engine subprocess's — onto a private named socket
+# inside the sandbox dir via a PATH shim, so no call can reach the real tmux server.
+_pf_tmux="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_pf_tmux" ]; then
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_pf_tmux" "$$" > "$TMP/bin/tmux"
+  chmod +x "$TMP/bin/tmux"
+fi
 printf '#!/bin/sh\necho hi\n' > "$TMP/bin/devin"; chmod +x "$TMP/bin/devin"; export PATH="$TMP/bin:$PATH"
 
 pass=0; fail=0

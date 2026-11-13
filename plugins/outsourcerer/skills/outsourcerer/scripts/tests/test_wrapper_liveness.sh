@@ -15,12 +15,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d /tmp/osrc-wl.XXXXXX)"
+TMP="$(mktemp -d /tmp/osrc-wl.XXXXXX)" || { echo "FAIL: mktemp"; exit 1; }
 export TMUX_TMPDIR="$TMP/t"; mkdir -p "$TMUX_TMPDIR"
-# Inside a tmux pane $TMUX names the real socket and beats TMUX_TMPDIR, so the EXIT trap's
-# kill-server would kill the developer's real server. Clear it before any tmux call.
+[ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 unset TMUX TMUX_PANE
-trap 'tmux kill-server 2>/dev/null; rm -rf "$TMP"' EXIT
+# Every tmux call — this test's and the sourced engine's — goes through a PATH shim onto a
+# private named socket inside the sandbox dir, so no call can reach the real tmux server.
+_wl_tmux="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_wl_tmux" ]; then
+  mkdir -p "$TMP/bin"
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_wl_tmux" "$$" > "$TMP/bin/tmux"
+  chmod +x "$TMP/bin/tmux"
+  PATH="$TMP/bin:$PATH"; export PATH
+fi
+trap "env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090
 source "$SRC" >/dev/null 2>&1
