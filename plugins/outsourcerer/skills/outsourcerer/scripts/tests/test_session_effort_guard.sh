@@ -45,6 +45,7 @@ tmux() {
     display-message)
       case "$last" in
         *pane_current_command*) printf '%s\n' "${FAKE_PANE_CMD-codex}"; return 0 ;;
+        *pane_current_path*) printf '%s\n' "${FAKE_PANE_CWD-$PWD}"; return 0 ;;
         *pane_pid*) printf '%s\n' "${FAKE_PANE_PID-99999999}"; return 0 ;;
         *) printf '4242\n'; return 0 ;;
       esac ;;
@@ -171,15 +172,44 @@ FAKE_PANE_PID=99999999; FAKE_PANE_CMD=codex
 [ "$rc" -eq 1 ] && ok "guard refuses when the pane's process tree runs claude" \
   || bad "guard missed claude in the pane process tree (rc=$rc)"
 
-# Explicit operator override for a pane proven not to be Claude Code.
-( OSRC_SEND_ALLOW_EFFORT=1; _session_send_effort_guard sess-cc "/effort high" ); rc=$?
-[ "$rc" -eq 0 ] && ok "OSRC_SEND_ALLOW_EFFORT=1 overrides the guard" \
-  || bad "override env did not bypass the guard (rc=$rc)"
+# Remote shells are refused outright: a claude on the far side of ssh/mosh is
+# invisible to every local check and /effort would change THAT machine's settings.
+FAKE_PANE_CMD=ssh
+_session_send_effort_guard sess-remote "/effort high"; rc=$?
+[ "$rc" -eq 1 ] && ok "guard refuses /effort into an ssh pane" \
+  || bad "guard allowed /effort into ssh (rc=$rc)"
+FAKE_PANE_CMD=mosh
+_session_send_effort_guard sess-remote "/effort high"; rc=$?
+[ "$rc" -eq 1 ] && ok "guard refuses /effort into a mosh pane" \
+  || bad "guard allowed /effort into mosh (rc=$rc)"
+FAKE_PANE_CMD=ssh
+_session_send_effort_guard sess-remote "/effort high" 1; rc=$?
+[ "$rc" -eq 0 ] && ok "allow flag overrides even an ssh pane (per-invocation)" \
+  || bad "allow flag did not override ssh refusal (rc=$rc)"
+FAKE_PANE_PID=99999999; FAKE_PANE_CMD=codex
 
-out="$(OSRC_SEND_ALLOW_EFFORT=1 SESSION_NAME=sess-cc session send "/effort high" 2>&1)"
+# Explicit per-command override for a pane proven not to be Claude Code. The old
+# env switch is gone on purpose: set once in a shell it stayed armed for every
+# later send on every pane.
+_session_send_effort_guard sess-cc "/effort high" 1; rc=$?
+[ "$rc" -eq 0 ] && ok "allow flag overrides the guard for this send" \
+  || bad "allow flag did not bypass the guard (rc=$rc)"
+( OSRC_SEND_ALLOW_EFFORT=1; _session_send_effort_guard sess-cc "/effort high" ); rc=$?
+[ "$rc" -eq 1 ] && ok "the retired env switch no longer disarms the guard" \
+  || bad "OSRC_SEND_ALLOW_EFFORT still overrides (rc=$rc)"
+
+out="$(SESSION_NAME=sess-cc session send --allow-effort "/effort high" 2>&1)"
 printf '%s' "$out" | grep -q 'effortLevel into' \
-  && bad "override did not get past the guard at dispatch: [$out]" \
-  || ok "OSRC_SEND_ALLOW_EFFORT=1 lets a dispatch send past the guard"
+  && bad "--allow-effort did not get past the guard at dispatch: [$out]" \
+  || ok "session send --allow-effort gets past the guard"
+
+# session reply parses the same flag and forwards it to _external_reply.
+_external_reply() { printf 'REPLYARGS:%s\n' "$*"; return 0; }
+out="$(session reply --allow-effort ext-1 hello world 2>&1)"
+printf '%s' "$out" | grep -q 'REPLYARGS:ext-1 hello world 1' \
+  && ok "session reply --allow-effort forwards the flag" \
+  || bad "reply flag not forwarded: [$out]"
+unset -f _external_reply
 
 # ---- the per-session path: env cap + session-scoped --effort + --continue ---------------
 Relaunch_out="$(_session_relaunch_cc fable high 2>/dev/null)"
@@ -200,6 +230,55 @@ printf '%s' "$Cmd_out" | grep -q -- '--effort high' \
   && printf '%s' "$Cmd_out" | grep -q -- '--continue' \
   && ok "session effort dispatch builds --effort + --continue for cc" \
   || bad "relaunch command lost the flags: [$Cmd_out]"
+
+# ---- --resume pins THIS pane's conversation; --continue is only the fallback -----------
+SID="3f8a2c1e-9b4d-4e5f-a6b7-c8d9e0f1a2b3"
+Relaunch_res="$(_session_relaunch_cc fable high "$SID" 2>/dev/null)"
+printf '%s' "$Relaunch_res" | grep -q -- "--resume $SID" \
+  && ! printf '%s' "$Relaunch_res" | grep -q -- '--continue' \
+  && ok "relaunch with a known session id uses --resume <id>, not --continue" \
+  || bad "resume-id relaunch wrong: [$Relaunch_res]"
+
+Cmd_res="$(_session_relaunch_command cc fable high "$SID" 2>/dev/null)"
+printf '%s' "$Cmd_res" | grep -q -- "--resume $SID" \
+  && ok "dispatch relaunch command carries --resume <id>" \
+  || bad "relaunch command lost --resume: [$Cmd_res]"
+
+# An invalid id falls back to --continue rather than emitting a bad flag.
+Relaunch_badid="$(_session_relaunch_cc fable high 'bad id!!' 2>/dev/null)"
+printf '%s' "$Relaunch_badid" | grep -q -- '--continue' \
+  && ! printf '%s' "$Relaunch_badid" | grep -q -- '--resume' \
+  && ok "invalid resume id falls back to --continue" \
+  || bad "invalid id not handled: [$Relaunch_badid]"
+
+# _session_cc_resume_id: registry cc_session_id fallback, live sessions-dir proof.
+printf '%s\n' '{"schema_version":"1","event":"start","session_id":"sess-resume","provider":"cc","model":"fable","effort":"high","state":"running","receipt":"","endpoint":"tmux:sess-resume","cc_session_id":"reg-sid-1","cc_pid":4242,"cwd":"/tmp/x","ts":"2026-11-13T00:00:00Z"}' >> "$OSRC_SESSION_REGISTRY"
+mkdir -p "$HOME/.claude/sessions"   # deliberately empty: live lookup finds nothing
+got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
+[ "$got" = "reg-sid-1" ] && ok "resume id falls back to the registry cc_session_id" \
+  || bad "registry fallback gave [$got]"
+
+# Live proof beats the registry: a ~/.claude/sessions file for a pid inside the
+# pane resolves the CURRENT sessionId (registry can be one respawn stale).
+printf '{"pid":9998,"cwd":"%s","startedAt":%s,"sessionId":"live-sid-1","procStart":"x"}\n' \
+  "$(pwd -P)" "$(( $(date +%s) * 1000 ))" > "$HOME/.claude/sessions/9998.json"
+FAKE_PANE_PID=9999
+ps() { case "$*" in *ppid*9998*) printf ' 9999\n';; *) printf '\n';; esac; }
+got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
+unset -f ps
+FAKE_PANE_PID=99999999
+[ "$got" = "live-sid-1" ] && ok "live ~/.claude/sessions proof beats the registry id" \
+  || bad "live lookup gave [$got]"
+
+# Wiring: _session_control_relaunch resolves the id and hands it to the vector.
+CAPTURE_ARGS="$TMP/relaunch-args"; : > "$CAPTURE_ARGS"
+_session_relaunch_command() { printf '%s\n' "$*" > "$CAPTURE_ARGS"; printf 'stub-launch'; }
+OSRC_CONTROL_VERIFY_POLLS=1 _session_control_relaunch sess-resume cc fable high >/dev/null 2>&1 || true
+unset -f _session_relaunch_command
+# pane_pid is the dead default -> live lookup misses -> registry id is what ships.
+grep -q 'reg-sid-1' "$CAPTURE_ARGS" \
+  && ok "control relaunch hands the pane's cc sessionId to the relaunch vector" \
+  || bad "relaunch vector did not get the session id: [$(cat "$CAPTURE_ARGS")]"
 
 # Older claude without --effort in --help: env cap still applies, flag omitted.
 touch "$OSRC_TEST_NO_EFFORT_FLAG"

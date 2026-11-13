@@ -17,28 +17,35 @@
 # safe path named. Only a leading /effort is a command; the word inside prose
 # is prompt text and passes.
 #
-# Guard order: explicit override env -> registry/flag provider -> the pane's
-# live foreground command -> the claude footer -> the pane's process tree ->
-# identified-non-claude allow -> fail closed. OSRC_SEND_ALLOW_EFFORT=1 is the
-# operator override for a pane proven not to be Claude Code.
+# Guard order: per-command allow flag -> registry/flag provider -> the pane's
+# live foreground command (claude AND remote shells: ssh/mosh/mosh-like panes can
+# hide a claude on the far side whose settings we cannot see) -> the claude
+# footer -> the pane's process tree -> identified-non-claude allow -> fail
+# closed. The allow flag (--allow-effort on `session send`/`session reply`) is
+# the per-invocation override for a pane proven not to be Claude Code; there is
+# deliberately no env switch, which would stay armed for every later send.
 
-_session_send_effort_guard() { # <tmux-pane> <message> -> 0 allow, 1 refuse
+_session_send_effort_guard() { # <tmux-pane> <message> [allow] -> 0 allow, 1 refuse
   local pane="$1" msg="$2" prov cmd
   msg="$(printf '%s' "$msg" | sed -e 's/^[[:space:]]*//')"
   printf '%s' "$msg" | grep -qiE '^/effort([[:space:]=:]|$)' || return 0
-  [ "${OSRC_SEND_ALLOW_EFFORT:-0}" = "1" ] && return 0
+  [ "${3:-0}" = "1" ] && return 0
   prov="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .provider // empty' | tail -1)"
   [ -n "$prov" ] || prov="${PROVIDER:-}"
   case "$prov" in cc|claude) return 1 ;; esac
   # Records and flags are stale-able; what runs in the pane NOW decides. A
   # stock Claude Code screen has no ContextQ footer, so the process name is
-  # the remaining proof for unmanaged/adopted panes.
+  # the remaining proof for unmanaged/adopted panes. ssh/mosh foregrounds are
+  # refused outright: a claude on the far side is invisible here and /effort
+  # would change THAT machine's settings.
   cmd="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null)"
-  case "$cmd" in *[Cc]laude*) return 1 ;; esac
+  case "$cmd" in
+    *[Cc]laude*|ssh|autossh|mosh) return 1 ;;
+  esac
   # A Claude Code footer ("<model> | <effort> | ... | ContextQ:") means /effort
   # here WOULD persist globally, so footer proof refuses even over a codex record.
   [ "$(_session_model_observe_cc_builtin "$pane" 2>/dev/null)" != "unknown" ] && return 1
-  # A wrapper foreground (bash/node/ssh) can still have claude underneath it.
+  # A wrapper foreground (bash/node) can still have claude underneath it.
   _session_pane_tree_has_claude "$pane" && return 1
   # Identified as something else: the keystrokes cannot reach a claude /effort.
   [ -n "$cmd" ] && return 0
