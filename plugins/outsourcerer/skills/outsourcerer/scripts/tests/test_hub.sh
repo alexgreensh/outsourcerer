@@ -225,6 +225,16 @@ none="$(run hub export --project no-such-slug 2>/dev/null)"
 echo "$none" | jq -e '.projects | length == 0' >/dev/null \
   && ok "--project unknown slug -> empty projects" || bad "--project unknown slug wrong"
 
+# Minimal PATH (supervisor repro): export must run on POSIX tools alone, or die
+# loudly naming what it needs — an empty doc is never a valid answer.
+minenv="$(env -i PATH=/usr/bin:/bin:/usr/sbin HOME="$HOME" OSRC_HOME="$OSRC_HOME" \
+  bash "$SRC" hub export 2>&1)" && minrc=0 || minrc=$?
+echo "$minenv" | jq -e '.projects | length >= 1' >/dev/null \
+  && ok "export under env -i minimal PATH yields projects" \
+  || bad "empty/failed export under minimal PATH (rc=$minrc): $minenv"
+echo "$minenv" | jq -e '.limits | type == "array" and length >= 1' >/dev/null \
+  && ok "limits rows under minimal PATH" || bad "limits missing under minimal PATH"
+
 echo "=== symlink loader (LOADER.md fallback) ==="
 ln -s "$SRC" "$TMP/outsourcerer-link"
 sym="$(OSRC_HOME="$OSRC_HOME" bash "$TMP/outsourcerer-link" hub export 2>"$TMP/sym.err")" \

@@ -509,9 +509,18 @@ EOF
 
 # ---- commands --------------------------------------------------------------------
 
+# _osrc_hub_need <tool...> -> die naming every missing tool. hub export used to
+# degrade to an empty projects/limits doc when a tool it calls was absent from
+# PATH — the failure mode was indistinguishable from "nothing running".
+_osrc_hub_need() {
+  local t miss=""
+  for t in "$@"; do have "$t" || miss="$miss $t"; done
+  [ -z "$miss" ] || die "hub: required tool(s) not on PATH:$miss"
+}
+
 # cmd_hub_export [--project <slug>] -> SCHEMA docs JSON on stdout.
 cmd_hub_export() {
-  have jq || die "hub export needs jq"
+  _osrc_hub_need jq date stat sort tr sed cut basename awk grep cat head
   local proj="" a
   while [ "$#" -gt 0 ]; do case "$1" in --project) proj="${2:-}"; shift 2 ;; *) shift ;; esac; done
   [ -z "$proj" ] || _osrc_hub_slug_ok "$proj" || die "hub export: bad project slug '$proj'"
@@ -556,7 +565,7 @@ cmd_hub_serve() {
   esac; done
   if [ -z "$port" ]; then port=8788; scan=10; fi   # fixed default, slide up to 8798
   case "$port" in *[!0-9]*) die "hub serve: --port must be a number" ;; esac
-  have python3 || die "hub serve needs python3"
+  _osrc_hub_need python3 od cat tr mkdir chmod
   local dir="${_OSRC_FACTORY_DIR:-$SCRIPT_DIR}"
   local server="$dir/lib/hub_server.py" page="$dir/lib/hub.html" engine="$dir/outsourcerer.sh"
   [ -f "$server" ] && [ -f "$page" ] && [ -f "$engine" ] \
