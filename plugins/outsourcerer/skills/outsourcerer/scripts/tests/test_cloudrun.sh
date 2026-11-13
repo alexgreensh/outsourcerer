@@ -235,6 +235,20 @@ out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
   && ok "spend: gate refusal stops launch" || bad "spend: refusal not honored (rc=$rc)"
 [ ! -e "$OSRC_HOME/remote/t-spendno.json" ] && ok "spend: no lane registered on refusal" || bad "spend: lane written on refusal"
 
+# ---- fail closed when NO spend gate is loaded (finding A) ----
+# devin cloud is metered: refuses unless THIS command carries --spend-ok
+out="$(start_cloud t-devin-nook --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin 2>&1)"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q -- '--spend-ok' \
+  && ok "spend: devin refuses without --spend-ok when gate absent" || bad "spend: devin fail-open (rc=$rc): $out"
+[ ! -e "$OSRC_HOME/remote/t-devin-nook.json" ] && ok "spend: no lane on devin refusal" || bad "spend: lane written on devin refusal"
+out="$(start_cloud t-devin-ok --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'devin session started' \
+  && ok "spend: --spend-ok approves THIS devin launch only" || bad "spend: --spend-ok failed (rc=$rc): $out"
+# subscription lanes proceed with a printed note when the gate is absent
+out="$(start_cloud t-claude-nogate --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+[ $rc -eq 0 ] && echo "$out" | grep -q 'spend gate not loaded' \
+  && ok "spend: claude subscription lane proceeds with note" || bad "spend: claude no-gate path (rc=$rc): $out"
+
 # ============================== URL credential stripping ==============================
 cu="$(_osrc_url_clean 'https://x-access-token:TOK123@github.com/acme/widgets.git')"
 [ "$cu" = "https://github.com/acme/widgets.git" ] \
@@ -242,6 +256,19 @@ cu="$(_osrc_url_clean 'https://x-access-token:TOK123@github.com/acme/widgets.git
 cu2="$(_osrc_url_clean 'https://user@github.com/acme/widgets.git')"
 [ "$cu2" = "https://github.com/acme/widgets.git" ] \
   && ok "urlclean: bare user@ stripped" || bad "urlclean user@: '$cu2'"
+# finding D edge cases: scp-style git@ preserved, password containing @, ssh:// bare login
+cu3="$(_osrc_url_clean 'git@github.com:acme/widgets.git')"
+[ "$cu3" = "git@github.com:acme/widgets.git" ] \
+  && ok "urlclean: scp-style git@host:path preserved" || bad "urlclean git@: '$cu3'"
+cu4="$(_osrc_url_clean 'https://user:p@ss@host.example/a.git')"
+[ "$cu4" = "https://host.example/a.git" ] \
+  && ok "urlclean: password containing @ stripped through LAST @" || bad "urlclean p@ss: '$cu4'"
+cu5="$(_osrc_url_clean 'ssh://git@github.com/acme/widgets.git')"
+[ "$cu5" = "ssh://git@github.com/acme/widgets.git" ] \
+  && ok "urlclean: ssh:// bare git@ login kept" || bad "urlclean ssh git@: '$cu5'"
+cu6="$(_osrc_url_clean 'ssh://user:p@ss@host.example/a.git')"
+[ "$cu6" = "ssh://host.example/a.git" ] \
+  && ok "urlclean: ssh:// password userinfo stripped" || bad "urlclean ssh p@ss: '$cu6'"
 parsed="$( _cloudrun_repo_parse 'https://u:p@github.com/acme/widgets.git' )"
 echo "$parsed" | grep -qE 'u:p@|widgets' && ! echo "$parsed" | grep -q 'u:p@' \
   && ok "urlclean: repo_parse emits credential-free url+display" || bad "urlclean: parse leaked: $parsed"
@@ -257,6 +284,22 @@ out="$(start_cloud t-packsha --repo "$WORK" --base main --brief "$BRIEF" --vehic
 PK="$(ls "$OSRC_HOME"/cloud/t-packsha.pack.md 2>/dev/null)"
 [ -n "$PK" ] && grep -q 'pinned commit:' "$PK" && grep -q 'sha=' "$PK" \
   && ok "pack: sha pinned + RESULT echo required" || bad "pack: missing sha contract (rc=$rc)"
+
+# --sha carries an offer's exact pinned commit through (finding F); refuses unpushed/unknown
+SHA_PIN="$(git -C "$WORK" rev-parse HEAD)"
+out="$(start_cloud t-sha --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude --sha "$SHA_PIN" 2>&1)"; rc=$?
+PK2="$OSRC_HOME/cloud/t-sha.pack.md"
+[ $rc -eq 0 ] && grep -q "pinned commit: $SHA_PIN" "$PK2" \
+  && ok "sha: --sha pins the exact commit in the pack" || bad "sha: --sha not honored (rc=$rc): $out"
+( cd "$WORK" && git commit -qm tmp --allow-empty )
+SHA_UNP="$(git -C "$WORK" rev-parse HEAD)"
+out="$(start_cloud t-shaunp --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude --where cloud --sha "$SHA_UNP" 2>&1)"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'not on any remote\|could never see' \
+  && ok "sha: unpushed --sha refused" || bad "sha: unpushed --sha allowed (rc=$rc): $out"
+git -C "$WORK" reset -q --hard HEAD~1
+out="$(start_cloud t-shabad --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude --where cloud --sha deadbeefdeadbeef 2>&1)"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'not a commit' \
+  && ok "sha: unknown --sha refused" || bad "sha: bad --sha allowed (rc=$rc): $out"
 
 # ============================== vehicle probes ========================================
 # all vehicles missing -> auto refuses with reasons
@@ -275,7 +318,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   source "'"$SRC"'" >/dev/null 2>&1
   have() { case "$1" in claude) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
   SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"; OSRC_STUB_LOG="'"$OSRC_STUB_LOG"'"
-  PATH="'"$STUB"':$PATH" _cloudrun_start t-skip --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-skip --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto --spend-ok
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'devin session started' \
   && ok "vehicle: missing claude -> auto skips to devin" || { bad "vehicle: skip-to-devin failed (rc=$rc)"; echo "SKIPDEBUG: $out" >&2; echo "STUBLOG: $(cat "$OSRC_STUB_LOG")" >&2; }
@@ -303,7 +346,7 @@ echo "$out" | grep -q 'Claude subscription' && ok "quota: claude plan disclosed"
 echo "$out" | grep -q 'session:' && ok "output: session ref printed" || bad "output: session ref missing"
 
 : > "$OSRC_STUB_LOG"
-out="$(start_cloud t-devin --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin 2>&1)"; rc=$?
+out="$(start_cloud t-devin --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -eq 0 ] && ok "launch: devin start rc=0" || { bad "launch: devin rc=$rc"; echo "$out"; }
 sec="$(awk '/=== devin/{f=1;next}/=== /{f=0}f' "$OSRC_STUB_LOG")"
 echo "$sec" | grep -qx -- '<--cloud>' && echo "$sec" | grep -qx -- '<-p>' && echo "$sec" | grep -q -- '--prompt-file' \
@@ -335,7 +378,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   source "'"$SRC"'" >/dev/null 2>&1
   cmd_lane() { printf "LANEADD|%s\n" "$*" >> "'"$OSRC_STUB_LOG"'"; return 0; }
   SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
-  PATH="'"$STUB"':$PATH" _cloudrun_start t-l2 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin --done-when "check:npm test"
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-l2 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin --spend-ok --done-when "check:npm test"
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && grep -q 'LANEADD|add t-l2 --branch cloud/t-l2' "$OSRC_STUB_LOG" \
   && ok "register: cmd_lane lane add invoked with contract args" || bad "register: cmd_lane not called (rc=$rc)"
@@ -346,7 +389,7 @@ grep 'LANEADD' "$OSRC_STUB_LOG" | grep -q -- '--ready READY' && grep 'LANEADD' "
 # (a) lane-posture down marker on the claude-native lane (key cc)
 mkdir -p "$OSRC_HOME/lane-posture"
 printf '%s\n' "$(( $(date +%s) + 3600 ))" > "$OSRC_HOME/lane-posture/cc.down"
-out="$(start_cloud t-conserve --repo "$WORK" --base main --brief "$BRIEF" --vehicle auto 2>&1)"; rc=$?
+out="$(start_cloud t-conserve --repo "$WORK" --base main --brief "$BRIEF" --vehicle auto --spend-ok 2>&1)"; rc=$?
 rm -f "$OSRC_HOME/lane-posture/cc.down"
 [ $rc -eq 0 ] && echo "$out" | grep -q 'devin session started' \
   && ok "conserve: lane-posture cc.down -> auto picks devin" || bad "conserve: posture marker ignored (rc=$rc): $out"
@@ -355,7 +398,7 @@ rm -f "$OSRC_HOME/lane-posture/cc.down"
 out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 OSRC_CC_PRESSURE=80 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   SCRIPT_PATH="'"$SRC"'"
-  PATH="'"$STUB"':$PATH" _cloudrun_start t-conserve2 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-conserve2 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto --spend-ok
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'devin session started' \
   && ok "conserve: claude window >= threshold -> auto picks devin" || bad "conserve: pressure ignored (rc=$rc): $out"
@@ -366,7 +409,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   source "'"$SRC"'" >/dev/null 2>&1
   osrc_done_set() { printf "DONESET|%s|%s|%s\n" "$1" "$2" "$3" >> "'"$OSRC_STUB_LOG"'"; return 0; }
   SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
-  PATH="'"$STUB"':$PATH" _cloudrun_start t-l6 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-l6 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin --spend-ok
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && grep -q 'DONESET|t-l6|check:bash ' "$OSRC_STUB_LOG" \
   && ok "done contract: osrc_done_set invoked" || bad "done contract: osrc_done_set not called (rc=$rc)"
@@ -375,14 +418,14 @@ done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^ch
   && ok "done contract: generated check script verifies cloud/<id> + READY" || bad "done contract: check script bad ($done_script)"
 
 # neither helper: still registers the lane json + prints the degrade notes
-out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin 2>&1)"; rc=$?
+out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -eq 0 ] && [ -f "$OSRC_HOME/remote/t-bare.json" ] \
   && ok "register: fallback json written when helpers absent" || bad "register: fallback failed (rc=$rc)"
 echo "$out" | grep -q 'osrc_done_set not merged yet' \
   && ok "done contract: absent-helper note printed" || bad "done contract: missing degrade note"
 
 # duplicate id refuses
-out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin 2>&1)"; rc=$?
+out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -ne 0 ] && echo "$out" | grep -q 'already registered' \
   && ok "register: duplicate lane id refused" || bad "register: duplicate id allowed (rc=$rc)"
 

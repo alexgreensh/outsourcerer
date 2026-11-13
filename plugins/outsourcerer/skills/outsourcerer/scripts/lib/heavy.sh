@@ -98,13 +98,65 @@ _osrc_heavy_segment() {
   esac
   local sub="${rest[0]:-}"
   case "$cmd" in
-    # ---- test suites via package runners ----
+    # ---- shell wrappers: `sh -c`/`bash -lc 'cmd'` — classify the -c payload ----
+    sh|bash|zsh|dash|ash|ksh)
+      case "${rest[0]:-}" in
+        --*) ;;
+        -c|-*c)
+          local inner
+          inner="$(printf '%s\n' "${rest[@]}" | tail -n +2 2>/dev/null | tr '\n' ' ')"
+          [ -n "${inner// /}" ] && { _osrc_heavy_reason "$inner"; return; } ;;
+      esac ;;
+    # ---- test suites via package runners (flags may precede the subcommand) ----
     npm|pnpm|yarn|bun)
-      case "$sub" in
+      local i psub="" pscript="" skipnext=0
+      for i in ${rest[@]+"${rest[@]}"}; do
+        if [ "$skipnext" = "1" ]; then skipnext=0; continue; fi
+        case "$i" in
+          --filter|-F|--prefix|--dir|-C|--cwd|--workspace) skipnext=1; continue ;;
+          -*) continue ;;
+        esac
+        if [ -z "$psub" ]; then psub="$i"; continue; fi
+        [ "$psub" = "run" ] && [ -z "$pscript" ] && { pscript="$i"; break; }
+      done
+      # bare `yarn` installs; bare npm/pnpm/bun print help (light)
+      if [ -z "$psub" ] && [ "$cmd" = "yarn" ]; then printf 'heavy: yarn install'; return 0; fi
+      case "$psub" in
         test|t|ci|e2e) printf 'heavy: test suite'; return 0 ;;
-        run) case "${rest[1]:-}" in test|ci|e2e|build|compile|bundle) printf 'heavy: build/test via %s run' "$cmd"; return 0 ;; esac ;;
+        run) case "$pscript" in test|test:*|ci|e2e|build|compile|bundle|dist) printf 'heavy: %s run %s' "$cmd" "$pscript"; return 0 ;; esac ;;
         install|i|add|remove|update|unlink) printf 'heavy: install'; return 0 ;;
       esac ;;
+    # ---- python -m <runner> ----
+    python|python3|python3.*|pypy|pypy3)
+      local mi=0 mj mod="" margs
+      for mj in ${rest[@]+"${rest[@]}"}; do
+        mi=$((mi+1)); [ "$mj" = "-m" ] && { mod="${rest[$mi]:-}"; break; }
+      done
+      case "$mod" in
+        pytest|py.test|nose|nose2|unittest|stestr|tox|nox)
+          # light only when EVERY positional arg is an explicit test file (own unit tests)
+          margs="$(printf '%s\n' "${rest[@]}" | tail -n +$((mi+2)) 2>/dev/null)"
+          if [ -n "$margs" ] \
+             && ! printf '%s\n' "$margs" | grep -qvE '^[[:space:]]*[^[:space:]]+\.(py|py\.test)(::[A-Za-z_][A-Za-z0-9_]*){0,2}[[:space:]]*$' \
+             && ! printf '%s\n' "$margs" | grep -qE '^-'; then
+            printf 'light'; return 0
+          fi
+          printf 'heavy: python -m %s' "$mod"; return 0 ;;
+        pip|pip3) [ "${rest[$mi+1]:-}" = "install" ] && { printf 'heavy: python -m pip install'; return 0; } ;;
+      esac ;;
+    # ---- npx/bunx/uvx <runner> ----
+    npx|bunx|uvx)
+      local nj nsub=""
+      for nj in ${rest[@]+"${rest[@]}"}; do
+        case "$nj" in -*) continue ;; esac
+        nsub="$nj"; break
+      done
+      case "$nsub" in
+        jest|vitest|playwright|cypress|mocha|ava|pytest|py.test|nose|nose2|rspec|phpunit|ctest|tox|nox)
+          printf 'heavy: %s %s' "$cmd" "$nsub"; return 0 ;;
+      esac ;;
+    # ---- env runners ----
+    tox|nox) printf 'heavy: env runner'; return 0 ;;
     # ---- builds ----
     go) case "$sub" in test|build|install|generate|vet) printf 'heavy: go %s' "$sub"; return 0 ;; esac ;;
     cargo) case "$sub" in build|test|bench|install|clippy|check|doc|publish|run|fix|verify-project) printf 'heavy: cargo %s' "$sub"; return 0 ;; esac ;;
@@ -121,7 +173,15 @@ _osrc_heavy_segment() {
     vagrant) case "$sub" in up|provision|build|destroy|reload|resume) printf 'heavy: vagrant %s' "$sub"; return 0 ;; esac ;;
     # ---- installs ----
     pip|pip3|pipx) case "$sub" in install|i|download|wheel) printf 'heavy: pip install'; return 0 ;; esac ;;
-    uv) case "$sub" in sync|add|tool|venv) printf 'heavy: uv %s' "$sub"; return 0 ;; pip) [ "${rest[1]:-}" = "install" ] && { printf 'heavy: uv pip install'; return 0; } ;; esac ;;
+    uv) case "$sub" in
+          sync|add|tool|venv) printf 'heavy: uv %s' "$sub"; return 0 ;;
+          run)
+            # `uv run <cmd>` — classify the wrapped command (`uv run pytest` is heavy)
+            local uin
+            uin="$(printf '%s\n' "${rest[@]}" | tail -n +2 2>/dev/null | tr '\n' ' ')"
+            [ -n "${uin// /}" ] && { _osrc_heavy_reason "$uin"; return; } ;;
+          pip) [ "${rest[1]:-}" = "install" ] && { printf 'heavy: uv pip install'; return 0; } ;;
+        esac ;;
     poetry) case "$sub" in install|add|update|sync|lock) printf 'heavy: poetry %s' "$sub"; return 0 ;; esac ;;
     conda|mamba) case "$sub" in install|create|env) printf 'heavy: conda %s' "$sub"; return 0 ;; esac ;;
     gem) case "$sub" in install|update|fetch) printf 'heavy: gem %s' "$sub"; return 0 ;; esac ;;
@@ -149,6 +209,23 @@ osrc_heavy() {
   esac
 }
 
+# _osrc_heavy_split <cmd> -> one segment per line. Splits on ; & | ( ) ` OUTSIDE single and
+# double quotes, so `echo "done; npm test"` stays one segment while `(npm test)`,
+# `result=$(npm test)` and `` echo `npm test` `` still expose the inner command.
+_osrc_heavy_split() {
+  local s="$1" cur="" q="" c i
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    if [ -n "$q" ]; then cur="$cur$c"; [ "$c" = "$q" ] && q=""; continue; fi
+    case "$c" in
+      "'"|'"') q="$c"; cur="$cur$c" ;;
+      ";"|"&"|"|"|"("|")"|"\`") printf '%s\n' "$cur"; cur="" ;;
+      *) cur="$cur$c" ;;
+    esac
+  done
+  printf '%s\n' "$cur"
+}
+
 # _osrc_heavy_reason <cmd> -> "heavy: <why>" | "light"
 _osrc_heavy_reason() {
   local cmd="$1" lc m seg r segs
@@ -156,8 +233,8 @@ _osrc_heavy_reason() {
   lc="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
   m="$(_osrc_heavy_markers "$lc")"
   [ -n "$m" ] && { printf '%s' "$m"; return 0; }
-  # Compound commands: classify each ; & | && || -separated segment; heavy if ANY is.
-  segs="$(printf '%s' "$lc" | tr ';&|' '\n\n\n')"
+  # Compound commands: classify each separator-delimited segment; heavy if ANY is.
+  segs="$(_osrc_heavy_split "$lc")"
   while IFS= read -r seg; do
     seg="${seg#"${seg%%[![:space:]]*}"}"
     [ -n "${seg//[[:space:]]/}" ] || continue
@@ -253,7 +330,7 @@ _osrc_heavy_brief() {
   {
     printf 'Run ONE command on the pinned commit and report its result.\n\n'
     printf 'Repository: %s\nBase branch: %s\nPinned commit: %s\n\n' "${repo:-the repository you cloned}" "${base:-the base branch}" "$sha"
-    printf 'Check out commit `%s` (it is the tip of `%s` on the remote), then at the repository root run exactly:\n\n```\n%s\n```\n\n' "$sha" "$base" "$check"
+    printf 'Check out commit `%s` (it is on the remote), then at the repository root run exactly:\n\n```\n%s\n```\n\n' "$sha" "$check"
     printf 'Then commit on branch `cloud/%s`:\n' "$id"
     printf -- '- `%s.RESULT`: first line `sha=%s`, second line `rc=<exit code of the command above>`, then the last ~80 lines of its combined output.\n' "$id" "$sha"
     printf -- '- `%s.READY` at the repository root containing exactly one line: `READY %s`.\n' "$id" "$id"
@@ -262,6 +339,37 @@ _osrc_heavy_brief() {
   } > "$f" 2>/dev/null || return 1
   chmod 600 "$f" 2>/dev/null
   printf '%s' "$f"
+}
+
+# ---- lane RESULT readback (finding B) --------------------------------------------------------------
+# _osrc_heavy_lane_result <id> <repo> <top> <check-sha> <out>
+#   rc 0 = RESULT found and sha-validated: OSRC_HEAVY_RC = its rc=, $out gets sha/rc + tail.
+#   rc 1 = still in flight (fetch failed or no RESULT yet) — caller keeps rc 125.
+#   rc 2 = RESULT sha mismatch — rejected, reason written to $out, OSRC_HEAVY_RC stays 125.
+_osrc_heavy_lane_result() {
+  local id="$1" repo="$2" top="$3" fsha="$4" out="$5"
+  local res l1 l2 psha rc pack
+  [ -n "$top" ] || return 1
+  git -C "$top" fetch --quiet origin "cloud/$id" 2>/dev/null \
+    || { [ -n "$repo" ] && git -C "$top" fetch --quiet "$repo" "cloud/$id" 2>/dev/null; } \
+    || return 1
+  res="$(git -C "$top" show "FETCH_HEAD:$id.RESULT" 2>/dev/null)" || return 1
+  l1="$(printf '%s\n' "$res" | sed -n '1p')"; l2="$(printf '%s\n' "$res" | sed -n '2p')"
+  # the pack's pinned commit is authoritative — it is what the agent was told to echo
+  pack="$OSRC_HOME/cloud/$id.pack.md"
+  [ -f "$pack" ] && psha="$(sed -n 's/^pinned commit: //p' "$pack" | head -1)"
+  [ -n "$psha" ] || psha="$fsha"
+  case "$l1" in
+    "sha=$psha") ;;
+    *) printf '>>> [heavy] lane %s RESULT sha mismatch: %s (want sha=%s) — rejected\n' "$id" "$l1" "$psha" >&2
+       printf '[outsourcerer] cloud lane %s returned RESULT for a different commit (%s, want sha=%s) — NOT accepted.\n' \
+         "$id" "$l1" "$psha" >> "$out" 2>/dev/null || true
+       OSRC_HEAVY_RC=125; return 2 ;;
+  esac
+  rc="${l2#rc=}"; case "$rc" in ''|*[!0-9]*) rc=125 ;; esac
+  { printf '>>> [heavy] cloud lane %s RESULT: sha=%s rc=%s\n' "$id" "$psha" "$rc"
+    printf '%s\n' "$res" | sed -n '3,$p' | head -80; } >> "$out" 2>/dev/null || true
+  OSRC_HEAVY_RC="$rc"; return 0
 }
 
 # ---- stall: queue + EVENT stalled ----------------------------------------------------------------
@@ -350,18 +458,40 @@ _osrc_heavy_gate() {
           id="$(_osrc_heavy_lane_id "$check" "$sha")"
           self="${SCRIPT_PATH:-${BASH_SOURCE[1]:-$0}}"
           if [ -n "${OSRC_HOME:-}" ] && [ -e "$OSRC_HOME/remote/$id.json" ]; then
-            # identical check+sha already has a lane: reuse it, never re-ask
-            printf '>>> [heavy] identical check+sha already delegated to lane %s — not re-asking\n' "$id" >&2
-            _osrc_heavy_emit delegated "$id" "heavy-check already in flight: $(printf '%s' "$check" | cut -c1-100) @ ${sha:0:7}" "\"$self\" cloud ls" heavy >&2
+            # identical check+sha already has a lane: read its RESULT back if it landed
+            local lrrc=0
+            _osrc_heavy_lane_result "$id" "$repo" "$top" "$sha" "$out" && { OSRC_HEAVY_MODE="done"; return 0; }
+            lrrc=$?
+            if [ "$lrrc" = "2" ]; then
+              # RESULT exists but failed sha validation — terminal for this check+sha
+              _osrc_heavy_emit failed "$id" "heavy-check RESULT rejected: sha mismatch (see lane log)" "\"$self\" cloud ls" heavy >&2
+            else
+              # still in flight: reuse the lane, never re-ask
+              printf '>>> [heavy] identical check+sha already delegated to lane %s — not re-asking\n' "$id" >&2
+              _osrc_heavy_emit delegated "$id" "heavy-check already in flight: $(printf '%s' "$check" | cut -c1-100) @ ${sha:0:7}" "\"$self\" cloud ls" heavy >&2
+            fi
             printf '[outsourcerer] heavy check NOT RUN: identical check+sha already delegated to cloud lane %s (see `cloud ls`).\n' "$id" >> "$out" 2>/dev/null || true
             OSRC_HEAVY_RC=125; OSRC_HEAVY_MODE="done"; return 0
           fi
           brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" "$sha" 2>/dev/null)"
           if [ -n "$brief" ]; then
-            next="\"$self\" cloud start $id --repo $(printf '%q' "$repo") --base $(printf '%q' "$base") --brief $(printf '%q' "$brief") --vehicle auto"
+            # NEXT carries the EXACT offered vehicle + pinned sha (never --vehicle auto,
+            # never a drifting HEAD); devin's metered lane needs the per-launch --spend-ok.
+            local spendflag="" evf evhits dup=0
+            [ "$veh" = "devin" ] && spendflag=" --spend-ok"
+            next="\"$self\" cloud start $id --repo $(printf '%q' "$repo") --base $(printf '%q' "$base") --brief $(printf '%q' "$brief") --vehicle $veh$spendflag --sha $sha"
+            # one approval EVENT per lane id — repeats of the same offer do not re-ask
+            evf="$OSRC_HOME/lanes/events.jsonl"
+            if [ -f "$evf" ]; then
+              evhits="$(grep -F "\"target\":\"$id\"" "$evf" 2>/dev/null)"
+              grep -q '"kind":"approval"' <<<"$evhits" && dup=1
+            fi
             printf '>>> [heavy] %s — cloud lane %s offered (%s); awaiting approval, NOT launched\n' "$reason" "$id" "$veh" >&2
-            _osrc_heavy_emit approval "$id" "heavy-check: $(printf '%s' "$check" | cut -c1-120) @ ${sha:0:7} — clean pushed tree; run NEXT to approve the hosted session" "$next" heavy >&2
-            printf '[outsourcerer] heavy check NOT RUN locally: cloud lane %s offered (EVENT approval above). To approve: %s\n' "$id" "$next" >> "$out" 2>/dev/null || true
+            [ "$dup" = "0" ] && _osrc_heavy_emit approval "$id" \
+              "heavy-check: $(printf '%s' "$check" | cut -c1-120) @ ${sha:0:7} — clean pushed tree; NEXT approves the hosted session (local alt: rerun this check with OSRC_HEAVY_LOCAL=1, niced+serialized)" \
+              "$next  # local alternative: OSRC_HEAVY_LOCAL=1 <same check> (niced, one at a time)" heavy >&2
+            printf '[outsourcerer] heavy check NOT RUN locally: cloud lane %s offered (EVENT approval above). To approve: %s\nLocal niced alternative: rerun the same check with OSRC_HEAVY_LOCAL=1 (serialized, nice -n 19).\n' \
+              "$id" "$next" >> "$out" 2>/dev/null || true
             OSRC_HEAVY_RC=125; OSRC_HEAVY_MODE="done"; return 0
           fi
         fi

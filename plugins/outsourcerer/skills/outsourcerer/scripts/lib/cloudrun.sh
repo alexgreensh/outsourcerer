@@ -114,14 +114,15 @@ _cloudrun_preflight() {
 # _cloudrun_pack <id> <repo-display> <base> <branch> <brief-file> <done-when> -> writes the
 # self-contained brief the cloud box receives (it has no access to this machine) and prints path.
 _cloudrun_pack() {
-  local id="$1" repo="$2" base="$3" branch="$4" brief="$5" donewhen="${6:-}" dir f task sha
+  local id="$1" repo="$2" base="$3" branch="$4" brief="$5" donewhen="${6:-}" pin="${7:-}" dir f task sha
   dir="$(_cloudrun_cdir)"; _mkdir_private "$dir" 2>/dev/null || die "cloud: cannot create $dir"
   f="$dir/$id.pack.md"
   task="$(cat "$brief" 2>/dev/null)"
   [ -n "$task" ] || die "cloud: brief file is empty: $brief"
-  # Pin the exact commit the delegator is looking at; the RESULT must echo it back so a verdict
+  # Pin the exact commit the delegator is looking at (--sha carries an offer's pinned sha
+  # through so it cannot drift to a newer HEAD); the RESULT must echo it back so a verdict
   # can never silently describe different code than the one on this machine.
-  sha="$(git rev-parse HEAD 2>/dev/null)"; sha="${sha:-unknown}"
+  sha="${pin:-$(git rev-parse HEAD 2>/dev/null)}"; sha="${sha:-unknown}"
   {
     printf '# Hosted-session task: %s\n\n' "$id"
     printf 'repo: %s\nbase branch: %s\nwork branch: %s\npinned commit: %s\n\n' "$repo" "$base" "$branch" "$sha"
@@ -435,7 +436,7 @@ _cloudrun_ls() {
 
 # ---- cloud start ----------------------------------------------------------------------------------
 _cloudrun_start() {
-  local id="" vehicle="auto" repo="" base="" brief="" where="auto" donewhen="" env="" claudeenv="" model=""
+  local id="" vehicle="auto" repo="" base="" brief="" where="auto" donewhen="" env="" claudeenv="" model="" spendok=0 pinsha=""
   [ -n "${1:-}" ] || die "cloud start <id> --repo <owner/name> --base <branch> --brief <file> [--vehicle V] [--where W]"
   id="$1"; shift
   while [ "$#" -gt 0 ]; do
@@ -449,6 +450,8 @@ _cloudrun_start() {
       --env)        env="${2:-}"; shift 2 ;;
       --claude-env) claudeenv="${2:-}"; shift 2 ;;
       --model)      model="${2:-}"; shift 2 ;;
+      --spend-ok)   spendok=1; shift ;;
+      --sha)        pinsha="${2:-}"; shift 2 ;;
       *) die "cloud start: unknown option '$1'" ;;
     esac
   done
@@ -485,10 +488,20 @@ _cloudrun_start() {
     printf '>>> [cloud] where=auto -> %s (%s)\n' "$wdec" "$wreason" >&2
     [ "$wdec" = "cloud" ] || die "cloud: --where auto routed this brief LOCAL ($wreason) — use session/run/edit, or pass --where cloud to override"
   fi
+  # --sha pins an exact commit (the heavy gate's offer carries it through); it must be a
+  # commit this clone has AND fully reachable from a remote — the cloud box can only see
+  # what was pushed. Checked before preflight so the reason is about the pin, not HEAD.
+  if [ -n "$pinsha" ]; then
+    git -C "$top" rev-parse --verify --quiet "${pinsha}^{commit}" >/dev/null 2>&1 \
+      || die "cloud: --sha '$pinsha' is not a commit in this clone"
+    local pinunp; pinunp="$(git -C "$top" rev-list --count "$pinsha" --not --remotes 2>/dev/null)"
+    case "$pinunp" in ''|*[!0-9]*) pinunp=1 ;; esac
+    [ "$pinunp" = "0" ] || die "cloud: --sha '$pinsha' has commits not on any remote — the hosted session could never see it"
+  fi
   # preflight: pushed base + no unpushed work + repo match (above)
   _cloudrun_preflight "$fetch" "$base" "$top"
   # context pack + gates (refusals before any vehicle probe or launch)
-  local pack packtext; pack="$(_cloudrun_pack "$id" "$display" "$base" "$branch" "$brief" "$donewhen")"
+  local pack packtext; pack="$(_cloudrun_pack "$id" "$display" "$base" "$branch" "$brief" "$donewhen" "$pinsha")"
   packtext="$(cat "$pack")"
   _cloudrun_private_check "$pack" \
     || die "cloud: pack failed the private-name check — sanitize the brief (no machine-local paths or denylisted names) and retry"
@@ -498,14 +511,19 @@ _cloudrun_start() {
   local veh; veh="$(_cloudrun_pick_vehicle "$vehicle" "$env")" \
     || die "cloud: no usable hosted-session vehicle"
   [ "$veh" = codex ] && [ -z "$env" ] && die "cloud: codex vehicle needs --env <id> or OSRC_CODEX_CLOUD_ENV"
-  # L7 spend gate when loaded: hosted sessions can bill metered (Devin ACU, API-key plans).
-  # Vehicle -> lane token for osrc_lane_billing: claude->cc, devin->dv, codex->cx.
+  # Spend gate, FAIL CLOSED (L10-r2 verdict finding A): L7's `_osrc_spend_gate` does not
+  # exist on any branch yet, so "not loaded" must not mean "billing unchecked". Interface
+  # agreed in CONTRACT.md: `_osrc_spend_gate <lane> <model> <vehicle> <desc>` rc0=allow.
+  # Until L7 ships it: Devin cloud bills metered ACU and ALWAYS asks — this one command
+  # needs --spend-ok. Claude/Codex are flat subscription lanes; they proceed with a note.
   if declare -F _osrc_spend_gate >/dev/null 2>&1; then
     local _sp_lane; case "$veh" in claude) _sp_lane=cc ;; devin) _sp_lane=dv ;; codex) _sp_lane=cx ;; *) _sp_lane="$veh" ;; esac
     _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \
       || die "cloud: spend gate refused the hosted-session launch"
+  elif [ "$veh" = "devin" ]; then
+    [ "$spendok" = "1" ] || die "cloud: devin cloud bills metered usage and no spend gate is loaded — re-run with --spend-ok to approve THIS launch only"
   else
-    printf '>>> [cloud] note: L7 spend gate not loaded — vehicle billing unchecked\n' >&2
+    printf '>>> [cloud] note: L7 spend gate not loaded — %s is a subscription lane; per-launch billing unchecked\n' "$veh" >&2
   fi
   _cloudrun_consent "$veh" "$(_cloudrun_vehicle_quota "$veh")"
   local cenv="$claudeenv"; [ "$veh" = claude ] || cenv=""

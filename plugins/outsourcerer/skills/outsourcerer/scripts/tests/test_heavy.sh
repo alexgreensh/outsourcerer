@@ -110,6 +110,30 @@ hv 1 "light: docker ps"               "docker ps"
 hv 1 "light: npm exec"                "npm exec tsc --noEmit"
 hv 1 "light: pip list"                "pip list"
 hv 1 "light: git log | head"          "git log --oneline | head -5"
+# --- finding E: wrappers, runners, flags-before-sub, quote-aware splitting ---
+hv 0 "heavy: sh -c npm test"          'sh -c "npm test"'
+hv 0 "heavy: bash -c cargo"           "bash -c 'cargo build --release'"
+hv 0 "heavy: bash -lc nested"         "bash -lc 'cd x && npm test'"
+hv 0 "heavy: (npm test)"              "(npm test)"
+hv 0 "heavy: \$(npm test)"            'result=$(npm test)'
+hv 0 "heavy: python -m pytest"        "python -m pytest"
+hv 0 "heavy: python3 -m pytest dir"   "python3 -m pytest tests/"
+hv 0 "heavy: npx jest"                "npx jest"
+hv 0 "heavy: npx playwright"          "npx playwright test"
+hv 0 "heavy: npm run test:all"        "npm run test:all"
+hv 0 "heavy: pnpm -r test"            "pnpm -r test"
+hv 0 "heavy: pnpm --filter test"      "pnpm --filter app test"
+hv 0 "heavy: uv run pytest"           "uv run pytest"
+hv 0 "heavy: tox"                     "tox"
+hv 0 "heavy: nox"                     "nox"
+hv 0 "heavy: bare yarn install"       "yarn"
+hv 1 "light: quoted separator"        'echo "done; npm test"'
+hv 1 "light: quoted single"           "echo 'npm test'"
+hv 1 "light: python -m pytest file"   "python -m pytest test_foo.py"
+hv 1 "light: python -m compileall"    "python -m compileall src/"
+hv 1 "light: uv run python app"       "uv run python app.py"
+hv 1 "light: npm run lint"            "npm run lint"
+hv 1 "light: sh -c echo"              'sh -c "echo hi"'
 OSRC_HEAVY=1; osrc_heavy "ls" 2>/dev/null; rc=$?
 [ "$rc" = 0 ] && ok "heavy: OSRC_HEAVY=1 forces" || bad "heavy: OSRC_HEAVY=1 (rc=$rc)"
 OSRC_HEAVY=0; osrc_heavy "cargo build" 2>/dev/null; rc=$?
@@ -148,6 +172,10 @@ ERRF="$TMP/gate4.err"; : > "$ERRF"
 grep -q "EVENT approval $ID2" "$ERRF" && ok "gate: EVENT approval <id> emitted" || bad "gate: no EVENT approval: $(cat "$ERRF")"
 grep -q 'NEXT ' "$ERRF" && grep -q "cloud start $ID2" "$ERRF" && grep -q -- '--repo' "$ERRF" \
   && ok "gate: NEXT carries exact cloud start line" || bad "gate: NEXT missing cloud start: $(cat "$ERRF")"
+grep -q -- "--vehicle claude" "$ERRF" && ! grep -q -- '--vehicle auto' "$ERRF" \
+  && ok "gate: NEXT pins the OFFERED vehicle (claude), not auto" || bad "gate: NEXT vehicle wrong: $(grep NEXT "$ERRF")"
+grep -q -- "--sha $SHA2" "$ERRF" && ok "gate: NEXT carries the pinned --sha" || bad "gate: NEXT missing --sha: $(grep NEXT "$ERRF")"
+grep -q 'OSRC_HEAVY_LOCAL=1' "$ERRF" && ok "gate: offer names the local niced alternative" || bad "gate: no local alternative in offer"
 grep -q 'NOT RUN' "$TMP/cout" && ok "gate: outfile says NOT RUN" || bad "gate: outfile lacks NOT RUN: $(cat "$TMP/cout")"
 [ ! -s "$OSRC_STUB_LOG" ] && ok "gate: NEVER launched a vehicle (cmd_cloud untouched)" || bad "gate: launched anyway: $(cat "$OSRC_STUB_LOG")"
 BRIEF2="$(ls "$OSRC_HOME"/cloud/"$ID2".brief.md 2>/dev/null)"
@@ -164,6 +192,47 @@ printf '{"id":"%s","status":"running"}\n' "$ID2" > "$OSRC_HOME/remote/$ID2.json"
 [ "$rc" = 125 ] && ok "gate: dedupe rc=125" || bad "gate: dedupe rc=$rc want 125"
 grep -q 'already delegated' "$ERRF" && ok "gate: identical check+sha reuses in-flight lane" || bad "gate: no dedupe: $(cat "$ERRF")"
 ! grep -q 'EVENT approval' "$ERRF" && ok "gate: dedupe does not re-ask approval" || bad "gate: dedupe re-emitted approval"
+rm -f "$OSRC_HOME/remote/$ID2.json"
+
+# repeated identical offer (no lane yet) -> ONE approval event per id, no duplicate asks
+APPR_BEFORE="$(grep -F "\"target\":\"$ID2\"" "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -c '"kind":"approval"')"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/cout4" ) 2>"$ERRF"; rc=$?
+APPR_AFTER="$(grep -F "\"target\":\"$ID2\"" "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -c '"kind":"approval"')"
+[ "$rc" = 125 ] && [ "$APPR_BEFORE" = "$APPR_AFTER" ] \
+  && ok "gate: repeat offer writes no duplicate approval event" || bad "gate: approval dup ($APPR_BEFORE->$APPR_AFTER) rc=$rc"
+! grep -q 'EVENT approval' "$ERRF" && ok "gate: repeat offer does not re-emit EVENT" || bad "gate: repeat offer re-emitted approval"
+
+# ---------- 4b. lane RESULT readback: cloud result returns its rc, sha-validated ----------
+# simulate the agent: push cloud/<id> carrying <id>.RESULT (sha= / rc= / output tail)
+mkdir -p "$OSRC_HOME/cloud" "$OSRC_HOME/remote"
+printf 'pinned commit: %s\n' "$SHA2" > "$OSRC_HOME/cloud/$ID2.pack.md"
+git clone -q "$BARE" "$TMP/cloudclone" 2>/dev/null
+git -C "$TMP/cloudclone" checkout -qb "cloud/$ID2"
+printf 'sha=%s\nrc=0\ncloud output tail line\n' "$SHA2" > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"
+git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm result
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+printf '{"id":"%s","status":"running"}\n' "$ID2" > "$OSRC_HOME/remote/$ID2.json"
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 0 ] && grep -q 'cloud output tail line' "$TMP/rout" \
+  && ok "gate: lane RESULT rc=0 returns as check pass" || bad "gate: RESULT rc=$rc out=$(cat "$TMP/rout" 2>/dev/null)"
+# a failing RESULT propagates its rc
+printf 'sha=%s\nrc=3\nfailing output\n' "$SHA2" > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm failrc
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout2" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 3 ] && ok "gate: lane RESULT rc propagates as check rc" || bad "gate: RESULT rc=$rc want 3"
+# a RESULT for the WRONG sha is rejected -> still NOT RUN (125)
+printf 'sha=0000000000000000000000000000000000000000\nrc=0\nstale result\n' > "$TMP/cloudclone/$ID2.RESULT"
+git -C "$TMP/cloudclone" add "$ID2.RESULT"; git -C "$TMP/cloudclone" -c user.email=t@t -c user.name=t commit -qm stale
+git -C "$TMP/cloudclone" push -q origin "cloud/$ID2"
+: > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/rout3" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && grep -q 'different commit' "$TMP/rout3" \
+  && ok "gate: RESULT sha mismatch rejected, stays NOT RUN" || bad "gate: mismatch rc=$rc out=$(cat "$TMP/rout3" 2>/dev/null)"
 rm -f "$OSRC_HOME/remote/$ID2.json"
 
 # ---------- 5. gate: dirty or unpushed tree -> NO cloud offer, local rules apply ----------

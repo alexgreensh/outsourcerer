@@ -18,7 +18,16 @@
 # pack, brief, lane record or done-check writes down must go through this first: a token embedded
 # in an origin URL is a live credential, and git's own credential helper supplies auth locally.
 _osrc_url_clean() {
-  printf '%s' "${1:-}" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]+@#\1#'
+  local u="${1:-}"
+  case "$u" in
+    # ssh:// keeps a bare login name (ssh://git@host is the user, not a secret); only a
+    # password-bearing userinfo (user:pass@, up to the LAST @ before the first /) is stripped.
+    ssh://*) printf '%s' "$u" | sed -E 's#^(ssh://)[^/]*:[^/]*@#\1#' ;;
+    # Everything else: strip userinfo up to the LAST @ in the authority — a password may
+    # itself contain @ (user:p@ss@host must not leave "ss@host" behind). [^/]* is greedy
+    # and cannot cross the first path slash, so it stops at the last @ before it.
+    *)       printf '%s' "$u" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/]*@#\1#' ;;
+  esac
 }
 
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
