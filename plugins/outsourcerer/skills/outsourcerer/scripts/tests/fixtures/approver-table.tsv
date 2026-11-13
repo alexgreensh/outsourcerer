@@ -2,7 +2,7 @@
 approve	shell		ls -la
 approve	shell		ls -la .
 approve	shell		touch made-by-test.txt && ls -la .
-approve	shell		ls -la /tmp/x-osrc-test-L3
+approve	shell		ls -la {TMPDIR}/x-osrc-test-L3
 approve	shell		cat README.md
 approve	shell		git status
 approve	shell		git status --short && git diff --stat
@@ -211,10 +211,10 @@ hold	shell		find / -name credentials
 hold	shell		cd ~ && cat .zshrc
 hold	shell		cp -R ~/Documents src/
 hold	shell		ls ~/Downloads
-hold	shell		ls /Users
+hold	shell		ls {HOMEPARENT}
 approve	shell		ls /usr/local/bin
 approve	shell		cat /etc/hosts
-approve	shell		ls -la /tmp
+approve	shell		ls -la {TMPDIR}
 approve	shell		git add .
 approve	shell		git add -A .
 hold	shell		git add ..

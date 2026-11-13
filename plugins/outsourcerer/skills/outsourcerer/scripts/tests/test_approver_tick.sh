@@ -7,7 +7,11 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FX="$HERE/fixtures/screen"
 TMP="$(mktemp -d "$HERE/.test-aptick.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-pass=0; fail=0; ok(){ pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
+pass=0; fail=0
+# One line per case: ok prints its label, or the test line that called it (file:line + source).
+ok(){ pass=$((pass+1)); if [ -n "${1:-}" ]; then echo "PASS: $1"; else
+  echo "PASS: line ${BASH_LINENO[0]}: $(sed -n "${BASH_LINENO[0]}{s/^[[:space:]]*//;p;}" "${BASH_SOURCE[1]}" | cut -c1-90)"; fi; }
+bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
 export OSRC_APPROVER_VERIFY_POLLS=3

@@ -9,11 +9,23 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CLS="$HERE/../lib/approver_classify.py"
 TABLE="$HERE/fixtures/approver-table.tsv"
 TMP="$(mktemp -d "$HERE/.test-approver.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-pass=0; fail=0; ok(){ pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
+pass=0; fail=0; ok(){ pass=$((pass+1)); echo "PASS: ${1:-line ${BASH_LINENO[0]}}"; }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 export OSRC_HOME="$TMP/osrc-home"; mkdir -p "$OSRC_HOME"
 ROOT="$TMP/repo"; OTHER="$TMP/other-wt"
 mkdir -p "$ROOT/src" "$ROOT/tests" "$OTHER/src"; git -C "$ROOT" init -q; git -C "$OTHER" init -q
 NL="$(printf '\nx')"; NL="${NL%x}"
+# Rows that name the home folder's parent or a temp folder are built from this machine, so the
+# table passes with HOME anywhere: {HOMEPARENT} = parent of $HOME (a read that covers $HOME holds);
+# {TMPDIR} = the first of $TMPDIR, /tmp, /var/tmp that neither holds $HOME nor sits inside it.
+_rp() { (cd -P "$1" 2>/dev/null && pwd); }
+RHOME="$(_rp "$HOME")"; HOMEPARENT="$(dirname "${RHOME:-$HOME}")"
+TMPDIR_ROW=""
+for c in "${TMPDIR:-}" /tmp /var/tmp; do
+  [ -n "$c" ] || continue; r="$(_rp "$c")"; [ -n "$r" ] || continue
+  case "$RHOME/" in "$r"/*) continue ;; esac; case "$r/" in "$RHOME"/*) continue ;; esac
+  TMPDIR_ROW="${c%/}"; break
+done
+[ -n "$TMPDIR_ROW" ] || { echo "FAIL: no temp folder outside \$HOME ($HOME) for the {TMPDIR} rows"; exit 1; }
 rows=0; approves=0; holds=0
 TAB="$(printf '\t')"
 while IFS= read -r line; do
@@ -22,11 +34,12 @@ while IFS= read -r line; do
   path="${line%%"$TAB"*}"; cmd="${line#*"$TAB"}"
   case "$want" in ''|'#'*) continue ;; esac
   rows=$((rows+1))
+  cmd="${cmd//\{HOMEPARENT\}/$HOMEPARENT}"; cmd="${cmd//\{TMPDIR\}/$TMPDIR_ROW}"
   cmd="${cmd//\{ROOT\}/$ROOT}"; cmd="${cmd//\{OTHER\}/$OTHER}"; cmd="${cmd//⏎/$NL}"
   path="${path//\{ROOT\}/$ROOT}"; path="${path//\{OTHER\}/$OTHER}"
   got="$(printf '%s' "$cmd" | (cd "$ROOT" && python3 -I "$CLS" --root "$ROOT" --kind "$kind" --path "$path"))"
   case "$want" in approve) approves=$((approves+1)) ;; hold) holds=$((holds+1)) ;; esac
-  if [ "${got%% *}" = "$want" ]; then ok; else bad "[$kind] '$cmd' expected $want, got: $got"; fi
+  if [ "${got%% *}" = "$want" ]; then ok "[$kind] $want: $cmd"; else bad "[$kind] '$cmd' expected $want, got: $got"; fi
 done < "$TABLE"
 [ "$rows" -ge 40 ] && ok || bad "table has only $rows rows (need >= 40)"
 [ "$approves" -ge 15 ] && [ "$holds" -ge 25 ] && ok || bad "table needs both sides (approve=$approves hold=$holds)"
