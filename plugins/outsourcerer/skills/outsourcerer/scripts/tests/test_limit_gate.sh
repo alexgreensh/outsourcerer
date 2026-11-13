@@ -90,8 +90,12 @@ _osrc_limit_exceeded cx "claude5h=99" \
 # UNIT: fallback order — SKILL.md conservation order, ready + non-exhausted only.
 # ---------------------------------------------------------------------------------------------------
 _session_limits() { printf 'codexwk=98\n'; }
+# Hermetic billing for the picker tests below: fake HOME (no real auth files) and stubs so
+# no real `devin models list` / `codex login status` ever executes.
+FH0="$TMP/fh0"; mkdir -p "$FH0"
 # Nothing ready -> rc1 (caller renders "none ready").
-( _fallback_lane_ready() { return 1; }; _lane_ready_probe() { return 1; }
+( HOME="$FH0"; _fallback_lane_ready() { return 1; }; _lane_ready_probe() { return 1; }
+  _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
   _osrc_limit_fallback "codexwk=98" ) \
   && bad "unit: fallback suggested with zero ready lanes" \
   || ok "unit: no ready lanes -> rc1"
@@ -101,15 +105,27 @@ fb="$( _fallback_lane_ready() { if [ "$1" = local ]; then return 0; fi; return 1
         _osrc_limit_fallback "codexwk=98" )"
 [ "$fb" = "local" ] && ok "unit: fallback picks local first when ready" || bad "unit: fallback picked '$fb' not local"
 # local unready, dv ready -> dv. cx itself is skipped (exhausted) even when "ready".
+# (_osrc_lane_spendable is stubbed: r3.1 billing makes dv's default model metered, and the
+# spend filter has its own dedicated tests below — this case is about limit ordering.)
 fb="$( _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0; fi; return 1; }
         _lane_ready_probe() { return 1; }
+        _osrc_lane_spendable() { return 0; }
         _osrc_limit_fallback "codexwk=98" )"
 [ "$fb" = "dv" ] && ok "unit: exhausted cx skipped; dv picked over cx" || bad "unit: fallback picked '$fb' not dv"
+# r3.1: with REAL billing (catalog stubbed so no real `devin models list` runs), dv's
+# unproven-free default is metered -> not suggested without consent.
+fb="$( HOME="$FH0"; _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0; fi; return 1; }
+        _lane_ready_probe() { return 1; }
+        _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
+        _osrc_limit_fallback "codexwk=98" )"; frc=$?
+{ [ -z "$fb" ] && [ $frc -ne 0 ]; } && ok "r3.1 spend: dv not suggested while its default model is unproven-free" \
+  || bad "r3.1 spend: fallback suggested '$fb' (rc=$frc) without spend proof"
 # Or is the last resort — but ONLY with spend consent (L7 add-on: metered lanes are never
 # suggested or picked quietly). Without consent the picker returns nothing rather than naming
 # a lane the spend gate would refuse; with OSRC_SPEND_OK=1 the same list picks or.
-fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
+fb="$( HOME="$FH0"; _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
         _lane_ready_probe() { return 1; }
+        _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
         _osrc_limit_fallback "codexwk=98" )"; frc=$?
 { [ -z "$fb" ] && [ $frc -ne 0 ]; } && ok "r3 spend: paid-only fallback suggests nothing without consent" \
   || bad "unit: paid-only fallback picked '$fb' without consent"
@@ -257,7 +273,8 @@ out="$( _session_limits() { printf 'codexwk=100\n'; }
 # rate_limits block carries window_minutes + used_percent; file mtime carries the age.
 # ---------------------------------------------------------------------------------------------------
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"
-for cli in codex devin; do printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/$cli"; chmod +x "$FAKEBIN/$cli"; done
+# claude is stubbed too: a consented bg child must never reach a real CLI (real spend).
+for cli in codex devin claude; do printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/$cli"; chmod +x "$FAKEBIN/$cli"; done
 
 fake_codex_rollout() {  # <home> <weekly_pct> [old]
   local h="$1" wk="$2" old="${3:-0}" d f now reset
@@ -265,6 +282,10 @@ fake_codex_rollout() {  # <home> <weekly_pct> [old]
   now="$(date +%s)"; reset=$((now + 259200))
   printf '%s\n' "{\"type\":\"turn_context\",\"payload\":{\"rate_limits\":{\"primary\":{\"window_minutes\":10080,\"used_percent\":$wk,\"resets_at\":$reset},\"secondary\":{\"window_minutes\":300,\"used_percent\":10,\"resets_at\":$reset}}}}" > "$f"
   [ "$old" = "1" ] && touch -t 202001010000 "$f"
+  # r3.1: the spend gate needs PROOF of a plan login or cx classifies unknown and refuses.
+  # These fixtures test the LIMIT gate, so give every fake home a ChatGPT-OAuth auth.json
+  # (tokens, no API key) -> cx billing subscription -> the spend gate passes silently.
+  mkdir -p "$h/.codex"; printf '{"tokens":{"access_token":"x","refresh_token":"y"}}' > "$h/.codex/auth.json"
 }
 
 run_pf() {  # <osrc_home> <home> [extra args...]
@@ -454,19 +475,43 @@ case "$b" in metered$'\n'metered) ok "r3 billing: tokenrouter + gi -> metered" ;
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing ci; osrc_lane_billing claudex' )
 case "$b" in subscription$'\n'subscription) ok "r3 billing: ci + claudex -> subscription" ;; *) bad "r3 billing: ci/claudex -> '$b'" ;; esac
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cursor; osrc_lane_billing grokbot' )
-case "$b" in subscription$'\n'subscription) ok "r3 billing: cursor + grokbot -> subscription" ;; *) bad "r3 billing: cursor/grokbot -> '$b'" ;; esac
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing dv glm-5.2' )
-[ "$b" = "subscription" ] && ok "r3 billing: dv free model -> subscription" || bad "r3 billing: dv glm-5.2 -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_set() { printf ""; }; osrc_lane_billing dv claude-opus-paid' )
-[ "$b" = "metered" ] && ok "r3 billing: dv paid model -> metered" || bad "r3 billing: dv paid -> '$b'"
+case "$b" in unknown$'\n'unknown) ok "r3 billing: cursor + grokbot unprovable -> unknown" ;; *) bad "r3 billing: cursor/grokbot -> '$b'" ;; esac
+# Devin spend-free is PROOF-based: live catalog Free tag, else only SWE-2 High / SWE-2 Flash
+# High offline. glm-5.2 (plan-included for quota) is NOT proven Free for spend -> metered.
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { return 1; }; osrc_lane_billing dv glm-5.2' )
+[ "$b" = "metered" ] && ok "r3 billing: dv glm-5.2 not-proven-Free -> metered" || bad "r3 billing: dv glm-5.2 -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { return 1; }; osrc_lane_billing dv swe-2-high; osrc_lane_billing dv swe-2-flash-high' )
+case "$b" in subscription$'\n'subscription) ok "r3 billing: dv offline fallback swe-2-high + swe-2-flash-high -> subscription" ;; *) bad "r3 billing: dv offline fallback -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { printf "swe-2-max glm-5.2 "; return 0; }; osrc_lane_billing dv glm-5.2; osrc_lane_billing dv swe-2-max' )
+case "$b" in subscription$'\n'subscription) ok "r3 billing: dv live catalog Free ids -> subscription" ;; *) bad "r3 billing: dv catalog free -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { printf "swe-2-max "; return 0; }; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing dv swe-2-high' )
+[ "$b" = "metered" ] && ok "r3 billing: reachable catalog overrides static fallback (swe-2-high not Free -> metered)" || bad "r3 billing: catalog-vs-static -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing dv swe-2-high' )
+[ "$b" = "unknown" ] && ok "r3 billing: dv no CLI -> unknown" || bad "r3 billing: dv no cli -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing nosuchlane' )
 [ "$b" = "unknown" ] && ok "r3 billing: unresolvable lane -> unknown" || bad "r3 billing: bogus -> '$b'"
 
-# cc: API key -> metered; no key + claude CLI -> subscription; neither -> unknown.
+# cc: API key -> metered; proven plan login -> subscription; CLI alone or redirect vars ->
+# metered/unknown. Round 3.1: subscription requires PROOF (credentials/keychain/auth-dir),
+# and every per-use redirect (token, base URL, BEDROCK/VERTEX, settings key helper) is metered.
 b=$( HOME="$HB" ANTHROPIC_API_KEY=x bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cc' )
 [ "$b" = "metered" ] && ok "r3 billing: cc + ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc+key -> '$b'"
+mkdir -p "$HB/.claude"; printf '{"claudeAiOauth":{"accessToken":"x"}}' > "$HB/.claude/.credentials.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
-[ "$b" = "subscription" ] && ok "r3 billing: cc login, no key -> subscription" || bad "r3 billing: cc login -> '$b'"
+[ "$b" = "subscription" ] && ok "r3 billing: cc proven plan login -> subscription" || bad "r3 billing: cc login -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; ANTHROPIC_AUTH_TOKEN=t ANTHROPIC_BASE_URL=https://openrouter.ai/api osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r3 billing: cc auth-token+base-url redirect -> metered" || bad "r3 billing: cc redirect -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; CLAUDE_CODE_USE_BEDROCK=1 osrc_lane_billing cc; CLAUDE_CODE_USE_VERTEX=1 osrc_lane_billing cc' )
+case "$b" in metered$'\n'metered) ok "r3 billing: cc BEDROCK+VERTEX -> metered" ;; *) bad "r3 billing: cc bedrock/vertex -> '$b'" ;; esac
+printf '{"apiKeyHelper":"/bin/echo sk-x"}' > "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r3 billing: cc settings apiKeyHelper -> metered" || bad "r3 billing: cc apikeyhelper -> '$b'"
+printf '{"env":{"ANTHROPIC_API_KEY":"sk-x"}}' > "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r3 billing: cc settings env.ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc settings envkey -> '$b'"
+rm -f "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; rm -f "$HOME/.claude/.credentials.json"; osrc_lane_billing cc' )
+[ "$b" = "unknown" ] && ok "r3 billing: cc CLI but no provable login -> unknown" || bad "r3 billing: cc cli-only -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r3 billing: cc unprovable -> unknown" || bad "r3 billing: cc unknown -> '$b'"
 
@@ -510,15 +555,33 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
 b=$( OSRC_SPEND_OK=1 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; printf "%s" "${OSRC_SPEND_OK:-unset}"' )
 [ "$b" = "unset" ] && ok "r3 spend: env OSRC_SPEND_OK is unset by the env block (cannot imply consent)" \
   || bad "r3 spend: env OSRC_SPEND_OK survived sourcing ('$b')"
-# .spend-ok job marker consents (the bg one-command channel). Runs in the already-sourced
-# shell: OSRC_JOB_DIR env-prefix is exactly what the detached child's gate reads.
-JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"; : > "$JD/.spend-ok"
+# .spend-ok job marker consents (the bg one-command channel) — BOUND to lane|model pairs.
+# Runs in the already-sourced shell: OSRC_JOB_DIR env-prefix is exactly what the detached
+# child's gate reads. An empty marker or a marker for a different lane/model consents nothing.
+JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"
+printf 'or|*\n' > "$JD/.spend-ok"
 out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && ok "r3 spend: per-job .spend-ok marker consents" || bad "r3 spend: .spend-ok marker rc=$rc: $out"
+[ $rc -eq 0 ] && ok "r3 spend: lane-bound .spend-ok marker consents" || bad "r3 spend: .spend-ok marker rc=$rc: $out"
+# The marker is single-use: the gate consumed (deleted) it after authorizing dispatch.
+[ ! -f "$JD/.spend-ok" ] && ok "r3 spend: marker consumed after dispatch" || bad "r3 spend: marker survived dispatch"
+# Re-consent, then prove binding: a marker minted for lane `or` does NOT authorize `dv`.
+printf 'or|*\n' > "$JD/.spend-ok"
+out="$( OSRC_JOB_DIR="$JD" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { return 1; }; _osrc_spend_gate dv glm-5.2 dv "test"' 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3 spend: or-marker does not authorize the dv lane" || bad "r3 spend: cross-lane consent leaked (rc=$rc)"
+# And a model-bound marker does not cover a different model on the same lane.
+printf 'or|glm-5.2\n' > "$JD/.spend-ok"
+out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3 spend: model-bound marker does not cover a different model" || bad "r3 spend: cross-model consent leaked (rc=$rc)"
+printf 'or|hy3\n' > "$JD/.spend-ok"
+out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -eq 0 ] && ok "r3 spend: exact lane|model marker consents" || bad "r3 spend: exact marker rc=$rc: $out"
+rm -f "$JD/.spend-ok"
 # And it is scoped to THAT job dir: a different job dir does not inherit the consent.
 JD2X="$OSRC_HOME/jobs/otherjob"; mkdir -p "$JD2X"
+printf 'or|*\n' > "$JD/.spend-ok"
 out="$( OSRC_JOB_DIR="$JD2X" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
 [ $rc -ne 0 ] && ok "r3 spend: .spend-ok consent is scoped to its own job dir" || bad "r3 spend: consent leaked across job dirs"
+rm -f "$JD/.spend-ok"
 
 # Fallback pickers never select a metered lane quietly: only `or` ready -> no pick;
 # with spend consent the same list picks it.
@@ -530,8 +593,9 @@ fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
         OSRC_SPEND_OK=1 _fallback_pick "" "alias|model|or" )"
 [ "$fb" = "alias|model|or" ] && ok "r3 spend: --spend-ok lets fallback reach the paid lane" || bad "r3 spend: consented fallback -> '$fb'"
 # Same for the limit-gate's own suggestion helper: paid-only -> nothing without consent, or with it.
-fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
+fb="$( HOME="$FH0"; _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
         _lane_ready_probe() { return 1; }
+        _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
         OSRC_SPEND_OK=1 _osrc_limit_fallback "codexwk=98" )"
 [ "$fb" = "or" ] && ok "r3 spend: consented limit-fallback may name the paid lane" || bad "r3 spend: consented limit-fallback -> '$fb'"
 # Subscription lane still picked without consent (control).
@@ -734,6 +798,136 @@ printf '%s' "$T" | grep -q '^ID .*STATE' && printf '%s' "$T" | grep -q 'claude' 
 CJ="$(env -i HOME="$SUM/home" PATH="$SUM/bin:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 TERM=dumb bash -c '. "$1"; _ready_probe_local() { return 1; }; cmd_lane limits --json' _ "$SRC" 2>/dev/null)"
 printf '%s' "$CJ" | python3 -c 'import json,sys; json.load(sys.stdin)' \
   && ok "r3 feed: cmd_lane limits --json alias emits valid JSON" || bad "r3 feed: cmd_lane alias failed: $CJ"
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3.1 — verdict L7-r3 remediation. One test per "To get to MERGE" item, command-level
+# where the verdict demanded it (items 1,3,4,5) and function-level for the classifier rows,
+# marker binding, cap guards and per-session dedupe.
+# ---------------------------------------------------------------------------------------------------
+
+# ITEM 1 (billing rows the verdict drove): cx OPENAI_BASE_URL / CODEX_API_KEY -> metered;
+# codex CLI with no auth.json and no login proof -> unknown; agy CLI without ~/.antigravity
+# -> unknown; cloud vehicle on ANY lane -> metered; empty lane -> unknown -> gate refuses.
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; OPENAI_BASE_URL=https://x.test osrc_lane_billing cx; CODEX_API_KEY=k osrc_lane_billing cx' )
+case "$b" in metered$'\n'metered) ok "r3.1 billing: cx OPENAI_BASE_URL + CODEX_API_KEY -> metered" ;; *) bad "r3.1 billing: cx redirects -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ] && return 0; command -v "$1" >/dev/null 2>&1; }; _timeout() { return 1; }; osrc_lane_billing cx' )
+[ "$b" = "unknown" ] && ok "r3.1 billing: codex CLI, no auth.json/login proof -> unknown" || bad "r3.1 billing: cx cli-only -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "unknown" ] && ok "r3.1 billing: agy CLI without ~/.antigravity -> unknown" || bad "r3.1 billing: gm cli-only -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or m cloud; osrc_lane_billing cc m cloud' )
+case "$b" in metered$'\n'metered) ok "r3.1 billing: cloud vehicle -> metered on any lane" ;; *) bad "r3.1 billing: cloud disp -> '$b'" ;; esac
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate "" "" "" "empty-lane probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.1 spend: empty lane refuses (unconditional gate, billing=unknown)" || bad "r3.1 spend: empty lane dispatched (rc=$rc)"
+
+# ITEM 3 (env kill-switches): exported OSRC_SPEND_GATE=0 / OSRC_CAP_GATE=0 must NOT reach the
+# gates — the env block unsets them before parsing. Command-level: a metered route still refuses.
+out="$( PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED= OSRC_CLOUD_ACK=1 \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
+    OSRC_SPEND_GATE=0 OSRC_CAP_GATE=0 \
+    bash "$SRC" --osrc-preflight-internal run --provider cc "hi" 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"spend gate"*|*"EVENT approval"*) ok "r3.1 env: OSRC_SPEND_GATE=0 exported still refuses metered route" ;;
+  *) bad "r3.1 env: gate bypassed or wrong refusal (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+
+# ITEM 5a (bg forwards EVENT + runnable NEXT): the preflight refusal lines reach the caller.
+# Dedicated OSRC_HOME: the shared test home already holds r3job/r3poll dirs, so "no job
+# minted" is only provable against a clean jobs tree.
+BH="$TMP/bhhome"; BGCWD2="$TMP/bgcwd2"; mkdir -p "$BH" "$BGCWD2"
+out="$( cd "$BGCWD2" && PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$BH" OSRC_SOURCED= \
+    OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
+    bash "$SRC" bg run --provider cc "hi" 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane"*) ok "r3.1 bg: refusal forwards EVENT approval" ;;
+  *) bad "r3.1 bg: no EVENT approval forwarded (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+case "$out" in
+  *"NEXT "*"--spend-ok"*) ok "r3.1 bg: refusal forwards runnable NEXT with --spend-ok" ;;
+  *) bad "r3.1 bg: NEXT missing/not runnable: $(printf '%s' "$out" | grep -a 'NEXT' | head -2)" ;;
+esac
+if [ -d "$BH/jobs" ] && [ -n "$(ls -A "$BH/jobs" 2>/dev/null)" ]; then
+  bad "r3.1 bg: refused launch still minted a job: $(ls "$BH/jobs")"
+else
+  ok "r3.1 bg: refused launch minted no job"
+fi
+
+# ITEM 5b+4 (consent reaches the detached child as argv; marker is lane|model-bound):
+# bg --spend-ok consents THIS command, preflight re-injects it as argv, and _bg_launch drops
+# the bound marker. Job id on stdout proves the whole chain; the child runs against stubs.
+out="$( cd "$BGCWD2" && PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$BH" OSRC_SOURCED= \
+    OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
+    bash "$SRC" bg run --spend-ok --provider cc "hi" 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && printf '%s' "$out" | grep -qE '^[A-Za-z0-9_-]+$' \
+  && ok "r3.1 bg: --spend-ok consents through preflight and mints a job" \
+  || bad "r3.1 bg: --spend-ok did not mint (rc=$rc): $(printf '%s' "$out" | head -5)"
+# The marker writer emits bound lane|model pairs for the consenting command's resolution.
+MKD="$TMP/markerjob"; mkdir -p "$MKD"
+# OSRC_SPEND_OK must be set AFTER sourcing — the env block unsets inherited consent by design.
+( OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1
+    OSRC_SPEND_OK=1; _osrc_spend_marker_write "'"$MKD"'" cc run --provider cc -m glm-5.2' >/dev/null 2>&1 )
+[ -f "$MKD/.spend-ok" ] && grep -q '|' "$MKD/.spend-ok" \
+  && ok "r3.1 marker: .spend-ok carries lane|model pairs ($(head -1 "$MKD/.spend-ok" 2>/dev/null))" \
+  || bad "r3.1 marker: .spend-ok missing or unbound: $(cat "$MKD/.spend-ok" 2>/dev/null)"
+# And OSRC_JOB_DIR is scrubbed from delegate environments (_run_tee_stderr choke point).
+leak="$( OSRC_JOB_DIR="$MKD" _run_tee_stderr /dev/null env 2>/dev/null | grep -c '^OSRC_JOB_DIR=' )"
+[ "$leak" = "0" ] && ok "r3.1 env: delegates never inherit OSRC_JOB_DIR" || bad "r3.1 env: OSRC_JOB_DIR leaked to delegate ($leak)"
+
+# Interactive y/N consent (pty via script): 'y' approves THIS command and prints the
+# OSRC_SPEND_CONSENT token bg's preflight greps for; 'n'/EOF refuses.
+PTYBIN="$(command -v script 2>/dev/null || echo /usr/bin/script)"
+out="$( { sleep 2; printf 'y\n'; sleep 0.5; } | HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 \
+    "$PTYBIN" -q /dev/null bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate or somemodel or "tty test"' 2>&1 )"
+case "$out" in
+  *OSRC_SPEND_CONSENT=1*"approved"*) ok "r3.1 spend: interactive y consents this command only" ;;
+  *) bad "r3.1 spend: interactive y path broken: $(printf '%s' "$out" | tail -4)" ;;
+esac
+out="$( { sleep 2; printf 'n\n'; sleep 0.5; } | HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 \
+    "$PTYBIN" -q /dev/null bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate or somemodel or "tty test"' 2>&1 )"
+case "$out" in
+  *"EVENT approval"*|*"declined"*) ok "r3.1 spend: interactive n refuses with EVENT approval" ;;
+  *) bad "r3.1 spend: interactive n did not refuse: $(printf '%s' "$out" | tail -4)" ;;
+esac
+
+# ITEM 6 (caps): unbound meters refuse at `lane cap` time; invalid specs refuse; the
+# provider-name lookup (`lane cap codex`) resolves; unread meters warn (unpinned) / refuse (pinned);
+# dedupe markers are per-session and --clear removes them.
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap dv "weekly<=40"' ) >/dev/null 2>&1 \
+  && bad "r3.1 cap: lane cap dv weekly<=40 accepted an unbindable meter" \
+  || ok "r3.1 cap: lane cap dv weekly<=40 refused (no dv window)"
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap cx "bogus<=10"' ) >/dev/null 2>&1 \
+  && bad "r3.1 cap: lane cap cx bogus<=10 accepted" \
+  || ok "r3.1 cap: lane cap cx bogus<=10 refused (unbound meter)"
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap cx "weekly<=.."' ) >/dev/null 2>&1 \
+  && bad "r3.1 cap: weekly<=.. accepted" \
+  || ok "r3.1 cap: weekly<=.. refused (not a real number)"
+CF2="$OSRC_HOME/lane-caps"; rm -f "$CF2"
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap codex "5h<=80"' ) >/dev/null 2>&1
+grep -q '^cx 5h<=80$' "$CF2" \
+  && ok "r3.1 cap: lane cap codex resolves provider name -> cx row" \
+  || bad "r3.1 cap: lane cap codex wrote wrong row: $(cat "$CF2" 2>/dev/null)"
+rm -f "$CF2"
+# Unread meter: standing cx cap + NO meter reading -> unpinned warns but proceeds; pinned refuses.
+printf 'cx weekly<=40\n' > "$CF2"
+_session_limits() { printf '\n'; }; _reset_snap
+out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
+[ $rc -eq 0 ] && case "$out" in *"no fresh reading"*) ok "r3.1 cap: unread capped meter warns, unpinned proceeds" ;; *) bad "r3.1 cap: unread unpinned wrong (rc=$rc): $out" ;; esac
+out="$( _fb_user_pinned=1 MODEL_EXPLICIT=1 _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in *"unverifiable cap"*|*"cap gate"*) ok "r3.1 cap: unread capped meter refuses under a pin" ;; *) bad "r3.1 cap: unread pinned wrong (rc=$rc): $out" ;; esac
+rm -f "$CF2"
+# Per-session dedupe: two sessions on the same lane+spec each get their EVENT; --clear removes markers.
+rm -f "$OSRC_HOME/lanes/events.jsonl"
+JD3="$OSRC_HOME/jobs"; mkdir -p "$JD3"
+_session_limits() { printf 'codexwk=45\n'; }; _reset_snap
+OSRC_CAPS='weekly<=40' _osrc_cap_poll sessA cx "" >/dev/null 2>&1
+OSRC_CAPS='weekly<=40' _osrc_cap_poll sessB cx "" >/dev/null 2>&1
+OSRC_CAPS='weekly<=40' _osrc_cap_poll sessA cx "" >/dev/null 2>&1   # same session+spec -> silent
+unset OSRC_CAPS
+n="$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)"
+[ "$n" = "2" ] && ok "r3.1 cap: cap events dedupe per session, not globally" || bad "r3.1 cap: expected 2 session events, got $n"
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap cx --clear' ) >/dev/null 2>&1
+ls "$OSRC_HOME"/.caplimit.* "$OSRC_HOME"/jobs/*/.caplimit.* >/dev/null 2>&1 \
+  && bad "r3.1 cap: --clear left caplimit markers" || ok "r3.1 cap: --clear removes cap-event markers"
+_session_limits() { printf 'codexwk=31 codex5h=12\n'; }; _reset_snap
 
 echo
 echo "RESULT: $pass passed, $fail failed"

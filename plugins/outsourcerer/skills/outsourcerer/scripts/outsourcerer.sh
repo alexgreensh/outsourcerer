@@ -272,7 +272,14 @@ unset OSRC_PROVIDER_INJECTED
 # (parsed below, in-process) or a per-job .spend-ok marker consents — both scoped to ONE
 # command. Sanitizing here means children re-inject consent explicitly (argv/file), never
 # by inheritance.
-unset OSRC_SPEND_OK
+# OSRC_SPEND_GATE / OSRC_CAP_GATE are kill-switches for the same reason: an exported
+# "=0" would silently disable paid-lane consent and usage caps for every later command.
+# There is deliberately NO env off-switch; --force-lane/--spend-ok are the consent paths.
+# OSRC_SPEND_NEXT is NOT unset: it is the runnable NEXT hint a refusing gate prints, and
+# parents pass it to children explicitly (bg -> preflight/job child). Every command entry
+# point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
+# display hint the gate never executes.
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -1138,15 +1145,63 @@ _floor_effort_for_model() {
   esac
 }
 
+# _devin_catalog_rawf -> path to the cached STRUCTURED Devin catalog JSON (.raw.json sibling
+# of the flattened model list), or rc1 when the lane has no catalog path.
+_devin_catalog_rawf() {
+  local f; f="$(_catalog_path dv)" || return 1
+  printf '%s' "${f%.json}.raw.json"
+}
+
 # _devin_catalog_raw -> the cached STRUCTURED Devin catalog JSON, refreshing via the normal catalog
 # path (so it shares the TTL, single-flight lock, and fail-open of the validation cache). Empty when
 # the catalog is unavailable (offline / old CLI) -> callers fall back to the static map.
 _devin_catalog_raw() {
-  local f rawf
-  f="$(_catalog_path dv)" || return 1
-  rawf="${f%.json}.raw.json"
+  local rawf
+  rawf="$(_devin_catalog_rawf)" || return 1
   _catalog_load dv >/dev/null 2>&1    # triggers a fresh fetch that repopulates BOTH artifacts if stale
   [ -f "$rawf" ] && cat "$rawf" 2>/dev/null
+}
+
+# _devin_catalog_free_ids -> space-separated EXACT ids the live catalog marks cost_tier="Free":
+# every variant model_uid tagged Free plus every family_uid whose variants are ALL Free.
+# Exact ids (not canon keys) so a paid -max/-medium variant can never ride in on a free
+# sibling's normalized name — the spend gate's Free proof depends on that precision.
+# rc0 whenever the catalog is reachable/fresh (even with an empty set); rc1 offline, so
+# callers can tell "reachable, nothing Free" apart from "cannot prove". The result is
+# cached in $OSRC_HOME keyed by the raw catalog's mtime — billing lookups run in $( )
+# subshells where in-process memos die, and this keeps `devin models list` to one fetch
+# per catalog TTL instead of one per lookup.
+_OSRC_DV_FREE_IDS_MEMO=""; _OSRC_DV_FREE_IDS_DONE=""
+_devin_catalog_free_ids() {
+  [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || return 1
+  # Per-process memo: a probe pass asks once per lane/model; without this each ask
+  # re-runs the catalog freshness check + jq walk (~15 subprocesses per pass).
+  [ -n "$_OSRC_DV_FREE_IDS_DONE" ] && { printf '%s' "$_OSRC_DV_FREE_IDS_MEMO"; return 0; }
+  local rawf cf mt cmt cids ids
+  rawf="$(_devin_catalog_rawf)" || return 1
+  _catalog_load dv >/dev/null 2>&1 || true    # refresh attempt; freshness below decides
+  _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
+  [ -f "$rawf" ] || return 1
+  cf="$OSRC_HOME/.devin-free-ids"
+  mt="$(stat -f %m "$rawf" 2>/dev/null || stat -c %Y "$rawf" 2>/dev/null || echo 0)"
+  if [ -f "$cf" ]; then
+    IFS='|' read -r cmt cids < "$cf" 2>/dev/null
+    if [ "$cmt" = "$mt" ]; then
+      _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$cids"
+      printf '%s' "$cids"; return 0
+    fi
+  fi
+  ids="$(jq -r '
+    def isfree(o): (((o.cost_tier // "") + " " + (o.cost_summary // ""))|test("free";"i"));
+    [ .families[]?
+      | ( select((.variants|length) > 0 and all(.variants[]?; isfree(.))) | .family_uid ),
+        ( .variants[]? | select(isfree(.)) | .model_uid ) ]
+    | unique | .[]
+  ' "$rawf" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
+  ( umask 077; printf '%s|%s\n' "$mt" "$ids" > "$cf" ) 2>/dev/null || true
+  _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$ids"
+  printf '%s' "$ids"
+  return 0
 }
 
 # The set of Devin models Devin's OWN live catalog marks cost_tier="Free" (canon-keyed, space-padded),
@@ -1731,7 +1786,10 @@ _lane_errfile() {
 # can only MISS a detection, never invent one.
 _run_tee_stderr() {
   local f="${1:-}"; shift
-  if [ -n "$f" ]; then "$@" 2> >(tee "$f" >&2); else "$@"; fi
+  # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
+  # inside the delegate would see THIS job's .spend-ok marker and cap-dedupe state as
+  # its own consent/cap context. Every delegate lane funnels through here.
+  if [ -n "$f" ]; then env -u OSRC_JOB_DIR "$@" 2> >(tee "$f" >&2); else env -u OSRC_JOB_DIR "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
@@ -2770,9 +2828,9 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
   local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
   if [ -n "$_dverr" ]; then
-    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
+    env -u OSRC_JOB_DIR devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
   else
-    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+    env -u OSRC_JOB_DIR devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   fi
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
     _policy_blocked=1
@@ -11284,12 +11342,15 @@ _bg_launch() {
   _owner_record "$id"
   chmod 700 "$jd" 2>/dev/null
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$jd" job "$id" "$(git rev-parse --show-toplevel 2>/dev/null)" || true
-  # L7 add-on: spend consent scoped to THIS job only. A --spend-ok on the parent command (or an
-  # interactive preflight yes carried forward by cmd_bg) drops a one-job marker the detached
-  # child's spend gate reads via _osrc_spend_ok. It lives and dies with the job dir — never
-  # persisted, never inherited by later commands. Post-verb --spend-ok also reaches the child
-  # on argv; this marker covers the leading-flag/interactive paths that never do.
-  [ "${OSRC_SPEND_OK:-0}" = "1" ] && { umask 077; : > "$jd/.spend-ok"; } 2>/dev/null || true
+  # L7 add-on: spend consent scoped to THIS job only, BOUND to the lane|model pairs the
+  # detached child will resolve (lib/spend.sh _osrc_spend_marker_pairs). A --spend-ok on
+  # the parent command (or an interactive preflight yes carried forward by cmd_bg) drops
+  # the marker the child's spend gate reads via _osrc_spend_ok; it lives and dies with
+  # the job dir — never persisted, never inherited by later commands, consumed on first
+  # use, and useless for a different lane/model (the inherited-OSRC_JOB_DIR hole). Post-
+  # verb --spend-ok also reaches the child on argv; this marker covers the leading-flag/
+  # interactive paths that never do.
+  _osrc_spend_marker_write "$jd" "$PROVIDER" "$@"
   # A factory task launch links the job to its task the moment the job exists, so a launcher killed
   # before it records the job id still leaves a job the scheduler can find and adopt.
   case "${OSRC_TASK_REF:-}" in ?*/?*) printf '%s\n' "$OSRC_TASK_REF" > "$jd/task_ref" 2>/dev/null || true ;; esac
@@ -11317,7 +11378,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -11505,6 +11566,13 @@ cmd_bg() {
     esac
   done
   [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
+  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the COMPLETE bg
+  # command (verb + args + --spend-ok), not the gate's "$0 --spend-ok" default. Built from
+  # the normalized argv so --provider/-m hoisting above is reflected. %q keeps it copy-paste
+  # safe for tasks with spaces/quotes.
+  OSRC_SPEND_NEXT="$0 bg"
+  for _a in "$@"; do OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT $(printf '%q' "$_a")"; done
+  OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT --spend-ok"
   # AUTHORIZATION (separate from the preflight VALIDATION below). The parent must refuse to
   # launch when the caller's inherited depth is already at the max. The preflight resets
   # OUTSOURCERER_DEPTH=0 so it can evaluate the dispatch gate without short-circuiting at the
@@ -11563,7 +11631,7 @@ cmd_bg() {
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} "$@" 2>&1)" || _pfrc=$?
+  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} "$@" 2>&1)" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11571,7 +11639,9 @@ cmd_bg() {
   # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
   # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
   if [ "$_pfrc" -ne 0 ]; then
-    printf '%s\n' "$_pfout" | grep -a 'ERROR:' | head -3 >&2
+    # Forward the gate's structured refusal too: EVENT/NEXT lines are how L1's supervise
+    # replays the approval ask — dropping them leaves the orchestrator blind.
+    printf '%s\n' "$_pfout" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
   # L7 add-on: an INTERACTIVE spend consent inside the preflight child (it inherits the tty and
@@ -11924,6 +11994,15 @@ run_job() {
   umask 077
   local jd="$OSRC_JOBS/$id"; _mkdir_private "$jd"
   local verb="$1"; shift
+  # L7 add-on: a refusing spend/cap gate inside this job needs a runnable NEXT. cmd_bg
+  # passes its bg-flavored command through the nohup env; anything else (fanout direct
+  # launch, __runjob by hand) rebuilds the foreground equivalent from verb+args.
+  if [ -z "${OSRC_SPEND_NEXT:-}" ]; then
+    OSRC_SPEND_NEXT="$0 $verb"
+    local _sn_a
+    for _sn_a in "$@"; do OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT $(printf '%q' "$_sn_a")"; done
+    OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT --spend-ok"
+  fi
   # OPT-IN worktree isolation: run this job in its own disposable git worktree so parallel EDITING jobs
   # never collide. cd into it BEFORE meta.json is written so cwd records the worktree.
   local wt="" wbr="" wbase="" _wl
@@ -12048,7 +12127,7 @@ run_job() {
   # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
   # only — env consent is sanitized by design.
   local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
   local sc=$?
@@ -14095,7 +14174,7 @@ delegate_ccnative() {
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
   # in", which is the failure users hit). Verified: with these unset, headless claude runs normally.
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH)
+  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR)
   if [ -n "$EFFORT" ]; then local think; think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && { clean+=("MAX_THINKING_TOKENS=$think"); printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; }; fi
   local rc=0
   # Same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
@@ -14318,7 +14397,7 @@ delegate_gmnative() {
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
     local _aerr; _aerr="$(mktemp "${TMPDIR:-/tmp}/osrc-agy.XXXXXX")"
-    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
+    env -u OSRC_JOB_DIR agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
     # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
@@ -14334,7 +14413,7 @@ delegate_gmnative() {
        && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
-      agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+      env -u OSRC_JOB_DIR agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
           --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
       [ -s "$_aerr" ] && cat "$_aerr" >&2
     fi
@@ -14416,7 +14495,7 @@ delegate_claudex() {
   # heavy use without rate limiting has triggered upstream account limits for some users.
   printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config)"
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u ANTHROPIC_API_KEY
+  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u ANTHROPIC_API_KEY
                "ANTHROPIC_BASE_URL=$(_claudex_url)" "ANTHROPIC_AUTH_TOKEN=$(_claudex_token)")
   # Effort: the model behind the proxy is a GPT reasoning model; Claude Code's effort plumbing is
   # enabled and the level is ALSO injected as a prompt directive (never silently dropped).
@@ -14581,7 +14660,7 @@ delegate_hermes() {
   _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for the Hermes receipt lookup
   local rc=0
-  hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
+  env -u OSRC_JOB_DIR hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
   record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost hermes "$_fg_launch" "")" hermes
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"
@@ -15485,7 +15564,7 @@ _local_agentic_shim() {
   # (this is what made agentic-local silently fail). The shim forces the real model upstream, so the
   # ANTHROPIC_MODEL id here just has to pass claude's bare acceptance. --allowedTools is variadic, so
   # it must be terminated by --permission-mode before the trailing prompt (not swallow it).
-  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH \
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR \
     ANTHROPIC_BASE_URL="$aurl" ANTHROPIC_AUTH_TOKEN="${OSRC_LOCAL_KEY:-local}" ANTHROPIC_API_KEY= \
     ANTHROPIC_MODEL="$model" ANTHROPIC_SMALL_FAST_MODEL="$model" \
     claude -p --bare ${sfx[@]+"${sfx[@]}"} --allowedTools $tools --permission-mode "$(_perm_escalate "$mode" "$wrapped")" "$wrapped" || rc=$?
@@ -16779,11 +16858,11 @@ route_delegate() {
   # interactive y/N defaulting No, argv --spend-ok, or the job's .spend-ok marker.
   # Non-interactive refusal emits EVENT approval + NEXT; auto/fallback pickers
   # never select a metered lane on their own (_osrc_lane_spendable).
-  if [ -n "$_cap_lane" ]; then
-    local _src=0
-    _osrc_spend_gate "$_cap_lane" "$RESOLVED_ID" "$disp" "dispatch $verb" || _src=$?
-    [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
-  fi
+  # UNCONDITIONAL: it runs even when lane resolution produced no _cap_lane — an
+  # empty lane is billing=unknown and must refuse, never silently dispatch.
+  local _src=0
+  _osrc_spend_gate "${_cap_lane:-$disp}" "$RESOLVED_ID" "$disp" "dispatch $verb" || _src=$?
+  [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
 
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
@@ -19902,6 +19981,18 @@ main() {
     esac
   done
   local cmd="${1:-}"; shift || true
+  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the COMPLETE
+  # command (verb + args + --spend-ok), not the gate's "$0 --spend-ok" default. Built once
+  # here for the dispatch verbs; cmd_bg overwrites with its bg-flavored version, run_job
+  # falls back to the same shape for detached children, and the session gate builds its
+  # own. %q keeps it copy-paste safe for tasks with spaces/quotes.
+  case "$cmd" in
+    run|explore|research|edit|yolo|fanout)
+      OSRC_SPEND_NEXT="$0 $cmd"
+      local _sn_a
+      for _sn_a in "$@"; do OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT $(printf '%q' "$_sn_a")"; done
+      OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT --spend-ok" ;;
+  esac
   # Fail fast + self-explaining if the state home is unwritable (sandboxed shell). Skipped for
   # help/version/doctor: those must still run so they can DIAGNOSE the problem.
   # Read-only handshake/status commands must still run in a sandbox (they only READ); mode setters

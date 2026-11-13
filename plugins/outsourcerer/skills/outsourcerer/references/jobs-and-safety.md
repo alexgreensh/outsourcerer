@@ -253,28 +253,46 @@ the lane but do NOT count as consent. Kill switch: `OSRC_LANE_LIMIT_GATE=0`.
 
 ## Paid-lane spend gate + per-lane caps (pre-dispatch and in-flight)
 
-`osrc_lane_billing <lane> [model]` classifies every lane `subscription | free | metered |
-unknown` from real auth state (API keys in env/`~/.env`, `~/.codex/auth.json`, CLI presence).
-`unknown` is treated as `metered`: when billing cannot be proven, the lane asks first. Before
-ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing, fallback
-hops, retries — the spend gate demands consent: interactive prompts show lane, model, reason
-and an estimate, `y/N` defaulting to No; non-interactive refuses with
-`EVENT approval <id> <ts> paid-lane:<lane>/<model>` and a `NEXT` `--spend-ok` retry. `--spend-ok`
-is argv-only, covers exactly one command (propagated through bg/fanout/hops as argv or a
-per-job `.spend-ok` marker), and is never persisted or implied by auto mode, the cloud-consent
-file, or an inherited env var (`OSRC_SPEND_OK` is unset before parsing). Auto-routing and every
-fallback picker skip metered/unknown lanes unless the command already carries consent; when
-only paid lanes remain, the run stops and asks instead of picking OpenRouter quietly.
-Kill switch: `OSRC_SPEND_GATE=0`.
+`osrc_lane_billing <lane> [model] [disp]` classifies every lane `subscription | free | metered |
+unknown` from PROOF, not presence: `subscription` requires positive credential evidence of a
+plan login (the same probes the limits feed uses) AND the absence of every per-use redirect —
+API keys, `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CODEX_API_KEY`,
+`CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`, `apiKeyHelper`/`env.ANTHROPIC_API_KEY` in
+`~/.claude/settings.json`, and any `cloud`/`hosted` vehicle are all `metered` even when a plan
+login also exists. A CLI on PATH with no provable login is `unknown`, and `unknown` is treated
+as `metered`: when billing cannot be proven, the lane asks first. Devin is the strict case —
+`subscription` only when the LIVE `devin models list` catalog tags the exact model
+`cost_tier="Free"` (reachable catalog overrides everything); offline, only `swe-2-high` and
+`swe-2-flash-high` count. Plan-included-but-not-Free models (glm-5.2 etc.) are `metered`.
+Before ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing,
+fallback hops, retries — the spend gate demands consent: interactive prompts show lane, model,
+reason and an estimate, `y/N` defaulting to No; non-interactive refuses with
+`EVENT approval <id> <ts> paid-lane:<lane>/<model>` and a `NEXT` line carrying the full
+runnable command plus `--spend-ok`. `--spend-ok` is argv-only, covers exactly one command
+(propagated through bg/fanout/hops as argv or a per-job `.spend-ok` marker), and is never
+persisted or implied by auto mode, the cloud-consent file, or an inherited env var
+(`OSRC_SPEND_OK`, `OSRC_SPEND_GATE` and `OSRC_CAP_GATE` are all unset before parsing — there is
+no env kill-switch). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
+command actually resolved, the child gate accepts only a matching pair, consumes (deletes) it
+on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call cannot borrow
+a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless
+the command already carries consent; when only paid lanes remain, the run stops and asks
+instead of picking OpenRouter quietly.
 
 Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
-name) on `run`/`bg`/`fanout`/`session start`, or standing `lane cap <lane> weekly<=40` until
-`lane cap <lane> --clear` (`lane ls` shows billing + caps, `lane billing <lane> [model]` queries
-the classifier). Before launch a lane at/over cap refuses (unpinned auto hops free, pins name
-the raise/clear commands); on every supervise poll a running lane that crosses emits ONE
-`EVENT limit <id> <ts> cap:<meter><=<pct> now:<pct>` plus a wrap-up `NEXT`, and `session send`
-refuses new work to a capped lane while wrap-up messages still pass. Caps never route to a
-metered lane — the spend gate applies independently. Kill switch: `OSRC_CAP_GATE=0`.
+name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing
+`lane cap <lane> weekly<=40` until `lane cap <lane> --clear` (`lane ls` shows billing + caps,
+`lane billing <lane> [model]` queries the classifier). A cap whose meter cannot bind to the
+lane's conserve windows is REFUSED at `lane cap` time — a cap that can never trip is a lie.
+Before launch a lane at/over cap refuses (unpinned auto hops free, pins name the raise/clear
+commands); a bound cap with no fresh meter reading warns, and refuses outright under a pin.
+On every supervise poll a running lane that crosses emits ONE `EVENT limit <id> <ts>
+cap:<meter><=<pct> now:<pct>` per job+spec (the dedupe marker is keyed by job/session id, and
+`lane cap --clear` removes the markers so a re-added cap re-notifies), and `session send`
+refuses new work to a capped lane while wrap-up messages still pass — that wrap-up test
+(`_osrc_cap_send_ok`) is deliberately best-effort prefix matching: "finish by also building
+the whole billing module" passes, so the pre-launch cap gate stays the hard bound. Caps never
+route to a metered lane — the spend gate applies independently.
 
 **Limits feed (Mission Control "Lanes and limits" panel):** `lane summary --json` (alias
 `lane limits --json`) emits ONE record per harness actually detected on this machine — its CLI

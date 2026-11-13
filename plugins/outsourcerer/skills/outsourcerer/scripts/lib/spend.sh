@@ -9,19 +9,22 @@
 #     gate classifies its billing and, for metered-or-unknown lanes, demands
 #     consent: interactive y/N (default No), --spend-ok on THIS command, or the
 #     per-job .spend-ok marker a consenting bg parent drops for its detached
-#     child. Non-interactive refusals emit `EVENT approval ... paid-lane:...`
-#     + NEXT so L1's supervise replays them. --spend-ok is NEVER persisted,
-#     never implied by auto mode, the cloud-consent file, or an inherited env
-#     var (the env block unsets OSRC_SPEND_OK before parsing; only argv
-#     --spend-ok or the job marker consents).
+#     child — the marker is BOUND to the resolved lane|model pair and consumed
+#     (deleted) once dispatch starts. Non-interactive refusals emit
+#     `EVENT approval ... paid-lane:...` + NEXT so L1's supervise replays them.
+#     --spend-ok is NEVER persisted, never implied by auto mode, the
+#     cloud-consent file, or an inherited env var (the env block unsets
+#     OSRC_SPEND_OK/OSRC_SPEND_GATE/OSRC_CAP_GATE before parsing; there is no
+#     env kill-switch for these gates).
 #
 #   --cap / lane cap + _osrc_cap_gate / _osrc_cap_poll
 #     Per-lane plan-window caps: `--cap weekly<=40 --cap 5h<=80` on a launch
 #     (repeatable) plus standing `lane cap <lane> weekly<=40` until
 #     `lane cap <lane> --clear`. Checked pre-launch (route_delegate + both
 #     session start paths) and on every _supervise poll; a tripped cap refuses
-#     new launches, emits `EVENT limit ... cap:... now:...` once per job, and
-#     `session send` refuses new work to a capped lane (wrap-up messages pass).
+#     new launches, emits `EVENT limit ... cap:... now:...` once per job/session,
+#     and `session send` refuses new work to a capped lane (wrap-up messages
+#     pass — see _osrc_cap_send_ok for the best-effort prefix match).
 #
 # Billing classes: subscription | free | metered | unknown. unknown is treated
 # as metered — when auth state cannot be proven, the lane asks first.
@@ -37,59 +40,133 @@ _osrc_billing_key() {
   [ -n "$(_extract_kv_value "$k" 2>/dev/null)" ]
 }
 
-# osrc_lane_billing <lane|disp|provider|alias> [model] -> subscription|free|metered|unknown
-# Reads real auth state where it is cheap to prove; anything unprovable is
-# `unknown`, which the spend gate treats as metered (ask first, never assume free).
+# _osrc_devin_free_for_spend <model> -> rc0 ONLY when the model is proven Free for SPEND
+# purposes. Live catalog first: when `devin models list` is reachable, ONLY its cost_tier="Free"
+# tag counts (exact model_uid / all-Free family_uid match — never a canon guess, so a paid
+# -max/-medium variant cannot ride in on a free sibling's name). Offline, the static fallback
+# is exactly two proven-free ids: SWE-2 High and SWE-2 Flash High — no family aliases, so
+# swe-2 / swe-2-flash / glm / anything unproven still asks. Everything else is paid and the
+# spend gate asks. Stricter than _devin_is_free_model, whose plan-included static list
+# answers a different question (does it draw the paid ACU balance, not "is it free to run").
+_osrc_devin_free_for_spend() {
+  local m="${1:-}" t ids
+  t="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
+  if [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ]; then
+    if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
+      # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
+      # Normalize the catalog side identically so a dotted/uppercase uid still matches.
+      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
+      case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
+    fi
+  fi
+  case "$t" in
+    swe-2-high|swe-2-flash-high) return 0 ;;
+  esac
+  return 1
+}
+
+# _osrc_claude_settings_metered -> rc0 when ~/.claude/settings.json routes Claude through a
+# per-use credential (apiKeyHelper script or env.ANTHROPIC_API_KEY) instead of the plan login.
+_osrc_claude_settings_metered() {
+  local f="$HOME/.claude/settings.json"
+  [ -f "$f" ] || return 1
+  if have jq; then
+    jq -e '.apiKeyHelper // empty' "$f" >/dev/null 2>&1 && return 0
+    jq -e '.env.ANTHROPIC_API_KEY // empty' "$f" >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  grep -q 'apiKeyHelper' "$f" 2>/dev/null && return 0
+  grep -q 'ANTHROPIC_API_KEY' "$f" 2>/dev/null && return 0
+  return 1
+}
+
+# osrc_lane_billing <lane|disp|provider|alias> [model] [disp] -> subscription|free|metered|unknown
+# Evidence-based: `subscription` requires PROOF of a plan login (same credential evidence the
+# limits feed's _osrc_harness_auth reads) AND the absence of every per-use redirect. API keys,
+# auth tokens, base-URL redirects, cloud vehicles (BEDROCK/VERTEX/OPENAI_BASE_URL/claude
+# settings helpers), and BYOK paths are `metered` even when a plan login also exists. A CLI on
+# PATH with no provable login is `unknown` — never assumed subscription. unknown is treated as
+# metered by the spend gate (ask first, never assume free). The third arg (disp/vehicle) is
+# NOT display-only: a disp containing cloud|hosted is metered on any lane — L10's `cloud
+# start` relies on this for hosted Devin sessions (CONTRACT.md L7 sign-off).
 osrc_lane_billing() {
-  local tok="${1:-}" model="${2:-}" lane=""
+  local tok="${1:-}" model="${2:-}" disp="${3:-}" lane=""
   [ -n "$tok" ] || { printf 'unknown\n'; return; }
-  lane="$(_lane_by_token "$tok" 2>/dev/null)" || lane=""
+  lane="$(_lane_by_disp "$tok" 2>/dev/null)" || lane=""
+  [ -n "$lane" ] || lane="$(_lane_by_token "$tok" 2>/dev/null)" || lane=""
   [ -n "$lane" ] || lane="$(_lane_by_native "$tok" 2>/dev/null)" || lane=""
   [ -n "$lane" ] || lane="$(_lane_by_provider "$tok" 2>/dev/null)" || lane=""
   [ -n "$lane" ] || { printf 'unknown\n'; return; }
+  # A hosted/cloud vehicle bills per-use on whatever plan login fronts it.
+  case "$disp" in *cloud*|cloud|*hosted*) printf 'metered\n'; return ;; esac
   case "$lane" in
     local) printf 'free\n'; return ;;
     or|tokenrouter|gi) printf 'metered\n'; return ;;          # API-key cash lanes by definition
-    ci|claudex) printf 'subscription\n'; return ;;           # ChatGPT-plan-backed lanes
+    ci|claudex) printf 'subscription\n'; return ;;           # ChatGPT-plan-backed proxy lanes
     cc)
-      # Native Claude Code: an API key bills cash; with no key the ONLY auth left is the
-      # claude.ai OAuth login (plan). CLI present + no key => subscription is provable.
-      if _osrc_billing_key ANTHROPIC_API_KEY; then printf 'metered\n'
-      elif have claude; then printf 'subscription\n'
+      # Native Claude Code: per-use evidence FIRST — an API key, an auth token, a base-URL
+      # redirect, BEDROCK/VERTEX, or a settings.json key helper all bill cash even when a
+      # claude.ai plan login also exists. Only a proven plan login with none of those is
+      # subscription; a bare `claude` on PATH proves nothing.
+      if _osrc_billing_key ANTHROPIC_API_KEY || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] \
+         || [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ] \
+         || [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ] || _osrc_claude_settings_metered; then
+        printf 'metered\n'
+      elif have claude && _osrc_harness_auth claude; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     cx)
-      # Native Codex: OPENAI_API_KEY (env or `codex login --api-key`) bills cash; a
-      # ~/.codex/auth.json ChatGPT login bills the ChatGPT plan.
-      if _osrc_billing_key OPENAI_API_KEY; then printf 'metered\n'; return; fi
+      # Native Codex: OPENAI_API_KEY/CODEX_API_KEY (env) or an api-key auth.json bills cash;
+      # OPENAI_BASE_URL redirects billing. A ChatGPT OAuth auth.json (tokens, no api key) or a
+      # `codex login status` "logged in" is the plan proof. No jq means auth.json cannot be
+      # classified -> unknown, never guessed subscription.
+      if _osrc_billing_key OPENAI_API_KEY || _osrc_billing_key CODEX_API_KEY \
+         || [ -n "${OPENAI_BASE_URL:-}" ]; then printf 'metered\n'; return; fi
       if [ -f "$HOME/.codex/auth.json" ]; then
-        if have jq && jq -e '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" >/dev/null 2>&1; then
-          printf 'metered\n'
-        else printf 'subscription\n'; fi
+        if have jq; then
+          if jq -e '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" >/dev/null 2>&1; then
+            printf 'metered\n'
+          else printf 'subscription\n'; fi
+        else printf 'unknown\n'; fi
         return
       fi
-      if have codex; then printf 'subscription\n'; else printf 'unknown\n'; fi; return ;;
-    gm) have agy && printf 'subscription\n' || printf 'unknown\n'; return ;;   # keyless Google-login lane
+      if have codex && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>/dev/null \
+         | grep -qi "logged in"; then printf 'subscription\n'; return; fi
+      printf 'unknown\n'; return ;;
+    gm)
+      # agy is keyless Google app-login: subscription ONLY with the login dir present.
+      # agy on PATH without ~/.antigravity proves nothing -> unknown.
+      if have agy && [ -d "$HOME/.antigravity" ]; then printf 'subscription\n'
+      else printf 'unknown\n'; fi; return ;;
     dv)
-      # Devin: plan-INCLUDED (free) models ride the subscription; everything else draws the
-      # paid ACU balance. Model-aware; an unnamed model means the configured default.
+      # Devin: live-catalog Free (or the two-id offline fallback) rides the plan; every other
+      # model draws the paid ACU balance -> metered. No CLI -> unprovable -> unknown.
+      have devin || { printf 'unknown\n'; return; }
       local _m="${model:-$DEFAULT_MODEL}"
-      if _devin_is_free_model "$_m" 2>/dev/null; then printf 'subscription\n'; else printf 'metered\n'; fi
+      if _osrc_devin_free_for_spend "$_m" 2>/dev/null; then printf 'subscription\n'; else printf 'metered\n'; fi
       return ;;
-    cursor|grokbot) printf 'subscription\n'; return ;;       # Cursor plan / Grok Bot weekly allowance
+    cursor)
+      # Cursor plan login is only provable via credential evidence; a bare cursor-agent on
+      # PATH (e.g. installed but never logged in) is unknown. API key -> metered.
+      if _osrc_billing_key CURSOR_API_KEY; then printf 'metered\n'
+      elif { have cursor-agent || have agent; } && _osrc_dir_auth "$HOME/.cursor"; then printf 'subscription\n'
+      else printf 'unknown\n'; fi; return ;;
+    grokbot) printf 'unknown\n'; return ;;                  # keyed webhook: billing not externally provable
     droid|warp)
-      # Factory/Warp plans are subscriptions; BYOK keys bill cash. A configured provider key
-      # means metered; the CLI present with no key evidence means the plan login.
+      # Factory/Warp plans are subscriptions proven by their auth dirs; BYOK keys bill cash.
+      # A configured provider key means metered; CLI+auth-dir means subscription; CLI alone
+      # or nothing provable means unknown.
       if _osrc_billing_key ANTHROPIC_API_KEY || _osrc_billing_key OPENAI_API_KEY \
          || _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY \
          || _osrc_billing_key OPENROUTER_API_KEY; then printf 'metered\n'
-      elif [ "$lane" = droid ] && have droid; then printf 'subscription\n'
-      elif [ "$lane" = warp ] && have oz; then printf 'subscription\n'
+      elif [ "$lane" = droid ] && have droid && _osrc_dir_auth "$HOME/.factory"; then printf 'subscription\n'
+      elif [ "$lane" = warp ] && have oz && _osrc_dir_auth "$HOME/.warp"; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     cline)
-      # ClinePass subscription OR keys in ~/.cline. Keys present -> metered.
+      # ClinePass subscription OR keys in ~/.cline. Keys present -> metered; a proven login
+      # dir without keys -> subscription; nothing provable -> unknown.
       if [ -d "$HOME/.cline" ] && grep -rqsE '"(apiKey|api_key|key)"[[:space:]]*:[[:space:]]*"[^"]{8,}"' "$HOME/.cline" 2>/dev/null; then
         printf 'metered\n'
-      elif have cline; then printf 'subscription\n'
+      elif have cline && _osrc_dir_auth "$HOME/.cline"; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     hermes|pi) printf 'unknown\n'; return ;;                  # provider/auth not externally provable
     *) printf 'unknown\n'; return ;;
@@ -98,13 +175,30 @@ osrc_lane_billing() {
 
 # ---- spend consent ------------------------------------------------------------
 
-# _osrc_spend_ok -> rc0 when THIS command carries spend consent: --spend-ok parsed
-# into OSRC_SPEND_OK (env-inherited values are unset by the env block before parse,
-# so they can never reach here), or the per-job .spend-ok marker a consenting bg
-# parent wrote for its detached child (scoped to exactly one job = one command).
+# _osrc_spend_ok [lane] [model] -> rc0 when THIS command carries spend consent:
+# --spend-ok parsed into OSRC_SPEND_OK (env-inherited values are unset by the env
+# block before parse, so they can never reach here), or the per-job .spend-ok
+# marker a consenting bg parent wrote for its detached child.
+#
+# The marker is BOUND to the lane/model pair the consenting command resolved
+# (one "lane|model" line per plausible resolution; model "*" = any model on that
+# lane). A marker authorizes ONLY its pair: an inherited OSRC_JOB_DIR pointing at
+# an old consented job, or a marker minted for a different lane/model, consents
+# nothing. On a marker match the path is recorded in _OSRC_SPEND_MARKER so the
+# gate can consume (delete) it once dispatch starts — consent is single-use.
+_OSRC_SPEND_MARKER=""
 _osrc_spend_ok() {
+  local lane="${1:-}" model="${2:-}"
   [ "${OSRC_SPEND_OK:-0}" = "1" ] && return 0
-  [ -n "${OSRC_JOB_DIR:-}" ] && [ -f "$OSRC_JOB_DIR/.spend-ok" ] && return 0
+  local mf="${OSRC_JOB_DIR:-}/.spend-ok" l m
+  [ -n "${OSRC_JOB_DIR:-}" ] && [ -f "$mf" ] || return 1
+  while IFS='|' read -r l m; do
+    [ -n "$l" ] || continue
+    [ "$l" = "$lane" ] || continue
+    case "$m" in ''|'*') _OSRC_SPEND_MARKER="$mf"; return 0 ;; esac
+    [ -z "$model" ] && { _OSRC_SPEND_MARKER="$mf"; return 0; }
+    [ "$m" = "$model" ] && { _OSRC_SPEND_MARKER="$mf"; return 0; }
+  done < "$mf"
   return 1
 }
 
@@ -114,7 +208,62 @@ _osrc_spend_ok() {
 _osrc_lane_spendable() {
   local b; b="$(osrc_lane_billing "${1:-}" "${2:-}" 2>/dev/null)"
   case "$b" in subscription|free) return 0 ;; esac
-  _osrc_spend_ok
+  _osrc_spend_ok "${1:-}" "${2:-}"
+}
+
+# _osrc_spend_marker_pairs <provider> [inner-args...] -> prints the "lane|model"
+# lines a bg job's .spend-ok marker should carry. The detached child re-resolves its
+# own lane/model from the inner argv, so the parent writes every plausible pair:
+# the provider-resolved lane (model "*" = any model on that lane — the command fixes
+# the model anyway), an inner --provider override's lane, and the -m/--model alias's
+# resolved lane|RESOLVED_ID when the alias table knows it. engine lanes that own their
+# catalog keep the raw -m token. Best-effort: pairs the parent cannot prove are simply
+# absent, and the child's gate then refuses closed with a runnable NEXT.
+_osrc_spend_marker_pairs() {
+  local prov="${1:-}"; shift || true
+  local iprov="$prov" imodel="" row rl ri
+  _osrc_marker_lane() {  # <provider-token> -> lane code or the token itself
+    local p="${1:-}" l
+    l="$(_lane_by_provider "$p" 2>/dev/null)"; [ -n "$l" ] || l="$(_lane_by_native "$p" 2>/dev/null)"
+    [ -n "$l" ] || l="$(_lane_by_token "$p" 2>/dev/null)"
+    printf '%s' "${l:-$p}"
+  }
+  printf '%s|*\n' "$(_osrc_marker_lane "$prov")"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --provider)   [ -n "${2:-}" ] && { iprov="$2"; shift; } ;;
+      --provider=*) iprov="${1#--provider=}" ;;
+      -m|--model)   [ -n "${2:-}" ] && { imodel="$2"; shift; } ;;
+      --model=*)    imodel="${1#--model=}" ;;
+      -m?*)         imodel="${1#-m}" ;;
+    esac
+    shift
+  done
+  if [ "$iprov" != "$prov" ]; then printf '%s|*\n' "$(_osrc_marker_lane "$iprov")"; fi
+  if [ -n "$imodel" ]; then
+    local mlane
+    mlane="$(_osrc_marker_lane "$iprov")"
+    row="$(resolve_model_row "$imodel" 2>/dev/null)"
+    if [ -n "$row" ]; then
+      ri="${row%%|*}"; rl="${row#*|}"; rl="${rl%%|*}"
+      [ -n "$rl" ] && mlane="$rl"
+      printf '%s|%s\n' "$mlane" "$ri"
+    else
+      rl="$(lane_from_name "$imodel" 2>/dev/null)"
+      [ -n "$rl" ] && mlane="$rl"
+      printf '%s|%s\n' "$mlane" "$imodel"
+    fi
+  fi
+}
+
+# _osrc_spend_marker_write <jobdir> <provider> [inner-args...] -> drop the bound
+# consent marker for a consenting bg launch. No-op unless OSRC_SPEND_OK=1.
+_osrc_spend_marker_write() {
+  local jd="${1:-}" prov="${2:-}"; shift 2 || true
+  [ "${OSRC_SPEND_OK:-0}" = "1" ] && [ -n "$jd" ] || return 0
+  local mf="$jd/.spend-ok"
+  ( umask 077; _osrc_spend_marker_pairs "$prov" "$@" > "$mf" ) 2>/dev/null || true
+  [ -s "$mf" ] || rm -f "$mf" 2>/dev/null
 }
 
 # ---- event emission (L1 lanes/events.jsonl contract) ---------------------------
@@ -140,17 +289,27 @@ _osrc_event() {  # <kind> <target> <detail> <next> [src]
   printf 'NEXT %s\n' "$next"
 }
 
-# _osrc_spend_gate <lane> <model> <disp> <why> -> the paid-lane gate.
-# rc0 proceed (free/subscription, consented, or OSRC_SPEND_GATE=0). Dies or returns
-# non-zero on refusal; the caller treats any non-zero as "do not dispatch".
+# _osrc_spend_gate <lane> <model> <disp> <why> -> the paid-lane gate. Unconditional:
+# callers invoke it on EVERY dispatch path, including when lane resolution came back
+# empty (an unresolvable lane is billing=unknown -> asks, never silently dispatches).
+# rc0 proceed (free/subscription, consented). Dies on refusal; the caller treats any
+# non-zero as "do not dispatch" and invokes the gate BEFORE any side effects.
 _osrc_spend_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" why="${4:-launch}"
-  [ "${OSRC_SPEND_GATE:-1}" = "0" ] && return 0
-  local bill; bill="$(osrc_lane_billing "$lane" "$model" 2>/dev/null)"
+  local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 2>/dev/null)"
   case "$bill" in subscription|free) return 0 ;; esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
-  local mname; mname="${model:-$DEFAULT_MODEL}"
-  if _osrc_spend_ok; then
+  # Show the model actually being dispatched; when none was resolved, the lane's own
+  # default — never DEFAULT_MODEL, which is the SCRIPT's default and can name a
+  # different engine's model entirely (the `paid-lane:cc/glm-5.2` lie).
+  local mname; mname="${model:-}"
+  [ -n "$mname" ] || mname="$(_lane_field "$lane" default_model 2>/dev/null)"
+  [ -n "$mname" ] || mname="default"
+  if _osrc_spend_ok "$lane" "$model"; then
+    # Marker consent is single-use: consume it now that dispatch is committed, so it
+    # cannot authorize a second launch (or leak into a sibling job via a shared dir).
+    [ "${OSRC_SPEND_OK:-0}" != "1" ] && [ -n "$_OSRC_SPEND_MARKER" ] \
+      && rm -f "$_OSRC_SPEND_MARKER" 2>/dev/null
     printf '>>> [spend] %s lane (%s / %s) bills %s — proceeding on this command'"'"'s spend consent.\n' \
       "$lname" "$disp" "$mname" "$bill" >&2
     return 0
@@ -176,16 +335,18 @@ _osrc_spend_gate() {
     die "spend gate: declined paid lane $lname ($disp / $mname, billing=$bill). Re-run with --spend-ok to approve this one command, or pick a subscription/free lane."
   fi
   _osrc_event approval "${lane:-launch}" "$detail" "$nexthint" spend >&2
-  die "spend gate: $lname ($disp / $mname) bills $bill and this run is non-interactive — refusing rather than spending silently. Re-run with --spend-ok to approve THIS command only (never persisted), or pick a subscription/free lane. OSRC_SPEND_GATE=0 disables the gate."
+  die "spend gate: $lname ($disp / $mname) bills $bill and this run is non-interactive — refusing rather than spending silently. Re-run with --spend-ok to approve THIS command only (never persisted), or pick a subscription/free lane."
 }
 
 # _osrc_session_spend_gate -> session-start form: resolves PROVIDER to its native
 # lane + the session model, then runs the same gate (no hop concept; consent or refuse).
+# NOTE the lane-resolution chain uses [ -n ] tests, not bare ||, so a lookup that prints
+# nothing cannot empty $lane and skip the remaining fallbacks (the `lane cap codex` bug class).
 _osrc_session_spend_gate() {
-  local _sp_p="${PROVIDER:-}" _sp_lane="" _sp_model="${MODEL:-$DEFAULT_MODEL}"
-  _sp_lane="$(_lane_by_native "$_sp_p" 2>/dev/null)" || _sp_lane="$(_lane_by_token "$_sp_p" 2>/dev/null)" || _sp_lane=""
+  local _sp_p="${PROVIDER:-}" _sp_lane="" _sp_model="${MODEL:-}"
+  _sp_lane="$(_lane_by_native "$_sp_p" 2>/dev/null)"; [ -n "$_sp_lane" ] || _sp_lane="$(_lane_by_token "$_sp_p" 2>/dev/null)"; [ -n "$_sp_lane" ] || _sp_lane=""
   [ -n "$_sp_lane" ] || _sp_lane="$_sp_p"
-  OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-$0 --spend-ok session start ${_sp_p:+--provider $_sp_p} ${MODEL:+-m $MODEL}}"
+  OSRC_SPEND_NEXT="$0 --spend-ok session start ${_sp_p:+--provider $_sp_p} ${MODEL:+-m $MODEL}"
   _osrc_spend_gate "$_sp_lane" "$_sp_model" "$_sp_p" "interactive session start"
 }
 
@@ -196,13 +357,17 @@ _osrc_session_spend_gate() {
 # $OSRC_HOME/lane-caps: standing caps, one per line: "<lane> <meter><=<pct>".
 _lane_caps_file() { printf '%s/lane-caps' "$OSRC_HOME"; }
 
-# _osrc_cap_valid <spec> -> rc0 for meter<=pct (pct may be decimal).
+# _osrc_cap_valid <spec> -> rc0 for meter<=pct where pct is a REAL number in [0,100]
+# (digits with at most one dot — "<=.." or "<=1.2.3" or "<=abc" are not caps, they are
+# typos that would otherwise trip on every reading or never trip at all).
 _osrc_cap_valid() {
   case "$1" in
     *=*) local m="${1%%<=*}" p="${1##*<=}"
          [ "$m" = "$1" ] && return 1   # no <= separator
-         case "$p" in ''|*[!0-9.]*) return 1 ;; esac
+         case "$p" in ''|*.*.*|*[!0-9.]*) return 1 ;; esac
+         case "$p" in *[0-9]*) ;; *) return 1 ;; esac
          case "$m" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+         awk -v p="$p" 'BEGIN{exit !(p+0>=0 && p+0<=100)}' || return 1
          return 0 ;;
     *) return 1 ;;
   esac
@@ -268,12 +433,68 @@ EOF
   printf '%s\n' "$hit"; return 0
 }
 
+# _osrc_cap_unbound <lane> -> prints cap specs for this lane whose meter does NOT bind to
+# any of the lane's conserve windows (silently inert — the cap can never trip). rc1 when
+# every spec binds or none exist.
+_osrc_cap_unbound() {
+  local lane="${1:-}" spec m out=""
+  [ -n "$lane" ] || return 1
+  while IFS= read -r spec; do
+    _osrc_cap_valid "$spec" || continue
+    m="${spec%%<=*}"
+    _osrc_cap_window "$lane" "$m" >/dev/null 2>&1 || out="$out $spec"
+  done <<EOF
+$(_osrc_cap_specs_for "$lane")
+EOF
+  out="${out# }"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"; return 0
+}
+
+# _osrc_cap_unread <lane> [limits-line] -> prints bound cap specs whose window has NO
+# fresh reading (the cap exists but cannot be evaluated — a silent hole). rc1 when every
+# bound spec has a reading or none exist.
+_osrc_cap_unread() {
+  local lane="${1:-}" limits="${2:-}" spec m w now out=""
+  [ -n "$lane" ] || return 1
+  [ -n "$limits" ] || limits="$(_osrc_limits_snapshot 2>/dev/null)"
+  while IFS= read -r spec; do
+    _osrc_cap_valid "$spec" || continue
+    m="${spec%%<=*}"
+    w="$(_osrc_cap_window "$lane" "$m" 2>/dev/null)" || continue   # unbound handled elsewhere
+    now="$(_osrc_cap_now "$w" "$limits" 2>/dev/null)" || { out="$out $spec"; continue; }
+    case "$now" in ''|*[!0-9.]*) out="$out $spec" ;; esac
+  done <<EOF
+$(_osrc_cap_specs_for "$lane")
+EOF
+  out="${out# }"
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"; return 0
+}
+
 # _osrc_cap_gate <lane> <model> <disp> [nohop] -> pre-launch cap check, placed next
 # to _osrc_limit_gate in route_delegate and the session paths. rc0 clear/consented;
 # dies on refusal; rc10 = a zero-cost hop was armed (caller `continue`s).
 _osrc_cap_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" nohop="${4:-}"
-  local hit; hit="$(_osrc_cap_tripped "$lane" 2>/dev/null)" || return 0
+  [ -n "$lane" ] || return 0
+  local hit; hit="$(_osrc_cap_tripped "$lane" 2>/dev/null)" || {
+    # Clear of a TRIPPED cap — but a cap that cannot be evaluated is not "clear":
+    # unbound specs warn (they can never trip), bound specs with no fresh reading warn
+    # too, and under an explicit pin both refuse loudly instead of silently proceeding.
+    local unb unr lname0
+    lname0="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname0" ] || lname0="$lane"
+    unb="$(_osrc_cap_unbound "$lane" 2>/dev/null)"
+    unr="$(_osrc_cap_unread "$lane" 2>/dev/null)"
+    if [ -n "$unb$unr" ]; then
+      [ -n "$unb" ] && printf '>>> [cap] %s: cap spec(s) %s do not bind to any %s window — they can never trip.\n' "$lname0" "$unb" "$lane" >&2
+      [ -n "$unr" ] && printf '>>> [cap] %s: capped meter has no fresh reading for %s — cap cannot be verified.\n' "$lname0" "$unr" >&2
+      if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
+        die "cap gate: ${lname0} has unverifiable cap(s) (${unb:+unbound:$unb }${unr:+unread:$unr}) and this run pinned ${model:-?} — refusing rather than launching with a cap that cannot be checked. Fix the cap (lane cap ${lane} ...) or re-run unpinned."
+      fi
+    fi
+    return 0
+  }
   local spec nowpct m p w
   spec="${hit%% now*}"; nowpct="${hit##* now}"
   m="${spec%%<=*}"; p="${spec##*<=}"
@@ -300,7 +521,7 @@ _osrc_cap_gate() {
 # next to _osrc_session_limit_gate. MODEL_EXPLICIT plays the pinned role.
 _osrc_session_cap_gate() {
   local _sc_p="${PROVIDER:-}" _sc_lane="" _sc_disp=""
-  _sc_lane="$(_lane_by_native "$_sc_p" 2>/dev/null)" || _sc_lane="$(_lane_by_token "$_sc_p" 2>/dev/null)" || _sc_lane=""
+  _sc_lane="$(_lane_by_native "$_sc_p" 2>/dev/null)"; [ -n "$_sc_lane" ] || _sc_lane="$(_lane_by_token "$_sc_p" 2>/dev/null)"; [ -n "$_sc_lane" ] || _sc_lane=""
   [ -n "$_sc_lane" ] && _sc_disp="$(_lane_field "$_sc_lane" disp 2>/dev/null)"
   [ -n "$_sc_disp" ] || _sc_disp="$_sc_p"
   local _fb_user_pinned="${MODEL_EXPLICIT:-0}"
@@ -313,15 +534,16 @@ _osrc_session_cap_gate() {
 _osrc_cap_poll() {
   local id="${1:-}" lane="${2:-}" model="${3:-}"
   [ -n "$lane" ] || return 0
-  [ "${OSRC_CAP_GATE:-1}" = "0" ] && return 0
   # meta.json .lane is normally the canonical code already; normalize defensively so a
   # disp/provider value still resolves before the caps file and window lookup.
   lane="$(_lane_by_disp "$lane" 2>/dev/null || _lane_by_token "$lane" 2>/dev/null || _quota_lane_key "$lane" 2>/dev/null || printf '%s' "$lane")"
   local hit; hit="$(_osrc_cap_tripped "$lane" 2>/dev/null)" || return 0
   local spec nowpct
   spec="${hit%% now*}"; nowpct="${hit##* now}"
-  # Dedupe: one event per job per spec (marker survives polls; cleared with the job dir).
-  local marker="${OSRC_JOB_DIR:-$OSRC_HOME}/.caplimit.$(printf '%s' "$spec" | tr -c 'A-Za-z0-9' '_')"
+  # Dedupe: one event per JOB per spec. The marker lives in the job dir when known
+  # (already per-job); without one it is keyed by job/session id so two sessions on
+  # the same lane+spec each get their own event instead of the first silencing the rest.
+  local marker="${OSRC_JOB_DIR:-$OSRC_HOME}/.caplimit.${id:-session}.$(printf '%s' "$spec" | tr -c 'A-Za-z0-9' '_')"
   [ -f "$marker" ] && return 0
   ( umask 077; : > "$marker" ) 2>/dev/null || true
   local next
@@ -357,8 +579,14 @@ _osrc_session_cap_send() {
   _osrc_cap_send_ok "$text" && return 0
   local spec nowpct
   spec="${hit%% now*}"; nowpct="${hit##* now}"
-  _osrc_event limit "$sess" "cap:$spec now:$nowpct" \
-    "$0 lane cap $lane --clear   # or raise the cap / stop the session" cap >&2
+  # Dedupe the EVENT per session (keyed by session id + spec, not the spec alone) so
+  # repeated refused sends do not spam lanes/events.jsonl — the refusal itself always fires.
+  local marker="${OSRC_JOB_DIR:-$OSRC_HOME}/.caplimit.${sess}.$(printf '%s' "$spec" | tr -c 'A-Za-z0-9' '_')"
+  if [ ! -f "$marker" ]; then
+    ( umask 077; : > "$marker" ) 2>/dev/null || true
+    _osrc_event limit "$sess" "cap:$spec now:$nowpct" \
+      "$0 lane cap $lane --clear   # or raise the cap / stop the session" cap >&2
+  fi
   die "session send refused: $lane lane is at ${nowpct}% — at/over cap $spec. Wrap-up messages (wrap up / finish / stop) still go through; new work does not. Raise the cap ('$0 lane cap $lane ${spec%%<=*}<=<pct>'), clear it ('$0 lane cap $lane --clear'), or stop the session."
 }
 
@@ -379,20 +607,30 @@ _lane_cap_cmd() {
   [ -n "$lane" ] || die "usage: lane cap <lane> <meter><=pct> | lane cap <lane> --clear"
   # Lane context, NOT quota/provider context: `cc` must stay the native-claude LANE
   # (quota_key would fold the provider token cc->or and silently cap the wrong pool).
-  lane="$(_lane_by_token "$lane" 2>/dev/null)" \
-    || lane="$(_lane_by_native "$lane" 2>/dev/null)" \
-    || lane="$(_lane_by_provider "$lane" 2>/dev/null)" \
-    || die "lane cap: unknown lane '$1' (use a lane code like cx/cc/dv/gm or a provider name like codex/claude)"
+  # Keep the ORIGINAL token through the fallback chain — a lookup that prints nothing
+  # must not empty $lane and skip the remaining resolutions (the `lane cap codex` bug).
+  local _tok="$lane"
+  lane="$(_lane_by_token "$_tok" 2>/dev/null)"; [ -n "$lane" ] || lane="$(_lane_by_native "$_tok" 2>/dev/null)"
+  [ -n "$lane" ] || lane="$(_lane_by_provider "$_tok" 2>/dev/null)"
+  [ -n "$lane" ] || die "lane cap: unknown lane '$_tok' (use a lane code like cx/cc/dv/gm or a provider name like codex/claude)"
   local cf; cf="$(_lane_caps_file)"
   if [ "$act" = "--clear" ] || [ "$act" = "clear" ]; then
-    [ -f "$cf" ] || { echo "lane cap: no standing caps declared; nothing to clear."; return 0; }
+    # Cap-event dedupe markers are per (job|session,spec): clearing the caps must also
+    # clear them, or a re-added identical cap would never re-notify. Done unconditionally —
+    # per-launch --cap markers exist even when no standing caps file does.
+    rm -f "$OSRC_HOME"/.caplimit.* "$OSRC_HOME"/jobs/*/.caplimit.* 2>/dev/null || true
+    [ -f "$cf" ] || { echo "lane cap: no standing caps declared for $lane (cap-event markers cleared)."; return 0; }
     local tmp="$cf.tmp.$$"
     grep -v "^$lane " "$cf" > "$tmp" 2>/dev/null || true
     mv -f "$tmp" "$cf" 2>/dev/null || { rm -f "$tmp"; die "lane cap: could not update $cf"; }
-    echo "lane cap: cleared standing caps for $lane"
+    echo "lane cap: cleared standing caps for $lane (and their cap-event markers)"
     return 0
   fi
   _osrc_cap_valid "$act" || die "usage: lane cap <lane> <meter><=pct>  (e.g. lane cap cx weekly<=40, lane cap cc 5h<=80)"
+  # Refuse a cap whose meter cannot bind to this lane's windows — a stored cap that can
+  # never trip is a lie, not a guardrail.
+  _osrc_cap_window "$lane" "${act%%<=*}" >/dev/null 2>&1 \
+    || die "lane cap: meter '${act%%<=*}' does not bind to lane '$lane' (no matching conserve window — the cap could never trip). Use a window this lane meters (e.g. $( _lane_field "$lane" conserve_windows 2>/dev/null | tr ' ' ',' ))."
   _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || die "cannot write state home $OSRC_HOME"
   # Replace an existing spec for the same meter on this lane; append otherwise.
   local m="${act%%<=*}" tmp="$cf.tmp.$$" found=0
