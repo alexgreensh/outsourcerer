@@ -590,26 +590,18 @@ _osrc_session_cap_send() {
   die "session send refused: $lane lane is at ${nowpct}% — at/over cap $spec. Wrap-up messages (wrap up / finish / stop) still go through; new work does not. Raise the cap ('$0 lane cap $lane ${spec%%<=*}<=<pct>'), clear it ('$0 lane cap $lane --clear'), or stop the session."
 }
 
-# ---- lane subcommand: cap management + billing query + ls ----------------------
+# ---- lane verb handlers (dispatched from cmd_lane in lib/remote.sh) -----------------
 #
-# Verb handlers are named osrc_lane_<verb> so L12's `osrc_lane` router can dispatch
-# `lane <verb>` straight to them without a name fight. CLI words are unchanged:
+# L2 owns the `lane` command: cmd_lane lives in lib/remote.sh (remote lanes + review
+# queue) and carries these L7 cases alongside its own add|ls|show|poll|rm|events:
 #   lane cap <lane> <meter><=pct> | lane cap <lane> --clear  -> osrc_lane_cap
-#   lane ls | lane list                                     -> osrc_lane_ls
 #   lane billing <lane> [model]                             -> osrc_lane_billing
-#   lane summary|limits [--json]                            -> osrc_lane_summary
+#   lane summary [--json]                                   -> osrc_lane_summary
+#   lane limits                                            -> osrc_lane_limits
+# (the old `lane ls` billing+caps table; `lane ls` itself is L2's remote-lane list.
+#  `lane summary|limits` used to share the feed alias — `limits` now means the table.)
 # `lane billing` dispatches to the osrc_lane_billing classifier itself — its
 # <lane|disp|provider|alias> [model] [disp] signature is a superset of the verb's args.
-
-cmd_lane() {
-  case "${1:-ls}" in
-    cap)   shift; osrc_lane_cap "$@" ;;
-    ls|list) osrc_lane_ls ;;
-    billing) shift; [ -n "${1:-}" ] || die "usage: lane billing <lane> [model]"; osrc_lane_billing "$@" ;;
-    summary|limits) shift; osrc_lane_summary "${1:-}" ;;
-    *) die "lane: unknown action '${1:-}' (use: cap <lane> <meter><=pct> | cap <lane> --clear | ls | billing <lane> [model] | summary [--json])" ;;
-  esac
-}
 
 osrc_lane_cap() {
   local lane="${1:-}" act="${2:-}"
@@ -675,7 +667,7 @@ _osrc_brief_caps() {
   return 0
 }
 
-osrc_lane_ls() {
+osrc_lane_limits() {
   local cf; cf="$(_lane_caps_file)"
   printf '%-10s %-12s %s\n' LANE BILLING CAPS "$([ -f "$cf" ] && echo '(standing)')"
   local l b caps now

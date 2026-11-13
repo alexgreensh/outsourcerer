@@ -20020,7 +20020,6 @@ main() {
     cloud)    cmd_cloud "$@" ;;                            # hosted sessions: cloud start|where|ls (lib/cloudrun.sh)
     posture)  cmd_posture "$@" ;;                          # remembered lane org-policy restrictions: status|reset
     limits)   cmd_limits "$@" ;;                            # per-model daily caps: set <lane> <model> N/day | status | clear
-    lane)     cmd_lane "$@" ;;                              # lane billing/caps: cap <lane> <meter><=pct>|--clear | ls | billing <lane>
     exclude)  cmd_exclude "$@" ;;                           # never-use model list: add|rm|ls|clear|check (issue #45)
     models)   models "$@" ;;
     run|explore) route_delegate "auto" "$cmd" "$@" ;;

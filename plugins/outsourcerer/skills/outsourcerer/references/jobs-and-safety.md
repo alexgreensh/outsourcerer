@@ -281,7 +281,7 @@ instead of picking OpenRouter quietly.
 
 Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
 name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing
-`lane cap <lane> weekly<=40` until `lane cap <lane> --clear` (`lane ls` shows billing + caps,
+`lane cap <lane> weekly<=40` until `lane cap <lane> --clear` (`lane limits` shows billing + caps,
 `lane billing <lane> [model]` queries the classifier). A cap whose meter cannot bind to the
 lane's conserve windows is REFUSED at `lane cap` time — a cap that can never trip is a lie.
 Before launch a lane at/over cap refuses (unpinned auto hops free, pins name the raise/clear
@@ -294,15 +294,17 @@ refuses new work to a capped lane while wrap-up messages still pass — that wra
 the whole billing module" passes, so the pre-launch cap gate stays the hard bound. Caps never
 route to a metered lane — the spend gate applies independently.
 
-**Limits feed (Mission Control "Lanes and limits" panel):** `lane summary --json` (alias
-`lane limits --json`) emits ONE record per harness actually detected on this machine — its CLI
+**Limits feed (Mission Control "Lanes and limits" panel):** `lane summary --json` emits ONE
+record per harness actually detected on this machine — its CLI
 on PATH AND logged in / has a plan; an installed-but-logged-out CLI (e.g. `cursor-agent` with no
 Cursor plan) is NOT listed, and gemini-cli is never listed (retired: Antigravity `agy` is the
 only Gemini text vehicle). Each record carries `id` = the Outsourcerer provider id the page maps
 to official icons, `state` ok|low|out|wait|unknown, `left`, `renews`/`renews_at`, the user's
 `cap` text, `paid` + `billing`, `window`/`used`, `updated`, `source`. Unmetered harnesses
 report `state:"unknown"`, `left:"not checked yet"` — nothing is guessed. Plain `lane summary`
-prints the same data as a table. L9's hub export consumes the JSON verbatim.
+prints the same data as a table. L9's hub export consumes the JSON verbatim. (`lane` is owned
+by L2's remote-lane command in lib/remote.sh — `lane ls` lists remote lanes; the L7 verbs are
+`cap`, `billing`, `summary`, `limits`.)
 
 ## Windows (Git Bash, no WSL)
 

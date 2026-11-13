@@ -611,9 +611,9 @@ a2|m2|or" )"
 type -t _osrc_cap_gate >/dev/null || { echo "FAIL: _osrc_cap_gate not defined"; exit 1; }
 type -t _osrc_cap_poll >/dev/null || { echo "FAIL: _osrc_cap_poll not defined"; exit 1; }
 type -t cmd_lane >/dev/null || { echo "FAIL: cmd_lane not defined"; exit 1; }
-# L12 router contract: the lane verb handlers carry osrc_lane_<verb> names so the
-# osrc_lane router can dispatch to them directly. CLI words stay the same.
-for _vf in osrc_lane_cap osrc_lane_ls osrc_lane_billing osrc_lane_summary; do
+# L7 lane verb handlers carry osrc_lane_<verb> names; cmd_lane itself is owned by L2
+# (lib/remote.sh) and dispatches cap|billing|summary|limits to them. CLI words pinned here.
+for _vf in osrc_lane_cap osrc_lane_limits osrc_lane_billing osrc_lane_summary; do
   type -t "$_vf" >/dev/null || { echo "FAIL: $_vf not defined (osrc_lane_* verb surface)"; exit 1; }
 done
 unset _vf
@@ -797,13 +797,14 @@ _row="$(_jget "$J62" 'import json; print(json.dumps(next(r for r in d if r["id"]
 printf '%s' "$_row" | grep -q '"paid": false' \
   && ok "r3 feed: subscription lane paid=false" || bad "r3 feed: claude paid flag wrong: $_row"
 
-# Text form prints the same table; cmd_lane summary|limits dispatch works.
+# Text form prints the same table; cmd_lane summary dispatch works (L2 owns cmd_lane in
+# lib/remote.sh; `lane limits` is the billing+caps table, `lane summary` is this feed).
 T="$(_sumtext "$SUM/home" "$SUM/bin")"
 printf '%s' "$T" | grep -q '^ID .*STATE' && printf '%s' "$T" | grep -q 'claude' \
   && ok "r3 feed: text table renders detected harnesses" || bad "r3 feed: text table wrong: $T"
-CJ="$(env -i HOME="$SUM/home" PATH="$SUM/bin:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 TERM=dumb bash -c '. "$1"; _ready_probe_local() { return 1; }; cmd_lane limits --json' _ "$SRC" 2>/dev/null)"
+CJ="$(env -i HOME="$SUM/home" PATH="$SUM/bin:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 TERM=dumb bash -c '. "$1"; _ready_probe_local() { return 1; }; cmd_lane summary --json' _ "$SRC" 2>/dev/null)"
 printf '%s' "$CJ" | python3 -c 'import json,sys; json.load(sys.stdin)' \
-  && ok "r3 feed: cmd_lane limits --json alias emits valid JSON" || bad "r3 feed: cmd_lane alias failed: $CJ"
+  && ok "r3 feed: cmd_lane summary --json emits valid JSON" || bad "r3 feed: cmd_lane summary failed: $CJ"
 
 # ---------------------------------------------------------------------------------------------------
 # ROUND 3.1 — verdict L7-r3 remediation. One test per "To get to MERGE" item, command-level
