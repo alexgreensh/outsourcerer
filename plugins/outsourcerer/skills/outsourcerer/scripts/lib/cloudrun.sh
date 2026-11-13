@@ -35,7 +35,7 @@ _cloudrun_cdir() { printf '%s/cloud' "$OSRC_HOME"; }
 # _cloudrun_repo_parse <repo-arg> -> "<transport>\t<fetch-url>\t<display>"
 # transport gh = GitHub owner/name (fetch via https URL); git = any git URL or local path.
 _cloudrun_repo_parse() {
-  local r="${1:-}" url
+  local r="${1:-}" url cu
   case "$r" in ''|*[[:space:]]*) return 1 ;; esac
   case "$r" in
     *://*|git@*|/*|.*|*//*)
@@ -46,9 +46,9 @@ _cloudrun_repo_parse() {
           url="$(cd "$r" && pwd)"; printf 'git\t%s\t%s' "$url" "$url"; return 0
         fi
         url="$(git -C "$r" remote get-url origin 2>/dev/null)" || url="$r"
-        printf 'git\t%s\t%s' "$url" "$url"; return 0
+        cu="$(_osrc_url_clean "$url")"; printf 'git\t%s\t%s' "$cu" "$cu"; return 0
       fi
-      case "$r" in *://*|git@*) printf 'git\t%s\t%s' "$r" "$r"; return 0 ;; esac
+      case "$r" in *://*|git@*) cu="$(_osrc_url_clean "$r")"; printf 'git\t%s\t%s' "$cu" "$cu"; return 0 ;; esac
       return 1 ;;
   esac
   case "$r" in
@@ -63,7 +63,7 @@ _cloudrun_repo_parse() {
 # would work on the wrong code.
 _cloudrun_repo_match() {
   local arg="$1" top="$2" origin norm_arg norm_origin at
-  origin="$(git -C "$top" remote get-url origin 2>/dev/null)" || return 1
+  origin="$(_osrc_url_clean "$(git -C "$top" remote get-url origin 2>/dev/null)")" || return 1
   norm_origin="$(printf '%s' "$origin" | sed -E 's#^(https?://|git@[^:]*:|ssh://[^/]*/)##; s#\.git$##; s#/$##')"
   case "$arg" in
     /*|./*|../*|.*)
@@ -74,7 +74,7 @@ _cloudrun_repo_match() {
       [ "$(cd "$at" 2>/dev/null && pwd -P)" = "$(cd "$top" 2>/dev/null && pwd -P)" ] && return 0
       return 1 ;;
     *://*|git@*)
-      norm_arg="$(printf '%s' "$arg" | sed -E 's#^(https?://|git@[^:]*:|ssh://[^/]*/)##; s#\.git$##; s#/$##')" ;;
+      norm_arg="$(_osrc_url_clean "$arg" | sed -E 's#^(https?://|git@[^:]*:|ssh://[^/]*/)##; s#\.git$##; s#/$##')" ;;
     */*/*|*..*) return 1 ;;
     */*) norm_arg="$arg" ;;
     *) return 1 ;;
@@ -114,19 +114,23 @@ _cloudrun_preflight() {
 # _cloudrun_pack <id> <repo-display> <base> <branch> <brief-file> <done-when> -> writes the
 # self-contained brief the cloud box receives (it has no access to this machine) and prints path.
 _cloudrun_pack() {
-  local id="$1" repo="$2" base="$3" branch="$4" brief="$5" donewhen="${6:-}" dir f task
+  local id="$1" repo="$2" base="$3" branch="$4" brief="$5" donewhen="${6:-}" dir f task sha
   dir="$(_cloudrun_cdir)"; _mkdir_private "$dir" 2>/dev/null || die "cloud: cannot create $dir"
   f="$dir/$id.pack.md"
   task="$(cat "$brief" 2>/dev/null)"
   [ -n "$task" ] || die "cloud: brief file is empty: $brief"
+  # Pin the exact commit the delegator is looking at; the RESULT must echo it back so a verdict
+  # can never silently describe different code than the one on this machine.
+  sha="$(git rev-parse HEAD 2>/dev/null)"; sha="${sha:-unknown}"
   {
     printf '# Hosted-session task: %s\n\n' "$id"
-    printf 'repo: %s\nbase branch: %s\nwork branch: %s\n\n' "$repo" "$base" "$branch"
+    printf 'repo: %s\nbase branch: %s\nwork branch: %s\npinned commit: %s\n\n' "$repo" "$base" "$branch" "$sha"
     printf '## Task\n\n%s\n\n' "$task"
     printf '## Contract\n\n'
-    printf -- '- Clone %s and base your work on branch `%s`.\n' "$repo" "$base"
+    printf -- '- Clone %s and base your work on branch `%s` (it contains commit `%s`).\n' "$repo" "$base" "$sha"
     printf -- '- Do ALL work on a new branch `%s` and push it when done.\n' "$branch"
     printf -- '- Your final commit MUST add a file `%s.READY` at the repository root containing exactly one line: `READY %s`.\n' "$id" "$id"
+    printf -- '- Also write `%s.RESULT` at the repository root: first line `sha=%s`, second line `rc=<0 if your work is complete>`, then a short summary.\n' "$id" "$sha"
     printf -- '- If your environment can open pull requests, open one from `%s` to `%s`. Do NOT merge it.\n' "$branch" "$base"
     [ -n "$donewhen" ] && printf -- '- Additional done check requested by the delegator: `%s`\n' "$donewhen"
     printf -- '- Testing discipline: run only the unit tests relevant to your change, one at a time, niced; leave full/heavy suites to CI — heavy suites run in dedicated cloud lanes.\n'
@@ -165,22 +169,43 @@ _cloudrun_private_check() {
   return "$hits"
 }
 
-# ---- consent (reuse the existing cloud-consent grant; the secret scan always runs) --------------
+# ---- consent: hosted sessions get their OWN key ---------------------------------------------
+# The model-API consent file ($OSRC_HOME/cloud-consent) and OSRC_CLOUD_ACK/--cloud-ack do NOT apply
+# here: they consent to "code sent to a remote model API", a different disclosure than "a hosted
+# agent runs on a vendor VM". Session consent lives in $OSRC_HOME/cloud-session-consent, granted
+# interactively or via `cloud consent grant`; no env var can imply it.
+_cloudrun_consent_file() { printf '%s/cloud-session-consent' "$OSRC_HOME"; }
+
+_cloudrun_consent_ok() {
+  local f; f="$(_cloudrun_consent_file)"
+  [ -L "$f" ] && return 1
+  [ -f "$f" ]
+}
+
+_cloudrun_consent_grant() {
+  local f tmp; f="$(_cloudrun_consent_file)"; _mkdir_private "$OSRC_HOME" 2>/dev/null || return 1
+  [ -L "$f" ] && rm -f "$f" 2>/dev/null
+  tmp="$f.tmp.$$"
+  printf 'granted: %s hosted-session disclosure (repo content + pushed branch leave this machine for a vendor VM)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
 _cloudrun_consent() { # <vehicle> <quota-desc>
-  if [ "${OSRC_CLOUD_ACK:-0}" = "1" ]; then _cloud_consent_persist; return 0; fi
-  if _cloud_consent_ok; then
-    printf '>>>   consent     : remembered grant in %s (revoke: %s consent revoke)\n' "${OSRC_CONSENT_FILE/#$HOME/~}" "$0" >&2
+  local f; f="$(_cloudrun_consent_file)"
+  if _cloudrun_consent_ok; then
+    printf '>>>   consent     : remembered hosted-session grant in %s (revoke: %s cloud consent revoke)\n' "${f/#$HOME/~}" "$0" >&2
     return 0
   fi
   if [ -t 0 ] && [ -t 2 ]; then
     printf '>>> [outsourcerer] CLOUD SESSION: the brief + repo go to a hosted %s VM (spends: %s). Acknowledge? (remembered) [y/N] ' "$1" "$2" >&2
     local ans=""; IFS= read -r ans || ans=""
-    case "$ans" in y|Y|yes|YES) _cloud_consent_persist; return 0 ;; esac
-    die "cloud: disclosure declined — refusing hosted session. Re-run with --cloud-ack or: $0 consent grant"
+    case "$ans" in y|Y|yes|YES) _cloudrun_consent_grant && return 0 ;; esac
+    die "cloud: disclosure declined — refusing hosted session. Re-run interactively, or: $0 cloud consent grant"
   fi
-  die "cloud: hosted session needs a ONE-TIME consent (repo content leaves this machine for a vendor VM). Fix once:
-    $0 consent grant        # remember consent for all future runs
-  or pass --cloud-ack on this command (also remembered)."
+  die "cloud: hosted session needs a ONE-TIME consent under its own key (repo content leaves this machine for a vendor VM; the model-API consent does not cover this). Fix once:
+    $0 cloud consent grant    # remember consent for hosted sessions
+  or run interactively and answer y."
 }
 
 # ---- vehicle probes (flags verified against live --help/docs, 2026-11-13; see L10-REPORT) ----------
@@ -198,29 +223,34 @@ _cloudrun_vehicle_quota() { # <vehicle> -> which plan the launch spends
 }
 
 # _cloudrun_vehicle_ok <vehicle> [codex-env-id] -> rc0 when usable; reason on stderr otherwise.
+# Probe output is CAPTURED before grepping: `cli | grep -q` lets grep -q exit early, SIGPIPE the
+# CLI, and an inherited `set -o pipefail` (SHELLOPTS) then reports a false "flag missing".
 _cloudrun_vehicle_ok() {
-  local v="$1" env="${2:-}"
+  local v="$1" env="${2:-}" out
   case "$v" in
     claude)
       have claude || { echo "claude CLI not on PATH" >&2; return 1; }
-      claude --help 2>/dev/null | grep -q -- '--cloud' || { echo "claude has no --cloud flag" >&2; return 1; }
+      out="$(claude --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
+        || { echo "claude has no --cloud flag" >&2; return 1; }
       if have jq; then
         [ "$(claude auth status 2>/dev/null | jq -r '.loggedIn // false' 2>/dev/null)" = "true" ] \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       else
-        claude auth status 2>/dev/null | grep -q '"loggedIn": *true' \
+        out="$(claude auth status 2>/dev/null)"; printf '%s' "$out" | grep -q '"loggedIn": *true' \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       fi ;;
     devin)
       have devin || { echo "devin CLI not on PATH" >&2; return 1; }
-      devin --help 2>/dev/null | grep -q -- '--cloud' || { echo "devin has no --cloud flag" >&2; return 1; }
-      devin auth status 2>/dev/null | grep -qi 'Logged in' \
+      out="$(devin --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
+        || { echo "devin has no --cloud flag" >&2; return 1; }
+      out="$(devin auth status 2>/dev/null)"; printf '%s' "$out" | grep -qi 'Logged in' \
         || { echo "devin not signed in (devin auth login)" >&2; return 1; } ;;
     codex)
       have codex || { echo "codex CLI not on PATH" >&2; return 1; }
-      codex cloud exec --help 2>/dev/null | grep -q -- '--env' || { echo "codex cloud exec has no --env (EXPERIMENTAL surface changed)" >&2; return 1; }
+      out="$(codex cloud exec --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--env' \
+        || { echo "codex cloud exec has no --env (EXPERIMENTAL surface changed)" >&2; return 1; }
       [ -n "$env" ] || { echo "codex cloud needs an environment id (--env or OSRC_CODEX_CLOUD_ENV; see 'codex cloud')" >&2; return 1; }
-      codex login status 2>/dev/null | grep -qi 'logged in' \
+      out="$(codex login status 2>/dev/null)"; printf '%s' "$out" | grep -qi 'logged in' \
         || { echo "codex not signed in (codex login)" >&2; return 1; } ;;
     *) echo "unknown vehicle '$v' (claude|devin|codex)" >&2; return 1 ;;
   esac
@@ -423,6 +453,8 @@ _cloudrun_start() {
     esac
   done
   [ -n "${OSRC_CODEX_CLOUD_ENV:-}" ] && [ -z "$env" ] && env="$OSRC_CODEX_CLOUD_ENV"
+  # Never let a user:pass@ credential ride into the pack, lane record or vehicle argv.
+  [ -n "$repo" ] && repo="$(_osrc_url_clean "$repo")"
   _cloudrun_id_ok "$id" || die "cloud: bad lane id '$id' (allowed: A-Za-z0-9._-, max 64, no leading dot)"
   [ -n "$repo" ] || die "cloud start needs --repo <owner/name|git-url|path>"
   [ -n "$brief" ] || die "cloud start needs --brief <file>"
@@ -462,10 +494,19 @@ _cloudrun_start() {
     || die "cloud: pack failed the private-name check — sanitize the brief (no machine-local paths or denylisted names) and retry"
   local WITH_SPEC=""
   _secret_scan "$packtext" "cloudrun"     # dies on credential files in scope / secret values
-  # vehicle + consent + launch
+  # vehicle + spend gate + consent + launch
   local veh; veh="$(_cloudrun_pick_vehicle "$vehicle" "$env")" \
     || die "cloud: no usable hosted-session vehicle"
   [ "$veh" = codex ] && [ -z "$env" ] && die "cloud: codex vehicle needs --env <id> or OSRC_CODEX_CLOUD_ENV"
+  # L7 spend gate when loaded: hosted sessions can bill metered (Devin ACU, API-key plans).
+  # Vehicle -> lane token for osrc_lane_billing: claude->cc, devin->dv, codex->cx.
+  if declare -F _osrc_spend_gate >/dev/null 2>&1; then
+    local _sp_lane; case "$veh" in claude) _sp_lane=cc ;; devin) _sp_lane=dv ;; codex) _sp_lane=cx ;; *) _sp_lane="$veh" ;; esac
+    _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \
+      || die "cloud: spend gate refused the hosted-session launch"
+  else
+    printf '>>> [cloud] note: L7 spend gate not loaded — vehicle billing unchecked\n' >&2
+  fi
   _cloudrun_consent "$veh" "$(_cloudrun_vehicle_quota "$veh")"
   local cenv="$claudeenv"; [ "$veh" = claude ] || cenv=""
   local log pidfile launch_out pid ref
@@ -489,6 +530,13 @@ cmd_cloud() {
     start) shift; _cloudrun_start "$@" ;;
     where) shift; osrc_where "$@" ;;
     ls|list) _cloudrun_ls ;;
-    *) die "cloud: start <id> --repo R --base B --brief F [--vehicle V] [--where W] | where <brief> | ls" ;;
+    consent)
+      case "${2:-}" in
+        grant) _cloudrun_consent_grant && echo "cloud session consent: granted in $(_cloudrun_consent_file) (hosted-session key only; model-API consent is separate). Revoke: $0 cloud consent revoke" ;;
+        revoke) rm -f "$(_cloudrun_consent_file)" 2>/dev/null; echo "cloud session consent: revoked." ;;
+        status) if _cloudrun_consent_ok; then echo "cloud session consent: GRANTED"; else echo "cloud session consent: not granted"; fi ;;
+        *) die "cloud consent: grant|revoke|status" ;;
+      esac ;;
+    *) die "cloud: start <id> --repo R --base B --brief F [--vehicle V] [--where W] | where <brief> | ls | consent grant|revoke|status" ;;
   esac
 }

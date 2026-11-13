@@ -21064,7 +21064,7 @@ $feedback"
     fi
     _loop_check "$check_timeout" "$check" "$ldir/check-$attempt.out"; crc=$?
     cout="$(cat "$ldir/check-$attempt.out" 2>/dev/null)"
-    if [ "$crc" -eq 124 ]; then
+    if [ "$crc" -eq 125 ]; then _osrc_loop_notrun verify "$lid" "$attempt" "$ldir"; state="blocked"; break; elif [ "$crc" -eq 124 ]; then
       printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || die "loop verify: cannot write failure state"
       echo "[loop verify] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
     else
@@ -21312,7 +21312,7 @@ $feedback"
       fi
       _loop_check "$check_timeout" "$check" "$ldir/check-$attempt.out"; crc=$?
       cout="$(cat "$ldir/check-$attempt.out" 2>/dev/null)"
-      if [ "$crc" -eq 124 ]; then
+      if [ "$crc" -eq 125 ]; then _result="notrun"; state="blocked"; _osrc_loop_notrun escalate "$lid" "$attempt" "$ldir"; elif [ "$crc" -eq 124 ]; then
         printf 'acceptance check timed out after %ss\n' "$check_timeout" > "$ldir/last_fail" 2>/dev/null || die "loop escalate: cannot write failure state"
         echo "[loop escalate] $lid: acceptance check timed out after ${check_timeout}s — counting attempt $attempt as failed. A check that hangs is a broken check, not a passing one." >&2
       else
@@ -21333,7 +21333,7 @@ $feedback"
     printf '>>> [loop escalate] receipt: attempt %s · tier %s/%s %s (%s lane) · %s in %ss · %s\n' \
       "$attempt" "$(( rung + 1 ))" "$nrung" "${RUNGS[$rung]}" "${RLANES[$rung]}" \
       "$(printf '%s' "$_result" | tr 'a-z' 'A-Z')" "$_ael" "$(_lane_cost_disclosure "${RLANES[$rung]}")" >&2
-    [ "$_result" = "blocked" ] && break
+    { [ "$_result" = "blocked" ] || [ "$_result" = "notrun" ]; } && break
     if [ "$crc" -eq 0 ]; then
       state="success"
       echo "[loop escalate] $lid: acceptance check PASSED on attempt $attempt (tier $(( rung + 1 ))/$nrung, ${RUNGS[$rung]})." >&2

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# test_heavy.sh — L10 add-on: osrc_heavy classification, osrc_mac_load, and the heavy-work gate
-# inside _loop_check (cloud lane -> niced local -> stalled queue). OFFLINE ONLY: sysctl/uptime are
-# PATH stubs reading OSRC_STUB_* env vars; cmd_cloud/_cloudrun_pick_vehicle are shadowed functions
-# or PATH-stub CLIs; git runs against a LOCAL bare repo. No real load, network, or vehicle calls.
+# test_heavy.sh — L10 add-on round 2: osrc_heavy command-word classification, osrc_mac_load,
+# and the heavy-work gate inside _loop_check. Round-2 contract: the gate NEVER launches — it
+# emits EVENT approval + NEXT (exact `cloud start` line) only for a clean, pushed tree, reuses
+# an in-flight lane for identical check+sha, queues+stalls on an overloaded Mac, else runs
+# niced one at a time. rc 125 always means NOT RUN. OFFLINE ONLY: sysctl/uptime are PATH stubs
+# reading OSRC_STUB_* env vars; git runs against a LOCAL bare repo; no vehicle is ever launched.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,7 +13,7 @@ if [ ! -f "$SRC" ]; then echo "FAIL: cannot find $SRC"; exit 1; fi
 
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-L10h-home-$$"
 mkdir -p "$OSRC_HOME"
-export OSRC_CLOUD_ACK=1 OSRC_HEAVY_POLL=1 OSRC_HEAVY_LOCK_WAIT=5
+export OSRC_HEAVY_LOCK_WAIT=5
 
 . "$SRC" >/dev/null 2>&1
 SCRIPT_PATH="$SRC"
@@ -62,7 +64,7 @@ git -C "$WORK2" branch -M main
 git -C "$WORK2" remote add origin "$BARE"
 git -C "$WORK2" push -qu origin main
 
-# ---------- 1. osrc_heavy classification ----------
+# ---------- 1. osrc_heavy classification: command WORDS, not substrings ----------
 hv() { # <want-rc> <desc> <cmd>
   osrc_heavy "$3" 2>/dev/null; local rc=$?
   [ "$rc" = "$1" ] && ok "heavy: $2" || bad "heavy: $2 (rc=$rc want $1)"
@@ -73,29 +75,41 @@ hv 1 "light: unit pytest file"        "pytest tests/test_foo.py"
 hv 1 "light: pytest file in tests/"   "pytest tests/test_foo.py -x"
 hv 1 "light: jest single file"        "jest src/foo.test.js"
 hv 1 "light: est under 2min"          "deploy.sh # est 1m"
+# --- the verdict's four false positives, verbatim ---
+hv 1 "light: make lint (was wrongly heavy)"   "make lint"
+hv 1 "light: bare make (dropped rule)"        "make"
+hv 1 "light: npx tsc (dropped rule)"          "npx tsc --noEmit"
+hv 1 "light: grep word make (substring)"      "grep -q make README.md"
+hv 1 "light: ls & wait (& not a signal)"      "ls & wait"
+# --- things that must STAY heavy ---
 hv 0 "heavy: conformance"             "bash scripts/tests/conformance.sh"
 hv 0 "heavy: test_factory"            "bash tests/test_factory_land.sh"
 hv 0 "heavy: pytest bare"             "pytest"
 hv 0 "heavy: pytest dir"              "pytest tests/"
 hv 0 "heavy: pytest coverage"         "pytest --coverage"
+hv 0 "heavy: pytest xdist -n"         "pytest -n 4 tests/"
 hv 0 "heavy: npm test"                "npm test"
 hv 0 "heavy: npm run build"           "npm run build"
+hv 0 "heavy: npm ci"                  "npm ci"
 hv 0 "heavy: cargo build"             "cargo build --release"
 hv 0 "heavy: cargo test"              "cargo test"
 hv 0 "heavy: npm install"             "npm install"
-hv 0 "heavy: npm ci"                  "npm ci"
 hv 0 "heavy: pip install"             "pip3 install -r requirements.txt"
-hv 0 "heavy: make"                    "make"
+hv 0 "heavy: make test"               "make test"
 hv 0 "heavy: make -j"                 "make -j8 all"
 hv 0 "heavy: docker build"            "docker build -t x ."
 hv 0 "heavy: xcodebuild"              "xcodebuild -scheme App build"
 hv 0 "heavy: gradle"                  "./gradlew build"
 hv 0 "heavy: benchmark"               "hyperfine 'ls -la'"
-hv 0 "heavy: parallel suites"         "pytest tests/ & npm test"
+hv 0 "heavy: two suites && "          "pytest tests/ && npm test"
 hv 0 "heavy: est over 2min"           "deploy.sh # est 5m"
 hv 0 "heavy: est hours"               "backup.sh # est: 2h"
 hv 0 "heavy: marked slow"             "bash slow_job.sh # slow"
 hv 0 "heavy: OSRC_SLOW=1"             "OSRC_SLOW=1 ./run.sh"
+hv 1 "light: docker ps"               "docker ps"
+hv 1 "light: npm exec"                "npm exec tsc --noEmit"
+hv 1 "light: pip list"                "pip list"
+hv 1 "light: git log | head"          "git log --oneline | head -5"
 OSRC_HEAVY=1; osrc_heavy "ls" 2>/dev/null; rc=$?
 [ "$rc" = 0 ] && ok "heavy: OSRC_HEAVY=1 forces" || bad "heavy: OSRC_HEAVY=1 (rc=$rc)"
 OSRC_HEAVY=0; osrc_heavy "cargo build" 2>/dev/null; rc=$?
@@ -121,71 +135,96 @@ OSRC_STUB_LOAD1=8.00; OSRC_STUB_SWAP_USED=400.00
 [ "$rc" = 0 ] && grep -q light-ok "$TMP/lout" && ok "gate: light check runs normally" || bad "gate: light check rc=$rc"
 [ ! -s "$OSRC_STUB_LOG" ] && ok "gate: light check spawns no cloud/nice" || bad "gate: light check touched stubs"
 
-# ---------- 4. gate: cloud lane runs the check (shadowed vehicle + cmd_cloud) ----------
+# ---------- 4. gate: clean+pushed tree -> EVENT approval + NEXT, NEVER launches ----------
+# cmd_cloud is shadowed with a tripwire: the gate must never invoke it.
+cmd_cloud() { echo "cmd_cloud LAUNCHED: $*" >> "$OSRC_STUB_LOG"; return 99; }
 _cloudrun_pick_vehicle() { printf 'claude'; }
-cmd_cloud() { # simulate the hosted agent: push cloud/<id> with RESULT+READY to origin
-  echo "cmd_cloud $*" >> "$OSRC_STUB_LOG"
-  local id="" base="main"
-  while [ $# -gt 0 ]; do case "$1" in
-    start) shift ;; --base) base="$2"; shift 2 ;; --repo|--brief|--vehicle|--where|--done-when|--env|--claude-env|--model) shift 2 ;;
-    --*) shift ;; *) [ -z "$id" ] && id="$1"; shift ;; esac; done
-  [ -n "$id" ] || return 1
-  local box="$TMP/cloudbox-$id"
-  git clone -q "$BARE" "$box" 2>/dev/null || return 1
-  git -C "$box" checkout -qb "cloud/$id" "origin/$base" 2>/dev/null || git -C "$box" checkout -qb "cloud/$id" 2>/dev/null || return 1
-  printf 'rc=0\ncloud check output: suite green\n' > "$box/$id.RESULT"
-  printf 'READY %s\n' "$id" > "$box/$id.READY"
-  git -C "$box" add -A >/dev/null 2>&1
-  git -C "$box" -c user.email=t@t -c user.name=t commit -qm result >/dev/null 2>&1
-  git -C "$box" push -q origin "cloud/$id" 2>/dev/null || return 1
-  return 0
-}
+SHA2="$(git -C "$WORK2" rev-parse HEAD)"
+ID2="$(_osrc_heavy_lane_id "bash conformance.sh" "$SHA2")"
 : > "$OSRC_STUB_LOG"
-( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/cout" ); rc=$?
-[ "$rc" = 0 ] && ok "gate: cloud lane rc propagates (rc=0)" || bad "gate: cloud lane rc=$rc"
-grep -q 'cloud check output' "$TMP/cout" && ok "gate: RESULT written to check outfile" || bad "gate: outfile missing RESULT: $(cat "$TMP/cout" 2>/dev/null)"
-grep -q 'cmd_cloud start heavy-' "$OSRC_STUB_LOG" && ok "gate: cloud start invoked with heavy- id" || bad "gate: no cloud start in stub log"
-grep -q -- '--where cloud' "$OSRC_STUB_LOG" && ok "gate: launch forced --where cloud" || bad "gate: missing --where cloud"
+ERRF="$TMP/gate4.err"; : > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/cout" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && ok "gate: approval-offer check rc=125 (not run)" || bad "gate: offer rc=$rc want 125"
+grep -q "EVENT approval $ID2" "$ERRF" && ok "gate: EVENT approval <id> emitted" || bad "gate: no EVENT approval: $(cat "$ERRF")"
+grep -q 'NEXT ' "$ERRF" && grep -q "cloud start $ID2" "$ERRF" && grep -q -- '--repo' "$ERRF" \
+  && ok "gate: NEXT carries exact cloud start line" || bad "gate: NEXT missing cloud start: $(cat "$ERRF")"
+grep -q 'NOT RUN' "$TMP/cout" && ok "gate: outfile says NOT RUN" || bad "gate: outfile lacks NOT RUN: $(cat "$TMP/cout")"
+[ ! -s "$OSRC_STUB_LOG" ] && ok "gate: NEVER launched a vehicle (cmd_cloud untouched)" || bad "gate: launched anyway: $(cat "$OSRC_STUB_LOG")"
+BRIEF2="$(ls "$OSRC_HOME"/cloud/"$ID2".brief.md 2>/dev/null)"
+[ -n "$BRIEF2" ] && grep -q "Pinned commit: $SHA2" "$BRIEF2" && grep -q "sha=$SHA2" "$BRIEF2" \
+  && ok "gate: brief pins the exact sha + RESULT contract" || bad "gate: brief missing sha pin: $BRIEF2"
+grep -q '"kind":"approval"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
+  && ok "gate: EVENT approval landed in lanes/events.jsonl" || bad "gate: events.jsonl missing approval"
 
-# cloud lane reports failure -> rc propagates
-cmd_cloud() {
-  echo "cmd_cloud $*" >> "$OSRC_STUB_LOG"
-  local id=""; while [ $# -gt 0 ]; do case "$1" in start) shift ;; --*) shift 2 ;; *) [ -z "$id" ] && id="$1"; shift ;; esac; done
-  local box="$TMP/cloudbox-f$id"; git clone -q "$BARE" "$box" 2>/dev/null
-  git -C "$box" checkout -qb "cloud/$id" "origin/main" 2>/dev/null
-  printf 'rc=3\n3 tests failed\n' > "$box/$id.RESULT"; printf 'READY %s\n' "$id" > "$box/$id.READY"
-  git -C "$box" add -A >/dev/null 2>&1; git -C "$box" -c user.email=t@t -c user.name=t commit -qm r >/dev/null 2>&1
-  git -C "$box" push -q origin "cloud/$id" 2>/dev/null; return 0
-}
-( cd "$WORK2" && _loop_check 30 "npm test" "$TMP/cout2" ); rc=$?
-[ "$rc" = 3 ] && ok "gate: cloud rc=3 propagates" || bad "gate: cloud rc=$rc want 3"
+# identical check+sha -> dedupe: pre-register the lane, expect 'already delegated', no 2nd offer
+mkdir -p "$OSRC_HOME/remote"
+printf '{"id":"%s","status":"running"}\n' "$ID2" > "$OSRC_HOME/remote/$ID2.json"
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
+( cd "$WORK2" && _loop_check 30 "bash conformance.sh" "$TMP/cout3" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && ok "gate: dedupe rc=125" || bad "gate: dedupe rc=$rc want 125"
+grep -q 'already delegated' "$ERRF" && ok "gate: identical check+sha reuses in-flight lane" || bad "gate: no dedupe: $(cat "$ERRF")"
+! grep -q 'EVENT approval' "$ERRF" && ok "gate: dedupe does not re-ask approval" || bad "gate: dedupe re-emitted approval"
+rm -f "$OSRC_HOME/remote/$ID2.json"
 
-# ---------- 5. gate: cloud refused -> local niced, one at a time ----------
-cmd_cloud() { echo "cmd_cloud $*" >> "$OSRC_STUB_LOG"; return 1; }   # preflight refusal
-_cloudrun_pick_vehicle() { printf 'devin'; }
-: > "$OSRC_STUB_LOG"
-# heavy via `# heavy` marker but actually runnable (echo) so the fallback can execute it
-( cd "$WORK2" && _loop_check 20 "echo fallback-ran # heavy" "$TMP/nout" ); rc=$?
-[ "$rc" = 0 ] && grep -q fallback-ran "$TMP/nout" && ok "gate: refused cloud falls back to local run" || bad "gate: fallback rc=$rc out=$(cat "$TMP/nout" 2>/dev/null)"
-grep -q 'nice -n 19' "$OSRC_STUB_LOG" && ok "gate: local heavy runs under nice -n 19" || bad "gate: no nice -n 19 in stub log: $(cat "$OSRC_STUB_LOG")"
-[ ! -d "$OSRC_HOME/heavy-local.lock.d" ] && ok "gate: heavy lock released after run" || bad "gate: lock leaked"
+# ---------- 5. gate: dirty or unpushed tree -> NO cloud offer, local rules apply ----------
+# dirty tree: untracked file present -> no offer; heavy check runs niced
+printf 'dirty\n' > "$WORK2/untracked.tmp"
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
+( cd "$WORK2" && _loop_check 20 "echo dirty-fallback-ran # heavy" "$TMP/dout" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 0 ] && grep -q dirty-fallback-ran "$TMP/dout" && ok "gate: dirty tree falls back to local run" || bad "gate: dirty rc=$rc"
+! grep -q 'EVENT approval' "$ERRF" && ok "gate: dirty tree gets NO cloud offer" || bad "gate: dirty tree offered cloud"
+grep -q 'nice -n 19' "$OSRC_STUB_LOG" && ok "gate: dirty-tree heavy runs under nice -n 19" || bad "gate: dirty run not niced"
+rm -f "$WORK2/untracked.tmp"
 
-# ---------- 6. gate: overloaded Mac -> queue + EVENT stalled, never runs ----------
+# unpushed commit -> no offer either
+git -C "$WORK2" -c user.email=t@t -c user.name=t commit -qm wip --allow-empty
+printf 'wip\n' > "$WORK2/wip.txt"; git -C "$WORK2" add wip.txt; git -C "$WORK2" -c user.email=t@t -c user.name=t commit -qm wip2
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
+( cd "$WORK2" && _loop_check 20 "echo unpushed-fallback # heavy" "$TMP/uout" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 0 ] && grep -q unpushed-fallback "$TMP/uout" && ok "gate: unpushed tree falls back to local run" || bad "gate: unpushed rc=$rc"
+! grep -q 'EVENT approval' "$ERRF" && ok "gate: unpushed tree gets NO cloud offer" || bad "gate: unpushed tree offered cloud"
+# restore: push the wip commits so later sections see a clean pushed tree
+git -C "$WORK2" push -q origin main
+
+# ---------- 6. gate: token-bearing origin URL never reaches brief/pack/NEXT ----------
+ORIG_URL="$(git -C "$WORK2" remote get-url origin)"
+git -C "$WORK2" remote set-url origin "https://x-access-token:SECRETTOKEN123@127.0.0.1:9/x.git"
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
+SHA3="$(git -C "$WORK2" rev-parse HEAD)"
+ID3="$(_osrc_heavy_lane_id "npm test" "$SHA3")"
+( cd "$WORK2" && _loop_check 30 "npm test" "$TMP/tout" ) 2>"$ERRF"; rc=$?
+[ "$rc" = 125 ] && grep -q "EVENT approval $ID3" "$ERRF" && ok "gate: token origin still offers (clean+pushed)" || bad "gate: token-origin offer rc=$rc: $(cat "$ERRF")"
+if grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP/tout" "$ERRF" 2>/dev/null | grep -q .; then
+  bad "gate: credential leaked into state/output: $(grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP" 2>/dev/null | head -3)"
+else
+  ok "gate: user:pass@ stripped everywhere (brief, NEXT, events, queue)"
+fi
+git -C "$WORK2" remote set-url origin "$ORIG_URL"
+
+# ---------- 7. gate: overloaded Mac -> queue + EVENT stalled, never runs ----------
 _cloudrun_pick_vehicle() { return 1; }   # no vehicle usable
 OSRC_STUB_NCPU=4 OSRC_STUB_LOAD1=9.00 OSRC_STUB_SWAP_USED=900.00   # 2.25/core, 90% swap
-: > "$OSRC_STUB_LOG"; ERRF="$TMP/gate6.err"; : > "$ERRF"
+: > "$OSRC_STUB_LOG"; : > "$ERRF"
 # heavy via `# est 6m` marker; would print SHOULD-NOT-RUN if it ever executed locally
 ( cd "$WORK2" && _loop_check 20 "echo SHOULD-NOT-RUN # est 6m" "$TMP/sout" ) 2>"$ERRF"; rc=$?
-[ "$rc" = 125 ] && ok "gate: stalled check rc=125" || bad "gate: stalled rc=$rc want 125"
+[ "$rc" = 125 ] && ok "gate: stalled check rc=125 (not run)" || bad "gate: stalled rc=$rc want 125"
 grep -q 'EVENT stalled heavy-' "$ERRF" && ok "gate: EVENT stalled emitted" || bad "gate: no EVENT stalled: $(cat "$ERRF")"
 grep -q 'NEXT ' "$ERRF" && grep -q 'cloud start' "$ERRF" && ok "gate: NEXT points to cloud option" || bad "gate: NEXT missing cloud start"
 grep -q 'mac-overloaded' "$ERRF" && ok "gate: stall reason mac-overloaded" || bad "gate: wrong stall reason"
 ls "$OSRC_HOME"/heavy-queue/heavy-*.cmd >/dev/null 2>&1 && ok "gate: check queued under heavy-queue/" || bad "gate: no queue file"
+grep -q '"kind":"stalled"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
+  && ok "gate: EVENT stalled landed in lanes/events.jsonl" || bad "gate: events.jsonl missing stalled"
 grep -q 'did NOT run locally' "$TMP/sout" && ok "gate: outfile records non-run" || bad "gate: outfile lacks stall note"
 ! grep -q SHOULD-NOT-RUN "$TMP/sout" && [ ! -s "$OSRC_STUB_LOG" ] \
   && ok "gate: stalled check never spawned locally" || bad "gate: stalled check ran anyway"
+OSRC_STUB_NCPU=8 OSRC_STUB_LOAD1=8.00 OSRC_STUB_SWAP_USED=400.00
 
-# ---------- 7. brief rule text ----------
+# ---------- 8. loop semantics: rc 125 stops the loop, never iterates ----------
+grep -q 'crc" -eq 125' "$SRC" && ok "loop: verify handles rc=125 as not-run" || bad "loop: verify missing 125 handler"
+grep -q 'NOT RUN' "$SCRIPT_DIR/../lib/heavy.sh" && ok "loop: verify reports NOT RUN" || bad "loop: verify lacks NOT RUN message"
+grep -q '"notrun"' "$SRC" && ok "loop: escalate receipts record notrun" || bad "loop: escalate missing notrun"
+
+# ---------- 9. brief rule text ----------
 _osrc_heavy_prompt | grep -qi 'unit tests' && _osrc_heavy_prompt | grep -qi 'cloud' \
   && ok "prompt: heavy rule mentions unit tests + cloud" || bad "prompt: heavy rule text"
 grep -q '_osrc_heavy_prompt' "$SRC" && ok "brief: _build_prompt injects heavy rule" || bad "brief: _build_prompt missing _osrc_heavy_prompt"

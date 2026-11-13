@@ -1,5 +1,6 @@
-# lib/heavy.sh — heavy-work gate (L10 add-on): full suites, builds, installs, benchmarks and
-# anything estimated over ~2 minutes belong on a hosted box, not on the user's Mac.
+# lib/heavy.sh — heavy-work gate (L10 add-on, round 2): full suites, builds, installs,
+# benchmarks and anything estimated over ~2 minutes belong on a hosted box, not on the
+# user's Mac.
 #
 #   osrc_heavy <command...>    -> rc 0 = heavy (reason on stderr), rc 1 = light
 #   osrc_mac_load              -> prints "load_per_core=<f> swap_pct=<n> (...)"; "?" when unknown
@@ -8,34 +9,32 @@
 #       sets OSRC_HEAVY_MODE: run (light) | nice (heavy, run locally niced) | done (handled here)
 #       sets OSRC_HEAVY_RC / OSRC_HEAVY_NOTE; mode=done means $out already holds the result
 #
-# Wired into _loop_check, the single funnel for bounded check commands (crew grading, loop
-# verify, land checks, done-contract `check:` evals). Cloud path reuses `cloud start` so every
-# existing gate (preflight, secret scan, private names, consent, lane + done registration)
-# applies unchanged. Sourced by outsourcerer.sh; defines functions only; bash 3.2.
+# Round-2 contract (review L10-VERDICT): the gate NEVER launches a hosted session itself.
+# With a usable vehicle AND a clean tree whose HEAD is fully on the remote, it emits
+# `EVENT approval <id> <ts> heavy-check: <cmd>` + `NEXT <exact cloud start line>` (the
+# orchestrator approves spend; `cloud start` then runs L7's spend gate + its own consent
+# key). Identical check+sha reuses the in-flight lane id instead of re-asking. Otherwise
+# local rules apply: never start on an overloaded Mac (queue + EVENT stalled), else run
+# niced one at a time. rc 125 always means NOT RUN — never a pass, never a code failure.
 #
-# Escape hatches: OSRC_HEAVY_OFF=1 disables the gate; OSRC_HEAVY=1 forces a command heavy,
-# OSRC_HEAVY=0 forces it light; OSRC_HEAVY_LOCAL=1 skips the cloud attempt (local/nice/stall only).
+# Wired into _loop_check, the single funnel for bounded check commands. Sourced by
+# outsourcerer.sh; defines functions only; bash 3.2.
+#
+# Escape hatches: OSRC_HEAVY_OFF=1 disables the gate; OSRC_HEAVY=1 forces heavy,
+# OSRC_HEAVY=0 forces light; OSRC_HEAVY_LOCAL=1 skips the cloud offer entirely.
 
 # ---- classification ----------------------------------------------------------------------------
-# _osrc_heavy_reason <cmd> -> "heavy: <why>" or "light". Conservative: a false "heavy" costs one
-# cloud attempt that falls back to niced-local; a false "light" overheats the Mac.
-_osrc_heavy_reason() {
-  local cmd="$1" lc est mins
-  [ -n "${cmd//[[:space:]]/}" ] || { printf 'light'; return 0; }
+# Whole-command markers that apply before any splitting: explicit heavy/slow marks and
+# runtime estimates (`# est 5m`, `est=90s`, `est: 2h`; unitless = minutes).
+_osrc_heavy_markers() { # <cmd-lowercased> -> "heavy: <why>" | ""
+  local lc="$1" est mins
   case "${OSRC_HEAVY:-auto}" in
     1) printf 'heavy: OSRC_HEAVY=1'; return 0 ;;
     0) printf 'light'; return 0 ;;
   esac
-  lc="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
-  # Several suites/commands in parallel.
-  if printf '%s' "$lc" | grep -qE '(^|[[:space:];|])&([[:space:]]|$)|\bparallel\b|xargs[^|]*-P[0-9]|\bmake\b[^|;&]*-[a-z]*j[[:space:]]*[0-9]|\b(jest|vitest|pytest)[^|;&]*--(workers|jobs|maxWorkers)[= ]+[0-9]'; then
-    printf 'heavy: several suites or commands in parallel'; return 0
-  fi
-  # Explicit markers: a `# slow` / `# heavy` comment, --slow/--heavy flag, OSRC_SLOW=1.
   if printf '%s' "$lc" | grep -qE '#[[:space:]]*(slow|heavy)\b|(^|[[:space:]])--(slow|heavy)\b|\bosrc_slow=1\b|\bosrc_heavy=1\b'; then
     printf 'heavy: marked slow/heavy'; return 0
   fi
-  # Estimated runtime marker: `# est 5m`, `est=90s`, `est: 2h` (unitless = minutes).
   est="$(printf '%s' "$lc" | grep -oE '\best\b[= :]*[0-9]+(\.[0-9]+)?[[:space:]]*[a-z]*' | head -1)"
   if [ -n "$est" ]; then
     mins="$(printf '%s' "$est" | awk '{
@@ -50,33 +49,94 @@ _osrc_heavy_reason() {
       printf 'heavy: estimated %.0fmin (>2min)' "$mins"; return 0
     fi
   fi
-  # Test suites / suite runners. A runner aimed at ONE explicit test FILE is an own-unit-test
-  # run (delegates are told to run those) -> not heavy by this rule.
-  if printf '%s' "$lc" | grep -qE '\bconformance\b|test_factory|\b(npm|pnpm|yarn|bun)[[:space:]]+(run[[:space:]]+)?(test|ci|e2e)\b|\bmake[[:space:]]+test\b|\bgo[[:space:]]+test\b|\bcargo[[:space:]]+test\b|\bbazel[[:space:]]+test\b'; then
-    printf 'heavy: test suite'; return 0
-  fi
-  if printf '%s' "$lc" | grep -qE '\b(pytest|py\.test|vitest|jest|mocha|ava|phpunit|rspec|ctest)\b'; then
-    # A runner aimed at ONE explicit test FILE (arg ending in a source/test extension) is an
-    # own-unit-test run; a bare runner, a directory, or a suite-wide flag is a full suite.
-    if printf '%s' "$lc" | grep -qE '[a-z0-9_./-]+\.(py|py\.test|js|jsx|ts|tsx|sh|rb|php)([^a-z]|$)' \
-       && ! printf '%s' "$lc" | grep -qE -- '--(all|coverage|watch|maxWorkers|workers)[= ]'; then
-      : # single test file -> own unit test, falls through to remaining rules
-    else
-      printf 'heavy: test suite runner'; return 0
+  printf ''
+}
+
+# _osrc_heavy_segment <seg-lowercased> -> "heavy: <why>" | "light". Matches the command
+# WORD (first real token after env-assignments, wrappers, flags and numeric flag-values),
+# never a substring: `grep -q make README` and `ls & wait` are light.
+_osrc_heavy_segment() {
+  local seg="$1" tok cmd="" seen=0 skipval=0
+  local -a toks rest
+  set -f
+  # shellcheck disable=SC2206
+  toks=( $seg )
+  set +f
+  rest=()
+  for tok in "${toks[@]}"; do
+    tok="${tok//\'/}"; tok="${tok//\"/}"
+    [ "$skipval" = "1" ] && { skipval=0; continue; }
+    if [ "$seen" = "0" ]; then
+      case "$tok" in
+        ''|[0-9]*) continue ;;
+        [A-Za-z_]*=*) continue ;;
+        sudo|doas|env|command|nice|time|nohup|exec|builtin|stdbuf|timeout|chronic|ionice|taskset|setsid|eatmydata) continue ;;
+        -u|-g|-h|-p|-U|-C|-D|-r|-t|-T|-n|-o|-e|-i|-E|-S) skipval=1; continue ;;
+        -*) continue ;;
+      esac
+      cmd="${tok##*/}"; seen=1; continue
     fi
-  fi
-  # Builds.
-  if printf '%s' "$lc" | grep -qE '\bcargo[[:space:]]+(build|check|clippy|doc|bench|install|publish|run|fix)\b|\bgo[[:space:]]+(build|install|generate)\b|\b(make|gmake|cmake|ninja|meson|bazel|buck2)\b|\bdocker[[:space:]]+(build|buildx|compose|run|pull|push)\b|\bxcodebuild\b|\bgradle(w)?\b|\b(mvn|mvnw|ant)\b|\b(terraform|pulumi|vagrant|packer)\b|\b(npm|pnpm|yarn|bun)[[:space:]]+(run[[:space:]]+)?(build|compile|bundle|ci)\b'; then
-    printf 'heavy: build'; return 0
-  fi
-  # Installs / dependency resolution.
-  if printf '%s' "$lc" | grep -qE '\b(npm|pnpm|yarn|bun)[[:space:]]+(ci|install|i|add|remove|update|exec)\b|\bnpx\b|\b(pip3?|pipx|uv[[:space:]]+pip|poetry|conda|gem|composer|brew|apt(-get)?|snap|choco|winget)[[:space:]]+(install|add|i|upgrade|update|remove|uninstall)\b|\bcargo[[:space:]]+install\b|\bgo[[:space:]]+install\b'; then
-    printf 'heavy: install'; return 0
-  fi
-  # Benchmarks / profiling at scale.
-  if printf '%s' "$lc" | grep -qE '\b(benchmark|benchmarks|hyperfine|criterion|k6|artillery|autocannon|unixbench|phoronix)\b|\bwrk\b|\bsiege\b'; then
-    printf 'heavy: benchmark'; return 0
-  fi
+    rest+=("$tok")
+  done
+  [ -n "$cmd" ] || { printf 'light'; return 0; }
+  # This repo's heavy suites, matched as arg BASENAMES (bash conformance.sh, ./x test_factory_y).
+  local a base
+  for a in ${rest[@]+"${rest[@]}"}; do
+    base="${a##*/}"
+    case "$base" in conformance*|test_factory*) printf 'heavy: test suite'; return 0 ;; esac
+  done
+  # A suite runner aimed at ONE explicit test FILE is an own-unit-test run -> light, unless a
+  # suite-wide flag (--coverage/--watch/--all/workers/xdist -n/...) is also present.
+  case "$cmd" in
+    pytest|py.test|trial|nosetests|vitest|jest|mocha|ava|jasmine|qunit|tap|tape|lab|uvu|phpunit|rspec|ctest|behave|lettuce|ginkgo)
+      if [ "${#rest[@]}" -gt 0 ] \
+         && printf '%s\n' "${rest[@]}" | grep -qE '\.(py|py\.test|js|jsx|ts|tsx|sh|rb|php)$' \
+         && ! printf '%s\n' "${rest[@]}" | grep -qE '^(--config|--setupFiles|--globalSetup|--reporters|--coverage|--all|--watch|--ci|-n|--numprocesses|--dist|--workers|--jobs|maxWorkers|max-workers)'; then
+        printf 'light'; return 0
+      fi
+      printf 'heavy: test suite runner'; return 0 ;;
+  esac
+  local sub="${rest[0]:-}"
+  case "$cmd" in
+    # ---- test suites via package runners ----
+    npm|pnpm|yarn|bun)
+      case "$sub" in
+        test|t|ci|e2e) printf 'heavy: test suite'; return 0 ;;
+        run) case "${rest[1]:-}" in test|ci|e2e|build|compile|bundle) printf 'heavy: build/test via %s run' "$cmd"; return 0 ;; esac ;;
+        install|i|add|remove|update|unlink) printf 'heavy: install'; return 0 ;;
+      esac ;;
+    # ---- builds ----
+    go) case "$sub" in test|build|install|generate|vet) printf 'heavy: go %s' "$sub"; return 0 ;; esac ;;
+    cargo) case "$sub" in build|test|bench|install|clippy|check|doc|publish|run|fix|verify-project) printf 'heavy: cargo %s' "$sub"; return 0 ;; esac ;;
+    make|gmake|bmake|rake)
+      # Only named heavy targets or parallel flags count — bare `make` is NOT a signal
+      # (L10 verdict: `make lint`, `make`, and any loose word-match were false positives).
+      case "$sub" in -j*|--jobs|-l|-k) printf 'heavy: parallel %s' "$cmd"; return 0 ;;
+        test|tests|build|all|install|compile|dist|release|check|coverage|e2e) printf 'heavy: %s %s' "$cmd" "$sub"; return 0 ;; esac ;;
+    docker|podman) case "$sub" in build|buildx|compose|run|pull|push|save|load|import|export) printf 'heavy: %s %s' "$cmd" "$sub"; return 0 ;; esac ;;
+    xcodebuild|gradle|gradlew|mvn|mvnw|ant|sbt|mill|ninja|meson|bazel|buck|buck2) printf 'heavy: build tool'; return 0 ;;
+    cmake) case "$sub" in --version|--help|-version|-help|--help-manual) ;; *) printf 'heavy: cmake configure/build'; return 0 ;; esac ;;
+    swift) case "$sub" in build|test) printf 'heavy: swift %s' "$sub"; return 0 ;; esac ;;
+    terraform|tofu|opentofu|pulumi|packer) printf 'heavy: infra tool'; return 0 ;;
+    vagrant) case "$sub" in up|provision|build|destroy|reload|resume) printf 'heavy: vagrant %s' "$sub"; return 0 ;; esac ;;
+    # ---- installs ----
+    pip|pip3|pipx) case "$sub" in install|i|download|wheel) printf 'heavy: pip install'; return 0 ;; esac ;;
+    uv) case "$sub" in sync|add|tool|venv) printf 'heavy: uv %s' "$sub"; return 0 ;; pip) [ "${rest[1]:-}" = "install" ] && { printf 'heavy: uv pip install'; return 0; } ;; esac ;;
+    poetry) case "$sub" in install|add|update|sync|lock) printf 'heavy: poetry %s' "$sub"; return 0 ;; esac ;;
+    conda|mamba) case "$sub" in install|create|env) printf 'heavy: conda %s' "$sub"; return 0 ;; esac ;;
+    gem) case "$sub" in install|update|fetch) printf 'heavy: gem %s' "$sub"; return 0 ;; esac ;;
+    bundle|bundler) case "$sub" in install|update|add|remove) printf 'heavy: bundle %s' "$sub"; return 0 ;; esac ;;
+    composer) case "$sub" in install|update|require|remove) printf 'heavy: composer %s' "$sub"; return 0 ;; esac ;;
+    brew) case "$sub" in install|upgrade|update|reinstall|tap|untap) printf 'heavy: brew %s' "$sub"; return 0 ;; esac ;;
+    apt|apt-get|yum|dnf|pacman|zypper|apk|snap|choco|winget|scoop)
+      case "$sub" in install|i|add|upgrade|dist-upgrade|remove|purge|reinstall) printf 'heavy: package install'; return 0 ;; esac ;;
+    # ---- benchmarks ----
+    hyperfine|k6|artillery|autocannon|wrk|siege|phoronix|unixbench) printf 'heavy: benchmark'; return 0 ;;
+    # ---- several suites/commands in parallel (explicit tools only; `&`/`;` segments are
+    #      classified independently above, so `ls & wait` stays light) ----
+    parallel) printf 'heavy: parallel runner'; return 0 ;;
+    xargs) [ "${#rest[@]}" -gt 0 ] && printf '%s\n' "${rest[@]}" | grep -qE '^-P[0-9]|--processes[= ][0-9]|-P$' && { printf 'heavy: xargs -P'; return 0; } ;;
+  esac
   printf 'light'
 }
 
@@ -87,6 +147,26 @@ osrc_heavy() {
     light) return 1 ;;
     *)     printf '%s\n' "$r" >&2; return 0 ;;
   esac
+}
+
+# _osrc_heavy_reason <cmd> -> "heavy: <why>" | "light"
+_osrc_heavy_reason() {
+  local cmd="$1" lc m seg r segs
+  [ -n "${cmd//[[:space:]]/}" ] || { printf 'light'; return 0; }
+  lc="$(printf '%s' "$cmd" | tr '[:upper:]' '[:lower:]')"
+  m="$(_osrc_heavy_markers "$lc")"
+  [ -n "$m" ] && { printf '%s' "$m"; return 0; }
+  # Compound commands: classify each ; & | && || -separated segment; heavy if ANY is.
+  segs="$(printf '%s' "$lc" | tr ';&|' '\n\n\n')"
+  while IFS= read -r seg; do
+    seg="${seg#"${seg%%[![:space:]]*}"}"
+    [ -n "${seg//[[:space:]]/}" ] || continue
+    r="$(_osrc_heavy_segment "$seg")"
+    [ "$r" != "light" ] && { printf '%s' "$r"; return 0; }
+  done <<_OSRC_HEAVY_SEGS
+$segs
+_OSRC_HEAVY_SEGS
+  printf 'light'
 }
 
 # ---- Mac load ----------------------------------------------------------------------------------
@@ -128,76 +208,76 @@ _osrc_mac_overloaded() {
   return 1
 }
 
-# ---- cloud brief + wait -------------------------------------------------------------------------
-# _osrc_heavy_id <check> -> stable lane id; suffixes epoch when the id is already registered.
-_osrc_heavy_id() {
-  local c id
+# ---- events: L1's lanes/events.jsonl contract + stderr mirror -------------------------------
+# _osrc_heavy_emit <kind> <target> <detail> <next> -> appends {ts,kind,target,detail,next,src}
+# to $OSRC_HOME/lanes/events.jsonl (same schema as L7's _osrc_event / lib/supervise.sh) and
+# prints the EVENT/NEXT pair to stderr so the caller's log shows it too.
+_osrc_heavy_emit() {
+  local kind="$1" target="$2" detail="$3" next="$4" src="${5:-heavy}"
+  local ts f line
+  ts="$(date +%s 2>/dev/null || echo 0)"
+  if [ -n "${OSRC_HOME:-}" ]; then
+    f="$OSRC_HOME/lanes/events.jsonl"; _mkdir_private "$OSRC_HOME/lanes" 2>/dev/null
+    if have jq; then
+      jq -cn --argjson ts "$ts" --arg k "$kind" --arg t "$target" --arg d "$detail" \
+        --arg n "$next" --arg s "$src" \
+        '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$s}' >> "$f" 2>/dev/null || true
+    else
+      line="$(printf '%s' "$detail" | tr '\n"\\' '   ' | cut -c1-300)"
+      printf '{"ts":%s,"kind":"%s","target":"%s","detail":"%s","next":"%s","src":"%s"}\n' \
+        "$ts" "$kind" "$target" "$line" "$(printf '%s' "$next" | tr '\n"\\' '   ' | cut -c1-300)" "$src" >> "$f" 2>/dev/null || true
+    fi
+  fi
+  printf 'EVENT %s %s %s %s\n' "$kind" "$target" "$ts" "$detail" >&2
+  printf 'NEXT %s\n' "$next" >&2
+}
+
+# ---- lane id + brief (sha-pinned) --------------------------------------------------------------
+# _osrc_heavy_lane_id <check> <sha> -> stable lane id for an identical check+sha. No epoch
+# suffix: the SAME check on the SAME commit IS the same lane — that is the dedupe key.
+_osrc_heavy_lane_id() {
+  local c sha7 id
   c="$(printf '%s' "$1" | cksum 2>/dev/null | awk '{print $1}')"; c="${c:-0}"
-  id="heavy-$c"
-  [ -n "${OSRC_HOME:-}" ] && [ -e "$OSRC_HOME/remote/$id.json" ] && id="$id-$(date +%s)"
+  sha7="$(printf '%s' "$2" | cut -c1-7)"; sha7="${sha7:-unknown}"
+  id="heavy-$c-$sha7"
   printf '%s' "$id"
 }
 
-# _osrc_heavy_brief <id> <check> <repo> <base> -> writes the self-contained task file `cloud
-# start` wraps into its context pack; prints the path. Teaches the RESULT contract the gate polls.
+# _osrc_heavy_brief <id> <check> <repo> <base> <sha> -> self-contained task file for `cloud
+# start`; prints path. Pins the exact commit; RESULT must echo sha= and rc=.
 _osrc_heavy_brief() {
-  local id="$1" check="$2" repo="$3" base="$4" dir f
+  local id="$1" check="$2" repo="$3" base="$4" sha="$5" dir f
   [ -n "${OSRC_HOME:-}" ] || return 1
   dir="$OSRC_HOME/cloud"; _mkdir_private "$dir" 2>/dev/null || return 1
   f="$dir/$id.brief.md"
   {
-    printf 'Run ONE command on the pushed branch and report its result.\n\n'
-    printf 'Repository: %s\nBase branch: %s\n\n' "${repo:-the repository you cloned}" "${base:-the base branch}"
-    printf 'At the repository root run exactly this command:\n\n```\n%s\n```\n\n' "$check"
+    printf 'Run ONE command on the pinned commit and report its result.\n\n'
+    printf 'Repository: %s\nBase branch: %s\nPinned commit: %s\n\n' "${repo:-the repository you cloned}" "${base:-the base branch}" "$sha"
+    printf 'Check out commit `%s` (it is the tip of `%s` on the remote), then at the repository root run exactly:\n\n```\n%s\n```\n\n' "$sha" "$base" "$check"
     printf 'Then commit on branch `cloud/%s`:\n' "$id"
-    printf -- '- `%s.RESULT`: first line `rc=<exit code of the command above>`, then the last ~80 lines of its combined output.\n' "$id"
+    printf -- '- `%s.RESULT`: first line `sha=%s`, second line `rc=<exit code of the command above>`, then the last ~80 lines of its combined output.\n' "$id" "$sha"
     printf -- '- `%s.READY` at the repository root containing exactly one line: `READY %s`.\n' "$id" "$id"
     printf -- '- push `cloud/%s`. Change nothing else; do not modify source files.\n' "$id"
-    printf 'If the command cannot run in your environment, still write `%s.RESULT` with `rc=127` and the error text, plus `%s.READY`, and push.\n' "$id" "$id"
+    printf 'If the command cannot run in your environment, still write `%s.RESULT` with `sha=%s` and `rc=127` plus the error text, plus `%s.READY`, and push.\n' "$id" "$sha" "$id"
   } > "$f" 2>/dev/null || return 1
   chmod 600 "$f" 2>/dev/null
   printf '%s' "$f"
 }
 
-# _osrc_heavy_cloud_wait <id> <dir> <out> <secs> -> polls origin for cloud/<id> carrying
-# <id>.RESULT; writes the report to $out and sets OSRC_HEAVY_RC. rc124 on timeout (lane keeps
-# running remotely; `cloud ls` / lane events show it).
-_osrc_heavy_cloud_wait() {
-  local id="$1" dir="$2" out="$3" secs="${4:-300}" start now elapsed res rc
-  start="$(date +%s)"
-  while :; do
-    if git -C "$dir" fetch -q origin "+refs/heads/cloud/$id:refs/remotes/osrc-cloud/$id" 2>/dev/null; then
-      res="$(git -C "$dir" show "refs/remotes/osrc-cloud/$id:$id.RESULT" 2>/dev/null)"
-      if [ -n "$res" ]; then
-        rc="$(printf '%s' "$res" | sed -n 's/^rc=//p' | head -1 | tr -dc '0-9')"
-        case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
-        printf '%s\n' "$res" > "$out" 2>/dev/null || true
-        printf '>>> [heavy] cloud lane %s reported rc=%s\n' "$id" "$rc" >&2
-        OSRC_HEAVY_RC="$rc"; return 0
-      fi
-    fi
-    now="$(date +%s)"; elapsed=$(( now - start ))
-    [ "$elapsed" -ge "$secs" ] && break
-    sleep "${OSRC_HEAVY_POLL:-5}"
-  done
-  printf '[outsourcerer] heavy check TIMED OUT after %ss waiting for cloud lane %s (branch cloud/%s still running remotely; see `cloud ls`).\n' \
-    "$secs" "$id" "$id" >> "$out" 2>/dev/null || true
-  printf '>>> [heavy] cloud lane %s did not report within %ss — it keeps running remotely\n' "$id" "$secs" >&2
-  OSRC_HEAVY_RC=124; return 0
-}
-
-# ---- stall: queue + EVENT/NEXT -----------------------------------------------------------------
-# _osrc_heavy_stall <check> <dir> <out> <reason> -> queues the check under $OSRC_HOME/heavy-queue,
-# prints the CONTRACT pair, sets OSRC_HEAVY_RC=125 (check did not run).
+# ---- stall: queue + EVENT stalled ----------------------------------------------------------------
+# _osrc_heavy_stall <check> <dir> <out> <reason> -> queues the check, emits EVENT stalled +
+# NEXT (cloud option), sets OSRC_HEAVY_RC=125 (NOT RUN — never a pass, never a code failure).
 _osrc_heavy_stall() {
   local check="$1" dir="$2" out="$3" reason="${4:-mac-overloaded}"
-  local id top repo base brief self next load lpc spct qdir qf
+  local id top repo base sha brief self next load lpc spct qdir qf
   OSRC_HEAVY_RC=125; OSRC_HEAVY_NOTE=""
-  id="$(_osrc_heavy_id "$check")"
   top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"
   repo="$(git -C "$dir" remote get-url origin 2>/dev/null)"
+  repo="$(_osrc_url_clean "$repo" 2>/dev/null || printf '%s' "$repo")"
   base="$(git -C "${top:-$dir}" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" 2>/dev/null)"
+  sha="$(git -C "${top:-$dir}" rev-parse HEAD 2>/dev/null)"
+  id="$(_osrc_heavy_lane_id "$check" "$sha")"
+  brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" "$sha" 2>/dev/null)"
   self="${SCRIPT_PATH:-${BASH_SOURCE[1]:-$0}}"
   if [ -n "$repo" ] && [ -n "$base" ] && [ -n "$brief" ]; then
     next="\"$self\" cloud start $id --repo $(printf '%q' "$repo") --base $(printf '%q' "$base") --brief $(printf '%q' "$brief") --vehicle auto"
@@ -207,23 +287,20 @@ _osrc_heavy_stall() {
   if [ -n "${OSRC_HOME:-}" ]; then
     qdir="$OSRC_HOME/heavy-queue"; _mkdir_private "$qdir" 2>/dev/null
     qf="$qdir/$id.cmd"
-    { printf '# queued heavy check %s (%s) — not run locally\n' "$(date +%s)" "$reason"
-      printf 'dir: %s\ncheck: %s\n' "$dir" "$check"
+    { printf '# queued heavy check %s (%s) — NOT RUN locally (rc 125 means not-run)\n' "$(date +%s)" "$reason"
+      printf 'dir: %s\ncheck: %s\nsha: %s\n' "$dir" "$check" "$sha"
       printf 'cloud option: %s\n' "$next"; } > "$qf" 2>/dev/null || true
   fi
   load="$(osrc_mac_load 2>/dev/null)"
   lpc="$(printf '%s' "$load" | sed -n 's/.*load_per_core=\([^ ]*\).*/\1/p')"; lpc="${lpc:-?}"
   spct="$(printf '%s' "$load" | sed -n 's/.*swap_pct=\([^ ]*\).*/\1/p')"; spct="${spct:-?}"
-  printf 'EVENT stalled %s %s %s load_per_core=%s swap_pct=%s\n' "$id" "$(date +%s)" "$reason" "$lpc" "$spct" >&2
-  printf 'NEXT %s\n' "$next" >&2
+  _osrc_heavy_emit stalled "$id" "heavy-check: $(printf '%s' "$check" | cut -c1-120) ($reason) load_per_core=$lpc swap_pct=$spct" "$next" heavy >&2
   printf '[outsourcerer] heavy check queued as lane %s (%s); it did NOT run locally. Cloud option:\n%s\n' \
     "$id" "$reason" "$next" >> "$out" 2>/dev/null || true
   return 0
 }
 
 # ---- local serialization: one heavy check at a time ----------------------------------------------
-# mkdir lock under $OSRC_HOME/heavy-local.lock.d holding "<epoch>"; stale after
-# OSRC_HEAVY_LOCK_STALE (default 7200s) so a dead holder cannot wedge the queue forever.
 _osrc_heavy_lockdir() { printf '%s/heavy-local.lock.d' "${OSRC_HOME:-${TMPDIR:-/tmp}/osrc-home}"; }
 
 _osrc_heavy_lock() { # <wait-secs> -> rc0 while holding the lock
@@ -246,34 +323,52 @@ _osrc_heavy_unlock() { rm -rf "$(_osrc_heavy_lockdir)" 2>/dev/null; return 0; }
 
 # ---- the gate ------------------------------------------------------------------------------------
 # _osrc_heavy_gate <check> <dir> <out> <secs> -> sets OSRC_HEAVY_MODE (run|nice|done).
-# Order per the add-on: cloud vehicle available -> run there; else local niced one-at-a-time;
-# overloaded Mac -> never start, queue + EVENT stalled. Called from _loop_check before spawn.
+# NEVER launches: cloud is an OFFER (EVENT approval + NEXT) only when a vehicle is usable AND
+# the tree is clean with HEAD fully on the remote; the sha is pinned into the brief.
 _osrc_heavy_gate() {
   OSRC_HEAVY_MODE="run"; OSRC_HEAVY_RC=1; OSRC_HEAVY_NOTE=""
   [ "${OSRC_HEAVY_OFF:-0}" = "1" ] && return 0
   local check="$1" dir="$2" out="$3" secs="${4:-300}" reason
   reason="$(_osrc_heavy_reason "$check")"
-  [ "$reason" = "light" ] && return 0    # light -> normal path
+  [ "$reason" = "light" ] && return 0
   printf '%s\n' "$reason" >&2
-  local top repo base id brief veh launch_log
-  # --- try a cloud lane first ---------------------------------------------------------------
+  local top repo base sha id brief veh self next dirty unpushed
+  # --- cloud OFFER (never a launch) ----------------------------------------------------------
   if [ "${OSRC_HEAVY_LOCAL:-0}" != "1" ] && declare -F cmd_cloud >/dev/null 2>&1 \
      && declare -F _cloudrun_pick_vehicle >/dev/null 2>&1; then
     top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"
     repo="$(git -C "$dir" remote get-url origin 2>/dev/null)"
+    repo="$(_osrc_url_clean "$repo" 2>/dev/null || printf '%s' "$repo")"
     base="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-    if [ -n "$top" ] && [ -n "$repo" ] && [ -n "$base" ] \
-       && veh="$(_cloudrun_pick_vehicle auto "${OSRC_CODEX_CLOUD_ENV:-}" 2>/dev/null)" \
-       && id="$(_osrc_heavy_id "$check")" \
-       && brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" 2>/dev/null)"; then
-      launch_log="${OSRC_HOME:-}/cloud/$id.heavy.log"
-      printf '>>> [heavy] %s — delegating to cloud lane %s (%s)\n' "$reason" "$id" "$veh" >&2
-      if ( cd "$dir" && cmd_cloud start "$id" --repo "$repo" --base "$base" --brief "$brief" --vehicle "$veh" --where cloud ) >"$launch_log" 2>&1; then
-        _osrc_heavy_cloud_wait "$id" "$dir" "$out" "$secs"
-        OSRC_HEAVY_MODE="done"; return 0
+    sha="$(git -C "$dir" rev-parse HEAD 2>/dev/null)"
+    if [ -n "$top" ] && [ -n "$repo" ] && [ -n "$base" ] && [ -n "$sha" ]; then
+      dirty="$(git -C "$dir" status --porcelain 2>/dev/null | head -1)"
+      unpushed="$(git -C "$dir" rev-list --count HEAD --not --remotes 2>/dev/null)"
+      case "$unpushed" in ''|*[!0-9]*) unpushed=0 ;; esac
+      if [ -z "$dirty" ] && [ "$unpushed" = "0" ]; then
+        if veh="$(_cloudrun_pick_vehicle auto "${OSRC_CODEX_CLOUD_ENV:-}" 2>/dev/null)"; then
+          id="$(_osrc_heavy_lane_id "$check" "$sha")"
+          self="${SCRIPT_PATH:-${BASH_SOURCE[1]:-$0}}"
+          if [ -n "${OSRC_HOME:-}" ] && [ -e "$OSRC_HOME/remote/$id.json" ]; then
+            # identical check+sha already has a lane: reuse it, never re-ask
+            printf '>>> [heavy] identical check+sha already delegated to lane %s — not re-asking\n' "$id" >&2
+            _osrc_heavy_emit delegated "$id" "heavy-check already in flight: $(printf '%s' "$check" | cut -c1-100) @ ${sha:0:7}" "\"$self\" cloud ls" heavy >&2
+            printf '[outsourcerer] heavy check NOT RUN: identical check+sha already delegated to cloud lane %s (see `cloud ls`).\n' "$id" >> "$out" 2>/dev/null || true
+            OSRC_HEAVY_RC=125; OSRC_HEAVY_MODE="done"; return 0
+          fi
+          brief="$(_osrc_heavy_brief "$id" "$check" "$repo" "$base" "$sha" 2>/dev/null)"
+          if [ -n "$brief" ]; then
+            next="\"$self\" cloud start $id --repo $(printf '%q' "$repo") --base $(printf '%q' "$base") --brief $(printf '%q' "$brief") --vehicle auto"
+            printf '>>> [heavy] %s — cloud lane %s offered (%s); awaiting approval, NOT launched\n' "$reason" "$id" "$veh" >&2
+            _osrc_heavy_emit approval "$id" "heavy-check: $(printf '%s' "$check" | cut -c1-120) @ ${sha:0:7} — clean pushed tree; run NEXT to approve the hosted session" "$next" heavy >&2
+            printf '[outsourcerer] heavy check NOT RUN locally: cloud lane %s offered (EVENT approval above). To approve: %s\n' "$id" "$next" >> "$out" 2>/dev/null || true
+            OSRC_HEAVY_RC=125; OSRC_HEAVY_MODE="done"; return 0
+          fi
+        fi
+      else
+        OSRC_HEAVY_NOTE="cloud not offered: tree not clean/pushed (dirty or unpushed commits)"
+        printf '>>> [heavy] %s — falling back to local rules\n' "$OSRC_HEAVY_NOTE" >&2
       fi
-      OSRC_HEAVY_NOTE="cloud lane refused ($(tail -1 "$launch_log" 2>/dev/null | cut -c1-120)); falling back to local rules"
-      printf '>>> [heavy] %s\n' "$OSRC_HEAVY_NOTE" >&2
     fi
   fi
   # --- local: never start heavy work on an overloaded Mac ------------------------------------
@@ -286,6 +381,15 @@ _osrc_heavy_gate() {
   printf '>>> [heavy] %s: %s\n' "$OSRC_HEAVY_NOTE" "$(printf '%s' "$check" | cut -c1-100)" >&2
   OSRC_HEAVY_MODE="nice"
   return 0
+}
+
+# _osrc_loop_notrun <kind> <lid> <attempt> <ldir> -> rc-125 NOT RUN bookkeeping for loop
+# callers: persist the reason where `loop status`/resume reads it and announce the stop on
+# stderr. Best-effort — the caller's state change is what matters.
+_osrc_loop_notrun() {
+  printf 'acceptance check NOT RUN (heavy-work gate: cloud approval pending, lane already delegated, or Mac overloaded)\n' \
+    > "$4/last_fail" 2>/dev/null || true
+  echo "[loop $1] $2: acceptance check NOT RUN on attempt $3 — the heavy-work gate did not execute it (see EVENT/NEXT above and $4/last_fail). Stopping: there is no result to iterate or escalate on." >&2
 }
 
 # _osrc_heavy_prompt -> the testing-discipline block injected into generated lane briefs.

@@ -40,18 +40,20 @@ osrc_where() {
     printf 'local\nreason: empty brief — nothing to send to a hosted session\n'
     return 0
   fi
+  # NOTE: match against $lc via herestrings, never `printf | grep -q` — grep -q exits early,
+  # SIGPIPEs a large brief, and an inherited `set -o pipefail` (SHELLOPTS) would misread it.
   # --- LOCAL: the user said local ---------------------------------------------------------
-  if printf '%s' "$lc" | grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|on my (mac|machine|laptop|computer)|this mac|my machine|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only'; then
+  if grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|on my (mac|machine|laptop|computer)|this mac|my machine|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only' <<<"$lc"; then
     decision="local"; reason="the brief says keep it local"
   # --- LOCAL: local-only services / apps the cloud box cannot reach ------------------------
-  elif printf '%s' "$lc" | grep -qE 'whatsapp|\bbrowser\b|mac gui|\bgui app|apple(script|events)|\blocalhost\b|127\.0\.0\.1|0\.0\.0\.0|local (host )?(db|database)|postgres|postgresql|mysql|mariadb|redis|mongodb|\bsqlite3?\b|\btmux\b|\biterm\b|screen session'; then
+  elif grep -qE 'whatsapp|\bbrowser\b|mac gui|\bgui app|apple(script|events)|\blocalhost\b|127\.0\.0\.1|0\.0\.0\.0|local (host )?(db|database)|postgres|postgresql|mysql|mariadb|redis|mongodb|\bsqlite3?\b|\btmux\b|\biterm\b|screen session' <<<"$lc"; then
     decision="local"; reason="the brief needs a local-only service or app (cloud boxes cannot reach this machine)"
   # --- LOCAL: files/state that only exist here ----------------------------------------------
-  elif printf '%s' "$lc" | grep -qE '/users/|/home/|~/|files? (outside|outside of) (the )?(repo|repository)|outside (the )?(repo|repository)|outside the codebase|my (downloads|desktop|documents|pictures)|uncommitted changes|working tree|not pushed|unpushed|local commits'; then
+  elif grep -qE '/users/|/home/|~/|files? (outside|outside of) (the )?(repo|repository)|outside (the )?(repo|repository)|outside the codebase|my (downloads|desktop|documents|pictures)|uncommitted changes|working tree|not pushed|unpushed|local commits' <<<"$lc"; then
     decision="local"; reason="the brief touches files or state that only exist on this machine"
   # --- LOCAL: unpushed commits the brief builds on -------------------------------------------
   elif [ "$( _osrc_where_unpushed_count )" != "0" ] \
-    && printf '%s' "$lc" | grep -qE 'current branch|my (local )?(changes|commits|branch|work)|this checkout|working (dir|directory)|head of|tip of'; then
+    && grep -qE 'current branch|my (local )?(changes|commits|branch|work)|this checkout|working (dir|directory)|head of|tip of' <<<"$lc"; then
     decision="local"; reason="the brief builds on unpushed local commits a cloud clone cannot see"
   fi
   if [ "$decision" = "local" ]; then
@@ -59,7 +61,7 @@ osrc_where() {
     return 0
   fi
   # --- CLOUD (default): self-contained repo work belongs off the Mac -------------------------
-  if printf '%s' "$lc" | grep -qE 'untrusted|third.party|external (repo|code|package)|install|npm ci|brew |curl |wget |heavy|full test suite|test suite|conformance|cargo (test|build)|npm (test|run build|ci)|pnpm |docker build|xcodebuild|gradle|pytest|vitest|jest|make test|hyperfine|benchmark|build from scratch|security audit'; then
+  if grep -qE 'untrusted|third.party|external (repo|code|package)|install|npm ci|brew |curl |wget |heavy|full test suite|test suite|conformance|cargo (test|build)|npm (test|run build|ci)|pnpm |docker build|xcodebuild|gradle|pytest|vitest|jest|make test|hyperfine|benchmark|build from scratch|security audit' <<<"$lc"; then
     reason="hostile/heavy/install work always belongs on a hosted box, off the Mac"
   else
     reason="self-contained repo work — hosted session keeps it off this machine"

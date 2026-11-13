@@ -14,6 +14,13 @@
 # REFUSEs; a REAL .env/credential file in scope hard-dies regardless of ack (KTD1/KTD2).
 # =============================================================================
 
+# _osrc_url_clean <url> -> the URL with any user:pass@ / user@ credential stripped. Anything a
+# pack, brief, lane record or done-check writes down must go through this first: a token embedded
+# in an origin URL is a live credential, and git's own credential helper supplies auth locally.
+_osrc_url_clean() {
+  printf '%s' "${1:-}" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]+@#\1#'
+}
+
 # _is_cloud_lane <disp> -> 0 if the resolved dispatch lane ships data off-machine, else 1.
 # Descriptor-first via _lane_by_disp (disp-vehicle context — provider names like
 # `cc`/`gemini` deliberately do NOT resolve here, preserving the session path's
@@ -259,7 +266,7 @@ _OSRC_GATE_SPECS
   # once it outgrows the pipe buffer grep's early exit SIGPIPEs printf, which pipefail reports as
   # "no secret" -- the hard-block would wave a real credential through to a cloud lane.
   if [ "${OSRC_SECRET_ALLOW_VALUE:-0}" != "1" ] \
-     && grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' <<<"$scan"; then
+     && grep -Eq '(^|[^A-Za-z0-9])(sk-[A-Za-z0-9._-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|[a-zA-Z][a-zA-Z0-9+.-]{1,15}://[^/[:space:]@:"'"'"']+:[^/[:space:]@"'"'"']+@|-----BEGIN [A-Z ]*PRIVATE KEY-----)' <<<"$scan"; then
     die "CLOUD GATE: a live secret VALUE (API key / token / private key) is in the prompt or a --with file — refusing the cloud route so it doesn't leave your machine. Reference the secret by NAME instead of pasting its value, or set OSRC_SECRET_ALLOW_VALUE=1 if you truly intend to send it."
   fi
 }

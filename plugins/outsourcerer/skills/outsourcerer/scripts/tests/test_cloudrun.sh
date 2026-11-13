@@ -86,14 +86,19 @@ BRIEF_PRIVATE="$TMP/brief-private.md"
 printf 'Read the notes in /Users/someone/private/plan.md and implement them.\n' > "$BRIEF_PRIVATE"
 
 export CLAUDE_CODE_SESSION_ID="test-L10-session"
-export OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8
+export OSRC_CLOUD_LAUNCH_WAIT=8
+# Hosted sessions use their OWN consent key (cloud-session-consent), never OSRC_CLOUD_ACK
+# and never the model-API cloud-consent file. Grant it once for the happy paths below.
+_cloudrun_consent_grant
 
 start_cloud() { # runs _cloudrun_start inside WORK with stubs on PATH; args passed through
-  ( cd "$WORK" && PATH="$STUB:$PATH" _cloudrun_start "$@" )
+  ( cd "$WORK" && hash -r && PATH="$STUB:$PATH" _cloudrun_start "$@" )
 }
 
 # ============================== osrc_where routing table ==============================
-w() { osrc_where "$1" | head -1; }
+# Run inside the fixture repo ($WORK): osrc_where's unpushed-commit check reads the cwd's
+# git state, and this suite itself sits on an unpushed lane branch.
+w() { ( cd "$WORK" && osrc_where "$1" | head -1 ); }
 [ "$(w 'refactor the auth module and add unit tests')" = "cloud" ] \
   && ok "where: self-contained repo work -> cloud" || bad "where: repo work not cloud"
 [ "$(w 'install the new npm packages and run the full test suite')" = "cloud" ] \
@@ -167,21 +172,95 @@ out="$(start_cloud t-where2 --repo "$WORK" --base main --brief "$BRIEF" --where 
 [ $rc -ne 0 ] && echo "$out" | grep -q 'cannot run a local brief' \
   && ok "start: --where local is a usage error" || bad "start: --where local accepted (rc=$rc)"
 
-# ============================== consent gate ==========================================
-rm -f "$OSRC_HOME/cloud-consent"
+# ============================== consent gate (own key: cloud-session-consent) =============
+rm -f "$OSRC_HOME/cloud-session-consent" "$OSRC_HOME/cloud-consent"
 out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
   unset OSRC_CLOUD_ACK
   . "'"$SRC"'" >/dev/null 2>&1
   SCRIPT_PATH="'"$SRC"'"
   _cloudrun_start t-consent --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude
 ' </dev/null 2>&1 )"; rc=$?
-[ $rc -ne 0 ] && echo "$out" | grep -q 'ONE-TIME consent' \
-  && ok "consent: no ack + non-interactive -> refuse" || bad "consent: proceeded without ack (rc=$rc)"
+[ $rc -ne 0 ] && echo "$out" | grep -q 'cloud consent grant' \
+  && ok "consent: no session grant + non-interactive -> refuse" || bad "consent: proceeded without grant (rc=$rc): $out"
 [ ! -e "$OSRC_HOME/remote/t-consent.json" ] && ok "consent: no lane on refusal" || bad "consent: lane written on refusal"
+
+# the model-API consent file + OSRC_CLOUD_ACK must NOT imply hosted-session consent
+printf 'granted\n' > "$OSRC_HOME/cloud-consent"
+out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
+  export OSRC_CLOUD_ACK=1
+  . "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"
+  _cloudrun_start t-consent2 --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude
+' </dev/null 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'cloud consent grant' \
+  && ok "consent: OSRC_CLOUD_ACK + model-API file do NOT grant sessions" || bad "consent: env/old file implied session consent (rc=$rc)"
+rm -f "$OSRC_HOME/cloud-consent"
+
+# `cloud consent grant` subcommand is the documented fix, then start proceeds
+out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"
+  cmd_cloud consent grant >/dev/null && cmd_cloud consent status
+' 2>&1 )"
+echo "$out" | grep -q 'GRANTED' && ok "consent: cloud consent grant/status works" || bad "consent: grant subcommand failed: $out"
+
+# ============================== L7 spend gate integration ==============================
+# when _osrc_spend_gate is loaded, cloud start calls it with the vehicle->lane mapping
+# (claude->cc, devin->dv, codex->cx) BEFORE consent/launch.
+out="$( cd "$WORK" && PATH="$STUB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"
+  _osrc_spend_gate() { echo "SPEND_GATE|$1|$2|$3|$4" >> "'"$OSRC_STUB_LOG"'"; }
+  _cloudrun_start t-spend --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude --model sonnet-test
+' 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && grep -q 'SPEND_GATE|cc|sonnet-test|claude|cloud session t-spend' "$OSRC_STUB_LOG" \
+  && ok "spend: gate called lane=cc model=sonnet-test disp=claude" || bad "spend: gate args wrong/missing (rc=$rc): $(grep SPEND "$OSRC_STUB_LOG")"
+: > "$OSRC_STUB_LOG"
+out="$( cd "$WORK" && PATH="$STUB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"
+  _osrc_spend_gate() { echo "SPEND_GATE|$1|$2|$3|$4" >> "'"$OSRC_STUB_LOG"'"; }
+  _cloudrun_start t-spenddv --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle devin
+' 2>&1 )"; rc=$?
+grep -q 'SPEND_GATE|dv||devin|' "$OSRC_STUB_LOG" \
+  && ok "spend: devin maps to dv lane (ACU-metered)" || bad "spend: devin lane mapping wrong: $(grep SPEND "$OSRC_STUB_LOG")"
+# a refusing gate must stop the launch dead
+out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  SCRIPT_PATH="'"$SRC"'"
+  _osrc_spend_gate() { die "spend gate refused (test)"; }
+  _cloudrun_start t-spendno --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude
+' 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'spend gate refused' \
+  && ok "spend: gate refusal stops launch" || bad "spend: refusal not honored (rc=$rc)"
+[ ! -e "$OSRC_HOME/remote/t-spendno.json" ] && ok "spend: no lane registered on refusal" || bad "spend: lane written on refusal"
+
+# ============================== URL credential stripping ==============================
+cu="$(_osrc_url_clean 'https://x-access-token:TOK123@github.com/acme/widgets.git')"
+[ "$cu" = "https://github.com/acme/widgets.git" ] \
+  && ok "urlclean: user:pass@ stripped" || bad "urlclean: '$cu'"
+cu2="$(_osrc_url_clean 'https://user@github.com/acme/widgets.git')"
+[ "$cu2" = "https://github.com/acme/widgets.git" ] \
+  && ok "urlclean: bare user@ stripped" || bad "urlclean user@: '$cu2'"
+parsed="$( _cloudrun_repo_parse 'https://u:p@github.com/acme/widgets.git' )"
+echo "$parsed" | grep -qE 'u:p@|widgets' && ! echo "$parsed" | grep -q 'u:p@' \
+  && ok "urlclean: repo_parse emits credential-free url+display" || bad "urlclean: parse leaked: $parsed"
+out="$( bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _secret_scan "clone https://u:p@github.com/acme/widgets.git and run tests" t-url
+' 2>&1 )"; rc=$?
+[ $rc -ne 0 ] && echo "$out" | grep -q 'secret VALUE' \
+  && ok "secret-scan: URL credential pattern hard-blocks" || bad "secret-scan: URL cred missed (rc=$rc): $out"
+# pack pins the sha and demands the RESULT echo it
+(cd "$WORK" && git rev-parse HEAD >/dev/null 2>&1) && \
+out="$(start_cloud t-packsha --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+PK="$(ls "$OSRC_HOME"/cloud/t-packsha.pack.md 2>/dev/null)"
+[ -n "$PK" ] && grep -q 'pinned commit:' "$PK" && grep -q 'sha=' "$PK" \
+  && ok "pack: sha pinned + RESULT echo required" || bad "pack: missing sha contract (rc=$rc)"
 
 # ============================== vehicle probes ========================================
 # all vehicles missing -> auto refuses with reasons
-out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 bash -c '
+out="$( cd "$WORK" && bash -c '
   source "'"$SRC"'" >/dev/null 2>&1
   have() { case "$1" in claude|devin|codex) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
   SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
@@ -191,6 +270,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 bash -c '
   && ok "vehicle: all missing -> auto refuses" || bad "vehicle: all-missing not refused (rc=$rc)"
 
 # claude missing -> auto skips to devin
+: > "$OSRC_STUB_LOG"
 out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   source "'"$SRC"'" >/dev/null 2>&1
   have() { case "$1" in claude) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
@@ -198,7 +278,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   PATH="'"$STUB"':$PATH" _cloudrun_start t-skip --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && echo "$out" | grep -q 'devin session started' \
-  && ok "vehicle: missing claude -> auto skips to devin" || bad "vehicle: skip-to-devin failed (rc=$rc)"
+  && ok "vehicle: missing claude -> auto skips to devin" || { bad "vehicle: skip-to-devin failed (rc=$rc)"; echo "SKIPDEBUG: $out" >&2; echo "STUBLOG: $(cat "$OSRC_STUB_LOG")" >&2; }
 echo "$out" | grep -q 'vehicle skipped' && ok "vehicle: skip reason printed" || bad "vehicle: skip reason missing"
 
 # ============================== launch argv per vehicle ===============================
