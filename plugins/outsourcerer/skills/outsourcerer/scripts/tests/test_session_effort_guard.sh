@@ -31,17 +31,41 @@ JSON
 SNAP="$(shasum -a 256 "$SETTINGS" 2>/dev/null || cksum "$SETTINGS")"
 
 # Fake tmux: session exists, capture returns a benign non-menu pane, send-keys is logged.
+# display-message answers by format: FAKE_PANE_CMD is the pane's foreground command
+# (default "codex" = identified non-claude; set to "" for an unidentifiable pane),
+# FAKE_PANE_PID feeds the process-tree walk (default a pid that cannot exist).
 SEND_LOG="$TMP/send.log"; : > "$SEND_LOG"
 CAPTURE_FILE="$TMP/capture"; printf 'working on the thing\n' > "$CAPTURE_FILE"
 tmux() {
+  local last; for last; do :; done
   case "$1" in
     has-session) return 0 ;;
     capture-pane) cat "$CAPTURE_FILE" 2>/dev/null; return 0 ;;
     send-keys) printf 'SEND: %s\n' "$*" >> "$SEND_LOG"; return 0 ;;
-    display-message) printf '4242\n'; return 0 ;;
+    display-message)
+      case "$last" in
+        *pane_current_command*) printf '%s\n' "${FAKE_PANE_CMD-codex}"; return 0 ;;
+        *pane_pid*) printf '%s\n' "${FAKE_PANE_PID-99999999}"; return 0 ;;
+        *) printf '4242\n'; return 0 ;;
+      esac ;;
     *) return 0 ;;
   esac
 }
+
+# Stubbed claude bin: --help advertises --effort unless $OSRC_TEST_NO_EFFORT_FLAG
+# names an existing file (the "older claude" case). NEVER the real claude.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--help" ]; then
+  printf 'Usage: claude [options]\n  --model <model>\n  -c, --continue  Continue the most recent conversation\n'
+  [ -f "${OSRC_TEST_NO_EFFORT_FLAG:-/nonexistent-osrc-path}" ] || printf '  --effort <level>  Effort level for the current session\n'
+fi
+exit 0
+EOF
+chmod +x "$TMP/bin/claude"
+PATH="$TMP/bin:$PATH"; export PATH
+export OSRC_TEST_NO_EFFORT_FLAG="$TMP/no-effort-flag"
 
 # Registry records: one cc session, one codex session, written directly (start-event tmux
 # probes are irrelevant to the guard and would slow the suite).
@@ -117,12 +141,98 @@ _session_send_effort_guard sess-cc "/effort low"; rc=$?
   && ok "guard refuses with settings.json absent and creates nothing" \
   || bad "guard behaved wrongly with settings.json absent (rc=$rc)"
 
-# ---- the per-session path itself: cc relaunch is env-scoped, never a settings write ----------
+# ---- pane identity: stock claude screen, no registry record -------------------------------
+# A stock Claude Code screen has NO ContextQ footer; pane_current_command is the proof.
+FAKE_PANE_CMD=claude
+printf 'working on the thing\n' > "$CAPTURE_FILE"
+_session_send_effort_guard sess-stock "/effort high"; rc=$?
+[ "$rc" -eq 1 ] && ok "guard refuses /effort when pane_current_command is claude (stock screen, no record)" \
+  || bad "guard missed stock claude pane (rc=$rc)"
+
+# Unidentifiable pane (no command, dead pid, no footer, no record): fail closed.
+FAKE_PANE_CMD=
+_session_send_effort_guard sess-mystery "/effort high"; rc=$?
+[ "$rc" -eq 1 ] && ok "guard fails closed when the pane cannot be identified" \
+  || bad "guard allowed /effort on an unidentified pane (rc=$rc)"
+
+# Identified non-claude with no record at all: allowed.
+FAKE_PANE_CMD=codex
+_session_send_effort_guard sess-mystery "/effort high"; rc=$?
+[ "$rc" -eq 0 ] && ok "guard allows /effort on an identified non-claude pane" \
+  || bad "guard refused identified codex pane (rc=$rc)"
+
+# Wrapper foreground (bash) with claude underneath in the process tree: refused.
+FAKE_PANE_CMD=bash; FAKE_PANE_PID=9999
+ps() { local last; for last; do :; done; case "$last" in 9999) printf '%s\n' -- '-zsh';; 9998) printf '%s\n' 'claude --model fable';; *) printf '%s\n' 'sleep 30';; esac; }
+pgrep() { local last; for last; do :; done; [ "$last" = 9999 ] && printf '9998\n'; return 0; }
+_session_send_effort_guard sess-wrap "/effort high"; rc=$?
+unset -f ps pgrep
+FAKE_PANE_PID=99999999; FAKE_PANE_CMD=codex
+[ "$rc" -eq 1 ] && ok "guard refuses when the pane's process tree runs claude" \
+  || bad "guard missed claude in the pane process tree (rc=$rc)"
+
+# Explicit operator override for a pane proven not to be Claude Code.
+( OSRC_SEND_ALLOW_EFFORT=1; _session_send_effort_guard sess-cc "/effort high" ); rc=$?
+[ "$rc" -eq 0 ] && ok "OSRC_SEND_ALLOW_EFFORT=1 overrides the guard" \
+  || bad "override env did not bypass the guard (rc=$rc)"
+
+out="$(OSRC_SEND_ALLOW_EFFORT=1 SESSION_NAME=sess-cc session send "/effort high" 2>&1)"
+printf '%s' "$out" | grep -q 'effortLevel into' \
+  && bad "override did not get past the guard at dispatch: [$out]" \
+  || ok "OSRC_SEND_ALLOW_EFFORT=1 lets a dispatch send past the guard"
+
+# ---- the per-session path: env cap + session-scoped --effort + --continue ---------------
 Relaunch_out="$(_session_relaunch_cc fable high 2>/dev/null)"
 printf '%s' "$Relaunch_out" | grep -q 'MAX_THINKING_TOKENS=24000' \
-  && printf '%s' "$Relaunch_out" | grep -q 'claude' \
-  && ok "session effort relaunch carries MAX_THINKING_TOKENS (env, per-process)" \
-  || bad "cc relaunch lost the env effort: [$Relaunch_out]"
+  && printf '%s' "$Relaunch_out" | grep -q -- '--effort high' \
+  && printf '%s' "$Relaunch_out" | grep -q -- '--continue' \
+  && ok "cc relaunch carries env cap + --effort high + --continue" \
+  || bad "cc relaunch missing session-scoped effort/continue: [$Relaunch_out]"
+
+Relaunch_min="$(_session_relaunch_cc fable minimal 2>/dev/null)"
+printf '%s' "$Relaunch_min" | grep -q -- '--effort low' \
+  && printf '%s' "$Relaunch_min" | grep -q 'MAX_THINKING_TOKENS=0' \
+  && ok "minimal/none map to --effort low with the zero env cap" \
+  || bad "minimal mapping wrong: [$Relaunch_min]"
+
+Cmd_out="$(_session_relaunch_command cc fable high 2>/dev/null)"
+printf '%s' "$Cmd_out" | grep -q -- '--effort high' \
+  && printf '%s' "$Cmd_out" | grep -q -- '--continue' \
+  && ok "session effort dispatch builds --effort + --continue for cc" \
+  || bad "relaunch command lost the flags: [$Cmd_out]"
+
+# Older claude without --effort in --help: env cap still applies, flag omitted.
+touch "$OSRC_TEST_NO_EFFORT_FLAG"
+Relaunch_old="$(_session_relaunch_cc fable high 2>/dev/null)"
+printf '%s' "$Relaunch_old" | grep -q 'MAX_THINKING_TOKENS=24000' \
+  && ! printf '%s' "$Relaunch_old" | grep -q -- '--effort' \
+  && ok "claude without --effort keeps the env cap and omits the flag" \
+  || bad "unsupported-claude relaunch wrong: [$Relaunch_old]"
+rm -f "$OSRC_TEST_NO_EFFORT_FLAG"
+
+# Session START path: same session-scoped flag when EFFORT is set.
+MODEL=fable; MODEL_EXPLICIT=0; EFFORT=high; SESSION_LAUNCH=()
+_session_launch_cc 2>/dev/null
+joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
+printf '%s' "$joined" | grep -q -- '--effort high' \
+  && ok "session start launch includes --effort high" \
+  || bad "start launch missing --effort: [$joined]"
+
+touch "$OSRC_TEST_NO_EFFORT_FLAG"; EFFORT=high; SESSION_LAUNCH=()
+_session_launch_cc 2>/dev/null
+joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
+! printf '%s' "$joined" | grep -q -- '--effort' \
+  && printf '%s' "$joined" | grep -q 'MAX_THINKING_TOKENS=24000' \
+  && ok "start on old claude keeps env cap, omits --effort" \
+  || bad "start launch on old claude wrong: [$joined]"
+rm -f "$OSRC_TEST_NO_EFFORT_FLAG"
+EFFORT=minimal; SESSION_LAUNCH=()
+_session_launch_cc 2>/dev/null
+joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
+printf '%s' "$joined" | grep -q -- '--effort low' \
+  && ok "start maps minimal -> --effort low" \
+  || bad "start minimal mapping wrong: [$joined]"
+unset EFFORT MODEL MODEL_EXPLICIT SESSION_LAUNCH
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
