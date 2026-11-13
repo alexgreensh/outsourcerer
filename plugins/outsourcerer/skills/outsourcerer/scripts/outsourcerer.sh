@@ -6972,6 +6972,7 @@ _external_reply() { # <session-id> <message>
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
   pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; generation="$(printf '%s' "$claim" | jq -r '.generation')"
   _external_claim_authorized "$claim" || { echo "external reply requires the matching durable controller id and claim token" >&2; return 1; }
+  _session_send_effort_guard "$pane" "$message" || { echo "external reply refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just this pane. To set the global default on purpose, type /effort in the session TUI yourself." >&2; return 1; }
   oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
   if [ "$latest" = typing_started ]; then _obligation_delivery_unknown "$oid" "$id"; echo "delivery unknown; no automatic replay" >&2; return 1; fi
@@ -20017,6 +20018,7 @@ session() {
         esac
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
+      _session_send_effort_guard "$SESSION_NAME" "$*" || die "session send refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just '$SESSION_NAME'. For a per-session change run '$0 session effort <level>' (relaunches this pane session-scoped; settings untouched). To set the global default on purpose, type /effort in the session TUI yourself."
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
       case "$_send_rc" in
         0) echo "sent (delivery verified). Read progress with: $0 session read" ;;
