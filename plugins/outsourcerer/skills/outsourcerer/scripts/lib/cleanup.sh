@@ -257,13 +257,15 @@ _osrc_cleanup_verdict() {
       ;;
     worktree)
       [ -d "$pp" ] || { printf 'ASK\tworktree path is not a directory\n'; return 0; }
-      [ -z "$(git -C "$pp" status --porcelain 2>/dev/null | head -1)" ] \
+      # --untracked-files=all beats a repo's status.showUntrackedFiles=no:
+      # hidden untracked files must still read as uncommitted changes (review B1).
+      [ -z "$(git -C "$pp" status --porcelain --untracked-files=all 2>/dev/null | head -1)" ] \
         || { printf 'ASK\tworktree has uncommitted changes\n'; return 0; }
       # Ignored files are invisible to the check above: a .env or a gitignored
       # deliverable would die with a "clean" worktree. Disposable caches only;
       # .env* and anything else is ASK, named (review finding 1).
       local ig ifile igbad=""
-      ig="$(git -C "$pp" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p')"
+      ig="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null | sed -n 's/^!! //p')"
       if [ -n "$ig" ]; then
         while IFS= read -r ifile; do
           [ -n "$ifile" ] || continue

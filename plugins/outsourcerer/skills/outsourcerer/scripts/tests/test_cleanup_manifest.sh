@@ -80,6 +80,15 @@ owner wt-ignored
 git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/ghost-x" -b outsourcerer/ghost-x HEAD
 WT_GHOST="$R/.outsourcerer/worktrees/ghost-x"
 
+# B1: status.showUntrackedFiles=no must not hide untracked files — a merged-tip
+# worktree with an unseen scratch file is dirty, not deletable.
+R2="$TMP/repo2"; mkrepo "$R2"
+git -C "$R2" config status.showUntrackedFiles no
+git -C "$R2" worktree add -q "$R2/.outsourcerer/worktrees/wt-hidden" -b outsourcerer/wt-hidden HEAD
+WT_HID="$R2/.outsourcerer/worktrees/wt-hidden"
+printf 'unsaved work\n' > "$WT_HID/scratch.txt"
+owner wt-hidden
+
 # Branch records: pr-hit has a MERGED PR whose headRefOid IS the tip (SAFE);
 # pr-old has a MERGED PR but a post-merge commit on top (ASK, finding 2).
 git -C "$R" checkout -qb tmp-side
@@ -124,6 +133,7 @@ manifest "$WT_BAD" worktree wt-unmerged "$R"
 manifest "outsourcerer/wt-unmerged" branch wt-unmerged "$R"
 manifest "$WT_IGN" worktree wt-ignored "$R"
 manifest "$WT_GHOST" worktree ghost-x "$R"
+manifest "$WT_HID" worktree wt-hidden "$R2"
 manifest "outsourcerer/pr-hit" branch job-pr "$R"
 manifest "outsourcerer/pr-old" branch job-pr "$R"
 manifest "$OSRC_HOME/jobs/job-old" job job-old ""
@@ -136,7 +146,7 @@ manifest "$OSRC_HOME/jobs" job evil ""
 manifest "$OSRC_HOME/owners" job evil ""
 manifest "$OSRC_HOME/jobs/../remote" job evil ""
 
-age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" \
+age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" "$WT_HID" \
   "$OSRC_HOME/jobs/job-old" "$OSRC_HOME/jobs/job-busy" \
   "$OSRC_HOME/jobs/job-uncollected" "$OSRC_HOME/jobs/job-liveowner"
 # job-blocked must be old enough to pass the 1h gate but young enough that the
@@ -150,6 +160,7 @@ echo "$out" | grep -q "SAFE.*wt-safe" && ok "merged worktree SAFE despite ignore
 echo "$out" | grep -q "ASK.*wt-unmerged" && ok "unmerged worktree ASK" || bad "wt-unmerged not ASK"
 echo "$out" | grep -q "ASK.*wt-ignored" && ok "worktree with ignored .env ASK (finding 1)" || bad "wt-ignored not ASK"
 echo "$out" | grep -q "ASK.*ghost-x" && ok "owner with no record ASK (finding 5)" || bad "ghost-x not ASK"
+echo "$out" | grep -q "ASK.*wt-hidden" && ok "hidden untracked file makes worktree ASK (B1)" || bad "wt-hidden not ASK: $(echo "$out" | grep wt-hidden)"
 echo "$out" | grep -q "ASK.*pr-old" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
 echo "$out" | grep -q "ASK.*job-blocked" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
 echo "$out" | grep -q "ASK.*job-uncollected" && ok "done-but-uncollected job ASK (finding 4)" || bad "job-uncollected not ASK"
@@ -201,6 +212,7 @@ git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/pr-old >/dev/null 2>&1
 [ -d "$WT_BAD" ] && ok "ASK worktree preserved" || bad "unmerged worktree was deleted!"
 [ -d "$WT_IGN" ] && [ -f "$WT_IGN/.env" ] && ok "ignored-.env worktree preserved (finding 1)" || bad "wt-ignored deleted with its .env!"
 [ -d "$WT_GHOST" ] && ok "no-record-owner worktree preserved" || bad "ghost worktree deleted!"
+[ -d "$WT_HID" ] && [ -f "$WT_HID/scratch.txt" ] && ok "hidden-untracked worktree preserved (B1)" || bad "wt-hidden deleted with unseen untracked file!"
 [ -d "$OSRC_HOME/jobs/job-uncollected" ] && ok "uncollected job preserved (finding 4)" || bad "job-uncollected deleted!"
 [ -d "$OSRC_HOME/jobs/job-blocked" ] && ok "blocked job evidence preserved (finding 4)" || bad "job-blocked deleted!"
 git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/wt-unmerged >/dev/null 2>&1 \
