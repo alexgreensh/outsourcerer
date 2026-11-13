@@ -13,6 +13,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
@@ -225,7 +226,7 @@ case "$out" in *"=== INJECTED SKILL: confskill ==="*) ok "no transport arg keeps
 # ============================================================================
 CAPTURE="$TMP/cline_capture.txt"
 export OSRC_CLINE_FAKE_CAPTURE="$CAPTURE"
-FAKE_PATH="$SCRIPT_DIR/fake-bin"
+FAKE_PATH="$TESTS_DIR/fake-bin"
 REST=("do the thing"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC='skills=confskill'
 rm -f "$CAPTURE"
 ( PATH="$FAKE_PATH:$PATH" delegate_cline auto ) >/dev/null 2>&1 || true

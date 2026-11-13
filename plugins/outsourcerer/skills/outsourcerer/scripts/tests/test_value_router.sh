@@ -7,6 +7,7 @@
 # is exercised for real, not a hand-matched synthetic pair.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent"; echo "RESULT: 0 passed, 0 failed"; exit 0; }
@@ -71,7 +72,7 @@ lane_byok="$(cmd_advise --json --effort max "refactor the auth module" 2>/dev/nu
 grep -q 'OSRC_ADVISE_ROUTER' "$SRC" && ok "OSRC_ADVISE_ROUTER documented" || bad "OSRC_ADVISE_ROUTER not documented"
 grep -q '_model_canon_key' "$SRC" && ok "_model_canon_key present" || bad "_model_canon_key missing"
 grep -q '_lane_marginal_cost' "$SRC" && ok "_lane_marginal_cost present" || bad "_lane_marginal_cost missing"
-grep -q 'test_value_router' "$SCRIPT_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
+grep -q 'test_value_router' "$TESTS_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
 
 echo
 echo "RESULT: $pass passed, $fail failed"

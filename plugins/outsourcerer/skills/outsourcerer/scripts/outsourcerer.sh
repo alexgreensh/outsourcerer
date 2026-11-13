@@ -18824,23 +18824,6 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
   return 0
 }
 
-# The current model generation of a managed session, from its latest start record (1 if none).
-# Non-start events must carry this forward: _session_registry_append defaults generation to 1, and
-# an `effort` record stamped with 1 over a generation-3 session rewinds the model-pin lock key.
-_session_current_generation() { # <session-id>
-  local gen
-  gen="$(_session_record "$1" 2>/dev/null | cut -f4)"
-  case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
-  printf '%s' "$gen"
-}
-
-# Read a session's latest start record: "provider<TAB>model<TAB>effort<TAB>generation<TAB>perm_profile".
-# Field 5 (perm_profile) is "default" for records written before L5 or without --perm.
-_session_record() { # <session-id>
-  _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" \
-    'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring), (.perm_profile // "default")] | @tsv' | tail -1
-}
-
 # Return codes: 0 = VERIFIED submitted (an external receipt adapter proved delivery to the model);
 # 2 = submitted (the text left the composer, verified by pane-content change) but model delivery is
 # NOT independently verified (no receipt adapter — honest "submitted, model delivery unverified");
@@ -18953,16 +18936,6 @@ _managed_session_model() { # <session-id> [model-name/filter]
   esac
   _endpoint_mutation_unlock "$key"
   return "$rc"
-}
-
-# Validate session name before any path construction, tmux, or rm use.
-# Reject empty, '.', '..', and any name containing a character outside [A-Za-z0-9._-].
-_validate_session_name() {
-  case "$SESSION_NAME" in
-    ''|.|..|*[!A-Za-z0-9._-]*)
-      die "invalid session name '$SESSION_NAME' (OUTSOURCERER_TMUX must be non-empty, not '.' or '..', and match ^[A-Za-z0-9._-]+$)"
-      ;;
-  esac
 }
 
 SESSION_LAUNCH=()
@@ -19932,6 +19905,17 @@ session() {
       _external_reply "$external_id" "$*" || return 1
       ;;
     start)
+      # --done-when <spec> is a session-start-only flag: pull it out before parse_model so it never
+      # leaks into REST or a provider argv, validate it up front, and record the contract only after
+      # the launch verifies (osrc_done_* live in lib/done.sh).
+      local _done_when="" _dm_args=()
+      while [ $# -gt 0 ]; do case "$1" in
+        --done-when)    [ -n "${2:-}" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command> | pr:<owner/repo>#<n>"; _done_when="$2"; shift 2 ;;
+        --done-when=*)  _done_when="${1#--done-when=}"; [ -n "$_done_when" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command> | pr:<owner/repo>#<n>"; shift ;;
+        *)              _dm_args+=("$1"); shift ;;
+      esac; done
+      set -- ${_dm_args[@]+"${_dm_args[@]}"}
+      [ -z "$_done_when" ] || osrc_done_validate "$_done_when" || die "session start: invalid --done-when spec"
       parse_model "$@"
       _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
       # Validate the model token before it is interpolated into a tmux shell command — but only when
@@ -19994,6 +19978,12 @@ session() {
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session answer [y|n|<i>|<label>]   |   $0 session control <interrupt|exit|relaunch>   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       _owner_record "$SESSION_NAME"
+      if [ -n "$_done_when" ]; then
+        osrc_done_set "$SESSION_NAME" "$_done_when" "$PWD" || die "session start: could not record the done contract for '$SESSION_NAME'"
+        echo "Done contract recorded: $_done_when"
+      else
+        osrc_done_clear "$SESSION_NAME" 2>/dev/null || true
+      fi
       echo "To be woken when a turn ends: after each session send, start '$0 wait $SESSION_NAME' as a background command."
       ;;
     send)
@@ -20121,6 +20111,7 @@ session() {
     stop)
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       _session_registry_end stop >/dev/null 2>&1 || true
+      osrc_done_clear "$SESSION_NAME" 2>/dev/null || true
       ;;
     *)
       die "session subcommand: start | send \"text\" | answer [y|n|<index>|<label>] | read | clear | model [NAME] | effort <level> | control <interrupt|exit|relaunch> | claim <external-id> <tmux-pane> | release <external-id> | reply <external-id> <text> | stop"

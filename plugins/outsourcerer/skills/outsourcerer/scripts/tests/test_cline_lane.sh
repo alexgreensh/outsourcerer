@@ -16,6 +16,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
@@ -47,7 +48,7 @@ v="$(_cline_effort garbage 2>/dev/null)"
 
 # --- version helpers ---
 # _cline_version calls `cline --version`, so fake-bin must be on PATH for the parse test.
-_cv_test="$(PATH="$SCRIPT_DIR/fake-bin:$PATH" _cline_version 2>/dev/null || echo ERR)"
+_cv_test="$(PATH="$TESTS_DIR/fake-bin:$PATH" _cline_version 2>/dev/null || echo ERR)"
 [ "$_cv_test" = "3.0.48" ] && ok "_cline_version parses 'cline 3.0.48' -> 3.0.48" \
   || bad "_cline_version did not parse 3.0.48 (got '$_cv_test')"
 if _ver_ge 3.0.48 3.0.36 2>/dev/null; then ok "_ver_ge: 3.0.48 >= 3.0.36 (pass)"; else bad "_ver_ge: 3.0.48 should be >= 3.0.36"; fi
@@ -79,7 +80,7 @@ grep -q 'OSRC_CLINE_SKIP_VER_GATE' "$SRC" && ok "version gate bypass escape hatc
 # --- the fake-bin stub must echo, not execute (fork bomb trap) ---
 # A stub that runs `cline 3.0.48` instead of `echo "cline 3.0.48"` would recurse infinitely if ever
 # executed with fake-bin on PATH. The --version output must come from echo, not from executing cline.
-grep -q 'echo "cline' "$SCRIPT_DIR/fake-bin/cline" && ok "fake-bin/cline uses echo for --version (no fork bomb)" \
+grep -q 'echo "cline' "$TESTS_DIR/fake-bin/cline" && ok "fake-bin/cline uses echo for --version (no fork bomb)" \
   || bad "fake-bin/cline does NOT use echo for --version (latent fork bomb)"
 
 # --- install instructions must point at the real npm package (cline, not @anthropic-ai/cline-cli) ---
@@ -115,7 +116,7 @@ _is_cloud_lane cline && ok "cline is in the _is_cloud_lane set" || bad "cline no
 
 # --- brief advertises cline when the CLI is present (auto-detection, no config) ---
 # Stub PATH so `have cline` is true, then run the lane probe.
-PATH="$SCRIPT_DIR/fake-bin:$PATH" _lanes="$(PATH="$SCRIPT_DIR/fake-bin:$PATH" _ready_lanes 2>/dev/null)"
+PATH="$TESTS_DIR/fake-bin:$PATH" _lanes="$(PATH="$TESTS_DIR/fake-bin:$PATH" _ready_lanes 2>/dev/null)"
 case "$_lanes" in *cline=*) ok "brief lists cline when the CLI is on PATH" ;; *) bad "brief does not advertise cline: $_lanes" ;; esac
 
 # --- doctor has a dedicated cline section (install + auth guidance) ---
@@ -157,7 +158,7 @@ echo "=== Layer 2: Behavioral dispatch (fake-bin/cline on PATH) ==="
 # Set up the capture file and PATH for all behavioral tests.
 CAPTURE="$TMP/cline_capture.txt"
 export OSRC_CLINE_FAKE_CAPTURE="$CAPTURE"
-FAKE_PATH="$SCRIPT_DIR/fake-bin"
+FAKE_PATH="$TESTS_DIR/fake-bin"
 
 # Helper: reset globals to a clean state, set REST, and call delegate_cline.
 # delegate_cline reads: REST (task args), MODEL, MODEL_EXPLICIT, EFFORT, TIER_FLAG, WITH_SPEC.
@@ -337,7 +338,7 @@ fi
 # the lane lands on the lane's own "cline CLI not on PATH" error — that error is the proof of dispatch.
 # An earlier no-command `PATH=... _lanes=...` line leaked fake-bin into this shell's PATH globally, so
 # strip it for the seam run (otherwise the fake cline answers and we never see the lane error).
-_SEAM_PATH="${PATH//$SCRIPT_DIR\/fake-bin:/}"; _SEAM_PATH="${_SEAM_PATH//:$SCRIPT_DIR\/fake-bin/}"; _SEAM_PATH="${_SEAM_PATH//$SCRIPT_DIR\/fake-bin/}"
+_SEAM_PATH="${PATH//$TESTS_DIR\/fake-bin:/}"; _SEAM_PATH="${_SEAM_PATH//:$TESTS_DIR\/fake-bin/}"; _SEAM_PATH="${_SEAM_PATH//$TESTS_DIR\/fake-bin/}"
 # --cloud-ack clears the one-time cloud-consent gate (the fresh test $OSRC_HOME has no stored consent)
 # and --wait forces foreground (a non-interactive slow-lane run would otherwise auto-detach to bg and
 # print a job receipt instead of the lane error). Routing (where the dead-lane defect died) runs BEFORE
