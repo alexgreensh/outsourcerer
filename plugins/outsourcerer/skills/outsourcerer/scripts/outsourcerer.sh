@@ -4065,6 +4065,8 @@ _session_launch_cc() {
   [ -n "$EFFORT" ] && SESSION_LAUNCH+=("MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")")
   SESSION_LAUNCH+=("-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
   [ "$MODEL_EXPLICIT" = "1" ] && SESSION_LAUNCH+=("--model" "$MODEL")
+  local _ccflag; _ccflag="$(_cc_effort_flag "${EFFORT:-}")"
+  if [ -n "$_ccflag" ] && _session_cc_effort_supported; then SESSION_LAUNCH+=("--effort" "$_ccflag"); fi
 }
 
 # ---- or (OpenRouter — metered multi-provider gateway, rode by cc/codex transports)
@@ -6927,6 +6929,7 @@ _external_reply() { # <session-id> <message>
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
   pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; generation="$(printf '%s' "$claim" | jq -r '.generation')"
   _external_claim_authorized "$claim" || { echo "external reply requires the matching durable controller id and claim token" >&2; return 1; }
+  _session_send_effort_guard "$pane" "$message" || { echo "external reply refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just this pane. For a per-session change use 'session effort <level>' on a managed claude session (respawns claude with --continue, conversation kept; settings untouched). If this pane is provably not Claude Code, OSRC_SEND_ALLOW_EFFORT=1 overrides the guard. To set the global default on purpose, type /effort in the session TUI yourself." >&2; return 1; }
   oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
   if [ "$latest" = typing_started ]; then _obligation_delivery_unknown "$oid" "$id"; echo "delivery unknown; no automatic replay" >&2; return 1; fi
@@ -19485,6 +19488,7 @@ session() {
         printf 'EVENT failed %s %s send refused: modal open (%s menu); nothing typed\nNEXT OUTSOURCERER_TMUX=%s %s session answer\n' "$SESSION_NAME" "$(date +%s)" "$_menu_kind" "$SESSION_NAME" "$0"
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
+      _session_send_effort_guard "$SESSION_NAME" "$*" || die "session send refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just '$SESSION_NAME'. For a per-session change run '$0 session effort <level>': it respawns this pane's claude with --continue (the conversation is kept; the process does restart) plus a session-scoped --effort flag — settings untouched. If this pane is provably not Claude Code, prefix the send with OSRC_SEND_ALLOW_EFFORT=1 to override the guard; to set the global default on purpose, type /effort in the session TUI yourself."
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
       case "$_send_rc" in
         0) echo "sent (verified: ${OSRC_SEND_EVIDENCE:-delivery receipt}). Read progress with: $0 session read" ;;

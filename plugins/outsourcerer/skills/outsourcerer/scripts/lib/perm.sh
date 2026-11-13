@@ -525,16 +525,19 @@ _osrc_perm_restore_profile() {
 # Both read the global PERM_PROFILE, which _session_control_relaunch restores from
 # the session's registry record before calling _session_relaunch_command.
 
-# Relaunch command for `session effort`/control relaunch on a cc session (claude
-# honors effort via MAX_THINKING_TOKENS). No effort -> rc1 (caller leaves session).
+# Relaunch command for `session effort` on a cc session (claude honors effort via
+# MAX_THINKING_TOKENS plus the session-scoped --effort flag). --continue resumes
+# the pane's conversation so the respawn does not start from nothing. --perm safe adds
+# the same allow-list/ask-rules suffix session start emits (default -> empty suffix).
+# No effort -> rc1 (the caller leaves the session intact).
 _session_relaunch_cc() {
-  local tokens suffix
+  local tokens suffix flag
   tokens="$(_effort_thinking_tokens "$2")"
   [ -n "$tokens" ] || return 1
-  # --perm safe: same allow-list/ask-rules suffix session start emits, %q-quoted for
-  # the respawn-pane shell string; default -> empty suffix, byte-identical output.
   suffix="$(osrc_perm_string_suffix cc "${PERM_PROFILE:-default}")" || return 1
-  printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q%s' "$tokens" "$1" "$suffix"
+  flag="$(_cc_effort_flag "$2")"
+  printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q --continue%s' "$tokens" "$1" "$suffix"
+  if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
 }
 
 # Relaunch command for codex/cx. --perm safe applies the SAME substitution as

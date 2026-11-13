@@ -129,6 +129,7 @@ _ALL_SUITES="$_ALL_SUITES test_reconcile_launch_grace"
 _ALL_SUITES="$_ALL_SUITES test_perm_profiles"
 _ALL_SUITES="$_ALL_SUITES test_handover"
 _ALL_SUITES="$_ALL_SUITES test_done_contract"
+_ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
