@@ -121,6 +121,21 @@ mkdir -p "$OSRC_HOME/jobs/job-uncollected"; echo done > "$OSRC_HOME/jobs/job-unc
 mkdir -p "$OSRC_HOME/owners/sess-x"; : > "$OSRC_HOME/owners/sess-x/job-uncollected"
 # job-blocked: terminal-but-not-done evidence, kept until the 3d TTL (finding 4).
 mkdir -p "$OSRC_HOME/jobs/job-blocked"; echo blocked > "$OSRC_HOME/jobs/job-blocked/status"
+# B2: loop dirs and autodetach log/rc get the same evidence rule as jobs.
+# loop-ok: success + collected -> SAFE. loop-blocked: 2h-old blocked -> ASK.
+# loop-uncol: success but an owner record still points at it -> ASK.
+mkdir -p "$OSRC_HOME/loops/loop-ok"; echo success > "$OSRC_HOME/loops/loop-ok/state"
+mkdir -p "$OSRC_HOME/loops/loop-blocked"; echo blocked > "$OSRC_HOME/loops/loop-blocked/state"
+mkdir -p "$OSRC_HOME/loops/loop-uncol"; echo success > "$OSRC_HOME/loops/loop-uncol/state"
+mkdir -p "$OSRC_HOME/owners/sess-y"; : > "$OSRC_HOME/owners/sess-y/loop-uncol"
+owner loop-ok; owner loop-blocked; owner loop-uncol
+# ad-ok: exited 0 -> SAFE. ad-fail: exited 1 -> ASK. ad-noex: session vanished
+# with no .rc marker -> ASK.
+mkdir -p "$OSRC_HOME/autodetach"
+printf 'done\n' > "$OSRC_HOME/autodetach/ad-ok.log"; printf '0\n' > "$OSRC_HOME/autodetach/ad-ok.rc"
+printf 'died\n' > "$OSRC_HOME/autodetach/ad-fail.log"; printf '1\n' > "$OSRC_HOME/autodetach/ad-fail.rc"
+printf 'hung\n' > "$OSRC_HOME/autodetach/ad-noex.log"
+owner ad-ok; owner ad-fail; owner ad-noex
 # job-liveowner: remote lane record says live -> ASK.
 mkdir -p "$OSRC_HOME/remote"; jq -cn '{id:"job-liveowner",branch:"b",head_ready:false}' > "$OSRC_HOME/remote/job-liveowner.json"
 mkdir -p "$OSRC_HOME/jobs/job-liveowner"; echo done > "$OSRC_HOME/jobs/job-liveowner/status"
@@ -141,6 +156,14 @@ manifest "$OSRC_HOME/jobs/job-busy" job job-busy ""
 manifest "$OSRC_HOME/jobs/job-uncollected" job job-uncollected ""
 manifest "$OSRC_HOME/jobs/job-blocked" job job-blocked ""
 manifest "$OSRC_HOME/jobs/job-liveowner" job job-liveowner ""
+manifest "$OSRC_HOME/loops/loop-ok" loop loop-ok ""
+manifest "$OSRC_HOME/loops/loop-blocked" loop loop-blocked ""
+manifest "$OSRC_HOME/loops/loop-uncol" loop loop-uncol ""
+manifest "$OSRC_HOME/autodetach/ad-ok.log" autodetach ad-ok ""
+manifest "$OSRC_HOME/autodetach/ad-ok.rc" autodetach ad-ok ""
+manifest "$OSRC_HOME/autodetach/ad-fail.log" autodetach ad-fail ""
+manifest "$OSRC_HOME/autodetach/ad-fail.rc" autodetach ad-fail ""
+manifest "$OSRC_HOME/autodetach/ad-noex.log" autodetach ad-noex ""
 manifest "$TMP/outside-dir" job outside-sess ""
 manifest "$OSRC_HOME/jobs" job evil ""
 manifest "$OSRC_HOME/owners" job evil ""
@@ -148,10 +171,15 @@ manifest "$OSRC_HOME/jobs/../remote" job evil ""
 
 age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" "$WT_HID" \
   "$OSRC_HOME/jobs/job-old" "$OSRC_HOME/jobs/job-busy" \
-  "$OSRC_HOME/jobs/job-uncollected" "$OSRC_HOME/jobs/job-liveowner"
-# job-blocked must be old enough to pass the 1h gate but young enough that the
-# 3d evidence TTL still protects it.
-age2h "$OSRC_HOME/jobs/job-blocked"
+  "$OSRC_HOME/jobs/job-uncollected" "$OSRC_HOME/jobs/job-liveowner" \
+  "$OSRC_HOME/loops/loop-ok" "$OSRC_HOME/autodetach/ad-ok.log" \
+  "$OSRC_HOME/autodetach/ad-ok.rc"
+# job-blocked, the blocked/uncollected loop, and the non-zero/no-marker
+# autodetach logs are old enough to pass the 1h gate but young enough that the
+# 3d evidence TTL still protects them.
+age2h "$OSRC_HOME/jobs/job-blocked" "$OSRC_HOME/loops/loop-blocked" \
+  "$OSRC_HOME/loops/loop-uncol" "$OSRC_HOME/autodetach/ad-fail.log" \
+  "$OSRC_HOME/autodetach/ad-fail.rc" "$OSRC_HOME/autodetach/ad-noex.log"
 
 echo "=== dry run (default age gate) ==="
 out="$(run cleanup 2>&1)" || { bad "cleanup dry run failed"; echo "$out"; }
@@ -167,6 +195,13 @@ echo "$out" | grep -q "ASK.*job-uncollected" && ok "done-but-uncollected job ASK
 echo "$out" | grep -q "ASK.*outside-dir" && ok "outside-root path ASK" || bad "outside-dir not ASK"
 echo "$out" | grep -q "ASK.*job-liveowner" && ok "live-owner item ASK" || bad "live-owner not ASK"
 echo "$out" | grep -q "SAFE.*job-old" && ok "collected done job SAFE" || bad "job-old not SAFE"
+echo "$out" | grep -q "SAFE.*loop-ok" && ok "collected success loop SAFE (B2)" || bad "loop-ok not SAFE: $(echo "$out" | grep loop-ok)"
+echo "$out" | grep -q "ASK.*loop-blocked" && ok "blocked loop keeps evidence until TTL (B2)" || bad "loop-blocked not ASK"
+echo "$out" | grep -q "ASK.*loop-uncol" && ok "success-but-uncollected loop ASK (B2)" || bad "loop-uncol not ASK"
+echo "$out" | grep -q "SAFE.*ad-ok\.log" && echo "$out" | grep -q "SAFE.*ad-ok\.rc" \
+  && ok "exited-0 autodetach pair SAFE (B2)" || bad "ad-ok not SAFE: $(echo "$out" | grep ad-ok)"
+echo "$out" | grep -q "ASK.*ad-fail" && ok "exit-1 autodetach keeps evidence until TTL (B2)" || bad "ad-fail not ASK"
+echo "$out" | grep -q "ASK.*ad-noex" && ok "no-exit-marker autodetach keeps evidence until TTL (B2)" || bad "ad-noex not ASK"
 echo "$out" | grep -c "ASK" | grep -q '^[0-9]' && echo "$out" | grep -q "jobs.*not the shape" \
   && ok "jobs-dir attack line ASK (finding 5)" || bad "attack lines not ASK: $(echo "$out" | grep -E 'jobs |owners|remote')"
 [ -d "$WT_SAFE" ] && [ -d "$WT_BAD" ] && [ -d "$OSRC_HOME/jobs/job-old" ] \
@@ -215,6 +250,14 @@ git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/pr-old >/dev/null 2>&1
 [ -d "$WT_HID" ] && [ -f "$WT_HID/scratch.txt" ] && ok "hidden-untracked worktree preserved (B1)" || bad "wt-hidden deleted with unseen untracked file!"
 [ -d "$OSRC_HOME/jobs/job-uncollected" ] && ok "uncollected job preserved (finding 4)" || bad "job-uncollected deleted!"
 [ -d "$OSRC_HOME/jobs/job-blocked" ] && ok "blocked job evidence preserved (finding 4)" || bad "job-blocked deleted!"
+[ ! -d "$OSRC_HOME/loops/loop-ok" ] && ok "collected success loop removed (B2)" || bad "loop-ok survived"
+[ -d "$OSRC_HOME/loops/loop-blocked" ] && ok "blocked loop evidence preserved (B2)" || bad "loop-blocked deleted!"
+[ -d "$OSRC_HOME/loops/loop-uncol" ] && ok "uncollected loop preserved (B2)" || bad "loop-uncol deleted!"
+[ ! -f "$OSRC_HOME/autodetach/ad-ok.log" ] && [ ! -f "$OSRC_HOME/autodetach/ad-ok.rc" ] \
+  && ok "exited-0 autodetach pair removed (B2)" || bad "ad-ok survived"
+[ -f "$OSRC_HOME/autodetach/ad-fail.log" ] && [ -f "$OSRC_HOME/autodetach/ad-fail.rc" ] \
+  && ok "exit-1 autodetach evidence preserved (B2)" || bad "ad-fail deleted!"
+[ -f "$OSRC_HOME/autodetach/ad-noex.log" ] && ok "no-marker autodetach log preserved (B2)" || bad "ad-noex deleted!"
 git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/wt-unmerged >/dev/null 2>&1 \
   && ok "unmerged branch preserved" || bad "unmerged branch deleted!"
 [ -d "$TMP/outside-dir" ] && ok "outside-manifest path untouched" || bad "outside path deleted!"

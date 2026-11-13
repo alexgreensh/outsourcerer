@@ -305,11 +305,31 @@ _osrc_cleanup_verdict() {
       fi
       ;;
     loop)
+      # Same evidence rule as jobs (review B2): SAFE only on a clean finish
+      # whose result was collected, or past the 3-day TTL. A blocked or
+      # still-running loop's state file is evidence, not trash.
       local lst
       lst="$(cat "$OSRC_HOME/loops/$sess/state" 2>/dev/null)"
       case "$lst" in
-        success|blocked|max_turns|max_time|failed|error|canceled|done) : ;;
-        *) printf 'ASK\tloop state is %s\n' "${lst:-unknown}"; return 0 ;;
+        success|done)
+          _osrc_job_collected "$sess" \
+            || { printf 'ASK\tloop finished but result not collected\n'; return 0; } ;;
+        *) [ $(( now - newest )) -ge "${OSRC_CLEANUP_JOB_TTL:-259200}" ] \
+             || { printf 'ASK\tloop state %s — evidence kept for 3d\n' "${lst:-unknown}"; return 0; } ;;
+      esac
+      ;;
+    autodetach)
+      # Same evidence rule as jobs (review B2). The .rc marker holds the pane's
+      # exit code; only a 0 exit is a clean finish. A missing marker means the
+      # run never finished reporting — that log is evidence, not trash.
+      local arc
+      arc="$(tr -dc '0-9' < "$OSRC_HOME/autodetach/$sess.rc" 2>/dev/null)"
+      case "$arc" in
+        0)
+          _osrc_job_collected "$sess" \
+            || { printf 'ASK\tautodetach exited 0 but result not collected\n'; return 0; } ;;
+        *) [ $(( now - newest )) -ge "${OSRC_CLEANUP_JOB_TTL:-259200}" ] \
+             || { printf 'ASK\tautodetach exit %s — evidence kept for 3d\n' "${arc:-none}"; return 0; } ;;
       esac
       ;;
   esac
