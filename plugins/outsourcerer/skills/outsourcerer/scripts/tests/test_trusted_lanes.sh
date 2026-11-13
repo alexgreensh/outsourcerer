@@ -9,8 +9,11 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+GATE="$SCRIPT_DIR/../lib/cloudgate.sh"   # cloud disclosure + secret-scan gate (L10 module split)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+[ -f "$GATE" ] || { echo "FAIL: cannot find $GATE"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
+bash -n "$GATE" || { echo "FAIL: bash -n failed for $GATE"; exit 1; }
 
 TMP="$(mktemp -d)"
 export HOME="$TMP" XDG_CONFIG_HOME="$TMP/cfg" OSRC_HOME="$TMP/osrc"
@@ -87,20 +90,20 @@ OSRC_TRUST_LANE_ONCE=" devin " _lane_trusted_for_pwd devin \
   && ok "--trust-lane grants for this invocation" || bad "--trust-lane did not grant"
 OSRC_TRUST_LANE_ONCE=" devin " _lane_trusted_for_pwd cc \
   && bad "--trust-lane leaked to another lane" || ok "--trust-lane is scoped to the named lane only"
-grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE' "$SRC" \
+grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE' "$SRC" "$GATE" \
   && bad "OSRC_TRUST_LANE_ONCE is exported — a child job would inherit the grant" \
   || ok "the per-invocation grant is never exported (children re-evaluate their own repo)"
 
 # --- Source-level posture checks. ---
-grep -q 'trusted-lanes.json' "$SRC" && ok "trust config path documented in source" || bad "config path missing"
-grep -q 'credential-file scan SKIPPED' "$SRC" \
+grep -q 'trusted-lanes.json' "$SRC" "$GATE" && ok "trust config path documented in source" || bad "config path missing"
+grep -q 'credential-file scan SKIPPED' "$SRC" "$GATE" \
   && ok "a skipped credential scan is announced in the disclosure banner (never silent)" \
   || bad "no disclosure line when the scan is skipped"
 # Trust covers the repo's own credential FILES. It must not also wave through a live secret VALUE
 # pasted into a prompt — a different decision the operator never made.
 # Here-string, not a pipe: grep -q quits on the first match and, under pipefail, awk's SIGPIPE
 # would read as "missing".
-grep -q 'OSRC_SECRET_ALLOW_VALUE' <<<"$(awk '/^_secret_scan\(\)/,/^}/' "$SRC")" \
+grep -q 'OSRC_SECRET_ALLOW_VALUE' <<<"$(awk '/^_secret_scan\(\)/,/^}/' "$GATE")" \
   && ok "pasted-VALUE hard-block still present in _secret_scan (not covered by trust)" \
   || bad "value hard-block missing from _secret_scan"
 

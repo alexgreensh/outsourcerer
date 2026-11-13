@@ -503,7 +503,7 @@ _task_brief() {
       printf -- '- Make it complete and self-contained: the next workers see only what you write, not your session.\n'
     fi
     [ -n "$check" ] && printf -- '- This check must pass (exit code 0) from the top of the repository: `%s`\n' "$check"
-    printf -- '- End with a short summary: what you did, what you found or changed, anything left open. It is handed to the tasks that depend on this one.\n\n'
+    printf -- '- Testing rule: your own unit tests only, one at a time, niced; heavy suites run in the cloud — do not run conformance, builds, installs or benchmarks on this machine.\n- End with a short summary: what you did, what you found or changed, anything left open. It is handed to the tasks that depend on this one.\n\n'
 
     deps="$(printf '%s' "$t" | _ft_jq -r '(.deps // [])[]')"
     if [ -n "$deps" ]; then
