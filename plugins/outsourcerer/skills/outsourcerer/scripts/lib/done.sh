@@ -6,8 +6,11 @@
 #   done | not-done | no-contract | error <reason>
 # Specs:
 #   file:<path>              the file exists (absolute, or relative to the contract cwd)
-#   branch:<b>@<marker>      the tip commit of local branch <b> contains <marker> (e.g. @READY)
-#   check:<shell-command>    exits 0 within 300 s, run from the contract cwd; result cached 60 s
+#   branch:<b>@<marker>      tip commit SUBJECT of local branch <b> has <marker> as a whole word
+#                            at the start or end ("NOT <marker>" never counts); cached n/a
+#   check:<shell-command>    exits 0 within 300 s from the contract cwd, run ONCE per lane in the
+#                            background behind a lock; callers never block — they get the last
+#                            cached verdict or not-done; settled verdicts cached 60 s
 #   pr:<owner/repo>#<n>      `gh pr view <n> -R <repo> --json state` reports MERGED; a missing gh
 #                            or a failed call is `error`, never silently not-done; cached 60 s
 #
@@ -98,18 +101,47 @@ osrc_done_get() {
   cat "$f"
 }
 
-# osrc_done_clear <name> -> drop the contract and its check cache (session stop / clean restart).
+# osrc_done_clear <name> -> drop the contract, its check cache and any check lock (session stop /
+# clean restart). A running background probe is left to finish; its spec-guard keeps its verdict
+# out of a replacement contract's cache.
 osrc_done_clear() {
   local name="${1:-}" dir
   _osrc_done_name_ok "$name" || return 0
   dir="$(_osrc_done_dir)"
+  rm -rf "$dir/$name.checklock" "$dir/$name.checklock.stale."* 2>/dev/null
   rm -f "$dir/$name.json" "$dir/$name.checkcache" "$dir/$name.json.tmp."* 2>/dev/null
   return 0
 }
 
+# Marker hit rule for branch:<b>@<marker>: the marker must be a WHOLE WORD at the start or end of
+# the commit SUBJECT line (%s), and a marker negated by "not" ("NOT READY", "still not READY")
+# never counts — a false done is the one thing a done contract must not produce. Whole-word means
+# bounded by non-[A-Za-z0-9_] (so ALREADY does not contain READY); start/end means mid-subject
+# mentions ("wip: NOT READY, tests red") do not count either.
+_osrc_done_marker_hit() { # <subject> <marker> -> rc0 on a qualifying hit
+  local subj="$1" marker="$2" rest pre pt
+  [ -n "$subj" ] && [ -n "$marker" ] || return 1
+  # start-anchored: marker at position 0 followed by a boundary char or EOL
+  case "$subj" in
+    "$marker"*)
+      rest="${subj#"$marker"}"
+      case "$rest" in ''|[!A-Za-z0-9_]*) return 0 ;; esac ;;
+  esac
+  # end-anchored: marker at EOL preceded by a boundary char or BOL, and not negated by "not"
+  case "$subj" in
+    *"$marker")
+      pre="${subj%"$marker"}"
+      case "$pre" in ''|*[!A-Za-z0-9_]) ;; *) return 1 ;; esac
+      pt="${pre%"${pre##*[![:space:]]}"}"   # rstrip whitespace
+      printf '%s' "$pt" | grep -qiE '(^|[^a-z0-9_])not$' && return 1
+      return 0 ;;
+  esac
+  return 1
+}
+
 # branch:<branch>@<marker> evaluator. Prints one state word.
 _osrc_done_branch() { # <cwd> <branch>@<marker>
-  local cwd="$1" rest="$2" branch marker msg
+  local cwd="$1" rest="$2" branch marker subj
   case "$rest" in *@?*) ;; *) echo "error bad-spec"; return 0 ;; esac
   branch="${rest%@*}"; marker="${rest##*@}"
   { [ -n "$branch" ] && [ -n "$marker" ]; } || { echo "error bad-spec"; return 0; }
@@ -119,9 +151,9 @@ _osrc_done_branch() { # <cwd> <branch>@<marker>
   # A branch that does not exist is simply not-done, not an error.
   git -C "$cwd" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null 2>&1 \
     || { echo not-done; return 0; }
-  msg="$(git -C "$cwd" log -1 --format=%B "refs/heads/$branch" 2>/dev/null)" \
+  subj="$(git -C "$cwd" log -1 --format=%s "refs/heads/$branch" 2>/dev/null)" \
     || { echo "error git-log"; return 0; }
-  printf '%s\n' "$msg" | grep -qF -- "$marker" && echo done || echo not-done
+  _osrc_done_marker_hit "$subj" "$marker" && echo done || echo not-done
 }
 
 # 60 s per-session result cache shared by the check: and pr: evaluators, so a poll loop does not
@@ -148,23 +180,74 @@ _osrc_done_cache_write() { # <name> <done|not-done>
   rm -f "$cache.tmp.$$" 2>/dev/null
 }
 
-# check:<cmd> evaluator. done requires exit 0 inside the bound (default 300 s,
-# OSRC_DONE_CHECK_SECS); a timeout or any nonzero exit is not-done — the contract is "exits 0",
-# nothing softer.
-_osrc_done_check() { # <name> <cwd> <cmd>
-  local name="$1" cwd="$2" cmd="$3" rc state cached
-  [ -n "${cmd//[[:space:]]/}" ] || { echo "error bad-spec"; return 0; }
-  [ -d "$cwd" ] || { echo "error cwd-missing"; return 0; }
-  cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }
+# Last cached verdict at ANY age ("" + rc1 when none). Used while a check: run is in flight:
+# the caller answers from the last known verdict instead of blocking on the probe.
+_osrc_done_cache_peek() { # <name>
+  local name="$1" cts cstate cache
+  cache="$(_osrc_done_dir)/$name.checkcache"
+  [ -f "$cache" ] || return 1
+  cts=""; cstate=""
+  read -r cts cstate < "$cache" 2>/dev/null || return 1
+  case "$cts" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cstate" in done|not-done) ;; *) return 1 ;; esac
+  printf '%s\n' "$cstate"
+}
+
+# check:<cmd> runs ONCE per lane at a time, in the background, behind a mkdir lock — a poll
+# loop must never block on a 300 s probe (one slow `npm test` would stall observation of every
+# other lane). Whoever wins the lock spawns the runner and returns immediately; every caller,
+# winner included, answers with the last cached verdict or not-done. done requires exit 0 inside
+# the bound (default 300 s, OSRC_DONE_CHECK_SECS); a timeout or any nonzero exit is not-done.
+_osrc_done_check_run() { # <name> <cwd> <cmd> <spec> — background body: run, cache, release
+  local name="$1" cwd="$2" cmd="$3" spec="$4" rc state cur f
+  f="$(_osrc_done_dir)/$name.json"
   if type _timeout >/dev/null 2>&1; then
-    _timeout "${OSRC_DONE_CHECK_SECS:-300}" bash -c 'cd "$1" && eval "$2"' _ "$cwd" "$cmd" >/dev/null 2>&1
+    _timeout "${OSRC_DONE_CHECK_SECS:-300}" bash -c 'cd "$1" && eval "$2"' _ "$cwd" "$cmd" </dev/null >/dev/null 2>&1
   else
-    ( cd "$cwd" && eval "$cmd" ) >/dev/null 2>&1
+    ( cd "$cwd" && eval "$cmd" ) </dev/null >/dev/null 2>&1
   fi
   rc=$?
   [ "$rc" -eq 0 ] && state=done || state=not-done
-  _osrc_done_cache_write "$name" "$state"
-  echo "$state"
+  # A contract replaced while the probe ran must not inherit this verdict.
+  cur="$(jq -r '.spec // empty' "$f" 2>/dev/null)"
+  [ "$cur" = "$spec" ] && _osrc_done_cache_write "$name" "$state"
+}
+
+# Try to take $OSRC_HOME/done/<name>.checklock. rc0 = this caller holds it. A lock whose epoch is
+# missing or older than the check bound + 60 s is dead (runner killed/rebooted) and is broken by
+# atomic rename — only one breaker can win the mv, so two pollers cannot both retake it.
+_osrc_done_check_lock() { # <name>
+  local name="$1" dir lock now le stale_dir
+  dir="$(_osrc_done_dir)"; lock="$dir/$name.checklock"; now="$(date +%s)"
+  if mkdir "$lock" 2>/dev/null; then return 0; fi
+  le=""; read -r le < "$lock/epoch" 2>/dev/null || le=""
+  case "$le" in ''|*[!0-9]*) stale_dir=1 ;; *)
+    [ $((now - le)) -gt $(( ${OSRC_DONE_CHECK_SECS:-300} + 60 )) ] && stale_dir=1 || stale_dir=0 ;;
+  esac
+  [ "$stale_dir" = 1 ] || return 1
+  stale_dir="$lock.stale.$$.$RANDOM"
+  mv "$lock" "$stale_dir" 2>/dev/null || return 1
+  rm -rf "$stale_dir" 2>/dev/null
+  mkdir "$lock" 2>/dev/null
+}
+
+_osrc_done_check_spawn() { # <name> <cwd> <cmd> <spec> — caller holds <name>.checklock
+  local name="$1" cwd="$2" cmd="$3" spec="$4" lock
+  lock="$(_osrc_done_dir)/$name.checklock"
+  printf '%s\n' "$(date +%s)" > "$lock/epoch" 2>/dev/null
+  ( _osrc_done_check_run "$name" "$cwd" "$cmd" "$spec"
+    rm -f "$lock/epoch" 2>/dev/null
+    rmdir "$lock" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+}
+
+_osrc_done_check() { # <name> <cwd> <cmd> <spec>
+  local name="$1" cwd="$2" cmd="$3" spec="$4" cached last
+  [ -n "${cmd//[[:space:]]/}" ] || { echo "error bad-spec"; return 0; }
+  [ -d "$cwd" ] || { echo "error cwd-missing"; return 0; }
+  cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }
+  last="$(_osrc_done_cache_peek "$name")"
+  _osrc_done_check_lock "$name" && _osrc_done_check_spawn "$name" "$cwd" "$cmd" "$spec"
+  echo "${last:-not-done}"
 }
 
 # pr:<owner/repo>#<n> evaluator: done when `gh pr view` reports state MERGED (a merged PR is a
@@ -211,7 +294,7 @@ osrc_done_state() {
       case "$p" in /*) t="$p" ;; *) t="$cwd/$p" ;; esac
       [ -e "$t" ] && echo done || echo not-done ;;
     branch:*) _osrc_done_branch "$cwd" "${spec#branch:}" ;;
-    check:*)  _osrc_done_check "$name" "$cwd" "${spec#check:}" ;;
+    check:*)  _osrc_done_check "$name" "$cwd" "${spec#check:}" "$spec" ;;
     pr:*)     _osrc_done_pr "$name" "${spec#pr:}" ;;
   esac
 }
