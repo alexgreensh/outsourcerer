@@ -13,11 +13,34 @@ is omitted. Decisions come from `$OSRC_HOME/hub/decisions/<slug>.json`; card fie
 overrides (short/note/issues/theme) come from `$OSRC_HOME/hub/projects/<slug>.json`.
 `extraLinks` entries are kept only when their `url` starts with `https://`.
 
+The document also carries a top-level `limits` array — the rows behind the rail's
+"Lanes and limits" panel — built from L7's meter sources where they exist:
+
+- `id`, `name` — the lane/window (`claude-5h`, `claude-weekly`, `chatgpt-5h`,
+  `chatgpt-weekly`, `devin`, `gemini`, `openrouter`, `local`).
+- `state` — `ok` (<50% used), `low` (50–89), `out` (>=90, the launch-gate
+  threshold), or `wait` (no fresh reading; never presented as exhausted).
+- `left` — human string, e.g. `60% left`, or a disposition like `paid per use`.
+- `renews` — `HH:MM` within 36h, else `Fri HH:MM`, from the window's `resets_at`.
+- `models` — which model ids draw on that lane.
+- `cap` — the cap description when a source publishes one.
+- `note` — honest caveat (e.g. "Last reading is stale — treated as unknown").
+- `paid` — present and `true` only for per-use billing lanes (OpenRouter);
+  the panel shows a `paid` tag on those rows.
+- `order` — rail sort order. `updated` — `HH:MM` of the source reading.
+
+Sources, same precedence and freshness gates as L7: `$OSRC_HOME/rate-limits.json`
+then `$HOME/.claude/token-optimizer/rate-limits.json` for the Claude windows
+(dropped when the reading is over 10 minutes old), and L7's `_session_limits` /
+`_codex_rate_limits` when `lib/limits.sh` is loaded for the ChatGPT windows
+(`codexage` marks a stale reading — a floor, not a measurement — so the row goes
+to `wait`). With no meters at all the unmetered lanes still emit honest rows.
+
 To publish it as an artifact, the orchestrator:
 
 1. Reads the current artifact version first (`db` doc versions).
-2. Writes `projects` and `answers` collections with `if_version` so a concurrent
-   write is never clobbered.
+2. Writes `projects`, `limits`, and `answers` collections with `if_version` so a
+   concurrent write is never clobbered.
 3. Reads `answers` on every heartbeat; after acting on a decision, marks it done.
 
 Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
@@ -37,7 +60,8 @@ constant time as bytes, stripped from server logs, and removed from the address 
 by the page once it is in `sessionStorage`. `hub serve` dies rather than run with a
 fallback token if `/dev/urandom` is unreadable.
 
-Local mode is local *data*, not a fully offline page: the page loads Google Fonts
-and fetches the repo's star count from `api.github.com`. Those are the only two
-outside requests; the token stays in the URL query of loopback requests and the
-default referrer policy sends origin-only, so it never reaches a third party.
+Local mode is local *data*, not a fully offline page: the page loads Google Fonts,
+the Lucide icon script pinned at `lucide@0.469.0` from `cdn.jsdelivr.net`, and
+fetches the repo's star count from `api.github.com`. Those are the only outside
+requests; the token stays in the URL query of loopback requests and the default
+referrer policy sends origin-only, so it never reaches a third party.

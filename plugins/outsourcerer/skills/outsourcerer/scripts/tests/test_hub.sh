@@ -46,6 +46,11 @@ EOF
 cat > "$OSRC_HOME/hub/projects/sess-1.json" <<'EOF'
 {"name":"Mission Control","tagline":"one page for every lane","order":1,"repo":"alexgreensh/outsourcerer","status":"building","pct":40}
 EOF
+# Fresh L7 rate-limits artifact: 5h nearly out, weekly fine, both resetting later.
+NOW="$(date +%s)"
+jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
+  '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
+  > "$OSRC_HOME/rate-limits.json"
 
 echo "=== hub export ==="
 out="$(run hub export 2>"$TMP/export.err")" || { bad "hub export exited nonzero: $(cat "$TMP/export.err")"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
@@ -63,6 +68,40 @@ echo "$proj" | jq -e '.lanes[] | select(.id=="job-1") | .status == "Done" and .p
 echo "$proj" | jq -e '.decisions[0].id == "D1" and .decisions[0].status == "wait" and .decisions[0].weight == "High"' >/dev/null \
   && ok "decision normalized (id/status/weight)" || bad "decision shape wrong"
 echo "$proj" | jq -e '.exported_at | type == "number"' >/dev/null && ok "project exported_at present" || bad "exported_at missing"
+
+echo "=== hub export: limits ==="
+lim="$(echo "$out" | jq -c '.limits')"
+echo "$lim" | jq -e 'type == "array" and length >= 4' >/dev/null && ok "limits array present" || bad "limits missing: $lim"
+echo "$lim" | jq -e 'all(.[]; (.name | type == "string") and (.state | IN("ok","low","out","wait")) and (.order | type == "number"))' >/dev/null \
+  && ok "every limit row has name/state ok|low|out|wait/order" || bad "limit row shape wrong: $lim"
+echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .state == "out" and (.left | test("left")) and (.renews | type == "string") and (.updated | type == "string")' >/dev/null \
+  && ok "claude-5h: 95% used -> out with left/renews/updated" || bad "claude-5h row wrong: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")')"
+echo "$lim" | jq -e '.[] | select(.id=="claude-weekly") | .state == "ok"' >/dev/null \
+  && ok "claude-weekly: 40% used -> ok" || bad "claude-weekly row wrong"
+echo "$lim" | jq -e '.[] | select(.id=="openrouter") | .paid == true' >/dev/null \
+  && ok "openrouter row carries the paid tag" || bad "openrouter paid flag missing"
+echo "$lim" | jq -e '[.[] | select(.paid == true)] | length == 1' >/dev/null \
+  && ok "exactly one paid lane" || bad "paid lane count wrong"
+echo "$lim" | jq -e '.[] | select(.id=="openrouter") | (.models | type == "string") and (.note | type == "string")' >/dev/null \
+  && ok "limit rows carry models+note" || bad "models/note missing"
+# A stale artifact (>10min old) must degrade to wait, never fake a reading.
+jq -cn --argjson t "$(( (${NOW} - 1200) * 1000 ))" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
+  '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
+  > "$OSRC_HOME/rate-limits.json"
+out2="$(run hub export 2>/dev/null)"
+echo "$out2" | jq -e '[.limits[] | select(.id | startswith("claude")) | .state] | all(. == "wait")' >/dev/null \
+  && ok "stale artifact -> claude rows wait" || bad "stale artifact not wait: $(echo "$out2" | jq -c '.limits[]|select(.id|startswith("claude"))')"
+# No artifact at all -> still a valid array with a wait row and the unmetered lanes.
+rm -f "$OSRC_HOME/rate-limits.json"
+out3="$(run hub export 2>/dev/null)"
+echo "$out3" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="claude") | .state == "wait")' >/dev/null \
+  && ok "missing artifact -> claude wait row, array still valid" || bad "missing-artifact limits wrong"
+echo "$out3" | jq -e '.limits[] | select(.id=="openrouter") | .paid == true' >/dev/null \
+  && ok "paid lane present without meters" || bad "unmetered rows missing"
+# Restore the fresh fixture for the serve checks below.
+jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
+  '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
+  > "$OSRC_HOME/rate-limits.json"
 
 one="$(run hub export --project sess-1 2>/dev/null)"
 echo "$one" | jq -e '(.projects | length) == 1 and (.projects[0].id == "sess-1")' >/dev/null \
@@ -103,6 +142,8 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects?t=wrong")"
 
 pj="$(curl -s "$BASE/api/projects?t=$TOK")"
 echo "$pj" | jq -e '.projects | length >= 1' >/dev/null && ok "GET /api/projects returns export" || bad "api/projects empty"
+echo "$pj" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="openrouter") | .paid == true)' >/dev/null \
+  && ok "GET /api/projects carries the limits array" || bad "api/projects missing limits"
 
 pg="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/?t=$TOK")"
 [ "$pg" = "200" ] && ok "GET / serves the page" || bad "page GET got $pg"

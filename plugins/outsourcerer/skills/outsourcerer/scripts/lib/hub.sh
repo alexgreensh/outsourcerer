@@ -336,6 +336,113 @@ _osrc_hub_unowned_project() {
      tagline:"Runs launched without an owning orchestrator session."}'
 }
 
+# ---- limits (the Lanes and limits rail) ------------------------------------------
+
+# _osrc_hh_mm <epoch-seconds> -> "HH:MM" within 36h, else "Fri HH:MM"; empty input -> "".
+_osrc_hh_mm() {
+  case "${1:-}" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+  local now=$(( $(date +%s) ))
+  if [ $(( $1 - now )) -le 129600 ]; then date -r "$1" '+%H:%M' 2>/dev/null
+  else date -r "$1" '+%a %H:%M' 2>/dev/null; fi
+}
+
+# _osrc_limit_state <pct-used> -> ok|low|out. Boundaries mirror L7: <50 working,
+# 50-89 running low, >=90 out (the launch gate would already refuse it).
+_osrc_limit_state() {
+  case "${1:-}" in ''|*[!0-9.]*) printf 'wait'; return 0 ;; esac
+  awk -v p="$1" 'BEGIN{ if (p>=90) print "out"; else if (p>=50) print "low"; else print "ok" }'
+}
+
+# _osrc_limit_row <id> <name> <state> <left> <renews> <models> <note> <paid> <order> <updated>
+_osrc_limit_row() {
+  jq -cn --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$5" \
+        --arg models "$6" --arg note "$7" --argjson paid "${8:-false}" --argjson order "${9:-99}" --arg updated "${10}" \
+    '{id:$id,name:$name,state:$state,order:$order}
+     + (if $left=="" then {} else {left:$left} end)
+     + (if $renews=="" then {} else {renews:$renews} end)
+     + (if $models=="" then {} else {models:$models} end)
+     + (if $note=="" then {} else {note:$note} end)
+     + (if $updated=="" then {} else {updated:$updated} end)
+     + (if $paid then {paid:true} else {} end)'
+}
+
+# _osrc_hub_limits -> JSON array for the rail's "Lanes and limits" panel. Built
+# from L7's meter sources where present: the claude rate-limits artifact
+# ($OSRC_HOME/rate-limits.json, then the token-optimizer copy — same precedence,
+# 10-min freshness gate) for Claude 5h/weekly, and L7's own _session_limits /
+# _codex_rate_limits when lib/limits.sh is loaded for the ChatGPT windows.
+# Unmetered lanes are honest rows (no invented percentages); OpenRouter carries
+# the paid tag.
+_osrc_hub_limits() {
+  have jq 2>/dev/null || { printf '[]'; return 0; }
+  local now ts_ms stale c5 c5r c7 c7r cand raw arr='[]' upd=''
+  now="$(date +%s)"
+  # Claude windows: first fresh artifact wins; a stale one still emits rows in
+  # `wait` so the panel shows the reading is unprovable, not absent.
+  for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
+    [ -f "$cand" ] && jq -e . "$cand" >/dev/null 2>&1 || continue
+    raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
+    IFS='|' read -r c5 c5r c7 c7r ts_ms <<EOF
+$raw
+EOF
+    # Expired windows reset the reading rather than report an old percentage.
+    case "$c5r" in ''|*[!0-9]*) : ;; *) [ "$c5r" -lt "$now" ] && c5="" ;; esac
+    case "$c7r" in ''|*[!0-9]*) : ;; *) [ "$c7r" -lt "$now" ] && c7="" ;; esac
+    case "$ts_ms" in ''|*[!0-9]*) stale=1; upd="" ;;
+      *) [ $(( now - ts_ms / 1000 )) -gt 600 ] && stale=1 || stale=0
+         upd="$(date -r $(( ts_ms / 1000 )) '+%H:%M' 2>/dev/null)" ;;
+    esac
+    [ -n "$c5$c7" ] || stale=1
+    [ "$stale" = 0 ] && break
+  done
+  if [ -n "$c5$c7" ]; then
+    local st leftr note5 note7
+    note5="Session window, resets every 5 hours."
+    note7="Weekly window — the binding cap in practice."
+    [ "${stale:-1}" = 1 ] && { note5="$note5 Last reading is stale — treated as unknown, not exhausted."; note7="$note7 Last reading is stale — treated as unknown, not exhausted."; }
+    if [ -n "$c5" ]; then
+      st="$(_osrc_limit_state "$c5")"; [ "$stale" = 1 ] && st=wait
+      leftr="$(( 100 - ${c5%.*} ))% left"; [ "${c5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd")" '$a+[$b]')"
+    fi
+    if [ -n "$c7" ]; then
+      st="$(_osrc_limit_state "$c7")"; [ "$stale" = 1 ] && st=wait
+      leftr="$(( 100 - ${c7%.*} ))% left"; [ "${c7%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd")" '$a+[$b]')"
+    fi
+  else
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude 'Claude Code' wait '' '' 'claude-* on your Claude subscription' 'No fresh limit reading — the statusline artifact is missing or over 10 minutes old.' false 1 '')" '$a+[$b]')"
+  fi
+  # ChatGPT windows via L7's normalized reader when it is loaded; codexage marks
+  # a stale reading (a floor, never a measurement).
+  if type _session_limits >/dev/null 2>&1; then
+    local lim tok x5='' xw='' xage='' xraw x5r xwr xa
+    lim="$(_session_limits 2>/dev/null)"
+    for tok in $lim; do case "$tok" in codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;; codexage=*) xage="${tok#*=}" ;; esac; done
+    x5r=''; xwr=''
+    if type _codex_rate_limits >/dev/null 2>&1; then
+      xraw="$(_codex_rate_limits 2>/dev/null)" || xraw=''
+      case "$xraw" in *\|*) x5r="$(printf '%s' "$xraw" | cut -d'|' -f3)"; xwr="$(printf '%s' "$xraw" | cut -d'|' -f4)" ;; esac
+    fi
+    if [ -n "$x5" ]; then
+      st="$(_osrc_limit_state "$x5")"; [ -n "$xage" ] && st=wait
+      leftr="$(( 100 - ${x5%.*} ))% left"; [ "${x5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd")" '$a+[$b]')"
+    fi
+    if [ -n "$xw" ]; then
+      st="$(_osrc_limit_state "$xw")"; [ -n "$xage" ] && st=wait
+      leftr="$(( 100 - ${xw%.*} ))% left"; [ "${xw%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd")" '$a+[$b]')"
+    fi
+  fi
+  # Unmetered lanes: honest rows, nothing invented. paid marks per-use billing.
+  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row devin 'Devin' ok 'plan quota, no meter' '' 'glm, swe, devin-* on your Devin plan' 'A plan refusal is only detectable when a run hits it.' false 5 '')" '$a+[$b]')"
+  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row gemini 'Gemini' ok 'keyless, Google acct' '' 'gemini-*, nano-banana' 'No published meter.' false 6 '')" '$a+[$b]')"
+  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row openrouter 'OpenRouter' ok 'paid per use' '' 'OpenRouter model ids' 'Billed from your balance — outsourcerer asks before every run.' true 7 '')" '$a+[$b]')"
+  arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row local 'Local' ok 'free, your hardware' '' 'ollama:*, lmstudio:*, local:*' 'No meter, no bill.' false 8 '')" '$a+[$b]')"
+  printf '%s' "$arr"
+}
+
 # ---- commands --------------------------------------------------------------------
 
 # cmd_hub_export [--project <slug>] -> SCHEMA docs JSON on stdout.
@@ -367,7 +474,8 @@ cmd_hub_export() {
   elif [ "$found" = 0 ]; then
     echo "hub export: no project '$proj' (slugs: owners/*, hub/decisions/*.json, hub/projects/*.json)" >&2
   fi
-  jq -cn --argjson now "$now" --argjson ps "$projects" '{generated_at:$now, projects:$ps}'
+  local limits; limits="$(_osrc_hub_limits 2>/dev/null)"; case "$limits" in ''|*'error'*) limits='[]' ;; esac
+  jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}'
 }
 
 # cmd_hub_serve [--port N] [--no-open] -> local Mission Control on 127.0.0.1.
