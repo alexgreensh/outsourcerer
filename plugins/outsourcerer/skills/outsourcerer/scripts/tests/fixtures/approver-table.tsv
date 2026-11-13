@@ -293,3 +293,9 @@ approve	shell		git config --get user.email
 approve	shell		git config --get core.autocrlf
 approve	shell		git config --get branch.main.remote
 approve	shell		git config --get init.defaultBranch
+# Round 5 follow-up: git remote URLs can hold a token (same class as git config --get remote.*.url)
+approve	shell		git remote
+hold	shell		git remote -v
+hold	shell		git remote show origin
+hold	shell		git remote get-url origin
+approve	shell		git tag -l

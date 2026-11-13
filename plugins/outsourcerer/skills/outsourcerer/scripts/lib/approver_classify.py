@@ -430,8 +430,10 @@ def git_rule(rest, cwd, roots):
         return "read-only:git " + sub
     if sub == "branch" and all(a in ("-a", "-r", "-v", "-vv", "--list", "--show-current", "--all") for a in sargs):
         return "read-only:git branch"
-    if sub in ("tag", "remote") and all(a in ("-l", "--list", "-v") for a in sargs):
-        return "read-only:git " + sub
+    if sub == "tag" and all(a in ("-l", "--list") for a in sargs):
+        return "read-only:git tag"
+    if sub == "remote" and not sargs:   # names only; -v / get-url / show print URLs (can hold a token)
+        return "read-only:git remote"
     if sub == "stash":
         if sargs[:1] in (["list"], ["show"]) and all(a in ("-p", "--stat") or not a.startswith("-") for a in sargs[1:]):
             return "read-only:git stash " + sargs[0]
