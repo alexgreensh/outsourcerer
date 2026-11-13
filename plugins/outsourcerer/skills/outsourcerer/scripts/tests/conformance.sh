@@ -81,6 +81,7 @@ _ALL_SUITES="$_ALL_SUITES test_devin_catalog_free_tier"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_session_send_verify"
 _ALL_SUITES="$_ALL_SUITES test_session_control"
+_ALL_SUITES="$_ALL_SUITES test_screen_state test_approver_table test_approver_tick"   # L3 screen reader + approver
 _ALL_SUITES="$_ALL_SUITES test_codex_code_mode_host"
 _ALL_SUITES="$_ALL_SUITES test_codex_windows_sandbox"
 _ALL_SUITES="$_ALL_SUITES test_cloud_autoisolate"

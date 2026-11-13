@@ -542,9 +542,9 @@ fi
 # ---- static: the dispatch wires menu refusal + the new rc messages + control/answer subcommands -
 grep -q 'session send refused: the pane is showing an interactive choice menu' "$SRC" && ok "send refuses helpfully on a menu pane" || bad "no helpful menu refusal in send"
 grep -q 'Use '"'"'session answer'"'"' to select an option' "$SRC" && ok "send refusal names session answer" || bad "send refusal does not name session answer"
-grep -q 'session send failed: nothing was submitted' "$SRC" && ok "send failure message says 'nothing was submitted'" || bad "send failure message wrong"
+grep -q 'EVENT failed %s %s send did not land' "$SRC" && ok "send failure is an EVENT failed line, never 'sent' (L3)" || bad "send failure message wrong"
 grep -q 'Pane state:' "$SRC" && ok "send failure carries the real pane state" || bad "send failure omits pane state"
-grep -q 'submitted, text left the composer' "$SRC" && ok "rc 2 message states submission verified" || bad "rc 2 message wrong"
+grep -q 'sent (submitted: ' "$SRC" && ok "rc 2 message states the submission evidence" || bad "rc 2 message wrong"
 grep -q 'session control <interrupt|exit|relaunch>' "$SRC" && ok "control subcommand advertised in usage" || bad "control not in usage"
 grep -q 'answer \[y|n|<index>|<label>\]' "$SRC" && ok "answer subcommand advertised in usage" || bad "answer not in usage"
 # The control plane must be strictly separate from send: lifecycle text must never be delivered as chat.
