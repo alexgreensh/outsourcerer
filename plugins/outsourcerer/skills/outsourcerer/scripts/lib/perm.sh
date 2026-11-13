@@ -3,9 +3,10 @@
 # plus the session-launch helpers moved here from outsourcerer.sh (file-size ratchet:
 # outsourcerer.sh is legacy and may only shrink; new code lives in scripts/lib/).
 #
-# Loaded by the byte-identical loader line in outsourcerer.sh directly after
-# `OSRC_JOBS="$OSRC_HOME/jobs"`:
-#   for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+# Loaded by the byte-identical CONTRACT line in outsourcerer.sh directly after
+# `OSRC_JOBS="$OSRC_HOME/jobs"`, and again from the real script dir after the factory
+# loader (see briefs/LOADER.md — the second line covers sourced mode and symlinked
+# invocation, where $SCRIPT_DIR does not point at this file's folder).
 #
 # osrc_perm_flags <engine> <profile> <workdir>
 #   Prints the EXTRA launch flags for the profile, one argv element per line.
@@ -104,6 +105,24 @@ _session_assert_model_pinnable() {
 # can't be prefix-excluded), sips (--out writes), npm install/i/ci/add/remove/update/
 # publish/link, pip install/download, brew install/uninstall, gem install, apt/yum/
 # dnf/pacman/zypper entirely, jq kept (no write flags).
+#
+# Also excluded after review (L5 round 2): printenv (dumps every secret in the
+# environment into the delegate's context), defaults read / nvram -p (can print stored
+# tokens), mount (bare form lists, but `mount <dev> <dir>` mutates — the prefix emitter
+# cannot exclude the arg form), gh api (a later -X DELETE on the same line is not
+# excluded by a GET prefix), and commands that never return on their own — ping,
+# traceroute, nettop, fs_usage, log stream, syslog, gh run watch, sleep, tail -f (via
+# ask rules), log show (unbounded dump) — for the same reason interactive pagers are
+# excluded: they would stall the delegate's turn. black/isort write in place by
+# default (no read-only form to allow); prettier/eslint/ruff keep their read-only
+# defaults and their write flags are ask-listed instead.
+#
+# Prefix-write holes verified live in a scratch repo and removed: `git remote -v`
+# (its ` *` tail accepts `git remote -v prune|update` — prune RAN, verified), bare
+# `git reflog` (`git reflog expire|drop` mutate), and both `git symbolic-ref` forms
+# (`git symbolic-ref [--short] HEAD <ref>` WRITES HEAD — verified rc=0). git's own
+# action-conflict guard rejects the smuggled combos on the kept entries
+# (`branch -a -d`, `tag -l -d`, `config -l --add`, `worktree list prune` all error).
 _osrc_perm_safe_cmds() {
   cat <<'EOF'
 ls
@@ -131,7 +150,6 @@ printf
 which
 whereis
 type
-printenv
 date
 uname
 hostname
@@ -146,8 +164,6 @@ df
 ps
 lsof
 netstat
-ping
-traceroute
 jq
 sort
 uniq
@@ -161,7 +177,6 @@ shasum
 cksum
 true
 false
-sleep
 sw_vers
 find
 git status
@@ -190,7 +205,6 @@ git stash list
 git stash show
 git worktree list
 git submodule status
-git remote -v
 git remote show
 git remote get-url
 git branch --show-current
@@ -198,10 +212,7 @@ git branch --list
 git branch -a
 git tag -l
 git tag --list
-git reflog
 git reflog show
-git symbolic-ref HEAD
-git symbolic-ref --short HEAD
 git config --get
 git config --get-all
 git config --list
@@ -216,12 +227,9 @@ gh issue view
 gh issue list
 gh run list
 gh run view
-gh run watch
 gh release view
 gh release list
 gh repo view
-gh api --method GET
-gh api -X GET
 npm test
 npm run test
 npm run lint
@@ -308,11 +316,8 @@ playwright test
 eslint
 prettier
 ruff check
-ruff
 mypy
 pyright
-black
-isort
 tsc --noEmit
 pip list
 pip show
@@ -328,7 +333,6 @@ brew search
 brew leaves
 brew deps
 brew cat
-defaults read
 plutil -p
 plutil -lint
 codesign -dv
@@ -337,16 +341,10 @@ system_profiler
 ioreg
 kextstat
 vm_stat
-nettop
-fs_usage
-log show
-log stream
 log stats
-syslog
 diskutil list
 diskutil info
 diskutil apfs list
-mount
 hdiutil info
 hdiutil imageinfo
 qlmanage -m
@@ -354,23 +352,46 @@ spctl --status
 spctl -a -vv
 csrutil status
 fdesetup status
-nvram -p
 pmset -g
 EOF
 }
 
 # Ask-listed patterns: matched commands PROMPT (not allow, not deny) even when an allow
 # prefix would cover them. Covers the dangerous corners INSIDE allowed families:
-# find -delete/-exec/-ok/-fprint/-fprintf, git diff --output / sips-style --out writers,
-# and shell redirection (<, >) which would otherwise let `echo x > ~/.ssh/authorized_keys`
-# ride an allowed `echo`. `2>/dev/null` prompts too — the safe direction; the orchestrator
-# can still approve it in one keystroke. NOTE: where the engine resolves ask-vs-allow by
-# specificity, a more specific allow (e.g. `Bash(git diff *)`) can win — the residual is
-# documented in L5-REPORT.md; gemini's policy engine resolves by priority so ask wins there.
+# find -delete/-exec/-ok/-fprint/-fls, output-file writers (--out*, sort -o is left to
+# Claude's own path guard), exec-via-flag commands (fd -x/-X/--exec, rg/ag --pre/
+# --pager/--hostname-bin, git grep -O / --open-files-in-pager, sort
+# --compress-program), formatter/test-runner write+stall flags (prettier --write,
+# eslint --fix/-o, ruff --fix, go/dotnet/cargo output-dir flags, --watch/--ui/--debug/
+# --pdb interactive modes, tail -f, lsof +r, gh --watch, playwright --ui/--debug),
+# secret exposure (ps env forms), and .git writers (git fsck --lost-found).
+#
+# Claude Code rule order is deny -> ask -> allow and a matching ask rule prompts even
+# when a MORE SPECIFIC allow rule also matches — there is no specificity tiebreak
+# (code.claude.com/docs/en/permissions). Verified live on Claude Code 2.1.323
+# (claude-haiku-5-5, -p): `ls && rm -rf dir`, `ls && touch f`, `echo $(touch f)`,
+# `cat f | sh`, and `echo x > f` were all stopped by Claude's OWN command parser
+# before the allow rules mattered — it splits compounds, refuses unverifiable nested
+# commands, and asks before any file creation even inside the workdir. The `>`/`<`
+# ask rules were therefore redundant and are dropped: they cost the commonest
+# delegate command (`2>&1 | tail`, `2>/dev/null`) a prompt for no added safety.
+# What remains asks on flags the parser does not model as separate operations.
 _osrc_perm_ask_patterns() {
   printf '%s\n' \
-    'Bash(*>*)' 'Bash(*<*)' \
-    'Bash(*-delete*)' 'Bash(*-exec*)' 'Bash(*-ok*)' 'Bash(*-fprint*)' 'Bash(*--out*)'
+    'Bash(*-delete*)' 'Bash(*-exec*)' 'Bash(*-ok*)' 'Bash(*-fprint*)' 'Bash(*-fls*)' 'Bash(*--out*)' \
+    'Bash(*--ext-diff*)' 'Bash(*--textconv*)' \
+    'Bash(fd *-x*)' 'Bash(fd *-X*)' 'Bash(fd *--exec*)' \
+    'Bash(rg *--pre*)' 'Bash(rg *--hostname-bin*)' 'Bash(rg *--pager*)' 'Bash(ag *--pager*)' \
+    'Bash(sort *--compress-program*)' \
+    'Bash(git grep *-O*)' 'Bash(git grep *--open-files-in-pager*)' 'Bash(git fsck *--lost-found*)' \
+    'Bash(tail *-f*)' 'Bash(tail *-F*)' 'Bash(tail *--follow*)' \
+    'Bash(ps e*)' 'Bash(ps * e*)' 'Bash(ps *-E*)' \
+    'Bash(lsof *+r*)' \
+    'Bash(*--watch*)' 'Bash(*--pdb*)' \
+    'Bash(playwright *--ui*)' 'Bash(playwright *--debug*)' 'Bash(vitest *--ui*)' \
+    'Bash(go build *-o*)' 'Bash(go test *-o*)' 'Bash(dotnet *-o *)' 'Bash(cargo *--target-dir*)' \
+    'Bash(eslint *--fix*)' 'Bash(eslint *-o *)' \
+    'Bash(prettier *--write*)' 'Bash(ruff *--fix*)'
 }
 
 # Script-name families that also appear in colon form (`npm run test:unit`, `yarn build:prod`).
@@ -406,40 +427,18 @@ _osrc_perm_claude_args() {
   printf '{"permissions":{"ask":[%s]}}\n' "$asks"
 }
 
-# _osrc_perm_gemini_args <workdir> -> --approval-mode auto_edit (edit tools auto-approve)
-# plus --policy <file>: a generated user-tier TOML whose [[rule]] entries map the same
-# safe prefixes to decision="allow" and the dangerous corners to decision="ask_user".
-# Verified against @google/gemini-cli 0.58.0 bundled docs/reference/policy-engine.md:
-# commandRegex is tested against the tool-call JSON args (`{"command":"..."}`), rules
-# resolve by highest priority, and ask_user prompts interactively. Policy file lives under
-# $OSRC_HOME/perm/ so it survives across sessions and never touches the repo.
-_osrc_perm_gemini_policy() {
-  local path="$1" alts='' p rx
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    # regex-escape the only metachar present in the list ('.' in ./mvnw, ./gradlew)
-    rx="${p//./[.]}"
-    alts="$alts|$rx"
-  done < <(_osrc_perm_safe_cmds)
-  alts="${alts#|}"
-  mkdir -p "$(dirname "$path")" 2>/dev/null
-  {
-    printf '# Generated by outsourcerer --perm safe — do not edit; regenerated each launch.\n'
-    printf 'version = 1\n\n[policy]\n\n'
-    printf '[[rule]]\ntoolName = "run_shell_command"\npriority = 100\ndecision = "allow"\n'
-    printf 'commandRegex = '"'"'"command":"(%s)(\\s|")'"'"'\n\n' "$alts"
-    printf '[[rule]]\ntoolName = "run_shell_command"\npriority = 200\ndecision = "ask_user"\n'
-    printf 'commandRegex = '"'"'"command":"[^"]*(-delete|-exec|-ok|-fprint|--out|>|<)'"'"'\n'
-  } > "$path" 2>/dev/null
-  chmod 600 "$path" 2>/dev/null
-  [ -s "$path" ] || return 1
-}
-
+# _osrc_perm_gemini_args <workdir> -> --approval-mode auto_edit only: gemini-cli's edit
+# tools auto-approve while shell commands keep the default approval behavior.
+#
+# A generated [[rule]] policy file was tried and WITHDRAWN (L5 round 2, review finding
+# 3): commandRegex is tested against the tool-call JSON args, and the round-1 regexes
+# both stopped at the first quoted string (`[^\"]*`) and anchored only the first word,
+# so `echo "hi" > ~/.zshrc`, `find . -delete`, `ls && rm -rf ~`, `cat a | sh` and
+# `sort -o /tmp/x` all evaluated as allow. gemini-cli refuses OAuth on this machine,
+# so no live session can prove a corrected policy — per the review, emit only
+# auto_edit until one does.
 _osrc_perm_gemini_args() {
-  local workdir="${1:-$PWD}" path
-  path="${OSRC_HOME:-$HOME/.outsourcerer}/perm/gemini-safe.toml"
-  _osrc_perm_gemini_policy "$path" || return 1
-  printf '%s\n' '--approval-mode' 'auto_edit' '--policy' "$path"
+  printf '%s\n' '--approval-mode' 'auto_edit'
 }
 
 # osrc_perm_apply_launch <provider> <lane> — append the safe-profile flags to the
@@ -447,14 +446,107 @@ _osrc_perm_gemini_args() {
 # _session_launch_adapter after the lane fn returns. Engines whose safe rung is a
 # SUBSTITUTION rather than an append (cx: --approve-for-me replaces -s) handle
 # PERM_PROFILE inside their own adapter; everything else lands here.
+# A flag-generation failure is fatal: silently launching with default permissions
+# under a "safe" banner is exactly the lie the banner exists to prevent.
 osrc_perm_apply_launch() {
-  local provider="$1" lane="$2" eng _pa
+  local provider="$1" lane="$2" eng _pa _flags
   eng="${SESSION_LAUNCH_ENGINE:-$lane}"   # separate stmt: `local a= b=$a` expands before assign
   [ "${PERM_PROFILE:-default}" = "default" ] && return 0
   type osrc_perm_flags >/dev/null 2>&1 \
     || _session_launch_error "$provider" "--perm $PERM_PROFILE needs scripts/lib/perm.sh, which is missing from this install"
-  while IFS= read -r _pa; do [ -n "$_pa" ] && SESSION_LAUNCH+=("$_pa"); done \
-    < <(osrc_perm_flags "$eng" "$PERM_PROFILE" "$PWD" 2>/dev/null)
+  _flags="$(osrc_perm_flags "$eng" "$PERM_PROFILE" "$PWD")" \
+    || _session_launch_error "$provider" "--perm safe flag generation failed for engine '$eng'"
+  while IFS= read -r _pa; do [ -n "$_pa" ] && SESSION_LAUNCH+=("$_pa"); done <<< "$_flags"
+  # Explicit rc0: a no-rung engine yields empty _flags, and the while/read above
+  # returns 1 at EOF — without this the ADAPTER reports failure for exactly the
+  # engines safe mode is supposed to launch unchanged (droid/hermes/cline/pi).
+  return 0
+}
+
+# osrc_perm_desc <engine> -> one-line honest description of what `safe` actually does
+# for that engine, or rc 1 when the engine has no faithful safe rung. "safe" is NOT
+# one thing across engines (review finding 4): Claude gets an explicit allow-list;
+# devin/codex/cursor get the engine's OWN auto-approval rung, where a model or server
+# classifier judges each action — not a list; agy gets the vendor's auto mode;
+# gemini-cli gets edit-tools-only auto-approval. The launch banner prints this so the
+# receipt never claims an allow-list the engine does not have.
+osrc_perm_desc() {
+  case "$1" in
+    devin|dv)          printf '%s' "devin --permission-mode smart (MODEL-JUDGED: a fast model auto-runs what it judges safe; installs, mutating git, rm/sudo, dotenv/keys still prompt)" ;;
+    cx|codex)          printf '%s' "codex --approve-for-me (MODEL-JUDGED: approval requests route through automatic review; replaces -s workspace-write)" ;;
+    cc|claude)         printf '%s' "claude --allowedTools allow-list + ask rules (EXPLICIT LIST: read-only/git-read/test-build commands + workspace edits; deletes, exec-flags, redirects and everything else still prompt)" ;;
+    cursor)            printf '%s' "cursor --auto-review (CLASSIFIER-JUDGED: a server classifier auto-runs safe tool calls)" ;;
+    agy|antigravity)   printf '%s' "agy --mode auto (engine auto mode per vendor docs — not an allow-list)" ;;
+    gemini|gmnative|gm) printf '%s' "gemini-cli --approval-mode auto_edit (edit tools auto-approve; shell commands still ask)" ;;
+    *)                 return 1 ;;
+  esac
+}
+
+# _osrc_perm_banner <provider> — print the honest [perm] line after a safe-profile
+# launch is built. No-op unless PERM_PROFILE=safe. Engines with no faithful rung get
+# an explicit "launched default" line instead of a false success banner.
+_osrc_perm_banner() {
+  [ "${PERM_PROFILE:-default}" = "safe" ] || return 0
+  local _pb_eng="${SESSION_LAUNCH_ENGINE:-$1}" _pb_desc
+  if _pb_desc="$(osrc_perm_desc "$_pb_eng" 2>/dev/null)"; then
+    printf '>>> [perm] safe — %s. Anything outside still prompts.\n' "$_pb_desc" >&2
+  else
+    printf '>>> [perm] safe: no faithful safe rung for %s; launched with DEFAULT permissions (everything prompts).\n' "$1" >&2
+  fi
+}
+
+# osrc_perm_string_suffix <engine> <profile> -> prints " <flag> <flag>..." with each
+# flag %q-quoted, for launch vectors carried as ONE shell string (tmux send-keys,
+# winpty launch.bash is an array and does NOT use this, respawn-pane). default or a
+# no-rung engine prints nothing; rc 1 when safe was requested but osrc_perm_flags is
+# unavailable, so callers can die loudly instead of launching unprotected.
+osrc_perm_string_suffix() {
+  local eng="$1" prof="${2:-default}" _pa out=""
+  [ "$prof" = "safe" ] || return 0
+  type osrc_perm_flags >/dev/null 2>&1 || return 1
+  while IFS= read -r _pa; do [ -n "$_pa" ] && out="$out $(printf '%q' "$_pa")"; done < <(osrc_perm_flags "$eng" "$prof" "$PWD")
+  printf '%s' "$out"
+}
+
+# _osrc_perm_restore_profile <session-id> — set the global PERM_PROFILE from the
+# session's latest start record (registry field 5, written by _session_registry_append
+# at launch). Relaunch/effort-relaunch rebuild the command from scratch, so without
+# this a `--perm safe` session silently comes back with default permissions. Records
+# written before L5 lack the field -> env/default. Not local: the relaunch_fn lanes
+# and the registry append read the global.
+_osrc_perm_restore_profile() {
+  local _ps_saved
+  _ps_saved="$(_session_record "$1" 2>/dev/null | cut -f5)"
+  case "$_ps_saved" in safe|default) PERM_PROFILE="$_ps_saved" ;; *) PERM_PROFILE="${PERM_PROFILE:-${OSRC_PERM_PROFILE:-default}}" ;; esac
+  case "$PERM_PROFILE" in safe|default) ;; *) PERM_PROFILE=default ;; esac
+}
+
+# ---- session relaunch vectors (moved from outsourcerer.sh for the size ratchet) ---
+# Both read the global PERM_PROFILE, which _session_control_relaunch restores from
+# the session's registry record before calling _session_relaunch_command.
+
+# Relaunch command for `session effort`/control relaunch on a cc session (claude
+# honors effort via MAX_THINKING_TOKENS). No effort -> rc1 (caller leaves session).
+_session_relaunch_cc() {
+  local tokens suffix
+  tokens="$(_effort_thinking_tokens "$2")"
+  [ -n "$tokens" ] || return 1
+  # --perm safe: same allow-list/ask-rules suffix session start emits, %q-quoted for
+  # the respawn-pane shell string; default -> empty suffix, byte-identical output.
+  suffix="$(osrc_perm_string_suffix cc "${PERM_PROFILE:-default}")" || return 1
+  printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q%s' "$tokens" "$1" "$suffix"
+}
+
+# Relaunch command for codex/cx. --perm safe applies the SAME substitution as
+# session start: --approve-for-me replaces `-s workspace-write` (the two conflict).
+_session_relaunch_cx() { # <model> <effort> -> relaunch command string
+  local cid code_mode_host sbx
+  cid="$(resolve_model_row "$1")"; cid="${cid%%|*}"; [ -n "$cid" ] || cid="$1"
+  _validate_model_token "$cid"
+  code_mode_host="$(_codex_code_mode_host_flag)" || return 1
+  sbx="-s workspace-write"
+  [ "${PERM_PROFILE:-default}" = "safe" ] && sbx="--approve-for-me"
+  printf 'codex -m %q %s -c features.code_mode_host=%q -c model_reasoning_effort=%q' "$cid" "$sbx" "$code_mode_host" "$2"
 }
 
 # osrc_perm_flags <engine> <profile> <workdir> — see header. Engine keys accept both
@@ -471,8 +563,9 @@ osrc_perm_flags() {
     agy|antigravity) printf '%s\n' '--mode' 'auto' ;;
     gemini|gmnative|gm)
       # The gm lane's safe flags depend on its VEHICLE: agy has --mode auto; gemini-cli
-      # gets the generated policy file + auto_edit. SESSION_LAUNCH_ENGINE normally carries
-      # the resolved vehicle; direct calls resolve it the same way _session_launch_gm does.
+      # gets --approval-mode auto_edit (edit tools auto-approve, shell commands still
+      # ask). SESSION_LAUNCH_ENGINE normally carries the resolved vehicle; direct calls
+      # resolve it the same way _session_launch_gm does.
       local veh="${SESSION_LAUNCH_ENGINE:-${OSRC_GEMINI_VEHICLE:-}}"
       [ -n "$veh" ] || { command -v agy >/dev/null 2>&1 && veh=agy; }
       [ -n "$veh" ] || { command -v gemini >/dev/null 2>&1 && veh=gemini; }

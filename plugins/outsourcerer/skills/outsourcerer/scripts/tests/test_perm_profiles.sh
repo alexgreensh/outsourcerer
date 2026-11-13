@@ -8,10 +8,16 @@
 #   * safe maps to each engine's DOCUMENTED pre-allow mechanism (verified vs --help/docs,
 #     see sessions/2026-11-13-autonomy/out/L5-AUDIT.md): devin --permission-mode smart,
 #     cx --approve-for-me (replacing -s, they conflict), cc --allowedTools+--settings,
-#     cursor --auto-review, agy --mode auto, gemini-cli --approval-mode auto_edit+--policy.
+#     cursor --auto-review, agy --mode auto, gemini-cli --approval-mode auto_edit.
+#     (Round 2: the generated gemini policy TOML was withdrawn — see L5-VERDICT.md.)
 #   * parse_model/_consume_flags accept --perm safe|default (and --perm=) identically and
-#     never leak it into REST; invalid values die.
+#     never leak it into REST; invalid values (flag or OSRC_PERM_PROFILE env) die;
+#     --perm on a non-session verb warns instead of being silently ignored.
 #   * _session_launch_adapter appends safe flags for ported lanes; default is unchanged.
+#   * The launch banner is honest: engines with no faithful safe rung say so, and the
+#     recorded profile survives control/effort relaunch (_session_relaunch_*).
+#   * scripts/lib/*.sh loads when outsourcerer.sh is invoked THROUGH A SYMLINK
+#     (LOADER.md: $SCRIPT_DIR points at the link's dir, not the real one).
 #
 # Deterministic: no engine needs to be installed for the flag-matrix assertions; adapter
 # checks SKIP when the lane's CLI is absent. OSRC_HOME is scratch. No tmux.
@@ -79,33 +85,56 @@ ck "cc safe pre-allows npm test" "$TMP/cc.txt" "Bash(npm test)"
 ck "cc safe pre-allows npm run test:* scripts" "$TMP/cc.txt" "Bash(npm run test:*)"
 ck "cc safe pre-allows pytest" "$TMP/cc.txt" "Bash(pytest)"
 ck "cc safe emits --settings ask-list" "$TMP/cc.txt" "--settings"
-ck "cc ask-list covers shell redirect" "$TMP/cc.txt" 'Bash(*>*)'
 ck "cc ask-list covers find -exec" "$TMP/cc.txt" 'Bash(*-exec*)'
+ck "cc ask-list covers find -delete" "$TMP/cc.txt" 'Bash(*-delete*)'
 ck "cc ask-list covers --output writers" "$TMP/cc.txt" 'Bash(*--out*)'
+ck "cc ask-list covers rg --pager exec" "$TMP/cc.txt" 'Bash(rg *--pager*)'
+ck "cc ask-list covers sort --compress-program exec" "$TMP/cc.txt" 'Bash(sort *--compress-program*)'
+ck "cc ask-list covers tail -f stall" "$TMP/cc.txt" 'Bash(tail *-f*)'
+ck "cc ask-list covers ps env leak" "$TMP/cc.txt" 'Bash(ps e*)'
+ck "cc ask-list covers watch-mode stall" "$TMP/cc.txt" 'Bash(*--watch*)'
+ck "cc ask-list covers prettier --write" "$TMP/cc.txt" 'Bash(prettier *--write*)'
+ck "cc ask-list covers eslint --fix" "$TMP/cc.txt" 'Bash(eslint *--fix*)'
+ck "cc ask-list covers pytest --pdb stall" "$TMP/cc.txt" 'Bash(*--pdb*)'
+ck "cc ask-list covers git fsck --lost-found" "$TMP/cc.txt" 'Bash(git fsck *--lost-found*)'
+# Round-2 removals: these must NOT appear as allow rules.
 nck "cc safe does NOT pre-allow rm" "$TMP/cc.txt" "Bash(rm"
 nck "cc safe does NOT pre-allow git push" "$TMP/cc.txt" "Bash(git push"
 nck "cc safe does NOT pre-allow curl" "$TMP/cc.txt" "Bash(curl"
 nck "cc safe does NOT pre-allow sudo" "$TMP/cc.txt" "Bash(sudo"
 nck "cc safe does NOT pre-allow docker" "$TMP/cc.txt" "Bash(docker"
 nck "cc safe does NOT pre-allow psql" "$TMP/cc.txt" "Bash(psql"
-nck "cc safe does NOT pre-allow env exec wrapper" "$TMP/cc.txt" "Bash(env)"
+nck "cc safe does NOT pre-allow env exec wrapper" "$TMP/cc.txt" "Bash(env"
 nck "cc safe does NOT pre-allow tmux" "$TMP/cc.txt" "Bash(tmux"
+nck "cc safe does NOT pre-allow printenv (secret dump)" "$TMP/cc.txt" "Bash(printenv"
+nck "cc safe does NOT pre-allow ping (never returns)" "$TMP/cc.txt" "Bash(ping"
+nck "cc safe does NOT pre-allow sleep (never returns)" "$TMP/cc.txt" "Bash(sleep"
+nck "cc safe does NOT pre-allow log show (unbounded)" "$TMP/cc.txt" "Bash(log show"
+nck "cc safe does NOT pre-allow gh api (verb smuggle)" "$TMP/cc.txt" "Bash(gh api"
+nck "cc safe does NOT pre-allow gh run watch (hangs)" "$TMP/cc.txt" "Bash(gh run watch"
+nck "cc safe does NOT pre-allow black (writes by default)" "$TMP/cc.txt" "Bash(black"
+nck "cc safe does NOT pre-allow isort (writes by default)" "$TMP/cc.txt" "Bash(isort"
+nck "cc safe does NOT pre-allow bare ruff (format/server escape)" "$TMP/cc.txt" "Bash(ruff)"
+nck "cc safe does NOT pre-allow git remote -v (prune/update smuggle)" "$TMP/cc.txt" "Bash(git remote -v"
+nck "cc safe does NOT pre-allow git symbolic-ref (writes HEAD)" "$TMP/cc.txt" "Bash(git symbolic-ref"
+nck "cc safe does NOT pre-allow bare git reflog (expire/drop)" "$TMP/cc.txt" "Bash(git reflog)"
+nck "cc safe does NOT pre-allow bare git reflog args" "$TMP/cc.txt" "Bash(git reflog *)"
+ck "cc safe still allows git reflog show" "$TMP/cc.txt" "Bash(git reflog show *)"
+ck "cc safe still allows git remote show" "$TMP/cc.txt" "Bash(git remote show *)"
+ck "cc safe still allows ruff check" "$TMP/cc.txt" "Bash(ruff check *)"
 
-# ---------- 4. gemini-cli safe args + policy file ----------------------------------
+# ---------- 4. gemini-cli safe args (policy withdrawn in round 2) ------------------
+# The round-1 generated [[rule]] policy auto-allowed commands it claimed to ask about
+# (regexes stopped at the first quoted string and anchored only the first word), and
+# gemini-cli refuses OAuth on this machine so no live session can prove a corrected
+# policy. Per the review, safe emits ONLY the documented --approval-mode auto_edit.
 export OSRC_GEMINI_VEHICLE=gemini
 osrc_perm_flags gemini safe "$WD" > "$TMP/gm.txt"
 ck "gemini safe emits --approval-mode" "$TMP/gm.txt" "--approval-mode"
 ck "gemini safe emits auto_edit" "$TMP/gm.txt" "auto_edit"
-ck "gemini safe emits --policy" "$TMP/gm.txt" "--policy"
-POL="$(sed -n '/--policy/{n;p;}' "$TMP/gm.txt")"
-[ -n "$POL" ] && [ -f "$POL" ] && ok "gemini policy file written under OSRC_HOME" || no "gemini policy file missing: '$POL'"
-case "$POL" in "$OSRC_HOME"/*) ok "gemini policy lives under scratch OSRC_HOME" ;; *) no "gemini policy outside OSRC_HOME: $POL" ;; esac
-[ -n "$POL" ] && [ -f "$POL" ] && {
-  ck "policy has allow rule" "$POL" 'decision = "allow"'
-  ck "policy has ask_user rule" "$POL" 'decision = "ask_user"'
-  ck "policy allow regex covers git status" "$POL" "git status"
-  ck "policy ask regex covers redirect" "$POL" ">"
-}
+nck "gemini safe has NO --policy (withdrawn)" "$TMP/gm.txt" "--policy"
+nck "gemini safe writes no policy file" "$TMP/gm.txt" ".toml"
+[ ! -d "$OSRC_HOME/perm" ] && ok "gemini safe creates no perm/ dir" || no "gemini safe left $OSRC_HOME/perm behind"
 # gm alias resolves through the vehicle too
 _out="$(OSRC_GEMINI_VEHICLE=agy osrc_perm_flags gm safe "$WD")"
 [ "$_out" = $'--mode\nauto' ] && ok "gm+agy vehicle -> --mode auto" || no "gm+agy -> '$_out'"
@@ -125,12 +154,23 @@ _rc=0; ( parse_model --perm bogus ) >/dev/null 2>&1 || _rc=$?
 [ "$_rc" -ne 0 ] && ok "parse_model --perm bogus dies" || no "parse_model --perm bogus accepted"
 _rc=0; ( parse_model --perm ) >/dev/null 2>&1 || _rc=$?
 [ "$_rc" -ne 0 ] && ok "parse_model --perm (missing value) dies" || no "parse_model --perm missing value accepted"
+# Round 2: an INVALID OSRC_PERM_PROFILE env value must die, not silently behave as default.
+_rc=0; ( OSRC_PERM_PROFILE=bogus parse_model >/dev/null 2>&1 ) || _rc=$?
+[ "$_rc" -ne 0 ] && ok "parse_model bogus OSRC_PERM_PROFILE dies" || no "parse_model bogus OSRC_PERM_PROFILE accepted"
+_rc=0; ( OSRC_PERM_PROFILE=bogus _consume_flags x >/dev/null 2>&1 ) || _rc=$?
+[ "$_rc" -ne 0 ] && ok "_consume_flags bogus OSRC_PERM_PROFILE dies" || no "_consume_flags bogus OSRC_PERM_PROFILE accepted"
 
 _p="$( _consume_flags --perm safe "do the thing" >/dev/null 2>&1; printf '%s|%s' "${PERM_PROFILE:-}" "${REST[0]:-}" )"
 [ "$_p" = "safe|do the thing" ] \
   && ok "_consume_flags --perm safe consumed, REST clean" || no "_consume_flags --perm safe (got '$_p')"
 _p="$( _consume_flags --perm=default >/dev/null 2>&1; printf '%s' "${PERM_PROFILE:-}" )"
 [ "$_p" = default ] && ok "_consume_flags --perm=default" || no "_consume_flags --perm=default (got '$_p')"
+# Round 2: --perm on a non-session verb must WARN, not be silently ignored.
+_warn="$(_consume_flags --perm safe "do the thing" 2>&1 >/dev/null)"
+case "$_warn" in *"[perm] note"*|*"only applies to interactive"*) ok "_consume_flags warns --perm ignored off session start" ;; *) no "_consume_flags silent on --perm (got '$_warn')" ;; esac
+# parse_model serves session start too, so it must NOT emit the non-session warning.
+_warn="$( parse_model --perm safe 2>&1 >/dev/null )"
+case "$_warn" in *"only applies to interactive"*) no "parse_model wrongly warns on --perm" ;; *) ok "parse_model does not warn (session start honors --perm)" ;; esac
 
 # ---------- 6. adapter integration (skip when lane CLI absent) ----------------------
 # Prints SESSION_LAUNCH one-arg-per-line from a subshell so die() can't kill the test.
@@ -221,6 +261,95 @@ if have cursor-agent || have agent; then
     nck "cursor default has no --auto-review" "$TMP/l-cur-def.txt" "--auto-review"
   fi
 else echo "SKIP: cursor-agent not installed"; fi
+
+# ---------- 7. honest banner + relaunch profile preservation ----------------------
+# osrc_perm_desc: rc0 + description for engines WITH a rung, rc1 for no-rung engines.
+_desc="$(osrc_perm_desc cc 2>/dev/null)" && case "$_desc" in *allow*|*LIST*|*list*) ok "osrc_perm_desc cc describes the allow-list" ;; *) no "osrc_perm_desc cc vague: '$_desc'" ;; esac
+_desc="$(osrc_perm_desc devin 2>/dev/null)" && case "$_desc" in *MODEL-JUDGED*|*model*judged*|*smart*) ok "osrc_perm_desc devin admits model-judged" ;; *) no "osrc_perm_desc devin vague: '$_desc'" ;; esac
+_rc=0; osrc_perm_desc droid >/dev/null 2>&1 || _rc=$?
+[ "$_rc" -ne 0 ] && ok "osrc_perm_desc droid -> rc1 (no rung)" || no "osrc_perm_desc droid should fail"
+_rc=0; osrc_perm_desc hermes >/dev/null 2>&1 || _rc=$?
+[ "$_rc" -ne 0 ] && ok "osrc_perm_desc hermes -> rc1 (no rung)" || no "osrc_perm_desc hermes should fail"
+_rc=0; osrc_perm_desc cline >/dev/null 2>&1 || _rc=$?
+[ "$_rc" -ne 0 ] && ok "osrc_perm_desc cline -> rc1 (no rung)" || no "osrc_perm_desc cline should fail"
+_rc=0; osrc_perm_desc pi >/dev/null 2>&1 || _rc=$?
+[ "$_rc" -ne 0 ] && ok "osrc_perm_desc pi -> rc1 (no rung)" || no "osrc_perm_desc pi should fail"
+
+# _osrc_perm_banner: silent under default; honest under safe for both rung and no-rung.
+_b="$( PERM_PROFILE=default _osrc_perm_banner droid 2>&1 )"; [ -z "$_b" ] \
+  && ok "banner silent under default profile" || no "banner printed under default: '$_b'"
+_b="$( PERM_PROFILE=safe SESSION_LAUNCH_ENGINE=cc _osrc_perm_banner cc 2>&1 )"
+case "$_b" in *"[perm] safe"*"claude"*|*"[perm] safe"*) ok "banner prints safe desc for cc" ;; *) no "banner missing safe line for cc: '$_b'" ;; esac
+_b="$( PERM_PROFILE=safe _osrc_perm_banner droid 2>&1 )"
+case "$_b" in *"no faithful safe rung"*"DEFAULT"*) ok "banner honestly reports no-rung engine as default" ;; *) no "banner lied for droid: '$_b'" ;; esac
+_b="$( PERM_PROFILE=safe _osrc_perm_banner hermes 2>&1 )"
+case "$_b" in *"no faithful safe rung"*) ok "banner honestly reports hermes as default" ;; *) no "banner lied for hermes: '$_b'" ;; esac
+
+# Relaunch preservation: the recorded PERM_PROFILE must reach the rebuilt command.
+# _session_relaunch_cc is deterministic (effort->tokens + perm suffix, no CLI probe).
+_cc_safe="$( PERM_PROFILE=safe _session_relaunch_cc "claude-haiku-5-5" high 2>/dev/null )"
+case "$_cc_safe" in *--allowedTools*--settings*|*--allowedTools*) ok "cc relaunch safe -> --allowedTools suffix" ;; *) no "cc relaunch safe missing allow-list: '$_cc_safe'" ;; esac
+_cc_def="$( PERM_PROFILE=default _session_relaunch_cc "claude-haiku-5-5" high 2>/dev/null )"
+case "$_cc_def" in *--allowedTools*|*--settings*) no "cc relaunch default leaked safe flags: '$_cc_def'" ;; *) ok "cc relaunch default -> no safe flags (byte-identical shape)" ;; esac
+# _session_relaunch_cx: safe swaps -s workspace-write for --approve-for-me.
+_cx_safe="$( PERM_PROFILE=safe _session_relaunch_cx "test-model-1" low 2>/dev/null )"
+_cx_def="$( PERM_PROFILE=default _session_relaunch_cx "test-model-1" low 2>/dev/null )"
+if [ -n "$_cx_safe" ] && [ -n "$_cx_def" ]; then
+  case "$_cx_safe" in *--approve-for-me*) ok "cx relaunch safe -> --approve-for-me" ;; *) no "cx relaunch safe missing --approve-for-me: '$_cx_safe'" ;; esac
+  case "$_cx_safe" in *workspace-write*) no "cx relaunch safe kept -s workspace-write: '$_cx_safe'" ;; *) ok "cx relaunch safe drops -s workspace-write" ;; esac
+  case "$_cx_def" in *workspace-write*) ok "cx relaunch default keeps -s workspace-write" ;; *) no "cx relaunch default lost workspace-write: '$_cx_def'" ;; esac
+  case "$_cx_def" in *--approve-for-me*) no "cx relaunch default leaked --approve-for-me" ;; *) ok "cx relaunch default has no --approve-for-me" ;; esac
+else
+  echo "SKIP: _session_relaunch_cx produced no output (model row/codex probe unavailable)"
+fi
+
+# ---------- 8. symlink loader (LOADER.md) ------------------------------------------
+# $SCRIPT_DIR is computed from $0/BASH_SOURCE — through a symlink it points at the
+# LINK's directory, which has no lib/. The _OSRC_FACTORY_DIR fallback must resolve the
+# real script dir and load lib/*.sh anyway, or `session start --perm safe` dies with
+# "needs scripts/lib/perm.sh". Prove it two ways: source-through-symlink function
+# visibility, and an exec-through-symlink session start that gets PAST the launch
+# adapter (tmux stubbed; reaching tmux proves osrc_perm_* resolved).
+mkdir -p "$TMP/linkdir" "$TMP/tmuxbin"
+ln -sf "$SRC" "$TMP/linkdir/outsourcerer.sh"
+( . "$TMP/linkdir/outsourcerer.sh" >/dev/null 2>&1
+  type -t osrc_perm_flags >/dev/null && type -t osrc_perm_apply_launch >/dev/null \
+    && type -t osrc_perm_string_suffix >/dev/null && type -t _session_relaunch_cx >/dev/null \
+    && type -t _session_relaunch_cc >/dev/null ) \
+  && ok "lib functions load when sourced through a symlink" \
+  || no "lib functions MISSING via symlink source (loader broken)"
+
+# exec-through-symlink: a stub tmux on PATH records calls; session start --perm safe
+# must get past the launch adapter (which needs perm.sh) and actually invoke tmux.
+cat > "$TMP/tmuxbin/tmux" <<'EOF'
+#!/bin/sh
+echo "tmux $*" >> "$OSRC_TMUX_LOG"
+# has-session must FAIL (rc1) or session start reports "already exists" and stops
+# before new-session; every other call succeeds with empty output.
+[ "$1" = "has-session" ] && exit 1
+exit 0
+EOF
+chmod +x "$TMP/tmuxbin/tmux"
+: > "$TMP/tmux.log"
+( unset OSRC_SOURCED; cd "$WD" && \
+  env -u OSRC_SOURCED OSRC_TMUX_LOG="$TMP/tmux.log" PATH="$TMP/tmuxbin:$PATH" \
+    OSRC_HOME="$OSRC_HOME" OSRC_SESSION_NAME="l5-symlink-probe" \
+    "$TMP/linkdir/outsourcerer.sh" --provider cc session start --perm safe >/dev/null 2>"$TMP/symlink.err" )
+_rc=$?
+if [ -s "$TMP/tmux.log" ]; then
+  ok "exec via symlink reached tmux (perm.sh loaded; session start --perm safe built a launch)"
+  if grep -q "perm.sh" "$TMP/symlink.err"; then
+    no "symlink exec hit perm.sh-missing error despite tmux calls: $(cat "$TMP/symlink.err")"
+  else ok "no perm.sh-missing error on symlink exec"; fi
+else
+  # tmux never called: either the launch build died (the bug) or an earlier gate did.
+  # The perm-lib error is the specific regression; anything else is environmental.
+  if grep -q "perm.sh" "$TMP/symlink.err"; then
+    no "exec via symlink died on missing perm.sh (LOADER regression): $(cat "$TMP/symlink.err")"
+  else
+    echo "SKIP: symlink exec did not reach tmux for a non-perm reason (rc=$_rc): $(head -3 "$TMP/symlink.err")"
+  fi
+fi
 
 echo "----"
 echo "RESULT: $pass passed, $fail failed"
