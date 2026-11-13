@@ -115,7 +115,7 @@ Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEART
 
 ## Subcommands
 
-Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `session` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `loop` · `fleet` (`ls`/`show`/`name`/`supervise`: your Claude Code sessions plus Outsourcerer's own jobs, not other tools' independent sessions) · `advise` · `doctor` · `models`. Factory: `plan` · `task` · `land` · `flow` · `exclude`. More: `suggest`/`deals` · `estimate` · `tab` · `second-opinion` · `image` · `continue` · `tap` · `sanitize` · `parity*` · `posture` · `classify` · `cleanup`/`gc`. Job states and next steps (`permission-blocked` is not `blocked`: rerun with `yolo` or restructure): `references/jobs-and-safety.md`.
+Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `session` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `loop` · `fleet` (`ls`/`show`/`name`/`supervise`: your Claude Code sessions plus Outsourcerer's own jobs, not other tools' independent sessions) · `advise` · `doctor` · `models`. Factory: `plan` · `task` · `land` · `flow` · `exclude`. Remote lanes (cloud sessions, CI branches) + one-reviewer queue: `lane` · `review` (`references/remote-and-review.md`). More: `suggest`/`deals` · `estimate` · `tab` · `second-opinion` · `image` · `continue` · `tap` · `sanitize` · `parity*` · `posture` · `classify` · `cleanup`/`gc`. Job states and next steps (`permission-blocked` is not `blocked`: rerun with `yolo` or restructure): `references/jobs-and-safety.md`.
 
 ## Factory: plans for multi-step work
 
