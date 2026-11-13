@@ -12,16 +12,24 @@ lane add <id> --branch <remote-branch> [--repo owner/name|path|url] [--ready MAR
 lane ls | show <id> | poll [id] | rm <id> | events
 ```
 
-- **READY** = the branch tip's commit message has the word `READY` (not `not READY`), or the tip tree
-  has a root file `READY` / `<id>.READY`. `--ready SHIPPED` swaps the word. A push that is not READY
-  is progress: no event, but it resets the stall clock.
+- **READY** (one rule, the same as the done contract's `branch:<b>@<marker>`): the marker word is at the
+  START or END of the tip commit's SUBJECT line and is not negated by "not" (`READY: done`,
+  `fix tests READY` count; `docs: explain the READY marker`, `wip: not READY` and a body-only READY do
+  not). Or the tip commit ADDED or CHANGED a root file `READY` / `<id>.READY`; a file committed
+  earlier does not count, so WIP pushes after a review are not READY. `--ready SHIPPED` swaps the
+  word. A push that is not READY is progress: no event, but it resets the stall clock.
 - **Polling** is one network call per lane per poll (`git ls-remote`, or one
   `gh api repos/o/n/commits/<branch>` for `owner/name`), at most every `OSRC_REMOTE_POLL_SECS` (60).
-  A moved head costs a branch fetch into `remote/<id>.git` (git) or up to two `contents` calls (gh).
+  A moved head costs a branch fetch into `remote/<id>.git` (git transport only). Every network call is
+  killed after `OSRC_NET_TIMEOUT` (20 s), so a hung connection cannot stall `osrc_remote_events`.
 - `lane add` registers the lane in the shared owner registry (`_owner_record`), so the stop-guard can
   see it. `osrc_remote_state <id>` prints `live|ready|done|failed|gone` from cache, no network.
 - **Done contract**: `--done-when check:"<cmd>"` runs on the READY sha in a throwaway worktree
-  (`OSRC_CHECK_TIMEOUT`, 900s). Fail means `EVENT failed`, no review enqueued, no reviewer tokens spent.
+  (`OSRC_CHECK_TIMEOUT`, 900s) **in the background**: events never wait for it. While it runs the lane
+  reads `live` (`lane show` has `check.state=running`); the next poll collects the result. Pass
+  enqueues; fail, or a runner that died without a result, means `EVENT failed` and no review is spent.
+  **The command executes code pushed by the remote lane, on this machine, with your own rights and no
+  sandbox.** Only set it on lanes whose branch you would run locally.
 - **Failure is loud**: `gh` auth failure or rate limit emits `EVENT failed` with the reason on the first
   poll; other poll errors after `OSRC_REMOTE_ERR_MAX` (5) in a row; a deleted branch the lane once had.
 - `stalled`: no push for `OSRC_REMOTE_STALL` minutes (90) while the lane is live.
@@ -36,16 +44,24 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 ```
 
 - READY lanes auto-enqueue, deduped by lane + head sha. Item id is `<lane>-<sha7>`.
+- `review requeue <item>` on an in-flight item is refused while the reviewer is working or inside the
+  send grace (it would be sent twice); `--force` overrides.
 - `review next` sends only to an idle reviewer (`osrc_screen_state` when L3 lands, otherwise a
-  conservative pane reader that needs an empty composer and no spinner), never with another item in
+  conservative pane reader that needs an empty composer and no spinner; L3's `composer` counts as idle only
+  when its evidence says "no turn yet", never when the composer holds unsent text), never with another item in
   flight. The brief is `review/<item>.md`; the reviewer writes `review/<item>.VERDICT`, first line
   `MERGE`, `CHANGES` or `BLOCK`, findings below.
 - **Verdict contract**: each item records `sha_at_ready`, `sha_reviewed`, `verdict`, `findings` (path).
   A push after READY supersedes a queued review of the old sha and marks an in-flight or finished one
   `stale`; the new READY head is enqueued as a re-review. A stale MERGE never makes the lane `done`.
+  After CHANGES the lane reads `live` again and its stall clock starts at the verdict, so a lane that
+  was sent findings and went silent raises `stalled`.
+- `lane rm` deletes the lane's event stamps, review items and scratch files, so re-adding the same id
+  announces and queues a still-READY head again. Backstop: a READY lane with no queued, in-flight or
+  finished item for its head raises `EVENT unreviewed` with the fix as NEXT.
   Set `OSRC_REVIEW_REREVIEW_ANY=1` to re-review on any push, not only READY ones.
 - **Send-back** for lanes that cannot receive `session send`: `review sendback <item>` writes
-  `review/REVIEW-<sha7>.md` and prints a relay message. Chosen over pushing a `review/<lane>` ref
+  `review/REVIEW-<lane>-<sha7>.md` and prints a relay message. Chosen over pushing a `review/<lane>` ref
   because a push is outward-facing and needs write access to a branch the lane may own or protect.
 - **Rotation**: after `OSRC_REVIEW_ROTATE_K` reviews (6) or a footer context bar over
   `OSRC_REVIEW_CTX_MAX` percent (60), `review next` refuses and `review rotate` prints the steps for a

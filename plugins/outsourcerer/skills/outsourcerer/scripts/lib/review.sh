@@ -14,7 +14,7 @@
 # Nothing here merges anything. Merging stays with the orchestrator; this only surfaces it.
 #
 # Send-back channel for lanes that cannot receive `session send` (cloud sessions): CHANGES/BLOCK
-# verdicts print a NEXT of `review sendback <item>`, which writes review/REVIEW-<sha7>.md and prints a
+# verdicts print a NEXT of `review sendback <item>`, which writes review/REVIEW-<lane>-<sha7>.md and prints a
 # ready-to-relay message for the orchestrator to deliver however that lane takes input. Chosen over
 # pushing a review/<lane> ref because a push is outward-facing and needs write access to a branch a
 # cloud lane may own or protect; the orchestrator is already the relay, and a local file cannot fail
@@ -29,11 +29,14 @@ _osrc_review_reviewer() { local f="$OSRC_HOME/review/reviewer.json"; [ -f "$f" ]
 # Prefers L3's osrc_screen_state when present. Until then a conservative wrapper: only a clearly
 # empty composer with no spinner in the last lines counts as idle. Unknown never sends.
 _osrc_review_screen() { # <session> -> idle|working|approval|unknown (first word only)
-  local s="$1" st text tail_text
+  local s="$1" st st_out text tail_text
   if type osrc_screen_state >/dev/null 2>&1; then
-    st="$(osrc_screen_state "$s" 2>/dev/null | head -1)"
+    st_out="$(osrc_screen_state "$s" 2>/dev/null)"; st="$(printf '%s\n' "$st_out" | head -1)"
     case "$st" in
-      idle|composer) printf idle ;;
+      idle) printf idle ;;
+      # `composer` = ready with no turn yet (a fresh reviewer: fine) OR holding unsent text (typing the
+      # request would submit that text with it). Only the evidence tells them apart.
+      composer) case "$(printf '%s\n' "$st_out" | sed -n 2p)" in *"no turn yet"*) printf idle ;; *) printf unknown ;; esac ;;
       working) printf working ;;
       approval|question) printf approval ;;
       *) printf unknown ;;
@@ -61,6 +64,9 @@ _osrc_review_send() { # <session> <one-line message>
   local s="$1" m="$2" probe tail_text i rc
   if type _managed_endpoint_live >/dev/null 2>&1 && _managed_endpoint_live "$s" "$s" 2>/dev/null; then
     _managed_session_send "$s" "$m"; rc=$?
+    # rc 2 = the text left the composer (submitted) but delivery to the model is not independently
+    # receipted. Treated as sent; if it never landed, the reviewer reads idle and, after the send grace,
+    # osrc_review_events raises "idle without a verdict".
     [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; return
   fi
   tmux has-session -t "=$s" 2>/dev/null || return 1
@@ -103,10 +109,22 @@ _osrc_review_enqueue() {
   return 0
 }
 
-_osrc_review_item_exists_for_lane() { # any earlier item (any state) for this lane?
+_osrc_review_item_exists_for_lane() { # any earlier item (any state) for this lane? exact lane match, not a name prefix
   local p
-  for p in "$OSRC_HOME/review/items/$1"-*.json; do [ -s "$p" ] && return 0; done
+  for p in $(_osrc_review_items); do [ "$(jq -r .lane "$p")" = "$1" ] && return 0; done
   return 1
+}
+
+_osrc_review_item_state() { # <lane> <head> -> state of that exact head's item, or empty
+  local p="$(_osrc_rv_item "$1-${2:0:7}")"
+  [ -f "$p" ] && [ "$(jq -r .head "$p")" = "$2" ] && jq -r .state "$p"
+  return 0
+}
+
+_osrc_review_requeue_cmd() { # <lane> <head> -> the command that gets this head reviewed
+  local p="$(_osrc_rv_item "$1-${2:0:7}")"
+  if [ -f "$p" ]; then printf '%s review requeue %s-%s' "$(_osrc_self)" "$1" "${2:0:7}"
+  else printf '%s review queue add %s' "$(_osrc_self)" "$1"; fi
 }
 
 # Called by the lane poll when a lane's head moves.
@@ -123,10 +141,12 @@ _osrc_review_supersede() { # <lane> <new-head>
   done
 }
 
-_osrc_review_lane_removed() { # drop queued items of a removed lane
-  local p
+_osrc_review_lane_removed() { # <lane>: delete that lane's items and files; a lane re-added under the same id starts clean
+  local p id
   for p in $(_osrc_review_items); do
-    [ "$(jq -r .lane "$p")" = "$1" ] && [ "$(jq -r .state "$p")" = queued ] && _osrc_jq_set "$p" '.state="dropped"'
+    [ "$(jq -r .lane "$p")" = "$1" ] || continue
+    id="$(jq -r .id "$p")"
+    rm -f "$p" "$OSRC_HOME/review/$id.md" "$OSRC_HOME/review/$id.VERDICT" "$OSRC_HOME/review/REVIEW-$id.md"
   done
 }
 
@@ -225,7 +245,7 @@ osrc_review_events() {
     stale="$(jq -r .stale "$p")"
     case "$st" in
       queued) nq=$((nq+1)); [ -n "$oldest" ] || oldest="$id"
-        if [ $(( now - $(jq -r .enq_ts "$p") )) -ge "$un" ] && _osrc_ev_due "unreviewed:$id" "$un"; then
+        if [ $(( now - $(jq -r .enq_ts "$p") )) -ge "$un" ] && _osrc_ev_due "$lane" "unreviewed:$id" "$un"; then
           _osrc_emit unreviewed "$lane" "READY $sha7 queued $(( (now - $(jq -r .enq_ts "$p")) / ${OSRC_TIME_UNIT:-60} ))m with no review started (item $id)" "$(_osrc_review_next_cmd "$s")"
         fi ;;
       inflight) inflight="$id" ;;
@@ -235,17 +255,17 @@ osrc_review_events() {
         if [ "$stale" = true ]; then nextc="$(_osrc_self) review show $id"; else
           case "$v" in MERGE) nextc="$(_osrc_self) review show $id" ;; *) nextc="$(_osrc_self) review sendback $id" ;; esac
         fi
-        if _osrc_ev_due "verdict:$id" "$renotify"; then
+        if _osrc_ev_due "$lane" "verdict:$id" "$renotify"; then
           _osrc_emit done "$lane" "VERDICT $v $sha7$( [ "$stale" = true ] && printf ' STALE: lane moved to %s, re-review pending' "$(jq -r '.stale_by[0:7]' "$p")")" "$nextc"
         fi ;;
     esac
-    if [ "$st" = inflight ] && [ "$(jq -r .invalid_first_line "$p")" != "" ] && _osrc_ev_due "badverdict:$id" "$renotify"; then
+    if [ "$st" = inflight ] && [ "$(jq -r .invalid_first_line "$p")" != "" ] && _osrc_ev_due "$lane" "badverdict:$id" "$renotify"; then
       _osrc_emit question "$lane" "verdict file for $id has no MERGE/CHANGES/BLOCK first line (got: $(jq -r .invalid_first_line "$p"))" "OUTSOURCERER_TMUX=$s $(_osrc_self) session send \"first line of $OSRC_HOME/review/$id.VERDICT must be exactly MERGE, CHANGES or BLOCK\""
     fi
   done
   [ -n "$s" ] || return 0
   if ! tmux has-session -t "=$s" 2>/dev/null; then
-    if _osrc_ev_due "rvgone:$s" "$renotify" && { [ "$nq" -gt 0 ] || [ -n "$inflight" ]; }; then
+    if _osrc_ev_due .reviewer "rvgone:$s" "$renotify" && { [ "$nq" -gt 0 ] || [ -n "$inflight" ]; }; then
       _osrc_emit failed "$s" "reviewer session is gone with $nq queued and ${inflight:-no} item in flight" "$(_osrc_self) review rotate"
     fi
     return 0
@@ -253,14 +273,14 @@ osrc_review_events() {
   scr="$(_osrc_review_screen "$s")"
   if [ -n "$inflight" ]; then
     local sent; sent="$(jq -r .sent_ts "$(_osrc_rv_item "$inflight")")"
-    if [ "$scr" = idle ] && [ $(( now - sent )) -ge "$send_grace" ] && _osrc_ev_due "rvstopped:$inflight" "$renotify"; then
+    if [ "$scr" = idle ] && [ $(( now - sent )) -ge "$send_grace" ] && _osrc_ev_due .reviewer "rvstopped:$inflight" "$renotify"; then
       _osrc_emit idle "$s" "reviewer went idle without writing a verdict for $inflight (stopped, or asked a question)" "OUTSOURCERER_TMUX=$s $(_osrc_self) session read"
-    elif [ "$scr" = approval ] && _osrc_ev_due "rvapproval:$s" "$renotify"; then
+    elif [ "$scr" = approval ] && _osrc_ev_due .reviewer "rvapproval:$s" "$renotify"; then
       _osrc_emit approval "$s" "reviewer is at a prompt while reviewing $inflight" "OUTSOURCERER_TMUX=$s $(_osrc_self) session read"
     fi
     return 0
   fi
-  if [ "$nq" -gt 0 ] && [ "$scr" = idle ] && _osrc_ev_due "rvidle:$s" "$rv_renotify"; then
+  if [ "$nq" -gt 0 ] && [ "$scr" = idle ] && _osrc_ev_due .reviewer "rvidle:$s" "$rv_renotify"; then
     rot="$(_osrc_review_rotation_due "$s")" && _osrc_emit idle "$s" "reviewer idle, $nq queued (oldest $oldest); rotation due: $rot, start a fresh reviewer" "$(_osrc_self) review rotate" \
       || _osrc_emit idle "$s" "reviewer idle, $nq queued (oldest $oldest)" "$(_osrc_self) review next"
   fi
@@ -282,8 +302,7 @@ cmd_review() {
     next) _osrc_review_next "$@" ;;
     show) _osrc_review_show "${1:-}" ;;
     ack) local i; i="$(_osrc_review_resolve "${1:-}")" || die "no such review item"; _osrc_jq_set "$(_osrc_rv_item "$i")" '.acked=true' && echo "acked $i" ;;
-    requeue) local i; i="$(_osrc_review_resolve "${1:-}")" || die "no such review item"
-             _osrc_jq_set "$(_osrc_rv_item "$i")" '.state="queued" | .sent_ts=0' && echo "requeued $i" ;;
+    requeue) _osrc_review_requeue "$@" ;;
     drop) local i; i="$(_osrc_review_resolve "${1:-}")" || die "no such review item"; _osrc_jq_set "$(_osrc_rv_item "$i")" '.state="dropped"' && echo "dropped $i" ;;
     sendback) _osrc_review_sendback "${1:-}" ;;
     rotate) _osrc_review_rotate ;;
@@ -311,8 +330,8 @@ _osrc_review_queue_add() {
     case "$target" in *[!A-Za-z0-9._/-]*|-*|"") die "'$target' is neither a registered lane nor a usable branch name" ;; esac
     rr="$(_osrc_repo_resolve "$repo")" || die "cannot resolve a repo for branch '$target' (pass --repo)"
     _OSRC_RV_TRANSPORT="${rr%%	*}"; _OSRC_RV_URL="${rr#*	}"; _OSRC_RV_BRANCH="$target"
-    if [ "$_OSRC_RV_TRANSPORT" = gh ]; then head="$(gh api "repos/$_OSRC_RV_URL/commits/$target" --jq .sha 2>/dev/null)"
-    else head="$(git ls-remote "$_OSRC_RV_URL" "refs/heads/$target" 2>/dev/null | awk 'NR==1{print $1}')"; fi
+    if [ "$_OSRC_RV_TRANSPORT" = gh ]; then head="$(_osrc_net gh api "repos/$_OSRC_RV_URL/commits/$target" --jq .sha 2>/dev/null)"
+    else head="$(_osrc_net git ls-remote "$_OSRC_RV_URL" "refs/heads/$target" 2>/dev/null | awk 'NR==1{print $1}')"; fi
     [ -n "$head" ] || die "branch $target not found on $_OSRC_RV_URL"
     id="$(printf '%s' "$target" | tr '/' '-')"
     export _OSRC_RV_TRANSPORT _OSRC_RV_URL _OSRC_RV_BRANCH
@@ -371,16 +390,13 @@ _osrc_review_next() {
   _osrc_lock "$lk" || { echo "another review next is running" >&2; return 3; }
   now="$(_osrc_now)"
   _osrc_review_ingest
+  # oldest queued first (the items list is name-sorted, so order explicitly by enqueue time)
   for p in $(_osrc_review_items); do
     case "$(jq -r .state "$p")" in
-      inflight) inflight="$(jq -r .id "$p")" ;;
-      queued) [ -n "$chosen" ] || chosen="$p" ;;
+      inflight) inflight="$(jq -r .id "$p")"; continue ;;
+      queued) ;;
+      *) continue ;;
     esac
-  done
-  # oldest queued first (items list is name-sorted, so order explicitly by enqueue time)
-  chosen=""
-  for p in $(_osrc_review_items); do
-    [ "$(jq -r .state "$p")" = queued ] || continue
     if [ -z "$chosen" ] || [ "$(jq -r .enq_ts "$p")" -lt "$(jq -r .enq_ts "$chosen")" ]; then chosen="$p"; fi
   done
   if [ -n "$inflight" ]; then _osrc_unlock "$lk"; echo "one review in flight already: $inflight (never more than one). Verdict goes to $OSRC_HOME/review/$inflight.VERDICT"; return 3; fi
@@ -407,6 +423,23 @@ _osrc_review_next() {
   return 1
 }
 
+_osrc_review_requeue() { # <item> [--force]
+  local i p force="" s scr now sent grace="${OSRC_REVIEW_SEND_GRACE_SECS:-45}"
+  [ "${2:-}" != "--force" ] || force=1
+  i="$(_osrc_review_resolve "${1:-}")" || die "review requeue <item> [--force]"
+  p="$(_osrc_rv_item "$i")"; now="$(_osrc_now)"
+  if [ "$(jq -r .state "$p")" = inflight ] && [ -z "$force" ]; then
+    # requeueing an item the reviewer may still be working on would type the same request twice
+    s="$(_osrc_review_reviewer)"; sent="$(jq -r .sent_ts "$p")"
+    scr=unknown; [ -n "$s" ] && tmux has-session -t "=$s" 2>/dev/null && scr="$(_osrc_review_screen "$s")"
+    if [ "$scr" != idle ] || [ $(( now - sent )) -lt "$grace" ]; then
+      echo "$i is in flight and the reviewer is $scr (sent $(( now - sent ))s ago): not requeueing, it would be sent twice. Use --force if you are sure." >&2
+      return 1
+    fi
+  fi
+  _osrc_jq_set "$p" '.state="queued" | .sent_ts=0' && echo "requeued $i"
+}
+
 _osrc_review_show() {
   local i p; i="$(_osrc_review_resolve "${1:-}")" || die "review show <item>"
   p="$(_osrc_rv_item "$i")"; _osrc_review_ingest
@@ -420,7 +453,7 @@ _osrc_review_sendback() {
   local i p out v lane sha7
   i="$(_osrc_review_resolve "${1:-}")" || die "review sendback <item>"
   p="$(_osrc_rv_item "$i")"; v="$(jq -r .verdict "$p")"; [ -n "$v" ] || die "$i has no verdict yet"
-  lane="$(jq -r .lane "$p")"; sha7="$(jq -r '.head[0:7]' "$p")"; out="$OSRC_HOME/review/REVIEW-$sha7.md"
+  lane="$(jq -r .lane "$p")"; sha7="$(jq -r '.head[0:7]' "$p")"; out="$OSRC_HOME/review/REVIEW-$i.md"
   { printf '# Review of %s @ %s: %s\n\n' "$lane" "$sha7" "$v"
     [ "$(jq -r .stale "$p")" != true ] || printf 'NOTE: the lane has pushed %s since; findings apply to %s.\n\n' "$(jq -r '.stale_by[0:7]' "$p")" "$sha7"
     tail -n +2 "$(jq -r .findings "$p")"; } > "$out"

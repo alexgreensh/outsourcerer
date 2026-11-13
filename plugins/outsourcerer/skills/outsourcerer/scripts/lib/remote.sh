@@ -7,10 +7,12 @@
 #   lane ls | show <id> | poll [id] | rm <id> | events
 #
 # State: $OSRC_HOME/remote/<id>.json (one file per lane, written atomically). A lane is READY when
-# the branch tip's commit message carries the marker word (default READY) or the tip tree has a
-# root file <MARKER> / <id>.<MARKER>. Every poll is ONE network call (git ls-remote, or one
-# `gh api .../commits/<branch>`); more calls happen only when the head moved. Per-lane rate limit
-# OSRC_REMOTE_POLL_SECS (default 60). Registered in the shared owner registry via _owner_record.
+# the branch tip's commit SUBJECT carries the marker word (default READY) at its start or end, or the
+# tip commit ADDED/CHANGED a root file <MARKER> / <id>.<MARKER> (a file committed earlier does not
+# count, so later WIP pushes are not READY). Every poll is ONE network call (git ls-remote, or one
+# `gh api .../commits/<branch>`), bounded by OSRC_NET_TIMEOUT (20s); more calls happen only when the
+# head moved. Per-lane rate limit OSRC_REMOTE_POLL_SECS (default 60). Registered in the shared owner
+# registry via _owner_record.
 #
 # Contract (CONTRACT.md): osrc_remote_state <id> -> live|ready|done|failed|gone (cache only, no
 # network); osrc_remote_events -> EVENT/NEXT line pairs, never blocks. Review queue: lib/review.sh.
@@ -34,7 +36,7 @@ _osrc_id_ok() { # lane ids are path components and ref names: keep them boring
 # _osrc_jq_set <file> <jq-args...>: apply a jq filter in place, atomically (tmp + mv).
 _osrc_jq_set() {
   local f="$1" tmp; shift
-  tmp="$f.tmp.$$"
+  tmp="$f.tmp.$$.$RANDOM"
   if jq "$@" "$f" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then mv -f "$tmp" "$f"; else rm -f "$tmp"; return 1; fi
 }
 
@@ -48,15 +50,17 @@ _osrc_lock() { # <dir> -> 0 acquired
 }
 _osrc_unlock() { rmdir "$1" 2>/dev/null || true; }
 
-# Event dedupe: one file per key under remote/.ev holding the last emit time. interval 0 = once.
-_osrc_ev_due() { # <key> <interval-secs>
-  local d="$OSRC_HOME/remote/.ev" k f last now
-  k="$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"; f="$d/$k"
+# Event dedupe: one file per key under remote/.ev/<scope>/ holding the last emit time (interval 0 =
+# once). The scope is the lane id (or .reviewer), so `lane rm` can clear exactly that lane's stamps
+# and a lane re-added under the same id is announced afresh.
+_osrc_ev_due() { # <scope> <key> <interval-secs>
+  local d="$OSRC_HOME/remote/.ev/$1" k f last now
+  k="$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"; f="$d/$k"
   now="$(_osrc_now)"; mkdir -p "$d" 2>/dev/null
   if [ -f "$f" ]; then
-    [ "${2:-0}" -gt 0 ] 2>/dev/null || return 1
+    [ "${3:-0}" -gt 0 ] 2>/dev/null || return 1
     last="$(cat "$f" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
-    [ $(( now - last )) -ge "$2" ] || return 1
+    [ $(( now - last )) -ge "$3" ] || return 1
   fi
   printf '%s' "$now" > "$f"
   return 0
@@ -78,6 +82,25 @@ try:
     sys.exit(p.wait(timeout=secs))
 except subprocess.TimeoutExpired:
     os.killpg(p.pid, signal.SIGKILL); p.wait(); sys.exit(124)
+PY
+}
+
+# Every network call (git ls-remote, gh api, git fetch) goes through this: argv run directly in its own
+# process group, killed after OSRC_NET_TIMEOUT seconds (default 20), rc 124 + "timed out" on stderr.
+# A hung connection must not hold the lane lock or block osrc_remote_events.
+_osrc_net() { # <command> [args...]
+  python3 - "${OSRC_NET_TIMEOUT:-20}" "$@" <<'PY'
+import os, signal, subprocess, sys
+secs, argv = float(sys.argv[1]), sys.argv[2:]
+try:
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, start_new_session=True)
+except OSError as e:
+    sys.stderr.write("%s\n" % e); sys.exit(127)
+try:
+    sys.exit(p.wait(timeout=secs))
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL); p.wait()
+    sys.stderr.write("timed out after %ds\n" % secs); sys.exit(124)
 PY
 }
 
@@ -116,7 +139,7 @@ _osrc_lane_cache() { # <id> <lane-json>
   local c="$OSRC_HOME/remote/$1.git" url b
   url="$(_osrc_lane_fetch_url "$2")"; b="$(jq -r '.branch' "$2")"
   [ -d "$c" ] || git init -q --bare "$c" 2>/dev/null || return 1
-  git --git-dir="$c" fetch -q --no-tags "$url" "+refs/heads/$b:refs/heads/lane" 2>>"$OSRC_HOME/remote/$1.fetch.err" || return 1
+  _osrc_net git --git-dir="$c" fetch -q --no-tags "$url" "+refs/heads/$b:refs/heads/lane" 2>>"$OSRC_HOME/remote/$1.fetch.err" || return 1
   printf '%s' "$c"
 }
 
@@ -131,16 +154,18 @@ _osrc_gh_err_kind() { # <stderr-text> -> auth|rate|missing|net
 }
 
 # ---- poll --------------------------------------------------------------------------------------
-# _osrc_lane_poll <id> [force]: refresh one lane. At most one network call unless the head moved.
+# _osrc_lane_poll <id> [force]: refresh one lane. At most one network call unless the head moved. A
+# finished background check is collected on EVERY call (cheap, no network); only the network part is
+# rate limited.
 _osrc_lane_poll() {
   local id="$1" force="${2:-}" f now poll last lk
   f="$(_osrc_lane_json "$id")"; [ -f "$f" ] || return 1
-  now="$(_osrc_now)"; poll="${OSRC_REMOTE_POLL_SECS:-60}"
-  last="$(jq -r '.last_poll_ts // 0' "$f")"
-  if [ -z "$force" ] && [ $(( now - last )) -lt "$poll" ]; then return 0; fi
   lk="$OSRC_HOME/remote/$id.lock"
   _osrc_lock "$lk" || return 0
-  _osrc_lane_poll_locked "$id" "$f" "$now"
+  now="$(_osrc_now)"; poll="${OSRC_REMOTE_POLL_SECS:-60}"
+  _osrc_lane_check_collect "$id" "$f" "$now"
+  last="$(jq -r '.last_poll_ts // 0' "$f")"
+  if [ -n "$force" ] || [ $(( now - last )) -ge "$poll" ]; then _osrc_lane_poll_locked "$id" "$f" "$now"; fi
   _osrc_unlock "$lk"
   return 0
 }
@@ -153,7 +178,7 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   names=""
   if [ "$transport" = gh ]; then
     have gh || { _osrc_lane_poll_err "$id" "$f" "$now" auth "gh CLI not installed or not on PATH"; return 0; }
-    out="$(gh api "repos/$url/commits/$branch" 2>"$f.err")" || rc=$?
+    out="$(_osrc_net gh api "repos/$url/commits/$branch" 2>"$f.err")" || rc=$?
     err="$(cat "$f.err" 2>/dev/null)"; rm -f "$f.err"
     if [ "$rc" -ne 0 ]; then
       kind="$(_osrc_gh_err_kind "$err")"
@@ -164,7 +189,7 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
       names="$(printf '%s' "$out" | jq -r '.files[]?.filename' 2>/dev/null)"
     fi
   else
-    out="$(git ls-remote "$url" "refs/heads/$branch" 2>"$f.err")" || rc=$?
+    out="$(_osrc_net git ls-remote "$url" "refs/heads/$branch" 2>"$f.err")" || rc=$?
     err="$(cat "$f.err" 2>/dev/null)"; rm -f "$f.err"
     if [ "$rc" -ne 0 ]; then _osrc_lane_poll_err "$id" "$f" "$now" net "$err"; return 0; fi
     head="$(printf '%s\n' "$out" | awk 'NR==1{print $1}')"
@@ -185,14 +210,12 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   if [ "$transport" != gh ]; then
     cache="$(_osrc_lane_cache "$id" "$f")" || { _osrc_lane_poll_err "$id" "$f" "$now" net "fetch of $branch failed: $(tail -1 "$OSRC_HOME/remote/$id.fetch.err" 2>/dev/null)"; return 0; }
     msg="$(git --git-dir="$cache" log -1 --format=%B "$head" 2>/dev/null)"
-    names="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"
+    # files the TIP COMMIT added or changed (not the whole tree): a READY file committed once must not
+    # make every later push READY. The gh path gets the same list from the commits response (.files).
+    names="$(git --git-dir="$cache" diff-tree --no-commit-id --name-only -r --root "$head" 2>/dev/null)"
   fi
   if _osrc_msg_ready "$msg" "$marker" || printf '%s\n' "$names" | grep -qxE "$marker|$id\\.$marker"; then
     ready=true
-  elif [ "$transport" = gh ]; then
-    # the tip commit did not touch a marker file, but an earlier one may have left it in the tree
-    if gh api "repos/$url/contents/$marker?ref=$head" >/dev/null 2>&1 \
-       || gh api "repos/$url/contents/$id.$marker?ref=$head" >/dev/null 2>&1; then ready=true; fi
   fi
   sha7="${head:0:7}"
   _osrc_jq_set "$f" --arg head "$head" --arg msg "$(printf '%s' "$msg" | head -1 | cut -c1-160)" \
@@ -210,10 +233,30 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   return 0
 }
 
-_osrc_msg_ready() { # <message> <marker>
-  local m="$1" k="$2"
-  printf '%s' "$m" | grep -qiE "(^|[^A-Za-z])(not|un)[ -]?$k([^A-Za-z]|$)" && return 1
-  printf '%s' "$m" | grep -qE "(^|[^A-Za-z])$k([^A-Za-z]|$)"
+# ONE marker rule, shared with the done contract (lib/done.sh, _osrc_done_marker_hit) when loaded: the
+# marker must be a whole word at the START or END of the commit SUBJECT line, and a marker negated
+# by "not" never counts. Body text and mid-subject mentions ("docs: explain the READY marker",
+# "wip: not READY, tests red") do not make a lane READY. The local copy below is that same rule for
+# when done.sh is not loaded.
+_osrc_msg_ready() { # <commit message> <marker>
+  local subj; subj="$(printf '%s' "$1" | head -1)"
+  if type _osrc_done_marker_hit >/dev/null 2>&1; then _osrc_done_marker_hit "$subj" "$2"; else _osrc_marker_hit_local "$subj" "$2"; fi
+}
+_osrc_marker_hit_local() { # <subject> <marker>
+  local subj="$1" marker="$2" rest pre pt
+  [ -n "$subj" ] && [ -n "$marker" ] || return 1
+  case "$subj" in
+    "$marker"*) rest="${subj#"$marker"}"; case "$rest" in ''|[!A-Za-z0-9_]*) return 0 ;; esac ;;
+  esac
+  case "$subj" in
+    *"$marker")
+      pre="${subj%"$marker"}"
+      case "$pre" in ''|*[!A-Za-z0-9_]) ;; *) return 1 ;; esac
+      pt="${pre%"${pre##*[![:space:]]}"}"
+      printf '%s' "$pt" | grep -qiE '(^|[^a-z0-9_])not$' && return 1
+      return 0 ;;
+  esac
+  return 1
 }
 
 # Poll failure bookkeeping. auth and rate-limit are reported on the FIRST occurrence (silence is the
@@ -226,42 +269,79 @@ _osrc_lane_poll_err() { # <id> <json> <now> <kind> <msg>
 }
 
 # Done contract: run `--done-when check:"CMD"` on the READY sha in a throwaway worktree before the
-# reviewer is spent on it. Pass (or no check) -> enqueue. Fail -> recorded, `failed` event, no review.
+# reviewer is spent on it. The check runs in the BACKGROUND, detached from the caller's pipes, so
+# osrc_remote_events never blocks on it: the lane reads `live` with check.state=running until the
+# runner writes remote/<id>-<sha7>.rc, which the next poll collects. Pass -> enqueue; fail or a dead
+# runner -> `failed` event, no review spent. NOTE the command executes code pushed by the remote lane,
+# on this machine, with the user's own rights and no sandbox.
 _osrc_lane_check_and_enqueue() { # <id> <json> <head> <now>
-  local id="$1" f="$2" head="$3" now="$4" check sha7 cache wt log rc=0 base
-  check="$(jq -r '.done_when // ""' "$f")"; sha7="${head:0:7}"
-  if [ -n "$check" ]; then
-    cache="$(_osrc_lane_cache "$id" "$f")" || { _osrc_jq_set "$f" --arg h "$head" --argjson now "$now" '.check={head:$h,rc:125,ts:$now,log:"",why:"could not fetch the branch to run the check"}'; return 0; }
-    wt="$OSRC_HOME/remote/wt/$id-$sha7"; log="$OSRC_HOME/remote/$id-$sha7.check.log"
-    mkdir -p "$OSRC_HOME/remote/wt"; rm -rf "$wt"
-    if git --git-dir="$cache" worktree add -q --detach "$wt" "$head" >"$log" 2>&1; then
-      _osrc_run_timeout "${OSRC_CHECK_TIMEOUT:-900}" "$wt" "$check" >>"$log" 2>&1 || rc=$?
-      git --git-dir="$cache" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-      git --git-dir="$cache" worktree prune >/dev/null 2>&1
-    else
-      rc=125
-    fi
-    _osrc_jq_set "$f" --arg h "$head" --argjson rc "$rc" --argjson now "$now" --arg log "$log" \
-      '.check={head:$h,rc:$rc,ts:$now,log:$log,why:""}'
-    [ "$rc" -eq 0 ] || return 0
-  fi
-  base="$(jq -r '.base // "main"' "$f")"
+  local id="$1" f="$2" head="$3" now="$4" check
+  check="$(jq -r '.done_when // ""' "$f")"
+  if [ -n "$check" ]; then _osrc_lane_check_start "$id" "$f" "$head" "$now" "$check"; return 0; fi
   type _osrc_review_enqueue >/dev/null 2>&1 || return 0
   _osrc_review_enqueue "$id" "$head" "$(jq -r '.brief // ""' "$f")" auto >/dev/null 2>&1 || true
 }
 
+_osrc_lane_check_start() { # <id> <json> <head> <now> <command>
+  local id="$1" f="$2" head="$3" now="$4" check="$5" sha7 cache log rcfile pid
+  sha7="${head:0:7}"; log="$OSRC_HOME/remote/$id-$sha7.check.log"; rcfile="$OSRC_HOME/remote/$id-$sha7.rc"
+  if ! cache="$(_osrc_lane_cache "$id" "$f")"; then
+    _osrc_jq_set "$f" --arg h "$head" --argjson now "$now" '.check={head:$h,state:"done",rc:125,ts:$now,log:"",pid:0,why:"could not fetch the branch to run the check"}'
+    return 0
+  fi
+  rm -f "$rcfile"
+  _osrc_jq_set "$f" --arg h "$head" --argjson now "$now" --arg log "$log" '.check={head:$h,state:"running",rc:null,ts:$now,log:$log,pid:0,why:""}'
+  ( trap '' HUP; _osrc_lane_check_run "$id" "$cache" "$head" "$check" "$log" "$rcfile" ) </dev/null >/dev/null 2>&1 &
+  pid=$!; disown 2>/dev/null || true
+  _osrc_jq_set "$f" --argjson pid "$pid" '.check.pid=$pid'
+}
+
+_osrc_lane_check_run() { # <id> <cache> <head> <command> <log> <rcfile>   (background)
+  local id="$1" cache="$2" head="$3" check="$4" log="$5" rcfile="$6" wt rc=0
+  wt="$OSRC_HOME/remote/wt/$id-${head:0:7}"
+  mkdir -p "$OSRC_HOME/remote/wt"; rm -rf "$wt"
+  if git --git-dir="$cache" worktree add -q --detach "$wt" "$head" >"$log" 2>&1; then
+    _osrc_run_timeout "${OSRC_CHECK_TIMEOUT:-900}" "$wt" "$check" >>"$log" 2>&1 || rc=$?
+    git --git-dir="$cache" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+    git --git-dir="$cache" worktree prune >/dev/null 2>&1
+  else
+    rc=125
+  fi
+  printf '%s' "$rc" > "$rcfile.tmp" && mv -f "$rcfile.tmp" "$rcfile"
+}
+
+_osrc_lane_check_collect() { # <id> <json> <now>   (called under the lane lock)
+  local id="$1" f="$2" head sha7 rcfile rc pid
+  [ "$(jq -r '.check.state // ""' "$f")" = running ] || return 0
+  head="$(jq -r '.check.head' "$f")"; sha7="${head:0:7}"; rcfile="$OSRC_HOME/remote/$id-$sha7.rc"; pid="$(jq -r '.check.pid // 0' "$f")"
+  if [ ! -s "$rcfile" ]; then
+    # runner gone without a result (killed, reaped by a sandbox)? say so instead of waiting forever
+    if [ "$pid" -gt 0 ] 2>/dev/null && ! kill -0 "$pid" 2>/dev/null && [ ! -s "$rcfile" ]; then
+      _osrc_jq_set "$f" '.check.state="done" | .check.rc=125 | .check.why="check runner died before writing a result"'
+    fi
+    return 0
+  fi
+  rc="$(cat "$rcfile")"; case "$rc" in ''|*[!0-9]*) rc=125 ;; esac
+  _osrc_jq_set "$f" --argjson rc "$rc" '.check.state="done" | .check.rc=$rc'
+  # only a check on the CURRENT head may enqueue; a lane that has pushed since moved on
+  if [ "$rc" -eq 0 ] && [ "$(jq -r '.head' "$f")" = "$head" ] && type _osrc_review_enqueue >/dev/null 2>&1; then
+    _osrc_review_enqueue "$id" "$head" "$(jq -r '.brief // ""' "$f")" auto >/dev/null 2>&1 || true
+  fi
+}
+
 # ---- state + events ----------------------------------------------------------------------------
 osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no network, safe in hooks)
-  local id="$1" f head v
+  local id="$1" f head v ch_state
   f="$(_osrc_lane_json "$id")"; [ -f "$f" ] || { printf gone; return 0; }
   if [ "$(jq -r '.branch_deleted' "$f")" = true ]; then printf failed; return 0; fi
   head="$(jq -r '.head // ""' "$f")"
-  if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ]; then
-    printf failed; return 0
-  fi
+  ch_state=""; [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && ch_state="$(jq -r '.check.state // ""' "$f")"
+  if [ "$ch_state" = done ] && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ]; then printf failed; return 0; fi
   if [ "$(jq -r '.head_ready' "$f")" = true ]; then
+    [ "$ch_state" != running ] || { printf live; return 0; }     # done-when check still running
     v=""; type _osrc_review_verdict_for >/dev/null 2>&1 && v="$(_osrc_review_verdict_for "$id" "$head")"
-    case "$v" in MERGE|BLOCK) printf done; return 0 ;; esac
+    # CHANGES: the ball is back with the lane, so it is live (and gets a stall clock from the verdict)
+    case "$v" in MERGE|BLOCK) printf done; return 0 ;; CHANGES) printf live; return 0 ;; esac
     printf ready; return 0
   fi
   printf live
@@ -283,7 +363,7 @@ osrc_remote_events() {
     # poll trouble: auth / rate limit at once, anything else after N consecutive failures
     errn="$(jq -r '.err_count // 0' "$f")"; errk="$(jq -r '.err_kind // ""' "$f")"
     if [ "$errn" -gt 0 ] && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
-      if _osrc_ev_due "pollerr:$id:$errk" "$renotify"; then
+      if _osrc_ev_due "$id" "pollerr:$errk" "$renotify"; then
         case "$errk" in
           auth) _osrc_emit failed "$id" "gh/git auth failure polling $(jq -r .branch "$f"): $(jq -r .err_msg "$f")" "gh auth status" ;;
           rate) _osrc_emit failed "$id" "rate limited polling $(jq -r .branch "$f"): $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
@@ -291,22 +371,32 @@ osrc_remote_events() {
         esac
       fi
     fi
-    if [ "$(jq -r '.branch_deleted' "$f")" = true ] && _osrc_ev_due "deleted:$id" "$renotify"; then
+    if [ "$(jq -r '.branch_deleted' "$f")" = true ] && _osrc_ev_due "$id" deleted "$renotify"; then
       _osrc_emit failed "$id" "branch $(jq -r .branch "$f") was deleted from the remote" "$(_osrc_self) lane show $id"
     fi
-    if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ] \
-       && _osrc_ev_due "checkfail:$id:$head" "$renotify"; then
-      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$(jq -r .check.rc "$f")), no review spent; log $(jq -r '.check.log' "$f")" "tail -40 $(printf '%q' "$(jq -r '.check.log' "$f")")"
+    if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.state // ""' "$f")" = done ] \
+       && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
+      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$(jq -r .check.rc "$f")$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")" "tail -40 $(printf '%q' "$(jq -r '.check.log' "$f")")"
     fi
     st="$(osrc_remote_state "$id")"
-    if [ "$st" = ready ] && [ "$(jq -r '.ready_head // ""' "$f")" = "$head" ] && _osrc_ev_due "ready:$id:$head" 0; then
+    if [ "$st" = ready ] && [ "$(jq -r '.ready_head // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "ready:$head" 0; then
       _osrc_emit done "$id" "READY $sha7 on $(jq -r .branch "$f"): $(jq -r .head_msg "$f") (queued for review)" "$(_osrc_next_for_ready)"
+    fi
+    # backstop: READY with no live review item for this head (removed and re-added lane, dropped or
+    # lost item) is the "sat READY for hours" class. Say so instead of staying quiet.
+    if [ "$st" = ready ] && [ -n "$head" ] && type _osrc_review_item_state >/dev/null 2>&1; then
+      case "$(_osrc_review_item_state "$id" "$head")" in
+        queued|inflight|verdict) ;;
+        *) if _osrc_ev_due "$id" "noitem:$head" "$renotify"; then
+             _osrc_emit unreviewed "$id" "READY $sha7 has no review item queued, in flight or finished" "$(_osrc_review_requeue_cmd "$id" "$head")"
+           fi ;;
+      esac
     fi
     if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ]; then
       last_move="$(jq -r '.last_push_ts // .created_ts' "$f")"
       vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
       [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
-      if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "stalled:$id" "$stall"; then
+      if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "$id" stalled "$stall"; then
         _osrc_emit stalled "$id" "no push on $(jq -r .branch "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id"
       fi
     fi
@@ -395,12 +485,15 @@ _osrc_lane_ls() {
 }
 
 _osrc_lane_rm() {
-  local id="${1:-}" d
+  local id="${1:-}" d w h7='[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'
   [ -n "$id" ] || die "lane rm <id>"
   _osrc_id_ok "$id" || die "bad lane id"
   [ -f "$(_osrc_lane_json "$id")" ] || die "no lane '$id'"
   rm -f "$(_osrc_lane_json "$id")"
-  rm -rf "$OSRC_HOME/remote/$id.git" "$OSRC_HOME/remote/$id.lock" "$OSRC_HOME/remote/wt/$id"-*
+  rm -rf "$OSRC_HOME/remote/$id.git" "$OSRC_HOME/remote/$id.lock" "$OSRC_HOME/remote/.ev/$id"
+  # exactly <id>-<sha7>: a bare "$id-*" glob would also hit lane "$id-other"
+  for w in "$OSRC_HOME/remote/wt/$id"-$h7; do [ -e "$w" ] && rm -rf "$w"; done
+  for w in "$OSRC_HOME/remote/$id"-$h7.check.log "$OSRC_HOME/remote/$id"-$h7.rc; do [ -e "$w" ] && rm -f "$w"; done
   for d in "$OSRC_HOME"/owners/*/"$id"; do [ -f "$d" ] && rm -f "$d"; done
   type _osrc_review_lane_removed >/dev/null 2>&1 && _osrc_review_lane_removed "$id"
   echo "lane $id removed"
