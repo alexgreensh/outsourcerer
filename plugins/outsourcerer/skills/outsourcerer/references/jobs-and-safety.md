@@ -251,6 +251,41 @@ Consent to proceed anyway: `--force-lane`, or `--provider` typed on the command 
 env-selected providers (`OSRC_PROVIDER`, `OUTSOURCERER_PROVIDER`, `OSRC_PROVIDER_EXPLICIT`) pick
 the lane but do NOT count as consent. Kill switch: `OSRC_LANE_LIMIT_GATE=0`.
 
+## Paid-lane spend gate + per-lane caps (pre-dispatch and in-flight)
+
+`osrc_lane_billing <lane> [model]` classifies every lane `subscription | free | metered |
+unknown` from real auth state (API keys in env/`~/.env`, `~/.codex/auth.json`, CLI presence).
+`unknown` is treated as `metered`: when billing cannot be proven, the lane asks first. Before
+ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing, fallback
+hops, retries — the spend gate demands consent: interactive prompts show lane, model, reason
+and an estimate, `y/N` defaulting to No; non-interactive refuses with
+`EVENT approval <id> <ts> paid-lane:<lane>/<model>` and a `NEXT` `--spend-ok` retry. `--spend-ok`
+is argv-only, covers exactly one command (propagated through bg/fanout/hops as argv or a
+per-job `.spend-ok` marker), and is never persisted or implied by auto mode, the cloud-consent
+file, or an inherited env var (`OSRC_SPEND_OK` is unset before parsing). Auto-routing and every
+fallback picker skip metered/unknown lanes unless the command already carries consent; when
+only paid lanes remain, the run stops and asks instead of picking OpenRouter quietly.
+Kill switch: `OSRC_SPEND_GATE=0`.
+
+Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
+name) on `run`/`bg`/`fanout`/`session start`, or standing `lane cap <lane> weekly<=40` until
+`lane cap <lane> --clear` (`lane ls` shows billing + caps, `lane billing <lane> [model]` queries
+the classifier). Before launch a lane at/over cap refuses (unpinned auto hops free, pins name
+the raise/clear commands); on every supervise poll a running lane that crosses emits ONE
+`EVENT limit <id> <ts> cap:<meter><=<pct> now:<pct>` plus a wrap-up `NEXT`, and `session send`
+refuses new work to a capped lane while wrap-up messages still pass. Caps never route to a
+metered lane — the spend gate applies independently. Kill switch: `OSRC_CAP_GATE=0`.
+
+**Limits feed (Mission Control "Lanes and limits" panel):** `lane summary --json` (alias
+`lane limits --json`) emits ONE record per harness actually detected on this machine — its CLI
+on PATH AND logged in / has a plan; an installed-but-logged-out CLI (e.g. `cursor-agent` with no
+Cursor plan) is NOT listed, and gemini-cli is never listed (retired: Antigravity `agy` is the
+only Gemini text vehicle). Each record carries `id` = the Outsourcerer provider id the page maps
+to official icons, `state` ok|low|out|wait|unknown, `left`, `renews`/`renews_at`, the user's
+`cap` text, `paid` + `billing`, `window`/`used`, `updated`, `source`. Unmetered harnesses
+report `state:"unknown"`, `left:"not checked yet"` — nothing is guessed. Plain `lane summary`
+prints the same data as a table. L9's hub export consumes the JSON verbatim.
+
 ## Windows (Git Bash, no WSL)
 
 `run`/`edit`/`yolo`/`bg`/`fanout`/`status`/`doctor`/`advise`/`consent` all work under Git Bash

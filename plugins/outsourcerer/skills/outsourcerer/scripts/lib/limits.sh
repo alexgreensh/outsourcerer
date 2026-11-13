@@ -159,6 +159,52 @@ EOF
 }
 
 
+# _osrc_meter_windows -> per-window meter detail for DISPLAY/EXPORT (Mission Control's
+# "Lanes and limits" panel, L9 hub export). Same sources and freshness gates as
+# _session_limits — which remains the gating authority — but keeps the two things
+# _session_limits drops: each window's resets_at epoch and the codex rollout age.
+# Output: one TSV line per measured window, "window<TAB>pct<TAB>resets_at_epoch|-><TAB>age_secs|->".
+# A window absent here means exactly what its absence means in _session_limits: no
+# provable fresh reading (expired window, stale/undatable statusline artifact).
+_osrc_meter_windows() {
+  # ---- claude (statusline tap / token-optimizer artifact), mirrors _session_limits ----
+  local cand raw c5="" c5r="" c7="" c7r="" ts="" nowms line=""
+  if [ -n "${OSRC_CC_PRESSURE:-}" ]; then
+    c5="$(_pct_normalize "$OSRC_CC_PRESSURE")"       # override wins; no reset epoch exists
+  else
+    for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
+      [ -f "$cand" ] && have jq && jq -e . "$cand" >/dev/null 2>&1 || continue
+      raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
+      IFS='|' read -r c5 c5r c7 c7r ts <<EOF
+$raw
+EOF
+      nowms="$(date +%s 2>/dev/null)"; [ -n "$nowms" ] && nowms=$((nowms*1000))
+      case "$ts" in
+        ''|*[!0-9]*) c5=""; c7="" ;;
+        *) [ -n "$nowms" ] && [ $((nowms - ts)) -gt 600000 ] && { c5=""; c7=""; } ;;
+      esac
+      c5="$(_window_pct "$c5" "$c5r" 2>/dev/null)" || c5=""
+      c7="$(_window_pct "$c7" "$c7r" 2>/dev/null)" || c7=""
+      [ -n "$c5$c7" ] && break
+    done
+  fi
+  [ -n "$c5" ] && printf 'claude5h\t%s\t%s\t-\n' "$c5" "${c5r:-}"
+  [ -n "$c7" ] && printf 'claude7d\t%s\t%s\t-\n' "$c7" "${c7r:-}"
+  # ---- codex (rollout rate_limits), mirrors _session_limits ----
+  raw="$(_codex_rate_limits 2>/dev/null)" || raw=""
+  local x5="" xw="" x5r="" xwr="" xage=""
+  if [ -n "$raw" ]; then
+    IFS='|' read -r x5 xw x5r xwr xage <<EOF
+$raw
+EOF
+    x5="$(_window_pct "$x5" "$x5r" 2>/dev/null)" || x5=""
+    xw="$(_window_pct "$xw" "$xwr" 2>/dev/null)" || xw=""
+  fi
+  [ -n "$x5" ] && printf 'codex5h\t%s\t%s\t%s\n' "$x5" "${x5r:-}" "${xage:-}"
+  [ -n "$xw" ] && printf 'codexwk\t%s\t%s\t%s\n' "$xw" "${xwr:-}" "${xage:-}"
+}
+
+
 # _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
 # OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
 # local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
@@ -355,6 +401,9 @@ _osrc_limit_fallback() {
   [ -n "$limits" ] || limits="$(_session_limits 2>/dev/null)"
   for l in local dv gm cx or; do
     _osrc_limit_exceeded "$l" "$limits" && continue
+    # L7 add-on: never SUGGEST a metered/unknown lane the spend gate would refuse —
+    # subscription/free only unless this command already carries spend consent.
+    _osrc_lane_spendable "$l" 2>/dev/null || continue
     _osrc_limit_lane_ready "$l" && { printf '%s' "$l"; return 0; }
   done
   return 1

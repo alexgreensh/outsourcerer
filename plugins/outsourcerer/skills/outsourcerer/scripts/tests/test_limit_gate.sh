@@ -105,11 +105,14 @@ fb="$( _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0
         _lane_ready_probe() { return 1; }
         _osrc_limit_fallback "codexwk=98" )"
 [ "$fb" = "dv" ] && ok "unit: exhausted cx skipped; dv picked over cx" || bad "unit: fallback picked '$fb' not dv"
-# Or is the last resort: only or ready -> or.
+# Or is the last resort — but ONLY with spend consent (L7 add-on: metered lanes are never
+# suggested or picked quietly). Without consent the picker returns nothing rather than naming
+# a lane the spend gate would refuse; with OSRC_SPEND_OK=1 the same list picks or.
 fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
         _lane_ready_probe() { return 1; }
-        _osrc_limit_fallback "codexwk=98" )"
-[ "$fb" = "or" ] && ok "unit: or is the last-resort fallback" || bad "unit: fallback picked '$fb' not or"
+        _osrc_limit_fallback "codexwk=98" )"; frc=$?
+{ [ -z "$fb" ] && [ $frc -ne 0 ]; } && ok "r3 spend: paid-only fallback suggests nothing without consent" \
+  || bad "unit: paid-only fallback picked '$fb' without consent"
 
 # ---------------------------------------------------------------------------------------------------
 # UNIT: _osrc_limit_gate — warn once, then consent/hop/refuse. die() exits, so refusal cases run
@@ -431,6 +434,306 @@ esac
 out="$( OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; type -t _osrc_limit_gate' _ "$LINKDIR/outsourcerer.sh" 2>/dev/null )"
 [ "$out" = "function" ] && ok "symlink: sourced load through link defines _osrc_limit_gate" \
   || bad "symlink: sourced load through link did not define _osrc_limit_gate (got '$out')"
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3 — ADD-ON 1: paid-lane spend gate (lib/spend.sh). osrc_lane_billing classes, unknown->metered,
+# non-interactive EVENT approval refusal, --spend-ok one-command-only, env cannot imply consent,
+# and fallback pickers never selecting a metered lane quietly.
+# ---------------------------------------------------------------------------------------------------
+type -t osrc_lane_billing >/dev/null || { echo "FAIL: osrc_lane_billing not defined (lib/spend.sh not loaded?)"; exit 1; }
+type -t _osrc_spend_gate >/dev/null || { echo "FAIL: _osrc_spend_gate not defined"; exit 1; }
+HB="$TMP/hb"; mkdir -p "$HB"
+
+# Billing classes — each in a subshell with a controlled HOME (no ~/.env, no real auth files).
+b=$( HOME="$HB" OSRC_SPEND_GATE=0 bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing local' )
+[ "$b" = "free" ] && ok "r3 billing: local -> free" || bad "r3 billing: local -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or' )
+[ "$b" = "metered" ] && ok "r3 billing: or (OpenRouter) -> metered" || bad "r3 billing: or -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing tokenrouter; osrc_lane_billing gi' )
+case "$b" in metered$'\n'metered) ok "r3 billing: tokenrouter + gi -> metered" ;; *) bad "r3 billing: tr/gi -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing ci; osrc_lane_billing claudex' )
+case "$b" in subscription$'\n'subscription) ok "r3 billing: ci + claudex -> subscription" ;; *) bad "r3 billing: ci/claudex -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cursor; osrc_lane_billing grokbot' )
+case "$b" in subscription$'\n'subscription) ok "r3 billing: cursor + grokbot -> subscription" ;; *) bad "r3 billing: cursor/grokbot -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing dv glm-5.2' )
+[ "$b" = "subscription" ] && ok "r3 billing: dv free model -> subscription" || bad "r3 billing: dv glm-5.2 -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_set() { printf ""; }; osrc_lane_billing dv claude-opus-paid' )
+[ "$b" = "metered" ] && ok "r3 billing: dv paid model -> metered" || bad "r3 billing: dv paid -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing nosuchlane' )
+[ "$b" = "unknown" ] && ok "r3 billing: unresolvable lane -> unknown" || bad "r3 billing: bogus -> '$b'"
+
+# cc: API key -> metered; no key + claude CLI -> subscription; neither -> unknown.
+b=$( HOME="$HB" ANTHROPIC_API_KEY=x bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r3 billing: cc + ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc+key -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "subscription" ] && ok "r3 billing: cc login, no key -> subscription" || bad "r3 billing: cc login -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cc' )
+[ "$b" = "unknown" ] && ok "r3 billing: cc unprovable -> unknown" || bad "r3 billing: cc unknown -> '$b'"
+
+# cx: ChatGPT auth.json -> subscription; OPENAI_API_KEY -> metered; nothing -> unknown.
+mkdir -p "$HB/.codex"; printf '{"tokens":{"access_token":"x"}}' > "$HB/.codex/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
+[ "$b" = "subscription" ] && ok "r3 billing: cx ChatGPT login -> subscription" || bad "r3 billing: cx auth.json -> '$b'"
+printf '{"OPENAI_API_KEY":"sk-x"}' > "$HB/.codex/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
+[ "$b" = "metered" ] && ok "r3 billing: cx auth.json API key -> metered" || bad "r3 billing: cx apikey -> '$b'"
+rm -rf "$HB/.codex"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cx' )
+[ "$b" = "unknown" ] && ok "r3 billing: cx unprovable -> unknown" || bad "r3 billing: cx unknown -> '$b'"
+
+# unknown is treated as METERED by the gate: non-interactive refusal + EVENT approval + NEXT.
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+        _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane:or/"* ) ok "r3 spend: non-interactive metered lane refuses with EVENT approval" ;;
+  *) bad "r3 spend: refusal missing EVENT approval (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+case "$out" in
+  *"--spend-ok"*) ok "r3 spend: refusal NEXT names --spend-ok" ;;
+  *) bad "r3 spend: refusal missing --spend-ok hint: $(printf '%s' "$out" | head -4)" ;;
+esac
+grep -q '"kind":"approval"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
+  && ok "r3 spend: EVENT approval persisted to lanes/events.jsonl" \
+  || bad "r3 spend: events.jsonl missing approval event"
+
+# --spend-ok consents THIS command only: OSRC_SPEND_OK set AFTER sourcing (what flag parsing
+# does) lets the gate proceed; a fresh command without it refuses again. (Env-inherited
+# OSRC_SPEND_OK is sanitized by the env block — proven by the dedicated test below.)
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+        OSRC_SPEND_OK=1; _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r3 spend: --spend-ok (OSRC_SPEND_OK=1) consents this command" || bad "r3 spend: consented gate rc=$rc: $out"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+        _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && ok "r3 spend: consent does NOT persist to the next command" || bad "r3 spend: consent leaked into next command"
+
+# Env-inherited OSRC_SPEND_OK must be sanitized by the engine env block BEFORE parsing.
+b=$( OSRC_SPEND_OK=1 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; printf "%s" "${OSRC_SPEND_OK:-unset}"' )
+[ "$b" = "unset" ] && ok "r3 spend: env OSRC_SPEND_OK is unset by the env block (cannot imply consent)" \
+  || bad "r3 spend: env OSRC_SPEND_OK survived sourcing ('$b')"
+# .spend-ok job marker consents (the bg one-command channel). Runs in the already-sourced
+# shell: OSRC_JOB_DIR env-prefix is exactly what the detached child's gate reads.
+JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"; : > "$JD/.spend-ok"
+out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -eq 0 ] && ok "r3 spend: per-job .spend-ok marker consents" || bad "r3 spend: .spend-ok marker rc=$rc: $out"
+# And it is scoped to THAT job dir: a different job dir does not inherit the consent.
+JD2X="$OSRC_HOME/jobs/otherjob"; mkdir -p "$JD2X"
+out="$( OSRC_JOB_DIR="$JD2X" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3 spend: .spend-ok consent is scoped to its own job dir" || bad "r3 spend: consent leaked across job dirs"
+
+# Fallback pickers never select a metered lane quietly: only `or` ready -> no pick;
+# with spend consent the same list picks it.
+fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
+        _osrc_lane_spendable or m || true
+        _fallback_pick "" "alias|model|or" )"
+[ -z "$fb" ] && ok "r3 spend: fallback refuses to pick metered or without consent" || bad "r3 spend: fallback picked '$fb'"
+fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
+        OSRC_SPEND_OK=1 _fallback_pick "" "alias|model|or" )"
+[ "$fb" = "alias|model|or" ] && ok "r3 spend: --spend-ok lets fallback reach the paid lane" || bad "r3 spend: consented fallback -> '$fb'"
+# Same for the limit-gate's own suggestion helper: paid-only -> nothing without consent, or with it.
+fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
+        _lane_ready_probe() { return 1; }
+        OSRC_SPEND_OK=1 _osrc_limit_fallback "codexwk=98" )"
+[ "$fb" = "or" ] && ok "r3 spend: consented limit-fallback may name the paid lane" || bad "r3 spend: consented limit-fallback -> '$fb'"
+# Subscription lane still picked without consent (control).
+fb="$( _fallback_lane_ready() { [ "$1" = local ] && return 0; return 1; }
+        _fallback_pick "" "a1|m1|local
+a2|m2|or" )"
+[ "$fb" = "a1|m1|local" ] && ok "r3 spend: free lane still picked first without consent" || bad "r3 spend: free pick -> '$fb'"
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3 — ADD-ON 2: per-lane usage caps. --cap parsing shape, standing lane cap persistence,
+# pre-launch gate, supervise-poll EVENT limit (once), session-send wrap-up pass.
+# ---------------------------------------------------------------------------------------------------
+type -t _osrc_cap_gate >/dev/null || { echo "FAIL: _osrc_cap_gate not defined"; exit 1; }
+type -t _osrc_cap_poll >/dev/null || { echo "FAIL: _osrc_cap_poll not defined"; exit 1; }
+type -t cmd_lane >/dev/null || { echo "FAIL: cmd_lane not defined"; exit 1; }
+
+# Spec validation + window mapping.
+_osrc_cap_valid 'weekly<=40' && ok "r3 cap: weekly<=40 valid" || bad "r3 cap: weekly<=40 rejected"
+_osrc_cap_valid 'bogus' && bad "r3 cap: bogus spec accepted" || ok "r3 cap: bogus spec rejected"
+_osrc_cap_valid 'weekly<40' && bad "r3 cap: < (not <=) accepted" || ok "r3 cap: < rejected"
+[ "$(_osrc_cap_window cx weekly)" = "codexwk" ] && ok "r3 cap: cx weekly -> codexwk" || bad "r3 cap: cx weekly window wrong"
+[ "$(_osrc_cap_window cc 5h)" = "claude5h" ] && ok "r3 cap: cc 5h -> claude5h" || bad "r3 cap: cc 5h window wrong"
+[ "$(_osrc_cap_window cx codex5h)" = "codex5h" ] && ok "r3 cap: raw window name passes through" || bad "r3 cap: raw window failed"
+
+# _osrc_cap_tripped: under-cap clear, at-cap trips with now value.
+_session_limits() { printf 'codexwk=31 codex5h=12\n'; }; _reset_snap
+_osrc_cap_tripped cx "codexwk=31 codex5h=12" >/dev/null 2>&1 \
+  && bad "r3 cap: un capped cx tripped" || ok "r3 cap: no caps -> clear"
+hit="$( OSRC_CAPS='weekly<=40' _osrc_cap_tripped cx 'codexwk=31 codex5h=12' 2>/dev/null )"
+[ -z "$hit" ] && ok "r3 cap: under-cap (31 < 40) does not trip" || bad "r3 cap: under-cap tripped: $hit"
+hit="$( OSRC_CAPS='weekly<=40' _osrc_cap_tripped cx 'codexwk=41 codex5h=12' 2>/dev/null )"
+case "$hit" in *"weekly<=40 now41"*) ok "r3 cap: at/over-cap trips with now value" ;; *) bad "r3 cap: over-cap hit='$hit'" ;; esac
+hit="$( OSRC_CAPS='5h<=10' _osrc_cap_tripped cc 'claude5h=11 claude7d=5' 2>/dev/null )"
+case "$hit" in *"5h<=10 now11"*) ok "r3 cap: cc 5h cap binds claude5h" ;; *) bad "r3 cap: cc 5h hit='$hit'" ;; esac
+
+# lane cap persistence: set writes lane-caps, clear removes the lane's rows.
+CF="$OSRC_HOME/lane-caps"; rm -f "$CF"
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap cx "weekly<=40"; cmd_lane cap cc "5h<=80"' ) >/dev/null 2>&1
+grep -q '^cx weekly<=40$' "$CF" && grep -q '^cc 5h<=80$' "$CF" \
+  && ok "r3 cap: lane cap persists standing caps" || bad "r3 cap: lane-caps file wrong: $(cat "$CF" 2>/dev/null)"
+# Standing cap now trips the gate for cx even without --cap.
+hit="$( _osrc_cap_tripped cx 'codexwk=45 codex5h=10' 2>/dev/null )"
+case "$hit" in *"weekly<=40 now45"*) ok "r3 cap: standing cap enforced" ;; *) bad "r3 cap: standing cap not enforced: '$hit'" ;; esac
+( OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; cmd_lane cap cx --clear' ) >/dev/null 2>&1
+grep -q '^cx ' "$CF" && bad "r3 cap: --clear left cx rows" || ok "r3 cap: lane cap --clear removes the lane"
+grep -q '^cc 5h<=80$' "$CF" && ok "r3 cap: --clear is per-lane (cc cap survives)" || bad "r3 cap: --clear removed other lanes"
+
+# Pre-launch cap gate: pinned refuses loudly naming cap + raise/clear; unpinned auto hops.
+_session_limits() { printf 'codexwk=45\n'; }; _reset_snap
+out="$( _fallback_enabled() { return 1; }
+        OSRC_CAPS='weekly<=40' _fb_user_pinned=1 MODEL_EXPLICIT=1 RESOLVED_ID=x PROVIDER=devin tier=edit \
+        _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"cap gate"*"weekly<=40"*"lane cap"*) ok "r3 cap: pinned at-cap refuses naming cap + commands" ;;
+  *) bad "r3 cap: pinned refusal wrong (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+# Under-cap pinned proceeds rc0.
+_session_limits() { printf 'codexwk=20\n'; }; _reset_snap
+( OSRC_CAPS='weekly<=40' _fb_user_pinned=1 _osrc_cap_gate cx x cxnative >/dev/null 2>&1 ) \
+  && ok "r3 cap: under-cap launch proceeds" || bad "r3 cap: under-cap blocked"
+
+# Supervise poll: one EVENT limit per job+spec; second poll silent.
+rm -f "$OSRC_HOME/lanes/events.jsonl"
+JD2="$OSRC_HOME/jobs/r3poll"; mkdir -p "$JD2"; OSRC_JOB_DIR="$JD2"
+_session_limits() { printf 'codexwk=45\n'; }; _reset_snap
+OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1
+OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1   # dedupe: same spec -> silent
+unset OSRC_CAPS
+grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -q '^1$' \
+  && ok "r3 cap: supervise poll emits exactly ONE EVENT limit per job+cap" \
+  || bad "r3 cap: poll events=$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)"
+grep -q 'cap:weekly<=40 now:45' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
+  && ok "r3 cap: EVENT limit carries cap:<spec> now:<pct>" || bad "r3 cap: event detail wrong"
+unset OSRC_JOB_DIR
+unset OSRC_CAPS
+
+# session send: wrap-up passes, new work refused at cap.
+_osrc_cap_send_ok "wrap up now" && ok "r3 cap: wrap-up text passes send gate" || bad "r3 cap: wrap-up refused"
+_osrc_cap_send_ok "please finish the refactor" && ok "r3 cap: finish text passes" || bad "r3 cap: finish refused"
+_osrc_cap_send_ok "add a new endpoint for billing" && bad "r3 cap: new work passed send gate" || ok "r3 cap: new work refused"
+_osrc_cap_send_ok "mark the task done and also write tests" && bad "r3 cap: mixed work passed" || ok "r3 cap: mixed new-work refused"
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3b — limits summary feed (Mission Control "Lanes and limits" / L9 hub export):
+# ONE record per DETECTED harness (CLI on PATH AND login/plan/key provable), id = provider id,
+# unknown limits are honest (state unknown / left "not checked yet"), caps surface as `cap`,
+# and gemini-cli is NEVER listed even when a `gemini` binary sits on PATH.
+# ---------------------------------------------------------------------------------------------------
+type -t osrc_limits_summary >/dev/null || { echo "FAIL: osrc_limits_summary not defined"; exit 1; }
+type -t _osrc_harness_detected >/dev/null || { echo "FAIL: _osrc_harness_detected not defined"; exit 1; }
+have python3 || { echo "FAIL: python3 needed for JSON assertions"; exit 1; }
+
+SUM="$TMP/summary"; mkdir -p "$SUM/bin" "$SUM/home" "$SUM/home-empty"
+# Stub CLIs: installed == stub on PATH. devin answers `auth status`; the rest exit 0 quietly.
+for c in claude codex agy droid cursor-agent oz cline pi hermes gemini warp; do
+  printf '#!/bin/sh\nexit 0\n' > "$SUM/bin/$c"; chmod +x "$SUM/bin/$c"
+done
+cat > "$SUM/bin/devin" <<'EOF'
+#!/bin/sh
+# Logged in iff THIS home's devin auth file exists — installed-but-logged-out must not detect.
+case "$*" in *"auth status"*) [ -f "$HOME/.devin/auth.json" ] && echo "logged in";; esac
+exit 0
+EOF
+chmod +x "$SUM/bin/devin"
+# Auth fixtures in $SUM/home: claude creds, codex auth.json, antigravity dir, factory auth file,
+# devin auth file. $SUM/home-empty gets NONE of them.
+mkdir -p "$SUM/home/.claude" "$SUM/home/.codex" "$SUM/home/.antigravity" "$SUM/home/.factory" "$SUM/home/.devin"
+printf '{}' > "$SUM/home/.claude/.credentials.json"
+printf '{"tokens":{"id_token":"x"}}' > "$SUM/home/.codex/auth.json"
+printf '{}' > "$SUM/home/.factory/auth.json"
+printf '{}' > "$SUM/home/.devin/auth.json"
+
+# _sumjson <home> <bindir> [VAR=val ...] -> osrc_limits_summary --json under a fully
+# hermetic env (env -i): fake HOME, stub-only PATH, OSRC_PLATFORM=linux (skips the real
+# macOS keychain probe), local-inference probe stubbed off (no localhost flakiness).
+_sumjson() {
+  local fh="$1" fb="$2"; shift 2
+  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
+      OSRC_SOURCED=1 TERM=dumb "$@" \
+      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_limits_summary --json' _ "$SRC" 2>/dev/null
+}
+_sumtext() {
+  local fh="$1" fb="$2"; shift 2
+  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
+      OSRC_SOURCED=1 TERM=dumb "$@" \
+      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_limits_summary' _ "$SRC" 2>/dev/null
+}
+# _jget <json> <python-expr-on-d> -> prints result (d = parsed list).
+_jget() { python3 -c 'import json,sys
+d=json.load(sys.stdin)
+'"$2" <<< "$1"; }
+
+# Empty home: every CLI installed but logged out -> ZERO records (never a fixed registry dump).
+J="$(_sumjson "$SUM/home-empty" "$SUM/bin")"
+[ "$J" = "[]" ] && ok "r3 feed: installed-but-logged-out -> empty list (no guesses)" \
+  || bad "r3 feed: empty-home JSON='$J'"
+
+# Authenticated home: detected harnesses only, provider-id keys, gemini-cli absent.
+J="$(_sumjson "$SUM/home" "$SUM/bin")"
+printf '%s' "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and d' \
+  && ok "r3 feed: --json emits a non-empty valid array" || bad "r3 feed: invalid JSON: $J"
+for id in claude codex agy devin droid; do
+  printf '%s' "$J" | grep -q "\"id\":\"$id\"" \
+    && ok "r3 feed: detected harness '$id' present" || bad "r3 feed: '$id' missing from $J"
+done
+for id in cursor gemini local warp cline pi hermes grokbot; do
+  printf '%s' "$J" | grep -q "\"id\":\"$id\"" \
+    && bad "r3 feed: '$id' listed without provable auth" || ok "r3 feed: '$id' correctly absent"
+done
+# Unknown meters are honest: no fake percentages anywhere.
+printf '%s' "$J" | grep -q '"left":"not checked yet"' \
+  && ok "r3 feed: unmetered harnesses report 'not checked yet'" || bad "r3 feed: no honest-unknown left field"
+_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))' | grep -q '^5$' \
+  && ok "r3 feed: no fresh meter -> all five detected harnesses state=unknown" \
+  || bad "r3 feed: unexpected unknown-state count: $(_jget "$J" 'print([r["id"]+":"+r["state"] for r in d])')"
+
+# Metered state: OSRC_CC_PRESSURE feeds claude5h -> low at 62, out at 95.
+J62="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62)"
+_row="$(_jget "$J62" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+case "$_row" in
+  *'"state": "low"'*) ;; *) bad "r3 feed: claude@62 state not low: $_row"; _row="" ;; esac
+[ -n "$_row" ] && printf '%s' "$_row" | grep -q '38% left' \
+  && ok "r3 feed: claude@62 -> low, '38% left'" || { [ -n "$_row" ] && bad "r3 feed: claude@62 left wrong: $_row"; }
+J95="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=95)"
+_row="$(_jget "$J95" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+printf '%s' "$_row" | grep -q '"state": "out"' \
+  && ok "r3 feed: claude@95 -> out" || bad "r3 feed: claude@95 state wrong: $_row"
+
+# Caps surface: standing lane cap + per-launch --cap spec both land in the `cap` field.
+printf 'cc weekly<=40\n' > "$OSRC_HOME/lane-caps"
+J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62)"
+_row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+printf '%s' "$_row" | grep -q 'weekly<=40' \
+  && ok "r3 feed: standing cap renders in cap field" || bad "r3 feed: standing cap missing: $_row"
+J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62 OSRC_CAPS='5h<=80')"
+_row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+printf '%s' "$_row" | grep -q '5h<=80' \
+  && ok "r3 feed: per-launch --cap renders in cap field" || bad "r3 feed: per-launch cap missing: $_row"
+rm -f "$OSRC_HOME/lane-caps"
+
+# Tripped cap -> state out (dispatch would refuse). OSRC_CC_PRESSURE feeds claude5h only,
+# so the caps must bind the 5h window — a weekly cap has no reading to evaluate and honestly
+# cannot trip.
+printf 'cc 5h<=70\n' > "$OSRC_HOME/lane-caps"
+J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62 OSRC_CAPS='5h<=50')"
+_row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+printf '%s' "$_row" | grep -q '"state": "out"' \
+  && ok "r3 feed: tripped cap flips state to out" || bad "r3 feed: cap-tripped state wrong: $_row"
+rm -f "$OSRC_HOME/lane-caps"
+
+# paid tag: subscription billing -> paid false.
+_row="$(_jget "$J62" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
+printf '%s' "$_row" | grep -q '"paid": false' \
+  && ok "r3 feed: subscription lane paid=false" || bad "r3 feed: claude paid flag wrong: $_row"
+
+# Text form prints the same table; cmd_lane summary|limits dispatch works.
+T="$(_sumtext "$SUM/home" "$SUM/bin")"
+printf '%s' "$T" | grep -q '^ID .*STATE' && printf '%s' "$T" | grep -q 'claude' \
+  && ok "r3 feed: text table renders detected harnesses" || bad "r3 feed: text table wrong: $T"
+CJ="$(env -i HOME="$SUM/home" PATH="$SUM/bin:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 TERM=dumb bash -c '. "$1"; _ready_probe_local() { return 1; }; cmd_lane limits --json' _ "$SRC" 2>/dev/null)"
+printf '%s' "$CJ" | python3 -c 'import json,sys; json.load(sys.stdin)' \
+  && ok "r3 feed: cmd_lane limits --json alias emits valid JSON" || bad "r3 feed: cmd_lane alias failed: $CJ"
 
 echo
 echo "RESULT: $pass passed, $fail failed"
