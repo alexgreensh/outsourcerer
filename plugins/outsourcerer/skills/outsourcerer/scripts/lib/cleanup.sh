@@ -270,7 +270,9 @@ _osrc_cleanup_verdict() {
         while IFS= read -r ifile; do
           [ -n "$ifile" ] || continue
           case "${ifile%/}" in
-            node_modules|.venv|__pycache__|dist|build|target) : ;;
+            # Only pure dependency caches are disposable. dist/build/target
+            # can hold the lane's actual deliverable (review B3).
+            node_modules|.venv|__pycache__) : ;;
             *) igbad="${igbad:+$igbad, }${ifile%/}" ;;
           esac
         done <<<"$ig"

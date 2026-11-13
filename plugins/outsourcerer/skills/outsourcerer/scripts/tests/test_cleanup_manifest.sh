@@ -89,6 +89,15 @@ WT_HID="$R2/.outsourcerer/worktrees/wt-hidden"
 printf 'unsaved work\n' > "$WT_HID/scratch.txt"
 owner wt-hidden
 
+# B3: dist/build/target are ignored build outputs that can be the lane's own
+# deliverable — not disposable caches. A merged worktree holding dist/ is ASK.
+printf 'dist/\nbuild/\ntarget/\n' >> "$R/.git/info/exclude"
+git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/wt-dist" -b outsourcerer/wt-dist HEAD
+WT_DIST="$R/.outsourcerer/worktrees/wt-dist"
+mkdir -p "$WT_DIST/dist" "$WT_DIST/target"; printf 'packed deliverable\n' > "$WT_DIST/dist/app.js"
+printf 'built\n' > "$WT_DIST/target/bin"
+owner wt-dist
+
 # Branch records: pr-hit has a MERGED PR whose headRefOid IS the tip (SAFE);
 # pr-old has a MERGED PR but a post-merge commit on top (ASK, finding 2).
 git -C "$R" checkout -qb tmp-side
@@ -149,6 +158,7 @@ manifest "outsourcerer/wt-unmerged" branch wt-unmerged "$R"
 manifest "$WT_IGN" worktree wt-ignored "$R"
 manifest "$WT_GHOST" worktree ghost-x "$R"
 manifest "$WT_HID" worktree wt-hidden "$R2"
+manifest "$WT_DIST" worktree wt-dist "$R"
 manifest "outsourcerer/pr-hit" branch job-pr "$R"
 manifest "outsourcerer/pr-old" branch job-pr "$R"
 manifest "$OSRC_HOME/jobs/job-old" job job-old ""
@@ -169,7 +179,7 @@ manifest "$OSRC_HOME/jobs" job evil ""
 manifest "$OSRC_HOME/owners" job evil ""
 manifest "$OSRC_HOME/jobs/../remote" job evil ""
 
-age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" "$WT_HID" \
+age "$WT_SAFE" "$WT_BAD" "$WT_IGN" "$WT_GHOST" "$WT_HID" "$WT_DIST" \
   "$OSRC_HOME/jobs/job-old" "$OSRC_HOME/jobs/job-busy" \
   "$OSRC_HOME/jobs/job-uncollected" "$OSRC_HOME/jobs/job-liveowner" \
   "$OSRC_HOME/loops/loop-ok" "$OSRC_HOME/autodetach/ad-ok.log" \
@@ -189,6 +199,7 @@ echo "$out" | grep -q "ASK.*wt-unmerged" && ok "unmerged worktree ASK" || bad "w
 echo "$out" | grep -q "ASK.*wt-ignored" && ok "worktree with ignored .env ASK (finding 1)" || bad "wt-ignored not ASK"
 echo "$out" | grep -q "ASK.*ghost-x" && ok "owner with no record ASK (finding 5)" || bad "ghost-x not ASK"
 echo "$out" | grep -q "ASK.*wt-hidden" && ok "hidden untracked file makes worktree ASK (B1)" || bad "wt-hidden not ASK: $(echo "$out" | grep wt-hidden)"
+echo "$out" | grep -q "ASK.*wt-dist" && ok "ignored dist/target build output ASK (B3)" || bad "wt-dist not ASK: $(echo "$out" | grep wt-dist)"
 echo "$out" | grep -q "ASK.*pr-old" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
 echo "$out" | grep -q "ASK.*job-blocked" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
 echo "$out" | grep -q "ASK.*job-uncollected" && ok "done-but-uncollected job ASK (finding 4)" || bad "job-uncollected not ASK"
@@ -248,6 +259,7 @@ git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/pr-old >/dev/null 2>&1
 [ -d "$WT_IGN" ] && [ -f "$WT_IGN/.env" ] && ok "ignored-.env worktree preserved (finding 1)" || bad "wt-ignored deleted with its .env!"
 [ -d "$WT_GHOST" ] && ok "no-record-owner worktree preserved" || bad "ghost worktree deleted!"
 [ -d "$WT_HID" ] && [ -f "$WT_HID/scratch.txt" ] && ok "hidden-untracked worktree preserved (B1)" || bad "wt-hidden deleted with unseen untracked file!"
+[ -f "$WT_DIST/dist/app.js" ] && [ -f "$WT_DIST/target/bin" ] && ok "worktree with ignored dist/target preserved (B3)" || bad "wt-dist deleted with its build output!"
 [ -d "$OSRC_HOME/jobs/job-uncollected" ] && ok "uncollected job preserved (finding 4)" || bad "job-uncollected deleted!"
 [ -d "$OSRC_HOME/jobs/job-blocked" ] && ok "blocked job evidence preserved (finding 4)" || bad "job-blocked deleted!"
 [ ! -d "$OSRC_HOME/loops/loop-ok" ] && ok "collected success loop removed (B2)" || bad "loop-ok survived"
