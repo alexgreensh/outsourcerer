@@ -12,6 +12,7 @@
 # Run: bash test_wrapper_liveness.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
@@ -75,7 +76,7 @@ echo "=== CPU time of a process tree ==="
 c="$(_tree_cpu_centis $$)"
 case "$c" in ''|*[!0-9]*) no "cpu centis not a number: [$c]" ;; *) ok "cpu centis is a number ($c)" ;; esac
 _tree_cpu_centis notapid >/dev/null 2>&1 && no "a non-pid was accepted" || ok "a non-pid is refused"
-grep -q 'OSRC_CPU_LIVENESS' "$SRC" && grep -q '_tree_cpu_centis "$pid"' "$SRC" \
+grep -q 'OSRC_CPU_LIVENESS' "$SRC" "$WDLIB" && grep -q '_tree_cpu_centis "$pid"' "$SRC" "$WDLIB" \
   && ok "the stall watchdog consults CPU time before reaping a silent delegate" \
   || no "the watchdog has no CPU liveness probe"
 

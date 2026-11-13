@@ -18,6 +18,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -38,7 +39,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 grep -aq '_printmode_needle' "$SRC" \
   && ok "source: _supervise detects devin print-mode rejection string" \
   || bad "source: print-mode rejection detection missing from _supervise"
-grep -aq 'OSRC_NO_PRINTMODE_ABORT' "$SRC" \
+grep -aq 'OSRC_NO_PRINTMODE_ABORT' "$SRC" "$WDLIB" \
   && ok "source: print-mode abort has an opt-out (OSRC_NO_PRINTMODE_ABORT)" \
   || bad "source: no opt-out for print-mode abort"
 # ANCHOR guard (echo-poisoning regression fix): the runtime trigger must require devin's real log

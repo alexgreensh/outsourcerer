@@ -12,6 +12,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -112,7 +113,7 @@ wait "$spoke_supervisor" 2>/dev/null || true
 
 # The remedy this tool prints for output-token exhaustion must not tell users to do the thing that
 # gets their job killed without also telling them how to stay alive.
-grep -a 'OUTPUT-TOKEN limit' "$SRC" | grep -q 'OSRC::PROGRESS' \
+grep -a 'OUTPUT-TOKEN limit' "$SRC" "$WDLIB" | grep -q 'OSRC::PROGRESS' \
   && ok "the write-to-a-file remedy also asks for a progress heartbeat" \
   || bad "remedy advises silence with no heartbeat (contradicts the stall watchdog)"
 

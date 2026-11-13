@@ -24,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Honor an override so the same test can be run against an unpatched source to prove it
 # catches the regression, without mutating the working tree.
 SRC="${OSRC_TEST_SRC:-$SCRIPT_DIR/../outsourcerer.sh}"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise lives in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -99,7 +100,7 @@ grep -q _kill_process_group <<<"$_killjob_body" \
   && ok "source: _kill_job routes through _kill_process_group" \
   || bad "source: _kill_job does not call _kill_process_group"
 # _supervise records an isolated PGID for the job and uses _kill_job on every exit arm.
-_supervise_body="$(awk '/^_supervise\(\)/{f=1} f{print} f&&/^}/{exit}' "$SRC" 2>/dev/null)"
+_supervise_body="$(awk '/^_supervise\(\)/{f=1} f{print} f&&/^}/{exit}' "$WDLIB" "$SRC" 2>/dev/null)"
 grep -aq '\$jd/pgid' <<<"$_supervise_body" \
   && ok "source: _supervise records the delegate PGID in \$jd/pgid" \
   || bad "source: _supervise does not record a job PGID"
