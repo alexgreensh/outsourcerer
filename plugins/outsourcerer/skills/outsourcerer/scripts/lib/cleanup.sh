@@ -93,13 +93,39 @@ _osrc_owner_state() {
   printf 'ask'
 }
 
+# _osrc_owner_known <id> -> 0 when ANY record of the owner exists. An owner with
+# no record at all outlived (or never had) its maker: ASK, never gone.
+_osrc_owner_known() {
+  [ -d "$OSRC_JOBS/$1" ] || [ -d "$OSRC_HOME/loops/$1" ] \
+    || [ -d "$OSRC_HOME/fanout/$1" ] || [ -d "$OSRC_HOME/isolated/$1" ] \
+    || [ -f "$OSRC_HOME/remote/$1.json" ] \
+    || [ -e "$OSRC_HOME/autodetach/$1.log" ] || [ -e "$OSRC_HOME/autodetach/$1.rc" ] \
+    || ls -d "$OSRC_HOME/owners"/*/"$1" >/dev/null 2>&1
+}
+
+# _osrc_job_collected <id> -> 0 when nothing still points at the job's result:
+# no owner record (the stop-guard reaps it only once the owner's turn ends with
+# the result delivered) and no running wait/fanout wait covers it.
+_osrc_job_collected() {
+  ls -d "$OSRC_HOME/owners"/*/"$1" >/dev/null 2>&1 && return 1
+  _waited_ids 2>/dev/null | grep -qxF "$1" && return 1
+  return 0
+}
+
 # _osrc_lsof_busy <path> -> 0 busy, 1 clear, 2 cannot-verify (caller treats as ASK).
 # macOS lsof returns 1 even when it lists files, so the exit code is useless: the
 # listing itself is the signal (empty stdout = nothing open, any row = busy).
+# Directories use `lsof +D`; plain files `lsof --` (lsof +D on a file only warns).
+# stderr is discarded inside the wrapped call so a WARNING never reads as "busy"
+# through _timeout's merged capture.
 _osrc_lsof_busy() {
   have lsof 2>/dev/null || return 2
   local out rc
-  out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" lsof +D "$1" 2>/dev/null)"
+  if [ -d "$1" ]; then
+    out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" bash -c 'exec lsof +D "$1" 2>/dev/null' _ "$1")"
+  else
+    out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" bash -c 'exec lsof -- "$1" 2>/dev/null' _ "$1")"
+  fi
   rc=$?
   case "$rc" in 124) return 2 ;; esac   # timed out: doubt -> ASK
   case "$rc" in 0|1) : ;; *) return 2 ;; esac
@@ -122,11 +148,16 @@ _osrc_branch_merged() {
   for b in "${bases[@]}"; do
     git -C "$repo" merge-base --is-ancestor "$br" "$b" 2>/dev/null && return 0
   done
-  # No local ref contains it: a merged PR still preserves the work.
+  # No local ref contains it: a merged PR preserves the work ONLY when the PR's
+  # merged head is this branch's current tip — commits made after the merge are
+  # not preserved by that PR (review finding 2).
   if have gh 2>/dev/null; then
-    local st
-    st="$(cd "$repo" 2>/dev/null && gh pr list --head "$br" --state all --json state --jq '.[].state' 2>/dev/null | head -1)"
-    [ "$st" = "MERGED" ] && return 0
+    local tip
+    tip="$(git -C "$repo" rev-parse "$br" 2>/dev/null)"
+    [ -n "$tip" ] \
+      && (cd "$repo" 2>/dev/null && gh pr list --head "$br" --state merged \
+            --json headRefOid --jq '.[].headRefOid' 2>/dev/null | grep -qx "$tip") \
+      && return 0
   fi
   return 1
 }
@@ -153,6 +184,9 @@ _osrc_cleanup_verdict() {
     [ -e "$path" ] || [ -L "$path" ] || { printf 'GONE\tpath absent\n'; return 0; }
   fi
 
+  # A manifest line must LOOK like what its kind makes before anything else is
+  # trusted (review finding 5): per-kind shape, and '..' never in a real record.
+  case "$path" in *..*) printf 'ASK\tpath contains ..\n'; return 0 ;; esac
   # Root containment: worktrees/branches are repo-scoped; every other kind lives under
   # $OSRC_HOME (jobs, fanout, loops, autodetach, isolated, tmp), so that is their root.
   case "$kind" in worktree|branch) root="$repo" ;; *) root="$OSRC_HOME" ;; esac
@@ -170,12 +204,24 @@ _osrc_cleanup_verdict() {
     case "${pp##*/}" in
       node_modules|.venv|venv|store|state|.env|.git|.outsourcerer) printf 'ASK\tload-bearing path\n'; return 0 ;;
     esac
+    case "$kind" in
+      job)        case "$pp" in "$OSRC_HOME"/jobs/"$sess") : ;; *) printf 'ASK\tnot the shape of a job dir\n'; return 0 ;; esac ;;
+      loop)       case "$pp" in "$OSRC_HOME"/loops/"$sess") : ;; *) printf 'ASK\tnot the shape of a loop dir\n'; return 0 ;; esac ;;
+      fanout)     case "$pp" in "$OSRC_HOME"/fanout/"$sess") : ;; *) printf 'ASK\tnot the shape of a fanout dir\n'; return 0 ;; esac ;;
+      isolated)   case "$pp" in "$OSRC_HOME"/isolated/"$sess") : ;; *) printf 'ASK\tnot the shape of an isolated dir\n'; return 0 ;; esac ;;
+      autodetach) case "$pp" in "$OSRC_HOME"/autodetach/"$sess".log|"$OSRC_HOME"/autodetach/"$sess".rc) : ;; *) printf 'ASK\tnot the shape of an autodetach file\n'; return 0 ;; esac ;;
+      worktree)   case "$pp" in "$rp"/.outsourcerer/worktrees/"$sess") : ;; *) printf 'ASK\tnot the shape of a worktree\n'; return 0 ;; esac ;;
+      tmp)        case "$pp" in "$OSRC_HOME"/tmp/?*) : ;; *) printf 'ASK\tnot the shape of a tmp path\n'; return 0 ;; esac ;;
+      *)          printf 'ASK\tunknown kind %s\n' "$kind"; return 0 ;;
+    esac
   fi
 
-  # Owning session done or gone.
+  # Owning session done or gone; 'gone' still needs a record to have existed.
   st="$(_osrc_owner_state "$sess")"
   case "$st" in
-    done|gone) : ;;
+    done) : ;;
+    gone) _osrc_owner_known "$sess" \
+        || { printf 'ASK\towner %s has no record at all\n' "$sess"; return 0; } ;;
     ask) printf 'ASK\towner state undecidable\n'; return 0 ;;
     *) printf 'ASK\towner %s still %s\n' "$sess" "$st"; return 0 ;;
   esac
@@ -186,15 +232,48 @@ _osrc_cleanup_verdict() {
     case "$newest" in ''|*[!0-9]*|0) printf 'ASK\tcannot read modification time\n'; return 0 ;; esac
     [ $(( now - newest )) -ge "${OSRC_CLEANUP_MIN_AGE:-3600}" ] \
       || { printf 'ASK\tyounger than 1h\n'; return 0; }
-    _osrc_lsof_busy "$pp" && { printf 'ASK\tfiles open under it\n'; return 0; }
-    # rc 2 (cannot verify) also lands here as busy -> ASK, per "any doubt ASK".
+    _osrc_lsof_busy "$pp"; local lrc=$?
+    case "$lrc" in
+      1) : ;;
+      0) printf 'ASK\tfiles open under it\n'; return 0 ;;
+      *) printf 'ASK\topen-file check could not verify\n'; return 0 ;;
+    esac
   fi
 
   case "$kind" in
+    job)
+      # A job dir is the lane's evidence. SAFE only when it finished clean AND its
+      # result was collected, or it is past the same 3-day TTL gc uses; a blocked
+      # or failed dir keeps its evidence until then (review finding 4).
+      local jstat
+      jstat="$(_reconcile_status "$sess" 2>/dev/null || printf '?')"
+      case "$jstat" in
+        done|'done?')
+          _osrc_job_collected "$sess" \
+            || { printf 'ASK\tjob done but result not collected\n'; return 0; } ;;
+        *) [ $(( now - newest )) -ge "${OSRC_CLEANUP_JOB_TTL:-259200}" ] \
+             || { printf 'ASK\tjob status %s — evidence kept for 3d\n' "${jstat:-?}"; return 0; } ;;
+      esac
+      ;;
     worktree)
       [ -d "$pp" ] || { printf 'ASK\tworktree path is not a directory\n'; return 0; }
       [ -z "$(git -C "$pp" status --porcelain 2>/dev/null | head -1)" ] \
         || { printf 'ASK\tworktree has uncommitted changes\n'; return 0; }
+      # Ignored files are invisible to the check above: a .env or a gitignored
+      # deliverable would die with a "clean" worktree. Disposable caches only;
+      # .env* and anything else is ASK, named (review finding 1).
+      local ig ifile igbad=""
+      ig="$(git -C "$pp" status --porcelain --ignored 2>/dev/null | sed -n 's/^!! //p')"
+      if [ -n "$ig" ]; then
+        while IFS= read -r ifile; do
+          [ -n "$ifile" ] || continue
+          case "${ifile%/}" in
+            node_modules|.venv|__pycache__|dist|build|target) : ;;
+            *) igbad="${igbad:+$igbad, }${ifile%/}" ;;
+          esac
+        done <<<"$ig"
+        [ -z "$igbad" ] || { printf 'ASK\tignored files in worktree: %s\n' "$igbad"; return 0; }
+      fi
       local wj br base
       wj="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$sess/worktree.json"
       br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
@@ -374,8 +453,10 @@ _osrc_cleanup_apply() {
 
 _osrc_cleanup_ack() {
   have jq 2>/dev/null || die "cleanup --ack needs jq"
-  local items ah
+  local items ah n_ask
   items="$(_osrc_cleanup_items --no-size)"
+  n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
+  [ "${n_ask:-0}" -gt 0 ] || { echo "[outsourcerer] cleanup: no ASK items — nothing to acknowledge."; return 0; }
   ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || die "cannot create $(_osrc_cl_root)"
   printf '%s\n' "$ah" > "$(_osrc_cl_ack)"
@@ -395,13 +476,8 @@ _osrc_cleanup_tick_run() {
   _osrc_cleanup_state_write "$items" || true
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
   n_safe="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; n_safe="${n_safe:-0}"
-  # Under 15GB free: apply SAFE leftovers, then surface ASK to the orchestrator.
-  if [ "$free_gb" -lt "${OSRC_CLEANUP_FREE_GB:-15}" ] && [ "$n_safe" -gt 0 ]; then
-    _osrc_cleanup_apply >/dev/null 2>&1 || true
-    items="$(_osrc_cleanup_items --no-size)"
-    _osrc_cleanup_state_write "$items" || true
-    n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
-  fi
+  # Review finding 6: until the SAFE-verdict findings are proven the heartbeat
+  # SCANS and WAKES only — it never applies. Apply stays a typed `cleanup --apply`.
   if [ "$n_ask" -gt 0 ] && type _wake_append >/dev/null 2>&1; then
     ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
     alert_dir="$(_osrc_cl_root)"; mkdir -p "$alert_dir" 2>/dev/null || return 0
@@ -438,23 +514,37 @@ _osrc_cleanup_tick() {
 }
 
 # _osrc_disk_gate -> refuse new lane launches while free disk < OSRC_DISK_MIN_GB (10)
-# and the current ASK list has not been acknowledged. Called from _bg_launch,
-# route_delegate and session start; dies with the fix when it refuses.
+# and the CURRENT ASK list has not been acknowledged. Called from _bg_launch,
+# route_delegate and session start; dies with the fix when it refuses. Under
+# pressure it rescans live: the tick's state file can be an hour old, and an ack
+# must match the list as it is now (review finding 8).
 _osrc_disk_gate() {
-  local free_kb free_gb state ah ch an
+  local free_kb free_gb state ah ch an ns items top
   free_kb="$(_osrc_free_kb)"
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
   [ "$free_gb" -lt "${OSRC_DISK_MIN_GB:-10}" ] || return 0
+  items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
+  _osrc_cleanup_state_write "$items" || true
   state="$(_osrc_cl_state)"
   if [ ! -f "$state" ]; then
     die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and cleanup state is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
   fi
-  ah="$(jq -r '.ask_hash // ""' "$state" 2>/dev/null)"
-  ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
-  [ -n "$ah" ] && [ "$ah" = "$ch" ] && return 0
   an="$(jq -r '.ask // 0' "$state" 2>/dev/null)"
-  die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${an:-?} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  if [ "${an:-0}" -gt 0 ]; then
+    ah="$(jq -r '.ask_hash // ""' "$state" 2>/dev/null)"
+    ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
+    [ -n "$ah" ] && [ "$ah" = "$ch" ] && return 0
+    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  fi
+  # ASK list is empty: never demand an ack of nothing. Say the disk is full and
+  # name what is using it (review finding 8).
+  ns="$(jq -r '.safe // 0' "$state" 2>/dev/null)"
+  top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
+  if [ "${ns:-0}" -gt 0 ]; then
+    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}"
+  fi
+  die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or launch with OSRC_DISK_MIN_GB=0 to override."
 }
 
 # =============================================================================
