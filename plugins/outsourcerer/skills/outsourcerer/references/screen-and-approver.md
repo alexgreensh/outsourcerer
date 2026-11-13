@@ -135,6 +135,9 @@ engine's own sandbox.
   tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
 - Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
   printenv/env, shell rc files like `.zshrc`/`.bash_profile` and history files `*_history`),
+  anything that prints environment VALUES (`env`, `printenv`, `export -p`, `set`, `declare -x`,
+  `/proc/*/environ`, `env | grep …`: the screen goes to the delegate's model, and a value can be a
+  login token). Names only, `env | cut -d= -f1` (or `printenv | …`), approves,
   whatever reads them (cat, jq, cut, awk, column, xargs).
 - Any read under the home folder outside the worktree (and the extra dirs), or one that covers
   the home folder (`find ~`, `find /`, `ls /Users`). System paths (`/usr`, `/opt`, `/etc`,

@@ -19,7 +19,7 @@ SECRET_NAME = re.compile(
     r".*\.keychain(-db)?|\.?credentials(\..*)?|.*token.*|.*secret.*|.*password.*|auth\.json|"
     r"\.git-credentials|.*\.kdbx|"
     r"\.(bashrc|zshrc|kshrc|cshrc|tcshrc|profile|bash_profile|bash_login|bash_logout|zprofile|zshenv|zlogin|"
-    r"zlogout)|.*_history|\.histfile|config\.fish|\.python_history|\.node_repl_history)$", re.I)
+    r"zlogout)|.*_history|environ|\.histfile|config\.fish|\.python_history|\.node_repl_history)$", re.I)
 ENV_NAMED = {  # env names that get their own rule (every env prefix holds; these say why)
     "OSRC_HOME": "overrides OSRC_HOME (would point the run at the live ~/.outsourcerer)",
     "HOME": "overrides HOME (moves ~ and every dotfile lookup)",

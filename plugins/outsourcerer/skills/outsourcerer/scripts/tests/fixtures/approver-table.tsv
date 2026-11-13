@@ -234,3 +234,38 @@ hold	shell		gawk 'BEGIN{f="sys" "tem"; @f("touch /tmp/osrc-x")}'
 hold	shell		gawk '@load "filefuncs"; BEGIN{}' src/a
 hold	shell		awk 'BEGIN{ARGV[1]="~/.ssh/id_rsa";ARGC=2}{print}'
 approve	shell		gawk '{print $1}' src/a
+# ---- Round 4b: commands that print environment values hold; names-only `env | cut -d= -f1` approves ----
+hold	shell		env
+hold	shell		printenv
+hold	shell		printenv HOME
+hold	shell		printenv GH_TOKEN
+hold	shell		export -p
+hold	shell		export
+hold	shell		set
+hold	shell		declare -x
+hold	shell		declare -p
+hold	shell		typeset -x
+hold	shell		compgen -e
+hold	shell		cat /proc/1/environ
+hold	shell		cat /proc/self/environ
+hold	shell		tr '\0' '\n' < /proc/self/environ
+hold	shell		strings /proc/1/environ
+hold	shell		env | grep TOKEN
+hold	shell		printenv | grep -i key
+hold	shell		env | sort
+hold	shell		env -0
+hold	shell		env | cut -d= -f2
+hold	shell		env | cut -d= -f1-
+hold	shell		env | cut -d= -f1,2
+hold	shell		env | cut -c1-80
+hold	shell		env | awk -F= '{print $1}'
+hold	shell		env | cut -d= -f1 > names.txt
+hold	shell		env | cut -d= -f1 | xargs printenv
+hold	shell		env |& cut -d= -f1
+hold	shell		env -u TMUX | cut -d= -f1
+approve	shell		env | cut -d= -f1
+approve	shell		printenv | cut -d= -f1
+approve	shell		env | cut -f1 -d=
+approve	shell		env | cut -d = -f 1
+approve	shell		env | cut -d= -f1 | sort
+approve	shell		env | cut -d= -f1 | grep TOKEN
