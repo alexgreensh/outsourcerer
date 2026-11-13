@@ -338,8 +338,9 @@ a.pill svg { width: 13px; height: 13px; }
   let mode = 'none', pullErr = '', unsubs = [];
   const TOKEN = (() => { try { const t = new URLSearchParams(location.search).get('t') || ''; if (t) { sessionStorage.setItem('osrc-hub-t', t); try { const u = new URL(location.href); u.searchParams.delete('t'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e2) {} } return t || sessionStorage.getItem('osrc-hub-t') || ''; } catch (e) { return ''; } })();
   function api(path, opts) {
-    const sep = path.indexOf('?') >= 0 ? '&' : '?';
-    return fetch(path + sep + 't=' + encodeURIComponent(TOKEN), opts || {}).then((r) => {
+    opts = opts || {};
+    opts.headers = Object.assign({ 'X-Hub-Token': TOKEN }, opts.headers || {});
+    return fetch(path, opts).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
     });
@@ -768,7 +769,8 @@ a.pill svg { width: 13px; height: 13px; }
       clearTimeout(timer);
       return;
     }
-    // No artifact db: local mode via hub serve (token in the URL, then the cookie).
+    // No artifact db: local mode via hub serve (token from the bookmark URL,
+    // then kept in sessionStorage and sent as the X-Hub-Token header).
     mode = 'local';
     db = makeLocalDb();
     subscribe(db);

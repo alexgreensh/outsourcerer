@@ -97,11 +97,13 @@ artifact mode writes, so an orchestrator reading that directory sees local-mode
 answers too.
 
 Endpoints: `GET /api/projects`, `GET /api/answers`, `POST /api/answers`,
-`POST /api/refresh`. Every request needs the token (`?t=` or `X-OSRC-Token`) and a
-loopback `Host` header (`127.0.0.1`/`localhost`/`[::1]`); the token is compared in
-constant time as bytes, stripped from server logs, and removed from the address bar
-by the page once it is in `sessionStorage`. `hub serve` dies rather than run with a
-fallback token if `/dev/urandom` is unreadable.
+`POST /api/refresh`. API routes and POSTs need the `X-Hub-Token` header plus a
+loopback `Host` header (`127.0.0.1`/`localhost`/`[::1]`); `?t=` authenticates
+only the `GET /` page load (the bookmark), so the token never sits in an API
+URL. The token is compared in constant time as bytes, stripped from server
+logs, and moved from the address bar into `sessionStorage` by the page. No
+cookie is set or accepted. `hub serve` dies rather than run with a fallback
+token if `/dev/urandom` is unreadable.
 
 Local mode is local *data*, not a fully offline page: the page loads Google Fonts,
 the Lucide icon script pinned at `lucide@0.469.0` from `cdn.jsdelivr.net`, and

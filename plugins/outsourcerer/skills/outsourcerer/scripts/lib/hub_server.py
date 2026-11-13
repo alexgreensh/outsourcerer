@@ -170,31 +170,20 @@ def make_handler(hub):
             return host in ("127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port)
 
         def _token_ok(self):
-            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            t = (q.get("t") or [""])[0]
-            via = "query" if t else ""
+            path = urllib.parse.urlparse(self.path).path
+            # X-Hub-Token is the API credential; the page sends it on every call.
+            t = self.headers.get("X-Hub-Token", "")
             if not t:
-                t = self.headers.get("X-OSRC-Token", "")
-                via = "header" if t else ""
-            if not t:
-                for part in (self.headers.get("Cookie") or "").split(";"):
-                    name, _, val = part.strip().partition("=")
-                    if name == "osrc_hub_t":
-                        t, via = val, "cookie"
-                        break
+                # ?t= is the bookmarkable page URL and nothing else: a token in
+                # a URL ends up in proxy/history logs, so it never authenticates
+                # an API route or POST (review A3). No cookie exists — the
+                # bookmark survives reload via sessionStorage (review finding 4).
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                cand = (q.get("t") or [""])[0]
+                if cand and self.command == "GET" and path in ("/", "/index.html"):
+                    t = cand
             # compare_digest needs bytes on both sides; a non-ASCII token must not raise.
-            ok = hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
-            # The cookie exists ONLY so the stripped-?t= URL survives a reload of
-            # the page document. It is not a credential anywhere else — every API
-            # call the page makes carries ?t= itself, so a stray page on another
-            # localhost port cannot spend it (review A1).
-            if ok and via == "cookie":
-                path = urllib.parse.urlparse(self.path).path
-                ok = self.command == "GET" and path in ("/", "/index.html")
-            # A tokened GET that did NOT use the cookie plants one, so the bare
-            # URL (page strips ?t= for the address bar) still works on reload.
-            self._want_cookie = ok and via in ("query", "header") and self.command == "GET"
-            return ok
+            return hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
 
         def _post_origin_ok(self):
             # A browser POST must come from this server's own page. Origin is the
@@ -211,17 +200,9 @@ def make_handler(hub):
                 return False
             return True
 
-        def _send_cookie(self):
-            if getattr(self, "_want_cookie", False):
-                self.send_header(
-                    "Set-Cookie",
-                    "osrc_hub_t=%s; Path=/; HttpOnly; SameSite=Strict" % hub.token,
-                )
-
         def _send_json(self, obj, code=200):
             data = json.dumps(obj).encode()
             self.send_response(code)
-            self._send_cookie()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
@@ -244,7 +225,6 @@ def make_handler(hub):
                 except OSError:
                     return self._send_json({"error": "page missing"}, 500)
                 self.send_response(200)
-                self._send_cookie()
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")

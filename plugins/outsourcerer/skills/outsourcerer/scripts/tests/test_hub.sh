@@ -267,64 +267,73 @@ PERM="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME
 
 code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects")"
 [ "$code" = "403" ] && ok "api refuses requests without token" || bad "no-token request got $code"
-code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects?t=wrong")"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Hub-Token: wrong' "$BASE/api/projects")"
 [ "$code" = "403" ] && ok "api refuses wrong token" || bad "wrong-token request got $code"
+# Review A3: ?t= authenticates the page GET only — it is not a credential on
+# API routes or POSTs, where it would sit in URLs (proxy/history/referrer).
+code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects?t=$TOK")"
+[ "$code" = "403" ] && ok "valid ?t= refused on /api/projects" || bad "?t= on api got $code"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/refresh?t=$TOK")"
+[ "$code" = "403" ] && ok "valid ?t= refused on POST" || bad "?t= on POST got $code"
 
-pj="$(curl -s "$BASE/api/projects?t=$TOK")"
+pj="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects")"
 echo "$pj" | jq -e '.projects | length >= 1' >/dev/null && ok "GET /api/projects returns export" || bad "api/projects empty"
 echo "$pj" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="openrouter") | .paid == true)' >/dev/null \
   && ok "GET /api/projects carries the limits array" || bad "api/projects missing limits"
 
 pg="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/?t=$TOK")"
-[ "$pg" = "200" ] && ok "GET / serves the page" || bad "page GET got $pg"
+[ "$pg" = "200" ] && ok "GET /?t= serves the page" || bad "page GET got $pg"
 
-an0="$(curl -s "$BASE/api/answers?t=$TOK")"
+an0="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/answers")"
 echo "$an0" | jq -e 'type == "object"' >/dev/null && ok "GET /api/answers returns object" || bad "answers GET bad"
 
-post="$(curl -s -X POST "$BASE/api/answers?t=$TOK" -H 'Content-Type: application/json' \
+post="$(curl -s -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" -H 'Content-Type: application/json' \
   -d '{"id":"sess-1--D1","project":"sess-1","decision":"D1","question":"Ship the hub?","choice":"yes","note":"lgtm"}')"
 echo "$post" | jq -e '.ok == true' >/dev/null && ok "POST /api/answers accepted" || bad "answer POST failed: $post"
 [ -f "$OSRC_HOME/hub/answers/sess-1--D1.json" ] && ok "answer written to hub/answers/<id>.json" || bad "answer file missing"
-an1="$(curl -s "$BASE/api/answers?t=$TOK")"
+an1="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/answers")"
 echo "$an1" | jq -e '."sess-1--D1".choice == "yes" and ."sess-1--D1".note == "lgtm"' >/dev/null \
   && ok "GET /api/answers round-trips the write" || bad "answers round-trip wrong: $an1"
 
-badpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+badpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" \
   -H 'Content-Type: application/json' -d '{"id":"bad id!!","choice":"x"}')"
 [ "$badpost" = "400" ] && ok "POST rejects malformed answer id" || bad "bad id got $badpost"
-dotpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+dotpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" \
   -H 'Content-Type: application/json' -d '{"id":"..--x","choice":"x"}')"
 [ "$dotpost" = "400" ] && ok "POST rejects id not starting alphanumeric" || bad "dot id got $dotpost"
-badhost="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' "$BASE/api/projects?t=$TOK")"
+badhost="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' -H "X-Hub-Token: $TOK" "$BASE/api/projects")"
 [ "$badhost" = "403" ] && ok "foreign Host header refused" || bad "foreign Host got $badhost"
 
-# Review A1: the reload cookie is a credential for the page document ONLY;
-# POSTs need a same-origin Origin/Sec-Fetch-Site whatever carried the token.
+# Finding 4: no cookie exists at all — not set, not accepted anywhere.
 ck="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/")"
-[ "$ck" = "200" ] && ok "cookie alone serves GET /" || bad "cookie GET / got $ck"
+[ "$ck" = "403" ] && ok "cookie refused even on GET /" || bad "cookie GET / got $ck"
 ck2="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/api/projects")"
-[ "$ck2" = "403" ] && ok "cookie alone refused on /api/projects" || bad "cookie api got $ck2"
+[ "$ck2" = "403" ] && ok "cookie refused on /api/projects" || bad "cookie api got $ck2"
 ck3="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" -X POST "$BASE/api/answers" \
   -H 'Content-Type: application/json' -d '{"id":"ck--D1","choice":"x"}')"
-[ "$ck3" = "403" ] && ok "cookie alone refused on POST" || bad "cookie POST got $ck3"
-or1="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+[ "$ck3" = "403" ] && ok "cookie refused on POST" || bad "cookie POST got $ck3"
+curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -qi 'set-cookie' \
+  && bad "server still sets a cookie" || ok "no Set-Cookie on page GET"
+grep -q 'document.cookie' "$PAGE" && bad "page still uses document.cookie" || ok "page carries no document.cookie"
+# A1: POSTs need a same-origin Origin/Sec-Fetch-Site whatever carried the token.
+or1="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" \
   -H 'Origin: http://127.0.0.1:3000' -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
 [ "$or1" = "403" ] && ok "POST with foreign Origin refused" || bad "foreign Origin POST got $or1"
-or2="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+or2="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" \
   -H 'Origin: https://evil.example' -H 'Sec-Fetch-Site: cross-site' \
   -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
 [ "$or2" = "403" ] && ok "POST with cross-site headers refused" || bad "cross-site POST got $or2"
-or3="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers?t=$TOK" \
+or3="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H "X-Hub-Token: $TOK" \
   -H "Origin: http://127.0.0.1:${PORT}" -H 'Sec-Fetch-Site: same-origin' \
   -H 'Content-Type: application/json' -d '{"id":"or--D1","choice":"x"}')"
 [ "$or3" = "200" ] && ok "POST with same-origin Origin accepted" || bad "same-origin POST got $or3"
 
-r0="$(curl -s "$BASE/api/projects?t=$TOK" | jq -r '.generated_at')"
+r0="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects" | jq -r '.generated_at')"
 sleep 1
-rf="$(curl -s -X POST "$BASE/api/refresh?t=$TOK")"
+rf="$(curl -s -X POST "$BASE/api/refresh" -H "X-Hub-Token: $TOK")"
 echo "$rf" | jq -e '(.generated_at | type) == "number" and (.projects | length) >= 1' >/dev/null \
   && ok "POST /api/refresh re-exports" || bad "refresh failed: $(echo "$rf" | head -c 200)"
-r1="$(curl -s "$BASE/api/projects?t=$TOK" | jq -r '.generated_at')"
+r1="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects" | jq -r '.generated_at')"
 [ "$r1" -ge "$r0" ] && ok "refresh updates generated_at ($r0 -> $r1)" || bad "generated_at did not advance"
 
 # Loopback only: the listening socket must be 127.0.0.1, nothing else.
@@ -393,7 +402,7 @@ OSRC_HUB_REFRESH_SECS=1 OSRC_HUB_IDLE_SECS=30 OSRC_HOME="$OSRC_HOME" \
 SRV=$!
 URL5="$(wait_url "$TMP/serve5.log")"
 [ -n "$URL5" ] || { bad "idle-test serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
-curl -s -o /dev/null "${URL5%%\?*}/api/projects?t=${URL5##*t=}"   # a page poll -> refresh stays live
+curl -s -o /dev/null -H "X-Hub-Token: ${URL5##*t=}" "${URL5%%\?*}/api/projects"   # a page poll -> refresh stays live
 m0="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
 sleep 3
 m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
@@ -428,7 +437,7 @@ sleep 2.5
 m4="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
 [ "$m3" = "$m4" ] && ok "no page poll for the idle window -> refresh loop stops" \
   || bad "loop kept exporting while idle ($m3 -> $m4)"
-curl -s -o /dev/null "${URL6%%\?*}/api/projects?t=${URL6##*t=}"   # a poll wakes it
+curl -s -o /dev/null -H "X-Hub-Token: ${URL6##*t=}" "${URL6%%\?*}/api/projects"   # a poll wakes it
 echo again > "$OSRC_HOME/jobs/job-x/status"
 wait_mtime "$EXPORT_JSON" "$m4" \
   && ok "a page poll resumes the refresh loop" \
