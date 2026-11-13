@@ -36,9 +36,13 @@ _OSRC_UTF8_LOCALE=""
 _osrc_utf8_locale() { # -> prints a usable UTF-8 locale name (cached)
   if [ -z "$_OSRC_UTF8_LOCALE" ]; then
     local cand avail
-    avail="$(locale -a 2>/dev/null)"
+    avail="
+$(locale -a 2>/dev/null)
+"
     for cand in en_US.UTF-8 en_US.utf8 C.UTF-8 C.utf8; do
-      if printf '%s\n' "$avail" | grep -qx -- "$cand"; then _OSRC_UTF8_LOCALE="$cand"; break; fi
+      case "$avail" in *"
+$cand
+"*) _OSRC_UTF8_LOCALE="$cand"; break ;; esac
     done
     [ -n "$_OSRC_UTF8_LOCALE" ] || _OSRC_UTF8_LOCALE="C.UTF-8"
   fi
