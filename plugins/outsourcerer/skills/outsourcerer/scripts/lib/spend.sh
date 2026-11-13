@@ -591,18 +591,27 @@ _osrc_session_cap_send() {
 }
 
 # ---- lane subcommand: cap management + billing query + ls ----------------------
+#
+# Verb handlers are named osrc_lane_<verb> so L12's `osrc_lane` router can dispatch
+# `lane <verb>` straight to them without a name fight. CLI words are unchanged:
+#   lane cap <lane> <meter><=pct> | lane cap <lane> --clear  -> osrc_lane_cap
+#   lane ls | lane list                                     -> osrc_lane_ls
+#   lane billing <lane> [model]                             -> osrc_lane_billing
+#   lane summary|limits [--json]                            -> osrc_lane_summary
+# `lane billing` dispatches to the osrc_lane_billing classifier itself — its
+# <lane|disp|provider|alias> [model] [disp] signature is a superset of the verb's args.
 
 cmd_lane() {
   case "${1:-ls}" in
-    cap)   shift; _lane_cap_cmd "$@" ;;
-    ls|list) _lane_ls ;;
-    billing) shift; _lane_billing_cmd "$@" ;;
-    summary|limits) shift; osrc_limits_summary "${1:-}" ;;
+    cap)   shift; osrc_lane_cap "$@" ;;
+    ls|list) osrc_lane_ls ;;
+    billing) shift; [ -n "${1:-}" ] || die "usage: lane billing <lane> [model]"; osrc_lane_billing "$@" ;;
+    summary|limits) shift; osrc_lane_summary "${1:-}" ;;
     *) die "lane: unknown action '${1:-}' (use: cap <lane> <meter><=pct> | cap <lane> --clear | ls | billing <lane> [model] | summary [--json])" ;;
   esac
 }
 
-_lane_cap_cmd() {
+osrc_lane_cap() {
   local lane="${1:-}" act="${2:-}"
   [ -n "$lane" ] || die "usage: lane cap <lane> <meter><=pct> | lane cap <lane> --clear"
   # Lane context, NOT quota/provider context: `cc` must stay the native-claude LANE
@@ -645,12 +654,6 @@ _lane_cap_cmd() {
   echo "lane cap: $lane $act$( [ "$found" = 1 ] && echo ' (replaced)' )"
 }
 
-_lane_billing_cmd() {
-  local lane="${1:-}" model="${2:-}"
-  [ -n "$lane" ] || die "usage: lane billing <lane> [model]"
-  printf '%s\n' "$(osrc_lane_billing "$lane" "$model")"
-}
-
 # _osrc_brief_caps <limits-line> -> one "caps" line for cmd_brief / handover briefs:
 # every standing cap rendered as "<lane> cap <pct>% <window-class>, now <pct>%".
 # Silent (rc1) when no standing caps exist.
@@ -672,7 +675,7 @@ _osrc_brief_caps() {
   return 0
 }
 
-_lane_ls() {
+osrc_lane_ls() {
   local cf; cf="$(_lane_caps_file)"
   printf '%-10s %-12s %s\n' LANE BILLING CAPS "$([ -f "$cf" ] && echo '(standing)')"
   local l b caps now
@@ -768,7 +771,7 @@ _osrc_harness_detected() {
   esac
 }
 
-# osrc_limits_summary [--json] -> one record per DETECTED harness for the MC "Lanes and
+# osrc_lane_summary [--json] -> one record per DETECTED harness for the MC "Lanes and
 # limits" panel / L9 hub export. Never a fixed list: only harnesses whose CLI is installed
 # and whose login/plan/key is provable appear. JSON fields match the page contract:
 # id, name, state (ok|low|out|wait|unknown), left, renews, cap, paid, plus billing, lane,
@@ -780,7 +783,7 @@ _osrc_harness_detected() {
 #   out     fresh reading at/over the limit line, or a cap is tripped (dispatch refuses)
 #   wait    a meter exists but the only reading is stale — "waiting for reset/refresh"
 #   unknown no meter feed for this harness — left reads "not checked yet"
-osrc_limits_summary() {
+osrc_lane_summary() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
   local mw="" _w _p _rst _age
   mw="$(_osrc_meter_windows 2>/dev/null)"

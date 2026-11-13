@@ -611,6 +611,12 @@ a2|m2|or" )"
 type -t _osrc_cap_gate >/dev/null || { echo "FAIL: _osrc_cap_gate not defined"; exit 1; }
 type -t _osrc_cap_poll >/dev/null || { echo "FAIL: _osrc_cap_poll not defined"; exit 1; }
 type -t cmd_lane >/dev/null || { echo "FAIL: cmd_lane not defined"; exit 1; }
+# L12 router contract: the lane verb handlers carry osrc_lane_<verb> names so the
+# osrc_lane router can dispatch to them directly. CLI words stay the same.
+for _vf in osrc_lane_cap osrc_lane_ls osrc_lane_billing osrc_lane_summary; do
+  type -t "$_vf" >/dev/null || { echo "FAIL: $_vf not defined (osrc_lane_* verb surface)"; exit 1; }
+done
+unset _vf
 
 # Spec validation + window mapping.
 _osrc_cap_valid 'weekly<=40' && ok "r3 cap: weekly<=40 valid" || bad "r3 cap: weekly<=40 rejected"
@@ -684,7 +690,7 @@ _osrc_cap_send_ok "mark the task done and also write tests" && bad "r3 cap: mixe
 # unknown limits are honest (state unknown / left "not checked yet"), caps surface as `cap`,
 # and gemini-cli is NEVER listed even when a `gemini` binary sits on PATH.
 # ---------------------------------------------------------------------------------------------------
-type -t osrc_limits_summary >/dev/null || { echo "FAIL: osrc_limits_summary not defined"; exit 1; }
+type -t osrc_lane_summary >/dev/null || { echo "FAIL: osrc_lane_summary not defined"; exit 1; }
 type -t _osrc_harness_detected >/dev/null || { echo "FAIL: _osrc_harness_detected not defined"; exit 1; }
 have python3 || { echo "FAIL: python3 needed for JSON assertions"; exit 1; }
 
@@ -708,20 +714,20 @@ printf '{"tokens":{"id_token":"x"}}' > "$SUM/home/.codex/auth.json"
 printf '{}' > "$SUM/home/.factory/auth.json"
 printf '{}' > "$SUM/home/.devin/auth.json"
 
-# _sumjson <home> <bindir> [VAR=val ...] -> osrc_limits_summary --json under a fully
+# _sumjson <home> <bindir> [VAR=val ...] -> osrc_lane_summary --json under a fully
 # hermetic env (env -i): fake HOME, stub-only PATH, OSRC_PLATFORM=linux (skips the real
 # macOS keychain probe), local-inference probe stubbed off (no localhost flakiness).
 _sumjson() {
   local fh="$1" fb="$2"; shift 2
   env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
       OSRC_SOURCED=1 TERM=dumb "$@" \
-      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_limits_summary --json' _ "$SRC" 2>/dev/null
+      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_lane_summary --json' _ "$SRC" 2>/dev/null
 }
 _sumtext() {
   local fh="$1" fb="$2"; shift 2
   env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
       OSRC_SOURCED=1 TERM=dumb "$@" \
-      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_limits_summary' _ "$SRC" 2>/dev/null
+      bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_lane_summary' _ "$SRC" 2>/dev/null
 }
 # _jget <json> <python-expr-on-d> -> prints result (d = parsed list).
 _jget() { python3 -c 'import json,sys
