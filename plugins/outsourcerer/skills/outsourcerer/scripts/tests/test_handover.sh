@@ -68,6 +68,16 @@ out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt '../evil' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && [ ! -e "$TMP/evil" ] \
   && ok "a hostile session id cannot escape owners/" || no "path escape via adopt (rc=$rc): [$out]"
 
+# '.'/'..' survive tr but owners/.. IS the state home: adopt must refuse them and touch nothing.
+printf 'sentinel\n' > "$OSRC_HOME/zz-sentinel"
+for bad in '.' '..' '.hidden-sid'; do
+  out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt "$bad" 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] && ok "adopt refuses '$bad'" || no "adopt '$bad' not refused (rc=$rc): [$out]"
+done
+[ -f "$OSRC_HOME/zz-sentinel" ] && [ ! -e "$OSRC_HOME/owners/new-sess/zz-sentinel" ] \
+  && ok "a refused dot-id adopt moved no state-home files" \
+  || no "state home was touched by a dot-id adopt"
+
 # duplicate target already owned by the current session
 : > "$OSRC_HOME/owners/new-sess/sess-c"
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt old-two 2>/dev/null)"
@@ -122,6 +132,64 @@ out="$(env -u CLAUDE_CODE_SESSION_ID "$SRC" handover 2>&1)"; rc=$?
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" handover --bogus 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unknown argument' \
   && ok "handover rejects unknown args" || no "bad arg not refused (rc=$rc): [$out]"
+
+echo "=== an idle-but-alive tmux target gets a read instruction, not 'no waiter' ==="
+# sess-idle has only an owner marker: no job dir, no autodetach files. The fake tmux below
+# answers has-session/display-message so _owned_live_state reads it as an existing session
+# with no working state -> idle. The brief must send the new session to LOOK at it.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/tmux" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *" has-session "*) exit 0 ;;
+  *" display-message "*) printf '/tmp/fake-pane-cwd\n'; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$TMP/bin/tmux"
+: > "$OSRC_HOME/owners/new-sess/sess-idle"
+OUT2="$TMP/brief-idle.md"
+out="$(PATH="$TMP/bin:$PATH" CLAUDE_CODE_SESSION_ID=new-sess "$SRC" handover --out "$OUT2" 2>/dev/null)"; rc=$?
+[ "$rc" -eq 0 ] && grep -q '`sess-idle` -- tmux, idle' "$OUT2" \
+  && ok "idle session row shows kind=tmux state=idle" || no "idle row wrong (rc=$rc): $(grep -A3 'sess-idle' "$OUT2" 2>/dev/null)"
+grep -A6 'sess-idle' "$OUT2" | grep -q 'OUTSOURCERER_TMUX=sess-idle' \
+  && grep -A6 'sess-idle' "$OUT2" | grep -q 'session read' \
+  && ok "idle session gets the session read command" || no "no read command for idle session"
+_idle_blk="$(awk '/^### `sess-idle`/{f=1;next} /^### `/{if(f)exit} f' "$OUT2")"
+printf '%s' "$_idle_blk" | grep -q 'no waiter needed' \
+  && no "an alive idle session was told it needs no waiter" \
+  || ok "idle session is not dismissed as needing no waiter"
+grep -A6 'sess-idle' "$OUT2" | grep -q '/tmp/fake-pane-cwd' \
+  && ok "idle session cwd falls back to the pane path" || no "pane cwd fallback missing"
+
+echo "=== handover prefers one supervise command when L1's multiplexer exists ==="
+OUT3="$TMP/brief-supervise.md"
+( export OSRC_SOURCED=1 CLAUDE_CODE_SESSION_ID=new-sess
+  . "$SRC" >/dev/null 2>&1
+  cmd_supervise() { :; }
+  cmd_handover --out "$OUT3" >/dev/null 2>&1 )
+grep -q 'supervise' "$OUT3" && grep -q 'covered by' "$OUT3" \
+  && ok "with cmd_supervise defined the brief names the single supervisor" \
+  || no "supervise path missing: $(grep -i 'supervise\|waiter' "$OUT3" 2>/dev/null | head -5)"
+grep -q 'wait job-live' "$OUT3" \
+  && no "per-target wait printed even though supervise exists" \
+  || ok "no per-target wait lines when supervise covers them"
+
+echo "=== a symlinked launcher still loads lib/ (stop-guard must not fail open) ==="
+SRC_REAL="$(cd "$SCRIPT_DIR/.." && pwd)/outsourcerer.sh"
+mkdir -p "$TMP/linkdir"
+ln -sf "$SRC_REAL" "$TMP/linkdir/outsourcerer.sh"
+out="$(CLAUDE_CODE_SESSION_ID=link-sess "$TMP/linkdir/outsourcerer.sh" adopt --list 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'new-sess' \
+  && ok "adopt --list works through a symlink (lib loaded from the real dir)" \
+  || no "symlink adopt --list failed (rc=$rc): [$out]"
+mkjob l8-link-job
+mkdir -p "$OSRC_HOME/owners/link-sid"
+: > "$OSRC_HOME/owners/link-sid/l8-link-job"
+out="$(printf '{"session_id":"link-sid"}' | "$TMP/linkdir/outsourcerer.sh" stop-guard 2>/dev/null)"
+printf '%s' "$out" | grep -q '"decision":"block"' \
+  && ok "stop-guard through a symlink still blocks on owned live work" \
+  || no "symlink stop-guard failed open (no block): [$out]"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

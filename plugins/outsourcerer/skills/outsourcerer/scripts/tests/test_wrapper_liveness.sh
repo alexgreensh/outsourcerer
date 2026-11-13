@@ -24,11 +24,11 @@ unset TMUX TMUX_PANE
 _wl_tmux="$(command -v tmux 2>/dev/null || true)"
 if [ -n "$_wl_tmux" ]; then
   mkdir -p "$TMP/bin"
-  printf '#!/bin/sh\nexec "%s" -L osrc-test-L8-%s "$@"\n' "$_wl_tmux" "$$" > "$TMP/bin/tmux"
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_wl_tmux" "$$" > "$TMP/bin/tmux"
   chmod +x "$TMP/bin/tmux"
   PATH="$TMP/bin:$PATH"; export PATH
 fi
-trap "env -u TMUX -u TMUX_PANE tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
+trap "env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090
 source "$SRC" >/dev/null 2>&1

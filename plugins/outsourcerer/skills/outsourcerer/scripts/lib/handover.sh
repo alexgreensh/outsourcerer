@@ -9,7 +9,12 @@
 # _owned_live_state and cmd_stop_guard stay in outsourcerer.sh with the stop guard.
 
 _owner_sid() { # [session-id] -> sanitized session id, or nothing
-  printf '%s' "${1:-${CLAUDE_CODE_SESSION_ID:-}}" | tr -cd 'A-Za-z0-9._-' | cut -c1-128
+  local s; s="$(printf '%s' "${1:-${CLAUDE_CODE_SESSION_ID:-}}" | tr -cd 'A-Za-z0-9._-' | cut -c1-128)"
+  # '.' and '..' survive tr but resolve OUT of owners/ (owners/.. IS the state home), so every
+  # registry reader/writer must see them as "no session". Other dot-leading ids ('..evil',
+  # '.hidden') are harmless literal dir names and keep working.
+  case "$s" in .|..) s="" ;; esac
+  printf '%s' "$s"
 }
 
 _owner_record() { # <job-or-session-id>
@@ -72,7 +77,8 @@ EOF
 }
 
 cmd_adopt() {
-  local old new odir ndir f base moved=0 dup=0
+  local old new odir ndir f base moved=0 dup=0 dups="" odir_real owners_real ndir_real
+  local newest=0 mt now human
   case "${1:-}" in
     --list|-l)
       [ "$#" -eq 1 ] || die "adopt --list takes no other arguments"
@@ -89,16 +95,40 @@ cmd_adopt() {
   [ -n "$new" ] || die "adopt: no current session id (CLAUDE_CODE_SESSION_ID is unset); nothing to adopt into"
   old="$(_owner_sid "$1")"
   [ -n "$old" ] || die "adopt: could not sanitize session id '$1'"
+  # adopt is stricter than the registry: dot-leading ids are never session ids a human typed.
+  case "$new" in .*) die "adopt: current session id '$new' is not a valid owner id" ;; esac
+  case "$old" in .*) die "adopt: '$1' is not a valid session id" ;; esac
   [ "$old" != "$new" ] || die "adopt: '$old' is already the current session"
   odir="$OSRC_HOME/owners/$old"
   [ -d "$odir" ] || die "adopt: no owners dir for session '$old' ($odir)"
+  # owners/<sid> must really live under owners/: a planted symlink (or a sanitization slip)
+  # must never let adopt move state-home files into an arbitrary directory.
+  owners_real="$(cd "$OSRC_HOME/owners" 2>/dev/null && pwd -P)" || die "adopt: cannot resolve $OSRC_HOME/owners"
+  odir_real="$(cd "$odir" 2>/dev/null && pwd -P)" || die "adopt: cannot resolve $odir"
+  [ "$(dirname "$odir_real")" = "$owners_real" ] || die "adopt: '$old' does not resolve inside owners/"
+  # Freshness of the old dir's markers is the only liveness signal adopt has: warn when the
+  # previous session may still be running, since adopting then steals a live fleet.
+  for f in "$odir"/* "$odir"/.[!.]* "$odir"/..?*; do
+    [ -f "$f" ] || continue
+    mt="$(_mtime "$f" 2>/dev/null)"
+    case "$mt" in ''|*[!0-9]*) ;; *) [ "$mt" -gt "$newest" ] 2>/dev/null && newest="$mt" ;; esac
+  done
+  if [ "$newest" != "0" ]; then
+    human="$(_epoch_local "$newest" 2>/dev/null)"
+    printf 'adopt: newest marker in owners/%s is %s\n' "$old" "${human:-$newest}" >&2
+    now="$(date +%s)"
+    [ $((now - newest)) -lt 300 ] 2>/dev/null && \
+      echo "adopt: WARNING: '$old' has activity under 5 minutes old -- it may still be a live session; adopting takes its fleet" >&2
+  fi
   ndir="$OSRC_HOME/owners/$new"
   mkdir -p "$ndir" 2>/dev/null || die "adopt: cannot create $ndir"
+  ndir_real="$(cd "$ndir" 2>/dev/null && pwd -P)" || die "adopt: cannot resolve $ndir"
+  [ "$(dirname "$ndir_real")" = "$owners_real" ] || die "adopt: '$new' does not resolve inside owners/"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     base="${f##*/}"
     if [ -e "$ndir/$base" ]; then
-      rm -f "$f" 2>/dev/null && dup=$((dup + 1))
+      rm -f "$f" 2>/dev/null && { dup=$((dup + 1)); dups="$dups $base"; }
     elif mv "$f" "$ndir/$base" 2>/dev/null; then
       moved=$((moved + 1))
       printf '%s\n' "$base"
@@ -110,7 +140,7 @@ $(_handover_owner_files "$odir")
 EOF
   rmdir "$odir" 2>/dev/null || true   # only succeeds when nothing (e.g. .stop-blocks) remains
   echo "adopt: moved $moved target(s) from '$old' to '$new'" >&2
-  [ "$dup" -gt 0 ] && echo "adopt: $dup target(s) were already owned by '$new' (duplicate markers dropped)" >&2
+  [ "$dup" -gt 0 ] && echo "adopt: dropped $dup duplicate marker(s) already owned by '$new':${dups# }" >&2
   return 0
 }
 
@@ -191,6 +221,31 @@ _handover_field() {
   [ -n "$v" ] && printf '%s' "$v"
 }
 
+# _handover_waiter <kind> <state> <id> -> prints the exact follow-up command line for the
+# incoming session, or nothing when no waiter applies. `supervise` (L1's blocking
+# multiplexer) covers every owned target in one command when it is defined; otherwise each
+# live target gets its own `wait`. An alive tmux session that is not mid-turn gets `session
+# read`, not `wait`: it will not finish on its own, but it is parked awaiting input.
+_handover_waiter() {
+  local kind="$1" state="$2" id="$3"
+  case "$kind:$state" in
+    remote:*) return 0 ;;
+    *:live)
+      if type cmd_supervise >/dev/null 2>&1; then printf -- '- covered by: `%s supervise`\n' "$SCRIPT_PATH"
+      else printf -- '- waiter: `%s wait %s` (run as a background command)\n' "$SCRIPT_PATH" "$id"; fi ;;
+    tmux:done|*:gone) printf -- '- no waiter needed (%s)\n' "$state" ;;
+    tmux:*)
+      printf -- '- alive, waiting for input: `OUTSOURCERER_TMUX=%s %s session read`\n' "$id" "$SCRIPT_PATH"
+      if type osrc_screen_state >/dev/null 2>&1; then
+        local scr st ev
+        scr="$(osrc_screen_state "$id" 2>/dev/null)"
+        st="$(printf '%s\n' "$scr" | sed -n '1p')"; ev="$(printf '%s\n' "$scr" | sed -n '2p')"
+        [ -n "$st" ] && printf -- '  screen: %s%s\n' "$st" "${ev:+ -- $ev}"
+      fi ;;
+    *) printf -- '- no waiter needed (%s)\n' "$state" ;;
+  esac
+}
+
 cmd_handover() {
   local out="" sid dir id kind state cwd model n=0 f
   while [ "$#" -gt 0 ]; do
@@ -222,6 +277,14 @@ cmd_handover() {
     printf 'First command for the incoming session -- it moves every target below into your\n'
     printf 'owners/ dir so the stop-guard and `wait` cover them:\n\n'
     printf '    %s adopt %s\n\n' "$SCRIPT_PATH" "$sid"
+    if type cmd_supervise >/dev/null 2>&1; then
+      printf 'Then arm ONE supervisor for everything you now own -- it blocks until any owned\n'
+      printf 'target needs you (approval, question, done, failed, stalled) and prints the exact\n'
+      printf 'next command:\n\n'
+      printf '    %s supervise\n\n' "$SCRIPT_PATH"
+    else
+      printf 'Then arm a `wait` per live target below; each blocks to terminal and wakes you.\n\n'
+    fi
     if [ -d "$dir" ]; then
       printf '## Owned targets\n\n'
       while IFS= read -r f; do
@@ -233,10 +296,9 @@ cmd_handover() {
         printf '### `%s` -- %s, %s\n\n' "$id" "$kind" "$state"
         [ -n "$model" ] && printf -- '- model: %s\n' "$model"
         [ -n "$cwd" ] && printf -- '- cwd: `%s`\n' "$cwd"
-        case "$kind:$state" in
-          remote:*) printf -- '- remote lane: tracked in `%s`; no local `wait` target\n' "$OSRC_HOME/remote/$id.json" ;;
-          *:live)  printf -- '- waiter: `%s wait %s` (run as a background command)\n' "$SCRIPT_PATH" "$id" ;;
-          *)       printf -- '- no waiter needed (%s)\n' "$state" ;;
+        case "$kind" in
+          remote) printf -- '- remote lane: tracked in `%s`; no local `wait` target\n' "$OSRC_HOME/remote/$id.json" ;;
+          *)      _handover_waiter "$kind" "$state" "$id" ;;
         esac
         printf '\n'
       done <<EOF

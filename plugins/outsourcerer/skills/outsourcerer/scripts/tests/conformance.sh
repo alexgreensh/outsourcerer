@@ -308,14 +308,14 @@ _conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo 
 _conf_shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-shim.XXXXXX")" || { echo "FAIL: mktemp for the tmux shim"; exit 1; }
 _conf_tmux_real="$(command -v tmux 2>/dev/null || true)"
 if [ -n "$_conf_tmux_real" ]; then
-  printf '#!/bin/sh\nexec "%s" -L osrc-test-L8-%s "$@"\n' "$_conf_tmux_real" "$$" > "$_conf_shim_dir/tmux"
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_conf_tmux_real" "$$" > "$_conf_shim_dir/tmux"
   chmod +x "$_conf_shim_dir/tmux"
   PATH="$_conf_shim_dir:$PATH"; export PATH
 fi
 _conf_tmux_end() {
   local d
-  env -u TMUX -u TMUX_PANE tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1
-  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${d%/}" tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1; done
+  env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1
+  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${d%/}" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; done
   rm -rf "$_conf_tmux_dir" "$_conf_shim_dir"
 }
 _conf_tmux_had="${TMUX_TMPDIR+1}"; _conf_tmux_prev="${TMUX_TMPDIR-}"
@@ -367,7 +367,7 @@ else
           printf '%s' "$_suite_out" > "$_par_dir/$t.out"
           printf '%s %s %s\n' "$_suite_rc" "$_suite_timed_out" "$_suite_secs" > "$_par_dir/$t.meta.tmp"
           mv -f "$_par_dir/$t.meta.tmp" "$_par_dir/$t.meta"
-          env -u TMUX -u TMUX_PANE tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
+          env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
         _par_pid[$_l]=$!; _active=$((_active + 1))
       else
         echo absent > "$_par_dir/$t.meta"; _par_done[$_l]=1

@@ -247,11 +247,7 @@ OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
-# BASH_SOURCE leads over $0: when this file is SOURCED (tests, OSRC_SOURCED=1) $0 is the
-# caller, and $SCRIPT_DIR must still point at THIS script's dir or the lib/*.sh loader
-# below finds nothing. A sourcing caller's own $0-derived SCRIPT_PATH/SCRIPT_DIR are
-# restored right after the loader (see there), so sourcing clobbers nothing.
-SCRIPT_PATH="$(command -v -- "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]:-$0}")"
+SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
 case "$SCRIPT_PATH" in
   /*) ;;  # already absolute
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
@@ -262,14 +258,6 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
 for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
-# Sourced (BASH_SOURCE[0] != $0)? The loader needed THIS script's dir, but a sourcing caller
-# keeps its own $0-derived SCRIPT_PATH/SCRIPT_DIR: tests resolve their fixtures through
-# $SCRIPT_DIR, and the pre-lib behavior gave them exactly that view. Executed runs skip this.
-if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then
-  SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
-  case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;; esac
-  SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
-fi
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
@@ -21700,6 +21688,7 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
+[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
 
 main() {
   # Mint this run's marker id once, and export it so the prompt the delegate receives and every

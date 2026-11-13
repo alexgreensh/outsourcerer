@@ -18,7 +18,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
 TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
-trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
+trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
 # Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
@@ -30,7 +30,7 @@ export TMUX_TMPDIR="$TMP/tmux"; unset TMUX TMUX_PANE
 # inside the sandbox dir via a PATH shim, so no call can reach the real tmux server.
 _pf_tmux="$(command -v tmux 2>/dev/null || true)"
 if [ -n "$_pf_tmux" ]; then
-  printf '#!/bin/sh\nexec "%s" -L osrc-test-L8-%s "$@"\n' "$_pf_tmux" "$$" > "$TMP/bin/tmux"
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_pf_tmux" "$$" > "$TMP/bin/tmux"
   chmod +x "$TMP/bin/tmux"
 fi
 printf '#!/bin/sh\necho hi\n' > "$TMP/bin/devin"; chmod +x "$TMP/bin/devin"; export PATH="$TMP/bin:$PATH"
