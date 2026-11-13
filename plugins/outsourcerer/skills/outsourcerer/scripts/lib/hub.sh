@@ -576,9 +576,12 @@ cmd_hub_serve() {
     || die "hub files missing under $dir/lib (hub_server.py, hub.html) or $engine"
   local tokf="$OSRC_HOME/hub/token" tok=""
   mkdir -p "$OSRC_HOME/hub"
+  chmod 700 "$OSRC_HOME/hub" 2>/dev/null || die "hub serve: cannot chmod 700 $OSRC_HOME/hub"
+  [ -L "$tokf" ] && die "hub serve: $tokf is a symlink — refusing a planted token file"
   if [ "$newtok" != 1 ] && [ -f "$tokf" ]; then
     tok="$(cat "$tokf" 2>/dev/null | tr -d ' \n')"
     case "$tok" in *[!0-9a-fA-F]*|'') tok="" ;; esac   # corrupt file -> mint below
+    [ "${#tok}" -eq 32 ] || tok=""                   # exactly 16 bytes of hex
   fi
   if [ -z "$tok" ]; then
     tok="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
@@ -586,6 +589,7 @@ cmd_hub_serve() {
     ( umask 077 && printf '%s\n' "$tok" > "$tokf" ) || die "hub serve: cannot write $tokf"
     [ "$newtok" = 1 ] && echo "hub serve: rotated the access token — old bookmarks are dead" >&2
   fi
+  chmod 600 "$tokf" 2>/dev/null || die "hub serve: cannot chmod 600 $tokf"
   export OSRC_HUB_TOKEN="$tok"
   local -a args=(--bind 127.0.0.1 --port "$port" --page "$page" --engine "$engine" --osrc-home "$OSRC_HOME" --scan "$scan")
   [ "$noopen" = 1 ] && args+=(--no-open)

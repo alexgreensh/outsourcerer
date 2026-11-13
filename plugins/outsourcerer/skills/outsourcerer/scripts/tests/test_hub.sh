@@ -420,6 +420,34 @@ PERM3="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOM
 [ "$PERM3" = "600" ] && ok "rotated hub/token still mode 0600" || bad "rotated token mode $PERM3"
 cleanup_srv
 
+# A3 leftovers: token must be exactly 32 hex, chmod 600 every start, no
+# symlink accepted, hub/ dir locked to 0700.
+DPERM="$(stat -f %Lp "$OSRC_HOME/hub" 2>/dev/null || stat -c %a "$OSRC_HOME/hub" 2>/dev/null)"
+[ "$DPERM" = "700" ] && ok "hub/ dir is mode 0700" || bad "hub/ dir mode $DPERM"
+printf 'ab\n' > "$OSRC_HOME/hub/token"          # too short -> re-minted, not served
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t1.log" 2>&1 &
+SRV=$!
+URLT="$(wait_url "$TMP/serve_t1.log")"
+[ -n "$URLT" ] && [ "$(cat "$OSRC_HOME/hub/token" | tr -d ' \n')" != "ab" ] \
+  && [ "$(cat "$OSRC_HOME/hub/token" | tr -d ' \n' | wc -c | tr -d ' ')" = "32" ] \
+  && ok "short token file re-minted to 32 hex" || bad "short token accepted or not re-minted"
+chmod 644 "$OSRC_HOME/hub/token"; cleanup_srv
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t2.log" 2>&1 &
+SRV=$!
+URLT="$(wait_url "$TMP/serve_t2.log")"
+PERM4="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+[ -n "$URLT" ] && [ "$PERM4" = "600" ] && ok "chmod 600 enforced on reused token every start" \
+  || bad "reused token mode $PERM4"
+cleanup_srv
+rm -f "$OSRC_HOME/hub/token" && ln -s /etc/passwd "$OSRC_HOME/hub/token"
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t3.log" 2>&1 &
+SRV=$!
+sleep 1
+grep -q 'symlink' "$TMP/serve_t3.log" && ! kill -0 "$SRV" 2>/dev/null \
+  && ok "symlinked token file refused" || bad "symlinked token accepted (server still running?)"
+kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
+rm -f "$OSRC_HOME/hub/token"
+
 # Fixed default port: no --port -> 8788, or the next free one WITH the notice.
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --no-open >"$TMP/serve4.log" 2>&1 &
 SRV=$!
