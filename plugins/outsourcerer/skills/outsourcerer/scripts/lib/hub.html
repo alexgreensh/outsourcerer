@@ -137,6 +137,7 @@ button { font: inherit; color: inherit; }
 .lrow .lf { font-family: var(--mono); font-size: .78rem; font-weight: 700; text-align: right; white-space: nowrap; }
 .lrow .rn { grid-column: 2 / 4; font-size: .82rem; display: inline-flex; align-items: center; gap: 6px; }
 .lst { font-size: .75rem; font-weight: 700; }
+.lst.stale { color: var(--down); background: var(--down-bg); border-radius: 999px; padding: 2px 8px; }
 .lfold { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .lfold .chev { width: 18px; height: 18px; transition: transform .15s ease; }
 .lfold[aria-expanded="true"] .chev { transform: rotate(90deg); }
@@ -276,6 +277,8 @@ a.pill svg { width: 13px; height: 13px; }
     <div class="rail-mid">
     <h2><span>Running now</span><span class="mono" id="pcount"></span></h2>
     <div class="plist" id="plist"><p id="plist-empty">Loading your projects…</p></div>
+    <div id="shipwrap" hidden><h2><button type="button" class="lfold" id="sfold" aria-expanded="false" aria-controls="slist"><i data-lucide="chevron-right" class="chev"></i><span>Shipped</span></button><span class="mono" id="scount"></span></h2>
+    <div class="plist" id="slist" hidden></div></div>
     <h2><button type="button" class="lfold" id="lfold" aria-expanded="false" aria-controls="llist"><i data-lucide="chevron-right" class="chev"></i><span>Lanes and limits</span></button><span class="mono lst" id="lstamp"></span></h2>
     <div class="llist" id="llist"><p class="lnone">No limits reported yet.</p></div>
     </div>
@@ -488,8 +491,12 @@ a.pill svg { width: 13px; height: 13px; }
   const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
 
   function renderRail() {
-    const list = $('plist'); list.replaceChildren();
-    $('pcount').textContent = projects.length ? String(projects.length) : '';
+    const list = $('plist'); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
+    const live = projects.filter((p) => p.status !== 'shipped'), done = projects.filter((p) => p.status === 'shipped');
+    $('pcount').textContent = live.length ? String(live.length) : '';
+    $('shipwrap').hidden = !done.length; $('scount').textContent = done.length ? String(done.length) : '';
+    const sopen = shipOpen() || done.some((p) => p.id === current); $('sfold').setAttribute('aria-expanded', String(sopen)); slist.hidden = !sopen;
+    if (projects.length && !live.length) list.appendChild(el('p', null, 'Nothing building right now.'));
     if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'No projects reported yet. An orchestrator adds its project when it starts a build.' : 'Sign in on claude.ai to see your projects.'))); return; }
     projects.forEach((p) => {
       const box = el('div', 'proj' + (current === p.id ? ' on' : ''));
@@ -511,7 +518,7 @@ a.pill svg { width: 13px; height: 13px; }
         });
         box.appendChild(ul);
       }
-      list.appendChild(box);
+      (p.status === 'shipped' ? slist : list).appendChild(box);
     });
     renderLimits(); paint();
   }
@@ -534,8 +541,10 @@ a.pill svg { width: 13px; height: 13px; }
   function limitsOpen() { try { return localStorage.getItem('mc-limits-open') === '1'; } catch (e) { return false; } }
   function setLimitsOpen(v) { try { localStorage.setItem('mc-limits-open', v ? '1' : '0'); } catch (e) {} renderLimits(); paint(); }
   { const b = $('lfold'); if (b) b.addEventListener('click', (e) => { e.stopPropagation(); setLimitsOpen(!limitsOpen()); }); }
+  function shipOpen() { try { return localStorage.getItem('mc-shipped-open') === '1'; } catch (e) { return false; } }
+  { const b = $('sfold'); if (b) b.addEventListener('click', (e) => { e.stopPropagation(); try { localStorage.setItem('mc-shipped-open', shipOpen() ? '0' : '1'); } catch (x) {} renderRail(); }); }
   function staleCheck() {
-    document.querySelectorAll('.stamp-top').forEach((st) => {
+    document.querySelectorAll('.stamp-top, .lst').forEach((st) => {
       const t = Date.parse(st.dataset.at || ''); if (!st.dataset.live || isNaN(t)) return;
       const min = Math.floor((Date.now() - t) / 60000); const old = min > 45;
       st.classList.toggle('stale', old);
@@ -550,7 +559,9 @@ a.pill svg { width: 13px; height: 13px; }
     const open = limitsOpen(); const fb = $('lfold'); if (fb) fb.setAttribute('aria-expanded', String(open));
     const working = limits.filter((l) => ['ok', 'low'].includes(l.state || 'ok'));
     const shown = open ? limits : working;
-    $('lstamp').textContent = newest ? newest : '';
+    const ls = $('lstamp'); ls.textContent = newest ? 'Checked ' + newest.replace(/^[A-Z][a-z]{2} /, '') : '';
+    const at = Math.max(...working.map((l) => Date.parse(l.updatedAt || '') || 0));
+    ls.dataset.at = at > 0 ? new Date(at).toISOString() : ''; ls.dataset.live = '1'; staleCheck();
     if (!open && !working.length) box.appendChild(el('p', 'lnone', 'Nothing has room right now.'));
     shown.forEach((l) => {
       const st = l.state || 'ok';

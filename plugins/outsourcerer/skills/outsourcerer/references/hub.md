@@ -53,7 +53,19 @@ In the page, the panel is folded by default: its header is a disclosure button
 and folded it lists only rows with room (`ok`/`low`) plus a
 "Show N more (out or not checked)" button; the choice is remembered per browser
 in `localStorage`. Rows open a detail card (models, cap, renews, note, source,
-checked-at) on click/Enter/Space — no hover cards.
+checked-at) on click/Enter/Space — no hover cards. The header stamp reads
+"Checked HH:MM" from the newest row `updated` and shares the project's stale
+alarm: the newest `updatedAt` of `ok`/`low` rows over 45 minutes turns it red
+with "not updated for N min".
+
+Projects with `status: "shipped"` move out of "Running now" into a folded
+"Shipped" section below it (hidden when empty, state remembered in
+`localStorage` `mc-shipped-open`, auto-open while a shipped project is open).
+
+When L7's `osrc_limits_summary --json` (lib/spend.sh) is loaded it is the
+preferred feed — recomputed on every export so each poll carries fresh rows.
+Its ISO `updated` is mirrored into `updatedAt` and trimmed to `HH:MM` for
+display. The built-in builder below is the fallback when spend.sh is absent.
 
 To publish it as an artifact, the orchestrator:
 

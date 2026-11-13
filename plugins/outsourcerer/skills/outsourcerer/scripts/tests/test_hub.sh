@@ -89,6 +89,13 @@ sepoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%S%z' "$(echo "$sproj" | jq -r '.updated
   || date -u -d "$(echo "$sproj" | jq -r '.updatedAt')" '+%s' 2>/dev/null)"
 { [ -n "$sepoch" ] && [ $(( $(date +%s) - sepoch )) -gt 2700 ]; } \
   && ok "stale-1 updatedAt is >45min old (not export time)" || bad "stale-1 updatedAt not old enough: $sage"
+# Item 15: shipped status flows through so the rail can file it under "Shipped".
+cat > "$OSRC_HOME/hub/projects/shipped-1.json" <<'EOF'
+{"name":"Done Board","tagline":"went live last week","order":8,"status":"shipped","pct":100}
+EOF
+outs="$(run hub export 2>/dev/null)"
+echo "$outs" | jq -e '.projects[] | select(.id=="shipped-1") | .status == "shipped"' >/dev/null \
+  && ok "shipped status flows through the export" || bad "shipped-1 status wrong"
 
 echo "=== hub export: limits ==="
 lim="$(echo "$out" | jq -c '.limits')"
@@ -99,6 +106,9 @@ echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .state == "wait" and (.lef
   && ok "claude-5h: 95% used with reset -> wait with left/renews/updated" || bad "claude-5h row wrong: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")')"
 echo "$lim" | jq -e '.[] | select(.id=="claude-weekly") | .state == "ok"' >/dev/null \
   && ok "claude-weekly: 40% used -> ok" || bad "claude-weekly row wrong"
+# Item 15: metered rows carry updatedAt (ISO) so the rail stamp can go stale.
+echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")' >/dev/null \
+  && ok "claude-5h carries updatedAt (ISO)" || bad "claude-5h updatedAt missing: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")|{updated,updatedAt}')"
 echo "$lim" | jq -e '.[] | select(.id=="openrouter") | .paid == true' >/dev/null \
   && ok "openrouter row carries the paid tag" || bad "openrouter paid flag missing"
 echo "$lim" | jq -e '[.[] | select(.paid == true)] | length == 1' >/dev/null \
@@ -130,6 +140,19 @@ JQDIR="$(dirname "$(command -v jq)")"
 out4="$(PATH="/usr/bin:/bin:$JQDIR" run hub export 2>/dev/null)"
 echo "$out4" | jq -e '[.limits[] | select(.id=="devin" or .id=="agy" or .id=="local")] | length == 0' >/dev/null \
   && ok "undetected lanes omitted from limits" || bad "undetected lanes listed"
+# Item 15: when L7's osrc_limits_summary --json is available it feeds the rail
+# (recomputed on every export). A PATH stub stands in for lib/spend.sh here.
+cat > "$TMP/bin/osrc_limits_summary" <<'EOF'
+#!/bin/sh
+[ "$1" = "--json" ] && printf '[{"id":"fake","name":"Fake Lane","state":"ok","left":"half left","renews_at":0,"cap":null,"cap_tripped":false,"paid":false,"billing":"subscription","window":null,"used":null,"updated":"2026-11-13T19:05:00Z","source":"outsourcerer","windows":{}}]\n' || printf 'FAKE\n'
+EOF
+chmod +x "$TMP/bin/osrc_limits_summary"
+out5="$(run hub export 2>/dev/null)"
+echo "$out5" | jq -e '.limits | length == 1 and .[0].id == "fake"' >/dev/null \
+  && ok "osrc_limits_summary --json feeds the rail when present" || bad "limits summary feed ignored: $(echo "$out5" | jq -c .limits)"
+echo "$out5" | jq -e '.limits[0].updatedAt == "2026-11-13T19:05:00Z" and .limits[0].updated == "19:05"' >/dev/null \
+  && ok "summary rows normalized (updatedAt ISO, updated HH:MM)" || bad "summary normalization wrong: $(echo "$out5" | jq -c .limits)"
+rm -f "$TMP/bin/osrc_limits_summary"
 # Restore the fresh fixture for the serve checks below.
 jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
@@ -159,6 +182,15 @@ grep -q 'function staleCheck' "$PAGE" && grep -q 'setInterval(staleCheck' "$PAGE
 grep -q "status === 'shipped' ? '' : '1'" "$PAGE" && grep -q 'min > 45' "$PAGE" \
   && ok "stale alarm: shipped exempt, 45min threshold" || bad "stale alarm semantics missing"
 if grep -qE '\b(alert|confirm|prompt) *\(' "$PAGE"; then bad "alert/confirm/prompt dialog found in page"; else ok "no alert/confirm/prompt dialogs"; fi
+# Item 15: Shipped rail section + red limits stamp.
+grep -q 'id="sfold"' "$PAGE" && grep -q 'id="slist"' "$PAGE" && grep -q 'id="shipwrap"' "$PAGE" \
+  && grep -q 'mc-shipped-open' "$PAGE" && grep -q "status === 'shipped' ? slist : list" "$PAGE" \
+  && ok "Shipped rail section (sfold/slist/shipwrap/mc-shipped-open)" || bad "shipped rail section missing"
+grep -q 'done.some((p) => p.id === current)' "$PAGE" \
+  && ok "shipped section auto-opens for the current project" || bad "shipped auto-open missing"
+grep -q 'lst.stale' "$PAGE" && grep -q "stamp-top, .lst" "$PAGE" \
+  && grep -q 'l.updatedAt' "$PAGE" && grep -q "ls.dataset.live = '1'" "$PAGE" \
+  && ok "limits stamp joins staleCheck (.lst.stale, updatedAt feed)" || bad "limits stale stamp missing"
 
 one="$(run hub export --project sess-1 2>/dev/null)"
 echo "$one" | jq -e '(.projects | length) == 1 and (.projects[0].id == "sess-1")' >/dev/null \
@@ -310,10 +342,18 @@ sleep 3
 m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
 [ "$m0" = "$m1" ] && ok "no state change -> refresh loop skips the export" \
   || bad "refresh re-exported unchanged state ($m0 -> $m1)"
+# Wait for the mtime to move (the export subprocess can take a couple seconds
+# under nice); a loop that never fires still fails.
+wait_mtime() {  # <file> <baseline> -> 0 when mtime != baseline within ~10s
+  local i b="$2"
+  for i in $(seq 1 40); do
+    [ "$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)" != "$b" ] && return 0
+    sleep 0.25
+  done; return 1
+}
 mkdir -p "$OSRC_HOME/jobs/job-x" && echo running > "$OSRC_HOME/jobs/job-x/status"
-sleep 2.5
-m2="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
-[ "$m2" != "$m1" ] && ok "state change under OSRC_HOME -> next tick re-exports" \
+wait_mtime "$EXPORT_JSON" "$m1" \
+  && ok "state change under OSRC_HOME -> next tick re-exports" \
   || bad "state change did not trigger a re-export"
 cleanup_srv
 
@@ -333,9 +373,8 @@ m4="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
   || bad "loop kept exporting while idle ($m3 -> $m4)"
 curl -s -o /dev/null "${URL6%%\?*}/api/projects?t=${URL6##*t=}"   # a poll wakes it
 echo again > "$OSRC_HOME/jobs/job-x/status"
-sleep 2.5
-m5="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
-[ "$m5" != "$m4" ] && ok "a page poll resumes the refresh loop" \
+wait_mtime "$EXPORT_JSON" "$m4" \
+  && ok "a page poll resumes the refresh loop" \
   || bad "loop did not resume after a poll"
 cleanup_srv
 
