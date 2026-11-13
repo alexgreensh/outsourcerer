@@ -18,7 +18,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
 TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")"
-trap 'TMUX_TMPDIR="$TMP/tmux" tmux kill-server >/dev/null 2>&1; rm -rf "$TMP"' EXIT
+trap 'env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$TMP/tmux" tmux kill-server >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
 # Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
