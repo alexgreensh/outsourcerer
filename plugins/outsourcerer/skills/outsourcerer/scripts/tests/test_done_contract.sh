@@ -9,7 +9,11 @@
 #   3. branch:<b>@<marker> done/not-done, missing branch -> not-done, non-repo cwd -> error.
 #   4. check:<cmd> done/not-done, 60 s result cache (counter proves no rerun), cache bypass via
 #      OSRC_DONE_CACHE_SECS=0, and the wall-clock bound via OSRC_DONE_CHECK_SECS.
-#   5. bad specs -> error bad-spec; osrc_done_set rejects bad name/spec; osrc_done_get round-trips.
+#   5. pr:<owner/repo>#<n> done/not-done/error against a stub gh on PATH (never the network),
+#      same 60 s cache, errors re-evaluate instead of caching.
+#   6. bad specs -> error bad-spec; osrc_done_set rejects bad name/spec; osrc_done_get round-trips.
+#   7. loader: lib/done.sh must load when outsourcerer.sh is reached through a symlink, both
+#      sourced and executed (LOADER.md).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,14 +34,13 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-# Source the engine for _timeout/_mkdir_private/_kill_tree, then the module explicitly: when a
-# suite sources outsourcerer.sh, $0 is the suite so SCRIPT_DIR does not point at scripts/, and the
-# lib/*.sh loader (which keys off $SCRIPT_DIR) cannot find lib/. Production execution resolves
-# SCRIPT_DIR correctly; the module itself is what is under test here.
+# Source the engine for _timeout/_mkdir_private/_kill_tree. lib/done.sh is pulled in by the
+# engine's own _OSRC_FACTORY_DIR loader (BASH_SOURCE + realpath), which still resolves when $0 —
+# and so SCRIPT_DIR — points at this test's dir under sourcing. The explicit ". $LIB" is
+# deliberately absent: the suite must prove the engine's loader, not a hand-fed source.
 (
   set --
   . "$SRC" >/dev/null 2>&1
-  . "$LIB"
   for fn in osrc_done_set osrc_done_get osrc_done_state osrc_done_validate osrc_done_clear; do
     type -t "$fn" >/dev/null || { echo "FAIL: $fn not loaded"; exit 1; }
   done
@@ -120,13 +123,77 @@ READY for review" --allow-empty
   [ "$_st" = "not-done" ] && [ $((t1 - t0)) -lt 20 ] \
     && ok "check timeout -> not-done within the bound" || bad "check timeout -> $_st in $((t1-t0))s"
 
-  # --- 5. bad specs / validation ---------------------------------------------------------------
-  for badspec in 'bogus' 'file:' 'branch:onlybranch' 'branch:@READY' 'branch:-lead@X' 'check:   ' ''; do
+  # --- pr:<owner/repo>#<n> against a stub gh on PATH (never the network) ------------------------
+  GHBIN="$TMP/ghbin"; mkdir -p "$GHBIN"
+  cat > "$GHBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+# stub gh: log argv, then emit {"state":"$GH_STUB_STATE"} or fail per GH_STUB_RC / GH_STUB_RAW.
+echo "$*" >> "${GH_STUB_LOG:-/dev/null}"
+[ "${GH_STUB_RC:-0}" = "0" ] || exit "${GH_STUB_RC:-1}"
+if [ -n "${GH_STUB_RAW:-}" ]; then printf '%s\n' "$GH_STUB_RAW"; else printf '{"state":"%s"}\n' "${GH_STUB_STATE:-OPEN}"; fi
+STUB
+  chmod +x "$GHBIN/gh"
+  export GH_STUB_LOG="$TMP/gh.log"; : > "$GH_STUB_LOG"
+  export GH_STUB_STATE=OPEN GH_STUB_RC=0
+  unset GH_STUB_RAW
+  export PATH="$GHBIN:$PATH"
+
+  osrc_done_set lane-pr-open 'pr:octo/repo#42' "$WORK" || exit 1
+  [ "$(osrc_done_state lane-pr-open)" = "not-done" ] \
+    && ok "pr OPEN -> not-done" || bad "pr OPEN -> $(osrc_done_state lane-pr-open)"
+  GH_STUB_STATE=CLOSED
+  osrc_done_set lane-pr-closed 'pr:octo/repo#43' "$WORK" || exit 1
+  [ "$(osrc_done_state lane-pr-closed)" = "not-done" ] \
+    && ok "pr CLOSED -> not-done" || bad "pr CLOSED -> $(osrc_done_state lane-pr-closed)"
+  GH_STUB_STATE=MERGED
+  osrc_done_set lane-pr-merged 'pr:octo/repo#44' "$WORK" || exit 1
+  [ "$(osrc_done_state lane-pr-merged)" = "done" ] \
+    && ok "pr MERGED -> done" || bad "pr MERGED -> $(osrc_done_state lane-pr-merged)"
+  grep -q 'pr view 44 -R octo/repo --json state' "$GH_STUB_LOG" \
+    && ok "stub gh saw the exact pr view argv" || bad "stub gh argv: $(cat "$GH_STUB_LOG")"
+
+  # Cache: second poll inside 60 s must not re-invoke gh.
+  : > "$GH_STUB_LOG"
+  osrc_done_state lane-pr-merged >/dev/null
+  osrc_done_state lane-pr-merged >/dev/null
+  [ "$(wc -l < "$GH_STUB_LOG" | tr -d ' ')" = "0" ] \
+    && ok "pr result cached 60 s (gh not re-invoked)" || bad "pr cache: gh ran $(wc -l < "$GH_STUB_LOG")x"
+  OSRC_DONE_CACHE_SECS=0 osrc_done_state lane-pr-merged >/dev/null
+  [ "$(wc -l < "$GH_STUB_LOG" | tr -d ' ')" = "1" ] \
+    && ok "OSRC_DONE_CACHE_SECS=0 bypasses the pr cache" || bad "pr cache bypass: $(wc -l < "$GH_STUB_LOG")"
+
+  # gh failing is an error, and errors are NOT cached: fix the stub and the next poll recovers.
+  GH_STUB_RC=1
+  osrc_done_set lane-pr-fail 'pr:octo/repo#45' "$WORK" || exit 1
+  [ "$(osrc_done_state lane-pr-fail)" = "error gh-failed" ] \
+    && ok "gh exit!=0 -> error gh-failed" || bad "gh failure -> $(osrc_done_state lane-pr-fail)"
+  GH_STUB_RC=0 GH_STUB_STATE=MERGED
+  [ "$(osrc_done_state lane-pr-fail)" = "done" ] \
+    && ok "gh error not cached (recovers next poll)" || bad "gh error cached: $(osrc_done_state lane-pr-fail)"
+
+  # gh answering non-JSON / a state jq cannot read is also gh-failed, not a silent not-done.
+  export GH_STUB_RAW='not json at all'
+  osrc_done_set lane-pr-junk 'pr:octo/repo#46' "$WORK" || exit 1
+  [ "$(osrc_done_state lane-pr-junk)" = "error gh-failed" ] \
+    && ok "gh garbage output -> error gh-failed" || bad "gh garbage -> $(osrc_done_state lane-pr-junk)"
+  unset GH_STUB_RAW
+
+  # gh missing entirely: a PATH with jq but no gh anywhere (real gh lives outside /usr/bin).
+  osrc_done_set lane-pr-nogh 'pr:octo/repo#47' "$WORK" || exit 1
+  JQDIR="$(dirname "$(command -v jq)")"
+  [ "$(PATH="/usr/bin:/bin:$JQDIR" osrc_done_state lane-pr-nogh)" = "error gh-missing" ] \
+    && ok "gh missing -> error gh-missing" || bad "gh missing -> $(PATH="/usr/bin:/bin:$JQDIR" osrc_done_state lane-pr-nogh)"
+
+  # --- 6. bad specs / validation ---------------------------------------------------------------
+  for badspec in 'bogus' 'file:' 'branch:onlybranch' 'branch:@READY' 'branch:-lead@X' 'check:   ' \
+                 'pr:' 'pr:noslash#1' 'pr:a/b#' 'pr:a/b#x' 'pr:a/b#1#2' 'pr:/b#1' 'pr:a/#1' 'pr:a b/c#1' ''; do
     if osrc_done_validate "$badspec" >/dev/null 2>&1; then
       bad "osrc_done_validate accepted '$badspec'"
     fi
   done
   ok "osrc_done_validate rejects every malformed spec"
+  osrc_done_validate 'pr:octo/repo#42' >/dev/null 2>&1 \
+    && ok "osrc_done_validate accepts a well-formed pr spec" || bad "osrc_done_validate rejected pr:octo/repo#42"
   osrc_done_set lane-badspec 'bogus' "$WORK" 2>/dev/null \
     && bad "osrc_done_set accepted a bad spec" || ok "osrc_done_set rejects a bad spec"
   # A hand-edited contract with a bad spec surfaces as error bad-spec, not a crash.
@@ -134,6 +201,9 @@ READY for review" --allow-empty
   printf '{"spec":"bogus","cwd":"%s"}\n' "$WORK" > "$OSRC_HOME/done/lane-hand.json"
   [ "$(osrc_done_state lane-hand)" = "error bad-spec" ] \
     && ok "hand-edited bad spec -> error bad-spec" || bad "hand-edited bad spec -> $(osrc_done_state lane-hand)"
+  printf '{"spec":"pr:a/b#x","cwd":"%s"}\n' "$WORK" > "$OSRC_HOME/done/lane-handpr.json"
+  [ "$(osrc_done_state lane-handpr)" = "error bad-spec" ] \
+    && ok "hand-edited bad pr spec -> error bad-spec" || bad "hand-edited bad pr spec -> $(osrc_done_state lane-handpr)"
   printf 'not json\n' > "$OSRC_HOME/done/lane-broken.json"
   [ "$(osrc_done_state lane-broken)" = "error unreadable-contract" ] \
     && ok "corrupt contract -> error unreadable-contract" || bad "corrupt contract -> $(osrc_done_state lane-broken)"
@@ -147,6 +217,34 @@ READY for review" --allow-empty
     [ "$rc" -ne 0 ] || bad "session start --done-when bogus exited 0"
   else
     echo "SKIP: session start CLI check (no tmux on this host)"
+  fi
+
+  # --- 7. loader: lib must load through a symlink (LOADER.md) ---------------------------------
+  LINKDIR="$TMP/linkdir"; mkdir -p "$LINKDIR"
+  ln -s "$SRC" "$LINKDIR/outsourcerer.sh"
+  linked="$(
+    set --
+    OSRC_SOURCED=1
+    . "$LINKDIR/outsourcerer.sh" >/dev/null 2>&1
+    for fn in osrc_done_set osrc_done_state osrc_done_validate osrc_done_clear _session_record; do
+      type -t "$fn" >/dev/null || exit 1
+    done
+    echo ok
+  )"
+  [ "$linked" = "ok" ] \
+    && ok "lib loads when sourced through a symlink" || bad "lib missing via symlink (sourced): $linked"
+
+  # Executed through the symlink, a bogus --done-when must die at osrc_done_validate — proof the
+  # lib loaded. Without it bash reports "osrc_done_validate: command not found" instead.
+  if command -v tmux >/dev/null 2>&1; then
+    out="$(OSRC_HOME="$OSRC_HOME" bash "$LINKDIR/outsourcerer.sh" session start --done-when bogus 2>&1)"
+    case "$out" in
+      *"command not found"*) bad "symlinked run: lib not loaded ($out)" ;;
+      *"invalid --done-when spec"*) ok "lib loads when executed through a symlink" ;;
+      *) bad "symlinked run unexpected output: $out" ;;
+    esac
+  else
+    echo "SKIP: symlinked CLI check (no tmux on this host)"
   fi
 
   osrc_done_clear lane-file

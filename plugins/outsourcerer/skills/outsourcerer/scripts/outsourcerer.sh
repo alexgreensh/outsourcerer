@@ -242,14 +242,8 @@ fi
 OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
-# Prefer BASH_SOURCE[0]: when SOURCED (test suites), $0 is the caller's path and SCRIPT_DIR would
-# point at the wrong dir, so lib/*.sh would never load. Executed, BASH_SOURCE[0] == $0's path.
-# Otherwise resolve via command -v for PATH-invoked usage (bare `outsourcerer bg run ...`).
-SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
-case "$SCRIPT_PATH" in
-  */*) [ -f "$SCRIPT_PATH" ] || SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")" ;;
-  *)   SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")" ;;
-esac
+# Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
+SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
 case "$SCRIPT_PATH" in
   /*) ;;  # already absolute
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
@@ -19912,8 +19906,8 @@ session() {
       # the launch verifies (osrc_done_* live in lib/done.sh).
       local _done_when="" _dm_args=()
       while [ $# -gt 0 ]; do case "$1" in
-        --done-when)    [ -n "${2:-}" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command>"; _done_when="$2"; shift 2 ;;
-        --done-when=*)  _done_when="${1#--done-when=}"; [ -n "$_done_when" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command>"; shift ;;
+        --done-when)    [ -n "${2:-}" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command> | pr:<owner/repo>#<n>"; _done_when="$2"; shift 2 ;;
+        --done-when=*)  _done_when="${1#--done-when=}"; [ -n "$_done_when" ] || die "--done-when needs a spec: file:<path> | branch:<branch>@<marker> | check:<shell-command> | pr:<owner/repo>#<n>"; shift ;;
         *)              _dm_args+=("$1"); shift ;;
       esac; done
       set -- ${_dm_args[@]+"${_dm_args[@]}"}

@@ -5,9 +5,11 @@
 # contract at $OSRC_HOME/done/<session>.json ({"spec","cwd"}) and `osrc_done_state` answers one of:
 #   done | not-done | no-contract | error <reason>
 # Specs:
-#   file:<path>           the file exists (absolute, or relative to the contract cwd)
-#   branch:<b>@<marker>   the tip commit of local branch <b> contains <marker> (e.g. @READY)
-#   check:<shell-command> exits 0 within 300 s, run from the contract cwd; result cached 60 s
+#   file:<path>              the file exists (absolute, or relative to the contract cwd)
+#   branch:<b>@<marker>      the tip commit of local branch <b> contains <marker> (e.g. @READY)
+#   check:<shell-command>    exits 0 within 300 s, run from the contract cwd; result cached 60 s
+#   pr:<owner/repo>#<n>      `gh pr view <n> -R <repo> --json state` reports MERGED; a missing gh
+#                            or a failed call is `error`, never silently not-done; cached 60 s
 #
 # This file also hosts session helpers moved out of outsourcerer.sh so that legacy file does not
 # grow (scripts/check_file_size.py ratchet): _session_current_generation, _session_record,
@@ -21,6 +23,26 @@ _osrc_done_dir() { printf '%s/done' "${OSRC_HOME:-$HOME/.outsourcerer}"; }
 _osrc_done_name_ok() {
   case "${1:-}" in
     ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# pr:<owner/repo>#<n> well-formedness, shared by osrc_done_validate and the state evaluator (a
+# hand-edited contract bypasses osrc_done_set). Exactly one '#', owner/repo non-empty around a
+# single '/', <n> all digits.
+_osrc_done_pr_spec_ok() { # <owner/repo>#<n>
+  local rest="$1" repo num
+  repo="${rest%%#*}"; num="${rest##*#}"
+  [ "$rest" = "$repo#$num" ] || return 1
+  case "$repo" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  case "$repo" in
+    ''|*/*/*|'/'*|*/|*[[:space:]]*) return 1 ;;
+  esac
+  case "$num" in
+    ''|*[!0-9]*) return 1 ;;
   esac
   return 0
 }
@@ -40,8 +62,10 @@ osrc_done_validate() {
     check:*)
       cmd="${spec#check:}"
       [ -n "${cmd//[[:space:]]/}" ] || { echo "check: needs a shell command" >&2; return 1; } ;;
+    pr:*)
+      _osrc_done_pr_spec_ok "${spec#pr:}" || { echo "pr: needs <owner/repo>#<n>" >&2; return 1; } ;;
     *)
-      echo "spec must start with file: | branch: | check:" >&2; return 1 ;;
+      echo "spec must start with file: | branch: | check: | pr:" >&2; return 1 ;;
   esac
   return 0
 }
@@ -57,6 +81,8 @@ osrc_done_set() {
   f="$dir/$name.json"; tmp="$f.tmp.$$"
   if jq -n --arg spec "$spec" --arg cwd "$cwd" '{spec:$spec,cwd:$cwd}' > "$tmp" 2>/dev/null; then
     mv "$tmp" "$f" 2>/dev/null || { rm -f "$tmp"; echo "osrc_done_set: cannot write $f" >&2; return 1; }
+    # A new spec must not inherit the previous contract's cached verdict.
+    rm -f "$dir/$name.checkcache" 2>/dev/null
   else
     rm -f "$tmp"; echo "osrc_done_set: jq failed" >&2; return 1
   fi
@@ -98,24 +124,38 @@ _osrc_done_branch() { # <cwd> <branch>@<marker>
   printf '%s\n' "$msg" | grep -qF -- "$marker" && echo done || echo not-done
 }
 
-# check:<cmd> evaluator with a 60 s per-session result cache so a poll loop does not rerun the
-# command every tick. done requires exit 0 inside the bound (default 300 s, OSRC_DONE_CHECK_SECS);
-# a timeout or any nonzero exit is not-done — the contract is "exits 0", nothing softer.
+# 60 s per-session result cache shared by the check: and pr: evaluators, so a poll loop does not
+# rerun the probe every tick. Only settled verdicts (done|not-done) are cached; errors always
+# re-evaluate so a broken contract or missing tool surfaces on the next poll, not 60 s later.
+_osrc_done_cache_read() { # <name> -> fresh cached verdict on stdout, rc 1 when absent/stale
+  local name="$1" now cts cstate cache
+  cache="$(_osrc_done_dir)/$name.checkcache"
+  [ -f "$cache" ] || return 1
+  now="$(date +%s)"
+  cts=""; cstate=""
+  read -r cts cstate < "$cache" 2>/dev/null || return 1
+  case "$cts" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cstate" in done|not-done) ;; *) return 1 ;; esac
+  [ $((now - cts)) -lt "${OSRC_DONE_CACHE_SECS:-60}" ] || return 1
+  printf '%s\n' "$cstate"
+}
+
+_osrc_done_cache_write() { # <name> <done|not-done>
+  local name="$1" state="$2" cache
+  cache="$(_osrc_done_dir)/$name.checkcache"
+  printf '%s %s\n' "$(date +%s)" "$state" > "$cache.tmp.$$" 2>/dev/null \
+    && mv "$cache.tmp.$$" "$cache" 2>/dev/null
+  rm -f "$cache.tmp.$$" 2>/dev/null
+}
+
+# check:<cmd> evaluator. done requires exit 0 inside the bound (default 300 s,
+# OSRC_DONE_CHECK_SECS); a timeout or any nonzero exit is not-done — the contract is "exits 0",
+# nothing softer.
 _osrc_done_check() { # <name> <cwd> <cmd>
-  local name="$1" cwd="$2" cmd="$3" now cts cstate cache rc state
+  local name="$1" cwd="$2" cmd="$3" rc state cached
   [ -n "${cmd//[[:space:]]/}" ] || { echo "error bad-spec"; return 0; }
   [ -d "$cwd" ] || { echo "error cwd-missing"; return 0; }
-  cache="$(_osrc_done_dir)/$name.checkcache"
-  now="$(date +%s)"
-  if [ -f "$cache" ]; then
-    cts=""; cstate=""
-    read -r cts cstate < "$cache" 2>/dev/null || :
-    case "$cts" in ''|*[!0-9]*) cts=0 ;; esac
-    case "$cstate" in
-      done|not-done)
-        [ $((now - cts)) -lt "${OSRC_DONE_CACHE_SECS:-60}" ] && { echo "$cstate"; return 0; } ;;
-    esac
-  fi
+  cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }
   if type _timeout >/dev/null 2>&1; then
     _timeout "${OSRC_DONE_CHECK_SECS:-300}" bash -c 'cd "$1" && eval "$2"' _ "$cwd" "$cmd" >/dev/null 2>&1
   else
@@ -123,11 +163,33 @@ _osrc_done_check() { # <name> <cwd> <cmd>
   fi
   rc=$?
   [ "$rc" -eq 0 ] && state=done || state=not-done
-  now="$(date +%s)"
-  printf '%s %s\n' "$now" "$state" > "$cache.tmp.$$" 2>/dev/null \
-    && mv "$cache.tmp.$$" "$cache" 2>/dev/null
-  rm -f "$cache.tmp.$$" 2>/dev/null
+  _osrc_done_cache_write "$name" "$state"
   echo "$state"
+}
+
+# pr:<owner/repo>#<n> evaluator: done when `gh pr view` reports state MERGED (a merged PR is a
+# finished lane even when the pane still looks blocked). gh missing or the call failing is an
+# error, not not-done — "we could not check" must never read as "still working".
+_osrc_done_pr() { # <name> <owner/repo>#<n>
+  local name="$1" rest="$2" repo num cached out state rc
+  _osrc_done_pr_spec_ok "$rest" || { echo "error bad-spec"; return 0; }
+  repo="${rest%%#*}"; num="${rest##*#}"
+  command -v gh >/dev/null 2>&1 || { echo "error gh-missing"; return 0; }
+  cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }
+  # _timeout captures the child's stderr into the same file as stdout, so the gh call runs under
+  # bash -c with its own 2>/dev/null — otherwise a gh warning would corrupt the JSON parse.
+  if type _timeout >/dev/null 2>&1; then
+    out="$(_timeout "${OSRC_DONE_CHECK_SECS:-300}" bash -c 'gh pr view "$1" -R "$2" --json state 2>/dev/null' _ "$num" "$repo")"; rc=$?
+  else
+    out="$(gh pr view "$num" -R "$repo" --json state 2>/dev/null)"; rc=$?
+  fi
+  [ "$rc" -eq 0 ] || { echo "error gh-failed"; return 0; }
+  state="$(printf '%s' "$out" | jq -r '.state // empty' 2>/dev/null)"
+  case "$state" in
+    MERGED)      _osrc_done_cache_write "$name" done;      echo done ;;
+    OPEN|CLOSED) _osrc_done_cache_write "$name" not-done; echo not-done ;;
+    *)           echo "error gh-failed" ;;
+  esac
 }
 
 # osrc_done_state <name> -> exactly one of: done | not-done | no-contract | error <reason>
@@ -139,7 +201,7 @@ osrc_done_state() {
   spec="$(jq -r '.spec // empty' "$f" 2>/dev/null)" || { echo "error unreadable-contract"; return 0; }
   cwd="$(jq -r '.cwd // empty' "$f" 2>/dev/null)"
   case "$spec" in
-    file:*|branch:*|check:*) ;;
+    file:*|branch:*|check:*|pr:*) ;;
     *) echo "error bad-spec"; return 0 ;;
   esac
   [ -n "$cwd" ] || { echo "error bad-contract"; return 0; }
@@ -150,6 +212,7 @@ osrc_done_state() {
       [ -e "$t" ] && echo done || echo not-done ;;
     branch:*) _osrc_done_branch "$cwd" "${spec#branch:}" ;;
     check:*)  _osrc_done_check "$name" "$cwd" "${spec#check:}" ;;
+    pr:*)     _osrc_done_pr "$name" "${spec#pr:}" ;;
   esac
 }
 
