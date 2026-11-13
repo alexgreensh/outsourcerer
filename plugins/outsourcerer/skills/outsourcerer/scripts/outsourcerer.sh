@@ -253,6 +253,16 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
+# When SOURCED ($0 is the caller, BASH_SOURCE[0] is this file), SCRIPT_DIR above points at
+# the caller's dir and lib/*.sh would never load. Temporarily re-resolve from BASH_SOURCE
+# for the loader only, then restore — downstream code keeps the caller-visible SCRIPT_DIR
+# it always had (tests set their own SCRIPT_DIR before sourcing).
+_osrc_caller_sd="$SCRIPT_DIR"
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "${0:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+fi
+for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+SCRIPT_DIR="$_osrc_caller_sd"; unset _osrc_caller_sd
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
@@ -1010,6 +1020,7 @@ parse_model() {
   # still ignores tier/with (advisory only); non-Devin callers of parse_model (session, continue) get
   # the correct tier/effort state instead of silently dropping it.
   MODEL=""; MODEL_EXPLICIT=0; EFFORT="${OUTSOURCERER_EFFORT:-}"; TIER_FLAG=""; WITH_SPEC=""; REST=()
+  PERM_PROFILE="${OSRC_PERM_PROFILE:-default}"
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model)           [ -n "${2:-}" ] || die "-m requires a model name"; _exclude_refuse "$2"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
@@ -1019,6 +1030,14 @@ parse_model() {
                             case "$2" in minimal|low|medium|high|xhigh|max|none) EFFORT="$2" ;;
                               *) die "--effort '$2' invalid (use: minimal|low|medium|high|xhigh|max)" ;; esac
                             shift 2 ;;
+      --perm)               [ -n "${2:-}" ] || die "--perm requires: safe|default"
+                            case "$2" in safe|default) PERM_PROFILE="$2" ;;
+                              *) die "--perm '$2' invalid (use: safe|default)" ;; esac
+                            shift 2 ;;
+      --perm=*)             PERM_PROFILE="${1#--perm=}"
+                            case "$PERM_PROFILE" in safe|default) ;;
+                              *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
+                            shift ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
@@ -3840,6 +3859,7 @@ _session_launch_gm() {
   have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
   [ "$gveh" != "gemini" ] || _gm_load_key
   [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable gemini "$gveh" --help
+  SESSION_LAUNCH_ENGINE="$gveh"   # --perm resolves safe flags against the vehicle (agy vs gemini-cli)
   if [ "$MODEL_EXPLICIT" = "1" ]; then SESSION_LAUNCH=("$gveh" "--model" "$MODEL"); else SESSION_LAUNCH=("$gveh"); fi
 }
 
@@ -3912,7 +3932,13 @@ _session_launch_cx() {
   [ -n "$cid" ] && _validate_model_token "$cid"   # empty = codex default; don't die on no-model session
   [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable codex codex --help
   local _ccmh=(); _ccmh=("-c" "features.code_mode_host=$(_codex_code_mode_host_flag)")
-  SESSION_LAUNCH=("codex" "-s" "workspace-write")
+  SESSION_LAUNCH=("codex")
+  # --perm safe: -s is dropped here because --approve-for-me (appended by the shared perm
+  # pass in _session_launch_adapter) already implies the workspace-write sandbox plus
+  # on-request approvals routed through automatic review — and it CONFLICTS with an
+  # explicit -s (verified: `codex --help`; learn.chatgpt.com cli reference). default
+  # keeps `-s workspace-write` byte-identical.
+  [ "${PERM_PROFILE:-default}" = "safe" ] || SESSION_LAUNCH+=("-s" "workspace-write")
   [ "$MODEL_EXPLICIT" = "1" ] && SESSION_LAUNCH+=("-m" "$cid")
   [ -n "$EFFORT" ] && SESSION_LAUNCH+=("-c" "model_reasoning_effort=$EFFORT")
   SESSION_LAUNCH+=(${_ccmh[@]+"${_ccmh[@]}"})
@@ -5113,11 +5139,20 @@ _tier_banner() {
 # OSRC_TIER_OVERRIDE so classification honors it.
 _consume_flags() {
   MODEL=""; MODEL_EXPLICIT=0; TIER_FLAG=""; WITH_SPEC=""; EFFORT="${OUTSOURCERER_EFFORT:-}"; OSRC_ALLOW_DOWNGRADE="${OSRC_ALLOW_DOWNGRADE:-0}"
+  PERM_PROFILE="${OSRC_PERM_PROFILE:-default}"
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model) [ -n "${2:-}" ] || die "-m requires a model name"; _exclude_refuse "$2"; MODEL="$2"; MODEL_EXPLICIT=1; shift 2 ;;
       --tier)     [ -n "${2:-}" ] || die "--tier requires: frontier|capable|mid|budget|raw"; TIER_FLAG="$2"; OSRC_TIER_OVERRIDE="$2"; shift 2 ;;
       --with)     [ -n "${2:-}" ] || die "--with requires e.g. skills=a,b or mcp=x"; _validate_with_token "$2"; WITH_SPEC="$WITH_SPEC $2"; shift 2 ;;
+      --perm)     [ -n "${2:-}" ] || die "--perm requires: safe|default"
+                  case "$2" in safe|default) PERM_PROFILE="$2" ;;
+                    *) die "--perm '$2' invalid (use: safe|default)" ;; esac
+                  shift 2 ;;
+      --perm=*)   PERM_PROFILE="${1#--perm=}"
+                  case "$PERM_PROFILE" in safe|default) ;;
+                    *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
+                  shift ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --no-advise) OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise model selection on a bare run
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
@@ -18931,24 +18966,11 @@ _validate_session_name() {
 }
 
 SESSION_LAUNCH=()
+SESSION_LAUNCH_ENGINE=""
 
-_session_launch_error() {
-  local provider="$1" reason="$2"
-  die "session start: $provider interactive launch unavailable ($reason). Use '$0 --provider $provider run \"task\"' for one-shot work or '$0 --provider $provider bg run \"task\"' for supervised background work."
-}
-
-_session_probe_help() {
-  local probe_file rc=0
-  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-session-probe.XXXXXX" 2>/dev/null)" || return 1
-  _timeout 3 "$@" > "$probe_file" 2>&1 || rc=$?
-  if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
-    rm -f "$probe_file"
-    [ "$rc" -ne 0 ] && return "$rc"
-    return 1
-  fi
-  cat "$probe_file"
-  rm -f "$probe_file"
-}
+# session-launch helpers (_session_launch_error, _session_probe_help,
+# _session_help_has_model_flag, _session_assert_model_pinnable, _session_shell_command)
+# moved to scripts/lib/perm.sh (file-size ratchet; loader above).
 
 # bug (session routing): `session start -m terra` launched DEVIN because PROVIDER defaults to devin and the
 # session-start paths never applied the alias->lane map — the exact "sol/terra on Devin" mistake the skill
@@ -18976,49 +18998,10 @@ _session_infer_provider() {
   fi
 }
 
-# _session_help_has_model_flag <help-text> -> 0 if a model override flag is documented in the FULL
-# help text, 1 otherwise. Matches both long (--model <id> / --model=<id>) and short (-m <id> /
-# -m, --model <id>) forms, delimited so a flag like --mode or -mode cannot false-positive. This is
-# the evidence-based proof behind the general model-pin guard: a lane may only append a model flag
-# to an interactive launch when its own CLI documents that flag at the level being invoked. The
-# droid bug was an unverified COMMENT asserting "interactive droid accepts --model too" — the flag
-# was never in `droid --help`, fell through into the prompt, and the run billed Claude quota on the
-# DEFAULT model (claude-opus-5). Verifying the real --help (never truncated) is the only proof.
-_session_help_has_model_flag() {
-  # Here-string, not a pipeline: help text is never truncated, so it can outgrow the pipe buffer
-  # and `printf | grep -q` would take grep's early-exit SIGPIPE (141) under pipefail as a miss.
-  grep -Eq -- '--model([ =]|$)|(^|[[:space:],])-m([[:space:],]|$)' <<<"$1"
-}
-
-# _session_assert_model_pinnable <provider> <cli> [help-args...] -> probe the real CLI help and
-# REFUSE (via _session_launch_error) if no model override flag is documented at the level being
-# invoked. Returns 0 silently when the flag is proven present. This is the general guard: a lane
-# that cannot PROVE it honors an explicit model must fail loudly, never start on the lane default
-# and bill silently. A failed/timed-out probe is also a refusal — "could not prove it" is not "it
-# is supported". <help-args> are the subcommand/help args to probe (e.g. `hermes chat --help`).
-#
-# Uses a GENEROUS timeout (OSRC_SESSION_MODEL_PROBE_SECS, default 8) rather than the 3s
-# _session_probe_help cap: this is a once-per-session safety check, and heavy node CLIs (e.g.
-# gemini-cli) can take ~5s to print --help on a cold start. A 3s cap falsely refused a lane that
-# DOES document -m/--model, which is its own kind of silent breakage. The cost is paid only when a
-# model is explicitly pinned (MODEL_EXPLICIT=1), not on every session start.
-_session_assert_model_pinnable() {
-  local provider="$1" cli="$2"; shift 2
-  local help_text probe_file rc=0
-  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-mpg.XXXXXX" 2>/dev/null)" || _session_launch_error "$provider" "model-flag probe: could not create a temp file"
-  _timeout "${OSRC_SESSION_MODEL_PROBE_SECS:-8}" "$cli" "$@" > "$probe_file" 2>&1 || rc=$?
-  if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
-    rm -f "$probe_file"
-    _session_launch_error "$provider" "the model-flag help probe for \`$cli $*\` failed or timed out (rc=$rc) — cannot prove interactive model pinning, refusing rather than billing on the lane default"
-  fi
-  help_text="$(cat "$probe_file")"; rm -f "$probe_file"
-  _session_help_has_model_flag "$help_text" \
-    || _session_launch_error "$provider" "interactive $provider has no model override in \`$cli $*\` (verified against the real CLI --help). A --model/-m token would not be honored and the run would proceed on the lane DEFAULT model, billing silently. Drop -m to use the lane's configured model, or use the lane's exec/delegate path (e.g. '$0 --provider $provider run -m <model> \"task\"') where the flag is documented."
-}
-
 _session_launch_adapter() {
   local provider="${1:-$PROVIDER}" help_text="" chat_help="" cli="" de=""
   SESSION_LAUNCH=()
+  SESSION_LAUNCH_ENGINE=""
 
   # Descriptor-first: a ported lane's session_fn owns the capability probe + launch
   # vector. Session context resolves native_of first (codex->cx, claude->cc,
@@ -19028,23 +19011,24 @@ _session_launch_adapter() {
   local _sla_l _sla_fn=""
   _sla_l="$(_lane_by_native "$provider" 2>/dev/null)" || _sla_l="$(_lane_by_token "$provider" 2>/dev/null)" || _sla_l=""
   [ -n "$_sla_l" ] && _sla_fn="$(_lane_field "$_sla_l" session_fn 2>/dev/null)"
-  if [ -n "$_sla_fn" ]; then "$_sla_fn"; return; fi
+  if [ -n "$_sla_fn" ]; then
+    "$_sla_fn"
+    # --perm safe|default: append the engine's documented pre-allow flags. default emits
+    # nothing -> launch byte-identical. Lanes whose safe rung is a substitution (cx drops
+    # -s for --approve-for-me) read PERM_PROFILE inside their own session_fn.
+    if [ "${PERM_PROFILE:-default}" != "default" ]; then
+      type osrc_perm_apply_launch >/dev/null 2>&1 \
+        || _session_launch_error "$provider" "--perm $PERM_PROFILE needs scripts/lib/perm.sh, which is missing from this install"
+      osrc_perm_apply_launch "$provider" "$_sla_l"
+    fi
+    return
+  fi
 
   case "$provider" in
     *)
       _session_launch_error "$provider" "no capability adapter is defined"
       ;;
   esac
-}
-
-_session_shell_command() {
-  local arg quoted out=""
-  for arg in "$@"; do
-    printf -v quoted '%q' "$arg"
-    [ -n "$out" ] && out="$out "
-    out="$out$quoted"
-  done
-  printf '%s\n' "$out"
 }
 
 # _session_launch_liveness_check <session-name> <provider> <launch-cmd> -> after send-keys, poll
@@ -19758,13 +19742,19 @@ _winpty_session() {
           # Effort is NOT silently dropped (see the tmux devin case): Devin's interactive TUI has no
           # reasoning control this tool can set, so a requested --effort cannot be enforced here.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r).\n' "$EFFORT" "$0" "$EFFORT" >&2
-          LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false") ;;
+          LAUNCH=("devin" "--model" "$MODEL" "--respect-workspace-trust" "false")
+          # --perm safe|default: same mapping as the tmux devin arm (see there).
+          if [ "${PERM_PROFILE:-default}" != "default" ]; then
+            type osrc_perm_flags >/dev/null 2>&1 || die "session start: --perm $PERM_PROFILE needs scripts/lib/perm.sh (missing from this install)"
+            while IFS= read -r _perm_a; do [ -n "$_perm_a" ] && LAUNCH+=("$_perm_a"); done < <(osrc_perm_flags devin "$PERM_PROFILE" "$PWD")
+          fi ;;
         codex|cx|droid|cursor|hermes|cline|pi|gemini|gm|cc|claude)
           _exclude_session_default_guard "$PROVIDER"
           _session_launch_adapter "$PROVIDER"
           LAUNCH=("${SESSION_LAUNCH[@]}") ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
+      [ "${PERM_PROFILE:-default}" = "safe" ] && printf '>>> [perm] safe: engine-native pre-allow flags applied; anything outside the safe set still prompts.\n' >&2
 
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
       _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || die "OSRC_HOME not writable: $OSRC_HOME"
@@ -19953,13 +19943,21 @@ session() {
           # tool can drive, so a requested --effort cannot be enforced on a session. Say so loudly rather
           # than running Low while the receipt implies otherwise, and name the paths that DO honor it.
           [ -n "$EFFORT" ] && printf '>>> [effort] WARNING: --effort %s NOT applied to this Devin session — Devin'"'"'s interactive TUI has no reasoning control this tool can set; it runs at the TUI default. Set it in the TUI, or use `%s --provider devin run --effort %s ...` (exec honors -r), or a lane that supports interactive effort.\n' "$EFFORT" "$0" "$EFFORT" >&2
-          launch="devin --model '$MODEL' --respect-workspace-trust false" ;;   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
+          launch="devin --model '$MODEL' --respect-workspace-trust false"   # single-quoted: a validated [1m]-style token must not glob-expand when send-keys hands it to the shell
+          # --perm safe|default: devin's documented safe rung is --permission-mode smart
+          # (workspace edits auto + clearly-safe shell/fetch auto-run; installs, mutating
+          # git, rm/sudo, dotenv/keys still prompt — `devin --help` + permissions.mdx).
+          if [ "${PERM_PROFILE:-default}" != "default" ]; then
+            type osrc_perm_flags >/dev/null 2>&1 || die "session start: --perm $PERM_PROFILE needs scripts/lib/perm.sh (missing from this install)"
+            while IFS= read -r _perm_a; do [ -n "$_perm_a" ] && launch="$launch $_perm_a"; done < <(osrc_perm_flags devin "$PERM_PROFILE" "$PWD")
+          fi ;;
         codex|cx|droid|cursor|hermes|cline|pi|gemini|gm|cc|claude)
           _exclude_session_default_guard "$PROVIDER"
           _session_launch_adapter "$PROVIDER"
           launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")" ;;
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
+      [ "${PERM_PROFILE:-default}" = "safe" ] && printf '>>> [perm] safe: engine-native pre-allow flags applied; anything outside the safe set still prompts.\n' >&2
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
       _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
