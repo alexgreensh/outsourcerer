@@ -105,8 +105,11 @@ logs, and moved from the address bar into `sessionStorage` by the page. No
 cookie is set or accepted. `hub serve` dies rather than run with a fallback
 token if `/dev/urandom` is unreadable.
 
-Local mode is local *data*, not a fully offline page: the page loads Google Fonts,
-the Lucide icon script pinned at `lucide@0.469.0` from `cdn.jsdelivr.net`, and
-fetches the repo's star count from `api.github.com`. Those are the only outside
-requests; the token stays in the URL query of loopback requests and the default
-referrer policy sends origin-only, so it never reaches a third party.
+Local mode makes **zero third-party requests**: Poppins (latin) and Noto Sans
+Hebrew are vendored as woff2 under `lib/hub-assets/fonts/` (provenance and OFL
+texts in `SOURCES.md` there) and served token-free from `/assets/`; the eight
+icons are inlined SVG; the GitHub star count is fetched in artifact mode only.
+The served page carries a strict CSP (`default-src 'self'` plus
+`script-src`/`style-src 'unsafe-inline'` because the page is one self-contained
+file), `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`,
+and it renders fully with the network off. CJK stays on system fonts.

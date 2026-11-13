@@ -34,6 +34,10 @@ class Hub:
         self.osrc_home = osrc_home
         self.engine = engine
         self.page_path = page_path
+        # Vendored assets (fonts, licences) live next to the page and are the
+        # only files served without a token — they are static and read-only.
+        self.assets_dir = os.path.join(
+            os.path.dirname(os.path.abspath(page_path)), "hub-assets")
         self.token = token
         self.answers_dir = os.path.join(osrc_home, "hub", "answers")
         os.makedirs(self.answers_dir, exist_ok=True)
@@ -200,10 +204,48 @@ def make_handler(hub):
                 return False
             return True
 
+        def _sec_headers(self):
+            # Strict CSP: everything the page loads comes from this server.
+            # Inline script/style stay allowed because the page is a single
+            # self-contained file; nothing remote is reachable (review A2).
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; font-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; "
+                "object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+
         def _send_json(self, obj, code=200):
             data = json.dumps(obj).encode()
             self.send_response(code)
+            self._sec_headers()
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _send_asset(self, path):
+            # /assets/<name> serves the vendored hub-assets directory only:
+            # realpath containment + a small extension allowlist, so no
+            # traversal and no engine/source files ever leave through it.
+            base = os.path.realpath(hub.assets_dir)
+            rel = urllib.parse.unquote(path[len("/assets/"):])
+            full = os.path.realpath(os.path.join(base, rel))
+            ext = os.path.splitext(full)[1].lstrip(".").lower()
+            ctype = {"woff2": "font/woff2",
+                     "txt": "text/plain; charset=utf-8"}.get(ext)
+            if (not ctype or full == base
+                    or not full.startswith(base + os.sep)
+                    or not os.path.isfile(full)):
+                return self._send_json({"error": "not found"}, 404)
+            with open(full, "rb") as f:
+                data = f.read()
+            self.send_response(200)
+            self._sec_headers()
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -213,11 +255,18 @@ def make_handler(hub):
             self._send_json({"error": "forbidden"}, 403)
 
         def do_GET(self):
-            if not self._host_ok() or not self._token_ok():
+            if not self._host_ok():
                 return self._deny()
-            hub.last_poll = time.time()
             u = urllib.parse.urlparse(self.path)
             path = u.path
+            if path.startswith("/assets/"):
+                # A font fetch means a page is open — count it as a poll so the
+                # idle timer reflects real use.
+                hub.last_poll = time.time()
+                return self._send_asset(path)
+            if not self._token_ok():
+                return self._deny()
+            hub.last_poll = time.time()
             if path in ("/", "/index.html"):
                 try:
                     with open(hub.page_path, "rb") as f:
@@ -225,6 +274,7 @@ def make_handler(hub):
                 except OSError:
                     return self._send_json({"error": "page missing"}, 500)
                 self.send_response(200)
+                self._sec_headers()
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")

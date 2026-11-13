@@ -175,7 +175,17 @@ jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW
 
 echo "=== page structure (design port contract) ==="
 PAGE="$HERE/../lib/hub.html"
-grep -q 'lucide@0\.469\.0' "$PAGE" && ok "lucide pinned at 0.469.0" || bad "lucide pin missing"
+LIB="$HERE/../lib"
+# A2: no third-party script or font request — everything is vendored or inlined.
+grep -q 'src="http\|href="https://fonts\|jsdelivr\|googleapis\|gstatic' "$PAGE" \
+  && bad "third-party script/font URL still in page" || ok "no third-party script or font URL in page"
+grep -q 'const ICONS' "$PAGE" && ok "icons inlined (no lucide script needed)" || bad "ICONS map missing"
+for f in poppins-400 poppins-500 poppins-600 poppins-700 noto-sans-hebrew; do
+  [ -f "$LIB/hub-assets/fonts/$f.woff2" ] && head -c4 "$LIB/hub-assets/fonts/$f.woff2" | grep -q 'wOF2' \
+    && ok "$f.woff2 vendored and valid" || bad "$f.woff2 missing/corrupt"
+done
+[ -f "$LIB/hub-assets/fonts/Poppins-OFL.txt" ] && [ -f "$LIB/hub-assets/fonts/NotoSansHebrew-OFL.txt" ] \
+  && ok "OFL licence texts vendored" || bad "OFL licence missing"
 grep -q 'aria-expanded' "$PAGE" && grep -q 'id="lfold"' "$PAGE" && ok "limits rail is a disclosure (lfold aria-expanded)" || bad "limits disclosure missing"
 grep -q 'mc-limits-open' "$PAGE" && ok "limits fold persists via localStorage" || bad "fold persistence missing"
 grep -q "ok', 'low'" "$PAGE" && ok "folded panel filters to ok|low" || bad "fold predicate missing"
@@ -283,6 +293,21 @@ echo "$pj" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="op
 
 pg="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/?t=$TOK")"
 [ "$pg" = "200" ] && ok "GET /?t= serves the page" || bad "page GET got $pg"
+# A2: strict CSP on the served page, vendored fonts served token-free from
+# /assets/, and the asset route cannot be walked out of its directory.
+csp="$(curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -i 'content-security-policy')"
+echo "$csp" | grep -q "default-src 'self'" && echo "$csp" | grep -q "connect-src 'self'" \
+  && ok "page served with strict default-src self CSP" || bad "CSP missing/weak: $csp"
+aw="$(curl -s "$BASE/assets/fonts/poppins-400.woff2" | head -c4)"
+[ "$aw" = "wOF2" ] && ok "vendored font served from /assets (no token)" || bad "font asset got '$aw'"
+aw2="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/fonts/noto-sans-hebrew.woff2")"
+[ "$aw2" = "200" ] && ok "hebrew font served from /assets" || bad "hebrew font got $aw2"
+trav="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/%2e%2e/hub_server.py")"
+[ "$trav" != "200" ] && ok "asset traversal refused" || bad "traversal served hub_server.py"
+md="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/fonts/SOURCES.md")"
+[ "$md" != "200" ] && ok "asset extension allowlist holds" || bad "SOURCES.md served as asset"
+lic="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/fonts/Poppins-OFL.txt")"
+[ "$lic" = "200" ] && ok "OFL text served from /assets" || bad "OFL text got $lic"
 
 an0="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/answers")"
 echo "$an0" | jq -e 'type == "object"' >/dev/null && ok "GET /api/answers returns object" || bad "answers GET bad"
