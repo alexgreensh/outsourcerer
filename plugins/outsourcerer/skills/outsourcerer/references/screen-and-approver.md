@@ -39,6 +39,9 @@ How the reader works:
 - `_managed_menu_detect` (used by `session send` and `session answer`) is gated on this reader.
   When an engine's layout is recognised, only an open approval or question counts as a menu. A
   reply that ends in a numbered list no longer blocks `session send`.
+  On Claude, its exact mode line (`⏵⏵ auto mode on (shift+tab to cycle)`, …) as the last row is
+  footer, not a menu row: an idle composer above it reads as no menu, and an unknown cursor menu
+  above it still reads as a menu, so `session send` refuses with "modal open … session answer".
 
 ## Sends that land
 
@@ -134,6 +137,7 @@ engine's own sandbox.
 - `git config --list`/`--get-all`/`--get remote.*.url` and any key off a short harmless list
   (`user.name`, `user.email`, `core.*`, `branch.*.remote|merge|rebase`, …): config can hold an
   `http.extraheader` token or a token-bearing URL.
+- `git remote -v`/`show`/`get-url` (they print the same URLs); only bare `git remote` approves.
 - `gh api` (every form), `gh pr create/merge`, `gh … --web`, sudo, `curl|wget … | sh`, any network
   tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
 - Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
