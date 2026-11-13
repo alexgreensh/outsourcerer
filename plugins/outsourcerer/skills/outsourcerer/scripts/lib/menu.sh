@@ -157,13 +157,12 @@ _managed_menu_detect() { # <pane>
     # The reader knows this layout: list the options from its rows (row 1 included, no history).
     _osrc_menu_from_screen && return 0
   fi
-  # Claude's mode status line in the last rows means a live composer, never a modal, even when the
-  # composer box itself was not recognised (half-drawn frame, odd width).
-  _j=$((_SCR_N - 3)); [ "$_j" -ge 0 ] || _j=0
-  while [ "$_j" -lt "$_SCR_N" ]; do
-    _osrc_scr_cc_status_row "${_SCR_L[$_j]}" && { printf 'MENU none\n'; return 0; }
-    _j=$((_j + 1))
-  done
+  # Claude only: its mode status line as the LAST row means a live composer, never a modal, even
+  # when the composer box itself was not recognised (half-drawn frame, odd width). Whole-line match,
+  # so a tool's "⏵ deploy on" under its own menu (or any other engine's pane) changes nothing.
+  if [ "$(_osrc_scr_engine_norm "$_eng")" = cc ] && [ "$_SCR_N" -gt 0 ] && _osrc_scr_cc_status_row "${_SCR_L[$((_SCR_N - 1))]}"; then
+    printf 'MENU none\n'; return 0
+  fi
   # Legacy path guard: a prompt-glyph row that sits directly between two horizontal rules is a
   # composer box, and a `❯ Try "…"` row is Claude Code's composer placeholder. Neither is a menu.
   _j=1

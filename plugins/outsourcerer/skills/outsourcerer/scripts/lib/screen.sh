@@ -108,13 +108,9 @@ _osrc_scr_trim() { local s="$1"; s="${s#"${s%%[! ]*}"}"; printf '%s' "${s%"${s##
 # "⏸ plan mode on", "⏵⏵ bypass permissions on", "⏵⏵ accept edits on", "⏸ manual mode on"). It is
 # drawn only beside a live composer: no Claude modal (permission, picker, trust) shows it, and each
 # of those ends in its own footer. Seen live 2026-11-13: read as a choice menu, send refused to type.
-_osrc_scr_cc_status_row() { # <row>
-  local t; t="$(_osrc_scr_trim "$1")"
-  case "$t" in
-    *"(shift+tab to cycle)"*) return 0 ;;
-    "⏵⏵ "*" on"*|"⏵ "*" on"*|"⏸ "*" on"*) return 0 ;;
-  esac
-  return 1
+_osrc_scr_cc_status_row() { # <row>: the WHOLE row must be one of Claude's real mode lines
+  printf '%s\n' "$(_osrc_scr_trim "$1")" | LC_ALL="$(_osrc_utf8_locale)" grep -Eq \
+    '^(⏵⏵ (accept edits|auto mode|bypass permissions) on|⏸ (plan|manual) mode on)( \(shift\+tab to cycle\))?( · ← [0-9]+ agents?)?$'
 }
 
 _osrc_scr_is_rule() { # a horizontal rule (Claude/Devin/agy composer box), possibly with a title

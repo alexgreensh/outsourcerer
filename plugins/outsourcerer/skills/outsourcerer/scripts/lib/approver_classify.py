@@ -357,6 +357,8 @@ def awk_rule(args, cwd, roots):
         raise Hold("awk without a program")
     if re.search(r"system|getline|ENVIRON|\||>|close|fflush", pos[0]):
         raise Hold("awk program writes, executes or reads the environment")
+    if re.search(r"SYMTAB|FUNCTAB|PROCINFO", pos[0]):   # gawk tables reach ENVIRON and every variable
+        raise Hold("awk program reads gawk symbol tables (SYMTAB/FUNCTAB/PROCINFO)")
     if re.search(r"@|ARGV|ARGC", pos[0]):   # gawk @f() indirect calls, @load; ARGV/ARGC read any file
         raise Hold("awk program uses @ (indirect call / @load) or rewrites ARGV/ARGC")
     for f in pos[1:]:
@@ -700,31 +702,6 @@ def classify_segment(tokens, prev_op, cwd, roots):
     raise Hold("unknown command: " + name)
 
 
-def env_names_only(segs) -> bool:
-    """True for a pipeline that starts `env | cut -d= -f1` or `printenv | cut -d= -f1` (bare env, a
-    plain pipe, cut with only -d '=' and -f 1 in any spelling). It prints names, not values; any
-    other env/printenv form dumps values (a login token can be one) and holds."""
-    if len(segs) < 2 or segs[0][0] not in (["env"], ["printenv"]) or segs[1][1] != "|":
-        return False
-    toks = segs[1][0]
-    if not toks or toks[0] != "cut":
-        return False
-    d = f = None; i = 1
-    while i < len(toks):
-        t = toks[i]
-        if t in ("-d", "-f") and i + 1 < len(toks):
-            v = toks[i + 1]; i += 2
-        elif t[:2] in ("-d", "-f") and len(t) > 2:
-            v = t[2:]; i += 1
-        else:
-            return False
-        if t.startswith("-d"):
-            d = v
-        else:
-            f = v
-    return d == "=" and f == "1"
-
-
 def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple[bool, str]:
     """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set."""
     try:
@@ -752,9 +729,10 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         pre_checks(cmd)
         rules, cur = [], cwd
         segs = split_segments(cmd)
-        if env_names_only(segs):   # `env | cut -d= -f1 ...`: variable names, never values
-            rules.append("read-only:env names (cut -d= -f1)")
-            segs = segs[2:]
+        # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
+        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body: review round 4, B.)
+        if [t for t, _ in segs] == [["compgen", "-e"]]:
+            return True, "read-only:env names (compgen -e)"
         for seg, prev in segs:
             rule, cur = classify_segment(seg, prev, cur, roots)
             rules.append(rule)

@@ -37,4 +37,11 @@ got="$(printf 'ls' | HOME="$TMP" python3 -I "$CLS" --root "$TMP")"; [ "${got%% *
 got="$(printf 'ls' | python3 -I "$CLS" --bogus x)"; [ "${got%% *}" = hold ] && ok || bad "usage error did not hold: $got"
 
 echo "rows=$rows approve=$approves hold=$holds"
+# review round 4 B: the approved names form never prints a multi-line value; the old cut form did
+SECRET_TWO_LINE="$(printf 'first=line\nOSRC_PEM_BODY_7f3a')"; export SECRET_TWO_LINE
+out="$(bash -c 'compgen -e' 2>/dev/null)"
+case "$out" in *OSRC_PEM_BODY_7f3a*|*first=line*) bad "compgen -e printed a value line" ;; *) ok ;; esac
+case "$(env | cut -d= -f1)" in *OSRC_PEM_BODY_7f3a*) ok ;; *) bad "(control) env | cut -d= -f1 was expected to leak the 2nd value line" ;; esac
+unset SECRET_TWO_LINE
+
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

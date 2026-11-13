@@ -103,7 +103,7 @@ engine's own sandbox.
 **Approved** (every flag must be on that command's allowlist, else hold):
 - Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/uniq and xxd (one file, a
   second is an output)/stat/cut/jq (no `env`, `$ENV`, `input`)/find (allowlisted
-  predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs (no `system`, `getline`, `ENVIRON`, pipes, `>`, `@`, `ARGV`/`ARGC`),
+  predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs (no `system`, `getline`, `ENVIRON`, pipes, `>`, `@`, `ARGV`/`ARGC`, `SYMTAB`/`FUNCTAB`/`PROCINFO`),
   `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
   `--no-index`, `-O`), `gh pr|issue|run view|list` (no `--web`), `--help`/`--version` on known
   commands.
@@ -137,7 +137,8 @@ engine's own sandbox.
   printenv/env, shell rc files like `.zshrc`/`.bash_profile` and history files `*_history`),
   anything that prints environment VALUES (`env`, `printenv`, `export -p`, `set`, `declare -x`,
   `/proc/*/environ`, `env | grep …`: the screen goes to the delegate's model, and a value can be a
-  login token). Names only, `env | cut -d= -f1` (or `printenv | …`), approves,
+  login token). Names only: exactly `compgen -e` approves. `env | cut -d= -f1` holds, because a multi-line value
+  (a PEM key, service-account JSON) prints its later lines whole,
   whatever reads them (cat, jq, cut, awk, column, xargs).
 - Any read under the home folder outside the worktree (and the extra dirs), or one that covers
   the home folder (`find ~`, `find /`, `ls /Users`). System paths (`/usr`, `/opt`, `/etc`,

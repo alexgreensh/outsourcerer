@@ -276,6 +276,31 @@ open(sys.argv[2],"w").write("\n".join(l for l in s if not re.sub(r"\x1b\[[0-9;?]
     grep -q -- '-l -- status line test' "$TMP/skeys" && grep -q ' Enter$' "$TMP/skeys" && [ "${OSRC_SEND_MODAL:-0}" = 0 ]
   ) && ok || bad "send did not type into an idle cc pane with the $m status line: $(tr '\n' '|' < "$TMP/skeys")"
 done
+# review round 4 A: a status-LOOKING row under a tool's own menu never disables the menu guard.
+# Whole `session send` command, fake tmux, keys recorded: refused with 0 keys on every engine.
+printf '%s\n' '$ ./deploy.sh' 'Select environment (use arrow keys)' '❯ production' '  staging' '⏵ deploy on' > "$TMP/deploy-menu.txt"
+printf '%s\n' '$ ./deploy.sh' 'Select environment (use arrow keys)' '❯ production' '  staging' '⏵⏵ auto mode on (shift+tab to cycle)' '  ⏸ manual mode on extra' > "$TMP/deploy-menu-cc-notlast.txt"
+for eng in codex devin gemini cc; do
+  : > "$TMP/dkeys"
+  ( SESSION_NAME="osrc-test-L3-dm"; _managed_provider() { printf '%s' "$eng"; }; OSRC_MENU_SETTLE_POLLS=0
+    # every send gate but the menu guard is open, so a miss shows up as typed keys
+    _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+    _obligation_guard_begin() { :; }; _obligation_guard_end() { :; }; _obligation_delivery_unknown() { :; }
+    _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
+    _managed_composer_state() { printf empty; }; _state_jsonl_read() { :; }; OSRC_SEND_VERIFY_SECS=1
+    tmux() { case "$1" in has-session) return 0 ;; capture-pane) cat "$TMP/deploy-menu.txt" ;; send-keys) printf '%s\n' "$*" >> "$TMP/dkeys" ;; *) return 0 ;; esac; }
+    session send "please continue" ) >/dev/null 2>&1; rc=$?
+  [ "$rc" != 0 ] && [ ! -s "$TMP/dkeys" ] && ok || bad "session send typed into a tool menu with a status-looking row on $eng (rc=$rc keys=$(tr '\n' '|' < "$TMP/dkeys"))"
+done
+r="$(MH_PROV=cc MH_FILE="$TMP/deploy-menu-cc-notlast.txt" menu_head)"
+[ "$r" != "MENU none" ] && ok || bad "cc: a real-looking status row that is not the whole last line hid a menu"
+for bad_row in '⏵ x on' '⏵⏵ auto mode on (shift+tab to cycle) and more' 'xx ⏸ plan mode on'; do
+  _osrc_scr_cc_status_row "$bad_row" && bad "status-row matcher accepted [$bad_row]" || ok
+done
+for good_row in '⏵⏵ auto mode on (shift+tab to cycle)' '  ⏸ manual mode on · ← 15 agents' '⏵⏵ bypass permissions on (shift+tab to cycle)' '⏸ plan mode on (shift+tab to cycle)' '⏵⏵ accept edits on (shift+tab to cycle) · ← 2 agents'; do
+  _osrc_scr_cc_status_row "$good_row" && ok || bad "status-row matcher rejected the real line [$good_row]"
+done
+
 # every real approval/question capture is still a modal with the guard in place
 for spec in cc:cc-permission-bash cc:cc-permission-bash-1 cc:cc-permission-bash-rm cc:cc-permission-write cc:cc-askuserquestion cc:cc-trust-folder-menu codex:cx-approval codex:cx-trust-folder-menu devin:dv-approval devin:dv-approval-wrapped agy:agy-approval agy:agy-file-approval agy:agy-trust-folder-menu gemini:gm-trust-folder-menu; do
   r="$(MH_PROV="${spec%%:*}" MH_FILE="$FX/${spec#*:}.ansi" menu_head)"
