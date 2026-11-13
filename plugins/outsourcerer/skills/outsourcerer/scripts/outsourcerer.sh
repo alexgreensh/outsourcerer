@@ -19582,7 +19582,7 @@ session() {
           *) printf '%s\n' "$_arep"; _osrc_menu_how "$_akind" ;;
         esac
       else
-        _managed_menu_answer "$SESSION_NAME" "$1" || die "session answer failed: the menu did not close. Re-check with: $0 session read"
+        _managed_menu_answer "$SESSION_NAME" "$1" || die "session answer failed (reason above): nothing selected, or the menu did not close. Re-check with: $0 session state"
         echo "answered. Re-check with: $0 session read"
       fi
       ;;

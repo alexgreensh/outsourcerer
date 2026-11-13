@@ -136,6 +136,7 @@ r="$(menu_of agy agy-approval)"; printf '%s\n' "$r" | grep -q '^SEL 1 Yes, run c
 r="$(menu_of devin dv-approval)"; [ "$(printf '%s\n' "$r" | grep -c '^SEL ')" = 1 ] && printf '%s\n' "$r" | grep -q '^SEL 1 Allow' \
   && printf '%s\n' "$r" | grep -qx 'OPT 3 Deny' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin report noisy: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of devin dv-approval-wrapped)"; [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin wrapped: command row listed as an option: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of cc cc-prose-question)"; [ "$(printf '%s\n' "$r" | head -1)" = "MENU none" ] && ok || bad "a prose question (composer live) read as a menu, send would be refused: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of cc cc-askuserquestion)"; printf '%s\n' "$r" | grep -q '^SEL 1 Red' && printf '%s\n' "$r" | grep -q '^OPT 4 Chat about this' && ok || bad "cc question: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of cc cc-trust-folder-menu)"; printf '%s\n' "$r" | grep -qx 'SEL 1 No, exit' && printf '%s\n' "$r" | grep -qx 'OPT 2 Yes, I trust this folder' && ok || bad "cc trust: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of gemini gm-trust-folder-menu)"; printf '%s\n' "$r" | grep -q '^SEL 1 Trust folder' && printf '%s\n' "$r" | grep -q "^OPT 3 Don't trust" && ok || bad "gemini trust: $(printf '%s' "$r" | tr '\n' '|')"

@@ -150,6 +150,10 @@ _managed_menu_detect() { # <pane>
   done
   if [ "${OSRC_SCR_GENERIC:-1}" != 1 ]; then
     case "$OSRC_SCR_STATE" in approval|question) ;; *) printf 'MENU none\n'; return 0 ;; esac
+    # A prose question ends a reply above a live composer: that is answered with `session send`.
+    # Only a picker or prompt that has replaced the composer is a menu (seen live: history rows of a
+    # prose "What should Claude do instead?" were read as cursor rows).
+    [ "${OSRC_SCR_COMPOSER_FOUND:-0}" = 1 ] && { printf 'MENU none\n'; return 0; }
     # The reader knows this layout: list the options from its rows (row 1 included, no history).
     _osrc_menu_from_screen && return 0
   fi
