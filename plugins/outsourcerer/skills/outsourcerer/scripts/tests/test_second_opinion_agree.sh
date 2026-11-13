@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_second_opinion_agree.sh — _so_agree semantic-agreement gate for `second-opinion`.
 # Guards the two silent false-agree paths: contradiction (negation flip) and superset.
 # The invariant: a false reading only ever ESCALATES (never a wrong agreement).
@@ -12,12 +14,12 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; trap 'rm -rf "$T"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 # chk <desc> <agree|disagree> <answer1> <answer2>  — drives the built-in __so-agree hook.
 chk() {
   printf '%s' "$3" > "$T/a"; printf '%s' "$4" > "$T/b"
-  local got; got="$(OSRC_LEDGER_QUIET=1 bash "$SRC" __so-agree "$T/a" "$T/b" 2>/dev/null)"
+  local got; got="$(OSRC_SOURCED=0 OSRC_LEDGER_QUIET=1 bash "$SRC" __so-agree "$T/a" "$T/b" 2>/dev/null)"
   [ "$got" = "$2" ] && ok "$1 -> $got" || bad "$1 (got '$got', want '$2')"
 }
 

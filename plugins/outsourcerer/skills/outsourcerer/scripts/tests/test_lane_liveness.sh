@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_lane_liveness.sh — "installed" must never be reported as "will answer".
 #
 # A lane stays installed and authenticated while its subscription window is exhausted, its token has

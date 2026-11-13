@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_tier_churn.sh — tier_from_name must survive model churn without a table edit.
 # Newer families (GPT-6/Astra, hy4/hy5) route by capability the day they ship, and a
 # size suffix (mini/lite/...) OUTRANKS family so a small variant of a new frontier model

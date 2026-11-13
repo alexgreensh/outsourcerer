@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_skill_bundle.sh — a granted skill must transfer WHOLE, per lane capability, or not at all.
 #
 # The gaps this locks out (all verified on 0.13.0):
@@ -17,7 +19,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 SUITE_ERR="$TMP/suite-stderr.txt"
 exec 9>&2 2>"$SUITE_ERR"   # watchdog: the suite's own stderr must stay EMPTY
 pass=0; fail=0

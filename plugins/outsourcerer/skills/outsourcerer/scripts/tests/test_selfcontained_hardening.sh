@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_selfcontained_hardening.sh — locks the self-contained hardening fixes.
 # Static presence checks + two behavioral checks. Run: bash test_selfcontained_hardening.sh
 set -uo pipefail

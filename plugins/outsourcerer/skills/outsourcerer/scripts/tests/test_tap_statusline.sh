@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_tap_statusline.sh — the statusline command a versioned plugin-cache install emits must
 # resolve the NEWEST installed version at render time, so it survives a plugin update+prune that
 # deletes the version it was pinned to. And it must never embed a path it cannot safely single-quote
@@ -12,7 +14,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TMP="$(mktemp -d "$PWD/.test-tapstatus.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }

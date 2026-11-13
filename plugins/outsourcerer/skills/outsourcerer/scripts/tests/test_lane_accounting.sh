@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # Tests the truthful lane-accounting: _effective_lane mapping + cmd_tab three-way FREE/PLAN/CASH
 # bucket. Sources the main script with the `main "$@"` dispatcher stripped (side-effect-free).
 set -euo pipefail
@@ -10,7 +12,7 @@ command -v jq >/dev/null 2>&1 || { echo "FAIL: jq required" >&2; exit 1; }
 
 # BSD/macOS mktemp: template must END in X's (no trailing suffix).
 TMP="$(mktemp "${TMPDIR:-/tmp}/osrc_acct.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT
+trap 'rm -f "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$MAIN" > "$TMP"
 # shellcheck disable=SC1090
 set +e; source "$TMP"; set -e
@@ -73,7 +75,7 @@ ck "bucket {provider:openrouter}"    "$(bkt '{"provider":"openrouter"}')"   cash
 # --- C. cash-accounting: an UNMEASURED cash OpenRouter run (empty cost_usd) is still a CASH run and must be
 #        counted as est-only, NOT dropped and NOT reported as "$0 measured". Prove via the real
 #        cmd_tab summary output over a crafted ledger. ---
-LED="$(mktemp "${TMPDIR:-/tmp}/osrc_led.XXXXXX")"; trap 'rm -f "$TMP" "$LED"' EXIT
+LED="$(mktemp "${TMPDIR:-/tmp}/osrc_led.XXXXXX")"; trap 'rm -f "$TMP" "$LED"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 {
   printf '%s\n' '{"ts":"t","provider":"codex","model":"glm","tier":"capable","verb":"run","in_tokens":10,"cost_usd":"","task_hash":"1","lane":"or"}'
   printf '%s\n' '{"ts":"t","provider":"codex","model":"glm","tier":"capable","verb":"run","in_tokens":10,"cost_usd":"0.002000","task_hash":"2","lane":"or"}'

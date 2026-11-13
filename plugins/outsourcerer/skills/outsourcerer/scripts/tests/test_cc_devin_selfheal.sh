@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
 # test_cc_devin_selfheal.sh — cc-lane OpenRouter exhaustion (e.g. 402 insufficient credit) heals
 # across to the Devin lane for dual-lane models (glm today), instead of dying on OpenRouter with
 # a healthy Devin sibling sitting unused. Companion to the existing codex->cc self-heal

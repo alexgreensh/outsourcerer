@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh"
+osrc_test_sandbox
+set -eu
+TESTS="$(cd "$(dirname "$0")" && pwd)"
+# An optional path lets the negative control and callers check individual files.
+python3 - "$TESTS" "$@" <<'PY'
+import pathlib, re, sys
+
+root = pathlib.Path(sys.argv[1])
+paths = [pathlib.Path(p) for p in sys.argv[2:]] or sorted(root.glob('test_*.sh'))
+source = re.compile(r'''(?:^|[;\s(])(?:source|\.)\s+["']?([^\s;"']+)''')
+assignment = re.compile(r'\b([A-Za-z_][A-Za-z_0-9]*)=(.*)')
+bad = []
+for path in paths:
+    safe = False
+    aliases = set()
+    heredoc = None
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        stripped = line.strip()
+        if heredoc:
+            if stripped == heredoc:
+                heredoc = None
+            continue
+        if not stripped or stripped.startswith('#'):
+            continue
+        h = re.search(r'<<-?\s*["\']?([A-Za-z_][A-Za-z_0-9]*)["\']?', line)
+        if h:
+            heredoc = h.group(1)
+        if 'lib_sandbox.sh' in line and source.search(line):
+            continue
+        hit = source.search(line)
+        if hit:
+            target = hit.group(1)
+            var = re.match(r'\$\{?([A-Za-z_][A-Za-z_0-9]*)', target)
+            engine = 'outsourcerer.sh' in line[hit.start():] or (var and var.group(1) in aliases)
+            before = line[:hit.start()]
+            if engine and not (safe or re.search(r'\bOSRC_HOME=', before)):
+                bad.append(f'{path}:{number}: sources outsourcerer.sh before sandbox')
+        if re.search(r'\bOSRC_HOME=', line) or re.match(r'\s*osrc_test_sandbox(?:\s|$)', line):
+            safe = True
+        a = assignment.search(line)
+        if a:
+            name, value = a.groups()
+            if 'outsourcerer.sh' in value or any(re.search(r'\$\{?' + re.escape(v) + r'(?:\}|\b)', value) for v in aliases):
+                aliases.add(name)
+        # Recognize copies made with sed before a source of the temporary result.
+        copy = re.search(r'''\bsed\b.*\$\{?([A-Za-z_][A-Za-z_0-9]*)\}?["']?\s*>\s*["']?\$\{?([A-Za-z_][A-Za-z_0-9]*)''', line)
+        if copy and copy.group(1) in aliases:
+            aliases.add(copy.group(2))
+if bad:
+    print('\n'.join(bad), file=sys.stderr)
+    sys.exit(1)
+print(f'PASS: sandbox precedes engine sourcing in {len(paths)} test files')
+PY
+if [ "$#" -eq 0 ]; then
+  printf '%s\n' 'SRC="../outsourcerer.sh"' '. "$SRC"' 'OSRC_HOME=/too-late' > "$OSRC_TEST_ROOT/bad.sh"
+  if bash "$0" "$OSRC_TEST_ROOT/bad.sh" > "$OSRC_TEST_ROOT/bad.out" 2>&1; then
+    echo 'FAIL: guard accepted a source before sandboxing' >&2
+    exit 1
+  fi
+  grep -q 'before sandbox' "$OSRC_TEST_ROOT/bad.out"
+  printf '%s\n' 'SRC="../outsourcerer.sh"' 'OSRC_HOME=/isolated' '. "$SRC"' > "$OSRC_TEST_ROOT/good.sh"
+  bash "$0" "$OSRC_TEST_ROOT/good.sh"
+  echo 'PASS: guard rejects an unsandboxed temporary test'
+fi
