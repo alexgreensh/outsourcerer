@@ -105,7 +105,10 @@ grep -q "adopt new-sess" "$OUT" && ok "the brief names the adopt command for thi
   || no "adopt command missing: $(cat "$OUT" 2>/dev/null | head -20)"
 grep -q '`job-live` -- job, live' "$OUT" && ok "the brief lists the live job with kind+state" \
   || no "job row wrong: $(grep -A3 'job-live' "$OUT" 2>/dev/null)"
-grep -q 'wait job-live' "$OUT" && ok "a live job gets its wait command" || no "wait command missing"
+# With L1 loaded a live job is covered by the one supervise; without it, by its own wait.
+grep -q 'covered by: `.*supervise`' <<<"$(grep -A6 'job-live' "$OUT")" && ok "with supervise loaded, a live job is covered by it" || no "supervise cover missing: $(grep -A6 'job-live' "$OUT")"
+( export OSRC_SOURCED=1 CLAUDE_CODE_SESSION_ID=new-sess; . "$SRC" >/dev/null 2>&1; unset -f cmd_supervise; cmd_handover --out "$TMP/brief-nosup.md" >/dev/null 2>&1 )
+grep -q 'wait job-live' "$TMP/brief-nosup.md" && ok "without supervise, a live job gets its wait command" || no "wait command missing"
 grep -q 'glm-5.2' "$OUT" && grep -q '/tmp/fake-work' "$OUT" \
   && ok "job model and cwd come from meta.json" || no "model/cwd missing"
 grep -q '`sess-old` -- tmux, done' "$OUT" && ok "an autodetach marker reads as a done tmux target" \
@@ -143,11 +146,16 @@ cat > "$TMP/bin/tmux" <<'EOF'
 case " $* " in
   *" has-session "*) exit 0 ;;
   *" display-message "*) printf '/tmp/fake-pane-cwd\n'; exit 0 ;;
+  *" capture-pane "*) [ -n "${FAKE_PANE:-}" ] && cat "$FAKE_PANE"; exit 0 ;;
 esac
 exit 0
 EOF
 chmod +x "$TMP/bin/tmux"
 : > "$OSRC_HOME/owners/new-sess/sess-idle"
+# L1 calls a pane idle only once supervise has confirmed it (a busy pane flickers through idle
+# frames), so serve a real idle Claude Code pane and record that supervise already reported it.
+export FAKE_PANE="$SCRIPT_DIR/fixtures/supervise/cc-idle-after-work.txt"
+mkdir -p "$OSRC_HOME/lanes/state"; printf '%s\n' "- 0 - - 0 idle:1 $(date +%s)" > "$OSRC_HOME/lanes/state/sess-idle"
 OUT2="$TMP/brief-idle.md"
 out="$(PATH="$TMP/bin:$PATH" CLAUDE_CODE_SESSION_ID=new-sess "$SRC" handover --out "$OUT2" 2>/dev/null)"; rc=$?
 [ "$rc" -eq 0 ] && grep -q '`sess-idle` -- tmux, idle' "$OUT2" \

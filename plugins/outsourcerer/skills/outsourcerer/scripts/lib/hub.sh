@@ -80,6 +80,7 @@ _osrc_hub_lane_status() {
     live|working|running|launching|stalled\?|exploring\?|no-progress-writes|ready)
       [ "$rv" = "" ] && [ "$st" = "ready" ] && st="Review" || st="Building" ;;
     idle) st="Idle" ;;
+    waiting) st="Blocked"; extra="${extra:+$extra; }waiting on the orchestrator (approval, question or limit)" ;;
     done|'done?') st="Done" ;;
     blocked|permission-blocked) st="Blocked" ;;
     failed|wedged|timeout) st="Failed" ;;
@@ -263,7 +264,7 @@ _osrc_hub_build_project() {
   if [ -d "$sid_dir" ]; then
     for t in "$sid_dir"/*; do
       [ -f "$t" ] || continue
-      case "${t##*/}" in .*) continue ;; esac
+      case "${t##*/}" in .*|watch.*) continue ;; esac   # watch.*: a supervise --watch, not a lane
       lane="$(_osrc_hub_lane_for "${t##*/}" "$rmap")"
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
     done

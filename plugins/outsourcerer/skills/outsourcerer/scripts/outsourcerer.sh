@@ -51,6 +51,7 @@
 #   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   supervise [--session SID] [id..] ORCHESTRATOR DEFAULT: one background waiter for everything this session owns; returns EVENT/NEXT lines (approval|question|failed|limit|done|idle|stalled|...) and replays missed events.
 #   wait <job-id> [--for N]        BLOCK until a job is terminal; exit 0 done|done?, 3 blocked|permission-blocked, 1 other failure (failed|wedged|timeout|interrupted|canceled), 124 --for N elapsed while still live. Unlike watch (a bounded ~15s status poll), wait blocks to terminal by default.
 #   adopt --list | adopt <sid>     Session handover: --list shows every owners/ session dir; adopt
 #                                  <old-sid> moves that session's owned targets into THIS session.
@@ -6603,7 +6604,7 @@ _external_session_observation() { # <items-json> <id> <source> <endpoint> [pid] 
 
 _external_session_observations() { # <managed-job-items-json>
   have jq || return 1
-  local items="$1" id endpoint pid start engine_pid engine_pid_start lane requested resolved generation cc_session_id cc_pid registry_cwd observed
+  local items="$1" id endpoint pid start engine_pid engine_pid_start lane requested resolved generation cc_session_id cc_pid registry_cwd observed pstate
   local source path name command
   # Registry entries prove ownership, not a live terminal state. Preserve the managed record as
   # an observation only when it is not already represented by a managed job.
@@ -6622,11 +6623,12 @@ _external_session_observations() { # <managed-job-items-json>
     _external_session_id_valid "$id" || continue
     _session_engine_alive "$endpoint" "$pid" "$start" "$engine_pid" "$engine_pid_start" || continue
     observed="$(_session_model_observe "$lane" "$endpoint" "$id" 2>/dev/null)"; [ -n "$observed" ] || observed=unknown
-    items="$(printf '%s' "$items" | jq --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$registry_cwd" --argjson model_generation "$generation" '
+    pstate="$(_sv_fleet_state "$endpoint" 2>/dev/null)" || pstate=""; [ -n "$pstate" ] || pstate="unknown"$'\x1f'"managed registry"
+    items="$(printf '%s' "$items" | jq --arg pst "${pstate%%$'\x1f'*}" --arg pev "${pstate#*$'\x1f'}" --arg id "$id" --arg endpoint "$endpoint" --arg lane "$lane" --arg requested "$requested" --arg resolved "$resolved" --arg observed "$observed" --arg pid "$pid" --arg start "$start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$registry_cwd" --argjson model_generation "$generation" '
       . + [{schema_version:"1",session_id:$id,owner:"managed",harness:"registry",lane:(if $lane=="" then null else $lane end),
        requested_model:(if $requested=="" then null else $requested end),resolved_model:(if $resolved=="" then null else $resolved end),model_generation:$model_generation,observed_model:(if $observed=="" then "unknown" else $observed end),effort:null,endpoint:$endpoint,harness_pid:(if $pid=="" then null else ($pid|tonumber? // null) end),pid_start:(if $start=="" then null else $start end),
        engine_pid:(if $engine_pid=="" then null else ($engine_pid|tonumber? // null) end),engine_pid_start:(if $engine_pid_start=="" then null else $engine_pid_start end),
-       started_at:null,state:"unknown",state_evidence:"managed registry",composer_state:"unknown",claim:null,
+       started_at:null,state:$pst,state_evidence:$pev,composer_state:"unknown",claim:null,
        task_summary:"managed session",last_receipt:null,source_generation:null,cwd:(if $cwd=="" then null else $cwd end),
        cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),
        cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber? // null) end)}]')" || return 1
@@ -8300,7 +8302,8 @@ _heartbeat_tick() {
           '{event_id:$event_id,kind:"fleet-state",generation:$generation,state:.state,job_id:.job_id,session_id:.session_id,task_summary:.task_summary}')" || wake_ok=0
         ;;
     esac
-  done < <(printf '%s' "$snapshot" | jq -c '.items[] | select((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead" or .state == "unresponsive?" or .state == "blocked?"))')
+  done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead" or .state == "unresponsive?" or .state == "blocked?")) or (.owner == "managed" and (.state == "idle" or .state == "completed" or .state == "done")))')
+  _sv_observe_all beacon >/dev/null 2>&1 || true   # durable lanes/events.jsonl that supervise replays
   if [ "$wake_cursor" != "$generation" ]; then
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi
@@ -13418,12 +13421,13 @@ _wait_session() {
       fi
       st=working
     else
-      st="$(_fleet_snapshot_refresh 2>/dev/null | jq -r --arg id "$id" '[.items[]? | select(.session_id==$id) | .state][0] // empty' 2>/dev/null)"
+      st="$(_sv_snapshot_recent 2>/dev/null | jq -r --arg id "$id" '[.items[]? | select(.session_id==$id) | .state][0] // empty' 2>/dev/null)"
       [ -z "$st" ] && [ "$alive" = 0 ] && st=ended
       case "$st" in
         working|unresponsive\?) seen_work=1; idle_since="" ;;
         blocked|blocked\?) printf '[outsourcerer] wait: %s is waiting on you.\n' "$id" >&2; return 3 ;;
         done|completed) printf '[outsourcerer] wait: %s is done.\n' "$id" >&2; return 0 ;;
+        unknown) _sv_unknown_persistent "$id" && { printf '[outsourcerer] wait: %s screen is unrecognised and unchanged; treat as stalled (capture saved in %s). Read it: OUTSOURCERER_TMUX=%s %s session read\n' "$id" "$OSRC_HOME/fixtures-inbox" "$id" "$0" >&2; return 3; } ;;
         failed|dead|ended|stopped) printf '[outsourcerer] wait: %s %s.\n' "$id" "$st" >&2; return 1 ;;
         idle|'')
           [ -n "$idle_since" ] || idle_since=$(date +%s)
@@ -18386,12 +18390,6 @@ _session_model_observe() { # <lane> <endpoint> <session-id>
   if [ -n "$_f" ]; then "$_f" "$endpoint" "$session_id"; return; fi
   case "$lane" in devin|dv) _session_model_observe_devin "$endpoint" "$session_id" ;; *) printf 'unknown\n' ;; esac
 }
-_session_model_matches() { # <requested> <resolved> <observed>
-  local requested="$1" resolved="$2" observed="$3"
-  [ -n "$observed" ] && [ "$observed" != unknown ] || return 1
-  [ "$(printf '%s' "$observed" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$requested" | tr '[:upper:]' '[:lower:]')" ] && return 0
-  [ "$(printf '%s' "$observed" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$resolved" | tr '[:upper:]' '[:lower:]')" ]
-}
 _session_model_receipt_devin() { _external_receipt_verify "$1" "$2"; }
 _session_model_receipt() { # <lane> <pane> <restore-id>
   # Descriptor-first (native context then lane token -> receipt_fn); the case below
@@ -18737,7 +18735,7 @@ _winpty_session() {
       fi
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
       _owner_record "$SESSION_NAME"
-      echo "To be woken when a turn ends: after each session send, start '$0 wait $SESSION_NAME' as a background command."
+      echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
       [ -n "${1:-}" ] || die "session send needs text"
@@ -18936,7 +18934,7 @@ session() {
       else
         osrc_done_clear "$SESSION_NAME" 2>/dev/null || true
       fi
-      echo "To be woken when a turn ends: after each session send, start '$0 wait $SESSION_NAME' as a background command."
+      echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
       _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
@@ -19075,99 +19073,8 @@ session() {
   esac
 }
 
-# ---- unwatched-job detection --------------------------------------------------------------------
-# A detached job nobody is watching is the failure mode this tool exists to prevent: it accepts work,
-# goes quiet, and the orchestrator finds out minutes or hours later. Telling the orchestrator to
-# "remember to watch" does not survive a busy session, so the tool tracks attention itself and says so
-# at the next opportunity, rather than relying on anyone's memory.
-_mark_watched() { [ -n "${1:-}" ] && [ -d "$OSRC_JOBS/$1" ] && date +%s > "$OSRC_JOBS/$1/last_seen" 2>/dev/null || true; }
-
-# _unwatched_jobs -> lines "<id> <seconds-since-anyone-looked>" for RUNNING jobs nobody is tracking.
-_unwatched_jobs() {
-  local jd id st seen now age; now=$(date +%s)
-  [ -d "$OSRC_JOBS" ] || return 0
-  for jd in "$OSRC_JOBS"/*/; do
-    [ -d "$jd" ] || continue
-    id="$(basename "$jd")"
-    st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-    case "$st" in running|launching|"stalled?"|"exploring?"|no-progress-writes) ;; *) continue ;; esac
-    seen="$(cat "$jd/last_seen" 2>/dev/null)"
-    case "$seen" in ''|*[!0-9]*) seen="$(cat "$jd/started_at" 2>/dev/null)" ;; esac
-    case "$seen" in ''|*[!0-9]*) continue ;; esac
-    age=$(( now - seen ))
-    [ "$age" -ge "${OSRC_UNWATCHED_AFTER:-120}" ] && printf '%s %s\n' "$id" "$age"
-  done
-}
-
-# _warn_unwatched -> loud, actionable notice on stderr when live jobs are going unobserved.
-_warn_unwatched() {
-  local out n; out="$(_unwatched_jobs)"; [ -n "$out" ] || return 0
-  n="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
-  printf '>>> [outsourcerer] %s job(s) are RUNNING and nobody has looked at them:\n' "$n" >&2
-  printf '%s\n' "$out" | while read -r _i _a; do
-    printf '>>>   %s  (unobserved %ss)   watch it: %s watch %s\n' "$_i" "$_a" "$0" "$_i" >&2
-  done
-  printf '>>>   An unwatched job is how a wedge becomes a lost hour. Watch it, or cancel it.\n' >&2
-}
-
-# ---- stop guard (Claude Code Stop hook) ---------------------------------------------------
-# Claude Code takes a turn only on user input or when a background command it started exits.
-# A delegate launched without a background `wait` therefore finishes unnoticed, and the agent keeps
-# telling the user it is "still going" (issue #48). The plugin's Stop hook runs `stop-guard`: when
-# the session that is about to end its turn launched delegates that are still live and nothing is
-# waiting on them, it blocks the stop and names the exact `wait` commands to start. A live run with
-# a waiter is fine, because the waiter's exit will wake the session.
-#
-# Ownership: every launch made from a Claude Code session records its id under
-# $OSRC_HOME/owners/<session-id>/. Other sessions' work never blocks this one.
-# Loop safety: the same unwaited set is blocked at most OSRC_STOP_GUARD_MAX times (default 2), then
-# the stop is allowed. A new set blocks again. OSRC_STOP_GUARD=0 turns the guard off. Any error
-# allows the stop.
-# (_owner_sid/_owner_record/_waited_ids moved to lib/handover.sh; _owned_live_state stays here.)
-
-# _owned_live_state lives in lib/owner_state.sh (moved for the file-size ratchet; the
-# hub and stop-guard both call it after the lib load).
-
-cmd_stop_guard() {
-  [ "${OSRC_STOP_GUARD:-1}" = "0" ] && return 0
-  have jq || return 0
-  local input sid dir live="" id state waited n reason key cnt max="${OSRC_STOP_GUARD_MAX:-2}"
-  case "$max" in ''|*[!0-9]*) max=2 ;; esac
-  input="$(head -c 65536 2>/dev/null)" || input=""
-  sid="$(_owner_sid "$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)")"
-  [ -n "$sid" ] || sid="$(_owner_sid)"
-  [ -n "$sid" ] || return 0
-  dir="$OSRC_HOME/owners/$sid"
-  [ -d "$dir" ] || return 0
-  waited="$(_waited_ids 2>/dev/null)"
-  for id in $(ls -1 "$dir" 2>/dev/null); do
-    state="$(_owned_live_state "$id" 2>/dev/null)"
-    case "$state" in
-      done|gone) rm -f "$dir/$id" 2>/dev/null ;;
-      live) printf '%s\n' "$waited" | grep -qxF "$id" || live="$live $id" ;;
-    esac
-  done
-  live="${live# }"
-  if [ -z "$live" ]; then
-    rm -f "$dir/.stop-blocks" 2>/dev/null
-    rmdir "$dir" 2>/dev/null
-    return 0
-  fi
-  # Loop safety: count consecutive blocks for this exact set.
-  key="$(printf '%s' "$live" | cksum | awk '{print $1}')"
-  cnt="$(awk -v k="$key" '$1==k{print $2}' "$dir/.stop-blocks" 2>/dev/null)"; cnt="${cnt:-0}"
-  if [ "$cnt" -ge "$max" ]; then
-    printf '[outsourcerer] stop-guard: %s still running with nothing waiting on it; letting the turn end after %s reminders.\n' "$live" "$cnt" >&2
-    return 0
-  fi
-  printf '%s %s\n' "$key" "$((cnt + 1))" > "$dir/.stop-blocks" 2>/dev/null
-  n="$(printf '%s\n' $live | grep -c .)"
-  reason="$(printf 'Outsourcerer: %s delegate run(s) you launched are still going, and nothing will wake you when they finish. Before ending your turn, start one background command per run (Bash with run_in_background: true):' "$n")"
-  for id in $live; do reason="$reason $(printf '\n  %s wait %s' "$SCRIPT_PATH" "$id")"; done
-  reason="$reason$(printf '\nThen tell the user what is running. Each wait returns with the result when its run ends, which gives you a turn to report it.')"
-  jq -cn --arg r "$reason" '{decision:"block", reason:$r}'
-  return 0
-}
+# Ownership registry (_owner_sid, _owner_record): lib/handover.sh. _owned_live_state: lib/owner_state.sh.
+# Unwatched-job nags, _waited_ids and the stop guard: lib/stopguard.sh. supervise: lib/supervise.sh.
 
 # ---- blind-turn guard ------------------------------------------------------------------
 # The failure this closes: four delegated sessions sat parked on approval prompts for over an
@@ -20666,7 +20573,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|lane|review|team|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|supervise|lane|review|team|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -20730,6 +20637,7 @@ main() {
     bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
     heartbeat)   cmd_heartbeat "$@" ;;                     # verified supervision arm: start|status
     watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
+    supervise)   cmd_supervise "$@" ;;                     # ONE blocking waiter for everything this session owns: EVENT/NEXT lines (lib/supervise.sh)
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
@@ -20768,7 +20676,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|team|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|gc|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|team|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|supervise|result|logs|cancel|cleanup|gc|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a
@@ -20802,7 +20710,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|lane|review|team|explain|classify|session|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|supervise|lane|review|team|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue|cloud)
       if ! _blind_turn_guard; then

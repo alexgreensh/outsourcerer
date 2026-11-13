@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.323
+▝▜██████▀  Haiku 5.5 with xhigh effort · Claude Ultra
+ ▝▝   ▝▝   ~/code/demo-app · /rc
+
+
+❯ Ask me a yes/no question and wait for my answer. Do nothing else.
+
+⏺ Would you like me to continue the refactor on the feature/x branch?
+
+✻ Brewed for 27s · done 9:29 AM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Haiku 5.5 | xhi | demo-app | (feature/x) | █░░░░░░░░░ 14% | Quality --
+  ⤸ resumable | week 23%
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 15 agents

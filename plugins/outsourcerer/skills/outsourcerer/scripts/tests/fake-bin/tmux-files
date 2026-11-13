@@ -1,0 +1,13 @@
+#!/bin/bash
+# Fake tmux for supervise tests: a pane is the file $FAKE_TMUX_DIR/<target>.screen.
+# has-session succeeds while that file exists; capture-pane prints it. Nothing else does anything.
+D="${FAKE_TMUX_DIR:?}"; cmd="$1"; shift; t=""
+while [ "$#" -gt 0 ]; do case "$1" in -t) t="$2"; shift 2 ;; *) shift ;; esac; done
+t="${t#=}"; t="${t%%:*}"
+case "$cmd" in
+  has-session) [ -f "$D/$t.screen" ] ;;
+  capture-pane) [ -f "$D/$t.screen" ] && cat "$D/$t.screen" ;;
+  send-keys) echo "send-keys $t" >> "$D/keys.log" ;;
+  list-panes|display-message|display) exit 1 ;;
+  *) exit 0 ;;
+esac
