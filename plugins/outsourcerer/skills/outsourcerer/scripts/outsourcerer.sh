@@ -15202,69 +15202,7 @@ cmd_image() {
 # =============================================================================
 # reverse bridge (insourcerer): let a Codex session delegate INTO claude.
 # =============================================================================
-# Reverse bridge INTO droid / cursor: teach the HOST agent (Factory droid, Cursor CLI) to drive
-# outsourcerer from ITS side — someone living in droid/cursor gets Devin/OpenRouter/Claude/Codex/
-# local lanes + bg/fanout supervision without leaving their tool. Blocks are idempotent
-# (marker-guarded, same OUTSOURCERER:INSOURCE marker as parity-codex).
-_insource_block() {   # <host-label>
-  cat <<EOF
-
-<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: $1) -->
-## Outsourcerer: delegate grunt work to cheaper/different engines
-This machine has outsourcerer installed. From this $1 session you can delegate to Devin
-(glm-5.2/swe-1.7, spends Devin plan limits), OpenRouter (glm/hy3/deepseek via --provider cc|codex),
-a VERIFIED Claude model (run -m fable|opus|sonnet|haiku, Claude subscription), ChatGPT-sub
-models (run -m sol|terra|luna), keyless Gemini (run -m gemini-flash), or local Ollama (\$0 cash + \$0 plan, private).
-  $SCRIPT_PATH doctor                          # what's available right now (run this first)
-  $SCRIPT_PATH run -m glm "<read-only task>"   # one-shot; edit/yolo for mutating work
-  $SCRIPT_PATH bg run -m hy3 "<long task>"     # supervised background job -> status/result <id>
-  $SCRIPT_PATH fanout --max 6 -m glm --verb run -- "t1" "t2"   # parallel multi-agent
-First cloud delegation needs a one-time consent: $SCRIPT_PATH consent grant (remembered after).
-Read only the final message; delegates end with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>).
-<!-- /OUTSOURCERER:INSOURCE -->
-EOF
-}
-
-parity_droid() {
-  have droid || printf '>>> note: droid CLI not on PATH yet; writing the bridge anyway so it works the moment droid is installed.\n' >&2
-  local fhome="${FACTORY_HOME:-$HOME/.factory}" agents; agents="$fhome/AGENTS.md"
-  mkdir -p "$fhome"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-droid: insource block already present in $agents"; return 0
-  fi
-  _insource_block "Factory droid" >> "$agents" || die "parity-droid: cannot write $agents"
-  echo "parity-droid: appended insource block to $agents (droid loads ~/.factory/AGENTS.md globally)"
-}
-
-parity_cursor() {
-  local agents="$PWD/AGENTS.md"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-cursor: insource block already present in $agents"; return 0
-  fi
-  _insource_block "Cursor" >> "$agents" || die "parity-cursor: cannot write $agents"
-  echo "parity-cursor: appended insource block to $agents (cursor-agent auto-loads repo-root AGENTS.md; repo-level by design — commit or gitignore as you prefer)"
-}
-
-parity_codex() {
-  local codex_home="${CODEX_HOME:-$HOME/.codex}" agents
-  agents="$codex_home/AGENTS.md"
-  mkdir -p "$codex_home"
-  if [ -f "$agents" ] && grep -q 'OUTSOURCERER:INSOURCE' "$agents" 2>/dev/null; then
-    echo "parity-codex: insource block already present in $agents"; return 0
-  fi
-  cat >> "$agents" <<EOF
-
-<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity-codex) -->
-## Insourcing to Claude (outsourcerer reverse bridge)
-For turns needing Claude-grade judgment, delegate INTO Claude from this Codex session:
-  $SCRIPT_PATH run -m fable "<task>"     # Claude-native (uses your Claude subscription)
-  $SCRIPT_PATH --provider cc run "<task>"  # OpenRouter cc lane (a cheap Claude-compatible model)
-Read only the final message; the delegate signals liveness with OSRC::PROGRESS lines and ends
-with OSRC::DONE <summary> (or OSRC::BLOCKED <reason>) as its final line.
-<!-- /OUTSOURCERER:INSOURCE -->
-EOF
-  echo "parity-codex: appended insource block to $agents"
-}
+# The INSOURCE writers (_insource_block, _insource_write, parity_droid|cursor|codex) live in lib/parity.sh.
 
 # _osrc_realpath <path> -> physical path with all symlinks resolved (portable: macOS ships neither
 # `readlink -f` nor `realpath` by default, so follow the chain by hand). This matters because
