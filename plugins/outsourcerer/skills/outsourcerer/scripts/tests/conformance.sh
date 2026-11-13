@@ -122,6 +122,7 @@ _ALL_SUITES="$_ALL_SUITES test_factory_e2e"
 _ALL_SUITES="$_ALL_SUITES test_factory_pstack"
 _ALL_SUITES="$_ALL_SUITES test_job_meta_lane"
 _ALL_SUITES="$_ALL_SUITES test_reconcile_launch_grace"
+_ALL_SUITES="$_ALL_SUITES test_handover"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
@@ -299,11 +300,23 @@ _gate_int_sweep() {
 # developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
 # default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
 _conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
+[ -d "$_conf_tmux_dir" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
+# A PATH shim routes EVERY tmux call a suite makes — its own and the engine's — onto a private
+# named socket inside that suite's TMUX_TMPDIR, so kill-server can never reach the developer's
+# real server even if TMUX leaks into a suite. Suites that fake tmux still win: they prepend
+# their own fake-bin to PATH inside the suite.
+_conf_shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-shim.XXXXXX")" || { echo "FAIL: mktemp for the tmux shim"; exit 1; }
+_conf_tmux_real="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_conf_tmux_real" ]; then
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-L8-%s "$@"\n' "$_conf_tmux_real" "$$" > "$_conf_shim_dir/tmux"
+  chmod +x "$_conf_shim_dir/tmux"
+  PATH="$_conf_shim_dir:$PATH"; export PATH
+fi
 _conf_tmux_end() {
   local d
-  TMUX_TMPDIR="$_conf_tmux_dir" tmux kill-server >/dev/null 2>&1
-  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && TMUX_TMPDIR="${d%/}" tmux kill-server >/dev/null 2>&1; done
-  rm -rf "$_conf_tmux_dir"
+  env -u TMUX -u TMUX_PANE tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1
+  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${d%/}" tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1; done
+  rm -rf "$_conf_tmux_dir" "$_conf_shim_dir"
 }
 _conf_tmux_had="${TMUX_TMPDIR+1}"; _conf_tmux_prev="${TMUX_TMPDIR-}"
 export TMUX_TMPDIR="$_conf_tmux_dir"; unset TMUX TMUX_PANE
@@ -354,7 +367,7 @@ else
           printf '%s' "$_suite_out" > "$_par_dir/$t.out"
           printf '%s %s %s\n' "$_suite_rc" "$_suite_timed_out" "$_suite_secs" > "$_par_dir/$t.meta.tmp"
           mv -f "$_par_dir/$t.meta.tmp" "$_par_dir/$t.meta"
-          tmux kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
+          env -u TMUX -u TMUX_PANE tmux -L osrc-test-L8-$$ kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
         _par_pid[$_l]=$!; _active=$((_active + 1))
       else
         echo absent > "$_par_dir/$t.meta"; _par_done[$_l]=1
