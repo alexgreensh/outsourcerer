@@ -81,7 +81,9 @@ Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
 `outsourcerer hub serve [--port N] [--new-token]` runs the same page on
 `127.0.0.1` only, behind a token in the URL, and opens it (`--no-open` /
 `OSRC_HUB_NO_OPEN=1` to skip). The token is created once into
-`$OSRC_HOME/hub/token` (mode `0600`) and reused on every later launch, so the
+`$OSRC_HOME/hub/token` under a `0700` `hub/` dir: exactly 32 hex chars,
+`0600` re-enforced on every start, short or padded contents re-minted, and a
+symlinked file refused outright. It is reused on every later launch, so the
 printed URL stays bookmarkable across restarts; `--new-token` is the only
 rotation and kills old bookmarks. The default port is fixed at `8788`; if it is
 taken the server slides to the next free port (up to 8798) and prints a notice —
@@ -107,8 +109,9 @@ token if `/dev/urandom` is unreadable.
 
 Local mode makes **zero third-party requests**: Poppins (latin) and Noto Sans
 Hebrew are vendored as woff2 under `lib/hub-assets/fonts/` (provenance and OFL
-texts in `SOURCES.md` there) and served token-free from `/assets/`; the eight
-icons are inlined SVG; the GitHub star count is fetched in artifact mode only.
+texts in `SOURCES.md` there) and served token-free from `/assets/`; all icons
+are inlined SVG (`ICONS`/`HICONS`); the GitHub star count is fetched in
+artifact mode only.
 The served page carries a strict CSP (`default-src 'self'` plus
 `script-src`/`style-src 'unsafe-inline'` because the page is one self-contained
 file), `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`,
