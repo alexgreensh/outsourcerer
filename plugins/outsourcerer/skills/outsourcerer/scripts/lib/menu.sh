@@ -6,6 +6,101 @@
 # (FINDINGS class 6, Fable E8): Claude Code's composer + status bar read as a cursor list, and a reply
 # that ends in a numbered list read as a numbered menu. Unknown engines keep the legacy heuristics.
 
+# ---- options straight from the engine reader (L3 round 2, review finding 7) ---------------------
+# On a recognised engine the option rows are read from the live screen rows (_SCR_L): the cursor row
+# (❯ › > ● ❭) fixes the label column, and the menu is every row at that column, numbered or not.
+# Row 1 is listed even when the cursor sits on it (the old numbered regex needed a leading digit).
+_osrc_menu_row() { # <row>: sets _MR_SEL (1 = cursor row) _MR_COL (label column) _MR_NUM _MR_LAB
+  local r="$1" pre p2
+  case "$r" in *"│"*) case "${r%%│*}" in *[!\ ]*) ;; *) r="${r#*│}" ;; esac ;; esac
+  pre="${r%%[! ]*}"; r="${r#"$pre"}"; _MR_SEL=0
+  case "$r" in "❯ "*|"› "*|"> "*|"● "*|"❭ "*)
+    _MR_SEL=1; pre="$pre${r%% *} "; r="${r#* }"; p2="${r%%[! ]*}"; pre="$pre$p2"; r="${r#"$p2"}" ;;
+  esac
+  _MR_COL=${#pre}; _MR_NUM=""
+  case "$r" in [0-9]". "*|[0-9][0-9]". "*|[0-9]") "*|[0-9][0-9]") "*) _MR_NUM="${r%%[.)]*}"; r="${r#*[.)] }" ;; esac
+  r="$(_osrc_scr_trim "$r")"; r="${r%│}"
+  _MR_LAB="$(printf '%s' "$(_osrc_scr_trim "$r")" | tr -s ' ')"
+}
+
+_osrc_menu_from_screen() { # uses _SCR_L from the last analyse; prints MENU select + SEL/OPT rows, rc 1 if none
+  local n=$_SCR_N lo s i col numd dir pos=0 rows="" out=""
+  lo=$((n - 30)); [ "$lo" -ge 0 ] || lo=0
+  s=-1; i=$((n - 1))
+  while [ "$i" -ge "$lo" ]; do
+    _osrc_menu_row "${_SCR_L[$i]}"
+    [ "$_MR_SEL" = 1 ] && [ -n "$_MR_LAB" ] && { s=$i; break; }
+    i=$((i - 1))
+  done
+  [ "$s" -ge 0 ] || return 1
+  col=$_MR_COL; numd=0; [ -n "$_MR_NUM" ] && numd=1
+  rows="$s"
+  for dir in -1 1; do
+    i=$((s + dir))
+    while [ "$i" -ge "$lo" ] && [ "$i" -lt "$n" ]; do
+      if _osrc_scr_is_rule "${_SCR_L[$i]}"; then [ "$numd" = 1 ] || break; i=$((i + dir)); continue; fi
+      _osrc_menu_row "${_SCR_L[$i]}"
+      local isnum=0; [ -n "$_MR_NUM" ] && isnum=1
+      if [ "$_MR_COL" = "$col" ] && [ -n "$_MR_LAB" ] && [ "$isnum" = "$numd" ]; then
+        if [ "$dir" = -1 ]; then rows="$i $rows"; else rows="$rows $i"; fi
+      elif [ "$numd" = 1 ] && [ -z "$_MR_NUM" ] && [ "$_MR_COL" -gt "$col" ]; then :   # wrapped label / description
+      else break
+      fi
+      i=$((i + dir))
+    done
+  done
+  for i in $rows; do
+    _osrc_menu_row "${_SCR_L[$i]}"; pos=$((pos + 1))
+    out="$out$([ "$_MR_SEL" = 1 ] && printf SEL || printf OPT) ${_MR_NUM:-$pos} $_MR_LAB
+"
+  done
+  printf 'MENU select\n%s' "$out"
+}
+
+# A row that widens the delegate's permissions is never picked by a label match, only by its index.
+_osrc_menu_risky() { # <label>
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    *"don't ask again"*|*"dont ask again"*|*always*|*"auto mode"*|*bypass*|*"accept edits"*|*auto-approve*|*persist*|*"trust parent"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Resolve a selector against a report's SEL/OPT rows. Prints the option index. A number must be an
+# offered index. A label must match exactly one row (case-insensitive substring); two or more is
+# refused as ambiguous, and a risky row is refused by label.
+_osrc_menu_resolve() { # <report> <selector>
+  local rep="$1" sel="$2" line idx lab hits=0 hit="" hitlab="" names=""
+  [ -n "$sel" ] || { echo "empty selector" >&2; return 1; }
+  case "$sel" in *[!0-9]*) ;; *)
+    printf '%s\n' "$rep" | grep -qE "^(SEL|OPT) $sel " || { echo "index $sel is not one of the offered options" >&2; return 1; }
+    printf '%s' "$sel"; return 0 ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in "SEL "*|"OPT "*) ;; *) continue ;; esac
+    idx="${line#* }"; lab="${idx#* }"; idx="${idx%% *}"
+    if printf '%s\n' "$lab" | grep -F -i -q -- "$sel"; then
+      hits=$((hits + 1)); hit="$idx"; hitlab="$lab"; names="$names [$idx] $lab;"
+    fi
+  done <<<"$rep"
+  [ "$hits" -ge 1 ] || { echo "no option matches '$sel'" >&2; return 1; }
+  [ "$hits" -eq 1 ] || { echo "'$sel' is ambiguous, it matches:$names answer with the option index instead" >&2; return 1; }
+  if _osrc_menu_risky "$hitlab"; then
+    echo "refusing to pick '$hitlab' by label: it widens the delegate's permissions. If that is really meant, answer with its index: $hit" >&2; return 1
+  fi
+  printf '%s' "$hit"
+}
+
+_osrc_menu_how() { # <kind>: the answer hint printed under a menu report
+  case "$1" in
+    consent) echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
+    *) echo "answer with:  $0 session answer <index>   (an OPT/SEL index above; a label works only when it matches exactly one row, and never picks an always/don't-ask-again/auto-mode/bypass row)" ;;
+  esac
+}
+
+_osrc_menu_pos() { # <report> <index>: 1-based position of that option among the SEL/OPT rows
+  printf '%s\n' "$1" | grep -E '^(SEL|OPT) ' | awk -v k="$2" '$2==k {print NR; exit}'
+}
+
 # ---- interactive menu / choice-prompt detection (Bug A) -----------------------------------------
 # When a delegate is showing an interactive choice menu, `session send` refused with "nothing was
 # typed", leaving NO way to answer the menu through the session API. `session answer` and the helpful
@@ -17,6 +112,7 @@
 #   MENU numbered
 #   OPT <idx> <label>
 #   ...
+#   MENU select            <- recognised engine: rows read by lib/screen.sh, SEL/OPT by option index
 #   MENU cursor
 #   SEL <pos> <label>      <- the row currently marked with ❯
 #   OPT <pos> <label>
@@ -54,6 +150,8 @@ _managed_menu_detect() { # <pane>
   done
   if [ "${OSRC_SCR_GENERIC:-1}" != 1 ]; then
     case "$OSRC_SCR_STATE" in approval|question) ;; *) printf 'MENU none\n'; return 0 ;; esac
+    # The reader knows this layout: list the options from its rows (row 1 included, no history).
+    _osrc_menu_from_screen && return 0
   fi
   # Legacy path guard: a prompt-glyph row that sits directly between two horizontal rules is a
   # composer box, and a `❯ Try "…"` row is Claude Code's composer placeholder. Neither is a menu.
@@ -202,52 +300,18 @@ _managed_menu_answer() { # <pane> <selector>
       # Format-agnostic: accept EITHER a numeric index (backward compat) OR a label
       # substring. The two provider families order options differently, so a hardcoded
       # row index picks the wrong option across families; matching the label is safe.
-      case "$sel" in
-        *[!0-9]*)
-          # Label substring: resolve to the matching option's index, then type it.
-          local _nidx=""
-          while IFS= read -r line; do
-            case "$line" in
-              OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then _nidx="${line#OPT }"; _nidx="${_nidx%% *}"; fi ;;
-            esac
-          done < <(printf '%s\n' "$report")
-          [ -n "$_nidx" ] || { echo "no numbered option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
-          sel="$_nidx"
-          ;;
-      esac
-      printf '%s\n' "$report" | grep -qE "^OPT $sel " || { echo "index $sel is not one of the offered options" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      sel="$(_osrc_menu_resolve "$report" "$sel")" || { _endpoint_mutation_unlock "$key"; return 1; }
       tmux send-keys -t "$pane" -l -- "$sel" 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
       ;;
-    codex)
-      # Codex approval menu: cursor-like, but the default highlight is option 1 and plain
-      # Enter selects it. Match the label, navigate from position 1 to the target with
-      # Up/Down, then Enter (Enter alone if the target IS option 1). Navigation uses
-      # standard TUI arrow keys; the default-option-1 + Enter path is the verified one.
-      target_pos=0; sel_pos=0
-      while IFS= read -r line; do
-        case "$line" in
-          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="$sel_pos"; fi ;;
-          OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="${line#OPT }"; target_pos="${target_pos%% *}"; fi ;;
-        esac
-      done < <(printf '%s\n' "$report")
-      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no codex option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
-      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected codex row found" >&2; _endpoint_mutation_unlock "$key"; return 1; }
-      delta=$((target_pos - sel_pos))
-      if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done
-      elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done; fi
-      tmux send-keys -t "$pane" Enter 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }
-      ;;
-    cursor)
-      target_pos=0; sel_pos=0
-      while IFS= read -r line; do
-        case "$line" in
-          SEL*) sel_pos="${line#SEL }"; sel_pos="${sel_pos%% *}"; lab="${line#SEL }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="$sel_pos"; fi ;;
-          OPT*) lab="${line#OPT }"; lab="${lab#* }"; if _managed_label_contains_literal "$lab" "$sel"; then target_pos="${line#OPT }"; target_pos="${target_pos%% *}"; fi ;;
-        esac
-      done < <(printf '%s\n' "$report")
-      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no cursor-list option matches '$sel'" >&2; _endpoint_mutation_unlock "$key"; return 1; }
-      [ "${sel_pos:-0}" -gt 0 ] 2>/dev/null || { echo "no currently selected (❯) row found" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+    codex|cursor|select)
+      # Navigate from the highlighted row to the target by list position, then Enter. Enter alone
+      # when the target is already highlighted.
+      target_pos="$(_osrc_menu_resolve "$report" "$sel")" || { _endpoint_mutation_unlock "$key"; return 1; }
+      target_pos="$(_osrc_menu_pos "$report" "$target_pos")"
+      sel_pos="$(printf '%s\n' "$report" | grep -E '^(SEL|OPT) ' | awk '$1=="SEL" {print NR}')"
+      [ "$(printf '%s\n' "$sel_pos" | grep -c .)" = 1 ] || { echo "the menu has no single highlighted row; nothing sent" >&2; _endpoint_mutation_unlock "$key"; return 1; }
+      [ "${target_pos:-0}" -gt 0 ] 2>/dev/null || { echo "option not found in the menu; nothing sent" >&2; _endpoint_mutation_unlock "$key"; return 1; }
       delta=$((target_pos - sel_pos))
       if [ "$delta" -gt 0 ]; then i=0; while [ "$i" -lt "$delta" ]; do tmux send-keys -t "$pane" Down 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done
       elif [ "$delta" -lt 0 ]; then i=0; n=$((0 - delta)); while [ "$i" -lt "$n" ]; do tmux send-keys -t "$pane" Up 2>/dev/null || { _endpoint_mutation_unlock "$key"; return 1; }; i=$((i+1)); done; fi

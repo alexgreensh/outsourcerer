@@ -43,16 +43,25 @@ How the reader works:
 ## Sends that land
 
 `session send "…"` reports exactly one of these:
-- `sent (verified: …)`: the composer cleared, and the engine started working, opened a prompt,
-  or shows the text in its history.
-- `sent (submitted: …; no reaction seen yet)`: the composer cleared, but no reaction showed up
-  within `OSRC_SEND_VERIFY_SECS` (default 8).
+- `sent (verified: …)`: there is proof about THIS send. The screen is read before typing, and
+  only one of these counts: the text was seen in the composer and the composer then emptied; a
+  history row with the text appeared that was not there before; or the engine moved into
+  `working` from a state that was not working. An old question, an old identical line or an
+  approval on screen proves nothing.
+- `sent (submitted, …; model delivery NOT independently verified: …)`: the composer is empty but
+  none of those proofs showed up within `OSRC_SEND_VERIFY_SECS` (default 8). Check with
+  `session state`.
+- If a prompt opens while the text is being typed, the keys went into the prompt. Enter is not
+  pressed and the send fails.
 - On failure it prints `EVENT failed <session> <ts> send did not land: …` plus a NEXT line and
   exits non-zero. If the text was still in the composer after Enter, it pressed Enter once more
   before failing.
 
 Messages longer than `OSRC_SEND_MAX_CHARS` (default 1500) are written to
-`<delegate cwd>/.osrc-msgs/msg-*.md`, which is added to git's exclude list. The delegate gets a
+`<delegate cwd>/.osrc-msgs/msg-*.md`. That folder is added to the repo's `.git/info/exclude`
+(the shared one, from `git rev-parse --git-common-dir`), so it never shows in `git status`. The file
+is written only after the send is admitted and is removed if the send is refused before typing.
+Files older than 7 days are pruned on the next spill. The delegate gets a
 one-line "Read the file …" instead. Sending the same message twice ("continue", "y") works: each
 send is its own obligation.
 
@@ -80,31 +89,72 @@ and never picks "always allow". It needs two things to act:
 
 After pressing Enter it re-reads the screen to confirm the prompt closed.
 
-**Approved:**
-- Read-only commands: ls/cat/grep/rg/head/tail/find (no -exec/-delete), sed without -i,
-  `git status|log|diff|show|…`, `gh pr|issue|run view|list`, `gh api` GET, `--help`/`--version`.
-- Test, build and lint runs: npm/pnpm/yarn test|lint|build, pytest, cargo/go test|build,
-  `make test`, `bash tests/…`, ruff check, tsc, eslint (no --fix).
-- Writes (mkdir/touch/cp/mv/rm, redirects, `sed -i`, git add/commit, file-create prompts) only
-  when every target is inside the delegate's worktree. The worktree is the git toplevel of the
-  pane's cwd. Add more dirs with `OSRC_APPROVER_EXTRA_DIRS=dir1:dir2`.
+**What `safe` is, and what it is not.** It stops accidents: a delegate that wanders outside its
+worktree, deletes the wrong thing, reads a secret or pushes. It is **not a sandbox**, and it is
+**no defence against a prompt-injected or hostile delegate**. A delegate that may write
+`tests/x.sh` and then run `bash tests/x.sh`, or edit `package.json` and run `npm test`, can run
+anything it likes, because running the worktree's own tests is in the safe class. If the delegate
+reads untrusted input (issues, web pages, other people's code), keep the policy `off` and use the
+engine's own sandbox.
+
+**Approved** (every flag must be on that command's allowlist, else hold):
+- Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/cut/jq/find (allowlisted
+  predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs,
+  `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
+  `--no-index`, `-O`), `gh pr|issue|run view|list` (no `--web`), `--help`/`--version` on known
+  commands.
+- Test, build and lint runs, only as the exact script verb: `npm|pnpm|yarn test|lint|build`
+  with no extra arguments, pytest/unittest, `cargo|go test|build` (no `-o`, `--manifest-path`),
+  `make test`, `bash tests/…`, ruff check, tsc, eslint (no `--fix`, `-o`, `--outDir`). Every path
+  argument must be inside the worktree.
+- Writes (mkdir/touch/cp/mv/rm, redirects, `sed -i`, `chmod` with a plain 3-digit or symbolic
+  mode, git add/commit, `git switch <name>` / `-c <name>`, file-create prompts) only when every
+  target is inside the delegate's worktree and not `.git` or anything under it. The worktree is
+  the git toplevel of the pane's cwd. Add more dirs with `OSRC_APPROVER_EXTRA_DIRS=dir1:dir2`.
+- `env -u TMUX -u TMUX_PANE …` (and CLAUDECODE, NO_COLOR) in front of an approved command.
 
 **Held** (prints `EVENT approval` and `NEXT … session answer`):
-- rm/delete or any write outside the worktree, or a write aimed at the worktree root itself.
-- git push, reset --hard, any force/-D flag, checkout/restore that discards work, commit --amend.
-- sudo, `curl|wget … | sh`, any network tool, package installs, `npm publish`,
-  `gh pr create/merge`.
-- Secrets (.env*, keys, tokens, ~/.ssh, keychain, printenv/env).
+- rm/delete or any write outside the worktree, a write aimed at the worktree root itself, any
+  write into `.git` (`rm -rf .git`, `.git/hooks/*`, `.git/config`).
+- Anything that touches OSRC_HOME: `OSRC_HOME=…`, `env OSRC_HOME=…`, `env -u OSRC_HOME`,
+  `unset OSRC_HOME`, `export OSRC_HOME=…`, or the word OSRC_HOME anywhere in the command.
+- Any other environment prefix (`PATH=`, `HOME=`, `BASH_ENV=`, `GIT_*`, `*_OPTIONS`, …) unless it
+  is on the short harmless list.
+- Any `$` (variables, `$?`, `$HOME`), `~user`/`~+`/`~-`, brace expansion `{a,b}`, `…`, a trailing
+  `&&`/`||`/`|`/`;`, and multi-line commands (Devin's and Claude's wrapped rows are joined first).
+- git push, reset --hard, any force/-D flag, checkout/restore that discards work, commit
+  `--amend`/`--no-verify`, `git stash` other than list/show (the stash is shared by every
+  worktree), `git switch -C`/`--discard-changes`, `git init`, any git global flag except
+  `--no-pager` (`--git-dir`, `--work-tree`, `-C`, `-c`).
+- `gh api` (every form), `gh pr create/merge`, `gh … --web`, sudo, `curl|wget … | sh`, any network
+  tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
+- Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
+  printenv/env), whatever reads them (cat, jq, cut, awk, column, xargs).
 - ~/.outsourcerer, ~/.claude, $OSRC_HOME, or another git worktree.
-- Command substitution, heredocs, subshells, background `&`, eval/source.
-- tmux/kill/launchctl, interpreters (`python -c`), multi-line commands, folder-trust prompts,
-  and anything it cannot parse. Unknown means hold.
+- Command substitution, heredocs, subshells, background `&`, eval/source, xargs.
+- tmux/kill/launchctl, interpreters (`python -c`), pagers and endless output (`less`, `more`,
+  `yes`), setuid modes (`chmod 4755`), folder-trust prompts, and anything it cannot parse.
+  Unknown means hold.
 
 Matching works on parsed shell tokens with quotes respected. A filename containing "approve" is
-just an argument, and `grep -E 'a|b'` is one segment.
+just an argument, and `grep -E 'a|b'` is one segment. Attached short flags (`-osrc/x`, `-XDELETE`)
+are split before the allowlist check.
+
+**Relative paths are trusted relative to the pane.** The classifier resolves a relative path
+against the git toplevel of the pane's current directory. Claude Code shows no working directory
+in its prompt. Codex and Devin can run a command in a different directory from their own, and
+their prompts do not always show it. When they do not, `rm -rf build` is judged as if it ran in
+the worktree. Absolute and `~` paths are always checked exactly.
 
 A held prompt is reported once. If it is still open after `OSRC_HOLD_MIN` minutes (default 30),
 `EVENT approval … still held after Nm` is re-emitted so it cannot sleep overnight.
+
+**Answering a held prompt.** `session answer` with no selector lists the prompt's rows, read
+from the same engine reader (row 1 included, even under the cursor). Answer with the row's
+index: `session answer 1` approves once on Claude, Codex and agy. A label works only when it
+matches exactly one row: `session answer Yes` on Claude's prompt matches three rows and is
+refused. A row that widens permissions ("always", "don't ask again", "auto mode", "Bypass",
+"accept edits") is never picked by label, only by its index.
 
 `osrc_approver_tick` return codes:
 

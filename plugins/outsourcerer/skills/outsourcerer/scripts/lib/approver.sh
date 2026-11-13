@@ -112,6 +112,8 @@ _osrc_approver_next() { # <session> -> the NEXT command for a held prompt
 osrc_approver_tick() { # <pane> [session-id]
   local LC_ALL; LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL
   local pane="$1" sid="${2:-${1%%:*}}" pol cap eng root verdict decision rule cmd1 key hdir hf now first last age holdmin i lockkey=""
+  # The session id names files in the held dir; an empty, dotted or path-like id would match others.
+  case "$sid" in ""|.*|*/*) return 1 ;; esac
   pol="$(_osrc_approver_policy_get "$sid")"
   [ "$pol" = safe ] || return 1
   eng="$(_osrc_screen_engine_of "$pane")"
@@ -119,7 +121,7 @@ osrc_approver_tick() { # <pane> [session-id]
   _osrc_screen_analyze_text "$eng" <<<"$cap"
   hdir="$(_osrc_approver_dir)/held"
   if [ "$OSRC_SCR_STATE" != approval ]; then
-    rm -f "$hdir/$sid".* 2>/dev/null
+    [ -n "$sid" ] && rm -f "$hdir/$sid".* 2>/dev/null
     return 1
   fi
   cmd1="$(printf '%s' "$OSRC_SCR_CMD" | awk 'NR>1{printf " ⏎ "} {printf "%s", $0}')"
@@ -182,7 +184,7 @@ osrc_approver_tick() { # <pane> [session-id]
     _osrc_approver_next "$sid"
     return 2
   fi
-  rm -f "$hdir/$sid".* 2>/dev/null
+  [ -n "$sid" ] && rm -f "$hdir/$sid".* 2>/dev/null
   printf '%s %s\n' "$now" "$now" > "$hf"
   _osrc_approver_log "$sid" "$eng" "${cmd1:-$OSRC_SCR_PATH}" hold "$rule" "$root" "$OSRC_SCR_KIND" "$OSRC_SCR_PATH"
   printf 'EVENT approval %s %s held by policy safe (%s): %s\n' "$sid" "$now" "$rule" "${cmd1:-${OSRC_SCR_PATH:-$OSRC_SCR_EVIDENCE}}"

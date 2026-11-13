@@ -319,9 +319,18 @@ _osrc_scr_devin() {
   lo=$((n - 25)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*confirm · esc cancel*" $((n - 2 > 0 ? n - 2 : 0)); then
     OSRC_SCR_KIND=other
-    i="$(_osrc_scr_last "*\$ *" "$lo")"
-    case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*) OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")" ;; esac
-    i="$(_osrc_scr_last "❭ *" "$lo")"
+    # Menu row first, then the command: every row from the `$ ` row up to the menu is joined,
+    # so a command Devin wraps onto a second row reaches the classifier whole (multi-line holds).
+    local m; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
+    i="$(_osrc_scr_last "*\$ *" "$lo" $((m - 1)))"
+    case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*)
+      OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")"; i=$((i + 1))
+      while [ "$i" -lt "$m" ]; do
+        OSRC_SCR_CMD="$OSRC_SCR_CMD
+$(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
+      done ;;
+    esac
+    i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
       l="$(_osrc_scr_trim "${_SCR_L[$i]#❭}")"; OSRC_SCR_SEL="${l%% *}"
       case "$l" in *"→ Once"*) OSRC_SCR_SCOPE=once ;; *"→ "*) OSRC_SCR_SCOPE="$(printf '%s' "${l#*→ }" | awk '{print $1}')" ;; esac
@@ -438,6 +447,19 @@ _osrc_scr_history_has() { # <snippet>
   hist="$(printf '%s' "$hist" | tr -s ' ' ' ')"
   case "$hist" in *"$want"*) return 0 ;; esac
   return 1
+}
+
+# How many times <snippet> appears in the history region (wrapped rows joined). Send verification
+# compares this against a count taken before typing, so an old identical line is not a receipt.
+_osrc_scr_history_count() { # <snippet>
+  local want hist i n=0
+  want="$(printf '%s' "$1" | tr -s ' \t\n' '   ')"; want="$(_osrc_scr_trim "$want")"
+  [ -n "$want" ] || { printf 0; return 0; }
+  i=0; hist=""
+  while [ "$i" -le "$OSRC_SCR_HIST_END" ] && [ "$i" -lt "$_SCR_N" ]; do hist="$hist ${_SCR_L[$i]}"; i=$((i + 1)); done
+  hist="$(printf '%s' "$hist" | tr -s ' ' ' ')"
+  while :; do case "$hist" in *"$want"*) hist="${hist#*"$want"}"; n=$((n + 1)) ;; *) break ;; esac; done
+  printf '%s' "$n"
 }
 
 # ---- public API ----------------------------------------------------------------------------------

@@ -108,6 +108,7 @@ _osrc_send_spill() { # <pane> <message>
   [ -n "$cwd" ] && [ -d "$cwd" ] || return 1
   dir="$cwd/.osrc-msgs"
   mkdir -p "$dir" 2>/dev/null || return 1
+  find "$dir" -name 'msg-*.md' -mtime +7 -exec rm -f {} + 2>/dev/null   # read long ago; keep the dir small
   f="$dir/msg-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM.md"
   printf '%s\n' "$msg" > "$f" 2>/dev/null || return 1
   common="$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null)" || common=""
@@ -120,12 +121,17 @@ _osrc_send_spill() { # <pane> <message>
 }
 
 # ---- screen-verified submission ------------------------------------------------------------------
-# After Enter: 0 = submitted and the engine reacted (evidence in OSRC_SEND_EVIDENCE); 2 = the text
-# left the composer but no reaction was seen in the window; 1 = the text is still in the composer
-# after one extra Enter; 3 = layout unknown (caller uses the legacy check); 4 = pane unreadable.
-# <snippet> is the first characters of what was typed.
-_osrc_send_verify_screen() { # <pane> <engine> <snippet>
-  local pane="$1" eng="$2" snip="$3" secs polls i cap retried=0 cleared=0
+# After Enter: 0 = submitted, with proof about THIS send in OSRC_SEND_EVIDENCE; 2 = no proof either
+# way (the composer is empty but nothing tied to this send was seen); 1 = the text is still in the
+# composer after one extra Enter; 3 = layout unknown (caller uses the legacy check); 4 = pane
+# unreadable. <snippet> is the first characters of what was typed.
+# Proof (review finding 8) is one of: the text was SEEN in the composer and the composer is now empty
+# (two reads running); a history row with the text that was not there before typing (count above
+# <base_hist>); a move into `working` from a <base_state> that was not working. A state that already
+# existed (an old question, an old identical line, an approval) proves nothing.
+_osrc_send_verify_screen() { # <pane> <engine> <snippet> [base_state] [base_hist] [seen_typed 0|1]
+  local pane="$1" eng="$2" snip="$3" base="${4:-unknown}" bhist="${5:-}" seen="${6:-0}" secs polls i cap retried=0 cleared=0 run=0
+  case "$bhist" in ''|*[!0-9]*) bhist=999999 ;; esac   # no baseline -> history can never be the proof
   secs="${OSRC_SEND_VERIFY_SECS:-8}"; case "$secs" in ''|*[!0-9]*) secs=8 ;; esac
   polls=$((secs * 4)); OSRC_SEND_EVIDENCE=""
   i=0
@@ -133,29 +139,31 @@ _osrc_send_verify_screen() { # <pane> <engine> <snippet>
     cap="$(_osrc_screen_capture "$pane")" || return 4
     _osrc_screen_analyze_text "$eng" <<<"$cap"
     if [ "$OSRC_SCR_GENERIC" = 1 ] && [ "$OSRC_SCR_COMPOSER_FOUND" != 1 ]; then
-      case "$OSRC_SCR_STATE" in working|approval|question) OSRC_SEND_EVIDENCE="$OSRC_SCR_STATE: $OSRC_SCR_EVIDENCE"; return 0 ;; esac
+      if [ "$OSRC_SCR_STATE" = working ] && [ "$base" != working ]; then OSRC_SEND_EVIDENCE="working (was $base): $OSRC_SCR_EVIDENCE"; return 0; fi
       [ "$i" -ge 2 ] && return 3
     elif [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] && [ -n "$OSRC_SCR_COMPOSER" ]; then
+      run=0
       # Text still sitting in the composer (or a "[Pasted text ...]" chip). One more Enter, once.
       if [ "$retried" = 0 ] && [ "$i" -ge 6 ]; then
-        tmux send-keys -t "$pane" Enter 2>/dev/null; retried=1
+        tmux send-keys -t "$pane" Enter 2>/dev/null; retried=1; seen=1
       elif [ "$retried" = 1 ] && [ "$i" -ge 14 ]; then
         OSRC_SEND_EVIDENCE="text still in the composer after Enter x2: $(printf '%s' "$OSRC_SCR_COMPOSER" | cut -c1-80)"
         return 1
       fi
     else
-      cleared=1
-      case "$OSRC_SCR_STATE" in
-        working|approval|question) OSRC_SEND_EVIDENCE="$OSRC_SCR_STATE: $OSRC_SCR_EVIDENCE"; return 0 ;;
-      esac
-      if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] && _osrc_scr_history_has "$snip"; then
-        OSRC_SEND_EVIDENCE="text in history above the composer"; return 0
+      cleared=1; run=$((run + 1))
+      if [ "$OSRC_SCR_STATE" = working ] && [ "$base" != working ]; then OSRC_SEND_EVIDENCE="working (was $base): $OSRC_SCR_EVIDENCE"; return 0; fi
+      if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] && [ "$(_osrc_scr_history_count "$snip")" -gt "$bhist" ]; then
+        OSRC_SEND_EVIDENCE="new history row with the text above the composer"; return 0
+      fi
+      if [ "$seen" = 1 ] && [ "$run" -ge 2 ]; then
+        OSRC_SEND_EVIDENCE="text seen in the composer, composer empty after Enter (now $OSRC_SCR_STATE)"; return 0
       fi
     fi
     sleep 0.25
     i=$((i + 1))
   done
-  if [ "$cleared" = 1 ]; then OSRC_SEND_EVIDENCE="composer cleared, no reaction within ${secs}s"; return 2; fi
+  if [ "$cleared" = 1 ]; then OSRC_SEND_EVIDENCE="no proof this send landed within ${secs}s: text never seen in the composer, no new history row, no move into working (was $base, now $OSRC_SCR_STATE)"; return 2; fi
   OSRC_SEND_EVIDENCE="text still in the composer after ${secs}s: $(printf '%s' "$OSRC_SCR_COMPOSER" | cut -c1-80)"
   return 1
 }
@@ -166,24 +174,44 @@ _osrc_send_verify_screen() { # <pane> <engine> <snippet>
 # failure (nothing typed, send failed, or the text never left the composer). OSRC_SEND_EVIDENCE holds
 # the reason for the caller. The obligation log records `submitted` with a "screen:" receipt on rc 0.
 _managed_session_send() { # <session-id> <message>
-  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation typed_tail sub_rc tail_rc eng snip spilled
+  local session_id="$1" message="$2" pane="$1" oid key composer receipt generation typed_tail sub_rc tail_rc eng snip spilled spillf="" base bhist seen cap
   OSRC_SEND_EVIDENCE=""
   _managed_endpoint_live "$session_id" "$pane" || { OSRC_SEND_EVIDENCE="session endpoint not provably live"; return 1; }
-  if [ "${#message}" -gt "${OSRC_SEND_MAX_CHARS:-1500}" ]; then
-    spilled="$(_osrc_send_spill "$pane" "$message")" && message="$spilled"
-  fi
   # E6: one obligation per send. A repeated identical message is a new send, not a replay.
   oid="send.$session_id.$(printf '%s' "$message" | cksum | awk '{print $1}').$(date +%s).$$$RANDOM"
   _obligation_admit "$oid" "$session_id" || { OSRC_SEND_EVIDENCE="obligation ledger refused the send"; return 1; }
-  _endpoint_mutation_lock "$pane" || { OSRC_SEND_EVIDENCE="endpoint lock busy"; return 1; }
+  # Long message: spill only once the send is admitted; a refusal before typing removes the file.
+  if [ "${#message}" -gt "${OSRC_SEND_MAX_CHARS:-1500}" ]; then
+    spilled="$(_osrc_send_spill "$pane" "$message")" && { message="$spilled"; spillf="$(printf '%s' "$spilled" | sed 's/^Read the file \([^ ]*\) .*/\1/')"; }
+  fi
+  _endpoint_mutation_lock "$pane" || { OSRC_SEND_EVIDENCE="endpoint lock busy"; [ -n "$spillf" ] && rm -f "$spillf"; return 1; }
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
-  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; OSRC_SEND_EVIDENCE="session endpoint not provably live"; return 1; }
+  _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; [ -n "$spillf" ] && rm -f "$spillf"; OSRC_SEND_EVIDENCE="session endpoint not provably live"; return 1; }
   _tmux_reset_input "$pane"
-  _obligation_append "$oid" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; return 1; }
+  _obligation_append "$oid" "$session_id" typing_started "" || { _endpoint_mutation_unlock "$key"; [ -n "$spillf" ] && rm -f "$spillf"; return 1; }
   _obligation_guard_begin "$oid" "$session_id"
   composer="$(_managed_composer_state "$session_id" "$pane" 2>/dev/null)"
-  [ "$composer" = empty ] || { OSRC_SEND_EVIDENCE="composer not empty before typing (unsent text or unreadable)"; _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  [ "$composer" = empty ] || { OSRC_SEND_EVIDENCE="composer not empty before typing (unsent text or unreadable)"; [ -n "$spillf" ] && rm -f "$spillf"; _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  # Baseline before typing (finding 8): what is on screen now proves nothing about this send.
+  eng="$(_osrc_screen_engine_of "$pane")"
+  snip="$(printf '%s' "$message" | tr -s ' \t\n' '   ' | cut -c1-24)"
+  base="unknown"; bhist=""
+  if cap="$(_osrc_screen_capture "$pane")"; then
+    _osrc_screen_analyze_text "$eng" <<<"$cap"; base="$OSRC_SCR_STATE"; bhist="$(_osrc_scr_history_count "$snip")"
+  fi
   tmux send-keys -t "$pane" -l -- "$message" || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
+  # Before Enter: did the text land in the composer, or did a prompt open and take the keys?
+  seen=0
+  if cap="$(_osrc_screen_capture "$pane")"; then
+    _osrc_screen_analyze_text "$eng" <<<"$cap"
+    if [ "$OSRC_SCR_COMPOSER_FOUND" != 1 ] && { [ "$OSRC_SCR_STATE" = approval ] || [ "$OSRC_SCR_STATE" = question ]; }; then
+      OSRC_SEND_EVIDENCE="a $OSRC_SCR_STATE prompt opened while typing, so the keys went into it; Enter NOT pressed: $OSRC_SCR_EVIDENCE"
+      _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
+    fi
+    case "$(printf '%s' "$OSRC_SCR_COMPOSER" | tr -s ' \t\n' '   ')" in
+      *"$(printf '%s' "$snip" | cut -c1-12)"*|*"[Pasted text"*) [ -n "$snip" ] && seen=1 ;;
+    esac
+  fi
   # Pre-Enter snapshot for the legacy check (unknown layouts). A failed capture means there is no
   # baseline to prove anything against: fail closed.
   typed_tail="$(_managed_pane_tail "$pane" 2>/dev/null)"; tail_rc=$?
@@ -191,9 +219,7 @@ _managed_session_send() { # <session-id> <message>
     OSRC_SEND_EVIDENCE="pane unreadable before Enter"; _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1
   fi
   tmux send-keys -t "$pane" Enter || { _obligation_delivery_unknown "$oid" "$session_id"; _obligation_guard_end; _endpoint_mutation_unlock "$key"; return 1; }
-  eng="$(_osrc_screen_engine_of "$pane")"
-  snip="$(printf '%s' "$message" | tr -s ' \t\n' '   ' | cut -c1-24)"
-  _osrc_send_verify_screen "$pane" "$eng" "$snip"; sub_rc=$?
+  _osrc_send_verify_screen "$pane" "$eng" "$snip" "$base" "$bhist" "$seen"; sub_rc=$?
   if [ "$sub_rc" -eq 3 ]; then
     _managed_send_submitted "$pane" "$typed_tail"; sub_rc=$?
     case "$sub_rc" in

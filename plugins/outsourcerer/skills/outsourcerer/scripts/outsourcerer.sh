@@ -19548,12 +19548,7 @@ session() {
       _menu_kind="$(_managed_menu_detect "$SESSION_NAME" 2>/dev/null | head -1 | awk '{print $2}')"
       if [ "$_menu_kind" != "none" ]; then
         _managed_menu_detect "$SESSION_NAME"
-        case "$_menu_kind" in
-          consent)  echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
-          numbered) echo "answer with:  $0 session answer <index|label-substring>   (one of the OPT indexes/labels above)" ;;
-          codex)    echo "answer with:  $0 session answer <label-substring>   (matches an OPT label above; Enter confirms the option-1 default)" ;;
-          cursor)   echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
-        esac
+        _osrc_menu_how "$_menu_kind"
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
@@ -19584,10 +19579,7 @@ session() {
         _akind="$(printf '%s\n' "$_arep" | head -1 | awk '{print $2}')"
         case "$_akind" in
           none) die "no interactive menu detected in '$SESSION_NAME'. Re-check with: $0 session read" ;;
-          consent)  printf '%s\n' "$_arep"; echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
-          numbered) printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <index|label-substring>   (one of the OPT indexes/labels above)" ;;
-          codex)    printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <label-substring>   (matches an OPT label above; Enter confirms the option-1 default)" ;;
-          cursor)   printf '%s\n' "$_arep"; echo "answer with:  $0 session answer <label-substring>   (matches an OPT/SEL label above)" ;;
+          *) printf '%s\n' "$_arep"; _osrc_menu_how "$_akind" ;;
         esac
       else
         _managed_menu_answer "$SESSION_NAME" "$1" || die "session answer failed: the menu did not close. Re-check with: $0 session read"

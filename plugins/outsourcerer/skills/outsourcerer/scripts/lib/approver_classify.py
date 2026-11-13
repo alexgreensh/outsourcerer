@@ -4,13 +4,23 @@
 Deny by default. There is exactly ONE gate, is_safe(): it returns approve only when NO danger rule
 matched AND EVERY segment of the command is in the safe set. Anything not understood holds.
 
+Round 2 (review L3-VERDICT): the classifier no longer approves a command NAME with arbitrary
+flags, and no longer treats a token as a literal path when the shell would expand it.
+- Anything the shell expands before running is held up front: any `$`, backticks, braces, `~user`
+  / `~+` / `~-`, `=~`, a truncated `…`, a trailing operator, more than one line, any mention of
+  OSRC_HOME.
+- Every approved command has a flag allowlist. An unknown flag (including attached forms such as
+  `-XPUT`, `-osrc/x`, `--output=...`) holds.
+- Env prefixes hold (a tiny harmless list aside), with a named rule for OSRC_HOME, HOME, PATH,
+  TMUX*, GIT_*, BASH_ENV and *_OPTIONS. `env -u` is parsed; unsetting OSRC_HOME or HOME holds.
+- Writes never touch `.git`. Paths compare case-folded on macOS.
+
 Usage:
   approver_classify.py --root DIR [--extra DIR]... [--kind shell|write|read] [--path P]   (command on stdin)
   -> prints "approve <rule>" or "hold <rule>" (one line), exit 0. Exit 2 = usage error (caller holds).
 
-Matching is on the PARSED command (shlex tokens, quote-aware), never on substrings of the raw text:
-a filename containing "approve" or "install" is just an argument, and `grep -E 'a|b'` is one
-segment because the pipe is quoted. Stdlib only.
+`safe` stops accidents. It is not a sandbox: a delegate allowed to write tests/x.sh and then run
+`bash tests/x.sh` can run anything. See references/screen-and-approver.md.
 """
 from __future__ import annotations
 
@@ -20,56 +30,98 @@ import shlex
 import sys
 
 HOME = os.path.expanduser("~")
+FOLD = sys.platform == "darwin"   # macOS file systems are case-insensitive by default
+
+
+def norm(p: str) -> str:
+    return p.lower() if FOLD else p
+
 
 # ---- protected locations and secrets -------------------------------------------------------------
 PROTECTED_DIRS = [os.path.join(HOME, d) for d in (".outsourcerer", ".claude", ".ssh", ".gnupg", ".aws",
-                                                  ".config/gh", ".kube", ".docker", "Library/Keychains")]
+                                                  ".config/gh", ".kube", ".docker", "Library/Keychains",
+                                                  ".netrc", ".config/gcloud", ".azure")]
 if os.environ.get("OSRC_HOME"):
     PROTECTED_DIRS.append(os.environ["OSRC_HOME"])
 SECRET_NAME = re.compile(
-    r"(^|/)(\.env(\..*)?|\.netrc|\.npmrc|\.pypirc|id_[a-z0-9]+|.*\.pem|.*\.key|.*\.p12|.*\.keychain(-db)?|"
-    r"credentials(\.json)?|.*token.*|.*secret.*|.*password.*|auth\.json|\.git-credentials)$", re.I)
-SECRET_VAR = re.compile(r"(KEY|TOKEN|SECRET|PASS|CRED|AUTH)", re.I)
-
-# ---- command sets ---------------------------------------------------------------------------------
-READ_ONLY = {
-    "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag", "file", "stat", "du", "df",
-    "pwd", "echo", "printf", "which", "type", "tree", "diff", "cmp", "uniq", "cut", "tr", "nl", "jq",
-    "basename", "dirname", "realpath", "readlink", "date", "uname", "whoami", "id", "true", "false",
-    "test", "[", "sleep", "md5", "md5sum", "shasum", "sha1sum", "sha256sum", "column", "comm", "fold",
-    "expand", "rev", "seq", "yes", "hexdump", "xxd", "od", "strings", "less", "more", "bat", "fd",
-    "wc", "locale", "hostname", "sw_vers", "lsof", "ps", "pgrep", "shellcheck",
+    r"(^|/)(\.env(\..*)?|\.envrc|\.netrc|\.npmrc|\.pypirc|id_[a-z0-9]+|.*\.pem|.*\.key|.*\.p12|.*\.pfx|"
+    r".*\.keychain(-db)?|\.?credentials(\..*)?|.*token.*|.*secret.*|.*password.*|auth\.json|"
+    r"\.git-credentials|.*\.kdbx)$", re.I)
+ENV_NAMED = {  # env names that get their own rule (every env prefix holds; these say why)
+    "OSRC_HOME": "overrides OSRC_HOME (would point the run at the live ~/.outsourcerer)",
+    "HOME": "overrides HOME (moves ~ and every dotfile lookup)",
+    "PATH": "overrides PATH (chooses which programs run)",
+    "BASH_ENV": "sets BASH_ENV (runs a file before the script)",
+    "ENV": "sets ENV (runs a file before the shell)",
 }
-WRAPPERS = {"time", "nice", "command", "builtin", "nohup", "stdbuf"}
-PKG_MANAGERS = {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "brew", "apt", "apt-get", "gem",
-                "cargo", "go", "poetry", "pipx", "conda", "port", "dnf", "yum", "apk", "composer"}
-INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "perl",
-                "ruby", "php", "osascript", "deno", "bun", "pwsh"}
-TEST_RUNNERS = {"pytest", "jest", "vitest", "mocha", "tsc", "eslint", "ruff", "mypy", "pyright",
-                "rspec", "phpunit", "flake8", "pylint", "black", "prettier", "golangci-lint",
-                "swiftlint", "ctest", "tox", "nox", "bats"}
-SCRIPT_VERBS = {"test", "tests", "lint", "build", "check", "typecheck", "type-check", "format:check",
-                "test:unit", "test:e2e", "verify"}
-GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe",
-            "shortlog", "cat-file", "ls-tree", "merge-base", "rev-list", "name-rev", "grep",
-            "show-ref", "for-each-ref", "whatchanged", "count-objects", "var", "help", "version"}
-GIT_LOCAL_WRITE = {"add", "commit", "mv", "rm", "switch", "restore", "stash", "init"}
-GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
-           ("issue", "view"), ("issue", "list"), ("issue", "status"), ("run", "view"),
-           ("run", "list"), ("repo", "view"), ("release", "view"), ("release", "list"),
-           ("workflow", "list"), ("workflow", "view"), ("search", "code"), ("search", "issues"),
-           ("search", "prs"), ("auth", "status"), ("label", "list"), ("cache", "list")}
+ENV_HARMLESS = {"CI=1", "CI=true", "NO_COLOR=1", "FORCE_COLOR=0", "FORCE_COLOR=1", "TERM=dumb",
+                "PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1"}
+ENV_UNSET_OK = {"TMUX", "TMUX_PANE", "CLAUDECODE", "NO_COLOR"}
 
 OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", "(", ")"}
-REDIRECT = re.compile(r"^(\d*)(>>?|&>|>\||<|<<<?|<>)(.*)$")
+REDIR_OPS = {">", ">>", "<", ">&", "<<", "<<<", ">|", "&>", "&>>", "<>", "<&"}
 
 
 class Hold(Exception):
     pass
 
 
+# ---- flag specs ----------------------------------------------------------------------------------
+class Spec:
+    """Allowed flags for one command. short: boolean letters; short_val: letters taking a value;
+    long: boolean long flags; long_val: long flags taking a value (--x=v or --x v); num: allow -NUM.
+    pos: how positionals are read: paths | none | any | pattern (first is a pattern) | filter (first
+    is a program) | inside (paths that must be inside the worktree). val_inside: value flags whose
+    path must be inside the worktree."""
+    def __init__(self, short="", short_val="", long=(), long_val=(), num=False, pos="paths", val_inside=()):
+        self.short, self.short_val = set(short), set(short_val)
+        self.long, self.long_val = set(long), set(long_val)
+        self.num, self.pos, self.val_inside = num, pos, set(val_inside)
+
+
+def parse(name: str, args: list[str], sp: Spec) -> tuple[list[str], list[tuple[str, str]]]:
+    """-> (positionals, [(flag, value)]). Unknown flag = Hold. Letter-level parsing, so attached
+    forms (-XPUT, -osrc/x, -fkey=v) are seen."""
+    pos, vals, i, eoo = [], [], 0, False
+    while i < len(args):
+        a = args[i]
+        if eoo or a == "-" or not a.startswith("-"):
+            pos.append(a); i += 1; continue
+        if a == "--":
+            eoo = True; i += 1; continue
+        if a.startswith("--"):
+            key, eq, v = a.partition("=")
+            if key in sp.long and not eq:
+                i += 1; continue
+            if key in sp.long_val:
+                if not eq:
+                    if i + 1 >= len(args):
+                        raise Hold("%s %s needs a value" % (name, key))
+                    v = args[i + 1]; i += 1
+                vals.append((key, v)); i += 1; continue
+            raise Hold("flag not on the %s allowlist: %s" % (name, a))
+        body = a[1:]
+        if sp.num and body.isdigit():
+            i += 1; continue
+        j = 0
+        while j < len(body):
+            c = body[j]
+            if c in sp.short_val:
+                v = body[j + 1:]
+                if not v:
+                    if i + 1 >= len(args):
+                        raise Hold("%s -%s needs a value" % (name, c))
+                    v = args[i + 1]; i += 1
+                vals.append(("-" + c, v)); break
+            if c not in sp.short:
+                raise Hold("flag not on the %s allowlist: -%s (in %s)" % (name, c, a))
+            j += 1
+        i += 1
+    return pos, vals
+
+
+# ---- paths ---------------------------------------------------------------------------------------
 def resolve(path: str, cwd: str) -> str:
-    path = path.replace("${HOME}", HOME)
     if path == "~" or path.startswith("~/"):
         path = HOME + path[1:]
     if not os.path.isabs(path):
@@ -78,16 +130,15 @@ def resolve(path: str, cwd: str) -> str:
 
 
 def inside(path: str, roots: list[str]) -> bool:
+    p = norm(path)
     for r in roots:
-        if path == r or path.startswith(r.rstrip("/") + "/"):
+        r = norm(r)
+        if p == r or p.startswith(r.rstrip("/") + "/"):
             return True
     return False
 
 
 def check_path(tok: str, cwd: str, roots: list[str], write: bool) -> None:
-    if "$" in tok.replace("${HOME}", "").replace("$HOME", ""):
-        raise Hold("variable expansion in an argument")
-    tok = tok.replace("$HOME", HOME)
     if any(c in tok for c in "*?[") and write:
         raise Hold("glob in a write target")
     p = resolve(tok, cwd)
@@ -98,8 +149,12 @@ def check_path(tok: str, cwd: str, roots: list[str], write: bool) -> None:
     if write:
         if not inside(p, roots):
             raise Hold("write outside the worktree: " + tok)
-        if p in roots:
+        if norm(p) in [norm(r) for r in roots]:
             raise Hold("write targets the worktree root itself: " + tok)
+        for r in roots:
+            if inside(p, [r]):
+                if ".git" in [norm(x) for x in os.path.relpath(p, r).split(os.sep)]:
+                    raise Hold("write into .git: " + tok)
     else:
         root = roots[0]
         if not inside(p, roots):
@@ -112,11 +167,149 @@ def check_path(tok: str, cwd: str, roots: list[str], write: bool) -> None:
                 q = os.path.dirname(q)
 
 
-def path_args(args: list[str]) -> list[str]:
-    return [a for a in args if a and not a.startswith("-")]
+def check_inside(tok: str, cwd: str, roots: list[str], what: str) -> None:
+    check_path(tok, cwd, roots, write=False)
+    if not inside(resolve(tok, cwd), roots):
+        raise Hold("%s outside the worktree: %s" % (what, tok))
 
 
-def split_segments(cmd: str) -> list[list[str]]:
+# ---- command tables ------------------------------------------------------------------------------
+COLOR = ("--color", "--colour")
+READ_SPECS = {
+    "ls": Spec("1aAlhtrSRdFGiknopsucT", long=("--all", "--almost-all", "--human-readable") + COLOR, long_val=COLOR),
+    "cat": Spec("nbsvetAu"),
+    "head": Spec("qv", "nc", num=True),
+    "tail": Spec("qvr", "nc", num=True),
+    "wc": Spec("lwcmL"),
+    "grep": Spec("rRnilvcwxEFHhoqsLaIZzP", "eABCm",
+                 long=("--line-number", "--ignore-case", "--recursive", "--count", "--files-with-matches", "--word-regexp") + COLOR,
+                 long_val=("--include", "--exclude", "--exclude-dir", "--regexp", "--max-count") + COLOR, pos="pattern"),
+    "rg": Spec("nilvcwxFHoqsSuUN.", "eABCmgtT",
+               long=("--files", "--hidden", "--no-ignore", "--line-number", "--count", "--files-with-matches",
+                     "--fixed-strings", "--ignore-case", "--smart-case", "--no-heading", "--heading", "--json",
+                     "--vimgrep", "--word-regexp", "--multiline") + COLOR,
+               long_val=("--glob", "--type", "--type-not", "--regexp", "--max-count", "--context",
+                         "--after-context", "--before-context", "--max-depth") + COLOR, pos="pattern"),
+    "file": Spec("bLi"),
+    "stat": Spec("Llnqrsx"),
+    "du": Spec("shcakLx", "d"),
+    "df": Spec("hkPi"),
+    "pwd": Spec("LP", pos="none"),
+    "which": Spec("a", pos="none"),
+    "type": Spec("a", pos="none"),
+    "tree": Spec("adfCi", "LIP"),
+    "diff": Spec("uqrNwbBiyc", "U", long=("--brief", "--recursive") + COLOR),
+    "cmp": Spec("ls"),
+    "uniq": Spec("cdui"),
+    "cut": Spec("s", "cfd"),
+    "tr": Spec("dsc", pos="none"),
+    "nl": Spec("", "ba"),
+    "jq": Spec("rcSjneC", long=("--raw-output", "--compact-output", "--sort-keys", "--exit-status", "--slurp"), pos="filter"),
+    "basename": Spec("a", "s", pos="none"),
+    "dirname": Spec(pos="none"),
+    "realpath": Spec("eqs", pos="none"),
+    "readlink": Spec("fen", pos="none"),
+    "date": Spec("uR", pos="none"),
+    "uname": Spec("amnrsvp", pos="none"),
+    "whoami": Spec(pos="none"), "id": Spec("unG", pos="none"),
+    "true": Spec(pos="none"), "false": Spec(pos="none"),
+    "sleep": Spec(pos="none"),
+    "echo": Spec("ne", pos="none"),
+    "printf": Spec(pos="none"),
+    "md5": Spec("qr"), "md5sum": Spec(""), "shasum": Spec("", "a"), "sha1sum": Spec(""), "sha256sum": Spec(""),
+    "column": Spec("tx", "s"),
+    "comm": Spec("123"),
+    "fold": Spec("bs", "w"),
+    "rev": Spec(""),
+    "seq": Spec("", "sf", pos="none"),
+    "hexdump": Spec("Cv", "n"), "xxd": Spec("p", "lsc"), "od": Spec("cxAv", "tN"), "strings": Spec("a", "n"),
+    "sort": Spec("rnufbVhsd", "kt"),
+    "shellcheck": Spec("x", "sSef", long=("--external-sources",), long_val=("--shell", "--severity", "--exclude", "--format")),
+}
+HELP_OK = set(READ_SPECS) | {"git", "gh", "npm", "pnpm", "yarn", "npx", "node", "python", "python3", "pip", "pip3",
+                             "cargo", "go", "make", "pytest", "ruff", "mypy", "tsc", "eslint", "jest", "vitest",
+                             "devin", "claude", "codex", "agy", "gemini", "cursor-agent", "outsourcerer",
+                             "outsourcerer.sh", "tmux", "uv", "deno", "bun", "rustc", "swift", "brew", "find",
+                             "sed", "awk", "rm", "cp", "mv", "mkdir"}
+
+GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog",
+            "cat-file", "ls-tree", "merge-base", "rev-list", "name-rev", "show-ref", "for-each-ref",
+            "count-objects", "version", "grep"}
+GIT_READ_LONG = {"--oneline", "--stat", "--shortstat", "--numstat", "--name-only", "--name-status", "--graph",
+                 "--decorate", "--all", "--no-merges", "--merges", "--first-parent", "--reverse", "--cached",
+                 "--staged", "--no-color", "--patch", "--follow", "--short", "--branch", "--porcelain",
+                 "--ignored", "--check", "--summary", "--exit-code", "--quiet", "--no-patch", "--raw",
+                 "--show-toplevel", "--abbrev-ref", "--git-dir", "--is-inside-work-tree", "--show-prefix",
+                 "--verify", "--tags", "--always", "--dirty", "--count", "--others", "--modified", "--deleted",
+                 "--exclude-standard", "--full-name", "--heads", "--long", "--ignore-all-space",
+                 "--left-right", "--cherry-pick", "--abbrev-commit", "--source"} | set(COLOR)
+GIT_READ_LONG_VAL = {"--format", "--pretty", "--since", "--until", "--after", "--before", "--author", "--grep",
+                     "--max-count", "--date", "--diff-filter", "--unified", "--untracked-files", "--abbrev",
+                     "--decorate", "--porcelain", "--word-diff", "--relative", "--sort", "--points-at",
+                     "--contains", "--merged", "--no-merged", "--skip", "--committer"} | set(COLOR)
+GIT_READ_SPEC = Spec("pswbqznrtlcuvSeiEFI", "nUL", tuple(GIT_READ_LONG), tuple(GIT_READ_LONG_VAL), num=True, pos="any")
+
+GH_READ = {("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"),
+           ("issue", "view"), ("issue", "list"), ("issue", "status"), ("run", "view"),
+           ("run", "list"), ("repo", "view"), ("release", "view"), ("release", "list"),
+           ("workflow", "list"), ("workflow", "view"), ("auth", "status"), ("label", "list")}
+GH_SPEC = Spec("", "RLq", long=("--log", "--log-failed", "--comments", "--name-only", "--patch", "--exit-status"),
+               long_val=("--json", "--jq", "--state", "--limit", "--repo", "--author", "--label", "--base",
+                         "--head", "--search", "--branch", "--workflow", "--status", "--job", "--attempt") + COLOR,
+               pos="any")
+
+SCRIPT_VERBS = {"test", "tests", "lint", "build", "check", "typecheck", "type-check", "format:check",
+                "test:unit", "verify"}
+PKG_MANAGERS = {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "brew", "apt", "apt-get", "gem",
+                "cargo", "go", "poetry", "pipx", "conda", "port", "dnf", "yum", "apk", "composer"}
+INTERPRETERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "perl",
+                "ruby", "php", "osascript", "deno", "bun", "pwsh"}
+RUNNER_SPECS = {
+    "pytest": Spec("xqvsl", "km", long=("--lf", "--ff", "--no-header", "--disable-warnings", "--exitfirst", "--quiet", "--verbose"),
+                   long_val=("--maxfail", "--tb"), pos="inside"),
+    "jest": Spec("i", "t", long=("--runInBand", "--silent", "--ci", "--verbose", "--passWithNoTests"),
+                 long_val=("--testNamePattern",), pos="inside"),
+    "vitest": Spec("", "t", long=("--run", "--silent"), long_val=("--reporter", "--testNamePattern"), pos="inside"),
+    "tsc": Spec("", "p", long=("--noEmit", "--pretty"), long_val=("--project",), pos="none", val_inside=("-p", "--project")),
+    "eslint": Spec("", "", long=("--quiet",), long_val=("--max-warnings", "--ext", "--format"), pos="inside"),
+    "mypy": Spec("", "", long=("--strict", "--ignore-missing-imports", "--no-error-summary", "--pretty"), pos="inside"),
+    "pyright": Spec(pos="inside"),
+    "flake8": Spec("", "", long_val=("--max-line-length", "--select", "--ignore", "--extend-ignore"), pos="inside"),
+    "pylint": Spec("", "", long_val=("--disable", "--enable"), pos="inside"),
+    "shellcheck": READ_SPECS["shellcheck"],
+    "bats": Spec("t", pos="inside"),
+    "ctest": Spec("", "j", long=("--output-on-failure",), pos="none"),
+}
+
+
+# ---- shell-level danger (before any parsing) -----------------------------------------------------
+def pre_checks(cmd: str) -> None:
+    if "\n" in cmd or "\r" in cmd:
+        raise Hold("multi-line command (continuation lines, heredoc or wrapped text)")
+    if "`" in cmd or "$(" in cmd or "<(" in cmd or ">(" in cmd:
+        raise Hold("command substitution")
+    if "$" in cmd:
+        raise Hold("variable or special-parameter expansion ($)")
+    if "{" in cmd or "}" in cmd:
+        raise Hold("brace expansion or group")
+    if "…" in cmd:
+        raise Hold("truncated command (…): the rest is not visible")
+    if "OSRC_HOME" in cmd:
+        raise Hold("mentions OSRC_HOME (unset/override would point the run at the live ~/.outsourcerer)")
+    t = cmd.rstrip()
+    for op in ("&&", "||", "|", ";", "\\", "&"):
+        if t.endswith(op):
+            raise Hold("command ends in an operator (%s): the rest is not visible" % op)
+
+
+def check_tilde(tok: str) -> None:
+    if tok.startswith("~") and not (tok == "~" or tok.startswith("~/")):
+        raise Hold("tilde expansion to another user or the dir stack: " + tok)
+    if "=~" in tok or ":~" in tok:
+        raise Hold("tilde expansion inside an assignment-like word: " + tok)
+
+
+def split_segments(cmd: str):
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     lex.commenters = ""
@@ -124,278 +317,496 @@ def split_segments(cmd: str) -> list[list[str]]:
         toks = list(lex)
     except ValueError as e:
         raise Hold("unparseable: %s" % e)
-    segs, cur = [], []
+    segs, cur, prev = [], [], None
     for t in toks:
         if t in OPERATORS:
             if t in ("(", ")"):
                 raise Hold("subshell")
             if t == "&":
                 raise Hold("background job")
-            segs.append((cur, t)); cur = []
+            if cur:
+                segs.append((cur, prev))
+            cur, prev = [], t
         else:
             cur.append(t)
-    segs.append((cur, None))
-    out, prev_op = [], None
-    for seg, op in segs:
-        if not seg:
-            prev_op = op
-            continue
-        out.append((seg, prev_op))
-        prev_op = op
-    return out
+    if cur:
+        segs.append((cur, prev))
+    return segs
 
 
-def merge_redirects(tokens: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
-    """shlex splits '>' and '2>&1' oddly; regroup into (op, target) pairs."""
-    args, redirs, i = [], [], 0
+def take_redirects(tokens, cwd, roots):
+    args, i = [], 0
     while i < len(tokens):
         t = tokens[i]
-        if t in (">", ">>", "<", ">&", "<<", "<<<", ">|", "&>"):
+        fd = re.fullmatch(r"\d+", t) and i + 1 < len(tokens) and tokens[i + 1] in REDIR_OPS
+        if t in REDIR_OPS or fd:
+            if fd:
+                i += 1; t = tokens[i]
             tgt = tokens[i + 1] if i + 1 < len(tokens) else ""
-            redirs.append((t, tgt)); i += 2; continue
-        m = re.match(r"^(\d+)$", t)
-        if m and i + 1 < len(tokens) and tokens[i + 1] in (">", ">>", ">&", "<"):
-            tgt = tokens[i + 2] if i + 2 < len(tokens) else ""
-            redirs.append((tokens[i + 1], tgt)); i += 3; continue
-        args.append(t); i += 1
-    return args, redirs
-
-
-def classify_segment(tokens, prev_op, cwd, roots) -> tuple[str, str]:
-    """Returns (rule, new_cwd). Raises Hold."""
-    args, redirs = merge_redirects(tokens)
-    for op, tgt in redirs:
-        if op in ("<<", "<<<"):
-            raise Hold("heredoc / here-string")
-        if op == ">&" or tgt in ("/dev/null", "&1", "&2", "1", "2"):
+            i += 2
+            if t in ("<<", "<<<"):
+                raise Hold("heredoc / here-string")
+            if t in (">&", "<&") and (tgt.isdigit() or tgt == "-"):
+                continue
+            if not tgt:
+                raise Hold("redirect without a target")
+            check_tilde(tgt)
+            if tgt == "/dev/null":
+                continue
+            check_path(tgt, cwd, roots, write=(t not in ("<", "<&")))
             continue
-        if op == "<":
-            check_path(tgt, cwd, roots, write=False); continue
-        check_path(tgt, cwd, roots, write=True)
+        args.append(t); i += 1
+    return args
+
+
+# ---- per-command rules ---------------------------------------------------------------------------
+def read_positionals(name, pos, sp, vals, cwd, roots):
+    kind = sp.pos
+    if kind in ("none", "any"):
+        return
+    if kind == "pattern" and not any(f in ("-e", "--regexp") for f, _ in vals):
+        pos = pos[1:]
+    if kind == "filter":
+        pos = pos[1:]
+    for a in pos:
+        if kind == "inside":
+            check_inside(a, cwd, roots, name + " path")
+        else:
+            check_path(a, cwd, roots, write=False)
+
+
+def sed_script_ok(script: str) -> None:
+    """Only an address plus p, d, q, =, n, N, and s/// with flags g|p|I|digits. Anything else
+    (w, W, e, r, R, a, i, c, s///w, s///e, labels, braces) holds."""
+    i, n = 0, len(script)
+    while i < n:
+        while i < n and script[i] in " ;\t":
+            i += 1
+        if i >= n:
+            break
+        while i < n and (script[i].isdigit() or script[i] in "$,!"):
+            i += 1
+        if i < n and script[i] == "/":
+            j = script.find("/", i + 1)
+            if j < 0:
+                raise Hold("sed address not closed")
+            i = j + 1
+            if i < n and script[i] == ",":
+                i += 1
+                while i < n and (script[i].isdigit() or script[i] == "$"):
+                    i += 1
+                if i < n and script[i] == "/":
+                    j = script.find("/", i + 1)
+                    i = (j + 1) if j >= 0 else n
+            while i < n and script[i] == " ":
+                i += 1
+        if i >= n:
+            raise Hold("sed address without a command")
+        c = script[i]
+        if c in "pdq=nN":
+            i += 1; continue
+        if c == "s" and i + 1 < n:
+            d = script[i + 1]
+            if d.isalnum() or d in " \\":
+                raise Hold("sed s with an unusual delimiter")
+            parts, j = 0, i + 2
+            while j < n and parts < 2:
+                if script[j] == "\\":
+                    j += 2; continue
+                if script[j] == d:
+                    parts += 1
+                j += 1
+            if parts < 2:
+                raise Hold("sed s not closed")
+            while j < n and script[j] != ";":
+                if script[j] not in "gpI0123456789 ":
+                    raise Hold("sed s flag writes or executes: " + script[j])
+                j += 1
+            i = j; continue
+        raise Hold("sed command not on the allowlist: " + c)
+
+
+def sed_rule(args, cwd, roots):
+    scripts, files, inplace, i, has_e = [], [], False, 0, "-e" in args
+    while i < len(args):
+        a = args[i]
+        if a in ("-n", "-E", "-r", "--quiet", "--silent"):
+            i += 1; continue
+        if a == "-e":
+            scripts.append(args[i + 1] if i + 1 < len(args) else ""); i += 2; continue
+        if a == "-i":
+            inplace = True
+            if i + 1 < len(args) and args[i + 1] == "":
+                i += 1
+            i += 1; continue
+        if a.startswith("-"):
+            raise Hold("flag not on the sed allowlist: " + a)
+        if not has_e and not scripts:
+            scripts.append(a)
+        else:
+            files.append(a)
+        i += 1
+    if not scripts:
+        raise Hold("sed without a script")
+    for s in scripts:
+        sed_script_ok(s)
+    for f in files:
+        check_path(f, cwd, roots, write=inplace)
+    if inplace:
+        if not files:
+            raise Hold("sed -i without a file")
+        return "write-in-worktree:sed -i"
+    return "read-only:sed"
+
+
+def awk_rule(args, cwd, roots):
+    pos, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "-F":
+            i += 2; continue
+        if a.startswith("-F") and len(a) > 2:
+            i += 1; continue
+        if a.startswith("-"):
+            raise Hold("flag not on the awk allowlist: " + a)
+        pos.append(a); i += 1
+    if not pos:
+        raise Hold("awk without a program")
+    if re.search(r"system|getline|ENVIRON|\||>|close|fflush", pos[0]):
+        raise Hold("awk program writes, executes or reads the environment")
+    for f in pos[1:]:
+        check_path(f, cwd, roots, write=False)
+    return "read-only:awk"
+
+
+FIND_OK_NOARG = {"-print", "-print0", "-prune", "-empty", "-not", "!", "(", ")", "-o", "-a", "-and", "-or",
+                 "-depth", "-xdev"}
+FIND_OK_ARG = {"-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-newer", "-mtime",
+               "-mmin", "-size", "-regex", "-iregex", "-perm", "-user", "-group", "-wholename"}
+
+
+def find_rule(args, cwd, roots):
+    i, starts = 0, True
+    while i < len(args):
+        a = args[i]
+        if starts and not a.startswith("-") and a not in ("!", "(", ")"):
+            check_path(a, cwd, roots, write=False); i += 1; continue
+        starts = False
+        if a in FIND_OK_NOARG:
+            i += 1; continue
+        if a in FIND_OK_ARG:
+            i += 2; continue
+        raise Hold("find predicate not on the allowlist (actions like -exec/-delete hold): " + a)
+    return "read-only:find"
+
+
+WRITE_SPECS = {"mkdir": Spec("pv"), "touch": Spec("acm"), "cp": Spec("rRpafvn"), "mv": Spec("fvn"),
+               "rm": Spec("rRfvd"), "rmdir": Spec("pv"), "ln": Spec("sfnv"), "unlink": Spec(""),
+               "tee": Spec("a"), "chmod": Spec("Rv", pos="any")}
+
+
+def write_rule(name, args, cwd, roots):
+    pos, _ = parse(name, args, WRITE_SPECS[name])
+    if name == "chmod":
+        if len(pos) < 2:
+            raise Hold("chmod needs a mode and a target")
+        mode, pos = pos[0], pos[1:]
+        if not re.fullmatch(r"[0-7]{3}|[ugoa]*[+=-][rwxX]+(,[ugoa]*[+=-][rwxX]+)*", mode):
+            raise Hold("chmod mode not on the allowlist (setuid/sticky/4-digit): " + mode)
+    if not pos:
+        raise Hold(name + " without a target")
+    if name in ("cp", "ln"):
+        for s in pos[:-1]:
+            check_path(s, cwd, roots, write=False)
+        pos = pos[-1:]
+    for t in pos:
+        check_path(t, cwd, roots, write=True)
+    return "write-in-worktree:" + name
+
+
+def git_rule(rest, cwd, roots):
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        if rest[i] == "--no-pager":
+            i += 1; continue
+        raise Hold("git global flag (could aim at another repo or run a program): " + rest[i])
+    if i >= len(rest):
+        raise Hold("bare git")
+    sub, sargs = rest[i], rest[i + 1:]
+    if sub in GIT_READ:
+        if sub == "grep" and any(a.startswith("-O") or a.startswith("--open-files") for a in sargs):
+            raise Hold("git grep -O runs a pager program")
+        pos, _ = parse("git " + sub, sargs, GIT_READ_SPEC)
+        for a in pos:
+            if "/" in a or os.path.exists(resolve(a, cwd)):
+                check_path(a, cwd, roots, write=False)
+        return "read-only:git " + sub
+    if sub == "branch" and all(a in ("-a", "-r", "-v", "-vv", "--list", "--show-current", "--all") for a in sargs):
+        return "read-only:git branch"
+    if sub in ("tag", "remote") and all(a in ("-l", "--list", "-v") for a in sargs):
+        return "read-only:git " + sub
+    if sub == "stash":
+        if sargs[:1] in (["list"], ["show"]) and all(a in ("-p", "--stat") or not a.startswith("-") for a in sargs[1:]):
+            return "read-only:git stash " + sargs[0]
+        raise Hold("git stash changes the shared stash stack (only list/show approve)")
+    if sub == "worktree" and sargs == ["list"]:
+        return "read-only:git worktree list"
+    if sub == "config" and sargs[:1] in (["--get"], ["--list"], ["-l"], ["--get-all"]):
+        return "read-only:git config"
+    if sub == "switch":
+        if (len(sargs) == 1 and not sargs[0].startswith("-")) or \
+           (len(sargs) == 2 and sargs[0] == "-c" and not sargs[1].startswith("-")):
+            return "write-in-worktree:git switch"
+        raise Hold("git switch with flags (can discard work or reset a branch)")
+    if sub == "checkout" and len(sargs) == 2 and sargs[0] == "-b" and not sargs[1].startswith("-"):
+        return "write-in-worktree:git checkout -b"
+    if sub == "add":
+        pos, _ = parse("git add", sargs, Spec("Auv", long=("--all", "--update", "--verbose")))
+        for a in pos:
+            check_path(a, cwd, roots, write=True)
+        return "write-in-worktree:git add"
+    if sub == "commit":
+        pos, _ = parse("git commit", sargs, Spec("aqv", "m", long=("--all", "--quiet"), long_val=("--message",), pos="none"))
+        if pos:
+            raise Hold("git commit with path arguments")
+        return "write-in-worktree:git commit"
+    if sub in ("mv", "rm"):
+        pos, _ = parse("git " + sub, sargs, Spec("rqn" if sub == "rm" else "nv"))
+        for a in pos:
+            check_path(a, cwd, roots, write=True)
+        return "write-in-worktree:git " + sub
+    if sub == "push":
+        raise Hold("git push")
+    raise Hold("git %s not on the allowlist" % sub)
+
+
+def gh_rule(rest):
+    if rest[:1] == ["api"]:
+        raise Hold("gh api (method and fields are easy to smuggle; not in the safe set)")
+    pair = tuple(rest[:2])
+    if pair not in GH_READ:
+        raise Hold("gh " + " ".join(rest[:2]) + " (publishing / mutating, or not on the allowlist)")
+    parse("gh " + " ".join(pair), rest[2:], GH_SPEC)
+    return "read-only:gh " + " ".join(pair)
+
+
+def runner_rule(name, rest, cwd, roots):
+    sp = RUNNER_SPECS[name]
+    pos, vals = parse(name, rest, sp)
+    for f, v in vals:
+        if f in sp.val_inside:
+            check_inside(v, cwd, roots, name + " " + f)
+    read_positionals(name, pos, sp, vals, cwd, roots)
+    return "test/build:" + name
+
+
+def pkg_rule(name, rest, cwd, roots):
+    if name in ("npm", "pnpm", "yarn"):
+        core = [a for a in rest if a not in ("--silent", "-s")]
+        if core in (["test"], ["t"]) or (len(core) == 1 and core[0] in SCRIPT_VERBS):
+            return "test/build:%s %s" % (name, core[0])
+        if len(core) == 2 and core[0] == "run" and core[1] in SCRIPT_VERBS:
+            return "test/build:%s run %s" % (name, core[1])
+        if core[:1] and core[0] in ("publish", "unpublish", "deprecate", "dist-tag", "owner", "login", "adduser", "token"):
+            raise Hold("network publishing: %s %s" % (name, core[0]))
+        raise Hold("%s %s (install, extra arguments, or a script name not on the allowlist)" % (name, " ".join(core)))
+    if name == "cargo":
+        if rest[:1] and rest[0] in ("test", "build", "check", "clippy"):
+            parse("cargo " + rest[0], rest[1:], Spec("q", "pj", long=("--all-features", "--workspace", "--release", "--quiet",
+                                                                    "--lib", "--bins", "--tests", "--no-fail-fast",
+                                                                    "--all-targets", "--locked"),
+                                                   long_val=("--package", "--features", "--jobs"), pos="any"))
+            return "test/build:cargo " + rest[0]
+        raise Hold("cargo %s" % (rest[0] if rest else ""))
+    if name == "go":
+        if rest[:1] and rest[0] in ("test", "build", "vet"):
+            ok_flags = {"-v", "-race", "-short", "-cover"}
+            for a in rest[1:]:
+                if a.startswith("-"):
+                    if a not in ok_flags and not re.fullmatch(r"-(run|count|timeout)=[A-Za-z0-9_.^|]+", a):
+                        raise Hold("go flag not on the allowlist: " + a)
+                else:
+                    check_inside(a, cwd, roots, "go package path")
+            return "test/build:go " + rest[0]
+        raise Hold("go %s" % (rest[0] if rest else ""))
+    raise Hold("package manager: " + name)
+
+
+def env_word_rule(word: str) -> None:
+    nm = word.split("=", 1)[0]
+    if nm in ENV_NAMED:
+        raise Hold(ENV_NAMED[nm])
+    if nm.startswith("TMUX"):
+        raise Hold("sets %s (would aim tmux at another server)" % nm)
+    if nm.startswith("GIT_"):
+        raise Hold("sets %s (git can run programs or use another repo)" % nm)
+    if nm.endswith(("_OPTIONS", "_OPTS", "_FLAGS")):
+        raise Hold("sets %s (injects options into the program)" % nm)
+    if word not in ENV_HARMLESS:
+        raise Hold("environment prefix not on the allowlist: " + nm)
+
+
+def env_rule(args: list[str]) -> list[str]:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "-u":
+            nm = args[i + 1] if i + 1 < len(args) else ""
+            if nm in ("OSRC_HOME", "HOME"):
+                raise Hold("env -u %s (points the run at the live ~/.outsourcerer or a default home)" % nm)
+            if nm not in ENV_UNSET_OK:
+                raise Hold("env -u %s not on the allowlist" % nm)
+            i += 2; continue
+        if a.startswith("-"):
+            raise Hold("env flag not on the allowlist: " + a)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
+            env_word_rule(a); i += 1; continue
+        break
+    if i >= len(args):
+        raise Hold("env dump (secrets)")
+    return args[i:]
+
+
+NOT_SAFE = {
+    "sudo": "privilege escalation", "doas": "privilege escalation", "su": "privilege escalation",
+    "curl": "network tool", "wget": "network tool", "nc": "network tool", "ssh": "network tool",
+    "scp": "network tool", "rsync": "network tool", "ftp": "network tool", "sftp": "network tool",
+    "security": "secrets access", "keychain": "secrets access", "printenv": "secrets access",
+    "ps": "shows other processes' environments", "lsof": "process inspection",
+}
+for _n in ("eval", "exec", "source", ".", "trap", "unset", "export", "set", "declare", "alias"):
+    NOT_SAFE[_n] = "shell builtin that changes the environment"
+for _n in ("kill", "killall", "pkill", "shutdown", "reboot", "halt", "launchctl", "systemctl", "crontab", "chown",
+           "dd", "mkfs", "diskutil", "tmux", "screen", "osascript", "open", "less", "more", "yes", "xargs", "time",
+           "nohup", "nice", "watch", "install", "truncate"):
+    NOT_SAFE[_n] = "not in the safe set (process control, interactive, unbounded, or runs another command)"
+
+
+def classify_segment(tokens, prev_op, cwd, roots):
+    for t in tokens:
+        check_tilde(t)
+    args = take_redirects(tokens, cwd, roots)
     while args and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", args[0]):
-        if SECRET_VAR.search(args[0].split("=", 1)[0]):
-            raise Hold("sets a secret-looking variable")
+        env_word_rule(args[0])
         args = args[1:]
-    while args and args[0] in WRAPPERS:
-        args = args[1:]
-    if args and args[0] == "timeout":
-        args = args[2:] if len(args) > 2 else []
     if args and args[0] == "env":
-        if len(args) == 1:
-            raise Hold("env dump (secrets)")
-        args = args[1:]
-        while args and "=" in args[0]:
-            args = args[1:]
+        args = env_rule(args[1:])
     if not args:
         return "redirect-only", cwd
-    for a in args:
-        if "`" in a or "$(" in a or "<(" in a or ">(" in a:
-            raise Hold("command substitution")
-    name = os.path.basename(args[0])
-    rest = args[1:]
-
-    if prev_op in ("|", "|&") and name in INTERPRETERS | {"xargs", "sudo", "tee", "source", "."}:
-        if name in INTERPRETERS or name in ("sudo", "source", "."):
-            raise Hold("pipe into a shell/interpreter")
-    if name in ("sudo", "doas", "su"):
-        raise Hold("privilege escalation")
-    if name in ("eval", "exec", "source", ".", "trap"):
-        raise Hold("eval/exec/source")
-    if name in ("curl", "wget", "nc", "ssh", "scp", "rsync", "ftp", "sftp", "telnet"):
-        raise Hold("network tool")
-    if name in ("security", "keychain", "printenv", "set", "declare", "export"):
-        raise Hold("secrets / environment access")
-    if name in ("kill", "killall", "pkill", "shutdown", "reboot", "launchctl", "systemctl", "crontab",
-                "chown", "dd", "mkfs", "diskutil", "tmux", "screen", "osascript", "open"):
-        raise Hold("system / process control: " + name)
-    if len(rest) == 1 and rest[0] in ("--help", "-h", "--version", "-V") and "/" not in args[0]:
+    name, rest = args[0], args[1:]
+    if "/" in name:
+        raise Hold("runs a program by path: " + name)
+    if prev_op in ("|", "|&") and name in INTERPRETERS:
+        raise Hold("pipe into a shell/interpreter")
+    if name in NOT_SAFE:
+        raise Hold("%s: %s" % (NOT_SAFE[name], name))
+    if len(rest) == 1 and rest[0] in ("--help", "--version") and name in HELP_OK:
         return "help/version", cwd
-
     if name == "cd":
+        if rest[:1] == ["-"]:
+            raise Hold("cd - (goes to $OLDPWD, which is not visible)")
+        if len(rest) > 1 or (rest and rest[0].startswith("-")):
+            raise Hold("cd with flags")
         tgt = rest[0] if rest else HOME
         check_path(tgt, cwd, roots, write=False)
         return "cd", resolve(tgt, cwd)
-    if name in READ_ONLY:
-        for a in path_args(rest):
-            if name in ("grep", "egrep", "fgrep", "rg", "ag", "jq", "tr", "echo", "printf", "seq",
-                        "date", "sleep", "test", "[", "cut", "column", "yes") :
-                continue
-            check_path(a, cwd, roots, write=False)
-        if name in ("grep", "rg", "egrep", "fgrep", "ag"):
-            for a in path_args(rest)[1:]:
-                check_path(a, cwd, roots, write=False)
-        return "read-only:" + name, cwd
     if name == "find":
-        bad = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
-        if any(a in bad for a in rest):
-            raise Hold("find with an action (-exec/-delete)")
-        for a in rest:
-            if a.startswith("-") or a in ("!", "(", ")"):
-                break
-            check_path(a, cwd, roots, write=False)
-        return "read-only:find", cwd
-    if name == "sort":
-        if any(a == "-o" or a.startswith("--output") for a in rest):
-            raise Hold("sort -o writes a file")
-        for a in path_args(rest):
-            check_path(a, cwd, roots, write=False)
-        return "read-only:sort", cwd
+        return find_rule(rest, cwd, roots), cwd
     if name in ("sed", "gsed"):
-        if any(a == "-i" or a.startswith("-i") or a == "--in-place" for a in rest):
-            files = [a for a in path_args(rest)][1:]
-            if not files:
-                raise Hold("sed -i without a file")
-            for f in files:
-                check_path(f, cwd, roots, write=True)
-            return "write-in-worktree:sed -i", cwd
-        script = path_args(rest)[0] if path_args(rest) else ""
-        if re.search(r"(^|[;}\s])[wWe]\s|/[wW]\s", script):
-            raise Hold("sed script writes or executes")
-        for a in path_args(rest)[1:]:
-            check_path(a, cwd, roots, write=False)
-        return "read-only:sed", cwd
+        return sed_rule(rest, cwd, roots), cwd
     if name in ("awk", "gawk", "mawk"):
-        prog = " ".join(rest)
-        if "system" in prog or ">" in prog or "|" in prog or "getline" in prog:
-            raise Hold("awk program writes or executes")
-        return "read-only:awk", cwd
-    if name == "xargs":
-        sub = [a for a in rest if not a.startswith("-")]
-        if not sub:
-            raise Hold("xargs without a command")
-        r, _ = classify_segment(sub, None, cwd, roots)
-        if not r.startswith("read-only"):
-            raise Hold("xargs runs a non-read-only command")
-        return "read-only:xargs " + sub[0], cwd
-
-    if name in ("mkdir", "touch", "cp", "mv", "ln", "rmdir", "rm", "unlink", "tee", "chmod", "truncate", "install"):
-        if name == "install":
-            raise Hold("install(1)")
-        if name == "chmod" and any("s" in a for a in rest if a.startswith(("+", "u+", "g+"))):
-            raise Hold("setuid/setgid chmod")
-        targets = path_args(rest)
-        if name == "chmod":
-            targets = targets[1:]
-        if not targets:
-            raise Hold(name + " without a target")
-        if name == "cp" or name == "ln":
-            for s in targets[:-1]:
-                check_path(s, cwd, roots, write=False)
-            targets = targets[-1:]
-        for t in targets:
-            check_path(t, cwd, roots, write=True)
-        return "write-in-worktree:" + name, cwd
-
+        return awk_rule(rest, cwd, roots), cwd
+    if name in ("test", "["):
+        ok = {"-f", "-d", "-e", "-s", "-z", "-n", "-x", "-r", "-w", "-L", "!", "-eq", "-ne", "-lt", "-gt", "-le", "-ge", "]"}
+        if any(a.startswith("-") and a not in ok for a in rest):
+            raise Hold("test operator not on the allowlist")
+        return "read-only:test", cwd
+    if name in READ_SPECS:
+        sp = READ_SPECS[name]
+        pos, vals = parse(name, rest, sp)
+        if name == "rg" and "--files" in rest:
+            sp = Spec(pos="paths")
+        read_positionals(name, pos, sp, vals, cwd, roots)
+        return "read-only:" + name, cwd
+    if name in WRITE_SPECS:
+        return write_rule(name, rest, cwd, roots), cwd
     if name == "git":
-        i = 0
-        while i < len(rest) and rest[i].startswith("-"):
-            if rest[i] in ("-C", "-c"):
-                raise Hold("git -C/-c")
-            i += 1
-        if i >= len(rest):
-            raise Hold("bare git")
-        sub, sargs = rest[i], rest[i + 1:]
-        if any(a in ("-f", "--force", "--force-with-lease", "-D", "--hard", "--mirror", "--delete")
-               or a.startswith("--force") for a in sargs):
-            raise Hold("git force/hard/delete flag")
-        if sub == "push":
-            raise Hold("git push")
-        if sub in GIT_READ:
-            return "read-only:git " + sub, cwd
-        if sub in ("branch", "tag", "remote", "worktree", "config", "stash", "reflog"):
-            if sub == "config" and sargs[:1] and sargs[0] in ("--get", "--list", "-l", "--get-all", "--get-regexp"):
-                return "read-only:git config", cwd
-            if sub == "stash" and (not sargs or sargs[0] in ("list", "show")):
-                return "read-only:git stash list", cwd
-            if sub == "worktree" and sargs[:1] == ["list"]:
-                return "read-only:git worktree list", cwd
-            if sub in ("branch", "tag", "remote", "reflog") and all(a in ("-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "show") for a in sargs):
-                return "read-only:git " + sub, cwd
-            if sub == "stash" and sargs[0] in ("push", "save") and len(sargs) <= 3:
-                return "write-in-worktree:git stash", cwd
-            raise Hold("git %s with arguments" % sub)
-        if sub in ("checkout",):
-            if sargs[:1] == ["-b"] and len(sargs) == 2:
-                return "write-in-worktree:git checkout -b", cwd
-            raise Hold("git checkout can discard work")
-        if sub == "restore":
-            raise Hold("git restore discards work")
-        if sub in GIT_LOCAL_WRITE:
-            if sub == "commit" and "--amend" in sargs:
-                raise Hold("git commit --amend")
-            for a in path_args(sargs) if sub in ("add", "mv", "rm") else []:
-                check_path(a, cwd, roots, write=True) if sub != "add" else check_path(a, cwd, roots, write=False)
-            return "write-in-worktree:git " + sub, cwd
-        raise Hold("git " + sub)
-
+        return git_rule(rest, cwd, roots), cwd
     if name == "gh":
-        pair = tuple(rest[:2])
-        if pair in GH_READ:
-            return "read-only:gh " + " ".join(pair), cwd
-        if rest[:1] == ["api"]:
-            a = rest[1:]
-            if any(x in ("-X", "--method", "-f", "-F", "--field", "--raw-field", "--input") for x in a):
-                raise Hold("gh api with a method or fields")
-            return "read-only:gh api GET", cwd
-        raise Hold("gh " + " ".join(rest[:2]) + " (publishing / mutating)")
-
-    # package managers: tests/builds approve, installs/publish hold
-    if name in ("npm", "pnpm", "yarn", "bun"):
-        if not rest:
-            raise Hold(name + " bare")
-        verb = rest[0]
-        if verb in ("test", "t") or verb in SCRIPT_VERBS:
-            return "test/build:" + name + " " + verb, cwd
-        if verb == "run" and len(rest) >= 2 and (rest[1] in SCRIPT_VERBS or rest[1].startswith(("test", "lint", "build", "typecheck"))):
-            return "test/build:" + name + " run " + rest[1], cwd
-        if verb in ("ls", "list", "outdated", "view", "why", "audit") and name != "bun":
-            return "read-only:" + name + " " + verb, cwd
-        if verb in ("publish", "unpublish", "deprecate", "dist-tag", "owner", "login", "adduser", "token"):
-            raise Hold("network publishing: %s %s" % (name, verb))
-        raise Hold("package install / script: %s %s" % (name, verb))
-    if name == "npx" or name == "pnpx":
-        if rest and os.path.basename(rest[0]) in TEST_RUNNERS:
-            return "test/build:npx " + rest[0], cwd
-        raise Hold("npx runs a downloaded package")
-    if name in ("cargo", "go"):
-        if rest and rest[0] in ("test", "build", "check", "clippy", "vet", "fmt") and not (rest[0] == "fmt" and "--check" not in rest and name == "cargo"):
-            return "test/build:%s %s" % (name, rest[0]), cwd
-        raise Hold("%s %s" % (name, rest[0] if rest else ""))
+        return gh_rule(rest), cwd
+    if name in RUNNER_SPECS:
+        return runner_rule(name, rest, cwd, roots), cwd
+    if name in ("npx", "pnpx"):
+        if rest and rest[0] in RUNNER_SPECS:
+            return runner_rule(rest[0], rest[1:], cwd, roots), cwd
+        raise Hold("npx runs a package that is not an allowlisted runner")
+    if name == "ruff":
+        if rest[:1] == ["check"]:
+            pos, _ = parse("ruff check", rest[1:], Spec("q", long=("--quiet", "--statistics", "--no-fix"),
+                                                         long_val=("--select", "--ignore", "--output-format"), pos="inside"))
+            for a in pos:
+                check_inside(a, cwd, roots, "ruff path")
+            return "test/build:ruff check", cwd
+        if rest[:2] == ["format", "--check"] and all(not a.startswith("-") for a in rest[2:]):
+            for a in rest[2:]:
+                check_inside(a, cwd, roots, "ruff path")
+            return "test/build:ruff format --check", cwd
+        raise Hold("ruff without check (rewrites files) or flags off the allowlist")
+    if name in ("prettier", "black"):
+        if any(a in ("--check", "--diff") for a in rest) and all(a in ("--check", "--diff", "-q", "--quiet") or not a.startswith("-") for a in rest):
+            for a in rest:
+                if not a.startswith("-"):
+                    check_inside(a, cwd, roots, name + " path")
+            return "test/build:%s --check" % name, cwd
+        raise Hold(name + " rewrites files or uses flags off the allowlist")
     if name in ("make", "gmake"):
-        tgts = [a for a in rest if not a.startswith("-")]
-        if tgts and all(t in SCRIPT_VERBS or t.startswith(("test", "lint", "check")) for t in tgts):
+        tgts = [a for a in rest if a not in ("-s", "-k") and not re.fullmatch(r"-j\d*", a)]
+        if tgts and all(t in SCRIPT_VERBS for t in tgts):
             return "test/build:make " + " ".join(tgts), cwd
-        raise Hold("make target not a test/build/lint")
-    if name in TEST_RUNNERS:
-        if name in ("prettier", "black") and not any(a in ("--check", "-c", "--diff") for a in rest):
-            raise Hold(name + " rewrites files")
-        if name == "ruff" and rest[:1] == ["format"] and "--check" not in rest:
-            raise Hold("ruff format rewrites files")
-        if name == "eslint" and "--fix" in rest:
-            raise Hold("eslint --fix rewrites files")
-        return "test/build:" + name, cwd
-    if name in ("python", "python3") and len(rest) >= 2 and rest[0] == "-m":
-        if rest[1] in ("pytest", "unittest", "mypy", "ruff", "flake8", "pylint", "py_compile", "compileall", "tox", "nox"):
-            return "test/build:python -m " + rest[1], cwd
-        if rest[1] == "json.tool":
-            return "read-only:python -m json.tool", cwd
-        raise Hold("python -m " + rest[1])
+        raise Hold("make target/flag not on the allowlist")
+    if name in ("python", "python3"):
+        if len(rest) >= 2 and rest[0] == "-m":
+            mod = rest[1]
+            if mod == "pytest":
+                return runner_rule("pytest", rest[2:], cwd, roots), cwd
+            if mod == "unittest":
+                pos, _ = parse("unittest", rest[2:], Spec("vqfb", "k", pos="any"))
+                for a in pos:
+                    if "/" in a or a.endswith(".py"):
+                        check_inside(a, cwd, roots, "unittest path")
+                    elif not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", a):
+                        raise Hold("unittest argument not a module or a worktree path: " + a)
+                return "test/build:python -m unittest", cwd
+            if mod in ("py_compile", "compileall"):
+                for a in rest[2:]:
+                    if a.startswith("-") and a != "-q":
+                        raise Hold("flag not on the allowlist: " + a)
+                    if not a.startswith("-"):
+                        check_inside(a, cwd, roots, mod + " path")
+                return "test/build:python -m " + mod, cwd
+            if mod in ("mypy", "flake8", "pylint"):
+                return runner_rule(mod, rest[2:], cwd, roots), cwd
+            raise Hold("python -m " + mod)
+        raise Hold("interpreter: " + name)
     if name in ("bash", "sh", "zsh") and rest:
         if rest[0] == "-n":
+            for a in rest[1:]:
+                check_path(a, cwd, roots, write=False)
             return "test/build:%s -n" % name, cwd
         script = rest[0]
         if script.startswith("-"):
             raise Hold("%s %s" % (name, script))
         p = resolve(script, cwd)
         base = os.path.basename(p)
-        rel = "/" + os.path.relpath(p, roots[0]) if inside(p, roots) else ""
+        rel = "/" + os.path.relpath(p, roots[0]) if inside(p, roots[:1]) else ""
         if rel and (re.match(r"^(test|tests|check|lint|conformance)[_.-]", base) or "/tests/" in rel or "/test/" in rel):
             return "test/build:%s %s" % (name, base), cwd
         raise Hold("runs a script that is not a test inside the worktree")
-    if name in ("node",) and rest[:1] == ["--check"]:
+    if name == "node" and rest[:1] == ["--check"] and len(rest) == 2:
+        check_inside(rest[1], cwd, roots, "node --check path")
         return "test/build:node --check", cwd
     if name in PKG_MANAGERS:
-        raise Hold("package manager: " + name)
+        return pkg_rule(name, rest, cwd, roots), cwd
     if name in INTERPRETERS:
         raise Hold("interpreter: " + name)
     raise Hold("unknown command: " + name)
@@ -409,11 +820,15 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         if kind in ("write", "edit"):
             if not path:
                 raise Hold("file write with no visible path")
+            pre_checks(path)
+            check_tilde(path)
             check_path(path, cwd, roots, write=True)
             return True, "write-in-worktree:file " + path
         if kind == "read":
             if not path:
                 raise Hold("file read with no visible path")
+            pre_checks(path)
+            check_tilde(path)
             check_path(path, cwd, roots, write=False)
             return True, "read-only:file " + path
         if kind != "shell":
@@ -421,10 +836,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         cmd = cmd.strip()
         if not cmd:
             raise Hold("no command visible")
-        if "\n" in cmd:
-            raise Hold("multi-line command (continuation lines, heredoc or wrapped text)")
-        if "`" in cmd or "$(" in cmd or "<(" in cmd or ">(" in cmd:
-            raise Hold("command substitution")
+        pre_checks(cmd)
         rules, cur = [], cwd
         for seg, prev in split_segments(cmd):
             rule, cur = classify_segment(seg, prev, cur, roots)
@@ -455,7 +867,7 @@ def main(argv: list[str]) -> int:
         print("hold no delegate worktree known"); return 0
     root = os.path.realpath(root)
     roots = [root] + [os.path.realpath(e) for e in extras if os.path.isdir(e)]
-    if root in ("/", os.path.realpath(HOME)):
+    if norm(root) in ("/", norm(os.path.realpath(HOME))):
         print("hold delegate root is / or $HOME (too broad to scope writes)"); return 0
     cmd = sys.stdin.read()
     ok, rule = is_safe(cmd, kind, path, root, roots)

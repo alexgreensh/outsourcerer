@@ -40,6 +40,7 @@ dv-idle|devin|composer||
 dv-working|devin|working||
 dv-idle-after-work|devin|idle||
 dv-approval|devin|approval|shell|touch made-by-devin.txt && ls
+dv-approval-wrapped|devin|approval|shell|
 agy-idle|agy|composer||
 agy-working|agy|working||
 agy-idle-after-work|agy|idle||
@@ -92,6 +93,15 @@ _osrc_screen_analyze_text cc < "$FX/cc-composer-typed-unsent.ansi"
 case "$OSRC_SCR_COMPOSER" in "When you finish, reply with exactly: ROUND4 DONE."*) ok ;; *) bad "typed composer text not extracted: $OSRC_SCR_COMPOSER" ;; esac
 [ "$OSRC_SCR_STATE" = composer ] && ok || bad "typed [y/N] text in the composer read as $OSRC_SCR_STATE"
 
+# ---- finding 4: a Devin command wrapped onto two rows is read whole (both rows, multi-line) -------
+_osrc_screen_analyze_text devin < "$FX/dv-approval-wrapped.ansi"
+want_cmd="ls -la src &&
+rm -rf ~/Documents"
+[ "$OSRC_SCR_STATE" = approval ] && [ "$OSRC_SCR_CMD" = "$want_cmd" ] && ok || bad "devin wrapped command read as [$OSRC_SCR_CMD]"
+[ "$OSRC_SCR_SEL" = Allow ] && [ "$OSRC_SCR_SCOPE" = once ] && ok || bad "devin wrapped: sel=$OSRC_SCR_SEL scope=$OSRC_SCR_SCOPE"
+_osrc_screen_analyze_text devin < "$FX/dv-approval.ansi"
+[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt && ls" ] && ok || bad "devin single-row command now reads [$OSRC_SCR_CMD]"
+
 # ---- osrc_screen_state through a fake tmux (contract: 2 lines) -------------------------------------
 CAP=""; tmux() { case "$1" in capture-pane) cat "$CAP" ;; display-message) printf '%s\n' "$TMP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/keys" ;; *) return 0 ;; esac; }
 CAP="$FX/dv-approval.ansi"; out="$(osrc_screen_state fake-pane devin)"
@@ -113,6 +123,35 @@ printf '%s\n' '────────────────────' '�
 CAP="$TMP/generic-composer.txt"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "legacy path read a composer box as a menu"
 _managed_provider() { printf devin; }
 CAP="$FX/dv-approval.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "devin approval not detected as a menu"
+
+# ---- finding 7: the menu report comes from the engine reader; answers resolve safely ---------------
+_endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
+menu_of() { _managed_provider() { printf '%s' "$1"; }; CAP="$FX/$2.ansi"; _managed_menu_detect p 2>/dev/null; }
+r="$(menu_of cc cc-permission-bash-rm)"
+[ "$(printf '%s\n' "$r" | head -1)" = "MENU select" ] && printf '%s\n' "$r" | grep -qx 'SEL 1 Yes' \
+  && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 4 ] && ok || bad "cc rm prompt: row 1 not listed / wrong rows: $(printf '%s' "$r" | tr '\n' '|')"
+printf '%s\n' "$r" | grep -q '^OPT 3 Yes, and switch to auto mode' && ok || bad "cc rm prompt: option 3 missing"
+r="$(menu_of codex cx-approval)"; printf '%s\n' "$r" | grep -q '^SEL 1 Yes, proceed' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "codex: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of agy agy-approval)"; printf '%s\n' "$r" | grep -q '^SEL 1 Yes, run command' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 4 ] && ok || bad "agy: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of devin dv-approval)"; [ "$(printf '%s\n' "$r" | grep -c '^SEL ')" = 1 ] && printf '%s\n' "$r" | grep -q '^SEL 1 Allow' \
+  && printf '%s\n' "$r" | grep -qx 'OPT 3 Deny' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin report noisy: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of devin dv-approval-wrapped)"; [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin wrapped: command row listed as an option: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of cc cc-askuserquestion)"; printf '%s\n' "$r" | grep -q '^SEL 1 Red' && printf '%s\n' "$r" | grep -q '^OPT 4 Chat about this' && ok || bad "cc question: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of cc cc-trust-folder-menu)"; printf '%s\n' "$r" | grep -qx 'SEL 1 No, exit' && printf '%s\n' "$r" | grep -qx 'OPT 2 Yes, I trust this folder' && ok || bad "cc trust: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of gemini gm-trust-folder-menu)"; printf '%s\n' "$r" | grep -q '^SEL 1 Trust folder' && printf '%s\n' "$r" | grep -q "^OPT 3 Don't trust" && ok || bad "gemini trust: $(printf '%s' "$r" | tr '\n' '|')"
+# answers on the held cc rm prompt: 1 selects row 1 (Enter alone), Yes is ambiguous, auto mode by label refused
+_managed_provider() { printf cc; }; CAP="$FX/cc-permission-bash-rm.ansi"
+tmux() { case "$1" in capture-pane) cat "$CAP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/akeys"; case " $* " in *" Enter "*) CAP="$FX/cc-idle-after-work.ansi" ;; esac ;; *) return 0 ;; esac; }
+: > "$TMP/akeys"; _managed_menu_answer p 1 2>/dev/null && [ "$(cat "$TMP/akeys")" = "send-keys -t p Enter" ] && ok || bad "answer 1 on cc rm prompt: $(cat "$TMP/akeys" | tr '\n' '|')"
+CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"
+err="$(_managed_menu_answer p Yes 2>&1)"; rc=$?
+[ "$rc" = 1 ] && [ ! -s "$TMP/akeys" ] && case "$err" in *ambiguous*) true ;; *) false ;; esac && ok || bad "answer Yes not refused as ambiguous (rc=$rc keys=$(cat "$TMP/akeys") err=$err)"
+CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; _managed_menu_answer p y >/dev/null 2>&1; [ ! -s "$TMP/akeys" ] && ok || bad "answer y typed keys: $(cat "$TMP/akeys")"
+CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; err="$(_managed_menu_answer p "auto mode" 2>&1)"
+[ ! -s "$TMP/akeys" ] && case "$err" in *"refusing to pick"*) true ;; *) false ;; esac && ok || bad "auto-mode row picked by label: $(cat "$TMP/akeys") $err"
+CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; _managed_menu_answer p No 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Down|send-keys -t p Down|send-keys -t p Down|send-keys -t p Enter|" ] && ok || bad "answer No: $(tr '\n' '|' < "$TMP/akeys")"
+CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; _managed_menu_answer p 3 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Down|send-keys -t p Down|send-keys -t p Enter|" ] && ok || bad "answer 3 by index: $(tr '\n' '|' < "$TMP/akeys")"
+unset -f menu_of
 
 # ---- E6: two identical sends to one session are both admitted (each is its own obligation) ---------
 _obligation_append "send.x.1.a" e6sess typing_started "" >/dev/null 2>&1
@@ -148,8 +187,59 @@ tmux() {
     *) return 0 ;;
   esac
 }
-OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "please run the suite"; rc=$?
+OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "please run the suite" composer 0 0; rc=$?
 [ "$rc" = 0 ] && ok || bad "cleared composer + spinner not accepted as submitted (rc=$rc $OSRC_SEND_EVIDENCE)"
+
+# ---- finding 8: a static pane is never a receipt; proof must be about THIS send --------------------
+# Baseline exactly as _managed_session_send takes it, then a pane that never changes.
+static_verify() { # <fixture> <snippet> -> rc of the verifier with a same-screen baseline, text never seen
+  CAP="$FX/$1.ansi"
+  tmux() { case "$1" in capture-pane) cat "$CAP" ;; *) return 0 ;; esac; }
+  _osrc_screen_analyze_text cc < "$CAP"; local b="$OSRC_SCR_STATE" h; h="$(_osrc_scr_history_count "$2")"
+  OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "$2" "$b" "$h" 0
+}
+static_verify cc-prose-question "src/main.py please"; rc=$?
+[ "$rc" != 0 ] && ok || bad "old prose question verified a send that never appeared ($OSRC_SEND_EVIDENCE)"
+static_verify cc-idle-after-work "Use the Bash tool to run"; rc=$?
+[ "$rc" != 0 ] && ok || bad "an old identical history line verified a resend ($OSRC_SEND_EVIDENCE)"
+static_verify cc-permission-bash-rm "1 please continue"; rc=$?
+[ "$rc" != 0 ] && ok || bad "an approval on screen verified a send ($OSRC_SEND_EVIDENCE)"
+# positive controls: a NEW identical history row counts; text seen in the composer then cleared counts
+_osrc_screen_analyze_text cc < "$FX/cc-idle-after-work.ansi"; h="$(_osrc_scr_history_count "Use the Bash tool to run")"
+[ "$h" = 1 ] && ok || bad "history count of the old line is $h, want 1"
+tmux() { case "$1" in capture-pane) printf '\342\235\257 Use the Bash tool to run exactly this\n\342\235\257 Use the Bash tool to run again\n'; mk_cc "" "Quality 1" ;; *) return 0 ;; esac; }
+OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "Use the Bash tool to run" idle 1 0; rc=$?
+[ "$rc" = 0 ] && ok || bad "a second identical history row was not accepted (rc=$rc $OSRC_SEND_EVIDENCE)"
+CAP="$FX/cc-idle-after-work.ansi"; tmux() { case "$1" in capture-pane) cat "$CAP" ;; *) return 0 ;; esac; }
+OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "brand new words here" idle 0 1; rc=$?
+[ "$rc" = 0 ] && ok || bad "text seen in the composer, then cleared, not accepted (rc=$rc $OSRC_SEND_EVIDENCE)"
+# full send: a prompt that opens while typing takes the keys -> rc 1 and Enter is NEVER pressed
+(
+  _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+  _obligation_guard_begin() { :; }; _obligation_guard_end() { :; }; _obligation_delivery_unknown() { :; }
+  _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }; _tmux_reset_input() { :; }
+  _managed_composer_state() { printf empty; }; _osrc_screen_engine_of() { printf cc; }
+  CAP="$FX/cc-idle-after-work.ansi"; : > "$TMP/fkeys"
+  tmux() { case "$1" in capture-pane) cat "$CAP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/fkeys"; CAP="$FX/cc-permission-bash-rm.ansi" ;; *) return 0 ;; esac; }
+  _managed_session_send p "1 yes go ahead"; rc=$?
+  [ "$rc" = 1 ] && ! grep -q ' Enter$' "$TMP/fkeys" && case "$OSRC_SEND_EVIDENCE" in *"Enter NOT pressed"*) true ;; *) false ;; esac
+) && ok || bad "send into a prompt that opened while typing pressed Enter or reported success: $(tr '\n' '|' < "$TMP/fkeys")"
+# spill after admit: a refused send leaves no spill file behind
+(
+  _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }
+  _endpoint_mutation_lock() { return 1; }
+  tmux() { case "$1" in display-message) printf '%s\n' "$TMP/wt2" ;; *) return 0 ;; esac; }
+  mkdir -p "$TMP/wt2"
+  OSRC_SEND_MAX_CHARS=10 _managed_session_send p "a message longer than ten chars"
+  [ -z "$(ls "$TMP/wt2/.osrc-msgs" 2>/dev/null)" ]
+) && ok || bad "a refused send left its spill file: $(ls "$TMP/wt2/.osrc-msgs" 2>/dev/null)"
+(
+  _obligation_admit() { return 1; }; _managed_endpoint_live() { return 0; }
+  tmux() { case "$1" in display-message) printf '%s\n' "$TMP/wt3" ;; *) return 0 ;; esac; }
+  mkdir -p "$TMP/wt3"
+  OSRC_SEND_MAX_CHARS=10 _managed_session_send p "a message longer than ten chars"
+  [ ! -d "$TMP/wt3/.osrc-msgs" ]
+) && ok || bad "a send the ledger refused still spilled a file"
 
 # ---- long message spill ----------------------------------------------------------------------------
 mkdir -p "$TMP/wt"; git -C "$TMP/wt" init -q

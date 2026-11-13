@@ -46,7 +46,7 @@ tail -1 "$LOG" | jq -e '.decision=="approve" and .session=="sess" and .engine=="
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "rm outside worktree not held (rc=$rc keys=$(cat "$KEYS"))"
 printf '%s\n' "$out" | grep -q '^EVENT approval sess [0-9]* held by policy safe' && printf '%s\n' "$out" | grep -q 'session answer' && ok || bad "hold not reported: $out"
-tail -1 "$LOG" | jq -e '.decision=="hold" and (.rule|test("outside"))' >/dev/null && ok || bad "hold not logged: $(tail -1 "$LOG")"
+tail -1 "$LOG" | jq -e '.decision=="hold" and (.rule|test("outside|[(][$][)]"))' >/dev/null && ok || bad "hold not logged: $(tail -1 "$LOG")"
 # second tick within OSRC_HOLD_MIN: quiet
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 3 ] && [ -z "$out" ] && ok || bad "repeat hold was not quiet (rc=$rc out=$out)"
@@ -58,7 +58,7 @@ CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
 
 # other engines' real prompts
-for spec in "devin|dv-approval|0" "codex|cx-approval|0" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
+for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "codex|cx-approval|0" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
   PROV="${spec%%|*}"; rest="${spec#*|}"; f="${rest%%|*}"; want="${rest#*|}"
   rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
   [ "$PROV" = cc ] || AFTER="$FX/dv-idle-after-work.ansi"
@@ -82,5 +82,10 @@ tmux() { case "$1" in capture-pane) cat "$CAP" ;; display-message) return 1 ;; s
 rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; CAP="$FX/cc-permission-bash.ansi"
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "unknown worktree did not hold (rc=$rc)"
+
+# empty / dotted session id never acts and never deletes another session's held record (finding 13)
+mkdir -p "$OSRC_HOME/approver/held"; : > "$OSRC_HOME/approver/held/.keep"; : > "$OSRC_HOME/approver/held/other.cmd"; : > "$KEYS"
+osrc_approver_tick "" "" >/dev/null 2>&1; rc1=$?; osrc_approver_tick sess ".." >/dev/null 2>&1; rc2=$?
+[ "$rc1" = 1 ] && [ "$rc2" = 1 ] && [ ! -s "$KEYS" ] && [ -e "$OSRC_HOME/approver/held/.keep" ] && [ -e "$OSRC_HOME/approver/held/other.cmd" ] && ok || bad "bad session id acted or deleted held files (rc=$rc1/$rc2)"
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]
