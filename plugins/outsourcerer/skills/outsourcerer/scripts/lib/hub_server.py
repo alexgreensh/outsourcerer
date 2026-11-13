@@ -3,7 +3,9 @@
 
 Loopback only (127.0.0.1), token-gated, Python 3 standard library only.
 Endpoints: GET / , GET /api/projects, GET /api/answers, POST /api/answers,
-POST /api/refresh. Re-exports every REFRESH_SECS seconds in a background thread.
+POST /api/refresh. Re-exports every REFRESH_SECS seconds in a background
+thread, but only while a page has polled within IDLE_SECS and only when
+state under OSRC_HOME actually changed (idle dashboards cost no CPU).
 """
 import argparse
 import hmac
@@ -18,8 +20,12 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-REFRESH_SECS = 30
+REFRESH_SECS = int(os.environ.get("OSRC_HUB_REFRESH_SECS") or 30)
+IDLE_SECS = int(os.environ.get("OSRC_HUB_IDLE_SECS") or 300)
 ANSWER_MAX = 16384
+# Directories whose mtimes count as "state changed" for the refresh loop.
+WATCH_DIRS = ("jobs", "hub", "owners", "remote")
+WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
@@ -36,6 +42,26 @@ class Hub:
         self.cache_ts = 0.0
         self.export_error = ""
         self.lock = threading.Lock()
+        self.last_poll = time.time()
+        self.last_state_mtime = -1.0
+
+    def state_mtime(self):
+        # Newest mtime anywhere state can live; cheap walk, no file reads.
+        best = 0.0
+        for name in WATCH_FILES:
+            try:
+                best = max(best, os.path.getmtime(os.path.join(self.osrc_home, name)))
+            except OSError:
+                pass
+        for sub in WATCH_DIRS:
+            root = os.path.join(self.osrc_home, sub)
+            for dirpath, _dirnames, filenames in os.walk(root):
+                for n in filenames:
+                    try:
+                        best = max(best, os.path.getmtime(os.path.join(dirpath, n)))
+                    except OSError:
+                        continue
+        return best
 
     def run_export(self, timeout=90):
         env = dict(os.environ)
@@ -58,12 +84,15 @@ class Hub:
             self.cache = data
             self.cache_ts = time.time()
             self.export_error = ""
+        self.last_state_mtime = self.state_mtime()
         return data
 
     def refresh_loop(self):
         while True:
             try:
-                self.run_export()
+                if time.time() - self.last_poll <= IDLE_SECS \
+                        and self.state_mtime() != self.last_state_mtime:
+                    self.run_export()
             except Exception as e:  # keep serving last good cache; surface the error
                 with self.lock:
                     self.export_error = str(e)[:300]
@@ -183,6 +212,7 @@ def make_handler(hub):
         def do_GET(self):
             if not self._host_ok() or not self._token_ok():
                 return self._deny()
+            hub.last_poll = time.time()
             u = urllib.parse.urlparse(self.path)
             path = u.path
             if path in ("/", "/index.html"):
@@ -211,6 +241,7 @@ def make_handler(hub):
         def do_POST(self):
             if not self._host_ok() or not self._token_ok():
                 return self._deny()
+            hub.last_poll = time.time()
             u = urllib.parse.urlparse(self.path)
             try:
                 n = int(self.headers.get("Content-Length") or 0)
@@ -250,6 +281,8 @@ def main():
     ap.add_argument("--engine", required=True)
     ap.add_argument("--osrc-home", required=True)
     ap.add_argument("--no-open", action="store_true")
+    ap.add_argument("--scan", type=int, default=0,
+                    help="try the next free port, up to N after --port")
     args = ap.parse_args()
 
     token = os.environ.get("OSRC_HUB_TOKEN") or os.urandom(16).hex()
@@ -263,8 +296,22 @@ def main():
 
     threading.Thread(target=hub.refresh_loop, daemon=True).start()
 
-    httpd = ThreadingHTTPServer((args.bind, args.port), make_handler(hub))
+    # Fixed default port for a bookmarkable URL; --scan lets it slide to
+    # the next free port and we say so (an explicit --port stays strict).
+    httpd = None
+    last_err = None
+    for port in range(args.port, args.port + args.scan + 1):
+        try:
+            httpd = ThreadingHTTPServer((args.bind, port), make_handler(hub))
+            break
+        except OSError as e:
+            last_err = e
+    if httpd is None:
+        raise SystemExit("hub serve: no free port in %d..%d: %s"
+                         % (args.port, args.port + args.scan, last_err))
     port = httpd.server_address[1]
+    if port != args.port:
+        sys.stderr.write("[hub] port %d busy — serving on %d instead\n" % (args.port, port))
     url = "http://127.0.0.1:%d/?t=%s" % (port, urllib.parse.quote(token))
     print("[outsourcerer] hub: %s" % url, flush=True)
     if not args.no_open and os.environ.get("OSRC_HUB_NO_OPEN") != "1":

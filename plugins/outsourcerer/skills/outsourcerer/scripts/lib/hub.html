@@ -119,6 +119,7 @@ button { font: inherit; color: inherit; }
 [data-lucide], svg.lucide { width: 1em; height: 1em; stroke-width: 2.2; flex: none; vertical-align: -0.14em; }
 .logo { width: 1em; height: 1em; flex: none; vertical-align: -0.14em; }
 .stamp-top { margin: 0; align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; font-family: var(--mono); font-weight: 700; font-size: .95rem; padding: 4px 12px; border: 1.5px solid var(--edge); border-radius: 999px; background: var(--card); }
+.stamp-top.stale { background: var(--down-bg); color: var(--down); border-color: var(--down); }
 .chip { display: inline-flex; align-items: center; gap: 5px; font-size: .8rem; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1.5px solid var(--edge); white-space: nowrap; background: var(--card); }
 .plats { display: inline-flex; gap: 4px; margin-left: 6px; font-size: 14px; vertical-align: -0.1em; }
 .wt { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-weight: 700; font-size: .78rem; padding: 2px 10px; border-radius: 999px; border: 1.5px solid var(--edge); }
@@ -533,6 +534,15 @@ a.pill svg { width: 13px; height: 13px; }
   function limitsOpen() { try { return localStorage.getItem('mc-limits-open') === '1'; } catch (e) { return false; } }
   function setLimitsOpen(v) { try { localStorage.setItem('mc-limits-open', v ? '1' : '0'); } catch (e) {} renderLimits(); paint(); }
   { const b = $('lfold'); if (b) b.addEventListener('click', (e) => { e.stopPropagation(); setLimitsOpen(!limitsOpen()); }); }
+  function staleCheck() {
+    document.querySelectorAll('.stamp-top').forEach((st) => {
+      const t = Date.parse(st.dataset.at || ''); if (!st.dataset.live || isNaN(t)) return;
+      const min = Math.floor((Date.now() - t) / 60000); const old = min > 45;
+      st.classList.toggle('stale', old);
+      let w = st.querySelector('.stw'); if (old) { if (!w) { w = el('span', 'stw'); st.append(w); } w.textContent = ' · not updated for ' + (min >= 120 ? Math.floor(min / 60) + ' h' : min + ' min'); } else if (w) w.remove();
+    });
+  }
+  setInterval(staleCheck, 60000);
   function renderLimits() {
     const box = $('llist'); if (!box) return; box.replaceChildren();
     if (!limits.length) { box.appendChild(el('p', 'lnone', db ? 'No limits reported yet. Orchestrators add each harness here.' : 'Sign in on claude.ai to see limits.')); $('lstamp').textContent = ''; return; }
@@ -577,9 +587,12 @@ a.pill svg { width: 13px; height: 13px; }
     if (p.repo) { const a = el('a', 'pill'); a.href = 'https://github.com/' + p.repo; a.target = '_blank'; a.rel = 'noopener'; a.append(ghSvg(), document.createTextNode(p.repo)); meta.append(a); }
     const h1 = el('h1', null, String(p.name));
     (p.extraLinks || []).forEach((x) => { if (!x.url || !/^https:\/\//i.test(String(x.url))) return; const k = el('a', 'board-link', x.t); k.href = x.url; k.target = '_blank'; k.rel = 'noopener'; meta.append(k); });
-    if (p.updated) { const st = el('p', 'stamp-top'); st.append(ic('clock'), el('span', null, 'Updated ' + p.updated)); ph.append(st); }
+    // Stale alarm (past bug: boards sat on an old stamp for hours while work moved). Needs updatedAt (ISO).
+    if (p.updated) { const st = el('p', 'stamp-top'); st.dataset.at = p.updatedAt || ''; st.dataset.live = p.status === 'shipped' ? '' : '1';
+      st.append(ic('clock'), el('span', null, 'Updated ' + p.updated)); ph.append(st); }
     ph.append(h1, el('p', 'lede', p.tagline || ''), meta);
     main.appendChild(ph);
+    staleCheck();   // stamp must be in the DOM for querySelectorAll to find it
 
     const ds = openDecs(p);
     const stats = el('div', 'stats');

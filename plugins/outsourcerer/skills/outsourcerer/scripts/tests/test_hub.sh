@@ -74,6 +74,21 @@ echo "$proj" | jq -e '.lanes[] | select(.id=="job-1") | .status == "Done" and .p
 echo "$proj" | jq -e '.decisions[0].id == "D1" and .decisions[0].status == "wait" and .decisions[0].weight == "High"' >/dev/null \
   && ok "decision normalized (id/status/weight)" || bad "decision shape wrong"
 echo "$proj" | jq -e '.exported_at | type == "number"' >/dev/null && ok "project exported_at present" || bad "exported_at missing"
+# Item 14 stale alarm needs a machine-readable updatedAt (ISO, from input mtimes).
+echo "$proj" | jq -e '.updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")' >/dev/null \
+  && ok "project updatedAt is an ISO timestamp" || bad "updatedAt missing/not ISO: $(echo "$proj" | jq -c '.updatedAt')"
+# A card whose inputs are all old must export an old updatedAt (not export time).
+cat > "$OSRC_HOME/hub/projects/stale-1.json" <<'EOF'
+{"name":"Stale Board","tagline":"has not moved in two hours","order":9}
+EOF
+touch -t "$(date -u -v-2H '+%Y%m%d%H%M.%S' 2>/dev/null || date -u -d '2 hours ago' '+%Y%m%d%H%M.%S')" "$OSRC_HOME/hub/projects/stale-1.json"
+outs="$(run hub export 2>/dev/null)"
+sproj="$(echo "$outs" | jq -c '.projects[] | select(.id=="stale-1")')"
+sage="$(echo "$sproj" | jq -r '(.updatedAt | sub("Z$";"+00:00")) + " epoch"' 2>/dev/null)"
+sepoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%S%z' "$(echo "$sproj" | jq -r '.updatedAt | sub("Z$";"+0000")')" '+%s' 2>/dev/null \
+  || date -u -d "$(echo "$sproj" | jq -r '.updatedAt')" '+%s' 2>/dev/null)"
+{ [ -n "$sepoch" ] && [ $(( $(date +%s) - sepoch )) -gt 2700 ]; } \
+  && ok "stale-1 updatedAt is >45min old (not export time)" || bad "stale-1 updatedAt not old enough: $sage"
 
 echo "=== hub export: limits ==="
 lim="$(echo "$out" | jq -c '.limits')"
@@ -136,6 +151,14 @@ grep -q "el('div', 'tcol')" "$PAGE" && grep -q '^\.tcol ' "$PAGE" && ok "balance
 grep -q 'hgt\[0\] <= hgt\[1\]' "$PAGE" && ok "theme cards join the shorter column" || bad "column balance check missing"
 grep -q '100dvh' "$PAGE" && grep -q 'rail-top' "$PAGE" && grep -q 'rail-mid' "$PAGE" && ok "rail layout (rail-top/rail-mid/100dvh)" || bad "rail layout missing"
 grep -q 'mask' "$PAGE" && grep -q 'data:image/png;base64' "$PAGE" && ok "wordmark css mask (inlined asset)" || bad "wordmark mask missing"
+# Item 14: stale alarm + no dialogs (past dashboard bugs).
+grep -q 'function staleCheck' "$PAGE" && grep -q 'setInterval(staleCheck' "$PAGE" \
+  && grep -q 'stamp-top.stale' "$PAGE" && grep -q 'dataset.at' "$PAGE" \
+  && grep -q 'dataset.live' "$PAGE" && grep -q 'not updated for' "$PAGE" \
+  && ok "stale alarm wired (staleCheck, data-at/live, .stamp-top.stale)" || bad "stale alarm missing from page"
+grep -q "status === 'shipped' ? '' : '1'" "$PAGE" && grep -q 'min > 45' "$PAGE" \
+  && ok "stale alarm: shipped exempt, 45min threshold" || bad "stale alarm semantics missing"
+if grep -qE '\b(alert|confirm|prompt) *\(' "$PAGE"; then bad "alert/confirm/prompt dialog found in page"; else ok "no alert/confirm/prompt dialogs"; fi
 
 one="$(run hub export --project sess-1 2>/dev/null)"
 echo "$one" | jq -e '(.projects | length) == 1 and (.projects[0].id == "sess-1")' >/dev/null \
@@ -168,6 +191,11 @@ done
 [ -n "$URL" ] || { bad "hub serve did not print a token URL"; cat "$TMP/serve.log"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 BASE="${URL%%\?*}"; TOK="${URL##*t=}"
 ok "serve printed loopback token URL"
+# Item 14: the token persists in $OSRC_HOME/hub/token (0600) so the URL is bookmarkable.
+[ -f "$OSRC_HOME/hub/token" ] && ok "token persisted to hub/token" || bad "hub/token missing"
+PERM="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+[ "$PERM" = "600" ] && ok "hub/token is mode 0600" || bad "hub/token mode $PERM"
+[ "$(cat "$OSRC_HOME/hub/token")" = "$TOK" ] && ok "served token is the persisted token" || bad "served token != persisted token"
 
 code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects")"
 [ "$code" = "403" ] && ok "api refuses requests without token" || bad "no-token request got $code"
@@ -220,6 +248,95 @@ if echo "$lsof_out" | grep -qE '(\*|0\.0\.0\.0|\[::\]):'; then bad "server expos
 # so only the server's own "[hub]" request lines are checked).
 if grep '^\[hub\]' "$TMP/serve.log" | grep -q 't='; then bad "token leaked into server log"; else ok "token stripped from request logs"; fi
 
+cleanup_srv
+
+echo "=== item 14: bookmarkable URL, idle refresh ==="
+# Helper: launch serve in the background, wait for its printed URL.
+wait_url() {  # <logfile> -> URL on stdout
+  local u="" i
+  for i in $(seq 1 60); do
+    u="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$1" 2>/dev/null | head -1)"
+    [ -n "$u" ] && break; sleep 0.2
+  done; printf '%s' "$u"
+}
+
+# Restart without --new-token: the persisted token must be reused (bookmark still valid).
+PORT2="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve2.log" 2>&1 &
+SRV=$!
+URL2="$(wait_url "$TMP/serve2.log")"
+TOK2="${URL2##*t=}"
+[ -n "$URL2" ] && [ "$TOK2" = "$TOK" ] \
+  && ok "restart reuses the persisted token (bookmarkable URL)" \
+  || bad "restart minted a new token"
+cleanup_srv
+
+# --new-token rotates: file content changes, mode stays 0600.
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open --new-token >"$TMP/serve3.log" 2>&1 &
+SRV=$!
+URL3="$(wait_url "$TMP/serve3.log")"
+TOK3="${URL3##*t=}"
+[ -n "$URL3" ] && [ "$TOK3" != "$TOK" ] && [ "$(cat "$OSRC_HOME/hub/token")" = "$TOK3" ] \
+  && ok "--new-token rotates the persisted token" || bad "--new-token did not rotate"
+PERM3="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+[ "$PERM3" = "600" ] && ok "rotated hub/token still mode 0600" || bad "rotated token mode $PERM3"
+cleanup_srv
+
+# Fixed default port: no --port -> 8788, or the next free one WITH the notice.
+OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --no-open >"$TMP/serve4.log" 2>&1 &
+SRV=$!
+URL4="$(wait_url "$TMP/serve4.log")"
+P4="$(printf '%s' "$URL4" | sed -E 's|.*127\.0\.0\.1:([0-9]+).*|\1|')"
+if [ "$P4" = "8788" ]; then
+  ok "default serve bound to the fixed port 8788"
+elif [ "$P4" -ge 8789 ] && [ "$P4" -le 8798 ] && grep -q 'busy — serving on' "$TMP/serve4.log"; then
+  ok "default port busy -> next free $P4 with notice"
+else
+  bad "default port check failed (P4=$P4): $(cat "$TMP/serve4.log" | head -5)"
+fi
+cleanup_srv
+
+# Idle-CPU: REFRESH=1s ticks, IDLE=30s. No state change -> no re-export;
+# a file change under OSRC_HOME -> next tick re-exports.
+EXPORT_JSON="$OSRC_HOME/hub/export.json"
+OSRC_HUB_REFRESH_SECS=1 OSRC_HUB_IDLE_SECS=30 OSRC_HOME="$OSRC_HOME" \
+  bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve5.log" 2>&1 &
+SRV=$!
+URL5="$(wait_url "$TMP/serve5.log")"
+[ -n "$URL5" ] || { bad "idle-test serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
+curl -s -o /dev/null "${URL5%%\?*}/api/projects?t=${URL5##*t=}"   # a page poll -> refresh stays live
+m0="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+sleep 3
+m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+[ "$m0" = "$m1" ] && ok "no state change -> refresh loop skips the export" \
+  || bad "refresh re-exported unchanged state ($m0 -> $m1)"
+mkdir -p "$OSRC_HOME/jobs/job-x" && echo running > "$OSRC_HOME/jobs/job-x/status"
+sleep 2.5
+m2="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+[ "$m2" != "$m1" ] && ok "state change under OSRC_HOME -> next tick re-exports" \
+  || bad "state change did not trigger a re-export"
+cleanup_srv
+
+# Idle-stop: REFRESH=1s ticks, IDLE=2s. With no page polling, the loop stops
+# even when state changes; a poll wakes it again.
+OSRC_HUB_REFRESH_SECS=1 OSRC_HUB_IDLE_SECS=2 OSRC_HOME="$OSRC_HOME" \
+  bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve6.log" 2>&1 &
+SRV=$!
+URL6="$(wait_url "$TMP/serve6.log")"
+[ -n "$URL6" ] || { bad "idle-stop serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
+sleep 3                                  # now past the 2s idle window, nothing polled
+echo still-running > "$OSRC_HOME/jobs/job-x/status"   # state changes while idle
+m3="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+sleep 2.5
+m4="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+[ "$m3" = "$m4" ] && ok "no page poll for the idle window -> refresh loop stops" \
+  || bad "loop kept exporting while idle ($m3 -> $m4)"
+curl -s -o /dev/null "${URL6%%\?*}/api/projects?t=${URL6##*t=}"   # a poll wakes it
+echo again > "$OSRC_HOME/jobs/job-x/status"
+sleep 2.5
+m5="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+[ "$m5" != "$m4" ] && ok "a page poll resumes the refresh loop" \
+  || bad "loop did not resume after a poll"
 cleanup_srv
 
 echo "RESULTS: $pass pass $fail fail"

@@ -12,6 +12,10 @@ is omitted. Decisions come from `$OSRC_HOME/hub/decisions/<slug>.json`; card fie
 (name/tagline/themes/order/repo/status/pct/eta/flow/extraLinks) and per-lane
 overrides (short/note/issues/theme) come from `$OSRC_HOME/hub/projects/<slug>.json`.
 `extraLinks` entries are kept only when their `url` starts with `https://`.
+Each project also carries `updatedAt` — the ISO time of its newest input file
+(owner links, card, decisions). The page turns it into the stale alarm: a live
+project untouched for 45+ minutes shows "not updated for N min"; a shipped one
+never alarms.
 
 The document also carries a top-level `limits` array — the rows behind the rail's
 "Lanes and limits" panel — built from L7's meter sources. A row exists only for a
@@ -62,11 +66,23 @@ Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
 
 ## Local mode (any browser)
 
-`outsourcerer hub serve [--port N]` runs the same page on `127.0.0.1` only, behind a
-random token in the URL, and opens it (`--no-open` / `OSRC_HUB_NO_OPEN=1` to skip).
-The server re-exports every 30s; the page polls every 15s. Answers POST to
-`$OSRC_HOME/hub/answers/<slug>--<id>.json` — the same files artifact mode writes, so
-an orchestrator reading that directory sees local-mode answers too.
+`outsourcerer hub serve [--port N] [--new-token]` runs the same page on
+`127.0.0.1` only, behind a token in the URL, and opens it (`--no-open` /
+`OSRC_HUB_NO_OPEN=1` to skip). The token is created once into
+`$OSRC_HOME/hub/token` (mode `0600`) and reused on every later launch, so the
+printed URL stays bookmarkable across restarts; `--new-token` is the only
+rotation and kills old bookmarks. The default port is fixed at `8788`; if it is
+taken the server slides to the next free port (up to 8798) and prints a notice —
+an explicit `--port` never slides.
+
+The server re-exports at most every `OSRC_HUB_REFRESH_SECS` (default 30s), and
+only when it is worth it: the export is skipped when no file under `jobs`,
+`hub`, `owners`, `remote`, or `rate-limits.json` changed since the last run,
+and the loop stops entirely once no page has polled for `OSRC_HUB_IDLE_SECS`
+(default 5 minutes — an idle dashboard costs no CPU). The page polls every 15s.
+Answers POST to `$OSRC_HOME/hub/answers/<slug>--<id>.json` — the same files
+artifact mode writes, so an orchestrator reading that directory sees local-mode
+answers too.
 
 Endpoints: `GET /api/projects`, `GET /api/answers`, `POST /api/answers`,
 `POST /api/refresh`. Every request needs the token (`?t=` or `X-OSRC-Token`) and a

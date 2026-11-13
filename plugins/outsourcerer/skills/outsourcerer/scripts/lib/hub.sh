@@ -282,12 +282,15 @@ _osrc_hub_build_project() {
   etanote="$(jq -r '.etaNote // ""' <<<"$card")"
   tagline="$(jq -r '.tagline // ""' <<<"$card")"
   repo="$(jq -r '.repo // ""' <<<"$card")"
+  local upda; upda="$(_osrc_hub_project_mtime "$slug")"
   out="$(jq -cn \
     --arg id "$slug" --arg name "$name" --argjson order "$order" --arg upd "$upd" \
+    --arg upda "$upda" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
     --arg status "$status" --arg pct "$pct" --arg eta "$eta" --arg etanote "$etanote" \
     --arg tagline "$tagline" --arg repo "$repo" --argjson card "$card" '
     {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs}
+    + (if $upda=="" then {} else {updatedAt:$upda} end)
     + (if $status=="" then {} else {status:$status} end)
     + (if $pct=="" then {} else {pct:($pct|tonumber)} end)
     + (if $eta=="" then {} else {eta:$eta} end)
@@ -299,6 +302,21 @@ _osrc_hub_build_project() {
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
   ')"
   printf '%s' "$out"
+}
+
+# _osrc_hub_project_mtime <slug> -> ISO-8601 of the newest input file for this
+# project (owner links, card, decisions), or "" when nothing exists. Feeds the
+# page's "not updated for N min" stale alarm.
+_osrc_hub_project_mtime() {
+  local slug="$1" best=0 f m
+  _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
+  for f in "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json"; do
+    [ -f "$f" ] || continue
+    m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+    [ "$m" -gt "$best" ] 2>/dev/null && best="$m"
+  done
+  [ "$best" -gt 0 ] || { printf ''; return 0; }
+  date -u -r "$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf ''
 }
 
 # _osrc_hub_unowned_project -> project doc for targets no owner session claims
@@ -329,11 +347,13 @@ _osrc_hub_unowned_project() {
     lane="$(_osrc_hub_lane_job "$id")" && [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a+[$b]')"
   done
   [ "$lanes" != "[]" ] || return 0
-  local card; card="$(_osrc_hub_card unowned)"
+  local card upda; card="$(_osrc_hub_card unowned)"; upda="$(_osrc_hub_project_mtime unowned)"
   jq -cn --arg id unowned --arg name "Unowned runs" --argjson order 999 --arg upd "$upd" \
+    --arg upda "$upda" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs '[]' --argjson card "$card" '
     {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
-     tagline:"Runs launched without an owning orchestrator session."}'
+     tagline:"Runs launched without an owning orchestrator session."}
+    + (if $upda=="" then {} else {updatedAt:$upda} end)'
 }
 
 # ---- limits (the Lanes and limits rail) ------------------------------------------
@@ -497,24 +517,39 @@ cmd_hub_export() {
   jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}'
 }
 
-# cmd_hub_serve [--port N] [--no-open] -> local Mission Control on 127.0.0.1.
+# cmd_hub_serve [--port N] [--no-open] [--new-token] -> local Mission Control
+# on 127.0.0.1. Token persists in $OSRC_HOME/hub/token (0600) so the printed
+# URL stays bookmarkable across restarts; --new-token rotates it. Default
+# port is fixed; the server slides to the next free port and says so.
 cmd_hub_serve() {
-  local port="${OSRC_HUB_PORT:-0}" noopen="${OSRC_HUB_NO_OPEN:-0}"
+  local port="${OSRC_HUB_PORT:-}" noopen="${OSRC_HUB_NO_OPEN:-0}" newtok=0 scan=0
   while [ "$#" -gt 0 ]; do case "$1" in
-    --port) port="${2:-}"; shift 2 ;;
+    --port) port="${2:-}"; scan=0; shift 2 ;;
     --no-open) noopen=1; shift ;;
-    *) die "hub serve: unknown option '$1' (usage: hub serve [--port N] [--no-open])" ;;
+    --new-token) newtok=1; shift ;;
+    *) die "hub serve: unknown option '$1' (usage: hub serve [--port N] [--no-open] [--new-token])" ;;
   esac; done
-  case "$port" in ''|*[!0-9]*) die "hub serve: --port must be a number (0 = pick a free one)" ;; esac
+  if [ -z "$port" ]; then port=8788; scan=10; fi   # fixed default, slide up to 8798
+  case "$port" in *[!0-9]*) die "hub serve: --port must be a number" ;; esac
   have python3 || die "hub serve needs python3"
   local dir="${_OSRC_FACTORY_DIR:-$SCRIPT_DIR}"
   local server="$dir/lib/hub_server.py" page="$dir/lib/hub.html" engine="$dir/outsourcerer.sh"
   [ -f "$server" ] && [ -f "$page" ] && [ -f "$engine" ] \
     || die "hub files missing under $dir/lib (hub_server.py, hub.html) or $engine"
-  local tok; tok="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
-  [ -n "$tok" ] || die "hub serve: cannot read /dev/urandom for the access token — refusing to run with a guessable one"
+  local tokf="$OSRC_HOME/hub/token" tok=""
+  mkdir -p "$OSRC_HOME/hub"
+  if [ "$newtok" != 1 ] && [ -f "$tokf" ]; then
+    tok="$(cat "$tokf" 2>/dev/null | tr -d ' \n')"
+    case "$tok" in *[!0-9a-fA-F]*|'') tok="" ;; esac   # corrupt file -> mint below
+  fi
+  if [ -z "$tok" ]; then
+    tok="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [ -n "$tok" ] || die "hub serve: cannot read /dev/urandom for the access token — refusing to run with a guessable one"
+    ( umask 077 && printf '%s\n' "$tok" > "$tokf" ) || die "hub serve: cannot write $tokf"
+    [ "$newtok" = 1 ] && echo "hub serve: rotated the access token — old bookmarks are dead" >&2
+  fi
   export OSRC_HUB_TOKEN="$tok"
-  local -a args=(--bind 127.0.0.1 --port "$port" --page "$page" --engine "$engine" --osrc-home "$OSRC_HOME")
+  local -a args=(--bind 127.0.0.1 --port "$port" --page "$page" --engine "$engine" --osrc-home "$OSRC_HOME" --scan "$scan")
   [ "$noopen" = 1 ] && args+=(--no-open)
   exec python3 -I "$server" "${args[@]}"
 }
@@ -524,6 +559,6 @@ cmd_hub() {
   case "$sub" in
     export) shift; cmd_hub_export "$@" ;;
     serve) shift; cmd_hub_serve "$@" ;;
-    *) die "hub: export [--project SLUG] | serve [--port N] [--no-open]" ;;
+    *) die "hub: export [--project SLUG] | serve [--port N] [--no-open] [--new-token]" ;;
   esac
 }
