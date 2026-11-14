@@ -41,7 +41,7 @@ For a design review, start a fresh reviewer with the browser tools and required 
 ```
 review reviewer <tmux-session> [--replace]   set THE reviewer (refuses a second live one)
 review queue add <lane-or-branch> [--brief F] | queue ls
-review next [--force]    send the oldest queued item as ONE line pointing at a generated brief
+review next [--force] [--final]    send the oldest queued item as ONE line pointing at a generated brief
 review show|ack|requeue|drop|sendback <item> | rotate | events
 ```
 
@@ -56,6 +56,10 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - **Verdict contract**: each item records `sha_at_ready`, `sha_reviewed`, `verdict`, `findings` (path).
   A push after READY supersedes a queued review of the old sha and marks an in-flight or finished one
   `stale`; the new READY head is enqueued as a re-review. A stale MERGE never makes the lane `done`.
+- Re-review briefs compare against the last reviewed commit and turn its findings into a checklist.
+  Lane reports should add a `## Round <number>` section for each round; when available, only the
+  latest round is included. Use `review next --final` for the final merge review, which requests the
+  full base-to-head diff as well as the checklist.
   After CHANGES the lane reads `live` again and its stall clock starts at the verdict, so a lane that
   was sent findings and went silent raises `stalled`.
 - `lane rm` deletes the lane's event stamps, review items and scratch files, so re-adding the same id

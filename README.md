@@ -126,6 +126,8 @@ Reviewer rotation defaults to two reviews or 35% context, configurable with `OSR
 
 Set `OSRC_LEAN_LAUNCH=1` for Claude sessions and delegates to retain `CLAUDE.md` while using strict MCP configuration without `--bare`. Interactive sessions start with no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a JSON config containing the required servers. Installed skills and plugins are still inherited.
 
+Re-review briefs use the previous reviewed commit and findings. Use `review next --final` for the full base-to-head merge review; per-round reports use `## Round <number>` sections.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---

@@ -113,6 +113,8 @@ Supervision refreshes its project and limits snapshot every 10 minutes into `$OS
 
 Use `supervise --auto done,limits` to dispatch a verified READY queue item to the reviewer without a wake. Auto mode only runs the exact review-queue action for that READY event; verdicts, questions, held approvals, and other actions still wake the orchestrator.
 
+Ask lanes to append a `## Round <number>` section to their reports for each review round. Re-review checks the changes since the previous reviewed commit and the prior findings; run the final merge review with `review next --final` so it covers the full diff.
+
 ## Operating rules
 
 - **Cloud consent, once ever.** The first cloud delegation needs consent (repo content leaves the machine; a secret-scan hard-block runs on every delegation regardless). Tell the user in one line, then `consent grant` (or `--cloud-ack`); it is remembered in `~/.outsourcerer/cloud-consent`. Read a gate refusal before retrying: the error names the fix.
