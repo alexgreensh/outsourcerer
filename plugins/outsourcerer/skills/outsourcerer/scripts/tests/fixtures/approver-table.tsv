@@ -20,17 +20,17 @@ approve	shell		find . -name '*.py' -not -path './node_modules/*'
 approve	shell		wc -l src/*.py
 approve	shell		python3 --version
 approve	shell		devin --help
-approve	shell		npm test
-approve	shell		npm run lint
-approve	shell		pnpm run test:unit
-approve	shell		python3 -m pytest -x tests/ -q
-approve	shell		pytest -k "not slow" --maxfail=1
-approve	shell		cargo test --all-features
-approve	shell		go test ./...
-approve	shell		make test
-approve	shell		bash tests/test_screen_state.sh
-approve	shell		bash -n scripts/outsourcerer.sh
-approve	shell		ruff check . && mypy src
+hold	shell		npm test
+hold	shell		npm run lint
+hold	shell		pnpm run test:unit
+hold	shell		python3 -m pytest -x tests/ -q
+hold	shell		pytest -k "not slow" --maxfail=1
+hold	shell		cargo test --all-features
+hold	shell		go test ./...
+hold	shell		make test
+hold	shell		bash tests/test_screen_state.sh
+hold	shell		bash -n scripts/outsourcerer.sh
+hold	shell		ruff check . && mypy src
 approve	shell		mkdir -p build/out && cp README.md build/out/
 approve	shell		git add -A && git commit -m "feat: approve flow, install hook"
 approve	shell		cd src && ls
@@ -147,7 +147,7 @@ hold	shell		env -u HOME bash tests/test_x.sh
 hold	shell		unset OSRC_HOME
 hold	shell		export OSRC_HOME=~/.outsourcerer
 hold	shell		env -u OSRC_HOME -u TMUX bash tests/test_x.sh
-approve	shell		env -u TMUX -u TMUX_PANE bash tests/test_x.sh
+hold	shell		env -u TMUX -u TMUX_PANE bash tests/test_x.sh
 hold	shell		gh api -XDELETE repos/a/b
 hold	shell		gh api repos/a/b/pulls/1/merge -XPUT
 hold	shell		gh api graphql -fquery=x
@@ -184,7 +184,7 @@ hold	shell		gh pr view 1 --web
 approve	shell		df -h
 approve	shell		du -sh src
 approve	shell		git log --oneline HEAD~3..HEAD
-approve	shell		go test ./...
+hold	shell		go test ./...
 approve	shell		git switch feature-x
 approve	shell		git switch -c feature-y
 approve	shell		git stash list

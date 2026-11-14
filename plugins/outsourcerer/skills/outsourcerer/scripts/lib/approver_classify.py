@@ -768,7 +768,9 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             raise Hold("no command visible")
         pre_checks(cmd)
         if sealed_runner(cmd, cwd, roots[0]):
-            return True, "isolated:sealed-run"
+            # 0.16.0: the sandbox wrapper is not yet airtight (worktree code can run before it,
+            # Linux leaves host sockets reachable), so even sealed runs wait for a person.
+            raise Hold("test runs wait for a person in this version")
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
@@ -780,6 +782,9 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             rules.append(rule)
         if not rules:
             raise Hold("empty command")
+        if any(r.startswith("test/build") for r in rules):
+            # A test or build script can run arbitrary code with the lane's full rights.
+            raise Hold("test and build runs wait for a person in this version")
         return True, " + ".join(dict.fromkeys(rules))
     except Hold as h:
         return False, str(h)

@@ -93,7 +93,8 @@ class SealedRunnerTests(unittest.TestCase):
         good = runner + ' ' + test
         with mock.patch.object(classifier.os, 'access', return_value=True), mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
             self.assertTrue(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
-            self.assertTrue(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
+            # 0.16.0 holds even recognised sealed runs until the sandbox is airtight.
+            self.assertEqual(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)]), (False, 'test runs wait for a person in this version'))
             for bad in [good + ' | cat', good + '; echo x', good + ' > /dev/null',
                         'CI=1 ' + good, runner + ' ../' + test,
                         '/elsewhere/sealed-run.sh ' + test, good + ' --help', good + '\nls']:
