@@ -40,7 +40,10 @@ Retrieved via
 
 ## Icons
 
-Not vendored files: the eight icons the page uses are inlined in `lib/hub.html`
+Not vendored files: the icons the page uses are inlined in `lib/hub.html`
 (`ICONS` map), copied from `lucide-static@0.469.0`
 (`https://unpkg.com/lucide-static@0.469.0/icons/<name>.svg`, ISC licence):
-chevron-right, terminal, rotate-ccw, clock, rocket, snowflake, hand, send.
+check, wrench, octagon-x, pause, user-check, eye, git-merge, hammer, chevron-right,
+terminal, rotate-ccw, clock, rocket, snowflake, hand, send, and for Home (MC-3, paths
+re-fetched from that URL on 2026-11-14): layout-grid, arrow-right, circle-check, refresh-cw.
+`lib/hub-assets/hub-home.js` is first-party page code, not a vendored file.

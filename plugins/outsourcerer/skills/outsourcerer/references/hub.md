@@ -67,12 +67,47 @@ preferred feed — recomputed on every export so each poll carries fresh rows.
 Its ISO `updated` is mirrored into `updatedAt` and trimmed to `HH:MM` for
 display. The built-in builder below is the fallback when spend.sh is absent.
 
+## Home, Mark done, Refresh
+
+The page opens on **Home** (no hash or `#home`; the logo and the rail's Home entry go
+back to it, a `#<slug>` hash still deep-links a project): "N decisions wait on you /
+Across M projects.", a top-priority bar of every Critical/High decision, then a 2x2 tile
+per running project. The Home code lives in `lib/hub-assets/hub-home.js` (served from
+`/assets/hub-home.js`, `script-src 'self'`) so `hub.html` stays under 1,000 lines; if it
+fails to load the page falls back to the old project-first view.
+
+**Mark done** sits in each rail project's hover card ("Mark done, move to Shipped" /
+"Move back to running", with a 6 s Undo). A user mark is
+`{status:"shipped", shippedAt, shippedBy:"user", prevStatus}`.
+**Rule for every orchestrator and engine write: never change `status`, `shippedAt`,
+`shippedBy` or `prevStatus` on a project whose `shippedBy` is `"user"`.** Read the doc
+first and carry those four fields over; only the user's Move back clears them.
+- Local mode: `POST /api/projects/<slug>/status` `{"status":"shipped"|"restore"}`
+  (same `X-Hub-Token`, loopback Host and same-origin checks as `/api/answers`; the slug
+  must pass the hub slug rule AND name a project in the current export, else 400/404).
+  It writes `$OSRC_HOME/hub/status/<slug>.json`, which `hub export` merges LAST, so no
+  card write in `hub/projects/<slug>.json` can undo it. `restore` writes
+  `{restoredBy:"user", restoredAt, restoredAtEpoch, prevStatus}`: it clears a card
+  `status:"shipped"` only while the card file is older than the click, so a later
+  orchestrator "shipped" still wins. A symlinked override file is ignored.
+- Artifact mode: the page updates `projects/<slug>` itself with the fields above.
+
+**Refresh**: a live stamp older than 45 minutes (project header, Home tile, limits
+header) shows a Refresh button. Artifact mode writes `refresh/<kind>--<id>`
+(`{kind:"project"|"limits", id, at}`); the orchestrator's 5-minute check re-reads that
+project (or the limits) and writes it back. Local mode calls `POST /api/refresh` and
+re-pulls; if the build still has nothing newer the page says so.
+
 To publish it as an artifact, the orchestrator:
 
 1. Reads the current artifact version first (`db` doc versions).
 2. Writes `projects`, `limits`, and `answers` collections with `if_version` so a
-   concurrent write is never clobbered.
-3. Reads `answers` on every heartbeat; after acting on a decision, marks it done.
+   concurrent write is never clobbered. A project doc with `shippedBy:"user"` keeps its
+   status fields (rule above).
+3. Reads `answers` and `refresh` on every heartbeat; after acting on a decision, marks
+   it done; after re-reading a refresh target, deletes its `refresh/` doc.
+4. Publishes `assets/hub-home.js` next to the page (with the fonts) when it publishes
+   `hub.html` itself.
 
 Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
 
@@ -103,7 +138,7 @@ artifact mode writes, so an orchestrator reading that directory sees local-mode
 answers too.
 
 Endpoints: `GET /api/projects`, `GET /api/answers`, `POST /api/answers`,
-`POST /api/refresh`. API routes and POSTs need the `X-Hub-Token` header plus a
+`POST /api/refresh`, `POST /api/projects/<slug>/status`. API routes and POSTs need the `X-Hub-Token` header plus a
 loopback `Host` header (`127.0.0.1`/`localhost`/`[::1]`). `?t=` authenticates
 nothing — the page's own script reads it into `sessionStorage` and sends it
 back as the header, so the token never sits in an API URL, and it is stripped

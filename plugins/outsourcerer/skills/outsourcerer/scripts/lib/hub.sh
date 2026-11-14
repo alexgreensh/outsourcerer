@@ -302,7 +302,26 @@ _osrc_hub_build_project() {
     + (if ($card.flow|type)=="array" and ($card.flow|length)>0 then {flow:$card.flow} else {} end)
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
   ')"
-  printf '%s' "$out"
+  _osrc_hub_status_override "$slug" "$out"
+}
+
+# _osrc_hub_status_override <slug> <project-json> -> project with the user's Mark done
+# override from $OSRC_HOME/hub/status/<slug>.json (written by hub_server.py) merged LAST,
+# so no card/orchestrator write can change a status whose shippedBy is "user".
+# A "restore" record only clears a card "shipped" that is older than the click.
+_osrc_hub_status_override() {
+  local f="$OSRC_HOME/hub/status/$1.json" pf="$OSRC_HOME/hub/projects/$1.json" cm=0
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || { printf '%s' "$2"; return 0; }
+  [ -f "$pf" ] && cm="$(stat -f %m "$pf" 2>/dev/null || stat -c %Y "$pf" 2>/dev/null || echo 0)"
+  jq -c --slurpfile o "$f" --argjson cm "${cm:-0}" '
+    ($o[0] // {}) as $o
+    | if ($o | type) != "object" then .
+      elif $o.shippedBy == "user" then
+        . + {status:"shipped", shippedBy:"user", shippedAt:($o.shippedAt // null),
+             prevStatus:(if ($o.prevStatus // "") == "" or $o.prevStatus == "shipped" then "building" else $o.prevStatus end)}
+      elif $o.restoredBy == "user" and .status == "shipped" and ($cm <= ($o.restoredAtEpoch // 0)) then
+        .status = (if ($o.prevStatus // "") == "" or $o.prevStatus == "shipped" then "building" else $o.prevStatus end)
+      else . end' <<<"$2" 2>/dev/null || printf '%s' "$2"
 }
 
 # _osrc_hub_project_mtime <slug> -> ISO-8601 of the newest input file for this

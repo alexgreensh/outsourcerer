@@ -5,7 +5,7 @@ Loopback only (127.0.0.1), Python 3 standard library only. GET / and
 /assets/* are public static content (no data); every API route takes the
 X-Hub-Token header.
 Endpoints: GET / , GET /api/projects, GET /api/answers, POST /api/answers,
-POST /api/refresh. Re-exports every REFRESH_SECS seconds in a background
+POST /api/refresh, POST /api/projects/<id>/status (Mark done / Move back). Re-exports every REFRESH_SECS seconds in a background
 thread, but only while a page has polled within IDLE_SECS and only when
 state under OSRC_HOME actually changed (idle dashboards cost no CPU).
 """
@@ -33,6 +33,9 @@ ANSWER_MAX = 16384
 WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")
 WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
+SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
+STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
 
 class Hub:
@@ -47,6 +50,9 @@ class Hub:
         self.token = token
         self.answers_dir = os.path.join(osrc_home, "hub", "answers")
         os.makedirs(self.answers_dir, exist_ok=True)
+        # Mark done overrides: hub export merges these last, so no card or
+        # orchestrator write can undo a status the user set (shippedBy "user").
+        self.status_dir = os.path.join(osrc_home, "hub", "status")
         self.export_file = os.path.join(osrc_home, "hub", "export.json")
         self.cache = None          # {"generated_at": int, "projects": [...]}
         self.cache_ts = 0.0
@@ -176,6 +182,51 @@ class Hub:
         return rec, None
 
 
+    def write_status(self, slug, body):
+        """POST /api/projects/<slug>/status {status: "shipped"|"restore"}.
+
+        Returns (http_code, payload). The slug must match SLUG_RE AND name a
+        project in the current export, so a request can never create a file
+        for something that does not exist."""
+        if not SLUG_RE.match(slug or ""):
+            return 400, {"error": "bad project id"}
+        if not isinstance(body, dict) or body.get("status") not in ("shipped", "restore"):
+            return 400, {"error": "status must be shipped or restore"}
+        payload, _err = self.projects_payload()
+        cur = next((p for p in payload.get("projects", [])
+                    if isinstance(p, dict) and p.get("id") == slug), None)
+        if cur is None:
+            return 404, {"error": "no such project"}
+        now = time.time()
+        iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        prev = cur.get("prevStatus") if cur.get("status") == "shipped" else cur.get("status")
+        if not prev or prev == "shipped":
+            prev = "building"
+        if body["status"] == "shipped":
+            rec = {"status": "shipped", "shippedAt": iso, "shippedBy": "user",
+                   "prevStatus": prev}
+        else:
+            # Move back: the build reports its own status again. restoredAt
+            # lets the export drop a card "shipped" older than this click,
+            # while a newer orchestrator write still wins.
+            rec = {"restoredBy": "user", "restoredAt": iso,
+                   "restoredAtEpoch": int(now), "prevStatus": prev}
+        os.makedirs(self.status_dir, exist_ok=True)
+        path = os.path.join(self.status_dir, slug + ".json")
+        if os.path.islink(path):
+            return 409, {"error": "status file is a symlink"}
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f)
+        os.replace(tmp, path)
+        try:
+            data = self.run_export()
+        except Exception as e:
+            return 500, {"error": str(e)[:300], "override": rec}
+        proj = next((p for p in data.get("projects", []) if p.get("id") == slug), None)
+        return 200, {"ok": True, "override": rec, "project": proj}
+
+
 def make_handler(hub):
     class Handler(BaseHTTPRequestHandler):
         server_version = "outsourcerer-hub/1"
@@ -258,6 +309,7 @@ def make_handler(hub):
             full = os.path.realpath(os.path.join(base, rel))
             ext = os.path.splitext(full)[1].lstrip(".").lower()
             ctype = {"woff2": "font/woff2",
+                     "js": "text/javascript; charset=utf-8",
                      "txt": "text/plain; charset=utf-8"}.get(ext)
             if (not ctype or full == base
                     or not full.startswith(base + os.sep)
@@ -344,6 +396,10 @@ def make_handler(hub):
                 body = json.loads(raw.decode("utf-8", "replace"))
             except Exception:
                 return self._send_json({"error": "bad json"}, 400)
+            m = STATUS_PATH_RE.match(u.path)
+            if m:
+                code, out = hub.write_status(urllib.parse.unquote(m.group(1)), body)
+                return self._send_json(out, code)
             if u.path == "/api/answers":
                 rec, err = hub.write_answer(body)
                 if err:
