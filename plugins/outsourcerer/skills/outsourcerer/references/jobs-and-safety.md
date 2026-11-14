@@ -272,7 +272,8 @@ runnable command plus `--spend-ok`. `--spend-ok` is argv-only, covers exactly on
 (propagated through bg/fanout/hops as argv or a per-job `.spend-ok` marker), and is never
 persisted or implied by auto mode, the cloud-consent file, or an inherited env var
 (`OSRC_SPEND_OK`, `OSRC_SPEND_GATE` and `OSRC_CAP_GATE` are all unset before parsing — there is
-no env kill-switch). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
+no env kill-switch). Place `--spend-ok` BEFORE the task text (`run --spend-ok "task"`, not
+`run "task" --spend-ok` — anything after the task is task text, not a flag). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
 command actually resolved, the child gate accepts only a matching pair, consumes (deletes) it
 on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call cannot borrow
 a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless

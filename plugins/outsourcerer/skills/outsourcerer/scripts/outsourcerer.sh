@@ -16172,7 +16172,7 @@ _route_confirm() {
 _route_receipt() {
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] || return 0
   printf '>>> [route] RESOLVED lane=%s model=%s explicit=--provider %s\n' \
-    "$ROUTE_LANE" "${RESOLVED_ID:-$ROUTE_MODEL}" "$PROVIDER" >&2
+    "$ROUTE_LANE" "$(_osrc_route_launched_model)" "$PROVIDER" >&2
 }
 
 _route_provider_default_model() { # Provider-specific route identity, never parser state.

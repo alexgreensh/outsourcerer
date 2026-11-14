@@ -250,6 +250,58 @@ esac
 [ ! -e "$E2/osrc/jobs/$jid/.spend-ok" ] && ok "r5 bg: .spend-ok marker consumed" \
   || bad "r5 bg: marker left behind in $jid"
 
+# ---------------------------------------------------------------------------------------------------
+# ROUND 6 (r6 verdict follow-ups): flag consent drops a leftover .spend-ok; RESOLVED prints the
+# id the delegate will actually launch for lanes that re-resolve at dispatch.
+# ---------------------------------------------------------------------------------------------------
+
+# #1: OSRC_SPEND_OK=1 (argv consent) removes a leftover marker in a REAL job dir — the
+# reviewer's `run --spend-ok` auto-detach case left one behind.
+JD="$OSRC_HOME/jobs/job-r6flag"; mkdir -p "$JD"
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD/.spend-ok"
+( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ ! -e "$JD/.spend-ok" ] \
+  && ok "r6 marker: flag consent drops leftover .spend-ok in job dir" \
+  || bad "r6 marker: flag consent left marker (rc=$rc exists=$([ -e "$JD/.spend-ok" ] && echo y || echo n))"
+# A dir outside $OSRC_JOBS keeps its file — the drop uses the same validation as the read path.
+FD="$TMP/notjobs/jd"; mkdir -p "$FD"; printf 'x\n' > "$FD/.spend-ok"
+( OSRC_JOB_DIR="$FD" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$FD/.spend-ok" ] \
+  && ok "r6 marker: forged job dir keeps its file" \
+  || bad "r6 marker: forged dir lost its file (rc=$rc)"
+# Marker consent (no flag) still binds the exact pair and records the path for the gate.
+JD2="$OSRC_HOME/jobs/job-r6mark"; mkdir -p "$JD2"
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD2/.spend-ok"
+OSRC_JOB_DIR="$JD2" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
+{ [ $rc -eq 0 ] && [ "$_OSRC_SPEND_MARKER" = "$JD2/.spend-ok" ]; } \
+  && ok "r6 marker: marker consent still binds exact pair" \
+  || bad "r6 marker: marker consent broke (rc=$rc marker=$_OSRC_SPEND_MARKER)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN OSRC_SPEND_OK _OSRC_SPEND_MARKER
+
+# #2: dv re-resolves the raw -m token against the live catalog at dispatch
+# (_devin_resolve_model); the receipt must print THAT id (kimi -> kimi-k9-free),
+# not the family/alias the route table resolved.
+KCAT="$TMP/kimicat.json"
+cat > "$KCAT" <<'EOF'
+{"families":[{"family_uid":"kimi","aliases":["kimi"],"variants":[
+  {"model_uid":"kimi-k9-free","cost_tier":"Free","cost_summary":null},
+  {"model_uid":"kimi-k9-pro","cost_tier":"Paid","cost_summary":"$1/MTok"}]}]}
+EOF
+rout="$( _devin_catalog_raw() { cat "$KCAT"; }
+    PROVIDER=devin ROUTE_PROVIDER_EXPLICIT=1 ROUTE_LANE=devin ROUTE_MODEL=kimi \
+    RESOLVED_ID=kimi MODEL=kimi _route_receipt 2>&1 )"
+case "$rout" in
+  *"model=kimi-k9-free"*) ok "r6 resolved: dv receipt prints launched catalog id" ;;
+  *) bad "r6 resolved: dv receipt wrong: $rout" ;;
+esac
+# A lane that does NOT re-resolve at dispatch still prints RESOLVED_ID verbatim.
+rout="$( PROVIDER=cc ROUTE_PROVIDER_EXPLICIT=1 ROUTE_LANE=cc ROUTE_MODEL=sonnet \
+    RESOLVED_ID=claude-sonnet-4-5 MODEL=sonnet _route_receipt 2>&1 )"
+case "$rout" in
+  *"model=claude-sonnet-4-5"*) ok "r6 resolved: cc receipt keeps resolved table id" ;;
+  *) bad "r6 resolved: cc receipt wrong: $rout" ;;
+esac
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

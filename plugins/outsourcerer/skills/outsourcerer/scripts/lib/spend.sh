@@ -265,7 +265,17 @@ osrc_lane_billing() {
 _OSRC_SPEND_MARKER=""
 _osrc_spend_ok() {
   local lane="${1:-}" model="${2:-}"
-  [ "${OSRC_SPEND_OK:-0}" = "1" ] && return 0
+  if [ "${OSRC_SPEND_OK:-0}" = "1" ]; then
+    # argv/env consent supersedes the bound marker: drop any leftover .spend-ok in
+    # THIS job's dir so a flag-consented launch leaves no consent file behind. Same
+    # job-dir validation as the marker read path — only a real $OSRC_JOBS/<id> is touched.
+    local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest
+    case "$_jd" in "$_jobs"/*)
+      _rest="${_jd#"$_jobs"/}"
+      case "$_rest" in ""|*/*|*..*) ;; *) rm -f "$_jd/.spend-ok" 2>/dev/null || true ;; esac ;;
+    esac
+    return 0
+  fi
   local jd="${OSRC_JOB_DIR:-}" tok="${OSRC_JOB_TOKEN:-}"
   [ -n "$jd" ] && [ -n "$tok" ] || return 1
   local jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" rest
@@ -482,6 +492,22 @@ _osrc_spend_next_build() {
     for a in "$@"; do out="$out $(printf '%q' "$a")"; done
   fi
   OSRC_SPEND_NEXT="$out"
+}
+
+# _osrc_route_launched_model -> the model id the delegate will actually launch with
+# for the current route (reads route_delegate's dynamic scope: ROUTE_LANE, ROUTE_MODEL,
+# RESOLVED_ID, MODEL). dv/droid/warp re-resolve at dispatch — delegate_devin runs
+# _devin_resolve_model on the raw -m token (live catalog: family kimi -> kimi-k9-free),
+# the engine lanes run _lane_model_for — so the RESOLVED receipt must print THAT id,
+# not the family/alias the route table resolved. Every other lane launches
+# RESOLVED_ID verbatim. Lives here for the engine-size budget; caller: _route_receipt.
+_osrc_route_launched_model() {
+  local rid="${RESOLVED_ID:-${ROUTE_MODEL:-}}"
+  case "${ROUTE_LANE:-}" in
+    devin|dv)   rid="$(_devin_resolve_model "${MODEL:-}" 2>/dev/null)" ;;
+    droid|warp) rid="$(_lane_model_for "$ROUTE_LANE" "${RESOLVED_ID:-${MODEL:-}}" 2>/dev/null)" ;;
+  esac
+  printf '%s' "${rid:-${RESOLVED_ID:-${ROUTE_MODEL:-}}}"
 }
 
 # =============================================================================
