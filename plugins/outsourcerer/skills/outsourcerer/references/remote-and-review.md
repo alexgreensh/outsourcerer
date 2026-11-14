@@ -36,6 +36,8 @@ lane ls | show <id> | poll [id] | rm <id> | events
 
 ## Review queue (one reviewer, one item in flight)
 
+For a design review, start a fresh reviewer with the browser tools and required design skills available at launch, or provide screenshots captured beforehand. Keep the same design checks and evidence in either case.
+
 ```
 review reviewer <tmux-session> [--replace]   set THE reviewer (refuses a second live one)
 review queue add <lane-or-branch> [--brief F] | queue ls
