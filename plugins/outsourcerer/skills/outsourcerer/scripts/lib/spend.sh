@@ -65,6 +65,71 @@ _osrc_devin_free_for_spend() {
   return 1
 }
 
+# _devin_catalog_free_ids -> space-separated EXACT ids the live catalog marks cost_tier="Free":
+# every variant model_uid tagged Free plus every family_uid whose variants are ALL Free.
+# Exact ids (not canon keys) so a paid -max/-medium variant can never ride in on a free
+# sibling's normalized name — the spend gate's Free proof depends on that precision.
+# rc0 whenever the catalog is reachable/fresh (even with an empty set); rc1 offline, so
+# callers can tell "reachable, nothing Free" apart from "cannot prove". The result is
+# cached in $OSRC_HOME keyed by the raw catalog's mtime — billing lookups run in $( )
+# subshells where in-process memos die, and this keeps `devin models list` to one fetch
+# per catalog TTL instead of one per lookup. Lives here (not the engine) for the
+# engine-size budget; its catalog helpers (_devin_catalog_rawf/_catalog_load/_catalog_fresh)
+# stay engine-side and resolve at call time.
+_OSRC_DV_FREE_IDS_MEMO=""; _OSRC_DV_FREE_IDS_DONE=""
+_devin_catalog_free_ids() {
+  [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || return 1
+  # Per-process memo: a probe pass asks once per lane/model; without this each ask
+  # re-runs the catalog freshness check + jq walk (~15 subprocesses per pass).
+  [ -n "$_OSRC_DV_FREE_IDS_DONE" ] && { printf '%s' "$_OSRC_DV_FREE_IDS_MEMO"; return 0; }
+  local rawf cf mt cmt cids ids
+  rawf="$(_devin_catalog_rawf)" || return 1
+  _catalog_load dv >/dev/null 2>&1 || true    # refresh attempt; freshness below decides
+  _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
+  [ -f "$rawf" ] || return 1
+  cf="$OSRC_HOME/.devin-free-ids"
+  mt="$(stat -f %m "$rawf" 2>/dev/null || stat -c %Y "$rawf" 2>/dev/null || echo 0)"
+  if [ -f "$cf" ]; then
+    IFS='|' read -r cmt cids < "$cf" 2>/dev/null
+    if [ "$cmt" = "$mt" ]; then
+      _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$cids"
+      printf '%s' "$cids"; return 0
+    fi
+  fi
+  ids="$(jq -r '
+    def isfree(o): (((o.cost_tier // "") + " " + (o.cost_summary // ""))|test("free";"i"));
+    [ .families[]?
+      | ( select((.variants|length) > 0 and all(.variants[]?; isfree(.))) | .family_uid ),
+        ( .variants[]? | select(isfree(.)) | .model_uid ) ]
+    | unique | .[]
+  ' "$rawf" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
+  ( umask 077; printf '%s|%s\n' "$mt" "$ids" > "$cf" ) 2>/dev/null || true
+  _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$ids"
+  printf '%s' "$ids"
+  return 0
+}
+
+# _devin_default_free_model -> the dv lane's implicit default, picked at RUN TIME from
+# the live catalog's Free set so a bare `run`/`bg` never lands on a metered model by
+# default (Alex's rule: free models before any spend). Preference inside the Free set:
+# swe-2-high, then swe-2-flash-high, then the first Free id the catalog lists. Catalog
+# unreachable or nothing Free -> swe-2-high, the proven offline-free fallback; if it is
+# ever metered the spend gate still asks rather than silently picking another paid id.
+# Lives here (not the engine) for the engine-size budget; callers: _route_provider_default_model,
+# osrc_lane_billing dv.
+_devin_default_free_model() {
+  local ids norm cand
+  if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
+    norm="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
+    for cand in swe-2-high swe-2-flash-high; do
+      case " $norm " in *" $cand "*) printf '%s' "$cand"; return 0 ;; esac
+    done
+    cand="${ids%% *}"                       # first catalog Free id, raw uid
+    [ -n "$cand" ] && { printf '%s' "$cand"; return 0; }
+  fi
+  printf 'swe-2-high'
+}
+
 # _osrc_claude_settings_metered -> rc0 when ~/.claude/settings.json routes Claude through a
 # per-use credential (apiKeyHelper script or env.ANTHROPIC_API_KEY) instead of the plan login.
 _osrc_claude_settings_metered() {
@@ -324,6 +389,15 @@ _osrc_event() {  # <kind> <target> <detail> <next> [src]
 _osrc_spend_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" why="${4:-launch}"
   local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 2>/dev/null)"
+  # L10 hosted sessions (`cloud start`) carry their OWN consent: _cloudrun_consent runs
+  # immediately after this gate and its disclosure names the spend ("spends: Claude
+  # subscription (plan limits)" etc). Local auth proof often cannot see a hosted
+  # session's remote login, so subscription/free/UNKNOWN billing on a cloud-session
+  # dispatch defers to that consent instead of double-asking. PROVEN metered (API-key
+  # env, metered models, paid-API lanes) still asks here via --spend-ok.
+  case "$why" in
+    "cloud session "*) [ "$bill" = "metered" ] || return 0 ;;
+  esac
   case "$bill" in subscription|free) return 0 ;; esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
   # Show the model actually being dispatched; when none was resolved, the lane's own
@@ -384,6 +458,35 @@ _osrc_session_spend_gate() {
     fi
   fi
   _osrc_spend_gate "$_sp_lane" "$_sp_model" "$_sp_p" "interactive session start"
+}
+
+# _osrc_spend_next_build <verb> [fallback-args...] -> OSRC_SPEND_NEXT = the user's
+# ORIGINAL command with --spend-ok inserted directly after <verb>. NEXT must equal
+# the refused command plus consent: rebuilding from post-parse state used to drop
+# --provider/--cloud-ack/-m and append consent after the task text, producing a
+# NEXT that routed to a different lane or model than the EVENT named. The verb is
+# the first argv token equal to <verb> in main()'s _OSRC_USER_ARGV snapshot
+# (sentinels stripped, global flags intact, original order preserved); an existing
+# --spend-ok token is left alone rather than doubled. %q keeps it copy-paste safe.
+# With no snapshot (direct internal calls) it falls back to "$0 <verb> --spend-ok
+# <args>". Lives here (not the engine) for the engine-size budget; callers: main(),
+# cmd_bg, _osrc_session_spend_gate.
+_osrc_spend_next_build() {
+  local verb="${1:-}"; shift || true
+  [ -n "$verb" ] || return 1
+  local out="$0" a seen=0 had=0
+  if [ "${_OSRC_USER_ARGV+set}" = "set" ] && [ "${#_OSRC_USER_ARGV[@]}" -gt 0 ]; then
+    for a in "${_OSRC_USER_ARGV[@]}"; do [ "$a" = "--spend-ok" ] && had=1; done
+    for a in "${_OSRC_USER_ARGV[@]}"; do
+      out="$out $(printf '%q' "$a")"
+      [ "$had" = 0 ] && [ "$seen" = 0 ] && [ "$a" = "$verb" ] && { out="$out --spend-ok"; seen=1; }
+    done
+    [ "$seen" = 0 ] && [ "$had" = 0 ] && out="$out --spend-ok"
+  else
+    out="$out $verb --spend-ok"
+    for a in "$@"; do out="$out $(printf '%q' "$a")"; done
+  fi
+  OSRC_SPEND_NEXT="$out"
 }
 
 # =============================================================================
