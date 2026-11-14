@@ -27,7 +27,7 @@ jobs:
       - name: Install jq
         run: |
           if command -v jq >/dev/null 2>&1; then jq --version; exit 0; fi
-          if [ "$RUNNER_OS" = "macOS" ]; then brew install jq; else sudo apt-get update && sudo apt-get install -y jq; fi
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install jq; else sudo apt-get update && sudo apt-get install -y jq bubblewrap; fi
         shell: bash
 
       - name: Run conformance tests
