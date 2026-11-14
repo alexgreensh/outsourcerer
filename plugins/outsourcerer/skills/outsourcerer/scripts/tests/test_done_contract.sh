@@ -30,7 +30,7 @@ bash -n "$LIB" || { echo "FAIL: bash -n failed for $LIB"; exit 1; }
 TMP="$(mktemp -d "$HERE/.test-done-contract.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
-export OSRC_HOME="$TMP/state"
+export OSRC_HOME="$TMP/state" GIT_CEILING_DIRECTORIES="$TMP"
 mkdir -p "$HOME" "$OSRC_HOME"
 
 pass=0; fail=0
@@ -122,8 +122,8 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
   osrc_done_set lane-nobranch 'branch:no-such@READY' "$REPO" || exit 1
   [ "$(osrc_done_state lane-nobranch)" = "not-done" ] \
     && ok "missing branch -> not-done (not error)" || bad "missing branch -> $(osrc_done_state lane-nobranch)"
-  # $TMP lives inside this git worktree, so a "non-repo" cwd must come from outside it.
-  NOREPO="$(mktemp -d "${TMPDIR:-/tmp}/osrc-done-norepo.XXXXXX")"
+  # The ceiling prevents Git from finding the enclosing worktree.
+  NOREPO="$TMP/norepo"; mkdir -p "$NOREPO"
   osrc_done_set lane-norepo 'branch:main@READY' "$NOREPO" || exit 1
   [ "$(osrc_done_state lane-norepo)" = "error not-a-repo" ] \
     && ok "non-repo cwd -> error not-a-repo" || bad "non-repo cwd -> $(osrc_done_state lane-norepo)"
@@ -263,11 +263,11 @@ STUB
     && ok "gh garbage output -> error gh-failed" || bad "gh garbage -> $(osrc_done_state lane-pr-junk)"
   unset GH_STUB_RAW
 
-  # gh missing entirely: a PATH with jq but no gh anywhere (real gh lives outside /usr/bin).
+  # gh missing entirely: a PATH containing jq and no gh.
   osrc_done_set lane-pr-nogh 'pr:octo/repo#47' "$WORK" || exit 1
-  JQDIR="$(dirname "$(command -v jq)")"
-  [ "$(PATH="/usr/bin:/bin:$JQDIR" osrc_done_state lane-pr-nogh)" = "error gh-missing" ] \
-    && ok "gh missing -> error gh-missing" || bad "gh missing -> $(PATH="/usr/bin:/bin:$JQDIR" osrc_done_state lane-pr-nogh)"
+  JQDIR="$TMP/jq-only"; mkdir -p "$JQDIR"; ln -s "$(command -v jq)" "$JQDIR/jq"
+  [ "$(PATH="$JQDIR" osrc_done_state lane-pr-nogh)" = "error gh-missing" ] \
+    && ok "gh missing -> error gh-missing" || bad "gh missing -> $(PATH="$JQDIR" osrc_done_state lane-pr-nogh)"
 
   # --- 6. bad specs / validation ---------------------------------------------------------------
   for badspec in 'bogus' 'file:' 'branch:onlybranch' 'branch:@READY' 'branch:-lead@X' 'check:   ' \

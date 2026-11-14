@@ -51,12 +51,12 @@ _osrc_free_kb() {
 # them without walking a whole worktree).
 _osrc_path_newest_mtime() {
   local p="$1" m c cm newest=0
-  m="$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null)"
+  m="$(stat -c %Y "$p" 2>/dev/null || stat -f %m "$p" 2>/dev/null)"
   case "$m" in ''|*[!0-9]*) m=0 ;; esac
   newest="$m"
   for c in "$p"/* "$p"/.[!.]*; do
     [ -e "$c" ] || [ -L "$c" ] || continue
-    cm="$(stat -f %m "$c" 2>/dev/null || stat -c %Y "$c" 2>/dev/null)"
+    cm="$(stat -c %Y "$c" 2>/dev/null || stat -f %m "$c" 2>/dev/null)"
     case "$cm" in ''|*[!0-9]*) continue ;; esac
     [ "$cm" -gt "$newest" ] && newest="$cm"
   done
@@ -546,7 +546,7 @@ _osrc_cleanup_tick() {
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 0
   local lock="$(_osrc_cl_root)/.lock" lage
   if ! mkdir "$lock" 2>/dev/null; then
-    lage=$(( now - $(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || echo 0) ))
+    lage=$(( now - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0) ))
     { [ "$lage" -gt 600 ] && rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null; } || return 0
   fi
   date +%s > "$stamp" 2>/dev/null || true

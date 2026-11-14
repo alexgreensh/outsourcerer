@@ -321,7 +321,7 @@ _osrc_lane_msg_notice() { # <id>
 _ol_msg_nudge_fresh() { # <to> -> 0 when a nudge was sent recently
   local f; f="$(_osrc_msgs_dir)/$1.nudged"
   [ -f "$f" ] || return 1
-  local m; m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+  local m; m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
   [ $(( $(date +%s) - ${m:-0} )) -lt "${OSRC_MSG_NUDGE_SECS:-60}" ]
 }
 _ol_msg_nudge_mark() { ( umask 077; : > "$(_osrc_msgs_dir)/$1.nudged" ) 2>/dev/null; }

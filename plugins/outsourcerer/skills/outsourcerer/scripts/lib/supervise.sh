@@ -82,7 +82,7 @@ _sv_history_tail() { # [n]
 _sv_cc_transcript() { # <session-id>
   local rec ccid cwd cache; cache="$(_sv_lanes)/state/$1.cc"
   [ -s "$cache" ] && { cat "$cache"; return 0; }
-  [ -e "$cache" ] && [ $(( $(_sv_now) - $(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0) )) -lt 120 ] && return 1
+  [ -e "$cache" ] && [ $(( $(_sv_now) - $(stat -c %Y "$cache" 2>/dev/null || stat -f %m "$cache" 2>/dev/null || echo 0) )) -lt 120 ] && return 1
   # One grep + one jq: _state_jsonl_read spawns a jq per registry line, and this runs per pane per poll.
   [ -f "$OSRC_SESSION_REGISTRY" ] || return 1
   rec="$(grep -F "\"$1\"" "$OSRC_SESSION_REGISTRY" 2>/dev/null | grep -F cc_session_id | jq -r --arg id "$1" 'select(.session_id==$id and (.cc_session_id // "") != "") | .cc_session_id + "\t" + (.cwd // "")' 2>/dev/null | tail -1)"

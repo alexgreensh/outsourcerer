@@ -338,7 +338,7 @@ _osrc_hub_project_mtime() {
   _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
   for f in "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json"; do
     [ -f "$f" ] || continue
-    m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
     [ "$m" -gt "$best" ] 2>/dev/null && best="$m"
   done
   [ "$best" -gt 0 ] || { printf ''; return 0; }
@@ -367,7 +367,7 @@ _osrc_hub_unowned_project() {
     id="$(basename "$jd")"
     printf '%s\n' "$claimed" | grep -qxF "$id" && continue
     st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-    mt="$(stat -f %m "$jd" 2>/dev/null || stat -c %Y "$jd" 2>/dev/null || echo 0)"
+    mt="$(stat -c %Y "$jd" 2>/dev/null || stat -f %m "$jd" 2>/dev/null || echo 0)"
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted)
       [ $(( now_s - ${mt:-0} )) -lt 86400 ] || continue ;; esac
     lane="$(_osrc_hub_lane_job "$id")" && [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a+[$b]')"

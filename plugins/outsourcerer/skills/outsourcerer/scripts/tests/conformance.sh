@@ -137,7 +137,7 @@ _ALL_SUITES="$_ALL_SUITES test_done_contract"
 _ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
 _ALL_SUITES="$_ALL_SUITES test_cloudrun"
 _ALL_SUITES="$_ALL_SUITES test_heavy"
-_ALL_SUITES="$_ALL_SUITES test_hub test_hub_home test_cleanup_manifest test_limit_gate test_spend_consent"
+_ALL_SUITES="$_ALL_SUITES test_hub test_hub_home test_cleanup_manifest test_limit_gate test_spend_consent test_lane_billing test_lanemsg test_portable_mtime"
 _ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_tests_set_home"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
@@ -430,7 +430,7 @@ grep -q '_is_transport_failure'                   "$SRC" && ok "U4 transport-vs-
 grep -q '_devin_model_for'                        "$SRC" && ok "availability-aware routing present"             || bad "availability-aware routing missing"
 grep -q 'Read Edit Write Bash Grep Glob'          "$SRC" && ok "U7 mutating coding toolset granted (no bash wedge)" || bad "U7 toolset missing"
 grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach trigger present"                       || bad "D3 trigger missing"
-grep -q '_lane_trusted_for_pwd'                    "$SRC" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
+grep -q '^_lane_trusted_for_pwd()'                  "$SCRIPT_DIR/../lib/cloudgate.sh" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
 grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation trust grant is exported (child jobs would inherit it)" || ok "trust grant is never exported (no inheritance)"
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
 grep -q '_blind_turn_guard'                          "$SRC" && ok "blind-turn guard present (refuses to end blind on live work)" || bad "blind-turn guard missing"

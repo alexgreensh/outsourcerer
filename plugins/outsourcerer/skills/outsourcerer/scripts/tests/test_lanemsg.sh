@@ -139,9 +139,9 @@ have_out "$out" "NEXT " "msg -> NEXT line"
 [ -f "$OSRC_HOME/msgs/laneA.jsonl" ] && ok "mailbox file created" || bad "mailbox file missing"
 shape="$(jq -r '[.id,.from,.to,(.ts|type),.text] | @tsv' "$OSRC_HOME/msgs/laneA.jsonl" | tail -1)"
 case "$shape" in *"$SID"*laneA*) ok "msg shape {id,from,to,ts,text}: $shape" ;; *) bad "msg shape wrong: $shape" ;; esac
-[ "$(stat -f %Lp "$OSRC_HOME/msgs/laneA.jsonl" 2>/dev/null || stat -c %a "$OSRC_HOME/msgs/laneA.jsonl")" = "600" ] \
+[ "$(stat -c %a "$OSRC_HOME/msgs/laneA.jsonl" 2>/dev/null || stat -f %Lp "$OSRC_HOME/msgs/laneA.jsonl")" = "600" ] \
   && ok "mailbox mode 0600" || bad "mailbox mode not 0600"
-dmode="$(stat -f %Lp "$OSRC_HOME/msgs" 2>/dev/null || stat -c %a "$OSRC_HOME/msgs")"
+dmode="$(stat -c %a "$OSRC_HOME/msgs" 2>/dev/null || stat -f %Lp "$OSRC_HOME/msgs")"
 [ "$dmode" = "700" ] && ok "msgs dir mode 0700" || bad "msgs dir mode $dmode"
 jq -e 'select(.kind=="msg" and .target=="laneA" and .src=="lane-msg")' "$OSRC_HOME/lanes/events.jsonl" >/dev/null 2>&1 \
   && ok "durable event row appended (kind=msg)" || bad "no msg row in lanes/events.jsonl"

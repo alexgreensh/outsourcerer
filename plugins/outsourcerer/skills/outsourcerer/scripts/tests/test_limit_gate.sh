@@ -785,14 +785,22 @@ leak="$( OSRC_JOB_DIR="$MKD" OSRC_JOB_TOKEN=tokW _run_tee_stderr /dev/null env 2
 # Interactive y/N consent (pty via script): 'y' approves THIS command and prints the
 # OSRC_SPEND_CONSENT token bg's preflight greps for; 'n'/EOF refuses.
 PTYBIN="$(command -v script 2>/dev/null || echo /usr/bin/script)"
-out="$( { sleep 2; printf 'y\n'; sleep 0.5; } | HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 \
-    "$PTYBIN" -q /dev/null bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate or somemodel or "tty test"' 2>&1 )"
+pty_spend() {
+  local cmd quoted
+  printf -v quoted '%q' "$SRC"
+  cmd=". $quoted >/dev/null 2>&1; _osrc_spend_gate or somemodel or 'tty test'"
+  if [ "$(uname -s)" = Linux ]; then
+    HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 "$PTYBIN" -q -c "bash -c $(printf '%q' "$cmd")" /dev/null
+  else
+    HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 "$PTYBIN" -q /dev/null bash -c "$cmd"
+  fi
+}
+out="$( { sleep 2; printf 'y\n'; sleep 0.5; } | pty_spend 2>&1 )"
 case "$out" in
   *OSRC_SPEND_CONSENT=1*"approved"*) ok "r3.1 spend: interactive y consents this command only" ;;
   *) bad "r3.1 spend: interactive y path broken: $(printf '%s' "$out" | tail -4)" ;;
 esac
-out="$( { sleep 2; printf 'n\n'; sleep 0.5; } | HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 \
-    "$PTYBIN" -q /dev/null bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate or somemodel or "tty test"' 2>&1 )"
+out="$( { sleep 2; printf 'n\n'; sleep 0.5; } | pty_spend 2>&1 )"
 case "$out" in
   *"EVENT approval"*|*"declined"*) ok "r3.1 spend: interactive n refuses with EVENT approval" ;;
   *) bad "r3.1 spend: interactive n did not refuse: $(printf '%s' "$out" | tail -4)" ;;

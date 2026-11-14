@@ -44,7 +44,7 @@ _osrc_jq_set() {
 _osrc_lock() { # <dir> -> 0 acquired
   local d="$1" age
   if mkdir "$d" 2>/dev/null; then return 0; fi
-  age=$(( $(date +%s) - $(stat -f %m "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null || echo 0) ))
+  age=$(( $(date +%s) - $(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0) ))
   if [ "$age" -gt "${OSRC_LOCK_STALE_SECS:-300}" ]; then rmdir "$d" 2>/dev/null; mkdir "$d" 2>/dev/null && return 0; fi
   return 1
 }
