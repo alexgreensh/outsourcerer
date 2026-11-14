@@ -151,9 +151,10 @@ _session_send_effort_guard sess-stock "/effort high"; rc=$?
   || bad "guard missed stock claude pane (rc=$rc)"
 
 # Unidentifiable pane (no command, dead pid, no footer, no record): fail closed.
+# rc 2 = the UNCERTAIN refusal class, the only kind --allow-effort can lift.
 FAKE_PANE_CMD=
 _session_send_effort_guard sess-mystery "/effort high"; rc=$?
-[ "$rc" -eq 1 ] && ok "guard fails closed when the pane cannot be identified" \
+[ "$rc" -eq 2 ] && ok "guard fails closed when the pane cannot be identified" \
   || bad "guard allowed /effort on an unidentified pane (rc=$rc)"
 
 # Identified non-claude with no record at all: allowed.
@@ -172,36 +173,66 @@ FAKE_PANE_PID=99999999; FAKE_PANE_CMD=codex
 [ "$rc" -eq 1 ] && ok "guard refuses when the pane's process tree runs claude" \
   || bad "guard missed claude in the pane process tree (rc=$rc)"
 
-# Remote shells are refused outright: a claude on the far side of ssh/mosh is
-# invisible to every local check and /effort would change THAT machine's settings.
-FAKE_PANE_CMD=ssh
-_session_send_effort_guard sess-remote "/effort high"; rc=$?
-[ "$rc" -eq 1 ] && ok "guard refuses /effort into an ssh pane" \
-  || bad "guard allowed /effort into ssh (rc=$rc)"
-FAKE_PANE_CMD=mosh
-_session_send_effort_guard sess-remote "/effort high"; rc=$?
-[ "$rc" -eq 1 ] && ok "guard refuses /effort into a mosh pane" \
-  || bad "guard allowed /effort into mosh (rc=$rc)"
+# Remote shells and privilege/remote wrappers are refused: a claude on the far
+# side (or inside the container/attached session) is invisible to every local
+# check and /effort would change THAT side's settings. rc 2 = uncertain.
+for rc_cmd in ssh autossh mosh mosh-client et sshpass telnet docker kubectl tmux screen sudo; do
+  FAKE_PANE_CMD="$rc_cmd"
+  _session_send_effort_guard sess-remote "/effort high"; rc=$?
+  [ "$rc" -eq 2 ] || bad "guard did not refuse /effort into a $rc_cmd pane (rc=$rc)"
+done
 FAKE_PANE_CMD=ssh
 _session_send_effort_guard sess-remote "/effort high" 1; rc=$?
 [ "$rc" -eq 0 ] && ok "allow flag overrides even an ssh pane (per-invocation)" \
   || bad "allow flag did not override ssh refusal (rc=$rc)"
 FAKE_PANE_PID=99999999; FAKE_PANE_CMD=codex
 
-# Explicit per-command override for a pane proven not to be Claude Code. The old
-# env switch is gone on purpose: set once in a shell it stayed armed for every
-# later send on every pane.
+# The flag lifts ONLY the uncertain refusals. Every proven-claude path refuses
+# even with --allow-effort: a flag that overrides known claude is the 16:50
+# incident with one extra word.
+FAKE_PANE_CMD=
+_session_send_effort_guard sess-mystery "/effort high" 1; rc=$?
+[ "$rc" -eq 0 ] && ok "allow flag overrides an unidentifiable pane" \
+  || bad "allow flag did not lift the uncertain refusal (rc=$rc)"
 _session_send_effort_guard sess-cc "/effort high" 1; rc=$?
-[ "$rc" -eq 0 ] && ok "allow flag overrides the guard for this send" \
-  || bad "allow flag did not bypass the guard (rc=$rc)"
+[ "$rc" -eq 1 ] && ok "allow flag does NOT override a registered cc pane" \
+  || bad "flag overrode a proven cc pane (rc=$rc)"
+FAKE_PANE_CMD=claude
+_session_send_effort_guard sess-stock "/effort high" 1; rc=$?
+[ "$rc" -eq 1 ] && ok "allow flag does NOT override a foreground-claude pane" \
+  || bad "flag overrode a foreground-claude pane (rc=$rc)"
+FAKE_PANE_CMD=codex
+printf 'Opus 5 | high | /repo | ContextQ: 42%% used\n' > "$CAPTURE_FILE"
+_session_send_effort_guard sess-ext "/effort high" 1; rc=$?
+[ "$rc" -eq 1 ] && ok "allow flag does NOT override footer proof" \
+  || bad "flag overrode footer proof (rc=$rc)"
+printf 'working on the thing\n' > "$CAPTURE_FILE"
+
+# The retired env switch stays dead.
 ( OSRC_SEND_ALLOW_EFFORT=1; _session_send_effort_guard sess-cc "/effort high" ); rc=$?
 [ "$rc" -eq 1 ] && ok "the retired env switch no longer disarms the guard" \
   || bad "OSRC_SEND_ALLOW_EFFORT still overrides (rc=$rc)"
 
-out="$(SESSION_NAME=sess-cc session send --allow-effort "/effort high" 2>&1)"
+# Dispatch level: a proven cc pane refuses WITH the flag and the message never
+# advertises it; an uncertain pane lets the flagged send through.
+out="$(SESSION_NAME=sess-cc session send --allow-effort "/effort high" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'effortLevel into' \
+  && ok "session send --allow-effort still refused on a proven cc pane" \
+  || bad "flag got past a proven cc pane at dispatch (rc=$rc): [$out]"
+printf '%s' "$out" | grep -q -- '--allow-effort' \
+  && bad "proven refusal advertised the override flag: [$out]" \
+  || ok "proven refusal does not mention --allow-effort"
+
+FAKE_PANE_CMD=ssh
+out="$(SESSION_NAME=sess-remote session send "/effort high" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- '--allow-effort' \
+  && ok "uncertain refusal names the --allow-effort override" \
+  || bad "uncertain refusal lacked the override hint (rc=$rc): [$out]"
+out="$(SESSION_NAME=sess-remote session send --allow-effort "/effort high" 2>&1)"
 printf '%s' "$out" | grep -q 'effortLevel into' \
   && bad "--allow-effort did not get past the guard at dispatch: [$out]" \
-  || ok "session send --allow-effort gets past the guard"
+  || ok "session send --allow-effort gets past an uncertain refusal"
+FAKE_PANE_CMD=codex
 
 # session reply parses the same flag and forwards it to _external_reply.
 _external_reply() { printf 'REPLYARGS:%s\n' "$*"; return 0; }
@@ -244,31 +275,69 @@ printf '%s' "$Cmd_res" | grep -q -- "--resume $SID" \
   && ok "dispatch relaunch command carries --resume <id>" \
   || bad "relaunch command lost --resume: [$Cmd_res]"
 
-# An invalid id falls back to --continue rather than emitting a bad flag.
+# An invalid id falls back to --continue rather than emitting a bad flag. The
+# check is UUID-strict: a planted id like --dangerously-skip-permissions must
+# never reach the claude command line as a flag.
 Relaunch_badid="$(_session_relaunch_cc fable high 'bad id!!' 2>/dev/null)"
 printf '%s' "$Relaunch_badid" | grep -q -- '--continue' \
   && ! printf '%s' "$Relaunch_badid" | grep -q -- '--resume' \
   && ok "invalid resume id falls back to --continue" \
   || bad "invalid id not handled: [$Relaunch_badid]"
+Relaunch_flagid="$(_session_relaunch_cc fable high '--dangerously-skip-permissions' 2>/dev/null)"
+printf '%s' "$Relaunch_flagid" | grep -q -- '--continue' \
+  && ! printf '%s' "$Relaunch_flagid" | grep -q -- '--resume' \
+  && ok "a leading-dash id falls back to --continue, never a claude flag" \
+  || bad "flag-shaped id reached --resume: [$Relaunch_flagid]"
+Relaunch_nonuuid="$(_session_relaunch_cc fable high 'reg-sid-1' 2>/dev/null)"
+printf '%s' "$Relaunch_nonuuid" | grep -q -- '--continue' \
+  && ! printf '%s' "$Relaunch_nonuuid" | grep -q -- '--resume' \
+  && ok "a non-UUID id falls back to --continue" \
+  || bad "non-UUID id reached --resume: [$Relaunch_nonuuid]"
 
 # _session_cc_resume_id: registry cc_session_id fallback, live sessions-dir proof.
-printf '%s\n' '{"schema_version":"1","event":"start","session_id":"sess-resume","provider":"cc","model":"fable","effort":"high","state":"running","receipt":"","endpoint":"tmux:sess-resume","cc_session_id":"reg-sid-1","cc_pid":4242,"cwd":"/tmp/x","ts":"2026-11-13T00:00:00Z"}' >> "$OSRC_SESSION_REGISTRY"
+REG_SID="aaaaaaaa-1111-4222-8333-444455556666"
+LIVE_SID="bbbbbbbb-2222-4333-8444-555566667777"
+printf '%s\n' "{\"schema_version\":\"1\",\"event\":\"start\",\"session_id\":\"sess-resume\",\"provider\":\"cc\",\"model\":\"fable\",\"effort\":\"high\",\"state\":\"running\",\"receipt\":\"\",\"endpoint\":\"tmux:sess-resume\",\"cc_session_id\":\"$REG_SID\",\"cc_pid\":4242,\"cwd\":\"/tmp/x\",\"ts\":\"2026-11-13T00:00:00Z\"}" >> "$OSRC_SESSION_REGISTRY"
 mkdir -p "$HOME/.claude/sessions"   # deliberately empty: live lookup finds nothing
+FAKE_PANE_PID=4242
 got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
-[ "$got" = "reg-sid-1" ] && ok "resume id falls back to the registry cc_session_id" \
+[ "$got" = "$REG_SID" ] && ok "resume id falls back to the registry cc_session_id" \
   || bad "registry fallback gave [$got]"
 
 # Live proof beats the registry: a ~/.claude/sessions file for a pid inside the
 # pane resolves the CURRENT sessionId (registry can be one respawn stale).
-printf '{"pid":9998,"cwd":"%s","startedAt":%s,"sessionId":"live-sid-1","procStart":"x"}\n' \
-  "$(pwd -P)" "$(( $(date +%s) * 1000 ))" > "$HOME/.claude/sessions/9998.json"
+printf '{"pid":9998,"cwd":"%s","startedAt":%s,"sessionId":"%s","procStart":"x"}\n' \
+  "$(pwd -P)" "$(( $(date +%s) * 1000 ))" "$LIVE_SID" > "$HOME/.claude/sessions/9998.json"
 FAKE_PANE_PID=9999
 ps() { case "$*" in *ppid*9998*) printf ' 9999\n';; *) printf '\n';; esac; }
 got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
 unset -f ps
 FAKE_PANE_PID=99999999
-[ "$got" = "live-sid-1" ] && ok "live ~/.claude/sessions proof beats the registry id" \
+[ "$got" = "$LIVE_SID" ] && ok "live ~/.claude/sessions proof beats the registry id" \
   || bad "live lookup gave [$got]"
+
+# _fleet_cc_session_for_pane: the session CLOSEST to the pane pid wins; a nested
+# `claude -p` helper (more hops, newer startedAt) must not steal the resume.
+SDIR="$HOME/.claude/sessions"; CWD_P="$(pwd -P)"; NOW_MS=$(( $(date +%s) * 1000 ))
+OWN_SID="11111111-aaaa-4bbb-8ccc-ddddeeeeffff"; NEST_SID="22222222-bbbb-4ccc-8ddd-eeeeffff0000"
+rm -f "$SDIR"/*.json
+printf '{"pid":6001,"cwd":"%s","startedAt":%s,"sessionId":"%s","procStart":"x"}\n' "$CWD_P" "$((NOW_MS - 60000))" "$OWN_SID" > "$SDIR/6001.json"
+printf '{"pid":6002,"cwd":"%s","startedAt":%s,"sessionId":"%s","procStart":"x"}\n' "$CWD_P" "$((NOW_MS - 5000))" "$NEST_SID" > "$SDIR/6002.json"
+ps() { case "${4:-}" in 6001) printf ' 7000\n' ;; 6002) printf ' 6003\n' ;; 6003) printf ' 7000\n' ;; *) printf '\n' ;; esac; }
+got="$(_fleet_cc_session_for_pane 7000 "$CWD_P" 2>/dev/null)"
+unset -f ps
+[ "$got" = "$OWN_SID"$'\t'"6001" ] && ok "closest-to-pane session wins over a newer nested claude" \
+  || bad "fleet pick chose wrong session: [$got]"
+
+# An invalid (non-UUID) sessionId is skipped inside the loop, not allowed to win
+# and fall through: plant the NEWEST file with a flag-shaped id.
+printf '{"pid":6004,"cwd":"%s","startedAt":%s,"sessionId":"--dangerously-skip-permissions","procStart":"x"}\n' "$CWD_P" "$((NOW_MS - 1000))" > "$SDIR/6004.json"
+ps() { case "${4:-}" in 6001) printf ' 7000\n' ;; 6002) printf ' 6003\n' ;; 6003) printf ' 7000\n' ;; 6004) printf ' 7000\n' ;; *) printf '\n' ;; esac; }
+got="$(_fleet_cc_session_for_pane 7000 "$CWD_P" 2>/dev/null)"
+unset -f ps
+[ "$got" = "$OWN_SID"$'\t'"6001" ] && ok "invalid sessionId file is skipped, valid older one still wins" \
+  || bad "invalid id poisoned the fleet pick: [$got]"
+rm -f "$SDIR"/*.json
 
 # Wiring: _session_control_relaunch resolves the id and hands it to the vector.
 CAPTURE_ARGS="$TMP/relaunch-args"; : > "$CAPTURE_ARGS"
@@ -276,7 +345,7 @@ _session_relaunch_command() { printf '%s\n' "$*" > "$CAPTURE_ARGS"; printf 'stub
 OSRC_CONTROL_VERIFY_POLLS=1 _session_control_relaunch sess-resume cc fable high >/dev/null 2>&1 || true
 unset -f _session_relaunch_command
 # pane_pid is the dead default -> live lookup misses -> registry id is what ships.
-grep -q 'reg-sid-1' "$CAPTURE_ARGS" \
+grep -q "$REG_SID" "$CAPTURE_ARGS" \
   && ok "control relaunch hands the pane's cc sessionId to the relaunch vector" \
   || bad "relaunch vector did not get the session id: [$(cat "$CAPTURE_ARGS")]"
 

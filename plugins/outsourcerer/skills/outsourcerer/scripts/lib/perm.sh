@@ -525,6 +525,15 @@ _osrc_perm_restore_profile() {
 # Both read the global PERM_PROFILE, which _session_control_relaunch restores from
 # the session's registry record before calling _session_relaunch_command.
 
+# _session_cc_uuid_valid <id> -> 0 only for a real claude sessionId shape (a
+# UUID). --resume takes the value verbatim, so the check must be strict: the
+# looser _external_session_id_valid charset accepts a leading-dash id like
+# --dangerously-skip-permissions, which claude would read as a flag, and any
+# process the delegate starts can plant a matching ~/.claude/sessions file.
+_session_cc_uuid_valid() {
+  printf '%s\n' "${1:-}" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
 # _session_cc_resume_id <tmux-pane> -> the pane claude's sessionId for
 # `claude --resume <id>`, or nothing (= the caller falls back to --continue).
 # Live proof first: ~/.claude/sessions/*.json maps the running claude pid to its
@@ -541,10 +550,16 @@ _session_cc_resume_id() {
   if [ -n "$pid" ] && [ -n "$cwd" ]; then
     match="$(_fleet_cc_session_for_pane "$pid" "$cwd" 2>/dev/null)" || match=""
     sid="${match%%$'\t'*}"
-    _external_session_id_valid "$sid" && { printf '%s\n' "$sid"; return 0; }
+    _session_cc_uuid_valid "$sid" && { printf '%s\n' "$sid"; return 0; }
   fi
   sid="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .cc_session_id // empty' | tail -1)"
-  _external_session_id_valid "$sid" && printf '%s\n' "$sid"
+  _session_cc_uuid_valid "$sid" && printf '%s\n' "$sid"
+}
+
+# _session_cc_resume_for <prov> <pane> -> the resume id for cc/claude panes,
+# empty for every other provider (and whenever no id can be proven).
+_session_cc_resume_for() {
+  case "$1" in cc|claude) _session_cc_resume_id "$2" 2>/dev/null ;; esac
 }
 
 # Relaunch command for `session effort` on a cc session (claude honors effort via
@@ -560,7 +575,7 @@ _session_relaunch_cc() {
   suffix="$(osrc_perm_string_suffix cc "${PERM_PROFILE:-default}")" || return 1
   flag="$(_cc_effort_flag "$2")"
   printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$1"
-  if _external_session_id_valid "$resume"; then printf ' --resume %q' "$resume"; else printf ' --continue'; fi
+  if _session_cc_uuid_valid "$resume"; then printf ' --resume %q' "$resume"; else printf ' --continue'; fi
   printf '%s' "$suffix"
   if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
 }
