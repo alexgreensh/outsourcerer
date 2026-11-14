@@ -95,10 +95,12 @@ out2="$(HOME="$H" _parity_repair_deadlinks)"
 # NOTE: capture awk output into a var before grepping — `grep -q` exits on first match and closes the
 # pipe; under `set -o pipefail` that SIGPIPEs awk and fails the pipeline even though the match is real.
 grep -q '_parity_repair_deadlinks' "$SRC" && ok "helper defined in source" || bad "helper missing"
-brief_body="$(awk '/^cmd_brief\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC")"
+# cmd_brief lives in lib/lanemsg.sh now (moved out of the engine); read the engine and the module.
+LANEMSG="$(dirname "$SRC")/lib/lanemsg.sh"
+brief_body="$(awk '/^cmd_brief\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC" "$LANEMSG")"
 case "$brief_body" in *_parity_repair_deadlinks*) ok "brief auto-heals the mirror" ;; *) bad "brief does not call the heal" ;; esac
 case "$brief_body" in *"_parity_repair_deadlinks prune"*) bad "brief PRUNES on the hot path (must be re-pin-only)" ;; *) ok "brief does not pass prune (re-pin-only hot path)" ;; esac
-grep -q 'OSRC_BRIEF_NO_HEAL' "$SRC" && ok "brief heal has an opt-out (OSRC_BRIEF_NO_HEAL)" || bad "no opt-out for brief heal"
+grep -q 'OSRC_BRIEF_NO_HEAL' "$SRC" "$LANEMSG" && ok "brief heal has an opt-out (OSRC_BRIEF_NO_HEAL)" || bad "no opt-out for brief heal"
 doctor_body="$(awk '/^doctor\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC")"
 case "$doctor_body" in *--fix*) ok "doctor --fix parsed" ;; *) bad "doctor --fix not wired" ;; esac
 case "$doctor_body" in *"_parity_repair_deadlinks prune"*) ok "doctor --fix prunes (explicit repair)" ;; *) bad "doctor --fix does not pass prune" ;; esac

@@ -13,14 +13,20 @@ _insource_write() {   # <file> <host-label> [codex]
   b="$(mktemp "${TMPDIR:-/tmp}/osrc-ins.XXXXXX")" || die "parity: mktemp failed"
   _insource_block "$@" > "$b" || { rm -f "$b"; die "parity: cannot render insource block"; }
   eval "$(awk '/^<!-- OUTSOURCERER:INSOURCE/ && !s { s=NR } s && /^<!-- \/OUTSOURCERER:INSOURCE -->/ && NR > s && !e { e=NR } END { if (s) print "s=" s " e=" e }' "$f" 2>/dev/null)"
+  # Write IN PLACE (cat tmp > "$f"), never mv a temp over the target: the file belongs to the user (often a
+  # symlink into a dotfiles repo, sometimes read-only), and a rename would turn the link into a regular
+  # file, reset the mode, and can cross filesystems. A read-only target fails loudly here.
   if [ -n "$s" ] && [ -n "$e" ]; then
     { [ "$s" -eq 1 ] || head -n "$((s-1))" "$f"; cat "$b"; tail -n "+$((e+1))" "$f"; } > "$b.out" \
-      && mv "$b.out" "$f" || { rm -f "$b" "$b.out"; die "parity: cannot rewrite $f"; }
+      || { rm -f "$b" "$b.out"; die "parity: cannot rewrite $f"; }
+    cat "$b.out" > "$f" || { rm -f "$b" "$b.out"; die "parity: cannot write $f (read-only or not writable)"; }
   else
-    [ -n "$s" ] && sed "${s}d" "$f" > "$b.out" && mv "$b.out" "$f"   # dangling start marker: drop it
-    { [ -s "$f" ] && printf '\n'; cat "$b"; } >> "$f" || { rm -f "$b"; die "parity: cannot write $f"; }
+    if [ -n "$s" ]; then   # dangling start marker: drop it
+      sed "${s}d" "$f" > "$b.out" && cat "$b.out" > "$f" || { rm -f "$b" "$b.out"; die "parity: cannot write $f (read-only or not writable)"; }
+    fi
+    { [ -s "$f" ] && printf '\n'; cat "$b"; } >> "$f" || { rm -f "$b" "$b.out"; die "parity: cannot write $f"; }
   fi
-  rm -f "$b"
+  rm -f "$b" "$b.out"
 }
 # _insource_block <host-label> [codex]: emit the block. Model-agnostic (hardcoded ids went stale); cache
 # installs resolve the NEWEST version at read time (numeric sort — no GNU sort -V on macOS).
@@ -29,7 +35,7 @@ _insource_block() {
   case "$SCRIPT_PATH" in */plugins/cache/*/*/*/skills/outsourcerer/scripts/outsourcerer.sh)
     vroot="$(cd "$(dirname "$SCRIPT_PATH")/../../../.." 2>/dev/null && pwd)" || vroot="" ;; esac
   case "$vroot::$SCRIPT_PATH" in *[\'\"\$\`\\]*) ;;   # unsafe to embed in the emitted command: keep pinned
-    *) [ -z "$vroot" ] || OLINE="  O=\"\$(ls -d \"$vroot\"/*/skills/outsourcerer/scripts/outsourcerer.sh 2>/dev/null | awk -F/ '{print \$(NF-4), \$0}' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1 | cut -d' ' -f2-)\"; [ -n \"\$O\" ] || O=\"$SCRIPT_PATH\"" ;; esac
+    *) [ -z "$vroot" ] || OLINE="  O=\"\$(ls -d \"$vroot\"/*/skills/outsourcerer/scripts/outsourcerer.sh 2>/dev/null | awk -F/ '{print \$(NF-4) \"\\t\" \$0}' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n | tail -n 1 | cut -f2-)\"; [ -n \"\$O\" ] || O=\"$SCRIPT_PATH\"" ;; esac
   [ "${2:-}" != "codex" ] || {
     cat <<EOF
 <!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity-codex) -->

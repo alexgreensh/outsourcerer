@@ -118,5 +118,19 @@ for bad_val in abc -5 0x10 " 12"; do
     || bad "malformed knob '$bad_val' disabled the floor: reason='$(rsn "$lbl")' witnesses=$(wit "$lbl") (elapsed ${el}s)"
 done
 
+# 9. An OVERSIZED knob (10+ digits overflows the shell's integer tests) must also mean the stall window,
+#    not a quietly skipped floor.
+lbl=gbig; el=$(run_case "$lbl" dv "" 300 12 60 OSRC_NOWRITE_WARN=2 OSRC_NOWRITE_KILL=4 OSRC_DEVIN_NOWRITE_KILL=99999999999999999999)
+[ "$(rsn "$lbl")" = "stall-kill" ] && [ "$(wit "$lbl")" -ge 7 ] \
+  && ok "oversized OSRC_DEVIN_NOWRITE_KILL falls back to the stall-window floor" \
+  || bad "oversized knob disabled the floor: reason='$(rsn "$lbl")' witnesses=$(wit "$lbl")"
+
+# 10. meta.json is the job's own record of its lane and wins over a stray OSRC_JOB_LANE in the environment:
+#     a cc job with OSRC_JOB_LANE=dv leaking in must NOT get the Devin floor (killed at ~6s as before).
+el=$(run_case c10 cc dv 300 18 60 OSRC_NOWRITE_WARN=3 OSRC_NOWRITE_KILL=6)
+[ "$(rsn c10)" = "exploring-timeout" ] && [ "$(wit c10)" -le 12 ] \
+  && ok "meta.json lane (cc) beats a stray OSRC_JOB_LANE=dv: no Devin floor on a cc job" \
+  || bad "stray OSRC_JOB_LANE gave a cc job the dv floor: reason='$(rsn c10)' witnesses=$(wit c10)"
+
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

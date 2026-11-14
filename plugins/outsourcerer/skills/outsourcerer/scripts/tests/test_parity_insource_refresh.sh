@@ -165,6 +165,41 @@ e="$TMP/empty"; mkdir -p "$e"; : > "$e/AGENTS.md"
   ] && ok "empty file: block starts at line 1 (no leading blank)" \
   || bad "empty file: unexpected first line"
 
+# ---- 10. the target belongs to the user: write IN PLACE, never rename over it -------------------------
+# (review of #63: an mv-based writer turned a symlinked AGENTS.md, the dotfiles layout, into a regular
+#  file on the second run, reset a 640 mode to the umask default, and silently replaced a read-only file.)
+_mode() { ls -l "$1" | cut -c1-10; }
+d="$TMP/dots"; mkdir -p "$d" "$TMP/ch"; printf 'my own header\n' > "$d/AGENTS.md"
+ln -s "$d/AGENTS.md" "$TMP/ch/AGENTS.md"
+CODEX_HOME="$TMP/ch" parity_codex >/dev/null; CODEX_HOME="$TMP/ch" parity_codex >/dev/null   # append, then rewrite
+[ -L "$TMP/ch/AGENTS.md" ] && ok "symlinked target stays a symlink after two runs (append then rewrite)" \
+  || bad "symlinked target was replaced by a regular file"
+[ "$(grep -c '^<!-- OUTSOURCERER:INSOURCE' "$d/AGENTS.md")" = "1" ] && grep -q 'my own header' "$d/AGENTS.md" \
+  && ok "the real file behind the link carries exactly one block and the user's text" \
+  || bad "real file behind the link: unexpected content"
+m="$TMP/modes"; mkdir -p "$m"; printf 'x\n' > "$m/AGENTS.md"; chmod 640 "$m/AGENTS.md"
+( cd "$m" && parity_cursor >/dev/null ); ( cd "$m" && parity_cursor >/dev/null )
+[ "$(_mode "$m/AGENTS.md")" = "-rw-r-----" ] && ok "file mode (640) survives append and rewrite" \
+  || bad "file mode changed to $(_mode "$m/AGENTS.md")"
+ro="$TMP/ro"; mkdir -p "$ro"; printf 'x\n' > "$ro/AGENTS.md"; ( cd "$ro" && parity_cursor >/dev/null )
+cp "$ro/AGENTS.md" "$TMP/ro.before"; chmod 444 "$ro/AGENTS.md"
+( cd "$ro" && parity_cursor ) >"$TMP/ro.out" 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'read-only\|cannot write' "$TMP/ro.out" \
+  && cmp -s "$ro/AGENTS.md" "$TMP/ro.before" && [ "$(_mode "$ro/AGENTS.md")" = "-r--r--r--" ] \
+  && ok "read-only target fails loudly and is left untouched" \
+  || bad "read-only target: rc=$rc, out=$(head -c 160 "$TMP/ro.out")"
+chmod 644 "$ro/AGENTS.md"
+
+# ---- 11. a version folder with a space must not break the resolver -----------------------------
+SCRIPT_PATH="$C/0.15.3/skills/outsourcerer/scripts/outsourcerer.sh"
+mkdir -p "$C/20.0.0 beta/skills/outsourcerer/scripts"; : > "$C/20.0.0 beta/skills/outsourcerer/scripts/outsourcerer.sh"
+oline="$(_insource_block "Cursor" | grep '^  O=')"
+resolved="$(eval "${oline#  }"; printf '%s' "$O")"
+[ "$resolved" = "$C/20.0.0 beta/skills/outsourcerer/scripts/outsourcerer.sh" ] \
+  && ok "version folder with a space resolves to its full path (no split on the space)" \
+  || bad "space in version folder: resolver picked: $resolved"
+rm -rf "$C/20.0.0 beta"
+
 echo
 echo "parity-insource-refresh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

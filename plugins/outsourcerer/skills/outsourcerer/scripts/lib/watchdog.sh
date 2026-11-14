@@ -153,10 +153,12 @@ _supervise() {
   local nowrite_secs="${OSRC_NOPROGRESS_SECS:-600}" nowrite_kill="${OSRC_NOPROGRESS_KILL_SECS:-0}"
   case "$nowrite_secs" in ''|*[!0-9]*) nowrite_secs=600 ;; esac
   case "$nowrite_kill" in ''|*[!0-9]*) nowrite_kill=0 ;; esac
-  # The lane rides the same env carry as the verb (OSRC_JOB_LANE from run_job), meta.json as fallback,
-  # so the lane-keyed guards below stay jq-independent too.
-  local _jlane="${OSRC_JOB_LANE:-}"
-  [ -n "$_jlane" ] || { [ -f "$jd/meta.json" ] && _jlane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"; }
+  # meta.json is the job's own record of its lane, so it wins when it has one; OSRC_JOB_LANE (exported by
+  # run_job) is the fallback for hosts without jq or a failed meta write. Preferring the env first would
+  # let a stray OSRC_JOB_LANE=dv in the caller's shell give another lane's job the Devin floor.
+  local _jlane=""
+  [ -f "$jd/meta.json" ] && _jlane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
+  [ -n "$_jlane" ] || _jlane="${OSRC_JOB_LANE:-}"
   local write_expecting=0; case "$verb" in edit|yolo) write_expecting=1 ;; esac
   _lane_text_only "$_jlane" && write_expecting=0
   [ "$nowrite_secs" -gt 0 ] || write_expecting=0
@@ -166,10 +168,10 @@ _supervise() {
   # widened dv stall window and reaped healthy delegates mid-test-suite. Floor nww_kill up to the
   # stall-kill window, which owns the silence verdict on this lane. WARN/flag clocks are unchanged;
   # a higher user window is never lowered. OSRC_DEVIN_NOWRITE_KILL overrides the floor (0 = off, the
-  # pre-fix behaviour); a malformed value falls back to the stall window rather than silently
+  # pre-fix behaviour); a malformed or oversized value falls back to the stall window rather than silently
   # switching the fix off.
   local _dvfloor="${OSRC_DEVIN_NOWRITE_KILL:-$kill_after}"
-  case "$_dvfloor" in ''|*[!0-9]*) _dvfloor="$kill_after" ;; esac
+  case "$_dvfloor" in ''|*[!0-9]*|??????????*) _dvfloor="$kill_after" ;; esac   # non-numeric or 10+ digits (overflows test's integers): stall window
   if [ "$_jlane" = "dv" ] && [ "$_dvfloor" -gt 0 ] 2>/dev/null && [ "$nww_kill" -lt "$_dvfloor" ]; then nww_kill="$_dvfloor"; fi
   # A live process is not proof that the delegate reached its first model turn. SessionStart hooks
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
