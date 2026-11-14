@@ -48,7 +48,14 @@ grep -q "if (pinned && owner && owner.isConnected) place(owner)" "$PAGE" && ok "
 grep -q "max-height: calc(100vh - 32px); overflow-y: auto" "$PAGE" && ok "hover card max-height scroll" || bad "hover card max-height missing"
 grep -q "target.closest('.prline')" "$PAGE" && ok "rail cards anchor past the row" || bad "rail card anchor missing"
 grep -q "const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf)" "$PAGE" && ok "lane hover: every issue its own link" || bad "lane hover refs missing"
-grep -q "Mark done, move to Shipped" "$PAGE" && grep -q "Move back to running" "$PAGE" && ok "Mark done / Move back in the rail card" || bad "Mark done missing"
+grep -q "Mark done, move to Shipped" "$JS" && grep -q "Move back to running" "$JS" && grep -q "H.doneBtn(p, null, hide)" "$PAGE" && ok "Mark done / Move back in the rail card" || bad "Mark done missing"
+# MC-7 (Alex approved all five proposals)
+grep -q "H.doneBtn(p, 'hdone-' + p.id)" "$PAGE" && grep -q "meta.append(k)" "$PAGE" && ok "MC-7 #1: Mark done also in the project page header (a button, in the tab order)" || bad "MC-7 #1: header Mark done missing"
+grep -q "@media (hover: none) { .ph .hcact { min-height: 44px; } }" "$PAGE" && ok "MC-7 #1: header button is a 44px touch target" || bad "MC-7 #1: header button touch size missing"
+grep -q ".app:has(.ph.home) .main > .ph.home { order: 1;" "$PAGE" && grep -q ".app:has(.ph.home) .main > .toppri { order: 1;" "$PAGE" && ok "MC-7 #2: phone Home puts the headline and top-priority bar above the rail list" || bad "MC-7 #2: phone Home order missing"
+grep -q "min-width: 1200px) { .pt-prog" "$PAGE" && bad "MC-7 #3: the tile stamp still shares the bar row at 1200px+" || { grep -q ".pt-meta { display: flex; flex-direction: column;" "$PAGE" && ok "MC-7 #3: tile stamp on its own row at every width" || bad "MC-7 #3: pt-meta is not a column"; }
+grep -q ".tprow { display: grid; grid-template-columns: 4.25rem minmax(0, 1fr) auto;" "$PAGE" && ok "MC-7 #4: fixed pill column in the top-priority rows" || bad "MC-7 #4: pill column not fixed"
+grep -q "row.append(stPill(p)" "$PAGE" && grep -q "top.append(nb, stPill(p))" "$JS" && grep -q "' st-wait'" "$PAGE" && ok "MC-7 #5: hover card and tile share one status pill" || bad "MC-7 #5: hover pill differs from the tile"
 grep -q "}, 6000);" "$JS" && grep -q "'Undo'" "$JS" && ok "Undo toast, 6 s" || bad "Undo toast missing"
 miss=""; for i in layout-grid hand arrow-right circle-check chevron-right rotate-ccw refresh-cw clock pause rocket check; do
   grep -q "^    '$i': '<" "$PAGE" || miss="$miss $i"

@@ -5,7 +5,7 @@
    and the stale-stamp Refresh button. If this file fails to load, hub.html falls back to the project view. */
 (function () {
   window.OSRC_HUB_HOME = function (ctx) {
-    const { $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT } = ctx;
+    const { $, el, ic, pri, paint, openDecs, byWeight, stPill } = ctx;
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
     const grown = new Set();   // a tile's bar animates the first time only; re-renders set it directly (MC-5 #4)
     // Tiles use a short stamp (MC-5 #1): "12:57 UTC" today, "13 Nov" otherwise, from the project's real last change
@@ -56,6 +56,16 @@
       else utoast(p.name + ' is back in Running now');
     }
 
+    // One Mark done / Move back button, used in the rail card and the project page header (MC-7 #1: the header
+    // copy is the one a phone or a keyboard can reach). Same click, same Undo, same shippedBy/shippedAt.
+    function doneBtn(p, id, after) {
+      if (!ctx.db || ctx.canWrite === false) return null;
+      const shipped = p.status === 'shipped', k = el('button', 'hcact'); k.type = 'button'; k.id = id || (shipped ? 'back-' : 'chk-') + p.id;
+      k.append(ic(shipped ? 'rotate-ccw' : 'check'), document.createTextNode(shipped ? 'Move back to running' : 'Mark done, move to Shipped'));
+      k.addEventListener('click', (e) => { e.stopPropagation(); if (after) after(); setShipped(p, !shipped); });
+      return k;
+    }
+
     // ---- Refresh on stale stamps (>45 min) ----------------------------------------------------
     // Artifact mode asks the orchestrator through doc refresh/<kind--id>; its 5-minute check re-reads that
     // project or the limits. Pending asks are remembered for 10 min so re-renders keep the state.
@@ -88,8 +98,7 @@
       const t = el('article', 'card ptile' + (p.status === 'paused' ? ' paused' : '') + (ds.length ? ' waits' : '')); t.id = 'tile-' + p.id;
       const top = el('div', 'pt-top');
       const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.id = 'ptn-' + p.id; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
-      const stt = ds.length ? ['st-wait', 'Waiting on you'] : [p.status === 'paused' ? 'st-paused' : p.status === 'shipped' ? 'st-shipped' : '', STATUS_TXT[p.status] || 'Building'];
-      top.append(nb, el('span', 'pill ' + stt[0], stt[1])); t.append(top);
+      top.append(nb, stPill(p)); t.append(top);
       if (p.tagline) t.append(el('p', 'pt-tag', p.tagline));
       const pr = el('div', 'pt-prog'); const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
       bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuenow', String(p.pct || 0)); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-label', p.name + ' progress');
@@ -156,6 +165,6 @@
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast };
+    return { renderHome, refreshBtn, setShipped, utoast, doneBtn };
   };
 })();

@@ -270,7 +270,8 @@ a.pill svg { width: 13px; height: 13px; }
 .toppri { display: flex; flex-direction: column; gap: 12px; background: var(--hi-soft); border-color: var(--hi-line); }
 .toppri h2 { margin: 0; font-size: 1.3rem; font-weight: 700; line-height: 1.25; display: flex; align-items: center; gap: 10px; }
 .tplist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.tprow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1.5px solid var(--hi-line); }
+.tprow { display: grid; grid-template-columns: 4.25rem minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1.5px solid var(--hi-line); }
+.tprow > .pri { justify-self: start; }   /* fixed pill column: every name starts on one edge (MC-7 #4) */
 .tprow:first-child { border-top: 0; padding-top: 2px; }
 .tpq { display: flex; flex-direction: row; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
 .tpn { font-weight: 700; font-size: 1rem; }
@@ -290,10 +291,9 @@ a.pill svg { width: 13px; height: 13px; }
 .ptile.hl { border-color: var(--ink); box-shadow: 4px 4px 0 var(--shadow); }
 .pt-top5 { font-weight: 600; font-size: .9rem; margin: 0; }
 .pt-prog .pt-meta { grid-column: 1 / -1; }
-@media (min-width: 1200px) { .pt-prog { grid-template-columns: minmax(96px, 1fr) 4rem minmax(0, 11.5rem); } .pt-prog .pt-meta { grid-column: auto; min-width: 0; } .pt-prog:has(.lst.stale) .pt-meta { grid-column: 1 / -1; } }
 .ph.home h1 { font-size: 2rem; }
 .pt-prog .pct { font-family: var(--mono); font-weight: 700; font-size: 1.4rem; line-height: 1; }
-.pt-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: .9rem; }
+.pt-meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; font-size: .9rem; }   /* the stamp gets its own row at every width (MC-7 #3) */
 .pt-meta > span { display: inline-flex; align-items: center; gap: 6px; }
 .pt-meta .lst.stale { border-radius: 12px; } /* a pill on one line, a rounded box if a narrow tile wraps it */
 .pt-decs { list-style: none; margin: 0; padding: 10px 0 0; border-top: 1.5px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
@@ -315,6 +315,8 @@ a.pill svg { width: 13px; height: 13px; }
 .rfr:disabled { cursor: default; opacity: .85; }
 @media (hover: none) { .rfr { min-height: 32px; } }
 .hcact { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; margin-top: 4px; padding: 6px 14px; border-radius: 999px; border: 1.5px solid var(--edge); background: var(--card); color: var(--ink); font-weight: 600; font-size: .9rem; cursor: pointer; }
+.ph .hcact { margin-top: 0; }
+@media (hover: none) { .ph .hcact { min-height: 44px; } }
 .hcact:hover, .hcact:focus-visible { background: var(--up-bg); color: var(--up); border-color: var(--up); }
 
 @media (max-width: 860px) {
@@ -330,7 +332,15 @@ a.pill svg { width: 13px; height: 13px; }
   .stats, .lanes, .decs, .themes { grid-template-columns: 1fr; }
   .tile.has-open { grid-template-columns: 44px minmax(0, 1fr); }
   .tile .open { grid-column: 2; justify-self: start; }
+  /* MC-7 #2: on Home the headline and the top-priority bar come before the rail list; the rest of Home follows it. */
+  .app:has(.ph.home) .main { display: contents; --mi: clamp(48px, 9vw, 128px); } .app:has(.ph.home) .main > * { order: 3; margin-inline: var(--mi); }
+  .app:has(.ph.home) .main > .ph.home { order: 1; margin-top: 24px; } .app:has(.ph.home) .main > .toppri { order: 1; margin-top: 16px; }
+  .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
+  .app:has(.ph.home) .main > :nth-child(1 of :not(.ph, .toppri)) { border-top: 1.5px solid var(--edge); margin: 16px 0 0; padding: 32px var(--mi) 0; }
+  .app:has(.ph.home) .main > :last-child { margin-bottom: 40px; } .app:has(.ph.home) .main > .foot { margin-top: 16px; }
+  .app:has(.ph.home) .rail-mid > h2:nth-of-type(2), .app:has(.ph.home) .rail-mid > .llist { order: 4; } .app:has(.ph.home) .credits { order: 5; }
 }
+@media (max-width: 700px) { .app:has(.ph.home) .main { --mi: 16px; } }
 @media (prefers-reduced-motion: no-preference) { .bar > span { transition: width .6s ease; } .star, .board-link { transition: transform .15s, box-shadow .15s; } }
 </style>
 
@@ -416,6 +426,7 @@ a.pill svg { width: 13px; height: 13px; }
   const byWeight = (a, b) => ORDER.indexOf(a.weight) - ORDER.indexOf(b.weight);
   const pri = (w) => el('span', 'pri p-' + String(w || 'Medium').toLowerCase(), w || 'Medium');
   const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused' };
+  const stPill = (p) => { const w = openDecs(p).length; return el('span', 'pill' + (w ? ' st-wait' : p.status === 'paused' || p.status === 'shipped' ? ' st-' + p.status : ''), w ? 'Waiting on you' : STATUS_TXT[p.status] || 'Building'); };   // tile and hover card share one pill (MC-7 #5)
   let projects = [], answers = {}, limits = [], db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false;  // drafts: hub-decide.js (MC-4)
   // ---- data adapter: artifact db (window.claude) or local API (hub serve) ----
   let mode = 'none', pullErr = '', unsubs = [];
@@ -678,14 +689,8 @@ a.pill svg { width: 13px; height: 13px; }
       const line = el('div', 'prline'); line.appendChild(b);
       b.addEventListener('mouseenter', () => { if (!current) { const t = $('tile-' + p.id); if (t) t.classList.add('hl'); } });
       b.addEventListener('mouseleave', () => { const t = $('tile-' + p.id); if (t) t.classList.remove('hl'); });
-      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(el('span', 'pill', openDecs(p).length ? 'Waiting on you' : (STATUS_TXT[p.status] || 'Building')), el('span', 'mono', (p.pct || 0) + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); if (p.tagline) c.append(el('p', null, p.tagline));
-        if (H && db && canWrite !== false) {   // Mark done lives in the rail project's card (Alex 11:58)
-          const shipped = p.status === 'shipped';
-          const k = el('button', 'hcact'); k.type = 'button'; k.id = (shipped ? 'back-' : 'chk-') + p.id;
-          k.append(ic(shipped ? 'rotate-ccw' : 'check'), document.createTextNode(shipped ? 'Move back to running' : 'Mark done, move to Shipped'));
-          k.addEventListener('click', (e) => { e.stopPropagation(); hide(); H.setShipped(p, !shipped); });
-          c.append(k);
-        } }, true);
+      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p), el('span', 'mono', (p.pct || 0) + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); if (p.tagline) c.append(el('p', null, p.tagline));
+        const k = H && H.doneBtn(p, null, hide); if (k) c.append(k); }, true);   // Mark done in the rail card (Alex 11:58) and the page header (MC-7)
       box.appendChild(line);
       const ds = openDecs(p);  // Alex: the rail always lists each project's open decisions, Home included
       if (ds.length) {
@@ -787,6 +792,7 @@ a.pill svg { width: 13px; height: 13px; }
     if (p.repo) { const a = el('a', 'pill'); a.href = 'https://github.com/' + p.repo; a.target = '_blank'; a.rel = 'noopener'; a.append(ghSvg(), document.createTextNode(p.repo)); meta.append(a); }
     const h1 = el('h1', null, String(p.name));
     (p.extraLinks || []).forEach((x) => { if (!x.url || !/^https:\/\//i.test(String(x.url))) return; const k = el('a', 'board-link', x.t); k.href = x.url; k.target = '_blank'; k.rel = 'noopener'; meta.append(k); });
+    { const k = H && H.doneBtn(p, 'hdone-' + p.id); if (k) meta.append(k); }   // MC-7 #1: reachable by touch and keyboard
     // Stale alarm (past bug: boards sat on an old stamp for hours while work moved). Needs updatedAt (ISO).
     if (p.updated) { const st = el('p', 'stamp-top'); st.dataset.rk = 'project:' + p.id; st.dataset.at = p.updatedAt || ''; st.dataset.live = p.status === 'shipped' ? '' : '1';
       st.append(ic('clock'), el('span', null, 'Updated ' + p.updated)); ph.append(st); }
@@ -932,7 +938,7 @@ a.pill svg { width: 13px; height: 13px; }
 
   // Home, Mark done and Refresh live in assets/hub-home.js (keeps this file under 1,000 lines).
   const H = typeof window.OSRC_HUB_HOME === 'function' ? window.OSRC_HUB_HOME({
-    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, go, hide, renderRail, renderMain, staleCheck,
+    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck,
     get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
