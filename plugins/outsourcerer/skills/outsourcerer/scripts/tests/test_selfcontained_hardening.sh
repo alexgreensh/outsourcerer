@@ -6,13 +6,16 @@ osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+GATE="$SCRIPT_DIR/../lib/cloudgate.sh"   # cloud disclosure + secret-scan gate (L10 module split)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+[ -f "$GATE" ] || { echo "FAIL: cannot find $GATE"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n"; exit 1; }
+bash -n "$GATE" || { echo "FAIL: bash -n $GATE"; exit 1; }
 
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
-has() { grep -Fq "$1" "$SRC" && ok "$2" || bad "$2 (missing: $1)"; }
+has() { grep -Fq "$1" "$SRC" "$GATE" && ok "$2" || bad "$2 (missing: $1)"; }
 
 # Ledger append computed into a var then single/flock'd append (no direct jq >> race).
 has 'if flock -w 5 9' "ledger uses a bounded-wait flock-guarded append (no silent drop on lock failure)"
@@ -29,7 +32,7 @@ grep -Eq "jq -cn[^|]*>> \"\\\$OSRC_LEDGER\"" "$SRC" && bad "raw 'jq ... >> ledge
 # WITH_SPEC split without globbing.
 has 'done <<_OSRC_GATE_SPECS' "_secret_scan splits WITH_SPEC via _with_specs heredoc (no glob)"
 # Scope the check to _secret_scan: the --with parsers at build_mcp_flags intentionally word-split.
-ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$SRC")"
+ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$GATE")"
 printf '%s' "$ss_body" | grep -Fq 'for tok in $WITH_SPEC' && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
 # Every OSRC_ALLOWED_TOOLS consumer must be deglobbed via `read -ra` (safe word-splitting, no
 # globbing). Invariant, stale-proof: there is >=1 safe deglob spot and ZERO unsafe unquoted
