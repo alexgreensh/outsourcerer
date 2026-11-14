@@ -3,6 +3,10 @@ set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${OSRC_HOME:?test requires an isolated OSRC_HOME}"
 mkdir -p "$OSRC_HOME/bin" "$OSRC_HOME/a/token-optimizer" "$OSRC_HOME/b/token-optimizer" "$OSRC_HOME/unknown"
+for cli in codex devin droid cursor-agent agent agy gemini cline pi hermes warp curl gh; do
+  printf '#!/bin/bash\nexit 99\n' > "$OSRC_HOME/bin/$cli"
+  chmod +x "$OSRC_HOME/bin/$cli"
+done
 mkdir -p "$HOME/.claude/skills" "$HOME/.claude/agents" "$HOME/.claude/projects" "$HOME/.claude/commands" "$HOME/.claude/hooks" "$HOME/.claude/plugins" "$HOME/.claude/references" "$HOME/.claude/statsig" "$HOME/.claude/session-env"
 printf '{}' > "$HOME/.claude/settings.json"
 mkfifo "$HOME/.claude/.credentials.json"
@@ -22,6 +26,8 @@ case "$CLAUDE_CONFIG_DIR" in
   */b) printf '%s\n' '{"loggedIn":true,"authMethod":"console","apiProvider":"firstParty","subscriptionType":"max"}' ;;
   */thirdparty) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"bedrock","subscriptionType":"max"}' ;;
   */unverified) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}' ;;
+  */keysource) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","apiKeySource":"helper"}' ;;
+  */failed) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 1 ;;
   *) printf '%s\n' '{}' ;;
 esac
 EOF
@@ -36,6 +42,9 @@ PATH="$OSRC_HOME/bin:$PATH"; export PATH
 have() { command -v "$1" >/dev/null 2>&1; }
 _timeout() { shift; "$@"; }
 . "$ROOT/lib/limits.sh"
+. "$ROOT/lib/spend.sh"
+_lane_by_disp() { [ "$1" = cc ] && printf cc; }
+_extract_kv_value() { return 1; }
 _osrc_cap_valid() { case "$1" in weekly\<\=*|5h\<\=*) return 0 ;; *) return 1 ;; esac; }
 _osrc_cap_window() { case "$2" in weekly) echo claude7d ;; 5h) echo claude5h ;; *) return 1 ;; esac; }
 _osrc_cap_specs_for() { printf '%s\n' "${TEST_CAP:-}"; }
@@ -52,7 +61,16 @@ printf '{"timestamp":%s000,"five_hour":{"used_percentage":30},"seven_day":{"used
 [ "$(_osrc_account_billing "$OSRC_HOME/b")" = metered ]
 [ "$(_osrc_account_billing "$OSRC_HOME/thirdparty")" = metered ]
 [ "$(_osrc_account_billing "$OSRC_HOME/unverified")" = unknown ]
+[ "$(_osrc_account_billing "$OSRC_HOME/keysource")" = metered ]
+[ "$(_osrc_account_billing "$OSRC_HOME/failed")" = unknown ]
 [ "$(_osrc_account_billing "$OSRC_HOME/unknown")" = unknown ]
+printf '{"apiKeyHelper":"example"}\n' > "$OSRC_HOME/a/settings.json"
+[ "$(_osrc_account_billing "$OSRC_HOME/a")" = metered ]
+rm "$OSRC_HOME/a/settings.json"
+CLAUDE_CODE_USE_FOUNDRY=true
+export CLAUDE_CODE_USE_FOUNDRY
+[ "$(_osrc_account_billing "$OSRC_HOME/a")" = metered ]
+unset CLAUDE_CODE_USE_FOUNDRY
 accounts=$(printf 'a\t%s/a\nb\t%s/b\nunknown\t%s/unknown\n' "$OSRC_HOME" "$OSRC_HOME" "$OSRC_HOME")
 [ "$(printf '%s\n' "$accounts" | _osrc_account_choose)" = b ]
 TEST_CAP='5h<=25'; export TEST_CAP
@@ -109,6 +127,10 @@ if /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account hat --foreg
 grep -q 'spend gate' "$OSRC_HOME/denied"
 /bin/bash "$CLI" --osrc-preflight-internal run --spend-ok -m fable --account hat --foreground hello >"$OSRC_HOME/approved" 2>&1
 /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account work --foreground hello >"$OSRC_HOME/work" 2>&1
+printf '{"apiKeyHelper":"example"}\n' > "$HOME/.claude/settings.json"
+if /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account work --foreground hello >"$OSRC_HOME/helper" 2>&1; then exit 1; fi
+grep -q 'spend gate' "$OSRC_HOME/helper"
+printf '{}\n' > "$HOME/.claude/settings.json"
 if /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account hat --cap '5h<=25' --foreground hello >"$OSRC_HOME/forcecap" 2>&1; then exit 1; fi
 grep -q 'configured cap' "$OSRC_HOME/forcecap"
 if /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account missing --foreground hello >"$OSRC_HOME/missing" 2>&1; then exit 1; fi
