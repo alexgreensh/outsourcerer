@@ -85,6 +85,8 @@ class SealedRunnerTests(unittest.TestCase):
         real_access = os.access
         with mock.patch.object(classifier.os, 'access', side_effect=lambda path, mode: False if str(path) in ('/usr/bin/bwrap', '/usr/bin/sandbox-exec') else real_access(path, mode)):
             self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
+            with mock.patch.object(classifier.sys, 'platform', 'linux'):
+                self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
 
     def test_isolation_probes(self):
         tool = '/usr/bin/sandbox-exec' if sys.platform == 'darwin' else '/usr/bin/bwrap'
