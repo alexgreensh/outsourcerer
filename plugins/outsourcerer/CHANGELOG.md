@@ -20,23 +20,23 @@ All notable changes to the Outsourcerer plugin are documented here.
 - **Mission Control.** `hub serve` opens a local page with every project you are running: progress, lanes, limits, and the decisions waiting on you, answerable from the page. Home shows the top-priority decisions first. **Mark done** moves a project to Shipped and **Move back** returns it to running, with a six-second Undo; a project you marked done stays done. A half-typed answer survives refreshes. The page makes no third-party requests and the API sits behind a local token. `hub export` prints the same data as JSON.
 - **Cleanup you can trust.** `cleanup` lists what your sessions created with a SAFE or ASK verdict for each. `--apply` removes only the SAFE ones.
 - **Claude multi-account lanes.** `accounts add work` registers a second Claude config directory with its own official login, and `accounts` shows each one's weekly and five-hour headroom. New Claude lanes start on the account with the most room under your caps, or the one you name with `--account`. Running lanes never move. Each account must be your own. Outsourcerer never stores, copies or relays login tokens; it only points Claude at a config directory. We have not confirmed how Anthropic's terms treat one person using several personal subscriptions, so check them for your case.
-- **A cheaper orchestrator.** Supervision refreshes project and limits snapshots itself every 10 minutes, so no extra timer is needed. `supervise --auto done,limits` sends verified READY work to the reviewer without waking you. `handover --check-context` prepares a handover when the orchestrator passes 150,000 input tokens (`OSRC_ORCH_CTX_MAX`). Reviewers rotate after two reviews or 35% context, re-reviews read only what changed plus the earlier findings, and `OSRC_LEAN_LAUNCH=1` starts Claude sessions with a strict MCP config while keeping `CLAUDE.md`.
+- **A lighter orchestrator.** Supervision refreshes project and limits snapshots itself every 10 minutes, so no extra timer is needed. `supervise --auto done,limits` sends verified READY work to the reviewer without waking you. `handover --check-context` prepares a handover when the orchestrator passes 150,000 input tokens (`OSRC_ORCH_CTX_MAX`). Reviewers rotate after two reviews or 35% context, re-reviews read only what changed plus the earlier findings, and `OSRC_LEAN_LAUNCH=1` starts Claude sessions with a strict MCP config while keeping `CLAUDE.md`.
 - **Session handover.** `handover` writes a pickup brief and `adopt` moves everything a session owns to the new one, so a long-running orchestrator can be replaced without dropping a lane.
 - **Lane messages and a team score.** `lane msg` and `lane inbox` let lanes leave each other notes. `team score` shows what each lane delivered.
 
 ### Changed
 
-- **`OSRC_FAILOVER_CASH_OK=1` no longer spends by itself.** It lets failover consider cash lanes; the hop still needs `--spend-ok` on that command. An exported variable is standing consent, and spending is approved one command at a time. The stop message names the cash lanes it skipped and exactly what to add.
-- **The `gemini` CLI text lane is retired.** Antigravity (`agy`) is the one Gemini text vehicle. `OSRC_GEMINI_VEHICLE=gemini` now stops with a clear message. `GEMINI_API_KEY` still serves the image lane.
+- **Paid failover is confirmed per command.** `OSRC_FAILOVER_CASH_OK=1` lets failover consider paid lanes, and each hop confirms with `--spend-ok` on that command. The stop message names the cash lanes it skipped and exactly what to add.
+- **Antigravity (`agy`) is the Gemini text lane.** `OSRC_GEMINI_VEHICLE=gemini` explains the switch. `GEMINI_API_KEY` still serves the image lane.
 - **Devin's default follows the live Free list.** The model is picked at run time from the models Devin currently marks Free. Plan-included models that are not Free count as paid and ask first.
-- **`/effort` is refused in Claude panes.** Typed there it changes a global setting for every later Claude session. `session effort <level>` changes the one session you mean.
+- **`session effort <level>` sets effort for exactly the session you mean.** Typing `/effort` into a Claude pane is caught, since it would change every later session.
 
 ### Fixed
 
-- **A healthy Devin job is no longer killed during a long quiet command.** A test suite or build that writes no files used to trip the no-write timer. The kill now waits for the stall window (30 minutes by default; `OSRC_DEVIN_NOWRITE_KILL` sets it). (#58)
-- **A `ps` hiccup at launch no longer kills the job.** When the start time couldn't be read at spawn, the next successful read looked like a reused process id and the job was stopped. Unknown now stays unknown until the first real reading. (#60)
-- **INSOURCE blocks refresh on every `parity-*` run.** They no longer name retired Devin lanes or point at an old version's path, and a symlinked or read-only `AGENTS.md` is handled safely. (#62)
-- **Tests leave your real tmux server and home folder alone.** Suites run in a scratch home, and a guard fails any test that could stop a tmux server it didn't start.
+- **Long quiet Devin commands run to completion.** A test suite or build that writes no files keeps going until the stall window (30 minutes by default; `OSRC_DEVIN_NOWRITE_KILL` sets it). (#58)
+- **Launch checks read processes reliably.** The reuse guard engages after the first real start-time reading. (#60)
+- **INSOURCE blocks refresh on every `parity-*` run.** The template stays model-neutral and version-free, and symlinked or read-only `AGENTS.md` files are handled safely. (#62)
+- **Tests run in their own scratch home and tmux server**, with a guard that keeps your real ones untouched.
 
 ## 0.15.3
 
