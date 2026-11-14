@@ -114,6 +114,42 @@ EOF
   grep -q 'undo-kept=1' <<<"$rb" && ok "a late info toast never replaces a live Undo" || bad "Undo toast replaced: $rb"
 else echo "SKIP: node not installed (refreshBtn unit)"; fi
 
+echo "=== MC-10: live lane summary under the bar (node, no browser) ==="
+if command -v node >/dev/null 2>&1; then
+  sm="$(node - "$JS" <<'EOF' 2>&1
+const fs = require('fs'), vm = require('vm');
+function mk(tag, cls, txt) { return { tag, className: cls || '', text: txt, children: [], dataset: {}, style: {}, id: '', title: '',
+  append(...k) { this.children.push(...k); }, appendChild(k) { this.children.push(k); return k; }, replaceChildren(...k) { this.children = k; },
+  setAttribute() {}, addEventListener() {}, classList: { contains: () => false, add() {} } }; }
+const win = {}; vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), { window: win, document: { createTextNode: (t) => ({ t }), body: { appendChild() {} } }, setTimeout, clearTimeout, requestAnimationFrame: () => {} });
+const main = mk('main');
+const now = new Date().toISOString();
+const ctx = { $: (id) => (id === 'main' ? main : null), el: (t, c, x) => mk(t, c, x), ic: () => mk('i'), pri: () => mk('span'), paint() {}, openDecs: () => [], byWeight: () => 0,
+  stPill: () => mk('span', 'pill'), go() {}, staleCheck() {}, db: {}, canWrite: null, mode: 'local',
+  projects: [{ id: 'a', name: 'A', status: 'building', pct: 40, tagline: 'The tagline', updated: 'x', updatedAt: now, summary: '5 lanes: 3 building, 1 done', summaryAt: now },
+             { id: 'b', name: 'B', status: 'building', pct: 10, tagline: 'Other', updated: 'x', updatedAt: now },
+             { id: 'c', name: 'C', status: 'building', pct: 10, updated: 'x', updatedAt: now, summary: '   ' }] };
+const H = win.OSRC_HUB_HOME(ctx); H.renderHome();
+const all = []; (function walk(n) { if (!n || typeof n !== 'object') return; all.push(n); (n.children || []).forEach(walk); })(main);
+const tile = (id) => all.find((n) => n.id === 'tile-' + id);
+const find = (root, cls) => { const r = []; (function w(n) { if (!n || typeof n !== 'object') return; if ((n.className || '').split(' ').includes(cls)) r.push(n); (n.children || []).forEach(w); })(root); return r; };
+const sa = find(tile('a'), 'psum'), meta = find(tile('a'), 'pt-meta')[0];
+console.log('a-line=' + (sa.length === 1 && sa[0].text === '5 lanes: 3 building, 1 done' ? 1 : 0));
+console.log('a-in-meta-after-stamp=' + (meta && meta.children.indexOf(sa[0]) > meta.children.indexOf(find(meta, 'lst')[0]) ? 1 : 0));
+console.log('a-tagline-kept=' + (find(tile('a'), 'pt-tag')[0] || {}).text);
+console.log('a-title=' + (/^Lane summary as of /.test(sa[0] && sa[0].title) ? 1 : 0));
+console.log('b-none=' + find(tile('b'), 'psum').length + ' c-blank=' + find(tile('c'), 'psum').length);
+console.log('hover-helper=' + (typeof H.sumLine === 'function' && H.sumLine({ id: 'z', summary: 's' }).className === 'psum' && H.sumLine({ id: 'z' }) === null ? 1 : 0));
+EOF
+)"
+  grep -q 'a-line=1' <<<"$sm" && grep -q 'a-in-meta-after-stamp=1' <<<"$sm" && grep -q 'a-tagline-kept=The tagline' <<<"$sm" && grep -q 'a-title=1' <<<"$sm" \
+    && ok "MC-10: tile shows the live summary as its own line beside the Updated stamp, tagline kept" || bad "MC-10 tile summary line wrong: $sm"
+  grep -q 'b-none=0 c-blank=0' <<<"$sm" && ok "MC-10: no summary line when the summary is absent or blank" || bad "MC-10 summary line shown when absent: $sm"
+  grep -q 'hover-helper=1' <<<"$sm" && grep -q "H.sumLine(p)" "$PAGE" \
+    && ok "MC-10: the rail hover card uses the same summary line" || bad "MC-10 hover card has no summary line: $sm"
+  grep -qE '^\.lst, \.psum \{' "$PAGE" && ok "MC-10: summary line wears the stamp's type (shared rule)" || bad "MC-10: .psum not styled with .lst"
+else echo "SKIP: node not installed (MC-10 summary unit)"; fi
+
 echo "=== export merges the Mark done override ==="
 echo '{"name":"Alpha","status":"review","pct":80,"order":1}' > "$OSRC_HOME/hub/projects/alpha.json"
 echo '{"name":"Beta","status":"shipped","pct":100,"order":2}' > "$OSRC_HOME/hub/projects/beta.json"

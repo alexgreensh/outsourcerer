@@ -160,7 +160,7 @@ button { font: inherit; color: inherit; }
 .lrow .nm > span:not(.hlogo):not(.paidtag) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lrow .lf { font-family: var(--mono); font-size: .78rem; font-weight: 700; text-align: right; white-space: nowrap; }
 .lrow .rn { grid-column: 2 / 4; font-size: .82rem; display: inline-flex; align-items: center; gap: 6px; }
-.lst { font-size: .8rem; font-weight: 700; }
+.lst, .psum { font-size: .8rem; font-weight: 700; } /* MC-10: the lane summary wears the stamp's type */
 .lst.stale { color: var(--down); background: var(--down-bg); border-radius: 999px; padding: 2px 8px; }
 .lfold { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .lfold .chev { width: 18px; height: 18px; transition: transform .15s ease; }
@@ -692,7 +692,7 @@ a.pill svg { width: 13px; height: 13px; }
       const line = el('div', 'prline'); line.appendChild(b);
       b.addEventListener('mouseenter', () => { if (!current) { const t = $('tile-' + p.id); if (t) t.classList.add('hl'); } });
       b.addEventListener('mouseleave', () => { const t = $('tile-' + p.id); if (t) t.classList.remove('hl'); });
-      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p), el('span', 'mono', (p.pct || 0) + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); if (p.tagline) c.append(el('p', null, p.tagline));
+      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p), el('span', 'mono', (p.pct || 0) + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); const sl = H && H.sumLine(p); if (sl) c.append(sl); if (p.tagline) c.append(el('p', null, p.tagline));
         const k = H && H.doneBtn(p, null, hide); if (k) c.append(k); }, true);   // Mark done in the rail card (Alex 11:58) and the page header (MC-7)
       box.appendChild(line);
       const ds = openDecs(p);  // Alex: the rail always lists each project's open decisions, Home included

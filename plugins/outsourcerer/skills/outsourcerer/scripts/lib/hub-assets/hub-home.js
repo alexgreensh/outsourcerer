@@ -92,6 +92,16 @@
       }
     }
 
+    // ---- Live summary line (MC-10) ----------------------------------------------------------------
+    // The tick rewrites p.summary from real lane state ("5 lanes: 3 building, 1 done") every 10 min. It sits under
+    // the progress bar with the Updated stamp, in the stamp's type; the tagline stays the description. None, no line.
+    function sumLine(p) {
+      const s = typeof p.summary === 'string' ? p.summary.trim() : ''; if (!s) return null;
+      const d = el('span', 'psum', s); d.id = 'psum-' + p.id;
+      const at = shortStamp(p.summaryAt, ''); if (at) d.title = 'Lane summary as of ' + at;
+      return d;
+    }
+
     // ---- Home: the first screen. One glance answers "what needs me". --------------------------
     function ptile(p) {
       const go = ctx.go; const ds = openDecs(p);
@@ -111,6 +121,7 @@
         u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + shortStamp(p.updatedAt, p.updated);
         u.append(ic(p.status === 'paused' ? 'pause' : 'clock'), el('span', 'lstx', u.dataset.base)); meta.append(u);
       }
+      const sl = sumLine(p); if (sl) meta.append(sl);
       if (meta.children.length) pr.append(meta);
       const topN = ds.filter(isTop).length;
       const rest = ds.filter((d) => !isTop(d));
@@ -165,6 +176,6 @@
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast, doneBtn };
+    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine };
   };
 })();
