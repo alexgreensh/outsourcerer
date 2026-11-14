@@ -275,12 +275,13 @@ SRV=$!
 cleanup_srv() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }
 trap 'cleanup_srv; rm -rf "$TMP"' EXIT
 URL=""
-for _ in $(seq 1 50); do
+for _ in $(seq 1 150); do   # 30 s headroom for a loaded CI runner; leaves as soon as the URL is out (MC-8)
   URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" 2>/dev/null | head -1)"
   [ -n "$URL" ] && break
+  kill -0 "$SRV" 2>/dev/null || break
   sleep 0.2
 done
-[ -n "$URL" ] || { bad "hub serve did not print a token URL"; cat "$TMP/serve.log"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
+[ -n "$URL" ] || { bad "hub serve did not print a token URL ($(kill -0 "$SRV" 2>/dev/null && echo still running || echo exited))"; cat "$TMP/serve.log"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 BASE="${URL%%\?*}"; TOK="${URL##*t=}"
 ok "serve printed loopback token URL"
 # Item 14: the token persists in $OSRC_HOME/hub/token (0600) so the URL is bookmarkable.
@@ -424,7 +425,7 @@ echo "=== item 14: bookmarkable URL, idle refresh ==="
 # Helper: launch serve in the background, wait for its printed URL.
 wait_url() {  # <logfile> -> URL on stdout
   local u="" i
-  for i in $(seq 1 60); do
+  for i in $(seq 1 150); do   # 30 s headroom for a loaded CI runner (MC-8)
     u="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$1" 2>/dev/null | head -1)"
     [ -n "$u" ] && break; sleep 0.2
   done; printf '%s' "$u"
@@ -525,11 +526,15 @@ cleanup_srv
 
 # Idle-stop: REFRESH=1s ticks, IDLE=2s. With no page polling, the loop stops
 # even when state changes; a poll wakes it again.
+# serve prints its URL before the startup export (MC-8): wait for that export to land, or it would be
+# counted as the loop exporting while idle.
+m_pre="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"; sleep 1.1
 OSRC_HUB_REFRESH_SECS=1 OSRC_HUB_IDLE_SECS=2 OSRC_HOME="$OSRC_HOME" \
   bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve6.log" 2>&1 &
 SRV=$!
 URL6="$(wait_url "$TMP/serve6.log")"
 [ -n "$URL6" ] || { bad "idle-stop serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
+wait_mtime "$EXPORT_JSON" "$m_pre" || bad "idle-stop serve: the startup export never landed"
 sleep 3                                  # now past the 2s idle window, nothing polled
 echo still-running > "$OSRC_HOME/jobs/job-x/status"   # state changes while idle
 m3="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"

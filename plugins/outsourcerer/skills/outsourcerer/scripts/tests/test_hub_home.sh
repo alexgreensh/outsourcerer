@@ -183,6 +183,20 @@ grep -q "^tmp 200 original False 0o600 0o700$" <<<"$sy" && ok "planted temp-name
 grep -q "^dir 409 \['keep.txt'\]$" <<<"$sy" && ok "symlinked status folder: 409, nothing written outside" || bad "status folder symlink: $sy"
 grep -q "^ans True \[\]$" <<<"$sy" && ok "symlinked answers folder: refused, nothing written outside" || bad "answers folder symlink: $sy"
 
+echo "=== serve prints its URL before the first export (MC-8) ==="
+# CI macOS runner: the first export ran before the port was bound, outlasted the test wait and left an
+# empty log. A fake engine that takes 8 s must not hold the URL back, and the first data request must
+# still get that export's projects (it waits for it instead of returning an empty board).
+SLOW="$TMP/slow-engine"; printf '#!/bin/sh\nsleep 8\necho %s\n' "'{\"projects\":[{\"id\":\"slowp\",\"name\":\"Slow\"}]}'" > "$SLOW"; chmod +x "$SLOW"
+mkdir -p "$TMP/slowhome"
+OSRC_HUB_TOKEN=0123456789abcdef0123456789abcdef python3 -I "$LIB/hub_server.py" --port 0 --page "$PAGE" --engine "$SLOW" --osrc-home "$TMP/slowhome" --no-open >"$TMP/slow.log" 2>&1 &
+SSRV=$!; t0=$SECONDS; SURL=""
+for _ in $(seq 1 120); do SURL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/' "$TMP/slow.log" | head -1)"; [ -n "$SURL" ] && break; sleep 0.1; done
+[ -n "$SURL" ] && [ $((SECONDS - t0)) -le 5 ] && ok "URL printed before an 8 s export finishes ($((SECONDS - t0)) s)" || bad "URL waited for the export: '$SURL' after $((SECONDS - t0)) s: $(head -3 "$TMP/slow.log")"
+sp="$(curl -s --max-time 20 -H 'X-Hub-Token: 0123456789abcdef0123456789abcdef' "${SURL}api/projects")"
+grep -q '"slowp"' <<<"$sp" && ok "first /api/projects waits for the startup export (not an empty board)" || bad "first projects call: $sp"
+kill "$SSRV" 2>/dev/null; wait "$SSRV" 2>/dev/null
+
 echo "=== POST /api/projects/<id>/status ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl"; echo "RESULTS: $pass pass $fail fail"; [ "$fail" -eq 0 ]; exit $?; }
 rm -f "$OSRC_HOME/hub/status/"*.json
@@ -190,8 +204,9 @@ echo '{"name":"Alpha","status":"review","pct":80,"order":1}' > "$OSRC_HOME/hub/p
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open >"$TMP/serve.log" 2>&1 &
 SRV=$!
-URL=""; for _ in $(seq 1 60); do URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" | head -1)"; [ -n "$URL" ] && break; sleep 0.25; done
-[ -n "$URL" ] || { bad "hub serve did not start: $(head -3 "$TMP/serve.log")"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
+# 30 s headroom for a loaded CI runner; the loop leaves as soon as the URL is out (MC-8).
+URL=""; for _ in $(seq 1 120); do URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" | head -1)"; [ -n "$URL" ] && break; kill -0 "$SRV" 2>/dev/null || break; sleep 0.25; done
+[ -n "$URL" ] || { bad "hub serve did not start ($(kill -0 "$SRV" 2>/dev/null && echo still running || echo exited)): $(head -5 "$TMP/serve.log")"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 B="${URL%%\?*}"; TOK="${URL##*t=}"
 post() { curl -s -o "$TMP/body" -w '%{http_code}' -X POST "$B$1" -H 'Content-Type: application/json' "${@:3}" -d "$2"; }
 [ "$(post /api/projects/alpha/status '{"status":"shipped"}')" = 403 ] && ok "status: no token -> 403" || bad "status without token not refused"

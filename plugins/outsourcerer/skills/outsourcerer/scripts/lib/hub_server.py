@@ -61,6 +61,9 @@ class Hub:
         self.lock = threading.Lock()
         self.last_poll = time.time()
         self.last_state_mtime = -1.0
+        # Set once the first export has finished (ok or not). main() prints the URL before that
+        # export runs (a slow export kept the URL back past the CI wait, MC-8); data requests wait here.
+        self.first_export = threading.Event()
         # CSP hashes for the page's inline <script> blocks, computed once so
         # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
         # self-contained file, so its blocks are knowable at startup.
@@ -128,6 +131,7 @@ class Hub:
             time.sleep(REFRESH_SECS)
 
     def projects_payload(self):
+        self.first_export.wait(timeout=95)   # the startup export, not a second one racing it
         with self.lock:
             if self.cache is not None and time.time() - self.cache_ts < REFRESH_SECS + 10:
                 return self.cache, self.export_error
@@ -480,14 +484,6 @@ def main():
     token = os.environ.get("OSRC_HUB_TOKEN") or os.urandom(16).hex()
     hub = Hub(args.osrc_home, args.engine, args.page, token)
 
-    # First export synchronously so the first page load is not empty.
-    try:
-        hub.run_export()
-    except Exception as e:
-        sys.stderr.write("[hub] initial export failed (will retry): %s\n" % e)
-
-    threading.Thread(target=hub.refresh_loop, daemon=True).start()
-
     # Fixed default port for a bookmarkable URL; --scan lets it slide to
     # the next free port and we say so (an explicit --port stays strict).
     httpd = None
@@ -506,6 +502,19 @@ def main():
         sys.stderr.write("[hub] port %d busy — serving on %d instead\n" % (args.port, port))
     url = "http://127.0.0.1:%d/?t=%s" % (port, urllib.parse.quote(token))
     print("[outsourcerer] hub: %s" % url, flush=True)
+
+    # The URL is out first; the first export then runs in the background and the first
+    # /api/projects waits for it (projects_payload), so the first page load is still not empty.
+    def first_then_loop():
+        try:
+            hub.run_export()
+        except Exception as e:
+            sys.stderr.write("[hub] initial export failed (will retry): %s\n" % e)
+        finally:
+            hub.first_export.set()
+        hub.refresh_loop()
+    threading.Thread(target=first_then_loop, daemon=True).start()
+
     if not args.no_open and os.environ.get("OSRC_HUB_NO_OPEN") != "1":
         try:
             webbrowser.open(url)
