@@ -107,6 +107,8 @@ Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEART
 
 For a pane's current state, use `OUTSOURCERER_TMUX=<session> outsourcerer.sh session state` (backed by `osrc_screen_state`). Read the raw pane only if the state is `unknown`; do not repeatedly paste full pane captures into the orchestrator context.
 
+After each actionable wake, run `outsourcerer.sh handover --check-context`. At the default 150,000 input tokens (override with `OSRC_ORCH_CTX_MAX`), it writes a handover. Start a fresh orchestrator with that handover, verify its first action adopts the old owner's targets and arms supervision, then hand off. Keep the old orchestrator responsible until that first action is verified; if context is unavailable, keep supervising and retry at the next wake.
+
 ## Operating rules
 
 - **Cloud consent, once ever.** The first cloud delegation needs consent (repo content leaves the machine; a secret-scan hard-block runs on every delegation regardless). Tell the user in one line, then `consent grant` (or `--cloud-ack`); it is remembered in `~/.outsourcerer/cloud-consent`. Read a gate refusal before retrying: the error names the fix.

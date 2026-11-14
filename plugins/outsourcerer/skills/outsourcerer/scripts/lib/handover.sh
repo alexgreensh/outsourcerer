@@ -133,6 +133,15 @@ EOF
 
 # ------------------------------------------------------------- handover ----
 
+_handover_context_usage() { # <session-id> <cwd>: latest assistant input context, not cumulative spend
+  local path rows
+  path="$(_fleet_transcript_path "$1" "$2")"
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  rows="$(jq -r 'select(.message.role == "assistant" and (.message.usage | type) == "object") | .message.usage | select((.input_tokens | type) == "number") | ((.input_tokens // 0) + (.cache_creation_input_tokens // 0) + (.cache_read_input_tokens // 0))' "$path" 2>/dev/null)" || return 1
+  [ -n "$rows" ] || return 1
+  printf '%s\n' "$rows" | tail -1
+}
+
 # _handover_kind <id> -> job | remote | tmux | unknown
 _handover_kind() {
   local id="$1"
@@ -234,11 +243,12 @@ _handover_waiter() {
 }
 
 cmd_handover() {
-  local out="" sid dir id kind state cwd model n=0 f
+  local out="" sid dir id kind state cwd model n=0 f check=0 ctx max
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --out)    out="${2:-}"; [ -n "$out" ] || die "handover --out needs a file"; shift 2 ;;
       --out=*)  out="${1#--out=}"; [ -n "$out" ] || die "handover --out needs a file"; shift ;;
+      --check-context) check=1; shift ;;
       -h|--help)
         echo "usage: $0 handover [--out FILE]"
         echo "  writes a markdown brief for the NEXT orchestrator session: every target this"
@@ -250,6 +260,14 @@ cmd_handover() {
   done
   sid="$(_owner_sid)"
   [ -n "$sid" ] || die "handover: no current session id (CLAUDE_CODE_SESSION_ID is unset)"
+  if [ "$check" = 1 ]; then
+    max="${OSRC_ORCH_CTX_MAX:-150000}"
+    case "$max" in ''|*[!0-9]*|0) die "handover: OSRC_ORCH_CTX_MAX must be a positive integer" ;; esac
+    ctx="$(_handover_context_usage "$sid" "$PWD")" || { echo 'handover: context usage unavailable; keep the current orchestrator' >&2; return 2; }
+    case "$ctx" in ''|*[!0-9]*) echo 'handover: invalid context usage; keep the current orchestrator' >&2; return 2 ;; esac
+    if [ "$ctx" -lt "$max" ]; then printf 'handover: context %s/%s; rotation not due\n' "$ctx" "$max"; return 0; fi
+    printf 'handover: context %s/%s; rotation due\n' "$ctx" "$max"
+  fi
   dir="$OSRC_HOME/owners/$sid"
   if [ -z "$out" ]; then
     mkdir -p "$OSRC_HOME/handover" 2>/dev/null || die "handover: cannot create $OSRC_HOME/handover"
