@@ -306,7 +306,7 @@ credential_scan "$TMP/missing-credential-scan"; scan_rc=$?
 [ "$scan_rc" -ge 2 ] && ok "gate: credential scan reports a missing path" || bad "gate: credential scan accepted a missing path (rc=$scan_rc)"
 credential_scan "$OSRC_HOME" "$TMP/tout" "$ERRF"; scan_rc=$?
 case "$scan_rc" in
-  0) bad "gate: credential leaked into state/output" ;;
+  0) bad "gate: credential leaked into state/output: $(grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP/tout" "$ERRF" 2>/dev/null)" ;;
   1) ok "gate: user:pass@ stripped everywhere (brief, NEXT, events, queue)" ;;
   *) bad "gate: credential scan failed (rc=$scan_rc)" ;;
 esac

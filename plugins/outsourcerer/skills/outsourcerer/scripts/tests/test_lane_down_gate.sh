@@ -22,7 +22,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanedown.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+export OSRC_HOME="$TMP/home"; OSRC_SOURCED=1; export -n OSRC_SOURCED; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090
 . "$SRC" >/dev/null 2>&1
 type -t _gate_hop >/dev/null || { echo "FAIL: _gate_hop not defined (gate wiring missing?)"; exit 1; }
@@ -69,6 +69,15 @@ _lane_down_clear cx
     && [ "$_fb_alias" = "kimi" ] && [ "$_fb_lane" = "cx" ] ) \
   && ok "hop: _gate_hop rewrites argv to --provider codex -m kimi + marks hop-mode + exposes _fb_alias/_fb_lane for the notice" \
   || bad "hop: _gate_hop did not arm the expected hop"
+( PATH="$FAKEBIN:$PATH"
+  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin; unset OSRC_SPEND_OK
+  _fb_tried=""; _fb_loaded=1; _fb_cands="kimi|kimi-k3|cx"
+  REST=("do the thing"); TIER_FLAG=""; EFFORT=""; WITH_SPEC=""; OSRC_ALLOW_DOWNGRADE=0
+  ARGV=(run "do the thing")
+  _gate_hop devin; rc=$?
+  [ "$rc" -eq 1 ] && [ "${ARGV[*]}" = "run do the thing" ] ) \
+  && ok "hop: unknown billing without consent refuses and leaves argv unchanged" \
+  || bad "hop: unknown billing without consent was selected or changed argv"
 # Exhausted shortlist -> rc1 so the caller dies with its own gate-specific message.
 ( PATH="$FAKEBIN:$PATH"
   MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin

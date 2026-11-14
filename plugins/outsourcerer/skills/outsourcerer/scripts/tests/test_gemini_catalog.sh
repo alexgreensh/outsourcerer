@@ -122,7 +122,9 @@ printf '["gemini-3.5-flash","gemini-3.9-flash","gemini-3.1-pro-preview","gemini-
 grep -q 'id="$(_gemini_api_id nano-banana)"' "$SRC" && ok "the image backend picks its Gemini id through the resolver" || bad "image backend still names a literal id"
 [ "$(OSRC_GEMINI_FLASH_API_ID=gemini-7-flash _gemini_api_id gemini-flash)" = "gemini-7-flash" ] && ok "gemini-cli vehicle: env pin wins" || bad "gi env pin lost"
 grep -Fq "gemini-cli is retired — Antigravity 'agy' replaced it" "$SRC" && ok "retired gemini-cli dispatch names its replacement" || bad "gemini-cli retirement notice missing"
-retired_out="$( ( REST=('test task'); RESOLVED_ID=gemini-flash; OSRC_GEMINI_VEHICLE=gemini; delegate_gmnative mid ) 2>&1 )"; retired_rc=$?
+mkdir -p "$TMP/retired-bin"
+for cli in agy gemini; do printf '#!/bin/sh\nexit 99\n' > "$TMP/retired-bin/$cli"; chmod +x "$TMP/retired-bin/$cli"; done
+retired_out="$( ( PATH="$TMP/retired-bin:$PATH"; REST=('test task'); RESOLVED_ID=gemini-flash; OSRC_GEMINI_VEHICLE=gemini; delegate_gmnative mid ) 2>&1 )"; retired_rc=$?
 [ "$retired_rc" -ne 0 ] && grep -Fq 'gemini-cli is retired' <<<"$retired_out" && ok "retired gemini-cli vehicle is refused" || bad "retired gemini-cli was not refused: rc=$retired_rc $retired_out"
 
 # --- a refused model clears the cache and explains the pins (the dispatch-side half) --------------

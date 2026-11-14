@@ -403,11 +403,14 @@ hub_log_token_scan() {
   local lines rc
   lines="$(grep '^\[hub\]' "$1" 2>/dev/null)"; rc=$?
   [ "$rc" -ge 2 ] && return "$rc"
-  [ "$rc" -eq 1 ] && return 1
+  [ "$rc" -eq 1 ] && return 2
   grep -q 't=' <<<"$lines"
 }
 hub_log_token_scan "$TMP/missing-server.log"; scan_rc=$?
 [ "$scan_rc" -ge 2 ] && ok "request-log scan reports a missing file" || bad "request-log scan accepted a missing file (rc=$scan_rc)"
+: > "$TMP/empty-server.log"
+hub_log_token_scan "$TMP/empty-server.log"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "request-log scan rejects an empty log" || bad "request-log scan accepted an empty log (rc=$scan_rc)"
 hub_log_token_scan "$TMP/serve.log"; scan_rc=$?
 case "$scan_rc" in
   0) bad "token leaked into server log" ;;

@@ -63,6 +63,9 @@ gb() { ( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 OSRC_GROKBOT_PO
 echo "=== registration ==="
 ( export OSRC_SOURCED=1; source "$SRC" >/dev/null 2>&1; [ "$(_lane_field grokbot dispatch)" = "delegate_grokbot" ] ) \
   && ok "grokbot is a registered lane" || no "grokbot lane not registered"
+out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://127.0.0.1:9/h GROKBOT_WEBHOOK_KEY=fixture "$SRC" --provider grokbot run 'no consent' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'paid-lane:grokbot/.*(unknown)' <<<"$out" \
+  && ok "unknown-billing grokbot refuses without spend consent" || no "grokbot did not refuse unknown billing: rc=$rc [$out]"
 
 echo "=== delivery round trip ==="
 start_bot crsr_test push
