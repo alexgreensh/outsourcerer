@@ -159,6 +159,7 @@ _supervise() {
   local _jlane=""
   [ -f "$jd/meta.json" ] && _jlane="$(jq -r '.lane // ""' "$jd/meta.json" 2>/dev/null)"
   [ -n "$_jlane" ] || _jlane="${OSRC_JOB_LANE:-}"
+  local _jmodel=""; [ -f "$jd/meta.json" ] && _jmodel="$(jq -r '.model // ""' "$jd/meta.json" 2>/dev/null)"
   local write_expecting=0; case "$verb" in edit|yolo) write_expecting=1 ;; esac
   _lane_text_only "$_jlane" && write_expecting=0
   [ "$nowrite_secs" -gt 0 ] || write_expecting=0
@@ -198,6 +199,10 @@ _supervise() {
     kill -0 "$pid" 2>/dev/null || break
     now=$(date +%s)
     size=$(wc -c < "$jd/out.log" 2>/dev/null || echo 0)
+    # L7 add-on: per-lane usage cap on every supervise poll. A lane that crosses its cap gets ONE
+    # EVENT limit + wrap-up NEXT (deduped per job+spec inside _osrc_cap_poll); the job is never
+    # killed for it — "no new work" is enforced by the session-send gate and the pre-launch gate.
+    _osrc_cap_poll "$(basename "$jd")" "$_jlane" "$_jmodel"
     if [ "$size" -gt "$last_size" ]; then
       last_size=$size; last_change=$now
       grep -a -E 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$jd/out.log" 2>/dev/null | tail -1 > "$jd/progress"

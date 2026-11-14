@@ -71,13 +71,13 @@
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
 #   a genuine strength for VISUAL REVIEW (UI/UX critique, screenshot/design feedback) when paired
 #   with the right skills, route those tasks here.
-#     PRIMARY vehicle = ANTIGRAVITY CLI `agy`, KEYLESS: it rides your existing Antigravity/Google
-#     app login (no API key needed, that is the whole point). `agy -p` headless print mode works
-#     in non-TTY pipes/subprocesses on current builds (v1.0.2+; the old non-TTY stdout bug is fixed
-#     per its changelog and verified live). Auto-selected when `agy` is on PATH.
-#     FALLBACK vehicle = `gemini` CLI (gemini-cli) + GEMINI_API_KEY/GOOGLE_API_KEY in ~/.env (same
-#     single-key extraction as OPENROUTER_API_KEY). Used when agy is absent, or forced with
-#     OSRC_GEMINI_VEHICLE=gemini (for users who prefer an API key).
+#     vehicle = ANTIGRAVITY CLI `agy`, KEYLESS, the ONLY text vehicle: it rides your existing
+#     Antigravity/Google app login (no API key needed, that is the whole point). `agy -p`
+#     headless print mode works in non-TTY pipes/subprocesses on current builds (v1.0.2+; the
+#     old non-TTY stdout bug is fixed per its changelog and verified live).
+#     gemini-cli is RETIRED (Alex 17:02 — Antigravity replaced it): never auto-selected, never
+#     routed to, and OSRC_GEMINI_VEHICLE=gemini dies loudly even if a `gemini` binary remains
+#     on PATH. GEMINI_API_KEY/GOOGLE_API_KEY survive ONLY for the image lane (nano-banana).
 #   nano-banana -> Gemini 2.5 Flash Image, dispatched via the `image` subcommand ONLY (it is NOT a
 #   text lane; `run -m nano-banana` dies with a pointer to `image`). Image-to-FILE needs the REST
 #   API + GEMINI_API_KEY: agy's keyless headless model list has no image model, so image gen is the
@@ -153,6 +153,13 @@
 # Model is a parameter everywhere. Default is overridable via OUTSOURCERER_MODEL.
 # Plan-limit status on Devin CHANGES over time, this script never hardcodes it; use `models`.
 #
+# PLAN-METER GATE: brief/advise read live plan windows (claude5h/claude7d/codex5h/codexwk). A lane
+# at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH reading is never dispatched to: advise
+# excludes it, unpinned runs hop to the next ready lane for free, pinned -m and `session start`
+# refuse loudly. Stale readings (> OSRC_LIMITS_STALE_SECS, default 6h) warn only. Consent:
+# --force-lane, or --provider typed on the command line (env-selected providers do NOT count).
+# Kill switch: OSRC_LANE_LIMIT_GATE=0.
+#
 # MODEL ADVISORY (which model should I use?):
 #   advise [--refresh] [--json] [--effort LEVEL] "<task>"   Classifies your task (code/reasoning/agentic/creative/
 #   simple), scores every known model against live benchmark data (OpenRouter benchmarks API:
@@ -170,6 +177,9 @@ export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
 OSRC_VERSION="0.15.3"
+# Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
+# picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
+# free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -252,6 +262,27 @@ elif [ -n "${OSRC_PROVIDER:-}" ] || [ -n "${OUTSOURCERER_PROVIDER:-}" ]; then
 else
   PROVIDER_EXPLICIT=0
 fi
+# OSRC_PROVIDER_ARG is the limit gate's consent signal: 1 only when --provider was typed on a USER
+# command line (argv parses below set it; env-selected providers never do). Internal re-dispatchers
+# that inject --provider into a child's argv (_pf_provider/_run_provider/_ad_full) export
+# OSRC_PROVIDER_INJECTED=1 so that parse cannot counterfeit a user pin — snapshot it here and unset
+# the env copy so the marker can never leak into this process's own children.
+_OSRC_PROVIDER_INJECTED="${OSRC_PROVIDER_INJECTED:-0}"
+unset OSRC_PROVIDER_INJECTED
+# OSRC_SPEND_OK is the paid-lane gate's consent signal and must NEVER arrive via the
+# environment: an orchestrator that exported it once would silently consent every later
+# command to paid spend (the exact class this gate exists to stop). Only argv --spend-ok
+# (parsed below, in-process) or a per-job .spend-ok marker consents — both scoped to ONE
+# command. Sanitizing here means children re-inject consent explicitly (argv/file), never
+# by inheritance.
+# OSRC_SPEND_GATE / OSRC_CAP_GATE are kill-switches for the same reason: an exported
+# "=0" would silently disable paid-lane consent and usage caps for every later command.
+# There is deliberately NO env off-switch; --force-lane/--spend-ok are the consent paths.
+# OSRC_SPEND_NEXT is NOT unset: it is the runnable NEXT hint a refusing gate prints, and
+# parents pass it to children explicitly (bg -> preflight/job child). Every command entry
+# point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
+# display hint the gate never executes.
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -1047,10 +1078,14 @@ parse_model() {
                               *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
                             PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --force-lane)         OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT
+      --spend-ok)           OSRC_SPEND_OK=1; shift ;;    # consent to ONE paid-lane launch (lib/spend.sh; never persisted, env cannot imply it)
+      --cap)                [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
+      --cap=*)              OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1113,16 +1148,25 @@ _floor_effort_for_model() {
   esac
 }
 
+# _devin_catalog_rawf -> path to the cached STRUCTURED Devin catalog JSON (.raw.json sibling
+# of the flattened model list), or rc1 when the lane has no catalog path.
+_devin_catalog_rawf() {
+  local f; f="$(_catalog_path dv)" || return 1
+  printf '%s' "${f%.json}.raw.json"
+}
+
 # _devin_catalog_raw -> the cached STRUCTURED Devin catalog JSON, refreshing via the normal catalog
 # path (so it shares the TTL, single-flight lock, and fail-open of the validation cache). Empty when
 # the catalog is unavailable (offline / old CLI) -> callers fall back to the static map.
 _devin_catalog_raw() {
-  local f rawf
-  f="$(_catalog_path dv)" || return 1
-  rawf="${f%.json}.raw.json"
+  local rawf
+  rawf="$(_devin_catalog_rawf)" || return 1
   _catalog_load dv >/dev/null 2>&1    # triggers a fresh fetch that repopulates BOTH artifacts if stale
   [ -f "$rawf" ] && cat "$rawf" 2>/dev/null
 }
+
+# _devin_catalog_free_ids lives in lib/spend.sh (engine-size budget; it is the spend
+# gate's Free proof — exact ids the live catalog marks cost_tier="Free").
 
 # The set of Devin models Devin's OWN live catalog marks cost_tier="Free" (canon-keyed, space-padded),
 # so the free tier self-heals as Devin adds/renames Free models instead of drifting behind a hardcoded
@@ -1163,6 +1207,9 @@ _devin_first_catalog_free_model() {
     | (first // empty)
   ' 2>/dev/null <<<"$raw"
 }
+
+# _devin_default_free_model lives in lib/spend.sh (engine-size budget; it is spend-gate
+# machinery — the dv lane's runtime Free-catalog default, picked among Free-tagged ids).
 
 # _devin_resolve_dynamic <token> -> a launchable Devin variant resolved from the LIVE catalog, or
 # empty if unresolvable/offline. This is what lets a NEW or renamed Devin model work with no
@@ -1706,7 +1753,10 @@ _lane_errfile() {
 # can only MISS a detection, never invent one.
 _run_tee_stderr() {
   local f="${1:-}"; shift
-  if [ -n "$f" ]; then "$@" 2> >(tee "$f" >&2); else "$@"; fi
+  # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
+  # inside the delegate would see THIS job's .spend-ok marker and cap-dedupe state as
+  # its own consent/cap context. Every delegate lane funnels through here.
+  if [ -n "$f" ]; then env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@" 2> >(tee "$f" >&2); else env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
@@ -1987,8 +2037,8 @@ _catalog_fetch_inner() {
       raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" agy models 2>/dev/null)"
       ;;
     gi)
-      # Gemini API model list for the gemini-cli (API key) vehicle, which has no list command of its
-      # own. Key goes in a header, never the URL (process lists and proxies see URLs).
+      # Gemini API model list for the gi image lane (GEMINI_API_KEY path — the gemini-cli
+      # text vehicle is retired). Key goes in a header, never the URL (process lists and proxies see URLs).
       local _gk="${GEMINI_API_KEY:-${GOOGLE_API_KEY:-}}"
       [ -n "$_gk" ] || _gk="$(_extract_kv_value GEMINI_API_KEY 2>/dev/null)"
       [ -n "$_gk" ] || _gk="$(_extract_kv_value GOOGLE_API_KEY 2>/dev/null)"
@@ -2675,7 +2725,12 @@ Read the skill's SKILL.md first with your file tools, then follow the files it r
 delegate() {
   local perm="$1"; shift
   local sandbox="${1:-}"; shift || true
+  # parse_model resets MODEL="" — keep route_delegate's resolved default (the runtime
+  # Free-catalog pick for a bare run) so `devin --model` never launches empty. An explicit
+  # -m/--model in ORIG repopulates MODEL itself, so this only fills the no-pin case.
+  local _inherited_model="${MODEL:-}"
   parse_model "$@"
+  [ -z "$MODEL" ] && MODEL="$_inherited_model"
   [ "${PERM_FLAG_SEEN:-0}" = "1" ] && printf '>>> [perm] note: --perm only applies to interactive `session start`; ignored for this verb.\n' >&2
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local prompt; prompt="$(_effort_prompt "${REST[*]}")"
@@ -2745,9 +2800,9 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
   local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
   if [ -n "$_dverr" ]; then
-    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
+    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
   else
-    devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   fi
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
     _policy_blocked=1
@@ -3166,7 +3221,8 @@ resolve_tier() {
 # string resolves differently per lookup kind ("cc" is lane-cc for cost
 # disclosure but provider-cc -> or for quota/default-model; "codex" is cx's
 # native provider for session observation but or's transport provider elsewhere;
-# "gemini" is the paid-API lane gi for disclosure but gm's provider for routing):
+# "gemini" is the paid-API lane gi for disclosure but gm's provider for routing;
+# the gemini-cli VEHICLE itself is retired — gm rides Antigravity `agy` only):
 #   provider  (--provider):  devin|cc|codex|gemini|gm|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter
 #   lane code (internal):    dv|or|cc|cx|gm|gi|ci|local|droid|cursor|hermes|warp|cline|pi|claudex|tokenrouter
 #   disp      (vehicle):     devin|ccor|codexor|ccnative|cxnative|gmnative|claudex|droid|cursor|hermes|warp|cline|pi|tokenrouter|local
@@ -3860,27 +3916,26 @@ lane_descriptor_gm() {
     "participates_health=yes"
 }
 _ready_probe_gm() { have agy || return 1; printf 'gemini=keyless'; }
-_fallback_ready_gm() {
-  if have agy; then return 0; fi
-  have gemini || return 1
-  local k; k="$(_extract_kv_value GEMINI_API_KEY)"; [ -n "$k" ] || k="$(_extract_kv_value GOOGLE_API_KEY)"
-  [ -n "$k" ] || return 1
-}
+_fallback_ready_gm() { have agy || return 1; }
 _session_launch_gm() {
   # Dynamic scope: reads MODEL/MODEL_EXPLICIT from the session-start caller.
+  # gemini-cli is RETIRED (Antigravity `agy` replaced it): the only vehicle is agy,
+  # even when an old `gemini` binary is still on PATH.
   local gveh="${OSRC_GEMINI_VEHICLE:-}"
-  if [ -z "$gveh" ]; then if have agy; then gveh=agy; elif have gemini; then gveh=gemini; else die "gemini session needs a CLI (install Antigravity 'agy' keyless, or gemini-cli + GEMINI_API_KEY)"; fi; fi
+  if [ -z "$gveh" ]; then gveh=agy; elif [ "$gveh" = "gemini" ]; then
+    die "gemini-cli is retired — Antigravity 'agy' replaced it. Unset OSRC_GEMINI_VEHICLE (or set it to agy); the Gemini API-key image lane is unaffected."
+  fi
   have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
-  [ "$gveh" != "gemini" ] || _gm_load_key
   [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable gemini "$gveh" --help
   SESSION_LAUNCH_ENGINE="$gveh"   # --perm resolves safe flags against the vehicle (agy vs gemini-cli)
   if [ "$MODEL_EXPLICIT" = "1" ]; then SESSION_LAUNCH=("$gveh" "--model" "$MODEL"); else SESSION_LAUNCH=("$gveh"); fi
 }
 
-# ---- gi (gemini-cli on a paid Gemini API key — the metered Gemini vehicle) ----
+# ---- gi (Gemini API image lane on a paid GEMINI_API_KEY — metered, image-only) ----
 # Lane-side half of the `gemini` split (aliases, NOT providers): it carries the
-# image backend + catalog and REFUSES text dispatch (route_check_fn dies). No
-# disp field — gi never reaches a dispatch vehicle.
+# image backend + catalog and REFUSES text dispatch (route_check_fn dies). The
+# gemini-cli TEXT vehicle is retired — this lane talks to the Gemini REST API
+# directly for image generation only. No disp field — gi never reaches a dispatch vehicle.
 lane_descriptor_gi() {
   printf '%s\n' \
     "name=gi" \
@@ -5157,15 +5212,19 @@ _consume_flags() {
                     *) die "--perm '$PERM_PROFILE' invalid (use: safe|default)" ;; esac
                   PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
+      --force-lane) OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT (lib/limits.sh)
+      --spend-ok)   OSRC_SPEND_OK=1; shift ;;    # consent to ONE paid-lane launch (lib/spend.sh)
+      --cap)        [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
+      --cap=*)      OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
       --no-advise) OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise model selection on a bare run
       --cloud-ack) OSRC_CLOUD_ACK=1; shift ;;   # consume as a LEADING flag: sets the cloud-gate ack and never leaks into REST/prompt
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -9474,135 +9533,6 @@ _hermes_run_cost() {
 # as such everywhere, provider-reported usage (bg stream cost, codex rate-limits) is preferred.
 _est_tokens() { local n=${#1}; echo $(( n * 10 / 33 )); }
 
-# _mtime <path> -> file modification time as a unix epoch, on both GNU and BSD.
-# ORDER MATTERS AND IS NOT INTERCHANGEABLE. `stat -f` means "modification time" on BSD/macOS but
-# "filesystem status" on GNU/Linux, where it SUCCEEDS and prints filesystem info — so a
-# `stat -f ... || stat -c ...` fallback is unreachable on Linux and yields garbage that silently fails
-# every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
-# GNU FIRST is the only ordering where the fallback actually happens on both.
-_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
-
-# _codex_rate_limits -> "5h%|wk%|5h_reset_epoch|wk_reset_epoch" from the newest Codex session
-# rollout. Codex records the ChatGPT-plan rate-limit windows the API returns into every rollout, so
-# this is the REAL cost of a "no cash" ChatGPT-sub run: it spends your finite 5-hour and weekly
-# limits. Best-effort; empty when codex/jq/rollout unavailable.
-_codex_rate_limits() {
-  have jq || return 1
-  local sdir="$HOME/.codex/sessions"; [ -d "$sdir" ] || return 1
-  local newest; newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
-  [ -n "$newest" ] || return 1
-  # How OLD this reading is matters more than the number. Codex only records rate limits while it is
-  # RUNNING, so with no recent codex session the newest rollout can be days old. Usage only ever rises
-  # within a window, so a stale reading is a FLOOR, never a current value — and reporting it as current
-  # overstates headroom in the one direction that hurts: work gets routed to an exhausted lane.
-  # The age travels in the RETURN STRING. This function is read through a command substitution, so an
-  # exported variable would die with the subshell and the caller would silently see nothing — the same
-  # defect that left the 0-writes flag dead for its entire life.
-  local _mt; _mt="$(_mtime "$newest")"; case "$_mt" in ''|*[!0-9]*) _mt="$(date +%s)" ;; esac
-  local _age; _age=$(( $(date +%s) - _mt ))
-  local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
-  [ -n "$line" ] || return 1
-  # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
-  # .primary (observed: primary.window_minutes=10080 = weekly, secondary=null). Classify each present
-  # slot by its window (<=360min -> 5h/short, else weekly/long) so codex5h/codexwk are never swapped.
-  printf '%s' "$line" | jq -r '
-    ([.. | objects | select(has("rate_limits")) | .rate_limits] | last) as $r
-    | select($r != null)
-    | [ $r.primary, $r.secondary ] | map(select(. != null)) as $slots
-    | ( [ $slots[] | select((.window_minutes // 100000) <= 360) ] | first ) as $sh
-    | ( [ $slots[] | select((.window_minutes // 0)      >  360) ] | first ) as $wk
-    | "\($sh.used_percent // "")|\($wk.used_percent // "")|\($sh.resets_at // "")|\($wk.resets_at // "")"
-  ' 2>/dev/null | head -1 | sed "s/\$/|$_age/"
-}
-
-# _human_eta <epoch> -> "3h 12m" remaining until epoch, or "" if past/unknown.
-_human_eta() {
-  local target="$1" now
-  case "$target" in ''|*[!0-9]*) return 0 ;; esac
-  now="$(date +%s 2>/dev/null)" || return 0
-  local d=$(( target - now )); [ "$d" -gt 0 ] || return 0
-  printf '%dh %dm' $(( d / 3600 )) $(( (d % 3600) / 60 ))
-}
-
-# _codex_quota_line -> honest one-liner on ChatGPT-plan headroom after a codex-native run.
-_codex_quota_line() {
-  local raw; raw="$(_codex_rate_limits)" || return 1
-  [ -n "$raw" ] || return 1
-  local p s pr sr; IFS='|' read -r p s pr sr <<< "$raw"
-  [ -n "$p$s" ] || return 1
-  local pe se; pe="$(_human_eta "$pr")"; se="$(_human_eta "$sr")"
-  local msg="ChatGPT plan usage, 5h window: ${p:-?}%"
-  [ -n "$pe" ] && msg="$msg (resets in $pe)"
-  msg="$msg · weekly: ${s:-?}%"
-  [ -n "$se" ] && msg="$msg (resets in $se)"
-  printf '%s' "$msg"
-}
-
-# ---- SESSION LIMIT AWARENESS (copilot conserve engine). Best-effort, degrade gracefully:
-# NEVER die, NEVER block a delegation — a wrong/absent limit signal must only soften a RECOMMENDATION.
-_pct_normalize() {   # echo a 0..100 number, else nothing
-  awk -v v="${1:-}" 'BEGIN { if (v ~ /^([0-9]+([.][0-9]+)?|[.][0-9]+)$/ && v>=0 && v<=100) printf "%g", v }' 2>/dev/null
-}
-_window_pct() {   # <pct> <resets_at-epoch> -> pct if the window is still live, else nothing (drop expired)
-  local pct reset="${2:-}" now
-  pct="$(_pct_normalize "${1:-}")"; [ -n "$pct" ] || return 1
-  case "$reset" in ''|null) ;; *[!0-9]*) return 1 ;;
-    *) now="$(date +%s 2>/dev/null)" || return 1; [ "$reset" -gt "$now" ] || return 1 ;; esac
-  printf '%s' "$pct"
-}
-# _session_limits -> normalized one-liner "claude5h=95 claude7d=38 codex5h=.. codexwk=.." (omits unknown).
-# Claude source = the token-optimizer statusline artifact (the only readable 5h/7d signal Claude Code
-# exposes; ADVISORY — it's derived + only fresh while a statusline renders). We drop stale (>10min) and
-# expired-window values rather than trust them, and honor OSRC_CC_PRESSURE as an explicit override.
-_session_limits() {
-  # Claude 5h/7d source precedence: explicit override > outsourcerer's own statusline tap
-  # (universal, `tap install`) > the token-optimizer statusline artifact (if that plugin is present).
-  local cand raw c5="" c7="" c5r="" c7r="" ts="" nowms line=""
-  if [ -n "${OSRC_CC_PRESSURE:-}" ]; then
-    c5="$(_pct_normalize "$OSRC_CC_PRESSURE")"       # explicit orchestrator override wins
-  else
-    # Try each candidate in precedence order; a STALE/expired/invalid one is SKIPPED so we fall
-    # through to the next fresh source (fixes: a frozen $OSRC_HOME artifact shadowing token-optimizer's
-    # fresh file forever). tap file first (universal), then token-optimizer's.
-    for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do
-      [ -f "$cand" ] && have jq && jq -e . "$cand" >/dev/null 2>&1 || continue
-      raw="$(jq -r '"\(.five_hour.used_percentage // "")|\(.five_hour.resets_at // "")|\(.seven_day.used_percentage // "")|\(.seven_day.resets_at // "")|\(.timestamp // "")"' "$cand" 2>/dev/null)"
-      IFS='|' read -r c5 c5r c7 c7r ts <<EOF
-$raw
-EOF
-      # Freshness gate: fail CLOSED. A statusline artifact older than 10min — OR one whose timestamp is
-      # missing/non-integer (can't prove freshness) — is treated as stale and skipped.
-      nowms="$(date +%s 2>/dev/null)"; [ -n "$nowms" ] && nowms=$((nowms*1000))
-      case "$ts" in
-        ''|*[!0-9]*) c5=""; c7="" ;;                                             # unprovable -> stale
-        *) [ -n "$nowms" ] && [ $((nowms - ts)) -gt 600000 ] && { c5=""; c7=""; } ;;
-      esac
-      c5="$(_window_pct "$c5" "$c5r" 2>/dev/null)" || c5=""
-      c7="$(_window_pct "$c7" "$c7r" 2>/dev/null)" || c7=""
-      [ -n "$c5$c7" ] && break                                                   # got fresh data -> stop
-    done
-  fi
-  raw="$(_codex_rate_limits 2>/dev/null)" || raw=""
-  local x5="" xw="" x5r="" xwr="" xage=""
-  if [ -n "$raw" ]; then
-    IFS='|' read -r x5 xw x5r xwr xage <<EOF
-$raw
-EOF
-    x5="$(_window_pct "$x5" "$x5r" 2>/dev/null)" || x5=""
-    xw="$(_window_pct "$xw" "$xwr" 2>/dev/null)" || xw=""
-  fi
-  [ -n "$c5" ] && line="$line claude5h=$c5"
-  [ -n "$c7" ] && line="$line claude7d=$c7"
-  [ -n "$x5" ] && line="$line codex5h=$x5"
-  [ -n "$xw" ] && line="$line codexwk=$xw"
-  # Mark the codex figures stale rather than dropping them: a floor with its age attached is useful,
-  # a confident wrong number is not.
-  case "$xage" in ''|*[!0-9]*) xage=0 ;; esac
-  { [ -n "$x5" ] || [ -n "$xw" ]; } && [ "$xage" -gt "${OSRC_LIMITS_MAX_AGE:-7200}" ] \
-    && line="$line codexage=${xage}"
-  printf '%s\n' "${line# }"
-}
-
 cmd_tab() {
   # An empty or absent ledger is an empty Tab. Decide BEFORE printing the header so the render is
   # identical whether the file is missing, zero-length, or whitespace-only (the normal state between
@@ -9794,71 +9724,6 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe grokbot 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
-}
-
-# _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
-# OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
-# local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
-# headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
-_conserve_reco() {
-  local limits="${1:-}" lanes="${2:-}" tok c5="" c7="" x5="" xw="" xstale="" posture lane="" why="" tight=0
-  for tok in $limits; do case "$tok" in
-    claude5h=*) c5="${tok#*=}" ;; claude7d=*) c7="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
-    codexage=*) xstale="${tok#*=}" ;;
-  esac; done
-  # Claude has TWO windows and the WEEKLY (7d) cap is the binding one in practice — a freshly-reset 5h
-  # window must NEVER mask a nearly-exhausted week. Bind to the MORE-spent of the two (closest to the
-  # cap), conserve if EITHER crosses the line, and report both so the 5h number can't hide the weekly.
-  if [ -n "$c5" ] || [ -n "$c7" ]; then
-    local bind="" bindpct=""
-    [ -n "$c7" ] && { bind="weekly"; bindpct="$c7"; }
-    [ -n "$c5" ] && awk -v a="$c5" -v b="${bindpct:-0}" 'BEGIN{exit !(a>b)}' 2>/dev/null && { bind="5h"; bindpct="$c5"; }
-    posture="Claude weekly ${c7:-?}% / 5h ${c5:-?}% (binding: ${bind} ${bindpct}%)"
-    awk -v n="${bindpct:-0}" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n >= t) }' 2>/dev/null && tight=1
-  else posture="Claude limits unknown"; fi
-  if [ "$tight" = "0" ]; then
-    printf 'HEADROOM: %s (< %s%% conserve line) — route by best-fit; no forced conservation.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"
-    return 0
-  fi
-  # Descriptor-first: conserve_match holds the lane's _ready_lanes token (leading-space
-  # prefix match), conserve_name the display label, conserve_why/conserve_why_fn the reason.
-  # The case below is the unported tail — the priority order itself is routing policy.
-  local _cl _cm
-  for _cl in local dv gm; do
-    _cm="$(_lane_field "$_cl" conserve_match 2>/dev/null)"
-    if [ -n "$_cm" ] && case " $lanes " in *"$_cm"*) true ;; *) false ;; esac; then
-      lane="$(_lane_field "$_cl" conserve_name 2>/dev/null)"
-      local _cwf; _cwf="$(_lane_field "$_cl" conserve_why_fn 2>/dev/null)"
-      if [ -n "$_cwf" ]; then why="$("$_cwf")"; else why="$(_lane_field "$_cl" conserve_why 2>/dev/null)"; fi
-      break
-    fi
-  done
-  [ -n "$lane" ] || case " $lanes " in
-    *" devin=glm/swe "*)  lane="Devin GLM/SWE";   why="$(_lane_cost_disclosure dv), preserves your Claude quota" ;;
-  esac
-  if [ -z "$lane" ]; then
-    local codex_ok=0 seen=0 blocked=0 v
-    case " $lanes " in *" codex=sol/terra "*)
-      # A stale reading is a FLOOR, not a measurement: usage only rises within a window, so an old
-      # low number is exactly how work gets routed to a lane that is already exhausted. Fail closed,
-      # the same way the Claude freshness gate does.
-      [ -n "$xstale" ] && blocked=1 && seen=1
-      for v in "$x5" "$xw"; do [ -n "$v" ] || continue; seen=1
-        awk -v n="$v" -v t="$OSRC_CONSERVE_THRESHOLD" 'BEGIN { exit !(n < t) }' 2>/dev/null || blocked=1; done
-      [ "$seen" = "1" ] && [ "$blocked" = "0" ] && codex_ok=1 ;;
-    esac
-    if [ "$codex_ok" = "1" ]; then lane="Codex Sol/Terra"; why="your ChatGPT plan is below the conserve line in every known window"
-    elif [ -n "$xstale" ]; then : # codex deliberately skipped: its usage reading is too old to trust
-    else
-      _cm="$(_lane_field or conserve_match 2>/dev/null)"
-      if [ -n "$_cm" ] && case " $lanes " in *"$_cm"*) true ;; *) false ;; esac; then
-        lane="$(_lane_field or conserve_name 2>/dev/null)"
-        why="$(_lane_field or conserve_why 2>/dev/null)"
-      fi
-    fi
-  fi
-  if [ -n "$lane" ]; then printf 'CONSERVE: %s (>= %s%%) — route grind to %s (%s); keep Claude for judgment.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD" "$lane" "$why"
-  else printf 'CONSERVE: %s (>= %s%%) — but no lower-cost lane is ready. Start local inference (ollama) or log into Devin; meanwhile throttle and keep judgment on Claude.\n' "$posture" "$OSRC_CONSERVE_THRESHOLD"; fi
 }
 
 # ---- LIMITS TAP: universal session-limit capture (works WITHOUT token-optimizer).
@@ -10120,7 +9985,6 @@ cmd_tap() {
     *) die "tap: unknown action '${1:-}' (use: install|uninstall|status; 'run' is the internal statusline handler)" ;;
   esac
 }
-
 
 # =============================================================================
 # MODEL ADVISORY: task-aware model recommendation with benchmark data.
@@ -10429,52 +10293,6 @@ _variant_weight() {
   printf '%s' $(( w + d ))
 }
 
-# _lane_conserve_mult <lane> <limits-line> -> a score multiplier in [0.90,1.00] that GENTLY deprioritizes
-# a lane whose live plan window is past the conserve line, so "limits-left" actually steers the pick and
-# not just the separate conserve-routing layer. Only lanes we can MEASURE are penalized (cc=Claude
-# 5h/weekly, cx=Codex 5h/weekly, whichever is more spent); unmeasurable lanes (dv/gm/or) return 1.00 so we never
-# invent a limit we cannot read. At/below the conserve line -> 1.00 (headroom); scales linearly to 0.90
-# at 100% used. Deliberately small: it breaks ties and loses close races to a fresher lane, but a ~10%
-# max haircut won't drop a genuinely-capable model below its capability threshold on its own.
-_lane_conserve_mult() {
-  local lane="$1" limits="${2:-}" t="${OSRC_CONSERVE_THRESHOLD:-50}" u="" c5="" c7="" x5="" xw="" tok
-  for tok in $limits; do
-    case "$tok" in
-      claude5h=*) c5="${tok#*=}" ;;
-      claude7d=*) c7="${tok#*=}" ;;
-      codex5h=*)  x5="${tok#*=}" ;;
-      codexwk=*)  xw="${tok#*=}" ;;
-    esac
-  done
-  # Descriptor-first: conserve_windows names the limit tokens a lane is measured by
-  # (cc: claude5h claude7d — the MORE-spent binds; cx: codex5h codexwk). The case below
-  # is the unported-lane fallback.
-  local _cl _cw="" _w _wv
-  _cl="$(_lane_by_token "$lane" 2>/dev/null)" && _cw="$(_lane_field "$_cl" conserve_windows 2>/dev/null)"
-  if [ -n "$_cw" ]; then
-    u=""
-    for tok in $limits; do
-      for _w in $_cw; do
-        case "$tok" in
-          "$_w="*) _wv="${tok#*=}"
-            case "$_wv" in ''|*[!0-9.]*) ;; *)
-              { [ -z "$u" ] || awk -v a="$_wv" -v b="$u" 'BEGIN{exit !(a+0>b+0)}'; } && u="$_wv" ;;
-            esac ;;
-        esac
-      done
-    done
-  else
-    u=""
-  fi
-  case "$u" in ''|*[!0-9.]*) printf '1.00'; return ;; esac
-  awk -v u="$u" -v t="$t" 'BEGIN{
-    if (t+0 >= 100 || u+0 < t+0) { printf "1.00"; exit }
-    m = 1 - 0.10*(u - t)/(100 - t)
-    if (m < 0.90) m = 0.90; if (m > 1.00) m = 1.00
-    printf "%.4f", m
-  }'
-}
-
 # _advise_candidate_rows [field] -> emit `alias|resolved|lane|tier` rows for the advise ranking
 # loop, replacing the old static-only `printf '%s\n' "$OSRC_MODEL_TABLE"` source. The pool is the
 # UNION of:
@@ -10761,6 +10579,11 @@ cmd_advise() {
   # penalty anywhere. Opt out with OSRC_ADVISE_CONSERVE=0.
   local _adv_limits="" conserve_seen="" conserve_notes=""
   [ "${OSRC_ADVISE_CONSERVE:-1}" != "0" ] && _adv_limits="$(_session_limits 2>/dev/null)"
+  # L7 LIMIT GATE: a lane at/over OSRC_LANE_LIMIT_PCT on a FRESH meter is excluded outright — the
+  # hard edge, independent of the soft conserve haircut below. Stale readings count as unknown.
+  # OSRC_LANE_LIMIT_GATE=0 disables. Read once here, shared by every candidate in the loop.
+  local _gate_limits="" _limit_notes=""
+  [ "${OSRC_LANE_LIMIT_GATE:-1}" != "0" ] && _gate_limits="$(_session_limits 2>/dev/null)"
   # Score each candidate from the alias table.
   local results="" has_bench=0 bench_count=0 total_count=0
   local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
@@ -10770,6 +10593,12 @@ cmd_advise() {
     if _lane_flag "$lane" image_lane; then continue; fi
     _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
     _model_excluded "$alias" && continue      # user exclude list (#45), alias form (resolved form is in _model_denied)
+    # L7 LIMIT GATE: never pick a lane whose fresh meter is at/over OSRC_LANE_LIMIT_PCT.
+    if [ -n "$_gate_limits" ] && _osrc_limit_exceeded "$lane" "$_gate_limits" 2>/dev/null; then
+      local _olr; _olr="$(_osrc_lane_limit "$lane" "$_gate_limits" 2>/dev/null)"
+      _limit_notes="${_limit_notes:+$_limit_notes; }${_olr:-$lane} >= $(_osrc_limit_threshold)% -> $lane excluded"
+      continue
+    fi
     total_count=$((total_count + 1))
     bench_line="$(_bench_lookup "$resolved" "$field")"
     if [ -n "$bench_line" ]; then
@@ -10958,6 +10787,9 @@ cmd_advise() {
   fi
 
   # Guard: if no candidates at all (empty model table), fail gracefully.
+  if [ -z "$rec_alias" ] && [ -n "$_limit_notes" ]; then
+    die "advise: every candidate lane is at/over OSRC_LANE_LIMIT_PCT (${_limit_notes}). Wait for a window reset, or set OSRC_LANE_LIMIT_GATE=0."
+  fi
   [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
 
   # Recompute the recommended model's history for the human/json explanation (raw + effective).
@@ -11008,12 +10840,13 @@ cmd_advise() {
       --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
-      --arg conserve "$conserve_notes" \
+      --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
       --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
         shortlist:$shortlist,
         conservation:(if $conserve=="" then null else $conserve end),
+        limit_gate:(if $limit_gate=="" then null else $limit_gate end),
         benchmark_data_available:($has_bench=="1"),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
         history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
@@ -11035,6 +10868,7 @@ cmd_advise() {
       echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
     fi
     [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
+    [ -n "$_limit_notes" ] && echo "   limit-gate: $_limit_notes (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"
     echo
     echo "--- recommendation ---"
     echo "   model: $rec_alias ($rec_resolved)"
@@ -11480,6 +11314,20 @@ _bg_launch() {
   _owner_record "$id"
   chmod 700 "$jd" 2>/dev/null
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$jd" job "$id" "$(git rev-parse --show-toplevel 2>/dev/null)" || true
+  # L7 add-on: spend consent scoped to THIS job only, BOUND to the lane|model pairs the
+  # detached child will resolve (lib/spend.sh _osrc_spend_marker_pairs). A --spend-ok on
+  # the parent command (or an interactive preflight yes carried forward by cmd_bg) drops
+  # the marker the child's spend gate reads via _osrc_spend_ok; it lives and dies with
+  # the job dir — never persisted, never inherited by later commands, consumed on first
+  # use, and useless for a different lane/model (the inherited-OSRC_JOB_DIR hole). Post-
+  # verb --spend-ok also reaches the child on argv; this marker covers the leading-flag/
+  # interactive paths that never do.
+  # OSRC_JOB_TOKEN is the per-job consent secret: minted here, embedded in the marker
+  # header, and exported to THIS child alone by run_job (delegates get it scrubbed with
+  # OSRC_JOB_DIR). A marker in any other dir — or this dir read by any other process —
+  # consents nothing.
+  OSRC_JOB_TOKEN="$(_new_job_id)"
+  _osrc_spend_marker_write "$jd" "$PROVIDER" "$@"
   # A factory task launch links the job to its task the moment the job exists, so a launcher killed
   # before it records the job id still leaves a job the scheduler can find and adopt.
   case "${OSRC_TASK_REF:-}" in ?*/?*) printf '%s\n' "$OSRC_TASK_REF" > "$jd/task_ref" 2>/dev/null || true ;; esac
@@ -11507,7 +11355,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" OSRC_JOB_TOKEN="$OSRC_JOB_TOKEN" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -11621,14 +11469,14 @@ _bg_capture_provider() {
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
       [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
-      PROVIDER="$_tok"; PROVIDER_EXPLICIT=1; _want_val=0; continue
+      PROVIDER="$_tok"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; _want_val=0; continue
     fi
     case "$_tok" in
       --provider)   _want_val=1 ;;
       # `--provider=X` must NOT slip through: unmatched, it would stay in the argv, reach the leaf as
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
-      --provider=*) PROVIDER="${_tok#--provider=}"; PROVIDER_EXPLICIT=1
+      --provider=*) PROVIDER="${_tok#--provider=}"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1
                     [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
@@ -11637,12 +11485,18 @@ _bg_capture_provider() {
   return 0   # never inherit the trailing test's exit status (a bare `&& die` would return 1 on the happy path)
 }
 
+# _osrc_spend_next_build lives in lib/spend.sh (engine-size budget; it is spend-gate
+# machinery — rebuilds NEXT as the refused command + --spend-ok after the verb).
+
 cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent for THIS bg command (lib/spend.sh)
+    --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
+    --cap=*)     OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -11692,6 +11546,12 @@ cmd_bg() {
     esac
   done
   [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
+  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the COMPLETE
+  # original command (global flags + verb + args) with --spend-ok right after `bg` —
+  # _osrc_spend_next_build reads main()'s _OSRC_USER_ARGV snapshot so --provider/
+  # --cloud-ack/-m and the verb all survive; "$@" here is only the fallback for
+  # direct internal calls. %q keeps it copy-paste safe for tasks with spaces/quotes.
+  _osrc_spend_next_build bg "$@"
   # AUTHORIZATION (separate from the preflight VALIDATION below). The parent must refuse to
   # launch when the caller's inherited depth is already at the max. The preflight resets
   # OUTSOURCERER_DEPTH=0 so it can evaluate the dispatch gate without short-circuiting at the
@@ -11736,13 +11596,21 @@ cmd_bg() {
   # caller's depth (it no longer resets it) so route_delegate's guard trips there too as a backstop.
   local -a _pf_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _pf_provider=(--provider "$PROVIDER")
+  # OSRC_PROVIDER_ARG carries whether --provider was typed on the user's command line (the limit
+  # gate's consent signal); OSRC_PROVIDER_INJECTED marks the injected --provider so the preflight
+  # child's argv parse cannot counterfeit that pin. Both mirror _run_provider's logic below.
+  local _pf_inj=0; [ "${#_pf_provider[@]}" -gt 0 ] && _pf_inj=1
+  # L7 add-on: a leading --spend-ok was consumed into OSRC_SPEND_OK (not in "$@"), so re-inject it
+  # as argv for the preflight child — argv is the only consent channel that survives a process
+  # boundary (env is sanitized by design). Post-verb --spend-ok arrives on "$@" on its own.
+  local -a _pf_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _pf_spend=(--spend-ok)
   # Signal preflight via a PRIVATE ARGV SENTINEL, not an env var. An env `OSRC_PREFLIGHT=1` would be
   # INHERITED by a normal top-level invocation (dotfiles, direnv, CI, a wrapper) and silently turn a
   # real run into a dispatch-suppressing no-op that skips the cloud/secret gate and reports fake
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} "$@" 2>&1)" || _pfrc=$?
+  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} "$@" 2>&1)" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11750,9 +11618,16 @@ cmd_bg() {
   # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
   # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
   if [ "$_pfrc" -ne 0 ]; then
-    printf '%s\n' "$_pfout" | grep -a 'ERROR:' | head -3 >&2
+    # Forward the gate's structured refusal too: EVENT/NEXT lines are how L1's supervise
+    # replays the approval ask — dropping them leaves the orchestrator blind.
+    printf '%s\n' "$_pfout" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
+  # L7 add-on: an INTERACTIVE spend consent inside the preflight child (it inherits the tty and
+  # prints OSRC_SPEND_CONSENT=1 on yes) must reach the parent — the detached child cannot ask.
+  # Carry it as THIS command's consent so _bg_launch drops the job's .spend-ok marker. A non-tty
+  # preflight never prints the token, so nothing is consented silently.
+  printf '%s\n' "$_pfout" | grep -q 'OSRC_SPEND_CONSENT=1' && OSRC_SPEND_OK=1
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -11888,9 +11763,15 @@ _autodetach_run() {
   # parent is part of (the call site decremented it back to the pre-increment value, matching the
   # bg child's inherited depth). Pass cloud ack so the pane's _cloud_disclose / _bg_cloud_preack
   # return early (the parent already acquired consent).
-  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}")"
+  _ad_full="export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OUTSOURCERER_DEPTH=$(printf '%q' "${OUTSOURCERER_DEPTH:-0}") OSRC_PROVIDER_ARG=$(printf '%q' "${OSRC_PROVIDER_ARG:-0}")"
   [ -n "${OUTSOURCERER_MAX_DEPTH:-}" ] && _ad_full="$_ad_full OUTSOURCERER_MAX_DEPTH=$(printf '%q' "$OUTSOURCERER_MAX_DEPTH")"
+  # When --provider is re-injected below it is machine-derived, not a user pin: mark it so the
+  # pane's argv parse cannot set OSRC_PROVIDER_ARG (the env value above already carries provenance).
+  [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full OSRC_PROVIDER_INJECTED=1"
   _ad_full="$_ad_full $(printf '%q' "$SCRIPT_PATH")"
+  # L7 add-on: carry THIS command's spend consent into the pane as argv (env consent is
+  # sanitized; the pane is a fresh process). --spend-ok sits in main()'s global-flag zone.
+  [ "${OSRC_SPEND_OK:-0}" = "1" ] && _ad_full="$_ad_full --spend-ok"
   # Re-add --provider if it was a GLOBAL flag consumed by main() (not in ORIG). Mirrors run_job's
   # _run_provider logic. A duplicate (when --provider IS in ORIG) is harmless: both are consumed.
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full --provider $(printf '%q' "$PROVIDER")"
@@ -12048,7 +11929,7 @@ _factory_global_flags() {
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --provider)
         [ -n "${2:-}" ] || die "--provider needs a value (a lane name, e.g. droid)"
-        PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+        PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       *) _FGF_ARGS+=("$1"); shift ;;
     esac
   done
@@ -12092,6 +11973,13 @@ run_job() {
   umask 077
   local jd="$OSRC_JOBS/$id"; _mkdir_private "$jd"
   local verb="$1"; shift
+  # L7 add-on: a refusing spend/cap gate inside this job needs a runnable NEXT. cmd_bg
+  # passes its bg-flavored command through the nohup env; anything else (fanout direct
+  # launch, __runjob by hand) rebuilds the foreground equivalent — verb + args with
+  # --spend-ok right after the verb, same shape _osrc_spend_next_build produces.
+  if [ -z "${OSRC_SPEND_NEXT:-}" ]; then
+    _osrc_spend_next_build "$verb" "$@"
+  fi
   # OPT-IN worktree isolation: run this job in its own disposable git worktree so parallel EDITING jobs
   # never collide. cd into it BEFORE meta.json is written so cwd records the worktree.
   local wt="" wbr="" wbase="" _wl
@@ -12188,10 +12076,14 @@ run_job() {
   # the real launch instant, not the later meta write; fall back to now for a direct (non-bg) call.
   local _started; _started="$(cat "$jd/started_at" 2>/dev/null)"; case "$_started" in ''|*[!0-9]*) _started="$(date +%s)" ;; esac
   if have jq; then
+    # L7 add-on: record the effective caps (standing + per-launch) on the job so Mission Control
+    # lane cards and `status` can render "cap 40% weekly, now 31%" without re-deriving them.
+    local _jcaps; _jcaps="$(_osrc_cap_specs_for "$lane" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
     jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
-       --arg cwd "$PWD" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" \
+       --arg cwd "$PWD" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" --arg caps "$_jcaps" \
        '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st}
         + (if $lane=="" then {} else {lane:$lane} end)
+        + (if $caps=="" then {} else {caps:$caps} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
   fi
   # Run the real dispatch (foreground path) under the watchdog, in stream mode so we get last.txt+cost.
@@ -12203,9 +12095,18 @@ run_job() {
   # backstop inside the child.
   local -a _run_provider=()
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _run_provider=(--provider "$prov")
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" \
+  # OSRC_PROVIDER_ARG propagates whether --provider was typed on the USER's command line (the
+  # limit gate's consent signal) into the job child; OSRC_PROVIDER_INJECTED marks the re-injected
+  # --provider below so the child's argv parse cannot counterfeit that pin. Same pair as the bg
+  # preflight child (_pf_provider) and the auto-detach pane (_ad_full).
+  local _run_inj=0; [ "${#_run_provider[@]}" -gt 0 ] && _run_inj=1
+  # L7 add-on: re-inject --spend-ok as argv when THIS job's parent consented via a leading flag
+  # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
+  # only — env consent is sanitized by design.
+  local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
+  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
-    "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} "$verb" "$@"
+    "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
   local sc=$?
   # The child may have auto-isolated itself (issue #51, _cloud_autoisolate): it left the initial
   # receipt in the job dir. Adopt it so the job gets the same receipt and cleanup as --worktree.
@@ -13589,6 +13490,9 @@ cmd_fanout() {
       --route)        [ -n "${2:-}" ] || die "--route needs 'pattern=model,...'"; route_spec="$2"; shift 2 ;;
       --worktree)     export OSRC_WORKTREE=1; shift ;;
       --with)         [ -n "${2:-}" ] || die "--with needs a spec"; _validate_with_token "$2"; fwd+=(--with "$2"); shift 2 ;;
+      --spend-ok)     OSRC_SPEND_OK=1; fwd+=(--spend-ok); shift ;;   # consent covers THIS fanout's dispatches; forwarded as argv, never env
+      --cap)          [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; fwd+=(--cap "$2"); shift 2 ;;
+      --cap=*)        OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; fwd+=(--cap "${1#--cap=}"); shift ;;
       --preamble)     [ -n "${2:-}" ] || die "--preamble needs a file"; preamble="$2"; shift 2 ;;
       --tasks)        [ -n "${2:-}" ] || die "--tasks needs a file"; tasksfile="$2"; shift 2 ;;
       --agents)       [ -n "${2:-}" ] || die "--agents needs a dir"; agentsdir="$2"; shift 2 ;;
@@ -14247,7 +14151,7 @@ delegate_ccnative() {
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
   # in", which is the failure users hit). Verified: with these unset, headless claude runs normally.
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH)
+  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN)
   if [ -n "$EFFORT" ]; then local think; think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && { clean+=("MAX_THINKING_TOKENS=$think"); printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; }; fi
   local rc=0
   # Same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
@@ -14418,20 +14322,20 @@ _agy_effort() {
   printf '%s' "$out"
 }
 
-# delegate_gmnative <tier>, Gemini text/agentic lane. TWO vehicles:
-#   PRIMARY  agy (Antigravity CLI), KEYLESS, rides the user's Antigravity/Google app login.
-#   FALLBACK gemini CLI (gemini-cli) + GEMINI_API_KEY (single-key extraction, _gm_load_key).
-# Vehicle picked by OSRC_GEMINI_VEHICLE (agy|gemini) if set, else agy-if-present, else gemini.
+# delegate_gmnative <tier>, Gemini text/agentic lane. ONE vehicle:
+#   agy (Antigravity CLI), KEYLESS, rides the user's Antigravity/Google app login.
+# The gemini-cli vehicle is RETIRED (Alex 17:02 — Antigravity replaced it): it is never
+# auto-selected and OSRC_GEMINI_VEHICLE=gemini dies loudly, even if a `gemini` binary
+# is still installed. The paid Gemini API key path survives ONLY for the image lane (gi).
 delegate_gmnative() {
   local tier="$1"
   [ "${#REST[@]}" -gt 0 ] || die "no task prompt given"
   local task="${REST[*]}" id="$RESOLVED_ID"
   local vehicle="${OSRC_GEMINI_VEHICLE:-}"
-  if [ -z "$vehicle" ]; then
-    if have agy; then vehicle=agy; elif have gemini; then vehicle=gemini; else
-      die "Gemini lane needs a CLI. PRIMARY (keyless): install Antigravity CLI using https://antigravity.google/docs/cli/install/, then open Antigravity and sign in once so 'agy' inherits your login. FALLBACK (API key): npm install -g @google/gemini-cli + add GEMINI_API_KEY to ~/.env (https://aistudio.google.com/apikey)."
-    fi
+  if [ -z "$vehicle" ]; then vehicle=agy; elif [ "$vehicle" = "gemini" ]; then
+    die "gemini-cli is retired — Antigravity 'agy' replaced it. Unset OSRC_GEMINI_VEHICLE (or set it to agy); the Gemini API-key image lane is unaffected."
   fi
+  have agy || die "Gemini lane needs the Antigravity CLI. Install it using https://antigravity.google/docs/cli/install/, then open Antigravity and sign in once so 'agy' inherits your login. (gemini-cli is retired; GEMINI_API_KEY remains only for the image lane.)"
   _with_preamble_render "bundle"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}" "bundle")"
   # Effort is NATIVE on agy (it takes --effort and refuses to run without one for these models) and
@@ -14470,7 +14374,7 @@ delegate_gmnative() {
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
     local _aerr; _aerr="$(mktemp "${TMPDIR:-/tmp}/osrc-agy.XXXXXX")"
-    agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
+    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
     # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
@@ -14486,14 +14390,14 @@ delegate_gmnative() {
        && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
-      agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+      env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
           --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
       [ -s "$_aerr" ] && cat "$_aerr" >&2
     fi
     if grep -qi 'timeout waiting for response' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] the keyless Antigravity lane accepted the request and never answered (model and login both resolved, so this is the Antigravity backend, not your prompt).\n' >&2
       printf '>>>   check      : %s doctor  — it probes this lane for real rather than assuming the installed CLI works.\n' "$0" >&2
-      printf '>>>   fall back  : OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY in ~/.env), or use a different lane entirely (-m glm spends Devin plan limits).\n' >&2
+      printf '>>>   fall back  : use a different lane entirely (-m glm spends Devin plan limits; gemini-cli itself is retired — agy is the only Gemini vehicle).\n' >&2
       printf '>>>   tune       : OSRC_AGY_PRINT_TIMEOUT=%s was the wait; lower it to fail faster while this lane is unhealthy.\n' "${OSRC_AGY_PRINT_TIMEOUT:-5m}" >&2
       rc="${rc:-124}"; [ "$rc" = "0" ] && rc=124
     elif [ "${rc:-0}" -ne 0 ] && grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
@@ -14509,32 +14413,7 @@ delegate_gmnative() {
     printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gm)" >&2
     return "$rc"
   fi
-
-  # FALLBACK: gemini CLI + API key.
-  have gemini || die "OSRC_GEMINI_VEHICLE=gemini but 'gemini' CLI not on PATH. Install: npm install -g @google/gemini-cli  (https://geminicli.com/docs/get-started/installation/). Then set GEMINI_API_KEY in ~/.env."
-  _gm_load_key
-  local _gid_req="$id"; id="$(_gemini_api_id "$id")"
-  _exclude_refuse_resolved "$_gid_req" "$id"
-  local gflag posture
-  case "$tier" in
-    auto)         gflag=(--approval-mode default);            posture="READ-ONLY (headless denies tool-exec approval)" ;;
-    accept-edits) gflag=(--sandbox --approval-mode auto_edit); posture="WORKSPACE-WRITE + OS sandbox (macOS Seatbelt / Docker), auto-approves edits" ;;
-    autonomous)   gflag=(--sandbox --approval-mode auto_edit); posture="WORKSPACE-WRITE + OS sandbox (macOS Seatbelt / Docker), can exec tools" ;;
-    dangerous)    gflag=(--approval-mode yolo);                posture="DANGER (auto-approves ALL tools; sandboxed only if GEMINI_SANDBOX is set)" ;;
-    *) die "bad tier: $tier" ;;
-  esac
-  _tier_banner "gemini-cli (api key)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure gemini)"
-  local ofmt=(--output-format text); [ "${OSRC_STREAM:-0}" = "1" ] && ofmt=(--output-format json)
-  # ISOLATION (I1, gemini harness parity): gemini-cli loads ~/.gemini/settings.json mcpServers
-  # unconditionally; a headless run can wedge on an interactive-auth MCP server. --allowed-mcp-server-names
-  # is an allowlist (array); a sentinel matching NO configured server (__none__) means ZERO MCP servers
-  # load. Escape hatch: OSRC_GEMINI_USER_MCP=1 drops the flag so the full live surface loads.
-  local gmcp=()
-  [ "${OSRC_GEMINI_USER_MCP:-0}" = "1" ] || gmcp=(--allowed-mcp-server-names __none__)
-  gemini -p "$wrapped" "${gflag[@]}" "${gmcp[@]+"${gmcp[@]}"}" "${ofmt[@]}" --model "$id" || rc=$?
-  record_ledger gemini "$id" "$ttier" "$tier" "$task" "$(_fg_run_cost gi 0 "")" gi
-  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure gemini)" >&2
-  return "$rc"
+  die "unreachable: gemini lane vehicle resolved to '$vehicle' (only agy is valid; gemini-cli is retired)"
 }
 
 # cmd_image_codex <prompt> <out> <tier>, drives `codex exec` against its built-in gpt-image-2 tool:
@@ -14593,7 +14472,7 @@ delegate_claudex() {
   # heavy use without rate limiting has triggered upstream account limits for some users.
   printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config)"
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u ANTHROPIC_API_KEY
+  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN -u ANTHROPIC_API_KEY
                "ANTHROPIC_BASE_URL=$(_claudex_url)" "ANTHROPIC_AUTH_TOKEN=$(_claudex_token)")
   # Effort: the model behind the proxy is a GPT reasoning model; Claude Code's effort plumbing is
   # enabled and the level is ALSO injected as a prompt directive (never silently dropped).
@@ -14758,7 +14637,7 @@ delegate_hermes() {
   _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for the Hermes receipt lookup
   local rc=0
-  hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
+  env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
   record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost hermes "$_fg_launch" "")" hermes
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"
@@ -15662,7 +15541,7 @@ _local_agentic_shim() {
   # (this is what made agentic-local silently fail). The shim forces the real model upstream, so the
   # ANTHROPIC_MODEL id here just has to pass claude's bare acceptance. --allowedTools is variadic, so
   # it must be terminated by --permission-mode before the trailing prompt (not swallow it).
-  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH \
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN \
     ANTHROPIC_BASE_URL="$aurl" ANTHROPIC_AUTH_TOKEN="${OSRC_LOCAL_KEY:-local}" ANTHROPIC_API_KEY= \
     ANTHROPIC_MODEL="$model" ANTHROPIC_SMALL_FAST_MODEL="$model" \
     claude -p --bare ${sfx[@]+"${sfx[@]}"} --allowedTools $tools --permission-mode "$(_perm_escalate "$mode" "$wrapped")" "$wrapped" || rc=$?
@@ -16169,6 +16048,9 @@ _fallback_pick() {
     case "$tried" in *" $eff "*) continue ;; esac
     { _model_excluded "$alias" || _model_excluded "$model"; } && continue   # user exclude list (#45)
     _fallback_lane_ready "$lane" || continue
+    # L7 add-on: auto-routing/fallbacks never pick a metered-or-unknown lane quietly —
+    # only subscription/free lanes, unless THIS command already carries --spend-ok.
+    _osrc_lane_spendable "$lane" "$model" || continue
     printf '%s|%s|%s' "$alias" "$model" "$lane"
     return 0
   done <<OSRC_FB_EOF
@@ -16290,7 +16172,7 @@ _route_confirm() {
 _route_receipt() {
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] || return 0
   printf '>>> [route] RESOLVED lane=%s model=%s explicit=--provider %s\n' \
-    "$ROUTE_LANE" "$ROUTE_MODEL" "$PROVIDER" >&2
+    "$ROUTE_LANE" "${RESOLVED_ID:-$ROUTE_MODEL}" "$PROVIDER" >&2
 }
 
 _route_provider_default_model() { # Provider-specific route identity, never parser state.
@@ -16299,12 +16181,16 @@ _route_provider_default_model() { # Provider-specific route identity, never pars
   # The case below is the unported-lane fallback.
   local _l _v
   if _l="$(_lane_by_provider "${1:-}" 2>/dev/null)"; then
+    # dv is special: its implicit default is picked at RUN TIME from the live catalog's
+    # Free set (never a metered model by default); the descriptor field is only the
+    # offline hint and must not win over the catalog.
+    [ "$_l" = "dv" ] && { _devin_default_free_model; return 0; }
     _v="$(_lane_field "$_l" default_model 2>/dev/null)"
     [ -n "$_v" ] && { printf '%s' "$_v"; return 0; }
     return 1
   fi
   case "$1" in
-    devin) printf '%s' "$DEFAULT_MODEL" ;;
+    devin) _devin_default_free_model ;;
     *) return 1 ;;
   esac
 }
@@ -16323,6 +16209,9 @@ _fb_rebuild_argv() {  # <_fb_next>
   [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
+  [ "${OSRC_FORCE_LANE:-0}" = "1" ] && _new+=(--force-lane)   # keep lane-limit consent through hop rebuilds
+  [ "${OSRC_SPEND_OK:-0}" = "1" ] && _new+=(--spend-ok)       # keep ONE-command spend consent through hop rebuilds
+  for _w in ${OSRC_CAPS:-}; do _new+=(--cap "$_w"); done      # keep per-launch caps through hop rebuilds
   _words_noglob "${WITH_SPEC:-}"
   for _w in ${WORDS[@]+"${WORDS[@]}"}; do _new+=(--with "$_w"); done
   _new+=(${REST[@]+"${REST[@]}"})
@@ -16441,6 +16330,9 @@ _failover_lane_ok() {
     esac
     return 1
   fi
+  # L7 add-on: failover never hops onto a metered/unknown lane without THIS command's
+  # --spend-ok consent (broader than the credits-only check above: unknown counts too).
+  _osrc_lane_spendable "$l" "$m" || return 1
   [ -n "$m" ] && _model_denied "$m" && return 1
   if [ -n "$m" ]; then
     _wm="$(_lane_field "$l" warn_model 2>/dev/null)"
@@ -16562,6 +16454,9 @@ _failover_rebuild_argv() {
   [ -n "${TIER_FLAG:-}" ] && _new+=(--tier "$TIER_FLAG")
   [ -n "${EFFORT:-}" ] && _new+=(--effort "$EFFORT")
   [ "${OSRC_ALLOW_DOWNGRADE:-0}" = "1" ] && _new+=(--allow-downgrade)
+  [ "${OSRC_FORCE_LANE:-0}" = "1" ] && _new+=(--force-lane)   # keep lane-limit consent through hop rebuilds
+  [ "${OSRC_SPEND_OK:-0}" = "1" ] && _new+=(--spend-ok)       # keep ONE-command spend consent through hop rebuilds
+  for _w in ${OSRC_CAPS:-}; do _new+=(--cap "$_w"); done      # keep per-launch caps through hop rebuilds
   _words_noglob "${WITH_SPEC:-}"
   for _w in ${WORDS[@]+"${WORDS[@]}"}; do _new+=(--with "$_w"); done
   [ "$mutating" = "1" ] && _new+=("$(_failover_handoff_note "${4:-}" "${5:-}")")
@@ -16693,13 +16588,15 @@ route_delegate() {
     if [ "$_fb_skipval" = "1" ]; then _fb_skipval=0; continue; fi
     case "$_fbp" in
       -m|--model) _fb_user_pinned=1; break ;;
-      --tier|--with|--effort|--reasoning|--provider|--trust-lane) _fb_skipval=1 ;;
+      --tier|--with|--effort|--reasoning|--provider|--trust-lane|--cap) _fb_skipval=1 ;;
       # This scanner MUST recognize exactly the leading flags _consume_flags consumes, or a `-m` that
       # follows an unrecognized-but-valid flag reads as `*) break` (pinned=0) while _consume_flags still
       # sets MODEL_EXPLICIT=1 — and the quota gate would then SILENTLY switch a pinned model. Kept in
-      # sync with _consume_flags: --provider=X (equals form) and --no-advise are consumed there too.
+      # sync with _consume_flags: --provider=X (equals form), --no-advise, --spend-ok and --cap=X are
+      # consumed there too.
       --provider=*) : ;;
-      --allow-downgrade|--cloud-ack|--wait|--foreground|--no-advise) : ;;
+      --cap=*) : ;;
+      --allow-downgrade|--cloud-ack|--wait|--foreground|--no-advise|--force-lane|--spend-ok) : ;;
       *) break ;;
     esac
   done
@@ -16914,6 +16811,39 @@ route_delegate() {
   if _model_denied "$RESOLVED_ID"; then
     die "-m $RESOLVED_ID is on OSRC_MODEL_DENYLIST and will not be dispatched. Pick another -m, or unset/edit OSRC_MODEL_DENYLIST if this is unwanted."
   fi
+
+  # L7 LIMIT GATE: a lane whose plan meter is at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH
+  # reading is nearly spent — routing there parks the delegate on a limit banner (the
+  # ChatGPT-weekly-at-98% failure). Fresh readings gate; stale (>6h) readings warn only.
+  # --force-lane or an explicit --provider consents; unpinned auto runs take a zero-cost hop;
+  # pins refuse loudly. Implemented in lib/limits.sh (_osrc_limit_gate).
+  local _olrc=0
+  _osrc_limit_gate "$disp" || _olrc=$?
+  if [ "$_olrc" = "10" ]; then continue; fi
+  [ "$_olrc" != "0" ] && die "internal: _osrc_limit_gate returned $_olrc"
+
+  # L7 ADD-ON 2 — PER-LANE USAGE CAPS (lib/spend.sh): a lane at/over its --cap or
+  # standing `lane cap` refuses new launches; unpinned auto takes a zero-cost hop,
+  # pins refuse loudly naming the cap and the raise/clear commands.
+  local _cap_lane=""
+  _cap_lane="$(_lane_by_disp "$disp" 2>/dev/null)" || _cap_lane="$(_quota_lane_key "$disp" 2>/dev/null)" || _cap_lane=""
+  if [ -n "$_cap_lane" ]; then
+    local _crc=0
+    _osrc_cap_gate "$_cap_lane" "$RESOLVED_ID" "$disp" || _crc=$?
+    if [ "$_crc" = "10" ]; then continue; fi
+    [ "$_crc" != "0" ] && die "internal: _osrc_cap_gate returned $_crc"
+  fi
+
+  # L7 ADD-ON 1 — PAID-LANE SPEND GATE (lib/spend.sh): billing subscription|free
+  # proceeds silently; metered AND unknown (unprovable auth) demand consent —
+  # interactive y/N defaulting No, argv --spend-ok, or the job's .spend-ok marker.
+  # Non-interactive refusal emits EVENT approval + NEXT; auto/fallback pickers
+  # never select a metered lane on their own (_osrc_lane_spendable).
+  # UNCONDITIONAL: it runs even when lane resolution produced no _cap_lane — an
+  # empty lane is billing=unknown and must refuse, never silently dispatch.
+  local _src=0
+  _osrc_spend_gate "${_cap_lane:-$disp}" "$RESOLVED_ID" "$disp" "dispatch $verb" || _src=$?
+  [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
 
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
@@ -18112,6 +18042,14 @@ _winpty_session() {
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
 
+      # L7 LIMIT GATE (session form, winpty parity with the tmux path): refuse an exhausted lane
+      # BEFORE the session dir/broker is created; consent proceeds with the warning already printed.
+      _osrc_session_limit_gate
+      # L7 add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
+      # before ANY paid/unknown-billing lane — interactive y/N default No, --spend-ok one command.
+      _osrc_session_cap_gate
+      _osrc_session_spend_gate
+
       have winpty || die "winpty not found (needed for session on Windows; Git for Windows ships it)"
       _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || die "OSRC_HOME not writable: $OSRC_HOME"
 
@@ -18170,6 +18108,7 @@ _winpty_session() {
     send)
       [ -n "${1:-}" ] || die "session send needs text"
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
       mkdir -p "$sdir/cmd"
       local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
       printf '%s' "$*" > "$tmp"
@@ -18326,6 +18265,15 @@ session() {
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
+      # L7 LIMIT GATE (session form): the lane is resolved and the launch vector built, but no tmux
+      # session exists yet. Interactive sessions cannot hop — consent (--force-lane / argv
+      # --provider) proceeds with the warning already printed, anything else refuses loudly naming
+      # the fallback lane. This is the path that used to park a Terra lane on a plan-limit banner.
+      _osrc_session_limit_gate
+      # L7 add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
+      # before ANY paid/unknown-billing lane — interactive y/N default No, --spend-ok one command.
+      _osrc_session_cap_gate
+      _osrc_session_spend_gate
       # Use has-session to avoid killing a concurrent session.
       _validate_session_name
       _cloud_disclose "$PROVIDER" "$MODEL" "interactive session in $PWD"
@@ -18369,6 +18317,7 @@ session() {
     send)
       _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
+      _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
       # helpfully with the options + the answer command instead of typing into the menu. Typing
@@ -19021,11 +18970,7 @@ doctor() {
       if _model_excluded gemini-flash || _model_excluded "$_agtok"; then echo "      antigravity-agy: ping skipped ($_agtok is on your exclude list)"
       else agy -p "reply PONG" --model "$(_agy_model_token gemini-flash)" --effort low --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
     fi
-    if have gemini; then
-      local _gmtok; _gmtok="$(_gemini_api_id gemini-flash-lite 2>/dev/null)"
-      if _model_excluded gemini-flash-lite || _model_excluded "$_gmtok"; then echo "      gemini-cli: ping skipped ($_gmtok is on your exclude list)"
-      else gemini -p "reply PONG" --allowed-mcp-server-names __none__ --approval-mode default --model "$(_gemini_api_id gemini-flash-lite)" >/dev/null 2>&1 && echo "      gemini-cli (api key): PONG (authenticated)" || echo "      gemini-cli: no reply (not authed / model unavailable)"; fi
-    fi
+    # gemini-cli is RETIRED (Antigravity `agy` is the only Gemini text vehicle) — no ping.
   else
     echo "    (set OSRC_DOCTOR_PING=1 to probe native lane liveness with a bounded 1-token request; without it, 'present' above means installed + authed-looking, NOT proven to answer)"
   fi
@@ -19130,7 +19075,7 @@ doctor() {
   fi
   echo "  -- Gemini / Antigravity lane (gemini-pro/gemini-flash/gemini-flash-lite text, nano-banana image) --"
   # PRIMARY vehicle: agy (keyless). Detect + guide setup per this skill's revision.
-  local gm_default; if [ -n "${OSRC_GEMINI_VEHICLE:-}" ]; then gm_default="$OSRC_GEMINI_VEHICLE (forced via OSRC_GEMINI_VEHICLE)"; elif have agy; then gm_default="agy (keyless)"; elif have gemini; then gm_default="gemini-cli (api key)"; else gm_default="NONE, install one below"; fi
+  local gm_default; if [ "${OSRC_GEMINI_VEHICLE:-}" = "gemini" ]; then gm_default="gemini-cli (RETIRED — dispatches refuse; unset OSRC_GEMINI_VEHICLE)"; elif [ -n "${OSRC_GEMINI_VEHICLE:-}" ]; then gm_default="$OSRC_GEMINI_VEHICLE (forced via OSRC_GEMINI_VEHICLE)"; elif have agy; then gm_default="agy (keyless)"; else gm_default="NONE, install agy (gemini-cli is retired)"; fi
   echo "    text vehicle in use: $gm_default"
   if have agy; then
     echo "    agy (Antigravity CLI, PRIMARY/keyless): v$(agy --version 2>/dev/null | head -1), auth = your Antigravity/Google app login; cost: $(_lane_cost_disclosure gm)"
@@ -19147,7 +19092,7 @@ doctor() {
               --print-timeout "${OSRC_DOCTOR_PROBE_TIMEOUT:-25s}" 2>&1)" || _prc=$?
       case "$_pt" in
         *[Oo][Kk]*) echo "    agy liveness: RESPONDS (probed just now with a real request)" ;;
-        *timeout*)  echo "    agy liveness: INSTALLED BUT NOT ANSWERING — a real request timed out. Treat this lane as DOWN, not ready: sign in to the Antigravity app again, or force the API-key vehicle with OSRC_GEMINI_VEHICLE=gemini (needs GEMINI_API_KEY)." ;;
+        *timeout*)  echo "    agy liveness: INSTALLED BUT NOT ANSWERING — a real request timed out. Treat this lane as DOWN, not ready: sign in to the Antigravity app again. (gemini-cli is retired; agy is the only text vehicle.)" ;;
         *)          echo "    agy liveness: UNCLEAR (rc=$_prc) — $(printf '%s' "$_pt" | tr -d '\n' | cut -c1-120)" ;;
       esac
     fi
@@ -19155,15 +19100,11 @@ doctor() {
     echo "    agy (Antigravity CLI, PRIMARY/keyless): NOT on PATH"
     echo "      install using https://antigravity.google/docs/cli/install/, then open Antigravity once to sign in"
   fi
-  if have gemini; then
-    echo "    gemini CLI (FALLBACK/api key): v$(gemini --version 2>/dev/null | head -1)"
-  else
-    echo "    gemini CLI (FALLBACK/api key): NOT on PATH -> npm install -g @google/gemini-cli"
-  fi
+  echo "    gemini-cli: RETIRED (Antigravity 'agy' replaced it) — never routed to, even if the binary is still installed"
   if [ -f "$HOME/.env" ] && grep -qE '^[[:space:]]*(export[[:space:]]+)?(GEMINI_API_KEY|GOOGLE_API_KEY)=' "$HOME/.env" 2>/dev/null; then
-    echo "    GEMINI_API_KEY: present in ~/.env (enables the gemini-cli fallback + image lane)"
+    echo "    GEMINI_API_KEY: present in ~/.env (image lane / nano-banana only — the text vehicle is agy)"
   else
-    echo "    GEMINI_API_KEY: MISSING from ~/.env, only needed for the fallback text vehicle and for 'image'/nano-banana (get one: https://aistudio.google.com/apikey)"
+    echo "    GEMINI_API_KEY: MISSING from ~/.env, only needed for 'image'/nano-banana (get one: https://aistudio.google.com/apikey)"
   fi
   echo "  -- Image generation (backend AUTO-RESOLVED: codex gpt-image-2 > nano-banana > OpenRouter) --"
   if _codex_image_available; then
@@ -19998,6 +19939,13 @@ main() {
       *) break ;;
     esac
   done
+  # L7 r3.1: snapshot THIS process's user command — internal sentinels stripped, global
+  # flags and verb+args in original order — so a refusing spend/cap gate can print NEXT
+  # = the exact refused command + --spend-ok after the verb (never a rebuilt approximation
+  # that drops --provider/--cloud-ack or misplaces consent after the task text). A main()
+  # local: callees (cmd_bg, run_job, the spend gate) see it by dynamic scope; each process
+  # (preflight child, detached job child) snapshots its own argv.
+  local -a _OSRC_USER_ARGV=("$@")
   # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
   # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
@@ -20012,12 +19960,29 @@ main() {
   while :; do
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
-                  PROVIDER="$2"; PROVIDER_EXPLICIT=1; shift 2 ;;
+                  PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
+      --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent, argv-only, one command (lib/spend.sh)
+      --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
+      --cap=*)     OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
       *) break ;;
     esac
   done
   local cmd="${1:-}"; shift || true
+  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the refused
+  # command verbatim + --spend-ok directly after the verb — _osrc_spend_next_build reads
+  # the _OSRC_USER_ARGV snapshot so global flags (--cloud-ack, leading --provider/--cap)
+  # and every arg survive in original order. Build ONLY when unset: the preflight and
+  # detached-job children inherit the PARENT's NEXT via env (a bg refusal must forward
+  # the bg command, not a run-flavored rebuild of the child's inner argv). bg rebuilds
+  # from its own normalized argv inside cmd_bg; session start inserts after `start`.
+  if [ -z "${OSRC_SPEND_NEXT:-}" ]; then
+    case "$cmd" in
+      run|explore|research|edit|yolo|fanout) _osrc_spend_next_build "$cmd" ;;
+      bg)   _osrc_spend_next_build bg "$@" ;;
+      session) [ "${1:-}" = "start" ] && _osrc_spend_next_build start ;;
+    esac
+  fi
   # Fail fast + self-explaining if the state home is unwritable (sandboxed shell). Skipped for
   # help/version/doctor: those must still run so they can DIAGNOSE the problem.
   # Read-only handshake/status commands must still run in a sandbox (they only READ); mode setters

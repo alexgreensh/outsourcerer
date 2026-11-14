@@ -9,6 +9,7 @@ orchestration rules that govern how you drive jobs once dispatched.
 - Post-hoc classification (`classify`)
 - Cloud gate + one-time consent
 - Plan-limit failover
+- Plan-meter gate (pre-dispatch)
 - Windows (Git Bash, no WSL)
 - Orchestration rules while this skill is active
 - Watch what you launch, and report on a clock
@@ -238,6 +239,80 @@ the job, the line names it and the consent switch (`OSRC_FAILOVER_CASH_OK=1`) in
 silently. A pinned `-m` that can only move to a different model is refused the same loud way
 (override: `OSRC_FALLBACK_PINNED=1`). Each hop records a `fallback` row in the Tab ($0,
 bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
+
+## Plan-meter gate (pre-dispatch)
+
+`brief`/`advise` read live plan windows (`claude5h`/`claude7d`/`codex5h`/`codexwk`). A lane at or
+over `OSRC_LANE_LIMIT_PCT` (default 90) on a FRESH reading is never dispatched to: `advise`
+excludes it, an unpinned run hops to the next ready lane for free, a pinned `-m` refuses loudly,
+and `session start` refuses before tmux exists. Stale readings (older than
+`OSRC_LIMITS_STALE_SECS`, default 6h) are "unknown, not exhausted": warn only, never block.
+Consent to proceed anyway: `--force-lane`, or `--provider` typed on the command line —
+env-selected providers (`OSRC_PROVIDER`, `OUTSOURCERER_PROVIDER`, `OSRC_PROVIDER_EXPLICIT`) pick
+the lane but do NOT count as consent. Kill switch: `OSRC_LANE_LIMIT_GATE=0`.
+
+## Paid-lane spend gate + per-lane caps (pre-dispatch and in-flight)
+
+`osrc_lane_billing <lane> [model] [disp]` classifies every lane `subscription | free | metered |
+unknown` from PROOF, not presence: `subscription` requires positive credential evidence of a
+plan login (the same probes the limits feed uses) AND the absence of every per-use redirect —
+API keys, `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `CODEX_API_KEY`,
+`CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`, `apiKeyHelper`/`env.ANTHROPIC_API_KEY` in
+`~/.claude/settings.json`, and any `cloud`/`hosted` vehicle are all `metered` even when a plan
+login also exists. A CLI on PATH with no provable login is `unknown`, and `unknown` is treated
+as `metered`: when billing cannot be proven, the lane asks first. Devin is the strict case —
+`subscription` only when the LIVE `devin models list` catalog tags the exact model
+`cost_tier="Free"` (reachable catalog overrides everything); offline, only `swe-2-high` and
+`swe-2-flash-high` count. Plan-included-but-not-Free models (glm-5.2 etc.) are `metered`.
+Before ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing,
+fallback hops, retries — the spend gate demands consent: interactive prompts show lane, model,
+reason and an estimate, `y/N` defaulting to No; non-interactive refuses with
+`EVENT approval <id> <ts> paid-lane:<lane>/<model>` and a `NEXT` line carrying the full
+runnable command plus `--spend-ok`. `--spend-ok` is argv-only, covers exactly one command
+(propagated through bg/fanout/hops as argv or a per-job `.spend-ok` marker), and is never
+persisted or implied by auto mode, the cloud-consent file, or an inherited env var
+(`OSRC_SPEND_OK`, `OSRC_SPEND_GATE` and `OSRC_CAP_GATE` are all unset before parsing — there is
+no env kill-switch). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
+command actually resolved, the child gate accepts only a matching pair, consumes (deletes) it
+on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call cannot borrow
+a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless
+the command already carries consent; when only paid lanes remain, the run stops and asks
+instead of picking OpenRouter quietly.
+
+`OUTSOURCERER_MODEL` sets the script-level `DEFAULT_MODEL` fallback only: lanes with a
+descriptor `default_model` use theirs, and `dv` ignores it entirely — a bare Devin run
+picks its model at run time from the live catalog's Free set (`swe-2-high` offline), so
+the env var never reaches a `dv` dispatch. Pin Devin explicitly with `-m <free-id>`.
+
+Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
+name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing
+`lane cap <lane> weekly<=40` until `lane cap <lane> --clear` (`lane limits` shows billing + caps,
+`lane billing <lane> [model]` queries the classifier). A cap whose meter cannot bind to the
+lane's conserve windows is REFUSED at `lane cap` time — a cap that can never trip is a lie.
+Before launch a lane at/over cap refuses (unpinned auto hops free, pins name the raise/clear
+commands); a bound cap with no fresh meter reading warns, and refuses outright under a pin.
+On every supervise poll a running lane that crosses emits ONE `EVENT limit <id> <ts>
+cap:<meter><=<pct> now:<pct>` per job+spec (the dedupe marker is keyed by job/session id, and
+`lane cap --clear` removes the markers so a re-added cap re-notifies), and `session send`
+refuses new work to a capped lane while wrap-up messages still pass — that wrap-up test
+(`_osrc_cap_send_ok`) is deliberately best-effort prefix matching: "finish by also building
+the whole billing module" passes, so the pre-launch cap gate stays the hard bound. Caps never
+route to a metered lane — the spend gate applies independently.
+
+**Limits feed (Mission Control "Lanes and limits" panel):** `lane summary --json` emits ONE
+record per harness actually detected on this machine — its CLI
+on PATH AND logged in / has a plan; an installed-but-logged-out CLI (e.g. `cursor-agent` with no
+Cursor plan) is NOT listed, and gemini-cli is never listed (retired: Antigravity `agy` is the
+only Gemini text vehicle). Each record carries `id` = the Outsourcerer provider id the page maps
+to official icons, `state` ok|low|out|wait|unknown, `left`, `renews`/`renews_at`, the user's
+`cap` text, `paid` + `billing`, `window`/`used`, `updated`, `source`. Unmetered harnesses
+report `state:"unknown"`, `left:"not checked yet"` — nothing is guessed. Plain `lane summary`
+prints the same data as a table. **An empty panel is not broken**: the feed lists only
+harnesses whose CLI is installed AND logged in / has a plan, so a machine with no
+authenticated agent CLIs correctly emits `[]` (and `osrc_limits_summary` remains as a
+function alias for the feed). L9's hub export consumes the JSON verbatim. (`lane` is owned
+by L2's remote-lane command in lib/remote.sh — `lane ls` lists remote lanes; the L7 verbs are
+`cap`, `billing`, `summary`, `limits`.)
 
 ## Windows (Git Bash, no WSL)
 

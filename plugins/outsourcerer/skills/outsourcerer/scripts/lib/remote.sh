@@ -416,7 +416,9 @@ _osrc_next_for_ready() { # best next command when something just became READY
 # ---- commands ----------------------------------------------------------------------------------
 cmd_lane() {
   local sub="${1:-}"; shift || true
-  have jq || die "lane needs jq"
+  # L7 verbs (cap|billing|summary|limits, handlers in lib/spend.sh) need no jq;
+  # the remote-lane verbs below do.
+  case "$sub" in cap|billing|summary|limits) ;; *) have jq || die "lane needs jq" ;; esac
   case "$sub" in
     add) _osrc_lane_add "$@" ;;
     ls|list) _osrc_lane_ls ;;
@@ -428,7 +430,12 @@ cmd_lane() {
     events) osrc_remote_events ;;
     msg) [ -n "${1:-}" ] && [ -n "${2:-}" ] || die "lane msg <to|all|orchestrator> \"<text>\""; osrc_lane_msg "$@" ;;
     inbox) osrc_lane_inbox "$@" ;;
-    *) die "lane: add <id> --branch B [--repo R] [--ready M] [--base BR] [--brief F] [--done-when check:\"CMD\"] | ls | show <id> | poll [id] | rm <id> | events | msg <to> \"<text>\" | inbox [--peek]" ;;
+    # L7 spend/cap verbs (lib/spend.sh + lib/limits.sh): billing classifier, standing caps, limits feed.
+    cap)     osrc_lane_cap "$@" ;;
+    billing) [ -n "${1:-}" ] || die "usage: lane billing <lane> [model]"; osrc_lane_billing "$@" ;;
+    summary) osrc_lane_summary "$@" ;;
+    limits)  osrc_lane_limits ;;
+    *) die "lane: add <id> --branch B [--repo R] [--ready M] [--base BR] [--brief F] [--done-when check:\"CMD\"] | ls | show <id> | poll [id] | rm <id> | events | msg <to> \"<text>\" | inbox [--peek] | cap <lane> <meter><=pct>|--clear | billing <lane> [model] | summary [--json] | limits" ;;
   esac
 }
 

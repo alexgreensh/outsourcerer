@@ -531,7 +531,9 @@ _cloudrun_start() {
   [ -n "$model" ] && spendnext="$spendnext --model $(printf '%q' "$model")"
   [ -n "$pinsha" ] && spendnext="$spendnext --sha $pinsha"
   [ -n "$donewhen" ] && spendnext="$spendnext --done-when $(printf '%q' "check:$donewhen")"
-  [ "$spendok" = "1" ] && spendnext="$spendnext --spend-ok"
+  # NEXT is the approve-line: it always ends in --spend-ok so a gate refusal hands the
+  # orchestrator one runnable command (never a dead end that re-asks the same way).
+  spendnext="$spendnext --spend-ok"
   OSRC_SPEND_NEXT="$spendnext"; export OSRC_SPEND_NEXT
   if declare -F _osrc_spend_gate >/dev/null 2>&1; then
     _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \

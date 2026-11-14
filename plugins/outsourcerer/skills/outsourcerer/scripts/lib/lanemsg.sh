@@ -698,6 +698,7 @@ cmd_brief() {
     printf 'limits      : %s\n' "unavailable (no readable session meter — treat as unknown)"
   fi
   [ -z "$limits" ] && printf 'tip         : %s tap install  — one-time statusline tap; makes limit-awareness automatic (no token-optimizer needed)\n' "$0"
+  _osrc_brief_caps "$limits"   # L7 add-on: standing per-lane caps with live usage (silent when none)
   _conserve_reco "$limits" "$lanes"
   # Devin plan meter: the one pre-flight signal we own for the shared daily bucket (see the meter
   # block). Full line whenever devin is installed; otherwise only when there is something to say.

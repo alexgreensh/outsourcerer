@@ -54,13 +54,16 @@ printf '%s' "$out" | grep -qiE 'cloud disclosure|delegat|devin|lane' \
   || bad "the run did not reach the dispatch layer (may still be short-circuiting)"
 
 # 2. The legitimate internal sentinel STILL triggers preflight (a dry, no-dispatch check that returns 0),
-#    so the security fix did not break the mechanism bg/fanout depend on.
-rc=0; ( bash "$SRC" --osrc-preflight-internal --cloud-ack run -m glm-5.2 "echo hi" ) >/dev/null 2>&1 || rc=$?
+#    so the security fix did not break the mechanism bg/fanout depend on. The model is swe-2-high —
+#    provably Free on the Devin offline fallback, so the L7 spend gate passes without consent
+#    (glm-5.2 is unproven -> metered -> the gate correctly refuses; that contract lives in
+#    test_limit_gate.sh).
+rc=0; ( bash "$SRC" --osrc-preflight-internal --cloud-ack run -m swe-2-high "echo hi" ) >/dev/null 2>&1 || rc=$?
 [ "$rc" = "0" ] && ok "the internal --osrc-preflight-internal sentinel still preflights cleanly (rc=0)" \
   || bad "the internal preflight sentinel is broken (rc=$rc) — bg/fanout launches would refuse"
 
 # 3. End-to-end: a real bg launch (which uses the preflight internally) still succeeds.
-outb="$(bash "$SRC" --cloud-ack bg run -m glm-5.2 "echo hi" 2>&1)"
+outb="$(bash "$SRC" --cloud-ack bg run -m swe-2-high "echo hi" 2>&1)"
 printf '%s' "$outb" | grep -qi 'launched' \
   && ok "bg launch still passes its route preflight and starts the job" \
   || bad "bg launch broke: $(printf '%s' "$outb" | tail -1)"

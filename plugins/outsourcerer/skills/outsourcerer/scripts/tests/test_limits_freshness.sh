@@ -14,7 +14,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+LIB="$SCRIPT_DIR/../lib/limits.sh"   # limit/meter functions live here (L7 module split)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+[ -f "$LIB" ] || { echo "FAIL: cannot find $LIB"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"
@@ -56,12 +58,12 @@ grep -q 'Run codex once to refresh' "$SRC" \
 # Source-level: the age must travel in the RETURN STRING. An exported variable would die in the
 # command substitution the caller uses — the same defect that left the 0-writes flag dead for its
 # whole life, and the reason this bug was invisible.
-grep -q 'export OSRC_CODEX_READING_AGE' <<<"$(awk '/^_codex_rate_limits\(\)/,/^}/' "$SRC")" \
+grep -q 'export OSRC_CODEX_READING_AGE' <<<"$(awk '/^_codex_rate_limits\(\)/,/^}/' "$LIB")" \
   && bad "the reading age is exported from a function read via command substitution (it will be lost)" \
   || ok "the reading age travels in the return string, not an export"
 
 # And the threshold must be tunable rather than a magic number nobody can adjust.
-grep -q 'OSRC_LIMITS_MAX_AGE' "$SRC" \
+grep -q 'OSRC_LIMITS_MAX_AGE' "$LIB" \
   && ok "the staleness threshold is configurable (OSRC_LIMITS_MAX_AGE)" \
   || bad "staleness threshold is hardcoded"
 
