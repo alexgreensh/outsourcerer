@@ -157,11 +157,21 @@ _managed_menu_detect() { # <pane>
     # The reader knows this layout: list the options from its rows (row 1 included, no history).
     _osrc_menu_from_screen && return 0
   fi
-  # Claude only: its mode status line as the LAST row means a live composer, never a modal, even
-  # when the composer box itself was not recognised (half-drawn frame, odd width). Whole-line match,
-  # so a tool's "⏵ deploy on" under its own menu (or any other engine's pane) changes nothing.
+  # Claude only: its mode status line as the LAST row is footer, never a menu row. Drop it and read
+  # what is above: an idle composer box still reads MENU none (guard below), an unknown cursor menu
+  # above the line still reads as a menu, so send says "menu open, use session answer". Whole-line
+  # match, so a tool's "⏵ deploy on" under its own menu (or any other engine's pane) changes nothing.
   if [ "$(_osrc_scr_engine_norm "$_eng")" = cc ] && [ "$_SCR_N" -gt 0 ] && _osrc_scr_cc_status_row "${_SCR_L[$((_SCR_N - 1))]}"; then
-    printf 'MENU none\n'; return 0
+    _SCR_N=$((_SCR_N - 1))
+    # An empty "❯" row is Claude's idle composer drawn without its rules (half-drawn frame): a menu's
+    # selected row always carries a label.
+    _j=0
+    while [ "$_j" -lt "$_SCR_N" ]; do
+      [ "$(_osrc_scr_trim "${_SCR_L[$_j]}")" = "❯" ] && { printf 'MENU none\n'; return 0; }
+      _j=$((_j + 1))
+    done
+    tail_region="$(printf '%s\n' "$tail_region" | sed '$d')"
+    raw_tail_region="$(printf '%s\n' "$raw_tail_region" | sed '$d')"
   fi
   # Legacy path guard: a prompt-glyph row that sits directly between two horizontal rules is a
   # composer box, and a `❯ Try "…"` row is Claude Code's composer placeholder. Neither is a menu.

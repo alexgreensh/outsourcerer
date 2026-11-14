@@ -296,6 +296,24 @@ for eng in codex devin gemini cc; do
     session send "please continue" ) >/dev/null 2>&1; rc=$?
   [ "$rc" != 0 ] && [ ! -s "$TMP/dkeys" ] && ok || bad "session send typed into a tool menu with a status-looking row on $eng (rc=$rc keys=$(tr '\n' '|' < "$TMP/dkeys"))"
 done
+# r5 follow-up: on Claude, an unknown cursor menu with the exact mode line as the LAST row is still
+# a menu: send refuses with "menu open ... session answer" (not "composer not empty"), 0 keys.
+printf '%s\n' '$ ./deploy.sh' 'Select environment (use arrow keys)' '❯ production' '  staging' '  ⏵⏵ auto mode on (shift+tab to cycle)' > "$TMP/deploy-menu-cc-mode.txt"
+r="$(MH_PROV=cc MH_FILE="$TMP/deploy-menu-cc-mode.txt" menu_head)"
+[ "$r" != "MENU none" ] && ok "cc: cursor menu above the exact mode line reads as a menu ($r)" || bad "cc: the exact mode line as last row hid a cursor menu"
+cc_mode_send() {
+  ( SESSION_NAME="osrc-test-L3-dm"; _managed_provider() { printf cc; }; OSRC_MENU_SETTLE_POLLS=0
+    _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
+    _obligation_guard_begin() { :; }; _obligation_guard_end() { :; }; _obligation_delivery_unknown() { :; }
+    _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
+    _managed_composer_state() { printf unreadable; }; _state_jsonl_read() { :; }; OSRC_SEND_VERIFY_SECS=1
+    tmux() { case "$1" in has-session) return 0 ;; capture-pane) cat "$TMP/deploy-menu-cc-mode.txt" ;; send-keys) printf '%s\n' "$*" >> "$TMP/dkeys" ;; *) return 0 ;; esac; }
+    session send "please continue" ) > "$TMP/dout" 2>&1
+}
+: > "$TMP/dkeys"; cc_mode_send
+if grep -q 'modal open' "$TMP/dout" && grep -q 'session answer' "$TMP/dout" && ! grep -q 'composer not empty' "$TMP/dout" && [ ! -s "$TMP/dkeys" ]; then
+  ok "cc: send on a menu above the mode line says menu open / session answer, 0 keys"
+else bad "cc: send on a menu above the mode line: keys=$(tr '\n' '|' < "$TMP/dkeys") out=$(tail -3 "$TMP/dout" | tr '\n' '|')"; fi
 r="$(MH_PROV=cc MH_FILE="$TMP/deploy-menu-cc-notlast.txt" menu_head)"
 [ "$r" != "MENU none" ] && ok || bad "cc: a real-looking status row that is not the whole last line hid a menu"
 for bad_row in '⏵ x on' '⏵⏵ auto mode on (shift+tab to cycle) and more' 'xx ⏸ plan mode on'; do
