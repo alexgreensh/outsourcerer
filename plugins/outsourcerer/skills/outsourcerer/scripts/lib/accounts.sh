@@ -38,15 +38,20 @@ EOF
   return 1
 }
 
-# These are account identities, transient sessions, caches, or possible secrets.
+# Only explicit shared configuration is linked; identity and session state stay local.
 _osrc_account_shareable() {
   case "$1" in
-    settings.json) return 0 ;; # Shared user configuration, not an account cache.
-    .credentials.json|.claude.json|.env|.env.*|*.pem|*.key) return 1 ;; # Login, identity, and secret files.
-    statsig|todos|shell-snapshots|ide|session-env) return 1 ;; # Per-account live state.
-    *[Cc]redential*|*[Tt]oken*|*[Ss]ecret*|*[Aa]uth*|*[Kk]ey*) return 1 ;; # Possible credentials.
-    *[Cc]ache*|*.lock|*.lock.*|*.json|*.jsonl) return 1 ;; # Cache, locks, and account-specific JSON.
-    *) return 0 ;;
+    settings.json) return 0 ;; # Shared preferences and hooks.
+    CLAUDE.md) return 0 ;; # Shared instructions.
+    skills) return 0 ;; # Shared skills.
+    agents) return 0 ;; # Shared agent definitions.
+    commands) return 0 ;; # Shared commands.
+    hooks) return 0 ;; # Shared hook definitions.
+    plugins) return 0 ;; # Shared plugins.
+    projects) return 0 ;; # Shared project memory.
+    references) return 0 ;; # Shared reference material.
+    token-optimizer) return 1 ;; # Usage belongs to each account.
+    *) return 1 ;;
   esac
 }
 
@@ -123,9 +128,14 @@ EOF
         [ -z "$existing" ] || [ "$existing" = "$dir" ] || die "accounts: name belongs to a different Hats directory"
         case "$dir" in *$'\n'*|*$'\t'*|*$'\r'*) die "accounts: invalid directory" ;; esac
         [ "$dir" != "$HOME/.claude" ] || die "accounts: cannot register the default directory"
+        local physical source; physical="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$dir")" || die "accounts: cannot resolve directory"
+        source="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$HOME/.claude")" || die "accounts: cannot resolve default directory"
+        case "$physical" in "$source"|"$source"/*) die "accounts: cannot share into the default directory or its descendants" ;; esac
         mkdir -p "$dir" || die "accounts: cannot create directory"
-        [ "$(cd "$dir" && pwd -P)" != "$(cd "$HOME/.claude" 2>/dev/null && pwd -P)" ] || die "accounts: cannot share into the default directory"
-        _osrc_account_links_add "$name" "$dir" || die "accounts: cannot share configuration"
+        _mkdir_private "$OSRC_HOME" || die "accounts: cannot create state directory"
+        [ ! -L "$file" ] || die "accounts: registry is a symlink"
+        [ ! -e "$OSRC_HOME/claude-account-links/$name" ] && [ ! -L "$OSRC_HOME/claude-account-links/$name" ] || die "accounts: link manifest already exists"
+        _osrc_account_links_add "$name" "$dir" || { _osrc_account_links_remove "$name" "$dir"; die "accounts: cannot share configuration"; }
       else
         [ "$#" -eq 2 ] || die "usage: accounts rm <name>"
         [ -f "$file" ] && awk -F '\t' -v n="$name" '$1==n { found=1 } END { exit !found }' "$file" || die "accounts: name is not in registry"
@@ -134,8 +144,8 @@ EOF
       _mkdir_private "$OSRC_HOME" || die "accounts: cannot create state directory"
       [ ! -L "$file" ] || die "accounts: registry is a symlink"
       tmp="$OSRC_HOME/.claude-accounts.$$"
-      ( umask 077; [ ! -f "$file" ] || awk -F '\t' -v n="$name" '$1!=n' "$file"; [ "$action" != add ] || printf '%s\t%s\n' "$name" "$dir" ) > "$tmp" || die "accounts: cannot update registry"
-      mv -f "$tmp" "$file" || die "accounts: cannot update registry"
+      ( umask 077; [ ! -f "$file" ] || awk -F '\t' -v n="$name" '$1!=n' "$file"; [ "$action" != add ] || printf '%s\t%s\n' "$name" "$dir" ) > "$tmp" || { [ "$action" != add ] || _osrc_account_links_remove "$name" "$dir"; die "accounts: cannot update registry"; }
+      mv -f "$tmp" "$file" || { rm -f "$tmp"; [ "$action" != add ] || _osrc_account_links_remove "$name" "$dir"; die "accounts: cannot update registry"; }
       if [ "$action" = rm ]; then _osrc_account_links_remove "$name" "$dir"; fi
       printf 'accounts: %s %s\n' "$action" "$name"
       [ "$action" != add ] || printf 'Run CLAUDE_CONFIG_DIR=%q claude once and use /login yourself.\n' "$dir"
@@ -145,39 +155,62 @@ EOF
 }
 
 _osrc_account_select() {
-  local name="${OSRC_ACCOUNT:-}" dir specs
+  local name="${OSRC_ACCOUNT:-}" dir
   if [ -z "$name" ]; then
-    name="$(_osrc_accounts | _osrc_account_choose)" || die "no Claude account has known weekly headroom under the configured caps; use --account to select explicitly"
+    name="$(_osrc_accounts | _osrc_account_choose)" || { _osrc_account_has_caps && die "no Claude account has known usage under the configured caps"; name=default; }
   fi
   dir="$(_osrc_account_dir "$name")" || die "unknown Claude account: $name"
-  [ -d "$dir" ] || die "Claude account directory does not exist: $dir"
-  specs="$(_osrc_cap_specs_for cc)"
-  if [ -n "$specs" ]; then
-    printf '%s\t%s\n' "$name" "$dir" | _osrc_account_choose >/dev/null || die "Claude account $name has unknown usage or is at a configured cap"
+  [ "$name" = default ] || [ -d "$dir" ] || die "Claude account directory does not exist: $dir"
+  if _osrc_account_has_caps; then
+    printf '%s\t%s\n' "$name" "$dir" | _osrc_account_choose allow-metered >/dev/null || die "Claude account $name has unknown usage or is at a configured cap"
   fi
-  OSRC_ACCOUNT="$name"; OSRC_ACCOUNT_DIR="$dir"; export OSRC_ACCOUNT
+  OSRC_ACCOUNT="$name"; OSRC_ACCOUNT_DIR="$dir"
+  [ "$name" != default ] || OSRC_ACCOUNT_DIR=""
+}
+
+_osrc_account_has_caps() {
+  local spec
+  while IFS= read -r spec; do
+    _osrc_cap_valid "$spec" && _osrc_cap_window cc "${spec%%<=*}" >/dev/null 2>&1 && return 0
+  done <<EOF
+$(_osrc_cap_specs_for cc)
+EOF
+  return 1
 }
 
 # _session_launch_cc lives in lib/leanlaunch.sh; it adds CLAUDE_CONFIG_DIR when OSRC_ACCOUNT_DIR is set.
 
 _osrc_account_usage() {
-  local dir="$1" file="$1/token-optimizer/rate-limits.json" raw c5 r5 c7 r7 ts now
-  [ -f "$file" ] && have jq || return 1
-  raw="$(jq -r '[(.five_hour.used_percentage // ""),(.five_hour.resets_at // ""),(.seven_day.used_percentage // ""),(.seven_day.resets_at // ""),(.timestamp // "")] | join("|")' "$file" 2>/dev/null)" || return 1
+  local dir="$1" file raw c5 r5 c7 r7 ts now
+  local files=("$dir/token-optimizer/rate-limits.json")
+  if [ "$dir" = "$HOME/.claude" ] && [ -n "${OSRC_CC_PRESSURE:-}" ]; then
+    c5="$(_pct_normalize "$OSRC_CC_PRESSURE")"; [ -n "$c5" ] || return 1
+    printf '%s|\n' "$c5"; return 0
+  fi
+  [ "$dir" != "$HOME/.claude" ] || files=("$OSRC_HOME/rate-limits.json" "${files[@]}")
+  have jq || return 1
+  for file in "${files[@]}"; do
+  [ -f "$file" ] || continue
+  raw="$(jq -r '[(.five_hour.used_percentage // ""),(.five_hour.resets_at // ""),(.seven_day.used_percentage // ""),(.seven_day.resets_at // ""),(.timestamp // "")] | join("|")' "$file" 2>/dev/null)" || continue
   IFS='|' read -r c5 r5 c7 r7 ts <<EOF
 $raw
 EOF
-  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ts" in ''|*[!0-9]*) continue ;; esac
   now="$(date +%s)" || return 1
-  [ "$ts" -le $((now * 1000)) ] && [ $((now * 1000 - ts)) -le 600000 ] || return 1
+  [ "$ts" -le $((now * 1000)) ] && [ $((now * 1000 - ts)) -le 600000 ] || continue
   c5="$(_window_pct "$c5" "$r5" 2>/dev/null)" || c5=""
   c7="$(_window_pct "$c7" "$r7" 2>/dev/null)" || c7=""
-  [ -n "$c5$c7" ] || return 1
-  printf '%s|%s\n' "$c5" "$c7"
+  [ -n "$c5$c7" ] || continue
+  printf '%s|%s\n' "$c5" "$c7"; return 0
+  done
+  return 1
 }
 
-# The only authentication data inspected is the CLI's status JSON.
-_osrc_account_billing() { OSRC_ACCOUNT_DIR="$1" osrc_lane_billing cc; }
+# Use the existing billing gate, with the selected account scoped to the probe.
+_osrc_account_billing() {
+  if [ "$1" = "$HOME/.claude" ]; then OSRC_ACCOUNT_DIR= osrc_lane_billing cc
+  else OSRC_ACCOUNT_DIR="$1" osrc_lane_billing cc; fi
+}
 
 _osrc_account_console() {
   local status
@@ -188,12 +221,14 @@ _osrc_account_console() {
 
 # Choose the smallest weekly usage. Unknown windows cannot satisfy a bound cap.
 _osrc_account_choose() {
-  local name dir usage c5 c7 spec meter window value cap best="" bestpct=""
+  local name dir usage c5 c7 spec meter window value cap best="" bestpct="" fallback="" bill
   while IFS=$'\t' read -r name dir; do
-    _osrc_account_name_valid "$name" && [ -d "$dir" ] || continue
-    usage="$(_osrc_account_usage "$dir")" || continue
+    _osrc_account_name_valid "$name" || continue
+    [ "$name" = default ] || [ -d "$dir" ] || continue
+    bill="$(_osrc_account_billing "$dir")"
+    if [ "$bill" != subscription ] && [ "${OSRC_SPEND_OK:-0}" != 1 ] && [ "${1:-}" != allow-metered ]; then continue; fi
+    usage="$(_osrc_account_usage "$dir")" || usage='|'
     c5="${usage%%|*}"; c7="${usage#*|}"
-    [ -n "$c7" ] || continue
     local allowed=1
     while IFS= read -r spec; do
       _osrc_cap_valid "$spec" || continue
@@ -205,10 +240,12 @@ _osrc_account_choose() {
 $(_osrc_cap_specs_for cc)
 EOF
     [ "$allowed" = 1 ] || continue
+    if [ -z "$c7" ]; then [ -n "$fallback" ] || fallback="$name"; continue; fi
     if [ -z "$best" ] || awk -v a="$c7" -v b="$bestpct" 'BEGIN { exit !(a+0 < b+0) }'; then
       best="$name"; bestpct="$c7"
     fi
   done
+  [ -n "$best" ] || best="$fallback"
   [ -n "$best" ] || return 1
   printf '%s\n' "$best"
 }
