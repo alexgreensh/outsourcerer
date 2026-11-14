@@ -6,8 +6,10 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../lib/cleanup.sh"
 . "$HERE/../lib/supervise_watch.sh"
-mkdir -p "$OSRC_HOME/fixture"
+. "$HERE/../lib/hub.sh"
+mkdir -p "$OSRC_HOME/fixture" "$OSRC_HOME/hub/projects"
 printf test > "$OSRC_HOME/fixture/L1.DONE"
+printf '{}\n' > "$OSRC_HOME/hub/projects/example.json"
 stat() {
   if [ "$1" = -c ]; then
     [ "$TEST_STAT" = gnu ] || return 1
@@ -24,5 +26,6 @@ for TEST_STAT in gnu bsd; do
     L1.DONE:12345:4:*) ;;
     *) echo "FAIL: $TEST_STAT fingerprint"; exit 1 ;;
   esac
-  echo "PASS: $TEST_STAT cleanup and watch fingerprint"
+  [ -n "$(_osrc_hub_project_mtime example)" ] || { echo "FAIL: $TEST_STAT hub timestamp"; exit 1; }
+  echo "PASS: $TEST_STAT cleanup, watch fingerprint and hub timestamp"
 done

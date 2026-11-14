@@ -360,7 +360,7 @@ unset _r9noval; export _r9noval
 _osrc_envrun -u _r9noval true
 if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
   _ep="$(export -p)"
-  [ "${_r9noval+x}" = x ] && grep -q 'declare -x _r9noval$' <<<"$_ep" \
+  [ "${_r9noval+x}" != x ] && grep -q 'declare -x _r9noval$' <<<"$_ep" \
     && ok "r10 envrun: exported-empty var restored exported-empty (bash>=4)" \
     || bad "r10 envrun: exported-empty lost (set=${_r9noval+x} ep=$(printf '%s' "$_ep" | grep _r9noval))"
 else

@@ -285,7 +285,7 @@ BASE="${URL%%\?*}"; TOK="${URL##*t=}"
 ok "serve printed loopback token URL"
 # Item 14: the token persists in $OSRC_HOME/hub/token (0600) so the URL is bookmarkable.
 [ -f "$OSRC_HOME/hub/token" ] && ok "token persisted to hub/token" || bad "hub/token missing"
-PERM="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+PERM="$(stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null || stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null)"
 [ "$PERM" = "600" ] && ok "hub/token is mode 0600" || bad "hub/token mode $PERM"
 [ "$(cat "$OSRC_HOME/hub/token")" = "$TOK" ] && ok "served token is the persisted token" || bad "served token != persisted token"
 
@@ -448,13 +448,13 @@ URL3="$(wait_url "$TMP/serve3.log")"
 TOK3="${URL3##*t=}"
 [ -n "$URL3" ] && [ "$TOK3" != "$TOK" ] && [ "$(cat "$OSRC_HOME/hub/token")" = "$TOK3" ] \
   && ok "--new-token rotates the persisted token" || bad "--new-token did not rotate"
-PERM3="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+PERM3="$(stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null || stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null)"
 [ "$PERM3" = "600" ] && ok "rotated hub/token still mode 0600" || bad "rotated token mode $PERM3"
 cleanup_srv
 
 # A3 leftovers: token must be exactly 32 hex, chmod 600 every start, no
 # symlink accepted, hub/ dir locked to 0700.
-DPERM="$(stat -f %Lp "$OSRC_HOME/hub" 2>/dev/null || stat -c %a "$OSRC_HOME/hub" 2>/dev/null)"
+DPERM="$(stat -c %a "$OSRC_HOME/hub" 2>/dev/null || stat -f %Lp "$OSRC_HOME/hub" 2>/dev/null)"
 [ "$DPERM" = "700" ] && ok "hub/ dir is mode 0700" || bad "hub/ dir mode $DPERM"
 printf 'ab\n' > "$OSRC_HOME/hub/token"          # too short -> re-minted, not served
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t1.log" 2>&1 &
@@ -467,7 +467,7 @@ chmod 644 "$OSRC_HOME/hub/token"; cleanup_srv
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t2.log" 2>&1 &
 SRV=$!
 URLT="$(wait_url "$TMP/serve_t2.log")"
-PERM4="$(stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null || stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null)"
+PERM4="$(stat -c %a "$OSRC_HOME/hub/token" 2>/dev/null || stat -f %Lp "$OSRC_HOME/hub/token" 2>/dev/null)"
 [ -n "$URLT" ] && [ "$PERM4" = "600" ] && ok "chmod 600 enforced on reused token every start" \
   || bad "reused token mode $PERM4"
 cleanup_srv
@@ -503,9 +503,9 @@ SRV=$!
 URL5="$(wait_url "$TMP/serve5.log")"
 [ -n "$URL5" ] || { bad "idle-test serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 curl -s -o /dev/null -H "X-Hub-Token: ${URL5##*t=}" "${URL5%%\?*}/api/projects"   # a page poll -> refresh stays live
-m0="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+m0="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 sleep 3
-m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+m1="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 [ "$m0" = "$m1" ] && ok "no state change -> refresh loop skips the export" \
   || bad "refresh re-exported unchanged state ($m0 -> $m1)"
 # Wait for the mtime to move (the export subprocess can take several seconds
@@ -513,7 +513,7 @@ m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
 wait_mtime() {  # <file> <baseline> -> 0 when mtime != baseline within ~24s
   local i b="$2"
   for i in $(seq 1 96); do
-    [ "$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)" != "$b" ] && return 0
+    [ "$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" != "$b" ] && return 0
     sleep 0.25
   done; return 1
 }
@@ -532,9 +532,9 @@ URL6="$(wait_url "$TMP/serve6.log")"
 [ -n "$URL6" ] || { bad "idle-stop serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 sleep 3                                  # now past the 2s idle window, nothing polled
 echo still-running > "$OSRC_HOME/jobs/job-x/status"   # state changes while idle
-m3="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+m3="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 sleep 2.5
-m4="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
+m4="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 [ "$m3" = "$m4" ] && ok "no page poll for the idle window -> refresh loop stops" \
   || bad "loop kept exporting while idle ($m3 -> $m4)"
 curl -s -o /dev/null -H "X-Hub-Token: ${URL6##*t=}" "${URL6%%\?*}/api/projects"   # a poll wakes it
