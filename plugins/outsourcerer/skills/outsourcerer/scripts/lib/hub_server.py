@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -34,6 +35,7 @@ WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")
 WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
+# Always fullmatch: re.match with "$" also accepts a trailing newline (MC-5 #5).
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
@@ -49,10 +51,9 @@ class Hub:
             os.path.dirname(os.path.abspath(page_path)), "hub-assets")
         self.token = token
         self.answers_dir = os.path.join(osrc_home, "hub", "answers")
-        os.makedirs(self.answers_dir, exist_ok=True)
-        # Mark done overrides: hub export merges these last, so no card or
-        # orchestrator write can undo a status the user set (shippedBy "user").
-        self.status_dir = os.path.join(osrc_home, "hub", "status")
+        os.makedirs(self.answers_dir, mode=0o700, exist_ok=True)
+        # Mark done overrides go to hub/status/<slug>.json (write_status); hub export
+        # merges them last, so no card write can undo a status the user set.
         self.export_file = os.path.join(osrc_home, "hub", "export.json")
         self.cache = None          # {"generated_at": int, "projects": [...]}
         self.cache_ts = 0.0
@@ -107,10 +108,7 @@ class Hub:
         if not isinstance(data, dict) or "projects" not in data:
             raise RuntimeError("export output is not a SCHEMA document")
         data["exported_at"] = int(time.time())
-        tmp = self.export_file + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, self.export_file)
+        self._safe_write("", "export.json", data)
         with self.lock:
             self.cache = data
             self.cache_ts = time.time()
@@ -161,7 +159,7 @@ class Hub:
         if not isinstance(body, dict):
             return None, "body must be a JSON object"
         aid = body.get("id")
-        if not isinstance(aid, str) or not ID_RE.match(aid):
+        if not isinstance(aid, str) or not ID_RE.fullmatch(aid):
             return None, "bad answer id"
         choice = body.get("choice")
         note = body.get("note")
@@ -186,12 +184,44 @@ class Hub:
             "note": note.strip()[:4000],
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        path = os.path.join(self.answers_dir, aid + ".json")
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(rec, f)
-        os.replace(tmp, path)
+        try:
+            self._safe_write("answers", aid + ".json", rec)
+        except OSError as e:
+            return None, "cannot write answer: %s" % str(e)[:200]
         return rec, None
+
+    # ---- symlink-safe writes (MC-5 #3) ----------------------------------------------------
+    # Every file the server writes lives in <osrc_home>/hub[/<sub>]. A planted symlink (the
+    # folder, the target, or a guessable temp name) must never redirect a write: the folder
+    # must resolve to exactly where it should be, the temp file is created exclusively with
+    # a random name (mkstemp, mode 600), and a symlinked target is refused.
+    def _safe_dir(self, sub):
+        parts = ("hub", sub) if sub else ("hub",)
+        d = os.path.join(self.osrc_home, *parts)
+        want = os.path.join(os.path.realpath(self.osrc_home), *parts)
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        if os.path.islink(d) or os.path.realpath(d) != want:
+            raise OSError("refusing %s: it is a symlink or resolves outside OSRC_HOME" % d)
+        os.chmod(d, 0o700)
+        return d
+
+    def _safe_write(self, sub, name, obj):
+        d = self._safe_dir(sub)
+        path = os.path.join(d, name)
+        if os.path.islink(path):
+            raise FileExistsError("refusing %s: it is a symlink" % path)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix="." + name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(obj, f)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return path
 
 
     def write_status(self, slug, body):
@@ -200,7 +230,7 @@ class Hub:
         Returns (http_code, payload). The slug must match SLUG_RE AND name a
         project in the current export, so a request can never create a file
         for something that does not exist."""
-        if not SLUG_RE.match(slug or ""):
+        if not SLUG_RE.fullmatch(slug or ""):
             return 400, {"error": "bad project id"}
         if not isinstance(body, dict) or body.get("status") not in ("shipped", "restore"):
             return 400, {"error": "status must be shipped or restore"}
@@ -218,25 +248,38 @@ class Hub:
             rec = {"status": "shipped", "shippedAt": iso, "shippedBy": "user",
                    "prevStatus": prev}
         else:
-            # Move back: the build reports its own status again. restoredAt
-            # lets the export drop a card "shipped" older than this click,
-            # while a newer orchestrator write still wins.
-            rec = {"restoredBy": "user", "restoredAt": iso,
-                   "restoredAtEpoch": int(now), "prevStatus": prev}
-        os.makedirs(self.status_dir, exist_ok=True)
-        path = os.path.join(self.status_dir, slug + ".json")
-        if os.path.islink(path):
-            return 409, {"error": "status file is a symlink"}
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(rec, f)
-        os.replace(tmp, path)
+            # Move back (MC-5 #2): remember what the card said about shipping at
+            # click time. The restore holds through any number of card rewrites
+            # (orchestrators rewrite the whole card to bump pct or the stamp) and
+            # yields only when the card says something new about shipping: a
+            # different status or shippedAt than it had when the user clicked.
+            card = self._read_card(slug)
+            rec = {"restoredBy": "user", "restoredAt": iso, "prevStatus": prev,
+                   "cardStatus": card.get("status"), "cardShippedAt": card.get("shippedAt")}
+        try:
+            self._safe_write("status", slug + ".json", rec)
+        except OSError as e:
+            return 409, {"error": str(e)[:300]}
         try:
             data = self.run_export()
         except Exception as e:
-            return 500, {"error": str(e)[:300], "override": rec}
+            # The override IS written; the next good export shows it. Say so
+            # instead of "not saved" (MC-5 #6), like /api/projects does.
+            return 200, {"ok": True, "override": rec, "export_error": str(e)[:300]}
         proj = next((p for p in data.get("projects", []) if p.get("id") == slug), None)
         return 200, {"ok": True, "override": rec, "project": proj}
+
+
+    def _read_card(self, slug):
+        path = os.path.join(self.osrc_home, "hub", "projects", slug + ".json")
+        try:
+            if os.path.islink(path):
+                return {}
+            with open(path) as f:
+                card = json.load(f)
+            return card if isinstance(card, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
 
 def make_handler(hub):
@@ -408,7 +451,7 @@ def make_handler(hub):
                 body = json.loads(raw.decode("utf-8", "replace"))
             except Exception:
                 return self._send_json({"error": "bad json"}, 400)
-            m = STATUS_PATH_RE.match(u.path)
+            m = STATUS_PATH_RE.fullmatch(u.path)
             if m:
                 code, out = hub.write_status(urllib.parse.unquote(m.group(1)), body)
                 return self._send_json(out, code)

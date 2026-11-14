@@ -7,6 +7,15 @@
   window.OSRC_HUB_HOME = function (ctx) {
     const { $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT } = ctx;
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
+    const grown = new Set();   // a tile's bar animates the first time only; re-renders set it directly (MC-5 #4)
+    // Tiles use a short stamp (MC-5 #1): "12:57 UTC" today, "13 Nov" otherwise, from the project's real last change
+    // (updatedAt). The full stamp stays on the project page. Long stamps squeezed the bars and wrapped the stale pill.
+    const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    function shortStamp(iso, fallback) {
+      const t = Date.parse(iso || ''); if (isNaN(t)) return fallback;
+      const d = new Date(t), pad = (n) => String(n).padStart(2, '0');
+      return d.toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10) ? pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC' : d.getUTCDate() + ' ' + MON[d.getUTCMonth()];
+    }
 
     // ---- Undo toast (6 s) -------------------------------------------------------------------
     let utoastT = null, undoUntil = 0;
@@ -55,7 +64,7 @@
     function refreshBtn(st, old) {
       let rb = st.querySelector('.rfr'); const key = st.dataset.rk;
       if (!(old && key && ctx.db && ctx.canWrite !== false)) { if (rb) rb.remove(); return; }
-      if (!rb) { rb = el('button', 'rfr'); rb.type = 'button'; rb.addEventListener('click', (e) => { e.stopPropagation(); askRefresh(key, rb); }); st.append(rb); }
+      if (!rb) { rb = el('button', 'rfr'); rb.type = 'button'; rb.id = 'rfr-' + key.replace(/[^A-Za-z0-9_-]/g, '-') + (st.classList.contains('stamp-top') ? '-top' : ''); rb.addEventListener('click', (e) => { e.stopPropagation(); askRefresh(key, rb); }); st.append(rb); }
       const pend = asked[key] && Date.now() - asked[key] < 600000;
       rb.disabled = !!pend; rb.replaceChildren(ic('refresh-cw'), document.createTextNode(pend ? 'Refreshing…' : 'Refresh'));
       rb.title = pend ? 'Asked. The orchestrator updates this within about 5 minutes.' : (ctx.mode === 'local' ? 'Read this project again now' : 'Ask the orchestrator to read this again now');
@@ -78,19 +87,19 @@
       const go = ctx.go; const ds = openDecs(p);
       const t = el('article', 'card ptile' + (p.status === 'paused' ? ' paused' : '') + (ds.length ? ' waits' : '')); t.id = 'tile-' + p.id;
       const top = el('div', 'pt-top');
-      const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
+      const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.id = 'ptn-' + p.id; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
       const stt = ds.length ? ['st-wait', 'Waiting on you'] : [p.status === 'paused' ? 'st-paused' : p.status === 'shipped' ? 'st-shipped' : '', STATUS_TXT[p.status] || 'Building'];
       top.append(nb, el('span', 'pill ' + stt[0], stt[1])); t.append(top);
       if (p.tagline) t.append(el('p', 'pt-tag', p.tagline));
       const pr = el('div', 'pt-prog'); const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
       bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuenow', String(p.pct || 0)); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-label', p.name + ' progress');
       pr.append(bar, el('span', 'pct', (p.pct || 0) + '%')); t.append(pr);
-      requestAnimationFrame(() => { fill.style.width = (p.pct || 0) + '%'; });
+      if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = (p.pct || 0) + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = (p.pct || 0) + '%'; }); }
       const meta = el('div', 'pt-meta');
       if (p.eta) { const e = el('span'); e.append(ic('rocket'), document.createTextNode('Ships ' + p.eta)); meta.append(e); }
       if (p.updated) {
         const u = el('span', 'lst'); u.dataset.at = p.updatedAt || ''; u.dataset.live = (p.status === 'shipped' || p.status === 'paused') ? '' : '1';
-        u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + p.updated;
+        u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + shortStamp(p.updatedAt, p.updated);
         u.append(ic(p.status === 'paused' ? 'pause' : 'clock'), el('span', 'lstx', u.dataset.base)); meta.append(u);
       }
       if (meta.children.length) pr.append(meta);
@@ -99,9 +108,9 @@
       if (topN) t.append(el('p', 'pt-top5', topN + ' in top priority, above'));
       if (rest.length) {
         const ul = el('ul', 'pt-decs');
-        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); ul.append(li); });
+        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); ul.append(li); });
         t.append(ul);
-        if (rest.length > 2) { const m = el('button', 'pt-more', 'and ' + (rest.length - 2) + ' more'); m.type = 'button'; m.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(m); }
+        if (rest.length > 2) { const m = el('button', 'pt-more', 'and ' + (rest.length - 2) + ' more'); m.type = 'button'; m.id = 'ptm-' + p.id; m.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(m); }
       } else if (!topN) { const n = el('p', 'pt-none'); n.append(ic('circle-check'), document.createTextNode('Nothing waiting on you.')); t.append(n); }
       t.addEventListener('click', () => go(p.id));
       return t;
@@ -109,7 +118,7 @@
 
     function renderHome() {
       const projects = ctx.projects, db = ctx.db, go = ctx.go;
-      const main = $('main'); ctx.hide(); main.replaceChildren();
+      const main = $('main'); main.replaceChildren();   // no hide(): an open card re-anchors after the render (keepHover)
       const live = projects.filter((p) => p.status !== 'shipped');
       const running = live.filter((p) => p.status !== 'paused').concat(live.filter((p) => p.status === 'paused'));
       const shipped = projects.filter((p) => p.status === 'shipped');

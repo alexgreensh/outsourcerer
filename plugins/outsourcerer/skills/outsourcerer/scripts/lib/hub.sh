@@ -308,19 +308,25 @@ _osrc_hub_build_project() {
 # _osrc_hub_status_override <slug> <project-json> -> project with the user's Mark done
 # override from $OSRC_HOME/hub/status/<slug>.json (written by hub_server.py) merged LAST,
 # so no card/orchestrator write can change a status whose shippedBy is "user".
-# A "restore" record only clears a card "shipped" that is older than the click.
+# A Move back ("restore") record carries what the card said about shipping at click time
+# (cardStatus, cardShippedAt). It holds through any number of card rewrites and yields only
+# when the card says something new about shipping (MC-5 #2). Symlinks (the status folder or
+# the file) are never followed.
 _osrc_hub_status_override() {
-  local f="$OSRC_HOME/hub/status/$1.json" pf="$OSRC_HOME/hub/projects/$1.json" cm=0
-  { [ -f "$f" ] && [ ! -L "$f" ]; } || { printf '%s' "$2"; return 0; }
-  [ -f "$pf" ] && cm="$(stat -f %m "$pf" 2>/dev/null || stat -c %Y "$pf" 2>/dev/null || echo 0)"
-  jq -c --slurpfile o "$f" --argjson cm "${cm:-0}" '
+  local d="$OSRC_HOME/hub/status" pf="$OSRC_HOME/hub/projects/$1.json" card='{}'
+  local f="$d/$1.json"
+  { [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$f" ] && [ ! -L "$f" ]; } || { printf '%s' "$2"; return 0; }
+  { [ -f "$pf" ] && [ ! -L "$pf" ]; } && card="$(jq -c 'if type == "object" then {status, shippedAt} else {} end' "$pf" 2>/dev/null || printf '{}')"
+  jq -c --slurpfile o "$f" --argjson card "$card" '
     ($o[0] // {}) as $o
+    | (if ($o.prevStatus // "") == "" or $o.prevStatus == "shipped" then "building" else $o.prevStatus end) as $prev
     | if ($o | type) != "object" then .
       elif $o.shippedBy == "user" then
-        . + {status:"shipped", shippedBy:"user", shippedAt:($o.shippedAt // null),
-             prevStatus:(if ($o.prevStatus // "") == "" or $o.prevStatus == "shipped" then "building" else $o.prevStatus end)}
-      elif $o.restoredBy == "user" and .status == "shipped" and ($cm <= ($o.restoredAtEpoch // 0)) then
-        .status = (if ($o.prevStatus // "") == "" or $o.prevStatus == "shipped" then "building" else $o.prevStatus end)
+        . + {status:"shipped", shippedBy:"user", shippedAt:($o.shippedAt // null), prevStatus:$prev}
+      elif $o.restoredBy == "user" and ($o | has("cardStatus")) and .status == "shipped"
+           and ($card.status // null) == ($o.cardStatus // null)
+           and ($card.shippedAt // null) == ($o.cardShippedAt // null) then
+        .status = $prev
       else . end' <<<"$2" 2>/dev/null || printf '%s' "$2"
 }
 

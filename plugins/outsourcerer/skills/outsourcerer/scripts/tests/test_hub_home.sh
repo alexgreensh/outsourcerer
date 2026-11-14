@@ -12,11 +12,12 @@ SRC="$HERE/../outsourcerer.sh"
 LIB="$HERE/../lib"
 PAGE="$LIB/hub.html"
 JS="$LIB/hub-assets/hub-home.js"
+DEC="$LIB/hub-assets/hub-decide.js"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 
-TMP="$(mktemp -d "$HERE/.hub-home-test.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/hub-home-test.XXXXXX")"   # never beside the suites (MC-5 #8); trap removes it
 SRV=""
 cleanup() { [ -n "$SRV" ] && { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }; rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -32,7 +33,7 @@ old_touch() { touch -t "$(date -u -v-"$1" '+%Y%m%d%H%M.%S' 2>/dev/null || date -
 st_of() { run hub export 2>/dev/null | jq -c --arg id "$1" '.projects[] | select(.id==$id) | {status, shippedBy, prevStatus}'; }
 
 echo "=== page contract (Home port) ==="
-grep -q '<script src="assets/hub-home.js"></script>' "$PAGE" && ok "page loads assets/hub-home.js" || bad "hub-home.js not loaded by the page"
+grep -q '<script src="assets/hub-home.js"></script>' "$PAGE" && grep -q '<script src="assets/hub-decide.js"></script>' "$PAGE" && ok "page loads assets/hub-home.js + hub-decide.js" || bad "an asset script is not loaded by the page"
 grep -q 'These are top-priority decisions for you right now.' "$JS" && ok "top bar text is exact" || bad "top bar text missing/changed"
 grep -q "decisions wait on you" "$JS" && grep -q "'Across ' + waitingOn" "$JS" && ok "headline N decisions wait on you + Across M projects" || bad "Home headline missing"
 grep -q 'id="homebtn"' "$PAGE" && grep -q 'id="hcount"' "$PAGE" && ok "Home entry + count badge in the rail" || bad "Home entry missing"
@@ -49,31 +50,32 @@ grep -q "target.closest('.prline')" "$PAGE" && ok "rail cards anchor past the ro
 grep -q "const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf)" "$PAGE" && ok "lane hover: every issue its own link" || bad "lane hover refs missing"
 grep -q "Mark done, move to Shipped" "$PAGE" && grep -q "Move back to running" "$PAGE" && ok "Mark done / Move back in the rail card" || bad "Mark done missing"
 grep -q "}, 6000);" "$JS" && grep -q "'Undo'" "$JS" && ok "Undo toast, 6 s" || bad "Undo toast missing"
-grep -q "Alex: the rail always lists each project's open decisions" "$PAGE" && ok "rail keeps open decisions on Home" || bad "rail decisions note missing"
 miss=""; for i in layout-grid hand arrow-right circle-check chevron-right rotate-ccw refresh-cw clock pause rocket check; do
   grep -q "^    '$i': '<" "$PAGE" || miss="$miss $i"
 done; [ -z "$miss" ] && ok "every icon Home uses is in the inline ICONS map" || bad "icons missing from ICONS:$miss"
 grep -qE '\b(alert|confirm|prompt) *\(' "$JS" && bad "dialog call in hub-home.js" || ok "no alert/confirm/prompt in hub-home.js"
 grep -qi 'font-style: *italic\|<em>\|<i>[^<]' "$PAGE" && bad "italics in page" || ok "no italics"
 grep -q 'border-left: *[0-9.]*px solid var(--hi)' "$PAGE" && bad "border-left accent stripe" || ok "no border-left accent stripes"
-[ "$(wc -l < "$PAGE")" -le 1000 ] && [ "$(wc -l < "$JS")" -le 1000 ] && [ "$(wc -l < "$LIB/hub_server.py")" -le 1000 ] && [ "$(wc -l < "$LIB/hub.sh")" -le 1000 ] \
+[ "$(wc -l < "$PAGE")" -le 1000 ] && [ "$(wc -l < "$JS")" -le 1000 ] && [ "$(wc -l < "$DEC")" -le 1000 ] && [ "$(wc -l < "$LIB/hub_server.py")" -le 1000 ] && [ "$(wc -l < "$LIB/hub.sh")" -le 1000 ] \
   && ok "hub.html/hub-home.js/hub_server.py/hub.sh each <= 1000 lines" || bad "a hub file passed 1000 lines"
 
 echo "=== MC-4: drafts survive re-renders (page contract) ==="
-grep -q "const key = p.id + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$PAGE" && ok "decision draft keyed <project>--<decision> in forms" || bad "draft store missing"
-grep -q "main.replaceChildren(); forms = {}" "$PAGE" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
-grep -q "ta.value = f.note" "$PAGE" && grep -q "String(o === f.choice)" "$PAGE" && ok "text + chosen option restored on render" || bad "draft not restored"
+grep -q "const key = p.id + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$DEC" && ok "decision draft keyed <project>--<decision> in forms" || bad "draft store missing"
+grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
+grep -q "ta.value = f.note" "$DEC" && grep -q "String(o === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
-grep -q "if (composing || saving) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
-grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing" || bad "identical-poll skip missing"
-grep -q "resetForms" "$PAGE" "$JS" && bad "Home still resets drafts" || ok "going Home keeps drafts"
+grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
+grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
+grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders (MC-5 #4)" || bad "hover re-anchor missing"
+grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render (MC-5 #4)" || bad "bars re-grow on every render"
+grep -q "resetForms" "$PAGE" "$JS" "$DEC" && bad "Home still resets drafts" || ok "going Home keeps drafts"
 
 echo "=== refreshBtn: only on a stale stamp (node, no browser) ==="
 if command -v node >/dev/null 2>&1; then
   rb="$(node - "$JS" <<'EOF' 2>&1
 const fs = require('fs'), vm = require('vm');
 function mk(tag) { const e = { tag, children: [], dataset: {}, className: '', disabled: false, isConnected: true,
-  append(...k) { this.children.push(...k); }, appendChild(k) { this.children.push(k); return k; }, setAttribute() {}, replaceChildren(...k) { this.children = k; },
+  append(...k) { this.children.push(...k); }, appendChild(k) { this.children.push(k); return k; }, setAttribute() {}, classList: { contains: () => false }, replaceChildren(...k) { this.children = k; },
   addEventListener() {}, remove() { this.parent && (this.parent.children = this.parent.children.filter((x) => x !== this)); },
   querySelector(sel) { return this.children.find((c) => sel === '.' + c.className) || null; } };
   const ap = e.append.bind(e); e.append = (...k) => { k.forEach((x) => { if (x && typeof x === 'object') x.parent = e; }); ap(...k); }; return e; }
@@ -109,11 +111,16 @@ echo '{"name":"Alpha","status":"building","pct":90,"order":1}' > "$OSRC_HOME/hub
 ln -s "$OSRC_HOME/hub/status/alpha.json" "$OSRC_HOME/hub/status/beta.json"
 [ "$(st_of beta | jq -r .status)" = "shipped" ] && [ "$(st_of beta | jq -r .shippedBy)" = "null" ] && ok "symlinked override ignored" || bad "symlinked override merged: $(st_of beta)"
 rm -f "$OSRC_HOME/hub/status/beta.json"
-old_touch 1H "$OSRC_HOME/hub/projects/beta.json"
-jq -cn --argjson e "$(date +%s)" '{restoredBy:"user",restoredAt:"x",restoredAtEpoch:$e,prevStatus:"building"}' > "$OSRC_HOME/hub/status/beta.json"
-[ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back clears an older card shipped" || bad "restore ignored: $(st_of beta)"
-sleep 1; touch "$OSRC_HOME/hub/projects/beta.json"
-[ "$(st_of beta | jq -r .status)" = "shipped" ] && ok "a newer card shipped wins over an old Move back" || bad "restore pinned forever: $(st_of beta)"
+echo '{"restoredBy":"user","restoredAt":"x","prevStatus":"building","cardStatus":"shipped","cardShippedAt":null}' > "$OSRC_HOME/hub/status/beta.json"
+[ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back clears the card's shipped" || bad "restore ignored: $(st_of beta)"
+sleep 1; echo '{"name":"Beta","status":"shipped","pct":100,"order":2}' > "$OSRC_HOME/hub/projects/beta.json"   # heartbeat rewrites the same card
+[ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back survives a rewrite of the same card (MC-5 #2)" || bad "card rewrite undid Move back: $(st_of beta)"
+echo '{"name":"Beta","status":"shipped","shippedAt":"2026-11-20T09:00:00Z","pct":100,"order":2}' > "$OSRC_HOME/hub/projects/beta.json"
+[ "$(st_of beta | jq -r .status)" = "shipped" ] && ok "a card that ships again (new shippedAt) wins over Move back" || bad "restore pinned forever: $(st_of beta)"
+mkdir -p "$TMP/elsewhere" && echo '{"status":"shipped","shippedBy":"user"}' > "$TMP/elsewhere/alpha.json"
+mv "$OSRC_HOME/hub/status" "$TMP/status.real" && ln -s "$TMP/elsewhere" "$OSRC_HOME/hub/status"
+[ "$(st_of alpha | jq -r .shippedBy)" = "null" ] && ok "export never reads overrides through a symlinked status folder" || bad "export followed a symlinked status folder"
+rm "$OSRC_HOME/hub/status" && mv "$TMP/status.real" "$OSRC_HOME/hub/status"
 
 echo "=== write_status slug guard alone (poisoned export) ==="
 # The project-exists check masks the slug regex for real exports (every exported id is a
@@ -122,13 +129,45 @@ sg="$(cd "$LIB" && OSRC_T="$TMP/sg" PAGE="$PAGE" python3 -I -c '
 import os, sys, time; sys.path.insert(0, os.getcwd()); import hub_server as h
 t = os.environ["OSRC_T"]; os.makedirs(t)
 hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x")
-for bad in ("../evil", ".hidden", "a/b"):
+for bad in ("../evil", ".hidden", "a/b", "alpha\n"):
     hub.cache = {"projects": [{"id": bad, "status": "building"}]}; hub.cache_ts = time.time()
     print(bad, hub.write_status(bad, {"status": "shipped"})[0])
 print("escaped" if os.path.exists(os.path.join(t, "hub", "evil.json")) else "contained")
+sd = os.path.join(t, "hub", "status")
+print("nl-file" if os.path.isdir(sd) and any("\n" in n for n in os.listdir(sd)) else "no-nl-file")
+print("answer-nl", hub.write_answer({"id": "a--b\n", "choice": "x"})[1])
+# MC-5 #6: the override is written even when the re-export fails -> 200 + export_error, not "not saved".
+hub.cache = {"projects": [{"id": "ok1", "status": "review"}]}; hub.cache_ts = time.time()
+code, body = hub.write_status("ok1", {"status": "shipped"})
+print("exportfail", code, bool(body.get("export_error")), os.path.isfile(os.path.join(t, "hub", "status", "ok1.json")))
 ' 2>&1)"
 grep -q '^\.\./evil 400$' <<<"$sg" && grep -q '^\.hidden 400$' <<<"$sg" && grep -q '^a/b 400$' <<<"$sg" && grep -q contained <<<"$sg" \
   && ok "slug regex alone refuses traversal ids even when the export lists them" || bad "slug guard: $sg"
+grep -q '^alpha$' <<<"$sg" && grep -q '^ 400$' <<<"$sg" && grep -q '^no-nl-file$' <<<"$sg" \
+  && ok "slug with a trailing newline refused, no file (MC-5 #5)" || bad "trailing-newline slug: $sg"
+grep -q '^answer-nl bad answer id$' <<<"$sg" && ok "answer id with a trailing newline refused (MC-5 #5)" || bad "trailing-newline answer id: $sg"
+grep -q '^exportfail 200 True True$' <<<"$sg" && ok "failed re-export: 200 + export_error, override kept (MC-5 #6)" || bad "export failure reply: $sg"
+
+echo "=== symlink-safe writes (MC-5 #3) ==="
+sy="$(cd "$LIB" && OSRC_T="$TMP/sy" PAGE="$PAGE" python3 -I -c '
+import os, sys, time, stat; sys.path.insert(0, os.getcwd()); import hub_server as h
+t = os.environ["OSRC_T"]; os.makedirs(os.path.join(t, "hub", "status")); os.makedirs(os.path.join(t, "victim"))
+victim = os.path.join(t, "victim", "keep.txt"); open(victim, "w").write("original")
+hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x")
+hub.cache = {"projects": [{"id": "alpha", "status": "review"}]}; hub.cache_ts = time.time()
+os.symlink(victim, os.path.join(t, "hub", "status", "alpha.json.tmp"))      # the old fixed temp name
+c1, _ = hub.write_status("alpha", {"status": "shipped"})
+f = os.path.join(t, "hub", "status", "alpha.json")
+print("tmp", c1, open(victim).read(), os.path.islink(f), oct(os.stat(f).st_mode & 0o777), oct(os.stat(os.path.dirname(f)).st_mode & 0o777))
+os.rename(os.path.join(t, "hub", "status"), os.path.join(t, "status.real")); os.symlink(os.path.join(t, "victim"), os.path.join(t, "hub", "status"))
+c2, b2 = hub.write_status("alpha", {"status": "restore"})
+print("dir", c2, sorted(os.listdir(os.path.join(t, "victim"))))
+os.makedirs(os.path.join(t, "victim2")); os.rename(os.path.join(t, "hub", "answers"), os.path.join(t, "answers.real")); os.symlink(os.path.join(t, "victim2"), os.path.join(t, "hub", "answers"))
+print("ans", hub.write_answer({"id": "a--b", "choice": "x"})[1] is not None, sorted(os.listdir(os.path.join(t, "victim2"))))
+' 2>&1)"
+grep -q "^tmp 200 original False 0o600 0o700$" <<<"$sy" && ok "planted temp-name symlink: target untouched, override written 600 in a 700 folder" || bad "temp symlink: $sy"
+grep -q "^dir 409 \['keep.txt'\]$" <<<"$sy" && ok "symlinked status folder: 409, nothing written outside" || bad "status folder symlink: $sy"
+grep -q "^ans True \[\]$" <<<"$sy" && ok "symlinked answers folder: refused, nothing written outside" || bad "answers folder symlink: $sy"
 
 echo "=== POST /api/projects/<id>/status ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl"; echo "RESULTS: $pass pass $fail fail"; [ "$fail" -eq 0 ]; exit $?; }
@@ -160,6 +199,7 @@ curl -s -H "X-Hub-Token: $TOK" "$B/api/projects" | jq -e '.projects[]|select(.id
 c="$(post /api/projects/alpha/status '{"status":"restore"}' -H "X-Hub-Token: $TOK")"
 [ "$c" = 200 ] && jq -e '.project.status=="review" and (.project.shippedBy==null)' "$TMP/body" >/dev/null \
   && ok "Move back restores the previous status" || bad "restore failed ($c): $(cat "$TMP/body")"
+[ "$(post /api/answers '{"id":"alpha--D1\n","choice":"x"}' -H "X-Hub-Token: $TOK")" = 400 ] && ok "HTTP: answer id with trailing newline -> 400" || bad "trailing-newline answer id accepted"
 # MC-4: the page offers "your own answer" in the note, so a note-only answer must land.
 c="$(post /api/answers '{"id":"alpha--N1","choice":"","note":"my own answer"}' -H "X-Hub-Token: $TOK")"
 [ "$c" = 200 ] && jq -e '.choice=="" and .note=="my own answer"' "$OSRC_HOME/hub/answers/alpha--N1.json" >/dev/null \

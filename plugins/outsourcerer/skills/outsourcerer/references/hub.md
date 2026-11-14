@@ -74,7 +74,14 @@ back to it, a `#<slug>` hash still deep-links a project): "N decisions wait on y
 Across M projects.", a top-priority bar of every Critical/High decision, then a 2x2 tile
 per running project. The Home code lives in `lib/hub-assets/hub-home.js` (served from
 `/assets/hub-home.js`, `script-src 'self'`) so `hub.html` stays under 1,000 lines; if it
-fails to load the page falls back to the old project-first view.
+fails to load the page falls back to the old project-first view. Decision cards and
+their drafts live in `lib/hub-assets/hub-decide.js` the same way. Polls and snapshots
+that bring identical data re-render nothing; a real change re-renders in place: keyboard
+focus, an open hover card (re-anchored with fresh numbers) and the rail-hover tile
+highlight survive, and progress bars animate only the first time. Tiles show a short
+stamp ("Updated 12:57 UTC" today, "Updated 13 Nov" otherwise, from `updatedAt`; a stale
+one reads "No update for 4 h" with the full stamp on hover), so every tile's bar is the
+same length.
 
 **Mark done** sits in each rail project's hover card ("Mark done, move to Shipped" /
 "Move back to running", with a 6 s Undo). A user mark is
@@ -87,9 +94,20 @@ first and carry those four fields over; only the user's Move back clears them.
   must pass the hub slug rule AND name a project in the current export, else 400/404).
   It writes `$OSRC_HOME/hub/status/<slug>.json`, which `hub export` merges LAST, so no
   card write in `hub/projects/<slug>.json` can undo it. `restore` writes
-  `{restoredBy:"user", restoredAt, restoredAtEpoch, prevStatus}`: it clears a card
-  `status:"shipped"` only while the card file is older than the click, so a later
-  orchestrator "shipped" still wins. A symlinked override file is ignored.
+  `{restoredBy:"user", restoredAt, prevStatus, cardStatus, cardShippedAt}`, recording
+  what the card said about shipping at click time. It holds through any number of card
+  rewrites (heartbeats rewrite the whole card) and yields only when the card says
+  something new about shipping: a different `status` or `shippedAt`. **Orchestrators
+  that ship a project should set `shippedAt` in the card**, or a later genuine "shipped"
+  can't be told apart from the one the user moved back. If the re-export after a click
+  fails, the reply is still 200 with the override plus `export_error` (the click is
+  saved; the next good export shows it).
+  Every file the server writes (`hub/status/`, `hub/answers/`, `hub/export.json`) goes
+  through one symlink-safe writer: the folder must resolve to exactly
+  `<OSRC_HOME>/hub[/sub]` (a symlinked folder is refused), the temp file is created
+  exclusively with a random name (mode 600, folder 700), and a symlinked target is
+  refused (409). The export never reads an override through a symlinked file or folder.
+  Ids are matched with `fullmatch` (no trailing newline).
 - Artifact mode: the page updates `projects/<slug>` itself with the fields above.
 
 **Refresh**: a live stamp older than 45 minutes (project header, Home tile, limits
@@ -106,8 +124,8 @@ To publish it as an artifact, the orchestrator:
    status fields (rule above).
 3. Reads `answers` and `refresh` on every heartbeat; after acting on a decision, marks
    it done; after re-reading a refresh target, deletes its `refresh/` doc.
-4. Publishes `assets/hub-home.js` next to the page (with the fonts) when it publishes
-   `hub.html` itself.
+4. Publishes `assets/hub-home.js` and `assets/hub-decide.js` next to the page (with the
+   fonts) when it publishes `hub.html` itself.
 
 Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`. `choice` may be
 empty when the viewer typed their own answer in `note` (one of the two always carries text).
