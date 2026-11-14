@@ -6930,14 +6930,14 @@ _obligation_latest_state() { # <id>
   _state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r --arg id "$1" 'select(.obligation_id==$id) | .state' | tail -1
 }
 
-_external_reply() { # <session-id> <message>
-  local id="$1" message="$2" claim pane pid start generation composer oid latest receipt key
+_external_reply() { # <session-id> <message> [allow-effort]
+  local id="$1" message="$2" allow_effort="${3:-0}" claim pane pid start generation composer oid latest receipt key
   _external_send_enabled || return 1
   [ "$OSRC_PLATFORM" != "windows" ] || { echo "unverified Windows mutation support" >&2; return 1; }
   claim="$(_external_claim_read "$id")" || { echo "external reply requires a live claim" >&2; return 1; }
   pane="$(printf '%s' "$claim" | jq -r '.endpoint // empty' | sed 's/^tmux://')"; pid="$(printf '%s' "$claim" | jq -r '.pid')"; start="$(printf '%s' "$claim" | jq -r '.pid_start')"; generation="$(printf '%s' "$claim" | jq -r '.generation')"
   _external_claim_authorized "$claim" || { echo "external reply requires the matching durable controller id and claim token" >&2; return 1; }
-  _session_send_effort_guard "$pane" "$message" || { echo "external reply refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just this pane. For a per-session change use 'session effort <level>' on a managed claude session (respawns claude with --continue, conversation kept; settings untouched). If this pane is provably not Claude Code, OSRC_SEND_ALLOW_EFFORT=1 overrides the guard. To set the global default on purpose, type /effort in the session TUI yourself." >&2; return 1; }
+  _session_send_effort_guard "$pane" "$message" "$allow_effort" || { echo "$(_session_effort_refuse_msg "$_SESSION_GUARD_RC" reply "$id")" >&2; return 1; }
   oid="reply.$id.$(printf '%s' "$message" | cksum | awk '{print $1}')"
   latest="$(_obligation_latest_state "$oid")"
   if [ "$latest" = typing_started ]; then _obligation_delivery_unknown "$oid" "$id"; echo "delivery unknown; no automatic replay" >&2; return 1; fi
@@ -17864,7 +17864,7 @@ _session_control_exit() { # <pane> <provider>
 # an incremented generation so _managed_endpoint_live keeps proving the endpoint live against the new
 # process. Never tears down or discards work.
 _session_control_relaunch() { # <pane> <provider> <model> <effort>
-  local pane="$1" prov="$2" model="$3" effort="${4:-}" launch pid_before pid_after gen i
+  local pane="$1" prov="$2" model="$3" effort="${4:-}" launch pid_before pid_after gen i resume_id="$( type _session_cc_resume_for >/dev/null 2>&1 && _session_cc_resume_for "$2" "$1" )"
   # #45: never relaunch onto a model the user excluded after the session started.
   if [ -n "$model" ] && _exclude_hit "$model"; then
     echo "relaunch refused: this session was started on $model, which you have since excluded (exclude list entry: $EXCL_HIT). Stop it and start a new one with an allowed model:  $0 session stop && $0 --provider $prov session start -m <model>" >&2
@@ -17878,7 +17878,7 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
   type _osrc_perm_restore_profile >/dev/null 2>&1 && _osrc_perm_restore_profile "$pane"
   case "$prov" in
     codex|cx|cc|claude|droid)
-      launch="$(_session_relaunch_command "$prov" "$model" "$effort")" || return 1 ;;
+      launch="$(_session_relaunch_command "$prov" "$model" "$effort" "$resume_id")" || return 1 ;;
     devin|dv)
       _validate_model_token "$model"
       launch="devin --model '$model' --respect-workspace-trust false$(osrc_perm_string_suffix devin "${PERM_PROFILE:-default}")" \
@@ -18162,16 +18162,15 @@ _session_resolved_model() { # <provider> <requested-model>
 }
 
 _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
-  local pane_pid="$1" wanted_cwd="$2" path pid cwd started now_ms delta best_delta="" best="" parent hops
+  local pane_pid="$1" wanted_cwd="$2" path pid cwd sid started now_ms delta best_delta="" best_hops="" best="" parent hops
   case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
   [ -d "$OSRC_CLAUDE_SESSIONS_DIR" ] || return 1
   now_ms=$(( $(date +%s) * 1000 ))
   while IFS= read -r path; do
-    pid="$(jq -r '.pid // empty' "$path" 2>/dev/null)"
-    cwd="$(jq -r '.cwd // empty' "$path" 2>/dev/null)"
-    started="$(jq -r '.startedAt // 0' "$path" 2>/dev/null)"
+    IFS=$'\t' read -r pid cwd sid started < <(jq -r '[.pid // "", .cwd // "", .sessionId // "", .startedAt // 0] | @tsv' "$path" 2>/dev/null)  # one jq pass: pid, cwd, sessionId, startedAt
     case "$pid:$started" in *[!0-9:]*|:*|*:) continue ;; esac
     [ "$cwd" = "$wanted_cwd" ] || continue
+    _session_cc_uuid_valid "$sid" || continue   # a planted/garbage id must not win the pick
     parent="$pid"; hops=0
     while [ "$parent" != "$pane_pid" ] && [ "$parent" -gt 1 ] 2>/dev/null && [ "$hops" -lt 32 ]; do
       parent="$(ps -o ppid= -p "$parent" 2>/dev/null | tr -d ' ')"
@@ -18180,9 +18179,9 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
     done
     [ "$parent" = "$pane_pid" ] || continue
     delta=$(( now_ms - started )); [ "$delta" -ge 0 ] || delta=$(( -delta ))
-    if [ -z "$best_delta" ] || [ "$delta" -lt "$best_delta" ]; then
-      best_delta="$delta"
-      best="$(jq -r '.sessionId // empty' "$path" 2>/dev/null)"$'\t'"$pid"
+    if [ -z "$best" ] || [ "$hops" -lt "$best_hops" ] || { [ "$hops" -eq "$best_hops" ] && [ "$delta" -lt "$best_delta" ]; }; then  # closest hop wins; recency breaks ties
+      best_delta="$delta"; best_hops="$hops"
+      best="$sid"$'\t'"$pid"
     fi
   done < <(find "$OSRC_CLAUDE_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
   [ -n "$best" ] || return 1
@@ -18691,14 +18690,14 @@ _model_pin_restore_allowed() { # <session-id> <generation>
   [ "$last" -eq 0 ] || [ $((now - last)) -ge "$cooldown" ]
 }
 
-_session_relaunch_command() { # <provider> <model> <effort>
+_session_relaunch_command() { # <provider> <model> <effort> [cc-resume-id]
   local provider="$1" model="$2" effort="$3" cid tokens code_mode_host
   # Descriptor-first: relaunch_fn owns a ported lane's relaunch vector
   # (session context: native_of then lane token, same as the launch adapter).
   local _rl_l _rl_f=""
   _rl_l="$(_lane_by_native "$provider" 2>/dev/null)" || _rl_l="$(_lane_by_token "$provider" 2>/dev/null)" || _rl_l=""
   [ -n "$_rl_l" ] && _rl_f="$(_lane_field "$_rl_l" relaunch_fn 2>/dev/null)"
-  if [ -n "$_rl_f" ]; then "$_rl_f" "$model" "$effort"; return; fi
+  if [ -n "$_rl_f" ]; then "$_rl_f" "$model" "$effort" "${4:-}"; return; fi
   case "$provider" in
     droid)
       # VERIFIED against the live CLI: interactive `droid` has NO reasoning-effort flag
@@ -18939,9 +18938,9 @@ session() {
       echo "claim released for '$1'"
       ;;
     reply)
-      [ "$#" -ge 2 ] || die "session reply needs <external-id> <text>"
+      local _allow_effort=0; while [ $# -gt 0 ]; do case "$1" in --allow-effort) _allow_effort=1; shift ;; *) break ;; esac; done; [ "$#" -ge 2 ] || die "session reply needs <external-id> <text>"
       local external_id="$1"; shift
-      _external_reply "$external_id" "$*" || return 1
+      _external_reply "$external_id" "$*" "$_allow_effort" || return 1
       ;;
     start)
       # --done-when <spec> is a session-start-only flag: pull it out before parse_model so it never
@@ -19026,7 +19025,7 @@ session() {
       echo "To be woken when a turn ends: after each session send, start '$0 wait $SESSION_NAME' as a background command."
       ;;
     send)
-      [ -n "${1:-}" ] || die "session send needs text"
+      local _allow_effort=0; while [ $# -gt 0 ]; do case "$1" in --allow-effort) _allow_effort=1; shift ;; *) break ;; esac; done; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
@@ -19039,7 +19038,7 @@ session() {
         printf 'EVENT failed %s %s send refused: modal open (%s menu); nothing typed\nNEXT OUTSOURCERER_TMUX=%s %s session answer\n' "$SESSION_NAME" "$(date +%s)" "$_menu_kind" "$SESSION_NAME" "$0"
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
-      _session_send_effort_guard "$SESSION_NAME" "$*" || die "session send refused: '/effort' persists effortLevel into ~/.claude/settings.json — it re-defaults effort for EVERY new Claude session, not just '$SESSION_NAME'. For a per-session change run '$0 session effort <level>': it respawns this pane's claude with --continue (the conversation is kept; the process does restart) plus a session-scoped --effort flag — settings untouched. If this pane is provably not Claude Code, prefix the send with OSRC_SEND_ALLOW_EFFORT=1 to override the guard; to set the global default on purpose, type /effort in the session TUI yourself."
+      _session_send_effort_guard "$SESSION_NAME" "$*" "$_allow_effort" || die "$(_session_effort_refuse_msg "$_SESSION_GUARD_RC" send "$SESSION_NAME")"
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
       case "$_send_rc" in
         0) echo "sent (verified: ${OSRC_SEND_EVIDENCE:-delivery receipt}). Read progress with: $0 session read" ;;

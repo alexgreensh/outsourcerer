@@ -525,18 +525,58 @@ _osrc_perm_restore_profile() {
 # Both read the global PERM_PROFILE, which _session_control_relaunch restores from
 # the session's registry record before calling _session_relaunch_command.
 
+# _session_cc_uuid_valid <id> -> 0 only for a real claude sessionId shape (a
+# UUID). --resume takes the value verbatim, so the check must be strict: the
+# looser _external_session_id_valid charset accepts a leading-dash id like
+# --dangerously-skip-permissions, which claude would read as a flag, and any
+# process the delegate starts can plant a matching ~/.claude/sessions file.
+_session_cc_uuid_valid() {
+  printf '%s\n' "${1:-}" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+# _session_cc_resume_id <tmux-pane> -> the pane claude's sessionId for
+# `claude --resume <id>`, or nothing (= the caller falls back to --continue).
+# Live proof first: ~/.claude/sessions/*.json maps the running claude pid to its
+# sessionId via _fleet_cc_session_for_pane; the registry start record's
+# cc_session_id is the fallback for a pane whose session file is already gone.
+# --resume beats --continue because --continue picks the newest conversation in
+# the folder, which may be a DIFFERENT session's when two claude panes share a
+# cwd; the id pins this pane's own conversation.
+_session_cc_resume_id() {
+  local pane="$1" pid cwd match sid
+  pid="$(tmux display-message -p -t "$pane" '#{pane_pid}' 2>/dev/null)"
+  cwd="$(tmux display-message -p -t "$pane" '#{pane_current_path}' 2>/dev/null)"
+  if [ -n "$cwd" ]; then cwd="$(cd "$cwd" 2>/dev/null && pwd -P)" || cwd=""; fi
+  if [ -n "$pid" ] && [ -n "$cwd" ]; then
+    match="$(_fleet_cc_session_for_pane "$pid" "$cwd" 2>/dev/null)" || match=""
+    sid="${match%%$'\t'*}"
+    _session_cc_uuid_valid "$sid" && { printf '%s\n' "$sid"; return 0; }
+  fi
+  sid="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .cc_session_id // empty' | tail -1)"
+  _session_cc_uuid_valid "$sid" && printf '%s\n' "$sid"
+}
+
+# _session_cc_resume_for <prov> <pane> -> the resume id for cc/claude panes,
+# empty for every other provider (and whenever no id can be proven).
+_session_cc_resume_for() {
+  case "$1" in cc|claude) _session_cc_resume_id "$2" 2>/dev/null ;; esac
+}
+
 # Relaunch command for `session effort` on a cc session (claude honors effort via
-# MAX_THINKING_TOKENS plus the session-scoped --effort flag). --continue resumes
-# the pane's conversation so the respawn does not start from nothing. --perm safe adds
-# the same allow-list/ask-rules suffix session start emits (default -> empty suffix).
-# No effort -> rc1 (the caller leaves the session intact).
+# MAX_THINKING_TOKENS plus the session-scoped --effort flag). $3 is the pane's
+# claude sessionId when known: --resume <id> pins THIS conversation, --continue
+# (the fallback) picks the newest in the folder and can grab a sibling pane's.
+# --perm safe adds the same allow-list/ask-rules suffix session start emits
+# (default -> empty suffix). No effort -> rc1 (the caller leaves it intact).
 _session_relaunch_cc() {
-  local tokens suffix flag
+  local tokens suffix flag resume="${3:-}"
   tokens="$(_effort_thinking_tokens "$2")"
   [ -n "$tokens" ] || return 1
   suffix="$(osrc_perm_string_suffix cc "${PERM_PROFILE:-default}")" || return 1
   flag="$(_cc_effort_flag "$2")"
-  printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q --continue%s' "$tokens" "$1" "$suffix"
+  printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$1"
+  if _session_cc_uuid_valid "$resume"; then printf ' --resume %q' "$resume"; else printf ' --continue'; fi
+  printf '%s' "$suffix"
   if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
 }
 
