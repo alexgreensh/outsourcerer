@@ -478,16 +478,6 @@ def git_rule(rest, cwd, roots):
     raise Hold("git %s not on the allowlist" % sub)
 
 
-def gh_rule(rest):
-    if rest[:1] == ["api"]:
-        raise Hold("gh api (method and fields are easy to smuggle; not in the safe set)")
-    pair = tuple(rest[:2])
-    if pair not in GH_READ:
-        raise Hold("gh " + " ".join(rest[:2]) + " (publishing / mutating, or not on the allowlist)")
-    parse("gh " + " ".join(pair), rest[2:], GH_SPEC)
-    return "read-only:gh " + " ".join(pair)
-
-
 def runner_rule(name, rest, cwd, roots):
     sp = RUNNER_SPECS[name]
     pos, vals = parse(name, rest, sp)
@@ -567,7 +557,7 @@ def env_rule(args: list[str]) -> list[str]:
 
 NOT_SAFE = {
     "sudo": "privilege escalation", "doas": "privilege escalation", "su": "privilege escalation",
-    "curl": "network tool", "wget": "network tool", "nc": "network tool", "ssh": "network tool",
+    "curl": "network tool", "wget": "network tool", "nc": "network tool", "ssh": "network tool", "gh": "network tool",
     "scp": "network tool", "rsync": "network tool", "ftp": "network tool", "sftp": "network tool",
     "security": "secrets access", "keychain": "secrets access", "printenv": "secrets access",
     "ps": "shows other processes' environments", "lsof": "process inspection",
@@ -630,8 +620,6 @@ def classify_segment(tokens, prev_op, cwd, roots):
         return write_rule(name, rest, cwd, roots), cwd
     if name == "git":
         return git_rule(rest, cwd, roots), cwd
-    if name == "gh":
-        return gh_rule(rest), cwd
     if name in RUNNER_SPECS:
         return runner_rule(name, rest, cwd, roots), cwd
     if name in ("npx", "pnpx"):

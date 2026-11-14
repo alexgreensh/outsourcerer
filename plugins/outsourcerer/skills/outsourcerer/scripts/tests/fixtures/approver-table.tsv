@@ -9,9 +9,9 @@ approve	shell		git status --short && git diff --stat
 approve	shell		git log --oneline -20
 approve	shell		git show HEAD~1 --stat
 approve	shell		git diff main...HEAD -- src/
-approve	shell		gh pr view 59 --json title,body
-approve	shell		gh pr list --state open
-approve	shell		gh run view 123 --log-failed
+hold	shell		gh pr view 59 --json title,body
+hold	shell		gh pr list --state open
+hold	shell		gh run view 123 --log-failed
 approve	shell		rg -n "approve" src/
 approve	shell		grep -E 'a|b' notes.txt
 approve	shell		grep -rn "test_antigravity_install" tests/ | head -20
