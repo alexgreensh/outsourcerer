@@ -25,20 +25,7 @@ _owner_record() { # <job-or-session-id>
   return 0
 }
 
-# _waited_ids -> ids that a running `wait` / `fanout wait` already covers, one per line.
-_waited_ids() {
-  local line rest gid
-  ps -axo command= 2>/dev/null | grep -E 'outsourcerer(\.sh)?[^ ]* (.* )?wait( |$)' | grep -v 'stop-guard' | while IFS= read -r line; do
-    rest="${line##* wait }"
-    case "$line" in
-      *" fanout wait "*)
-        gid="${line##* fanout wait }"; gid="${gid%% *}"
-        [ -f "$(_fanout_dir "$gid" 2>/dev/null)/members.tsv" ] && cut -f1 "$(_fanout_dir "$gid")/members.tsv" 2>/dev/null
-        ;;
-      *) printf '%s\n' "${rest%% *}" ;;
-    esac
-  done
-}
+# _waited_ids lives in lib/stopguard.sh (it also counts a live `supervise` as a waiter).
 
 # ---------------------------------------------------------------- adopt ----
 

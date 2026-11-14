@@ -31,33 +31,36 @@ mkjob() { mkdir -p "$TMP/jobs/$1"; printf '%s\n' "$2" > "$TMP/jobs/$1/status"
 # --- a live job nobody has looked at must be reported, unprompted ---
 mkjob lonely running 600
 out="$(run doctor 2>&1)"
-printf '%s' "$out" | grep -q 'nobody has looked at them' \
+grep -q 'nobody has looked at them' <<<"$out" \
   && ok "an unobserved running job is reported on the next invocation" \
   || bad "a job running for 10 minutes with no observer went unmentioned"
-printf '%s' "$out" | grep -q 'watch lonely' \
+grep -q 'watch lonely' <<<"$out" \
   && ok "the warning names the exact command to start watching" \
   || bad "warning does not give the watch command"
+grep -qE '^>>> +lonely +\(unobserved' <<<"$out" \
+  && ok "the per-job warning line has the shape the negative checks below anchor on" \
+  || bad "per-job warning line changed shape; the 'finished'/'fresh' checks would pass vacuously"
 
 # --- looking at it counts; the tool must stop nagging once you have ---
 run status lonely >/dev/null 2>&1
-run doctor 2>&1 | grep -q 'nobody has looked at them' \
+grep -q 'nobody has looked at them' <<<"$(run doctor 2>&1)" \
   && bad "still warned about a job that was just inspected" \
   || ok "the warning clears once someone actually looks"
 
 # --- a finished job is not 'unwatched'; only live work can be neglected ---
 mkjob finished done 900
-run doctor 2>&1 | grep -q 'finished' \
+grep -qE '^>>> +finished +\(unobserved' <<<"$(run doctor 2>&1)" \
   && bad "a completed job was reported as needing a watcher" \
   || ok "terminal jobs are never reported as unwatched"
 
 # --- a job that just started gets a grace period, or every launch would cry wolf ---
 mkjob fresh running 5
-run doctor 2>&1 | grep -q 'fresh' \
+grep -qE '^>>> +fresh +\(unobserved' <<<"$(run doctor 2>&1)" \
   && bad "warned about a job that started seconds ago (cries wolf on every launch)" \
   || ok "a just-launched job is given a grace period before it counts as neglected"
 
 # --- the grace period is tunable rather than a magic number ---
-grep -q 'OSRC_UNWATCHED_AFTER' "$SRC" \
+grep -q 'OSRC_UNWATCHED_AFTER' "$SRC" "$SCRIPT_DIR"/../lib/*.sh \
   && ok "the neglect threshold is configurable" || bad "neglect threshold is hardcoded"
 
 # --- launching must TELL you to watch, not offer it as one option among three ---
@@ -67,7 +70,7 @@ grep -q 'NOW WATCH IT' "$SRC" \
 
 # --- the commands that mean 'someone looked' must record it, or the warning never clears ---
 for c in cmd_status cmd_watch cmd_result; do
-  grep -qF '_mark_watched' <<<"$(awk "/^$c\(\) \{/,/_mark_watched/" "$SRC")" \
+  grep -qF '_mark_watched' <<<"$(cat "$SRC" "$SCRIPT_DIR"/../lib/*.sh | awk "/^$c\(\) \{/,/_mark_watched/")" \
     && ok "$c records that the job was observed" \
     || bad "$c does not record attention (warning would never clear)"
 done
@@ -106,7 +109,7 @@ printf '%s\n' generation-2 > "$HB_TMP/generation"
 OSRC_HEARTBEAT_SINK="$HB_TMP/missing/sink" _heartbeat_tick >/dev/null 2>&1 || true
 pending="$(_wake_drain)"
 [ "$(wc -l < "$HB_TMP/heartbeat/heartbeat.log" | tr -d ' ')" = 2 ] \
-  && printf '%s' "$pending" | grep -q 'heartbeat-sink' \
+  && grep -q 'heartbeat-sink' <<<"$pending" \
   && ok "attached sink loss preserves the log and records unknown" \
   || bad "attached sink loss erased delivery or failed to surface unknown"
 rm -rf "$HB_TMP"

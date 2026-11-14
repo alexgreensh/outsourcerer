@@ -290,22 +290,93 @@ jobs that have been running with nobody looking. If you see that warning, you al
 ; watch or cancel before doing anything else. Watching is also what makes loops steerable: you cannot
 course-correct or kill a bad run you are not reading.
 
-**If you are an agent harness (Claude Code, Codex CLI), wake yourself with a background `wait`.** These
-harnesses take a turn only when the user types or when a background command they started exits; a
-command run by `OSRC_HEARTBEAT_WAKE` cannot inject a turn. So in the same turn as the launch, start
-`outsourcerer.sh wait <id>` as a background command (Claude Code: Bash `run_in_background: true`), one
-per job. `<id>` is a `bg` job id or a tmux session name (an auto-detached `run` prints its session as
-`osrc-ad-...`; a `session start` uses its session name). For a run, `wait` returns when it ends and
-prints its output, exit 0 on success, 1 on failure, 3 when it is waiting on you. For an interactive
-session it returns when the turn ends (idle after working). Every launch prints the exact line as
-**WAKE**.
+**If you are an agent harness (Claude Code, Codex CLI), wake yourself with ONE background `supervise`.**
+These harnesses take a turn only when the user types or when a background command they started exits;
+a command run by `OSRC_HEARTBEAT_WAKE` cannot inject a turn. So after every launch and after every
+wake, start `outsourcerer.sh supervise` as a background command (Claude Code: Bash
+`run_in_background: true`). One command covers everything this Claude Code session owns
+(`$OSRC_HOME/owners/<session-id>/`: `bg` jobs, auto-detached runs, `session start` sessions, remote
+lanes), or pass ids to watch only those. It blocks until something needs you, then prints one pair per
+target and exits 0:
+
+**Hand-in files.** A lane that reports by writing a file, not by its screen, is covered with
+`supervise --watch <dir|file>` (repeatable). Files named `*.DONE`, `*VERDICT*` or `*QUESTION*` in a
+watched directory each become their own target: `EVENT done L1.DONE ...` (NEXT reads `L1-REPORT.md`
+beside it when it exists), `EVENT done L1-VERDICT.md ...`, `EVENT question L2.QUESTION ...`. Every event
+is keyed on the file's name + mtime + size + content hash, so a lane re-handing in by rewriting the
+same DONE file (an empty DONE touched again, or a new sha inside) fires again; diffing file names
+missed exactly that. Registering baselines the files already there; registering again never
+re-baselines. **A watch counts as live work until `supervise --unwatch <dir|file>`.** The beacon
+logs its events while no supervise runs, and the stop guard blocks every stop with no supervise
+armed (the usual two blocks, then it lets the stop through and leaves the `.unguarded` note), on
+every turn, until you unwatch. Unwatch when the round is over. The hub does not show watches as lanes.
+File names are lane-written input: a hand-in name must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`, anything
+else is skipped with one stderr notice, a `--watch` path may only use `[A-Za-z0-9._/-]`, and every
+NEXT quotes its path with `printf %q`, so a NEXT is always a plain `cat <file>`. A lane's own done
+contract (`--done-when file:` or `branch:`) keys its `done` event the same way, on the file
+fingerprint or the branch tip sha.
+
+    EVENT <kind> <target-id> <unix-ts> <one-line detail>
+    NEXT <exact command to run>
+
+Kinds, highest priority first: `approval` (a menu or permission prompt is open; NEXT is `session
+answer`, which lists the options), `question` (the delegate stopped and asked, read from the Claude
+transcript where there is one), `failed` (terminal failure, a pane that died without a stop, or an
+API/login error banner such as "Please run /login · API Error: 403"; only the banner counts: the LAST
+line above the composer, in the CLI's own shape (Claude Code's `⎿` line with `API Error: <code>` or
+`Please run /login`; other engines a line starting with one), never a lane that asked something or whose
+done contract holds, and only after the same screen held for the confirm window. Then supervise **types
+into the lane**: one automatic `continue` through `session send` (which refuses modals), and it wakes
+you with NEXT `session send 'continue'` if the same error is still there. The heartbeat beacon runs the
+same pass, so it can type that `continue` too with no supervise armed. `OSRC_SUPERVISE_AUTORETRY=0`
+turns the typing off: you get the `failed` event and its NEXT, nothing is typed), `limit` (a
+plan-limit banner; never reported as idle), `done` (a quiet lane whose done contract holds, checked
+BEFORE the question test, so "Done. Want me to also update the docs?" is done with the question kept in
+the detail), `idle` (finished a turn after working; the screen must look idle on two polls at least
+`OSRC_SUPERVISE_CONFIRM`=20 s apart, so a busy Codex pane flickering between tool calls never counts; a
+fresh session that was never asked anything is not an event), `stalled` (working with no screen change
+for `OSRC_SUPERVISE_STALL`=15 min, or a screen nothing recognises; its ANSI capture lands in
+`$OSRC_HOME/fixtures-inbox/`, local only, and can hold whatever was on screen, so do not share it
+unread), then `unreviewed` and `drift` from other modules, and `approved` (informational: logged and
+shown with the next real wake, never a wake by itself). `EVENT done all` means nothing you own is live.
+`EVENT failed supervise` (exit 2) means supervise itself broke: run its NEXT to re-arm.
+
+**With the approver** (`session approve-policy safe`, lib/approver.sh), supervise calls
+`osrc_approver_tick` on every open prompt before reporting it: approved once (logged as `approved`, no
+wake), held and new or older than `OSRC_HOLD_MIN` (the approver's own `EVENT approval` + `session answer`
+wakes you), held and already reported (nothing; the approver owns that reminder clock), or nothing to do
+(supervise reports the prompt itself). The heartbeat beacon runs the same pass every tick, so `safe`
+acts even when no supervise is armed. A beacon started before this version keeps the old code until it
+is restarted (`heartbeat start` after stopping the old leader).
+
+Act on every NEXT in the batch, then arm `supervise` again. After the first event it waits up to
+`OSRC_SUPERVISE_SETTLE`=20 s while other targets could still report, so near-simultaneous events land in
+one wake. The same unresolved event is not repeated on the next arm, but comes back after
+`OSRC_SUPERVISE_REMIND`=20 min, so a skipped event never sleeps forever. Events are appended to
+`$OSRC_HOME/lanes/events.jsonl` by supervise and by the heartbeat beacon on every tick; each session
+keeps a cursor (offset + log generation, so a 5 MB rotation finishes the old file first), and every
+event carries its owner session, so a supervise re-armed after compaction, a restart or a reaped
+background shell returns at once with what happened in between, including runs the stop guard already
+pruned (the guard logs a finished run's event before it removes the marker). Poll cadence: `OSRC_SUPERVISE_POLL` (10 s).
+
+`wait <id>` keeps its contract for one run: it returns when that run ends and prints its output, exit 0
+on success, 1 on failure, 3 when it is waiting on you (now also when its screen stays unrecognised). On
+an interactive session it returns at the end of every turn, so an orchestrator would have to re-arm one
+per session; that is why `supervise` is the default.
 
 **The stop guard backs this up in Claude Code.** The plugin installs a Stop hook. Each launch made from a
-Claude Code session records that session as its owner. When the session tries to end its turn while one
-of its runs is still going and no `wait` covers it, the hook blocks the stop and lists the exact `wait`
-commands to start. Runs with a waiter, finished runs and other sessions' runs never block. The same
-unwaited set is blocked at most twice (`OSRC_STOP_GUARD_MAX`), then the turn may end. Turn it off with
-`OSRC_STOP_GUARD=0`. Any error lets the turn end.
+Claude Code session records that session as its owner. A target is owed a waiter while it is working,
+parked on an approval, question, limit or API error, or is a remote lane still live or READY; an idle
+session is owed one while anything else the session owns is. One idle-looking screen read is not trusted:
+idle counts only after supervise (or the beacon) confirmed it. With the beacon off and no supervise ever
+armed, an idle lane therefore costs two blocked stops, whose message says to arm supervise. A done
+contract that holds also wins over a composer holding unsent text: a finished lane's lost send is not
+reported. When the session tries to end its turn with such work and
+no running `supervise` (or a `wait` per id), the hook blocks the stop and names the one `supervise`
+command to start. The same unwaited set is blocked at most twice (`OSRC_STOP_GUARD_MAX`); then the turn
+may end, and `$OSRC_HOME/owners/<session-id>/.unguarded` records it loudly: every later outsourcerer call
+prints that line until a supervise runs. Turn the guard off with `OSRC_STOP_GUARD=0`. Any error lets the
+turn end.
 
 **If you are an async / message-driven orchestrator that only takes a turn when input arrives (a
 chat/Slack/Telegram bot, or any assistant that sits idle between messages, even a long-lived process

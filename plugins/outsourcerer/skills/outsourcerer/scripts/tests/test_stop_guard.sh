@@ -44,7 +44,8 @@ mkjob job-live
 mkdir -p "$OSRC_HOME/owners/sess-A"; : > "$OSRC_HOME/owners/sess-A/job-live"
 out="$(guard sess-A)"
 printf '%s' "$out" | jq -e '.decision=="block"' >/dev/null 2>&1 && ok "the stop is blocked" || no "not blocked: [$out]"
-printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "wait job-live" && ok "the reason names the exact wait command" || no "reason lacks the wait command"
+printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "supervise --session sess-A" && ok "the reason names ONE supervise command" || no "reason lacks the supervise command"
+printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "job-live" && ok "the reason names the run that needs a waiter" || no "reason lacks the run id"
 printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "run_in_background" && ok "the reason says to run it in the background" || no "reason lacks run_in_background"
 
 echo "=== other sessions are not blocked ==="
