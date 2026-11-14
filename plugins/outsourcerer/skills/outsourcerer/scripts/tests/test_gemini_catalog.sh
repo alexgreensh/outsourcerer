@@ -140,7 +140,7 @@ grep -q '\-\-model "$(_gemini_api_id gemini-flash-lite)"' "$SRC" && ok "the gemi
 # reads it.
 OSRC_SOURCED=1 bash -c '
   source "$1" || exit 1
-  lane_descriptor_gm | grep -q "default_model=gemini-flash-lite" || exit 1
+  { _t3b_pipe="$(lane_descriptor_gm)" && grep -q "default_model=gemini-flash-lite" <<<"$_t3b_pipe"; } || exit 1
   [ "$(_lane_by_provider gemini)" = "gm" ] || exit 1
   [ "$(_route_provider_default_model gemini)" = "gemini-flash-lite" ]
 ' _ "$SRC" >/dev/null 2>&1 \

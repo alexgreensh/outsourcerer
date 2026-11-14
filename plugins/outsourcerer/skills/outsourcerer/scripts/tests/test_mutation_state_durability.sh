@@ -61,7 +61,7 @@ if _fleet_snapshot_write "$snapshot" && _fleet_snapshot_read | jq -e '.items | t
 else
   bad "snapshot publish/read failed"
 fi
-if find "$OSRC_HOME" -name '.fleet-snapshot.*.tmp' -print | grep -q .; then
+if { _t3b_pipe="$(find "$OSRC_HOME" -name '.fleet-snapshot.*.tmp' -print)" && grep -q . <<<"$_t3b_pipe"; }; then
   bad "snapshot temporary file remains"
 else
   ok "snapshot temporary file is replaced"
@@ -72,7 +72,7 @@ if grep -q "Captain's Call" <<<"$digest" && grep -q 'Charted Next' <<<"$digest";
 else
   bad "digest sections are incomplete ($digest)"
 fi
-if _heartbeat_line "$snapshot" | grep -q '♥'; then
+if { _t3b_pipe="$(_heartbeat_line "$snapshot")" && grep -q '♥' <<<"$_t3b_pipe"; }; then
   ok "heartbeat line renders a pulse"
 else
   bad "heartbeat line did not render"

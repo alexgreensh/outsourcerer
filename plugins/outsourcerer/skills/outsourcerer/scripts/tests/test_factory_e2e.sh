@@ -46,7 +46,7 @@ T="$OSRC_HOME/plans/demo/tasks"
 [ "$(jq -r .state "$T/t2.json")" = done ] && ok "ship task done" || bad "ship state $(jq -r .state "$T/t2.json")"
 [ "$(jq -r '.landed // false' "$T/t2.json")" = true ] && ok "ship task landed" || bad "ship task not landed"
 grep -q "SPEC: create feature.txt" "$T/t2/brief.md" && ok "the spec reached the build worker's brief" || bad "dependency output missing from brief"
-git -C "$R" log --format=%s main | grep -q '^land(demo/t2): build it$' && ok "main has the land merge commit" || bad "no land commit on main"
+{ _t3b_pipe="$(git -C "$R" log --format=%s main)" && grep -q '^land(demo/t2): build it$' <<<"$_t3b_pipe"; } && ok "main has the land merge commit" || bad "no land commit on main"
 [ "$(git -C "$R" show main:feature.txt 2>/dev/null)" = "feature built" ] && ok "the built file is on main" || bad "feature.txt not on main"
 [ -z "$(git -C "$R" status --porcelain)" ] && ok "the caller's checkout stayed clean" || bad "caller checkout dirty"
 [ "$(jq -r .verdict "$T/t2/evidence.json")" = done ] && [ "$(jq -r .secret_scan "$T/t2/evidence.json")" = clean ] \

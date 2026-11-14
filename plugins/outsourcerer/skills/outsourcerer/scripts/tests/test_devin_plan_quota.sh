@@ -110,7 +110,7 @@ grep -q 'mis-gate' <<<"$_out" && bad "block: still prints the ACU mis-gate wordi
 grep -q 'Switch lanes OFF Devin' <<<"$_out" && ok "block: caller's OFF-Devin advice printed" || bad "block: advice missing"
 # The probe lines legitimately NAME the sibling model they asked (that is the verification, not a
 # recommendation); every other line must still steer clear of Devin plan models.
-printf '%s' "$_out" | grep -v '\] probe:' | grep -qE 'swe-1-7|glm-5-2\)|Retry on one of those plan-included' && bad "block: recommends another Devin plan model" || ok "block: no Devin plan model recommended"
+{ _t3b_pipe="$(printf '%s' "$_out" | grep -v '\] probe:')" && grep -qE 'swe-1-7|glm-5-2\)|Retry on one of those plan-included' <<<"$_t3b_pipe"; } && bad "block: recommends another Devin plan model" || ok "block: no Devin plan model recommended"
 # Weekly + unparseable reset -> lane still down, but the window is a LABELED estimate.
 _lane_down_clear dv
 printf 'Error: weekly usage quota exhausted, resets at soon.\n' > "$FX/weekly-vague"

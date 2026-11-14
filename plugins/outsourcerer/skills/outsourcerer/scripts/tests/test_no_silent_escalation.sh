@@ -105,7 +105,7 @@ if grep -q 'SECURITY DOWNGRADE' <<<"$out"; then ok "self-heal escalation banner 
 if grep -q 'permission-mode.*accept-edits' "$SRC"; then
   # The only remaining accept-edits permission-mode is inside non-continue lanes.
   # We ensure the continue_turn block itself is clean.
-  if grep -A2 'continue_turn()' "$SRC" | grep -q 'permission-mode.*accept-edits'; then
+  if { _t3b_pipe="$(grep -A2 'continue_turn()' "$SRC")" && grep -q 'permission-mode.*accept-edits' <<<"$_t3b_pipe"; }; then
     bad "continue_turn still forces accept-edits"
   else
     ok "continue_turn does not force accept-edits"

@@ -180,7 +180,7 @@ out="$(WITH_SPEC='skills=space ünicode' _with_preamble_render bundle 2>/dev/nul
 grep -Eq "space ünicode: $OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/space ünicode/" <<<"$out" \
   && ok "a spaced unicode skill bundles end-to-end" \
   || bad "spaced skill did not bundle: $out"
-find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md" | grep -q . \
+{ _t3b_pipe="$(find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md")" && grep -q . <<<"$_t3b_pipe"; } \
   && ok "the spaced skill's tree is on disk under its real name" \
   || bad "spaced skill tree missing on disk"
 

@@ -48,7 +48,7 @@ echo "=== a thin brief is held before a worker is spent ==="
 t1="$(O task add 'build it' --shape ship 2>/dev/null)"
 out="$(L "_task_dispatch p $t1" 2>&1)"; rc=$?
 check "a ship task with no spec, check or dependency does not start" "[ $rc -ne 0 ] && [ \"\$(launches)\" = 0 ]"
-check "it is held with a reason that names what is missing" "[ \"\$(J $t1 .state)\" = held ] && J $t1 .hold.reason | grep -q 'too thin' && J $t1 .hold.reason | grep -q 'spec, a check'"
+check "it is held with a reason that names what is missing" "[ \"\$(J $t1 .state)\" = held ] && { _t3b_pipe=\"\$(J $t1 .hold.reason)\" && grep -q 'too thin' <<<\"\$_t3b_pipe\"; } && { _t3b_pipe=\"\$(J $t1 .hold.reason)\" && grep -q 'spec, a check' <<<\"\$_t3b_pipe\"; }"
 check "no attempt is used up" "[ \"\$(J $t1 .attempts)\" = 0 ]"
 check "the message says how to add the detail" "grep -q 'task release' <<<\"\$out\""
 O task release "$t1" --plan p --answer 'done when a.txt says bye; check: grep bye a.txt' >/dev/null 2>&1
@@ -62,7 +62,7 @@ L "_task_dispatch p $t3" >/dev/null 2>&1
 check "a scout task with only a title starts" "[ \"\$(J $t3 .state)\" = running ]"
 t4="$(L "_task_new p '{\"title\":\"\",\"prompt\":\"\"}'" 2>/dev/null)"
 L "_task_dispatch p $t4" >/dev/null 2>&1
-check "a task with no words at all is held" "[ \"\$(J $t4 .state)\" = held ] && J $t4 .hold.reason | grep -q 'no prompt or title'"
+check "a task with no words at all is held" "[ \"\$(J $t4 .state)\" = held ] && { _t3b_pipe=\"\$(J $t4 .hold.reason)\" && grep -q 'no prompt or title' <<<\"\$_t3b_pipe\"; }"
 t5="$(O task add 'build on scout' --shape ship --after "$t3" 2>/dev/null)"
 t5b="$(L "_task_new p '{\"title\":\"cand\",\"shape\":\"ship\",\"flow\":{\"name\":\"best-of-n\",\"stage\":\"candidate\"}}'" 2>/dev/null)"
 check "a flow stage is trusted to its template" "[ -z \"\$(L \"_task_brief_lint \\\"\\\$(_task_get p $t5b)\\\"\")\" ]"
@@ -77,7 +77,7 @@ check "an unreadable --until is refused when a default rides on it" "[ $rc -ne 0
 now="$(date +%s)"
 out="$(O task hold "$t6" --plan p --reason 'postgres or sqlite?' --default sqlite --until +2h 2>&1)"; rc=$?
 check "--until +2h stores a deadline about two hours out" "[ $rc -eq 0 ] && e=\$(J $t6 .hold.until_epoch) && [ \$((e - now)) -ge 7190 ] && [ \$((e - now)) -le 7210 ]"
-check "the deadline is also stored as a readable UTC time" "J $t6 .hold.until | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'"
+check "the deadline is also stored as a readable UTC time" "{ _t3b_pipe=\"\$(J $t6 .hold.until)\" && grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<\"\$_t3b_pipe\"; }"
 check "hold says what happens with no answer" "grep -q 'default: sqlite' <<<\"\$out\""
 out="$(O task show "$t6" --plan p 2>&1)"
 check "task show lists the default" "grep -q 'default:  sqlite' <<<\"\$out\""
@@ -128,20 +128,20 @@ mk() { local id; id="$(O task add "$1" --retries 3 2>/dev/null)"
 again() { L "_task_update p $1 '.state = \"running\" | .attempts = (.attempts + 1)'" >/dev/null 2>&1; }
 r1="$(mk transient)"; L "_ff_fail_or_retry p $r1 'job 20261023-131700-ab ended failed (HTTP 429)'" >/dev/null 2>&1
 check "transient: retried on the same model" "[ \"\$(J $r1 .state)\" = todo ] && [ \"\$(J $r1 .model)\" = m1 ] && [ \"\$(J $r1 .last_fail_class)\" = transient ]"
-check "transient: the brief note says it was not the work" "J $r1 .result | grep -q 'not the work itself'"
+check "transient: the brief note says it was not the work" "{ _t3b_pipe=\"\$(J $r1 .result)\" && grep -q 'not the work itself' <<<\"\$_t3b_pipe\"; }"
 again "$r1"; L "_ff_fail_or_retry p $r1 'job 20261023-131700-ab ended failed (HTTP 429)'" >/dev/null 2>&1
 check "transient twice: moves to the next model" "[ \"\$(J $r1 .model)\" = m2 ]"
 r2="$(mk model)"; L "_ff_fail_or_retry p $r2 'job x ended failed (model not found)'" >/dev/null 2>&1
 check "model: switches to the next model" "[ \"\$(J $r2 .state)\" = todo ] && [ \"\$(J $r2 .model)\" = m2 ]"
 again "$r2"; L "_ff_fail_or_retry p $r2 'job x ended failed (empty output)'" >/dev/null 2>&1
-check "model twice in a row: held for a re-plan" "[ \"\$(J $r2 .state)\" = held ] && J $r2 .hold.reason | grep -q 'model or lane problem'"
+check "model twice in a row: held for a re-plan" "[ \"\$(J $r2 .state)\" = held ] && { _t3b_pipe=\"\$(J $r2 .hold.reason)\" && grep -q 'model or lane problem' <<<\"\$_t3b_pipe\"; }"
 r3="$(mk big)"; L "_ff_fail_or_retry p $r3 'job x ended wedged'" >/dev/null 2>&1
-check "too big: same model, asked for a smaller piece with OPEN ITEMS" "[ \"\$(J $r3 .model)\" = m1 ] && J $r3 .result | grep -q 'smallest piece' && J $r3 .result | grep -q 'OPEN ITEMS'"
+check "too big: same model, asked for a smaller piece with OPEN ITEMS" "[ \"\$(J $r3 .model)\" = m1 ] && { _t3b_pipe=\"\$(J $r3 .result)\" && grep -q 'smallest piece' <<<\"\$_t3b_pipe\"; } && { _t3b_pipe=\"\$(J $r3 .result)\" && grep -q 'OPEN ITEMS' <<<\"\$_t3b_pipe\"; }"
 again "$r3"; out="$(L "_ff_fail_or_retry p $r3 'job x ended timeout'" 2>&1)"
-check "too big twice: held, asking to split it" "[ \"\$(J $r3 .state)\" = held ] && J $r3 .hold.reason | grep -q 'Split it'"
+check "too big twice: held, asking to split it" "[ \"\$(J $r3 .state)\" = held ] && { _t3b_pipe=\"\$(J $r3 .hold.reason)\" && grep -q 'Split it' <<<\"\$_t3b_pipe\"; }"
 r4="$(mk work)"; L "_ff_fail_or_retry p $r4 'the done check said no: tests fail'" >/dev/null 2>&1
 again "$r4"; L "_ff_fail_or_retry p $r4 'the done check said no: tests still fail'" >/dev/null 2>&1
-check "work twice: keeps retrying within the budget" "[ \"\$(J $r4 .state)\" = todo ] && J $r4 .result | grep -q 'tests still fail'"
+check "work twice: keeps retrying within the budget" "[ \"\$(J $r4 .state)\" = todo ] && { _t3b_pipe=\"\$(J $r4 .result)\" && grep -q 'tests still fail' <<<\"\$_t3b_pipe\"; }"
 r5="$(O task add 'out of budget' --retries 0 2>/dev/null)"
 L "_task_update p $r5 '.state = \"running\" | .attempts = 1'" >/dev/null 2>&1
 L "_ff_fail_or_retry p $r5 'the done check said no: nope'" >/dev/null 2>&1

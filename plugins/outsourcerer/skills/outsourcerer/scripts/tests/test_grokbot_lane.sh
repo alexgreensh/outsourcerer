@@ -71,7 +71,7 @@ out="$(gb run "summarize the repo")"; rc=$?
 case "$out" in *BOT_RESULT_OK*) ok "the bot's result file is printed" ;; *) no "result missing: [$out]" ;; esac
 jq -e '.source=="outsourcerer" and .mode=="read-only" and (.branch|startswith("osrc/grokbot-")) and (.instructions|contains("summarize the repo"))' "$TMP/payload.json" >/dev/null 2>&1 \
   && ok "the payload carries the task, a fresh branch and read-only mode" || no "payload wrong: $(head -c 300 "$TMP/payload.json")"
-jq -r .instructions "$TMP/payload.json" | grep -q "push osrc/grokbot-" && ok "the instructions tell the bot how to deliver" || no "delivery instructions missing"
+{ _t3b_pipe="$(jq -r .instructions "$TMP/payload.json")" && grep -q "push osrc/grokbot-" <<<"$_t3b_pipe"; } && ok "the instructions tell the bot how to deliver" || no "delivery instructions missing"
 grep -q "delivered on branch osrc/grokbot-" "$TMP/err" && ok "it names the delivered branch" || no "branch not reported"
 stop_bot
 
@@ -96,7 +96,7 @@ out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_
 [ "$rc" -ne 0 ] && grep -q "GROKBOT_WEBHOOK_URL" <<<"$out" && ok "missing setup names the two settings" || no "missing setup rc=$rc"
 out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://example.com/h GROKBOT_WEBHOOK_KEY=k "$SRC" --provider grokbot run "x" 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && grep -q "https://" <<<"$out" && ok "a plain-http webhook is refused (the key would travel in the clear)" || no "http URL accepted"
-grep -q 'printf .Authorization: Bearer' "$SRC" && ! grep -n 'delegate_grokbot' -A80 "$SRC" | grep -q -- '-H "Authorization' \
+grep -q 'printf .Authorization: Bearer' "$SRC" && ! { _t3b_pipe="$(grep -n 'delegate_grokbot' -A80 "$SRC")" && grep -q -- '-H "Authorization' <<<"$_t3b_pipe"; } \
   && ok "the key goes through the header file, never the process list" || no "key may appear in argv"
 
 echo "RESULT: $pass passed, $fail failed"

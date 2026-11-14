@@ -160,14 +160,14 @@ OUT2="$TMP/brief-idle.md"
 out="$(PATH="$TMP/bin:$PATH" CLAUDE_CODE_SESSION_ID=new-sess "$SRC" handover --out "$OUT2" 2>/dev/null)"; rc=$?
 [ "$rc" -eq 0 ] && grep -q '`sess-idle` -- tmux, idle' "$OUT2" \
   && ok "idle session row shows kind=tmux state=idle" || no "idle row wrong (rc=$rc): $(grep -A3 'sess-idle' "$OUT2" 2>/dev/null)"
-grep -A6 'sess-idle' "$OUT2" | grep -q 'OUTSOURCERER_TMUX=sess-idle' \
-  && grep -A6 'sess-idle' "$OUT2" | grep -q 'session read' \
+{ _t3b_pipe="$(grep -A6 'sess-idle' "$OUT2")" && grep -q 'OUTSOURCERER_TMUX=sess-idle' <<<"$_t3b_pipe"; } \
+  && { _t3b_pipe="$(grep -A6 'sess-idle' "$OUT2")" && grep -q 'session read' <<<"$_t3b_pipe"; } \
   && ok "idle session gets the session read command" || no "no read command for idle session"
 _idle_blk="$(awk '/^### `sess-idle`/{f=1;next} /^### `/{if(f)exit} f' "$OUT2")"
 grep -q 'no waiter needed' <<<"$_idle_blk" \
   && no "an alive idle session was told it needs no waiter" \
   || ok "idle session is not dismissed as needing no waiter"
-grep -A6 'sess-idle' "$OUT2" | grep -q '/tmp/fake-pane-cwd' \
+{ _t3b_pipe="$(grep -A6 'sess-idle' "$OUT2")" && grep -q '/tmp/fake-pane-cwd' <<<"$_t3b_pipe"; } \
   && ok "idle session cwd falls back to the pane path" || no "pane cwd fallback missing"
 
 echo "=== handover prefers one supervise command when L1's multiplexer exists ==="

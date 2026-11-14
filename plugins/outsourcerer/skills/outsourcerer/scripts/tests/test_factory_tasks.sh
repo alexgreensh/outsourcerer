@@ -152,7 +152,7 @@ check "concurrent task add allocates five distinct ids" "[ \"\$(sort -u \"$TMP/a
 t6="$(O task add 'will not launch' 2>/dev/null)"
 out="$(STUB_FAIL=1 L "_task_dispatch alpha $t6" 2>&1)"; rc=$?
 check "a failed launch fails the task with a reason" \
-  "[ $rc -ne 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = failed ] && jq -r .result \"$OSRC_HOME/plans/alpha/tasks/$t6.json\" | grep -q 'did not launch'"
+  "[ $rc -ne 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = failed ] && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" && grep -q 'did not launch' <<<\"\$_t3b_pipe\"; }"
 check "a failed task raises a wake event for the heartbeat" \
   "grep -q '\"kind\":\"factory-task\".*\"task\":\"$t6\".*\"task_state\":\"failed\"' \"$OSRC_HOME/wake-queue.jsonl\""
 
@@ -202,7 +202,7 @@ out="$(L "_task_dispatch alpha $t7" 2>&1)"; rc=$?
 check "a held task cannot be dispatched" "[ $rc -ne 0 ] && grep -q 'held for a decision' <<<\"\$out\""
 show="$(O plan show 2>&1)"
 check "plan show puts held and failed tasks in Captain's Call" \
-  "printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\" | grep -q \"$t7 \\[held\\] big - needs a decision: pick A or B\" && printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\" | grep -q \"$t6 \\[failed\\]\""
+  "{ _t3b_pipe=\"\$(printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\")\" && grep -q \"$t7 \\[held\\] big - needs a decision: pick A or B\" <<<\"\$_t3b_pipe\"; } && { _t3b_pipe=\"\$(printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\")\" && grep -q \"$t6 \\[failed\\]\" <<<\"\$_t3b_pipe\"; }"
 out="$(O task release "$t7" 2>&1)"; rc=$?
 check "release without an answer is refused" "[ $rc -ne 0 ]"
 O task release "$t7" --answer 'B' >/dev/null 2>&1
@@ -245,7 +245,7 @@ echo done > "$OSRC_HOME/jobs/J4/status"; printf 'Independent finding: all good\n
 out="$(O task done t4 2>&1)"; rc=$?
 check "done passes on a finished job with a result (fallback contract)" "[ $rc -eq 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" = done ]"
 check "done copies a scout's output to report.md and fills the result" \
-  "grep -q 'Independent finding' \"$OSRC_HOME/plans/alpha/tasks/t4/report.md\" && jq -r .result \"$OSRC_HOME/plans/alpha/tasks/t4.json\" | grep -q 'Independent finding'"
+  "grep -q 'Independent finding' \"$OSRC_HOME/plans/alpha/tasks/t4/report.md\" && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" && grep -q 'Independent finding' <<<\"\$_t3b_pipe\"; }"
 check "done passes through verifying (logged)" \
   "jq -e 'select(.task==\"t4\" and .to==\"verifying\")' \"$OSRC_HOME/plans/alpha/events.jsonl\" >/dev/null"
 L "_task_update alpha $t5 '.job = \"J5\"'"; mkdir -p "$OSRC_HOME/jobs/J5"; echo done > "$OSRC_HOME/jobs/J5/status"; echo x > "$OSRC_HOME/jobs/J5/last.txt"
@@ -307,7 +307,7 @@ else
   check "plan run without factory-flow.sh says what is missing" "[ $rc -ne 0 ] && grep -q 'factory-flow.sh' <<<\"\$out\""
 fi
 check "ship task in a plan without a repo fails closed" \
-  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship --check true >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\" | grep -q 'no repo'"
+  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship --check true >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\")\" && grep -q 'no repo' <<<\"\$_t3b_pipe\"; }"
 
 # ---- end to end through the REAL bg path (fake droid binary, no model call)
 FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
@@ -501,7 +501,7 @@ check "#7 ... but does recover one whose claim is older than the stale window" "
 k5="$(O task add 'launch fails' --plan fx 2>/dev/null)"
 STUB_FAIL=1 L "_task_dispatch fx $k5" >/dev/null 2>&1
 check "#R3-13 a launch failure is marked launch_failed with a 'launch failed' reason (attempt counted)" \
-  "[ \"\$(jq -r '[.state,(.launch_failed|tostring),(.attempts|tostring)] | join(\"|\")' \"\$(TJ fx $k5)\")\" = 'failed|true|1' ] && jq -r .result \"\$(TJ fx $k5)\" | grep -q '^launch failed: '"
+  "[ \"\$(jq -r '[.state,(.launch_failed|tostring),(.attempts|tostring)] | join(\"|\")' \"\$(TJ fx $k5)\")\" = 'failed|true|1' ] && { _t3b_pipe=\"\$(jq -r .result \"\$(TJ fx $k5)\")\" && grep -q '^launch failed: ' <<<\"\$_t3b_pipe\"; }"
 O task retry "$k5" --plan fx >/dev/null 2>&1
 check "#R3-13 retry clears launch_failed" "[ \"\$(jq -r '.launch_failed' \"\$(TJ fx $k5)\")\" = false ]"
 
@@ -714,7 +714,7 @@ r3_crlf() (
   [ -n "$job" ] && _task_get r3 "$id" | command jq -e '.state=="running" and (.job|length)>0' >/dev/null
 )
 check 'R3 D4 native jq CRLF does not break task dispatch' r3_crlf
-check 'R3 D22 task header references published documentation' "! head -n 5 \"$HERE/../factory-tasks.sh\" | grep -q CONTRACT.md"
+check 'R3 D22 task header references published documentation' "! { _t3b_pipe=\"\$(head -n 5 \"$HERE/../factory-tasks.sh\")\" && grep -q CONTRACT.md <<<\"\$_t3b_pipe\"; }"
 r3_hint() (
   . "$LIB"
   local id out; id="$(r3_task)"

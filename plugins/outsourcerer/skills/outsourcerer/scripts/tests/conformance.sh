@@ -138,7 +138,7 @@ _ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
 _ALL_SUITES="$_ALL_SUITES test_cloudrun"
 _ALL_SUITES="$_ALL_SUITES test_heavy"
 _ALL_SUITES="$_ALL_SUITES test_hub test_cleanup_manifest test_limit_gate test_spend_consent"
-_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q"
+_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
@@ -488,7 +488,7 @@ else
     else bad "LIVE $label: ran but did NOT read the nonce (tool grant broken?)"; fi
   }
   # Devin GLM (availability-aware routing fix — this is the exact path that used to 403 on OpenRouter).
-  if have devin && devin auth status 2>/dev/null | grep -qi "logged in"; then
+  if have devin && { _t3b_pipe="$(devin auth status 2>/dev/null)" && grep -qi "logged in" <<<"$_t3b_pipe"; }; then
     probe_lane "devin/glm" run -m glm
   else note "LIVE devin: not installed / not logged in"; fi
   # Native Claude (subscription) if present.

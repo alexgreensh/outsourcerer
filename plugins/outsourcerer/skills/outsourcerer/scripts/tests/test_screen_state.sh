@@ -368,7 +368,7 @@ PROVIDER=codex; PROVIDER_EXPLICIT=1; _osrc_session_adopt_record
 # server without -L/-S must unset TMUX first.
 KS="kill""-server"
 for t in "$HERE"/test_*.sh "$HERE"/conformance.sh; do
-  grep -v '^[[:space:]]*#' "$t" | grep -q "tmux $KS" || continue
+  { _t3b_pipe="$(grep -v '^[[:space:]]*#' "$t")" && grep -q "tmux $KS" <<<"$_t3b_pipe"; } || continue
   grep -qE 'unset TMUX( |$)' "$t" && ok || bad "$(basename "$t") kills a tmux server without unsetting TMUX (hits the real server from inside a pane)"
 done
 

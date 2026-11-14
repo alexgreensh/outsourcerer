@@ -277,7 +277,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && grep -q 'GATE|SPEND_OK=1|' "$OSRC_STUB_LOG" \
   && ok "spend: --spend-ok exports OSRC_SPEND_OK=1 to the gate" || bad "spend: OSRC_SPEND_OK not exported (rc=$rc): $out"
-grep 'GATE|' "$OSRC_STUB_LOG" | grep -q 'NEXT=.*cloud start t-dvok' \
+{ _t3b_pipe="$(grep 'GATE|' "$OSRC_STUB_LOG")" && grep -q 'NEXT=.*cloud start t-dvok' <<<"$_t3b_pipe"; } \
   && ok "spend: OSRC_SPEND_NEXT carries the runnable cloud start line" || bad "spend: OSRC_SPEND_NEXT wrong: $(grep GATE "$OSRC_STUB_LOG")"
 # inherited OSRC_SPEND_OK=1 WITHOUT the flag does not satisfy the devin check
 out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 OSRC_SPEND_OK=1 bash -c '
@@ -380,11 +380,11 @@ grep -q 'sonnet-test' <<<"$sec" && ok "launch: claude --model passed" || bad "la
 grep -q 'cloud/t-claude' <<<"$sec" && ok "launch: pack names work branch cloud/<id>" || bad "launch: pack missing branch"
 grep -q 't-claude.READY' <<<"$sec" && ok "launch: pack carries READY contract" || bad "launch: pack missing READY"
 [ -f "$OSRC_HOME/remote/t-claude.json" ] && ok "lane: remote/t-claude.json registered" || bad "lane: json missing"
-jq -r '.vehicle // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null | grep -qx 'claude' \
+{ _t3b_pipe="$(jq -r '.vehicle // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -qx 'claude' <<<"$_t3b_pipe"; } \
   && ok "lane: vehicle field = claude" || bad "lane: vehicle field wrong"
-jq -r '.session_ref // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null | grep -q 'claude.ai' \
+{ _t3b_pipe="$(jq -r '.session_ref // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -q 'claude.ai' <<<"$_t3b_pipe"; } \
   && ok "lane: session_ref captured from launch log" || bad "lane: session_ref missing"
-jq -r '.branch // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null | grep -qx 'cloud/t-claude' \
+{ _t3b_pipe="$(jq -r '.branch // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -qx 'cloud/t-claude' <<<"$_t3b_pipe"; } \
   && ok "lane: branch = cloud/t-claude" || bad "lane: branch wrong"
 [ -f "$OSRC_HOME/owners/test-L10-session/t-claude" ] && ok "owner: owner record written" || bad "owner: record missing"
 grep -q 'Claude subscription' <<<"$out" && ok "quota: claude plan disclosed" || bad "quota: claude plan missing"
@@ -399,7 +399,7 @@ grep -qx -- '<--cloud>' <<<"$sec" && grep -qx -- '<-p>' <<<"$sec" && grep -q -- 
 pf="$(echo "$sec" | grep -A1 -- '--prompt-file' | sed -n '2p' | tr -d '<>')"
 [ -n "$pf" ] && [ -f "$pf" ] && grep -q 'cloud/t-devin' "$pf" \
   && ok "launch: devin prompt-file is the context pack" || bad "launch: prompt-file wrong ($pf)"
-jq -r '.vehicle' "$OSRC_HOME/remote/t-devin.json" 2>/dev/null | grep -qx 'devin' \
+{ _t3b_pipe="$(jq -r '.vehicle' "$OSRC_HOME/remote/t-devin.json" 2>/dev/null)" && grep -qx 'devin' <<<"$_t3b_pipe"; } \
   && ok "lane: devin vehicle recorded" || bad "lane: devin vehicle wrong"
 
 : > "$OSRC_STUB_LOG"
@@ -427,7 +427,7 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 ' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && grep -q 'LANEADD|add t-l2 --branch cloud/t-l2' "$OSRC_STUB_LOG" \
   && ok "register: cmd_lane lane add invoked with contract args" || bad "register: cmd_lane not called (rc=$rc)"
-grep 'LANEADD' "$OSRC_STUB_LOG" | grep -q -- '--ready READY' && grep 'LANEADD' "$OSRC_STUB_LOG" | grep -q -- '--done-when check:npm test' \
+{ _t3b_pipe="$(grep 'LANEADD' "$OSRC_STUB_LOG")" && grep -q -- '--ready READY' <<<"$_t3b_pipe"; } && { _t3b_pipe="$(grep 'LANEADD' "$OSRC_STUB_LOG")" && grep -q -- '--done-when check:npm test' <<<"$_t3b_pipe"; } \
   && ok "register: ready marker + done-when forwarded" || bad "register: lane args incomplete"
 out="$(cmd_lane() { echo 'fixture registry failure' >&2; return 1; }; _cloudrun_register t-l2fail devin cloud/t-l2fail git "$BARE" "$WORK" main "$BRIEF" '' '' '' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'fixture registry failure' <<<"$out" && [ ! -e "$OSRC_HOME/remote/t-l2fail.json" ] \

@@ -133,7 +133,7 @@ _tr_ctx="$(grep -niE 'tokenrouter' "$SRC" | grep -iE '\$0 cash|is free|free lane
   || bad "tokenrouter lane makes a static free/\$0 claim: $_tr_ctx"
 
 # --- no hardcoded expiry date for the promo tier (the Inviolable Rule: tier by identity + runtime) ---
-if grep -niE 'tokenrouter' "$SRC" | grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}'; then
+if { _t3b_pipe="$(grep -niE 'tokenrouter' "$SRC")" && grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}' <<<"$_t3b_pipe"; }; then
   bad "a hardcoded date is attached to the tokenrouter lane (promo expiry must be runtime-detected)"
 else
   ok "no hardcoded expiry date attached to the tokenrouter lane"

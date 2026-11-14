@@ -161,7 +161,7 @@ tab	$big"
 CLAUDE_CODE_SESSION_ID="$SID" osrc_lane_msg laneA "$big" >/dev/null 2>&1
 stored="$(jq -r .text "$OSRC_HOME/msgs/laneA.jsonl" | tail -1)"
 [ "$(printf '%s' "$stored" | wc -c | tr -d ' ')" -le 4000 ] && ok "text capped at 4 KB" || bad "text not capped"
-printf '%s' "$stored" | LC_ALL=C grep -q '[[:cntrl:]]' && bad "control chars survived" || ok "control chars stripped"
+LC_ALL=C grep -q '[[:cntrl:]]' <<<"$stored" && bad "control chars survived" || ok "control chars stripped"
 CLAUDE_CODE_SESSION_ID="$SID" osrc_lane_msg laneA "red [31m text [1;32mend" >/dev/null 2>&1
 case "$(jq -r .text "$OSRC_HOME/msgs/laneA.jsonl" | tail -1)" in
   *"[31m"*|*"1;32m"*) bad "ANSI residue survived" ;; *) ok "ANSI residue stripped" ;; esac

@@ -56,7 +56,7 @@ EOF
 grep -qE 'glm-5\.2|0\.3\.1' "$wd/AGENTS.md" \
   && bad "stale block survived a parity re-run" \
   || ok "parity-cursor replaces the stale block"
-head -1 "$wd/AGENTS.md" | grep -q '^user header$' && tail -1 "$wd/AGENTS.md" | grep -q '^user footer$' \
+{ _t3b_pipe="$(head -1 "$wd/AGENTS.md")" && grep -q '^user header$' <<<"$_t3b_pipe"; } && { _t3b_pipe="$(tail -1 "$wd/AGENTS.md")" && grep -q '^user footer$' <<<"$_t3b_pipe"; } \
   && ok "user content outside the markers is preserved" \
   || bad "user content outside the markers was damaged"
 [ "$(grep -c '^<!-- OUTSOURCERER:INSOURCE' "$wd/AGENTS.md")" = "1" ] \

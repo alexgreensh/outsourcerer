@@ -221,7 +221,7 @@ grep -q "SAFE.*ad-ok\.log" <<<"$out" && grep -q "SAFE.*ad-ok\.rc" <<<"$out" \
   && ok "exited-0 autodetach pair SAFE (B2)" || bad "ad-ok not SAFE: $(echo "$out" | grep ad-ok)"
 grep -q "ASK.*ad-fail" <<<"$out" && ok "exit-1 autodetach keeps evidence until TTL (B2)" || bad "ad-fail not ASK"
 grep -q "ASK.*ad-noex" <<<"$out" && ok "no-exit-marker autodetach keeps evidence until TTL (B2)" || bad "ad-noex not ASK"
-echo "$out" | grep -c "ASK" | grep -q '^[0-9]' && grep -q "jobs.*not the shape" <<<"$out" \
+{ _t3b_pipe="$(echo "$out" | grep -c "ASK")" && grep -q '^[0-9]' <<<"$_t3b_pipe"; } && grep -q "jobs.*not the shape" <<<"$out" \
   && ok "jobs-dir attack line ASK (finding 5)" || bad "attack lines not ASK: $(echo "$out" | grep -E 'jobs |owners|remote')"
 [ -d "$WT_SAFE" ] && [ -d "$WT_BAD" ] && [ -d "$OSRC_HOME/jobs/job-old" ] \
   && ok "dry run deleted nothing" || bad "dry run mutated the filesystem"

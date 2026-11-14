@@ -86,7 +86,7 @@ jd="$OSRC_JOBS/c8"; mkdir -p "$jd"; echo no-progress-writes > "$jd/status"; echo
 jd="$OSRC_JOBS/c9"; mkdir -p "$jd"; sleep 20 & LP=$!
 echo no-progress-writes > "$jd/status"; echo "$LP" > "$jd/pid"; ps -o lstart= -p "$LP" | tr -s ' ' > "$jd/pid_start"
 echo 700 > "$jd/nowrite_age"; printf '{"verb":"edit","model":"kimi","started":%s}' "$(( $(date +%s) - 800 ))" > "$jd/meta.json"; echo $(( $(date +%s) - 800 )) > "$jd/started_at"
-_status_line c9 2>/dev/null | grep -q 'no-progress-writes.*!no-writes(700s,alive)' && ok "status line shows '!no-writes(<age>s,alive)'" || bad "status line: $(_status_line c9 2>/dev/null)"
+{ _t3b_pipe="$(_status_line c9 2>/dev/null)" && grep -q 'no-progress-writes.*!no-writes(700s,alive)' <<<"$_t3b_pipe"; } && ok "status line shows '!no-writes(<age>s,alive)'" || bad "status line: $(_status_line c9 2>/dev/null)"
 kill "$LP" 2>/dev/null
 
 echo "== $pass passed, $fail failed =="

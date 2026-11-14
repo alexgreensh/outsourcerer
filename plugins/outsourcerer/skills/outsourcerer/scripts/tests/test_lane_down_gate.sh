@@ -87,7 +87,7 @@ mark_down() { mkdir -p "$1/lane-posture"; printf '%s\n' "$(( $(date +%s) + ${2:-
 
 # Clean: no marker -> normal routing (regression: default path untouched).
 H1="$TMP/h1"; mkdir -p "$H1"
-run_pf "$H1" | grep -q 'RESOLVED lane=droid' && ok "integration: no marker -> droid routes normally" || bad "no-marker routing regressed"
+{ _t3b_pipe="$(run_pf "$H1")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: no marker -> droid routes normally" || bad "no-marker routing regressed"
 
 # Pinned -m on a down lane -> LOUD refusal that names the lane AND the pin. The order guarantee:
 # a known-down lane must never quietly absorb an explicit user choice.
@@ -118,11 +118,11 @@ case "$out" in *"marked DOWN"*"posture reset"*) ok "integration: unpinned down-l
 
 # Expired marker -> inert, routes normally (self-heal).
 H4="$TMP/h4"; mkdir -p "$H4"; mark_down "$H4" -50 droid
-run_pf "$H4" | grep -q 'RESOLVED lane=droid' && ok "integration: expired marker self-heals -> routes normally" || bad "expired marker still blocking"
+{ _t3b_pipe="$(run_pf "$H4")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: expired marker self-heals -> routes normally" || bad "expired marker still blocking"
 
 # A mark on a DIFFERENT lane does not gate this route (isolation).
 H5="$TMP/h5"; mkdir -p "$H5"; mark_down "$H5" 300 dv
-run_pf "$H5" | grep -q 'RESOLVED lane=droid' && ok "integration: dv marker does not gate the droid route" || bad "cross-lane isolation broken"
+{ _t3b_pipe="$(run_pf "$H5")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: dv marker does not gate the droid route" || bad "cross-lane isolation broken"
 
 # ---------------------------------------------------------------------------------------------------
 # SOURCE cross-checks: the gate's placement + pin order are the reviewed contract.

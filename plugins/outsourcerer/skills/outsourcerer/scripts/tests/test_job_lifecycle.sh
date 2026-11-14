@@ -139,11 +139,11 @@ printf '%s\n' '{"name":"Read"}' '{"name":"Read"}' '{"name":"Bash"}' > "$jd4/out.
 echo running > "$jd4/status"; echo $(( $(date +%s) - 400 )) > "$jd4/started_at"
 echo "$LP" > "$jd4/pid"; ps -o lstart= -p "$LP" | tr -s ' ' > "$jd4/pid_start"
 printf '{"verb":"edit","model":"glm","started":%s}' "$(( $(date +%s) - 400 ))" > "$jd4/meta.json"
-_status_line x-explore 2>/dev/null | grep -q 'exploring(0-writes)' \
+{ _t3b_pipe="$(_status_line x-explore 2>/dev/null)" && grep -q 'exploring(0-writes)' <<<"$_t3b_pipe"; } \
   && ok "a mutating job with zero writes is flagged to the operator" \
   || bad "0-writes flag never reaches the caller (exported from a subshell?)"
 printf '%s\n' '{"name":"Write"}' >> "$jd4/out.log"
-_status_line x-explore 2>/dev/null | grep -q 'exploring(0-writes)' \
+{ _t3b_pipe="$(_status_line x-explore 2>/dev/null)" && grep -q 'exploring(0-writes)' <<<"$_t3b_pipe"; } \
   && bad "flag still set after the job started writing" \
   || ok "the flag clears as soon as real writes appear"
 kill $LP 2>/dev/null

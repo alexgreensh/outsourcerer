@@ -48,17 +48,17 @@ grep -Fq 'tools=(--allowedTools $OSRC_ALLOWED_TOOLS)' "$SRC" && bad "unquoted al
 has '(_i+1)) -lt ${#ORIG[@]} ]' "ORIG rewrite bounds-checked (no phantom element)"
 # Private temp/result files. umask is set at run_job START (before the Codex last.txt write).
 has 'umask 077' "umask 077 present at run_job start (covers the primary Codex last.txt path)"
-awk '/^run_job\(\) *\{/{f=1} f{print} f&&/^  local jd=/{exit}' "$SRC" | grep -Fq 'umask 077' && ok "umask 077 precedes job-dir/delegate setup" || bad "umask 077 not at run_job start"
+{ _t3b_pipe="$(awk '/^run_job\(\) *\{/{f=1} f{print} f&&/^  local jd=/{exit}' "$SRC")" && grep -Fq 'umask 077' <<<"$_t3b_pipe"; } && ok "umask 077 precedes job-dir/delegate setup" || bad "umask 077 not at run_job start"
 [ "$(grep -c 'old_umask' "$SRC")" -ge 4 ] && ok "temp files (.ccerr/.ccnative) hardened with umask save/restore" || bad "temp-file umask hardening missing"
 
 # --- Behavioral: a trailing -m (genuinely last token) does not append a phantom element. ---
-( . "$SRC" >/dev/null 2>&1
+{ _t3b_pipe="$( . "$SRC" >/dev/null 2>&1
   ORIG=(edit -m); _dvm="glm-5.2"        # -m is the LAST element -> _i+1 is out of range
   before=${#ORIG[@]}
   for _i in "${!ORIG[@]}"; do case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac; done
   after=${#ORIG[@]}
   [ "$before" -eq "$after" ] && echo PHANTOM_OK || echo "PHANTOM_BAD before=$before after=$after"
-) | grep -q PHANTOM_OK && ok "trailing -m (last token) does not grow ORIG (phantom-free)" || bad "phantom element appended"
+)" && grep -q PHANTOM_OK <<<"$_t3b_pipe"; } && ok "trailing -m (last token) does not grow ORIG (phantom-free)" || bad "phantom element appended"
 
 # --- Behavioral: record_ledger append writes exactly one intact JSON line. ---
 if command -v jq >/dev/null 2>&1; then

@@ -137,7 +137,7 @@ cmd_review next >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 4 ] && [ ! -f "$FAKE_TMUX/rv.sent" ] && ok "review next refuses to type into a working reviewer (rc 4, nothing sent)" || bad "sent into busy reviewer rc=$rc"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"
 out="$(cmd_review next 2>&1)"; rc=$?
-[ "$rc" -eq 0 ] && grep -c '^LIT:' "$FAKE_TMUX/rv.sent" | grep -q '^1$' && ok "idle reviewer + queue: review next sends exactly one line" || bad "next did not send once rc=$rc out=$out"
+[ "$rc" -eq 0 ] && { _t3b_pipe="$(grep -c '^LIT:' "$FAKE_TMUX/rv.sent")" && grep -q '^1$' <<<"$_t3b_pipe"; } && ok "idle reviewer + queue: review next sends exactly one line" || bad "next did not send once rc=$rc out=$out"
 first_item="$(jq -r 'select(.state=="inflight") | .id' "$OSRC_HOME"/review/items/*.json)"
 grep -q "Review request $first_item: read $OSRC_HOME/review/$first_item.md" "$FAKE_TMUX/rv.sent" && grep -q "$first_item.VERDICT" "$FAKE_TMUX/rv.sent" \
   && ok "the instruction points at the brief file and names the VERDICT path" || bad "instruction text wrong: $(cat "$FAKE_TMUX/rv.sent")"
@@ -252,7 +252,7 @@ q0=$(_osrc_review_count_queued)
 cmd_review next >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 5 ] && ok "rotation due: review next refuses (rc 5) instead of overloading the reviewer" || bad "next ignored rotation rc=$rc (queued $q0)"
 tick 200; ev="$(events)"; grep -q '^NEXT osrc review rotate' <<<"$ev" && ok "idle reviewer + rotation due: NEXT suggests a fresh reviewer" || bad "rotation NEXT missing: $ev"
-cmd_review rotate | grep -q 'review reviewer <new-session>' && ok "review rotate prints the 3 steps" || bad "rotate output"
+{ _t3b_pipe="$(cmd_review rotate)" && grep -q 'review reviewer <new-session>' <<<"$_t3b_pipe"; } && ok "review rotate prints the 3 steps" || bad "rotate output"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv2.screen"
 ( cmd_review reviewer rv2 ) >/dev/null 2>&1; [ $? -ne 0 ] && [ "$(cmd_review reviewer)" = rv ] && ok "never two reviewers: switching while the old one is alive is refused" || bad "second reviewer accepted"
 cmd_review reviewer rv2 --replace >/dev/null 2>&1 && [ "$(cmd_review reviewer)" = rv2 ] && [ "$(jq -r .reviews "$OSRC_HOME/review/reviewer.json")" = 0 ] && ok "--replace switches and resets the counters" || bad "replace failed"
@@ -311,13 +311,13 @@ cmd_lane add fl --branch cloud/fl --repo "$REMOTE" >/dev/null; hf1="$(push cloud
 n0=$(ls "$OSRC_HOME/review/items" | grep -c '^fl-')
 hf2="$(push cloud/fl "wip: half way through the review fixes")"; tick 1; events >/dev/null
 n1=$(ls "$OSRC_HOME/review/items" | grep -c '^fl-')
-{ ls "$WORK" >/dev/null; git -C "$REMOTE" ls-tree --name-only "$hf2" | grep -qx 'fl.READY'; } && [ "$(jq -r .head_ready "$OSRC_HOME/remote/fl.json")" = false ] && [ "$n0" = "$n1" ] && [ "$(osrc_remote_state fl)" != ready ] \
+{ ls "$WORK" >/dev/null; { _t3b_pipe="$(git -C "$REMOTE" ls-tree --name-only "$hf2")" && grep -qx 'fl.READY' <<<"$_t3b_pipe"; }; } && [ "$(jq -r .head_ready "$OSRC_HOME/remote/fl.json")" = false ] && [ "$n0" = "$n1" ] && [ "$(osrc_remote_state fl)" != ready ] \
   && ok "a later WIP push with fl.READY still in the tree is NOT READY and spends no review" || bad "sticky READY file: ready=$(jq -r .head_ready "$OSRC_HOME/remote/fl.json") items $n0->$n1"
 
 # ---- 21. finding 5: a hung network call is bounded ---------------------------------------------------------------
 cmd_lane add hang --branch cloud/hang --repo octo/hang >/dev/null 2>&1; : > "$GH_HANG"; rm -f "$GH_ERR"
 t0=$SECONDS; ( export OSRC_NET_TIMEOUT=1; _osrc_lane_poll hang force ); dt=$(( SECONDS - t0 ))
-[ "$dt" -le 4 ] && [ "$(jq -r .err_count "$OSRC_HOME/remote/hang.json")" -ge 1 ] && jq -r .err_msg "$OSRC_HOME/remote/hang.json" | grep -q 'timed out' \
+[ "$dt" -le 4 ] && [ "$(jq -r .err_count "$OSRC_HOME/remote/hang.json")" -ge 1 ] && { _t3b_pipe="$(jq -r .err_msg "$OSRC_HOME/remote/hang.json")" && grep -q 'timed out' <<<"$_t3b_pipe"; } \
   && ok "hung gh call is killed at OSRC_NET_TIMEOUT (${dt}s) and recorded as a poll error" || bad "hung call not bounded: ${dt}s $(jq -c '[.err_count,.err_msg]' "$OSRC_HOME/remote/hang.json")"
 rm -f "$GH_HANG"; for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f 'sleep 31[3]7' >/dev/null || break; sleep 0.3; done   # orphaned child is reaped by init asynchronously
 pgrep -f 'sleep 31[3]7' >/dev/null && bad "hung child left running" || ok "the hung child process group is gone"

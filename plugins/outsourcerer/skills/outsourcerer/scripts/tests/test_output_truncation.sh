@@ -113,7 +113,7 @@ wait "$spoke_supervisor" 2>/dev/null || true
 
 # The remedy this tool prints for output-token exhaustion must not tell users to do the thing that
 # gets their job killed without also telling them how to stay alive.
-grep -a 'OUTPUT-TOKEN limit' "$SRC" "$WDLIB" | grep -q 'OSRC::PROGRESS' \
+{ _t3b_pipe="$(grep -a 'OUTPUT-TOKEN limit' "$SRC" "$WDLIB")" && grep -q 'OSRC::PROGRESS' <<<"$_t3b_pipe"; } \
   && ok "the write-to-a-file remedy also asks for a progress heartbeat" \
   || bad "remedy advises silence with no heartbeat (contradicts the stall watchdog)"
 
@@ -185,7 +185,7 @@ printf '%s\n' "a log line mentioning OSRC::DONE#testmark01 mid-sentence" > "$TMP
   || bad "a mid-sentence signed marker was accepted"
 
 # The id has to actually reach the delegate, and must differ per run or it is just a constant to copy.
-osrc_protocol_block | grep -q 'testmark01' \
+{ _t3b_pipe="$(osrc_protocol_block)" && grep -q 'testmark01' <<<"$_t3b_pipe"; } \
   && ok "the protocol handed to the delegate carries this run's id" \
   || bad "protocol block does not include the run id"
 m1="$(_new_mark)"; m2="$(_new_mark)"

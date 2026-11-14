@@ -70,7 +70,7 @@ commit_in() { # <tid> <file> <content>
 }
 tfield() { jq -r "$2" "$PD/tasks/$1.json"; }
 efield() { jq -r "$2" "$PD/tasks/$1/evidence.json" 2>/dev/null; }
-no_land_wt() { ! git -C "$REPO" worktree list | grep -q '/land-'; }
+no_land_wt() { ! { _t3b_pipe="$(git -C "$REPO" worktree list)" && grep -q '/land-' <<<"$_t3b_pipe"; }; }
 
 # ---------------- done contract: scout ----------------
 mk_task t1 scout ""
@@ -182,7 +182,7 @@ out="$(drv cmd_land t11 2>&1)"; rc=$?
   && [ "$(efield t11 .land.verdict)" = check_failed ] \
   && ok "land (S13): merged check failure preserves done with separate landing error" || bad "merge breaks check (rc=$rc out=$out)"
 no_land_wt && ok "land: no integration worktree left after a red check" || bad "worktree left after red check"
-grep 'merge breaks check' "$ST/wake-queue.jsonl" 2>/dev/null | grep -q 'p/t11' && ok "land: red check queued a wake event" || bad "wake event missing"
+{ _t3b_pipe="$(grep 'merge breaks check' "$ST/wake-queue.jsonl" 2>/dev/null)" && grep -q 'p/t11' <<<"$_t3b_pipe"; } && ok "land: red check queued a wake event" || bad "wake event missing"
 grep -q 'clean checkout' <<<"$out" && grep -q -- '--setup' <<<"$out" \
   && ok "land (#9): a red merged check says it ran in a clean checkout and points at --setup" || bad "clean-checkout hint missing: $out"
 
@@ -441,7 +441,7 @@ printf '%s %s\n' "$livepid" "$(drv _pid_start_identity "$livepid")" > "$ST/land/
 mk_task t33 ship "" "prune"; commit_in t33 r33.txt a
 out="$(drv cmd_land t33 2>&1)"; rc=$?
 [ "$rc" = 0 ] && [ ! -d "$WD/land-stale1" ] && [ ! -d "$WD/land-stale2" ] && [ -d "$WD/land-live" ] \
-  && ! git -C "$REPO" worktree list | grep -q 'land-stale' \
+  && ! { _t3b_pipe="$(git -C "$REPO" worktree list)" && grep -q 'land-stale' <<<"$_t3b_pipe"; } \
   && ok "land (#17): leftover land-* worktrees of dead lands are pruned; a live one is kept" || bad "prune (rc=$rc out=$out)"
 grep -q 'j-t33' "$TMP/hook.log" 2>/dev/null && ! grep -q '/land-' "$TMP/hook.log" && ok "land (#15): repo hooks never run for the scratch worktree" || bad "post-checkout hook ran in a land worktree"
 kill "$livepid" 2>/dev/null; wait "$livepid" 2>/dev/null

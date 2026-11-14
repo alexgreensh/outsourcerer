@@ -77,7 +77,7 @@ sleep 60 & child=$!; kids="$kids $child"
 # This regression needs one observable parent/child edge. Some restricted
 # sandboxes deny both pgrep and process-table reads, so they cannot exercise
 # the contract at all. Skip there instead of reporting a product failure.
-if ! pgrep -P "$$" 2>/dev/null | grep -qx "$child"; then
+if ! { _t3b_pipe="$(pgrep -P "$$" 2>/dev/null)" && grep -qx "$child" <<<"$_t3b_pipe"; }; then
   echo "SKIP: process-tree enumeration unavailable; Devin liveness regression requires a visible child process"
   exit 0
 fi

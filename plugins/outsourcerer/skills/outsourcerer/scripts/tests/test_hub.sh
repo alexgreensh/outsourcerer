@@ -189,7 +189,7 @@ grep -q 'WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review"
 grep -q '"Poppins"' "$PAGE" && grep -q -- '--mono: var(--sans)' "$PAGE" && grep -q -- '--code: ui-monospace' "$PAGE" \
   && ok "Poppins everywhere, real mono only for code (v22)" || bad "v22 font stack missing"
 for f in poppins-400 poppins-500 poppins-600 poppins-700 noto-sans-hebrew; do
-  [ -f "$LIB/hub-assets/fonts/$f.woff2" ] && head -c4 "$LIB/hub-assets/fonts/$f.woff2" | grep -q 'wOF2' \
+  [ -f "$LIB/hub-assets/fonts/$f.woff2" ] && { _t3b_pipe="$(head -c4 "$LIB/hub-assets/fonts/$f.woff2")" && grep -q 'wOF2' <<<"$_t3b_pipe"; } \
     && ok "$f.woff2 vendored and valid" || bad "$f.woff2 missing/corrupt"
 done
 [ -f "$LIB/hub-assets/fonts/Poppins-OFL.txt" ] && [ -f "$LIB/hub-assets/fonts/NotoSansHebrew-OFL.txt" ] \
@@ -231,7 +231,7 @@ grep -q 'getUTCHours' "$PAGE" && grep -q 'Math.max' "$PAGE" \
 grep -q "l.updated || '').sort" "$PAGE" && bad "limits stamp still sorts display strings" \
   || ok "no HH:MM string sorting in limits stamp"
 # Item 16: Hebrew + CJK support.
-head -c 400 "$PAGE" | grep -q 'charset="utf-8"' \
+{ _t3b_pipe="$(head -c 400 "$PAGE")" && grep -q 'charset="utf-8"' <<<"$_t3b_pipe"; } \
   && ok "page declares utf-8 charset (item 16)" || bad "no charset meta in hub.html"
 grep -q "Noto Sans Hebrew" "$PAGE" && grep -q -- "--cjk" "$PAGE" && grep -q "PingFang SC" "$PAGE" \
   && ok "Hebrew + CJK font stacks wired (item 16)" || bad "i18n fonts missing"
@@ -367,7 +367,7 @@ ck2="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/api/pr
 ck3="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" -X POST "$BASE/api/answers" \
   -H 'Content-Type: application/json' -d '{"id":"ck--D1","choice":"x"}')"
 [ "$ck3" = "403" ] && ok "cookie refused on POST" || bad "cookie POST got $ck3"
-curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -qi 'set-cookie' \
+{ _t3b_pipe="$(curl -s -D - -o /dev/null "$BASE/?t=$TOK")" && grep -qi 'set-cookie' <<<"$_t3b_pipe"; } \
   && bad "server still sets a cookie" || ok "no Set-Cookie on page GET"
 grep -q 'document.cookie' "$PAGE" && bad "page still uses document.cookie" || ok "page carries no document.cookie"
 # A1: POSTs need a same-origin Origin/Sec-Fetch-Site whatever carried the token.
@@ -399,7 +399,7 @@ if grep -qE '(\*|0\.0\.0\.0|\[::\]):' <<<"$lsof_out"; then bad "server exposed o
 
 # The token must never reach the request log (it is in the printed URL line by design,
 # so only the server's own "[hub]" request lines are checked).
-if grep '^\[hub\]' "$TMP/serve.log" | grep -q 't='; then bad "token leaked into server log"; else ok "token stripped from request logs"; fi
+if { _t3b_pipe="$(grep '^\[hub\]' "$TMP/serve.log")" && grep -q 't=' <<<"$_t3b_pipe"; }; then bad "token leaked into server log"; else ok "token stripped from request logs"; fi
 
 cleanup_srv
 

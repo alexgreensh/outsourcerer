@@ -691,7 +691,7 @@ _session_limits() { printf 'codexwk=45\n'; }; _reset_snap
 OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1
 OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1   # dedupe: same spec -> silent
 unset OSRC_CAPS
-grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -q '^1$' \
+{ _t3b_pipe="$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)" && grep -q '^1$' <<<"$_t3b_pipe"; } \
   && ok "r3 cap: supervise poll emits exactly ONE EVENT limit per job+cap" \
   || bad "r3 cap: poll events=$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)"
 grep -q 'cap:weekly<=40 now:45' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
@@ -775,7 +775,7 @@ done
 # Unknown meters are honest: no fake percentages anywhere.
 grep -q '"left":"not checked yet"' <<<"$J" \
   && ok "r3 feed: unmetered harnesses report 'not checked yet'" || bad "r3 feed: no honest-unknown left field"
-_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))' | grep -q '^5$' \
+{ _t3b_pipe="$(_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))')" && grep -q '^5$' <<<"$_t3b_pipe"; } \
   && ok "r3 feed: no fresh meter -> all five detected harnesses state=unknown" \
   || bad "r3 feed: unexpected unknown-state count: $(_jget "$J" 'print([r["id"]+":"+r["state"] for r in d])')"
 
@@ -895,7 +895,7 @@ MKD="$OSRC_HOME/jobs/markerjob"; mkdir -p "$MKD"
 # consent by design.
 ( OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1
     OSRC_SPEND_OK=1 OSRC_JOB_TOKEN=tokW; _osrc_spend_marker_write "'"$MKD"'" cc run --provider cc -m glm-5.2' >/dev/null 2>&1 )
-[ -f "$MKD/.spend-ok" ] && head -1 "$MKD/.spend-ok" | grep -q 'token=tokW' \
+[ -f "$MKD/.spend-ok" ] && { _t3b_pipe="$(head -1 "$MKD/.spend-ok")" && grep -q 'token=tokW' <<<"$_t3b_pipe"; } \
   && ! grep -q '|\*' "$MKD/.spend-ok" && grep -q '|' "$MKD/.spend-ok" \
   && ok "r3.2 marker: .spend-ok carries token header + exact pairs ($(tail -1 "$MKD/.spend-ok" 2>/dev/null))" \
   || bad "r3.2 marker: .spend-ok missing token/exact pairs: $(cat "$MKD/.spend-ok" 2>/dev/null)"

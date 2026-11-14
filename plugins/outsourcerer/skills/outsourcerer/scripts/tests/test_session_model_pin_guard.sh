@@ -148,7 +148,7 @@ _n_assert=$(cat "$SRC" "$SCRIPT_DIR/../lib/perm.sh" | grep -c '_session_assert_m
   && ok "guard wired in >=7 sites (helper def + droid-refuse comment-free + devin x2 switches + codex/cc/gemini via descriptor session_fn): $_n_assert" \
   || no "guard not wired into all session-start switches (found $_n_assert references, want >=7)"
 # droid must NOT append --model in the adapter (the bug shape is gone).
-if grep -A30 '^    droid)' "$SRC" | grep -q 'SESSION_LAUNCH+=("--model"'; then
+if { _t3b_pipe="$(grep -A30 '^    droid)' "$SRC")" && grep -q 'SESSION_LAUNCH+=("--model"' <<<"$_t3b_pipe"; }; then
   no "droid adapter still appends --model (the bug is NOT fixed)"
 else
   ok "droid adapter no longer appends --model to the interactive launch"

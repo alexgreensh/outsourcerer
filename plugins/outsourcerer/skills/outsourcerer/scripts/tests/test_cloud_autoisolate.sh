@@ -69,7 +69,7 @@ case "$wt" in "$R/.outsourcerer/worktrees/run-"*) ok "cwd moved into a repo work
 grep -q 'gitignored secret file(s)' "$TMP/iso.err" && grep -q 'bring back' "$TMP/iso.err" \
   && ok "prints the isolated path and how to bring edits back" || bad "notice missing: $(cat "$TMP/iso.err")"
 grep -q 'SECRET=live' "$TMP/iso.err" && bad "notice leaked the secret value" || ok "notice never prints the secret value"
-git -C "$R" status --porcelain | grep -q '\.outsourcerer' && bad ".outsourcerer shows up in the user's git status" || ok ".outsourcerer kept out of git status"
+{ _t3b_pipe="$(git -C "$R" status --porcelain)" && grep -q '\.outsourcerer' <<<"$_t3b_pipe"; } && bad ".outsourcerer shows up in the user's git status" || ok ".outsourcerer kept out of git status"
 # The full gate then passes on the isolated tree.
 gate="$(cd "$wt" && bash -c 'f="$1"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; _secret_scan "task" devin && echo PASSED' _ "$SRC" 2>&1)"
 case "$gate" in *PASSED*) ok "secret scan passes inside the isolated tree" ;; *) bad "gate still blocks in the isolated tree: $gate" ;; esac
@@ -146,7 +146,7 @@ bash "$SRC" cleanup "$rid" --force >/dev/null 2>&1
 grep -q '^a2' "$cap" 2>/dev/null && ok "delegate sees the uncommitted same-size edit" || bad "delegate missed the uncommitted edit: $(tail -1 "$cap" 2>/dev/null)"
 
 echo "=== structural ==="
-awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$RESOLVED_ID"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC" | grep -qx ok \
+{ _t3b_pipe="$(awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$RESOLVED_ID"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC")" && grep -qx ok <<<"$_t3b_pipe"; } \
   && ok "route_delegate isolates right before the cloud gate" || bad "route_delegate does not call _cloud_autoisolate before _cloud_disclose"
 
 echo ""
