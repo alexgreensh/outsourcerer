@@ -19,8 +19,8 @@
 [38;5;246m[49m  ⎿  UserPromptSubmit says: [Token Optimizer] Loop: 4 similar messages in last 4 turns. Try a different [39m      [48;5;235m
 [49m     [38;5;246mapproach.[39m                                                                                                [48;5;235m
 [49m                                                                                                              [48;5;235m
-[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)                                                                                            [48;5;235m
-[38;5;246m[49m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=x;file:///Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt[0m]8;;\                                                                                [48;5;235m
+[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)                                                                                            [48;5;235m
+[38;5;246m[49m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt[0m]8;;\                                                                                [48;5;235m
 [49m     [2m[38;5;231m 1 [0m[38;5;231mhi[39m                                                                                                    [48;5;235m
 [49m                                                                                                              [48;5;235m
 [49m  [38;5;246mListed [1m1[0m[38;5;246m directory [39m                                                                                         [48;5;235m
@@ -42,7 +42,7 @@
 [49m Do you want to proceed?                                                                                      [48;5;235m
 [49m [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m                                                                                                     [48;5;235m
 [49m   [38;5;246m2. [39mYes, and don't ask again for [1mrm -rf /tmp/x-osrc-test-L3[0m and [1m"echo \"exit=$?\""[0m commands in              [48;5;235m
-[49m      [1m/Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3[0m[48;5;235m
+[49m      [1m/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3[0m[48;5;235m
 [49m      [1m.osrc-test-L3/work[0m                                                                                      [48;5;235m
 [49m   [38;5;246m3. [39mYes, and switch to auto mode[38;5;246m · auto mode handles these prompts for you[39m                                  [48;5;235m
 [49m   [38;5;246m4. [39mNo                                                                                                      [48;5;235m
