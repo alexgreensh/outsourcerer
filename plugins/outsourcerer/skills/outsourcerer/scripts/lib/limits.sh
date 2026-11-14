@@ -419,17 +419,18 @@ _OSRC_LIMITS_SNAP=""
 _OSRC_LIMITS_SNAP_TS=0
 _osrc_limits_snapshot() {
   local now; now="$(date +%s 2>/dev/null || printf 0)"
+  if [ -z "$_OSRC_LIMITS_SNAP" ] || [ $(( now - _OSRC_LIMITS_SNAP_TS )) -gt 60 ]; then
+    _OSRC_LIMITS_SNAP="$(_session_limits 2>/dev/null)"
+    _OSRC_LIMITS_SNAP_TS="$now"
+  fi
   if [ -n "${OSRC_ACCOUNT_DIR:-}" ]; then
-    local usage a b
+    local usage a b token
+    for token in $_OSRC_LIMITS_SNAP; do case "$token" in claude5h=*|claude7d=*) ;; *) printf '%s ' "$token" ;; esac; done
     usage="$(_osrc_account_usage "$OSRC_ACCOUNT_DIR")" || usage='|'
     a="${usage%%|*}"; b="${usage#*|}"
     [ -z "$a" ] || printf 'claude5h=%s ' "$a"
     [ -z "$b" ] || printf 'claude7d=%s ' "$b"
     return 0
-  fi
-  if [ -z "$_OSRC_LIMITS_SNAP" ] || [ $(( now - _OSRC_LIMITS_SNAP_TS )) -gt 60 ]; then
-    _OSRC_LIMITS_SNAP="$(_session_limits 2>/dev/null)"
-    _OSRC_LIMITS_SNAP_TS="$now"
   fi
   printf '%s' "$_OSRC_LIMITS_SNAP"
 }

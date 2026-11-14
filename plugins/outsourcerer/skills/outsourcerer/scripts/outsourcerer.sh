@@ -11283,6 +11283,7 @@ _bg_cloud_preack() {   # args: <verb> [flags] "task"
 # _bg_launch <verb> [flags] "task" -> mint a job id, detach a supervised __runjob, echo ONLY the id.
 # Shared by cmd_bg and cmd_fanout so a job is minted+detached the exact same way everywhere.
 _bg_launch() {
+  if [ -n "${OSRC_ACCOUNT:-}" ]; then local _bv="$1"; shift; set -- "$_bv" --account "$OSRC_ACCOUNT" "$@"; fi
   # NOTE: the cloud preack is intentionally NOT called here -- _bg_launch runs inside `id=$(_bg_launch ...)`
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
@@ -11480,7 +11481,7 @@ cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
-    --account)   [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; export OSRC_ACCOUNT; shift 2 ;;
+    --account)   [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; shift 2 ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
     --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent for THIS bg command (lib/spend.sh)
     --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
@@ -11521,6 +11522,7 @@ cmd_bg() {
     esac
     printf '>>> [bg] no verb given; defaulting to `run` (read-only). Use edit/yolo for mutating work.\n' >&2
   fi
+  if [ -n "${OSRC_ACCOUNT:-}" ]; then local _bv="$1"; shift; set -- "$_bv" --account "$OSRC_ACCOUNT" "$@"; fi
   # Last parent-side gate: there must be a real task. A flags-only invocation used to mint a job whose
   # detached child then died on a usage error, which is the phantom-job pattern this block exists to
   # stop. Skip the verb, skip flag/value pairs, and require something left over.
@@ -19916,7 +19918,7 @@ main() {
   # inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. So: drop any inherited
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
-  unset OSRC_PREFLIGHT
+  unset OSRC_PREFLIGHT OSRC_ACCOUNT OSRC_ACCOUNT_DIR
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19956,7 +19958,7 @@ main() {
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
                   PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
-      --account) [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; export OSRC_ACCOUNT; shift 2 ;;
+      --account) [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent, argv-only, one command (lib/spend.sh)
       --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
