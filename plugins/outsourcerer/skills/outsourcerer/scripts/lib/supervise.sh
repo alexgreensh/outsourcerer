@@ -532,21 +532,23 @@ $w" ;;
     return 2
   fi
   have jq || { _sv_fail "jq is required" "$rearm"; return 2; }
-  # The worker runs in the background so a signal to this process is forwarded to it, and the
-  # worker (not a dead parent) prints the `EVENT failed supervise` line before exiting.
-  local child
+  # The worker may be inside a redirected refresh when signalled. The parent owns the event so
+  # its output cannot disappear into that refresh's temporary file.
+  local child signalled=0
   export OSRC_SUPERVISE_AUTO="$auto"
   ( _sv_main "$sid" "$once" $ids ) & child=$!
-  trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+  trap 'if [ "$signalled" = 0 ]; then signalled=1; _sv_fail "killed by a signal" "$rearm"; fi; kill -TERM "$child" 2>/dev/null' TERM INT HUP
   while :; do
     wait "$child"; rc=$?
     kill -0 "$child" 2>/dev/null || break
   done
   trap - TERM INT HUP
+  [ "$signalled" != 1 ] || return 2
   case "$rc" in
     0) return 0 ;;
     1) [ "$once" = 1 ] && return 1; _sv_fail "internal error (rc 1)" "$rearm"; return 2 ;;
-    10) return 2 ;;
+    10) _sv_fail "killed by a signal" "$rearm"; return 2 ;;
+    11) return 2 ;;
     *) _sv_fail "internal error (rc $rc)" "$rearm"; return 2 ;;
   esac
 }
@@ -554,12 +556,13 @@ $w" ;;
 _sv_main() { # <sid> <once> [ids...]
   local sid="$1" once="$2"; shift 2
   local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list
-  local gen cgen older="" real f
+  local gen cgen older="" real f armed armed_q
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
-  trap 'rm -f "$dir/armed.$$"' EXIT
-  trap '_sv_fail "killed by a signal" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"; exit 10' TERM INT HUP
-  printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$dir/armed.$$"
+  armed="$dir/armed.$$"; printf -v armed_q '%q' "$armed"
+  trap "rm -f -- $armed_q" EXIT
+  trap 'exit 10' TERM INT HUP
+  printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
   fi
@@ -567,14 +570,14 @@ _sv_main() { # <sid> <once> [ids...]
   settle="$(_sv_num "${OSRC_SUPERVISE_SETTLE:-}" 20)"; maxs="$(_sv_num "${OSRC_SUPERVISE_MAX_SECS:-}" 0)"
   # cursor file: "<offset> <generation>"; a rotation since then means: finish events.jsonl.1 first.
   f="$(_sv_lanes)/events.jsonl"
-  read -r cursor cgen < "$dir/cursor" 2>/dev/null; cursor="$(_sv_num "${cursor:-}" 0)"
+  read -r cursor cgen 2>/dev/null < "$dir/cursor"; cursor="$(_sv_num "${cursor:-}" 0)"
   gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"; cgen="$(_sv_num "${cgen:-}" "$gen")"
   t0="$(_sv_now)"
   while :; do
     now="$(_sv_now)"
     if ! _sv_tick "$dir" "$now"; then
       _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
-      exit 10
+      exit 11
     fi
     if [ -n "$explicit" ]; then targets="$explicit"
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
