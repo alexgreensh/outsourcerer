@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-L10-home-$$"
+export OSRC_HOME="$HOME/osrc-test-L10-home-$$"
 mkdir -p "$OSRC_HOME"
 
 . "$SRC" >/dev/null 2>&1
@@ -423,6 +423,9 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
   && ok "register: cmd_lane lane add invoked with contract args" || bad "register: cmd_lane not called (rc=$rc)"
 grep 'LANEADD' "$OSRC_STUB_LOG" | grep -q -- '--ready READY' && grep 'LANEADD' "$OSRC_STUB_LOG" | grep -q -- '--done-when check:npm test' \
   && ok "register: ready marker + done-when forwarded" || bad "register: lane args incomplete"
+out="$(cmd_lane() { echo 'fixture registry failure' >&2; return 1; }; _cloudrun_register t-l2fail devin cloud/t-l2fail git "$BARE" "$WORK" main "$BRIEF" '' '' '' 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'fixture registry failure' <<<"$out" && [ ! -e "$OSRC_HOME/remote/t-l2fail.json" ] \
+  && ok "register: real helper failure is surfaced without fallback" || bad "register: helper failure concealed (rc=$rc): $out"
 
 # ============================== conserve mode -> devin preferred =====================
 # (a) lane-posture down marker on the claude-native lane (key cc)
@@ -456,15 +459,30 @@ done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^ch
 [ -n "$done_script" ] && [ -x "$done_script" ] && grep -q 'cloud/t-l6' "$done_script" \
   && ok "done contract: generated check script verifies cloud/<id> + READY" || bad "done contract: check script bad ($done_script)"
 
-# neither helper: still registers the lane json + prints the degrade notes
-out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+# Both helpers present: real lane registry and done contract, not stubs.
+out="$(start_cloud t-real --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && jq -e '.id == "t-real" and .branch == "cloud/t-real" and .vehicle == "devin"' "$OSRC_HOME/remote/t-real.json" >/dev/null \
+  && [ -f "$OSRC_HOME/owners/$CLAUDE_CODE_SESSION_ID/t-real" ] \
+  && ok "register: real lane registry and owner used" || bad "register: real lane registry failed (rc=$rc): $out"
+jq -e --arg cwd "$(cd "$WORK" && pwd -P)" '.cwd == $cwd and (.spec | startswith("check:bash "))' "$OSRC_HOME/done/t-real.json" >/dev/null 2>&1 \
+  && grep -q 'osrc_done_set t-real' <<<"$out" \
+  && ok "done contract: real helper stored check and cwd" || bad "done contract: real helper failed: $out"
+
+# Duplicate must be rejected before any second vehicle probe or launch.
+: > "$OSRC_STUB_LOG"
+out="$(start_cloud t-real --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'already registered' <<<"$out" && [ ! -s "$OSRC_STUB_LOG" ] \
+  && ok "register: duplicate refused before vehicle use" || bad "register: duplicate not safely refused (rc=$rc): $out"
+
+# Neither helper: still registers the lane json + prints the degrade note.
+out="$(unset -f cmd_lane osrc_done_set; start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -eq 0 ] && [ -f "$OSRC_HOME/remote/t-bare.json" ] \
   && ok "register: fallback json written when helpers absent" || bad "register: fallback failed (rc=$rc)"
 grep -q 'osrc_done_set not merged yet' <<<"$out" \
   && ok "done contract: absent-helper note printed" || bad "done contract: missing degrade note"
 
-# duplicate id refuses
-out="$(start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+# Duplicate also refuses in the fallback path.
+out="$(unset -f cmd_lane osrc_done_set; start_cloud t-bare --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -ne 0 ] && grep -q 'already registered' <<<"$out" \
   && ok "register: duplicate lane id refused" || bad "register: duplicate id allowed (rc=$rc)"
 

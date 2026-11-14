@@ -360,11 +360,11 @@ _cloudrun_register() {
   if type cmd_lane >/dev/null 2>&1; then
     local -a largs=(add "$id" --branch "$branch" --repo "$repo" --ready READY --base "$base" --brief "$brief")
     [ -n "$donewhen" ] && largs+=(--done-when "check:$donewhen")
-    if cmd_lane "${largs[@]}" >/dev/null 2>"$(_cloudrun_cdir)/$id.lane.err"; then
+    if ( cmd_lane "${largs[@]}" ) >/dev/null 2>"$(_cloudrun_cdir)/$id.lane.err"; then
       _cloudrun_json_extras "$id" "$vehicle" "$ref" "$pack"
       return 0
     fi
-    printf '>>> [cloud] lane add failed (%s); writing remote/%s.json directly\n' "$(tail -1 "$(_cloudrun_cdir)/$id.lane.err" 2>/dev/null)" "$id" >&2
+    die "cloud: lane add failed for '$id': $(tail -1 "$(_cloudrun_cdir)/$id.lane.err" 2>/dev/null)"
   fi
   local dir f tmp; dir="$(_cloudrun_rdir)"; _mkdir_private "$dir" 2>/dev/null || die "cloud: cannot create $dir"
   f="$dir/$id.json"; tmp="$f.tmp.$$"
@@ -459,6 +459,8 @@ _cloudrun_start() {
   # Never let a user:pass@ credential ride into the pack, lane record or vehicle argv.
   [ -n "$repo" ] && repo="$(_osrc_url_clean "$repo")"
   _cloudrun_id_ok "$id" || die "cloud: bad lane id '$id' (allowed: A-Za-z0-9._-, max 64, no leading dot)"
+  local lane_file; lane_file="$(_cloudrun_rdir)/$id.json"
+  [ ! -e "$lane_file" ] && [ ! -L "$lane_file" ] || die "cloud: lane '$id' already registered ($lane_file)"
   [ -n "$repo" ] || die "cloud start needs --repo <owner/name|git-url|path>"
   [ -n "$brief" ] || die "cloud start needs --brief <file>"
   [ -f "$brief" ] || die "cloud: brief file not found: $brief"
