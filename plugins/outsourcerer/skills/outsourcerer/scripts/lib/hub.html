@@ -823,6 +823,20 @@ a.pill svg { width: 13px; height: 13px; }
     // No artifact db: local mode via hub serve (token from the bookmark URL,
     // then kept in sessionStorage and sent as the X-Hub-Token header).
     mode = 'local';
+    if (!TOKEN) {
+      // The shell itself is public (static, no data) so a reload after ?t= was
+      // stripped, or a bare link, still renders — but the data API stays
+      // locked. Without a token there is nothing to subscribe to: say how to
+      // get in instead of polling into 403s (r4 finding 1).
+      clearTimeout(timer);
+      const w = $('welcome'), pe = $('plist-empty');
+      if (w) {
+        w.querySelector('h1').textContent = 'Open the link hub serve printed';
+        w.querySelector('p').textContent = 'This is the Mission Control shell — the project data sits behind the token API. Run "outsourcerer hub serve" and open the URL it prints (it ends in ?t=…); this tab will keep it for the session.';
+      }
+      if (pe) pe.textContent = 'No token — open the link hub serve printed.';
+      return;
+    }
     db = makeLocalDb();
     subscribe(db);
     clearTimeout(timer);

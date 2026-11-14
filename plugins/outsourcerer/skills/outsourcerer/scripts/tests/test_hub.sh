@@ -294,8 +294,9 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects")"
 [ "$code" = "403" ] && ok "api refuses requests without token" || bad "no-token request got $code"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Hub-Token: wrong' "$BASE/api/projects")"
 [ "$code" = "403" ] && ok "api refuses wrong token" || bad "wrong-token request got $code"
-# Review A3: ?t= authenticates the page GET only — it is not a credential on
-# API routes or POSTs, where it would sit in URLs (proxy/history/referrer).
+# Review A3: ?t= is not a credential anywhere — the page's own script reads it
+# into sessionStorage; the server never accepts it. API routes and POSTs take
+# the X-Hub-Token header only.
 code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects?t=$TOK")"
 [ "$code" = "403" ] && ok "valid ?t= refused on /api/projects" || bad "?t= on api got $code"
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/refresh?t=$TOK")"
@@ -308,6 +309,15 @@ echo "$pj" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="op
 
 pg="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/?t=$TOK")"
 [ "$pg" = "200" ] && ok "GET /?t= serves the page" || bad "page GET got $pg"
+# r4 finding 1: the shell is public — a reload stripped of ?t=, or a bare
+# link, must still render (byte-identical static file, no data inside).
+pgb="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")"
+[ "$pgb" = "200" ] && ok "GET / bare still serves the page" || bad "bare page GET got $pgb"
+cmp -s <(curl -s "$BASE/") "$PAGE" \
+  && ok "bare GET / is the byte-identical shell (no data)" || bad "bare page differs from hub.html"
+grep -q 'hub serve printed' "$PAGE" \
+  && ok "no-token page tells you to open the link hub serve printed" \
+  || bad "page lacks the no-token notice"
 # A2: strict CSP on the served page, vendored fonts served token-free from
 # /assets/, and the asset route cannot be walked out of its directory.
 csp="$(curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -i 'content-security-policy')"
@@ -344,9 +354,11 @@ dotpost="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/answers" -H
 badhost="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' -H "X-Hub-Token: $TOK" "$BASE/api/projects")"
 [ "$badhost" = "403" ] && ok "foreign Host header refused" || bad "foreign Host got $badhost"
 
-# Finding 4: no cookie exists at all — not set, not accepted anywhere.
+# Finding 4: no cookie exists at all — not set, not accepted anywhere. The
+# page shell is public, so a cookie there is simply ignored (still 200); it
+# must buy nothing on the API.
 ck="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/")"
-[ "$ck" = "403" ] && ok "cookie refused even on GET /" || bad "cookie GET / got $ck"
+[ "$ck" = "200" ] && ok "cookie ignored on the public GET /" || bad "cookie GET / got $ck"
 ck2="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" "$BASE/api/projects")"
 [ "$ck2" = "403" ] && ok "cookie refused on /api/projects" || bad "cookie api got $ck2"
 ck3="$(curl -s -o /dev/null -w '%{http_code}' -b "osrc_hub_t=$TOK" -X POST "$BASE/api/answers" \
@@ -442,7 +454,7 @@ cleanup_srv
 rm -f "$OSRC_HOME/hub/token" && ln -s /etc/passwd "$OSRC_HOME/hub/token"
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT2" --no-open >"$TMP/serve_t3.log" 2>&1 &
 SRV=$!
-sleep 1
+for i in $(seq 1 40); do kill -0 "$SRV" 2>/dev/null || break; sleep 0.25; done
 grep -q 'symlink' "$TMP/serve_t3.log" && ! kill -0 "$SRV" 2>/dev/null \
   && ok "symlinked token file refused" || bad "symlinked token accepted (server still running?)"
 kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null
@@ -476,11 +488,11 @@ sleep 3
 m1="$(stat -f %m "$EXPORT_JSON" 2>/dev/null || stat -c %Y "$EXPORT_JSON")"
 [ "$m0" = "$m1" ] && ok "no state change -> refresh loop skips the export" \
   || bad "refresh re-exported unchanged state ($m0 -> $m1)"
-# Wait for the mtime to move (the export subprocess can take a couple seconds
-# under nice); a loop that never fires still fails.
-wait_mtime() {  # <file> <baseline> -> 0 when mtime != baseline within ~10s
+# Wait for the mtime to move (the export subprocess can take several seconds
+# under nice on a loaded machine); a loop that never fires still fails.
+wait_mtime() {  # <file> <baseline> -> 0 when mtime != baseline within ~24s
   local i b="$2"
-  for i in $(seq 1 40); do
+  for i in $(seq 1 96); do
     [ "$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)" != "$b" ] && return 0
     sleep 0.25
   done; return 1
@@ -488,7 +500,7 @@ wait_mtime() {  # <file> <baseline> -> 0 when mtime != baseline within ~10s
 mkdir -p "$OSRC_HOME/jobs/job-x" && echo running > "$OSRC_HOME/jobs/job-x/status"
 wait_mtime "$EXPORT_JSON" "$m1" \
   && ok "state change under OSRC_HOME -> next tick re-exports" \
-  || bad "state change did not trigger a re-export"
+  || { bad "state change did not trigger a re-export"; tail -5 "$TMP/serve5.log" >&2; }
 cleanup_srv
 
 # Idle-stop: REFRESH=1s ticks, IDLE=2s. With no page polling, the loop stops
@@ -509,7 +521,7 @@ curl -s -o /dev/null -H "X-Hub-Token: ${URL6##*t=}" "${URL6%%\?*}/api/projects" 
 echo again > "$OSRC_HOME/jobs/job-x/status"
 wait_mtime "$EXPORT_JSON" "$m4" \
   && ok "a page poll resumes the refresh loop" \
-  || bad "loop did not resume after a poll"
+  || { bad "loop did not resume after a poll"; tail -5 "$TMP/serve6.log" >&2; }
 cleanup_srv
 
 echo "RESULTS: $pass pass $fail fail"

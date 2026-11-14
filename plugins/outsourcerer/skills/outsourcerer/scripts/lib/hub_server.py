@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Mission Control local server for outsourcerer hub serve.
 
-Loopback only (127.0.0.1), token-gated, Python 3 standard library only.
+Loopback only (127.0.0.1), Python 3 standard library only. GET / and
+/assets/* are public static content (no data); every API route takes the
+X-Hub-Token header.
 Endpoints: GET / , GET /api/projects, GET /api/answers, POST /api/answers,
 POST /api/refresh. Re-exports every REFRESH_SECS seconds in a background
 thread, but only while a page has polled within IDLE_SECS and only when
@@ -174,18 +176,14 @@ def make_handler(hub):
             return host in ("127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port)
 
         def _token_ok(self):
-            path = urllib.parse.urlparse(self.path).path
-            # X-Hub-Token is the API credential; the page sends it on every call.
+            # X-Hub-Token is the only credential, and it only guards data
+            # routes. GET / and /assets/* are static and carry no state, so
+            # they need none — which is what keeps a reload working after the
+            # page strips ?t= from the address bar (r4 finding 1). ?t= itself
+            # is read by the page's own script into sessionStorage; the server
+            # never reads it, so a token never sits in an API URL or a log
+            # line (review A3). No cookie exists (review finding 4).
             t = self.headers.get("X-Hub-Token", "")
-            if not t:
-                # ?t= is the bookmarkable page URL and nothing else: a token in
-                # a URL ends up in proxy/history logs, so it never authenticates
-                # an API route or POST (review A3). No cookie exists — the
-                # bookmark survives reload via sessionStorage (review finding 4).
-                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                cand = (q.get("t") or [""])[0]
-                if cand and self.command == "GET" and path in ("/", "/index.html"):
-                    t = cand
             # compare_digest needs bytes on both sides; a non-ASCII token must not raise.
             return hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
 
@@ -264,10 +262,13 @@ def make_handler(hub):
                 # idle timer reflects real use.
                 hub.last_poll = time.time()
                 return self._send_asset(path)
-            if not self._token_ok():
-                return self._deny()
-            hub.last_poll = time.time()
             if path in ("/", "/index.html"):
+                # The page is a static shell with no data, same as the fonts:
+                # served without the token so a reload (which stripped ?t=)
+                # and a bare URL still render. With no token the page itself
+                # says to open the link `hub serve` printed; the API behind
+                # it stays header-token only (r4 finding 1).
+                hub.last_poll = time.time()
                 try:
                     with open(hub.page_path, "rb") as f:
                         data = f.read()
@@ -280,7 +281,11 @@ def make_handler(hub):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(data)
-            elif path == "/api/projects":
+                return
+            if not self._token_ok():
+                return self._deny()
+            hub.last_poll = time.time()
+            if path == "/api/projects":
                 payload, err = hub.projects_payload()
                 if err:
                     payload["export_error"] = err

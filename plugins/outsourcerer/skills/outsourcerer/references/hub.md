@@ -85,7 +85,11 @@ Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
 `0600` re-enforced on every start, short or padded contents re-minted, and a
 symlinked file refused outright. It is reused on every later launch, so the
 printed URL stays bookmarkable across restarts; `--new-token` is the only
-rotation and kills old bookmarks. The default port is fixed at `8788`; if it is
+rotation and kills old bookmarks. `GET /` itself is a static shell served
+with no credential at all — a reload (the page strips `?t=` from the address
+bar) or a bare link still renders, and with no token the page says to open
+the link `hub serve` printed rather than polling into 403s. The default port
+is fixed at `8788`; if it is
 taken the server slides to the next free port (up to 8798) and prints a notice —
 an explicit `--port` never slides.
 
@@ -100,10 +104,10 @@ answers too.
 
 Endpoints: `GET /api/projects`, `GET /api/answers`, `POST /api/answers`,
 `POST /api/refresh`. API routes and POSTs need the `X-Hub-Token` header plus a
-loopback `Host` header (`127.0.0.1`/`localhost`/`[::1]`); `?t=` authenticates
-only the `GET /` page load (the bookmark), so the token never sits in an API
-URL. The token is compared in constant time as bytes, stripped from server
-logs, and moved from the address bar into `sessionStorage` by the page. No
+loopback `Host` header (`127.0.0.1`/`localhost`/`[::1]`). `?t=` authenticates
+nothing — the page's own script reads it into `sessionStorage` and sends it
+back as the header, so the token never sits in an API URL, and it is stripped
+from the address bar and from server logs. No
 cookie is set or accepted. `hub serve` dies rather than run with a fallback
 token if `/dev/urandom` is unreadable.
 
