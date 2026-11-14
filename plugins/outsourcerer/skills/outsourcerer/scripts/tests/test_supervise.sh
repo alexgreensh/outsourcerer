@@ -186,6 +186,11 @@ own S ng1; neg ng1 x "⏺ The deploy script printed Connection error twice. Shou
 own S ng2; neg ng2 x "⏺ Done. Added a retry for 429 Too Many Requests and ECONNRESET in fetch.ts. All 14 tests pass."
 own S ng3; neg ng3 x "  ⎿  src/errors.ts:12: Overloaded = 529," "⏺ That is the only place it is defined."
 own S ng4; neg ng4 x "⏺ Fixed the handler that logs API Error: 429 and Please run /login hints."
+# Review r4: a tool RESULT under its tool-call header has the banner's shape; it is the log's text.
+own S ng6; neg ng6 x "⏺ Bash(tail -1 app.log)" "  ⎿  API Error: 502 upstream timed out"
+got="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; L="  ⎿  API Error: 502 upstream timed out"
+  _sv_api_banner cc "$L" "⏺ Bash(tail -1 app.log)" && echo T; _sv_api_banner cc "$L" "❯ fix the build" && echo B; _sv_api_banner cc "$L" && echo B ) )"
+[ "$(tr -d '\n' <<<"$got")" = BB ] && ok "the same line under a tool-call header is a tool result; under a prompt it is still a banner" || no "banner/tool header: [$got]"
 out="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; SCRIPT_PATH="$TMP/bin/send-shim"; export SENDLOG="$TMP/sendlog/log"; OSRC_SUPERVISE_MAX_SECS=5 _sv_main S 0 ) )"
 [ ! -s "$TMP/sendlog/log" ] && ok "a delegate's question / done summary / tool output naming errors types nothing" || no "typed into a lane: $(cat "$TMP/sendlog/log")"
 grep -q '^EVENT failed' <<<"$out" && no "ordinary text read as failed: [$out]" || ok "none of them reads as failed"
@@ -250,7 +255,7 @@ grep -q '^watch\.' <<<"$(ls "$OSRC_HOME/owners/S/")" && ok "a watch is an owned 
 touch -m -t 202601010100 "$W/out/L1.DONE"   # same name, same (empty) content, new mtime: a re-hand-in
 out="$(sup --session S --once)"
 grep -q '^EVENT done L1.DONE [0-9]* hand-in L1.DONE rewritten (re-hand-in)' <<<"$out" && ok "an existing DONE rewritten -> EVENT done (file names unchanged)" || no "rewritten DONE missed: [$out]"
-grep -q "^NEXT cat '.*/out/L1-REPORT.md'$" <<<"$out" && ok "its NEXT reads the lane's report" || no "DONE NEXT: [$out]"
+grep -q '^NEXT cat [^;|&]*/out/L1-REPORT\.md$' <<<"$out" && ok "its NEXT reads the lane's report" || no "DONE NEXT: [$out]"
 out="$(sup --session S --once)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$out" ] && ok "the same hand-in never fires twice" || no "repeat fired: rc=$rc [$out]"
 printf 'sha1111\n' > "$W/out/L1.DONE"; sup --session S --once >/dev/null
@@ -276,6 +281,29 @@ got="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _owned_live_state "$wid" ) )
   && ok "--unwatch removes the watch and its owner record" || no "unwatch left: $(ls "$OSRC_HOME/owners/S/")"
 out="$("$SRC" supervise --session S --watch "$TMP/nope" 2>/dev/null)"; rc=$?
 [ "$rc" = 2 ] && grep -q '^EVENT failed supervise .*--watch' <<<"$out" && ok "--watch on a missing path fails loudly" || no "missing watch: rc=$rc [$out]"
+# Review r4 finding 1: a lane-written file name must never become shell in NEXT.
+fresh 42; W="$TMP/ws42"; mkdir -p "$W/out" "$TMP/run42"; : > "$W/out/L5.DONE"
+"$SRC" supervise --session S --watch "$W/out" --once >/dev/null 2>&1
+evil="x';touch\${IFS}PWNED;'.DONE"; : > "$W/out/$evil"; : > "$W/out/a b.DONE"; : > "$W/out/-rf.DONE"; : > "$W/out/\$(touch PWNED2).DONE"
+touch -m -t 202601010500 "$W/out/L5.DONE"
+out="$(sup --session S --once)"; err1="$(cat "$TMP/err")"
+grep -q '^EVENT done L5.DONE ' <<<"$out" && ok "a well-named hand-in next to hostile names still fires" || no "L5.DONE lost: [$out]"
+[ "$(grep -c '^EVENT' <<<"$out")" = 1 ] && ok "hostile / spaced / dash-led / \$( ) names produce no event" || no "hostile name produced an event: [$out]"
+[ "$(grep -c 'ignored hand-in file with an unusual name' <<<"$err1")" = 4 ] && ! grep -q "[';\$ ]PWNED\|touch\\$" <<<"$(grep 'ignored hand-in' <<<"$err1" | sed 's/^.*: //')" \
+  && ok "each unusual name is reported once on stderr, with its unusual characters removed" || no "notice: [$err1]"
+touch -m -t 202601010600 "$W/out/L5.DONE"; sup --session S --once >/dev/null; err2="$(cat "$TMP/err")"
+grep -q 'ignored hand-in' <<<"$err2" && no "the notice repeats on every pass: [$err2]" || ok "the notice is said once, not on every pass"
+grep '^NEXT ' <<<"$out" | sed 's/^NEXT //' > "$TMP/run42/next.sh"
+( cd "$TMP/run42" && bash next.sh >/dev/null 2>&1 ); [ ! -e "$TMP/run42/PWNED" ] && [ ! -e "$TMP/run42/PWNED2" ] && ! ls "$W/out" | grep -q '^PWNED' \
+  && ok "running every printed NEXT in a temp dir creates nothing" || no "a NEXT created a file: $(ls "$TMP/run42" "$W/out")"
+( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _sv_observe_all beacon ) 2>/dev/null
+! grep -q 'PWNED' "$OSRC_HOME/lanes/events.jsonl" && ok "the beacon never logs a hostile name either (events.jsonl clean)" || no "events.jsonl carries the name"
+nx="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; f="$W/out/L5.DONE"; printf 'cat %q' "$f" ) )"
+grep -q "^NEXT $(printf '%s' "$nx" | sed 's/[][\.*^$/]/\\&/g')$" <<<"$out" && ok "NEXT is built with printf %q" || no "NEXT not %q-quoted: [$out] want [$nx]"
+mkdir -p "$TMP/ws43/bad dir"; out="$("$SRC" supervise --session S --watch "$TMP/ws43/bad dir" 2>/dev/null)"; rc=$?
+[ "$rc" = 2 ] && grep -q '^EVENT failed supervise .*--watch: path has characters' <<<"$out" && ! ls "$OSRC_HOME/watch/" 2>/dev/null | xargs -I{} cat "$OSRC_HOME/watch/{}" | grep -q 'bad dir' \
+  && ok "--watch refuses a path outside [A-Za-z0-9._/-] and registers nothing" || no "bad --watch path: rc=$rc [$out]"
+
 # A tmux lane whose done contract is a file: the re-hand-in is a new done even on the same screen.
 fresh 41; own S dn2; pane dn2 cc-idle-after-work.txt; mkdir -p "$OSRC_HOME/done" "$TMP/ws41"; : > "$TMP/ws41/dn2.DONE"
 jq -cn --arg p "$TMP/ws41/dn2.DONE" '{spec:("file:"+$p),cwd:"/"}' > "$OSRC_HOME/done/dn2.json"

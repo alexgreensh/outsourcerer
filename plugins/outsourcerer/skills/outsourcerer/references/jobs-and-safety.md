@@ -306,8 +306,13 @@ beside it when it exists), `EVENT done L1-VERDICT.md ...`, `EVENT question L2.QU
 is keyed on the file's name + mtime + size + content hash, so a lane re-handing in by rewriting the
 same DONE file (an empty DONE touched again, or a new sha inside) fires again; diffing file names
 missed exactly that. Registering baselines the files already there; registering again never
-re-baselines. A watch is owned live work: the beacon logs its events while no supervise runs, and the
-stop guard keeps asking for a waiter until `supervise --unwatch <dir|file>`. A lane's own done
+re-baselines. **A watch counts as live work until `supervise --unwatch <dir|file>`.** The beacon
+logs its events while no supervise runs, and the stop guard blocks every stop with no supervise
+armed (the usual two blocks, then it lets the stop through and leaves the `.unguarded` note), on
+every turn, until you unwatch. Unwatch when the round is over. The hub does not show watches as lanes.
+File names are lane-written input: a hand-in name must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`, anything
+else is skipped with one stderr notice, a `--watch` path may only use `[A-Za-z0-9._/-]`, and every
+NEXT quotes its path with `printf %q`, so a NEXT is always a plain `cat <file>`. A lane's own done
 contract (`--done-when file:` or `branch:`) keys its `done` event the same way, on the file
 fingerprint or the branch tip sha.
 

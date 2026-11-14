@@ -70,7 +70,7 @@ grep -q 'NOW WATCH IT' "$SRC" \
 
 # --- the commands that mean 'someone looked' must record it, or the warning never clears ---
 for c in cmd_status cmd_watch cmd_result; do
-  grep -qF '_mark_watched' <<<"$(awk "/^$c\(\) \{/,/_mark_watched/" "$SRC")" \
+  grep -qF '_mark_watched' <<<"$(cat "$SRC" "$SCRIPT_DIR"/../lib/*.sh | awk "/^$c\(\) \{/,/_mark_watched/")" \
     && ok "$c records that the job was observed" \
     || bad "$c does not record attention (warning would never clear)"
 done

@@ -58,8 +58,12 @@ _sv_plan_limit_re() {
 # summary, and supervise typed `continue` into them). Only the LAST history line counts, and only in
 # the shape the CLI prints it: Claude Code's `⎿` result line carrying `API Error: <code>` or
 # `Please run /login`; other engines: a line that STARTS with one of those (after at most a glyph).
-_sv_api_banner() { # <engine> <line> -> 0 when <line> is an API/login error banner
+# Review r4: a TOOL RESULT has the same `⎿` shape (`⏺ Bash(tail -1 app.log)` then
+# `⎿  API Error: 502 ...` is the log's text), so a line whose previous non-blank line is a tool-call
+# header (`⏺ Name(`) is never a banner.
+_sv_api_banner() { # <engine> <line> [line-above] -> 0 when <line> is an API/login error banner
   local re
+  printf '%s\n' "${3:-}" | grep -Eq '^[[:space:]]*⏺[[:space:]]+[A-Za-z_][A-Za-z0-9_.:-]*\(' && return 1
   case "$1" in
     cc) re='^[[:space:]]*⎿[[:space:]]+(.*[[:space:]·])?(API Error: [0-9]{3}|Please run /login)' ;;
     *)  re='^[[:space:]]*([^[:alnum:][:space:]]{1,3}[[:space:]]+)?(API Error: [0-9]{3}|Please run /login)' ;;
@@ -136,7 +140,7 @@ _sv_target_screen() {
   [ -n "$q" ] && { printf 'question\n%s\n' "$q"; return 0; }
   hist="$(_sv_history_tail)"
   hit="$(printf '%s\n' "$hist" | tail -1)"
-  if _sv_api_banner "${OSRC_SCR_ENGINE:-$eng}" "$hit"; then printf 'failed\napi-error: %s\n' "$(printf '%s' "$hit" | cut -c1-160)"; return 0; fi
+  if _sv_api_banner "${OSRC_SCR_ENGINE:-$eng}" "$hit" "$(printf '%s\n' "$hist" | sed '$d' | grep -v '^[[:space:]]*$' | tail -1)"; then printf 'failed\napi-error: %s\n' "$(printf '%s' "$hit" | cut -c1-160)"; return 0; fi
   hit="$(printf '%s\n' "$hist" | grep -Ei "$(_sv_plan_limit_re)" | tail -1 | cut -c1-160)"
   [ -z "$hit" ] || { printf 'limit\n%s\n' "$hit"; return 0; }
   printf '%s\n%s\n' "$st" "$ev"
@@ -453,7 +457,12 @@ ${1#--watch=}"; shift ;;
   fi
   while IFS= read -r w; do
     [ -n "$w" ] || continue
-    wid="$(_sv_watch_add "$w")" || { _sv_fail "--watch: no such file or directory: $w" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2; }
+    wid="$(_sv_watch_add "$w")"; rc=$?
+    case "$rc" in
+      0) ;;
+      2) _sv_fail "--watch: path has characters outside [A-Za-z0-9._/-]: $(printf '%s' "$w" | tr -cd 'A-Za-z0-9._/-')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
+      *) _sv_fail "--watch: no such file or directory: $(printf '%s' "$w" | tr -cd 'A-Za-z0-9._/-')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
+    esac
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
   done <<< "$watches"
