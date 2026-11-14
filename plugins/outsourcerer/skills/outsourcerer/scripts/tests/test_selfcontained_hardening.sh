@@ -55,7 +55,7 @@ has 'umask 077' "umask 077 present at run_job start (covers the primary Codex la
 { _t3b_pipe="$( . "$SRC" >/dev/null 2>&1
   ORIG=(edit -m); _dvm="glm-5.2"        # -m is the LAST element -> _i+1 is out of range
   before=${#ORIG[@]}
-  for _i in "${!ORIG[@]}"; do case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac; done
+  for _i in "${!ORIG[@]}"; do case "${ORIG[$_i]}" in (-m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac; done
   after=${#ORIG[@]}
   [ "$before" -eq "$after" ] && echo PHANTOM_OK || echo "PHANTOM_BAD before=$before after=$after"
 )" && grep -q PHANTOM_OK <<<"$_t3b_pipe"; } && ok "trailing -m (last token) does not grow ORIG (phantom-free)" || bad "phantom element appended"
