@@ -71,6 +71,9 @@ TEST_CAP='5h<=25'; export TEST_CAP
 [ "$(printf '%s\n' "$accounts" | _osrc_account_choose)" = a ]
 TEST_CAP=''; export TEST_CAP
 CLI="$ROOT/outsourcerer.sh"
+printf '{"apiKeyHelper":"example"}\n' > "$HOME/.claude/settings.json"
+[ "$(/bin/bash "$CLI" lane billing cc)" = metered ]
+printf '{}\n' > "$HOME/.claude/settings.json"
 /bin/bash "$CLI" accounts add work "$OSRC_HOME/a" >/dev/null
 [ ! -e "$OSRC_HOME/launched" ]
 if /bin/bash "$CLI" accounts add default "$OSRC_HOME/a" >/dev/null 2>&1; then exit 1; fi
