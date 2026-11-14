@@ -323,6 +323,10 @@ grep -q 'hub serve printed' "$PAGE" \
 csp="$(curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -i 'content-security-policy')"
 echo "$csp" | grep -q "default-src 'self'" && echo "$csp" | grep -q "connect-src 'self'" \
   && ok "page served with strict default-src self CSP" || bad "CSP missing/weak: $csp"
+echo "$csp" | grep -q "script-src 'self' 'sha256-" \
+  && ok "CSP whitelists the inline script by hash" || bad "script-src not hash-locked: $csp"
+echo "$csp" | grep -q "script-src 'self' 'unsafe-inline'" \
+  && bad "script-src still allows any inline script" || ok "no script-src unsafe-inline"
 aw="$(curl -s "$BASE/assets/fonts/poppins-400.woff2" | head -c4)"
 [ "$aw" = "wOF2" ] && ok "vendored font served from /assets (no token)" || bad "font asset got '$aw'"
 aw2="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/fonts/noto-sans-hebrew.woff2")"

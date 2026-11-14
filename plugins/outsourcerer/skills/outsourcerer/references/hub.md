@@ -116,7 +116,8 @@ Hebrew are vendored as woff2 under `lib/hub-assets/fonts/` (provenance and OFL
 texts in `SOURCES.md` there) and served token-free from `/assets/`; all icons
 are inlined SVG (`ICONS`/`HICONS`); the GitHub star count is fetched in
 artifact mode only.
-The served page carries a strict CSP (`default-src 'self'` plus
-`script-src`/`style-src 'unsafe-inline'` because the page is one self-contained
-file), `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`,
+The served page carries a strict CSP (`default-src 'self'`; the one inline
+script is whitelisted by `sha256` hash, `style-src` keeps `'unsafe-inline'`
+for `style=` attributes), `X-Content-Type-Options: nosniff`, and
+`Referrer-Policy: no-referrer`,
 and it renders fully with the network off. CJK stays on system fonts.

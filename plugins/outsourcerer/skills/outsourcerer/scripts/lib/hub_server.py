@@ -10,6 +10,8 @@ thread, but only while a page has polled within IDLE_SECS and only when
 state under OSRC_HOME actually changed (idle dashboards cost no CPU).
 """
 import argparse
+import base64
+import hashlib
 import hmac
 import json
 import os
@@ -50,6 +52,21 @@ class Hub:
         self.lock = threading.Lock()
         self.last_poll = time.time()
         self.last_state_mtime = -1.0
+        # CSP hashes for the page's inline <script> blocks, computed once so
+        # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
+        # self-contained file, so its blocks are knowable at startup.
+        self.script_hashes = self._script_hashes()
+
+    def _script_hashes(self):
+        try:
+            with open(self.page_path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return []
+        return [
+            "sha256-" + base64.b64encode(hashlib.sha256(m.group(1)).digest()).decode()
+            for m in re.finditer(rb"<script>(.*?)</script>", data, re.S)
+        ]
 
     def state_mtime(self):
         # Newest mtime anywhere state can live; cheap walk, no file reads.
@@ -204,14 +221,19 @@ def make_handler(hub):
 
         def _sec_headers(self):
             # Strict CSP: everything the page loads comes from this server.
-            # Inline script/style stay allowed because the page is a single
-            # self-contained file; nothing remote is reachable (review A2).
+            # The inline script is whitelisted by hash rather than
+            # 'unsafe-inline' (r4 finding 2); inline style stays allowed
+            # because style attributes pepper the markup and hashes cannot
+            # cover those. Nothing remote is reachable regardless (review A2).
+            script_src = "script-src 'self'"
+            if hub.script_hashes:
+                script_src += " " + " ".join("'%s'" % h for h in hub.script_hashes)
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "default-src 'self'; %s; "
                 "style-src 'self' 'unsafe-inline'; font-src 'self'; "
                 "img-src 'self' data:; connect-src 'self'; "
-                "object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+                "object-src 'none'; frame-ancestors 'none'; base-uri 'none'" % script_src)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
 
