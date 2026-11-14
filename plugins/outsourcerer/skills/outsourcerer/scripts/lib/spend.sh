@@ -272,7 +272,8 @@ _osrc_spend_ok() {
     local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest
     case "$_jd" in "$_jobs"/*)
       _rest="${_jd#"$_jobs"/}"
-      case "$_rest" in ""|*/*|*..*) ;; *) rm -f "$_jd/.spend-ok" 2>/dev/null || true ;; esac ;;
+      # "." is not a job id, and a symlinked job dir must never be rm'd through.
+      case "$_rest" in ""|.|*/*|*..*) ;; *) [ -L "$_jd" ] || rm -f "$_jd/.spend-ok" 2>/dev/null || true ;; esac ;;
     esac
     return 0
   fi
@@ -281,7 +282,7 @@ _osrc_spend_ok() {
   local jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" rest
   case "$jd" in "$jobs"/*) ;; *) return 1 ;; esac
   rest="${jd#"$jobs"/}"
-  case "$rest" in ""|*/*|*..*) return 1 ;; esac
+  case "$rest" in ""|.|*/*|*..*) return 1 ;; esac
   local mf="$jd/.spend-ok" l m mtok="" _hd
   [ -f "$mf" ] || return 1
   _hd="$(head -n 1 "$mf" 2>/dev/null)"

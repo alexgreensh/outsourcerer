@@ -302,6 +302,26 @@ case "$rout" in
   *) bad "r6 resolved: cc receipt wrong: $rout" ;;
 esac
 
+# r7 hardening: "." is not a job-dir component and a symlinked job dir is never
+# rm'd through — the .spend-ok inside survives, and the read path refuses "." too.
+# ($OSRC_HOME/jobs/. IS $OSRC_HOME/jobs — a valid marker there must still not count.)
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$OSRC_HOME/jobs/.spend-ok"
+( OSRC_JOB_DIR="$OSRC_HOME/jobs/." OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$OSRC_HOME/jobs/.spend-ok" ] \
+  && ok "r7 marker: '.' job dir keeps .spend-ok (remove path)" \
+  || bad "r7 marker: '.' job dir lost file (rc=$rc)"
+OSRC_JOB_DIR="$OSRC_HOME/jobs/." OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
+[ $rc -ne 0 ] && ok "r7 marker: read path refuses '.' job dir" \
+  || bad "r7 marker: read path accepted '.' job dir (rc=$rc)"
+rm -f "$OSRC_HOME/jobs/.spend-ok"
+REAL="$TMP/realjob"; mkdir -p "$REAL"; printf 'keep\n' > "$REAL/.spend-ok"
+ln -s "$REAL" "$OSRC_HOME/jobs/job-r7link"
+( OSRC_JOB_DIR="$OSRC_HOME/jobs/job-r7link" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$REAL/.spend-ok" ] \
+  && ok "r7 marker: symlinked job dir keeps .spend-ok" \
+  || bad "r7 marker: symlinked dir lost file (rc=$rc)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN OSRC_SPEND_OK _OSRC_SPEND_MARKER
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
