@@ -19,8 +19,10 @@
 #
 # Names are lane-written input (review r4: `x';touch${IFS}PWNED;'.DONE` became a shell command in
 # NEXT). A hand-in file's basename must match ^[A-Za-z0-9][A-Za-z0-9._-]*$; anything else is skipped
-# with ONE notice per name. A --watch path must be made of [A-Za-z0-9._-] components. NEXT lines
-# quote every path with printf %q anyway, so a NEXT is always one plain `cat <file>`.
+# with ONE notice per name. A symlink in a watched folder is skipped the same way (r5: a lane could
+# point LINK.DONE at any file the orchestrator can read). A --watch path is the orchestrator's own
+# input and may hold spaces (~/Library/Mobile Documents/...); only control characters are refused.
+# NEXT lines quote every path with printf %q, so a NEXT is always one plain `cat <file>`.
 
 # name:mtime:size:cksum of a file, or empty when it is missing.
 _sv_fp() { # <path>
@@ -45,19 +47,24 @@ _sv_handin_name_ok() { # <basename>
   case "${1:-}" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
 }
-_sv_watch_path_ok() { # <absolute path>: every component [A-Za-z0-9._-]+ (hidden dirs allowed)
+_sv_watch_path_ok() { # <absolute path>: no control characters (a newline would split the .path file)
   case "${1:-}" in /*) ;; *) return 1 ;; esac
-  case "$1" in *[!A-Za-z0-9._/-]*|*//*) return 1 ;; esac
+  case "$1" in *[[:cntrl:]]*) return 1 ;; esac
   return 0
 }
 
 # One stderr notice per unusual name per watch; the name is shown with its unusual characters removed.
-_sv_handin_ignored() { # <watch-id> <path>
+_sv_handin_ignored() { # <watch-id> <path> [what]
   local f k; f="$(_sv_lanes)/state/$1.ignored"; k="$(printf '%s' "$2" | cksum | awk '{print $1}')"
   grep -qx "$k" "$f" 2>/dev/null && return 0
   mkdir -p "$(_sv_lanes)/state" 2>/dev/null; printf '%s\n' "$k" >> "$f"
-  printf '[outsourcerer] supervise: ignored hand-in file with an unusual name in %s: %s (allowed: letters, digits, . _ -, starting with a letter or digit)\n' \
-    "$(dirname "$2")" "$(basename "$2" | tr -cd 'A-Za-z0-9._-')" >&2
+  if [ "${3:-}" = symlink ]; then
+    printf '[outsourcerer] supervise: ignored hand-in symlink in %s: %s (a hand-in must be a regular file)\n' \
+      "$(dirname "$2")" "$(basename "$2" | tr -cd 'A-Za-z0-9._-')" >&2
+  else
+    printf '[outsourcerer] supervise: ignored hand-in file with an unusual name in %s: %s (allowed: letters, digits, . _ -, starting with a letter or digit)\n' \
+      "$(dirname "$2")" "$(basename "$2" | tr -cd 'A-Za-z0-9._-')" >&2
+  fi
 }
 
 _sv_watch_id() { printf 'watch.%s' "$(printf '%s' "$1" | cksum | awk '{print $1}')"; }
@@ -75,6 +82,7 @@ _sv_watch_files() { # <path> [watch-id]
 _sv_watch_one() { # <file> <watch-id> [any: a watched file needs no hand-in name]
   local b; b="$(basename "$1")"
   [ -n "${3:-}" ] || [ -n "$(_sv_handin_kind "$b")" ] || return 0
+  if [ -z "${3:-}" ] && [ -L "$1" ]; then [ -z "$2" ] || _sv_handin_ignored "$2" "$1" symlink; return 0; fi
   if _sv_handin_name_ok "$b"; then printf '%s\n' "$1"
   elif [ -n "$2" ]; then _sv_handin_ignored "$2" "$1"; fi
   return 0

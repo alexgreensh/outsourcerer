@@ -409,7 +409,7 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
     select(type=="object" and .ts >= $since and (($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
     | ({approval:1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
-      [$p, .ts, .kind, .target, (.detail|f), (.next|f)] | @tsv' 2>/dev/null
+      [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
 }
 
 # Informational kinds are logged and shown with the next real wake, but never wake on their own:
@@ -441,10 +441,12 @@ cmd_supervise() {
       --session) sid="$(_owner_sid "${2:-}")"; shift 2 ;;
       --session=*) sid="$(_owner_sid "${1#--session=}")"; shift ;;
       --once) once=1; shift ;;
-      --watch) watches="$watches
-${2:-}"; shift 2 ;;
-      --watch=*) watches="$watches
-${1#--watch=}"; shift ;;
+      --watch|--watch=*)
+        if [ "$1" = --watch ]; then w="${2:-}"; shift 2; else w="${1#--watch=}"; shift; fi
+        # the list below is newline-separated: refuse control characters before they split a path
+        case "$w" in *[[:cntrl:]]*) _sv_fail "--watch: path has control characters: $(printf '%s' "$w" | tr -d '[:cntrl:]')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;; esac
+        watches="$watches
+$w" ;;
       --unwatch) unwatch="${2:-}"; shift 2 ;;   # tests: one pass (plus settle), exit 1 when nothing is new
       -h|--help) sed -n '2,28p' "$_SV_SELF" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
       -*) _sv_fail "unknown flag $1" "$SCRIPT_PATH supervise"; return 2 ;;
@@ -460,8 +462,8 @@ ${1#--watch=}"; shift ;;
     wid="$(_sv_watch_add "$w")"; rc=$?
     case "$rc" in
       0) ;;
-      2) _sv_fail "--watch: path has characters outside [A-Za-z0-9._/-]: $(printf '%s' "$w" | tr -cd 'A-Za-z0-9._/-')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
-      *) _sv_fail "--watch: no such file or directory: $(printf '%s' "$w" | tr -cd 'A-Za-z0-9._/-')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
+      2) _sv_fail "--watch: path has control characters: $(printf '%s' "$w" | tr -d '[:cntrl:]')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
+      *) _sv_fail "--watch: no such file or directory: $(printf '%s' "$w" | tr -d '[:cntrl:]')" "$SCRIPT_PATH supervise --watch <dir|file>"; return 2 ;;
     esac
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
