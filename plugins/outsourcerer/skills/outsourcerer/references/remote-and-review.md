@@ -69,6 +69,9 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
   `OSRC_REVIEW_CTX_MAX` percent (35), `review next` refuses and `review rotate` prints the steps for a
   fresh reviewer. A managed reviewer idle with an empty queue for `OSRC_REVIEW_IDLE_MIN` minutes (50)
   is stopped and retired. `review reviewer <new> --replace` resets the counters.
+- Start a fresh Claude reviewer with `OSRC_LEAN_LAUNCH=1`: it retains `CLAUDE.md`, skips `--bare`,
+  and loads no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a config with the required servers.
+  Installed plugins and skills are still inherited.
 - Nothing merges automatically.
 
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)

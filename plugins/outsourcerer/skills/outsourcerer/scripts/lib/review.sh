@@ -498,7 +498,7 @@ _osrc_review_rotate() {
   local s why; s="$(_osrc_review_reviewer)"
   why="$( [ -n "$s" ] && _osrc_review_rotation_due "$s" )"
   echo "Reviewer rotation${why:+ ($why)}. One reviewer at a time:"
-  echo "  1. start a fresh reviewer (same model as the old one), e.g. OUTSOURCERER_TMUX=${s:-reviewer}-r$(( $(jq -r '.reviews // 0' "$OSRC_HOME/review/reviewer.json" 2>/dev/null || echo 0) + 1 )) $(_osrc_self) session start --provider cc -m <model>"
+  echo "  1. start a fresh reviewer (same model as the old one), e.g. OSRC_LEAN_LAUNCH=1 OUTSOURCERER_TMUX=${s:-reviewer}-r$(( $(jq -r '.reviews // 0' "$OSRC_HOME/review/reviewer.json" 2>/dev/null || echo 0) + 1 )) $(_osrc_self) session start --provider cc -m <model>"
   echo "  2. stop the old one: OUTSOURCERER_TMUX=${s:-<old>} $(_osrc_self) session stop   (only after any in-flight verdict is in)"
   echo "  3. $(_osrc_self) review reviewer <new-session>   (counters reset; queued items carry over)"
 }

@@ -124,6 +124,8 @@ Supervision refreshes a project-and-limits snapshot every 10 minutes. Change the
 
 Reviewer rotation defaults to two reviews or 35% context, configurable with `OSRC_REVIEW_ROTATE_K` and `OSRC_REVIEW_CTX_MAX`. An idle managed reviewer with an empty queue is retired after 50 minutes (`OSRC_REVIEW_IDLE_MIN`).
 
+Set `OSRC_LEAN_LAUNCH=1` for Claude sessions and delegates to retain `CLAUDE.md` while using strict MCP configuration without `--bare`. Interactive sessions start with no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a JSON config containing the required servers. Installed skills and plugins are still inherited.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---
