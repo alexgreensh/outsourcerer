@@ -300,9 +300,25 @@ grep '^NEXT ' <<<"$out" | sed 's/^NEXT //' > "$TMP/run42/next.sh"
 ! grep -q 'PWNED' "$OSRC_HOME/lanes/events.jsonl" && ok "the beacon never logs a hostile name either (events.jsonl clean)" || no "events.jsonl carries the name"
 nx="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; f="$W/out/L5.DONE"; printf 'cat %q' "$f" ) )"
 grep -q "^NEXT $(printf '%s' "$nx" | sed 's/[][\.*^$/]/\\&/g')$" <<<"$out" && ok "NEXT is built with printf %q" || no "NEXT not %q-quoted: [$out] want [$nx]"
-mkdir -p "$TMP/ws43/bad dir"; out="$("$SRC" supervise --session S --watch "$TMP/ws43/bad dir" 2>/dev/null)"; rc=$?
-[ "$rc" = 2 ] && grep -q '^EVENT failed supervise .*--watch: path has characters' <<<"$out" && ! ls "$OSRC_HOME/watch/" 2>/dev/null | xargs -I{} cat "$OSRC_HOME/watch/{}" | grep -q 'bad dir' \
-  && ok "--watch refuses a path outside [A-Za-z0-9._/-] and registers nothing" || no "bad --watch path: rc=$rc [$out]"
+# Review r5 #3: the orchestrator's own watch path may hold spaces, quotes, `$`; NEXT carries it via %q.
+fresh 43; W="$TMP/ws43/Mobile Documents/it's \$HOME (x)"; mkdir -p "$W"; : > "$W/L7.DONE"; echo report7 > "$W/L7-REPORT.md"
+"$SRC" supervise --session S --watch "$W" --once >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && ls "$OSRC_HOME/owners/S/" 2>/dev/null | grep -q '^watch\.' && ok "a watch path with spaces, a quote and \$ is accepted" || no "spaced watch path refused: rc=$rc $(cat "$TMP/err" 2>/dev/null)"
+touch -m -t 202601010700 "$W/L7.DONE"; out="$(sup --session S --once)"; mkdir -p "$TMP/run43"
+grep -q '^EVENT done L7.DONE ' <<<"$out" && [ "$(cd "$TMP/run43" && bash -c "$(sed -n 's/^NEXT //p' <<<"$out")" 2>&1)" = report7 ] && [ -z "$(ls "$TMP/run43")" ] \
+  && ok "its NEXT runs as one plain cat of the report (printf %q), creating nothing" || no "spaced NEXT: [$out] ran: [$(cd "$TMP/run43" && bash -c "$(sed -n 's/^NEXT //p' <<<"$out")" 2>&1)] left: [$(ls "$TMP/run43")]"
+mkdir -p "$TMP/ws43/a
+b"; out="$("$SRC" supervise --session S --watch "$TMP/ws43/a
+b" 2>/dev/null)"; rc=$?
+[ "$rc" = 2 ] && grep -q '^EVENT failed supervise .*--watch: path has control characters' <<<"$out" && ok "a watch path with a newline is refused" || no "newline path: rc=$rc [$out]"
+# Review r5 #1: a symlink in the watched folder is not a hand-in (a lane could point it anywhere).
+fresh 44; W="$TMP/ws44"; mkdir -p "$W"; : > "$W/L8.DONE"; "$SRC" supervise --session S --watch "$W" --once >/dev/null 2>&1
+ln -s /etc/hosts "$W/LINK.DONE"; touch -m -t 202601010800 "$W/L8.DONE"
+out="$(sup --session S --once)"; err1="$(cat "$TMP/err")"
+grep -q '^EVENT done L8.DONE ' <<<"$out" && ! grep -q 'LINK' <<<"$out" && ! grep -q 'LINK' "$OSRC_HOME/lanes/events.jsonl" \
+  && ok "LINK.DONE -> /etc/hosts gives no event (the real hand-in beside it still does)" || no "symlink hand-in: [$out]"
+[ "$(grep -c 'ignored hand-in symlink' <<<"$err1")" = 1 ] && ok "the symlink is reported once" || no "symlink notice: [$err1]"
+touch -m -t 202601010900 "$W/L8.DONE"; sup --session S --once >/dev/null; grep -q 'ignored hand-in' "$TMP/err" && no "symlink notice repeats" || ok "the symlink notice is not repeated"
 
 # A tmux lane whose done contract is a file: the re-hand-in is a new done even on the same screen.
 fresh 41; own S dn2; pane dn2 cc-idle-after-work.txt; mkdir -p "$OSRC_HOME/done" "$TMP/ws41"; : > "$TMP/ws41/dn2.DONE"

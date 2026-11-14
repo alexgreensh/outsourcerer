@@ -311,8 +311,11 @@ logs its events while no supervise runs, and the stop guard blocks every stop wi
 armed (the usual two blocks, then it lets the stop through and leaves the `.unguarded` note), on
 every turn, until you unwatch. Unwatch when the round is over. The hub does not show watches as lanes.
 File names are lane-written input: a hand-in name must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`, anything
-else is skipped with one stderr notice, a `--watch` path may only use `[A-Za-z0-9._/-]`, and every
-NEXT quotes its path with `printf %q`, so a NEXT is always a plain `cat <file>`. A lane's own done
+else is skipped with one stderr notice, and so is a symlink (a lane could point `LINK.DONE` at any file
+you can read). A `--watch` path is yours and may hold spaces (`~/Library/Mobile Documents/...`); only
+control characters are refused. Every NEXT quotes its path with `printf %q`, so a NEXT is always a
+plain `cat <file>`. Two sessions watching the same folder share one watch id (it is keyed on the path),
+so the second session's first arm replays hand-ins the first one already saw. A lane's own done
 contract (`--done-when file:` or `branch:`) keys its `done` event the same way, on the file
 fingerprint or the branch tip sha.
 
