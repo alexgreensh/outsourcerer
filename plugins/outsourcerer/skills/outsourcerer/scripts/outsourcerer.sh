@@ -1756,7 +1756,7 @@ _run_tee_stderr() {
   # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
   # inside the delegate would see THIS job's .spend-ok marker and cap-dedupe state as
   # its own consent/cap context. Every delegate lane funnels through here.
-  if [ -n "$f" ]; then env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@" 2> >(tee "$f" >&2); else env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; fi
+  if [ -n "$f" ]; then _osrc_nojob "$@" 2> >(tee "$f" >&2); else _osrc_nojob "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
@@ -2800,9 +2800,9 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
   local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
   if [ -n "$_dverr" ]; then
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
+    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
   else
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   fi
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
     _policy_blocked=1
@@ -14374,7 +14374,7 @@ delegate_gmnative() {
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
     local _aerr; _aerr="$(mktemp "${TMPDIR:-/tmp}/osrc-agy.XXXXXX")"
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
+    _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
     # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
@@ -14390,7 +14390,7 @@ delegate_gmnative() {
        && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
-      env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+      _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
           --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
       [ -s "$_aerr" ] && cat "$_aerr" >&2
     fi
@@ -14637,7 +14637,7 @@ delegate_hermes() {
   _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for the Hermes receipt lookup
   local rc=0
-  env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
+  _osrc_nojob hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
   record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost hermes "$_fg_launch" "")" hermes
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"

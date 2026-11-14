@@ -511,6 +511,24 @@ _osrc_route_launched_model() {
   printf '%s' "${rid:-${RESOLVED_ID:-${ROUTE_MODEL:-}}}"
 }
 
+# _osrc_nojob <cmd...> -> run the command with OSRC_JOB_DIR and OSRC_JOB_TOKEN UNSET,
+# then restore exactly the ones that were set, returning the command's rc. Delegates
+# must never inherit the job env (a nested outsourcerer call would see THIS job's
+# .spend-ok marker and cap-dedupe state as its own consent context). `env -u` cannot
+# do this job: it execs the real binary, so shell-function mocks of the delegate CLI
+# never run. unset in the current shell keeps function resolution AND keeps both
+# vars out of the child's environment. Do NOT hide them with `local`+unset — on
+# bash 3.2 the local does not mask the exported value for children.
+_osrc_nojob() {
+  local _nj_d="${OSRC_JOB_DIR+set}" _nj_dv="${OSRC_JOB_DIR:-}" \
+        _nj_t="${OSRC_JOB_TOKEN+set}" _nj_tv="${OSRC_JOB_TOKEN:-}" _nj_rc
+  unset OSRC_JOB_DIR OSRC_JOB_TOKEN
+  "$@"; _nj_rc=$?
+  [ "$_nj_d" = "set" ] && export OSRC_JOB_DIR="$_nj_dv"
+  [ "$_nj_t" = "set" ] && export OSRC_JOB_TOKEN="$_nj_tv"
+  return "$_nj_rc"
+}
+
 # =============================================================================
 # Per-lane usage caps (--cap / lane cap)
 # =============================================================================

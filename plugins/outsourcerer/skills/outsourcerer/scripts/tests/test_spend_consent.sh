@@ -322,6 +322,19 @@ ln -s "$REAL" "$OSRC_HOME/jobs/job-r7link"
   || bad "r7 marker: symlinked dir lost file (rc=$rc)"
 unset OSRC_JOB_DIR OSRC_JOB_TOKEN OSRC_SPEND_OK _OSRC_SPEND_MARKER
 
+# T3: _osrc_nojob runs a FUNCTION mock (env -u would exec the real binary), the
+# mock receives its args, a child sh sees both job vars UNSET, rc propagates, and
+# both vars are restored afterwards.
+_r7mock() { printf 'mock-args:%s\n' "$*"; sh -c 'printf "child-sees:%s/%s\n" "${OSRC_JOB_DIR:-UNSET}" "${OSRC_JOB_TOKEN:-UNSET}"'; return 3; }
+export OSRC_JOB_DIR="$OSRC_HOME/jobs/j1" OSRC_JOB_TOKEN=tokX
+out="$(_osrc_nojob _r7mock -m foo "a b" 2>&1)"; rc=$?
+case "$out" in *"mock-args:-m foo a b"*) ok "r7 nojob: function mock receives its args" ;; *) bad "r7 nojob: mock args missing: $out" ;; esac
+case "$out" in *"child-sees:UNSET/UNSET"*) ok "r7 nojob: child sees both job vars UNSET" ;; *) bad "r7 nojob: child saw job vars: $out" ;; esac
+[ $rc -eq 3 ] && ok "r7 nojob: rc propagates" || bad "r7 nojob: rc=$rc expected 3"
+[ "$OSRC_JOB_DIR" = "$OSRC_HOME/jobs/j1" ] && [ "$OSRC_JOB_TOKEN" = "tokX" ] \
+  && ok "r7 nojob: both vars restored" || bad "r7 nojob: vars not restored ($OSRC_JOB_DIR/$OSRC_JOB_TOKEN)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN _r7mock
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
