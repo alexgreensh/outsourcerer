@@ -353,6 +353,20 @@ _osrc_lane_spendable() {
   _osrc_spend_ok "${1:-}" "${2:-}"
 }
 
+# Failover cash-skip tracking (engine _failover_* calls these; they live here for the
+# engine-size budget and because they exist to feed the spend-consent stop message).
+# The picker runs under a command substitution, so skipped cash lanes are recorded in a
+# per-process file (not a variable) — $$ is shared by $( ) subshells, giving one file per
+# route_delegate call after _failover_cash_clear.
+_failover_cash_file() { printf '%s/.failover.cash.%s' "$OSRC_HOME" "$$"; }
+_failover_cash_skipped() { local _cf; _cf="$(_failover_cash_file)"; [ -f "$_cf" ] || return 0; tr '\n' ' ' < "$_cf" 2>/dev/null | sed -E 's/[[:space:]]+$//'; }
+_failover_cash_clear() { rm -f "$(_failover_cash_file)" 2>/dev/null; }
+_failover_cash_record() {  # <lane> — remember a skipped cash lane for the stop line
+  local l="${1:-}"; case " $_FAILOVER_CASH_SKIPPED " in *" $l "*) return 0 ;; esac
+  _FAILOVER_CASH_SKIPPED="${_FAILOVER_CASH_SKIPPED:+$_FAILOVER_CASH_SKIPPED }$l"
+  { umask 077; printf '%s\n' "$l" >> "$(_failover_cash_file)"; } 2>/dev/null || true
+}
+
 # _osrc_spend_marker_pairs <provider> [inner-args...] -> prints the exact "lane|model"
 # lines a bg job's .spend-ok marker should carry. The detached child re-resolves its
 # own lane/model from the inner argv, so the parent writes every plausible EXACT pair:

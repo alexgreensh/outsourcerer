@@ -16248,8 +16248,10 @@ _gate_hop() {
 #     invented capacity;
 #   * same model on another harness first, else the nearest tier from the tier table (ties go to the
 #     cheaper tier, then lane preference order);
-#   * free/plan lanes auto; CASH lanes (cost_class=credits) only with consent already granted
-#     (OSRC_FAILOVER_CASH_OK=1), otherwise they are named in the stop message, never used silently;
+#   * free/plan lanes auto; CASH lanes (cost_class=credits) are only CONSIDERED with
+#     OSRC_FAILOVER_CASH_OK=1 — that env var is standing consent, so the spend itself still
+#     needs this command's --spend-ok; unconsented cash lanes are named in the stop message,
+#     never used silently;
 #   * a READ-ONLY job (auto tier) simply re-dispatches on the pick; a MUTATING job (edit/yolo/
 #     research) is re-dispatched FRESH with a handoff note so the new agent continues from the CURRENT
 #     repo state — never a byte-level resume of the interrupted turn, and never a silent retry;
@@ -16268,11 +16270,6 @@ _FAILOVER_CASH_SKIPPED=""   # in-process mirror; the file below is the source of
 _FO_LANE=""; _FO_MODEL=""; _FO_VERDICT=""; _FO_REASON=""; _FO_RESET=""
 
 _failover_signal_file() { printf '%s/.failover.signal.%s' "$OSRC_HOME" "$$"; }
-# The picker runs under a command substitution, so the cash lanes it had to skip are recorded in a
-# per-process file (not a variable) for the stop line to name.
-_failover_cash_file() { printf '%s/.failover.cash.%s' "$OSRC_HOME" "$$"; }
-_failover_cash_skipped() { tr '\n' ' ' < "$(_failover_cash_file)" 2>/dev/null | sed -E 's/[[:space:]]+$//'; }
-_failover_cash_clear() { rm -f "$(_failover_cash_file)" 2>/dev/null; }
 # _failover_signal_write <lane> <model> <verdict> <reason> [reset-secs]. verdict: confirmed |
 # unverified | inconclusive | answered (answered = the lane still runs; not a failover trigger).
 _failover_signal_write() {
@@ -16304,7 +16301,6 @@ _tier_index() { case "${1:-}" in frontier) printf 0 ;; capable) printf 1 ;; mid)
 _tier_dist() { local a b; a="$(_tier_index "$1")"; b="$(_tier_index "$2")"; [ "$a" -ge "$b" ] && printf '%s' $(( a - b )) || printf '%s' $(( b - a )); }
 _failover_lane_rank() { local i=0 l; for l in $OSRC_FAILOVER_LANES; do i=$((i+1)); [ "$l" = "${1:-}" ] && { printf '%s' "$i"; return; }; done; printf 99; }
 _failover_lane_is_cash() { [ "$(_lane_field "${1:-}" cost_class 2>/dev/null)" = "credits" ]; }
-
 # _failover_lane_ok <lane> <verb> [model] -> rc0 when the lane can take this job RIGHT NOW: not marked
 # down, its CLI/key/login is present (the lane's own readiness probe), not a cash lane without consent,
 # not a denied model, and not a lane/model the descriptor warns off for a mutating verb. A skipped cash
@@ -16324,15 +16320,13 @@ _failover_lane_ok() {
     [ "$_hit" = 1 ] || return 1
   fi
   if _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" != "1" ]; then
-    case " $_FAILOVER_CASH_SKIPPED " in *" $l "*) ;; *)
-      _FAILOVER_CASH_SKIPPED="${_FAILOVER_CASH_SKIPPED:+$_FAILOVER_CASH_SKIPPED }$l"
-      { umask 077; printf '%s\n' "$l" >> "$(_failover_cash_file)"; } 2>/dev/null || true ;;
-    esac
-    return 1
+    _failover_cash_record "$l"; return 1
   fi
-  # L7 add-on: failover never hops onto a metered/unknown lane without THIS command's
-  # --spend-ok consent (broader than the credits-only check above: unknown counts too).
-  _osrc_lane_spendable "$l" "$m" || return 1
+  # L7 add-on: never hop onto metered/unknown without THIS command's --spend-ok; CASH_OK
+  # only lets the picker CONSIDER cash lanes, so a spend-blocked one is recorded for the
+  # stop line's --spend-ok hint.
+  _osrc_lane_spendable "$l" "$m" || {
+    _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ] && _failover_cash_record "$l"; return 1; }
   [ -n "$m" ] && _model_denied "$m" && return 1
   if [ -n "$m" ]; then
     _wm="$(_lane_field "$l" warn_model 2>/dev/null)"
@@ -16432,8 +16426,12 @@ _failover_soonest_reset() {
 }
 # _failover_nothing_notice <src-lane> <reason> -> the honest STOP line (never invented capacity).
 _failover_nothing_notice() {
-  local soon cash="" skipped; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"
-  [ -n "$skipped" ] && cash=" ($skipped would take it but spends cash; allow that with OSRC_FAILOVER_CASH_OK=1.)"
+  local soon cash="" skipped hint; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"
+  if [ -n "$skipped" ]; then
+    hint='allow that with OSRC_FAILOVER_CASH_OK=1 and --spend-ok on this command.'
+    [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ] && hint='OSRC_FAILOVER_CASH_OK already unlocked them — this command still needs --spend-ok.'
+    cash=" ($skipped would take it but spends cash; $hint)"
+  fi
   printf '>>> [failover] every lane you have is at its limit or absent; nothing to fail over to (%s %s). Waiting for %s or add a lane.%s\n' \
     "$(_lane_plan_display "${1:-?}")" "${2:-hit its plan limit}" "${soon:-the next reset (no lane stated one)}" "$cash" >&2
 }

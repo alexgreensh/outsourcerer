@@ -30,6 +30,19 @@ _quota_note_refusal() { :; }
 FB="$TMP/fakebin"; mkdir -p "$FB"
 mk() { for c in "$@"; do printf '#!/usr/bin/env bash\necho ok\n' > "$FB/$c"; chmod +x "$FB/$c"; done; hash -r; }
 rmc() { for c in "$@"; do rm -f "$FB/$c"; done; hash -r; }   # hash -r: bash caches lookups, a removed fake would still read as present
+_mkclaude() {  # claude fake that answers `auth status` with plan-proof JSON (r9 billing:
+  # cc subscription requires the 4-field auth-status verdict; a bare `echo ok` proves nothing)
+  mk claude
+  cat > "$FB/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+else
+  echo ok
+fi
+EOF
+  chmod +x "$FB/claude"; hash -r
+}
 _fallback_ready_or() { [ -n "${FAKE_OR_KEY:-}" ]; }
 # PATH ISOLATION: readiness == "CLI on PATH", so the REAL codex/claude/droid/... installed on the
 # developer's machine must be invisible or every "absent lane" assertion is meaningless. Only the
@@ -37,6 +50,16 @@ _fallback_ready_or() { [ -n "${FAKE_OR_KEY:-}" ]; }
 _jq="$(command -v jq 2>/dev/null)"; [ -n "$_jq" ] && ln -sf "$_jq" "$FB/jq"
 export PATH="$FB:/usr/bin:/bin:/usr/sbin:/sbin"; hash -r
 for c in codex claude droid oz cursor-agent cline agy devin; do command -v "$c" >/dev/null 2>&1 && { echo "FAIL: PATH isolation leaked a real '$c'"; exit 1; }; done
+
+# L7 r9 billing proof: the picker only takes spendable lanes, so every lane a row expects
+# picked needs PROVABLE plan billing — auth files for the dir-auth lanes (cx OAuth tokens,
+# droid/warp session auth). cc gets its proof from the auth-aware _mkclaude fake instead
+# (plan billing is the `claude auth status` verdict, there is no file path). Lanes with no
+# fixture — cursor, cline, pi, gm, claudex — stay billing-unknown on purpose.
+mkdir -p "$TMP/.codex" "$TMP/.factory" "$TMP/.warp"
+printf '{"tokens":{"access_token":"fake-plan-token"}}' > "$TMP/.codex/auth.json"
+printf '{"auth":"session"}' > "$TMP/.factory/auth.json"
+printf '{"auth":"session"}' > "$TMP/.warp/auth.json"
 
 # === (a) _failover_pick ==========================================================================
 _lane_down_mark dv 41220 "plan quota exhausted"
@@ -51,15 +74,29 @@ _lane_down_mark cx 300
 _p="$(_failover_pick dv glm-5.2 run)"; [ "$_p" = "droid||tier:mid" ] && ok "pick: a DOWN target (cx) is skipped" || bad "pick: down cx picked: '$_p'"
 _lane_down_clear cx
 _p="$(_failover_pick cx luna run)"; case "$_p" in cx\|*) bad "pick: source lane cx picked back: '$_p'" ;; *) ok "pick: never the source lane (got '${_p:-<empty>}')" ;; esac
-mk claude; export FAKE_OR_KEY=1
+_mkclaude; export FAKE_OR_KEY=1
 _p="$(_failover_pick dv glm-5.2 run)"; [ "$_p" = "cc|sonnet|tier:mid" ] && ok "pick: OpenRouter serves glm but is CASH without consent -> skipped; cc sonnet (mid) picked" || bad "pick: got '$_p'"
 case " $(_failover_cash_skipped) " in *" or "*) ok "pick: skipped cash lane remembered across the \$(...) (or)" ;; *) bad "pick: cash skip not recorded: '$(_failover_cash_skipped)'" ;; esac
-_p="$(OSRC_FAILOVER_CASH_OK=1 _failover_pick dv glm-5.2 run)"; [ "$_p" = "or|glm|same-model" ] && ok "pick: with OSRC_FAILOVER_CASH_OK=1 the same model on OpenRouter is chosen" || bad "pick: got '$_p'"
+# r9: OSRC_FAILOVER_CASH_OK only lets the picker CONSIDER a cash lane — spend still needs this
+# command's --spend-ok. CASH_OK alone: `or` is evaluated, spend-blocked, recorded for the stop
+# line, never picked. CASH_OK + spend consent: the same-model cash pick proceeds.
+_p="$(OSRC_FAILOVER_CASH_OK=1 _failover_pick dv glm-5.2 run)"
+case "$_p" in or\|*) bad "pick: CASH_OK alone picked the cash lane: '$_p'" ;; *) ok "pick: CASH_OK alone -> cash lane still not picked (got '${_p:-<empty>}')" ;; esac
+case " $(_failover_cash_skipped) " in *" or "*) ok "pick: CASH_OK spend-block records the cash lane for the stop line" ;; *) bad "pick: spend-blocked or not recorded: '$(_failover_cash_skipped)'" ;; esac
+_p="$(OSRC_FAILOVER_CASH_OK=1 OSRC_SPEND_OK=1 _failover_pick dv glm-5.2 run)"
+[ "$_p" = "or|glm|same-model" ] && ok "pick: CASH_OK + --spend-ok -> same-model cash pick proceeds" || bad "pick: got '$_p'"
 unset FAKE_OR_KEY; rmc droid codex claude
 _p="$(_failover_pick dv glm-5.2 run)"; [ -z "$_p" ] && ok "pick: nothing ready -> empty (no invented capacity)" || bad "pick: invented '$_p'"
 mk oz
 _p="$(_failover_pick dv glm-5.2 run)"; [ "$_p" = "warp||tier:mid" ] && ok "pick: warp readiness via its cli field (no ready_fn declared)" || bad "pick: got '$_p'"
 rmc oz
+# r9: a READY lane whose billing cannot be proven is never picked — cursor-agent on PATH
+# but no ~/.cursor auth -> billing unknown -> skipped exactly like a down lane. THIS
+# command's --spend-ok consent is the only thing that unlocks it.
+mk cursor-agent
+_p="$(_failover_pick dv glm-5.2 run)"; [ -z "$_p" ] && ok "pick: ready-but-unproven cursor (billing unknown) -> empty" || bad "pick: unproven lane picked: '$_p'"
+_p="$(OSRC_SPEND_OK=1 _failover_pick dv glm-5.2 run)"; case "$_p" in cursor\|*) ok "pick: --spend-ok consent unlocks the unproven lane (cursor)" ;; *) bad "pick: consent did not unlock cursor: '$_p'" ;; esac
+rmc cursor-agent
 _lane_down_clear dv
 
 # === (b) the blocks leave a signal ===============================================================
@@ -128,14 +165,22 @@ printf '%s' "$_o" | grep -q '>>> \[failover\] every lane you have is at its limi
 printf '%s' "$_o" | grep -q 'or add a lane' && ok "hop: STOP line suggests adding a lane" || bad "hop: add-a-lane missing"
 printf '%s' "$_o" | grep -q 'hops=0' && ok "hop: no hop counted on a stop" || bad "hop: counted a hop on stop"
 [ "$(printf '%s' "$_o" | sed -n 3p)" = "run" ] && ok "hop: argv untouched on a stop" || bad "hop: argv changed on stop"
-mk claude; export FAKE_OR_KEY=1
+_mkclaude; export FAKE_OR_KEY=1
 _failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
 _o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
 printf '%s' "$_o" | grep -q 'You have Claude Code (Claude plan) — moving this to sonnet there' && ok "hop: dv->cc sonnet when cc is the only ready plan lane (or is cash)" || bad "hop: $(printf '%s' "$_o" | grep failover)"
 rmc claude
 _failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
 _o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
-printf '%s' "$_o" | grep -q 'nothing to fail over to' && printf '%s' "$_o" | grep -q '(or would take it but spends cash; allow that with OSRC_FAILOVER_CASH_OK=1.)' && ok "hop: only a cash lane left -> STOP line names it + the consent switch, never uses it" || bad "hop: cash hint: $(printf '%s' "$_o" | grep failover)"
+printf '%s' "$_o" | grep -q 'nothing to fail over to' && printf '%s' "$_o" | grep -q 'OSRC_FAILOVER_CASH_OK=1 and --spend-ok on this command' && ok "hop: only a cash lane left -> STOP line names it + both consent switches, never uses it" || bad "hop: cash hint: $(printf '%s' "$_o" | grep failover)"
+# r9: CASH_OK alone lets the picker CONSIDER the cash lane but the spend gate still refuses —
+# the stop line must name --spend-ok; only CASH_OK + --spend-ok together hops onto it.
+_failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
+_o="$(OSRC_FAILOVER_CASH_OK=1 HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
+[ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && printf '%s' "$_o" | grep -q -- '--spend-ok' && ok "hop: CASH_OK alone -> STOP line names --spend-ok as the missing consent" || bad "hop: cash-ok-only stop: $(printf '%s' "$_o" | grep failover)"
+_failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
+_o="$(OSRC_FAILOVER_CASH_OK=1 OSRC_SPEND_OK=1 HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
+[ "$(printf '%s' "$_o" | sed -n 1p)" = 0 ] && printf '%s' "$_o" | grep -q -- '--spend-ok' && ok "hop: CASH_OK + --spend-ok -> cash hop proceeds, consent re-injected into argv" || bad "hop: cash hop refused: $(printf '%s' "$_o" | grep failover)"
 unset FAKE_OR_KEY; _lane_down_clear dv
 # C4 budget
 mk droid

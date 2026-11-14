@@ -216,7 +216,9 @@ does not retry the dead lane and does not stop at "it failed". The flow (mechani
    before the lane is marked down (probe-then-decide). A lane that still answers stays up.
 2. A target is chosen from the harnesses you actually have and that are ready right now: the same
    model elsewhere if one serves it, else the nearest-tier equivalent. Down, absent, and
-   (without `OSRC_FAILOVER_CASH_OK=1`) cash lanes are never picked.
+   (without `OSRC_FAILOVER_CASH_OK=1`) cash lanes are never picked. `OSRC_FAILOVER_CASH_OK=1`
+   only lets the picker *consider* a cash lane — the spend itself still needs this command's
+   `--spend-ok`, because env consent is standing consent and paid-lane approval is per command.
 3. The job is re-dispatched there, and you are told in plain language, every hop:
 
 ```
@@ -235,7 +237,8 @@ When **no** ready harness has headroom, nothing is invented. The run stops with:
 ```
 
 The soonest reset comes from the down lanes' own stated windows. If a cash lane could have taken
-the job, the line names it and the consent switch (`OSRC_FAILOVER_CASH_OK=1`) instead of spending
+the job, the line names it and the consent switches (`OSRC_FAILOVER_CASH_OK=1` to let the picker
+consider it, plus `--spend-ok` on the command for the spend itself) instead of spending
 silently. A pinned `-m` that can only move to a different model is refused the same loud way
 (override: `OSRC_FALLBACK_PINNED=1`). Each hop records a `fallback` row in the Tab ($0,
 bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
