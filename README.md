@@ -402,3 +402,10 @@ Built by [Alex Greenshpun](https://github.com/alexgreensh)
 *Delegate the grind. Keep the glory.*
 
 </div>
+# Claude accounts
+
+`outsourcerer accounts` lists Claude config directories and their weekly and five-hour headroom. Add one with `outsourcerer accounts add work`, or supply an absolute directory as the third argument. Shared settings, instructions, skills, agents, hooks, plugins, and memory are linked from `~/.claude`; login and live session state remain separate. Follow the printed login instruction yourself. `outsourcerer accounts check work` reports changed or missing links. `outsourcerer accounts rm work` removes the registry entry and links it created, leaving real files and the config directory intact. The `default` account is `~/.claude`.
+
+New Claude lanes choose the account with the most known weekly headroom below configured lane caps. Use `--account work` to select one explicitly. Usage that cannot be read is shown as unknown and is not automatically selected. Each new process keeps its chosen account; running lanes do not move. Console and other per-use accounts require spend consent.
+
+Release note: Anthropic's terms on one person using several personal subscriptions have not been confirmed by us.

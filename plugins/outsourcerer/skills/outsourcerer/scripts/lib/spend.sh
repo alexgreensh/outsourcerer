@@ -215,6 +215,7 @@ osrc_lane_billing() {
     or|tokenrouter|gi) printf 'metered\n'; return ;;          # API-key cash lanes by definition
     claudex) printf 'unknown\n'; return ;;                     # CLIProxyAPI upstream billing is not externally provable -> asks
     cc)
+      if [ -n "${OSRC_ACCOUNT_DIR:-}" ]; then local CLAUDE_CONFIG_DIR="$OSRC_ACCOUNT_DIR"; export CLAUDE_CONFIG_DIR; fi
       # Native Claude Code: per-use evidence FIRST — an API key, an auth token, a base-URL
       # redirect, BEDROCK/VERTEX, or a settings.json key helper all bill cash even when a
       # claude.ai plan login also exists. Only a proven plan login with none of those is
@@ -225,6 +226,7 @@ osrc_lane_billing() {
          || _osrc_claude_settings_metered; then
         printf 'metered\n'
       elif _osrc_claude_plan_login; then printf 'subscription\n'
+      elif [ -n "${OSRC_ACCOUNT_DIR:-}" ] && _osrc_account_console; then printf 'metered\n'
       else printf 'unknown\n'; fi; return ;;
     cx|ci)   # ci rides the same codex-native auth as cx
       # Native Codex: OPENAI_API_KEY/CODEX_API_KEY (env) or an api-key auth.json bills cash;

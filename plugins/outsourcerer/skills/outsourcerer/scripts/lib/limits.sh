@@ -419,6 +419,14 @@ _OSRC_LIMITS_SNAP=""
 _OSRC_LIMITS_SNAP_TS=0
 _osrc_limits_snapshot() {
   local now; now="$(date +%s 2>/dev/null || printf 0)"
+  if [ -n "${OSRC_ACCOUNT_DIR:-}" ]; then
+    local usage a b
+    usage="$(_osrc_account_usage "$OSRC_ACCOUNT_DIR")" || usage='|'
+    a="${usage%%|*}"; b="${usage#*|}"
+    [ -z "$a" ] || printf 'claude5h=%s ' "$a"
+    [ -z "$b" ] || printf 'claude7d=%s ' "$b"
+    return 0
+  fi
   if [ -z "$_OSRC_LIMITS_SNAP" ] || [ $(( now - _OSRC_LIMITS_SNAP_TS )) -gt 60 ]; then
     _OSRC_LIMITS_SNAP="$(_session_limits 2>/dev/null)"
     _OSRC_LIMITS_SNAP_TS="$now"
@@ -613,7 +621,7 @@ _osrc_harness_detected() {
 #   out     fresh reading at/over the limit line, or a cap is tripped (dispatch refuses)
 #   wait    a meter exists but the only reading is stale — "waiting for reset/refresh"
 #   unknown no meter feed for this harness — left reads "not checked yet"
-osrc_lane_summary() {
+_osrc_lane_summary_base() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
   local mw="" _w _p _rst _age
   mw="$(_osrc_meter_windows 2>/dev/null)"
@@ -691,6 +699,7 @@ EOF
     _osrc_summary_text "$rows"
   fi
 }
+
 
 # _osrc_jstr <s> -> JSON-escaped string body (no surrounding quotes).
 _osrc_jstr() { printf '%s' "${1:-}" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
