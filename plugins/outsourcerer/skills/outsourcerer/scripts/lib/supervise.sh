@@ -420,6 +420,11 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
 # an `approved` row waking the orchestrator would bring back the approval toil the approver removes.
 _sv_informational() { case "$1" in approved) return 0 ;; esac; return 1; }
 
+_sv_approval_summary() { # <new TSV rows>: report only at an actual wake
+  local count; count="$(printf '%s\n' "$1" | awk -F '\t' '$3 == "approved" { n++ } END { print n+0 }')"
+  [ "$count" -eq 0 ] || printf '[outsourcerer] %s auto-approval(s); log: %s/approvals.log\n' "$count" "$OSRC_HOME" >&2
+}
+
 _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live supervise for <sid> covers
   local f pid
   for f in "$OSRC_HOME/supervise/$1"/armed.*; do
@@ -551,6 +556,7 @@ _sv_main() { # <sid> <once> [ids...]
       [ -n "$first" ] || first="$now"
       # Settle only while some target could still produce an event (working / not yet confirmed).
       if [ $(( now - first )) -ge "$settle" ] || [ "$pend" = 0 ]; then
+        _sv_approval_summary "$new"
         # One pair per target: highest priority, then newest.
         printf '%s\n' "$new" | sort -t "$(printf '\t')" -k1,1n -k2,2nr | awk -F '\t' '!seen[$4]++' \
           | while IFS="$(printf '\t')" read -r _p ts kind tgt detail next; do
@@ -562,6 +568,7 @@ _sv_main() { # <sid> <once> [ids...]
         exit 0
       fi
     elif [ "$out" = 0 ] && [ -z "$first" ]; then
+      _sv_approval_summary "$new"
       nl="$(printf '%s' "$targets" | wc -w | tr -d ' ')"
       printf 'EVENT done all %s no owned live work (%s target(s) settled%s)\n' "$now" "$nl" "${idle_list:+; idle:$idle_list}"
       printf 'NEXT %s fleet ls\n' "$SCRIPT_PATH"
@@ -572,6 +579,7 @@ _sv_main() { # <sid> <once> [ids...]
     fi
     if [ "$once" = 1 ] && [ -z "$first" ]; then exit 1; fi
     if [ "$maxs" -gt 0 ] && [ $(( now - t0 )) -ge "$maxs" ]; then
+      _sv_approval_summary "$new"
       printf 'EVENT stalled supervise %s OSRC_SUPERVISE_MAX_SECS=%s reached with live work and no event\n' "$now" "$maxs"
       printf 'NEXT %s supervise%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${explicit:+ $explicit}"
       exit 0

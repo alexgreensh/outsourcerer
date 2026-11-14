@@ -114,6 +114,8 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 `--worktree` runs each editing specialist in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills via `--with` (MCP on the Claude lanes), and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
+For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy safe --all` to approve eligible prompts once and log each decision. The default remains off. Isolated test runs use `scripts/sealed-run.sh`; without an OS isolation tool they require a manually approved `--allow-unisolated` run.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---
