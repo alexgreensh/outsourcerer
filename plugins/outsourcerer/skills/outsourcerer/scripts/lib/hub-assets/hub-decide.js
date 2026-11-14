@@ -40,7 +40,8 @@
         try {
           await db.doc('answers/' + p.id + '--' + d.id).set({ project: p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
           say('Saved. Your orchestrator reads it when it checks Mission Control.'); delete forms[key];
-        } catch (e) { say('Not saved: ' + ((e && e.message) || 'try again'), true); sync(); } finally { saving--; ctx.flush(); }
+        } catch (e) { say(e && e.timeout ? 'Not sent, try again' : 'Not saved: ' + ((e && e.message) || 'try again'), true); sync(); }
+        finally { saving--; ctx.flush(!c.isConnected); }   // navigated away mid-send: re-render so the live card shows the outcome
       });
       a.append(opts, ta, go2, st); c.appendChild(a);
       return c;

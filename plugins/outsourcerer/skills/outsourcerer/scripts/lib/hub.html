@@ -423,10 +423,12 @@ a.pill svg { width: 13px; height: 13px; }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ 'X-Hub-Token': TOKEN }, opts.headers || {});
+    // A stalled hub must never hang a send or a poll: abort after 15 s (MC-6).
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 15000); opts.signal = ac.signal;
     return fetch(path, opts).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
-    });
+    }, (e) => { const x = new Error(ac.signal.aborted ? 'Not sent, try again' : ((e && e.message) || 'unreachable')); x.timeout = ac.signal.aborted; throw x; }).finally(() => clearTimeout(t));
   }
   // A poll that brings the same data re-renders nothing (exported_at changes on every export, so it is ignored).
   const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' ? undefined : v));
@@ -435,7 +437,7 @@ a.pill svg { width: 13px; height: 13px; }
     pullErr = '';
     projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
     if (firstPull) { current = pickStart(); firstPull = false; } else if (current && !projects.some((p) => p.id === current)) current = null;
-    renderRail(); renderMain();
+    renderRail(); pollRender();
   }
   function applyLimits(snap) {
     const s = sig(snap); if (s === sigL) return; sigL = s;
@@ -445,7 +447,7 @@ a.pill svg { width: 13px; height: 13px; }
   function applyAnswers(snap) {
     const s = sig(snap); if (s === sigA) return; sigA = s;
     answers = {}; snap.docs.forEach((d) => { answers[d.id] = d.data(); });
-    renderRail(); renderMain();
+    renderRail(); pollRender();
   }
   // Local-mode adapter: same collection()/doc() surface the artifact db exposes,
   // backed by GET/POST /api/* on hub serve. Polls every 15s; limits ride inside
@@ -729,7 +731,7 @@ a.pill svg { width: 13px; height: 13px; }
       st.classList.toggle('stale', old);
       if (H) H.refreshBtn(st, old);
       const age = min >= 120 ? Math.floor(min / 60) + ' h' : min + ' min';
-      if (st.dataset.words) { const tx = st.querySelector('.lstx'); if (tx) tx.textContent = old ? 'No update for ' + age : st.dataset.base; st.title = old ? st.dataset.base : ''; return; }   // tile: age only, full stamp on hover (MC-5 #1/#9)
+      if (st.dataset.words) { const tx = st.querySelector('.lstx'); if (tx) tx.textContent = old ? 'No update for ' + age + ' · ' + st.dataset.base.replace(/^Updated /, '') : st.dataset.base; return; }
       let w = st.querySelector('.stw'); if (old) { if (!w) { w = el('span', 'stw'); st.append(w); } w.textContent = ' · not updated for ' + age; } else if (w) w.remove();
     });
   }
@@ -775,7 +777,6 @@ a.pill svg { width: 13px; height: 13px; }
   function renderMain() {
     const p = projects.find((x) => x.id === current);
     const main = $('main');
-    if (composing || (D && D.busy())) { pending = true; return; }   // never rebuild a field mid-IME (Hebrew/CJK) or mid-send; flush() renders after
     const ae = document.activeElement, keep = ae && ae.id && main.contains(ae) ? { id: ae.id, s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection } : null;
     if (D) D.capture(main);
     if (!p) { if (H && (projects.length || db)) { H.renderHome(); refocus(keep); keepHover(); } else if (!H && projects.length) { current = projects[0].id; renderMain(); } return; }
@@ -897,8 +898,12 @@ a.pill svg { width: 13px; height: 13px; }
     paint(); refocus(keep); keepHover();
   }
   function refocus(keep) { const n = keep && $(keep.id); if (n) { n.focus({ preventScroll: true }); if (keep.s != null && n.setSelectionRange) try { n.setSelectionRange(keep.s, keep.e, keep.d || 'none'); } catch (e) {} } }
-  const flush = () => { if (pending && !composing && !(D && D.busy())) { pending = false; renderMain(); } };
-  document.addEventListener('compositionstart', () => { composing = true; }); document.addEventListener('compositionend', () => { composing = false; flush(); });
+  // Poll-driven renders wait while a field is mid-IME (Hebrew/CJK) or a send is in flight; a click (go, Home) never waits (MC-6).
+  function pollRender() { if (composing && compEl !== document.activeElement) composing = false; if (composing || (D && D.busy())) { pending = true; return; } renderMain(); }
+  const flush = (force) => { if ((pending || force) && !composing && !(D && D.busy())) { pending = false; renderMain(); } };
+  let compEl = null;   // the composing field; losing it (focusout, removed, window switch) ends the hold, so the board never stops updating
+  document.addEventListener('compositionstart', (e) => { composing = true; compEl = e.target; }); document.addEventListener('compositionend', () => { composing = false; flush(); });
+  document.addEventListener('focusout', (e) => { if (composing && e.target === compEl) { composing = false; flush(); } });
 
   function go(pid, did) {
     current = pid;
@@ -931,7 +936,7 @@ a.pill svg { width: 13px; height: 13px; }
     get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
-  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: () => flush(), get db() { return db; } }) : null;
+  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null;
 
   (async () => {
     const timer = setTimeout(() => { if (!projects.length) { renderRail(); if (db) renderMain(); } }, 10000);

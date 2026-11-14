@@ -68,6 +68,13 @@ grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" 
 grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
 grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders (MC-5 #4)" || bad "hover re-anchor missing"
 grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render (MC-5 #4)" || bad "bars re-grow on every render"
+grep -q "new AbortController(), t = setTimeout(() => ac.abort(), 15000)" "$PAGE" && grep -q "'Not sent, try again'" "$DEC" \
+  && ok "MC-6 #2: api() aborts after 15 s and the card says Not sent, try again" || bad "api timeout missing"
+grep -q "renderRail(); pollRender();" "$PAGE" && ! grep -q "^    if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" \
+  && ok "MC-6 #2: only poll-driven renders wait for a send; navigation never does" || bad "renderMain still holds navigation"
+grep -q "document.addEventListener('focusout', (e) => { if (composing && e.target === compEl) { composing = false; flush(); } })" "$PAGE" \
+  && grep -q "if (composing && compEl !== document.activeElement) composing = false;" "$PAGE" \
+  && ok "MC-6 #3: losing the composing field clears the hold" || bad "composition flag can stick"
 grep -q "resetForms" "$PAGE" "$JS" "$DEC" && bad "Home still resets drafts" || ok "going Home keeps drafts"
 
 echo "=== refreshBtn: only on a stale stamp (node, no browser) ==="
