@@ -10,6 +10,8 @@ CLS="$HERE/../lib/approver_classify.py"
 TABLE="$HERE/fixtures/approver-table.tsv"
 TMP="$(mktemp -d "$HERE/.test-approver.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ pass=$((pass+1)); echo "PASS: ${1:-line ${BASH_LINENO[0]}}"; }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 export OSRC_HOME="$TMP/osrc-home"; mkdir -p "$OSRC_HOME"
 ROOT="$TMP/repo"; OTHER="$TMP/other-wt"
 mkdir -p "$ROOT/src" "$ROOT/tests" "$OTHER/src"; git -C "$ROOT" init -q; git -C "$OTHER" init -q

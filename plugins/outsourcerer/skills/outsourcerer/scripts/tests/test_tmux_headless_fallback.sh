@@ -14,6 +14,8 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" 2>/dev/null' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 BIN="$TMP/bin"; FH="$TMP/fh/.local/bin"; mkdir -p "$BIN" "$FH"
 # symlink every PATH binary EXCEPT tmux, so `have tmux` is genuinely false but jq/git/etc still work.
 IFS=:; for d in $PATH; do [ -d "$d" ] || continue; for f in "$d"/*; do b="${f##*/}"; [ "$b" = tmux ] && continue; [ -e "$BIN/$b" ] || ln -s "$f" "$BIN/$b" 2>/dev/null; done; done; unset IFS
@@ -29,7 +31,7 @@ run() { # <extra-env> <home> -> sets RC/ERR
   ERR="$TMP/err.$RANDOM"
   env PATH="$BIN:$FH" HOME="$TMP/fh" OSRC_HOME="$1" OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 \
     OSRC_FORCE_AUTODETACH=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_CATALOG_VALIDATE=0 OUTSOURCERER_DEPTH=0 \
-    $2 bash "$SRC" run -m glm-5.2 "task" >/dev/null 2>"$ERR" </dev/null; RC=$?
+    $2 bash "$SRC" run --spend-ok -m glm-5.2 "task" >/dev/null 2>"$ERR" </dev/null; RC=$?
 }
 
 # (a) default: tmux absent -> fall back to bg (rc0), a job is created, and it recommends tmux.

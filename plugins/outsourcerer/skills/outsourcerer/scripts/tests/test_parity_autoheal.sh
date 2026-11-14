@@ -13,6 +13,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 TMP="$(mktemp -d "$PWD/.test-parity.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 export OSRC_HOME="$TMP/state"
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass + 1)); }

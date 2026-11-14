@@ -73,9 +73,9 @@ grep -q 'OSRC_LIMITS_MAX_AGE' "$LIB" \
 # The lane list is built from which CLIs are present and logged in. A lane stays installed and
 # authenticated while its subscription window is exhausted or its backend has stopped answering, so
 # calling that list "ready" is how work gets routed somewhere that cannot take it.
-grep -q "printf 'ready lanes" "$LANEMSG" \
-  && bad "the greeting still calls merely-installed lanes 'ready'" \
-  || ok "the greeting says lanes are installed, not that they will answer"
+grep -F "printf 'ready lanes" "$SRC" "$SCRIPT_DIR"/../lib/*.sh >/dev/null; rc=$?
+[ "$rc" -eq 1 ] && ok "the greeting says lanes are installed, not that they will answer" \
+  || bad "the greeting calls lanes ready or source search failed (rc=$rc)"
 grep -q 'not proof any of them will answer right now' "$LANEMSG" \
   && ok "the greeting points at the command that checks for real" \
   || bad "no pointer from the lane list to an actual liveness check"

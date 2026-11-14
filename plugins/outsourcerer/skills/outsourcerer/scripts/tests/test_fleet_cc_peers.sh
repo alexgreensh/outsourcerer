@@ -5,6 +5,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 FIXTURE="$(mktemp -d "$PWD/.test-fleet-cc.XXXXXX")"
 trap 'rm -rf "$FIXTURE"' EXIT
+export HOME="$FIXTURE/fakehome"
+mkdir -p "$HOME"
 
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }

@@ -23,6 +23,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TMP="$(mktemp -d)"
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 export OSRC_HOME="$TMP"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -80,13 +82,20 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
   REST=("test task")
   RESOLVED_ID="sol"
 
-  # Capture the codex exec args. Defining codex() also makes `have codex` return 0.
-  CODEX_ARGS=""
-  codex() { CODEX_ARGS="$*"; return 0; }
+  # The delegate runs through env, so capture arguments in an executable, not a shell function.
+  mkdir -p "$HOME/.local/bin"
+  cat > "$HOME/.local/bin/codex" <<'EOF'
+#!/bin/bash
+printf '%s' "$*" > "$CODEX_ARGS_FILE"
+EOF
+  chmod +x "$HOME/.local/bin/codex"
+  export CODEX_ARGS_FILE="$TMP/codex-args"
+  PATH="$HOME/.local/bin:$PATH"; export PATH
 
   # (c) Binary present -> flag should be true.
   _codex_code_mode_host() { return 0; }
   delegate_cxnative accept-edits >/dev/null 2>&1
+  CODEX_ARGS="$(cat "$CODEX_ARGS_FILE" 2>/dev/null)"
   if grep -q 'features.code_mode_host=true' <<<"$CODEX_ARGS"; then
     ok "(c) delegate_cxnative passes -c features.code_mode_host=true when binary present"
   else
@@ -95,7 +104,9 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
 
   # (d) Binary absent -> flag should be false.
   _codex_code_mode_host() { return 1; }
+  : > "$CODEX_ARGS_FILE"
   delegate_cxnative accept-edits >/dev/null 2>&1
+  CODEX_ARGS="$(cat "$CODEX_ARGS_FILE" 2>/dev/null)"
   if grep -q 'features.code_mode_host=false' <<<"$CODEX_ARGS"; then
     ok "(d) delegate_cxnative passes -c features.code_mode_host=false when binary absent"
   else

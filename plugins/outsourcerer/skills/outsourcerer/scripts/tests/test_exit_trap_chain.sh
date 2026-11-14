@@ -20,6 +20,8 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 BASE="$(mktemp -d "${TMPDIR:-/tmp}/test-exit-chain.XXXXXX")"
 trap 'rm -rf "$BASE"' EXIT
+export HOME="$BASE/fakehome"
+mkdir -p "$HOME"
 
 # Spawn a fresh bash that sandboxes HOME/OSRC_HOME, optionally arms a caller-style
 # cleanup trap, sources the engine, optionally exercises a save/restore function,

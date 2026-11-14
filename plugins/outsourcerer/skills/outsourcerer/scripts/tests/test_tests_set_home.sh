@@ -63,7 +63,10 @@ ALLOW = {
 }
 # L7 owns these paths; report its hits rather than editing or exempting them silently.
 L7 = re.compile(r'test_(?:cloud_.*|cloudrun|spend_.*|limit_gate|lane_billing|failover_pick|factory_exclude|autodetach)\.sh$')
-HOME = re.compile(r'(?<![A-Za-z0-9_])HOME\s*=')
+HOME_EXPORT = re.compile(r'^\s*export\s+(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|\'[^\']*\'|[^\s;]+)\s+)*HOME=(?:"[^"]*"|\'[^\']*\'|[^\s;]+)(?:\s|$)')
+HOME_ASSIGN = re.compile(r'^\s*HOME=(?:"[^"]*"|\'[^\']*\'|[^\s;]+)\s*$')
+HOME_DECLARE = re.compile(r'^\s*export\s+HOME(?:\s|$)')
+ENGINE_USE = re.compile(r'(?:^|[;(&|]\s*|\s)(?:\.|source|(?:/bin/)?bash)\s+[^\n]*(?:\$\{?(?:SRC|LIB|ENGINE|SCRIPT_PATH)\b|outsourcerer\.sh|/lib/)')
 ENGINE = re.compile(r'outsourcerer\.sh|/lib/|\$\{?(?:LIB|SRC|ENGINE|OSRC|SCRIPT_PATH)\b')
 
 def uncomment(line):
@@ -104,22 +107,38 @@ def shell_words(line):
     return ''.join(out)
 
 def missing_home(text):
-    code = '\n'.join(uncomment(line) for line in text.splitlines())
-    words = '\n'.join(shell_words(line) for line in code.splitlines())
-    return bool(ENGINE.search(code)) and not (HOME.search(words) or re.search(r'\bosrc_test_sandbox\b', words))
+    lines = [uncomment(line) for line in text.splitlines()]
+    code = '\n'.join(lines)
+    if not ENGINE.search(code): return False
+    assigned = False
+    # Split ordinary semicolon-separated setup commands, keeping quoted semicolons intact.
+    statements = []
+    for line in lines:
+        parts = re.split(r";(?=(?:[^'\"]|'[^']*'|\"[^\"]*\")*$)", line)
+        statements.extend(parts)
+    for line in statements:
+        words = shell_words(line)
+        if re.search(r'\bosrc_test_sandbox\b', words): return False
+        if HOME_EXPORT.match(line): return False
+        if HOME_ASSIGN.match(line): assigned = True; continue
+        if assigned and HOME_DECLARE.match(line): return False
+        if ENGINE_USE.search(line) and not re.search(r'\bbash\s+-n\b', line): return True
+    return True
 
-# Ensure comments and OSRC_HOME do not satisfy the HOME assignment check.
 assert missing_home('SRC="../outsourcerer.sh"\n# HOME=/fake\nexport OSRC_HOME=/fake\n. "$SRC"')
 print('PASS: comment and OSRC_HOME do not count as HOME')
 assert missing_home('SRC="../outsourcerer.sh"\necho "HOME=/fake"\n. "$SRC"')
 print('PASS: quoted text does not count as HOME')
 assert not missing_home('SRC="../outsourcerer.sh"\nexport HOME=/fake\n. "$SRC"')
-print('PASS: explicit HOME assignment is accepted')
-assert not missing_home('SRC="../outsourcerer.sh"\nout="$( HOME="$tmp" bash "$SRC" )"')
-print('PASS: HOME assignment in command substitution is accepted')
+assert not missing_home('SRC="../outsourcerer.sh"\nHOME=/fake\nexport HOME\n. "$SRC"')
+print('PASS: persistent HOME assignments are accepted')
+assert missing_home('SRC="../outsourcerer.sh"\nHOME=/fake bash "$SRC"')
+assert missing_home('SRC="../outsourcerer.sh"\n. "$SRC"\nexport HOME=/fake')
+print('PASS: one-command and late assignments are rejected')
 
-root = Path(sys.argv[1]); hits = 0; checked = 0
+root = Path(sys.argv[1]); hits = 0; checked = 0; scanned = 0
 for path in sorted(root.glob('test_*.sh')):
+    scanned += 1
     if path.name == 'test_tests_set_home.sh': continue  # this guard never sources the engine
     text = path.read_text(errors='replace')
     if not missing_home(text): continue
@@ -130,6 +149,8 @@ for path in sorted(root.glob('test_*.sh')):
     else:
         hits += 1; print('FAIL: engine or lib without HOME assignment:', path.name)
     checked += 1
+if scanned < 100:
+    hits += 1; print('FAIL: only %d test files scanned (minimum 100)' % scanned)
 if hits:
     print('RESULT: 4 passed, %d failed' % hits); sys.exit(1)
 print('PASS: no undocumented HOME guard hits (%d documented exceptions or L7 hits)' % checked)
