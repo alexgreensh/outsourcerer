@@ -177,6 +177,9 @@ export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
 OSRC_VERSION="0.15.3"
+# Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
+# picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
+# free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
 DEFAULT_MODEL="${OUTSOURCERER_MODEL:-glm-5.2}"
 
 # ---- platform detection (mac | linux | windows-gitbash). Windows = Git Bash / MSYS2, NO WSL
@@ -11352,7 +11355,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" OSRC_JOB_TOKEN="$OSRC_JOB_TOKEN" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -16169,7 +16172,7 @@ _route_confirm() {
 _route_receipt() {
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] || return 0
   printf '>>> [route] RESOLVED lane=%s model=%s explicit=--provider %s\n' \
-    "$ROUTE_LANE" "$ROUTE_MODEL" "$PROVIDER" >&2
+    "$ROUTE_LANE" "${RESOLVED_ID:-$ROUTE_MODEL}" "$PROVIDER" >&2
 }
 
 _route_provider_default_model() { # Provider-specific route identity, never parser state.

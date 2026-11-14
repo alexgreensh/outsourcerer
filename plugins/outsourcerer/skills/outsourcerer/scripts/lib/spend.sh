@@ -389,15 +389,10 @@ _osrc_event() {  # <kind> <target> <detail> <next> [src]
 _osrc_spend_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" why="${4:-launch}"
   local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 2>/dev/null)"
-  # L10 hosted sessions (`cloud start`) carry their OWN consent: _cloudrun_consent runs
-  # immediately after this gate and its disclosure names the spend ("spends: Claude
-  # subscription (plan limits)" etc). Local auth proof often cannot see a hosted
-  # session's remote login, so subscription/free/UNKNOWN billing on a cloud-session
-  # dispatch defers to that consent instead of double-asking. PROVEN metered (API-key
-  # env, metered models, paid-API lanes) still asks here via --spend-ok.
-  case "$why" in
-    "cloud session "*) [ "$bill" = "metered" ] || return 0 ;;
-  esac
+  # unknown is treated as METERED everywhere — cloud sessions included. A hosted
+  # session's plan login is proven by the same billing probes as a local launch
+  # (claude auth status / codex login status / devin catalog), and hosted-session
+  # consent never substitutes for spend approval (CONTRACT.md).
   case "$bill" in subscription|free) return 0 ;; esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
   # Show the model actually being dispatched; when none was resolved, the lane's own

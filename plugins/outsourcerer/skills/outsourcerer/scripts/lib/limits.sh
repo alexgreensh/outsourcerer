@@ -544,7 +544,12 @@ _osrc_harness_auth() {
       [ -f "$HOME/.claude/.credentials.json" ] && return 0
       [ "${OSRC_PLATFORM:-}" = "darwin" ] && have security \
         && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 && return 0
-      _osrc_dir_auth "$HOME/.claude" ;;
+      _osrc_dir_auth "$HOME/.claude" && return 0
+      # CLI proof: `claude auth status` reports the account login (same probe
+      # lib/cloudrun.sh uses before a hosted launch). A bare `claude` that cannot
+      # answer auth status proves nothing.
+      have claude && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 2>/dev/null \
+        | grep -q '"loggedIn" *: *true' ;;
     codex)
       [ -f "$HOME/.codex/auth.json" ] && return 0
       _osrc_billing_key OPENAI_API_KEY && return 0

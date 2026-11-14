@@ -279,6 +279,11 @@ a parent's consent. Auto-routing and every fallback picker skip metered/unknown 
 the command already carries consent; when only paid lanes remain, the run stops and asks
 instead of picking OpenRouter quietly.
 
+`OUTSOURCERER_MODEL` sets the script-level `DEFAULT_MODEL` fallback only: lanes with a
+descriptor `default_model` use theirs, and `dv` ignores it entirely — a bare Devin run
+picks its model at run time from the live catalog's Free set (`swe-2-high` offline), so
+the env var never reaches a `dv` dispatch. Pin Devin explicitly with `-m <free-id>`.
+
 Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
 name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing
 `lane cap <lane> weekly<=40` until `lane cap <lane> --clear` (`lane limits` shows billing + caps,

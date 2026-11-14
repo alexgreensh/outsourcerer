@@ -192,6 +192,64 @@ pfout="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="
   || bad "r3.2 next: bg round-trip rc=$pfrc: $(printf '%s' "$pfout" | head -6)"
 
 
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3.3 (r5 verdict): unknown billing asks even for hosted cloud sessions — no softening
+# keyed on the why text; proven subscription/free passes; bg --spend-ok reaches the job.
+# ---------------------------------------------------------------------------------------------------
+
+# F1: the three rows the verdict drove must REFUSE. have() stubbed dead so no CLI/auth probe
+# can prove a login -> billing unknown -> the gate asks, cloud-session why or not.
+for spec in 'cc||claude' 'cx||codex' 'zz||claude'; do
+  IFS='|' read -r _l _m _d <<<"$spec"
+  out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+    . "'"$SRC"'" >/dev/null 2>&1
+    have() { return 1; }
+    _osrc_spend_gate '"$_l"' '"$_m"' '"$_d"' "cloud session t-x" 2>&1 </dev/null' )"; rc=$?
+  [ $rc -ne 0 ] && ok "r5 cloud: $_l/$_d unknown billing refuses hosted session" \
+    || bad "r5 cloud: $_l/$_d unknown billing PASSED hosted session (rc=$rc): $out"
+done
+# Same unknown billing with a NON-cloud why also refuses (no why-keyed softening either way).
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  have() { return 1; }
+  _osrc_spend_gate cc "" claude "ordinary launch" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && ok "r5 cloud: unknown billing refuses on ordinary why too" \
+  || bad "r5 cloud: ordinary-why unknown passed (rc=$rc): $out"
+# Proven subscription passes even with a cloud-session why (claude auth status stub).
+mkdir -p "$FAKEBIN"; cat > "$FAKEBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in auth) echo '{"loggedIn": true}'; exit 0 ;; esac
+exit 0
+EOF
+chmod +x "$FAKEBIN/claude"
+out="$( HOME="$HB" PATH="$FAKEBIN:$PATH" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate cc "" claude "cloud session t-ok" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r5 cloud: proven claude login passes hosted session" \
+  || bad "r5 cloud: proven subscription refused (rc=$rc): $out"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/claude"; chmod +x "$FAKEBIN/claude"
+
+# F2 e2e: bg --spend-ok on a METERED lane — caller says launched, the job must pass the gate
+# (token+marker) and consume the marker, not refuse itself.
+E2="$TMP/e2e"; mkdir -p "$E2/home" "$E2/osrc"
+out="$( cd "$TMP" && HOME="$E2/home" OSRC_HOME="$E2/osrc" OSRC_SOURCED= \
+    OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
+    PATH="$FAKEBIN:$PATH" bash "$SRC" bg --spend-ok --provider cc "say hi" 2>&1 )"; rc=$?
+case "$out" in *[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z]*) ;; *) bad "r5 bg: no job id in output (rc=$rc): $out";; esac
+jid="$(printf '%s' "$out" | awk 'NF==1 && $1 ~ /^[0-9]{8}-[0-9]{6}-/ {print $1}' | tail -1)"
+[ -n "$jid" ] || bad "r5 bg: could not extract job id from: $out"
+# Wait for the detached job's out.log to appear, then give the gate a moment to run.
+for _ in $(seq 1 30); do [ -s "$E2/osrc/jobs/$jid/out.log" ] && break; sleep 1; done
+sleep 2
+jlog="$(cat "$E2/osrc/jobs/$jid/out.log" 2>/dev/null)"
+[ -n "$jlog" ] || bad "r5 bg: job produced no out.log (jid=$jid)"
+case "$jlog" in
+  *"spend gate"*|*"EVENT approval"*) bad "r5 bg: job refused itself at the spend gate: $(printf '%s' "$jlog" | head -4)" ;;
+  *) ok "r5 bg: --spend-ok job passed the spend gate" ;;
+esac
+[ ! -e "$E2/osrc/jobs/$jid/.spend-ok" ] && ok "r5 bg: .spend-ok marker consumed" \
+  || bad "r5 bg: marker left behind in $jid"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
