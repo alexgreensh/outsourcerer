@@ -473,6 +473,7 @@ a.pill svg { width: 13px; height: 13px; }
     }
     async function pull(name) {
       const data = name === 'answers' ? await api('/api/answers') : await api('/api/projects');
+      if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }   // startup export still running: stay on "Loading", ask again (MC-8)
       const snap = { docs: docsFor(name, data) };
       subs[name].slice().forEach((cb) => { try { cb(snap); } catch (e) { try { console.error('hub render (' + name + ')', e); } catch (e2) {} } });
     }
@@ -518,7 +519,7 @@ a.pill svg { width: 13px; height: 13px; }
   function subscribe(d) {
     unsubs.forEach((u) => { try { u && u(); } catch (e) {} });
     unsubs = [];
-    const u1 = d.collection('projects').onSnapshot(applyProjects, (e) => { pullErr = (e && e.message) || 'unreachable'; renderRail(); });
+    const u1 = d.collection('projects').onSnapshot(applyProjects, (e) => { pullErr = (e && e.message) || 'unreachable'; renderRail(); if (!projects.length) renderMain(); });
     const u2 = d.collection('limits').onSnapshot(applyLimits, () => {});
     const u3 = d.collection('answers').onSnapshot(applyAnswers, () => {});
     [u1, u2, u3].forEach((u) => { if (typeof u === 'function') unsubs.push(u); });
@@ -668,7 +669,9 @@ a.pill svg { width: 13px; height: 13px; }
   }
   const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
 
+  const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty" (MC-8)
   function renderRail() {
+    if (loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && ae.closest && ae.closest('.rail-mid') && ae.id !== 'homebtn' ? { id: ae.id } : null;   // keyboard focus survives a re-render (MC-5 #4)
     const list = $('plist'); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
     const live = projects.filter((p) => p.status !== 'shipped'), done = projects.filter((p) => p.status === 'shipped');
@@ -781,7 +784,7 @@ a.pill svg { width: 13px; height: 13px; }
   const grown = new Set();   // bars animate the first time only; a re-render sets the width directly (MC-5 #4)
   function renderMain() {
     const p = projects.find((x) => x.id === current);
-    const main = $('main');
+    const main = $('main'); if (!p && loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && main.contains(ae) ? { id: ae.id, s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection } : null;
     if (D) D.capture(main);
     if (!p) { if (H && (projects.length || db)) { H.renderHome(); refocus(keep); keepHover(); } else if (!H && projects.length) { current = projects[0].id; renderMain(); } return; }
@@ -975,8 +978,7 @@ a.pill svg { width: 13px; height: 13px; }
     db = makeLocalDb();
     subscribe(db);
     clearTimeout(timer);
-    // First pull failure surfaces in the rail instead of hanging on "Loading…".
-    setTimeout(() => { if (!projects.length) { renderRail(); renderMain(); } }, 3000);
+    // No blind timer: the first answer (applyProjects) or the first failure (onSnapshot error) ends "Loading" (MC-8).
   })();
 
   (function stars() {

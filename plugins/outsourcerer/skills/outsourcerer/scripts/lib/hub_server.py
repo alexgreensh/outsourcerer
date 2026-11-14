@@ -26,6 +26,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REFRESH_SECS = int(os.environ.get("OSRC_HUB_REFRESH_SECS") or 30)
+# A first GET /api/projects waits this long for the startup export, then answers {"starting": true}
+# so the page (15 s fetch abort) keeps "Loading" and asks again instead of failing (MC-8 r2).
+STARTING_WAIT = float(os.environ.get("OSRC_HUB_STARTING_WAIT") or 10)
 IDLE_SECS = int(os.environ.get("OSRC_HUB_IDLE_SECS") or 300)
 ANSWER_MAX = 16384
 # Directories whose mtimes count as "state changed" for the refresh loop.
@@ -421,6 +424,8 @@ def make_handler(hub):
                 return self._deny()
             hub.last_poll = time.time()
             if path == "/api/projects":
+                if not hub.first_export.wait(timeout=STARTING_WAIT):
+                    return self._send_json({"generated_at": int(time.time()), "projects": [], "starting": True})
                 payload, err = hub.projects_payload()
                 if err:
                     payload["export_error"] = err
@@ -444,6 +449,7 @@ def make_handler(hub):
             raw = self.rfile.read(n) if n > 0 else b""
             if u.path == "/api/refresh":
                 # Refresh carries no payload; the page POSTs it empty.
+                hub.first_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
                 try:
                     data = hub.run_export()
                 except Exception as e:

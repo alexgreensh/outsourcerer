@@ -185,17 +185,32 @@ grep -q "^ans True \[\]$" <<<"$sy" && ok "symlinked answers folder: refused, not
 
 echo "=== serve prints its URL before the first export (MC-8) ==="
 # CI macOS runner: the first export ran before the port was bound, outlasted the test wait and left an
-# empty log. A fake engine that takes 8 s must not hold the URL back, and the first data request must
-# still get that export's projects (it waits for it instead of returning an empty board).
-SLOW="$TMP/slow-engine"; printf '#!/bin/sh\nsleep 8\necho %s\n' "'{\"projects\":[{\"id\":\"slowp\",\"name\":\"Slow\"}]}'" > "$SLOW"; chmod +x "$SLOW"
-mkdir -p "$TMP/slowhome"
-OSRC_HUB_TOKEN=0123456789abcdef0123456789abcdef python3 -I "$LIB/hub_server.py" --port 0 --page "$PAGE" --engine "$SLOW" --osrc-home "$TMP/slowhome" --no-open >"$TMP/slow.log" 2>&1 &
+# empty log. Fake engine: 12 s per export, logs start/end. The URL must not wait for it; a first
+# /api/projects answers {"starting":true} after OSRC_HUB_STARTING_WAIT (3 s here, 10 s by default, under
+# the page's 15 s abort) so the page keeps "Loading" instead of claiming an empty board; a later call gets
+# the export's projects; POST /api/refresh during startup waits instead of exporting beside it (MC-8 r2).
+SLOW="$TMP/slow-engine"; SLOG="$TMP/slow-engine.log"
+printf '#!/bin/sh\necho start >> "%s"\nsleep 12\necho end >> "%s"\necho %s\n' "$SLOG" "$SLOG" "'{\"projects\":[{\"id\":\"slowp\",\"name\":\"Slow\"}]}'" > "$SLOW"; chmod +x "$SLOW"
+mkdir -p "$TMP/slowhome"; STK=0123456789abcdef0123456789abcdef
+OSRC_HUB_TOKEN=$STK OSRC_HUB_STARTING_WAIT=3 python3 -I "$LIB/hub_server.py" --port 0 --page "$PAGE" --engine "$SLOW" --osrc-home "$TMP/slowhome" --no-open >"$TMP/slow.log" 2>&1 &
 SSRV=$!; t0=$SECONDS; SURL=""
 for _ in $(seq 1 120); do SURL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/' "$TMP/slow.log" | head -1)"; [ -n "$SURL" ] && break; sleep 0.1; done
-[ -n "$SURL" ] && [ $((SECONDS - t0)) -le 5 ] && ok "URL printed before an 8 s export finishes ($((SECONDS - t0)) s)" || bad "URL waited for the export: '$SURL' after $((SECONDS - t0)) s: $(head -3 "$TMP/slow.log")"
-sp="$(curl -s --max-time 20 -H 'X-Hub-Token: 0123456789abcdef0123456789abcdef' "${SURL}api/projects")"
-grep -q '"slowp"' <<<"$sp" && ok "first /api/projects waits for the startup export (not an empty board)" || bad "first projects call: $sp"
+[ -n "$SURL" ] && [ $((SECONDS - t0)) -le 5 ] && ok "URL printed before a 12 s export finishes ($((SECONDS - t0)) s)" || bad "URL waited for the export: '$SURL' after $((SECONDS - t0)) s: $(head -3 "$TMP/slow.log")"
+curl -s -o "$TMP/slow-refresh.rc" -w '%{http_code}' --max-time 40 -X POST -H "X-Hub-Token: $STK" -H "Origin: ${SURL%/}" "${SURL}api/refresh" & RFP=$!   # fired during the startup export
+t1=$SECONDS; sp="$(curl -s --max-time 20 -H "X-Hub-Token: $STK" "${SURL}api/projects")"
+grep -q '"starting": *true' <<<"$sp" && ! grep -q '"slowp"' <<<"$sp" && [ $((SECONDS - t1)) -le 8 ] \
+  && ok "first /api/projects answers starting:true while the startup export runs ($((SECONDS - t1)) s, under the page's 15 s abort)" \
+  || bad "first /api/projects during the startup export, after $((SECONDS - t1)) s: $sp"
+wait "$RFP"; rc="$(cat "$TMP/slow-refresh.rc" 2>/dev/null)"
+[ "$(tr '\n' ' ' < "$SLOG")" = "start end start end " ] && ok "refresh during startup waits for the startup export, never beside it (rc $rc)" || bad "refresh overlapped the startup export (rc $rc): $(tr '\n' ' ' < "$SLOG")"
+sp="$(curl -s --max-time 20 -H "X-Hub-Token: $STK" "${SURL}api/projects")"
+grep -q '"slowp"' <<<"$sp" && ! grep -q '"starting"' <<<"$sp" && ok "after the startup export, /api/projects carries its projects" || bad "projects after startup: $sp"
 kill "$SSRV" 2>/dev/null; wait "$SSRV" 2>/dev/null
+# The page: no blind "nothing came" timer, and no empty-board text before the first projects answer.
+grep -q "setTimeout(() => { if (!projects.length) { renderRail(); renderMain(); } }, 3000)" "$PAGE" && bad "page still has the blind 3 s empty-board timer" || ok "page has no blind 3 s empty-board timer"
+grep -q "const loading = () => firstPull && !pullErr && mode === 'local';" "$PAGE" && grep -q "if (loading()) return;" "$PAGE" && grep -q "if (!p && loading()) return;" "$PAGE" \
+  && ok "rail and Home stay on Loading until the first projects answer or a failure" || bad "page can claim an empty board before the first projects answer"
+grep -q "if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }" "$PAGE" && ok "page treats starting:true as still loading and asks again" || bad "page ignores starting:true"
 
 echo "=== POST /api/projects/<id>/status ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl"; echo "RESULTS: $pass pass $fail fail"; [ "$fail" -eq 0 ]; exit $?; }
