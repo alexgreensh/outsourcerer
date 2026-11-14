@@ -111,6 +111,8 @@ After each actionable wake, run `outsourcerer.sh handover --check-context`. At t
 
 Supervision refreshes its project and limits snapshot every 10 minutes into `$OSRC_HOME/supervise/<owner-id>/hub.json`; use that snapshot for board updates. Do not add a separate timed cron for these checks. `OSRC_SUPERVISE_TICK_SECS` changes the interval.
 
+Use `supervise --auto done,limits` to dispatch a verified READY queue item to the reviewer without a wake. Auto mode only runs the exact review-queue action for that READY event; verdicts, questions, held approvals, and other actions still wake the orchestrator.
+
 ## Operating rules
 
 - **Cloud consent, once ever.** The first cloud delegation needs consent (repo content leaves the machine; a secret-scan hard-block runs on every delegation regardless). Tell the user in one line, then `consent grant` (or `--cloud-ack`); it is remembered in `~/.outsourcerer/cloud-consent`. Read a gate refusal before retrying: the error names the fix.
