@@ -354,7 +354,6 @@ _osrc_hub_lane_activity() {
   if [ -d "$OSRC_JOBS/$id" ]; then
     st="$(_reconcile_status "$id" 2>/dev/null || cat "$OSRC_JOBS/$id/status" 2>/dev/null)"
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
-    [ "$(_osrc_hub_done_state "$id")" = done ] && live=0
   elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
     type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
   elif have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; then
@@ -362,6 +361,20 @@ _osrc_hub_lane_activity() {
     case "$ta" in ''|*[!0-9]*) ;; *) [ "$ta" -gt "$b" ] && b="$ta" ;; esac
     case "$(_owned_live_state "$id" 2>/dev/null)" in working|live|running) live=1 ;; esac
   fi
+  # Session registry events and the done contract + its file hand-in are activity too (MC-9 r2 #1).
+  local dc="$OSRC_HOME/done/$id.json" spec cwd hf r
+  r="$(_osrc_hub_mt "$dc")"; [ "$r" -gt "$b" ] && b="$r"
+  if [ -f "$dc" ] && have jq; then
+    spec="$(jq -r '.spec // ""' "$dc" 2>/dev/null)"; cwd="$(jq -r '.cwd // ""' "$dc" 2>/dev/null)"
+    case "$spec" in file:*) hf="${spec#file:}"; case "$hf" in /*) ;; *) hf="${cwd:-.}/$hf" ;; esac
+      r="$(_osrc_hub_mt "$hf")"; [ "$r" -gt "$b" ] && b="$r" ;; esac
+  fi
+  if [ -f "${OSRC_SESSION_REGISTRY:-}" ] && have jq; then
+    r="$(jq -r --arg id "$id" 'select(.session_id==$id) | .ts // empty | if type=="number" then floor else (try fromdateiso8601 catch empty) end' "$OSRC_SESSION_REGISTRY" 2>/dev/null | sort -n | tail -1)"
+    case "$r" in ''|*[!0-9]*) ;; *) [ "$r" -gt "$b" ] && b="$r" ;; esac
+  fi
+  # A satisfied done contract ends "working" for every lane kind, not only jobs (MC-9 r2 #2).
+  [ "$live" = 1 ] && [ "$(_osrc_hub_done_state "$id")" = done ] && live=0
   printf '%s %s' "$b" "$live"
 }
 
@@ -378,11 +391,18 @@ _osrc_hub_project_mtime() {
   date -u -r "$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf ''
 }
 
-# osrc_hub_tick_touch <owner-session-id>: supervise's tick (L14 _sv_tick, every <= 10 min while an
-# orchestrator runs) calls this so the project's card never reads older than one tick (MC-9 item 4).
+# osrc_hub_tick_touch <owner-session-id>: supervise's tick (every <= 10 min while an orchestrator runs)
+# calls this. It rewrites the card's summary from the live lanes ("3 lanes: 2 building, 1 done") and
+# summaryAt, keeping every other card field, so the narrative never reads older than one tick (MC-9 r2 #3).
 osrc_hub_tick_touch() {
-  local f="$OSRC_HOME/hub/projects/${1:-}.json"
-  _osrc_hub_slug_ok "${1:-}" && [ -f "$f" ] && [ ! -L "$f" ] && touch "$f"
+  local slug="${1:-}" f pj sum now tmp
+  f="$OSRC_HOME/hub/projects/$slug.json"
+  _osrc_hub_slug_ok "$slug" && [ -f "$f" ] && [ ! -L "$f" ] && have jq || return 1
+  pj="$(_osrc_hub_build_project "$slug" "$(date +%s)" "$(date -u '+%a %d %b, %H:%M UTC')")" || return 1
+  sum="$(jq -r '(.lanes // []) as $l | if ($l|length)==0 then "No lanes running." else
+    "\($l|length) lane\(if ($l|length)==1 then "" else "s" end): " + ([$l[].status // "Building" | ascii_downcase] | group_by(.) | map("\(length) \(.[0])") | join(", ")) end' <<<"$pj" 2>/dev/null)" || return 1
+  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; tmp="$f.tick.$$"
+  jq --arg s "$sum" --arg at "$now" '. + {summary:$s, summaryAt:$at}' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
 }
 
 # _osrc_hub_unowned_project -> project doc for targets no owner session claims

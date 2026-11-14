@@ -565,7 +565,31 @@ a9="$(age sa)"; b9="$(age sb)"; c9="$(age sc)"
 [ "$a9" -ge 0 ] && [ "$a9" -le 120 ] && ok "only a job log changed -> project updatedAt moves (${a9}s old)" || bad "job log activity ignored: updatedAt ${a9}s old $(head -2 "$TMP/m9.err")"
 [ "$b9" -ge 0 ] && [ "$b9" -le 120 ] && ok "live running lane, nothing written for 3 h -> never stale (${b9}s old)" || bad "live lane shown stale: updatedAt ${b9}s old"
 [ "$c9" -ge 10000 ] && ok "finished lane, nothing moved for 3 h -> stays old (${c9}s), stale still means nothing moved" || bad "quiet finished project not old: ${c9}s"
-grep -q '^osrc_hub_tick_touch()' "$(dirname "$SRC")/lib/hub.sh" && ok "hub exposes osrc_hub_tick_touch for the supervise tick" || bad "osrc_hub_tick_touch missing"
+# MC-9 r2 (REV9 findings 1-3): libs sourced in a subshell, tmux is an in-process stub (no binary, no server).
+R9="$TMP/mc9r2"; mkdir -p "$R9/osrc/owners/p" "$R9/osrc/hub/projects" "$R9/osrc/jobs/jl" "$R9/osrc/sessions" "$R9/osrc/autodetach" "$R9/w"
+r9="$(cd "$R9" && OSRC_HOME="$R9/osrc" OSRC_JOBS="$R9/osrc/jobs" OSRC_SESSION_REGISTRY="$R9/osrc/sessions/registry.jsonl" LIB="$(dirname "$SRC")/lib" bash -c '
+. "$LIB/hub.sh"; . "$LIB/done.sh"
+have() { command -v "$1" >/dev/null 2>&1; }
+_reconcile_status() { cat "$OSRC_JOBS/$1/status" 2>/dev/null; }
+_owned_live_state() { printf live; }
+tmux() { case "$1" in has-session) [ "$2 $3" = "-t =ses" ] ;; display-message) printf %s "$(( $(date +%s) - 10800 ))" ;; *) return 99 ;; esac; }
+old() { python3 -c "import os,sys,time; t=time.time()-10800; [os.utime(f,(t,t)) for f in sys.argv[1:]]" "$@"; }
+fresh() { [ "${1%% *}" -ge $(( $(date +%s) - 120 )) ] 2>/dev/null && echo fresh || echo old; }
+echo "{\"session_id\":\"reg\",\"event\":\"end\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > "$OSRC_SESSION_REGISTRY"
+echo "reg $(fresh "$(_osrc_hub_lane_activity reg)")"
+osrc_done_set hin file:handin.done "$PWD/w" >/dev/null 2>&1; old "$OSRC_HOME/done/hin.json"; touch w/handin.done
+echo "hin $(fresh "$(_osrc_hub_lane_activity hin)")"
+echo log > "$OSRC_HOME/autodetach/ses.log"; osrc_done_set ses file:ses.done "$PWD/w" >/dev/null 2>&1; : > w/ses.done
+old "$OSRC_HOME/autodetach/ses.log" "$OSRC_HOME/done/ses.json" w/ses.done
+a="$(_osrc_hub_lane_activity ses)"; echo "ses ${a##* } $(fresh "$a")"
+echo "{\"name\":\"P\",\"tagline\":\"keep me\",\"status\":\"building\"}" > "$OSRC_HOME/hub/projects/p.json"
+: > "$OSRC_HOME/owners/p/jl"; echo running > "$OSRC_JOBS/jl/status"; echo "{\"provider\":\"codex\"}" > "$OSRC_JOBS/jl/meta.json"
+osrc_hub_tick_touch p; jq -c "{summary, keep: .tagline, fresh: ((.summaryAt // \"1970-01-01T00:00:00Z\") | fromdateiso8601 > (now - 120))}" "$OSRC_HOME/hub/projects/p.json"
+' 2>"$TMP/r9.err")"
+grep -q '^reg fresh$' <<<"$r9" && ok "a new session registry event is lane activity" || bad "registry event ignored: $r9 $(head -2 "$TMP/r9.err")"
+grep -q '^hin fresh$' <<<"$r9" && ok "a new done-contract file hand-in is lane activity" || bad "file hand-in ignored: $r9"
+grep -q '^ses 0 old$' <<<"$r9" && ok "a satisfied done contract ends 'working' for a session lane (quiet 3 h stays old)" || bad "finished session stays falsely fresh: $r9"
+grep -q '^{"summary":"1 lane: 1 building","keep":"keep me","fresh":true}$' <<<"$r9" && ok "tick rewrites the card summary + summaryAt and keeps other fields" || bad "tick summary: $r9"
 
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
