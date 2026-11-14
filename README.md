@@ -114,7 +114,7 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 `--worktree` runs each editing specialist in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills via `--with` (MCP on the Claude lanes), and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
-For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy safe --all` to approve eligible prompts once and log each decision. The default remains off. Test runs using `scripts/sealed-run.sh` still require approval; without an OS isolation tool they require the explicit `--allow-unisolated` flag.
+For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy safe --all` to approve eligible prompts once and log each decision. The default remains off. Sealed test runs can be approved automatically only with an OS isolation tool and a root-owned runner whose path is not writable by the delegate. Without isolation, a manual run requires `--allow-unisolated`.
 
 `outsourcerer handover --check-context` prepares a handover when the current orchestrator reaches 150,000 input tokens. Set `OSRC_ORCH_CTX_MAX` to change the threshold; keep the current orchestrator supervising until its replacement has adopted the work and armed supervision.
 

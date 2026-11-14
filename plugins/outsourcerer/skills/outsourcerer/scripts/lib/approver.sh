@@ -163,6 +163,13 @@ osrc_approver_tick() { # <pane> [session-id]
         return 3
       fi
     fi
+    # A durable attempt record must exist before a key is sent; otherwise a full or unwritable
+    # log could let an automatic approval happen with no audit trail at all.
+    if ! _osrc_approver_log "$sid" "$eng" "${cmd1:-$want_path}" attempt "$rule" "$root" "$OSRC_SCR_KIND" "$want_path"; then
+      rm -f "$pf"
+      [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
+      decision=hold; rule="approval log is not writable"
+    else
     tmux send-keys -t "$pane" Enter 2>/dev/null; i=$?
     if [ "$i" -eq 0 ]; then
       i=0
@@ -182,6 +189,7 @@ osrc_approver_tick() { # <pane> [session-id]
     fi
     [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
     decision=hold; rule="approver pressed Enter but the prompt did not close"
+    fi
   fi
   # Held: report once, then again only after OSRC_HOLD_MIN minutes so a hold cannot sleep overnight.
   holdmin="${OSRC_HOLD_MIN:-30}"; case "$holdmin" in ''|*[!0-9]*) holdmin=30 ;; esac

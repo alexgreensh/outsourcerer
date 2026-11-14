@@ -4,10 +4,12 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parents[1]
@@ -20,7 +22,26 @@ spec.loader.exec_module(classifier)
 
 
 class SealedRunnerTests(unittest.TestCase):
+    def test_trust_guard_mutant_is_rejected(self):
+        with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
+            outcome = unittest.TestResult()
+            SealedRunnerTests('test_installed_runner_must_be_immutable_to_delegate').run(outcome)
+            self.assertTrue(outcome.failures or outcome.errors)
+
+    def test_installed_runner_must_be_immutable_to_delegate(self):
+        safe = SimpleNamespace(st_uid=0, st_mode=0o755)
+        with mock.patch.object(classifier.os, 'geteuid', return_value=501), mock.patch.object(classifier.os, 'stat', return_value=safe), mock.patch.object(classifier.os, 'access', return_value=False):
+            self.assertTrue(classifier.trusted_sealed_runner('/trusted/sealed-run.sh'))
+        for unsafe in [SimpleNamespace(st_uid=501, st_mode=0o755), SimpleNamespace(st_uid=0, st_mode=0o775)]:
+            with self.subTest(mode=unsafe.st_mode, owner=unsafe.st_uid), mock.patch.object(classifier.os, 'geteuid', return_value=501), mock.patch.object(classifier.os, 'stat', return_value=unsafe), mock.patch.object(classifier.os, 'access', return_value=False):
+                self.assertFalse(classifier.trusted_sealed_runner('/trusted/sealed-run.sh'))
+        with mock.patch.object(classifier.os, 'geteuid', return_value=501), mock.patch.object(classifier.os, 'stat', return_value=safe), mock.patch.object(classifier.os, 'access', return_value=True):
+            self.assertFalse(classifier.trusted_sealed_runner('/trusted/sealed-run.sh'))
+        with mock.patch.object(classifier.os, 'geteuid', return_value=0):
+            self.assertFalse(classifier.trusted_sealed_runner('/trusted/sealed-run.sh'))
+
     def test_untrusted_replacement_runner_is_held(self):
+        self.assertFalse(classifier.trusted_sealed_runner(str(SCRIPTS / 'sealed-run.sh')))
         with tempfile.TemporaryDirectory(prefix='.sealed-untrusted-', dir=str(ROOT)) as d:
             root = Path(d)
             scripts = root / REL
@@ -34,7 +55,7 @@ class SealedRunnerTests(unittest.TestCase):
 
     def test_each_classifier_guard_rejects_a_mutant(self):
         original = classifier.sealed_runner
-        runner = str(REL / 'sealed-run.sh')
+        runner = shlex.quote(str(SCRIPTS / 'sealed-run.sh'))
         test = str(REL / 'tests/test_approver_table.sh')
         good = runner + ' ' + test
         mutants = {
@@ -67,12 +88,12 @@ class SealedRunnerTests(unittest.TestCase):
                 self.assertFalse(classifier.is_safe(command, 'shell', '', str(ROOT), [str(ROOT)])[0])
 
     def test_exact_command_and_rejections(self):
-        runner = str(REL / 'sealed-run.sh')
+        runner = shlex.quote(str(SCRIPTS / 'sealed-run.sh'))
         test = str(REL / 'tests/test_approver_table.sh')
         good = runner + ' ' + test
-        with mock.patch.object(classifier.os, 'access', return_value=True):
+        with mock.patch.object(classifier.os, 'access', return_value=True), mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
             self.assertTrue(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
-            self.assertFalse(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
+            self.assertTrue(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
             for bad in [good + ' | cat', good + '; echo x', good + ' > /dev/null',
                         'CI=1 ' + good, runner + ' ../' + test,
                         '/elsewhere/sealed-run.sh ' + test, good + ' --help', good + '\nls']:
@@ -83,7 +104,7 @@ class SealedRunnerTests(unittest.TestCase):
                 link.symlink_to('/etc/hosts')
                 self.assertFalse(classifier.sealed_runner(runner + ' ' + str(link.relative_to(ROOT)), str(ROOT), str(ROOT)))
         real_access = os.access
-        with mock.patch.object(classifier.os, 'access', side_effect=lambda path, mode: False if str(path) in ('/usr/bin/bwrap', '/usr/bin/sandbox-exec') else real_access(path, mode)):
+        with mock.patch.object(classifier.os, 'access', side_effect=lambda path, mode: False if str(path) in ('/usr/bin/bwrap', '/usr/bin/sandbox-exec') else real_access(path, mode)), mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
             self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
             with mock.patch.object(classifier.sys, 'platform', 'linux'):
                 self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))

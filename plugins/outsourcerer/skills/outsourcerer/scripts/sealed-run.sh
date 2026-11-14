@@ -1,6 +1,7 @@
-#!/bin/bash
+#!/bin/bash -p
 # Run worktree tests with a fresh environment and OS isolation when available.
 set -u
+PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'sealed-run: not in a worktree' >&2; exit 2; }
 root="$(cd "$root" && pwd -P)" || exit 2
 scripts="$root/plugins/outsourcerer/skills/outsourcerer/scripts"

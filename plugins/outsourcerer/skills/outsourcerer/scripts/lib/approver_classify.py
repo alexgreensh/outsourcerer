@@ -700,17 +700,34 @@ def classify_segment(tokens, prev_op, cwd, roots):
     raise Hold("unknown command: " + name)
 
 
+def trusted_sealed_runner(path: str) -> bool:
+    """A delegate with this UID must not be able to replace the executable or its parents."""
+    if os.geteuid() == 0:
+        return False
+    p = path
+    while True:
+        try:
+            st = os.stat(p)
+        except OSError:
+            return False
+        if st.st_uid != 0 or st.st_mode & 0o022 or os.access(p, os.W_OK):
+            return False
+        parent = os.path.dirname(p)
+        if parent == p:
+            return True
+        p = parent
+
+
 def sealed_runner(cmd: str, cwd: str, root: str) -> bool:
-    """Recognize only this checkout's isolated runner and worktree test paths."""
+    """Recognize a protected installed runner and worktree-relative test paths."""
     try:
         tokens = shlex.split(cmd)
     except ValueError:
         return False
     if len(tokens) < 2 or any(c in cmd for c in "|;&<>\n\r"):
         return False
-    relative_runner = "plugins/outsourcerer/skills/outsourcerer/scripts/sealed-run.sh"
-    runner = os.path.join(root, relative_runner)
-    if tokens[0] not in (relative_runner, runner) or os.path.realpath(runner) != runner or not os.access(runner, os.X_OK):
+    runner = os.path.realpath(os.path.join(os.path.dirname(__file__), '..', 'sealed-run.sh'))
+    if tokens[0] != runner or not os.access(runner, os.X_OK) or not trusted_sealed_runner(runner):
         return False
     platform_tool = {"darwin": "/usr/bin/sandbox-exec", "linux": "/usr/bin/bwrap"}.get(sys.platform)
     if not platform_tool or not os.access(platform_tool, os.X_OK):
@@ -751,7 +768,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             raise Hold("no command visible")
         pre_checks(cmd)
         if sealed_runner(cmd, cwd, roots[0]):
-            raise Hold("sealed runner is worktree-writable; its isolation cannot be trusted")
+            return True, "isolated:sealed-run"
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
