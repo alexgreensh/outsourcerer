@@ -30,7 +30,7 @@ LIB="$SCRIPT_DIR/../lib/perm.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n outsourcerer.sh"; exit 1; }
 bash -n "$LIB" || { echo "FAIL: bash -n lib/perm.sh"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-perm.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 . "$SRC" >/dev/null 2>&1
 type -t osrc_perm_flags >/dev/null || { echo "FAIL: osrc_perm_flags not loaded (lib loader broken)"; exit 1; }
 type -t osrc_perm_apply_launch >/dev/null || { echo "FAIL: osrc_perm_apply_launch not loaded"; exit 1; }
@@ -235,9 +235,12 @@ else echo "SKIP: agy not installed"; fi
 
 PERM_UNDER_TEST=safe
 if have droid; then
-  _safe="$(_launch droid)" || _safe=""
+  mkdir -p "$TMP/droid-stub"
+  printf '#!/bin/sh\n[ "$1" = --help ] || exit 99\nprintf "interactive mode default\\nexec non-interactive\\n--auto low medium high\\n"\n' > "$TMP/droid-stub/droid"
+  chmod +x "$TMP/droid-stub/droid"
+  _safe="$(PATH="$TMP/droid-stub:$PATH" _launch droid)" || _safe=""
   PERM_UNDER_TEST=default
-  _def="$(_launch droid)" || _def=""
+  _def="$(PATH="$TMP/droid-stub:$PATH" _launch droid)" || _def=""
   PERM_UNDER_TEST=safe
   if [ -n "$_safe" ] && [ "$_safe" = "$_def" ]; then
     ok "droid safe == default (no faithful rung; --auto medium already covers it)"

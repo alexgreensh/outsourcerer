@@ -11,7 +11,8 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find $SRC; exit 1; fi
 
 # Keep every durable artifact inside this temp dir, never in ~/.outsourcerer.
 TMP="$(mktemp -d)"
-export OSRC_HOME="$TMP"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP"
+mkdir -p "$HOME"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 

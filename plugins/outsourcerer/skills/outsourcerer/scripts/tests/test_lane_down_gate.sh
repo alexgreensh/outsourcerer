@@ -22,7 +22,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanedown.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; OSRC_SOURCED=1; export -n OSRC_SOURCED; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; OSRC_SOURCED=1; export -n OSRC_SOURCED; mkdir -p "$HOME" "$OSRC_HOME"
 # shellcheck disable=SC1090
 . "$SRC" >/dev/null 2>&1
 type -t _gate_hop >/dev/null || { echo "FAIL: _gate_hop not defined (gate wiring missing?)"; exit 1; }

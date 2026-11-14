@@ -23,7 +23,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-quota.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1

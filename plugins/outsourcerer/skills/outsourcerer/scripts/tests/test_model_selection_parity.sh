@@ -7,7 +7,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TEST_ROOT="$(mktemp -d)"
-export OSRC_HOME="$TEST_ROOT"
+export HOME="$TEST_ROOT/fakehome" OSRC_HOME="$TEST_ROOT"
+mkdir -p "$HOME"
 cleanup() { rm -rf "$TEST_ROOT"; }
 trap cleanup EXIT
 

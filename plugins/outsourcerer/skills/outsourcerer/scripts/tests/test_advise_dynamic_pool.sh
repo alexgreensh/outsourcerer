@@ -17,7 +17,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent (dynamic pool no-ops)"; echo "RESULT: 0 passed, 0 failed"; exit 0; }
 
-T="$(mktemp -d)"; export OSRC_HOME="$T"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; export HOME="$T/fakehome" OSRC_HOME="$T"; mkdir -p "$HOME"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/catalogs"
 . "$SRC" >/dev/null 2>&1
 

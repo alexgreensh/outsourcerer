@@ -22,8 +22,9 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # cmd_bg is invoked in a SUBSHELL because it `die`s, and die exits the process.
 try_bg() {   # <desc> -> echoes "<exit>|<jobdirs>"
   local sandbox; sandbox="$(mktemp -d)"
+  mkdir -p "$sandbox/home"
   local out rc
-  out="$( OSRC_HOME="$sandbox" bash "$SRC" bg "$@" 2>&1 )"; rc=$?
+  out="$( HOME="$sandbox/home" OSRC_HOME="$sandbox" bash "$SRC" bg "$@" 2>&1 )"; rc=$?
   local n; n="$(ls -1d "$sandbox"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
   printf '%s|%s|%s' "$rc" "$n" "$out"
   [ -n "$sandbox" ] && [ -d "$sandbox" ] && [ "$sandbox" != "$HOME" ] && rm -rf "$sandbox"
@@ -62,8 +63,9 @@ esac
 # exercised here — they die before any dispatch, so this suite never spends quota or touches the network.
 try_bg_acked() {   # <args...> -> "<exit>|<jobdirs>|<output>"
   local sandbox; sandbox="$(mktemp -d)"
+  mkdir -p "$sandbox/home"
   local out rc
-  out="$( OSRC_HOME="$sandbox" OSRC_CLOUD_ACK=1 bash "$SRC" bg "$@" 2>&1 )"; rc=$?
+  out="$( HOME="$sandbox/home" OSRC_HOME="$sandbox" OSRC_CLOUD_ACK=1 bash "$SRC" bg "$@" 2>&1 )"; rc=$?
   local n; n="$(ls -1d "$sandbox"/jobs/*/ 2>/dev/null | wc -l | tr -d ' ')"
   # Safety net: if a case ever DOES dispatch, do not leave it running.
   local d; for d in "$sandbox"/jobs/*/; do [ -d "$d" ] && kill "$(cat "$d/pid" 2>/dev/null)" 2>/dev/null; done

@@ -7,7 +7,8 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 TMP="$(mktemp -d)"
-export OSRC_HOME="$TMP"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP"
+mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok() { echo "PASS: $1"; pass=$((pass + 1)); }

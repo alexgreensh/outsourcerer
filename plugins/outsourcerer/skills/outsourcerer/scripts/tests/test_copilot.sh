@@ -9,7 +9,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-copilot-test-$$"
-mkdir -p "$OSRC_HOME"
+export HOME="$OSRC_HOME/fakehome"
+mkdir -p "$OSRC_HOME" "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT
 
 . "$SRC" >/dev/null 2>&1

@@ -24,7 +24,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 # mktemp check: if mktemp fails, the test used to continue with an empty TMP and report passes
 # on a broken setup. Under set -e this aborts immediately — the failure is visible, not silent.
 TMP="$(mktemp -d)" || { echo "FAIL: mktemp -d failed"; exit 1; }
-export OSRC_HOME="$TMP"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP"
+mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }

@@ -12,7 +12,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo "FAIL: cannot find $SRC"; exit 1; fi
 
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-L10h-home-$$"
-mkdir -p "$OSRC_HOME"
+export HOME="$OSRC_HOME/fakehome"
+mkdir -p "$OSRC_HOME" "$HOME"
 export OSRC_HEAVY_LOCK_WAIT=5
 
 . "$SRC" >/dev/null 2>&1
