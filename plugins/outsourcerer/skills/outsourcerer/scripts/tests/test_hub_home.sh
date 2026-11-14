@@ -64,13 +64,14 @@ if command -v node >/dev/null 2>&1; then
   rb="$(node - "$JS" <<'EOF' 2>&1
 const fs = require('fs'), vm = require('vm');
 function mk(tag) { const e = { tag, children: [], dataset: {}, className: '', disabled: false, isConnected: true,
-  append(...k) { this.children.push(...k); }, replaceChildren(...k) { this.children = k; },
+  append(...k) { this.children.push(...k); }, appendChild(k) { this.children.push(k); return k; }, setAttribute() {}, replaceChildren(...k) { this.children = k; },
   addEventListener() {}, remove() { this.parent && (this.parent.children = this.parent.children.filter((x) => x !== this)); },
   querySelector(sel) { return this.children.find((c) => sel === '.' + c.className) || null; } };
   const ap = e.append.bind(e); e.append = (...k) => { k.forEach((x) => { if (x && typeof x === 'object') x.parent = e; }); ap(...k); }; return e; }
-const win = {}; vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), { window: win, document: { createTextNode: (t) => ({ t }) }, setTimeout, clearTimeout, requestAnimationFrame: () => {} });
+let box = null;
+const win = {}; vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), { window: win, document: { createTextNode: (t) => ({ t }), body: { appendChild: (b) => { box = b; } } }, setTimeout, clearTimeout, requestAnimationFrame: () => {} });
 const el = (tag, cls) => { const e = mk(tag); if (cls) e.className = cls; return e; };
-const ctx = { $: () => null, el, ic: () => mk('i'), pri: () => mk('span'), paint() {}, openDecs: () => [], byWeight: () => 0, STATUS_TXT: {},
+const ctx = { $: (id) => (id === 'utoast' ? box : null), el, ic: () => mk('i'), pri: () => mk('span'), paint() {}, openDecs: () => [], byWeight: () => 0, STATUS_TXT: {},
   db: {}, canWrite: null, mode: 'local' };
 const H = win.OSRC_HUB_HOME(ctx);
 const st = el('span', 'lst'); st.dataset.rk = 'project:x';
@@ -78,10 +79,14 @@ H.refreshBtn(st, false); console.log('fresh=' + (st.querySelector('.rfr') ? 1 : 
 H.refreshBtn(st, true);  console.log('stale=' + (st.querySelector('.rfr') ? 1 : 0));
 H.refreshBtn(st, false); console.log('fresh-again=' + (st.querySelector('.rfr') ? 1 : 0));
 ctx.canWrite = false; H.refreshBtn(st, true); console.log('viewer=' + (st.querySelector('.rfr') ? 1 : 0));
+H.utoast('Moved X to Shipped', () => {}); H.utoast('Read again just now.');
+console.log('undo-kept=' + (box.children.some((c) => c.children && c.children.length === 0 && c.tag === 'button') ? 1 : 0));
+setTimeout(() => process.exit(0), 0);
 EOF
 )"
   grep -q 'fresh=0' <<<"$rb" && grep -q 'stale=1' <<<"$rb" && grep -q 'fresh-again=0' <<<"$rb" && grep -q 'viewer=0' <<<"$rb" \
     && ok "Refresh only on stale stamps, removed when fresh, hidden from viewers" || bad "refreshBtn wrong: $rb"
+  grep -q 'undo-kept=1' <<<"$rb" && ok "a late info toast never replaces a live Undo" || bad "Undo toast replaced: $rb"
 else echo "SKIP: node not installed (refreshBtn unit)"; fi
 
 echo "=== export merges the Mark done override ==="

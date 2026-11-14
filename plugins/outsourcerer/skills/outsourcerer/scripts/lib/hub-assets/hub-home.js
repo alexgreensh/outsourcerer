@@ -9,11 +9,14 @@
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
 
     // ---- Undo toast (6 s) -------------------------------------------------------------------
-    let utoastT = null;
+    let utoastT = null, undoUntil = 0;
     function utoast(msg, undo) {
+      // A late info message (e.g. a Refresh finishing) never takes a live Undo away from the user.
+      if (!undo && Date.now() < undoUntil) return;
+      undoUntil = undo ? Date.now() + 6000 : 0;
       const box = $('utoast') || (() => { const t = el('div', 'toast utoast'); t.id = 'utoast'; t.setAttribute('role', 'status'); document.body.appendChild(t); return t; })();
       box.replaceChildren(el('span', null, msg));
-      if (undo) { const u = el('button', null, 'Undo'); u.type = 'button'; u.addEventListener('click', (e) => { e.stopPropagation(); box.hidden = true; undo(); }); box.appendChild(u); }
+      if (undo) { const u = el('button', null, 'Undo'); u.type = 'button'; u.addEventListener('click', (e) => { e.stopPropagation(); box.hidden = true; undoUntil = 0; undo(); }); box.appendChild(u); }
       box.hidden = false; clearTimeout(utoastT); utoastT = setTimeout(() => { box.hidden = true; }, 6000);
     }
 
