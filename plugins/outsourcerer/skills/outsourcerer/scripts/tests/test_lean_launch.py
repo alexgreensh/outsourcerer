@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 MODULE = Path(__file__).resolve().parents[1] / 'lib/leanlaunch.sh'
+SCRIPT = MODULE.parent.parent / 'outsourcerer.sh'
 ROOT = Path(subprocess.check_output(['git', '-C', str(MODULE.parent), 'rev-parse', '--show-toplevel'], text=True).strip())
 SH = '''. "$1"
 have() { return 0; }
@@ -19,6 +20,15 @@ printf '%s\\n' "${SESSION_LAUNCH[@]}"
 
 
 class LeanLaunch(unittest.TestCase):
+    def test_symlinked_cli_loads_lean_module(self):
+        with tempfile.TemporaryDirectory(prefix='.lean-link-', dir=str(ROOT)) as d:
+            p = Path(d); link = p / 'outsourcerer'; link.symlink_to(SCRIPT)
+            cfg = p / 'invalid.json'; cfg.write_text('{}')
+            env = dict(os.environ, HOME=d, OSRC_HOME=str(p / 'osrc'), OSRC_LEAN_LAUNCH='1', OSRC_LEAN_MCP_CONFIG=str(cfg), OUTSOURCERER_TMUX='osrc-test-L14-link')
+            result = subprocess.run(['/bin/bash', str(link), '--provider', 'cc', 'session', 'start'], cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('lean launch: invalid MCP config', result.stdout + result.stderr)
+
     def run_launch(self, **extra):
         return subprocess.run(['/bin/bash', '-c', SH, 'bash', str(MODULE)], env=dict(os.environ, **extra), capture_output=True, text=True)
 
