@@ -256,6 +256,8 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
         printf '## Latest report round\n\n'
         awk 'tolower($0) ~ /^##[[:space:]]+round([[:space:]:-]|$)/ { text=$0 "\n"; found=1; active=1; next } active && /^##[[:space:]]/ { active=0 } active { text=text $0 "\n" } END { if (found) printf "%s", text; else print "No round section found; request the current round from the lane." }' "$report"
         printf '\n'
+      else
+        printf '## Latest report round\n\nReport not available; request the current round from the lane.\n\n'
       fi
     fi
     printf '## Where to write the verdict\n\nWrite exactly this file: %s\n\nFirst line: one word, MERGE, CHANGES or BLOCK. Below it: findings, most severe first, each with file:line and the fix. MERGE means no findings that must change before merge.\nDo not merge, push or edit the branch. You are the only reviewer; take items one at a time.\n' "$vf"

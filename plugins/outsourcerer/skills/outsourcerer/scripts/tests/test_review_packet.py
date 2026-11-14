@@ -43,6 +43,8 @@ class ReviewPacket(unittest.TestCase):
             self.assertIn('git diff origin/main...FETCH_HEAD', final)
             self.assertNotIn('git diff ' + oldsha + ' FETCH_HEAD', final)
             self.assertIn('- [ ] Fix the race', final)
+            (p / 'out/L1-REPORT.md').unlink()
+            self.assertIn('Report not available', build())
             prior['findings'] = str(p / 'secret')
             (p / 'secret').write_text('not for the packet')
             (p / ('review/items/' + oldid + '.json')).write_text(json.dumps(prior))
