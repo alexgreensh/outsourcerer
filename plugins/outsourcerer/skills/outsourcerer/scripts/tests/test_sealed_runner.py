@@ -20,6 +20,18 @@ spec.loader.exec_module(classifier)
 
 
 class SealedRunnerTests(unittest.TestCase):
+    def test_untrusted_replacement_runner_is_held(self):
+        with tempfile.TemporaryDirectory(prefix='.sealed-untrusted-', dir=str(ROOT)) as d:
+            root = Path(d)
+            scripts = root / REL
+            (scripts / 'tests').mkdir(parents=True)
+            runner = scripts / 'sealed-run.sh'
+            runner.write_text('#!/bin/sh\nexit 0\n'); runner.chmod(0o755)
+            (scripts / 'tests/test_example.sh').write_text('#!/bin/sh\nexit 0\n')
+            cmd = str(REL / 'sealed-run.sh') + ' ' + str(REL / 'tests/test_example.sh')
+            with mock.patch.object(classifier.os, 'access', return_value=True):
+                self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(root), [str(root)])[0])
+
     def test_each_classifier_guard_rejects_a_mutant(self):
         original = classifier.sealed_runner
         runner = str(REL / 'sealed-run.sh')
@@ -59,19 +71,20 @@ class SealedRunnerTests(unittest.TestCase):
         test = str(REL / 'tests/test_approver_table.sh')
         good = runner + ' ' + test
         with mock.patch.object(classifier.os, 'access', return_value=True):
-            self.assertTrue(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
+            self.assertTrue(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
+            self.assertFalse(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
             for bad in [good + ' | cat', good + '; echo x', good + ' > /dev/null',
                         'CI=1 ' + good, runner + ' ../' + test,
                         '/elsewhere/sealed-run.sh ' + test, good + ' --help', good + '\nls']:
                 with self.subTest(command=bad):
-                    self.assertFalse(classifier.is_safe(bad, 'shell', '', str(ROOT), [str(ROOT)])[0])
+                    self.assertFalse(classifier.sealed_runner(bad, str(ROOT), str(ROOT)))
             with tempfile.TemporaryDirectory(prefix='.sealed-link-', dir=str(SCRIPTS / 'tests')) as d:
                 link = Path(d) / 'outside.sh'
                 link.symlink_to('/etc/hosts')
-                self.assertFalse(classifier.is_safe(runner + ' ' + str(link.relative_to(ROOT)), 'shell', '', str(ROOT), [str(ROOT)])[0])
+                self.assertFalse(classifier.sealed_runner(runner + ' ' + str(link.relative_to(ROOT)), str(ROOT), str(ROOT)))
         real_access = os.access
         with mock.patch.object(classifier.os, 'access', side_effect=lambda path, mode: False if str(path) in ('/usr/bin/bwrap', '/usr/bin/sandbox-exec') else real_access(path, mode)):
-            self.assertFalse(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
+            self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
 
     def test_isolation_probes(self):
         tool = '/usr/bin/sandbox-exec' if sys.platform == 'darwin' else '/usr/bin/bwrap'

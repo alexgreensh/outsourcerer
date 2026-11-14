@@ -97,8 +97,8 @@ and never picks "always allow". It needs two things to act:
 After pressing Enter it re-reads the screen to confirm the prompt closed.
 For sandboxed lane worktrees, opt in to `safe` for the relevant sessions. Supervision reports
 the count of automatic approvals at the next actionable wake; details are in `$OSRC_HOME/approvals.log`.
-The sealed test runner is approved only for exact worktree test paths when the OS isolation tool is
-available. Without it, a person can choose `--allow-unisolated`; that form is held for approval.
+Sealed test runs are held for approval: a worktree-writable runner can be replaced before execution.
+Without an OS isolation tool, a person can choose the explicit `--allow-unisolated` form.
 
 **What `safe` is, and what it is not.** It stops accidents: a delegate that wanders outside its
 worktree, deletes the wrong thing, reads a secret or pushes. It is **not a sandbox**, and it is

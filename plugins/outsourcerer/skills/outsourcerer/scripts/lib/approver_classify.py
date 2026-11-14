@@ -751,7 +751,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             raise Hold("no command visible")
         pre_checks(cmd)
         if sealed_runner(cmd, cwd, roots[0]):
-            return True, "isolated:sealed-run"
+            raise Hold("sealed runner is worktree-writable; its isolation cannot be trusted")
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
