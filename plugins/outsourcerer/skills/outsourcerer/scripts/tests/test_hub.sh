@@ -187,6 +187,9 @@ grep -q 'src="http\|href="https://fonts\|jsdelivr\|googleapis\|gstatic' "$PAGE" 
 grep -q 'const ICONS' "$PAGE" && ok "icons inlined (no lucide script needed)" || bad "ICONS map missing"
 grep -q '@font-face' "$PAGE" && grep -q 'assets/fonts/poppins-400.woff2' "$PAGE" \
   && ok "vendored font @font-face blocks wired" || bad "font-face blocks missing"
+grep -q 'WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")' "$HERE/../lib/hub_server.py" \
+  && ok "refresh watcher covers every tree the export reads" \
+  || bad "WATCH_DIRS missing autodetach/review"
 grep -q '"Poppins"' "$PAGE" && grep -q -- '--mono: var(--sans)' "$PAGE" && grep -q -- '--code: ui-monospace' "$PAGE" \
   && ok "Poppins everywhere, real mono only for code (v22)" || bad "v22 font stack missing"
 for f in poppins-400 poppins-500 poppins-600 poppins-700 noto-sans-hebrew; do

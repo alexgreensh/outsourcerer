@@ -28,7 +28,9 @@ REFRESH_SECS = int(os.environ.get("OSRC_HUB_REFRESH_SECS") or 30)
 IDLE_SECS = int(os.environ.get("OSRC_HUB_IDLE_SECS") or 300)
 ANSWER_MAX = 16384
 # Directories whose mtimes count as "state changed" for the refresh loop.
-WATCH_DIRS = ("jobs", "hub", "owners", "remote")
+# Every tree the export reads must be here or a change under it never wakes
+# a re-export (r4 smaller: autodetach and review were missing).
+WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")
 WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
