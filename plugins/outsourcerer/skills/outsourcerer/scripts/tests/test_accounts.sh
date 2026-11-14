@@ -1,5 +1,7 @@
 #!/bin/bash
-set -eu
+set -eEu
+# Name the command that stops the suite, so a CI-only exit is never silent.
+trap 'echo "FAIL: test_accounts stopped at line $LINENO: $BASH_COMMAND" >&2' ERR
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-$ROOT/tests}/.account-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
