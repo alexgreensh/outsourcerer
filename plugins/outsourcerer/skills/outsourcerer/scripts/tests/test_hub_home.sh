@@ -212,6 +212,18 @@ grep -q "const loading = () => firstPull && !pullErr && mode === 'local';" "$PAG
   && ok "rail and Home stay on Loading until the first projects answer or a failure" || bad "page can claim an empty board before the first projects answer"
 grep -q "if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }" "$PAGE" && ok "page treats starting:true as still loading and asks again" || bad "page ignores starting:true"
 
+# CI run 5 (macOS runner): the stock HTTPServer bind calls socket.getfqdn(), a reverse-DNS lookup that hung
+# past 24 s before the URL printed. The hub's server must bind without it.
+fq="$(python3 -I -c '
+import socket, sys
+sys.path.insert(0, sys.argv[1])
+def boom(*a): raise RuntimeError("getfqdn called")
+socket.getfqdn = boom
+import hub_server as h
+s = getattr(h, "HubHTTPServer", h.ThreadingHTTPServer)(("127.0.0.1", 0), h.BaseHTTPRequestHandler)
+print("bound", s.server_name); s.server_close()' "$LIB" 2>&1 | tail -1)"
+[ "$fq" = "bound 127.0.0.1" ] && ok "hub server binds without a reverse-DNS lookup (getfqdn)" || bad "server bind calls getfqdn: $fq"
+
 echo "=== POST /api/projects/<id>/status ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl"; echo "RESULTS: $pass pass $fail fail"; [ "$fail" -eq 0 ]; exit $?; }
 rm -f "$OSRC_HOME/hub/status/"*.json

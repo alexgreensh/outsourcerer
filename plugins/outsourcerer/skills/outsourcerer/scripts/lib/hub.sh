@@ -338,7 +338,7 @@ _osrc_hub_mt() {
   local b=0 f m
   for f in "$@"; do
     [ -e "$f" ] || continue
-    m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"   # GNU first: GNU `stat -f` is filesystem status (CI run 5)
     [ "$m" -gt "$b" ] 2>/dev/null && b="$m"
   done
   printf '%s' "$b"

@@ -24,6 +24,18 @@ import time
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socketserver
+
+
+class HubHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse-DNS lookup in server_bind. The stock bind calls
+    socket.getfqdn(host), which can hang for many seconds on a macOS CI runner before the URL is
+    printed (CI run 5: no URL after 24 s). The name is only used for logging; the bind address is it."""
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
 
 REFRESH_SECS = int(os.environ.get("OSRC_HUB_REFRESH_SECS") or 30)
 # A first GET /api/projects waits this long for the startup export, then answers {"starting": true}
@@ -496,7 +508,7 @@ def main():
     last_err = None
     for port in range(args.port, args.port + args.scan + 1):
         try:
-            httpd = ThreadingHTTPServer((args.bind, port), make_handler(hub))
+            httpd = HubHTTPServer((args.bind, port), make_handler(hub))
             break
         except OSError as e:
             last_err = e

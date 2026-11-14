@@ -590,6 +590,12 @@ grep -q '^reg fresh$' <<<"$r9" && ok "a new session registry event is lane activ
 grep -q '^hin fresh$' <<<"$r9" && ok "a new done-contract file hand-in is lane activity" || bad "file hand-in ignored: $r9"
 grep -q '^ses 0 old$' <<<"$r9" && ok "a satisfied done contract ends 'working' for a session lane (quiet 3 h stays old)" || bad "finished session stays falsely fresh: $r9"
 grep -q '^{"summary":"1 lane: 1 building","keep":"keep me","fresh":true}$' <<<"$r9" && ok "tick rewrites the card summary + summaryAt and keeps other fields" || bad "tick summary: $r9"
+# CI run 5: on Linux GNU `stat -f %m` is filesystem status (junk, rc 0). Emulate GNU stat; the file's mtime must come back.
+g9="$(LIB="$(dirname "$SRC")/lib" F="$R9/osrc/hub/projects/p.json" bash -c '
+. "$LIB/hub.sh"
+stat() { case "$1" in -f) printf "  File: \"%s\"\n    ID: 0 Namelen: 255 Type: ext2/ext3\n" "$3" ;; -c) python3 -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$3" ;; *) return 1 ;; esac; }
+[ "$(_osrc_hub_mt "$F")" = "$(python3 -c "import os,sys; print(int(os.path.getmtime(sys.argv[1])))" "$F")" ] && echo same || echo "differs: $(_osrc_hub_mt "$F")"' 2>&1)"
+[ "$g9" = same ] && ok "_osrc_hub_mt reads mtimes with GNU stat (stat -c first)" || bad "GNU stat mtime: $g9"
 
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
