@@ -431,6 +431,14 @@ _sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits a
   last="$(_sv_num "$(cat "$dir/tick.time" 2>/dev/null)" 0)"
   [ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0
   type cmd_hub_export >/dev/null 2>&1 || return 1
+  # Keep each card's summary current from real lane state (MC-9), so the page never shows an old narrative.
+  if type osrc_hub_tick_touch >/dev/null 2>&1; then
+    local od slug
+    for od in "$OSRC_HOME"/owners/*/; do
+      slug="$(basename "$od")"
+      [ -f "$OSRC_HOME/hub/projects/$slug.json" ] && osrc_hub_tick_touch "$slug" >/dev/null 2>&1 || true
+    done
+  fi
   tmp="$dir/hub.json.tmp.$$"
   if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then
     rm -f "$tmp"; return 1
