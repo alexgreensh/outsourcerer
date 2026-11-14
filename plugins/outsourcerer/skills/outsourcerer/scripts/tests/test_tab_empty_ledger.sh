@@ -45,7 +45,7 @@ case "$out" in *Antigravity*) ok "the subscription lane is still attributed" ;; 
 
 # 5. class guard: no `grep -c ... || echo 0` survives in CODE (comment lines blanked first)
 TAB="$(printf '\t')"
-if LC_ALL=C sed -E "s/^[ $TAB]*#.*\$//" "$SRC" | LC_ALL=C grep -nE 'grep -c[^|]*[|][|] echo 0' | grep -q .; then
+if { _t3b_pipe="$(LC_ALL=C sed -E "s/^[ $TAB]*#.*\$//" "$SRC" | LC_ALL=C grep -nE 'grep -c[^|]*[|][|] echo 0')" && grep -q . <<<"$_t3b_pipe"; }; then
   bad "a 'grep -c ... || echo 0' pattern survives (prints 0 twice on no match)"
 else ok "no 'grep -c ... || echo 0' pattern left in the source"; fi
 

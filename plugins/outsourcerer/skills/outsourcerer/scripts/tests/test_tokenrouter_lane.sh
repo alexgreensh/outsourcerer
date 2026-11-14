@@ -133,7 +133,7 @@ _tr_ctx="$(grep -niE 'tokenrouter' "$SRC" | grep -iE '\$0 cash|is free|free lane
   || bad "tokenrouter lane makes a static free/\$0 claim: $_tr_ctx"
 
 # --- no hardcoded expiry date for the promo tier (the Inviolable Rule: tier by identity + runtime) ---
-if grep -niE 'tokenrouter' "$SRC" | grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}'; then
+if { _t3b_pipe="$(grep -niE 'tokenrouter' "$SRC")" && grep -qE '20[0-9]{2}-[0-9]{2}-[0-9]{2}' <<<"$_t3b_pipe"; }; then
   bad "a hardcoded date is attached to the tokenrouter lane (promo expiry must be runtime-detected)"
 else
   ok "no hardcoded expiry date attached to the tokenrouter lane"
@@ -196,7 +196,7 @@ export TOKENROUTER_API_KEY="***"
 # (B1) dispatch streams the fake completion and hits /chat/completions with a Bearer key.
 REST=("test task for tokenrouter"); MODEL="vendor-a/model-x"; MODEL_EXPLICIT=1; EFFORT=""; TIER_FLAG=""; WITH_SPEC=""
 _b1_out="$( ( delegate_tokenrouter auto ) 2>/dev/null || true )"
-if printf '%s' "$_b1_out" | grep -q 'TOKENROUTER-FAKE-OK'; then
+if grep -q 'TOKENROUTER-FAKE-OK' <<<"$_b1_out"; then
   ok "behavioral: delegate streams the gateway's SSE completion to stdout"
 else
   bad "behavioral: delegate did not stream the fake completion (got: $_b1_out)"
@@ -234,7 +234,7 @@ fi
 : > "$CAPTURE"
 REST=("test task"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC=""
 _b4_out="$( ( TOKENROUTER_API_KEY="" HOME="$TMP/nohome" delegate_tokenrouter auto ) 2>&1 >/dev/null || true )"
-if printf '%s' "$_b4_out" | grep -q 'TOKENROUTER_API_KEY not found'; then
+if grep -q 'TOKENROUTER_API_KEY not found' <<<"$_b4_out"; then
   ok "behavioral: missing key fails fast with a ~/.env pointer"
 else
   bad "behavioral: missing key did not fail fast (output: $_b4_out)"
@@ -244,7 +244,7 @@ fi
 : > "$CAPTURE"
 REST=("test task"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC=""
 _b5_out="$( ( delegate_tokenrouter auto ) 2>&1 >/dev/null || true )"
-if printf '%s' "$_b5_out" | grep -q 'needs -m <gateway-model-id>'; then
+if grep -q 'needs -m <gateway-model-id>' <<<"$_b5_out"; then
   ok "behavioral: no -m fails fast (no hardcoded default model)"
 else
   bad "behavioral: no -m did not fail fast (output: $_b5_out)"

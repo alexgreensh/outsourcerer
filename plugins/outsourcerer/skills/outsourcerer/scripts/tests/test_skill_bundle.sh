@@ -56,7 +56,7 @@ case "$d" in *plugins/cache*plugskill) ok "plugin-cache skill directory resolves
 
 # --- 2. skills=all expansion ---------------------------------------------------------------------
 names="$(WITH_SPEC='skills=all' _with_skill_names 2>/dev/null)"
-printf '%s\n' "$names" | grep -qx 'confskill' && printf '%s\n' "$names" | grep -qx 'plugskill' \
+grep -qx 'confskill' <<<"$names" && grep -qx 'plugskill' <<<"$names" \
   && ok "skills=all expands across the user dir and the plugin caches" \
   || bad "skills=all expansion wrong: $names"
 names="$(WITH_SPEC='skills=confskill,plugskill' _with_skill_names 2>/dev/null)"
@@ -85,7 +85,7 @@ rc=$?
 
 # --- 5. bundle preamble: path + manifest; a missing skill FAILS the dispatch -----------------------
 out="$(WITH_SPEC='skills=confskill' _with_preamble_render bundle 2>/dev/null; printf '%s' "${WITH_PRE_OUT:-}")"
-printf '%s' "$out" | grep -Eq "$OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/confskill/" && printf '%s' "$out" | grep -q 'MANIFEST.txt' \
+grep -Eq "$OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/confskill/" <<<"$out" && grep -q 'MANIFEST.txt' <<<"$out" \
   && ok "bundle preamble points at the on-disk bundle and its manifest" \
   || bad "bundle preamble missing root/manifest: $out"
 err="$( ( WITH_SPEC='skills=confskill,ghostskill' _with_preamble_render bundle ) 2>&1 >/dev/null )"
@@ -173,14 +173,14 @@ printf '# spaced skill\n' > "$SPC/SKILL.md"
 ( _validate_with_token 'skills=a,b /tmp/brief.txt' ) >/dev/null 2>&1 \
   && bad "a bare trailing file path passed validation" || ok "a bare trailing file path still dies at validation"
 names="$(WITH_SPEC='skills=space ünicode,confskill' _with_skill_names 2>/dev/null)"
-printf '%s\n' "$names" | grep -qx 'space ünicode' && printf '%s\n' "$names" | grep -qx 'confskill' \
+grep -qx 'space ünicode' <<<"$names" && grep -qx 'confskill' <<<"$names" \
   && ok "spaced names expand whole, not split on whitespace" \
   || bad "spaced name expansion wrong: $names"
 out="$(WITH_SPEC='skills=space ünicode' _with_preamble_render bundle 2>/dev/null; printf '%s' "${WITH_PRE_OUT:-}")"
-printf '%s' "$out" | grep -Eq "space ünicode: $OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/space ünicode/" \
+grep -Eq "space ünicode: $OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/space ünicode/" <<<"$out" \
   && ok "a spaced unicode skill bundles end-to-end" \
   || bad "spaced skill did not bundle: $out"
-find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md" | grep -q . \
+{ _t3b_pipe="$(find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md")" && grep -q . <<<"$_t3b_pipe"; } \
   && ok "the spaced skill's tree is on disk under its real name" \
   || bad "spaced skill tree missing on disk"
 

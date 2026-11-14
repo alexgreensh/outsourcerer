@@ -294,8 +294,23 @@ grep -q '^EVENT done L5.DONE ' <<<"$out" && ok "a well-named hand-in next to hos
 touch -m -t 202601010600 "$W/out/L5.DONE"; sup --session S --once >/dev/null; err2="$(cat "$TMP/err")"
 grep -q 'ignored hand-in' <<<"$err2" && no "the notice repeats on every pass: [$err2]" || ok "the notice is said once, not on every pass"
 grep '^NEXT ' <<<"$out" | sed 's/^NEXT //' > "$TMP/run42/next.sh"
-( cd "$TMP/run42" && bash next.sh >/dev/null 2>&1 ); [ ! -e "$TMP/run42/PWNED" ] && [ ! -e "$TMP/run42/PWNED2" ] && ! ls "$W/out" | grep -q '^PWNED' \
-  && ok "running every printed NEXT in a temp dir creates nothing" || no "a NEXT created a file: $(ls "$TMP/run42" "$W/out")"
+next_file_scan() {
+  local names rc
+  names="$(ls "$1" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] && return 2
+  grep -q '^PWNED' <<<"$names"
+}
+next_file_scan "$TMP/missing-watch-dir"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "NEXT file scan reports a missing directory" || no "NEXT file scan accepted a missing directory (rc=$scan_rc)"
+( cd "$TMP/run42" && bash next.sh >/dev/null 2>&1 )
+next_file_scan "$W/out"; scan_rc=$?
+if [ "$scan_rc" -ge 2 ]; then
+  no "NEXT file scan failed (rc=$scan_rc)"
+elif [ "$scan_rc" -eq 1 ] && [ ! -e "$TMP/run42/PWNED" ] && [ ! -e "$TMP/run42/PWNED2" ]; then
+  ok "running every printed NEXT in a temp dir creates nothing"
+else
+  no "a NEXT created a file: $(ls "$TMP/run42" "$W/out")"
+fi
 ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _sv_observe_all beacon ) 2>/dev/null
 ! grep -q 'PWNED' "$OSRC_HOME/lanes/events.jsonl" && ok "the beacon never logs a hostile name either (events.jsonl clean)" || no "events.jsonl carries the name"
 nx="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; f="$W/out/L5.DONE"; printf 'cat %q' "$f" ) )"
@@ -303,7 +318,7 @@ grep -q "^NEXT $(printf '%s' "$nx" | sed 's/[][\.*^$/]/\\&/g')$" <<<"$out" && ok
 # Review r5 #3: the orchestrator's own watch path may hold spaces, quotes, `$`; NEXT carries it via %q.
 fresh 43; W="$TMP/ws43/Mobile Documents/it's \$HOME (x)"; mkdir -p "$W"; : > "$W/L7.DONE"; echo report7 > "$W/L7-REPORT.md"
 "$SRC" supervise --session S --watch "$W" --once >/dev/null 2>&1; rc=$?
-[ "$rc" = 1 ] && ls "$OSRC_HOME/owners/S/" 2>/dev/null | grep -q '^watch\.' && ok "a watch path with spaces, a quote and \$ is accepted" || no "spaced watch path refused: rc=$rc $(cat "$TMP/err" 2>/dev/null)"
+[ "$rc" = 1 ] && { _t3b_pipe="$(ls "$OSRC_HOME/owners/S/" 2>/dev/null)" && grep -q '^watch\.' <<<"$_t3b_pipe"; } && ok "a watch path with spaces, a quote and \$ is accepted" || no "spaced watch path refused: rc=$rc $(cat "$TMP/err" 2>/dev/null)"
 touch -m -t 202601010700 "$W/L7.DONE"; out="$(sup --session S --once)"; mkdir -p "$TMP/run43"
 grep -q '^EVENT done L7.DONE ' <<<"$out" && [ "$(cd "$TMP/run43" && bash -c "$(sed -n 's/^NEXT //p' <<<"$out")" 2>&1)" = report7 ] && [ -z "$(ls "$TMP/run43")" ] \
   && ok "its NEXT runs as one plain cat of the report (printf %q), creating nothing" || no "spaced NEXT: [$out] ran: [$(cd "$TMP/run43" && bash -c "$(sed -n 's/^NEXT //p' <<<"$out")" 2>&1)] left: [$(ls "$TMP/run43")]"

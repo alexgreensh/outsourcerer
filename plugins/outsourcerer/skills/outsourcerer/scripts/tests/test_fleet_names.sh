@@ -67,9 +67,9 @@ unset MODEL_CALLS OSRC_TEST_FLEET_NAME_RUNNER
 [ "$fallback_rc" -eq 0 ] \
   && [ "$(printf '%s\n' "$fallback_output" | wc -l | tr -d ' ')" -eq 2 ] \
   && [ "$(wc -l < "$model_calls" | tr -d ' ')" -eq 3 ] \
-  && sed -n '1p' "$model_calls" | grep -q '^run -m glm-5-2 batch prompt$' \
-  && sed -n '2p' "$model_calls" | grep -q '^run -m swe-1-7 batch prompt$' \
-  && sed -n '3p' "$model_calls" | grep -q '^run -m haiku batch prompt$' \
+  && { _t3b_pipe="$(sed -n '1p' "$model_calls")" && grep -q '^run -m glm-5-2 batch prompt$' <<<"$_t3b_pipe"; } \
+  && { _t3b_pipe="$(sed -n '2p' "$model_calls")" && grep -q '^run -m swe-1-7 batch prompt$' <<<"$_t3b_pipe"; } \
+  && { _t3b_pipe="$(sed -n '3p' "$model_calls")" && grep -q '^run -m haiku batch prompt$' <<<"$_t3b_pipe"; } \
   && ! grep -q -- '--provider' "$model_calls" \
   && ok "batch model uses free Devin aliases before native fallbacks without --provider" \
   || bad "batch model fallback order or provider isolation was wrong"

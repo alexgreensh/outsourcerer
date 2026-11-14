@@ -42,21 +42,21 @@ SESSION_NAME=sess _osrc_cmd_approve_policy safe >/dev/null && [ "$(_osrc_approve
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 0 ] && ok || bad "safe command not approved (rc=$rc out=$out)"
 [ "$(grep -c 'send-keys -t sess Enter' "$KEYS")" = 1 ] && ok || bad "approve should press Enter exactly once: $(cat "$KEYS")"
-printf '%s\n' "$out" | grep -q '^EVENT approved sess [0-9]* ' && printf '%s\n' "$out" | grep -q '^NEXT ' && ok || bad "no EVENT approved/NEXT: $out"
+grep -q '^EVENT approved sess [0-9]* ' <<<"$out" && grep -q '^NEXT ' <<<"$out" && ok || bad "no EVENT approved/NEXT: $out"
 tail -1 "$LOG" | jq -e '.decision=="approve" and .session=="sess" and .engine=="cc" and (.command|contains("touch made-by-test.txt")) and (.rule|length>0)' >/dev/null && ok || bad "approve not logged: $(tail -1 "$LOG")"
 
 # rm -rf outside the worktree: HOLD, no keys, EVENT approval + NEXT, logged
 : > "$KEYS"; CAP="$FX/cc-permission-bash-rm.ansi"; AFTER=""
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "rm outside worktree not held (rc=$rc keys=$(cat "$KEYS"))"
-printf '%s\n' "$out" | grep -q '^EVENT approval sess [0-9]* held by policy safe' && printf '%s\n' "$out" | grep -q 'session answer' && ok || bad "hold not reported: $out"
+grep -q '^EVENT approval sess [0-9]* held by policy safe' <<<"$out" && grep -q 'session answer' <<<"$out" && ok || bad "hold not reported: $out"
 tail -1 "$LOG" | jq -e '.decision=="hold" and (.rule|test("outside|[(][$][)]"))' >/dev/null && ok || bad "hold not logged: $(tail -1 "$LOG")"
 # second tick within OSRC_HOLD_MIN: quiet
 out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 3 ] && [ -z "$out" ] && ok || bad "repeat hold was not quiet (rc=$rc out=$out)"
 # hold deadline: OSRC_HOLD_MIN=0 re-emits "still held"
 out="$(OSRC_HOLD_MIN=0 osrc_approver_tick sess sess)"; rc=$?
-[ "$rc" = 2 ] && printf '%s\n' "$out" | grep -q 'still held after' && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
+[ "$rc" = 2 ] && grep -q 'still held after' <<<"$out" && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
 # prompt gone -> held record cleared, rc 1
 CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
@@ -79,7 +79,7 @@ b=b.replace(b"   \x1b[38;5;246m2. \x1b[39mYes, and always", b" \xe2\x9d\xaf \x1b
 open(sys.argv[2],"wb").write(b)' "$FX/cc-permission-bash.ansi" "$TMP/cursor2.ansi"
 _osrc_screen_analyze_text cc < "$TMP/cursor2.ansi"; case "$OSRC_SCR_SEL" in "2. Yes, and always"*) ok ;; *) bad "cursor2 fixture not built (sel=$OSRC_SCR_SEL)" ;; esac
 CAP="$TMP/cursor2.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
-[ "$rc" = 2 ] && [ ! -s "$KEYS" ] && printf '%s' "$out" | grep -q 'not an approve-once' && ok || bad "approved with the cursor on 'always allow' (rc=$rc out=$out)"
+[ "$rc" = 2 ] && [ ! -s "$KEYS" ] && grep -q 'not an approve-once' <<<"$out" && ok || bad "approved with the cursor on 'always allow' (rc=$rc out=$out)"
 
 # unreadable cwd -> hold, never approve
 tmux() { case "$1" in capture-pane) cat "$CAP" ;; display-message) return 1 ;; send-keys) printf '%s\n' "$*" >> "$KEYS" ;; esac; }

@@ -122,7 +122,7 @@ printf 'success\n' > "$rd/state"
 printf 'max_turns\n' > "$rd/state"
 out="$( ( cmd_loop resume resume-test --max 20 "do something else entirely" ) 2>&1 )" \
   && bad "resume accepted replacement task text" \
-  || { printf '%s' "$out" | grep -q 'task is fixed by the original loop' && ok "resume refuses replacement task text" || bad "resume refused, but not because of the task ($out)"; }
+  || { grep -q 'task is fixed by the original loop' <<<"$out" && ok "resume refuses replacement task text" || bad "resume refused, but not because of the task ($out)"; }
 
 ( cmd_loop resume no-such-loop-id ) >/dev/null 2>&1 \
   && bad "resume accepted a loop id that does not exist" \

@@ -57,7 +57,7 @@ tmux() {
 }
 out="$(_session_control_interrupt "$PANE" cc)"; rc=$?
 if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-ctrl Escape' "$SEND_LOG" \
-   && printf '%s' "$out" | grep -q 'receipt: interrupt sent; the busy signal cleared'; then
+   && grep -q 'receipt: interrupt sent; the busy signal cleared' <<<"$out"; then
   ok "interrupt (cc) sends Escape and verifies the busy signal cleared"
 else
   bad "interrupt (cc) failed (rc=$rc): $out"
@@ -82,7 +82,7 @@ tmux() {
   esac
 }
 out="$(_session_control_interrupt "$PANE" cc 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && printf '%s' "$out" | grep -q 'did NOT clear'; then
+if [ "$rc" = 1 ] && grep -q 'did NOT clear' <<<"$out"; then
   ok "interrupt that never clears -> rc 1 with an honest 'did NOT clear' report"
 else
   bad "interrupt falsely verified a still-busy pane (rc=$rc)"
@@ -106,7 +106,7 @@ tmux() {
 }
 out="$(_session_control_exit "$PANE" cc)"; rc=$?
 if [ "$rc" = 0 ] && grep -q 'send-keys -t sess-ctrl -l -- /exit' "$SEND_LOG" && grep -q 'send-keys -t sess-ctrl Enter' "$SEND_LOG" \
-   && [ "$KILL_CALLED" = 0 ] && printf '%s' "$out" | grep -q 'returned to a shell'; then
+   && [ "$KILL_CALLED" = 0 ] && grep -q 'returned to a shell' <<<"$out"; then
   ok "exit (cc) sends /exit + Enter, verifies a shell prompt, does NOT kill-session"
 else
   bad "exit (cc) failed (rc=$rc, kill=$KILL_CALLED): $out"
@@ -142,7 +142,7 @@ tmux() {
   esac
 }
 out="$(_session_control_exit "$PANE" cc 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && [ "$KILL_CALLED" = 0 ] && printf '%s' "$out" | grep -q 'did NOT return to a shell'; then
+if [ "$rc" = 1 ] && [ "$KILL_CALLED" = 0 ] && grep -q 'did NOT return to a shell' <<<"$out"; then
   ok "exit that never reaches a shell -> rc 1, no kill-session fallback"
 else
   bad "exit forced a kill or falsely verified (rc=$rc, kill=$KILL_CALLED)"
@@ -194,7 +194,7 @@ _session_registry_append() { printf 'APPEND: %s\n' "$*" >> "$SEND_LOG"; return 0
 out="$(_session_control_relaunch "$PANE" devin glm-4.6 high 2>&1)"; rc=$?
 if [ "$rc" = 0 ] && [ -s "$ARM_LOG" ] \
    && grep -q 'RESPAWN: respawn-pane -k -t sess-ctrl devin --model .glm-4.6. --respect-workspace-trust false' "$SEND_LOG" \
-   && printf '%s' "$out" | grep -q 'New pane PID 22202 (was 11101)'; then
+   && grep -q 'New pane PID 22202 (was 11101)' <<<"$out"; then
   ok "relaunch respawns the pane, verifies the PID changed, preserves the session"
 else
   bad "relaunch failed (rc=$rc): $out"
@@ -209,7 +209,7 @@ PID_NOW=11101; SEND_LOG="$TMP/rel-noarm-log"; : > "$SEND_LOG"; : > "$ARM_LOG"; A
 out="$(_session_control_relaunch "$PANE" devin glm-4.6 high 2>&1)"; rc=$?
 ARM_RC=0
 if [ "$rc" -ne 0 ] && [ -s "$ARM_LOG" ] && ! grep -q 'kill-session' "$SEND_LOG" \
-   && printf '%s' "$out" | grep -q 'LIVE and UNSUPERVISED'; then
+   && grep -q 'LIVE and UNSUPERVISED' <<<"$out"; then
   ok "relaunch with a failed arm gate fails loudly and keeps the live pane"
 else
   bad "relaunch did not honor a failed arm gate (rc=$rc): $out"
@@ -226,7 +226,7 @@ tmux() {
   esac
 }
 out="$(_session_control_relaunch "$PANE" warp some-model '' 2>&1)"; rc=$?
-if [ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ] && printf '%s' "$out" | grep -qi 'not wired'; then
+if [ "$rc" = 1 ] && [ ! -s "$SEND_LOG" ] && grep -qi 'not wired' <<<"$out"; then
   ok "relaunch refuses an unsupported provider without respawning"
 else
   bad "relaunch did not refuse an unsupported provider (rc=$rc): $out"

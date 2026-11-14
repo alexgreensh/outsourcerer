@@ -22,7 +22,7 @@ Do you want to proceed with the change? [y/N] '
 
 # 1b. evidence is the matching prompt line, not empty
 ev="$(printf '%s' "$ap" | _pane_state_classify | jq -r '.evidence')"
-[ -n "$ev" ] && printf '%s' "$ev" | grep -qi 'proceed' && ok "approval evidence carries the prompt line" || bad "approval evidence empty or wrong: $ev"
+[ -n "$ev" ] && grep -qi 'proceed' <<<"$ev" && ok "approval evidence carries the prompt line" || bad "approval evidence empty or wrong: $ev"
 
 # 2. spinner / "esc to interrupt" -> working
 wp='Reading file src/foo.sh

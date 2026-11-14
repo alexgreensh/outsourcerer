@@ -278,7 +278,7 @@ esac
 # The extracted window must actually contain the read that triggers the defect. Without this the
 # probe can be green because it captured the wrong lines entirely.
 _dver_window() { sed -n "$(grep -nE '\{ *local _dver' "$SRC" | head -1 | cut -d: -f1),+4p" "$SRC"; }
-_dver_window | grep -q '\[ -n "\$_dver" \]' \
+{ _t3b_pipe="$(_dver_window)" && grep -q '\[ -n "\$_dver" \]' <<<"$_t3b_pipe"; } \
   && ok "probe window contains the unguarded read of _dver" \
   || bad "probe window does NOT contain the read of _dver — it is testing the wrong lines"
 

@@ -22,10 +22,9 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanedown.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
-SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
+export OSRC_HOME="$TMP/home"; OSRC_SOURCED=1; export -n OSRC_SOURCED; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090
-. "$SRC_ONLY" >/dev/null 2>&1
+. "$SRC" >/dev/null 2>&1
 type -t _gate_hop >/dev/null || { echo "FAIL: _gate_hop not defined (gate wiring missing?)"; exit 1; }
 
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"
@@ -60,16 +59,25 @@ _lane_down_clear cx
 # contract), so we simulate exactly the locals it reads.
 # ---------------------------------------------------------------------------------------------------
 ( PATH="$FAKEBIN:$PATH"
-  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin
+  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin; OSRC_SPEND_OK=1
   _fb_tried=""; _fb_loaded=1; _fb_cands="kimi|kimi-k3|cx"   # cx is the only READY lane (fake codex)
   REST=("do the thing"); TIER_FLAG=""; EFFORT=""; WITH_SPEC=""; OSRC_ALLOW_DOWNGRADE=0
   ARGV=(run "do the thing")
   _gate_hop devin \
-    && [ "${ARGV[*]}" = "--provider codex -m kimi do the thing" ] \
+    && [ "${ARGV[*]}" = "--provider codex -m kimi --spend-ok do the thing" ] \
     && [ "${OSRC_FALLBACK_PINNED:-0}" = "1" ] \
     && [ "$_fb_alias" = "kimi" ] && [ "$_fb_lane" = "cx" ] ) \
   && ok "hop: _gate_hop rewrites argv to --provider codex -m kimi + marks hop-mode + exposes _fb_alias/_fb_lane for the notice" \
   || bad "hop: _gate_hop did not arm the expected hop"
+( PATH="$FAKEBIN:$PATH"
+  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin; unset OSRC_SPEND_OK
+  _fb_tried=""; _fb_loaded=1; _fb_cands="kimi|kimi-k3|cx"
+  REST=("do the thing"); TIER_FLAG=""; EFFORT=""; WITH_SPEC=""; OSRC_ALLOW_DOWNGRADE=0
+  ARGV=(run "do the thing")
+  _gate_hop devin; rc=$?
+  [ "$rc" -eq 1 ] && [ "${ARGV[*]}" = "run do the thing" ] ) \
+  && ok "hop: unknown billing without consent refuses and leaves argv unchanged" \
+  || bad "hop: unknown billing without consent was selected or changed argv"
 # Exhausted shortlist -> rc1 so the caller dies with its own gate-specific message.
 ( PATH="$FAKEBIN:$PATH"
   MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin
@@ -82,12 +90,12 @@ _lane_down_clear cx
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: the gate via a real preflight route (fake droid; nothing dispatches)
 # ---------------------------------------------------------------------------------------------------
-run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 "hi" 2>&1; }
+run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 --spend-ok "hi" 2>&1; }
 mark_down() { mkdir -p "$1/lane-posture"; printf '%s\n' "$(( $(date +%s) + ${2:-300} ))" > "$1/lane-posture/$3.down"; }
 
 # Clean: no marker -> normal routing (regression: default path untouched).
 H1="$TMP/h1"; mkdir -p "$H1"
-run_pf "$H1" | grep -q 'RESOLVED lane=droid' && ok "integration: no marker -> droid routes normally" || bad "no-marker routing regressed"
+{ _t3b_pipe="$(run_pf "$H1")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: no marker -> droid routes normally" || bad "no-marker routing regressed"
 
 # Pinned -m on a down lane -> LOUD refusal that names the lane AND the pin. The order guarantee:
 # a known-down lane must never quietly absorb an explicit user choice.
@@ -118,11 +126,11 @@ case "$out" in *"marked DOWN"*"posture reset"*) ok "integration: unpinned down-l
 
 # Expired marker -> inert, routes normally (self-heal).
 H4="$TMP/h4"; mkdir -p "$H4"; mark_down "$H4" -50 droid
-run_pf "$H4" | grep -q 'RESOLVED lane=droid' && ok "integration: expired marker self-heals -> routes normally" || bad "expired marker still blocking"
+{ _t3b_pipe="$(run_pf "$H4")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: expired marker self-heals -> routes normally" || bad "expired marker still blocking"
 
 # A mark on a DIFFERENT lane does not gate this route (isolation).
 H5="$TMP/h5"; mkdir -p "$H5"; mark_down "$H5" 300 dv
-run_pf "$H5" | grep -q 'RESOLVED lane=droid' && ok "integration: dv marker does not gate the droid route" || bad "cross-lane isolation broken"
+{ _t3b_pipe="$(run_pf "$H5")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: dv marker does not gate the droid route" || bad "cross-lane isolation broken"
 
 # ---------------------------------------------------------------------------------------------------
 # SOURCE cross-checks: the gate's placement + pin order are the reviewed contract.

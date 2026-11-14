@@ -197,31 +197,31 @@ age2h "$OSRC_HOME/jobs/job-blocked" "$OSRC_HOME/jobs/job-unver" "$OSRC_HOME/loop
 
 echo "=== dry run (default age gate) ==="
 out="$(run cleanup 2>&1)" || { bad "cleanup dry run failed"; echo "$out"; }
-echo "$out" | grep -q 'dry run' && ok "dry run banner" || bad "no dry-run banner: $out"
-echo "$out" | grep -q "SAFE.*wt-safe" && ok "merged worktree SAFE despite ignored node_modules" || bad "wt-safe not SAFE: $(echo "$out" | grep wt-safe)"
-echo "$out" | grep -q "ASK.*wt-unmerged" && ok "unmerged worktree ASK" || bad "wt-unmerged not ASK"
-echo "$out" | grep -q "ASK.*wt-ignored" && ok "worktree with ignored .env ASK (finding 1)" || bad "wt-ignored not ASK"
-echo "$out" | grep -q "ASK.*ghost-x" && ok "owner with no record ASK (finding 5)" || bad "ghost-x not ASK"
-echo "$out" | grep -q "ASK.*wt-hidden" && ok "hidden untracked file makes worktree ASK (B1)" || bad "wt-hidden not ASK: $(echo "$out" | grep wt-hidden)"
-echo "$out" | grep -q "ASK.*wt-dist" && ok "ignored dist/target build output ASK (B3)" || bad "wt-dist not ASK: $(echo "$out" | grep wt-dist)"
-echo "$out" | grep -q "ignored files in worktree: dist (app.js" \
+grep -q 'dry run' <<<"$out" && ok "dry run banner" || bad "no dry-run banner: $out"
+grep -q "SAFE.*wt-safe" <<<"$out" && ok "merged worktree SAFE despite ignored node_modules" || bad "wt-safe not SAFE: $(echo "$out" | grep wt-safe)"
+grep -q "ASK.*wt-unmerged" <<<"$out" && ok "unmerged worktree ASK" || bad "wt-unmerged not ASK"
+grep -q "ASK.*wt-ignored" <<<"$out" && ok "worktree with ignored .env ASK (finding 1)" || bad "wt-ignored not ASK"
+grep -q "ASK.*ghost-x" <<<"$out" && ok "owner with no record ASK (finding 5)" || bad "ghost-x not ASK"
+grep -q "ASK.*wt-hidden" <<<"$out" && ok "hidden untracked file makes worktree ASK (B1)" || bad "wt-hidden not ASK: $(echo "$out" | grep wt-hidden)"
+grep -q "ASK.*wt-dist" <<<"$out" && ok "ignored dist/target build output ASK (B3)" || bad "wt-dist not ASK: $(echo "$out" | grep wt-dist)"
+grep -q "ignored files in worktree: dist (app.js" <<<"$out" \
   && ok "ASK reason names contents inside an ignored dir (r4)" \
   || bad "ASK reason lacks ignored-dir contents: $(echo "$out" | grep 'ignored files')"
-echo "$out" | grep -q "ASK.*pr-old" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
-echo "$out" | grep -q "ASK.*job-blocked" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
-echo "$out" | grep -q "ASK.*job-unver" && ok "unverified done? job keeps evidence until TTL (B4)" || bad "job-unver not ASK: $(echo "$out" | grep job-unver)"
-echo "$out" | grep -q "ASK.*job-uncollected" && ok "done-but-uncollected job ASK (finding 4)" || bad "job-uncollected not ASK"
-echo "$out" | grep -q "ASK.*outside-dir" && ok "outside-root path ASK" || bad "outside-dir not ASK"
-echo "$out" | grep -q "ASK.*job-liveowner" && ok "live-owner item ASK" || bad "live-owner not ASK"
-echo "$out" | grep -q "SAFE.*job-old" && ok "collected done job SAFE" || bad "job-old not SAFE"
-echo "$out" | grep -q "SAFE.*loop-ok" && ok "collected success loop SAFE (B2)" || bad "loop-ok not SAFE: $(echo "$out" | grep loop-ok)"
-echo "$out" | grep -q "ASK.*loop-blocked" && ok "blocked loop keeps evidence until TTL (B2)" || bad "loop-blocked not ASK"
-echo "$out" | grep -q "ASK.*loop-uncol" && ok "success-but-uncollected loop ASK (B2)" || bad "loop-uncol not ASK"
-echo "$out" | grep -q "SAFE.*ad-ok\.log" && echo "$out" | grep -q "SAFE.*ad-ok\.rc" \
+grep -q "ASK.*pr-old" <<<"$out" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
+grep -q "ASK.*job-blocked" <<<"$out" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
+grep -q "ASK.*job-unver" <<<"$out" && ok "unverified done? job keeps evidence until TTL (B4)" || bad "job-unver not ASK: $(echo "$out" | grep job-unver)"
+grep -q "ASK.*job-uncollected" <<<"$out" && ok "done-but-uncollected job ASK (finding 4)" || bad "job-uncollected not ASK"
+grep -q "ASK.*outside-dir" <<<"$out" && ok "outside-root path ASK" || bad "outside-dir not ASK"
+grep -q "ASK.*job-liveowner" <<<"$out" && ok "live-owner item ASK" || bad "live-owner not ASK"
+grep -q "SAFE.*job-old" <<<"$out" && ok "collected done job SAFE" || bad "job-old not SAFE"
+grep -q "SAFE.*loop-ok" <<<"$out" && ok "collected success loop SAFE (B2)" || bad "loop-ok not SAFE: $(echo "$out" | grep loop-ok)"
+grep -q "ASK.*loop-blocked" <<<"$out" && ok "blocked loop keeps evidence until TTL (B2)" || bad "loop-blocked not ASK"
+grep -q "ASK.*loop-uncol" <<<"$out" && ok "success-but-uncollected loop ASK (B2)" || bad "loop-uncol not ASK"
+grep -q "SAFE.*ad-ok\.log" <<<"$out" && grep -q "SAFE.*ad-ok\.rc" <<<"$out" \
   && ok "exited-0 autodetach pair SAFE (B2)" || bad "ad-ok not SAFE: $(echo "$out" | grep ad-ok)"
-echo "$out" | grep -q "ASK.*ad-fail" && ok "exit-1 autodetach keeps evidence until TTL (B2)" || bad "ad-fail not ASK"
-echo "$out" | grep -q "ASK.*ad-noex" && ok "no-exit-marker autodetach keeps evidence until TTL (B2)" || bad "ad-noex not ASK"
-echo "$out" | grep -c "ASK" | grep -q '^[0-9]' && echo "$out" | grep -q "jobs.*not the shape" \
+grep -q "ASK.*ad-fail" <<<"$out" && ok "exit-1 autodetach keeps evidence until TTL (B2)" || bad "ad-fail not ASK"
+grep -q "ASK.*ad-noex" <<<"$out" && ok "no-exit-marker autodetach keeps evidence until TTL (B2)" || bad "ad-noex not ASK"
+{ _t3b_pipe="$(echo "$out" | grep -c "ASK")" && grep -q '^[0-9]' <<<"$_t3b_pipe"; } && grep -q "jobs.*not the shape" <<<"$out" \
   && ok "jobs-dir attack line ASK (finding 5)" || bad "attack lines not ASK: $(echo "$out" | grep -E 'jobs |owners|remote')"
 [ -d "$WT_SAFE" ] && [ -d "$WT_BAD" ] && [ -d "$OSRC_HOME/jobs/job-old" ] \
   && ok "dry run deleted nothing" || bad "dry run mutated the filesystem"
@@ -231,30 +231,30 @@ exec 8< "$OSRC_HOME/jobs/job-busy/f"
 out2="$(run cleanup 2>&1)"
 exec 8<&-
 if [ "$have_lsof" = 1 ]; then
-  echo "$out2" | grep -q "ASK.*job-busy.*open" && ok "busy dir ASK 'files open'" || bad "busy dir verdict wrong: $(echo "$out2" | grep job-busy)"
+  grep -q "ASK.*job-busy.*open" <<<"$out2" && ok "busy dir ASK 'files open'" || bad "busy dir verdict wrong: $(echo "$out2" | grep job-busy)"
 else
-  echo "$out2" | grep -q "ASK.*job-busy" && ok "no lsof -> cannot-verify ASK" || bad "job-busy not ASK without lsof"
+  grep -q "ASK.*job-busy" <<<"$out2" && ok "no lsof -> cannot-verify ASK" || bad "job-busy not ASK without lsof"
 fi
 # rc 2 must be ASK, and this assertion can fail (no || true).
 v2="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_lsof_busy() { return 2; }
   _osrc_cleanup_verdict "{\"path\":\"'"$OSRC_HOME"'/jobs/job-old\",\"kind\":\"job\",\"session\":\"job-old\",\"repo\":\"\",\"ts\":0}"' 2>&1)"
-echo "$v2" | grep -q '^ASK' && ok "lsof cannot-verify lands ASK (finding 3)" || bad "lsof rc2 not ASK: $v2"
+grep -q '^ASK' <<<"$v2" && ok "lsof cannot-verify lands ASK (finding 3)" || bad "lsof rc2 not ASK: $v2"
 
 echo "=== heartbeat tick scans, never applies (finding 6) ==="
 tick="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }   # 50MB free -> under every threshold
   _osrc_cleanup_tick_run; echo tick-done' 2>&1)"
-echo "$tick" | grep -q tick-done && ok "tick ran" || bad "tick failed: $tick"
+grep -q tick-done <<<"$tick" && ok "tick ran" || bad "tick failed: $tick"
 [ -f "$OSRC_HOME/cleanup/state.json" ] && ok "tick wrote state.json" || bad "no state.json after tick"
 [ -d "$WT_SAFE" ] && [ -d "$OSRC_HOME/jobs/job-old" ] \
   && ok "tick did NOT apply SAFE items" || bad "tick applied deletions under pressure"
 
 echo "=== apply ==="
 app="$(run cleanup --apply 2>&1)" || { bad "cleanup --apply failed"; echo "$app"; }
-echo "$app" | grep -q 'removed' && ok "apply reported removals" || bad "apply output: $app"
+grep -q 'removed' <<<"$app" && ok "apply reported removals" || bad "apply output: $app"
 [ ! -d "$WT_SAFE" ] && ok "SAFE worktree removed" || bad "SAFE worktree still present"
 git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/wt-safe >/dev/null 2>&1 \
   && bad "SAFE branch survived apply" || ok "merged branch deleted"
@@ -292,7 +292,7 @@ gate="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
-echo "$gate" | grep -q 'refusing new lane launches' && ok "disk gate refuses under 10GB with unanswered ASK" || bad "gate did not refuse: $gate"
+grep -q 'refusing new lane launches' <<<"$gate" && ok "disk gate refuses under 10GB with unanswered ASK" || bad "gate did not refuse: $gate"
 run cleanup --ack >/dev/null 2>&1 && [ -f "$OSRC_HOME/cleanup/ask-ack" ] \
   && ok "--ack writes ask-ack" || bad "--ack did not write ask-ack"
 # The gate rescans live, so a matching ack passes even without a state file.
@@ -301,7 +301,7 @@ gate2="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
-echo "$gate2" | grep -q 'gate-rc=0' && ok "gate rescans live and passes after ack (finding 8)" || bad "gate still refused after ack: $gate2"
+grep -q 'gate-rc=0' <<<"$gate2" && ok "gate rescans live and passes after ack (finding 8)" || bad "gate still refused after ack: $gate2"
 # An ack taken against an older list no longer matches once the list changes:
 # a new ASK item appears after the ack, the live rescan sees it, gate refuses.
 mkdir -p "$OSRC_HOME/jobs/job-late"; echo blocked > "$OSRC_HOME/jobs/job-late/status"; age2h "$OSRC_HOME/jobs/job-late"
@@ -310,17 +310,17 @@ gate3="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
-echo "$gate3" | grep -q 'refusing new lane launches' && ok "stale ack cannot match a changed list (finding 8)" || bad "gate passed on stale ack: $gate3"
+grep -q 'refusing new lane launches' <<<"$gate3" && ok "stale ack cannot match a changed list (finding 8)" || bad "gate passed on stale ack: $gate3"
 echo "=== 0-ASK disk pressure (finding 8) ==="
 mkdir -p "$TMP/osrc2/jobs"
 g0="$(OSRC_HOME="$TMP/osrc2" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
-echo "$g0" | grep -q 'held elsewhere' && ok "0-ASK gate names the real problem (finding 8)" || bad "0-ASK gate wrong: $g0"
-echo "$g0" | grep -q 'ack' && bad "0-ASK gate demanded an ack of nothing" || ok "0-ASK gate does not demand ack"
+grep -q 'held elsewhere' <<<"$g0" && ok "0-ASK gate names the real problem (finding 8)" || bad "0-ASK gate wrong: $g0"
+grep -q 'ack' <<<"$g0" && bad "0-ASK gate demanded an ack of nothing" || ok "0-ASK gate does not demand ack"
 a0="$(OSRC_HOME="$TMP/osrc2" bash "$SRC" cleanup --ack 2>&1)"
-echo "$a0" | grep -q 'nothing to acknowledge' && ok "--ack on empty list says so (finding 8)" || bad "--ack empty-list wrong: $a0"
+grep -q 'nothing to acknowledge' <<<"$a0" && ok "--ack on empty list says so (finding 8)" || bad "--ack empty-list wrong: $a0"
 [ ! -f "$TMP/osrc2/cleanup/ask-ack" ] && ok "--ack writes nothing for an empty list" || bad "empty-list ack wrote a file"
 
 echo "=== legacy target cleanup (compat) ==="
@@ -330,7 +330,7 @@ git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/job-leg" -b outsourcerer
 jq -cn --arg p "$R/.outsourcerer/worktrees/job-leg" --arg b outsourcerer/job-leg --arg bs "$(git -C "$R" rev-parse HEAD)" \
   '{path:$p,branch:$b,base_sha:$bs}' > "$J/worktree.json"
 leg="$(run cleanup job-leg 2>&1)"; lrc=$?
-[ "$lrc" != "0" ] && echo "$leg" | grep -q 'REFUSING' && ok "cleanup <id> refuses unmerged work" || bad "legacy refuse broken (rc=$lrc): $leg"
+[ "$lrc" != "0" ] && grep -q 'REFUSING' <<<"$leg" && ok "cleanup <id> refuses unmerged work" || bad "legacy refuse broken (rc=$lrc): $leg"
 [ -d "$R/.outsourcerer/worktrees/job-leg" ] && ok "refused worktree still present" || bad "refused worktree vanished"
 run cleanup job-leg --force >/dev/null 2>&1
 [ ! -d "$R/.outsourcerer/worktrees/job-leg" ] && ok "cleanup <id> --force removes worktree" || bad "force cleanup failed"

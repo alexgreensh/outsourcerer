@@ -301,11 +301,15 @@ SHA3="$(git -C "$WORK2" rev-parse HEAD)"
 ID3="$(_osrc_heavy_lane_id "npm test" "$SHA3")"
 ( cd "$WORK2" && _loop_check 30 "npm test" "$TMP/tout" ) 2>"$ERRF"; rc=$?
 [ "$rc" = 125 ] && grep -q "EVENT approval $ID3" "$ERRF" && ok "gate: token origin still offers (clean+pushed)" || bad "gate: token-origin offer rc=$rc: $(cat "$ERRF")"
-if grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP/tout" "$ERRF" 2>/dev/null | grep -q .; then
-  bad "gate: credential leaked into state/output: $(grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP" 2>/dev/null | head -3)"
-else
-  ok "gate: user:pass@ stripped everywhere (brief, NEXT, events, queue)"
-fi
+credential_scan() { grep -rl 'SECRETTOKEN123\|x-access-token' "$@" >/dev/null 2>&1; }
+credential_scan "$TMP/missing-credential-scan"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "gate: credential scan reports a missing path" || bad "gate: credential scan accepted a missing path (rc=$scan_rc)"
+credential_scan "$OSRC_HOME" "$TMP/tout" "$ERRF"; scan_rc=$?
+case "$scan_rc" in
+  0) bad "gate: credential leaked into state/output: $(grep -rl 'SECRETTOKEN123\|x-access-token' "$OSRC_HOME" "$TMP/tout" "$ERRF" 2>/dev/null)" ;;
+  1) ok "gate: user:pass@ stripped everywhere (brief, NEXT, events, queue)" ;;
+  *) bad "gate: credential scan failed (rc=$scan_rc)" ;;
+esac
 git -C "$WORK2" remote set-url origin "$ORIG_URL"
 
 # ---------- 7. gate: overloaded Mac -> queue + EVENT stalled, never runs ----------
@@ -332,7 +336,7 @@ grep -q 'NOT RUN' "$SCRIPT_DIR/../lib/heavy.sh" && ok "loop: verify reports NOT 
 grep -q '"notrun"' "$SRC" && ok "loop: escalate receipts record notrun" || bad "loop: escalate missing notrun"
 
 # ---------- 9. brief rule text ----------
-_osrc_heavy_prompt | grep -qi 'unit tests' && _osrc_heavy_prompt | grep -qi 'cloud' \
+{ _t3b_pipe="$(_osrc_heavy_prompt)" && grep -qi 'unit tests' <<<"$_t3b_pipe"; } && { _t3b_pipe="$(_osrc_heavy_prompt)" && grep -qi 'cloud' <<<"$_t3b_pipe"; } \
   && ok "prompt: heavy rule mentions unit tests + cloud" || bad "prompt: heavy rule text"
 grep -q '_osrc_heavy_prompt' "$SRC" && ok "brief: _build_prompt injects heavy rule" || bad "brief: _build_prompt missing _osrc_heavy_prompt"
 grep -q 'Testing rule' "$SCRIPT_DIR/../factory-tasks.sh" && ok "brief: factory worker briefs carry rule" || bad "brief: factory-tasks missing rule"

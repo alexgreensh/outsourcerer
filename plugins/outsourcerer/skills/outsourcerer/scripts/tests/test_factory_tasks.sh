@@ -56,7 +56,7 @@ O() { bash "$SRC" "$@"; }
 check "sourcing outsourcerer.sh loads the factory library" "L 'type _task_dispatch >/dev/null && type cmd_plan >/dev/null'"
 mkdir -p "$TMP/bin"; ln -s "$SRC" "$TMP/bin/outsourcerer"
 out="$(cd "$TMP" && PATH="$TMP/bin:$PATH" outsourcerer plan ls 2>&1)"
-check "CLI through a PATH symlink finds factory-tasks.sh" "printf '%s' \"\$out\" | grep -q 'No plans yet'"
+check "CLI through a PATH symlink finds factory-tasks.sh" "grep -q 'No plans yet' <<<\"\$out\""
 
 # ---- plan new / current / use
 out="$(cd "$REPO" && O plan new alpha --goal 'ship the thing' 2>&1)"
@@ -65,14 +65,14 @@ check "plan new writes plan.json with schema, goal, repo, base_branch" \
   "[ \"\$(jq -r '[.schema,.name,.goal,.repo,.base_branch]|join(\"|\")' \"$pj\")\" = \"1|alpha|ship the thing|$REPO|main\" ]"
 check "plan new makes the plan current" "[ \"\$(cat \"$OSRC_HOME/plans/current\")\" = alpha ]"
 out="$(cd "$REPO" && O plan new alpha 2>&1)"; rc=$?
-check "plan new refuses a duplicate name" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'already exists'"
+check "plan new refuses a duplicate name" "[ $rc -ne 0 ] && grep -q 'already exists' <<<\"\$out\""
 out="$(cd "$TMP" && O plan new beta --no-repo --no-use 2>&1)"
 check "--no-use keeps the current plan" "[ \"\$(cat \"$OSRC_HOME/plans/current\")\" = alpha ] && [ \"\$(jq -r .repo \"$OSRC_HOME/plans/beta/plan.json\")\" = '' ]"
 O plan use beta >/dev/null 2>&1
 check "plan use switches the current plan" "[ \"\$(cat \"$OSRC_HOME/plans/current\")\" = beta ]"
 O plan use alpha >/dev/null 2>&1
 out="$(O plan use nope 2>&1)"; rc=$?
-check "plan use of a missing plan fails plainly" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'no plan named'"
+check "plan use of a missing plan fails plainly" "[ $rc -ne 0 ] && grep -q 'no plan named' <<<\"\$out\""
 out="$(O plan new 'bad name' 2>&1)"; rc=$?
 check "invalid plan names are refused" "[ $rc -ne 0 ]"
 
@@ -89,7 +89,7 @@ check "a scout task defaults to verb run and prompt = title when none given" \
   "[ \"\$(jq -r '.verb + \"|\" + .prompt' \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" = 'run|independent' ]"
 check "spec is stored as an absolute path" "[ \"\$(jq -r .spec \"$OSRC_HOME/plans/alpha/tasks/t2.json\")\" = \"$SPEC\" ]"
 out="$(O task add 'orphan' --deps t9 2>&1)"; rc=$?
-check "a dependency on a task that does not exist is refused" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 't9 does not exist'"
+check "a dependency on a task that does not exist is refused" "[ $rc -ne 0 ] && grep -q 't9 does not exist' <<<\"\$out\""
 check "ready = todo with every dep done (t1, t4)" "[ \"\$(L '_task_ready alpha' | tr '\n' ' ')\" = 't1 t4 ' ]"
 check "derived state marks t2/t3 blocked" \
   "[ \"\$(L '_task_view alpha' | jq -r 'map(select(.derived==\"blocked\"))|map(.id)|join(\",\")')\" = 't2,t3' ]"
@@ -122,17 +122,17 @@ check "the launch passes the task's verb and model" \
 # a large one goes by absolute path so the command line stays bounded.
 argvp="$(sed -n '4,$p' "$OSRC_HOME/jobs/$jid/argv")"
 check "the worker prompt names the task title and plan goal" \
-  "printf '%s' \"\$argvp\" | grep -q '^Task alpha/t2: build login\$' && printf '%s' \"\$argvp\" | grep -q '^Plan goal: ship the thing\$'"
+  "grep -q '^Task alpha/t2: build login\$' <<<\"\$argvp\" && grep -q '^Plan goal: ship the thing\$' <<<\"\$argvp\""
 check "a small brief is passed inline, with the saved copy's path" \
-  "printf '%s' \"\$argvp\" | grep -q '^# Task alpha/t2: build login' && printf '%s' \"\$argvp\" | grep -qF \"Saved copy: $OSRC_HOME/plans/alpha/tasks/t2/brief.md\""
+  "grep -q '^# Task alpha/t2: build login' <<<\"\$argvp\" && grep -qF \"Saved copy: $OSRC_HOME/plans/alpha/tasks/t2/brief.md\" <<<\"\$argvp\""
 bigp="$(OSRC_BRIEF_INLINE_MAX=10 L "_task_worker_prompt alpha t2 '$OSRC_HOME/plans/alpha/tasks/t2/brief.md'")"
 check "a brief over the inline cap is passed by absolute path, and the prompt stays short" \
-  "printf '%s' \"\$bigp\" | grep -qF \"read your full brief: $OSRC_HOME/plans/alpha/tasks/t2/brief.md\" && ! printf '%s' \"\$bigp\" | grep -q '^# Task alpha' && [ \"\$(printf '%s' \"\$bigp\" | wc -c | tr -d ' ')\" -lt 1200 ]"
+  "grep -qF \"read your full brief: $OSRC_HOME/plans/alpha/tasks/t2/brief.md\" <<<\"\$bigp\" && ! grep -q '^# Task alpha' <<<\"\$bigp\" && [ \"\$(printf '%s' \"\$bigp\" | wc -c | tr -d ' ')\" -lt 1200 ]"
 check "the job dir gets a task_ref back-link" "[ \"\$(cat \"$OSRC_HOME/jobs/$jid/task_ref\")\" = alpha/t2 ]"
 out="$(L '_task_dispatch alpha t2' 2>&1)"; rc=$?
-check "dispatching a running task is refused" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'already underway'"
+check "dispatching a running task is refused" "[ $rc -ne 0 ] && grep -q 'already underway' <<<\"\$out\""
 out="$(L '_task_dispatch alpha t3' 2>&1)"; rc=$?
-check "dispatching a blocked task is refused and names the blocker" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'waits on t2 (running)'"
+check "dispatching a blocked task is refused and names the blocker" "[ $rc -ne 0 ] && grep -q 'waits on t2 (running)' <<<\"\$out\""
 jid4="$(L '_task_dispatch alpha t4' 2>/dev/null)"
 check "scout dispatch does not ask for a worktree" "grep -q \"^$jid4|$REPO|0||alpha/t4\$\" \"$TMP/launches\""
 
@@ -152,7 +152,7 @@ check "concurrent task add allocates five distinct ids" "[ \"\$(sort -u \"$TMP/a
 t6="$(O task add 'will not launch' 2>/dev/null)"
 out="$(STUB_FAIL=1 L "_task_dispatch alpha $t6" 2>&1)"; rc=$?
 check "a failed launch fails the task with a reason" \
-  "[ $rc -ne 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = failed ] && jq -r .result \"$OSRC_HOME/plans/alpha/tasks/$t6.json\" | grep -q 'did not launch'"
+  "[ $rc -ne 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = failed ] && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" && grep -q 'did not launch' <<<\"\$_t3b_pipe\"; }"
 check "a failed task raises a wake event for the heartbeat" \
   "grep -q '\"kind\":\"factory-task\".*\"task\":\"$t6\".*\"task_state\":\"failed\"' \"$OSRC_HOME/wake-queue.jsonl\""
 
@@ -167,7 +167,7 @@ L "_task_update alpha t3 '.state = \"held\" | .hold = {reason:\"tone: formal or 
 O task release t3 --answer 'casual, short sentences' >/dev/null 2>&1
 bp="$(L '_task_brief alpha t3')"
 B="$(cat "$bp" 2>/dev/null)"
-has() { printf '%s' "$B" | grep -qF -- "$1"; }
+has() { grep -qF -- "$1" <<<"$B"; }
 check "brief path is tasks/<tid>/brief.md" "[ \"$bp\" = \"$OSRC_HOME/plans/alpha/tasks/t3/brief.md\" ]"
 check "brief opens with the plan goal" "has 'Plan goal: ship the thing'"
 check "brief carries the task prompt" "has '## Your task' && has 'write docs'"
@@ -181,15 +181,15 @@ check "brief carries this task's own captain decision" "has '## Decision from th
 check "a scout brief says change nothing" "has 'Do not change any files'"
 b2="$(cat "$(L '_task_brief alpha t2')")"
 check "a ship brief carries the spec contents and the check" \
-  "printf '%s' \"\$b2\" | grep -q 'SPEC-LINE-ONE' && printf '%s' \"\$b2\" | grep -qF '\`make test\`' && printf '%s' \"\$b2\" | grep -q 'Commit your finished work'"
+  "grep -q 'SPEC-LINE-ONE' <<<\"\$b2\" && grep -qF '\`make test\`' <<<\"\$b2\" && grep -q 'Commit your finished work' <<<\"\$b2\""
 # bounded: a huge dep output is trimmed; a huge spec is linked not pasted
 head -c 20000 /dev/zero | tr '\0' 'x' > "$OSRC_HOME/jobs/J1/last.txt"
 BIG="$TMP/big.md"; head -c 70000 /dev/zero | tr '\0' 'y' > "$BIG"
 t7="$(O task add 'big' --deps t1 --spec "$BIG" 2>/dev/null)"
 b7="$(cat "$(L "_task_brief alpha $t7")")"
 check "brief caps each dependency's output (~4KB) with a visible trim marker" \
-  "[ \"\$(printf '%s' \"\$b7\" | wc -c | tr -d ' ')\" -lt 8000 ] && printf '%s' \"\$b7\" | grep -q 'trimmed'"
-check "a spec over 64KB is linked by path, not pasted" "printf '%s' \"\$b7\" | grep -q \"Read it in full before you start: $BIG\""
+  "[ \"\$(printf '%s' \"\$b7\" | wc -c | tr -d ' ')\" -lt 8000 ] && grep -q 'trimmed' <<<\"\$b7\""
+check "a spec over 64KB is linked by path, not pasted" "grep -q \"Read it in full before you start: $BIG\" <<<\"\$b7\""
 
 # ---- hold / release
 out="$(O task hold t4 --reason 'is this still needed?' 2>&1)"; rc=$?
@@ -199,10 +199,10 @@ check "hold sets state held with reason and until" \
   "[ \"\$(jq -r '.state + \"|\" + .hold.reason + \"|\" + .hold.until' \"$OSRC_HOME/plans/alpha/tasks/$t7.json\")\" = 'held|pick A or B|Friday' ]"
 check "hold raises a wake event" "grep -q '\"task\":\"$t7\".*\"task_state\":\"held\"' \"$OSRC_HOME/wake-queue.jsonl\""
 out="$(L "_task_dispatch alpha $t7" 2>&1)"; rc=$?
-check "a held task cannot be dispatched" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'held for a decision'"
+check "a held task cannot be dispatched" "[ $rc -ne 0 ] && grep -q 'held for a decision' <<<\"\$out\""
 show="$(O plan show 2>&1)"
 check "plan show puts held and failed tasks in Captain's Call" \
-  "printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\" | grep -q \"$t7 \\[held\\] big - needs a decision: pick A or B\" && printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\" | grep -q \"$t6 \\[failed\\]\""
+  "{ _t3b_pipe=\"\$(printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\")\" && grep -q \"$t7 \\[held\\] big - needs a decision: pick A or B\" <<<\"\$_t3b_pipe\"; } && { _t3b_pipe=\"\$(printf '%s' \"\$show\" | sed -n \"/^Captain's Call/,/^Done/p\")\" && grep -q \"$t6 \\[failed\\]\" <<<\"\$_t3b_pipe\"; }"
 out="$(O task release "$t7" 2>&1)"; rc=$?
 check "release without an answer is refused" "[ $rc -ne 0 ]"
 O task release "$t7" --answer 'B' >/dev/null 2>&1
@@ -220,8 +220,8 @@ t9="$(O task add 'after failed' --deps "$t6" 2>/dev/null)"
 check "a failed dependency keeps dependents blocked" \
   "[ \"\$(L '_task_view alpha' | jq -r --arg id $t9 '.[]|select(.id==\$id)|.derived + \"|\" + (.blocked_by|map(.id+\":\"+.state)|join(\",\"))')\" = \"blocked|$t6:failed\" ]"
 show="$(O plan show 2>&1)"
-check "plan show names the failed blocker as needing the captain" "printf '%s' \"\$show\" | grep -q \"$t9 \\[blocked\\] after failed - waiting on $t6 (failed), needs the captain\""
-check "plan show lists dependencies" "printf '%s' \"\$show\" | grep -q '^  t3 <- t1, t2\$'"
+check "plan show names the failed blocker as needing the captain" "grep -q \"$t9 \\[blocked\\] after failed - waiting on $t6 (failed), needs the captain\" <<<\"\$show\""
+check "plan show lists dependencies" "grep -q '^  t3 <- t1, t2\$' <<<\"\$show\""
 O task retry "$t6" >/dev/null 2>&1
 check "retry puts a failed task back to todo and clears its job" \
   "[ \"\$(jq -r '.state + \"|\" + .job' \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = 'todo|' ]"
@@ -234,30 +234,30 @@ check "a canceled dependency keeps dependents blocked" \
 O task retry "$t6" >/dev/null 2>&1
 check "retry also revives a canceled task" "[ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/$t6.json\")\" = todo ]"
 b6="$(cat "$(L "_task_brief alpha $t6")")"
-check "a retried task's brief tells the worker what went wrong before" "printf '%s' \"\$b6\" | grep -q '## Earlier attempt'"
+check "a retried task's brief tells the worker what went wrong before" "grep -q '## Earlier attempt' <<<\"\$b6\""
 
 # ---- task done: fallback contract, then track C's hook when present
 L "_task_update alpha t4 '.job = \"J4\"'"; mkdir -p "$OSRC_HOME/jobs/J4"; echo running > "$OSRC_HOME/jobs/J4/status"
 out="$(O task done t4 2>&1)"; rc=$?
 check "done refuses while the job is still running and restores the state" \
-  "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'still running' && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" = running ]"
+  "[ $rc -ne 0 ] && grep -q 'still running' <<<\"\$out\" && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" = running ]"
 echo done > "$OSRC_HOME/jobs/J4/status"; printf 'Independent finding: all good\n' > "$OSRC_HOME/jobs/J4/last.txt"
 out="$(O task done t4 2>&1)"; rc=$?
 check "done passes on a finished job with a result (fallback contract)" "[ $rc -eq 0 ] && [ \"\$(jq -r .state \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" = done ]"
 check "done copies a scout's output to report.md and fills the result" \
-  "grep -q 'Independent finding' \"$OSRC_HOME/plans/alpha/tasks/t4/report.md\" && jq -r .result \"$OSRC_HOME/plans/alpha/tasks/t4.json\" | grep -q 'Independent finding'"
+  "grep -q 'Independent finding' \"$OSRC_HOME/plans/alpha/tasks/t4/report.md\" && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/alpha/tasks/t4.json\")\" && grep -q 'Independent finding' <<<\"\$_t3b_pipe\"; }"
 check "done passes through verifying (logged)" \
   "jq -e 'select(.task==\"t4\" and .to==\"verifying\")' \"$OSRC_HOME/plans/alpha/events.jsonl\" >/dev/null"
 L "_task_update alpha $t5 '.job = \"J5\"'"; mkdir -p "$OSRC_HOME/jobs/J5"; echo done > "$OSRC_HOME/jobs/J5/status"; echo x > "$OSRC_HOME/jobs/J5/last.txt"
 out="$(bash -c ". \"$LIB\"; _factory_done_check() { echo 'contract says no: no commits'; return 1; }; cmd_task done $t5" 2>&1)"; rc=$?
-check "done uses _factory_done_check when track C defines it" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'contract says no'"
+check "done uses _factory_done_check when track C defines it" "[ $rc -ne 0 ] && grep -q 'contract says no' <<<\"\$out\""
 out="$(bash -c ". \"$LIB\"; _factory_done_check() { _task_update \"\$1\" \"\$2\" '.evidence = \$e | .head_sha = \$h' --arg e /x/evidence.json --arg h feed; echo 'contract ok'; return 0; }; cmd_task done $t5" 2>&1)"; rc=$?
 check "a done check that writes the task itself (track C style) does not deadlock and is honored" \
   "[ $rc -eq 0 ] && [ \"\$(jq -r '.state + \"|\" + .evidence + \"|\" + .head_sha' \"$OSRC_HOME/plans/alpha/tasks/$t5.json\")\" = 'done|/x/evidence.json|feed' ]"
 L "_task_update alpha $t5 '.state = \"running\" | .landed = true | .landed_into = \"main\" | .landed_sha = \"0123456789abcdef\" | .pr = \"https://example.invalid/pr/1\"'"
 out="$(O task show "$t5" 2>&1)"
 check "task show displays landed status and PR when track C set them" \
-  "printf '%s' \"\$out\" | grep -q 'landed:   yes into main at 0123456789ab' && printf '%s' \"\$out\" | grep -q 'pr:       https://example.invalid/pr/1'"
+  "grep -q 'landed:   yes into main at 0123456789ab' <<<\"\$out\" && grep -q 'pr:       https://example.invalid/pr/1' <<<\"\$out\""
 O task done "$t5" --force --result 'did it by hand' >/dev/null 2>&1
 check "done --force marks done by hand with a result" "[ \"\$(jq -r '.state + \"|\" + .result' \"$OSRC_HOME/plans/alpha/tasks/$t5.json\")\" = 'done|did it by hand' ]"
 out="$(O task fail t4 --reason x 2>&1)"; rc=$?
@@ -265,28 +265,28 @@ check "fail of a done task is refused" "[ $rc -ne 0 ]"
 
 # ---- ls / show / ready CLI
 out="$(O task ls 2>&1)"
-check "task ls prints a table with derived states" "printf '%s' \"\$out\" | grep -q '^ID' && printf '%s' \"\$out\" | grep -q 'scout auth'"
+check "task ls prints a table with derived states" "grep -q '^ID' <<<\"\$out\" && grep -q 'scout auth' <<<\"\$out\""
 out="$(O task show t2 2>&1)"
-check "task show prints the task with its files and events" "printf '%s' \"\$out\" | grep -q 'alpha/t2: build login' && printf '%s' \"\$out\" | grep -q 'recent events'"
+check "task show prints the task with its files and events" "grep -q 'alpha/t2: build login' <<<\"\$out\" && grep -q 'recent events' <<<\"\$out\""
 check "task show --json is the raw task" "O task show t2 --json | jq -e '.id == \"t2\"' >/dev/null"
 out="$(O task ready 2>&1)"
-check "task ready lists ready tids with titles" "printf '%s' \"\$out\" | grep -q \"^$t6\""
+check "task ready lists ready tids with titles" "grep -q \"^$t6\" <<<\"\$out\""
 out="$(O plan ls 2>&1)"
-check "plan ls marks the current plan" "printf '%s' \"\$out\" | grep -q '^\\* alpha'"
+check "plan ls marks the current plan" "grep -q '^\\* alpha' <<<\"\$out\""
 
 # ---- corrupt files are survived, not fatal
 echo '{not json' > "$OSRC_HOME/plans/alpha/tasks/$t9.json"
 out="$(O task ls 2>&1)"
 check "a damaged task file is skipped with a warning; the rest still list" \
-  "printf '%s' \"\$out\" | grep -q 'skipping damaged task file' && printf '%s' \"\$out\" | grep -q 'scout auth'"
+  "grep -q 'skipping damaged task file' <<<\"\$out\" && grep -q 'scout auth' <<<\"\$out\""
 out="$(L "_task_get alpha $t9" 2>&1)"; rc=$?
-check "_task_get on a damaged file returns 1 with a plain reason" "[ $rc -eq 1 ] && printf '%s' \"\$out\" | grep -q 'damaged'"
+check "_task_get on a damaged file returns 1 with a plain reason" "[ $rc -eq 1 ] && grep -q 'damaged' <<<\"\$out\""
 L "_task_update alpha $t9 '.state = \"todo\"'" >/dev/null 2>&1; rc=$?
 check "_task_update on a damaged file refuses" "[ $rc -ne 0 ] && grep -q 'not json' \"$OSRC_HOME/plans/alpha/tasks/$t9.json\""
 check "_task_get of a missing task returns 1" "! L '_task_get alpha t999' 2>/dev/null"
 cp "$OSRC_HOME/plans/alpha/plan.json" "$TMP/plan.bak"; echo 'garbage' > "$OSRC_HOME/plans/alpha/plan.json"
 out="$(O plan show alpha 2>&1)"; rc=$?
-check "plan show survives a damaged plan.json" "[ $rc -eq 0 ] && printf '%s' \"\$out\" | grep -q 'damaged'"
+check "plan show survives a damaged plan.json" "[ $rc -eq 0 ] && grep -q 'damaged' <<<\"\$out\""
 cp "$TMP/plan.bak" "$OSRC_HOME/plans/alpha/plan.json"
 
 # ---- lock: a dead holder's lock is reclaimed
@@ -297,23 +297,23 @@ check "a stale lock from a dead process is reclaimed" "[ $rc -eq 0 ] && [ \"\$(j
 # ---- plan rm / plan run delegation
 tr_="$(O task add 'keep running' 2>/dev/null)"; L "_task_dispatch alpha $tr_" >/dev/null 2>&1
 out="$(O plan rm alpha 2>&1)"; rc=$?
-check "plan rm refuses while work is underway" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'still has work underway'"
+check "plan rm refuses while work is underway" "[ $rc -ne 0 ] && grep -q 'still has work underway' <<<\"\$out\""
 O plan rm beta >/dev/null 2>&1
 check "plan rm removes an idle plan" "[ ! -d \"$OSRC_HOME/plans/beta\" ]"
 if L 'type cmd_plan_run >/dev/null 2>&1'; then
   ok "plan run is provided by factory-flow.sh (delegation not exercised)"
 else
   out="$(O plan run 2>&1)"; rc=$?
-  check "plan run without factory-flow.sh says what is missing" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'factory-flow.sh'"
+  check "plan run without factory-flow.sh says what is missing" "[ $rc -ne 0 ] && grep -q 'factory-flow.sh' <<<\"\$out\""
 fi
 check "ship task in a plan without a repo fails closed" \
-  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship --check true >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\" | grep -q 'no repo'"
+  "O plan new norepo --no-repo >/dev/null 2>&1 && O task add 'build' --shape ship --check true >/dev/null 2>&1 && ! L '_task_dispatch norepo t1' 2>/dev/null && { _t3b_pipe=\"\$(jq -r .result \"$OSRC_HOME/plans/norepo/tasks/t1.json\")\" && grep -q 'no repo' <<<\"\$_t3b_pipe\"; }"
 
 # ---- end to end through the REAL bg path (fake droid binary, no model call)
 FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
 (cd "$REPO" && O plan new e2e --goal 'real launch' >/dev/null 2>&1)
 O task add 'real ship' --shape ship --check true --provider droid --plan e2e >/dev/null 2>&1
-jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O task start t1 --plan e2e 2>/dev/null | head -1)"
+jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O --spend-ok task start t1 --plan e2e 2>/dev/null | head -1)"
 i=0; while [ "$i" -lt 100 ]; do [ -f "$OSRC_HOME/jobs/$jid/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
 ej="$OSRC_HOME/plans/e2e/tasks/t1.json"
 if [ -n "$jid" ] && [ -f "$OSRC_HOME/jobs/$jid/meta.json" ]; then
@@ -439,9 +439,9 @@ check "#5 an abandoned steal guard is cleared and the dead lock then reclaimed" 
 
 # ---- #19: _task_new validates dep ids and ignores protected fields
 out="$(L "_task_new fx '{\"title\":\"evil\",\"deps\":[\"../t1\"]}'" 2>&1)"; rc=$?
-check "#19 a dependency that is not a task id is refused" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'not a task id'"
+check "#19 a dependency that is not a task id is refused" "[ $rc -ne 0 ] && grep -q 'not a task id' <<<\"\$out\""
 out="$(L "_task_new fx '{\"title\":\"evil\",\"state\":\"done\"}'" 2>&1)"; rc=$?
-check "#19 a new task cannot start done" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'starts as todo or held'"
+check "#19 a new task cannot start done" "[ $rc -ne 0 ] && grep -q 'starts as todo or held' <<<\"\$out\""
 nt="$(L "_task_new fx '{\"title\":\"sneaky\",\"id\":\"t99\",\"plan\":\"other\",\"attempts\":5,\"job\":\"J\",\"jobs\":[\"J\"],\"worktree\":\"/etc\",\"landed\":true}'" 2>/dev/null)"
 check "#19 protected fields passed to _task_new are ignored" \
   "[ \"$nt\" = t2 ] && [ \"\$(jq -c '[.id,.plan,.attempts,.job,.jobs,.worktree,(.landed // null)]' \"\$(TJ fx t2)\")\" = '[\"t2\",\"fx\",0,\"\",[],\"\",null]' ]"
@@ -454,8 +454,8 @@ g2="$(L "_task_new fx '{\"title\":\"ask later\",\"hold_after_deps\":true,\"promp
 g3="$(L "_task_new fx '{\"title\":\"land it\",\"land_target\":\"t1\"}'")"
 o1="$(O task start "$g1" --plan fx 2>&1)"; r1=$?; o2="$(O task start "$g2" --plan fx 2>&1)"; r2=$?; o3="$(O task start "$g3" --plan fx 2>&1)"; r3=$?
 check "#R3-3 task start refuses a captain decision with the next step" \
-  "[ $r1 -ne 0 ] && [ $r2 -ne 0 ] && printf '%s' \"\$o1\" | grep -q 'captain decision' && printf '%s' \"\$o2\" | grep -q 'task release'"
-check "#R3-3 task start refuses a land step and names the land command" "[ $r3 -ne 0 ] && printf '%s' \"\$o3\" | grep -q 'outsourcerer land t1 --plan fx'"
+  "[ $r1 -ne 0 ] && [ $r2 -ne 0 ] && grep -q 'captain decision' <<<\"\$o1\" && grep -q 'task release' <<<\"\$o2\""
+check "#R3-3 task start refuses a land step and names the land command" "[ $r3 -ne 0 ] && grep -q 'outsourcerer land t1 --plan fx' <<<\"\$o3\""
 check "#R3-3 nothing launched and the steps stay todo" \
   "! grep -q 'fx/$g1\$\\|fx/$g2\$\\|fx/$g3\$' \"$TMP/launches\" && [ \"\$(jq -r .state \"\$(TJ fx $g1)\")\$(jq -r .state \"\$(TJ fx $g3)\")\" = todotodo ]"
 
@@ -463,7 +463,7 @@ check "#R3-3 nothing launched and the steps stay todo" \
 c1="$(O task add 'claim dep' --plan fx 2>/dev/null)"; c2="$(O task add 'claim me' --deps "$c1" --plan fx 2>/dev/null)"
 out="$(L "_task_list() { echo 'LIST CALLED' >&2; return 1; }; _task_dispatch fx $c2" 2>&1)"; rc=$?
 check "#20 a blocked task is still refused without listing every task" \
-  "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q \"waits on $c1 (todo)\" && ! printf '%s' \"\$out\" | grep -q 'LIST CALLED'"
+  "[ $rc -ne 0 ] && grep -q \"waits on $c1 (todo)\" <<<\"\$out\" && ! grep -q 'LIST CALLED' <<<\"\$out\""
 L "_task_update fx $c1 '.state = \"done\"'" >/dev/null
 cj="$(L "_task_list() { echo 'LIST CALLED' >&2; return 1; }; _task_dispatch fx $c2" 2>/dev/null)"; rc=$?
 check "#20 a ready task is claimed and launched without listing every task" "[ $rc -eq 0 ] && [ \"\$(jq -r .job \"\$(TJ fx $c2)\")\" = \"$cj\" ]"
@@ -488,7 +488,7 @@ check "#7 cancel before launch: no worker is started at all" \
 k3="$(O task add 'launcher died' --plan fx 2>/dev/null)"
 L "_task_update fx $k3 '.state = \"running\" | .job = \"\" | .claimed_at = now | .claimed_by = \"999999 Thu Jan  1 00:00:00 1970\"'" >/dev/null
 out="$(O task start "$k3" --plan fx 2>&1)"
-check "#7 a stuck launch is named as such, with the recovery command" "printf '%s' \"\$out\" | grep -q 'being launched right now' && printf '%s' \"\$out\" | grep -q \"task retry $k3\""
+check "#7 a stuck launch is named as such, with the recovery command" "grep -q 'being launched right now' <<<\"\$out\" && grep -q \"task retry $k3\" <<<\"\$out\""
 O task retry "$k3" --plan fx >/dev/null 2>&1
 check "#7 retry recovers a running task whose launcher died before recording a job" "[ \"\$(jq -r .state \"\$(TJ fx $k3)\")\" = todo ]"
 k4="$(O task add 'launch in progress' --plan fx 2>/dev/null)"
@@ -501,7 +501,7 @@ check "#7 ... but does recover one whose claim is older than the stale window" "
 k5="$(O task add 'launch fails' --plan fx 2>/dev/null)"
 STUB_FAIL=1 L "_task_dispatch fx $k5" >/dev/null 2>&1
 check "#R3-13 a launch failure is marked launch_failed with a 'launch failed' reason (attempt counted)" \
-  "[ \"\$(jq -r '[.state,(.launch_failed|tostring),(.attempts|tostring)] | join(\"|\")' \"\$(TJ fx $k5)\")\" = 'failed|true|1' ] && jq -r .result \"\$(TJ fx $k5)\" | grep -q '^launch failed: '"
+  "[ \"\$(jq -r '[.state,(.launch_failed|tostring),(.attempts|tostring)] | join(\"|\")' \"\$(TJ fx $k5)\")\" = 'failed|true|1' ] && { _t3b_pipe=\"\$(jq -r .result \"\$(TJ fx $k5)\")\" && grep -q '^launch failed: ' <<<\"\$_t3b_pipe\"; }"
 O task retry "$k5" --plan fx >/dev/null 2>&1
 check "#R3-13 retry clears launch_failed" "[ \"\$(jq -r '.launch_failed' \"\$(TJ fx $k5)\")\" = false ]"
 
@@ -523,7 +523,7 @@ check "#6 an interrupted done check puts the task back (not stuck in verifying)"
   "[ $rc -eq 130 ] && [ \"\$(jq -r .state \"\$(TJ fx $d3)\")\" = running ]"
 L "_task_update fx $d3 '.state = \"verifying\"'" >/dev/null
 out="$(O task done "$d3" --plan fx 2>&1)"; rc=$?
-check "#R3-22 task done refuses a task another verifier is already checking" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'already being checked'"
+check "#R3-22 task done refuses a task another verifier is already checking" "[ $rc -ne 0 ] && grep -q 'already being checked' <<<\"\$out\""
 
 # ---- #8: the brief is complete but bounded, whatever the inputs hold
 (cd "$REPO" && O plan new huge --goal "$(head -c 6000 /dev/zero | tr '\0' 'g')" --no-use >/dev/null 2>&1)
@@ -544,7 +544,7 @@ check "#8 the worker's command-line prompt stays short however big the brief" \
 # ---- #21: a plan new that fails half way leaves nothing behind
 out="$(bash -c ". \"$LIB\"; _factory_write_json() { return 1; }; cmd_plan new halfmade --no-repo" 2>&1)"; rc=$?
 check "#21 plan new removes the folder it made when a later step fails" \
-  "[ $rc -ne 0 ] && [ ! -e \"$OSRC_HOME/plans/halfmade\" ] && printf '%s' \"\$out\" | grep -q 'Nothing was kept'"
+  "[ $rc -ne 0 ] && [ ! -e \"$OSRC_HOME/plans/halfmade\" ] && grep -q 'Nothing was kept' <<<\"\$out\""
 out="$(cd "$REPO" && O plan new halfmade --goal again --no-use 2>&1)"; rc=$?
 check "#21 ... so the same name works on the next try" "[ $rc -eq 0 ] && [ -f \"$OSRC_HOME/plans/halfmade/plan.json\" ]"
 
@@ -554,13 +554,13 @@ WT1="$REPO/.outsourcerer/worktrees/JW1"; git -C "$REPO" worktree add -q -b outso
 L "_task_update fx $w1 '.state = \"failed\" | .job = \"JW1\" | .worktree = \$w | .branch = \"outsourcerer/JW1\"' --arg w \"$WT1\"" >/dev/null
 out="$(O task retry "$w1" --plan fx 2>&1)"
 check "#22 retry removes a clean old worktree and keeps its branch" \
-  "[ ! -d \"$WT1\" ] && git -C \"$REPO\" rev-parse -q --verify refs/heads/outsourcerer/JW1 >/dev/null && printf '%s' \"\$out\" | grep -q 'branch outsourcerer/JW1 is kept'"
+  "[ ! -d \"$WT1\" ] && git -C \"$REPO\" rev-parse -q --verify refs/heads/outsourcerer/JW1 >/dev/null && grep -q 'branch outsourcerer/JW1 is kept' <<<\"\$out\""
 w2="$(O task add 'retry dirty wt' --shape ship --plan fx 2>/dev/null)"
 WT2="$REPO/.outsourcerer/worktrees/JW2"; git -C "$REPO" worktree add -q -b outsourcerer/JW2 "$WT2" HEAD 2>/dev/null; echo wip > "$WT2/wip.txt"
 L "_task_update fx $w2 '.state = \"failed\" | .job = \"JW2\" | .worktree = \$w | .branch = \"outsourcerer/JW2\"' --arg w \"$WT2\"" >/dev/null
 out="$(O task retry "$w2" --plan fx 2>&1)"
 check "#22 retry keeps an old worktree that has uncommitted work and says so" \
-  "[ -f \"$WT2/wip.txt\" ] && printf '%s' \"\$out\" | grep -q 'uncommitted changes' && [ \"\$(jq -r .state \"\$(TJ fx $w2)\")\" = todo ]"
+  "[ -f \"$WT2/wip.txt\" ] && grep -q 'uncommitted changes' <<<\"\$out\" && [ \"\$(jq -r .state \"\$(TJ fx $w2)\")\" = todo ]"
 git -C "$REPO" worktree remove --force "$WT2" >/dev/null 2>&1
 w3="$(L "_task_new fx '{\"title\":\"outside\",\"shape\":\"ship\"}'")"
 mkdir -p "$TMP/outside-wt"; L "_task_update fx $w3 '.state = \"failed\" | .worktree = \$w' --arg w \"$TMP/outside-wt\"" >/dev/null
@@ -569,13 +569,13 @@ check "#22 retry never removes a folder outside the repo's worktree area" "[ -d 
 r7="$(O task add 'zero padded' --retries 007 --plan fx 2>/dev/null)"
 check "#22 --retries 007 is stored as 7" "[ \"\$(jq -r .retries \"\$(TJ fx $r7)\")\" = 7 ]"
 out="$(O task add 'too many' --retries 123456 --plan fx 2>&1)"; rc=$?
-check "#22 an absurd --retries is refused plainly" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q '999 or less'"
+check "#22 an absurd --retries is refused plainly" "[ $rc -ne 0 ] && grep -q '999 or less' <<<\"\$out\""
 
 # ---- #18: a delegate never inherits this job's worktree switches
 FB2="$TMP/fakebin2"; mkdir -p "$FB2"
 printf '#!/usr/bin/env bash\nenv > "$ENVDUMP"\necho "OSRC::DONE env dumped"\n' > "$FB2/droid"; chmod +x "$FB2/droid"
 ( cd "$REPO" && PATH="$FB2:$PATH" ENVDUMP="$TMP/envdump" OSRC_WORKTREE=1 OSRC_WORKTREE_REQUIRED=1 OSRC_WORKTREE_BASE="$HEAD_SHA" OSRC_TASK_REF=fx/t1 OSRC_TASK_ATTEMPT=env-token \
-  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; run_job envjob droid run 'say hi'" ) >/dev/null 2>&1
+  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; run_job envjob droid run --spend-ok 'say hi'" ) >/dev/null 2>&1
 check "#18 the job itself still ran in its own worktree" "[ \"\$(jq -r '.worktree // \"\"' \"$OSRC_JOBS/envjob/meta.json\" 2>/dev/null)\" = \"$REPO/.outsourcerer/worktrees/envjob\" ]"
 check "#18 the delegate's environment has no OSRC_WORKTREE* switches" \
   "[ -s \"$TMP/envdump\" ] && ! grep -q '^OSRC_WORKTREE' \"$TMP/envdump\""
@@ -714,14 +714,14 @@ r3_crlf() (
   [ -n "$job" ] && _task_get r3 "$id" | command jq -e '.state=="running" and (.job|length)>0' >/dev/null
 )
 check 'R3 D4 native jq CRLF does not break task dispatch' r3_crlf
-check 'R3 D22 task header references published documentation' "! head -n 5 \"$HERE/../factory-tasks.sh\" | grep -q CONTRACT.md"
+check 'R3 D22 task header references published documentation' "! { _t3b_pipe=\"\$(head -n 5 \"$HERE/../factory-tasks.sh\")\" && grep -q CONTRACT.md <<<\"\$_t3b_pipe\"; }"
 r3_hint() (
   . "$LIB"
   local id out; id="$(r3_task)"
   out="$(cmd_task hold "$id" --plan r3 --reason decision)" || exit 1
-  printf '%s' "$out" | grep -q "task release $id --plan r3" || exit 1
+  grep -q "task release $id --plan r3" <<<"$out" || exit 1
   out="$(cmd_plan show r3)" || exit 1
-  printf '%s' "$out" | grep -q "task release $id --plan r3"
+  grep -q "task release $id --plan r3" <<<"$out"
 )
 check 'R3 S15 task and plan recovery hints name the selected plan' r3_hint
 r3_claim_tokens() (

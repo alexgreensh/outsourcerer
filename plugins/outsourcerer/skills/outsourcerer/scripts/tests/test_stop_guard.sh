@@ -44,9 +44,9 @@ mkjob job-live
 mkdir -p "$OSRC_HOME/owners/sess-A"; : > "$OSRC_HOME/owners/sess-A/job-live"
 out="$(guard sess-A)"
 printf '%s' "$out" | jq -e '.decision=="block"' >/dev/null 2>&1 && ok "the stop is blocked" || no "not blocked: [$out]"
-printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "supervise --session sess-A" && ok "the reason names ONE supervise command" || no "reason lacks the supervise command"
-printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "job-live" && ok "the reason names the run that needs a waiter" || no "reason lacks the run id"
-printf '%s' "$out" | jq -r .reason 2>/dev/null | grep -q "run_in_background" && ok "the reason says to run it in the background" || no "reason lacks run_in_background"
+{ _t3b_pipe="$(printf '%s' "$out" | jq -r .reason 2>/dev/null)" && grep -q "supervise --session sess-A" <<<"$_t3b_pipe"; } && ok "the reason names ONE supervise command" || no "reason lacks the supervise command"
+{ _t3b_pipe="$(printf '%s' "$out" | jq -r .reason 2>/dev/null)" && grep -q "job-live" <<<"$_t3b_pipe"; } && ok "the reason names the run that needs a waiter" || no "reason lacks the run id"
+{ _t3b_pipe="$(printf '%s' "$out" | jq -r .reason 2>/dev/null)" && grep -q "run_in_background" <<<"$_t3b_pipe"; } && ok "the reason says to run it in the background" || no "reason lacks run_in_background"
 
 echo "=== other sessions are not blocked ==="
 out="$(guard sess-B)"; [ -z "$out" ] && ok "a session that launched nothing ends its turn freely" || no "another session was blocked"
@@ -81,7 +81,7 @@ echo "=== plugin hook wiring ==="
 if [ -f "$HOOKS" ] && jq -e '.hooks.Stop[0].hooks[0].command | test("stop-guard")' "$HOOKS" >/dev/null 2>&1; then
   ok "the plugin registers a Stop hook that runs stop-guard"
 else no "no Stop hook in $HOOKS"; fi
-jq -r '.hooks.Stop[0].hooks[0].command' "$HOOKS" 2>/dev/null | grep -q 'exit 0' && ok "the hook fails open if the script is missing or errors" || no "hook can fail closed"
+{ _t3b_pipe="$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOOKS" 2>/dev/null)" && grep -q 'exit 0' <<<"$_t3b_pipe"; } && ok "the hook fails open if the script is missing or errors" || no "hook can fail closed"
 out="$(CLAUDE_PLUGIN_ROOT="$TMP/nope" sh -c "$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOOKS")" </dev/null 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "a missing plugin path exits 0" || no "missing plugin path rc=$rc"
 

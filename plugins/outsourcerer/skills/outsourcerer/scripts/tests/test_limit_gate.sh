@@ -386,7 +386,7 @@ esac
 out="$( cd "$BGCWD" && PATH="$FAKEBIN:$PATH" HOME="$HH7" OSRC_HOME="$H7" OSRC_SOURCED= \
     OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
     bash "$SRC" bg run --provider codex -m sol "hi" 2>&1 )"; rc=$?
-[ $rc -eq 0 ] && printf '%s' "$out" | grep -qE '^[A-Za-z0-9_-]+$' \
+[ $rc -eq 0 ] && grep -qE '^[A-Za-z0-9_-]+$' <<<"$out" \
   && ok "integration: bg run --provider (argv pin) consents and mints a job" \
   || bad "integration: argv --provider bg run did not mint (rc=$rc): $(printf '%s' "$out" | head -5)"
 
@@ -449,7 +449,7 @@ out="$( PATH="$FAKEBIN:$PATH" HOME="$HH6" OSRC_HOME="$H6" OSRC_SOURCED= OUTSOURC
     bash "$LINKDIR/outsourcerer.sh" brief 2>&1 )"; rc=$?
 case "$out" in
   *"command not found"*) bad "symlink: lib functions missing through symlinked launch" ;;
-  *) [ $rc -eq 0 ] && printf '%s' "$out" | grep -q 'outsourcerer session brief' \
+  *) [ $rc -eq 0 ] && grep -q 'outsourcerer session brief' <<<"$out" \
        && ok "symlink: brief through a symlinked script finds lib/limits.sh" \
        || bad "symlink: brief through link failed (rc=$rc): $(printf '%s' "$out" | head -3)" ;;
 esac
@@ -883,7 +883,7 @@ _session_limits() { printf 'codexwk=45\n'; }; _reset_snap
 OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1
 OSRC_CAPS='weekly<=40' _osrc_cap_poll r3poll cx "" >/dev/null 2>&1   # dedupe: same spec -> silent
 unset OSRC_CAPS
-grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | grep -q '^1$' \
+{ _t3b_pipe="$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)" && grep -q '^1$' <<<"$_t3b_pipe"; } \
   && ok "r3 cap: supervise poll emits exactly ONE EVENT limit per job+cap" \
   || bad "r3 cap: poll events=$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)"
 grep -q 'cap:weekly<=40 now:45' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
@@ -966,17 +966,17 @@ J="$(_sumjson "$SUM/home" "$SUM/bin")"
 printf '%s' "$J" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and d' \
   && ok "r3 feed: --json emits a non-empty valid array" || bad "r3 feed: invalid JSON: $J"
 for id in claude codex agy devin droid; do
-  printf '%s' "$J" | grep -q "\"id\":\"$id\"" \
+  grep -q "\"id\":\"$id\"" <<<"$J" \
     && ok "r3 feed: detected harness '$id' present" || bad "r3 feed: '$id' missing from $J"
 done
 for id in cursor gemini local warp cline pi hermes grokbot; do
-  printf '%s' "$J" | grep -q "\"id\":\"$id\"" \
+  grep -q "\"id\":\"$id\"" <<<"$J" \
     && bad "r3 feed: '$id' listed without provable auth" || ok "r3 feed: '$id' correctly absent"
 done
 # Unknown meters are honest: no fake percentages anywhere.
-printf '%s' "$J" | grep -q '"left":"not checked yet"' \
+grep -q '"left":"not checked yet"' <<<"$J" \
   && ok "r3 feed: unmetered harnesses report 'not checked yet'" || bad "r3 feed: no honest-unknown left field"
-_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))' | grep -q '^5$' \
+{ _t3b_pipe="$(_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))')" && grep -q '^5$' <<<"$_t3b_pipe"; } \
   && ok "r3 feed: no fresh meter -> all five detected harnesses state=unknown" \
   || bad "r3 feed: unexpected unknown-state count: $(_jget "$J" 'print([r["id"]+":"+r["state"] for r in d])')"
 
@@ -985,22 +985,22 @@ J62="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62)"
 _row="$(_jget "$J62" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
 case "$_row" in
   *'"state": "low"'*) ;; *) bad "r3 feed: claude@62 state not low: $_row"; _row="" ;; esac
-[ -n "$_row" ] && printf '%s' "$_row" | grep -q '38% left' \
+[ -n "$_row" ] && grep -q '38% left' <<<"$_row" \
   && ok "r3 feed: claude@62 -> low, '38% left'" || { [ -n "$_row" ] && bad "r3 feed: claude@62 left wrong: $_row"; }
 J95="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=95)"
 _row="$(_jget "$J95" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
-printf '%s' "$_row" | grep -q '"state": "out"' \
+grep -q '"state": "out"' <<<"$_row" \
   && ok "r3 feed: claude@95 -> out" || bad "r3 feed: claude@95 state wrong: $_row"
 
 # Caps surface: standing lane cap + per-launch --cap spec both land in the `cap` field.
 printf 'cc weekly<=40\n' > "$OSRC_HOME/lane-caps"
 J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62)"
 _row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
-printf '%s' "$_row" | grep -q 'weekly<=40' \
+grep -q 'weekly<=40' <<<"$_row" \
   && ok "r3 feed: standing cap renders in cap field" || bad "r3 feed: standing cap missing: $_row"
 J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62 OSRC_CAPS='5h<=80')"
 _row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
-printf '%s' "$_row" | grep -q '5h<=80' \
+grep -q '5h<=80' <<<"$_row" \
   && ok "r3 feed: per-launch --cap renders in cap field" || bad "r3 feed: per-launch cap missing: $_row"
 rm -f "$OSRC_HOME/lane-caps"
 
@@ -1010,19 +1010,19 @@ rm -f "$OSRC_HOME/lane-caps"
 printf 'cc 5h<=70\n' > "$OSRC_HOME/lane-caps"
 J="$(_sumjson "$SUM/home" "$SUM/bin" OSRC_CC_PRESSURE=62 OSRC_CAPS='5h<=50')"
 _row="$(_jget "$J" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
-printf '%s' "$_row" | grep -q '"state": "out"' \
+grep -q '"state": "out"' <<<"$_row" \
   && ok "r3 feed: tripped cap flips state to out" || bad "r3 feed: cap-tripped state wrong: $_row"
 rm -f "$OSRC_HOME/lane-caps"
 
 # paid tag: subscription billing -> paid false.
 _row="$(_jget "$J62" 'import json; print(json.dumps(next(r for r in d if r["id"]=="claude")))')"
-printf '%s' "$_row" | grep -q '"paid": false' \
+grep -q '"paid": false' <<<"$_row" \
   && ok "r3 feed: subscription lane paid=false" || bad "r3 feed: claude paid flag wrong: $_row"
 
 # Text form prints the same table; cmd_lane summary dispatch works (L2 owns cmd_lane in
 # lib/remote.sh; `lane limits` is the billing+caps table, `lane summary` is this feed).
 T="$(_sumtext "$SUM/home" "$SUM/bin")"
-printf '%s' "$T" | grep -q '^ID .*STATE' && printf '%s' "$T" | grep -q 'claude' \
+grep -q '^ID .*STATE' <<<"$T" && grep -q 'claude' <<<"$T" \
   && ok "r3 feed: text table renders detected harnesses" || bad "r3 feed: text table wrong: $T"
 CJ="$(env -i HOME="$SUM/home" PATH="$SUM/bin:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 TERM=dumb bash -c '. "$1"; _ready_probe_local() { return 1; }; cmd_lane summary --json' _ "$SRC" 2>/dev/null)"
 printf '%s' "$CJ" | python3 -c 'import json,sys; json.load(sys.stdin)' \
@@ -1096,7 +1096,7 @@ fi
 out="$( cd "$BGCWD2" && PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$BH" OSRC_SOURCED= \
     OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
     bash "$SRC" bg run --spend-ok --provider cc "hi" 2>&1 )"; rc=$?
-[ $rc -eq 0 ] && printf '%s' "$out" | grep -qE '^[A-Za-z0-9_-]+$' \
+[ $rc -eq 0 ] && grep -qE '^[A-Za-z0-9_-]+$' <<<"$out" \
   && ok "r3.1 bg: --spend-ok consents through preflight and mints a job" \
   || bad "r3.1 bg: --spend-ok did not mint (rc=$rc): $(printf '%s' "$out" | head -5)"
 # The marker writer emits the token header + bound EXACT lane|model pairs (never "*") for
@@ -1106,7 +1106,7 @@ MKD="$OSRC_HOME/jobs/markerjob"; mkdir -p "$MKD"
 # consent by design.
 ( OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1
     OSRC_SPEND_OK=1 OSRC_JOB_TOKEN=tokW; _osrc_spend_marker_write "'"$MKD"'" cc run --provider cc -m glm-5.2' >/dev/null 2>&1 )
-[ -f "$MKD/.spend-ok" ] && head -1 "$MKD/.spend-ok" | grep -q 'token=tokW' \
+[ -f "$MKD/.spend-ok" ] && { _t3b_pipe="$(head -1 "$MKD/.spend-ok")" && grep -q 'token=tokW' <<<"$_t3b_pipe"; } \
   && ! grep -q '|\*' "$MKD/.spend-ok" && grep -q '|' "$MKD/.spend-ok" \
   && ok "r3.2 marker: .spend-ok carries token header + exact pairs ($(tail -1 "$MKD/.spend-ok" 2>/dev/null))" \
   || bad "r3.2 marker: .spend-ok missing token/exact pairs: $(cat "$MKD/.spend-ok" 2>/dev/null)"

@@ -116,12 +116,12 @@ _lane_down_mark dv 7200 "plan quota exhausted" "provider stated reset"
 # rows in `posture status` (which cats these files raw), or a second fake "marker" line.
 _lane_down_mark gm 300 "plan limit exhausted" "$(printf 'line one\nline two\ttabbed\r\nend')"
 _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
-printf '%s' "$_ev" | grep -q 'line one' && printf '%s' "$_ev" | grep -q 'end' && [ "$(printf '%s' "$_ev" | wc -l | tr -d ' ')" = "0" ] && ok "sanitize: multi-line evidence stored as one line" || bad "sanitize: multi-line evidence mangled ($_ev)"
+grep -q 'line one' <<<"$_ev" && grep -q 'end' <<<"$_ev" && [ "$(printf '%s' "$_ev" | wc -l | tr -d ' ')" = "0" ] && ok "sanitize: multi-line evidence stored as one line" || bad "sanitize: multi-line evidence mangled ($_ev)"
 # Invalid UTF-8 input is kept in sanitized form (not dropped): under a UTF-8 locale BSD sed used
 # to abort on the bad byte and the evidence vanished entirely.
 _lane_down_mark gm 300 "plan limit exhausted" "$(printf 'bad\xffrawbytes')"
 _ev="$(cat "$OSRC_POSTURE_DIR/gm.down-evidence")"
-[ -n "$_ev" ] && printf '%s' "$_ev" | grep -q 'badrawbytes' && ok "sanitize: invalid-UTF-8 evidence kept (bad byte dropped)" || bad "sanitize: invalid-UTF-8 evidence lost ($_ev)"
+[ -n "$_ev" ] && grep -q 'badrawbytes' <<<"$_ev" && ok "sanitize: invalid-UTF-8 evidence kept (bad byte dropped)" || bad "sanitize: invalid-UTF-8 evidence lost ($_ev)"
 # A 3-byte character straddling the 400-byte cap leaves no partial sequence at the tail.
 _pad="$(printf '%*s' 398 '' | tr ' ' 'a')"
 _lane_down_mark gm 300 "plan limit exhausted" "${_pad}"$'\xe2\x82\xac'"tail"

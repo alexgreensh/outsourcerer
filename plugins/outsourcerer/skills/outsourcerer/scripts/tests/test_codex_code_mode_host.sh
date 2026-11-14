@@ -87,7 +87,7 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
   # (c) Binary present -> flag should be true.
   _codex_code_mode_host() { return 0; }
   delegate_cxnative accept-edits >/dev/null 2>&1
-  if printf '%s' "$CODEX_ARGS" | grep -q 'features.code_mode_host=true'; then
+  if grep -q 'features.code_mode_host=true' <<<"$CODEX_ARGS"; then
     ok "(c) delegate_cxnative passes -c features.code_mode_host=true when binary present"
   else
     bad "(c) delegate_cxnative missing features.code_mode_host=true (args=[$CODEX_ARGS])"
@@ -96,7 +96,7 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
   # (d) Binary absent -> flag should be false.
   _codex_code_mode_host() { return 1; }
   delegate_cxnative accept-edits >/dev/null 2>&1
-  if printf '%s' "$CODEX_ARGS" | grep -q 'features.code_mode_host=false'; then
+  if grep -q 'features.code_mode_host=false' <<<"$CODEX_ARGS"; then
     ok "(d) delegate_cxnative passes -c features.code_mode_host=false when binary absent"
   else
     bad "(d) delegate_cxnative missing features.code_mode_host=false (args=[$CODEX_ARGS])"
@@ -105,7 +105,7 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
   # (c-extra) The self-heal notice only prints when binary is absent (false case).
   _codex_code_mode_host() { return 0; }
   _NOTICE_OUT="$(delegate_cxnative accept-edits 2>&1 >/dev/null)"
-  if ! printf '%s' "$_NOTICE_OUT" | grep -q 'self-heal.*binary missing'; then
+  if ! grep -q 'self-heal.*binary missing' <<<"$_NOTICE_OUT"; then
     ok "(c-extra) no self-heal notice when binary is present"
   else
     bad "(c-extra) self-heal notice printed when binary IS present (should not)"
@@ -113,7 +113,7 @@ echo "=== (c)(d) delegate_cxnative passes the flag in both directions ==="
 
   _codex_code_mode_host() { return 1; }
   _NOTICE_OUT="$(delegate_cxnative accept-edits 2>&1 >/dev/null)"
-  if printf '%s' "$_NOTICE_OUT" | grep -q 'self-heal.*binary missing'; then
+  if grep -q 'self-heal.*binary missing' <<<"$_NOTICE_OUT"; then
     ok "(d-extra) self-heal notice printed when binary is absent"
   else
     bad "(d-extra) self-heal notice missing when binary IS absent (notice=[$_NOTICE_OUT])"
@@ -146,7 +146,7 @@ exit 0
 EOF
   chmod +x "$_FAKE_BIN/codex"
   if ( PATH="$_FAKE_BIN:$PATH" MODEL="" MODEL_EXPLICIT=0 EFFORT="" _session_launch_adapter codex \
-       && printf '%s\n' "${SESSION_LAUNCH[@]}" | grep -q 'features.code_mode_host=' ) 2>/dev/null; then
+       && grep -q 'features.code_mode_host=' <<<"$(printf '%s\n' "${SESSION_LAUNCH[@]}")" ) 2>/dev/null; then
     ok "(e) --provider codex session launch carries features.code_mode_host via the descriptor"
   else
     bad "(e) --provider codex session launch lost features.code_mode_host"
@@ -158,7 +158,7 @@ EOF
   _OSRC_CODEMODE=""
   _ccmh_flag="$(_codex_code_mode_host_flag)"
   _test_launch="codex -m 'sol' -s workspace-write -c features.code_mode_host=$_ccmh_flag"
-  if printf '%s' "$_test_launch" | grep -q 'features.code_mode_host=true'; then
+  if grep -q 'features.code_mode_host=true' <<<"$_test_launch"; then
     ok "(e) functional: session launch string has features.code_mode_host=true (binary present, overrides stale config)"
   else
     bad "(e) functional: session launch string has wrong flag (got $_ccmh_flag)"
@@ -169,7 +169,7 @@ EOF
   _OSRC_CODEMODE=""
   _ccmh_flag="$(_codex_code_mode_host_flag)"
   _test_launch="codex -m 'sol' -s workspace-write -c features.code_mode_host=$_ccmh_flag"
-  if printf '%s' "$_test_launch" | grep -q 'features.code_mode_host=false'; then
+  if grep -q 'features.code_mode_host=false' <<<"$_test_launch"; then
     ok "(e) functional: session launch string has features.code_mode_host=false (binary absent)"
   else
     bad "(e) functional: session launch string has wrong flag for absent binary (got $_ccmh_flag)"

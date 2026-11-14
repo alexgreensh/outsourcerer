@@ -55,7 +55,7 @@ snap="$(jq -cn --arg t "$hostile" '{items:[{owner:"managed",state:"working",obse
 out="$(line "$snap")"
 nlines="$(printf '%s' "$out" | wc -l | tr -d ' ')"
 [ "$nlines" -le 1 ] && ok "hostile label cannot split the one-line pulse" || bad "hostile label split the pulse ($nlines lines)"
-if printf '%s' "$out" | LC_ALL=C grep -q '[[:cntrl:]]'; then bad "control characters survived into the pulse"; else ok "control characters are stripped"; fi
+if LC_ALL=C grep -q '[[:cntrl:]]' <<<"$out"; then bad "control characters survived into the pulse"; else ok "control characters are stripped"; fi
 nchars="$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')"
 [ "$nchars" -le 200 ] && ok "pulse length stays bounded under an overlong label" || bad "overlong label blew out the line ($nchars bytes)"
 

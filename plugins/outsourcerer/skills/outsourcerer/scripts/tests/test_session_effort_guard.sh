@@ -115,7 +115,7 @@ _session_send_effort_guard sess-ext "/effort max"; rc=$?
 
 # ---- through the real `session send` dispatch (subshell: die exits) ------------------------
 out="$(SESSION_NAME=sess-cc session send "/effort high" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'session effort' \
+[ "$rc" -ne 0 ] && grep -q 'session effort' <<<"$out" \
   && ok "session send refuses /effort on cc and names the safe path" \
   || bad "session send did not refuse (rc=$rc): [$out]"
 ! grep -q '/effort' "$SEND_LOG" \
@@ -125,7 +125,7 @@ out="$(SESSION_NAME=sess-cc session send "/effort high" 2>&1)"; rc=$?
 out="$(SESSION_NAME=sess-cx session send "/effort high" 2>&1)"; rc=$?
 # A codex send gets PAST the guard into _managed_session_send, which then fails endpoint
 # proof in this fixture — what matters is the refusal reason is NOT the effort guard.
-printf '%s' "$out" | grep -q 'effortLevel into' \
+grep -q 'effortLevel into' <<<"$out" \
   && bad "codex send was refused by the effort guard: [$out]" \
   || ok "codex send is not stopped by the effort guard (fails later on endpoint proof, as expected)"
 
@@ -216,20 +216,20 @@ printf 'working on the thing\n' > "$CAPTURE_FILE"
 # Dispatch level: a proven cc pane refuses WITH the flag and the message never
 # advertises it; an uncertain pane lets the flagged send through.
 out="$(SESSION_NAME=sess-cc session send --allow-effort "/effort high" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'effortLevel into' \
+[ "$rc" -ne 0 ] && grep -q 'effortLevel into' <<<"$out" \
   && ok "session send --allow-effort still refused on a proven cc pane" \
   || bad "flag got past a proven cc pane at dispatch (rc=$rc): [$out]"
-printf '%s' "$out" | grep -q -- '--allow-effort' \
+grep -q -- '--allow-effort' <<<"$out" \
   && bad "proven refusal advertised the override flag: [$out]" \
   || ok "proven refusal does not mention --allow-effort"
 
 FAKE_PANE_CMD=ssh
 out="$(SESSION_NAME=sess-remote session send "/effort high" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- '--allow-effort' \
+[ "$rc" -ne 0 ] && grep -q -- '--allow-effort' <<<"$out" \
   && ok "uncertain refusal names the --allow-effort override" \
   || bad "uncertain refusal lacked the override hint (rc=$rc): [$out]"
 out="$(SESSION_NAME=sess-remote session send --allow-effort "/effort high" 2>&1)"
-printf '%s' "$out" | grep -q 'effortLevel into' \
+grep -q 'effortLevel into' <<<"$out" \
   && bad "--allow-effort did not get past the guard at dispatch: [$out]" \
   || ok "session send --allow-effort gets past an uncertain refusal"
 FAKE_PANE_CMD=codex
@@ -237,7 +237,7 @@ FAKE_PANE_CMD=codex
 # session reply parses the same flag and forwards it to _external_reply.
 _external_reply() { printf 'REPLYARGS:%s\n' "$*"; return 0; }
 out="$(session reply --allow-effort ext-1 hello world 2>&1)"
-printf '%s' "$out" | grep -q 'REPLYARGS:ext-1 hello world 1' \
+grep -q 'REPLYARGS:ext-1 hello world 1' <<<"$out" \
   && ok "session reply --allow-effort forwards the flag" \
   || bad "reply flag not forwarded: [$out]"
 unset -f _external_reply
@@ -259,34 +259,34 @@ _session_parse_allow_effort --allow-effort; rc=$?
 
 # ---- the per-session path: env cap + session-scoped --effort + --continue ---------------
 Relaunch_out="$(_session_relaunch_cc fable high 2>/dev/null)"
-printf '%s' "$Relaunch_out" | grep -q 'MAX_THINKING_TOKENS=24000' \
-  && printf '%s' "$Relaunch_out" | grep -q -- '--effort high' \
-  && printf '%s' "$Relaunch_out" | grep -q -- '--continue' \
+grep -q 'MAX_THINKING_TOKENS=24000' <<<"$Relaunch_out" \
+  && grep -q -- '--effort high' <<<"$Relaunch_out" \
+  && grep -q -- '--continue' <<<"$Relaunch_out" \
   && ok "cc relaunch carries env cap + --effort high + --continue" \
   || bad "cc relaunch missing session-scoped effort/continue: [$Relaunch_out]"
 
 Relaunch_min="$(_session_relaunch_cc fable minimal 2>/dev/null)"
-printf '%s' "$Relaunch_min" | grep -q -- '--effort low' \
-  && printf '%s' "$Relaunch_min" | grep -q 'MAX_THINKING_TOKENS=0' \
+grep -q -- '--effort low' <<<"$Relaunch_min" \
+  && grep -q 'MAX_THINKING_TOKENS=0' <<<"$Relaunch_min" \
   && ok "minimal/none map to --effort low with the zero env cap" \
   || bad "minimal mapping wrong: [$Relaunch_min]"
 
 Cmd_out="$(_session_relaunch_command cc fable high 2>/dev/null)"
-printf '%s' "$Cmd_out" | grep -q -- '--effort high' \
-  && printf '%s' "$Cmd_out" | grep -q -- '--continue' \
+grep -q -- '--effort high' <<<"$Cmd_out" \
+  && grep -q -- '--continue' <<<"$Cmd_out" \
   && ok "session effort dispatch builds --effort + --continue for cc" \
   || bad "relaunch command lost the flags: [$Cmd_out]"
 
 # ---- --resume pins THIS pane's conversation; --continue is only the fallback -----------
 SID="3f8a2c1e-9b4d-4e5f-a6b7-c8d9e0f1a2b3"
 Relaunch_res="$(_session_relaunch_cc fable high "$SID" 2>/dev/null)"
-printf '%s' "$Relaunch_res" | grep -q -- "--resume $SID" \
-  && ! printf '%s' "$Relaunch_res" | grep -q -- '--continue' \
+grep -q -- "--resume $SID" <<<"$Relaunch_res" \
+  && ! grep -q -- '--continue' <<<"$Relaunch_res" \
   && ok "relaunch with a known session id uses --resume <id>, not --continue" \
   || bad "resume-id relaunch wrong: [$Relaunch_res]"
 
 Cmd_res="$(_session_relaunch_command cc fable high "$SID" 2>/dev/null)"
-printf '%s' "$Cmd_res" | grep -q -- "--resume $SID" \
+grep -q -- "--resume $SID" <<<"$Cmd_res" \
   && ok "dispatch relaunch command carries --resume <id>" \
   || bad "relaunch command lost --resume: [$Cmd_res]"
 
@@ -294,18 +294,18 @@ printf '%s' "$Cmd_res" | grep -q -- "--resume $SID" \
 # check is UUID-strict: a planted id like --dangerously-skip-permissions must
 # never reach the claude command line as a flag.
 Relaunch_badid="$(_session_relaunch_cc fable high 'bad id!!' 2>/dev/null)"
-printf '%s' "$Relaunch_badid" | grep -q -- '--continue' \
-  && ! printf '%s' "$Relaunch_badid" | grep -q -- '--resume' \
+grep -q -- '--continue' <<<"$Relaunch_badid" \
+  && ! grep -q -- '--resume' <<<"$Relaunch_badid" \
   && ok "invalid resume id falls back to --continue" \
   || bad "invalid id not handled: [$Relaunch_badid]"
 Relaunch_flagid="$(_session_relaunch_cc fable high '--dangerously-skip-permissions' 2>/dev/null)"
-printf '%s' "$Relaunch_flagid" | grep -q -- '--continue' \
-  && ! printf '%s' "$Relaunch_flagid" | grep -q -- '--resume' \
+grep -q -- '--continue' <<<"$Relaunch_flagid" \
+  && ! grep -q -- '--resume' <<<"$Relaunch_flagid" \
   && ok "a leading-dash id falls back to --continue, never a claude flag" \
   || bad "flag-shaped id reached --resume: [$Relaunch_flagid]"
 Relaunch_nonuuid="$(_session_relaunch_cc fable high 'reg-sid-1' 2>/dev/null)"
-printf '%s' "$Relaunch_nonuuid" | grep -q -- '--continue' \
-  && ! printf '%s' "$Relaunch_nonuuid" | grep -q -- '--resume' \
+grep -q -- '--continue' <<<"$Relaunch_nonuuid" \
+  && ! grep -q -- '--resume' <<<"$Relaunch_nonuuid" \
   && ok "a non-UUID id falls back to --continue" \
   || bad "non-UUID id reached --resume: [$Relaunch_nonuuid]"
 
@@ -313,7 +313,7 @@ printf '%s' "$Relaunch_nonuuid" | grep -q -- '--continue' \
 # ever changes its id shape, this line is the only sign every relaunch went
 # back to --continue).
 warn_out="$(_session_relaunch_cc fable high 'reg-sid-1' 2>&1 >/dev/null)"
-printf '%s' "$warn_out" | grep -q 'not a UUID' \
+grep -q 'not a UUID' <<<"$warn_out" \
   && ok "non-UUID resume fallback prints a stderr line" \
   || bad "UUID fallback was silent: [$warn_out]"
 no_warn="$(_session_relaunch_cc fable high 2>&1 >/dev/null)"
@@ -334,7 +334,7 @@ got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
 # A registry cc_session_id that is not a UUID is rejected WITH a stderr line.
 bad_warn="$(_session_cc_resume_id sess-badid 2>&1 >/dev/null)"
 got="$(_session_cc_resume_id sess-badid 2>/dev/null)"
-[ -z "$got" ] && printf '%s' "$bad_warn" | grep -q 'not a UUID' \
+[ -z "$got" ] && grep -q 'not a UUID' <<<"$bad_warn" \
   && ok "non-UUID registry id rejected with a stderr line" \
   || bad "registry id handling wrong (got=[$got] warn=[$bad_warn])"
 
@@ -386,8 +386,8 @@ grep -q "$REG_SID" "$CAPTURE_ARGS" \
 # Older claude without --effort in --help: env cap still applies, flag omitted.
 touch "$OSRC_TEST_NO_EFFORT_FLAG"
 Relaunch_old="$(_session_relaunch_cc fable high 2>/dev/null)"
-printf '%s' "$Relaunch_old" | grep -q 'MAX_THINKING_TOKENS=24000' \
-  && ! printf '%s' "$Relaunch_old" | grep -q -- '--effort' \
+grep -q 'MAX_THINKING_TOKENS=24000' <<<"$Relaunch_old" \
+  && ! grep -q -- '--effort' <<<"$Relaunch_old" \
   && ok "claude without --effort keeps the env cap and omits the flag" \
   || bad "unsupported-claude relaunch wrong: [$Relaunch_old]"
 rm -f "$OSRC_TEST_NO_EFFORT_FLAG"
@@ -396,22 +396,22 @@ rm -f "$OSRC_TEST_NO_EFFORT_FLAG"
 MODEL=fable; MODEL_EXPLICIT=0; EFFORT=high; SESSION_LAUNCH=()
 _session_launch_cc 2>/dev/null
 joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
-printf '%s' "$joined" | grep -q -- '--effort high' \
+grep -q -- '--effort high' <<<"$joined" \
   && ok "session start launch includes --effort high" \
   || bad "start launch missing --effort: [$joined]"
 
 touch "$OSRC_TEST_NO_EFFORT_FLAG"; EFFORT=high; SESSION_LAUNCH=()
 _session_launch_cc 2>/dev/null
 joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
-! printf '%s' "$joined" | grep -q -- '--effort' \
-  && printf '%s' "$joined" | grep -q 'MAX_THINKING_TOKENS=24000' \
+! grep -q -- '--effort' <<<"$joined" \
+  && grep -q 'MAX_THINKING_TOKENS=24000' <<<"$joined" \
   && ok "start on old claude keeps env cap, omits --effort" \
   || bad "start launch on old claude wrong: [$joined]"
 rm -f "$OSRC_TEST_NO_EFFORT_FLAG"
 EFFORT=minimal; SESSION_LAUNCH=()
 _session_launch_cc 2>/dev/null
 joined="$(printf '%s ' "${SESSION_LAUNCH[@]}")"
-printf '%s' "$joined" | grep -q -- '--effort low' \
+grep -q -- '--effort low' <<<"$joined" \
   && ok "start maps minimal -> --effort low" \
   || bad "start minimal mapping wrong: [$joined]"
 unset EFFORT MODEL MODEL_EXPLICIT SESSION_LAUNCH

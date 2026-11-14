@@ -49,7 +49,7 @@ else
   ok "inherited OSRC_PREFLIGHT=1 no longer silently no-ops a real run (rc=$rc, output present)"
 fi
 # stronger: it actually reached the cloud disclosure / dispatch layer, not an early no-op return.
-printf '%s' "$out" | grep -qiE 'cloud disclosure|delegat|devin|lane' \
+grep -qiE 'cloud disclosure|delegat|devin|lane' <<<"$out" \
   && ok "the run reached the dispatch/cloud-gate layer despite the inherited env var" \
   || bad "the run did not reach the dispatch layer (may still be short-circuiting)"
 
@@ -64,7 +64,7 @@ rc=0; ( bash "$SRC" --osrc-preflight-internal --cloud-ack run -m swe-2-high "ech
 
 # 3. End-to-end: a real bg launch (which uses the preflight internally) still succeeds.
 outb="$(bash "$SRC" --cloud-ack bg run -m swe-2-high "echo hi" 2>&1)"
-printf '%s' "$outb" | grep -qi 'launched' \
+grep -qi 'launched' <<<"$outb" \
   && ok "bg launch still passes its route preflight and starts the job" \
   || bad "bg launch broke: $(printf '%s' "$outb" | tail -1)"
 

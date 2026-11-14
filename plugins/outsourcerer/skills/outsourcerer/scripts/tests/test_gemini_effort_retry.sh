@@ -76,7 +76,7 @@ fi
 
 # 3. The lane ultimately succeeded and returned the model's output instead of dying.
 [ "$rc" -eq 0 ] && ok "gemini lane exits 0 after the self-heal retry" || bad "gemini lane exited $rc despite a retry that should succeed"
-printf '%s' "$out" | grep -q 'REVIEW_OK' && ok "delegate returned the retried run's output" || bad "delegate did not surface the successful retry output: $out"
+grep -q 'REVIEW_OK' <<<"$out" && ok "delegate returned the retried run's output" || bad "delegate did not surface the successful retry output: $out"
 
 # 4. It did NOT nuke the healthy catalog for what was only a flag error.
 grep -qi 'refused model' "$TMP/err.txt" && bad "treated the effort error as an invalid-model error (would clear the catalog)" || ok "effort error is not misclassified as an invalid-model error"
@@ -116,7 +116,7 @@ chmod +x "$TMP/bin/agy"
 mkdir -p "$OSRC_HOME/catalog"; : > "$OSRC_HOME/catalog/gm.txt"   # a cached catalog that must survive
 REST=(review the code); RESOLVED_ID="gemini-flash"; EFFORT="medium"; TTIER=""
 rc3=0; out3="$(delegate_gmnative auto 2>"$TMP/err3.txt")" || rc3=$?
-printf '%s' "$out3" | grep -q 'REVIEW_OK' && ok "a successful run with a capability warning still returns its output" \
+grep -q 'REVIEW_OK' <<<"$out3" && ok "a successful run with a capability warning still returns its output" \
   || bad "a successful run's output was lost: $out3"
 grep -qi 'refused model' "$TMP/err3.txt" \
   && bad "a SUCCESSFUL run's warning wrongly cleared the catalog (would thrash the catalog on every run)" \

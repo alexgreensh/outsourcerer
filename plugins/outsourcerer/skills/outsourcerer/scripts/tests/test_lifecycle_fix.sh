@@ -52,7 +52,7 @@ SH
   out="$(_autodetach_run run task 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! printf '%s' "$out" | grep -q 'session :'
+  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! grep -q 'session :' <<<"$out"
 ) && ok "auto-detach rejects send-keys failure and kills the new tmux session" \
   || bad "auto-detach reported success or failed to clean up after send-keys"
 
@@ -87,7 +87,7 @@ SH
   out="$(session start -m glm 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! printf '%s' "$out" | grep -q "Started tmux session"
+  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! grep -q "Started tmux session" <<<"$out"
 ) && ok "session start rejects send-keys failure and cleans up the new tmux session" \
   || bad "session start reported success or failed to clean up after send-keys"
 
@@ -380,7 +380,7 @@ SH
   out="$(_blind_turn_guard 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 7 ] && printf '%s' "$out" | grep -qi 'unknown'
+  [ "$rc" -ne 7 ] && grep -qi 'unknown' <<<"$out"
 ) && ok "blind-turn guard refuses to block on an arbitrarily stale snapshot" \
   || bad "blind-turn guard treated stale blocked state as current"
 
@@ -392,7 +392,7 @@ SH
   resolve_model_row() { printf '%s\n' "$1"; }
   _codex_code_mode_host_flag() { printf 'true\n'; }
   cmd="$(_session_relaunch_command codex sol high)"
-  printf '%s' "$cmd" | grep -q 'features.code_mode_host=true'
+  grep -q 'features.code_mode_host=true' <<<"$cmd"
 ) && ok "Codex relaunch command preserves the explicit code-mode-host override" \
   || bad "Codex relaunch command dropped code-mode-host"
 

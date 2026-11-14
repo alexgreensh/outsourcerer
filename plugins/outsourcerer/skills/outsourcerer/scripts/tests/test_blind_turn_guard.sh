@@ -64,23 +64,23 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] \
   && ok "guard REFUSES (rc=7) when a live delegate is blocked awaiting input" \
   || bad "guard did not refuse on a blocked delegate (rc=$rc)"
-printf '%s' "$out" | grep -q 'WAITING ON YOU' \
+grep -q 'WAITING ON YOU' <<<"$out" \
   && ok "a blocked delegate is named 'WAITING ON YOU'" \
   || bad "blocked delegate was not labeled as waiting on you"
-printf '%s' "$out" | grep -q 'job-7' \
+grep -q 'job-7' <<<"$out" \
   && ok "the blocked delegate is named by id" \
   || bad "the blocked delegate id was not named"
-printf '%s' "$out" | grep -q 'approval prompt' \
+grep -q 'approval prompt' <<<"$out" \
   && ok "what the delegate is awaiting is surfaced" \
   || bad "the awaiting reason was not surfaced"
-printf '%s' "$out" | grep -q 'watch job-7' \
+grep -q 'watch job-7' <<<"$out" \
   && ok "the notice names the exact command to start watching the blocked job" \
   || bad "the blocked delegate did not give a watch command"
 # A working delegate must NOT be surfaced — silence on the healthy part of the fleet.
-printf '%s' "$out" | grep -q 'job-8' \
+grep -q 'job-8' <<<"$out" \
   && bad "a WORKING delegate was surfaced (a healthy fleet must stay silent)" \
   || ok "a working delegate is NOT surfaced (silence on healthy work)"
-printf '%s' "$out" | grep -qi 'working' \
+grep -qi 'working' <<<"$out" \
   && bad "the word 'working' leaked into the guard notice" \
   || ok "no 'working' wording in the refusal (blocked is distinct from working)"
 
@@ -88,10 +88,10 @@ printf '%s' "$out" | grep -qi 'working' \
 write_snapshot "$(snapshot_with "$peer_blocked")"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && ok "guard refuses on a blocked cc-peer delegate" || bad "guard did not refuse on a blocked peer (rc=$rc)"
-printf '%s' "$out" | grep -q 'session reply sess-42' \
+grep -q 'session reply sess-42' <<<"$out" \
   && ok "blocked peer names 'session reply <id>' as the answer command" \
   || bad "blocked peer did not name the session reply command"
-printf '%s' "$out" | grep -q 'fleet show sess-42' \
+grep -q 'fleet show sess-42' <<<"$out" \
   && ok "blocked peer names 'fleet show <id>' to inspect" \
   || bad "blocked peer did not name the fleet show command"
 
@@ -99,13 +99,13 @@ printf '%s' "$out" | grep -q 'fleet show sess-42' \
 write_snapshot "$(snapshot_with "$managed_stalled")"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
 [ "$rc" = 7 ] && ok "guard refuses on a stalled (unresponsive) delegate" || bad "guard did not refuse on a stalled delegate (rc=$rc)"
-printf '%s' "$out" | grep -q 'MAYBE STUCK' \
+grep -q 'MAYBE STUCK' <<<"$out" \
   && ok "a stalled delegate is named 'MAYBE STUCK'" \
   || bad "a stalled delegate was not labeled as maybe stuck"
-printf '%s' "$out" | grep -q 'WAITING ON YOU' \
+grep -q 'WAITING ON YOU' <<<"$out" \
   && bad "a stalled delegate was mislabeled as 'WAITING ON YOU' (stalled must be distinct from blocked)" \
   || ok "stalled and blocked are reported distinctly"
-printf '%s' "$out" | grep -q 'explain job-9' \
+grep -q 'explain job-9' <<<"$out" \
   && ok "the stalled delegate names 'explain <id>' to diagnose" \
   || bad "the stalled delegate did not name the explain command"
 
@@ -146,7 +146,7 @@ collect_and_write
   && ok "terminal permission-blocked job shows as 'stopped', not a live prompt" \
   || bad "terminal permission-blocked job state is '$(job_state term-pb)' (expected stopped)"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+[ "$rc" = 0 ] && ! grep -q 'WAITING' <<<"$out" \
   && ok "a terminal permission-blocked job does NOT trip the guard" \
   || bad "terminal permission-blocked job still trips the guard (rc=$rc): $out"
 rm -rf "$OSRC_JOBS/term-pb"
@@ -160,7 +160,7 @@ collect_and_write
   && ok "terminal blocked (OSRC::BLOCKED) job shows as 'stopped'" \
   || bad "terminal blocked job state is '$(job_state term-blk)' (expected stopped)"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 0 ] && ! printf '%s' "$out" | grep -q 'WAITING' \
+[ "$rc" = 0 ] && ! grep -q 'WAITING' <<<"$out" \
   && ok "a terminal OSRC::BLOCKED job does NOT trip the guard" \
   || bad "terminal OSRC::BLOCKED job still trips the guard (rc=$rc): $out"
 rm -rf "$OSRC_JOBS/term-blk"
@@ -186,7 +186,7 @@ collect_and_write
   && ok "a live blocked job keeps the 'blocked' fleet state" \
   || bad "live blocked job state is '$(job_state live-blk)' (expected blocked)"
 out="$(_blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'live-blk' && printf '%s' "$out" | grep -q 'WAITING ON YOU' \
+[ "$rc" = 7 ] && grep -q 'live-blk' <<<"$out" && grep -q 'WAITING ON YOU' <<<"$out" \
   && ok "a LIVE blocked job still refuses (rc=7) and is named WAITING ON YOU" \
   || bad "live blocked job was not reported (rc=$rc): $out"
 kill "$live_pid" 2>/dev/null; live_pid=""; rm -rf "$OSRC_JOBS/live-blk"
@@ -248,7 +248,7 @@ newjob unproven-blk
 echo blocked > "$OSRC_JOBS/unproven-blk/status"
 collect_and_write
 out="$(_blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'unproven-blk' \
+[ "$rc" = 7 ] && grep -q 'unproven-blk' <<<"$out" \
   && ok "an unverifiably-terminal blocked job still refuses (fails toward reporting)" \
   || bad "unverifiable blocked job was hidden (rc=$rc): $out"
 rm -rf "$OSRC_JOBS/unproven-blk"
@@ -340,7 +340,7 @@ out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
 write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
 if ps -o ppid= -p "$$" >/dev/null 2>&1; then
   out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
-  [ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
+  [ "$rc" = 7 ] && grep -q 'caller-sess' <<<"$out" \
     && ok "a sid-matched peer whose pid is not our ancestor is still reported (sid alone is not proof of self)" \
     || bad "a sid-matched non-ancestor peer was wrongly hidden (rc=$rc): $out"
 else
@@ -358,15 +358,15 @@ out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
   || bad "a pid-less sid-matched peer was wrongly reported (rc=$rc): $out"
 write_snapshot "$(snapshot_with "$peer_sid_only_stuck")"
 out="$(CLAUDE_CODE_SESSION_ID=some-other-sess _blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'caller-sess' \
+[ "$rc" = 7 ] && grep -q 'caller-sess' <<<"$out" \
   && ok "a different session with the same state is still reported" \
   || bad "a non-caller stuck peer was not reported (rc=$rc)"
 peer_ancestor_stuck='{"owner":"cc-peer","job_id":null,"session_id":"ancestor-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
 peer_self_waiting='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval","display_name":"orchestrator","cwd":"/repo"}'
 write_snapshot "$(snapshot_with "$peer_self_waiting" "$managed_blocked")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'job-7' && ! printf '%s' "$out" | grep -q 'caller-sess' \
-  && printf '%s' "$out" | grep -q '1 live delegate' \
+[ "$rc" = 7 ] && grep -q 'job-7' <<<"$out" && ! grep -q 'caller-sess' <<<"$out" \
+  && grep -q '1 live delegate' <<<"$out" \
   && ok "the caller is also excluded on the needs-you path, and real blocked work still refuses" \
   || bad "caller exclusion on the needs-you path is wrong (rc=$rc): $out"
 write_snapshot "$(snapshot_with "$peer_ancestor_stuck")"
@@ -377,8 +377,8 @@ out="$(unset CLAUDE_CODE_SESSION_ID; OSRC_FLEET_SELF_PID=$$ _blind_turn_guard 2>
   || bad "the ancestor-PID fallback did not exclude the caller (rc=$rc): $out"
 write_snapshot "$(snapshot_with "$peer_self_stuck" "$peer_blocked")"
 out="$(CLAUDE_CODE_SESSION_ID=caller-sess _blind_turn_guard 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'sess-42' && ! printf '%s' "$out" | grep -q 'caller-sess' \
-  && printf '%s' "$out" | grep -q '1 live delegate' \
+[ "$rc" = 7 ] && grep -q 'sess-42' <<<"$out" && ! grep -q 'caller-sess' <<<"$out" \
+  && grep -q '1 live delegate' <<<"$out" \
   && ok "real delegates are still reported alongside an excluded caller, and the count drops the caller" \
   || bad "caller exclusion hid or miscounted real delegates (rc=$rc): $out"
 
@@ -397,7 +397,7 @@ out="$(OSRC_HEARTBEAT_DISABLED=1 OUTSOURCERER_DEPTH=0 bash -c '
 [ "$rc" = 7 ] \
   && ok "main returns 7 (refuse to end blind) after a DELEGATING command with blocked work" \
   || bad "a delegating command did not refuse (rc=$rc) with blocked work present"
-printf '%s' "$out" | grep -q 'blind-turn guard' \
+grep -q 'blind-turn guard' <<<"$out" \
   && ok "the guard notice fires through main at a delegating command's turn-end" \
   || bad "the guard notice did not fire through main on a delegating command"
 
@@ -408,7 +408,7 @@ out="$(OSRC_HEARTBEAT_DISABLED=1 bash "$SRC" tab 2>&1)"; rc=$?
 [ "$rc" = 0 ] \
   && ok "a non-delegating command (tab) keeps exit 0 even with blocked fleet work" \
   || bad "a non-delegating command's exit code was overridden by the guard (rc=$rc)"
-printf '%s' "$out" | grep -q 'blind-turn guard' \
+grep -q 'blind-turn guard' <<<"$out" \
   && ok "the guard still surfaces as a backstop notice on a non-delegating command" \
   || bad "the guard did not surface on a non-delegating command"
 
@@ -416,7 +416,7 @@ printf '%s' "$out" | grep -q 'blind-turn guard' \
 out="$(OSRC_HEARTBEAT_DISABLED=1 bash "$SRC" fleet ls 2>&1)"; rc=$?
 # fleet ls calls _fleet_snapshot_refresh which overwrites $SNAP with a real (empty) collect; that is
 # fine — we only assert the guard did not append a refusal to a looking command's output.
-printf '%s' "$out" | grep -q 'blind-turn guard' \
+grep -q 'blind-turn guard' <<<"$out" \
   && bad "the guard fired on a looking command (fleet) — it must not interrupt supervision" \
   || ok "a looking command (fleet) does not trigger the blind-turn guard"
 

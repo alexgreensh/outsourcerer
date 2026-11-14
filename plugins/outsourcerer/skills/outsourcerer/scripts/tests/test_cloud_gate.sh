@@ -37,32 +37,32 @@ if ! _is_cloud_lane "local" >/dev/null 2>&1; then ok "local lane classified non-
 if ! _is_cloud_lane "ollama" >/dev/null 2>&1 && ! _is_cloud_lane "lmstudio" >/dev/null 2>&1; then ok "ollama/lmstudio classified non-cloud"; else bad "ollama/lmstudio mis-classified as cloud"; fi
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _cloud_disclose "local" "llama3" "do thing" ) 2>&1 )"
 [ $? -eq 0 ] && ok "non-cloud _cloud_disclose returns 0" || bad "non-cloud _cloud_disclose nonzero"
-echo "$out" | grep -qi 'CLOUD' && bad "non-cloud lane printed a cloud disclosure" || ok "non-cloud lane prints no disclosure"
+grep -qi 'CLOUD' <<<"$out" && bad "non-cloud lane printed a cloud disclosure" || ok "non-cloud lane prints no disclosure"
 
 # --- Scenario 2: cloud lane, non-interactive, no ack => fail-closed REFUSE. ---
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; _cloud_disclose "ccor" "gpt-4o" "summarize repo" ) </dev/null 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "cloud no-ack non-interactive REFUSES (rc=$rc)" || bad "cloud no-ack non-interactive proceeded (rc=$rc)"
-echo "$out" | grep -qi 'CLOUD GATE' && ok "refusal names CLOUD GATE" || bad "refusal missing CLOUD GATE marker"
+grep -qi 'CLOUD GATE' <<<"$out" && ok "refusal names CLOUD GATE" || bad "refusal missing CLOUD GATE marker"
 
 # --- Scenario 3: cloud lane with OSRC_CLOUD_ACK=1 => proceeds + disclosure printed. ---
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "summarize repo" ) 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && ok "cloud with OSRC_CLOUD_ACK=1 proceeds (rc=0)" || bad "cloud ack path failed (rc=$rc)"
-echo "$out" | grep -q 'CLOUD DISCLOSURE' && ok "disclosure block printed" || bad "disclosure block missing"
-echo "$out" | grep -q 'repo content LEAVES' && ok "disclosure states data leaves machine" || bad "disclosure omits data-leaves note"
+grep -q 'CLOUD DISCLOSURE' <<<"$out" && ok "disclosure block printed" || bad "disclosure block missing"
+grep -q 'repo content LEAVES' <<<"$out" && ok "disclosure states data leaves machine" || bad "disclosure omits data-leaves note"
 
 # --- Scenario 4: a real .env in cwd scope => hard die with the path, ack or not. ---
 mkdir -p "$TMP/envscope"
 printf 'OPENROUTER_API_KEY=sk-XXXX\n' > "$TMP/envscope/.env"
 out="$( ( cd "$TMP/envscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "real .env in scope hard-dies (rc=$rc)" || bad "real .env in scope did NOT die"
-echo "$out" | grep -q "$TMP/envscope/.env" && ok "die names the credential path" || bad "die omitted credential path"
+grep -q "$TMP/envscope/.env" <<<"$out" && ok "die names the credential path" || bad "die omitted credential path"
 
 # --- Scenario 4b: a NESTED credential file (not at PWD root) is also caught by the deep scan. ---
 mkdir -p "$TMP/deepscope/services/prod"
 printf 'AWS_SECRET_ACCESS_KEY=xxxx\n' > "$TMP/deepscope/services/prod/.env"
 out="$( ( cd "$TMP/deepscope"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
 [ $rc -ne 0 ] && ok "nested services/prod/.env hard-dies" || bad "nested .env NOT caught (deep scan failed)"
-echo "$out" | grep -q "deepscope/services/prod/.env" && ok "die names the nested credential path" || bad "die omitted nested path"
+grep -q "deepscope/services/prod/.env" <<<"$out" && ok "die names the nested credential path" || bad "die omitted nested path"
 
 # --- Scenario 4c (CRITICAL): an inherited OSRC_CLOUD_ACKED must NOT skip the secret scan. ---
 out="$( ( cd "$TMP/deepscope"; unset OSRC_CLOUD_ACK; export OSRC_CLOUD_ACKED=1; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
@@ -74,7 +74,7 @@ rm -rf "$TMP/envscope" "$TMP/deepscope"
 # --- Scenario 5: ':free' route disclosure states may-train. ---
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; _cloud_disclose "ccor" "google/gemini-flash-1.5:free" "task" ) 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && ok "':free' route with ack proceeds" || bad "':free' route ack failed"
-echo "$out" | grep -qi 'MAY TRAIN' && ok "':free' disclosure states may-train" || bad "':free' disclosure missing may-train note"
+grep -qi 'MAY TRAIN' <<<"$out" && ok "':free' disclosure states may-train" || bad "':free' disclosure missing may-train note"
 
 # --- Scenario 6: idempotency — acking once sets OSRC_CLOUD_ACKED for the process. ---
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1
@@ -83,7 +83,7 @@ out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1
           _cloud_disclose "ccor" "gpt-4o" "t2"
         ) 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && ok "second cloud call in-process passes after ack" || bad "second call re-prompted/failed"
-echo "$out" | grep -q 'ACKED_SET' && ok "OSRC_CLOUD_ACKED set after first ack" || bad "OSRC_CLOUD_ACKED not set"
+grep -q 'ACKED_SET' <<<"$out" && ok "OSRC_CLOUD_ACKED set after first ack" || bad "OSRC_CLOUD_ACKED not set"
 
 # --- Scenario 7: wire-in point present in route_delegate. ---
 if grep -q '_cloud_disclose "$disp"' "$SRC"; then ok "route_delegate wires the gate after lane resolution"; else bad "gate not wired into route_delegate"; fi
@@ -107,15 +107,15 @@ if grep -q 'case " ${ORIG\[\*\]} " in \*.*--cloud-ack' "$SRC"; then bad "dead OR
 ( cd "$TMP" && WITH_SPEC="" OSRC_SECRET_ALLOW_VALUE=1 _secret_scan "here is a key sk-FAKEfixture0notarealkey and OPENROUTER_API_KEY=x" >/dev/null 2>&1; echo "${OSRC_SECRET_HIT_COUNT:-0}" ) > "$TMP/cnt"
 [ "$(cat "$TMP/cnt")" -ge 1 ] 2>/dev/null && ok "secret scan sets a positive hit count" || bad "secret hit count not set"
 out="$( ( cd "$TMP"; unset OSRC_CLOUD_ACKED; OSRC_CLOUD_ACK=1; OSRC_SECRET_ALLOW_VALUE=1 _cloud_disclose "ccor" "gpt-4o" "leak sk-FAKEfixture0notarealkey here" ) 2>&1 )"
-echo "$out" | grep -q 'sk-FAKEfixture0notarealkey' && bad "raw secret value printed to stderr" || ok "raw secret value NOT printed (redacted)"
-echo "$out" | grep -qi 'values redacted' && ok "disclosure states values redacted" || bad "redaction note missing"
+grep -q 'sk-FAKEfixture0notarealkey' <<<"$out" && bad "raw secret value printed to stderr" || ok "raw secret value NOT printed (redacted)"
+grep -qi 'values redacted' <<<"$out" && ok "disclosure states values redacted" || bad "redaction note missing"
 
 # --- Scenario 9b (regression guard): a live secret VALUE in the prompt HARD-BLOCKS the cloud route by
 # default (nonzero exit), names the fix, and still never prints the value. The opt-out lifts it. ---
 vout="$( ( cd "$TMP" && WITH_SPEC="" _secret_scan "please rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 for me" ) 2>&1 )"; vrc=$?
 [ "$vrc" -ne 0 ] && ok "#3 live secret value hard-blocks by default (nonzero exit)" || bad "#3 secret value did NOT hard-block"
-echo "$vout" | grep -qi 'secret VALUE' && ok "#3 block message names the cause (secret VALUE)" || bad "#3 block message unclear"
-echo "$vout" | grep -q 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' && bad "#3 raw secret value leaked in block message" || ok "#3 raw value not printed in block"
+grep -qi 'secret VALUE' <<<"$vout" && ok "#3 block message names the cause (secret VALUE)" || bad "#3 block message unclear"
+grep -q 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' <<<"$vout" && bad "#3 raw secret value leaked in block message" || ok "#3 raw value not printed in block"
 ( cd "$TMP" && WITH_SPEC="" OSRC_SECRET_ALLOW_VALUE=1 _secret_scan "please rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 for me" >/dev/null 2>&1 ) \
   && ok "#3 OSRC_SECRET_ALLOW_VALUE=1 lifts the value hard-block" || bad "#3 opt-out did not lift the block"
 
@@ -143,7 +143,7 @@ rm -f "$TMP/launched"
 [ ! -f "$TMP/launched" ] && ok "cmd_bg did NOT reach _bg_launch after refusal" || bad "cmd_bg launched a job despite refusal"
 rm -f "$TMP/launched"
 out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack --spend-ok -m glm "task" </dev/null 2>/dev/null )"; rc=$?
-{ [ "$rc" -eq 0 ] && [ -f "$TMP/launched" ] && printf '%s' "$out" | grep -q 'stubid-123'; } && ok "cmd_bg --cloud-ack proceeds to launch and prints the job id" || bad "cmd_bg --cloud-ack did not launch (rc=$rc)"
+{ [ "$rc" -eq 0 ] && [ -f "$TMP/launched" ] && grep -q 'stubid-123' <<<"$out"; } && ok "cmd_bg --cloud-ack proceeds to launch and prints the job id" || bad "cmd_bg --cloud-ack did not launch (rc=$rc)"
 
 # --- Scenario 12: _bg_cloud_preack honors --cloud-ack only among LEADING flags, never a
 #     positional task that merely equals "--cloud-ack" (passed after `--`). ---
@@ -161,7 +161,7 @@ PROVIDER=devin
 #     OSRC_CLOUD_ACKED=1 bypass the credential hard-block entirely. ---
 if grep -q '_cloud_disclose "$disp"' "$SRC"; then ok "route_delegate calls _cloud_disclose"; else bad "_cloud_disclose call missing from route_delegate"; fi
 ctx="$(grep -B2 '_cloud_disclose "\$disp"' "$SRC")"
-echo "$ctx" | grep -q 'OSRC_CLOUD_ACKED.*!=.*1' && bad "_cloud_disclose STILL guarded by an ACKED conditional at the call site (bypass)" || ok "no ACKED guard wrapping the _cloud_disclose call"
+grep -q 'OSRC_CLOUD_ACKED.*!=.*1' <<<"$ctx" && bad "_cloud_disclose STILL guarded by an ACKED conditional at the call site (bypass)" || ok "no ACKED guard wrapping the _cloud_disclose call"
 
 # --- Scenario 14: a bogus OSRC_SECRET_SCAN_DEPTH must NOT fail the deep scan open. ---
 mkdir -p "$TMP/bogusdepth/nested"
@@ -192,12 +192,12 @@ rm -f "$OSRC_HOME/cloud-consent"
 [ $rc -ne 0 ] && ok "OSRC_CLOUD_ACK=0 overrides the stored grant (refuses)" || bad "OSRC_CLOUD_ACK=0 did not override stored grant"
 mkdir -p "$TMP/consentenv"; echo "SECRET=x" > "$TMP/consentenv/.env"
 out="$( ( cd "$TMP/consentenv"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_disclose "ccor" "gpt-4o" "task" ) 2>&1 )"; rc=$?
-{ [ $rc -ne 0 ] && echo "$out" | grep -q "credential file"; } && ok "stored grant NEVER skips the secret-scan hard-block" || bad "stored grant skipped the secret scan (rc=$rc)"
+{ [ $rc -ne 0 ] && grep -q "credential file" <<<"$out"; } && ok "stored grant NEVER skips the secret-scan hard-block" || bad "stored grant skipped the secret scan (rc=$rc)"
 rm -f "$OSRC_HOME/cloud-consent"
 ( unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; _cloud_consent_persist; _bg_cloud_preack run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
 [ $rc -eq 0 ] && ok "bg preack honors remembered consent" || bad "bg preack ignored remembered consent (rc=$rc)"
 rm -f "$OSRC_HOME/cloud-consent"
-out="$(cmd_consent status 2>&1)"; echo "$out" | grep -qi "not granted" && ok "consent status reports not-granted" || bad "consent status wrong when absent: $out"
+out="$(cmd_consent status 2>&1)"; grep -qi "not granted" <<<"$out" && ok "consent status reports not-granted" || bad "consent status wrong when absent: $out"
 cmd_consent grant >/dev/null 2>&1
 [ -f "$OSRC_HOME/cloud-consent" ] && ok "consent grant writes the consent file" || bad "consent grant wrote nothing"
 cmd_consent revoke >/dev/null 2>&1

@@ -51,8 +51,8 @@ grep -q "MUTATING" "$TMP/err" && ok "the banner says edit mutates" || no "banner
 
 echo "=== missing CLI ==="
 out="$( cd "$TMP/work" && PATH="/usr/bin:/bin" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider pi run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "pi CLI not on PATH" && ok "a missing pi fails loudly with the install hint" || no "missing-CLI path rc=$rc"
-printf '%s' "$out" | grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' && no "hint pipes a download to a shell" || ok "the install hint never pipes a download to a shell"
+[ "$rc" -ne 0 ] && grep -q "pi CLI not on PATH" <<<"$out" && ok "a missing pi fails loudly with the install hint" || no "missing-CLI path rc=$rc"
+grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' <<<"$out" && no "hint pipes a download to a shell" || ok "the install hint never pipes a download to a shell"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

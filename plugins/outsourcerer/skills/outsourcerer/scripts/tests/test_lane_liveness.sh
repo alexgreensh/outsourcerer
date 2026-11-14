@@ -40,7 +40,7 @@ dead_lane() { sh -c 'sleep 300' ; }
 probe_classify() {   # mirrors the doctor() probe branch structure
   local _ppt _prc=0
   _ppt="$(_timeout 2 dead_lane 2>&1)" || _prc=$?
-  if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+  if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
     echo "READY (probed just now, answered)"
   else
     case "$_ppt" in

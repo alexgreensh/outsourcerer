@@ -61,11 +61,11 @@ rc=0
 # Drive both orders through main() against a LOOK command: it must parse and
 # return rather than error on a stranded sentinel.
 out="$(main --osrc-job-child-internal --osrc-preflight-internal fleet 2>&1)"; rc=$?
-printf '%s' "$out" | grep -q 'looks like a flag' \
+grep -q 'looks like a flag' <<<"$out" \
   && bad "sentinel order job-child+preflight stranded the second sentinel: $(printf '%s' "$out" | head -1)" \
   || ok "job-child then preflight sentinel order parses and dispatches (rc=$rc)"
 out="$(main --osrc-preflight-internal --osrc-job-child-internal fleet 2>&1)"; rc=$?
-printf '%s' "$out" | grep -q 'looks like a flag' \
+grep -q 'looks like a flag' <<<"$out" \
   && bad "sentinel order preflight+job-child broke: $(printf '%s' "$out" | head -1)" \
   || ok "preflight then job-child sentinel order parses and dispatches (rc=$rc)"
 

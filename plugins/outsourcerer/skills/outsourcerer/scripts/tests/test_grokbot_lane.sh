@@ -58,11 +58,14 @@ start_bot() { rm -f "$TMP/port"; python3 "$TMP/bot.py" "$TMP" "$1" "$2" 2>"$TMP/
 stop_bot() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""; }
 gb() { ( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 OSRC_GROKBOT_POLL=1 OSRC_GROKBOT_TIMEOUT="${TO:-30}" \
          GROKBOT_WEBHOOK_URL="http://127.0.0.1:$(cat "$TMP/port")/hook" GROKBOT_WEBHOOK_KEY="${KEYUSE:-crsr_test}" \
-         "$SRC" --provider grokbot "$@" 2>"$TMP/err" ); }
+         "$SRC" --provider grokbot --spend-ok "$@" 2>"$TMP/err" ); }
 
 echo "=== registration ==="
 ( export OSRC_SOURCED=1; source "$SRC" >/dev/null 2>&1; [ "$(_lane_field grokbot dispatch)" = "delegate_grokbot" ] ) \
   && ok "grokbot is a registered lane" || no "grokbot lane not registered"
+out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://127.0.0.1:9/h GROKBOT_WEBHOOK_KEY=fixture "$SRC" --provider grokbot run 'no consent' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'paid-lane:grokbot/.*(unknown)' <<<"$out" \
+  && ok "unknown-billing grokbot refuses without spend consent" || no "grokbot did not refuse unknown billing: rc=$rc [$out]"
 
 echo "=== delivery round trip ==="
 start_bot crsr_test push
@@ -71,7 +74,7 @@ out="$(gb run "summarize the repo")"; rc=$?
 case "$out" in *BOT_RESULT_OK*) ok "the bot's result file is printed" ;; *) no "result missing: [$out]" ;; esac
 jq -e '.source=="outsourcerer" and .mode=="read-only" and (.branch|startswith("osrc/grokbot-")) and (.instructions|contains("summarize the repo"))' "$TMP/payload.json" >/dev/null 2>&1 \
   && ok "the payload carries the task, a fresh branch and read-only mode" || no "payload wrong: $(head -c 300 "$TMP/payload.json")"
-jq -r .instructions "$TMP/payload.json" | grep -q "push osrc/grokbot-" && ok "the instructions tell the bot how to deliver" || no "delivery instructions missing"
+{ _t3b_pipe="$(jq -r .instructions "$TMP/payload.json")" && grep -q "push osrc/grokbot-" <<<"$_t3b_pipe"; } && ok "the instructions tell the bot how to deliver" || no "delivery instructions missing"
 grep -q "delivered on branch osrc/grokbot-" "$TMP/err" && ok "it names the delivered branch" || no "branch not reported"
 stop_bot
 
@@ -92,12 +95,28 @@ start_bot crsr_test none
 out="$(TO=3 gb run "x")"; rc=$?
 [ "$rc" -eq 124 ] && grep -q "no branch after" "$TMP/err" && ok "no branch by the deadline returns 124 with a pointer" || no "timeout rc=$rc"
 stop_bot
-out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL= GROKBOT_WEBHOOK_KEY= "$SRC" --provider grokbot run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "GROKBOT_WEBHOOK_URL" && ok "missing setup names the two settings" || no "missing setup rc=$rc"
-out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://example.com/h GROKBOT_WEBHOOK_KEY=k "$SRC" --provider grokbot run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "https://" && ok "a plain-http webhook is refused (the key would travel in the clear)" || no "http URL accepted"
-grep -q 'printf .Authorization: Bearer' "$SRC" && ! grep -n 'delegate_grokbot' -A80 "$SRC" | grep -q -- '-H "Authorization' \
-  && ok "the key goes through the header file, never the process list" || no "key may appear in argv"
+out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL= GROKBOT_WEBHOOK_KEY= "$SRC" --provider grokbot --spend-ok run "x" 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && grep -q "GROKBOT_WEBHOOK_URL" <<<"$out" && ok "missing setup names the two settings" || no "missing setup rc=$rc"
+out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://example.com/h GROKBOT_WEBHOOK_KEY=k "$SRC" --provider grokbot --spend-ok run "x" 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && grep -q "https://" <<<"$out" && ok "a plain-http webhook is refused (the key would travel in the clear)" || no "http URL accepted"
+grok_header_scan() {
+  local body rc
+  body="$(grep -n -A80 'delegate_grokbot' "$1" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] && return 2
+  grep -q -- '-H "Authorization' <<<"$body"
+}
+grok_header_scan "$TMP/missing-source"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "authorization scan reports a missing source" || no "authorization scan accepted a missing source (rc=$scan_rc)"
+grok_header_scan "$SRC"; scan_rc=$?
+if [ "$scan_rc" -ge 2 ]; then
+  no "authorization scan failed (rc=$scan_rc)"
+elif [ "$scan_rc" -eq 0 ]; then
+  no "key may appear in argv"
+elif grep -q 'printf .Authorization: Bearer' "$SRC"; then
+  ok "the key goes through the header file, never the process list"
+else
+  no "authorization header file missing or unreadable"
+fi
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -36,9 +36,9 @@ fr=$(printf '%s' "$out" | grep -c 'next: fetch result')
 cw=$(printf '%s' "$out" | grep -c 'continuing watch')
 [ "$fr" -eq 1 ] && ok "terminal state emits exactly one 'fetch result' digest" || bad "expected 1 terminal digest, got $fr"
 [ "$cw" -eq 0 ] && ok "terminal iteration does not also emit a periodic digest (no double-emit)" || bad "double-emit: $cw periodic digests alongside terminal"
-printf '%s' "$out" | grep -q 'OSRC::PROGRESS watch term periodic digest' \
+grep -q 'OSRC::PROGRESS watch term periodic digest' <<<"$out" \
   && ok "digest uses the documented OSRC::PROGRESS header" || bad "digest header missing/wrong"
-printf '%s' "$out" | grep -qE '^- state: ' && printf '%s' "$out" | grep -qE '^- elapsed: ' \
+grep -qE '^- state: ' <<<"$out" && grep -qE '^- elapsed: ' <<<"$out" \
   && ok "digest carries state + elapsed bullets" || bad "digest bullets missing"
 
 # Bad interval must not error under set -u and must not spam: a running job watched --for 2 with a
