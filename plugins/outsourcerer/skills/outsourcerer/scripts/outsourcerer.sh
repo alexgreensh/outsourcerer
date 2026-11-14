@@ -17825,22 +17825,6 @@ _session_control_relaunch() { # <pane> <provider> <model> <effort>
   return 0
 }
 
-# The current model generation of a managed session, from its latest start record (1 if none).
-# Non-start events must carry this forward: _session_registry_append defaults generation to 1, and
-# an `effort` record stamped with 1 over a generation-3 session rewinds the model-pin lock key.
-_session_current_generation() { # <session-id>
-  local gen
-  gen="$(_session_record "$1" 2>/dev/null | cut -f4)"
-  case "$gen" in ''|*[!0-9]*) gen=1 ;; esac
-  printf '%s' "$gen"
-}
-
-# Read a session's latest start record: "provider<TAB>model<TAB>effort<TAB>generation".
-_session_record() { # <session-id>
-  _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" \
-    'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring)] | @tsv' | tail -1
-}
-
 _managed_session_clear() { # <session-id>
   local session_id="$1" pane="$1" key
   _managed_endpoint_live "$session_id" "$pane" || return 1

@@ -313,5 +313,19 @@ o1="$(dn)"; o2="$(dn)"; touch -m -t 202601010400 "$TMP/ws41/dn2.DONE"; o3="$(dn)
 grep -q '^EVENT done dn2 .*hand-in' <<<"$o1" && ! grep -q '^EVENT done dn2' <<<"$o2" && grep -q '^EVENT done dn2 .*hand-in' <<<"$o3" \
   && ok "a lane's done contract file rewritten -> EVENT done again, same screen" || no "contract re-hand-in: [$o1] [$o2] [$o3]"
 
+# Identical event text must not hide a new remote head within the reminder window.
+fresh 44; mkdir -p "$OSRC_HOME/remote"
+jq -n '{head:"aaaaaaa111111111111111111111111111111111"}' > "$OSRC_HOME/remote/rh.json"
+(
+  OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+  osrc_remote_events() { printf 'EVENT done rh 100 READY same detail\nNEXT inspect rh\n'; }
+  _sv_remote_poll test; _sv_remote_poll test
+  jq '.head="aaaaaaa222222222222222222222222222222222"' "$OSRC_HOME/remote/rh.json" > "$TMP/rh.json"
+  mv "$TMP/rh.json" "$OSRC_HOME/remote/rh.json"
+  _sv_remote_poll test; _sv_remote_poll test
+)
+[ "$(jq -s 'map(select(.target == "rh" and .kind == "done")) | length' "$OSRC_HOME/lanes/events.jsonl")" = 2 ] \
+  && ok "remote re-hand-in with identical detail and new full sha fires once" || no "remote re-hand-in lost or duplicated"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

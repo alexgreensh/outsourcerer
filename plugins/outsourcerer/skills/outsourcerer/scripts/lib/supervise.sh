@@ -380,16 +380,20 @@ _sv_observe_all() { # [src]
   _sv_remote_poll "${1:-beacon}"
 }
 
-# L2's remote lanes print their own EVENT/NEXT pairs; log them (deduped on kind+target+detail).
+# L2's remote lanes print EVENT/NEXT pairs; distinguish done events for new branch heads.
 _sv_remote_poll() { # <src>
   type osrc_remote_events >/dev/null 2>&1 || return 0
-  local line kind="" tgt detail next key now _e _ts; now="$(_sv_now)"
+  local line kind="" tgt detail next key now _e _ts head; now="$(_sv_now)"
   osrc_remote_events 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       EVENT\ *) read -r _e kind tgt _ts detail <<< "$line"; next="" ;;
       NEXT\ *) next="${line#NEXT }"
         [ -n "$kind" ] && [ -n "$tgt" ] || continue
-        key="$kind:$(printf '%s' "$detail" | cksum | awk '{print $1}')"
+        head=""
+        if [ "$kind" = done ] && type _osrc_id_ok >/dev/null 2>&1 && _osrc_id_ok "$tgt"; then
+          head="$(jq -r '.head // ""' "$OSRC_HOME/remote/$tgt.json" 2>/dev/null)"
+        fi
+        key="$kind:$(printf '%s\n%s' "$detail" "$head" | cksum | awk '{print $1}')"
         _sv_state_read "remote.$tgt"
         if [ "$SVS_LK" != "$key" ] || [ $(( now - SVS_LT )) -ge $(( $(_sv_num "${OSRC_SUPERVISE_REMIND:-}" 20) * 60 )) ]; then
           _sv_append "$kind" "$tgt" "$detail" "$next" "$1" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
