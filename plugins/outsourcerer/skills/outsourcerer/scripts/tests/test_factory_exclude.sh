@@ -192,7 +192,7 @@ grep -q 'z-ai/glm-5.2' <<<"$o" && ! grep -qi 'fable' <<<"$o" \
 o="$(run brief 2>&1)"
 grep -q '^excluded    : fable' <<<"$o" && ok "brief prints the active exclusions (sticks across sessions)" || bad "brief: $(printf '%s' "$o" | head -20)"
 o="$(run doctor 2>&1)"
-grep -q 'excluded    : fable' <<<"$o" && ok "doctor prints the active exclusions" || bad "doctor: $(grep -i exclu)" <<<"$o"
+grep -q 'excluded    : fable' <<<"$o" && ok "doctor prints the active exclusions" || bad "doctor: $(grep -i exclu <<<"$o")"
 o="$(OSRC_HOME="$TMP/empty-state" run doctor 2>&1)"
 grep -q 'excluded models: none' <<<"$o" && ok "doctor says none when nothing is excluded" || bad "doctor none"
 
