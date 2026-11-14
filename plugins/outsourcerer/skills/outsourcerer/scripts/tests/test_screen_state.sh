@@ -14,7 +14,7 @@ pass=0; fail=0
 ok(){ pass=$((pass+1)); if [ -n "${1:-}" ]; then echo "PASS: $1"; else
   echo "PASS: line ${BASH_LINENO[0]}: $(sed -n "${BASH_LINENO[0]}{s/^[[:space:]]*//;p;}" "${BASH_SOURCE[1]}" | cut -c1-90)"; fi; }
 bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
-export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/state"; mkdir -p "$HOME" "$OSRC_HOME"
 bash -n "$SRC" || { echo "FAIL: bash -n"; exit 1; }
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
 type osrc_screen_state >/dev/null 2>&1 && ok || { echo "FAIL: lib/screen.sh not loaded when sourced"; exit 1; }

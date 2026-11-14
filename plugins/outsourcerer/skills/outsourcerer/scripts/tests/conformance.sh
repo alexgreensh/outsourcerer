@@ -138,7 +138,7 @@ _ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
 _ALL_SUITES="$_ALL_SUITES test_cloudrun"
 _ALL_SUITES="$_ALL_SUITES test_heavy"
 _ALL_SUITES="$_ALL_SUITES test_hub test_cleanup_manifest test_limit_gate test_spend_consent"
-_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures"
+_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_tests_set_home"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls

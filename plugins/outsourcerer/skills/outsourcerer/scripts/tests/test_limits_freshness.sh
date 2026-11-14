@@ -15,11 +15,13 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 LIB="$SCRIPT_DIR/../lib/limits.sh"   # limit/meter functions live here (L7 module split)
+LANEMSG="$SCRIPT_DIR/../lib/lanemsg.sh" # cmd_brief moved with the watch and mailbox commands
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 [ -f "$LIB" ] || { echo "FAIL: cannot find $LIB"; exit 1; }
+[ -f "$LANEMSG" ] || { echo "FAIL: cannot find $LANEMSG"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"
+TMP="$(mktemp -d)"; export HOME="$TMP/fakehome" OSRC_HOME="$TMP"; mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
@@ -45,13 +47,13 @@ case "$r" in *OpenRouter*|*"no lower-cost lane"*) ok "refusing a stale lane stil
 
 # The human-facing text must say the figure is a FLOOR and why, not just print a number. A bare
 # "88% used" reads as "12% left", which is the sentence that sent work to an empty lane.
-grep -q 'AT LEAST that used' "$SRC" \
+grep -q 'AT LEAST that used' "$LANEMSG" \
   && ok "the stale figure is described as a floor, not a current value" \
   || bad "stale figures are still presented as if current"
-grep -q 'Usage only rises within a window' "$SRC" \
+grep -q 'Usage only rises within a window' "$LANEMSG" \
   && ok "the message explains WHY the real number is higher" \
   || bad "no explanation of why a stale reading understates usage"
-grep -q 'Run codex once to refresh' "$SRC" \
+grep -q 'Run codex once to refresh' "$LANEMSG" \
   && ok "the message gives the user a way to get a fresh reading" \
   || bad "no remedy offered for a stale reading"
 
@@ -71,10 +73,10 @@ grep -q 'OSRC_LIMITS_MAX_AGE' "$LIB" \
 # The lane list is built from which CLIs are present and logged in. A lane stays installed and
 # authenticated while its subscription window is exhausted or its backend has stopped answering, so
 # calling that list "ready" is how work gets routed somewhere that cannot take it.
-grep -q "printf 'ready lanes" "$SRC" \
+grep -q "printf 'ready lanes" "$LANEMSG" \
   && bad "the greeting still calls merely-installed lanes 'ready'" \
   || ok "the greeting says lanes are installed, not that they will answer"
-grep -q 'not proof any of them will answer right now' "$SRC" \
+grep -q 'not proof any of them will answer right now' "$LANEMSG" \
   && ok "the greeting points at the command that checks for real" \
   || bad "no pointer from the lane list to an actual liveness check"
 

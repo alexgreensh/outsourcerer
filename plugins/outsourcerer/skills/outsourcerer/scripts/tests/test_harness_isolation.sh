@@ -9,7 +9,7 @@
 #   - claude -p lanes (claude-native, cc/openrouter): --strict-mcp-config --mcp-config <empty>
 #     by default via build_mcp_flags_cc (populates global array CC_MCP_FLAGS), gated by
 #     OSRC_CLAUDE_USER_CONFIG (this patch). Fail-closed: nonzero return on setup failure.
-#   - gemini -p lane: --allowed-mcp-server-names __none__ gated by OSRC_GEMINI_USER_MCP (this patch).
+#   - the retired gemini-cli text vehicle is refused; Antigravity is the only Gemini text vehicle.
 # Interactive session/TUI paths are OUT OF SCOPE (a human can answer prompts there).
 set -u
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -116,24 +116,21 @@ grep -Eq 'claude -p --strict-mcp-config --mcp-config .*reply PONG' "$ENGINE" \
   || no "doctor claude-native probe not isolated"
 
 # ============================================================================
-# GEMINI -p LANE (gemini-cli fallback — I1 parity, this patch)
-# delegate_gmnative gemini-cli path must pass --allowed-mcp-server-names __none__ by default,
-# gated by OSRC_GEMINI_USER_MCP=1.
+# GEMINI: the former gemini-cli text vehicle and its doctor probe are retired.
 # ============================================================================
 
-# 9) The gemini-cli delegate path carries the MCP isolation flag, gated by the escape hatch.
-grep -q 'OSRC_GEMINI_USER_MCP:-0' "$ENGINE" \
-  && ok "gemini: OSRC_GEMINI_USER_MCP escape hatch present" \
-  || no "gemini: OSRC_GEMINI_USER_MCP escape hatch missing"
-# The delegate invocation line must carry the gmcp array expansion (the gated flag).
-grep -E 'gemini -p .*"\$\{gmcp\[@\]\}"' "$ENGINE" >/dev/null \
-  && ok "gemini: delegate invocation carries gated --allowed-mcp-server-names (__none__)" \
-  || no "gemini: delegate invocation missing gated MCP isolation"
-
-# 10) The doctor gemini probe is isolated.
-grep -Eq 'gemini -p "reply PONG" --allowed-mcp-server-names __none__' "$ENGINE" \
-  && ok "doctor gemini probe is isolated (--allowed-mcp-server-names __none__)" \
-  || no "doctor gemini probe not isolated"
+# 9) The text delegate explicitly refuses the retired vehicle.
+_gm_delegate="$(sed -n '/^delegate_gmnative() {/,/^}/p' "$ENGINE")"
+grep -Fq 'OSRC_GEMINI_VEHICLE:-' <<<"$_gm_delegate" && grep -Fq 'gemini-cli is retired' <<<"$_gm_delegate" \
+  && ok "gemini: retired text vehicle is refused" \
+  || no "gemini: retired vehicle refusal missing"
+grep -Fq 'have agy || die' <<<"$_gm_delegate" \
+  && ok "gemini: active text vehicle requires Antigravity" \
+  || no "gemini: active Antigravity guard missing"
+# 10) The retired vehicle is not pinged by doctor.
+grep -Fq 'gemini-cli is RETIRED (Antigravity `agy` is the only Gemini text vehicle) — no ping.' "$ENGINE" \
+  && ok "doctor does not ping the retired gemini-cli" \
+  || no "doctor retirement policy missing"
 
 # ============================================================================
 # BEHAVIORAL TEST: execute build_mcp_flags_cc in a controlled temp env and assert its output.
@@ -142,6 +139,7 @@ grep -Eq 'gemini -p "reply PONG" --allowed-mcp-server-names __none__' "$ENGINE" 
 # Then we MUTATE the function (remove the isolation) and verify the same assertion FAILS.
 # ============================================================================
 TMPDIR_ISOL="$(mktemp -d)"
+export HOME="$TMPDIR_ISOL/fakehome"; mkdir -p "$HOME"
 trap 'rm -rf "$TMPDIR_ISOL" 2>/dev/null' EXIT
 
 # Extract die(), have(), CC_MCP_FLAGS=(), build_mcp_flags_cc(), _emit_empty_mcp_cfg() from the engine

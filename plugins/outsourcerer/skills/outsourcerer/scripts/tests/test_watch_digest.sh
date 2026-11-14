@@ -9,7 +9,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+LANEMSG="$SCRIPT_DIR/../lib/lanemsg.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+[ -f "$LANEMSG" ] || { echo "FAIL: cannot find $LANEMSG"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 pass=0; fail=0
@@ -17,14 +19,15 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 # Source-level: the feature + its validation must be present.
-grep -q '_watch_digest()' "$SRC" && ok "_watch_digest helper defined" || bad "_watch_digest missing"
-grep -q 'OSRC_WATCH_DIGEST_SECS' "$SRC" && ok "OSRC_WATCH_DIGEST_SECS wired" || bad "digest interval env missing"
-grep -q "in ''|\*\[!0-9\]\*|0) digest_secs=420" "$SRC" \
+grep -q '_watch_digest()' "$LANEMSG" && ok "_watch_digest helper defined" || bad "_watch_digest missing"
+grep -q 'OSRC_WATCH_DIGEST_SECS' "$LANEMSG" && ok "OSRC_WATCH_DIGEST_SECS wired" || bad "digest interval env missing"
+grep -q "in ''|\*\[!0-9\]\*|0) digest_secs=420" "$LANEMSG" \
   && ok "digest interval is validated (positive integer, else default)" \
   || bad "digest interval is not validated"
 
 # Behavioural: isolated fake job dirs under a temp OSRC_HOME.
 export OSRC_HOME="$(mktemp -d)"; export OSRC_JOBS="$OSRC_HOME/jobs"
+export HOME="$OSRC_HOME/fakehome"; mkdir -p "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT
 mkdir -p "$OSRC_JOBS/term"
 date +%s > "$OSRC_JOBS/term/started_at"
