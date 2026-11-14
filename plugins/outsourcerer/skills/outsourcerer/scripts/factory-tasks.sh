@@ -127,16 +127,14 @@ _factory_self_pid() {
   _FACTORY_SELF_PID="$p"
 }
 
-# _factory_owner_dead <pid> <start-identity> -> rc0 only when the owner is PROVABLY gone (ps works and
-# the pid is absent, or the pid now belongs to a process with a different start time).
+# _factory_owner_dead <pid> <start-identity> -> rc0 only for a reused pid or explicit ESRCH.
 _factory_owner_dead() {
   local o_pid="$1" o_start="$2" cur probe _rc=0
   case "$o_pid" in ''|*[!0-9]*) return 1 ;; esac
   cur="$(_pid_start_identity "$o_pid" 2>/dev/null)" || _rc=$?
-  [ "$_rc" -eq 2 ] && return 0
   [ "$_rc" -eq 0 ] && [ -n "$o_start" ] && [ "$cur" != "$o_start" ] && return 0
   # A denied signal is not proof of death. Only an explicit ESRCH diagnostic is.
-  if [ "$_rc" -eq 1 ]; then
+  if [ "$_rc" -ne 0 ]; then
     probe="$(LC_ALL=C kill -0 "$o_pid" 2>&1)" || {
       case "$probe" in *"No such process"*) return 0 ;; esac
     }
