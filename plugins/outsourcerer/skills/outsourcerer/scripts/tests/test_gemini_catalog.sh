@@ -121,7 +121,9 @@ printf '["gemini-3.5-flash","gemini-3.9-flash","gemini-3.1-pro-preview","gemini-
 [ "$(_gemini_api_id nano-banana)" = "gemini-3.1-flash-image" ] && ok "image lane: nano-banana -> newest flash-image in the API model list" || bad "gi image: $(_gemini_api_id nano-banana)"
 grep -q 'id="$(_gemini_api_id nano-banana)"' "$SRC" && ok "the image backend picks its Gemini id through the resolver" || bad "image backend still names a literal id"
 [ "$(OSRC_GEMINI_FLASH_API_ID=gemini-7-flash _gemini_api_id gemini-flash)" = "gemini-7-flash" ] && ok "gemini-cli vehicle: env pin wins" || bad "gi env pin lost"
-grep -q 'id="$(_gemini_api_id "$id")"' "$SRC" && ok "the gemini-cli dispatch actually calls the resolver before --model" || bad "gemini-cli dispatch does not resolve the alias"
+grep -Fq "gemini-cli is retired — Antigravity 'agy' replaced it" "$SRC" && ok "retired gemini-cli dispatch names its replacement" || bad "gemini-cli retirement notice missing"
+retired_out="$( ( REST=('test task'); RESOLVED_ID=gemini-flash; OSRC_GEMINI_VEHICLE=gemini; delegate_gmnative mid ) 2>&1 )"; retired_rc=$?
+[ "$retired_rc" -ne 0 ] && grep -Fq 'gemini-cli is retired' <<<"$retired_out" && ok "retired gemini-cli vehicle is refused" || bad "retired gemini-cli was not refused: rc=$retired_rc $retired_out"
 
 # --- a refused model clears the cache and explains the pins (the dispatch-side half) --------------
 grep -q "invalid model selection|not recognized as a known model" "$SRC" && ok "the agy dispatch recognises a refused-model error" || bad "no refused-model translation in the agy dispatch"
@@ -133,7 +135,7 @@ dated="$(grep -nE 'gemini-[0-9]+\.[0-9]+-(flash|pro)' "$SRC" | grep -vE '^[0-9]+
 [ -z "$dated" ] && ok "no dated Gemini id is used outside the last-known offline constants" || bad "dated Gemini ids still hardcoded:
 $dated"
 grep -q '\-\-model "$(_agy_model_token gemini-flash)"' "$SRC" && ok "both agy liveness probes go through the resolver" || bad "an agy probe still names a literal model"
-grep -q '\-\-model "$(_gemini_api_id gemini-flash-lite)"' "$SRC" && ok "the gemini-cli probe goes through the resolver" || bad "gemini-cli probe still names a literal model"
+grep -Fq 'gemini-cli is RETIRED (Antigravity `agy` is the only Gemini text vehicle) — no ping.' "$SRC" && ok "doctor does not ping the retired gemini-cli" || bad "retired gemini-cli doctor policy missing"
 # The gemini-lane route default lives on the gm lane descriptor now (lane-contract
 # refactor): the descriptor's default_model is the undated family alias, and
 # --provider gemini must resolve to the gm lane so _route_provider_default_model

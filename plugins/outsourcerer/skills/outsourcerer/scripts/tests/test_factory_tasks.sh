@@ -313,7 +313,7 @@ check "ship task in a plan without a repo fails closed" \
 FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
 (cd "$REPO" && O plan new e2e --goal 'real launch' >/dev/null 2>&1)
 O task add 'real ship' --shape ship --check true --provider droid --plan e2e >/dev/null 2>&1
-jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O task start t1 --plan e2e 2>/dev/null | head -1)"
+jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O --spend-ok task start t1 --plan e2e 2>/dev/null | head -1)"
 i=0; while [ "$i" -lt 100 ]; do [ -f "$OSRC_HOME/jobs/$jid/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
 ej="$OSRC_HOME/plans/e2e/tasks/t1.json"
 if [ -n "$jid" ] && [ -f "$OSRC_HOME/jobs/$jid/meta.json" ]; then
@@ -575,7 +575,7 @@ check "#22 an absurd --retries is refused plainly" "[ $rc -ne 0 ] && grep -q '99
 FB2="$TMP/fakebin2"; mkdir -p "$FB2"
 printf '#!/usr/bin/env bash\nenv > "$ENVDUMP"\necho "OSRC::DONE env dumped"\n' > "$FB2/droid"; chmod +x "$FB2/droid"
 ( cd "$REPO" && PATH="$FB2:$PATH" ENVDUMP="$TMP/envdump" OSRC_WORKTREE=1 OSRC_WORKTREE_REQUIRED=1 OSRC_WORKTREE_BASE="$HEAD_SHA" OSRC_TASK_REF=fx/t1 OSRC_TASK_ATTEMPT=env-token \
-  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; run_job envjob droid run 'say hi'" ) >/dev/null 2>&1
+  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; run_job envjob droid run --spend-ok 'say hi'" ) >/dev/null 2>&1
 check "#18 the job itself still ran in its own worktree" "[ \"\$(jq -r '.worktree // \"\"' \"$OSRC_JOBS/envjob/meta.json\" 2>/dev/null)\" = \"$REPO/.outsourcerer/worktrees/envjob\" ]"
 check "#18 the delegate's environment has no OSRC_WORKTREE* switches" \
   "[ -s \"$TMP/envdump\" ] && ! grep -q '^OSRC_WORKTREE' \"$TMP/envdump\""

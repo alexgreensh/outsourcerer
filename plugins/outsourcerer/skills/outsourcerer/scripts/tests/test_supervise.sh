@@ -294,8 +294,23 @@ grep -q '^EVENT done L5.DONE ' <<<"$out" && ok "a well-named hand-in next to hos
 touch -m -t 202601010600 "$W/out/L5.DONE"; sup --session S --once >/dev/null; err2="$(cat "$TMP/err")"
 grep -q 'ignored hand-in' <<<"$err2" && no "the notice repeats on every pass: [$err2]" || ok "the notice is said once, not on every pass"
 grep '^NEXT ' <<<"$out" | sed 's/^NEXT //' > "$TMP/run42/next.sh"
-( cd "$TMP/run42" && bash next.sh >/dev/null 2>&1 ); [ ! -e "$TMP/run42/PWNED" ] && [ ! -e "$TMP/run42/PWNED2" ] && ! { _t3b_pipe="$(ls "$W/out")" && grep -q '^PWNED' <<<"$_t3b_pipe"; } \
-  && ok "running every printed NEXT in a temp dir creates nothing" || no "a NEXT created a file: $(ls "$TMP/run42" "$W/out")"
+next_file_scan() {
+  local names rc
+  names="$(ls "$1" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] && return 2
+  grep -q '^PWNED' <<<"$names"
+}
+next_file_scan "$TMP/missing-watch-dir"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "NEXT file scan reports a missing directory" || no "NEXT file scan accepted a missing directory (rc=$scan_rc)"
+( cd "$TMP/run42" && bash next.sh >/dev/null 2>&1 )
+next_file_scan "$W/out"; scan_rc=$?
+if [ "$scan_rc" -ge 2 ]; then
+  no "NEXT file scan failed (rc=$scan_rc)"
+elif [ "$scan_rc" -eq 1 ] && [ ! -e "$TMP/run42/PWNED" ] && [ ! -e "$TMP/run42/PWNED2" ]; then
+  ok "running every printed NEXT in a temp dir creates nothing"
+else
+  no "a NEXT created a file: $(ls "$TMP/run42" "$W/out")"
+fi
 ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _sv_observe_all beacon ) 2>/dev/null
 ! grep -q 'PWNED' "$OSRC_HOME/lanes/events.jsonl" && ok "the beacon never logs a hostile name either (events.jsonl clean)" || no "events.jsonl carries the name"
 nx="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; f="$W/out/L5.DONE"; printf 'cat %q' "$f" ) )"

@@ -127,7 +127,7 @@ case "$_bad_out" in *"must be a number"*) ok "limits set rejects non-numeric cap
 # INTEGRATION: the route gate via a real preflight (fake droid so nothing dispatches)
 # ---------------------------------------------------------------------------------------------------
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
-run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 "hi" 2>&1; }
+run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 --spend-ok "hi" 2>&1; }
 
 # no quota.json -> normal routing (regression: default path untouched)
 H3="$TMP/h3"; mkdir -p "$H3"

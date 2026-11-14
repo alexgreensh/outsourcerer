@@ -23,9 +23,8 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanedown.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
-SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090
-. "$SRC_ONLY" >/dev/null 2>&1
+. "$SRC" >/dev/null 2>&1
 type -t _gate_hop >/dev/null || { echo "FAIL: _gate_hop not defined (gate wiring missing?)"; exit 1; }
 
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"
@@ -60,12 +59,12 @@ _lane_down_clear cx
 # contract), so we simulate exactly the locals it reads.
 # ---------------------------------------------------------------------------------------------------
 ( PATH="$FAKEBIN:$PATH"
-  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin
+  MODEL=devin-default; RESOLVED_ID=devin-default; PROVIDER=devin; OSRC_SPEND_OK=1
   _fb_tried=""; _fb_loaded=1; _fb_cands="kimi|kimi-k3|cx"   # cx is the only READY lane (fake codex)
   REST=("do the thing"); TIER_FLAG=""; EFFORT=""; WITH_SPEC=""; OSRC_ALLOW_DOWNGRADE=0
   ARGV=(run "do the thing")
   _gate_hop devin \
-    && [ "${ARGV[*]}" = "--provider codex -m kimi do the thing" ] \
+    && [ "${ARGV[*]}" = "--provider codex -m kimi --spend-ok do the thing" ] \
     && [ "${OSRC_FALLBACK_PINNED:-0}" = "1" ] \
     && [ "$_fb_alias" = "kimi" ] && [ "$_fb_lane" = "cx" ] ) \
   && ok "hop: _gate_hop rewrites argv to --provider codex -m kimi + marks hop-mode + exposes _fb_alias/_fb_lane for the notice" \
@@ -82,7 +81,7 @@ _lane_down_clear cx
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: the gate via a real preflight route (fake droid; nothing dispatches)
 # ---------------------------------------------------------------------------------------------------
-run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 "hi" 2>&1; }
+run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 --spend-ok "hi" 2>&1; }
 mark_down() { mkdir -p "$1/lane-posture"; printf '%s\n' "$(( $(date +%s) + ${2:-300} ))" > "$1/lane-posture/$3.down"; }
 
 # Clean: no marker -> normal routing (regression: default path untouched).

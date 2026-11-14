@@ -399,7 +399,21 @@ if grep -qE '(\*|0\.0\.0\.0|\[::\]):' <<<"$lsof_out"; then bad "server exposed o
 
 # The token must never reach the request log (it is in the printed URL line by design,
 # so only the server's own "[hub]" request lines are checked).
-if { _t3b_pipe="$(grep '^\[hub\]' "$TMP/serve.log")" && grep -q 't=' <<<"$_t3b_pipe"; }; then bad "token leaked into server log"; else ok "token stripped from request logs"; fi
+hub_log_token_scan() {
+  local lines rc
+  lines="$(grep '^\[hub\]' "$1" 2>/dev/null)"; rc=$?
+  [ "$rc" -ge 2 ] && return "$rc"
+  [ "$rc" -eq 1 ] && return 1
+  grep -q 't=' <<<"$lines"
+}
+hub_log_token_scan "$TMP/missing-server.log"; scan_rc=$?
+[ "$scan_rc" -ge 2 ] && ok "request-log scan reports a missing file" || bad "request-log scan accepted a missing file (rc=$scan_rc)"
+hub_log_token_scan "$TMP/serve.log"; scan_rc=$?
+case "$scan_rc" in
+  0) bad "token leaked into server log" ;;
+  1) ok "token stripped from request logs" ;;
+  *) bad "request-log scan failed (rc=$scan_rc)" ;;
+esac
 
 cleanup_srv
 

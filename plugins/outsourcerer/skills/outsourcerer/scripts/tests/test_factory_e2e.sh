@@ -38,7 +38,7 @@ O() { (cd "$R" && PATH="$E/bin:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC
 O plan new demo --goal "add a feature file" >/dev/null 2>&1
 O task add "write the spec" --shape scout --provider droid >/dev/null 2>&1
 O task add "build it" --shape ship --deps t1 --check "test -f feature.txt" --provider droid >/dev/null 2>&1
-out="$(O plan run --interval 1 --max-minutes 3 --auto-land 2>&1)"; rc=$?
+out="$(O --spend-ok plan run --interval 1 --max-minutes 3 --auto-land 2>&1)"; rc=$?
 
 [ "$rc" -eq 0 ] && ok "plan run finishes with exit 0" || bad "plan run exit $rc: $(printf '%s' "$out" | tail -5)"
 T="$OSRC_HOME/plans/demo/tasks"
