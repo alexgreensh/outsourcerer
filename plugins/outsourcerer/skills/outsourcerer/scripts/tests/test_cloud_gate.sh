@@ -135,11 +135,14 @@ if grep -q '_bg_cloud_preack "\$@"' "$SRC"; then ok "preack wired into _bg_launc
 _bg_launch() { echo REACHED_LAUNCH > "$TMP/launched"; echo "stubid-123"; }
 PROVIDER=devin
 rm -f "$TMP/launched"
-( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
+# --spend-ok consents the metered dv/glm lane so the CLOUD gate is what decides here:
+# without it the route preflight's spend gate refuses first and this row would pass
+# for the wrong reason (billing, not cloud disclosure).
+( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --spend-ok -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
 [ "$rc" -ne 0 ] && ok "cmd_bg refused cloud gate returns nonzero (no fake success)" || bad "cmd_bg exited 0 despite refusal"
 [ ! -f "$TMP/launched" ] && ok "cmd_bg did NOT reach _bg_launch after refusal" || bad "cmd_bg launched a job despite refusal"
 rm -f "$TMP/launched"
-out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack -m glm "task" </dev/null 2>/dev/null )"; rc=$?
+out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack --spend-ok -m glm "task" </dev/null 2>/dev/null )"; rc=$?
 { [ "$rc" -eq 0 ] && [ -f "$TMP/launched" ] && grep -q 'stubid-123' <<<"$out"; } && ok "cmd_bg --cloud-ack proceeds to launch and prints the job id" || bad "cmd_bg --cloud-ack did not launch (rc=$rc)"
 
 # --- Scenario 12: _bg_cloud_preack honors --cloud-ack only among LEADING flags, never a

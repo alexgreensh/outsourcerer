@@ -216,7 +216,9 @@ does not retry the dead lane and does not stop at "it failed". The flow (mechani
    before the lane is marked down (probe-then-decide). A lane that still answers stays up.
 2. A target is chosen from the harnesses you actually have and that are ready right now: the same
    model elsewhere if one serves it, else the nearest-tier equivalent. Down, absent, and
-   (without `OSRC_FAILOVER_CASH_OK=1`) cash lanes are never picked.
+   (without `OSRC_FAILOVER_CASH_OK=1`) cash lanes are never picked. `OSRC_FAILOVER_CASH_OK=1`
+   only lets the picker *consider* a cash lane — the spend itself still needs this command's
+   `--spend-ok`, because env consent is standing consent and paid-lane approval is per command.
 3. The job is re-dispatched there, and you are told in plain language, every hop:
 
 ```
@@ -235,8 +237,10 @@ When **no** ready harness has headroom, nothing is invented. The run stops with:
 ```
 
 The soonest reset comes from the down lanes' own stated windows. If a cash lane could have taken
-the job, the line names it and the consent switch (`OSRC_FAILOVER_CASH_OK=1`) instead of spending
-silently. A pinned `-m` that can only move to a different model is refused the same loud way
+the job, the line names it and the consent switches (`OSRC_FAILOVER_CASH_OK=1` to let the picker
+consider it, plus `--spend-ok` on the command for the spend itself) instead of spending
+silently. A ready lane blocked only by metered or unproven billing is named the same way, with
+`--spend-ok` as the missing consent — it is never silently dropped as absent. A pinned `-m` that can only move to a different model is refused the same loud way
 (override: `OSRC_FALLBACK_PINNED=1`). Each hop records a `fallback` row in the Tab ($0,
 bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
 
@@ -272,7 +276,8 @@ runnable command plus `--spend-ok`. `--spend-ok` is argv-only, covers exactly on
 (propagated through bg/fanout/hops as argv or a per-job `.spend-ok` marker), and is never
 persisted or implied by auto mode, the cloud-consent file, or an inherited env var
 (`OSRC_SPEND_OK`, `OSRC_SPEND_GATE` and `OSRC_CAP_GATE` are all unset before parsing — there is
-no env kill-switch). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
+no env kill-switch). Place `--spend-ok` BEFORE the task text (`run --spend-ok "task"`, not
+`run "task" --spend-ok` — anything after the task is task text, not a flag). The marker is BOUND: `_bg_launch` writes the `lane|model` pairs the
 command actually resolved, the child gate accepts only a matching pair, consumes (deletes) it
 on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call cannot borrow
 a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless

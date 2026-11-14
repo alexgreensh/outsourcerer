@@ -30,7 +30,10 @@ cat > "$STUB/claude" <<'EOF'
 #!/usr/bin/env bash
 { echo "=== claude"; printf '<%s>\n' "$@"; } >> "$OSRC_STUB_LOG"
 case "${1:-}" in
-  auth)   echo '{"loggedIn": true}'; exit 0 ;;
+  # auth status must carry the full plan shape: cc billing is subscription ONLY on
+  # loggedIn+claude.ai+firstParty+a plan subscriptionType (lib/spend.sh); bare {"loggedIn":true}
+  # is unknown -> metered -> every cloud session below would refuse at the spend gate.
+  auth)   echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 0 ;;
   --help|-h|help) echo "Usage: claude [options] [prompt]"; echo "  --cloud [description|session_id|url]"; echo "  --environment <environment_id>"; exit 0 ;;
   --cloud) echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
 esac

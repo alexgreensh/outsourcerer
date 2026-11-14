@@ -1756,7 +1756,7 @@ _run_tee_stderr() {
   # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
   # inside the delegate would see THIS job's .spend-ok marker and cap-dedupe state as
   # its own consent/cap context. Every delegate lane funnels through here.
-  if [ -n "$f" ]; then env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@" 2> >(tee "$f" >&2); else env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; fi
+  if [ -n "$f" ]; then _osrc_nojob "$@" 2> >(tee "$f" >&2); else _osrc_nojob "$@"; fi
 }
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
@@ -2800,9 +2800,9 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
   local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
   if [ -n "$_dverr" ]; then
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
+    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
   else
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
+    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   fi
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
     _policy_blocked=1
@@ -14151,7 +14151,7 @@ delegate_ccnative() {
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
   # in", which is the failure users hit). Verified: with these unset, headless claude runs normally.
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN)
+  local clean=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN)
   if [ -n "$EFFORT" ]; then local think; think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && { clean+=("MAX_THINKING_TOKENS=$think"); printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; }; fi
   local rc=0
   # Same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
@@ -14165,13 +14165,13 @@ delegate_ccnative() {
   local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
   if [ "${OSRC_STREAM:-0}" = "1" ]; then
     # bg/stream path: stream-json carries modelUsage (verify from the captured out.log downstream).
-    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
+    _osrc_envrun "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
     record_ledger claude-native "$id" "$ttier" "$tier" "$task" "0.000000" cc
   else
     # foreground: capture JSON, print the result text, then VERIFY the real model from modelUsage.
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.ccnative.$$.json"
     local old_umask; old_umask="$(umask)"; umask 077
-    "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
+    _osrc_envrun "${clean[@]}" claude -p ${bare[@]+"${bare[@]}"} --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
     record_ledger claude-native "$id" "$ttier" "$tier" "$task" "0.000000" cc
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
@@ -14374,7 +14374,7 @@ delegate_gmnative() {
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
     local _aerr; _aerr="$(mktemp "${TMPDIR:-/tmp}/osrc-agy.XXXXXX")"
-    env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
+    _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
     # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
@@ -14390,7 +14390,7 @@ delegate_gmnative() {
        && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
-      env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+      _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
           --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
       [ -s "$_aerr" ] && cat "$_aerr" >&2
     fi
@@ -14472,7 +14472,7 @@ delegate_claudex() {
   # heavy use without rate limiting has triggered upstream account limits for some users.
   printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config)"
-  local clean=(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN -u ANTHROPIC_API_KEY
+  local clean=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN -u ANTHROPIC_API_KEY
                "ANTHROPIC_BASE_URL=$(_claudex_url)" "ANTHROPIC_AUTH_TOKEN=$(_claudex_token)")
   # Effort: the model behind the proxy is a GPT reasoning model; Claude Code's effort plumbing is
   # enabled and the level is ALSO injected as a prompt directive (never silently dropped).
@@ -14489,12 +14489,12 @@ delegate_claudex() {
   local emode; emode="$(_perm_escalate "$mode" "$wrapped")"; [ "$emode" = REFUSE ] && die "$_perm_refuse_msg"
   local rc=0
   if [ "${OSRC_STREAM:-0}" = "1" ]; then
-    "${clean[@]}" claude -p --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
+    _osrc_envrun "${clean[@]}" claude -p --verbose --output-format stream-json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" || rc=$?
     record_ledger claudex "$id" "$ttier" "$tier" "$task" "0.000000" claudex
   else
     mkdir -p "$OSRC_HOME"; local tmpj="$OSRC_HOME/.claudex.$$.json"
     local old_umask; old_umask="$(umask)"; umask 077
-    "${clean[@]}" claude -p --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
+    _osrc_envrun "${clean[@]}" claude -p --output-format json ${CC_MCP_FLAGS[@]+"${CC_MCP_FLAGS[@]}"} --model "$id" ${tools[@]+"${tools[@]}"} --permission-mode "$emode" "$wrapped" > "$tmpj" 2>/dev/null || rc=$?
     record_ledger claudex "$id" "$ttier" "$tier" "$task" "0.000000" claudex
     if [ "$rc" -eq 0 ] && have jq && [ -s "$tmpj" ]; then jq -r '.result // empty' "$tmpj" 2>/dev/null; else cat "$tmpj" 2>/dev/null; fi
     _cc_verify_model "$id" "$tmpj"
@@ -14637,7 +14637,7 @@ delegate_hermes() {
   _tier_banner "hermes (NousResearch)" "$id" "$ttier" "$posture | $(_lane_cost_disclosure hermes)"
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for the Hermes receipt lookup
   local rc=0
-  env -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
+  _osrc_nojob hermes ${wflag[@]+"${wflag[@]}"} -z "$wrapped" ${mflag[@]+"${mflag[@]}"} ${yflag[@]+"${yflag[@]}"} || rc=$?
   record_ledger hermes "${MODEL:-hermes-default}" "$ttier" "$tier" "$task" "$(_fg_run_cost hermes "$_fg_launch" "")" hermes
   printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure hermes)" >&2
   return "$rc"
@@ -15541,9 +15541,9 @@ _local_agentic_shim() {
   # (this is what made agentic-local silently fail). The shim forces the real model upstream, so the
   # ANTHROPIC_MODEL id here just has to pass claude's bare acceptance. --allowedTools is variadic, so
   # it must be terminated by --permission-mode before the trailing prompt (not swallow it).
-  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN \
-    ANTHROPIC_BASE_URL="$aurl" ANTHROPIC_AUTH_TOKEN="${OSRC_LOCAL_KEY:-local}" ANTHROPIC_API_KEY= \
-    ANTHROPIC_MODEL="$model" ANTHROPIC_SMALL_FAST_MODEL="$model" \
+  _osrc_envrun -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN \
+    "ANTHROPIC_BASE_URL=$aurl" "ANTHROPIC_AUTH_TOKEN=${OSRC_LOCAL_KEY:-local}" "ANTHROPIC_API_KEY=" \
+    "ANTHROPIC_MODEL=$model" "ANTHROPIC_SMALL_FAST_MODEL=$model" \
     claude -p --bare ${sfx[@]+"${sfx[@]}"} --allowedTools $tools --permission-mode "$(_perm_escalate "$mode" "$wrapped")" "$wrapped" || rc=$?
   record_ledger local "$model" "$ttier" "$tier" "${REST[*]}" "0.000000"
   [ -n "$shim_pid" ] && kill "$shim_pid" 2>/dev/null
@@ -16172,7 +16172,7 @@ _route_confirm() {
 _route_receipt() {
   [ "${ROUTE_PROVIDER_EXPLICIT:-0}" = "1" ] || return 0
   printf '>>> [route] RESOLVED lane=%s model=%s explicit=--provider %s\n' \
-    "$ROUTE_LANE" "${RESOLVED_ID:-$ROUTE_MODEL}" "$PROVIDER" >&2
+    "$ROUTE_LANE" "$(_osrc_route_launched_model)" "$PROVIDER" >&2
 }
 
 _route_provider_default_model() { # Provider-specific route identity, never parser state.
@@ -16248,8 +16248,10 @@ _gate_hop() {
 #     invented capacity;
 #   * same model on another harness first, else the nearest tier from the tier table (ties go to the
 #     cheaper tier, then lane preference order);
-#   * free/plan lanes auto; CASH lanes (cost_class=credits) only with consent already granted
-#     (OSRC_FAILOVER_CASH_OK=1), otherwise they are named in the stop message, never used silently;
+#   * free/plan lanes auto; CASH lanes (cost_class=credits) are only CONSIDERED with
+#     OSRC_FAILOVER_CASH_OK=1 — that env var is standing consent, so the spend itself still
+#     needs this command's --spend-ok; unconsented cash lanes are named in the stop message,
+#     never used silently;
 #   * a READ-ONLY job (auto tier) simply re-dispatches on the pick; a MUTATING job (edit/yolo/
 #     research) is re-dispatched FRESH with a handoff note so the new agent continues from the CURRENT
 #     repo state — never a byte-level resume of the interrupted turn, and never a silent retry;
@@ -16264,15 +16266,10 @@ _gate_hop() {
 # Lane preference order for a hop: plan/subscription lanes first, cash lanes last. `local` is left
 # out on purpose (no model-equivalence claim can be made for whatever the user pulled locally).
 OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline pi or tokenrouter claudex"
-_FAILOVER_CASH_SKIPPED=""   # in-process mirror; the file below is the source of truth across $(...)
+_FAILOVER_CASH_SKIPPED="" _FAILOVER_SPEND_SKIPPED=""   # in-process mirrors; the files in lib/spend.sh are the source of truth across $(...)
 _FO_LANE=""; _FO_MODEL=""; _FO_VERDICT=""; _FO_REASON=""; _FO_RESET=""
 
 _failover_signal_file() { printf '%s/.failover.signal.%s' "$OSRC_HOME" "$$"; }
-# The picker runs under a command substitution, so the cash lanes it had to skip are recorded in a
-# per-process file (not a variable) for the stop line to name.
-_failover_cash_file() { printf '%s/.failover.cash.%s' "$OSRC_HOME" "$$"; }
-_failover_cash_skipped() { tr '\n' ' ' < "$(_failover_cash_file)" 2>/dev/null | sed -E 's/[[:space:]]+$//'; }
-_failover_cash_clear() { rm -f "$(_failover_cash_file)" 2>/dev/null; }
 # _failover_signal_write <lane> <model> <verdict> <reason> [reset-secs]. verdict: confirmed |
 # unverified | inconclusive | answered (answered = the lane still runs; not a failover trigger).
 _failover_signal_write() {
@@ -16304,7 +16301,6 @@ _tier_index() { case "${1:-}" in frontier) printf 0 ;; capable) printf 1 ;; mid)
 _tier_dist() { local a b; a="$(_tier_index "$1")"; b="$(_tier_index "$2")"; [ "$a" -ge "$b" ] && printf '%s' $(( a - b )) || printf '%s' $(( b - a )); }
 _failover_lane_rank() { local i=0 l; for l in $OSRC_FAILOVER_LANES; do i=$((i+1)); [ "$l" = "${1:-}" ] && { printf '%s' "$i"; return; }; done; printf 99; }
 _failover_lane_is_cash() { [ "$(_lane_field "${1:-}" cost_class 2>/dev/null)" = "credits" ]; }
-
 # _failover_lane_ok <lane> <verb> [model] -> rc0 when the lane can take this job RIGHT NOW: not marked
 # down, its CLI/key/login is present (the lane's own readiness probe), not a cash lane without consent,
 # not a denied model, and not a lane/model the descriptor warns off for a mutating verb. A skipped cash
@@ -16324,15 +16320,13 @@ _failover_lane_ok() {
     [ "$_hit" = 1 ] || return 1
   fi
   if _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" != "1" ]; then
-    case " $_FAILOVER_CASH_SKIPPED " in *" $l "*) ;; *)
-      _FAILOVER_CASH_SKIPPED="${_FAILOVER_CASH_SKIPPED:+$_FAILOVER_CASH_SKIPPED }$l"
-      { umask 077; printf '%s\n' "$l" >> "$(_failover_cash_file)"; } 2>/dev/null || true ;;
-    esac
-    return 1
+    _failover_cash_record "$l"; return 1
   fi
-  # L7 add-on: failover never hops onto a metered/unknown lane without THIS command's
-  # --spend-ok consent (broader than the credits-only check above: unknown counts too).
-  _osrc_lane_spendable "$l" "$m" || return 1
+  # L7 add-on: never hop onto metered/unknown without THIS command's --spend-ok; CASH_OK
+  # only lets the picker CONSIDER cash lanes. Spend-blocked lanes of ANY cost class are
+  # recorded: cash lanes keep the cash record (stop line names both switches), the rest spend.
+  _osrc_lane_spendable "$l" "$m" || {
+    if _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ]; then _failover_cash_record "$l"; else _failover_spend_record "$l"; fi; return 1; }
   [ -n "$m" ] && _model_denied "$m" && return 1
   if [ -n "$m" ]; then
     _wm="$(_lane_field "$l" warn_model 2>/dev/null)"
@@ -16378,7 +16372,7 @@ _OSRC_FO_T
 _failover_pick() {
   local src="${1:-}" model="${2:-}" verb="${3:-run}" canon want l m alias resolved lane tier d ti key rows="" seen="" seq=0
   src="$(_lane_plan_key "$src")"; [ -n "$src" ] || src="${1:-}"
-  _FAILOVER_CASH_SKIPPED=""; _failover_cash_clear
+  _FAILOVER_CASH_SKIPPED=""; _failover_cash_clear; _FAILOVER_SPEND_SKIPPED=""; _failover_spend_clear
   # An ALIAS as typed (kimi, glm, sonnet) must mean the model it resolves to: canonicalize the table's
   # resolved id, not the raw token, or "kimi" never matches kimi-k3 on droid/warp and the same-model
   # pass silently falls through to a tier pick.
@@ -16432,8 +16426,13 @@ _failover_soonest_reset() {
 }
 # _failover_nothing_notice <src-lane> <reason> -> the honest STOP line (never invented capacity).
 _failover_nothing_notice() {
-  local soon cash="" skipped; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"
-  [ -n "$skipped" ] && cash=" ($skipped would take it but spends cash; allow that with OSRC_FAILOVER_CASH_OK=1.)"
+  local soon cash="" skipped ssk hint; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"; ssk="$(_failover_spend_skipped)"
+  if [ -n "$skipped" ]; then
+    hint='allow that with OSRC_FAILOVER_CASH_OK=1 and --spend-ok on this command.'
+    [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ] && hint='OSRC_FAILOVER_CASH_OK already unlocked them — this command still needs --spend-ok.'
+    cash=" ($skipped would take it but spends cash; $hint)"
+  fi
+  [ -n "$ssk" ] && cash="$cash ($ssk would take it but billing is metered or unproven; this command needs --spend-ok)"
   printf '>>> [failover] every lane you have is at its limit or absent; nothing to fail over to (%s %s). Waiting for %s or add a lane.%s\n' \
     "$(_lane_plan_display "${1:-?}")" "${2:-hit its plan limit}" "${soon:-the next reset (no lane stated one)}" "$cash" >&2
 }
@@ -18951,7 +18950,7 @@ doctor() {
     _model_excluded haiku && echo "      claude-native haiku: ping skipped (on your exclude list)"
     if have claude && ! _model_excluded haiku; then
       _ppt=""; _prc=0
-      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" 2>&1)" || _prc=$?
+      _ppt="$(_timeout "${OSRC_DOCTOR_PING_TIMEOUT:-30}" _osrc_envrun -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude -p --strict-mcp-config --mcp-config <(printf '{"mcpServers":{}}') --model haiku "reply PONG" 2>&1)" || _prc=$?
       if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
         echo "      claude-native haiku: READY (probed just now, answered)"
       else

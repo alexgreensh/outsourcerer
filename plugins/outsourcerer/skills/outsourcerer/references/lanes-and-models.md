@@ -506,8 +506,9 @@ notice with its reason and time left.
   before cash lanes). Engine lanes contribute their default model.
 
 Cash lanes (OpenRouter, TokenRouter, Claudex) are **never used silently**: they join the candidate
-list only when `OSRC_FAILOVER_CASH_OK=1` is set; otherwise the stop message names them and the
-switch. A pinned `-m` is moved only to the *same* model on another harness; a different-model pick
+list only when `OSRC_FAILOVER_CASH_OK=1` is set, and the hop itself still needs this command's
+`--spend-ok` — the env var is standing consent, spend approval is per command. Otherwise the stop
+message names them and both switches. A pinned `-m` is moved only to the *same* model on another harness; a different-model pick
 is refused loudly unless `OSRC_FALLBACK_PINNED=1`. Hops are bounded per job (`OSRC_FAILOVER_MAX`,
 default 2) so two spent lanes cannot ping-pong. The `local` lane is not a failover target: no
 equivalence claim can be made for whatever you pulled locally.

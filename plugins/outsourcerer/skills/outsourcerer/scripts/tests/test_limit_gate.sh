@@ -42,6 +42,8 @@ type -t _osrc_limit_gate >/dev/null || { echo "FAIL: _osrc_limit_gate not define
 type -t _session_limits >/dev/null || { echo "FAIL: _session_limits not defined (lib not loaded?)"; exit 1; }
 # The gate reads meters through a 60s snapshot cache; every stub change below must drop it.
 _reset_snap() { _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; }
+# HB: fake HOME for the ROUND 3.1 billing rows near the end (they fixture their own auth dirs).
+HB="$TMP/hb"; mkdir -p "$HB"
 
 # ---------------------------------------------------------------------------------------------------
 # UNIT: meter extraction — the lane's MOST-SPENT declared window wins.
@@ -115,7 +117,8 @@ fb="$( _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0
 # r3.2: with REAL billing (catalog stubbed unreachable), dv's implicit default is the
 # runtime Free pick -> offline swe-2-high -> subscription, so dv IS suggested without
 # consent. An explicitly metered dv model is still not suggested (covered by billing tests).
-fb="$( HOME="$FH0"; _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0; fi; return 1; }
+fb="$( HOME="$FH0"; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }
+        _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0; fi; return 1; }
         _lane_ready_probe() { return 1; }
         _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
         _osrc_limit_fallback "codexwk=98" )"; frc=$?
@@ -458,174 +461,6 @@ out="$( OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; type -t _osrc_limit_gate
   || bad "symlink: sourced load through link did not define _osrc_limit_gate (got '$out')"
 
 # ---------------------------------------------------------------------------------------------------
-# ROUND 3 — ADD-ON 1: paid-lane spend gate (lib/spend.sh). osrc_lane_billing classes, unknown->metered,
-# non-interactive EVENT approval refusal, --spend-ok one-command-only, env cannot imply consent,
-# and fallback pickers never selecting a metered lane quietly.
-# ---------------------------------------------------------------------------------------------------
-type -t osrc_lane_billing >/dev/null || { echo "FAIL: osrc_lane_billing not defined (lib/spend.sh not loaded?)"; exit 1; }
-type -t _osrc_spend_gate >/dev/null || { echo "FAIL: _osrc_spend_gate not defined"; exit 1; }
-HB="$TMP/hb"; mkdir -p "$HB"
-
-# Billing classes — each in a subshell with a controlled HOME (no ~/.env, no real auth files).
-b=$( HOME="$HB" OSRC_SPEND_GATE=0 bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing local' )
-[ "$b" = "free" ] && ok "r3 billing: local -> free" || bad "r3 billing: local -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or' )
-[ "$b" = "metered" ] && ok "r3 billing: or (OpenRouter) -> metered" || bad "r3 billing: or -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing tokenrouter; osrc_lane_billing gi' )
-case "$b" in metered$'\n'metered) ok "r3 billing: tokenrouter + gi -> metered" ;; *) bad "r3 billing: tr/gi -> '$b'" ;; esac
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing ci; osrc_lane_billing claudex' )
-case "$b" in subscription$'\n'subscription) ok "r3 billing: ci + claudex -> subscription" ;; *) bad "r3 billing: ci/claudex -> '$b'" ;; esac
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cursor; osrc_lane_billing grokbot' )
-case "$b" in unknown$'\n'unknown) ok "r3 billing: cursor + grokbot unprovable -> unknown" ;; *) bad "r3 billing: cursor/grokbot -> '$b'" ;; esac
-# Devin spend-free is PROOF-based: live catalog Free tag, else only SWE-2 High / SWE-2 Flash
-# High offline. glm-5.2 (plan-included for quota) is NOT proven Free for spend -> metered.
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { return 1; }; osrc_lane_billing dv glm-5.2' )
-[ "$b" = "metered" ] && ok "r3 billing: dv glm-5.2 not-proven-Free -> metered" || bad "r3 billing: dv glm-5.2 -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { return 1; }; osrc_lane_billing dv swe-2-high; osrc_lane_billing dv swe-2-flash-high' )
-case "$b" in subscription$'\n'subscription) ok "r3 billing: dv offline fallback swe-2-high + swe-2-flash-high -> subscription" ;; *) bad "r3 billing: dv offline fallback -> '$b'" ;; esac
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { printf "swe-2-max glm-5.2 "; return 0; }; osrc_lane_billing dv glm-5.2; osrc_lane_billing dv swe-2-max' )
-case "$b" in subscription$'\n'subscription) ok "r3 billing: dv live catalog Free ids -> subscription" ;; *) bad "r3 billing: dv catalog free -> '$b'" ;; esac
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { printf "swe-2-max "; return 0; }; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing dv swe-2-high' )
-[ "$b" = "metered" ] && ok "r3 billing: reachable catalog overrides static fallback (swe-2-high not Free -> metered)" || bad "r3 billing: catalog-vs-static -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing dv swe-2-high' )
-[ "$b" = "unknown" ] && ok "r3 billing: dv no CLI -> unknown" || bad "r3 billing: dv no cli -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing nosuchlane' )
-[ "$b" = "unknown" ] && ok "r3 billing: unresolvable lane -> unknown" || bad "r3 billing: bogus -> '$b'"
-
-# cc: API key -> metered; proven plan login -> subscription; CLI alone or redirect vars ->
-# metered/unknown. Round 3.1: subscription requires PROOF (credentials/keychain/auth-dir),
-# and every per-use redirect (token, base URL, BEDROCK/VERTEX, settings key helper) is metered.
-b=$( HOME="$HB" ANTHROPIC_API_KEY=x bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cc' )
-[ "$b" = "metered" ] && ok "r3 billing: cc + ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc+key -> '$b'"
-mkdir -p "$HB/.claude"; printf '{"claudeAiOauth":{"accessToken":"x"}}' > "$HB/.claude/.credentials.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
-[ "$b" = "subscription" ] && ok "r3 billing: cc proven plan login -> subscription" || bad "r3 billing: cc login -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; ANTHROPIC_AUTH_TOKEN=t ANTHROPIC_BASE_URL=https://openrouter.ai/api osrc_lane_billing cc' )
-[ "$b" = "metered" ] && ok "r3 billing: cc auth-token+base-url redirect -> metered" || bad "r3 billing: cc redirect -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; CLAUDE_CODE_USE_BEDROCK=1 osrc_lane_billing cc; CLAUDE_CODE_USE_VERTEX=1 osrc_lane_billing cc' )
-case "$b" in metered$'\n'metered) ok "r3 billing: cc BEDROCK+VERTEX -> metered" ;; *) bad "r3 billing: cc bedrock/vertex -> '$b'" ;; esac
-printf '{"apiKeyHelper":"/bin/echo sk-x"}' > "$HB/.claude/settings.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
-[ "$b" = "metered" ] && ok "r3 billing: cc settings apiKeyHelper -> metered" || bad "r3 billing: cc apikeyhelper -> '$b'"
-printf '{"env":{"ANTHROPIC_API_KEY":"sk-x"}}' > "$HB/.claude/settings.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
-[ "$b" = "metered" ] && ok "r3 billing: cc settings env.ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc settings envkey -> '$b'"
-rm -f "$HB/.claude/settings.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; rm -f "$HOME/.claude/.credentials.json"; osrc_lane_billing cc' )
-[ "$b" = "unknown" ] && ok "r3 billing: cc CLI but no provable login -> unknown" || bad "r3 billing: cc cli-only -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cc' )
-[ "$b" = "unknown" ] && ok "r3 billing: cc unprovable -> unknown" || bad "r3 billing: cc unknown -> '$b'"
-
-# cx: ChatGPT auth.json -> subscription; OPENAI_API_KEY -> metered; nothing -> unknown.
-mkdir -p "$HB/.codex"; printf '{"tokens":{"access_token":"x"}}' > "$HB/.codex/auth.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
-[ "$b" = "subscription" ] && ok "r3 billing: cx ChatGPT login -> subscription" || bad "r3 billing: cx auth.json -> '$b'"
-printf '{"OPENAI_API_KEY":"sk-x"}' > "$HB/.codex/auth.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
-[ "$b" = "metered" ] && ok "r3 billing: cx auth.json API key -> metered" || bad "r3 billing: cx apikey -> '$b'"
-rm -rf "$HB/.codex"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cx' )
-[ "$b" = "unknown" ] && ok "r3 billing: cx unprovable -> unknown" || bad "r3 billing: cx unknown -> '$b'"
-
-# unknown is treated as METERED by the gate: non-interactive refusal + EVENT approval + NEXT.
-out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
-        _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
-[ $rc -ne 0 ] && case "$out" in
-  *"EVENT approval"*"paid-lane:or/"* ) ok "r3 spend: non-interactive metered lane refuses with EVENT approval" ;;
-  *) bad "r3 spend: refusal missing EVENT approval (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
-esac
-case "$out" in
-  *"--spend-ok"*) ok "r3 spend: refusal NEXT names --spend-ok" ;;
-  *) bad "r3 spend: refusal missing --spend-ok hint: $(printf '%s' "$out" | head -4)" ;;
-esac
-grep -q '"kind":"approval"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null \
-  && ok "r3 spend: EVENT approval persisted to lanes/events.jsonl" \
-  || bad "r3 spend: events.jsonl missing approval event"
-
-# --spend-ok consents THIS command only: OSRC_SPEND_OK set AFTER sourcing (what flag parsing
-# does) lets the gate proceed; a fresh command without it refuses again. (Env-inherited
-# OSRC_SPEND_OK is sanitized by the env block — proven by the dedicated test below.)
-out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
-        OSRC_SPEND_OK=1; _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
-[ $rc -eq 0 ] && ok "r3 spend: --spend-ok (OSRC_SPEND_OK=1) consents this command" || bad "r3 spend: consented gate rc=$rc: $out"
-out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
-        _osrc_spend_gate or some-model or "test" 2>&1 </dev/null' )"; rc=$?
-[ $rc -ne 0 ] && ok "r3 spend: consent does NOT persist to the next command" || bad "r3 spend: consent leaked into next command"
-
-# Env-inherited OSRC_SPEND_OK must be sanitized by the engine env block BEFORE parsing.
-b=$( OSRC_SPEND_OK=1 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; printf "%s" "${OSRC_SPEND_OK:-unset}"' )
-[ "$b" = "unset" ] && ok "r3 spend: env OSRC_SPEND_OK is unset by the env block (cannot imply consent)" \
-  || bad "r3 spend: env OSRC_SPEND_OK survived sourcing ('$b')"
-# .spend-ok job marker consents (the bg one-command channel) — r3.2: accepted ONLY for a
-# real job child: dir directly under $OSRC_JOBS, OSRC_JOB_TOKEN matching the marker's
-# header, and an EXACT lane|model pair (never "*", never empty). Runs in the
-# already-sourced shell with env-prefixes exactly as the detached child's gate reads them.
-JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"
-_mkmark() {  # <dir> <token> <pairs...>
-  local d="$1" t="$2"; shift 2
-  { printf '#osrc-spend-ok token=%s\n' "$t"; printf '%s\n' "$@"; } > "$d/.spend-ok"
-}
-# Wildcard and empty-model fields authorize NOTHING anymore.
-_mkmark "$JD" tokA 'or|*'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: wildcard lane|* marker consents nothing" || bad "r3.2 spend: wildcard marker leaked consent (rc=$rc)"
-_mkmark "$JD" tokA 'or|'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: empty-model marker consents nothing" || bad "r3.2 spend: empty-model marker leaked (rc=$rc)"
-# Exact pair + matching token -> consent, and the gate consumes (deletes) the marker.
-_mkmark "$JD" tokA 'or|some-model'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && ok "r3.2 spend: exact lane|model marker + job token consents" || bad "r3.2 spend: exact marker rc=$rc: $out"
-[ ! -f "$JD/.spend-ok" ] && ok "r3.2 spend: marker consumed after dispatch" || bad "r3.2 spend: marker survived dispatch"
-# Wrong token (a sibling job's secret, or a forged env) consents nothing.
-_mkmark "$JD" tokB 'or|some-model'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: token mismatch consents nothing" || bad "r3.2 spend: wrong-token consent leaked (rc=$rc)"
-# No token at all -> nothing (an arbitrary OSRC_JOB_DIR alone is not a job child).
-out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: OSRC_JOB_DIR without OSRC_JOB_TOKEN consents nothing" || bad "r3.2 spend: tokenless dir consented (rc=$rc)"
-# A marker dir OUTSIDE $OSRC_JOBS is never honored, even with a valid-looking header.
-OUTJ="$TMP/notjobs"; mkdir -p "$OUTJ"; _mkmark "$OUTJ" tokA 'or|some-model'
-out="$( OSRC_JOB_DIR="$OUTJ" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: marker outside \$OSRC_JOBS consents nothing" || bad "r3.2 spend: out-of-tree marker consented (rc=$rc)"
-# Nested/traversal job dirs are not "this job" either.
-NEST="$OSRC_HOME/jobs/a/b"; mkdir -p "$NEST"; _mkmark "$NEST" tokA 'or|some-model'
-out="$( OSRC_JOB_DIR="$NEST" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: nested job dir consents nothing" || bad "r3.2 spend: nested dir consented (rc=$rc)"
-# Binding still holds inside the trusted context: lane `or` marker does NOT authorize `dv`,
-# and a model-bound marker does not cover a different model on the same lane.
-_mkmark "$JD" tokA 'or|some-model'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { return 1; }; _osrc_spend_gate dv glm-5.2 dv "test"' 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: or-marker does not authorize the dv lane" || bad "r3.2 spend: cross-lane consent leaked (rc=$rc)"
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3.2 spend: model-bound marker does not cover a different model" || bad "r3.2 spend: cross-model consent leaked (rc=$rc)"
-_mkmark "$JD" tokA 'or|hy3'
-out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && ok "r3.2 spend: exact lane|model marker consents (second pair)" || bad "r3.2 spend: exact marker rc=$rc: $out"
-rm -f "$JD/.spend-ok"
-
-# Fallback pickers never select a metered lane quietly: only `or` ready -> no pick;
-# with spend consent the same list picks it.
-fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
-        _osrc_lane_spendable or m || true
-        _fallback_pick "" "alias|model|or" )"
-[ -z "$fb" ] && ok "r3 spend: fallback refuses to pick metered or without consent" || bad "r3 spend: fallback picked '$fb'"
-fb="$( _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
-        OSRC_SPEND_OK=1 _fallback_pick "" "alias|model|or" )"
-[ "$fb" = "alias|model|or" ] && ok "r3 spend: --spend-ok lets fallback reach the paid lane" || bad "r3 spend: consented fallback -> '$fb'"
-# Same for the limit-gate's own suggestion helper: paid-only -> nothing without consent, or with it.
-fb="$( HOME="$FH0"; _fallback_lane_ready() { [ "$1" = or ] && return 0; return 1; }
-        _lane_ready_probe() { return 1; }
-        _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
-        OSRC_SPEND_OK=1 _osrc_limit_fallback "codexwk=98" )"
-[ "$fb" = "or" ] && ok "r3 spend: consented limit-fallback may name the paid lane" || bad "r3 spend: consented limit-fallback -> '$fb'"
-# Subscription lane still picked without consent (control).
-fb="$( _fallback_lane_ready() { [ "$1" = local ] && return 0; return 1; }
-        _fallback_pick "" "a1|m1|local
-a2|m2|or" )"
-[ "$fb" = "a1|m1|local" ] && ok "r3 spend: free lane still picked first without consent" || bad "r3 spend: free pick -> '$fb'"
-
-# ---------------------------------------------------------------------------------------------------
 # ROUND 3 — ADD-ON 2: per-lane usage caps. --cap parsing shape, standing lane cap persistence,
 # pre-launch gate, supervise-poll EVENT limit (once), session-send wrap-up pass.
 # ---------------------------------------------------------------------------------------------------
@@ -727,6 +562,15 @@ case "$*" in *"auth status"*) [ -f "$HOME/.devin/auth.json" ] && echo "logged in
 exit 0
 EOF
 chmod +x "$SUM/bin/devin"
+cat > "$SUM/bin/claude" <<'EOF'
+#!/bin/sh
+# `auth status` answers a claude.ai plan login (fake values) ONLY when this home's
+# credentials file exists — installed-but-logged-out must not detect. Billing proof
+# for the feed's paid flag comes from this same JSON.
+case "$*" in *"auth status"*) [ -f "$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}';; esac
+exit 0
+EOF
+chmod +x "$SUM/bin/claude"
 # Auth fixtures in $SUM/home: claude creds, codex auth.json, antigravity dir, factory auth file,
 # devin auth file. $SUM/home-empty gets NONE of them.
 mkdir -p "$SUM/home/.claude" "$SUM/home/.codex" "$SUM/home/.antigravity" "$SUM/home/.factory" "$SUM/home/.devin"
@@ -842,6 +686,16 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ]
 [ "$b" = "unknown" ] && ok "r3.1 billing: codex CLI, no auth.json/login proof -> unknown" || bad "r3.1 billing: cx cli-only -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
 [ "$b" = "unknown" ] && ok "r3.1 billing: agy CLI without ~/.antigravity -> unknown" || bad "r3.1 billing: gm cli-only -> '$b'"
+# r9 class-check: ~/.antigravity dir + per-use key evidence -> metered; dir alone -> subscription.
+mkdir -p "$HB/.antigravity"; printf '{"auth":"session"}' > "$HB/.antigravity/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "subscription" ] && ok "r9 billing: agy auth dir, no key material -> subscription" || bad "r9 billing: agy plain-auth -> '$b'"
+printf '{"apiKey":"gemini-key-abcdef123456"}' > "$HB/.antigravity/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "metered" ] && ok "r9 billing: agy auth dir apiKey -> metered" || bad "r9 billing: agy dir-key -> '$b'"
+rm -rf "$HB/.antigravity"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; GEMINI_API_KEY=x osrc_lane_billing gm; GOOGLE_API_KEY=y osrc_lane_billing gm' )
+case "$b" in metered$'\n'metered) ok "r9 billing: agy + GEMINI/GOOGLE_API_KEY -> metered" ;; *) bad "r9 billing: agy env keys -> '$b'" ;; esac
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or m cloud; osrc_lane_billing cc m cloud' )
 case "$b" in metered$'\n'metered) ok "r3.1 billing: cloud vehicle -> metered on any lane" ;; *) bad "r3.1 billing: cloud disp -> '$b'" ;; esac
 out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate "" "" "" "empty-lane probe" 2>&1 </dev/null' )"; rc=$?

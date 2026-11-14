@@ -21,6 +21,19 @@ FB="$TMP/fake-bin"; mkdir -p "$FB"; CALLS="$TMP/calls.log"
 for c in claude codex devin agy gemini droid cursor-agent oz cline hermes; do
   printf '#!/bin/sh\necho "%s $*" >> "%s"\necho PONG\nexit 0\n' "$c" "$CALLS" > "$FB/$c"; chmod +x "$FB/$c"
 done
+# claude's `auth status` answers a plan login (fake values) ONLY when this HOME has a
+# credentials file — r9 billing proof needs the full four-field JSON, and the scoped
+# fallback tests rely on file-present => subscription, file-absent => unknown.
+cat > "$FB/claude" <<EOF
+#!/bin/sh
+echo "claude \$*" >> "$CALLS"
+case "\$*" in
+  *"auth status"*) [ -f "\$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}' ;;
+esac
+echo PONG
+exit 0
+EOF
+chmod +x "$FB/claude"
 export PATH="$FB:$PATH"
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 export OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_NO_ADVISE=1 OSRC_BRIEF_NO_HEAL=1 OSRC_DOCTOR_OFFLINE=1
@@ -126,8 +139,12 @@ o="$(run run -m opus "hi" 2>&1)"
 grep -q "you excluded" <<<"$o" && bad "opus was wrongly refused: $o" || ok "an allowed model is not refused"
 
 # ---------------------------------------------------------------- provider defaults (automatic choice)
-: > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=glm run --provider devin run "hi" 2>&1)"; rc=$?
-[ "$rc" != 0 ] && grep -q 'default model for --provider devin' <<<"$o" && [ ! -s "$CALLS" ] \
+# dv's default is the runtime Free pick (swe-2-high offline), not the static glm-5.2 —
+# exclude the id that will actually resolve so the same gate is exercised. Resolving it
+# probes `devin models list` (metadata, logged by the fake) — "never run" means no
+# prompt-bearing dispatch (` -p `), not a literally empty call log.
+: > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=swe-2-high run --provider devin run "hi" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'default model for --provider devin' <<<"$o" && grep -q 'swe-2-high' <<<"$o" && ! grep -vqE '^devin (models list|auth status)' "$CALLS" \
   && ok "a provider's built-in default that is excluded is refused with the fix, never run" || bad "provider default: $o"
 
 # ---------------------------------------------------------------- automatic choices skip excluded
@@ -136,9 +153,15 @@ r="$(OR_OFFLOAD_CHAIN='z-ai/glm-5.2,anthropic/claude-5-fable,deepseek/deepseek-v
 o="$(OR_OFFLOAD_CHAIN='anthropic/claude-5-fable' lib 'MODEL_EXPLICIT=0; _or_chain auto; echo survived' 2>&1)"
 grep -q 'every model in the OpenRouter chain' <<<"$o" && ! grep -q survived <<<"$o" \
   && ok "an all-excluded OpenRouter chain stops with a clear message" || bad "all-excluded chain: $o"
-r="$(lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "fable|fable|cc
+# cc needs PROVABLE subscription billing to be spendable: r9 proof is `claude auth
+# status` JSON, so the scoped HOME gets a credentials file and the fake claude answers
+# auth status with a plan login only when that file exists.
+mkdir -p "$TMP/fbhome/.claude"; printf '{}\n' > "$TMP/fbhome/.claude/.credentials.json"
+r="$(HOME="$TMP/fbhome" lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "fable|fable|cc
 opus|opus|cc"' 2>/dev/null)"
 [ "$r" = "opus|opus|cc" ] && ok "fallback shortlist pick skips an excluded candidate" || bad "fallback pick: '$r'"
+r="$(lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "opus|opus|cc"' 2>/dev/null)"
+[ -z "$r" ] && ok "fallback pick: unprovable cc billing is skipped (unknown is never picked)" || bad "fallback pick unprovable: '$r'"
 r="$(lib '_model_denied fable && echo denied; _model_denied claude-opus-4-8 && echo bad || echo allowed' 2>/dev/null | tr '\n' ' ')"
 [ "$r" = "denied allowed " ] && ok "_model_denied (failover lane check + advise + route choke point) honors the exclude list" || bad "_model_denied: '$r'"
 r="$(lib '_lane_down_active() { return 1; }; _fallback_lane_ready() { return 0; }; _lane_ready_probe() { return 0; }; _failover_lane_ok cc run fable && echo ok || echo refused' 2>/dev/null)"
@@ -149,7 +172,7 @@ grep -q '^fable$' <<<"$o" && bad "escalate ladder kept fable: $o" \
 : > "$OSRC_HOME/benchmarks.json"
 r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --json --effort max "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null)"
 if printf '%s' "$r" | jq -e '.recommendation.alias' >/dev/null 2>&1; then
-  printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)' | grep -qi fable \
+  grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)')" \
     && bad "advise --json still lists a fable model" || ok "advise --json (recommendation + shortlist) never contains an excluded model"
 else bad "advise --json produced no JSON: $(printf '%s' "$r" | head -c 300)"; fi
 r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --effort max "architect a hard distributed consensus redesign" 2>&1)"
@@ -182,7 +205,7 @@ grep -q 'z-ai/glm-5.2' <<<"$o" && ! grep -qi 'fable' <<<"$o" \
 o="$(run brief 2>&1)"
 grep -q '^excluded    : fable' <<<"$o" && ok "brief prints the active exclusions (sticks across sessions)" || bad "brief: $(printf '%s' "$o" | head -20)"
 o="$(run doctor 2>&1)"
-grep -q 'excluded    : fable' <<<"$o" && ok "doctor prints the active exclusions" || bad "doctor: $(printf '%s' "$o" | grep -i exclu)"
+grep -q 'excluded    : fable' <<<"$o" && ok "doctor prints the active exclusions" || bad "doctor: $(grep -i exclu <<<"$o")"
 o="$(OSRC_HOME="$TMP/empty-state" run doctor 2>&1)"
 grep -q 'excluded models: none' <<<"$o" && ok "doctor says none when nothing is excluded" || bad "doctor none"
 
@@ -240,7 +263,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
   # a hand-edited bad line in the saved file fails closed too, and ls flags it
   printf 'fable\nbad[entry\n' > "$OSRC_HOME/exclude"
   xc gpt-5.6-sol || exit 1
-  bash "$SRC" exclude ls 2>&1 | grep -q 'bad\[entry.*NOT A VALID MODEL NAME' || exit 1
+  grep -q 'bad\[entry.*NOT A VALID MODEL NAME' <<<"$(bash "$SRC" exclude ls 2>&1)" || exit 1
 ) && ok "F2: a malformed entry fails closed (warns, refuses every model), [1m] entries work, exclude add rejects unparsable entries" || bad "F2 malformed entries"
 
 # ---- F3: the id an alias RESOLVES to is re-checked (Devin catalog, continue, agy family pick)
@@ -261,10 +284,21 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
   o="$(OSRC_EXCLUDE_MODELS=gemini-3.4-pro OSRC_AGY_PRO_DEFAULT=gemini-3.4-pro OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     _exclude_refuse_resolved gemini-pro "$(_agy_model_token gemini-pro)"; echo survived' bash "$SRC" 2>&1)"
   grep -q "'gemini-pro' resolves to gemini-3.4-pro" <<<"$o" && ! grep -q survived <<<"$o" || { echo "  agy: $o"; r=1; }
-  # every resolver dispatch site carries the second gate
-  for site in '_exclude_refuse_resolved "$id" "$atok"' '_exclude_refuse_resolved "$_gid_req" "$id"' '_exclude_refuse_resolved "$MODEL" "$_dvmodel"' '_exclude_refuse_resolved "$_lreq" "$id"' '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"'; do
+  # engine lanes (droid/warp) re-resolve through _lane_model_for — prove that gate FIRES
+  o="$(OSRC_EXCLUDE_MODELS=swe-1.8 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
+    have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }
+    _lane_model_for() { printf "swe-1-8"; }
+    droid() { echo ran; }
+    REST=("next"); MODEL_EXPLICIT=1; MODEL=swe; delegate_droid auto; echo survived' bash "$SRC" 2>&1)"
+  grep -q "'swe' resolves to swe-1-8, which you excluded" <<<"$o" && ! grep -qE 'survived|^ran' <<<"$o" || { echo "  droid: $o"; r=1; }
+  # every resolver dispatch site carries the second gate (the gemini-cli vehicle is
+  # retired, so its old $_gid_req site is gone; agy "id"/"atok" covers that lane now)
+  for site in '_exclude_refuse_resolved "$id" "$atok"' '_exclude_refuse_resolved "$MODEL" "$_dvmodel"' '_exclude_refuse_resolved "$_lreq" "$id"' '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"' '_exclude_refuse_resolved "$_req" "$MODEL" continue'; do
     grep -qF -- "$site" "$SRC" || { echo "  missing gate: $site"; r=1; }
   done
+  # the shared literals must cover BOTH engine lanes and BOTH session paths
+  [ "$(grep -cF '_exclude_refuse_resolved "$_lreq" "$id"' "$SRC")" -ge 2 ] || { echo "  _lreq gate not on both engine lanes"; r=1; }
+  [ "$(grep -cF '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"' "$SRC")" -ge 2 ] || { echo "  session gate not on both session paths"; r=1; }
   exit "$r"
 ) && ok "F3: Devin live-catalog, continue and agy family resolution re-check the final id (swe -> swe-1-8, gemini-pro -> dated id)" || bad "F3 resolved-id gate"
 
@@ -307,7 +341,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
     _session_model_restore() { echo RESTORED >&2; return 0; }; _model_pin_append() { return 0; }; _mkdir_claim() { return 0; }
     _model_pin_enforce_item "{\"session_id\":\"s1\",\"owner\":\"managed\",\"state\":\"working\",\"lane\":\"cc\",\"endpoint\":\"p\",\"requested_model\":\"fable\",\"observed_model\":\"opus\"}" 7')"
   grep -q '"result":"restore-skipped-excluded"' <<<"$o" && ! grep -q RESTORED <<<"$o" || { echo "  pin restore: $o"; r=1; }
-  grep -c '_exclude_session_default_guard "$PROVIDER"' "$SRC" | grep -qx 2 || { echo "  session start guard not wired on both session paths"; r=1; }
+  [ "$(grep -c '_exclude_session_default_guard "$PROVIDER"' "$SRC")" = 2 ] || { echo "  session start guard not wired on both session paths"; r=1; }
   exit "$r"
 ) && ok "F6: no -m session refuses an excluded/unknown default, relaunch and drift-restore never return to an excluded model" || bad "F6 sessions"
 
@@ -355,13 +389,13 @@ second_opinion "is the sky blue"'
   grep -q 'covers no model outsourcerer knows today' <<<"$o" || { echo "  none: $o"; exit 1; }
 ) && ok "F9: exclude add prints the known models an entry covers (pro -> deepseek-v4-pro surprise is visible) and the point-release note" || bad "F9 coverage print"
 
-# ---- F10: doctor never pings an excluded agy / gemini-cli model
+# ---- F10: doctor never pings an excluded agy model, and never pings retired gemini-cli
 (
   export OSRC_HOME; OSRC_HOME="$(xh f10)"; : > "$CALLS"
   o="$(OSRC_EXCLUDE_MODELS=gemini-flash,gemini-flash-lite OSRC_DOCTOR_PING=1 OSRC_DOCTOR_PING_TIMEOUT=2 OSRC_AGY_FLASH_DEFAULT=gemini-3.5-flash OSRC_GEMINI_FLASH_LITE_API_ID=gemini-3.5-flash-lite bash "$SRC" doctor 2>&1)"
-  grep -q 'antigravity-agy: ping skipped' <<<"$o" && grep -q 'gemini-cli: ping skipped' <<<"$o" \
-    && ! grep -q '^agy -p' "$CALLS" && ! grep -q '^gemini -p' "$CALLS" || { echo "  $(printf '%s' "$o" | grep -iE 'agy|gemini-cli' | head -5) calls=$(grep -E '^(agy|gemini) ' "$CALLS" | head -3)"; exit 1; }
-) && ok "F10: doctor skips the agy and gemini-cli pings when their model is excluded" || bad "F10 doctor agy ping"
+  grep -q 'antigravity-agy: ping skipped' <<<"$o" && grep -q 'gemini-cli: RETIRED' <<<"$o" \
+    && ! grep -q '^agy -p' "$CALLS" && ! grep -q '^gemini -p' "$CALLS" || { echo "  $(grep -iE 'agy|gemini-cli' <<<"$o" | head -5) calls=$(grep -E '^(agy|gemini) ' "$CALLS" | head -3)"; exit 1; }
+) && ok "F10: doctor skips the agy ping when its model is excluded and never pings retired gemini-cli" || bad "F10 doctor agy ping"
 
 # ---- F11: Devin health/plan probes skip excluded probe models
 (
@@ -394,7 +428,7 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f14)"; printf '# my exclusions\n\n   # none yet\n' > "$OSRC_HOME/exclude"
   r="$(lib '_exclude_active && echo active || echo idle' 2>/dev/null)"
-  [ "$r" = idle ] && bash "$SRC" exclude ls 2>&1 | grep -q 'no models excluded' || { echo "  $r"; exit 1; }
+  [ "$r" = idle ] && grep -q 'no models excluded' <<<"$(bash "$SRC" exclude ls 2>&1)" || { echo "  $r"; exit 1; }
 ) && ok "F14: a comments-only exclude file counts as no list" || bad "F14 comments-only file"
 
 # ---- F15: engine lanes running their own default say the list cannot see that model
@@ -407,8 +441,10 @@ second_opinion "is the sky blue"'
 # ---- F16: fanout without -m whose provider default is excluded is refused before anything starts
 (
   export OSRC_HOME; OSRC_HOME="$(xh f16)"; : > "$CALLS"
-  o="$(OSRC_EXCLUDE_MODELS=glm bash "$SRC" fanout -- "a" "b" 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && grep -q 'nothing was started.*--provider devin default glm-5.2' <<<"$o" && [ ! -s "$CALLS" ] \
+  # dv's default is the runtime Free pick (swe-2-high offline), not static glm-5.2 —
+  # exclude the id that will actually resolve so the same up-front gate is exercised.
+  o="$(OSRC_EXCLUDE_MODELS=swe-2-high bash "$SRC" fanout -- "a" "b" 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q 'nothing was started.*--provider devin default swe-2-high' <<<"$o" && ! grep -vqE '^devin (models list|auth status)' "$CALLS" \
     && [ -z "$(ls "$OSRC_HOME/jobs" 2>/dev/null)" ] || { echo "  rc=$rc $o"; exit 1; }
 ) && ok "F16: fanout with an excluded provider default is refused up front, no member launched" || bad "F16 fanout default"
 
