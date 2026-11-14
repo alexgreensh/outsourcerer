@@ -278,7 +278,18 @@ _osrc_cleanup_verdict() {
             # Only pure dependency caches are disposable. dist/build/target
             # can hold the lane's actual deliverable (review B3).
             node_modules|.venv|__pycache__) : ;;
-            *) igbad="${igbad:+$igbad, }${ifile%/}" ;;
+            *) local lbl="${ifile%/}"
+               # A collapsed '!! dir/' entry names the folder but not what is
+               # in it; expand a few contents so the ASK reason shows what
+               # would be lost (r4 smaller).
+               case "$ifile" in
+                 */) local ex
+                     ex="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null \
+                       | awk -v d="!! $ifile" 'index($0,d)==1 { sub(d,""); print }' \
+                       | head -3 | paste -sd', ' -)"
+                     [ -n "$ex" ] && lbl="$lbl ($ex)" ;;
+               esac
+               igbad="${igbad:+$igbad, }$lbl" ;;
           esac
         done <<<"$ig"
         [ -z "$igbad" ] || { printf 'ASK\tignored files in worktree: %s\n' "$igbad"; return 0; }

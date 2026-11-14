@@ -204,6 +204,9 @@ echo "$out" | grep -q "ASK.*wt-ignored" && ok "worktree with ignored .env ASK (f
 echo "$out" | grep -q "ASK.*ghost-x" && ok "owner with no record ASK (finding 5)" || bad "ghost-x not ASK"
 echo "$out" | grep -q "ASK.*wt-hidden" && ok "hidden untracked file makes worktree ASK (B1)" || bad "wt-hidden not ASK: $(echo "$out" | grep wt-hidden)"
 echo "$out" | grep -q "ASK.*wt-dist" && ok "ignored dist/target build output ASK (B3)" || bad "wt-dist not ASK: $(echo "$out" | grep wt-dist)"
+echo "$out" | grep -q "ignored files in worktree: dist (app.js" \
+  && ok "ASK reason names contents inside an ignored dir (r4)" \
+  || bad "ASK reason lacks ignored-dir contents: $(echo "$out" | grep 'ignored files')"
 echo "$out" | grep -q "ASK.*pr-old" && ok "merged PR + post-merge commit ASK (finding 2)" || bad "pr-old not ASK"
 echo "$out" | grep -q "ASK.*job-blocked" && ok "blocked job keeps evidence until TTL (finding 4)" || bad "job-blocked not ASK"
 echo "$out" | grep -q "ASK.*job-unver" && ok "unverified done? job keeps evidence until TTL (B4)" || bad "job-unver not ASK: $(echo "$out" | grep job-unver)"
