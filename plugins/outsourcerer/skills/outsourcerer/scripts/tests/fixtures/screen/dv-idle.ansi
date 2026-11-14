@@ -12,7 +12,7 @@ MacBook-Pro:work-dv dev$ devin --model 'swe-2-medium' --respect-workspace-trust 
 
  [38;2;124;124;124mPro · 0% remaining (resets in 43m)[39m
 
- [38;2;124;124;124m⏺[39m [38;2;124;124;124m~/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-dv[39m
+ [38;2;124;124;124m⏺[39m [38;2;124;124;124m~/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-dv[39m
 [38;2;68;68;68m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 [39m❭ [38;2;124;124;124mAsk Devin to build features, fix bugs, or work on your code[39m
 [38;2;68;68;68m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

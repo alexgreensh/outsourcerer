@@ -53,7 +53,7 @@ agy-idle|agy|composer||
 agy-working|agy|working||
 agy-idle-after-work|agy|idle||
 agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
-agy-file-approval|agy|approval|write|/Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
+agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
 agy-trust-folder-menu|agy|approval|trust|
 gm-trust-folder-menu|gemini|approval|trust|'
 

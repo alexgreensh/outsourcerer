@@ -27,8 +27,8 @@
 [38;5;246m[49m  ⎿  UserPromptSubmit says: [Token Optimizer] Loop: 4 similar messages in last 4 turns. Try a different [39m      [48;5;235m
 [49m     [38;5;246mapproach.[39m                                                                                                [48;5;235m
 [49m                                                                                                              [48;5;235m
-[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)                                                                                            [48;5;235m
-[38;5;246m[49m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=x;file:///Users/dev/CascadeProjects/Prompts/PERSONAL_OS/PROJECTS/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt[0m]8;;\                                                                                [48;5;235m
+[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)                                                                                            [48;5;235m
+[38;5;246m[49m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt[0m]8;;\                                                                                [48;5;235m
 [49m     [2m[38;5;231m 1 [0m[38;5;231mhi[39m                                                                                                    [48;5;235m
 [49m                                                                                                              [48;5;235m
 [38;5;246m[49m [39m Listing the target directory before deleting it                                                             [48;5;235m
