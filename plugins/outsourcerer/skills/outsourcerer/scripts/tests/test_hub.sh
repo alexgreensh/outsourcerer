@@ -549,5 +549,23 @@ wait_mtime "$EXPORT_JSON" "$m4" \
   || { bad "loop did not resume after a poll"; tail -5 "$TMP/serve6.log" >&2; }
 cleanup_srv
 
+echo "=== MC-9: a working project is never stale ==="
+# updatedAt used to be the newest of owner links, card and decisions only: lanes doing real work did not count.
+M9="$TMP/mc9"; mkdir -p "$M9/owners/sa" "$M9/owners/sb" "$M9/owners/sc" "$M9/hub/projects" "$M9/jobs/job-a" "$M9/jobs/job-b" "$M9/jobs/job-c"
+for x in a b c; do : > "$M9/owners/s$x/job-$x"; echo "{\"name\":\"P$x\",\"status\":\"building\"}" > "$M9/hub/projects/s$x.json"; echo '{"provider":"codex","model":"m"}' > "$M9/jobs/job-$x/meta.json"; echo log > "$M9/jobs/job-$x/log"; done
+echo done > "$M9/jobs/job-a/status"; echo done > "$M9/jobs/job-c/status"
+sleep 60 & M9P=$!; echo running > "$M9/jobs/job-b/status"; echo "$M9P" > "$M9/jobs/job-b/pid"
+old() { python3 -c 'import os,sys,time; t=time.time()-10800; [os.utime(f,(t,t)) for f in sys.argv[1:]]' "$@"; }
+old "$M9"/owners/*/* "$M9"/hub/projects/*.json "$M9"/jobs/*/*
+touch "$M9/jobs/job-a/log"                                  # only a job log moved
+m9="$(OSRC_HOME="$M9" OSRC_JOBS="$M9/jobs" bash "$SRC" hub export 2>"$TMP/m9.err")"
+kill "$M9P" 2>/dev/null; wait "$M9P" 2>/dev/null
+age() { jq -r --arg id "$1" '.projects[] | select(.id==$id) | .updatedAt // ""' <<<"$m9" | python3 -c 'import sys,time,calendar; s=sys.stdin.read().strip(); print(int(time.time()-calendar.timegm(time.strptime(s,"%Y-%m-%dT%H:%M:%SZ"))) if s else -1)'; }
+a9="$(age sa)"; b9="$(age sb)"; c9="$(age sc)"
+[ "$a9" -ge 0 ] && [ "$a9" -le 120 ] && ok "only a job log changed -> project updatedAt moves (${a9}s old)" || bad "job log activity ignored: updatedAt ${a9}s old $(head -2 "$TMP/m9.err")"
+[ "$b9" -ge 0 ] && [ "$b9" -le 120 ] && ok "live running lane, nothing written for 3 h -> never stale (${b9}s old)" || bad "live lane shown stale: updatedAt ${b9}s old"
+[ "$c9" -ge 10000 ] && ok "finished lane, nothing moved for 3 h -> stays old (${c9}s), stale still means nothing moved" || bad "quiet finished project not old: ${c9}s"
+grep -q '^osrc_hub_tick_touch()' "$(dirname "$SRC")/lib/hub.sh" && ok "hub exposes osrc_hub_tick_touch for the supervise tick" || bad "osrc_hub_tick_touch missing"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

@@ -259,7 +259,7 @@ _osrc_hub_build_project() {
   local slug="$1" now="$2" upd="$3"
   _osrc_hub_slug_ok "$slug" || return 1
   have jq || return 1
-  local sid_dir="$OSRC_HOME/owners/$slug" lanes='[]' t lane
+  local sid_dir="$OSRC_HOME/owners/$slug" lanes='[]' t lane act lact=0 llive=0
   local rmap; rmap="$(_osrc_hub_review_map)"
   if [ -d "$sid_dir" ]; then
     for t in "$sid_dir"/*; do
@@ -267,6 +267,9 @@ _osrc_hub_build_project() {
       case "${t##*/}" in .*|watch.*) continue ;; esac   # watch.*: a supervise --watch, not a lane
       lane="$(_osrc_hub_lane_for "${t##*/}" "$rmap")"
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
+      act="$(_osrc_hub_lane_activity "${t##*/}")"
+      [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
+      [ "${act##* }" = 1 ] && llive=1
     done
   fi
   local decs card out
@@ -283,7 +286,7 @@ _osrc_hub_build_project() {
   etanote="$(jq -r '.etaNote // ""' <<<"$card")"
   tagline="$(jq -r '.tagline // ""' <<<"$card")"
   repo="$(jq -r '.repo // ""' <<<"$card")"
-  local upda; upda="$(_osrc_hub_project_mtime "$slug")"
+  local upda; upda="$(_osrc_hub_project_mtime "$slug" "$lact" "$llive")"
   out="$(jq -cn \
     --arg id "$slug" --arg name "$name" --argjson order "$order" --arg upd "$upd" \
     --arg upda "$upda" \
@@ -330,19 +333,56 @@ _osrc_hub_status_override() {
       else . end' <<<"$2" 2>/dev/null || printf '%s' "$2"
 }
 
-# _osrc_hub_project_mtime <slug> -> ISO-8601 of the newest input file for this
-# project (owner links, card, decisions), or "" when nothing exists. Feeds the
-# page's "not updated for N min" stale alarm.
-_osrc_hub_project_mtime() {
-  local slug="$1" best=0 f m
-  _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
-  for f in "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json"; do
-    [ -f "$f" ] || continue
-    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
-    [ "$m" -gt "$best" ] 2>/dev/null && best="$m"
+# _osrc_hub_mt <path...> -> newest mtime (epoch) of the paths that exist, 0 when none. Stat only.
+_osrc_hub_mt() {
+  local b=0 f m
+  for f in "$@"; do
+    [ -e "$f" ] || continue
+    m="$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)"
+    [ "$m" -gt "$b" ] 2>/dev/null && b="$m"
   done
+  printf '%s' "$b"
+}
+
+# _osrc_hub_lane_activity <id> -> "<epoch> <live>": newest real activity of one owned lane (job dir files:
+# meta.json, log, rc, status..., remote lane file, its review items, autodetach log/rc, tmux session_activity)
+# and live=1 when the lane is working right now (a reconciled running job, a live remote lane, a working
+# tmux session). MC-9: a busy project must never look stale because its card was not rewritten.
+_osrc_hub_lane_activity() {
+  local id="$1" b live=0 st ta
+  b="$(_osrc_hub_mt "$OSRC_JOBS/$id"/* "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/review/items/$id"-*.json "$OSRC_HOME/autodetach/$id.log" "$OSRC_HOME/autodetach/$id.rc")"
+  if [ -d "$OSRC_JOBS/$id" ]; then
+    st="$(_reconcile_status "$id" 2>/dev/null || cat "$OSRC_JOBS/$id/status" 2>/dev/null)"
+    case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
+    [ "$(_osrc_hub_done_state "$id")" = done ] && live=0
+  elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
+    type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
+  elif have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; then
+    ta="$(tmux display-message -p -t "=$id" '#{session_activity}' 2>/dev/null)"
+    case "$ta" in ''|*[!0-9]*) ;; *) [ "$ta" -gt "$b" ] && b="$ta" ;; esac
+    case "$(_owned_live_state "$id" 2>/dev/null)" in working|live|running) live=1 ;; esac
+  fi
+  printf '%s %s' "$b" "$live"
+}
+
+# _osrc_hub_project_mtime <slug> [lane-activity-epoch] [live] -> ISO-8601 of the project's newest real
+# activity: its inputs (owner links, card, decisions) and, since MC-9, its owned lanes' activity. A live
+# working lane makes it "now": stale means nothing moved. "" when nothing exists. Feeds the page's alarm.
+_osrc_hub_project_mtime() {
+  local slug="$1" best=0 la="${2:-0}"
+  _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
+  best="$(_osrc_hub_mt "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json")"
+  [ "$la" -gt "$best" ] 2>/dev/null && best="$la"
+  [ "${3:-0}" = 1 ] && best="$(date +%s)"
   [ "$best" -gt 0 ] || { printf ''; return 0; }
   date -u -r "$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf ''
+}
+
+# osrc_hub_tick_touch <owner-session-id>: supervise's tick (L14 _sv_tick, every <= 10 min while an
+# orchestrator runs) calls this so the project's card never reads older than one tick (MC-9 item 4).
+osrc_hub_tick_touch() {
+  local f="$OSRC_HOME/hub/projects/${1:-}.json"
+  _osrc_hub_slug_ok "${1:-}" && [ -f "$f" ] && [ ! -L "$f" ] && touch "$f"
 }
 
 # _osrc_hub_unowned_project -> project doc for targets no owner session claims
