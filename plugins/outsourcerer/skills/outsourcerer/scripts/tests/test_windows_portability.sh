@@ -20,6 +20,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+. "$SCRIPT_DIR/lib_race_barrier.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -109,38 +110,27 @@ fi
 # property it cannot observe. Pre-forking the racers and holding them on a shared start flag makes
 # them contend for real, and the control below is what proves the assertion has teeth.
 _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if the barrier broke
-  local fn="$1" d="$2"
-  local won="$TMP/wins.$$.txt" flag="$TMP/go.$$"
-  # A missing/empty TMP lands won/flag at the filesystem root — report a broken barrier
-  # rather than racing on stray files (or spinning forever where they cannot be created).
+  local fn="$1" d="$2" gate="$2.gate"
+  # Refuse a missing scratch directory instead of racing on stray files.
   [ -n "${TMP:-}" ] && [ -d "$TMP" ] || { printf 'ERR'; return; }
-  true > "$won"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
-  # The barrier spin must be BOUNDED. The flag is created below; if it can never appear —
-  # the workdir was swept mid-round, the create failed, TMP was empty from the start — an
-  # unbounded `while [ ! -f ]` burns one full core per racer forever while `wait` parks the
-  # whole suite (observed: ~7 cores of busy-loop holding a conformance run for hours).
-  # A timed-out racer concedes the round, and a broken barrier returns ERR, so the suite
-  # reports FAIL and stops instead of hanging.
-  local i pids="" deadline=$(( SECONDS + 15 ))
+  mkdir "$gate" || { printf 'ERR'; return; }
+  local i rc released=0 winners=0
+  local pids=()
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    ( while [ ! -f "$flag" ]; do
-        { [ -d "$TMP" ] && [ "$SECONDS" -lt "$deadline" ]; } || break
-      done
-      [ -f "$flag" ] || { printf 'race: release flag never appeared\n' >&2; exit 1; }
-      "$fn" "$d" >/dev/null 2>&1 && printf 'win\n' >> "$won" ) &
-    pids="$pids $!"
+    ( osrc_race_ready "$gate" "$i" || exit 125
+      mkdir() { command mkdir "$@" 2>> "$gate/err.$i"; }
+      "$fn" "$d" ) > "$gate/out.$i" 2> "$gate/err.$i" &
+    pids[$i]=$!
   done
-  sleep 0.3          # let every racer reach the spin before the gun
-  if ! true > "$flag"; then   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
-    printf 'race: cannot create release flag\n' >&2
-    kill -KILL $pids 2>/dev/null; wait $pids 2>/dev/null
-    printf 'ERR'; return
-  fi
-  wait $pids
-  # won/flag disappearing under us means the workdir went away mid-round — that is a broken
-  # barrier, not a round with zero winners.
-  [ -f "$won" ] && [ -f "$flag" ] || { printf 'ERR'; return; }
-  grep -c 'win' "$won" || true   # -c prints 0 on no match (with exit 1); output is always a clean count
+  osrc_race_release "$gate" 10 || released=1
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    rc=0; wait "${pids[$i]}" || rc=$?
+    printf '%s\n' "$rc" > "$gate/status.$i"
+    [ "$rc" = 0 ] && winners=$((winners + 1))
+    [ "$rc" = 0 ] || [ "$rc" = 1 ] || released=1
+  done
+  [ "$released" = 0 ] || { printf 'ERR'; return; }
+  printf '%s' "$winners"
 }
 
 # A deliberately non-atomic claim, used only to prove the assertion can fail. It must NOT create
@@ -153,8 +143,8 @@ _broken_claim() { [ -d "$1" ] && return 1; mkdir -p "$1" 2>/dev/null || return 1
 rounds=20; bad_rounds=0; barrier_broken=0
 for r in $(seq 1 $rounds); do
   n="$(_race_round _mkdir_claim "$TMP/race-$r")"
-  if [ "$n" = "ERR" ]; then bad "race barrier broken — release flag never appeared (round $r)"; barrier_broken=1; break; fi
-  [ "$n" = "1" ] || bad_rounds=$((bad_rounds+1))
+  if [ "$n" = "ERR" ]; then bad "race barrier broken (round $r)"; osrc_race_report "$TMP/race-$r.gate" 10; barrier_broken=1; break; fi
+  if [ "$n" != "1" ]; then bad_rounds=$((bad_rounds+1)); printf 'round %s: winners=%s\n' "$r" "$n"; osrc_race_report "$TMP/race-$r.gate" 10; fi
 done
 if [ "$barrier_broken" -eq 0 ]; then
   [ "$bad_rounds" -eq 0 ] && ok "exactly one concurrent claimant wins, over $rounds contended rounds" \
@@ -167,10 +157,11 @@ fi
 ctl_bad=0; ctl_barrier_broken=0
 for r in $(seq 1 $rounds); do
   n="$(_race_round _broken_claim "$TMP/broken-$r")"
-  if [ "$n" = "ERR" ]; then bad "control: race barrier broken — release flag never appeared (round $r)"; ctl_barrier_broken=1; break; fi
+  if [ "$n" = "ERR" ]; then bad "control: race barrier broken (round $r)"; osrc_race_report "$TMP/broken-$r.gate" 10; ctl_barrier_broken=1; break; fi
   [ "$n" -ge 2 ] && ctl_bad=$((ctl_bad+1))
 done
 if [ "$ctl_barrier_broken" -eq 0 ]; then
+  [ "$ctl_bad" -gt 0 ] || osrc_race_report "$TMP/broken-$rounds.gate" 10
   [ "$ctl_bad" -gt 0 ] && ok "control: the race harness catches a non-atomic claim ($ctl_bad/$rounds rounds)" \
                        || bad "control: a non-atomic claim passed all $rounds rounds — the concurrency assertion has no power"
 fi

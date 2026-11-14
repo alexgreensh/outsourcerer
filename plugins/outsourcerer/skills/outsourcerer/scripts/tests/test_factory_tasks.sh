@@ -8,6 +8,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
+. "$HERE/lib_race_barrier.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "SKIP: git not installed"; exit 0; }
@@ -143,10 +144,22 @@ for i in 1 2 3; do ( STUB_SLEEP=0.2 L "_task_dispatch alpha $t5" >> "$TMP/race" 
 wait
 check "concurrent dispatch: exactly one launch wins" \
   "[ \"\$(grep -c . \"$TMP/race\")\" = 1 ] && [ \"\$(grep -c 'alpha/$t5\$' \"$TMP/launches\")\" = 1 ] && [ \"\$(jq -r .attempts \"$OSRC_HOME/plans/alpha/tasks/$t5.json\")\" = 1 ]"
-: > "$TMP/adds"
-for i in 1 2 3 4 5; do ( O task add "par $i" >> "$TMP/adds" 2>/dev/null ) & done
-wait
-check "concurrent task add allocates five distinct ids" "[ \"\$(sort -u \"$TMP/adds\" | grep -c '^t[0-9]')\" = 5 ]"
+gate="$TMP/add-race"; mkdir "$gate"; pids=()
+for i in 1 2 3 4 5; do
+  ( osrc_race_ready "$gate" "$i" || exit 125; O task add "par $i" ) > "$gate/out.$i" 2> "$gate/err.$i" & pids[$i]=$!
+done
+released=0; osrc_race_release "$gate" 5 || released=1
+adds_ok=1
+for i in 1 2 3 4 5; do
+  rc=0; wait "${pids[$i]}" || rc=$?; printf '%s\n' "$rc" > "$gate/status.$i"
+  [ "$rc" = 0 ] || adds_ok=0
+done
+cat "$gate"/out.* > "$TMP/adds"
+if [ "$released" = 0 ] && [ "$adds_ok" = 1 ] && [ "$(sort -u "$TMP/adds" | grep -c '^t[0-9]')" = 5 ]; then
+  ok "concurrent task add allocates five distinct ids"
+else
+  bad "concurrent task add allocates five distinct ids"; osrc_race_report "$gate" 5
+fi
 
 # ---- launch failure is surfaced, not silent
 t6="$(O task add 'will not launch' 2>/dev/null)"
@@ -775,9 +788,11 @@ r3_pid_cases() (
   _factory_owner_dead 1234 old || exit 1
   _factory_owner_dead 1234 new && exit 1
   _pid_start_identity() { return 2; }
+  kill() { return 0; }
+  _factory_owner_dead 1234 old && exit 1
+  kill() { echo 'kill: (1234) - No such process' >&2; return 1; }
   _factory_owner_dead 1234 old || exit 1
   _pid_start_identity() { return 1; }
-  kill() { echo 'kill: (1234) - No such process' >&2; return 1; }
   _factory_owner_dead 1234 old
 )
 check 'R3 D11 process identity handles reused, live, missing and ESRCH owners' r3_pid_cases

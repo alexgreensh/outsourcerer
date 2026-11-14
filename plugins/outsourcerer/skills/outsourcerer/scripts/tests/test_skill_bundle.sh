@@ -16,6 +16,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
+. "$TESTS_DIR/lib_race_barrier.sh"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
@@ -434,15 +435,38 @@ rc=$?
 _devin_skills_lock_release 2>/dev/null
 
 # --- 22. concurrent Devin dispatches serialize: state and marker always agree -----------------------
+devin_racer() {
+  local gate="$1" id="$2" skill="$3" actual links rc=0
+  osrc_race_ready "$gate" "$id" || return 125
+  WITH_SPEC="skills=$skill" _devin_with_prepare || return $?
+  if ! mkdir "$gate/critical" 2>/dev/null; then
+    echo "overlapping Devin grant critical sections" >&2; _devin_skills_lock_release; return 70
+  fi
+  actual="$(cat "$TMP/home/.config/devin/skills/.outsourcerer-grants" 2>/dev/null)"
+  links="$(cd "$TMP/home/.config/devin/skills" && find . -type l -not -name '.*' | sed 's|^\./||' | sort)"
+  if [ "$actual" != "$skill" ] || [ "$links" != "$skill" ]; then
+    printf 'held lock for %s: marker=%s links=%s\n' "$skill" "$actual" "$links" >&2; rc=1
+  fi
+  sleep 0.05 # Keep the critical section open to expose a second entrant.
+  rmdir "$gate/critical" || rc=1
+  _devin_skills_lock_release
+  return "$rc"
+}
 i=1; agree=1
 while [ "$i" -le 10 ]; do
   rm -rf "$TMP/home/.config/devin/skills"
-  ( WITH_SPEC='skills=confskill' _devin_with_prepare >/dev/null 2>&1; _devin_skills_lock_release ) &
-  ( WITH_SPEC='skills=plugskill' _devin_with_prepare >/dev/null 2>&1; _devin_skills_lock_release ) &
-  wait
+  gate="$TMP/devin-race-$i"; mkdir "$gate"
+  ( devin_racer "$gate" 1 confskill ) > "$gate/out.1" 2> "$gate/err.1" & p1=$!
+  ( devin_racer "$gate" 2 plugskill ) > "$gate/out.2" 2> "$gate/err.2" & p2=$!
+  released=0; osrc_race_release "$gate" 2 || released=1
+  rc1=0; wait "$p1" || rc1=$?; printf '%s\n' "$rc1" > "$gate/status.1"
+  rc2=0; wait "$p2" || rc2=$?; printf '%s\n' "$rc2" > "$gate/status.2"
   links="$(cd "$TMP/home/.config/devin/skills" 2>/dev/null && find . -type l -not -name '.*' | sed 's|^\./||' | sort | tr '\n' ' ')"
   marker="$(sort "$TMP/home/.config/devin/skills/.outsourcerer-grants" 2>/dev/null | tr '\n' ' ')"
-  [ "$links" = "$marker " ] || [ "${links% }" = "${marker% }" ] || { agree=0; break; }
+  if [ "$released" != 0 ] || [ "$rc1" != 0 ] || [ "$rc2" != 0 ] || [ "${links% }" != "${marker% }" ] \
+     || { [ "${marker% }" != confskill ] && [ "${marker% }" != plugskill ]; }; then
+    agree=0; osrc_race_report "$gate" 2; break
+  fi
   i=$((i+1))
 done
 [ "$agree" = "1" ] && ok "10x concurrent A/B Devin dispatches: links and marker always agree" \
