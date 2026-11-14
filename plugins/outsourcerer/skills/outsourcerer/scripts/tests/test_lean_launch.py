@@ -2,9 +2,11 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE = Path(__file__).resolve().parents[1] / 'lib/leanlaunch.sh'
 SCRIPT = MODULE.parent.parent / 'outsourcerer.sh'
@@ -20,11 +22,22 @@ printf '%s\\n' "${SESSION_LAUNCH[@]}"
 
 
 class LeanLaunch(unittest.TestCase):
+    def test_symlinked_cli_needs_no_installed_agents(self):
+        with tempfile.TemporaryDirectory(prefix='.lean-path-', dir=str(ROOT)) as d:
+            bindir = Path(d); (bindir / 'jq').symlink_to(shutil.which('jq'))
+            # Reproduce CI: system tools and jq, without the outer harness's agent stubs.
+            with mock.patch.dict(os.environ, {'PATH': d + ':/usr/bin:/bin'}):
+                result = unittest.TestResult(); LeanLaunch('test_symlinked_cli_loads_lean_module').run(result)
+            self.assertFalse(result.failures or result.errors, str(result.failures + result.errors))
+
     def test_symlinked_cli_loads_lean_module(self):
         with tempfile.TemporaryDirectory(prefix='.lean-link-', dir=str(ROOT)) as d:
             p = Path(d); link = p / 'outsourcerer'; link.symlink_to(SCRIPT)
             cfg = p / 'invalid.json'; cfg.write_text('{}')
-            env = dict(os.environ, HOME=d, OSRC_HOME=str(p / 'osrc'), OSRC_LEAN_LAUNCH='1', OSRC_LEAN_MCP_CONFIG=str(cfg), OUTSOURCERER_TMUX='osrc-test-L14-link')
+            bindir = p / 'bin'; bindir.mkdir()
+            for name in ('claude', 'tmux'):
+                stub = bindir / name; stub.write_text('#!/bin/sh\nexit 99\n'); stub.chmod(0o755)
+            env = dict(os.environ, HOME=d, OSRC_HOME=str(p / 'osrc'), OSRC_LEAN_LAUNCH='1', OSRC_LEAN_MCP_CONFIG=str(cfg), OUTSOURCERER_TMUX='osrc-test-L14b-link', PATH=str(bindir) + os.pathsep + os.environ['PATH'], OSRC_HEARTBEAT_DISABLED='1')
             result = subprocess.run(['/bin/bash', str(link), '--provider', 'cc', 'session', 'start'], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('lean launch: invalid MCP config', result.stdout + result.stderr)

@@ -43,10 +43,12 @@ for test_path in "${tests[@]}"; do
   case "$isolation" in
     mac)
       profile="$t/profile.sb"
-      (cd / && /usr/bin/python3 -I - "$profile" "$root" "$t" "$agents" <<'PY'
+      developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || exit 2
+      (cd / && /usr/bin/python3 -I - "$profile" "$root" "$t" "$agents" "$developer" <<'PY'
 import json, os, sys
 q = lambda p: json.dumps(p)
 system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
+system.append(os.path.realpath(sys.argv[5]))
 with open(sys.argv[1], 'w') as f:
     f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
@@ -77,13 +79,15 @@ PY
       for v in $agents; do
         for d in /usr/bin /bin /usr/local/bin; do
           exe="$d/$v"; [ -e "$exe" ] || continue
-          exe="$(cd / && /usr/bin/python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$exe")" || exit 2
+          canonical="$(cd / && /usr/bin/python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$exe")" || exit 2
+          # Separate directory binds preserve lexical aliases as separate mount destinations.
           mounts+=(--ro-bind "$t/bin/$v" "$exe")
+          [ "$canonical" = "$exe" ] || mounts+=(--ro-bind "$t/bin/$v" "$canonical")
         done
       done
       /usr/bin/bwrap --die-with-parent --new-session --clearenv --unshare-user --cap-drop ALL --unshare-net --unshare-pid --unshare-ipc \
         "${mounts[@]}" --tmpfs /tmp --tmpfs /run --dev /dev --proc /proc \
-        --ro-bind "$root" "$root" --bind "$t" "$t" --chdir "$root" -- "${cmd[@]}" || rc=$? ;;
+        --ro-bind "$root" "$root" --bind "$t" "$t" --remount-ro / --chdir "$root" -- "${cmd[@]}" || rc=$? ;;
     *) "${cmd[@]}" || rc=$? ;;
   esac
 done

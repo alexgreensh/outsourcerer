@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Adversarial regressions for the sealed execution and final review boundaries."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -20,6 +22,7 @@ REL = SCRIPTS.relative_to(ROOT)
 RUNNER = SCRIPTS / 'sealed-run.sh'
 REVIEW = SCRIPTS / 'lib/review.sh'
 CONFORMANCE = SCRIPTS / 'tests/conformance.sh'
+WORKFLOW = ROOT / '.github/workflows/tests.yml'
 sys.path.insert(0, str(SCRIPTS / 'lib'))
 spec = importlib.util.spec_from_file_location('boundary_classifier', SCRIPTS / 'lib/approver_classify.py')
 classifier = importlib.util.module_from_spec(spec)
@@ -27,6 +30,91 @@ spec.loader.exec_module(classifier)
 
 
 class SandboxFinal(unittest.TestCase):
+    def test_linux_ci_installs_bwrap_even_when_jq_exists(self):
+        source = WORKFLOW.read_text()
+        body = re.search(r'        run: \|\n(.*?)        shell: bash', source, re.S)
+        self.assertIsNotNone(body, 'dependency install step missing')
+        with tempfile.TemporaryDirectory(prefix='.ci-bwrap-', dir=ROOT) as d:
+            p = Path(d); bindir = p / 'bin'; bindir.mkdir(); log = p / 'installer.log'
+            (bindir / 'jq').write_text('#!/bin/sh\nexit 0\n')
+            (bindir / 'sudo').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> ' + shlex.quote(str(log)) + '\n')
+            for path in bindir.iterdir(): path.chmod(0o755)
+            env = dict(os.environ, RUNNER_OS='Linux', CI='true', PATH=str(bindir) + ':/usr/bin:/bin')
+            run = subprocess.run(['/bin/bash', '-e', '-c', textwrap.dedent(body.group(1))],
+                                 env=env, capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertTrue(log.exists(), 'jq bypassed Linux dependency installation')
+            self.assertRegex(log.read_text(), r'apt-get install[^\n]*\bbubblewrap\b')
+
+    def test_linux_ci_missing_bwrap_fails_both_runtime_probes(self):
+        spec = importlib.util.spec_from_file_location('ci_sealed_tests', SCRIPTS / 'tests/test_sealed_runner.py')
+        sealed = importlib.util.module_from_spec(spec); spec.loader.exec_module(sealed)
+        cases = [(SandboxFinal, 'test_linux_runtime_boundaries'), (sealed.SealedRunnerTests, 'test_isolation_probes')]
+        for case, method in cases:
+            for ci in ('true', ''):
+                with self.subTest(probe=method, CI=ci), mock.patch.object(sys, 'platform', 'linux'), \
+                        mock.patch.dict(os.environ, {'CI': ci}), mock.patch.object(os, 'access', return_value=False):
+                    outcome = unittest.TestResult(); case(method).run(outcome)
+                    if ci:
+                        self.assertTrue(outcome.failures, 'required Linux CI probe did not fail')
+                        self.assertFalse(outcome.skipped, 'required Linux CI probe skipped')
+                    else:
+                        self.assertEqual(len(outcome.skipped), 1)
+                        self.assertFalse(outcome.failures or outcome.errors)
+
+    def test_linux_ci_broken_bwrap_is_not_a_mac_skip(self):
+        spec = importlib.util.spec_from_file_location('broken_sealed_tests', SCRIPTS / 'tests/test_sealed_runner.py')
+        sealed = importlib.util.module_from_spec(spec); spec.loader.exec_module(sealed)
+        broken = mock.Mock(returncode=1, stdout='', stderr='sandbox_apply: Operation not permitted')
+        with mock.patch.object(sys, 'platform', 'linux'), mock.patch.dict(os.environ, {'CI': 'true'}), \
+                mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', return_value=broken):
+            outcome = unittest.TestResult(); sealed.SealedRunnerTests('test_isolation_probes').run(outcome)
+        self.assertTrue(outcome.failures, 'broken Linux sandbox did not fail')
+        self.assertFalse(outcome.skipped)
+
+    def test_linux_overlay_masks_merged_usr_aliases(self):
+        # Model bwrap's separate /usr and /bin mounts with harmless fixture executables.
+        source = RUNNER.read_text()
+        branch = source.split('    linux)\n', 1)[1].split('    *)', 1)[0].rsplit(';;', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='.merged-usr-', dir=ROOT) as d:
+            p = Path(d); (p / 'usr/bin').mkdir(parents=True); (p / 'bin').symlink_to('usr/bin')
+            t = p / 'scratch'; (t / 'bin').mkdir(parents=True)
+            for name in ('tmux', 'codex'):
+                real = p / 'usr/bin' / name; real.write_text('#!/bin/sh\nexit 7\n'); real.chmod(0o755)
+                stub = t / 'bin' / name; stub.write_text('#!/bin/sh\nexit 99\n'); stub.chmod(0o755)
+            recorder = p / 'bwrap-recorder'; captured = p / 'argv.json'
+            recorder.write_text('#!/usr/bin/python3 -I\nimport json,sys\nopen(' + repr(str(captured)) + ', "w").write(json.dumps(sys.argv[1:]))\n')
+            recorder.chmod(0o755)
+            branch = branch.replace('for d in /usr /bin /sbin /lib /lib64;', 'for d in "$fixture/usr" "$fixture/bin";')
+            branch = branch.replace('for d in /etc/ld.so.cache /etc/alternatives;', 'for d in "$fixture/no-etc";')
+            branch = branch.replace('for d in /usr/bin /bin /usr/local/bin;', 'for d in "$fixture/usr/bin" "$fixture/bin";')
+            branch = branch.replace('/usr/bin/bwrap ', '"$recorder" ')
+            prelude = 'fixture="$1"; t="$1/scratch"; root="$1"; recorder="$1/bwrap-recorder"; agents="tmux codex"; rc=0; cmd=(/usr/bin/true)\n'
+            run = subprocess.run(['/bin/bash', '-u', '-c', prelude + branch + '\nexit "$rc"', 'bash', str(p)],
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            args = json.loads(captured.read_text()); overlays = {}
+            for i, arg in enumerate(args[:-2]):
+                if arg == '--ro-bind': overlays[args[i + 2]] = args[i + 1]
+            for name in ('tmux', 'codex'):
+                for directory in ('usr/bin', 'bin'):
+                    alias = str(p / directory / name)
+                    executable = overlays.get(alias, alias)
+                    command = [executable, '-L', 'osrc-test-L14b', 'display-message'] if name == 'tmux' else [executable]
+                    result = subprocess.run(command, capture_output=True)
+                    self.assertEqual(result.returncode, 99, 'unmasked executable alias: ' + alias)
+
+    def test_canonical_only_overlay_mutant_is_rejected(self):
+        source = RUNNER.read_text()
+        before = 'mounts+=(--ro-bind "$t/bin/$v" "$exe")'
+        self.assertEqual(source.count(before), 1)
+        with tempfile.TemporaryDirectory(prefix='.alias-mutant-', dir=ROOT) as d:
+            mutant = Path(d) / 'sealed-run.sh'
+            mutant.write_text(source.replace(before, 'mounts+=(--ro-bind "$t/bin/$v" "$canonical")'))
+            with mock.patch.dict(globals(), {'RUNNER': mutant}):
+                outcome = unittest.TestResult(); SandboxFinal('test_linux_overlay_masks_merged_usr_aliases').run(outcome)
+            self.assertTrue(outcome.failures, 'canonical-only overlay mutant survived')
+
     def test_python_startup_never_imports_worktree_or_pythonpath(self):
         with tempfile.TemporaryDirectory(prefix='.boundary-', dir=ROOT) as d:
             p = Path(d); root = p / 'project'; tests = root / REL / 'tests'
@@ -56,8 +144,43 @@ class SandboxFinal(unittest.TestCase):
         self.assertNotIn('(allow file-read* (subpath "/"))', source)
         self.assertIn('(deny network*)', source)
 
-    @unittest.skipUnless(sys.platform == 'linux' and os.access('/usr/bin/bwrap', os.X_OK), 'Linux bubblewrap runtime unavailable')
+    def test_mac_profile_allows_selected_xcode_without_all_applications(self):
+        source = RUNNER.read_text()
+        generator = source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='.xcode-profile-', dir=ROOT) as d:
+            profile = Path(d) / 'profile.sb'
+            developer = '/Applications/Xcode_26.6.app/Contents/Developer'
+            result = subprocess.run(['/usr/bin/python3', '-I', '-', str(profile), str(ROOT), d, '', developer],
+                                    input=generator, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            policy = profile.read_text()
+            self.assertIn('(allow file-read* file-map-executable (subpath "' + developer + '"))', policy)
+            self.assertNotIn('(subpath "/Applications")', policy)
+
+    def test_linux_root_is_readonly(self):
+        self.assertIn('--remount-ro /', RUNNER.read_text())
+
+    def test_isolation_probe_accepts_readonly_filesystem_denial(self):
+        source = (SCRIPTS / 'tests/test_sealed_runner.py').read_text()
+        probe = source.split("py.write_text('''", 1)[1].split("''')", 1)[0]
+        import errno
+        with mock.patch.object(Path, 'read_text', side_effect=PermissionError(errno.EACCES, 'denied')), \
+                mock.patch.object(Path, 'write_text', side_effect=OSError(errno.EROFS, 'read-only filesystem')), \
+                mock.patch.object(socket, 'socket') as sock, mock.patch.object(sys, 'argv', ['probe', '/secret', '/outside']), \
+                mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
+            sock.return_value.connect.side_effect = PermissionError(errno.EPERM, 'denied')
+            try:
+                exec(compile(probe, 'readonly-probe', 'exec'), {})
+            except OSError as error:
+                self.fail('read-only filesystem denial must count as isolation: ' + str(error))
+
     def test_linux_runtime_boundaries(self):
+        if sys.platform != 'linux':
+            self.skipTest('Linux bubblewrap runtime only')
+        if not os.access('/usr/bin/bwrap', os.X_OK):
+            if os.environ.get('CI', '').lower() == 'true':
+                self.fail('Linux CI requires working /usr/bin/bwrap for runtime proof')
+            self.skipTest('Linux bubblewrap runtime unavailable')
         with tempfile.TemporaryDirectory(prefix='.linux-boundary-', dir=ROOT) as d:
             p = Path(d); root = p / 'project'; tests = root / REL / 'tests'; tests.mkdir(parents=True)
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
@@ -208,8 +331,10 @@ _osrc_review_verdict_for L14b bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
              'test_python_startup_never_imports_worktree_or_pythonpath'),
             ('host sockets', 'RUNNER', runner.replace('--tmpfs /tmp', ''), 'test_linux_profile_hides_host_runtime_and_processes'),
             ('host pids', 'RUNNER', runner.replace('--unshare-pid', ''), 'test_linux_profile_hides_host_runtime_and_processes'),
+            ('Linux root writes', 'RUNNER', runner.replace('--remount-ro /', ''), 'test_linux_root_is_readonly'),
             ('absolute agents', 'RUNNER', runner.replace('--ro-bind "$t/bin/$v" "$exe"', ''), 'test_linux_profile_hides_host_runtime_and_processes'),
             ('loader root', 'RUNNER', runner.replace('(allow file-read* (literal "/"))', ''), 'test_mac_loader_profile_is_narrow_and_bootable'),
+            ('selected Xcode', 'RUNNER', runner.replace('system.append(os.path.realpath(sys.argv[5]))', ''), 'test_mac_profile_allows_selected_xcode_without_all_applications'),
             ('CI registration', 'CONFORMANCE', conf.replace('test_sealed_runner ', ''), 'test_all_python_suites_registered_and_executed_as_python'),
             ('Python execution', 'CONFORMANCE', conf.replace('*.py) exec python3 "$2"', '*.py) exec bash "$2"'), 'test_python_suite_executes_in_bounded_runner'),
             ('suite HOME', 'CONFORMANCE', conf.replace('HOME="$_home/home" OSRC_HOME=', 'OSRC_HOME='), 'test_python_suite_executes_in_bounded_runner'),

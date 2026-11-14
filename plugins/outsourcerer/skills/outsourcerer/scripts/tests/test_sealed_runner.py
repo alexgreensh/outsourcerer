@@ -112,6 +112,8 @@ class SealedRunnerTests(unittest.TestCase):
     def test_isolation_probes(self):
         tool = '/usr/bin/sandbox-exec' if sys.platform == 'darwin' else '/usr/bin/bwrap'
         if not os.access(tool, os.X_OK):
+            if sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true':
+                self.fail('Linux CI requires working /usr/bin/bwrap for runtime proof')
             self.skipTest('OS isolation tool unavailable')
         with tempfile.TemporaryDirectory(prefix='.sealed-proof-', dir=str(ROOT)) as temp:
             home = Path(temp) / 'home'
@@ -128,11 +130,11 @@ secret, outside = sys.argv[1:]
 try:
  pathlib.Path(secret).read_text(); raise SystemExit("secret read allowed")
 except OSError as e:
- if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT): raise
+ if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EROFS): raise
 try:
  pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")
 except OSError as e:
- if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT): raise
+ if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EROFS): raise
 s=socket.socket()
 try:
  s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")
@@ -146,7 +148,7 @@ print("isolated")
             sh.write_text('#!/bin/bash\nexec /usr/bin/python3 "' + str(py) + '" "' + str(secret) + '" "' + str(outside) + '"\n')
             env = dict(os.environ, HOME=str(home), OSRC_HOME=str(home / 'osrc'))
             result = subprocess.run([str(scripts / 'sealed-run.sh'), str((REL / 'tests/probe.sh'))], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if 'sandbox_apply: Operation not permitted' in result.stderr:
+            if sys.platform == 'darwin' and 'sandbox_apply: Operation not permitted' in result.stderr:
                 self.skipTest('nested macOS sandbox is unavailable: sandbox_apply denied')
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('isolated', result.stdout)
