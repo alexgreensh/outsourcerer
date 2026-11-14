@@ -13,6 +13,8 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 # sourcing — OSRC_CONSENT_FILE is derived from OSRC_HOME at source time.
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-home-$$"
 mkdir -p "$OSRC_HOME"
+# r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
+export HOME="${TMPDIR:-/tmp}/osrc-test-home-$$-fakehome"; mkdir -p "$HOME"
 
 # Load the script's functions. main "$@" runs with no args (prints help, returns 0);
 # all gate functions are then defined in this shell. set -u is inherited from the
@@ -27,7 +29,7 @@ SCRIPT_PATH="$SRC"
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
 bad() { echo FAIL: $1; fail=$((fail+1)); }
-cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
+cleanup() { rm -rf "$TMP" "$OSRC_HOME" "$HOME"; }
 trap cleanup EXIT
 
 TMP="$(mktemp -d)"
@@ -135,11 +137,14 @@ if grep -q '_bg_cloud_preack "\$@"' "$SRC"; then ok "preack wired into _bg_launc
 _bg_launch() { echo REACHED_LAUNCH > "$TMP/launched"; echo "stubid-123"; }
 PROVIDER=devin
 rm -f "$TMP/launched"
-( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
+# --spend-ok consents the metered dv/glm lane so the CLOUD gate is what decides here:
+# without it the route preflight's spend gate refuses first and this row would pass
+# for the wrong reason (billing, not cloud disclosure).
+( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --spend-ok -m glm "task" </dev/null >/dev/null 2>&1 ); rc=$?
 [ "$rc" -ne 0 ] && ok "cmd_bg refused cloud gate returns nonzero (no fake success)" || bad "cmd_bg exited 0 despite refusal"
 [ ! -f "$TMP/launched" ] && ok "cmd_bg did NOT reach _bg_launch after refusal" || bad "cmd_bg launched a job despite refusal"
 rm -f "$TMP/launched"
-out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack -m glm "task" </dev/null 2>/dev/null )"; rc=$?
+out="$( cd "$TMP"; unset OSRC_CLOUD_ACK OSRC_CLOUD_ACKED; rm -f "$OSRC_HOME/cloud-consent"; cmd_bg run --cloud-ack --spend-ok -m glm "task" </dev/null 2>/dev/null )"; rc=$?
 { [ "$rc" -eq 0 ] && [ -f "$TMP/launched" ] && grep -q 'stubid-123' <<<"$out"; } && ok "cmd_bg --cloud-ack proceeds to launch and prints the job id" || bad "cmd_bg --cloud-ack did not launch (rc=$rc)"
 
 # --- Scenario 12: _bg_cloud_preack honors --cloud-ack only among LEADING flags, never a

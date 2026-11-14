@@ -215,10 +215,29 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   _osrc_spend_gate cc "" claude "ordinary launch" 2>&1 </dev/null' )"; rc=$?
 [ $rc -ne 0 ] && ok "r5 cloud: unknown billing refuses on ordinary why too" \
   || bad "r5 cloud: ordinary-why unknown passed (rc=$rc): $out"
-# Proven subscription passes even with a cloud-session why (claude auth status stub).
+# Proven subscription passes even with a cloud-session why. The stub's `auth status`
+# must carry the full plan proof (r9): loggedIn + authMethod=claude.ai +
+# apiProvider=firstParty + subscriptionType in pro|max|team|enterprise.
 mkdir -p "$FAKEBIN"; cat > "$FAKEBIN/claude" <<'EOF'
 #!/usr/bin/env bash
-case "${1:-}" in auth) echo '{"loggedIn": true}'; exit 0 ;; esac
+case "$*" in *"auth status"*) cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
+exit 0 ;; esac
 exit 0
 EOF
 chmod +x "$FAKEBIN/claude"
@@ -249,6 +268,124 @@ case "$jlog" in
 esac
 [ ! -e "$E2/osrc/jobs/$jid/.spend-ok" ] && ok "r5 bg: .spend-ok marker consumed" \
   || bad "r5 bg: marker left behind in $jid"
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 6 (r6 verdict follow-ups): flag consent drops a leftover .spend-ok; RESOLVED prints the
+# id the delegate will actually launch for lanes that re-resolve at dispatch.
+# ---------------------------------------------------------------------------------------------------
+
+# #1: OSRC_SPEND_OK=1 (argv consent) removes a leftover marker in a REAL job dir — the
+# reviewer's `run --spend-ok` auto-detach case left one behind.
+JD="$OSRC_HOME/jobs/job-r6flag"; mkdir -p "$JD"
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD/.spend-ok"
+( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ ! -e "$JD/.spend-ok" ] \
+  && ok "r6 marker: flag consent drops leftover .spend-ok in job dir" \
+  || bad "r6 marker: flag consent left marker (rc=$rc exists=$([ -e "$JD/.spend-ok" ] && echo y || echo n))"
+# A dir outside $OSRC_JOBS keeps its file — the drop uses the same validation as the read path.
+FD="$TMP/notjobs/jd"; mkdir -p "$FD"; printf 'x\n' > "$FD/.spend-ok"
+( OSRC_JOB_DIR="$FD" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$FD/.spend-ok" ] \
+  && ok "r6 marker: forged job dir keeps its file" \
+  || bad "r6 marker: forged dir lost its file (rc=$rc)"
+# Marker consent (no flag) still binds the exact pair and records the path for the gate.
+JD2="$OSRC_HOME/jobs/job-r6mark"; mkdir -p "$JD2"
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD2/.spend-ok"
+OSRC_JOB_DIR="$JD2" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
+{ [ $rc -eq 0 ] && [ "$_OSRC_SPEND_MARKER" = "$JD2/.spend-ok" ]; } \
+  && ok "r6 marker: marker consent still binds exact pair" \
+  || bad "r6 marker: marker consent broke (rc=$rc marker=$_OSRC_SPEND_MARKER)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN OSRC_SPEND_OK _OSRC_SPEND_MARKER
+
+# #2: dv re-resolves the raw -m token against the live catalog at dispatch
+# (_devin_resolve_model); the receipt must print THAT id (kimi -> kimi-k9-free),
+# not the family/alias the route table resolved.
+KCAT="$TMP/kimicat.json"
+cat > "$KCAT" <<'EOF'
+{"families":[{"family_uid":"kimi","aliases":["kimi"],"variants":[
+  {"model_uid":"kimi-k9-free","cost_tier":"Free","cost_summary":null},
+  {"model_uid":"kimi-k9-pro","cost_tier":"Paid","cost_summary":"$1/MTok"}]}]}
+EOF
+rout="$( _devin_catalog_raw() { cat "$KCAT"; }
+    PROVIDER=devin ROUTE_PROVIDER_EXPLICIT=1 ROUTE_LANE=devin ROUTE_MODEL=kimi \
+    RESOLVED_ID=kimi MODEL=kimi _route_receipt 2>&1 )"
+case "$rout" in
+  *"model=kimi-k9-free"*) ok "r6 resolved: dv receipt prints launched catalog id" ;;
+  *) bad "r6 resolved: dv receipt wrong: $rout" ;;
+esac
+# A lane that does NOT re-resolve at dispatch still prints RESOLVED_ID verbatim.
+rout="$( PROVIDER=cc ROUTE_PROVIDER_EXPLICIT=1 ROUTE_LANE=cc ROUTE_MODEL=sonnet \
+    RESOLVED_ID=claude-sonnet-4-5 MODEL=sonnet _route_receipt 2>&1 )"
+case "$rout" in
+  *"model=claude-sonnet-4-5"*) ok "r6 resolved: cc receipt keeps resolved table id" ;;
+  *) bad "r6 resolved: cc receipt wrong: $rout" ;;
+esac
+
+# r7 hardening: "." is not a job-dir component and a symlinked job dir is never
+# rm'd through — the .spend-ok inside survives, and the read path refuses "." too.
+# ($OSRC_HOME/jobs/. IS $OSRC_HOME/jobs — a valid marker there must still not count.)
+printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$OSRC_HOME/jobs/.spend-ok"
+( OSRC_JOB_DIR="$OSRC_HOME/jobs/." OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$OSRC_HOME/jobs/.spend-ok" ] \
+  && ok "r7 marker: '.' job dir keeps .spend-ok (remove path)" \
+  || bad "r7 marker: '.' job dir lost file (rc=$rc)"
+OSRC_JOB_DIR="$OSRC_HOME/jobs/." OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
+[ $rc -ne 0 ] && ok "r7 marker: read path refuses '.' job dir" \
+  || bad "r7 marker: read path accepted '.' job dir (rc=$rc)"
+rm -f "$OSRC_HOME/jobs/.spend-ok"
+REAL="$TMP/realjob"; mkdir -p "$REAL"; printf 'keep\n' > "$REAL/.spend-ok"
+ln -s "$REAL" "$OSRC_HOME/jobs/job-r7link"
+( OSRC_JOB_DIR="$OSRC_HOME/jobs/job-r7link" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=1 _osrc_spend_ok dv glm-5.2 ); rc=$?
+[ $rc -eq 0 ] && [ -e "$REAL/.spend-ok" ] \
+  && ok "r7 marker: symlinked job dir keeps .spend-ok" \
+  || bad "r7 marker: symlinked dir lost file (rc=$rc)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN OSRC_SPEND_OK _OSRC_SPEND_MARKER
+
+# T3: _osrc_nojob runs a FUNCTION mock (env -u would exec the real binary), the
+# mock receives its args, a child sh sees both job vars UNSET, rc propagates, and
+# both vars are restored afterwards.
+_r7mock() { printf 'mock-args:%s\n' "$*"; sh -c 'printf "child-sees:%s/%s\n" "${OSRC_JOB_DIR:-UNSET}" "${OSRC_JOB_TOKEN:-UNSET}"'; return 3; }
+export OSRC_JOB_DIR="$OSRC_HOME/jobs/j1" OSRC_JOB_TOKEN=tokX
+out="$(_osrc_nojob _r7mock -m foo "a b" 2>&1)"; rc=$?
+case "$out" in *"mock-args:-m foo a b"*) ok "r7 nojob: function mock receives its args" ;; *) bad "r7 nojob: mock args missing: $out" ;; esac
+case "$out" in *"child-sees:UNSET/UNSET"*) ok "r7 nojob: child sees both job vars UNSET" ;; *) bad "r7 nojob: child saw job vars: $out" ;; esac
+[ $rc -eq 3 ] && ok "r7 nojob: rc propagates" || bad "r7 nojob: rc=$rc expected 3"
+[ "$OSRC_JOB_DIR" = "$OSRC_HOME/jobs/j1" ] && [ "$OSRC_JOB_TOKEN" = "tokX" ] \
+  && ok "r7 nojob: both vars restored" || bad "r7 nojob: vars not restored ($OSRC_JOB_DIR/$OSRC_JOB_TOKEN)"
+unset OSRC_JOB_DIR OSRC_JOB_TOKEN _r7mock
+
+# r9: _osrc_envrun restores EXACT state — value AND export attribute — for both -u
+# and NAME=VALUE forms. A set-but-unexported var must not come back exported; a var
+# unset before the call must stay unset; the child sees the scrubbed env.
+_r9exp="exp-val"; export _r9exp
+_r9plain="plain-val"   # set but NOT exported — the r7 bug re-exported vars like this
+_osrc_envrun -u _r9exp -u _r9plain _r9tmp=injected sh -c '[ "${_r9exp:-GONE}" = GONE ] && [ "${_r9plain:-GONE}" = GONE ] && [ "${_r9tmp:-}" = injected ]' \
+  && [ "$_r9exp" = "exp-val" ] && _ep="$(export -p)" \
+  && grep -q 'declare -x _r9exp=' <<<"$_ep" \
+  && [ "$_r9plain" = "plain-val" ] && ! grep -q 'declare -x _r9plain=' <<<"$_ep" \
+  && [ "${_r9tmp+set}" != "set" ] \
+  && ok "r9 envrun: scrub reaches child; exported/set/unset states all restored exactly" \
+  || bad "r9 envrun: restore wrong (exp=${_r9exp:-unset} plain=${_r9plain:-unset} tmp=${_r9tmp:-unset})"
+unset _r9exp _r9plain _r9tmp
+
+# r10 F3: a var exported with NO value (`export X`, never assigned). On bash >= 4
+# declare -p prints 'declare -x X' and the restore branch runs — this is the branch
+# that had the $_a/$_er_a typo. On bash 3.2 declare -p FAILS for it, so the snapshot
+# is "unset" and the var comes back unset: lossy but safe, and unchanged by the fix.
+# This row only has teeth on bash >= 4 (the Linux leg); on 3.2 it pins the known gap.
+unset _r9noval; export _r9noval
+_osrc_envrun -u _r9noval true
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+  _ep="$(export -p)"
+  [ "${_r9noval+x}" = x ] && grep -q 'declare -x _r9noval$' <<<"$_ep" \
+    && ok "r10 envrun: exported-empty var restored exported-empty (bash>=4)" \
+    || bad "r10 envrun: exported-empty lost (set=${_r9noval+x} ep=$(printf '%s' "$_ep" | grep _r9noval))"
+else
+  [ "${_r9noval+x}" != x ] \
+    && ok "r10 envrun: exported-empty var on bash 3.2 snapshots as unset (known gap)" \
+    || bad "r10 envrun: bash3.2 exported-empty unexpectedly restored"
+fi
+unset _r9noval
 
 echo
 echo "RESULT: $pass passed, $fail failed"

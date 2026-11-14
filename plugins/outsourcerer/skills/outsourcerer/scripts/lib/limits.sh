@@ -575,11 +575,15 @@ _osrc_harness_auth() {
 
 # _osrc_dir_auth <dir> -> rc0 when the dir holds an auth-ish FILE (auth|cred|token|session|
 # login|oauth|account|keychain in the name). Files only — a "token-optimizer" style DIRECTORY
-# name must not count as a credential.
+# name must not count as a credential. The file must be NON-EMPTY and not a history/cache/
+# log/tmp artefact: session-history.json is a record of past sessions, not a login, and an
+# empty auth-named file proves nothing was ever written. Residual (r11 F5): real install
+# layouts are still unverified — a state file named outside these patterns stays unknown.
 _osrc_dir_auth() {
   local d="${1:-}"
   [ -d "$d" ] || return 1
-  find "$d" -maxdepth 1 -type f \
+  find "$d" -maxdepth 1 -type f -size +0c \
+    ! -iname '*history*' ! -iname '*cache*' ! -iname '*.log' ! -iname '*.tmp' \
     \( -iname '*auth*' -o -iname '*cred*' -o -iname '*token*' -o -iname '*session*' \
        -o -iname '*login*' -o -iname '*oauth*' -o -iname '*account*' -o -iname '*keychain*' \) \
     -print -quit 2>/dev/null | grep -q .
