@@ -105,6 +105,8 @@ Every delegated run gets a watcher in the same turn you launch it, and you repor
 
 Chat bots and other message-driven orchestrators cannot poll: export `OSRC_HEARTBEAT_WAKE="<your notifier>"` before launching so the beacon wakes you. An **ASYNC SUPERVISION** warning means it is unset. Cadence, wake payload, digest switch, and `fleet`: `references/jobs-and-safety.md`.
 
+For a pane's current state, use `OUTSOURCERER_TMUX=<session> outsourcerer.sh session state` (backed by `osrc_screen_state`). Read the raw pane only if the state is `unknown`; do not repeatedly paste full pane captures into the orchestrator context.
+
 ## Operating rules
 
 - **Cloud consent, once ever.** The first cloud delegation needs consent (repo content leaves the machine; a secret-scan hard-block runs on every delegation regardless). Tell the user in one line, then `consent grant` (or `--cloud-ack`); it is remembered in `~/.outsourcerer/cloud-consent`. Read a gate refusal before retrying: the error names the fix.
