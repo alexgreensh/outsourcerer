@@ -229,9 +229,10 @@ _osrc_account_console() {
   jq -e '.loggedIn == true and (.authMethod == "console" or .authMethod == "apiKey" or .authMethod == "api_key" or .apiKeySource != null or (.apiProvider != null and .apiProvider != "firstParty"))' >/dev/null 2>&1 <<<"$status"
 }
 
-# Choose the smallest weekly usage. Unknown windows cannot satisfy a bound cap.
+# Prefer usable plan accounts, then approved paid accounts; spent accounts are last.
 _osrc_account_choose() {
-  local name dir usage c5 c7 spec meter window value cap best="" bestpct="" fallback="" bill
+  local name dir usage c5 c7 spec meter window value cap best="" bestpct="" bill threshold spent rank best_rank=99 pct
+  threshold="$(_osrc_limit_threshold)"
   while IFS=$'\t' read -r name dir; do
     _osrc_account_name_valid "$name" || continue
     [ "$name" = default ] || [ -d "$dir" ] || continue
@@ -250,12 +251,16 @@ _osrc_account_choose() {
 $(_osrc_cap_specs_for cc)
 EOF
     [ "$allowed" = 1 ] || continue
-    if [ -z "$c7" ]; then [ -n "$fallback" ] || fallback="$name"; continue; fi
-    if [ -z "$best" ] || awk -v a="$c7" -v b="$bestpct" 'BEGIN { exit !(a+0 < b+0) }'; then
-      best="$name"; bestpct="$c7"
+    spent=0
+    for pct in "$c5" "$c7"; do
+      [ -z "$pct" ] || ! awk -v p="$pct" -v t="$threshold" 'BEGIN { exit !(p+0 >= t+0) }' || spent=1
+    done
+    rank=0; [ "$bill" = subscription ] || rank=1
+    [ "$spent" = 0 ] || rank=$((rank + 2))
+    if [ "$rank" -lt "$best_rank" ] || { [ "$rank" -eq "$best_rank" ] && [ -n "$c7" ] && { [ -z "$bestpct" ] || awk -v a="$c7" -v b="$bestpct" 'BEGIN { exit !(a+0 < b+0) }'; }; }; then
+      best="$name"; bestpct="$c7"; best_rank="$rank"
     fi
   done
-  [ -n "$best" ] || best="$fallback"
   [ -n "$best" ] || return 1
   printf '%s\n' "$best"
 }
