@@ -641,7 +641,6 @@ EOF
   local hid hname hcli hlane horder
   while IFS='|' read -r hid hname hcli hlane horder; do
     [ -n "$hid" ] || continue
-    [ "$hid" != claude ] || continue
     _osrc_harness_detected "$hid" || continue
     # caps for the backing lane: standing (lane-caps) + this invocation's --cap specs that bind.
     local caps="" cl cs ocw captripped=false

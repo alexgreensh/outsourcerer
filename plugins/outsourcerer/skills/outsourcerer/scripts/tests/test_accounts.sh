@@ -1,7 +1,9 @@
 #!/bin/bash
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-: "${OSRC_HOME:?test requires an isolated OSRC_HOME}"
+TEST_ROOT="$(mktemp -d "$ROOT/tests/.account-test.XXXXXX")"
+trap 'rm -rf "$TEST_ROOT"' EXIT
+export HOME="$TEST_ROOT/home" OSRC_HOME="$TEST_ROOT/state"
 mkdir -p "$OSRC_HOME/bin" "$OSRC_HOME/a/token-optimizer" "$OSRC_HOME/b/token-optimizer" "$OSRC_HOME/unknown"
 for cli in codex devin droid cursor-agent agent agy gemini cline pi hermes warp curl gh; do
   printf '#!/bin/bash\nexit 99\n' > "$OSRC_HOME/bin/$cli"
@@ -28,6 +30,7 @@ case "$CLAUDE_CONFIG_DIR" in
   */unverified) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}' ;;
   */keysource) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","apiKeySource":"helper"}' ;;
   */failed) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 1 ;;
+  ''|*/.claude) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}' ;;
   *) printf '%s\n' '{}' ;;
 esac
 EOF

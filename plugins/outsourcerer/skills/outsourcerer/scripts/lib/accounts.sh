@@ -230,6 +230,7 @@ osrc_lane_summary() {
   rows='[]'
   if have claude; then
     while IFS=$'\t' read -r name dir; do
+      [ "$name" != default ] || continue
       bill="$(_osrc_account_billing "$dir")"
       usage="$(_osrc_account_usage "$dir")" || usage='|'
       c5="${usage%%|*}"; c7="${usage#*|}"; used="$c7"
@@ -245,6 +246,10 @@ osrc_lane_summary() {
 $(_osrc_accounts)
 EOF
   fi
-  base="$(jq -cn --argjson b "$base" --argjson a "$rows" '([$b[] | select(.id != "claude")] + $a)')" || return 1
-  if [ "${1:-}" = --json ]; then printf '%s\n' "$base"; else jq -r '.[] | [.id,.name,.state,.left,.billing] | @tsv' <<<"$base"; fi
+  if [ "${1:-}" = --json ]; then
+    jq -cn --argjson b "$base" --argjson a "$rows" '$b + $a'
+  else
+    _osrc_lane_summary_base
+    jq -r '.[] | [.id,.name,.state,.left,.billing] | @tsv' <<<"$rows"
+  fi
 }
