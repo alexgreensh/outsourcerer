@@ -120,6 +120,8 @@ For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy saf
 
 Supervision refreshes a project-and-limits snapshot every 10 minutes. Change the interval with `OSRC_SUPERVISE_TICK_SECS`; the snapshot lives in `$OSRC_HOME/supervise/<owner-id>/hub.json`.
 
+Reviewer rotation defaults to two reviews or 35% context, configurable with `OSRC_REVIEW_ROTATE_K` and `OSRC_REVIEW_CTX_MAX`. An idle managed reviewer with an empty queue is retired after 50 minutes (`OSRC_REVIEW_IDLE_MIN`).
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---

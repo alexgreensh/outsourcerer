@@ -65,9 +65,10 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - **Send-back** for lanes that cannot receive `session send`: `review sendback <item>` writes
   `review/REVIEW-<lane>-<sha7>.md` and prints a relay message. Chosen over pushing a `review/<lane>` ref
   because a push is outward-facing and needs write access to a branch the lane may own or protect.
-- **Rotation**: after `OSRC_REVIEW_ROTATE_K` reviews (6) or a footer context bar over
-  `OSRC_REVIEW_CTX_MAX` percent (60), `review next` refuses and `review rotate` prints the steps for a
-  fresh reviewer. `review reviewer <new> --replace` resets the counters.
+- **Rotation**: after `OSRC_REVIEW_ROTATE_K` reviews (2) or a footer context bar over
+  `OSRC_REVIEW_CTX_MAX` percent (35), `review next` refuses and `review rotate` prints the steps for a
+  fresh reviewer. A managed reviewer idle with an empty queue for `OSRC_REVIEW_IDLE_MIN` minutes (50)
+  is stopped and retired. `review reviewer <new> --replace` resets the counters.
 - Nothing merges automatically.
 
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)

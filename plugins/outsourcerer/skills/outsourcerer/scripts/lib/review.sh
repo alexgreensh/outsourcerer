@@ -220,15 +220,44 @@ _osrc_review_write_brief() { # <item-id> -> writes review/<id>.md
 }
 
 # ---- rotation ----------------------------------------------------------------------------------
-# After K reviews (OSRC_REVIEW_ROTATE_K, default 6) or context bar over OSRC_REVIEW_CTX_MAX (60%).
+# After K reviews (default 2) or context bar over OSRC_REVIEW_CTX_MAX (35%).
 _osrc_review_rotation_due() { # <session> -> prints reason, rc 0 when due
   local s="$1" f="$OSRC_HOME/review/reviewer.json" n k ctx max
-  k="${OSRC_REVIEW_ROTATE_K:-6}"; max="${OSRC_REVIEW_CTX_MAX:-60}"
+  k="${OSRC_REVIEW_ROTATE_K:-2}"; max="${OSRC_REVIEW_CTX_MAX:-35}"
   n="$(jq -r '.reviews // 0' "$f" 2>/dev/null)"; [ -n "$n" ] || n=0
   if [ "$n" -ge "$k" ] 2>/dev/null; then printf '%s reviews done (limit %s)' "$n" "$k"; return 0; fi
   ctx="$(_osrc_review_ctx_pct "$s")"
   if [ -n "$ctx" ] && [ "$ctx" -gt "$max" ] 2>/dev/null; then printf 'context %s%% (limit %s%%)' "$ctx" "$max"; return 0; fi
   return 1
+}
+
+_osrc_review_idle_retire() { # <session> <now> <screen> <queued> <inflight>
+  local s="$1" now="$2" scr="$3" queued="$4" inflight="$5" marker="$OSRC_HOME/review/idle.$1" since mins lk p st endpoint_lock=""
+  case "$s" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  if [ "$scr" != idle ] || [ "$queued" -ne 0 ] || [ -n "$inflight" ]; then rm -f "$marker"; return 0; fi
+  if [ ! -f "$marker" ]; then printf '%s\n' "$now" > "$marker"; return 0; fi
+  read -r since < "$marker"; case "$since" in ''|*[!0-9]*) printf '%s\n' "$now" > "$marker"; return 0 ;; esac
+  mins="${OSRC_REVIEW_IDLE_MIN:-50}"; case "$mins" in ''|*[!0-9]*) mins=50 ;; esac
+  [ $((now - since)) -ge $((mins * 60)) ] || return 0
+  lk="$OSRC_HOME/review/.next.lock"; _osrc_lock "$lk" || return 0
+  if type _endpoint_mutation_lock >/dev/null 2>&1; then
+    _endpoint_mutation_lock "$s" || { _osrc_unlock "$lk"; return 0; }
+    endpoint_lock="$(printf '%s' "$s" | cksum | awk '{print $1}')"
+  fi
+  if [ "$(_osrc_review_reviewer)" != "$s" ] || [ "$(_osrc_review_screen "$s")" != idle ] || ! _managed_endpoint_live "$s" "$s"; then
+    [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"
+    _osrc_unlock "$lk"; return 0
+  fi
+  for p in $(_osrc_review_items); do
+    st="$(jq -r '.state // ""' "$p")"
+    case "$st" in queued|inflight) [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"; _osrc_unlock "$lk"; rm -f "$marker"; return 0 ;; esac
+  done
+  OUTSOURCERER_TMUX="$s" "$SCRIPT_PATH" session stop >/dev/null 2>&1
+  if ! tmux has-session -t "=$s" 2>/dev/null; then
+    _osrc_jq_set "$OSRC_HOME/review/reviewer.json" '.session="" | .retired=true' && rm -f "$marker"
+  fi
+  [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"
+  _osrc_unlock "$lk"
 }
 
 # ---- events ------------------------------------------------------------------------------------
@@ -271,6 +300,7 @@ osrc_review_events() {
     return 0
   fi
   scr="$(_osrc_review_screen "$s")"
+  _osrc_review_idle_retire "$s" "$now" "$scr" "$nq" "$inflight"
   if [ -n "$inflight" ]; then
     local sent; sent="$(jq -r .sent_ts "$(_osrc_rv_item "$inflight")")"
     if [ "$scr" = idle ] && [ $(( now - sent )) -ge "$send_grace" ] && _osrc_ev_due .reviewer "rvstopped:$inflight" "$renotify"; then
