@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))   # -I drops the script dir
@@ -739,7 +740,14 @@ def sealed_runner(cmd: str, cwd: str, root: str) -> bool:
         path = resolve(arg, cwd)
         if not inside(path, [test_root]) or not path.endswith(".sh") or not os.path.isfile(path):
             return False
-    return True
+    try:
+        # Existence is insufficient: nested sandboxes and disabled namespaces can refuse launch.
+        probe = subprocess.run(['/bin/bash', '-p', runner, '--check-sandbox'], cwd=root,
+                               env={'PATH': '/usr/bin:/bin', 'HOME': HOME},
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        return probe.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple[bool, str]:
@@ -768,9 +776,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             raise Hold("no command visible")
         pre_checks(cmd)
         if sealed_runner(cmd, cwd, roots[0]):
-            # 0.16.0: the sandbox wrapper is not yet airtight (worktree code can run before it,
-            # Linux leaves host sockets reachable), so even sealed runs wait for a person.
-            raise Hold("test runs wait for a person in this version")
+            return True, "test/build:sealed runner with verified OS isolation"
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut

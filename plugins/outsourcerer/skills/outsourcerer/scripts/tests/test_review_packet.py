@@ -11,6 +11,7 @@ ROOT = Path(subprocess.check_output(['git', '-C', str(MODULE.parent), 'rev-parse
 SH = '''. "$1"
 OSRC_HOME="$2"; export OSRC_HOME
 _osrc_id_ok() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
+_osrc_jq_set() { local p="$1"; shift; jq "$@" "$p" > "$p.new" && mv "$p.new" "$p"; }
 _osrc_review_write_brief "$3" "${4:-}"
 '''
 

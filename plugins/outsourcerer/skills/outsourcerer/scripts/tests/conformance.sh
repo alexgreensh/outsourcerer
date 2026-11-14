@@ -140,6 +140,8 @@ _ALL_SUITES="$_ALL_SUITES test_heavy"
 _ALL_SUITES="$_ALL_SUITES test_accounts"
 _ALL_SUITES="$_ALL_SUITES test_hub test_hub_home test_cleanup_manifest test_limit_gate test_spend_consent test_lane_billing test_lanemsg test_portable_mtime"
 _ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_tests_set_home"
+_PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final"
+_ALL_SUITES="$_ALL_SUITES $_PYTHON_SUITES"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
@@ -205,6 +207,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   expired="$out_file.expired"
   # Never risk an empty OSRC_HOME: the suite would run against the user's real ~/.outsourcerer.
   _home="$(mktemp -d)" || { rm -f "$out_file" 2>/dev/null; _suite_rc=127; return 127; }
+  mkdir -p "$_home/home" || { _suite_rc=127; return 127; }
   # The SUITE stays in the FOREGROUND. A background job starts with SIGINT/SIGQUIT ignored, and a
   # shell cannot trap or reset a signal that was ignored at entry, so every INT trap in a suite or
   # in the engine (_supervise, the obligation guard, the fifo streamer, the fallback runner) would
@@ -252,7 +255,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   # the suite, THIS shell would print a "Terminated: 15" diagnostic for its foreground child into
   # the gate log, which is exactly the noise the timeout report replaces. The suite's own stderr
   # is unaffected (its command redirect sends it to the capture file).
-  { OSRC_HOME="$_home" OSRC_HEARTBEAT_DISABLED=1 bash -c 'echo "$$ $PPID" > "$1"; exec bash "$2"' _ "$pid_file" "$suite" >"$out_file" 2>&1; _suite_rc=$?; } 2>/dev/null
+  { HOME="$_home/home" OSRC_HOME="$_home" OSRC_HEARTBEAT_DISABLED=1 bash -c 'echo "$$ $PPID" > "$1"; case "$2" in *.py) exec python3 "$2" ;; *) exec bash "$2" ;; esac' _ "$pid_file" "$suite" >"$out_file" 2>&1; _suite_rc=$?; } 2>/dev/null
   _suite_pid_file=""
   if [ -n "$wd_pid" ] && [ -f "$expired" ]; then
     # Timer won: let the watchdog finish its kill, then walk the tree once more so a descendant
@@ -351,8 +354,9 @@ esac
 if [ "$_JOBS" -le 1 ]; then
   trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
   for t in $_ALL_SUITES; do
-    if [ -f "$SCRIPT_DIR/$t.sh" ]; then
-      _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+    _suite_path="$SCRIPT_DIR/$t.sh"; [ -f "$_suite_path" ] || _suite_path="$SCRIPT_DIR/$t.py"
+    if [ -f "$_suite_path" ]; then
+      _run_unit_suite_bounded "$_suite_path"
       _report_unit_suite_result "$t"
     else note "unit suite $t absent"; fi
   done
@@ -377,10 +381,11 @@ else
   while [ "$_i" -lt "$_par_n" ]; do
     while [ "$_l" -lt "$_par_n" ] && [ "$_active" -lt "$_JOBS" ]; do
       t="${_par_order[$_l]}"
-      if [ -f "$SCRIPT_DIR/$t.sh" ]; then
+      _suite_path="$SCRIPT_DIR/$t.sh"; [ -f "$_suite_path" ] || _suite_path="$SCRIPT_DIR/$t.py"
+      if [ -f "$_suite_path" ]; then
         mkdir -p "$_conf_tmux_dir/$t"
         ( export TMUX_TMPDIR="$_conf_tmux_dir/$t"
-          _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+          _run_unit_suite_bounded "$_suite_path"
           printf '%s' "$_suite_out" > "$_par_dir/$t.out"
           printf '%s %s %s\n' "$_suite_rc" "$_suite_timed_out" "$_suite_secs" > "$_par_dir/$t.meta.tmp"
           mv -f "$_par_dir/$t.meta.tmp" "$_par_dir/$t.meta"
@@ -448,6 +453,13 @@ for _f in "$SCRIPT_DIR"/test_*.sh; do
 done
 [ -z "$_unreg" ] && ok "every test_*.sh in this directory is registered with the runner" \
   || bad "test suite(s) present but never run by the gate:$_unreg"
+_unreg=""
+for _f in "$SCRIPT_DIR"/test_*.py; do
+  _n="$(basename "$_f" .py)"
+  case " $_PYTHON_SUITES " in *" $_n "*) ;; *) _unreg="$_unreg $_n" ;; esac
+done
+[ -z "$_unreg" ] && ok "every test_*.py in this directory is registered with the runner" \
+  || bad "Python suite(s) present but never run by the gate:$_unreg"
 
 # 2b. INSTALL DRIFT: a second installed copy running different code than this one is the failure that
 # makes every other gate here meaningless — the suite passes against a tree the user never executes.

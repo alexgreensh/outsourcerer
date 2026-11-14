@@ -59,7 +59,8 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - Re-review briefs compare against the last reviewed commit and turn its findings into a checklist.
   Lane reports should add a `## Round <number>` section for each round; when available, only the
   latest round is included. Use `review next --final` for the final merge review, which requests the
-  full base-to-head diff as well as the checklist.
+  full base-to-head diff as well as the checklist. An incremental MERGE automatically queues a
+  full-diff round on that same head. Only a MERGE from a recorded full-diff round can finish the lane.
   After CHANGES the lane reads `live` again and its stall clock starts at the verdict, so a lane that
   was sent findings and went silent raises `stalled`.
 - `lane rm` deletes the lane's event stamps, review items and scratch files, so re-adding the same id

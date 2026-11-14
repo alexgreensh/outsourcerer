@@ -5,22 +5,24 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'sealed-run: not in a worktree' >&2; exit 2; }
 root="$(cd "$root" && pwd -P)" || exit 2
 scripts="$root/plugins/outsourcerer/skills/outsourcerer/scripts"
-unisolated=0
+unisolated=0; check=0
+if [ "${1:-}" = --check-sandbox ]; then check=1; shift; fi
 if [ "${1:-}" = --allow-unisolated ]; then unisolated=1; shift; fi
-[ "$#" -gt 0 ] || { echo 'sealed-run: supply test paths' >&2; exit 2; }
+[ "$#" -gt 0 ] || [ "$check" = 1 ] || { echo 'sealed-run: supply test paths' >&2; exit 2; }
 tests=()
 for arg in "$@"; do
   case "/$arg/" in *'/../'*|*'/./'*|*'//'*) echo 'sealed-run: invalid path' >&2; exit 2 ;; esac
   case "$arg" in /*|[-]*) echo 'sealed-run: paths must be relative' >&2; exit 2 ;; esac
-  path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root/$arg")" || exit 2
+  path="$(cd / && /usr/bin/python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$root/$arg")" || exit 2
   case "$path" in "$scripts/tests/"*.sh) [ -f "$path" ] || exit 2 ;; *) echo 'sealed-run: test outside scripts/tests' >&2; exit 2 ;; esac
   tests+=("$path")
 done
-real_home="${HOME:?sealed-run: HOME required}"
+cd "$root" || exit 2
 t="$(mktemp -d "$root/.osrc-sealed.XXXXXXXX")" || exit 2
 trap 'rm -rf "$t"' EXIT
 mkdir -p "$t/bin" "$t/home" "$t/osrc" "$t/tmp" || exit 2
-for v in claude devin codex tmux agy droid gemini cursor-agent hermes; do
+agents='claude devin codex tmux agy droid gemini cursor-agent hermes'
+for v in $agents; do
   printf '#!/bin/sh\nexit 99\n' > "$t/bin/$v"; chmod 755 "$t/bin/$v"
 done
 isolation=none
@@ -33,29 +35,55 @@ if [ "$isolation" = none ]; then
   echo 'sealed-run: WARNING: running without OS isolation' >&2
 fi
 rc=0
+# Probe the same profile and executable chain used for tests, without running worktree code.
+[ "$check" = 0 ] || tests=(/usr/bin/true)
 for test_path in "${tests[@]}"; do
-  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /usr/bin/nice -n 15 /usr/bin/perl -e 'alarm 600; exec @ARGV' /bin/bash "$test_path")
+  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /usr/bin/nice -n 19 /usr/bin/perl -e 'alarm 600; exec @ARGV')
+  if [ "$check" = 1 ]; then cmd+=(/usr/bin/true); else cmd+=(/bin/bash "$test_path"); fi
   case "$isolation" in
     mac)
       profile="$t/profile.sb"
-      python3 - "$profile" "$root" "$t" <<'PY'
-import json, sys
+      (cd / && /usr/bin/python3 -I - "$profile" "$root" "$t" "$agents" <<'PY'
+import json, os, sys
 q = lambda p: json.dumps(p)
-system = ['/usr', '/bin', '/sbin', '/System', '/Library', '/opt/homebrew', '/private/etc', '/dev']
+system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
 with open(sys.argv[1], 'w') as f:
-    f.write('(version 1)\n(deny default)\n(allow process*)\n(allow sysctl-read)\n(allow mach-lookup)\n')
+    f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
+    f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
+    # libignition opens / as an openat root before dyld can start any executable.
+    f.write('(allow file-read* (literal "/"))\n')
     for p in system + [sys.argv[2]]:
-        f.write('(allow file-read* (subpath %s))\n' % q(p))
+        f.write('(allow file-read* file-map-executable (subpath %s))\n' % q(p))
     f.write('(allow file-write* (subpath %s))\n(deny network*)\n' % q(sys.argv[3]))
+    f.write('(allow file-write* (literal "/dev/null") (literal "/dev/zero"))\n')
+    for v in sys.argv[4].split():
+        for d in ['/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin']:
+            p = os.path.realpath(os.path.join(d, v))
+            if os.path.exists(p):
+                f.write('(deny process-exec file-read-data (literal %s))\n' % q(p))
 PY
+      ) || exit 2
       /usr/bin/sandbox-exec -f "$profile" "${cmd[@]}" || rc=$? ;;
     linux)
-      # The home overlay hides credentials; re-expose only this worktree as read-only.
-      dirs=(); d="$root"
-      case "$root/" in "$real_home/"*)
-        while [ "$d" != "$real_home" ] && [ "$d" != / ]; do dirs=(--dir "$d" "${dirs[@]}"); d="$(dirname "$d")"; done ;;
-      esac
-      /usr/bin/bwrap --unshare-net --ro-bind / / --tmpfs "$real_home" "${dirs[@]}" --ro-bind "$root" "$root" --bind "$t" "$t" -- "${cmd[@]}" || rc=$? ;;
+      # Expose system runtimes only, never host homes, sockets or host /proc.
+      mounts=()
+      for d in /usr /bin /sbin /lib /lib64; do
+        [ ! -e "$d" ] || mounts+=(--ro-bind "$d" "$d")
+      done
+      for d in /etc/ld.so.cache /etc/alternatives; do
+        [ ! -e "$d" ] || mounts+=(--ro-bind "$d" "$d")
+      done
+      # Absolute agent/tmux paths must hit the same stubs as PATH lookups.
+      for v in $agents; do
+        for d in /usr/bin /bin /usr/local/bin; do
+          exe="$d/$v"; [ -e "$exe" ] || continue
+          exe="$(cd / && /usr/bin/python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$exe")" || exit 2
+          mounts+=(--ro-bind "$t/bin/$v" "$exe")
+        done
+      done
+      /usr/bin/bwrap --die-with-parent --new-session --clearenv --unshare-user --cap-drop ALL --unshare-net --unshare-pid --unshare-ipc \
+        "${mounts[@]}" --tmpfs /tmp --tmpfs /run --dev /dev --proc /proc \
+        --ro-bind "$root" "$root" --bind "$t" "$t" --chdir "$root" -- "${cmd[@]}" || rc=$? ;;
     *) "${cmd[@]}" || rc=$? ;;
   esac
 done

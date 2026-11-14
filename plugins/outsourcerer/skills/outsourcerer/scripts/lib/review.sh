@@ -153,6 +153,9 @@ _osrc_review_lane_removed() { # <lane>: delete that lane's items and files; a la
 _osrc_review_verdict_for() { # <lane> <head> -> verdict of a VALID (non-stale) review of exactly this head
   local p="$(_osrc_rv_item "$1-${2:0:7}")"
   [ -f "$p" ] || return 0
+  if [ "$(jq -r '.verdict // ""' "$p")" = MERGE ]; then
+    [ "$(jq -r '.review_scope // ""' "$p")" = full ] && [ "$(jq -r '.review_scope_head // ""' "$p")" = "$2" ] || return 0
+  fi
   [ "$(jq -r .state "$p")" = verdict ] && [ "$(jq -r .stale "$p")" = false ] && [ "$(jq -r .head "$p")" = "$2" ] && jq -r .verdict "$p"
   return 0
 }
@@ -186,12 +189,25 @@ _osrc_review_ingest() {
   local p id vf first v now settle age
   now="$(_osrc_now)"; settle="${OSRC_VERDICT_SETTLE_SECS:-30}"
   for p in $(_osrc_review_items); do
-    case "$(jq -r .state "$p")" in inflight) ;; *) continue ;; esac
+    case "$(jq -r .state "$p")" in
+      inflight) ;;
+      verdict)
+        if [ "$(jq -r '.verdict // ""' "$p")" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
+          _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0 | .acked=false'
+        fi
+        continue ;;
+      *) continue ;;
+    esac
     id="$(jq -r .id "$p")"; vf="$OSRC_HOME/review/$id.VERDICT"
     [ -s "$vf" ] || continue
     first="$(head -1 "$vf" | tr -d '\r' | sed 's/^[[:space:]#*]*//; s/[[:space:]*:.-]*$//' | tr '[:lower:]' '[:upper:]')"
     case "$first" in
       MERGE|CHANGES|BLOCK)
+        if [ "$first" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
+          # Incremental success schedules a full round on this same head; it cannot finish a lane.
+          _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0'
+          continue
+        fi
         _osrc_jq_set "$p" --arg v "$first" --argjson now "$now" --arg vf "$vf" \
           '.state="verdict" | .verdict=$v | .verdict_ts=$now | .sha_reviewed=.head | .findings=$vf | .invalid_first_line=""' ;;
       *)
@@ -223,11 +239,13 @@ _osrc_review_previous() { # <lane> <head> -> newest earlier verdict item with us
 }
 
 _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
-  local p="$(_osrc_rv_item "$1")" out="$OSRC_HOME/review/$1.md" lane branch head url tr base brief vf fetch prev sha findings report session_root resolved final="${2:-}"
+  local p="$(_osrc_rv_item "$1")" out="$OSRC_HOME/review/$1.md" lane branch head url tr base brief vf fetch prev sha findings report session_root resolved scope=full final="${2:-}"
   lane="$(jq -r .lane "$p")"; branch="$(jq -r .branch "$p")"; head="$(jq -r .head "$p")"; url="$(jq -r .url "$p")"
   _osrc_id_ok "$lane" || return 1
   tr="$(jq -r .transport "$p")"; base="$(jq -r .base "$p")"; brief="$(jq -r .brief "$p")"; vf="$OSRC_HOME/review/$1.VERDICT"
   prev="$(_osrc_review_previous "$lane" "$head")" || prev=""
+  [ "$(jq -r '.needs_final // false' "$p")" != true ] || final=final
+  if [ -n "$prev" ] && [ "$final" != final ]; then scope=incremental; fi
   if [ -n "$prev" ]; then sha="$(jq -r .sha_reviewed "$prev")"; findings="$(jq -r .findings "$prev")"; fi
   report=""; [ -n "$brief" ] && report="$(dirname "$brief")/../out/$lane-REPORT.md"
   if [ -f "$report" ] && [ ! -L "$report" ]; then
@@ -261,7 +279,9 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
       fi
     fi
     printf '## Where to write the verdict\n\nWrite exactly this file: %s\n\nFirst line: one word, MERGE, CHANGES or BLOCK. Below it: findings, most severe first, each with file:line and the fix. MERGE means no findings that must change before merge.\nDo not merge, push or edit the branch. You are the only reviewer; take items one at a time.\n' "$vf"
+    [ "$scope" != incremental ] || printf '\nThis is an incremental round. A MERGE here queues a full-diff final round on this same head before the lane can finish.\n'
   } > "$out" || return 1
+  _osrc_jq_set "$p" --arg scope "$scope" --arg head "$head" '.review_scope=$scope | .review_scope_head=$head' || return 1
   printf '%s' "$out"
 }
 

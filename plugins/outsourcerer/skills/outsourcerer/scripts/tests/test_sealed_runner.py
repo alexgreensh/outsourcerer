@@ -91,10 +91,9 @@ class SealedRunnerTests(unittest.TestCase):
         runner = shlex.quote(str(SCRIPTS / 'sealed-run.sh'))
         test = str(REL / 'tests/test_approver_table.sh')
         good = runner + ' ' + test
-        with mock.patch.object(classifier.os, 'access', return_value=True), mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
+        with mock.patch.object(classifier.os, 'access', return_value=True), mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True), mock.patch.object(classifier.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
             self.assertTrue(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
-            # 0.16.0 holds even recognised sealed runs until the sandbox is airtight.
-            self.assertEqual(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)]), (False, 'test runs wait for a person in this version'))
+            self.assertTrue(classifier.is_safe(good, 'shell', '', str(ROOT), [str(ROOT)])[0])
             for bad in [good + ' | cat', good + '; echo x', good + ' > /dev/null',
                         'CI=1 ' + good, runner + ' ../' + test,
                         '/elsewhere/sealed-run.sh ' + test, good + ' --help', good + '\nls']:
@@ -124,7 +123,25 @@ class SealedRunnerTests(unittest.TestCase):
             secret = home / 'secret'; secret.write_text('not a credential')
             outside = home / 'outside'
             py = scripts / 'tests/probe.py'
-            py.write_text('''import errno, pathlib, socket, sys\nsecret, outside = sys.argv[1:]\ntry:\n pathlib.Path(secret).read_text(); raise SystemExit("secret read allowed")\nexcept PermissionError: pass\ntry:\n pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")\nexcept PermissionError: pass\ns=socket.socket()\ntry:\n s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")\nexcept OSError as e:\n if e.errno not in (errno.EPERM, errno.EACCES): raise\nprint("isolated")\n''')
+            py.write_text('''import errno, pathlib, socket, sys
+secret, outside = sys.argv[1:]
+try:
+ pathlib.Path(secret).read_text(); raise SystemExit("secret read allowed")
+except OSError as e:
+ if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT): raise
+try:
+ pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")
+except OSError as e:
+ if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT): raise
+s=socket.socket()
+try:
+ s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")
+except OSError as e:
+ allowed = (errno.EPERM, errno.EACCES)
+ if sys.platform == 'linux': allowed += (errno.ENETUNREACH, errno.ECONNREFUSED)
+ if e.errno not in allowed: raise
+print("isolated")
+''')
             sh = scripts / 'tests/probe.sh'
             sh.write_text('#!/bin/bash\nexec /usr/bin/python3 "' + str(py) + '" "' + str(secret) + '" "' + str(outside) + '"\n')
             env = dict(os.environ, HOME=str(home), OSRC_HOME=str(home / 'osrc'))

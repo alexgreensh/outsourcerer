@@ -98,17 +98,15 @@ After pressing Enter it re-reads the screen to confirm the prompt closed.
 For sandboxed lane worktrees, opt in to `safe` for the relevant sessions. Supervision reports
 the count of automatic approvals at the next actionable wake; details are in `$OSRC_HOME/approvals.log`.
 Sealed test runs are auto-approved only when the installed runner and each parent directory are
-root-owned and not writable by the delegate's user, and the OS isolation tool is present. A
+root-owned and not writable by the delegate's user, and the OS isolation tool passes a launch check. A
 worktree-writable runner is held because it can be replaced before execution. Without an isolation
 tool, a person can choose the explicit `--allow-unisolated` form.
 
-**What `safe` is, and what it is not.** It stops accidents: a delegate that wanders outside its
-worktree, deletes the wrong thing, reads a secret or pushes. It is **not a sandbox**, and it is
-**no defence against a prompt-injected or hostile delegate**. A delegate that may write
-`tests/x.sh` and then run `bash tests/x.sh`, or edit `package.json` and run `npm test`, can run
-anything it likes, because running the worktree's own tests is in the safe class. If the delegate
-reads untrusted input (issues, web pages, other people's code), keep the policy `off` and use the
-engine's own sandbox.
+The classifier holds ordinary test and build commands because they execute worktree code.
+Only the exact protected `sealed-run.sh` command with relative `scripts/tests/*.sh` paths can
+run automatically. Its fresh HOME and environment, read-only worktree, scratch-only writes and
+OS sandbox isolate the test. Linux also hides host sockets and processes. Missing or broken
+OS isolation holds the command. Continue to use the engine's own sandbox for other actions.
 
 **Approved** (every flag must be on that command's allowlist, else hold):
 - Read-only commands: ls/cat/grep/rg/head/tail/wc/sort (no `-o`)/uniq and xxd (one file, a
@@ -117,10 +115,8 @@ engine's own sandbox.
   `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
   `--no-index`, `-O`), `--help`/`--version` on known
   commands.
-- Test, build and lint runs, only as the exact script verb: `npm|pnpm|yarn test|lint|build`
-  with no extra arguments, pytest/unittest, `cargo|go test|build` (no `-o`, `--manifest-path`),
-  `make test`, `bash tests/…`, ruff check, tsc, eslint (no `--fix`, `-o`, `--outDir`). Every path
-  argument must be inside the worktree.
+- Tests through the protected installed sealed runner, with a working OS sandbox and relative
+  shell-test paths inside the worktree's `plugins/outsourcerer/skills/outsourcerer/scripts/tests/`.
 - Writes (mkdir/touch/cp/mv/rm, redirects, `sed -i`, `chmod` with a plain 3-digit or symbolic
   mode, git add/commit (`git add .` included), `git switch <name>` / `-c <name>`, file-create prompts) only when every
   target is inside the delegate's worktree and not `.git` or anything under it. The worktree is
@@ -128,6 +124,8 @@ engine's own sandbox.
 - `env -u TMUX -u TMUX_PANE …` (and CLAUDECODE, NO_COLOR) in front of an approved command.
 
 **Held** (prints `EVENT approval` and `NEXT … session answer`):
+- Ordinary test, build and lint commands, writable runner copies, and sealed runs whose sandbox
+  is missing or fails its launch check. `--allow-unisolated` always requires a person.
 - Recursive `rm`, rm/delete or any write outside the worktree, a write aimed at the worktree root itself, any
   write into `.git` (`rm -rf .git`, `.git/hooks/*`, `.git/config`).
 - Anything that touches OSRC_HOME: `OSRC_HOME=…`, `env OSRC_HOME=…`, `env -u OSRC_HOME`,
