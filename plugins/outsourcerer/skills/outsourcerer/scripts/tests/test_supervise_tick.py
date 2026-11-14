@@ -5,12 +5,30 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE = Path(__file__).resolve().parents[1] / 'lib/supervise.sh'
 ROOT = Path(subprocess.check_output(['git', '-C', str(MODULE.parent), 'rev-parse', '--show-toplevel'], text=True).strip())
 
 
 class SuperviseTick(unittest.TestCase):
+    def test_cadence_and_refresh_guards_detect_mutations(self):
+        source = MODULE.read_text()
+        old_check = '''if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''
+        mutations = {
+            'producer failure': (old_check, '''cmd_hub_export > "$tmp"; if ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''),
+            'bad json': (old_check, '''if ! cmd_hub_export > "$tmp"; then'''),
+            'cadence': ('''[ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0''', ':'),
+        }
+        for name, (old, new) in mutations.items():
+            with self.subTest(guard=name), tempfile.TemporaryDirectory(prefix='.tick-mutant-', dir=str(ROOT)) as d:
+                self.assertEqual(source.count(old), 1)
+                module = Path(d) / 'supervise-mutant.sh'; module.write_text(source.replace(old, new))
+                with mock.patch.dict(globals(), {'MODULE': module}):
+                    result = unittest.TestResult()
+                    SuperviseTick('test_snapshot_cadence_and_failed_refresh').run(result)
+                self.assertTrue(result.failures or result.errors, name + ' mutant survived')
+
     def test_supervise_publishes_snapshot(self):
         with tempfile.TemporaryDirectory(prefix='.tick-cli-', dir=str(ROOT)) as d:
             env = dict(os.environ, HOME=d, OSRC_HOME=str(Path(d) / 'osrc'), CLAUDE_CODE_SESSION_ID='orch')
