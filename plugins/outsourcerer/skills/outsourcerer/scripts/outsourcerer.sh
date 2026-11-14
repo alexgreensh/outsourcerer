@@ -5,6 +5,7 @@
 # Subcommands:
 #   doctor                         Preflight: platform, state-home writability, lanes, auth, consent.
 #   brief                          Session-start handshake: ready lanes, live limits, conserve rec, mode.
+#   accounts [add NAME [DIR]|check NAME|rm NAME]  Manage Claude accounts; --account NAME selects one.
 #   mode [status|auto|manual|hybrid|reset]   The copilot driving mode (persisted, remembered once).
 #   consent status|grant|revoke    Cloud-disclosure consent, remembered ONCE in ~/.outsourcerer
 #                                  (the secret-scan still runs on every delegation regardless).
@@ -1079,6 +1080,7 @@ parse_model() {
                             PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade)    OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --force-lane)         OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT
+      --account)            [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; shift 2 ;;
       --spend-ok)           OSRC_SPEND_OK=1; shift ;;    # consent to ONE paid-lane launch (lib/spend.sh; never persisted, env cannot imply it)
       --cap)                [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
       --cap=*)              OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
@@ -4122,21 +4124,6 @@ _route_check_cc() {
   [ "$PROVIDER" = "codex" ] && die "$RESOLVED_ID is Claude-backend-only; it cannot run through Codex/OpenRouter. Drop --provider and let '-m $MODEL' use the claude native lane (uses your Claude subscription)."
 }
 
-# Interactive claude launch for both session-start paths (unix array + winpty
-# string via _session_shell_command). Dynamic scope: reads MODEL/MODEL_EXPLICIT/
-# EFFORT, writes SESSION_LAUNCH. The winpty path used to emit a nested
-# `env MAX_THINKING_TOKENS=N env -u ...`; the flat argv below is the same spawn.
-_session_launch_cc() {
-  have claude || die "claude not on PATH (needed for a claude session)"
-  [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable cc claude --help
-  SESSION_LAUNCH=("env")
-  [ -n "$EFFORT" ] && SESSION_LAUNCH+=("MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")")
-  SESSION_LAUNCH+=("-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH" "claude")
-  [ "$MODEL_EXPLICIT" = "1" ] && SESSION_LAUNCH+=("--model" "$MODEL")
-  local _ccflag; _ccflag="$(_cc_effort_flag "${EFFORT:-}")"
-  if [ -n "$_ccflag" ] && _session_cc_effort_supported; then SESSION_LAUNCH+=("--effort" "$_ccflag"); fi
-}
-
 # ---- or (OpenRouter — metered multi-provider gateway, rode by cc/codex transports)
 # providers=cc codex: those provider tokens mean "route via OpenRouter" in dispatch
 # context (they are or_transport_providers too). disp is provider-split:
@@ -5213,6 +5200,7 @@ _consume_flags() {
                   PERM_FLAG_SEEN=1; shift ;;
       --allow-downgrade) OSRC_ALLOW_DOWNGRADE=1; shift ;;
       --force-lane) OSRC_FORCE_LANE=1; shift ;;   # consent to launch on a lane at/over OSRC_LANE_LIMIT_PCT (lib/limits.sh)
+      --account) [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; shift 2 ;;
       --spend-ok)   OSRC_SPEND_OK=1; shift ;;    # consent to ONE paid-lane launch (lib/spend.sh)
       --cap)        [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
       --cap=*)      OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
@@ -11492,6 +11480,7 @@ cmd_bg() {
   # flag-placement tolerance: global flags are legal between `bg` and the verb.
   while :; do case "${1:-}" in
     --worktree)  export OSRC_WORKTREE=1; shift ;;
+    --account)   [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; export OSRC_ACCOUNT; shift 2 ;;
     --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
     --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent for THIS bg command (lib/spend.sh)
     --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
@@ -11772,6 +11761,8 @@ _autodetach_run() {
   # L7 add-on: carry THIS command's spend consent into the pane as argv (env consent is
   # sanitized; the pane is a fresh process). --spend-ok sits in main()'s global-flag zone.
   [ "${OSRC_SPEND_OK:-0}" = "1" ] && _ad_full="$_ad_full --spend-ok"
+  [ -n "${OSRC_ACCOUNT:-}" ] && _ad_full="$_ad_full --account $(printf '%q' "$OSRC_ACCOUNT")"
+  for _a in ${OSRC_CAPS:-}; do _ad_full="$_ad_full --cap $(printf '%q' "$_a")"; done
   # Re-add --provider if it was a GLOBAL flag consumed by main() (not in ORIG). Mirrors run_job's
   # _run_provider logic. A duplicate (when --provider IS in ORIG) is harmless: both are consumed.
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full --provider $(printf '%q' "$PROVIDER")"
@@ -14152,6 +14143,7 @@ delegate_ccnative() {
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
   # in", which is the failure users hit). Verified: with these unset, headless claude runs normally.
   local clean=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN)
+  [ -n "${OSRC_ACCOUNT_DIR:-}" ] && clean+=("CLAUDE_CONFIG_DIR=$OSRC_ACCOUNT_DIR")
   if [ -n "$EFFORT" ]; then local think; think="$(_effort_thinking_tokens "$EFFORT")"; [ -n "$think" ] && { clean+=("MAX_THINKING_TOKENS=$think"); printf '>>> [effort] reasoning=%s (native: MAX_THINKING_TOKENS=%s)\n' "$EFFORT" "$think" >&2; }; fi
   local rc=0
   # Same coding-toolset grant as the cc lane so a headless mutating native run does not wedge on a
@@ -16588,7 +16580,7 @@ route_delegate() {
     if [ "$_fb_skipval" = "1" ]; then _fb_skipval=0; continue; fi
     case "$_fbp" in
       -m|--model) _fb_user_pinned=1; break ;;
-      --tier|--with|--effort|--reasoning|--provider|--trust-lane|--cap) _fb_skipval=1 ;;
+      --tier|--with|--effort|--reasoning|--provider|--trust-lane|--cap|--account) _fb_skipval=1 ;;
       # This scanner MUST recognize exactly the leading flags _consume_flags consumes, or a `-m` that
       # follows an unrecognized-but-valid flag reads as `*) break` (pinned=0) while _consume_flags still
       # sets MODEL_EXPLICIT=1 — and the quota gate would then SILENTLY switch a pinned model. Kept in
@@ -16817,6 +16809,7 @@ route_delegate() {
   # ChatGPT-weekly-at-98% failure). Fresh readings gate; stale (>6h) readings warn only.
   # --force-lane or an explicit --provider consents; unpinned auto runs take a zero-cost hop;
   # pins refuse loudly. Implemented in lib/limits.sh (_osrc_limit_gate).
+  case "$disp" in ccnative) _osrc_account_select ;; *) OSRC_ACCOUNT_DIR="" ;; esac
   local _olrc=0
   _osrc_limit_gate "$disp" || _olrc=$?
   if [ "$_olrc" = "10" ]; then continue; fi
@@ -18016,6 +18009,7 @@ _winpty_session() {
     start)
       parse_model "$@"
       _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
+      case "$PROVIDER" in cc|claude) _osrc_account_select ;; esac
       # Validate only when a token was given: droid/cursor/warp/hermes/cline interactive sessions have
       # no model override and run on the lane default with an EMPTY MODEL — an unconditional validate
       # killed them with a bogus "model token is empty". Non-empty tokens are still validated.
@@ -18234,6 +18228,7 @@ session() {
       [ -z "$_done_when" ] || osrc_done_validate "$_done_when" || die "session start: invalid --done-when spec"
       parse_model "$@"
       _session_infer_provider   # bug 2: -m terra/sol/opus/... starts its NATIVE lane, not the devin default
+      case "$PROVIDER" in cc|claude) _osrc_account_select ;; esac
       # Validate the model token before it is interpolated into a tmux shell command — but only when
       # one was given. droid/cursor/warp/hermes/cline interactive sessions run on the lane default with
       # an EMPTY MODEL; an unconditional validate killed them with a bogus "model token is empty".
@@ -19961,6 +19956,7 @@ main() {
     case "${1:-}" in
       --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
                   PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --account) [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; export OSRC_ACCOUNT; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
       --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent, argv-only, one command (lib/spend.sh)
       --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
@@ -20004,6 +20000,7 @@ main() {
       _escalate_ladder_report "${1:-}" "" ;;
     doctor)   doctor "$@" ;;                               # health probe; `doctor --fix` also repairs dead parity links
     brief)    cmd_brief ;;                                 # session-start handshake: lanes + limits + conserve + mode
+    accounts) cmd_accounts "$@" ;;
     mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
     tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
     consent)  cmd_consent "$@" ;;                          # cloud-consent: status|grant|revoke (remembered ack)
