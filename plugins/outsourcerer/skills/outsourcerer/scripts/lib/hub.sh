@@ -456,7 +456,7 @@ _osrc_hub_limits() {
 # and never listed. OpenRouter carries the paid tag.
 _osrc_hub_limits_local() {
   have jq 2>/dev/null || { printf '[]'; return 0; }
-  local now ts_ms stale c5 c5r c7 c7r cand raw arr='[]' upd='' upda='' src='statusline'
+  local now ts_ms stale c5='' c5r='' c7='' c7r='' cand raw arr='[]' upd='' upda='' src='statusline'
   now="$(date +%s)"
   # Claude windows: first fresh artifact wins.
   for cand in "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json"; do

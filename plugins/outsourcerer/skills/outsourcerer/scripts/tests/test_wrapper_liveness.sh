@@ -84,7 +84,7 @@ echo "=== launch messages tell an agent how to be woken ==="
 grep -q '_wake_on_finish_hint "$_ad_sess"' "$SRC" && ok "an auto-detached run prints the WAKE line" || no "auto-detach has no WAKE line"
 [ "$(grep -c '_wake_on_finish_hint "$id"' "$SRC")" -ge 3 ] && ok "every bg launch path prints the WAKE line" || no "a bg launch path lacks the WAKE line"
 
-if command -v tmux >/dev/null 2>&1; then
+if tmux -L osrc-test-T5 -V >/dev/null 2>&1; then
   echo "=== real tmux: a running wrapper counts as a live launch ==="
   mkdir -p "$TMP/w"
   printf '#!/usr/bin/env bash\nsleep 8\n' > "$TMP/w/outsourcerer.sh"; chmod +x "$TMP/w/outsourcerer.sh"
@@ -101,7 +101,7 @@ if command -v tmux >/dev/null 2>&1; then
     && no "an idle prompt passed the launch check" || ok "an idle prompt still fails the launch check (droid -r guard kept)"
   tmux kill-session -t wl-idle 2>/dev/null
 else
-  echo "SKIP: tmux not installed; real-pane checks skipped"
+  echo "SKIP: a usable tmux is unavailable; real-pane checks skipped"
 fi
 
 echo "RESULT: $pass passed, $fail failed"
