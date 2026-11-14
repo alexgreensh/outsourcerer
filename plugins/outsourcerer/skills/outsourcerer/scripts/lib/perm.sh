@@ -550,10 +550,12 @@ _session_cc_resume_id() {
   if [ -n "$pid" ] && [ -n "$cwd" ]; then
     match="$(_fleet_cc_session_for_pane "$pid" "$cwd" 2>/dev/null)" || match=""
     sid="${match%%$'\t'*}"
-    _session_cc_uuid_valid "$sid" && { printf '%s\n' "$sid"; return 0; }
+    if _session_cc_uuid_valid "$sid"; then printf '%s\n' "$sid"; return 0
+    elif [ -n "$sid" ]; then echo "session resume: ignoring live claude session id '$sid' (not a UUID; the id shape may have changed)" >&2; fi
   fi
   sid="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$pane" 'select(.event=="start" and .session_id==$id) | .cc_session_id // empty' | tail -1)"
-  _session_cc_uuid_valid "$sid" && printf '%s\n' "$sid"
+  if _session_cc_uuid_valid "$sid"; then printf '%s\n' "$sid"
+  elif [ -n "$sid" ]; then echo "session resume: ignoring registry cc_session_id '$sid' (not a UUID; the id shape may have changed)" >&2; fi
 }
 
 # _session_cc_resume_for <prov> <pane> -> the resume id for cc/claude panes,
@@ -575,7 +577,9 @@ _session_relaunch_cc() {
   suffix="$(osrc_perm_string_suffix cc "${PERM_PROFILE:-default}")" || return 1
   flag="$(_cc_effort_flag "$2")"
   printf 'env MAX_THINKING_TOKENS=%q -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH claude --model %q' "$tokens" "$1"
-  if _session_cc_uuid_valid "$resume"; then printf ' --resume %q' "$resume"; else printf ' --continue'; fi
+  if _session_cc_uuid_valid "$resume"; then printf ' --resume %q' "$resume"
+  elif [ -n "$resume" ]; then printf ' --continue'; echo "session relaunch: resume id '$resume' is not a UUID; falling back to --continue" >&2
+  else printf ' --continue'; fi
   printf '%s' "$suffix"
   if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
 }

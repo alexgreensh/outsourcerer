@@ -18938,9 +18938,9 @@ session() {
       echo "claim released for '$1'"
       ;;
     reply)
-      local _allow_effort=0; while [ $# -gt 0 ]; do case "$1" in --allow-effort) _allow_effort=1; shift ;; *) break ;; esac; done; [ "$#" -ge 2 ] || die "session reply needs <external-id> <text>"
+      _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ "$#" -ge 2 ] || die "session reply needs <external-id> <text>"
       local external_id="$1"; shift
-      _external_reply "$external_id" "$*" "$_allow_effort" || return 1
+      _external_reply "$external_id" "$*" "$_AE_FLAG" || return 1
       ;;
     start)
       # --done-when <spec> is a session-start-only flag: pull it out before parse_model so it never
@@ -19025,7 +19025,7 @@ session() {
       echo "To be woken when a turn ends: after each session send, start '$0 wait $SESSION_NAME' as a background command."
       ;;
     send)
-      local _allow_effort=0; while [ $# -gt 0 ]; do case "$1" in --allow-effort) _allow_effort=1; shift ;; *) break ;; esac; done; [ -n "${1:-}" ] || die "session send needs text"
+      _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
@@ -19038,7 +19038,7 @@ session() {
         printf 'EVENT failed %s %s send refused: modal open (%s menu); nothing typed\nNEXT OUTSOURCERER_TMUX=%s %s session answer\n' "$SESSION_NAME" "$(date +%s)" "$_menu_kind" "$SESSION_NAME" "$0"
         die "session send refused: the pane is showing an interactive choice menu, not a text composer. Nothing was typed. Use 'session answer' to select an option."
       fi
-      _session_send_effort_guard "$SESSION_NAME" "$*" "$_allow_effort" || die "$(_session_effort_refuse_msg "$_SESSION_GUARD_RC" send "$SESSION_NAME")"
+      _session_send_effort_guard "$SESSION_NAME" "$*" "$_AE_FLAG" || die "$(_session_effort_refuse_msg "$_SESSION_GUARD_RC" send "$SESSION_NAME")"
       _managed_session_send "$SESSION_NAME" "$*"; _send_rc=$?
       case "$_send_rc" in
         0) echo "sent (verified: ${OSRC_SEND_EVIDENCE:-delivery receipt}). Read progress with: $0 session read" ;;

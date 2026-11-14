@@ -242,6 +242,21 @@ printf '%s' "$out" | grep -q 'REPLYARGS:ext-1 hello world 1' \
   || bad "reply flag not forwarded: [$out]"
 unset -f _external_reply
 
+# The parse helper itself: leading flags consumed, positionals preserved
+# (including args with spaces and a flag-looking first text word).
+_session_parse_allow_effort --allow-effort --allow-effort "hello world" tail; rc=$?
+[ "$_AE_FLAG" = "1" ] && [ "${#_AE_ARGS[@]}" -eq 2 ] && [ "${_AE_ARGS[0]}" = "hello world" ] && [ "${_AE_ARGS[1]}" = "tail" ] \
+  && ok "parse helper consumes repeated flags and preserves arg boundaries" \
+  || bad "parse helper mangled args (flag=$_AE_FLAG n=${#_AE_ARGS[@]})"
+_session_parse_allow_effort plain text; rc=$?
+[ "$_AE_FLAG" = "0" ] && [ "${#_AE_ARGS[@]}" -eq 2 ] \
+  && ok "parse helper leaves non-flag args alone" \
+  || bad "parse helper ate non-flag args"
+_session_parse_allow_effort --allow-effort; rc=$?
+[ "$_AE_FLAG" = "1" ] && [ "${#_AE_ARGS[@]}" -eq 0 ] \
+  && ok "parse helper handles flag-only input (empty rest)" \
+  || bad "parse helper broke on flag-only input"
+
 # ---- the per-session path: env cap + session-scoped --effort + --continue ---------------
 Relaunch_out="$(_session_relaunch_cc fable high 2>/dev/null)"
 printf '%s' "$Relaunch_out" | grep -q 'MAX_THINKING_TOKENS=24000' \
@@ -294,15 +309,34 @@ printf '%s' "$Relaunch_nonuuid" | grep -q -- '--continue' \
   && ok "a non-UUID id falls back to --continue" \
   || bad "non-UUID id reached --resume: [$Relaunch_nonuuid]"
 
+# The fallback is never silent: a rejected id says so on stderr (if Claude Code
+# ever changes its id shape, this line is the only sign every relaunch went
+# back to --continue).
+warn_out="$(_session_relaunch_cc fable high 'reg-sid-1' 2>&1 >/dev/null)"
+printf '%s' "$warn_out" | grep -q 'not a UUID' \
+  && ok "non-UUID resume fallback prints a stderr line" \
+  || bad "UUID fallback was silent: [$warn_out]"
+no_warn="$(_session_relaunch_cc fable high 2>&1 >/dev/null)"
+[ -z "$no_warn" ] && ok "empty resume id stays silent (normal --continue)" \
+  || bad "empty resume id warned unnecessarily: [$no_warn]"
+
 # _session_cc_resume_id: registry cc_session_id fallback, live sessions-dir proof.
 REG_SID="aaaaaaaa-1111-4222-8333-444455556666"
 LIVE_SID="bbbbbbbb-2222-4333-8444-555566667777"
 printf '%s\n' "{\"schema_version\":\"1\",\"event\":\"start\",\"session_id\":\"sess-resume\",\"provider\":\"cc\",\"model\":\"fable\",\"effort\":\"high\",\"state\":\"running\",\"receipt\":\"\",\"endpoint\":\"tmux:sess-resume\",\"cc_session_id\":\"$REG_SID\",\"cc_pid\":4242,\"cwd\":\"/tmp/x\",\"ts\":\"2026-11-13T00:00:00Z\"}" >> "$OSRC_SESSION_REGISTRY"
+printf '%s\n' "{\"schema_version\":\"1\",\"event\":\"start\",\"session_id\":\"sess-badid\",\"provider\":\"cc\",\"model\":\"fable\",\"effort\":\"high\",\"state\":\"running\",\"receipt\":\"\",\"endpoint\":\"tmux:sess-badid\",\"cc_session_id\":\"old-shape-id\",\"cc_pid\":4242,\"cwd\":\"/tmp/x\",\"ts\":\"2026-11-13T00:00:00Z\"}" >> "$OSRC_SESSION_REGISTRY"
 mkdir -p "$HOME/.claude/sessions"   # deliberately empty: live lookup finds nothing
 FAKE_PANE_PID=4242
 got="$(_session_cc_resume_id sess-resume 2>/dev/null)"
 [ "$got" = "$REG_SID" ] && ok "resume id falls back to the registry cc_session_id" \
   || bad "registry fallback gave [$got]"
+
+# A registry cc_session_id that is not a UUID is rejected WITH a stderr line.
+bad_warn="$(_session_cc_resume_id sess-badid 2>&1 >/dev/null)"
+got="$(_session_cc_resume_id sess-badid 2>/dev/null)"
+[ -z "$got" ] && printf '%s' "$bad_warn" | grep -q 'not a UUID' \
+  && ok "non-UUID registry id rejected with a stderr line" \
+  || bad "registry id handling wrong (got=[$got] warn=[$bad_warn])"
 
 # Live proof beats the registry: a ~/.claude/sessions file for a pid inside the
 # pane resolves the CURRENT sessionId (registry can be one respawn stale).

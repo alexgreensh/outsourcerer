@@ -84,6 +84,18 @@ _session_effort_refuse_msg() {
   esac
 }
 
+# _session_parse_allow_effort <args...> -> _AE_FLAG=0|1, _AE_ARGS=(remaining).
+# Consumes leading --allow-effort flags for `session send`/`session reply`; the
+# caller restores positionals with
+#   set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"
+# The + form is required: "${arr[@]}" on an empty array is a fatal unbound
+# variable under bash 3.2 + set -u, which the engine runs.
+_session_parse_allow_effort() {
+  _AE_FLAG=0
+  while [ $# -gt 0 ]; do case "$1" in --allow-effort) _AE_FLAG=1; shift ;; *) break ;; esac; done
+  _AE_ARGS=("$@")
+}
+
 # _session_pane_tree_has_claude <tmux-pane> -> 0 when any process in the pane's
 # tree looks like claude (comm args match). Walks children of pane_pid; the
 # depth cap keeps a pathological pid graph from looping forever.
