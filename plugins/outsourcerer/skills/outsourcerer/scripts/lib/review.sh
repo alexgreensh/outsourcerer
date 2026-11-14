@@ -477,11 +477,11 @@ _osrc_review_next() {
   done
   if [ -n "$inflight" ]; then _osrc_unlock "$lk"; echo "one review in flight already: $inflight (never more than one). Verdict goes to $OSRC_HOME/review/$inflight.VERDICT"; return 3; fi
   if [ -z "$chosen" ]; then _osrc_unlock "$lk"; echo "queue empty"; return 0; fi
+  scr="$(_osrc_review_screen "$s")"
+  if [ "$scr" != idle ]; then _osrc_unlock "$lk"; echo "reviewer $s is $scr, not idle: not sending" >&2; return 4; fi
   if [ -z "$force" ] && rot="$(_osrc_review_rotation_due "$s")"; then
     _osrc_unlock "$lk"; echo "reviewer rotation due ($rot): $(_osrc_self) review rotate   (or --force to send anyway)" >&2; return 5
   fi
-  scr="$(_osrc_review_screen "$s")"
-  if [ "$scr" != idle ]; then _osrc_unlock "$lk"; echo "reviewer $s is $scr, not idle: not sending" >&2; return 4; fi
   id="$(jq -r .id "$chosen")"
   brief="$(_osrc_review_write_brief "$id" "$final")" || { _osrc_unlock "$lk"; echo "could not write the review brief" >&2; return 1; }
   vf="$OSRC_HOME/review/$id.VERDICT"; rm -f "$vf"

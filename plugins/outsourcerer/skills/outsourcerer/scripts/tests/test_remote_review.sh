@@ -125,6 +125,8 @@ h6="$(push cloud/v6 "SHIPPED the thing")"; tick 1; events >/dev/null
 [ "$(osrc_remote_state cloud6)" = ready ] && ok "--ready SHIPPED: SHIPPED message triggers" || bad "custom marker message missed"
 
 # ---- 4. reviewer: set, idle -> events + next -----------------------------------------------------
+# This real pane is at 37%; raise the limit while testing ordinary queue flow.
+export OSRC_REVIEW_CTX_MAX=40
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"; cp "$FIX/cc-working-spinner.txt" "$FAKE_TMUX/rv.working"
 ( cmd_review next ) >/dev/null 2>&1; [ $? -eq 2 ] && ok "review next with no reviewer: rc 2, nothing sent" || bad "next without reviewer rc"
 cmd_review reviewer rv >/dev/null 2>&1 && [ "$(cmd_review reviewer)" = rv ] && ok "review reviewer sets THE reviewer" || bad "reviewer not set"
@@ -241,13 +243,14 @@ grep -q '^EVENT question ' <<<"$ev" && ok "verdict file without MERGE/CHANGES/BL
 
 cmd_review requeue "$it3" >/dev/null && [ "$(jq -r .state "$OSRC_HOME/review/items/$it3.json")" = queued ] && ok "review requeue returns a stuck in-flight item to the queue" || bad "requeue failed"
 # ---- 13. rotation ----------------------------------------------------------------------------------------
+unset OSRC_REVIEW_CTX_MAX
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"
-[ -z "$(_osrc_review_rotation_due rv)" ] && ok "fresh reviewer at 37% context: no rotation" || bad "premature rotation"
+r="$(_osrc_review_rotation_due rv)"; grep -q 'context 37% (limit 35%)' <<<"$r" && ok "reviewer at 37% context rotates at the new 35% default" || bad "new context rotation default: '$r'"
 cp "$FIX/cc-idle-composer-ctx56.txt" "$FAKE_TMUX/rv.screen"
 r="$(OSRC_REVIEW_CTX_MAX=50 _osrc_review_rotation_due rv)"; grep -q 'context 56%' <<<"$r" && ok "context bar read from the real footer: 56% > 50 limit triggers rotation" || bad "ctx rotation: '$r'"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"
-jq '.reviews=6' "$OSRC_HOME/review/reviewer.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/reviewer.json"
-r="$(_osrc_review_rotation_due rv)"; grep -q '6 reviews' <<<"$r" && ok "after K=6 reviews rotation is due" || bad "K rotation: '$r'"
+jq '.reviews=2' "$OSRC_HOME/review/reviewer.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/reviewer.json"
+r="$(_osrc_review_rotation_due rv)"; grep -q '2 reviews' <<<"$r" && ok "after K=2 reviews rotation is due" || bad "K rotation: '$r'"
 q0=$(_osrc_review_count_queued)
 cmd_review next >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 5 ] && ok "rotation due: review next refuses (rc 5) instead of overloading the reviewer" || bad "next ignored rotation rc=$rc (queued $q0)"
