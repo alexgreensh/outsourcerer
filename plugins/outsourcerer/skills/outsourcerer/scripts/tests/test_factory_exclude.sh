@@ -32,29 +32,29 @@ lib() { OSRC_SOURCED=1 bash -c 'src="$1"; code="$2"; set --; . "$src" >/dev/null
 
 # ---------------------------------------------------------------- CLI: add / ls / rm / clear
 out="$(run exclude ls 2>&1)"
-printf '%s' "$out" | grep -q 'no models excluded' && ok "exclude ls on an empty list says so" || bad "empty ls: $out"
+grep -q 'no models excluded' <<<"$out" && ok "exclude ls on an empty list says so" || bad "empty ls: $out"
 out="$(run exclude add Fable 2>&1)"; rc=$?
 [ "$rc" = 0 ] && grep -qx 'fable' "$OSRC_HOME/exclude" && ok "exclude add stores the entry lowercased in \$OSRC_HOME/exclude" || bad "add: rc=$rc $out"
 out="$(run exclude add fable 2>&1)"
-[ "$(grep -c . "$OSRC_HOME/exclude")" = 1 ] && printf '%s' "$out" | grep -q 'already excluded' && ok "exclude add is idempotent" || bad "duplicate add: $out"
+[ "$(grep -c . "$OSRC_HOME/exclude")" = 1 ] && grep -q 'already excluded' <<<"$out" && ok "exclude add is idempotent" || bad "duplicate add: $out"
 out="$(run exclude add '5' 2>&1)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no letters' && ok "an entry with no letters is refused (would exclude half the catalog)" || bad "digit entry accepted: $out"
+[ "$rc" != 0 ] && grep -q 'no letters' <<<"$out" && ok "an entry with no letters is refused (would exclude half the catalog)" || bad "digit entry accepted: $out"
 out="$(run exclude add 'fa;ble' 2>&1)"; rc=$?
 [ "$rc" != 0 ] && ok "an entry with shell metacharacters is refused" || bad "metachar entry accepted: $out"
 out="$(OSRC_EXCLUDE_MODELS="glm, Haiku" run exclude ls 2>&1)"
-printf '%s' "$out" | grep -q '^  fable$' && printf '%s' "$out" | grep -q 'haiku.*OSRC_EXCLUDE_MODELS' \
+grep -q '^  fable$' <<<"$out" && grep -q 'haiku.*OSRC_EXCLUDE_MODELS' <<<"$out" \
   && ok "exclude ls unions the saved list with OSRC_EXCLUDE_MODELS and labels the source" || bad "ls union: $out"
 run exclude add opus >/dev/null 2>&1
 out="$(run exclude rm OPUS 2>&1)"
 grep -qx opus "$OSRC_HOME/exclude" && bad "rm left the entry: $out" || { grep -qx fable "$OSRC_HOME/exclude" && ok "exclude rm removes one entry (case-insensitive) and keeps the rest" || bad "rm dropped other entries"; }
 out="$(OSRC_EXCLUDE_MODELS=sol run exclude rm sol 2>&1)"
-printf '%s' "$out" | grep -q 'still excluded by the OSRC_EXCLUDE_MODELS' && ok "exclude rm warns when the env var still excludes it" || bad "rm env note: $out"
+grep -q 'still excluded by the OSRC_EXCLUDE_MODELS' <<<"$out" && ok "exclude rm warns when the env var still excludes it" || bad "rm env note: $out"
 cp "$OSRC_HOME/exclude" "$TMP/exclude.bak"
 out="$(run exclude clear 2>&1)"
 [ ! -f "$OSRC_HOME/exclude" ] && ok "exclude clear removes the saved list" || bad "clear: $out"
 cp "$TMP/exclude.bak" "$OSRC_HOME/exclude"
 out="$(run exclude bogus 2>&1)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'unknown action' && ok "unknown exclude action fails with the usage" || bad "bogus action: $out"
+[ "$rc" != 0 ] && grep -q 'unknown action' <<<"$out" && ok "unknown exclude action fails with the usage" || bad "bogus action: $out"
 
 # ---------------------------------------------------------------- matcher
 chk() { run exclude check "$1" >/dev/null 2>&1; }
@@ -87,7 +87,7 @@ r2="$(OSRC_HOME="$TMP/empty-state" OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&
 refused() { # <label> <cmd...>
   local label="$1"; shift; : > "$CALLS"
   local o rc; o="$("$@" 2>&1)"; rc=$?
-  if [ "$rc" != 0 ] && printf '%s' "$o" | grep -q "you excluded" && printf '%s' "$o" | grep -q 'exclude rm fable' && [ ! -s "$CALLS" ]; then
+  if [ "$rc" != 0 ] && grep -q "you excluded" <<<"$o" && grep -q 'exclude rm fable' <<<"$o" && [ ! -s "$CALLS" ]; then
     ok "$label: refused with one plain line naming the fix; no model CLI ran"
   else
     bad "$label: rc=$rc calls=$(cat "$CALLS" 2>/dev/null | head -2) out=$(printf '%s' "$o" | tail -3)"
@@ -119,41 +119,51 @@ refused "crew -m fable" bash -c 'cd "$1" && shift && bash "$@"' bash "$TMP/repo"
 # env-only exclusion is enforced the same way
 mv "$OSRC_HOME/exclude" "$TMP/exclude.hold"
 : > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=fable run run -m fable "hi" 2>&1)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$o" | grep -q "you excluded 'fable'" && [ ! -s "$CALLS" ] && ok "OSRC_EXCLUDE_MODELS alone refuses -m too" || bad "env-only refusal: $o"
+[ "$rc" != 0 ] && grep -q "you excluded 'fable'" <<<"$o" && [ ! -s "$CALLS" ] && ok "OSRC_EXCLUDE_MODELS alone refuses -m too" || bad "env-only refusal: $o"
 mv "$TMP/exclude.hold" "$OSRC_HOME/exclude"
 # an allowed model still routes (exclusion is not a blanket block)
 o="$(run run -m opus "hi" 2>&1)"
-printf '%s' "$o" | grep -q "you excluded" && bad "opus was wrongly refused: $o" || ok "an allowed model is not refused"
+grep -q "you excluded" <<<"$o" && bad "opus was wrongly refused: $o" || ok "an allowed model is not refused"
 
 # ---------------------------------------------------------------- provider defaults (automatic choice)
-: > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=glm run --provider devin run "hi" 2>&1)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$o" | grep -q 'default model for --provider devin' && [ ! -s "$CALLS" ] \
+# dv's default is the runtime Free pick (swe-2-high offline), not the static glm-5.2 —
+# exclude the id that will actually resolve so the same gate is exercised. Resolving it
+# probes `devin models list` (metadata, logged by the fake) — "never run" means no
+# prompt-bearing dispatch (` -p `), not a literally empty call log.
+: > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=swe-2-high run --provider devin run "hi" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'default model for --provider devin' <<<"$o" && grep -q 'swe-2-high' <<<"$o" && ! grep -q -- ' -p ' "$CALLS" \
   && ok "a provider's built-in default that is excluded is refused with the fix, never run" || bad "provider default: $o"
 
 # ---------------------------------------------------------------- automatic choices skip excluded
 r="$(OR_OFFLOAD_CHAIN='z-ai/glm-5.2,anthropic/claude-5-fable,deepseek/deepseek-v4-pro' lib 'MODEL_EXPLICIT=0; _or_chain auto' 2>/dev/null)"
 [ "$r" = "z-ai/glm-5.2 deepseek/deepseek-v4-pro" ] && ok "OpenRouter chain drops excluded rungs" || bad "or chain: '$r'"
 o="$(OR_OFFLOAD_CHAIN='anthropic/claude-5-fable' lib 'MODEL_EXPLICIT=0; _or_chain auto; echo survived' 2>&1)"
-printf '%s' "$o" | grep -q 'every model in the OpenRouter chain' && ! printf '%s' "$o" | grep -q survived \
+grep -q 'every model in the OpenRouter chain' <<<"$o" && ! grep -q survived <<<"$o" \
   && ok "an all-excluded OpenRouter chain stops with a clear message" || bad "all-excluded chain: $o"
-r="$(lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "fable|fable|cc
+# cc needs PROVABLE subscription billing to be spendable: give it a Claude credentials
+# file in a scoped HOME so the real billing path classifies it subscription (the PONG
+# fake cannot answer `claude auth status`).
+mkdir -p "$TMP/fbhome/.claude"; printf '{}\n' > "$TMP/fbhome/.claude/.credentials.json"
+r="$(HOME="$TMP/fbhome" lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "fable|fable|cc
 opus|opus|cc"' 2>/dev/null)"
 [ "$r" = "opus|opus|cc" ] && ok "fallback shortlist pick skips an excluded candidate" || bad "fallback pick: '$r'"
+r="$(lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "opus|opus|cc"' 2>/dev/null)"
+[ -z "$r" ] && ok "fallback pick: unprovable cc billing is skipped (unknown is never picked)" || bad "fallback pick unprovable: '$r'"
 r="$(lib '_model_denied fable && echo denied; _model_denied claude-opus-4-8 && echo bad || echo allowed' 2>/dev/null | tr '\n' ' ')"
 [ "$r" = "denied allowed " ] && ok "_model_denied (failover lane check + advise + route choke point) honors the exclude list" || bad "_model_denied: '$r'"
 r="$(lib '_lane_down_active() { return 1; }; _fallback_lane_ready() { return 0; }; _lane_ready_probe() { return 0; }; _failover_lane_ok cc run fable && echo ok || echo refused' 2>/dev/null)"
 [ "$r" = refused ] && ok "cross-harness failover refuses an excluded model on a ready lane" || bad "failover lane ok: '$r'"
 o="$(lib '_escalate_ladder "" ""' 2>&1)"
-printf '%s' "$o" | grep -q '^fable$' && bad "escalate ladder kept fable: $o" \
-  || { printf '%s' "$o" | grep -q 'dropping ladder rung fable' && ok "escalate default ladder drops the excluded rung, out loud" || bad "ladder notice: $o"; }
+grep -q '^fable$' <<<"$o" && bad "escalate ladder kept fable: $o" \
+  || { grep -q 'dropping ladder rung fable' <<<"$o" && ok "escalate default ladder drops the excluded rung, out loud" || bad "ladder notice: $o"; }
 : > "$OSRC_HOME/benchmarks.json"
 r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --json --effort max "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null)"
 if printf '%s' "$r" | jq -e '.recommendation.alias' >/dev/null 2>&1; then
-  printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)' | grep -qi fable \
+  grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)')" \
     && bad "advise --json still lists a fable model" || ok "advise --json (recommendation + shortlist) never contains an excluded model"
 else bad "advise --json produced no JSON: $(printf '%s' "$r" | head -c 300)"; fi
 r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --effort max "architect a hard distributed consensus redesign" 2>&1)"
-printf '%s' "$r" | grep -qi fable && bad "advise text lists fable" || ok "advise text output never names an excluded model"
+grep -qi fable <<<"$r" && bad "advise text lists fable" || ok "advise text output never names an excluded model"
 
 # second-opinion: default premium judge (fable) swaps to the next allowed premium and says so
 SO='_so_run() { echo "$1" >> "$SOLOG"; echo "answer from $1 $RANDOM"; }; _so_agree() { return 1; }; record_ledger() { :; }
@@ -161,30 +171,30 @@ _autodetach_should() { return 1; }; _confident_fail() { return 1; }; _so_resolve
 second_opinion "is the sky blue"'
 SOLOG="$TMP/so.log"; export SOLOG; : > "$SOLOG"
 o="$(lib "$SO" 2>&1)"
-printf '%s' "$o" | grep -q 'premium judge fable is on your exclude list' && grep -qx opus "$SOLOG" && ! grep -q fable "$SOLOG" \
+grep -q 'premium judge fable is on your exclude list' <<<"$o" && grep -qx opus "$SOLOG" && ! grep -q fable "$SOLOG" \
   && ok "second-opinion premium falls back fable -> opus and says so" || bad "so premium: $(cat "$SOLOG" | tr '\n' ' ') $o"
 : > "$SOLOG"
 o="$(OSRC_EXCLUDE_MODELS=sol lib "$SO" 2>&1)"
-printf '%s' "$o" | grep -q 'sol is on your exclude list' && ! grep -qx sol "$SOLOG" \
+grep -q 'sol is on your exclude list' <<<"$o" && ! grep -qx sol "$SOLOG" \
   && ok "second-opinion default pair swaps an excluded comparison model" || bad "so pair: $(cat "$SOLOG" | tr '\n' ' ') $o"
 : > "$SOLOG"
 o="$(OSRC_EXCLUDE_MODELS='opus terra gemini-pro sol' lib "$SO" 2>&1)"; rc=$?
-printf '%s' "$o" | grep -q 'every fallback judge are on your exclude list' && ! grep -qE '^(fable|opus)$' "$SOLOG" \
+grep -q 'every fallback judge are on your exclude list' <<<"$o" && ! grep -qE '^(fable|opus)$' "$SOLOG" \
   && ok "second-opinion stops clearly when every premium judge is excluded" || bad "so all excluded: $o"
 
 # ---------------------------------------------------------------- suggest hides excluded models
 printf '%s' '{"data":[{"id":"anthropic/claude-5-fable","created":9,"context_length":200000,"pricing":{"prompt":"0","completion":"0"}},{"id":"z-ai/glm-5.2","created":8,"context_length":200000,"pricing":{"prompt":"0","completion":"0"}},{"id":"anthropic/claude-fable-5-1","created":7,"context_length":1000,"pricing":{"prompt":"0.00001","completion":"0.00002"}}]}' > "$OSRC_HOME/models.json"
 o="$(PATH="$FB:/usr/bin:/bin:$(dirname "$(command -v jq)")" run suggest 2>&1)"
-printf '%s' "$o" | grep -q 'z-ai/glm-5.2' && ! printf '%s' "$o" | grep -qi 'fable' \
+grep -q 'z-ai/glm-5.2' <<<"$o" && ! grep -qi 'fable' <<<"$o" \
   && ok "suggest/deals hides excluded models (OpenRouter rows + subscription line)" || bad "suggest: $o"
 
 # ---------------------------------------------------------------- brief + doctor show the list
 o="$(run brief 2>&1)"
-printf '%s' "$o" | grep -q '^excluded    : fable' && ok "brief prints the active exclusions (sticks across sessions)" || bad "brief: $(printf '%s' "$o" | head -20)"
+grep -q '^excluded    : fable' <<<"$o" && ok "brief prints the active exclusions (sticks across sessions)" || bad "brief: $(printf '%s' "$o" | head -20)"
 o="$(run doctor 2>&1)"
-printf '%s' "$o" | grep -q 'excluded    : fable' && ok "doctor prints the active exclusions" || bad "doctor: $(printf '%s' "$o" | grep -i exclu)"
+grep -q 'excluded    : fable' <<<"$o" && ok "doctor prints the active exclusions" || bad "doctor: $(grep -i exclu)" <<<"$o"
 o="$(OSRC_HOME="$TMP/empty-state" run doctor 2>&1)"
-printf '%s' "$o" | grep -q 'excluded models: none' && ok "doctor says none when nothing is excluded" || bad "doctor none"
+grep -q 'excluded models: none' <<<"$o" && ok "doctor says none when nothing is excluded" || bad "doctor none"
 
 # ================================================================ REVIEW-2 findings (one block each)
 # Every block below runs against its own state home so the saved list above never leaks in.
@@ -197,20 +207,20 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
   bash "$SRC" exclude add claude-fable-5 >/dev/null 2>&1
   r=0
   : > "$CALLS"; o="$(bash "$SRC" run -m fable "hi" 2>&1)"
-  printf '%s' "$o" | grep -q "you excluded 'fable' (exclude list entry: claude-fable-5; fable runs claude-fable-5-1 today, a point release of claude-fable-5)" && [ ! -s "$CALLS" ] || { echo "  -m fable: $o"; r=1; }
+  grep -q "you excluded 'fable' (exclude list entry: claude-fable-5; fable runs claude-fable-5-1 today, a point release of claude-fable-5)" <<<"$o" && [ ! -s "$CALLS" ] || { echo "  -m fable: $o"; r=1; }
   # -m claude passes the alias check, then Devin's live catalog resolves it to a Fable id: refused there.
   o="$(OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     _devin_with_prepare() { DEVIN_WITH_PRE=""; }; need_devin() { :; }; _catalog_validate() { :; }
     _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = claude ] && printf claude-fable-5-high; }
     devin() { echo "devin $*" >> "$2"; }
     delegate auto "" -m claude "hi"; echo survived' bash "$SRC" "$CALLS" 2>&1)"
-  printf '%s' "$o" | grep -q "'claude' resolves to claude-fable-5-high, which you excluded" && ! printf '%s' "$o" | grep -q survived && [ ! -s "$CALLS" ] || { echo "  -m claude: $o"; r=1; }
+  grep -q "'claude' resolves to claude-fable-5-high, which you excluded" <<<"$o" && ! grep -q survived <<<"$o" && [ ! -s "$CALLS" ] || { echo "  -m claude: $o"; r=1; }
   # second-opinion default premium judge is fable -> swapped, never run
   : > "$SOLOG"; o="$(lib "$SO" 2>&1)"
-  printf '%s' "$o" | grep -q 'premium judge fable is on your exclude list (claude-fable-5)' && ! grep -qi fable "$SOLOG" || { echo "  so: $o"; r=1; }
+  grep -q 'premium judge fable is on your exclude list (claude-fable-5)' <<<"$o" && ! grep -qi fable "$SOLOG" || { echo "  so: $o"; r=1; }
   # claude-native session without -m: Claude Code's own default could be Fable -> refused
   o="$(env -u ANTHROPIC_MODEL OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; MODEL_EXPLICIT=0; _exclude_session_default_guard cc; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q 'runs Claude Code.s own default model' && printf '%s' "$o" | grep -q 'covers fable' && ! printf '%s' "$o" | grep -q survived || { echo "  session: $o"; r=1; }
+  grep -q 'runs Claude Code.s own default model' <<<"$o" && grep -q 'covers fable' <<<"$o" && ! grep -q survived <<<"$o" || { echo "  session: $o"; r=1; }
   exit "$r"
 ) && ok "#45: exclude add claude-fable-5 refuses -m fable, -m claude (Devin -> Fable id), the second-opinion fable judge and a no -m claude session" || bad "#45 exact scenario"
 
@@ -230,7 +240,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
 (
   export OSRC_HOME; OSRC_HOME="$(xh f2)"
   o="$(OSRC_EXCLUDE_MODELS='gpt-[,fable' bash "$SRC" exclude check opus 2>&1)"; rc=$?
-  [ "$rc" = 0 ] && printf '%s' "$o" | grep -q "'gpt-\[' is not a valid model name" && printf '%s' "$o" | grep -q 'fail closed' || { echo "  bad entry: rc=$rc $o"; exit 1; }
+  [ "$rc" = 0 ] && grep -q "'gpt-\[' is not a valid model name" <<<"$o" && grep -q 'fail closed' <<<"$o" || { echo "  bad entry: rc=$rc $o"; exit 1; }
   OSRC_EXCLUDE_MODELS='gpt-[,fable' xc fable || exit 1
   OSRC_EXCLUDE_MODELS='claude-fable-5[1m]' xc claude-fable-5 || exit 1
   ! OSRC_EXCLUDE_MODELS='claude-fable-5[1m]' xc opus || exit 1
@@ -240,7 +250,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
   # a hand-edited bad line in the saved file fails closed too, and ls flags it
   printf 'fable\nbad[entry\n' > "$OSRC_HOME/exclude"
   xc gpt-5.6-sol || exit 1
-  bash "$SRC" exclude ls 2>&1 | grep -q 'bad\[entry.*NOT A VALID MODEL NAME' || exit 1
+  grep -q 'bad\[entry.*NOT A VALID MODEL NAME' <<<"$(bash "$SRC" exclude ls 2>&1)" || exit 1
 ) && ok "F2: a malformed entry fails closed (warns, refuses every model), [1m] entries work, exclude add rejects unparsable entries" || bad "F2 malformed entries"
 
 # ---- F3: the id an alias RESOLVES to is re-checked (Devin catalog, continue, agy family pick)
@@ -252,19 +262,30 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
     _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = swe ] && printf swe-1-8; }
     devin() { echo ran; }
     delegate auto "" -m swe "hi"; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q "'swe' resolves to swe-1-8, which you excluded" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  delegate: $o"; r=1; }
+  grep -q "'swe' resolves to swe-1-8, which you excluded" <<<"$o" && ! grep -qE 'survived|^ran' <<<"$o" || { echo "  delegate: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=swe-1.8 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     need_devin() { :; }; _devin_guard_before_delegation() { :; }; _devin_resolve_dynamic() { [ "$1" = swe ] && printf swe-1-8; }
     devin() { echo ran; }
     continue_turn -m swe "next"; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q "continue: 'swe' resolves to swe-1-8" && ! printf '%s' "$o" | grep -qE 'survived|^ran' || { echo "  continue: $o"; r=1; }
+  grep -q "continue: 'swe' resolves to swe-1-8" <<<"$o" && ! grep -qE 'survived|^ran' <<<"$o" || { echo "  continue: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=gemini-3.4-pro OSRC_AGY_PRO_DEFAULT=gemini-3.4-pro OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
     _exclude_refuse_resolved gemini-pro "$(_agy_model_token gemini-pro)"; echo survived' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q "'gemini-pro' resolves to gemini-3.4-pro" && ! printf '%s' "$o" | grep -q survived || { echo "  agy: $o"; r=1; }
-  # every resolver dispatch site carries the second gate
-  for site in '_exclude_refuse_resolved "$id" "$atok"' '_exclude_refuse_resolved "$_gid_req" "$id"' '_exclude_refuse_resolved "$MODEL" "$_dvmodel"' '_exclude_refuse_resolved "$_lreq" "$id"' '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"'; do
+  grep -q "'gemini-pro' resolves to gemini-3.4-pro" <<<"$o" && ! grep -q survived <<<"$o" || { echo "  agy: $o"; r=1; }
+  # engine lanes (droid/warp) re-resolve through _lane_model_for — prove that gate FIRES
+  o="$(OSRC_EXCLUDE_MODELS=swe-1.8 OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
+    have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }
+    _lane_model_for() { printf "swe-1-8"; }
+    droid() { echo ran; }
+    REST=("next"); MODEL_EXPLICIT=1; MODEL=swe; delegate_droid auto; echo survived' bash "$SRC" 2>&1)"
+  grep -q "'swe' resolves to swe-1-8, which you excluded" <<<"$o" && ! grep -qE 'survived|^ran' <<<"$o" || { echo "  droid: $o"; r=1; }
+  # every resolver dispatch site carries the second gate (the gemini-cli vehicle is
+  # retired, so its old $_gid_req site is gone; agy "id"/"atok" covers that lane now)
+  for site in '_exclude_refuse_resolved "$id" "$atok"' '_exclude_refuse_resolved "$MODEL" "$_dvmodel"' '_exclude_refuse_resolved "$_lreq" "$id"' '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"' '_exclude_refuse_resolved "$_req" "$MODEL" continue'; do
     grep -qF -- "$site" "$SRC" || { echo "  missing gate: $site"; r=1; }
   done
+  # the shared literals must cover BOTH engine lanes and BOTH session paths
+  [ "$(grep -cF '_exclude_refuse_resolved "$_lreq" "$id"' "$SRC")" -ge 2 ] || { echo "  _lreq gate not on both engine lanes"; r=1; }
+  [ "$(grep -cF '_exclude_refuse_resolved "$_sreq" "$MODEL" "session start"' "$SRC")" -ge 2 ] || { echo "  session gate not on both session paths"; r=1; }
   exit "$r"
 ) && ok "F3: Devin live-catalog, continue and agy family resolution re-check the final id (swe -> swe-1-8, gemini-pro -> dated id)" || bad "F3 resolved-id gate"
 
@@ -284,10 +305,10 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
 (
   export OSRC_HOME; OSRC_HOME="$(xh f5)"
   : > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=fable bash "$SRC" continue "next" 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && printf '%s' "$o" | grep -q 'continue: without -m the conversation keeps its original model' && [ ! -s "$CALLS" ] || { echo "  $o"; exit 1; }
+  [ "$rc" != 0 ] && grep -q 'continue: without -m the conversation keeps its original model' <<<"$o" && [ ! -s "$CALLS" ] || { echo "  $o"; exit 1; }
   # with no list, continue without -m is unchanged (reaches devin)
   o="$(OSRC_HOME="$(xh f5b)" OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; need_devin() { :; }; _devin_guard_before_delegation() { :; }; devin() { echo "RAN $*"; }; continue_turn "next"' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -q '^RAN -c' || { echo "  idle: $o"; exit 1; }
+  grep -q '^RAN -c' <<<"$o" || { echo "  idle: $o"; exit 1; }
 ) && ok "F5: continue without -m is refused while a list is active, unchanged when nothing is excluded" || bad "F5 continue without -m"
 
 # ---- F6: sessions (no-m default, relaunch onto an excluded model, drift restore)
@@ -296,18 +317,18 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
   sx() { OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1; eval "$2"' bash "$SRC" "$1" 2>&1; }
   mkdir -p "$TMP/f6home/.claude"; printf '{"model":"opus"}' > "$TMP/f6home/.claude/settings.json"
   o="$(unset ANTHROPIC_MODEL; HOME="$TMP/f6home" OSRC_EXCLUDE_MODELS=fable sx 'MODEL_EXPLICIT=0; _exclude_session_default_guard cc; echo survived')"
-  printf '%s' "$o" | grep -q survived || { echo "  configured opus: $o"; r=1; }
+  grep -q survived <<<"$o" || { echo "  configured opus: $o"; r=1; }
   o="$(ANTHROPIC_MODEL=claude-fable-5 OSRC_EXCLUDE_MODELS=fable sx 'MODEL_EXPLICIT=0; _exclude_session_default_guard cc; echo survived')"
-  printf '%s' "$o" | grep -q 'runs your configured default claude-fable-5, which you excluded' && ! printf '%s' "$o" | grep -q survived || { echo "  configured fable: $o"; r=1; }
+  grep -q 'runs your configured default claude-fable-5, which you excluded' <<<"$o" && ! grep -q survived <<<"$o" || { echo "  configured fable: $o"; r=1; }
   o="$(unset ANTHROPIC_MODEL; HOME="$TMP/nohome" OSRC_EXCLUDE_MODELS=glm sx 'MODEL_EXPLICIT=0; _exclude_session_default_guard cc; echo survived')"
-  printf '%s' "$o" | grep -q survived || { echo "  unrelated list: $o"; r=1; }
+  grep -q survived <<<"$o" || { echo "  unrelated list: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=fable sx 'tmux() { echo "TMUX $*"; }; _session_control_relaunch pane cc claude-fable-5 ""; echo "rc=$?"')"
-  printf '%s' "$o" | grep -q 'relaunch refused: this session was started on claude-fable-5' && printf '%s' "$o" | grep -q 'rc=1' && ! printf '%s' "$o" | grep -q TMUX || { echo "  relaunch: $o"; r=1; }
+  grep -q 'relaunch refused: this session was started on claude-fable-5' <<<"$o" && grep -q 'rc=1' <<<"$o" && ! grep -q TMUX <<<"$o" || { echo "  relaunch: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=fable sx '_wake_append() { :; }; _session_model_matches() { return 1; }; _model_pin_restore_allowed() { return 0; }
     _session_model_restore() { echo RESTORED >&2; return 0; }; _model_pin_append() { return 0; }; _mkdir_claim() { return 0; }
     _model_pin_enforce_item "{\"session_id\":\"s1\",\"owner\":\"managed\",\"state\":\"working\",\"lane\":\"cc\",\"endpoint\":\"p\",\"requested_model\":\"fable\",\"observed_model\":\"opus\"}" 7')"
-  printf '%s' "$o" | grep -q '"result":"restore-skipped-excluded"' && ! printf '%s' "$o" | grep -q RESTORED || { echo "  pin restore: $o"; r=1; }
-  grep -c '_exclude_session_default_guard "$PROVIDER"' "$SRC" | grep -qx 2 || { echo "  session start guard not wired on both session paths"; r=1; }
+  grep -q '"result":"restore-skipped-excluded"' <<<"$o" && ! grep -q RESTORED <<<"$o" || { echo "  pin restore: $o"; r=1; }
+  [ "$(grep -c '_exclude_session_default_guard "$PROVIDER"' "$SRC")" = 2 ] || { echo "  session start guard not wired on both session paths"; r=1; }
   exit "$r"
 ) && ok "F6: no -m session refuses an excluded/unknown default, relaunch and drift-restore never return to an excluded model" || bad "F6 sessions"
 
@@ -324,7 +345,7 @@ xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
     printf "single=%s\n" "$(wc -l < "$CNT" | tr -d " ")"
     : > "$CNT"; _exclude_filter sol terra luna fable opus sonnet haiku glm deepseek kimi swe gpt-5.5 gemini-pro gemini-flash z-ai/glm-5.2 >/dev/null
     printf "batch=%s\n" "$(wc -l < "$CNT" | tr -d " ")"' bash "$SRC" 2>&1)"
-  printf '%s' "$o" | grep -qx 'idle=0' && printf '%s' "$o" | grep -qx 'single=4' && printf '%s' "$o" | grep -qx 'batch=1' || { echo "  counts: $o"; exit 1; }
+  grep -qx 'idle=0' <<<"$o" && grep -qx 'single=4' <<<"$o" && grep -qx 'batch=1' <<<"$o" || { echo "  counts: $o"; exit 1; }
   # wall-clock bound: 200 checks over 40 names on an active list (memoized) stays well under 5s
   s0=$(date +%s)
   OSRC_EXCLUDE_MODELS='fable,gpt-5.6-*' OSRC_SOURCED=1 bash -c '. "$1" >/dev/null 2>&1
@@ -341,27 +362,27 @@ _autodetach_should() { return 1; }; _confident_fail() { return 1; }
 _so_resolve() { case "$1" in glm|z-ai/glm-5.2) echo "z-ai/glm-5.2|ccor|capable" ;; *) printf "%s|cc|frontier\n" "$1" ;; esac; }
 second_opinion "is the sky blue"'
   o="$(OSRC_SECOND_OPINION_MODELS=glm,fable OSRC_EXCLUDE_MODELS=fable lib "$SO8" 2>&1)"
-  printf '%s' "$o" | grep -q 'fable is on your exclude list (fable); using sol instead' && ! grep -qx 'z-ai/glm-5.2' "$SOLOG" && grep -qx sol "$SOLOG" || { echo "  $o / $(tr '\n' ' ' < "$SOLOG")"; exit 1; }
+  grep -q 'fable is on your exclude list (fable); using sol instead' <<<"$o" && ! grep -qx 'z-ai/glm-5.2' "$SOLOG" && grep -qx sol "$SOLOG" || { echo "  $o / $(tr '\n' ' ' < "$SOLOG")"; exit 1; }
 ) && ok "F8: second-opinion never swaps in a model that resolves to the other comparison model" || bad "F8 second-opinion resolved compare"
 
 # ---- F9: exclude add shows which known models an entry covers
 (
   export OSRC_HOME; OSRC_HOME="$(xh f9)"
   o="$(bash "$SRC" exclude add pro 2>&1)"
-  printf '%s' "$o" | grep -q '^  covers: .*deepseek' && printf '%s' "$o" | grep -q 'gemini-pro' || { echo "  pro: $o"; exit 1; }
+  grep -q '^  covers: .*deepseek' <<<"$o" && grep -q 'gemini-pro' <<<"$o" || { echo "  pro: $o"; exit 1; }
   o="$(bash "$SRC" exclude add claude-sonnet-5 2>&1)"
-  printf '%s' "$o" | grep -q 'covers: .*claude-sonnet-5' && ! printf '%s' "$o" | grep -q 'covers: .*claude-sonnet-5-5' && printf '%s' "$o" | grep -q 'does not cover its point releases' || { echo "  sonnet-5: $o"; exit 1; }
+  grep -q 'covers: .*claude-sonnet-5' <<<"$o" && ! grep -q 'covers: .*claude-sonnet-5-5' <<<"$o" && grep -q 'does not cover its point releases' <<<"$o" || { echo "  sonnet-5: $o"; exit 1; }
   o="$(bash "$SRC" exclude add zzz-nothing 2>&1)"
-  printf '%s' "$o" | grep -q 'covers no model outsourcerer knows today' || { echo "  none: $o"; exit 1; }
+  grep -q 'covers no model outsourcerer knows today' <<<"$o" || { echo "  none: $o"; exit 1; }
 ) && ok "F9: exclude add prints the known models an entry covers (pro -> deepseek-v4-pro surprise is visible) and the point-release note" || bad "F9 coverage print"
 
-# ---- F10: doctor never pings an excluded agy / gemini-cli model
+# ---- F10: doctor never pings an excluded agy model, and never pings retired gemini-cli
 (
   export OSRC_HOME; OSRC_HOME="$(xh f10)"; : > "$CALLS"
   o="$(OSRC_EXCLUDE_MODELS=gemini-flash,gemini-flash-lite OSRC_DOCTOR_PING=1 OSRC_DOCTOR_PING_TIMEOUT=2 OSRC_AGY_FLASH_DEFAULT=gemini-3.5-flash OSRC_GEMINI_FLASH_LITE_API_ID=gemini-3.5-flash-lite bash "$SRC" doctor 2>&1)"
-  printf '%s' "$o" | grep -q 'antigravity-agy: ping skipped' && printf '%s' "$o" | grep -q 'gemini-cli: ping skipped' \
-    && ! grep -q '^agy -p' "$CALLS" && ! grep -q '^gemini -p' "$CALLS" || { echo "  $(printf '%s' "$o" | grep -iE 'agy|gemini-cli' | head -5) calls=$(grep -E '^(agy|gemini) ' "$CALLS" | head -3)"; exit 1; }
-) && ok "F10: doctor skips the agy and gemini-cli pings when their model is excluded" || bad "F10 doctor agy ping"
+  grep -q 'antigravity-agy: ping skipped' <<<"$o" && grep -q 'gemini-cli: RETIRED' <<<"$o" \
+    && ! grep -q '^agy -p' "$CALLS" && ! grep -q '^gemini -p' "$CALLS" || { echo "  $(grep -iE 'agy|gemini-cli' <<<"$o" | head -5) calls=$(grep -E '^(agy|gemini) ' "$CALLS" | head -3)"; exit 1; }
+) && ok "F10: doctor skips the agy ping when its model is excluded and never pings retired gemini-cli" || bad "F10 doctor agy ping"
 
 # ---- F11: Devin health/plan probes skip excluded probe models
 (
@@ -378,7 +399,7 @@ second_opinion "is the sky blue"'
   mkdir -p "$TMP/f12repo" && (cd "$TMP/f12repo" && git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init) >/dev/null 2>&1
   (cd "$TMP/f12repo" && bash "$SRC" plan new p12 --goal g >/dev/null 2>&1)
   o="$(cd "$TMP/f12repo" && OSRC_EXCLUDE_MODELS=fable bash "$SRC" task add "x" -m fable 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && printf '%s' "$o" | grep -q "task add: you excluded 'fable'" && [ -z "$(ls "$OSRC_HOME/plans/p12/tasks" 2>/dev/null | grep json)" ] || { echo "  $o"; exit 1; }
+  [ "$rc" != 0 ] && grep -q "task add: you excluded 'fable'" <<<"$o" && [ -z "$(ls "$OSRC_HOME/plans/p12/tasks" 2>/dev/null | grep json)" ] || { echo "  $o"; exit 1; }
   o="$(cd "$TMP/f12repo" && OSRC_EXCLUDE_MODELS=fable bash "$SRC" task add "y" -m opus 2>&1)" || { echo "  opus refused: $o"; exit 1; }
 ) && ok "F12: task add -m fable is refused when it is added, an allowed model is saved" || bad "F12 task add"
 
@@ -386,7 +407,7 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f13)"; printf 'fable\n' > "$OSRC_HOME/exclude"
   o="$(lib '_state_lock_acquire() { return 1; }; cmd_exclude clear' 2>&1)"
-  printf '%s' "$o" | grep -q 'the list is busy' && [ -f "$OSRC_HOME/exclude" ] || { echo "  $o"; exit 1; }
+  grep -q 'the list is busy' <<<"$o" && [ -f "$OSRC_HOME/exclude" ] || { echo "  $o"; exit 1; }
   bash "$SRC" exclude clear >/dev/null 2>&1 && [ ! -f "$OSRC_HOME/exclude" ] || exit 1
 ) && ok "F13: exclude clear waits for the list's lock (a busy lock leaves the list intact)" || bad "F13 clear lock"
 
@@ -394,21 +415,23 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f14)"; printf '# my exclusions\n\n   # none yet\n' > "$OSRC_HOME/exclude"
   r="$(lib '_exclude_active && echo active || echo idle' 2>/dev/null)"
-  [ "$r" = idle ] && bash "$SRC" exclude ls 2>&1 | grep -q 'no models excluded' || { echo "  $r"; exit 1; }
+  [ "$r" = idle ] && grep -q 'no models excluded' <<<"$(bash "$SRC" exclude ls 2>&1)" || { echo "  $r"; exit 1; }
 ) && ok "F14: a comments-only exclude file counts as no list" || bad "F14 comments-only file"
 
 # ---- F15: engine lanes running their own default say the list cannot see that model
 (
   export OSRC_HOME; OSRC_HOME="$(xh f15)"
   o="$(OSRC_EXCLUDE_MODELS=fable OSRC_PREFLIGHT=1 bash "$SRC" --provider droid run "hi" 2>&1)"
-  printf '%s' "$o" | grep -q 'the droid lane runs the model it is configured with' || { echo "  $(printf '%s' "$o" | tail -3)"; exit 1; }
+  grep -q 'the droid lane runs the model it is configured with' <<<"$o" || { echo "  $(printf '%s' "$o" | tail -3)"; exit 1; }
 ) && ok "F15: an engine lane with no -m (droid/cursor/hermes default) prints that the exclude list cannot see its model" || bad "F15 engine default notice"
 
 # ---- F16: fanout without -m whose provider default is excluded is refused before anything starts
 (
   export OSRC_HOME; OSRC_HOME="$(xh f16)"; : > "$CALLS"
-  o="$(OSRC_EXCLUDE_MODELS=glm bash "$SRC" fanout -- "a" "b" 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && printf '%s' "$o" | grep -q 'nothing was started.*--provider devin default glm-5.2' && [ ! -s "$CALLS" ] \
+  # dv's default is the runtime Free pick (swe-2-high offline), not static glm-5.2 —
+  # exclude the id that will actually resolve so the same up-front gate is exercised.
+  o="$(OSRC_EXCLUDE_MODELS=swe-2-high bash "$SRC" fanout -- "a" "b" 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q 'nothing was started.*--provider devin default swe-2-high' <<<"$o" && ! grep -q -- ' -p ' "$CALLS" \
     && [ -z "$(ls "$OSRC_HOME/jobs" 2>/dev/null)" ] || { echo "  rc=$rc $o"; exit 1; }
 ) && ok "F16: fanout with an excluded provider default is refused up front, no member launched" || bad "F16 fanout default"
 
@@ -416,7 +439,7 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f17)"
   o="$(OSRC_EXCLUDE_MODELS='haiku glm' bash "$SRC" loop escalate --check true "task" 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && printf '%s' "$o" | grep -q 'your exclude list removed haiku, glm-5.2 from the default ladder' || { echo "  $o"; exit 1; }
+  [ "$rc" != 0 ] && grep -q 'your exclude list removed haiku, glm-5.2 from the default ladder' <<<"$o" || { echo "  $o"; exit 1; }
 ) && ok "F17: loop escalate says the exclude list shrank the ladder, not a generic rung-count error" || bad "F17 loop escalate"
 
 # ---- F18: a bg child whose -m was excluded after launch fails WITH its reason (never silently)
@@ -432,18 +455,18 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh cur)"; r=0
   ! OSRC_EXCLUDE_MODELS=claude-opus-4-8 xc opus || { echo "  old opus blocked -m opus"; r=1; }
-  o="$(OSRC_EXCLUDE_MODELS=claude-opus-4-8 bash "$SRC" run -m opus "hi" 2>&1)"; printf '%s' "$o" | grep -q "you excluded" && { echo "  run -m opus refused: $o"; r=1; }
+  o="$(OSRC_EXCLUDE_MODELS=claude-opus-4-8 bash "$SRC" run -m opus "hi" 2>&1)"; grep -q "you excluded" <<<"$o" && { echo "  run -m opus refused: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=claude-opus-5-5 bash "$SRC" run -m opus "hi" 2>&1)"
-  printf '%s' "$o" | grep -q "you excluded 'opus' (exclude list entry: claude-opus-5-5; opus runs claude-opus-5-5 today)" || { echo "  opus-5-5: $o"; r=1; }
+  grep -q "you excluded 'opus' (exclude list entry: claude-opus-5-5; opus runs claude-opus-5-5 today)" <<<"$o" || { echo "  opus-5-5: $o"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=claude-fable-5 bash "$SRC" run -m fable "hi" 2>&1)"
-  printf '%s' "$o" | grep -q "you excluded 'fable' (exclude list entry: claude-fable-5; fable runs claude-fable-5-1 today, a point release of claude-fable-5)" || { echo "  fable: $o"; r=1; }
+  grep -q "you excluded 'fable' (exclude list entry: claude-fable-5; fable runs claude-fable-5-1 today, a point release of claude-fable-5)" <<<"$o" || { echo "  fable: $o"; r=1; }
   OSRC_EXCLUDE_MODELS=opus xc opus && ! OSRC_EXCLUDE_MODELS='claude-opus-4*' xc opus && OSRC_EXCLUDE_MODELS='claude-opus-5*' xc opus || { echo "  family word / globs"; r=1; }
   o="$(OSRC_EXCLUDE_MODELS=gemini-3.5-pro bash "$SRC" exclude check gemini-pro 2>&1)"
-  printf '%s' "$o" | grep -q 'picks its model id live.*fail closed' || { echo "  gemini: $o"; r=1; }
+  grep -q 'picks its model id live.*fail closed' <<<"$o" || { echo "  gemini: $o"; r=1; }
   ! OSRC_EXCLUDE_MODELS=claude-sonnet-5 xc sonnet && OSRC_EXCLUDE_MODELS=claude-sonnet-5 xc claude-sonnet-5 || { echo "  sonnet-5 vs sonnet"; r=1; }
-  o="$(OSRC_EXCLUDE_MODELS=claude-sonnet-5 bash "$SRC" run -m sonnet "hi" 2>&1)"; printf '%s' "$o" | grep -q "you excluded" && { echo "  run -m sonnet refused: $o"; r=1; }
-  o="$(OSRC_EXCLUDE_MODELS=claude-sonnet-5 bash "$SRC" run -m claude-sonnet-5 "hi" 2>&1)"; printf '%s' "$o" | grep -q "you excluded 'claude-sonnet-5'" || { echo "  run -m claude-sonnet-5 allowed: $o"; r=1; }
-  o="$(OSRC_EXCLUDE_MODELS=claude-opus-5 bash "$SRC" run -m opus "hi" 2>&1)"; printf '%s' "$o" | grep -q "you excluded" && { echo "  opus-5 blocked -m opus: $o"; r=1; }
+  o="$(OSRC_EXCLUDE_MODELS=claude-sonnet-5 bash "$SRC" run -m sonnet "hi" 2>&1)"; grep -q "you excluded" <<<"$o" && { echo "  run -m sonnet refused: $o"; r=1; }
+  o="$(OSRC_EXCLUDE_MODELS=claude-sonnet-5 bash "$SRC" run -m claude-sonnet-5 "hi" 2>&1)"; grep -q "you excluded 'claude-sonnet-5'" <<<"$o" || { echo "  run -m claude-sonnet-5 allowed: $o"; r=1; }
+  o="$(OSRC_EXCLUDE_MODELS=claude-opus-5 bash "$SRC" run -m opus "hi" 2>&1)"; grep -q "you excluded" <<<"$o" && { echo "  opus-5 blocked -m opus: $o"; r=1; }
   grep -q '^OSRC_CLAUDE_POINT_RELEASES="claude-fable-5-1:claude-fable-5"' "$SRC" || { echo "  point-release list missing"; r=1; }
   grep -q '^OSRC_CLAUDE_CURRENT_IDS="fable|claude-fable-5-1 opus|claude-opus-5-5 sonnet|claude-sonnet-5-5 haiku|claude-haiku-5-5"' "$SRC" || { echo "  current-id map missing"; r=1; }
   exit "$r"
