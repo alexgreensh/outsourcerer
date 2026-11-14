@@ -118,6 +118,8 @@ For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy saf
 
 `outsourcerer handover --check-context` prepares a handover when the current orchestrator reaches 150,000 input tokens. Set `OSRC_ORCH_CTX_MAX` to change the threshold; keep the current orchestrator supervising until its replacement has adopted the work and armed supervision.
 
+Supervision refreshes a project-and-limits snapshot every 10 minutes. Change the interval with `OSRC_SUPERVISE_TICK_SECS`; the snapshot lives in `$OSRC_HOME/supervise/<owner-id>/hub.json`.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---

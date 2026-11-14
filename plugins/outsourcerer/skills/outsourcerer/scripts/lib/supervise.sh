@@ -425,6 +425,20 @@ _sv_approval_summary() { # <new TSV rows>: report only at an actual wake
   [ "$count" -eq 0 ] || printf '[outsourcerer] %s auto-approval(s); log: %s/approvals.log\n' "$count" "$OSRC_HOME" >&2
 }
 
+_sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits atomically
+  local dir="$1" now="$2" interval last tmp
+  interval="$(_sv_num "${OSRC_SUPERVISE_TICK_SECS:-}" 600)"; [ "$interval" -gt 0 ] || interval=600
+  last="$(_sv_num "$(cat "$dir/tick.time" 2>/dev/null)" 0)"
+  [ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0
+  type cmd_hub_export >/dev/null 2>&1 || return 1
+  tmp="$dir/hub.json.tmp.$$"
+  if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; return 1
+  fi
+  mv -f "$tmp" "$dir/hub.json" || return 1
+  printf '%s\n' "$now" > "$dir/tick.time"
+}
+
 _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live supervise for <sid> covers
   local f pid
   for f in "$OSRC_HOME/supervise/$1"/armed.*; do
@@ -522,6 +536,10 @@ _sv_main() { # <sid> <once> [ids...]
   t0="$(_sv_now)"
   while :; do
     now="$(_sv_now)"
+    if ! _sv_tick "$dir" "$now"; then
+      _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${explicit:+ $explicit}"
+      exit 10
+    fi
     if [ -n "$explicit" ]; then targets="$explicit"
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
     out=0; pend=0; idle_list=""
