@@ -76,7 +76,8 @@ git -C "$WORK" config user.name test
 printf 'hello\n' > "$WORK/README.md"
 git -C "$WORK" add -A && git -C "$WORK" commit -qm init
 git -C "$WORK" branch -M main
-git -C "$WORK" remote add origin "$BARE"
+# A relative fixture remote stays local without putting a machine-specific path in the pack.
+git -C "$WORK" remote add origin ../origin.git
 git -C "$WORK" push -qu origin main
 
 BRIEF="$TMP/brief.md"

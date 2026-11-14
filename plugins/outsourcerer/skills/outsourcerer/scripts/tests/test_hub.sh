@@ -152,9 +152,9 @@ echo "$out2" | jq -e '[.limits[] | select(.id | startswith("claude")) | .state] 
 rm -f "$OSRC_HOME/rate-limits.json"
 out3="$(run hub export 2>/dev/null)"
 echo "$out3" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="claude") | .state == "unknown")' >/dev/null \
-  && ok "missing artifact -> claude unknown row, array still valid" || bad "missing-artifact limits wrong"
+  && ok "missing artifact -> claude unknown row, array still valid" || bad "missing-artifact limits wrong: $(echo "$out3" | jq -c .limits)"
 echo "$out3" | jq -e '.limits[] | select(.id=="openrouter") | .paid == true' >/dev/null \
-  && ok "paid lane present without meters" || bad "unmetered rows missing"
+  && ok "paid lane present without meters" || bad "unmetered rows missing: $(echo "$out3" | jq -c .limits)"
 # Undetected lanes are omitted: without the fake binaries, no devin/agy/local row.
 JQDIR="$(dirname "$(command -v jq)")"
 out4="$(PATH="/usr/bin:/bin:$JQDIR" run hub export 2>/dev/null)"
