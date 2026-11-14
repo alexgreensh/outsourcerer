@@ -36,7 +36,23 @@ _mkclaude() {  # claude fake that answers `auth status` with plan-proof JSON (r9
   cat > "$FB/claude" <<'EOF'
 #!/usr/bin/env bash
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-  echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+  cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
 else
   echo ok
 fi

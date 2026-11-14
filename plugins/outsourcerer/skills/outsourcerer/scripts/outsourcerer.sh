@@ -11627,7 +11627,7 @@ cmd_bg() {
   # prints OSRC_SPEND_CONSENT=1 on yes) must reach the parent — the detached child cannot ask.
   # Carry it as THIS command's consent so _bg_launch drops the job's .spend-ok marker. A non-tty
   # preflight never prints the token, so nothing is consented silently.
-  printf '%s\n' "$_pfout" | grep -q 'OSRC_SPEND_CONSENT=1' && OSRC_SPEND_OK=1
+  grep -q 'OSRC_SPEND_CONSENT=1' <<<"$_pfout" && OSRC_SPEND_OK=1
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -16373,6 +16373,7 @@ _failover_pick() {
   local src="${1:-}" model="${2:-}" verb="${3:-run}" canon want l m alias resolved lane tier d ti key rows="" seen="" seq=0
   src="$(_lane_plan_key "$src")"; [ -n "$src" ] || src="${1:-}"
   _FAILOVER_CASH_SKIPPED=""; _failover_cash_clear; _FAILOVER_SPEND_SKIPPED=""; _failover_spend_clear
+  find "$OSRC_HOME" -maxdepth 1 \( -name '.failover.cash.*' -o -name '.failover.spend.*' \) -mmin +10 -delete 2>/dev/null  # sweep dead processes' skip markers (they live seconds)
   # An ALIAS as typed (kimi, glm, sonnet) must mean the model it resolves to: canonicalize the table's
   # resolved id, not the raw token, or "kimi" never matches kimi-k3 on droid/warp and the same-model
   # pass silently falls through to a tier pick.
@@ -16480,19 +16481,19 @@ _failover_hop() {
     return 1
   fi
   pick="$(_failover_pick "$src" "${RESOLVED_ID:-$smodel}" "$verb")"
-  if [ -z "$pick" ]; then _failover_nothing_notice "$src" "$reason"; return 1; fi
+  if [ -z "$pick" ]; then _failover_nothing_notice "$src" "$reason"; _failover_skip_clear; return 1; fi
   lane="${pick%%|*}"; why="${pick##*|}"; model="${pick#*|}"; model="${model%|*}"
   if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ] && [ "$why" != "same-model" ]; then
     printf '>>> [failover] %s %s. The only ready lane is %s, which serves a DIFFERENT model (%s); -m %s is a pinned choice, so I will not switch models silently. Re-run with --provider %s -m %s, or set OSRC_FALLBACK_PINNED=1 to allow it.\n' \
       "$(_lane_plan_display "$src")" "$reason" "$(_lane_plan_display "$lane")" "${model:-its default}" "${RESOLVED_ID:-$smodel}" "$(_fallback_provider_for_lane "$lane" 2>/dev/null || printf '%s' "$lane")" "${model:-<model>}" >&2
-    return 1
+    _failover_skip_clear; return 1
   fi
   [ "$tier" != "auto" ] && mutating=1
   _failover_rebuild_argv "$lane" "$model" "$mutating" "$src" "$smodel" || {
     printf '>>> [failover] %s %s. %s is ready but has no provider mapping for a re-dispatch — stopping.\n' "$(_lane_plan_display "$src")" "$reason" "$(_lane_plan_display "$lane")" >&2
-    return 1
+    _failover_skip_clear; return 1
   }
-  _failover_notice "$src" "$reason" "$lane" "$model" "$why" "$mutating"
+  _failover_skip_clear; _failover_notice "$src" "$reason" "$lane" "$model" "$why" "$mutating"
   OSRC_LEDGER_FORCE=1 record_ledger "${disp:-$src}" "${RESOLVED_ID:-$smodel}->${model:-$lane-default}" "" "fallback" "${REST[*]:-}" "0.000000" "" 2>/dev/null || true
   _fo_hops=$(( ${_fo_hops:-0} + 1 ))
   export OSRC_FALLBACK_PINNED=1

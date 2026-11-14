@@ -19,6 +19,10 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanebilling.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+# r11 F7: never inherit the real HOME — sourcing probes auth dirs and a real login
+# would leak subscription verdicts into rows that forgot HOME=. Every row prefixes
+# HOME="$HB" anyway; this covers anything that does not.
+export HOME="$TMP/fakehome"; mkdir -p "$HOME"
 # Source the REAL script (OSRC_SOURCED=1 skips main); loader 2 finds lib/ exactly as in
 # test_limit_gate.sh.
 # shellcheck disable=SC1090
@@ -77,8 +81,26 @@ _ccbill() { local fx="$1"; shift; env HOME="$HB" CLF="$fx" "$@" bash -c '. "$1" 
   have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }
   claude() { printf "%s" "$CLF"; }
   osrc_lane_billing cc' _ "$SRC" 2>/dev/null; }
-PLANJSON='{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
-[ "$(_ccbill "$PLANJSON")" = "subscription" ] && ok "r9 billing: cc plan login max -> subscription" || bad "r9 billing: cc max -> '$(_ccbill "$PLANJSON")'"
+# r11 F1: the canonical fixture is the REAL shape — `claude auth status` pretty-prints
+# (JSON.stringify(_, null, 2)), ~16 indented lines. Values are faked; field set matches
+# a real capture. The variant/negative rows below stay one-line, so BOTH shapes are
+# covered: indented via PLANJSON, one-line via the inline strings.
+PLANJSON='{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}'
+[ "$(_ccbill "$PLANJSON")" = "subscription" ] && ok "r9 billing: cc plan login max (indented real shape) -> subscription" || bad "r9 billing: cc max-indented -> '$(_ccbill "$PLANJSON")'"
 for st in pro team enterprise; do
   j="{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"$st\"}"
   b="$(_ccbill "$j")"
@@ -99,7 +121,7 @@ done
 [ "$(_ccbill 'not json at all')" = "unknown" ] && ok "r9 billing: cc garbage auth status -> unknown" || bad "r9 billing: cc garbage -> subscription?!"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; claude() { return 1; }; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r9 billing: cc auth status exit 1 -> unknown" || bad "r9 billing: cc exit1 -> '$b'"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; [ "$1" = jq ] && return 1; command -v "$1" >/dev/null 2>&1; }; claude() { printf "%s" "$PLANJSON"; }; PLANJSON="'"$PLANJSON"'" osrc_lane_billing cc' )
+b=$( HOME="$HB" PLANJSON="$PLANJSON" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; [ "$1" = jq ] && return 1; command -v "$1" >/dev/null 2>&1; }; claude() { printf "%s" "$PLANJSON"; }; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r9 billing: cc no jq -> unknown" || bad "r9 billing: cc no-jq -> '$b'"
 # File/keychain existence is NOT proof: a real-shaped creds block plus garbage CLI
 # output still yields unknown; a keychain entry without a plan yields unknown.
@@ -129,9 +151,9 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osr
 [ "$b" = "unknown" ] && ok "r3 billing: cc unprovable -> unknown" || bad "r3 billing: cc unknown -> '$b'"
 # r10 4.2: a non-zero `claude auth status` exit is NOT proof even when plan-shaped JSON
 # was printed — the exit code is captured before jq ever sees the payload.
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+b=$( HOME="$HB" PLANJSON="$PLANJSON" bash -c '. "'"$SRC"'" >/dev/null 2>&1
   have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }
-  claude() { printf "%s" "'"$PLANJSON"'"; return 1; }; osrc_lane_billing cc' )
+  claude() { printf "%s" "$PLANJSON"; return 1; }; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r10 billing: cc plan JSON + exit 1 -> unknown" || bad "r10 billing: cc exit1+json -> '$b'"
 # r10 4.3: plan proof tolerates case and plan variants — "Max" and "max_20x" are the
 # same plan family; a non-JSON line before the payload does not cost an ask.
@@ -146,6 +168,45 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1
 [ "$(_ccbill '{"notice":"hi"}
 {"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}')" = "unknown" ] \
   && ok "r10 billing: cc first-JSON-object rule fails safe on foreign object" || bad "r10 billing: cc foreign-object -> subscription?!"
+# r11 F1 rows: pretty shape alone, one-line shape alone, warning + pretty, foreign first,
+# garbage — the exact six shapes the verdict exercised.
+[ "$(_ccbill "$PLANJSON")" = "subscription" ] && ok "r11 billing: cc pretty-printed plan JSON -> subscription" || bad "r11 billing: cc pretty -> subscription?!"
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}')" = "subscription" ] \
+  && ok "r11 billing: cc one-line plan JSON -> subscription" || bad "r11 billing: cc one-line -> subscription?!"
+[ "$(_ccbill 'WARNING: deprecated flag
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "subscriptionType": "max"
+}')" = "subscription" ] \
+  && ok "r11 billing: cc warning line + pretty JSON -> subscription" || bad "r11 billing: cc warn+pretty -> subscription?!"
+# r11 F2a: a key/helper source beside the plan login is NOT subscription — the CLI
+# reports it as apiKeySource and the plan check requires it null.
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","apiKeySource":"apiKeyHelper","subscriptionType":"max"}')" = "unknown" ] \
+  && ok "r11 billing: cc apiKeySource set beside plan login -> unknown" || bad "r11 billing: cc apikeysource -> subscription?!"
+# r11 F2b: settings env.* redirects and CLAUDE_CONFIG_DIR all classify metered.
+printf '{"env":{"ANTHROPIC_BASE_URL":"https://proxy.example","ANTHROPIC_AUTH_TOKEN":"t"}}' > "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r11 billing: cc settings env.ANTHROPIC_BASE_URL+AUTH_TOKEN -> metered" || bad "r11 billing: cc settings baseurl -> '$b'"
+printf '{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}' > "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r11 billing: cc settings env.CLAUDE_CODE_USE_BEDROCK -> metered" || bad "r11 billing: cc settings bedrock -> '$b'"
+printf '{"env":{"CLAUDE_CODE_USE_VERTEX":"true"}}' > "$HB/.claude/settings.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r11 billing: cc settings env.CLAUDE_CODE_USE_VERTEX=true -> metered" || bad "r11 billing: cc settings vertex -> '$b'"
+rm -f "$HB/.claude/settings.json"
+# CLAUDE_CONFIG_DIR is honoured like CODEX_HOME: a helper there bills per-use even
+# when ~/.claude/settings.json is clean.
+mkdir -p "$HB/ccfg"; printf '{"apiKeyHelper":"/bin/echo sk-x"}' > "$HB/ccfg/settings.json"
+b=$( HOME="$HB" CLAUDE_CONFIG_DIR="$HB/ccfg" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
+[ "$b" = "metered" ] && ok "r11 billing: cc CLAUDE_CONFIG_DIR apiKeyHelper -> metered" || bad "r11 billing: cc configdir -> '$b'"
+rm -rf "$HB/ccfg"
+# Exported switches accept truthy values, not only literal "1".
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; CLAUDE_CODE_USE_BEDROCK=true osrc_lane_billing cc; CLAUDE_CODE_USE_FOUNDRY=1 osrc_lane_billing cc' )
+case "$b" in metered$'\n'metered) ok "r11 billing: cc exported BEDROCK=true + FOUNDRY=1 -> metered" ;; *) bad "r11 billing: cc flag-on -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; claude() { echo garbage; }; CLAUDE_CODE_USE_BEDROCK=0 osrc_lane_billing cc; CLAUDE_CODE_USE_VERTEX=false osrc_lane_billing cc' )
+[ "$b" = "unknown"$'\n'"unknown" ] && ok "r11 billing: cc exported BEDROCK=0 + VERTEX=false stay off -> unknown" || bad "r11 billing: cc flag-off -> '$b'"
 
 # cx: ChatGPT auth.json -> subscription; OPENAI_API_KEY -> metered; nothing -> unknown.
 mkdir -p "$HB/.codex"; printf '{"tokens":{"access_token":"x"}}' > "$HB/.codex/auth.json"
@@ -230,6 +291,15 @@ printf '{"customModels":[{"apiKey":"factory-key-abcdef123456"}]}' > "$HB/.factor
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing droid' )
 [ "$b" = "metered" ] && ok "r10 billing: droid settings.json customModels apiKey -> metered" || bad "r10 billing: droid settings.json -> '$b'"
 rm -rf "$HB/.factory"
+# r11 F5: a history/cache/log/tmp artefact is NOT a login — session-history.json
+# records past sessions; only auth-ish non-empty files prove _osrc_dir_auth.
+mkdir -p "$HB/.factory"; printf '[{"session":"old"}]' > "$HB/.factory/session-history.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing droid' )
+[ "$b" = "unknown" ] && ok "r11 billing: droid session-history.json only -> unknown" || bad "r11 billing: droid history-file -> '$b'"
+printf '' > "$HB/.factory/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing droid' )
+[ "$b" = "unknown" ] && ok "r11 billing: droid EMPTY auth.json -> unknown" || bad "r11 billing: droid empty-auth -> '$b'"
+rm -rf "$HB/.factory"
 
 mkdir -p "$HB/.warp"; printf '{"auth":"session"}' > "$HB/.warp/auth.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = oz ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing warp' )
@@ -247,6 +317,18 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] &
 printf '{"auth":"session"}' > "$HB/.antigravity/auth.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
 [ "$b" = "subscription" ] && ok "r10 billing: gm non-empty login file + agy -> subscription" || bad "r10 billing: gm login-file -> '$b'"
+rm -rf "$HB/.antigravity"
+# r11 F5: junk files do not prove a login — .DS_Store, argv.json (written by an
+# editor install before sign-in) and *.log are excluded from the state-file proof.
+mkdir -p "$HB/.antigravity"; printf 'junk' > "$HB/.antigravity/.DS_Store"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "unknown" ] && ok "r11 billing: gm .DS_Store only -> unknown" || bad "r11 billing: gm dsstore -> '$b'"
+printf '{"argv":[]}' > "$HB/.antigravity/argv.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "unknown" ] && ok "r11 billing: gm argv.json only -> unknown" || bad "r11 billing: gm argvjson -> '$b'"
+printf 'log line' > "$HB/.antigravity/run.log"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "unknown" ] && ok "r11 billing: gm *.log only -> unknown" || bad "r11 billing: gm logfile -> '$b'"
 rm -rf "$HB/.antigravity"
 
 # r9 class-check FUNCTIONAL: the spend gate itself, non-interactive with no consent.

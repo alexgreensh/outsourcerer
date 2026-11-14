@@ -9,8 +9,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 
-export OSRC_HOME="$HOME/osrc-test-L10-home-$$"
-mkdir -p "$OSRC_HOME"
+# r11 F7: HOME must be scratch BEFORE sourcing — auth/billing probes read $HOME and
+# OSRC_HOME lives under it. TMP is created first so cleanup() removes everything.
+TMP="$(mktemp -d)"
+export HOME="$TMP/home"; mkdir -p "$HOME"
+export OSRC_HOME="$TMP/osrc-home"; mkdir -p "$OSRC_HOME"
 
 . "$SRC" >/dev/null 2>&1
 SCRIPT_PATH="$SRC"   # sourced mode: $0 is this harness; point preflight/self-exec at the real script
@@ -20,8 +23,6 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
-
-TMP="$(mktemp -d)"
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
 
 # ---------- stubs: claude / devin / codex / gh (log argv, fake auth, fake session URL) ----------
@@ -33,7 +34,24 @@ case "${1:-}" in
   # auth status must carry the full plan shape: cc billing is subscription ONLY on
   # loggedIn+claude.ai+firstParty+a plan subscriptionType (lib/spend.sh); bare {"loggedIn":true}
   # is unknown -> metered -> every cloud session below would refuse at the spend gate.
-  auth)   echo '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 0 ;;
+  auth)   cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
+           exit 0 ;;
   --help|-h|help) echo "Usage: claude [options] [prompt]"; echo "  --cloud [description|session_id|url]"; echo "  --environment <environment_id>"; exit 0 ;;
   --cloud) echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
 esac

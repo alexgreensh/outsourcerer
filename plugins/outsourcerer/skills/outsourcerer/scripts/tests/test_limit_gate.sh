@@ -567,7 +567,24 @@ cat > "$SUM/bin/claude" <<'EOF'
 # `auth status` answers a claude.ai plan login (fake values) ONLY when this home's
 # credentials file exists — installed-but-logged-out must not detect. Billing proof
 # for the feed's paid flag comes from this same JSON.
-case "$*" in *"auth status"*) [ -f "$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}';; esac
+case "$*" in *"auth status"*) [ -f "$HOME/.claude/.credentials.json" ] && cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
+;; esac
 exit 0
 EOF
 chmod +x "$SUM/bin/claude"

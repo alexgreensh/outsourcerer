@@ -7,6 +7,8 @@ SK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../outsourcerer.sh"
 # real ~/.outsourcerer — a stored grant there would make every refusal assertion fail.
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-covtest-home-$$"
 mkdir -p "$OSRC_HOME"
+# r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
+export HOME="$OSRC_HOME/home"; mkdir -p "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT
 
 PASS=0

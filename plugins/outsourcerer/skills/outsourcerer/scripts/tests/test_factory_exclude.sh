@@ -28,7 +28,24 @@ cat > "$FB/claude" <<EOF
 #!/bin/sh
 echo "claude \$*" >> "$CALLS"
 case "\$*" in
-  *"auth status"*) [ -f "\$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}' ;;
+  *"auth status"*) [ -f "\$HOME/.claude/.credentials.json" ] && cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
+;;
 esac
 echo PONG
 exit 0

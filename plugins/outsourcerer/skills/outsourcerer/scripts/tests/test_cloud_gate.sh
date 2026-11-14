@@ -13,6 +13,8 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 # sourcing — OSRC_CONSENT_FILE is derived from OSRC_HOME at source time.
 export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-home-$$"
 mkdir -p "$OSRC_HOME"
+# r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
+export HOME="${TMPDIR:-/tmp}/osrc-test-home-$$-fakehome"; mkdir -p "$HOME"
 
 # Load the script's functions. main "$@" runs with no args (prints help, returns 0);
 # all gate functions are then defined in this shell. set -u is inherited from the
@@ -27,7 +29,7 @@ SCRIPT_PATH="$SRC"
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
 bad() { echo FAIL: $1; fail=$((fail+1)); }
-cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
+cleanup() { rm -rf "$TMP" "$OSRC_HOME" "$HOME"; }
 trap cleanup EXIT
 
 TMP="$(mktemp -d)"

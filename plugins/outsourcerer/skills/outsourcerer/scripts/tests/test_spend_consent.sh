@@ -220,7 +220,24 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
 # apiProvider=firstParty + subscriptionType in pro|max|team|enterprise.
 mkdir -p "$FAKEBIN"; cat > "$FAKEBIN/claude" <<'EOF'
 #!/usr/bin/env bash
-case "$*" in *"auth status"*) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 0 ;; esac
+case "$*" in *"auth status"*) cat <<'JSONEOF'
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/fake/projects",
+  "configDirectory": "/fake/config",
+  "loginExpiresAt": "2027-01-01T00:00:00.000Z",
+  "email": "fixture@example.invalid",
+  "orgId": "org-fixture",
+  "orgName": "Fixture Org",
+  "subscriptionType": "max",
+  "storedClaudeAiLogin": true,
+  "planTier": "max"
+}
+JSONEOF
+exit 0 ;; esac
 exit 0
 EOF
 chmod +x "$FAKEBIN/claude"
