@@ -415,7 +415,7 @@ a.pill svg { width: 13px; height: 13px; }
   const byWeight = (a, b) => ORDER.indexOf(a.weight) - ORDER.indexOf(b.weight);
   const pri = (w) => el('span', 'pri p-' + String(w || 'Medium').toLowerCase(), w || 'Medium');
   const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused' };
-  let projects = [], answers = {}, limits = [], db = null, current = null, forms = {}, canWrite = null, firstPull = true;
+  let projects = [], answers = {}, limits = [], db = null, current = null, forms = {}, canWrite = null, firstPull = true, sigP = '', sigA = '', composing = false, saving = 0, pending = false;  // forms: per-decision drafts <project>--<decision>, they outlive every re-render (MC-4)
   // ---- data adapter: artifact db (window.claude) or local API (hub serve) ----
   let mode = 'none', pullErr = '', unsubs = [];
   const TOKEN = (() => { try { const t = new URLSearchParams(location.search).get('t') || ''; if (t) { sessionStorage.setItem('osrc-hub-t', t); try { const u = new URL(location.href); u.searchParams.delete('t'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e2) {} } return t || sessionStorage.getItem('osrc-hub-t') || ''; } catch (e) { return ''; } })();
@@ -427,7 +427,10 @@ a.pill svg { width: 13px; height: 13px; }
       return r.json();
     });
   }
+  // A poll that brings the same data re-renders nothing (exported_at changes on every export, so it is ignored).
+  const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' ? undefined : v));
   function applyProjects(snap) {
+    const s = sig(snap); if (s === sigP && !firstPull && !pullErr) return; sigP = s;
     pullErr = '';
     projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
     if (firstPull) { current = pickStart(); firstPull = false; } else if (current && !projects.some((p) => p.id === current)) current = null;
@@ -438,6 +441,7 @@ a.pill svg { width: 13px; height: 13px; }
     renderLimits(); paint();
   }
   function applyAnswers(snap) {
+    const s = sig(snap); if (s === sigA) return; sigA = s;
     answers = {}; snap.docs.forEach((d) => { answers[d.id] = d.data(); });
     renderRail(); renderMain();
   }
@@ -758,8 +762,11 @@ a.pill svg { width: 13px; height: 13px; }
   function renderMain() {
     const p = projects.find((x) => x.id === current);
     const main = $('main');
+    if (composing || saving) { pending = true; return; }   // never rebuild a field mid-IME (Hebrew/CJK) or mid-send; flush() renders after
     if (!p) { if (H && (projects.length || db)) H.renderHome(); else if (!H && projects.length) { current = projects[0].id; renderMain(); } return; }
-    hide(); main.replaceChildren(); forms = {};
+    const ae = document.activeElement, keep = ae && ae.id && main.contains(ae) ? { id: ae.id, s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection } : null;
+    main.querySelectorAll('textarea[data-k]').forEach((t) => { const f = forms[t.dataset.k]; if (f) { f.h = t.style.height; f.top = t.scrollTop; } });
+    hide(); main.replaceChildren();
     const ph = el('header', 'ph');
     const meta = el('div', 'meta');
     meta.append(el('span', 'pill', STATUS_TXT[p.status] || 'Building'));
@@ -875,7 +882,10 @@ a.pill svg { width: 13px; height: 13px; }
     if (!ds.length) decSec();
     main.appendChild(el('p', 'foot', 'Last updated ' + (p.updated || 'not yet') + '. Each orchestrator refreshes its own project here as tracks move.'));
     paint();
+    const n = keep && $(keep.id); if (n) { n.focus({ preventScroll: true }); if (keep.s != null && n.setSelectionRange) try { n.setSelectionRange(keep.s, keep.e, keep.d || 'none'); } catch (e) {} }
   }
+  const flush = () => { if (pending && !composing && !saving) { pending = false; renderMain(); } };
+  document.addEventListener('compositionstart', () => { composing = true; }); document.addEventListener('compositionend', () => { composing = false; flush(); });
 
   function decCard(p, d) {
     const c = el('div', 'card dec'); c.id = 'dec-' + d.id;
@@ -883,24 +893,26 @@ a.pill svg { width: 13px; height: 13px; }
     if (d.rec) c.append(el('span', null, d.rec));
     if (d.when) c.append(el('span', 'mono', 'Needed by ' + d.when));
     const a = el('div', 'ans'); const opts = el('div', 'opts');
-    const f = { choice: '', btns: [] };
+    const key = p.id + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
     (d.options || []).forEach((o, i) => {
-      const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + p.id + '-' + d.id + '-' + i; b.setAttribute('aria-pressed', 'false');
+      const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + p.id + '-' + d.id + '-' + i; b.setAttribute('aria-pressed', String(o === f.choice));
       b.addEventListener('click', () => { f.choice = f.choice === o ? '' : o; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
       f.btns.push(b); opts.appendChild(b);
     });
     const ta = document.createElement('textarea'); ta.id = 'note-' + p.id + '-' + d.id; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note'); ta.setAttribute('dir', 'auto');
+    ta.dataset.k = key; ta.value = f.note; if (f.h) ta.style.height = f.h; if (f.top) requestAnimationFrame(() => { ta.scrollTop = f.top; });
     const go2 = el('button', 'go'); go2.append(ic('send'), document.createTextNode('Send answer')); go2.type = 'button'; go2.id = 'send-' + p.id + '-' + d.id;
     const st = el('span', 'saved'); st.setAttribute('aria-live', 'polite');
     const sync = () => { go2.disabled = !db || (!f.choice && !ta.value.trim()); };
-    ta.addEventListener('input', sync); sync();
+    const say = (m, err) => { f.msg = m; f.err = !!err; st.textContent = m; st.classList.toggle('err', !!err); };
+    ta.addEventListener('input', () => { f.note = ta.value; sync(); }); sync(); say(f.msg, f.err);
     if (!db) st.textContent = 'Answering works when you are signed in on claude.ai.';
     go2.addEventListener('click', async () => {
-      go2.disabled = true; st.textContent = 'Saving…';
+      go2.disabled = true; say('Saving…'); saving++;
       try {
         await db.doc('answers/' + p.id + '--' + d.id).set({ project: p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
-        st.classList.remove('err'); st.textContent = 'Saved. Your orchestrator reads it when it checks Mission Control.';
-      } catch (e) { st.classList.add('err'); st.textContent = 'Not saved: ' + ((e && e.message) || 'try again'); sync(); }
+        say('Saved. Your orchestrator reads it when it checks Mission Control.'); delete forms[key];
+      } catch (e) { say('Not saved: ' + ((e && e.message) || 'try again'), true); sync(); } finally { saving--; flush(); }
     });
     a.append(opts, ta, go2, st); c.appendChild(a);
     return c;
@@ -934,7 +946,6 @@ a.pill svg { width: 13px; height: 13px; }
   // Home, Mark done and Refresh live in assets/hub-home.js (keeps this file under 1,000 lines).
   const H = typeof window.OSRC_HUB_HOME === 'function' ? window.OSRC_HUB_HOME({
     $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, go, hide, renderRail, renderMain, staleCheck,
-    resetForms: () => { forms = {}; },
     get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;

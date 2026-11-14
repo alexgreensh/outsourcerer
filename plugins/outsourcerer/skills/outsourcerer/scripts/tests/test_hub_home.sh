@@ -59,6 +59,15 @@ grep -q 'border-left: *[0-9.]*px solid var(--hi)' "$PAGE" && bad "border-left ac
 [ "$(wc -l < "$PAGE")" -le 1000 ] && [ "$(wc -l < "$JS")" -le 1000 ] && [ "$(wc -l < "$LIB/hub_server.py")" -le 1000 ] && [ "$(wc -l < "$LIB/hub.sh")" -le 1000 ] \
   && ok "hub.html/hub-home.js/hub_server.py/hub.sh each <= 1000 lines" || bad "a hub file passed 1000 lines"
 
+echo "=== MC-4: drafts survive re-renders (page contract) ==="
+grep -q "const key = p.id + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$PAGE" && ok "decision draft keyed <project>--<decision> in forms" || bad "draft store missing"
+grep -q "main.replaceChildren(); forms = {}" "$PAGE" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
+grep -q "ta.value = f.note" "$PAGE" && grep -q "String(o === f.choice)" "$PAGE" && ok "text + chosen option restored on render" || bad "draft not restored"
+grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
+grep -q "if (composing || saving) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
+grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing" || bad "identical-poll skip missing"
+grep -q "resetForms" "$PAGE" "$JS" && bad "Home still resets drafts" || ok "going Home keeps drafts"
+
 echo "=== refreshBtn: only on a stale stamp (node, no browser) ==="
 if command -v node >/dev/null 2>&1; then
   rb="$(node - "$JS" <<'EOF' 2>&1
@@ -151,6 +160,14 @@ curl -s -H "X-Hub-Token: $TOK" "$B/api/projects" | jq -e '.projects[]|select(.id
 c="$(post /api/projects/alpha/status '{"status":"restore"}' -H "X-Hub-Token: $TOK")"
 [ "$c" = 200 ] && jq -e '.project.status=="review" and (.project.shippedBy==null)' "$TMP/body" >/dev/null \
   && ok "Move back restores the previous status" || bad "restore failed ($c): $(cat "$TMP/body")"
+# MC-4: the page offers "your own answer" in the note, so a note-only answer must land.
+c="$(post /api/answers '{"id":"alpha--N1","choice":"","note":"my own answer"}' -H "X-Hub-Token: $TOK")"
+[ "$c" = 200 ] && jq -e '.choice=="" and .note=="my own answer"' "$OSRC_HOME/hub/answers/alpha--N1.json" >/dev/null \
+  && ok "note-only answer accepted and stored" || bad "note-only answer refused ($c): $(cat "$TMP/body")"
+[ "$(post /api/answers '{"id":"alpha--N2","note":"no choice key at all"}' -H "X-Hub-Token: $TOK")" = 200 ] && ok "answer without a choice key accepted" || bad "missing choice key refused"
+[ "$(post /api/answers '{"id":"alpha--N3","choice":"  ","note":" "}' -H "X-Hub-Token: $TOK")" = 400 ] && ok "blank choice + blank note -> 400" || bad "empty answer accepted"
+[ "$(post /api/answers '{"id":"alpha--N4","choice":"yes","note":["x"]}' -H "X-Hub-Token: $TOK")" = 400 ] && ok "non-string note -> 400" || bad "non-string note accepted"
+[ ! -e "$OSRC_HOME/hub/answers/alpha--N3.json" ] && [ ! -e "$OSRC_HOME/hub/answers/alpha--N4.json" ] && ok "refused answers wrote nothing" || bad "a refused answer wrote a file"
 ct="$(curl -s -o /dev/null -D - "$B/assets/hub-home.js" | tr -d '\r' | grep -i '^content-type:')"
 grep -qi 'text/javascript' <<<"$ct" && ok "hub-home.js served as text/javascript (nosniff-safe)" || bad "hub-home.js content type: $ct"
 [ "$(curl -s "$B/assets/hub-home.js" | head -c 2)" = "/*" ] && ok "hub-home.js served token-free from /assets" || bad "hub-home.js not served"

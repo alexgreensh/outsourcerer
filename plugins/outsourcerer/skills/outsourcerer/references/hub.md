@@ -109,7 +109,10 @@ To publish it as an artifact, the orchestrator:
 4. Publishes `assets/hub-home.js` next to the page (with the fonts) when it publishes
    `hub.html` itself.
 
-Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`.
+Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`. `choice` may be
+empty when the viewer typed their own answer in `note` (one of the two always carries text).
+A half-typed answer survives every poll and re-render: the page keeps a per-decision draft
+(choice, text, focus, caret) and holds re-renders during IME composition and an in-flight send.
 
 ## Local mode (any browser)
 

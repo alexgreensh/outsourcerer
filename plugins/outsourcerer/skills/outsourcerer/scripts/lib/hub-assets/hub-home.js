@@ -109,7 +109,7 @@
 
     function renderHome() {
       const projects = ctx.projects, db = ctx.db, go = ctx.go;
-      const main = $('main'); ctx.hide(); main.replaceChildren(); ctx.resetForms();
+      const main = $('main'); ctx.hide(); main.replaceChildren();
       const live = projects.filter((p) => p.status !== 'shipped');
       const running = live.filter((p) => p.status !== 'paused').concat(live.filter((p) => p.status === 'paused'));
       const shipped = projects.filter((p) => p.status === 'shipped');

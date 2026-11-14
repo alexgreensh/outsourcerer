@@ -164,14 +164,26 @@ class Hub:
         if not isinstance(aid, str) or not ID_RE.match(aid):
             return None, "bad answer id"
         choice = body.get("choice")
-        if not isinstance(choice, str) or not choice.strip() or len(choice) > 4000:
+        note = body.get("note")
+        if choice is None:
+            choice = ""
+        if note is None:
+            note = ""
+        # The page offers "your own answer" in the note, so a note alone is a full
+        # answer (MC-4: a typed-only answer used to 400 and vanish). One of the two
+        # must carry text.
+        if not isinstance(choice, str) or len(choice) > 4000:
             return None, "bad choice"
+        if not isinstance(note, str) or len(note) > 4000:
+            return None, "bad note"
+        if not choice.strip() and not note.strip():
+            return None, "empty answer"
         rec = {
             "project": str(body.get("project") or "")[:200],
             "decision": str(body.get("decision") or "")[:200],
             "question": str(body.get("question") or "")[:2000],
             "choice": choice.strip()[:4000],
-            "note": str(body.get("note") or "")[:4000],
+            "note": note.strip()[:4000],
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         path = os.path.join(self.answers_dir, aid + ".json")
