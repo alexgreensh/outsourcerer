@@ -103,10 +103,10 @@ _failover_signal_write cx luna confirmed "plan limit spent (resets in 2h15m)" 81
 _o="$(hop auto run)"; _rc="$(printf '%s' "$_o" | sed -n 1p)"; _n="$(printf '%s' "$_o" | sed -n 2p)"
 [ "$_rc" = 0 ] && ok "hop: read-only cx->droid armed (rc0)" || bad "hop: rc=$_rc"
 [ "$(printf '%s' "$_o" | sed -n 3,4p | tr '\n' ' ')" = "--provider droid " ] && [ "$_n" = 5 ] && ok "hop: argv = --provider droid + task (no -m: lane default; no handoff note on read-only)" || bad "hop: argv: $(printf '%s' "$_o" | sed -n 3,7p | tr '\n' ' ')"
-printf '%s' "$_o" | grep -q '>>> \[failover\] Codex (ChatGPT plan) plan limit spent (resets in 2h15m). You have Droid (Factory) — moving this to its default model there (its nearest-tier equivalent (mid)) and continuing.' \
+grep -q '>>> \[failover\] Codex (ChatGPT plan) plan limit spent (resets in 2h15m). You have Droid (Factory) — moving this to its default model there (its nearest-tier equivalent (mid)) and continuing.' <<<"$_o" \
   && ok "hop: human notice names source + reason + target + model" || bad "hop: notice: $(printf '%s' "$_o" | grep failover)"
-printf '%s' "$_o" | grep -q 'FRESH' && bad "hop: read-only notice mentions FRESH re-dispatch" || ok "hop: read-only notice has no handoff language"
-printf '%s' "$_o" | grep -q 'hops=1 pinned=1' && ok "hop: hop counter + hop-mode pin set" || bad "hop: state: $(printf '%s' "$_o" | tail -1)"
+grep -q 'FRESH' <<<"$_o" && bad "hop: read-only notice mentions FRESH re-dispatch" || ok "hop: read-only notice has no handoff language"
+grep -q 'hops=1 pinned=1' <<<"$_o" && ok "hop: hop counter + hop-mode pin set" || bad "hop: state: $(printf '%s' "$_o" | tail -1)"
 _failover_signal_pending && bad "hop: signal not consumed" || ok "hop: signal consumed by the hop"
 # C2 mutating hop -> FRESH re-dispatch with handoff note
 _failover_signal_write cx luna confirmed "plan limit spent" 8100
@@ -115,41 +115,41 @@ _o="$(hop accept-edits edit)"; _rc="$(printf '%s' "$_o" | sed -n 1p)"; _n="$(pri
 _note="$(printf '%s' "$_o" | sed -n 5p)"
 case "$_note" in "[handoff] This task was started on Codex (ChatGPT plan) (luna)"*"git status"*"Do not redo completed steps"*"The original task follows."*) ok "hop: handoff note = continue from the CURRENT repo state" ;; *) bad "hop: note '$_note'" ;; esac
 [ "$(printf '%s' "$_o" | sed -n 6,8p | tr '\n' ' ')" = "fix the tests " ] && ok "hop: original task follows the note verbatim" || bad "hop: task tail: $(printf '%s' "$_o" | sed -n 6,8p | tr '\n' ' ')"
-printf '%s' "$_o" | grep -q 'continuing FRESH from the current repo state: the new agent reads the half-done files' && ok "hop: mutating notice says FRESH + reads the half-done files" || bad "hop: mutating notice missing"
-printf '%s' "$_o" | grep -q 'nothing from the interrupted turn is replayed' && ok "hop: mutating notice rules out replay" || bad "hop: replay wording missing"
-printf '%s' "$_o" | grep -qiE -- '--resume|--continue|resume-session' && bad "hop: argv carries a resume flag" || ok "hop: no byte-level resume flag anywhere in the rebuilt argv"
+grep -q 'continuing FRESH from the current repo state: the new agent reads the half-done files' <<<"$_o" && ok "hop: mutating notice says FRESH + reads the half-done files" || bad "hop: mutating notice missing"
+grep -q 'nothing from the interrupted turn is replayed' <<<"$_o" && ok "hop: mutating notice rules out replay" || bad "hop: replay wording missing"
+grep -qiE -- '--resume|--continue|resume-session' <<<"$_o" && bad "hop: argv carries a resume flag" || ok "hop: no byte-level resume flag anywhere in the rebuilt argv"
 # C3 nothing ready -> STOP line with soonest reset (+ cash hint when a cash lane was skipped)
 rmc droid
 _lane_down_mark dv 41220 "plan quota exhausted"
 _failover_signal_write dv glm-5.2 confirmed "daily quota spent (shared daily plan bucket; no free models there until reset in 11h26m)" 41160
 _o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"; _rc="$(printf '%s' "$_o" | sed -n 1p)"
 [ "$_rc" = 1 ] && ok "hop: nothing ready -> rc1 (caller stops)" || bad "hop nothing: rc=$_rc"
-printf '%s' "$_o" | grep -q '>>> \[failover\] every lane you have is at its limit or absent; nothing to fail over to (Devin daily quota spent' && printf '%s' "$_o" | grep -q 'Waiting for Devin in 11h' && ok "hop: STOP line = spec wording + reason + soonest reset (Devin in 11h…)" || bad "hop: stop line: $(printf '%s' "$_o" | grep failover)"
-printf '%s' "$_o" | grep -q 'or add a lane' && ok "hop: STOP line suggests adding a lane" || bad "hop: add-a-lane missing"
-printf '%s' "$_o" | grep -q 'hops=0' && ok "hop: no hop counted on a stop" || bad "hop: counted a hop on stop"
+grep -q '>>> \[failover\] every lane you have is at its limit or absent; nothing to fail over to (Devin daily quota spent' <<<"$_o" && grep -q 'Waiting for Devin in 11h' <<<"$_o" && ok "hop: STOP line = spec wording + reason + soonest reset (Devin in 11h…)" || bad "hop: stop line: $(printf '%s' "$_o" | grep failover)"
+grep -q 'or add a lane' <<<"$_o" && ok "hop: STOP line suggests adding a lane" || bad "hop: add-a-lane missing"
+grep -q 'hops=0' <<<"$_o" && ok "hop: no hop counted on a stop" || bad "hop: counted a hop on stop"
 [ "$(printf '%s' "$_o" | sed -n 3p)" = "run" ] && ok "hop: argv untouched on a stop" || bad "hop: argv changed on stop"
 mk claude; export FAKE_OR_KEY=1
 _failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
 _o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
-printf '%s' "$_o" | grep -q 'You have Claude Code (Claude plan) — moving this to sonnet there' && ok "hop: dv->cc sonnet when cc is the only ready plan lane (or is cash)" || bad "hop: $(printf '%s' "$_o" | grep failover)"
+grep -q 'You have Claude Code (Claude plan) — moving this to sonnet there' <<<"$_o" && ok "hop: dv->cc sonnet when cc is the only ready plan lane (or is cash)" || bad "hop: $(printf '%s' "$_o" | grep failover)"
 rmc claude
 _failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
 _o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
-printf '%s' "$_o" | grep -q 'nothing to fail over to' && printf '%s' "$_o" | grep -q '(or would take it but spends cash; allow that with OSRC_FAILOVER_CASH_OK=1.)' && ok "hop: only a cash lane left -> STOP line names it + the consent switch, never uses it" || bad "hop: cash hint: $(printf '%s' "$_o" | grep failover)"
+grep -q 'nothing to fail over to' <<<"$_o" && grep -q '(or would take it but spends cash; allow that with OSRC_FAILOVER_CASH_OK=1.)' <<<"$_o" && ok "hop: only a cash lane left -> STOP line names it + the consent switch, never uses it" || bad "hop: cash hint: $(printf '%s' "$_o" | grep failover)"
 unset FAKE_OR_KEY; _lane_down_clear dv
 # C4 budget
 mk droid
 _failover_signal_write cx luna confirmed "plan limit spent" 8100
-_o="$(HOP_HOPS=2 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && printf '%s' "$_o" | grep -q 'already hopped 2 time(s) (OSRC_FAILOVER_MAX=2)' && ok "hop: budget exhausted -> stops instead of ping-pong" || bad "hop budget: $(printf '%s' "$_o" | grep failover)"
+_o="$(HOP_HOPS=2 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && grep -q 'already hopped 2 time(s) (OSRC_FAILOVER_MAX=2)' <<<"$_o" && ok "hop: budget exhausted -> stops instead of ping-pong" || bad "hop budget: $(printf '%s' "$_o" | grep failover)"
 _failover_signal_write cx luna confirmed "plan limit spent" 8100
 _o="$(OSRC_FAILOVER_MAX=3 HOP_HOPS=2 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 0 ] && ok "hop: OSRC_FAILOVER_MAX raises the budget" || bad "hop: budget override ignored"
 # C5 pinned -m
 _failover_signal_write cx luna confirmed "plan limit spent" 8100
-_o="$(HOP_PINNED=1 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && printf '%s' "$_o" | grep -q 'pinned choice, so I will not switch models silently' && ok "hop: pinned -m + different-model pick -> refused loudly" || bad "hop pin: $(printf '%s' "$_o" | grep failover)"
+_o="$(HOP_PINNED=1 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && grep -q 'pinned choice, so I will not switch models silently' <<<"$_o" && ok "hop: pinned -m + different-model pick -> refused loudly" || bad "hop pin: $(printf '%s' "$_o" | grep failover)"
 _failover_signal_write cx luna confirmed "plan limit spent" 8100
 _o="$(OSRC_FALLBACK_PINNED=1 HOP_PINNED=1 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 0 ] && ok "hop: OSRC_FALLBACK_PINNED=1 allows the switch" || bad "hop: pinned override ignored"
 _failover_signal_write dv kimi-k3 confirmed "daily quota spent" 41160
-_o="$(HOP_MODEL=kimi-k3 HOP_DISP=devin HOP_PINNED=1 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 0 ] && printf '%s' "$_o" | grep -q 'moving this to kimi-k3 there (the same model)' && ok "hop: pinned -m + SAME model on droid -> allowed (the pin's intent is honored)" || bad "hop same-model pin: $(printf '%s' "$_o" | grep failover)"
+_o="$(HOP_MODEL=kimi-k3 HOP_DISP=devin HOP_PINNED=1 hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 0 ] && grep -q 'moving this to kimi-k3 there (the same model)' <<<"$_o" && ok "hop: pinned -m + SAME model on droid -> allowed (the pin's intent is honored)" || bad "hop same-model pin: $(printf '%s' "$_o" | grep failover)"
 # C6 answered verdict -> not a hop
 _failover_signal_write cx luna answered "still answers" ""
 _o="$(hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && ok "hop: 'answered' verdict -> rc1, no hop" || bad "hop: answered verdict hopped"

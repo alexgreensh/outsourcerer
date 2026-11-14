@@ -39,7 +39,7 @@ fi
 printf '%s\n' '{"event_id":"complete"}' > "$OSRC_WAKE_QUEUE"
 printf '%s' '{"event_id":' >> "$OSRC_WAKE_QUEUE"
 readout="$(_state_jsonl_read "$OSRC_WAKE_QUEUE" 2>&1)"
-if printf '%s' "$readout" | grep -q '"complete"' && printf '%s' "$readout" | grep -q 'ignored truncated final state record'; then
+if grep -q '"complete"' <<<"$readout" && grep -q 'ignored truncated final state record' <<<"$readout"; then
   ok "truncated final record is recovered"
 else
   bad "truncated final record was not recovered ($readout)"
@@ -67,7 +67,7 @@ else
   ok "snapshot temporary file is replaced"
 fi
 digest="$(_fleet_digest "$snapshot")"
-if printf '%s' "$digest" | grep -q "Captain's Call" && printf '%s' "$digest" | grep -q 'Charted Next'; then
+if grep -q "Captain's Call" <<<"$digest" && grep -q 'Charted Next' <<<"$digest"; then
   ok "digest renders all sections"
 else
   bad "digest sections are incomplete ($digest)"

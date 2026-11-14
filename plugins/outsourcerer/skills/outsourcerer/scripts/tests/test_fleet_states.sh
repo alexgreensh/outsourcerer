@@ -93,8 +93,8 @@ snapshot="$(jq -cn '{items:[
   {owner:"cc-peer",task_summary:"done",state:"done",state_label:"Done"}
 ]}')"
 listing="$(_fleet_ls_group "$snapshot" cc-peer Peers)"
-printf '%s' "$listing" | grep -q 'Waiting on you' \
-  && printf '%s' "$listing" | grep -q 'Done' \
+grep -q 'Waiting on you' <<<"$listing" \
+  && grep -q 'Done' <<<"$listing" \
   && [ "$(printf '%s' "$listing" | grep -c 'needs-you')" -eq 1 ] \
   && ok "fleet table renders state labels and only waiting rows need you" \
   || bad "fleet table state labels or needs-you rendering is wrong"

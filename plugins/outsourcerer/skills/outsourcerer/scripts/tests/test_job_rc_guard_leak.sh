@@ -73,7 +73,7 @@ newjob() { # <name> [cwd] [lane]
 # --- control: outside a job, a delegating command still refuses to end blind (rc=7). This is the
 # guard working as designed, and it proves the fixture state is enough to trigger it. ---
 out="$(child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'blind-turn guard' \
+[ "$rc" = 7 ] && grep -q 'blind-turn guard' <<<"$out" \
   && ok "control: an orchestrator-level run still gets the guard's rc=7" \
   || bad "control: expected rc=7 + guard notice outside a job (rc=$rc)"
 
@@ -81,7 +81,7 @@ out="$(child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
 # environment, so a delegate that runs outsourcerer itself inherits it; if env were the signal,
 # every nested call would run blind. Only the private argv sentinel exempts. ---
 out="$(OSRC_JOB_DIR="$FIXTURE/inherited-job" OSRC_STREAM=1 child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'blind-turn guard' \
+[ "$rc" = 7 ] && grep -q 'blind-turn guard' <<<"$out" \
   && ok "an inherited OSRC_JOB_DIR without the sentinel still gets the guard's rc=7" \
   || bad "inherited OSRC_JOB_DIR disabled the guard (rc=$rc)"
 

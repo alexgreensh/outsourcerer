@@ -93,9 +93,9 @@ out="$(TO=3 gb run "x")"; rc=$?
 [ "$rc" -eq 124 ] && grep -q "no branch after" "$TMP/err" && ok "no branch by the deadline returns 124 with a pointer" || no "timeout rc=$rc"
 stop_bot
 out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL= GROKBOT_WEBHOOK_KEY= "$SRC" --provider grokbot run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "GROKBOT_WEBHOOK_URL" && ok "missing setup names the two settings" || no "missing setup rc=$rc"
+[ "$rc" -ne 0 ] && grep -q "GROKBOT_WEBHOOK_URL" <<<"$out" && ok "missing setup names the two settings" || no "missing setup rc=$rc"
 out="$( cd "$TMP/work" && OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 GROKBOT_WEBHOOK_URL=http://example.com/h GROKBOT_WEBHOOK_KEY=k "$SRC" --provider grokbot run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "https://" && ok "a plain-http webhook is refused (the key would travel in the clear)" || no "http URL accepted"
+[ "$rc" -ne 0 ] && grep -q "https://" <<<"$out" && ok "a plain-http webhook is refused (the key would travel in the clear)" || no "http URL accepted"
 grep -q 'printf .Authorization: Bearer' "$SRC" && ! grep -n 'delegate_grokbot' -A80 "$SRC" | grep -q -- '-H "Authorization' \
   && ok "the key goes through the header file, never the process list" || no "key may appear in argv"
 

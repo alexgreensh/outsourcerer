@@ -245,7 +245,7 @@ chmod +x "$OLD_FAKE/cline"
 REST=("test task"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC=""
 rm -f "$CAPTURE"
 _GATE_OUT="$( ( PATH="$OLD_FAKE:$PATH" delegate_cline auto ) 2>&1 >/dev/null || true )"
-if printf '%s' "$_GATE_OUT" | grep -q 'requires cline >= 3.0.36'; then
+if grep -q 'requires cline >= 3.0.36' <<<"$_GATE_OUT"; then
   ok "behavioral: version gate refuses old cline (3.0.35) on the read-only tier with a clear message"
 else
   bad "behavioral: version gate did not refuse old cline (output: $_GATE_OUT)"
@@ -281,7 +281,7 @@ fi
 REST=("test task"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC=""
 rm -f "$CAPTURE"
 _FAILCLOSED_OUT="$( ( PATH="$WEIRD_FAKE:$PATH" delegate_cline auto ) 2>&1 >/dev/null || true )"
-if printf '%s' "$_FAILCLOSED_OUT" | grep -q 'cannot parse cline version'; then
+if grep -q 'cannot parse cline version' <<<"$_FAILCLOSED_OUT"; then
   ok "behavioral: unparseable version fails closed (refuses read-only tier without the bypass)"
 else
   bad "behavioral: unparseable version did not fail closed (output: $_FAILCLOSED_OUT)"

@@ -28,8 +28,8 @@ OSRC_NO_BYPASS=0
 mode="$(_perm_escalate acceptEdits "/tmp/protected/file" 2>"$TMP/err1.txt")"
 err="$(cat "$TMP/err1.txt")"
 if [ "$mode" = "acceptEdits" ]; then ok "default keeps caller mode (acceptEdits)" ; else bad "default changed mode to '$mode'"; fi
-if printf '%s' "$err" | grep -q 'protected path needs --allow-downgrade'; then ok "default prints --allow-downgrade warning" ; else bad "default warning missing: $err"; fi
-if printf '%s' "$err" | grep -q 'SECURITY DOWNGRADE'; then bad "default should NOT print SECURITY DOWNGRADE" ; else ok "default does not print SECURITY DOWNGRADE"; fi
+if grep -q 'protected path needs --allow-downgrade' <<<"$err"; then ok "default prints --allow-downgrade warning" ; else bad "default warning missing: $err"; fi
+if grep -q 'SECURITY DOWNGRADE' <<<"$err"; then bad "default should NOT print SECURITY DOWNGRADE" ; else ok "default does not print SECURITY DOWNGRADE"; fi
 
 # === Scenario 2: explicit per-run flag --allow-downgrade is consumed and escalates. ===
 _consume_flags --allow-downgrade "some task"
@@ -42,7 +42,7 @@ OSRC_ALLOW_DOWNGRADE=1
 mode="$(_perm_escalate acceptEdits "/tmp/protected/file" 2>"$TMP/err3.txt")"
 err="$(cat "$TMP/err3.txt")"
 if [ "$mode" = "bypassPermissions" ]; then ok "OSRC_ALLOW_DOWNGRADE=1 escalates to bypassPermissions" ; else bad "allow-downgrade did not escalate (got '$mode')"; fi
-if printf '%s' "$err" | grep -q 'SECURITY DOWNGRADE'; then ok "escalation banner says SECURITY DOWNGRADE" ; else bad "escalation missing SECURITY DOWNGRADE banner: $err"; fi
+if grep -q 'SECURITY DOWNGRADE' <<<"$err"; then ok "escalation banner says SECURITY DOWNGRADE" ; else bad "escalation missing SECURITY DOWNGRADE banner: $err"; fi
 
 # === Scenario 4: /tmp path is unchanged and produces no warning. ===
 OSRC_PROTECTED_PATHS=/nonexistent
@@ -61,12 +61,12 @@ need_devin() { :; }
 logged_in() { :; }
 continue_turn "hello again"
 if [ "$DEVIN_CALLED" = "1" ]; then ok "continue calls devin" ; else bad "continue did not call devin"; fi
-if printf '%s' "${DEVIN_ARGS[*]}" | grep -q -- '--permission-mode'; then
+if grep -q -- '--permission-mode' <<<"${DEVIN_ARGS[*]}"; then
   bad "continue still passes --permission-mode"
 else
   ok "continue no longer forces --permission-mode"
 fi
-if printf '%s' "${DEVIN_ARGS[*]}" | grep -q 'accept-edits'; then
+if grep -q 'accept-edits' <<<"${DEVIN_ARGS[*]}"; then
   bad "continue still passes accept-edits"
 else
   ok "continue no longer forces accept-edits"
@@ -89,8 +89,8 @@ delegate_codex accept-edits "task" > "$TMP/out6.txt" 2>&1
 rc=$?
 out="$(cat "$TMP/out6.txt")"
 if [ "$DELEGATE_CC_CALLED" = "0" ]; then ok "codex->cc self-heal without ack does NOT call delegate_cc" ; else bad "delegate_cc was called without ack"; fi
-if printf '%s' "$out" | grep -q 'SECURITY DOWNGRADE'; then ok "self-heal refusal banner says SECURITY DOWNGRADE" ; else bad "self-heal refusal missing SECURITY DOWNGRADE: $out"; fi
-if printf '%s' "$out" | grep -q 'requires --allow-downgrade'; then ok "self-heal refusal tells user to use --allow-downgrade" ; else bad "self-heal refusal missing --allow-downgrade hint: $out"; fi
+if grep -q 'SECURITY DOWNGRADE' <<<"$out"; then ok "self-heal refusal banner says SECURITY DOWNGRADE" ; else bad "self-heal refusal missing SECURITY DOWNGRADE: $out"; fi
+if grep -q 'requires --allow-downgrade' <<<"$out"; then ok "self-heal refusal tells user to use --allow-downgrade" ; else bad "self-heal refusal missing --allow-downgrade hint: $out"; fi
 
 # === Scenario 7: codex->cc self-heal with --allow-downgrade does drop sandbox and calls cc. ===
 OSRC_ALLOW_DOWNGRADE=0
@@ -99,7 +99,7 @@ delegate_codex accept-edits --allow-downgrade "task" > "$TMP/out7.txt" 2>&1
 rc=$?
 out="$(cat "$TMP/out7.txt")"
 if [ "$DELEGATE_CC_CALLED" = "1" ]; then ok "self-heal with --allow-downgrade calls delegate_cc" ; else bad "delegate_cc not called with --allow-downgrade"; fi
-if printf '%s' "$out" | grep -q 'SECURITY DOWNGRADE'; then ok "self-heal escalation banner says SECURITY DOWNGRADE" ; else bad "self-heal escalation missing SECURITY DOWNGRADE: $out"; fi
+if grep -q 'SECURITY DOWNGRADE' <<<"$out"; then ok "self-heal escalation banner says SECURITY DOWNGRADE" ; else bad "self-heal escalation missing SECURITY DOWNGRADE: $out"; fi
 
 # === Scenario 8: source no longer auto-escalates in the continue / self-heal blocks. ===
 if grep -q 'permission-mode.*accept-edits' "$SRC"; then

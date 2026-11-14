@@ -44,7 +44,7 @@ warn=""
 out="$(_utf8_guard "$INVALID" 2>"$TMP_ERR")"; warn="$(cat "$TMP_ERR" 2>/dev/null)"
 # iconv //IGNORE drops the lone E2 -> "hello  world" (double space where the byte was).
 [ "$out" = "hello  world" ] && ok "invalid UTF-8 lossy-decoded to valid" || bad "lossy-decode wrong: got [$out]"
-printf '%s' "$warn" | grep -q '\[utf8\]' && ok "warning emitted on invalid UTF-8" || bad "no warning on invalid UTF-8"
+grep -q '\[utf8\]' <<<"$warn" && ok "warning emitted on invalid UTF-8" || bad "no warning on invalid UTF-8"
 
 # --- Scenario 3: the guard's output is itself valid UTF-8 (would not re-trip clap). ---
 # Round-trip the cleaned output through iconv strict (no //IGNORE); must exit 0.

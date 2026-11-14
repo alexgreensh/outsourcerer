@@ -88,7 +88,7 @@ echo "=== (a) Default OSRC_REQUIRE_INTERACTIVE=1 → interactive tmux, no bg job
   RI_A_TMUX_CALLS="$(cat "$RI_TMUX_A/all-calls" 2>/dev/null || echo '')"
 
   # (a1) Engine returned 0 + a session name on stdout.
-  if [ "$RI_A_RC" -eq 0 ] && printf '%s' "$RI_A_OUT" | grep -q '^osrc-ad-'; then
+  if [ "$RI_A_RC" -eq 0 ] && grep -q '^osrc-ad-' <<<"$RI_A_OUT"; then
     ok "(a) engine returned 0 + osrc-ad- session name on stdout"
   else
     no "(a) engine failed or no session name (rc=$RI_A_RC, output=[$RI_A_OUT])"
@@ -102,33 +102,33 @@ echo "=== (a) Default OSRC_REQUIRE_INTERACTIVE=1 → interactive tmux, no bg job
   fi
 
   # (a3) tmux new-session was called.
-  if printf '%s' "$RI_A_TMUX_CALLS" | grep -q 'new-session'; then
+  if grep -q 'new-session' <<<"$RI_A_TMUX_CALLS"; then
     ok "(a) tmux new-session called (interactive tmux machinery)"
   else
     no "(a) tmux new-session NOT called (all-calls=[$RI_A_TMUX_CALLS])"
   fi
 
   # (a4) tmux send-keys was called with OSRC_NO_AUTODETACH=1 (fork-bomb guard) + the verb.
-  if printf '%s' "$RI_A_TMUX_CALLS" | grep -q 'send-keys' \
-     && printf '%s' "$RI_A_TMUX_CALLS" | grep -q 'OSRC_NO_AUTODETACH=1' \
-     && printf '%s' "$RI_A_TMUX_CALLS" | grep -q 'run'; then
+  if grep -q 'send-keys' <<<"$RI_A_TMUX_CALLS" \
+     && grep -q 'OSRC_NO_AUTODETACH=1' <<<"$RI_A_TMUX_CALLS" \
+     && grep -q 'run' <<<"$RI_A_TMUX_CALLS"; then
     ok "(a) tmux send-keys has OSRC_NO_AUTODETACH=1 + verb (fork-bomb guard + re-entry command)"
   else
     no "(a) send-keys missing OSRC_NO_AUTODETACH=1 or verb (all-calls=[$RI_A_TMUX_CALLS])"
   fi
 
   # (a5) The steering hint on stderr shows OUTSOURCERER_TMUX=<name> + session subcommands.
-  if printf '%s' "$RI_A_STDERR" | grep -q 'OUTSOURCERER_TMUX=' \
-     && printf '%s' "$RI_A_STDERR" | grep -q 'session read' \
-     && printf '%s' "$RI_A_STDERR" | grep -q 'session send' \
-     && printf '%s' "$RI_A_STDERR" | grep -q 'session stop'; then
+  if grep -q 'OUTSOURCERER_TMUX=' <<<"$RI_A_STDERR" \
+     && grep -q 'session read' <<<"$RI_A_STDERR" \
+     && grep -q 'session send' <<<"$RI_A_STDERR" \
+     && grep -q 'session stop' <<<"$RI_A_STDERR"; then
     ok "(a) stderr steering hint has OUTSOURCERER_TMUX + session read/send/stop"
   else
     no "(a) steering hint missing OUTSOURCERER_TMUX or session subcommands (stderr=[$RI_A_STDERR])"
   fi
 
   # (a6) The stderr says INTERACTIVE, not headless bg.
-  if printf '%s' "$RI_A_STDERR" | grep -q 'INTERACTIVE'; then
+  if grep -q 'INTERACTIVE' <<<"$RI_A_STDERR"; then
     ok "(a) stderr says INTERACTIVE tmux (not headless bg)"
   else
     no "(a) stderr missing INTERACTIVE label (stderr=[$RI_A_STDERR])"
@@ -165,8 +165,8 @@ echo "=== (b) tmux new-session fails → die loudly, no silent headless fallback
   fi
 
   # (b2) The error message names tmux + OSRC_REQUIRE_INTERACTIVE (the escape hatch).
-  if printf '%s' "$RI_B_STDERR" | grep -qi 'tmux' \
-     && printf '%s' "$RI_B_STDERR" | grep -q 'OSRC_REQUIRE_INTERACTIVE'; then
+  if grep -qi 'tmux' <<<"$RI_B_STDERR" \
+     && grep -q 'OSRC_REQUIRE_INTERACTIVE' <<<"$RI_B_STDERR"; then
     ok "(b) error message names tmux + OSRC_REQUIRE_INTERACTIVE (actionable reason)"
   else
     no "(b) error message missing tmux or OSRC_REQUIRE_INTERACTIVE (stderr=[$RI_B_STDERR])"
@@ -218,7 +218,7 @@ echo "=== (c) OSRC_REQUIRE_INTERACTIVE=0 → bg job created (opt-out works) ==="
   fi
 
   # (c3) tmux new-session was NOT called (the bg path doesn't use tmux).
-  if ! printf '%s' "$RI_C_TMUX_CALLS" | grep -q 'new-session'; then
+  if ! grep -q 'new-session' <<<"$RI_C_TMUX_CALLS"; then
     ok "(c) tmux new-session NOT called (bg path, not interactive)"
   else
     no "(c) tmux new-session was called — bg path should not use tmux (all-calls=[$RI_C_TMUX_CALLS])"
@@ -255,14 +255,14 @@ echo "=== (d) OSRC_NO_AUTODETACH=1 → foreground, no tmux, no bg job ==="
   fi
 
   # (d2) tmux new-session NOT called (foreground, not interactive).
-  if ! printf '%s' "$RI_D_TMUX_CALLS" | grep -q 'new-session'; then
+  if ! grep -q 'new-session' <<<"$RI_D_TMUX_CALLS"; then
     ok "(d) tmux new-session NOT called (foreground, not interactive)"
   else
     no "(d) tmux new-session called — foreground should not use tmux (all-calls=[$RI_D_TMUX_CALLS])"
   fi
 
   # (d3) The fake devin ran (foreground output present).
-  if printf '%s' "$RI_D_OUT" | grep -q "FAKE DEVIN RESULT"; then
+  if grep -q "FAKE DEVIN RESULT" <<<"$RI_D_OUT"; then
     ok "(d) fake devin ran foreground (output present)"
   else
     no "(d) fake devin output missing (output=[$RI_D_OUT])"

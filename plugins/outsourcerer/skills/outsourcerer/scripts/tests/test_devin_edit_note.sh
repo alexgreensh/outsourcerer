@@ -53,24 +53,24 @@ ledger_class_for() { # <perm> <task>
 }
 
 p="$(prompt_for accept-edits)"
-printf '%s' "$p" | grep -q 'fix the parser' \
+grep -q 'fix the parser' <<<"$p" \
   && ok "edit prompt still carries the task" || bad "edit prompt lost the task: $p"
-printf '%s' "$p" | grep -q 'refused and ends the run' \
+grep -q 'refused and ends the run' <<<"$p" \
   && ok "edit prompt warns that a confirmation-needing command ends the run" \
   || bad "edit prompt has no confirmation note"
-printf '%s' "$p" | grep -q 'end your reply with the exact verification commands' \
+grep -q 'end your reply with the exact verification commands' <<<"$p" \
   && ok "edit prompt hands verification back to the orchestrator" \
   || bad "edit prompt does not ask for the verification commands"
 
 p="$(prompt_for auto)"
-printf '%s' "$p" | grep -q 'fix the parser' && ok "read-only (auto) prompt still dispatches the task" || bad "read-only (auto) prompt was not captured"
-printf '%s' "$p" | grep -q 'refused and ends the run' \
+grep -q 'fix the parser' <<<"$p" && ok "read-only (auto) prompt still dispatches the task" || bad "read-only (auto) prompt was not captured"
+grep -q 'refused and ends the run' <<<"$p" \
   && bad "read-only (auto) prompt got the edit note" \
   || ok "read-only (auto) prompt is unchanged"
 
 p="$(prompt_for accept-edits OSRC_DEVIN_EDIT_NOTE=0)"
-printf '%s' "$p" | grep -q 'fix the parser' || bad "opt-out edit prompt was not captured"
-printf '%s' "$p" | grep -q 'refused and ends the run' \
+grep -q 'fix the parser' <<<"$p" || bad "opt-out edit prompt was not captured"
+grep -q 'refused and ends the run' <<<"$p" \
   && bad "OSRC_DEVIN_EDIT_NOTE=0 did not remove the note" \
   || ok "OSRC_DEVIN_EDIT_NOTE=0 leaves the edit prompt untouched"
 
@@ -89,7 +89,7 @@ case "$cl" in
   *) bad "ledger: the edit note skewed task_class ($cl)" ;;
 esac
 p="$(cat "$FAKE_ROOT/prompt.class" 2>/dev/null)"
-printf '%s' "$p" | grep -q 'say hi' && printf '%s' "$p" | grep -q 'refused and ends the run' \
+grep -q 'say hi' <<<"$p" && grep -q 'refused and ends the run' <<<"$p" \
   && ok "ledger: devin still received task + note together" || bad "ledger: captured prompt lost the task or the note"
 
 echo

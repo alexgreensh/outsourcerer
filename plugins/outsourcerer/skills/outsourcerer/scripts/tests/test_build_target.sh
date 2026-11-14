@@ -45,7 +45,7 @@ for kind in root branch version commit; do
     version) out="$(assert_target "$root" "$branch" "$OSRC_VERSION-x" "$head" 2>&1)"; rc=$? ;;
     commit) out="$(assert_target "$root" "$branch" "$OSRC_VERSION" "${head%?}x" 2>&1)"; rc=$? ;;
   esac
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$kind mismatch"; then
+  if [ "$rc" -ne 0 ] && grep -q "$kind mismatch" <<<"$out"; then
     ok "$kind mismatch is rejected"
   else
     bad "$kind mismatch was not identified ($out)"

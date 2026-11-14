@@ -83,7 +83,7 @@ events() { osrc_remote_events 2>&1; }
 
 # ---- 1. register + registry ---------------------------------------------------------------------
 out="$(cmd_lane add cloud1 --branch cloud/v1 --repo "$REMOTE" 2>&1)"
-echo "$out" | grep -q 'lane cloud1 registered' && ok "lane add registers a remote lane" || bad "lane add: $out"
+grep -q 'lane cloud1 registered' <<<"$out" && ok "lane add registers a remote lane" || bad "lane add: $out"
 [ -f "$OSRC_HOME/remote/cloud1.json" ] && ok "metadata written to remote/<id>.json" || bad "no lane json"
 [ -f "$OSRC_HOME/owners/sess-test-l2/cloud1" ] && ok "lane recorded in the shared owner registry (_owner_record)" || bad "owner record missing"
 [ "$(osrc_remote_state cloud1)" = live ] && ok "state before any push: live" || bad "state before push: $(osrc_remote_state cloud1)"
@@ -105,8 +105,8 @@ h1b="$(push cloud/v1 "this is not READY yet")"; tick 1
 # ---- 3. READY push: event + auto-enqueue + dedupe ----------------------------------------------
 h2="$(push cloud/v1 "READY: feature complete")"; tick 1
 ev="$(events)"
-echo "$ev" | grep -q "^EVENT done cloud1 $OSRC_NOW READY ${h2:0:7}" && ok "READY push emits EVENT done with sha7 and timestamp" || bad "no READY event: $ev"
-echo "$ev" | grep -q '^NEXT osrc review reviewer <tmux-session>' && ok "with no reviewer the NEXT command tells you to set one" || bad "NEXT wrong: $ev"
+grep -q "^EVENT done cloud1 $OSRC_NOW READY ${h2:0:7}" <<<"$ev" && ok "READY push emits EVENT done with sha7 and timestamp" || bad "no READY event: $ev"
+grep -q '^NEXT osrc review reviewer <tmux-session>' <<<"$ev" && ok "with no reviewer the NEXT command tells you to set one" || bad "NEXT wrong: $ev"
 [ -f "$OSRC_HOME/review/items/cloud1-${h2:0:7}.json" ] && ok "READY lane auto-enqueued (item cloud1-${h2:0:7})" || bad "not enqueued"
 [ "$(osrc_remote_state cloud1)" = ready ] && ok "state: ready" || bad "state not ready: $(osrc_remote_state cloud1)"
 [ -z "$(events | grep 'EVENT done cloud1')" ] && ok "the same READY head is not announced twice" || bad "READY event repeated"
@@ -129,7 +129,7 @@ cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"; cp "$FIX/cc-working
 ( cmd_review next ) >/dev/null 2>&1; [ $? -eq 2 ] && ok "review next with no reviewer: rc 2, nothing sent" || bad "next without reviewer rc"
 cmd_review reviewer rv >/dev/null 2>&1 && [ "$(cmd_review reviewer)" = rv ] && ok "review reviewer sets THE reviewer" || bad "reviewer not set"
 tick 1; ev="$(events)"
-echo "$ev" | grep -q '^EVENT idle rv .*3 queued' && echo "$ev" | grep -q '^NEXT osrc review next' && ok "reviewer idle + queue non-empty: EVENT idle, NEXT is review next" || bad "no reviewer-idle event: $ev"
+grep -q '^EVENT idle rv .*3 queued' <<<"$ev" && grep -q '^NEXT osrc review next' <<<"$ev" && ok "reviewer idle + queue non-empty: EVENT idle, NEXT is review next" || bad "no reviewer-idle event: $ev"
 [ "$(_osrc_review_screen rv)" = idle ] && ok "real Claude Code idle composer capture reads as idle" || bad "idle fixture misread: $(_osrc_review_screen rv)"
 cp "$FIX/cc-working-spinner.txt" "$FAKE_TMUX/rv.screen"
 [ "$(_osrc_review_screen rv)" = working ] && ok "real mid-turn spinner capture reads as working (not idle)" || bad "working fixture misread: $(_osrc_review_screen rv)"
@@ -155,16 +155,16 @@ _osrc_review_send eat "hello reviewer line" ; [ $? -ne 0 ] && ok "text left sitt
 
 # ---- 5. idle without verdict (after the send grace) ---------------------------------------------
 tick 10; ev="$(events)"
-echo "$ev" | grep -q "EVENT idle rv .*without writing a verdict" && bad "idle-without-verdict fired inside the send grace" || ok "no idle-without-verdict inside the 45s send grace"
+grep -q "EVENT idle rv .*without writing a verdict" <<<"$ev" && bad "idle-without-verdict fired inside the send grace" || ok "no idle-without-verdict inside the 45s send grace"
 tick 60; ev="$(events)"
-echo "$ev" | grep -q "^EVENT idle rv .*without writing a verdict for $first_item" && ok "reviewer idle past the grace with no verdict: EVENT idle" || bad "no stopped-reviewer event: $ev"
-echo "$ev" | grep -q '^NEXT OUTSOURCERER_TMUX=rv osrc session read' && ok "NEXT reads the reviewer's session" || bad "stopped-reviewer NEXT wrong"
+grep -q "^EVENT idle rv .*without writing a verdict for $first_item" <<<"$ev" && ok "reviewer idle past the grace with no verdict: EVENT idle" || bad "no stopped-reviewer event: $ev"
+grep -q '^NEXT OUTSOURCERER_TMUX=rv osrc session read' <<<"$ev" && ok "NEXT reads the reviewer's session" || bad "stopped-reviewer NEXT wrong"
 
 # ---- 6. verdict file -> done event, lane done ------------------------------------------------------
 lane1="$(jq -r .lane "$OSRC_HOME/review/items/$first_item.json")"; head1="$(jq -r .head "$OSRC_HOME/review/items/$first_item.json")"
 printf 'MERGE\nLooks fine, no findings.\n' > "$OSRC_HOME/review/$first_item.VERDICT"; tick 1
 ev="$(events)"
-echo "$ev" | grep -q "^EVENT done $lane1 [0-9]* VERDICT MERGE ${head1:0:7}" && ok "verdict file appears: EVENT done with the verdict in the detail" || bad "no verdict event: $ev"
+grep -q "^EVENT done $lane1 [0-9]* VERDICT MERGE ${head1:0:7}" <<<"$ev" && ok "verdict file appears: EVENT done with the verdict in the detail" || bad "no verdict event: $ev"
 it="$OSRC_HOME/review/items/$first_item.json"
 [ "$(jq -r .verdict "$it")" = MERGE ] && [ "$(jq -r .sha_reviewed "$it")" = "$head1" ] && [ "$(jq -r .sha_at_ready "$it")" = "$head1" ] && [ "$(jq -r .findings "$it")" = "$OSRC_HOME/review/$first_item.VERDICT" ] \
   && ok "verdict contract: sha_at_ready, sha_reviewed, verdict, findings path recorded" || bad "verdict record incomplete: $(jq -c . "$it")"
@@ -176,20 +176,20 @@ hfix="$(push cloud/v1 "READY: addressed review")"; tick 1; ev="$(events)"
 [ "$(jq -r .stale "$it")" = true ] && [ "$(jq -r .stale_by "$it")" = "$hfix" ] && ok "a push after the verdict marks the old review STALE" || bad "old review not stale"
 [ -f "$OSRC_HOME/review/items/$lane1-${hfix:0:7}.json" ] && [ "$(jq -r .rereview "$OSRC_HOME/review/items/$lane1-${hfix:0:7}.json")" = true ] && ok "re-review of the new head enqueued (flagged re-review)" || bad "no re-review item"
 [ "$(osrc_remote_state "$lane1")" = ready ] && ok "stale MERGE no longer makes the lane done" || bad "stale verdict still counts"
-ql="$(cmd_review queue ls)"; echo "$ql" | grep -q "STALE" && echo "$ql" | grep -q "re-review" && ok "queue ls shows STALE and re-review" || bad "queue ls missing stale marker"
+ql="$(cmd_review queue ls)"; grep -q "STALE" <<<"$ql" && grep -q "re-review" <<<"$ql" && ok "queue ls shows STALE and re-review" || bad "queue ls missing stale marker"
 
 # ---- 8. unreviewed after N minutes -------------------------------------------------------------------
 tick 1300; ev="$(events)"
-echo "$ev" | grep -q "^EVENT unreviewed " && ok "READY with no review started for OSRC_UNREVIEWED_MIN: EVENT unreviewed" || bad "no unreviewed event: $ev"
-echo "$ev" | grep -q '^NEXT osrc review next' && ok "unreviewed NEXT is review next (reviewer set)" || bad "unreviewed NEXT wrong"
+grep -q "^EVENT unreviewed " <<<"$ev" && ok "READY with no review started for OSRC_UNREVIEWED_MIN: EVENT unreviewed" || bad "no unreviewed event: $ev"
+grep -q '^NEXT osrc review next' <<<"$ev" && ok "unreviewed NEXT is review next (reviewer set)" || bad "unreviewed NEXT wrong"
 
 # ---- 9. stalled remote -----------------------------------------------------------------------------
 cmd_lane add cloud3 --branch cloud/v3 --repo "$REMOTE" >/dev/null; push cloud/v3 "wip" >/dev/null; tick 1; events >/dev/null
 tick 6000; ev="$(events)"
-echo "$ev" | grep -q '^EVENT stalled cloud3 ' && ok "no push for OSRC_REMOTE_STALL minutes: EVENT stalled" || bad "no stalled event: $ev"
-echo "$(events)" | grep -q '^EVENT stalled cloud3 ' && bad "stalled repeats immediately" || ok "stalled is throttled, not repeated each poll"
+grep -q '^EVENT stalled cloud3 ' <<<"$ev" && ok "no push for OSRC_REMOTE_STALL minutes: EVENT stalled" || bad "no stalled event: $ev"
+grep -q '^EVENT stalled cloud3 ' <<<"$(events)" && bad "stalled repeats immediately" || ok "stalled is throttled, not repeated each poll"
 h3b="$(push cloud/v3 "back to work")"; tick 1; events >/dev/null
-tick 50; echo "$(events)" | grep -q '^EVENT stalled cloud3 ' && bad "stalled right after a fresh push" || ok "a fresh push resets the stall clock"
+tick 50; grep -q '^EVENT stalled cloud3 ' <<<"$(events)" && bad "stalled right after a fresh push" || ok "a fresh push resets the stall clock"
 
 # ---- 10. done-when check (runs in the background; events never wait for it) -------------------------------
 waitrc() { local i; for i in $(seq 1 60); do [ -s "$1" ] && return 0; sleep 0.2; done; return 1; }
@@ -199,7 +199,7 @@ h4="$(push cloud/v4 "READY: first try")"; tick 1; ev="$(events)"
 ck="$(jq -r '.check.state' "$OSRC_HOME/remote/cloud4.json")"
 { [ "$ck" = running ] || [ "$ck" = done ]; } && ok "READY with --done-when: check is started in the background (state $ck)" || bad "check not started: $ck"
 waitrc "$OSRC_HOME/remote/cloud4-${h4:0:7}.rc"; tick 1; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed cloud4 .*done-when check failed' && ok "failing --done-when check: EVENT failed" || bad "no check-failed event: $ev"
+grep -q '^EVENT failed cloud4 .*done-when check failed' <<<"$ev" && ok "failing --done-when check: EVENT failed" || bad "no check-failed event: $ev"
 [ ! -f "$OSRC_HOME/review/items/cloud4-${h4:0:7}.json" ] && ok "failed check: no review item, no review spent" || bad "review enqueued despite failed check"
 [ "$(osrc_remote_state cloud4)" = failed ] && ok "lane state failed" || bad "state after failed check: $(osrc_remote_state cloud4)"
 [ ! -d "$OSRC_HOME/remote/wt/cloud4-${h4:0:7}" ] && ok "the throwaway worktree is removed after the check" || bad "worktree left behind"
@@ -220,7 +220,7 @@ cmd_lane add deadrun --branch cloud/deadrun --repo "$REMOTE" --done-when 'check:
 hd="$(push cloud/deadrun "wip")"; tick 1; events >/dev/null
 jq --arg h "$hd" '.head=$h | .head_ready=true | .check={head:$h,state:"running",rc:null,ts:1,log:"",pid:999999,why:""}' "$OSRC_HOME/remote/deadrun.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/remote/deadrun.json"
 tick 1; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed deadrun .*check runner died' && [ "$(osrc_remote_state deadrun)" = failed ] && ok "dead check runner: EVENT failed naming it" || bad "dead runner not reported: $ev"
+grep -q '^EVENT failed deadrun .*check runner died' <<<"$ev" && [ "$(osrc_remote_state deadrun)" = failed ] && ok "dead check runner: EVENT failed naming it" || bad "dead runner not reported: $ev"
 
 # ---- 11. queued item superseded by a newer push -------------------------------------------------------
 cmd_lane add cloud5 --branch cloud/v5 --repo "$REMOTE" >/dev/null
@@ -232,43 +232,43 @@ h5a="$(push cloud/v5 "READY a")"; tick 1; events >/dev/null; h5b="$(push cloud/v
 cd "$TMP"
 it2="$(jq -r 'select(.state=="queued") | .id' "$OSRC_HOME"/review/items/*.json | head -1)"; jq --arg i "$it2" '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/$it2.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/$it2.json"
 printf 'CHANGES\n1. a.sh:10 missing quote\n' > "$OSRC_HOME/review/$it2.VERDICT"; tick 1; ev="$(events)"
-echo "$ev" | grep -q "VERDICT CHANGES" && echo "$ev" | grep -q "^NEXT osrc review sendback $it2" && ok "CHANGES verdict: NEXT is review sendback" || bad "CHANGES NEXT wrong: $ev"
+grep -q "VERDICT CHANGES" <<<"$ev" && grep -q "^NEXT osrc review sendback $it2" <<<"$ev" && ok "CHANGES verdict: NEXT is review sendback" || bad "CHANGES NEXT wrong: $ev"
 sb="$(cmd_review sendback "$it2")"; sha7="$(jq -r '.head[0:7]' "$OSRC_HOME/review/items/$it2.json")"
-[ -f "$OSRC_HOME/review/REVIEW-$it2.md" ] && grep -q 'missing quote' "$OSRC_HOME/review/REVIEW-$it2.md" && echo "$sb" | grep -q 'relay this to lane' && ok "send-back writes REVIEW-<lane>-<sha7>.md and prints a relay message" || bad "send-back wrong: $sb"
+[ -f "$OSRC_HOME/review/REVIEW-$it2.md" ] && grep -q 'missing quote' "$OSRC_HOME/review/REVIEW-$it2.md" && grep -q 'relay this to lane' <<<"$sb" && ok "send-back writes REVIEW-<lane>-<sha7>.md and prints a relay message" || bad "send-back wrong: $sb"
 it3="$(jq -r 'select(.state=="queued") | .id' "$OSRC_HOME"/review/items/*.json | head -1)"; jq '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/$it3.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/$it3.json"
 printf 'looks good to me\n' > "$OSRC_HOME/review/$it3.VERDICT"; tick 100; ev="$(OSRC_VERDICT_SETTLE_SECS=0 events)"
-echo "$ev" | grep -q '^EVENT question ' && ok "verdict file without MERGE/CHANGES/BLOCK first line: EVENT question" || bad "invalid verdict not flagged: $ev"
+grep -q '^EVENT question ' <<<"$ev" && ok "verdict file without MERGE/CHANGES/BLOCK first line: EVENT question" || bad "invalid verdict not flagged: $ev"
 
 cmd_review requeue "$it3" >/dev/null && [ "$(jq -r .state "$OSRC_HOME/review/items/$it3.json")" = queued ] && ok "review requeue returns a stuck in-flight item to the queue" || bad "requeue failed"
 # ---- 13. rotation ----------------------------------------------------------------------------------------
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"
 [ -z "$(_osrc_review_rotation_due rv)" ] && ok "fresh reviewer at 37% context: no rotation" || bad "premature rotation"
 cp "$FIX/cc-idle-composer-ctx56.txt" "$FAKE_TMUX/rv.screen"
-r="$(OSRC_REVIEW_CTX_MAX=50 _osrc_review_rotation_due rv)"; echo "$r" | grep -q 'context 56%' && ok "context bar read from the real footer: 56% > 50 limit triggers rotation" || bad "ctx rotation: '$r'"
+r="$(OSRC_REVIEW_CTX_MAX=50 _osrc_review_rotation_due rv)"; grep -q 'context 56%' <<<"$r" && ok "context bar read from the real footer: 56% > 50 limit triggers rotation" || bad "ctx rotation: '$r'"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"
 jq '.reviews=6' "$OSRC_HOME/review/reviewer.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/reviewer.json"
-r="$(_osrc_review_rotation_due rv)"; echo "$r" | grep -q '6 reviews' && ok "after K=6 reviews rotation is due" || bad "K rotation: '$r'"
+r="$(_osrc_review_rotation_due rv)"; grep -q '6 reviews' <<<"$r" && ok "after K=6 reviews rotation is due" || bad "K rotation: '$r'"
 q0=$(_osrc_review_count_queued)
 cmd_review next >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 5 ] && ok "rotation due: review next refuses (rc 5) instead of overloading the reviewer" || bad "next ignored rotation rc=$rc (queued $q0)"
-tick 200; ev="$(events)"; echo "$ev" | grep -q '^NEXT osrc review rotate' && ok "idle reviewer + rotation due: NEXT suggests a fresh reviewer" || bad "rotation NEXT missing: $ev"
+tick 200; ev="$(events)"; grep -q '^NEXT osrc review rotate' <<<"$ev" && ok "idle reviewer + rotation due: NEXT suggests a fresh reviewer" || bad "rotation NEXT missing: $ev"
 cmd_review rotate | grep -q 'review reviewer <new-session>' && ok "review rotate prints the 3 steps" || bad "rotate output"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv2.screen"
 ( cmd_review reviewer rv2 ) >/dev/null 2>&1; [ $? -ne 0 ] && [ "$(cmd_review reviewer)" = rv ] && ok "never two reviewers: switching while the old one is alive is refused" || bad "second reviewer accepted"
 cmd_review reviewer rv2 --replace >/dev/null 2>&1 && [ "$(cmd_review reviewer)" = rv2 ] && [ "$(jq -r .reviews "$OSRC_HOME/review/reviewer.json")" = 0 ] && ok "--replace switches and resets the counters" || bad "replace failed"
 rm -f "$FAKE_TMUX/rv2.screen"; tick 100; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed rv2 .*gone' && ok "reviewer session gone with work queued: EVENT failed" || bad "dead reviewer not reported: $ev"
+grep -q '^EVENT failed rv2 .*gone' <<<"$ev" && ok "reviewer session gone with work queued: EVENT failed" || bad "dead reviewer not reported: $ev"
 
 # ---- 14. gh transport (fake gh): auth, rate limit, success ----------------------------------------------
 cmd_lane add ghlane --branch cloud/gh1 --repo octo/widgets >/dev/null 2>&1
 printf 'gh: To use GitHub CLI in a script, authenticate with gh auth login (HTTP 401)\n' > "$GH_ERR"; tick 1; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed ghlane .*auth failure' && echo "$ev" | grep -q '^NEXT gh auth status' && ok "gh auth failure: EVENT failed with the reason, not silence" || bad "no auth failure event: $ev"
+grep -q '^EVENT failed ghlane .*auth failure' <<<"$ev" && grep -q '^NEXT gh auth status' <<<"$ev" && ok "gh auth failure: EVENT failed with the reason, not silence" || bad "no auth failure event: $ev"
 printf 'gh: API rate limit exceeded for user (HTTP 403)\n' > "$GH_ERR"; tick 2000; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed ghlane .*rate limited' && ok "gh rate limit: EVENT failed naming the rate limit" || bad "no rate-limit event: $ev"
+grep -q '^EVENT failed ghlane .*rate limited' <<<"$ev" && ok "gh rate limit: EVENT failed naming the rate limit" || bad "no rate-limit event: $ev"
 rm -f "$GH_ERR"
 jq -n '{sha:"aaaaaaa1111111111111111111111111111111aa", commit:{message:"READY: gh lane done"}, files:[{filename:"x.txt"}]}' > "$GH_OUT"
 tick 2000; ev="$(events)"
-echo "$ev" | grep -q '^EVENT done ghlane .*READY aaaaaaa' && ok "gh transport: READY detected from one commits API call" || bad "gh READY missed: $ev"
+grep -q '^EVENT done ghlane .*READY aaaaaaa' <<<"$ev" && ok "gh transport: READY detected from one commits API call" || bad "gh READY missed: $ev"
 [ "$(jq -r .err_count "$OSRC_HOME/remote/ghlane.json")" = 0 ] && ok "a good poll clears the error state" || bad "error state stuck"
 jq -n '{sha:"bbbbbbb2222222222222222222222222222222bb", commit:{message:"more work"}, files:[]}' > "$GH_OUT"; : > "$GH_CONTENTS_OK"; tick 5; events >/dev/null
 [ "$(jq -r .head_ready "$OSRC_HOME/remote/ghlane.json")" = false ] && ! grep -q 'contents/' "$GH_LOG" && ok "gh transport: a READY file from an EARLIER commit does not make a later push READY (no contents calls either)" || bad "gh sticky READY"
@@ -282,9 +282,9 @@ cmd_lane add rl --branch cloud/rl --repo "$REMOTE" >/dev/null; : > "$TMP/lsremot
 # ---- 16. deleted branch, rm, stop-guard registry ---------------------------------------------------------------------
 cmd_lane add del --branch cloud/del --repo "$REMOTE" >/dev/null; push cloud/del "wip" >/dev/null; tick 1; events >/dev/null
 git -C "$REMOTE" branch -q -D cloud/del; tick 1; ev="$(events)"
-echo "$ev" | grep -q '^EVENT failed del .*deleted' && [ "$(osrc_remote_state del)" = failed ] && ok "branch deleted after being seen: EVENT failed, state failed" || bad "deleted branch: $ev"
+grep -q '^EVENT failed del .*deleted' <<<"$ev" && [ "$(osrc_remote_state del)" = failed ] && ok "branch deleted after being seen: EVENT failed, state failed" || bad "deleted branch: $ev"
 cmd_lane rm del >/dev/null && [ ! -f "$OSRC_HOME/remote/del.json" ] && [ ! -f "$OSRC_HOME/owners/sess-test-l2/del" ] && [ "$(osrc_remote_state del)" = gone ] && ok "lane rm removes metadata and the owner record" || bad "lane rm incomplete"
-ll="$(cmd_lane ls)"; echo "$ll" | grep -q 'cloud1' && ok "lane ls lists lanes" || bad "lane ls"
+ll="$(cmd_lane ls)"; grep -q 'cloud1' <<<"$ll" && ok "lane ls lists lanes" || bad "lane ls"
 
 
 # ---- 18. finding 1: lane rm then lane add must not lose a READY head -----------------------------------------------
@@ -293,9 +293,9 @@ cmd_lane add dd --branch cloud/dd --repo "$REMOTE" >/dev/null; hdd="$(push cloud
 cmd_lane rm dd >/dev/null
 [ ! -d "$OSRC_HOME/remote/.ev/dd" ] && [ ! -f "$OSRC_HOME/review/items/dd-${hdd:0:7}.json" ] && ok "lane rm clears the lane's event stamps and its review items" || bad "lane rm left stamps/items"
 cmd_lane add dd --branch cloud/dd --repo "$REMOTE" >/dev/null; tick 1; ev="$(events)"
-echo "$ev" | grep -q "^EVENT done dd .*READY ${hdd:0:7}" && [ -f "$OSRC_HOME/review/items/dd-${hdd:0:7}.json" ] && ok "lane re-added under the same id: READY announced again and queued" || bad "re-added lane lost its READY head: $ev"
+grep -q "^EVENT done dd .*READY ${hdd:0:7}" <<<"$ev" && [ -f "$OSRC_HOME/review/items/dd-${hdd:0:7}.json" ] && ok "lane re-added under the same id: READY announced again and queued" || bad "re-added lane lost its READY head: $ev"
 cmd_review drop "dd-${hdd:0:7}" >/dev/null; tick 1000; ev="$(events)"
-echo "$ev" | grep -q "^EVENT unreviewed dd .*no review item" && echo "$ev" | grep -q "^NEXT osrc review requeue dd-${hdd:0:7}" && ok "backstop: a READY lane with no live item raises EVENT unreviewed with the fix as NEXT" || bad "backstop missing: $ev"
+grep -q "^EVENT unreviewed dd .*no review item" <<<"$ev" && grep -q "^NEXT osrc review requeue dd-${hdd:0:7}" <<<"$ev" && ok "backstop: a READY lane with no live item raises EVENT unreviewed with the fix as NEXT" || bad "backstop missing: $ev"
 
 # ---- 19. finding 2: a lane sent CHANGES gets a stall clock -------------------------------------------------------
 cmd_lane add chg --branch cloud/chg --repo "$REMOTE" >/dev/null; hc="$(push cloud/chg "READY: v1")"; tick 1; events >/dev/null
@@ -303,7 +303,7 @@ jq '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/chg-${hc:0:7}.json"
 printf 'CHANGES\n1. fix it\n' > "$OSRC_HOME/review/chg-${hc:0:7}.VERDICT"; tick 1; events >/dev/null
 [ "$(osrc_remote_state chg)" = live ] && ok "READY head with a CHANGES verdict: lane is live (the ball is back with it)" || bad "CHANGES state: $(osrc_remote_state chg)"
 cmd_review ack "chg-${hc:0:7}" >/dev/null; tick 6000; ev="$(events)"
-echo "$ev" | grep -q '^EVENT stalled chg ' && ok "CHANGES then silence past OSRC_REMOTE_STALL: EVENT stalled (clock starts at the verdict)" || bad "no stall after CHANGES: $ev"
+grep -q '^EVENT stalled chg ' <<<"$ev" && ok "CHANGES then silence past OSRC_REMOTE_STALL: EVENT stalled (clock starts at the verdict)" || bad "no stall after CHANGES: $ev"
 
 # ---- 20. finding 3: a READY file is not sticky ----------------------------------------------------------------------
 cmd_lane add fl --branch cloud/fl --repo "$REMOTE" >/dev/null; hf1="$(push cloud/fl "add feature" fl.READY)"; tick 1; events >/dev/null
@@ -364,8 +364,8 @@ _osrc_review_item_exists_for_lane L2 && bad "lane L2 matched items of L2-remote"
 
 # ---- 17. the CLI works end-to-end through a PATH symlink (the loader finds lib/ via BASH_SOURCE) ------------------------------
 mkdir -p "$TMP/linkbin"; ln -s "$SRC" "$TMP/linkbin/outsourcerer"
-out="$(OSRC_SOURCED= PATH="$TMP/linkbin:$PATH" outsourcerer lane ls 2>&1)"; echo "$out" | grep -q 'LANE' && ok "lane via a PATH launcher symlink" || bad "symlink launch: $out"
-out="$(OSRC_SOURCED= PATH="$TMP/linkbin:$PATH" outsourcerer review queue ls 2>&1)"; echo "$out" | grep -q 'reviewer:' && ok "review via a PATH launcher symlink" || bad "symlink review: $out"
+out="$(OSRC_SOURCED= PATH="$TMP/linkbin:$PATH" outsourcerer lane ls 2>&1)"; grep -q 'LANE' <<<"$out" && ok "lane via a PATH launcher symlink" || bad "symlink launch: $out"
+out="$(OSRC_SOURCED= PATH="$TMP/linkbin:$PATH" outsourcerer review queue ls 2>&1)"; grep -q 'reviewer:' <<<"$out" && ok "review via a PATH launcher symlink" || bad "symlink review: $out"
 
 echo "---- $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

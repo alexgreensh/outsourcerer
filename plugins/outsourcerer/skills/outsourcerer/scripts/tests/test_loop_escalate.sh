@@ -49,7 +49,7 @@ SCRIPT_PATH="$MOCK"   # cmd_loop_escalate delegates via "$SCRIPT_PATH"
 #    front, never a mid-loop surprise after the cheap rungs already spent.
 export MOCK_MODELS="$TMP/m_val"; export MOCK_CNT="$TMP/c_val"; rm -f "$MOCK_MODELS"
 e="$( ( cmd_loop escalate --ladder "glm-5.2,nope-9x" --check "true" "t" ) 2>&1 )"
-[ $? -ne 0 ] && [ ! -f "$MOCK_MODELS" ] && printf '%s' "$e" | grep -q 'nope-9x' \
+[ $? -ne 0 ] && [ ! -f "$MOCK_MODELS" ] && grep -q 'nope-9x' <<<"$e" \
   && ok "an unknown ladder rung dies BEFORE any delegation, naming the rung" \
   || bad "unknown rung was not caught up front (delegated: $(cat "$MOCK_MODELS" 2>/dev/null | tr '\n' ' '))"
 
@@ -180,23 +180,23 @@ grep -q 'thing broke' "$_ld/last_fail" 2>/dev/null \
   && ok "the latest failure is readable without opening every check file" \
   || bad "no last-failure summary recorded"
 out="$(cmd_loop status 2>/dev/null)"
-printf '%s' "$out" | grep -q "$(basename "$_ld")" \
+grep -q "$(basename "$_ld")" <<<"$out" \
   && ok "loop status surfaces the escalate loop alongside verify loops" \
   || bad "loop status does not list the escalate loop"
 
 # 16. `loop resume` refuses escalate loops: the rung position and per-tier stall budget are not
 #     saved, so resuming would silently grade a fresh ladder against old feedback.
 e="$( ( cmd_loop resume "$(basename "$_ld")" --max 9 ) 2>&1 )"
-[ $? -ne 0 ] && printf '%s' "$e" | grep -qi 'escalate' \
+[ $? -ne 0 ] && grep -qi 'escalate' <<<"$e" \
   && ok "loop resume refuses an escalate loop, saying why" \
   || bad "resume of an escalate loop was not refused"
 
 # 17. The guidance names the new shape with its use-case, so picking it never requires reading
 #     the source.
 e="$( ( cmd_loop ) 2>&1 )"
-printf '%s' "$e" | grep -q 'loop escalate' \
+grep -q 'loop escalate' <<<"$e" \
   && ok "the loop help offers escalate alongside verify" || bad "loop help omits escalate"
-printf '%s' "$e" | grep -qi 'cheap' \
+grep -qi 'cheap' <<<"$e" \
   && ok "the guidance says what escalate is FOR (cheap first, pay more only on failure)" \
   || bad "loop help names escalate without saying when to pick it"
 

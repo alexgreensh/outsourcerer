@@ -33,7 +33,7 @@ grep -Eq "jq -cn[^|]*>> \"\\\$OSRC_LEDGER\"" "$SRC" && bad "raw 'jq ... >> ledge
 has 'done <<_OSRC_GATE_SPECS' "_secret_scan splits WITH_SPEC via _with_specs heredoc (no glob)"
 # Scope the check to _secret_scan: the --with parsers at build_mcp_flags intentionally word-split.
 ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$GATE")"
-printf '%s' "$ss_body" | grep -Fq 'for tok in $WITH_SPEC' && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
+grep -Fq 'for tok in $WITH_SPEC' <<<"$ss_body" && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
 # Every OSRC_ALLOWED_TOOLS consumer must be deglobbed via `read -ra` (safe word-splitting, no
 # globbing). Invariant, stale-proof: there is >=1 safe deglob spot and ZERO unsafe unquoted
 # expansions (the unsafe form is asserted absent on the next line too). Use grep -cF: the pattern

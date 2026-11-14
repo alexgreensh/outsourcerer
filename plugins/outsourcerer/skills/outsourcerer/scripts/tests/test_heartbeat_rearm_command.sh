@@ -68,7 +68,7 @@ kill_beacon() {
   out="$(OSRC_HOME="$h" OSRC_HEARTBEAT_DISABLED=0 OSRC_HEARTBEAT_EXECUTABLE="$FAKE_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=3 \
     bash "$SRC" heartbeat start 2>/dev/null)"; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: heartbeat start rc=$rc"; exit 1; }
-  printf '%s' "$out" | grep -q 'supervision armed, beacon pid .* verified live' \
+  grep -q 'supervision armed, beacon pid .* verified live' <<<"$out" \
     || { echo "FAIL: unexpected output: $out"; exit 1; }
   kill_beacon "$h/heartbeat/leader/owner.json"
   exit 0
@@ -83,7 +83,7 @@ kill_beacon() {
   mkdir -p "$h"
   out="$(OSRC_HOME="$h" OSRC_HEARTBEAT_DISABLED=0 bash "$SRC" heartbeat status 2>/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { echo "FAIL: status with no leader rc=$rc (expected 1)"; exit 1; }
-  printf '%s' "$out" | grep -q 'no verified-live heartbeat leader' || { echo "FAIL: unexpected empty-home output: $out"; exit 1; }
+  grep -q 'no verified-live heartbeat leader' <<<"$out" || { echo "FAIL: unexpected empty-home output: $out"; exit 1; }
   # A live leader (arm first, then ask) -> rc 0 and the pid is named.
   h2="$TMP/hb-status-live"
   mkdir -p "$h2"
@@ -92,7 +92,7 @@ kill_beacon() {
   vpid="$(jq -r '.pid' "$h2/heartbeat/leader/owner.json")"
   out="$(OSRC_HOME="$h2" OSRC_HEARTBEAT_DISABLED=0 bash "$SRC" heartbeat status 2>/dev/null)"; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: status with a live leader rc=$rc"; exit 1; }
-  printf '%s' "$out" | grep -q "pid $vpid verified live" || { echo "FAIL: status output missing the live pid: $out"; exit 1; }
+  grep -q "pid $vpid verified live" <<<"$out" || { echo "FAIL: status output missing the live pid: $out"; exit 1; }
   kill_beacon "$h2/heartbeat/leader/owner.json"
   exit 0
 ) && ok "heartbeat status reports leader liveness honestly" \
@@ -105,7 +105,7 @@ kill_beacon() {
   mkdir -p "$h"
   out="$(OSRC_HOME="$h" OSRC_HEARTBEAT_DISABLED=0 bash "$SRC" heartbeat frobnicate 2>&1 >/dev/null)"; rc=$?
   [ "$rc" -ne 0 ] || { echo "FAIL: unknown subcommand exited 0"; exit 1; }
-  printf '%s' "$out" | grep -q 'heartbeat subcommand: start | status' || { echo "FAIL: no usage in error: $out"; exit 1; }
+  grep -q 'heartbeat subcommand: start | status' <<<"$out" || { echo "FAIL: no usage in error: $out"; exit 1; }
   exit 0
 ) && ok "unknown heartbeat subcommand dies with usage" \
   || bad "heartbeat usage handling broken"

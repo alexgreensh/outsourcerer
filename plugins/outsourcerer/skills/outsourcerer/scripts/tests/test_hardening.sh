@@ -33,7 +33,7 @@ PWNED="$TMP/PWNED"
 rm -f "$PWNED"
 out=$(session start -m "x;touch $PWNED" 2>&1) || rc=$?
 [ -f "$PWNED" ] && bad "injection payload created PWNED file" || ok "injection payload did not create PWNED file"
-printf '%s' "$out" | grep -q 'invalid model token' && ok "session start rejects malicious model token" || bad "no invalid-token rejection: $out"
+grep -q 'invalid model token' <<<"$out" && ok "session start rejects malicious model token" || bad "no invalid-token rejection: $out"
 
 # --- Scenario 2: run-or-model.sh exports only OPENROUTER_API_KEY, not other ~/.env keys. ---
 mkdir -p "$TMP/.local/bin"
@@ -48,8 +48,8 @@ OPENROUTER_API_KEY=sk-or-test-key
 OTHER_KEY=should-not-appear
 EOF
 out=$(bash "$RUN_OR_MODEL" "tencent/hy3:free" 2>&1) || rc=$?
-if printf '%s' "$out" | grep -q 'OPENROUTER_API_KEY=sk-or-test-key'; then ok "run-or-model.sh exports OPENROUTER_API_KEY"; else bad "run-or-model.sh missing OPENROUTER_API_KEY: $out"; fi
-if printf '%s' "$out" | grep -q 'OTHER_KEY=should-not-appear'; then bad "run-or-model.sh leaked OTHER_KEY"; else ok "run-or-model.sh does NOT export OTHER_KEY"; fi
+if grep -q 'OPENROUTER_API_KEY=sk-or-test-key' <<<"$out"; then ok "run-or-model.sh exports OPENROUTER_API_KEY"; else bad "run-or-model.sh missing OPENROUTER_API_KEY: $out"; fi
+if grep -q 'OTHER_KEY=should-not-appear' <<<"$out"; then bad "run-or-model.sh leaked OTHER_KEY"; else ok "run-or-model.sh does NOT export OTHER_KEY"; fi
 if grep -qE 'set -a|source .*~/.env|\..*~/.env' "$RUN_OR_MODEL"; then bad "run-or-model.sh still sources full ~/.env"; else ok "run-or-model.sh uses single-key extraction"; fi
 
 # --- Scenario 3: run-or-codex.sh exports only OPENROUTER_API_KEY, not other ~/.env keys. ---
@@ -60,8 +60,8 @@ echo "OTHER_KEY=${OTHER_KEY:-}"
 EOF
 chmod +x "$TMP/.local/bin/codex"
 out=$(bash "$RUN_OR_CODEX" "tencent/hy3:free" tui 2>&1) || rc=$?
-if printf '%s' "$out" | grep -q 'OPENROUTER_API_KEY=sk-or-test-key'; then ok "run-or-codex.sh exports OPENROUTER_API_KEY"; else bad "run-or-codex.sh missing OPENROUTER_API_KEY: $out"; fi
-if printf '%s' "$out" | grep -q 'OTHER_KEY=should-not-appear'; then bad "run-or-codex.sh leaked OTHER_KEY"; else ok "run-or-codex.sh does NOT export OTHER_KEY"; fi
+if grep -q 'OPENROUTER_API_KEY=sk-or-test-key' <<<"$out"; then ok "run-or-codex.sh exports OPENROUTER_API_KEY"; else bad "run-or-codex.sh missing OPENROUTER_API_KEY: $out"; fi
+if grep -q 'OTHER_KEY=should-not-appear' <<<"$out"; then bad "run-or-codex.sh leaked OTHER_KEY"; else ok "run-or-codex.sh does NOT export OTHER_KEY"; fi
 if grep -qE 'set -a|source .*~/.env|\..*~/.env' "$RUN_OR_CODEX"; then bad "run-or-codex.sh still sources full ~/.env"; else ok "run-or-codex.sh uses single-key extraction"; fi
 
 # --- Scenario 4: --with mcp temp file hardening (source assertions). ---
@@ -95,7 +95,7 @@ out=$(cmd_gc --older-than 1 2>&1)
 if [ ! -d "$old_done" ]; then ok "gc removed old completed dir" ; else bad "gc did not remove old completed dir"; fi
 if [ -d "$old_running" ]; then ok "gc preserved running dir" ; else bad "gc removed running dir"; fi
 if [ -d "$recent_done" ]; then ok "gc preserved recent done dir" ; else bad "gc removed recent done dir"; fi
-printf '%s' "$out" | grep -q 'removed 1' && ok "gc reports 1 removed" || bad "gc did not report removal: $out"
+grep -q 'removed 1' <<<"$out" && ok "gc reports 1 removed" || bad "gc did not report removal: $out"
 
 
 # --- stat portability: the ordering is load-bearing. ---------------------------------------------

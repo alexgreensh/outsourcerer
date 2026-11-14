@@ -50,10 +50,10 @@ warning: response truncated (model hit max output token limit)
 Error: Response truncated: model hit max output token limit.' 1)"
 case "$r" in *output-token-limit*) ok "output-token exhaustion is recorded as a distinct reason" ;;
   *) bad "no output-token-limit reason recorded (got: $(printf '%s' "$r" | head -3 | tr '\n' ' '))" ;; esac
-printf '%s' "$r" | grep -qi 'CUT SHORT' \
+grep -qi 'CUT SHORT' <<<"$r" \
   && ok "operator is told the logged answer is incomplete, not merely that the run failed" \
   || bad "diagnostic does not say the output is incomplete"
-printf '%s' "$r" | grep -qiE 'smaller batches|write .*findings.* to a file' \
+grep -qiE 'smaller batches|write .*findings.* to a file' <<<"$r" \
   && ok "diagnostic carries the remedy (split the batch / write to a file)" \
   || bad "diagnostic states the problem but not the remedy"
 

@@ -244,7 +244,7 @@ else
 fi
 
 # (2d) The auto-detach receipt was printed to stderr.
-if printf '%s' "$REENTRY_STDERR" | grep -q '\[auto-detach\]'; then
+if grep -q '\[auto-detach\]' <<<"$REENTRY_STDERR"; then
   ok "re-entry: auto-detach receipt printed to stderr"
 else
   no "re-entry: auto-detach receipt missing from stderr"
@@ -278,7 +278,7 @@ sleep 8
 # matches anything. Now: require non-empty ID, assert the output contains BOTH the ID and 'failed'.
 if [ -n "$REENTRY_JOB_ID" ]; then
   STATUS_OUTPUT="$(HOME="$FAKE_HOME" OSRC_HOME="$REENTRY_HOME" bash "$ENGINE" status "$REENTRY_JOB_ID" 2>/dev/null)"
-  if printf '%s' "$STATUS_OUTPUT" | grep -q "$REENTRY_JOB_ID" && printf '%s' "$STATUS_OUTPUT" | grep -q 'failed'; then
+  if grep -q "$REENTRY_JOB_ID" <<<"$STATUS_OUTPUT" && grep -q 'failed' <<<"$STATUS_OUTPUT"; then
     ok "status: human output reports job $REENTRY_JOB_ID with terminal 'failed' state"
   else
     no "status: output missing job ID or 'failed' state (output=[$STATUS_OUTPUT])"
@@ -306,7 +306,7 @@ fi
 # (4d) result command prints the fake devin's output (last.txt or out.log tail).
 if [ -n "$REENTRY_JOB_ID" ]; then
   RESULT_OUTPUT="$(HOME="$FAKE_HOME" OSRC_HOME="$REENTRY_HOME" bash "$ENGINE" result "$REENTRY_JOB_ID" 2>/dev/null)"
-  if printf '%s' "$RESULT_OUTPUT" | grep -q "FAKE DEVIN RESULT"; then
+  if grep -q "FAKE DEVIN RESULT" <<<"$RESULT_OUTPUT"; then
     ok "result: command prints the fake devin output (FAKE DEVIN RESULT)"
   else
     no "result: command did not print fake devin output (output=[$RESULT_OUTPUT])"
@@ -322,7 +322,7 @@ fi
 if [ -n "$REENTRY_JOB_ID" ]; then
   WATCH_OUTPUT="$(HOME="$FAKE_HOME" OSRC_HOME="$REENTRY_HOME" OSRC_POLL=1 bash "$ENGINE" watch "$REENTRY_JOB_ID" --for 5 2>/dev/null)"
   WATCH_RC=$?
-  if [ "$WATCH_RC" -eq 0 ] && printf '%s' "$WATCH_OUTPUT" | grep -q "$REENTRY_JOB_ID" && printf '%s' "$WATCH_OUTPUT" | grep -q 'failed'; then
+  if [ "$WATCH_RC" -eq 0 ] && grep -q "$REENTRY_JOB_ID" <<<"$WATCH_OUTPUT" && grep -q 'failed' <<<"$WATCH_OUTPUT"; then
     ok "watch --for 5: returns 0 + shows job with terminal 'failed' state (not just the ID)"
   else
     no "watch --for 5: missing job ID or 'failed' state (rc=$WATCH_RC, output=[$WATCH_OUTPUT])"
@@ -398,7 +398,7 @@ else
   fi
 
   # The sabotaged engine should still have run the fake devin (foreground), so output has FAKE DEVIN RESULT.
-  if printf '%s' "$SAB_OUTPUT" | grep -q "FAKE DEVIN RESULT"; then
+  if grep -q "FAKE DEVIN RESULT" <<<"$SAB_OUTPUT"; then
     ok "negative control: sabotaged engine ran foreground (fake devin output present, no detach)"
   else
     no "negative control: sabotaged engine did not run foreground (output=[$SAB_OUTPUT])"

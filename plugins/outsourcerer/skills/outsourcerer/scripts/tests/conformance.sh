@@ -138,6 +138,7 @@ _ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
 _ALL_SUITES="$_ALL_SUITES test_cloudrun"
 _ALL_SUITES="$_ALL_SUITES test_heavy"
 _ALL_SUITES="$_ALL_SUITES test_hub test_cleanup_manifest test_limit_gate test_spend_consent"
+_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
@@ -280,7 +281,7 @@ _report_unit_suite_result() {   # <suite-name>; reads the _suite_* state _run_un
   if [ "$_suite_timed_out" -eq 1 ]; then
     bad "unit suite $1 TIMED OUT after ${_suite_secs}s"
     printf '%s\n' "$_suite_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
-  elif [ "$_suite_rc" -eq 0 ] && printf '%s\n' "$_suite_out" | grep -q '^FAIL'; then
+  elif [ "$_suite_rc" -eq 0 ] && grep -q '^FAIL' <<<"$_suite_out"; then
     # A suite that prints failures but exits 0 would otherwise read as green forever.
     bad "unit suite $1 printed FAIL lines but exited 0 (its last line must exit non-zero on failure)"
     printf '%s\n' "$_suite_out" | grep -E '^FAIL' | sed 's/^/      /'
@@ -482,7 +483,7 @@ else
     # OSRC_NO_AUTODETACH=1: the probe captures stdout (non-TTY), which would trigger D3 auto-detach
     # on capable/frontier tiers and return a job-id receipt instead of the answer — a false FAIL.
     out="$( cd "$FIX"; OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" "$@" --effort high "Read ./nonce.txt and reply with ONLY its contents." 2>&1 )"; rc=$?
-    if printf '%s' "$out" | grep -q "$nonce"; then ok "LIVE $label: read the fixture (real tool call), rc=$rc"
+    if grep -q "$nonce" <<<"$out"; then ok "LIVE $label: read the fixture (real tool call), rc=$rc"
     elif [ "$rc" -ne 0 ]; then note "LIVE $label: lane unavailable/failed (rc=$rc) — $(printf '%s' "$out" | tail -1)"
     else bad "LIVE $label: ran but did NOT read the nonce (tool grant broken?)"; fi
   }

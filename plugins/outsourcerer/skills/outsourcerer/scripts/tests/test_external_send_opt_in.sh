@@ -29,7 +29,7 @@ chmod +x "$TMP/bin/tmux" "$TMP/bin/ps" "$TMP/composer" "$TMP/receipt"
 run_cli(){ PATH="$TMP/bin:$PATH" OSRC_HOME="$TMP/state" OSRC_CONTROLLER_ID=controller-A OSRC_TEST_KEYS="$TMP/keys" "$SRC" "$@"; }
 
 out="$(run_cli session claim opt-in pane:0.0 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && [ ! -e "$TMP/state/sessions/claims/opt-in/owner.json" ] && printf '%s' "$out" | grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' \
+[ "$rc" -ne 0 ] && [ ! -e "$TMP/state/sessions/claims/opt-in/owner.json" ] && grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' <<<"$out" \
   && ok "external claim is refused by default with an experimental opt-in" || bad "default external claim was not safely refused: $out"
 
 out="$(OSRC_EXTERNAL_SEND=1 run_cli session claim opt-in pane:0.0 2>&1)"; rc=$?
@@ -38,14 +38,14 @@ token="$(printf '%s\n' "$out" | sed -n 's/^claim token: //p')"
   && ok "external claim is allowed only after explicit opt-in" || bad "opt-in claim failed: $out"
 
 out="$(OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" run_cli session reply opt-in hello 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && [ ! -e "$TMP/keys" ] && printf '%s' "$out" | grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' \
+[ "$rc" -ne 0 ] && [ ! -e "$TMP/keys" ] && grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' <<<"$out" \
   && ok "external reply is refused by default before terminal input" || bad "default external reply was not safely refused: $out"
 
 OSRC_EXTERNAL_SEND=1 OSRC_SESSION_CLAIM_TOKEN="$token" OSRC_EXTERNAL_COMPOSER_PROBE="$TMP/composer" OSRC_EXTERNAL_RECEIPT_PROBE="$TMP/receipt" run_cli session reply opt-in hello >/dev/null 2>&1 \
   && [ -s "$TMP/keys" ] && ok "opt-in external reply is allowed" || bad "opt-in external reply failed"
 
 out="$(OSRC_SESSION_CLAIM_TOKEN="$token" run_cli session release opt-in 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && [ -f "$TMP/state/sessions/claims/opt-in/owner.json" ] && printf '%s' "$out" | grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' \
+[ "$rc" -ne 0 ] && [ -f "$TMP/state/sessions/claims/opt-in/owner.json" ] && grep -q 'experimental.*OSRC_EXTERNAL_SEND=1' <<<"$out" \
   && ok "external release is refused by default" || bad "default external release was not safely refused: $out"
 
 OSRC_EXTERNAL_SEND=1 OSRC_SESSION_CLAIM_TOKEN="$token" run_cli session release opt-in >/dev/null 2>&1 \

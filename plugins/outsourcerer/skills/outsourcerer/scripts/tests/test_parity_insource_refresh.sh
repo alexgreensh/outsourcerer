@@ -28,13 +28,13 @@ set --; . "$SRC" >/dev/null 2>&1
 
 # ---- 1. the template is model-agnostic -----------------------------------------------------------
 block="$(_insource_block "Cursor")"
-printf '%s' "$block" | grep -qE 'glm|swe-1|hy3|fable|opus|sonnet|haiku' \
+grep -qE 'glm|swe-1|hy3|fable|opus|sonnet|haiku' <<<"$block" \
   && bad "template still names model ids" \
   || ok "template names no model ids"
-printf '%s' "$block" | grep -q 'models' \
+grep -q 'models' <<<"$block" \
   && ok "template points at the live models listing" \
   || bad "template lost the models pointer"
-printf '%s' "$block" | grep -q '^<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: Cursor) -->' \
+grep -q '^<!-- OUTSOURCERER:INSOURCE (managed by outsourcerer parity, host: Cursor) -->' <<<"$block" \
   && ok "generic block carries the host-labelled marker" \
   || bad "generic marker missing"
 
@@ -102,7 +102,7 @@ for v in 0.9.0 0.15.3 10.0.0; do : > "$C/$v/skills/outsourcerer/scripts/outsourc
 SCRIPT_PATH="$C/0.15.3/skills/outsourcerer/scripts/outsourcerer.sh"
 block="$(_insource_block "Cursor")"
 [ "$(printf '%s' "$block" | grep -c '0\.15\.3')" = "1" ] \
-  && printf '%s' "$block" | grep -q '|| O="[^"]*0\.15\.3' \
+  && grep -q '|| O="[^"]*0\.15\.3' <<<"$block" \
   && ok "cache install: pinned path survives only as the resolver's fallback" \
   || bad "cache install: pinned path outside the fallback (or missing)"
 oline="$(printf '%s\n' "$block" | grep '^  O=')"
@@ -121,10 +121,10 @@ resolved="$(eval "${oline#  }"; printf '%s' "$O")"
 # ---- 6. non-cache install: plain pinned path, no resolver ---------------------------------------
 SCRIPT_PATH="$TMP/plain/outsourcerer.sh"
 block="$(_insource_block "Cursor")"
-printf '%s' "$block" | grep -q "O=\"$TMP/plain/outsourcerer.sh\"" \
+grep -q "O=\"$TMP/plain/outsourcerer.sh\"" <<<"$block" \
   && ok "non-cache install pins the script path" \
   || bad "non-cache install lost the pinned path"
-printf '%s' "$block" | grep -q 'sort -t\.' \
+grep -q 'sort -t\.' <<<"$block" \
   && bad "non-cache install emitted a pointless resolver" \
   || ok "non-cache install emits no resolver"
 
@@ -133,7 +133,7 @@ W="$HOME/.claude/plugins/cache/mp/we\$ird"
 mkdir -p "$W/1.0.0/skills/outsourcerer/scripts"
 SCRIPT_PATH="$W/1.0.0/skills/outsourcerer/scripts/outsourcerer.sh"
 block="$(_insource_block "Cursor")"
-printf '%s' "$block" | grep -qF "O=\"$W/1.0.0/skills/outsourcerer/scripts/outsourcerer.sh\"" \
+grep -qF "O=\"$W/1.0.0/skills/outsourcerer/scripts/outsourcerer.sh\"" <<<"$block" \
   && ok 'a $ in the install path keeps the pinned path (no embedded-eval risk)' \
   || bad 'hostile path: pinned path not kept'
 

@@ -83,15 +83,15 @@ LED="$(mktemp "${TMPDIR:-/tmp}/osrc_led.XXXXXX")"; trap 'rm -f "$TMP" "$LED"; rm
 } > "$LED"
 TAB_OUT="$(OSRC_LEDGER="$LED" cmd_tab 2>/dev/null)"
 # unmeasured cash run counted (1 run), NOT folded into a false "$0 measured"
-echo "$TAB_OUT" | grep -qE 'cash lanes, cost not captured[[:space:]]*:[[:space:]]*1 run' \
+grep -qE 'cash lanes, cost not captured[[:space:]]*:[[:space:]]*1 run' <<<"$TAB_OUT" \
   && echo "PASS: cash-accounting unmeasured cash run counted as cost-not-captured (1)" \
   || { echo "FAIL: cash-accounting unmeasured cash run not counted"; echo "$TAB_OUT"; fail=1; }
 # measured cash is the real $0.002, not inflated by the unmeasured or the devin $0
-echo "$TAB_OUT" | grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.002' \
+grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.002' <<<"$TAB_OUT" \
   && echo "PASS: cash-accounting measured cash = \$0.002 (devin \$0 not counted as cash)" \
   || { echo "FAIL: cash-accounting measured-cash line wrong"; echo "$TAB_OUT"; fail=1; }
 # Devin gets its named plan-limit disclosure, not a generic free/cash label.
-echo "$TAB_OUT" | grep -qF 'Devin: 1 run(s), $0 cash, spends your Devin plan limits' \
+grep -qF 'Devin: 1 run(s), $0 cash, spends your Devin plan limits' <<<"$TAB_OUT" \
   && echo "PASS: plan-bucket Devin run has named plan-limit disclosure" \
   || { echo "FAIL: plan-bucket Devin disclosure missing"; echo "$TAB_OUT"; fail=1; }
 
@@ -99,7 +99,7 @@ echo "$TAB_OUT" | grep -qF 'Devin: 1 run(s), $0 cash, spends your Devin plan lim
 LED2="$(mktemp "${TMPDIR:-/tmp}/osrc_led2.XXXXXX")"
 printf '%s\n' '{"ts":"t","provider":"devin","model":"glm-5.2","verb":"run","cost_usd":"0.050000","lane":"dv"}' > "$LED2"
 TAB2="$(OSRC_LEDGER="$LED2" cmd_tab 2>/dev/null)"
-echo "$TAB2" | grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.05' \
+grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.05' <<<"$TAB2" \
   && echo "PASS: pay-per-use devin (\$0.05) counted as CASH, not hidden in plan" \
   || { echo "FAIL: paid devin not counted as cash"; echo "$TAB2"; fail=1; }
 rm -f "$LED2"
@@ -111,10 +111,10 @@ LED3="$(mktemp "${TMPDIR:-/tmp}/osrc_led3.XXXXXX")"
   printf '%s\n' 'THIS IS NOT JSON — interleaved garbage from a concurrent append'
   printf '%s\n' '{"ts":"t","provider":"devin","model":"glm-5.2","verb":"run","cost_usd":"0.000000","lane":"dv"}'; } > "$LED3"
 TAB3="$(OSRC_LEDGER="$LED3" cmd_tab 2>/dev/null)"
-echo "$TAB3" | grep -q '(ledger parse error)' \
+grep -q '(ledger parse error)' <<<"$TAB3" \
   && { echo "FAIL: one bad line blanked the whole Tab"; echo "$TAB3"; fail=1; } \
   || echo "PASS: malformed line did not blank the Tab"
-echo "$TAB3" | grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.002' \
+grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.002' <<<"$TAB3" \
   && echo "PASS: valid rows still tallied around the bad line" \
   || { echo "FAIL: valid rows lost"; echo "$TAB3"; fail=1; }
 rm -f "$LED3"

@@ -78,7 +78,7 @@ check_table guess
 # Every captured fixture must be in the table (an unlisted capture is an untested state).
 for f in "$FX"/*.ansi; do
   b="$(basename "$f" .ansi)"; [ "$b" = gm-auth-failed ] && continue
-  printf '%s\n' "$TABLE" | grep -q "^$b|" && ok || bad "fixture $b has no expected state in the table"
+  grep -q "^$b|" <<<"$TABLE" && ok || bad "fixture $b has no expected state in the table"
 done
 
 # ---- LC_ALL=C: the orchestrator's background shell had no UTF-8 locale and every glyph test missed.
@@ -88,7 +88,7 @@ out="$(LC_ALL=C LANG=C bash -c '
     _osrc_screen_analyze_text "" < "'"$FX"'/$f.ansi"; printf "%s=%s:%s\n" "$f" "$OSRC_SCR_STATE" "$OSRC_SCR_ENGINE"
   done')"
 for want in dv-approval=approval:devin cc-permission-bash=approval:cc agy-approval=approval:agy cc-fable-composer-false-menu=composer:cc cx-approval=approval:codex; do
-  printf '%s\n' "$out" | grep -qx "$want" && ok || bad "LC_ALL=C: want $want, got: $(printf '%s' "$out" | tr '\n' ' ')"
+  grep -qx "$want" <<<"$out" && ok || bad "LC_ALL=C: want $want, got: $(printf '%s' "$out" | tr '\n' ' ')"
 done
 
 # ---- trailing blank lines (Gemini/agy pad the pane): 40 extra blank rows change nothing.
@@ -136,18 +136,18 @@ CAP="$FX/dv-approval.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" 
 _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
 menu_of() { _managed_provider() { printf '%s' "$1"; }; CAP="$FX/$2.ansi"; _managed_menu_detect p 2>/dev/null; }
 r="$(menu_of cc cc-permission-bash-rm)"
-[ "$(printf '%s\n' "$r" | head -1)" = "MENU select" ] && printf '%s\n' "$r" | grep -qx 'SEL 1 Yes' \
+[ "$(printf '%s\n' "$r" | head -1)" = "MENU select" ] && grep -qx 'SEL 1 Yes' <<<"$r" \
   && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 4 ] && ok || bad "cc rm prompt: row 1 not listed / wrong rows: $(printf '%s' "$r" | tr '\n' '|')"
-printf '%s\n' "$r" | grep -q '^OPT 3 Yes, and switch to auto mode' && ok || bad "cc rm prompt: option 3 missing"
-r="$(menu_of codex cx-approval)"; printf '%s\n' "$r" | grep -q '^SEL 1 Yes, proceed' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "codex: $(printf '%s' "$r" | tr '\n' '|')"
-r="$(menu_of agy agy-approval)"; printf '%s\n' "$r" | grep -q '^SEL 1 Yes, run command' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 4 ] && ok || bad "agy: $(printf '%s' "$r" | tr '\n' '|')"
-r="$(menu_of devin dv-approval)"; [ "$(printf '%s\n' "$r" | grep -c '^SEL ')" = 1 ] && printf '%s\n' "$r" | grep -q '^SEL 1 Allow' \
-  && printf '%s\n' "$r" | grep -qx 'OPT 3 Deny' && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin report noisy: $(printf '%s' "$r" | tr '\n' '|')"
+grep -q '^OPT 3 Yes, and switch to auto mode' <<<"$r" && ok || bad "cc rm prompt: option 3 missing"
+r="$(menu_of codex cx-approval)"; grep -q '^SEL 1 Yes, proceed' <<<"$r" && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "codex: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of agy agy-approval)"; grep -q '^SEL 1 Yes, run command' <<<"$r" && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 4 ] && ok || bad "agy: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of devin dv-approval)"; [ "$(printf '%s\n' "$r" | grep -c '^SEL ')" = 1 ] && grep -q '^SEL 1 Allow' <<<"$r" \
+  && grep -qx 'OPT 3 Deny' <<<"$r" && [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin report noisy: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of devin dv-approval-wrapped)"; [ "$(printf '%s\n' "$r" | grep -c '^\(SEL\|OPT\) ')" = 3 ] && ok || bad "devin wrapped: command row listed as an option: $(printf '%s' "$r" | tr '\n' '|')"
 r="$(menu_of cc cc-prose-question)"; [ "$(printf '%s\n' "$r" | head -1)" = "MENU none" ] && ok || bad "a prose question (composer live) read as a menu, send would be refused: $(printf '%s' "$r" | tr '\n' '|')"
-r="$(menu_of cc cc-askuserquestion)"; printf '%s\n' "$r" | grep -q '^SEL 1 Red' && printf '%s\n' "$r" | grep -q '^OPT 4 Chat about this' && ok || bad "cc question: $(printf '%s' "$r" | tr '\n' '|')"
-r="$(menu_of cc cc-trust-folder-menu)"; printf '%s\n' "$r" | grep -qx 'SEL 1 No, exit' && printf '%s\n' "$r" | grep -qx 'OPT 2 Yes, I trust this folder' && ok || bad "cc trust: $(printf '%s' "$r" | tr '\n' '|')"
-r="$(menu_of gemini gm-trust-folder-menu)"; printf '%s\n' "$r" | grep -q '^SEL 1 Trust folder' && printf '%s\n' "$r" | grep -q "^OPT 3 Don't trust" && ok || bad "gemini trust: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of cc cc-askuserquestion)"; grep -q '^SEL 1 Red' <<<"$r" && grep -q '^OPT 4 Chat about this' <<<"$r" && ok || bad "cc question: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of cc cc-trust-folder-menu)"; grep -qx 'SEL 1 No, exit' <<<"$r" && grep -qx 'OPT 2 Yes, I trust this folder' <<<"$r" && ok || bad "cc trust: $(printf '%s' "$r" | tr '\n' '|')"
+r="$(menu_of gemini gm-trust-folder-menu)"; grep -q '^SEL 1 Trust folder' <<<"$r" && grep -q "^OPT 3 Don't trust" <<<"$r" && ok || bad "gemini trust: $(printf '%s' "$r" | tr '\n' '|')"
 # answers on the held cc rm prompt: 1 selects row 1 (Enter alone), Yes is ambiguous, auto mode by label refused
 _managed_provider() { printf cc; }; CAP="$FX/cc-permission-bash-rm.ansi"
 tmux() { case "$1" in capture-pane) cat "$CAP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/akeys"; case " $* " in *" Enter "*) CAP="$FX/cc-idle-after-work.ansi" ;; esac ;; *) return 0 ;; esac; }

@@ -84,7 +84,7 @@ after="$(wc -l < "$OSRC_SESSION_REGISTRY")"
 
 : > "$TMUX_LOG"
 out="$(session effort high 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && [ -s "$ARM_LOG" ] && printf '%s' "$out" | grep -q 'receipt.*relaunch' \
+if [ "$rc" -eq 0 ] && [ -s "$ARM_LOG" ] && grep -q 'receipt.*relaunch' <<<"$out" \
    && grep -q 'model_reasoning_effort=high' "$TMUX_LOG" \
    && tail -1 "$OSRC_SESSION_REGISTRY" | jq -e '.effort == "high" and .receipt == "relaunch"' >/dev/null; then
   ok "codex relaunch records effort and receipt"
@@ -94,8 +94,8 @@ fi
 
 PROVIDER=devin
 out="$(session effort low 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi 'advisory' \
-   && ! printf '%s' "$out" | grep -qi 'native-success\|live-applied' \
+if [ "$rc" -eq 0 ] && grep -qi 'advisory' <<<"$out" \
+   && ! grep -qi 'native-success\|live-applied' <<<"$out" \
    && tail -1 "$OSRC_SESSION_REGISTRY" | jq -e '.effort == "low" and .receipt == "advisory"' >/dev/null; then
   ok "Devin effort remains advisory"
 else
@@ -119,8 +119,8 @@ fi
 
 PROVIDER=gemini
 out="$(session effort medium 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -qi 'advisory' \
-   && ! printf '%s' "$out" | grep -qi 'native-success\|live-applied'; then
+if [ "$rc" -eq 0 ] && grep -qi 'advisory' <<<"$out" \
+   && ! grep -qi 'native-success\|live-applied' <<<"$out"; then
   ok "Gemini effort remains advisory"
 else
   bad "Gemini effort receipt is not advisory: rc=$rc out=$out"

@@ -50,7 +50,7 @@ out="$(L "_task_dispatch p $t1" 2>&1)"; rc=$?
 check "a ship task with no spec, check or dependency does not start" "[ $rc -ne 0 ] && [ \"\$(launches)\" = 0 ]"
 check "it is held with a reason that names what is missing" "[ \"\$(J $t1 .state)\" = held ] && J $t1 .hold.reason | grep -q 'too thin' && J $t1 .hold.reason | grep -q 'spec, a check'"
 check "no attempt is used up" "[ \"\$(J $t1 .attempts)\" = 0 ]"
-check "the message says how to add the detail" "printf '%s' \"\$out\" | grep -q 'task release'"
+check "the message says how to add the detail" "grep -q 'task release' <<<\"\$out\""
 O task release "$t1" --plan p --answer 'done when a.txt says bye; check: grep bye a.txt' >/dev/null 2>&1
 L "_task_dispatch p $t1" >/dev/null 2>&1
 check "after the captain adds the detail, it starts" "[ \"\$(J $t1 .state)\" = running ] && [ \"\$(launches)\" = 1 ]"
@@ -71,16 +71,16 @@ check "a ship task that builds on finished work passes the check" "[ -z \"\$(L \
 echo "=== a held decision with a default ==="
 t6="$(O task add 'pick a db' 2>/dev/null)"
 out="$(O task hold "$t6" --plan p --reason 'postgres or sqlite?' --default sqlite 2>&1)"; rc=$?
-check "--default without --until is refused" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q 'needs --until'"
+check "--default without --until is refused" "[ $rc -ne 0 ] && grep -q 'needs --until' <<<\"\$out\""
 out="$(O task hold "$t6" --plan p --reason 'postgres or sqlite?' --default sqlite --until tomorrow 2>&1)"; rc=$?
-check "an unreadable --until is refused when a default rides on it" "[ $rc -ne 0 ] && printf '%s' \"\$out\" | grep -q '+30m'"
+check "an unreadable --until is refused when a default rides on it" "[ $rc -ne 0 ] && grep -q '+30m' <<<\"\$out\""
 now="$(date +%s)"
 out="$(O task hold "$t6" --plan p --reason 'postgres or sqlite?' --default sqlite --until +2h 2>&1)"; rc=$?
 check "--until +2h stores a deadline about two hours out" "[ $rc -eq 0 ] && e=\$(J $t6 .hold.until_epoch) && [ \$((e - now)) -ge 7190 ] && [ \$((e - now)) -le 7210 ]"
 check "the deadline is also stored as a readable UTC time" "J $t6 .hold.until | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'"
-check "hold says what happens with no answer" "printf '%s' \"\$out\" | grep -q 'default: sqlite'"
+check "hold says what happens with no answer" "grep -q 'default: sqlite' <<<\"\$out\""
 out="$(O task show "$t6" --plan p 2>&1)"
-check "task show lists the default" "printf '%s' \"\$out\" | grep -q 'default:  sqlite'"
+check "task show lists the default" "grep -q 'default:  sqlite' <<<\"\$out\""
 L "_ff_apply_defaults p" >/dev/null 2>&1
 check "before the deadline, nothing changes" "[ \"\$(J $t6 .state)\" = held ] && [ \"\$(J $t6 .hold.answer)\" = '' ]"
 # A plan whose only task is a held decision with a default: plan run waits for it, --once says when.
@@ -88,14 +88,14 @@ check "before the deadline, nothing changes" "[ \"\$(J $t6 .state)\" = held ] &&
 q1="$(O task add 'choose' --plan q 2>/dev/null)"
 O task hold "$q1" --plan q --reason 'a or b?' --default a --until +1h >/dev/null 2>&1
 out="$(cd "$REPO" && L "cmd_plan run q --once" 2>&1)"; rc=$?
-check "plan run --once stops for the captain and names the pending default" "[ $rc -eq 3 ] && printf '%s' \"\$out\" | grep -q 'goes ahead with its default'"
+check "plan run --once stops for the captain and names the pending default" "[ $rc -eq 3 ] && grep -q 'goes ahead with its default' <<<\"\$out\""
 L "_task_update q $q1 '.hold.until_epoch = (now | floor) + 2'" >/dev/null 2>&1
 out="$(cd "$REPO" && L "cmd_plan run q --interval 1 --max-minutes 1" 2>&1)"; rc=$?
-check "a full plan run waits for the deadline instead of stopping, then applies the default" "printf '%s' \"\$out\" | grep -q 'waiting: $q1' && printf '%s' \"\$out\" | grep -q 'nobody answered' && [ \"\$(jq -r .hold.answer \"$OSRC_HOME/plans/q/tasks/$q1.json\")\" = a ]"
+check "a full plan run waits for the deadline instead of stopping, then applies the default" "grep -q 'waiting: $q1' <<<\"\$out\" && grep -q 'nobody answered' <<<\"\$out\" && [ \"\$(jq -r .hold.answer \"$OSRC_HOME/plans/q/tasks/$q1.json\")\" = a ]"
 L "_task_update p $t6 '.hold.until_epoch = 1'" >/dev/null 2>&1
 out="$(L "_ff_apply_defaults p" 2>&1)"
 check "after the deadline, the task goes ahead with the default" "[ \"\$(J $t6 .state)\" = todo ] && [ \"\$(J $t6 .hold.answer)\" = sqlite ] && [ \"\$(J $t6 .hold.defaulted)\" = true ]"
-check "it says so" "printf '%s' \"\$out\" | grep -q 'nobody answered'"
+check "it says so" "grep -q 'nobody answered' <<<\"\$out\""
 check "the default reaches the next brief as the captain's decision" "L '_task_brief p $t6' >/dev/null 2>&1; grep -q sqlite \"$OSRC_HOME/plans/p/tasks/$t6/brief.md\""
 out="$(O task hold "$t6" --plan p --reason 'when?' --default 'friday' --until 2030-01-02T03:04Z 2>&1)"
 check "an ISO deadline parses" "[ \"\$(J $t6 .hold.until_epoch)\" = 1893553440 ]"

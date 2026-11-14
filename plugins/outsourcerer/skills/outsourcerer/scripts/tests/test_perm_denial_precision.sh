@@ -117,7 +117,7 @@ fi
 # The needles must still be correct, not merely absent: assert they match a real
 # devin emission. An assembled needle that assembles WRONG is a silently dead guard.
 real_pm='2026-07-22T08:15:50Z INFO chisel::repl::handler: Print mode: rejecting tool exec that requires confirmation'
-printf '%s\n' "$real_pm" | grep -aq "$(_printmode_needle)" \
+grep -aq "$(_printmode_needle)" <<<"$real_pm" \
   && ok "print-mode needle still matches a real devin log line" \
   || bad "print-mode needle does NOT match a real devin log line (guard is dead)"
 

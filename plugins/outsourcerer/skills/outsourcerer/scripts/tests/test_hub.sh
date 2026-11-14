@@ -320,11 +320,11 @@ grep -q 'hub serve printed' "$PAGE" \
 # A2: strict CSP on the served page, vendored fonts served token-free from
 # /assets/, and the asset route cannot be walked out of its directory.
 csp="$(curl -s -D - -o /dev/null "$BASE/?t=$TOK" | grep -i 'content-security-policy')"
-echo "$csp" | grep -q "default-src 'self'" && echo "$csp" | grep -q "connect-src 'self'" \
+grep -q "default-src 'self'" <<<"$csp" && grep -q "connect-src 'self'" <<<"$csp" \
   && ok "page served with strict default-src self CSP" || bad "CSP missing/weak: $csp"
-echo "$csp" | grep -q "script-src 'self' 'sha256-" \
+grep -q "script-src 'self' 'sha256-" <<<"$csp" \
   && ok "CSP whitelists the inline script by hash" || bad "script-src not hash-locked: $csp"
-echo "$csp" | grep -q "script-src 'self' 'unsafe-inline'" \
+grep -q "script-src 'self' 'unsafe-inline'" <<<"$csp" \
   && bad "script-src still allows any inline script" || ok "no script-src unsafe-inline"
 aw="$(curl -s "$BASE/assets/fonts/poppins-400.woff2" | head -c4)"
 [ "$aw" = "wOF2" ] && ok "vendored font served from /assets (no token)" || bad "font asset got '$aw'"
@@ -393,9 +393,9 @@ r1="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects" | jq -r '.generated_at
 
 # Loopback only: the listening socket must be 127.0.0.1, nothing else.
 lsof_out="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)"
-echo "$lsof_out" | grep -q '127\.0\.0\.1:' && ok "server bound to 127.0.0.1 only" || bad "listen addr not loopback: $lsof_out"
-echo "$lsof_out" | grep -vqE '127\.0\.0\.1:|\*:' || true
-if echo "$lsof_out" | grep -qE '(\*|0\.0\.0\.0|\[::\]):'; then bad "server exposed on a non-loopback address"; fi
+grep -q '127\.0\.0\.1:' <<<"$lsof_out" && ok "server bound to 127.0.0.1 only" || bad "listen addr not loopback: $lsof_out"
+grep -vqE '127\.0\.0\.1:|\*:' <<<"$lsof_out" || true
+if grep -qE '(\*|0\.0\.0\.0|\[::\]):' <<<"$lsof_out"; then bad "server exposed on a non-loopback address"; fi
 
 # The token must never reach the request log (it is in the printed URL line by design,
 # so only the server's own "[hub]" request lines are checked).

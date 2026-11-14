@@ -145,9 +145,9 @@ _block="$(awk '/tmux send-keys -t "\$SESSION_NAME" "export PATH/{f=1} f{print} /
 _finalizer="$(awk '/^_session_launch_finalize\(\)/,/^}/' "$SRC")"
 _live_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_launch_liveness_check' | head -1 | cut -d: -f1)"
 _registry_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_registry_append start' | head -1 | cut -d: -f1)"
-if printf '%s\n' "$_block" | grep -q '_session_launch_finalize' \
-   && printf '%s\n' "$_block" | grep -q 'tmux send-keys' \
-   && printf '%s\n' "$_finalizer" | grep -q '_session_registry_append start' \
+if grep -q '_session_launch_finalize' <<<"$_block" \
+   && grep -q 'tmux send-keys' <<<"$_block" \
+   && grep -q '_session_registry_append start' <<<"$_finalizer" \
    && [ -n "$_live_line" ] && [ -n "$_registry_line" ] && [ "$_live_line" -lt "$_registry_line" ]; then
   ok "shared finalizer is wired into session start and checks liveness before registry append"
 else

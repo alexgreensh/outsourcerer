@@ -36,11 +36,11 @@ mkdir -p "$OSRC_HOME/owners/old-one" "$OSRC_HOME/owners/old-two"
 : > "$OSRC_HOME/owners/old-two/sess-c"
 : > "$OSRC_HOME/owners/old-one/.stop-blocks"
 out="$(CLAUDE_CODE_SESSION_ID=who-ever "$SRC" adopt --list 2>/dev/null)"
-printf '%s\n' "$out" | grep -q $'^old-one\t2\t' && ok "--list counts target files (dotfiles excluded)" \
+grep -q $'^old-one\t2\t' <<<"$out" && ok "--list counts target files (dotfiles excluded)" \
   || no "--list row wrong: [$out]"
-printf '%s\n' "$out" | grep -q $'^old-two\t1\t' && ok "--list covers every owners dir" \
+grep -q $'^old-two\t1\t' <<<"$out" && ok "--list covers every owners dir" \
   || no "--list missing old-two: [$out]"
-printf '%s\n' "$out" | grep -q '20[0-9][0-9]-' && ok "--list prints a human newest-mtime" \
+grep -q '20[0-9][0-9]-' <<<"$out" && ok "--list prints a human newest-mtime" \
   || no "--list mtime column missing: [$out]"
 
 echo "=== adopt moves targets into the current session ==="
@@ -51,18 +51,18 @@ rc=$?
 [ -f "$OSRC_HOME/owners/old-one/.stop-blocks" ] && [ ! -e "$OSRC_HOME/owners/old-one/job-a" ] \
   && ok ".stop-blocks stayed with the old session (its dir remains for it)" \
   || no ".stop-blocks handling wrong: $(ls -a "$OSRC_HOME/owners/old-one" 2>/dev/null | tr '\n' ' ')"
-printf '%s' "$out" | grep -q 'job-a' && printf '%s' "$out" | grep -q 'job-b' \
+grep -q 'job-a' <<<"$out" && grep -q 'job-b' <<<"$out" \
   && ok "adopt prints what moved" || no "moved ids not printed: [$out]"
 
 echo "=== adopt edge cases ==="
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt new-sess 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'already the current' \
+[ "$rc" -ne 0 ] && grep -qi 'already the current' <<<"$out" \
   && ok "adopt refuses old == current" || no "same-session adopt not refused (rc=$rc): [$out]"
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt no-such-sid 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'no owners dir' \
+[ "$rc" -ne 0 ] && grep -qi 'no owners dir' <<<"$out" \
   && ok "adopt refuses a session with no owners dir" || no "missing dir not refused (rc=$rc): [$out]"
 out="$(env -u CLAUDE_CODE_SESSION_ID "$SRC" adopt old-two 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'no current session' \
+[ "$rc" -ne 0 ] && grep -qi 'no current session' <<<"$out" \
   && ok "adopt refuses with no current session id" || no "no-sid adopt not refused (rc=$rc): [$out]"
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" adopt '../evil' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && [ ! -e "$TMP/evil" ] \
@@ -130,10 +130,10 @@ ls "$OSRC_HOME"/handover/new-sess-*.md >/dev/null 2>&1 && ok "default file was w
 
 echo "=== handover refusals ==="
 out="$(env -u CLAUDE_CODE_SESSION_ID "$SRC" handover 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'no current session' \
+[ "$rc" -ne 0 ] && grep -qi 'no current session' <<<"$out" \
   && ok "handover refuses with no session id" || no "no-sid handover not refused (rc=$rc): [$out]"
 out="$(CLAUDE_CODE_SESSION_ID=new-sess "$SRC" handover --bogus 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unknown argument' \
+[ "$rc" -ne 0 ] && grep -qi 'unknown argument' <<<"$out" \
   && ok "handover rejects unknown args" || no "bad arg not refused (rc=$rc): [$out]"
 
 echo "=== an idle-but-alive tmux target gets a read instruction, not 'no waiter' ==="
@@ -164,7 +164,7 @@ grep -A6 'sess-idle' "$OUT2" | grep -q 'OUTSOURCERER_TMUX=sess-idle' \
   && grep -A6 'sess-idle' "$OUT2" | grep -q 'session read' \
   && ok "idle session gets the session read command" || no "no read command for idle session"
 _idle_blk="$(awk '/^### `sess-idle`/{f=1;next} /^### `/{if(f)exit} f' "$OUT2")"
-printf '%s' "$_idle_blk" | grep -q 'no waiter needed' \
+grep -q 'no waiter needed' <<<"$_idle_blk" \
   && no "an alive idle session was told it needs no waiter" \
   || ok "idle session is not dismissed as needing no waiter"
 grep -A6 'sess-idle' "$OUT2" | grep -q '/tmp/fake-pane-cwd' \
@@ -188,14 +188,14 @@ SRC_REAL="$(cd "$SCRIPT_DIR/.." && pwd)/outsourcerer.sh"
 mkdir -p "$TMP/linkdir"
 ln -sf "$SRC_REAL" "$TMP/linkdir/outsourcerer.sh"
 out="$(CLAUDE_CODE_SESSION_ID=link-sess "$TMP/linkdir/outsourcerer.sh" adopt --list 2>&1)"; rc=$?
-[ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'new-sess' \
+[ "$rc" -eq 0 ] && grep -q 'new-sess' <<<"$out" \
   && ok "adopt --list works through a symlink (lib loaded from the real dir)" \
   || no "symlink adopt --list failed (rc=$rc): [$out]"
 mkjob l8-link-job
 mkdir -p "$OSRC_HOME/owners/link-sid"
 : > "$OSRC_HOME/owners/link-sid/l8-link-job"
 out="$(printf '{"session_id":"link-sid"}' | "$TMP/linkdir/outsourcerer.sh" stop-guard 2>/dev/null)"
-printf '%s' "$out" | grep -q '"decision":"block"' \
+grep -q '"decision":"block"' <<<"$out" \
   && ok "stop-guard through a symlink still blocks on owned live work" \
   || no "symlink stop-guard failed open (no block): [$out]"
 

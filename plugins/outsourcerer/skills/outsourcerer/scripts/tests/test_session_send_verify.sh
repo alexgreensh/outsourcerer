@@ -135,19 +135,19 @@ CAPTURE_FILE="$TMP/m-consent"; printf 'Working.\nProceed? [y/N]\n' > "$CAPTURE_F
 tmux() { case "$1" in capture-pane) cat "$CAPTURE_FILE" ;; *) return 0 ;; esac; }
 out="$(_managed_menu_detect "$PANE")"
 [ "$(printf '%s\n' "$out" | head -1 | awk '{print $2}')" = consent ] && ok "detect consent menu" || bad "consent not detected"
-printf '%s\n' "$out" | grep -q '^PROMPT .*\[y/N\]' && ok "consent report carries the prompt line" || bad "consent report missing prompt"
+grep -q '^PROMPT .*\[y/N\]' <<<"$out" && ok "consent report carries the prompt line" || bad "consent report missing prompt"
 
 CAPTURE_FILE="$TMP/m-num"; printf '1. Run tests\n2. Commit\n3. Cancel\n' > "$CAPTURE_FILE"
 out="$(_managed_menu_detect "$PANE")"
 k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
 [ "$k" = numbered ] && ok "detect numbered menu" || bad "numbered not detected ($k)"
-printf '%s\n' "$out" | grep -q '^OPT 1 Run tests' && printf '%s\n' "$out" | grep -q '^OPT 3 Cancel' && ok "numbered report lists options by index" || bad "numbered report missing options"
+grep -q '^OPT 1 Run tests' <<<"$out" && grep -q '^OPT 3 Cancel' <<<"$out" && ok "numbered report lists options by index" || bad "numbered report missing options"
 
 CAPTURE_FILE="$TMP/m-cur"; printf 'Select model\n❯ fable\n  opus\n  sonnet\n' > "$CAPTURE_FILE"
 out="$(_managed_menu_detect "$PANE")"
 k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
 [ "$k" = cursor ] && ok "detect cursor list (prose header excluded)" || bad "cursor not detected ($k)"
-printf '%s\n' "$out" | grep -q '^SEL 1 fable' && printf '%s\n' "$out" | grep -q '^OPT 2 opus' && ok "cursor report marks the ❯ row and lists siblings" || bad "cursor report wrong: $out"
+grep -q '^SEL 1 fable' <<<"$out" && grep -q '^OPT 2 opus' <<<"$out" && ok "cursor report marks the ❯ row and lists siblings" || bad "cursor report wrong: $out"
 
 # A bare ❯ prompt is NOT a cursor list (only one candidate row).
 CAPTURE_FILE="$TMP/m-bare"; printf '❯\n' > "$CAPTURE_FILE"
@@ -397,9 +397,9 @@ tmux() { case "$1" in capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\
 out="$(_managed_menu_detect "$PANE")"
 k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
 [ "$k" = codex ] && ok "detect Codex approval menu (kind codex, not blind)" || bad "Codex menu not detected as codex ($k)"
-printf '%s\n' "$out" | grep -qE '^(SEL|OPT) 1 Yes, proceed' && printf '%s\n' "$out" | grep -qE '^(SEL|OPT) 2 Yes, and don'"'"'t ask again' \
+grep -qE '^(SEL|OPT) 1 Yes, proceed' <<<"$out" && grep -qE '^(SEL|OPT) 2 Yes, and don' <<<"$out""'"'t ask again' \
   && ok "Codex report lists the numbered options by index + label" || bad "Codex report missing options: $out"
-printf '%s\n' "$out" | grep -q '^SEL 1 Yes, proceed' && [ "$(printf '%s\n' "$out" | grep -c '^SEL ')" = 1 ] \
+grep -q '^SEL 1 Yes, proceed' <<<"$out" && [ "$(printf '%s\n' "$out" | grep -c '^SEL ')" = 1 ] \
   && ok "Codex report identifies exactly one highlighted option" || bad "Codex report did not prove the highlighted option: $out"
 
 # Answering the DEFAULT (option 1, "Yes, proceed") -> Enter ALONE (no nav keys): the default
@@ -482,7 +482,7 @@ tmux() { case "$1" in capture-pane) if [ "${CLOSED:-0}" = 1 ]; then printf '❯\
 out="$(_managed_menu_detect "$PANE")"
 k="$(printf '%s\n' "$out" | head -1 | awk '{print $2}')"
 [ "$k" = cursor ] && ok "detect Claude/Devin approval menu (kind cursor)" || bad "Claude/Devin approval not detected as cursor ($k)"
-printf '%s\n' "$out" | grep -q '^SEL 1 Approve once' && printf '%s\n' "$out" | grep -q '^OPT 2 always allow' \
+grep -q '^SEL 1 Approve once' <<<"$out" && grep -q '^OPT 2 always allow' <<<"$out" \
   && ok "Claude/Devin report marks the ❯ default + lists the scoped-allow option" || bad "Claude/Devin report wrong: $out"
 
 # Answer "Approve once" (the ❯ default, position 1) -> Enter alone (already on it, delta 0).

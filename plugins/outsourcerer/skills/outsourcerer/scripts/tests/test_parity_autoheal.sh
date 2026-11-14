@@ -73,15 +73,15 @@ case "$(readlink "$H/.config/devin/skills/orphan")" in *pluginY*) bad "HIJACK: o
 
 # ---- prune is OPT-IN: brief-style call must NOT delete the truly-gone links ----------------------
 [ -L "$H/.config/devin/skills/ghost" ] && ok "brief-style call leaves truly-gone link (never deletes on hot path)" || bad "brief-style call deleted a link (should not prune)"
-printf '%s' "$out" | grep -q 'parity self-heal: re-pinned 4, pruned 0' && ok "brief-style summary: re-pinned 4, pruned 0" || bad "summary wrong: [$out]"
+grep -q 'parity self-heal: re-pinned 4, pruned 0' <<<"$out" && ok "brief-style summary: re-pinned 4, pruned 0" || bad "summary wrong: [$out]"
 # SIGNAL (observability): brief left unrepairable dead links (ghost + orphan) -> one advisory line.
-printf '%s' "$out" | grep -q 'dead skill link(s) not repaired on the hot path' && ok "brief signals unrepaired dead links + points at doctor --fix" || bad "no hot-path advisory printed: [$out]"
+grep -q 'dead skill link(s) not repaired on the hot path' <<<"$out" && ok "brief signals unrepaired dead links + points at doctor --fix" || bad "no hot-path advisory printed: [$out]"
 
 # ---- explicit prune (doctor --fix / parity) removes ALL truly-gone links (ghost + orphan) --------
 out_p="$(HOME="$H" _parity_repair_deadlinks prune)"
 [ -L "$H/.config/devin/skills/ghost" ] && bad "prune call did NOT remove the truly-gone ghost link" || ok "prune call removes the truly-gone ghost link"
 [ -L "$H/.config/devin/skills/orphan" ] && bad "prune call did NOT remove the own-plugin-gone orphan link" || ok "prune call removes the own-plugin-gone orphan link"
-printf '%s' "$out_p" | grep -q 'pruned 2' && ok "prune summary reports pruned 2 (ghost + orphan)" || bad "prune summary wrong: [$out_p]"
+grep -q 'pruned 2' <<<"$out_p" && ok "prune summary reports pruned 2 (ghost + orphan)" || bad "prune summary wrong: [$out_p]"
 
 # ---- healthy mirror is a silent no-op (zero added tokens on brief's hot path) -------------------
 out2="$(HOME="$H" _parity_repair_deadlinks)"
@@ -129,7 +129,7 @@ done
 cap_out="$(HOME="$CH" OSRC_BRIEF_HEAL_MAX=2 _parity_repair_deadlinks)"
 repinned=0; for i in 1 2 3 4; do [ -e "$CD/cap$i" ] && repinned=$((repinned+1)); done
 [ "$repinned" -eq 2 ] && ok "cap: brief handled exactly OSRC_BRIEF_HEAL_MAX=2 dead links, deferred the rest" || bad "cap not enforced (re-pinned $repinned of 4, expected 2)"
-printf '%s' "$cap_out" | grep -q '2 more dead skill link(s) not repaired on the hot path' && ok "cap: deferred remainder is signalled with a doctor --fix pointer" || bad "cap deferral not signalled: [$cap_out]"
+grep -q '2 more dead skill link(s) not repaired on the hot path' <<<"$cap_out" && ok "cap: deferred remainder is signalled with a doctor --fix pointer" || bad "cap deferral not signalled: [$cap_out]"
 # prune (doctor --fix) is unbounded: it must finish ALL four regardless of the cap.
 HOME="$CH" OSRC_BRIEF_HEAL_MAX=2 _parity_repair_deadlinks prune >/dev/null
 allrep=0; for i in 1 2 3 4; do [ -e "$CD/cap$i" ] && allrep=$((allrep+1)); done
