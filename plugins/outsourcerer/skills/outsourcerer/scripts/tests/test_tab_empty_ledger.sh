@@ -11,6 +11,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }

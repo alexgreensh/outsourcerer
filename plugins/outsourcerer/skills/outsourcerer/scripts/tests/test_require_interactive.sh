@@ -21,6 +21,8 @@ no(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMPDIR_RI="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_RI" 2>/dev/null' EXIT
+export HOME="$TMPDIR_RI/fakehome"
+mkdir -p "$HOME"
 
 # ---- fake devin (same shape as test_autodetach.sh) ----
 FAKE_HOME="$TMPDIR_RI/fake-home"
@@ -81,7 +83,7 @@ echo "=== (a) Default OSRC_REQUIRE_INTERACTIVE=1 → interactive tmux, no bg job
     OUTSOURCERER_DEPTH=0 \
     OSRC_FAKE_PANE_PID="$$" \
     OSRC_FAKE_TMUX_DIR="$RI_TMUX_A" \
-    bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_RI/a-stderr" </dev/null)"
+    bash "$ENGINE" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_RI/a-stderr" </dev/null)"
   RI_A_RC=$?
   RI_A_STDERR="$(cat "$TMPDIR_RI/a-stderr" 2>/dev/null)"
   RI_A_JOBS="$(find "$RI_JOBS_A" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
@@ -152,7 +154,7 @@ echo "=== (b) tmux new-session fails → die loudly, no silent headless fallback
     OUTSOURCERER_DEPTH=0 \
     OSRC_FAKE_TMUX_DIR="$RI_TMUX_B" \
     OSRC_FAKE_TMUX_FAIL_NEW=1 \
-    bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_RI/b-stderr" </dev/null)"
+    bash "$ENGINE" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_RI/b-stderr" </dev/null)"
   RI_B_RC=$?
   RI_B_STDERR="$(cat "$TMPDIR_RI/b-stderr" 2>/dev/null)"
   RI_B_JOBS="$(find "$RI_JOBS_B" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
@@ -198,7 +200,7 @@ echo "=== (c) OSRC_REQUIRE_INTERACTIVE=0 → bg job created (opt-out works) ==="
     OUTSOURCERER_DEPTH=0 \
     OSRC_POLL=1 \
     OSRC_FAKE_TMUX_DIR="$RI_TMUX_C" \
-    bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_RI/c-stderr" </dev/null)"
+    bash "$ENGINE" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_RI/c-stderr" </dev/null)"
   RI_C_RC=$?
   RI_C_JOBS="$(find "$RI_JOBS_C" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
   RI_C_TMUX_CALLS="$(cat "$RI_TMUX_C/all-calls" 2>/dev/null || echo '')"
@@ -242,7 +244,7 @@ echo "=== (d) OSRC_NO_AUTODETACH=1 → foreground, no tmux, no bg job ==="
     OUTSOURCERER_DEPTH=0 \
     OSRC_FG_GUARD=0 \
     OSRC_FAKE_TMUX_DIR="$RI_TMUX_D" \
-    bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_RI/d-stderr" </dev/null)"
+    bash "$ENGINE" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_RI/d-stderr" </dev/null)"
   RI_D_RC=$?
   RI_D_JOBS="$(find "$RI_JOBS_D" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
   RI_D_TMUX_CALLS="$(cat "$RI_TMUX_D/all-calls" 2>/dev/null || echo '')"

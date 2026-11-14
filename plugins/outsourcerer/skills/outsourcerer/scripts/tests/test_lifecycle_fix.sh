@@ -6,6 +6,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 TMP="$(mktemp -d "$PWD/.test-lifecycle-fix.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
@@ -84,7 +86,7 @@ SH
   _devin_guard_before_delegation() { return 0; }
   _session_assert_model_pinnable() { return 0; }
   set +e
-  out="$(session start -m glm 2>&1)"
+  out="$(session start --spend-ok -m glm 2>&1)"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! grep -q "Started tmux session" <<<"$out"

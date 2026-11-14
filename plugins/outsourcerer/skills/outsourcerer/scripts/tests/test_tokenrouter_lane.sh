@@ -27,6 +27,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 TMP="$(mktemp -d)" || { echo "FAIL: mktemp -d failed"; exit 1; }
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 export OSRC_HOME="$TMP"
 trap 'rm -rf "$TMP"; [ -n "${FAKE_PID:-}" ] && kill "$FAKE_PID" 2>/dev/null || true' EXIT
 pass=0; fail=0

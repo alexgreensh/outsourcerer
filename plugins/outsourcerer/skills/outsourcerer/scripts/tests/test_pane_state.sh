@@ -8,7 +8,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 TMP="$(mktemp -d "$PWD/.test-pane-state.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-OSRC_HOME="$TMP/state"; HOME="$TMP/home"; export OSRC_HOME HOME; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/home" OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
 
 # classify helper: pipe canned text in, read the .state field out.
