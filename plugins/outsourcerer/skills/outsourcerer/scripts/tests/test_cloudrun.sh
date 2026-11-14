@@ -244,8 +244,14 @@ out="$(start_cloud t-devin-nook --repo "$WORK" --base main --brief "$BRIEF" --ve
 out="$(start_cloud t-devin-ok --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -eq 0 ] && grep -q 'devin session started' <<<"$out" \
   && ok "spend: --spend-ok approves THIS devin launch only" || bad "spend: --spend-ok failed (rc=$rc): $out"
-# subscription lanes proceed with a printed note when the gate is absent
-out="$(start_cloud t-claude-nogate --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+# subscription lanes proceed with a printed note when the gate is absent.
+# L7 merged: lib/spend.sh IS loaded in this suite, so simulate its absence for this check.
+out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  unset -f _osrc_spend_gate
+  SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
+  _cloudrun_start t-claude-nogate --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude
+' 2>&1 )"; rc=$?
 [ $rc -eq 0 ] && grep -q 'spend gate not loaded' <<<"$out" \
   && ok "spend: claude subscription lane proceeds with note" || bad "spend: claude no-gate path (rc=$rc): $out"
 

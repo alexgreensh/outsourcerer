@@ -408,7 +408,10 @@ _osrc_hub_limits() {
   have jq 2>/dev/null || { printf '[]'; return 0; }
   if type osrc_limits_summary >/dev/null 2>&1; then
     local lsum; lsum="$(osrc_limits_summary --json 2>/dev/null)"
-    if [ -n "$lsum" ] && jq -e 'type == "array"' >/dev/null 2>&1 <<<"$lsum"; then
+    # An EMPTY feed is not authoritative: it lists only provably-logged-in harnesses,
+    # while the local builder below also covers artifact-evidenced rows (rate-limits
+    # files, paid keys, installed-but-unmetered lanes). Fall back on [] too.
+    if [ -n "$lsum" ] && jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$lsum"; then
       jq -c '[.[] | . + {updatedAt: (.updatedAt // .updated // "")}
                | (if (.updated | type == "string") and (.updated | test("T")) then .updated = (.updated[11:16] + " UTC") else . end)]' <<<"$lsum"
       return 0

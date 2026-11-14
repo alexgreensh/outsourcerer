@@ -161,18 +161,14 @@ out4="$(PATH="/usr/bin:/bin:$JQDIR" run hub export 2>/dev/null)"
 echo "$out4" | jq -e '[.limits[] | select(.id=="devin" or .id=="agy" or .id=="local")] | length == 0' >/dev/null \
   && ok "undetected lanes omitted from limits" || bad "undetected lanes listed"
 # Item 15: when L7's osrc_limits_summary --json is available it feeds the rail
-# (recomputed on every export). A PATH stub stands in for lib/spend.sh here.
-cat > "$TMP/bin/osrc_limits_summary" <<'EOF'
-#!/bin/sh
-[ "$1" = "--json" ] && printf '[{"id":"fake","name":"Fake Lane","state":"ok","left":"half left","renews_at":0,"cap":null,"cap_tripped":false,"paid":false,"billing":"subscription","window":null,"used":null,"updated":"2026-11-13T19:05:00Z","source":"outsourcerer","windows":{}}]\n' || printf 'FAKE\n'
-EOF
-chmod +x "$TMP/bin/osrc_limits_summary"
-out5="$(run hub export 2>/dev/null)"
-echo "$out5" | jq -e '.limits | length == 1 and .[0].id == "fake"' >/dev/null \
+# (recomputed on every export). L7 merged: the real function shadows any PATH stub,
+# so prove the preference with grokbot — a keyed-webhook harness the feed detects
+# from env vars and the local fallback never emits.
+out5="$(GROKBOT_WEBHOOK_URL='https://example.invalid/hook' GROKBOT_WEBHOOK_KEY='test-only' run hub export 2>/dev/null)"
+echo "$out5" | jq -e '[.limits[] | select(.id=="grokbot")] | length == 1' >/dev/null \
   && ok "osrc_limits_summary --json feeds the rail when present" || bad "limits summary feed ignored: $(echo "$out5" | jq -c .limits)"
-echo "$out5" | jq -e '.limits[0].updatedAt == "2026-11-13T19:05:00Z" and .limits[0].updated == "19:05 UTC"' >/dev/null \
-  && ok "summary rows normalized (updatedAt ISO, updated HH:MM UTC)" || bad "summary normalization wrong: $(echo "$out5" | jq -c .limits)"
-rm -f "$TMP/bin/osrc_limits_summary"
+echo "$out5" | jq -e '.limits[] | select(.id=="grokbot") | (.updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")) and (.updated | test(" UTC$"))' >/dev/null \
+  && ok "summary rows normalized (updatedAt ISO, updated HH:MM UTC)" || bad "summary normalization wrong: $(echo "$out5" | jq -c '.limits[]|select(.id=="grokbot")')"
 # Restore the fresh fixture for the serve checks below.
 jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
