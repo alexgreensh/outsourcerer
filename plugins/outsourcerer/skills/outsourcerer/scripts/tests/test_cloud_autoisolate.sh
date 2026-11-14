@@ -146,7 +146,7 @@ cap="$TMP/devin.cap"; calls="$TMP/devin.calls"
 # probe may run (metadata only), but no prompt-bearing (-p) call and no capture may appear.
 ref="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$TMP/devin.ref.cap" DEVIN_CALLS="$TMP/devin.ref.calls" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1; echo "rc=$?")"
 case "$ref" in *"rc=0"*) bad "unconsented metered launch was not refused" ;; *) ok "unconsented metered launch refused" ;; esac
-printf '%s' "$ref" | grep -q 'spend gate' && ok "the refusal is the spend gate" || bad "refusal was not the spend gate: $(printf '%s' "$ref" | tail -2)"
+grep -q 'spend gate' <<<"$ref" && ok "the refusal is the spend gate" || bad "refusal was not the spend gate: $(printf '%s' "$ref" | tail -2)"
 [ ! -s "$TMP/devin.ref.cap" ] && ok "refused launch dispatched nothing" || bad "refused launch still captured a run"
 if [ -f "$TMP/devin.ref.calls" ] && grep -q ' -p ' "$TMP/devin.ref.calls"; then bad "refused run logged a -p dispatch"; else ok "no -p dispatch in the refused run's call log"; fi
 grep -q 'models list' "$TMP/devin.ref.calls" 2>/dev/null && ok "billing probe ran as metadata-only 'models list'" || bad "expected a models-list probe in: $(cat "$TMP/devin.ref.calls" 2>/dev/null)"

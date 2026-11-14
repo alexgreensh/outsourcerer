@@ -200,6 +200,17 @@ _failover_signal_write cx luna answered "still answers" ""
 _o="$(hop auto run)"; [ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && ok "hop: 'answered' verdict -> rc1, no hop" || bad "hop: answered verdict hopped"
 rmc droid
 
+# r10 4.4: a READY non-cash lane with unproven billing is spend-blocked, RECORDED, and
+# NAMED in the stop line with --spend-ok — never silently dropped as "absent".
+rmc codex claude droid oz cursor-agent cline agy devin 2>/dev/null; mk cursor-agent
+unset FAKE_OR_KEY
+_failover_signal_write dv glm-5.2 confirmed "daily quota spent" 41160
+_p="$(_failover_pick dv glm-5.2 run)"; [ -z "$_p" ] && ok "pick: only spend-blocked cursor -> empty" || bad "pick: spend-blocked lane picked: '$_p'"
+case " $(_failover_spend_skipped) " in *" cursor "*) ok "spend-blocked non-cash lane recorded for the stop line" ;; *) bad "spend file missing cursor: '$(_failover_spend_skipped)'" ;; esac
+_o="$(HOP_MODEL=glm-5.2 HOP_DISP=devin hop auto run)"
+[ "$(printf '%s' "$_o" | sed -n 1p)" = 1 ] && grep -q 'cursor' <<<"$_o" && grep -q -- '--spend-ok' <<<"$_o" && ok "stop line names spend-blocked lane + --spend-ok" || bad "stop line: $(printf '%s' "$_o" | grep failover)"
+rmc cursor-agent
+
 # === (e) structural: both dispatch paths wire the hop; the loop owns the hop counter ==============
 [ "$(grep -c '_failover_hop "$tier" "$verb"' "$SRC")" = 2 ] && ok "structure: route_delegate calls _failover_hop on both dispatch paths" || bad "structure: hop call count $(grep -c '_failover_hop "$tier" "$verb"' "$SRC")"
 [ "$(grep -cE '^ +_failover_signal_clear$' "$SRC")" -ge 2 ] && ok "structure: signal cleared before each dispatch" || bad "structure: signal clear count"

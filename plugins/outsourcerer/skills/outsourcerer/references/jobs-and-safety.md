@@ -239,7 +239,8 @@ When **no** ready harness has headroom, nothing is invented. The run stops with:
 The soonest reset comes from the down lanes' own stated windows. If a cash lane could have taken
 the job, the line names it and the consent switches (`OSRC_FAILOVER_CASH_OK=1` to let the picker
 consider it, plus `--spend-ok` on the command for the spend itself) instead of spending
-silently. A pinned `-m` that can only move to a different model is refused the same loud way
+silently. A ready lane blocked only by metered or unproven billing is named the same way, with
+`--spend-ok` as the missing consent — it is never silently dropped as absent. A pinned `-m` that can only move to a different model is refused the same loud way
 (override: `OSRC_FALLBACK_PINNED=1`). Each hop records a `fallback` row in the Tab ($0,
 bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
 

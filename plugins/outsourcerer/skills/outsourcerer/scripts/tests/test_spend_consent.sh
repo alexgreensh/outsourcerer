@@ -343,12 +343,32 @@ unset OSRC_JOB_DIR OSRC_JOB_TOKEN _r7mock
 _r9exp="exp-val"; export _r9exp
 _r9plain="plain-val"   # set but NOT exported — the r7 bug re-exported vars like this
 _osrc_envrun -u _r9exp -u _r9plain _r9tmp=injected sh -c '[ "${_r9exp:-GONE}" = GONE ] && [ "${_r9plain:-GONE}" = GONE ] && [ "${_r9tmp:-}" = injected ]' \
-  && [ "$_r9exp" = "exp-val" ] && export -p | grep -q 'declare -x _r9exp=' \
-  && [ "$_r9plain" = "plain-val" ] && ! export -p | grep -q 'declare -x _r9plain=' \
+  && [ "$_r9exp" = "exp-val" ] && _ep="$(export -p)" \
+  && grep -q 'declare -x _r9exp=' <<<"$_ep" \
+  && [ "$_r9plain" = "plain-val" ] && ! grep -q 'declare -x _r9plain=' <<<"$_ep" \
   && [ "${_r9tmp+set}" != "set" ] \
   && ok "r9 envrun: scrub reaches child; exported/set/unset states all restored exactly" \
   || bad "r9 envrun: restore wrong (exp=${_r9exp:-unset} plain=${_r9plain:-unset} tmp=${_r9tmp:-unset})"
 unset _r9exp _r9plain _r9tmp
+
+# r10 F3: a var exported with NO value (`export X`, never assigned). On bash >= 4
+# declare -p prints 'declare -x X' and the restore branch runs — this is the branch
+# that had the $_a/$_er_a typo. On bash 3.2 declare -p FAILS for it, so the snapshot
+# is "unset" and the var comes back unset: lossy but safe, and unchanged by the fix.
+# This row only has teeth on bash >= 4 (the Linux leg); on 3.2 it pins the known gap.
+unset _r9noval; export _r9noval
+_osrc_envrun -u _r9noval true
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+  _ep="$(export -p)"
+  [ "${_r9noval+x}" = x ] && grep -q 'declare -x _r9noval$' <<<"$_ep" \
+    && ok "r10 envrun: exported-empty var restored exported-empty (bash>=4)" \
+    || bad "r10 envrun: exported-empty lost (set=${_r9noval+x} ep=$(printf '%s' "$_ep" | grep _r9noval))"
+else
+  [ "${_r9noval+x}" != x ] \
+    && ok "r10 envrun: exported-empty var on bash 3.2 snapshots as unset (known gap)" \
+    || bad "r10 envrun: bash3.2 exported-empty unexpectedly restored"
+fi
+unset _r9noval
 
 echo
 echo "RESULT: $pass passed, $fail failed"

@@ -16266,7 +16266,7 @@ _gate_hop() {
 # Lane preference order for a hop: plan/subscription lanes first, cash lanes last. `local` is left
 # out on purpose (no model-equivalence claim can be made for whatever the user pulled locally).
 OSRC_FAILOVER_LANES="cc cx gm dv droid warp cursor cline pi or tokenrouter claudex"
-_FAILOVER_CASH_SKIPPED=""   # in-process mirror; the file below is the source of truth across $(...)
+_FAILOVER_CASH_SKIPPED="" _FAILOVER_SPEND_SKIPPED=""   # in-process mirrors; the files in lib/spend.sh are the source of truth across $(...)
 _FO_LANE=""; _FO_MODEL=""; _FO_VERDICT=""; _FO_REASON=""; _FO_RESET=""
 
 _failover_signal_file() { printf '%s/.failover.signal.%s' "$OSRC_HOME" "$$"; }
@@ -16323,10 +16323,10 @@ _failover_lane_ok() {
     _failover_cash_record "$l"; return 1
   fi
   # L7 add-on: never hop onto metered/unknown without THIS command's --spend-ok; CASH_OK
-  # only lets the picker CONSIDER cash lanes, so a spend-blocked one is recorded for the
-  # stop line's --spend-ok hint.
+  # only lets the picker CONSIDER cash lanes. Spend-blocked lanes of ANY cost class are
+  # recorded: cash lanes keep the cash record (stop line names both switches), the rest spend.
   _osrc_lane_spendable "$l" "$m" || {
-    _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ] && _failover_cash_record "$l"; return 1; }
+    if _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ]; then _failover_cash_record "$l"; else _failover_spend_record "$l"; fi; return 1; }
   [ -n "$m" ] && _model_denied "$m" && return 1
   if [ -n "$m" ]; then
     _wm="$(_lane_field "$l" warn_model 2>/dev/null)"
@@ -16372,7 +16372,7 @@ _OSRC_FO_T
 _failover_pick() {
   local src="${1:-}" model="${2:-}" verb="${3:-run}" canon want l m alias resolved lane tier d ti key rows="" seen="" seq=0
   src="$(_lane_plan_key "$src")"; [ -n "$src" ] || src="${1:-}"
-  _FAILOVER_CASH_SKIPPED=""; _failover_cash_clear
+  _FAILOVER_CASH_SKIPPED=""; _failover_cash_clear; _FAILOVER_SPEND_SKIPPED=""; _failover_spend_clear
   # An ALIAS as typed (kimi, glm, sonnet) must mean the model it resolves to: canonicalize the table's
   # resolved id, not the raw token, or "kimi" never matches kimi-k3 on droid/warp and the same-model
   # pass silently falls through to a tier pick.
@@ -16426,12 +16426,13 @@ _failover_soonest_reset() {
 }
 # _failover_nothing_notice <src-lane> <reason> -> the honest STOP line (never invented capacity).
 _failover_nothing_notice() {
-  local soon cash="" skipped hint; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"
+  local soon cash="" skipped ssk hint; soon="$(_failover_soonest_reset)"; skipped="$(_failover_cash_skipped)"; ssk="$(_failover_spend_skipped)"
   if [ -n "$skipped" ]; then
     hint='allow that with OSRC_FAILOVER_CASH_OK=1 and --spend-ok on this command.'
     [ "${OSRC_FAILOVER_CASH_OK:-0}" = "1" ] && hint='OSRC_FAILOVER_CASH_OK already unlocked them — this command still needs --spend-ok.'
     cash=" ($skipped would take it but spends cash; $hint)"
   fi
+  [ -n "$ssk" ] && cash="$cash ($ssk would take it but billing is metered or unproven; this command needs --spend-ok)"
   printf '>>> [failover] every lane you have is at its limit or absent; nothing to fail over to (%s %s). Waiting for %s or add a lane.%s\n' \
     "$(_lane_plan_display "${1:-?}")" "${2:-hit its plan limit}" "${soon:-the next reset (no lane stated one)}" "$cash" >&2
 }

@@ -40,20 +40,21 @@ _osrc_billing_key() {
   [ -n "$(_extract_kv_value "$k" 2>/dev/null)" ]
 }
 
-# _osrc_dir_key_material <dir> -> rc0 when an auth-ish FILE in <dir> carries explicit
-# API-key material ("apiKey"/"api_key"/"api-key"/"apikey" JSON fields). A plan session
-# token is not API-key material; this only flags per-use credentials so a BYOK login
-# stored in the lane's config dir cannot pass as a subscription off dir existence alone
-# (same class as the claude credentials fix). Narrow on purpose: generic "key"/"token"
-# fields appear in plan session payloads too and would false-positive metered.
+# _osrc_dir_key_material <dir> -> rc0 when ANY regular file at depth 1 in <dir>
+# carries explicit API-key material ("apiKey"/"api_key"/"api-key"/"apikey" JSON
+# fields). A plan session token is not API-key material; this only flags per-use
+# credentials so a BYOK login stored in the lane's config dir cannot pass as a
+# subscription off dir existence alone (same class as the claude credentials
+# fix). Every file is scanned, not just auth-ish names: config.json /
+# settings.json are where these CLIs keep bring-your-own-key models, and the
+# field pattern is already narrow enough (8+ char value) that a filename filter
+# only hides the common case. -I still skips binary files.
 _osrc_dir_key_material() {
-  local d="${1:-}"
+  local d="${1:-}" _hits
   [ -d "$d" ] || return 1
-  find "$d" -maxdepth 1 -type f \
-    \( -iname '*auth*' -o -iname '*cred*' -o -iname '*token*' -o -iname '*session*' \
-       -o -iname '*login*' -o -iname '*oauth*' -o -iname '*account*' -o -iname '*keychain*' \) \
-    -exec grep -lsEI '"(apiKey|api_key|api-key|apikey)"[[:space:]]*:[[:space:]]*"[^"]{8,}"' {} + \
-    2>/dev/null | grep -q .
+  _hits="$(find "$d" -maxdepth 1 -type f -exec grep -lsIE \
+    '"(apiKey|api_key|api-key|apikey)"[[:space:]]*:[[:space:]]*"[^"]{8,}"' {} + 2>/dev/null)"
+  [ -n "$_hits" ]
 }
 
 # _osrc_devin_free_for_spend <model> -> rc0 ONLY when the model is proven Free for SPEND
@@ -201,37 +202,31 @@ osrc_lane_billing() {
       else printf 'unknown\n'; fi; return ;;
     cx|ci)   # ci rides the same codex-native auth as cx
       # Native Codex: OPENAI_API_KEY/CODEX_API_KEY (env) or an api-key auth.json bills cash;
-      # OPENAI_BASE_URL redirects billing. A ChatGPT OAuth auth.json (tokens, no api key) or a
-      # `codex login status` "logged in using ChatGPT" is the plan proof; "using an API key"
-      # is per-use. No jq means auth.json cannot be classified -> unknown, never guessed
-      # subscription.
+      # OPENAI_BASE_URL redirects billing. Per-use evidence wins over any plan proof: the
+      # CLI's "using an API key" answer or an OPENAI_API_KEY field beats a stale token
+      # file. Plan proof is the CLI's "logged in using ChatGPT" or an OAuth access_token.
+      # auth.json lives at ${CODEX_HOME:-$HOME/.codex} — the engine honours CODEX_HOME
+      # elsewhere (parity-codex writes there), so billing must too. A definitive "not
+      # logged in" beats a stale token file; {} / garbage / tokenless shapes are evidence
+      # of NEITHER and fall through, never guessed subscription.
       if _osrc_billing_key OPENAI_API_KEY || _osrc_billing_key CODEX_API_KEY \
          || [ -n "${OPENAI_BASE_URL:-}" ]; then printf 'metered\n'; return; fi
-      # auth.json proves a billing class only on POSITIVE evidence: an OPENAI_API_KEY
-      # field is per-use, an OAuth access_token is the ChatGPT plan. An empty, corrupt or
-      # unrecognised file is evidence of NEITHER — same class as the claude {} credentials
-      # fix — so it falls through to the CLI probe instead of guessing subscription.
-      if [ -f "$HOME/.codex/auth.json" ] && have jq; then
-        if jq -e '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" >/dev/null 2>&1; then
-          printf 'metered\n'; return
-        fi
-        if jq -e '.tokens.access_token | select(type == "string" and length > 0)' \
-             "$HOME/.codex/auth.json" >/dev/null 2>&1; then
-          printf 'subscription\n'; return
-        fi
-      fi
+      local _cs="" _cxj="${CODEX_HOME:-$HOME/.codex}/auth.json"
       if have codex; then
-        local _cs
-        # codex may print the status on stderr; capture both. The message distinguishes
-        # the plan from per-use: "Logged in using ChatGPT" is the subscription, while
-        # "Logged in using an API key" bills per token and must NOT pass as subscription
-        # (same class as the claude credentials fix — existence of a login is not proof
-        # of what it bills).
+        # codex may print the status on stderr; capture both.
         _cs="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>&1)"
-        if printf '%s' "$_cs" | grep -qi "logged in using chatgpt"; then
-          printf 'subscription\n'; return
-        fi
-        if printf '%s' "$_cs" | grep -qi "api key"; then printf 'metered\n'; return; fi
+        if grep -qi "api key" <<<"$_cs"; then printf 'metered\n'; return; fi
+      fi
+      if [ -f "$_cxj" ] && have jq \
+         && jq -e '.OPENAI_API_KEY // empty' "$_cxj" >/dev/null 2>&1; then
+        printf 'metered\n'; return
+      fi
+      if grep -qi "not logged in" <<<"$_cs"; then printf 'unknown\n'; return; fi
+      if grep -qi "logged in using chatgpt" <<<"$_cs"; then printf 'subscription\n'; return; fi
+      if [ -f "$_cxj" ] && have jq \
+         && jq -e '.tokens.access_token | select(type == "string" and length > 0)' \
+              "$_cxj" >/dev/null 2>&1; then
+        printf 'subscription\n'; return
       fi
       printf 'unknown\n'; return ;;
     gm)
@@ -241,7 +236,11 @@ osrc_lane_billing() {
       # key material -> subscription; agy on PATH without the dir proves nothing.
       if _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY \
          || _osrc_dir_key_material "$HOME/.antigravity"; then printf 'metered\n'
-      elif have agy && [ -d "$HOME/.antigravity" ]; then printf 'subscription\n'
+      # Dir existence alone is not proof (same class as the credentials fix): a real
+      # login writes at least one non-empty file. An empty dir + agy -> unknown.
+      elif have agy && [ -d "$HOME/.antigravity" ] \
+           && [ -n "$(find "$HOME/.antigravity" -maxdepth 1 -type f -size +0c -print -quit 2>/dev/null)" ]; then
+        printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     dv)
       # Devin: live-catalog Free (or the two-id offline fallback) rides the plan; every other
@@ -353,18 +352,26 @@ _osrc_lane_spendable() {
   _osrc_spend_ok "${1:-}" "${2:-}"
 }
 
-# Failover cash-skip tracking (engine _failover_* calls these; they live here for the
-# engine-size budget and because they exist to feed the spend-consent stop message).
-# The picker runs under a command substitution, so skipped cash lanes are recorded in a
-# per-process file (not a variable) — $$ is shared by $( ) subshells, giving one file per
-# route_delegate call after _failover_cash_clear.
+# Failover skip tracking (engine _failover_* calls these; they live here for the
+# engine-size budget and because they feed the spend-consent stop message). The
+# picker runs under a command substitution, so skipped lanes are recorded in a
+# per-process file — $$ is shared by $( ) subshells, one file per route_delegate
+# call after the matching _failover_*_clear.
 _failover_cash_file() { printf '%s/.failover.cash.%s' "$OSRC_HOME" "$$"; }
 _failover_cash_skipped() { local _cf; _cf="$(_failover_cash_file)"; [ -f "$_cf" ] || return 0; tr '\n' ' ' < "$_cf" 2>/dev/null | sed -E 's/[[:space:]]+$//'; }
 _failover_cash_clear() { rm -f "$(_failover_cash_file)" 2>/dev/null; }
 _failover_cash_record() {  # <lane> — remember a skipped cash lane for the stop line
   local l="${1:-}"; case " $_FAILOVER_CASH_SKIPPED " in *" $l "*) return 0 ;; esac
   _FAILOVER_CASH_SKIPPED="${_FAILOVER_CASH_SKIPPED:+$_FAILOVER_CASH_SKIPPED }$l"
-  { umask 077; printf '%s\n' "$l" >> "$(_failover_cash_file)"; } 2>/dev/null || true
+  ( umask 077; printf '%s\n' "$l" >> "$(_failover_cash_file)" ) 2>/dev/null || true
+}
+# Spend-blocked lanes (metered/unknown billing, ANY cost class) — same mechanism.
+_failover_spend_file() { printf '%s/.failover.spend.%s' "$OSRC_HOME" "$$"; }
+_failover_spend_skipped() { local _sf; _sf="$(_failover_spend_file)"; [ -f "$_sf" ] || return 0; tr '\n' ' ' < "$_sf" 2>/dev/null | sed -E 's/[[:space:]]+$//'; }
+_failover_spend_clear() { rm -f "$(_failover_spend_file)" 2>/dev/null; }
+_failover_spend_record() {  # <lane> — remember a spend-blocked lane for the stop line
+  local l="${1:-}"; case " $_FAILOVER_SPEND_SKIPPED " in *" $l "*) return 0 ;; esac
+  _FAILOVER_SPEND_SKIPPED="${_FAILOVER_SPEND_SKIPPED:+$_FAILOVER_SPEND_SKIPPED }$l"; ( umask 077; printf '%s\n' "$l" >> "$(_failover_spend_file)" ) 2>/dev/null || true
 }
 
 # _osrc_spend_marker_pairs <provider> [inner-args...] -> prints the exact "lane|model"
@@ -580,6 +587,9 @@ _osrc_route_launched_model() {
 # resolution AND keeps the vars out of the child's environment. Each var's declaration
 # is snapshotted with declare -p and replayed through eval, which is bash-3.2-safe
 # (no nameref/${var@a}); a var set-but-unexported before stays unexported after.
+# Arrays and integer-attributed vars are NOT restored (declare -p output for them is
+# not replayed faithfully); no caller passes one today — every scrubbed name is a
+# plain string. If a future caller needs one, extend the snapshot first.
 # NOTE: while CMD runs the vars are changed in THIS shell too (dynamic scope) — no
 # EXIT/TERM/signal trap handler may read them; restore happens only after CMD returns.
 _osrc_envrun() {
@@ -608,7 +618,7 @@ _osrc_envrun() {
       "declare -x "*)
         case "$_er_d" in
           *"="*) eval "export ${_er_d#declare -x }" ;;
-          *)     eval "unset $_a 2>/dev/null; export $_a" ;;
+          *)     eval "unset $_er_a 2>/dev/null; export $_er_a" ;;
         esac ;;
       "declare -- "*) eval "${_er_d#declare -- }"; export -n "$_er_a" 2>/dev/null || true ;;
       "declare "*)    eval "$_er_d"; export -n "$_er_a" 2>/dev/null || true ;;
@@ -626,17 +636,30 @@ _osrc_envrun() {
 _osrc_nojob() { _osrc_envrun -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; }
 
 # _osrc_claude_plan_login -> rc0 ONLY when `claude auth status` proves a claude.ai PLAN
-# login. The JSON must parse and carry loggedIn==true, authMethod=="claude.ai",
-# apiProvider=="firstParty", and subscriptionType in the explicit plan list
-# (pro|max|team|enterprise). Console/API-key/other logins, missing fields, non-JSON
-# output, non-zero exit, timeout, or no jq are all NOT proof (rc1 -> billing unknown,
-# the spend gate asks). jq emits only the verdict word or nothing — email, org, ids
-# and tokens are never printed, cached or logged. A credentials file or keychain entry
-# existing proves a login was once written, not what it bills, so neither is consulted.
+# login. The CLI's exit code is captured FIRST: a non-zero exit is not proof even if
+# JSON was printed (rc1 -> billing unknown, the spend gate asks). Among zero-exit
+# output the FIRST parseable JSON object wins, so a warning line before the payload
+# does not cost an ask. That object must carry loggedIn==true, authMethod=="claude.ai",
+# apiProvider=="firstParty", and a subscriptionType that is a known plan
+# (pro|max|team|enterprise, case-insensitive) or a variant starting with one
+# (max_20x); anything else is not proof. jq emits only the verdict word or nothing —
+# email, org, ids and tokens are never printed, cached or logged. A credentials file
+# or keychain entry existing proves a login was once written, not what it bills, so
+# neither is consulted. The probe runs under _osrc_envrun -u CLAUDECODE so an
+# orchestrator's nested-session marker cannot make the CLI misreport its login.
 _osrc_claude_plan_login() {
   have claude && have jq || return 1
-  [ "$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 2>/dev/null \
-      | jq -r 'if (.loggedIn == true) and (.authMethod == "claude.ai") and (.apiProvider == "firstParty") and (.subscriptionType == "pro" or .subscriptionType == "max" or .subscriptionType == "team" or .subscriptionType == "enterprise") then "plan" else "" end' 2>/dev/null)" = "plan" ]
+  local _out _rc
+  _out="$(_osrc_envrun -u CLAUDECODE _timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 2>/dev/null)"; _rc=$?
+  [ "$_rc" -eq 0 ] || return 1
+  [ "$(printf '%s\n' "$_out" | jq -Rn -r '
+    [inputs | fromjson? | objects] | .[0] |
+    if (.loggedIn == true) and (.authMethod == "claude.ai") and (.apiProvider == "firstParty")
+       and ((.subscriptionType | tostring | ascii_downcase) as $st |
+            ($st == "pro" or $st == "max" or $st == "team" or $st == "enterprise"
+             or ($st | (startswith("pro_") or startswith("pro-") or startswith("max_") or startswith("max-")
+                        or startswith("team_") or startswith("team-") or startswith("enterprise_") or startswith("enterprise-")))))
+    then "plan" else "" end' 2>/dev/null)" = "plan" ]
 }
 
 # =============================================================================
