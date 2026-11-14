@@ -28,6 +28,7 @@ if [ "${1:-}" != auth ]; then
 fi
 case "$CLAUDE_CONFIG_DIR" in
   */a) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}' ;;
+  */other) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}' ;;
   */b) printf '%s\n' '{"loggedIn":true,"authMethod":"console","apiProvider":"firstParty","subscriptionType":"max"}' ;;
   */thirdparty) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"bedrock","subscriptionType":"max"}' ;;
   */unverified) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}' ;;
@@ -82,7 +83,8 @@ export CLAUDE_CODE_USE_FOUNDRY
 unset CLAUDE_CODE_USE_FOUNDRY
 accounts=$(printf 'a\t%s/a\nb\t%s/b\nunknown\t%s/unknown\n' "$OSRC_HOME" "$OSRC_HOME" "$OSRC_HOME")
 OSRC_SPEND_OK=1
-[ "$(printf '%s\n' "$accounts" | _osrc_account_choose)" = b ]
+[ "$(printf '%s\n' "$accounts" | _osrc_account_choose)" = a ]
+printf 'PASS: spend consent does not outrank a plan\n'
 TEST_CAP='5h<=25'; export TEST_CAP
 [ "$(printf '%s\n' "$accounts" | _osrc_account_choose)" = a ]
 TEST_CAP='weekly<=10'; export TEST_CAP
@@ -121,6 +123,18 @@ printf '{"apiKeyHelper":"example"}\n' > "$HOME/.claude/settings.json"
 printf '{}\n' > "$HOME/.claude/settings.json"
 /bin/bash "$CLI" accounts add work "$OSRC_HOME/a" >/dev/null
 [ ! -e "$OSRC_HOME/launched" ]
+printf '{"timestamp":%s000,"five_hour":{"used_percentage":10},"seven_day":{"used_percentage":100}}\n' "$now" > "$OSRC_HOME/rate-limits.json"
+mv "$OSRC_HOME/a/token-optimizer/rate-limits.json" "$OSRC_HOME/a-usage-saved"
+(cd "$HOME" && OSRC_NO_AUTODETACH=1 /bin/bash "$CLI" run -m fable --cloud-ack --foreground hello >"$OSRC_HOME/spent-unknown" 2>&1)
+if [ "$(tail -1 "$OSRC_HOME/launched")" != "$OSRC_HOME/a|unset" ]; then echo 'FAIL: spent weekly account beat unknown account'; exit 1; fi
+printf 'PASS: spent weekly account loses to unknown account\n'
+printf '{"timestamp":%s000,"five_hour":{"used_percentage":100},"seven_day":{"used_percentage":20}}\n' "$now" > "$OSRC_HOME/rate-limits.json"
+printf '{"timestamp":%s000,"five_hour":{"used_percentage":5},"seven_day":{"used_percentage":60}}\n' "$now" > "$OSRC_HOME/a/token-optimizer/rate-limits.json"
+(cd "$HOME" && OSRC_NO_AUTODETACH=1 /bin/bash "$CLI" run -m fable --cloud-ack --foreground hello >"$OSRC_HOME/spent-5h" 2>&1)
+if [ "$(tail -1 "$OSRC_HOME/launched")" != "$OSRC_HOME/a|unset" ]; then echo 'FAIL: spent 5h account beat available account'; exit 1; fi
+printf 'PASS: spent 5h account loses to available account\n'
+mv "$OSRC_HOME/a-usage-saved" "$OSRC_HOME/a/token-optimizer/rate-limits.json"
+rm "$OSRC_HOME/rate-limits.json" "$OSRC_HOME/launched"
 if /bin/bash "$CLI" accounts add default "$OSRC_HOME/a" >/dev/null 2>&1; then exit 1; fi
 printf 'default\t%s\n' "$OSRC_HOME/a" >> "$OSRC_HOME/claude-accounts"
 if /bin/bash "$CLI" accounts rm default >/dev/null 2>&1; then exit 1; fi
@@ -131,15 +145,15 @@ if /bin/bash "$CLI" accounts rm default >/dev/null 2>&1; then exit 1; fi
 for shared in agents commands hooks plugins references; do
   [ "$(readlink "$OSRC_HOME/a/$shared")" = "$HOME/.claude/$shared" ]
 done
-[ -p "$OSRC_HOME/a/.credentials.json" ] && [ ! -L "$OSRC_HOME/a/.credentials.json" ]
+if [ ! -p "$OSRC_HOME/a/.credentials.json" ] || [ -L "$OSRC_HOME/a/.credentials.json" ]; then echo 'FAIL: account credential canary changed'; exit 1; fi
 [ ! -e "$OSRC_HOME/a/.claude.json" ]
 [ ! -e "$OSRC_HOME/a/statsig" ]
 [ ! -e "$OSRC_HOME/a/account-cache.json" ]
 for private in .claude.json.backup loop.md backups sessions daemon jobs tasks teams file-history logs debug telemetry usage-data plans local downloads token-optimizer; do
   [ "$private" = token-optimizer ] && continue
-  [ ! -e "$OSRC_HOME/a/$private" ] && [ ! -L "$OSRC_HOME/a/$private" ]
+  if [ -e "$OSRC_HOME/a/$private" ] || [ -L "$OSRC_HOME/a/$private" ]; then echo "FAIL: private path linked: $private"; exit 1; fi
 done
-[ -d "$OSRC_HOME/a/token-optimizer" ] && [ ! -L "$OSRC_HOME/a/token-optimizer" ]
+if [ ! -d "$OSRC_HOME/a/token-optimizer" ] || [ -L "$OSRC_HOME/a/token-optimizer" ]; then echo 'FAIL: token optimizer is not private'; exit 1; fi
 printf 'PASS: only shared configuration is linked\n'
 if /bin/bash "$CLI" accounts add inner "$HOME/.claude/inner" >"$OSRC_HOME/inner" 2>&1; then exit 1; fi
 [ ! -e "$HOME/.claude/inner" ]
@@ -172,6 +186,9 @@ listing=$(/bin/bash "$CLI" accounts)
 printf '{"timestamp":%s000,"five_hour":{"used_percentage":30},"seven_day":{"used_percentage":5}}\n' "$now" > "$OSRC_HOME/b/token-optimizer/rate-limits.json"
 /bin/bash "$CLI" --osrc-preflight-internal run -m fable --foreground hello >"$OSRC_HOME/auto" 2>&1
 printf 'PASS: auto placement prefers a plan over Console\n'
+(cd "$HOME" && OSRC_NO_AUTODETACH=1 /bin/bash "$CLI" run -m fable --spend-ok --cloud-ack --foreground hello >"$OSRC_HOME/approved-auto" 2>&1)
+if [ "$(tail -1 "$OSRC_HOME/launched")" != "$OSRC_HOME/a|unset" ]; then echo 'FAIL: spend consent beat available plan'; exit 1; fi
+printf 'PASS: spend consent still prefers an available plan\n'
 /bin/bash "$CLI" --osrc-preflight-internal run -m fable --cap '5h<=25' --foreground hello >"$OSRC_HOME/capped" 2>&1
 if /bin/bash "$CLI" --osrc-preflight-internal run -m fable --account hat --foreground hello >"$OSRC_HOME/denied" 2>&1; then exit 1; fi
 grep -q 'spend gate' "$OSRC_HOME/denied"
@@ -197,7 +214,7 @@ printf 'PASS: inherited account does not force or leak selection\n'
 [ ! -L "$OSRC_HOME/b/CLAUDE.md" ]
 /bin/bash "$CLI" accounts rm work >/dev/null
 [ ! -L "$OSRC_HOME/a/settings.json" ]
-[ -d "$OSRC_HOME/a/skills" ] && [ ! -L "$OSRC_HOME/a/skills" ]
+if [ ! -d "$OSRC_HOME/a/skills" ] || [ -L "$OSRC_HOME/a/skills" ]; then echo 'FAIL: real skills directory was not preserved'; exit 1; fi
 [ -d "$OSRC_HOME/a/token-optimizer" ]
 listing=$(/bin/bash "$CLI" accounts)
 [[ "$listing" != *work* ]]
