@@ -474,7 +474,7 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or' )
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing tokenrouter; osrc_lane_billing gi' )
 case "$b" in metered$'\n'metered) ok "r3 billing: tokenrouter + gi -> metered" ;; *) bad "r3 billing: tr/gi -> '$b'" ;; esac
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing ci; osrc_lane_billing claudex' )
-case "$b" in subscription$'\n'subscription) ok "r3 billing: ci + claudex -> subscription" ;; *) bad "r3 billing: ci/claudex -> '$b'" ;; esac
+case "$b" in unknown$'\n'unknown) ok "r9 billing: ci unproven + claudex upstream unverifiable -> unknown" ;; *) bad "r9 billing: ci/claudex -> '$b'" ;; esac
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cursor; osrc_lane_billing grokbot' )
 case "$b" in unknown$'\n'unknown) ok "r3 billing: cursor + grokbot unprovable -> unknown" ;; *) bad "r3 billing: cursor/grokbot -> '$b'" ;; esac
 # Devin spend-free is PROOF-based: live catalog Free tag, else only SWE-2 High / SWE-2 Flash
@@ -497,9 +497,50 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing nosuchl
 # and every per-use redirect (token, base URL, BEDROCK/VERTEX, settings key helper) is metered.
 b=$( HOME="$HB" ANTHROPIC_API_KEY=x bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cc' )
 [ "$b" = "metered" ] && ok "r3 billing: cc + ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc+key -> '$b'"
-mkdir -p "$HB/.claude"; printf '{"claudeAiOauth":{"accessToken":"x"}}' > "$HB/.claude/.credentials.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
-[ "$b" = "subscription" ] && ok "r3 billing: cc proven plan login -> subscription" || bad "r3 billing: cc login -> '$b'"
+# r9 F1: cc subscription proof is `claude auth status` JSON ONLY — loggedIn==true,
+# authMethod=="claude.ai", apiProvider=="firstParty", subscriptionType in
+# pro|max|team|enterprise. A credentials file, keychain entry, Console/API-key login,
+# missing fields, non-JSON, exit!=0 or no jq are all unknown. claude() is a shell
+# function stub (it reaches _timeout's subshell); CLF carries the fixture JSON.
+_ccbill() { local fx="$1"; shift; env HOME="$HB" CLF="$fx" "$@" bash -c '. "$1" >/dev/null 2>&1
+  have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }
+  claude() { printf "%s" "$CLF"; }
+  osrc_lane_billing cc' _ "$SRC" 2>/dev/null; }
+PLANJSON='{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'
+[ "$(_ccbill "$PLANJSON")" = "subscription" ] && ok "r9 billing: cc plan login max -> subscription" || bad "r9 billing: cc max -> '$(_ccbill "$PLANJSON")'"
+for st in pro team enterprise; do
+  j="{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"$st\"}"
+  b="$(_ccbill "$j")"
+  [ "$b" = "subscription" ] && ok "r9 billing: cc plan login $st -> subscription" || bad "r9 billing: cc $st -> '$b'"
+done
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"console"}')" = "unknown" ] \
+  && ok "r9 billing: cc non-plan subscriptionType -> unknown" || bad "r9 billing: cc console-type -> subscription?!"
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"console","apiProvider":"console","subscriptionType":null}')" = "unknown" ] \
+  && ok "r9 billing: cc console login -> unknown" || bad "r9 billing: cc console -> subscription?!"
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"apiKey","apiProvider":"firstParty"}')" = "unknown" ] \
+  && ok "r9 billing: cc api-key shape -> unknown" || bad "r9 billing: cc apikey -> subscription?!"
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":null}')" = "unknown" ] \
+  && ok "r9 billing: cc null subscriptionType -> unknown" || bad "r9 billing: cc null-type -> subscription?!"
+[ "$(_ccbill '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}')" = "unknown" ] \
+  && ok "r9 billing: cc missing subscriptionType -> unknown" || bad "r9 billing: cc missing-type -> subscription?!"
+[ "$(_ccbill '{"loggedIn":false,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}')" = "unknown" ] \
+  && ok "r9 billing: cc loggedIn false -> unknown" || bad "r9 billing: cc loggedIn-false -> subscription?!"
+[ "$(_ccbill 'not json at all')" = "unknown" ] && ok "r9 billing: cc garbage auth status -> unknown" || bad "r9 billing: cc garbage -> subscription?!"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; claude() { return 1; }; osrc_lane_billing cc' )
+[ "$b" = "unknown" ] && ok "r9 billing: cc auth status exit 1 -> unknown" || bad "r9 billing: cc exit1 -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; [ "$1" = jq ] && return 1; command -v "$1" >/dev/null 2>&1; }; claude() { printf "%s" "$PLANJSON"; }; PLANJSON="'"$PLANJSON"'" osrc_lane_billing cc' )
+[ "$b" = "unknown" ] && ok "r9 billing: cc no jq -> unknown" || bad "r9 billing: cc no-jq -> '$b'"
+# File/keychain existence is NOT proof: a real-shaped creds block plus garbage CLI
+# output still yields unknown; a keychain entry without a plan yields unknown.
+mkdir -p "$HB/.claude"; printf '{"claudeAiOauth":{"subscriptionType":"max","accessToken":"x"}}' > "$HB/.claude/.credentials.json"
+[ "$(_ccbill 'garbage')" = "unknown" ] && ok "r9 billing: real-shaped creds file + garbage CLI -> unknown" || bad "r9 billing: creds-file proved subscription?!"
+: > "$HB/.claude/.credentials.json"
+[ "$(_ccbill '')" = "unknown" ] && ok "r9 billing: empty creds file -> unknown" || bad "r9 billing: empty creds -> subscription?!"
+printf 'garbage' > "$HB/.claude/.credentials.json"
+[ "$(_ccbill '')" = "unknown" ] && ok "r9 billing: garbage creds file -> unknown" || bad "r9 billing: garbage creds -> subscription?!"
+b=$( HOME="$HB" OSRC_PLATFORM=darwin bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; security() { return 0; }; claude() { echo garbage; }; osrc_lane_billing cc' )
+[ "$b" = "unknown" ] && ok "r9 billing: keychain entry without plan -> unknown" || bad "r9 billing: keychain -> '$b'"
+rm -f "$HB/.claude/.credentials.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; ANTHROPIC_AUTH_TOKEN=t ANTHROPIC_BASE_URL=https://openrouter.ai/api osrc_lane_billing cc' )
 [ "$b" = "metered" ] && ok "r3 billing: cc auth-token+base-url redirect -> metered" || bad "r3 billing: cc redirect -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; CLAUDE_CODE_USE_BEDROCK=1 osrc_lane_billing cc; CLAUDE_CODE_USE_VERTEX=1 osrc_lane_billing cc' )
@@ -511,21 +552,172 @@ printf '{"env":{"ANTHROPIC_API_KEY":"sk-x"}}' > "$HB/.claude/settings.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing cc' )
 [ "$b" = "metered" ] && ok "r3 billing: cc settings env.ANTHROPIC_API_KEY -> metered" || bad "r3 billing: cc settings envkey -> '$b'"
 rm -f "$HB/.claude/settings.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; rm -f "$HOME/.claude/.credentials.json"; osrc_lane_billing cc' )
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = claude ] && return 0; command -v "$1" >/dev/null 2>&1; }; claude() { :; }; rm -f "$HOME/.claude/.credentials.json"; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r3 billing: cc CLI but no provable login -> unknown" || bad "r3 billing: cc cli-only -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cc' )
 [ "$b" = "unknown" ] && ok "r3 billing: cc unprovable -> unknown" || bad "r3 billing: cc unknown -> '$b'"
 
 # cx: ChatGPT auth.json -> subscription; OPENAI_API_KEY -> metered; nothing -> unknown.
 mkdir -p "$HB/.codex"; printf '{"tokens":{"access_token":"x"}}' > "$HB/.codex/auth.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
-[ "$b" = "subscription" ] && ok "r3 billing: cx ChatGPT login -> subscription" || bad "r3 billing: cx auth.json -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in subscription$'\n'subscription) ok "r3 billing: cx + ci ChatGPT login -> subscription" ;; *) bad "r3 billing: cx/ci auth.json -> '$b'" ;; esac
 printf '{"OPENAI_API_KEY":"sk-x"}' > "$HB/.codex/auth.json"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx' )
-[ "$b" = "metered" ] && ok "r3 billing: cx auth.json API key -> metered" || bad "r3 billing: cx apikey -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in metered$'\n'metered) ok "r3 billing: cx + ci auth.json API key -> metered" ;; *) bad "r3 billing: cx/ci apikey -> '$b'" ;; esac
 rm -rf "$HB/.codex"
-b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cx' )
-[ "$b" = "unknown" ] && ok "r3 billing: cx unprovable -> unknown" || bad "r3 billing: cx unknown -> '$b'"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { return 1; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in unknown$'\n'unknown) ok "r3 billing: cx + ci unprovable -> unknown" ;; *) bad "r3 billing: cx/ci unknown -> '$b'" ;; esac
+
+# r9 class-check: `codex login status` distinguishes plan from per-use — "Logged in using
+# ChatGPT" is subscription, "Logged in using an API key" bills per token -> metered,
+# anything else -> unknown. (No auth.json present, so the CLI probe is what decides.)
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ] && return 0; command -v "$1" >/dev/null 2>&1; }; codex() { echo "Logged in using ChatGPT"; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in subscription$'\n'subscription) ok "r9 billing: cx + ci login status ChatGPT -> subscription" ;; *) bad "r9 billing: cx/ci chatgpt-status -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ] && return 0; command -v "$1" >/dev/null 2>&1; }; codex() { echo "Logged in using an API key - sk-***1234"; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in metered$'\n'metered) ok "r9 billing: cx + ci login status API key -> metered" ;; *) bad "r9 billing: cx/ci apikey-status -> '$b'" ;; esac
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ] && return 0; command -v "$1" >/dev/null 2>&1; }; codex() { echo "Not logged in"; }; osrc_lane_billing cx' )
+[ "$b" = "unknown" ] && ok "r9 billing: cx login status not-logged-in -> unknown" || bad "r9 billing: cx not-logged-in -> '$b'"
+
+# r9 class-check: auth.json must prove a billing class POSITIVELY — {} / garbage /
+# tokenless shapes are evidence of NEITHER (same class as the claude {} fix) -> unknown,
+# never guessed subscription. have() claims jq only, so the real jq classification runs
+# while codex is absent (no CLI fallback can rescue these rows).
+mkdir -p "$HB/.codex"; printf '{}' > "$HB/.codex/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = jq ] && return 0; return 1; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in unknown$'\n'unknown) ok "r9 billing: cx/ci empty auth.json -> unknown" ;; *) bad "r9 billing: cx/ci {} auth.json -> '$b'" ;; esac
+printf 'not json{{{' > "$HB/.codex/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = jq ] && return 0; return 1; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in unknown$'\n'unknown) ok "r9 billing: cx/ci garbage auth.json -> unknown" ;; *) bad "r9 billing: cx/ci garbage auth.json -> '$b'" ;; esac
+printf '{"tokens":{}}' > "$HB/.codex/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = jq ] && return 0; return 1; }; osrc_lane_billing cx; osrc_lane_billing ci' )
+case "$b" in unknown$'\n'unknown) ok "r9 billing: cx/ci tokenless auth.json -> unknown" ;; *) bad "r9 billing: cx/ci tokenless auth.json -> '$b'" ;; esac
+rm -rf "$HB/.codex"
+
+# r9 class-check: dir-auth subscription proof must not pass a BYOK login — api-key
+# material inside the lane's auth dir -> metered; a plain auth file still -> subscription.
+mkdir -p "$HB/.cursor"; printf '{"auth":"session-token"}' > "$HB/.cursor/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { case "$1" in cursor-agent|agent) return 0 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }; osrc_lane_billing cursor' )
+[ "$b" = "subscription" ] && ok "r9 billing: cursor auth dir, no key material -> subscription" || bad "r9 billing: cursor plain-auth -> '$b'"
+printf '{"apiKey":"cursor-key-abcdef123456"}' > "$HB/.cursor/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { case "$1" in cursor-agent|agent) return 0 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }; osrc_lane_billing cursor' )
+[ "$b" = "metered" ] && ok "r9 billing: cursor auth dir apiKey -> metered" || bad "r9 billing: cursor dir-key -> '$b'"
+rm -rf "$HB/.cursor"
+
+mkdir -p "$HB/.factory"; printf '{"auth":"session"}' > "$HB/.factory/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing droid' )
+[ "$b" = "subscription" ] && ok "r9 billing: droid auth dir, no key material -> subscription" || bad "r9 billing: droid plain-auth -> '$b'"
+printf '{"api_key":"factory-key-abcdef123456"}' > "$HB/.factory/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing droid' )
+[ "$b" = "metered" ] && ok "r9 billing: droid auth dir api_key -> metered" || bad "r9 billing: droid dir-key -> '$b'"
+rm -rf "$HB/.factory"
+
+mkdir -p "$HB/.warp"; printf '{"auth":"session"}' > "$HB/.warp/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = oz ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing warp' )
+[ "$b" = "subscription" ] && ok "r9 billing: warp auth dir, no key material -> subscription" || bad "r9 billing: warp plain-auth -> '$b'"
+printf '{"api-key":"warp-key-abcdef123456"}' > "$HB/.warp/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = oz ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing warp' )
+[ "$b" = "metered" ] && ok "r9 billing: warp auth dir api-key -> metered" || bad "r9 billing: warp dir-key -> '$b'"
+rm -rf "$HB/.warp"
+
+# r9 class-check FUNCTIONAL: the spend gate itself, non-interactive with no consent.
+# Every lane whose billing rule changed must REFUSE on unproven/metered and PROCEED
+# only on positive plan/free proof — same call shape route_delegate uses.
+# claudex: upstream billing is not externally provable -> unknown -> refuse.
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate claudex gpt-5.6-sol claudex "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills unknown"*) ok "r9 spend: claudex unknown -> non-interactive refuse" ;;
+  *) bad "r9 spend: claudex gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+# cx/ci auth.json: unproven shapes -> unknown -> refuse; api-key field -> metered -> refuse;
+# OAuth access_token -> subscription -> proceed. Real jq on PATH classifies; the codex
+# stub exits 99 so no CLI probe can rescue the unproven rows.
+mkdir -p "$HB/.codex"; printf '{}' > "$HB/.codex/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate cx "" cxnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills unknown"*) ok "r9 spend: cx empty auth.json -> refuse" ;;
+  *) bad "r9 spend: cx {} gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate ci "" cxnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills unknown"*) ok "r9 spend: ci empty auth.json -> refuse" ;;
+  *) bad "r9 spend: ci {} gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"OPENAI_API_KEY":"sk-x"}' > "$HB/.codex/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate cx "" cxnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: cx api-key auth.json -> refuse" ;;
+  *) bad "r9 spend: cx apikey gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"tokens":{"access_token":"x"}}' > "$HB/.codex/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate cx "" cxnative "r9 probe" 2>&1 </dev/null; _osrc_spend_gate ci "" cxnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r9 spend: cx + ci ChatGPT auth.json -> proceed" || bad "r9 spend: cx/ci plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
+rm -rf "$HB/.codex"
+# gm: api-key material in the login dir or a Gemini/Google key env -> metered -> refuse;
+# plain dir + agy -> subscription -> proceed.
+mkdir -p "$HB/.antigravity"; printf '{"apiKey":"gemini-key-abcdef123456"}' > "$HB/.antigravity/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate gm "" gmnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: gm dir apiKey -> refuse" ;;
+  *) bad "r9 spend: gm dir-key gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"auth":"session"}' > "$HB/.antigravity/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" GEMINI_API_KEY=x bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate gm "" gmnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: gm GEMINI_API_KEY -> refuse" ;;
+  *) bad "r9 spend: gm env-key gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }
+  _osrc_spend_gate gm "" gmnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r9 spend: gm plain auth dir -> proceed" || bad "r9 spend: gm plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
+rm -rf "$HB/.antigravity"
+# cursor/droid/warp: api-key material -> metered -> refuse; plain auth dir + CLI -> proceed.
+mkdir -p "$HB/.cursor"; printf '{"apiKey":"cursor-key-abcdef123456"}' > "$HB/.cursor/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate cursor "" cursor "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: cursor dir apiKey -> refuse" ;;
+  *) bad "r9 spend: cursor dir-key gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"auth":"session-token"}' > "$HB/.cursor/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  have() { case "$1" in cursor-agent|agent) return 0 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  _osrc_spend_gate cursor "" cursor "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r9 spend: cursor plain auth dir -> proceed" || bad "r9 spend: cursor plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
+rm -rf "$HB/.cursor"
+mkdir -p "$HB/.factory"; printf '{"api_key":"factory-key-abcdef123456"}' > "$HB/.factory/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate droid "" droid "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: droid dir api_key -> refuse" ;;
+  *) bad "r9 spend: droid dir-key gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"auth":"session"}' > "$HB/.factory/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  have() { [ "$1" = droid ] && return 0; command -v "$1" >/dev/null 2>&1; }
+  _osrc_spend_gate droid "" droid "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r9 spend: droid plain auth dir -> proceed" || bad "r9 spend: droid plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
+rm -rf "$HB/.factory"
+mkdir -p "$HB/.warp"; printf '{"api-key":"warp-key-abcdef123456"}' > "$HB/.warp/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  _osrc_spend_gate warp "" warp "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"bills metered"*) ok "r9 spend: warp dir api-key -> refuse" ;;
+  *) bad "r9 spend: warp dir-key gate (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+printf '{"auth":"session"}' > "$HB/.warp/auth.json"
+out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
+  have() { [ "$1" = oz ] && return 0; command -v "$1" >/dev/null 2>&1; }
+  _osrc_spend_gate warp "" warp "r9 probe" 2>&1 </dev/null' )"; rc=$?
+[ $rc -eq 0 ] && ok "r9 spend: warp plain auth dir -> proceed" || bad "r9 spend: warp plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
+rm -rf "$HB/.warp"
 
 # unknown is treated as METERED by the gate: non-interactive refusal + EVENT approval + NEXT.
 out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
@@ -727,6 +919,15 @@ case "$*" in *"auth status"*) [ -f "$HOME/.devin/auth.json" ] && echo "logged in
 exit 0
 EOF
 chmod +x "$SUM/bin/devin"
+cat > "$SUM/bin/claude" <<'EOF'
+#!/bin/sh
+# `auth status` answers a claude.ai plan login (fake values) ONLY when this home's
+# credentials file exists — installed-but-logged-out must not detect. Billing proof
+# for the feed's paid flag comes from this same JSON.
+case "$*" in *"auth status"*) [ -f "$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}';; esac
+exit 0
+EOF
+chmod +x "$SUM/bin/claude"
 # Auth fixtures in $SUM/home: claude creds, codex auth.json, antigravity dir, factory auth file,
 # devin auth file. $SUM/home-empty gets NONE of them.
 mkdir -p "$SUM/home/.claude" "$SUM/home/.codex" "$SUM/home/.antigravity" "$SUM/home/.factory" "$SUM/home/.devin"
@@ -842,6 +1043,16 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = codex ]
 [ "$b" = "unknown" ] && ok "r3.1 billing: codex CLI, no auth.json/login proof -> unknown" || bad "r3.1 billing: cx cli-only -> '$b'"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
 [ "$b" = "unknown" ] && ok "r3.1 billing: agy CLI without ~/.antigravity -> unknown" || bad "r3.1 billing: gm cli-only -> '$b'"
+# r9 class-check: ~/.antigravity dir + per-use key evidence -> metered; dir alone -> subscription.
+mkdir -p "$HB/.antigravity"; printf '{"auth":"session"}' > "$HB/.antigravity/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "subscription" ] && ok "r9 billing: agy auth dir, no key material -> subscription" || bad "r9 billing: agy plain-auth -> '$b'"
+printf '{"apiKey":"gemini-key-abcdef123456"}' > "$HB/.antigravity/auth.json"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
+[ "$b" = "metered" ] && ok "r9 billing: agy auth dir apiKey -> metered" || bad "r9 billing: agy dir-key -> '$b'"
+rm -rf "$HB/.antigravity"
+b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; GEMINI_API_KEY=x osrc_lane_billing gm; GOOGLE_API_KEY=y osrc_lane_billing gm' )
+case "$b" in metered$'\n'metered) ok "r9 billing: agy + GEMINI/GOOGLE_API_KEY -> metered" ;; *) bad "r9 billing: agy env keys -> '$b'" ;; esac
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; osrc_lane_billing or m cloud; osrc_lane_billing cc m cloud' )
 case "$b" in metered$'\n'metered) ok "r3.1 billing: cloud vehicle -> metered on any lane" ;; *) bad "r3.1 billing: cloud disp -> '$b'" ;; esac
 out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_spend_gate "" "" "" "empty-lane probe" 2>&1 </dev/null' )"; rc=$?

@@ -215,10 +215,12 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   _osrc_spend_gate cc "" claude "ordinary launch" 2>&1 </dev/null' )"; rc=$?
 [ $rc -ne 0 ] && ok "r5 cloud: unknown billing refuses on ordinary why too" \
   || bad "r5 cloud: ordinary-why unknown passed (rc=$rc): $out"
-# Proven subscription passes even with a cloud-session why (claude auth status stub).
+# Proven subscription passes even with a cloud-session why. The stub's `auth status`
+# must carry the full plan proof (r9): loggedIn + authMethod=claude.ai +
+# apiProvider=firstParty + subscriptionType in pro|max|team|enterprise.
 mkdir -p "$FAKEBIN"; cat > "$FAKEBIN/claude" <<'EOF'
 #!/usr/bin/env bash
-case "${1:-}" in auth) echo '{"loggedIn": true}'; exit 0 ;; esac
+case "$*" in *"auth status"*) printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max"}'; exit 0 ;; esac
 exit 0
 EOF
 chmod +x "$FAKEBIN/claude"
@@ -334,6 +336,19 @@ case "$out" in *"child-sees:UNSET/UNSET"*) ok "r7 nojob: child sees both job var
 [ "$OSRC_JOB_DIR" = "$OSRC_HOME/jobs/j1" ] && [ "$OSRC_JOB_TOKEN" = "tokX" ] \
   && ok "r7 nojob: both vars restored" || bad "r7 nojob: vars not restored ($OSRC_JOB_DIR/$OSRC_JOB_TOKEN)"
 unset OSRC_JOB_DIR OSRC_JOB_TOKEN _r7mock
+
+# r9: _osrc_envrun restores EXACT state — value AND export attribute — for both -u
+# and NAME=VALUE forms. A set-but-unexported var must not come back exported; a var
+# unset before the call must stay unset; the child sees the scrubbed env.
+_r9exp="exp-val"; export _r9exp
+_r9plain="plain-val"   # set but NOT exported — the r7 bug re-exported vars like this
+_osrc_envrun -u _r9exp -u _r9plain _r9tmp=injected sh -c '[ "${_r9exp:-GONE}" = GONE ] && [ "${_r9plain:-GONE}" = GONE ] && [ "${_r9tmp:-}" = injected ]' \
+  && [ "$_r9exp" = "exp-val" ] && export -p | grep -q 'declare -x _r9exp=' \
+  && [ "$_r9plain" = "plain-val" ] && ! export -p | grep -q 'declare -x _r9plain=' \
+  && [ "${_r9tmp+set}" != "set" ] \
+  && ok "r9 envrun: scrub reaches child; exported/set/unset states all restored exactly" \
+  || bad "r9 envrun: restore wrong (exp=${_r9exp:-unset} plain=${_r9plain:-unset} tmp=${_r9tmp:-unset})"
+unset _r9exp _r9plain _r9tmp
 
 echo
 echo "RESULT: $pass passed, $fail failed"

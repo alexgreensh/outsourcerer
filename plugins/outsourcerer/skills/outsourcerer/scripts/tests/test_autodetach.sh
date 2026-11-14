@@ -193,6 +193,9 @@ mkdir -p -m 700 "$REENTRY_HOME"
 # not the bg path. This test exercises the bg re-entry path (fork-bomb guard, exit contract,
 # status/result/watch), so it needs the headless bg opt-out. The interactive tmux path has its
 # own dedicated suite (test_require_interactive.sh).
+# --spend-ok: glm-5.2 on dv is metered (unproven -> asks), and this suite pins the
+# autodetach/re-entry mechanics, not the spend gate — consent keeps billing out of the path.
+# _autodetach_run re-injects it into the detached child's argv, so the whole chain is covered.
 REENTRY_OUTPUT="$(HOME="$FAKE_HOME" \
   OSRC_HOME="$REENTRY_HOME" \
   OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 \
@@ -201,7 +204,7 @@ REENTRY_OUTPUT="$(HOME="$FAKE_HOME" \
   OSRC_POLL=1 \
   OSRC_CATALOG_VALIDATE=0 \
   OUTSOURCERER_DEPTH=0 \
-  bash "$ENGINE" run -m glm-5.2 "test task" 2>"$TMPDIR_AD/reentry-stderr" </dev/null)"
+  bash "$ENGINE" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_AD/reentry-stderr" </dev/null)"
 REENTRY_RC=$?
 REENTRY_STDERR="$(cat "$TMPDIR_AD/reentry-stderr" 2>/dev/null)"
 
@@ -233,9 +236,14 @@ fi
 
 # (2c) The child ran FOREGROUND (no re-detach): the job's out.log should contain the fake devin
 # output (FAKE DEVIN RESULT), proving the child reached delegate() -> devin, not another detach.
-# Wait for the job to finish (fake devin exits immediately, but _supervise polls every 1s).
-sleep 5
+# Poll for the marker (cap ~30s) instead of a fixed sleep: the child now runs the billing probe,
+# spend gate, autoisolate and cloud disclose before dispatch, so a flat sleep races a slow start.
 JOB_OUTLOG="$REENTRY_JOBS/$REENTRY_JOB_ID/out.log"
+_ad_wait=0
+while [ -n "$REENTRY_JOB_ID" ] && [ "$_ad_wait" -lt 120 ]; do
+  [ -f "$JOB_OUTLOG" ] && grep -q "FAKE DEVIN RESULT" "$JOB_OUTLOG" 2>/dev/null && break
+  sleep 0.25; _ad_wait=$((_ad_wait + 1))
+done
 if [ -f "$JOB_OUTLOG" ] && grep -q "FAKE DEVIN RESULT" "$JOB_OUTLOG" 2>/dev/null; then
   ok "re-entry: child ran foreground (out.log has fake devin output, no re-detach)"
 else
@@ -270,8 +278,16 @@ fi
 echo ""
 echo "=== PART 4: Real status/result/watch + nonzero exit ==="
 
-# Wait for _supervise to finish (polls every 1s with OSRC_POLL=1, fake devin exits immediately).
-sleep 8
+# Wait for _supervise to finish (polls every 1s with OSRC_POLL=1, fake devin exits immediately
+# once reached — but the child runs billing/gates first, so poll the STATUS file for a terminal
+# state: it says "running" from job start, only failed/done mark completion. Cap ~30s.
+_ad_wait=0
+while [ -n "$REENTRY_JOB_ID" ] && [ "$_ad_wait" -lt 120 ]; do
+  { [ -f "$REENTRY_JOBS/$REENTRY_JOB_ID/status" ] \
+    && ! grep -q 'running' "$REENTRY_JOBS/$REENTRY_JOB_ID/status" 2>/dev/null \
+    && [ -f "$REENTRY_JOBS/$REENTRY_JOB_ID/exit" ]; } && break
+  sleep 0.25; _ad_wait=$((_ad_wait + 1))
+done
 
 # (4a) status command reports the job AND its terminal 'failed' state (not just the job ID).
 # Sol: the old assert only checked the output contains the job ID — `grep -q ""` on an empty ID
@@ -360,6 +376,10 @@ echo "=== PART 1: Real negative control (sabotaged engine, no auto-detach) ==="
 SABOTAGED="$TMPDIR_AD/sabotaged-engine.sh"
 sed '/if _autodetach_should/,/^  fi$/d' "$ENGINE" > "$SABOTAGED" 2>/dev/null
 chmod +x "$SABOTAGED"
+# The engine sources $SCRIPT_DIR/lib/*.sh at startup; a copy outside scripts/ finds no
+# libs and dies on the first lib function (_osrc_limit_gate et al). Symlink lib/ beside
+# the copy so the sabotaged engine resolves the same functions the real one does.
+ln -sfn "$DIR/lib" "$TMPDIR_AD/lib"
 
 # Verify the sabotage worked: the `if _autodetach_should` call is GONE from route_delegate.
 SAB_RD_START=$(grep -n '^route_delegate()' "$SABOTAGED" | head -1 | cut -d: -f1)
@@ -385,7 +405,7 @@ else
     OSRC_REQUIRE_INTERACTIVE=0 \
     OUTSOURCERER_DEPTH=0 \
     OSRC_FG_GUARD=0 \
-    bash "$SABOTAGED" run -m glm-5.2 "test task" 2>"$TMPDIR_AD/sab-stderr" </dev/null)"
+    bash "$SABOTAGED" run --spend-ok -m glm-5.2 "test task" 2>"$TMPDIR_AD/sab-stderr" </dev/null)"
   SAB_RC=$?
 
   # Count jobs in the sabotaged run's OSRC_HOME. Should be ZERO (no auto-detach -> no bg job).

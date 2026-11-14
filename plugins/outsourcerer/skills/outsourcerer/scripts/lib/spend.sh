@@ -40,6 +40,22 @@ _osrc_billing_key() {
   [ -n "$(_extract_kv_value "$k" 2>/dev/null)" ]
 }
 
+# _osrc_dir_key_material <dir> -> rc0 when an auth-ish FILE in <dir> carries explicit
+# API-key material ("apiKey"/"api_key"/"api-key"/"apikey" JSON fields). A plan session
+# token is not API-key material; this only flags per-use credentials so a BYOK login
+# stored in the lane's config dir cannot pass as a subscription off dir existence alone
+# (same class as the claude credentials fix). Narrow on purpose: generic "key"/"token"
+# fields appear in plan session payloads too and would false-positive metered.
+_osrc_dir_key_material() {
+  local d="${1:-}"
+  [ -d "$d" ] || return 1
+  find "$d" -maxdepth 1 -type f \
+    \( -iname '*auth*' -o -iname '*cred*' -o -iname '*token*' -o -iname '*session*' \
+       -o -iname '*login*' -o -iname '*oauth*' -o -iname '*account*' -o -iname '*keychain*' \) \
+    -exec grep -lsEI '"(apiKey|api_key|api-key|apikey)"[[:space:]]*:[[:space:]]*"[^"]{8,}"' {} + \
+    2>/dev/null | grep -q .
+}
+
 # _osrc_devin_free_for_spend <model> -> rc0 ONLY when the model is proven Free for SPEND
 # purposes. Live catalog first: when `devin models list` is reachable, ONLY its cost_tier="Free"
 # tag counts (exact model_uid / all-Free family_uid match — never a canon guess, so a paid
@@ -146,8 +162,12 @@ _osrc_claude_settings_metered() {
 }
 
 # osrc_lane_billing <lane|disp|provider|alias> [model] [disp] -> subscription|free|metered|unknown
-# Evidence-based: `subscription` requires PROOF of a plan login (same credential evidence the
-# limits feed's _osrc_harness_auth reads) AND the absence of every per-use redirect. API keys,
+# Evidence-based: `subscription` requires PROOF of a plan login AND the absence of every
+# per-use redirect. For cc the only proof is `claude auth status` JSON carrying
+# loggedIn+authMethod=claude.ai+apiProvider=firstParty+subscriptionType in
+# pro|max|team|enterprise (_osrc_claude_plan_login) — a credentials file or keychain
+# entry proves a login was written, not what it bills, so neither yields subscription.
+# API keys,
 # auth tokens, base-URL redirects, cloud vehicles (BEDROCK/VERTEX/OPENAI_BASE_URL/claude
 # settings helpers), and BYOK paths are `metered` even when a plan login also exists. A CLI on
 # PATH with no provable login is `unknown` — never assumed subscription. unknown is treated as
@@ -167,7 +187,7 @@ osrc_lane_billing() {
   case "$lane" in
     local) printf 'free\n'; return ;;
     or|tokenrouter|gi) printf 'metered\n'; return ;;          # API-key cash lanes by definition
-    ci|claudex) printf 'subscription\n'; return ;;           # ChatGPT-plan-backed proxy lanes
+    claudex) printf 'unknown\n'; return ;;                     # CLIProxyAPI upstream billing is not externally provable -> asks
     cc)
       # Native Claude Code: per-use evidence FIRST — an API key, an auth token, a base-URL
       # redirect, BEDROCK/VERTEX, or a settings.json key helper all bill cash even when a
@@ -177,30 +197,51 @@ osrc_lane_billing() {
          || [ -n "${ANTHROPIC_BASE_URL:-}" ] || [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ] \
          || [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ] || _osrc_claude_settings_metered; then
         printf 'metered\n'
-      elif have claude && _osrc_harness_auth claude; then printf 'subscription\n'
+      elif _osrc_claude_plan_login; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
-    cx)
+    cx|ci)   # ci rides the same codex-native auth as cx
       # Native Codex: OPENAI_API_KEY/CODEX_API_KEY (env) or an api-key auth.json bills cash;
       # OPENAI_BASE_URL redirects billing. A ChatGPT OAuth auth.json (tokens, no api key) or a
-      # `codex login status` "logged in" is the plan proof. No jq means auth.json cannot be
-      # classified -> unknown, never guessed subscription.
+      # `codex login status` "logged in using ChatGPT" is the plan proof; "using an API key"
+      # is per-use. No jq means auth.json cannot be classified -> unknown, never guessed
+      # subscription.
       if _osrc_billing_key OPENAI_API_KEY || _osrc_billing_key CODEX_API_KEY \
          || [ -n "${OPENAI_BASE_URL:-}" ]; then printf 'metered\n'; return; fi
-      if [ -f "$HOME/.codex/auth.json" ]; then
-        if have jq; then
-          if jq -e '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" >/dev/null 2>&1; then
-            printf 'metered\n'
-          else printf 'subscription\n'; fi
-        else printf 'unknown\n'; fi
-        return
+      # auth.json proves a billing class only on POSITIVE evidence: an OPENAI_API_KEY
+      # field is per-use, an OAuth access_token is the ChatGPT plan. An empty, corrupt or
+      # unrecognised file is evidence of NEITHER — same class as the claude {} credentials
+      # fix — so it falls through to the CLI probe instead of guessing subscription.
+      if [ -f "$HOME/.codex/auth.json" ] && have jq; then
+        if jq -e '.OPENAI_API_KEY // empty' "$HOME/.codex/auth.json" >/dev/null 2>&1; then
+          printf 'metered\n'; return
+        fi
+        if jq -e '.tokens.access_token | select(type == "string" and length > 0)' \
+             "$HOME/.codex/auth.json" >/dev/null 2>&1; then
+          printf 'subscription\n'; return
+        fi
       fi
-      if have codex && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>/dev/null \
-         | grep -qi "logged in"; then printf 'subscription\n'; return; fi
+      if have codex; then
+        local _cs
+        # codex may print the status on stderr; capture both. The message distinguishes
+        # the plan from per-use: "Logged in using ChatGPT" is the subscription, while
+        # "Logged in using an API key" bills per token and must NOT pass as subscription
+        # (same class as the claude credentials fix — existence of a login is not proof
+        # of what it bills).
+        _cs="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>&1)"
+        if printf '%s' "$_cs" | grep -qi "logged in using chatgpt"; then
+          printf 'subscription\n'; return
+        fi
+        if printf '%s' "$_cs" | grep -qi "api key"; then printf 'metered\n'; return; fi
+      fi
       printf 'unknown\n'; return ;;
     gm)
-      # agy is keyless Google app-login: subscription ONLY with the login dir present.
-      # agy on PATH without ~/.antigravity proves nothing -> unknown.
-      if have agy && [ -d "$HOME/.antigravity" ]; then printf 'subscription\n'
+      # agy is Google app-login: subscription ONLY with the login dir present and no
+      # per-use key evidence. A Gemini/Google API key — exported or stored as api-key
+      # material inside ~/.antigravity — bills per token -> metered; dir alone without
+      # key material -> subscription; agy on PATH without the dir proves nothing.
+      if _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY \
+         || _osrc_dir_key_material "$HOME/.antigravity"; then printf 'metered\n'
+      elif have agy && [ -d "$HOME/.antigravity" ]; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     dv)
       # Devin: live-catalog Free (or the two-id offline fallback) rides the plan; every other
@@ -216,18 +257,24 @@ osrc_lane_billing() {
       return ;;
     cursor)
       # Cursor plan login is only provable via credential evidence; a bare cursor-agent on
-      # PATH (e.g. installed but never logged in) is unknown. API key -> metered.
-      if _osrc_billing_key CURSOR_API_KEY; then printf 'metered\n'
+      # PATH (e.g. installed but never logged in) is unknown. API key -> metered, whether
+      # exported or stored as api-key material inside ~/.cursor's auth files.
+      if _osrc_billing_key CURSOR_API_KEY || _osrc_dir_key_material "$HOME/.cursor"; then printf 'metered\n'
       elif { have cursor-agent || have agent; } && _osrc_dir_auth "$HOME/.cursor"; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
     grokbot) printf 'unknown\n'; return ;;                  # keyed webhook: billing not externally provable
     droid|warp)
       # Factory/Warp plans are subscriptions proven by their auth dirs; BYOK keys bill cash.
-      # A configured provider key means metered; CLI+auth-dir means subscription; CLI alone
-      # or nothing provable means unknown.
+      # A configured provider key — exported OR stored as api-key material inside the lane's
+      # own auth dir — means metered; CLI+auth-dir without key material means subscription;
+      # CLI alone or nothing provable means unknown.
+      local _osrc_kd=""
+      [ "$lane" = droid ] && _osrc_kd="$HOME/.factory"
+      [ "$lane" = warp ] && _osrc_kd="$HOME/.warp"
       if _osrc_billing_key ANTHROPIC_API_KEY || _osrc_billing_key OPENAI_API_KEY \
          || _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY \
-         || _osrc_billing_key OPENROUTER_API_KEY; then printf 'metered\n'
+         || _osrc_billing_key OPENROUTER_API_KEY \
+         || { [ -n "$_osrc_kd" ] && _osrc_dir_key_material "$_osrc_kd"; }; then printf 'metered\n'
       elif [ "$lane" = droid ] && have droid && _osrc_dir_auth "$HOME/.factory"; then printf 'subscription\n'
       elif [ "$lane" = warp ] && have oz && _osrc_dir_auth "$HOME/.warp"; then printf 'subscription\n'
       else printf 'unknown\n'; fi; return ;;
@@ -511,22 +558,71 @@ _osrc_route_launched_model() {
   printf '%s' "${rid:-${RESOLVED_ID:-${ROUTE_MODEL:-}}}"
 }
 
+# _osrc_envrun [-u NAME]... [NAME=VALUE]... CMD [ARGS...] -> run CMD with the listed
+# vars unset (-u) or overridden (NAME=VALUE, exported like env(1) assignments), then
+# restore EVERY touched var to its exact prior state — value AND export attribute —
+# and return CMD's rc. env(1) cannot do this job: it execs the real binary, so
+# shell-function mocks of delegate CLIs never run. Running CMD in-shell keeps function
+# resolution AND keeps the vars out of the child's environment. Each var's declaration
+# is snapshotted with declare -p and replayed through eval, which is bash-3.2-safe
+# (no nameref/${var@a}); a var set-but-unexported before stays unexported after.
+# NOTE: while CMD runs the vars are changed in THIS shell too (dynamic scope) — no
+# EXIT/TERM/signal trap handler may read them; restore happens only after CMD returns.
+_osrc_envrun() {
+  local _er_unset=() _er_set=() _er_names=() _er_sv=() _er_a _er_d _er_i=0 _er_rc=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -u)  shift; [ $# -gt 0 ] && _er_unset+=("$1"); shift ;;
+      --)  shift; break ;;
+      *=*) _er_set+=("$1"); shift ;;
+      *)   break ;;
+    esac
+  done
+  [ $# -gt 0 ] || return 127
+  for _er_a in ${_er_unset[@]+"${_er_unset[@]}"}; do _er_names+=("$_er_a"); done
+  for _er_a in ${_er_set[@]+"${_er_set[@]}"}; do _er_names+=("${_er_a%%=*}"); done
+  for _er_a in ${_er_names[@]+"${_er_names[@]}"}; do
+    if _er_d="$(declare -p "$_er_a" 2>/dev/null)"; then _er_sv+=("$_er_d"); else _er_sv+=("unset"); fi
+  done
+  for _er_a in ${_er_unset[@]+"${_er_unset[@]}"}; do unset "$_er_a" 2>/dev/null || true; done
+  for _er_a in ${_er_set[@]+"${_er_set[@]}"}; do export "$_er_a"; done
+  "$@"; _er_rc=$?
+  for _er_a in ${_er_names[@]+"${_er_names[@]}"}; do
+    _er_d="${_er_sv[$_er_i]}"; _er_i=$((_er_i+1))
+    case "$_er_d" in
+      unset) unset "$_er_a" 2>/dev/null || true ;;
+      "declare -x "*)
+        case "$_er_d" in
+          *"="*) eval "export ${_er_d#declare -x }" ;;
+          *)     eval "unset $_a 2>/dev/null; export $_a" ;;
+        esac ;;
+      "declare -- "*) eval "${_er_d#declare -- }"; export -n "$_er_a" 2>/dev/null || true ;;
+      "declare "*)    eval "$_er_d"; export -n "$_er_a" 2>/dev/null || true ;;
+      *)              eval "$_er_d" ;;
+    esac
+  done
+  return "$_er_rc"
+}
+
 # _osrc_nojob <cmd...> -> run the command with OSRC_JOB_DIR and OSRC_JOB_TOKEN UNSET,
-# then restore exactly the ones that were set, returning the command's rc. Delegates
-# must never inherit the job env (a nested outsourcerer call would see THIS job's
-# .spend-ok marker and cap-dedupe state as its own consent context). `env -u` cannot
-# do this job: it execs the real binary, so shell-function mocks of the delegate CLI
-# never run. unset in the current shell keeps function resolution AND keeps both
-# vars out of the child's environment. Do NOT hide them with `local`+unset — on
-# bash 3.2 the local does not mask the exported value for children.
-_osrc_nojob() {
-  local _nj_d="${OSRC_JOB_DIR+set}" _nj_dv="${OSRC_JOB_DIR:-}" \
-        _nj_t="${OSRC_JOB_TOKEN+set}" _nj_tv="${OSRC_JOB_TOKEN:-}" _nj_rc
-  unset OSRC_JOB_DIR OSRC_JOB_TOKEN
-  "$@"; _nj_rc=$?
-  [ "$_nj_d" = "set" ] && export OSRC_JOB_DIR="$_nj_dv"
-  [ "$_nj_t" = "set" ] && export OSRC_JOB_TOKEN="$_nj_tv"
-  return "$_nj_rc"
+# then restore them exactly, returning the command's rc. Delegates must never inherit
+# the job env (a nested outsourcerer call would see THIS job's .spend-ok marker and
+# cap-dedupe state as its own consent context). See _osrc_envrun for the mechanism
+# and the trap caveat (vars are unset in this shell while the command runs).
+_osrc_nojob() { _osrc_envrun -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; }
+
+# _osrc_claude_plan_login -> rc0 ONLY when `claude auth status` proves a claude.ai PLAN
+# login. The JSON must parse and carry loggedIn==true, authMethod=="claude.ai",
+# apiProvider=="firstParty", and subscriptionType in the explicit plan list
+# (pro|max|team|enterprise). Console/API-key/other logins, missing fields, non-JSON
+# output, non-zero exit, timeout, or no jq are all NOT proof (rc1 -> billing unknown,
+# the spend gate asks). jq emits only the verdict word or nothing — email, org, ids
+# and tokens are never printed, cached or logged. A credentials file or keychain entry
+# existing proves a login was once written, not what it bills, so neither is consulted.
+_osrc_claude_plan_login() {
+  have claude && have jq || return 1
+  [ "$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 2>/dev/null \
+      | jq -r 'if (.loggedIn == true) and (.authMethod == "claude.ai") and (.apiProvider == "firstParty") and (.subscriptionType == "pro" or .subscriptionType == "max" or .subscriptionType == "team" or .subscriptionType == "enterprise") then "plan" else "" end' 2>/dev/null)" = "plan" ]
 }
 
 # =============================================================================

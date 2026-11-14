@@ -21,6 +21,19 @@ FB="$TMP/fake-bin"; mkdir -p "$FB"; CALLS="$TMP/calls.log"
 for c in claude codex devin agy gemini droid cursor-agent oz cline hermes; do
   printf '#!/bin/sh\necho "%s $*" >> "%s"\necho PONG\nexit 0\n' "$c" "$CALLS" > "$FB/$c"; chmod +x "$FB/$c"
 done
+# claude's `auth status` answers a plan login (fake values) ONLY when this HOME has a
+# credentials file — r9 billing proof needs the full four-field JSON, and the scoped
+# fallback tests rely on file-present => subscription, file-absent => unknown.
+cat > "$FB/claude" <<EOF
+#!/bin/sh
+echo "claude \$*" >> "$CALLS"
+case "\$*" in
+  *"auth status"*) [ -f "\$HOME/.claude/.credentials.json" ] && printf '%s\n' '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","subscriptionType":"max","storedClaudeAiLogin":true}' ;;
+esac
+echo PONG
+exit 0
+EOF
+chmod +x "$FB/claude"
 export PATH="$FB:$PATH"
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 export OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_NO_ADVISE=1 OSRC_BRIEF_NO_HEAL=1 OSRC_DOCTOR_OFFLINE=1
@@ -131,7 +144,7 @@ grep -q "you excluded" <<<"$o" && bad "opus was wrongly refused: $o" || ok "an a
 # probes `devin models list` (metadata, logged by the fake) — "never run" means no
 # prompt-bearing dispatch (` -p `), not a literally empty call log.
 : > "$CALLS"; o="$(OSRC_EXCLUDE_MODELS=swe-2-high run --provider devin run "hi" 2>&1)"; rc=$?
-[ "$rc" != 0 ] && grep -q 'default model for --provider devin' <<<"$o" && grep -q 'swe-2-high' <<<"$o" && ! grep -q -- ' -p ' "$CALLS" \
+[ "$rc" != 0 ] && grep -q 'default model for --provider devin' <<<"$o" && grep -q 'swe-2-high' <<<"$o" && ! grep -vqE '^devin (models list|auth status)' "$CALLS" \
   && ok "a provider's built-in default that is excluded is refused with the fix, never run" || bad "provider default: $o"
 
 # ---------------------------------------------------------------- automatic choices skip excluded
@@ -140,9 +153,9 @@ r="$(OR_OFFLOAD_CHAIN='z-ai/glm-5.2,anthropic/claude-5-fable,deepseek/deepseek-v
 o="$(OR_OFFLOAD_CHAIN='anthropic/claude-5-fable' lib 'MODEL_EXPLICIT=0; _or_chain auto; echo survived' 2>&1)"
 grep -q 'every model in the OpenRouter chain' <<<"$o" && ! grep -q survived <<<"$o" \
   && ok "an all-excluded OpenRouter chain stops with a clear message" || bad "all-excluded chain: $o"
-# cc needs PROVABLE subscription billing to be spendable: give it a Claude credentials
-# file in a scoped HOME so the real billing path classifies it subscription (the PONG
-# fake cannot answer `claude auth status`).
+# cc needs PROVABLE subscription billing to be spendable: r9 proof is `claude auth
+# status` JSON, so the scoped HOME gets a credentials file and the fake claude answers
+# auth status with a plan login only when that file exists.
 mkdir -p "$TMP/fbhome/.claude"; printf '{}\n' > "$TMP/fbhome/.claude/.credentials.json"
 r="$(HOME="$TMP/fbhome" lib '_fallback_lane_ready() { return 0; }; _fallback_pick "" "fable|fable|cc
 opus|opus|cc"' 2>/dev/null)"
@@ -431,7 +444,7 @@ second_opinion "is the sky blue"'
   # dv's default is the runtime Free pick (swe-2-high offline), not static glm-5.2 —
   # exclude the id that will actually resolve so the same up-front gate is exercised.
   o="$(OSRC_EXCLUDE_MODELS=swe-2-high bash "$SRC" fanout -- "a" "b" 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && grep -q 'nothing was started.*--provider devin default swe-2-high' <<<"$o" && ! grep -q -- ' -p ' "$CALLS" \
+  [ "$rc" != 0 ] && grep -q 'nothing was started.*--provider devin default swe-2-high' <<<"$o" && ! grep -vqE '^devin (models list|auth status)' "$CALLS" \
     && [ -z "$(ls "$OSRC_HOME/jobs" 2>/dev/null)" ] || { echo "  rc=$rc $o"; exit 1; }
 ) && ok "F16: fanout with an excluded provider default is refused up front, no member launched" || bad "F16 fanout default"
 
