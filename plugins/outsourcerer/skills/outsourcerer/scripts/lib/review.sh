@@ -195,7 +195,7 @@ _osrc_review_ingest() {
         _osrc_jq_set "$p" --arg v "$first" --argjson now "$now" --arg vf "$vf" \
           '.state="verdict" | .verdict=$v | .verdict_ts=$now | .sha_reviewed=.head | .findings=$vf | .invalid_first_line=""' ;;
       *)
-        age=$(( $(date +%s) - $(stat -f %m "$vf" 2>/dev/null || stat -c %Y "$vf" 2>/dev/null || date +%s) ))   # real file mtime vs real clock
+        age=$(( $(date +%s) - $(stat -c %Y "$vf" 2>/dev/null || stat -f %m "$vf" 2>/dev/null || date +%s) ))   # real file mtime vs real clock
         [ "$age" -ge "$settle" ] && _osrc_jq_set "$p" --arg l "$(head -1 "$vf" | cut -c1-60)" '.invalid_first_line=$l' ;;
     esac
   done

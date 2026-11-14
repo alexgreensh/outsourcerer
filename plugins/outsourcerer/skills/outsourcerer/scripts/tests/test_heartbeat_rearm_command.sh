@@ -55,7 +55,7 @@ kill_beacon() {
   # ...and the command they name is dispatched (not a dead pointer).
   grep -q 'heartbeat)[[:space:]]*cmd_heartbeat' <<<"$(awk '/^main\(\)/,0' "$SRC")" \
     || { echo "FAIL: heartbeat is not wired into the main dispatch"; exit 1; }
-  grep -q 'supervise) cmd_heartbeat start' "$SRC" || { echo "FAIL: fleet supervise does not route to the arm path"; exit 1; }
+  grep -q 'supervise) cmd_heartbeat start' "$HERE/../lib/lanemsg.sh" || { echo "FAIL: fleet supervise does not route to the arm path"; exit 1; }
   exit 0
 ) && ok "remediation pointers reference a dispatched command" \
   || bad "heartbeat remediation pointer is dead"

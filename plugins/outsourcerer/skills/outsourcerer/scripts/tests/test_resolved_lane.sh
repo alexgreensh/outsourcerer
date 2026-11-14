@@ -32,6 +32,8 @@ set +e
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$MAIN_SCRIPT" > "$TMP_MAIN"
 # shellcheck disable=SC1090
 source "$TMP_MAIN"
+# The temporary script has no adjacent lib directory. Load the production modules.
+for module in "$HERE"/../lib/*.sh; do [ -r "$module" ] && . "$module"; done
 set -e
 
 have() { command -v "$1" >/dev/null 2>&1; }

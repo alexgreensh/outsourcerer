@@ -9,8 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 
-export OSRC_HOME="$HOME/osrc-test-L10-home-$$"
-mkdir -p "$OSRC_HOME"
+TMP="$(mktemp -d)"
+export HOME="$TMP/home" OSRC_HOME="$TMP/state"
+mkdir -p "$HOME" "$OSRC_HOME"
 
 . "$SRC" >/dev/null 2>&1
 SCRIPT_PATH="$SRC"   # sourced mode: $0 is this harness; point preflight/self-exec at the real script
@@ -21,7 +22,6 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 
-TMP="$(mktemp -d)"
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
 
 # ---------- stubs: claude / devin / codex / gh (log argv, fake auth, fake session URL) ----------

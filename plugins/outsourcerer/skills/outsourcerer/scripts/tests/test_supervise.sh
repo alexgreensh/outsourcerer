@@ -143,7 +143,7 @@ grep -q '^EVENT failed supervise .*signal' "$TMP/killed" && [ "$rc" = 2 ] && ok 
 
 echo "=== lib/ loads through a symlink (LOADER.md) ==="
 mkdir -p "$TMP/linkdir"; ln -s "$SRC" "$TMP/linkdir/outsourcerer"
-fresh 19; out="$("$TMP/linkdir/outsourcerer" supervise --session nobody 2>&1)"
+fresh 19; export OSRC_HOME="$TMP/h19"; out="$("$TMP/linkdir/outsourcerer" supervise --session nobody 2>&1)"
 grep -q '^EVENT done all ' <<<"$out" && ok "supervise works when run through a symlink" || no "symlinked supervise: [$out]"
 own G sq1; pane sq1 cc-question-live.txt
 out="$(printf '{"session_id":"G"}' | "$TMP/linkdir/outsourcerer" stop-guard 2>/dev/null)"

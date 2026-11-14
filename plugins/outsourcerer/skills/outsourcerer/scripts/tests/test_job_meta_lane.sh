@@ -9,7 +9,7 @@ export HOME="$E/home" OSRC_HOME="$E/state" GIT_CEILING_DIRECTORIES="$E"; mkdir -
 pass=0; fail=0; ok() { echo "PASS: $1"; pass=$((pass+1)); }; bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 printf '#!/usr/bin/env bash\necho "fine"; echo "OSRC::DONE ok"\n' > "$E/bin/codex"; chmod +x "$E/bin/codex"
 jid="$(cd "$E/work" && PATH="$E/bin:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_HEARTBEAT_DISABLED=1 \
-  bash "$SRC" bg --provider codex run -m gpt-6-testmodel "say fine" 2>/dev/null | head -1)"
+  bash "$SRC" bg --spend-ok --provider codex run -m gpt-6-testmodel "say fine" 2>/dev/null | head -1)"
 i=0; while [ "$i" -lt 100 ] && [ ! -s "$OSRC_HOME/jobs/$jid/meta.json" ]; do sleep 0.1; i=$((i+1)); done
 lane="$(jq -r '.lane // ""' "$OSRC_HOME/jobs/$jid/meta.json" 2>/dev/null)"
 [ "$lane" = cx ] && ok "an untabled gpt-6 model is recorded on its native lane (cx)" || bad "meta lane is '$lane' (job '$jid')"
