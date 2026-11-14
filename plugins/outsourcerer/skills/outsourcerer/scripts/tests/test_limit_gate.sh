@@ -112,14 +112,15 @@ fb="$( _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0
         _osrc_lane_spendable() { return 0; }
         _osrc_limit_fallback "codexwk=98" )"
 [ "$fb" = "dv" ] && ok "unit: exhausted cx skipped; dv picked over cx" || bad "unit: fallback picked '$fb' not dv"
-# r3.1: with REAL billing (catalog stubbed so no real `devin models list` runs), dv's
-# unproven-free default is metered -> not suggested without consent.
+# r3.2: with REAL billing (catalog stubbed unreachable), dv's implicit default is the
+# runtime Free pick -> offline swe-2-high -> subscription, so dv IS suggested without
+# consent. An explicitly metered dv model is still not suggested (covered by billing tests).
 fb="$( HOME="$FH0"; _fallback_lane_ready() { if [ "$1" = dv ] || [ "$1" = cx ]; then return 0; fi; return 1; }
         _lane_ready_probe() { return 1; }
         _devin_catalog_free_ids() { return 1; }; _timeout() { return 1; }
         _osrc_limit_fallback "codexwk=98" )"; frc=$?
-{ [ -z "$fb" ] && [ $frc -ne 0 ]; } && ok "r3.1 spend: dv not suggested while its default model is unproven-free" \
-  || bad "r3.1 spend: fallback suggested '$fb' (rc=$frc) without spend proof"
+{ [ "$fb" = "dv" ] && [ $frc -eq 0 ]; } && ok "r3.2 spend: dv suggested — its runtime default is provably Free" \
+  || bad "r3.2 spend: fallback picked '$fb' (rc=$frc); expected dv on the free default"
 # Or is the last resort — but ONLY with spend consent (L7 add-on: metered lanes are never
 # suggested or picked quietly). Without consent the picker returns nothing rather than naming
 # a lane the spend gate would refuse; with OSRC_SPEND_OK=1 the same list picks or.
@@ -555,32 +556,52 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
 b=$( OSRC_SPEND_OK=1 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; printf "%s" "${OSRC_SPEND_OK:-unset}"' )
 [ "$b" = "unset" ] && ok "r3 spend: env OSRC_SPEND_OK is unset by the env block (cannot imply consent)" \
   || bad "r3 spend: env OSRC_SPEND_OK survived sourcing ('$b')"
-# .spend-ok job marker consents (the bg one-command channel) — BOUND to lane|model pairs.
-# Runs in the already-sourced shell: OSRC_JOB_DIR env-prefix is exactly what the detached
-# child's gate reads. An empty marker or a marker for a different lane/model consents nothing.
+# .spend-ok job marker consents (the bg one-command channel) — r3.2: accepted ONLY for a
+# real job child: dir directly under $OSRC_JOBS, OSRC_JOB_TOKEN matching the marker's
+# header, and an EXACT lane|model pair (never "*", never empty). Runs in the
+# already-sourced shell with env-prefixes exactly as the detached child's gate reads them.
 JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"
-printf 'or|*\n' > "$JD/.spend-ok"
+_mkmark() {  # <dir> <token> <pairs...>
+  local d="$1" t="$2"; shift 2
+  { printf '#osrc-spend-ok token=%s\n' "$t"; printf '%s\n' "$@"; } > "$d/.spend-ok"
+}
+# Wildcard and empty-model fields authorize NOTHING anymore.
+_mkmark "$JD" tokA 'or|*'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: wildcard lane|* marker consents nothing" || bad "r3.2 spend: wildcard marker leaked consent (rc=$rc)"
+_mkmark "$JD" tokA 'or|'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: empty-model marker consents nothing" || bad "r3.2 spend: empty-model marker leaked (rc=$rc)"
+# Exact pair + matching token -> consent, and the gate consumes (deletes) the marker.
+_mkmark "$JD" tokA 'or|some-model'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -eq 0 ] && ok "r3.2 spend: exact lane|model marker + job token consents" || bad "r3.2 spend: exact marker rc=$rc: $out"
+[ ! -f "$JD/.spend-ok" ] && ok "r3.2 spend: marker consumed after dispatch" || bad "r3.2 spend: marker survived dispatch"
+# Wrong token (a sibling job's secret, or a forged env) consents nothing.
+_mkmark "$JD" tokB 'or|some-model'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: token mismatch consents nothing" || bad "r3.2 spend: wrong-token consent leaked (rc=$rc)"
+# No token at all -> nothing (an arbitrary OSRC_JOB_DIR alone is not a job child).
 out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && ok "r3 spend: lane-bound .spend-ok marker consents" || bad "r3 spend: .spend-ok marker rc=$rc: $out"
-# The marker is single-use: the gate consumed (deleted) it after authorizing dispatch.
-[ ! -f "$JD/.spend-ok" ] && ok "r3 spend: marker consumed after dispatch" || bad "r3 spend: marker survived dispatch"
-# Re-consent, then prove binding: a marker minted for lane `or` does NOT authorize `dv`.
-printf 'or|*\n' > "$JD/.spend-ok"
-out="$( OSRC_JOB_DIR="$JD" bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { return 1; }; _osrc_spend_gate dv glm-5.2 dv "test"' 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3 spend: or-marker does not authorize the dv lane" || bad "r3 spend: cross-lane consent leaked (rc=$rc)"
-# And a model-bound marker does not cover a different model on the same lane.
-printf 'or|glm-5.2\n' > "$JD/.spend-ok"
-out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3 spend: model-bound marker does not cover a different model" || bad "r3 spend: cross-model consent leaked (rc=$rc)"
-printf 'or|hy3\n' > "$JD/.spend-ok"
-out="$( OSRC_JOB_DIR="$JD" _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && ok "r3 spend: exact lane|model marker consents" || bad "r3 spend: exact marker rc=$rc: $out"
-rm -f "$JD/.spend-ok"
-# And it is scoped to THAT job dir: a different job dir does not inherit the consent.
-JD2X="$OSRC_HOME/jobs/otherjob"; mkdir -p "$JD2X"
-printf 'or|*\n' > "$JD/.spend-ok"
-out="$( OSRC_JOB_DIR="$JD2X" _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
-[ $rc -ne 0 ] && ok "r3 spend: .spend-ok consent is scoped to its own job dir" || bad "r3 spend: consent leaked across job dirs"
+[ $rc -ne 0 ] && ok "r3.2 spend: OSRC_JOB_DIR without OSRC_JOB_TOKEN consents nothing" || bad "r3.2 spend: tokenless dir consented (rc=$rc)"
+# A marker dir OUTSIDE $OSRC_JOBS is never honored, even with a valid-looking header.
+OUTJ="$TMP/notjobs"; mkdir -p "$OUTJ"; _mkmark "$OUTJ" tokA 'or|some-model'
+out="$( OSRC_JOB_DIR="$OUTJ" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: marker outside \$OSRC_JOBS consents nothing" || bad "r3.2 spend: out-of-tree marker consented (rc=$rc)"
+# Nested/traversal job dirs are not "this job" either.
+NEST="$OSRC_HOME/jobs/a/b"; mkdir -p "$NEST"; _mkmark "$NEST" tokA 'or|some-model'
+out="$( OSRC_JOB_DIR="$NEST" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: nested job dir consents nothing" || bad "r3.2 spend: nested dir consented (rc=$rc)"
+# Binding still holds inside the trusted context: lane `or` marker does NOT authorize `dv`,
+# and a model-bound marker does not cover a different model on the same lane.
+_mkmark "$JD" tokA 'or|some-model'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids() { return 1; }; _osrc_spend_gate dv glm-5.2 dv "test"' 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: or-marker does not authorize the dv lane" || bad "r3.2 spend: cross-lane consent leaked (rc=$rc)"
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: model-bound marker does not cover a different model" || bad "r3.2 spend: cross-model consent leaked (rc=$rc)"
+_mkmark "$JD" tokA 'or|hy3'
+out="$( OSRC_JOB_DIR="$JD" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or hy3 or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -eq 0 ] && ok "r3.2 spend: exact lane|model marker consents (second pair)" || bad "r3.2 spend: exact marker rc=$rc: $out"
 rm -f "$JD/.spend-ok"
 
 # Fallback pickers never select a metered lane quietly: only `or` ready -> no pick;
@@ -867,17 +888,28 @@ out="$( cd "$BGCWD2" && PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$BH" OSRC_SO
 [ $rc -eq 0 ] && printf '%s' "$out" | grep -qE '^[A-Za-z0-9_-]+$' \
   && ok "r3.1 bg: --spend-ok consents through preflight and mints a job" \
   || bad "r3.1 bg: --spend-ok did not mint (rc=$rc): $(printf '%s' "$out" | head -5)"
-# The marker writer emits bound lane|model pairs for the consenting command's resolution.
-MKD="$TMP/markerjob"; mkdir -p "$MKD"
-# OSRC_SPEND_OK must be set AFTER sourcing — the env block unsets inherited consent by design.
+# The marker writer emits the token header + bound EXACT lane|model pairs (never "*") for
+# the consenting command's resolution; without OSRC_JOB_TOKEN it writes nothing.
+MKD="$OSRC_HOME/jobs/markerjob"; mkdir -p "$MKD"
+# OSRC_SPEND_OK/OSRC_JOB_TOKEN must be set AFTER sourcing — the env block unsets inherited
+# consent by design.
+( OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1
+    OSRC_SPEND_OK=1 OSRC_JOB_TOKEN=tokW; _osrc_spend_marker_write "'"$MKD"'" cc run --provider cc -m glm-5.2' >/dev/null 2>&1 )
+[ -f "$MKD/.spend-ok" ] && head -1 "$MKD/.spend-ok" | grep -q 'token=tokW' \
+  && ! grep -q '|\*' "$MKD/.spend-ok" && grep -q '|' "$MKD/.spend-ok" \
+  && ok "r3.2 marker: .spend-ok carries token header + exact pairs ($(tail -1 "$MKD/.spend-ok" 2>/dev/null))" \
+  || bad "r3.2 marker: .spend-ok missing token/exact pairs: $(cat "$MKD/.spend-ok" 2>/dev/null)"
+rm -f "$MKD/.spend-ok"
 ( OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1
     OSRC_SPEND_OK=1; _osrc_spend_marker_write "'"$MKD"'" cc run --provider cc -m glm-5.2' >/dev/null 2>&1 )
-[ -f "$MKD/.spend-ok" ] && grep -q '|' "$MKD/.spend-ok" \
-  && ok "r3.1 marker: .spend-ok carries lane|model pairs ($(head -1 "$MKD/.spend-ok" 2>/dev/null))" \
-  || bad "r3.1 marker: .spend-ok missing or unbound: $(cat "$MKD/.spend-ok" 2>/dev/null)"
-# And OSRC_JOB_DIR is scrubbed from delegate environments (_run_tee_stderr choke point).
-leak="$( OSRC_JOB_DIR="$MKD" _run_tee_stderr /dev/null env 2>/dev/null | grep -c '^OSRC_JOB_DIR=' )"
-[ "$leak" = "0" ] && ok "r3.1 env: delegates never inherit OSRC_JOB_DIR" || bad "r3.1 env: OSRC_JOB_DIR leaked to delegate ($leak)"
+[ ! -e "$MKD/.spend-ok" ] \
+  && ok "r3.2 marker: no OSRC_JOB_TOKEN -> no marker written" \
+  || bad "r3.2 marker: tokenless write produced a marker"
+rm -f "$MKD/.spend-ok"
+# And OSRC_JOB_DIR + OSRC_JOB_TOKEN are scrubbed from delegate environments
+# (_run_tee_stderr choke point + the per-lane env -u spawn lists).
+leak="$( OSRC_JOB_DIR="$MKD" OSRC_JOB_TOKEN=tokW _run_tee_stderr /dev/null env 2>/dev/null | grep -cE '^(OSRC_JOB_DIR|OSRC_JOB_TOKEN)=' )"
+[ "$leak" = "0" ] && ok "r3.2 env: delegates never inherit OSRC_JOB_DIR/OSRC_JOB_TOKEN" || bad "r3.2 env: job consent env leaked to delegate ($leak)"
 
 # Interactive y/N consent (pty via script): 'y' approves THIS command and prints the
 # OSRC_SPEND_CONSENT token bg's preflight greps for; 'n'/EOF refuses.
@@ -935,6 +967,161 @@ n="$(grep -c '"kind":"limit"' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null)"
 ls "$OSRC_HOME"/.caplimit.* "$OSRC_HOME"/jobs/*/.caplimit.* >/dev/null 2>&1 \
   && bad "r3.1 cap: --clear left caplimit markers" || ok "r3.1 cap: --clear removes cap-event markers"
 _session_limits() { printf 'codexwk=31 codex5h=12\n'; }; _reset_snap
+
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3.2 (r3.1 verdict findings 1-3): runtime Free default, NEXT=refused command+--spend-ok,
+# token-bound exact .spend-ok markers.
+# ---------------------------------------------------------------------------------------------------
+
+# F1 unit: _devin_default_free_model picks from the live catalog's Free set, prefers
+# swe-2-high, falls back to swe-2-high offline — never a metered id.
+b="$( _devin_catalog_free_ids() { printf 'swe-2-max swe-2-high '; return 0; }; _devin_default_free_model )"
+[ "$b" = "swe-2-high" ] && ok "r3.2 default: catalog Free set -> swe-2-high preferred" || bad "r3.2 default: catalog pick -> '$b'"
+b="$( _devin_catalog_free_ids() { printf 'glm-5.2 swe-2-max '; return 0; }; _devin_default_free_model )"
+[ "$b" = "glm-5.2" ] && ok "r3.2 default: no preferred id -> first catalog Free id" || bad "r3.2 default: first-free pick -> '$b'"
+b="$( _devin_catalog_free_ids() { return 1; }; _devin_default_free_model )"
+[ "$b" = "swe-2-high" ] && ok "r3.2 default: catalog unreachable -> swe-2-high fallback" || bad "r3.2 default: offline -> '$b'"
+b="$( _devin_catalog_free_ids() { printf ' '; return 0; }; _devin_default_free_model )"
+[ "$b" = "swe-2-high" ] && ok "r3.2 default: reachable-but-empty Free set -> swe-2-high" || bad "r3.2 default: empty free set -> '$b'"
+b="$( _devin_catalog_free_ids() { printf 'glm-5.2 '; return 0; }; _devin_default_free_model )"
+[ "$b" = "glm-5.2" ] && ok "r3.2 default: catalog Free id wins even when not a preferred name" || bad "r3.2 default: free-id pick -> '$b'"
+# billing dv with NO model now classifies by the runtime default, not DEFAULT_MODEL.
+b="$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { return 1; }; osrc_lane_billing dv' )"
+[ "$b" = "subscription" ] && ok "r3.2 billing: dv no-model -> runtime Free default -> subscription" || bad "r3.2 billing: dv no-model -> '$b'"
+b="$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { printf "glm-5.2 "; return 0; }; osrc_lane_billing dv' )"
+[ "$b" = "subscription" ] && ok "r3.2 billing: dv no-model follows catalog Free pick (glm-5.2 free here)" || bad "r3.2 billing: dv catalog-default -> '$b'"
+b="$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = devin ] && return 0; command -v "$1" >/dev/null 2>&1; }; _devin_catalog_free_ids() { printf " "; return 0; }; osrc_lane_billing dv' )"
+[ "$b" = "metered" ] && ok "r3.2 billing: dv no-model metered when live catalog has no Free id" || bad "r3.2 billing: dv catalog-empty-free -> '$b'"
+
+# F2 unit: _osrc_spend_next_build reproduces the refused command + --spend-ok after the verb.
+_OSRC_USER_ARGV=(bg --cloud-ack --provider cc "say hi")
+_osrc_spend_next_build bg
+case "$OSRC_SPEND_NEXT" in
+  *" bg --spend-ok --cloud-ack --provider cc say\\ hi") ok "r3.2 next: bg NEXT = command + --spend-ok after verb" ;;
+  *) bad "r3.2 next: bg NEXT wrong: $OSRC_SPEND_NEXT" ;;
+esac
+_OSRC_USER_ARGV=(--cloud-ack run --provider or -m hy3 "say hi")
+_osrc_spend_next_build run
+case "$OSRC_SPEND_NEXT" in
+  *" --cloud-ack run --spend-ok --provider or -m hy3 say\\ hi") ok "r3.2 next: run NEXT keeps leading global flags + verb position" ;;
+  *) bad "r3.2 next: run NEXT wrong: $OSRC_SPEND_NEXT" ;;
+esac
+_OSRC_USER_ARGV=(session start --provider cc -m glm "do it")
+_osrc_spend_next_build start
+case "$OSRC_SPEND_NEXT" in
+  *" session start --spend-ok --provider cc -m glm do\\ it") ok "r3.2 next: session NEXT inserts after start" ;;
+  *) bad "r3.2 next: session NEXT wrong: $OSRC_SPEND_NEXT" ;;
+esac
+# An existing --spend-ok is never doubled.
+_OSRC_USER_ARGV=(run --spend-ok --provider or -m hy3 "say hi")
+_osrc_spend_next_build run
+case "$OSRC_SPEND_NEXT" in
+  *" run --spend-ok --provider or -m hy3 say\\ hi") ok "r3.2 next: existing --spend-ok not duplicated" ;;
+  *) bad "r3.2 next: duplicated/misplaced consent: $OSRC_SPEND_NEXT" ;;
+esac
+unset _OSRC_USER_ARGV
+
+# F1+F2 integration: a default `run` on a logged-in Devin stub with a live Free-tagged
+# catalog does NOT ask for spend consent and dispatches the catalog's Free pick.
+DBIN="$TMP/dbin"; DHOME="$TMP/dhome"; DOH="$TMP/dohome"
+mkdir -p "$DBIN" "$DHOME" "$DOH/catalogs"
+cat > "$DBIN/devin" <<'EOF'
+#!/usr/bin/env bash
+echo "devin $*" >> "${DEVIN_STUB_LOG:-/dev/null}"
+case "${1:-}" in
+  auth)   echo "Logged in as stub@example.com"; exit 0 ;;
+  models) cat "${DEVIN_STUB_CATALOG:-/dev/null}"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$DBIN/devin"
+cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
+{"families":[
+ {"family_uid":"swe-2","aliases":["swe"],"variants":[
+   {"model_uid":"swe-2-high","cost_tier":"Free","cost_summary":null},
+   {"model_uid":"swe-2-max","cost_tier":"Paid","cost_summary":"$5/MTok"}]},
+ {"family_uid":"glm-5.2","aliases":["glm"],"variants":[
+   {"model_uid":"glm-5-2","cost_tier":"Plan","cost_summary":"plan-included"}]}]}
+EOF
+printf '["swe-2","swe","swe-2-high","swe-2-max","glm-5.2","glm","glm-5-2"]\n' > "$DOH/catalogs/dv.json"
+: > "$TMP/devin-stub.log"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
+    bash "$SRC" run "say hi" 2>&1 )"; rc=$?
+case "$out" in
+  *"spend gate"*|*"PAID LANE"*) bad "r3.2 default-run: bare run on Free-catalog Devin asked for spend (rc=$rc)" ;;
+  *) [ $rc -eq 0 ] && ok "r3.2 default-run: bare run on logged-in Devin does not ask" \
+       || bad "r3.2 default-run: bare run rc=$rc: $(printf '%s' "$out" | head -6)" ;;
+esac
+grep -q -- '--model swe-2-high' "$TMP/devin-stub.log" \
+  && ok "r3.2 default-run: dispatched the catalog Free pick swe-2-high" \
+  || bad "r3.2 default-run: stub log lacks --model swe-2-high: $(cat "$TMP/devin-stub.log" 2>/dev/null | head -5)"
+# Offline catalog -> swe-2-high fallback still does not ask.
+DOH2="$TMP/dohome2"; mkdir -p "$DOH2"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH2" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
+    bash "$SRC" run "say hi again" 2>&1 )"; rc=$?
+case "$out" in
+  *"spend gate"*|*"PAID LANE"*) bad "r3.2 default-run: offline bare run asked for spend" ;;
+  *) [ $rc -eq 0 ] && ok "r3.2 default-run: offline catalog -> swe-2-high, still no ask" \
+       || bad "r3.2 default-run: offline rc=$rc: $(printf '%s' "$out" | head -6)" ;;
+esac
+# But an EXPLICIT metered model still asks — the default fix never exempts a named paid id.
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    bash "$SRC" run -m glm-5.2 "paid on purpose" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane"* ) ok "r3.2 default-run: explicit metered -m glm-5.2 still refuses" ;;
+  *) bad "r3.2 default-run: explicit metered model did not refuse (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+
+# F2 integration + round-trip: a refused `run` prints NEXT = the exact command + --spend-ok
+# after the verb; running NEXT through the dispatch preflight reaches the SAME lane/model
+# the EVENT named. devin/glm-5.2 is metered under the stub catalog (not Free-tagged).
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    bash "$SRC" run --provider devin -m glm-5.2 "say hi" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane:dv/"* ) ok "r3.2 next: refusal EVENT names dv lane" ;;
+  *) bad "r3.2 next: refusal missing EVENT (rc=$rc): $(printf '%s' "$out" | head -5)" ;;
+esac
+nxt="$( printf '%s\n' "$out" | sed -n 's/^NEXT //p' | head -1 )"
+case "$nxt" in
+  *" run --spend-ok --provider devin -m glm-5.2 say\\ hi"* ) ok "r3.2 next: NEXT = refused command + --spend-ok after verb" ;;
+  *) bad "r3.2 next: NEXT wrong shape: $nxt" ;;
+esac
+# Round-trip: strip the script path, feed the rest through the dispatch preflight —
+# rc0 proves the printed command consents AND resolves the same lane/model.
+rest="${nxt#"$SRC"}"
+pfout="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    eval "bash \"$SRC\" --osrc-preflight-internal${rest}" 2>&1 )"; pfrc=$?
+[ $pfrc -eq 0 ] && ok "r3.2 next: round-trip NEXT reaches the same lane/model with consent" \
+  || bad "r3.2 next: round-trip preflight rc=$pfrc: $(printf '%s' "$pfout" | head -6)"
+
+# Same for bg: NEXT must keep bg + every flag (--cloud-ack, --provider, -m) verbatim.
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_CLOUD_ACK=1 \
+    bash "$SRC" bg run --cloud-ack --provider devin -m glm-5.2 "say hi" 2>&1 </dev/null )"; rc=$?
+nxt="$( printf '%s\n' "$out" | sed -n 's/^NEXT //p' | head -1 )"
+case "$nxt" in
+  *" bg --spend-ok run --cloud-ack --provider devin -m glm-5.2 say\\ hi"* ) ok "r3.2 next: bg NEXT preserves verb + all flags" ;;
+  *) bad "r3.2 next: bg NEXT wrong shape: $nxt" ;;
+esac
+# Round-trip the bg NEXT's inner command through preflight (strip 'bg', sentinel first).
+bgrest="${nxt#"$SRC bg"}"
+pfout="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
+    eval "bash \"$SRC\" --osrc-preflight-internal${bgrest}" 2>&1 )"; pfrc=$?
+[ $pfrc -eq 0 ] && ok "r3.2 next: bg NEXT round-trips to the same lane/model" \
+  || bad "r3.2 next: bg round-trip rc=$pfrc: $(printf '%s' "$pfout" | head -6)"
 
 echo
 echo "RESULT: $pass passed, $fail failed"

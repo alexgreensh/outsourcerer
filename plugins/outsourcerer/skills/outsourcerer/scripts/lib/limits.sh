@@ -502,3 +502,238 @@ _osrc_session_limit_gate() {
   local _fb_user_pinned="${MODEL_EXPLICIT:-0}"
   _osrc_limit_gate "$_sl_disp" nohop
 }
+
+# =============================================================================
+# Limits summary feed — moved from lib/spend.sh (r4 finding 5: spend.sh had grown past
+# the size guideline; the MC "Lanes and limits" panel / L9 hub export lives with the
+# other meter readers here). osrc_lane_summary composes _osrc_meter_windows + caps +
+# osrc_lane_billing at call time, so cross-lib deps resolve fine.
+# =============================================================================
+
+# ---- limits summary (Mission Control "Lanes and limits" panel / L9 hub export) ----
+
+# Harness registry: the agent products outsourcerer can drive, as "id|display|cli|lane|order".
+# id is the provider id the MC page keys its official icons on (claude, codex->openai icon via
+# the page's alias table, agy, warp, devin, droid, gemini-cli...). The gemini CLI harness is
+# RETIRED (Antigravity `agy` replaced it, Alex 17:02) and is deliberately absent: it is never
+# detected, never listed, never routed — even if an old `gemini` binary is still on PATH.
+# Detection is per-user and honest: a harness appears ONLY when its CLI is installed AND login
+# or a plan/key is provable (_osrc_harness_auth). Installed-but-logged-out (e.g. cursor-agent
+# with no Cursor plan) does NOT appear — we never guess auth state.
+OSRC_HARNESS_TABLE="claude|Claude|claude|cc|1
+codex|Codex / ChatGPT|codex|cx|2
+agy|Antigravity|agy|gm|3
+devin|Devin|devin|dv|4
+droid|Factory Droid|droid|droid|5
+warp|Warp|oz|warp|6
+cursor|Cursor|cursor-agent|cursor|7
+cline|Cline|cline|cline|8
+pi|Pi|pi|pi|9
+hermes|Hermes|hermes|hermes|10
+grokbot|Grok Bot|-|grokbot|11
+local|Local inference|-|local|12"
+
+# _osrc_harness_auth <id> -> rc0 when login/plan/key is PROVABLE for this harness.
+# Probes are filesystem/credential evidence or bounded CLI auth-status calls; anything
+# unprovable returns 1 so the harness stays off the panel (never a guess).
+_osrc_harness_auth() {
+  local id="${1:-}" d
+  case "$id" in
+    claude)
+      _osrc_billing_key ANTHROPIC_API_KEY && return 0
+      [ -f "$HOME/.claude/.credentials.json" ] && return 0
+      [ "${OSRC_PLATFORM:-}" = "darwin" ] && have security \
+        && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 && return 0
+      _osrc_dir_auth "$HOME/.claude" ;;
+    codex)
+      [ -f "$HOME/.codex/auth.json" ] && return 0
+      _osrc_billing_key OPENAI_API_KEY && return 0
+      _osrc_dir_auth "$HOME/.codex" && return 0
+      have codex && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>/dev/null \
+        | grep -qi "logged in" ;;
+    agy)     [ -d "$HOME/.antigravity" ] ;;
+    devin)   have devin && _timeout "${OSRC_DEVIN_AUTH_SECS:-5}" devin auth status 2>/dev/null \
+               | grep -qi "logged in" ;;
+    droid)   _osrc_dir_auth "$HOME/.factory" ;;
+    warp)    _osrc_dir_auth "$HOME/.warp" ;;
+    cursor)  _osrc_billing_key CURSOR_API_KEY && return 0; _osrc_dir_auth "$HOME/.cursor" ;;
+    cline)   _osrc_dir_auth "$HOME/.cline" ;;
+    pi)      _osrc_dir_auth "$HOME/.pi" ;;
+    hermes)  _osrc_dir_auth "$HOME/.hermes" ;;
+    grokbot) # keyed webhook lane: the keys ARE the auth
+      { [ -n "${GROKBOT_WEBHOOK_URL:-}" ] || [ -n "$(_extract_kv_value GROKBOT_WEBHOOK_URL 2>/dev/null)" ]; } \
+        && { [ -n "${GROKBOT_WEBHOOK_KEY:-}" ] || [ -n "$(_extract_kv_value GROKBOT_WEBHOOK_KEY 2>/dev/null)" ]; } ;;
+    local)   return 0 ;;   # free on-machine inference: no login concept
+    *)       return 1 ;;
+  esac
+}
+
+# _osrc_dir_auth <dir> -> rc0 when the dir holds an auth-ish FILE (auth|cred|token|session|
+# login|oauth|account|keychain in the name). Files only — a "token-optimizer" style DIRECTORY
+# name must not count as a credential.
+_osrc_dir_auth() {
+  local d="${1:-}"
+  [ -d "$d" ] || return 1
+  find "$d" -maxdepth 1 -type f \
+    \( -iname '*auth*' -o -iname '*cred*' -o -iname '*token*' -o -iname '*session*' \
+       -o -iname '*login*' -o -iname '*oauth*' -o -iname '*account*' -o -iname '*keychain*' \) \
+    -print -quit 2>/dev/null | grep -q .
+}
+
+# _osrc_harness_detected <id> -> rc0 when the harness's CLI is installed AND auth is provable.
+_osrc_harness_detected() {
+  local id="${1:-}" cli
+  case "$id" in
+    grokbot) _osrc_harness_auth grokbot ;;                 # keyed, no CLI
+    local)   _ready_probe_local >/dev/null 2>&1 ;;        # endpoint detection, no auth
+    *)
+      cli="$(printf '%s\n' "$OSRC_HARNESS_TABLE" | awk -F'|' -v i="$id" '$1==i{print $3}')"
+      [ -n "$cli" ] && [ "$cli" != "-" ] && have "$cli" && _osrc_harness_auth "$id" ;;
+  esac
+}
+
+# osrc_lane_summary [--json] -> one record per DETECTED harness for the MC "Lanes and
+# limits" panel / L9 hub export. Never a fixed list: only harnesses whose CLI is installed
+# and whose login/plan/key is provable appear. JSON fields match the page contract:
+# id, name, state (ok|low|out|wait|unknown), left, renews, cap, paid, plus billing, lane,
+# renews_at, updated, source, order and a windows detail object. No arg prints a table.
+#
+# state semantics (mirrors the gates; unknown limits are never guessed):
+#   ok      fresh meter reading under OSRC_CONSERVE_THRESHOLD
+#   low     fresh reading at/over conserve line but under OSRC_LANE_LIMIT_PCT
+#   out     fresh reading at/over the limit line, or a cap is tripped (dispatch refuses)
+#   wait    a meter exists but the only reading is stale — "waiting for reset/refresh"
+#   unknown no meter feed for this harness — left reads "not checked yet"
+osrc_lane_summary() {
+  local json=0; [ "${1:-}" = "--json" ] && json=1
+  local mw="" _w _p _rst _age
+  mw="$(_osrc_meter_windows 2>/dev/null)"
+  local stale_secs limit_thr cons_thr cline=""
+  stale_secs="${OSRC_LIMITS_STALE_SECS:-21600}"
+  limit_thr="$(_osrc_limit_threshold 2>/dev/null)"; limit_thr="${limit_thr:-90}"
+  cons_thr="${OSRC_CONSERVE_THRESHOLD:-50}"
+  while IFS='	' read -r _w _p _rst _age; do
+    [ -n "$_w" ] && [ -n "$_p" ] && cline="$cline $_w=$_p"
+  done <<EOF
+$mw
+EOF
+  cline="${cline# }"
+  local cf; cf="$(_lane_caps_file)"
+  local checked; checked="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo 0)"
+  local rows=""
+  local hid hname hcli hlane horder
+  while IFS='|' read -r hid hname hcli hlane horder; do
+    [ -n "$hid" ] || continue
+    _osrc_harness_detected "$hid" || continue
+    # caps for the backing lane: standing (lane-caps) + this invocation's --cap specs that bind.
+    local caps="" cl cs ocw captripped=false
+    if [ -f "$cf" ]; then
+      while IFS=' ' read -r cl cs; do
+        [ "$cl" = "$hlane" ] && [ -n "$cs" ] && caps="${caps:+$caps; }$cs"
+      done < "$cf"
+    fi
+    for ocw in ${OSRC_CAPS:-}; do
+      _osrc_cap_valid "$ocw" || continue
+      _osrc_cap_window "$hlane" "${ocw%%<=*}" >/dev/null 2>&1 && caps="${caps:+$caps; }$ocw"
+    done
+    local cw; cw="$(_lane_field "$hlane" conserve_windows 2>/dev/null)"
+    [ -n "$cw" ] && [ -n "$cline" ] && _osrc_cap_tripped "$hlane" "$cline" >/dev/null 2>&1 && captripped=true
+    # meter state over the lane's declared windows
+    local state=unknown left="not checked yet" win="" used="" renews_at="" renews="" saw=0 stale_seen=0
+    if [ -n "$cw" ]; then
+      local worst="" worstw="" wrow wp wr wa
+      for w in $cw; do
+        wrow="$(printf '%s\n' "$mw" | awk -F'\t' -v w="$w" '$1==w{print; exit}')"
+        [ -n "$wrow" ] || continue
+        wp="$(printf '%s' "$wrow" | cut -f2)"; wr="$(printf '%s' "$wrow" | cut -f3)"; wa="$(printf '%s' "$wrow" | cut -f4)"
+        case "$wa" in ''|-|*[!0-9]*) ;; *) [ "$wa" -gt "$stale_secs" ] && { stale_seen=1; continue; } ;; esac
+        saw=1
+        if [ -z "$worst" ] || awk -v a="$wp" -v b="$worst" 'BEGIN{exit !(a+0>b+0)}'; then
+          worst="$wp"; worstw="$w"; used="$wp"; renews_at="$wr"
+        fi
+      done
+      if [ "$saw" = "1" ]; then
+        win="$worstw"
+        case "$used" in ''|*[!0-9.]*) ;; *)
+          left="$(awk -v u="$used" 'BEGIN{printf "%g%% left",100-u}')" ;;
+        esac
+        case "$renews_at" in ''|-|*[!0-9]*) renews_at=""; renews="" ;;
+          *) renews="$(_human_eta "$renews_at" 2>/dev/null)"; renews="${renews:+in $renews}" ;;
+        esac
+        state=ok
+        awk -v p="$used" -v t="$cons_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=low
+        awk -v p="$used" -v t="$limit_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=out
+      elif [ "$stale_seen" = "1" ]; then
+        state=wait; left=""   # page falls back to its "Waiting for reset" label
+      fi
+    fi
+    [ "$captripped" = true ] && [ "$state" != unknown ] && state=out
+    local bill paid
+    bill="$(osrc_lane_billing "$hlane" 2>/dev/null)"; bill="${bill:-unknown}"
+    case "$bill" in subscription|free) paid=false ;; *) paid=true ;; esac
+    rows="$rows$hid|$hname|$hlane|$horder|$state|$left|$renews_at|${renews:-}|$caps|$captripped|$bill|$paid|$win|$used|$checked
+"
+  done <<EOF
+$OSRC_HARNESS_TABLE
+EOF
+  if [ "$json" = "1" ]; then
+    _osrc_summary_json "$rows" "$mw"
+  else
+    _osrc_summary_text "$rows"
+  fi
+}
+
+# _osrc_jstr <s> -> JSON-escaped string body (no surrounding quotes).
+_osrc_jstr() { printf '%s' "${1:-}" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# _osrc_jnum <s> -> the number, or null when empty/non-numeric.
+_osrc_jnum() { case "${1:-}" in ''|*[!0-9.]*) printf 'null' ;; *) printf '%s' "$1" ;; esac; }
+# _osrc_jstr_or_null <s> -> quoted string or null.
+_osrc_jstr_or_null() { case "${1:-}" in '') printf 'null' ;; *) printf '"%s"' "$(_osrc_jstr "$1")" ;; esac; }
+
+_osrc_summary_json() {  # <rows> <meter-windows-tsv>
+  local mw="$2"
+  printf '['
+  local first=1
+  # rows: id|name|lane|order|state|left|renews_at|renews|caps|captripped|billing|paid|win|used|checked
+  while IFS='|' read -r hid hname hlane horder state left renews_at renews caps captripped bill paid win used checked; do
+    [ -n "$hid" ] || continue
+    [ "$first" = 1 ] || printf ','
+    first=0
+    local cw2 wdet="" w2 wrow2 wp2 wr2 wa2 l2 r2
+    cw2="$(_lane_field "$hlane" conserve_windows 2>/dev/null)"
+    if [ -n "$cw2" ]; then
+      for w2 in $cw2; do
+        wrow2="$(printf '%s\n' "$mw" | awk -F'\t' -v w="$w2" '$1==w{print; exit}')"
+        [ -n "$wrow2" ] || continue
+        wp2="$(printf '%s' "$wrow2" | cut -f2)"; wr2="$(printf '%s' "$wrow2" | cut -f3)"
+        l2="$(awk -v u="$wp2" 'BEGIN{printf "%g",100-u}' 2>/dev/null)"
+        r2=""; case "$wr2" in ''|-|*[!0-9]*) ;; *) r2="$(_human_eta "$wr2" 2>/dev/null)"; r2="${r2:+in $r2}" ;; esac
+        wdet="$wdet\"$w2\":{\"used\":$(_osrc_jnum "$wp2"),\"left\":$(_osrc_jnum "$l2"),\"renews_at\":$(_osrc_jnum "$wr2"),\"renews\":$(_osrc_jstr_or_null "$r2")},"
+      done
+      wdet="{${wdet%,}}"
+    else wdet="{}"; fi
+    printf '{"id":"%s","name":"%s","lane":"%s","order":%s,"state":"%s","left":%s,"renews":%s,"renews_at":%s,"cap":%s,"cap_tripped":%s,"paid":%s,"billing":"%s","window":%s,"used":%s,"updated":"%s","source":"outsourcerer","windows":%s}' \
+      "$(_osrc_jstr "$hid")" "$(_osrc_jstr "$hname")" "$(_osrc_jstr "$hlane")" "$(_osrc_jnum "$horder")" \
+      "$state" "$(_osrc_jstr_or_null "$left")" "$(_osrc_jstr_or_null "$renews")" \
+      "$(_osrc_jnum "$renews_at")" "$(_osrc_jstr_or_null "$caps")" "$captripped" "$paid" \
+      "$(_osrc_jstr "$bill")" "$(_osrc_jstr_or_null "$win")" "$(_osrc_jnum "$used")" \
+      "$(_osrc_jstr "$checked")" "$wdet"
+  done <<EOF
+$1
+EOF
+  printf ']\n'
+}
+
+_osrc_summary_text() {  # <rows>
+  printf '%-9s %-18s %-8s %-9s %-12s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP PAID
+  local hid
+  # rows: id|name|lane|order|state|left|renews_at|renews|caps|captripped|billing|paid|win|used|checked
+  while IFS='|' read -r hid hname hlane horder state left renews_at renews caps captripped bill paid win used checked; do
+    [ -n "$hid" ] || continue
+    printf '%-9s %-18s %-8s %-12s %-10s %-6s %s%s\n' "$hid" "$hname" "$state" "${left:-—}" \
+      "${renews:-—}" "${caps:--}" "$([ "$paid" = true ] && echo paid || echo '-')" \
+      "$([ "$captripped" = true ] && echo '[cap tripped]')"
+  done <<EOF
+$1
+EOF
+}

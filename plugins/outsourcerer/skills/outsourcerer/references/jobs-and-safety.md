@@ -302,7 +302,10 @@ only Gemini text vehicle). Each record carries `id` = the Outsourcerer provider 
 to official icons, `state` ok|low|out|wait|unknown, `left`, `renews`/`renews_at`, the user's
 `cap` text, `paid` + `billing`, `window`/`used`, `updated`, `source`. Unmetered harnesses
 report `state:"unknown"`, `left:"not checked yet"` — nothing is guessed. Plain `lane summary`
-prints the same data as a table. L9's hub export consumes the JSON verbatim. (`lane` is owned
+prints the same data as a table. **An empty panel is not broken**: the feed lists only
+harnesses whose CLI is installed AND logged in / has a plan, so a machine with no
+authenticated agent CLIs correctly emits `[]` (and `osrc_limits_summary` remains as a
+function alias for the feed). L9's hub export consumes the JSON verbatim. (`lane` is owned
 by L2's remote-lane command in lib/remote.sh — `lane ls` lists remote lanes; the L7 verbs are
 `cap`, `billing`, `summary`, `limits`.)
 
