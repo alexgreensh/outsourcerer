@@ -237,7 +237,7 @@ _osrc_hub_card() {
     base="$(jq -c '{name:(.name // empty), tagline:(.tagline // empty)} | with_entries(select(.value != null and .value != ""))' "$decfile" 2>/dev/null || printf '{}')"
   fi
   if [ -f "$pf" ]; then
-    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,lanes}
+    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,summary,summaryAt,lanes}
       | .extraLinks |= (if .==null then null else [.[]? | select(.url | type == "string" and startswith("https://"))] end)
       | with_entries(select(.value != null))' "$pf" 2>/dev/null || printf '{}')" '$a + $b')"
   fi
@@ -304,6 +304,7 @@ _osrc_hub_build_project() {
     + (if ($card.themes|type)=="array" and ($card.themes|length)>0 then {themes:$card.themes} else {} end)
     + (if ($card.flow|type)=="array" and ($card.flow|length)>0 then {flow:$card.flow} else {} end)
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
+    + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
   ')"
   _osrc_hub_status_override "$slug" "$out"
 }

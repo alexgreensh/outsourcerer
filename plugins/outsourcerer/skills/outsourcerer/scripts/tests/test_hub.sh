@@ -585,11 +585,13 @@ a="$(_osrc_hub_lane_activity ses)"; echo "ses ${a##* } $(fresh "$a")"
 echo "{\"name\":\"P\",\"tagline\":\"keep me\",\"status\":\"building\"}" > "$OSRC_HOME/hub/projects/p.json"
 : > "$OSRC_HOME/owners/p/jl"; echo running > "$OSRC_JOBS/jl/status"; echo "{\"provider\":\"codex\"}" > "$OSRC_JOBS/jl/meta.json"
 osrc_hub_tick_touch p; jq -c "{summary, keep: .tagline, fresh: ((.summaryAt // \"1970-01-01T00:00:00Z\") | fromdateiso8601 > (now - 120))}" "$OSRC_HOME/hub/projects/p.json"
+_osrc_hub_build_project p "$(date +%s)" now | jq -r "\"exported \" + (.summary // \"none\") + \" \" + (if .summaryAt then \"at\" else \"noat\" end)"
 ' 2>"$TMP/r9.err")"
 grep -q '^reg fresh$' <<<"$r9" && ok "a new session registry event is lane activity" || bad "registry event ignored: $r9 $(head -2 "$TMP/r9.err")"
 grep -q '^hin fresh$' <<<"$r9" && ok "a new done-contract file hand-in is lane activity" || bad "file hand-in ignored: $r9"
 grep -q '^ses 0 old$' <<<"$r9" && ok "a satisfied done contract ends 'working' for a session lane (quiet 3 h stays old)" || bad "finished session stays falsely fresh: $r9"
 grep -q '^{"summary":"1 lane: 1 building","keep":"keep me","fresh":true}$' <<<"$r9" && ok "tick rewrites the card summary + summaryAt and keeps other fields" || bad "tick summary: $r9"
+grep -q '^exported 1 lane: 1 building at$' <<<"$r9" && ok "the export carries the tick's summary + summaryAt to the page" || bad "summary not exported: $r9"
 # CI run 5: on Linux GNU `stat -f %m` is filesystem status (junk, rc 0). Emulate GNU stat; the file's mtime must come back.
 g9="$(LIB="$(dirname "$SRC")/lib" F="$R9/osrc/hub/projects/p.json" bash -c '
 . "$LIB/hub.sh"
