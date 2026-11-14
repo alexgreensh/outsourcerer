@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eEu
+set -eu
 # Name the command that stops the suite, so a CI-only exit is never silent.
 trap 'echo "FAIL: test_accounts stopped at line $LINENO: $BASH_COMMAND" >&2' ERR
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -219,7 +219,8 @@ printf 'PASS: inherited account does not force or leak selection\n'
 if [ ! -d "$OSRC_HOME/a/skills" ] || [ -L "$OSRC_HOME/a/skills" ]; then echo 'FAIL: real skills directory was not preserved'; exit 1; fi
 [ -d "$OSRC_HOME/a/token-optimizer" ]
 listing=$(/bin/bash "$CLI" accounts)
-[[ "$listing" != *work* ]]
+# Match the ACCOUNT column, not the whole row: CI checkouts live under .../work/..., so the config dir alone matched.
+if awk -F'\t' '$1 == "work" { found = 1 } END { exit !found }' <<<"$listing"; then echo 'FAIL: removed account still listed'; exit 1; fi
 mkdir -p "$OSRC_HOME/link"
 ln -s "$CLI" "$OSRC_HOME/link/osrc"
 listing=$(/bin/bash "$OSRC_HOME/link/osrc" accounts)
