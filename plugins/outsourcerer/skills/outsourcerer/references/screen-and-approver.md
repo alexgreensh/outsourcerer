@@ -79,6 +79,7 @@ send is its own obligation.
 ```
 outsourcerer session approve-policy safe            # this session (OUTSOURCERER_TMUX / $PWD name)
 outsourcerer session approve-policy safe --session osrc-terra-1
+outsourcerer session approve-policy safe --all      # opt in for sandboxed worktree lanes
 outsourcerer session approve-policy off --all       # default for sessions without their own policy
 outsourcerer session approve-policy                 # show
 outsourcerer session approve-tick                   # one pass by hand (supervise calls osrc_approver_tick)
@@ -94,6 +95,10 @@ and never picks "always allow". It needs two things to act:
    `1. Yes, allow creation`.
 
 After pressing Enter it re-reads the screen to confirm the prompt closed.
+For sandboxed lane worktrees, opt in to `safe` for the relevant sessions. Supervision reports
+the count of automatic approvals at the next actionable wake; details are in `$OSRC_HOME/approvals.log`.
+Sealed test runs are held for approval: a worktree-writable runner can be replaced before execution.
+Without an OS isolation tool, a person can choose the explicit `--allow-unisolated` form.
 
 **What `safe` is, and what it is not.** It stops accidents: a delegate that wanders outside its
 worktree, deletes the wrong thing, reads a secret or pushes. It is **not a sandbox**, and it is
@@ -108,7 +113,7 @@ engine's own sandbox.
   second is an output)/stat/cut/jq (no `env`, `$ENV`, `input`)/find (allowlisted
   predicates only, no -exec/-delete/-fprint), sed with only p/d/q/=/n/N/s///, awk inline programs (no `system`, `getline`, `ENVIRON`, pipes, `>`, `@`, `ARGV`/`ARGC`, `SYMTAB`/`FUNCTAB`/`PROCINFO`),
   `git status|log|diff|show|blame|grep|branch --list|stash list|stash show` (no `--output`,
-  `--no-index`, `-O`), `gh pr|issue|run view|list` (no `--web`), `--help`/`--version` on known
+  `--no-index`, `-O`), `--help`/`--version` on known
   commands.
 - Test, build and lint runs, only as the exact script verb: `npm|pnpm|yarn test|lint|build`
   with no extra arguments, pytest/unittest, `cargo|go test|build` (no `-o`, `--manifest-path`),
@@ -121,7 +126,7 @@ engine's own sandbox.
 - `env -u TMUX -u TMUX_PANE …` (and CLAUDECODE, NO_COLOR) in front of an approved command.
 
 **Held** (prints `EVENT approval` and `NEXT … session answer`):
-- rm/delete or any write outside the worktree, a write aimed at the worktree root itself, any
+- Recursive `rm`, rm/delete or any write outside the worktree, a write aimed at the worktree root itself, any
   write into `.git` (`rm -rf .git`, `.git/hooks/*`, `.git/config`).
 - Anything that touches OSRC_HOME: `OSRC_HOME=…`, `env OSRC_HOME=…`, `env -u OSRC_HOME`,
   `unset OSRC_HOME`, `export OSRC_HOME=…`, or the word OSRC_HOME anywhere in the command.
@@ -138,7 +143,7 @@ engine's own sandbox.
   (`user.name`, `user.email`, `core.*`, `branch.*.remote|merge|rebase`, …): config can hold an
   `http.extraheader` token or a token-bearing URL.
 - `git remote -v`/`show`/`get-url` (they print the same URLs); only bare `git remote` approves.
-- `gh api` (every form), `gh pr create/merge`, `gh … --web`, sudo, `curl|wget … | sh`, any network
+- Every `gh` command, sudo, `curl|wget … | sh`, any network
   tool, package installs, `npm publish`, `npm run <anything but the exact verb>`.
 - Secrets (.env*, keys, tokens, `.credentials*` in any case, ~/.ssh, ~/.netrc, keychain, `ps e`,
   printenv/env, shell rc files like `.zshrc`/`.bash_profile` and history files `*_history`),

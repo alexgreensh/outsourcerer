@@ -3,7 +3,7 @@
 #
 #   review queue add <lane-or-branch> [--brief FILE] [--repo R] | queue ls
 #   review reviewer [<tmux-session> [--replace]]    set / show THE reviewer
-#   review next [--force]       send the oldest queued item to the reviewer (one in flight, ever)
+#   review next [--force] [--final]  send the oldest queued item (one in flight, ever)
 #   review show <item> | ack <item> | requeue <item> | drop <item> | sendback <item> | rotate | events
 #
 # Item = $OSRC_HOME/review/items/<lane>-<sha7>.json, created atomically (dedupe by lane + head sha).
@@ -202,33 +202,108 @@ _osrc_review_ingest() {
 }
 
 # ---- brief -------------------------------------------------------------------------------------
-_osrc_review_write_brief() { # <item-id> -> writes review/<id>.md
-  local p="$(_osrc_rv_item "$1")" out="$OSRC_HOME/review/$1.md" lane branch head url tr base brief vf fetch
+_osrc_review_previous() { # <lane> <head> -> newest earlier verdict item with usable evidence
+  local p lane="$1" head="$2" sha ts best=0 bestpath="" id findings
+  while IFS= read -r p; do
+    [ "$(jq -r '.lane // ""' "$p")" = "$lane" ] || continue
+    [ "$(jq -r '.state // ""' "$p")" = verdict ] || continue
+    sha="$(jq -r '.sha_reviewed // ""' "$p")"; [ "$sha" != "$head" ] || continue
+    case "$sha" in ''|*[!0-9a-fA-F]*) continue ;; esac
+    [ "${#sha}" -eq 40 ] || [ "${#sha}" -eq 64 ] || continue
+    id="$(jq -r '.id // ""' "$p")"
+    case "$id" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
+    [ "${#id}" -le 80 ] || continue
+    findings="$(jq -r '.findings // ""' "$p")"
+    [ "$findings" = "$OSRC_HOME/review/$id.VERDICT" ] && [ -f "$findings" ] && [ ! -L "$findings" ] || continue
+    ts="$(jq -r '.verdict_ts // 0' "$p")"; case "$ts" in ''|*[!0-9]*) continue ;; esac
+    if [ "$ts" -ge "$best" ]; then best="$ts"; bestpath="$p"; fi
+  done < <(_osrc_review_items)
+  [ -n "$bestpath" ] || return 1
+  printf '%s' "$bestpath"
+}
+
+_osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
+  local p="$(_osrc_rv_item "$1")" out="$OSRC_HOME/review/$1.md" lane branch head url tr base brief vf fetch prev sha findings report session_root resolved final="${2:-}"
   lane="$(jq -r .lane "$p")"; branch="$(jq -r .branch "$p")"; head="$(jq -r .head "$p")"; url="$(jq -r .url "$p")"
+  _osrc_id_ok "$lane" || return 1
   tr="$(jq -r .transport "$p")"; base="$(jq -r .base "$p")"; brief="$(jq -r .brief "$p")"; vf="$OSRC_HOME/review/$1.VERDICT"
+  prev="$(_osrc_review_previous "$lane" "$head")" || prev=""
+  if [ -n "$prev" ]; then sha="$(jq -r .sha_reviewed "$prev")"; findings="$(jq -r .findings "$prev")"; fi
+  report=""; [ -n "$brief" ] && report="$(dirname "$brief")/../out/$lane-REPORT.md"
+  if [ -f "$report" ] && [ ! -L "$report" ]; then
+    session_root="$(cd "$(dirname "$brief")/.." 2>/dev/null && pwd -P)"
+    resolved="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$report")"
+    case "$resolved" in "$session_root"/out/*) report="$resolved" ;; *) report="" ;; esac
+  fi
   if [ "$tr" = gh ]; then fetch="https://github.com/$url.git"; else fetch="$url"; fi
   {
     printf '# Review request: %s @ %s\n\n' "$lane" "${head:0:7}"
     printf -- '- Lane: %s\n- Branch: %s\n- Head sha (review exactly this): %s\n- Remote: %s\n- Base to diff against: %s\n\n' "$lane" "$branch" "$head" "$fetch" "$base"
-    printf '## Get the change\n\n```\ngit fetch %q %q && git log --oneline FETCH_HEAD -20\ngit diff origin/%s...FETCH_HEAD   # or: git diff $(git merge-base origin/%s FETCH_HEAD) FETCH_HEAD\n' "$fetch" "$branch" "$base" "$base"
-    [ "$tr" = gh ] && printf 'gh api repos/%s/compare/%s...%s -H "Accept: application/vnd.github.diff"\n' "$url" "$base" "$branch"
+    printf '## Get the change\n\n```\ngit fetch %q %q && git log --oneline FETCH_HEAD -20\n' "$fetch" "$branch"
+    if [ -n "$prev" ] && [ "$final" != final ]; then
+      printf 'git diff %s FETCH_HEAD   # changes since the last reviewed commit\n' "$sha"
+    else
+      printf 'git diff origin/%s...FETCH_HEAD   # full diff, required for a final merge review\n' "$base"
+      [ "$tr" = gh ] && printf 'gh api repos/%s/compare/%s...%s -H "Accept: application/vnd.github.diff"\n' "$url" "$base" "$branch"
+    fi
     printf '```\n\nIf FETCH_HEAD is not %s, the lane moved: say so in the verdict and review %s anyway.\n\n' "${head:0:7}" "${head:0:7}"
     if [ -n "$brief" ] && [ -f "$brief" ]; then printf '## The lane'"'"'s own brief (what it was asked to build)\n\n'; cat "$brief"; printf '\n\n'; fi
+    if [ -n "$prev" ]; then
+      printf '## Prior findings: verify each fix with evidence\n\n'
+      sed '1d; s/^/- [ ] /' "$findings"
+      printf '\n'
+      if [ -f "$report" ] && [ ! -L "$report" ]; then
+        printf '## Latest report round\n\n'
+        awk 'tolower($0) ~ /^##[[:space:]]+round([[:space:]:-]|$)/ { text=$0 "\n"; found=1; active=1; next } active && /^##[[:space:]]/ { active=0 } active { text=text $0 "\n" } END { if (found) printf "%s", text; else print "No round section found; request the current round from the lane." }' "$report"
+        printf '\n'
+      else
+        printf '## Latest report round\n\nReport not available; request the current round from the lane.\n\n'
+      fi
+    fi
     printf '## Where to write the verdict\n\nWrite exactly this file: %s\n\nFirst line: one word, MERGE, CHANGES or BLOCK. Below it: findings, most severe first, each with file:line and the fix. MERGE means no findings that must change before merge.\nDo not merge, push or edit the branch. You are the only reviewer; take items one at a time.\n' "$vf"
   } > "$out" || return 1
   printf '%s' "$out"
 }
 
 # ---- rotation ----------------------------------------------------------------------------------
-# After K reviews (OSRC_REVIEW_ROTATE_K, default 6) or context bar over OSRC_REVIEW_CTX_MAX (60%).
+# After K reviews (default 2) or context bar over OSRC_REVIEW_CTX_MAX (35%).
 _osrc_review_rotation_due() { # <session> -> prints reason, rc 0 when due
   local s="$1" f="$OSRC_HOME/review/reviewer.json" n k ctx max
-  k="${OSRC_REVIEW_ROTATE_K:-6}"; max="${OSRC_REVIEW_CTX_MAX:-60}"
+  k="${OSRC_REVIEW_ROTATE_K:-2}"; max="${OSRC_REVIEW_CTX_MAX:-35}"
   n="$(jq -r '.reviews // 0' "$f" 2>/dev/null)"; [ -n "$n" ] || n=0
   if [ "$n" -ge "$k" ] 2>/dev/null; then printf '%s reviews done (limit %s)' "$n" "$k"; return 0; fi
   ctx="$(_osrc_review_ctx_pct "$s")"
   if [ -n "$ctx" ] && [ "$ctx" -gt "$max" ] 2>/dev/null; then printf 'context %s%% (limit %s%%)' "$ctx" "$max"; return 0; fi
   return 1
+}
+
+_osrc_review_idle_retire() { # <session> <now> <screen> <queued> <inflight>
+  local s="$1" now="$2" scr="$3" queued="$4" inflight="$5" marker="$OSRC_HOME/review/idle.$1" since mins lk p st endpoint_lock=""
+  case "$s" in ''|.*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  if [ "$scr" != idle ] || [ "$queued" -ne 0 ] || [ -n "$inflight" ]; then rm -f "$marker"; return 0; fi
+  if [ ! -f "$marker" ]; then printf '%s\n' "$now" > "$marker"; return 0; fi
+  read -r since < "$marker"; case "$since" in ''|*[!0-9]*) printf '%s\n' "$now" > "$marker"; return 0 ;; esac
+  mins="${OSRC_REVIEW_IDLE_MIN:-50}"; case "$mins" in ''|*[!0-9]*) mins=50 ;; esac
+  [ $((now - since)) -ge $((mins * 60)) ] || return 0
+  lk="$OSRC_HOME/review/.next.lock"; _osrc_lock "$lk" || return 0
+  if type _endpoint_mutation_lock >/dev/null 2>&1; then
+    _endpoint_mutation_lock "$s" || { _osrc_unlock "$lk"; return 0; }
+    endpoint_lock="$(printf '%s' "$s" | cksum | awk '{print $1}')"
+  fi
+  if [ "$(_osrc_review_reviewer)" != "$s" ] || [ "$(_osrc_review_screen "$s")" != idle ] || ! _managed_endpoint_live "$s" "$s"; then
+    [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"
+    _osrc_unlock "$lk"; return 0
+  fi
+  for p in $(_osrc_review_items); do
+    st="$(jq -r '.state // ""' "$p")"
+    case "$st" in queued|inflight) [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"; _osrc_unlock "$lk"; rm -f "$marker"; return 0 ;; esac
+  done
+  OUTSOURCERER_TMUX="$s" "$SCRIPT_PATH" session stop >/dev/null 2>&1
+  if ! tmux has-session -t "=$s" 2>/dev/null; then
+    _osrc_jq_set "$OSRC_HOME/review/reviewer.json" '.session="" | .retired=true' && rm -f "$marker"
+  fi
+  [ -z "$endpoint_lock" ] || _endpoint_mutation_unlock "$endpoint_lock"
+  _osrc_unlock "$lk"
 }
 
 # ---- events ------------------------------------------------------------------------------------
@@ -271,6 +346,7 @@ osrc_review_events() {
     return 0
   fi
   scr="$(_osrc_review_screen "$s")"
+  _osrc_review_idle_retire "$s" "$now" "$scr" "$nq" "$inflight"
   if [ -n "$inflight" ]; then
     local sent; sent="$(jq -r .sent_ts "$(_osrc_rv_item "$inflight")")"
     if [ "$scr" = idle ] && [ $(( now - sent )) -ge "$send_grace" ] && _osrc_ev_due .reviewer "rvstopped:$inflight" "$renotify"; then
@@ -382,8 +458,8 @@ _osrc_review_set_reviewer() {
 }
 
 _osrc_review_next() {
-  local force="" s p chosen="" inflight="" scr id brief msg vf now rot lk n
-  [ "${1:-}" != "--force" ] || force=1
+  local force="" final="" s p chosen="" inflight="" scr id brief msg vf now rot lk n
+  while [ "$#" -gt 0 ]; do case "$1" in --force) force=1 ;; --final) final=final ;; *) echo "review next: unknown option $1" >&2; return 2 ;; esac; shift; done
   s="$(_osrc_review_reviewer)"; [ -n "$s" ] || { echo "no reviewer set: review reviewer <tmux-session>" >&2; return 2; }
   tmux has-session -t "=$s" 2>/dev/null || { echo "reviewer session '$s' is gone: $(_osrc_self) review rotate" >&2; return 2; }
   mkdir -p "$OSRC_HOME/review"; lk="$OSRC_HOME/review/.next.lock"
@@ -407,7 +483,7 @@ _osrc_review_next() {
   scr="$(_osrc_review_screen "$s")"
   if [ "$scr" != idle ]; then _osrc_unlock "$lk"; echo "reviewer $s is $scr, not idle: not sending" >&2; return 4; fi
   id="$(jq -r .id "$chosen")"
-  brief="$(_osrc_review_write_brief "$id")" || { _osrc_unlock "$lk"; echo "could not write the review brief" >&2; return 1; }
+  brief="$(_osrc_review_write_brief "$id" "$final")" || { _osrc_unlock "$lk"; echo "could not write the review brief" >&2; return 1; }
   vf="$OSRC_HOME/review/$id.VERDICT"; rm -f "$vf"
   msg="Review request $id: read $brief and follow it. Write your verdict to $vf (first line MERGE, CHANGES or BLOCK). One review at a time."
   if _osrc_review_send "$s" "$msg"; then
@@ -468,7 +544,7 @@ _osrc_review_rotate() {
   local s why; s="$(_osrc_review_reviewer)"
   why="$( [ -n "$s" ] && _osrc_review_rotation_due "$s" )"
   echo "Reviewer rotation${why:+ ($why)}. One reviewer at a time:"
-  echo "  1. start a fresh reviewer (same model as the old one), e.g. OUTSOURCERER_TMUX=${s:-reviewer}-r$(( $(jq -r '.reviews // 0' "$OSRC_HOME/review/reviewer.json" 2>/dev/null || echo 0) + 1 )) $(_osrc_self) session start --provider cc -m <model>"
+  echo "  1. start a fresh reviewer (same model as the old one), e.g. OSRC_LEAN_LAUNCH=1 OUTSOURCERER_TMUX=${s:-reviewer}-r$(( $(jq -r '.reviews // 0' "$OSRC_HOME/review/reviewer.json" 2>/dev/null || echo 0) + 1 )) $(_osrc_self) session start --provider cc -m <model>"
   echo "  2. stop the old one: OUTSOURCERER_TMUX=${s:-<old>} $(_osrc_self) session stop   (only after any in-flight verdict is in)"
   echo "  3. $(_osrc_self) review reviewer <new-session>   (counters reset; queued items carry over)"
 }

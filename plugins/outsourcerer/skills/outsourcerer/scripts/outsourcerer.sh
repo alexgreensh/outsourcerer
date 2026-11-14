@@ -4124,6 +4124,8 @@ _route_check_cc() {
   [ "$PROVIDER" = "codex" ] && die "$RESOLVED_ID is Claude-backend-only; it cannot run through Codex/OpenRouter. Drop --provider and let '-m $MODEL' use the claude native lane (uses your Claude subscription)."
 }
 
+# _session_launch_cc lives in lib/leanlaunch.sh.
+
 # ---- or (OpenRouter — metered multi-provider gateway, rode by cc/codex transports)
 # providers=cc codex: those provider tokens mean "route via OpenRouter" in dispatch
 # context (they are or_transport_providers too). disp is provider-split:
@@ -14128,7 +14130,7 @@ delegate_ccnative() {
   # OSRC_CLAUDE_USER_CONFIG=1 is the escape hatch back to the full live surface. OUTSOURCERER_LOADED=1
   # keeps the strict-MCP isolation (it loads CLAUDE.md/skills, NOT MCP — MCP still needs --with mcp=).
   local bare=() load_note="OAuth login, MCP ISOLATED (strict-empty; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then bare=(--bare); load_note="clean (--bare, API key auth, no MCP surface)";
+  if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${OSRC_LEAN_LAUNCH:-0}" != 1 ]; then bare=(--bare); load_note="clean (--bare, API key auth, no MCP surface)";
   elif [ "${OUTSOURCERER_LOADED:-0}" = "1" ]; then load_note="LOADED, full CLAUDE.md + skills (MCP still isolated; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"; fi
   _with_preamble_render "bundle+mcp"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
   local ttier wrapped; ttier="$(resolve_tier "$id" "${TTIER:-}")"; wrapped="$(_build_prompt "$id" "$task" "${TTIER:-}" "bundle+mcp")"
@@ -14138,6 +14140,7 @@ delegate_ccnative() {
   # used, so it can never mislabel an Opus run as $id. Prefer it when you need a proven, independent run.
   [ -n "${CLAUDECODE:-}" ] && printf '>>> [note] running a VERIFIED, independent %s via the CLI. (An in-session Agent subagent with model=%s is the alternative, but it cannot prove which model ran.)\n' "$id" "$id" >&2
   _tier_banner "claude-native" "$id" "$ttier" "$posture | $(_lane_cost_disclosure cc) | env: $load_note"
+  [ "${OSRC_LEAN_LAUNCH:-0}:${OSRC_CLAUDE_USER_CONFIG:-0}" != 1:1 ] || die "lean launch requires strict MCP isolation"
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config; aborting to avoid inheriting live MCP — set OSRC_CLAUDE_USER_CONFIG=1 to override)"
   # SELF-HEAL: strip the nested Claude Code session env so a `claude -p` launched from INSIDE Claude
   # Code authenticates cleanly (inherited CLAUDE_CODE_* vars make the child think it is "not logged
@@ -14463,6 +14466,7 @@ delegate_claudex() {
   # Honest one-time-per-run caveat: unofficial bridge, upstream endpoints are internal/unstable,
   # heavy use without rate limiting has triggered upstream account limits for some users.
   printf '>>> [claudex] UNOFFICIAL community bridge: Claude Code harness + your ChatGPT-sub model via local CLIProxyAPI. Upstream endpoint is internal/not guaranteed; heavy unthrottled use risks provider-side limits. Official alternative for Codex-in-Claude: the openai/codex-plugin-cc plugin.\n' >&2
+  [ "${OSRC_LEAN_LAUNCH:-0}:${OSRC_CLAUDE_USER_CONFIG:-0}" != 1:1 ] || die "lean launch requires strict MCP isolation"
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config)"
   local clean=(-u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_EXECPATH -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN -u ANTHROPIC_API_KEY
                "ANTHROPIC_BASE_URL=$(_claudex_url)" "ANTHROPIC_AUTH_TOKEN=$(_claudex_token)")
@@ -15232,9 +15236,10 @@ delegate_cc() {
   # live project-scoped MCP servers (which can wedge a headless run on interactive OAuth). LOADED
   # brings in CLAUDE.md + skills, NOT MCP — MCP still needs --with mcp=a,b or OSRC_CLAUDE_USER_CONFIG=1.
   local bare=(--bare) load_note="clean (--bare, no MCP surface)"
-  if [ "${OUTSOURCERER_LOADED:-0}" = "1" ]; then
+  if [ "${OUTSOURCERER_LOADED:-0}" = "1" ] || [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ]; then
     bare=(); load_note="LOADED, inherits your full CLAUDE.md + skills (MCP isolated; --with mcp= / OSRC_CLAUDE_USER_CONFIG=1 to load)"
   fi
+  [ "${OSRC_LEAN_LAUNCH:-0}:${OSRC_CLAUDE_USER_CONFIG:-0}" != 1:1 ] || die "lean launch requires strict MCP isolation"
   local sfx=(); [ "${OSRC_STREAM:-0}" = "1" ] && sfx=(--verbose --output-format stream-json)
   build_mcp_flags_cc || die "isolation setup failed (cannot create strict-empty MCP config; aborting to avoid inheriting live MCP — set OSRC_CLAUDE_USER_CONFIG=1 to override)"
   # Grant the coding toolset so a headless mutating job does NOT wedge on an unanswerable Bash
@@ -15498,6 +15503,7 @@ _local_agentic_codex() {
 # LAZY: reuse an existing proxy (OSRC_LOCAL_ANTHROPIC_URL) if present; else launch the shim ONLY here,
 # where the user has explicitly asked for agentic-local; tear it down after. Never eager, never installs.
 _local_agentic_shim() {
+  [ "${OSRC_LEAN_LAUNCH:-0}" != 1 ] || die "lean launch is unavailable for the local shim, which requires --bare"
   local tier="$1" base="$2" model="$3"
   have claude || die "agentic-local via the shim drives 'claude -p' (Claude Code); claude not on PATH."
   local aurl="${OSRC_LOCAL_ANTHROPIC_URL:-}" shim_pid=""

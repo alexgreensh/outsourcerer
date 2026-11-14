@@ -393,6 +393,8 @@ WRITE_SPECS = {"mkdir": Spec("pv"), "touch": Spec("acm"), "cp": Spec("rRpafvn"),
 
 
 def write_rule(name, args, cwd, roots):
+    if name == "rm" and any(a.startswith("-") and not a.startswith("--") and ("r" in a[1:] or "R" in a[1:]) for a in args):
+        raise Hold("recursive rm requires explicit approval")
     pos, _ = parse(name, args, WRITE_SPECS[name])
     if name == "chmod":
         if len(pos) < 2:
@@ -478,16 +480,6 @@ def git_rule(rest, cwd, roots):
     raise Hold("git %s not on the allowlist" % sub)
 
 
-def gh_rule(rest):
-    if rest[:1] == ["api"]:
-        raise Hold("gh api (method and fields are easy to smuggle; not in the safe set)")
-    pair = tuple(rest[:2])
-    if pair not in GH_READ:
-        raise Hold("gh " + " ".join(rest[:2]) + " (publishing / mutating, or not on the allowlist)")
-    parse("gh " + " ".join(pair), rest[2:], GH_SPEC)
-    return "read-only:gh " + " ".join(pair)
-
-
 def runner_rule(name, rest, cwd, roots):
     sp = RUNNER_SPECS[name]
     pos, vals = parse(name, rest, sp)
@@ -567,7 +559,7 @@ def env_rule(args: list[str]) -> list[str]:
 
 NOT_SAFE = {
     "sudo": "privilege escalation", "doas": "privilege escalation", "su": "privilege escalation",
-    "curl": "network tool", "wget": "network tool", "nc": "network tool", "ssh": "network tool",
+    "curl": "network tool", "wget": "network tool", "nc": "network tool", "ssh": "network tool", "gh": "network tool",
     "scp": "network tool", "rsync": "network tool", "ftp": "network tool", "sftp": "network tool",
     "security": "secrets access", "keychain": "secrets access", "printenv": "secrets access",
     "ps": "shows other processes' environments", "lsof": "process inspection",
@@ -630,8 +622,6 @@ def classify_segment(tokens, prev_op, cwd, roots):
         return write_rule(name, rest, cwd, roots), cwd
     if name == "git":
         return git_rule(rest, cwd, roots), cwd
-    if name == "gh":
-        return gh_rule(rest), cwd
     if name in RUNNER_SPECS:
         return runner_rule(name, rest, cwd, roots), cwd
     if name in ("npx", "pnpx"):
@@ -710,6 +700,31 @@ def classify_segment(tokens, prev_op, cwd, roots):
     raise Hold("unknown command: " + name)
 
 
+def sealed_runner(cmd: str, cwd: str, root: str) -> bool:
+    """Recognize only this checkout's isolated runner and worktree test paths."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return False
+    if len(tokens) < 2 or any(c in cmd for c in "|;&<>\n\r"):
+        return False
+    relative_runner = "plugins/outsourcerer/skills/outsourcerer/scripts/sealed-run.sh"
+    runner = os.path.join(root, relative_runner)
+    if tokens[0] not in (relative_runner, runner) or os.path.realpath(runner) != runner or not os.access(runner, os.X_OK):
+        return False
+    platform_tool = {"darwin": "/usr/bin/sandbox-exec", "linux": "/usr/bin/bwrap"}.get(sys.platform)
+    if not platform_tool or not os.access(platform_tool, os.X_OK):
+        return False
+    test_root = os.path.join(root, "plugins/outsourcerer/skills/outsourcerer/scripts/tests")
+    for arg in tokens[1:]:
+        if os.path.isabs(arg) or arg.startswith("-") or any(p in (".", "..", "") for p in arg.split("/")):
+            return False
+        path = resolve(arg, cwd)
+        if not inside(path, [test_root]) or not path.endswith(".sh") or not os.path.isfile(path):
+            return False
+    return True
+
+
 def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple[bool, str]:
     """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set."""
     try:
@@ -735,6 +750,8 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         if not cmd:
             raise Hold("no command visible")
         pre_checks(cmd)
+        if sealed_runner(cmd, cwd, roots[0]):
+            raise Hold("sealed runner is worktree-writable; its isolation cannot be trusted")
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut

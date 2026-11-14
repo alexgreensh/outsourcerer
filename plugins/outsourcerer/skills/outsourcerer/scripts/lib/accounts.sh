@@ -158,17 +158,7 @@ _osrc_account_select() {
   OSRC_ACCOUNT="$name"; OSRC_ACCOUNT_DIR="$dir"; export OSRC_ACCOUNT
 }
 
-_session_launch_cc() {
-  have claude || die "claude not on PATH (needed for a claude session)"
-  [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable cc claude --help
-  SESSION_LAUNCH=("env" "-u" "CLAUDECODE" "-u" "CLAUDE_CODE_ENTRYPOINT" "-u" "CLAUDE_CODE_SESSION_ID" "-u" "CLAUDE_CODE_CHILD_SESSION" "-u" "CLAUDE_CODE_EXECPATH")
-  [ -n "${OSRC_ACCOUNT_DIR:-}" ] && SESSION_LAUNCH+=("CLAUDE_CONFIG_DIR=$OSRC_ACCOUNT_DIR")
-  [ -n "$EFFORT" ] && SESSION_LAUNCH+=("MAX_THINKING_TOKENS=$(_effort_thinking_tokens "$EFFORT")")
-  SESSION_LAUNCH+=("claude")
-  [ "$MODEL_EXPLICIT" = "1" ] && SESSION_LAUNCH+=("--model" "$MODEL")
-  local _ccflag; _ccflag="$(_cc_effort_flag "${EFFORT:-}")"
-  if [ -n "$_ccflag" ] && _session_cc_effort_supported; then SESSION_LAUNCH+=("--effort" "$_ccflag"); fi
-}
+# _session_launch_cc lives in lib/leanlaunch.sh; it adds CLAUDE_CONFIG_DIR when OSRC_ACCOUNT_DIR is set.
 
 _osrc_account_usage() {
   local dir="$1" file="$1/token-optimizer/rate-limits.json" raw c5 r5 c7 r7 ts now

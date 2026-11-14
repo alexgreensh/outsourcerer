@@ -52,6 +52,7 @@ _osrc_cap_valid() { case "$1" in weekly\<\=*|5h\<\=*) return 0 ;; *) return 1 ;;
 _osrc_cap_window() { case "$2" in weekly) echo claude7d ;; 5h) echo claude5h ;; *) return 1 ;; esac; }
 _osrc_cap_specs_for() { printf '%s\n' "${TEST_CAP:-}"; }
 . "$ROOT/lib/accounts.sh"
+. "$ROOT/lib/leanlaunch.sh"
 MODEL_EXPLICIT=0; EFFORT=''; OSRC_ACCOUNT_DIR="$OSRC_HOME/a"
 _cc_effort_flag() { :; }
 _session_launch_cc

@@ -420,6 +420,56 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
 # an `approved` row waking the orchestrator would bring back the approval toil the approver removes.
 _sv_informational() { case "$1" in approved) return 0 ;; esac; return 1; }
 
+_sv_approval_summary() { # <new TSV rows>: report only at an actual wake
+  local count; count="$(printf '%s\n' "$1" | awk -F '\t' '$3 == "approved" { n++ } END { print n+0 }')"
+  [ "$count" -eq 0 ] || printf '[outsourcerer] %s auto-approval(s); log: %s/approvals.log\n' "$count" "$OSRC_HOME" >&2
+}
+
+_sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits atomically
+  local dir="$1" now="$2" interval last tmp
+  interval="$(_sv_num "${OSRC_SUPERVISE_TICK_SECS:-}" 600)"; [ "$interval" -gt 0 ] || interval=600
+  last="$(_sv_num "$(cat "$dir/tick.time" 2>/dev/null)" 0)"
+  [ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0
+  type cmd_hub_export >/dev/null 2>&1 || return 1
+  tmp="$dir/hub.json.tmp.$$"
+  if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; return 1
+  fi
+  mv -f "$tmp" "$dir/hub.json" || return 1
+  printf '%s\n' "$now" > "$dir/tick.time"
+}
+
+_sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY -> review next
+  local rows="$1" dir="$2" row p ts kind target detail next head state key mark
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS="$(printf '\t')" read -r p ts kind target detail next <<< "$row"
+    if [ "$kind" = done ] && type _osrc_id_ok >/dev/null 2>&1 && _osrc_id_ok "$target" \
+      && [ "$next" = "$(_osrc_self) review next" ] && [ -f "$OSRC_HOME/remote/$target.json" ]; then
+      key="$(printf '%s' "$row" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+      case "$key" in *[!0-9a-f]*|'') printf '%s\n' "$row"; continue ;; esac
+      [ "${#key}" -eq 64 ] || { printf '%s\n' "$row"; continue; }
+      mark="$dir/auto.$key"
+      [ -f "$mark" ] && continue
+      head="$(jq -r '.head // ""' "$OSRC_HOME/remote/$target.json" 2>/dev/null)"
+      state="$(type _osrc_review_item_state >/dev/null 2>&1 && _osrc_review_item_state "$target" "$head")"
+      case "$detail" in
+        "READY ${head:0:7} "*)
+          if [ -n "$head" ] && [ "$state" = queued ]; then
+            if mkdir "$mark.lock" 2>/dev/null; then
+              if [ -f "$mark" ]; then rmdir "$mark.lock" 2>/dev/null; continue; fi
+              if ( cmd_review next >/dev/null 2>&1 ) && printf '%s\n' "$ts" > "$mark"; then
+                rmdir "$mark.lock" 2>/dev/null; continue
+              fi
+              rmdir "$mark.lock" 2>/dev/null
+            fi
+          fi ;;
+      esac
+    fi
+    printf '%s\n' "$row"
+  done <<< "$rows"
+}
+
 _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live supervise for <sid> covers
   local f pid
   for f in "$OSRC_HOME/supervise/$1"/armed.*; do
@@ -437,7 +487,7 @@ _sv_fail() { # <reason> <rearm>
 }
 
 cmd_supervise() {
-  local sid="" ids="" once=0 rearm rc watches="" unwatch="" w wid
+  local sid="" ids="" once=0 rearm rc watches="" unwatch="" w wid auto="" kind
   # A signal before the worker starts must still print the failure line, never exit silently.
   trap '_sv_fail "killed by a signal before it armed" "$SCRIPT_PATH supervise"; exit 2' TERM INT HUP
   while [ "$#" -gt 0 ]; do
@@ -445,6 +495,10 @@ cmd_supervise() {
       --session) sid="$(_owner_sid "${2:-}")"; shift 2 ;;
       --session=*) sid="$(_owner_sid "${1#--session=}")"; shift ;;
       --once) once=1; shift ;;
+      --auto|--auto=*)
+        if [ "$1" = --auto ]; then [ "$#" -ge 2 ] || { _sv_fail "--auto needs a value" "$SCRIPT_PATH supervise"; return 2; }; auto="$2"; shift 2; else auto="${1#--auto=}"; shift; fi
+        case "$auto" in ''|,*|*,|*,,*|*[!A-Za-z,]*) _sv_fail "--auto needs done and/or limits" "$SCRIPT_PATH supervise"; return 2 ;; esac
+        for kind in $(printf '%s' "$auto" | tr ',' ' '); do case "$kind" in done|limits) ;; *) _sv_fail "--auto cannot run $kind" "$SCRIPT_PATH supervise"; return 2 ;; esac; done ;;
       --watch|--watch=*)
         if [ "$1" = --watch ]; then w="${2:-}"; shift 2; else w="${1#--watch=}"; shift; fi
         # the list below is newline-separated: refuse control characters before they split a path
@@ -472,7 +526,7 @@ $w" ;;
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
   done <<< "$watches"
-  rearm="$SCRIPT_PATH supervise${sid:+ --session $sid}${ids}"
+  rearm="$SCRIPT_PATH supervise${sid:+ --session $sid}${auto:+ --auto $auto}${ids}"
   if [ -z "$sid" ] && [ -z "$ids" ]; then
     _sv_fail "no Claude Code session id (CLAUDE_CODE_SESSION_ID unset) and no target ids" "$SCRIPT_PATH supervise --session <your-session-id>"
     return 2
@@ -481,6 +535,7 @@ $w" ;;
   # The worker runs in the background so a signal to this process is forwarded to it, and the
   # worker (not a dead parent) prints the `EVENT failed supervise` line before exiting.
   local child
+  export OSRC_SUPERVISE_AUTO="$auto"
   ( _sv_main "$sid" "$once" $ids ) & child=$!
   trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
   while :; do
@@ -503,7 +558,7 @@ _sv_main() { # <sid> <once> [ids...]
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
   trap 'rm -f "$dir/armed.$$"' EXIT
-  trap '_sv_fail "killed by a signal" "$SCRIPT_PATH supervise${sid:+ --session $sid}${explicit:+ $explicit}"; exit 10' TERM INT HUP
+  trap '_sv_fail "killed by a signal" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"; exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$dir/armed.$$"
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
@@ -517,6 +572,10 @@ _sv_main() { # <sid> <once> [ids...]
   t0="$(_sv_now)"
   while :; do
     now="$(_sv_now)"
+    if ! _sv_tick "$dir" "$now"; then
+      _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
+      exit 10
+    fi
     if [ -n "$explicit" ]; then targets="$explicit"
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
     out=0; pend=0; idle_list=""
@@ -546,11 +605,13 @@ _sv_main() { # <sid> <once> [ids...]
     size="$(wc -c 2>/dev/null < "$f" | tr -d ' ')"; size="$(_sv_num "$size" 0)"
     [ "$cursor" -le "$size" ] || cursor=0
     new="$(printf '%s\n%s' "$older" "$(_sv_read_range "$f" "$cursor" "$size" "$tj" "$sid")" | grep .)"
+    case ",${OSRC_SUPERVISE_AUTO:-}," in *,done,*) new="$(_sv_auto_filter "$new" "$dir")" ;; esac
     real="$(printf '%s\n' "$new" | awk -F '\t' '$3 != "approved"' | grep .)"
     if [ -n "$real" ]; then
       [ -n "$first" ] || first="$now"
       # Settle only while some target could still produce an event (working / not yet confirmed).
       if [ $(( now - first )) -ge "$settle" ] || [ "$pend" = 0 ]; then
+        _sv_approval_summary "$new"
         # One pair per target: highest priority, then newest.
         printf '%s\n' "$new" | sort -t "$(printf '\t')" -k1,1n -k2,2nr | awk -F '\t' '!seen[$4]++' \
           | while IFS="$(printf '\t')" read -r _p ts kind tgt detail next; do
@@ -558,10 +619,11 @@ _sv_main() { # <sid> <once> [ids...]
               printf 'NEXT %s\n' "$next"
             done
         printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-        printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${explicit:+ $explicit}" >&2
+        printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
         exit 0
       fi
     elif [ "$out" = 0 ] && [ -z "$first" ]; then
+      _sv_approval_summary "$new"
       nl="$(printf '%s' "$targets" | wc -w | tr -d ' ')"
       printf 'EVENT done all %s no owned live work (%s target(s) settled%s)\n' "$now" "$nl" "${idle_list:+; idle:$idle_list}"
       printf 'NEXT %s fleet ls\n' "$SCRIPT_PATH"
@@ -572,8 +634,9 @@ _sv_main() { # <sid> <once> [ids...]
     fi
     if [ "$once" = 1 ] && [ -z "$first" ]; then exit 1; fi
     if [ "$maxs" -gt 0 ] && [ $(( now - t0 )) -ge "$maxs" ]; then
+      _sv_approval_summary "$new"
       printf 'EVENT stalled supervise %s OSRC_SUPERVISE_MAX_SECS=%s reached with live work and no event\n' "$now" "$maxs"
-      printf 'NEXT %s supervise%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${explicit:+ $explicit}"
+      printf 'NEXT %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}"
       exit 0
     fi
     if [ -n "$first" ]; then

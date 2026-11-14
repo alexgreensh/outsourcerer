@@ -114,6 +114,20 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 `--worktree` runs each editing specialist in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills via `--with` (MCP on the Claude lanes), and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
+For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy safe --all` to approve eligible prompts once and log each decision. The default remains off. Test runs using `scripts/sealed-run.sh` still require approval; without an OS isolation tool they require the explicit `--allow-unisolated` flag.
+
+`outsourcerer handover --check-context` prepares a handover when the current orchestrator reaches 150,000 input tokens. Set `OSRC_ORCH_CTX_MAX` to change the threshold; keep the current orchestrator supervising until its replacement has adopted the work and armed supervision.
+
+Supervision refreshes a project-and-limits snapshot every 10 minutes. Change the interval with `OSRC_SUPERVISE_TICK_SECS`; the snapshot lives in `$OSRC_HOME/supervise/<owner-id>/hub.json`.
+
+`supervise --auto done,limits` can dispatch a verified READY queue item to the reviewer automatically. Verdicts and other judgment calls still wake the orchestrator.
+
+Reviewer rotation defaults to two reviews or 35% context, configurable with `OSRC_REVIEW_ROTATE_K` and `OSRC_REVIEW_CTX_MAX`. An idle managed reviewer with an empty queue is retired after 50 minutes (`OSRC_REVIEW_IDLE_MIN`).
+
+Set `OSRC_LEAN_LAUNCH=1` for Claude sessions and delegates to retain `CLAUDE.md` while using strict MCP configuration without `--bare`. Interactive sessions start with no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a JSON config containing the required servers. Installed skills and plugins are still inherited.
+
+Re-review briefs use the previous reviewed commit and findings. Use `review next --final` for the full base-to-head merge review; per-round reports use `## Round <number>` sections.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---

@@ -36,10 +36,12 @@ lane ls | show <id> | poll [id] | rm <id> | events
 
 ## Review queue (one reviewer, one item in flight)
 
+For a design review, start a fresh reviewer with the browser tools and required design skills available at launch, or provide screenshots captured beforehand. Keep the same design checks and evidence in either case.
+
 ```
 review reviewer <tmux-session> [--replace]   set THE reviewer (refuses a second live one)
 review queue add <lane-or-branch> [--brief F] | queue ls
-review next [--force]    send the oldest queued item as ONE line pointing at a generated brief
+review next [--force] [--final]    send the oldest queued item as ONE line pointing at a generated brief
 review show|ack|requeue|drop|sendback <item> | rotate | events
 ```
 
@@ -54,6 +56,10 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - **Verdict contract**: each item records `sha_at_ready`, `sha_reviewed`, `verdict`, `findings` (path).
   A push after READY supersedes a queued review of the old sha and marks an in-flight or finished one
   `stale`; the new READY head is enqueued as a re-review. A stale MERGE never makes the lane `done`.
+- Re-review briefs compare against the last reviewed commit and turn its findings into a checklist.
+  Lane reports should add a `## Round <number>` section for each round; when available, only the
+  latest round is included. Use `review next --final` for the final merge review, which requests the
+  full base-to-head diff as well as the checklist.
   After CHANGES the lane reads `live` again and its stall clock starts at the verdict, so a lane that
   was sent findings and went silent raises `stalled`.
 - `lane rm` deletes the lane's event stamps, review items and scratch files, so re-adding the same id
@@ -63,9 +69,13 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - **Send-back** for lanes that cannot receive `session send`: `review sendback <item>` writes
   `review/REVIEW-<lane>-<sha7>.md` and prints a relay message. Chosen over pushing a `review/<lane>` ref
   because a push is outward-facing and needs write access to a branch the lane may own or protect.
-- **Rotation**: after `OSRC_REVIEW_ROTATE_K` reviews (6) or a footer context bar over
-  `OSRC_REVIEW_CTX_MAX` percent (60), `review next` refuses and `review rotate` prints the steps for a
-  fresh reviewer. `review reviewer <new> --replace` resets the counters.
+- **Rotation**: after `OSRC_REVIEW_ROTATE_K` reviews (2) or a footer context bar over
+  `OSRC_REVIEW_CTX_MAX` percent (35), `review next` refuses and `review rotate` prints the steps for a
+  fresh reviewer. A managed reviewer idle with an empty queue for `OSRC_REVIEW_IDLE_MIN` minutes (50)
+  is stopped and retired. `review reviewer <new> --replace` resets the counters.
+- Start a fresh Claude reviewer with `OSRC_LEAN_LAUNCH=1`: it retains `CLAUDE.md`, skips `--bare`,
+  and loads no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a config with the required servers.
+  Installed plugins and skills are still inherited.
 - Nothing merges automatically.
 
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
