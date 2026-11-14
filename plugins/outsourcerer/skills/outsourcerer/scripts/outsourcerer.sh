@@ -56,6 +56,10 @@
 #                                  <old-sid> moves that session's owned targets into THIS session.
 #   handover [--out FILE]          Write the markdown brief (targets, kind, state, model, cwd,
 #                                  adopt + wait commands) the NEXT session runs to pick up the fleet.
+#   lane msg|inbox                 Lane-to-lane messages: msg <to|all|orchestrator> "<text>",
+#                                  inbox [--peek]. DATA, never permission. references/lanes.md.
+#   team score|record|budget       One team score per plan/fleet: tests passed on handed-in
+#                                  shas minus a token-cost penalty. `fleet status` prints it.
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
 #   gemini-pro / gemini-flash / gemini-flash-lite  -> Gemini text/agentic lane. Gemini models are
@@ -9058,21 +9062,6 @@ cmd_fleet_show() {
   fi
 }
 
-cmd_fleet() {
-  local sub="${1:-ls}"
-  case "$sub" in --*) sub=ls ;; *) [ "$#" -gt 0 ] && shift ;; esac
-  case "$sub" in
-    adopt) _fleet_todo "$sub" ;;
-    compact) _fleet_todo "$sub" ;;
-    ls) cmd_fleet_ls "$@" ;;
-    name) cmd_fleet_name "$@" ;;
-    sent) _fleet_todo "$sub" ;;
-    show) cmd_fleet_show "$@" ;;
-    supervise) cmd_heartbeat start ;;
-    tell) _fleet_todo "$sub" ;;
-    *) die "fleet subcommand: ls | show | supervise | tell | name | compact | adopt | sent" ;;
-  esac
-}
 
 # =============================================================================
 # CREW / LEARNING LEDGER (slice 1+2). Additive: cost rows stay in ledger.jsonl
@@ -10121,58 +10110,6 @@ cmd_tap() {
   esac
 }
 
-# cmd_brief -> the session-start handshake readout. READ-ONLY, never prompts (safe in bg/CI: prints
-# and returns). The orchestrator runs this on skill activation, then presents the mode menu
-# conversationally per the SKILL.md contract.
-cmd_brief() {
-  local lanes limits mode
-  lanes="$(_ready_lanes 2>/dev/null)"
-  limits="$(_session_limits 2>/dev/null)"
-  printf '== outsourcerer session brief ==\n'
-  # "installed", not "ready". This list is built from which CLIs are present and logged in, which is
-  # not the same as which can currently serve a request: a lane stays installed and authenticated while
-  # its subscription window is exhausted or its backend has stopped answering. Calling that "ready" is
-  # how work gets routed somewhere that cannot take it. `doctor` issues real requests and reports which
-  # of these actually respond.
-  printf 'lanes installed: %s\n' "${lanes:-none detected (run doctor)}"
-  printf '  (installed + logged in — not proof any of them will answer right now; `%s doctor` probes for real)\n' "$0"
-  # Human-readable limits: turn "claude5h=95" into "Claude 5h window: 95%% used" so a non-technical
-  # reader instantly knows high = nearly out. Keep the raw tokens too (agents/scripts parse them).
-  if [ -n "$limits" ]; then
-    local _pretty="" _t
-    for _t in $limits; do case "$_t" in
-      claude5h=*) _pretty="$_pretty · Claude 5h: ${_t#*=}% used" ;;
-      claude7d=*) _pretty="$_pretty · Claude 7d: ${_t#*=}% used" ;;
-      codex5h=*)  _pretty="$_pretty · ChatGPT 5h: ${_t#*=}% used" ;;
-      codexwk=*)  _pretty="$_pretty · ChatGPT weekly: ${_t#*=}% used" ;;
-      codexage=*) _codexstale="${_t#*=}" ;;
-    esac; done
-    if [ -n "${_codexstale:-}" ]; then
-      _pretty="$_pretty  (ChatGPT figures are AT LEAST that used — last reading is $(( _codexstale / 3600 ))h old, from the newest codex session on disk. Usage only rises within a window, so the real number is higher and the lane may be exhausted. Run codex once to refresh.)"
-    fi
-    printf 'limits      :%s   [%s]\n' "${_pretty# · }" "$limits"
-  else
-    printf 'limits      : %s\n' "unavailable (no readable session meter — treat as unknown)"
-  fi
-  [ -z "$limits" ] && printf 'tip         : %s tap install  — one-time statusline tap; makes limit-awareness automatic (no token-optimizer needed)\n' "$0"
-  _conserve_reco "$limits" "$lanes"
-  # Devin plan meter: the one pre-flight signal we own for the shared daily bucket (see the meter
-  # block). Full line whenever devin is installed; otherwise only when there is something to say.
-  if have devin; then _plan_lanes_meter; else _plan_lanes_meter quiet; fi
-  # The user's exclude list (#45), every session: this line is what makes "never use X" persist.
-  _exclude_notice_line
-  if mode="$(_mode_read)"; then printf 'driving mode : %s — %s\n' "$mode" "$(_mode_meaning "$mode")"
-  else printf -- '---\n'; _mode_menu; fi
-  # Self-heal the Devin skills mirror. `brief` runs at session start on EVERY host, so this closes the
-  # loop the user hit: plugin upgrades orphan version-pinned skill links, doctor detected but never
-  # repaired them, and nothing else ran parity. On this hot path it ONLY re-pins already-dead links to
-  # their source's current location (no `prune` arg -> it never DELETES here, and never adds net-new).
-  # So brief's read-only-in-spirit contract holds: it makes reality match the state brief already
-  # reports, deletes nothing, and prints nothing when the mirror is healthy. Pruning of truly-gone
-  # links is left to the explicit `doctor --fix`/`parity`. Opt out with OSRC_BRIEF_NO_HEAL=1 (e.g. a
-  # strictly read-only audit). Never fatal.
-  [ "${OSRC_BRIEF_NO_HEAL:-0}" = "1" ] || _parity_repair_deadlinks 2>/dev/null || true
-}
 
 # =============================================================================
 # MODEL ADVISORY: task-aware model recommendation with benchmark data.
@@ -13414,79 +13351,6 @@ cmd_status() {
   fi
 }
 
-# _watch_digest <id> <interval-secs> <next-label> -> emit a periodic status digest to stdout.
-# No new state file, no background process: reads the same status/progress/started_at the watch
-# loop already reads. Gives a watched job a heartbeat into the running session even when nothing
-# has changed, so a long silent-but-healthy run does not look like a hang.
-_watch_digest() {
-  local id="$1" interval="$2" next="$3" st="$4"
-  local jd="$OSRC_JOBS/$id"
-  local prog started now elapsed
-  prog="$(tail -1 "$jd/progress" 2>/dev/null)"
-  case "$prog" in
-    *OSRC::*) prog="OSRC::$(printf '%s' "${prog##*OSRC::}" | tr -d '"\\')" ;;
-    *) prog="(none yet)" ;;
-  esac
-  started="$(cat "$jd/started_at" 2>/dev/null)"
-  case "$started" in ''|*[!0-9]*) started="" ;; esac
-  now=$(date +%s)
-  if [ -n "$started" ]; then elapsed="$(( now - started ))s"; else elapsed="?"; fi
-  printf 'OSRC::PROGRESS watch %s periodic digest\n- state: %s\n- last: %s\n- elapsed: %s\n- next: %s\n' \
-    "$id" "$st" "$prog" "$elapsed" "$next"
-}
-
-cmd_watch() {
-  _mark_watched "${1:-}"
-  local id="${1:-}"; [ -n "$id" ] || die "watch needs a job id"
-  local jd="$OSRC_JOBS/$id"; [ -d "$jd" ] || die "no such job: $id"
-  local forsec=0; [ "${2:-}" = "--for" ] && forsec="${3:-60}"
-  local t0; t0=$(date +%s); local last="" lastprog=""
-  local deadline="${OSRC_STATUS_DEADLINE:-15}"
-  case "$deadline" in ''|*[!0-9]*|0) deadline=15 ;; esac
-  # Periodic digest cadence: even with no state change, report into the running session so a long
-  # silent-but-healthy run does not look like a hang. OSRC_WATCH_DIGEST_SECS tunes it (default 420s).
-  local digest_secs="${OSRC_WATCH_DIGEST_SECS:-420}"
-  # Validate: a non-numeric value would error under set -u arithmetic; 0/negative would emit every
-  # poll (spam). Require a positive integer, else fall back to the default. (Sol review, MEDIUM.)
-  case "$digest_secs" in ''|*[!0-9]*|0) digest_secs=420 ;; esac
-  [ "$digest_secs" -eq 0 ] 2>/dev/null && digest_secs=420
-  local last_digest; last_digest=$t0
-  while :; do
-    local elapsed; elapsed=$(( $(date +%s) - t0 ))
-    if [ "$elapsed" -ge "$deadline" ]; then
-      printf '[outsourcerer] watch deadline (%ss) reached for %s; stopping.\n' "$deadline" "$id" >&2
-      break
-    fi
-    local st; st="$(cat "$jd/status" 2>/dev/null || echo '?')"
-    # HEARTBEAT: print on a status change OR when a NEW OSRC::PROGRESS marker lands.
-    # Before this, watch was silent for the entire multi-minute 'running' phase even while the delegate
-    # emitted progress — the native equivalent of "going dark" the whole time work is happening.
-    local prog; prog="$(tail -1 "$jd/progress" 2>/dev/null)"
-    if [ "$st" != "$last" ] || { [ -n "$prog" ] && [ "$prog" != "$lastprog" ]; }; then
-      _status_line "$id"; last="$st"; lastprog="$prog"
-    fi
-    # Terminal state FIRST: emit the final digest and break before a periodic tick could double it,
-    # and before --for could exit without it. (Sol review, both LOWs collapse to this ordering.)
-    case "$st" in done|done?|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted)
-      _watch_digest "$id" "$digest_secs" "fetch result" "$st"
-      break ;; esac
-    # Periodic digest: emit on the interval so the session sees the job is still alive even when
-    # status and progress are unchanged. Only reached while non-terminal, so it never doubles.
-    local _now; _now=$(date +%s)
-    if [ $(( _now - last_digest )) -ge "$digest_secs" ]; then
-      _watch_digest "$id" "$digest_secs" "continuing watch; next digest in ${digest_secs}s" "$st"
-      last_digest=$_now
-    fi
-    [ "$forsec" -gt 0 ] && [ "$elapsed" -ge "$forsec" ] && break
-    # A caller can configure a very large poll interval; never let that make
-    # the deadline advisory.  Wake no later than the remaining wall-clock time.
-    local poll="${OSRC_POLL:-10}" remain
-    case "$poll" in ''|*[!0-9]*|0) poll=10 ;; esac
-    remain=$(( deadline - elapsed ))
-    [ "$poll" -gt "$remain" ] && poll=$remain
-    sleep "$poll"
-  done
-}
 
 # cmd_wait <job-id> [--for N] -> BLOCK until <job-id> reaches a terminal state, then exit with an
 # HONEST code. Unlike cmd_watch (a bounded ~15s status poll that stops at OSRC_STATUS_DEADLINE
@@ -13550,7 +13414,7 @@ _wait_session() {
           ;;
       esac
     fi
-    [ "$st" != "$last" ] && { printf '[outsourcerer] wait: %s %s\n' "$id" "${st:-unknown}" >&2; last="$st"; }
+    [ "$st" != "$last" ] && { printf '[outsourcerer] wait: %s %s\n' "$id" "${st:-unknown}" >&2; last="$st"; _osrc_lane_msg_tick "$id"; }
     elapsed=$(( $(date +%s) - t0 ))
     if [ "$forset" = 1 ] && { [ "$forsec" -eq 0 ] || [ "$elapsed" -ge "$forsec" ]; }; then
       printf '[outsourcerer] wait --for %ss elapsed for %s; still %s (non-terminal).\n' "$forsec" "$id" "${st:-live}" >&2
@@ -19185,6 +19049,7 @@ session() {
            printf 'EVENT failed %s %s send did not land: %s | pane: %s\nNEXT OUTSOURCERER_TMUX=%s %s session %s\n' "$SESSION_NAME" "$(date +%s)" "${OSRC_SEND_EVIDENCE:-nothing was submitted}" "$_st" "$SESSION_NAME" "$0" "$([ "${OSRC_SEND_MODAL:-0}" = 1 ] && echo answer || echo state)"
            die "session send failed: nothing was submitted (${OSRC_SEND_EVIDENCE:-no evidence}). Pane state: $_st. Re-check with: $0 session state" ;;
       esac
+      case "$_send_rc" in 0|2) _osrc_lane_msg_maybe_nudge "$SESSION_NAME" ;; esac   # lane msgs: tell the delegate its unread count
       ;;
     state)
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
@@ -20909,7 +20774,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|lane|review|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|lane|review|team|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -20977,6 +20842,7 @@ main() {
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
     lane) cmd_lane "$@" ;; review) cmd_review "$@" ;;   # remote lanes + single-reviewer queue (lib/remote.sh, lib/review.sh)
+    team)        osrc_team "$@" ;;                         # one team score per plan/fleet: tests passed - token-cost penalty
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
@@ -21009,7 +20875,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|team|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|result|logs|cancel|cleanup|tab|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a
@@ -21043,7 +20909,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|lane|review|explain|classify|session|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|lane|review|team|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue|cloud)
       if ! _blind_turn_guard; then

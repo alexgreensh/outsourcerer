@@ -426,7 +426,9 @@ cmd_lane() {
           else local i; for i in $(_osrc_remote_ids); do _osrc_lane_poll "$i" force; done; fi ;;
     rm|remove) _osrc_lane_rm "${1:-}" ;;
     events) osrc_remote_events ;;
-    *) die "lane: add <id> --branch B [--repo R] [--ready M] [--base BR] [--brief F] [--done-when check:\"CMD\"] | ls | show <id> | poll [id] | rm <id> | events" ;;
+    msg) [ -n "${1:-}" ] && [ -n "${2:-}" ] || die "lane msg <to|all|orchestrator> \"<text>\""; osrc_lane_msg "$@" ;;
+    inbox) osrc_lane_inbox "$@" ;;
+    *) die "lane: add <id> --branch B [--repo R] [--ready M] [--base BR] [--brief F] [--done-when check:\"CMD\"] | ls | show <id> | poll [id] | rm <id> | events | msg <to> \"<text>\" | inbox [--peek]" ;;
   esac
 }
 
