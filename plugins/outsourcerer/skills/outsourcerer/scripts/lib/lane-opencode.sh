@@ -1,17 +1,7 @@
 # =============================================================================
-# OPENCODE GO LANE (--provider opencode): the OpenCode Go subscription, driven
-# through the user's `opencode` CLI (`opencode run`). The lane owns its catalog:
-# -m is a Go model id (`glm-5.3-flash`, or full `opencode-go/glm-5.3-flash`),
-# never an Outsourcerer alias. Only `opencode-go/*` ids bill the Go plan — a
-# non-Go provider prefix (`opencode/<id>` = Zen pay-as-you-go or free tier, or
-# any other configured provider) is REFUSED unless OSRC_OPENCODE_ALLOW_NONGO=1,
-# so a Go request can never silently become a Zen bill. There is no -free
-# exception: catalog membership does not prove a $0 price (a repriced model can
-# keep its suffix), so even Zen's free tier needs the explicit opt-in. No
-# hardcoded default model: `opencode run` without -m would fall back to whatever
-# the user configured, which may not be a Go model — so the lane requires -m,
-# and is skipped as a failover TARGET (a hop can only rebuild argv without -m,
-# which would die here).
+# OpenCode lane. Bare model IDs use opencode-go; provider/model IDs pass through.
+# Billing is unproven, so the shared spend gate requires per-command consent.
+# There is no implicit model or failover target.
 #
 # Dispatch: `opencode [--standalone] run --agent <a> -m opencode-go/<id>[#variant]
 # -- "<prompt>" </dev/null`. Stdin is ALWAYS closed: a non-TTY `opencode run`
@@ -62,12 +52,8 @@
 #   * expired key ("API key has expired") — AUTH failure: this lane is marked
 #     down and the renewal instruction surfaced; not a rate limit, never an
 #     outage for other lanes.
-#   * plan/usage-limit phrasing — Go limits are PER-MODEL (monthly allowance
-#     plus rolling windows), so _opencode_plan_limit probes a sibling model
-#     but marks the lane DOWN only when the probe's own refusal names an
-#     account-wide window; a second model-scoped refusal stays a model refusal.
-#     Bare 429/throttling is transport, not a plan limit: the detector anchors
-#     on explicit plan/allowance/window wording like the sibling lanes.
+#   * plan/usage limits do not trigger another potentially paid probe.
+#   * bare 429/throttling is transport, not a plan limit.
 # =============================================================================
 
 # Anchored phrasing only, matched against a FAILED run's captured stderr. Only
@@ -78,11 +64,6 @@
 # the rate limit renders") and on transient provider throttling, which is a
 # transport failure, not a spent plan.
 _OPENCODE_PLAN_LIMIT_RE='usage[ -]?limit[^.]{0,40}(reached|exceeded|exhausted|hit)|monthly allowance|allowance[^.]{0,30}(reached|exceeded|exhausted|spent)|(5[- ]?hour|daily|weekly|monthly)[[:space:]]+(usage[[:space:]]+)?(limit|window|allowance|quota)[^.]{0,40}(reached|exceeded|exhausted|hit|spent)|quota[^.]{0,30}(exceeded|exhausted|reached|spent)|insufficient[[:space:]]+(funds?|credits?|balance|quota)|plan[ -]?wide[[:space:]]+(limit|quota)[^.]{0,30}(reached|exceeded)'
-# Wording that names an ACCOUNT-WIDE scope (rather than one model's allowance):
-# only when a refusal carries one of these does a confirmed probe refusal mean
-# the whole lane is spent. Kept deliberately narrow — marking a per-model
-# refusal lane-down is the failure mode this avoids.
-_OPENCODE_ACCOUNT_LIMIT_RE='account[- ]wide|across[[:space:]]+(all[[:space:]]+)?models|all[[:space:]]+models|whole[[:space:]]+(plan|account)|plan[- ]wide|workspace[- ]wide|organi[sz]ation[- ]wide|team[- ]wide|shared[[:space:]]+(limit|window|allowance|quota|bucket)'
 
 _opencode_go_authed() {
   # Go credentials live in opencode's own auth store; `opencode auth list` prints
@@ -114,13 +95,7 @@ _opencode_ver() {
 }
 _opencode_v2() { [ "$(_opencode_ver)" = "2" ]; }
 
-_opencode_gate() {  # lane gate_fn: cli presence is handled by the cli= field
-  # A non-Go provider/id model does not need Go credentials at all: without the
-  # opt-in the delegate refuses it with the billing error, and with
-  # OSRC_OPENCODE_ALLOW_NONGO=1 it runs on the chosen provider's own auth.
-  case "${MODEL:-}" in */*) case "$MODEL" in opencode-go/*) ;; *) return 0 ;; esac ;; esac
-  _opencode_go_authed || die "the opencode lane needs OpenCode Go credentials: run 'opencode auth login' and choose OpenCode Go (https://opencode.ai). 'opencode auth list' shows the stored credentials — a plain 'OpenCode' entry is Zen pay-as-you-go and does not work here."
-}
+_opencode_gate() { :; }
 
 _opencode_route_check() { _opencode_cli_missing; _opencode_gate; }
 
@@ -134,7 +109,7 @@ _opencode_model() {
   case "$m" in
     ''|*//*|*/) return 1 ;;                               # empty, empty id, or // path
     opencode-go/?*) printf '%s' "$m" ;;
-    */*) [ "${OSRC_OPENCODE_ALLOW_NONGO:-0}" = "1" ] && printf '%s' "$m" || return 1 ;;
+    */*) printf '%s' "$m" ;;
     *) printf 'opencode-go/%s' "$m" ;;
   esac
 }
@@ -147,16 +122,6 @@ _opencode_effort() { # tier -> opencode --variant
     high|xhigh) printf 'high' ;;
     max)    printf 'max' ;;
     *)      printf '' ;;
-  esac
-}
-
-# _opencode_probe_model <refused-model>: cheapest Go id for plan-limit
-# verification (mirrors _devin_plan_probe_model).
-_opencode_probe_model() {
-  local refused; refused="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$refused" in
-    *glm-5.3-flash*) printf 'opencode-go/glm-5.3' ;;
-    *)               printf 'opencode-go/glm-5.3-flash' ;;
   esac
 }
 
@@ -257,70 +222,14 @@ _opencode_classify() {
   return 1
 }
 
-# _opencode_plan_limit <errfile> <model>: probe-then-decide with PER-MODEL
-# semantics — Go limits live on the model (monthly allowance plus rolling
-# windows), so a refused model plus a refused probe model does NOT prove the
-# lane is spent the way it would on a shared-bucket lane. The lane goes DOWN
-# only when the probe's own refusal names an ACCOUNT-WIDE window
-# (_OPENCODE_ACCOUNT_LIMIT_RE); every other outcome is a confirmed model
-# refusal: the failover machinery may hop to another Go model, and no lane
-# marker is written.
+# Never issue a second request to classify a limit: Go extra usage may bill.
 _opencode_plan_limit() {
-  local f="$1" m="$2" line reset secs="" ttl verdict pline
-  line="$(_lane_plan_limit_line opencode "$f")"
+  local f="$1" m="$2" reset secs=""
   reset="$(_lane_limit_reset_phrase "$f")"
   [ -n "$reset" ] && secs="$(_lane_limit_reset_secs "$reset")"
-  ttl="${OSRC_LANE_PLAN_DOWN_TTL:-3600}"; case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
-  [ -n "$secs" ] && ttl=$(( secs + 60 ))
-  printf '>>> [opencode plan limit] OpenCode Go refused "%s" citing a plan/usage limit%s. Go limits are per model — verifying with one sibling model before deciding anything.\n' "$m" "${reset:+ (it says: $reset)}" >&2
-  [ -n "$line" ] && printf '>>> [opencode plan limit] exact wording (for tightening this detector): %s\n' "$line" >&2
-  verdict="$(_lane_free_probe opencode "$m")"
-  pline=""; [ -s "$(_lane_probe_file opencode)" ] && pline="$(LC_ALL=C head -c 160 "$(_lane_probe_file opencode)" | LC_ALL=C tr '\n' ' ' | _utf8_sanitize 2>/dev/null | LC_ALL=C sed -E 's/[[:space:]]+$//')"
-  case "$verdict" in
-    limit-refused)
-      printf '>>> [opencode plan limit] probe CONFIRMED an account-wide window%s — lane marked DOWN for %s (clear early with: %s posture reset). Dispatch + fallback skip it until then.\n' "${pline:+ ($pline)}" "$(_fmt_secs_human "$ttl")" "$0" >&2
-      _lane_down_mark opencode "$ttl" "plan limit exhausted (account-wide window)" "${line:-}${pline:+ | probe: $pline}" || true ;;
-    answered)
-      printf '>>> [opencode plan limit] probe ANSWERED — the lane is up; only "%s" is spent. Signalling a model hop.\n' "$m" >&2 ;;
-    model-refused)
-      printf '>>> [opencode plan limit] probe model refused on ITS OWN model-scoped terms%s — the lane stays UP: two models at their own limits is not a lane outage. Signalling a model hop.\n' "${pline:+ ($pline)}" >&2 ;;
-    *)
-      printf '>>> [opencode plan limit] probe INCONCLUSIVE — nothing proven either way; the lane stays unmarked (per-model refusals never mark it). Retries handle each refusal on its own.\n' >&2 ;;
-  esac
-  case "$verdict" in
-    unreachable) _failover_signal_write opencode "$m" inconclusive "refused \"$m\" citing a plan/usage limit; probe inconclusive" "${secs:-}" 2>/dev/null ;;
-    *)           _failover_signal_write opencode "$m" confirmed "model refused citing its plan/usage limit${secs:+ (resets in $(_fmt_secs_human "$secs"))}" "${secs:-}" 2>/dev/null ;;
-  esac || true
-  rm -f "$(_lane_probe_file opencode)" 2>/dev/null
+  printf '>>> [opencode plan limit] model %s was refused; no additional paid probe was run.\n' "$m" >&2
+  _failover_signal_write opencode "$m" inconclusive "model refused citing a plan/usage limit" "$secs" 2>/dev/null || true
   _quota_note_refusal opencode "$m" 2>/dev/null || true
-  return 0
-}
-
-# _opencode_free_probe -> printed verdict for _lane_free_probe's opencode arm.
-# Probe: cheapest Go model, bounded, stdin closed, plan agent. Verdicts:
-#   answered        the probe model said OK — the lane works
-#   limit-refused   the probe's refusal names an ACCOUNT-WIDE window — the only
-#                   verdict that may mark the lane down
-#   model-refused   the probe refused on model-scoped terms (region, or a
-#                   per-model allowance) — proves nothing about the lane
-#   unreachable     timeout / CLI missing / anything else
-_opencode_free_probe() {
-  local out="" rc=0 secs="${OSRC_LANE_PROBE_SECS:-30}" po sa=()
-  case "$secs" in ''|*[!0-9]*) secs=30 ;; esac
-  if _mkdir_private "$OSRC_HOME" >/dev/null 2>&1; then
-    out="$(_lane_probe_file opencode)"; : > "$out" 2>/dev/null && chmod 600 "$out" 2>/dev/null || out=""
-  fi
-  if ! have opencode; then [ -n "$out" ] && printf 'opencode CLI not on PATH\n' > "$out"; printf 'unreachable'; return 0; fi
-  [ "$(_opencode_ver)" = "2" ] && sa=(--standalone)
-  _timeout "$secs" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode ${sa[@]+"${sa[@]}"} run --agent plan -m "$(_opencode_probe_model "$1")" "reply OK" </dev/null > "${out:-/dev/null}" 2>&1 || rc=$?
-  po=""; [ -n "$out" ] && po="$(LC_ALL=C tr -d '\033' < "$out" 2>/dev/null | LC_ALL=C sed 's/\[[0-9;]*[A-Za-z]//g')"
-  if printf '%s' "$po" | grep -qi 'hosted outside Europe and the United States\|Select Global at ' 2>/dev/null; then printf 'model-refused'; return 0; fi
-  if printf '%s' "$po" | grep -qiE "$_OPENCODE_PLAN_LIMIT_RE" 2>/dev/null; then
-    if printf '%s' "$po" | grep -qiE "$_OPENCODE_ACCOUNT_LIMIT_RE" 2>/dev/null; then printf 'limit-refused'; else printf 'model-refused'; fi
-    return 0
-  fi
-  if [ "$rc" -eq 0 ] && printf '%s' "$po" | grep -qiE '(^|[^A-Za-z])OK([^A-Za-z]|$)' 2>/dev/null; then printf 'answered'; return 0; fi
-  printf 'unreachable'; return 0
 }
 
 delegate_opencode() {
@@ -329,7 +238,7 @@ delegate_opencode() {
   local task="${REST[*]}" id="${MODEL:-}"
   have opencode || _opencode_cli_missing
   [ -n "$id" ] || die "the opencode lane needs -m <go-model-id> (e.g. glm-5.3-flash or opencode-go/glm-5.3-flash; the lane has no default — a bare run would fall back to opencode's own configured model, which may not bill your Go plan). Nothing was run."
-  id="$(_opencode_model "$id")" || die "opencode lane: -m '$id' is not an OpenCode Go model — it would bill OpenCode Zen pay-as-you-go or another configured provider, NOT your Go plan. Pass a Go id (glm-5.3-flash, opencode-go/<id>; list: opencode models | grep '^opencode-go/'), or set OSRC_OPENCODE_ALLOW_NONGO=1 to force."
+  id="$(_opencode_model "$id")" || die "opencode: invalid model id. Nothing was run."
   _validate_model_token "$id"
   local aflag=() posture cfg v; v="$(_opencode_ver)"
   case "$tier" in
@@ -391,7 +300,7 @@ lane_descriptor_opencode() {
     "cost_class=limited" \
     "plan_limited=yes" \
     "compare_class=plan" \
-    "cost_disclosure=\$0 cash, spends your OpenCode Go plan allowance (per-model monthly, plus 20% per 5h and 50% per week windows — live usage in the OpenCode Console)" \
+    "cost_disclosure=billing may be paid; spend consent required when unproven" \
     "is_cloud=yes" \
     "fallback_provider=opencode" \
     "participates_health=yes"
@@ -409,37 +318,12 @@ _doctor_opencode() {
     return 0
   fi
   echo "    opencode Go: credential present. Models: opencode models | grep '^opencode-go/'"
-  if [ "$_doff" = "1" ]; then echo "    opencode liveness: probe skipped (OSRC_DOCTOR_OFFLINE)"
-  elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
-    local _pt _pte _prc=0 _dps="${OSRC_DOCTOR_PROBE_TIMEOUT_SECS:-30}" _dsa=()
-    case "$_dps" in ''|*[!0-9]*) _dps=30 ;; esac
-    _opencode_v2 && _dsa=(--standalone)
-    _pt="$(_timeout "$_dps" env OPENCODE_CONFIG_CONTENT="$(_opencode_config_json readonly)" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode ${_dsa[@]+"${_dsa[@]}"} run --agent plan -m opencode-go/glm-5.3-flash "Reply with exactly: OK" </dev/null 2>&1)" || _prc=$?
-    case "$_pt" in
-      *"hosted outside Europe"*|*"Select Global"*)
-        echo "    opencode liveness: LANE UP, probe model region-refused — glm-5.3-flash is hosted outside Europe/US; select Global at https://opencode.ai/console -> Settings > Privacy > Regions, or run with another Go model" ;;
-      *"API key has expired"*|*"Create a new API key"*)
-        echo "    opencode liveness: AUTH FAILURE — the Go API key has expired; create a new key in OpenCode Console and re-login: opencode auth login"
-        _lane_down_mark opencode "${OSRC_LANE_DOWN_TTL:-300}" "OpenCode Go API key expired" 2>/dev/null || true ;;
-      *)
-        # READY needs the same anchored word-boundary OK _opencode_free_probe uses, anchored to
-        # the END of the ANSI-stripped output (its last line): an HTTP "200 OK" status line or an
-        # OK substring inside an error page must never read as a healthy answer (the probe asks
-        # for exactly: OK). Portable ERE grep — no \b, no grep -w.
-        _pte="$(printf '%s' "$_pt" | LC_ALL=C tr -d '\033' | LC_ALL=C sed 's/\[[0-9;]*[A-Za-z]//g')"
-        _pte="${_pte%"${_pte##*[![:space:]]}"}"
-        if printf '%s' "$_pt" | grep -qiE "$_OPENCODE_PLAN_LIMIT_RE"; then
-          echo "    opencode liveness: lane UP but Go plan allowance spent on the probe model (per-model monthly + 5h/weekly windows — OpenCode Console has the live figure)"
-        elif [ "$_prc" -eq 0 ] && printf '%s\n' "$_pte" | tail -1 | grep -qiE '(^|[^A-Za-z])OK[[:space:]]*$' 2>/dev/null; then
-          echo "    opencode liveness: READY — opencode-go/glm-5.3-flash answered (plan agent, read-only config, stdin closed)"
-        elif [ "$_prc" -eq 0 ]; then
-          echo "    opencode liveness: probe returned but did not echo OK — Go lane suspect"
-        elif printf '%s' "$_pte" | grep -qiE '(^|[^A-Za-z])OK([^A-Za-z]|$)' 2>/dev/null; then
-          echo "    opencode liveness: probe echoed OK but exited rc=$_prc — Go lane suspect"
-        else
-          echo "    opencode liveness: NOT ANSWERING (rc=$_prc) — try a manual 'opencode run -m opencode-go/glm-5.3-flash \"reply OK\" </dev/null'"
-          _lane_down_mark opencode "${OSRC_LANE_DOWN_TTL:-300}" "doctor probe rc=$_prc" 2>/dev/null || true
-        fi ;;
-    esac
-  fi
+  echo "    opencode liveness: probe skipped (billing cannot be verified without spend consent)"
+}
+
+_opencode_fanout_check() {
+  local model="${1:-}" route="${2:-}" label="${3:-}" front="${4:-}"
+  [ -z "$model" ] && [ -n "$route" ] && model="$(_route_match "$label" "$route")"
+  [ -n "$model" ] || model="$front"
+  [ -n "$model" ] || die "fanout: lane 'opencode' needs a model for every job. Nothing was started."
 }

@@ -165,20 +165,11 @@ is Pi's, so do NOT promise a model or price.
 
 ## OpenCode Go lane (`--provider opencode`)
 
-`--provider opencode` delegates through the OpenCode CLI (https://opencode.ai) on your **OpenCode
-Go** subscription. Billing is the Go plan: **$0 cash, spends plan limits** (per-model monthly
-allowance plus 20%-per-5h and 50%-per-week windows — the live figure is in the OpenCode Console;
-there is no usage API, so the lane is deliberately not in `OSRC_PLAN_LANES`, same as
-pi/tokenrouter/grokbot). The roster is opencode's (`opencode models`), not ours.
+`--provider opencode` uses the OpenCode CLI (https://opencode.ai). A model is required.
+A bare ID uses the `opencode-go/` provider; a full `provider/model` is passed through.
+Paid models ask first: approve in the terminal or pass `--spend-ok` on that command.
+Go also asks because a stored credential does not prove whether extra usage is enabled.
 
-- **`-m` is REQUIRED and is a Go model id.** A bare id (`-m glm-5.3-flash`) becomes
-  `opencode-go/glm-5.3-flash`; a full `opencode-go/<id>` passes verbatim. There is no default —
-  without `-m`, `opencode run` would silently use whatever model you configured, which may not bill
-  your Go plan. `opencode models` lists the Go catalog.
-- **Zen is refused, never silently used.** `-m opencode/<id>` (OpenCode Zen pay-as-you-go or free
-  tier) or any other `provider/id` dies with the reason unless you set
-  `OSRC_OPENCODE_ALLOW_NONGO=1`. There is no `-free` exception: catalog membership does not prove
-  a $0 price, so even Zen's free tier needs the explicit opt-in.
 - **Posture is enforced per-run, never by editing your config.** `run`/`explore` get `--agent plan`
   PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies every action, then re-allows only the read
   family (read/glob/grep/question) — a named deny list can never cover task/subagent, webfetch,
@@ -207,14 +198,8 @@ pi/tokenrouter/grokbot). The roster is opencode's (`opencode models`), not ours.
 - **Failures classify honestly.** A per-model region refusal ("hosted outside Europe and the United
   States — select Global in the console's privacy settings") is a model refusal, NOT a lane outage:
   the console instruction is surfaced and failover may pick another model. An expired Go API key is
-  an auth failure — the lane is marked down with the renewal instruction, never a rate limit, and
-  other lanes are unaffected. A plan/usage-limit refusal is verified against a sibling model, but
-  Go limits are per model: the lane is only marked down when the probe's own refusal names an
-  account-wide window — two models at their own limits is a model hop, not a lane outage. Bare
-  429/throttling classifies as transport, never a plan limit.
-- **Not a failover target.** `opencode` is not in `OSRC_FAILOVER_LANES`, and adding it does nothing:
-  a hop can only rebuild argv without `-m` (it cannot name a model on the target lane), and this
-  lane requires `-m` by design — the picker skips it rather than mint a job that dies at the gate.
+  an auth failure. Plan-limit refusals do not trigger a sibling-model probe because that
+  extra request could bill. OpenCode is not a failover target.
 - **Context:** `--with skills=…` travels via the standard staged bundle (the bundle dir is carved
   out as an external_directory allow in both the permissions and policies layers; jq is required
   for that carving). `mcp=` is refused — opencode's MCP semantics differ from the repo's; use your
@@ -224,7 +209,7 @@ pi/tokenrouter/grokbot). The roster is opencode's (`opencode models`), not ours.
   `opencode-ai` npm package is 1.x, both predate the 2.x policies layer), then
   `opencode auth login` and
   choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work).
-  `doctor` probes `opencode-go/glm-5.3-flash` read-only and classifies ready / region / expired-key.
+  `doctor` reports the credential but does not issue a potentially paid probe.
 
 ## Grok Bot lane (`--provider grokbot`)
 

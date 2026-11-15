@@ -211,6 +211,7 @@ osrc_lane_billing() {
   # A hosted/cloud vehicle bills per-use on whatever plan login fronts it.
   case "$disp" in *cloud*|cloud|*hosted*) printf 'metered\n'; return ;; esac
   case "$lane" in
+    opencode) printf 'metered\n'; return ;; # Go extra usage can bill; auth list does not prove its billing state.
     local) printf 'free\n'; return ;;
     or|tokenrouter|gi) printf 'metered\n'; return ;;          # API-key cash lanes by definition
     claudex) printf 'unknown\n'; return ;;                     # CLIProxyAPI upstream billing is not externally provable -> asks

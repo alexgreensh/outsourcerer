@@ -10,7 +10,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-bash -n "$SCRIPT_DIR/../lane-opencode.sh" || { echo "FAIL: lane-opencode.sh bash -n failed"; exit 1; }
+bash -n "$SCRIPT_DIR/../lib/lane-opencode.sh" || { echo "FAIL: lane-opencode.sh bash -n failed"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-oc.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home" OSRC_HEARTBEAT_DISABLED=1; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work" "$TMP/nohome"
 pass=0; fail=0
@@ -48,7 +48,7 @@ echo "opencode stub: unhandled args: \$*" >&2; exit 2
 EOF
 chmod +x "$TMP/bin/opencode"
 
-run() { ( cd "$TMP/work" && env -u OSRC_FAKE_OC_MODE -u OSRC_FAKE_OC_NOAUTH PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode "$@" 2>"$TMP/err" ); }
+run() { ( cd "$TMP/work" && env -u OSRC_FAKE_OC_MODE -u OSRC_FAKE_OC_NOAUTH PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode "$@" 2>"$TMP/err" ); }
 argv() { tr '\n' ' ' < "$TMP/argv" 2>/dev/null; }
 src_fn() { ( export OSRC_SOURCED=1 PATH="$TMP/bin:$PATH"; source "$SRC" >/dev/null 2>&1; "$@" ); }
 
@@ -64,17 +64,14 @@ src_fn _lane_field opencode is_cloud | grep -q '^yes$' && ok "lane is marked clo
 echo "=== model normalization (the Go billing guarantee) ==="
 [ "$(src_fn _opencode_model glm-5.3-flash)" = "opencode-go/glm-5.3-flash" ] && ok "a bare Go id gets the opencode-go/ prefix" || no "bare-id prefixing wrong"
 [ "$(src_fn _opencode_model opencode-go/kimi-k3.1-pro)" = "opencode-go/kimi-k3.1-pro" ] && ok "a full opencode-go/ id passes verbatim" || no "full id rewritten"
-src_fn _opencode_model 'opencode/some-free' >/dev/null 2>&1 && no "a Zen -free id passed without the opt-in" || ok "a Zen -free id is refused without OSRC_OPENCODE_ALLOW_NONGO (catalog membership is not a \$0 price)"
-src_fn _opencode_model 'opencode-go/' >/dev/null 2>&1 && no "an empty opencode-go/ id normalized" || ok "opencode-go/ with an empty id is refused"
-src_fn _opencode_model 'a//b' >/dev/null 2>&1 && no "a // path normalized" || ok "a token with // is refused"
-src_fn _opencode_model 'opencode/nothere-free' >/dev/null 2>&1 && no "an unlisted -free id passed on suffix trust" || ok "every opencode/* id is refused without the opt-in (suffix is not a billing guarantee)"
+[ "$(src_fn _opencode_model opencode/some-free)" = "opencode/some-free" ] && ok "non-Go ID passes through" || no "non-Go ID rejected"
+src_fn _opencode_model 'opencode-go/' >/dev/null 2>&1 && no "empty ID accepted" || ok "empty ID rejected"
+src_fn _opencode_model 'a//b' >/dev/null 2>&1 && no "invalid path accepted" || ok "invalid path rejected"
 rm -f "$TMP/argv"
-out="$(run run -m opencode/glm-5.3 'x' 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && grep -q 'not an OpenCode Go model' "$TMP/err" && [ ! -f "$TMP/argv" ] \
-  && ok "opencode/<id> (Zen pay-as-you-go) is refused before dispatch" || no "Zen id not refused rc=$rc err=$(tail -2 "$TMP/err")"
-[ ! -f "$TMP/argv" ] && ok "the refused Zen run never reached the CLI" || no "Zen id reached the CLI"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 OSRC_OPENCODE_ALLOW_NONGO=1 "$SRC" --provider opencode run -m opencode/glm-5.3 'x' 2>"$TMP/err" )"
-case "$(argv)" in *"-m opencode/glm-5.3"*) ok "OSRC_OPENCODE_ALLOW_NONGO=1 is the explicit opt-in (verbatim id)" ;; *) no "opt-in did not pass the id: [$(argv)]" ;; esac
+out="$(cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_SPEND_OK=1 OSRC_CLOUD_ACK=1 "$SRC" --provider opencode run -m opencode/glm-5.3 x 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$TMP/argv" ] && ok "inherited spend flag cannot authorize paid launch" || no "inherited spend flag authorized launch"
+out="$(run run -m opencode/glm-5.3 x)"; rc=$?
+[ "$rc" -eq 0 ] && case "$(argv)" in *"-m opencode/glm-5.3"*) true ;; *) false ;; esac && ok "per-command consent permits non-Go model" || no "consented non-Go run failed"
 [ "$(src_fn lane_from_name opencode-go/deepseek-v4.1-flash)" = "opencode" ] && ok "an explicit opencode-go/ model routes to the lane without --provider" || no "family_globs routing missing"
 [ "$(src_fn lane_from_name opencode-go/claude-sonnet-4.6)" = "opencode" ] && ok "an opencode-go/ id whose tail matches another lane's family still routes to opencode" || no "opencode-go/ id shadowed by a substring glob"
 [ "$(src_fn lane_from_name opencode/mega-free)" = "opencode" ] && ok "an explicit opencode/ Zen id also routes here (to be refused or allowed correctly)" || no "opencode/ prefix does not route to the lane"
@@ -137,52 +134,42 @@ echo "=== failure classification ==="
 # OSRC_FAILOVER_MAX=0 pins the run to the opencode lane: otherwise a confirmed refusal hops lanes
 # and this test box's real CLIs could answer (and spend a plan) — the signal-write contract itself
 # is checked statically below.
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=region OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m deepseek-v4.1-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=region OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m deepseek-v4.1-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'Global' && printf '%s' "$out" | grep -qi 'region' \
   && ok "a region refusal surfaces the Select-Global console instruction" || no "region refusal handling rc=$rc out=$(printf '%s' "$out" | tail -3)"
 [ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "region refusal does NOT mark the lane down (it is per-model)" || no "region refusal wrongly marked the lane down"
-grep -q '_failover_signal_write opencode "$m" confirmed' "$SCRIPT_DIR/../lane-opencode.sh" \
+grep -q '_failover_signal_write opencode "$m" confirmed' "$SCRIPT_DIR/../lib/lane-opencode.sh" \
   && ok "region/auth refusal writes a confirmed failover signal (another model may be tried)" || no "no failover signal write in the lane"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=expired OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=expired OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'expired' && ok "an expired key surfaces the renewal instruction" || no "expired key handling rc=$rc"
 [ -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "expired key marks THIS lane down (auth failure, other lanes unaffected)" || no "expired key did not mark the lane down"
 rm -f "$OSRC_HOME/lane-posture/opencode.down" 2>/dev/null
 
 echo "=== plan-limit: per-model semantics ==="
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limit OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limit OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'plan limit' && ok "a per-model limit refusal reaches the plan-limit path" || no "limit refusal unclassified rc=$rc out=$(printf '%s' "$out" | tail -3)"
-[ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "refused model + refused probe stays a MODEL refusal — lane NOT marked down" || no "per-model limit wrongly marked the lane down"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limitacct OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && [ -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "an account-wide window confirmed by the probe marks the lane DOWN" || no "account-wide limit did not mark the lane rc=$rc"
+[ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "refused model does not mark the lane down" || no "per-model limit wrongly marked the lane down"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limitacct OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] && ok "unverified account limit does not mark lane down" || no "unverified account limit marked lane down rc=$rc"
 rm -f "$OSRC_HOME/lane-posture/opencode.down" 2>/dev/null
 
 echo "=== generic 429 is transport, not a plan limit ==="
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=t429 OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=t429 OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && ! printf '%s' "$out" | grep -qi 'plan limit' && [ ! -f "$OSRC_HOME/lane-posture/opencode.down" ] \
   && ok "a bare 429/throttle is left to transport handling (no probe, no mark)" || no "429 misclassified rc=$rc out=$(printf '%s' "$out" | tail -2)"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=ok OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'assert that the rate limit should be rendered' 2>&1 )"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=ok OSRC_FAILOVER_MAX=0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'assert that the rate limit should be rendered' 2>&1 )"
 ! printf '%s' "$out" | grep -qi 'plan limit' && ok "task prose about rate limits never triggers the detector" || no "task prose false-positive"
-
-echo "=== probe verdicts (model-scoped refusals) ==="
-[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=region OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "model-refused" ] \
-  && ok "a region-refused probe returns model-refused (never lane-down)" || no "probe region verdict wrong"
-[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limit OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "model-refused" ] \
-  && ok "a per-model-limited probe returns model-refused" || no "probe per-model verdict wrong"
-[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=limitacct OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "limit-refused" ] \
-  && ok "an account-wide-worded probe returns limit-refused" || no "probe account-wide verdict wrong"
-[ "$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_MODE=ok OSRC_HOME="$OSRC_HOME" bash -c "OSRC_SOURCED=1; source '$SRC' >/dev/null 2>&1; _opencode_free_probe glm-5.3" )" = "answered" ] \
-  && ok "a healthy probe returns answered" || no "probe answered verdict wrong"
 
 echo "=== version handling ==="
 rm -f "$TMP/argv"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unparseable\|cannot parse' && [ ! -f "$TMP/argv" ] \
   && ok "an unparseable version refuses the read-only tier (fail closed)" || no "unparseable version fell open rc=$rc"
 rm -f "$TMP/argv"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=3.0.0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=3.0.0 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && [ ! -f "$TMP/argv" ] && ok "an unknown v3 also refuses read-only (unknown major is not guessed)" || no "v3 fell open rc=$rc"
 rm -f "$TMP/argv" "$TMP/occfg" "$TMP/rawargv"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=1.19.5 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash --effort high 'x' 2>&1 )"
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_VER=1.19.5 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash --effort high 'x' 2>&1 )"
 ! head -1 "$TMP/rawargv" 2>/dev/null | grep -qx -- '--standalone' && ok "v1 dispatch has no --standalone" || no "v1 wrongly used --standalone"
 case "$(argv)" in *"--variant high"*) ok "v1 maps effort to --variant" ;; *) no "v1 effort missing: [$(argv)]" ;; esac
 cfg="$(cat "$TMP/occfg" 2>/dev/null)"
@@ -206,16 +193,12 @@ for _v in 1.19.5 2.2.6; do
 done
 
 echo "=== jq guards fail closed ==="
-grep -q '! have jq' "$SCRIPT_DIR/../lane-opencode.sh" && ok "the bundle-carving jq requirement is in the source" || no "missing the jq requirement for staged bundles"
+grep -q '! have jq' "$SCRIPT_DIR/../lib/lane-opencode.sh" && ok "the bundle-carving jq requirement is in the source" || no "missing the jq requirement for staged bundles"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/jq" && chmod +x "$TMP/bin/jq"
 rm -f "$TMP/argv"
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'unenforced\|not valid JSON' && [ ! -f "$TMP/argv" ] && ok "a failing jq on the config validator refuses before dispatch" || no "broken-jq fell open rc=$rc out=$(printf '%s' "$out" | tail -3)"
 rm -f "$TMP/bin/jq"
-
-echo "=== non-Go opt-in does not need Go credentials ==="
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_OPENCODE_ALLOW_NONGO=1 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m opencode/some-free 'x' 2>&1 )"; rc=$?
-[ "$rc" -eq 0 ] && ok "ALLOW_NONGO=1 + no Go credential still dispatches (the opt-in provider's own auth applies)" || no "non-Go opt-in wrongly demanded Go auth rc=$rc out=$(printf '%s' "$out" | tail -2)"
 
 echo "=== ledger ==="
 rm -f "$OSRC_HOME/ledger.jsonl"
@@ -229,31 +212,22 @@ printf '%s' "$dout" | grep -q 'OpenCode Go lane' && ok "doctor has an OpenCode G
 printf '%s' "$dout" | grep -q 'credential present' && ok "doctor sees the Go credential" || no "doctor missed the credential"
 dout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_DOCTOR_OFFLINE=1 "$SRC" doctor 2>&1 )"
 printf '%s' "$dout" | grep -q 'NO OpenCode Go credential' && ok "doctor distinguishes a missing Go credential from a Zen one" || no "doctor missed the noauth state"
-dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" doctor 2>&1 )"
-printf '%s' "$dout" | grep -q 'liveness: READY' && ok "doctor probes glm-5.3-flash and reports READY" || no "doctor probe did not report READY"
-dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb OSRC_FAKE_OC_MODE=noise200 "$SRC" doctor 2>&1 )"
-printf '%s' "$dout" | grep -q 'opencode liveness: READY' && no "an HTTP '200 OK' status line inside error output read as READY" || ok "probe output 'HTTP/1.1 200 OK' + error body (rc=0) is NOT READY"
-dout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb OSRC_FAKE_OC_MODE=plainok "$SRC" doctor 2>&1 )"
-printf '%s' "$dout" | grep -q 'opencode liveness: READY' && ok "a plain 'OK' probe reply is READY" || no "plain OK did not report READY: $(printf '%s' "$dout" | grep 'opencode liveness')"
+printf '%s' "$dout" | grep -q 'probe skipped' && ok "doctor avoids paid probes" || no "doctor did not skip probe"
 bout="$( cd "$TMP/work" && env -i PATH="$TMP/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$TMP/nohome" OSRC_HOME="$OSRC_HOME" OSRC_HEARTBEAT_DISABLED=1 TERM=dumb "$SRC" brief 2>&1 )"
 printf '%s' "$bout" | grep -q 'opencode=go' && ok "brief advertises opencode=go when authed" || no "brief lacks the ready entry: $(printf '%s' "$bout" | tail -5)"
 
-echo "=== auth gate ==="
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_FAKE_OC_NOAUTH=1 OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'OpenCode Go credential' && ok "a missing Go credential fails with the auth-login pointer" || no "auth gate missing rc=$rc"
-
 echo "=== missing CLI (router seam) ==="
-out="$( cd "$TMP/work" && PATH="/usr/bin:/bin" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="/usr/bin:/bin" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode run -m glm-5.3-flash 'x' 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'opencode CLI not on PATH' && ok "a missing opencode fails loudly with the install hint" || no "missing-CLI path rc=$rc out=$(printf '%s' "$out" | tail -2)"
 printf '%s' "$out" | grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' && no "the install hint pipes a download to a shell" || ok "the install hint never pipes a download to a shell"
 
 echo "=== fanout preflight ==="
-out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider opencode fanout -- "t1" "t2" 2>&1 )"; rc=$?
+out="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --spend-ok --provider opencode fanout -- "t1" "t2" 2>&1 )"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "lane 'opencode' needs a model for every job" && ok "fanout dies up front when a job has no model" || no "fanout model gate missing rc=$rc out=$(printf '%s' "$out" | tail -2)"
 
 echo "=== bg + wait + status round trip ==="
 ( cd "$TMP/work" && git init -q 2>/dev/null && git -c user.email=t@t -c user.name=t commit -qm init --allow-empty 2>/dev/null; true )
-jout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 "$SRC" --provider opencode bg run -m glm-5.3-flash 'reply ok' 2>&1 )"
+jout="$( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 "$SRC" --spend-ok --provider opencode bg run -m glm-5.3-flash 'reply ok' 2>&1 )"
 jid="$(printf '%s' "$jout" | grep -oE '[0-9]{8}-[0-9]{6}-[0-9a-f]+' | head -1)"
 [ -n "$jid" ] && ok "bg launches a supervised job ($jid)" || no "bg did not launch: $(printf '%s' "$jout" | tail -3)"
 if [ -n "$jid" ]; then
