@@ -37,9 +37,18 @@ cp "$D/outsourcerer.sh" "$T/copy/outsourcerer.sh"
 cp -R "$D/lib" "$T/copy/lib"
 rm "$T/copy/lib/lane-opencode.sh"
 unset OSRC_SOURCED
-out="$(OSRC_DOCTOR_OFFLINE=1 "$T/copy/outsourcerer.sh" doctor 2>&1)"; rc=$?
+out="$(OSRC_PROVIDER=local OSRC_DOCTOR_OFFLINE=1 "$T/copy/outsourcerer.sh" doctor 2>&1)"; rc=$?
 check test "$rc" = 0
-if grep -q "_doctor_opencode: command not found" <<< "$out"; then echo "FAIL: missing module doctor"; fail=$((fail+1)); else echo "PASS: missing module doctor"; pass=$((pass+1)); fi
+if grep -q "_doctor_opencode: command not found" <<< "$out" || ! grep -q 'Devin lane' <<< "$out"; then echo "FAIL: missing module doctor"; fail=$((fail+1)); else echo "PASS: missing module doctor"; pass=$((pass+1)); fi
+# Match CI: no terminal, isolated HOME/TMPDIR, and no Devin CLI on the system path.
+ci_path='/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
+if ! PATH="$ci_path" command -v devin >/dev/null 2>&1; then
+  out="$(PATH="$ci_path" OSRC_PROVIDER=local OSRC_DOCTOR_OFFLINE=1 "$T/copy/outsourcerer.sh" doctor </dev/null 2>&1)"; rc=$?
+  check test "$rc" = 0
+  check grep -q 'devin: NOT INSTALLED' <<< "$out"
+else
+  echo 'SKIP: system path contains Devin; missing-CLI CI scenario unavailable'
+fi
 mkdir -p "$T/bin"
 printf '#!/bin/sh\ncase "$1" in --version) echo 2.2.6;; auth) echo "OpenCode Go api";; run|--standalone) touch "%s/dispatched";; esac\n' "$T" > "$T/bin/opencode"
 chmod +x "$T/bin/opencode"
