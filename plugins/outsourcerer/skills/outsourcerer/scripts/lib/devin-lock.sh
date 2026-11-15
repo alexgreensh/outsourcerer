@@ -13,22 +13,39 @@ _devin_lock_debris() {
   [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
 }
 
+# BASHPID is not available in Bash 3.2, and $$ can identify a parent shell.
+_osrc_mutex_self_pid() {
+  if [ -n "${BASHPID:-}" ]; then _OSRC_MUTEX_SELF="$BASHPID"; return 0; fi
+  local f
+  f="$(umask 077; mktemp "$1/.pid.XXXXXX")" || return 1
+  _OSRC_MUTEX_SELF=""
+  sh -c 'echo $PPID' > "$f" 2>/dev/null && { read -r _OSRC_MUTEX_SELF < "$f"; } 2>/dev/null
+  rm -f "$f" 2>/dev/null
+  case "$_OSRC_MUTEX_SELF" in ''|*[!0-9]*) return 1 ;; esac
+}
+
 # A reaper excludes new acquisitions, then checks the same path again. Without
 # that exclusion a stale check can be followed by a rename of a new live mutex.
 _osrc_guarded_mutex_acquire() {
-  local mx="$1.mx" guard="$1.mx.reaping" candidates="$1.mx.candidates" n=0 dead ticket p busy
+  local mx="$1.mx" guard="$1.mx.reaping" candidates="$1.mx.candidates" n=0 dead ticket p busy owner
   mkdir -p "$candidates" 2>/dev/null || return 1
+  _osrc_mutex_self_pid "$candidates" || return 1
+  owner="$_OSRC_MUTEX_SELF"
   while [ "$n" -lt 100 ]; do
     if [ ! -d "$guard" ]; then
       # A ticket covers the mkdir-to-pid window, even if the creator is paused
       # for longer than the legacy ownerless-lock age threshold.
-      ticket="$(umask 077; mktemp "$candidates/${_BASHPID:-$$}.XXXXXX")" || return 1
+      ticket="$(umask 077; mktemp "$candidates/$owner.XXXXXX")" || return 1
       if [ ! -d "$guard" ] && (umask 077; mkdir "$mx") 2>/dev/null; then
         if [ -d "$guard" ]; then
-          rmdir "$mx" 2>/dev/null || { rm -f "$ticket"; return 1; }
+          # The pathname may already name a different generation. Leave an
+          # unowned directory for guarded stale recovery rather than deleting it.
+          rm -f "$ticket" 2>/dev/null
+          return 1
         else
-          printf '%s\n' "${_BASHPID:-$$}" > "$mx/pid" 2>/dev/null || {
-            rm -f "$mx/pid" "$ticket" 2>/dev/null; rmdir "$mx" 2>/dev/null; return 1
+          printf '%s\n' "$owner" > "$mx/pid" 2>/dev/null || {
+            # A failed write does not prove this pathname is still ours.
+            rm -f "$ticket" 2>/dev/null; return 1
           }
           rm -f "$ticket" 2>/dev/null
           return 0
@@ -44,7 +61,7 @@ _osrc_guarded_mutex_acquire() {
         if _devin_pid_gone "$p"; then rm -f "$ticket" 2>/dev/null; else busy=1; fi
       done
       if [ "$busy" = 0 ] && _devin_lock_debris "$mx"; then
-        dead="$mx.dead.${_BASHPID:-$$}.$RANDOM"
+        dead="$mx.dead.$owner.$RANDOM"
         if mv "$mx" "$dead" 2>/dev/null; then
           if _devin_lock_debris "$dead"; then
             rm -rf "$dead" 2>/dev/null
@@ -66,7 +83,45 @@ _osrc_guarded_mutex_acquire() {
   return 1
 }
 
-_osrc_guarded_mutex_release() { rm -rf "$1.mx" 2>/dev/null; }
+_osrc_guarded_mutex_release() {
+  local mx="$1.mx" guard="$1.mx.reaping" candidates="$1.mx.candidates" ticket pid owner n=0 nonce worker rc=0
+  [ -d "$mx" ] || return 0
+  mkdir -p "$candidates" 2>/dev/null || return 1
+  _osrc_mutex_self_pid "$candidates" || return 1
+  owner="$_OSRC_MUTEX_SELF"
+  # Keep a live ticket until rm completes, including its ownerless window.
+  ticket="$(umask 077; mktemp "$candidates/$owner.XXXXXX")" || return 1
+  # A guard already held may have scanned candidates before this ticket existed.
+  # Once it clears, any later reaper must observe our ticket before deleting.
+  while [ -d "$guard" ]; do
+    n=$((n + 1))
+    if [ "$n" -ge 100 ]; then
+      rm -f "$ticket" 2>/dev/null
+      printf 'outsourcerer: mutex release deferred while reclamation guard %s is present.\n' "$guard" >&2
+      return 1
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  pid="$(cat "$mx/pid" 2>/dev/null)"
+  if [ "$pid" != "$owner" ]; then rm -f "$ticket" 2>/dev/null; return 1; fi
+  # The deleting process holds its own ticket across exec. If the calling shell
+  # dies while rm is paused, the reaper still sees the live remover's PID.
+  nonce="$RANDOM.$RANDOM"
+  (
+    _osrc_mutex_self_pid "$candidates" || exit 1
+    local worker_ticket="$candidates/$_OSRC_MUTEX_SELF.$nonce"
+    (umask 077; set -o noclobber; : > "$worker_ticket") 2>/dev/null || exit 1
+    [ -f "$ticket" ] && kill -0 "$owner" 2>/dev/null || exit 1
+    exec rm -rf "$mx"
+  ) 2>/dev/null &
+  worker=$!
+  wait "$worker" || rc=$?
+  if [ "$rc" != 0 ]; then
+    printf 'outsourcerer: mutex release failed for %s; protection remains at %s.\n' "$mx" "$ticket" >&2
+    return 1
+  fi
+  rm -f "$candidates/$worker.$nonce" "$ticket" 2>/dev/null
+}
 _devin_lock_mutex_acquire() { _osrc_guarded_mutex_acquire "$@"; }
 _devin_lock_mutex_release() { _osrc_guarded_mutex_release "$@"; }
 
