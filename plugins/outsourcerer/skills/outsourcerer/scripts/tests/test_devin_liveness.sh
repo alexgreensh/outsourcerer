@@ -252,6 +252,23 @@ grep -aq '^no-init' "$jd5/reason" 2>/dev/null \
   && ok "control: no-init still fires with OSRC_DEVIN_LIVENESS=0" \
   || bad "control: no-init did not fire even with liveness disabled"
 
+# A continuously updated log must not defer no-init indefinitely.
+jd_cap="$TMP/jobs/job-noinit-cap"; mkdir -p "$jd_cap"
+printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd_cap/meta.json"
+cat > "$TMP/cap_writer.sh" <<EOF
+#!/usr/bin/env bash
+while :; do touch "$DLOGS/devin_20260722-444444_\$\$.log"; sleep 1; done
+EOF
+start_cap=$(date +%s)
+OSRC_NOINIT_SECS=3 OSRC_POLL=1 _supervise "$jd_cap" 30 45 60 -- bash "$TMP/cap_writer.sh" >/dev/null 2>&1
+rc_cap=$?
+elapsed_cap=$(( $(date +%s) - start_cap ))
+if [ "$rc_cap" = 125 ] && grep -aq '^no-init' "$jd_cap/reason" 2>/dev/null && [ "$elapsed_cap" -ge 14 ] && [ "$elapsed_cap" -lt 30 ]; then
+  ok "continuous log hits capped no-init before hard timeout (elapsed=${elapsed_cap}s)"
+else
+  bad "continuous log cap failed (rc=$rc_cap, elapsed=${elapsed_cap}s, reason=$(cat "$jd_cap/reason" 2>/dev/null))"
+fi
+
 # STALE LOG: a devin log that PREDATES this job must never disarm no-init. The pid glob is a
 # number, so a log left by an earlier process whose pid the kernel reused would otherwise
 # vouch for a job that never launched devin. Backdating the mtime makes the freshness gate

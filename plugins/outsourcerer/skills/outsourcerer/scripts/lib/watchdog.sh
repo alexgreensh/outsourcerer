@@ -179,7 +179,7 @@ _supervise() {
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0"
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0" ni_start="$t0" ni_cap
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
     local _live_stime; _live_stime="$(_pid_start_identity "$pid" 2>/dev/null || printf '')"
@@ -223,14 +223,16 @@ _supervise() {
     # only before the delegate's first output, so a lockwait file left behind (or written by the
     # delegate itself) cannot disarm a running job; the hard timeout always counts from launch (t0).
     # The queue wait has its own bound (OSRC_DEVIN_LOCK_WAIT_MAX) and its log line names the holder.
-    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; ni0=$now; }
+    [ "$initialized" = "0" ] && [ -f "$jd/lockwait" ] && { qt0=$now; last_change=$now; ni0=$now; ni_start=$now; }
     idle=$(( now - last_change )); age=$(( now - qt0 ))
     # Require positive proof of a model/agent turn. Byte growth alone includes
     # launcher headers, blank lines, stderr diagnostics, and every tier banner.
     if [ "$initialized" = "0" ] && _delegate_has_model_output "$jd/out.log" "$jd/progress"; then
       initialized=1
     elif [ "$initialized" = "0" ] && [ "${OSRC_DEVIN_LIVENESS:-1}" = "1" ] && _idmt="$(_devin_live_mtime "$pid")" && [ -n "$_idmt" ] && [ "$_idmt" -gt "$ni0" ] && [ "$_idmt" -le "$(date +%s)" ]; then
-      ni0="$_idmt"
+      # Log activity can extend startup by at most four windows after lock wait.
+      ni_cap=$(( ni_start + 4 * noinit ))
+      if [ "$_idmt" -gt "$ni_cap" ]; then ni0="$ni_cap"; else ni0="$_idmt"; fi
     fi
     if [ "$initialized" = "0" ] && [ $(( now - ni0 )) -ge "$noinit" ]; then
       local _noinit_reason
