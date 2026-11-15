@@ -2,6 +2,21 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.1
+
+### Added
+
+- **OpenCode lane.** `--provider opencode` runs tasks through the OpenCode CLI with OpenCode Go models. Every OpenCode model asks before it runs (`y/N` in a terminal, `--spend-ok` in scripts), read-only runs deny writes and the task tool, and a repository's own OpenCode settings never change billing or credentials. Thanks to Dani Kamanovsky (#56).
+- **Mission Control is one command away.** `outsourcerer mc` (or `mission-control`, or `/outsourcerer:mission-control`) opens it, and the first background job of the day prints the command.
+
+### Fixed
+
+- **Mission Control shows your work clearly.** Projects carry real names from their repository and task, only sessions doing work right now appear, each card lists its live lanes with model and status, unknown progress shows no bar, and the page loads much faster.
+- **Plan labels say what they mean.** Lanes billed per use read "pay per use", lanes whose plan login can't be confirmed read "plan not confirmed", and subscriptions carry no label.
+- **Healthy Devin jobs keep running.** A short first reply that opens with a status word now counts as output, and a Devin job whose log stays active is handed to the stall and hard-timeout checks instead of being stopped at startup. A malformed `OSRC_NOINIT_SECS` falls back to the default. Thanks to Dani Kamanovsky (#57).
+- **A yes covers what you were shown.** Consent for one lane and model no longer carries to a different pay-per-use lane on a fallback; a fallback moves on to a lane you have already covered.
+- **Busy locks stay quiet.** Two jobs reaching for the same lock no longer print a stray error on Linux.
+
 ## 0.16.0
 
 ### Added
