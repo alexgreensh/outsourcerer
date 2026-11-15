@@ -134,6 +134,7 @@ exec /usr/bin/perl -e "alarm 600; exec @ARGV" "$@"' sealed-run)
       developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || { echo 'sealed-run: OS isolation unavailable; xcode-select failed' >&2; exit 78; }
       (cd / && /usr/bin/python3 -I - "$profile" "$root" "$t" "$agents" "$developer" "$git_common" <<'PY'
 import json, os, sys
+from pathlib import Path
 q = lambda p: json.dumps(p)
 system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
 system.append(os.path.realpath(sys.argv[5]))
@@ -150,10 +151,16 @@ with open(sys.argv[1], 'w') as f:
     f.write('(allow file-write* (literal "/dev/null") (literal "/dev/zero"))\n')
     # Descriptor aliases allow pipe redirection, not creation of filesystem paths.
     f.write('(allow file-write-data (regex #"^/dev/fd/[0-9]+$"))\n')
-    # Bash 3.2 ignores TMPDIR for here-docs. Hide its system temp candidates so
-    # get_sys_tmpdir falls back to cwd, which the launcher pins to scratch.
+    ancestors = set()
+    for path in sys.argv[2:4] + sys.argv[6:7]:
+        ancestors.update(str(p) for p in Path(os.path.realpath(path)).parents)
+    for p in sorted(ancestors):
+        f.write('(allow file-read-metadata (literal %s))\n' % q(p))
+    # Git resolves ancestor metadata. Do not hide those directories or their
+    # aliases; this grants no access to their other files or directory listings.
     for p in ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/usr/tmp']:
-        f.write('(deny file-read-metadata (literal %s))\n' % q(p))
+        if os.path.realpath(p) not in ancestors:
+            f.write('(deny file-read-metadata (literal %s))\n' % q(p))
     for v in sys.argv[4].split():
         for d in ['/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin']:
             p = os.path.realpath(os.path.join(d, v))

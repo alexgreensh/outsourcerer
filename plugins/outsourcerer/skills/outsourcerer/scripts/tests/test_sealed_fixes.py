@@ -173,6 +173,31 @@ class SealedFixes(unittest.TestCase):
         self.assertNotIn('(allow file-read* (subpath "/private/tmp"))', policy)
         self.assertNotIn('(allow file-read* file-map-executable (subpath "/private/tmp"))', policy)
 
+    def test_mac_profile_allows_temp_ancestor_metadata_without_temp_contents(self):
+        generator = self.source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        profile = self.base / 'ancestors.sb'
+        root = '/private/tmp/checkout/work'
+        scratch = '/private/tmp/scratch/run'
+        common = '/private/var/tmp/main/.git'
+        result = subprocess.run(['/usr/bin/python3', '-I', '-', str(profile), root, scratch,
+                                 '', '/Library/Developer/CommandLineTools', common],
+                                input=generator, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        policy = profile.read_text()
+        for parent in ('/', '/private', '/private/tmp', '/private/tmp/checkout',
+                       '/private/tmp/scratch', '/private/var', '/private/var/tmp', '/private/var/tmp/main'):
+            self.assertIn('(allow file-read-metadata (literal "' + parent + '"))', policy)
+            self.assertNotIn('(deny file-read-metadata (literal "' + parent + '"))', policy)
+        for parent in ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'):
+            denial = '(deny file-read-metadata (literal "' + parent + '"))'
+            if os.path.realpath(parent) in ('/private/tmp', '/private/var/tmp'):
+                self.assertNotIn(denial, policy)
+            else:
+                self.assertIn(denial, policy)
+            self.assertNotIn('(allow file-read* (subpath "' + parent + '"))', policy)
+            self.assertNotIn('(allow file-read* file-map-executable (subpath "' + parent + '"))', policy)
+        self.assertIn('(deny file-read-metadata (literal "/usr/tmp"))', policy)
+
     def test_matrix_timeout_terminates_then_kills_and_cleans_scratch(self):
         temp = self.base / 'tmp'
         temp.mkdir()
