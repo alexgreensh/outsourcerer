@@ -26,8 +26,8 @@ _osrc_pinned_assert() {
 
 _osrc_pin_provider() {
   case "$1" in
-    devin) printf devin ;; cxnative|codexor) printf codex ;; ccnative|ccor) printf cc ;;
-    gmnative) printf gemini ;; local|claudex|droid|cursor|hermes|warp|cline|pi|grokbot|tokenrouter|opencode) printf '%s' "$1" ;;
+    devin) printf devin ;; codexor) printf codex ;; ccor) printf cc ;;
+    ccnative|cxnative|gmnative|local|claudex|droid|cursor|hermes|warp|cline|pi|grokbot|tokenrouter|opencode) printf '%s' "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -76,14 +76,21 @@ _osrc_preflight_native() {
   RESOLVED_ID="$resolved"
 }
 
+_osrc_pin_engine_default() {
+  case "${_OSRC_PIN_DISP:-}" in droid|cursor|hermes|warp|cline|pi|grokbot) ;; *) return 1 ;; esac
+  [ "${_OSRC_PIN_MODEL:-}" = "$(_lane_field "$_OSRC_PIN_DISP" default_model)" ]
+}
+
 # Replace only leading model flags, never task text or another flag's value.
 _osrc_pin_argv() {
   local verb="$1"; shift
-  _OSRC_PIN_ARGV=("$verb" -m "$_OSRC_PIN_MODEL")
+  _OSRC_PIN_ARGV=("$verb")
+  _osrc_pin_engine_default || _OSRC_PIN_ARGV+=(-m "$_OSRC_PIN_MODEL")
   while [ $# -gt 0 ]; do
     case "$1" in
-      -m|--model) shift 2 ;;
-      --tier|--with|--perm|--account|--cap|--trust-lane|--effort|--reasoning) _OSRC_PIN_ARGV+=("$1" "$2"); shift 2 ;;
+      -m|--model) [ $# -ge 2 ] || return 1; shift 2 ;;
+      --model=*|-m?*) shift ;;
+      --tier|--with|--perm|--account|--cap|--trust-lane|--effort|--reasoning) [ $# -ge 2 ] || return 1; _OSRC_PIN_ARGV+=("$1" "$2"); shift 2 ;;
       --perm=*|--cap=*|--allow-downgrade|--force-lane|--spend-ok|--no-advise|--cloud-ack|--wait|--foreground) _OSRC_PIN_ARGV+=("$1"); shift ;;
       *) _OSRC_PIN_ARGV+=("$@"); break ;;
     esac
@@ -102,9 +109,6 @@ $record
 EOF_PIN
   case "$record" in *[[:space:]]*) return 1 ;; esac
   [ -n "$_OSRC_PIN_LANE" ] && [ -n "$_OSRC_PIN_MODEL" ] && [ -n "$_OSRC_PIN_DISP" ] && [ -n "$_OSRC_PIN_PROVIDER" ] && [ -z "$extra" ] || return 1
-  # These are engine placeholders, not runnable model IDs. Pinning them would
-  # silently change a provider-default launch into an invalid explicit model.
-  case "$_OSRC_PIN_MODEL" in droid-default|cursor-default|hermes-default|warp-default|cline-default|pi-default|grokbot-default) echo "bg: provider default model cannot be pinned; specify -m explicitly." >&2; return 1 ;; esac
   case "$_OSRC_PIN_AUTH" in 0|1) ;; *) return 1 ;; esac
   _OSRC_PREFLIGHT_PAIR=""
   [ "$_OSRC_PIN_AUTH" = 1 ] && _OSRC_PREFLIGHT_PAIR="$_OSRC_PIN_LANE|$_OSRC_PIN_MODEL"

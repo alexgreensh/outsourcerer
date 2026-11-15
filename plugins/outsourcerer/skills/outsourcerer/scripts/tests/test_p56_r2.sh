@@ -203,7 +203,7 @@ _probe_preflight() (
   pair="$(_osrc_bg_preflight "$D/outsourcerer.sh")" || probe_rc=$?
   [ -e "$T/codex-probed" ] || { echo 'codex probe missing'; return 1; }
   [ ! -e "$T/secret-leaked" ] || { echo 'private key reached a probe'; return 1; }
-  if [ "$probe_rc" != 0 ]; then [ -z "$pair" ]; else case "$pair" in 'cx|'*'|cxnative|codex|0') true ;; *) echo "probe record: $pair"; false ;; esac; fi
+  if [ "$probe_rc" != 0 ]; then [ -z "$pair" ]; else case "$pair" in 'cx|'*'|cxnative|cxnative|0') true ;; *) echo "probe record: $pair"; false ;; esac; fi
 )
 check _probe_preflight
 _startup_probe() (
@@ -212,7 +212,7 @@ _startup_probe() (
   local probe_rc=0
   pair="$(_osrc_bg_preflight "$D/outsourcerer.sh")" || probe_rc=$?
   [ -e "$T/dirname-probed" ] && [ ! -e "$T/secret-leaked" ] || return 1
-  if [ "$probe_rc" != 0 ]; then [ -z "$pair" ]; else case "$pair" in 'cx|'*'|cxnative|codex|0') true ;; *) return 1 ;; esac; fi
+  if [ "$probe_rc" != 0 ]; then [ -z "$pair" ]; else case "$pair" in 'cx|'*'|cxnative|cxnative|0') true ;; *) return 1 ;; esac; fi
 )
 check _startup_probe
 cat > "$T/bin/opencode" <<EOF_PROBE
@@ -324,13 +324,51 @@ if [ -n "$real_id" ]; then
   if [ -s "$T/real-child-argv" ] && grep -q -x -- "$real_expected" "$T/real-child-argv" && [ "$(jq -r '.model' "$OSRC_JOBS/$real_id/meta.json")" = "$real_expected" ]; then echo 'PASS: real bg child ran the preflight model'; pass=$((pass+1)); else echo "FAIL: real bg child did not run pinned model: $real_out"; fail=$((fail+1)); fi
   OSRC_SOURCED=0 "$D/outsourcerer.sh" wait "$real_id" >/dev/null 2>&1; check test "$?" = 0
 fi
-_unknown_engine_default() (
+_engine_defaults() (
+  local lane default
+  for lane in droid cursor hermes warp cline pi grokbot; do
+    default="$(_lane_field "$lane" default_model)"
+    _osrc_preflight_unpack "$lane|$default|$lane|$lane|1" || return 1
+    _osrc_pin_argv run --spend-ok 'engine task' || return 1
+    [ "${_OSRC_PIN_ARGV[*]}" = 'run --spend-ok engine task' ] || return 1
+    MODEL="$default"; MODEL_EXPLICIT=0; PROVIDER="$lane"
+    _lane_cli_gate() { :; }
+    _osrc_pinned_resolve || return 1
+    [ "$disp" = "$lane" ] && [ "$RESOLVED_ID" = "$default" ] && [ "$_OSRC_PREFLIGHT_PAIR" = "$lane|$default" ] || return 1
+  done
+)
+check _engine_defaults
+_pin_flag_forms() (
+  _OSRC_PIN_DISP=devin; _OSRC_PIN_MODEL=pinned
+  _osrc_pin_argv run --model=old -mold --tier capable 'task -m text' || return 1
+  [ "${_OSRC_PIN_ARGV[*]}" = 'run -m pinned --tier capable task -m text' ] || return 1
+  ! _osrc_pin_argv run --tier && ! _osrc_pin_argv run -m
+)
+check _pin_flag_forms
+_engine_default_bg() (
   export OSRC_SOURCED=0; SCRIPT_PATH="$D/outsourcerer.sh"; OSRC_SPEND_NEXT=x
   printf '#!/bin/sh\nexit 0\n' > "$T/bin/droid"; chmod +x "$T/bin/droid"
-  _bg_launch() { : > "$T/default-launch"; echo unexpected; }
-  cmd_bg --spend-ok --provider droid run task >"$T/default-output" 2>&1
+  _bg_cloud_preack() { :; }; _wake_on_finish_hint() { :; }; _async_supervision_notice() { :; }
+  _bg_launch() { [ "$PROVIDER|$_OSRC_PIN_DISP|$_OSRC_PREFLIGHT_PAIR|$*" = 'droid|droid|droid|droid-default|run task' ] || return 1; echo 20261115-120000-default; }
+  cmd_bg --spend-ok --provider droid run task >/dev/null 2>&1
 )
-if _unknown_engine_default; then echo 'FAIL: unknown engine default launched'; fail=$((fail+1)); elif [ -e "$T/default-launch" ] || ! grep -q 'specify -m' "$T/default-output"; then echo 'FAIL: unknown engine default refusal'; fail=$((fail+1)); else echo 'PASS: unknown engine default refused before launch'; pass=$((pass+1)); fi
+check _engine_default_bg
+_native_job_metadata() (
+  local lane output id i
+  for lane in ccnative cxnative gmnative; do [ "$(_osrc_pin_provider "$lane")" = "$lane" ] || return 1; done
+  cat > "$T/bin/codex" <<EOF_NATIVE
+#!/bin/bash
+case "\${1:-}" in exec) printf '%s' "\$OUTSOURCERER_PROVIDER" > "$T/native-child-provider"; echo 'OSRC::DONE fixture' ;; *) echo 'Logged in using ChatGPT' ;; esac
+EOF_NATIVE
+  chmod +x "$T/bin/codex"
+  output="$(cd "$T/work" && OSRC_SOURCED=0 OSRC_CLOUD_ACK=1 "$D/outsourcerer.sh" bg --spend-ok run -m sol 'native metadata fixture' 2>&1)" || return 1
+  id="$(printf '%s\n' "$output" | awk 'NF==1 && $1 ~ /^[0-9]{8}-[0-9]{6}-/ {print $1; exit}')"
+  [ -n "$id" ] || return 1
+  for i in $(seq 1 45); do [ -s "$T/native-child-provider" ] && [ -f "$OSRC_JOBS/$id/meta.json" ] && break; sleep 1; done
+  [ "$(jq -r '.provider + "|" + .lane' "$OSRC_JOBS/$id/meta.json")" = 'cxnative|cx' ] && [ "$(cat "$T/native-child-provider")" = cxnative ] || return 1
+  OSRC_SOURCED=0 "$D/outsourcerer.sh" wait "$id" >/dev/null 2>&1
+)
+check _native_job_metadata
 _child_disables_advise() (
   export OSRC_ADVISE=1; unset OSRC_NO_ADVISE
   _OSRC_PIN_DISP=devin; _OSRC_PIN_MODEL=swe-2-high

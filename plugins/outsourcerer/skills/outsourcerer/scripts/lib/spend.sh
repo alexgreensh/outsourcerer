@@ -498,7 +498,7 @@ _osrc_bg_preflight_capture() {
   export -n _osrc_preflight_key
   _osrc_preflight_key="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   [ "${#_osrc_preflight_key}" = 32 ] || return 1
-  buf="$({ pair="$(BASH_ENV= ENV= OSRC_NO_ADVISE=1 /bin/bash -c 'set +x; export -n _osrc_preflight_key; IFS= read -r _osrc_preflight_key <&4 || exit 1; exec 4<&-; . "$0" "$@"' "$@" --osrc-preflight-internal --osrc-preflight-pair-fd ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} ${_pf_args[@]+"${_pf_args[@]}"} 4<<<"$_osrc_preflight_key" 3>&-)"; rc=$?; pair="${pair##*$'\n'}"; printf '\n__OSRC_PAIR__%s\n' "$pair"; exit "$rc"; } 2>&1)" || rc=$?
+  buf="$({ pair="$(BASH_ENV= ENV= OSRC_NO_ADVISE=1 "${BASH:-bash}" -c 'set +x; export -n _osrc_preflight_key; IFS= read -r _osrc_preflight_key <&4 || exit 1; exec 4<&-; . "$0" "$@"' "$@" --osrc-preflight-internal --osrc-preflight-pair-fd ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} ${_pf_args[@]+"${_pf_args[@]}"} 4<<<"$_osrc_preflight_key" 3>&-)"; rc=$?; pair="${pair##*$'\n'}"; printf '\n__OSRC_PAIR__%s\n' "$pair"; exit "$rc"; } 2>&1)" || rc=$?
   tail="${buf##*$'\n'}"
   case "$tail" in __OSRC_PAIR__*) pair="${tail#__OSRC_PAIR__}" ;; *) return 1 ;; esac
   if [ "$rc" -ne 0 ]; then buf="${buf%$'\n'*}"; printf '%s\n' "$buf" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2; return "$rc"; fi
