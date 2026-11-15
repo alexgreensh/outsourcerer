@@ -66,7 +66,8 @@ rm -f "$qf"
 # (the non-sandbox path used to discard stderr, hiding the quota signal). The `: > "$_dverr"` init + a
 # single devin invocation through _run_tee_stderr (which drains tee before returning) is the marker; a
 # leftover `2> >(tee` process substitution can return before the file is written (CI 43739334624).
-grep -qF ': > "$_dverr"' "$SRC" && grep -qF '_run_tee_stderr "$_dverr" devin' "$SRC" && ! grep -vE '^[[:space:]]*#' "$SRC" | grep -qF '> >(tee' && ok "devin stderr capture unified (quota signal visible on both paths)" || bad "devin stderr capture not unified"
+_src_code=$(grep -vE '^[[:space:]]*#' "$SRC")
+grep -qF ': > "$_dverr"' "$SRC" && grep -qF '_run_tee_stderr "$_dverr" devin' "$SRC" && ! grep -qF '> >(tee' <<<"$_src_code" && ok "devin stderr capture unified (quota signal visible on both paths)" || bad "devin stderr capture not unified"
 
 echo "----"
 echo "tool-bugs-062: $pass passed, $fail failed"
