@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
-T="$(mktemp -d "${TMPDIR:-/tmp}/devin-lock-race.XXXXXX")" || exit 1
+T="$(mktemp -d "${TMPDIR%/}/devin-lock-race.XXXXXX")" || exit 1
 export HOME="$T/home" OSRC_HOME="$T/osrc"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$HOME" "$OSRC_HOME"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Pause one stale reaper while another contender attempts the same election.
 set -uo pipefail
-T="$(mktemp -d "${TMPDIR:-/tmp}/heartbeat-election-race.XXXXXX")" || exit 1
+T="$(mktemp -d "${TMPDIR%/}/heartbeat-election-race.XXXXXX")" || exit 1
 export HOME="$T/home" OSRC_HOME="$T/state" OSRC_FORCE_MKDIR_ELECTION=1 OSRC_STATE_LOCK_STALE_SECS=0
 mkdir -p "$HOME" "$OSRC_HOME"
 a=""; b=""

@@ -274,7 +274,7 @@ print('linux boundaries isolated')
     def test_python_suite_executes_in_bounded_runner(self):
         with tempfile.TemporaryDirectory(prefix='.python-suite-', dir=ROOT) as d:
             suite = Path(d) / 'fixture.py'
-            suite.write_text('import os\nassert os.environ["HOME"] == os.path.join(os.environ["OSRC_HOME"], "home")\nprint("python suite executed")\nraise SystemExit(7)\n')
+            suite.write_text('import os\nassert os.environ["HOME"] == os.path.join(os.environ["OSRC_HOME"], "home")\nassert os.path.realpath(os.environ["TMPDIR"]) == os.path.realpath("/tmp")\nprint("python suite executed")\nraise SystemExit(7)\n')
             shell = '''
 for fn in _run_unit_suite_bounded; do
   eval "$(sed -n '/^'"${fn}"'() {/,/^}/p' "$1")"
@@ -283,8 +283,10 @@ OSRC_SUITE_TIMEOUT=0
 _run_unit_suite_bounded "$2"
 printf '%s\\n%s\\n' "$_suite_rc" "$_suite_out"
 '''
+            env = dict(os.environ)
+            env.pop('TMPDIR', None)
             result = subprocess.run(['/bin/bash', '-c', shell, 'bash', str(CONFORMANCE), str(suite)],
-                                    capture_output=True, text=True, check=True)
+                                    env=env, capture_output=True, text=True, check=True)
             self.assertEqual(result.stdout.strip(), '7\npython suite executed')
 
     def review(self, final=False, legacy=False, advance=False, moved=False):

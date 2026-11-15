@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # A paused stale reaper must not remove a later generation of the lock.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-stale-lock.XXXXXX")" || exit 1
+T="$(mktemp -d "${TMPDIR%/}/osrc-stale-lock.XXXXXX")" || exit 1
 export HOME="$T/home" OSRC_HOME="$T/state" OSRC_HEARTBEAT_DISABLED=1
 mkdir -p "$HOME" "$OSRC_HOME"
 a=""; b=""

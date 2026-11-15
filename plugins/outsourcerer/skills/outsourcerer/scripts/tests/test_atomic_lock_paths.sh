@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 . "$DIR/lib_race_barrier.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lock-paths.XXXXXX")" || exit 1
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-lock-paths.XXXXXX")" || exit 1
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state" HOME="$TMP/home" OSRC_HEARTBEAT_DISABLED=1 OSRC_FORCE_MKDIR_ELECTION=1 OSRC_PLAN_LOCK_TRIES=2
 mkdir -p "$HOME" "$OSRC_HOME"

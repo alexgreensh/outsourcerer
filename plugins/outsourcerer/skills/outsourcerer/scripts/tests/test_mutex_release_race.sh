@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Exercise a paused real rm and a replacement during failed PID publication.
 set -uo pipefail
 [ "$(uname -s)" = Linux ] || { echo 'SKIP: release syscall interposition requires Linux'; exit 0; }
 command -v cc >/dev/null 2>&1 || { echo 'FAIL: release syscall test requires a C compiler'; exit 1; }
-T="$(mktemp -d "${TMPDIR:-/tmp}/mutex-release-race.XXXXXX")" || exit 1
+T="$(mktemp -d "${TMPDIR%/}/mutex-release-race.XXXXXX")" || exit 1
 export HOME="$T/home" OSRC_HOME="$T/state"
 mkdir -p "$HOME" "$OSRC_HOME"
 a=""; holder=""; remover=""
