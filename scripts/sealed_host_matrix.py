@@ -46,6 +46,7 @@ def stop_owned(process):
 
 
 def run(command, directory, env, output, timeout):
+    """Stop the owned process group; the caller owns and cleans its scratch."""
     with output.open('w') as log:
         process = subprocess.Popen(['/usr/bin/nice', '-n', '19'] + command, cwd=directory,
                                    env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -59,13 +60,6 @@ def run(command, directory, env, output, timeout):
         except BaseException:
             stop_owned(process)
             raise
-        finally:
-            # This directory belongs only to this suite. Kill the group first,
-            # including on interruption, then remove even SIGKILL leftovers.
-            scratch = Path(env['TMPDIR'])
-            for owned in scratch.glob('.osrc-sealed.*'):
-                if owned.is_dir() and not owned.is_symlink():
-                    shutil.rmtree(owned)
 
 
 def direct_command(command, bindir, agent_paths=None):

@@ -15369,8 +15369,8 @@ delegate_local() {
   local payload; payload="$(jq -cn --arg m "$model" --arg c "$wrapped" '{model:$m,stream:true,messages:[{role:"user",content:$c}]}')"
   # Stream so the liveness watchdog (bg/fanout) sees byte growth, and the user sees tokens live.
   local line data tok rc=0
-  curl -sN --fail-with-body -m "${OSRC_LOCAL_GEN_TIMEOUT:-900}" "$base/chat/completions" \
-       -H 'Content-Type: application/json' -H "Authorization: Bearer ${OSRC_LOCAL_KEY:-local}" \
+  _curl_with_auth "${OSRC_LOCAL_KEY:-local}" -sN --fail-with-body -m "${OSRC_LOCAL_GEN_TIMEOUT:-900}" "$base/chat/completions" \
+       -H 'Content-Type: application/json' \
        -d "$payload" 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       data:*) data="${line#data:}"; data="${data# }"

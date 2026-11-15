@@ -116,7 +116,8 @@ readable. This is a measured compatibility decision for that host, not a guarant
 about process environment access on every macOS version.
 
 Apple Bash 3.2 ignores `TMPDIR` for here-document files. The sealed launcher starts
-in scratch and denies Bash's system temporary folders. A suite that enters the
+in scratch. Other system-temp contents cannot be listed, read, or written. Metadata
+for a guessed path, including its existence, remains visible. A suite that enters the
 read-only checkout must put subsequent here-document blocks in a scratch subshell:
 `(cd "$TMPDIR" || exit 1; ...)`. Keep checkout reads in the parent, and use absolute
 output paths inside that block. Arbitrary here-documents after `cd` into the checkout
@@ -124,9 +125,11 @@ cannot be redirected by setting `TMPDIR`; the checkout remains read-only.
 
 `scripts/sealed_host_matrix.py --out <directory>` stores host evidence under that
 directory; the default is `TMPDIR`, with a unique `sealed-matrix-*` folder. Direct
-runs also use an OS guard to deny installed agents by absolute path. If the guard
-is unavailable they are refused. A timeout terminates the owned process group,
-then kills any remaining descendants and removes its sealed scratch.
+runs also use an OS guard to prevent accidental calls to installed agents by absolute
+path. This is a convenience for test fidelity, not a security boundary; an alternate
+interpreter or entry point can bypass it. If the guard is unavailable direct runs
+are refused. A timeout terminates the owned process group, then kills any remaining
+descendants. The owning per-suite context removes only the scratch it created.
 
 The classifier holds ordinary test and build commands because they execute worktree code.
 Only the exact protected `sealed-run.sh` command with relative `scripts/tests/*.sh` paths can

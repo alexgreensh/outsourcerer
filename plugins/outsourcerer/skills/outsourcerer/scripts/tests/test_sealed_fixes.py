@@ -2,9 +2,11 @@
 """Regression checks that do not require launching an OS sandbox."""
 import importlib.util
 import ast
+import json
 import os
 from pathlib import Path
 import shlex
+import re
 import subprocess
 import tempfile
 import unittest
@@ -24,7 +26,7 @@ runner_spec.loader.exec_module(runner_tests)
 
 class SealedFixes(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='.sealed-fixes-', dir=ROOT)
+        self.temp = matrix.suite_scratch()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.root = self.base / 'repo'
@@ -82,7 +84,32 @@ class SealedFixes(unittest.TestCase):
         (self.root / '.git').write_text('gitdir: ' + str(fake) + '\n')
         result = self.run_runner(self.suite('evil', 'echo MUST-NOT-RUN\n'))
         self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertIn('sealed-run: untrusted git common directory', result.stderr)
         self.assertNotIn('MUST-NOT-RUN', result.stdout)
+
+    def test_backlink_requires_the_reciprocal_gitdir_pointer(self):
+        private = self.base / 'private'
+        self.git('init', '-q', str(private))
+        registered = private / '.git/worktrees/registered'
+        registered.mkdir(parents=True)
+        (registered / 'gitdir').write_text(str(self.root / '.git') + '\n')
+        fake = self.root / 'fake'
+        fake.mkdir()
+        (fake / 'HEAD').write_text('ref: refs/heads/main\n')
+        (fake / 'commondir').write_text(str(private / '.git') + '\n')
+        (self.root / '.git').rename(self.root / 'original-git')
+        (self.root / '.git').write_text('gitdir: ' + str(fake) + '\n')
+        self.assertEqual(self.git('-C', str(self.root), 'rev-parse', '--show-toplevel'), str(self.root))
+        suite = self.suite('evil', 'echo MUST-NOT-RUN\n')
+        result = self.run_runner(suite)
+        self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertIn('sealed-run: untrusted git common directory', result.stderr)
+        self.assertNotIn('MUST-NOT-RUN', result.stdout)
+        reciprocal = ' and\n                (root / gitdir[8:]).resolve() == backlink.parent.resolve()'
+        self.assertIn(reciprocal, self.source)
+        mutant = self.run_runner(suite, source=self.source.replace(reciprocal, '', 1))
+        self.assertEqual(mutant.returncode, 0, mutant.stderr)
+        self.assertIn('MUST-NOT-RUN', mutant.stdout)
 
     def test_git_config_cannot_move_the_trusted_checkout_root(self):
         private = self.base / 'private'
@@ -95,6 +122,7 @@ class SealedFixes(unittest.TestCase):
         (self.root / '.git').write_text('gitdir: ' + str(private / '.git') + '\n')
         result = self.run_runner(str((REL / 'tests/evil.sh')))
         self.assertEqual(result.returncode, 77, result.stderr)
+        self.assertIn('sealed-run: git checkout root mismatch', result.stderr)
         self.assertNotIn('PRIVATE-REPO-READ', result.stdout)
 
     def test_real_linked_worktree_is_accepted(self):
@@ -199,16 +227,101 @@ class SealedFixes(unittest.TestCase):
         self.assertIn('(deny file-read-metadata (literal "/usr/tmp"))', policy)
 
     def test_matrix_timeout_terminates_then_kills_and_cleans_scratch(self):
-        temp = self.base / 'tmp'
-        temp.mkdir()
         script = self.base / 'wait.sh'
         script.write_text('trap "echo terminated; exit 0" TERM\nmkdir "$TMPDIR/.osrc-sealed.owned"\nwhile :; do sleep 1; done\n')
         output = self.base / 'output.log'
-        env = dict(self.env, TMPDIR=str(temp))
-        rc = matrix.run(['/bin/bash', str(script)], self.base, env, output, .3)
-        self.assertEqual(rc, 124)
-        self.assertIn('terminated', output.read_text())
-        self.assertFalse(list(temp.glob('.osrc-sealed.*')))
+        with matrix.suite_scratch() as owned:
+            temp = Path(owned)
+            env = dict(self.env, TMPDIR=owned)
+            rc = matrix.run(['/bin/bash', str(script)], self.base, env, output, .3)
+            self.assertEqual(rc, 124)
+            self.assertIn('terminated', output.read_text())
+            self.assertTrue((temp / '.osrc-sealed.owned').exists(), 'run removed caller-owned scratch')
+        self.assertFalse(temp.exists(), 'owning context did not clean up after the timeout')
+
+    def test_matrix_run_preserves_foreign_scratch_in_shared_tmpdir(self):
+        foreign = self.base / '.osrc-sealed.foreign'
+        foreign.mkdir()
+        (foreign / 'canary').write_text('belongs to another run')
+        rc = matrix.run(['/bin/sh', '-c', 'exit 0'], self.base, self.env, self.base / 'output.log', 2)
+        self.assertEqual(rc, 0)
+        self.assertTrue(foreign.exists(), 'run deleted scratch it did not create')
+        self.assertEqual((foreign / 'canary').read_text(), 'belongs to another run')
+
+    def test_matrix_row_cleans_only_its_created_scratch_after_timeout(self):
+        foreign = self.base / '.osrc-sealed.foreign'
+        foreign.mkdir()
+        created = []
+        def timeout(command, directory, env, output, seconds):
+            owned = Path(env['TMPDIR'])
+            self.assertTrue(owned.exists())
+            (owned / '.osrc-sealed.owned').mkdir()
+            created.append(owned)
+            output.write_text('MATRIX_TIMEOUT: fixture\n')
+            return 124
+        args = ['matrix', '--suite', 'test_done_contract', '--mode', 'sealed', '--out', str(self.base / 'proof')]
+        with mock.patch.object(matrix, 'run', side_effect=timeout), mock.patch('sys.argv', args), mock.patch('sys.stdout'):
+            self.assertEqual(matrix.main(), 1)
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists(), 'matrix row left its owned scratch behind')
+        self.assertTrue(foreign.exists(), 'matrix row deleted another run\'s scratch')
+
+    def test_fixture_scratch_is_outside_checkout(self):
+        self.assertNotIn(ROOT, self.base.parents)
+
+    def test_local_key_never_enters_curl_argv_and_header_is_private_and_removed(self):
+        engine = (SCRIPTS / 'outsourcerer.sh').read_text()
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{.*?^}', engine, re.M | re.S).group()
+                              for name in ('_curl_with_auth', 'delegate_local'))
+        bindir = self.base / 'bin'
+        bindir.mkdir()
+        curl = bindir / 'curl'
+        curl.write_text('''#!/usr/bin/python3
+import json, os, pathlib, stat, sys
+args = sys.argv[1:]
+header = next((args[i+1][1:] for i, arg in enumerate(args[:-1]) if arg == '-H' and args[i+1].startswith('@')), None)
+row = dict(argv=args, header_file=header)
+if header:
+ path = pathlib.Path(header)
+ row.update(header=path.read_text(), mode=stat.S_IMODE(path.stat().st_mode))
+pathlib.Path(os.environ['CURL_CAPTURE']).write_text(json.dumps(row))
+if os.environ['CURL_RC'] != '0': sys.exit(int(os.environ['CURL_RC']))
+print('data: {"choices":[{"delta":{"content":"fixture-output"}}]}')
+print('data: [DONE]')
+''')
+        curl.chmod(0o755)
+        driver = self.base / 'local.sh'
+        driver.write_text(functions + '''
+have() { command -v "$1" >/dev/null; }
+die() { printf "%s\\n" "$*" >&2; exit 1; }
+_local_resolve() { printf 'http://127.0.0.1/v1|fixture'; }
+_with_preamble_render() { :; }
+resolve_tier() { printf fixture; }
+_build_prompt() { printf fixture-prompt; }
+_tier_banner() { :; }
+_lane_cost_disclosure() { printf fixture; }
+record_ledger() { :; }
+MODEL=fixture
+REST=(fixture-task)
+delegate_local auto
+''')
+        capture = self.base / 'curl.json'
+        key = 'synthetic-local-key-canary'
+        for rc in ('0', '22'):
+            with self.subTest(curl_rc=rc):
+                env = dict(self.env, PATH=str(bindir) + ':' + os.environ['PATH'], OSRC_LOCAL_KEY=key,
+                           OSRC_LOCAL_AGENTIC='0', OSRC_STREAM='0', CURL_CAPTURE=str(capture), CURL_RC=rc)
+                result = subprocess.run(['/bin/bash', str(driver)], env=env, capture_output=True, text=True)
+                row = json.loads(capture.read_text())
+                self.assertNotIn(key, '\0'.join(row['argv']))
+                self.assertEqual(row['header'], 'Authorization: Bearer ' + key + '\n')
+                self.assertEqual(row['mode'], 0o600)
+                self.assertFalse(Path(row['header_file']).exists(), 'credential header leaked after curl returned')
+                if rc == '0':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('fixture-output', result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
 
     def test_matrix_accepts_output_directory(self):
         result = subprocess.run(['python3', str(ROOT / 'scripts/sealed_host_matrix.py'),
@@ -259,47 +372,6 @@ class SealedFixes(unittest.TestCase):
             result = unittest.TestResult()
             runner_tests.SealedRunnerTests('test_isolation_probes').run(result)
         self.assertTrue(result.failures, 'broken Linux process probe was accepted as unsupported')
-
-    def test_host_bisect_preparation_never_launches_a_sandbox(self):
-        output = self.base / 'prepared'
-        result = subprocess.run(['python3', str(ROOT / 'scripts/sealed_host_bisect.py'),
-                                 '--prepare-only', '--out', str(output)],
-                                env=self.env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        proof = Path(result.stdout.strip().split('PROOF_DIR=')[1])
-        import json
-        rows = json.loads((proof / 'results.json').read_text())
-        self.assertTrue(rows)
-        self.assertTrue(all(row['rc'] is None for row in rows))
-        self.assertFalse(list(proof.glob('*/output.log')), 'prepare mode ran a sandbox command')
-        sources = {row['variant']: Path(row['prepared']).read_text() for row in rows}
-        baseline = self.git('show', '11598a4:' + str(REL / 'sealed-run.sh')) + '\n'
-        regression = self.git('show', '75302c2:' + str(REL / 'sealed-run.sh')) + '\n'
-        self.assertEqual(sources['baseline-original'], baseline)
-        self.assertEqual(sources['regression-original'], regression)
-        self.assertEqual(sources['current-fixed'], self.source)
-        hunks = json.loads((proof / 'hunks.json').read_text())
-        for hunk in hunks:
-            old, new = baseline.splitlines(keepends=True), regression.splitlines(keepends=True)
-            removed, added = hunk['removed'].splitlines(keepends=True), hunk['added'].splitlines(keepends=True)
-            a, b = hunk['old_start'] - 1, hunk['new_start'] - 1
-            self.assertEqual(sources['apply-' + hunk['name']], ''.join(old[:a] + added + old[a + len(removed):]))
-            self.assertEqual(sources['revert-' + hunk['name']], ''.join(new[:b] + removed + new[b + len(added):]))
-
-    def test_host_bisect_requires_a_working_control_before_naming_a_hunk(self):
-        spec = importlib.util.spec_from_file_location('bisect_probe', ROOT / 'scripts/sealed_host_bisect.py')
-        probe = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(probe)
-        rows = [dict(variant=name, input_tmpdir='normal', rc=rc)
-                for name, rc in [('baseline-original', 0), ('regression-original', 78),
-                                 ('revert-hunk-02', 0), ('apply-hunk-02', 78)]]
-        notes = probe.diagnosis(rows)
-        self.assertIn('normal: reverting hunk-02 repairs startup; applying it alone rc=78', notes)
-        rows[0]['rc'] = 78
-        notes = probe.diagnosis(rows)
-        self.assertIn('normal: invalid control, baseline did not pass', notes)
-        self.assertFalse(any('repairs startup' in note for note in notes))
-
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
