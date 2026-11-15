@@ -11525,7 +11525,7 @@ cmd_bg() {
   _osrc_preflight_unpack "$_pfroute" || die "bg: preflight returned an incomplete or invalid route; nothing started."
   [ "$_OSRC_PIN_AUTH" = 1 ] && OSRC_SPEND_OK=1
   PROVIDER="$_OSRC_PIN_PROVIDER"; PROVIDER_EXPLICIT=1
-  _osrc_pin_argv "$@"; set -- "${_OSRC_PIN_ARGV[@]}"
+  _osrc_pin_argv "$@" || die "bg: incomplete flag in pinned arguments"; set -- "${_OSRC_PIN_ARGV[@]}"
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
