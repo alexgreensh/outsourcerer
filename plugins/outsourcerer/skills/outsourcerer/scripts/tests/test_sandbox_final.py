@@ -144,7 +144,7 @@ class SandboxFinal(unittest.TestCase):
         self.assertNotIn('(allow file-read* (subpath "/"))', source)
         self.assertIn('(deny network*)', source)
 
-    def test_mac_profile_reads_only_common_git_and_process_metadata(self):
+    def test_mac_profile_reads_git_without_process_permissions(self):
         generator = RUNNER.read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
         with tempfile.TemporaryDirectory(prefix='.git-process-profile-', dir=ROOT) as d:
             p = Path(d); profile = p / 'profile.sb'; common = p / 'main/.git'
@@ -156,7 +156,7 @@ class SandboxFinal(unittest.TestCase):
             self.assertIn('(allow file-read* (subpath "' + str(common) + '"))', policy)
             self.assertNotIn('(subpath "' + str(common.parent) + '")', policy)
             for operation in ('process-info-pidinfo', 'process-info-listpids'):
-                self.assertIn('(allow ' + operation + ')', policy)
+                self.assertNotIn('(allow ' + operation + ')', policy)
             self.assertNotIn('(allow process-info*)', policy)
             self.assertNotIn('no-sandbox', policy)
             self.assertIn('(allow file-write-data (regex #"^/dev/fd/[0-9]+$"))', policy)

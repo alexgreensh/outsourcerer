@@ -31,7 +31,11 @@ for test_path in ${tests[@]+"${tests[@]}"}; do
     case "$line" in '# sealed-run-requires: '*)
       reason="${line#\# sealed-run-requires: }"
       case "$reason" in
-        process-inspection) needs_process=1; continue ;;
+        process-inspection)
+          case "$(uname -s)" in
+            Darwin) echo "sealed-run: unsupported suite: requires process-inspection (macOS ps cannot run safely): $test_path" >&2; exit 77 ;;
+          esac
+          needs_process=1; continue ;;
         network|real-tmux|nested-sandbox) ;;
         *) echo 'sealed-run: invalid capability declaration' >&2; exit 2 ;;
       esac
@@ -53,10 +57,6 @@ case "$(uname -s)" in
   Darwin) [ -x /usr/bin/sandbox-exec ] && isolation=mac ;;
   Linux) [ -x /usr/bin/bwrap ] && isolation=linux ;;
 esac
-if [ "$isolation" = mac ]; then
-  # macOS ps is setuid and cannot exec in Seatbelt. Keep its code, drop elevation.
-  cp /bin/ps "$t/bin/ps" && chmod 0755 "$t/bin/ps" || { echo 'sealed-run: unprivileged process reader unavailable' >&2; exit 78; }
-fi
 if [ "$isolation" = none ]; then
   { [ "$unisolated" = 1 ] && [ "$check" = 0 ]; } || { echo 'sealed-run: OS isolation unavailable; use --allow-unisolated for a manual run' >&2; exit 78; }
   echo 'sealed-run: WARNING: running without OS isolation' >&2
@@ -93,7 +93,6 @@ system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebr
 system.append(os.path.realpath(sys.argv[5]))
 with open(sys.argv[1], 'w') as f:
     f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
-    f.write('(allow process-info-listpids)\n(allow process-info-pidinfo)\n')
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
     # libignition opens / as an openat root before dyld can start any executable.
     f.write('(allow file-read* (literal "/"))\n')

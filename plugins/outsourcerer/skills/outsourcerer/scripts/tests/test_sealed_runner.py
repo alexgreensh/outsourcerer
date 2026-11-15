@@ -46,7 +46,7 @@ class SealedRunnerTests(unittest.TestCase):
                 if args[0] == 'git': return SimpleNamespace(returncode=0, stdout='', stderr='')
                 if not available:
                     return SimpleNamespace(returncode=78, stdout='', stderr='sealed-run: OS isolation unavailable\n')
-                return SimpleNamespace(returncode=0, stdout='shell scratch isolated\nisolated\n', stderr='')
+                return SimpleNamespace(returncode=0, stdout='shell scratch isolated\nisolated\nprocess metadata readable\n', stderr='')
             with self.subTest(available=available), mock.patch.object(sys, 'platform', 'darwin'), \
                     mock.patch.dict(os.environ), mock.patch.object(os, 'access', return_value=True), \
                     mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.object(sys, 'stdout', new_callable=io.StringIO) as output:
@@ -69,10 +69,6 @@ class SealedRunnerTests(unittest.TestCase):
             backend = root / 'sandbox-exec'
             backend.write_text('''#!/bin/sh
 shift 2
-for argument in "$@"; do
-  case "$argument" in PATH=*) copied="${argument#PATH=}"; copied="${copied%%:*}/ps" ;; esac
-done
-[ -x "$copied" ] && [ ! -u "$copied" ] && [ ! -g "$copied" ] || exit 96
 case " $* " in *sealed-process-probe*) exit 86 ;; esac
 exec "$@"
 '''); backend.chmod(0o755)
@@ -103,6 +99,7 @@ exec "$@"
                         self.assertIn('OS isolation unavailable', result.stderr)
                     if label == 'process inspection unavailable':
                         self.assertIn('requires process-inspection', result.stderr)
+                        self.assertIn('macOS ps cannot run safely', result.stderr)
                         self.assertNotIn('must-not-run', result.stdout)
 
     def test_check_mode_has_no_dead_true_entry(self):
@@ -356,14 +353,6 @@ exec 4<&-
 cd "$scratch"
 printf 'pipe proof' | cat > "$TMPDIR/pipe-proof"
 [ "$(cat "$TMPDIR/pipe-proof")" = 'pipe proof' ]
-[ ! -u "$(command -v ps)" ]
-[ ! -g "$(command -v ps)" ]
-sleep 30 & child=$!
-trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :' EXIT
-ps -o pid=,ppid=,pgid=,lstart= -p "$child" > "$TMPDIR/process"
-[ -s "$TMPDIR/process" ]
-kill "$child"; wait "$child" 2>/dev/null || :
-trap - EXIT
 value="$(cat <<'PROBE'
 shell-here-document
 PROBE
@@ -419,6 +408,21 @@ exec /usr/bin/python3 ''' + shlex.quote(str(py)) + ' ' + shlex.quote(str(secret)
             self.assertEqual(canary.read_text(), 'unchanged')
             self.assertFalse((main / '.git/sealed-write-probe').exists())
             self.assertFalse(outside.exists())
+            process_test = scripts / 'tests/process.sh'
+            process_test.write_text('''#!/bin/bash
+# sealed-run-requires: process-inspection
+set -eu
+ps -o pid=,ppid=,pgid=,lstart= -p "$$" > "${TMPDIR%/}/process"
+[ -s "${TMPDIR%/}/process" ]
+echo 'process metadata readable'
+''')
+            process = subprocess.run([str(scripts / 'sealed-run.sh'), str(process_test.relative_to(root))],
+                                     cwd=root, env=env, capture_output=True, text=True)
+            self.assertIn(process.returncode, (0, 77), process.stdout + process.stderr)
+            if process.returncode == 77:
+                self.assertIn('requires process-inspection', process.stderr)
+            else:
+                self.assertIn('process metadata readable', process.stdout)
 
 
 if __name__ == '__main__':
