@@ -100,31 +100,31 @@ adapter_output() {
 }
 
 out="$(adapter_output droid)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '<droid>' \
-   && printf '%s' "$out" | grep -q '<--auto>' && printf '%s' "$out" | grep -q '<medium>'; then
+if [ "$rc" -eq 0 ] && grep -q '<droid>' <<<"$out" \
+   && grep -q '<--auto>' <<<"$out" && grep -q '<medium>' <<<"$out"; then
   ok "Droid adapter selects its advertised interactive mode with bounded autonomy"
 else
   bad "Droid supported probe did not produce the interactive launch: $out"
 fi
 
 out="$(adapter_output cursor 1 cursor-model)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '<cursor-agent>' \
-   && printf '%s' "$out" | grep -q '<--model>' && printf '%s' "$out" | grep -q '<cursor-model>'; then
+if [ "$rc" -eq 0 ] && grep -q '<cursor-agent>' <<<"$out" \
+   && grep -q '<--model>' <<<"$out" && grep -q '<cursor-model>' <<<"$out"; then
   ok "Cursor adapter preserves an advertised model override"
 else
   bad "Cursor supported probe did not produce the interactive launch: $out"
 fi
 
 out="$(adapter_output hermes 1 provider/model)"; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '<hermes>' \
-   && printf '%s' "$out" | grep -q '<chat>' && printf '%s' "$out" | grep -q '<provider/model>'; then
+if [ "$rc" -eq 0 ] && grep -q '<hermes>' <<<"$out" \
+   && grep -q '<chat>' <<<"$out" && grep -q '<provider/model>' <<<"$out"; then
   ok "Hermes adapter selects interactive chat and preserves its model override"
 else
   bad "Hermes supported probe did not produce the interactive launch: $out"
 fi
 
 out="$(adapter_output droid 1 unavailable-model)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'model'; then
+if [ "$rc" -ne 0 ] && grep -qi 'model' <<<"$out"; then
   ok "Droid REFUSES a pinned-model interactive session naming the model flag (no --model in top-level droid --help)"
 else
   bad "Droid pinned model override did NOT refuse (the bug: it appended --model to interactive droid): rc=$rc out=$out"
@@ -134,8 +134,8 @@ for fixture in 'droid:DROID_HELP_MODE' 'cursor:CURSOR_HELP_MODE' 'hermes:HERMES_
   provider="${fixture%%:*}"; mode_var="${fixture#*:}"
   export "$mode_var=one-shot"
   out="$(adapter_output "$provider")"; rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'interactive' \
-     && printf '%s' "$out" | grep -q ' run ' && printf '%s' "$out" | grep -q ' bg '; then
+  if [ "$rc" -ne 0 ] && grep -qi 'interactive' <<<"$out" \
+     && grep -q ' run ' <<<"$out" && grep -q ' bg ' <<<"$out"; then
     ok "$provider rejects one-shot-only help and names run/bg alternatives"
   else
     bad "$provider accepted ambiguous one-shot help or omitted alternatives: rc=$rc out=$out"
@@ -145,8 +145,8 @@ done
 
 for provider in droid cursor hermes; do
   out="$(PATH=/usr/bin:/bin adapter_output "$provider")"; rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'PATH' \
-     && printf '%s' "$out" | grep -q ' run ' && printf '%s' "$out" | grep -q ' bg '; then
+  if [ "$rc" -ne 0 ] && grep -qi 'PATH' <<<"$out" \
+     && grep -q ' run ' <<<"$out" && grep -q ' bg ' <<<"$out"; then
     ok "$provider reports a missing CLI before launch and names run/bg alternatives"
   else
     bad "$provider did not fail closed when its CLI was missing: rc=$rc out=$out"

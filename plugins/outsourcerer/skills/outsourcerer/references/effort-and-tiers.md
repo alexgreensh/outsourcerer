@@ -53,3 +53,18 @@ these open-weight lanes**, not only to premium native lanes.
 5. Default `mid`.
 
 `raw` = your prompt verbatim (plus the OSRC:: progress protocol only), no scaffold at all.
+
+## Changing effort on a LIVE session: `session effort`, never `/effort`
+
+`/effort` typed into a Claude Code pane is a GLOBAL command: it persists `effortLevel` into
+`~/.claude/settings.json` and re-defaults effort for every later session. To change one running
+session's effort use `session effort <level>` — for cc it respawns the pane's claude with
+`--resume <its session id>` (or `--continue` when the id is unknown), a session-scoped
+`--effort` flag, and `MAX_THINKING_TOKENS`; settings are never touched.
+
+`session send`/`session reply` refuse a LEADING `/effort` aimed at a pane that is or might be
+Claude Code. Proven-claude panes (registry record, `claude` foreground, footer, or claude in
+the process tree) always refuse. The per-command `--allow-effort` flag overrides ONLY the two
+uncertain refusals — a remote shell (`ssh`/`mosh`/`telnet`/`docker`/`kubectl`/`tmux`/`screen`/
+`sudo`/...) or an unidentifiable pane — for that one send, e.g.
+`session send --allow-effort "/effort high"`. There is no environment switch.

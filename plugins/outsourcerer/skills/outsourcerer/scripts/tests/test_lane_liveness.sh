@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_lane_liveness.sh — "installed" must never be reported as "will answer".
 #
 # A lane stays installed and authenticated while its subscription window is exhausted, its token has
@@ -38,7 +40,7 @@ dead_lane() { sh -c 'sleep 300' ; }
 probe_classify() {   # mirrors the doctor() probe branch structure
   local _ppt _prc=0
   _ppt="$(_timeout 2 dead_lane 2>&1)" || _prc=$?
-  if [ "$_prc" -eq 0 ] && printf '%s' "$_ppt" | grep -qi 'pong'; then
+  if [ "$_prc" -eq 0 ] && grep -qi 'pong' <<<"$_ppt"; then
     echo "READY (probed just now, answered)"
   else
     case "$_ppt" in

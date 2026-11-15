@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_job_rc_guard_leak.sh — a supervised job's exit code must be the delegate's, and a devin
 # non-interactive reject must read as permission-blocked, not failed or done?.
 #
@@ -15,7 +16,7 @@ FIX="$HERE/fixtures/devin-rc7"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/test-rc-guard.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR%/}/test-rc-guard.XXXXXX")"
 trap 'rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 mkdir -p "$OSRC_HOME"
@@ -73,7 +74,7 @@ newjob() { # <name> [cwd] [lane]
 # --- control: outside a job, a delegating command still refuses to end blind (rc=7). This is the
 # guard working as designed, and it proves the fixture state is enough to trigger it. ---
 out="$(child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'blind-turn guard' \
+[ "$rc" = 7 ] && grep -q 'blind-turn guard' <<<"$out" \
   && ok "control: an orchestrator-level run still gets the guard's rc=7" \
   || bad "control: expected rc=7 + guard notice outside a job (rc=$rc)"
 
@@ -81,7 +82,7 @@ out="$(child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
 # environment, so a delegate that runs outsourcerer itself inherits it; if env were the signal,
 # every nested call would run blind. Only the private argv sentinel exempts. ---
 out="$(OSRC_JOB_DIR="$FIXTURE/inherited-job" OSRC_STREAM=1 child "$FIX/readonly-review.delegate.txt" 0 2>&1)"; rc=$?
-[ "$rc" = 7 ] && printf '%s' "$out" | grep -q 'blind-turn guard' \
+[ "$rc" = 7 ] && grep -q 'blind-turn guard' <<<"$out" \
   && ok "an inherited OSRC_JOB_DIR without the sentinel still gets the guard's rc=7" \
   || bad "inherited OSRC_JOB_DIR disabled the guard (rc=$rc)"
 

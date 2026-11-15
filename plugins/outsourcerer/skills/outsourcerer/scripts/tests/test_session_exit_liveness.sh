@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_session_exit_liveness.sh — an engine that exits 0 to a bare shell is NOT a started session.
 #
 # The droid -r/resume bug: `droid --auto medium -r high` tried to RESUME a session named "high"
@@ -21,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-liveness.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-liveness.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 BIN="$TMP/bin"; mkdir -p "$BIN"
 
@@ -145,9 +146,9 @@ _block="$(awk '/tmux send-keys -t "\$SESSION_NAME" "export PATH/{f=1} f{print} /
 _finalizer="$(awk '/^_session_launch_finalize\(\)/,/^}/' "$SRC")"
 _live_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_launch_liveness_check' | head -1 | cut -d: -f1)"
 _registry_line="$(printf '%s\n' "$_finalizer" | grep -n '_session_registry_append start' | head -1 | cut -d: -f1)"
-if printf '%s\n' "$_block" | grep -q '_session_launch_finalize' \
-   && printf '%s\n' "$_block" | grep -q 'tmux send-keys' \
-   && printf '%s\n' "$_finalizer" | grep -q '_session_registry_append start' \
+if grep -q '_session_launch_finalize' <<<"$_block" \
+   && grep -q 'tmux send-keys' <<<"$_block" \
+   && grep -q '_session_registry_append start' <<<"$_finalizer" \
    && [ -n "$_live_line" ] && [ -n "$_registry_line" ] && [ "$_live_line" -lt "$_registry_line" ]; then
   ok "shared finalizer is wired into session start and checks liveness before registry append"
 else

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 # test_job_lifecycle.sh — the launching->running->terminal lifecycle and the phantom-job guards:
 # a detached worker that never comes up must NOT become a status=running job with a ~56-year age that
 # no watcher reaps. It must become `failed` (stillborn) with a sane age and a reason, and it must stay
@@ -22,8 +23,8 @@ run(){ OSRC_HOME="$OSRC_HOME" bash "$SRC" "$@"; }
 JD="$OSRC_HOME/jobs/20260101-000000-stillborn"; mkdir -p "$JD"
 echo launching > "$JD/status"; echo $(( $(date +%s) - 120 )) > "$JD/started_at"
 line="$(run status 2>/dev/null | grep stillborn)"
-echo "$line" | grep -q ' failed ' && ok "stillborn launching job -> failed" || bad "stillborn not marked failed ($line)"
-echo "$line" | grep -qE '\b(1[0-9]{2}|[1-9][0-9])s\b' && ok "stillborn age is sane seconds, not a 56-year epoch age" \
+grep -q ' failed ' <<<"$line" && ok "stillborn launching job -> failed" || bad "stillborn not marked failed ($line)"
+grep -qE '\b(1[0-9]{2}|[1-9][0-9])s\b' <<<"$line" && ok "stillborn age is sane seconds, not a 56-year epoch age" \
   || bad "stillborn age not sane ($line)"
 [ -s "$JD/error" ] && grep -qi 'stillborn' "$JD/error" && ok "stillborn reason recorded (actionable)" || bad "no stillborn reason"
 
@@ -38,9 +39,9 @@ echo "$js" | jq -e '.jobs[] | select(.job_id|test("stillborn")) | .status=="fail
 # --- Scenario 3: a meta-less job with NO start time shows age '?', never a 56-year age. ---
 JD2="$OSRC_HOME/jobs/20260101-000001-noage"; mkdir -p "$JD2"; echo running > "$JD2/status"
 aline="$(run status 2>/dev/null | grep noage)"
-echo "$aline" | grep -q ' ? ' && ok "unknown start time shows age '?', not a fabricated 56-year age" \
+grep -q ' ? ' <<<"$aline" && ok "unknown start time shows age '?', not a fabricated 56-year age" \
   || bad "unknown-age job did not show '?' ($aline)"
-echo "$aline" | grep -qE '17[0-9]{8}s|5[0-9] year' && bad "56-year phantom age is back" || ok "no 56-year phantom age"
+grep -qE '17[0-9]{8}s|5[0-9] year' <<<"$aline" && bad "56-year phantom age is back" || ok "no 56-year phantom age"
 
 
 # --- A dead job must not read as alive on ANY path. ---------------------------------------------
@@ -139,11 +140,11 @@ printf '%s\n' '{"name":"Read"}' '{"name":"Read"}' '{"name":"Bash"}' > "$jd4/out.
 echo running > "$jd4/status"; echo $(( $(date +%s) - 400 )) > "$jd4/started_at"
 echo "$LP" > "$jd4/pid"; ps -o lstart= -p "$LP" | tr -s ' ' > "$jd4/pid_start"
 printf '{"verb":"edit","model":"glm","started":%s}' "$(( $(date +%s) - 400 ))" > "$jd4/meta.json"
-_status_line x-explore 2>/dev/null | grep -q 'exploring(0-writes)' \
+{ _t3b_pipe="$(_status_line x-explore 2>/dev/null)" && grep -q 'exploring(0-writes)' <<<"$_t3b_pipe"; } \
   && ok "a mutating job with zero writes is flagged to the operator" \
   || bad "0-writes flag never reaches the caller (exported from a subshell?)"
 printf '%s\n' '{"name":"Write"}' >> "$jd4/out.log"
-_status_line x-explore 2>/dev/null | grep -q 'exploring(0-writes)' \
+{ _t3b_pipe="$(_status_line x-explore 2>/dev/null)" && grep -q 'exploring(0-writes)' <<<"$_t3b_pipe"; } \
   && bad "flag still set after the job started writing" \
   || ok "the flag clears as soon as real writes appear"
 kill $LP 2>/dev/null
@@ -219,15 +220,15 @@ grep -q -- '-newermt' <<<"$_noc" && bad "filesystem-progress check uses the GNU-
 jl="$OSRC_HOME/jobs/still-launching"; mkdir -p "$jl"
 echo launching > "$jl/status"; date +%s > "$jl/started_at"
 out="$(run logs still-launching 2>&1)"
-printf '%s' "$out" | grep -qi 'still starting up' \
+grep -qi 'still starting up' <<<"$out" \
   && ok "a launching job says it is still starting, not that the log is missing" \
   || bad "launching job still reports a bare missing-log error: $(printf '%s' "$out" | tail -1)"
-printf '%s' "$out" | grep -q 'watch still-launching' \
+grep -q 'watch still-launching' <<<"$out" \
   && ok "the message offers the command that shows the job live" \
   || bad "no actionable next step for a launching job"
 
 out="$(run logs no-such-job-id 2>&1)"
-printf '%s' "$out" | grep -qi 'no such job' \
+grep -qi 'no such job' <<<"$out" \
   && ok "an unknown job id is reported as unknown, not as a missing log" \
   || bad "unknown job id is indistinguishable from a missing log"
 

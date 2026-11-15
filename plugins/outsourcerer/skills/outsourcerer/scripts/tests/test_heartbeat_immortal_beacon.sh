@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_immortal_beacon.sh — the heartbeat never counts a flatlined job as active work.
 #
 # Root cause guarded: _heartbeat_active_work read each job's `status` file RAW and treated
@@ -14,7 +15,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-immortal.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-immortal.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"

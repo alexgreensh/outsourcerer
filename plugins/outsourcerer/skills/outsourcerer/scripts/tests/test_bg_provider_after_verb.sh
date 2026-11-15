@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_bg_provider_after_verb.sh — an explicit --provider is AUTHORITATIVE in the bg lane, wherever it sits.
 #
 # The bug (lane routing): cmd_bg's flag loop only consumed a --provider written BEFORE the verb. So
@@ -29,10 +30,10 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 # Source functions only (drop the `main "$@"` dispatcher) so nothing runs on load.
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-bgprov.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-bgprov.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 SRC_ONLY="$TMP/src.sh"
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1
 type -t _bg_capture_provider >/dev/null || { echo "FAIL: _bg_capture_provider not defined (fix missing?)"; exit 1; }
@@ -127,7 +128,7 @@ if have jq; then
     # OSRC_SOURCED must be UNSET for the child: we exported it =1 to source functions above, but the child
     # is a real run and OSRC_SOURCED=1 would make it skip main() and never launch.
     id="$( PATH="$FAKEBIN:$PATH" OSRC_HOME="$home" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
-           bash "$SRC" bg "$@" 2>/dev/null | head -1 )"
+           bash "$SRC" --spend-ok bg "$@" 2>/dev/null | head -1 )"
     local jd="$home/jobs/$id" i=0
     while [ "$i" -lt 60 ]; do [ -f "$jd/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
     [ -f "$jd/meta.json" ] || { bad "e2e $lane: no meta.json was written"; return; }

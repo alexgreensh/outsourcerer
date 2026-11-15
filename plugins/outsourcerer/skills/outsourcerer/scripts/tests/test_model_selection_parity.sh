@@ -7,7 +7,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TEST_ROOT="$(mktemp -d)"
-export OSRC_HOME="$TEST_ROOT"
+export HOME="$TEST_ROOT/fakehome" OSRC_HOME="$TEST_ROOT"
+mkdir -p "$HOME"
 cleanup() { rm -rf "$TEST_ROOT"; }
 trap cleanup EXIT
 
@@ -71,7 +72,7 @@ for lane_fn in delegate_cxnative delegate_ccnative delegate_gmnative delegate_cl
                delegate_droid delegate_cursor delegate_hermes delegate_warp delegate_cc \
                delegate_local delegate_codex; do
   body="$(sed -n "/^${lane_fn}() {/,/^}/p" "$SRC")"
-  if printf '%s' "$body" | grep -q '_build_prompt'; then
+  if grep -q '_build_prompt' <<<"$body"; then
     ok "$lane_fn uses the shared effort-aware prompt"
   else
     bad "$lane_fn bypasses the shared effort-aware prompt"
@@ -79,7 +80,7 @@ for lane_fn in delegate_cxnative delegate_ccnative delegate_gmnative delegate_cl
 done
 
 devin_body="$(sed -n '/^delegate() {/,/^}/p' "$SRC")"
-if printf '%s' "$devin_body" | grep -q '_effort_prompt'; then
+if grep -q '_effort_prompt' <<<"$devin_body"; then
   ok "Devin receives effort as an advisory prompt input"
 else
   bad "Devin dispatch omits effort from its prompt"
@@ -87,9 +88,9 @@ fi
 
 droid_body="$(sed -n '/^delegate_droid() {/,/^}/p' "$SRC")"
 warp_body="$(sed -n '/^delegate_warp() {/,/^}/p' "$SRC")"
-printf '%s' "$droid_body" | grep -q '_lane_model_for droid' \
+grep -q '_lane_model_for droid' <<<"$droid_body" \
   && ok "Droid resolves lane-specific model ids" || bad "Droid skips lane-specific model resolution"
-printf '%s' "$warp_body" | grep -q '_lane_model_for warp' \
+grep -q '_lane_model_for warp' <<<"$warp_body" \
   && ok "Warp resolves lane-specific model ids" || bad "Warp skips lane-specific model resolution"
 
 echo

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_timeout_capture.sh : a fast `_timeout` child must not cost the full bound,
 # and a reaped watchdog must not leave its timer process behind.
 #
@@ -18,7 +19,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "$PWD/.test-timeout-capture.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR%/}/.test-timeout-capture.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 mkdir -p "$OSRC_HOME"

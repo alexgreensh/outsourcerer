@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_parity_hermes.sh — the Hermes reverse bridge must work, and keep working.
 #
 # Hermes (NousResearch) discovers SKILL.md-format skills from $HERMES_HOME/skills/*/SKILL.md — the
@@ -31,7 +33,7 @@ grep -q 'parity-hermes; providers' "$SRC" \
   || bad "parity-hermes missing from usage list"
 
 # --- Behavioural: run it against an isolated fake HERMES_HOME + fake skill root. ---
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 # A fake skill root that looks like an install (has SKILL.md), reached via a fake SCRIPT_PATH so the
 # self-locating logic resolves to it: $SCRIPT_PATH -> <root>/scripts/outsourcerer.sh, root = <skill>.

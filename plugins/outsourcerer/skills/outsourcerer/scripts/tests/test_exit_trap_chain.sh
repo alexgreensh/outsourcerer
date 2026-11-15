@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression for the trap-then-source leak.
 # A caller that arms `trap 'rm -rf "$fixture"' EXIT` before sourcing outsourcerer.sh must
 # not lose its cleanup to the engine's own EXIT trap, which is installed at source time.
@@ -18,8 +19,10 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-BASE="$(mktemp -d "${TMPDIR:-/tmp}/test-exit-chain.XXXXXX")"
+BASE="$(mktemp -d "${TMPDIR%/}/test-exit-chain.XXXXXX")"
 trap 'rm -rf "$BASE"' EXIT
+export HOME="$BASE/fakehome"
+mkdir -p "$HOME"
 
 # Spawn a fresh bash that sandboxes HOME/OSRC_HOME, optionally arms a caller-style
 # cleanup trap, sources the engine, optionally exercises a save/restore function,

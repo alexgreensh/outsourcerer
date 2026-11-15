@@ -49,7 +49,7 @@ else
   bad "wake append failed"
 fi
 pending="$(_wake_drain)"
-if printf '%s' "$pending" | grep -q 'wake-1' && printf '%s' "$pending" | grep -q 'wake-2'; then
+if grep -q 'wake-1' <<<"$pending" && grep -q 'wake-2' <<<"$pending"; then
   ok "unacknowledged wakes drain"
 else
   bad "wake drain omitted a pending event"
@@ -61,7 +61,7 @@ else
   bad "wake acknowledgement failed"
 fi
 pending="$(_wake_drain)"
-if ! printf '%s' "$pending" | grep -q 'wake-1' && printf '%s' "$pending" | grep -q 'wake-2'; then
+if ! grep -q 'wake-1' <<<"$pending" && grep -q 'wake-2' <<<"$pending"; then
   ok "acknowledged wake is excluded without losing the next wake"
 else
   bad "wake acknowledgement filtering is wrong ($pending)"
@@ -88,7 +88,7 @@ TRACE="$TMP/trace"
 : > "$INJECT"   # existence-gates the lock-time wake-3 injection below
 _wake_rearm_id wake-1 || bad "wake_rearm_id returned an error"
 q="$(_wake_drain)"
-if printf '%s' "$q" | grep -q 'wake-2' && printf '%s' "$q" | grep -q 'wake-3' && ! printf '%s' "$q" | grep -q 'wake-1'; then
+if grep -q 'wake-2' <<<"$q" && grep -q 'wake-3' <<<"$q" && ! grep -q 'wake-1' <<<"$q"; then
   ok "a wake appended during the re-arm lock survives the rewrite (no lost alarm)"
 else
   bad "concurrent wake was lost by the re-arm rewrite (queue: $q)"
@@ -118,7 +118,7 @@ _wake_ack wake-2
 _wake_rearm_id wake-2
 _wake_append '{"event_id":"wake-2","kind":"blocked"}'   # the fresh alarm the re-arm un-traps
 pending="$(_wake_drain)"
-if printf '%s' "$pending" | grep -q 'wake-2' && printf '%s' "$pending" | grep -q 'wake-3'; then
+if grep -q 'wake-2' <<<"$pending" && grep -q 'wake-3' <<<"$pending"; then
   ok "rearm consumes the ack so the same id can re-fire"
 else
   bad "rearm broke deliverable state (queue: $pending)"

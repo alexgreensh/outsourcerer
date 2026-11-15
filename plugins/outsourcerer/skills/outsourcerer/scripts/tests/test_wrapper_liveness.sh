@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_wrapper_liveness.sh — issues #47 and #48.
 #
 # #47: an auto-detached run puts outsourcerer.sh itself in the tmux pane. It is a bash script, so
@@ -12,12 +13,24 @@
 # Run: bash test_wrapper_liveness.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d /tmp/osrc-wl.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-wl.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 export TMUX_TMPDIR="$TMP/t"; mkdir -p "$TMUX_TMPDIR"
-trap 'tmux kill-server 2>/dev/null; rm -rf "$TMP"' EXIT
+[ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
+unset TMUX TMUX_PANE
+# Every tmux call — this test's and the sourced engine's — goes through a PATH shim onto a
+# private named socket inside the sandbox dir, so no call can reach the real tmux server.
+_wl_tmux="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_wl_tmux" ]; then
+  mkdir -p "$TMP/bin"
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_wl_tmux" "$$" > "$TMP/bin/tmux"
+  chmod +x "$TMP/bin/tmux"
+  PATH="$TMP/bin:$PATH"; export PATH
+fi
+trap "env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # shellcheck disable=SC1090
 source "$SRC" >/dev/null 2>&1
@@ -64,7 +77,7 @@ echo "=== CPU time of a process tree ==="
 c="$(_tree_cpu_centis $$)"
 case "$c" in ''|*[!0-9]*) no "cpu centis not a number: [$c]" ;; *) ok "cpu centis is a number ($c)" ;; esac
 _tree_cpu_centis notapid >/dev/null 2>&1 && no "a non-pid was accepted" || ok "a non-pid is refused"
-grep -q 'OSRC_CPU_LIVENESS' "$SRC" && grep -q '_tree_cpu_centis "$pid"' "$SRC" \
+grep -q 'OSRC_CPU_LIVENESS' "$SRC" "$WDLIB" && grep -q '_tree_cpu_centis "$pid"' "$SRC" "$WDLIB" \
   && ok "the stall watchdog consults CPU time before reaping a silent delegate" \
   || no "the watchdog has no CPU liveness probe"
 
@@ -72,7 +85,7 @@ echo "=== launch messages tell an agent how to be woken ==="
 grep -q '_wake_on_finish_hint "$_ad_sess"' "$SRC" && ok "an auto-detached run prints the WAKE line" || no "auto-detach has no WAKE line"
 [ "$(grep -c '_wake_on_finish_hint "$id"' "$SRC")" -ge 3 ] && ok "every bg launch path prints the WAKE line" || no "a bg launch path lacks the WAKE line"
 
-if command -v tmux >/dev/null 2>&1; then
+if tmux -L osrc-test-T5 -V >/dev/null 2>&1; then
   echo "=== real tmux: a running wrapper counts as a live launch ==="
   mkdir -p "$TMP/w"
   printf '#!/usr/bin/env bash\nsleep 8\n' > "$TMP/w/outsourcerer.sh"; chmod +x "$TMP/w/outsourcerer.sh"
@@ -89,7 +102,7 @@ if command -v tmux >/dev/null 2>&1; then
     && no "an idle prompt passed the launch check" || ok "an idle prompt still fails the launch check (droid -r guard kept)"
   tmux kill-session -t wl-idle 2>/dev/null
 else
-  echo "SKIP: tmux not installed; real-pane checks skipped"
+  echo "SKIP: a usable tmux is unavailable; real-pane checks skipped"
 fi
 
 echo "RESULT: $pass passed, $fail failed"

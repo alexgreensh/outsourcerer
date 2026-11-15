@@ -93,11 +93,11 @@ sleep 1
 
 hint_out="$(_devin_sandboxed_proxy_tls_hint 2>&1)"
 if [ -n "$hint_out" ]; then ok "hint: emitted on signature in newest devin log"; else bad "hint: NOT emitted on signature"; fi
-if printf '%s' "$hint_out" | grep -q 'devin TLS handshake failed against a local proxy'; then ok "hint: names the cause"; else bad "hint: missing cause line"; fi
-if printf '%s' "$hint_out" | grep -q 'OSStatus -26276'; then ok "hint: carries the recognized OSStatus code"; else bad "hint: missing OSStatus code"; fi
-if printf '%s' "$hint_out" | grep -qi 'sandbox'; then ok "hint: names the fix (sandbox/proxy disabled)"; else bad "hint: missing fix"; fi
+if grep -q 'devin TLS handshake failed against a local proxy' <<<"$hint_out"; then ok "hint: names the cause"; else bad "hint: missing cause line"; fi
+if grep -q 'OSStatus -26276' <<<"$hint_out"; then ok "hint: carries the recognized OSStatus code"; else bad "hint: missing OSStatus code"; fi
+if grep -qi 'sandbox' <<<"$hint_out"; then ok "hint: names the fix (sandbox/proxy disabled)"; else bad "hint: missing fix"; fi
 # Must NOT surface the stale older-session code.
-if printf '%s' "$hint_out" | grep -q 'OSStatus -9843'; then bad "hint: FALSE-POSITIVE on stale older log (scanned the wrong file)"; else ok "hint: did not match stale older log"; fi
+if grep -q 'OSStatus -9843' <<<"$hint_out"; then bad "hint: FALSE-POSITIVE on stale older log (scanned the wrong file)"; else ok "hint: did not match stale older log"; fi
 
 # --- Scenario 2b: hint is silent when the devin log signature is absent. ---
 rm -f "$HOME/.local/share/devin/cli/logs"/devin_*.log
@@ -171,14 +171,14 @@ printf '{"provider":"devin","verb":"run","model":"glm-5.2"}' > "$jd_sig/meta.jso
 echo failed > "$jd_sig/status"
 printf 'Error: Agent error: Connection error\n' > "$jd_sig/last.txt"
 printf 'Error: Agent error: Connection error\n' > "$jd_sig/out.log"
-sig_out="$(cmd_result "$jid_sig" 2>/tmp/rr_sig 1>/dev/null)"; rc_sig=$?
-sig_err="$(cat /tmp/rr_sig 2>/dev/null)"; rm -f /tmp/rr_sig
+sig_out="$(cmd_result "$jid_sig" 2>"$TMP/rr_sig" 1>/dev/null)"; rc_sig=$?
+sig_err="$(cat "$TMP/rr_sig" 2>/dev/null)"; rm -f "$TMP/rr_sig"
 if [ "$rc_sig" -eq 0 ]; then ok "cmd_result: exit 0 even when hint is emitted"; else bad "cmd_result: exit $rc_sig when hint emitted (regression)"; fi
-if printf '%s' "$sig_err" | grep -q 'devin TLS handshake failed'; then ok "cmd_result: hint emitted to stderr on signature"; else bad "cmd_result: hint NOT emitted on signature"; fi
-sig_logs_out="$(cmd_logs "$jid_sig" 2>/tmp/rl_sig 1>/dev/null)"; rc_sigl=$?
-sig_logs_err="$(cat /tmp/rl_sig 2>/dev/null)"; rm -f /tmp/rl_sig
+if grep -q 'devin TLS handshake failed' <<<"$sig_err"; then ok "cmd_result: hint emitted to stderr on signature"; else bad "cmd_result: hint NOT emitted on signature"; fi
+sig_logs_out="$(cmd_logs "$jid_sig" 2>"$TMP/rl_sig" 1>/dev/null)"; rc_sigl=$?
+sig_logs_err="$(cat "$TMP/rl_sig" 2>/dev/null)"; rm -f "$TMP/rl_sig"
 if [ "$rc_sigl" -eq 0 ]; then ok "cmd_logs: exit 0 even when hint is emitted"; else bad "cmd_logs: exit $rc_sigl when hint emitted (regression)"; fi
-if printf '%s' "$sig_logs_err" | grep -q 'devin TLS handshake failed'; then ok "cmd_logs: hint emitted to stderr on signature"; else bad "cmd_logs: hint NOT emitted on signature"; fi
+if grep -q 'devin TLS handshake failed' <<<"$sig_logs_err"; then ok "cmd_logs: hint emitted to stderr on signature"; else bad "cmd_logs: hint NOT emitted on signature"; fi
 
 # (c) non-devin (cc) job -> hint silent, exit 0.
 jid_cc="job-cc-clean"; jd_cc="$OSRC_HOME/jobs/$jid_cc"; mkdir -p "$jd_cc"

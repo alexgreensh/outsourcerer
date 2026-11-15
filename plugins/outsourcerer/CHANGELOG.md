@@ -2,6 +2,46 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.0
+
+### Added
+
+- **One watcher for everything you own.** `supervise` covers every job, session and remote lane in one background command and returns the moment one of them needs you: an approval prompt, a question, a finished turn, a stall, a failure. Each event comes with the exact command to run next. The stop guard now sees idle sessions with queued work, delegates that stopped to ask, and remote lanes, so a turn no longer ends with nothing left to wake it.
+- **Remote lanes.** `lane add <id> --branch <remote-branch>` registers work that runs where Outsourcerer can't attach: Claude cloud sessions, Devin cloud, any CI or worker that pushes a branch. A READY push is picked up by the same watcher, and `--done-when check:"<cmd>"` runs your check on the READY commit before any review is spent.
+- **A review queue with one reviewer.** `review reviewer <session>` names the reviewer, `review queue add` lines work up, `review next` sends the oldest item with a generated brief. READY work goes to review without you carrying the list in your head.
+- **Sessions that know what is on screen.** `session state` reports approval, question, working, idle or composer with the evidence line. `session send` checks that the message landed and was submitted, and refuses to type into an open prompt. Claude Code's composer and status lines are no longer mistaken for a menu.
+- **A built-in safe approver.** `session approve-policy safe` answers routine prompts once: read-only commands, edits inside the lane's worktree, and tests through a protected sealed runner after its OS sandbox passes a launch check. Other test and build commands, deletes outside the worktree, pushes, installs and credential access wait for you. Every decision is logged. Off by default.
+- **Fewer prompts from the start.** `session start --perm safe` launches a delegate on its engine's own pre-allow level. For Claude that is read-only, test and build commands plus edits in the workspace; deletes and everything else still ask. Engines with no such level start as before and the banner says so.
+- **A done contract per session.** `session start --done-when` takes `file:`, `branch:<b>@<marker>`, `check:"<cmd>"` or `pr:<owner/repo>#<n>`, so "done" is something the watcher can check instead of something a delegate says.
+- **Used-up plans are skipped.** A lane whose plan meter reads 90% or more on a fresh reading is left out of `advise` and not launched into. `--force-lane` or an explicit `--provider` goes ahead anyway, and `OSRC_LANE_LIMIT_PCT` moves the line. A stale reading counts as unknown and never blocks.
+- **Paid lanes always ask first.** Anything that bills per use (OpenRouter, TokenRouter, Gemini API, paid Devin models, any API-key login) or whose billing can't be proven needs your yes on that command: a `y/N` prompt in a terminal, `--spend-ok` in scripts. Billing is read from your real login, so an API-key Claude or Codex login is treated as paid.
+- **Caps per lane.** `lane cap <lane> weekly<=40` keeps a lane under a share of its plan, `lane limits` shows billing and caps, and `lane summary` lists every signed-in harness with what is left.
+- **Cloud sessions.** `cloud start <id> --repo <owner/name> --base <branch> --brief <file>` launches a hosted Claude, Devin or Codex session that keeps load off your machine. `cloud where` and `cloud ls` find them again. Metered ones need `--spend-ok` every time.
+- **Mission Control.** `hub serve` opens a local page with every project you are running: progress, lanes, limits, and the decisions waiting on you, answerable from the page. Home shows the top-priority decisions first. **Mark done** moves a project to Shipped and **Move back** returns it to running, with a six-second Undo; a project you marked done stays done. A half-typed answer survives refreshes. The page makes no third-party requests and the API sits behind a local token. `hub export` prints the same data as JSON.
+- **Cleanup you can trust.** `cleanup` lists what your sessions created with a SAFE or ASK verdict for each. `--apply` removes only the SAFE ones.
+- **Claude multi-account lanes.** `accounts add work` registers a second Claude config directory with its own official login, and `accounts` shows each one's weekly and five-hour headroom. New Claude lanes start on the account with the most room under your caps, or the one you name with `--account`. Running lanes never move. Each account must be your own. Outsourcerer never stores, copies or relays login tokens; it only points Claude at a config directory. We have not confirmed how Anthropic's terms treat one person using several personal subscriptions, so check them for your case.
+- **A lighter orchestrator.** Supervision refreshes project and limits snapshots itself every 10 minutes, so no extra timer is needed. `supervise --auto done,limits` sends verified READY work to the reviewer without waking you. `handover --check-context` prepares a handover when the orchestrator passes 150,000 input tokens (`OSRC_ORCH_CTX_MAX`). Reviewers rotate after two reviews or 35% context, re-reviews read only what changed plus the earlier findings, and `OSRC_LEAN_LAUNCH=1` starts Claude sessions with a strict MCP config while keeping `CLAUDE.md`.
+- **Session handover.** `handover` writes a pickup brief and `adopt` moves everything a session owns to the new one, so a long-running orchestrator can be replaced without dropping a lane.
+- **Lane messages and a team score.** `lane msg` and `lane inbox` let lanes leave each other notes. `team score` shows what each lane delivered.
+
+### Changed
+
+- **Paid failover is confirmed per command.** `OSRC_FAILOVER_CASH_OK=1` lets failover consider paid lanes, and each hop confirms with `--spend-ok` on that command. The stop message names the cash lanes it skipped and exactly what to add.
+- **Antigravity (`agy`) is the Gemini text lane.** `OSRC_GEMINI_VEHICLE=gemini` explains the switch. `GEMINI_API_KEY` still serves the image lane.
+- **Devin's default follows the live Free list.** The model is picked at run time from the models Devin currently marks Free. Plan-included models that are not Free count as paid and ask first.
+- **`session effort <level>` sets effort for exactly the session you mean.** Typing `/effort` into a Claude pane is caught, since it would change every later session.
+
+### Fixed
+
+- **Long quiet Devin commands run to completion.** A test suite or build that writes no files keeps going until the stall window (30 minutes by default; `OSRC_DEVIN_NOWRITE_KILL` sets it). (#58)
+- **Launch checks read processes reliably.** The reuse guard engages after the first real start-time reading. (#60)
+- **INSOURCE blocks refresh on every `parity-*` run.** The template stays model-neutral and version-free, and symlinked or read-only `AGENTS.md` files are handled safely. (#62)
+- **Locks keep exactly one owner everywhere.** Directory claims no longer trust the system `mkdir` to be atomic: Ubuntu 26.04's Rust `mkdir` could let two contenders win. Claims use Perl or Python, the native `/bin/mkdir` on macOS and BSD, or refuse with a clear message.
+- **Stale-lock cleanup never removes a newer owner.** Recovery for the Devin, heartbeat, remote and done locks holds a guard until removal finishes.
+- **API keys stay off the command line.** The local-model key now reaches `curl` through a private header file, like the other keys, so other processes cannot read it.
+- **Clean paths on macOS.** A trailing `/` in `TMPDIR` no longer produces `//` paths.
+- **Tests run in their own scratch home and tmux server**, with a guard that keeps your real ones untouched.
+
 ## 0.15.3
 
 ### Fixed

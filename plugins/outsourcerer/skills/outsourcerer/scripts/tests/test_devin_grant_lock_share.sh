@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_devin_grant_lock_share.sh — Devin dispatches with the SAME skill grant set share the
 # skills-home grant lock instead of serializing behind it.
 #
@@ -29,7 +30,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TD="$(mktemp -d "${TMPDIR:-/tmp}/osrc-glock.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }; trap 'rm -rf "$TD"' EXIT
+TD="$(mktemp -d "${TMPDIR%/}/osrc-glock.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }; trap 'rm -rf "$TD"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }

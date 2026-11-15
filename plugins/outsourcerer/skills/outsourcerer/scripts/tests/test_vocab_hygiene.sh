@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Track B — vocabulary hygiene: the sanitizer that keeps model-facing text out of the fallback cascade.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-vocab.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-vocab.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 pass=0; fail=0
@@ -47,8 +48,8 @@ printf 'The kill switch armed the daemon.\nplain line\n' > "$TMP/notes/decisions
 printf 'kill "$pid"  # real syscall, must survive\n'      > "$TMP/notes/run.sh"
 
 out="$(cmd_sanitize "$TMP/notes" 2>&1)"
-printf '%s' "$out" | grep -q 'decisions.md:1' && ok "dry-run reports the trigger line" || bad "dry-run missed it"
-printf '%s' "$out" | grep -q 'run.sh' && bad "source file was scanned (should be skipped)" || ok "source file skipped in scan"
+grep -q 'decisions.md:1' <<<"$out" && ok "dry-run reports the trigger line" || bad "dry-run missed it"
+grep -q 'run.sh' <<<"$out" && bad "source file was scanned (should be skipped)" || ok "source file skipped in scan"
 grep -q 'kill switch' "$TMP/notes/decisions.md" && ok "dry-run wrote nothing" || bad "dry-run mutated the file"
 
 cmd_sanitize "$TMP/notes/decisions.md" --write >/dev/null 2>&1
@@ -57,7 +58,7 @@ grep -q 'kill "\$pid"' "$TMP/notes/run.sh" && ok "syscall in .sh preserved (neve
 
 # refusing a lone source-file target
 out2="$(cmd_sanitize "$TMP/notes/run.sh" 2>&1)"
-printf '%s' "$out2" | grep -qi 'skipping.*source' && ok "lone source-file target is refused with a note" || bad "source-file target not refused"
+grep -qi 'skipping.*source' <<<"$out2" && ok "lone source-file target is refused with a note" || bad "source-file target not refused"
 
 # ---- atomic write: a failed rewrite leaves the ORIGINAL intact and is counted as failed (#6/#10) --
 mkdir -p "$TMP/ro"
@@ -68,7 +69,7 @@ out3="$(cmd_sanitize "$TMP/ro/state.md" --write 2>&1)"; rc3=$?
 chmod 700 "$TMP/ro"
 [ "$(cat "$TMP/ro/state.md")" = "$orig" ] && ok "failed rewrite left the original intact (no truncation)" || bad "original was damaged on failed write"
 [ "$rc3" -ne 0 ] && ok "sanitize --write returns nonzero when a rewrite fails" || bad "failed rewrite reported success"
-printf '%s' "$out3" | grep -qiE 'failed|could not' && ok "failed rewrite is reported, not counted as rewritten" || bad "failed rewrite silently counted"
+grep -qiE 'failed|could not' <<<"$out3" && ok "failed rewrite is reported, not counted as rewritten" || bad "failed rewrite silently counted"
 
 # ---- regression (gauntlet MAJOR): a filename containing a newline must still be discovered/rewritten -
 # find|read split newline-delimited output into two nonexistent paths, silently skipping the file.

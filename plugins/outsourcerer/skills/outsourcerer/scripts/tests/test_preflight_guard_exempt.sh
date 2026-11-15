@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_preflight_guard_exempt.sh — a route preflight is exempt from the blind-turn guard.
 #
 # Root cause guarded: bg/fanout validate a dispatch by re-entering the script with OSRC_PREFLIGHT=1.
@@ -16,7 +17,7 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "$PWD/.test-preflight.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-preflight.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME"
@@ -61,11 +62,11 @@ rc=0
 # Drive both orders through main() against a LOOK command: it must parse and
 # return rather than error on a stranded sentinel.
 out="$(main --osrc-job-child-internal --osrc-preflight-internal fleet 2>&1)"; rc=$?
-printf '%s' "$out" | grep -q 'looks like a flag' \
+grep -q 'looks like a flag' <<<"$out" \
   && bad "sentinel order job-child+preflight stranded the second sentinel: $(printf '%s' "$out" | head -1)" \
   || ok "job-child then preflight sentinel order parses and dispatches (rc=$rc)"
 out="$(main --osrc-preflight-internal --osrc-job-child-internal fleet 2>&1)"; rc=$?
-printf '%s' "$out" | grep -q 'looks like a flag' \
+grep -q 'looks like a flag' <<<"$out" \
   && bad "sentinel order preflight+job-child broke: $(printf '%s' "$out" | head -1)" \
   || ok "preflight then job-child sentinel order parses and dispatches (rc=$rc)"
 

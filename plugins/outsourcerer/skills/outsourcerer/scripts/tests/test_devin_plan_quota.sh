@@ -95,31 +95,31 @@ _after=$(date +%s)
 _lane_down_active dv && ok "block: dv lane marked DOWN after a daily exhaustion" || bad "block: dv lane NOT down"
 [ "$(_lane_down_reason dv)" = "plan quota exhausted" ] && ok "block: down-reason recorded" || bad "block: reason '$(_lane_down_reason dv)'"
 _ev="$(_posture_get dv down-evidence 2>/dev/null)"
-printf '%s' "$_ev" | grep -q 'daily usage quota has been exhausted' && ok "block: down-evidence keeps the refusal wording" || bad "block: down-evidence '$_ev'"
-printf '%s' "$_ev" | grep -q ' | probe: ' && ok "block: down-evidence keeps the probe wording too" || bad "block: down-evidence missing probe half '$_ev'"
+grep -q 'daily usage quota has been exhausted' <<<"$_ev" && ok "block: down-evidence keeps the refusal wording" || bad "block: down-evidence '$_ev'"
+grep -q ' | probe: ' <<<"$_ev" && ok "block: down-evidence keeps the probe wording too" || bad "block: down-evidence missing probe half '$_ev'"
 # The mark lands somewhere inside the call, so until-before = reset+slack + (mark-before): the floor
 # is Devin's stated reset plus the product's 60s slack, and the ceiling adds only the elapsed time the
 # call measurably took, never a magic headroom a legitimate probe could overflow.
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
 [ "$_ttl" -ge 41220 ] && [ "$_ttl" -le $(( 41220 + _after - _before )) ] && ok "block: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "block: TTL ${_ttl}s is not Devin's stated reset"
-printf '%s' "$_out" | grep -q 'shared DAILY plan quota is exhausted' && ok "block: says the SHARED DAILY bucket is exhausted" || bad "block: missing honest daily wording"
-printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && ok "block: says it blocks ALL plan-included models" || bad "block: missing all-models wording"
-printf '%s' "$_out" | grep -q 'Devin says it resets in 11h26m' && ok "block: quotes Devin's reset" || bad "block: reset not quoted"
-printf '%s' "$_out" | grep -qi 'estimate' && bad "block: labeled an estimate although Devin's reset parsed" || ok "block: no estimate language when the reset parsed"
-printf '%s' "$_out" | grep -q 'mis-gate' && bad "block: still prints the ACU mis-gate wording" || ok "block: ACU mis-gate wording absent"
-printf '%s' "$_out" | grep -q 'Switch lanes OFF Devin' && ok "block: caller's OFF-Devin advice printed" || bad "block: advice missing"
+grep -q 'shared DAILY plan quota is exhausted' <<<"$_out" && ok "block: says the SHARED DAILY bucket is exhausted" || bad "block: missing honest daily wording"
+grep -q 'blocks ALL plan-included models' <<<"$_out" && ok "block: says it blocks ALL plan-included models" || bad "block: missing all-models wording"
+grep -q 'Devin says it resets in 11h26m' <<<"$_out" && ok "block: quotes Devin's reset" || bad "block: reset not quoted"
+grep -qi 'estimate' <<<"$_out" && bad "block: labeled an estimate although Devin's reset parsed" || ok "block: no estimate language when the reset parsed"
+grep -q 'mis-gate' <<<"$_out" && bad "block: still prints the ACU mis-gate wording" || ok "block: ACU mis-gate wording absent"
+grep -q 'Switch lanes OFF Devin' <<<"$_out" && ok "block: caller's OFF-Devin advice printed" || bad "block: advice missing"
 # The probe lines legitimately NAME the sibling model they asked (that is the verification, not a
 # recommendation); every other line must still steer clear of Devin plan models.
-printf '%s' "$_out" | grep -v '\] probe:' | grep -qE 'swe-1-7|glm-5-2\)|Retry on one of those plan-included' && bad "block: recommends another Devin plan model" || ok "block: no Devin plan model recommended"
+{ _t3b_pipe="$(printf '%s' "$_out" | grep -v '\] probe:')" && grep -qE 'swe-1-7|glm-5-2\)|Retry on one of those plan-included' <<<"$_t3b_pipe"; } && bad "block: recommends another Devin plan model" || ok "block: no Devin plan model recommended"
 # Weekly + unparseable reset -> lane still down, but the window is a LABELED estimate.
 _lane_down_clear dv
 printf 'Error: weekly usage quota exhausted, resets at soon.\n' > "$FX/weekly-vague"
 _before=$(date +%s)
 _out="$(OSRC_DEVIN_PLAN_DOWN_TTL=1234 _devin_plan_quota_block "$FX/weekly-vague" swe-1.7 'scope' 'advice' 2>&1)"
 _after=$(date +%s)
-printf '%s' "$_out" | grep -q 'shared WEEKLY plan quota' && ok "block: WEEKLY period read from Devin's line" || bad "block: weekly not detected"
-printf '%s' "$_out" | grep -q 'ESTIMATE' && ok "block: unparseable reset -> window labeled an ESTIMATE" || bad "block: estimate label missing"
-printf '%s' "$_out" | grep -q 'app.devin.ai/settings/usage' && ok "block: points at the dashboard when no reset parsed" || bad "block: dashboard URL missing"
+grep -q 'shared WEEKLY plan quota' <<<"$_out" && ok "block: WEEKLY period read from Devin's line" || bad "block: weekly not detected"
+grep -q 'ESTIMATE' <<<"$_out" && ok "block: unparseable reset -> window labeled an ESTIMATE" || bad "block: estimate label missing"
+grep -q 'app.devin.ai/settings/usage' <<<"$_out" && ok "block: points at the dashboard when no reset parsed" || bad "block: dashboard URL missing"
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
 [ "$_ttl" -ge 1234 ] && [ "$_ttl" -le $(( 1234 + _after - _before )) ] && ok "block: fallback TTL honors OSRC_DEVIN_PLAN_DOWN_TTL (${_ttl}s)" || bad "block: fallback TTL ${_ttl}s"
 _lane_down_clear dv
@@ -132,8 +132,8 @@ _free_branch="$(awk '/if \[ -n "\$_dverr" \] && _devin_plan_quota_exhausted "\$_
 [ -n "$_free_branch" ] && ok "structure: free-tier branch checks plan quota BEFORE the ACU mis-gate wording" || bad "structure: plan check not ahead of the ACU check in the free-tier branch"
 grep -q 'if _devin_plan_quota_exhausted "$_dverr"; then' "$SRC" && ok "structure: paid branch gates on which signature matched" || bad "structure: paid branch does not gate on the plan matcher"
 _adv="$(grep -E '_pq_off=|"Switch lanes OFF Devin: OpenRouter' "$SRC")"
-printf '%s' "$_adv" | grep -q -- '--provider cc' && ok "structure: plan-quota advice routes to OpenRouter via --provider cc" || bad "structure: advice lacks the OpenRouter hop"
-printf '%s' "$_adv" | grep -qE 'swe-1-7|kimi-k3|-m swe|-m kimi' && bad "structure: plan-quota advice names a Devin plan model" || ok "structure: plan-quota advice names no Devin plan model"
+grep -q -- '--provider cc' <<<"$_adv" && ok "structure: plan-quota advice routes to OpenRouter via --provider cc" || bad "structure: advice lacks the OpenRouter hop"
+grep -qE 'swe-1-7|kimi-k3|-m swe|-m kimi' <<<"$_adv" && bad "structure: plan-quota advice names a Devin plan model" || ok "structure: plan-quota advice names no Devin plan model"
 grep -q 'Check Devin.*own plan with: devin usage' "$SRC" && bad "hint: dead 'devin usage' command still advertised" || ok "hint: no dead 'devin usage' advice remains"
 grep -q 'https://app.devin.ai/settings/usage' "$SRC" && ok "hint: dashboard URL is the pointer" || bad "hint: dashboard URL missing"
 

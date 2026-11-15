@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Focused kill-window regressions for the remaining re-verdict residuals.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-reverdict.XXXXXX")"; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-reverdict.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
 export OSRC_HOME="$TMP/state"; OSRC_EXTERNAL_SEND=1; export OSRC_EXTERNAL_SEND; pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 set --; . "$SRC" >/dev/null 2>&1
@@ -13,7 +14,7 @@ _pid_start_identity(){ [ "$1" = "$$" ] && printf '%s\n' 'Thu Jul 31 01:02:03 202
 mkdir -p "$OSRC_HEARTBEAT"
 OSRC_FORCE_MKDIR_ELECTION=1
 ( _state_sync(){ case "$1" in *.election.pending.*) kill -STOP "$(sh -c 'echo "$PPID"')";; esac; return 0; }; _heartbeat_claim "$$" 'Thu Jul 31 01:02:03 2026' kill-election '' ) & child=$!
-for _ in $(seq 1 40); do find "$OSRC_HEARTBEAT" -name '.owner.*' -path '*.election.pending.*/*' | grep -q . && break; sleep .05; done
+for _ in $(seq 1 40); do { _t3b_pipe="$(find "$OSRC_HEARTBEAT" -name '.owner.*' -path '*.election.pending.*/*')" && grep -q . <<<"$_t3b_pipe"; } && break; sleep .05; done
 kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null || true
 election_pending="$(find "$OSRC_HEARTBEAT" -maxdepth 1 -type d -name '.election.pending.*' | head -1)"
 [ -z "$election_pending" ] || mv "$election_pending" "$OSRC_HEARTBEAT/.election.pending.999.Thu_Jul_31_01:02:03_2026"
@@ -21,7 +22,7 @@ mkdir -p "$OSRC_HEARTBEAT/leader"; printf '%s\n' '{"pid":999,"pid_start":"Thu Ju
 _heartbeat_claim "$$" 'Thu Jul 31 01:02:03 2026' recovered '' && ok "SIGKILL during election publish recovers on next daemon" || bad "election kill window wedged startup"
 rm -f "$OSRC_HEARTBEAT/leader/owner.json"; rmdir "$OSRC_HEARTBEAT/leader" 2>/dev/null || true
 ( _state_sync(){ kill -STOP "$(sh -c 'echo "$PPID"')"; }; _heartbeat_publish_dir "$OSRC_HEARTBEAT/leader" 999 'Thu Jul 31 01:02:03 2026' '{"pid":999,"pid_start":"Thu Jul 31 01:02:03 2026","token":"kill-leader"}' ) & child=$!
-for _ in $(seq 1 40); do find "$OSRC_HEARTBEAT" -name '.owner.*' -path '*leader.pending.*/*' | grep -q . && break; sleep .05; done
+for _ in $(seq 1 40); do { _t3b_pipe="$(find "$OSRC_HEARTBEAT" -name '.owner.*' -path '*leader.pending.*/*')" && grep -q . <<<"$_t3b_pipe"; } && break; sleep .05; done
 kill -9 "$child" 2>/dev/null; wait "$child" 2>/dev/null || true
 rm -f "$OSRC_HEARTBEAT/leader/owner.json"; rmdir "$OSRC_HEARTBEAT/leader" 2>/dev/null || true
 _heartbeat_claim "$$" 'Thu Jul 31 01:02:03 2026' leader-recovered '' && ok "SIGKILL during leader publish recovers on next daemon" || bad "leader kill window wedged startup"

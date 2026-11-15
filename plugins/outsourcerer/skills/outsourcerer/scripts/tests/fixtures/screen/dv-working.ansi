@@ -1,0 +1,50 @@
+devin --model 'swe-2-medium' --respect-workspace-trust false
+
+The default interactive shell is now zsh.
+To update your account to use zsh, please run `chsh -s /bin/zsh`.
+For more details, please visit https://support.apple.com/kb/HT208050.
+MacBook-Pro:work-dv dev$ devin --model 'swe-2-medium' --respect-workspace-trust false
+
+⠀⣴⣾⣶⡄⠀⠀⠀⠀
+⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI
+⠀⣤⣶⣦⣴⠿⢿⠿⠃  [38;2;124;124;124mv3000.12.57[39m
+⠀⠻⢿⠿⠃⠀⠀⠀⠀
+
+ [38;2;124;124;124mPro · 0% remaining (resets in 43m)[39m
+
+[38;2;255;255;255m[48;2;42;42;42m❭[39m [38;2;255;255;255mRun this shell command: touch made-by-devin.txt && ls[39m
+
+[38;2;175;215;135m[49m⠀⢰[38;2;124;124;124m Thinking · 1s (esc twice to interrupt)[39m
+[38;2;68;68;68m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[48;2;42;42;42m [38;2;176;176;176mRun this shell command: touch made-by-d…[39m [38;2;68;68;68m[49m─
+[39m❭ [38;2;124;124;124mGuide Devin while it works[39m
+[38;2;68;68;68m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39mSWE-2 Medium                                                                                                                                              [38;2;124;124;124mPress opt+m to switch between available models
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

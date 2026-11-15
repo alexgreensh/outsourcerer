@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_arm_liveness.sh — nothing claims "armed"/"supervised" unless the watcher PID is
 # verified alive (SPEC heartbeat-liveness A).
 #
@@ -39,7 +41,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-heartbeat-armlive.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-heartbeat-armlive.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"
@@ -100,7 +102,7 @@ chmod +x "$FAKE_JOB"
   # The verified pid is reportable by the manual arm command.
   out="$(cmd_heartbeat start 2>/dev/null)"; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: heartbeat start rc=$rc"; exit 1; }
-  printf '%s' "$out" | grep -q "beacon pid $vpid verified live" || { echo "FAIL: heartbeat start output missing verified pid: $out"; exit 1; }
+  grep -q "beacon pid $vpid verified live" <<<"$out" || { echo "FAIL: heartbeat start output missing verified pid: $out"; exit 1; }
   kill "$vpid" 2>/dev/null || true   # stop the fake beacon; later blocks must see a clean state
   exit 0
 ) && ok "live leader: arm verified (rc 0) and the verified pid is reportable" \
@@ -121,7 +123,7 @@ chmod +x "$FAKE_JOB"
   export OSRC_HEARTBEAT_EXECUTABLE="$DEAD_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=1
   err="$(_heartbeat_arm_verify 2>&1 >/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { echo "FAIL: rc=$rc (expected 1)"; exit 1; }
-  printf '%s' "$err" | grep -q 'NOT-ARMED' || { echo "FAIL: no NOT-ARMED on stderr"; exit 1; }
+  grep -q 'NOT-ARMED' <<<"$err" || { echo "FAIL: no NOT-ARMED on stderr"; exit 1; }
   # NEVER a false positive: any 'armed' mention that is NOT the NOT-ARMED warning is a claim.
   claim="$(printf '%s' "$err" | grep -i 'armed' | grep -vi 'not-armed')"
   [ -z "$claim" ] || { echo "FAIL: positive armed claim over a dead watcher: $claim"; exit 1; }
@@ -154,7 +156,7 @@ chmod +x "$FAKE_JOB"
   n="$(cat "$n_file")"
   [ "$rc" -eq 1 ] || { echo "FAIL: rc=$rc (expected 1)"; exit 1; }
   [ "$n" -eq 2 ] || { echo "FAIL: _heartbeat_start called $n times (expected exactly 2 = 1 arm + 1 re-arm)"; exit 1; }
-  printf '%s' "$err" | grep -q 'NOT-ARMED' || { echo "FAIL: no NOT-ARMED after the single re-arm"; exit 1; }
+  grep -q 'NOT-ARMED' <<<"$err" || { echo "FAIL: no NOT-ARMED after the single re-arm"; exit 1; }
   exit 0
 ) && ok "leader dead between arm and verify: exactly ONE re-arm, then NOT-ARMED" \
   || bad "re-arm count wrong or missing NOT-ARMED"
@@ -232,14 +234,14 @@ chmod +x "$FAKE_JOB"
   [ -z "$claim" ] || { echo "FAIL: positive armed claim: $claim"; exit 1; }
   [ "$(cat "$OSRC_JOBS/$out/supervision" 2>/dev/null)" = "not-armed" ] || { echo "FAIL: \$jd/supervision is not 'not-armed'"; exit 1; }
   # The durable marker surfaces on every status read while supervision is still not armed.
-  _status_line "$out" 2>/dev/null | grep -q 'SUPERVISION:NOT-ARMED' || { echo "FAIL: status line does not surface SUPERVISION:NOT-ARMED"; exit 1; }
+  { _t3b_pipe="$(_status_line "$out" 2>/dev/null)" && grep -q 'SUPERVISION:NOT-ARMED' <<<"$_t3b_pipe"; } || { echo "FAIL: status line does not surface SUPERVISION:NOT-ARMED"; exit 1; }
   # A LATER successful arm must stop the false flag (hardening): arm for real, then the same
   # stale marker no longer renders !SUPERVISION:NOT-ARMED -- status re-evaluates, never trusts
   # the marker file forever.
   export OSRC_HEARTBEAT_EXECUTABLE="$FAKE_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=3 HB_PID_START="Thu Jul 31 01:02:03 2026"
   _heartbeat_arm_verify; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: follow-up arm rc=$rc (expected a verified arm)"; exit 1; }
-  _status_line "$out" 2>/dev/null | grep -q 'SUPERVISION:NOT-ARMED' \
+  { _t3b_pipe="$(_status_line "$out" 2>/dev/null)" && grep -q 'SUPERVISION:NOT-ARMED' <<<"$_t3b_pipe"; } \
     && { echo "FAIL: !SUPERVISION:NOT-ARMED still rendered after a later verified arm"; exit 1; }
   [ "$(cat "$OSRC_JOBS/$out/supervision" 2>/dev/null)" = "not-armed" ] \
     || { echo "FAIL: the not-armed marker itself was disturbed by the later arm"; exit 1; }
@@ -312,7 +314,7 @@ SH
   export OSRC_HEARTBEAT_EXECUTABLE="$DEAD_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=1
   err="$(_heartbeat_arm_verify 2>&1 >/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { kill "$zomb_proc" 2>/dev/null || true; echo "FAIL: arm_verify rc=$rc over a zombie leader (expected 1)"; exit 1; }
-  printf '%s' "$err" | grep -q 'NOT-ARMED' || { kill "$zomb_proc" 2>/dev/null || true; echo "FAIL: no NOT-ARMED over a zombie leader"; exit 1; }
+  grep -q 'NOT-ARMED' <<<"$err" || { kill "$zomb_proc" 2>/dev/null || true; echo "FAIL: no NOT-ARMED over a zombie leader"; exit 1; }
   claim="$(printf '%s' "$err" | grep -i 'armed' | grep -vi 'not-armed')"
   [ -z "$claim" ] || { kill "$zomb_proc" 2>/dev/null || true; echo "FAIL: positive armed claim over a zombie: $claim"; exit 1; }
   kill "$zomb_proc" 2>/dev/null || true   # ends the unreaping parent; launchd reaps the corpse
@@ -341,12 +343,12 @@ SH
   _heartbeat_leader_alive && { echo "FAIL: forged non-beacon owner verified live"; exit 1; }
   out="$(cmd_heartbeat status 2>/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { echo "FAIL: heartbeat status rc=$rc over a forgery (expected 1)"; exit 1; }
-  printf '%s' "$out" | grep -q 'no verified-live heartbeat leader' || { echo "FAIL: status claimed liveness over a forgery: $out"; exit 1; }
+  grep -q 'no verified-live heartbeat leader' <<<"$out" || { echo "FAIL: status claimed liveness over a forgery: $out"; exit 1; }
   # And the full arm gate goes loud NOT-ARMED (rc 1) -- never a positive "armed" claim.
   export OSRC_HEARTBEAT_EXECUTABLE="$DEAD_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=1
   err="$(_heartbeat_arm_verify 2>&1 >/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { echo "FAIL: arm_verify rc=$rc over a forged owner (expected 1)"; exit 1; }
-  printf '%s' "$err" | grep -q 'NOT-ARMED' || { echo "FAIL: no NOT-ARMED over a forged owner"; exit 1; }
+  grep -q 'NOT-ARMED' <<<"$err" || { echo "FAIL: no NOT-ARMED over a forged owner"; exit 1; }
   claim="$(printf '%s' "$err" | grep -i 'armed' | grep -vi 'not-armed')"
   [ -z "$claim" ] || { echo "FAIL: positive armed claim over a forged owner: $claim"; exit 1; }
   # The SAME record, now with the pid's ps command carrying the beacon argv (the seam stands in

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_preflight_env_isolation.sh — an INHERITED OSRC_PREFLIGHT env var can never turn a real run into
 # a silent no-op; preflight is signaled only by our own private argv sentinel.
 #
@@ -17,14 +18,22 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "$PWD/.test-pfenv.XXXXXX")"
-trap 'TMUX_TMPDIR="$TMP/tmux" tmux kill-server >/dev/null 2>&1; rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
+trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
 # Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
 # inherits the server's env (real HOME, real PATH): it scoped the real Devin skills home and
 # launched the real devin CLI on a cloud model. A private server plus a stub devin keep it here.
 export TMUX_TMPDIR="$TMP/tmux"; unset TMUX TMUX_PANE
+[ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
+# Route every tmux call — the test's and the engine subprocess's — onto a private named socket
+# inside the sandbox dir via a PATH shim, so no call can reach the real tmux server.
+_pf_tmux="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_pf_tmux" ]; then
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_pf_tmux" "$$" > "$TMP/bin/tmux"
+  chmod +x "$TMP/bin/tmux"
+fi
 printf '#!/bin/sh\necho hi\n' > "$TMP/bin/devin"; chmod +x "$TMP/bin/devin"; export PATH="$TMP/bin:$PATH"
 
 pass=0; fail=0
@@ -41,19 +50,22 @@ else
   ok "inherited OSRC_PREFLIGHT=1 no longer silently no-ops a real run (rc=$rc, output present)"
 fi
 # stronger: it actually reached the cloud disclosure / dispatch layer, not an early no-op return.
-printf '%s' "$out" | grep -qiE 'cloud disclosure|delegat|devin|lane' \
+grep -qiE 'cloud disclosure|delegat|devin|lane' <<<"$out" \
   && ok "the run reached the dispatch/cloud-gate layer despite the inherited env var" \
   || bad "the run did not reach the dispatch layer (may still be short-circuiting)"
 
 # 2. The legitimate internal sentinel STILL triggers preflight (a dry, no-dispatch check that returns 0),
-#    so the security fix did not break the mechanism bg/fanout depend on.
-rc=0; ( bash "$SRC" --osrc-preflight-internal --cloud-ack run -m glm-5.2 "echo hi" ) >/dev/null 2>&1 || rc=$?
+#    so the security fix did not break the mechanism bg/fanout depend on. The model is swe-2-high —
+#    provably Free on the Devin offline fallback, so the L7 spend gate passes without consent
+#    (glm-5.2 is unproven -> metered -> the gate correctly refuses; that contract lives in
+#    test_limit_gate.sh).
+rc=0; ( bash "$SRC" --osrc-preflight-internal --cloud-ack run -m swe-2-high "echo hi" ) >/dev/null 2>&1 || rc=$?
 [ "$rc" = "0" ] && ok "the internal --osrc-preflight-internal sentinel still preflights cleanly (rc=0)" \
   || bad "the internal preflight sentinel is broken (rc=$rc) — bg/fanout launches would refuse"
 
 # 3. End-to-end: a real bg launch (which uses the preflight internally) still succeeds.
-outb="$(bash "$SRC" --cloud-ack bg run -m glm-5.2 "echo hi" 2>&1)"
-printf '%s' "$outb" | grep -qi 'launched' \
+outb="$(bash "$SRC" --cloud-ack bg run -m swe-2-high "echo hi" 2>&1)"
+grep -qi 'launched' <<<"$outb" \
   && ok "bg launch still passes its route preflight and starts the job" \
   || bad "bg launch broke: $(printf '%s' "$outb" | tail -1)"
 

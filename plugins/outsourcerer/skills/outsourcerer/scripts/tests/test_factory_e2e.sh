@@ -38,7 +38,7 @@ O() { (cd "$R" && PATH="$E/bin:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC
 O plan new demo --goal "add a feature file" >/dev/null 2>&1
 O task add "write the spec" --shape scout --provider droid >/dev/null 2>&1
 O task add "build it" --shape ship --deps t1 --check "test -f feature.txt" --provider droid >/dev/null 2>&1
-out="$(O plan run --interval 1 --max-minutes 3 --auto-land 2>&1)"; rc=$?
+out="$(O --spend-ok plan run --interval 1 --max-minutes 3 --auto-land 2>&1)"; rc=$?
 
 [ "$rc" -eq 0 ] && ok "plan run finishes with exit 0" || bad "plan run exit $rc: $(printf '%s' "$out" | tail -5)"
 T="$OSRC_HOME/plans/demo/tasks"
@@ -46,7 +46,7 @@ T="$OSRC_HOME/plans/demo/tasks"
 [ "$(jq -r .state "$T/t2.json")" = done ] && ok "ship task done" || bad "ship state $(jq -r .state "$T/t2.json")"
 [ "$(jq -r '.landed // false' "$T/t2.json")" = true ] && ok "ship task landed" || bad "ship task not landed"
 grep -q "SPEC: create feature.txt" "$T/t2/brief.md" && ok "the spec reached the build worker's brief" || bad "dependency output missing from brief"
-git -C "$R" log --format=%s main | grep -q '^land(demo/t2): build it$' && ok "main has the land merge commit" || bad "no land commit on main"
+{ _t3b_pipe="$(git -C "$R" log --format=%s main)" && grep -q '^land(demo/t2): build it$' <<<"$_t3b_pipe"; } && ok "main has the land merge commit" || bad "no land commit on main"
 [ "$(git -C "$R" show main:feature.txt 2>/dev/null)" = "feature built" ] && ok "the built file is on main" || bad "feature.txt not on main"
 [ -z "$(git -C "$R" status --porcelain)" ] && ok "the caller's checkout stayed clean" || bad "caller checkout dirty"
 [ "$(jq -r .verdict "$T/t2/evidence.json")" = done ] && [ "$(jq -r .secret_scan "$T/t2/evidence.json")" = clean ] \

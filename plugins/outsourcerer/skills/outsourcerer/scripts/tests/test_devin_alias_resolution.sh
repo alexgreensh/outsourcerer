@@ -45,6 +45,8 @@ sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$TMP_SRC"
 # shellcheck disable=SC1090
 export PATH="$TMP/bin:$PATH" HOME="$TMP" OSRC_HOME="$TMP/osrc" OUTSOURCERER_DEPTH=0
 source "$TMP_SRC"
+# The temporary script has no adjacent lib directory. Load the production modules.
+for module in "$HERE"/../lib/*.sh; do [ -r "$module" ] && . "$module"; done
 PROVIDER=devin
 
 check() {

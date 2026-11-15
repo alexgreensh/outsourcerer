@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
+# sealed-run-requires: nested-sandbox
 # conformance.sh — U5: per-lane conformance harness (the don't-ship-blind gate).
 #
 # TWO layers:
@@ -32,7 +34,7 @@ note() { echo "SKIP: $1"; skip=$((skip+1)); }
 echo "=== STATIC gate: Phase-0 invariants wired ==="
 
 # 1. Every unit test suite is green (aggregate).
-_ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
+_ALL_SUITES="test_atomic_mkdir_claim test_atomic_lock_paths test_stale_lock_races test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default test_session_capabilities \
          test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
          test_loops test_job_lifecycle test_output_truncation test_lane_accounting \
@@ -49,8 +51,11 @@ _ALL_SUITES="$_ALL_SUITES test_model_selection_parity"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_human"
 _ALL_SUITES="$_ALL_SUITES test_endpoint_mutation_lock test_relaunch_bookkeeping test_noglob_splitting"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_reclaim"
+_ALL_SUITES="$_ALL_SUITES test_heartbeat_election_race"
 _ALL_SUITES="$_ALL_SUITES test_devin_org_policy_posture"
 _ALL_SUITES="$_ALL_SUITES test_devin_grant_lock_share"
+_ALL_SUITES="$_ALL_SUITES test_devin_lock_race"
+_ALL_SUITES="$_ALL_SUITES test_mutex_release_race"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_wake_push"
 _ALL_SUITES="$_ALL_SUITES test_session_registry_end"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_single_instance"
@@ -58,6 +63,7 @@ _ALL_SUITES="$_ALL_SUITES test_cc_model_restore"
 _ALL_SUITES="$_ALL_SUITES test_vocab_hygiene"
 _ALL_SUITES="$_ALL_SUITES test_tool_bugs_062"
 _ALL_SUITES="$_ALL_SUITES test_managed_send"
+_ALL_SUITES="$_ALL_SUITES test_supervise"
 _ALL_SUITES="$_ALL_SUITES test_parity_autoheal"
 _ALL_SUITES="$_ALL_SUITES test_pr10_falsestall_before_quota"
 _ALL_SUITES="$_ALL_SUITES test_cline_lane"
@@ -78,9 +84,11 @@ _ALL_SUITES="$_ALL_SUITES test_advise_dynamic_pool"
 _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_tmux_headless_fallback"
 _ALL_SUITES="$_ALL_SUITES test_devin_catalog_free_tier"
+_ALL_SUITES="$_ALL_SUITES test_remote_review"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_session_send_verify"
 _ALL_SUITES="$_ALL_SUITES test_session_control"
+_ALL_SUITES="$_ALL_SUITES test_screen_state test_approver_table test_approver_tick"   # L3 screen reader + approver
 _ALL_SUITES="$_ALL_SUITES test_codex_code_mode_host"
 _ALL_SUITES="$_ALL_SUITES test_codex_windows_sandbox"
 _ALL_SUITES="$_ALL_SUITES test_cloud_autoisolate"
@@ -93,6 +101,7 @@ _ALL_SUITES="$_ALL_SUITES test_session_model_pin_guard"
 _ALL_SUITES="$_ALL_SUITES test_session_exit_liveness"
 _ALL_SUITES="$_ALL_SUITES test_wrapper_liveness"
 _ALL_SUITES="$_ALL_SUITES test_stop_guard"
+_ALL_SUITES="$_ALL_SUITES test_tmux_kill_safety"
 _ALL_SUITES="$_ALL_SUITES test_pi_lane"
 _ALL_SUITES="$_ALL_SUITES test_grokbot_lane"
 _ALL_SUITES="$_ALL_SUITES test_lifecycle_fix"
@@ -103,8 +112,13 @@ _ALL_SUITES="$_ALL_SUITES test_preflight_guard_exempt"
 _ALL_SUITES="$_ALL_SUITES test_preflight_env_isolation"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_arm_liveness test_heartbeat_autoarm test_heartbeat_stale_alarm test_heartbeat_rearm_command"
 _ALL_SUITES="$_ALL_SUITES test_tier_churn"
+_ALL_SUITES="$_ALL_SUITES test_sandbox_guard"
 _ALL_SUITES="$_ALL_SUITES test_lane_down_marker test_lane_down_gate test_delegate_attribution"
 _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota test_nowrite_watchdog test_advise_task_shape"
+_ALL_SUITES="$_ALL_SUITES test_devin_nowrite_floor"
+_ALL_SUITES="$_ALL_SUITES test_supervise_pid_baseline"
+_ALL_SUITES="$_ALL_SUITES test_parity_insource_refresh"
+_ALL_SUITES="$_ALL_SUITES test_lib_symlink_loader"
 _ALL_SUITES="$_ALL_SUITES test_devin_plan_quota_probe"
 _ALL_SUITES="$_ALL_SUITES test_lane_plan_limit"
 _ALL_SUITES="$_ALL_SUITES test_failover_pick"
@@ -116,12 +130,24 @@ _ALL_SUITES="$_ALL_SUITES test_session_probe_sigpipe"
 _ALL_SUITES="$_ALL_SUITES test_exit_trap_chain"
 _ALL_SUITES="$_ALL_SUITES test_factory_land"
 _ALL_SUITES="$_ALL_SUITES test_factory_tasks"
+_ALL_SUITES="$_ALL_SUITES test_lock_owner_probe"
 _ALL_SUITES="$_ALL_SUITES test_factory_exclude"
 _ALL_SUITES="$_ALL_SUITES test_factory_flow"
 _ALL_SUITES="$_ALL_SUITES test_factory_e2e"
 _ALL_SUITES="$_ALL_SUITES test_factory_pstack"
 _ALL_SUITES="$_ALL_SUITES test_job_meta_lane"
 _ALL_SUITES="$_ALL_SUITES test_reconcile_launch_grace"
+_ALL_SUITES="$_ALL_SUITES test_perm_profiles"
+_ALL_SUITES="$_ALL_SUITES test_handover"
+_ALL_SUITES="$_ALL_SUITES test_done_contract"
+_ALL_SUITES="$_ALL_SUITES test_session_effort_guard"
+_ALL_SUITES="$_ALL_SUITES test_cloudrun"
+_ALL_SUITES="$_ALL_SUITES test_heavy"
+_ALL_SUITES="$_ALL_SUITES test_accounts"
+_ALL_SUITES="$_ALL_SUITES test_hub test_hub_home test_cleanup_manifest test_limit_gate test_spend_consent test_lane_billing test_lanemsg test_portable_mtime"
+_ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_tests_set_home"
+_PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_sealed_fixes test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final test_shell_scratch"
+_ALL_SUITES="$_ALL_SUITES $_PYTHON_SUITES"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,
 # override with OSRC_SUITE_TIMEOUT (seconds; 0 disables the bound; a non-numeric value falls
@@ -175,6 +201,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   # pass standalone failed only in the aggregate. Isolate the state (a suite that sets its own
   # OSRC_HOME still overrides this).
   local suite="$1" secs out_file pid_file expired _home root wd_pid _st pp0
+  export TMPDIR="${TMPDIR:-/tmp}"
   _suite_out=""; _suite_rc=0; _suite_timed_out=0; _suite_secs=""
   case "${OSRC_SUITE_TIMEOUT:-}" in
     0) secs=0 ;;                                   # 0 explicitly disables the bound
@@ -182,11 +209,12 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
     *) secs="$OSRC_SUITE_TIMEOUT" ;;
   esac
   _suite_secs="$secs"
-  out_file="$(mktemp "${TMPDIR:-/tmp}/osrc-suite-out.XXXXXX")" || { _suite_rc=127; return 127; }
+  out_file="$(mktemp "${TMPDIR%/}/osrc-suite-out.XXXXXX")" || { _suite_rc=127; return 127; }
   pid_file="$out_file.pid"
   expired="$out_file.expired"
   # Never risk an empty OSRC_HOME: the suite would run against the user's real ~/.outsourcerer.
   _home="$(mktemp -d)" || { rm -f "$out_file" 2>/dev/null; _suite_rc=127; return 127; }
+  mkdir -p "$_home/home" || { _suite_rc=127; return 127; }
   # The SUITE stays in the FOREGROUND. A background job starts with SIGINT/SIGQUIT ignored, and a
   # shell cannot trap or reset a signal that was ignored at entry, so every INT trap in a suite or
   # in the engine (_supervise, the obligation guard, the fifo streamer, the fallback runner) would
@@ -234,7 +262,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
   # the suite, THIS shell would print a "Terminated: 15" diagnostic for its foreground child into
   # the gate log, which is exactly the noise the timeout report replaces. The suite's own stderr
   # is unaffected (its command redirect sends it to the capture file).
-  { OSRC_HOME="$_home" OSRC_HEARTBEAT_DISABLED=1 bash -c 'echo "$$ $PPID" > "$1"; exec bash "$2"' _ "$pid_file" "$suite" >"$out_file" 2>&1; _suite_rc=$?; } 2>/dev/null
+  { HOME="$_home/home" OSRC_HOME="$_home" OSRC_HEARTBEAT_DISABLED=1 bash -c 'echo "$$ $PPID" > "$1"; case "$2" in *.py) exec python3 "$2" ;; *) exec bash "$2" ;; esac' _ "$pid_file" "$suite" >"$out_file" 2>&1; _suite_rc=$?; } 2>/dev/null
   _suite_pid_file=""
   if [ -n "$wd_pid" ] && [ -f "$expired" ]; then
     # Timer won: let the watchdog finish its kill, then walk the tree once more so a descendant
@@ -264,7 +292,7 @@ _report_unit_suite_result() {   # <suite-name>; reads the _suite_* state _run_un
   if [ "$_suite_timed_out" -eq 1 ]; then
     bad "unit suite $1 TIMED OUT after ${_suite_secs}s"
     printf '%s\n' "$_suite_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'
-  elif [ "$_suite_rc" -eq 0 ] && printf '%s\n' "$_suite_out" | grep -q '^FAIL'; then
+  elif [ "$_suite_rc" -eq 0 ] && grep -q '^FAIL' <<<"$_suite_out"; then
     # A suite that prints failures but exits 0 would otherwise read as green forever.
     bad "unit suite $1 printed FAIL lines but exited 0 (its last line must exit non-zero on failure)"
     printf '%s\n' "$_suite_out" | grep -E '^FAIL' | sed 's/^/      /'
@@ -298,12 +326,24 @@ _gate_int_sweep() {
 # PATH), not the suite's sandbox: a suite whose run auto-detached into a session was scoping the
 # developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
 # default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
-_conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
+_conf_tmux_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
+[ -d "$_conf_tmux_dir" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
+# A PATH shim routes EVERY tmux call a suite makes — its own and the engine's — onto a private
+# named socket inside that suite's TMUX_TMPDIR, so kill-server can never reach the developer's
+# real server even if TMUX leaks into a suite. Suites that fake tmux still win: they prepend
+# their own fake-bin to PATH inside the suite.
+_conf_shim_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-shim.XXXXXX")" || { echo "FAIL: mktemp for the tmux shim"; exit 1; }
+_conf_tmux_real="$(command -v tmux 2>/dev/null || true)"
+if [ -n "$_conf_tmux_real" ]; then
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_conf_tmux_real" "$$" > "$_conf_shim_dir/tmux"
+  chmod +x "$_conf_shim_dir/tmux"
+  PATH="$_conf_shim_dir:$PATH"; export PATH
+fi
 _conf_tmux_end() {
   local d
-  TMUX_TMPDIR="$_conf_tmux_dir" tmux kill-server >/dev/null 2>&1
-  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && TMUX_TMPDIR="${d%/}" tmux kill-server >/dev/null 2>&1; done
-  rm -rf "$_conf_tmux_dir"
+  env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1
+  for d in "$_conf_tmux_dir"/*/; do [ -d "$d" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${d%/}" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; done
+  rm -rf "$_conf_tmux_dir" "$_conf_shim_dir"
 }
 _conf_tmux_had="${TMUX_TMPDIR+1}"; _conf_tmux_prev="${TMUX_TMPDIR-}"
 export TMUX_TMPDIR="$_conf_tmux_dir"; unset TMUX TMUX_PANE
@@ -321,8 +361,9 @@ esac
 if [ "$_JOBS" -le 1 ]; then
   trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
   for t in $_ALL_SUITES; do
-    if [ -f "$SCRIPT_DIR/$t.sh" ]; then
-      _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+    _suite_path="$SCRIPT_DIR/$t.sh"; [ -f "$_suite_path" ] || _suite_path="$SCRIPT_DIR/$t.py"
+    if [ -f "$_suite_path" ]; then
+      _run_unit_suite_bounded "$_suite_path"
       _report_unit_suite_result "$t"
     else note "unit suite $t absent"; fi
   done
@@ -332,7 +373,7 @@ else
   # a suite or the engine would silently never install. Each worker runs the usual bounded runner
   # and leaves its result in files; results are reported in registry order, as soon as the next
   # suite in order is done, so the log reads the same as a serial run.
-  _par_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
+  _par_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
   _par_order=(); for t in $_ALL_SUITES; do _par_order+=("$t"); done
   _par_n=${#_par_order[@]}; _par_pid=(); _par_done=()
   _par_sweep() {
@@ -347,14 +388,15 @@ else
   while [ "$_i" -lt "$_par_n" ]; do
     while [ "$_l" -lt "$_par_n" ] && [ "$_active" -lt "$_JOBS" ]; do
       t="${_par_order[$_l]}"
-      if [ -f "$SCRIPT_DIR/$t.sh" ]; then
+      _suite_path="$SCRIPT_DIR/$t.sh"; [ -f "$_suite_path" ] || _suite_path="$SCRIPT_DIR/$t.py"
+      if [ -f "$_suite_path" ]; then
         mkdir -p "$_conf_tmux_dir/$t"
         ( export TMUX_TMPDIR="$_conf_tmux_dir/$t"
-          _run_unit_suite_bounded "$SCRIPT_DIR/$t.sh"
+          _run_unit_suite_bounded "$_suite_path"
           printf '%s' "$_suite_out" > "$_par_dir/$t.out"
           printf '%s %s %s\n' "$_suite_rc" "$_suite_timed_out" "$_suite_secs" > "$_par_dir/$t.meta.tmp"
           mv -f "$_par_dir/$t.meta.tmp" "$_par_dir/$t.meta"
-          tmux kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
+          env -u TMUX -u TMUX_PANE tmux -L osrc-test-$$ kill-server >/dev/null 2>&1 ) >/dev/null 2>&1 &
         _par_pid[$_l]=$!; _active=$((_active + 1))
       else
         echo absent > "$_par_dir/$t.meta"; _par_done[$_l]=1
@@ -401,7 +443,7 @@ grep -q '_is_transport_failure'                   "$SRC" && ok "U4 transport-vs-
 grep -q '_devin_model_for'                        "$SRC" && ok "availability-aware routing present"             || bad "availability-aware routing missing"
 grep -q 'Read Edit Write Bash Grep Glob'          "$SRC" && ok "U7 mutating coding toolset granted (no bash wedge)" || bad "U7 toolset missing"
 grep -q '_autodetach_should'                       "$SRC" && ok "D3 auto-detach trigger present"                       || bad "D3 trigger missing"
-grep -q '_lane_trusted_for_pwd'                    "$SRC" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
+grep -q '^_lane_trusted_for_pwd()'                  "$SCRIPT_DIR/../lib/cloudgate.sh" && ok "per-repo lane trust resolver present"                  || bad "trust resolver missing"
 grep -qE 'export[[:space:]]+OSRC_TRUST_LANE_ONCE'  "$SRC" && bad "per-invocation trust grant is exported (child jobs would inherit it)" || ok "trust grant is never exported (no inheritance)"
 grep -q '_autodetach_run.*_bg_launch\|_bg_launch'  "$SRC" && ok "D3 auto-detach reuses bg machinery"                    || bad "D3 reuse missing"
 grep -q '_blind_turn_guard'                          "$SRC" && ok "blind-turn guard present (refuses to end blind on live work)" || bad "blind-turn guard missing"
@@ -418,6 +460,13 @@ for _f in "$SCRIPT_DIR"/test_*.sh; do
 done
 [ -z "$_unreg" ] && ok "every test_*.sh in this directory is registered with the runner" \
   || bad "test suite(s) present but never run by the gate:$_unreg"
+_unreg=""
+for _f in "$SCRIPT_DIR"/test_*.py; do
+  _n="$(basename "$_f" .py)"
+  case " $_PYTHON_SUITES " in *" $_n "*) ;; *) _unreg="$_unreg $_n" ;; esac
+done
+[ -z "$_unreg" ] && ok "every test_*.py in this directory is registered with the runner" \
+  || bad "Python suite(s) present but never run by the gate:$_unreg"
 
 # 2b. INSTALL DRIFT: a second installed copy running different code than this one is the failure that
 # makes every other gate here meaningless — the suite passes against a tree the user never executes.
@@ -454,12 +503,12 @@ else
     # OSRC_NO_AUTODETACH=1: the probe captures stdout (non-TTY), which would trigger D3 auto-detach
     # on capable/frontier tiers and return a job-id receipt instead of the answer — a false FAIL.
     out="$( cd "$FIX"; OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" "$@" --effort high "Read ./nonce.txt and reply with ONLY its contents." 2>&1 )"; rc=$?
-    if printf '%s' "$out" | grep -q "$nonce"; then ok "LIVE $label: read the fixture (real tool call), rc=$rc"
+    if grep -q "$nonce" <<<"$out"; then ok "LIVE $label: read the fixture (real tool call), rc=$rc"
     elif [ "$rc" -ne 0 ]; then note "LIVE $label: lane unavailable/failed (rc=$rc) — $(printf '%s' "$out" | tail -1)"
     else bad "LIVE $label: ran but did NOT read the nonce (tool grant broken?)"; fi
   }
   # Devin GLM (availability-aware routing fix — this is the exact path that used to 403 on OpenRouter).
-  if have devin && devin auth status 2>/dev/null | grep -qi "logged in"; then
+  if have devin && { _t3b_pipe="$(devin auth status 2>/dev/null)" && grep -qi "logged in" <<<"$_t3b_pipe"; }; then
     probe_lane "devin/glm" run -m glm
   else note "LIVE devin: not installed / not logged in"; fi
   # Native Claude (subscription) if present.

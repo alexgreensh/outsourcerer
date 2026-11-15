@@ -84,6 +84,8 @@ def _free_port():
 
 
 def main():
+    if os.environ.get('OSRC_CONFORMANCE_LIVE') != '1':
+        print('SKIP: live agent certification requires OSRC_CONFORMANCE_LIVE=1'); return 0
     if not subprocess.run(["bash", "-lc", "command -v claude"], capture_output=True).stdout.strip():
         print("SKIP: claude CLI not on PATH (cannot certify the live loop here)"); return 0
     if not os.path.isfile(SHIM):

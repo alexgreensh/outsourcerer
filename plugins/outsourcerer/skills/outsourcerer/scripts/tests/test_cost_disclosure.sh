@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp "${TMPDIR:-/tmp}/osrc-cost.XXXXXX")"
-FIX="$(mktemp -d "${TMPDIR:-/tmp}/osrc-cost-fixture.XXXXXX")"
-trap 'rm -f "$TMP"; rm -rf "$FIX"' EXIT
+TMP="$(mktemp "${TMPDIR%/}/osrc-cost.XXXXXX")"
+FIX="$(mktemp -d "${TMPDIR%/}/osrc-cost-fixture.XXXXXX")"
+trap 'rm -f "$TMP"; rm -rf "$FIX"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$TMP"
 set +e
 # shellcheck disable=SC1090
@@ -53,7 +56,7 @@ EOF
     '$0 cash, spends your Claude plan limits' \
     '$0 cash, spends your Devin plan limits' \
     '$0 cash + $0 plan'; do
-    if printf '%s\n' "$tab_out" | grep -Fq "$disclosure"; then
+    if grep -Fq "$disclosure" <<<"$tab_out"; then
       ok "tab renders $disclosure"
     else
       bad "tab omitted $disclosure"
@@ -62,8 +65,8 @@ EOF
 
   OSRC_MODELS_JSON="$FIX/missing-models.json"
   estimate_out="$(cmd_estimate 'small task' 2>&1)"
-  if printf '%s\n' "$estimate_out" | grep -Fq '$0 cash, spends your ChatGPT plan limits' &&
-     printf '%s\n' "$estimate_out" | grep -Fq '$0 cash + $0 plan'; then
+  if grep -Fq '$0 cash, spends your ChatGPT plan limits' <<<"$estimate_out" &&
+     grep -Fq '$0 cash + $0 plan' <<<"$estimate_out"; then
     ok "estimate renders plan and local disclosures"
   else
     bad "estimate omitted plan or local disclosure"
@@ -73,8 +76,8 @@ EOF
   printf '{"data":[]}\n' > "$OSRC_MODELS_JSON"
   have() { [ "$1" = jq ]; }
   suggest_out="$(cmd_suggest 2>&1)"
-  if printf '%s\n' "$suggest_out" | grep -Fq '$0 cash, spends your ChatGPT plan limits' &&
-     printf '%s\n' "$suggest_out" | grep -Fq '$0 cash, spends your Antigravity plan limits'; then
+  if grep -Fq '$0 cash, spends your ChatGPT plan limits' <<<"$suggest_out" &&
+     grep -Fq '$0 cash, spends your Antigravity plan limits' <<<"$suggest_out"; then
     ok "suggest renders named plan-limit disclosures"
   else
     bad "suggest omitted named plan-limit disclosure"

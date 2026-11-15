@@ -197,7 +197,7 @@ profiles), and idle computers can pause, so prefer short jobs or a routine that 
 ## Gemini / Antigravity lane, text delegation + visual review + image gen
 
 `gemini-pro` / `gemini-flash` / `gemini-flash-lite` are model-alias-selected exactly like
-`sol`/`fable`, no `--provider` needed. Two vehicles, auto-selected:
+`sol`/`fable`, no `--provider` needed. ONE vehicle (gemini-cli is retired, see below):
 
 **PRIMARY, Antigravity CLI `agy`, KEYLESS (the whole point).** When `agy` is on PATH the lane
 dispatches through it in headless print mode (`agy -p`), riding **your existing Antigravity/Google
@@ -208,11 +208,11 @@ in non-TTY environments", fixed), as are print-mode error/exit-code handling and
 propagation in `-p`. Tiers map to agy flags: `run`→plain `-p` (read-only), `edit`/`research`→
 `--sandbox --dangerously-skip-permissions` (sandboxed autonomy), `yolo`→`--dangerously-skip-permissions`.
 
-**FALLBACK, `gemini` CLI (gemini-cli) + `GEMINI_API_KEY`.** For users who prefer an API key (or
-have no Antigravity login): install gemini-cli and add `GEMINI_API_KEY`/`GOOGLE_API_KEY` to
-`~/.env` (single-key extraction, same rule as `OPENROUTER_API_KEY`, never `set -a`). Used
-automatically when `agy` is absent, or force it with `OSRC_GEMINI_VEHICLE=gemini`. Force agy with
-`OSRC_GEMINI_VEHICLE=agy`.
+**`gemini` CLI (gemini-cli) is RETIRED** (Antigravity replaced it): it is never auto-selected,
+never routed to, and `OSRC_GEMINI_VEHICLE=gemini` dies loudly — even when an old `gemini`
+binary is still installed. `agy` is the only text vehicle. `OSRC_GEMINI_VEHICLE=agy` still
+works as an explicit pin. `GEMINI_API_KEY`/`GOOGLE_API_KEY` in `~/.env` now serve ONLY the
+image lane (nano-banana / `image` subcommand).
 
 `doctor` reports which vehicle is in use and prints the exact install + one-step auth for whichever
 you're missing.
@@ -506,8 +506,9 @@ notice with its reason and time left.
   before cash lanes). Engine lanes contribute their default model.
 
 Cash lanes (OpenRouter, TokenRouter, Claudex) are **never used silently**: they join the candidate
-list only when `OSRC_FAILOVER_CASH_OK=1` is set; otherwise the stop message names them and the
-switch. A pinned `-m` is moved only to the *same* model on another harness; a different-model pick
+list only when `OSRC_FAILOVER_CASH_OK=1` is set, and the hop itself still needs this command's
+`--spend-ok` — the env var is standing consent, spend approval is per command. Otherwise the stop
+message names them and both switches. A pinned `-m` is moved only to the *same* model on another harness; a different-model pick
 is refused loudly unless `OSRC_FALLBACK_PINNED=1`. Hops are bounded per job (`OSRC_FAILOVER_MAX`,
 default 2) so two spent lanes cannot ping-pong. The `local` lane is not a failover target: no
 equivalence claim can be made for whatever you pulled locally.

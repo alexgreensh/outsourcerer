@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # 0.6.2 tool bugs: (1) free-tier Devin models must not read as blocked by the paid "0%" display,
 # (3) droid explore/run (read-only) tier must be permissioned to actually read (--auto low).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-062.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-062.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 pass=0; fail=0
@@ -33,7 +34,7 @@ grep -q 'does NOT gate it' "$SRC" && ok "clarification states the paid figure do
 grep -qE 'auto\)[[:space:]]*aflag=\(--auto low\)' "$SRC" && ok "droid auto tier -> --auto low (read-only, permissioned)" || bad "droid auto tier is not --auto low"
 # scope the negative to delegate_droid's body (the gemini/agy lane legitimately has an empty auto flag)
 droid_body="$(awk '/^delegate_droid\(\)/{p=1} p{print} p&&/^}/{exit}' "$SRC")"
-printf '%s' "$droid_body" | grep -qE 'auto\)[[:space:]]*aflag=\(\)' && bad "droid auto tier still empty-flagged (under-permissioned)" || ok "droid auto tier no longer empty-flagged"
+grep -qE 'auto\)[[:space:]]*aflag=\(\)' <<<"$droid_body" && bad "droid auto tier still empty-flagged (under-permissioned)" || ok "droid auto tier no longer empty-flagged"
 
 # ---- bug 1 (precise): _devin_quota_refusal detects a paid-balance/ACU refusal, ignores unrelated ----
 # The 0.6.2 hint was hedged ("if that was a quota refusal"). Now Devin's stderr is captured and matched,

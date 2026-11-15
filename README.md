@@ -114,6 +114,20 @@ outsourcerer fanout collect <id>            # every result in one place, then: o
 
 `--worktree` runs each editing specialist in its **own disposable git worktree** so parallel edits never collide; worktrees are preserved after the run (never auto-deleted), and `cleanup` refuses to bin one that has unmerged work unless you `--force`. Every job is watchdog-supervised so it ends **classified** (done / blocked / timed-out), carries your skills via `--with` (MCP on the Claude lanes), and lands on the **Tab**. You keep the persona, the decomposition, the merge policy; the sorcerer runs the fleet.
 
+For sandboxed worktree lanes, opt in to `outsourcerer session approve-policy safe --all` to approve eligible prompts once and log each decision. The default remains off. Sealed test runs can be approved automatically only with an OS isolation tool and a root-owned runner whose path is not writable by the delegate. Without isolation, a manual run requires `--allow-unisolated`.
+
+`outsourcerer handover --check-context` prepares a handover when the current orchestrator reaches 150,000 input tokens. Set `OSRC_ORCH_CTX_MAX` to change the threshold; keep the current orchestrator supervising until its replacement has adopted the work and armed supervision.
+
+Supervision refreshes a project-and-limits snapshot every 10 minutes. Change the interval with `OSRC_SUPERVISE_TICK_SECS`; the snapshot lives in `$OSRC_HOME/supervise/<owner-id>/hub.json`.
+
+`supervise --auto done,limits` can dispatch a verified READY queue item to the reviewer automatically. Verdicts and other judgment calls still wake the orchestrator.
+
+Reviewer rotation defaults to two reviews or 35% context, configurable with `OSRC_REVIEW_ROTATE_K` and `OSRC_REVIEW_CTX_MAX`. An idle managed reviewer with an empty queue is retired after 50 minutes (`OSRC_REVIEW_IDLE_MIN`).
+
+Set `OSRC_LEAN_LAUNCH=1` for Claude sessions and delegates to retain `CLAUDE.md` while using strict MCP configuration without `--bare`. Interactive sessions start with no MCP servers unless `OSRC_LEAN_MCP_CONFIG` names a JSON config containing the required servers. Installed skills and plugins are still inherited.
+
+Re-review briefs use the previous reviewed commit and findings. Use `review next --final` for the full base-to-head merge review; per-round reports use `## Round <number>` sections.
+
 **It wakes you when a job ends.** Every launch prints a `wait` line. Start it as a background command and Claude Code or Codex gets a turn the moment the work finishes, with the result in hand. **On the roadmap:** pushed completion events for chat bots, and a richer receipt (cost + branch/SHA) in that same JSON.
 
 ---
@@ -369,9 +383,18 @@ Add capability to one offload with `--with skills=<name>` / `--with mcp=<name>`.
 
 - More harnesses as the frontier expands.
 - An OpenRouter server-side subagent lane, and pushed completion events for chat-bot orchestrators.
-- *Already shipped:* cloud jobs that run in a clean copy when your secrets are gitignored, plus Codex writes on Windows, in v0.15.3; steadier time limits and launch checks in v0.15.2; default answers for held decisions and retries that fit the failure in v0.15.1; the **Pi** and **Grok Bot** lanes plus Cursor plugin packaging in v0.15.0; the **software factory** (durable plans, automatic context hand-off, a done contract, a serialized merge gate, and ready-made flows) plus a saved model exclude list in v0.14.0; the **`fleet`** view (one honest list of every session you're running, with real names and honest states) in v0.7.0; the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
+- *Already shipped:* one `supervise` watcher for every job, session and remote lane, a single-reviewer queue, the Mission Control page (`hub serve`), paid lanes that always ask first, and Claude multi-account lanes in v0.16.0; cloud jobs that run in a clean copy when your secrets are gitignored, plus Codex writes on Windows, in v0.15.3; steadier time limits and launch checks in v0.15.2; default answers for held decisions and retries that fit the failure in v0.15.1; the **Pi** and **Grok Bot** lanes plus Cursor plugin packaging in v0.15.0; the **software factory** (durable plans, automatic context hand-off, a done contract, a serialized merge gate, and ready-made flows) plus a saved model exclude list in v0.14.0; the **`fleet`** view (one honest list of every session you're running, with real names and honest states) in v0.7.0; the **Cline** engine lane in v0.6.4, fully supervised, running on your own Cline setup (your API keys, or a ClinePass subscription for discounted open-weight models like GLM, DeepSeek, and Kimi); **loops** (a bounded try→check→retry cycle run on a cheap external model, verified by your own tests) and per-repo lane trust in v0.4.13; the interactive copilot (auto/manual/hybrid modes + live-limit auto-conservation) and **Cursor**, **Droid**, and the `claudex` lane (your ChatGPT model inside the Claude Code harness) in v0.4.8; reverse bridges so you can drive Outsourcerer *from* Codex, Droid, Cursor, or Hermes too (Hermes goes both ways: delegate to it with `-m <any>`, or drive Outsourcerer from inside a Hermes session via `parity-hermes`); parallel `fanout` (v0.2.0); the local Ollama/LM-Studio lane (v0.3.0); git-worktree isolation, agent-library routing, and machine-readable `status --json` (v0.3.1).
 
 Issues and PRs welcome.
+
+## Claude accounts
+
+`outsourcerer accounts` lists Claude config directories and their weekly and five-hour headroom. Add one with `outsourcerer accounts add work`, or supply an absolute directory as the third argument. Shared settings, instructions, skills, agents, hooks, plugins, and memory are linked from `~/.claude`; login and live session state remain separate. Follow the printed login instruction yourself. `outsourcerer accounts check work` reports changed or missing links. `outsourcerer accounts rm work` removes the registry entry and links it created, leaving real files and the config directory intact. The `default` account is `~/.claude`.
+
+New Claude lanes prefer subscription accounts with the most known weekly headroom below configured lane caps. Use `--account work` to select one explicitly. Unreadable usage is shown as unknown; an account with unknown usage cannot satisfy a configured cap. Without a cap, the default account can still launch. Each new process keeps its chosen account; running lanes do not move. Console and other per-use accounts require spend consent.
+
+Release note: Anthropic's terms on one person using several personal subscriptions have not been confirmed by us.
+
 
 ## License
 

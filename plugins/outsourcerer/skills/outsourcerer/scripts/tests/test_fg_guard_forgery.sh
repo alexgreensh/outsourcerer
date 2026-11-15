@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_fg_guard_forgery.sh — a foreground delegate that echoes an UNSIGNED terminal marker must not
 # arm the teardown kill timer, and a SIGKILLed half-finished run must never report rc=0.
 #

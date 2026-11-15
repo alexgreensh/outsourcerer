@@ -36,7 +36,7 @@ SCRIPT_PATH="$MOCK"   # cmd_loop delegates via "$SCRIPT_PATH"
 ( cmd_loop verify --check "true" >/dev/null 2>&1 ); [ $? -ne 0 ] && ok "loop verify requires a task" || bad "missing task did not error"
 
 # 3. unknown shape errors and points at the recipes.
-e="$( ( cmd_loop sweep --check true "x" ) 2>&1 )"; echo "$e" | grep -qi 'recipe' && ok "non-verify shape points to references/loops.md recipes" || bad "unknown shape message unhelpful"
+e="$( ( cmd_loop sweep --check true "x" ) 2>&1 )"; grep -qi 'recipe' <<<"$e" && ok "non-verify shape points to references/loops.md recipes" || bad "unknown shape message unhelpful"
 
 # 4. SUCCESS: check passes on attempt 1 -> state success, exit 0, delegate ran exactly once.
 export MOCK_CNT="$TMP/c_ok"; : > "$MOCK_CNT"
@@ -119,13 +119,13 @@ fi
 #     selection criteria pushes the hardest decision back onto the user at the exact moment they have
 #     the least context, and a wrong choice here wastes a whole run.
 e="$( ( cmd_loop ) 2>&1 )"
-printf '%s' "$e" | grep -qi 'which loop do you want' \
+grep -qi 'which loop do you want' <<<"$e" \
   && ok "the loop help asks the selection question instead of only listing shapes" \
   || bad "loop help lists shapes with no guidance on choosing"
 for shape in sweep best-of-N evaluator-optimizer council-build; do
-  printf '%s' "$e" | grep -q "$shape" || bad "selection guidance omits $shape"
+  grep -q "$shape" <<<"$e" || bad "selection guidance omits $shape"
 done
-printf '%s' "$e" | grep -qi 'do not loop' \
+grep -qi 'do not loop' <<<"$e" \
   && ok "the guidance also says when NOT to loop (no checker means no loop)" \
   || bad "no guidance on when looping is the wrong tool"
 ok "selection guidance names every recipe"
@@ -209,15 +209,15 @@ grep -q 'thing broke' "$_ld/last_fail" 2>/dev/null \
   && ok "the latest failure is readable without opening every check file" \
   || bad "no last-failure summary recorded"
 out="$(cmd_loop status 2>/dev/null)"
-printf '%s' "$out" | grep -q 'LAST FAILURE' \
+grep -q 'LAST FAILURE' <<<"$out" \
   && ok "loop status surfaces state, attempt, elapsed and the current failure" \
   || bad "loop status does not report live state"
 
 # 18. Spend must name both cash impact and the plan limit that actually binds.
 out="$(MOCK_CNT="$MOCK_CNT" cmd_loop verify --check "true" --max 3 "t" 2>&1 >/dev/null)"
-printf '%s' "$out" | grep -qi 'attempt(s) over' \
+grep -qi 'attempt(s) over' <<<"$out" \
   && ok "a finished loop reports what it consumed" || bad "loop does not report its consumption"
-printf '%s' "$out" | grep -Fq '$0 cash, spends your Devin plan limits' \
+grep -Fq '$0 cash, spends your Devin plan limits' <<<"$out" \
   && ok "the report names Devin plan-limit spend alongside cash cost" \
   || bad "consumption report omits the Devin plan-limit disclosure"
 

@@ -72,28 +72,28 @@ w_fh="$(_variant_weight glm-5-3-flash-high high)"; w_h="$(_variant_weight glm-5-
 # === end-to-end advise ===
 pick() { cmd_advise --effort "$1" "$2" 2>/dev/null | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}'; }
 _adv="$(cmd_advise --effort high "$EDIT_TASK" 2>/dev/null)"
-printf '%s' "$_adv" | grep -q '^   category: agentic' && ok "advise: edit-run-verify -> category agentic" || bad "advise: category not agentic"
-printf '%s' "$_adv" | grep -q 'scoring by: agentic_index' && ok "advise: scored on agentic_index" || bad "advise: wrong score field"
+grep -q '^   category: agentic' <<<"$_adv" && ok "advise: edit-run-verify -> category agentic" || bad "advise: category not agentic"
+grep -q 'scoring by: agentic_index' <<<"$_adv" && ok "advise: scored on agentic_index" || bad "advise: wrong score field"
 _pick="$(printf '%s' "$_adv" | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}')"
 case "$_pick" in kimi|kimi-k3|kimi-k2.7) bad "advise: kimi is #1 on the edit-run-verify task ($_pick)" ;; *) ok "advise: kimi is NOT #1 (pick: $_pick)" ;; esac
 [ "$_pick" = "glm-5.3-flash-high" ] && ok "advise: recommends glm-5.3-flash-high" || bad "advise: pick '$_pick' (want glm-5.3-flash-high)"
-printf '%s' "$_adv" | grep -E '^\s+glm-5\.3-high ' | grep -q 'lighter sibling preferred' && ok "advise: glm-5.3-high listed as 'lighter sibling preferred' at effort high" || bad "advise: glm-5.3-high not demoted"
-printf '%s' "$_adv" | grep -E '^>> glm-5\.3-flash-high ' | grep -q ' OK$' && ok "advise: flash-high row is the recommended (>>) OK row" || bad "advise: flash-high row not marked recommended"
+{ _t3b_pipe="$(printf '%s' "$_adv" | grep -E '^\s+glm-5\.3-high ')" && grep -q 'lighter sibling preferred' <<<"$_t3b_pipe"; } && ok "advise: glm-5.3-high listed as 'lighter sibling preferred' at effort high" || bad "advise: glm-5.3-high not demoted"
+{ _t3b_pipe="$(printf '%s' "$_adv" | grep -E '^>> glm-5\.3-flash-high ')" && grep -q ' OK$' <<<"$_t3b_pipe"; } && ok "advise: flash-high row is the recommended (>>) OK row" || bad "advise: flash-high row not marked recommended"
 _json="$(cmd_advise --json --effort high "$EDIT_TASK" 2>/dev/null)"
 [ "$(printf '%s' "$_json" | jq -r '.recommendation.alias')" = "glm-5.3-flash-high" ] && ok "advise --json: recommendation.alias" || bad "advise --json: alias '$(printf '%s' "$_json" | jq -r '.recommendation.alias')'"
 [ "$(printf '%s' "$_json" | jq -r '.shortlist[0].alias')" = "glm-5.3-flash-high" ] && ok "advise --json: shortlist[0] is the pick (demoted siblings leave the top group)" || bad "advise --json: shortlist[0] '$(printf '%s' "$_json" | jq -r '.shortlist[0].alias')'"
 [ "$(printf '%s' "$_json" | jq -r '[.shortlist[]|select(.alias=="glm-5.3-high")|.lighter_sibling_preferred][0]')" = "true" ] && ok "advise --json: glm-5.3-high flagged lighter_sibling_preferred" || bad "advise --json: flag missing on glm-5.3-high"
 # effort max: variant preference OFF (the heavier rung is the point)
 _max="$(cmd_advise --effort max "$EDIT_TASK" 2>/dev/null)"
-printf '%s' "$_max" | grep -q 'lighter sibling preferred' && bad "advise --effort max: variant preference still demoting" || ok "advise --effort max: no variant demotion"
+grep -q 'lighter sibling preferred' <<<"$_max" && bad "advise --effort max: variant preference still demoting" || ok "advise --effort max: no variant demotion"
 # OSRC_ADVISE_VARIANT_PREF=0 escape hatch
-OSRC_ADVISE_VARIANT_PREF=0 cmd_advise --effort high "$EDIT_TASK" 2>/dev/null | grep -q 'lighter sibling preferred' && bad "OSRC_ADVISE_VARIANT_PREF=0 ignored" || ok "OSRC_ADVISE_VARIANT_PREF=0 disables the preference"
+{ _t3b_pipe="$(OSRC_ADVISE_VARIANT_PREF=0 cmd_advise --effort high "$EDIT_TASK" 2>/dev/null)" && grep -q 'lighter sibling preferred' <<<"$_t3b_pipe"; } && bad "OSRC_ADVISE_VARIANT_PREF=0 ignored" || ok "OSRC_ADVISE_VARIANT_PREF=0 disables the preference"
 # hard pure-reasoning: kimi STILL wins
 _r="$(cmd_advise --effort high "$REASON_TASK" 2>/dev/null)"
-printf '%s' "$_r" | grep -q '^   category: reasoning' && printf '%s' "$_r" | grep -q '^   difficulty: hard' && ok "reasoning task: category reasoning, difficulty hard" || bad "reasoning task: classification drifted"
+grep -q '^   category: reasoning' <<<"$_r" && grep -q '^   difficulty: hard' <<<"$_r" && ok "reasoning task: category reasoning, difficulty hard" || bad "reasoning task: classification drifted"
 _rp="$(printf '%s' "$_r" | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}')"
 case "$_rp" in kimi|kimi-k3) ok "reasoning task: kimi still #1 ($_rp)" ;; *) bad "reasoning task: kimi lost #1 to '$_rp'" ;; esac
-printf '%s' "$_r" | grep -E '^>> kimi ' | grep -q 'score=80' && ok "reasoning task: kimi carries the +20 near-frontier bump (score 80)" || bad "reasoning task: kimi score not 80"
+{ _t3b_pipe="$(printf '%s' "$_r" | grep -E '^>> kimi ')" && grep -q 'score=80' <<<"$_t3b_pipe"; } && ok "reasoning task: kimi carries the +20 near-frontier bump (score 80)" || bad "reasoning task: kimi score not 80"
 
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

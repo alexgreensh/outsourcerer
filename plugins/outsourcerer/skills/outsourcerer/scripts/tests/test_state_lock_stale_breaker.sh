@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_state_lock_stale_breaker.sh — the mkdir state-lock (the active path on stock macOS, which ships
 # no flock) recovers from a crashed holder instead of wedging every state write forever.
 #
@@ -16,7 +17,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-statelock.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-statelock.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"
@@ -95,7 +96,7 @@ rm -rf "$lock"
 # 5. End-to-end: a crashed holder's residue does not stop a real state append from landing.
 mkdir "$lock"; printf '%s %s\n' 999999 'Thu Jan  1 00:00:00 2020' > "$lock/owner"
 if _state_append "$file" '{"probe":1}'; then
-  tail -n1 "$file" | grep -q '"probe":1' && ok "state append recovers past a crashed holder's stale lock" || bad "append returned 0 but did not write the record"
+  { _t3b_pipe="$(tail -n1 "$file")" && grep -q '"probe":1' <<<"$_t3b_pipe"; } && ok "state append recovers past a crashed holder's stale lock" || bad "append returned 0 but did not write the record"
 else
   bad "state append still fails closed behind a stale lock (the wedge is not fixed)"
 fi

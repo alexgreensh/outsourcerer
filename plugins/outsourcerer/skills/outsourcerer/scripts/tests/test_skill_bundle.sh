@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_skill_bundle.sh — a granted skill must transfer WHOLE, per lane capability, or not at all.
 #
 # The gaps this locks out (all verified on 0.13.0):
@@ -13,11 +15,13 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
+. "$TESTS_DIR/lib_race_barrier.sh"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 SUITE_ERR="$TMP/suite-stderr.txt"
 exec 9>&2 2>"$SUITE_ERR"   # watchdog: the suite's own stderr must stay EMPTY
 pass=0; fail=0
@@ -53,7 +57,7 @@ case "$d" in *plugins/cache*plugskill) ok "plugin-cache skill directory resolves
 
 # --- 2. skills=all expansion ---------------------------------------------------------------------
 names="$(WITH_SPEC='skills=all' _with_skill_names 2>/dev/null)"
-printf '%s\n' "$names" | grep -qx 'confskill' && printf '%s\n' "$names" | grep -qx 'plugskill' \
+grep -qx 'confskill' <<<"$names" && grep -qx 'plugskill' <<<"$names" \
   && ok "skills=all expands across the user dir and the plugin caches" \
   || bad "skills=all expansion wrong: $names"
 names="$(WITH_SPEC='skills=confskill,plugskill' _with_skill_names 2>/dev/null)"
@@ -82,7 +86,7 @@ rc=$?
 
 # --- 5. bundle preamble: path + manifest; a missing skill FAILS the dispatch -----------------------
 out="$(WITH_SPEC='skills=confskill' _with_preamble_render bundle 2>/dev/null; printf '%s' "${WITH_PRE_OUT:-}")"
-printf '%s' "$out" | grep -Eq "$OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/confskill/" && printf '%s' "$out" | grep -q 'MANIFEST.txt' \
+grep -Eq "$OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/confskill/" <<<"$out" && grep -q 'MANIFEST.txt' <<<"$out" \
   && ok "bundle preamble points at the on-disk bundle and its manifest" \
   || bad "bundle preamble missing root/manifest: $out"
 err="$( ( WITH_SPEC='skills=confskill,ghostskill' _with_preamble_render bundle ) 2>&1 >/dev/null )"
@@ -170,14 +174,14 @@ printf '# spaced skill\n' > "$SPC/SKILL.md"
 ( _validate_with_token 'skills=a,b /tmp/brief.txt' ) >/dev/null 2>&1 \
   && bad "a bare trailing file path passed validation" || ok "a bare trailing file path still dies at validation"
 names="$(WITH_SPEC='skills=space ünicode,confskill' _with_skill_names 2>/dev/null)"
-printf '%s\n' "$names" | grep -qx 'space ünicode' && printf '%s\n' "$names" | grep -qx 'confskill' \
+grep -qx 'space ünicode' <<<"$names" && grep -qx 'confskill' <<<"$names" \
   && ok "spaced names expand whole, not split on whitespace" \
   || bad "spaced name expansion wrong: $names"
 out="$(WITH_SPEC='skills=space ünicode' _with_preamble_render bundle 2>/dev/null; printf '%s' "${WITH_PRE_OUT:-}")"
-printf '%s' "$out" | grep -Eq "space ünicode: $OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/space ünicode/" \
+grep -Eq "space ünicode: $OSRC_HOME/skill-bundle\.[0-9]+\.[0-9]+/space ünicode/" <<<"$out" \
   && ok "a spaced unicode skill bundles end-to-end" \
   || bad "spaced skill did not bundle: $out"
-find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md" | grep -q . \
+{ _t3b_pipe="$(find "$OSRC_HOME" -path "*skill-bundle.*/space ünicode/SKILL.md")" && grep -q . <<<"$_t3b_pipe"; } \
   && ok "the spaced skill's tree is on disk under its real name" \
   || bad "spaced skill tree missing on disk"
 
@@ -225,7 +229,7 @@ case "$out" in *"=== INJECTED SKILL: confskill ==="*) ok "no transport arg keeps
 # ============================================================================
 CAPTURE="$TMP/cline_capture.txt"
 export OSRC_CLINE_FAKE_CAPTURE="$CAPTURE"
-FAKE_PATH="$SCRIPT_DIR/fake-bin"
+FAKE_PATH="$TESTS_DIR/fake-bin"
 REST=("do the thing"); MODEL=""; MODEL_EXPLICIT=0; EFFORT=""; TIER_FLAG=""; WITH_SPEC='skills=confskill'
 rm -f "$CAPTURE"
 ( PATH="$FAKE_PATH:$PATH" delegate_cline auto ) >/dev/null 2>&1 || true
@@ -431,15 +435,38 @@ rc=$?
 _devin_skills_lock_release 2>/dev/null
 
 # --- 22. concurrent Devin dispatches serialize: state and marker always agree -----------------------
+devin_racer() {
+  local gate="$1" id="$2" skill="$3" actual links rc=0
+  osrc_race_ready "$gate" "$id" || return 125
+  WITH_SPEC="skills=$skill" _devin_with_prepare || return $?
+  if ! mkdir "$gate/critical" 2>/dev/null; then
+    echo "overlapping Devin grant critical sections" >&2; _devin_skills_lock_release; return 70
+  fi
+  actual="$(cat "$TMP/home/.config/devin/skills/.outsourcerer-grants" 2>/dev/null)"
+  links="$(cd "$TMP/home/.config/devin/skills" && find . -type l -not -name '.*' | sed 's|^\./||' | sort)"
+  if [ "$actual" != "$skill" ] || [ "$links" != "$skill" ]; then
+    printf 'held lock for %s: marker=%s links=%s\n' "$skill" "$actual" "$links" >&2; rc=1
+  fi
+  sleep 0.05 # Keep the critical section open to expose a second entrant.
+  rmdir "$gate/critical" || rc=1
+  _devin_skills_lock_release
+  return "$rc"
+}
 i=1; agree=1
 while [ "$i" -le 10 ]; do
   rm -rf "$TMP/home/.config/devin/skills"
-  ( WITH_SPEC='skills=confskill' _devin_with_prepare >/dev/null 2>&1; _devin_skills_lock_release ) &
-  ( WITH_SPEC='skills=plugskill' _devin_with_prepare >/dev/null 2>&1; _devin_skills_lock_release ) &
-  wait
+  gate="$TMP/devin-race-$i"; mkdir "$gate"
+  ( devin_racer "$gate" 1 confskill ) > "$gate/out.1" 2> "$gate/err.1" & p1=$!
+  ( devin_racer "$gate" 2 plugskill ) > "$gate/out.2" 2> "$gate/err.2" & p2=$!
+  released=0; osrc_race_release "$gate" 2 || released=1
+  rc1=0; wait "$p1" || rc1=$?; printf '%s\n' "$rc1" > "$gate/status.1"
+  rc2=0; wait "$p2" || rc2=$?; printf '%s\n' "$rc2" > "$gate/status.2"
   links="$(cd "$TMP/home/.config/devin/skills" 2>/dev/null && find . -type l -not -name '.*' | sed 's|^\./||' | sort | tr '\n' ' ')"
   marker="$(sort "$TMP/home/.config/devin/skills/.outsourcerer-grants" 2>/dev/null | tr '\n' ' ')"
-  [ "$links" = "$marker " ] || [ "${links% }" = "${marker% }" ] || { agree=0; break; }
+  if [ "$released" != 0 ] || [ "$rc1" != 0 ] || [ "$rc2" != 0 ] || [ "${links% }" != "${marker% }" ] \
+     || { [ "${marker% }" != confskill ] && [ "${marker% }" != plugskill ]; }; then
+    agree=0; osrc_race_report "$gate" 2; break
+  fi
   i=$((i+1))
 done
 [ "$agree" = "1" ] && ok "10x concurrent A/B Devin dispatches: links and marker always agree" \

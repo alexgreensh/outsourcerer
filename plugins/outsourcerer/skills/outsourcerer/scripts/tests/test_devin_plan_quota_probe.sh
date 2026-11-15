@@ -87,18 +87,18 @@ _out="$(_devin_plan_quota_block "$FX/daily" claude-opus-5 'including the free-ti
 _lane_down_active dv && bad "answered: dv lane marked DOWN although the free probe answered" || ok "answered: dv lane NOT down (free model still answers)"
 [ -e "$OSRC_POSTURE_DIR/dv.down" ] && bad "answered: stale down marker survived an answering probe" || ok "answered: stale down marker cleared"
 [ "$(calls)" = "glm-5-2" ] && ok "answered: exactly one bounded probe (glm-5-2) was sent" || bad "answered: devin calls were '$(calls)'"
-printf '%s' "$_out" | grep -q 'Devin refused "claude-opus-5"' && ok "answered: names the refused model" || bad "answered: refused model not named"
-printf '%s' "$_out" | grep -q 'NOT confirmed' && ok "answered: says the blanket claim was NOT confirmed" || bad "answered: missing NOT-confirmed verdict"
-printf '%s' "$_out" | grep -q '"glm-5-2" answered' && ok "answered: names the free model that answered" || bad "answered: probe model not named as answering"
-printf '%s' "$_out" | grep -q '"claude-opus-5" was refused on this run' && ok "answered: says only what happened to the refused model (refused on this run)" || bad "answered: refused-model wording missing"
-printf '%s' "$_out" | grep -q 'treated as spent' && bad "answered: claims the refused model is 'treated as spent' (nothing enforces that)" || ok "answered: no unenforced 'treated as spent' claim"
+grep -q 'Devin refused "claude-opus-5"' <<<"$_out" && ok "answered: names the refused model" || bad "answered: refused model not named"
+grep -q 'NOT confirmed' <<<"$_out" && ok "answered: says the blanket claim was NOT confirmed" || bad "answered: missing NOT-confirmed verdict"
+grep -q '"glm-5-2" answered' <<<"$_out" && ok "answered: names the free model that answered" || bad "answered: probe model not named as answering"
+grep -q '"claude-opus-5" was refused on this run' <<<"$_out" && ok "answered: says only what happened to the refused model (refused on this run)" || bad "answered: refused-model wording missing"
+grep -q 'treated as spent' <<<"$_out" && bad "answered: claims the refused model is 'treated as spent' (nothing enforces that)" || ok "answered: no unenforced 'treated as spent' claim"
 [ -e "$(_lane_probe_file dv)" ] && bad "answered: probe capture left behind after the block" || ok "answered: probe capture consumed by the block"
-printf '%s' "$_out" | grep -q 'dv lane stays UP' && ok "answered: says the lane stays UP" || bad "answered: lane verdict missing"
-printf '%s' "$_out" | grep -q -- '-m glm-5-2' && ok "answered: tells the user how to keep using the free model" || bad "answered: no usable-model hint"
-printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && bad "answered: still claims ALL plan-included models are blocked" || ok "answered: no all-models-blocked claim"
-printf '%s' "$_out" | grep -q 'marked DOWN' && bad "answered: prints a marked-DOWN line" || ok "answered: no marked-DOWN line"
-printf '%s' "$_out" | grep -qi 'do NOT retry' && bad "answered: 'do NOT retry' wording printed" || ok "answered: no 'do NOT retry' wording"
-printf '%s' "$_out" | grep -q 'Devin says it resets in 11h26m' && ok "answered: still quotes Devin's reset for the refused model" || bad "answered: reset not quoted"
+grep -q 'dv lane stays UP' <<<"$_out" && ok "answered: says the lane stays UP" || bad "answered: lane verdict missing"
+grep -q -- '-m glm-5-2' <<<"$_out" && ok "answered: tells the user how to keep using the free model" || bad "answered: no usable-model hint"
+grep -q 'blocks ALL plan-included models' <<<"$_out" && bad "answered: still claims ALL plan-included models are blocked" || ok "answered: no all-models-blocked claim"
+grep -q 'marked DOWN' <<<"$_out" && bad "answered: prints a marked-DOWN line" || ok "answered: no marked-DOWN line"
+grep -qi 'do NOT retry' <<<"$_out" && bad "answered: 'do NOT retry' wording printed" || ok "answered: no 'do NOT retry' wording"
+grep -q 'Devin says it resets in 11h26m' <<<"$_out" && ok "answered: still quotes Devin's reset for the refused model" || bad "answered: reset not quoted"
 
 # === (c) refused model IS the default probe model -> probe a SIBLING, not the same model ==========
 refuse glm-5-2
@@ -121,13 +121,13 @@ _lane_down_active dv && ok "confirmed: dv lane marked DOWN after the probe was r
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
 [ "$_ttl" -ge 41220 ] && [ "$_ttl" -le $(( 41220 + _after - _before )) ] && ok "confirmed: lane-down window = Devin's 11h26m (+slack), got ${_ttl}s" || bad "confirmed: TTL ${_ttl}s is not Devin's stated reset"
 [ "$(calls)" = "glm-5-2" ] && ok "confirmed: exactly one bounded probe was sent" || bad "confirmed: devin calls were '$(calls)'"
-printf '%s' "$_out" | grep -q 'CONFIRMED' && ok "confirmed: says the probe CONFIRMED the block" || bad "confirmed: verdict missing"
-printf '%s' "$_out" | grep -q 'shared DAILY plan quota is exhausted' && ok "confirmed: says the SHARED DAILY bucket is exhausted" || bad "confirmed: honest daily wording missing"
-printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && ok "confirmed: says it blocks ALL plan-included models" || bad "confirmed: all-models wording missing"
-printf '%s' "$_out" | grep -q 'the probe was refused as well' && ok "confirmed: caller's scope clause carries the probe result" || bad "confirmed: scope clause missing"
-printf '%s' "$_out" | grep -q 'Switch lanes OFF Devin' && ok "confirmed: OFF-Devin advice printed" || bad "confirmed: advice missing"
-printf '%s' "$_out" | grep -q 'exact wording on the probe' && ok "confirmed: quotes Devin's wording from the probe" || bad "confirmed: probe wording not quoted"
-printf '%s' "$_out" | grep -qi 'do NOT retry' && bad "confirmed: 'do NOT retry' wording printed" || ok "confirmed: no 'do NOT retry' wording"
+grep -q 'CONFIRMED' <<<"$_out" && ok "confirmed: says the probe CONFIRMED the block" || bad "confirmed: verdict missing"
+grep -q 'shared DAILY plan quota is exhausted' <<<"$_out" && ok "confirmed: says the SHARED DAILY bucket is exhausted" || bad "confirmed: honest daily wording missing"
+grep -q 'blocks ALL plan-included models' <<<"$_out" && ok "confirmed: says it blocks ALL plan-included models" || bad "confirmed: all-models wording missing"
+grep -q 'the probe was refused as well' <<<"$_out" && ok "confirmed: caller's scope clause carries the probe result" || bad "confirmed: scope clause missing"
+grep -q 'Switch lanes OFF Devin' <<<"$_out" && ok "confirmed: OFF-Devin advice printed" || bad "confirmed: advice missing"
+grep -q 'exact wording on the probe' <<<"$_out" && ok "confirmed: quotes Devin's wording from the probe" || bad "confirmed: probe wording not quoted"
+grep -qi 'do NOT retry' <<<"$_out" && bad "confirmed: 'do NOT retry' wording printed" || ok "confirmed: no 'do NOT retry' wording"
 _lane_down_clear dv
 
 # === (e) probe unreachable -> short transport window only, never the quota window ================
@@ -138,8 +138,8 @@ _lane_down_active dv && ok "unreachable: lane gets a down marker (it is not answ
 _until="$(_posture_get dv down 2>/dev/null)"; _ttl=$(( ${_until:-0} - _before ))
 [ "$_ttl" -ge 300 ] && [ "$_ttl" -le $(( 300 + _after - _before )) ] && ok "unreachable: short transport TTL (${_ttl}s; 300s + probe bound), not the 11h quota window" || bad "unreachable: TTL ${_ttl}s"
 case "$(_lane_down_reason dv)" in *"probe unreachable"*) ok "unreachable: reason says the probe was unreachable" ;; *) bad "unreachable: reason '$(_lane_down_reason dv)'" ;; esac
-printf '%s' "$_out" | grep -q 'INCONCLUSIVE' && ok "unreachable: says INCONCLUSIVE" || bad "unreachable: verdict missing"
-printf '%s' "$_out" | grep -q 'blocks ALL plan-included models' && bad "unreachable: claims ALL plan-included models blocked without proof" || ok "unreachable: no unproven all-models claim"
+grep -q 'INCONCLUSIVE' <<<"$_out" && ok "unreachable: says INCONCLUSIVE" || bad "unreachable: verdict missing"
+grep -q 'blocks ALL plan-included models' <<<"$_out" && bad "unreachable: claims ALL plan-included models blocked without proof" || ok "unreachable: no unproven all-models claim"
 _lane_down_clear dv
 
 # === (f) structural ==============================================================================

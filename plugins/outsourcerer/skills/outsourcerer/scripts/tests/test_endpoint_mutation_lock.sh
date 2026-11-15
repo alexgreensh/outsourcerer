@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_endpoint_mutation_lock.sh — the endpoint mutation lock survives a nested state write and
 # recovers from a leaked lock directory.
 #
@@ -14,7 +15,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-mutation-lock.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-mutation-lock.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"

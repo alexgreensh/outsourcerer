@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression coverage for the 0.10.1 lifecycle / registry / heartbeat supervision fixes.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-lifecycle-fix.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-lifecycle-fix.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
@@ -52,7 +55,7 @@ SH
   out="$(_autodetach_run run task 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! printf '%s' "$out" | grep -q 'session :'
+  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! grep -q 'session :' <<<"$out"
 ) && ok "auto-detach rejects send-keys failure and kills the new tmux session" \
   || bad "auto-detach reported success or failed to clean up after send-keys"
 
@@ -84,10 +87,10 @@ SH
   _devin_guard_before_delegation() { return 0; }
   _session_assert_model_pinnable() { return 0; }
   set +e
-  out="$(session start -m glm 2>&1)"
+  out="$(session start --spend-ok -m glm 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! printf '%s' "$out" | grep -q "Started tmux session"
+  [ "$rc" -ne 0 ] && grep -q '^kill-session$' "$OSRC_TMUX_LOG" && ! grep -q "Started tmux session" <<<"$out"
 ) && ok "session start rejects send-keys failure and cleans up the new tmux session" \
   || bad "session start reported success or failed to clean up after send-keys"
 
@@ -380,7 +383,7 @@ SH
   out="$(_blind_turn_guard 2>&1)"
   rc=$?
   set -e
-  [ "$rc" -ne 7 ] && printf '%s' "$out" | grep -qi 'unknown'
+  [ "$rc" -ne 7 ] && grep -qi 'unknown' <<<"$out"
 ) && ok "blind-turn guard refuses to block on an arbitrarily stale snapshot" \
   || bad "blind-turn guard treated stale blocked state as current"
 
@@ -392,7 +395,7 @@ SH
   resolve_model_row() { printf '%s\n' "$1"; }
   _codex_code_mode_host_flag() { printf 'true\n'; }
   cmd="$(_session_relaunch_command codex sol high)"
-  printf '%s' "$cmd" | grep -q 'features.code_mode_host=true'
+  grep -q 'features.code_mode_host=true' <<<"$cmd"
 ) && ok "Codex relaunch command preserves the explicit code-mode-host override" \
   || bad "Codex relaunch command dropped code-mode-host"
 

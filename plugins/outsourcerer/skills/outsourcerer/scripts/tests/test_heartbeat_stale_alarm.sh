@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_stale_alarm.sh — staleness is ALARMED, not just displayed (SPEC
 # heartbeat-liveness C): a supervised session whose status is stale past the stall window is
 # surfaced as a wake event, once per (session, state) while unacked, and re-alarms after ack if
@@ -23,7 +24,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-heartbeat-stale.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-heartbeat-stale.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"
@@ -76,7 +77,7 @@ unacked_count(){
   # 1. The stale session is alarmed, named, with the WHY in task_summary.
   [ "$(unacked_count "$STALE_ID")" -eq 1 ] || { echo "FAIL: expected exactly 1 unacked $STALE_ID, got $(unacked_count "$STALE_ID")"; exit 1; }
   ev="$(_state_jsonl_read "$OSRC_WAKE_QUEUE" 2>/dev/null | jq -r 'select(.event_id=="'"$STALE_ID"'") | .task_summary')"
-  printf '%s' "$ev" | grep -qF 'unchanged for 700s' || { echo "FAIL: task_summary lacks the evidence: $ev"; exit 1; }
+  grep -qF 'unchanged for 700s' <<<"$ev" || { echo "FAIL: task_summary lacks the evidence: $ev"; exit 1; }
   sid="$(_state_jsonl_read "$OSRC_WAKE_QUEUE" 2>/dev/null | jq -r 'select(.event_id=="'"$STALE_ID"'") | .session_id')"
   [ "$sid" = "sess-stale-1" ] || { echo "FAIL: event does not name the session: $sid"; exit 1; }
   # 2. Re-run the wake pass (cursor reset, SAME generation, no state change): no duplicate

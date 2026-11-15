@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_session_model_pin_guard.sh — the GENERAL model-pin guard for interactive sessions.
 #
 # The droid bug (P0 quota leak): the droid session lane appended --model to interactive `droid` on
@@ -22,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-mpg.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-mpg.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 BIN="$TMP/bin"; mkdir -p "$BIN"
 
@@ -142,12 +143,13 @@ fi
 # --- source-level: the guard is wired into BOTH session-start switches for the lanes that build
 #     their launch inline (devin/codex/cc/gemini), so a future CLI dropping --model can't bill
 #     silently on those lanes either. droid refuses unconditionally inside the adapter. ---
-_n_assert=$(grep -c '_session_assert_model_pinnable' "$SRC")
+# The helper's definition moved to scripts/lib/perm.sh (file-size ratchet); count both files.
+_n_assert=$(cat "$SRC" "$SCRIPT_DIR/../lib/perm.sh" | grep -c '_session_assert_model_pinnable')
 [ "$_n_assert" -ge 7 ] \
   && ok "guard wired in >=7 sites (helper def + droid-refuse comment-free + devin x2 switches + codex/cc/gemini via descriptor session_fn): $_n_assert" \
   || no "guard not wired into all session-start switches (found $_n_assert references, want >=7)"
 # droid must NOT append --model in the adapter (the bug shape is gone).
-if grep -A30 '^    droid)' "$SRC" | grep -q 'SESSION_LAUNCH+=("--model"'; then
+if { _t3b_pipe="$(grep -A30 '^    droid)' "$SRC")" && grep -q 'SESSION_LAUNCH+=("--model"' <<<"$_t3b_pipe"; }; then
   no "droid adapter still appends --model (the bug is NOT fixed)"
 else
   ok "droid adapter no longer appends --model to the interactive launch"

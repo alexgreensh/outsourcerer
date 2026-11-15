@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_utf8_guard.sh — U? conformance: the devin dispatch boundary must not die on the opaque
 # clap error "invalid UTF-8 was detected in one or more arguments" when a prompt contains
 # broken bytes (the real-world source is byte-truncation upstream: awk substr / cut -c slicing
@@ -20,7 +22,7 @@ bad()  { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d)"; TMP_ERR="$TMP/err"; : > "$TMP_ERR"
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap 'cleanup; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 # Source the main script for function access (it guards its own entrypoint with a main-runnable
 # check, so sourcing defines functions without executing dispatch).
@@ -42,7 +44,7 @@ warn=""
 out="$(_utf8_guard "$INVALID" 2>"$TMP_ERR")"; warn="$(cat "$TMP_ERR" 2>/dev/null)"
 # iconv //IGNORE drops the lone E2 -> "hello  world" (double space where the byte was).
 [ "$out" = "hello  world" ] && ok "invalid UTF-8 lossy-decoded to valid" || bad "lossy-decode wrong: got [$out]"
-printf '%s' "$warn" | grep -q '\[utf8\]' && ok "warning emitted on invalid UTF-8" || bad "no warning on invalid UTF-8"
+grep -q '\[utf8\]' <<<"$warn" && ok "warning emitted on invalid UTF-8" || bad "no warning on invalid UTF-8"
 
 # --- Scenario 3: the guard's output is itself valid UTF-8 (would not re-trip clap). ---
 # Round-trip the cleaned output through iconv strict (no //IGNORE); must exit 0.

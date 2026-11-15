@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression guard for the free Devin lane: stale CLI processes must not wedge it,
 # paid-tier quota text must not mark it down, and every liveness request is bounded
 # without relying on a platform-specific timeout executable.
@@ -12,7 +14,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/var/tmp}/osrc-devin-guard.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR%/}/osrc-devin-guard.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 export OSRC_HOME="$TEST_ROOT/state"
 export OSRC_JOBS="$OSRC_HOME/jobs"
@@ -23,6 +25,9 @@ mkdir -p "$OSRC_JOBS" "$TEST_ROOT/bin"
 _mkdir_private() { mkdir -p "$1"; }
 _kill_tree() { kill -TERM "$1" 2>/dev/null || true; }
 eval "$(sed -n '/^_mtime() {/,/^}/p' "$SRC")"
+# _mtime lives in lib/limits.sh (extracted from the engine); pull it from there too so the
+# orphan-freshness check below has a real definition regardless of which file currently owns it.
+eval "$(sed -n '/^_mtime() {/,/^}/p' "$SCRIPT_DIR/../lib/limits.sh")"
 eval "$(sed -n '/^_timeout() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_elapsed_secs() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_pid_descends_from() {/,/^}/p' "$SRC")"

@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_selfcontained_hardening.sh — locks the self-contained hardening fixes.
 # Static presence checks + two behavioral checks. Run: bash test_selfcontained_hardening.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+GATE="$SCRIPT_DIR/../lib/cloudgate.sh"   # cloud disclosure + secret-scan gate (L10 module split)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+[ -f "$GATE" ] || { echo "FAIL: cannot find $GATE"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n"; exit 1; }
+bash -n "$GATE" || { echo "FAIL: bash -n $GATE"; exit 1; }
 
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
-has() { grep -Fq "$1" "$SRC" && ok "$2" || bad "$2 (missing: $1)"; }
+has() { grep -Fq "$1" "$SRC" "$GATE" && ok "$2" || bad "$2 (missing: $1)"; }
 
 # Ledger append computed into a var then single/flock'd append (no direct jq >> race).
 has 'if flock -w 5 9' "ledger uses a bounded-wait flock-guarded append (no silent drop on lock failure)"
@@ -27,8 +32,8 @@ grep -Eq "jq -cn[^|]*>> \"\\\$OSRC_LEDGER\"" "$SRC" && bad "raw 'jq ... >> ledge
 # WITH_SPEC split without globbing.
 has 'done <<_OSRC_GATE_SPECS' "_secret_scan splits WITH_SPEC via _with_specs heredoc (no glob)"
 # Scope the check to _secret_scan: the --with parsers at build_mcp_flags intentionally word-split.
-ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$SRC")"
-printf '%s' "$ss_body" | grep -Fq 'for tok in $WITH_SPEC' && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
+ss_body="$(awk '/^_secret_scan\(\) *\{/{f=1} f{print} f&&/^}/{exit}' "$GATE")"
+grep -Fq 'for tok in $WITH_SPEC' <<<"$ss_body" && bad "_secret_scan still has unquoted WITH_SPEC loop" || ok "_secret_scan unquoted WITH_SPEC loop removed"
 # Every OSRC_ALLOWED_TOOLS consumer must be deglobbed via `read -ra` (safe word-splitting, no
 # globbing). Invariant, stale-proof: there is >=1 safe deglob spot and ZERO unsafe unquoted
 # expansions (the unsafe form is asserted absent on the next line too). Use grep -cF: the pattern
@@ -43,17 +48,17 @@ grep -Fq 'tools=(--allowedTools $OSRC_ALLOWED_TOOLS)' "$SRC" && bad "unquoted al
 has '(_i+1)) -lt ${#ORIG[@]} ]' "ORIG rewrite bounds-checked (no phantom element)"
 # Private temp/result files. umask is set at run_job START (before the Codex last.txt write).
 has 'umask 077' "umask 077 present at run_job start (covers the primary Codex last.txt path)"
-awk '/^run_job\(\) *\{/{f=1} f{print} f&&/^  local jd=/{exit}' "$SRC" | grep -Fq 'umask 077' && ok "umask 077 precedes job-dir/delegate setup" || bad "umask 077 not at run_job start"
+{ _t3b_pipe="$(awk '/^run_job\(\) *\{/{f=1} f{print} f&&/^  local jd=/{exit}' "$SRC")" && grep -Fq 'umask 077' <<<"$_t3b_pipe"; } && ok "umask 077 precedes job-dir/delegate setup" || bad "umask 077 not at run_job start"
 [ "$(grep -c 'old_umask' "$SRC")" -ge 4 ] && ok "temp files (.ccerr/.ccnative) hardened with umask save/restore" || bad "temp-file umask hardening missing"
 
 # --- Behavioral: a trailing -m (genuinely last token) does not append a phantom element. ---
-( . "$SRC" >/dev/null 2>&1
+{ _t3b_pipe="$( . "$SRC" >/dev/null 2>&1
   ORIG=(edit -m); _dvm="glm-5.2"        # -m is the LAST element -> _i+1 is out of range
   before=${#ORIG[@]}
-  for _i in "${!ORIG[@]}"; do case "${ORIG[$_i]}" in -m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac; done
+  for _i in "${!ORIG[@]}"; do case "${ORIG[$_i]}" in (-m|--model) [ $((_i+1)) -lt ${#ORIG[@]} ] && ORIG[$((_i+1))]="$_dvm" ;; esac; done
   after=${#ORIG[@]}
   [ "$before" -eq "$after" ] && echo PHANTOM_OK || echo "PHANTOM_BAD before=$before after=$after"
-) | grep -q PHANTOM_OK && ok "trailing -m (last token) does not grow ORIG (phantom-free)" || bad "phantom element appended"
+)" && grep -q PHANTOM_OK <<<"$_t3b_pipe"; } && ok "trailing -m (last token) does not grow ORIG (phantom-free)" || bad "phantom element appended"
 
 # --- Behavioral: record_ledger append writes exactly one intact JSON line. ---
 if command -v jq >/dev/null 2>&1; then

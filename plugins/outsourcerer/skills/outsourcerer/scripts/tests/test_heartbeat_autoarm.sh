@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_autoarm.sh — bg, fanout, and session launches arm supervision in the same turn
 # with no opt-in required, and OSRC_FLEET_SUPERVISION=0 still opts out silently
 # (SPEC heartbeat-liveness B + escape-hatch constraint).
@@ -19,7 +21,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-heartbeat-autoarm.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-heartbeat-autoarm.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"
@@ -139,7 +141,7 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   out="$(OSRC_HOME="$h1" OSRC_HEARTBEAT_DISABLED=0 OSRC_HEARTBEAT_EXECUTABLE="$FAKE_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=3 \
     bash "$SRC" heartbeat start 2>"$TMP/hb-ok.err")"; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: heartbeat start rc=$rc"; exit 1; }
-  printf '%s' "$out" | grep -q 'verified live' || { echo "FAIL: no verified-live message: $out"; exit 1; }
+  grep -q 'verified live' <<<"$out" || { echo "FAIL: no verified-live message: $out"; exit 1; }
   kill_beacon "$h1/heartbeat/leader/owner.json"
   # Sabotaged executable -> rc 1 + NOT-ARMED, and no positive armed claim.
   h2="$TMP/hb-dead"
@@ -147,7 +149,7 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   err="$(OSRC_HOME="$h2" OSRC_HEARTBEAT_DISABLED=0 OSRC_HEARTBEAT_EXECUTABLE="$TMP/no-such-beacon" OSRC_HEARTBEAT_START_TIMEOUT=1 \
     bash "$SRC" heartbeat start 2>&1 >/dev/null)"; rc=$?
   [ "$rc" -eq 1 ] || { echo "FAIL: sabotaged heartbeat start rc=$rc (expected 1)"; exit 1; }
-  printf '%s' "$err" | grep -q 'NOT-ARMED' || { echo "FAIL: no NOT-ARMED on stderr"; exit 1; }
+  grep -q 'NOT-ARMED' <<<"$err" || { echo "FAIL: no NOT-ARMED on stderr"; exit 1; }
   claim="$(printf '%s' "$err" | grep -i 'armed' | grep -vi 'not-armed')"
   [ -z "$claim" ] || { echo "FAIL: positive armed claim: $claim"; exit 1; }
   # Opted out -> rc 2 + explicit message, never NOT-ARMED.
@@ -155,7 +157,7 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   mkdir -p "$h3"
   out="$(OSRC_HOME="$h3" OSRC_HEARTBEAT_DISABLED=0 OSRC_FLEET_SUPERVISION=0 bash "$SRC" heartbeat start 2>"$TMP/hb-opt.err")"; rc=$?
   [ "$rc" -eq 2 ] || { echo "FAIL: opted-out heartbeat start rc=$rc (expected 2)"; exit 1; }
-  printf '%s' "$out" | grep -q 'opted out via OSRC_FLEET_SUPERVISION=0' || { echo "FAIL: no opted-out message: $out"; exit 1; }
+  grep -q 'opted out via OSRC_FLEET_SUPERVISION=0' <<<"$out" || { echo "FAIL: no opted-out message: $out"; exit 1; }
   grep -qi 'not-armed' "$TMP/hb-opt.err" && { echo "FAIL: NOT-ARMED fired under opt-out"; exit 1; }
   exit 0
 ) && ok "heartbeat start CLI: rc 0 verified / rc 1 NOT-ARMED / rc 2 silent opt-out" \
@@ -170,8 +172,8 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   out="$(OSRC_HOME="$h" OSRC_HEARTBEAT_DISABLED=0 OSRC_HEARTBEAT_EXECUTABLE="$FAKE_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=3 \
     bash "$SRC" fleet supervise 2>/dev/null)"; rc=$?
   [ "$rc" -eq 0 ] || { echo "FAIL: fleet supervise rc=$rc"; exit 1; }
-  printf '%s' "$out" | grep -q 'verified live' || { echo "FAIL: fleet supervise did not arm: $out"; exit 1; }
-  printf '%s' "$out" | grep -q 'reserved for a sibling track' && { echo "FAIL: still the reserved stub"; exit 1; }
+  grep -q 'verified live' <<<"$out" || { echo "FAIL: fleet supervise did not arm: $out"; exit 1; }
+  grep -q 'reserved for a sibling track' <<<"$out" && { echo "FAIL: still the reserved stub"; exit 1; }
   kill_beacon "$h/heartbeat/leader/owner.json"
   exit 0
 ) && ok "fleet supervise routes to the verified arm path" \
@@ -186,9 +188,9 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   mkdir -p "$h"
   out="$(OSRC_HOME="$h" OSRC_HEARTBEAT_DISABLED=1 bash "$SRC" heartbeat start 2>"$TMP/hb-dis.err")"; rc=$?
   [ "$rc" -eq 2 ] || { echo "FAIL: disabled heartbeat start rc=$rc (expected 2)"; exit 1; }
-  printf '%s' "$out" | grep -q 'opted out via OSRC_HEARTBEAT_DISABLED=1' \
+  grep -q 'opted out via OSRC_HEARTBEAT_DISABLED=1' <<<"$out" \
     || { echo "FAIL: rc 2 message does not name OSRC_HEARTBEAT_DISABLED=1: $out"; exit 1; }
-  printf '%s' "$out" | grep -q 'OSRC_FLEET_SUPERVISION=0' \
+  grep -q 'OSRC_FLEET_SUPERVISION=0' <<<"$out" \
     && { echo "FAIL: rc 2 message misattributes to OSRC_FLEET_SUPERVISION=0: $out"; exit 1; }
   grep -qi 'not-armed' "$TMP/hb-dis.err" && { echo "FAIL: NOT-ARMED fired while disabled"; exit 1; }
   # The other knob still renders its own name (no regression in the FLEET_SUPERVISION branch).
@@ -196,7 +198,7 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   mkdir -p "$h2"
   out="$(OSRC_HOME="$h2" OSRC_HEARTBEAT_DISABLED=0 OSRC_FLEET_SUPERVISION=0 bash "$SRC" heartbeat start 2>/dev/null)"; rc=$?
   [ "$rc" -eq 2 ] || { echo "FAIL: FLEET_SUPERVISION=0 heartbeat start rc=$rc (expected 2)"; exit 1; }
-  printf '%s' "$out" | grep -q 'opted out via OSRC_FLEET_SUPERVISION=0' \
+  grep -q 'opted out via OSRC_FLEET_SUPERVISION=0' <<<"$out" \
     || { echo "FAIL: rc 2 message does not name OSRC_FLEET_SUPERVISION=0: $out"; exit 1; }
   exit 0
 ) && ok "rc 2 distinguishes OSRC_HEARTBEAT_DISABLED=1 from OSRC_FLEET_SUPERVISION=0" \

@@ -1,0 +1,50 @@
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run exactly this command: touch made-by-test.txt && ls -la . Then say ok.[39m
+
+[49m  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m ok
+
+[38;5;246m✻[39m [38;5;246mSautéed for 20s · done 9:10 AM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the AskUserQuestion tool to ask me whether I prefer red or blue. Do nothing else.[39m
+
+[38;5;246m[49m⏺ [39mUser declined to answer questions
+[38;5;246m  ⎿  · Do you prefer red or blue? (Red / Blue)[39m
+
+[38;5;246m✻[39m [38;5;246mCooked for 9s · done 9:11 AM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mWithout using any tools, ask me in plain prose which file I want you to edit next, then stop and wait.[39m
+
+[38;5;231m[49m⏺[39m Which file should I edit next? I haven't changed anything since I created [38;5;153mmade-by-test.txt[39m in the working directory, and I left the red-or-blue question alone after you stopped it. Tell me the file
+  path, or describe the change, and I'll make it.
+
+[38;5;246m✻[39m [38;5;246mBrewed for 21s · done 9:11 AM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mWithout tools, reply with only a numbered list of two items: 1. Yes 2. No[39m
+
+[38;5;231m[49m⏺[39m 1. Yes
+  2. No
+
+[38;5;246m✻[39m [38;5;246mCrunched for 16s · done 9:12 AM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Write tool to create notes.txt containing the word hi. Then run the Bash command: rm -rf /tmp/x-osrc-test-L3[39m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: [Token Optimizer] Loop: 4 similar messages in last 4 turns. Try a different approach.[39m
+
+[38;5;246m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)
+
+[38;5;246m⏺[39m Listing the target directory before deleting it
+[38;5;246m  ⎿  $ ls -la /tmp/x-osrc-test-L3[39m
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mCreate file[0m
+ [38;5;246mnotes.txt[39m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m [2m[38;5;231m 1 [0m[38;5;231mhi[39m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to create [1mnotes.txt[0m?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m
+   [38;5;246m2. [39mYes, and switch to [1maccept edits (auto-approve file edits and common file commands)[0m for this session [1m(shift+tab)[0m
+   [38;5;246m3. [39mNo
+
+ [38;5;246mEsc to cancel · Tab to amend[39m

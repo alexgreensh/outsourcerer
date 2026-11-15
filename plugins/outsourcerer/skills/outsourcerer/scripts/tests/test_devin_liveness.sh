@@ -20,6 +20,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib/ (size rule)
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -76,7 +77,7 @@ sleep 60 & child=$!; kids="$kids $child"
 # This regression needs one observable parent/child edge. Some restricted
 # sandboxes deny both pgrep and process-table reads, so they cannot exercise
 # the contract at all. Skip there instead of reporting a product failure.
-if ! pgrep -P "$$" 2>/dev/null | grep -qx "$child"; then
+if ! { _t3b_pipe="$(pgrep -P "$$" 2>/dev/null)" && grep -qx "$child" <<<"$_t3b_pipe"; }; then
   echo "SKIP: process-tree enumeration unavailable; Devin liveness regression requires a visible child process"
   exit 0
 fi
@@ -185,7 +186,7 @@ st_fin="$(cat "$jd3/status" 2>/dev/null)"
                        || bad "finished job reported wedged post-mortem (rc=125) — killing a corpse"
 
 # ---------------------------------------------------------------- opt-out
-grep -aq 'OSRC_DEVIN_LIVENESS' "$SRC" \
+grep -aq 'OSRC_DEVIN_LIVENESS' "$SRC" "$WDLIB" \
   && ok "devin liveness check has an opt-out (OSRC_DEVIN_LIVENESS)" \
   || bad "no opt-out for the devin liveness check"
 

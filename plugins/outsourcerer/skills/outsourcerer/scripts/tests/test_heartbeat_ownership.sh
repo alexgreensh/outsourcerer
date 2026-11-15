@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-heartbeat-ownership.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-heartbeat-ownership.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 TEST_TMP="$TMP"
 export OSRC_HOME="$TMP/state"
 trap 'rm -rf "$TEST_TMP"' EXIT

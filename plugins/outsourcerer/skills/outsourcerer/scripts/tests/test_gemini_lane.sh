@@ -56,7 +56,7 @@ done
 
 # The clamp must be announced. Quietly giving less (or more) thinking than asked for is the kind of
 # change the caller cannot see in the output.
-_agy_effort gemini-3.1-pro medium 2>&1 >/dev/null | grep -q 'has no' \
+{ _t3b_pipe="$(_agy_effort gemini-3.1-pro medium 2>&1 >/dev/null)" && grep -q 'has no' <<<"$_t3b_pipe"; } \
   && ok "clamping to a different effort level is announced on stderr" \
   || bad "effort was clamped silently"
 

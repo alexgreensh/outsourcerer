@@ -1,0 +1,50 @@
+devin --model 'swe-2-medium' --respect-workspace-trust false
+
+The default interactive shell is now zsh.
+To update your account to use zsh, please run `chsh -s /bin/zsh`.
+For more details, please visit https://support.apple.com/kb/HT208050.
+MacBook-Pro:work-dv dev$ devin --model 'swe-2-medium' --respect-workspace-trust false
+
+⠀⣴⣾⣶⡄⠀⠀⠀⠀
+⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI
+⠀⣤⣶⣦⣴⠿⢿⠿⠃  [38;2;124;124;124mv3000.12.57[39m
+⠀⠻⢿⠿⠃⠀⠀⠀⠀
+
+ [38;2;124;124;124mPro · 0% remaining (resets in 43m)[39m
+
+[38;2;255;255;255m[48;2;42;42;42m❭[39m [38;2;255;255;255mRun this shell command: touch made-by-devin.txt && ls[39m
+
+[49m [38;2;74;222;128m✓[39m touch made-by-devin.txt && ls
+
+ Done. [38;2;220;220;170m[48;2;0;43;54m made-by-devin.txt [39m[49m created — it's the only file in the directory.
+
+ [38;2;124;124;124m⏺[39m [38;2;124;124;124m~/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-dv[39m
+[38;2;68;68;68m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[48;2;42;42;42m [38;2;176;176;176mCreate a file and list directory conten…[39m [38;2;68;68;68m[49m─
+[39m❭ [38;2;124;124;124mAsk Devin to build features, fix bugs, or work on your code[39m
+[38;2;68;68;68m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39mSWE-2 Medium                                                                                                                                                             [38;2;124;124;124mContext: 24k / 262k tokens (9%)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

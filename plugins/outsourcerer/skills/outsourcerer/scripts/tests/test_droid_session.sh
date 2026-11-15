@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_droid_session.sh — droid interactive-session EXEC-FLAG LEAK guards. TWO bugs in the same
 # block, same root cause: the interactive launch was assembled from the EXEC flag set.
 #
@@ -18,14 +19,23 @@
 # This asserts the adapter now REFUSES a pinned-model AND an explicit-effort droid session (naming
 # the flag in the reason) instead of appending either, while a bare droid session still launches on
 # `droid --auto medium` with NO -r and NO --model. Runs the adapter in a subshell because
-# _session_launch_error calls die (exit 1). Skips if droid is absent.
+# _session_launch_error calls die (exit 1). Uses a stubbed help probe and never launches a real droid.
 # Run: bash test_droid_session.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-droid.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-droid.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+# Probe a deterministic help fixture, never an installed or ambient agent binary.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/droid" <<'STUB'
+#!/bin/sh
+[ "${1:-}" = --help ] || exit 99
+printf '%s\n' 'Start interactive mode (default)' 'exec: Run non-interactively (for scripts/automation)' '--auto <level> low|medium|high'
+STUB
+chmod +x "$TMP/bin/droid"
+export PATH="$TMP/bin:$PATH"
 . "$SRC" >/dev/null 2>&1
 type -t _session_launch_adapter >/dev/null || { echo "FAIL: _session_launch_adapter not loaded"; exit 1; }
 if ! have droid; then echo "SKIP: droid not installed"; echo "RESULT: 0 passed, 0 failed"; exit 0; fi

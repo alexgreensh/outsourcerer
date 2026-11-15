@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-FIXTURE="$(mktemp -d "$PWD/.test-fleet-states.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR%/}/.test-fleet-states.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 
 pass=0; fail=0
@@ -93,8 +94,8 @@ snapshot="$(jq -cn '{items:[
   {owner:"cc-peer",task_summary:"done",state:"done",state_label:"Done"}
 ]}')"
 listing="$(_fleet_ls_group "$snapshot" cc-peer Peers)"
-printf '%s' "$listing" | grep -q 'Waiting on you' \
-  && printf '%s' "$listing" | grep -q 'Done' \
+grep -q 'Waiting on you' <<<"$listing" \
+  && grep -q 'Done' <<<"$listing" \
   && [ "$(printf '%s' "$listing" | grep -c 'needs-you')" -eq 1 ] \
   && ok "fleet table renders state labels and only waiting rows need you" \
   || bad "fleet table state labels or needs-you rendering is wrong"

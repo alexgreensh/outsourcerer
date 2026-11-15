@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_reconcile_launch_grace.sh — regression for the launch race in _reconcile_status's
 # running-branch: run_job writes status=running BEFORE it spawns the delegate and records
 # pid/supervisor_pid. A reconcile (status/result/watch, or the heartbeat's read-only tick) landing
@@ -15,7 +16,7 @@ pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-reconcile-grace.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/test-reconcile-grace.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/sessions"

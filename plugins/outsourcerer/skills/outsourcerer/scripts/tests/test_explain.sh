@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_explain.sh — the `explain` verb + the "non-success terminal states persist a reason" invariant.
 #
 # For every NON-SUCCESS terminal state, the job dir MUST carry a non-empty $jd/reason (or $jd/error),
@@ -16,7 +17,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required for this test"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-explain.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-explain.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 
 # OSRC_HOME must be set BEFORE sourcing: outsourcerer.sh pins OSRC_HOME/OSRC_JOBS at source time.
 # OSRC_SOURCED=1 keeps the source guard from running main().
@@ -87,7 +88,7 @@ check_state_and_reason() {
   # check_state_and_reason <jid> <expected-state-substring>
   local jid="$1" want="$2" out rsnline
   out="$(explain_out "$jid")" || { bad "$jid: explain returned non-zero"; return; }
-  printf '%s\n' "$out" | grep -qE "^state:[[:space:]]+${want}" \
+  grep -qE "^state:[[:space:]]+${want}" <<<"$out" \
     && ok "$jid: state shown ($want)" \
     || bad "$jid: state not shown (want '$want'); got: [$(printf '%s\n' "$out" | grep '^state:')]"
   rsnline="$(printf '%s\n' "$out" | grep '^reason:' || true)"
@@ -106,36 +107,36 @@ check_state_and_reason "j-doneq"    "done\?"
 
 # --- done: state shown, reason is (not recorded), and explain does NOT error. ---
 dout="$(explain_out "j-done")" || bad "j-done: explain returned non-zero for a done job"
-printf '%s\n' "$dout" | grep -qE '^state:[[:space:]]+done' && ok "j-done: state shown (done)" || bad "j-done: state not shown"
-printf '%s\n' "$dout" | grep -qE '^reason:[[:space:]]+\(not recorded\)' && ok "j-done: reason is (not recorded)" || bad "j-done: reason should be (not recorded)"
+grep -qE '^state:[[:space:]]+done' <<<"$dout" && ok "j-done: state shown (done)" || bad "j-done: state not shown"
+grep -qE '^reason:[[:space:]]+\(not recorded\)' <<<"$dout" && ok "j-done: reason is (not recorded)" || bad "j-done: reason should be (not recorded)"
 # done must NOT have a reason file on disk.
 [ -s "$OSRC_JOBS/j-done/reason" ] && bad "j-done: a done job should NOT persist a reason" || ok "j-done: no reason file on disk"
 
 # --- explain surfaces verb/model/provider (via _job_field) for a job with meta.json. ---
 pout="$(explain_out "j-perm")"
-printf '%s\n' "$pout" | grep -qE '^verb:[[:space:]]+edit'        && ok "j-perm: verb shown"        || bad "j-perm: verb not shown"
-printf '%s\n' "$pout" | grep -qE '^model:[[:space:]]+glm-5-2'    && ok "j-perm: model shown"       || bad "j-perm: model not shown"
-printf '%s\n' "$pout" | grep -qE '^provider:[[:space:]]+devin'   && ok "j-perm: provider shown"    || bad "j-perm: provider not shown"
+grep -qE '^verb:[[:space:]]+edit' <<<"$pout"        && ok "j-perm: verb shown"        || bad "j-perm: verb not shown"
+grep -qE '^model:[[:space:]]+glm-5-2' <<<"$pout"    && ok "j-perm: model shown"       || bad "j-perm: model not shown"
+grep -qE '^provider:[[:space:]]+devin' <<<"$pout"   && ok "j-perm: provider shown"    || bad "j-perm: provider not shown"
 
 # --- explain shows the last genuine marker + the _classify_job verdict. ---
 vout="$(explain_out "j-done")"
-printf '%s\n' "$vout" | grep -qE '^marker:[[:space:]]+OSRC::DONE' && ok "j-done: last marker shown" || bad "j-done: marker not shown"
-printf '%s\n' "$vout" | grep -qE '^verdict:[[:space:]]+REUSE-OUTPUT' && ok "j-done: verdict shown (REUSE-OUTPUT)" || bad "j-done: verdict not shown"
+grep -qE '^marker:[[:space:]]+OSRC::DONE' <<<"$vout" && ok "j-done: last marker shown" || bad "j-done: marker not shown"
+grep -qE '^verdict:[[:space:]]+REUSE-OUTPUT' <<<"$vout" && ok "j-done: verdict shown (REUSE-OUTPUT)" || bad "j-done: verdict not shown"
 
 # --- permission-blocked: a SANITIZED evidence excerpt is printed and credentials are redacted. ---
 eout="$(explain_out "j-perm")"
-printf '%s\n' "$eout" | grep -qE '^evidence:' && ok "j-perm: evidence excerpt printed" || bad "j-perm: evidence excerpt missing"
-printf '%s\n' "$eout" | grep -q 'sk-live-SECRETKEY1234567890' && bad "j-perm: raw API key leaked in evidence" || ok "j-perm: no raw API key in evidence"
-printf '%s\n' "$eout" | grep -q '\[REDACTED' && ok "j-perm: credential redacted in evidence" || bad "j-perm: credential not redacted in evidence"
+grep -qE '^evidence:' <<<"$eout" && ok "j-perm: evidence excerpt printed" || bad "j-perm: evidence excerpt missing"
+grep -q 'sk-live-SECRETKEY1234567890' <<<"$eout" && bad "j-perm: raw API key leaked in evidence" || ok "j-perm: no raw API key in evidence"
+grep -q '\[REDACTED' <<<"$eout" && ok "j-perm: credential redacted in evidence" || bad "j-perm: credential not redacted in evidence"
 # A non-permission-blocked job must NOT print an evidence block.
-printf '%s\n' "$(explain_out "j-failed")" | grep -q '^evidence:' && bad "j-failed: evidence printed for a non-permission-blocked job" || ok "j-failed: no evidence block"
+grep -q '^evidence:' <<<"$(explain_out "j-failed")" && bad "j-failed: evidence printed for a non-permission-blocked job" || ok "j-failed: no evidence block"
 
 # --- Graceful degradation: missing meta.json -> still prints, rc 0, fields degrade to '?'. ---
 nm_rc=0; nm_out="$(cmd_explain "j-nometa" 2>/dev/null)" || nm_rc=$?
 [ "$nm_rc" -eq 0 ] && ok "j-nometa: explain rc 0 with no meta.json" || bad "j-nometa: explain rc=$nm_rc with no meta.json"
-printf '%s\n' "$nm_out" | grep -qE '^state:[[:space:]]+failed' && ok "j-nometa: state shown" || bad "j-nometa: state not shown"
-printf '%s\n' "$nm_out" | grep -qE '^verb:[[:space:]]+\?' && ok "j-nometa: verb degrades to ?" || bad "j-nometa: verb did not degrade to ?"
-printf '%s\n' "$nm_out" | grep -qE '^reason:[[:space:]]+exit-nonzero:rc=2' && ok "j-nometa: reason still shown" || bad "j-nometa: reason missing"
+grep -qE '^state:[[:space:]]+failed' <<<"$nm_out" && ok "j-nometa: state shown" || bad "j-nometa: state not shown"
+grep -qE '^verb:[[:space:]]+\?' <<<"$nm_out" && ok "j-nometa: verb degrades to ?" || bad "j-nometa: verb did not degrade to ?"
+grep -qE '^reason:[[:space:]]+exit-nonzero:rc=2' <<<"$nm_out" && ok "j-nometa: reason still shown" || bad "j-nometa: reason missing"
 
 # --- Graceful degradation: jq unavailable -> still prints, rc 0, fields degrade to '?'. ---
 # Shadow `have` so `have jq` returns false (the script gates every jq use on `have jq`). The
@@ -144,9 +145,9 @@ have() { [ "$1" = "jq" ] && return 1; command -v "$1" >/dev/null 2>&1; }
 jq_rc=0; jq_out="$(cmd_explain "j-perm" 2>/dev/null)" || jq_rc=$?
 unset -f have
 [ "$jq_rc" -eq 0 ] && ok "j-perm (no jq): explain rc 0" || bad "j-perm (no jq): explain rc=$jq_rc"
-printf '%s\n' "$jq_out" | grep -qE '^state:[[:space:]]+permission-blocked' && ok "j-perm (no jq): state shown" || bad "j-perm (no jq): state not shown"
-printf '%s\n' "$jq_out" | grep -qE '^verb:[[:space:]]+\?' && ok "j-perm (no jq): verb degrades to ?" || bad "j-perm (no jq): verb did not degrade to ?"
-printf '%s\n' "$jq_out" | grep -qE '^reason:[[:space:]]+permission-blocked:denials=3' && ok "j-perm (no jq): reason still shown" || bad "j-perm (no jq): reason missing"
+grep -qE '^state:[[:space:]]+permission-blocked' <<<"$jq_out" && ok "j-perm (no jq): state shown" || bad "j-perm (no jq): state not shown"
+grep -qE '^verb:[[:space:]]+\?' <<<"$jq_out" && ok "j-perm (no jq): verb degrades to ?" || bad "j-perm (no jq): verb did not degrade to ?"
+grep -qE '^reason:[[:space:]]+permission-blocked:denials=3' <<<"$jq_out" && ok "j-perm (no jq): reason still shown" || bad "j-perm (no jq): reason missing"
 
 # --- Invariant on disk: every NON-SUCCESS terminal job has a non-empty reason OR error file. ---
 for jid in j-perm j-timeout j-failed j-canceled j-doneq j-nometa; do

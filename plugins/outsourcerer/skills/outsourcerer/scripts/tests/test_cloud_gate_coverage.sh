@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -euo pipefail
 
 SK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../outsourcerer.sh"
 
 # ISOLATE persistent state (v0.4.8 remembered consent): never read/pollute the user's
 # real ~/.outsourcerer — a stored grant there would make every refusal assertion fail.
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-covtest-home-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-covtest-home-$$"
 mkdir -p "$OSRC_HOME"
+# r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
+export HOME="$OSRC_HOME/home"; mkdir -p "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT
 
 PASS=0
@@ -31,7 +34,7 @@ check() {
 
 # A1: `second-opinion` subcommand runs the cloud gate.
 out=$(OSRC_CLOUD_ACK= bash "$SK" second-opinion "hello" </dev/null 2>&1 || true)
-if printf '%s' "$out" | grep -q "CLOUD GATE"; then
+if grep -q "CLOUD GATE" <<<"$out"; then
   check "A1 second-opinion runs cloud gate" 0
 else
   check "A1 second-opinion runs cloud gate" 1
@@ -39,9 +42,9 @@ fi
 
 # A2: `image` subcommand runs the cloud gate.
 out=$(OSRC_CLOUD_ACK= bash "$SK" image "a red panda" /tmp/gatetest.png </dev/null 2>&1 || true)
-if printf '%s' "$out" | grep -q "CLOUD GATE"; then
+if grep -q "CLOUD GATE" <<<"$out"; then
   check "A2 image runs cloud gate" 0
-elif printf '%s' "$out" | grep -qiE 'no image backend|GEMINI_API_KEY|OPENROUTER_API_KEY|not on PATH|install'; then
+elif grep -qiE 'no image backend|GEMINI_API_KEY|OPENROUTER_API_KEY|not on PATH|install' <<<"$out"; then
   # No image backend is configured on this machine, so the run dies before the gate would matter.
   # The property under test is "the gate runs BEFORE anything leaves the machine"; with no backend
   # there is no egress to gate, so this is untestable here rather than broken. Failing instead would

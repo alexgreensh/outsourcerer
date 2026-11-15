@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_conformance_suite_timeout.sh — conformance.sh's per-suite wall-clock bound.
 #
 # A wedged suite must fail the gate loudly, not park it: without a bound a busy-spinning suite
@@ -30,7 +33,7 @@ case "$_SUITE_TIMEOUT_DEFAULT" in ''|*[!0-9]*) echo "FAIL: default bound missing
 
 TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap 'cleanup; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 # Record what _suite_kill_tree is aimed at: the pidfile's two numbers ("PID PPID") must never be
 # fused into one pid, or a post-timeout walk could be aimed at an unrelated process. The

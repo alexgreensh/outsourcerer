@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_delegate_attribution.sh — delegated-commit attribution (GH007). Two real seams:
 #  1) ENV: every delegate_* harness is a child of this process, so route_delegate exports a noreply
 #     GIT_AUTHOR_*/GIT_COMMITTER_* identity — a delegate commit can never carry the operator's
@@ -17,9 +18,11 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-attrib.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
-SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-attrib.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
+export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME"
+SRC_ONLY="$TMP/src.sh"; sed '/^\[ "${OSRC_SOURCED:-}" = "1" \] || main "\$@"$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1
 
@@ -39,13 +42,13 @@ run_droid() {  # <home> <dumpfile> [extra env via leading VAR=x args] -- real fg
   env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
     HOME="$FAKEHOME" PATH="$FAKEBIN:$PATH" OSRC_HOME="$h" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
     OSRC_NO_ADVISE=1 OSRC_ENV_DUMP="$dump" OUTSOURCERER_DEPTH=0 "$@" \
-    bash "$SRC" run --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
+    bash "$SRC" run --spend-ok --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
 }
 
 # 1) Default: delegate child sees the noreply identity.
 H1="$TMP/h1"; mkdir -p "$H1"; D1="$TMP/d1.env"
 run_droid "$H1" "$D1"
-if grep -q '^GIT_AUTHOR_EMAIL=outsourcerer-delegate@users\.noreply\.github\.com$' "$D1" \
+if [ -f "$D1" ] && grep -q '^GIT_AUTHOR_EMAIL=outsourcerer-delegate@users\.noreply\.github\.com$' "$D1" \
    && grep -q '^GIT_COMMITTER_EMAIL=outsourcerer-delegate@users\.noreply\.github\.com$' "$D1"; then
   ok "env: delegate child carries the noreply author+committer identity"
 else
@@ -57,8 +60,8 @@ H2="$TMP/h2"; mkdir -p "$H2"; D2="$TMP/d2.env"
 env -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
   HOME="$FAKEHOME" PATH="$FAKEBIN:$PATH" OSRC_HOME="$H2" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
   OSRC_NO_ADVISE=1 OSRC_ENV_DUMP="$D2" OUTSOURCERER_DEPTH=0 GIT_AUTHOR_NAME="Operator Name" \
-  bash "$SRC" run --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
-if grep -q '^GIT_AUTHOR_NAME=Operator Name$' "$D2" && ! grep -q '^GIT_COMMITTER_EMAIL=' "$D2"; then
+  bash "$SRC" run --spend-ok --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
+if [ -f "$D2" ] && grep -q '^GIT_AUTHOR_NAME=Operator Name$' "$D2" && ! grep -q '^GIT_COMMITTER_EMAIL=' "$D2"; then
   ok "env: operator-set GIT_* is respected (no override)"
 else
   bad "env: operator identity was overridden"
@@ -69,8 +72,8 @@ H3="$TMP/h3"; mkdir -p "$H3"; D3="$TMP/d3.env"
 env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
   HOME="$FAKEHOME" PATH="$FAKEBIN:$PATH" OSRC_HOME="$H3" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
   OSRC_NO_ADVISE=1 OSRC_ENV_DUMP="$D3" OUTSOURCERER_DEPTH=0 OSRC_DELEGATE_GIT_IDENTITY=0 \
-  bash "$SRC" run --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
-if ! grep -q '^GIT_AUTHOR_EMAIL=' "$D3" && ! grep -q '^GIT_COMMITTER_EMAIL=' "$D3"; then
+  bash "$SRC" run --spend-ok --provider droid -m kimi-k3 "hi" >/dev/null 2>&1
+if [ -f "$D3" ] && ! grep -q '^GIT_AUTHOR_EMAIL=' "$D3" && ! grep -q '^GIT_COMMITTER_EMAIL=' "$D3"; then
   ok "env: OSRC_DELEGATE_GIT_IDENTITY=0 injects nothing"
 else
   bad "env: opt-out still injected an identity"

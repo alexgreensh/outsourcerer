@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_gemini_effort_retry.sh — the keyless Gemini (agy) lane self-heals the effort/model mismatch.
 #
 # Root cause guarded: _agy_model_token can resolve a family alias to a concrete id (e.g.
@@ -17,7 +18,7 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "$PWD/.test-gmretry.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-gmretry.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin"
@@ -76,7 +77,7 @@ fi
 
 # 3. The lane ultimately succeeded and returned the model's output instead of dying.
 [ "$rc" -eq 0 ] && ok "gemini lane exits 0 after the self-heal retry" || bad "gemini lane exited $rc despite a retry that should succeed"
-printf '%s' "$out" | grep -q 'REVIEW_OK' && ok "delegate returned the retried run's output" || bad "delegate did not surface the successful retry output: $out"
+grep -q 'REVIEW_OK' <<<"$out" && ok "delegate returned the retried run's output" || bad "delegate did not surface the successful retry output: $out"
 
 # 4. It did NOT nuke the healthy catalog for what was only a flag error.
 grep -qi 'refused model' "$TMP/err.txt" && bad "treated the effort error as an invalid-model error (would clear the catalog)" || ok "effort error is not misclassified as an invalid-model error"
@@ -116,7 +117,7 @@ chmod +x "$TMP/bin/agy"
 mkdir -p "$OSRC_HOME/catalog"; : > "$OSRC_HOME/catalog/gm.txt"   # a cached catalog that must survive
 REST=(review the code); RESOLVED_ID="gemini-flash"; EFFORT="medium"; TTIER=""
 rc3=0; out3="$(delegate_gmnative auto 2>"$TMP/err3.txt")" || rc3=$?
-printf '%s' "$out3" | grep -q 'REVIEW_OK' && ok "a successful run with a capability warning still returns its output" \
+grep -q 'REVIEW_OK' <<<"$out3" && ok "a successful run with a capability warning still returns its output" \
   || bad "a successful run's output was lost: $out3"
 grep -qi 'refused model' "$TMP/err3.txt" \
   && bad "a SUCCESSFUL run's warning wrongly cleared the catalog (would thrash the catalog on every run)" \

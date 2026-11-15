@@ -20,6 +20,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+. "$SCRIPT_DIR/lib_race_barrier.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -109,38 +110,49 @@ fi
 # property it cannot observe. Pre-forking the racers and holding them on a shared start flag makes
 # them contend for real, and the control below is what proves the assertion has teeth.
 _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if the barrier broke
-  local fn="$1" d="$2"
-  local won="$TMP/wins.$$.txt" flag="$TMP/go.$$"
-  # A missing/empty TMP lands won/flag at the filesystem root — report a broken barrier
-  # rather than racing on stray files (or spinning forever where they cannot be created).
+  local fn="$1" d="$2" gate="$2.gate"
+  # Refuse a missing scratch directory instead of racing on stray files.
   [ -n "${TMP:-}" ] && [ -d "$TMP" ] || { printf 'ERR'; return; }
-  true > "$won"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
-  # The barrier spin must be BOUNDED. The flag is created below; if it can never appear —
-  # the workdir was swept mid-round, the create failed, TMP was empty from the start — an
-  # unbounded `while [ ! -f ]` burns one full core per racer forever while `wait` parks the
-  # whole suite (observed: ~7 cores of busy-loop holding a conformance run for hours).
-  # A timed-out racer concedes the round, and a broken barrier returns ERR, so the suite
-  # reports FAIL and stops instead of hanging.
-  local i pids="" deadline=$(( SECONDS + 15 ))
+  mkdir "$gate" || { printf 'ERR'; return; }
+  local i rc released=0 winners=0
+  local pids=()
   for i in 1 2 3 4 5 6 7 8 9 10; do
-    ( while [ ! -f "$flag" ]; do
-        { [ -d "$TMP" ] && [ "$SECONDS" -lt "$deadline" ]; } || break
-      done
-      [ -f "$flag" ] || { printf 'race: release flag never appeared\n' >&2; exit 1; }
-      "$fn" "$d" >/dev/null 2>&1 && printf 'win\n' >> "$won" ) &
-    pids="$pids $!"
+    ( osrc_race_ready "$gate" "$i" || exit 125
+      mkdir() {
+        local status last
+        for last in "$@"; do :; done
+        command mkdir "$@" 2>> "$gate/err.$i"; status=$?
+        printf '%s\n' "$status" > "$gate/mkdir-status.$i"
+        printf 'mkdir status=%s path=%s\n' "$status" "$last" >> "$gate/out.$i"
+        if [ "$status" = 0 ]; then
+          # An inode can be reused. Record ctime too, and retain a missing observation.
+          stat -c 'identity inode=%i ctime=%z path=%n' "$last" >> "$gate/out.$i" 2>/dev/null \
+            || stat -f 'identity inode=%i ctime=%c path=%N' "$last" >> "$gate/out.$i" 2>/dev/null \
+            || printf 'identity unavailable: path disappeared or stat failed\n' >> "$gate/out.$i"
+        fi
+        return "$status"
+      }
+      rc=0; "$fn" "$d" || rc=$?
+      if [ "$rc" = 0 ]; then
+        stat -c 'claim identity inode=%i ctime=%z path=%n' "$d" >> "$gate/out.$i" 2>/dev/null \
+          || stat -f 'claim identity inode=%i ctime=%c path=%N' "$d" >> "$gate/out.$i" 2>/dev/null \
+          || printf 'claim identity unavailable\n' >> "$gate/out.$i"
+      fi
+      exit "$rc" ) > "$gate/out.$i" 2> "$gate/err.$i" &
+    pids[$i]=$!
   done
-  sleep 0.3          # let every racer reach the spin before the gun
-  if ! true > "$flag"; then   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
-    printf 'race: cannot create release flag\n' >&2
-    kill -KILL $pids 2>/dev/null; wait $pids 2>/dev/null
-    printf 'ERR'; return
-  fi
-  wait $pids
-  # won/flag disappearing under us means the workdir went away mid-round — that is a broken
-  # barrier, not a round with zero winners.
-  [ -f "$won" ] && [ -f "$flag" ] || { printf 'ERR'; return; }
-  grep -c 'win' "$won" || true   # -c prints 0 on no match (with exit 1); output is always a clean count
+  osrc_race_release "$gate" 10 || released=1
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    rc=0; wait "${pids[$i]}" || rc=$?
+    printf '%s\n' "$rc" > "$gate/status.$i"
+    [ "$rc" = 0 ] && winners=$((winners + 1))
+    [ "$rc" = 0 ] || [ "$rc" = 1 ] || released=1
+    if [ "$fn" = _mkdir_claim ] && [ -f "$gate/mkdir-status.$i" ]; then
+      [ "$(cat "$gate/mkdir-status.$i")" = "$rc" ] || released=1
+    fi
+  done
+  [ "$released" = 0 ] || { printf 'ERR'; return; }
+  printf '%s' "$winners"
 }
 
 # A deliberately non-atomic claim, used only to prove the assertion can fail. It must NOT create
@@ -150,11 +162,58 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
 # the Windows exit-status problem by reaching for -p and losing the lock.
 _broken_claim() { [ -d "$1" ] && return 1; mkdir -p "$1" 2>/dev/null || return 1; return 0; }
 
+# Control the child status independently of mkdir so a wait-status bookkeeping
+# error cannot be mistaken for a second successful filesystem claim.
+_one_claim() { [ "$i" = 3 ]; }
+
+# A removed claim can be acquired again even with a correct atomic mkdir. Force that
+# interleaving so the harness proves it reports both winners and their identities.
+_deleted_claim() {
+  case "$i" in
+    1) mkdir "$1" || return 1; : > "$gate/first-created" ;;
+    2) local deadline=$((SECONDS + 20))
+       while [ ! -f "$gate/first-created" ]; do
+         [ "$SECONDS" -lt "$deadline" ] || return 1
+         sleep 0.01
+       done
+       rmdir "$1" || return 1
+       mkdir "$1" || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+n="$(_race_round _deleted_claim "$TMP/deleted-control")"
+if [ "$n" = 2 ] && grep -q '^identity inode=' "$TMP/deleted-control.gate/out.1" \
+  && grep -q '^identity inode=' "$TMP/deleted-control.gate/out.2"; then
+  ok 'removed-and-recreated claim is detected as two winners'
+else
+  bad "removed-and-recreated claim was not detected: $n"
+  osrc_race_report "$TMP/deleted-control.gate" 10
+fi
+fixed_bad=0
+for r in $(seq 1 20); do
+  n="$(_race_round _one_claim "$TMP/fixed-$r")"
+  if [ "$n" != 1 ]; then
+    fixed_bad=1; printf 'fixed-status control round %s: winners=%s\n' "$r" "$n"
+    osrc_race_report "$TMP/fixed-$r.gate" 10; break
+  fi
+done
+[ "$fixed_bad" = 0 ] && ok 'fixed-status control records exactly one winner' \
+                     || bad 'fixed-status control misreported child statuses'
+
+# A false successful function result must not hide a failed mkdir.
+n="$( _mkdir_claim() { mkdir "$1" || :; return 0; }; _race_round _mkdir_claim "$TMP/masked-status" )"
+[ "$n" = ERR ] && ok 'mkdir and child-status disagreement fails the round' \
+                || { bad "masked mkdir failures were accepted: $n"; osrc_race_report "$TMP/masked-status.gate" 10; }
+
 rounds=20; bad_rounds=0; barrier_broken=0
 for r in $(seq 1 $rounds); do
   n="$(_race_round _mkdir_claim "$TMP/race-$r")"
-  if [ "$n" = "ERR" ]; then bad "race barrier broken — release flag never appeared (round $r)"; barrier_broken=1; break; fi
-  [ "$n" = "1" ] || bad_rounds=$((bad_rounds+1))
+  if [ "$n" = "ERR" ]; then bad "race barrier broken (round $r)"; osrc_race_report "$TMP/race-$r.gate" 10; barrier_broken=1; break; fi
+  if [ "$n" != "1" ]; then
+    bad_rounds=$((bad_rounds+1)); printf 'round %s: winners=%s\n' "$r" "$n"
+    [ "$n" -le 1 ] || printf '  multiple claimants reported success; compare their recorded identities\n'
+    osrc_race_report "$TMP/race-$r.gate" 10
+  fi
 done
 if [ "$barrier_broken" -eq 0 ]; then
   [ "$bad_rounds" -eq 0 ] && ok "exactly one concurrent claimant wins, over $rounds contended rounds" \
@@ -167,10 +226,11 @@ fi
 ctl_bad=0; ctl_barrier_broken=0
 for r in $(seq 1 $rounds); do
   n="$(_race_round _broken_claim "$TMP/broken-$r")"
-  if [ "$n" = "ERR" ]; then bad "control: race barrier broken — release flag never appeared (round $r)"; ctl_barrier_broken=1; break; fi
+  if [ "$n" = "ERR" ]; then bad "control: race barrier broken (round $r)"; osrc_race_report "$TMP/broken-$r.gate" 10; ctl_barrier_broken=1; break; fi
   [ "$n" -ge 2 ] && ctl_bad=$((ctl_bad+1))
 done
 if [ "$ctl_barrier_broken" -eq 0 ]; then
+  [ "$ctl_bad" -gt 0 ] || osrc_race_report "$TMP/broken-$rounds.gate" 10
   [ "$ctl_bad" -gt 0 ] && ok "control: the race harness catches a non-atomic claim ($ctl_bad/$rounds rounds)" \
                        || bad "control: a non-atomic claim passed all $rounds rounds — the concurrency assertion has no power"
 fi
@@ -278,7 +338,7 @@ esac
 # The extracted window must actually contain the read that triggers the defect. Without this the
 # probe can be green because it captured the wrong lines entirely.
 _dver_window() { sed -n "$(grep -nE '\{ *local _dver' "$SRC" | head -1 | cut -d: -f1),+4p" "$SRC"; }
-_dver_window | grep -q '\[ -n "\$_dver" \]' \
+{ _t3b_pipe="$(_dver_window)" && grep -q '\[ -n "\$_dver" \]' <<<"$_t3b_pipe"; } \
   && ok "probe window contains the unguarded read of _dver" \
   || bad "probe window does NOT contain the read of _dver — it is testing the wrong lines"
 

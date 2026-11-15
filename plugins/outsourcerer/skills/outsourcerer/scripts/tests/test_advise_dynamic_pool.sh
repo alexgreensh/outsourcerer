@@ -12,11 +12,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent (dynamic pool no-ops)"; echo "RESULT: 0 passed, 0 failed"; exit 0; }
 
-T="$(mktemp -d)"; export OSRC_HOME="$T"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; export HOME="$T/fakehome" OSRC_HOME="$T"; mkdir -p "$HOME"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/catalogs"
 . "$SRC" >/dev/null 2>&1
 
@@ -88,7 +89,7 @@ cat > "$OSRC_MODELS_JSON" <<'MJSON'
 {"data":[{"id":"acme/nova-max-1"},{"id":"x-ai/grok-4.5"},{"id":"or-unscored-xyz"}]}
 MJSON
 pool="$(_advise_candidate_rows intelligence_index)"
-printf '%s\n' "$pool" | grep -q '^acme/nova-max-1|acme/nova-max-1|or|frontier$' \
+grep -q '^acme/nova-max-1|acme/nova-max-1|or|frontier$' <<<"$pool" \
   && ok "discovery: new OR id enters the pool with score-derived tier (frontier)" \
   || bad "discovery: new OR id missing or wrong tier"
 # Discovered strong model wins the recommendation for a frontier-required task.
@@ -97,7 +98,7 @@ rec="$(printf '%s' "$json" | jq -r '.recommendation.alias' 2>/dev/null)"
 [ "$rec" = "acme/nova-max-1" ] && ok "discovery: never-seen model wins on merit" || bad "advise picked '$rec' instead of acme/nova-max-1"
 
 # === Scored-only (perf + merit guard): an UNSCORED OpenRouter id is NOT added to the pool. ===
-printf '%s\n' "$pool" | grep -q 'or-unscored-xyz' && bad "scored-only violated: unscored id entered the pool" || ok "scored-only: an unscored OR id is skipped"
+grep -q 'or-unscored-xyz' <<<"$pool" && bad "scored-only violated: unscored id entered the pool" || ok "scored-only: an unscored OR id is skipped"
 
 # === No Devin noise: the pool's dv-lane rows are exactly the static table's (no discovered uids). ===
 # Seed a Devin catalog with a variant uid that is NOT in bench; it must NEVER appear as a candidate.
@@ -105,7 +106,7 @@ cat > "$T/catalogs/dv.raw.json" <<'RAW'
 {"families":[{"family_uid":"phantom","aliases":[],"variants":[{"model_uid":"phantom-v9-high","cost_summary":"Free"}]}]}
 RAW
 pool2="$(_advise_candidate_rows intelligence_index)"
-printf '%s\n' "$pool2" | grep -q 'phantom-v9-high' && bad "a Devin catalog uid leaked into the pool" || ok "no Devin catalog uid enters the pool (bench-unmatched noise excluded)"
+grep -q 'phantom-v9-high' <<<"$pool2" && bad "a Devin catalog uid leaked into the pool" || ok "no Devin catalog uid enters the pool (bench-unmatched noise excluded)"
 dv_dyn="$(printf '%s\n' "$pool2" | awk -F'|' '$3=="dv"{print $2}' | sort -u)"
 dv_static="$(printf '%s\n' "$static_only" | awk -F'|' '$3=="dv"{print $2}' | sort -u)"
 [ "$dv_dyn" = "$dv_static" ] && ok "dv-lane candidates == static table only" || bad "dv-lane candidates diverged from the static table"
@@ -135,7 +136,7 @@ cat > "$OSRC_MODELS_JSON" <<'MJSON'
 MJSON
 hatch_out="$(OSRC_ADVISE_DYNAMIC_POOL=0 _advise_candidate_rows)"
 [ "$hatch_out" = "$static_only" ] && ok "escape hatch: output == static table (byte-identical)" || bad "escape hatch diverged from static table"
-printf '%s\n' "$hatch_out" | grep -q 'acme/nova-max-1' && bad "escape hatch leaked a dynamic id" || ok "escape hatch drops dynamic ids"
+grep -q 'acme/nova-max-1' <<<"$hatch_out" && bad "escape hatch leaked a dynamic id" || ok "escape hatch drops dynamic ids"
 
 # === Offline: no caches -> output == static table (the pre-dynamic candidate set). ===
 rm -f "$OSRC_MODELS_JSON" "$OSRC_BENCH_JSON"
@@ -181,7 +182,7 @@ grep -q '_advise_candidate_rows "\$field"' "$SRC" && ok "ranking loop sources _a
 grep -q 'OSRC_ADVISE_DYNAMIC_POOL' "$SRC" && ok "OSRC_ADVISE_DYNAMIC_POOL documented" || bad "OSRC_ADVISE_DYNAMIC_POOL not documented"
 grep -q 'OSRC_ADVISE_DYNAMIC_MAX'  "$SRC" && ok "OSRC_ADVISE_DYNAMIC_MAX documented" || bad "OSRC_ADVISE_DYNAMIC_MAX not documented"
 grep -q '_tier_from_score' "$SRC" && ok "_tier_from_score present" || bad "_tier_from_score missing"
-grep -q 'test_advise_dynamic_pool' "$SCRIPT_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
+grep -q 'test_advise_dynamic_pool' "$TESTS_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
 
 echo
 echo "RESULT: $pass passed, $fail failed"

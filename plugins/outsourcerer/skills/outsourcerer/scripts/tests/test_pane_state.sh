@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # P2c: session/tmux state classification. Self-contained — sources the script with
 # OSRC_SOURCED=1 so main() does not run, then pipes canned pane dumps into
 # _pane_state_classify and asserts the JSON state. Also checks `session read`
 # without --state stays byte-identical, and that --state emits the classifier JSON.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-pane-state.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-pane-state.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-OSRC_HOME="$TMP/state"; HOME="$TMP/home"; export OSRC_HOME HOME; mkdir -p "$OSRC_HOME"
+export HOME="$TMP/home" OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
 
 # classify helper: pipe canned text in, read the .state field out.
@@ -22,7 +23,7 @@ Do you want to proceed with the change? [y/N] '
 
 # 1b. evidence is the matching prompt line, not empty
 ev="$(printf '%s' "$ap" | _pane_state_classify | jq -r '.evidence')"
-[ -n "$ev" ] && printf '%s' "$ev" | grep -qi 'proceed' && ok "approval evidence carries the prompt line" || bad "approval evidence empty or wrong: $ev"
+[ -n "$ev" ] && grep -qi 'proceed' <<<"$ev" && ok "approval evidence carries the prompt line" || bad "approval evidence empty or wrong: $ev"
 
 # 2. spinner / "esc to interrupt" -> working
 wp='Reading file src/foo.sh

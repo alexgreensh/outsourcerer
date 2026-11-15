@@ -69,7 +69,7 @@ case "$wt" in "$R/.outsourcerer/worktrees/run-"*) ok "cwd moved into a repo work
 grep -q 'gitignored secret file(s)' "$TMP/iso.err" && grep -q 'bring back' "$TMP/iso.err" \
   && ok "prints the isolated path and how to bring edits back" || bad "notice missing: $(cat "$TMP/iso.err")"
 grep -q 'SECRET=live' "$TMP/iso.err" && bad "notice leaked the secret value" || ok "notice never prints the secret value"
-git -C "$R" status --porcelain | grep -q '\.outsourcerer' && bad ".outsourcerer shows up in the user's git status" || ok ".outsourcerer kept out of git status"
+{ _t3b_pipe="$(git -C "$R" status --porcelain)" && grep -q '\.outsourcerer' <<<"$_t3b_pipe"; } && bad ".outsourcerer shows up in the user's git status" || ok ".outsourcerer kept out of git status"
 # The full gate then passes on the isolated tree.
 gate="$(cd "$wt" && bash -c 'f="$1"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; _secret_scan "task" devin && echo PASSED' _ "$SRC" 2>&1)"
 case "$gate" in *PASSED*) ok "secret scan passes inside the isolated tree" ;; *) bad "gate still blocks in the isolated tree: $gate" ;; esac
@@ -122,8 +122,17 @@ echo "=== (4) end to end: delegate starts on the first try, in the isolated tree
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/devin" <<'EOF'
 #!/usr/bin/env bash
+echo "devin $*" >> "${DEVIN_CALLS:-/dev/null}"
 if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then echo "Logged in"; exit 0; fi
-{ echo "cwd=$PWD"; [ -e web/.env.local ] && echo "secret=present" || echo "secret=absent"; cat same.txt; } > "$DEVIN_CAPTURE"
+# Only a prompt-bearing dispatch (-p) is a delegate run. Billing/catalog probes
+# (`devin models list`, `devin auth status`) run BEFORE isolation in the user's repo;
+# if they wrote the capture their cwd/secret would masquerade as the delegate's.
+for a in "$@"; do
+  if [ "$a" = "-p" ]; then
+    { echo "cwd=$PWD"; [ -e web/.env.local ] && echo "secret=present" || echo "secret=absent"; cat same.txt; } > "$DEVIN_CAPTURE"
+    break
+  fi
+done
 echo ok; exit 0
 EOF
 chmod +x "$TMP/bin/devin"
@@ -132,10 +141,22 @@ chmod +x "$TMP/bin/devin"
 R="$TMP/r7"; mkdir -p "$R/web"
 ( cd "$R" && git init -q && printf '.env.local\n' > web/.gitignore && printf 'a1\n' > same.txt && git add -A && git commit -qm init \
   && printf 'S=1\n' > web/.env.local && printf 'a2\n' > same.txt )
-cap="$TMP/devin.cap"
+cap="$TMP/devin.cap"; calls="$TMP/devin.calls"
+# (4a) WITHOUT spend consent the metered lane must refuse before any dispatch: the billing
+# probe may run (metadata only), but no prompt-bearing (-p) call and no capture may appear.
+ref="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$TMP/devin.ref.cap" DEVIN_CALLS="$TMP/devin.ref.calls" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1; echo "rc=$?")"
+case "$ref" in *"rc=0"*) bad "unconsented metered launch was not refused" ;; *) ok "unconsented metered launch refused" ;; esac
+grep -q 'spend gate' <<<"$ref" && ok "the refusal is the spend gate" || bad "refusal was not the spend gate: $(printf '%s' "$ref" | tail -2)"
+[ ! -s "$TMP/devin.ref.cap" ] && ok "refused launch dispatched nothing" || bad "refused launch still captured a run"
+if [ -f "$TMP/devin.ref.calls" ] && grep -q ' -p ' "$TMP/devin.ref.calls"; then bad "refused run logged a -p dispatch"; else ok "no -p dispatch in the refused run's call log"; fi
+grep -q 'models list' "$TMP/devin.ref.calls" 2>/dev/null && ok "billing probe ran as metadata-only 'models list'" || bad "expected a models-list probe in: $(cat "$TMP/devin.ref.calls" 2>/dev/null)"
+# (4b) --spend-ok consents THIS metered launch only (argv, never env — OSRC_SPEND_OK is unset
+# from the environment at startup). Billing decides the spend ask, never data exposure: the
+# delegate must still land in the isolated tree.
 # Through the real `edit` command, so route_delegate's gate is in the path (delegate() sits below it).
-e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1)"
+e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" DEVIN_CALLS="$calls" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit --spend-ok -m swe-2 "fix the parser" </dev/null 2>&1)"
 if [ -s "$cap" ]; then ok "delegate launched (no gate kill)"; else bad "delegate never launched: $(printf '%s' "$e2e" | grep -m2 'CLOUD GATE\|error')"; fi
+grep -q ' -p ' "$calls" 2>/dev/null && ok "call log shows a real -p dispatch, not a probe" || bad "no -p dispatch in call log: $(cat "$calls" 2>/dev/null)"
 grep -q "^cwd=$R/.outsourcerer/worktrees/run-" "$cap" 2>/dev/null && ok "delegate cwd is the isolated worktree" || bad "delegate cwd: $(head -1 "$cap" 2>/dev/null)"
 grep -q '^secret=absent' "$cap" 2>/dev/null && ok "delegate cannot see web/.env.local" || bad "delegate saw the secret"
 rid="$(basename "$(sed -n 's/^cwd=//p' "$cap" 2>/dev/null)")"
@@ -146,7 +167,7 @@ bash "$SRC" cleanup "$rid" --force >/dev/null 2>&1
 grep -q '^a2' "$cap" 2>/dev/null && ok "delegate sees the uncommitted same-size edit" || bad "delegate missed the uncommitted edit: $(tail -1 "$cap" 2>/dev/null)"
 
 echo "=== structural ==="
-awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$RESOLVED_ID"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC" | grep -qx ok \
+{ _t3b_pipe="$(awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$RESOLVED_ID"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC")" && grep -qx ok <<<"$_t3b_pipe"; } \
   && ok "route_delegate isolates right before the cloud gate" || bad "route_delegate does not call _cloud_autoisolate before _cloud_disclose"
 
 echo ""

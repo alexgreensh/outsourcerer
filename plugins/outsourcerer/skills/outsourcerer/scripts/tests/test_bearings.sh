@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-bearings.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-bearings.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 HOME="$TMP/home"; export HOME; mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
@@ -28,10 +29,10 @@ sections="$(printf '%s\n' "$out" | grep -E "^(Captain's Call|Recently Landed|Und
 expected="$(printf "%s\n" "Captain's Call" "Recently Landed" Underway "Charted Next")"
 [ "$sections" = "$expected" ] && ok "rundown renders the four sections in fixed order" \
   || bad "rundown section order changed"
-printf '%s' "$out" | grep -q -- '- call \[blocked\]' \
+grep -q -- '- call \[blocked\]' <<<"$out" \
   && ok "rundown classifies current blocked work" \
   || bad "blocked work was not placed in Captain's Call"
-printf '%s' "$out" | grep -q -- '- landed \[completed\]' \
+grep -q -- '- landed \[completed\]' <<<"$out" \
   && ok "rundown classifies recently landed work" \
   || bad "completed work was not placed in Recently Landed"
 [ "$(cat "$TMP/state/jobs/observed/status")" = running ] \
@@ -41,19 +42,19 @@ printf '%s' "$out" | grep -q -- '- landed \[completed\]' \
 before="$(jq -r '.generation' "$TMP/state/fleet-snapshot.json")"
 out="$(run bearings 2>&1)"
 after="$(jq -r '.generation' "$TMP/state/fleet-snapshot.json")"
-[ "$before" = "$after" ] && printf '%s' "$out" | grep -q '^Underway$' \
+[ "$before" = "$after" ] && grep -q '^Underway$' <<<"$out" \
   && ok "bearings reads the published snapshot without rediscovery" \
   || bad "bearings changed or failed to read the published snapshot"
 
 empty="$TMP/empty"
 out="$(OSRC_HOME="$empty" bash "$SRC" bearings 2>&1)"
-printf '%s' "$out" | grep -q -- '- unknown \[unknown\] fleet state unavailable' \
+grep -q -- '- unknown \[unknown\] fleet state unavailable' <<<"$out" \
   && ok "missing evidence fails to unknown" \
   || bad "missing evidence was promoted to a known state"
 
 line="$(OSRC_HOME="$TMP/line" bash -c 'src="$1"; snapshot="$2"; set --; . "$src" >/dev/null 2>&1; _heartbeat_line "$snapshot"' bash "$SRC" \
   '{"schema_version":"1","generation":"g","captured_at":"now","items":[{"state":"working","job_id":"agent-1","session_id":null,"observed_model":"sol","lane":"cx","task_summary":"map auth"}]}')"
-printf '%s' "$line" | grep -q "sol on 'map auth'" \
+grep -q "sol on 'map auth'" <<<"$line" \
   && ok "heartbeat line names the active agent, model, and work" \
   || bad "heartbeat line omitted active work detail"
 

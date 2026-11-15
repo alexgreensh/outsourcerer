@@ -127,16 +127,14 @@ _factory_self_pid() {
   _FACTORY_SELF_PID="$p"
 }
 
-# _factory_owner_dead <pid> <start-identity> -> rc0 only when the owner is PROVABLY gone (ps works and
-# the pid is absent, or the pid now belongs to a process with a different start time).
+# _factory_owner_dead <pid> <start-identity> -> rc0 only for a reused pid or explicit ESRCH.
 _factory_owner_dead() {
   local o_pid="$1" o_start="$2" cur probe _rc=0
   case "$o_pid" in ''|*[!0-9]*) return 1 ;; esac
   cur="$(_pid_start_identity "$o_pid" 2>/dev/null)" || _rc=$?
-  [ "$_rc" -eq 2 ] && return 0
   [ "$_rc" -eq 0 ] && [ -n "$o_start" ] && [ "$cur" != "$o_start" ] && return 0
   # A denied signal is not proof of death. Only an explicit ESRCH diagnostic is.
-  if [ "$_rc" -eq 1 ]; then
+  if [ "$_rc" -ne 0 ]; then
     probe="$(LC_ALL=C kill -0 "$o_pid" 2>&1)" || {
       case "$probe" in *"No such process"*) return 0 ;; esac
     }
@@ -503,7 +501,7 @@ _task_brief() {
       printf -- '- Make it complete and self-contained: the next workers see only what you write, not your session.\n'
     fi
     [ -n "$check" ] && printf -- '- This check must pass (exit code 0) from the top of the repository: `%s`\n' "$check"
-    printf -- '- End with a short summary: what you did, what you found or changed, anything left open. It is handed to the tasks that depend on this one.\n\n'
+    printf -- '- Testing rule: your own unit tests only, one at a time, niced; heavy suites run in the cloud — do not run conformance, builds, installs or benchmarks on this machine.\n- End with a short summary: what you did, what you found or changed, anything left open. It is handed to the tasks that depend on this one.\n\n'
 
     deps="$(printf '%s' "$t" | _ft_jq -r '(.deps // [])[]')"
     if [ -n "$deps" ]; then
@@ -929,10 +927,10 @@ _plan_cli_new() {
   fi
   _mkdir_private "$(_plans_root)" || die "cannot create $(_plans_root)"
   pd="$(_plan_dir "$name")"
-  mkdir "$pd" 2>/dev/null || die "a plan named '$name' already exists. Pick another name, or see it with: outsourcerer plan show $name"
+  _mkdir_claim "$pd" || die "a plan named '$name' already exists. Pick another name, or see it with: outsourcerer plan show $name"
   # From here on this call owns $pd (mkdir just made it): any failure removes it again, so a half-made
   # plan (no plan.json) never blocks the name or confuses plan ls.
-  mkdir "$pd/tasks" 2>/dev/null || _plan_new_abort "$pd" "could not create $pd/tasks"
+  _mkdir_claim "$pd/tasks" || _plan_new_abort "$pd" "could not create $pd/tasks"
   now="$(_factory_now)"
   _factory_write_json "$pd/plan.json" "$(_ft_jq -cn --arg n "$name" --arg g "$goal" --arg r "$repo" --arg b "$base" --arg now "$now" \
     '{schema:1,name:$n,goal:$g,repo:$r,base_branch:$b,created:$now,updated:$now}')" || _plan_new_abort "$pd" "could not save $pd/plan.json"

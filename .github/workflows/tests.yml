@@ -24,10 +24,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install jq
+      - name: Install test dependencies
         run: |
-          if command -v jq >/dev/null 2>&1; then jq --version; exit 0; fi
-          if [ "$RUNNER_OS" = "macOS" ]; then brew install jq; else sudo apt-get update && sudo apt-get install -y jq; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y jq bubblewrap
+          elif ! command -v jq >/dev/null 2>&1; then
+            brew install jq
+          fi
         shell: bash
 
       - name: Run conformance tests

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_quota.sh — per-model daily quota: counter-from-ledger, caps config, the gate, and routing.
 #
 # The feature: outsourcerer knows each free model's DAILY request cap, counts usage from ledger.jsonl
@@ -22,8 +23,8 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-quota.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-quota.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1
@@ -127,11 +128,11 @@ case "$_bad_out" in *"must be a number"*) ok "limits set rejects non-numeric cap
 # INTEGRATION: the route gate via a real preflight (fake droid so nothing dispatches)
 # ---------------------------------------------------------------------------------------------------
 FAKEBIN="$TMP/bin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
-run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 "hi" 2>&1; }
+run_pf() { PATH="$FAKEBIN:$PATH" OSRC_HOME="$1" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash "$SRC" --osrc-preflight-internal run --provider droid -m kimi-k3 --spend-ok "hi" 2>&1; }
 
 # no quota.json -> normal routing (regression: default path untouched)
 H3="$TMP/h3"; mkdir -p "$H3"
-run_pf "$H3" | grep -q 'RESOLVED lane=droid' && ok "integration: no quota.json -> droid routes normally" || bad "no-config routing regressed"
+{ _t3b_pipe="$(run_pf "$H3")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: no quota.json -> droid routes normally" || bad "no-config routing regressed"
 
 # pinned model at cap -> refuse with the reset info (never a silent switch)
 H4="$TMP/h4"; mkdir -p "$H4"; printf '{"models":{"droid:kimi-k3":{"per_day":1,"reset":"utc"}}}\n' > "$H4/quota.json"
@@ -141,7 +142,7 @@ case "$out" in *"pinned choice"*|*"at 1/1"*) ok "integration: pinned at-cap mode
 
 # under cap -> routes normally
 H5="$TMP/h5"; mkdir -p "$H5"; printf '{"models":{"droid:kimi-k3":{"per_day":9,"reset":"utc"}}}\n' > "$H5/quota.json"
-run_pf "$H5" | grep -q 'RESOLVED lane=droid' && ok "integration: under-cap model routes normally" || bad "under-cap routing broke"
+{ _t3b_pipe="$(run_pf "$H5")" && grep -q 'RESOLVED lane=droid' <<<"$_t3b_pipe"; } && ok "integration: under-cap model routes normally" || bad "under-cap routing broke"
 
 # Pin-scanner parity: a `-m` after --no-advise or --provider= must still count as PINNED, so an at-cap
 # pinned model REFUSES ("pinned choice") instead of silently hopping (torture HIGH: scanner divergence).

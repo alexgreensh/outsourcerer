@@ -1467,7 +1467,7 @@ _ff_plan_ensure() {
   fi
   now="$(_ff_now)"
   mkdir -p "$(dirname "$pd")" || die "could not create $(dirname "$pd")"
-  mkdir "$pd" 2>/dev/null || { [ "$new" = 1 ] && return 2; die "could not create the plan folder $pd"; }
+  _mkdir_claim "$pd" || { [ "$new" = 1 ] && return 2; die "could not create the plan folder $pd"; }
   mkdir -p "$pd/tasks" || die "could not create the plan folder $pd"
   _FF_PLAN_CREATED=1
   tmp="$pd/.plan.json.$$"

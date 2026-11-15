@@ -11,6 +11,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome"
+mkdir -p "$HOME"
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
@@ -45,7 +47,7 @@ case "$out" in *Antigravity*) ok "the subscription lane is still attributed" ;; 
 
 # 5. class guard: no `grep -c ... || echo 0` survives in CODE (comment lines blanked first)
 TAB="$(printf '\t')"
-if LC_ALL=C sed -E "s/^[ $TAB]*#.*\$//" "$SRC" | LC_ALL=C grep -nE 'grep -c[^|]*[|][|] echo 0' | grep -q .; then
+if { _t3b_pipe="$(LC_ALL=C sed -E "s/^[ $TAB]*#.*\$//" "$SRC" | LC_ALL=C grep -nE 'grep -c[^|]*[|][|] echo 0')" && grep -q . <<<"$_t3b_pipe"; }; then
   bad "a 'grep -c ... || echo 0' pattern survives (prints 0 twice on no match)"
 else ok "no 'grep -c ... || echo 0' pattern left in the source"; fi
 

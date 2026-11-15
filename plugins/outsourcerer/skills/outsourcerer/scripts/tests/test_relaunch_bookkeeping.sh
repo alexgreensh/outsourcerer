@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_relaunch_bookkeeping.sh — a relaunch never tears down the live pane over a bookkeeping
 # failure, and non-start registry events carry the session's real model generation.
 #
@@ -17,7 +18,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-relaunch-bookkeeping.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-relaunch-bookkeeping.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"

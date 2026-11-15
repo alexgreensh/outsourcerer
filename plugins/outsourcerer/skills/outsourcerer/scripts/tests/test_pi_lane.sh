@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_pi_lane.sh — the Pi engine lane (https://github.com/earendil-works/pi) must be registered,
 # reachable by --provider pi, and send flags Pi actually accepts: print mode, no saved session,
 # --model passthrough, --thinking for effort, and a read-only tool list for run/explore.
@@ -7,8 +8,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-pi.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
-export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-pi.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; mkdir -p "$HOME" "$OSRC_HOME" "$TMP/bin" "$TMP/work"
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
@@ -21,7 +22,7 @@ echo "PI_OK"
 EOF
 chmod +x "$TMP/bin/pi"
 
-run() { ( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider pi "$@" 2>"$TMP/err" ); }
+run() { ( cd "$TMP/work" && PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider pi --spend-ok "$@" 2>"$TMP/err" ); }
 argv() { tr '\n' ' ' < "$TMP/argv" 2>/dev/null; }
 
 echo "=== registration ==="
@@ -50,9 +51,9 @@ case "$a" in *"--tools "*) no "edit should use Pi's default tools: [$a]" ;; *) o
 grep -q "MUTATING" "$TMP/err" && ok "the banner says edit mutates" || no "banner lacks MUTATING"
 
 echo "=== missing CLI ==="
-out="$( cd "$TMP/work" && PATH="/usr/bin:/bin" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider pi run "x" 2>&1 )"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "pi CLI not on PATH" && ok "a missing pi fails loudly with the install hint" || no "missing-CLI path rc=$rc"
-printf '%s' "$out" | grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' && no "hint pipes a download to a shell" || ok "the install hint never pipes a download to a shell"
+out="$( cd "$TMP/work" && PATH="/usr/bin:/bin" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 "$SRC" --provider pi --spend-ok run "x" 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && grep -q "pi CLI not on PATH" <<<"$out" && ok "a missing pi fails loudly with the install hint" || no "missing-CLI path rc=$rc"
+grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' <<<"$out" && no "hint pipes a download to a shell" || ok "the install hint never pipes a download to a shell"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

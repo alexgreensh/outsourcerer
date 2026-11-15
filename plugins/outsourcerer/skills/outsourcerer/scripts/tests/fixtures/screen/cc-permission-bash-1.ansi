@@ -1,0 +1,50 @@
+                                                                                                              [48;5;235m
+[49m                                                                                                              [48;5;235m [1m2 files[0m[48;5;235m changed                                                                        [38;5;246m✕[39m
+[38;5;246m[48;5;237m❯ [38;5;231mUse the AskUserQuestion tool to ask me whether I prefer red or blue. Do nothing else.[39m                       [48;5;235m [38;5;246mno commits yet — showing staged and new files[39m
+[49m                                                                                                              [48;5;235m
+[38;5;246m[49m⏺ [39mUser declined to answer questions                                                                           [48;5;235m [38;5;246mmade-by-test.txt[39m
+[38;5;246m[49m  ⎿  · Do you prefer red or blue? (Red / Blue)[39m                                                                [48;5;235m [38;5;246mnotes.txt[39m
+[49m                                                                                                              [48;5;235m
+[38;5;246m[49m✻[39m [38;5;246mCooked for 9s · done 9:11 AM[39m                                                                                [48;5;235m [38;5;246m────────────────────────────────────────────────────────────────────────────────────────[39m
+[49m                                                                                                              [48;5;235m [1mmade-by-test.txt[0m[38;5;246m[48;5;235m (untracked)[39m
+[38;5;246m[48;5;237m❯ [38;5;231mWithout using any tools, ask me in plain prose which file I want you to edit next, then stop and wait.[39m      [48;5;235m [38;5;246m────────────────────────────────────────────────────────────────────────────────────────[39m
+[49m                                                                                                              [48;5;235m [3m[38;5;246mNew file not yet staged.[0m[48;5;235m
+[38;5;231m[49m⏺[39m Which file should I edit next? I haven't changed anything since I created [38;5;153mmade-by-test.txt[39m in the working   [48;5;235m [3m[38;5;246mRun `git add :/made-by-test.txt` to see line counts.[0m[48;5;235m
+[49m  directory, and I left the red-or-blue question alone after you stopped it. Tell me the file path, or        [48;5;235m
+[49m  describe the change, and I'll make it.                                                                      [48;5;235m [38;5;246m────────────────────────────────────────────────────────────────────────────────────────[39m
+[49m                                                                                                              [48;5;235m [1mnotes.txt[0m[38;5;246m[48;5;235m (untracked)[39m
+[38;5;246m[49m✻[39m [38;5;246mBrewed for 21s · done 9:11 AM[39m                                                                               [48;5;235m [38;5;246m────────────────────────────────────────────────────────────────────────────────────────[39m
+[49m                                                                                                              [48;5;235m [3m[38;5;246mNew file not yet staged.[0m[48;5;235m
+[38;5;246m[48;5;237m❯ [38;5;231mWithout tools, reply with only a numbered list of two items: 1. Yes 2. No[39m                                   [48;5;235m [3m[38;5;246mRun `git add :/notes.txt` to see line counts.[0m[48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;231m[49m⏺[39m 1. Yes                                                                                                      [48;5;235m
+[49m  2. No                                                                                                       [48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;246m[49m✻[39m [38;5;246mCrunched for 16s · done 9:12 AM[39m                                                                             [48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Write tool to create notes.txt containing the word hi. Then run the Bash command: rm -rf [39m           [48;5;235m
+[48;5;237m  [38;5;231m/tmp/x-osrc-test-L3[39m                                                                                         [48;5;235m
+[38;5;246m[49m  ⎿  UserPromptSubmit says: [Token Optimizer] Loop: 4 similar messages in last 4 turns. Try a different [39m      [48;5;235m
+[49m     [38;5;246mapproach.[39m                                                                                                [48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;114m[49m⏺[39m [1mWrite[0m(]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt]8;;\)                                                                                            [48;5;235m
+[38;5;246m[49m  ⎿  [39mWrote [1m1[0m line to [1m]8;id=x;file:///Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work/notes.txt\notes.txt[0m]8;;\                                                                                [48;5;235m
+[49m     [2m[38;5;231m 1 [0m[38;5;231mhi[39m                                                                                                    [48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;246m[49m [39m Listing the target directory before deleting it                                                             [48;5;235m
+[38;5;246m[49m  ⎿  $ ls -la /tmp/x-osrc-test-L3[39m                                                                             [48;5;235m
+[49m                                                                                                              [48;5;235m
+[38;5;153m[49m──────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m[48;5;235m
+[49m [1m[38;5;153mBash command[0m                                                                                                 [48;5;235m
+[49m [1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[0m                            [48;5;235m
+[49m [38;5;246mList the target directory before deleting it[39m                                                                 [48;5;235m
+[38;5;239m[49m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m[48;5;235m
+[49m ls -la /tmp/x-osrc-test-L3                                                                                   [48;5;235m
+[38;5;239m[49m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌[39m[48;5;235m
+[49m Do you want to proceed?                                                                                      [48;5;235m
+[49m [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m                                                                                                     [48;5;235m
+[49m   [38;5;246m2. [39mYes, allow reading from [1m/tmp[0m from this project                                                          [48;5;235m
+[49m   [38;5;246m3. [39mYes, and switch to auto mode[38;5;246m · auto mode handles these prompts for you[39m                                  [48;5;235m
+[49m   [38;5;246m4. [39mNo                                                                                                      [48;5;235m
+[49m                                                                                                              [48;5;235m
+[49m [38;5;246mEsc to cancel · Tab to amend[39m                                                                                 [48;5;235m

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
@@ -53,7 +55,7 @@ snap="$(jq -cn --arg t "$hostile" '{items:[{owner:"managed",state:"working",obse
 out="$(line "$snap")"
 nlines="$(printf '%s' "$out" | wc -l | tr -d ' ')"
 [ "$nlines" -le 1 ] && ok "hostile label cannot split the one-line pulse" || bad "hostile label split the pulse ($nlines lines)"
-if printf '%s' "$out" | LC_ALL=C grep -q '[[:cntrl:]]'; then bad "control characters survived into the pulse"; else ok "control characters are stripped"; fi
+if LC_ALL=C grep -q '[[:cntrl:]]' <<<"$out"; then bad "control characters survived into the pulse"; else ok "control characters are stripped"; fi
 nchars="$(printf '%s' "$out" | LC_ALL=C wc -c | tr -d ' ')"
 [ "$nchars" -le 200 ] && ok "pulse length stays bounded under an overlong label" || bad "overlong label blew out the line ($nchars bytes)"
 

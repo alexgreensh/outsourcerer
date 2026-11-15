@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 
 if [ "${OSRC_TEST_FLEET_NAME_RUNNER:-0}" = 1 ]; then
@@ -37,7 +39,7 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-FIXTURE="$(mktemp -d "$PWD/.test-fleet-names.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR%/}/.test-fleet-names.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 
 pass=0; fail=0
@@ -67,9 +69,9 @@ unset MODEL_CALLS OSRC_TEST_FLEET_NAME_RUNNER
 [ "$fallback_rc" -eq 0 ] \
   && [ "$(printf '%s\n' "$fallback_output" | wc -l | tr -d ' ')" -eq 2 ] \
   && [ "$(wc -l < "$model_calls" | tr -d ' ')" -eq 3 ] \
-  && sed -n '1p' "$model_calls" | grep -q '^run -m glm-5-2 batch prompt$' \
-  && sed -n '2p' "$model_calls" | grep -q '^run -m swe-1-7 batch prompt$' \
-  && sed -n '3p' "$model_calls" | grep -q '^run -m haiku batch prompt$' \
+  && { _t3b_pipe="$(sed -n '1p' "$model_calls")" && grep -q '^run -m glm-5-2 batch prompt$' <<<"$_t3b_pipe"; } \
+  && { _t3b_pipe="$(sed -n '2p' "$model_calls")" && grep -q '^run -m swe-1-7 batch prompt$' <<<"$_t3b_pipe"; } \
+  && { _t3b_pipe="$(sed -n '3p' "$model_calls")" && grep -q '^run -m haiku batch prompt$' <<<"$_t3b_pipe"; } \
   && ! grep -q -- '--provider' "$model_calls" \
   && ok "batch model uses free Devin aliases before native fallbacks without --provider" \
   || bad "batch model fallback order or provider isolation was wrong"

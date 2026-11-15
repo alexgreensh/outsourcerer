@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_feature_fixes.sh — regression for the QA-gauntlet fixes:
 #   F4  _pane_state_json escapes evidence so output is ALWAYS valid JSON (quotes/backslash/tab).
 #   F5  _explain_redact catches uppercase API_KEY, hyphenated api-key, HTTP Basic-Auth URLs,
@@ -9,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-fixes.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-fixes.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1
 mkdir -p "$OSRC_HOME/jobs"
 . "$SRC" >/dev/null 2>&1

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_fanout_json.sh — `fanout status --json` must reconcile each member before counting.
 #
 # _fanout_status routes every per-job status read through _reconcile_status. Its JSON summary
@@ -26,7 +27,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed on $SRC"; exit 1; }
 
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required for this test"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-fanout-json.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-fanout-json.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 
 # OSRC_HOME must be set BEFORE sourcing: outsourcerer.sh pins OSRC_HOME/OSRC_JOBS at source
 # time (lines ~238-239). OSRC_SOURCED=1 keeps the source guard from running main().
