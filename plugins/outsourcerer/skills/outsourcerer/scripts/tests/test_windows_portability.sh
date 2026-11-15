@@ -118,7 +118,15 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
   local pids=()
   for i in 1 2 3 4 5 6 7 8 9 10; do
     ( osrc_race_ready "$gate" "$i" || exit 125
-      mkdir() { command mkdir "$@" 2>> "$gate/err.$i"; }
+      mkdir() {
+        local status last
+        for last in "$@"; do :; done
+        command mkdir "$@" 2>> "$gate/err.$i"; status=$?
+        printf '%s\n' "$status" > "$gate/mkdir-status.$i"
+        printf 'mkdir status=%s path=%s\n' "$status" "$last" >> "$gate/out.$i"
+        [ "$status" != 0 ] || ls -di "$last" >> "$gate/out.$i" 2>> "$gate/err.$i"
+        return "$status"
+      }
       "$fn" "$d" ) > "$gate/out.$i" 2> "$gate/err.$i" &
     pids[$i]=$!
   done
@@ -128,6 +136,9 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
     printf '%s\n' "$rc" > "$gate/status.$i"
     [ "$rc" = 0 ] && winners=$((winners + 1))
     [ "$rc" = 0 ] || [ "$rc" = 1 ] || released=1
+    if [ "$fn" = _mkdir_claim ]; then
+      [ -f "$gate/mkdir-status.$i" ] && [ "$(cat "$gate/mkdir-status.$i")" = "$rc" ] || released=1
+    fi
   done
   [ "$released" = 0 ] || { printf 'ERR'; return; }
   printf '%s' "$winners"
@@ -139,6 +150,25 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
 # succeeds for every racer, which is the shape of the plausible regression here — someone "fixing"
 # the Windows exit-status problem by reaching for -p and losing the lock.
 _broken_claim() { [ -d "$1" ] && return 1; mkdir -p "$1" 2>/dev/null || return 1; return 0; }
+
+# Control the child status independently of mkdir so a wait-status bookkeeping
+# error cannot be mistaken for a second successful filesystem claim.
+_one_claim() { [ "$i" = 3 ]; }
+fixed_bad=0
+for r in $(seq 1 20); do
+  n="$(_race_round _one_claim "$TMP/fixed-$r")"
+  if [ "$n" != 1 ]; then
+    fixed_bad=1; printf 'fixed-status control round %s: winners=%s\n' "$r" "$n"
+    osrc_race_report "$TMP/fixed-$r.gate" 10; break
+  fi
+done
+[ "$fixed_bad" = 0 ] && ok 'fixed-status control records exactly one winner' \
+                     || bad 'fixed-status control misreported child statuses'
+
+# A false successful function result must not hide a failed mkdir.
+n="$( _mkdir_claim() { mkdir "$1" || :; return 0; }; _race_round _mkdir_claim "$TMP/masked-status" )"
+[ "$n" = ERR ] && ok 'mkdir and child-status disagreement fails the round' \
+                || { bad "masked mkdir failures were accepted: $n"; osrc_race_report "$TMP/masked-status.gate" 10; }
 
 rounds=20; bad_rounds=0; barrier_broken=0
 for r in $(seq 1 $rounds); do

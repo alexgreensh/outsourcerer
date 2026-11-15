@@ -2455,57 +2455,6 @@ _bashpid_into() {
 # pass, so one over a minute old is pruned even if its pid was reused.
 _DEVIN_LOCK_DIR=""; _DEVIN_LOCK_SHARED=0
 _devin_grants_canon() { printf '%s\n' "$1" | { grep -v '^$' || true; } | LC_ALL=C sort -u; }
-# _devin_lock_debris <dir> -> rc0 when a mutex/lock dir is abandoned: its recorded pid is dead, or
-# it has no pid and is over a minute old (its creator died between mkdir and the pid write; a live
-# one carries its pid within milliseconds). Without the age arm a pid-less dir is never reaped and
-# wedges every later Devin dispatch.
-# The braces matter: in `read < f 2>/dev/null` the input redirect is applied first, so a missing f
-# (a mutex released between our failed mkdir and this read) prints "No such file or directory" on
-# the dispatch's stderr, which lands in the job log. Grouped, the error is silenced too.
-_devin_lock_debris() {
-  local o=""; { read -r o < "$1/pid"; } 2>/dev/null
-  if [ -n "$o" ]; then ! kill -0 "$o" 2>/dev/null; return; fi
-  [ -n "$(find "$1" -maxdepth 0 -mmin +1 2>/dev/null)" ]
-}
-# Callers set _BASHPID (via _bashpid_into) first; it is the mutex's owner key.
-_devin_lock_mutex_acquire() { # <lock>
-  local mx="$1.mx" n=0 dead
-  while ! mkdir "$mx" 2>/dev/null; do
-    if _devin_lock_debris "$mx"; then
-      # Claim by rename, then re-judge what was claimed: two reapers can no longer both delete it,
-      # and a fresh mutex that replaced the debris in between is put back, not destroyed.
-      dead="$mx.dead.${_BASHPID:-$$}.$RANDOM"
-      if mv "$mx" "$dead" 2>/dev/null; then
-        if _devin_lock_debris "$dead"; then rm -rf "$dead" 2>/dev/null
-        elif [ ! -e "$mx" ]; then mv "$dead" "$mx" 2>/dev/null || rm -rf "$dead" 2>/dev/null
-        else rm -rf "$dead" 2>/dev/null; fi
-      fi
-      continue
-    fi
-    n=$((n + 1)); [ "$n" -ge 100 ] && return 1
-    sleep 0.1 2>/dev/null || sleep 1
-  done
-  printf '%s\n' "${_BASHPID:-$$}" > "$mx/pid" 2>/dev/null
-  return 0
-}
-# It does not check ownership; it is only safe because every caller holds the mutex it releases.
-_devin_lock_mutex_release() { rm -rf "$1.mx" 2>/dev/null; }
-# _devin_lock_stale <lock> -> rc0 when nobody live holds it (dead holder files are pruned). A lock
-# with neither holders/ nor pid is mid-creation (a pre-share outsourcerer creates it without the
-# mutex) unless it is over a minute old. A legacy pid-only lock is judged by its pid alone.
-_devin_lock_stale() {
-  local lock="$1" h p live=0
-  [ -d "$lock/holders" ] || [ -s "$lock/pid" ] || { _devin_lock_debris "$lock"; return; }
-  for h in "$lock"/holders/*; do
-    [ -e "$h" ] || continue
-    p="${h##*/}"
-    case "$p" in ''|*[!0-9]*) rm -f "$h" 2>/dev/null; continue ;; esac
-    if kill -0 "$p" 2>/dev/null; then live=1; else rm -f "$h" 2>/dev/null; fi
-  done
-  p="$(cat "$lock/pid" 2>/dev/null)"
-  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && live=1
-  [ "$live" = "0" ]
-}
 _devin_skills_lock_acquire() { # [grant-set]
   local dst="$HOME/.config/devin/skills"
   local lock="$dst/.outsourcerer-grants.lock.d" owner tries=0 since
@@ -8022,7 +7971,7 @@ _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
   _state_sync "$(dirname "$canonical")"
 }
 
-_heartbeat_election_acquire() { # <lock> <pid> <pid-start>
+_heartbeat_election_acquire_inner() { # <lock> <pid> <pid-start>
   local lock="$1" pid="$2" pid_start="$3" owner old_pid old_start live rc record grace lage corpse
   if [ "${OSRC_FORCE_MKDIR_ELECTION:-0}" != 1 ] && command -v flock >/dev/null 2>&1; then
     [ ! -L "$lock.flock" ] || return 1
@@ -8069,12 +8018,6 @@ _heartbeat_election_acquire() { # <lock> <pid> <pid-start>
   _heartbeat_publish_dir "$lock" "$pid" "$pid_start" "$record" || return 1
   _HEARTBEAT_ELECTION_KIND=mkdir
 }
-_heartbeat_election_release() {
-  local lock="$1"
-  case "${_HEARTBEAT_ELECTION_KIND:-}" in flock) flock -u 8 2>/dev/null || true; exec 8>&- ;; mkdir) _heartbeat_remove_tree "$lock" || true ;; esac
-  _HEARTBEAT_ELECTION_KIND=""
-}
-
 _heartbeat_claim() {
   local pid="$1" pid_start="$2" token="$3" sink="${4:-}" lock="$OSRC_HEARTBEAT/.election"
   local leader="$OSRC_HEARTBEAT/leader" owner="$OSRC_HEARTBEAT/leader/owner.json"
