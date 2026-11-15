@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
+osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_supervise_lifecycle.sh — SUP (0.16.2): three supervise / stop-guard bugs seen live 2026-11-15.
 #  1. A Claude lane that ended its turn with its own background shell still running ("1 shell still
 #     running"), or any idle lane short of its done contract, was "settled": EVENT done all.
@@ -17,7 +19,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; SD="${OSRC_TEST_SRC:-$HERE/..}"; SRC="$SD
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-sv-life.XXXXXX")" || { echo "FAIL: no scratch dir" >&2; exit 1; }; PIDS=""
-trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP" 2>/dev/null || { sleep 2; rm -rf "$TMP"; }' EXIT
+trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP" 2>/dev/null || { sleep 2; rm -rf "$TMP"; }; rm -rf "$OSRC_TEST_ROOT" 2>/dev/null' EXIT
 mkdir -p "$TMP/bin" "$TMP/panes"
 # fake tmux: tmux-files plus a kill-session that records whether the registry already held the stop.
 cat > "$TMP/bin/tmux" <<'EOF'

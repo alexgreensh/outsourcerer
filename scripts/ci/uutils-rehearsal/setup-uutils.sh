@@ -13,6 +13,11 @@ set -euo pipefail
 is_uutils_mkdir() {
   local m="$1" real ver line owner=""
   real="$(readlink -f "$m" 2>/dev/null)" || real="$m"
+  # A wrapper this script wrote ("exec <multicall> <util>") is judged by the binary it runs.
+  if [ -f "$real" ] && head -c 2 "$real" 2>/dev/null | grep -q '^#!'; then
+    local tgt; tgt="$(sed -n 's/^exec "\([^"]*\)" "[^"]*" "\$@"$/\1/p' "$real" 2>/dev/null | head -1)"
+    [ -n "$tgt" ] && real="$(readlink -f "$tgt" 2>/dev/null || printf '%s' "$tgt")"
+  fi
   ver="$(LC_ALL=C "$m" --version 2>/dev/null)" || ver=""
   line="$(printf '%s\n' "$ver" | head -1)"
   owner="$(dpkg -S "$real" 2>/dev/null | head -1)" || owner=""
@@ -43,7 +48,11 @@ fi
 
 if [ -n "$mc" ]; then
   for u in $("$mc" --list 2>/dev/null | tr ',' '\n' | tr -d ' ' | grep -E '^[a-z0-9_\[]+$'); do
-    ln -sf "$mc" "$OUT/$u"
+    # A wrapper, not a symlink: uutils 0.0.24's multicall refuses an argv0 that differs from its own
+    # file name ("Requested utility `mkdir` does not match executable name"), but accepts the
+    # utility as its first argument. /bin/sh is not on $OUT, so the wrapper never recurses.
+    printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$mc" "$u" > "$OUT/$u"
+    chmod +x "$OUT/$u"
   done
 fi
 # Per-utility directory layout (e.g. /usr/lib/cargo/bin/coreutils/mkdir): link those too.
