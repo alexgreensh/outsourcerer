@@ -1,0 +1,7 @@
+# Lock suites rehearsed on a uutils host (one per line). Read by run.sh and the `uutils` CI job.
+test_atomic_mkdir_claim
+test_atomic_lock_paths
+test_stale_lock_races
+test_devin_lock_race
+test_devin_grant_lock_share
+test_state_lock_stale_breaker

@@ -14,7 +14,7 @@ mkdir -p "$OSRC_HOME/done" "$OSRC_HEARTBEAT" "$(_plan_dir race)"
 
 # Every mkdir invocation lies about an existing directory, just like the
 # observed uutils race. Keep the first successful owner alive until all finish.
-mkdir() { command mkdir -p "$@"; }
+mkdir() { osrc_test_mkdir_p "$@"; }   # lying mkdir; see lib_scratch.sh
 sleep() { command sleep 0.002; }
 failed=0
 for kind in mutex heartbeat factory plan_create remote done heavy; do

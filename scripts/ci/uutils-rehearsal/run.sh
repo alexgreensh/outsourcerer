@@ -7,7 +7,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 IMAGE="${OSRC_UUTILS_IMAGE:-osrc-uutils}"
-SUITES="${*:-test_atomic_mkdir_claim test_atomic_lock_paths test_stale_lock_races test_devin_lock_race test_devin_grant_lock_share test_state_lock_stale_breaker}"
+SUITES="${*:-$(grep -v '^#' "$ROOT/scripts/ci/uutils-rehearsal/suites.txt")}"
 
 docker image inspect "$IMAGE" >/dev/null 2>&1 || {
   echo "image $IMAGE missing: docker build -t $IMAGE $ROOT/scripts/ci/uutils-rehearsal" >&2; exit 2; }
@@ -20,12 +20,12 @@ for s in $SUITES; do
     --mount "type=bind,src=$ROOT,dst=/work,readonly" --tmpfs /scratch:exec \
     "$IMAGE" bash -c '
       set -u
-      mkdir --version | head -1 | grep -qi uutils || { echo "FAIL: mkdir is not uutils: $(command -v mkdir)"; exit 3; }
+      bash /usr/local/lib/osrc/setup-uutils.sh --check "$(command -v mkdir)" || { echo "FAIL: mkdir is not uutils: $(command -v mkdir)"; exit 3; }
       cp -a /work /scratch/w && cd /scratch/w
       export HOME=/scratch/home OSRC_HOME=/scratch/osrc TMPDIR=/scratch/tmp; mkdir -p "$HOME" "$OSRC_HOME" "$TMPDIR"
       bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/'"$s"'.sh' > "$LOGD/$s.log" 2>&1
   rc=$?
-  printf '%-34s rc=%s  %s\n' "$s" "$rc" "$(grep -E 'RESULT|PASS|FAIL' "$LOGD/$s.log" | tail -1)"
+  printf '%-34s rc=%s  %s\n' "$s" "$rc" "$(grep -E 'RESULT|passed|PASS|FAIL' "$LOGD/$s.log" | tail -1)"
   [ "$rc" = 0 ] || { fails=$((fails+1)); grep -E 'FAIL' "$LOGD/$s.log" | head -20 | sed 's/^/    /'; }
 done
 echo "uutils rehearsal: $fails suite(s) failed"

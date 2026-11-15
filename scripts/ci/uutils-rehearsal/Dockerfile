@@ -19,18 +19,12 @@ RUN sed -i 's/^Components: main restricted$/Components: main restricted universe
  && apt-get install -y --no-install-recommends rust-coreutils bash jq tmux git python3 perl procps locales ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Build a PATH directory with one symlink per uutils utility, wherever the package put its multicall
-# binary (24.04 and 25.x lay it out differently). Fail the build if no uutils mkdir results.
-RUN set -e; \
-    mc=""; for c in /usr/lib/cargo/bin/coreutils /usr/bin/coreutils /usr/lib/cargo/bin/coreutils/coreutils; do \
-      [ -f "$c" ] && [ -x "$c" ] && { mc="$c"; break; }; done; \
-    [ -n "$mc" ] || { echo "no uutils multicall binary found" >&2; dpkg -L rust-coreutils | head -40 >&2; exit 1; }; \
-    mkdir -p /opt/uutils/bin; \
-    for u in $("$mc" --list 2>/dev/null | tr ',' '\n' | tr -d ' ' | grep -E '^[a-z0-9_\[]+$'); do \
-      ln -sf "$mc" "/opt/uutils/bin/$u"; done; \
-    /opt/uutils/bin/mkdir --version | grep -qi uutils
+# One symlink per uutils utility in /opt/uutils/bin, wherever the package put it. Same script the
+# `uutils` CI job runs, so the image and CI cannot drift. Fails the build if no uutils mkdir results.
+COPY setup-uutils.sh /usr/local/lib/osrc/setup-uutils.sh
+RUN bash /usr/local/lib/osrc/setup-uutils.sh /opt/uutils/bin
 
 # uutils first: every coreutils name (mkdir, rm, mv, ln, stat, date, ...) resolves to uutils.
 ENV PATH=/opt/uutils/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-RUN mkdir --version | grep -qi uutils && command -v mkdir | grep -q '^/opt/uutils/'
+RUN command -v mkdir | grep -q '^/opt/uutils/' && bash /usr/local/lib/osrc/setup-uutils.sh --check "$(command -v mkdir)"
 WORKDIR /scratch

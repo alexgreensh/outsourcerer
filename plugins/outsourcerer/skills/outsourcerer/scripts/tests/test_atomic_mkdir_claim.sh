@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Mimic an external mkdir that reports success to every caller on an existing
 # directory. The control proves the stub creates the double-winner condition.
-mkdir() { command mkdir -p "$@"; }
+mkdir() { osrc_test_mkdir_p "$@"; }   # lying mkdir; see lib_scratch.sh
 mkdir "$TMP/control" && mkdir "$TMP/control" || { echo 'FAIL: lying mkdir control'; exit 1; }
 echo 'PASS: lying mkdir reports success twice'
 

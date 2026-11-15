@@ -22,3 +22,13 @@ osrc_test_dead_pid() {
   wait "$_p" 2>/dev/null
   printf '%s\n' "$_p"
 }
+
+# osrc_test_mkdir_p <args...> -> "mkdir -p" that tolerates a caller's own -p. Lying-mkdir shims wrap
+# `mkdir -p "$@"`, and the product already calls `mkdir -p dir`, so the shim ran `mkdir -p -p dir`.
+# GNU accepts the repeat; uutils 0.0.24 (Ubuntu 24.04) rejects it with rc 1, so under uutils every
+# contender "lost" and the lock suites saw zero owners. Drop the caller's -p, then add exactly one.
+osrc_test_mkdir_p() {
+  local _a=() _x
+  for _x in "$@"; do [ "$_x" = -p ] || _a+=("$_x"); done
+  builtin command mkdir -p ${_a[@]+"${_a[@]}"}
+}
