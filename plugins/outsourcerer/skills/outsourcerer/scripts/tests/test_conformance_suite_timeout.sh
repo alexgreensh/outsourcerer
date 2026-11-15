@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
 osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_conformance_suite_timeout.sh — conformance.sh's per-suite wall-clock bound.

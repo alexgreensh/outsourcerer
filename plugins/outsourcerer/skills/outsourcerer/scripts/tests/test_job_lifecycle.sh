@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 # test_job_lifecycle.sh — the launching->running->terminal lifecycle and the phantom-job guards:
 # a detached worker that never comes up must NOT become a status=running job with a ~56-year age that
 # no watcher reaps. It must become `failed` (stillborn) with a sane age and a reason, and it must stay

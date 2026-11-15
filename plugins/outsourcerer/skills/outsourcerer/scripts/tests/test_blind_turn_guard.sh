@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_blind_turn_guard.sh — the orchestrator must not end its turn blind while live delegated work
 # needs a human.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_rearm_command.sh — the manual re-arm path the tool's own messages point at is
 # real (SPEC heartbeat-liveness A/B glue). Three messages tell the user to run `$0 heartbeat

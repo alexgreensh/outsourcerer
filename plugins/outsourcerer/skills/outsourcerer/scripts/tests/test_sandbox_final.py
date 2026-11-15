@@ -144,6 +144,24 @@ class SandboxFinal(unittest.TestCase):
         self.assertNotIn('(allow file-read* (subpath "/"))', source)
         self.assertIn('(deny network*)', source)
 
+    def test_mac_profile_reads_only_common_git_and_process_metadata(self):
+        generator = RUNNER.read_text().split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='.git-process-profile-', dir=ROOT) as d:
+            p = Path(d); profile = p / 'profile.sb'; common = p / 'main/.git'
+            result = subprocess.run(['/usr/bin/python3', '-I', '-', str(profile), str(p / 'worktree'),
+                                     str(p / 'scratch'), '', '/Library/Developer/CommandLineTools', str(common)],
+                                    input=generator, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            policy = profile.read_text()
+            self.assertIn('(allow file-read* (subpath "' + str(common) + '"))', policy)
+            self.assertNotIn('(subpath "' + str(common.parent) + '")', policy)
+            for operation in ('process-info-pidinfo', 'process-info-listpids'):
+                self.assertIn('(allow ' + operation + ')', policy)
+            self.assertNotIn('(allow process-info*)', policy)
+            self.assertNotIn('no-sandbox', policy)
+            self.assertIn('(allow file-write-data (regex #"^/dev/fd/[0-9]+$"))', policy)
+            self.assertNotIn('(allow file-write* (subpath "/dev"))', policy)
+
     def test_mac_profile_allows_selected_xcode_without_all_applications(self):
         source = RUNNER.read_text()
         generator = source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]

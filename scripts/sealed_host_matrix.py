@@ -112,14 +112,27 @@ def main():
                         help='run only selected modes; all also includes focused Python checks')
     parser.add_argument('--list', action='store_true', help='list selected mode/suite pairs without running')
     parser.add_argument('--include-slow', action='store_true', help='Linux integration only')
-    parser.add_argument('--timeout', '--suite-timeout', type=float, default=120,
-                        help='seconds per suite process group (default: 120); timeout rc is 124')
+    parser.add_argument('--timeout', '--suite-timeout', type=float, default=300,
+                        help='seconds per suite process group (default: 300); timeout rc is 124')
+    parser.add_argument('--timeout-for', action='append', default=[], metavar='SUITE=SECONDS',
+                        help='override one selected suite timeout, in every selected mode; repeatable')
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error('--timeout must be a positive finite number')
     if args.include_slow and platform.system() == 'Darwin':
         parser.error('Mac load rule forbids conformance and test_factory_*; use Linux integration')
     tasks = selected_tasks(args, parser)
+    overrides = {}
+    for item in args.timeout_for:
+        name, separator, value = item.partition('=')
+        matches = {path.name for path, mode in tasks if name in (path.name, path.stem)}
+        try:
+            seconds = float(value)
+        except ValueError:
+            seconds = 0
+        if not separator or len(matches) != 1 or not math.isfinite(seconds) or seconds <= 0:
+            parser.error('--timeout-for requires a selected SUITE and positive finite SECONDS')
+        overrides[matches.pop()] = seconds
     if args.list:
         for path, mode in tasks:
             print(mode + '\t' + str(path.relative_to(ROOT)))
@@ -134,11 +147,12 @@ def main():
     print('PROOF_DIR=' + str(proof), flush=True)
     (proof / 'head.txt').write_text(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True))
     (proof / 'source.diff').write_text(subprocess.check_output(['git', '-C', str(ROOT), 'diff'], text=True))
-    (proof / 'selection.json').write_text(json.dumps(dict(timeout=args.timeout,
+    (proof / 'selection.json').write_text(json.dumps(dict(timeout=args.timeout, overrides=overrides,
         tasks=[dict(suite=path.name, mode=mode) for path, mode in tasks]), indent=2) + '\n')
     rows = []
 
     def record(path, mode):
+        timeout = overrides.get(path.name, args.timeout)
         directory = proof / mode / path.name
         for name in ('home', 'state', 'tmp'):
             (directory / name).mkdir(parents=True)
@@ -153,7 +167,7 @@ def main():
         output = directory / 'output.log'
         interrupted = None
         try:
-            rc = run(command, ROOT, env, output, args.timeout)
+            rc = run(command, ROOT, env, output, timeout)
         except MatrixInterrupted as error:
             interrupted = error
             rc = 128 + error.signum
@@ -163,7 +177,7 @@ def main():
         if interrupted:
             notes.append('interrupted by ' + signal.Signals(interrupted.signum).name)
         row = dict(suite=path.name, mode=mode, rc=rc, failure_lines=failures,
-                   tmpdir=env['TMPDIR'], timeout=args.timeout, reason='; '.join(notes),
+                   tmpdir=env['TMPDIR'], timeout=timeout, reason='; '.join(notes),
                    log=str(output.relative_to(proof)))
         persist_row(proof, rows, row)
         print(f'{path.name}\t{mode}\trc={rc}\tFAIL-lines={failures}\t' + row['reason'], flush=True)

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_arm_liveness.sh — nothing claims "armed"/"supervised" unless the watcher PID is
 # verified alive (SPEC heartbeat-liveness A).

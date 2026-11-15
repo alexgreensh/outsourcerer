@@ -61,6 +61,7 @@ class ShellScratch(unittest.TestCase):
             for name in ('first', 'alarm', 'last'):
                 (tests / ('test_' + name + '.sh')).write_text('exit 0\n')
             def run(command, directory, env, output, timeout):
+                self.assertEqual(timeout, 300)
                 output.write_text('')
                 if command[-1].endswith('test_alarm.sh'):
                     signal.raise_signal(signal.SIGALRM)
@@ -96,7 +97,8 @@ class ShellScratch(unittest.TestCase):
                     self.assertEqual(len(rows), 1, 'first result was not persisted before the next suite')
                     self.assertIn('test_first.sh', (proof / 'matrix.md').read_text())
                 return run(command, directory, env, output, timeout)
-            argv = ['matrix', '--suites', 'test_first,test_slow', '--mode', 'direct', '--timeout', '0.1']
+            argv = ['matrix', '--suites', 'test_first,test_slow', '--mode', 'direct',
+                    '--timeout', '300', '--timeout-for', 'test_slow=0.1']
             with mock.patch.dict(matrix.__dict__, ROOT=root, SCRIPTS=scripts, TESTS=tests), \
                     mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stdout', new_callable=io.StringIO), \
                     mock.patch.object(matrix.subprocess, 'check_output', return_value='fixture\n'), \
@@ -108,6 +110,7 @@ class ShellScratch(unittest.TestCase):
             self.assertEqual([(row['suite'], row['mode'], row['rc']) for row in rows],
                              [('test_first.sh', 'direct', 0), ('test_slow.sh', 'direct', 124)])
             self.assertTrue(all(row['tmpdir'].endswith('/') for row in rows))
+            self.assertEqual([row['timeout'] for row in rows], [300, 0.1])
             self.assertIn('124', (proof / 'matrix.md').read_text())
 
     def test_shell_scratch_trims_and_canonicalizes_tmpdir(self):

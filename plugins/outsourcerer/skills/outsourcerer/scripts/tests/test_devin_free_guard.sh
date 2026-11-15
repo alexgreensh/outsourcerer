@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression guard for the free Devin lane: stale CLI processes must not wedge it,
 # paid-tier quota text must not mark it down, and every liveness request is bounded

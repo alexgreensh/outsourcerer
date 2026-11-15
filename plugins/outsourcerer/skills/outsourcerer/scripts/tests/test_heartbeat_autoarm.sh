@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_autoarm.sh — bg, fanout, and session launches arm supervision in the same turn
 # with no opt-in required, and OSRC_FLEET_SUPERVISION=0 still opts out silently

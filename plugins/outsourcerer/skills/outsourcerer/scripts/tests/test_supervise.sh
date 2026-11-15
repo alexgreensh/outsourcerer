@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: process-inspection
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_supervise.sh — L1: one `supervise` waiter wakes the orchestrator for every owned delegate that
 # needs it (approval, question, idle-after-work, stalled, dead, limit), replays missed events, dedupes

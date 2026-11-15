@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: network
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_hub_home.sh -- MC-3 Mission Control Home port:
 #   * POST /api/projects/<id>/status (Mark done / Move back): token, origin, strict id, known project only

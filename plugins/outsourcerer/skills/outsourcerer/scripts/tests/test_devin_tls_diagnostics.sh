@@ -171,12 +171,12 @@ printf '{"provider":"devin","verb":"run","model":"glm-5.2"}' > "$jd_sig/meta.jso
 echo failed > "$jd_sig/status"
 printf 'Error: Agent error: Connection error\n' > "$jd_sig/last.txt"
 printf 'Error: Agent error: Connection error\n' > "$jd_sig/out.log"
-sig_out="$(cmd_result "$jid_sig" 2>/tmp/rr_sig 1>/dev/null)"; rc_sig=$?
-sig_err="$(cat /tmp/rr_sig 2>/dev/null)"; rm -f /tmp/rr_sig
+sig_out="$(cmd_result "$jid_sig" 2>"$TMP/rr_sig" 1>/dev/null)"; rc_sig=$?
+sig_err="$(cat "$TMP/rr_sig" 2>/dev/null)"; rm -f "$TMP/rr_sig"
 if [ "$rc_sig" -eq 0 ]; then ok "cmd_result: exit 0 even when hint is emitted"; else bad "cmd_result: exit $rc_sig when hint emitted (regression)"; fi
 if grep -q 'devin TLS handshake failed' <<<"$sig_err"; then ok "cmd_result: hint emitted to stderr on signature"; else bad "cmd_result: hint NOT emitted on signature"; fi
-sig_logs_out="$(cmd_logs "$jid_sig" 2>/tmp/rl_sig 1>/dev/null)"; rc_sigl=$?
-sig_logs_err="$(cat /tmp/rl_sig 2>/dev/null)"; rm -f /tmp/rl_sig
+sig_logs_out="$(cmd_logs "$jid_sig" 2>"$TMP/rl_sig" 1>/dev/null)"; rc_sigl=$?
+sig_logs_err="$(cat "$TMP/rl_sig" 2>/dev/null)"; rm -f "$TMP/rl_sig"
 if [ "$rc_sigl" -eq 0 ]; then ok "cmd_logs: exit 0 even when hint is emitted"; else bad "cmd_logs: exit $rc_sigl when hint emitted (regression)"; fi
 if grep -q 'devin TLS handshake failed' <<<"$sig_logs_err"; then ok "cmd_logs: hint emitted to stderr on signature"; else bad "cmd_logs: hint NOT emitted on signature"; fi
 

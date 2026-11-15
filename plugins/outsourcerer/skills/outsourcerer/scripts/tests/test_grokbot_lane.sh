@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: network
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_grokbot_lane.sh — the Grok Bot lane posts the task to a routine webhook (Bearer key, JSON),
 # then waits for the bot to push a branch to origin and prints OUTSOURCERER_RESULT.md from it.

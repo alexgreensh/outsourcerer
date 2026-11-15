@@ -64,7 +64,18 @@ class SealedRunnerTests(unittest.TestCase):
             root = Path(d); tests = root / REL / 'tests'; tests.mkdir(parents=True)
             subprocess.run(['git', 'init', '-q', d], check=True)
             test = tests / 'reserved.sh'; test.write_text('exit 78\n')
-            backend = root / 'sandbox-exec'; backend.write_text('#!/bin/sh\nshift 2\nexec "$@"\n'); backend.chmod(0o755)
+            process_test = tests / 'process.sh'
+            process_test.write_text('#!/bin/bash\n# sealed-run-requires: process-inspection\necho must-not-run\n')
+            backend = root / 'sandbox-exec'
+            backend.write_text('''#!/bin/sh
+shift 2
+for argument in "$@"; do
+  case "$argument" in PATH=*) copied="${argument#PATH=}"; copied="${copied%%:*}/ps" ;; esac
+done
+[ -x "$copied" ] && [ ! -u "$copied" ] && [ ! -g "$copied" ] || exit 96
+case " $* " in *sealed-process-probe*) exit 86 ;; esac
+exec "$@"
+'''); backend.chmod(0o755)
             source = (SCRIPTS / 'sealed-run.sh').read_text()
             query = '$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)'
             mac = source.replace('case "$(uname -s)" in', 'case Darwin in').replace('Darwin) [ -x /usr/bin/sandbox-exec ] && isolation=mac ;;', 'Darwin) isolation=mac ;;')
@@ -79,6 +90,7 @@ class SealedRunnerTests(unittest.TestCase):
                 ('manual then check, working OS', good, ['--allow-unisolated', '--check-sandbox'], 0),
                 ('check then manual, working OS', good, ['--check-sandbox', '--allow-unisolated'], 0),
                 ('test exit 78', good, [str(test.relative_to(root))], 1),
+                ('process inspection unavailable', good, [str(process_test.relative_to(root))], 77),
             ]
             runner = root / 'runner.sh'
             for label, content, args, expected in cases:
@@ -89,6 +101,9 @@ class SealedRunnerTests(unittest.TestCase):
                     self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                     if label in ('xcode-select failure', 'profile failure'):
                         self.assertIn('OS isolation unavailable', result.stderr)
+                    if label == 'process inspection unavailable':
+                        self.assertIn('requires process-inspection', result.stderr)
+                        self.assertNotIn('must-not-run', result.stdout)
 
     def test_check_mode_has_no_dead_true_entry(self):
         self.assertNotIn('tests=(/usr/bin/true)', (SCRIPTS / 'sealed-run.sh').read_text())
@@ -105,6 +120,17 @@ class SealedRunnerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
             self.assertIn('unsupported suite: requires network', result.stderr)
             self.assertNotIn('must-not-run', result.stdout)
+
+    def test_network_suites_refuse_before_launch(self):
+        for name in ('test_hub.sh', 'test_hub_home.sh', 'test_grokbot_lane.sh'):
+            with self.subTest(suite=name):
+                result = subprocess.run(['/bin/bash', '-p', str(SCRIPTS / 'sealed-run.sh'),
+                                         str(REL / 'tests' / name)], cwd=ROOT,
+                                        env=dict(os.environ, OSRC_HOME=os.environ['OSRC_HOME']),
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+                self.assertIn('unsupported suite: requires network', result.stderr)
+                self.assertNotIn('sandbox-exec:', result.stderr)
 
     def test_shell_bootstrap_uses_scratch_before_here_document(self):
         import re
@@ -272,10 +298,16 @@ exit 0
         with tempfile.TemporaryDirectory(prefix='.sealed-proof-', dir=str(ROOT)) as temp:
             home = Path(temp) / 'home'
             root = home / 'project'
+            main = home / 'main'
+            main.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(main)], check=True)
+            subprocess.run(['git', '-C', str(main), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid',
+                            '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture', '--allow-empty'], check=True)
+            subprocess.run(['git', '-C', str(main), 'worktree', 'add', '-q', '--detach', str(root)], check=True)
             scripts = root / REL
             (scripts / 'tests').mkdir(parents=True)
             shutil.copy2(SCRIPTS / 'sealed-run.sh', scripts / 'sealed-run.sh')
-            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            canary = root / 'read-only-canary'; canary.write_text('unchanged')
             secret = home / 'secret'; secret.write_text('not a credential')
             outside = home / 'outside'
             real_home_write = Path(pwd.getpwuid(os.getuid()).pw_dir) / ('.osrc-sealed-probe-' + uuid.uuid4().hex)
@@ -306,10 +338,33 @@ scratch="$(pwd -P)"
 [ "$scratch" = "$TMPDIR" ]
 cd ''' + shlex.quote(str(root)) + '''
 [ -r ''' + shlex.quote(str(sh)) + ''' ]
+git rev-parse --show-toplevel > "$TMPDIR/git-root"
+[ "$(cat "$TMPDIR/git-root")" = ''' + shlex.quote(str(root)) + ''' ]
+common="$(git rev-parse --git-common-dir)"
+[ -r "$common/config" ]
+if (printf bad > "$common/sealed-write-probe") 2>/dev/null; then
+  echo 'git common write allowed'; exit 1
+fi
 if (printf bad > .sealed-write-probe) 2>/dev/null; then
   echo 'worktree write allowed'; exit 1
 fi
+exec 4< read-only-canary
+if (printf bad > /dev/fd/4) 2>/dev/null; then
+  echo 'read-only descriptor upgraded to write'; exit 1
+fi
+exec 4<&-
 cd "$scratch"
+printf 'pipe proof' > >(cat > "$TMPDIR/pipe-proof")
+wait "$!"
+[ "$(cat "$TMPDIR/pipe-proof")" = 'pipe proof' ]
+[ ! -u "$(command -v ps)" ]
+[ ! -g "$(command -v ps)" ]
+sleep 30 & child=$!
+trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :' EXIT
+ps -o pid=,ppid=,pgid=,lstart= -p "$child" > "$TMPDIR/process"
+[ -s "$TMPDIR/process" ]
+kill "$child"; wait "$child" 2>/dev/null || :
+trap - EXIT
 value="$(cat <<'PROBE'
 shell-here-document
 PROBE
@@ -362,6 +417,8 @@ exec /usr/bin/python3 ''' + shlex.quote(str(py)) + ' ' + shlex.quote(str(secret)
             self.assertIn('shell scratch isolated', result.stdout)
             self.assertFalse((root / '.sealed-write-probe').exists())
             self.assertFalse(real_home_write.exists())
+            self.assertEqual(canary.read_text(), 'unchanged')
+            self.assertFalse((main / '.git/sealed-write-probe').exists())
             self.assertFalse(outside.exists())
 
 
