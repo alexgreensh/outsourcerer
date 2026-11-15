@@ -186,13 +186,16 @@ _osrc_review_resolve() { # <id-or-unique-prefix> -> item id
 # ---- verdict ingestion ----------------------------------------------------------------------
 # A verdict file is <item>.VERDICT whose first line is MERGE|CHANGES|BLOCK (case-insensitive).
 _osrc_review_ingest() {
-  local p id vf first v now settle age
+  local p id vf first v now settle age lane
   now="$(_osrc_now)"; settle="${OSRC_VERDICT_SETTLE_SECS:-30}"
   for p in $(_osrc_review_items); do
     case "$(jq -r .state "$p")" in
       inflight) ;;
       verdict)
         if [ "$(jq -r '.verdict // ""' "$p")" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
+          [ "$(jq -r '.stale // false' "$p")" != true ] || continue
+          lane="$(jq -r .lane "$p")"
+          [ -f "$(_osrc_lane_json "$lane")" ] || continue
           _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0 | .acked=false'
         fi
         continue ;;
@@ -205,7 +208,7 @@ _osrc_review_ingest() {
       MERGE|CHANGES|BLOCK)
         if [ "$first" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
           # Incremental success schedules a full round on this same head; it cannot finish a lane.
-          _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0'
+          _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0 | .acked=false'
           continue
         fi
         _osrc_jq_set "$p" --arg v "$first" --argjson now "$now" --arg vf "$vf" \

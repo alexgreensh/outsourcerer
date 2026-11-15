@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused classifier and sandbox boundary checks; all scratch stays in the worktree."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
@@ -30,18 +31,72 @@ class SealedRunnerTests(unittest.TestCase):
             self.assertIn('--check-sandbox', args, 'worktree test ran on an unavailable host')
             checks.append(args)
             return SimpleNamespace(returncode=78, stdout='', stderr='sealed-run: OS isolation unavailable; runtime launch failed\n')
-        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run):
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.dict(os.environ, {'CI': 'true'}), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.object(sys, 'stdout', new_callable=io.StringIO) as output:
             outcome = unittest.TestResult(); SealedRunnerTests('test_isolation_probes').run(outcome)
         self.assertFalse(outcome.failures or outcome.errors, str(outcome.failures + outcome.errors))
         self.assertFalse(outcome.skipped, 'unavailable host must prove a classifier hold')
         self.assertGreaterEqual(len(checks), 2, 'availability and classifier must both check the real runner')
+        self.assertIn('HOLD branch', output.getvalue())
+
+    def test_plain_mac_requires_positive_isolation_and_reports_branch(self):
+        for available in (False, True):
+            def run(args, **kwargs):
+                if args[0] == 'git': return SimpleNamespace(returncode=0, stdout='', stderr='')
+                if not available:
+                    return SimpleNamespace(returncode=78, stdout='', stderr='sealed-run: OS isolation unavailable\n')
+                return SimpleNamespace(returncode=0, stdout='isolated\n', stderr='')
+            with self.subTest(available=available), mock.patch.object(sys, 'platform', 'darwin'), \
+                    mock.patch.dict(os.environ), mock.patch.object(os, 'access', return_value=True), \
+                    mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.object(sys, 'stdout', new_callable=io.StringIO) as output:
+                os.environ.pop('CI', None)
+                outcome = unittest.TestResult(); SealedRunnerTests('test_isolation_probes').run(outcome)
+                self.assertFalse(outcome.skipped)
+                if available:
+                    self.assertFalse(outcome.failures or outcome.errors, str(outcome.failures + outcome.errors))
+                else:
+                    self.assertTrue(outcome.failures, 'plain Mac silently accepted unavailable isolation')
+                self.assertIn('isolation branch', output.getvalue())
+
+    def test_runner_statuses_flag_orders_and_reserved_exit(self):
+        with tempfile.TemporaryDirectory(prefix='.runner-contract-', dir=ROOT) as d:
+            root = Path(d); tests = root / REL / 'tests'; tests.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', d], check=True)
+            test = tests / 'reserved.sh'; test.write_text('exit 78\n')
+            backend = root / 'sandbox-exec'; backend.write_text('#!/bin/sh\nshift 2\nexec "$@"\n'); backend.chmod(0o755)
+            source = (SCRIPTS / 'sealed-run.sh').read_text()
+            query = '$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)'
+            mac = source.replace('case "$(uname -s)" in', 'case Darwin in').replace('Darwin) [ -x /usr/bin/sandbox-exec ] && isolation=mac ;;', 'Darwin) isolation=mac ;;')
+            mac = mac.replace('/usr/bin/sandbox-exec -f', shlex.quote(str(backend)) + ' -f')
+            good = mac.replace(query, '$(printf /Library/Developer/CommandLineTools)')
+            none = source.replace('case "$(uname -s)" in', 'case NoOS in')
+            cases = [
+                ('xcode-select failure', mac.replace(query, '$(exit 71)'), ['--check-sandbox'], 78),
+                ('profile failure', good.replace('import json, os, sys\n', 'import json, os, sys\nraise OSError("profile failed")\n'), ['--check-sandbox'], 78),
+                ('manual then check, no OS', none, ['--allow-unisolated', '--check-sandbox'], 78),
+                ('check then manual, no OS', none, ['--check-sandbox', '--allow-unisolated'], 78),
+                ('manual then check, working OS', good, ['--allow-unisolated', '--check-sandbox'], 0),
+                ('check then manual, working OS', good, ['--check-sandbox', '--allow-unisolated'], 0),
+                ('test exit 78', good, [str(test.relative_to(root))], 1),
+            ]
+            runner = root / 'runner.sh'
+            for label, content, args, expected in cases:
+                with self.subTest(case=label):
+                    runner.write_text(content)
+                    result = subprocess.run(['/bin/bash', '-p', str(runner)] + args, cwd=root,
+                                            env=dict(os.environ, HOME=d, OSRC_HOME=str(root / 'osrc')), capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    if label in ('xcode-select failure', 'profile failure'):
+                        self.assertIn('OS isolation unavailable', result.stderr)
+
+    def test_check_mode_has_no_dead_true_entry(self):
+        self.assertNotIn('tests=(/usr/bin/true)', (SCRIPTS / 'sealed-run.sh').read_text())
 
     def test_working_sandbox_still_rejects_an_isolation_failure(self):
         def run(args, **kwargs):
             if args[0] == 'git' or '--check-sandbox' in args:
                 return SimpleNamespace(returncode=0, stdout='', stderr='')
             return SimpleNamespace(returncode=1, stdout='', stderr='outside write allowed')
-        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run):
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
             outcome = unittest.TestResult(); SealedRunnerTests('test_isolation_probes').run(outcome)
         self.assertTrue(outcome.failures)
         self.assertFalse(outcome.skipped)
@@ -79,7 +134,7 @@ exit 0
             runner = root / 'sealed-run.sh'; source = (SCRIPTS / 'sealed-run.sh').read_text()
             source = source.replace('case "$(uname -s)" in', 'case Darwin in')
             source = source.replace('Darwin) [ -x /usr/bin/sandbox-exec ] && isolation=mac ;;', 'Darwin) isolation=mac ;;')
-            source = source.replace('developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || exit 2', 'developer=/Library/Developer/CommandLineTools')
+            source = source.replace('$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)', '$(printf /Library/Developer/CommandLineTools)')
             source = source.replace('/usr/bin/sandbox-exec -f', shlex.quote(str(stub)) + ' -f')
             runner.write_text(source)
             for args in [ ['--check-sandbox'], [str(test.relative_to(root))] ]:
@@ -178,10 +233,13 @@ exit 0
                 self.assertFalse(classifier.sealed_runner(good, str(ROOT), str(ROOT)))
 
     def test_isolation_probes(self):
+        require_isolation = (sys.platform == 'darwin' and not os.environ.get('CI')) or (sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true')
         tool = '/usr/bin/sandbox-exec' if sys.platform == 'darwin' else '/usr/bin/bwrap'
         if not os.access(tool, os.X_OK):
-            if sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true':
-                self.fail('Linux CI requires working /usr/bin/bwrap for runtime proof')
+            if require_isolation:
+                print('test_isolation_probes: isolation branch (required)', flush=True)
+                self.fail('working OS sandbox required for runtime proof')
+            print('test_isolation_probes: HOLD branch', flush=True)
             cmd = shlex.quote(str(SCRIPTS / 'sealed-run.sh')) + ' ' + str(REL / 'tests/test_approver_table.sh')
             with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
                 self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(ROOT), [str(ROOT)])[0])
@@ -220,8 +278,10 @@ print("isolated")
             env = dict(os.environ, HOME=str(home), OSRC_HOME=str(home / 'osrc'))
             available = subprocess.run([str(scripts / 'sealed-run.sh'), '--check-sandbox'], cwd=root, env=env, capture_output=True, text=True)
             if available.returncode != 0:
-                if sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true':
-                    self.fail('Linux CI requires working bwrap: ' + available.stdout + available.stderr)
+                if require_isolation:
+                    print('test_isolation_probes: isolation branch (required)', flush=True)
+                    self.fail('working OS sandbox required: ' + available.stdout + available.stderr)
+                print('test_isolation_probes: HOLD branch', flush=True)
                 self.assertEqual(available.returncode, 78, available.stdout + available.stderr)
                 self.assertIn('sealed-run: OS isolation unavailable', available.stderr)
                 cmd = shlex.quote(str(SCRIPTS / 'sealed-run.sh')) + ' ' + str(REL / 'tests/probe.sh')
@@ -229,6 +289,7 @@ print("isolated")
                     self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(root), [str(root)])[0])
                 self.assertFalse(outside.exists())
                 return
+            print('test_isolation_probes: isolation branch', flush=True)
             result = subprocess.run([str(scripts / 'sealed-run.sh'), str((REL / 'tests/probe.sh'))], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('isolated', result.stdout)

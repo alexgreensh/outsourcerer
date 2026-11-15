@@ -17,6 +17,26 @@ _osrc_review_write_brief "$3" "${4:-}"
 
 
 class ReviewPacket(unittest.TestCase):
+    def test_legacy_requeue_only_for_current_registered_lane_and_resets_ack(self):
+        for registered, stale, state in [(False, False, 'verdict'), (True, True, 'verdict'),
+                                         (True, False, 'verdict'), (True, False, 'inflight')]:
+            with self.subTest(registered=registered, stale=stale, state=state), tempfile.TemporaryDirectory(prefix='.legacy-review-', dir=ROOT) as d:
+                p = Path(d); (p / 'review/items').mkdir(parents=True); (p / 'remote').mkdir()
+                head = 'a' * 40; id = 'L14b-aaaaaaa'
+                item = {'id': id, 'lane': 'L14b', 'head': head, 'state': state, 'stale': stale, 'verdict': 'MERGE', 'acked': True}
+                path = p / f'review/items/{id}.json'; path.write_text(json.dumps(item))
+                if registered: (p / 'remote/L14b.json').write_text(json.dumps({'head': head}))
+                if state == 'inflight': (p / f'review/{id}.VERDICT').write_text('MERGE\n')
+                shell = '. "$1"; . "$2"; OSRC_HOME="$3"; OSRC_NOW=100; _osrc_review_ingest'
+                subprocess.run(['/bin/bash', '-c', shell, 'bash', str(MODULE.parent / 'remote.sh'), str(MODULE), d], check=True)
+                result = json.loads(path.read_text())
+                if registered and not stale:
+                    self.assertEqual(result['state'], 'queued')
+                    self.assertTrue(result['needs_final'])
+                    self.assertFalse(result['acked'])
+                else:
+                    self.assertEqual(result, item)
+
     def test_rereview_and_final_diff_with_findings_and_latest_round(self):
         with tempfile.TemporaryDirectory(prefix='.packet-test-', dir=str(ROOT)) as d:
             p = Path(d); (p / 'review/items').mkdir(parents=True); (p / 'briefs').mkdir(); (p / 'out').mkdir()

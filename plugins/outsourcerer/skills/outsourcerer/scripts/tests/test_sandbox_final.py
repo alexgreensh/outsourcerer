@@ -53,7 +53,7 @@ class SandboxFinal(unittest.TestCase):
         for case, method in cases:
             for ci in ('true', ''):
                 with self.subTest(probe=method, CI=ci), mock.patch.object(sys, 'platform', 'linux'), \
-                        mock.patch.dict(os.environ, {'CI': ci}), mock.patch.object(os, 'access', return_value=False):
+                        mock.patch.dict(os.environ, {'CI': ci}), mock.patch.object(os, 'access', return_value=False), mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
                     outcome = unittest.TestResult(); case(method).run(outcome)
                     if ci:
                         self.assertTrue(outcome.failures, 'required Linux CI probe did not fail')
@@ -67,7 +67,7 @@ class SandboxFinal(unittest.TestCase):
         sealed = importlib.util.module_from_spec(spec); spec.loader.exec_module(sealed)
         broken = mock.Mock(returncode=1, stdout='', stderr='sandbox_apply: Operation not permitted')
         with mock.patch.object(sys, 'platform', 'linux'), mock.patch.dict(os.environ, {'CI': 'true'}), \
-                mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', return_value=broken):
+                mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', return_value=broken), mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
             outcome = unittest.TestResult(); sealed.SealedRunnerTests('test_isolation_probes').run(outcome)
         self.assertTrue(outcome.failures, 'broken Linux sandbox did not fail')
         self.assertFalse(outcome.skipped)

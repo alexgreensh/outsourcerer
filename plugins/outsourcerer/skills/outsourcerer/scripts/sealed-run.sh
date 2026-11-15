@@ -6,8 +6,10 @@ root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'sealed-run: not i
 root="$(cd "$root" && pwd -P)" || exit 2
 scripts="$root/plugins/outsourcerer/skills/outsourcerer/scripts"
 unisolated=0; check=0
-if [ "${1:-}" = --check-sandbox ]; then check=1; shift; fi
-if [ "${1:-}" = --allow-unisolated ]; then unisolated=1; shift; fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in --check-sandbox) check=1 ;; --allow-unisolated) unisolated=1 ;; *) break ;; esac
+  shift
+done
 [ "$#" -gt 0 ] || [ "$check" = 1 ] || { echo 'sealed-run: supply test paths' >&2; exit 2; }
 tests=()
 for arg in "$@"; do
@@ -36,8 +38,7 @@ if [ "$isolation" = none ]; then
 fi
 overall=0
 # Check the interpreter runtime as well as sandbox application, before any worktree code runs.
-[ "$check" = 0 ] || tests=(/usr/bin/true)
-for test_path in __OSRC_SANDBOX_PROBE__ "${tests[@]}"; do
+for test_path in __OSRC_SANDBOX_PROBE__ ${tests[@]+"${tests[@]}"}; do
   rc=0
   cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /bin/bash -p -c '/usr/bin/renice 19 "$$" >/dev/null 2>&1 || :; exec /usr/bin/perl -e "alarm 600; exec @ARGV" "$@"' sealed-run)
   if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then
@@ -48,7 +49,7 @@ for test_path in __OSRC_SANDBOX_PROBE__ "${tests[@]}"; do
   case "$isolation" in
     mac)
       profile="$t/profile.sb"
-      developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || exit 2
+      developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || { echo 'sealed-run: OS isolation unavailable; xcode-select failed' >&2; exit 78; }
       (cd / && /usr/bin/python3 -I - "$profile" "$root" "$t" "$agents" "$developer" <<'PY'
 import json, os, sys
 q = lambda p: json.dumps(p)
@@ -69,7 +70,7 @@ with open(sys.argv[1], 'w') as f:
             if os.path.exists(p):
                 f.write('(deny process-exec file-read-data (literal %s))\n' % q(p))
 PY
-      ) || exit 2
+      ) || { echo 'sealed-run: OS isolation unavailable; profile generation failed' >&2; exit 78; }
       /usr/bin/sandbox-exec -f "$profile" "${cmd[@]}" || rc=$? ;;
     linux)
       # Expose system runtimes only, never host homes, sockets or host /proc.
@@ -98,6 +99,9 @@ PY
   if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then
     [ "$rc" = 0 ] || { echo "sealed-run: OS isolation unavailable; refusing test execution (sandbox/runtime rc=$rc)" >&2; exit 78; }
     [ "$check" = 0 ] || exit 0
-  elif [ "$rc" != 0 ]; then overall="$rc"; fi
+  elif [ "$rc" != 0 ]; then
+    [ "$rc" != 78 ] || rc=1
+    overall="$rc"
+  fi
 done
 exit "$overall"

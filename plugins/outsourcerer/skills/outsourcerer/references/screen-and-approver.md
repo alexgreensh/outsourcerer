@@ -101,6 +101,7 @@ Sealed test runs are auto-approved only when the installed runner and each paren
 root-owned and not writable by the delegate's user, and the OS isolation tool passes a launch check. A
 worktree-writable runner is held because it can be replaced before execution. Without an isolation
 tool, a person can choose the explicit `--allow-unisolated` form.
+A probe taking longer than 10 seconds also falls back to HOLD.
 
 The classifier holds ordinary test and build commands because they execute worktree code.
 Only the exact protected `sealed-run.sh` command with relative `scripts/tests/*.sh` paths can
