@@ -51,9 +51,17 @@ sleep 30
 SH
 chmod +x "$FAKE_BEACON"
 
-# A fake job supervisor: the detached __runjob child exits instantly; the arm is what we test.
+# Run the real preflight, then make only the detached job supervisor a no-op.
 FAKE_JOB="$TMP/fake-runjob.sh"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_JOB"
+cat > "$FAKE_JOB" <<EOF_JOB
+#!/usr/bin/env bash
+if [ "\${1:-}" = --osrc-preflight-internal ]; then
+  export OSRC_SOURCED=0
+  . "$SRC" "\$@"
+else
+  exit 0
+fi
+EOF_JOB
 chmod +x "$FAKE_JOB"
 
 kill_beacon() { # <owner.json> — stop the fake beacon a test armed
@@ -71,12 +79,12 @@ kill_beacon() { # <owner.json> — stop the fake beacon a test armed
   . "$SRC" >/dev/null 2>&1
   _state_sync(){ return 0; }
   _pid_start_identity(){ printf 'Thu Jul 31 01:02:03 2026\n'; }
-  PROVIDER=local
+  PROVIDER=local; PROVIDER_EXPLICIT=1
   SCRIPT_PATH="$FAKE_JOB"
   export OSRC_HEARTBEAT_EXECUTABLE="$FAKE_BEACON" OSRC_HEARTBEAT_START_TIMEOUT=3 HB_PID_START="Thu Jul 31 01:02:03 2026"
   unset OSRC_FLEET_SUPERVISION
-  cmd_bg run "task" >/dev/null 2>&1; rc=$?
-  [ "$rc" -eq 0 ] || { echo "FAIL: cmd_bg rc=$rc"; exit 1; }
+  ( cmd_bg run "task" ) >/dev/null 2>"$TMP/bg.err"; rc=$?
+  [ "$rc" -eq 0 ] || { echo "FAIL: cmd_bg rc=$rc: $(tail -5 "$TMP/bg.err")"; exit 1; }
   owner="$OSRC_HEARTBEAT/leader/owner.json"
   [ -f "$owner" ] || { echo "FAIL: no owner.json after bg launch (auto-arm did not run)"; exit 1; }
   vpid="$(jq -r '.pid' "$owner")"
