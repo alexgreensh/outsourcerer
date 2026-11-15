@@ -3,7 +3,10 @@ set -uo pipefail
 D="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d "${TMPDIR:-/tmp}/p56.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 export OSRC_HOME="$T/home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
-mkdir -p "$OSRC_HOME"
+mkdir -p "$OSRC_HOME" "$T/bin"
+printf '#!/bin/sh\necho "tmux stub"\n' > "$T/bin/tmux"
+chmod +x "$T/bin/tmux"
+export PATH="$T/bin:$PATH"
 OSRC_FAILOVER_LANES='opencode or'
 . "$D/outsourcerer.sh" >/dev/null 2>&1
 pass=0; fail=0

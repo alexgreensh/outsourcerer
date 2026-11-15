@@ -13,6 +13,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 bash -n "$SCRIPT_DIR/../lib/lane-opencode.sh" || { echo "FAIL: lane-opencode.sh bash -n failed"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-oc.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home" OSRC_HEARTBEAT_DISABLED=1; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work" "$TMP/nohome"
+printf '#!/bin/sh\necho "tmux stub"\n' > "$TMP/bin/tmux"; chmod +x "$TMP/bin/tmux"
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
