@@ -295,7 +295,7 @@ exit 0
             with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
                 self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(ROOT), [str(ROOT)])[0])
             return
-        with tempfile.TemporaryDirectory(prefix='.sealed-proof-', dir=str(ROOT)) as temp:
+        with tempfile.TemporaryDirectory(prefix='.sealed-proof-', dir=Path(os.environ.get('TMPDIR') or tempfile.gettempdir()).resolve()) as temp:
             home = Path(temp) / 'home'
             root = home / 'project'
             main = home / 'main'
@@ -354,8 +354,7 @@ if (printf bad > /dev/fd/4) 2>/dev/null; then
 fi
 exec 4<&-
 cd "$scratch"
-printf 'pipe proof' > >(cat > "$TMPDIR/pipe-proof")
-wait "$!"
+printf 'pipe proof' | cat > "$TMPDIR/pipe-proof"
 [ "$(cat "$TMPDIR/pipe-proof")" = 'pipe proof' ]
 [ ! -u "$(command -v ps)" ]
 [ ! -g "$(command -v ps)" ]
