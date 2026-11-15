@@ -260,12 +260,14 @@ _osrc_hub_build_project() {
   _osrc_hub_slug_ok "$slug" || return 1
   have jq || return 1
   local sid_dir="$OSRC_HOME/owners/$slug" lanes='[]' t lane act lact=0 llive=0
+  type _osrc_hub_cache_get >/dev/null 2>&1 && _osrc_hub_cache_get "$slug" "$now" "$upd" && return 0   # settled project (MC2 r2 #4)
   local rmap; rmap="$(_osrc_hub_review_map)"
   if [ -d "$sid_dir" ]; then
     for t in "$sid_dir"/*; do
       [ -f "$t" ] || continue
       case "${t##*/}" in .*|watch.*) continue ;; esac   # watch.*: a supervise --watch, not a lane
       lane="$(_osrc_hub_lane_for "${t##*/}" "$rmap")"
+      [ -n "$lane" ] && type _osrc_hub_lane_live_fields >/dev/null 2>&1 && lane="$(_osrc_hub_lane_live_fields "$lane")"   # state + times (MC2 r2 #5)
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
       act="$(_osrc_hub_lane_activity "${t##*/}")"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
@@ -307,7 +309,10 @@ _osrc_hub_build_project() {
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
     + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
   ')"
-  _osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and ((.status // "building") | ascii_downcase) == "building" then .status="idle" else . end'
+  out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and ((.status // "building") | ascii_downcase) == "building" then .status="idle" else . end')"
+  printf '%s\n' "$out"
+  type _osrc_hub_cache_put >/dev/null 2>&1 && _osrc_hub_cache_put "$slug" "$out"
+  return 0
 }
 
 # _osrc_hub_status_override <slug> <project-json> -> project with the user's Mark done
@@ -346,6 +351,24 @@ _osrc_hub_mt() {
   printf '%s' "$b"
 }
 
+# (MC2 r2 #4; here, not in hub-perf.sh, because suites source hub.sh alone.)
+# _osrc_hub_reg_ts <id> -> newest registry ts (epoch) for the id, "" when unknown. Uses the memo index
+# when open; returns 1 when no index exists so the caller can fall back to its own scan.
+_osrc_hub_reg_ts() {
+  [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/reg/.indexed" ] || return 1
+  cat "$_OSRC_HUB_MEMO/reg/$1.ts" 2>/dev/null
+  return 0
+}
+
+# _osrc_hub_tmux_row <id> -> "<created> <activity>" for a live tmux session (memo list, else tmux).
+_osrc_hub_tmux_row() {
+  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/tmux" ]; then
+    awk -v s="$1" '$1 == s { print $2, $3; f = 1; exit } END { exit !f }' "$_OSRC_HUB_MEMO/tmux"
+  else
+    tmux has-session -t "=$1" 2>/dev/null && tmux display-message -p -t "=$1" '#{session_created} #{window_activity}' 2>/dev/null
+  fi
+}
+
 # _osrc_hub_lane_activity <id> -> "<epoch> <live>": newest real activity of one owned lane (job dir files:
 # meta.json, log, rc, status..., remote lane file, its review items, autodetach log/rc, tmux session_activity)
 # and live=1 when the lane is working right now (a reconciled running job, a live remote lane, a working
@@ -358,8 +381,8 @@ _osrc_hub_lane_activity() {
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
   elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
     type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
-  elif have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; then
-    ta="$(tmux display-message -p -t "=$id" '#{session_activity}' 2>/dev/null)"
+  elif have tmux 2>/dev/null && ta="$(_osrc_hub_tmux_row "$id")" && [ -n "$ta" ]; then
+    ta="${ta##* }"
     case "$ta" in ''|*[!0-9]*) ;; *) [ "$ta" -gt "$b" ] && b="$ta" ;; esac
     case "$(_owned_live_state "$id" 2>/dev/null)" in working|live|running) live=1 ;; esac
   fi
@@ -371,7 +394,9 @@ _osrc_hub_lane_activity() {
     case "$spec" in file:*) hf="${spec#file:}"; case "$hf" in /*) ;; *) hf="${cwd:-.}/$hf" ;; esac
       r="$(_osrc_hub_mt "$hf")"; [ "$r" -gt "$b" ] && b="$r" ;; esac
   fi
-  if [ -f "${OSRC_SESSION_REGISTRY:-}" ] && have jq; then
+  if r="$(_osrc_hub_reg_ts "$id")"; then
+    case "$r" in ''|*[!0-9]*) ;; *) [ "$r" -gt "$b" ] && b="$r" ;; esac
+  elif [ -f "${OSRC_SESSION_REGISTRY:-}" ] && have jq; then
     r="$(jq -r --arg id "$id" 'select(.session_id==$id) | .ts // empty | if type=="number" then floor else (try fromdateiso8601 catch empty) end' "$OSRC_SESSION_REGISTRY" 2>/dev/null | sort -n | tail -1)"
     case "$r" in ''|*[!0-9]*) ;; *) [ "$r" -gt "$b" ] && b="$r" ;; esac
   fi
@@ -412,13 +437,15 @@ osrc_hub_tick_touch() {
 _osrc_hub_unowned_project() {
   local now="$1" upd="$2" rmap lanes='[]' id lane claimed
   rmap="$(_osrc_hub_review_map)"
-  claimed="$(for d in "$OSRC_HOME"/owners/*/; do [ -d "$d" ] && for f in "$d"/*; do [ -f "$f" ] && basename "$f"; done; done 2>/dev/null)"
+  local _nl='
+'
+  claimed="$(for d in "$OSRC_HOME"/owners/*/; do [ -d "$d" ] && for f in "$d"/*; do [ -f "$f" ] && printf '%s\n' "${f##*/}"; done; done 2>/dev/null)"
   # Unowned remote lanes.
   local rf
   for rf in "$OSRC_HOME"/remote/*.json; do
     [ -f "$rf" ] || continue
     id="$(basename "$rf" .json)"
-    printf '%s\n' "$claimed" | grep -qxF "$id" && continue
+    case "$_nl$claimed$_nl" in *"$_nl$id$_nl"*) continue ;; esac   # no grep per dir (MC2 r2 #4)
     lane="$(_osrc_hub_lane_remote "$id")" && [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a+[$b]')"
   done
   # Unowned job dirs (recent or live only — ancient done dirs are gc's job, not the hub's).
@@ -427,7 +454,7 @@ _osrc_hub_unowned_project() {
   for jd in "$OSRC_JOBS"/*/; do
     [ -d "$jd" ] || continue
     id="$(basename "$jd")"
-    printf '%s\n' "$claimed" | grep -qxF "$id" && continue
+    case "$_nl$claimed$_nl" in *"$_nl$id$_nl"*) continue ;; esac   # no grep per dir (MC2 r2 #4)
     st="$(cat "$jd/status" 2>/dev/null || echo '?')"
     mt="$(stat -c %Y "$jd" 2>/dev/null || stat -f %m "$jd" 2>/dev/null || echo 0)"
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted)
@@ -628,6 +655,7 @@ cmd_hub_export() {
   [ -z "$proj" ] || _osrc_hub_slug_ok "$proj" || die "hub export: bad project slug '$proj'"
   local now upd projects='[]' slug found=0
   now="$(date +%s)"; upd="$(date -u '+%a %d %b, %H:%M UTC')"
+  type _osrc_hub_memo_begin >/dev/null 2>&1 && _osrc_hub_memo_begin   # one pane read per lane per export (MC2 r2 #4)
   # Slugs: every owner session + every decisions/projects file + unowned.
   local slugs=""
   local d f
@@ -649,7 +677,9 @@ cmd_hub_export() {
   elif [ "$found" = 0 ]; then
     echo "hub export: no project '$proj' (slugs: owners/*, hub/decisions/*.json, hub/projects/*.json)" >&2
   fi
-  local limits; limits="$(_osrc_hub_limits 2>/dev/null)"; case "$limits" in ''|*'error'*) limits='[]' ;; esac
+  local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
+  case "$limits" in ''|*'error'*) limits='[]' ;; esac
+  type _osrc_hub_memo_end >/dev/null 2>&1 && _osrc_hub_memo_end
   jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}'
 }
 

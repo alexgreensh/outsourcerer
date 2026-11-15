@@ -116,6 +116,8 @@ class Hub:
     def run_export(self, timeout=90):
         env = dict(os.environ)
         env["OSRC_HOME"] = self.osrc_home
+        # Settled-project cache + stale-while-revalidate limits (hub-perf.sh, MC2 r2 #4).
+        env.setdefault("OSRC_HUB_FAST", "1")
         proc = subprocess.run(
             [self.engine, "hub", "export"],
             capture_output=True, text=True, timeout=timeout, env=env,
