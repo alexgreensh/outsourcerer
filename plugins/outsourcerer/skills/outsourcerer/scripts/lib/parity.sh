@@ -9,8 +9,8 @@
 # versioned script path that the next plugin upgrade deletes.
 
 _insource_write() {   # <file> <host-label> [codex]
-  local f="$1"; shift; local b="" s="" e=""
-  b="$(mktemp "${TMPDIR:-/tmp}/osrc-ins.XXXXXX")" || die "parity: mktemp failed"
+  local f="$1"; shift; local b="" s="" e="" _tmp_base="${TMPDIR:-/tmp}"
+  b="$(mktemp "${_tmp_base%/}/osrc-ins.XXXXXX")" || die "parity: mktemp failed"
   _insource_block "$@" > "$b" || { rm -f "$b"; die "parity: cannot render insource block"; }
   eval "$(awk '/^<!-- OUTSOURCERER:INSOURCE/ && !s { s=NR } s && /^<!-- \/OUTSOURCERER:INSOURCE -->/ && NR > s && !e { e=NR } END { if (s) print "s=" s " e=" e }' "$f" 2>/dev/null)"
   # Write IN PLACE (cat tmp > "$f"), never mv a temp over the target: the file belongs to the user (often a

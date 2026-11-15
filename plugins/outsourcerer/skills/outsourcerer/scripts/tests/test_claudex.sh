@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_claudex.sh — claudex lane (Claude Code harness -> local CLIProxyAPI) conformance, OFFLINE.
 # Style mirrors test_cloud_gate.sh: source the script, exercise routing/guardrails, no live calls.
 set -uo pipefail
@@ -7,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-claudex-test-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-claudex-test-$$"
 export HOME="$OSRC_HOME/fakehome"
 mkdir -p "$OSRC_HOME" "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT

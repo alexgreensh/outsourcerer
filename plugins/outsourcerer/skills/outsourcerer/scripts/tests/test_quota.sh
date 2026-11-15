@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_quota.sh — per-model daily quota: counter-from-ledger, caps config, the gate, and routing.
 #
 # The feature: outsourcerer knows each free model's DAILY request cap, counts usage from ledger.jsonl
@@ -22,7 +23,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-quota.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-quota.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 SRC_ONLY="$TMP/src.sh"; sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
 osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # Test for the "resolved lane" accounting feature of outsourcerer.sh.
@@ -26,7 +27,7 @@ fi
 # a temp copy so sourcing is side-effect-free (no bg jobs, no network). A temp
 # FILE (not process substitution) is required: this bash does not define
 # functions when `source`-ing from a <() pipe.
-TMP_MAIN="$(mktemp "${TMPDIR:-/tmp}/outsourcerer_src.XXXXXX")"
+TMP_MAIN="$(mktemp "${TMPDIR%/}/outsourcerer_src.XXXXXX")"
 trap 'rm -f "$TMP_MAIN"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 set +e
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$MAIN_SCRIPT" > "$TMP_MAIN"

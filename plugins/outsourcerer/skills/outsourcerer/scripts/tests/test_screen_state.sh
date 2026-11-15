@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # L3: lib/screen.sh is the one screen reader. Every fixture under fixtures/screen/ is a REAL pane
 # capture (tmux capture-pane -e -p) taken 2026-11-13 from throwaway sessions: Claude Code 2.1.323
 # (Haiku), Codex 0.167 (gpt-5.6-luna), Devin CLI 3000.12 (SWE-2), Antigravity CLI 1.5.5, gemini-cli.
@@ -8,7 +9,7 @@
 # and the `session effort` lane resolution.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FX="$HERE/fixtures/screen"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-screen.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-screen.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 # One line per case: ok prints its label, or the test line that called it (file:line + source).
 ok(){ pass=$((pass+1)); if [ -n "${1:-}" ]; then echo "PASS: $1"; else

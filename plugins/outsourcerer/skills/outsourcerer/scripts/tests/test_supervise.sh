@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_supervise.sh — L1: one `supervise` waiter wakes the orchestrator for every owned delegate that
 # needs it (approval, question, idle-after-work, stalled, dead, limit), replays missed events, dedupes
 # with a 20-minute reminder, and the stop guard is satisfied by a live supervise but not by nothing.
@@ -8,7 +9,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"; FX="$SCRIPT_DIR/fixtures/supervise"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-supervise.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; PIDS=""
+TMP="$(mktemp -d "${TMPDIR%/}/.test-supervise.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; PIDS=""
 trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/panes"; ln -s "$SCRIPT_DIR/fake-bin/tmux-files" "$TMP/bin/tmux"
 export PATH="$TMP/bin:$PATH" FAKE_TMUX_DIR="$TMP/panes" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_STREAM=1

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_cleanup_manifest.sh -- the created.jsonl manifest cleanup: dry-run SAFE/ASK
 # verdicts, --apply deletes SAFE only, --ack, the disk gate, the scan-only tick,
 # and the legacy `cleanup <id> [--force]` worktree path. Every verdict test uses
@@ -13,7 +14,7 @@ command -v git >/dev/null 2>&1 || { echo "SKIP: git not installed"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 have_lsof=0; command -v lsof >/dev/null 2>&1 && have_lsof=1
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.cleanup-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.cleanup-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" XDG_CONFIG_HOME="$TMP/xdg"
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1 OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0

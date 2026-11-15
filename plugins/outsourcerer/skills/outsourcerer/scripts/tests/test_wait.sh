@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_wait.sh — the `wait <job-id> [--for N]` verb: BLOCK until a job reaches a terminal state,
 # then exit with an HONEST code. The return code is the contract:
 #   0   done | done?
@@ -20,7 +21,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-wait.XXXXXX")"; trap 'rm -rf "$TMP"; [ -n "${SLEEP_PID:-}" ] && kill "$SLEEP_PID" 2>/dev/null || true' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-wait.XXXXXX")"; trap 'rm -rf "$TMP"; [ -n "${SLEEP_PID:-}" ] && kill "$SLEEP_PID" 2>/dev/null || true' EXIT
 
 # OSRC_HOME must be set BEFORE sourcing: outsourcerer.sh pins OSRC_HOME/OSRC_JOBS at source time.
 # OSRC_SOURCED=1 keeps the source guard from running main().

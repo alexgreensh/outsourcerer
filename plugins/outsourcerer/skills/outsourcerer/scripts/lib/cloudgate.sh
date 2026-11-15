@@ -113,9 +113,9 @@ _cred_file_hits() {
     # to run scans nothing and the gate fails OPEN. Run find into a private temp file, CHECK its status,
     # and fail CLOSED if the scan could not complete. A cloud delegate runs with our own repo
     # privileges, so paths find can read are exactly the paths the delegate can read.
-    local _sf _ef
-    _sf="$(mktemp "${TMPDIR:-/tmp}/osrc.scan.XXXXXX" 2>/dev/null)" || die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."
-    _ef="$(mktemp "${TMPDIR:-/tmp}/osrc.scanerr.XXXXXX" 2>/dev/null)" || { rm -f "$_sf"; die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."; }
+    local _sf _ef _tmp_base="${TMPDIR:-/tmp}"
+    _sf="$(mktemp "${_tmp_base%/}/osrc.scan.XXXXXX" 2>/dev/null)" || die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."
+    _ef="$(mktemp "${_tmp_base%/}/osrc.scanerr.XXXXXX" 2>/dev/null)" || { rm -f "$_sf"; die "CLOUD GATE: cannot create scan tempfile — refusing cloud route (fail closed)."; }
     find "$PWD" -maxdepth "$_depth" \
                \( -name .git -o -name node_modules -o -name vendor -o -name .venv -o -name venv \
                   -o -name target -o -name dist -o -name build -o -name .terraform \) -prune -o \
@@ -173,7 +173,7 @@ _cloud_autoisolate() {
   for h in "${_CRED_HITS[@]}"; do
     _cred_hit_ignored_untracked "$h" || return 1     # a tracked/unignored secret: the gate blocks it
   done
-  local root rel id jd wt br base tree snap idx gidx
+  local root rel id jd wt br base tree snap idx gidx _tmp_base="${TMPDIR:-/tmp}"
   root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
   rel="$(git rev-parse --show-prefix 2>/dev/null)"   # resume in the same subdir of the snapshot
   if [ -n "${OSRC_JOB_DIR:-}" ]; then id="$(basename "$OSRC_JOB_DIR")"; jd="$OSRC_JOB_DIR"
@@ -183,7 +183,7 @@ _cloud_autoisolate() {
   wt="$root/.outsourcerer/worktrees/$id"; br="outsourcerer/$id"
   _osrc_git_exclude_state "$root"                    # keep .outsourcerer/ out of the snapshot itself
   # Snapshot through a PRIVATE copy of the index, so the user's staging area is never touched.
-  idx="$(mktemp "${TMPDIR:-/tmp}/osrc.idx.XXXXXX" 2>/dev/null)" || return 1
+  idx="$(mktemp "${_tmp_base%/}/osrc.idx.XXXXXX" 2>/dev/null)" || return 1
   gidx="$(git -C "$root" rev-parse --git-path index 2>/dev/null)"
   case "$gidx" in /*|[A-Za-z]:[/\\]*) ;; *) gidx="$root/$gidx" ;; esac
   # cp -p keeps the index mtime: git trusts an entry's stat data only when the file is older than the

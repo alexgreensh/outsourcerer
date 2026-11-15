@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heartbeat_stale_alarm.sh — staleness is ALARMED, not just displayed (SPEC
 # heartbeat-liveness C): a supervised session whose status is stale past the stall window is
 # surfaced as a wake event, once per (session, state) while unacked, and re-alarms after ack if
@@ -23,7 +24,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-heartbeat-stale.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-heartbeat-stale.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export HOME="$TMP/home"

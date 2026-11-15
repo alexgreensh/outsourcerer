@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_lane_billing.sh — L7 r10 split from test_limit_gate.sh (file-size rule): the
 # per-lane billing proof rows (osrc_lane_billing classes) and the functional spend-gate
 # rows (_osrc_spend_gate consent semantics, .spend-ok markers, fallback pickers never
@@ -17,7 +18,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-lanebilling.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-lanebilling.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # r11 F7: never inherit the real HOME — sourcing probes auth dirs and a real login
 # would leak subscription verdicts into rows that forgot HOME=. Every row prefixes

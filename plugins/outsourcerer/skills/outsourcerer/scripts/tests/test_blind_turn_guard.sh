@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_blind_turn_guard.sh — the orchestrator must not end its turn blind while live delegated work
 # needs a human.
 #
@@ -19,7 +20,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/.test-blind-turn.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+FIXTURE="$(mktemp -d "${TMPDIR%/}/.test-blind-turn.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 # The real-collect cases below must not fold this host's actual Claude sessions

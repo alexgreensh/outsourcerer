@@ -71,7 +71,7 @@ def main():
         for name in ('home', 'state', 'tmp'):
             (directory / name).mkdir(parents=True)
         env = {'HOME': str(directory / 'home'), 'OSRC_HOME': str(directory / 'state'),
-               'TMPDIR': str(directory / 'tmp'), 'OSRC_HEARTBEAT_DISABLED': '1',
+               'TMPDIR': str(directory / 'tmp') + '/', 'OSRC_HEARTBEAT_DISABLED': '1',
                'PYTHONDONTWRITEBYTECODE': '1',
                'PATH': str(bindir) + ':/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin'}
         output = directory / 'output.log'
@@ -79,7 +79,7 @@ def main():
         body = output.read_text(errors='replace')
         failures = len(re.findall(r'^\s*(?:FAIL(?:ED)?[: :]|not ok\b)', body, re.M))
         notes = sorted(set(re.findall(r'^.*(?:SKIP:|sandbox denies|unsupported suite:|denied capability:|MATRIX_DENIED:|OS isolation unavailable|shell scratch unavailable).*$', body, re.M)))
-        row = dict(suite=suite, mode=mode, rc=rc, failure_lines=failures,
+        row = dict(suite=suite, mode=mode, rc=rc, failure_lines=failures, tmpdir=env['TMPDIR'],
                    reason='; '.join(notes), log=str(output.relative_to(proof)))
         rows.append(row)
         (proof / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')

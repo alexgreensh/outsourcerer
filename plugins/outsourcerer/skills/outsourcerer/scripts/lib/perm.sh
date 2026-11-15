@@ -22,8 +22,8 @@ _session_launch_error() {
 }
 
 _session_probe_help() {
-  local probe_file rc=0
-  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-session-probe.XXXXXX" 2>/dev/null)" || return 1
+  local probe_file rc=0 _tmp_base="${TMPDIR:-/tmp}"
+  probe_file="$(mktemp "${_tmp_base%/}/osrc-session-probe.XXXXXX" 2>/dev/null)" || return 1
   _timeout 3 "$@" > "$probe_file" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
     rm -f "$probe_file"
@@ -72,8 +72,8 @@ _session_help_has_model_flag() {
 # model is explicitly pinned (MODEL_EXPLICIT=1), not on every session start.
 _session_assert_model_pinnable() {
   local provider="$1" cli="$2"; shift 2
-  local help_text probe_file rc=0
-  probe_file="$(mktemp "${TMPDIR:-/tmp}/osrc-mpg.XXXXXX" 2>/dev/null)" || _session_launch_error "$provider" "model-flag probe: could not create a temp file"
+  local help_text probe_file rc=0 _tmp_base="${TMPDIR:-/tmp}"
+  probe_file="$(mktemp "${_tmp_base%/}/osrc-mpg.XXXXXX" 2>/dev/null)" || _session_launch_error "$provider" "model-flag probe: could not create a temp file"
   _timeout "${OSRC_SESSION_MODEL_PROBE_SECS:-8}" "$cli" "$@" > "$probe_file" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ] || [ ! -s "$probe_file" ]; then
     rm -f "$probe_file"

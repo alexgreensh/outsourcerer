@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression coverage for the 0.10.1 lifecycle / registry / heartbeat supervision fixes.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-lifecycle-fix.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-lifecycle-fix.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome"
 mkdir -p "$HOME"

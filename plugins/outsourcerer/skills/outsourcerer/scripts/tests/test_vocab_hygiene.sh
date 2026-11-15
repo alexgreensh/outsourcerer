@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Track B — vocabulary hygiene: the sanitizer that keeps model-facing text out of the fallback cascade.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-vocab.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-vocab.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 pass=0; fail=0

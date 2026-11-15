@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
 osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # test_tap_statusline.sh — the statusline command a versioned plugin-cache install emits must
@@ -13,7 +14,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-tapstatus.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-tapstatus.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 pass=0; fail=0

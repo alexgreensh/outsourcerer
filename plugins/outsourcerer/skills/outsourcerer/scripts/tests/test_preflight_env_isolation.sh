@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_preflight_env_isolation.sh — an INHERITED OSRC_PREFLIGHT env var can never turn a real run into
 # a silent no-op; preflight is signaled only by our own private argv sentinel.
 #
@@ -17,7 +18,7 @@ SRC="$HERE/../outsourcerer.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # `session send "/effort ..."` must NEVER reach a Claude Code pane: /effort persists
 # effortLevel into ~/.claude/settings.json, re-defaulting effort for EVERY future claude
 # session (the 2026-11-13 TR-orchestrator leak — the intent was a per-session change, the
@@ -12,7 +13,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-effort-guard.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-effort-guard.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"                       # fake HOME: claude settings resolve here only
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME/sessions"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-obligations.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
+HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; TMP="$(mktemp -d "${TMPDIR%/}/.test-obligations.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 OSRC_HOME="$TMP/state"; OSRC_EXTERNAL_SEND=1; export OSRC_HOME OSRC_EXTERNAL_SEND; set --; . "$SRC" >/dev/null 2>&1; LOG="$TMP/keys"
 _pid_start_identity(){ printf 'Mon Jan 1 00:00:00 2024\n'; }

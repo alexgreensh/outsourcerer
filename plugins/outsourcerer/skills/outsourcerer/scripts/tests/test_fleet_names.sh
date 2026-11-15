@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 
 if [ "${OSRC_TEST_FLEET_NAME_RUNNER:-0}" = 1 ]; then
@@ -37,7 +38,7 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/.test-fleet-names.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+FIXTURE="$(mktemp -d "${TMPDIR%/}/.test-fleet-names.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 
 pass=0; fail=0

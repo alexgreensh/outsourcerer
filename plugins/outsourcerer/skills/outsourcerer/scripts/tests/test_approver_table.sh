@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # L3 approver policy table: every row of fixtures/approver-table.tsv must classify exactly as
 # expected (approve|hold). Rows are real commands from orchestrator sessions (FINDINGS 2026-11-13)
 # plus the dangerous shapes that must HOLD: rm outside the worktree, redirects out, $(...),
@@ -8,7 +9,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLS="$HERE/../lib/approver_classify.py"
 TABLE="$HERE/fixtures/approver-table.tsv"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-approver.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-approver.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ pass=$((pass+1)); echo "PASS: ${1:-line ${BASH_LINENO[0]}}"; }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 export HOME="$TMP/fakehome"
 mkdir -p "$HOME"

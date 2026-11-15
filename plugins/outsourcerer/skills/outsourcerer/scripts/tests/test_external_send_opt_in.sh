@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-external-opt-in.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-external-opt-in.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/tmux" <<'EOF'

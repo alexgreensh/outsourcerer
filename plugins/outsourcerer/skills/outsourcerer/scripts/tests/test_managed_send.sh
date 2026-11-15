@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Bug 2 — managed `session send` must NEVER forge a delivery receipt. Without a usable external receipt
 # adapter it reports "sent (unverified)" (rc 2) and records delivery_unknown; a broken adapter fails
 # closed; only a real external receipt yields a verified `submitted`.
@@ -6,7 +7,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-msend.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-msend.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 pass=0; fail=0

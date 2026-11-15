@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_cloud_gate.sh — cloud-disclosure + secret-scan gate conformance.
 # Loads the gate primitives from outsourcerer.sh and exercises them OFFLINE (no real
 # delegation). Mirrors the scripts/tests/ shim-test style. Run: bash test_cloud_gate.sh
@@ -11,10 +12,10 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find "$SRC"; exit 1; fi
 # ISOLATE persistent state: consent is remembered in $OSRC_HOME/cloud-consent since v0.4.8,
 # so the suite must never read (or pollute) the user's real ~/.outsourcerer. Export BEFORE
 # sourcing — OSRC_CONSENT_FILE is derived from OSRC_HOME at source time.
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-home-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-test-home-$$"
 mkdir -p "$OSRC_HOME"
 # r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
-export HOME="${TMPDIR:-/tmp}/osrc-test-home-$$-fakehome"; mkdir -p "$HOME"
+export HOME="${TMPDIR%/}/osrc-test-home-$$-fakehome"; mkdir -p "$HOME"
 
 # Load the script's functions. main "$@" runs with no args (prints help, returns 0);
 # all gate functions are then defined in this shell. set -u is inherited from the

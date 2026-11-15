@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_done_contract.sh — the L6 "done" contract for session lanes (lib/done.sh).
 #
 # An idle delegate can be finished OR stuck halfway; the screen cannot tell them apart, so
@@ -27,7 +28,7 @@ LIB="$HERE/../lib/done.sh"
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 bash -n "$LIB" || { echo "FAIL: bash -n failed for $LIB"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-done-contract.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-done-contract.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 export OSRC_HOME="$TMP/state" GIT_CEILING_DIRECTORIES="$TMP"

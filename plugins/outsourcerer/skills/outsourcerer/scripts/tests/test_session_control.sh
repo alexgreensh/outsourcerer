@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Bug B — lifecycle control and conversation must be separate planes. `session control
 # <interrupt|exit|relaunch>` owns the per-lane mechanics, sends ONLY lifecycle keys (never a prompt
 # the delegate would read as chat), verifies each action took effect, and never tears down or
@@ -12,7 +13,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-control.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-control.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 pass=0; fail=0

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_factory_pstack.sh -- three factory guards: a brief too thin to act on is held before a worker
 # is spent; a held decision can carry a default answer that applies when its deadline passes; and a
 # failed attempt is retried according to why it failed (same model, next model, smaller piece, or a
@@ -10,7 +11,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 for t in jq git; do command -v "$t" >/dev/null 2>&1 || { echo "FAIL: $t is required"; exit 1; }; done
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-factory-pstack.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/test-factory-pstack.XXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
 export GIT_CEILING_DIRECTORIES="$(dirname "$TMP")"
 HOME="$TMP/home"; export HOME; mkdir -p "$HOME"

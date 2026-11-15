@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_copilot.sh — session-start copilot handshake: mode persistence, limit awareness, conserve
 # routing, and the NON-INTERACTIVE-SAFE guarantee (GLM F10: brief/mode must never hang a pipe/CI).
 # OFFLINE; sources the script and exercises the pure functions. Run: bash test_copilot.sh
@@ -8,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-copilot-test-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-copilot-test-$$"
 export HOME="$OSRC_HOME/fakehome"
 mkdir -p "$OSRC_HOME" "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT

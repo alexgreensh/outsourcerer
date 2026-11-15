@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_handover.sh — session handover: `adopt` moves a previous orchestrator session's
 # owned targets into the current session; `handover` writes the markdown brief the next
 # session picks the fleet up with. Covers the owners/ registry move, refusals, the
@@ -12,7 +13,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 bash -n "$SCRIPT_DIR/../lib/handover.sh" || { echo "FAIL: bash -n lib/handover.sh failed"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq is required"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-ho.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-ho.XXXXXX")"
 PIDS=""
 trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/owners"

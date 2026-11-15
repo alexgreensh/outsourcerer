@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # sealed-run-requires: nested-sandbox
 # conformance.sh — U5: per-lane conformance harness (the don't-ship-blind gate).
 #
@@ -207,7 +208,7 @@ _run_unit_suite_bounded() {   # <suite.sh>; results in _suite_out, _suite_rc, _s
     *) secs="$OSRC_SUITE_TIMEOUT" ;;
   esac
   _suite_secs="$secs"
-  out_file="$(mktemp "${TMPDIR:-/tmp}/osrc-suite-out.XXXXXX")" || { _suite_rc=127; return 127; }
+  out_file="$(mktemp "${TMPDIR%/}/osrc-suite-out.XXXXXX")" || { _suite_rc=127; return 127; }
   pid_file="$out_file.pid"
   expired="$out_file.expired"
   # Never risk an empty OSRC_HOME: the suite would run against the user's real ~/.outsourcerer.
@@ -324,13 +325,13 @@ _gate_int_sweep() {
 # PATH), not the suite's sandbox: a suite whose run auto-detached into a session was scoping the
 # developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
 # default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
-_conf_tmux_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
+_conf_tmux_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
 [ -d "$_conf_tmux_dir" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 # A PATH shim routes EVERY tmux call a suite makes — its own and the engine's — onto a private
 # named socket inside that suite's TMUX_TMPDIR, so kill-server can never reach the developer's
 # real server even if TMUX leaks into a suite. Suites that fake tmux still win: they prepend
 # their own fake-bin to PATH inside the suite.
-_conf_shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-shim.XXXXXX")" || { echo "FAIL: mktemp for the tmux shim"; exit 1; }
+_conf_shim_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-shim.XXXXXX")" || { echo "FAIL: mktemp for the tmux shim"; exit 1; }
 _conf_tmux_real="$(command -v tmux 2>/dev/null || true)"
 if [ -n "$_conf_tmux_real" ]; then
   printf '#!/bin/sh\nexec "%s" -L osrc-test-%s "$@"\n' "$_conf_tmux_real" "$$" > "$_conf_shim_dir/tmux"
@@ -371,7 +372,7 @@ else
   # a suite or the engine would silently never install. Each worker runs the usual bounded runner
   # and leaves its result in files; results are reported in registry order, as soon as the next
   # suite in order is done, so the log reads the same as a serial run.
-  _par_dir="$(mktemp -d "${TMPDIR:-/tmp}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
+  _par_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
   _par_order=(); for t in $_ALL_SUITES; do _par_order+=("$t"); done
   _par_n=${#_par_order[@]}; _par_pid=(); _par_done=()
   _par_sweep() {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Exercise the guard with isolated shell-text fixtures; fixture commands are never executed.
 set -uo pipefail
 command -v python3 >/dev/null 2>&1 || { echo 'SKIP: python3 is required for quiet-grep guard fixtures'; exit 0; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
-T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-grep-fixtures.XXXXXX")" || exit 1
+T="$(mktemp -d "${TMPDIR%/}/osrc-grep-fixtures.XXXXXX")" || exit 1
 trap 'rm -rf "$T"' EXIT
 python3 - "$HERE/test_no_pipe_grep_q.sh" "$T" <<'PY'
 import os

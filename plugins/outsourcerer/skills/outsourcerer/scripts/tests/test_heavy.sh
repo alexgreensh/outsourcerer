@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_heavy.sh — L10 add-on round 2: osrc_heavy command-word classification, osrc_mac_load,
 # and the heavy-work gate inside _loop_check. Round-2 contract: the gate NEVER launches — it
 # emits EVENT approval + NEXT (exact `cloud start` line) only for a clean, pushed tree, reuses
@@ -11,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 if [ ! -f "$SRC" ]; then echo "FAIL: cannot find $SRC"; exit 1; fi
 
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-test-L10h-home-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-test-L10h-home-$$"
 export HOME="$OSRC_HOME/fakehome"
 mkdir -p "$OSRC_HOME" "$HOME"
 export OSRC_HEAVY_LOCK_WAIT=5

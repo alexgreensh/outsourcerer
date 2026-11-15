@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Regression guard for the free Devin lane: stale CLI processes must not wedge it,
 # paid-tier quota text must not mark it down, and every liveness request is bounded
 # without relying on a platform-specific timeout executable.
@@ -12,7 +13,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/var/tmp}/osrc-devin-guard.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR%/}/osrc-devin-guard.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 export OSRC_HOME="$TEST_ROOT/state"
 export OSRC_JOBS="$OSRC_HOME/jobs"

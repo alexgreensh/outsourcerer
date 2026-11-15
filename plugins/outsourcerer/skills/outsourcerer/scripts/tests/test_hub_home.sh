@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_hub_home.sh -- MC-3 Mission Control Home port:
 #   * POST /api/projects/<id>/status (Mark done / Move back): token, origin, strict id, known project only
 #   * hub export merges the user's override LAST (shippedBy "user" survives any card write)
@@ -17,7 +18,7 @@ DEC="$LIB/hub-assets/hub-decide.js"
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/hub-home-test.XXXXXX")"   # never beside the suites (MC-5 #8); trap removes it
+TMP="$(mktemp -d "${TMPDIR%/}/hub-home-test.XXXXXX")"   # never beside the suites (MC-5 #8); trap removes it
 SRV=""
 cleanup() { [ -n "$SRV" ] && { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }; rm -rf "$TMP"; }
 trap cleanup EXIT

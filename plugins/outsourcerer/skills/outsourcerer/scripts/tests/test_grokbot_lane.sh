@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_grokbot_lane.sh — the Grok Bot lane posts the task to a routine webhook (Bearer key, JSON),
 # then waits for the bot to push a branch to origin and prints OUTSOURCERER_RESULT.md from it.
 # A local HTTP server plays the bot: it checks the key, records the payload, and pushes the branch
@@ -9,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 command -v python3 >/dev/null || { echo "SKIP: python3 missing"; exit 0; }
 for t in jq git curl; do command -v "$t" >/dev/null || { echo "FAIL: $t is required"; exit 1; }; done
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-gb.XXXXXX")"; SRV=""
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-gb.XXXXXX")"; SRV=""
 trap '[ -n "$SRV" ] && kill "$SRV" 2>/dev/null; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME"
 export HOME="$TMP/fakehome"; mkdir -p "$HOME"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_explain.sh — the `explain` verb + the "non-success terminal states persist a reason" invariant.
 #
 # For every NON-SUCCESS terminal state, the job dir MUST carry a non-empty $jd/reason (or $jd/error),
@@ -16,7 +17,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is required for this test"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-explain.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-explain.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 
 # OSRC_HOME must be set BEFORE sourcing: outsourcerer.sh pins OSRC_HOME/OSRC_JOBS at source time.
 # OSRC_SOURCED=1 keeps the source guard from running main().

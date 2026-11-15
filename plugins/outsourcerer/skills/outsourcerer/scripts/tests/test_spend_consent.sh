@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_spend_consent.sh — L7 round 3.2 (r3.1 verdict findings 1-3): runtime Free Devin
 # default, NEXT = refused command + --spend-ok, token-bound exact .spend-ok markers.
 # Split from test_limit_gate.sh to keep every file under the 1,000-line rule.
@@ -21,7 +22,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-spendconsent.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-spendconsent.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # Source the REAL script (OSRC_SOURCED=1 skips main); lib/* load via the symlink-safe
 # fallback loader exactly like test_limit_gate.sh.

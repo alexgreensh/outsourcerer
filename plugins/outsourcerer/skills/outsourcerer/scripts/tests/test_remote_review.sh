@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_remote_review.sh -- remote lanes (lib/remote.sh) + single-reviewer queue (lib/review.sh).
 #
 # No network: a local bare git repo stands in for the remote, a fake `tmux` stands in for the reviewer
@@ -7,7 +8,7 @@
 # Every OSRC_HOME is under the runner's scratch directory; live state is never used.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FIX="$HERE/fixtures/review"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-remote-review.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-remote-review.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }

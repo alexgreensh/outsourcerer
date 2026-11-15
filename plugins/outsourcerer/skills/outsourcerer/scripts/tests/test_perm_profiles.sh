@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_perm_profiles.sh — `session start --perm safe|default` (L5).
 #
 # Covers the contract in scripts/lib/perm.sh:
@@ -29,7 +30,7 @@ LIB="$SCRIPT_DIR/../lib/perm.sh"
 [ -f "$LIB" ] || { echo "FAIL: cannot find $LIB"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n outsourcerer.sh"; exit 1; }
 bash -n "$LIB" || { echo "FAIL: bash -n lib/perm.sh"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-perm.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-perm.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
 . "$SRC" >/dev/null 2>&1
 type -t osrc_perm_flags >/dev/null || { echo "FAIL: osrc_perm_flags not loaded (lib loader broken)"; exit 1; }

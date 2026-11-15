@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_sandbox.sh" || { echo "FAIL: sandbox library" >&2; exit 1; }
 osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # Tests the truthful lane-accounting: _effective_lane mapping + cmd_tab three-way FREE/PLAN/CASH
@@ -11,7 +12,7 @@ MAIN="$HERE/../outsourcerer.sh"
 command -v jq >/dev/null 2>&1 || { echo "FAIL: jq required" >&2; exit 1; }
 
 # BSD/macOS mktemp: template must END in X's (no trailing suffix).
-TMP="$(mktemp "${TMPDIR:-/tmp}/osrc_acct.XXXXXX")"
+TMP="$(mktemp "${TMPDIR%/}/osrc_acct.XXXXXX")"
 trap 'rm -f "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$MAIN" > "$TMP"
 # shellcheck disable=SC1090
@@ -75,7 +76,7 @@ ck "bucket {provider:openrouter}"    "$(bkt '{"provider":"openrouter"}')"   cash
 # --- C. cash-accounting: an UNMEASURED cash OpenRouter run (empty cost_usd) is still a CASH run and must be
 #        counted as est-only, NOT dropped and NOT reported as "$0 measured". Prove via the real
 #        cmd_tab summary output over a crafted ledger. ---
-LED="$(mktemp "${TMPDIR:-/tmp}/osrc_led.XXXXXX")"; trap 'rm -f "$TMP" "$LED"; rm -rf "$OSRC_TEST_ROOT"' EXIT
+LED="$(mktemp "${TMPDIR%/}/osrc_led.XXXXXX")"; trap 'rm -f "$TMP" "$LED"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 {
   printf '%s\n' '{"ts":"t","provider":"codex","model":"glm","tier":"capable","verb":"run","in_tokens":10,"cost_usd":"","task_hash":"1","lane":"or"}'
   printf '%s\n' '{"ts":"t","provider":"codex","model":"glm","tier":"capable","verb":"run","in_tokens":10,"cost_usd":"0.002000","task_hash":"2","lane":"or"}'
@@ -96,7 +97,7 @@ grep -qF 'Devin: 1 run(s), $0 cash, spends your Devin plan limits' <<<"$TAB_OUT"
   || { echo "FAIL: plan-bucket Devin disclosure missing"; echo "$TAB_OUT"; fail=1; }
 
 # --- D. a PAY-PER-USE devin row (nonzero cost on lane=dv) must count as CASH, not plan. ---
-LED2="$(mktemp "${TMPDIR:-/tmp}/osrc_led2.XXXXXX")"
+LED2="$(mktemp "${TMPDIR%/}/osrc_led2.XXXXXX")"
 printf '%s\n' '{"ts":"t","provider":"devin","model":"glm-5.2","verb":"run","cost_usd":"0.050000","lane":"dv"}' > "$LED2"
 TAB2="$(OSRC_LEDGER="$LED2" cmd_tab 2>/dev/null)"
 grep -qE 'cash billed \(measured\)[[:space:]]*:[[:space:]]*\$0.05' <<<"$TAB2" \
@@ -106,7 +107,7 @@ rm -f "$LED2"
 
 # --- E. a single malformed/interleaved ledger line must NOT blank the whole Tab;
 #        the valid rows still tally and a parse-error message must NOT appear. ---
-LED3="$(mktemp "${TMPDIR:-/tmp}/osrc_led3.XXXXXX")"
+LED3="$(mktemp "${TMPDIR%/}/osrc_led3.XXXXXX")"
 { printf '%s\n' '{"ts":"t","provider":"codex","model":"glm","verb":"run","cost_usd":"0.002000","lane":"or"}'
   printf '%s\n' 'THIS IS NOT JSON — interleaved garbage from a concurrent append'
   printf '%s\n' '{"ts":"t","provider":"devin","model":"glm-5.2","verb":"run","cost_usd":"0.000000","lane":"dv"}'; } > "$LED3"

@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Guard: no test may kill a tmux server that could be the developer's real one.
 # Inside a tmux pane $TMUX names the real socket and overrides TMUX_TMPDIR, so a bare
 # `tmux kill-server` in a test killed every live delegate session on 2026-11-13.
@@ -14,8 +15,8 @@ for f in "$DIR"/*.sh "$DIR"/../outsourcerer.sh "$DIR"/../lib/*.sh; do
     case "$line" in *' -L '*|*' -S '*|*'env -u TMUX'*) continue ;; esac
     grep -q 'unset TMUX' "$f" && continue
     echo "FAIL: $f:${line%%:*} kills a tmux server without -L/-S or clearing TMUX"
-    echo x >> "${TMPDIR:-/tmp}/.osrc-kill-safety.$$"
+    echo x >> "${TMPDIR%/}/.osrc-kill-safety.$$"
   done
 done
-if [ -f "${TMPDIR:-/tmp}/.osrc-kill-safety.$$" ]; then rm -f "${TMPDIR:-/tmp}/.osrc-kill-safety.$$"; echo "RESULT: FAIL"; exit 1; fi
+if [ -f "${TMPDIR%/}/.osrc-kill-safety.$$" ]; then rm -f "${TMPDIR%/}/.osrc-kill-safety.$$"; echo "RESULT: FAIL"; exit 1; fi
 echo "RESULT: PASS"

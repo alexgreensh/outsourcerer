@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -euo pipefail
 
 SK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../outsourcerer.sh"
 
 # ISOLATE persistent state (v0.4.8 remembered consent): never read/pollute the user's
 # real ~/.outsourcerer — a stored grant there would make every refusal assertion fail.
-export OSRC_HOME="${TMPDIR:-/tmp}/osrc-covtest-home-$$"
+export OSRC_HOME="${TMPDIR%/}/osrc-covtest-home-$$"
 mkdir -p "$OSRC_HOME"
 # r11 F7: scratch HOME too — auth/billing probes read $HOME; never inherit the real one.
 export HOME="$OSRC_HOME/home"; mkdir -p "$HOME"

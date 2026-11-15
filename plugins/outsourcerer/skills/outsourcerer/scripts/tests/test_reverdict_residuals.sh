@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Focused kill-window regressions for the remaining re-verdict residuals.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-reverdict.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/.test-reverdict.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; TEST_TMP="$TMP"; trap 'rm -rf "$TEST_TMP"' EXIT
 export OSRC_HOME="$TMP/state"; OSRC_EXTERNAL_SEND=1; export OSRC_EXTERNAL_SEND; pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 set --; . "$SRC" >/dev/null 2>&1

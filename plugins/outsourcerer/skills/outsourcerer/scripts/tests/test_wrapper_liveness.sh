@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_wrapper_liveness.sh — issues #47 and #48.
 #
 # #47: an auto-detached run puts outsourcerer.sh itself in the tmux pane. It is a bash script, so
@@ -16,7 +17,7 @@ WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-wl.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-wl.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 export TMUX_TMPDIR="$TMP/t"; mkdir -p "$TMUX_TMPDIR"
 [ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 unset TMUX TMUX_PANE

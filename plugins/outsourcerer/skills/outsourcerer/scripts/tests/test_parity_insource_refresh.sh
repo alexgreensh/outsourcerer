@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_parity_insource_refresh.sh — parity-* INSOURCE blocks must REFRESH, not append-once (issue #62).
 #
 # The old writers returned early when the OUTSOURCERER:INSOURCE marker was present, so a block
@@ -16,7 +17,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/test-parity-insource.XXXXXX")" && pwd)"  # canonicalize: macOS TMPDIR has a trailing slash
+TMP="$(cd "$(mktemp -d "${TMPDIR%/}/test-parity-insource.XXXXXX")" && pwd)"  # canonicalize: macOS TMPDIR has a trailing slash
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
 export OSRC_HOME="$TMP/state"

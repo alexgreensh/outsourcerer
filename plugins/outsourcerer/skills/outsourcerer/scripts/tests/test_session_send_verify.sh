@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Bug A — `session send` must SUBMIT what it typed and VERIFY it left the composer, then report
 # honestly. It must NEVER print "sent" when nothing was submitted, and on failure it must say what
 # state the pane is actually in. Also: when the pane is showing an interactive choice menu, `send`
@@ -12,7 +13,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-send-verify.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-send-verify.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 pass=0; fail=0

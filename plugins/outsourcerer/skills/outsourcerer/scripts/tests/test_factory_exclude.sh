@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_factory_exclude.sh — issue #45: a persistent model exclude list.
 # `exclude add|rm|ls|clear|check`, robust family matching, refusal of an explicit -m on every verb,
 # and every automatic choice skipping excluded models. Fake CLIs only: no real model is ever called.
@@ -9,7 +10,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-factory-exclude.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-factory-exclude.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 HOME="$TMP/home"; export HOME; mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0

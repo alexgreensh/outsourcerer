@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_bg_provider_after_verb.sh — an explicit --provider is AUTHORITATIVE in the bg lane, wherever it sits.
 #
 # The bug (lane routing): cmd_bg's flag loop only consumed a --provider written BEFORE the verb. So
@@ -29,7 +30,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 # Source functions only (drop the `main "$@"` dispatcher) so nothing runs on load.
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-bgprov.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-bgprov.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 SRC_ONLY="$TMP/src.sh"
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"

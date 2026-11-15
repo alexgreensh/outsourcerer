@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_limit_gate.sh — L7: a lane whose plan meter is at/over OSRC_LANE_LIMIT_PCT (default 90)
 # on a FRESH reading is never routed to. The failure this kills: ChatGPT weekly at 98%, `brief`
 # showed it, and a launch still resolved onto the lane where the delegate sat on a limit banner.
@@ -31,7 +32,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-limitgate.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-limitgate.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
 # Source the REAL script (OSRC_SOURCED=1 skips main). $0 is this test, so SCRIPT_DIR resolves to
 # the tests dir and loader 1 finds nothing — loader 2 (_OSRC_FACTORY_DIR, symlinks followed)

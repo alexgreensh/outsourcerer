@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # PR #10 regression: a killed job whose out.log merely NARRATES "429" / "rate limit" in prose must
 # NOT be misrouted to RETRY-DIFFERENT-LANE credit-exhausted. The quota scan runs before the false-
 # stall check and _DEVIN_QUOTA_RE matches a BARE 402/429/rate-limit -- correct against a captured
@@ -10,7 +11,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-pr10.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-pr10.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 # A non-git working dir so the meta.cwd fallback ($PWD when jq is absent) can never hit a real repo
 # and count unrelated commits as the delegate's work.

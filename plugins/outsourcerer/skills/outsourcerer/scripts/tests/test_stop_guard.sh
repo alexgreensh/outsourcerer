@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_stop_guard.sh — issue #48: Claude Code may not end its turn while runs it launched are still
 # going with nothing waiting on them. Covers ownership, the block payload, waiter detection, other
 # sessions, loop safety, cleanup, the off switch, and the plugin hook wiring.
@@ -10,7 +11,7 @@ HOOKS="$SCRIPT_DIR/../../../../hooks/hooks.json"
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq is required (the guard and these checks read JSON)"; exit 1; }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-sg.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-sg.XXXXXX")"
 PIDS=""
 trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME/jobs"

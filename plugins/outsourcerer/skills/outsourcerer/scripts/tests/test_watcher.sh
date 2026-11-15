@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_watcher.sh — a detached job must never run unobserved without the tool saying so.
 #
 # Observed repeatedly in real sessions: the orchestrator launches a background job and then moves on,
@@ -83,7 +84,7 @@ grep -qF '__runjob' <<<"$(awk '/Surface neglected jobs on EVERY invocation/,/esa
 # --- fleet heartbeat: one collection per tick, generation dedupe, durable and attached sinks ---
 src="$SRC"; set --; . "$src" >/dev/null 2>&1
 trap 'rm -rf "$TMP"' EXIT
-HB_TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-watcher-heartbeat.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+HB_TMP="$(mktemp -d "${TMPDIR%/}/.test-watcher-heartbeat.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 old_home="$OSRC_HOME"; OSRC_HOME="$HB_TMP"; OSRC_JOBS="$HB_TMP/jobs"
 OSRC_WAKE_QUEUE="$HB_TMP/wake-queue.jsonl"; OSRC_WAKE_ACK="$HB_TMP/wake-acks.jsonl"
 OSRC_FLEET_SNAPSHOT="$HB_TMP/fleet-snapshot.json"; OSRC_HEARTBEAT="$HB_TMP/heartbeat"

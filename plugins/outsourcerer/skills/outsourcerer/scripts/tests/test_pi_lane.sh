@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_pi_lane.sh — the Pi engine lane (https://github.com/earendil-works/pi) must be registered,
 # reachable by --provider pi, and send flags Pi actually accepts: print mode, no saved session,
 # --model passthrough, --thinking for effort, and a read-only tool list for run/explore.
@@ -7,7 +8,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-pi.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-pi.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; mkdir -p "$HOME" "$OSRC_HOME" "$TMP/bin" "$TMP/work"
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }

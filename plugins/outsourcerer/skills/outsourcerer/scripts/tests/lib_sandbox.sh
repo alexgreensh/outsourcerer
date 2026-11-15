@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Isolate state and replace delegate executables before loading the CLI.
 osrc_test_sandbox() {
   local T vehicle
-  T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-test.XXXXXX")" || return 1
+  T="$(mktemp -d "${TMPDIR%/}/osrc-test.XXXXXX")" || return 1
   export OSRC_TEST_ROOT="$T" HOME="$T/h" OSRC_HOME="$T/o"
   OSRC_SOURCED=1; export -n OSRC_SOURCED
   trap 'rm -rf "$OSRC_TEST_ROOT"' EXIT

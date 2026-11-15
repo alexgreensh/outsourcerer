@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_delegate_attribution.sh — delegated-commit attribution (GH007). Two real seams:
 #  1) ENV: every delegate_* harness is a child of this process, so route_delegate exports a noreply
 #     GIT_AUTHOR_*/GIT_COMMITTER_* identity — a delegate commit can never carry the operator's
@@ -17,7 +18,7 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-attrib.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR%/}/osrc-attrib.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome"
 mkdir -p "$HOME"
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME"

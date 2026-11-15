@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_job_rc_guard_leak.sh — a supervised job's exit code must be the delegate's, and a devin
 # non-interactive reject must read as permission-blocked, not failed or done?.
 #
@@ -15,7 +16,7 @@ FIX="$HERE/fixtures/devin-rc7"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/test-rc-guard.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR%/}/test-rc-guard.XXXXXX")"
 trap 'rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 mkdir -p "$OSRC_HOME"

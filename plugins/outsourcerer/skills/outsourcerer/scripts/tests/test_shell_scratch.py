@@ -40,7 +40,80 @@ def repo_scratch(source):
     return found
 
 
+def untrimmed_tmpdir_joins(source):
+    return [number for number, line in enumerate(source.splitlines(), 1)
+            if not line.lstrip().startswith('#')
+            and re.search(r'\$(?:TMPDIR|\{TMPDIR(?::-[^{}]*)?\}\}*)/', line)]
+
+
 class ShellScratch(unittest.TestCase):
+    def test_shell_scratch_trims_and_canonicalizes_tmpdir(self):
+        for path in HERE.glob('*.sh'):
+            source = path.read_text()
+            with self.subTest(suite=path.name):
+                self.assertEqual(untrimmed_tmpdir_joins(source), [])
+                if '${TMPDIR%/}/' in source:
+                    self.assertIn('. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh"', source)
+
+    def test_product_scratch_trims_tmpdir(self):
+        scripts = HERE.parent
+        bad = [str(path.relative_to(scripts)) + ':' + str(line)
+               for path in scripts.rglob('*.sh') if HERE not in path.parents
+               for line in untrimmed_tmpdir_joins(path.read_text())]
+        self.assertEqual(bad, [], 'untrimmed product TMPDIR joins: ' + ', '.join(bad))
+
+    def test_product_allocations_with_a_trailing_slash(self):
+        with tempfile.TemporaryDirectory(prefix='osrc-product-slash-') as d:
+            root = Path(d); bindir = root / 'bin'; bindir.mkdir()
+            state = root / 'state'; state.mkdir(); (state / 'work').mkdir()
+            stub = bindir / 'mktemp'
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$OSRC_HOME/templates"\nexec /usr/bin/mktemp "$@"\n')
+            stub.chmod(0o755)
+            script = '''set -eu
+_timeout() { shift; "$@"; }
+die() { echo "$*" >&2; exit 1; }
+. "$1/lib/perm.sh"
+. "$1/lib/parity.sh"
+. "$1/lib/cloudgate.sh"
+. "$1/lib/heavy.sh"
+_session_probe_help /bin/echo probe >/dev/null
+_session_assert_model_pinnable stub /bin/echo --model
+_insource_block() { printf bridge; }
+printf original > "$OSRC_HOME/insource"
+_insource_write "$OSRC_HOME/insource" stub
+cd "$OSRC_HOME/work"
+_cred_file_hits
+_osrc_heavy_lockdir
+'''
+            result = subprocess.run(['/bin/bash', '-c', script, 'product-scratch', str(HERE.parent)],
+                                    env={'PATH': str(bindir) + ':/usr/bin:/bin', 'HOME': d,
+                                         'OSRC_HOME': str(state) + '/', 'TMPDIR': str(root) + '/'},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            templates = (state / 'templates').read_text().splitlines()
+            self.assertEqual(len(templates), 5)
+            for template in templates:
+                self.assertNotIn('//', template)
+                self.assertEqual(Path(template).parent, root)
+            self.assertEqual(result.stdout.strip(), str(state / 'heavy-local.lock.d'))
+
+    def test_named_scratch_with_a_trailing_slash_and_symlink(self):
+        with tempfile.TemporaryDirectory(prefix='osrc-slash-') as d:
+            root = Path(d); real = root / 'real'; real.mkdir()
+            alias = root / 'alias'; alias.symlink_to(real, target_is_directory=True)
+            for name in NAMED:
+                source = (HERE / f'test_{name}.sh').read_text()
+                allocation = next(line for line in source.splitlines() if '="$(mktemp -d ' in line)
+                script = '. "$1/lib_scratch.sh"\n' + allocation + '\nprintf "%s\\n" "$TMP"\n'
+                with self.subTest(suite=name):
+                    result = subprocess.run(['/bin/bash', '-u', '-c', script, str(HERE / 'probe.sh'), str(HERE)],
+                                            env={'PATH': '/usr/bin:/bin', 'HOME': d, 'OSRC_HOME': str(root / 'state'),
+                                                 'TMPDIR': str(alias) + '/'}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    allocated = result.stdout.strip()
+                    self.assertNotIn('//', allocated)
+                    self.assertEqual(Path(allocated).parent, real.resolve())
+
     def test_all_shell_suites_avoid_repo_scratch(self):
         bad = [f'{path.name}:{line}' for path in HERE.glob('*.sh') for line in repo_scratch(path.read_text())]
         self.assertEqual(bad, [], 'repo scratch allocations: ' + ', '.join(bad))

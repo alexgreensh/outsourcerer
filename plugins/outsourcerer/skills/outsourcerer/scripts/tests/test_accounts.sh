@@ -1,9 +1,10 @@
 #!/bin/bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 set -eu
 # Name the command that stops the suite, so a CI-only exit is never silent.
 trap 'echo "FAIL: test_accounts stopped at line $LINENO: $BASH_COMMAND" >&2' ERR
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/.account-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TEST_ROOT="$(mktemp -d "${TMPDIR%/}/.account-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TEST_ROOT"' EXIT
 export HOME="$TEST_ROOT/home" OSRC_HOME="$TEST_ROOT/state"
 mkdir -p "$OSRC_HOME/bin" "$OSRC_HOME/a/token-optimizer" "$OSRC_HOME/b/token-optimizer" "$OSRC_HOME/unknown"

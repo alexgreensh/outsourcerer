@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_factory_tasks.sh -- factory track B: the plan/task store, readiness, claim atomicity, the
 # context-handoff brief, hold/release, cancel/retry, done fallback, corrupt-file handling, and the
 # CLI through a PATH symlink. No real delegate ever runs: _task_bg_launch is overridden after
@@ -15,7 +16,7 @@ command -v git >/dev/null 2>&1 || { echo "SKIP: git not installed"; exit 0; }
 
 # Outside this checkout (system temp), and git told not to look above it, so no test repo, worktree or
 # branch can ever land in the real repository.
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-factory-tasks.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR%/}/test-factory-tasks.XXXXXX")"
 TMP="$(cd "$TMP" && pwd -P)"
 export GIT_CEILING_DIRECTORIES="$(dirname "$TMP")"
 HOME="$TMP/home"; export HOME; mkdir -p "$HOME"

@@ -440,7 +440,7 @@ _osrc_heavy_stall() {
 }
 
 # ---- local serialization: one heavy check at a time ----------------------------------------------
-_osrc_heavy_lockdir() { printf '%s/heavy-local.lock.d' "${OSRC_HOME:-${TMPDIR:-/tmp}/osrc-home}"; }
+_osrc_heavy_lockdir() { local base="${TMPDIR:-/tmp}"; base="${OSRC_HOME:-${base%/}/osrc-home}"; printf '%s/heavy-local.lock.d' "${base%/}"; }
 
 _osrc_heavy_lock() { # <wait-secs> -> rc0 while holding the lock
   local dir waited=0 max="${1:-120}" ep now

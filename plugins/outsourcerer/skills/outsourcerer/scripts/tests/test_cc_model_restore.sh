@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # Track C — claude-native (cc) live model observe + restore (the Fable->Opus flip-back).
 # Parser/navigation logic is tested against fixtures captured from a real Claude Code TUI; the live
 # end-to-end path was validated by hand against a running session during development.
@@ -6,7 +7,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-cc-model.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.test-cc-model.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export OSRC_CC_PICKER_WAIT=0 OSRC_CC_PICKER_NAV_WAIT=0

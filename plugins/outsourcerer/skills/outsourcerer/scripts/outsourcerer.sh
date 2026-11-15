@@ -2433,7 +2433,7 @@ _skill_tree_names_safe() {
 # makes the Devin skills-home grant lock actually serialize concurrent dispatches on stock macOS.
 _bashpid_into() {
   if [ -n "${BASHPID:-}" ]; then _BASHPID="$BASHPID"; return; fi
-  local _tf; _tf="$(mktemp "${TMPDIR:-/tmp}/.osrc-pid.XXXXXX" 2>/dev/null)" || _tf="${TMPDIR:-/tmp}/.osrc-pid.$$.$RANDOM"
+  local _tf _tmp_base="${TMPDIR:-/tmp}"; _tf="$(mktemp "${_tmp_base%/}/.osrc-pid.XXXXXX" 2>/dev/null)" || _tf="${_tmp_base%/}/.osrc-pid.$$.$RANDOM"
   sh -c 'echo $PPID' > "$_tf" 2>/dev/null
   _BASHPID=""; { read -r _BASHPID < "$_tf"; } 2>/dev/null; rm -f "$_tf" 2>/dev/null
   [ -n "$_BASHPID" ] || _BASHPID="$$"
@@ -7175,7 +7175,7 @@ _fleet_name_model() { # <batch-prompt>; free Devin lanes first, then native fall
     # (stock macOS ships none). Capture through a private file, not a command substitution — a
     # missed grandchild holding the substitution pipe would keep this function blocked long after
     # the kill (same reason _timeout does it).
-    out_file="$(mktemp "${OSRC_HOME:-${TMPDIR:-/tmp}}/.fleetname.XXXXXX" 2>/dev/null || mktemp)" || continue
+    local _tmp_base="${OSRC_HOME:-${TMPDIR:-/tmp}}"; out_file="$(mktemp "${_tmp_base%/}/.fleetname.XXXXXX" 2>/dev/null || mktemp)" || continue
     chmod 600 "$out_file" 2>/dev/null || true
     monitor_was_on=0; case "$-" in *m*) monitor_was_on=1 ;; esac
     set -m
@@ -11128,7 +11128,7 @@ _fg_guard() {
     "$fn"; return $?
   fi
   local w hard tdl; w="$(_tier_windows "$tier")"; hard="${OSRC_FG_TIMEOUT:-${w##* }}"; tdl="${OSRC_FG_TEARDOWN:-45}"
-  local base cap fifo rcf hit; base="${TMPDIR:-/tmp}/osrc.fg.$$.${RANDOM}"; cap="$base.log"; fifo="$base.fifo"; rcf="$base.rc"; hit="$base.hit"
+  local base cap fifo rcf hit _tmp_base="${TMPDIR:-/tmp}"; base="${_tmp_base%/}/osrc.fg.$$.${RANDOM}"; cap="$base.log"; fifo="$base.fifo"; rcf="$base.rc"; hit="$base.hit"
   if ! mkfifo "$fifo" 2>/dev/null; then "$fn"; return $?; fi     # no fifo -> never block the user, run inline
   export OSRC_FG_GUARD_ACTIVE=1
   tee "$cap" < "$fifo" & local tp=$!
@@ -14313,7 +14313,7 @@ delegate_gmnative() {
     # retry grep matched nothing (the Ubuntu CI failure). Capture stderr SYNCHRONOUSLY too
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
-    local _aerr; _aerr="$(mktemp "${TMPDIR:-/tmp}/osrc-agy.XXXXXX")"
+    local _aerr _tmp_base="${TMPDIR:-/tmp}"; _aerr="$(mktemp "${_tmp_base%/}/osrc-agy.XXXXXX")"
     _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
