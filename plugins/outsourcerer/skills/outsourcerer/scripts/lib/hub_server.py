@@ -386,6 +386,7 @@ def make_handler(hub):
             ext = os.path.splitext(full)[1].lstrip(".").lower()
             ctype = {"woff2": "font/woff2",
                      "js": "text/javascript; charset=utf-8",
+                     "css": "text/css; charset=utf-8",
                      "txt": "text/plain; charset=utf-8"}.get(ext)
             if (not ctype or full == base
                     or not full.startswith(base + os.sep)

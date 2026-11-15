@@ -99,6 +99,7 @@ cmd_stop_guard() {
   sid="$(_owner_sid "$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)")"
   [ -n "$sid" ] || sid="$(_owner_sid)"
   [ -n "$sid" ] || return 0
+  type osrc_hub_beat_if_known >/dev/null 2>&1 && osrc_hub_beat_if_known "$sid"   # per-turn heartbeat (MC3)
   dir="$OSRC_HOME/owners/$sid"
   [ -d "$dir" ] || return 0
   for id in $(ls -1 "$dir" 2>/dev/null); do
@@ -112,7 +113,8 @@ cmd_stop_guard() {
           _sv_observe "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1
           _sv_emit "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1 || continue
         fi
-        rm -f "$dir/$id" 2>/dev/null ;;
+        rm -f "$dir/$id" 2>/dev/null
+        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id" ;;   # listed as finished (MC3)
       # An idle lane short of its done contract stopped early: it is owed a waiter (SUP bug 1).
       idle) if _sv_idle_owed "$id"; then need="$need $id"; else idle="$idle $id"; fi ;;
       *) need="$need $id" ;;

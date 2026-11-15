@@ -5571,16 +5571,6 @@ _lane_down_remaining() {  # <lane-or-disp> -> human time left on the down marker
   case "$v" in ''|*[!0-9]*) printf '~%ss' "${OSRC_LANE_DOWN_TTL:-300}"; return ;; esac
   if [ "$v" -gt "$now" ]; then _fmt_secs_human $(( v - now )); else printf '0s'; fi
 }
-_fmt_secs_human() {  # <secs> -> 3d2h / 11h26m / 26m / 45s
-  local s="${1:-0}"; case "$s" in ''|*[!0-9]*) s=0 ;; esac
-  if   [ "$s" -ge 86400 ]; then printf '%sd%sh' $(( s/86400 )) $(( s%86400/3600 ))
-  elif [ "$s" -ge 3600 ];  then printf '%sh%02dm' $(( s/3600 )) $(( s%3600/60 ))
-  elif [ "$s" -ge 60 ];    then printf '%sm' $(( s/60 ))
-  else printf '%ss' "$s"; fi
-}
-_epoch_local() {  # <epoch> -> local "YYYY-MM-DD HH:MM" (BSD `date -r`, then GNU `date -d @`)
-  date -r "$1" +'%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$1" +'%Y-%m-%d %H:%M' 2>/dev/null || printf 'epoch %s' "$1"
-}
 _lane_down_active() {  # <lane-or-disp> -> rc0 if an unexpired down marker exists (self-purges)
   local lane; lane="$(_quota_lane_key "$1")"
   [ -n "$lane" ] && [ "$lane" != "?" ] || return 1
@@ -19897,6 +19887,7 @@ main() {
   # passthrough even when OSRC_HOME is unwritable (a preflight die would silently kill the user's
   # real statusline). Its write paths self-guard. brief/mode are read-only/self-guarding likewise.
   case "$cmd" in ""|-h|--help|help|--version|-V|doctor|brief|mode|tap|exclude|parity|parity-*) ;; *) _state_home_preflight ;; esac
+  type osrc_hub_beat_cmd >/dev/null 2>&1 && osrc_hub_beat_cmd "$cmd"   # Mission Control heartbeat (lib/hub-report.sh)
   case "$cmd" in
     --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)

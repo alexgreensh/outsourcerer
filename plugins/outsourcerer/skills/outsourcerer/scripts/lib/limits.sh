@@ -676,7 +676,7 @@ EOF
           left="$(awk -v u="$used" 'BEGIN{printf "%g%% left",100-u}')" ;;
         esac
         case "$renews_at" in ''|-|*[!0-9]*) renews_at=""; renews="" ;;
-          *) renews="$(_human_eta "$renews_at" 2>/dev/null)"; renews="${renews:+in $renews}" ;;
+          *) renews="$(_osrc_renew_text "$renews_at" 2>/dev/null)" ;;   # "in 4 days · Thu 19 Nov" (MC3)
         esac
         state=ok
         awk -v p="$used" -v t="$cons_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=low
@@ -726,7 +726,7 @@ _osrc_summary_json() {  # <rows> <meter-windows-tsv>
         [ -n "$wrow2" ] || continue
         wp2="$(printf '%s' "$wrow2" | cut -f2)"; wr2="$(printf '%s' "$wrow2" | cut -f3)"
         l2="$(awk -v u="$wp2" 'BEGIN{printf "%g",100-u}' 2>/dev/null)"
-        r2=""; case "$wr2" in ''|-|*[!0-9]*) ;; *) r2="$(_human_eta "$wr2" 2>/dev/null)"; r2="${r2:+in $r2}" ;; esac
+        r2=""; case "$wr2" in ''|-|*[!0-9]*) ;; *) r2="$(_osrc_renew_text "$wr2" 2>/dev/null)" ;; esac
         wdet="$wdet\"$w2\":{\"used\":$(_osrc_jnum "$wp2"),\"left\":$(_osrc_jnum "$l2"),\"renews_at\":$(_osrc_jnum "$wr2"),\"renews\":$(_osrc_jstr_or_null "$r2")},"
       done
       wdet="{${wdet%,}}"
@@ -744,13 +744,14 @@ EOF
 }
 
 _osrc_summary_text() {  # <rows>
-  printf '%-9s %-18s %-8s %-9s %-12s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP BILLING
+  printf '%-9s %-18s %-8s %-12s %-24s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP BILLING
   local hid
   # rows: id|name|lane|order|state|left|renews_at|renews|caps|captripped|billing|paid|win|used|checked
   while IFS='|' read -r hid hname hlane horder state left renews_at renews caps captripped bill paid win used checked; do
     [ -n "$hid" ] || continue
-    printf '%-9s %-18s %-8s %-12s %-10s %-6s %s%s\n' "$hid" "$hname" "$state" "${left:-—}" \
-      "${renews:-—}" "${caps:--}" "$(case "$bill" in metered) echo 'pay per use' ;; unknown) echo 'plan not confirmed' ;; *) echo '-' ;; esac)" \
+    # printf pads bytes: "·" and "—" are multi-byte, so widen by their extra bytes to keep columns.
+    printf "%-9s %-18s %-8s %-12s %-$([ -n "$renews" ] && echo 25 || echo 26)s %-6s %s%s\n" "$hid" "$hname" "$state" "${left:-—}" \
+      "${renews:-—}" "${caps:--}" "$(case "$bill" in (metered) echo 'pay per use' ;; (unknown) echo 'plan not confirmed' ;; (*) echo '-' ;; esac)" \
       "$([ "$captripped" = true ] && echo '[cap tripped]')"
   done <<EOF
 $1

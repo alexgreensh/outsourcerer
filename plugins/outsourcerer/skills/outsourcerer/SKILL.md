@@ -132,7 +132,7 @@ Core: `brief` · `mode` · `consent` · `cloud` (hosted sessions: `start`/`where
 
 ## Mission Control (`hub`)
 
-`hub export` prints the project docs the Mission Control page renders, built from live state (owners, jobs, sessions, remote lanes, done contracts, review verdicts). `hub serve` runs the same page locally on `127.0.0.1` behind a random token and opens it. `cleanup` (no args) is a dry run over the created-manifest with SAFE/ASK verdicts; `--apply` deletes SAFE only, `--ack` acknowledges ASK, `<id> [--force]` removes a worktree as before. Guide: `references/hub.md`.
+`hub export` prints the project docs the Mission Control page renders, built from live state (owners, jobs, sessions, remote lanes, done contracts, review verdicts). `hub serve` runs the same page locally on `127.0.0.1` behind a random token and opens it. Your session shows there on its own once it uses Outsourcerer. At each milestone, say where you are in your own words: `hub report --status building|review|waiting|shipped --pct N --eta "<when>" --next "<one line>"`, `--name "<project>"` once, `--ask "<question>"` when you need Alex (`--done-ask D1` once answered). `cleanup` (no args) is a dry run over the created-manifest with SAFE/ASK verdicts; `--apply` deletes SAFE only, `--ack` acknowledges ASK, `<id> [--force]` removes a worktree as before. Guide: `references/hub.md`.
 
 ## Factory: plans for multi-step work
 

@@ -21,7 +21,7 @@ printf '{"cwd":"%s"}\n' "$T/folder" > "$OSRC_JOBS/two/meta.json"
 touch "$OSRC_HOME/owners/folder-id/two"
 [ "$(_osrc_hub_derived_name folder-id)" = 'Folder' ]
 printf '%s\n' '{"type":"user","message":{"content":"Build the mission control dashboard"}}' > "$HOME/.claude/projects/p/prompt-id.jsonl"
-[ -z "$(_osrc_hub_derived_name prompt-id)" ] && [ "$(_osrc_hub_session_detail prompt-id)" = 'Build the mission control…' ]
+[ -z "$(_osrc_hub_derived_name prompt-id)" ] && [ "$(_osrc_hub_session_detail prompt-id)" = 'Build the mission control dashboard' ]   # MC3 Titles: a first prompt is cut at ~6 words, not 32 chars
 printf '%s\n' '{"type":"custom-title","customTitle":"A named session"}' >> "$HOME/.claude/projects/p/prompt-id.jsonl"
 [ "$(_osrc_hub_session_detail prompt-id)" = 'A named session' ]
 [ -z "$(_osrc_hub_derived_name missing-id)$(_osrc_hub_session_detail missing-id)" ]
@@ -47,7 +47,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 nm() { printf '%s\n' "$2" > "$HOME/.claude/projects/p/$1.jsonl"; _osrc_hub_session_detail "$1"; }
 
 # #3 names: chat noise stripped, slash commands dropped, word-boundary cut with an ellipsis, meta skipped.
-[ "$(nm img '{"type":"user","message":{"content":[{"type":"text","text":"[Image #1] something is really, really wrong, either with the token optimizer"}]}}')" = 'something is really, really…' ] || fail "image token: $(_osrc_hub_session_detail img)"
+[ "$(nm img '{"type":"user","message":{"content":[{"type":"text","text":"[Image #1] something is really, really wrong, either with the token optimizer"}]}}')" = 'something is really, really wrong, either…' ] || fail "image token: $(_osrc_hub_session_detail img)"
 [ "$(nm paste '{"type":"user","message":{"content":"\n\n<pasted_content id=\"b887\">\nToken Optimizer savings audit.\n</pasted_content>"}}')" = 'Token Optimizer savings audit.' ] || fail "pasted_content: $(_osrc_hub_session_detail paste)"
 [ "$(nm ptext '{"type":"user","message":{"content":"[Pasted text #2 +40 lines] ship the hub fix"}}')" = 'ship the hub fix' ] || fail 'pasted text token'
 [ "$(nm slash '{"type":"user","message":{"content":"/review fix the login bug"}}')" = 'fix the login bug' ] || fail 'leading slash command'
@@ -55,7 +55,7 @@ nm() { printf '%s\n' "$2" > "$HOME/.claude/projects/p/$1.jsonl"; _osrc_hub_sessi
 printf '%s\n%s\n' '{"type":"user","isMeta":true,"message":{"content":"Base directory for this skill"}}' '{"type":"user","message":{"content":"The real ask"}}' > "$HOME/.claude/projects/p/meta.jsonl"
 [ "$(_osrc_hub_session_detail meta)" = 'The real ask' ] || fail 'isMeta not skipped'
 # Cached by session id; a grown transcript (here a rename) is read again.
-[ "$(cut -d' ' -f2- "$OSRC_HOME/hub/titles/meta")" = 'The real ask' ] || fail 'name not cached'
+[ "$(cut -d' ' -f2- "$OSRC_HOME/hub/titles-v2/meta")" = 'The real ask' ] || fail 'name not cached'
 printf '%s\n' '{"type":"custom-title","customTitle":"[Image #3] Renamed  session"}' >> "$HOME/.claude/projects/p/meta.jsonl"
 [ "$(_osrc_hub_session_detail meta)" = 'Renamed session' ] || fail "cache not invalidated: $(_osrc_hub_session_detail meta)"
 printf 'PASS: MC2 r2 #3 names cleaned and cached\n'
@@ -146,11 +146,11 @@ out="$(ex)"
 [ "$(pname "$out" s-ship)" = 'Demo · ship 0.16.1' ] || fail "custom title: $(pname "$out" s-ship)"
 [ "$(pname "$out" s-side)" = 'Demo · fix the sidebar see and' ] || fail "cleaned prompt: $(pname "$out" s-side)"
 [ "$(pname "$out" s-sum)" = 'Demo · Release notes for 0.16.1' ] || fail "summary line: $(pname "$out" s-sum)"
-[ "$(pname "$out" s-none)" = 'Demo · session 1' ] || fail "nothing usable: $(pname "$out" s-none)"
+[ "$(pname "$out" s-none)" = 'Demo' ] || fail "nothing usable (MC3: unique without a suffix): $(pname "$out" s-none)"
 printf '%s' "$out" | jq -e '[.projects[].name | test("https?:|/|[0-9a-f]{8}|\\(")] | any | not' >/dev/null || fail "an id, URL or path in a name: $(printf '%s' "$out" | jq -c '[.projects[].name]')"
-# Alone in its project: just the project. No project known: what it is doing. A card name wins.
+# A title always joins the project (MC3 Titles). No project known: the title alone. A card name wins.
 for s in s-side s-sum s-none; do old 120 "$HOME/.claude/projects/p/$s.jsonl"; done
-out="$(ex)"; [ "$(pname "$out" s-ship)" = 'Demo' ] || fail "single session not plain: $(pname "$out" s-ship)"
+out="$(ex)"; [ "$(pname "$out" s-ship)" = 'Demo · ship 0.16.1' ] || fail "single session: $(pname "$out" s-ship)"   # MC3 Titles: always "<Project> · <title>"
 mkdir -p "$OSRC_HOME/owners/s-loose" "$OSRC_JOBS/s-loose-job"; printf '{}\n' > "$OSRC_JOBS/s-loose-job/meta.json"; touch "$OSRC_HOME/owners/s-loose/s-loose-job"
 printf '%s\n' '{"type":"user","message":{"content":"/plan draft the launch email"}}' > "$HOME/.claude/projects/p/s-loose.jsonl"
 out="$(ex)"; [ "$(pname "$out" s-loose)" = 'draft the launch email' ] || fail "no-project name: $(pname "$out" s-loose)"
