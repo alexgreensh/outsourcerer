@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A failed ps lookup must not let a contender steal a live factory lock.
 set -uo pipefail
-TEST_ROOT="$(mktemp -d "${TMPDIR:-.}/lock-owner-test.XXXXXX")" || exit 1
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/lock-owner-test.XXXXXX")" || exit 1
 export HOME="$TEST_ROOT/home" OSRC_HOME="$TEST_ROOT/osrc"
 holder=""
 cleanup() { [ -z "$holder" ] || { kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true; }; rm -rf "$TEST_ROOT"; }
