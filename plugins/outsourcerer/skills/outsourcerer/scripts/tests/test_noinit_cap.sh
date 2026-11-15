@@ -28,7 +28,7 @@ job cold dv
 start=$(date +%s)
 OSRC_NOINIT_SECS=3 _supervise "$T/cold" 30 45 30 -- /bin/bash -c 'sleep 2; touch "$1"; sleep 30' _ "$LIVE_LOG" >/dev/null 2>&1
 rc=$?; elapsed=$(( $(date +%s) - start )); reason=$(cat "$T/cold/reason" 2>/dev/null)
-if [ "$rc" = 125 ] && [ "$elapsed" -ge 4 ] && [ "$elapsed" -lt 20 ] && printf '%s\n' "$reason" | grep -Eq '^no-init: delegate never started after [0-9]+s'; then
+if [ "$rc" = 125 ] && [ "$elapsed" -ge 4 ] && [ "$elapsed" -lt 20 ] && [[ "$reason" =~ ^no-init:\ delegate\ never\ started\ after\ [0-9]+s ]]; then
   reported=$(printf '%s\n' "$reason" | sed -E 's/^no-init: delegate never started after ([0-9]+)s.*/\1/')
   if [ "$reported" -ge 4 ] && [ "$reported" -le "$elapsed" ]; then ok "cold log triggers no-init with elapsed time"; else bad "incorrect elapsed time: $reason"; fi
 else
