@@ -22,8 +22,7 @@ mkdir -p "$OSRC_HOME" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_CLAUDE_PROJECTS_DIR"
 set --
 . "$SRC" >/dev/null 2>&1
 
-dead_pid=999999
-while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
 now_ms="$(date +%s)000"
 jq -cn --argjson pid "$dead_pid" --argjson now "$now_ms" '
   {pid:$pid,sessionId:"dead-waiting",cwd:"/",startedAt:$now,updatedAt:$now,

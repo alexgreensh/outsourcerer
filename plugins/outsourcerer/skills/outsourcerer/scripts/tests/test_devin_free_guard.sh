@@ -230,11 +230,14 @@ fi
 # job's recorded child (else the orphan reaper misses its own lane-blocker, or worse, claims a
 # recycled pid). Real sleep, killed by pid. Not `locale -a | grep -q`: under pipefail the
 # early-exiting grep SIGPIPEs the large output; capture and match instead.
-# The dead supervisor is a child we forked and REAPED ourselves: provably gone, and its pid cannot
-# come back without a full pid-space wrap. (Scanning down from the sleep's pid for the first pid
-# kill -0 rejects could land on a process that was still being created, or one owned by another
-# user, so "dead" was a guess.) On failure, _ow_why prints the evidence the CI log needs.
-( exit 0 ) & _ow_dead=$!; wait "$_ow_dead" 2>/dev/null
+# The dead supervisor is a child we forked and REAPED ourselves (osrc_test_dead_pid): provably gone,
+# and its pid cannot come back without a full pid-space wrap. Root cause of the macOS CI flake
+# (run 43751567057, both cases "got ''"): the old harness scanned down from the sleep's pid for the
+# first pid kill -0 rejected, and kill -0 also rejects a pid whose process is still being created.
+# That "dead" supervisor was alive a moment later, so the product (correctly) declined to call the
+# job orphaned. Reproduced on macOS: 3/300 picks were alive 20 ms later under fork churn.
+# On any future failure, _ow_why prints the evidence the CI log needs.
+_ow_dead="$(osrc_test_dead_pid)"
 sleep 60 & _ow_pid=$!
 _ow_why() {
   local d="$1" sup="dead"

@@ -80,3 +80,56 @@ jobs:
             echo "$s: $r in $(( $(date +%s) - start ))s"
           done
           [ -z "$failed" ] || { echo "::error::failed on Windows Git Bash:$failed"; exit 1; }
+  uutils:
+    # Ubuntu 26.04 ships uutils coreutils, whose mkdir is not an atomic claim (it once accepted
+    # EEXIST), and lib/atomic-claim.sh has a uutils-only branch that GNU hosts never reach. This job
+    # puts uutils FIRST on PATH and runs the lock suites one at a time. The PATH setup is the same
+    # script the local rehearsal image uses (scripts/ci/uutils-rehearsal), so they cannot drift.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uutils coreutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rust-coreutils jq
+        shell: bash
+
+      - name: Put uutils first on PATH
+        run: |
+          sudo bash scripts/ci/uutils-rehearsal/setup-uutils.sh /opt/uutils/bin
+          echo /opt/uutils/bin >> "$GITHUB_PATH"
+        shell: bash
+
+      - name: Prove mkdir is uutils
+        run: |
+          set -euo pipefail
+          command -v mkdir
+          mkdir --version | head -1
+          [ "$(command -v mkdir)" = /opt/uutils/bin/mkdir ] || { echo "::error::mkdir is not the uutils one"; exit 1; }
+          # 24.04's uutils 0.0.24 prints "mkdir 0.0.24" (no "uutils"), so prove it by package ownership.
+          bash scripts/ci/uutils-rehearsal/setup-uutils.sh --check "$(command -v mkdir)" \
+            || { echo "::error::mkdir is not uutils (see evidence line above)"; exit 1; }
+        shell: bash
+
+      - name: Run lock suites (one at a time)
+        run: |
+          set -uo pipefail
+          T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
+          fails=0
+          for s in $(grep -v '^#' scripts/ci/uutils-rehearsal/suites.txt); do
+            H="$(mktemp -d "$RUNNER_TEMP/uu-$s.XXXXXX")"
+            start=$(date +%s); rc=0
+            HOME="$H" OSRC_HOME="$H/osrc" OSRC_HEARTBEAT_DISABLED=1 TMPDIR="$H" \
+              timeout 150 bash "$T/$s.sh" > "$H.log" 2>&1 || rc=$?
+            echo "$s rc=$rc $(( $(date +%s) - start ))s: $(grep -E 'RESULT|passed|PASS|FAIL' "$H.log" | tail -1)"
+            if [ "$rc" != 0 ]; then
+              fails=$((fails+1)); echo "::error::$s failed under uutils (rc=$rc)"; tail -40 "$H.log"
+            fi
+          done
+          [ "$fails" = 0 ]
+        shell: bash

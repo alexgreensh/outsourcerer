@@ -34,8 +34,7 @@ ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
 # A dead pid we can rely on across the suite.
-dead_pid=999999
-while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
 
 # ---------------------------------------------------------------------------
 # 1. `session stop` writes an `end` event (reason stop) and is idempotent.
