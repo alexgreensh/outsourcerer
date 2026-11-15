@@ -17,6 +17,17 @@ mkdir() { command mkdir -p "$@"; }
 mkdir "$TMP/control" && mkdir "$TMP/control" || { echo 'FAIL: lying mkdir control'; exit 1; }
 echo 'PASS: lying mkdir reports success twice'
 
+mkdir_banner="$(command mkdir --version 2>/dev/null)" || mkdir_banner=""
+host_system="$(uname -s 2>/dev/null)"
+shell_usable=0; shell_error='mkdir is not a known atomic implementation'
+case "$host_system" in
+  Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly) shell_usable=1 ;;
+  *) case "$mkdir_banner" in
+       *uutils*|*Uutils*) shell_error='uutils mkdir requires working Perl or Python 3' ;;
+       *'GNU coreutils'*) shell_usable=1 ;;
+     esac ;;
+esac
+
 for mode in native python shell; do
   if [ "$mode" = python ] && ! command -v python3 >/dev/null 2>&1; then
     echo 'SKIP: Python is unavailable'; continue
@@ -37,7 +48,7 @@ for mode in native python shell; do
         }
       fi
       if [ "$mode" = shell ]; then mkdir() { builtin command mkdir "$@"; }; fi
-      _mkdir_claim "$claim"; printf '%s\n' "$?" > "$gate/result.$i"
+      _mkdir_claim "$claim" 2> "$gate/error.$i"; printf '%s\n' "$?" > "$gate/result.$i"
     ) & pids[$i]=$!
   done
   osrc_race_release "$gate" 10 || exit 1
@@ -47,11 +58,18 @@ for mode in native python shell; do
     read -r rc < "$gate/result.$i"
     [ "$rc" != 0 ] || wins=$((wins + 1))
   done
-  [ "$wins" = 1 ] || { echo "FAIL: $mode helper allowed $wins winners"; exit 1; }
-  echo "PASS: $mode helper elects exactly one owner despite lying mkdir"
+  if [ "$mode" = shell ] && [ "$shell_usable" = 0 ]; then
+    [ "$wins" = 0 ] && [ ! -e "$claim" ] || { echo "FAIL: unsafe shell helper allowed $wins winners"; exit 1; }
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      grep -Fq "$shell_error" "$gate/error.$i" || { echo "FAIL: shell refusal lacked diagnostic for racer $i"; exit 1; }
+    done
+    echo 'PASS: unsafe shell mkdir refuses every contender with a diagnostic'
+  else
+    [ "$wins" = 1 ] || { echo "FAIL: $mode helper allowed $wins winners"; exit 1; }
+    echo "PASS: $mode helper elects exactly one owner despite lying mkdir"
+  fi
 done
 
-mkdir_banner="$(command mkdir --version 2>/dev/null)" || mkdir_banner=""
 case "$mkdir_banner" in *'GNU coreutils'*) gnu_mkdir=1 ;; *) gnu_mkdir=0 ;; esac
 if [ "$gnu_mkdir" = 1 ]; then
   for platform in MSYS_NT-10.0 MINGW64_NT-10.0 CYGWIN_NT-10.0; do
@@ -89,20 +107,30 @@ fi
     builtin command "$@"
   }
   python3() { printf '%s\n' "${1:-}" >> "$TMP/python-args"; return 1; }
-  _mkdir_claim "$TMP/python-failed" || exit 1
+  rc=0; _mkdir_claim "$TMP/python-failed" 2> "$TMP/python-failed.err" || rc=$?
+  if [ "$shell_usable" = 1 ]; then [ "$rc" = 0 ] || exit 1
+  else
+    [ "$rc" != 0 ] && [ ! -e "$TMP/python-failed" ] && grep -Fq "$shell_error" "$TMP/python-failed.err" || exit 1
+    builtin command mkdir "$TMP/python-failed" || exit 1
+  fi
   [ "$(cat "$TMP/python-args")" = -I ] || exit 1
   ! _mkdir_claim "$TMP/python-failed" || exit 1
 ) || { echo 'FAIL: a broken Python did not safely fall back or was not isolated'; exit 1; }
-echo 'PASS: broken isolated Python falls back for a missing directory and refuses an existing one'
+echo 'PASS: broken isolated Python follows the safe host fallback and refuses an existing directory'
 (
   mkdir() { builtin command mkdir "$@"; }
   perl() { printf 'perl\n' >> "$TMP/broken-order"; return 1; }
   python3() { printf 'python %s\n' "${1:-}" >> "$TMP/broken-order"; return 1; }
-  _mkdir_claim "$TMP/both-failed" || exit 1
+  rc=0; _mkdir_claim "$TMP/both-failed" 2> "$TMP/both-failed.err" || rc=$?
+  if [ "$shell_usable" = 1 ]; then [ "$rc" = 0 ] || exit 1
+  else
+    [ "$rc" != 0 ] && [ ! -e "$TMP/both-failed" ] && grep -Fq "$shell_error" "$TMP/both-failed.err" || exit 1
+    builtin command mkdir "$TMP/both-failed" || exit 1
+  fi
   [ "$(cat "$TMP/broken-order")" = "$(printf 'perl\npython -I')" ] || exit 1
   ! _mkdir_claim "$TMP/both-failed" || exit 1
 ) || { echo 'FAIL: broken interpreters did not fall back in order'; exit 1; }
-echo 'PASS: broken Perl and Python fall back in order without claiming an existing directory'
+echo 'PASS: broken Perl and Python use the safe host fallback without claiming an existing directory'
 
 (
   command() {
@@ -157,9 +185,14 @@ fi
   }
   mkdir() { builtin command mkdir "$@"; }
   : > "$TMP/old-gate.osrc-claim-gate"
-  _osrc_atomic_mkdir "$TMP/old-gate"
+  if [ "$shell_usable" = 1 ]; then
+    _osrc_atomic_mkdir "$TMP/old-gate"
+  else
+    if _osrc_atomic_mkdir "$TMP/old-gate" 2> "$TMP/old-gate.err"; then exit 1; fi
+    [ ! -e "$TMP/old-gate" ] && grep -Fq "$shell_error" "$TMP/old-gate.err"
+  fi
 ) || { echo 'FAIL: obsolete sibling gate still wedges an atomic mkdir'; exit 1; }
-echo 'PASS: obsolete sibling gate does not wedge a claim'
+echo 'PASS: obsolete sibling gate does not change safe fallback behavior'
 
 # The host name alone cannot make an unknown PATH mkdir trustworthy. Native
 # BSD hosts must bypass it; MSYS-family hosts must reject its mystery banner.
