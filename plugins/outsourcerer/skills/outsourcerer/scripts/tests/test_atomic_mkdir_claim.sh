@@ -148,6 +148,36 @@ echo 'PASS: broken Perl and Python use the safe host fallback without claiming a
 ) || { echo 'FAIL: unsafe uutils fallback was not refused with a diagnostic'; exit 1; }
 echo 'PASS: uutils without an interpreter fails closed with a named diagnostic'
 
+# A contended claim whose holder releases between our refused mkdir and any follow-up check must
+# just lose: no fall-through to the next interpreter or the shell, no uutils diagnostic on stderr
+# (CI run 43751567057: "cannot claim ...lock.d.mx: uutils mkdir requires working Perl or Python 3"
+# leaked into contended Devin dispatches). Real Perl refuses the existing dir; the wrapper then
+# releases it, exactly the holder's rm -rf landing in the window.
+for interp in perl python3; do
+  command -v "$interp" >/dev/null 2>&1 || { echo "SKIP: $interp unavailable for the release-window case"; continue; }
+  (
+    rm -f "$TMP/rw.order"
+    builtin command mkdir "$TMP/rw-$interp"
+    uname() { echo Linux; }
+    mkdir() {
+      [ "${1:-}" != --version ] || { echo 'mkdir (uutils coreutils) 0.10.0'; return 0; }
+      builtin command mkdir "$@"
+    }
+    if [ "$interp" = perl ]; then
+      perl() { local r=0; printf 'perl\n' >> "$TMP/rw.order"; builtin command perl "$@" || r=$?; rmdir "$TMP/rw-perl"; return "$r"; }
+      python3() { printf 'python3\n' >> "$TMP/rw.order"; return 1; }
+    else
+      command() { case "${1:-}:${2:-}" in -v:perl) return 1 ;; esac; builtin command "$@"; }
+      python3() { local r=0; printf 'python3\n' >> "$TMP/rw.order"; builtin command python3 "$@" || r=$?; rmdir "$TMP/rw-python3"; return "$r"; }
+    fi
+    rc=0; _osrc_atomic_mkdir "$TMP/rw-$interp" 2> "$TMP/rw.err" || rc=$?
+    [ "$rc" != 0 ] || { echo "rc=0 claimed a refused directory"; exit 1; }
+    [ ! -s "$TMP/rw.err" ] || { echo "stderr: $(cat "$TMP/rw.err")"; exit 1; }
+    [ "$(cat "$TMP/rw.order")" = "$interp" ] || { echo "fell through: $(tr '\n' ' ' < "$TMP/rw.order")"; exit 1; }
+  ) || { echo "FAIL: a $interp refusal followed by a release fell through to the next claim mechanism"; exit 1; }
+  echo "PASS: a $interp refusal is final even when the holder releases inside the window"
+done
+
 # A shell-only caller paused before the real mkdir must lose to a Perl caller.
 if command -v perl >/dev/null 2>&1; then
   (

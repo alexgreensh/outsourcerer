@@ -177,7 +177,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.16.0"
+OSRC_VERSION="0.16.1"
 # Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
 # picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
 # free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
@@ -277,7 +277,7 @@ unset OSRC_PROVIDER_INJECTED
 # parents pass it to children explicitly (bg -> preflight/job child). Every command entry
 # point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
 # display hint the gate never executes.
-unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_PREFLIGHT_PAIR
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -1081,7 +1081,7 @@ parse_model() {
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
+      --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --)                   shift; REST+=("$@"); break ;;
       *)                    REST+=("$1"); shift ;;
     esac
@@ -1558,17 +1558,7 @@ _lane_plan_key() {
   case " $OSRC_LANE_REGISTRY $OSRC_PLAN_LANES " in *" $k "*) printf '%s' "$k" ;; *) printf '' ;; esac
 }
 # _lane_plan_limit_re <lane> -> that lane's matcher (empty = no matcher; dv is handled by its own fn).
-_lane_plan_limit_re() {
-  case "$(_lane_plan_key "${1:-}")" in
-    cx)     printf '%s' "$_CX_PLAN_LIMIT_RE" ;;
-    cc)     printf '%s' "$_CC_PLAN_LIMIT_RE" ;;
-    cursor) printf '%s' "$_CURSOR_PLAN_LIMIT_RE" ;;
-    warp)   printf '%s' "$_WARP_PLAN_LIMIT_RE" ;;
-    droid)  printf '%s' "$_DROID_PLAN_LIMIT_RE" ;;
-    cline)  printf '%s' "$_CLINE_PLAN_LIMIT_RE" ;;
-    *)      printf '' ;;
-  esac
-}
+
 # _lane_plan_limit_refusal <lane> <errfile> -> rc0 if the captured output is that lane's plan/usage-limit
 # refusal. Dispatcher: dv -> _devin_plan_quota_exhausted; other lanes -> their anchored regex; a lane
 # with no matcher (gm/or/hermes/local/unknown) -> rc1, never a false positive.
@@ -1623,28 +1613,8 @@ _lane_limit_reset_secs() {
   _devin_plan_quota_reset_secs "$p"
 }
 # Human names + where to look, for the block's message. Not a roster of limits, just labels.
-_lane_plan_display() {
-  case "$(_lane_plan_key "${1:-}")" in
-    dv) printf 'Devin' ;; cx) printf 'Codex (ChatGPT plan)' ;; cc) printf 'Claude Code (Claude plan)' ;;
-    warp) printf 'Warp (Oz)' ;; droid) printf 'Droid (Factory)' ;; cursor) printf 'Cursor' ;;
-    cline) printf 'Cline' ;; pi) printf 'Pi' ;; gm) printf 'Gemini CLI' ;; or) printf 'OpenRouter (cash)' ;;
-    tokenrouter) printf 'TokenRouter (cash)' ;; grokbot) printf 'Grok Bot' ;; claudex) printf 'Claudex proxy' ;; local) printf 'local' ;;
-    *) printf '%s' "${1:-?}" ;;
-  esac
-}
-_lane_plan_usage_hint() {
-  case "$(_lane_plan_key "${1:-}")" in
-    cx)     printf 'Live figure: /status or /usage inside codex.' ;;
-    cc)     printf 'Live figure: /usage inside Claude Code.' ;;
-    warp)   printf 'Live figure: Warp Settings > AI usage.' ;;
-    droid)  printf 'Live figure: /limits inside droid (toggle Droid Core / Extra Usage there), or Settings > Usage.' ;;
-    cursor) printf 'Live figure: the Cursor dashboard (Settings > Usage).' ;;
-    cline)  printf 'Live figure: your Cline account / provider dashboard.' ;;
-    pi)     printf 'Live figure: the dashboard of whatever Pi is signed in to.' ;;
-    grokbot) printf 'Live figure: Grok Bot settings > Usage (weekly allowance).' ;;
-    *)      printf '' ;;
-  esac
-}
+
+
 # _lane_meter_saturated <lane> -> rc0 when the lane's OWN meter shows a plan window at/over 100%.
 # cx reads the Codex rollout rate_limits (_codex_rate_limits), cc the statusline tap (_session_limits);
 # both arrive through _session_limits' normalized tokens, already freshness- and expiry-gated. This is
@@ -3112,11 +3082,11 @@ tier_from_price() {   # <openrouter-id> -> budget|mid|frontier from cached prici
 # infer here. Open-weight ids (glm/deepseek/kimi/qwen…) are deliberately absent — they are dual-lane
 # and correctly ride the provider default, so they must fall through to the provider router below.
 lane_from_name() {
-  # Descriptor-first: family_globs on each native lane (cc/cx/gm). The iteration order
-  # is the old case's first-match order (cc, cx, gm) — NOT registry order — because a
-  # token matching two lanes' globs must resolve the same way it did before.
+  # Descriptor-first: family_globs on each native lane. opencode runs FIRST: its
+  # `opencode-go/`/`opencode/` provider prefixes are unambiguous and must beat cc/cx
+  # substring globs (a Go id like opencode-go/claude-* is still an opencode model).
   local _l _g
-  for _l in cc cx gm; do
+  for _l in opencode cc cx gm; do
     _words_noglob "$(_lane_field "$_l" family_globs 2>/dev/null)"   # split WITHOUT globbing the patterns against cwd
     for _g in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$1" in $_g) echo "$_l"; return ;; esac
@@ -3236,7 +3206,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"
 
 # _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
 _lane_field() {
@@ -3414,7 +3384,7 @@ _lane_cli_gate() {
 _lane_ready_probe() {
   local f; f="$(_lane_field "${1:-}" ready_fn 2>/dev/null)" || return 1
   [ -n "$f" ] || return 1
-  "$f"
+  "$f" 9>&-
 }
 
 # _lane_health_key <token> -> the canonical lane code Slice-1 lane-down state keys
@@ -5153,10 +5123,10 @@ _consume_flags() {
       # Per-invocation trust grant. Assigned WITHOUT export on purpose: it must not be inherited by a
       # bg/fanout child, which re-evaluates trust from config for whatever repo it actually runs in.
       --trust-lane) [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;  # accepted AFTER the subcommand too (flag-placement tolerance)
       # `--provider=X` (equals spelling): without this it fell through to `*) break`, became REST/prompt text,
       # and the run silently used the devin default — the same explicit-lane-lost bug as the bg path.
-      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift ;;
+      --provider=*) PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift ;;
       --wait|--foreground) OSRC_NO_AUTODETACH=1; shift ;;  # D3: force foreground even for slow lanes (escape hatch)
       --effort|--reasoning)
                   [ -n "${2:-}" ] || die "--effort requires: minimal|low|medium|high|xhigh|max"
@@ -9649,6 +9619,7 @@ _ready_lanes() {
   _rp="$(_lane_ready_probe tokenrouter 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe grokbot 2>/dev/null)" && lanes="$lanes $_rp"
   _rp="$(_lane_ready_probe claudex 2>/dev/null)" && lanes="$lanes $_rp"
+  _rp="$(_lane_ready_probe opencode 2>/dev/null)" && lanes="$lanes $_rp"
   printf '%s\n' "${lanes# }"
 }
 
@@ -11395,7 +11366,7 @@ _bg_capture_provider() {
     if [ "$_want_val" = "1" ]; then
       # empty value ( `--provider ""` ) fails loud here, mirroring the leading loop's `[ -n ]` guard,
       # instead of setting PROVIDER="" EXPLICIT=1 and dying later with the wrapped preflight error.
-      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
+      [ -n "$_tok" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|opencode)"
       PROVIDER="$_tok"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; _want_val=0; continue
     fi
     case "$_tok" in
@@ -11404,11 +11375,11 @@ _bg_capture_provider() {
       # prompt text, and route to the devin default — the very silent-fallback this fix exists to kill,
       # surviving in the equals spelling. Accept it (value normalized back to the space form downstream).
       --provider=*) PROVIDER="${_tok#--provider=}"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1
-                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)" ;;
+                    [ -n "$PROVIDER" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|opencode)" ;;
       *)            _BG_ARGV+=("$_tok") ;;
     esac
   done
-  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local)"
+  [ "$_want_val" = "1" ] && die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|opencode)"
   return 0   # never inherit the trailing test's exit status (a bare `&& die` would return 1 on the happy path)
 }
 
@@ -11424,7 +11395,7 @@ cmd_bg() {
     --spend-ok)  OSRC_SPEND_OK=1; shift ;;    # paid-lane consent for THIS bg command (lib/spend.sh)
     --cap)       [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
     --cap=*)     OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
-    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
+    --provider)  [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
     *) break ;;
   esac; done
   [ $# -gt 0 ] || die "bg needs a task (e.g. bg \"map this repo\" or bg run -m glm \"...\")"
@@ -11511,7 +11482,7 @@ cmd_bg() {
   # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
   # text lane) otherwise produced a job id, a "launched" line, and a failure only the job record ever
   # saw. Output is discarded on success so the disclosure banner is not printed twice.
-  local _pfout _pfrc=0
+  local _pfrc=0; local -a _pf_args=("$@")
   # --provider must be passed EXPLICITLY: cmd_bg already consumed the flag into a shell variable that a
   # child process does not inherit, so without this the preflight would silently check the DEFAULT lane
   # and bless a combination the real run rejects.
@@ -11539,7 +11510,7 @@ cmd_bg() {
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" "$SCRIPT_PATH" --osrc-preflight-internal ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} "$@" 2>&1)" || _pfrc=$?
+  _OSRC_PREFLIGHT_PAIR="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" _osrc_bg_preflight "$SCRIPT_PATH")" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11547,16 +11518,15 @@ cmd_bg() {
   # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
   # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
   if [ "$_pfrc" -ne 0 ]; then
-    # Forward the gate's structured refusal too: EVENT/NEXT lines are how L1's supervise
-    # replays the approval ask — dropping them leaves the orchestrator blind.
-    printf '%s\n' "$_pfout" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2
+    # The preflight has forwarded its captured failure diagnostics.
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
-  # L7 add-on: an INTERACTIVE spend consent inside the preflight child (it inherits the tty and
-  # prints OSRC_SPEND_CONSENT=1 on yes) must reach the parent — the detached child cannot ask.
-  # Carry it as THIS command's consent so _bg_launch drops the job's .spend-ok marker. A non-tty
-  # preflight never prints the token, so nothing is consented silently.
-  grep -q 'OSRC_SPEND_CONSENT=1' <<<"$_pfout" && OSRC_SPEND_OK=1
+  # Only the private preflight descriptor can carry consent to the detached job.
+  [ -n "$_OSRC_PREFLIGHT_PAIR" ] && OSRC_SPEND_OK=1
+  if [ "${OSRC_SPEND_OK:-0}" = 1 ]; then
+    case "$_OSRC_PREFLIGHT_PAIR" in ?*'|'?*) ;; *) die "bg: spend consent could not be bound to the preflight lane and model" ;; esac
+    case "$_OSRC_PREFLIGHT_PAIR" in *'|'*'|'*|*[[:space:]]*) die "bg: invalid spend consent pair" ;; esac
+  fi
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -11804,7 +11774,7 @@ _resolve_run_cost() {
         # `tokenrouter` is a metered gateway lane: no receipt means we COULD NOT MEASURE the run,
         # never that it cost $0 (some models are a $0 promo, but that is a runtime fact, not a
         # ledger default — recording $0 here would understate spend the same way the or guard does).
-        or|gi|gemini|gm|gmnative|droid|warp|tokenrouter) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
+        or|gi|gemini|gm|gmnative|droid|warp|tokenrouter|opencode) real_cost="" ;; # API/BYOK-capable vehicle: no receipt is not measured zero
         *)  real_cost="0.000000" ;;         # local or verified subscription vehicle
       esac
     fi
@@ -11978,7 +11948,7 @@ run_job() {
   # Engine lanes (droid/cursor) own their model catalog: -m passes through verbatim, and with no -m
   # the ENGINE's configured default runs -- never our alias table's, so don't record it as such.
   case "$prov" in
-    droid|cursor|hermes|warp|cline|pi|pi) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
+    droid|cursor|hermes|warp|cline|pi|opencode) lane="$prov"; [ "$MODEL_EXPLICIT" = "1" ] || id2="($prov default)" ;;
     # tokenrouter has NO default model (-m is required, the roster is the gateway's): a bg job on
     # this lane always carries an explicit model; just record the lane.
     tokenrouter)  lane="tokenrouter" ;;
@@ -12035,7 +12005,7 @@ run_job() {
   # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
   # only — env consent is sanitized by design.
   local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
+  OSRC_STREAM=1 OSRC_NO_ADVISE=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
   local sc=$?
@@ -13596,7 +13566,10 @@ $body"
         _ready_probe_grokbot >/dev/null 2>&1 \
           || die "fanout: lane 'grokbot' needs GROKBOT_WEBHOOK_URL and GROKBOT_WEBHOOK_KEY (env or ~/.env). Nothing was started."
         continue ;;
-      *)      continue ;;  # not an engine lane; auth/credential gates are on the child side
+      opencode)
+        _opencode_fanout_check "$g_model" "$route_spec" "${labels[$_pi]}" "${a_model[$_pi]}"
+        _dp_cli="opencode" ;;
+      *) continue ;;
     esac
     if ! have "$_dp_cli"; then
       # cursor has a fallback: `agent` (if it's the Cursor agent, checked by route_delegate).
@@ -16334,7 +16307,7 @@ _failover_pick() {
 $OSRC_MODEL_TABLE
 _OSRC_FO_T
   for l in $OSRC_FAILOVER_LANES; do
-    [ "$l" != "$src" ] && [ "$(_lane_field "$l" owns_catalog 2>/dev/null)" = "yes" ] || continue
+    [ "$l" != "$src" ] && [ "$(_lane_field "$l" owns_catalog 2>/dev/null)" = "yes" ] && [ -n "$(_lane_field "$l" default_model 2>/dev/null)" ] || continue
     tier="$(resolve_tier "$(_lane_field "$l" default_model 2>/dev/null)" 2>/dev/null)"; case "$tier" in frontier|capable|mid|budget) ;; *) tier=mid ;; esac
     d="$(_tier_dist "$want" "$tier")"; ti="$(_tier_index "$tier")"; seq=$((seq + 1))
     rows="$rows$(printf '%s%s%02d%04d|%s||%s' "$d" "$((3 - ti))" "$(_failover_lane_rank "$l")" "$seq" "$l" "$tier")
@@ -16551,7 +16524,8 @@ route_delegate() {
     # tokenrouter has NO default model: the roster is the gateway's (discovered live), so a run
     # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
     [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
-    MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
+    [ "$PROVIDER" != "opencode" ] || die "the opencode lane needs -m <go-model-id> (e.g. glm-5.3-flash or opencode-go/glm-5.3-flash — a bare run would fall back to opencode's configured model, which may not bill your Go plan)"
+    MODEL="$(_route_provider_default_model "$PROVIDER" 9>&-)" || die "unknown provider '$PROVIDER'"
     # A provider's built-in default can be a model the user excluded (e.g. --provider codex -> sol).
     # Never run it silently: say which default it is and how to pick another.
     case "$MODEL" in *-default) _exclude_engine_default_notice "$PROVIDER" ;; esac
@@ -16572,6 +16546,7 @@ route_delegate() {
       _route_resolution local "$MODEL"
       _route_requires_confirmation && _route_confirm
       _route_receipt
+      _osrc_spend_gate local "$MODEL" local "dispatch $verb"
       [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 0
       delegate_local "$tier"; return $?
   fi
@@ -16679,7 +16654,7 @@ route_delegate() {
     else
     case "$PROVIDER" in
       devin) disp=devin ;;
-      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter|grokbot)" ;;
+      *)     die "unknown provider '$PROVIDER' (use: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|claudex|local|tokenrouter|grokbot|opencode)" ;;
     esac
     fi
   fi
@@ -18972,6 +18947,7 @@ doctor() {
   else
     echo "    pi: NOT on PATH. Install: npm i -g @earendil-works/pi-coding-agent (or see https://pi.dev), then run pi and /login once."
   fi
+  type _doctor_opencode >/dev/null 2>&1 && _doctor_opencode
   echo "  -- Claudex lane (GPT-5.6 Sol/Terra INSIDE the Claude Code harness, via YOUR local CLIProxyAPI) --"
   if [ "$_doff" = "1" ]; then echo "    claudex: probe skipped (OSRC_DOCTOR_OFFLINE)"
   elif have cliproxyapi || have cli-proxy-api || [ -f "${OSRC_CLAUDEX_CONFIG:-$HOME/.cli-proxy-api/config.yaml}" ]; then
@@ -19843,7 +19819,6 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
-# lib/ modules: sourced mode ($0 is the caller) misses them above; load from the real folder too.
 [ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
 
 main() {
@@ -19860,7 +19835,7 @@ main() {
   # inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. So: drop any inherited
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
-  unset OSRC_PREFLIGHT OSRC_ACCOUNT OSRC_ACCOUNT_DIR
+  unset OSRC_PREFLIGHT _OSRC_PREFLIGHT_FD OSRC_ACCOUNT OSRC_ACCOUNT_DIR
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19874,6 +19849,7 @@ main() {
   while :; do
     case "${1:-}" in
       --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
+      --osrc-preflight-pair-fd)    exec 9>&3 3>&-; _OSRC_PREFLIGHT_FD=1; shift ;;
       --osrc-job-child-internal)   _job_child=1; shift ;;
       *) break ;;
     esac
@@ -19898,7 +19874,7 @@ main() {
   # being read as an "unknown subcommand" and costing whole retry round-trips -- never again.
   while :; do
     case "${1:-}" in
-      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)"
+      --provider) [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"
                   PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
       --account) [ -n "${2:-}" ] || die "--account needs a name"; OSRC_ACCOUNT="$2"; shift 2 ;;
       --cloud-ack) export OSRC_CLOUD_ACK=1; shift ;;
@@ -19957,7 +19933,7 @@ main() {
     research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
     edit)        route_delegate "accept-edits" "$cmd" "$@" ;;
     yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
-    bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
+    bg)          _osrc_hub_daily_hint; cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     plan) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_plan "$@" ;;                          # factory: durable plan graph (plan new|ls|show|use|rm|run)
     task) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_task "$@" ;;                          # factory: tasks in a plan (add|ls|show|ready|start|hold|release|done|fail|cancel|retry)
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
@@ -19985,7 +19961,8 @@ main() {
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
-    hub)         cmd_hub "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
+    hub)         cmd_hub "$@" ;;
+    mc|mission-control) cmd_hub_serve "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
@@ -20001,7 +19978,7 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "continue is Devin-only for now (provider=$PROVIDER). For OR interactive follow-ups use the sibling tmux harness: scripts/run-or-{model,codex}.sh"
       continue_turn "$@" ;;
     session)
-      session "$@" ;;   # provider-aware: devin | codex | cc (see session start)
+      [ "${1:-}" != start ] || _osrc_hub_daily_hint; session "$@" ;;   # provider-aware: devin | codex | cc (see session start)
     parity)
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
@@ -20012,7 +19989,7 @@ main() {
     *) case "$cmd" in
          -*) die "'$cmd' looks like a flag, not a subcommand. Global flags (--provider X, --cloud-ack) are accepted before OR after the subcommand, but a subcommand is required. Example: $0 run --provider cc --cloud-ack \"task\"" ;;
        esac
-       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|team|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|supervise|result|logs|cancel|cleanup|gc|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot)" ;;
+       die "unknown subcommand '$cmd' (try: doctor|brief|mode|consent|cloud|exclude|models|plan|task|land|flow|lane|review|team|run|research|edit|yolo|explore|deals|bg|fanout|fleet|status|classify|explain|rundown|bearings|heartbeat|watch|wait|supervise|result|logs|cancel|cleanup|gc|tab|hub|estimate|suggest|advise|second-opinion|image|continue|session|adopt|handover|parity|parity-codex|parity-droid|parity-cursor|parity-hermes; providers: devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)" ;;
 
   esac
   # ---- blind-turn guard: refuse to end the orchestrating turn while live delegated work needs a

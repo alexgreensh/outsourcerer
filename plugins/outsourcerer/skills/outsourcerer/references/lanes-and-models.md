@@ -163,6 +163,54 @@ is Pi's, so do NOT promise a model or price.
   `pi` and `/login` once. `doctor` shows whether it is on PATH. `session start --provider pi` opens
   Pi's TUI in tmux.
 
+## OpenCode Go lane (`--provider opencode`)
+
+`--provider opencode` uses the OpenCode CLI (https://opencode.ai). A model is required.
+A bare ID uses the `opencode-go/` provider; a full `provider/model` is passed through.
+Paid models ask first: approve in the terminal or pass `--spend-ok` on that command.
+Go also asks because a stored credential does not prove whether extra usage is enabled.
+
+- **Posture is enforced per-run, never by editing your config.** `run`/`explore` get `--agent plan`
+  PLUS an inline `OPENCODE_CONFIG_CONTENT` that denies every action, then re-allows only the read
+  family (read/glob/grep/question) — a named deny list can never cover task/subagent, webfetch,
+  skill, MCP and plugin tools. On v2.x the same rules are additionally asserted as `policies`
+  (tool.use statements), the layer applied AFTER agent rules and saved approvals — without it a
+  user's `agents.plan.permissions` allow-all would silently reopen writes. Policies are still not
+  the last word: a project `opencode.json(c)`/`.opencode/` loads after the inline config and its
+  own policies evaluate last, so read-only runs also set `OPENCODE_DISABLE_PROJECT_CONFIG=1` and
+  ignore project config entirely (verified on v2.2.6: a hostile project's `policies` +
+  `agents.plan` allow-all reopened writes through both the root `opencode.json` and
+  `.opencode/opencode.json` forms; the env var denied both). The broad read allow
+  would mask opencode's built-in `*.env`/`*.env.*` ask, so those stay denied (`.env.example`
+  excepted). `edit` gets `--agent build --auto`: file tools are scoped to the job dir
+  (hard external_directory deny + the skill-bundle exception), but **shell is not contained** —
+  command-directory inference is best-effort, so a shell command keeps your full user rights —
+  All tiers ignore project configuration and deny subagent tasks to prevent a model switch without consent.
+  `research` REFUSES: opencode has no OS sandbox (same answer as claude-native/cc). `yolo`
+  pre-allows other tools but denies subagent tasks. Your `~/.config/opencode/opencode.json` is never rewritten. On opencode
+  v2.x the run uses `--standalone`: a shared background server never sees the CLI's env, so the
+  per-run permission rules only reach a private one. Read-only and edit tiers refuse outright when
+  `opencode --version` cannot be parsed (guessing the v1 schema at a v2 install would launch
+  unenforced).
+- **stdin is always closed** (`</dev/null`), and the prompt is separated by `--` so a task starting
+  with `-` is never parsed as flags.
+- `--effort` maps to the thinking variant (`--variant` on v1, `-m <id>#<variant>` on v2).
+- **Failures classify honestly.** A per-model region refusal ("hosted outside Europe and the United
+  States — select Global in the console's privacy settings") is a model refusal, NOT a lane outage:
+  the console instruction is surfaced and failover may pick another model. An expired Go API key is
+  an auth failure. Plan-limit refusals do not trigger a sibling-model probe because that
+  extra request could bill. OpenCode is not a failover target.
+- **Context:** `--with skills=…` travels via the standard staged bundle (the bundle dir is carved
+  out as an external_directory allow in both the permissions and policies layers; jq is required
+  for that carving). `mcp=` is refused — opencode's MCP semantics differ from the repo's; use your
+  own `~/.config/opencode` MCP setup instead.
+- Install: `brew install opencode` (or `brew install anomalyco/tap/opencode-v2`,
+  `npm i -g @opencode/cli@latest`; the old `opencode-ai/tap/opencode` formula is 0.x and the
+  `opencode-ai` npm package is 1.x, both predate the 2.x policies layer), then
+  `opencode auth login` and
+  choose **OpenCode Go** (a plain "OpenCode" credential is Zen pay-as-you-go and does not work).
+  `doctor` reports the credential but does not issue a potentially paid probe.
+
 ## Grok Bot lane (`--provider grokbot`)
 
 Grok Bot (xAI's always-on agents, each with its own cloud computer) has **no chat API**. A bot

@@ -109,7 +109,7 @@ _devin_catalog_free_ids() {
   # re-runs the catalog freshness check + jq walk (~15 subprocesses per pass).
   [ -n "$_OSRC_DV_FREE_IDS_DONE" ] && { printf '%s' "$_OSRC_DV_FREE_IDS_MEMO"; return 0; }
   local rawf cf mt cmt cids ids
-  rawf="$(_devin_catalog_rawf)" || return 1
+  rawf="$(_devin_catalog_rawf 9>&-)" || return 1
   _catalog_load dv >/dev/null 2>&1 || true    # refresh attempt; freshness below decides
   _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
   [ -f "$rawf" ] || return 1
@@ -211,6 +211,7 @@ osrc_lane_billing() {
   # A hosted/cloud vehicle bills per-use on whatever plan login fronts it.
   case "$disp" in *cloud*|cloud|*hosted*) printf 'metered\n'; return ;; esac
   case "$lane" in
+    opencode) printf 'metered\n'; return ;; # Go extra usage can bill; auth list does not prove its billing state.
     local) printf 'free\n'; return ;;
     or|tokenrouter|gi) printf 'metered\n'; return ;;          # API-key cash lanes by definition
     claudex) printf 'unknown\n'; return ;;                     # CLIProxyAPI upstream billing is not externally provable -> asks
@@ -242,7 +243,7 @@ osrc_lane_billing() {
       local _cs="" _cxj="${CODEX_HOME:-$HOME/.codex}/auth.json"
       if have codex; then
         # codex may print the status on stderr; capture both.
-        _cs="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>&1)"
+        _cs="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 9>&- 2>&1)"
         if grep -qi "api key" <<<"$_cs"; then printf 'metered\n'; return; fi
       fi
       if [ -f "$_cxj" ] && have jq \
@@ -345,14 +346,27 @@ _OSRC_SPEND_MARKER=""
 _osrc_spend_ok() {
   local lane="${1:-}" model="${2:-}"
   if [ "${OSRC_SPEND_OK:-0}" = "1" ]; then
-    # argv/env consent supersedes the bound marker: drop any leftover .spend-ok in
-    # THIS job's dir so a flag-consented launch leaves no consent file behind. Same
-    # job-dir validation as the marker read path — only a real $OSRC_JOBS/<id> is touched.
-    local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest
+    if [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] && [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || return 1
+    fi
+    # A supervised job's marker limits even a forwarded flag to its approved pair.
+    local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest _mf _header _l _m _match=0
     case "$_jd" in "$_jobs"/*)
       _rest="${_jd#"$_jobs"/}"
-      # "." is not a job id, and a symlinked job dir must never be rm'd through.
-      case "$_rest" in ""|.|*/*|*..*) ;; *) [ -L "$_jd" ] || rm -f "$_jd/.spend-ok" 2>/dev/null || true ;; esac ;;
+      case "$_rest" in ""|.|*/*|*..*) ;; *)
+        _mf="$_jd/.spend-ok"
+        if [ ! -L "$_jd" ] && [ -f "$_mf" ] && [ -n "${OSRC_JOB_TOKEN:-}" ]; then
+          IFS= read -r _header < "$_mf"
+          [ "$_header" = "#osrc-spend-ok token=$OSRC_JOB_TOKEN" ] || return 1
+          while IFS='|' read -r _l _m; do
+            [ "$_l" = "$lane" ] && [ -n "$_m" ] && [ "$_m" = "$model" ] && _match=1
+          done < "$_mf"
+          [ "$_match" = 1 ] || return 1
+          rm -f "$_mf" 2>/dev/null || true
+        elif [ "${_job_child:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+          return 1
+        fi ;;
+      esac ;;
     esac
     return 0
   fi
@@ -380,7 +394,7 @@ _osrc_spend_ok() {
 # billing subscription|free, or spend consent already granted for this command. Fallback
 # pickers call this so auto-routing never lands on a metered lane quietly.
 _osrc_lane_spendable() {
-  local b; b="$(osrc_lane_billing "${1:-}" "${2:-}" 2>/dev/null)"
+  local b; b="$(osrc_lane_billing "${1:-}" "${2:-}" 9>&- 2>/dev/null)"
   case "$b" in subscription|free) return 0 ;; esac
   _osrc_spend_ok "${1:-}" "${2:-}"
 }
@@ -468,9 +482,25 @@ _osrc_spend_marker_write() {
   local mf="$jd/.spend-ok"
   ( umask 077
     printf '#osrc-spend-ok token=%s\n' "$OSRC_JOB_TOKEN"
-    _osrc_spend_marker_pairs "$prov" "$@"
+    if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then
+      printf '%s\n' "$_OSRC_PREFLIGHT_PAIR"
+    else
+      _osrc_spend_marker_pairs "$prov" "$@"
+    fi
   ) > "$mf" 2>/dev/null || true
   [ -s "$mf" ] || rm -f "$mf" 2>/dev/null
+}
+
+# Buffer diagnostics while fd 8 keeps an interactive spend prompt on the terminal.
+_osrc_bg_preflight() { _osrc_bg_preflight_capture "$@" 8>&2; }
+_osrc_bg_preflight_capture() {
+  local buf pair tail rc=0
+  buf="$({ pair="$(OSRC_NO_ADVISE=1 "$@" --osrc-preflight-internal --osrc-preflight-pair-fd ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} ${_pf_args[@]+"${_pf_args[@]}"} 3>&1 1>&2)"; rc=$?; printf '\n__OSRC_PAIR__%s\n' "$pair"; exit "$rc"; } 2>&1)" || rc=$?
+  tail="${buf##*$'\n'}"
+  case "$tail" in __OSRC_PAIR__*) pair="${tail#__OSRC_PAIR__}" ;; *) return 1 ;; esac
+  if [ "$rc" -ne 0 ]; then buf="${buf%$'\n'*}"; printf '%s\n' "$buf" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2; fi
+  printf '%s\n' "$pair"
+  return "$rc"
 }
 
 # ---- event emission (L1 lanes/events.jsonl contract) ---------------------------
@@ -503,12 +533,18 @@ _osrc_event() {  # <kind> <target> <detail> <next> [src]
 # non-zero as "do not dispatch" and invokes the gate BEFORE any side effects.
 _osrc_spend_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" why="${4:-launch}"
-  local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 2>/dev/null)"
+  local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 9>&- 2>/dev/null)"
   # unknown is treated as METERED everywhere — cloud sessions included. A hosted
   # session's plan login is proven by the same billing probes as a local launch
   # (claude auth status / codex login status / devin catalog), and hosted-session
   # consent never substitutes for spend approval (CONTRACT.md).
-  case "$bill" in subscription|free) return 0 ;; esac
+  case "$bill" in subscription|free)
+    if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    fi
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ] && printf '%s|%s\n' "$lane" "$model" >&9
+    return 0 ;;
+  esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
   # Show the model actually being dispatched; when none was resolved, the lane's own
   # default — never DEFAULT_MODEL, which is the SCRIPT's default and can name a
@@ -517,6 +553,8 @@ _osrc_spend_gate() {
   [ -n "$mname" ] || mname="$(_lane_field "$lane" default_model 2>/dev/null)"
   [ -n "$mname" ] || mname="default"
   if _osrc_spend_ok "$lane" "$model"; then
+    _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && printf '%s|%s\n' "$lane" "$model" >&9
     # Marker consent is single-use: consume it now that dispatch is committed, so it
     # cannot authorize a second launch (or leak into a sibling job via a shared dir).
     [ "${OSRC_SPEND_OK:-0}" != "1" ] && [ -n "$_OSRC_SPEND_MARKER" ] \
@@ -527,19 +565,21 @@ _osrc_spend_gate() {
   fi
   # Estimate when one exists (metered lanes price per-token in the catalog).
   local est="" mcost
-  mcost="$(_lane_marginal_cost "$lane" "$mname" 1000 2>/dev/null)"
+  mcost="$(_lane_marginal_cost "$lane" "$mname" 1000 9>&- 2>/dev/null)"
   case "$mcost" in ''|*[!0-9.]*) ;; *) est="$mcost" ;; esac
   local detail="paid-lane:$lane/$mname ($bill) — $why"
   local nexthint="${OSRC_SPEND_NEXT:-$0 --spend-ok}"
-  if [ -t 0 ] && [ -t 2 ]; then
-    printf '>>> [spend] PAID LANE: %s (%s) / %s bills %s%s.\n' "$lname" "$disp" "$mname" "$bill" "${est:+ — est $est}" >&2
-    printf '>>>   why: %s. This lane is not subscription/free; approve spend for THIS command only.\n' "$why" >&2
+  if [ -t 0 ] && { [ -t 2 ] || { [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ -t 8 ]; }; }; then
+    local prompt_fd=2; [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ -t 8 ] && prompt_fd=8
+    printf '>>> [spend] PAID LANE: %s (%s) / %s bills %s%s.\n' "$lname" "$disp" "$mname" "$bill" "${est:+ — est $est}" >&"$prompt_fd"
+    printf '>>>   why: %s. This lane is not subscription/free; approve spend for THIS command only.\n' "$why" >&"$prompt_fd"
     local ans=""; IFS= read -r ans || ans=""
     case "$ans" in
       y|Y|yes|YES)
         OSRC_SPEND_OK=1
-        printf 'OSRC_SPEND_CONSENT=1\n'   # machine token: a bg preflight parent greps this to carry consent forward
-        printf '>>> [spend] approved for this command only (never persisted).\n' >&2
+        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+        [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && printf '%s|%s\n' "$lane" "$model" >&9
+        printf '>>> [spend] approved for this command only (never persisted).\n' >&"$prompt_fd"
         return 0 ;;
     esac
     _osrc_event approval "${lane:-launch}" "$detail" "$nexthint" spend >&2
@@ -695,7 +735,7 @@ _osrc_nojob() { _osrc_envrun -u OSRC_JOB_DIR -u OSRC_JOB_TOKEN "$@"; }
 _osrc_claude_plan_login() {
   have claude && have jq || return 1
   local _out _rc
-  _out="$(_osrc_envrun -u CLAUDECODE _timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 2>/dev/null)"; _rc=$?
+  _out="$(_osrc_envrun -u CLAUDECODE _timeout "${OSRC_BRIEF_TIMEOUT:-5}" claude auth status 9>&- 2>/dev/null)"; _rc=$?
   [ "$_rc" -eq 0 ] || return 1
   [ "$(printf '%s\n' "$_out" | sed -n '/^[[:space:]]*{/,$p' | jq -n -r '
     first(inputs | objects) |

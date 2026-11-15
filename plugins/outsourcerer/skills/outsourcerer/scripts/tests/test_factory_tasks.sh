@@ -530,9 +530,9 @@ bash -c ". \"$LIB\"; _factory_done_check() { _task_update fx $d2 '.state = \"can
 check "#6 a failing check does not restore over a concurrent cancel" "[ \"\$(jq -r .state \"\$(TJ fx $d2)\")\" = canceled ]"
 d3="$(O task add 'done interrupted' --plan fx 2>/dev/null)"
 L "_task_update fx $d3 '.state = \"running\" | .job = \"JD3\"'" >/dev/null
-bash -c ". \"$LIB\"; _factory_done_check() { sleep 1; echo ok; return 0; }; cmd_task done $d3 --plan fx" >/dev/null 2>&1 & DP=$!
-i=0; while [ "$i" -lt 50 ] && [ "$(jq -r .state "$(TJ fx $d3)")" != verifying ]; do sleep 0.1; i=$((i + 1)); done
-kill -TERM "$DP" 2>/dev/null; wait "$DP"; rc=$?
+bash -c ". \"$LIB\"; _factory_done_check() { : > \"$TMP/check-started\"; while [ ! -f \"$TMP/check-release\" ]; do sleep 0.1; done; echo ok; }; cmd_task done $d3 --plan fx" >/dev/null 2>&1 & DP=$!
+i=0; while [ "$i" -lt 100 ] && [ ! -f "$TMP/check-started" ]; do sleep 0.1; i=$((i + 1)); done
+kill -TERM "$DP" 2>/dev/null; : > "$TMP/check-release"; wait "$DP"; rc=$?
 check "#6 an interrupted done check puts the task back (not stuck in verifying)" \
   "[ $rc -eq 130 ] && [ \"\$(jq -r .state \"\$(TJ fx $d3)\")\" = running ]"
 L "_task_update fx $d3 '.state = \"verifying\"'" >/dev/null
@@ -589,7 +589,7 @@ check "#22 an absurd --retries is refused plainly" "[ $rc -ne 0 ] && grep -q '99
 FB2="$TMP/fakebin2"; mkdir -p "$FB2"
 printf '#!/usr/bin/env bash\nenv > "$ENVDUMP"\necho "OSRC::DONE env dumped"\n' > "$FB2/droid"; chmod +x "$FB2/droid"
 ( cd "$REPO" && PATH="$FB2:$PATH" ENVDUMP="$TMP/envdump" OSRC_WORKTREE=1 OSRC_WORKTREE_REQUIRED=1 OSRC_WORKTREE_BASE="$HEAD_SHA" OSRC_TASK_REF=fx/t1 OSRC_TASK_ATTEMPT=env-token \
-  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; run_job envjob droid run --spend-ok 'say hi'" ) >/dev/null 2>&1
+  OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 bash -c ". \"$LIB\"; SCRIPT_PATH=\"$SRC\"; OSRC_JOB_TOKEN=env-test; OSRC_SPEND_OK=1; mkdir -p \"\$OSRC_JOBS/envjob\"; _osrc_spend_marker_write \"\$OSRC_JOBS/envjob\" droid run -m fixture-model; run_job envjob droid run --spend-ok -m fixture-model 'say hi'" ) >/dev/null 2>&1
 check "#18 the job itself still ran in its own worktree" "[ \"\$(jq -r '.worktree // \"\"' \"$OSRC_JOBS/envjob/meta.json\" 2>/dev/null)\" = \"$REPO/.outsourcerer/worktrees/envjob\" ]"
 check "#18 the delegate's environment has no OSRC_WORKTREE* switches" \
   "[ -s \"$TMP/envdump\" ] && ! grep -q '^OSRC_WORKTREE' \"$TMP/envdump\""

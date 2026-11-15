@@ -230,8 +230,19 @@ fi
 # job's recorded child (else the orphan reaper misses its own lane-blocker, or worse, claims a
 # recycled pid). Real sleep, killed by pid. Not `locale -a | grep -q`: under pipefail the
 # early-exiting grep SIGPIPEs the large output; capture and match instead.
+# The dead supervisor is a child we forked and REAPED ourselves: provably gone, and its pid cannot
+# come back without a full pid-space wrap. (Scanning down from the sleep's pid for the first pid
+# kill -0 rejects could land on a process that was still being created, or one owned by another
+# user, so "dead" was a guess.) On failure, _ow_why prints the evidence the CI log needs.
+( exit 0 ) & _ow_dead=$!; wait "$_ow_dead" 2>/dev/null
 sleep 60 & _ow_pid=$!
-_ow_dead=$((_ow_pid - 1)); while kill -0 "$_ow_dead" 2>/dev/null; do _ow_dead=$((_ow_dead - 1)); done
+_ow_why() {
+  local d="$1" sup="dead"
+  kill -0 "$_ow_dead" 2>/dev/null && sup="ALIVE"
+  printf '      | why: candidate=%s alive=%s supervisor=%s(%s) record=[%s] live_c=[%s] live_plain=[%s]\n' \
+    "$_ow_pid" "$(kill -0 "$_ow_pid" 2>/dev/null && echo yes || echo no)" "$_ow_dead" "$sup" \
+    "$(cat "$d/pid_start" 2>/dev/null)" "$(LC_ALL=C ps -o lstart= -p "$_ow_pid" 2>&1)" "$(ps -o lstart= -p "$_ow_pid" 2>&1)"
+}
 _locs="$(locale -a 2>/dev/null)"
 case "$_locs" in
   *"fr_FR.UTF-8"*)
@@ -242,7 +253,7 @@ case "$_locs" in
     got="$(_devin_pid_owned_by_dead_job "$_ow_pid" 2>/dev/null)"
     [ "$got" = "$OSRC_JOBS/ow-fr" ] \
       && ok "a plain-locale (fr_FR) pid_start still proves dead-job ownership" \
-      || bad "fr_FR pid_start did not match its own live process (got '$got') — the reaper would miss its own lane-blocker"
+      || { bad "fr_FR pid_start did not match its own live process (got '$got') — the reaper would miss its own lane-blocker"; _ow_why "$OSRC_JOBS/ow-fr"; }
     rm -rf "$OSRC_JOBS/ow-fr"
     ;;
   *) echo "SKIP: fr_FR.UTF-8 locale not installed; plain-locale ownership case not exercised" ;;
@@ -253,7 +264,7 @@ LC_ALL=C ps -o lstart= -p "$_ow_pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:s
 got="$(_devin_pid_owned_by_dead_job "$_ow_pid" 2>/dev/null)"
 [ "$got" = "$OSRC_JOBS/ow-c" ] \
   && ok "a C-locale pid_start (current writer) proves dead-job ownership" \
-  || bad "C-locale pid_start did not match (got '$got')"
+  || { bad "C-locale pid_start did not match (got '$got')"; _ow_why "$OSRC_JOBS/ow-c"; }
 rm -rf "$OSRC_JOBS/ow-c"
 mkdir -p "$OSRC_JOBS/ow-rec"
 echo "$_ow_pid" > "$OSRC_JOBS/ow-rec/pid"; echo "$_ow_dead" > "$OSRC_JOBS/ow-rec/supervisor_pid"
