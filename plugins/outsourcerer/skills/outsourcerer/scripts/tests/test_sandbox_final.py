@@ -189,15 +189,18 @@ class SandboxFinal(unittest.TestCase):
         source = (SCRIPTS / 'tests/test_sealed_runner.py').read_text()
         probe = source.split("py.write_text('''", 1)[1].split("''')", 1)[0]
         import errno
-        with mock.patch.object(Path, 'read_text', side_effect=PermissionError(errno.EACCES, 'denied')), \
-                mock.patch.object(Path, 'write_text', side_effect=OSError(errno.EROFS, 'read-only filesystem')), \
-                mock.patch.object(socket, 'socket') as sock, mock.patch.object(sys, 'argv', ['probe', '/secret', '/outside']), \
-                mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
-            sock.return_value.connect.side_effect = PermissionError(errno.EPERM, 'denied')
-            try:
-                exec(compile(probe, 'readonly-probe', 'exec'), {})
-            except OSError as error:
-                self.fail('read-only filesystem denial must count as isolation: ' + str(error))
+        for platform in ('darwin', 'linux'):
+            with self.subTest(platform=platform), mock.patch.object(sys, 'platform', platform), \
+                    mock.patch.object(Path, 'read_text', side_effect=PermissionError(errno.EACCES, 'denied')), \
+                    mock.patch.object(Path, 'write_text', side_effect=OSError(errno.EROFS, 'read-only filesystem')), \
+                    mock.patch.object(socket, 'if_nameindex', return_value=[(1, 'lo')]), \
+                    mock.patch.object(socket, 'socket') as sock, mock.patch.object(sys, 'argv', ['probe', '/secret', '/outside']), \
+                    mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
+                sock.return_value.connect.side_effect = OSError(errno.ENETUNREACH if platform == 'linux' else errno.EPERM, 'denied')
+                try:
+                    exec(compile(probe, 'readonly-probe', 'exec'), {})
+                except OSError as error:
+                    self.fail('read-only filesystem denial must count as isolation: ' + str(error))
 
     def test_linux_runtime_boundaries(self):
         if sys.platform != 'linux':

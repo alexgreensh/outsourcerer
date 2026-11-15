@@ -349,16 +349,47 @@ delegate_local auto
         if os.uname().sysname == 'Darwin':
             self.assertIn(str(fake), (bindir / 'direct.sb').read_text())
 
-    def test_network_probe_rejects_connection_refused_without_isolation(self):
+    def test_linux_network_probe_requires_private_interfaces_and_no_route(self):
+        import errno, socket, sys
         tree = ast.parse((SCRIPTS / 'tests/test_sealed_runner.py').read_text())
         probe = next(node.args[0].value for node in ast.walk(tree)
                      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                      and isinstance(node.func.value, ast.Name) and node.func.value.id == 'py'
                      and node.func.attr == 'write_text')
-        network = probe[probe.index('s=socket.socket()'):]
-        stub = 'import errno, socket, sys\nsys.platform="linux"\nclass Socket:\n def connect(self, target): raise OSError(errno.ECONNREFUSED, "refused")\nsocket.socket=Socket\n'
-        result = subprocess.run(['python3', '-c', stub + network], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0, 'host loopback refusal counted as network isolation')
+        start = next(node.lineno for node in ast.parse(probe).body
+                     if any(isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+                            and isinstance(item.func.value, ast.Name) and item.func.value.id == 'socket'
+                            for item in ast.walk(node)))
+        network = '\n'.join(probe.splitlines()[start - 1:])
+        for route_error in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ECONNREFUSED, errno.EPERM, None):
+            for names in ([(1, 'lo')], [(1, 'lo'), (2, 'eth0')]):
+                with self.subTest(route_error=route_error, interfaces=names):
+                    client = mock.Mock()
+                    def connect(target):
+                        # Loopback refusal carries no isolation evidence.
+                        code = errno.ECONNREFUSED if target[0] == '127.0.0.1' else route_error
+                        if code is not None:
+                            raise OSError(code, 'fixture network result')
+                    client.connect.side_effect = connect
+                    scope = dict(errno=errno, socket=socket, sys=sys)
+                    with mock.patch.object(sys, 'platform', 'linux'), \
+                            mock.patch.object(socket, 'if_nameindex', return_value=names), \
+                            mock.patch.object(socket, 'socket', return_value=client), mock.patch('sys.stdout'):
+                        if len(names) > 1:
+                            with self.assertRaisesRegex(SystemExit, 'non-loopback interface visible'):
+                                exec(compile(network, 'network-probe', 'exec'), scope)
+                            client.connect.assert_not_called()
+                        elif route_error in (errno.ENETUNREACH, errno.EHOSTUNREACH):
+                            exec(compile(network, 'network-probe', 'exec'), scope)
+                        elif route_error is None:
+                            with self.assertRaisesRegex(SystemExit, 'network allowed'):
+                                exec(compile(network, 'network-probe', 'exec'), scope)
+                        else:
+                            with self.assertRaises(OSError) as caught:
+                                exec(compile(network, 'network-probe', 'exec'), scope)
+                            self.assertEqual(caught.exception.errno, route_error)
+                    if len(names) == 1:
+                        client.connect.assert_called_once_with(('1.1.1.1', 53))
 
     def test_linux_runtime_requires_a_successful_process_probe(self):
         def run(args, **kwargs):

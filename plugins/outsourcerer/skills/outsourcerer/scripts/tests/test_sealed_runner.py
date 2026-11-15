@@ -319,13 +319,21 @@ try:
  pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")
 except OSError as e:
  if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EROFS): raise
-s=socket.socket()
-try:
- s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")
-except OSError as e:
- allowed = (errno.EPERM, errno.EACCES)
- if sys.platform == 'linux': allowed += (errno.ENETUNREACH,)
- if e.errno not in allowed: raise
+if sys.platform == 'linux':
+ if {name for _, name in socket.if_nameindex()} != {"lo"}:
+  raise SystemExit("non-loopback interface visible")
+ s=socket.socket()
+ s.settimeout(1)
+ try:
+  s.connect(("1.1.1.1", 53)); raise SystemExit("routable network allowed")
+ except OSError as e:
+  if e.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH): raise
+else:
+ s=socket.socket()
+ try:
+  s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")
+ except OSError as e:
+  if e.errno not in (errno.EPERM, errno.EACCES): raise
 print("isolated")
 ''')
             sh = scripts / 'tests/probe.sh'
