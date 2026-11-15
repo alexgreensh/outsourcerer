@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Keep shell-suite scratch independent of the read-only checkout."""
 from pathlib import Path
+import importlib.util
+import io
 import re
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[5]
@@ -47,6 +52,64 @@ def untrimmed_tmpdir_joins(source):
 
 
 class ShellScratch(unittest.TestCase):
+    def test_matrix_alarm_persists_current_row_and_stops(self):
+        import json
+        spec = importlib.util.spec_from_file_location('alarm_matrix', ROOT / 'scripts/sealed_host_matrix.py')
+        matrix = importlib.util.module_from_spec(spec); spec.loader.exec_module(matrix)
+        with tempfile.TemporaryDirectory(prefix='osrc-matrix-alarm-') as d:
+            root = Path(d); scripts = root / 'scripts'; tests = scripts / 'tests'; tests.mkdir(parents=True)
+            for name in ('first', 'alarm', 'last'):
+                (tests / ('test_' + name + '.sh')).write_text('exit 0\n')
+            def run(command, directory, env, output, timeout):
+                output.write_text('')
+                if command[-1].endswith('test_alarm.sh'):
+                    signal.raise_signal(signal.SIGALRM)
+                return 0
+            argv = ['matrix', '--suites', 'test_first', 'test_alarm', 'test_last', '--mode', 'direct']
+            handler = signal.getsignal(signal.SIGALRM)
+            with mock.patch.dict(matrix.__dict__, ROOT=root, SCRIPTS=scripts, TESTS=tests), \
+                    mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stdout', new_callable=io.StringIO), \
+                    mock.patch.object(matrix.subprocess, 'check_output', return_value='fixture\n'), \
+                    mock.patch.object(matrix, 'run', side_effect=run):
+                self.assertEqual(matrix.main(), 142)
+            self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+            proof = next((root / '.evidence-L14c').glob('host-*'))
+            rows = [json.loads(line) for line in (proof / 'results.jsonl').read_text().splitlines()]
+            self.assertEqual([(row['suite'], row['rc']) for row in rows],
+                             [('test_first.sh', 0), ('test_alarm.sh', 142)])
+            self.assertIn('SIGALRM', rows[-1]['reason'])
+            self.assertIn('142', (proof / 'matrix.md').read_text())
+
+    def test_matrix_filters_and_incremental_timeout_results(self):
+        spec = importlib.util.spec_from_file_location('host_matrix', ROOT / 'scripts/sealed_host_matrix.py')
+        matrix = importlib.util.module_from_spec(spec); spec.loader.exec_module(matrix)
+        with tempfile.TemporaryDirectory(prefix='osrc-matrix-parts-') as d:
+            root = Path(d); scripts = root / 'scripts'; tests = scripts / 'tests'; tests.mkdir(parents=True)
+            (tests / 'test_first.sh').write_text('exit 0\n')
+            (tests / 'test_slow.sh').write_text('sleep 10\n')
+            run = matrix.run
+            def observe(command, directory, env, output, timeout):
+                self.assertTrue(env['TMPDIR'].endswith('/'))
+                if command[-1].endswith('test_slow.sh'):
+                    proof = next((root / '.evidence-L14c').glob('host-*'))
+                    rows = (proof / 'results.jsonl').read_text().splitlines()
+                    self.assertEqual(len(rows), 1, 'first result was not persisted before the next suite')
+                    self.assertIn('test_first.sh', (proof / 'matrix.md').read_text())
+                return run(command, directory, env, output, timeout)
+            argv = ['matrix', '--suites', 'test_first,test_slow', '--mode', 'direct', '--timeout', '0.1']
+            with mock.patch.dict(matrix.__dict__, ROOT=root, SCRIPTS=scripts, TESTS=tests), \
+                    mock.patch.object(sys, 'argv', argv), mock.patch.object(sys, 'stdout', new_callable=io.StringIO), \
+                    mock.patch.object(matrix.subprocess, 'check_output', return_value='fixture\n'), \
+                    mock.patch.object(matrix, 'run', side_effect=observe):
+                self.assertEqual(matrix.main(), 1)
+            import json
+            proof = next((root / '.evidence-L14c').glob('host-*'))
+            rows = [json.loads(line) for line in (proof / 'results.jsonl').read_text().splitlines()]
+            self.assertEqual([(row['suite'], row['mode'], row['rc']) for row in rows],
+                             [('test_first.sh', 'direct', 0), ('test_slow.sh', 'direct', 124)])
+            self.assertTrue(all(row['tmpdir'].endswith('/') for row in rows))
+            self.assertIn('124', (proof / 'matrix.md').read_text())
+
     def test_shell_scratch_trims_and_canonicalizes_tmpdir(self):
         for path in HERE.glob('*.sh'):
             source = path.read_text()
