@@ -443,8 +443,11 @@ _osrc_heavy_stall() {
 _osrc_heavy_lockdir() { local base="${TMPDIR:-/tmp}"; base="${OSRC_HOME:-${base%/}/osrc-home}"; printf '%s/heavy-local.lock.d' "${base%/}"; }
 
 _osrc_heavy_lock() { # <wait-secs> -> rc0 while holding the lock
-  local dir waited=0 max="${1:-120}" ep now
+  local dir waited=0 max="${1:-120}" ep now started="$SECONDS"
   dir="$(_osrc_heavy_lockdir)"; mkdir -p "$(dirname "$dir")" 2>/dev/null
+  until _osrc_guarded_mutex_acquire "$dir"; do
+    [ $((SECONDS - started)) -lt "$max" ] || return 1
+  done
   until _osrc_atomic_mkdir "$dir"; do
     ep="$(cat "$dir/epoch" 2>/dev/null)"; now="$(date +%s)"
     case "$ep" in ''|*[!0-9]*) ep="$(_mtime "$dir" 2>/dev/null || echo 0)" ;; esac
@@ -452,14 +455,22 @@ _osrc_heavy_lock() { # <wait-secs> -> rc0 while holding the lock
     if [ "$ep" -gt 0 ] && [ $(( now - ep )) -gt "${OSRC_HEAVY_LOCK_STALE:-7200}" ] 2>/dev/null; then
       rm -rf "$dir" 2>/dev/null; continue
     fi
-    [ "$waited" -ge "$max" ] && return 1
+    [ "$waited" -ge "$max" ] && { _osrc_guarded_mutex_release "$dir"; return 1; }
     sleep 2; waited=$(( waited + 2 ))
   done
   date +%s > "$dir/epoch" 2>/dev/null
   return 0
 }
 
-_osrc_heavy_unlock() { rm -rf "$(_osrc_heavy_lockdir)" 2>/dev/null; return 0; }
+_osrc_heavy_unlock() {
+  local dir owner
+  dir="$(_osrc_heavy_lockdir)"
+  _osrc_mutex_self_pid "$dir.mx.candidates" || return 1
+  owner="$(cat "$dir.mx/pid" 2>/dev/null)"
+  [ "$owner" = "$_OSRC_MUTEX_SELF" ] || return 1
+  rm -rf "$dir" 2>/dev/null
+  _osrc_guarded_mutex_release "$dir"
+}
 
 # ---- the gate ------------------------------------------------------------------------------------
 # _osrc_heavy_gate <check> <dir> <out> <secs> -> sets OSRC_HEAVY_MODE (run|nice|done).

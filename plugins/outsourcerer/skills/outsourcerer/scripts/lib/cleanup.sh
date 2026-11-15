@@ -544,13 +544,32 @@ _osrc_cleanup_tick() {
     [ "$age" -lt "${OSRC_CLEANUP_TICK_SECS:-3600}" ] && return 0
   fi
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 0
-  local lock="$(_osrc_cl_root)/.lock" lage
+  local lock="$(_osrc_cl_root)/.lock" lage token corpse current
+  _osrc_guarded_mutex_acquire "$lock" || return 0
   if ! _osrc_atomic_mkdir "$lock"; then
     lage=$(( now - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0) ))
-    { [ "$lage" -gt 600 ] && rmdir "$lock" 2>/dev/null && _osrc_atomic_mkdir "$lock"; } || return 0
+    corpse="$lock.stale.${BASHPID:-$$}.$RANDOM"
+    if ! { [ "$lage" -gt 600 ] && mv "$lock" "$corpse" 2>/dev/null \
+      && rm -rf "$corpse" 2>/dev/null && _osrc_atomic_mkdir "$lock"; }; then
+      _osrc_guarded_mutex_release "$lock" || true
+      return 0
+    fi
+  fi
+  token="${BASHPID:-$$}.$RANDOM.$RANDOM"
+  if ! printf '%s\n' "$token" > "$lock/owner" 2>/dev/null; then
+    rm -f "$lock/owner" 2>/dev/null
+    rmdir "$lock" 2>/dev/null || true
+    _osrc_guarded_mutex_release "$lock" || true
+    return 0
   fi
   date +%s > "$stamp" 2>/dev/null || true
-  ( _osrc_cleanup_tick_run; rmdir "$lock" 2>/dev/null ) >/dev/null 2>&1 &
+  _osrc_guarded_mutex_release "$lock" || return 0
+  ( _osrc_cleanup_tick_run
+    if _osrc_guarded_mutex_acquire "$lock"; then
+      current="$(cat "$lock/owner" 2>/dev/null)"
+      if [ "$current" = "$token" ]; then rm -f "$lock/owner"; rmdir "$lock" 2>/dev/null || true; fi
+      _osrc_guarded_mutex_release "$lock" || true
+    fi ) >/dev/null 2>&1 &
   return 0
 }
 

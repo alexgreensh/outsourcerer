@@ -35,6 +35,7 @@ for mode in native python shell; do
           builtin command "$@"
         }
       fi
+      if [ "$mode" = shell ]; then mkdir() { builtin command mkdir "$@"; }; fi
       _mkdir_claim "$claim"; printf '%s\n' "$?" > "$gate/result.$i"
     ) & pids[$i]=$!
   done
@@ -63,6 +64,7 @@ if command -v perl >/dev/null 2>&1; then
   echo 'PASS: working Perl is preferred and existing directories are refused'
 fi
 (
+  mkdir() { builtin command mkdir "$@"; }
   command() {
     case "${1:-}:${2:-}" in -v:perl) return 1 ;; esac
     builtin command "$@"
@@ -74,6 +76,7 @@ fi
 ) || { echo 'FAIL: a broken Python did not safely fall back or was not isolated'; exit 1; }
 echo 'PASS: broken isolated Python falls back for a missing directory and refuses an existing one'
 (
+  mkdir() { builtin command mkdir "$@"; }
   perl() { printf 'perl\n' >> "$TMP/broken-order"; return 1; }
   python3() { printf 'python %s\n' "${1:-}" >> "$TMP/broken-order"; return 1; }
   _mkdir_claim "$TMP/both-failed" || exit 1
@@ -81,3 +84,57 @@ echo 'PASS: broken isolated Python falls back for a missing directory and refuse
   ! _mkdir_claim "$TMP/both-failed" || exit 1
 ) || { echo 'FAIL: broken interpreters did not fall back in order'; exit 1; }
 echo 'PASS: broken Perl and Python fall back in order without claiming an existing directory'
+
+(
+  command() {
+    case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
+    builtin command "$@"
+  }
+  mkdir() {
+    [ "${1:-}" != --version ] || { echo 'mkdir (uutils coreutils) 0.10.0'; return 0; }
+    command mkdir -p "$@"
+  }
+  if _osrc_atomic_mkdir "$TMP/uutils-only" 2> "$TMP/uutils.err"; then exit 1; fi
+  [ ! -e "$TMP/uutils-only" ] && grep -q 'uutils mkdir requires working Perl or Python 3' "$TMP/uutils.err"
+) || { echo 'FAIL: unsafe uutils fallback was not refused with a diagnostic'; exit 1; }
+echo 'PASS: uutils without an interpreter fails closed with a named diagnostic'
+
+# A shell-only caller paused before the real mkdir must lose to a Perl caller.
+if command -v perl >/dev/null 2>&1; then
+  (
+    command() {
+      case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
+      builtin command "$@"
+    }
+    mkdir() {
+      [ "${1:-}" != --version ] || { echo 'mkdir (GNU coreutils)'; return 0; }
+      : > "$TMP/mixed-paused"
+      deadline=$((SECONDS + 20))
+      while [ ! -f "$TMP/mixed-go" ]; do [ "$SECONDS" -lt "$deadline" ] || exit 2; sleep 0.01; done
+      builtin command mkdir "$@"
+    }
+    rc=0; _osrc_atomic_mkdir "$TMP/mixed" || rc=$?
+    printf '%s\n' "$rc" > "$TMP/mixed.rc"
+  ) & mixed_pid=$!
+  deadline=$((SECONDS + 20))
+  while [ ! -f "$TMP/mixed-paused" ]; do
+    [ "$SECONDS" -lt "$deadline" ] || { kill "$mixed_pid" 2>/dev/null; wait "$mixed_pid" 2>/dev/null; echo 'FAIL: mixed contender did not pause'; exit 1; }
+    sleep 0.01
+  done
+  _osrc_atomic_mkdir "$TMP/mixed" || { echo 'FAIL: Perl mixed contender did not win'; exit 1; }
+  : > "$TMP/mixed-go"; wait "$mixed_pid" || exit 1
+  [ "$(cat "$TMP/mixed.rc")" != 0 ] || { echo 'FAIL: both mixed-backend contenders won'; exit 1; }
+  echo 'PASS: atomic external mkdir excludes a simultaneous Perl owner'
+fi
+
+# A leftover file from the old shell-gate implementation cannot wedge claims.
+(
+  command() {
+    case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
+    builtin command "$@"
+  }
+  mkdir() { builtin command mkdir "$@"; }
+  : > "$TMP/old-gate.osrc-claim-gate"
+  _osrc_atomic_mkdir "$TMP/old-gate"
+) || { echo 'FAIL: obsolete sibling gate still wedges an atomic mkdir'; exit 1; }
+echo 'PASS: obsolete sibling gate does not wedge a claim'

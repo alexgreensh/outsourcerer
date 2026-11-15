@@ -34,7 +34,7 @@ note() { echo "SKIP: $1"; skip=$((skip+1)); }
 echo "=== STATIC gate: Phase-0 invariants wired ==="
 
 # 1. Every unit test suite is green (aggregate).
-_ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
+_ALL_SUITES="test_atomic_mkdir_claim test_atomic_lock_paths test_stale_lock_races test_cloud_gate test_no_silent_escalation test_hardening test_escalation_classify \
          test_devin_tls_diagnostics test_devin_printmode_hang test_lane_fallback test_interactive_default test_session_capabilities \
          test_harness_isolation test_autodetach test_advise test_claudex test_copilot \
          test_loops test_job_lifecycle test_output_truncation test_lane_accounting \

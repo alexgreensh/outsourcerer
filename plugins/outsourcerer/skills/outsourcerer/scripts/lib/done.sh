@@ -105,10 +105,15 @@ osrc_done_get() {
 # clean restart). A running background probe is left to finish; its spec-guard keeps its verdict
 # out of a replacement contract's cache.
 osrc_done_clear() {
-  local name="${1:-}" dir
+  local name="${1:-}" dir lock
   _osrc_done_name_ok "$name" || return 0
   dir="$(_osrc_done_dir)"
-  rm -rf "$dir/$name.checklock" "$dir/$name.checklock.stale."* 2>/dev/null
+  lock="$dir/$name.checklock"
+  if [ -d "$dir" ]; then
+    _osrc_guarded_mutex_acquire "$lock" || return 1
+    rm -rf "$lock" "$lock.stale."* 2>/dev/null
+    _osrc_guarded_mutex_release "$lock" || return 1
+  fi
   rm -f "$dir/$name.json" "$dir/$name.checkcache" "$dir/$name.json.tmp."* 2>/dev/null
   return 0
 }
@@ -216,7 +221,7 @@ _osrc_done_check_run() { # <name> <cwd> <cmd> <spec> — background body: run, c
 # Try to take $OSRC_HOME/done/<name>.checklock. rc0 = this caller holds it. A lock whose epoch is
 # missing or older than the check bound + 60 s is dead (runner killed/rebooted) and is broken by
 # atomic rename — only one breaker can win the mv, so two pollers cannot both retake it.
-_osrc_done_check_lock() { # <name>
+_osrc_done_check_lock_inner() { # <name>, caller owns recovery mutex
   local name="$1" dir lock now le stale_dir age
   dir="$(_osrc_done_dir)"; lock="$dir/$name.checklock"; now="$(date +%s)"
   if _osrc_atomic_mkdir "$lock"; then return 0; fi
@@ -236,17 +241,47 @@ _osrc_done_check_lock() { # <name>
   _osrc_atomic_mkdir "$lock"
 }
 
-_osrc_done_check_spawn() { # <name> <cwd> <cmd> <spec> — caller holds <name>.checklock
-  local name="$1" cwd="$2" cmd="$3" spec="$4" lock
+_osrc_done_check_lock() {
+  local name="$1" lock rc=0 token
+  _OSRC_DONE_CLAIM_TOKEN=""
   lock="$(_osrc_done_dir)/$name.checklock"
-  printf '%s\n' "$(date +%s)" > "$lock/epoch" 2>/dev/null
+  _osrc_guarded_mutex_acquire "$lock" || return 1
+  _osrc_done_check_lock_inner "$name" || rc=$?
+  if [ "$rc" = 0 ]; then
+    token="${BASHPID:-$$}.$RANDOM.$RANDOM"
+    if ! { printf '%s\n' "$token" > "$lock/owner" && date +%s > "$lock/epoch"; } 2>/dev/null; then
+      rm -f "$lock/owner" "$lock/epoch" 2>/dev/null
+      rmdir "$lock" 2>/dev/null || true
+      rc=1
+    else
+      _OSRC_DONE_CLAIM_TOKEN="$token"
+    fi
+  fi
+  _osrc_guarded_mutex_release "$lock" || return 1
+  return "$rc"
+}
+
+_osrc_done_check_spawn() { # <name> <cwd> <cmd> <spec> — caller holds <name>.checklock
+  local name="$1" cwd="$2" cmd="$3" spec="$4" lock token current
+  lock="$(_osrc_done_dir)/$name.checklock"
+  token="${_OSRC_DONE_CLAIM_TOKEN:-}"; [ -n "$token" ] || return 1
+  _osrc_guarded_mutex_acquire "$lock" || return 1
+  current="$(cat "$lock/owner" 2>/dev/null)"
+  if [ "$current" != "$token" ]; then _osrc_guarded_mutex_release "$lock"; return 1; fi
   ( _osrc_done_check_run "$name" "$cwd" "$cmd" "$spec"
-    rm -f "$lock/epoch" 2>/dev/null
-    rmdir "$lock" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+    if _osrc_guarded_mutex_acquire "$lock"; then
+      current="$(cat "$lock/owner" 2>/dev/null)"
+      if [ "$current" = "$token" ]; then
+        rm -f "$lock/epoch" "$lock/owner" 2>/dev/null
+        rmdir "$lock" 2>/dev/null || true
+      fi
+      _osrc_guarded_mutex_release "$lock" || true
+    fi ) >/dev/null 2>&1 </dev/null &
+  _osrc_guarded_mutex_release "$lock"
 }
 
 _osrc_done_check() { # <name> <cwd> <cmd> <spec>
-  local name="$1" cwd="$2" cmd="$3" spec="$4" cached last
+  local name="$1" cwd="$2" cmd="$3" spec="$4" cached last _OSRC_DONE_CLAIM_TOKEN=""
   [ -n "${cmd//[[:space:]]/}" ] || { echo "error bad-spec"; return 0; }
   [ -d "$cwd" ] || { echo "error cwd-missing"; return 0; }
   cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }

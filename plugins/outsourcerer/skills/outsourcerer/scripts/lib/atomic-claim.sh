@@ -11,13 +11,16 @@ _osrc_atomic_mkdir() {
     ( umask 077; python3 -I -c 'import os,sys; os.mkdir(sys.argv[1], 0o700)' "$1" ) 2>/dev/null && return 0
     [ ! -e "$1" ] && [ ! -L "$1" ] || return 1
   fi
-  # Last-resort shell-only gate. Fail closed if a killed creator leaves it.
-  (
-    umask 077
-    local gate="$1.osrc-claim-gate"
-    ( set -C; : > "$gate" ) 2>/dev/null || exit 1
-    trap 'rm -f "$gate"' EXIT
-    [ ! -e "$1" ] && [ ! -L "$1" ] || exit 1
-    mkdir "$1" 2>/dev/null
-  )
+  # Only implementations known to use an exclusive mkdir syscall are safe.
+  local version system
+  version="$(LC_ALL=C mkdir --version 2>/dev/null)" || version=""
+  case "$version" in
+    *uutils*|*Uutils*) printf 'outsourcerer: cannot claim %s: uutils mkdir requires working Perl or Python 3.\n' "$1" >&2; return 1 ;;
+    *'GNU coreutils'*) ( umask 077; mkdir "$1" ) 2>/dev/null; return $? ;;
+  esac
+  system="$(uname -s 2>/dev/null)"
+  case "$system" in
+    Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly|MINGW*|MSYS*|CYGWIN*) ( umask 077; mkdir "$1" ) 2>/dev/null ;;
+    *) printf 'outsourcerer: cannot claim %s: mkdir is not a known atomic implementation; install Perl or Python 3.\n' "$1" >&2; return 1 ;;
+  esac
 }

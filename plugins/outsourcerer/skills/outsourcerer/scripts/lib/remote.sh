@@ -42,13 +42,26 @@ _osrc_jq_set() {
 
 # Tiny mkdir lock with stale breaking (a crashed poller must not wedge a lane forever).
 _osrc_lock() { # <dir> -> 0 acquired
-  local d="$1" age
-  if _osrc_atomic_mkdir "$d"; then return 0; fi
-  age=$(( $(date +%s) - $(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0) ))
-  if [ "$age" -gt "${OSRC_LOCK_STALE_SECS:-300}" ]; then rmdir "$d" 2>/dev/null; _osrc_atomic_mkdir "$d" && return 0; fi
-  return 1
+  local d="$1" age rc=1
+  _osrc_guarded_mutex_acquire "$d" || return 1
+  if _osrc_atomic_mkdir "$d"; then rc=0
+  else
+    age=$(( $(date +%s) - $(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0) ))
+    if [ "$age" -gt "${OSRC_LOCK_STALE_SECS:-300}" ]; then
+      rmdir "$d" 2>/dev/null && _osrc_atomic_mkdir "$d" && rc=0
+    fi
+  fi
+  if [ "$rc" != 0 ]; then _osrc_guarded_mutex_release "$d" || return 1; fi
+  return "$rc"
 }
-_osrc_unlock() { rmdir "$1" 2>/dev/null || true; }
+_osrc_unlock() {
+  local owner
+  _osrc_mutex_self_pid "$1.mx.candidates" || return 1
+  owner="$(cat "$1.mx/pid" 2>/dev/null)"
+  [ "$owner" = "$_OSRC_MUTEX_SELF" ] || return 1
+  rmdir "$1" 2>/dev/null || true
+  _osrc_guarded_mutex_release "$1"
+}
 
 # Event dedupe: one file per key under remote/.ev/<scope>/ holding the last emit time (interval 0 =
 # once). The scope is the lane id (or .reviewer), so `lane rm` can clear exactly that lane's stamps
