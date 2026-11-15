@@ -51,8 +51,7 @@ pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-dead_pid=999999
-while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
 
 # A fake beacon binary: writes owner.json for its own pid (pid_start either fixed by the caller's
 # mocked _pid_start_identity via HB_PID_START, or read from the real ps) then stays alive.

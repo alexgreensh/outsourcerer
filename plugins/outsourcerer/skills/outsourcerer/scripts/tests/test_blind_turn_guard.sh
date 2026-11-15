@@ -134,8 +134,7 @@ newjob() { # <id> - minimal managed-job dir for collection
   jq -cn --arg id "$1" '{id:$id,provider:"devin",verb:"run",model:"swe-2-high",lane:"dv"}' > "$jd/meta.json"
   : > "$jd/.startmark"; : > "$jd/.fsmark"; : > "$jd/out.log"
 }
-dead_pid=999999; while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
-dead_spid=$dead_pid; while kill -0 "$dead_spid" 2>/dev/null; do dead_spid=$((dead_spid - 1)); done
+dead_pid="$(osrc_test_dead_pid)"; dead_spid="$dead_pid"   # provably dead (lib_scratch.sh)
 collect_and_write() { _fleet_snapshot_write "$(_fleet_snapshot_collect)"; }
 job_state() { jq -r --arg j "$1" '.items[] | select(.job_id==$j) | .state' "$SNAP"; }
 
@@ -327,7 +326,7 @@ out="$(OSRC_BLIND_TURN_GUARD=0 _blind_turn_guard 2>&1)"; rc=$?
 # process the session spawns (a tmux server, later panes), so a shell in such a pane shares the sid
 # while the real session with that sid is a DIFFERENT, possibly stuck, peer. When the ancestor walk
 # is usable, a sid-matched row must also prove it by pid ancestry. ---
-far_pid=999999; while kill -0 "$far_pid" 2>/dev/null; do far_pid=$((far_pid - 1)); done
+far_pid="$(osrc_test_dead_pid)"   # provably dead, never an ancestor (lib_scratch.sh)
 # The real caller row: same sid as the env var AND a pid that sits in our ancestry.
 peer_self_stuck='{"owner":"cc-peer","job_id":null,"session_id":"caller-sess","pid":'"$$"',"state":"unresponsive?","state_label":"Maybe stuck","waiting_for":null,"display_name":"orchestrator","cwd":"/repo"}'
 # A peer whose sid matches but whose pid is NOT an ancestor (the actual stuck peer).

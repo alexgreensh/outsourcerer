@@ -13,7 +13,7 @@ s="$SRC"; set --; . "$s" >/dev/null 2>&1
 _state_sync() { return 0; }
 
 # A definitely-dead PID (nothing running, kill -0 and ps -p both fail).
-dead=99991; while kill -0 "$dead" 2>/dev/null || ps -p "$dead" >/dev/null 2>&1; do dead=$((dead-1)); done
+dead="$(osrc_test_dead_pid)"   # forked and reaped: kill -0 and ps -p both fail (lib_scratch.sh)
 
 # Stub ps so a live incumbent still LOOKS alive with a readable identity, but the dead PID is absent.
 mkdir -p "$TMP/bin"; export HB_PS_MARKER="$TMP/marker"; printf '%s\n' 'Thu Jul 31 01:02:03 2026' > "$HB_PS_MARKER"
