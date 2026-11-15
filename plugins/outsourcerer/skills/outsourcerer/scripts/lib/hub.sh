@@ -278,7 +278,7 @@ _osrc_hub_build_project() {
   lanes="$(_osrc_hub_apply_lane_overrides "$lanes" "$card")"
   # name: card > decisions-file already folded into card; fallback slug.
   local name order status pct eta etanote tagline repo themes flow extralinks
-  name="$(jq -r '.name // ""' <<<"$card")"; [ -n "$name" ] || name="$slug"
+  name="$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)"; [ -n "$name" ] || name="$(_osrc_hub_derived_name "$slug")"
   order="$(jq -r '.order // 99' <<<"$card")"
   status="$(jq -r '.status // ""' <<<"$card")"
   pct="$(jq -r '.pct // ""' <<<"$card")"
@@ -286,14 +286,15 @@ _osrc_hub_build_project() {
   etanote="$(jq -r '.etaNote // ""' <<<"$card")"
   tagline="$(jq -r '.tagline // ""' <<<"$card")"
   repo="$(jq -r '.repo // ""' <<<"$card")"
-  local upda; upda="$(_osrc_hub_project_mtime "$slug" "$lact" "$llive")"
+  local upda stale_hours="${OSRC_HUB_STALE_HOURS:-24}"; case "$stale_hours" in ''|*[!0-9]*) stale_hours=24 ;; esac
+  upda="$(_osrc_hub_project_mtime "$slug" "$lact" "$llive")"
   out="$(jq -cn \
     --arg id "$slug" --arg name "$name" --argjson order "$order" --arg upd "$upd" \
-    --arg upda "$upda" \
+    --arg upda "$upda" --argjson live "$llive" --argjson staleHours "$stale_hours" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
     --arg status "$status" --arg pct "$pct" --arg eta "$eta" --arg etanote "$etanote" \
     --arg tagline "$tagline" --arg repo "$repo" --argjson card "$card" '
-    {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs}
+    {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs, liveLanes:$live, staleHours:$staleHours}
     + (if $upda=="" then {} else {updatedAt:$upda} end)
     + (if $status=="" then {} else {status:$status} end)
     + (if $pct=="" then {} else {pct:($pct|tonumber)} end)
@@ -306,7 +307,7 @@ _osrc_hub_build_project() {
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
     + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
   ')"
-  _osrc_hub_status_override "$slug" "$out"
+  _osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and ((.status // "building") | ascii_downcase) == "building" then .status="idle" else . end'
 }
 
 # _osrc_hub_status_override <slug> <project-json> -> project with the user's Mark done
@@ -434,12 +435,14 @@ _osrc_hub_unowned_project() {
     lane="$(_osrc_hub_lane_job "$id")" && [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a+[$b]')"
   done
   [ "$lanes" != "[]" ] || return 0
-  local card upda; card="$(_osrc_hub_card unowned)"; upda="$(_osrc_hub_project_mtime unowned)"
+  local card upda live=0 act; card="$(_osrc_hub_card unowned)"
+  for id in $(jq -r '.[].id' <<<"$lanes"); do act="$(_osrc_hub_lane_activity "$id")"; [ "${act##* }" = 1 ] && live=1; done
+  upda="$(_osrc_hub_project_mtime unowned 0 "$live")"
   jq -cn --arg id unowned --arg name "Unowned runs" --argjson order 999 --arg upd "$upd" \
-    --arg upda "$upda" \
+    --arg upda "$upda" --argjson live "$live" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs '[]' --argjson card "$card" '
     {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
-     tagline:"Runs launched without an owning orchestrator session."}
+     tagline:"Runs launched without an owning orchestrator session.", liveLanes:$live, status:(if $live == 1 then "building" else "idle" end)}
     + (if $upda=="" then {} else {updatedAt:$upda} end)'
 }
 
@@ -470,10 +473,15 @@ _osrc_limit_state() {
 
 # _osrc_limit_row <id> <name> <state> <left> <renews> <models> <note> <paid> <order> <updated> [source] [updatedAt-ISO]
 _osrc_limit_row() {
-  jq -cn --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$5" \
+  local bill=unknown token=''
+  case "$1" in claude*) token=cc ;; chatgpt*) token=cx ;; devin) token=dv ;; agy) token=gm ;; openrouter) token=or ;; local) token=local ;; esac
+  if [ -n "$token" ] && type osrc_lane_billing >/dev/null 2>&1; then bill="$(osrc_lane_billing "$token" 2>/dev/null)"; fi
+  [ "$1" != openrouter ] || bill=metered
+  [ "$1" != local ] || bill=free
+  jq -cn --arg billing "${bill:-unknown}" --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$5" \
         --arg models "$6" --arg note "$7" --argjson paid "${8:-false}" --argjson order "${9:-99}" --arg updated "${10}" --arg source "${11:-}" \
         --arg upda "${12:-}" \
-    '{id:$id,name:$name,state:$state,order:$order}
+    '{id:$id,name:$name,state:$state,order:$order,billing:$billing}
      + (if $left=="" then {} else {left:$left} end)
      + (if $renews=="" then {} else {renews:$renews} end)
      + (if $models=="" then {} else {models:$models} end)
@@ -589,10 +597,10 @@ EOF
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row devin 'Devin' unknown 'plan quota, no meter' '' 'glm, swe, devin-* on your Devin plan' 'A plan refusal is only detectable when a run hits it.' false 5 '' '')" '$a+[$b]')"
   fi
   if command -v agy >/dev/null 2>&1; then
-    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row agy 'Antigravity' unknown 'keyless, Google acct' '' 'gemini-*, nano-banana' 'No published meter.' false 6 '' '')" '$a+[$b]')"
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row agy 'Antigravity' unknown 'no meter' '' 'gemini-*, nano-banana' 'No published meter.' false 6 '' '')" '$a+[$b]')"
   fi
   if [ -n "${OPENROUTER_API_KEY:-}" ] || grep -qs '^OPENROUTER_API_KEY=' "$HOME/.env" 2>/dev/null; then
-    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row openrouter 'OpenRouter' ok 'paid per use' '' 'OpenRouter model ids' 'Billed from your balance — outsourcerer asks before every run.' true 7 '' '')" '$a+[$b]')"
+    arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row openrouter 'OpenRouter' ok 'pay per use' '' 'OpenRouter model ids' 'Billed from your balance — outsourcerer asks before every run.' true 7 '' '')" '$a+[$b]')"
   fi
   if command -v ollama >/dev/null 2>&1 || [ -d "$HOME/.lmstudio" ]; then
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row local 'Local' ok 'free, your hardware' '' 'ollama:*, lmstudio:*, local:*' 'No meter, no bill.' false 8 '' '')" '$a+[$b]')"

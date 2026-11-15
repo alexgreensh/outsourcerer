@@ -425,3 +425,6 @@ Built by [Alex Greenshpun](https://github.com/alexgreensh)
 *Delegate the grind. Keep the glory.*
 
 </div>
+## Mission Control
+
+Mission Control shows your projects, running work, decisions, and lane limits in one place. Open it with `outsourcerer mc`.
