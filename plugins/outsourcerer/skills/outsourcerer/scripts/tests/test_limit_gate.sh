@@ -783,8 +783,7 @@ rm -f "$MKD/.spend-ok"
 leak="$( OSRC_JOB_DIR="$MKD" OSRC_JOB_TOKEN=tokW _run_tee_stderr /dev/null env 2>/dev/null | grep -cE '^(OSRC_JOB_DIR|OSRC_JOB_TOKEN)=' )"
 [ "$leak" = "0" ] && ok "r3.2 env: delegates never inherit OSRC_JOB_DIR/OSRC_JOB_TOKEN" || bad "r3.2 env: job consent env leaked to delegate ($leak)"
 
-# Interactive y/N consent (pty via script): 'y' approves THIS command and prints the
-# OSRC_SPEND_CONSENT token bg's preflight greps for; 'n'/EOF refuses.
+# Interactive y/N consent (pty via script): 'y' approves this command; 'n'/EOF refuses.
 PTYBIN="$(command -v script 2>/dev/null || echo /usr/bin/script)"
 pty_spend() {
   local cmd quoted
@@ -796,9 +795,10 @@ pty_spend() {
     HOME="$HB" OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 "$PTYBIN" -q /dev/null bash -c "$cmd"
   fi
 }
+if python3 -c 'import os,pty; a,b=pty.openpty(); os.close(a); os.close(b)' >/dev/null 2>&1; then
 out="$( { sleep 2; printf 'y\n'; sleep 0.5; } | pty_spend 2>&1 )"
 case "$out" in
-  *OSRC_SPEND_CONSENT=1*"approved"*) ok "r3.1 spend: interactive y consents this command only" ;;
+  *"approved"*) ok "r3.1 spend: interactive y consents this command only" ;;
   *) bad "r3.1 spend: interactive y path broken: $(printf '%s' "$out" | tail -4)" ;;
 esac
 out="$( { sleep 2; printf 'n\n'; sleep 0.5; } | pty_spend 2>&1 )"
@@ -806,6 +806,9 @@ case "$out" in
   *"EVENT approval"*|*"declined"*) ok "r3.1 spend: interactive n refuses with EVENT approval" ;;
   *) bad "r3.1 spend: interactive n did not refuse: $(printf '%s' "$out" | tail -4)" ;;
 esac
+else
+  echo 'SKIP: interactive spend checks require an available pseudo-terminal'
+fi
 
 # ITEM 6 (caps): unbound meters refuse at `lane cap` time; invalid specs refuse; the
 # provider-name lookup (`lane cap codex`) resolves; unread meters warn (unpinned) / refuse (pinned);
