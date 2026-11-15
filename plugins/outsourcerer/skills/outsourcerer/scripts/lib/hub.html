@@ -99,7 +99,7 @@ button { font: inherit; color: inherit; }
 .proj { display: flex; flex-direction: column; gap: 4px; border-radius: 14px; border: 1.5px solid transparent; padding: 6px; }
 .proj.on { background: var(--hi-soft); border-color: var(--hi-line); }
 .pbtn { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; background: none; border: 0; padding: 6px 6px; border-radius: 10px; cursor: pointer; text-align: left; width: 100%; }
-.pbtn .nm { text-align: left; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbtn .nm { text-align: left; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pbtn .when { grid-column: 2 / -1; font-size: .78rem; font-weight: 500; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -6px; } /* MC2 r2 #1: Earlier date on its own row under the name, never one character per line */
 .dot { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--edge); background: var(--card); }
 .dot.building { background: var(--thumb); }
 .dot.waiting { background: var(--hi); }
@@ -290,14 +290,14 @@ a.pill svg { width: 13px; height: 13px; }
 .ptile.waits { border-color: var(--hi-line); }
 .ptile.hl { border-color: var(--ink); box-shadow: 4px 4px 0 var(--shadow); }
 .pt-top5 { font-weight: 600; font-size: .9rem; margin: 0; }
-.pt-prog .pt-meta { grid-column: 1 / -1; }
+.pt-prog .pt-meta { grid-column: 1 / -1; } .pt-prog.nopct { grid-template-columns: minmax(0, 1fr); } /* MC2 r2 #2: no reported progress, no bar */
 .ph.home h1 { font-size: 2rem; }
 .pt-prog .pct { font-family: var(--mono); font-weight: 700; font-size: 1.4rem; line-height: 1; }
 .pt-meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; font-size: .9rem; }   /* the stamp gets its own row at every width (MC-7 #3) */
 .pt-meta > span { display: inline-flex; align-items: center; gap: 6px; }
 .pt-meta .lst.stale { border-radius: 12px; } /* a pill on one line, a rounded box if a narrow tile wraps it */
 .pt-decs { list-style: none; margin: 0; padding: 10px 0 0; border-top: 1.5px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
-.pt-decs .dbtn { padding: 6px 8px; font-size: .95rem; }
+.pt-decs .dbtn { padding: 6px 8px; font-size: .95rem; } .pt-lanes, .rlanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; } .pt-lanes { padding-top: 10px; border-top: 1.5px solid var(--line); } .pt-lanes li, .rlanes li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; font-size: .88rem; } .pt-lanes .lnn, .rlanes .lnn { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lnm { grid-column: 2; grid-row: 2; font-size: .78rem; opacity: .75; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lns, .rlanes .lns { justify-self: end; text-align: right; font-size: .8rem; white-space: nowrap; } .pt-lanes .lnd, .rlanes .lnd { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; background: transparent; } .ln-working .lnd { background: currentColor; } .ln-approval .lnd, .ln-question .lnd, .ln-limit .lnd { background: var(--hi); } .ln-failed .lnd { background: var(--dot-out); border-color: var(--dot-out); } .ln-idle .lnd, .ln-unknown .lnd { border-style: dashed; } .ln-approval .lns, .ln-question .lns, .ln-limit .lns, .ln-failed .lns { font-weight: 700; } .rlanes { padding: 0 6px 4px 28px; } .rlanes li { grid-template-columns: 8px minmax(0, 1fr); font-size: .78rem; } .rlanes .lnd { width: 8px; height: 8px; } .rlanes .lns { grid-column: 2; justify-self: start; text-align: left; opacity: .8; } /* MC2 r2 #5: live lanes on cards and in the rail */
 .pt-more { align-self: flex-start; background: none; border: 0; padding: 4px 8px; font-weight: 600; font-size: .9rem; cursor: pointer; border-radius: 8px; text-decoration: underline; text-underline-offset: 3px; }
 .pt-more:hover { background: var(--thumb); }
 .pt-none { margin: 0; padding-top: 10px; border-top: 1.5px solid var(--line); display: inline-flex; align-items: center; gap: 8px; font-weight: 500; }
@@ -324,7 +324,7 @@ a.pill svg { width: 13px; height: 13px; }
   .rail, .rail-mid { display: contents; }
   .rail-top { order: 0; padding: 14px 16px; background: var(--card); }
   .rail-mid > h2 { margin-top: 16px; }
-  .rail-mid > h2:first-of-type, .rail-mid > .plist, .rail-mid > #shipwrap, .rail-mid > .home-btn { order: 1; margin-inline: 16px; }
+  .rail-mid > h2:first-of-type, .rail-mid > .plist, .rail-mid > details, .rail-mid > #shipwrap, .rail-mid > .home-btn { order: 1; margin-inline: 16px; }
   .rail-mid > .home-btn { width: auto; margin-top: 12px; }
   .main { order: 2; border-top: 1.5px solid var(--edge); margin-top: 16px; }
   .rail-mid > h2:nth-of-type(2), .rail-mid > .llist { order: 3; margin-inline: 16px; }
@@ -335,7 +335,7 @@ a.pill svg { width: 13px; height: 13px; }
   /* MC-7 #2: on Home the headline and the top-priority bar come before the rail list; the rest of Home follows it. */
   .app:has(.ph.home) .main { display: contents; --mi: clamp(48px, 9vw, 128px); } .app:has(.ph.home) .main > * { order: 3; margin-inline: var(--mi); }
   .app:has(.ph.home) .main > .ph.home { order: 1; margin-top: 24px; } .app:has(.ph.home) .main > .toppri { order: 1; margin-top: 16px; }
-  .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
+  .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > details, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
   .app:has(.ph.home) .main > :nth-child(1 of :not(.ph, .toppri)) { border-top: 1.5px solid var(--edge); margin: 16px 0 0; padding: 32px var(--mi) 0; }
   .app:has(.ph.home) .main > :last-child { margin-bottom: 40px; } .app:has(.ph.home) .main > .foot { margin-top: 16px; }
   .app:has(.ph.home) .rail-mid > h2:nth-of-type(2), .app:has(.ph.home) .rail-mid > .llist { order: 4; } .app:has(.ph.home) .credits { order: 5; }
@@ -425,7 +425,7 @@ a.pill svg { width: 13px; height: 13px; }
   const ORDER = ['Critical', 'High', 'Medium', 'Low'];
   const byWeight = (a, b) => ORDER.indexOf(a.weight) - ORDER.indexOf(b.weight);
   const pri = (w) => el('span', 'pri p-' + String(w || 'Medium').toLowerCase(), w || 'Medium');
-  const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused' };
+  const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused', idle: 'Idle' };
   const stPill = (p) => { const w = openDecs(p).length; return el('span', 'pill' + (w ? ' st-wait' : p.status === 'paused' || p.status === 'shipped' ? ' st-' + p.status : ''), w ? 'Waiting on you' : STATUS_TXT[p.status] || 'Building'); };   // tile and hover card share one pill (MC-7 #5)
   let projects = [], answers = {}, limits = [], db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false;  // drafts: hub-decide.js (MC-4)
   // ---- data adapter: artifact db (window.claude) or local API (hub serve) ----
@@ -531,7 +531,7 @@ a.pill svg { width: 13px; height: 13px; }
     const mk = (a) => { const c = document.createElementNS(NS, 'circle'); for (const k in a) c.setAttribute(k, a[k]); svg.appendChild(c); };
     mk({ cx: 22, cy: 22, r: 18, fill: 'none', class: 'bg', 'stroke-width': 6 });
     mk({ cx: 22, cy: 22, r: 18, fill: 'none', class: 'fg', 'stroke-width': 6, 'stroke-dasharray': (C * (p || 0) / 100) + ' ' + C, transform: 'rotate(-90 22 22)', 'stroke-linecap': 'round' });
-    const tx = document.createElementNS(NS, 'text'); tx.setAttribute('x', 22); tx.setAttribute('y', 26); tx.setAttribute('text-anchor', 'middle'); tx.textContent = p || 0; svg.appendChild(tx);
+    const tx = document.createElementNS(NS, 'text'); tx.setAttribute('x', 22); tx.setAttribute('y', 26); tx.setAttribute('text-anchor', 'middle'); tx.textContent = typeof p === 'number' ? p : '–'; svg.appendChild(tx);
     return svg;
   }
   let hc = null, pinned = null, owner = null, closeT = null;
@@ -669,13 +669,16 @@ a.pill svg { width: 13px; height: 13px; }
   }
   const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
 
+  const runningNow = (p) => p.status !== 'shipped' && (p.liveLanes > 0 || openDecs(p).length > 0);
+  const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct); const earlier = (p) => p.status !== 'shipped' && p.liveLanes === 0 && !openDecs(p).length && (!p.updatedAt || Date.now() - Date.parse(p.updatedAt) >= (p.staleHours == null ? 24 : p.staleHours) * 3600000);
   const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty" (MC-8)
   function renderRail() {
     if (loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && ae.closest && ae.closest('.rail-mid') && ae.id !== 'homebtn' ? { id: ae.id } : null;   // keyboard focus survives a re-render (MC-5 #4)
-    const list = $('plist'); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
-    const live = projects.filter((p) => p.status !== 'shipped'), done = projects.filter((p) => p.status === 'shipped');
-    $('pcount').textContent = live.length ? String(live.length) : '';
+    const list = $('plist'); if (list.nextElementSibling && list.nextElementSibling.dataset.earlier === '1') list.nextElementSibling.remove(); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
+    const live = projects.filter((p) => p.status !== 'shipped' && !earlier(p)), done = projects.filter((p) => p.status === 'shipped');
+    const old = projects.filter(earlier);
+    $('pcount').textContent = String(projects.filter(runningNow).length);
     const hb = $('homebtn'); hb.classList.toggle('on', !current); hb.setAttribute('aria-current', current ? 'false' : 'page');
     const nOpen = live.reduce((a, p) => a + openDecs(p).length, 0); const hn = $('hcount'); hn.replaceChildren();
     if (nOpen) { const top = live.some((p) => openDecs(p).some((d) => d.weight === 'Critical' || d.weight === 'High')); const t = el('span', 'pri ' + (top ? 'p-high' : 'p-medium'), String(nOpen)); t.title = nOpen + (nOpen === 1 ? ' decision waits' : ' decisions wait') + ' on you'; hn.append(t); }
@@ -683,18 +686,19 @@ a.pill svg { width: 13px; height: 13px; }
     const sopen = shipOpen() || done.some((p) => p.id === current); $('sfold').setAttribute('aria-expanded', String(sopen)); slist.hidden = !sopen;
     if (projects.length && !live.length) list.appendChild(el('p', null, 'Nothing building right now.'));
     if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'No projects reported yet. An orchestrator adds its project when it starts a build.' : 'Sign in on claude.ai to see your projects.'))); return; }
+    const oldList = el('div', 'plist'); const oldFold = el('details'); oldFold.dataset.earlier = '1'; oldFold.append(el('summary', null, 'Earlier sessions (' + old.length + ')'), oldList); if (old.length) list.after(oldFold);
     projects.forEach((p) => {
       const box = el('div', 'proj' + (current === p.id ? ' on' : ''));
       const b = el('button', 'pbtn'); b.type = 'button'; b.id = 'p-' + p.id;
       if (current === p.id) b.setAttribute('aria-current', 'true');
-      b.append(el('span', 'dot ' + (openDecs(p).length ? 'waiting' : (p.status || 'building'))), el('span', 'nm', p.name), el('span', 'mono', (p.pct || 0) + '%'));
+      b.append(el('span', 'dot ' + (openDecs(p).length ? 'waiting' : (p.status || 'building'))), el('span', 'nm', p.name), el('span', 'mono', pctOk(p) ? p.pct + '%' : ''));
       b.addEventListener('click', () => { hide(); go(p.id); });
       const line = el('div', 'prline'); line.appendChild(b);
       b.addEventListener('mouseenter', () => { if (!current) { const t = $('tile-' + p.id); if (t) t.classList.add('hl'); } });
       b.addEventListener('mouseleave', () => { const t = $('tile-' + p.id); if (t) t.classList.remove('hl'); });
-      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p), el('span', 'mono', (p.pct || 0) + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); const sl = H && H.sumLine(p); if (sl) c.append(sl); if (p.tagline) c.append(el('p', null, p.tagline));
+      hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p)); if (pctOk(p)) row.append(el('span', 'mono', p.pct + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); const sl = H && H.sumLine(p); if (sl) c.append(sl); if (p.tagline) c.append(el('p', null, p.tagline));
         const k = H && H.doneBtn(p, null, hide); if (k) c.append(k); }, true);   // Mark done in the rail card (Alex 11:58) and the page header (MC-7)
-      box.appendChild(line);
+      box.appendChild(line); const rl = H && H.laneList && p.status !== 'shipped' && !earlier(p) ? H.laneList(p, true) : null; if (rl) box.appendChild(rl);   // MC2 r2 #5
       const ds = openDecs(p);  // Alex: the rail always lists each project's open decisions, Home included
       if (ds.length) {
         const ul = el('ul', 'dlist');
@@ -707,7 +711,8 @@ a.pill svg { width: 13px; height: 13px; }
         });
         box.appendChild(ul);
       }
-      (p.status === 'shipped' ? slist : list).appendChild(box);
+      if (earlier(p)) { const t = Date.parse(p.updatedAt || ''); b.append(el('span', 'when', isNaN(t) ? 'Date unknown' : 'Last active ' + new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }))); }
+      (p.status === 'shipped' ? slist : earlier(p) ? oldList : list).appendChild(box);
     });
     renderLimits(); paint(); refocus(keep); keepHover();
   }
@@ -760,7 +765,7 @@ a.pill svg { width: 13px; height: 13px; }
     shown.forEach((l) => {
       const st = l.state || 'ok';
       const r = el('button', 'lrow'); r.type = 'button'; r.id = 'lim-' + l.id;
-      const nm = el('span', 'nm'); nm.append(el('span', null, l.name || l.id)); if (l.paid) nm.append(el('span', 'paidtag', 'paid'));
+      const nm = el('span', 'nm'); nm.append(el('span', null, l.name || l.id)); const billing = l.billing || (l.paid ? 'metered' : 'subscription'); if (billing === 'metered' || billing === 'unknown') { const tag = el('span', 'paidtag', billing === 'metered' ? 'pay per use' : 'plan not confirmed'); tag.title = billing === 'metered' ? 'Billed per use. Outsourcerer asks before every run.' : 'Outsourcerer could not confirm a plan login, so it asks before every run.'; nm.append(tag); }
       nm.prepend(hlogo(l));
       r.append(el('span', 'dot ' + st), nm, el('span', 'lf', l.left || LSTATE[st] || ''));
       if (l.renews) { const rn = el('span', 'rn'); rn.append(ic('rotate-ccw'), document.createTextNode((st === 'ok' ? 'Renews ' : 'Back ') + l.renews)); r.append(rn); }
@@ -772,7 +777,7 @@ a.pill svg { width: 13px; height: 13px; }
         if (l.cap) c.append(el('p', null, 'Your cap: ' + l.cap));
         if (l.renews) c.append(el('p', null, 'Renews ' + l.renews + '.'));
         if (l.note) c.append(el('p', null, l.note));
-        if (l.paid) c.append(el('p', null, 'Paid per use. Outsourcerer asks you before every run.'));
+        if (billing === 'metered' || billing === 'unknown') c.append(el('p', null, billing === 'metered' ? 'Billed per use. Outsourcerer asks before every run.' : 'Outsourcerer could not confirm a plan login, so it asks before every run.'));
         if (l.updated) c.append(el('p', 'where', 'Checked ' + l.updated + (l.source ? ' by ' + l.source : '')));
       });
       box.appendChild(r);
@@ -806,8 +811,8 @@ a.pill svg { width: 13px; height: 13px; }
     const ds = openDecs(p);
     const stats = el('div', 'stats');
     const s1 = el('div', 'card stat'); const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
-    s1.append(el('span', 'k', 'Done so far'), el('span', 'big', (p.pct || 0) + '%'), bar);
-    if ((p.lanes || []).length) s1.append(el('span', null, 'Average across ' + p.lanes.length + ' work tracks'));
+    s1.append(el('span', 'k', 'Done so far'), el('span', pctOk(p) ? 'big' : 'mid', pctOk(p) ? p.pct + '%' : 'Not reported yet'), bar); bar.hidden = !pctOk(p);
+    if (pctOk(p) && (p.lanes || []).length) s1.append(el('span', null, 'Average across ' + p.lanes.length + ' work tracks'));
     if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = (p.pct || 0) + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = (p.pct || 0) + '%'; }); }
     const s2 = el('div', 'card stat'); const k2 = el('span', 'k'); k2.append(ic('rocket'), document.createTextNode('Release goes live'));
     s2.append(k2, el('span', 'mid', p.eta || 'Not set'));
@@ -849,8 +854,8 @@ a.pill svg { width: 13px; height: 13px; }
         ob.addEventListener('click', (e) => { e.stopPropagation(); hide(); openSession(ob, l.session); });
         c.append(ob);
       }
-      c.setAttribute('aria-label', l.short + ', ' + (l.status || 'Building') + ', ' + (l.pct || 0) + ' percent');
-      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status), el('span', 'mono', (l.pct || 0) + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.issues) { const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf); else h.append(el('p', null, 'Issues: ' + l.issues)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); if (l.session) h.append(el('p', 'where', 'Session: ' + l.session)); });
+      c.setAttribute('aria-label', l.short + ', ' + (l.status || 'Building') + (pctOk(l) ? ', ' + l.pct + ' percent' : ''));
+      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status)); if (pctOk(l)) row.append(el('span', 'mono', l.pct + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.issues) { const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf); else h.append(el('p', null, 'Issues: ' + l.issues)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); if (l.session) h.append(el('p', 'where', 'Session: ' + l.session)); });
       return c;
     };
     const norm = (s) => String(s || 'Building').toLowerCase();
@@ -883,8 +888,8 @@ a.pill svg { width: 13px; height: 13px; }
       themes.forEach((th) => {
         const list = th.k ? lanes.filter((l) => l.theme === th.k) : lanes;
         if (!list.length) return;
-        const avg = Math.round(list.reduce((s, l) => s + (l.pct || 0), 0) / list.length);
-        const box = el('div', 'card theme'); const h = el('h3'); h.append(el('span', null, th.t), el('span', 'mono', avg + '%'));
+        const wp = list.filter(pctOk), avg = wp.length ? Math.round(wp.reduce((s, l) => s + l.pct, 0) / wp.length) + '%' : '';
+        const box = el('div', 'card theme'); const h = el('h3'); h.append(el('span', null, th.t), el('span', 'mono', avg));
         const grid = el('div', 'lanes'); list.forEach((l) => grid.appendChild(laneTile(l)));
         box.append(h, grid); wrap.appendChild(box);
       });
@@ -941,7 +946,7 @@ a.pill svg { width: 13px; height: 13px; }
 
   // Home, Mark done and Refresh live in assets/hub-home.js (keeps this file under 1,000 lines).
   const H = typeof window.OSRC_HUB_HOME === 'function' ? window.OSRC_HUB_HOME({
-    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck,
+    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck, earlier,
     get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;

@@ -19819,7 +19819,6 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
-# lib/ modules: sourced mode ($0 is the caller) misses them above; load from the real folder too.
 [ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
 
 main() {
@@ -19934,7 +19933,7 @@ main() {
     research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
     edit)        route_delegate "accept-edits" "$cmd" "$@" ;;
     yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
-    bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
+    bg)          _osrc_hub_daily_hint; cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     plan) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_plan "$@" ;;                          # factory: durable plan graph (plan new|ls|show|use|rm|run)
     task) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_task "$@" ;;                          # factory: tasks in a plan (add|ls|show|ready|start|hold|release|done|fail|cancel|retry)
     fanout)      cmd_fanout "$@" ;;                        # parallel N-way multi-subagent (+ status|wait|collect|list)
@@ -19962,7 +19961,8 @@ main() {
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
-    hub)         cmd_hub "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
+    hub)         cmd_hub "$@" ;;
+    mc|mission-control) cmd_hub_serve "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
@@ -19978,7 +19978,7 @@ main() {
       [ "$PROVIDER" = "devin" ] || die "continue is Devin-only for now (provider=$PROVIDER). For OR interactive follow-ups use the sibling tmux harness: scripts/run-or-{model,codex}.sh"
       continue_turn "$@" ;;
     session)
-      session "$@" ;;   # provider-aware: devin | codex | cc (see session start)
+      [ "${1:-}" != start ] || _osrc_hub_daily_hint; session "$@" ;;   # provider-aware: devin | codex | cc (see session start)
     parity)
       [ "$PROVIDER" = "devin" ] || die "parity syncs into Devin only. cc inherits your Claude skills/MCP natively; codex uses its own AGENTS.md + MCP."
       parity ;;
