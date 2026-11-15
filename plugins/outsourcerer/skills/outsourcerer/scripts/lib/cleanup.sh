@@ -545,9 +545,9 @@ _osrc_cleanup_tick() {
   fi
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 0
   local lock="$(_osrc_cl_root)/.lock" lage
-  if ! mkdir "$lock" 2>/dev/null; then
+  if ! _osrc_atomic_mkdir "$lock"; then
     lage=$(( now - $(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0) ))
-    { [ "$lage" -gt 600 ] && rmdir "$lock" 2>/dev/null && mkdir "$lock" 2>/dev/null; } || return 0
+    { [ "$lage" -gt 600 ] && rmdir "$lock" 2>/dev/null && _osrc_atomic_mkdir "$lock"; } || return 0
   fi
   date +%s > "$stamp" 2>/dev/null || true
   ( _osrc_cleanup_tick_run; rmdir "$lock" 2>/dev/null ) >/dev/null 2>&1 &

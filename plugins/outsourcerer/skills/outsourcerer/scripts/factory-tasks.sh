@@ -927,10 +927,10 @@ _plan_cli_new() {
   fi
   _mkdir_private "$(_plans_root)" || die "cannot create $(_plans_root)"
   pd="$(_plan_dir "$name")"
-  mkdir "$pd" 2>/dev/null || die "a plan named '$name' already exists. Pick another name, or see it with: outsourcerer plan show $name"
+  _mkdir_claim "$pd" || die "a plan named '$name' already exists. Pick another name, or see it with: outsourcerer plan show $name"
   # From here on this call owns $pd (mkdir just made it): any failure removes it again, so a half-made
   # plan (no plan.json) never blocks the name or confuses plan ls.
-  mkdir "$pd/tasks" 2>/dev/null || _plan_new_abort "$pd" "could not create $pd/tasks"
+  _mkdir_claim "$pd/tasks" || _plan_new_abort "$pd" "could not create $pd/tasks"
   now="$(_factory_now)"
   _factory_write_json "$pd/plan.json" "$(_ft_jq -cn --arg n "$name" --arg g "$goal" --arg r "$repo" --arg b "$base" --arg now "$now" \
     '{schema:1,name:$n,goal:$g,repo:$r,base_branch:$b,created:$now,updated:$now}')" || _plan_new_abort "$pd" "could not save $pd/plan.json"

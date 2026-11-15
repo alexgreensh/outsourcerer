@@ -464,7 +464,7 @@ _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY ->
       case "$detail" in
         "READY ${head:0:7} "*)
           if [ -n "$head" ] && [ "$state" = queued ]; then
-            if mkdir "$mark.lock" 2>/dev/null; then
+            if _osrc_atomic_mkdir "$mark.lock"; then
               if [ -f "$mark" ]; then rmdir "$mark.lock" 2>/dev/null; continue; fi
               if ( cmd_review next >/dev/null 2>&1 ) && printf '%s\n' "$ts" > "$mark"; then
                 rmdir "$mark.lock" 2>/dev/null; continue

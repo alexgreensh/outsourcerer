@@ -240,15 +240,9 @@ _mkdir_private() {
 }
 
 # _mkdir_claim <dir> -> 0 only if THIS call created <dir>; 1 if it already existed.
-# Use where the directory doubles as a lock. Plain `mkdir` (no -p) is the atomic primitive: the
-# kernel guarantees exactly one of two racing callers creates it, which is what stops concurrent
-# launches from sharing one job directory. Do NOT relax this to a test-then-create, and do not fold
-# it into _mkdir_private, whose -p makes an existing directory a success.
+# The shared helper uses the OS mkdir operation, not a potentially non-atomic utility.
 _mkdir_claim() {
-  # The subshell carries the umask, not the atomicity: `mkdir` with no -p is still the single
-  # syscall that either creates the directory or fails because someone else already did, and the
-  # subshell's exit status is that mkdir's.
-  ( umask 077; mkdir "$1" ) 2>/dev/null || return 1
+  _osrc_atomic_mkdir "$1" || return 1
   _harden_dir "$1"
   return 0
 }
@@ -1998,15 +1992,14 @@ _catalog_fetch() {
   f="$(_catalog_path "$lane")" || return 1
   _mkdir_private "$(dirname "$f")" || return 1
   lock="${f}.lock.d"
-  if ! mkdir "$lock" 2>/dev/null; then
+  if ! _osrc_atomic_mkdir "$lock"; then
     _max=$(( ${OSRC_CATALOG_FETCH_TIMEOUT:-10} + 2 )); _w=0
     while [ "$_w" -lt "$_max" ]; do
       _catalog_fresh "$lane" && return 0            # winner published a fresh cache -> use it
-      mkdir "$lock" 2>/dev/null && break             # winner vanished (stale lock) -> take over
+      _osrc_atomic_mkdir "$lock" && { _w=-1; break; } # winner vanished -> take over
       sleep 1; _w=$(( _w + 1 ))
     done
-    _catalog_fresh "$lane" && { rmdir "$lock" 2>/dev/null; return 0; }
-    [ -d "$lock" ] || mkdir "$lock" 2>/dev/null      # last resort: probe unlocked rather than skip
+    [ "$_w" -lt 0 ] || { _catalog_fresh "$lane"; return $?; }
   fi
   _catalog_fetch_inner "$lane"; _rc=$?
   rmdir "$lock" 2>/dev/null
@@ -2495,7 +2488,7 @@ _devin_skills_lock_acquire() { # [grant-set]
     # Creation runs under the mutex too: a stale check that ran between `mkdir holders` and the
     # holder file landing would see an empty lock and reap a live creator.
     if _devin_lock_mutex_acquire "$lock"; then
-      if mkdir "$lock" 2>/dev/null; then
+      if _osrc_atomic_mkdir "$lock"; then
         mkdir "$lock/holders" 2>/dev/null; : > "$lock/holders/$me"
         printf '%s\n' "$me" > "$lock/pid" 2>/dev/null
         _devin_lock_mutex_release "$lock"; _DEVIN_LOCK_SHARED=0; break
@@ -7964,7 +7957,7 @@ _heartbeat_publish_dir() { # <canonical> <pid> <pid-start> <record>
   # mkdir is the portable atomic directory claim. Do not use `mv pending
   # canonical`: when canonical appears between the check and mv, mv nests the
   # pending directory inside it on common hosts and leaves cleanup wedged.
-  mkdir "$canonical" 2>/dev/null || return 1
+  _osrc_atomic_mkdir "$canonical" || return 1
   mv "$pending/owner.json" "$canonical/owner.json" || return 1
   _state_sync "$canonical" || return 1
   rmdir "$pending" 2>/dev/null || return 1

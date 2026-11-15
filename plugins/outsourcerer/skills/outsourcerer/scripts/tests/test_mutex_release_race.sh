@@ -17,6 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/../lib/atomic-claim.sh"
 . "$HERE/../lib/devin-lock.sh"
 cc -shared -fPIC "$HERE/fixtures/pause-rmdir.c" -ldl -o "$T/pause.so" || exit 1
 wait_file() {

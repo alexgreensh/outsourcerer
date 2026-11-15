@@ -217,18 +217,23 @@ _osrc_done_check_run() { # <name> <cwd> <cmd> <spec> — background body: run, c
 # missing or older than the check bound + 60 s is dead (runner killed/rebooted) and is broken by
 # atomic rename — only one breaker can win the mv, so two pollers cannot both retake it.
 _osrc_done_check_lock() { # <name>
-  local name="$1" dir lock now le stale_dir
+  local name="$1" dir lock now le stale_dir age
   dir="$(_osrc_done_dir)"; lock="$dir/$name.checklock"; now="$(date +%s)"
-  if mkdir "$lock" 2>/dev/null; then return 0; fi
+  if _osrc_atomic_mkdir "$lock"; then return 0; fi
   le=""; read -r le < "$lock/epoch" 2>/dev/null || le=""
-  case "$le" in ''|*[!0-9]*) stale_dir=1 ;; *)
+  case "$le" in ''|*[!0-9]*)
+    age="$(_mtime "$lock" 2>/dev/null || echo 0)"
+    case "$age" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$age" -gt 0 ] && [ $((now - age)) -gt $(( ${OSRC_DONE_CHECK_SECS:-300} + 60 )) ] || return 1
+    stale_dir=1 ;;
+  *)
     [ $((now - le)) -gt $(( ${OSRC_DONE_CHECK_SECS:-300} + 60 )) ] && stale_dir=1 || stale_dir=0 ;;
   esac
   [ "$stale_dir" = 1 ] || return 1
   stale_dir="$lock.stale.$$.$RANDOM"
   mv "$lock" "$stale_dir" 2>/dev/null || return 1
   rm -rf "$stale_dir" 2>/dev/null
-  mkdir "$lock" 2>/dev/null
+  _osrc_atomic_mkdir "$lock"
 }
 
 _osrc_done_check_spawn() { # <name> <cwd> <cmd> <spec> — caller holds <name>.checklock

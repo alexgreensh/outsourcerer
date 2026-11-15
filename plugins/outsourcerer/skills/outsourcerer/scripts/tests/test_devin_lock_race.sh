@@ -5,6 +5,7 @@ export HOME="$T/home" OSRC_HOME="$T/osrc"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$HOME" "$OSRC_HOME"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+. "$HERE/../lib/atomic-claim.sh"
 . "$HERE/../lib/devin-lock.sh"
 
 permission_probe() (

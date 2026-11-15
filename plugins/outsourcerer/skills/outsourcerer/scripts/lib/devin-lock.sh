@@ -36,7 +36,7 @@ _osrc_guarded_mutex_acquire() {
       # A ticket covers the mkdir-to-pid window, even if the creator is paused
       # for longer than the legacy ownerless-lock age threshold.
       ticket="$(umask 077; mktemp "$candidates/$owner.XXXXXX")" || return 1
-      if [ ! -d "$guard" ] && (umask 077; mkdir "$mx") 2>/dev/null; then
+      if [ ! -d "$guard" ] && _osrc_atomic_mkdir "$mx"; then
         if [ -d "$guard" ]; then
           # The pathname may already name a different generation. Leave an
           # unowned directory for guarded stale recovery rather than deleting it.
@@ -53,7 +53,7 @@ _osrc_guarded_mutex_acquire() {
       fi
       rm -f "$ticket" 2>/dev/null
     fi
-    if [ ! -d "$guard" ] && _devin_lock_debris "$mx" && (umask 077; mkdir "$guard") 2>/dev/null; then
+    if [ ! -d "$guard" ] && _devin_lock_debris "$mx" && _osrc_atomic_mkdir "$guard"; then
       busy=0
       for ticket in "$candidates"/*; do
         [ -e "$ticket" ] || continue

@@ -132,7 +132,13 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
         fi
         return "$status"
       }
-      "$fn" "$d" ) > "$gate/out.$i" 2> "$gate/err.$i" &
+      rc=0; "$fn" "$d" || rc=$?
+      if [ "$rc" = 0 ]; then
+        stat -c 'claim identity inode=%i ctime=%z path=%n' "$d" >> "$gate/out.$i" 2>/dev/null \
+          || stat -f 'claim identity inode=%i ctime=%c path=%N' "$d" >> "$gate/out.$i" 2>/dev/null \
+          || printf 'claim identity unavailable\n' >> "$gate/out.$i"
+      fi
+      exit "$rc" ) > "$gate/out.$i" 2> "$gate/err.$i" &
     pids[$i]=$!
   done
   osrc_race_release "$gate" 10 || released=1
@@ -141,8 +147,8 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
     printf '%s\n' "$rc" > "$gate/status.$i"
     [ "$rc" = 0 ] && winners=$((winners + 1))
     [ "$rc" = 0 ] || [ "$rc" = 1 ] || released=1
-    if [ "$fn" = _mkdir_claim ]; then
-      [ -f "$gate/mkdir-status.$i" ] && [ "$(cat "$gate/mkdir-status.$i")" = "$rc" ] || released=1
+    if [ "$fn" = _mkdir_claim ] && [ -f "$gate/mkdir-status.$i" ]; then
+      [ "$(cat "$gate/mkdir-status.$i")" = "$rc" ] || released=1
     fi
   done
   [ "$released" = 0 ] || { printf 'ERR'; return; }
@@ -205,7 +211,7 @@ for r in $(seq 1 $rounds); do
   if [ "$n" = "ERR" ]; then bad "race barrier broken (round $r)"; osrc_race_report "$TMP/race-$r.gate" 10; barrier_broken=1; break; fi
   if [ "$n" != "1" ]; then
     bad_rounds=$((bad_rounds+1)); printf 'round %s: winners=%s\n' "$r" "$n"
-    [ "$n" -le 1 ] || printf '  claim path was removed and recreated between successful mkdir calls\n'
+    [ "$n" -le 1 ] || printf '  multiple claimants reported success; compare their recorded identities\n'
     osrc_race_report "$TMP/race-$r.gate" 10
   fi
 done

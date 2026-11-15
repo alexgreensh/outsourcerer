@@ -445,10 +445,11 @@ _osrc_heavy_lockdir() { local base="${TMPDIR:-/tmp}"; base="${OSRC_HOME:-${base%
 _osrc_heavy_lock() { # <wait-secs> -> rc0 while holding the lock
   local dir waited=0 max="${1:-120}" ep now
   dir="$(_osrc_heavy_lockdir)"; mkdir -p "$(dirname "$dir")" 2>/dev/null
-  until mkdir "$dir" 2>/dev/null; do
+  until _osrc_atomic_mkdir "$dir"; do
     ep="$(cat "$dir/epoch" 2>/dev/null)"; now="$(date +%s)"
+    case "$ep" in ''|*[!0-9]*) ep="$(_mtime "$dir" 2>/dev/null || echo 0)" ;; esac
     case "$ep" in ''|*[!0-9]*) ep=0 ;; esac
-    if [ $(( now - ep )) -gt "${OSRC_HEAVY_LOCK_STALE:-7200}" ] 2>/dev/null; then
+    if [ "$ep" -gt 0 ] && [ $(( now - ep )) -gt "${OSRC_HEAVY_LOCK_STALE:-7200}" ] 2>/dev/null; then
       rm -rf "$dir" 2>/dev/null; continue
     fi
     [ "$waited" -ge "$max" ] && return 1
