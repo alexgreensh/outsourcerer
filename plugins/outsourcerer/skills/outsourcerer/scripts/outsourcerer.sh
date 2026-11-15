@@ -2673,7 +2673,7 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   local sbx=(); [ -n "$sandbox" ] && sbx=(--sandbox)
   # Aliases must become real Devin ids here, at the last point before the CLI: parse_model kept the
   # token verbatim, and `devin --model glm` is a hard launch failure.
-  local _dvmodel; _dvmodel="$(_devin_resolve_model "$MODEL")"
+  local _dvmodel; if [ "${_OSRC_PIN_DISP:-}" = devin ]; then _dvmodel="$MODEL"; else _dvmodel="$(_devin_resolve_model "$MODEL")"; fi
   [ "$_dvmodel" = "$MODEL" ] || printf '>>> [model] alias "%s" -> Devin id "%s"\n' "$MODEL" "$_dvmodel" >&2
   _exclude_refuse_resolved "$MODEL" "$_dvmodel"   # #45: `-m claude` can resolve to an excluded Fable id
   MODEL="$_dvmodel"
@@ -3384,7 +3384,7 @@ _lane_cli_gate() {
 _lane_ready_probe() {
   local f; f="$(_lane_field "${1:-}" ready_fn 2>/dev/null)" || return 1
   [ -n "$f" ] || return 1
-  "$f" 9>&-
+  "$f"
 }
 
 # _lane_health_key <token> -> the canonical lane code Slice-1 lane-down state keys
@@ -11253,7 +11253,8 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
-  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" OSRC_JOB_TOKEN="$OSRC_JOB_TOKEN" nohup "$SCRIPT_PATH" __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
+  _osrc_pin_internal_args
+  OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" OSRC_JOB_TOKEN="$OSRC_JOB_TOKEN" nohup "$SCRIPT_PATH" ${_OSRC_PIN_ARGS[@]+"${_OSRC_PIN_ARGS[@]}"} __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
   # watcher. Everything here goes to STDERR ONLY -- this function runs inside `id=$(_bg_launch ...)`
   # and its stdout is the job-id contract. rc 0 = leader verified live; rc 1 = loud NOT-ARMED
@@ -11482,7 +11483,7 @@ cmd_bg() {
   # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
   # text lane) otherwise produced a job id, a "launched" line, and a failure only the job record ever
   # saw. Output is discarded on success so the disclosure banner is not printed twice.
-  local _pfrc=0; local -a _pf_args=("$@")
+  local _pfrc=0 _pfroute _OSRC_PREFLIGHT_PAIR="" _OSRC_PIN_LANE="" _OSRC_PIN_MODEL="" _OSRC_PIN_DISP="" _OSRC_PIN_PROVIDER="" _OSRC_PIN_AUTH=""; local -a _pf_args=("$@")
   # --provider must be passed EXPLICITLY: cmd_bg already consumed the flag into a shell variable that a
   # child process does not inherit, so without this the preflight would silently check the DEFAULT lane
   # and bless a combination the real run rejects.
@@ -11510,7 +11511,7 @@ cmd_bg() {
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _OSRC_PREFLIGHT_PAIR="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" _osrc_bg_preflight "$SCRIPT_PATH")" || _pfrc=$?
+  _pfroute="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" _osrc_bg_preflight "$SCRIPT_PATH")" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11521,12 +11522,10 @@ cmd_bg() {
     # The preflight has forwarded its captured failure diagnostics.
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
-  # Only the private preflight descriptor can carry consent to the detached job.
-  [ -n "$_OSRC_PREFLIGHT_PAIR" ] && OSRC_SPEND_OK=1
-  if [ "${OSRC_SPEND_OK:-0}" = 1 ]; then
-    case "$_OSRC_PREFLIGHT_PAIR" in ?*'|'?*) ;; *) die "bg: spend consent could not be bound to the preflight lane and model" ;; esac
-    case "$_OSRC_PREFLIGHT_PAIR" in *'|'*'|'*|*[[:space:]]*) die "bg: invalid spend consent pair" ;; esac
-  fi
+  _osrc_preflight_unpack "$_pfroute" || die "bg: preflight returned an incomplete or invalid route; nothing started."
+  [ "$_OSRC_PIN_AUTH" = 1 ] && OSRC_SPEND_OK=1
+  PROVIDER="$_OSRC_PIN_PROVIDER"; PROVIDER_EXPLICIT=1
+  _osrc_pin_argv "$@"; set -- "${_OSRC_PIN_ARGV[@]}"
   _bg_cloud_preack "$@"   # ack in the PARENT so a refusal `die`s the whole command (not just a subshell)
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
@@ -12005,9 +12004,10 @@ run_job() {
   # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
   # only — env consent is sanitized by design.
   local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
+  _osrc_pin_internal_args
   OSRC_STREAM=1 OSRC_NO_ADVISE=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
-    "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
+    "$SCRIPT_PATH" --osrc-job-child-internal ${_OSRC_PIN_ARGS[@]+"${_OSRC_PIN_ARGS[@]}"} ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
   local sc=$?
   # The child may have auto-isolated itself (issue #51, _cloud_autoisolate): it left the initial
   # receipt in the job dir. Adopt it so the job gets the same receipt and cleanup as --worktree.
@@ -14445,7 +14445,7 @@ delegate_droid() {
   esac
   local mflag=()
   if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
-    local _lreq="$id"; id="$(_lane_model_for droid "$id")"; model_key="$id"; ledger_model="$id"
+    local _lreq="$id"; [ "${_OSRC_PIN_DISP:-}" = droid ] || id="$(_lane_model_for droid "$id")"; model_key="$id"; ledger_model="$id"
     _exclude_refuse_resolved "$_lreq" "$id"
     _validate_model_token "$id"; mflag=(-m "$id")
   else id="(droid default/configured)"; fi
@@ -14586,7 +14586,7 @@ delegate_warp() {
   esac
   local mflag=()
   if [ "${MODEL_EXPLICIT:-0}" = "1" ] && [ -n "$id" ]; then
-    local _lreq="$id"; id="$(_lane_model_for warp "$id")"; model_key="$id"; ledger_model="$id"
+    local _lreq="$id"; [ "${_OSRC_PIN_DISP:-}" = warp ] || id="$(_lane_model_for warp "$id")"; model_key="$id"; ledger_model="$id"
     _exclude_refuse_resolved "$_lreq" "$id"
     _validate_model_token "$id"
     # live-catalog gate for the Warp lane. Validate the resolved id against `oz model list`
@@ -15789,7 +15789,7 @@ delegate_codex() {
 # catalogs and claudex/local are policy/hardware lanes — our shortlist aliases don't map onto
 # them, so they keep the single-attempt path.
 _fallback_enabled() {
-  [ "${OSRC_FALLBACK:-1}" = "1" ] || return 1
+  [ -z "${_OSRC_PIN_DISP:-}" ] && [ "${OSRC_FALLBACK:-1}" = "1" ] || return 1
   have jq || return 1
   case "${PROVIDER:-devin}" in devin|cc|codex) return 0 ;; esac
   return 1
@@ -16022,6 +16022,7 @@ _fallback_dispatch() {
 _route_resolution() {   # <dispatch-lane> <model>
   local lane="$1" model="$2"
   [ -n "$lane" ] && [ -n "$model" ] || die "route resolution is incomplete; refusing to choose a provider"
+  _osrc_pinned_assert "$lane" "$model"
   ROUTE_LANE="$lane"; ROUTE_MODEL="$model"
   ROUTE_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}"
   ROUTE_MODEL_EXPLICIT="${MODEL_EXPLICIT:-0}"
@@ -16202,7 +16203,7 @@ _failover_signal_read() {
 }
 # _failover_signal_pending -> rc0 when the last dispatch left a plan-limit verdict that warrants a hop.
 _failover_signal_pending() {
-  _failover_signal_read || return 1
+  [ -z "${_OSRC_PIN_DISP:-}" ] && _failover_signal_read || return 1
   [ "$_FO_VERDICT" != "answered" ]
 }
 
@@ -16525,7 +16526,7 @@ route_delegate() {
     # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
     [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
     [ "$PROVIDER" != "opencode" ] || die "the opencode lane needs -m <go-model-id> (e.g. glm-5.3-flash or opencode-go/glm-5.3-flash — a bare run would fall back to opencode's configured model, which may not bill your Go plan)"
-    MODEL="$(_route_provider_default_model "$PROVIDER" 9>&-)" || die "unknown provider '$PROVIDER'"
+    MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
     # A provider's built-in default can be a model the user excluded (e.g. --provider codex -> sol).
     # Never run it silently: say which default it is and how to pick another.
     case "$MODEL" in *-default) _exclude_engine_default_notice "$PROVIDER" ;; esac
@@ -16551,7 +16552,8 @@ route_delegate() {
       delegate_local "$tier"; return $?
   fi
 
-  RESOLVED_ID="$MODEL"; RESOLVED_LANE=""; TTIER=""
+  RESOLVED_ID="$MODEL"; RESOLVED_LANE=""; TTIER=""; local disp="" _or_autoroute_note="" _or_credit_state=""
+  if [ -n "${_OSRC_PIN_DISP:-}" ]; then _osrc_pinned_resolve; else
   # DROID/CURSOR/HERMES engine lanes skip alias resolution entirely: the engine owns its model catalog
   # (incl. user-configured/BYOK models), so `-m glm` under --provider droid means DROID's "glm",
   # never our alias table's z-ai/glm-5.2. The skill adapts to the user's tools, not the reverse.
@@ -16582,7 +16584,6 @@ route_delegate() {
     fi
   fi
 
-  local disp="" _or_autoroute_note="" _or_credit_state=""
   local _pl_lane=""; _pl_lane="$(_lane_by_provider "$PROVIDER" 2>/dev/null)"
   if _provider_engine_lane "$PROVIDER" >/dev/null 2>&1; then
     disp="$PROVIDER"
@@ -16659,6 +16660,8 @@ route_delegate() {
     fi
   fi
 
+  fi
+  _osrc_preflight_native
   # QUOTA GATE: skip a model that's at its declared daily cap BEFORE we announce/dispatch this route, so
   # work spreads across free tiers and only falls through to paid when the frees are spent. No quota.json
   # (or no entry for this model) -> _quota_gate rc0 and this whole block is a no-op: the default routing
@@ -19836,7 +19839,7 @@ main() {
   # inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. So: drop any inherited
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
-  unset OSRC_PREFLIGHT _OSRC_PREFLIGHT_FD OSRC_ACCOUNT OSRC_ACCOUNT_DIR
+  unset OSRC_PREFLIGHT _OSRC_PREFLIGHT_FD _OSRC_PIN_DISP _OSRC_PIN_MODEL OSRC_ACCOUNT OSRC_ACCOUNT_DIR
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19850,7 +19853,8 @@ main() {
   while :; do
     case "${1:-}" in
       --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
-      --osrc-preflight-pair-fd)    exec 9>&3 3>&-; _OSRC_PREFLIGHT_FD=1; shift ;;
+      --osrc-preflight-pair-fd)    _OSRC_PREFLIGHT_FD=1; shift ;;
+      --osrc-pinned-route)         _OSRC_PIN_DISP="${2:-}"; _OSRC_PIN_MODEL="${3:-}"; shift 3 ;;
       --osrc-job-child-internal)   _job_child=1; shift ;;
       *) break ;;
     esac
@@ -19930,10 +19934,10 @@ main() {
     limits)   cmd_limits "$@" ;;                            # per-model daily caps: set <lane> <model> N/day | status | clear
     exclude)  cmd_exclude "$@" ;;                           # never-use model list: add|rm|ls|clear|check (issue #45)
     models)   models "$@" ;;
-    run|explore) route_delegate "auto" "$cmd" "$@" ;;
-    research)    route_delegate "autonomous" "$cmd" "$@" ;;      # exec tools inside a sandbox (devin/codex), see header
-    edit)        route_delegate "accept-edits" "$cmd" "$@" ;;
-    yolo)        route_delegate "dangerous" "$cmd" "$@" ;;
+    run|explore) _osrc_route_dispatch "auto" "$cmd" "$@" ;;
+    research)    _osrc_route_dispatch "autonomous" "$cmd" "$@" ;;
+    edit)        _osrc_route_dispatch "accept-edits" "$cmd" "$@" ;;
+    yolo)        _osrc_route_dispatch "dangerous" "$cmd" "$@" ;;
     bg)          cmd_bg "$@" ;;                            # background: detach a supervised job, print id
     plan) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_plan "$@" ;;                          # factory: durable plan graph (plan new|ls|show|use|rm|run)
     task) _factory_global_flags "$@"; set -- ${_FGF_ARGS[@]+"${_FGF_ARGS[@]}"}; cmd_task "$@" ;;                          # factory: tasks in a plan (add|ls|show|ready|start|hold|release|done|fail|cancel|retry)
