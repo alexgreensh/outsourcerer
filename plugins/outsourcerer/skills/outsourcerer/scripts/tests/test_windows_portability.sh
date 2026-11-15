@@ -124,7 +124,12 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
         command mkdir "$@" 2>> "$gate/err.$i"; status=$?
         printf '%s\n' "$status" > "$gate/mkdir-status.$i"
         printf 'mkdir status=%s path=%s\n' "$status" "$last" >> "$gate/out.$i"
-        [ "$status" != 0 ] || ls -di "$last" >> "$gate/out.$i" 2>> "$gate/err.$i"
+        if [ "$status" = 0 ]; then
+          # An inode can be reused. Record ctime too, and retain a missing observation.
+          stat -c 'identity inode=%i ctime=%z path=%n' "$last" >> "$gate/out.$i" 2>/dev/null \
+            || stat -f 'identity inode=%i ctime=%c path=%N' "$last" >> "$gate/out.$i" 2>/dev/null \
+            || printf 'identity unavailable: path disappeared or stat failed\n' >> "$gate/out.$i"
+        fi
         return "$status"
       }
       "$fn" "$d" ) > "$gate/out.$i" 2> "$gate/err.$i" &
@@ -154,6 +159,30 @@ _broken_claim() { [ -d "$1" ] && return 1; mkdir -p "$1" 2>/dev/null || return 1
 # Control the child status independently of mkdir so a wait-status bookkeeping
 # error cannot be mistaken for a second successful filesystem claim.
 _one_claim() { [ "$i" = 3 ]; }
+
+# A removed claim can be acquired again even with a correct atomic mkdir. Force that
+# interleaving so the harness proves it reports both winners and their identities.
+_deleted_claim() {
+  case "$i" in
+    1) mkdir "$1" || return 1; : > "$gate/first-created" ;;
+    2) local deadline=$((SECONDS + 20))
+       while [ ! -f "$gate/first-created" ]; do
+         [ "$SECONDS" -lt "$deadline" ] || return 1
+         sleep 0.01
+       done
+       rmdir "$1" || return 1
+       mkdir "$1" || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+n="$(_race_round _deleted_claim "$TMP/deleted-control")"
+if [ "$n" = 2 ] && grep -q '^identity inode=' "$TMP/deleted-control.gate/out.1" \
+  && grep -q '^identity inode=' "$TMP/deleted-control.gate/out.2"; then
+  ok 'removed-and-recreated claim is detected as two winners'
+else
+  bad "removed-and-recreated claim was not detected: $n"
+  osrc_race_report "$TMP/deleted-control.gate" 10
+fi
 fixed_bad=0
 for r in $(seq 1 20); do
   n="$(_race_round _one_claim "$TMP/fixed-$r")"
@@ -174,7 +203,11 @@ rounds=20; bad_rounds=0; barrier_broken=0
 for r in $(seq 1 $rounds); do
   n="$(_race_round _mkdir_claim "$TMP/race-$r")"
   if [ "$n" = "ERR" ]; then bad "race barrier broken (round $r)"; osrc_race_report "$TMP/race-$r.gate" 10; barrier_broken=1; break; fi
-  if [ "$n" != "1" ]; then bad_rounds=$((bad_rounds+1)); printf 'round %s: winners=%s\n' "$r" "$n"; osrc_race_report "$TMP/race-$r.gate" 10; fi
+  if [ "$n" != "1" ]; then
+    bad_rounds=$((bad_rounds+1)); printf 'round %s: winners=%s\n' "$r" "$n"
+    [ "$n" -le 1 ] || printf '  claim path was removed and recreated between successful mkdir calls\n'
+    osrc_race_report "$TMP/race-$r.gate" 10
+  fi
 done
 if [ "$barrier_broken" -eq 0 ]; then
   [ "$bad_rounds" -eq 0 ] && ok "exactly one concurrent claimant wins, over $rounds contended rounds" \
