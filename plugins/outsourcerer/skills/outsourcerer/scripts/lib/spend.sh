@@ -346,14 +346,27 @@ _OSRC_SPEND_MARKER=""
 _osrc_spend_ok() {
   local lane="${1:-}" model="${2:-}"
   if [ "${OSRC_SPEND_OK:-0}" = "1" ]; then
-    # argv/env consent supersedes the bound marker: drop any leftover .spend-ok in
-    # THIS job's dir so a flag-consented launch leaves no consent file behind. Same
-    # job-dir validation as the marker read path — only a real $OSRC_JOBS/<id> is touched.
-    local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest
+    if [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] && [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || return 1
+    fi
+    # A supervised job's marker limits even a forwarded flag to its approved pair.
+    local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest _mf _header _l _m _match=0
     case "$_jd" in "$_jobs"/*)
       _rest="${_jd#"$_jobs"/}"
-      # "." is not a job id, and a symlinked job dir must never be rm'd through.
-      case "$_rest" in ""|.|*/*|*..*) ;; *) [ -L "$_jd" ] || rm -f "$_jd/.spend-ok" 2>/dev/null || true ;; esac ;;
+      case "$_rest" in ""|.|*/*|*..*) ;; *)
+        _mf="$_jd/.spend-ok"
+        if [ ! -L "$_jd" ] && [ -f "$_mf" ] && [ -n "${OSRC_JOB_TOKEN:-}" ]; then
+          IFS= read -r _header < "$_mf"
+          [ "$_header" = "#osrc-spend-ok token=$OSRC_JOB_TOKEN" ] || return 1
+          while IFS='|' read -r _l _m; do
+            [ "$_l" = "$lane" ] && [ -n "$_m" ] && [ "$_m" = "$model" ] && _match=1
+          done < "$_mf"
+          [ "$_match" = 1 ] || return 1
+          rm -f "$_mf" 2>/dev/null || true
+        elif [ "${_job_child:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+          return 1
+        fi ;;
+      esac ;;
     esac
     return 0
   fi
@@ -469,7 +482,11 @@ _osrc_spend_marker_write() {
   local mf="$jd/.spend-ok"
   ( umask 077
     printf '#osrc-spend-ok token=%s\n' "$OSRC_JOB_TOKEN"
-    _osrc_spend_marker_pairs "$prov" "$@"
+    if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then
+      printf '%s\n' "$_OSRC_PREFLIGHT_PAIR"
+    else
+      _osrc_spend_marker_pairs "$prov" "$@"
+    fi
   ) > "$mf" 2>/dev/null || true
   [ -s "$mf" ] || rm -f "$mf" 2>/dev/null
 }
@@ -509,7 +526,13 @@ _osrc_spend_gate() {
   # session's plan login is proven by the same billing probes as a local launch
   # (claude auth status / codex login status / devin catalog), and hosted-session
   # consent never substitutes for spend approval (CONTRACT.md).
-  case "$bill" in subscription|free) return 0 ;; esac
+  case "$bill" in subscription|free)
+    if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    fi
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
+    return 0 ;;
+  esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
   # Show the model actually being dispatched; when none was resolved, the lane's own
   # default — never DEFAULT_MODEL, which is the SCRIPT's default and can name a
@@ -518,6 +541,8 @@ _osrc_spend_gate() {
   [ -n "$mname" ] || mname="$(_lane_field "$lane" default_model 2>/dev/null)"
   [ -n "$mname" ] || mname="default"
   if _osrc_spend_ok "$lane" "$model"; then
+    _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
     # Marker consent is single-use: consume it now that dispatch is committed, so it
     # cannot authorize a second launch (or leak into a sibling job via a shared dir).
     [ "${OSRC_SPEND_OK:-0}" != "1" ] && [ -n "$_OSRC_SPEND_MARKER" ] \
@@ -539,6 +564,8 @@ _osrc_spend_gate() {
     case "$ans" in
       y|Y|yes|YES)
         OSRC_SPEND_OK=1
+        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+        [ "${OSRC_PREFLIGHT:-0}" = 1 ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
         printf 'OSRC_SPEND_CONSENT=1\n'   # machine token: a bg preflight parent greps this to carry consent forward
         printf '>>> [spend] approved for this command only (never persisted).\n' >&2
         return 0 ;;

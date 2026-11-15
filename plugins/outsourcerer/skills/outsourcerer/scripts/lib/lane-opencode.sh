@@ -28,7 +28,7 @@
 # opencode.json(c)/.opencode/ loads AFTER the inline config and its own
 # policies evaluate last — verified on v2.2.6 that a hostile project
 # `policies` + `agents.plan` allow-all reopened writes through both the root
-# opencode.json and .opencode/opencode.json forms — so read-only runs also set
+# opencode.json and .opencode/opencode.json forms — so all runs set
 # OPENCODE_DISABLE_PROJECT_CONFIG=1 and skip the project layer entirely
 # (verified on v2.2.6: with the var set the same hostile configs denied the
 # write again). v1 has no hard policy layer, so a user's own agent-level
@@ -41,9 +41,8 @@
 # job dir (hard external_directory deny + bundle exception) but SHELL IS NOT
 # CONTAINED — opencode's own docs call command-directory inference best-effort,
 # so a shell command can still touch anything your user can — and mutating
-# tiers HONOUR project config, so the project's own opencode.json can widen
-# them further. research/autonomous REFUSES: opencode has no OS sandbox (same
-# answer as claude-native/cc). yolo pre-allows everything, by definition.
+# tiers deny task/subagent calls, which could select another billed model.
+# research/autonomous REFUSES: opencode has no OS sandbox. Yolo permits other tools.
 #
 # Failure classes (repo conventions: lane-down markers + refusal evidence):
 #   * region refusal ("hosted outside Europe and the United States") — PER-MODEL
@@ -63,6 +62,7 @@
 # `resource_exhausted` are deliberately ABSENT: they fire on task prose ("assert
 # the rate limit renders") and on transient provider throttling, which is a
 # transport failure, not a spent plan.
+unset _OPENCODE_VER
 _OPENCODE_PLAN_LIMIT_RE='usage[ -]?limit[^.]{0,40}(reached|exceeded|exhausted|hit)|monthly allowance|allowance[^.]{0,30}(reached|exceeded|exhausted|spent)|(5[- ]?hour|daily|weekly|monthly)[[:space:]]+(usage[[:space:]]+)?(limit|window|allowance|quota)[^.]{0,40}(reached|exceeded|exhausted|hit|spent)|quota[^.]{0,30}(exceeded|exhausted|reached|spent)|insufficient[[:space:]]+(funds?|credits?|balance|quota)|plan[ -]?wide[[:space:]]+(limit|quota)[^.]{0,30}(reached|exceeded)'
 
 _opencode_go_authed() {
@@ -97,7 +97,7 @@ _opencode_v2() { [ "$(_opencode_ver)" = "2" ]; }
 
 _opencode_gate() { :; }
 
-_opencode_route_check() { _opencode_cli_missing; _opencode_gate; }
+_opencode_route_check() { have opencode || _opencode_cli_missing; _opencode_gate; }
 
 _ready_probe_opencode() { have opencode && _opencode_go_authed && printf 'opencode=go'; }
 
@@ -132,7 +132,7 @@ _opencode_effort() { # tier -> opencode --variant
 # slip through any enumeration). scoped: the mutating tiers — file tools are
 # denied outside the job dir but SHELL IS NOT (opencode's docs call directory
 # inference best-effort, so a shell command keeps your user's full rights).
-# allowall: yolo only.
+# allowall: yolo, except task/subagent calls.
 #
 # v2 emits BOTH `permissions` and `policies` (tool.use statements). Policies are
 # the layer applied AFTER agent rules and saved approvals — top-level
@@ -140,7 +140,7 @@ _opencode_effort() { # tier -> opencode --variant
 # shipped `plan` agent can write under ~/.opencode/plan; a user allow-all agent
 # silently re-opens everything). A PROJECT config (opencode.json(c)/.opencode/)
 # loads after this inline one and its own policies evaluate last, so it can
-# still reopen everything — read-only callers set
+# still reopen everything — all callers set
 # OPENCODE_DISABLE_PROJECT_CONFIG=1 on the opencode invocation to skip the
 # project layer entirely (verified on v2.2.6: hostile project
 # policies+agents.plan allow-all reopened writes via both the root
@@ -169,11 +169,11 @@ _opencode_config_json() {
         fi ;;
       scoped)
         if [ -n "$root" ]; then
-          jq -cn --arg root "$root" '{permission:{"*":"allow",read:{"*.env":"deny","*.env.*":"deny","*.envrc":"deny","*.env.example":"allow"},external_directory:{"*":"deny",($root):"allow",($root+"/*"):"allow",($root+"/**"):"allow"}}}'
+          jq -cn --arg root "$root" '{permission:{"*":"allow",task:"deny",read:{"*.env":"deny","*.env.*":"deny","*.envrc":"deny","*.env.example":"allow"},external_directory:{"*":"deny",($root):"allow",($root+"/*"):"allow",($root+"/**"):"allow"}}}'
         else
-          printf '%s' '{"permission":{"*":"allow","read":{"*.env":"deny","*.env.*":"deny","*.envrc":"deny","*.env.example":"allow"},"external_directory":"deny"}}'
+          printf '%s' '{"permission":{"*":"allow","task":"deny","read":{"*.env":"deny","*.env.*":"deny","*.envrc":"deny","*.env.example":"allow"},"external_directory":"deny"}}'
         fi ;;
-      allowall) printf '%s' '{"permission":{"*":"allow","doom_loop":"allow","external_directory":"allow"}}' ;;
+      allowall) printf '%s' '{"permission":{"*":"allow","task":"deny","doom_loop":"allow","external_directory":"allow"}}' ;;
       *)        printf '%s' '{}' ;;
     esac
     return
@@ -182,17 +182,17 @@ _opencode_config_json() {
   case "$mode" in
     readonly)
       if [ -n "$root" ]; then
-        jq -cn --arg root "$root" '{permissions:[{action:"*",resource:"*",effect:"deny"},{action:"read",resource:"*",effect:"allow"},{action:"read",resource:"*.env",effect:"deny"},{action:"read",resource:"*.env.*",effect:"deny"},{action:"read",resource:"*.envrc",effect:"deny"},{action:"read",resource:"*.env.example",effect:"allow"},{action:"glob",resource:"*",effect:"allow"},{action:"grep",resource:"*",effect:"allow"},{action:"question",resource:"*",effect:"allow"},{action:"external_directory",resource:$root,effect:"allow"},{action:"external_directory",resource:($root+"/*"),effect:"allow"},{action:"external_directory",resource:($root+"/**"),effect:"allow"}],policies:[{action:"tool.use",resource:"*",effect:"deny"},{action:"tool.use",resource:"read:*",effect:"allow"},{action:"tool.use",resource:"read:*.env",effect:"deny"},{action:"tool.use",resource:"read:*.env.*",effect:"deny"},{action:"tool.use",resource:"read:*.envrc",effect:"deny"},{action:"tool.use",resource:"read:*.env.example",effect:"allow"},{action:"tool.use",resource:"glob:*",effect:"allow"},{action:"tool.use",resource:"grep:*",effect:"allow"},{action:"tool.use",resource:"question:*",effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/*"),effect:"allow"}]}'
+        jq -cn --arg root "$root" '{permissions:[{action:"*",resource:"*",effect:"deny"},{action:"read",resource:"*",effect:"allow"},{action:"read",resource:"*.env",effect:"deny"},{action:"read",resource:"*.env.*",effect:"deny"},{action:"read",resource:"*.envrc",effect:"deny"},{action:"read",resource:"*.env.example",effect:"allow"},{action:"glob",resource:"*",effect:"allow"},{action:"grep",resource:"*",effect:"allow"},{action:"question",resource:"*",effect:"allow"},{action:"external_directory",resource:$root,effect:"allow"},{action:"external_directory",resource:($root+"/*"),effect:"allow"},{action:"external_directory",resource:($root+"/**"),effect:"allow"}],policies:[{action:"tool.use",resource:"*",effect:"deny"},{action:"tool.use",resource:"read:*",effect:"allow"},{action:"tool.use",resource:"read:*.env",effect:"deny"},{action:"tool.use",resource:"read:*.env.*",effect:"deny"},{action:"tool.use",resource:"read:*.envrc",effect:"deny"},{action:"tool.use",resource:"read:*.env.example",effect:"allow"},{action:"tool.use",resource:"glob:*",effect:"allow"},{action:"tool.use",resource:"grep:*",effect:"allow"},{action:"tool.use",resource:"question:*",effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/*"),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/**"),effect:"allow"}]}'
       else
         printf '%s' '{"permissions":[{"action":"*","resource":"*","effect":"deny"},{"action":"read","resource":"*","effect":"allow"},{"action":"read","resource":"*.env","effect":"deny"},{"action":"read","resource":"*.env.*","effect":"deny"},{"action":"read","resource":"*.envrc","effect":"deny"},{"action":"read","resource":"*.env.example","effect":"allow"},{"action":"glob","resource":"*","effect":"allow"},{"action":"grep","resource":"*","effect":"allow"},{"action":"question","resource":"*","effect":"allow"}],"policies":[{"action":"tool.use","resource":"*","effect":"deny"},{"action":"tool.use","resource":"read:*","effect":"allow"},{"action":"tool.use","resource":"read:*.env","effect":"deny"},{"action":"tool.use","resource":"read:*.env.*","effect":"deny"},{"action":"tool.use","resource":"read:*.envrc","effect":"deny"},{"action":"tool.use","resource":"read:*.env.example","effect":"allow"},{"action":"tool.use","resource":"glob:*","effect":"allow"},{"action":"tool.use","resource":"grep:*","effect":"allow"},{"action":"tool.use","resource":"question:*","effect":"allow"}]}'
       fi ;;
     scoped)
       if [ -n "$root" ]; then
-        jq -cn --arg root "$root" '{permissions:[{action:"*",resource:"*",effect:"allow"},{action:"read",resource:"*.env",effect:"deny"},{action:"read",resource:"*.env.*",effect:"deny"},{action:"read",resource:"*.envrc",effect:"deny"},{action:"read",resource:"*.env.example",effect:"allow"},{action:"external_directory",resource:"*",effect:"deny"},{action:"external_directory",resource:$root,effect:"allow"},{action:"external_directory",resource:($root+"/*"),effect:"allow"},{action:"external_directory",resource:($root+"/**"),effect:"allow"}],policies:[{action:"tool.use",resource:"read:*.env",effect:"deny"},{action:"tool.use",resource:"read:*.env.*",effect:"deny"},{action:"tool.use",resource:"read:*.envrc",effect:"deny"},{action:"tool.use",resource:"read:*.env.example",effect:"allow"},{action:"tool.use",resource:"external_directory:*",effect:"deny"},{action:"tool.use",resource:("external_directory:"+$root),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/*"),effect:"allow"}]}'
+        jq -cn --arg root "$root" '{permissions:[{action:"*",resource:"*",effect:"allow"},{action:"task",resource:"*",effect:"deny"},{action:"read",resource:"*.env",effect:"deny"},{action:"read",resource:"*.env.*",effect:"deny"},{action:"read",resource:"*.envrc",effect:"deny"},{action:"read",resource:"*.env.example",effect:"allow"},{action:"external_directory",resource:"*",effect:"deny"},{action:"external_directory",resource:$root,effect:"allow"},{action:"external_directory",resource:($root+"/*"),effect:"allow"},{action:"external_directory",resource:($root+"/**"),effect:"allow"}],policies:[{action:"tool.use",resource:"task:*",effect:"deny"},{action:"tool.use",resource:"read:*.env",effect:"deny"},{action:"tool.use",resource:"read:*.env.*",effect:"deny"},{action:"tool.use",resource:"read:*.envrc",effect:"deny"},{action:"tool.use",resource:"read:*.env.example",effect:"allow"},{action:"tool.use",resource:"external_directory:*",effect:"deny"},{action:"tool.use",resource:("external_directory:"+$root),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/*"),effect:"allow"},{action:"tool.use",resource:("external_directory:"+$root+"/**"),effect:"allow"}]}'
       else
-        printf '%s' '{"permissions":[{"action":"*","resource":"*","effect":"allow"},{"action":"read","resource":"*.env","effect":"deny"},{"action":"read","resource":"*.env.*","effect":"deny"},{"action":"read","resource":"*.envrc","effect":"deny"},{"action":"read","resource":"*.env.example","effect":"allow"},{"action":"external_directory","resource":"*","effect":"deny"}],"policies":[{"action":"tool.use","resource":"read:*.env","effect":"deny"},{"action":"tool.use","resource":"read:*.env.*","effect":"deny"},{"action":"tool.use","resource":"read:*.envrc","effect":"deny"},{"action":"tool.use","resource":"read:*.env.example","effect":"allow"},{"action":"tool.use","resource":"external_directory:*","effect":"deny"}]}'
+        printf '%s' '{"permissions":[{"action":"*","resource":"*","effect":"allow"},{"action":"task","resource":"*","effect":"deny"},{"action":"read","resource":"*.env","effect":"deny"},{"action":"read","resource":"*.env.*","effect":"deny"},{"action":"read","resource":"*.envrc","effect":"deny"},{"action":"read","resource":"*.env.example","effect":"allow"},{"action":"external_directory","resource":"*","effect":"deny"}],"policies":[{"action":"tool.use","resource":"task:*","effect":"deny"},{"action":"tool.use","resource":"read:*.env","effect":"deny"},{"action":"tool.use","resource":"read:*.env.*","effect":"deny"},{"action":"tool.use","resource":"read:*.envrc","effect":"deny"},{"action":"tool.use","resource":"read:*.env.example","effect":"allow"},{"action":"tool.use","resource":"external_directory:*","effect":"deny"}]}'
       fi ;;
-    allowall) printf '%s' '{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' ;;
+    allowall) printf '%s' '{"permissions":[{"action":"*","resource":"*","effect":"allow"},{"action":"task","resource":"*","effect":"deny"}],"policies":[{"action":"tool.use","resource":"task:*","effect":"deny"}]}' ;;
     *)        printf '%s' '{}' ;;
   esac
 }
@@ -245,10 +245,10 @@ delegate_opencode() {
     auto)         aflag=(--agent plan);         cfg=readonly; posture="READ-ONLY (--agent plan + per-run deny-all policy re-allowing read/glob/grep/question only)" ;;
     accept-edits) aflag=(--agent build --auto); cfg=scoped;   posture="MUTATING (build agent, --auto; file tools scoped to the job dir, shell runs with full user rights — no sandbox)" ;;
     autonomous)   die "opencode lane has NO OS sandbox; 'research' is unsafe here (a build agent would run with your full user rights). Use --provider codex/devin for sandboxed exec, or run/explore/edit/yolo on this lane. Nothing was run." ;;
-    dangerous)    aflag=(--agent build --auto); cfg=allowall; posture="DANGER (build agent, --auto, all permissions pre-allowed; no sandbox)" ;;
+    dangerous)    aflag=(--agent build --auto); cfg=allowall; posture="DANGER (build agent, --auto, task subagents denied; no sandbox)" ;;
     *) die "delegate_opencode: bad tier: $tier" ;;
   esac
-  case "$tier:$v" in auto:|accept-edits:)
+  case "$tier:$v" in auto:|accept-edits:|dangerous:)
     die "opencode lane: cannot parse 'opencode --version' — supported majors are 1.x (read-only posture enforced; user agent-rule overrides remain a residual gap) and 2.x (recommended, adds the hard policies layer). A 0.x install (brew install opencode-ai/tap/opencode, npm i -g opencode-ai) predates both — upgrade with brew install opencode or npm i -g @opencode/cli@latest. Guessing the schema would launch '$tier' unenforced, so refusing (same fail-closed posture as the cline lane). Nothing was run." ;; esac
   local eff=() oe=""
   if [ -n "${EFFORT:-}" ]; then
@@ -270,13 +270,12 @@ delegate_opencode() {
   local rc=0 _lerr sa=() pcenv=(); _lerr="$(_lane_errfile)"
   [ "$v" = "2" ] && sa=(--standalone)   # the shared background server ignores the per-run env config; a private one reads it
   # A project opencode.json(c)/.opencode/ loads AFTER the inline config and its own policies
-  # evaluate last, so a hostile project reopens the denies (verified on v2.2.6). Read-only runs
-  # skip the project layer entirely; mutating tiers honour it by design.
-  [ "$cfg" = "readonly" ] && pcenv=(OPENCODE_DISABLE_PROJECT_CONFIG=1)
-  _run_tee_stderr "$_lerr" env OPENCODE_CONFIG_CONTENT="$oc_cfg" ${pcenv[@]+"${pcenv[@]}"} opencode ${sa[@]+"${sa[@]}"} run ${aflag[@]+"${aflag[@]}"} -m "$id" ${eff[@]+"${eff[@]}"} -- "$wrapped" </dev/null || rc=$?
+  # evaluate last, so every tier skips the project layer.
+  pcenv=(OPENCODE_DISABLE_PROJECT_CONFIG=1)
+  _run_tee_stderr "$_lerr" env -u OPENCODE_CONFIG -u OPENCODE_CONFIG_DIR -u OPENCODE_PERMISSION OPENCODE_CONFIG_CONTENT="$oc_cfg" ${pcenv[@]+"${pcenv[@]}"} opencode ${sa[@]+"${sa[@]}"} run ${aflag[@]+"${aflag[@]}"} -m "$id" ${eff[@]+"${eff[@]}"} -- "$wrapped" </dev/null || rc=$?
   _opencode_classify "$_lerr" "$id" "$rc" || true
   [ -n "$_lerr" ] && rm -f "$_lerr" 2>/dev/null
-  record_ledger opencode "$id" "$ttier" "$tier" "$task" "$(_fg_run_cost opencode 0 "")" opencode
+  record_ledger opencode "$id" "$ttier" "$tier" "$task" "" opencode
   return "$rc"
 }
 
@@ -297,9 +296,7 @@ lane_descriptor_opencode() {
     "family_globs=opencode-go/* opencode/*" \
     "model_globs=opencode-go/* opencode/*" \
     "quota_key=opencode" \
-    "cost_class=limited" \
-    "plan_limited=yes" \
-    "compare_class=plan" \
+    "cost_class=credits" \
     "cost_disclosure=billing may be paid; spend consent required when unproven" \
     "is_cloud=yes" \
     "fallback_provider=opencode" \

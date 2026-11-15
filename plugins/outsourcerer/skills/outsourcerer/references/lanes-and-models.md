@@ -185,9 +185,9 @@ Go also asks because a stored credential does not prove whether extra usage is e
   excepted). `edit` gets `--agent build --auto`: file tools are scoped to the job dir
   (hard external_directory deny + the skill-bundle exception), but **shell is not contained** —
   command-directory inference is best-effort, so a shell command keeps your full user rights —
-  and mutating tiers honour project config, so the project's own `opencode.json` can widen them.
+  All tiers ignore project configuration and deny subagent tasks to prevent a model switch without consent.
   `research` REFUSES: opencode has no OS sandbox (same answer as claude-native/cc). `yolo`
-  pre-allows everything. Your `~/.config/opencode/opencode.json` is never rewritten. On opencode
+  pre-allows other tools but denies subagent tasks. Your `~/.config/opencode/opencode.json` is never rewritten. On opencode
   v2.x the run uses `--standalone`: a shared background server never sees the CLI's env, so the
   per-run permission rules only reach a private one. Read-only and edit tiers refuse outright when
   `opencode --version` cannot be parsed (guessing the v1 schema at a v2 install would launch
