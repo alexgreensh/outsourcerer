@@ -3384,7 +3384,7 @@ _lane_cli_gate() {
 _lane_ready_probe() {
   local f; f="$(_lane_field "${1:-}" ready_fn 2>/dev/null)" || return 1
   [ -n "$f" ] || return 1
-  "$f"
+  "$f" 9>&-
 }
 
 # _lane_health_key <token> -> the canonical lane code Slice-1 lane-down state keys
@@ -11518,7 +11518,7 @@ cmd_bg() {
   # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
   # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
   if [ "$_pfrc" -ne 0 ]; then
-    # The preflight already streamed its structured refusal to stderr.
+    # The preflight has forwarded its captured failure diagnostics.
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
   # Only the private preflight descriptor can carry consent to the detached job.
@@ -12005,7 +12005,7 @@ run_job() {
   # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
   # only — env consent is sanitized by design.
   local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
-  OSRC_STREAM=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
+  OSRC_STREAM=1 OSRC_NO_ADVISE=1 OSRC_JOB_DIR="$jd" OSRC_JOB_TOKEN="${OSRC_JOB_TOKEN:-}" OUTSOURCERER_PROVIDER="$prov" OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_run_inj" OSRC_JOB_VERB="$verb" OSRC_JOB_LANE="$lane" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" \
     _supervise "$jd" "$warn" "$kill" "$hard" -- \
     "$SCRIPT_PATH" --osrc-job-child-internal ${_run_provider[@]+"${_run_provider[@]}"} ${_run_spend[@]+"${_run_spend[@]}"} "$verb" "$@"
   local sc=$?
@@ -16525,7 +16525,7 @@ route_delegate() {
     # without -m is a user error, not a route we can resolve. Fail fast with the catalog pointer.
     [ "$PROVIDER" != "tokenrouter" ] || die "the tokenrouter lane needs -m <gateway-model-id> (no hardcoded default — list the gateway's catalog: curl -s -H 'Authorization: Bearer ***' $(_tr_base_url)/models)"
     [ "$PROVIDER" != "opencode" ] || die "the opencode lane needs -m <go-model-id> (e.g. glm-5.3-flash or opencode-go/glm-5.3-flash — a bare run would fall back to opencode's configured model, which may not bill your Go plan)"
-    MODEL="$(_route_provider_default_model "$PROVIDER")" || die "unknown provider '$PROVIDER'"
+    MODEL="$(_route_provider_default_model "$PROVIDER" 9>&-)" || die "unknown provider '$PROVIDER'"
     # A provider's built-in default can be a model the user excluded (e.g. --provider codex -> sol).
     # Never run it silently: say which default it is and how to pick another.
     case "$MODEL" in *-default) _exclude_engine_default_notice "$PROVIDER" ;; esac
@@ -19850,7 +19850,7 @@ main() {
   while :; do
     case "${1:-}" in
       --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
-      --osrc-preflight-pair-fd)    _OSRC_PREFLIGHT_FD=1; shift ;;
+      --osrc-preflight-pair-fd)    exec 9>&3 3>&-; _OSRC_PREFLIGHT_FD=1; shift ;;
       --osrc-job-child-internal)   _job_child=1; shift ;;
       *) break ;;
     esac

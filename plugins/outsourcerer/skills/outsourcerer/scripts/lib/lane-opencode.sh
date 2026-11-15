@@ -70,7 +70,7 @@ _opencode_go_authed() {
   # an "OpenCode Go" entry when one exists (a plain "OpenCode" entry is the Zen
   # pay-as-you-go credential and does NOT count). Output may carry ANSI markup.
   have opencode || return 1
-  _timeout 10 opencode auth list 2>/dev/null | tr -d '\033' | sed 's/\[[0-9;]*[A-Za-z]//g' | grep -qi 'opencode *go'
+  { _timeout 10 opencode auth list 2>/dev/null | tr -d '\033' | sed 's/\[[0-9;]*[A-Za-z]//g' | grep -qi 'opencode *go'; } 9>&-
 }
 
 _opencode_cli_missing() {
@@ -88,7 +88,7 @@ _opencode_cli_missing() {
 # posture as the cline lane's version gate).
 _opencode_ver() {
   if [ -z "${_OPENCODE_VER+x}" ]; then
-    _OPENCODE_VER="$(opencode --version 2>/dev/null | tr -cd '0-9.\n' | grep -oE '[0-9]+' | head -1)"
+    _OPENCODE_VER="$({ opencode --version 2>/dev/null | tr -cd '0-9.\n' | grep -oE '[0-9]+' | head -1; } 9>&-)"
     case "$_OPENCODE_VER" in 1|2) ;; *) _OPENCODE_VER= ;; esac
   fi
   printf '%s' "$_OPENCODE_VER"
