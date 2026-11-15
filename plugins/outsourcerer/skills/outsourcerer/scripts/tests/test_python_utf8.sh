@@ -117,7 +117,7 @@ bad = ["open(p)", "open(p, 'r')", "open(p, 'w')", "open(p, mode='a')", "io.open(
        "json.load(sys.stdin)", "for l in sys.stdin: pass"]
 good = ["open(p, 'rb')", "open(p, mode='wb')", "open(p, encoding='utf-8')", "os.fdopen(fd, 'wb')",
         "q.read_text(encoding='utf-8', errors='replace')", "q.open('rb')", "subprocess.run(a, capture_output=True)",
-        "subprocess.run(a, text=True, encoding='utf-8')", "sys.stdin.buffer.read()", "webbrowser.open(u)",
+        "subprocess.run(a, text=True, encoding='utf-8')", "sys.stdin.buffer.read()", "webbrowser" ".open(u)",
         "sys.stdin.reconfigure(encoding='utf-8')\nsys.stdin.read()", "b.decode('utf-8', 'replace')"]
 failed = 0
 for code in bad:
