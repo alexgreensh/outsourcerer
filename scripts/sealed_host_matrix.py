@@ -31,16 +31,17 @@ class MatrixInterrupted(Exception):
 def stop_owned(process):
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
         pass
-    # The leader may exit while a descendant ignores TERM.
+    # The leader may exit while a descendant ignores TERM. macOS answers EPERM, not ESRCH,
+    # once the whole group is gone, so both mean there is nothing left to stop.
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     process.wait()
 
