@@ -36,6 +36,10 @@ All notable changes to the Outsourcerer plugin are documented here.
 - **Long quiet Devin commands run to completion.** A test suite or build that writes no files keeps going until the stall window (30 minutes by default; `OSRC_DEVIN_NOWRITE_KILL` sets it). (#58)
 - **Launch checks read processes reliably.** The reuse guard engages after the first real start-time reading. (#60)
 - **INSOURCE blocks refresh on every `parity-*` run.** The template stays model-neutral and version-free, and symlinked or read-only `AGENTS.md` files are handled safely. (#62)
+- **Locks keep exactly one owner everywhere.** Directory claims no longer trust the system `mkdir` to be atomic: Ubuntu 26.04's Rust `mkdir` could let two contenders win. Claims use Perl or Python, the native `/bin/mkdir` on macOS and BSD, or refuse with a clear message.
+- **Stale-lock cleanup never removes a newer owner.** Recovery for the Devin, heartbeat, remote and done locks holds a guard until removal finishes.
+- **API keys stay off the command line.** The local-model key now reaches `curl` through a private header file, like the other keys, so other processes cannot read it.
+- **Clean paths on macOS.** A trailing `/` in `TMPDIR` no longer produces `//` paths.
 - **Tests run in their own scratch home and tmux server**, with a guard that keeps your real ones untouched.
 
 ## 0.15.3
