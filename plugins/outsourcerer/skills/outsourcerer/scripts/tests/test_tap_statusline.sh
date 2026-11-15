@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-tapstatus.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-tapstatus.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"; rm -rf "$OSRC_TEST_ROOT"' EXIT
 
 pass=0; fail=0

@@ -4,7 +4,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-lifecycle-fix.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-lifecycle-fix.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome"
 mkdir -p "$HOME"

@@ -8,7 +8,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"; FX="$SCRIPT_DIR/fixtures/supervise"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
-TMP="$(mktemp -d "$SCRIPT_DIR/.test-supervise.XXXXXX")"; PIDS=""
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-supervise.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; PIDS=""
 trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/panes"; ln -s "$SCRIPT_DIR/fake-bin/tmux-files" "$TMP/bin/tmux"
 export PATH="$TMP/bin:$PATH" FAKE_TMUX_DIR="$TMP/panes" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_STREAM=1

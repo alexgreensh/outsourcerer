@@ -8,7 +8,7 @@
 # and the `session effort` lane resolution.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FX="$HERE/fixtures/screen"
-TMP="$(mktemp -d "$HERE/.test-screen.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-screen.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 # One line per case: ok prints its label, or the test line that called it (file:line + source).
 ok(){ pass=$((pass+1)); if [ -n "${1:-}" ]; then echo "PASS: $1"; else

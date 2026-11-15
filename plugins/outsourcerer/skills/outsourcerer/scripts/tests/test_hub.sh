@@ -11,8 +11,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 
-# Scratch under the worktree (never live ~/.outsourcerer, never left in /tmp).
-TMP="$(mktemp -d "$HERE/.hub-test.XXXXXX")"
+# Honor the runner's writable scratch directory, including in a read-only checkout.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.hub-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" XDG_CONFIG_HOME="$TMP/xdg"
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1 OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0
@@ -269,7 +269,23 @@ sym="$(OSRC_HOME="$OSRC_HOME" bash "$TMP/outsourcerer-link" hub export 2>"$TMP/s
 echo "=== hub serve (local mode) ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl not installed (serve tests)"; echo "RESULTS: $pass pass $fail fail"; exit $([ $fail -eq 0 ] && echo 0 || echo 1); }
 # Pick a free port, then let the OS reuse-check it (small race is fine for a test).
-PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+PORT="$(python3 -I - <<'PY'
+import errno, socket
+try:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        print(s.getsockname()[1])
+except OSError as error:
+    if error.errno not in (errno.EPERM, errno.EACCES):
+        raise
+    print("OSRC_NETWORK_DENIED")
+PY
+)"
+port_rc=$?
+if [ "$PORT" = OSRC_NETWORK_DENIED ]; then
+  ok "OS sandbox denies loopback; HTTP integration requires a direct host run"
+else
+  [ "$port_rc" = 0 ] && [ -n "$PORT" ] || { bad "loopback probe failed unexpectedly"; exit 1; }
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open >"$TMP/serve.log" 2>&1 &
 SRV=$!
 cleanup_srv() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }
@@ -548,6 +564,8 @@ wait_mtime "$EXPORT_JSON" "$m4" \
   && ok "a page poll resumes the refresh loop" \
   || { bad "loop did not resume after a poll"; tail -5 "$TMP/serve6.log" >&2; }
 cleanup_srv
+trap 'rm -rf "$TMP"' EXIT
+fi
 
 echo "=== MC-9: a working project is never stale ==="
 # updatedAt used to be the newest of owner links, card and decisions only: lanes doing real work did not count.

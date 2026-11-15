@@ -6,7 +6,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-cc-model.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-cc-model.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"
 export OSRC_CC_PICKER_WAIT=0 OSRC_CC_PICKER_NAV_WAIT=0

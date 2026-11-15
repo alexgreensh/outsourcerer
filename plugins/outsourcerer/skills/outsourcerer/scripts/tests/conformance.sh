@@ -144,7 +144,7 @@ _ALL_SUITES="$_ALL_SUITES test_heavy"
 _ALL_SUITES="$_ALL_SUITES test_accounts"
 _ALL_SUITES="$_ALL_SUITES test_hub test_hub_home test_cleanup_manifest test_limit_gate test_spend_consent test_lane_billing test_lanemsg test_portable_mtime"
 _ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_tests_set_home"
-_PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final"
+_PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final test_shell_scratch"
 _ALL_SUITES="$_ALL_SUITES $_PYTHON_SUITES"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park
 # it: without a bound a busy-spinning suite would hold the gate indefinitely. Default 600s,

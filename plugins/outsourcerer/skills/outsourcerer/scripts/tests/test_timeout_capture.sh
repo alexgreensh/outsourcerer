@@ -18,7 +18,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-FIXTURE="$(mktemp -d "$PWD/.test-timeout-capture.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/.test-timeout-capture.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$FIXTURE"' EXIT
 export OSRC_HOME="$FIXTURE/home"
 mkdir -p "$OSRC_HOME"

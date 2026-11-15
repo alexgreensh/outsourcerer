@@ -37,7 +37,7 @@ fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-FIXTURE="$(mktemp -d "$PWD/.test-fleet-names.XXXXXX")"
+FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/.test-fleet-names.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'kill "${live_pid:-}" 2>/dev/null || true; rm -rf "$FIXTURE"' EXIT
 
 pass=0; fail=0

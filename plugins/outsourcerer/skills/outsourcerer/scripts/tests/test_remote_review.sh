@@ -4,10 +4,10 @@
 # No network: a local bare git repo stands in for the remote, a fake `tmux` stands in for the reviewer
 # pane (its screens are REAL Claude Code captures in fixtures/review/), a fake `gh` stands in for
 # GitHub's API. Time is a fake clock (OSRC_NOW, OSRC_TIME_UNIT=1) so "20 minutes" costs no sleeping.
-# Every OSRC_HOME is a scratch dir under this folder; nothing touches ~/.outsourcerer.
+# Every OSRC_HOME is under the runner's scratch directory; live state is never used.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FIX="$HERE/fixtures/review"
-TMP="$(mktemp -d "$HERE/.test-remote-review.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-remote-review.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }

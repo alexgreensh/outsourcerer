@@ -9,7 +9,7 @@ SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
-TMP="$(mktemp -d "$PWD/.test-factory-exclude.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-factory-exclude.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 HOME="$TMP/home"; export HOME; mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0

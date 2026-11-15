@@ -10,7 +10,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-pr10.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-pr10.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 # A non-git working dir so the meta.cwd fallback ($PWD when jq is absent) can never hit a real repo
 # and count unrelated commits as the delegate's work.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
-TMP="$(mktemp -d "$PWD/.test-external.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-external.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 export HOME="$TMP/home" OSRC_HOME="$TMP/state"; mkdir -p "$HOME/.claude/sessions" "$HOME/.codex/sessions"
 printf '%s\n' '{"event":"start","session_id":"owned","provider":"cc"}' > "$OSRC_HOME-registry"

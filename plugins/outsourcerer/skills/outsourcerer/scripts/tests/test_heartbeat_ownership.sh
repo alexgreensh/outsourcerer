@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
-TMP="$(mktemp -d "$PWD/.test-heartbeat-ownership.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/.test-heartbeat-ownership.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 TEST_TMP="$TMP"
 export OSRC_HOME="$TMP/state"
 trap 'rm -rf "$TEST_TMP"' EXIT
