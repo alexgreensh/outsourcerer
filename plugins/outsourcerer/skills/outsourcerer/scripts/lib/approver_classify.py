@@ -817,7 +817,12 @@ def main(argv: list[str]) -> int:
     roots = [root] + [os.path.realpath(e) for e in extras if os.path.isdir(e)]
     if norm(root) in ("/", norm(os.path.realpath(HOME))):
         print("hold delegate root is / or $HOME (too broad to scope writes)"); return 0
-    cmd = sys.stdin.read()
+    # Decode the bytes we judge strictly as UTF-8, never the locale codec (cp1252 on
+    # Windows) and never with replacement: an approval must be about the real command.
+    try:
+        cmd = sys.stdin.buffer.read().decode("utf-8")
+    except UnicodeDecodeError:
+        print("hold command is not valid UTF-8"); return 0
     ok, rule = is_safe(cmd, kind, path, root, roots)
     print(("approve " if ok else "hold ") + rule.replace("\n", " "))
     return 0

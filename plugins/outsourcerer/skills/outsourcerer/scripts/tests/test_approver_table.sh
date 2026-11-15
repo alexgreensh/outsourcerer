@@ -51,6 +51,12 @@ done < "$TABLE"
 got="$(printf 'ls' | python3 -I "$CLS" --root "$TMP/does-not-exist")"; [ "${got%% *}" = hold ] && ok || bad "missing root did not hold: $got"
 got="$(printf 'ls' | HOME="$TMP" python3 -I "$CLS" --root "$TMP")"; [ "${got%% *}" = hold ] && ok || bad "root==HOME did not hold: $got"
 got="$(printf 'ls' | python3 -I "$CLS" --bogus x)"; [ "${got%% *}" = hold ] && ok || bad "usage error did not hold: $got"
+# The command is decoded as strict UTF-8, never the locale codec (cp1252 on Windows) and never
+# with replacement characters: bytes that are not UTF-8 hold, real UTF-8 still classifies.
+got="$(printf 'ls src/caf\377\217' | (cd "$ROOT" && python3 -I "$CLS" --root "$ROOT"))"
+[ "$got" = "hold command is not valid UTF-8" ] && ok "non-UTF-8 command holds" || bad "non-UTF-8 command: $got"
+got="$(printf 'ls src/caf\303\251 src/\346\227\245' | (cd "$ROOT" && PYTHONUTF8=0 LC_ALL=C python3 -I "$CLS" --root "$ROOT"))"
+[ "${got%% *}" = approve ] && ok "UTF-8 command classifies under a C locale" || bad "UTF-8 command under C locale: $got"
 
 echo "rows=$rows approve=$approves hold=$holds"
 # review round 4 B: the approved names form never prints a multi-line value; the old cut form did
