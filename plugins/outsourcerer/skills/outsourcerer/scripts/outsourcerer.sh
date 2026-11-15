@@ -1713,17 +1713,7 @@ _lane_errfile() {
   local f; _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || { printf ''; return 0; }
   f="$OSRC_HOME/.lerr.$$"; : > "$f" 2>/dev/null && chmod 600 "$f" 2>/dev/null && printf '%s' "$f" || printf ''
 }
-# _run_tee_stderr <errfile|""> <cmd...> -> run the command with stderr STILL shown live and also captured
-# to the file (the dv lane's `2> >(tee ...)` idiom). stdout is untouched; $? is the command's. With an
-# empty file the command runs plain. Best-effort: a still-flushing tee can leave the file short, which
-# can only MISS a detection, never invent one.
-_run_tee_stderr() {
-  local f="${1:-}"; shift
-  # L7 add-on: delegates must never inherit OSRC_JOB_DIR — a nested outsourcerer call
-  # inside the delegate would see THIS job's .spend-ok marker and cap-dedupe state as
-  # its own consent/cap context. Every delegate lane funnels through here.
-  if [ -n "$f" ]; then _osrc_nojob "$@" 2> >(tee "$f" >&2); else _osrc_nojob "$@"; fi
-}
+# _run_tee_stderr lives in lib/stderr-capture.sh.
 # _lane_plan_limit_after_run <lane> <errfile> <model> <rc> -> rc0 always. The post-run hook every plan
 # lane's delegate calls: on a failed run (or a headless claude -p result flagged is_error:true, which
 # exits 0), route the captured output through the dispatcher and, on a match, the probe-then-decide
@@ -2709,15 +2699,10 @@ Note on this run: it is non-interactive and only file edits are auto-approved. S
   local rc=0 _policy_blocked=0
   # Capture devin's stderr (where org-policy AND paid-balance/quota refusals land) while still showing it,
   # so a one-time "autonomous restricted" verdict can be REMEMBERED and a free-tier quota refusal can be
-  # DETECTED precisely (bug 1). Mirrors the agy lane's `2> >(tee ... >&2)` idiom. stdout (the result) is
-  # untouched. $? is devin's, not tee's, because the redirection is on devin, not a pipe. Both dispatch
-  # paths capture now (the non-sandbox path used to discard stderr, so the quota signal was invisible).
+  # DETECTED precisely (bug 1). _run_tee_stderr (lib/stderr-capture.sh) waits for tee, so the file is
+  # complete before it is classified; stdout and devin's $? are untouched. Both dispatch paths capture.
   local _dverr="$OSRC_HOME/.dverr.$$"; : > "$_dverr" 2>/dev/null || _dverr=""
-  if [ -n "$_dverr" ]; then
-    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null 2> >(tee "$_dverr" >&2) || rc=$?
-  else
-    _osrc_nojob devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
-  fi
+  _run_tee_stderr "$_dverr" devin --model "$MODEL" --permission-mode "$perm" ${sbx[@]+"${sbx[@]}"} --respect-workspace-trust false -p "$prompt" </dev/null || rc=$?
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ -n "$_dverr" ] && _devin_autonomous_policy_blocked "$_dverr"; then
     _policy_blocked=1
     _posture_set devin autonomous restricted
