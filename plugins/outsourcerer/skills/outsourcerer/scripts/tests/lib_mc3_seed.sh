@@ -59,7 +59,7 @@ mc3_seed() {
   tr="$(_mc3_repo total-recall)"; out="$(_mc3_repo outsourcerer)"
   # A: one running lane, one finished lane.
   _mc3_transcript "$MC3_SID_A" ai "TR v1.8.6 build"
-  _mc3_job job-a1 running "$tr" "Sync engine retries"
+  _mc3_job job-a1 running "$tr" "Sync engine retries for the cloud backup path"
   sleep 600 & MC3_SLEEP_PID=$!
   printf '%s\n' "$MC3_SLEEP_PID" > "$OSRC_HOME/jobs/job-a1/pid"
   _mc3_job job-a2 done "$tr" "Search ranking fix"

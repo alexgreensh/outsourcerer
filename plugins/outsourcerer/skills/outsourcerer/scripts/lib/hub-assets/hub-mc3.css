@@ -25,3 +25,8 @@
 @media (max-width: 720px) { .also li { grid-template-columns: 12px minmax(0, 1fr) auto; } .also .an { white-space: normal; } .also .am { grid-column: 2 / -1; grid-row: 2; } .also .as { grid-row: 1; grid-column: 3; } }
 .empty-how { margin: 0; display: flex; flex-direction: column; gap: 8px; font-size: 1rem; }
 .empty-how code { font-family: var(--code); font-size: .9rem; background: var(--thumb); border-radius: 6px; padding: 2px 6px; }
+/* Phone (orchestrator review): a top-priority row stacks, pill on its own line, question full width, chevron right. */
+@media (max-width: 520px) { .tprow { grid-template-columns: minmax(0, 1fr) auto; row-gap: 6px; } .tprow > .pri { grid-column: 1; grid-row: 1; } .tprow .tpq { grid-column: 1; grid-row: 2; } .tprow .chev { grid-column: 2; grid-row: 1 / span 2; align-self: center; } }
+/* Phone: a lane name wraps to two lines instead of truncating; its state gets its own line under it. */
+@media (max-width: 720px) { .pt-lanes li { grid-template-columns: 10px minmax(0, 1fr); align-items: start; } .pt-lanes .lnd { margin-top: .35em; } .pt-lanes .lnn { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } .pt-lanes .lnm { grid-column: 2; grid-row: auto; } .pt-lanes .lns { grid-column: 2; justify-self: start; text-align: left; white-space: normal; } }
+@media (max-width: 720px) { .rlanes .lnn { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } }
