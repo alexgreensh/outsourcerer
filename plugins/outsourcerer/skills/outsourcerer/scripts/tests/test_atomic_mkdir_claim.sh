@@ -51,7 +51,9 @@ for mode in native python shell; do
   echo "PASS: $mode helper elects exactly one owner despite lying mkdir"
 done
 
-if command mkdir --version 2>/dev/null | grep -q 'GNU coreutils'; then
+mkdir_banner="$(command mkdir --version 2>/dev/null)" || mkdir_banner=""
+case "$mkdir_banner" in *'GNU coreutils'*) gnu_mkdir=1 ;; *) gnu_mkdir=0 ;; esac
+if [ "$gnu_mkdir" = 1 ]; then
   for platform in MSYS_NT-10.0 MINGW64_NT-10.0 CYGWIN_NT-10.0; do
     (
       command() {
@@ -107,6 +109,8 @@ echo 'PASS: broken Perl and Python fall back in order without claiming an existi
     case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
     builtin command "$@"
   }
+  # uutils ships on Linux; on Darwin/BSD the helper rightly uses native /bin/mkdir instead.
+  uname() { echo Linux; }
   mkdir() {
     [ "${1:-}" != --version ] || { echo 'mkdir (uutils coreutils) 0.10.0'; return 0; }
     command mkdir -p "$@"
@@ -123,6 +127,7 @@ if command -v perl >/dev/null 2>&1; then
       case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
       builtin command "$@"
     }
+    uname() { echo Linux; }  # the GNU fallback path; Darwin/BSD use native /bin/mkdir
     mkdir() {
       [ "${1:-}" != --version ] || { echo 'mkdir (GNU coreutils)'; return 0; }
       : > "$TMP/mixed-paused"
