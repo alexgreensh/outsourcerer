@@ -161,6 +161,19 @@ class SealedFixes(unittest.TestCase):
         self.assertIn('sysctl-name "hw.pagesize"', result.stdout)
         self.assertNotIn('sysctl-name "kern.proc', result.stdout)
 
+    def test_mac_profile_reads_external_scratch_without_reading_shared_tmp(self):
+        generator = self.source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+        profile = self.base / 'profile.sb'
+        scratch = '/private/tmp/sealed-owned-fixture'
+        result = subprocess.run(['/usr/bin/python3', '-I', '-', str(profile), str(self.root),
+                                 scratch, '', '/Library/Developer/CommandLineTools', str(self.root / '.git')],
+                                input=generator, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        policy = profile.read_text()
+        self.assertIn('(allow file-read* file-map-executable (subpath "' + scratch + '"))', policy)
+        self.assertNotIn('(allow file-read* (subpath "/private/tmp"))', policy)
+        self.assertNotIn('(allow file-read* file-map-executable (subpath "/private/tmp"))', policy)
+
     def test_matrix_timeout_terminates_then_kills_and_cleans_scratch(self):
         temp = self.base / 'tmp'
         temp.mkdir()
@@ -222,6 +235,46 @@ class SealedFixes(unittest.TestCase):
             result = unittest.TestResult()
             runner_tests.SealedRunnerTests('test_isolation_probes').run(result)
         self.assertTrue(result.failures, 'broken Linux process probe was accepted as unsupported')
+
+    def test_host_bisect_preparation_never_launches_a_sandbox(self):
+        output = self.base / 'prepared'
+        result = subprocess.run(['python3', str(ROOT / 'scripts/sealed_host_bisect.py'),
+                                 '--prepare-only', '--out', str(output)],
+                                env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        proof = Path(result.stdout.strip().split('PROOF_DIR=')[1])
+        import json
+        rows = json.loads((proof / 'results.json').read_text())
+        self.assertTrue(rows)
+        self.assertTrue(all(row['rc'] is None for row in rows))
+        self.assertFalse(list(proof.glob('*/output.log')), 'prepare mode ran a sandbox command')
+        sources = {row['variant']: Path(row['prepared']).read_text() for row in rows}
+        baseline = self.git('show', '11598a4:' + str(REL / 'sealed-run.sh')) + '\n'
+        regression = self.git('show', '75302c2:' + str(REL / 'sealed-run.sh')) + '\n'
+        self.assertEqual(sources['baseline-original'], baseline)
+        self.assertEqual(sources['regression-original'], regression)
+        self.assertEqual(sources['current-fixed'], self.source)
+        hunks = json.loads((proof / 'hunks.json').read_text())
+        for hunk in hunks:
+            old, new = baseline.splitlines(keepends=True), regression.splitlines(keepends=True)
+            removed, added = hunk['removed'].splitlines(keepends=True), hunk['added'].splitlines(keepends=True)
+            a, b = hunk['old_start'] - 1, hunk['new_start'] - 1
+            self.assertEqual(sources['apply-' + hunk['name']], ''.join(old[:a] + added + old[a + len(removed):]))
+            self.assertEqual(sources['revert-' + hunk['name']], ''.join(new[:b] + removed + new[b + len(added):]))
+
+    def test_host_bisect_requires_a_working_control_before_naming_a_hunk(self):
+        spec = importlib.util.spec_from_file_location('bisect_probe', ROOT / 'scripts/sealed_host_bisect.py')
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        rows = [dict(variant=name, input_tmpdir='normal', rc=rc)
+                for name, rc in [('baseline-original', 0), ('regression-original', 78),
+                                 ('revert-hunk-02', 0), ('apply-hunk-02', 78)]]
+        notes = probe.diagnosis(rows)
+        self.assertIn('normal: reverting hunk-02 repairs startup; applying it alone rc=78', notes)
+        rows[0]['rc'] = 78
+        notes = probe.diagnosis(rows)
+        self.assertIn('normal: invalid control, baseline did not pass', notes)
+        self.assertFalse(any('repairs startup' in note for note in notes))
 
 
 if __name__ == '__main__':

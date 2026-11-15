@@ -148,7 +148,7 @@ with open(sys.argv[1], 'w') as f:
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
     # libignition opens / as an openat root before dyld can start any executable.
     f.write('(allow file-read* (literal "/"))\n')
-    for p in system + [sys.argv[2]]:
+    for p in system + [sys.argv[2], sys.argv[3]]:
         f.write('(allow file-read* file-map-executable (subpath %s))\n' % q(p))
     if len(sys.argv) > 6:
         f.write('(allow file-read* (subpath %s))\n' % q(os.path.realpath(sys.argv[6])))
