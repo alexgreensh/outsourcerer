@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.325
+▝▜██████▀  Haiku 5.5 with xhigh effort · Claude Ultra
+ ▝▝   ▝▝   ~/code/demo-app · /rc
+
+
+❯ Use the Bash tool with run_in_background set to true to run: sleep 240. Then reply with only the word ok and end your turn. Do not wait for it.
+  ⎿  UserPromptSubmit hook [command hook 5] timed out after 20s — output discarded. Raise the hook's "timeout" to allow more time.
+
+  Ran 1 shell command 
+
+⏺ ok
+
+✻ Crunched for 44s · done 11:45 PM
+
+⏺ Background command "Sleep 240 seconds in background" completed (exit code 0)
+
+  Reading ~/code/demo-app/README.md · 5s
+  ⎿  ~/code/demo-app/README.md
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✢ Burrowing… (running PostToolUse hook · 18s · ↓ 468 tokens)
+  ⎿  Tip: Run /install-slack-app to use Claude in Slack
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 to keep future transcripts
+  Haiku 5.5 | xhi | demo-app | (main) | █░░░░░░░░░ 15% | Quality --
+  ⤸ resumable | week 11%
+  ⏵⏵ auto mode on (shift+tab to cycle)
