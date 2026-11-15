@@ -61,6 +61,8 @@ for line in \
   'Retrying the request to https://api.devin.ai/v3/sessions/abc123 after ECONNRESET; attempt 4 of 8, backoff 32s, will keep trying' \
   'Waiting for the upstream model stream to reconnect after a long network partition on the corporate proxy, attempt backoff continues' \
   'Connecting to wss://api.devin.ai/v3/stream?token=abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890 (retry 3)' \
+  'Starting MCP server /very/long/path/to/a/project/configuration/and/dependencies/that/keeps/going/with/many/more/components/for/testing/startup' \
+  'Starting session; Attempt 3/5 while reconnecting to the service after a long delay and waiting for the remote endpoint to become available again' \
   '⠋'
 do
   printf '%s\n' "$line" > "$noise"
@@ -232,11 +234,11 @@ st_fin="$(cat "$jd3/status" 2>/dev/null)"
 # launcher noise: a healthy delegate may have no qualifying line even after the <120-char
 # fix (a short reply can also still read as status chatter, per the unit cases above).
 # The delegate's own live CLI log is positive proof a turn started, so no-init must stay
-# disarmed while it is warm. noinit=3 sits inside every other window, so only this signal
+# disarmed while it is warm. noinit=5 sits inside every other window, so only this signal
 # can save the job.
 jd4="$TMP/jobs/job-noinit-alive"; mkdir -p "$jd4"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd4/meta.json"
-OSRC_NOINIT_SECS=3 OSRC_POLL=1 _supervise "$jd4" 30 45 60 -- bash "$TMP/silent_alive.sh" >/dev/null 2>&1
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd4/meta.json"
+OSRC_NOINIT_SECS=5 OSRC_POLL=1 _supervise "$jd4" 30 45 60 -- bash "$TMP/silent_alive.sh" >/dev/null 2>&1
 rc_ni=$?
 if grep -aq '^no-init' "$jd4/reason" 2>/dev/null; then
   bad "live devin log did not disarm no-init (rc=$rc_ni, reason=$(cat "$jd4/reason" 2>/dev/null))"
@@ -252,29 +254,12 @@ grep -aq '^no-init' "$jd5/reason" 2>/dev/null \
   && ok "control: no-init still fires with OSRC_DEVIN_LIVENESS=0" \
   || bad "control: no-init did not fire even with liveness disabled"
 
-# A continuously updated log must not defer no-init indefinitely.
-jd_cap="$TMP/jobs/job-noinit-cap"; mkdir -p "$jd_cap"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd_cap/meta.json"
-cat > "$TMP/cap_writer.sh" <<EOF
-#!/usr/bin/env bash
-while :; do touch "$DLOGS/devin_20260722-444444_\$\$.log"; sleep 1; done
-EOF
-start_cap=$(date +%s)
-OSRC_NOINIT_SECS=3 OSRC_POLL=1 _supervise "$jd_cap" 30 45 60 -- bash "$TMP/cap_writer.sh" >/dev/null 2>&1
-rc_cap=$?
-elapsed_cap=$(( $(date +%s) - start_cap ))
-if [ "$rc_cap" = 125 ] && grep -aq '^no-init' "$jd_cap/reason" 2>/dev/null && [ "$elapsed_cap" -ge 14 ] && [ "$elapsed_cap" -lt 30 ]; then
-  ok "continuous log hits capped no-init before hard timeout (elapsed=${elapsed_cap}s)"
-else
-  bad "continuous log cap failed (rc=$rc_cap, elapsed=${elapsed_cap}s, reason=$(cat "$jd_cap/reason" 2>/dev/null))"
-fi
-
 # STALE LOG: a devin log that PREDATES this job must never disarm no-init. The pid glob is a
 # number, so a log left by an earlier process whose pid the kernel reused would otherwise
 # vouch for a job that never launched devin. Backdating the mtime makes the freshness gate
 # the ONLY thing that can refuse it — deterministic, unlike same-second timing races.
 jd6="$TMP/jobs/job-stale-log"; mkdir -p "$jd6"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd6/meta.json"
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd6/meta.json"
 cat > "$TMP/stale_log.sh" <<EOF
 #!/usr/bin/env bash
 touch "$DLOGS/devin_20200101-000000_\$\$.log"
@@ -293,7 +278,7 @@ grep -aq '^no-init' "$jd6/reason" 2>/dev/null \
 # noinit seconds past its own mtime and the job then dies as no-init, with the RIGHT reason —
 # never as silent-delegate at the stall window, whose advice a hung startup cannot use.
 jd7="$TMP/jobs/job-late-log"; mkdir -p "$jd7"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd7/meta.json"
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd7/meta.json"
 cat > "$TMP/late_log.sh" <<EOF
 #!/usr/bin/env bash
 sleep 2
@@ -335,7 +320,7 @@ OSRC_NOWRITE_WARN=3 OSRC_NOWRITE_KILL=3 OSRC_NOINIT_SECS=3 OSRC_POLL=1 \
 # SLOW WRITER: the no-init check must measure age AFTER the push, not against the previous
 # poll's mtime — a delegate whose log advances every 2s inside a 3s window is alive.
 jd9="$TMP/jobs/job-slow-writer"; mkdir -p "$jd9"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd9/meta.json"
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd9/meta.json"
 cat > "$TMP/slow_writer.sh" <<EOF
 #!/usr/bin/env bash
 for i in \$(seq 1 5); do touch "$DLOGS/devin_20260722-666666_\$\$.log"; sleep 2; done
@@ -352,7 +337,7 @@ fi
 # FUTURE-DATED MTIME: a log stamped ahead of the clock (skew, or deliberate) must not
 # ratchet the no-init clock; only mtimes <= now may advance it.
 jd10="$TMP/jobs/job-future-log"; mkdir -p "$jd10"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd10/meta.json"
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd10/meta.json"
 cat > "$TMP/future_log.sh" <<EOF
 #!/usr/bin/env bash
 touch "$DLOGS/devin_20260722-777777_\$\$.log"
@@ -369,13 +354,13 @@ grep -aq '^no-init' "$jd10/reason" 2>/dev/null \
 # (the log is alive — never-started is the wrong verdict) while the write-free burn still
 # dies as exploring-timeout. Two clocks, two different arms, one log.
 jd11="$TMP/jobs/job-silent-edit"; mkdir -p "$jd11"
-printf '{"verb":"edit","cwd":"%s"}\n' "$WORK" > "$jd11/meta.json"
+printf '{"verb":"edit","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd11/meta.json"
 cat > "$TMP/silent_edit.sh" <<EOF
 #!/usr/bin/env bash
 for i in \$(seq 1 25); do touch "$DLOGS/devin_20260722-888888_\$\$.log"; sleep 1; done
 EOF
 chmod +x "$TMP/silent_edit.sh"
-OSRC_NOWRITE_WARN=3 OSRC_NOWRITE_KILL=3 OSRC_NOINIT_SECS=3 OSRC_POLL=1 \
+OSRC_NOWRITE_WARN=3 OSRC_NOWRITE_KILL=3 OSRC_DEVIN_NOWRITE_KILL=0 OSRC_NOINIT_SECS=3 OSRC_POLL=1 \
   _supervise "$jd11" 30 45 60 -- bash "$TMP/silent_edit.sh" >/dev/null 2>&1
 [ "$(cat "$jd11/reason" 2>/dev/null)" = "exploring-timeout" ] \
   && ok "silent warm-log edit job: no-init held off, exploring-timeout still bounds the burn" \

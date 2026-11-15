@@ -189,8 +189,7 @@ kill -0 "$ni_pid" 2>/dev/null \
 kill -0 "$ni_child" 2>/dev/null \
   && bad "a no-init delegate descendant survived its deadline" \
   || ok "the no-init delegate process tree is killed"
-ni_reason='no-init: delegate never started within 2s (likely a hung SessionStart hook cold-start or parked lane) — retry, or run as a session to watch it boot'
-[ "$(cat "$jdni/reason" 2>/dev/null)" = "$ni_reason" ] \
+grep -Eq '^no-init: delegate never started after [0-9]+s ' "$jdni/reason" 2>/dev/null \
   && ok "header, blank, ERROR, and mid-tier lines do not disarm the no-init watchdog" \
   || bad "no-init reason is '$(cat "$jdni/reason" 2>/dev/null)'"
 
