@@ -31,10 +31,39 @@ check _opencode_route_check
 check test "$(_lane_field opencode cost_class)" = credits
 check test -z "$(_lane_field opencode plan_limited)"
 check test -z "$(_resolve_run_cost opencode 0 /dev/null)"
+# OpenCode is a native program on Windows: the carve-out must be in its path form
+# (C:/...), computed here independently of the product helper. POSIX elsewhere.
+work_native="$T/work"
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) work_native="$(cygpath -m "$T/work")" ;; esac
 for mode in readonly scoped; do
   cfg="$(_opencode_config_json "$mode" "$T/work")"
-  check jq -e --arg p "external_directory:$T/work/**" '[.policies[].resource]|index($p)!=null' <<< "$cfg"
+  check jq -e --arg p "external_directory:$work_native/**" '[.policies[].resource]|index($p)!=null' <<< "$cfg"
 done
+# Seam: fake MSYS (cygpath on PATH + windows platform) must convert, both config
+# layers; the same fake cygpath on mac/linux must leave the POSIX path alone.
+# MSYS argv rewriting is switched off so real Git Bash proves the product converts
+# the path itself instead of leaning on MSYS's guess.
+mkdir -p "$T/fakecyg"
+printf '#!/bin/sh\n[ "$1" = -m ] || exit 9\nprintf "C:/fake%%s\\n" "$2"\n' > "$T/fakecyg/cygpath"; chmod +x "$T/fakecyg/cygpath"
+_msys_seam() (
+  export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+  PATH="$T/fakecyg:$PATH"; OSRC_PLATFORM=windows
+  for v in 2 1; do
+    _OPENCODE_VER=$v
+    for mode in readonly scoped; do
+      cfg="$(_opencode_config_json "$mode" /c/Users/x/work)"
+      if [ "$v" = 2 ]; then
+        jq -e '[.policies[].resource,.permissions[].resource]|index("external_directory:C:/fake/c/Users/x/work/**")!=null and index("external_directory:/c/Users/x/work/**")==null' <<< "$cfg" >/dev/null || { echo "v$v $mode: $cfg"; exit 1; }
+      else
+        jq -e '.permission.external_directory|has("C:/fake/c/Users/x/work/**") and (has("/c/Users/x/work/**")|not)' <<< "$cfg" >/dev/null || { echo "v$v $mode: $cfg"; exit 1; }
+      fi
+    done
+  done
+  OSRC_PLATFORM=mac; _OPENCODE_VER=2
+  cfg="$(_opencode_config_json readonly /Users/x/work)"
+  jq -e '[.policies[].resource]|index("external_directory:/Users/x/work/**")!=null' <<< "$cfg" >/dev/null || { echo "mac: $cfg"; exit 1; }
+)
+check _msys_seam
 for mode in scoped allowall; do
   cfg="$(_opencode_config_json "$mode")"
   check jq -e '[.policies[]|select(.resource=="task:*" and .effect=="deny")]|length>0' <<< "$cfg"

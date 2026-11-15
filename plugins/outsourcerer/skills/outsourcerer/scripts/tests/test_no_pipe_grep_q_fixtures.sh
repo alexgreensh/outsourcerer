@@ -12,7 +12,9 @@ import pathlib
 import subprocess
 import sys
 
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 guard = sys.argv[1]
+U8 = dict(encoding='utf-8', errors='replace')
 root = pathlib.Path(sys.argv[2])
 bad = {
     'locale-prefix': 'echo "$x" | LC_ALL=C grep -q P',
@@ -51,27 +53,36 @@ for expected, fixtures in ((True, bad), (False, good)):
     for name, code in fixtures.items():
         setup = 'shopt -so pipefail\n' if name == 'shopt-pipefail' else 'set -uo pipefail\n'
         path = root / (name + '.sh')
-        path.write_text(setup + code + '\n')
-        result = subprocess.run(['/bin/bash', guard, str(root)], text=True, capture_output=True)
+        path.write_text(setup + code + '\n', encoding='utf-8')
+        result = subprocess.run(['/bin/bash', guard, str(root)], capture_output=True, **U8)
         hit = result.returncode == 1 and f'{path}:2:' in result.stdout
         ok = hit if expected else result.returncode == 0
         print(('PASS: ' if ok else 'FAIL: ') + name + ('' if ok else ': ' + result.stdout + result.stderr))
         failed += not ok
         path.unlink()
+# Bytes that are not UTF-8 (0xff) and undefined in cp1252 (0x8f) must not crash the guard:
+# Windows CI died in read_text() with the locale codec before scanning anything.
+path = root / 'non-utf8.sh'
+path.write_bytes(b'set -uo pipefail\n# caf\xff \x8f \xe2\x80\x94\necho "$x" | grep -q P\n')
+result = subprocess.run(['/bin/bash', guard, str(root)], capture_output=True, **U8)
+ok = result.returncode == 1 and f'{path}:3:' in result.stdout and 'Traceback' not in result.stderr
+print(('PASS: ' if ok else 'FAIL: ') + 'non-UTF-8 bytes still scanned' + ('' if ok else ': ' + result.stdout + result.stderr))
+failed += not ok
+path.unlink()
 status_case = '''set -o pipefail
 producer() { printf 'MATCH\\n'; return 7; }
 { captured="$(producer)" && grep -q MATCH <<<"$captured"; }
 '''
-r = subprocess.run(['/bin/bash', '-c', status_case], text=True, capture_output=True)
+r = subprocess.run(['/bin/bash', '-c', status_case], capture_output=True, **U8)
 ok = r.returncode != 0
 print(('PASS: ' if ok else 'FAIL: ') + 'matching output does not hide producer failure')
 failed += not ok
 env = os.environ.copy()
 env['PATH'] = '/nonexistent'
-r = subprocess.run(['/bin/bash', guard, str(root)], text=True, capture_output=True, env=env)
+r = subprocess.run(['/bin/bash', guard, str(root)], capture_output=True, **U8, env=env)
 ok = r.returncode == 0 and 'SKIP:' in r.stdout and 'python3' in r.stdout
 print(('PASS: ' if ok else 'FAIL: ') + 'python3 unavailable skips clearly')
 failed += not ok
-print(f'RESULT: {len(bad) + len(good) + 2 - failed} passed, {failed} failed')
+print(f'RESULT: {len(bad) + len(good) + 3 - failed} passed, {failed} failed')
 sys.exit(bool(failed))
 PY

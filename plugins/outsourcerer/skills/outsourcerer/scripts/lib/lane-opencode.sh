@@ -125,6 +125,22 @@ _opencode_effort() { # tier -> opencode --variant
   esac
 }
 
+# _osrc_native_path <path> -> the path as a native Windows program sees it.
+# OpenCode on Windows is a node program: it matches external_directory against
+# C:/Users/... paths, never the MSYS /c/Users/... spelling Git Bash hands us.
+# Without this the rule depended on MSYS silently rewriting the bare /c/... argv
+# passed to jq.exe (off under MSYS_NO_PATHCONV=1 / MSYS2_ARG_CONV_EXCL, absent
+# with a non-native jq), so the bundle carve-out could name a folder OpenCode
+# never sees. cygpath -m is a no-op on an already-native C:/ path.
+# Mac/Linux paths pass through unchanged.
+_osrc_native_path() {
+  local p="$1" w
+  if [ "${OSRC_PLATFORM:-}" = "windows" ] && command -v cygpath >/dev/null 2>&1; then
+    w="$(cygpath -m "$p" 2>/dev/null)" && [ -n "$w" ] && p="$w"
+  fi
+  printf '%s\n' "$p"
+}
+
 # _opencode_config_json <readonly|scoped|allowall> [bundle_root] -> per-run config JSON.
 # readonly: deny EVERYTHING first, then re-allow only the read family — a deny
 # list that names mutating tools can never be complete (task/subagent, webfetch,
@@ -159,6 +175,7 @@ _opencode_effort() { # tier -> opencode --variant
 # caller's non-empty guard then refuses to launch unenforced.
 _opencode_config_json() {
   local mode="$1" root="${2:-}" ver; ver="$(_opencode_ver)"
+  [ -n "$root" ] && root="$(_osrc_native_path "$root")"
   if [ "$ver" = "1" ]; then
     case "$mode" in
       readonly)

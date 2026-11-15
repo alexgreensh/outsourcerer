@@ -8,6 +8,8 @@ fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 python3 - "${1:-$HERE}" <<'PY'
 import pathlib,re,shlex,sys
+# Windows runners default to cp1252: decode and print UTF-8 explicitly, never the locale.
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 root=pathlib.Path(sys.argv[1])
 
 def uncomment(line):
@@ -146,7 +148,7 @@ def logical_lines(text):
 
 failed=False
 for path in sorted(root.rglob('*.sh')):
-    lines=list(logical_lines(path.read_text()))
+    lines=list(logical_lines(path.read_text(encoding='utf-8', errors='replace')))
     if not any(re.search(r'(?:^|[;&])\s*(?:set|shopt)\s+[^\n#]*\bpipefail\b',s) for _,s in lines): continue
     for number,line in lines:
         if scan(line): print(f'{path}:{number}: producer piped into quiet grep'); failed=True
