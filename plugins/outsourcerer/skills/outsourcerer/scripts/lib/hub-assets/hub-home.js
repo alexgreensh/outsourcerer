@@ -102,6 +102,49 @@
       return d;
     }
 
+    // ---- Progress (MC2 r2 #2) ---------------------------------------------------------------------
+    // A project or lane that never reported progress has no pct: it shows no number and no bar. 0 is a real 0.
+    const hasPct = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
+
+    // ---- Live lanes (MC2 r2 #5) ------------------------------------------------------------------
+    // Every running card and rail entry lists its live lanes: name, model, what it is doing and for how long.
+    // Export gives state (screen/job truth), startedAt and activeAt (epochs); old exports only had status.
+    const LST = { working: 'working', approval: 'waiting for approval', question: 'asked a question', idle: 'idle',
+      limit: 'hit a plan limit', failed: 'failed', unknown: 'state unknown' };
+    const ENDED = ['Done', 'Merged', 'Failed', 'Canceled', 'Shipped'];
+    function laneState(l) {
+      if (l.state && LST[l.state]) return l.state;
+      const s = String(l.status || '').toLowerCase();
+      return s === 'idle' ? 'idle' : s === 'blocked' ? 'approval' : s === 'building' || !s ? 'working' : 'unknown';
+    }
+    const liveLanes = (p) => (p.lanes || []).filter((l) => !ENDED.includes(l.status) && l.state !== 'done');
+    function dur(sec) {
+      if (!(sec >= 0)) return '';
+      const m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+      return m < 1 ? 'under a minute' : h < 1 ? m + ' min' : d < 1 ? h + ' h ' + (m % 60) + ' min' : d + ' d ' + (h % 24) + ' h';
+    }
+    function hhmm(t) { const d = new Date(t * 1000), z = (n) => String(n).padStart(2, '0'); return z(d.getUTCHours()) + ':' + z(d.getUTCMinutes()) + ' UTC'; }
+    // How long: a working lane counts from its start, a waiting or idle one from its last activity.
+    function laneFor(l, st) {
+      const t = st === 'working' ? (l.startedAt || l.activeAt) : (l.activeAt || l.startedAt);
+      return t ? dur(Date.now() / 1000 - t) : '';
+    }
+    function laneList(p, compact) {
+      const ls = liveLanes(p); if (!ls.length) return null;
+      const ul = el('ul', compact ? 'rlanes' : 'pt-lanes'); ul.setAttribute('aria-label', 'Live lanes in ' + p.name);
+      ls.forEach((l) => {
+        const st = laneState(l), how = laneFor(l, st);
+        const li = el('li', 'ln-' + st); li.id = (compact ? 'rl-' : 'pl-') + p.id + '-' + l.id;
+        const txt = LST[st] + (how ? ', ' + how : '');
+        li.append(el('span', 'lnd'), el('span', 'lnn', l.short || l.id));
+        if (!compact && l.model) li.append(el('span', 'lnm mono', l.model));
+        li.append(el('span', 'lns', txt));
+        li.title = [l.short || l.id, l.model, txt, l.startedAt ? 'started ' + hhmm(l.startedAt) : '', l.activeAt ? 'last activity ' + hhmm(l.activeAt) : ''].filter(Boolean).join(' · ');
+        ul.append(li);
+      });
+      return ul;
+    }
+
     // ---- Home: the first screen. One glance answers "what needs me". --------------------------
     function ptile(p) {
       const go = ctx.go; const ds = openDecs(p);
@@ -110,10 +153,13 @@
       const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.id = 'ptn-' + p.id; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
       top.append(nb, stPill(p)); t.append(top);
       if (p.tagline) t.append(el('p', 'pt-tag', p.tagline));
-      const pr = el('div', 'pt-prog'); const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
-      bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuenow', String(p.pct || 0)); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-label', p.name + ' progress');
-      pr.append(bar, el('span', 'pct', (p.pct || 0) + '%')); t.append(pr);
-      if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = (p.pct || 0) + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = (p.pct || 0) + '%'; }); }
+      const pr = el('div', 'pt-prog' + (hasPct(p) ? '' : ' nopct')); t.append(pr);
+      if (hasPct(p)) {
+        const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
+        bar.setAttribute('role', 'progressbar'); bar.setAttribute('aria-valuenow', String(p.pct)); bar.setAttribute('aria-valuemin', '0'); bar.setAttribute('aria-valuemax', '100'); bar.setAttribute('aria-label', p.name + ' progress');
+        pr.append(bar, el('span', 'pct', p.pct + '%'));
+        if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = p.pct + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = p.pct + '%'; }); }
+      }
       const meta = el('div', 'pt-meta');
       if (p.eta) { const e = el('span'); e.append(ic('rocket'), document.createTextNode('Ships ' + p.eta)); meta.append(e); }
       if (p.updated) {
@@ -122,7 +168,8 @@
         u.append(ic(p.status === 'paused' ? 'pause' : 'clock'), el('span', 'lstx', u.dataset.base)); meta.append(u);
       }
       const sl = sumLine(p); if (sl) meta.append(sl);
-      if (meta.children.length) pr.append(meta);
+      if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
+      const lanes = laneList(p, false); if (lanes) t.append(lanes);
       const topN = ds.filter(isTop).length;
       const rest = ds.filter((d) => !isTop(d));
       if (topN) t.append(el('p', 'pt-top5', topN + ' in top priority, above'));
@@ -176,6 +223,6 @@
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine };
+    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList };
   };
 })();

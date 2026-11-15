@@ -744,13 +744,13 @@ EOF
 }
 
 _osrc_summary_text() {  # <rows>
-  printf '%-9s %-18s %-8s %-9s %-12s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP PAID
+  printf '%-9s %-18s %-8s %-9s %-12s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP BILLING
   local hid
   # rows: id|name|lane|order|state|left|renews_at|renews|caps|captripped|billing|paid|win|used|checked
   while IFS='|' read -r hid hname hlane horder state left renews_at renews caps captripped bill paid win used checked; do
     [ -n "$hid" ] || continue
     printf '%-9s %-18s %-8s %-12s %-10s %-6s %s%s\n' "$hid" "$hname" "$state" "${left:-—}" \
-      "${renews:-—}" "${caps:--}" "$([ "$paid" = true ] && echo paid || echo '-')" \
+      "${renews:-—}" "${caps:--}" "$(case "$bill" in metered) echo 'pay per use' ;; unknown) echo 'plan not confirmed' ;; *) echo '-' ;; esac)" \
       "$([ "$captripped" = true ] && echo '[cap tripped]')"
   done <<EOF
 $1
