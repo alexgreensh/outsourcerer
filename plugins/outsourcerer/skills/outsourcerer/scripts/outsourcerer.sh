@@ -11436,13 +11436,12 @@ cmd_bg() {
   # Last parent-side gate: there must be a real task. A flags-only invocation used to mint a job whose
   # detached child then died on a usage error, which is the phantom-job pattern this block exists to
   # stop. Skip the verb, skip flag/value pairs, and require something left over.
-  local _sawtask=0 _skipnext=0 _first=1 _a
-  for _a in "$@"; do
+  local _sawtask=0 _skipnext=0 _first=1 _a; for _a in "$@"; do
     [ "$_first" = "1" ] && { _first=0; continue; }          # position 1 is the verb
     [ "$_skipnext" = "1" ] && { _skipnext=0; continue; }    # this token is a flag's VALUE
     case "$_a" in
-      -m|--model|--effort|--with|--provider) _skipnext=1 ;;
-      -*) ;;                                                 # a bare flag, keep looking
+      -m|--model|--tier|--with|--perm|--account|--cap|--trust-lane|--effort|--reasoning|--provider) _skipnext=1 ;;
+      --perm=*|--cap=*|--provider=*|--allow-downgrade|--force-lane|--spend-ok|--no-advise|--cloud-ack|--wait|--foreground) ;;
       *) _sawtask=1; break ;;
     esac
   done
@@ -16431,6 +16430,7 @@ _failover_notice() {
 # routes to its native lane regardless of --provider; unknown ids / no -m route by --provider.
 # Tiers: auto|accept-edits|autonomous|dangerous
 route_delegate() {
+  if [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_ACTIVE:-0}" != 1 ]; then local _OSRC_PREFLIGHT_ACTIVE=1; _osrc_route_dispatch "$@"; return $?; fi
   local tier="$1" verb="$2"; shift 2
   # Disk-pressure gate: refuse new lane launches while free disk is under
   # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
