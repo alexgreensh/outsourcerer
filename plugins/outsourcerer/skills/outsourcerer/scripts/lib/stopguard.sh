@@ -58,8 +58,9 @@ _warn_unwatched() {
 # Owed a waiter (the 2026-11-13 overnight root cause was that idle sessions were not):
 #   live     a job/remote lane/session that is working
 #   waiting  a session parked on an approval or question, a plan-limit banner, or a READY remote lane
-#   idle     an interactive session at an empty composer: owed a waiter ONLY while something else
-#            the orchestrator owns is live or waiting (an idle reviewer with queued work).
+#   idle     an interactive session at an empty composer: owed a waiter unless its done contract
+#            holds or nobody has prompted it yet (_sv_idle_owed); a settled idle one is owed a waiter
+#            ONLY while something else the orchestrator owns is live or waiting.
 # A running `supervise` for this session covers every owned target; a `wait <id>` covers its id.
 #
 # Ownership: every launch made from a Claude Code session records its id under
@@ -84,19 +85,9 @@ _sg_confirmed_quiet() { # <id> <kind> -> idle|live
 
 # _waited_ids [owner-sid] -> ids a running `wait` / `fanout wait` covers, one per line. A line `*`
 # means a live `supervise` for that owner covers every target it owns.
-_waited_ids() {
-  local line rest gid
+_waited_ids() { # only a process that IS an outsourcerer wait counts, never a line mentioning one (lib/lane_life.sh)
   [ -z "${1:-}" ] || _sv_armed_cover "$1"
-  ps -axo command= 2>/dev/null | grep -E 'outsourcerer(\.sh)?[^ ]* (.* )?wait( |$)' | grep -v 'stop-guard' | while IFS= read -r line; do
-    rest="${line##* wait }"
-    case "$line" in
-      *" fanout wait "*)
-        gid="${line##* fanout wait }"; gid="${gid%% *}"
-        [ -f "$(_fanout_dir "$gid" 2>/dev/null)/members.tsv" ] && cut -f1 "$(_fanout_dir "$gid")/members.tsv" 2>/dev/null
-        ;;
-      *) printf '%s\n' "${rest%% *}" ;;
-    esac
-  done
+  _sg_ps_waits
 }
 
 cmd_stop_guard() {
@@ -122,7 +113,8 @@ cmd_stop_guard() {
           _sv_emit "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1 || continue
         fi
         rm -f "$dir/$id" 2>/dev/null ;;
-      idle) idle="$idle $id" ;;
+      # An idle lane short of its done contract stopped early: it is owed a waiter (SUP bug 1).
+      idle) if _sv_idle_owed "$id"; then need="$need $id"; else idle="$idle $id"; fi ;;
       *) need="$need $id" ;;
     esac
   done

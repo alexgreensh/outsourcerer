@@ -18069,6 +18069,7 @@ _winpty_session() {
       esac
       ;;
     stop)
+      _session_registry_end stop >/dev/null 2>&1 || true   # recorded before the broker stops (SUP)
       if [ -d "$sdir" ]; then
         mkdir -p "$sdir/cmd"
         : > "$sdir/cmd/stop"
@@ -18082,7 +18083,6 @@ _winpty_session() {
           [ -n "$bpid" ] && kill -0 "$bpid" 2>/dev/null && kill -9 "$bpid" 2>/dev/null || true
         fi
       fi
-      _session_registry_end stop >/dev/null 2>&1 || true
       rm -rf "$sdir"
       echo "stopped '$SESSION_NAME'."
       ;;
@@ -18345,8 +18345,8 @@ session() {
       esac
       ;;
     stop)
+      _session_registry_end stop >/dev/null 2>&1 || true   # BEFORE the kill: a poll in between saw "gone, no stop" (SUP)
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
-      _session_registry_end stop >/dev/null 2>&1 || true
       osrc_done_clear "$SESSION_NAME" 2>/dev/null || true
       ;;
     *)

@@ -56,7 +56,8 @@ echo "=== idle after work wakes; done all after ==="
 fresh 4; own S i1; pane i1 cc-working-turn.txt
 ( sleep 2; cp "$FX/cc-idle-after-work.txt" "$TMP/panes/i1.screen" ) & PIDS="$PIDS $!"
 out="$(sup --session S)"; grep -q '^EVENT idle i1 .*finished its turn' <<<"$out" && ok "working -> idle wakes as idle" || no "idle-after-work: [$out]"
-out="$(sup --session S)"; grep -q '^EVENT done all ' <<<"$out" && ok "nothing live left -> EVENT done all (idle already reported)" || no "done all: [$out]"
+# SUP (0.16.2): an idle lane short of done is still live work; a re-arm keeps watching it.
+out="$(OSRC_SUPERVISE_MAX_SECS=3 sup --session S)"; ! grep -q '^EVENT done all ' <<<"$out" && ok "idle already reported, not done: re-arm keeps watching (no 'done all')" || no "idle lane settled: [$out]"
 fresh 5; out="$(sup --session nobody)"; grep -q '^EVENT done all ' <<<"$out" && grep -q '^NEXT ' <<<"$out" && ok "no owned work -> EVENT done all + NEXT" || no "empty: [$out]"
 
 echo "=== busy Codex flicker does NOT wake (synthetic frames) ==="
@@ -117,7 +118,10 @@ grep -q 'supervise --session G' <<<"$(jq -r .reason <<<"$out")" && ok "the block
 fresh 14; own G i9; pane i9 cc-idle-after-work.txt
 out="$(guard G)"; printf '%s' "$out" | jq -e '.decision=="block"' >/dev/null 2>&1 && ok "one unconfirmed idle read is not trusted (busy panes flicker idle)" || no "single idle read allowed the stop"
 sup --session G >/dev/null   # supervise confirms and reports the idle
-out="$(guard G)"; [ -z "$out" ] && ok "a confirmed idle session with nothing else live does not block" || no "idle-only blocked: [$out]"
+out="$(guard G)"; printf '%s' "$out" | jq -e '.decision=="block"' >/dev/null 2>&1 && ok "a confirmed idle session short of its done contract is owed a waiter (SUP)" || no "idle-not-done allowed the stop: [$out]"
+mkdir -p "$OSRC_HOME/done" "$TMP/ws14"; : > "$TMP/ws14/i9.DONE"
+jq -cn --arg p "$TMP/ws14/i9.DONE" --arg c "$TMP/ws14" '{spec:("file:"+$p),cwd:$c}' > "$OSRC_HOME/done/i9.json"
+out="$(guard G)"; [ -z "$out" ] && ok "a confirmed idle session whose done contract holds does not block" || no "done idle blocked: [$out]"
 own G w9; pane w9 cc-working-turn.txt
 out="$(guard G)"; grep -q 'i9' <<<"$(jq -r .reason <<<"$out" 2>/dev/null)" && ok "an idle session IS owed a waiter while other owned work is live" || no "idle with live sibling: [$out]"
 fresh 15; own G rl1; mkdir -p "$OSRC_HOME/remote"; echo '{}' > "$OSRC_HOME/remote/rl1.json"
