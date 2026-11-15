@@ -37,3 +37,46 @@ jobs:
       - name: Run conformance tests
         run: bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh
         shell: bash
+
+  windows-bg-path:
+    # Windows Git Bash is a supported platform, and the background route (bg-pin, preflight, stderr capture)
+    # must run there with no mkfifo, python, flock, setsid, fcntl or /dev/fd. conformance.sh needs tmux and
+    # POSIX process groups, so this job runs only the bg-path suites, each on its own, under Git Bash.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF line endings (bash cannot run CRLF scripts)
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install test dependencies
+        run: |
+          command -v jq >/dev/null 2>&1 || choco install jq -y --no-progress
+          # The engine and test_no_pipe_grep_q call python3; Windows ships it as python.
+          if ! python3 -c 'import sys' >/dev/null 2>&1; then
+            mkdir -p "$HOME/osrc-bin"
+            printf '#!/bin/sh\nexec python "$@"\n' > "$HOME/osrc-bin/python3"
+            chmod +x "$HOME/osrc-bin/python3"
+            cygpath -w "$HOME/osrc-bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Run bg-path suites
+        run: |
+          uname -a; bash --version | head -1; jq --version; python3 --version
+          T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
+          failed=""
+          for s in test_stderr_capture test_windows_portability test_codex_windows_sandbox \
+                   test_no_phantom_jobs test_bg_provider_after_verb test_p56_r2 \
+                   test_tool_bugs_062 test_no_pipe_grep_q test_opencode_lane; do
+            echo "::group::$s"
+            start=$(date +%s)
+            if bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi
+            echo "::endgroup::"
+            echo "$s: $r in $(( $(date +%s) - start ))s"
+          done
+          [ -z "$failed" ] || { echo "::error::failed on Windows Git Bash:$failed"; exit 1; }

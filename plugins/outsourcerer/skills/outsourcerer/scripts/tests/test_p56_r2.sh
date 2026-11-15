@@ -430,6 +430,12 @@ check test "$int_rc" != 0
 check test -f "$T/interrupted-pair"
 check test ! -s "$T/interrupted-pair"
 check test ! -e "$T/interrupted-launch"
+# Process groups (os.killpg) and pseudo-terminals (pty) do not exist for Windows Python, so these two
+# real-signal/real-terminal cases run on macOS and Linux only; every other check above runs under Git Bash too.
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) _p56_posix=0 ;; *) _p56_posix=1 ;; esac
+if [ "$_p56_posix" = 0 ]; then
+  echo 'SKIP: Ctrl-C process-group and pseudo-terminal cases need POSIX (Windows Git Bash)'
+else
 # Deliver Ctrl-C to the isolated process group while the fake preflight is running.
 cat > "$T/wait-preflight" <<EOF_WAIT
 #!/bin/sh
@@ -522,5 +528,6 @@ finally:
 PY_PTY
 pty_rc=$?
 if [ "$pty_rc" = 77 ]; then echo 'SKIP: terminal test needs a pseudo-terminal'; else check test "$pty_rc" = 0; fi
+fi
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
