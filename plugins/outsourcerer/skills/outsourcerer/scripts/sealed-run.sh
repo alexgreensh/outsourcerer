@@ -31,15 +31,20 @@ case "$(uname -s)" in
   Linux) [ -x /usr/bin/bwrap ] && isolation=linux ;;
 esac
 if [ "$isolation" = none ]; then
-  [ "$unisolated" = 1 ] || { echo 'sealed-run: no OS isolation; use --allow-unisolated for a manual run' >&2; exit 2; }
+  { [ "$unisolated" = 1 ] && [ "$check" = 0 ]; } || { echo 'sealed-run: OS isolation unavailable; use --allow-unisolated for a manual run' >&2; exit 78; }
   echo 'sealed-run: WARNING: running without OS isolation' >&2
 fi
-rc=0
-# Probe the same profile and executable chain used for tests, without running worktree code.
+overall=0
+# Check the interpreter runtime as well as sandbox application, before any worktree code runs.
 [ "$check" = 0 ] || tests=(/usr/bin/true)
-for test_path in "${tests[@]}"; do
-  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /usr/bin/nice -n 19 /usr/bin/perl -e 'alarm 600; exec @ARGV')
-  if [ "$check" = 1 ]; then cmd+=(/usr/bin/true); else cmd+=(/bin/bash "$test_path"); fi
+for test_path in __OSRC_SANDBOX_PROBE__ "${tests[@]}"; do
+  rc=0
+  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /bin/bash -p -c '/usr/bin/renice 19 "$$" >/dev/null 2>&1 || :; exec /usr/bin/perl -e "alarm 600; exec @ARGV" "$@"' sealed-run)
+  if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then
+    cmd+=(/usr/bin/python3 -I -c 'import json, pathlib, socket')
+  else
+    cmd+=(/bin/bash "$test_path")
+  fi
   case "$isolation" in
     mac)
       profile="$t/profile.sb"
@@ -90,5 +95,9 @@ PY
         --ro-bind "$root" "$root" --bind "$t" "$t" --remount-ro / --chdir "$root" -- "${cmd[@]}" || rc=$? ;;
     *) "${cmd[@]}" || rc=$? ;;
   esac
+  if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then
+    [ "$rc" = 0 ] || { echo "sealed-run: OS isolation unavailable; refusing test execution (sandbox/runtime rc=$rc)" >&2; exit 78; }
+    [ "$check" = 0 ] || exit 0
+  elif [ "$rc" != 0 ]; then overall="$rc"; fi
 done
-exit "$rc"
+exit "$overall"

@@ -59,7 +59,7 @@ class SandboxFinal(unittest.TestCase):
                         self.assertTrue(outcome.failures, 'required Linux CI probe did not fail')
                         self.assertFalse(outcome.skipped, 'required Linux CI probe skipped')
                     else:
-                        self.assertEqual(len(outcome.skipped), 1)
+                        self.assertEqual(len(outcome.skipped), 1 if case is SandboxFinal else 0)
                         self.assertFalse(outcome.failures or outcome.errors)
 
     def test_linux_ci_broken_bwrap_is_not_a_mac_skip(self):

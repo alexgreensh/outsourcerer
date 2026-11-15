@@ -22,6 +22,74 @@ spec.loader.exec_module(classifier)
 
 
 class SealedRunnerTests(unittest.TestCase):
+    def test_unavailable_host_asserts_hold_without_running_tests(self):
+        checks = []
+        def run(args, **kwargs):
+            if args[0] == 'git':
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            self.assertIn('--check-sandbox', args, 'worktree test ran on an unavailable host')
+            checks.append(args)
+            return SimpleNamespace(returncode=78, stdout='', stderr='sealed-run: OS isolation unavailable; runtime launch failed\n')
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run):
+            outcome = unittest.TestResult(); SealedRunnerTests('test_isolation_probes').run(outcome)
+        self.assertFalse(outcome.failures or outcome.errors, str(outcome.failures + outcome.errors))
+        self.assertFalse(outcome.skipped, 'unavailable host must prove a classifier hold')
+        self.assertGreaterEqual(len(checks), 2, 'availability and classifier must both check the real runner')
+
+    def test_working_sandbox_still_rejects_an_isolation_failure(self):
+        def run(args, **kwargs):
+            if args[0] == 'git' or '--check-sandbox' in args:
+                return SimpleNamespace(returncode=0, stdout='', stderr='')
+            return SimpleNamespace(returncode=1, stdout='', stderr='outside write allowed')
+        with mock.patch.object(sys, 'platform', 'darwin'), mock.patch.object(os, 'access', return_value=True), mock.patch.object(subprocess, 'run', side_effect=run):
+            outcome = unittest.TestResult(); SealedRunnerTests('test_isolation_probes').run(outcome)
+        self.assertTrue(outcome.failures)
+        self.assertFalse(outcome.skipped)
+
+    def test_unavailable_classifier_approval_mutant_is_rejected(self):
+        with mock.patch.object(classifier, 'sealed_runner', return_value=True):
+            outcome = unittest.TestResult(); SealedRunnerTests('test_unavailable_host_asserts_hold_without_running_tests').run(outcome)
+        self.assertTrue(outcome.failures, 'unavailable runtime was auto-approved')
+
+    def test_priority_failure_does_not_abort_or_hide_test_exit(self):
+        source = (SCRIPTS / 'sealed-run.sh').read_text()
+        import re
+        match = re.search(r"/bin/bash -p -c '([^']*)' sealed-run", source)
+        self.assertIsNotNone(match, 'priority must be best effort inside the launcher')
+        with tempfile.TemporaryDirectory(prefix='.priority-proof-', dir=ROOT) as d:
+            stub = Path(d) / 'renice'; marker = Path(d) / 'called'
+            stub.write_text('#!/bin/sh\nprintf called > ' + shlex.quote(str(marker)) + '\nexit 71\n'); stub.chmod(0o755)
+            script = match.group(1).replace('/usr/bin/renice', '"$OSRC_TEST_PRIORITY"')
+            result = subprocess.run(['/bin/bash', '-p', '-c', script, 'sealed-run', '/bin/sh', '-c', 'echo test-ran; exit 23'],
+                                    env=dict(os.environ, OSRC_TEST_PRIORITY=str(stub)), capture_output=True, text=True)
+            self.assertTrue(marker.exists())
+            self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+            self.assertIn('test-ran', result.stdout)
+
+    def test_runner_reports_runtime_unavailable_before_worktree_execution(self):
+        with tempfile.TemporaryDirectory(prefix='.runtime-proof-', dir=ROOT) as d:
+            root = Path(d); tests = root / REL / 'tests'; tests.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', d], check=True)
+            test = tests / 'probe.sh'; test.write_text('echo must-not-run\n')
+            stub = root / 'sandbox-exec'; calls = root / 'calls'
+            stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> ' + shlex.quote(str(calls)) + '''
+case " $* " in *"/usr/bin/python3 -I -c"*) echo 'runtime cannot start' >&2; exit 71 ;; esac
+exit 0
+'''); stub.chmod(0o755)
+            runner = root / 'sealed-run.sh'; source = (SCRIPTS / 'sealed-run.sh').read_text()
+            source = source.replace('case "$(uname -s)" in', 'case Darwin in')
+            source = source.replace('Darwin) [ -x /usr/bin/sandbox-exec ] && isolation=mac ;;', 'Darwin) isolation=mac ;;')
+            source = source.replace('developer="$(/usr/bin/env -u DEVELOPER_DIR /usr/bin/xcode-select -p 2>/dev/null)" || exit 2', 'developer=/Library/Developer/CommandLineTools')
+            source = source.replace('/usr/bin/sandbox-exec -f', shlex.quote(str(stub)) + ' -f')
+            runner.write_text(source)
+            for args in [ ['--check-sandbox'], [str(test.relative_to(root))] ]:
+                with self.subTest(args=args):
+                    result = subprocess.run(['/bin/bash', '-p', str(runner)] + args, cwd=root,
+                                            env=dict(os.environ, HOME=d, OSRC_HOME=str(root / 'osrc')), capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+                    self.assertIn('sealed-run: OS isolation unavailable', result.stderr)
+            self.assertNotIn(str(test), calls.read_text())
+
     def test_trust_guard_mutant_is_rejected(self):
         with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
             outcome = unittest.TestResult()
@@ -114,7 +182,10 @@ class SealedRunnerTests(unittest.TestCase):
         if not os.access(tool, os.X_OK):
             if sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true':
                 self.fail('Linux CI requires working /usr/bin/bwrap for runtime proof')
-            self.skipTest('OS isolation tool unavailable')
+            cmd = shlex.quote(str(SCRIPTS / 'sealed-run.sh')) + ' ' + str(REL / 'tests/test_approver_table.sh')
+            with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
+                self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(ROOT), [str(ROOT)])[0])
+            return
         with tempfile.TemporaryDirectory(prefix='.sealed-proof-', dir=str(ROOT)) as temp:
             home = Path(temp) / 'home'
             root = home / 'project'
@@ -147,9 +218,18 @@ print("isolated")
             sh = scripts / 'tests/probe.sh'
             sh.write_text('#!/bin/bash\nexec /usr/bin/python3 "' + str(py) + '" "' + str(secret) + '" "' + str(outside) + '"\n')
             env = dict(os.environ, HOME=str(home), OSRC_HOME=str(home / 'osrc'))
+            available = subprocess.run([str(scripts / 'sealed-run.sh'), '--check-sandbox'], cwd=root, env=env, capture_output=True, text=True)
+            if available.returncode != 0:
+                if sys.platform == 'linux' and os.environ.get('CI', '').lower() == 'true':
+                    self.fail('Linux CI requires working bwrap: ' + available.stdout + available.stderr)
+                self.assertEqual(available.returncode, 78, available.stdout + available.stderr)
+                self.assertIn('sealed-run: OS isolation unavailable', available.stderr)
+                cmd = shlex.quote(str(SCRIPTS / 'sealed-run.sh')) + ' ' + str(REL / 'tests/probe.sh')
+                with mock.patch.object(classifier, 'trusted_sealed_runner', return_value=True):
+                    self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(root), [str(root)])[0])
+                self.assertFalse(outside.exists())
+                return
             result = subprocess.run([str(scripts / 'sealed-run.sh'), str((REL / 'tests/probe.sh'))], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if sys.platform == 'darwin' and 'sandbox_apply: Operation not permitted' in result.stderr:
-                self.skipTest('nested macOS sandbox is unavailable: sandbox_apply denied')
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('isolated', result.stdout)
             self.assertFalse(outside.exists())
