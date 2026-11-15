@@ -16,14 +16,46 @@ _osrc_hub_derived_name() {
     [ -n "$name" ] && { printf '%s (%s)' "$name" "${sid:0:8}"; return; }
   done
   if [ -n "$common" ] && [ "$conflict" = 0 ]; then printf '%s (%s)' "${common##*/}" "${sid:0:8}"; return; fi
+  prompt="$(_osrc_hub_prompt_name "$sid")"
+  [ -n "$prompt" ] && { printf '%s' "$prompt"; return; }
+  printf 'Session %.8s' "$sid"
+}
+
+# jq: a first prompt as a readable name (MC2 r2 #3). Chat noise goes ("[Image #1]", "[Pasted text #2 +40
+# lines]", <pasted_content>/<command-*> wrappers, leading slash commands), whitespace collapses, and a long
+# prompt is cut at a word boundary with an ellipsis.
+_OSRC_HUB_NAME_JQ='def clean: gsub("<command-(name|message)>[^<]*</command-(name|message)>"; " ") | gsub("<[^>]*>"; " ")
+  | gsub("\\[(Image|Pasted text)[^\\]]*\\]"; " ") | gsub("\\s+"; " ") | sub("^ "; "") | sub("^(/[A-Za-z0-9:_.-]+ ?)+"; "") | sub(" $"; "");
+def short($n): if length <= $n then . else .[0:$n] as $c | ($c | sub(" [^ ]*$"; "")) as $w
+  | (if ($w | length) >= ($n / 2) then $w else $c end) | sub("[ ,;:.-]+$"; "") + "…" end;'
+
+# _osrc_hub_prompt_name <sid> -> cleaned custom title or first real prompt of the Claude transcript, or "".
+# Transcripts run to 100+ MB, so it never parses one whole: grep pulls the few lines it needs, and the
+# result is cached per session id in $OSRC_HOME/hub/names/<sid> ("<size> <name>"). Transcripts only grow,
+# so an unchanged size means an unchanged transcript (MC2 r2 #4).
+_osrc_hub_prompt_name() {
+  local sid="$1" f c name='' t sz line
+  case "$sid" in ''|.*|*/*) return 0 ;; esac
+  c="$OSRC_HOME/hub/names/$sid"
   for f in "$HOME"/.claude/projects/*/"$sid".jsonl; do
     [ -f "$f" ] || continue
-    prompt="$(jq -r 'select((.customTitle // "") != "") | .customTitle' "$f" 2>/dev/null | tail -1)"
-    [ -n "$prompt" ] || prompt="$(jq -r 'select(.type == "user") | .message.content | if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join(" ")) else empty end' "$f" 2>/dev/null | head -1)"
-    prompt="$(printf %s "$prompt" | tr '\n\r' '  ' | cut -c1-48)"
-    [ -n "$prompt" ] && { printf '%s' "$prompt"; return; }
+    sz="$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)"
+    if [ -n "$sz" ] && [ -f "$c" ] && [ ! -L "$c" ]; then
+      IFS= read -r line < "$c" 2>/dev/null || true
+      [ "${line%% *}" = "$sz" ] && [ -n "${line#* }" ] && { printf '%s' "${line#* }"; return 0; }
+    fi
+    t="$(grep -F '"customTitle"' "$f" 2>/dev/null | tail -1)"
+    [ -z "$t" ] || name="$(jq -r "$_OSRC_HUB_NAME_JQ"' (.customTitle // "") | clean | short(48)' <<<"$t" 2>/dev/null)"
+    [ -n "$name" ] || name="$(grep -m 40 -E '"type": ?"user"' "$f" 2>/dev/null | jq -rn "$_OSRC_HUB_NAME_JQ"'
+      first(inputs | select(.type == "user" and ((.isMeta // false) | not)) | .message.content
+        | (if type == "string" then . elif type == "array" then ([.[] | select(.type == "text") | .text] | join(" ")) else "" end)
+        | clean | select(length > 0 and (startswith("Caveat:") | not)) | short(48)) // empty' 2>/dev/null)"
+    if [ -n "$name" ]; then
+      mkdir -p "$OSRC_HOME/hub/names" 2>/dev/null && [ ! -L "$c" ] && printf '%s %s\n' "$sz" "$name" > "$c.$$" 2>/dev/null && mv -f "$c.$$" "$c" 2>/dev/null
+      printf '%s' "$name"; return 0
+    fi
   done
-  printf 'Session %.8s' "$sid"
+  return 0
 }
 
 _osrc_hub_daily_hint() {
