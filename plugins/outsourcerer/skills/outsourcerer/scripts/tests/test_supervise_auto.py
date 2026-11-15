@@ -9,6 +9,7 @@ import unittest
 MODULE = Path(__file__).resolve().parents[1] / 'lib/supervise.sh'
 ROOT = Path(subprocess.check_output(['git', '-C', str(MODULE.parent), 'rev-parse', '--show-toplevel'], text=True).strip())
 SH = r'''
+. "$(dirname "$1")/atomic-claim.sh"
 . "$1"
 OSRC_HOME="$2"; export OSRC_HOME
 _osrc_self() { printf osrc; }
