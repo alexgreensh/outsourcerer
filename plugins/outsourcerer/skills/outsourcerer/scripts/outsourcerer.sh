@@ -11442,6 +11442,7 @@ cmd_bg() {
     case "$_a" in
       -m|--model|--tier|--with|--perm|--account|--cap|--trust-lane|--effort|--reasoning|--provider) _skipnext=1 ;;
       --perm=*|--cap=*|--provider=*|--allow-downgrade|--force-lane|--spend-ok|--no-advise|--cloud-ack|--wait|--foreground) ;;
+      --) continue ;;                                       # separator: whatever follows is the task
       *) _sawtask=1; break ;;
     esac
   done

@@ -50,6 +50,12 @@ rest="${r#*|}"; n="${rest%%|*}"; msg="${rest#*|}"
 [ "$n" = "0" ] && ok "a flags-only invocation mints NO job dir" || bad "flags-only created $n job dir(s)"
 case "$msg" in *"no task text"*) ok "the error says the task is missing" ;; *) bad "unclear flags-only error"; esac
 
+# --- a bare `--` separator is not a task ------------------------------------------------------------
+r="$(try_bg run --)"
+rest="${r#*|}"; n="${rest%%|*}"; msg="${rest#*|}"
+[ "$n" = "0" ] && ok "bg run -- with nothing after it mints NO job dir" || bad "bg run -- created $n job dir(s)"
+case "$msg" in *"no task text"*) ok "bg run -- says the task is missing" ;; *) bad "unclear bare-separator error: $msg"; esac
+
 # --- -m before the verb: the second most common caller mistake -------------------------------------
 # This used to die with "unknown subcommand '-m'". It is unambiguous, so it must be ACCEPTED, not
 # refused: refusing it costs a whole round trip to teach the caller our argument order.
