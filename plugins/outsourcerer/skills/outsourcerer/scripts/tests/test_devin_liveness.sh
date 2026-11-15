@@ -248,7 +248,7 @@ fi
 
 # NEGATIVE CONTROL: with the liveness signal off, the same silent job hits the deadline.
 jd5="$TMP/jobs/job-noinit-ctl"; mkdir -p "$jd5"
-printf '{"verb":"explore","cwd":"%s"}\n' "$WORK" > "$jd5/meta.json"
+printf '{"verb":"explore","lane":"dv","cwd":"%s"}\n' "$WORK" > "$jd5/meta.json"
 OSRC_DEVIN_LIVENESS=0 OSRC_NOINIT_SECS=3 OSRC_POLL=1 _supervise "$jd5" 30 45 60 -- bash "$TMP/silent_alive.sh" >/dev/null 2>&1
 grep -aq '^no-init' "$jd5/reason" 2>/dev/null \
   && ok "control: no-init still fires with OSRC_DEVIN_LIVENESS=0" \
