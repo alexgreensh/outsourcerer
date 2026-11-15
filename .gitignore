@@ -53,3 +53,5 @@ plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
 
 # Local scratch for agents
 .context/
+.osrc-sealed.*
+.evidence-*

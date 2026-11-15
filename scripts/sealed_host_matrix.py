@@ -9,14 +9,16 @@ from pathlib import Path
 import platform
 import re
 import signal
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'plugins/outsourcerer/skills/outsourcerer/scripts'
 TESTS = SCRIPTS / 'tests'
 AGENTS = 'tmux claude devin codex agy droid gemini cursor-agent hermes cline pi agent warp ollama opencode grok composer'
-PYTHON_SUITES = ('test_sealed_runner', 'test_sandbox_final', 'test_lean_launch',
+PYTHON_SUITES = ('test_sealed_runner', 'test_sealed_fixes', 'test_sandbox_final', 'test_lean_launch',
                  'test_review_packet', 'test_review_lifecycle', 'test_shell_scratch')
 MODES = ('direct', 'sealed', 'python')
 
@@ -27,6 +29,15 @@ class MatrixInterrupted(Exception):
 
 
 def stop_owned(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    # The leader may exit while a descendant ignores TERM.
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -48,6 +59,52 @@ def run(command, directory, env, output, timeout):
         except BaseException:
             stop_owned(process)
             raise
+        finally:
+            # This directory belongs only to this suite. Kill the group first,
+            # including on interruption, then remove even SIGKILL leftovers.
+            scratch = Path(env['TMPDIR'])
+            for owned in scratch.glob('.osrc-sealed.*'):
+                if owned.is_dir() and not owned.is_symlink():
+                    shutil.rmtree(owned)
+
+
+def direct_command(command, bindir, agent_paths=None):
+    """Keep direct test semantics, but deny installed agent binaries by full path."""
+    paths = set()
+    for agent in AGENTS.split():
+        installed = shutil.which(agent)
+        if installed:
+            paths.add(Path(installed).absolute())
+        for base in ('/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin'):
+            path = Path(base) / agent
+            if path.exists():
+                paths.add(path)
+    paths.update(Path(path) for path in (agent_paths or []))
+    paths.update(path.resolve() for path in list(paths))
+    if platform.system() == 'Darwin' and Path('/usr/bin/sandbox-exec').exists():
+        profile = bindir / 'direct.sb'
+        profile.write_text('(version 1)\n(allow default)\n' + ''.join(
+            '(deny process-exec file-read-data (literal %s))\n' % json.dumps(str(path)) for path in sorted(paths)))
+        return ['/usr/bin/sandbox-exec', '-f', str(profile)] + command
+    if platform.system() == 'Linux' and Path('/usr/bin/bwrap').exists():
+        argv = ['/usr/bin/bwrap', '--die-with-parent', '--new-session', '--unshare-user',
+                '--cap-drop', 'ALL', '--bind', '/', '/']
+        stub = bindir / 'denied-agent'
+        stub.write_text('#!/bin/sh\necho "MATRIX_DENIED: real agent" >&2\nexit 99\n')
+        stub.chmod(0o755)
+        for path in sorted(paths):
+            argv += ['--ro-bind', str(stub), str(path)]
+        return argv + ['--'] + command
+    raise RuntimeError('MATRIX_DENIED: OS guard unavailable for absolute agent paths')
+
+
+def suite_scratch():
+    base = Path(tempfile.gettempdir()).resolve()
+    if base == ROOT or ROOT in base.parents:
+        base = Path('/tmp').resolve()
+    if base == ROOT or ROOT in base.parents:
+        raise RuntimeError('no scratch directory outside checkout')
+    return tempfile.TemporaryDirectory(prefix='sealed-suite-', dir=base)
 
 
 def matrix_markdown(rows):
@@ -111,6 +168,7 @@ def main():
     parser.add_argument('--mode', choices=('direct', 'sealed', 'both', 'python', 'all'), default='all',
                         help='run only selected modes; all also includes focused Python checks')
     parser.add_argument('--list', action='store_true', help='list selected mode/suite pairs without running')
+    parser.add_argument('--out', type=Path, help='evidence parent directory (default: TMPDIR)')
     parser.add_argument('--include-slow', action='store_true', help='Linux integration only')
     parser.add_argument('--timeout', '--suite-timeout', type=float, default=300,
                         help='seconds per suite process group (default: 300); timeout rc is 124')
@@ -137,7 +195,9 @@ def main():
         for path, mode in tasks:
             print(mode + '\t' + str(path.relative_to(ROOT)))
         return 0
-    proof = ROOT / '.evidence-L14c' / ('host-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
+    parent = (args.out or Path(tempfile.gettempdir())).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    proof = Path(tempfile.mkdtemp(prefix='sealed-matrix-' + datetime.now().strftime('%Y%m%d-'), dir=parent))
     bindir = proof / 'bin'
     bindir.mkdir(parents=True)
     for agent in AGENTS.split():
@@ -154,10 +214,11 @@ def main():
     def record(path, mode):
         timeout = overrides.get(path.name, args.timeout)
         directory = proof / mode / path.name
-        for name in ('home', 'state', 'tmp'):
+        for name in ('home', 'state'):
             (directory / name).mkdir(parents=True)
+        runtime = suite_scratch()
         env = {'HOME': str(directory / 'home'), 'OSRC_HOME': str(directory / 'state'),
-               'TMPDIR': str(directory / 'tmp') + '/', 'OSRC_HEARTBEAT_DISABLED': '1',
+               'TMPDIR': runtime.name + '/', 'OSRC_HEARTBEAT_DISABLED': '1',
                'PYTHONDONTWRITEBYTECODE': '1',
                'PATH': str(bindir) + ':/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin'}
         if mode == 'sealed':
@@ -167,12 +228,19 @@ def main():
         output = directory / 'output.log'
         interrupted = None
         try:
+            if mode != 'sealed':
+                command = direct_command(command, bindir)
             rc = run(command, ROOT, env, output, timeout)
+        except RuntimeError as error:
+            output.write_text(str(error) + '\n')
+            rc = 78
         except MatrixInterrupted as error:
             interrupted = error
             rc = 128 + error.signum
+        finally:
+            runtime.cleanup()
         body = output.read_text(errors='replace')
-        failures = len(re.findall(r'^\s*(?:FAIL(?:ED)?[: :]|not ok\b)', body, re.M))
+        failures = len(re.findall(r'^\s*(?:FAIL(?:ED)?(?:[:\s]|$)|not ok\b)', body, re.M))
         notes = sorted(set(re.findall(r'^.*(?:SKIP:|sandbox denies|unsupported suite:|denied capability:|MATRIX_DENIED:|MATRIX_TIMEOUT:|OS isolation unavailable|shell scratch unavailable).*$', body, re.M)))
         if interrupted:
             notes.append('interrupted by ' + signal.Signals(interrupted.signum).name)

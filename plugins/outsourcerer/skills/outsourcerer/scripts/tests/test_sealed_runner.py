@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused classifier and sandbox boundary checks; all scratch stays in the worktree."""
+"""Focused classifier and sandbox boundary checks with private scratch."""
 import importlib.util
 import io
 import os
@@ -319,12 +319,22 @@ try:
  pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")
 except OSError as e:
  if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EROFS): raise
+if sys.platform == 'darwin':
+ import ctypes, os
+ libc = ctypes.CDLL(None, use_errno=True)
+ mib = (ctypes.c_int * 3)(1, 49, os.getppid())
+ size = ctypes.c_size_t(65536)
+ data = ctypes.create_string_buffer(size.value)
+ rc = libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0)
+ if rc != -1 or ctypes.get_errno() not in (errno.EPERM, errno.EACCES):
+  raise SystemExit("parent process args readable")
+ print("process args denied")
 s=socket.socket()
 try:
  s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")
 except OSError as e:
  allowed = (errno.EPERM, errno.EACCES)
- if sys.platform == 'linux': allowed += (errno.ENETUNREACH, errno.ECONNREFUSED)
+ if sys.platform == 'linux': allowed += (errno.ENETUNREACH,)
  if e.errno not in allowed: raise
 print("isolated")
 ''')
@@ -350,7 +360,9 @@ if (printf bad > /dev/fd/4) 2>/dev/null; then
   echo 'read-only descriptor upgraded to write'; exit 1
 fi
 exec 4<&-
-cd "$scratch"
+# A suite may enter the checkout for reads, but Bash 3.2 here-documents use
+# cwd, ignoring TMPDIR. Keep each here-document block in a scratch subshell.
+(cd "$scratch" || exit 1
 printf 'pipe proof' | cat > "$TMPDIR/pipe-proof"
 [ "$(cat "$TMPDIR/pipe-proof")" = 'pipe proof' ]
 value="$(cat <<'PROBE'
@@ -374,6 +386,7 @@ assert pathlib.Path(name).resolve().is_relative_to(scratch), name
 assert len(os.read(3, 80000)) == 70001
 print("large here-document scratch:", name)
 '
+)
 if (printf bad > ''' + shlex.quote(str(real_home_write)) + ''') 2>/dev/null; then
   echo 'real HOME write allowed'; exit 1
 fi
@@ -418,7 +431,10 @@ echo 'process metadata readable'
 ''')
             process = subprocess.run([str(scripts / 'sealed-run.sh'), str(process_test.relative_to(root))],
                                      cwd=root, env=env, capture_output=True, text=True)
-            self.assertIn(process.returncode, (0, 77), process.stdout + process.stderr)
+            if sys.platform == 'linux':
+                self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+            else:
+                self.assertIn(process.returncode, (0, 77), process.stdout + process.stderr)
             if process.returncode == 77:
                 self.assertIn('requires process-inspection', process.stderr)
             else:

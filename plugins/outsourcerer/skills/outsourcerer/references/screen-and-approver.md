@@ -103,6 +103,25 @@ worktree-writable runner is held because it can be replaced before execution. Wi
 tool, a person can choose the explicit `--allow-unisolated` form.
 A probe taking longer than 10 seconds also falls back to HOLD.
 
+On macOS, suites declaring `process-inspection` are refused with exit 77, including
+manual `--allow-unisolated` runs. Apple's `/bin/ps` is setuid, and macOS kills a
+copied `ps`; copying it into scratch does not provide a safe process reader. Run
+these suites on Linux, where the private process namespace supports the probe.
+The macOS profile permits only named runtime sysctls and denies process arguments.
+
+Apple Bash 3.2 ignores `TMPDIR` for here-document files. The sealed launcher starts
+in scratch and denies Bash's system temporary folders. A suite that enters the
+read-only checkout must put subsequent here-document blocks in a scratch subshell:
+`(cd "$TMPDIR" || exit 1; ...)`. Keep checkout reads in the parent, and use absolute
+output paths inside that block. Arbitrary here-documents after `cd` into the checkout
+cannot be redirected by setting `TMPDIR`; the checkout remains read-only.
+
+`scripts/sealed_host_matrix.py --out <directory>` stores host evidence under that
+directory; the default is `TMPDIR`, with a unique `sealed-matrix-*` folder. Direct
+runs also use an OS guard to deny installed agents by absolute path. If the guard
+is unavailable they are refused. A timeout terminates the owned process group,
+then kills any remaining descendants and removes its sealed scratch.
+
 The classifier holds ordinary test and build commands because they execute worktree code.
 Only the exact protected `sealed-run.sh` command with relative `scripts/tests/*.sh` paths can
 run automatically. Its fresh HOME and environment, read-only worktree, scratch-only writes and

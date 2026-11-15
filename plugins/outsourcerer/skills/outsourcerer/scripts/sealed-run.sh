@@ -2,10 +2,46 @@
 # Run worktree tests with a fresh environment and OS isolation when available.
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin; export PATH
-root="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo 'sealed-run: not in a worktree' >&2; exit 2; }
-root="$(cd "$root" && pwd -P)" || exit 2
-git_common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || { echo 'sealed-run: git common directory unavailable' >&2; exit 2; }
-git_common="$(cd "$root" && cd "$git_common" && pwd -P)" || exit 2
+# Git's discovery must use this cwd, never a caller's repository/config overrides.
+for _git_var in ${!GIT_@}; do unset "$_git_var"; done
+unset _git_var
+# core.worktree in an external gitdir must not redefine the trusted checkout.
+root="$(/usr/bin/python3 -I -c 'import pathlib,sys
+cwd = pathlib.Path.cwd()
+for p in [cwd] + list(cwd.parents):
+    marker = p / ".git"
+    if marker.exists() or marker.is_symlink():
+        print(p); sys.exit(0)
+sys.exit(1)')" || { echo 'sealed-run: not in a worktree' >&2; exit 2; }
+git_root="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null)" || { echo 'sealed-run: invalid git checkout' >&2; exit 77; }
+git_root="$(cd "$git_root" && pwd -P)" || exit 77
+[ "$root" = "$git_root" ] || { echo 'sealed-run: git checkout root mismatch' >&2; exit 77; }
+git_common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || { echo 'sealed-run: git common directory unavailable' >&2; exit 77; }
+git_common="$(cd "$root" && cd "$git_common" && pwd -P)" || exit 77
+# A .git pointer is checkout-controlled. Only the repo itself or a registered
+# linked worktree may grant access to metadata outside the checkout.
+/usr/bin/python3 -I -c '
+import os, pathlib, pwd, sys
+root, common = map(pathlib.Path, sys.argv[1:3])
+home = pathlib.Path(sys.argv[3]).resolve()
+real_home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+if common in (home, real_home, root) or common in root.parents:
+    sys.exit(1)
+dotgit = root / ".git"
+if dotgit.is_dir() and not dotgit.is_symlink() and common == dotgit:
+    sys.exit(0)
+for backlink in (common / "worktrees").glob("*/gitdir"):
+    try:
+        target = pathlib.Path(backlink.read_text().strip())
+        gitdir = dotgit.read_text().strip()
+        if (target.is_absolute() and target.resolve() == dotgit and
+                gitdir.startswith("gitdir: ") and
+                (root / gitdir[8:]).resolve() == backlink.parent.resolve()):
+            sys.exit(0)
+    except OSError:
+        pass
+sys.exit(1)
+' "$root" "$git_common" "${HOME:-/}" || { echo 'sealed-run: untrusted git common directory' >&2; exit 77; }
 scripts="$root/plugins/outsourcerer/skills/outsourcerer/scripts"
 unisolated=0; check=0
 while [ "$#" -gt 0 ]; do
@@ -45,8 +81,18 @@ for test_path in ${tests[@]+"${tests[@]}"}; do
   done < "$test_path"
 done
 cd "$root" || exit 2
-t="$(mktemp -d "$root/.osrc-sealed.XXXXXXXX")" || exit 2
+scratch_base="$(cd / && /usr/bin/python3 -I -c 'import os,sys,tempfile
+root = sys.argv[1]
+base = os.path.realpath(tempfile.gettempdir())
+if os.path.commonpath([root, base]) == root:
+    base = os.path.realpath("/tmp")
+if os.path.commonpath([root, base]) == root:
+    sys.exit(1)
+print(base)' "$root")" || exit 2
+t="$(mktemp -d "$scratch_base/.osrc-sealed.XXXXXXXX")" || exit 2
 trap 'rm -rf "$t"' EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 mkdir -p "$t/bin" "$t/home" "$t/osrc" "$t/tmp" || exit 2
 agents='claude devin codex tmux agy droid gemini cursor-agent hermes cline pi agent warp ollama opencode grok composer'
 for v in $agents; do
@@ -92,7 +138,13 @@ q = lambda p: json.dumps(p)
 system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
 system.append(os.path.realpath(sys.argv[5]))
 with open(sys.argv[1], 'w') as f:
-    f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
+    f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow file-read-metadata)\n')
+    for name in ['hw.pagesize', 'hw.ncpu', 'hw.activecpu', 'hw.logicalcpu',
+                 'hw.logicalcpu_max', 'hw.physicalcpu', 'hw.physicalcpu_max',
+                 'hw.memsize', 'hw.optional.arm64', 'hw.machine', 'hw.model',
+                 'kern.osrelease', 'kern.ostype', 'kern.osversion', 'kern.argmax',
+                 'kern.hostname', 'kern.bootsessionuuid', 'sysctl.proc_translated']:
+        f.write('(allow sysctl-read (sysctl-name %s))\n' % q(name))
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
     # libignition opens / as an openat root before dyld can start any executable.
     f.write('(allow file-read* (literal "/"))\n')
@@ -137,7 +189,7 @@ PY
         done
       done
       /usr/bin/bwrap --die-with-parent --new-session --clearenv --unshare-user --cap-drop ALL --unshare-net --unshare-pid --unshare-ipc \
-        "${mounts[@]}" --tmpfs /tmp --tmpfs /run --dev /dev --proc /proc \
+        --tmpfs /tmp --tmpfs /run --dev /dev --proc /proc "${mounts[@]}" \
         --ro-bind "$root" "$root" --bind "$t" "$t" --remount-ro / \
         --remount-ro /tmp --remount-ro /run --remount-ro /dev --remount-ro /proc \
         --chdir "$t/tmp" -- "${cmd[@]}" || rc=$? ;;
@@ -149,8 +201,8 @@ PY
   elif [ "$test_path" = __OSRC_PROCESS_PROBE__ ]; then
     [ "$rc" = 0 ] || { echo "sealed-run: unsupported suite: requires process-inspection (sandbox reader rc=$rc)" >&2; exit 77; }
   elif [ "$rc" != 0 ]; then
-    [ "$rc" != 78 ] || rc=1
-    overall="$rc"
+    case "$rc" in 77|78) rc=1 ;; esac
+    [ "$overall" != 0 ] || overall="$rc"
   fi
 done
 exit "$overall"
