@@ -16,9 +16,9 @@ mkdir() { command mkdir -p "$@"; }
 mkdir "$TMP/control" && mkdir "$TMP/control" || { echo 'FAIL: lying mkdir control'; exit 1; }
 echo 'PASS: lying mkdir reports success twice'
 
-for mode in native perl shell; do
-  if [ "$mode" = perl ] && ! command -v perl >/dev/null 2>&1; then
-    echo 'SKIP: Perl is unavailable'; continue
+for mode in native python shell; do
+  if [ "$mode" = python ] && ! command -v python3 >/dev/null 2>&1; then
+    echo 'SKIP: Python is unavailable'; continue
   fi
   gate="$TMP/gate-$mode"; claim="$TMP/claim-$mode"
   command mkdir "$gate"
@@ -29,8 +29,8 @@ for mode in native perl shell; do
       if [ "$mode" != native ]; then
         command() {
           case "${1:-}:${2:-}" in
-            -v:python3) return 1 ;;
-            -v:perl) [ "$mode" != shell ] || return 1 ;;
+            -v:python3) [ "$mode" != shell ] || return 1 ;;
+            -v:perl) return 1 ;;
           esac
           builtin command "$@"
         }
@@ -48,3 +48,36 @@ for mode in native perl shell; do
   [ "$wins" = 1 ] || { echo "FAIL: $mode helper allowed $wins winners"; exit 1; }
   echo "PASS: $mode helper elects exactly one owner despite lying mkdir"
 done
+
+# An unavailable or broken interpreter must not turn an absent directory into
+# a false collision, and Python must not load code from the caller's directory.
+if command -v perl >/dev/null 2>&1; then
+  (
+    perl() { printf 'perl\n' >> "$TMP/order"; command perl "$@"; }
+    python3() { printf 'python\n' >> "$TMP/order"; return 1; }
+    _mkdir_claim "$TMP/perl-first" || exit 1
+    [ "$(cat "$TMP/order")" = perl ] || exit 1
+    ! _mkdir_claim "$TMP/perl-first" || exit 1
+    ! grep -q python "$TMP/order" || exit 1
+  ) || { echo 'FAIL: Perl was not preferred or an existing directory was claimed'; exit 1; }
+  echo 'PASS: working Perl is preferred and existing directories are refused'
+fi
+(
+  command() {
+    case "${1:-}:${2:-}" in -v:perl) return 1 ;; esac
+    builtin command "$@"
+  }
+  python3() { printf '%s\n' "${1:-}" >> "$TMP/python-args"; return 1; }
+  _mkdir_claim "$TMP/python-failed" || exit 1
+  [ "$(cat "$TMP/python-args")" = -I ] || exit 1
+  ! _mkdir_claim "$TMP/python-failed" || exit 1
+) || { echo 'FAIL: a broken Python did not safely fall back or was not isolated'; exit 1; }
+echo 'PASS: broken isolated Python falls back for a missing directory and refuses an existing one'
+(
+  perl() { printf 'perl\n' >> "$TMP/broken-order"; return 1; }
+  python3() { printf 'python %s\n' "${1:-}" >> "$TMP/broken-order"; return 1; }
+  _mkdir_claim "$TMP/both-failed" || exit 1
+  [ "$(cat "$TMP/broken-order")" = "$(printf 'perl\npython -I')" ] || exit 1
+  ! _mkdir_claim "$TMP/both-failed" || exit 1
+) || { echo 'FAIL: broken interpreters did not fall back in order'; exit 1; }
+echo 'PASS: broken Perl and Python fall back in order without claiming an existing directory'
