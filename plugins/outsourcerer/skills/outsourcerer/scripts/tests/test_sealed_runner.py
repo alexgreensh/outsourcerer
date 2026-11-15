@@ -319,16 +319,6 @@ try:
  pathlib.Path(outside).write_text("bad"); raise SystemExit("outside write allowed")
 except OSError as e:
  if e.errno not in (errno.EPERM, errno.EACCES, errno.ENOENT, errno.EROFS): raise
-if sys.platform == 'darwin':
- import ctypes, os
- libc = ctypes.CDLL(None, use_errno=True)
- mib = (ctypes.c_int * 3)(1, 49, os.getppid())
- size = ctypes.c_size_t(65536)
- data = ctypes.create_string_buffer(size.value)
- rc = libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0)
- if rc != -1 or ctypes.get_errno() not in (errno.EPERM, errno.EACCES):
-  raise SystemExit("parent process args readable")
- print("process args denied")
 s=socket.socket()
 try:
  s.connect(("127.0.0.1", 9)); raise SystemExit("network allowed")

@@ -138,13 +138,7 @@ q = lambda p: json.dumps(p)
 system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
 system.append(os.path.realpath(sys.argv[5]))
 with open(sys.argv[1], 'w') as f:
-    f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow file-read-metadata)\n')
-    for name in ['hw.pagesize', 'hw.ncpu', 'hw.activecpu', 'hw.logicalcpu',
-                 'hw.logicalcpu_max', 'hw.physicalcpu', 'hw.physicalcpu_max',
-                 'hw.memsize', 'hw.optional.arm64', 'hw.machine', 'hw.model',
-                 'kern.osrelease', 'kern.ostype', 'kern.osversion', 'kern.argmax',
-                 'kern.hostname', 'kern.bootsessionuuid', 'sysctl.proc_translated']:
-        f.write('(allow sysctl-read (sysctl-name %s))\n' % q(name))
+    f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
     # libignition opens / as an openat root before dyld can start any executable.
     f.write('(allow file-read* (literal "/"))\n')

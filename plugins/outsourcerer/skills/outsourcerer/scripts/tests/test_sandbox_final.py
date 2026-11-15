@@ -192,8 +192,7 @@ class SandboxFinal(unittest.TestCase):
         with mock.patch.object(Path, 'read_text', side_effect=PermissionError(errno.EACCES, 'denied')), \
                 mock.patch.object(Path, 'write_text', side_effect=OSError(errno.EROFS, 'read-only filesystem')), \
                 mock.patch.object(socket, 'socket') as sock, mock.patch.object(sys, 'argv', ['probe', '/secret', '/outside']), \
-                mock.patch.object(sys, 'stdout', new_callable=io.StringIO), \
-                mock.patch.object(sys, 'platform', 'linux'):
+                mock.patch.object(sys, 'stdout', new_callable=io.StringIO):
             sock.return_value.connect.side_effect = PermissionError(errno.EPERM, 'denied')
             try:
                 exec(compile(probe, 'readonly-probe', 'exec'), {})

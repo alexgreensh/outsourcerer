@@ -143,7 +143,7 @@ class SealedFixes(unittest.TestCase):
         args = result.stdout.splitlines()
         self.assertLess(args.index('--tmpfs'), args.index(str(self.root / '.git')))
 
-    def test_mac_profile_limits_sysctl_to_named_runtime_keys(self):
+    def test_mac_profile_keeps_host_proven_sysctl_rule(self):
         backend = self.base / 'sandbox-exec'
         backend.write_text('#!/bin/sh\ncat "$2"\n')
         backend.chmod(0o755)
@@ -157,9 +157,8 @@ class SealedFixes(unittest.TestCase):
         result = subprocess.run(['/bin/bash', '-p', str(self.runner), '--check-sandbox'],
                                 cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('(allow sysctl-read)', result.stdout)
-        self.assertIn('sysctl-name "hw.pagesize"', result.stdout)
-        self.assertNotIn('sysctl-name "kern.proc', result.stdout)
+        self.assertIn('(allow sysctl-read)', result.stdout)
+        self.assertNotIn('sysctl-name', result.stdout)
 
     def test_mac_profile_reads_external_scratch_without_reading_shared_tmp(self):
         generator = self.source.split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]

@@ -107,7 +107,13 @@ On macOS, suites declaring `process-inspection` are refused with exit 77, includ
 manual `--allow-unisolated` runs. Apple's `/bin/ps` is setuid, and macOS kills a
 copied `ps`; copying it into scratch does not provide a safe process reader. Run
 these suites on Linux, where the private process namespace supports the probe.
-The macOS profile permits only named runtime sysctls and denies process arguments.
+The macOS profile retains `(allow sysctl-read)`. Narrowing it to named runtime keys
+made Perl's alarm launcher fail with `panic: sysconf: Operation not permitted`
+(exit 29), refusing every sealed run even after here-documents worked. A host check
+on Alex's Mac (Darwin 27) found that inspecting other same-user processes exposed
+argv only, without their environment. Command-line arguments may therefore be
+readable. This is a measured compatibility decision for that host, not a guarantee
+about process environment access on every macOS version.
 
 Apple Bash 3.2 ignores `TMPDIR` for here-document files. The sealed launcher starts
 in scratch and denies Bash's system temporary folders. A suite that enters the
