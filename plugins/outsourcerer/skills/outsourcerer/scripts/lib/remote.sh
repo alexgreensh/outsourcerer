@@ -516,7 +516,7 @@ _osrc_lane_rm() {
   # exactly <id>-<sha7>: a bare "$id-*" glob would also hit lane "$id-other"
   for w in "$OSRC_HOME/remote/wt/$id"-$h7; do [ -e "$w" ] && rm -rf "$w"; done
   for w in "$OSRC_HOME/remote/$id"-$h7.check.log "$OSRC_HOME/remote/$id"-$h7.rc; do [ -e "$w" ] && rm -f "$w"; done
-  for d in "$OSRC_HOME"/owners/*/"$id"; do [ -f "$d" ] && rm -f "$d"; done
+  for d in "$OSRC_HOME"/owners/*/"$id"; do [ -f "$d" ] && rm -f "$d" && { type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$(basename "$(dirname "$d")")" "$id"; }; done
   type _osrc_review_lane_removed >/dev/null 2>&1 && _osrc_review_lane_removed "$id"
   echo "lane $id removed"
 }

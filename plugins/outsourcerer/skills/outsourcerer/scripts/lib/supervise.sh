@@ -600,6 +600,7 @@ _sv_main() { # <sid> <once> [ids...]
       if [ "$SV_DROP" = 1 ] && [ -z "$explicit" ]; then
         # keep the target in this batch's filter, drop it from the registry
         rm -f "$OSRC_HOME/owners/$sid/$id" 2>/dev/null
+        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id"   # listed as finished (MC3)
       fi
     done
     _sv_remote_poll supervise

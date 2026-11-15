@@ -22,6 +22,7 @@ _owner_record() { # <job-or-session-id>
   [ -n "$s" ] && [ -n "${1:-}" ] || return 0
   case "$1" in */*|.|..) return 0 ;; esac
   mkdir -p "$OSRC_HOME/owners/$s" 2>/dev/null && : > "$OSRC_HOME/owners/$s/$1" 2>/dev/null
+  type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$s" "$1"   # Mission Control remembers it (MC3)
   return 0
 }
 

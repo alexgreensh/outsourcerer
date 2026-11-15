@@ -136,7 +136,7 @@ button { font: inherit; color: inherit; }
 .stamp { font-family: var(--mono); font-weight: 700; background: var(--card); border-color: var(--edge); }
 .board-link { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: var(--ink); background: var(--card); border: 1.5px solid var(--edge); font-weight: 600; padding: 4px 14px; border-radius: 999px; }
 .board-link:hover { background: var(--hi); color: var(--on-hi); box-shadow: 3px 3px 0 var(--shadow); transform: translate(-1px, -1px); }
-.stats { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 16px; }
+.stats { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); gap: 16px; }
 .card { color: var(--ink); background: var(--card); border: 1.5px solid var(--edge); border-radius: 16px; padding: 20px; min-width: 0; }
 .stat { display: flex; flex-direction: column; gap: 10px; }
 .stat .k { font-weight: 600; font-size: 1rem; display: inline-flex; align-items: center; gap: 8px; }
@@ -157,7 +157,7 @@ button { font: inherit; color: inherit; }
 .lrow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px; border-radius: 10px; background: none; border: 0; text-align: left; width: 100%; cursor: default; }
 .lrow:hover { background: color-mix(in srgb, var(--ink) 9%, transparent); }
 .lrow .nm { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
-.lrow .nm > span:not(.hlogo):not(.paidtag) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrow .nm { flex-wrap: wrap; row-gap: 2px; } .lrow .nm > span:not(.hlogo):not(.paidtag) { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } /* MC3: the name never shrinks to one letter; a tag wraps under it */
 .lrow .lf { font-family: var(--mono); font-size: .78rem; font-weight: 700; text-align: right; white-space: nowrap; }
 .lrow .rn { grid-column: 2 / 4; font-size: .82rem; display: inline-flex; align-items: center; gap: 6px; }
 .lst, .psum { font-size: .8rem; font-weight: 700; } /* MC-10: the lane summary wears the stamp's type */
@@ -176,7 +176,7 @@ button { font: inherit; color: inherit; }
 .hlogo { width: 18px; height: 18px; flex: none; display: inline-flex; align-items: center; justify-content: center; color: var(--ink); }
 .hlogo svg, .hlogo img { width: 18px; height: 18px; display: block; }
 .hlogo img { border-radius: 4px; }
-.paidtag { flex: none; font-family: var(--mono); font-size: .75rem; font-weight: 700; padding: 0 6px; border-radius: 999px; border: 1.5px solid var(--down); color: var(--down); background: var(--down-bg); }
+.paidtag { flex: none; font-family: var(--mono); font-size: .75rem; font-weight: 700; padding: 0 6px; border-radius: 999px; border: 1.5px solid var(--edge); color: var(--ink); background: transparent; } /* MC3: neutral outline, not an error red */
 .big { font-family: var(--mono); font-weight: 700; font-size: clamp(3rem, 9vw, 4.5rem); line-height: 1; }
 .stat.wait { background: var(--hi-soft); border-color: var(--hi-line); }
 .mid { font-weight: 700; font-size: 1.6rem; line-height: 1.15; }
@@ -277,7 +277,7 @@ a.pill svg { width: 13px; height: 13px; }
 .tpn { font-weight: 700; font-size: 1rem; }
 .tpt { font-weight: 500; line-height: 1.35; }
 .tprow .go { padding: 6px 16px; white-space: nowrap; }
-.ptiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.ptiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; } /* MC3: cards size to content, no tall blank boxes */
 .ptiles.one { grid-template-columns: minmax(0, 1fr); }
 .ptile { display: flex; flex-direction: column; gap: 12px; cursor: pointer; }
 .ptile:hover { border-color: var(--ink); box-shadow: 4px 4px 0 var(--shadow); }
@@ -297,7 +297,7 @@ a.pill svg { width: 13px; height: 13px; }
 .pt-meta > span { display: inline-flex; align-items: center; gap: 6px; }
 .pt-meta .lst.stale { border-radius: 12px; } /* a pill on one line, a rounded box if a narrow tile wraps it */
 .pt-decs { list-style: none; margin: 0; padding: 10px 0 0; border-top: 1.5px solid var(--line); display: flex; flex-direction: column; gap: 2px; }
-.pt-decs .dbtn { padding: 6px 8px; font-size: .95rem; } .pt-lanes, .rlanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; } .pt-lanes { padding-top: 10px; border-top: 1.5px solid var(--line); } .pt-lanes li, .rlanes li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; font-size: .88rem; } .pt-lanes .lnn, .rlanes .lnn { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lnm { grid-column: 2; grid-row: 2; font-size: .78rem; opacity: .75; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lns, .rlanes .lns { justify-self: end; text-align: right; font-size: .8rem; white-space: nowrap; } .pt-lanes .lnd, .rlanes .lnd { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; background: transparent; } .ln-working .lnd { background: currentColor; } .ln-approval .lnd, .ln-question .lnd, .ln-limit .lnd { background: var(--hi); } .ln-failed .lnd { background: var(--dot-out); border-color: var(--dot-out); } .ln-idle .lnd, .ln-unknown .lnd { border-style: dashed; } .ln-approval .lns, .ln-question .lns, .ln-limit .lns, .ln-failed .lns { font-weight: 700; } .rlanes { padding: 0 6px 4px 28px; } .rlanes li { grid-template-columns: 8px minmax(0, 1fr); font-size: .78rem; } .rlanes .lnd { width: 8px; height: 8px; } .rlanes .lns { grid-column: 2; justify-self: start; text-align: left; opacity: .8; } /* MC2 r2 #5: live lanes on cards and in the rail */
+.pt-decs .dbtn { padding: 6px 8px; font-size: .95rem; } .pt-lanes, .rlanes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; } .pt-lanes { padding-top: 10px; border-top: 1.5px solid var(--line); } .pt-lanes li, .rlanes li { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; column-gap: 8px; align-items: center; font-size: .88rem; } .pt-lanes .lnn, .rlanes .lnn { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lnm { grid-column: 2; grid-row: 2; font-size: .78rem; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pt-lanes .lns, .rlanes .lns { justify-self: end; text-align: right; font-size: .8rem; white-space: nowrap; } .pt-lanes .lnd, .rlanes .lnd { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; background: transparent; } .ln-working .lnd { background: currentColor; } .ln-approval .lnd, .ln-question .lnd, .ln-limit .lnd { background: var(--hi); } .ln-failed .lnd { background: var(--dot-out); border-color: var(--dot-out); } .ln-idle .lnd, .ln-unknown .lnd { border-style: dashed; } .ln-approval .lns, .ln-question .lns, .ln-limit .lns, .ln-failed .lns { font-weight: 700; } .rlanes { padding: 0 6px 4px 28px; } .rlanes li { grid-template-columns: 8px minmax(0, 1fr); font-size: .78rem; } .rlanes .lnd { width: 8px; height: 8px; } .rlanes .lns { grid-column: 2; justify-self: start; text-align: left; font-weight: 500; } /* MC2 r2 #5: live lanes on cards and in the rail */
 .pt-more { align-self: flex-start; background: none; border: 0; padding: 4px 8px; font-weight: 600; font-size: .9rem; cursor: pointer; border-radius: 8px; text-decoration: underline; text-underline-offset: 3px; }
 .pt-more:hover { background: var(--thumb); }
 .pt-none { margin: 0; padding-top: 10px; border-top: 1.5px solid var(--line); display: inline-flex; align-items: center; gap: 8px; font-weight: 500; }
@@ -334,15 +334,16 @@ a.pill svg { width: 13px; height: 13px; }
   .tile .open { grid-column: 2; justify-self: start; }
   /* MC-7 #2: on Home the headline and the top-priority bar come before the rail list; the rest of Home follows it. */
   .app:has(.ph.home) .main { display: contents; --mi: clamp(48px, 9vw, 128px); } .app:has(.ph.home) .main > * { order: 3; margin-inline: var(--mi); }
-  .app:has(.ph.home) .main > .ph.home { order: 1; margin-top: 24px; } .app:has(.ph.home) .main > .toppri { order: 1; margin-top: 16px; }
+  .app:has(.ph.home) .main > .ph.home { order: 1; margin-top: 24px; } .app:has(.ph.home) .main > .toppri { order: 1; margin-top: 16px; } .app:has(.ph.home) .main > .glance { order: 1; margin-top: 16px; }
   .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
-  .app:has(.ph.home) .main > :nth-child(1 of :not(.ph, .toppri)) { border-top: 1.5px solid var(--edge); margin: 16px 0 0; padding: 32px var(--mi) 0; }
+  .app:has(.ph.home) .main > :nth-child(1 of :not(.ph, .toppri, .glance)) { border-top: 1.5px solid var(--edge); margin: 16px 0 0; padding: 32px var(--mi) 0; }
   .app:has(.ph.home) .main > :last-child { margin-bottom: 40px; } .app:has(.ph.home) .main > .foot { margin-top: 16px; }
   .app:has(.ph.home) .rail-mid > h2:nth-of-type(2), .app:has(.ph.home) .rail-mid > .llist { order: 4; } .app:has(.ph.home) .credits { order: 5; }
 }
 @media (max-width: 700px) { .app:has(.ph.home) .main { --mi: 16px; } }
 @media (prefers-reduced-motion: no-preference) { .bar > span { transition: width .6s ease; } .star, .board-link { transition: transform .15s, box-shadow .15s; } }
 </style>
+<link rel="stylesheet" href="assets/hub-mc3.css">
 
 <div class="app">
   <aside class="rail" aria-label="Projects">
@@ -374,7 +375,7 @@ a.pill svg { width: 13px; height: 13px; }
     <div class="plist" id="plist"><p id="plist-empty">Loading your projects…</p></div>
     <div id="shipwrap" hidden><h2><button type="button" class="lfold" id="sfold" aria-expanded="false" aria-controls="slist"><i data-lucide="chevron-right" class="chev"></i><span>Shipped</span></button><span class="mono" id="scount"></span></h2>
     <div class="plist" id="slist" hidden></div></div>
-    <h2><button type="button" class="lfold" id="lfold" aria-expanded="false" aria-controls="llist"><i data-lucide="chevron-right" class="chev"></i><span>Lanes and limits</span></button><span class="mono lst" id="lstamp"></span></h2>
+    <h2><button type="button" class="lfold" id="lfold" aria-expanded="false" aria-controls="llist"><i data-lucide="chevron-right" class="chev"></i><span>Your plans</span></button><span class="mono lst" id="lstamp"></span></h2>
     <div class="llist" id="llist"><p class="lnone">No limits reported yet.</p></div>
     </div>
     <div class="credits">
@@ -414,6 +415,7 @@ a.pill svg { width: 13px; height: 13px; }
     if (save) { try { localStorage.setItem('osrc-theme', v); } catch (e) {} }
   }
   let saved = 'light'; try { saved = localStorage.getItem('osrc-theme') || 'light'; } catch (e) {}
+  { const q = new URLSearchParams(location.search).get('theme'); if (q === 'light' || q === 'dark') saved = q; }   // ?theme=dark: shareable, and how the screenshots are taken
   setTheme(saved, false);
   document.getElementById('t-light').addEventListener('click', () => setTheme('light', true));
   document.getElementById('t-dark').addEventListener('click', () => setTheme('dark', true));
@@ -425,9 +427,9 @@ a.pill svg { width: 13px; height: 13px; }
   const ORDER = ['Critical', 'High', 'Medium', 'Low'];
   const byWeight = (a, b) => ORDER.indexOf(a.weight) - ORDER.indexOf(b.weight);
   const pri = (w) => el('span', 'pri p-' + String(w || 'Medium').toLowerCase(), w || 'Medium');
-  const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused', idle: 'Idle' };
+  const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused', idle: 'Between lanes' };
   const stPill = (p) => { const w = openDecs(p).length; return el('span', 'pill' + (w ? ' st-wait' : p.status === 'paused' || p.status === 'shipped' ? ' st-' + p.status : ''), w ? 'Waiting on you' : STATUS_TXT[p.status] || 'Building'); };   // tile and hover card share one pill (MC-7 #5)
-  let projects = [], answers = {}, limits = [], db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false;  // drafts: hub-decide.js (MC-4)
+  let projects = [], answers = {}, limits = [], also = [], alsoSig = '', db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false;  // drafts: hub-decide.js (MC-4)
   // ---- data adapter: artifact db (window.claude) or local API (hub serve) ----
   let mode = 'none', pullErr = '', unsubs = [];
   const TOKEN = (() => { try { const t = new URLSearchParams(location.search).get('t') || ''; if (t) { sessionStorage.setItem('osrc-hub-t', t); try { const u = new URL(location.href); u.searchParams.delete('t'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e2) {} } return t || sessionStorage.getItem('osrc-hub-t') || ''; } catch (e) { return ''; } })();
@@ -453,7 +455,7 @@ a.pill svg { width: 13px; height: 13px; }
   function applyLimits(snap) {
     const s = sig(snap); if (s === sigL) return; sigL = s;
     limits = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).sort((a, b) => (a.order || 99) - (b.order || 99));
-    renderLimits(); paint(); keepHover();
+    renderLimits(); if (!current) pollRender(); paint(); keepHover();   // Home's plans tile reads limits (MC3)
   }
   function applyAnswers(snap) {
     const s = sig(snap); if (s === sigA) return; sigA = s;
@@ -474,6 +476,7 @@ a.pill svg { width: 13px; height: 13px; }
     async function pull(name) {
       const data = name === 'answers' ? await api('/api/answers') : await api('/api/projects');
       if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }   // startup export still running: stay on "Loading", ask again (MC-8)
+      if (name === 'projects') { const a = JSON.stringify(Array.isArray(data.also) ? data.also : []); if (a !== alsoSig) { alsoSig = a; also = JSON.parse(a); sigP = ''; } }   // MC3 "Also running" rides in the export
       const snap = { docs: docsFor(name, data) };
       subs[name].slice().forEach((cb) => { try { cb(snap); } catch (e) { try { console.error('hub render (' + name + ')', e); } catch (e2) {} } });
     }
@@ -684,7 +687,7 @@ a.pill svg { width: 13px; height: 13px; }
     $('shipwrap').hidden = !done.length; $('scount').textContent = done.length ? String(done.length) : '';
     const sopen = shipOpen() || done.some((p) => p.id === current); $('sfold').setAttribute('aria-expanded', String(sopen)); slist.hidden = !sopen;
     if (projects.length && !live.length) list.appendChild(el('p', null, 'Nothing building right now.'));
-    if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'No projects reported yet. An orchestrator adds its project when it starts a build.' : 'Sign in on claude.ai to see your projects.'))); return; }
+    if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'Nothing running. A project appears here when a Claude Code session hands work to Outsourcerer.' : 'Sign in on claude.ai to see your projects.'))); return; }
     projects.forEach((p) => {
       const box = el('div', 'proj' + (current === p.id ? ' on' : ''));
       const b = el('button', 'pbtn'); b.type = 'button'; b.id = 'p-' + p.id;
@@ -755,8 +758,9 @@ a.pill svg { width: 13px; height: 13px; }
     // Newest working-row updatedAt decides both the stamp text and its stale
     // state — sorting HH:MM strings goes wrong across midnight (finding 5).
     const at = Math.max(...working.map((l) => Date.parse(l.updatedAt || '') || 0));
-    const utcHM = (ms) => { const d = new Date(ms); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC'; };
-    const ls = $('lstamp'); ls.textContent = at > 0 ? 'Checked ' + utcHM(at) : '';
+    // MC3: one clock, the viewer's local time (Alex is UTC+2); never a UTC label.
+    const localHM = (ms) => (H && H.localStamp ? H.localStamp(ms) : new Date(ms).toTimeString().slice(0, 5));
+    const ls = $('lstamp'); ls.textContent = at > 0 ? 'Checked ' + localHM(at) : '';
     ls.dataset.at = at > 0 ? new Date(at).toISOString() : ''; ls.dataset.live = '1'; ls.dataset.rk = 'limits'; staleCheck();
     if (!open && !working.length) box.appendChild(el('p', 'lnone', 'Nothing has room right now.'));
     shown.forEach((l) => {
@@ -765,7 +769,7 @@ a.pill svg { width: 13px; height: 13px; }
       const nm = el('span', 'nm'); nm.append(el('span', null, l.name || l.id)); const billing = l.billing || (l.paid ? 'metered' : 'subscription'); if (billing === 'metered' || billing === 'unknown') { const tag = el('span', 'paidtag', billing === 'metered' ? 'pay per use' : 'plan not confirmed'); tag.title = billing === 'metered' ? 'Billed per use. Outsourcerer asks before every run.' : 'Outsourcerer could not confirm a plan login, so it asks before every run.'; nm.append(tag); }
       nm.prepend(hlogo(l));
       r.append(el('span', 'dot ' + st), nm, el('span', 'lf', l.left || LSTATE[st] || ''));
-      if (l.renews) { const rn = el('span', 'rn'); rn.append(ic('rotate-ccw'), document.createTextNode((st === 'ok' ? 'Renews ' : 'Back ') + l.renews)); r.append(rn); }
+      if (l.renews) { const rn = el('span', 'rn'); rn.append(ic('rotate-ccw'), document.createTextNode((st === 'ok' || st === 'low' ? 'Renews ' : 'Back ') + l.renews)); r.append(rn); }
       r.setAttribute('aria-label', (l.name || l.id) + ': ' + (LSTATE[st] || st) + (l.left ? ', ' + l.left : '') + (l.renews ? ', renews ' + l.renews : ''));
       pop(r, (c) => {
         const ht = el('div', 'ht'); ht.append(hlogo(l), document.createTextNode(l.name || l.id)); c.append(ht);
@@ -800,24 +804,23 @@ a.pill svg { width: 13px; height: 13px; }
     { const k = H && H.doneBtn(p, 'hdone-' + p.id); if (k) meta.append(k); }   // MC-7 #1: reachable by touch and keyboard
     // Stale alarm (past bug: boards sat on an old stamp for hours while work moved). Needs updatedAt (ISO).
     if (p.updated) { const st = el('p', 'stamp-top'); st.dataset.rk = 'project:' + p.id; st.dataset.at = p.updatedAt || ''; st.dataset.live = p.status === 'shipped' ? '' : '1';
-      st.append(ic('clock'), el('span', null, 'Updated ' + p.updated)); ph.append(st); }
+      st.append(ic('clock'), el('span', null, 'Updated ' + (H && H.localStamp && Date.parse(p.updatedAt || '') ? H.localStamp(Date.parse(p.updatedAt)) : p.updated))); ph.append(st); }
     ph.append(h1, el('p', 'lede', p.tagline || ''), meta);
     main.appendChild(ph);
     staleCheck();   // stamp must be in the DOM for querySelectorAll to find it
 
     const ds = openDecs(p);
     const stats = el('div', 'stats');
-    const s1 = el('div', 'card stat'); const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
-    s1.append(el('span', 'k', 'Done so far'), el('span', pctOk(p) ? 'big' : 'mid', pctOk(p) ? p.pct + '%' : 'Not reported yet'), bar); bar.hidden = !pctOk(p);
-    if (pctOk(p) && (p.lanes || []).length) s1.append(el('span', null, 'Average across ' + p.lanes.length + ' work tracks'));
-    if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = (p.pct || 0) + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = (p.pct || 0) + '%'; }); }
-    const s2 = el('div', 'card stat'); const k2 = el('span', 'k'); k2.append(ic('rocket'), document.createTextNode('Release goes live'));
-    s2.append(k2, el('span', 'mid', p.eta || 'Not set'));
-    if (p.freeze) { const fz = el('span'); fz.append(ic('snowflake'), document.createTextNode(' Code freeze '), el('b', 'mono', p.freeze)); s2.append(fz); }
-    if (p.etaNote) s2.append(el('span', null, p.etaNote));
-    const s3 = el('div', 'card stat' + (ds.length ? ' wait' : '')); const k3 = el('span', 'k'); k3.append(ic('hand'), document.createTextNode('Waiting on you'));
-    s3.append(k3, el('span', 'big', String(ds.length)), el('span', null, ds.length === 0 ? 'Nothing needs you' : ds.length === 1 ? 'decision, see below' : 'decisions, see below'));
-    stats.append(s1, s2, s3); main.appendChild(stats);
+    // MC3: only real numbers. A card with nothing reported is left out, never "Not set"; 4 cards go 2x2.
+    const cards = [], card = (k, cls) => { const c = el('div', 'card stat' + (cls || '')); c.append(k); cards.push(c); return c; }, key = (icn, t) => { const k = el('span', 'k'); if (icn) k.append(ic(icn)); k.append(document.createTextNode(t)); return k; };
+    if (pctOk(p)) { const bar = el('div', 'bar'), fill = el('span'); bar.appendChild(fill); card(key(null, 'Done so far')).append(el('span', 'big', p.pct + '%'), bar);
+      if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = p.pct + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = p.pct + '%'; }); } }
+    if (p.eta || p.freeze) { const s2 = card(key('rocket', 'Release goes live')); if (p.eta) s2.append(el('span', 'mid', p.eta));
+      if (p.freeze) { const fz = el('span'); fz.append(ic('snowflake'), document.createTextNode(' Code freeze '), el('b', 'mono', p.freeze)); s2.append(fz); } if (p.etaNote) s2.append(el('span', null, p.etaNote)); }
+    if (p.next) card(key('arrow-right', 'Next step')).append(el('span', null, p.next));
+    card(key('hand', 'Waiting on you'), ds.length ? ' wait' : '').append(el('span', 'big', String(ds.length)), el('span', null, ds.length === 0 ? 'Nothing needs you' : ds.length === 1 ? 'decision, see below' : 'decisions, see below'));
+    if (stats.style && stats.style.setProperty) stats.style.setProperty('--cols', String(cards.length === 4 ? 2 : cards.length));
+    cards.forEach((c) => stats.append(c)); main.appendChild(stats);
 
     const decSec = () => {
     if (ds.length || (p.decisions || []).length) {
@@ -944,7 +947,7 @@ a.pill svg { width: 13px; height: 13px; }
   // Home, Mark done and Refresh live in assets/hub-home.js (keeps this file under 1,000 lines).
   const H = typeof window.OSRC_HUB_HOME === 'function' ? window.OSRC_HUB_HOME({
     $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck,
-    get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
+    get projects() { return projects; }, get also() { return also; }, get limits() { return limits; }, LSTATE, hlogo, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
   const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null;

@@ -1,0 +1,27 @@
+/* Mission Control MC3 styles (glance strip, Also running, next step, finished lanes, empty state).
+   Lives outside hub.html so the page stays under the 1,000-line rule; served by `hub serve` from
+   /assets/hub-mc3.css (style-src 'self'). Tokens come from hub.html :root. */
+/* MC3: an odd last tile spans the row, so a 2-column grid never leaves an orphan cell. */
+.ptiles > .ptile:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.glance { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); gap: 16px; margin: 0; padding: 0; list-style: none; }
+.glance li { display: flex; flex-direction: column; gap: 4px; padding: 16px 18px; border: 1.5px solid var(--edge); border-radius: 16px; background: var(--card); box-shadow: 3px 3px 0 var(--shadow); min-width: 0; }
+.glance li.hot { background: var(--hi); color: var(--on-hi); }
+.glance .gv { font-weight: 700; font-size: 1.9rem; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.glance .gl { font-weight: 600; font-size: .95rem; }
+.glance .gs { font-size: .85rem; font-weight: 600; }
+@media (max-width: 720px) { .glance { grid-template-columns: minmax(0, 1fr); gap: 10px; } .glance li { display: grid; grid-template-columns: minmax(3.2em, auto) minmax(0, 1fr); column-gap: 14px; row-gap: 0; padding: 12px 16px; align-items: center; } .glance .gv { grid-row: span 2; font-size: 1.6rem; white-space: nowrap; } }
+.pt-next { margin: 0; font-size: .95rem; font-weight: 500; display: flex; gap: 8px; align-items: baseline; }
+.pt-next b { font-weight: 700; white-space: nowrap; }
+.pt-ended { margin: 0; font-size: .85rem; font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.also { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1.5px solid var(--edge); border-radius: 16px; background: var(--card); overflow: hidden; }
+.also li { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto auto; gap: 4px 14px; align-items: center; padding: 12px 18px; font-size: .92rem; }
+.also li + li { border-top: 1.5px solid var(--line); }
+.also .an { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.also .an b { font-weight: 700; }
+.also .am { font-size: .82rem; font-weight: 600; white-space: nowrap; }
+.also .as { font-size: .82rem; font-weight: 700; white-space: nowrap; text-align: right; }
+.also .as.waiting { background: var(--hi); color: var(--on-hi); border-radius: 999px; padding: 1px 10px; }
+.also .dot { width: 10px; height: 10px; }
+@media (max-width: 720px) { .also li { grid-template-columns: 12px minmax(0, 1fr) auto; } .also .an { white-space: normal; } .also .am { grid-column: 2 / -1; grid-row: 2; } .also .as { grid-row: 1; grid-column: 3; } }
+.empty-how { margin: 0; display: flex; flex-direction: column; gap: 8px; font-size: 1rem; }
+.empty-how code { font-family: var(--code); font-size: .9rem; background: var(--thumb); border-radius: 6px; padding: 2px 6px; }

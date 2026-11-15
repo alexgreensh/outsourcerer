@@ -132,6 +132,14 @@ empty when the viewer typed their own answer in `note` (one of the two always ca
 A half-typed answer survives every poll and re-render: the page keeps a per-decision draft
 (choice, text, focus, caret) and holds re-renders during IME composition and an in-flight send.
 
+## Reporting and who shows up (MC3)
+
+- **Who is on the page.** A Claude session becomes an orchestrator the first time it uses Outsourcerer (starts a lane, runs `supervise`, `session`, `bg`, `lane`, `review`, `wait`...; or `hub report`). Those commands and the per-turn stop-guard hook touch `$OSRC_HOME/hub/seen/<sid>/.beat`; the project stays listed while a beat, a report or its transcript is newer than `OSRC_HUB_ACTIVE_MIN` (30) minutes, between lanes included. Lanes that left the registry stay listed as finished for `OSRC_HUB_ENDED_HOURS` (12). A session that never touched Outsourcerer never appears; `tap`, `brief`, `limits` and `hub export` never register anyone, and nor do delegates (`OUTSOURCERER_DEPTH` > 0).
+- **`hub report`** (run from the orchestrator's own session; keyed by `CLAUDE_CODE_SESSION_ID`): `--status building|review|waiting|shipped`, `--pct 0-100`, `--eta "<text>"`, `--next "<one line>"`, `--name "<what a person calls it>"` (never a path, URL or id), `--ask "<question>" [--weight Critical|High|Medium|Low]` (adds open decision D<n>), `--done-ask D<n>`. Fields merge into `hub/projects/<sid>.json` / `hub/decisions/<sid>.json` with an atomic rename; text is cleaned to one line. Call it at milestones: start, each lane landed, review, waiting on Alex, shipped.
+- **Names.** A card's `--name` wins. Otherwise "<Project> · <title>": the project is the humanized repo or folder; the title is the transcript's last `custom-title` (/rename), else last `ai-title`, else last `agent-name` cleaned of `[cloud]`, `owner/` and id tokens, else the first prompt cut to ~6 words. Only the transcript tail is read.
+- **Also running.** Other Claude Code sessions (not orchestrators, not lanes) that are working, waiting on you, or wrote their transcript within `OSRC_HUB_ACTIVE_MIN`, from the fleet's peer observation (`_fleet_cc_peer_observations`). Read-only: nothing attaches to or sends to them. Export field `also`; cached `OSRC_HUB_ALSO_TTL` (30) s under `hub serve`.
+- **Renewals** read "in 4 days · Thu 19 Nov", "today · 18:40", "tomorrow · 09:10" (local time, 24h clock) in the page, the export and `lane summary`.
+
 ## Local mode (any browser)
 
 `outsourcerer hub serve [--port N] [--new-token]` runs the same page on

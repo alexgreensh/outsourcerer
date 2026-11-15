@@ -8,13 +8,19 @@
     const { $, el, ic, pri, paint, openDecs, byWeight, stPill } = ctx;
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
     const grown = new Set();   // a tile's bar animates the first time only; re-renders set it directly (MC-5 #4)
-    // Tiles use a short stamp (MC-5 #1): "12:57 UTC" today, "13 Nov" otherwise, from the project's real last change
+    // Tiles use a short stamp (MC-5 #1), local time (MC3), from the project's real last change
     // (updatedAt). The full stamp stays on the project page. Long stamps squeezed the bars and wrapped the stale pill.
     const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    // MC3: local time, never UTC. "23:00" today, "yesterday 23:00", else "Mon 16 Nov, 09:10".
+    const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    function localStamp(ms) {
+      const d = new Date(ms), pad = (n) => String(n).padStart(2, '0'), hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+      const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+      const diff = Math.round((day(new Date()) - day(d)) / 86400000);
+      return diff === 0 ? hm : diff === 1 ? 'yesterday ' + hm : DAY[d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()] + ', ' + hm;
+    }
     function shortStamp(iso, fallback) {
-      const t = Date.parse(iso || ''); if (isNaN(t)) return fallback;
-      const d = new Date(t), pad = (n) => String(n).padStart(2, '0');
-      return d.toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10) ? pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ' UTC' : d.getUTCDate() + ' ' + MON[d.getUTCMonth()];
+      const t = Date.parse(iso || ''); return isNaN(t) ? fallback : localStamp(t);
     }
 
     // ---- Undo toast (6 s) -------------------------------------------------------------------
@@ -123,7 +129,7 @@
       const m = Math.floor(sec / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
       return m < 1 ? 'under a minute' : h < 1 ? m + ' min' : d < 1 ? h + ' h ' + (m % 60) + ' min' : d + ' d ' + (h % 24) + ' h';
     }
-    function hhmm(t) { const d = new Date(t * 1000), z = (n) => String(n).padStart(2, '0'); return z(d.getUTCHours()) + ':' + z(d.getUTCMinutes()) + ' UTC'; }
+    function hhmm(t) { return localStamp(t * 1000); }
     // How long: a working lane counts from its start, a waiting or idle one from its last activity.
     function laneFor(l, st) {
       const t = st === 'working' ? (l.startedAt || l.activeAt) : (l.activeAt || l.startedAt);
@@ -153,6 +159,7 @@
       const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.id = 'ptn-' + p.id; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
       top.append(nb, stPill(p)); t.append(top);
       if (p.tagline) t.append(el('p', 'pt-tag', p.tagline));
+      if (p.next) { const n = el('p', 'pt-next'); n.append(el('b', null, 'Next'), el('span', null, p.next)); t.append(n); }   // MC3: hub report --next
       const pr = el('div', 'pt-prog' + (hasPct(p) ? '' : ' nopct')); t.append(pr);
       if (hasPct(p)) {
         const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
@@ -170,9 +177,10 @@
       const sl = sumLine(p); if (sl) meta.append(sl);
       if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
       const lanes = laneList(p, false); if (lanes) t.append(lanes);
+      const fin = endedLanes(p); if (fin) t.append(fin);
       const topN = ds.filter(isTop).length;
       const rest = ds.filter((d) => !isTop(d));
-      if (topN) t.append(el('p', 'pt-top5', topN + ' in top priority, above'));
+      if (topN) t.append(el('p', 'pt-top5', topN + (topN === 1 ? ' decision waiting, shown above' : ' decisions waiting, shown above')));
       if (rest.length) {
         const ul = el('ul', 'pt-decs');
         rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); ul.append(li); });
@@ -181,6 +189,52 @@
       } else if (!topN) { const n = el('p', 'pt-none'); n.append(ic('circle-check'), document.createTextNode('Nothing waiting on you.')); t.append(n); }
       t.addEventListener('click', () => go(p.id));
       return t;
+    }
+
+    // ---- Finished lanes (MC3): a lane that ended stays listed under its project for a while. -------------
+    function endedLanes(p) {
+      const ls = (p.lanes || []).filter((l) => l.ended || ENDED.includes(l.status)); if (!ls.length) return null;
+      const names = ls.map((l) => l.short || l.id), shown = names.slice(0, 3).join(', ');
+      const f = el('p', 'pt-ended'); f.append(ic('circle-check'), el('span', null, 'Finished: ' + shown + (names.length > 3 ? ' and ' + (names.length - 3) + ' more' : '')));
+      f.title = ls.map((l) => (l.short || l.id) + ' · ' + String(l.status || 'Done').toLowerCase()).join('\n');
+      return f;
+    }
+
+    // ---- At a glance (MC3): what is running, what needs me, what is left on my plans. -----------------
+    function glance(running, waiting) {
+      const items = [];
+      const lanesOn = running.reduce((a, p) => a + liveLanes(p).length, 0);
+      items.push({ v: String(running.length), l: running.length === 1 ? 'project running' : 'projects running',
+        s: lanesOn ? lanesOn + (lanesOn === 1 ? ' lane working' : ' lanes working') : (running.length ? 'Between lanes' : 'Nothing started') });
+      const asks = running.reduce((a, p) => a + liveLanes(p).filter((l) => ['approval', 'question'].includes(laneState(l))).length, 0);
+      const need = waiting + asks;
+      items.push({ v: String(need), l: need === 1 ? 'thing needs you' : 'things need you', hot: need > 0,
+        s: need ? [waiting ? waiting + (waiting === 1 ? ' decision' : ' decisions') : '', asks ? asks + (asks === 1 ? ' lane asking' : ' lanes asking') : ''].filter(Boolean).join(', ') : 'Nothing waiting' });
+      // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
+      const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
+      if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), s: lim.l.renews ? 'Renews ' + lim.l.renews : (ctx.LSTATE[lim.l.state] || ''), hot: lim.l.state === 'out' || lim.l.state === 'wait' });
+      const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));
+      items.forEach((x) => { const li = el('li', x.hot ? 'hot' : null); li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); ul.append(li); });
+      return ul;
+    }
+
+    // ---- Also running (MC3 #5): other Claude Code sessions working now. Read-only, no actions. --------------
+    const ALSO_ST = { working: 'Working', waiting: 'Waiting on you' };
+    function alsoRunning() {
+      const rows = ctx.also || []; if (!rows.length) return null;
+      const sec = el('section'); sec.append(el('h2', null, 'Also running'));
+      const ul = el('ul', 'also'); ul.setAttribute('aria-label', 'Other Claude Code sessions');
+      rows.forEach((r) => {
+        const li = el('li'); li.id = 'also-' + r.key;
+        const st = ALSO_ST[r.state] || (r.idleMin >= 1 ? 'Idle ' + (r.idleMin >= 60 ? Math.floor(r.idleMin / 60) + ' h ' + (r.idleMin % 60) + ' min' : r.idleMin + ' min') : 'Idle, just now');
+        // "<Project> · <title>": the project in bold, the session's own title after it (MC3 Titles).
+        const nm = el('span', 'an'); const p0 = r.project && r.name.indexOf(r.project + ' · ') === 0 ? r.project : '';
+        if (p0) nm.append(el('b', null, p0), document.createTextNode(r.name.slice(p0.length))); else nm.append(el('b', null, r.name));
+        li.append(el('span', 'dot ' + (r.state === 'working' ? 'ok' : r.state === 'waiting' ? 'waiting' : '')), nm, el('span', 'am', r.model || ''), el('span', 'as ' + (r.state || ''), st));
+        li.title = [r.name, r.model, st].filter(Boolean).join(' · ');
+        ul.append(li);
+      });
+      sec.append(ul); return sec;
     }
 
     function renderHome() {
@@ -193,11 +247,19 @@
       const ph = el('header', 'ph home');
       const waitingOn = new Set(all.map((x) => x.p.id)).size;
       const err = ctx.pullErr;
-      const head = !projects.length ? (err ? 'Cannot reach the local hub' : db ? 'No projects yet' : 'Sign in to see your projects')
-        : all.length ? all.length + (all.length === 1 ? ' decision waits on you' : ' decisions wait on you') : 'Nothing is waiting on you';
-      const sub = !projects.length ? (err ? 'Is hub serve running? (' + err + ')' : db ? 'An orchestrator adds its project here when it starts a build.' : 'Open this board on claude.ai while signed in.')
-        : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : 'Everything is moving.';
-      ph.append(el('h1', null, head), el('p', 'lede', sub)); main.append(ph);
+      const head = !projects.length ? (err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
+        : all.length ? all.length + (all.length === 1 ? ' decision waits on you' : ' decisions wait on you') : running.length ? 'Nothing is waiting on you' : 'Nothing is running right now';
+      const sub = !projects.length ? (err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
+        : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : 'Everything you started has shipped.';
+      ph.append(el('h1', null, head), el('p', 'lede', sub));
+      if (!projects.length && db && !err) {   // MC3: an empty page says how to start, never a blank
+        const how = el('div', 'empty-how');
+        const a = el('p', null, 'To start one, ask Claude Code to outsource a task, for example “outsource the test fixes to Codex”.');
+        const b = el('p'); b.append(document.createTextNode('Or run it yourself: '), el('code', null, 'outsourcerer bg edit "fix the failing tests"'));
+        how.append(a, b); ph.append(how);
+      }
+      main.append(ph);
+      if (db && !err) main.append(glance(running, all.length));
       const top = all.filter((x) => isTop(x.d)).sort((a, b) => byWeight(a.d, b.d));
       if (top.length) {
         const sec = el('section', 'card toppri'); const h = el('h2'); h.id = 'tp-h'; h.append(ic('hand'), el('span', null, 'These are top-priority decisions for you right now.')); sec.setAttribute('aria-labelledby', 'tp-h');
@@ -219,10 +281,11 @@
         const grid = el('div', 'ptiles' + (list.length === 1 ? ' one' : '')); list.forEach((p) => grid.append(ptile(p)));
         sec.append(grid); main.append(sec);
       }
+      const also = alsoRunning(); if (also) main.append(also);
       if (running.length && shipped.length) main.append(el('p', 'foot', shipped.length + ' shipped, listed under Shipped in the sidebar.'));
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList };
+    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList, localStamp };
   };
 })();
