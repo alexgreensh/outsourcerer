@@ -186,7 +186,7 @@
     function renderHome() {
       const projects = ctx.projects, db = ctx.db, go = ctx.go;
       const main = $('main'); main.replaceChildren();   // no hide(): an open card re-anchors after the render (keepHover)
-      const live = projects.filter((p) => p.status !== 'shipped' && !ctx.earlier(p));
+      const live = projects.filter((p) => p.status !== 'shipped');
       const running = live.filter((p) => p.status !== 'paused').concat(live.filter((p) => p.status === 'paused'));
       const shipped = projects.filter((p) => p.status === 'shipped');
       const all = []; running.forEach((p) => openDecs(p).forEach((d) => all.push({ p, d })));

@@ -311,13 +311,13 @@ b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = oz ] &&
 rm -rf "$HB/.warp"
 
 # r10 4.1: an EMPTY ~/.antigravity dir is not a login — dir existence alone must not
-# classify subscription. An unverified file name does not establish a plan.
+# classify subscription (same class as the credentials fix). A non-empty login file is.
 mkdir -p "$HB/.antigravity"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
 [ "$b" = "unknown" ] && ok "r10 billing: gm empty .antigravity dir + agy -> unknown" || bad "r10 billing: gm empty-dir -> '$b'"
 printf '{"auth":"session"}' > "$HB/.antigravity/auth.json"
 b=$( HOME="$HB" bash -c '. "'"$SRC"'" >/dev/null 2>&1; have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }; osrc_lane_billing gm' )
-[ "$b" = "unknown" ] && ok "gm unverified auth file -> unknown" || bad "gm unverified auth file -> '$b'"
+[ "$b" = "subscription" ] && ok "r10 billing: gm non-empty login file + agy -> subscription" || bad "r10 billing: gm login-file -> '$b'"
 rm -rf "$HB/.antigravity"
 # r11 F5: junk files do not prove a login — .DS_Store, argv.json (written by an
 # editor install before sign-in) and *.log are excluded from the state-file proof.
@@ -371,7 +371,7 @@ out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
 [ $rc -eq 0 ] && ok "r9 spend: cx + ci ChatGPT auth.json -> proceed" || bad "r9 spend: cx/ci plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
 rm -rf "$HB/.codex"
 # gm: api-key material in the login dir or a Gemini/Google key env -> metered -> refuse;
-# unverified auth file -> unknown -> refuse.
+# plain dir + agy -> subscription -> proceed.
 mkdir -p "$HB/.antigravity"; printf '{"apiKey":"gemini-key-abcdef123456"}' > "$HB/.antigravity/auth.json"
 out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
   _osrc_spend_gate gm "" gmnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
@@ -389,7 +389,7 @@ esac
 out="$( HOME="$HB" OSRC_HOME="$OSRC_HOME" bash -c '. "'"$SRC"'" >/dev/null 2>&1
   have() { [ "$1" = agy ] && return 0; command -v "$1" >/dev/null 2>&1; }
   _osrc_spend_gate gm "" gmnative "r9 probe" 2>&1 </dev/null' )"; rc=$?
-[ $rc -ne 0 ] && ok "gm unverified auth file -> refuse" || bad "gm unverified auth file bypassed gate"
+[ $rc -eq 0 ] && ok "r9 spend: gm plain auth dir -> proceed" || bad "r9 spend: gm plan gate refused (rc=$rc): $(printf '%s' "$out" | head -4)"
 rm -rf "$HB/.antigravity"
 # cursor/droid/warp: api-key material -> metered -> refuse; plain auth dir + CLI -> proceed.
 mkdir -p "$HB/.cursor"; printf '{"apiKey":"cursor-key-abcdef123456"}' > "$HB/.cursor/auth.json"

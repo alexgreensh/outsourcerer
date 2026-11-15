@@ -132,7 +132,7 @@ _osrc_hub_lane_live_fields() {
 # $OSRC_HOME/hub/cache/<slug>.json holds the last doc of a project with nothing that can move on its own:
 # no live lane, no tmux session, no remote lane, every lane terminal. It is reused while no input under
 # the project is newer than the cache file and it is under an hour old. Anything live is rebuilt.
-_OSRC_HUB_CACHE_V=2
+_OSRC_HUB_CACHE_V=3   # r3: names are finished in the export, not cached
 
 _osrc_hub_cache_paths() { # <slug> -> every file or dir whose change invalidates the project
   local slug="$1" t id

@@ -309,7 +309,9 @@ _osrc_hub_build_project() {
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
     + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
   ')"
-  out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and ((.status // "building") | ascii_downcase) == "building" then .status="idle" else . end')"
+  # No live lane and no status of its own -> idle. A status the card or a Mark done / Move back set is kept
+  # exactly (MC2 r3: relabelling an explicit "building" undid Move back).
+  out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and (has("status") | not) then .status="idle" else . end')"
   printf '%s\n' "$out"
   type _osrc_hub_cache_put >/dev/null 2>&1 && _osrc_hub_cache_put "$slug" "$out"
   return 0
@@ -411,7 +413,7 @@ _osrc_hub_lane_activity() {
 _osrc_hub_project_mtime() {
   local slug="$1" best=0 la="${2:-0}"
   _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
-  best="$(_osrc_hub_mt "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json")"
+  best="$(_osrc_hub_mt "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json" "$HOME"/.claude/projects/*/"$slug".jsonl)"
   [ "$la" -gt "$best" ] 2>/dev/null && best="$la"
   [ "${3:-0}" = 1 ] && best="$(date +%s)"
   [ "$best" -gt 0 ] || { printf ''; return 0; }
@@ -669,18 +671,48 @@ cmd_hub_export() {
     [ -n "$slug" ] || continue
     [ -n "$proj" ] && [ "$slug" != "$proj" ] && continue
     local pj; pj="$(_osrc_hub_build_project "$slug" "$now" "$upd")" || continue
+    [ -n "$pj" ] || continue
+    # Full listing: working orchestrator sessions only (MC2 r3). --project still answers for any slug.
+    [ -n "$proj" ] || _osrc_hub_visible "$slug" "$pj" || continue
+    if [ -z "$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)" ]; then
+      pj="$(jq -c --arg d "$(_osrc_hub_session_detail "$slug")" '. + {_base: (.name // ""), _detail: $d}' <<<"$pj")"
+    fi
     [ -n "$pj" ] && { projects="$(jq -cn --argjson a "$projects" --argjson b "$pj" '$a+[$b]')"; [ "$slug" = "$proj" ] && found=1; }
   done
   if [ -z "$proj" ]; then
     local uj; uj="$(_osrc_hub_unowned_project "$now" "$upd")"
-    [ -n "$uj" ] && projects="$(jq -cn --argjson a "$projects" --argjson b "$uj" '$a+[$b]')"
+    [ -n "$uj" ] && jq -e '.liveLanes > 0' >/dev/null 2>&1 <<<"$uj" && projects="$(jq -cn --argjson a "$projects" --argjson b "$uj" '$a+[$b]')"
   elif [ "$found" = 0 ]; then
     echo "hub export: no project '$proj' (slugs: owners/*, hub/decisions/*.json, hub/projects/*.json)" >&2
   fi
   local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
   case "$limits" in ''|*'error'*) limits='[]' ;; esac
   type _osrc_hub_memo_end >/dev/null 2>&1 && _osrc_hub_memo_end
-  jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}'
+  jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}' | _osrc_hub_name_finish
+}
+
+# _osrc_hub_visible <slug> <project-json>: is this a working orchestrator session (MC2 r3)? Shown when ANY:
+# a live owned lane (a tmux session, a running or waiting job, a live remote lane), an open decision, or its
+# own Claude transcript written in the last OSRC_HUB_ACTIVE_MIN (30) minutes. The transcript rule needs at
+# least one owned lane ever: a session that never delegated is not an orchestrator. A project card
+# (hub/projects/<slug>.json) is an orchestrator's explicit report and always shows: it carries Mark done
+# and the Shipped list. Data stays on disk either way.
+_osrc_hub_visible() {
+  local slug="$1" pj="$2" m="${OSRC_HUB_ACTIVE_MIN:-30}" t f lanes=0
+  [ -f "$OSRC_HOME/hub/projects/$slug.json" ] && return 0
+  jq -e '([.lanes[]? | select(.session != null or ((.state // "") | IN("working", "approval", "question", "limit")))] | length > 0)
+         or ([.decisions[]? | select((.status // "wait") != "done")] | length > 0)' >/dev/null 2>&1 <<<"$pj" && return 0
+  for t in "$OSRC_HOME/owners/$slug"/*; do
+    [ -f "$t" ] || continue
+    case "${t##*/}" in .*|watch.*) continue ;; esac
+    lanes=1; break
+  done
+  [ "$lanes" = 1 ] || return 1
+  case "$m" in ''|*[!0-9]*) m=30 ;; esac
+  for f in "$HOME"/.claude/projects/*/"$slug".jsonl; do
+    [ -f "$f" ] && [ -n "$(find "$f" -mmin "-$m" 2>/dev/null)" ] && return 0
+  done
+  return 1
 }
 
 # cmd_hub_serve [--port N] [--no-open] [--new-token] -> local Mission Control

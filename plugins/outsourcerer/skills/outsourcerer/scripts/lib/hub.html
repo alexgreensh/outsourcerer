@@ -99,7 +99,7 @@ button { font: inherit; color: inherit; }
 .proj { display: flex; flex-direction: column; gap: 4px; border-radius: 14px; border: 1.5px solid transparent; padding: 6px; }
 .proj.on { background: var(--hi-soft); border-color: var(--hi-line); }
 .pbtn { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 10px; align-items: center; background: none; border: 0; padding: 6px 6px; border-radius: 10px; cursor: pointer; text-align: left; width: 100%; }
-.pbtn .nm { text-align: left; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .pbtn .when { grid-column: 2 / -1; font-size: .78rem; font-weight: 500; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: -6px; } /* MC2 r2 #1: Earlier date on its own row under the name, never one character per line */
+.pbtn .nm { text-align: left; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--edge); background: var(--card); }
 .dot.building { background: var(--thumb); }
 .dot.waiting { background: var(--hi); }
@@ -324,7 +324,7 @@ a.pill svg { width: 13px; height: 13px; }
   .rail, .rail-mid { display: contents; }
   .rail-top { order: 0; padding: 14px 16px; background: var(--card); }
   .rail-mid > h2 { margin-top: 16px; }
-  .rail-mid > h2:first-of-type, .rail-mid > .plist, .rail-mid > details, .rail-mid > #shipwrap, .rail-mid > .home-btn { order: 1; margin-inline: 16px; }
+  .rail-mid > h2:first-of-type, .rail-mid > .plist, .rail-mid > #shipwrap, .rail-mid > .home-btn { order: 1; margin-inline: 16px; }
   .rail-mid > .home-btn { width: auto; margin-top: 12px; }
   .main { order: 2; border-top: 1.5px solid var(--edge); margin-top: 16px; }
   .rail-mid > h2:nth-of-type(2), .rail-mid > .llist { order: 3; margin-inline: 16px; }
@@ -335,7 +335,7 @@ a.pill svg { width: 13px; height: 13px; }
   /* MC-7 #2: on Home the headline and the top-priority bar come before the rail list; the rest of Home follows it. */
   .app:has(.ph.home) .main { display: contents; --mi: clamp(48px, 9vw, 128px); } .app:has(.ph.home) .main > * { order: 3; margin-inline: var(--mi); }
   .app:has(.ph.home) .main > .ph.home { order: 1; margin-top: 24px; } .app:has(.ph.home) .main > .toppri { order: 1; margin-top: 16px; }
-  .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > details, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
+  .app:has(.ph.home) .rail-mid > h2:first-of-type, .app:has(.ph.home) .rail-mid > .plist, .app:has(.ph.home) .rail-mid > #shipwrap, .app:has(.ph.home) .rail-mid > .home-btn { order: 2; }
   .app:has(.ph.home) .main > :nth-child(1 of :not(.ph, .toppri)) { border-top: 1.5px solid var(--edge); margin: 16px 0 0; padding: 32px var(--mi) 0; }
   .app:has(.ph.home) .main > :last-child { margin-bottom: 40px; } .app:has(.ph.home) .main > .foot { margin-top: 16px; }
   .app:has(.ph.home) .rail-mid > h2:nth-of-type(2), .app:has(.ph.home) .rail-mid > .llist { order: 4; } .app:has(.ph.home) .credits { order: 5; }
@@ -670,14 +670,13 @@ a.pill svg { width: 13px; height: 13px; }
   const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
 
   const runningNow = (p) => p.status !== 'shipped' && (p.liveLanes > 0 || openDecs(p).length > 0);
-  const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct); const earlier = (p) => p.status !== 'shipped' && p.liveLanes === 0 && !openDecs(p).length && (!p.updatedAt || Date.now() - Date.parse(p.updatedAt) >= (p.staleHours == null ? 24 : p.staleHours) * 3600000);
+  const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
   const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty" (MC-8)
   function renderRail() {
     if (loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && ae.closest && ae.closest('.rail-mid') && ae.id !== 'homebtn' ? { id: ae.id } : null;   // keyboard focus survives a re-render (MC-5 #4)
-    const list = $('plist'); if (list.nextElementSibling && list.nextElementSibling.dataset.earlier === '1') list.nextElementSibling.remove(); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
-    const live = projects.filter((p) => p.status !== 'shipped' && !earlier(p)), done = projects.filter((p) => p.status === 'shipped');
-    const old = projects.filter(earlier);
+    const list = $('plist'); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
+    const live = projects.filter((p) => p.status !== 'shipped'), done = projects.filter((p) => p.status === 'shipped');   // the export lists working sessions only (MC2 r3)
     $('pcount').textContent = String(projects.filter(runningNow).length);
     const hb = $('homebtn'); hb.classList.toggle('on', !current); hb.setAttribute('aria-current', current ? 'false' : 'page');
     const nOpen = live.reduce((a, p) => a + openDecs(p).length, 0); const hn = $('hcount'); hn.replaceChildren();
@@ -686,7 +685,6 @@ a.pill svg { width: 13px; height: 13px; }
     const sopen = shipOpen() || done.some((p) => p.id === current); $('sfold').setAttribute('aria-expanded', String(sopen)); slist.hidden = !sopen;
     if (projects.length && !live.length) list.appendChild(el('p', null, 'Nothing building right now.'));
     if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'No projects reported yet. An orchestrator adds its project when it starts a build.' : 'Sign in on claude.ai to see your projects.'))); return; }
-    const oldList = el('div', 'plist'); const oldFold = el('details'); oldFold.dataset.earlier = '1'; oldFold.append(el('summary', null, 'Earlier sessions (' + old.length + ')'), oldList); if (old.length) list.after(oldFold);
     projects.forEach((p) => {
       const box = el('div', 'proj' + (current === p.id ? ' on' : ''));
       const b = el('button', 'pbtn'); b.type = 'button'; b.id = 'p-' + p.id;
@@ -698,7 +696,7 @@ a.pill svg { width: 13px; height: 13px; }
       b.addEventListener('mouseleave', () => { const t = $('tile-' + p.id); if (t) t.classList.remove('hl'); });
       hover(b, (c) => { c.append(el('div', 'ht', p.name)); const row = el('div', 'row'); row.append(stPill(p)); if (pctOk(p)) row.append(el('span', 'mono', p.pct + '%')); if (p.eta) row.append(el('span', null, 'Ships ' + p.eta)); c.append(row); const sl = H && H.sumLine(p); if (sl) c.append(sl); if (p.tagline) c.append(el('p', null, p.tagline));
         const k = H && H.doneBtn(p, null, hide); if (k) c.append(k); }, true);   // Mark done in the rail card (Alex 11:58) and the page header (MC-7)
-      box.appendChild(line); const rl = H && H.laneList && p.status !== 'shipped' && !earlier(p) ? H.laneList(p, true) : null; if (rl) box.appendChild(rl);   // MC2 r2 #5
+      box.appendChild(line); const rl = H && H.laneList && p.status !== 'shipped' ? H.laneList(p, true) : null; if (rl) box.appendChild(rl);   // MC2 r2 #5
       const ds = openDecs(p);  // Alex: the rail always lists each project's open decisions, Home included
       if (ds.length) {
         const ul = el('ul', 'dlist');
@@ -711,8 +709,7 @@ a.pill svg { width: 13px; height: 13px; }
         });
         box.appendChild(ul);
       }
-      if (earlier(p)) { const t = Date.parse(p.updatedAt || ''); b.append(el('span', 'when', isNaN(t) ? 'Date unknown' : 'Last active ' + new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }))); }
-      (p.status === 'shipped' ? slist : earlier(p) ? oldList : list).appendChild(box);
+      (p.status === 'shipped' ? slist : list).appendChild(box);
     });
     renderLimits(); paint(); refocus(keep); keepHover();
   }
@@ -946,7 +943,7 @@ a.pill svg { width: 13px; height: 13px; }
 
   // Home, Mark done and Refresh live in assets/hub-home.js (keeps this file under 1,000 lines).
   const H = typeof window.OSRC_HUB_HOME === 'function' ? window.OSRC_HUB_HOME({
-    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck, earlier,
+    $, el, ic, pri, paint, openDecs, byWeight, STATUS_TXT, stPill, go, hide, renderRail, renderMain, staleCheck,
     get projects() { return projects; }, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
