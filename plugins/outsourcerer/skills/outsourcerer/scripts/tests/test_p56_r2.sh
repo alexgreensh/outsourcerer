@@ -141,5 +141,73 @@ _forged_preflight() (
   cmd_bg run $'task\nOSRC_SPEND_PAIR=opencode|opencode-go/model' >/dev/null 2>&1
 )
 check _forged_preflight
+# Local routes still bind a leading spend flag before the background launch.
+_local_bg() (
+  export OSRC_SOURCED=0; SCRIPT_PATH="$D/outsourcerer.sh"; OSRC_SPEND_NEXT=x
+  _bg_cloud_preack() { :; }; _wake_on_finish_hint() { :; }; _async_supervision_notice() { :; }
+  _bg_launch() { [ "$_OSRC_PREFLIGHT_PAIR" = 'local|local' ] && echo 20261115-120000-local; }
+  cmd_bg --spend-ok --provider local run 'x' >/dev/null 2>&1
+)
+check _local_bg
+_factory_local() (
+  export OSRC_SOURCED=0; SCRIPT_PATH="$D/outsourcerer.sh"; OSRC_SPEND_NEXT=x
+  _bg_cloud_preack() { :; }; _wake_on_finish_hint() { :; }; _async_supervision_notice() { :; }
+  _bg_launch() { [ "$_OSRC_PREFLIGHT_PAIR" = 'local|ollama:fixture' ] || return 1; mkdir -p "$OSRC_JOBS/20261115-120000-local"; echo 20261115-120000-local; }
+  cmd_plan new p56local --no-repo --no-use >/dev/null 2>&1 || exit 1
+  cmd_task add 'local factory' -m ollama:fixture --plan p56local >/dev/null 2>&1 || exit 1
+  OSRC_SPEND_OK=1; cmd_task start t1 --plan p56local >/dev/null 2>&1 || exit 1
+  [ "$(jq -r .job "$OSRC_HOME/plans/p56local/tasks/t1.json")" = 20261115-120000-local ]
+)
+check _factory_local
+check test -z "$(find "$OSRC_HOME" -maxdepth 1 -name '.preflight.*' -print)"
+# The fake preflight interrupts its parent during the handoff.
+cat > "$T/interrupt-preflight" <<'EOF_INT'
+#!/bin/sh
+kill -TERM "$PPID"
+EOF_INT
+chmod +x "$T/interrupt-preflight"
+_interrupted_preflight() (
+  local -a _pf_provider=() _pf_spend=() _pf_args=()
+  _osrc_bg_preflight "$T/interrupt-preflight" >/dev/null 2>&1
+)
+_interrupted_preflight; int_rc=$?
+check test "$int_rc" != 0
+check test -z "$(find "$OSRC_HOME" -maxdepth 1 -name '.preflight.*' -print)"
+# Deliver Ctrl-C to the isolated process group while the fake preflight is running.
+cat > "$T/wait-preflight" <<EOF_WAIT
+#!/bin/sh
+: > "$T/preflight-ready"
+while :; do sleep 1; done
+EOF_WAIT
+chmod +x "$T/wait-preflight"
+python3 - "$D/outsourcerer.sh" "$T/wait-preflight" "$T/preflight-ready" "$OSRC_HOME" <<'PY_INT'
+import glob, os, signal, subprocess, sys, time
+script, fake, ready, home = sys.argv[1:]
+command = '. "$1" >/dev/null 2>&1; _pf_provider=(); _pf_spend=(); _pf_args=(); _osrc_bg_preflight "$2"'
+proc = subprocess.Popen(['/bin/bash', '-c', command, 'test', script, fake], start_new_session=True,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+try:
+    deadline = time.monotonic() + 15
+    while not os.path.exists(ready) and proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not os.path.exists(ready):
+        raise RuntimeError('preflight never started')
+    os.killpg(proc.pid, signal.SIGINT)
+    rc = proc.wait(timeout=15)
+    deadline = time.monotonic() + 5
+    remaining = glob.glob(os.path.join(home, '.preflight.*'))
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.05)
+        remaining = glob.glob(os.path.join(home, '.preflight.*'))
+    if rc == 0 or remaining:
+        raise RuntimeError('interrupted preflight rc=%s, remaining=%s' % (rc, remaining))
+except Exception as exc:
+    if proc.poll() is None:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    print(exc, file=sys.stderr)
+    sys.exit(1)
+PY_INT
+check test "$?" = 0
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

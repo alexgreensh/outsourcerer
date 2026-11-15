@@ -11482,7 +11482,7 @@ cmd_bg() {
   # An unroutable combination (a ChatGPT-only model forced through OpenRouter, an image model used as a
   # text lane) otherwise produced a job id, a "launched" line, and a failure only the job record ever
   # saw. Output is discarded on success so the disclosure banner is not printed twice.
-  local _pfout _pfrc=0 _pfpair; _mkdir_private "$OSRC_HOME" || die "bg: cannot create preflight directory"; _pfpair="$(umask 077; mktemp "$OSRC_HOME/.preflight.XXXXXX")" || die "bg: cannot create preflight consent file"
+  local _pfrc=0; local -a _pf_args=("$@")
   # --provider must be passed EXPLICITLY: cmd_bg already consumed the flag into a shell variable that a
   # child process does not inherit, so without this the preflight would silently check the DEFAULT lane
   # and bless a combination the real run rejects.
@@ -11510,8 +11510,7 @@ cmd_bg() {
   # success — the same inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. argv
   # does not leak through the environment, and main() drops any inherited OSRC_PREFLIGHT before honoring
   # only this sentinel. OSRC_CLOUD_ACK stays env here (the child needs it and it is not a safety gate).
-  _pfout="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" "$SCRIPT_PATH" --osrc-preflight-internal --osrc-preflight-pair-file "$_pfpair" ${_pf_provider[@]+"${_pf_provider[@]}"} ${_pf_spend[@]+"${_pf_spend[@]}"} "$@" 2>&1)" || _pfrc=$?
-  _OSRC_PREFLIGHT_PAIR="$(cat "$_pfpair")"; rm -f "$_pfpair"
+  _OSRC_PREFLIGHT_PAIR="$(OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$_pf_inj" OSRC_SPEND_NEXT="$OSRC_SPEND_NEXT" _osrc_bg_preflight "$SCRIPT_PATH")" || _pfrc=$?
   # Fail CLOSED: a preflight whose result we cannot interpret must refuse to launch, never launch
   # anyway. The old code fail-opened on any error string it did not recognize (e.g. "recursion guard"
   # under nested delegation), which minted a phantom job for a lane that could not dispatch. The
@@ -11519,12 +11518,10 @@ cmd_bg() {
   # non-zero rc is always a real dispatch failure. The real run still enforces every gate as a
   # backstop, but the preflight's job is to fail BEFORE a job dir is minted.
   if [ "$_pfrc" -ne 0 ]; then
-    # Forward the gate's structured refusal too: EVENT/NEXT lines are how L1's supervise
-    # replays the approval ask — dropping them leaves the orchestrator blind.
-    printf '%s\n' "$_pfout" | grep -aE 'ERROR:|^EVENT |^NEXT ' | head -6 >&2
+    # The preflight already streamed its structured refusal to stderr.
     die "bg: refusing to launch -- the route preflight returned non-zero (rc=$_pfrc). Nothing was started. See above for the dispatch error."
   fi
-  # Only the private preflight file can carry consent to the detached job.
+  # Only the private preflight descriptor can carry consent to the detached job.
   [ -n "$_OSRC_PREFLIGHT_PAIR" ] && OSRC_SPEND_OK=1
   if [ "${OSRC_SPEND_OK:-0}" = 1 ]; then
     case "$_OSRC_PREFLIGHT_PAIR" in ?*'|'?*) ;; *) die "bg: spend consent could not be bound to the preflight lane and model" ;; esac
@@ -16549,6 +16546,7 @@ route_delegate() {
       _route_resolution local "$MODEL"
       _route_requires_confirmation && _route_confirm
       _route_receipt
+      _osrc_spend_gate local "$MODEL" local "dispatch $verb"
       [ "${OSRC_PREFLIGHT:-0}" = "1" ] && return 0
       delegate_local "$tier"; return $?
   fi
@@ -19838,7 +19836,7 @@ main() {
   # inherited-env-defeats-a-gate class already closed for OSRC_CLOUD_ACKED. So: drop any inherited
   # value, then honor the sentinel (argv cannot leak through the environment). Must run before the $1
   # inspection below so the sentinel is consumed and the real subcommand lands in $1.
-  unset OSRC_PREFLIGHT _OSRC_PREFLIGHT_FILE OSRC_ACCOUNT OSRC_ACCOUNT_DIR
+  unset OSRC_PREFLIGHT _OSRC_PREFLIGHT_FD OSRC_ACCOUNT OSRC_ACCOUNT_DIR
   # Same class, same defense: the supervised job child is exempt from the blind-turn guard (see
   # below), and that exemption must travel in argv, not env. OSRC_JOB_DIR is functional state the
   # child legitimately reads (capture dirs) AND it is inheritable -- run_job exports it into the
@@ -19852,7 +19850,7 @@ main() {
   while :; do
     case "${1:-}" in
       --osrc-preflight-internal)   OSRC_PREFLIGHT=1; shift ;;
-      --osrc-preflight-pair-file)  _OSRC_PREFLIGHT_FILE="${2:-}"; shift 2 ;;
+      --osrc-preflight-pair-fd)    _OSRC_PREFLIGHT_FD=1; shift ;;
       --osrc-job-child-internal)   _job_child=1; shift ;;
       *) break ;;
     esac
