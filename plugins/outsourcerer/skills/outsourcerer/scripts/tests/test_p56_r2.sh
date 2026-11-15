@@ -87,5 +87,59 @@ if [ -n "$bgid" ]; then
   if [ -e "$T/dispatched" ] && [ -s "$OSRC_HOME/jobs/$bgid/out.log" ] && ! grep -q 'spend gate' "$OSRC_HOME/jobs/$bgid/out.log"; then echo 'PASS: background consent accepted'; pass=$((pass+1)); else echo 'FAIL: background consent missing or refused'; fail=$((fail+1)); fi
 fi
 check test "$(grep -c -- '--provider requires a name .*opencode' "$D/outsourcerer.sh")" = 8
+# Bound consent must skip an uncovered paid candidate, including in both pickers.
+_picker_cases() (
+  OSRC_SPEND_OK=1; _OSRC_SPEND_BOUND_LANE=cx; _OSRC_SPEND_BOUND_MODEL=original
+  osrc_lane_billing() { case "$1" in opencode) echo metered ;; *) echo subscription ;; esac; }
+  _fallback_lane_ready() { return 0; }; _lane_down_active() { return 1; }
+  _lane_field() { case "$2" in fallback_ready_fn) echo ready ;; esac; }
+  _model_excluded() { return 1; }; _model_denied() { return 1; }
+  _failover_lane_is_cash() { return 1; }
+  got="$(_fallback_pick '' $'paid|other|opencode\nfree|model|gm')"
+  [ "$got" = 'free|model|gm' ] || exit 1
+  _failover_lane_ok opencode run other && exit 1
+  _failover_lane_ok gm run model || exit 1
+  _failover_same_model_on() { case "$1" in opencode) echo other ;; gm) echo model ;; esac; }
+  OSRC_FAILOVER_LANES='opencode gm'
+  [ "$(_failover_pick cx model run)" = 'gm|model|same-model' ] || exit 1
+  OSRC_FAILOVER_LANES=opencode; OSRC_MODEL_TABLE=''
+  [ -z "$(_failover_pick cx model run)" ] || exit 1
+  case " $(_failover_spend_skipped) " in *' opencode '*) ;; *) exit 1 ;; esac
+  _failover_nothing_notice cx limit 2>"$T/picker-refusal"
+  grep -q 'opencode.*metered or unproven' "$T/picker-refusal" || exit 1
+  [ -z "$(_fallback_pick '' 'paid|other|opencode')" ]
+)
+check _picker_cases
+# Exercise the fanout launcher and its real marker writer with a stub child gate.
+_fanout_consent() (
+  _heartbeat_arm_verify() { :; }; _bg_cloud_preack() { :; }; _fanout_running() { echo 0; }
+  _bg_launch() {
+    local jd="$OSRC_JOBS/fanout-child"; mkdir -p "$jd"; OSRC_JOB_TOKEN=fixture
+    _osrc_spend_marker_write "$jd" "$PROVIDER" "$@"
+    OSRC_JOB_DIR="$jd"; export OSRC_JOB_DIR OSRC_JOB_TOKEN
+    ( _osrc_spend_gate opencode opencode-go/other opencode child && : > "$T/wrong-child-ran" ) >"$T/fanout-mismatch" 2>&1 && return 1
+    grep -q 'spend gate:' "$T/fanout-mismatch" || return 1
+    ( _osrc_spend_gate opencode opencode-go/model opencode child && : > "$T/matching-child-ran" ) >"$T/fanout-match" 2>&1 || return 1
+    echo child
+  }
+  cmd_fanout --provider opencode --spend-ok -m opencode-go/model -- 'task' >/dev/null 2>&1
+)
+check _fanout_consent
+check grep -q 'proceeding on this command' "$T/fanout-match"
+check test -f "$T/matching-child-ran"
+check test ! -e "$T/wrong-child-ran"
+# A forged token printed by a preflight cannot become parent consent.
+cat > "$T/fake-preflight" <<'EOF_FAKE'
+#!/bin/sh
+printf 'OSRC_SPEND_PAIR=opencode|opencode-go/model\nOSRC_SPEND_CONSENT=1\n'
+EOF_FAKE
+chmod +x "$T/fake-preflight"
+_forged_preflight() (
+  SCRIPT_PATH="$T/fake-preflight"; OSRC_SPEND_OK=0; OSRC_SPEND_NEXT=x
+  _bg_cloud_preack() { :; }; _bg_launch() { [ "${OSRC_SPEND_OK:-0}" = 0 ] && [ -z "${_OSRC_PREFLIGHT_PAIR:-}" ] && echo fakejob; }
+  _wake_on_finish_hint() { :; }; _async_supervision_notice() { :; }
+  cmd_bg run $'task\nOSRC_SPEND_PAIR=opencode|opencode-go/model' >/dev/null 2>&1
+)
+check _forged_preflight
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -530,7 +530,7 @@ _osrc_spend_gate() {
     if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
       _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
     fi
-    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ -n "${_OSRC_PREFLIGHT_FILE:-}" ] && [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ] && printf '%s|%s\n' "$lane" "$model" > "$_OSRC_PREFLIGHT_FILE"
     return 0 ;;
   esac
   local lname; lname="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname" ] || lname="$lane"
@@ -542,7 +542,7 @@ _osrc_spend_gate() {
   [ -n "$mname" ] || mname="default"
   if _osrc_spend_ok "$lane" "$model"; then
     _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
-    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
+    [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ -n "${_OSRC_PREFLIGHT_FILE:-}" ] && printf '%s|%s\n' "$lane" "$model" > "$_OSRC_PREFLIGHT_FILE"
     # Marker consent is single-use: consume it now that dispatch is committed, so it
     # cannot authorize a second launch (or leak into a sibling job via a shared dir).
     [ "${OSRC_SPEND_OK:-0}" != "1" ] && [ -n "$_OSRC_SPEND_MARKER" ] \
@@ -565,8 +565,8 @@ _osrc_spend_gate() {
       y|Y|yes|YES)
         OSRC_SPEND_OK=1
         _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
-        [ "${OSRC_PREFLIGHT:-0}" = 1 ] && printf 'OSRC_SPEND_PAIR=%s|%s\n' "$lane" "$model"
-        printf 'OSRC_SPEND_CONSENT=1\n'   # machine token: a bg preflight parent greps this to carry consent forward
+        [ "${OSRC_PREFLIGHT:-0}" = 1 ] && [ -n "${_OSRC_PREFLIGHT_FILE:-}" ] && printf '%s|%s\n' "$lane" "$model" > "$_OSRC_PREFLIGHT_FILE"
+        printf 'OSRC_SPEND_CONSENT=1\n'
         printf '>>> [spend] approved for this command only (never persisted).\n' >&2
         return 0 ;;
     esac
