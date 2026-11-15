@@ -51,6 +51,22 @@ for mode in native python shell; do
   echo "PASS: $mode helper elects exactly one owner despite lying mkdir"
 done
 
+if command mkdir --version 2>/dev/null | grep -q 'GNU coreutils'; then
+  for platform in MSYS_NT-10.0 MINGW64_NT-10.0 CYGWIN_NT-10.0; do
+    (
+      command() {
+        case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
+        builtin command "$@"
+      }
+      uname() { printf '%s\n' "$platform"; }
+      mkdir() { builtin command mkdir "$@"; }
+      _osrc_atomic_mkdir "$TMP/gnu-$platform" || exit 1
+      ! _osrc_atomic_mkdir "$TMP/gnu-$platform" || exit 1
+    ) || { echo "FAIL: $platform could not use GNU mkdir atomically"; exit 1; }
+    echo "PASS: $platform accepts genuine GNU mkdir"
+  done
+fi
+
 # An unavailable or broken interpreter must not turn an absent directory into
 # a false collision, and Python must not load code from the caller's directory.
 if command -v perl >/dev/null 2>&1; then
@@ -139,3 +155,31 @@ fi
   _osrc_atomic_mkdir "$TMP/old-gate"
 ) || { echo 'FAIL: obsolete sibling gate still wedges an atomic mkdir'; exit 1; }
 echo 'PASS: obsolete sibling gate does not wedge a claim'
+
+# The host name alone cannot make an unknown PATH mkdir trustworthy. Native
+# BSD hosts must bypass it; MSYS-family hosts must reject its mystery banner.
+for platform in Darwin FreeBSD OpenBSD NetBSD DragonFly MSYS_NT-10.0 MINGW64_NT-10.0 CYGWIN_NT-10.0; do
+  (
+    command() {
+      case "${1:-}:${2:-}" in -v:perl|-v:python3) return 1 ;; esac
+      builtin command "$@"
+    }
+    uname() { printf '%s\n' "$platform"; }
+    mkdir() {
+      printf 'called\n' >> "$TMP/mystery-$platform.calls"
+      if [ "${1:-}" = --version ]; then echo 'mystery mkdir 1.0'; return 0; fi
+      builtin command mkdir -p "$@"
+    }
+    claim="$TMP/mystery-$platform"; ar=0; br=0
+    _osrc_atomic_mkdir "$claim" 2> "$TMP/mystery-$platform.err" || ar=$?
+    _osrc_atomic_mkdir "$claim" 2>> "$TMP/mystery-$platform.err" || br=$?
+    case "$platform" in
+      Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly)
+        [ "$ar" = 0 ] && [ "$br" != 0 ] && [ -d "$claim" ] && [ ! -e "$TMP/mystery-$platform.calls" ] ;;
+      *)
+        [ "$ar" != 0 ] && [ "$br" != 0 ] && [ ! -e "$claim" ] \
+          && grep -q 'mkdir is not a known atomic implementation' "$TMP/mystery-$platform.err" ;;
+    esac
+  ) || { echo "FAIL: $platform trusted a mystery PATH mkdir"; exit 1; }
+  echo "PASS: $platform rejects or bypasses a mystery PATH mkdir"
+done

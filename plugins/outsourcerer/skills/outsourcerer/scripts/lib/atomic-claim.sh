@@ -13,14 +13,15 @@ _osrc_atomic_mkdir() {
   fi
   # Only implementations known to use an exclusive mkdir syscall are safe.
   local version system
+  system="$(uname -s 2>/dev/null)"
+  case "$system" in
+    Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly) ( umask 077; /bin/mkdir "$1" ) 2>/dev/null; return $? ;;
+  esac
   version="$(LC_ALL=C mkdir --version 2>/dev/null)" || version=""
   case "$version" in
     *uutils*|*Uutils*) printf 'outsourcerer: cannot claim %s: uutils mkdir requires working Perl or Python 3.\n' "$1" >&2; return 1 ;;
     *'GNU coreutils'*) ( umask 077; mkdir "$1" ) 2>/dev/null; return $? ;;
   esac
-  system="$(uname -s 2>/dev/null)"
-  case "$system" in
-    Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly|MINGW*|MSYS*|CYGWIN*) ( umask 077; mkdir "$1" ) 2>/dev/null ;;
-    *) printf 'outsourcerer: cannot claim %s: mkdir is not a known atomic implementation; install Perl or Python 3.\n' "$1" >&2; return 1 ;;
-  esac
+  printf 'outsourcerer: cannot claim %s: mkdir is not a known atomic implementation; install Perl or Python 3.\n' "$1" >&2
+  return 1
 }
