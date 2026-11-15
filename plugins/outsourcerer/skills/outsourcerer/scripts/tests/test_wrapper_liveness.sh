@@ -16,7 +16,7 @@ WDLIB="$(dirname "$SRC")/lib/watchdog.sh"   # _supervise and friends live in lib
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
-TMP="$(mktemp -d /tmp/osrc-wl.XXXXXX)" || { echo "FAIL: mktemp"; exit 1; }
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/osrc-wl.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 export TMUX_TMPDIR="$TMP/t"; mkdir -p "$TMUX_TMPDIR"
 [ -d "$TMUX_TMPDIR" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 unset TMUX TMUX_PANE

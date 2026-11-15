@@ -4,12 +4,14 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import pwd
 import shutil
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest import mock
 
@@ -26,7 +28,7 @@ class SealedRunnerTests(unittest.TestCase):
     def test_unavailable_host_asserts_hold_without_running_tests(self):
         checks = []
         def run(args, **kwargs):
-            if args[0] == 'git':
+            if args[0] == 'git' or args[:2] == ['/bin/bash', '-n']:
                 return SimpleNamespace(returncode=0, stdout='', stderr='')
             self.assertIn('--check-sandbox', args, 'worktree test ran on an unavailable host')
             checks.append(args)
@@ -44,7 +46,7 @@ class SealedRunnerTests(unittest.TestCase):
                 if args[0] == 'git': return SimpleNamespace(returncode=0, stdout='', stderr='')
                 if not available:
                     return SimpleNamespace(returncode=78, stdout='', stderr='sealed-run: OS isolation unavailable\n')
-                return SimpleNamespace(returncode=0, stdout='isolated\n', stderr='')
+                return SimpleNamespace(returncode=0, stdout='shell scratch isolated\nisolated\n', stderr='')
             with self.subTest(available=available), mock.patch.object(sys, 'platform', 'darwin'), \
                     mock.patch.dict(os.environ), mock.patch.object(os, 'access', return_value=True), \
                     mock.patch.object(subprocess, 'run', side_effect=run), mock.patch.object(sys, 'stdout', new_callable=io.StringIO) as output:
@@ -90,6 +92,29 @@ class SealedRunnerTests(unittest.TestCase):
 
     def test_check_mode_has_no_dead_true_entry(self):
         self.assertNotIn('tests=(/usr/bin/true)', (SCRIPTS / 'sealed-run.sh').read_text())
+
+    def test_denied_suite_capability_is_named_before_execution(self):
+        with tempfile.TemporaryDirectory(prefix='.capability-proof-', dir=ROOT) as d:
+            root = Path(d); tests = root / REL / 'tests'; tests.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', d], check=True)
+            test = tests / 'needs-network.sh'
+            test.write_text('#!/bin/bash\n# sealed-run-requires: network\necho must-not-run\n')
+            result = subprocess.run(['/bin/bash', '-p', str(SCRIPTS / 'sealed-run.sh'), str(test.relative_to(root))],
+                                    cwd=root, env=dict(os.environ, HOME=d, OSRC_HOME=str(root / 'osrc')),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+            self.assertIn('unsupported suite: requires network', result.stderr)
+            self.assertNotIn('must-not-run', result.stdout)
+
+    def test_shell_bootstrap_uses_scratch_before_here_document(self):
+        import re
+        source = (SCRIPTS / 'sealed-run.sh').read_text()
+        script = re.search(r"/bin/bash -p -c '([^']*)' sealed-run", source).group(1)
+        with tempfile.TemporaryDirectory(prefix='.shell-bootstrap-', dir=ROOT) as d:
+            result = subprocess.run(['/bin/bash', '-p', '-c', script, 'sealed-run', '/bin/pwd', '-P'],
+                                    cwd=ROOT, env=dict(os.environ, TMPDIR=d), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), str(Path(d).resolve()))
 
     def test_working_sandbox_still_rejects_an_isolation_failure(self):
         def run(args, **kwargs):
@@ -253,6 +278,7 @@ exit 0
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             secret = home / 'secret'; secret.write_text('not a credential')
             outside = home / 'outside'
+            real_home_write = Path(pwd.getpwuid(os.getuid()).pw_dir) / ('.osrc-sealed-probe-' + uuid.uuid4().hex)
             py = scripts / 'tests/probe.py'
             py.write_text('''import errno, pathlib, socket, sys
 secret, outside = sys.argv[1:]
@@ -274,7 +300,45 @@ except OSError as e:
 print("isolated")
 ''')
             sh = scripts / 'tests/probe.sh'
-            sh.write_text('#!/bin/bash\nexec /usr/bin/python3 "' + str(py) + '" "' + str(secret) + '" "' + str(outside) + '"\n')
+            sh.write_text('''#!/bin/bash
+set -eu
+scratch="$(pwd -P)"
+[ "$scratch" = "$TMPDIR" ]
+cd ''' + shlex.quote(str(root)) + '''
+[ -r ''' + shlex.quote(str(sh)) + ''' ]
+if (printf bad > .sealed-write-probe) 2>/dev/null; then
+  echo 'worktree write allowed'; exit 1
+fi
+cd "$scratch"
+value="$(cat <<'PROBE'
+shell-here-document
+PROBE
+)"
+[ "$value" = shell-here-document ]
+created="$(mktemp -d "$TMPDIR/mktemp.XXXXXX")"
+[ -d "$created" ]
+rmdir "$created"
+exec 3<<'LARGE_HEREDOC'
+''' + 'x' * 70000 + '''
+LARGE_HEREDOC
+/usr/bin/python3 -I -c 'import fcntl, os, pathlib, sys
+if sys.platform == "darwin":
+    name = fcntl.fcntl(3, 50, bytes(1024)).split(bytes([0]))[0].decode()
+else:
+    name = os.readlink("/proc/self/fd/3").removesuffix(" (deleted)")
+scratch = pathlib.Path(os.environ["TMPDIR"]).resolve()
+assert pathlib.Path(name).resolve().is_relative_to(scratch), name
+assert len(os.read(3, 80000)) == 70001
+print("large here-document scratch:", name)
+'
+if (printf bad > ''' + shlex.quote(str(real_home_write)) + ''') 2>/dev/null; then
+  echo 'real HOME write allowed'; exit 1
+fi
+if (printf bad > /tmp/''' + uuid.uuid4().hex + ''') 2>/dev/null; then
+  echo 'system temp write allowed'; exit 1
+fi
+printf 'shell scratch isolated\\n'
+exec /usr/bin/python3 ''' + shlex.quote(str(py)) + ' ' + shlex.quote(str(secret)) + ' ' + shlex.quote(str(outside)) + '\n')
             env = dict(os.environ, HOME=str(home), OSRC_HOME=str(home / 'osrc'))
             available = subprocess.run([str(scripts / 'sealed-run.sh'), '--check-sandbox'], cwd=root, env=env, capture_output=True, text=True)
             if available.returncode != 0:
@@ -289,10 +353,15 @@ print("isolated")
                     self.assertFalse(classifier.is_safe(cmd, 'shell', '', str(root), [str(root)])[0])
                 self.assertFalse(outside.exists())
                 return
+            syntax = subprocess.run(['/bin/bash', '-n', str(sh)], capture_output=True, text=True)
+            self.assertEqual(syntax.returncode, 0, syntax.stdout + syntax.stderr)
             print('test_isolation_probes: isolation branch', flush=True)
             result = subprocess.run([str(scripts / 'sealed-run.sh'), str((REL / 'tests/probe.sh'))], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('isolated', result.stdout)
+            self.assertIn('shell scratch isolated', result.stdout)
+            self.assertFalse((root / '.sealed-write-probe').exists())
+            self.assertFalse(real_home_write.exists())
             self.assertFalse(outside.exists())
 
 

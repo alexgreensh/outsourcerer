@@ -7,9 +7,18 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[5]
 NAMED = ('approver_table', 'approver_tick', 'cleanup_manifest', 'done_contract',
          'hub', 'remote_review', 'screen_state', 'supervise')
-REPO_REF = re.compile(r'\$(?:\{)?(?:HERE|SCRIPT_DIR|PWD|ROOT)(?=[^A-Za-z0-9_]|$)|\$\((?:pwd|dirname)\b')
+REPO_REF = re.compile(r'\$(?:\{)?(?:HERE|SCRIPT_DIR|PWD|ROOT|REPO|REPO_ROOT|WORKTREE)(?=[^A-Za-z0-9_]|$)|\$\((?:pwd|dirname|git\s+rev-parse)\b', re.I)
+
+
+def checkout_path(path):
+    if path.startswith('$'):
+        return False
+    if not path.startswith('/'):
+        return True
+    return Path(path).resolve().is_relative_to(ROOT)
 
 
 def repo_scratch(source):
@@ -18,8 +27,11 @@ def repo_scratch(source):
         if line.lstrip().startswith('#'): continue
         for match in re.finditer(r'(?:\$\(|`|^|[;&|])\s*(?:(?:if|!|command)\s+)*(?:/[A-Za-z0-9_./-]*/)?mktemp\s+([^\n)`]*)', line):
             args = match.group(1)
-            if not re.search(r'(?:^|\s)(?:-d|--directory)(?:\s|$)', args): continue
             if REPO_REF.search(args):
+                found.append(number); continue
+            # Check defaults even when TMPDIR happens to be set on this host.
+            defaults = re.findall(r'\$\{[A-Za-z_][A-Za-z0-9_]*:?[=-]([^{}]*)\}', args)
+            if any(checkout_path(default) for default in defaults):
                 found.append(number); continue
             # A relative template also depends on the caller's working directory.
             words = args.replace('"', '').replace("'", '').split()
@@ -41,6 +53,23 @@ class ShellScratch(unittest.TestCase):
             with self.subTest(command=command): self.assertTrue(repo_scratch(command))
         for command in ['mktemp -d', 'mktemp -d "${TMPDIR:-/tmp}/x.XXXXXX"', 'mktemp -d "$TMP/child.XXXXXX"', 'echo "FAIL: mktemp -d failed"']:
             with self.subTest(command=command): self.assertFalse(repo_scratch(command))
+
+    def test_guard_rejects_checkout_fallbacks(self):
+        old_line = 'T="$(mktemp -d "${TMPDIR:-.}/osrc-lock-owner.XXXXXX")"'
+        self.assertEqual(repo_scratch(old_line), [1])
+        for fallback in ('.', './tests', 'tests', '../checkout', '${ROOT}/tests',
+                         '$REPO', '${repo_root}', '$WORKTREE', '$(git rev-parse --show-toplevel)',
+                         str(HERE), str(ROOT)):
+            for operator in ('-', ':-', '=', ':='):
+                command = 'mktemp -d "${TMPDIR' + operator + fallback + '}/x.XXXXXX"'
+                with self.subTest(command=command):
+                    self.assertEqual(repo_scratch(command), [1])
+        for command in ('mktemp "${TMPDIR:-.}/file.XXXXXX"',
+                        'mktemp -d -p "${TMPDIR:-.}" child.XXXXXX',
+                        'mktemp -d "${TMPDIR:-${CACHE:-.}}/child.XXXXXX"'):
+            with self.subTest(command=command):
+                self.assertEqual(repo_scratch(command), [1])
+        self.assertEqual(repo_scratch(old_line.replace('TMPDIR:-.', 'TMPDIR:-/tmp')), [])
 
     def test_named_suites_stop_when_scratch_allocation_fails(self):
         with tempfile.TemporaryDirectory(prefix='osrc-scratch-guard-') as d:

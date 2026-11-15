@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: nested-sandbox
 # conformance.sh — U5: per-lane conformance harness (the don't-ship-blind gate).
 #
 # TWO layers:

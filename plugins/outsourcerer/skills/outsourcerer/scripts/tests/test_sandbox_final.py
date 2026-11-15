@@ -100,7 +100,7 @@ class SandboxFinal(unittest.TestCase):
                 for directory in ('usr/bin', 'bin'):
                     alias = str(p / directory / name)
                     executable = overlays.get(alias, alias)
-                    command = [executable, '-L', 'osrc-test-L14b', 'display-message'] if name == 'tmux' else [executable]
+                    command = [executable, '-L', 'osrc-test-L14c', 'display-message'] if name == 'tmux' else [executable]
                     result = subprocess.run(command, capture_output=True)
                     self.assertEqual(result.returncode, 99, 'unmasked executable alias: ' + alias)
 
@@ -156,9 +156,16 @@ class SandboxFinal(unittest.TestCase):
             policy = profile.read_text()
             self.assertIn('(allow file-read* file-map-executable (subpath "' + developer + '"))', policy)
             self.assertNotIn('(subpath "/Applications")', policy)
+            for path in ('/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/usr/tmp'):
+                self.assertIn('(deny file-read-metadata (literal "' + path + '"))', policy)
+            writes = re.findall(r'\(allow file-write\* (.*)', policy)
+            self.assertEqual(writes, ['(subpath "' + d + '"))',
+                                      '(literal "/dev/null") (literal "/dev/zero"))'])
 
     def test_linux_root_is_readonly(self):
-        self.assertIn('--remount-ro /', RUNNER.read_text())
+        source = RUNNER.read_text()
+        for mount in ('/', '/tmp', '/run', '/dev', '/proc'):
+            self.assertIn('--remount-ro ' + mount, source)
 
     def test_isolation_probe_accepts_readonly_filesystem_denial(self):
         source = (SCRIPTS / 'tests/test_sealed_runner.py').read_text()

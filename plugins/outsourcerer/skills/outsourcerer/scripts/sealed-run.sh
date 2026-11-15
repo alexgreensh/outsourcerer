@@ -19,13 +19,27 @@ for arg in "$@"; do
   case "$path" in "$scripts/tests/"*.sh) [ -f "$path" ] || exit 2 ;; *) echo 'sealed-run: test outside scripts/tests' >&2; exit 2 ;; esac
   tests+=("$path")
 done
+# Capability declarations are data, never sourced. Refuse the whole batch before
+# executing anything when a suite needs a boundary the sandbox must keep closed.
+for test_path in ${tests[@]+"${tests[@]}"}; do
+  lines=0
+  while IFS= read -r line && [ "$lines" -lt 20 ]; do
+    lines=$((lines+1))
+    case "$line" in '# sealed-run-requires: '*)
+      reason="${line#\# sealed-run-requires: }"
+      case "$reason" in network|real-tmux|nested-sandbox) ;; *) echo 'sealed-run: invalid capability declaration' >&2; exit 2 ;; esac
+      echo "sealed-run: unsupported suite: requires $reason (sandbox denies it): $test_path" >&2
+      exit 77 ;;
+    esac
+  done < "$test_path"
+done
 cd "$root" || exit 2
 t="$(mktemp -d "$root/.osrc-sealed.XXXXXXXX")" || exit 2
 trap 'rm -rf "$t"' EXIT
 mkdir -p "$t/bin" "$t/home" "$t/osrc" "$t/tmp" || exit 2
-agents='claude devin codex tmux agy droid gemini cursor-agent hermes'
+agents='claude devin codex tmux agy droid gemini cursor-agent hermes cline pi agent warp ollama opencode grok composer'
 for v in $agents; do
-  printf '#!/bin/sh\nexit 99\n' > "$t/bin/$v"; chmod 755 "$t/bin/$v"
+  printf '#!/bin/sh\necho "sealed-run: denied capability: real %s" >&2\nexit 99\n' "$v" > "$t/bin/$v"; chmod 755 "$t/bin/$v"
 done
 isolation=none
 case "$(uname -s)" in
@@ -40,7 +54,14 @@ overall=0
 # Check the interpreter runtime as well as sandbox application, before any worktree code runs.
 for test_path in __OSRC_SANDBOX_PROBE__ ${tests[@]+"${tests[@]}"}; do
   rc=0
-  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /bin/bash -p -c '/usr/bin/renice 19 "$$" >/dev/null 2>&1 || :; exec /usr/bin/perl -e "alarm 600; exec @ARGV" "$@"' sealed-run)
+  cmd=(/usr/bin/env -i "PATH=$t/bin:/usr/bin:/bin:/usr/sbin:/opt/homebrew/bin" "HOME=$t/home" "OSRC_HOME=$t/osrc" "TMPDIR=$t/tmp" /bin/bash -p -c '/usr/bin/renice 19 "$$" >/dev/null 2>&1 || :
+cd "$TMPDIR" || exit 78
+probe=$(cat <<OSRC_SHELL_PROBE
+sealed-shell-runtime
+OSRC_SHELL_PROBE
+) || { echo "sealed-run: shell scratch unavailable (here-document)" >&2; exit 78; }
+[ "$probe" = sealed-shell-runtime ] || exit 78
+exec /usr/bin/perl -e "alarm 600; exec @ARGV" "$@"' sealed-run)
   if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then
     cmd+=(/usr/bin/python3 -I -c 'import json, pathlib, socket')
   else
@@ -64,6 +85,10 @@ with open(sys.argv[1], 'w') as f:
         f.write('(allow file-read* file-map-executable (subpath %s))\n' % q(p))
     f.write('(allow file-write* (subpath %s))\n(deny network*)\n' % q(sys.argv[3]))
     f.write('(allow file-write* (literal "/dev/null") (literal "/dev/zero"))\n')
+    # Bash 3.2 ignores TMPDIR for here-docs. Hide its system temp candidates so
+    # get_sys_tmpdir falls back to cwd, which the launcher pins to scratch.
+    for p in ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp', '/usr/tmp']:
+        f.write('(deny file-read-metadata (literal %s))\n' % q(p))
     for v in sys.argv[4].split():
         for d in ['/usr/bin', '/bin', '/usr/local/bin', '/opt/homebrew/bin']:
             p = os.path.realpath(os.path.join(d, v))
@@ -93,7 +118,9 @@ PY
       done
       /usr/bin/bwrap --die-with-parent --new-session --clearenv --unshare-user --cap-drop ALL --unshare-net --unshare-pid --unshare-ipc \
         "${mounts[@]}" --tmpfs /tmp --tmpfs /run --dev /dev --proc /proc \
-        --ro-bind "$root" "$root" --bind "$t" "$t" --remount-ro / --chdir "$root" -- "${cmd[@]}" || rc=$? ;;
+        --ro-bind "$root" "$root" --bind "$t" "$t" --remount-ro / \
+        --remount-ro /tmp --remount-ro /run --remount-ro /dev --remount-ro /proc \
+        --chdir "$t/tmp" -- "${cmd[@]}" || rc=$? ;;
     *) "${cmd[@]}" || rc=$? ;;
   esac
   if [ "$test_path" = __OSRC_SANDBOX_PROBE__ ]; then

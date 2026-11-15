@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# sealed-run-requires: network
 # test_hub.sh -- Mission Control: `hub export` SCHEMA output from seeded OSRC_HOME,
 # `hub serve` local server (token gate, answers round-trip, refresh, loopback only),
 # and the LOADER.md symlink fallback (lib functions load when invoked via a symlink).
