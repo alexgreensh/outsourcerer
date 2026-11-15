@@ -341,10 +341,27 @@ check _engine_defaults
 _pin_flag_forms() (
   _OSRC_PIN_DISP=devin; _OSRC_PIN_MODEL=pinned
   _osrc_pin_argv run --model=old -mold --tier capable 'task -m text' || return 1
-  [ "${_OSRC_PIN_ARGV[*]}" = 'run -m pinned --tier capable task -m text' ] || return 1
+  [ "${_OSRC_PIN_ARGV[*]}" = 'run -m pinned --model=old -mold --tier capable task -m text' ] || return 1
+  _osrc_pin_argv run -mold 'task -m text' || return 1
+  [ "${_OSRC_PIN_ARGV[*]}" = 'run -m pinned -mold task -m text' ] || return 1
   ! _osrc_pin_argv run --tier && ! _osrc_pin_argv run -m
 )
 check _pin_flag_forms
+_bg_prompt_words() (
+  export OSRC_SOURCED=0; SCRIPT_PATH="$D/outsourcerer.sh"; OSRC_SPEND_NEXT=x
+  _bg_cloud_preack() { :; }; _wake_on_finish_hint() { :; }; _async_supervision_notice() { :; }
+  _bg_launch() {
+    [ "$1|$2|$3" = 'run|-m|local' ] || return 1; shift 3
+    [ "$#" = "${#expected[@]}" ] || return 1
+    local word; for word in "${expected[@]}"; do [ "$1" = "$word" ] || return 1; shift; done
+    echo 20261115-120000-prompt
+  }
+  local -a expected=('-mention the timeout')
+  cmd_bg --provider local run '-mention the timeout' >/dev/null 2>&1 || return 1
+  expected=(--model=opus fix)
+  cmd_bg --provider local run --model=opus fix >/dev/null 2>&1
+)
+check _bg_prompt_words
 _engine_default_bg() (
   export OSRC_SOURCED=0; SCRIPT_PATH="$D/outsourcerer.sh"; OSRC_SPEND_NEXT=x
   printf '#!/bin/sh\nexit 0\n' > "$T/bin/droid"; chmod +x "$T/bin/droid"

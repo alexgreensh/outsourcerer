@@ -89,7 +89,6 @@ _osrc_pin_argv() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -m|--model) [ $# -ge 2 ] || return 1; shift 2 ;;
-      --model=*|-m?*) shift ;;
       --tier|--with|--perm|--account|--cap|--trust-lane|--effort|--reasoning) [ $# -ge 2 ] || return 1; _OSRC_PIN_ARGV+=("$1" "$2"); shift 2 ;;
       --perm=*|--cap=*|--allow-downgrade|--force-lane|--spend-ok|--no-advise|--cloud-ack|--wait|--foreground) _OSRC_PIN_ARGV+=("$1"); shift ;;
       *) _OSRC_PIN_ARGV+=("$@"); break ;;
