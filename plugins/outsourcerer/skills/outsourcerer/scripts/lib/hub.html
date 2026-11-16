@@ -154,7 +154,7 @@ button { font: inherit; color: inherit; }
 .sub { margin: 0; }
 .dli { display: flex; flex-direction: column; gap: 4px; }
 .llist { display: flex; flex-direction: column; gap: 4px; }
-.lrow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px; border-radius: 10px; background: none; border: 0; text-align: left; width: 100%; cursor: default; }
+.lrow { display: grid; grid-template-columns: 12px minmax(7em, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px; border-radius: 10px; background: none; border: 0; text-align: left; width: 100%; cursor: default; }
 .lrow:hover { background: color-mix(in srgb, var(--ink) 9%, transparent); }
 .lrow .nm { font-weight: 600; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; align-items: center; min-width: 0; }
 .lrow .nmt { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.25; } .lrow .tags { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; } /* PL: icon inline left of the name, the name wraps (never truncated), pills on their own line */
@@ -768,7 +768,7 @@ a.pill svg { width: 13px; height: 13px; }
       const r = el('button', 'lrow'); r.type = 'button'; r.id = 'lim-' + l.id;
       const nm = el('span', 'nm'); nm.append(hlogo(l), el('span', 'nmt', l.name || l.id)); const billing = l.billing || (l.paid ? 'metered' : 'subscription'); let tag = null; if ((billing === 'metered' && !/^pay per use$/i.test(l.left || '')) || (billing === 'unknown' && !l.plan_seen)) { tag = el('span', 'paidtag', billing === 'metered' ? 'pay per use' : 'plan not confirmed'); tag.title = billing === 'metered' ? 'Billed per use. Outsourcerer asks before every run.' : 'Outsourcerer could not confirm a plan login, so it asks before every run.'; }
       const PW = window.OSRC_HUB_PLANS; const wl = PW && PW.windows ? PW.windows(l, el, ic) : null;   // PL: 5-hour and weekly lines, each with its renew time
-      r.append(el('span', 'dot ' + st), nm, el('span', 'lf', l.left || LSTATE[st] || '')); if (tag) { const tg = el('span', 'tags'); tg.append(tag); r.append(tg); }
+      r.append(el('span', 'dot ' + st), nm, el('span', 'lf', String(l.left || LSTATE[st] || '').split(' · ')[0]));   // the model-group detail is in the window lines below if (tag) { const tg = el('span', 'tags'); tg.append(tag); r.append(tg); }
       if (wl) r.append(wl); else if (l.renews) { const rn = el('span', 'rn'); rn.append(ic('rotate-ccw'), document.createTextNode((st === 'ok' || st === 'low' ? 'Renews ' : 'Back ') + l.renews)); r.append(rn); }
       r.setAttribute('aria-label', (l.name || l.id) + ': ' + (LSTATE[st] || st) + (l.left ? ', ' + l.left : '') + (l.renews ? ', renews ' + l.renews : ''));
       pop(r, (c) => {
