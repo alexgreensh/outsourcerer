@@ -48,6 +48,8 @@ fx idle '› first task' '• Working (3s • esc to interrupt)' '• DONE' '  W
   '› Ask Codex to do anything' '  ← for agents · ? for shortcuts'
 fx booting '› Ask Codex to do anything'; title booting $'\xe2\xa0\xa7 proj'
 fx typed '› Create a file named hello.txt containing' '  the single line WINPTY_OK' '  ? for shortcuts'
+fx echo_done '› first task' '› second task' '  Worked for 3s • 11:05 PM'
+fx typed_busy '› first task' '• Working (3s • esc to interrupt)' '› second task'
 
 # ---- menu detection --------------------------------------------------------------------------------
 _winpty_menu "$TMP/fx/trust" >/dev/null && ok "trust prompt reads as an open menu" || bad "trust prompt not seen as a menu"
@@ -80,6 +82,33 @@ _winpty_composer_holds "$TMP/fx/idle" "Create a file named hello.txt" \
   && bad "an empty composer read as holding the text" || ok "an empty composer does not hold the text"
 out="$(_winpty_clean "$TMP/fx/working")"
 case "$out" in *$'\033'*|*$'\r'*) bad "read output still carries OSC/CR noise" ;; *) ok "read output is stripped of OSC titles and CRs" ;; esac
+# The winpty log is append-only, so a SUBMITTED line's echo is never erased. It is an unsent
+# composer only when NO turn edge (busy / turn-end row) follows it — otherwise the engine already
+# accepted the send and a retry Enter is a duplicate (the 0.16.4 double-Enter bug, from the real
+# Codex capture in the 'working' fixture).
+_winpty_composer_holds "$TMP/fx/working" "second task" \
+  && bad "a submitted echo with the engine working read as unsent text" || ok "a submitted echo while the engine works is not an unsent composer"
+_winpty_composer_holds "$TMP/fx/echo_done" "second task" \
+  && bad "a submitted echo after a fast-finished turn read as unsent text" || ok "a submitted echo with the turn already ended is not an unsent composer"
+_winpty_composer_holds "$TMP/fx/typed_busy" "second task" \
+  && ok "text typed mid-turn with no turn edge after it still reads as unsent" || bad "a genuine hold (busy row older than the typing) was missed"
+
+# ---- send retry loop: a retry Enter only for a verifiably unsent composer --------------------------
+# _winpty_cmd_send against a session dir whose out.log is a fixture; count the enter-* mailbox files.
+SESSION_NAME="t-winpty-send"
+sent_to() { local sd="$TMP/sess-$1"; mkdir -p "$sd/cmd"; cp "$TMP/fx/$1" "$sd/out.log"; shift; _winpty_cmd_send "$sd" "$*" >/dev/null; ls "$sd"/cmd/enter-* 2>/dev/null | wc -l | tr -d ' '; }
+expect "a submitted send (engine working on it) gets no retry Enters" "$(sent_to working 'second task')" "0"
+expect "a submitted send (turn already ended) gets no retry Enters" "$(sent_to echo_done 'second task')" "0"
+expect "a fresh empty composer (control) gets no retry Enters"     "$(sent_to idle 'second task')" "0"
+expect "a genuinely unsent composer still gets its justified retries" "$(sent_to typed 'Create a file named hello.txt containing the single line WINPTY_OK')" "2"
+# Menu transition DURING the retry window: the loop's per-iteration menu check must stop the next
+# Enter, not only the guard at send time. The menu rows land after the first retry check (~1.5s)
+# and well before the second (~3s).
+sdm="$TMP/sess-menutrans"; mkdir -p "$sdm/cmd"; cp "$TMP/fx/typed" "$sdm/out.log"
+( sleep 1.7; printf '%s\r\n' '› 1. Trust and continue' '  2. Back to Agent Command Center' '  enter continue · esc back' >> "$sdm/out.log" ) &
+_winpty_cmd_send "$sdm" 'Create a file named hello.txt containing the single line WINPTY_OK' >/dev/null
+wait
+expect "a menu opening mid-window stops further retry Enters" "$(ls "$sdm"/cmd/enter-* 2>/dev/null | wc -l | tr -d ' ')" "1"
 
 # ---- broker keystrokes against a fake winpty ---------------------------------------------------------
 cat > "$TMP/bin/winpty" <<'EOF'
