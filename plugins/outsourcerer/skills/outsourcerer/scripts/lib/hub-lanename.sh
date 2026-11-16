@@ -75,9 +75,9 @@ _osrc_hub_lane_name() {
       _osrc_hub_idlike "$t" && t=""
     fi
   fi
+  [ -n "$t" ] || [ -d "$OSRC_JOBS/$id" ] || t="$(_osrc_hub_folder_label "$id")"   # osrc-auto-P56W -> P56W, even in a shared worktree
   [ -n "$t" ] || [ -z "$cwd" ] || t="$(_osrc_hub_folder_label "$cwd")"
   [ -n "$t" ] || [ -z "$br" ] || t="$(_osrc_hub_folder_label "$br")"
-  [ -n "$t" ] || [ -n "$cwd" ] || t="$(_osrc_hub_folder_label "$id")"
   if [ -z "$t" ]; then
     case "$prov" in
       cc|claude) t="Claude lane" ;; devin|dv) t="Devin lane" ;; codex|cx) t="Codex lane" ;;
