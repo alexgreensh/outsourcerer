@@ -19,6 +19,7 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 TMP="$(mktemp -d)"
+mkdir -p "$TMP/home"; export HOME="$TMP/home"   # never the real home (test_tests_set_home)
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
