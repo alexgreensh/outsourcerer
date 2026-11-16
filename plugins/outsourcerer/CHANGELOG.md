@@ -2,6 +2,20 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.3
+
+### Added
+
+- **Every project keeps its full history.** Each project page shows a timeline of every lane that ran and how it ended, every release shipped, every PR merged and every issue closed, with links. Home cards sum it up in one line. GitHub data is read only and refreshed at most every 10 minutes.
+- **All your plans at a glance.** The plans card lists every checked plan with what's left and when it renews.
+
+### Fixed
+
+- **Renewals always read in days.** Saved plan checks from earlier versions now show "Renews in 3 days · Thu 19 Nov" instead of hours.
+- **Real names everywhere.** Lanes and projects show human names, never session ids.
+- **Finished lanes stay visible.** They fold under Finished instead of disappearing.
+- **A calmer plans header.** One line, with a neutral stamp for the last check.
+
 ## 0.16.2
 
 ### Added
