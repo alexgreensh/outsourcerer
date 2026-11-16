@@ -121,12 +121,12 @@ grep -q 'renews_at:(\$rat|tonumber)' "$S/lib/hub.sh" && ok "local builder rows c
 
 echo "=== 2. names: never a session id, hash, sid or slug ==="
 lanes="$(jq -r '.projects[].lanes[]?.short' <<<"$X")"
-printf '%s\n' "$lanes" | grep -qx 'Video' && ok "devin tmux lane reads 'Video' (folder), not $LA" || bad "video lane name: $lanes"
-printf '%s\n' "$lanes" | grep -qx 'F-TEST brief in total-recall' && ok "Claude lane reads its own transcript title" || bad "claude lane name: $lanes"
-printf '%s\n' "$lanes" | grep -qx 'V185 F4a' && ok "job lane with no task reads its folder 'V185 F4a', not 'or yolo <hex>'" || bad "job lane name: $lanes"
+grep -qx 'Video' <<<"$lanes" && ok "devin tmux lane reads 'Video' (folder), not $LA" || bad "video lane name: $lanes"
+grep -qx 'F-TEST brief in total-recall' <<<"$lanes" && ok "Claude lane reads its own transcript title" || bad "claude lane name: $lanes"
+grep -qx 'V185 F4a' <<<"$lanes" && ok "job lane with no task reads its folder 'V185 F4a', not 'or yolo <hex>'" || bad "job lane name: $lanes"
 names="$(jq -r '.projects[].name' <<<"$X")"
-printf '%s\n' "$names" | grep -q 'Total Recall 1.9.85 orchestrator handover' && ok "slug /rename title skipped for the ai-title" || bad "project names: $names"
-printf '%s\n' "$names" | grep -q 'total-recall-85' && bad "slug title still on a card" || ok "no 'total-recall-85' on a card"
+grep -q 'Total Recall 1.9.85 orchestrator handover' <<<"$names" && ok "slug /rename title skipped for the ai-title" || bad "project names: $names"
+grep -q 'total-recall-85' <<<"$names" && bad "slug title still on a card" || ok "no 'total-recall-85' on a card"
 D="$(OSRC_SOURCED=1 bash -c '. "$1"; _osrc_hub_folder_label "$2"; _osrc_hub_folder_label "$3"; printf "[%s]" "$(_osrc_hub_folder_label "$4")"' _ "$ENG" "/x/v185-redo" "$LA" "/x/9f8e7d6c5b4a")"
 [ "$D" = "$(printf 'V185 redo\nVideo\n[]')" ] && ok "folder labels: 'V185 redo', 'Video', hex folder -> empty" || bad "folder labels: $(printf '%s' "$D" | tr '\n' '|')"
 
@@ -156,7 +156,7 @@ jq -e '[.items[] | select(.kind == "pr")] | map("\(.number):\(.outcome)") | sort
 jq -e '[.items[] | select(.kind == "issue" and .number == 62)] | length == 1' >/dev/null <<<"$H" && ok "closed issue #62 listed" || bad "issues: $(jq -c '[.items[]|select(.kind=="issue")]' <<<"$H")"
 jq -e '[.items[] | select(.kind == "lane")] | map("\(.title)=\(.outcome)") | sort == ["F-TEST brief in total-recall=running","V185 F4a=finished"]' >/dev/null <<<"$H" && ok "every lane with outcome: live Claude lane running, finished job green" || bad "lanes: $(jq -c '[.items[]|select(.kind=="lane")|{title,outcome}]' <<<"$H")"
 jq -e '.summary.prsMerged == 1 and .week.releases == 1 and .week.issuesClosed == 1' >/dev/null <<<"$H" && ok "summary + this-week counts" || bad "summary: $(jq -c '{summary,week}' <<<"$H")"
-grep -vE '^(release|pr|issue) list ' "$T/gh.log" | grep -q . && bad "gh called with a non-list command: $(cat "$T/gh.log")" || ok "gh used read-only (list calls only)"
+[ -n "$(grep -vE '^(release|pr|issue) list ' "$T/gh.log")" ] && bad "gh called with a non-list command: $(cat "$T/gh.log")" || ok "gh used read-only (list calls only)"
 c1="$(wc -l < "$T/gh.log")"; OSRC_HUB_FAST=1 bash "$ENG" hub export >/dev/null 2>&1; c2="$(wc -l < "$T/gh.log")"
 [ "$c1" = "$c2" ] && ok "second export served GitHub data from the 10-minute cache" || bad "gh re-called within TTL ($c1 -> $c2)"
 touch "$T/gh-offline"; git -C "$WF" commit -q --allow-empty -m x >/dev/null 2>&1; git -C "$WF" tag v1.9.84 >/dev/null 2>&1
