@@ -131,7 +131,7 @@
 #
 # WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
 # outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
-# `session` start is not supported on Windows (only `session read` goes through the winpty broker);
+# `session` runs through the bundled winpty broker instead of tmux (start/send/answer/read/clear/stop);
 # everything else works (bg/fanout cover the same ground for long or parallel work, supervised).
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
@@ -11604,7 +11604,7 @@ _autodetach_run() {
     fi
     _use_headless=1
     if [ "$OSRC_PLATFORM" = "windows" ]; then
-      printf '>>> [auto-detach] Git Bash has no tmux and interactive `session` start is not supported on Windows, so there is nothing to install. Running the HEADLESS bg path (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0.\n' >&2
+      printf '>>> [auto-detach] Git Bash has no tmux, so there is nothing to install (a steerable `session start` runs through the winpty broker instead). Running the HEADLESS bg path (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0.\n' >&2
     else
     printf '>>> [auto-detach] tmux is not installed. RECOMMENDED: install tmux (%s) — it is the basic requirement for steerable interactive `session` mode; without it you can run/fanout headless but cannot watch or steer a live delegate. Falling back to the HEADLESS bg path now (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0; fail instead of falling back with OSRC_REQUIRE_TMUX=1.\n' \
       "$( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')" >&2
@@ -17899,10 +17899,11 @@ _session_relaunch_effort() { # <provider> <model> <effort>
 _winpty_session() {
   local sub="${1:-}"; shift || true
   _validate_session_name
-  if [ "$sub" != "read" ]; then
-    echo "unverified Windows mutation support" >&2
-    return 1
-  fi
+  # start/send/answer/read/clear/stop were verified end to end on Windows 11 + Git for Windows winpty
+  # 0.4.3 + codex 0.169 (lib/winpty.sh has the details). The Devin model picker keystrokes were not.
+  case "$sub" in
+    model) echo "unverified Windows mutation support" >&2; return 1 ;;
+  esac
   local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
   local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
   [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
@@ -17973,8 +17974,22 @@ _winpty_session() {
         _w=$((_w + 1))
       done
 
+      # Fail closed when the engine died during boot (e.g. winpty "cannot start 'codex': Not found in
+      # PATH", or a winpty assertion). This used to WARN and still print "Started", leaving a dead
+      # session the orchestrator believed was live. Give a slow engine a few seconds before judging.
+      _w=0
+      while [ "$_w" -lt 15 ] && [ -f "$sdir/winpty.pid" ] && kill -0 "$(cat "$sdir/winpty.pid" 2>/dev/null)" 2>/dev/null; do
+        sleep 0.2; _w=$((_w + 1))
+      done
       if [ ! -f "$sdir/winpty.pid" ] || ! kill -0 "$(cat "$sdir/winpty.pid" 2>/dev/null)" 2>/dev/null; then
-        echo "WARN: winpty did not start quickly; see $sdir/broker.log" >&2
+        {
+          echo "session start FAILED: the $PROVIDER engine is not running under winpty. Its last output:"
+          _winpty_clean "$sdir/out.log" 8 | sed 's/^/  | /'
+          _winpty_clean "$sdir/broker.log" 4 | sed 's/^/  broker: /'
+        } >&2
+        kill "$(cat "$sdir/broker.pid" 2>/dev/null)" 2>/dev/null || true
+        rm -rf "$sdir"
+        return 1
       fi
 
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
@@ -17997,7 +18012,7 @@ _winpty_session() {
       else
         echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       fi
-      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      echo "Give it ~8s to boot, then:  $0 session read [--state]   |   $0 session send \"…\"   |   $0 session answer [<option-number>]   |   $0 session clear   |   $0 session stop"
       _owner_record "$SESSION_NAME"
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
@@ -18005,27 +18020,60 @@ _winpty_session() {
       [ -n "${1:-}" ] || die "session send needs text"
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
       _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
+      # Menu guard (tmux parity, Bug A): text typed into an open menu is lost, and its Enter picks
+      # whatever row the cursor is on. Refuse and point at `session answer`.
+      local _wmenu
+      if _wmenu="$(_winpty_menu "$sdir/out.log")"; then
+        printf '%s\n' "$_wmenu"
+        printf 'EVENT failed %s %s send refused: menu open; nothing typed\nNEXT %s session answer <option-number>\n' "$SESSION_NAME" "$(date +%s)" "$0"
+        die "session send refused: the session is showing a menu, not a text composer. Nothing was typed. Answer it with: $0 session answer <option-number>"
+      fi
       mkdir -p "$sdir/cmd"
       local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
       printf '%s' "$*" > "$tmp"
       mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$-$RANDOM.txt"
-      sleep 0.4
+      # The broker presses Enter once. Some TUIs swallow the first Enter of a fast paste; press it
+      # again only when the text is verifiably still in the composer and no menu has opened.
+      local _wtry=0
+      while [ "$_wtry" -lt 2 ]; do
+        sleep 1.5
+        [ -d "$sdir/cmd" ] || break
+        _winpty_menu "$sdir/out.log" >/dev/null && break
+        _winpty_composer_holds "$sdir/out.log" "$*" || break
+        : > "$sdir/cmd/enter-$(date +%s)-$$-$RANDOM"
+        _wtry=$((_wtry + 1))
+      done
       echo "sent. Read progress with: $0 session read"
       ;;
-    read)
+    answer)
+      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
+      local _wm _wmv
+      _wm="$(_winpty_menu "$sdir/out.log")" || die "no interactive menu detected in '$SESSION_NAME'. Re-check with: $0 session read"
+      if [ "$#" -eq 0 ]; then
+        printf '%s\n' "$_wm"
+        echo "answer with:  $0 session answer <option-number>"
+        return 0
+      fi
+      _wmv="$(_winpty_answer_move "$sdir/out.log" "$1")" || die "session answer: nothing selected (reason above). Re-check with: $0 session read"
+      mkdir -p "$sdir/cmd"
+      local tmp; tmp="$(mktemp "$sdir/cmd/.answer.XXXXXX" 2>/dev/null || echo "$sdir/cmd/answer.$$")"
+      printf '%s' "$_wmv" > "$tmp"
+      mv "$tmp" "$sdir/cmd/answer-$(date +%s)-$$-$RANDOM.txt"
+      sleep 1.5
+      echo "answered option $1. Re-check with: $0 session read --state"
+      ;;
+    read|state)
       local _want_state=0
+      [ "$sub" = state ] && _want_state=1
       while [ "$#" -gt 0 ]; do case "$1" in --state) _want_state=1; shift;; *) shift;; esac; done
       [ -d "$sdir" ] || { echo "no session '$SESSION_NAME' (run: $0 session start)"; return 0; }
       if [ "$_want_state" = "1" ]; then
-        # WITH --state: classify the log tail. The no-flag path below stays byte-identical.
-        if [ -f "$sdir/out.log" ]; then
-          tail -n 200 "$sdir/out.log" | _pane_state_classify
-        else
-          _pane_state_json unknown "no output yet"
-        fi
+        # WITH --state: menu (after the last composer row) > title spinner > engine reader on the tail.
+        _winpty_state_json "$sdir/out.log" "$(_session_record "$SESSION_NAME" 2>/dev/null | cut -f1)"
       else
+        # In-band window titles (OSC 0, one per spinner frame) and CRs are terminal noise, not output.
         if [ -f "$sdir/out.log" ]; then
-          tail -n 200 "$sdir/out.log" | grep -v '^[[:space:]]*$'
+          _winpty_clean "$sdir/out.log" 200
         else
           echo "(no output yet)"
         fi
@@ -18081,7 +18129,7 @@ _winpty_session() {
       echo "stopped '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | stop"
+      die "session subcommand: start | send \"text\" | answer [<option-number>] | read [--state] | clear | model [NAME] | effort <level> | stop"
       ;;
   esac
 }
@@ -19098,7 +19146,7 @@ doctor() {
   fi
   echo "  default model: $DEFAULT_MODEL"
   have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: jobs/status/advise/parity)" || echo "  jq:   not installed -> $( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || { [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install jq' || echo 'apt/dnf install jq'; }) (jobs/status/advise need it)"
-  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' unavailable; bg/fanout cover it" || echo "brew/apt install tmux — only needed for 'session'"))"
+  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' uses the winpty broker instead" || echo "brew/apt install tmux — only needed for 'session'"))"
   local lm=""
   if [ "$_doff" = "1" ]; then
     echo "  live models: skipped (OSRC_DOCTOR_OFFLINE)"

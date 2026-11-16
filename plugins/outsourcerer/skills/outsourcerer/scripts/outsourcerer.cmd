@@ -1,8 +1,8 @@
 @echo off
 rem outsourcerer.cmd — Windows launcher, NO WSL REQUIRED.
 rem Runs outsourcerer.sh under Git Bash (ships with Git for Windows, which you almost
-rem certainly already have). WSL is NOT needed and never was: only the optional tmux
-rem "session" mode is unavailable on Windows; run/edit/yolo/bg/fanout all work.
+rem certainly already have). WSL is NOT needed and never was: run/edit/yolo/bg/fanout
+rem all work, and "session" runs through the bundled winpty broker instead of tmux.
 setlocal EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 
