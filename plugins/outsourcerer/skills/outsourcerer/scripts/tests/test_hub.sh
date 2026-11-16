@@ -525,6 +525,9 @@ SRV=$!
 URL5="$(wait_url "$TMP/serve5.log")"
 [ -n "$URL5" ] || { bad "idle-test serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 curl -s -o /dev/null -H "X-Hub-Token: ${URL5##*t=}" "${URL5%%\?*}/api/projects"   # a page poll -> refresh stays live
+# A warm start (0.16.4) answers that poll from the saved export while the startup export still runs;
+# measure only after the startup export itself has landed.
+for _ in $(seq 1 120); do grep -q 'startup export done' "$TMP/serve5.log" && break; sleep 0.5; done
 m0="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 sleep 3
 m1="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"

@@ -80,6 +80,7 @@ class Hub:
         # export runs (a slow export kept the URL back past the CI wait, MC-8); data requests wait here.
         self.first_export = threading.Event()
         self.warming = False       # serving the last saved export while the startup export runs
+        self.fresh_export = threading.Event()   # the startup export itself finished (warm start or not)
         # CSP hashes for the page's inline <script> blocks, computed once so
         # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
         # self-contained file, so its blocks are knowable at startup.
@@ -486,7 +487,7 @@ def make_handler(hub):
             raw = self.rfile.read(n) if n > 0 else b""
             if u.path == "/api/refresh":
                 # Refresh carries no payload; the page POSTs it empty.
-                hub.first_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
+                hub.fresh_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
                 try:
                     data = hub.run_export()
                 except Exception as e:
@@ -559,6 +560,9 @@ def main():
             with hub.lock:
                 hub.warming = False
             hub.first_export.set()
+            hub.fresh_export.set()
+            sys.stderr.write("[hub] startup export done\n")
+            sys.stderr.flush()
         hub.refresh_loop()
     threading.Thread(target=first_then_loop, daemon=True).start()
 
