@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# scripts/preflight.sh [--base REF] [--static-only]: the local gate that runs BEFORE a lane says done and
+# before any push, so CI never meets a failure the Mac could have caught for free.
+#
+# Built from the last 40 red CI runs (2026-11-16, out/ci-failure-history.tsv): the top classes were
+#   1. a new suite nobody registered in conformance.sh ("never run by the gate", 18 failures),
+#   2. static lints such as quiet grep in a pipe (test_no_pipe_grep_q, 8),
+#   3. suites that cover the file just changed (test_hub 16, test_hub_home 11, test_limit_gate 7, ...),
+#      including a lib that only works when the engine's loader sourced its sibling first.
+# Order is cheapest first; the first failing stage stops the run.
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 2
+BASE=origin/main; STATIC_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --base) BASE="$2"; shift 2 ;;
+    --static-only) STATIC_ONLY=1; shift ;;
+    *) echo "usage: scripts/preflight.sh [--base REF] [--static-only]" >&2; exit 2 ;;
+  esac
+done
+T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
+fail=0; t0=$(date +%s)
+stage() { printf '\n== %s\n' "$1"; }
+run() { # <label> <cmd...>
+  local s=$(date +%s) log; log="$(mktemp "${TMPDIR:-/tmp}/preflight.XXXXXX")"
+  if "${@:2}" >"$log" 2>&1; then echo "ok   $1 ($(( $(date +%s) - s ))s)"
+  else echo "FAIL $1 ($(( $(date +%s) - s ))s)"; tail -25 "$log" | sed 's/^/     | /'; fail=1; fi
+  rm -f "$log"
+}
+
+stage "1. registration: every test file is in the conformance runner"
+_suites_of() { # <var>: every name assigned to _ALL_SUITES / _PYTHON_SUITES in conformance.sh (strings span lines)
+  python3 -I -c 'import re,sys
+s=open(sys.argv[1],encoding="utf-8").read()
+print(" ".join(n for m in re.finditer(r"^"+sys.argv[2]+r"=\"([^\"]*)\"",s,re.M) for n in m.group(1).split() if n.startswith("test_")))' "$T/conformance.sh" "$1"
+}
+_ALL_SUITES="$(_suites_of _ALL_SUITES)"; _PYTHON_SUITES="$(_suites_of _PYTHON_SUITES)"
+[ -n "$_ALL_SUITES" ] || { echo "FAIL could not read the suite list from $T/conformance.sh"; exit 1; }
+unreg=""
+for f in "$T"/test_*.sh; do n="$(basename "$f" .sh)"; case " $_ALL_SUITES " in *" $n "*) ;; *) unreg="$unreg $n" ;; esac; done
+for f in "$T"/test_*.py; do [ -e "$f" ] || continue; n="$(basename "$f" .py)"; case " $_PYTHON_SUITES " in *" $n "*) ;; *) unreg="$unreg $n" ;; esac; done
+if [ -z "$unreg" ]; then echo "ok   all suites registered"; else echo "FAIL not in tests/conformance.sh:$unreg"; fail=1; fi
+
+stage "2. static lints"
+for l in test_no_pipe_grep_q test_sandbox_guard test_no_real_browser test_python_utf8 test_no_dead_pid_scan; do
+  run "$l" bash "$T/$l.sh"
+done
+run "file size" python3 scripts/check_file_size.py
+[ "$fail" = 0 ] || { echo; echo "preflight: FAILED at the static stage ($(( $(date +%s) - t0 ))s). Fix before running suites."; exit 1; }
+[ "$STATIC_ONLY" = 1 ] && { echo; echo "preflight: static stages green ($(( $(date +%s) - t0 ))s)."; exit 0; }
+
+stage "3. suites covering what changed since $BASE"
+git rev-parse -q --verify "$BASE" >/dev/null || { echo "FAIL base $BASE not found (git fetch?)"; exit 1; }
+changed="$(git diff --name-only "$BASE"...HEAD; git diff --name-only HEAD; git ls-files --others --exclude-standard)"
+suites=""
+add() { case " $suites " in *" $1 "*) ;; *) [ -f "$T/$1.sh" ] && suites="$suites $1" ;; esac; }
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  case "$p" in
+    "$T"/test_*.sh) add "$(basename "$p" .sh)" ;;
+    plugins/outsourcerer/skills/outsourcerer/scripts/*)
+      b="$(basename "$p")"; [ "$b" = outsourcerer.sh ] && continue   # the engine: every suite; CI owns that
+      for s in $(grep -lF "$b" "$T"/test_*.sh 2>/dev/null); do add "$(basename "$s" .sh)"; done ;;
+  esac
+done <<<"$changed"
+[ -n "$suites" ] || echo "ok   no changed file is covered by a suite"
+# Parallel pool (PREFLIGHT_JOBS, default 4): run serially, 15 hub suites took 23 min on 2026-11-16.
+J="${PREFLIGHT_JOBS:-4}"; L="$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX")"
+for s in $suites; do
+  case " $_ALL_SUITES " in *" $s "*) ;; *) continue ;; esac   # helpers, not suites
+  # Same isolation as conformance.sh's pool: job control (set -m) so INT traps install in background
+  # jobs, and a fresh HOME + OSRC_HOME per suite (exactly conformance.sh:270) so one suite's state never perturbs another.
+  mkdir -p "$L/$s.home/home"; set -m
+  ( st=$(date +%s); HOME="$L/$s.home/home" OSRC_HOME="$L/$s.home" OSRC_HEARTBEAT_DISABLED=1 nice -n 19 bash "$T/$s.sh" >"$L/$s.log" 2>&1; echo "$? $(( $(date +%s) - st ))" >"$L/$s.rc" ) &
+  set +m
+  while [ "$(jobs -rp | wc -l)" -ge "$J" ]; do sleep 1; done
+done
+wait
+for s in $suites; do
+  [ -f "$L/$s.rc" ] || continue; read -r rc secs <"$L/$s.rc"
+  if [ "$rc" = 0 ]; then echo "ok   $s (${secs}s)"; continue; fi
+  # Failed under parallel load: rerun alone. Only a failure that repeats alone is real; one that passes
+  # alone is printed as load-sensitive (test_hub's /api/projects export timed out this way, 2026-11-16).
+  rm -rf "$L/$s.home"; mkdir -p "$L/$s.home/home"; first="$(grep -E 'FAIL' "$L/$s.log" | head -10)"
+  if HOME="$L/$s.home/home" OSRC_HOME="$L/$s.home" OSRC_HEARTBEAT_DISABLED=1 bash "$T/$s.sh" >"$L/$s.solo.log" 2>&1; then
+    echo "warn $s failed under load, passed alone (load-sensitive):"; sed 's/^/     ? /' <<<"$first"
+    continue
+  fi
+  # Fails alone: run the same suite on BASE in the same environment. Only FAIL lines that base does not
+  # also print block; lines base fails too are this machine's (test_hub's /api/projects under a fake HOME
+  # fails on this Mac at every commit and passes on CI, 2026-11-16).
+  if [ ! -d "$L/base" ]; then git worktree add -q --detach "$L/base" "$BASE" >/dev/null 2>&1 || mkdir -p "$L/base.broken"; fi
+  grep -E '^ *FAIL' "$L/$s.solo.log" | sed 's/^ *//' | sort -u >"$L/$s.new"
+  if [ -f "$L/base/$T/$s.sh" ]; then
+    rm -rf "$L/$s.bh"; mkdir -p "$L/$s.bh/home"
+    (cd "$L/base" && HOME="$L/$s.bh/home" OSRC_HOME="$L/$s.bh" OSRC_HEARTBEAT_DISABLED=1 bash "$T/$s.sh" 2>&1) | grep -E '^ *FAIL' | sed 's/^ *//' | sort -u >"$L/$s.base"
+  else : >"$L/$s.base"; fi
+  only="$(comm -23 "$L/$s.new" "$L/$s.base")"
+  if [ -z "$only" ]; then
+    echo "warn $s fails here, but base $BASE fails the same lines on this machine (not this change):"; sed 's/^/     ? /' "$L/$s.new"
+  else
+    echo "FAIL $s (new versus $BASE)"; sed 's/^/     | /' <<<"$only"; tail -6 "$L/$s.solo.log" | sed 's/^/     ~ /'; fail=1
+  fi
+done
+[ -d "$L/base" ] && git worktree remove --force "$L/base" >/dev/null 2>&1
+rm -rf "$L"
+
+echo
+if [ "$fail" = 0 ]; then echo "preflight: GREEN ($(( $(date +%s) - t0 ))s). Not covered here: Windows Git Bash and uutils (CI jobs) and suites reached only through outsourcerer.sh."; exit 0; fi
+echo "preflight: FAILED ($(( $(date +%s) - t0 ))s)."; exit 1
