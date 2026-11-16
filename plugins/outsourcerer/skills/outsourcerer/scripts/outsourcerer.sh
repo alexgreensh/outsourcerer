@@ -287,8 +287,12 @@ OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
 SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
+# A Windows drive path (`C:/...` or `C:\...`, what Git Bash callers and the skill itself pass) is
+# absolute too: prefixing $PWD to it yields `$PWD/C:/...`, which breaks the lib/*.sh load below
+# (the glob matches nothing, so every lib is silently skipped) and every self re-exec (bg preflight,
+# the detached __runjob supervisor), so background launches fail with "nothing started".
 case "$SCRIPT_PATH" in
-  /*) ;;  # already absolute
+  /*|[A-Za-z]:[/\\]*) ;;  # already absolute (POSIX or Windows drive)
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
 esac
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -4616,7 +4620,7 @@ _with_bundle_root() {
 # the leaf itself need not exist. Portable: no realpath, no readlink -f (BSD readlink lacks -f).
 _canon_path() {
   local p="$1" d b
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  case "$p" in /*|[A-Za-z]:[/\\]*) ;; *) p="$PWD/$p" ;; esac
   d="$(dirname "$p")"; b="$(basename "$p")"
   ( cd "$d" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$b" )
 }
