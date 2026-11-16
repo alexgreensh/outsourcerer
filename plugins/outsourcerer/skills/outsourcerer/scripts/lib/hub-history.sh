@@ -60,7 +60,7 @@ _osrc_hub_gh_fetch() { # <repo> <file>
   local repo="$1" f="$2" rel prs iss ok=true
   if have gh 2>/dev/null; then
     rel="$(gh release list -R "$repo" --limit 40 --json tagName,name,publishedAt,isDraft 2>/dev/null)" || ok=false
-    [ "$ok" = true ] && { prs="$(gh pr list -R "$repo" --state closed --limit 100 --json number,title,closedAt,mergedAt,url 2>/dev/null)" || ok=false; }
+    [ "$ok" = true ] && { prs="$(gh pr list -R "$repo" --state all --limit 100 --json number,title,closedAt,mergedAt,url 2>/dev/null)" || ok=false; }
     [ "$ok" = true ] && { iss="$(gh issue list -R "$repo" --state closed --limit 100 --json number,title,closedAt,url,stateReason 2>/dev/null)" || ok=false; }
   else ok=false; fi
   jq -e 'arrays' >/dev/null 2>&1 <<<"${rel:-}" || { rel='[]'; ok=false; }
@@ -219,7 +219,7 @@ _osrc_hub_history() {
     + [ $gh.releases[]? | select((.isDraft // false) | not) | {kind: "release", title: (if (.name // "") != "" then .name else .tagName end), tag: .tagName,
           at: (.publishedAt | ep), url: (if $repo != "" then "https://github.com/\($repo)/releases/tag/\(.tagName | @uri)" else null end)} ]
     + [ $tags[]? | {kind: "release", title: .tag, tag: .tag, at: .at, local: true} ]
-    + [ $gh.prs[]? | {kind: "pr", number, title, url: (.url | gurl), outcome: (if .mergedAt then "merged" else "closed" end),
+    + [ $gh.prs[]? | select(.closedAt or .mergedAt) | {kind: "pr", number, title, url: (.url | gurl), outcome: (if .mergedAt then "merged" else "closed" end),
           at: ((.mergedAt // .closedAt) | ep)} ]
     + [ $gh.issues[]? | {kind: "issue", number, title, url: (.url | gurl), outcome: (if .stateReason == "NOT_PLANNED" then "not planned" else "closed" end),
           at: (.closedAt | ep)} ] )
