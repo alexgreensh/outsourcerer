@@ -253,14 +253,15 @@
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
       const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
       // MC4 #5: every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
-      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n);
+      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)
+        .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // PL: checked plans with no percentage ("Free models", "Pay per use") get a line too
       if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), plans: lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') });
       const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));
       items.forEach((x) => {
         const li = el('li', (x.hot ? 'hot' : '') + (x.plans ? ' gplans' : '') || null);
         if (x.plans) {
           li.append(el('span', 'gl', 'Left on your plans'));
-          x.plans.forEach((q) => { const r = el('span', 'gp'); r.append(el('span', 'gpn', q.l.name || q.l.id), el('span', 'gpv', Math.round(q.n) + '%'));
+          x.plans.forEach((q) => { const r = el('span', 'gp'); r.append(el('span', 'gpn', q.l.name || q.l.id), el('span', isFinite(q.n) ? 'gpv' : 'gpv gpt', isFinite(q.n) ? Math.round(q.n) + '%' : q.t));
             if (q.l.renews) r.append(el('span', 'gs gpr', 'Renews ' + q.l.renews)); li.append(r); });
         } else { li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); }
         ul.append(li);

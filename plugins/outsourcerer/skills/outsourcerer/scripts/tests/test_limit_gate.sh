@@ -602,13 +602,13 @@ printf '{}' > "$SUM/home/.devin/auth.json"
 # macOS keychain probe), local-inference probe stubbed off (no localhost flakiness).
 _sumjson() {
   local fh="$1" fb="$2"; shift 2
-  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
+  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_PROBE_TMUX_PREFIX=osrc-test-PL-gate \
       OSRC_SOURCED=1 TERM=dumb "$@" \
       bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_lane_summary --json' _ "$SRC" 2>/dev/null
 }
 _sumtext() {
   local fh="$1" fb="$2"; shift 2
-  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" \
+  env -i HOME="$fh" PATH="$fb:/usr/bin:/bin" OSRC_PLATFORM=linux OSRC_HOME="$OSRC_HOME" OSRC_PROBE_TMUX_PREFIX=osrc-test-PL-gate \
       OSRC_SOURCED=1 TERM=dumb "$@" \
       bash -c '. "$1"; _ready_probe_local() { return 1; }; _OSRC_LIMITS_SNAP=""; _OSRC_LIMITS_SNAP_TS=0; osrc_lane_summary' _ "$SRC" 2>/dev/null
 }
@@ -634,9 +634,12 @@ for id in cursor gemini local warp cline pi hermes grokbot; do
   grep -q "\"id\":\"$id\"" <<<"$J" \
     && bad "r3 feed: '$id' listed without provable auth" || ok "r3 feed: '$id' correctly absent"
 done
-# Unknown meters are honest: no fake percentages anywhere.
-grep -q '"left":"not checked yet"' <<<"$J" \
-  && ok "r3 feed: unmetered harnesses report 'not checked yet'" || bad "r3 feed: no honest-unknown left field"
+# Unknown meters are honest: no fake percentages anywhere, and (PL, 0.16.3) never "not checked yet":
+# a row with no reading says so and carries the reason (these stubs answer no probe).
+grep -qi 'not checked yet' <<<"$J" \
+  && bad "r3 feed: a row still says 'not checked yet'" || ok "r3 feed: no row says 'not checked yet'"
+_jget "$J" 'import sys; sys.exit(0 if all(r.get("note") and r.get("left") for r in d if r["state"]=="unknown") else 1)' \
+  && ok "r3 feed: every unmeasured row says what is known and why" || bad "r3 feed: an unknown row has no note/left: $J"
 { _t3b_pipe="$(_jget "$J" 'print(sum(1 for r in d if r["state"]=="unknown"))')" && grep -q '^5$' <<<"$_t3b_pipe"; } \
   && ok "r3 feed: no fresh meter -> all five detected harnesses state=unknown" \
   || bad "r3 feed: unexpected unknown-state count: $(_jget "$J" 'print([r["id"]+":"+r["state"] for r in d])')"

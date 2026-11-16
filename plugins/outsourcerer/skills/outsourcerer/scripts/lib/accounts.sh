@@ -267,13 +267,13 @@ osrc_lane_summary() {
       usage="$(_osrc_account_usage "$dir")" || usage='|'
       c5="${usage%%|*}"; c7="${usage#*|}"; used="$c7"
       [ -n "$c5" ] && { [ -z "$used" ] || awk -v a="$c5" -v b="$used" 'BEGIN { exit !(a>b) }'; } && used="$c5"
-      state=unknown; left='not checked yet'
+      state=unknown; left='No reading'   # PL: never "not checked yet"; the note says why
       if [ -n "$used" ]; then
         left="$(awk -v p="$used" 'BEGIN { printf "%g%% left",100-p }')"; state=ok
         awk -v p="$used" -v t="${OSRC_CONSERVE_THRESHOLD:-50}" 'BEGIN { exit !(p>=t) }' && state=low
         awk -v p="$used" -v t="$(_osrc_limit_threshold)" 'BEGIN { exit !(p>=t) }' && state=out
       fi
-      rows="$(jq -cn --argjson a "$rows" --arg n "$name" --arg b "$bill" --arg s "$state" --arg l "$left" --arg c5 "$c5" --arg c7 "$c7" --arg u "$used" '$a + [{id:("claude-"+$n), name:("Claude ("+$n+")"), lane:"cc", order:0, state:$s, left:$l, billing:$b, paid:($b != "subscription"), used:(if $u == "" then null else ($u|tonumber) end), windows:({} + (if $c5 == "" then {} else {claude5h:{used:($c5|tonumber),left:(100-($c5|tonumber))}} end) + (if $c7 == "" then {} else {claude7d:{used:($c7|tonumber),left:(100-($c7|tonumber))}} end)), source:"outsourcerer"}]')" || return 1
+      rows="$(jq -cn --argjson a "$rows" --arg n "$name" --arg b "$bill" --arg s "$state" --arg l "$left" --arg c5 "$c5" --arg c7 "$c7" --arg u "$used" '$a + [{id:("claude-"+$n), name:("Claude ("+$n+")"), lane:"cc", order:0, state:$s, left:$l, updated:(now|todate), note:(if $u == "" then "No statusline reading for this account in the last 10 minutes; Claude Code reports one on its next turn under this account." else null end), billing:$b, paid:($b != "subscription"), used:(if $u == "" then null else ($u|tonumber) end), windows:({} + (if $c5 == "" then {} else {claude5h:{used:($c5|tonumber),left:(100-($c5|tonumber))}} end) + (if $c7 == "" then {} else {claude7d:{used:($c7|tonumber),left:(100-($c7|tonumber))}} end)), source:"outsourcerer"}]')" || return 1
     done <<EOF
 $(_osrc_accounts)
 EOF
