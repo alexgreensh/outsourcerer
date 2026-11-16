@@ -138,6 +138,8 @@ _sv_target_screen() {
     esac
   fi
   [ -n "$q" ] && { printf 'question\n%s\n' "$q"; return 0; }
+  # Turn ended but its own background shell still runs: Claude Code wakes it when the shell exits.
+  if [ "$st" = idle ] && hit="$(_sv_bg_shell)"; then printf 'working\nbackground shell still running: %s\n' "$hit"; return 0; fi
   hist="$(_sv_history_tail)"
   hit="$(printf '%s\n' "$hist" | tail -1)"
   if _sv_api_banner "${OSRC_SCR_ENGINE:-$eng}" "$hit" "$(printf '%s\n' "$hist" | sed '$d' | grep -v '^[[:space:]]*$' | tail -1)"; then printf 'failed\napi-error: %s\n' "$(printf '%s' "$hit" | cut -c1-160)"; return 0; fi
@@ -208,11 +210,10 @@ _sv_unknown_persistent() { # <session-id>
 
 # ---- observe one target -> SV_K (event kind or empty), SV_D, SV_H, SV_OUT (1 = still owed a waiter),
 # SV_DROP (1 = terminal: the owner record goes once the event is logged)
-_sv_registry_ended() { _session_registry_last_event "$1" 2>/dev/null | jq -e '.event=="end"' >/dev/null 2>&1; }
 
 _sv_observe() { # <id> <now> [src] [owner]
   local id="$1" now="$2" src="${3:-supervise}" owner="${4:-}" st code h out ev stall cap sig rf
-  SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""
+  SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0
   case "$id" in watch.*) _sv_observe_watch "$id" "$src" "$owner"; return 0 ;; esac
   stall=$(( $(_sv_num "${OSRC_SUPERVISE_STALL:-}" 15) * 60 ))
   _sv_state_read "$id"
@@ -285,11 +286,14 @@ _sv_observe() { # <id> <now> [src] [owner]
       composer)
         case "$ev" in
           *"no turn yet"*) SVS_CK=- ;;   # fresh session, nothing asked of it yet: not an event, not live
-          *) if _sv_confirm composer "$h" "$now"; then SV_K=idle; SV_D="idle with unsent text in its composer (a send did not land): $ev"
-             else SV_OUT=1; SV_PEND=1; fi ;;
+          *) SV_OUT=1   # not done: still owed a waiter after the idle event (SUP bug 1)
+             if _sv_confirm composer "$h" "$now"; then SV_K=idle; SV_D="idle with unsent text in its composer (a send did not land): $ev"
+             else SV_PEND=1; fi ;;
         esac ;;
       working)
         SV_OUT=1; SV_PEND=1; SVS_CK=-
+        # A long test run in a background shell keeps the screen still on purpose: wait longer.
+        case "$ev" in "background shell still running"*) stall=$(( $(_sv_num "${OSRC_SUPERVISE_BG_STALL:-}" 60) * 60 )) ;; esac
         if [ $(( now - SVS_CHANGED )) -ge "$stall" ]; then
           SV_K=stalled; SV_D="working but the screen has not changed for $(( (now - SVS_CHANGED) / 60 ))m: $ev"
         else SVS_LK=-; fi ;;   # healthy: forget the last event so a repeat of it reports again
@@ -304,6 +308,7 @@ _sv_observe() { # <id> <now> [src] [owner]
                   rf="$(_sv_done_fp "$id")"
                   [ -n "$rf" ] && { SV_H="$(printf '%s' "$rf" | cksum | awk '{print $1}')"; SV_D="$SV_D (hand-in ${rf#*:})"; } ;;
             idle)
+              SV_OUT=1   # short of done: report it once, then keep watching for its next change
               if [ "$(type -t osrc_done_state >/dev/null 2>&1 && osrc_done_state "$id" 2>/dev/null)" = not-done ]; then
                 SV_K=idle; SV_D="finished its turn but its done contract does not hold yet"
               else SV_K=idle; SV_D="finished its turn, composer empty (no done marker)"; fi ;;
@@ -313,10 +318,7 @@ _sv_observe() { # <id> <now> [src] [owner]
         else SV_OUT=1; SV_PEND=1; fi ;;
     esac
   else
-    # Pane gone. A deliberate stop wrote an `end` event; anything else is a dead delegate.
-    if _sv_registry_ended "$id"; then SV_DROP=1
-    elif [ "$SVS_HASH" = - ] && [ -z "$(_session_registry_last_event "$id" 2>/dev/null)" ]; then SV_DROP=1   # never a session we saw
-    else SV_K=failed; SV_D="session is gone (pane dead, no stop recorded)"; SV_DROP=1; SV_H=gone; fi
+    _sv_observe_gone "$id"   # stopped (recorded stop) | done (handed in, then closed) | failed (lib/lane_life.sh)
   fi
   _sv_state_write "$id"
 }
@@ -563,7 +565,7 @@ $w" ;;
 
 _sv_main() { # <sid> <once> [ids...]
   local sid="$1" once="$2"; shift 2
-  local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list
+  local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list stopped_list=""
   local gen cgen older="" real f armed armed_q
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
@@ -589,17 +591,19 @@ _sv_main() { # <sid> <once> [ids...]
     fi
     if [ -n "$explicit" ]; then targets="$explicit"
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
-    out=0; pend=0; idle_list=""
+    out=0; pend=0; idle_list=""; stopped_list=""
     for id in $targets; do
       _sv_observe "$id" "$now" supervise "$sid"
       _sv_emit "$id" "$now" supervise "$sid"
       [ "$SV_OUT" = 1 ] && out=1
       [ "$SV_PEND" = 1 ] && pend=1
       [ "$SV_K" = idle ] && idle_list="$idle_list $id"
+      [ "$SV_STOPPED" = 1 ] && stopped_list="$stopped_list $id"   # ended by its owner: settled, not a crash
       [ -n "$SV_WT" ] && seen="$seen $SV_WT"   # hand-in files are their own event targets
       if [ "$SV_DROP" = 1 ] && [ -z "$explicit" ]; then
         # keep the target in this batch's filter, drop it from the registry
         rm -f "$OSRC_HOME/owners/$sid/$id" 2>/dev/null
+        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id"   # listed as finished (MC3)
       fi
     done
     _sv_remote_poll supervise
@@ -636,7 +640,7 @@ _sv_main() { # <sid> <once> [ids...]
     elif [ "$out" = 0 ] && [ -z "$first" ]; then
       _sv_approval_summary "$new"
       nl="$(printf '%s' "$targets" | wc -w | tr -d ' ')"
-      printf 'EVENT done all %s no owned live work (%s target(s) settled%s)\n' "$now" "$nl" "${idle_list:+; idle:$idle_list}"
+      printf 'EVENT done all %s no owned live work (%s target(s) settled%s%s)\n' "$now" "$nl" "${idle_list:+; idle:$idle_list}" "${stopped_list:+; stopped:$stopped_list}"
       printf 'NEXT %s fleet ls\n' "$SCRIPT_PATH"
       printf '%s\n' "$new" | grep . | while IFS="$(printf '\t')" read -r _p ts kind tgt detail next; do
         printf 'EVENT %s %s %s %s\nNEXT %s\n' "$kind" "$tgt" "$ts" "$detail" "$next"; done

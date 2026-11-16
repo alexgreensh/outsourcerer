@@ -137,8 +137,8 @@ _OSRC_HUB_CACHE_V=3   # r3: names are finished in the export, not cached
 _osrc_hub_cache_paths() { # <slug> -> every file or dir whose change invalidates the project
   local slug="$1" t id
   printf '%s\n' "$OSRC_HOME/owners/$slug" "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json" "$OSRC_HOME/hub/status/$slug.json" \
-    "$OSRC_HOME/review/items" "$HOME"/.claude/projects/*/"$slug".jsonl
-  for t in "$OSRC_HOME/owners/$slug"/*; do
+    "$OSRC_HOME/review/items" "$HOME"/.claude/projects/*/"$slug".jsonl "$OSRC_HOME/hub/seen/$slug"   # seen: beat + ended lanes (MC3)
+  for t in "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/seen/$slug"/*; do
     [ -f "$t" ] || continue; id="${t##*/}"
     printf '%s\n' "$OSRC_JOBS/$id" "$OSRC_HOME/done/$id.json" "$OSRC_HOME/autodetach/$id.log" "$OSRC_HOME/autodetach/$id.rc"
   done

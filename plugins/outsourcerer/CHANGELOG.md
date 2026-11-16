@@ -2,6 +2,26 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.2
+
+### Added
+
+- **Mission Control is never empty.** Every session that uses Outsourcerer shows up on its own and stays while it works, between lanes included. Finished lanes stay listed for a while instead of the whole project vanishing, and sessions that never used Outsourcerer stay off the page.
+- **`outsourcerer hub report`.** An orchestrator can set its project's name, status, progress, next step and questions for you in one line, and they show on the card.
+- **Also running.** Mission Control lists the other Claude sessions working right now, each named by its project and its own title, read only.
+- **Proven on Windows and on newer Ubuntu.** CI now runs the background-job path under Windows Git Bash and the lock suites on uutils coreutils.
+
+### Fixed
+
+- **Renewals read like a calendar.** "Renews in 3 days · Thu 19 Nov", or "today" and "tomorrow" with a time, in your local time.
+- **A clearer Mission Control.** Local times everywhere, no faded text, neutral plan labels, cards sized to their content, and a phone layout that stacks priorities and wraps long lane names.
+- **The watcher keeps watching.** A lane that is waiting on its own test run counts as busy, a lane you stop yourself reads as stopped, and a crashed lane is always reported.
+- **Background jobs keep the route you approved.** The lane and model you said yes to are bound at launch, engine defaults and prompts pass through intact, and delegate output is captured live on every platform.
+- **OpenCode read-only runs on Windows.** The working folder carve-out uses the path form OpenCode sees on Windows.
+- **Text reads the same everywhere.** Shipped Python reads and writes UTF-8 explicitly, so Windows code pages no longer break it.
+- **No surprise browser windows.** Tests never start a real browser, and headless runs never ask for your keychain.
+- **Steadier tests.** The macOS free-guard test no longer guesses which process is dead.
+
 ## 0.16.1
 
 ### Added

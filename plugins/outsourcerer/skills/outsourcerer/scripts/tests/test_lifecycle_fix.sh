@@ -62,7 +62,9 @@ SH
 # Normal interactive session start must apply the same send-keys failure contract.
 (
   set --
-  export OSRC_HOME="$TMP/session-start-home" OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+  # OSRC_DISK_MIN_GB=0: the launch disk guard refuses under 10 GB free, which made this case fail on any
+  # low-disk host for a reason unrelated to the send-keys contract it tests.
+  export OSRC_HOME="$TMP/session-start-home" OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1 OSRC_DISK_MIN_GB=0
   mkdir -p "$OSRC_HOME"
   mkdir -p "$TMP/bin-session"
   cat > "$TMP/bin-session/devin" <<'SH'
@@ -195,8 +197,7 @@ SH
   mkdir -p "$OSRC_HOME/sessions"
   . "$SRC" >/dev/null 2>&1
   SESSION_NAME=effort-relaunch
-  dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+  dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
   jq -cn --argjson pid "$dead_pid" '{schema_version:"1",event:"start",session_id:"effort-relaunch",provider:"codex",model:"sol",requested_model:"sol",resolved_model:"sol",model_generation:1,effort:"medium",state:"running",receipt:"receipt",endpoint:"tmux:effort-relaunch",harness_pid:($pid|tostring),pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
   PANE_PID="${BASHPID:-$$}"
   sleep 30 & NEW_PANE_PID=$!
@@ -236,8 +237,7 @@ SH
   mkdir -p "$OSRC_HOME/sessions"
   . "$SRC" >/dev/null 2>&1
   SESSION_NAME=identity-session
-  dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+  dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
   jq -cn --argjson pid "$dead_pid" '{schema_version:"1",event:"start",session_id:"identity-session",provider:"devin",model:"glm",requested_model:"glm",resolved_model:"glm",model_generation:1,effort:"high",state:"running",receipt:"receipt",endpoint:"tmux:identity-session",harness_pid:($pid|tostring),pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
   tmux() { return 1; }
   _session_registry_append effort devin glm high advisory advisory >/dev/null
@@ -256,8 +256,7 @@ SH
   mkdir -p "$OSRC_HOME/sessions"
   . "$SRC" >/dev/null 2>&1
   SESSION_NAME=reap-race
-  dead_pid=999999
-  while kill -0 "$dead_pid" 2>/dev/null; do dead_pid=$((dead_pid - 1)); done
+  dead_pid="$(osrc_test_dead_pid)"   # provably dead (lib_scratch.sh)
   jq -cn --argjson pid "$dead_pid" '{schema_version:"1",event:"start",session_id:"reap-race",provider:"devin",model:"glm",requested_model:"glm",resolved_model:"glm",model_generation:1,effort:"high",state:"running",receipt:"receipt",endpoint:"tmux:reap-race",harness_pid:($pid|tostring),pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
   hook="$TMP/reap-race-hook"
   _session_harness_alive() {

@@ -126,11 +126,11 @@ echo "$lim" | jq -e '.[] | select(.id=="claude-weekly") | .state == "ok"' >/dev/
 # Item 15: metered rows carry updatedAt (ISO) so the rail stamp can go stale.
 echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")' >/dev/null \
   && ok "claude-5h carries updatedAt (ISO)" || bad "claude-5h updatedAt missing: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")|{updated,updatedAt}')"
-# Finding 5: one clock — every displayed time is UTC and labelled.
-echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .updated | test(" UTC$")' >/dev/null \
-  && ok "limit row checked-time is UTC-labelled" || bad "limit row updated not UTC: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")|.updated')"
-echo "$proj" | jq -e '.updated | test(" UTC$")' >/dev/null \
-  && ok "project stamp is UTC-labelled" || bad "project updated not UTC: $(echo "$proj" | jq -c .updated)"
+# Finding 5, revised by MC3: one clock, the viewer's local time, never a UTC label.
+echo "$lim" | jq -e '.[] | select(.id=="claude-5h") | .updated | test("^[0-2][0-9]:[0-5][0-9]$")' >/dev/null \
+  && ok "limit row checked-time is local HH:MM" || bad "limit row updated not local HH:MM: $(echo "$lim" | jq -c '.[]|select(.id=="claude-5h")|.updated')"
+echo "$proj" | jq -e '.updated | test("UTC") | not' >/dev/null \
+  && ok "project stamp is local, no UTC label" || bad "project updated still UTC: $(echo "$proj" | jq -c .updated)"
 echo "$lim" | jq -e '.[] | select(.id=="openrouter") | .paid == true' >/dev/null \
   && ok "openrouter row carries the paid tag" || bad "openrouter paid flag missing"
 echo "$lim" | jq -e '[.[] | select(.paid == true)] | length == 1' >/dev/null \
@@ -169,8 +169,8 @@ echo "$out4" | jq -e '[.limits[] | select(.id=="devin" or .id=="agy" or .id=="lo
 out5="$(GROKBOT_WEBHOOK_URL='https://example.invalid/hook' GROKBOT_WEBHOOK_KEY='test-only' run hub export 2>/dev/null)"
 echo "$out5" | jq -e '[.limits[] | select(.id=="grokbot")] | length == 1' >/dev/null \
   && ok "osrc_limits_summary --json feeds the rail when present" || bad "limits summary feed ignored: $(echo "$out5" | jq -c .limits)"
-echo "$out5" | jq -e '.limits[] | select(.id=="grokbot") | (.updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")) and (.updated | test(" UTC$"))' >/dev/null \
-  && ok "summary rows normalized (updatedAt ISO, updated HH:MM UTC)" || bad "summary normalization wrong: $(echo "$out5" | jq -c '.limits[]|select(.id=="grokbot")')"
+echo "$out5" | jq -e '.limits[] | select(.id=="grokbot") | (.updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")) and (.updated | test("^[0-2][0-9]:[0-5][0-9]$"))' >/dev/null \
+  && ok "summary rows normalized (updatedAt ISO, updated local HH:MM)" || bad "summary normalization wrong: $(echo "$out5" | jq -c '.limits[]|select(.id=="grokbot")')"
 # Restore the fresh fixture for the serve checks below.
 jq -cn --argjson t "${NOW}000" --argjson r5 "$((NOW+7200))" --argjson r7 "$((NOW+400000))" \
   '{five_hour:{used_percentage:95,resets_at:$r5},seven_day:{used_percentage:40,resets_at:$r7},timestamp:$t,source:"statusline"}' \
@@ -226,10 +226,10 @@ grep -q 'done.some((p) => p.id === current)' "$PAGE" \
 grep -q 'lst.stale' "$PAGE" && grep -q "stamp-top, .lst" "$PAGE" \
   && grep -q 'l.updatedAt' "$PAGE" && grep -q "ls.dataset.live = '1'" "$PAGE" \
   && ok "limits stamp joins staleCheck (.lst.stale, updatedAt feed)" || bad "limits stale stamp missing"
-# Finding 5: the stamp is computed from newest working updatedAt in UTC, not
+# Finding 5: the stamp is computed from newest working updatedAt (local time since MC3), not
 # by sorting HH:MM display strings (wrong across midnight).
-grep -q 'getUTCHours' "$PAGE" && grep -q 'Math.max' "$PAGE" \
-  && ok "limits stamp formatted from updatedAt in UTC" || bad "limits stamp not UTC/updatedAt-based"
+grep -q 'localHM(at)' "$PAGE" && grep -q 'Math.max' "$PAGE" && ! grep -q "' UTC'" "$PAGE" \
+  && ok "limits stamp formatted from updatedAt in local time" || bad "limits stamp not local/updatedAt-based"
 grep -q "l.updated || '').sort" "$PAGE" && bad "limits stamp still sorts display strings" \
   || ok "no HH:MM string sorting in limits stamp"
 # Item 16: Hebrew + CJK support.

@@ -37,3 +37,99 @@ jobs:
       - name: Run conformance tests
         run: bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh
         shell: bash
+
+  windows-bg-path:
+    # Windows Git Bash is a supported platform, and the background route (bg-pin, preflight, stderr capture)
+    # must run there with no mkfifo, python, flock, setsid, fcntl or /dev/fd. conformance.sh needs tmux and
+    # POSIX process groups, so this job runs only the bg-path suites, each on its own, under Git Bash.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep LF line endings (bash cannot run CRLF scripts)
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install test dependencies
+        run: |
+          command -v jq >/dev/null 2>&1 || choco install jq -y --no-progress
+          # The engine and test_no_pipe_grep_q call python3; Windows ships it as python.
+          if ! python3 -c 'import sys' >/dev/null 2>&1; then
+            mkdir -p "$HOME/osrc-bin"
+            printf '#!/bin/sh\nexec python "$@"\n' > "$HOME/osrc-bin/python3"
+            chmod +x "$HOME/osrc-bin/python3"
+            cygpath -w "$HOME/osrc-bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Run bg-path suites
+        run: |
+          uname -a; bash --version | head -1; jq --version; python3 --version
+          T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
+          failed=""
+          for s in test_stderr_capture test_windows_portability test_codex_windows_sandbox \
+                   test_no_phantom_jobs test_bg_provider_after_verb test_p56_r2 \
+                   test_tool_bugs_062 test_no_pipe_grep_q test_opencode_lane; do
+            echo "::group::$s"
+            start=$(date +%s)
+            if bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi
+            echo "::endgroup::"
+            echo "$s: $r in $(( $(date +%s) - start ))s"
+          done
+          [ -z "$failed" ] || { echo "::error::failed on Windows Git Bash:$failed"; exit 1; }
+  uutils:
+    # Ubuntu 26.04 ships uutils coreutils, whose mkdir is not an atomic claim (it once accepted
+    # EEXIST), and lib/atomic-claim.sh has a uutils-only branch that GNU hosts never reach. This job
+    # puts uutils FIRST on PATH and runs the lock suites one at a time. The PATH setup is the same
+    # script the local rehearsal image uses (scripts/ci/uutils-rehearsal), so they cannot drift.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uutils coreutils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rust-coreutils jq
+        shell: bash
+
+      - name: Put uutils first on PATH
+        run: |
+          sudo bash scripts/ci/uutils-rehearsal/setup-uutils.sh /opt/uutils/bin
+          echo /opt/uutils/bin >> "$GITHUB_PATH"
+        shell: bash
+
+      - name: Prove mkdir is uutils
+        run: |
+          set -euo pipefail
+          command -v mkdir
+          mkdir --version | head -1
+          [ "$(command -v mkdir)" = /opt/uutils/bin/mkdir ] || { echo "::error::mkdir is not the uutils one"; exit 1; }
+          # 24.04's uutils 0.0.24 prints "mkdir 0.0.24" (no "uutils"), so prove it by package ownership.
+          bash scripts/ci/uutils-rehearsal/setup-uutils.sh --check "$(command -v mkdir)" \
+            || { echo "::error::mkdir is not uutils (see evidence line above)"; exit 1; }
+        shell: bash
+
+      - name: Run lock suites (one at a time)
+        run: |
+          set -uo pipefail
+          T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
+          fails=0
+          for s in $(grep -v '^#' scripts/ci/uutils-rehearsal/suites.txt); do
+            H="$(mktemp -d "$RUNNER_TEMP/uu-$s.XXXXXX")"
+            start=$(date +%s); rc=0
+            HOME="$H" OSRC_HOME="$H/osrc" OSRC_HEARTBEAT_DISABLED=1 TMPDIR="$H" \
+              timeout 150 bash "$T/$s.sh" > "$H.log" 2>&1 || rc=$?
+            echo "$s rc=$rc $(( $(date +%s) - start ))s: $(grep -E 'RESULT|passed|PASS|FAIL' "$H.log" | tail -1)"
+            if [ "$rc" != 0 ]; then
+              fails=$((fails+1)); echo "::error::$s failed under uutils (rc=$rc)"; tail -40 "$H.log"
+            fi
+          done
+          [ "$fails" = 0 ]
+        shell: bash

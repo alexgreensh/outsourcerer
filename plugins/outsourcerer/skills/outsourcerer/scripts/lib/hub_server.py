@@ -120,7 +120,7 @@ class Hub:
         env.setdefault("OSRC_HUB_FAST", "1")
         proc = subprocess.run(
             [self.engine, "hub", "export"],
-            capture_output=True, text=True, timeout=timeout, env=env,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, env=env,
         )
         if proc.returncode != 0:
             raise RuntimeError((proc.stderr or proc.stdout or "export failed").strip()[:300])
@@ -170,7 +170,7 @@ class Hub:
             if not n.endswith(".json"):
                 continue
             try:
-                with open(os.path.join(self.answers_dir, n)) as f:
+                with open(os.path.join(self.answers_dir, n), encoding="utf-8") as f:
                     out[n[:-5]] = json.load(f)
             except Exception:
                 continue
@@ -233,7 +233,7 @@ class Hub:
             raise FileExistsError("refusing %s: it is a symlink" % path)
         fd, tmp = tempfile.mkstemp(dir=d, prefix="." + name + ".", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(obj, f)
             os.replace(tmp, path)
         except BaseException:
@@ -296,7 +296,7 @@ class Hub:
         try:
             if os.path.islink(path):
                 return {}
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 card = json.load(f)
             return card if isinstance(card, dict) else {}
         except (OSError, ValueError):
@@ -386,6 +386,7 @@ def make_handler(hub):
             ext = os.path.splitext(full)[1].lstrip(".").lower()
             ctype = {"woff2": "font/woff2",
                      "js": "text/javascript; charset=utf-8",
+                     "css": "text/css; charset=utf-8",
                      "txt": "text/plain; charset=utf-8"}.get(ext)
             if (not ctype or full == base
                     or not full.startswith(base + os.sep)

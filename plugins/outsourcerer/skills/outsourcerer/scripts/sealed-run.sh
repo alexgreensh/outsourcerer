@@ -32,8 +32,9 @@ if dotgit.is_dir() and not dotgit.is_symlink() and common == dotgit:
     sys.exit(0)
 for backlink in (common / "worktrees").glob("*/gitdir"):
     try:
-        target = pathlib.Path(backlink.read_text().strip())
-        gitdir = dotgit.read_text().strip()
+        # surrogateescape = how Python decodes OS paths; a mismatch still fails closed.
+        target = pathlib.Path(backlink.read_text(encoding="utf-8", errors="surrogateescape").strip())
+        gitdir = dotgit.read_text(encoding="utf-8", errors="surrogateescape").strip()
         if (target.is_absolute() and target.resolve() == dotgit and
                 gitdir.startswith("gitdir: ") and
                 (root / gitdir[8:]).resolve() == backlink.parent.resolve()):
@@ -138,7 +139,7 @@ from pathlib import Path
 q = lambda p: json.dumps(p)
 system = ['/usr', '/bin', '/sbin', '/System', '/Library/Developer', '/opt/homebrew', '/private/etc', '/dev']
 system.append(os.path.realpath(sys.argv[5]))
-with open(sys.argv[1], 'w') as f:
+with open(sys.argv[1], 'w', encoding='utf-8') as f:
     f.write('(version 1)\n(deny default)\n(allow process-exec)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow sysctl-read)\n(allow file-read-metadata)\n')
     f.write('(allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.logd") (global-name "com.apple.system.notification_center"))\n')
     # libignition opens / as an openat root before dyld can start any executable.

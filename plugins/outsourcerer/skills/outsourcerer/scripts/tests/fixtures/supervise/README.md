@@ -9,6 +9,14 @@ Real `tmux capture-pane -p` captures from a live `session start -m haiku` (Claud
 - cc-question-live.txt    turn ended on a yes/no question
 - cc-idle-after-work.txt  turn ended with a plain answer (`⏺ ok`)
 
+From a live `claude --model haiku` on a private tmux server (Claude Code 2.1.325, 2026-11-15), used by
+test_supervise_lifecycle.sh (SUP):
+
+- cc-idle-bg-shell.txt / .ansi       turn ended while its background `sleep 240` runs:
+                                     `✻ Crunched for 44s · done 11:45 PM · 1 shell still running`, footer `⏵⏵ auto mode on · 1 shell`
+- cc-bg-shell-finished-working.txt   the same pane after the shell exited: summary line lost its shell
+                                     count, `⏺ Background command ... completed`, a new turn running
+
 codex-approval.ansi is the Codex approval menu already used (verified live) by
 test_session_send_verify.sh. codex-busy/idle frames in the test are synthetic (no live Codex run:
 ChatGPT weekly quota near its cap).

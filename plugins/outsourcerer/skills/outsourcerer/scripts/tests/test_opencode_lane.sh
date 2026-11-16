@@ -56,6 +56,22 @@ run() { ( cd "$TMP/work" && env -u OSRC_FAKE_OC_MODE -u OSRC_FAKE_OC_NOAUTH PATH
 argv() { tr '\n' ' ' < "$TMP/argv" 2>/dev/null; }
 src_fn() { ( export OSRC_SOURCED=1 PATH="$TMP/bin:$PATH"; source "$SRC" >/dev/null 2>&1; "$@" ); }
 
+mkdir -p "$TMP/slow-tee"
+cat > "$TMP/slow-tee/tee" <<'EOF_TEE'
+#!/bin/sh
+sleep 1
+exec /usr/bin/tee "$@"
+EOF_TEE
+chmod +x "$TMP/slow-tee/tee"
+_stderr_capture_drained() (
+  export OSRC_SOURCED=1 PATH="$TMP/slow-tee:$TMP/bin:$PATH"
+  source "$SRC" >/dev/null 2>&1
+  local rc=0
+  _run_tee_stderr "$TMP/captured-stderr" /bin/sh -c 'printf output; printf expired >&2; exit 7' >"$TMP/captured-stdout" 2>/dev/null || rc=$?
+  [ "$rc" = 7 ] && [ "$(cat "$TMP/captured-stdout")" = output ] && [ "$(cat "$TMP/captured-stderr")" = expired ]
+)
+_stderr_capture_drained && ok "stderr capture is complete before classification, preserving stdout and status" || no "stderr capture returned before tee finished"
+
 echo "=== registration ==="
 ( export OSRC_SOURCED=1; source "$SRC" >/dev/null 2>&1
   case " $OSRC_LANE_REGISTRY " in *" opencode "*) exit 0 ;; *) exit 1 ;; esac ) && ok "opencode is in the lane registry" || no "opencode missing from the registry"

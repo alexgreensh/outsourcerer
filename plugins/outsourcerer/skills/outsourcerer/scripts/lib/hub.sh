@@ -237,7 +237,7 @@ _osrc_hub_card() {
     base="$(jq -c '{name:(.name // empty), tagline:(.tagline // empty)} | with_entries(select(.value != null and .value != ""))' "$decfile" 2>/dev/null || printf '{}')"
   fi
   if [ -f "$pf" ]; then
-    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,summary,summaryAt,lanes}
+    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,next,reportedAt,shippedAt,summary,summaryAt,lanes}
       | .extraLinks |= (if .==null then null else [.[]? | select(.url | type == "string" and startswith("https://"))] end)
       | with_entries(select(.value != null))' "$pf" 2>/dev/null || printf '{}')" '$a + $b')"
   fi
@@ -274,6 +274,14 @@ _osrc_hub_build_project() {
       [ "${act##* }" = 1 ] && llive=1
     done
   fi
+  # Lanes that left the registry stay listed as finished for a while (MC3, lib/hub-report.sh).
+  if type _osrc_hub_ended_ids >/dev/null 2>&1; then
+    for t in $(_osrc_hub_ended_ids "$slug"); do
+      lane="$(_osrc_hub_ended_lane "$t" "$rmap")"
+      [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
+      act="$(_osrc_hub_lane_activity "$t")"; [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
+    done
+  fi
   local decs card out
   decs="$(_osrc_hub_decisions "$slug")"
   card="$(_osrc_hub_card "$slug")"
@@ -307,6 +315,9 @@ _osrc_hub_build_project() {
     + (if ($card.themes|type)=="array" and ($card.themes|length)>0 then {themes:$card.themes} else {} end)
     + (if ($card.flow|type)=="array" and ($card.flow|length)>0 then {flow:$card.flow} else {} end)
     + (if ($card.extraLinks|type)=="array" and ($card.extraLinks|length)>0 then {extraLinks:$card.extraLinks} else {} end)
+    + (if ($card.next|type)=="string" and $card.next!="" then {next:$card.next} else {} end)
+    + (if ($card.reportedAt|type)=="string" then {reportedAt:$card.reportedAt} else {} end)
+    + (if ($card.shippedAt|type)=="string" then {shippedAt:$card.shippedAt} else {} end)
     + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
   ')"
   # No live lane and no status of its own -> idle. A status the card or a Mark done / Move back set is kept
@@ -413,7 +424,7 @@ _osrc_hub_lane_activity() {
 _osrc_hub_project_mtime() {
   local slug="$1" best=0 la="${2:-0}"
   _osrc_hub_slug_ok "$slug" || { printf ''; return 0; }
-  best="$(_osrc_hub_mt "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json" "$HOME"/.claude/projects/*/"$slug".jsonl)"
+  best="$(_osrc_hub_mt "$OSRC_HOME/owners/$slug"/* "$OSRC_HOME/hub/seen/$slug/.beat" "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/decisions/$slug.json" "$HOME"/.claude/projects/*/"$slug".jsonl)"
   [ "$la" -gt "$best" ] 2>/dev/null && best="$la"
   [ "${3:-0}" = 1 ] && best="$(date +%s)"
   [ "$best" -gt 0 ] || { printf ''; return 0; }
@@ -427,7 +438,7 @@ osrc_hub_tick_touch() {
   local slug="${1:-}" f pj sum now tmp
   f="$OSRC_HOME/hub/projects/$slug.json"
   _osrc_hub_slug_ok "$slug" && [ -f "$f" ] && [ ! -L "$f" ] && have jq || return 1
-  pj="$(_osrc_hub_build_project "$slug" "$(date +%s)" "$(date -u '+%a %d %b, %H:%M UTC')")" || return 1
+  pj="$(_osrc_hub_build_project "$slug" "$(date +%s)" "$(_osrc_hub_now_stamp)")" || return 1
   sum="$(jq -r '(.lanes // []) as $l | if ($l|length)==0 then "No lanes running." else
     "\($l|length) lane\(if ($l|length)==1 then "" else "s" end): " + ([$l[].status // "Building" | ascii_downcase] | group_by(.) | map("\(length) \(.[0])") | join(", ")) end' <<<"$pj" 2>/dev/null)" || return 1
   now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; tmp="$f.tick.$$"
@@ -481,13 +492,19 @@ _osrc_hub_unowned_project() {
 _osrc_hh_mm() {
   case "${1:-}" in ''|*[!0-9]*) printf ''; return 0 ;; esac
   local now=$(( $(date +%s) ))
-  # One clock across the page: everything displayed is UTC (review finding 5).
+  # One clock across the page: the viewer's local time (MC3; was UTC, review finding 5).
   if [ $(( $1 - now )) -le 129600 ]; then
-    date -u -r "$1" '+%H:%M' 2>/dev/null || date -u -d "@$1" '+%H:%M' 2>/dev/null
+    date -r "$1" '+%H:%M' 2>/dev/null || date -d "@$1" '+%H:%M' 2>/dev/null
   else
-    date -u -r "$1" '+%a %H:%M' 2>/dev/null || date -u -d "@$1" '+%a %H:%M' 2>/dev/null
+    date -r "$1" '+%a %H:%M' 2>/dev/null || date -d "@$1" '+%a %H:%M' 2>/dev/null
   fi
 }
+
+# _osrc_hub_now_stamp -> the export's display stamp, local ("23:00"; lib/hub-report.sh), else local %a %d %b, %H:%M.
+_osrc_hub_now_stamp() { if type _osrc_hub_stamp >/dev/null 2>&1; then _osrc_hub_stamp; else date '+%a %d %b, %H:%M'; fi; }
+
+# _osrc_hub_renews <epoch> -> "in 4 days · Thu 19 Nov" / "today · 18:40" (lib/hub-report.sh), else HH:MM.
+_osrc_hub_renews() { if type _osrc_renew_text >/dev/null 2>&1; then _osrc_renew_text "$1"; else _osrc_hh_mm "$1"; fi; }
 
 # _osrc_limit_state <pct-used> [resets_at-epoch] -> ok|low|out|wait|unknown.
 # Boundaries mirror L7: <50 working, 50-89 running low, >=90 spent — `wait`
@@ -536,7 +553,7 @@ _osrc_hub_limits() {
     # files, paid keys, installed-but-unmetered lanes). Fall back on [] too.
     if [ -n "$lsum" ] && jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"$lsum"; then
       jq -c '[.[] | . + {updatedAt: (.updatedAt // .updated // "")}
-               | (if (.updated | type == "string") and (.updated | test("T")) then .updated = (.updated[11:16] + " UTC") else . end)]' <<<"$lsum"
+               | (if (.updated | type == "string") and (.updated | test("T")) then .updated = ((.updated | fromdateiso8601? // null) as $e | if $e then ($e | strflocaltime("%H:%M")) else .updated[11:16] end) else . end)]' <<<"$lsum"   # local (MC3)
       return 0
     fi
   fi
@@ -568,7 +585,7 @@ EOF
     case "$c7r" in ''|*[!0-9]*) : ;; *) [ "$c7r" -lt "$now" ] && c7="" ;; esac
     case "$ts_ms" in ''|*[!0-9]*) stale=1; upd=""; upda="" ;;
       *) [ $(( now - ts_ms / 1000 )) -gt 600 ] && stale=1 || stale=0
-         upd="$(date -u -r $(( ts_ms / 1000 )) '+%H:%M UTC' 2>/dev/null || date -u -d "@$(( ts_ms / 1000 ))" '+%H:%M UTC' 2>/dev/null)"
+         upd="$(date -r $(( ts_ms / 1000 )) '+%H:%M' 2>/dev/null || date -d "@$(( ts_ms / 1000 ))" '+%H:%M' 2>/dev/null)"   # local (MC3)
          upda="$(date -u -r $(( ts_ms / 1000 )) '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$(( ts_ms / 1000 ))" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" ;;
     esac
     [ -n "$c5$c7" ] || stale=1
@@ -583,12 +600,12 @@ EOF
     if [ -n "$c5" ]; then
       st="$(_osrc_limit_state "$c5" "$c5r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c5%.*} ))% left"; [ "${c5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd" "$src" "$upda")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hub_renews "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd" "$src" "$upda")" '$a+[$b]')"
     fi
     if [ -n "$c7" ]; then
       st="$(_osrc_limit_state "$c7" "$c7r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c7%.*} ))% left"; [ "${c7%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd" "$src" "$upda")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hub_renews "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd" "$src" "$upda")" '$a+[$b]')"
     fi
   elif command -v claude >/dev/null 2>&1 || [ -d "$HOME/.claude" ]; then
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude 'Claude Code' unknown '' '' 'claude-* on your Claude subscription' 'Installed but no fresh limit reading — the statusline artifact is missing or over 10 minutes old.' false 1 '' '')" '$a+[$b]')"
@@ -610,12 +627,12 @@ EOF
     if [ -n "$x5" ]; then
       st="$(_osrc_limit_state "$x5" "$x5r")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${x5%.*} ))% left"; [ "${x5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hh_mm "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hub_renews "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
     fi
     if [ -n "$xw" ]; then
       st="$(_osrc_limit_state "$xw" "$xwr")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${xw%.*} ))% left"; [ "${xw%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hh_mm "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hub_renews "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
     fi
   elif command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ]; then
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt 'ChatGPT (Codex)' unknown '' '' 'sol, terra, gpt-5.* on your ChatGPT plan' 'Codex installed but no limit reading yet.' false 3 '' '')" '$a+[$b]')"
@@ -656,12 +673,12 @@ cmd_hub_export() {
   while [ "$#" -gt 0 ]; do case "$1" in --project) proj="${2:-}"; shift 2 ;; *) shift ;; esac; done
   [ -z "$proj" ] || _osrc_hub_slug_ok "$proj" || die "hub export: bad project slug '$proj'"
   local now upd projects='[]' slug found=0
-  now="$(date +%s)"; upd="$(date -u '+%a %d %b, %H:%M UTC')"
+  now="$(date +%s)"; upd="$(_osrc_hub_now_stamp)"
   type _osrc_hub_memo_begin >/dev/null 2>&1 && _osrc_hub_memo_begin   # one pane read per lane per export (MC2 r2 #4)
   # Slugs: every owner session + every decisions/projects file + unowned.
   local slugs=""
   local d f
-  for d in "$OSRC_HOME"/owners/*/; do [ -d "$d" ] && slugs="$slugs $(basename "$d")"; done
+  for d in "$OSRC_HOME"/owners/*/ "$OSRC_HOME"/hub/seen/*/; do [ -d "$d" ] && slugs="$slugs $(basename "$d")"; done
   for f in "$OSRC_HOME"/hub/decisions/*.json "$OSRC_HOME"/hub/projects/*.json; do
     [ -f "$f" ] && slugs="$slugs $(basename "$f" .json)"
   done
@@ -688,27 +705,39 @@ cmd_hub_export() {
   local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
   case "$limits" in ''|*'error'*) limits='[]' ;; esac
   type _osrc_hub_memo_end >/dev/null 2>&1 && _osrc_hub_memo_end
-  jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" '{generated_at:$now, projects:$ps, limits:$ls}' | _osrc_hub_name_finish
+  local also='[]'; [ -n "$proj" ] || ! type _osrc_hub_also >/dev/null 2>&1 || also="$(_osrc_hub_also)"   # MC3: other sessions
+  jq -e 'arrays' >/dev/null 2>&1 <<<"$also" || also='[]'
+  jq -cn --argjson now "$now" --argjson ps "$projects" --argjson ls "$limits" --argjson also "$also" '{generated_at:$now, projects:$ps, limits:$ls, also:$also}' | _osrc_hub_name_finish
 }
 
-# _osrc_hub_visible <slug> <project-json>: is this a working orchestrator session (MC2 r3)? Shown when ANY:
-# a live owned lane (a tmux session, a running or waiting job, a live remote lane), an open decision, or its
-# own Claude transcript written in the last OSRC_HUB_ACTIVE_MIN (30) minutes. The transcript rule needs at
-# least one owned lane ever: a session that never delegated is not an orchestrator. A project card
-# (hub/projects/<slug>.json) is an orchestrator's explicit report and always shows: it carries Mark done
-# and the Shipped list. Data stays on disk either way.
+# _osrc_hub_visible <slug> <project-json>: is this a working orchestrator session (MC2 r3, MC3)? Shown when ANY:
+# a live owned lane (a tmux session, a running or waiting job, a live remote lane) or an open decision; a
+# shipped card, for OSRC_HUB_SHIPPED_DAYS (7) in the Shipped list; any card for OSRC_HUB_STALE_HOURS (24); or an ACTIVE orchestrator: one that used
+# Outsourcerer (lib/hub-report.sh seen/ dir, an owners/ dir or its own card) and beat, reported or wrote its
+# transcript in the last OSRC_HUB_ACTIVE_MIN (30) minutes, between lanes included. A Claude session that
+# never touched Outsourcerer has none of these and never shows. Data stays on disk either way.
 _osrc_hub_visible() {
-  local slug="$1" pj="$2" m="${OSRC_HUB_ACTIVE_MIN:-30}" t f lanes=0
-  [ -f "$OSRC_HOME/hub/projects/$slug.json" ] && return 0
-  jq -e '([.lanes[]? | select(.session != null or ((.state // "") | IN("working", "approval", "question", "limit")))] | length > 0)
+  local slug="$1" pj="$2" m="${OSRC_HUB_ACTIVE_MIN:-30}" days="${OSRC_HUB_SHIPPED_DAYS:-7}" t f lanes=0
+  case "$m" in ''|*[!0-9]*) m=30 ;; esac
+  case "$days" in ''|*[!0-9]*) days=7 ;; esac
+  jq -e '([.lanes[]? | select((.ended // false) | not) | select(.session != null or ((.state // "") | IN("working", "approval", "question", "limit")))] | length > 0)
          or ([.decisions[]? | select((.status // "wait") != "done")] | length > 0)' >/dev/null 2>&1 <<<"$pj" && return 0
+  if jq -e '.status == "shipped"' >/dev/null 2>&1 <<<"$pj"; then
+    for f in "$OSRC_HOME/hub/projects/$slug.json" "$OSRC_HOME/hub/status/$slug.json"; do
+      [ -f "$f" ] && [ -n "$(find "$f" -mmin "-$((days * 1440))" 2>/dev/null)" ] && return 0
+    done
+  fi
+  # A card (an orchestrator's own report) shows for OSRC_HUB_STALE_HOURS (24): long enough for the page's
+  # "no update for X h" alarm to flag a quiet project instead of it vanishing.
+  local sh="${OSRC_HUB_STALE_HOURS:-24}"; case "$sh" in ''|*[!0-9]*) sh=24 ;; esac
+  [ -f "$OSRC_HOME/hub/projects/$slug.json" ] && [ -n "$(find "$OSRC_HOME/hub/projects/$slug.json" -mmin "-$((sh * 60))" 2>/dev/null)" ] && return 0
+  if type _osrc_hub_active >/dev/null 2>&1; then _osrc_hub_active "$slug" && return 0; return 1; fi
   for t in "$OSRC_HOME/owners/$slug"/*; do
     [ -f "$t" ] || continue
     case "${t##*/}" in .*|watch.*) continue ;; esac
     lanes=1; break
   done
   [ "$lanes" = 1 ] || return 1
-  case "$m" in ''|*[!0-9]*) m=30 ;; esac
   for f in "$HOME"/.claude/projects/*/"$slug".jsonl; do
     [ -f "$f" ] && [ -n "$(find "$f" -mmin "-$m" 2>/dev/null)" ] && return 0
   done
@@ -761,6 +790,7 @@ cmd_hub() {
   case "$sub" in
     export) shift; cmd_hub_export "$@" ;;
     serve) shift; cmd_hub_serve "$@" ;;
-    *) die "hub: export [--project SLUG] | serve [--port N] [--no-open] [--new-token]" ;;
+    report) shift; type cmd_hub_report >/dev/null 2>&1 || die "hub report: lib/hub-report.sh is missing"; cmd_hub_report "$@" ;;
+    *) die "hub: export [--project SLUG] | serve [--port N] [--no-open] [--new-token] | report --status/--pct/--eta/--next/--name/--ask/--done-ask" ;;
   esac
 }

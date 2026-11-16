@@ -64,8 +64,10 @@ printf '\033[31mError: billing limit reached\033[0m\n' > "$qf"
 rm -f "$qf"
 # stderr capture must be hoisted so BOTH the sandbox and non-sandbox devin runs feed the quota detector
 # (the non-sandbox path used to discard stderr, hiding the quota signal). The `: > "$_dverr"` init + a
-# single teed devin invocation is the unified-capture marker.
-grep -qF ': > "$_dverr"' "$SRC" && grep -qF 'tee "$_dverr"' "$SRC" && ok "devin stderr capture unified (quota signal visible on both paths)" || bad "devin stderr capture not unified"
+# single devin invocation through _run_tee_stderr (which drains tee before returning) is the marker; a
+# leftover `2> >(tee` process substitution can return before the file is written (CI 43739334624).
+_src_code=$(grep -vE '^[[:space:]]*#' "$SRC")
+grep -qF ': > "$_dverr"' "$SRC" && grep -qF '_run_tee_stderr "$_dverr" devin' "$SRC" && ! grep -qF '> >(tee' <<<"$_src_code" && ok "devin stderr capture unified (quota signal visible on both paths)" || bad "devin stderr capture not unified"
 
 echo "----"
 echo "tool-bugs-062: $pass passed, $fail failed"
