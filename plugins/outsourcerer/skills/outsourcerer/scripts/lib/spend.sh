@@ -160,6 +160,15 @@ _devin_default_free_model() {
 # empty, 0 and false are off. CLAUDE_CODE_USE_* style env switches accept more than
 # the literal "1" (the real CLI treats "true" the same), so billing must too.
 _osrc_flag_on() { case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
+# _osrc_anthropic_redirect <url> -> rc0 when the URL sends Claude Code somewhere other than
+# Anthropic's own first-party API. Empty or the stock https://api.anthropic.com (any case,
+# trailing slashes) is NOT a redirect: the Claude desktop app exports exactly that default
+# into every session it spawns, and treating it as a proxy flagged plan logins as metered.
+_osrc_anthropic_redirect() {
+  local u; u="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  while [ "${u%/}" != "$u" ]; do u="${u%/}"; done
+  case "$u" in ''|https://api.anthropic.com) return 1 ;; *) return 0 ;; esac
+}
 
 # _osrc_claude_settings_metered -> rc0 when the ACTIVE Claude config dir's
 # settings.json routes Claude through a per-use credential: an apiKeyHelper, or an
@@ -222,7 +231,7 @@ osrc_lane_billing() {
       # claude.ai plan login also exists. Only a proven plan login with none of those is
       # subscription; a bare `claude` on PATH proves nothing.
       if _osrc_billing_key ANTHROPIC_API_KEY || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] \
-         || [ -n "${ANTHROPIC_BASE_URL:-}" ] || _osrc_flag_on "${CLAUDE_CODE_USE_BEDROCK:-}" \
+         || _osrc_anthropic_redirect "${ANTHROPIC_BASE_URL:-}" || _osrc_flag_on "${CLAUDE_CODE_USE_BEDROCK:-}" \
          || _osrc_flag_on "${CLAUDE_CODE_USE_VERTEX:-}" || _osrc_flag_on "${CLAUDE_CODE_USE_FOUNDRY:-}" \
          || _osrc_claude_settings_metered; then
         printf 'metered\n'
