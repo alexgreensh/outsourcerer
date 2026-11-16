@@ -203,8 +203,8 @@ _osrc_hub_lane_fallback() { # <id> -> lane json or nothing
      + (if $note=="" then {} else {note:$note} end)'
 }
 
-# _osrc_hub_lane_for <id> <rmap> -> lane json: remote -> job -> session -> fallback.
-_osrc_hub_lane_for() {
+# _osrc_hub_lane_for_raw <id> <rmap> -> lane json: remote -> job -> session -> fallback (named by lib/hub-lanename.sh).
+_osrc_hub_lane_for_raw() {
   local id="$1" rmap="$2"
   if [ -f "$OSRC_HOME/remote/$id.json" ]; then _osrc_hub_lane_remote "$id" && return 0; fi
   if [ -d "$OSRC_JOBS/$id" ]; then
@@ -517,19 +517,20 @@ _osrc_limit_state() {
   elif awk -v p="$1" 'BEGIN{ exit !(p>=50) }'; then printf 'low'; else printf 'ok'; fi
 }
 
-# _osrc_limit_row <id> <name> <state> <left> <renews> <models> <note> <paid> <order> <updated> [source] [updatedAt-ISO]
+# _osrc_limit_row <id> <name> <state> <left> <renews|renews_at-epoch> <models> <note> <paid> <order> <updated> [source] [updatedAt-ISO]
 _osrc_limit_row() {
   local bill=unknown token=''
   case "$1" in claude*) token=cc ;; chatgpt*) token=cx ;; devin) token=dv ;; agy) token=gm ;; openrouter) token=or ;; local) token=local ;; esac
   if [ -n "$token" ] && type osrc_lane_billing >/dev/null 2>&1; then bill="$(osrc_lane_billing "$token" 2>/dev/null)"; fi
   [ "$1" != openrouter ] || bill=metered
   [ "$1" != local ] || bill=free
-  jq -cn --arg billing "${bill:-unknown}" --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$5" \
+  local rat=""; case "${5:-}" in *[!0-9]*|'') ;; *) rat="$5" ;; esac   # MC4: an epoch travels as renews_at
+  jq -cn --arg billing "${bill:-unknown}" --arg id "$1" --arg name "$2" --arg state "$3" --arg left "$4" --arg renews "$([ -n "$rat" ] && _osrc_hub_renews "$rat" || printf '%s' "${5:-}")" --arg rat "$rat" \
         --arg models "$6" --arg note "$7" --argjson paid "${8:-false}" --argjson order "${9:-99}" --arg updated "${10}" --arg source "${11:-}" \
         --arg upda "${12:-}" \
     '{id:$id,name:$name,state:$state,order:$order,billing:$billing}
      + (if $left=="" then {} else {left:$left} end)
-     + (if $renews=="" then {} else {renews:$renews} end)
+     + (if $renews=="" then {} else {renews:$renews} end) + (if $rat=="" then {} else {renews_at:($rat|tonumber)} end)
      + (if $models=="" then {} else {models:$models} end)
      + (if $note=="" then {} else {note:$note} end)
      + (if $updated=="" then {} else {updated:$updated} end)
@@ -600,12 +601,12 @@ EOF
     if [ -n "$c5" ]; then
       st="$(_osrc_limit_state "$c5" "$c5r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c5%.*} ))% left"; [ "${c5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$(_osrc_hub_renews "$c5r")" 'claude-* on your Claude subscription' "$note5" false 1 "$upd" "$src" "$upda")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-5h 'Claude Code — 5 hour' "$st" "$leftr" "$c5r" 'claude-* on your Claude subscription' "$note5" false 1 "$upd" "$src" "$upda")" '$a+[$b]')"
     fi
     if [ -n "$c7" ]; then
       st="$(_osrc_limit_state "$c7" "$c7r")"; [ "$stale" = 1 ] && st=unknown
       leftr="$(( 100 - ${c7%.*} ))% left"; [ "${c7%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$(_osrc_hub_renews "$c7r")" 'claude-* on your Claude subscription' "$note7" false 2 "$upd" "$src" "$upda")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude-weekly 'Claude Code — weekly' "$st" "$leftr" "$c7r" 'claude-* on your Claude subscription' "$note7" false 2 "$upd" "$src" "$upda")" '$a+[$b]')"
     fi
   elif command -v claude >/dev/null 2>&1 || [ -d "$HOME/.claude" ]; then
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row claude 'Claude Code' unknown '' '' 'claude-* on your Claude subscription' 'Installed but no fresh limit reading — the statusline artifact is missing or over 10 minutes old.' false 1 '' '')" '$a+[$b]')"
@@ -627,12 +628,12 @@ EOF
     if [ -n "$x5" ]; then
       st="$(_osrc_limit_state "$x5" "$x5r")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${x5%.*} ))% left"; [ "${x5%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$(_osrc_hub_renews "$x5r")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-5h 'ChatGPT — 5 hour' "$st" "$leftr" "$x5r" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Session window, resets every 5 hours.')" false 3 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
     fi
     if [ -n "$xw" ]; then
       st="$(_osrc_limit_state "$xw" "$xwr")"; [ -n "$xage" ] && st=unknown
       leftr="$(( 100 - ${xw%.*} ))% left"; [ "${xw%.*}" -ge 100 ] 2>/dev/null && leftr="0% left"
-      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$(_osrc_hub_renews "$xwr")" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
+      arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt-weekly 'ChatGPT — weekly' "$st" "$leftr" "$xwr" 'sol, terra, gpt-5.* on your ChatGPT plan' "$([ -n "$xage" ] && printf 'Reading is %ss old — a floor, not a measurement.' "$xage" || printf 'Weekly window — the binding cap in practice.')" false 4 "$upd" 'codex rollout' "$updx")" '$a+[$b]')"
     fi
   elif command -v codex >/dev/null 2>&1 || [ -d "$HOME/.codex" ]; then
     arr="$(jq -cn --argjson a "$arr" --argjson b "$(_osrc_limit_row chatgpt 'ChatGPT (Codex)' unknown '' '' 'sol, terra, gpt-5.* on your ChatGPT plan' 'Codex installed but no limit reading yet.' false 3 '' '')" '$a+[$b]')"
@@ -694,6 +695,7 @@ cmd_hub_export() {
     if [ -z "$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)" ]; then
       pj="$(jq -c --arg d "$(_osrc_hub_session_detail "$slug")" '. + {_base: (.name // ""), _detail: $d}' <<<"$pj")"
     fi
+    ! type _osrc_hub_history >/dev/null 2>&1 || pj="$(jq -c --argjson h "$(_osrc_hub_history "$slug" "$pj" 2>/dev/null || echo null)" '. + {history:$h}' <<<"$pj" 2>/dev/null || printf '%s' "$pj")"   # MC4 History
     [ -n "$pj" ] && { projects="$(jq -cn --argjson a "$projects" --argjson b "$pj" '$a+[$b]')"; [ "$slug" = "$proj" ] && found=1; }
   done
   if [ -z "$proj" ]; then
@@ -703,7 +705,7 @@ cmd_hub_export() {
     echo "hub export: no project '$proj' (slugs: owners/*, hub/decisions/*.json, hub/projects/*.json)" >&2
   fi
   local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
-  case "$limits" in ''|*'error'*) limits='[]' ;; esac
+  case "$limits" in ''|*'error'*) limits='[]' ;;esac; ! type _osrc_hub_limits_fresh >/dev/null 2>&1 || limits="$(_osrc_hub_limits_fresh <<<"$limits")"   # MC4: renews from renews_at, now
   type _osrc_hub_memo_end >/dev/null 2>&1 && _osrc_hub_memo_end
   local also='[]'; [ -n "$proj" ] || ! type _osrc_hub_also >/dev/null 2>&1 || also="$(_osrc_hub_also)"   # MC3: other sessions
   jq -e 'arrays' >/dev/null 2>&1 <<<"$also" || also='[]'
@@ -794,3 +796,7 @@ cmd_hub() {
     *) die "hub: export [--project SLUG] | serve [--port N] [--no-open] [--new-token] | report --status/--pct/--eta/--next/--name/--ask/--done-ask" ;;
   esac
 }
+
+# Lane naming lives in lib/hub-lanename.sh (MC4). The engine's lib loader sources it first; suites and
+# helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
+type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }

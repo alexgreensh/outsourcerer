@@ -4,6 +4,42 @@
    its live state and the helpers it already has, and gets back the Home renderer, the Mark done flow
    and the stale-stamp Refresh button. If this file fails to load, hub.html falls back to the project view. */
 (function () {
+  // ---- MC4: the page never prints an id or a stored renew string ------------------------------
+  // Same id rules as lib/hub-lanename.sh (_OSRC_HUB_IDLIKE_JQ): Outsourcerer session prefixes, "--<digits>"
+  // hash joins, hex runs of 6+ holding a digit, a whole value that is a slug ending in a number.
+  const IDLIKE = [/(^|[^A-Za-z0-9])(osrc|outsourcerer)-/i, /--[0-9]/,
+    /(^|[^A-Za-z0-9])(?=[0-9a-fA-F]*[0-9])[0-9a-fA-F]{6,}(?![A-Za-z0-9])/, /^[a-z0-9]+([-_][a-z0-9]+)*[-_][0-9]+[a-z]?$/];
+  const idlike = (s) => typeof s === 'string' && IDLIKE.some((r) => r.test(s));
+  const HOURS = /\d+\s*h\s*\d+\s*m|^\s*(in\s+)?\d+\s*h\s*$/i;   // "92h 32m", "in 120h 6m": an old build's countdown
+  const RDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'], RMON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  // renewText(epoch s) -> "today · 18:40" | "tomorrow · 09:10" | "in 4 days · Thu 19 Nov" in the viewer's local time; "" when past.
+  function renewText(sec, nowMs) {
+    const t = new Date(sec > 1e11 ? sec : sec * 1000), now = new Date(nowMs || Date.now());
+    if (!(t.getTime() > now.getTime())) return '';
+    const day = (x) => Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()) / 86400000, pad = (n) => String(n).padStart(2, '0');
+    const d = Math.round(day(t) - day(now)), hm = pad(t.getHours()) + ':' + pad(t.getMinutes());
+    return d === 0 ? 'today · ' + hm : d === 1 ? 'tomorrow · ' + hm : 'in ' + d + ' days · ' + RDAY[t.getDay()] + ' ' + t.getDate() + ' ' + RMON[t.getMonth()];
+  }
+  function cleanLimit(l, nowMs) {
+    const o = Object.assign({}, l);
+    if (typeof o.renews_at === 'number' && o.renews_at > 0) o.renews = renewText(o.renews_at, nowMs) || null;
+    else if (typeof o.renews !== 'string' || HOURS.test(o.renews)) delete o.renews;
+    return o;
+  }
+  // A project name keeps its human parts ("Total Recall Core · total-recall-85" -> "Total Recall Core").
+  function cleanName(s, fallback) {
+    if (typeof s !== 'string') return fallback;
+    const parts = s.split(' · ').filter((x) => x && !idlike(x));
+    return parts.length ? parts.join(' · ') : fallback;
+  }
+  function cleanProject(p) {
+    const o = Object.assign({}, p);
+    o.name = cleanName(o.name, 'Orchestrator session');
+    if (Array.isArray(o.lanes)) o.lanes = o.lanes.map((l) => (idlike(l.short) || !l.short ? Object.assign({}, l, { short: l.model ? 'Lane · ' + l.model : 'Lane' }) : l));
+    return o;
+  }
+  window.OSRC_HUB_CLEAN = { idlike, renewText, limit: cleanLimit, project: cleanProject, name: cleanName };
+
   window.OSRC_HUB_HOME = function (ctx) {
     const { $, el, ic, pri, paint, openDecs, byWeight, stPill } = ctx;
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
@@ -177,7 +213,11 @@
       const sl = sumLine(p); if (sl) meta.append(sl);
       if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
       const lanes = laneList(p, false); if (lanes) t.append(lanes);
-      const fin = endedLanes(p); if (fin) t.append(fin);
+      // MC4: the full lane history folds up under "Finished (N)" (collapsed here, open on the project page),
+      // and one line sums up the week (releases, PRs, issues) with a link to the History on the project page.
+      const HX = window.OSRC_HUB_HISTORY, hf = HX && p.history ? HX.finishedFold({ el, ic }, p, false) : null;
+      if (hf) t.append(hf); else { const fin = endedLanes(p); if (fin) t.append(fin); }
+      const hsum = HX && HX.summary(p); if (hsum) { const hb = el('button', 'hx-sum', hsum); hb.type = 'button'; hb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(hb); }
       const topN = ds.filter(isTop).length;
       const rest = ds.filter((d) => !isTop(d));
       if (topN) t.append(el('p', 'pt-top5', topN + (topN === 1 ? ' decision waiting, shown above' : ' decisions waiting, shown above')));
@@ -212,9 +252,20 @@
         s: need ? [waiting ? waiting + (waiting === 1 ? ' decision' : ' decisions') : '', asks ? asks + (asks === 1 ? ' lane asking' : ' lanes asking') : ''].filter(Boolean).join(', ') : 'Nothing waiting' });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
       const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
-      if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), s: lim.l.renews ? 'Renews ' + lim.l.renews : (ctx.LSTATE[lim.l.state] || ''), hot: lim.l.state === 'out' || lim.l.state === 'wait' });
+      // MC4 #5: every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
+      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)
+        .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // PL: checked plans with no percentage ("Free models", "Pay per use") get a line too
+      if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), plans: lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') });
       const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));
-      items.forEach((x) => { const li = el('li', x.hot ? 'hot' : null); li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); ul.append(li); });
+      items.forEach((x) => {
+        const li = el('li', (x.hot ? 'hot' : '') + (x.plans ? ' gplans' : '') || null);
+        if (x.plans) {
+          li.append(el('span', 'gl', 'Left on your plans'));
+          x.plans.forEach((q) => { const r = el('span', 'gp'); r.append(el('span', 'gpn', q.l.name || q.l.id), el('span', isFinite(q.n) ? 'gpv' : 'gpv gpt', isFinite(q.n) ? Math.round(q.n) + '%' : q.t));
+            if (q.l.renews) r.append(el('span', 'gs gpr', 'Renews ' + q.l.renews)); li.append(r); });
+        } else { li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); }
+        ul.append(li);
+      });
       return ul;
     }
 

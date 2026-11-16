@@ -55,7 +55,7 @@ nm() { printf '%s\n' "$2" > "$HOME/.claude/projects/p/$1.jsonl"; _osrc_hub_sessi
 printf '%s\n%s\n' '{"type":"user","isMeta":true,"message":{"content":"Base directory for this skill"}}' '{"type":"user","message":{"content":"The real ask"}}' > "$HOME/.claude/projects/p/meta.jsonl"
 [ "$(_osrc_hub_session_detail meta)" = 'The real ask' ] || fail 'isMeta not skipped'
 # Cached by session id; a grown transcript (here a rename) is read again.
-[ "$(cut -d' ' -f2- "$OSRC_HOME/hub/titles-v2/meta")" = 'The real ask' ] || fail 'name not cached'
+[ "$(cut -d' ' -f2- "$OSRC_HOME/hub/titles-v3/meta")" = 'The real ask' ] || fail 'name not cached'
 printf '%s\n' '{"type":"custom-title","customTitle":"[Image #3] Renamed  session"}' >> "$HOME/.claude/projects/p/meta.jsonl"
 [ "$(_osrc_hub_session_detail meta)" = 'Renamed session' ] || fail "cache not invalidated: $(_osrc_hub_session_detail meta)"
 printf 'PASS: MC2 r2 #3 names cleaned and cached\n'

@@ -191,7 +191,8 @@ _osrc_hub_cache_put() {
 # The meters behind it refresh on a 10-minute gate; probing every harness cost 3-10 s per export.
 _osrc_hub_limits_inputs() {
   printf '%s\n' "$OSRC_HOME/rate-limits.json" "$HOME/.claude/token-optimizer/rate-limits.json" "$OSRC_HOME/lanes/events.jsonl" \
-    "$OSRC_HOME/.devin-free-ids" "$HOME/.claude/settings.json" "$HOME/.codex/auth.json" "$HOME/.claude/.credentials.json"
+    "$OSRC_HOME/.devin-free-ids" "$HOME/.claude/settings.json" "$HOME/.codex/auth.json" "$HOME/.claude/.credentials.json" \
+    "$OSRC_HOME/hub/probes/codex.json" "$OSRC_HOME/hub/probes/agy.json" "$OSRC_HOME/hub/probes/devin.json" "$OSRC_HOME/hub/probes/droid.json"   # PL: a probe answer refreshes the rail
 }
 _osrc_hub_limits_write() { # <file> : compute and store atomically
   local out; out="$(_osrc_hub_limits 2>/dev/null)"
