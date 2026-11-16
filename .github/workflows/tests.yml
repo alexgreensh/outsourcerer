@@ -74,7 +74,7 @@ jobs:
           failed=""
           for s in test_stderr_capture test_windows_portability test_codex_windows_sandbox \
                    test_no_phantom_jobs test_bg_provider_after_verb test_p56_r2 \
-                   test_tool_bugs_062 test_no_pipe_grep_q test_opencode_lane; do
+                   test_tool_bugs_062 test_no_pipe_grep_q test_opencode_lane test_windows_drive_script_path; do
             echo "::group::$s"
             start=$(date +%s)
             if bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi
