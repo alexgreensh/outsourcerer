@@ -207,6 +207,9 @@ grep -q '#16171a' "$PAGE" && grep -q '#1f2024' "$PAGE" && grep -q '#34363d' "$PA
 grep -cq '#18191c' "$PAGE" && bad "old dark tokens still present" || ok "old dark tokens fully replaced"
 grep -q "el('div', 'tcol')" "$PAGE" && grep -q '^\.tcol ' "$PAGE" && ok "balanced .tcol theme packing" || bad ".tcol packing missing"
 grep -q 'hgt\[0\] <= hgt\[1\]' "$PAGE" && ok "theme cards join the shorter column" || bad "column balance check missing"
+grep -q "localStorage.getItem('osrc-theme')" "$PAGE" && grep -q "catch (e) {} if (saved !== 'light' && saved !== 'dark') saved = root.getAttribute('data-theme')" "$PAGE" && ok "host pin resolves outside the storage try" || bad "host pin missing or inside the storage try"
+grep -q "saved !== 'dark') { try { saved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark'" "$PAGE" && ok "no saved or host theme falls back to the OS setting" || bad "OS theme fallback missing"
+grep -q "URLSearchParams(location.search).get('theme')" "$PAGE" && grep -q "saved = q" "$PAGE" && ok "?theme= override still wins" || bad "?theme= override missing"
 grep -q '100dvh' "$PAGE" && grep -q 'rail-top' "$PAGE" && grep -q 'rail-mid' "$PAGE" && ok "rail layout (rail-top/rail-mid/100dvh)" || bad "rail layout missing"
 grep -q 'mask' "$PAGE" && grep -q 'data:image/png;base64' "$PAGE" && ok "wordmark css mask (inlined asset)" || bad "wordmark mask missing"
 # Item 14: stale alarm + no dialogs (past dashboard bugs).
@@ -522,6 +525,9 @@ SRV=$!
 URL5="$(wait_url "$TMP/serve5.log")"
 [ -n "$URL5" ] || { bad "idle-test serve did not start"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 curl -s -o /dev/null -H "X-Hub-Token: ${URL5##*t=}" "${URL5%%\?*}/api/projects"   # a page poll -> refresh stays live
+# A warm start (0.16.4) answers that poll from the saved export while the startup export still runs;
+# measure only after the startup export itself has landed.
+for _ in $(seq 1 120); do grep -q 'startup export done' "$TMP/serve5.log" && break; sleep 0.5; done
 m0="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"
 sleep 3
 m1="$(stat -c %Y "$EXPORT_JSON" 2>/dev/null || stat -f %m "$EXPORT_JSON")"

@@ -79,6 +79,8 @@ class Hub:
         # Set once the first export has finished (ok or not). main() prints the URL before that
         # export runs (a slow export kept the URL back past the CI wait, MC-8); data requests wait here.
         self.first_export = threading.Event()
+        self.warming = False       # serving the last saved export while the startup export runs
+        self.fresh_export = threading.Event()   # the startup export itself finished (warm start or not)
         # CSP hashes for the page's inline <script> blocks, computed once so
         # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
         # self-contained file, so its blocks are knowable at startup.
@@ -147,9 +149,30 @@ class Hub:
                     self.export_error = str(e)[:300]
             time.sleep(REFRESH_SECS)
 
+    def load_saved(self):
+        """Warm start: serve the last export.json this hub wrote while the first export runs, so a
+        restart never shows an endless "Loading" (a cold export took about a minute, 0.16.3)."""
+        try:
+            if os.path.islink(self.export_file) or not os.path.isfile(self.export_file) \
+                    or os.path.getsize(self.export_file) > 16 * 1024 * 1024:
+                return False
+            with open(self.export_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
+            return False
+        with self.lock:
+            self.cache = data
+            self.cache_ts = time.time()
+            self.warming = True
+        return True
+
     def projects_payload(self):
         self.first_export.wait(timeout=95)   # the startup export, not a second one racing it
         with self.lock:
+            if self.warming and self.cache is not None:
+                return self.cache, self.export_error
             if self.cache is not None and time.time() - self.cache_ts < REFRESH_SECS + 10:
                 return self.cache, self.export_error
         try:
@@ -464,7 +487,7 @@ def make_handler(hub):
             raw = self.rfile.read(n) if n > 0 else b""
             if u.path == "/api/refresh":
                 # Refresh carries no payload; the page POSTs it empty.
-                hub.first_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
+                hub.fresh_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
                 try:
                     data = hub.run_export()
                 except Exception as e:
@@ -527,12 +550,19 @@ def main():
     # The URL is out first; the first export then runs in the background and the first
     # /api/projects waits for it (projects_payload), so the first page load is still not empty.
     def first_then_loop():
+        if hub.load_saved():
+            hub.first_export.set()   # the saved copy answers at once; the fresh export replaces it
         try:
             hub.run_export()
         except Exception as e:
             sys.stderr.write("[hub] initial export failed (will retry): %s\n" % e)
         finally:
+            with hub.lock:
+                hub.warming = False
             hub.first_export.set()
+            hub.fresh_export.set()
+            sys.stderr.write("[hub] startup export done\n")
+            sys.stderr.flush()
         hub.refresh_loop()
     threading.Thread(target=first_then_loop, daemon=True).start()
 

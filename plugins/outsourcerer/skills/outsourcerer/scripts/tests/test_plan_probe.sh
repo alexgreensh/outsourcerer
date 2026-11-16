@@ -140,7 +140,7 @@ grep -q '@' <<<"$R" && bad "agy: an account email leaked into the feed" || ok "a
 if [ -n "$(ls "$TX"/*/ 2>/dev/null | grep -v '^osrc-test-PL' || true)" ]; then bad "agy: probe used a tmux socket not named osrc-test-PL*"; else ok "agy: probe tmux server is private and test-named"; fi
 
 R="$(row devin)"
-jq -e '.state == "ok" and .left == "Free models" and (.note | test("Pro plan: 2 models are free"))' >/dev/null <<<"$R" && ok "devin: Free models, Pro plan, only true Free rows counted" || bad "devin: $R"
+jq -e '.state == "ok" and .left == "Free · no limit" and (.note | test("Pro plan: 2 models are free")) and (.note | test("cloud quota"))' >/dev/null <<<"$R" && ok "devin: Free · no limit + cloud quota note, Pro plan, only true Free rows counted" || bad "devin: $R"
 grep -qE 'fixture@example|Fixture Person' <<<"$J" && bad "devin: name/email leaked" || ok "devin: name and email never leave the probe"
 
 R="$(row droid)"

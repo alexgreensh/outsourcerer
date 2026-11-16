@@ -131,7 +131,7 @@
 #
 # WINDOWS: NO WSL REQUIRED. Runs under Git Bash (ships with Git for Windows); use the
 # outsourcerer.cmd / outsourcerer.ps1 launchers next to this script from cmd/PowerShell.
-# `session` start is not supported on Windows (only `session read` goes through the winpty broker);
+# `session` runs through the bundled winpty broker instead of tmux (start/send/answer/read/clear/stop);
 # everything else works (bg/fanout cover the same ground for long or parallel work, supervised).
 # The cc/codex backends read OPENROUTER_API_KEY from ~/.env and, when no -m is given, ESCALATE
 # through a model chain (OR_OFFLOAD_CHAIN, default tencent/hy3:free -> z-ai/glm-5.2 ->
@@ -177,7 +177,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.16.3"
+OSRC_VERSION="0.16.4"
 # Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
 # picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
 # free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
@@ -287,8 +287,12 @@ OR_CHAIN_DEFAULT="z-ai/glm-5.2,deepseek/deepseek-v4-pro"
 # Absolute path to THIS script (for the reverse bridge / parity-codex AGENTS.md snippet).
 # Resolve via command -v first to handle PATH-invoked usage (bare `outsourcerer bg run ...`).
 SCRIPT_PATH="$(command -v -- "$0" 2>/dev/null || printf '%s' "$0")"
+# A Windows drive path (`C:/...` or `C:\...`, what Git Bash callers and the skill itself pass) is
+# absolute too: prefixing $PWD to it yields `$PWD/C:/...`, which breaks the lib/*.sh load below
+# (the glob matches nothing, so every lib is silently skipped) and every self re-exec (bg preflight,
+# the detached __runjob supervisor), so background launches fail with "nothing started".
 case "$SCRIPT_PATH" in
-  /*) ;;  # already absolute
+  /*|[A-Za-z]:[/\\]*) ;;  # already absolute (POSIX or Windows drive)
   *)  SCRIPT_PATH="$PWD/$SCRIPT_PATH" ;;
 esac
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -4616,7 +4620,7 @@ _with_bundle_root() {
 # the leaf itself need not exist. Portable: no realpath, no readlink -f (BSD readlink lacks -f).
 _canon_path() {
   local p="$1" d b
-  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  case "$p" in /*|[A-Za-z]:[/\\]*) ;; *) p="$PWD/$p" ;; esac
   d="$(dirname "$p")"; b="$(basename "$p")"
   ( cd "$d" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$b" )
 }
@@ -11600,7 +11604,7 @@ _autodetach_run() {
     fi
     _use_headless=1
     if [ "$OSRC_PLATFORM" = "windows" ]; then
-      printf '>>> [auto-detach] Git Bash has no tmux and interactive `session` start is not supported on Windows, so there is nothing to install. Running the HEADLESS bg path (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0.\n' >&2
+      printf '>>> [auto-detach] Git Bash has no tmux, so there is nothing to install (a steerable `session start` runs through the winpty broker instead). Running the HEADLESS bg path (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0.\n' >&2
     else
     printf '>>> [auto-detach] tmux is not installed. RECOMMENDED: install tmux (%s) — it is the basic requirement for steerable interactive `session` mode; without it you can run/fanout headless but cannot watch or steer a live delegate. Falling back to the HEADLESS bg path now (supervised via watchdog/status/result). Silence with OSRC_REQUIRE_INTERACTIVE=0; fail instead of falling back with OSRC_REQUIRE_TMUX=1.\n' \
       "$( [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install tmux' || echo 'apt/dnf install tmux')" >&2
@@ -17895,10 +17899,11 @@ _session_relaunch_effort() { # <provider> <model> <effort>
 _winpty_session() {
   local sub="${1:-}"; shift || true
   _validate_session_name
-  if [ "$sub" != "read" ]; then
-    echo "unverified Windows mutation support" >&2
-    return 1
-  fi
+  # start/send/answer/read/clear/stop were verified end to end on Windows 11 + Git for Windows winpty
+  # 0.4.3 + codex 0.169 (lib/winpty.sh has the details). The Devin model picker keystrokes were not.
+  case "$sub" in
+    model) echo "unverified Windows mutation support" >&2; return 1 ;;
+  esac
   local sdir="$OSRC_HOME/sessions/$SESSION_NAME"
   local broker="$SCRIPT_DIR/outsourcerer-winpty-broker.sh"
   [ -f "$broker" ] || die "winpty broker missing: $broker (installation corruption?)"
@@ -17969,8 +17974,22 @@ _winpty_session() {
         _w=$((_w + 1))
       done
 
+      # Fail closed when the engine died during boot (e.g. winpty "cannot start 'codex': Not found in
+      # PATH", or a winpty assertion). This used to WARN and still print "Started", leaving a dead
+      # session the orchestrator believed was live. Give a slow engine a few seconds before judging.
+      _w=0
+      while [ "$_w" -lt 15 ] && [ -f "$sdir/winpty.pid" ] && kill -0 "$(cat "$sdir/winpty.pid" 2>/dev/null)" 2>/dev/null; do
+        sleep 0.2; _w=$((_w + 1))
+      done
       if [ ! -f "$sdir/winpty.pid" ] || ! kill -0 "$(cat "$sdir/winpty.pid" 2>/dev/null)" 2>/dev/null; then
-        echo "WARN: winpty did not start quickly; see $sdir/broker.log" >&2
+        {
+          echo "session start FAILED: the $PROVIDER engine is not running under winpty. Its last output:"
+          _winpty_clean "$sdir/out.log" 8 | sed 's/^/  | /'
+          _winpty_clean "$sdir/broker.log" 4 | sed 's/^/  broker: /'
+        } >&2
+        kill "$(cat "$sdir/broker.pid" 2>/dev/null)" 2>/dev/null || true
+        rm -rf "$sdir"
+        return 1
       fi
 
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
@@ -17993,39 +18012,18 @@ _winpty_session() {
       else
         echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       fi
-      echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
+      echo "Give it ~8s to boot, then:  $0 session read [--state]   |   $0 session send \"…\"   |   $0 session answer [<option-number>]   |   $0 session clear   |   $0 session stop"
       _owner_record "$SESSION_NAME"
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
-      [ -n "${1:-}" ] || die "session send needs text"
-      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
-      mkdir -p "$sdir/cmd"
-      local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
-      printf '%s' "$*" > "$tmp"
-      mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$-$RANDOM.txt"
-      sleep 0.4
-      echo "sent. Read progress with: $0 session read"
+      _winpty_cmd_send "$sdir" "$@"
       ;;
-    read)
-      local _want_state=0
-      while [ "$#" -gt 0 ]; do case "$1" in --state) _want_state=1; shift;; *) shift;; esac; done
-      [ -d "$sdir" ] || { echo "no session '$SESSION_NAME' (run: $0 session start)"; return 0; }
-      if [ "$_want_state" = "1" ]; then
-        # WITH --state: classify the log tail. The no-flag path below stays byte-identical.
-        if [ -f "$sdir/out.log" ]; then
-          tail -n 200 "$sdir/out.log" | _pane_state_classify
-        else
-          _pane_state_json unknown "no output yet"
-        fi
-      else
-        if [ -f "$sdir/out.log" ]; then
-          tail -n 200 "$sdir/out.log" | grep -v '^[[:space:]]*$'
-        else
-          echo "(no output yet)"
-        fi
-      fi
+    answer)
+      _winpty_cmd_answer "$sdir" "$@"
+      ;;
+    read|state)
+      _winpty_cmd_read "$sdir" "$sub" "$@"
       ;;
     clear)
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
@@ -18077,7 +18075,7 @@ _winpty_session() {
       echo "stopped '$SESSION_NAME'."
       ;;
     *)
-      die "session subcommand: start | send \"text\" | read | clear | model [NAME] | effort <level> | stop"
+      die "session subcommand: start | send \"text\" | answer [<option-number>] | read [--state] | clear | model [NAME] | effort <level> | stop"
       ;;
   esac
 }
@@ -19094,7 +19092,7 @@ doctor() {
   fi
   echo "  default model: $DEFAULT_MODEL"
   have jq   && echo "  jq:   $(jq --version 2>/dev/null) (needed for: jobs/status/advise/parity)" || echo "  jq:   not installed -> $( [ "$OSRC_PLATFORM" = "windows" ] && echo 'winget install jqlang.jq' || { [ "$OSRC_PLATFORM" = "mac" ] && echo 'brew install jq' || echo 'apt/dnf install jq'; }) (jobs/status/advise need it)"
-  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' unavailable; bg/fanout cover it" || echo "brew/apt install tmux — only needed for 'session'"))"
+  have tmux && echo "  tmux: $(tmux -V) (needed for: interactive session mode)"     || echo "  tmux: not installed ($( [ "$OSRC_PLATFORM" = "windows" ] && echo "no tmux on Git Bash — 'session' uses the winpty broker instead" || echo "brew/apt install tmux — only needed for 'session'"))"
   local lm=""
   if [ "$_doff" = "1" ]; then
     echo "  live models: skipped (OSRC_DOCTOR_OFFLINE)"
@@ -19943,7 +19941,7 @@ main() {
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     hub)         cmd_hub "$@" ;;
-    mc|mission-control) cmd_hub_serve "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
+    mc|mission-control) cmd_hub_mc "$@" ;;                             # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus

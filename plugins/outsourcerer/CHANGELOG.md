@@ -2,6 +2,22 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.16.4
+
+### Added
+
+- **Windows sessions work end to end.** On Windows Git Bash, `session start`, `send`, `read --state`, `clear` and `stop` now run through the winpty broker with Codex, and a new `session answer <n>` picks an option in an open menu. A start whose engine dies at boot fails loudly with its last output instead of saying "Started", `send` refuses to type into an open menu, and it presses Enter only once. Thanks @NehoraiHadad (#75).
+- **Mission Control follows your system theme.** With no saved choice, the page opens in light or dark to match the OS. Thanks @danikdanik (#73).
+
+### Fixed
+
+- **Windows drive paths.** Running the engine as `C:/.../outsourcerer.sh` loaded none of its libraries, so background runs failed with "nothing started". Drive paths are now treated as absolute. Thanks @NehoraiHadad (#74).
+- **`outsourcerer mc` opens the page and returns.** It reuses a Mission Control that is already running, or starts one in the background, instead of running a second server in the foreground that never returned.
+- **No endless "Loading" after a restart.** Mission Control shows your last saved projects at once and swaps in fresh data when it's ready.
+- **Long plan headlines no longer crush the plan name** in the sidebar ("A n t i g r a v i t y" down one column). The row shows the percentage; each model group is listed below it.
+- **Devin says what its limit is.** "Free · no limit" for its free models, with a note that Devin Cloud runs use your plan's cloud quota, which the Devin CLI does not report.
+- **Cleaner names.** Short id fragments like "49e4" no longer show up in lane and project names.
+
 ## 0.16.3
 
 ### Added

@@ -78,4 +78,4 @@
 .lrow .tags .paidtag { white-space: nowrap; }
 #hc .lwins { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
 #hc .lwin { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: .85rem; }
-.glance .gpv.gpt { font-size: .95rem; } /* PL: a word value (Free models, Pay per use) sits under the percentages, not over them */
+.glance .gpv.gpt { font-size: .95rem; } /* PL: a word value (Free · no limit, Pay per use) sits under the percentages, not over them */

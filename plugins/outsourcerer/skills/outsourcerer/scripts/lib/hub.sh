@@ -787,6 +787,37 @@ cmd_hub_serve() {
   exec python3 -I "$server" "${args[@]}"
 }
 
+# cmd_hub_mc: `mc` / `mission-control`, the open-the-page command. It reuses a hub that already serves this
+# OSRC_HOME (its token answers /api/answers on 8788-8798), else starts one detached, opens the page and
+# returns. Before 0.16.4 `mc` ran `hub serve` in the foreground: it never returned, and with 8788 taken it
+# quietly started a second server. `mc serve ...` (or any serve flag) still runs the server in front.
+cmd_hub_mc() {
+  case "${1:-}" in serve) shift; cmd_hub_serve "$@"; return ;; --port|--no-open|--new-token) cmd_hub_serve "$@"; return ;; esac
+  [ "$#" -eq 0 ] || die "mc: unknown option '$1' (usage: mc | mc serve [--port N] [--no-open] [--new-token])"
+  local tokf="$OSRC_HOME/hub/token" tok="" p url="" log="$OSRC_HOME/hub/serve.log" i
+  local dir="${_OSRC_FACTORY_DIR:-$SCRIPT_DIR}"
+  [ -f "$tokf" ] && [ ! -L "$tokf" ] && tok="$(tr -d ' \n' <"$tokf" 2>/dev/null)"
+  case "$tok" in *[!0-9a-fA-F]*) tok="" ;; esac
+  if [ "${#tok}" -eq 32 ] && command -v curl >/dev/null 2>&1; then
+    for p in 8788 8789 8790 8791 8792 8793 8794 8795 8796 8797 8798; do
+      [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $tok" "http://127.0.0.1:$p/api/answers" 2>/dev/null)" = 200 ] \
+        && { url="http://127.0.0.1:$p/?t=$tok"; break; }
+    done
+  fi
+  if [ -z "$url" ]; then
+    mkdir -p "$OSRC_HOME/hub" && chmod 700 "$OSRC_HOME/hub" 2>/dev/null
+    [ -L "$log" ] && die "mc: $log is a symlink, refusing to write it"
+    ( OSRC_HUB_NO_OPEN=1 nohup bash "$dir/outsourcerer.sh" hub serve --no-open >"$log" 2>&1 & ) >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+      url="$(grep -oE 'http://127\.0\.0\.1:[0-9]+/\?t=[0-9a-fA-F]+' "$log" 2>/dev/null | tail -1)"
+      [ -n "$url" ] && break; sleep 0.5
+    done
+    [ -n "$url" ] || die "mc: Mission Control did not start within 15 s; see $log"
+  fi
+  echo "[outsourcerer] Mission Control: $url"
+  [ "${OSRC_HUB_NO_OPEN:-0}" = 1 ] || python3 -I -c 'import sys, webbrowser; webbrowser.open(sys.argv[1])' "$url" >/dev/null 2>&1 || true
+}
+
 cmd_hub() {
   local sub="${1:-}"
   case "$sub" in

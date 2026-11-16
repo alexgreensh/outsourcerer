@@ -1,7 +1,7 @@
 # outsourcerer.ps1 — PowerShell launcher, NO WSL REQUIRED.
 # Runs outsourcerer.sh under Git Bash (ships with Git for Windows). WSL is NOT needed:
-# only the optional tmux "session" mode is unavailable on Windows; run/edit/yolo/bg/fanout
-# all work. Usage:  ./outsourcerer.ps1 doctor   |   ./outsourcerer.ps1 run "map this repo"
+# run/edit/yolo/bg/fanout all work, and "session" runs through the bundled winpty broker
+# instead of tmux. Usage:  ./outsourcerer.ps1 doctor   |   ./outsourcerer.ps1 run "map this repo"
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sh = Join-Path $scriptDir 'outsourcerer.sh'
