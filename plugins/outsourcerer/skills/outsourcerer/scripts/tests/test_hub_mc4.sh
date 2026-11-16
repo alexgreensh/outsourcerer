@@ -106,10 +106,12 @@ X="$(OSRC_HUB_FAST=1 bash "$ENG" hub export 2>"$T/err")"; rc=$?
 echo "=== 1. renews: rebuilt from renews_at, never a stored string ==="
 # expected text, computed the same way the engine does (local time)
 expA="$(OSRC_SOURCED=1 bash -c '. "$1"; _osrc_renew_text "$2"' _ "$ENG" "$RA")"
-case "$expA" in "in 4 days · "???" "*) ok "renew text helper says 'in N days · Ddd D Mon' ($expA)" ;; *) bad "unexpected helper text: $expA" ;; esac
+# Calendar days, not 24 h blocks: +4 d 1 h lands on day 5 within an hour of midnight (CI runs in UTC).
+case "$expA" in "in 4 days · "???" "*|"in 5 days · "???" "*) ok "renew text helper says 'in N days · Ddd D Mon' ($expA)" ;; *) bad "unexpected helper text: $expA" ;; esac
 jq -e --arg e "$expA" '.limits[] | select(.id == "claude") | .renews == $e' >/dev/null <<<"$X" && ok "0.16.0 cache row 'in 92h 32m' exports as '$expA'" || bad "claude renews: $(jq -c '.limits[] | select(.id=="claude") | .renews' <<<"$X")"
 jq -e --arg e "$expA" '.limits[] | select(.id == "claude") | .windows["5h"].renews == $e' >/dev/null <<<"$X" && ok "window detail renews rebuilt too" || bad "window renews: $(jq -c '.limits[] | select(.id=="claude") | .windows' <<<"$X")"
-jq -e '.limits[] | select(.id == "codex") | .renews | test("^in 5 days · [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2}$")' >/dev/null <<<"$X" && ok "codex 'in 120h 6m' exports as a date" || bad "codex renews: $(jq -c '.limits[] | select(.id=="codex") | .renews' <<<"$X")"
+expB="$(OSRC_SOURCED=1 bash -c '. "$1"; _osrc_renew_text "$2"' _ "$ENG" "$RB")"
+jq -e --arg e "$expB" '.limits[] | select(.id == "codex") | .renews | (. == $e and test("^in [56] days · [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2}$"))' >/dev/null <<<"$X" && ok "codex 'in 120h 6m' exports as a date" || bad "codex renews: $(jq -c '.limits[] | select(.id=="codex") | .renews' <<<"$X")"
 jq -e '.limits[] | select(.id == "chatgpt-weekly") | (.renews // null) == null' >/dev/null <<<"$X" && ok "a stored string with no epoch is dropped, not shown" || bad "epoch-less row kept: $(jq -c '.limits[] | select(.id=="chatgpt-weekly")' <<<"$X")"
 jq -r '[.limits[] | .renews, (.windows // {} | .[] | .renews)] | .[] | strings' <<<"$X" | grep -E '[0-9]+h [0-9]+m' && bad "an 'Nh Nm' renew string survived" || ok "no 'Nh Nm' renew string anywhere in limits"
 # a past epoch renders nothing
