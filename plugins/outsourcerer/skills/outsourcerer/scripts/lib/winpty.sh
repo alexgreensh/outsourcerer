@@ -38,6 +38,17 @@ _winpty_title_busy() {
   return 1
 }
 
+# Turn-edge row classifiers (on cleaned lines), shared by the state reader and the send
+# verification so the two can never disagree about what proves a turn started or ended.
+_winpty_is_busy_row() { # "• Working (12s • esc to interrupt)"
+  case "$1" in *"esc to interrupt"*|*"esc twice to interrupt"*) return 0 ;; esac
+  return 1
+}
+_winpty_is_done_row() { # "Worked for 27s", Claude's "· done"
+  case "$1" in *"Worked for "*|*" for "[0-9]*"s · done"*|*" for "[0-9]*"m · done"*) return 0 ;; esac
+  return 1
+}
+
 # Row classifiers (on cleaned lines).
 _winpty_is_menu_row() { # "› 2. Skip", "❯ 1. Yes", "  3. Cancel" (a numbered option row)
   local re='^[[:space:]]*((›|❯|>)[[:space:]]+)?[0-9]+\.[[:space:]]+[^[:space:]]'
@@ -102,14 +113,22 @@ _winpty_answer_move() {
 }
 
 # _winpty_composer_holds <out.log> <text> -> rc 0 when the LAST composer row still shows the start of
-# <text> (the send was typed but not submitted).
+# <text> AND no turn edge follows it (the send was typed but not submitted). The winpty log is
+# append-only, so a SUBMITTED line's echo is never erased: an echo with a busy or turn-end row after
+# it is the engine already working on that send, not an unsent composer, and a retry Enter would be
+# a duplicate (the 0.16.4 double-Enter bug on real Codex output).
 _winpty_composer_holds() {
-  local f="$1" want l last=""
+  local f="$1" want l last="" ci=-1 ti=-1 i=0
   want="$(printf '%s' "$2" | tr -s '[:space:]' ' ' | cut -c1-24)"
   [ -n "$want" ] || return 1
-  while IFS= read -r l; do _winpty_is_composer_row "$l" && last="$l"; done < <(_winpty_clean "$f" 40)
-  case "$last" in *"$want"*) return 0 ;; esac
-  return 1
+  while IFS= read -r l; do
+    _winpty_is_composer_row "$l" && { last="$l"; ci="$i"; }
+    { _winpty_is_busy_row "$l" || _winpty_is_done_row "$l"; } && ti="$i"
+    i=$((i + 1))
+  done < <(_winpty_clean "$f" 40)
+  case "$last" in *"$want"*) ;; *) return 1 ;; esac
+  [ "$ti" -gt "$ci" ] && return 1
+  return 0
 }
 
 # _winpty_state_json <out.log> [engine] -> {"state","evidence"} in the session read --state vocabulary.
@@ -125,10 +144,9 @@ _winpty_state_json() {
   # always refresh the window title on a later turn, so the text decides and the title only adds.
   local busy_at=-1 done_at=-1 i=0 l busy_line=""
   while IFS= read -r l; do
-    case "$l" in
-      *"esc to interrupt"*|*"esc twice to interrupt"*) busy_at="$i"; busy_line="$l" ;;
-      *"Worked for "*|*" for "[0-9]*"s · done"*|*" for "[0-9]*"m · done"*) done_at="$i" ;;
-    esac
+    if _winpty_is_busy_row "$l"; then busy_at="$i"; busy_line="$l"
+    elif _winpty_is_done_row "$l"; then done_at="$i"
+    fi
     i=$((i + 1))
   done < <(_winpty_clean "$f" 120)
   if [ "$busy_at" -gt "$done_at" ]; then
@@ -166,7 +184,8 @@ _winpty_cmd_send() {
   printf '%s' "$*" > "$tmp"
   mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$-$RANDOM.txt"
   # The broker presses Enter once. Some TUIs swallow the first Enter of a fast paste; press it
-  # again only when the text is verifiably still in the composer and no menu has opened.
+  # again only when the text is verifiably still in the composer (no turn edge proves the engine
+  # took it) and no menu has opened.
   local _wtry=0
   while [ "$_wtry" -lt 2 ]; do
     sleep 1.5
