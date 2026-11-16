@@ -695,6 +695,7 @@ cmd_hub_export() {
     if [ -z "$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)" ]; then
       pj="$(jq -c --arg d "$(_osrc_hub_session_detail "$slug")" '. + {_base: (.name // ""), _detail: $d}' <<<"$pj")"
     fi
+    ! type _osrc_hub_history >/dev/null 2>&1 || pj="$(jq -c --argjson h "$(_osrc_hub_history "$slug" "$pj" 2>/dev/null || echo null)" '. + {history:$h}' <<<"$pj" 2>/dev/null || printf '%s' "$pj")"   # MC4 History
     [ -n "$pj" ] && { projects="$(jq -cn --argjson a "$projects" --argjson b "$pj" '$a+[$b]')"; [ "$slug" = "$proj" ] && found=1; }
   done
   if [ -z "$proj" ]; then

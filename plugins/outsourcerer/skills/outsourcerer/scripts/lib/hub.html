@@ -403,7 +403,7 @@ a.pill svg { width: 13px; height: 13px; }
 </div>
 <div class="hc" id="hc" role="tooltip" hidden></div>
 
-<script src="assets/hub-home.js"></script>
+<script src="assets/hub-home.js"></script><script src="assets/hub-history.js"></script>
 <script src="assets/hub-decide.js"></script>
 <script>
 (function () {
@@ -908,7 +908,7 @@ a.pill svg { width: 13px; height: 13px; }
       sec2.appendChild(wrap); main.appendChild(sec2);
     }
     if (!ds.length) decSec();
-    main.appendChild(el('p', 'foot', 'Last updated ' + (p.updated || 'not yet') + '. Each orchestrator refreshes its own project here as tracks move.'));
+    if (window.OSRC_HUB_HISTORY) { const hx = OSRC_HUB_HISTORY.section({ el, ic }, p); if (hx) main.appendChild(hx); }   main.appendChild(el('p', 'foot', 'Last updated ' + (p.updated || 'not yet') + '. Each orchestrator refreshes its own project here as tracks move.'));
     paint(); refocus(keep); keepHover();
   }
   function refocus(keep) { const n = keep && $(keep.id); if (n) { n.focus({ preventScroll: true }); if (keep.s != null && n.setSelectionRange) try { n.setSelectionRange(keep.s, keep.e, keep.d || 'none'); } catch (e) {} } }

@@ -43,3 +43,27 @@
 #lstamp .rfr { flex: none; margin-left: 2px; padding: 2px; gap: 0; font-size: 0; line-height: 0; }
 #lstamp .rfr svg { width: 13px; height: 13px; }
 @media (hover: none) { #lstamp .rfr { min-height: 28px; min-width: 28px; justify-content: center; } }
+/* MC4 #5: the plans tile lists every checked plan, lowest first. */
+.glance li.gplans { gap: 6px; }
+.glance .gp { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 10px; align-items: baseline; }
+.glance .gpn { font-weight: 700; font-size: .95rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glance .gpv { font-weight: 700; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.glance .gpr { grid-column: 1 / -1; }
+@media (max-width: 720px) { .glance li.gplans { display: flex; } }
+/* MC4 #6/#7: lane history and the project timeline. Finished is green, failed red, the rest neutral. */
+.hx-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border: 1.5px solid var(--edge); border-radius: 16px; background: var(--card); overflow: hidden; }
+.hx-list li { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; gap: 4px 12px; align-items: center; padding: 10px 16px; font-size: .92rem; }
+.hx-list li + li { border-top: 1.5px solid var(--line); }
+.hx-list svg, .hx-list i { width: 16px; height: 16px; }
+.hx-t { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; }
+.hx-m { font-size: .82rem; font-weight: 600; white-space: nowrap; }
+.hx-d { font-size: .8rem; white-space: nowrap; }
+.hx-finished > svg, .hx-finished > i { color: var(--dot-ok); }
+.hx-failed > svg, .hx-failed > i { color: var(--dot-out); }
+.hx-fold { margin-top: 10px; }
+.hx-fold > summary { cursor: pointer; font-weight: 700; font-size: .92rem; padding: 4px 0; }
+.ptile .hx-fold .hx-list li { padding: 8px 12px; font-size: .85rem; }
+.hx-sum { border: 0; background: none; padding: 0; font: inherit; font-size: .85rem; font-weight: 600; text-align: left; text-decoration: underline; cursor: pointer; color: inherit; }
+.hx-note { margin: 0 0 10px; font-size: .9rem; }
+.hx section { margin-top: 28px; }
+@media (max-width: 720px) { .hx-list li { grid-template-columns: 18px minmax(0, 1fr) auto; } .hx-t { white-space: normal; } .hx-m { grid-column: 2; grid-row: 2; } .hx-d { grid-column: 3; grid-row: 1; } }

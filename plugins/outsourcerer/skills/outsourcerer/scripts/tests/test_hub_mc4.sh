@@ -83,6 +83,22 @@ jq -cn --argjson ra "$RA" --argjson rb "$RB" '[
   {id:"codex",name:"Codex / ChatGPT",lane:"cx",order:2,state:"ok",left:"59% left",renews:"in 120h 6m",renews_at:$rb,billing:"subscription",updated:"22:27",updatedAt:"2026-11-15T20:27:00Z"},
   {id:"chatgpt-weekly",name:"ChatGPT — weekly",state:"ok",order:4,billing:"subscription",left:"41% left",renews:"in 120h 6m",updated:"22:27"}]' > "$OSRC_HOME/hub/limits-cache.json"
 
+# gh shim: read-only list calls answered from fixtures; anything else fails and is logged.
+GHN="$(date -u -r $((now - 3600)) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$((now - 3600))" +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$T/bin/gh" <<EOF
+#!/bin/sh
+echo "\$*" >> "$T/gh.log"
+[ -f "$T/gh-offline" ] && exit 1
+case "\$1 \$2" in
+  "release list") printf '[{"tagName":"v1.9.85","name":"Total Recall 1.9.85","publishedAt":"$GHN","isDraft":false}]' ;;
+  "pr list") printf '[{"number":71,"title":"Fix hub names","closedAt":"$GHN","mergedAt":"$GHN","url":"https://github.com/alexgreensh/total-recall-core/pull/71"},{"number":70,"title":"Drop idea","closedAt":"$GHN","mergedAt":null,"url":"https://github.com/alexgreensh/total-recall-core/pull/70"}]' ;;
+  "issue list") printf '[{"number":62,"title":"Stale guidance","closedAt":"$GHN","url":"https://github.com/alexgreensh/total-recall-core/issues/62","stateReason":"COMPLETED"}]' ;;
+  *) echo "gh shim: refused \$*" >&2; exit 9 ;;
+esac
+EOF
+chmod +x "$T/bin/gh"
+echo done > "$OSRC_HOME/jobs/$JOB/status"
+
 X="$(OSRC_HUB_FAST=1 bash "$ENG" hub export 2>"$T/err")"; rc=$?
 [ "$rc" = 0 ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$X" && ok "hub export runs on the real-shaped seed" || { bad "export rc=$rc $(head -c 400 "$T/err")"; echo "RESULT: $pass passed, $fail failed"; exit 1; }
 [ -n "${MC4_DUMP:-}" ] && printf '%s\n' "$X" > "$MC4_DUMP"
@@ -131,6 +147,27 @@ done
 for s in "Video" "V185 redo" "Total Recall Core" "F-TEST brief in total-recall" "10x-animation" "FABLE-BRIEF-2026-11-15 video proposal" "Outsourcerer 0.16.2"; do
   jq -en --arg s "$s" "$(sed -n '/^_OSRC_HUB_IDLIKE_JQ=/,/;.$/p' "$S/lib/hub-lanename.sh" | sed "1s/^_OSRC_HUB_IDLIKE_JQ='//; \$s/'\$//")"' $s | idlike' >/dev/null 2>&1 && bad "idlike flags a real name '$s'" || ok "idlike leaves '$s' alone"
 done
+
+echo "=== 7. History: lanes + releases + PRs + issues, cached, read-only ==="
+H="$(jq -c --arg s "$SC" '.projects[] | select(.id == $s) | .history' <<<"$X")"
+jq -e '.repo == "alexgreensh/total-recall-core" and .github == "ok"' >/dev/null <<<"$H" && ok "history repo from the lanes' git remote, GitHub reachable" || bad "history head: $(jq -c '{repo,github}' <<<"$H")"
+jq -e '[.items[] | select(.kind == "release" and .title == "Total Recall 1.9.85" and (.url | startswith("https://github.com/alexgreensh/total-recall-core/releases/tag/")))] | length == 1' >/dev/null <<<"$H" && ok "release listed with its link" || bad "release: $(jq -c '[.items[]|select(.kind=="release")]' <<<"$H")"
+jq -e '[.items[] | select(.kind == "pr")] | map("\(.number):\(.outcome)") | sort == ["70:closed","71:merged"]' >/dev/null <<<"$H" && ok "PR #71 merged, PR #70 closed unmerged" || bad "prs: $(jq -c '[.items[]|select(.kind=="pr")]' <<<"$H")"
+jq -e '[.items[] | select(.kind == "issue" and .number == 62)] | length == 1' >/dev/null <<<"$H" && ok "closed issue #62 listed" || bad "issues: $(jq -c '[.items[]|select(.kind=="issue")]' <<<"$H")"
+jq -e '[.items[] | select(.kind == "lane")] | map("\(.title)=\(.outcome)") | sort == ["F-TEST brief in total-recall=running","V185 F4a=finished"]' >/dev/null <<<"$H" && ok "every lane with outcome: live Claude lane running, finished job green" || bad "lanes: $(jq -c '[.items[]|select(.kind=="lane")|{title,outcome}]' <<<"$H")"
+jq -e '.summary.prsMerged == 1 and .week.releases == 1 and .week.issuesClosed == 1' >/dev/null <<<"$H" && ok "summary + this-week counts" || bad "summary: $(jq -c '{summary,week}' <<<"$H")"
+grep -vE '^(release|pr|issue) list ' "$T/gh.log" | grep -q . && bad "gh called with a non-list command: $(cat "$T/gh.log")" || ok "gh used read-only (list calls only)"
+c1="$(wc -l < "$T/gh.log")"; OSRC_HUB_FAST=1 bash "$ENG" hub export >/dev/null 2>&1; c2="$(wc -l < "$T/gh.log")"
+[ "$c1" = "$c2" ] && ok "second export served GitHub data from the 10-minute cache" || bad "gh re-called within TTL ($c1 -> $c2)"
+touch "$T/gh-offline"; git -C "$WF" commit -q --allow-empty -m x >/dev/null 2>&1; git -C "$WF" tag v1.9.84 >/dev/null 2>&1
+HO="$(OSRC_HUB_GH_TTL=0 bash "$ENG" hub export 2>/dev/null | jq -c --arg s "$SC" '.projects[] | select(.id == $s) | .history')"
+jq -e '.github == "unreachable" and ([.items[] | select(.kind == "release" and .local == true and .tag == "v1.9.84")] | length == 1)' >/dev/null <<<"$HO" && ok "offline: GitHub not reachable flag + local git tags" || bad "offline: $(jq -c '{github, r:[.items[]|select(.kind=="release")]}' <<<"$HO")"
+rm -f "$T/gh-offline"
+HJS="$S/lib/hub-assets/hub-history.js"
+grep -q "Finished (' + done.length" "$HJS" && grep -q 'finishedFold({ el, ic }, p, false)' "$S/lib/hub-assets/hub-home.js" && grep -q 'OSRC_HUB_HISTORY.section({ el, ic }, p)' "$S/lib/hub.html" \
+  && ok "page: Finished (N) fold open on the project page, collapsed on Home; History section wired" || bad "history page wiring missing"
+grep -q 'GitHub not reachable' "$HJS" && ok "page says 'GitHub not reachable' in one neutral line" || bad "offline line missing"
+grep -q "plans: lims" "$S/lib/hub-assets/hub-home.js" && ok "plans tile lists every checked plan (#5)" || bad "plans tile still shows one plan"
 
 echo "=== 3. page: header on one line, neutral stale pill, page-side guards ==="
 CSS="$S/lib/hub-assets/hub-mc3.css"; HJ="$S/lib/hub-assets/hub-home.js"; PG="$S/lib/hub.html"

@@ -31,6 +31,7 @@ _osrc_hub_folder_label() {
   [ -n "$b" ] || return 0
   b="${b%%--*}"                       # outsourcerer-<folder>--<hash>-<sid8> -> outsourcerer-<folder>
   case "$b" in outsourcerer-*) b="${b#outsourcerer-}" ;; osrc-*) b="${b#osrc-}" ;; esac
+  b="${b#wt-}"; b="${b#worktree-}"; b="${b#auto-}"   # wt-auto-SUP / osrc-auto-SUP -> SUP
   jq -rn --arg s "$b" "$_OSRC_HUB_IDLIKE_JQ"'
     $s | gsub("[-_.]+"; " ") | split(" ") | map(select(length > 0 and (idlike | not)))
     | join(" ") | if . == "" then "" else (.[0:1] | ascii_upcase) + .[1:] end' 2>/dev/null
