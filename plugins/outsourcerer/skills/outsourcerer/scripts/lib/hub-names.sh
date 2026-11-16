@@ -79,14 +79,14 @@ _osrc_hub_session_detail() {
     fi
     tl="$(tail -c "$tail_b" "$f" 2>/dev/null | grep -E '"type": ?"(custom-title|ai-title|agent-name)"')"
     t="$(printf '%s\n' "$tl" | grep -E '"type": ?"custom-title"' | tail -1)"
-    [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_IDLIKE_JQ"' (.customTitle // "") | if idlike then "" else clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
+    [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ ${_OSRC_HUB_IDLIKE_JQ:-def idlike: false;}"' (.customTitle // "") | if idlike then "" else clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
     if [ -z "$out" ]; then
       t="$(printf '%s\n' "$tl" | grep -E '"type": ?"ai-title"' | tail -1)"
       [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ"' (.aiTitle // "") | clean | short('"$n"')' <<<"$t" 2>/dev/null)"
     fi
     if [ -z "$out" ]; then
       t="$(printf '%s\n' "$tl" | grep -E '"type": ?"agent-name"' | tail -1)"
-      [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ $_OSRC_HUB_IDLIKE_JQ"' (.agentName // "") | if idlike then "" else agentclean | clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
+      [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ ${_OSRC_HUB_IDLIKE_JQ:-def idlike: false;}"' (.agentName // "") | if idlike then "" else agentclean | clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
     fi
     [ -n "$out" ] || out="$(grep -m 40 -E '"type": ?"user"' "$f" 2>/dev/null | jq -rn "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ"'
       first(inputs | select(.type == "user" and ((.isMeta // false) | not)) | .message.content
