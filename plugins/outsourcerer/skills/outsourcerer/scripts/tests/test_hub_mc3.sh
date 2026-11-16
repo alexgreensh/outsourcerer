@@ -90,7 +90,8 @@ for args in "--status flying" "--pct 101" "--pct -3" "--pct 4x" "--name https://
   if as "$MC3_SID_A" hub report $args >/dev/null 2>&1; then bad "accepted bad input: $args"; else ok "rejects: $args"; fi
 done
 eng hub report --pct 5 >/dev/null 2>&1 && bad "report without a Claude session accepted" || ok "report without CLAUDE_CODE_SESSION_ID refuses"
-ls "$OSRC_HOME/hub/projects" "$OSRC_HOME/hub/decisions" | grep -q '\.tmp\.' && bad "temp files left behind" || ok "atomic writes leave no temp files"
+_left="$(ls "$OSRC_HOME/hub/projects" "$OSRC_HOME/hub/decisions" 2>/dev/null)"
+grep -q '\.tmp\.' <<<"$_left" && bad "temp files left behind" || ok "atomic writes leave no temp files"
 as "$MC3_SID_A" hub report --next "$(printf 'line one\nline\ttwo %s/secret' "$HOME")" >/dev/null
 jq -e '.next == "line one line two ~/secret"' "$OSRC_HOME/hub/projects/$MC3_SID_A.json" >/dev/null && ok "text is one clean line, HOME shortened" || bad "next: $(jq -r .next "$OSRC_HOME/hub/projects/$MC3_SID_A.json")"
 ln -s "$T/elsewhere.json" "$OSRC_HOME/hub/projects/$G.json.tmp" 2>/dev/null; rm -f "$OSRC_HOME/hub/projects/$G.json"; ln -s "$T/elsewhere.json" "$OSRC_HOME/hub/projects/$G.json"
@@ -120,7 +121,8 @@ echo "=== 4. renewal text ==="
 ) > "$T/renew.out"
 cat "$T/renew.out"; pass=$((pass + $(grep -c '^PASS' "$T/renew.out"))); fail=$((fail + $(grep -c '^FAIL' "$T/renew.out")))
 L="$(eng lane summary 2>&1)"
-grep -q "in 4 days · " <<<"$L" && ok "CLI limits table says days + date" || bad "CLI table: $L"
+# Midnight-safe: 92h ahead is "in 3 days" or "in 4 days" depending on the hour the suite runs.
+grep -Eq "in [34] days · [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2}" <<<"$L" && ok "CLI limits table says days + date" || bad "CLI table: $L"
 grep -Eq '[0-9]+h [0-9]+m' <<<"$L" && bad "CLI table still counts hours: $L" || ok "CLI table never counts hours"
 grep -q "syntax error" <<<"$L" && bad "CLI table crashed under bash 3.2: $L" || ok "CLI table renders under /bin/bash"
 eng hub export | jq -e '[.limits[] | select(.renews != null)] | length > 0 and all(.[]; .renews | test("^(today|tomorrow) · [0-2][0-9]:[0-5][0-9]$|^in [0-9]+ days · [A-Z][a-z]{2} [0-9]{1,2} [A-Z][a-z]{2}$"))' >/dev/null \
