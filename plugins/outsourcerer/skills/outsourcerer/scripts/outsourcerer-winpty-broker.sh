@@ -118,6 +118,7 @@ while kill -0 "$WPID" 2>/dev/null; do
           -[0-9]*) k=$'\e[A'; n=${mv#-} ;;
           *) n="" ;;
         esac
+        case "$n" in *[!0-9]*) n="" ;; esac   # "5-3" or "+-1": not a move; press nothing (no stray Enter)
         if [ -n "$n" ]; then
           while [ "$n" -gt 0 ]; do printf '%s' "$k" >&3; sleep 0.15; n=$((n - 1)); done
           sleep 0.3

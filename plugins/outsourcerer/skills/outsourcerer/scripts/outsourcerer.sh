@@ -18017,67 +18017,13 @@ _winpty_session() {
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
-      [ -n "${1:-}" ] || die "session send needs text"
-      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
-      # Menu guard (tmux parity, Bug A): text typed into an open menu is lost, and its Enter picks
-      # whatever row the cursor is on. Refuse and point at `session answer`.
-      local _wmenu
-      if _wmenu="$(_winpty_menu "$sdir/out.log")"; then
-        printf '%s\n' "$_wmenu"
-        printf 'EVENT failed %s %s send refused: menu open; nothing typed\nNEXT %s session answer <option-number>\n' "$SESSION_NAME" "$(date +%s)" "$0"
-        die "session send refused: the session is showing a menu, not a text composer. Nothing was typed. Answer it with: $0 session answer <option-number>"
-      fi
-      mkdir -p "$sdir/cmd"
-      local tmp; tmp="$(mktemp "$sdir/cmd/.send.XXXXXX" 2>/dev/null || echo "$sdir/cmd/send.$$")"
-      printf '%s' "$*" > "$tmp"
-      mv "$tmp" "$sdir/cmd/send-$(date +%s)-$$-$RANDOM.txt"
-      # The broker presses Enter once. Some TUIs swallow the first Enter of a fast paste; press it
-      # again only when the text is verifiably still in the composer and no menu has opened.
-      local _wtry=0
-      while [ "$_wtry" -lt 2 ]; do
-        sleep 1.5
-        [ -d "$sdir/cmd" ] || break
-        _winpty_menu "$sdir/out.log" >/dev/null && break
-        _winpty_composer_holds "$sdir/out.log" "$*" || break
-        : > "$sdir/cmd/enter-$(date +%s)-$$-$RANDOM"
-        _wtry=$((_wtry + 1))
-      done
-      echo "sent. Read progress with: $0 session read"
+      _winpty_cmd_send "$sdir" "$@"
       ;;
     answer)
-      [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
-      local _wm _wmv
-      _wm="$(_winpty_menu "$sdir/out.log")" || die "no interactive menu detected in '$SESSION_NAME'. Re-check with: $0 session read"
-      if [ "$#" -eq 0 ]; then
-        printf '%s\n' "$_wm"
-        echo "answer with:  $0 session answer <option-number>"
-        return 0
-      fi
-      _wmv="$(_winpty_answer_move "$sdir/out.log" "$1")" || die "session answer: nothing selected (reason above). Re-check with: $0 session read"
-      mkdir -p "$sdir/cmd"
-      local tmp; tmp="$(mktemp "$sdir/cmd/.answer.XXXXXX" 2>/dev/null || echo "$sdir/cmd/answer.$$")"
-      printf '%s' "$_wmv" > "$tmp"
-      mv "$tmp" "$sdir/cmd/answer-$(date +%s)-$$-$RANDOM.txt"
-      sleep 1.5
-      echo "answered option $1. Re-check with: $0 session read --state"
+      _winpty_cmd_answer "$sdir" "$@"
       ;;
     read|state)
-      local _want_state=0
-      [ "$sub" = state ] && _want_state=1
-      while [ "$#" -gt 0 ]; do case "$1" in --state) _want_state=1; shift;; *) shift;; esac; done
-      [ -d "$sdir" ] || { echo "no session '$SESSION_NAME' (run: $0 session start)"; return 0; }
-      if [ "$_want_state" = "1" ]; then
-        # WITH --state: menu (after the last composer row) > title spinner > engine reader on the tail.
-        _winpty_state_json "$sdir/out.log" "$(_session_record "$SESSION_NAME" 2>/dev/null | cut -f1)"
-      else
-        # In-band window titles (OSC 0, one per spinner frame) and CRs are terminal noise, not output.
-        if [ -f "$sdir/out.log" ]; then
-          _winpty_clean "$sdir/out.log" 200
-        else
-          echo "(no output yet)"
-        fi
-      fi
+      _winpty_cmd_read "$sdir" "$sub" "$@"
       ;;
     clear)
       [ -d "$sdir" ] || die "no session '$SESSION_NAME' (run: $0 session start)"
