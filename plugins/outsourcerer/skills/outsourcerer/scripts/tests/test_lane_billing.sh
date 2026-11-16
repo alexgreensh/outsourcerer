@@ -102,6 +102,15 @@ PLANJSON='{
   "planTier": "max"
 }'
 [ "$(_ccbill "$PLANJSON")" = "subscription" ] && ok "r9 billing: cc plan login max (indented real shape) -> subscription" || bad "r9 billing: cc max-indented -> '$(_ccbill "$PLANJSON")'"
+# The Claude desktop app exports ANTHROPIC_BASE_URL=https://api.anthropic.com (the stock
+# first-party endpoint) into every session. That is not a redirect: a plan login must stay
+# subscription. Any other host is still a redirect and bills per-use.
+for u in https://api.anthropic.com https://api.anthropic.com/ HTTPS://API.ANTHROPIC.COM; do
+  b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL="$u")"
+  [ "$b" = "subscription" ] && ok "billing: cc plan login + first-party base URL $u -> subscription" || bad "billing: cc first-party base URL $u -> '$b'"
+done
+b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL=https://proxy.example)"
+[ "$b" = "metered" ] && ok "billing: cc plan login + foreign base URL -> metered" || bad "billing: cc foreign base URL -> '$b'"
 for st in pro team enterprise; do
   j="{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"$st\"}"
   b="$(_ccbill "$j")"
