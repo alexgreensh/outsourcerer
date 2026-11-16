@@ -207,6 +207,9 @@ grep -q '#16171a' "$PAGE" && grep -q '#1f2024' "$PAGE" && grep -q '#34363d' "$PA
 grep -cq '#18191c' "$PAGE" && bad "old dark tokens still present" || ok "old dark tokens fully replaced"
 grep -q "el('div', 'tcol')" "$PAGE" && grep -q '^\.tcol ' "$PAGE" && ok "balanced .tcol theme packing" || bad ".tcol packing missing"
 grep -q 'hgt\[0\] <= hgt\[1\]' "$PAGE" && ok "theme cards join the shorter column" || bad "column balance check missing"
+grep -q "localStorage.getItem('osrc-theme')" "$PAGE" && grep -q "catch (e) {} if (saved !== 'light' && saved !== 'dark') saved = root.getAttribute('data-theme')" "$PAGE" && ok "host pin resolves outside the storage try" || bad "host pin missing or inside the storage try"
+grep -q "saved !== 'dark') { try { saved = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark'" "$PAGE" && ok "no saved or host theme falls back to the OS setting" || bad "OS theme fallback missing"
+grep -q "URLSearchParams(location.search).get('theme')" "$PAGE" && grep -q "saved = q" "$PAGE" && ok "?theme= override still wins" || bad "?theme= override missing"
 grep -q '100dvh' "$PAGE" && grep -q 'rail-top' "$PAGE" && grep -q 'rail-mid' "$PAGE" && ok "rail layout (rail-top/rail-mid/100dvh)" || bad "rail layout missing"
 grep -q 'mask' "$PAGE" && grep -q 'data:image/png;base64' "$PAGE" && ok "wordmark css mask (inlined asset)" || bad "wordmark mask missing"
 # Item 14: stale alarm + no dialogs (past dashboard bugs).
