@@ -66,6 +66,14 @@ done <<<"$changed"
 [ -n "$suites" ] || echo "ok   no changed file is covered by a suite"
 # Parallel pool (PREFLIGHT_JOBS, default 4): run serially, 15 hub suites took 23 min on 2026-11-16.
 J="${PREFLIGHT_JOBS:-4}"; L="$(mktemp -d "${TMPDIR:-/tmp}/preflight.XXXXXX")"
+# Suites run on a clock where it is 23:xx local (PREFLIGHT_TZ overrides; "keep" keeps the Mac's zone).
+# A "+N hours" renewal then crosses midnight, as it does on CI near UTC midnight (test_hub_mc4 said
+# "in 6 days" on CI and "in 5 days" here, 2026-11-17).
+if [ -z "${PREFLIGHT_TZ:-}" ]; then
+  _off=$(( (23 - 10#$(date -u +%H) + 36) % 24 - 12 ))   # UTC offset that makes it 23:xx, in -12..+11
+  if [ "$_off" -ge 0 ]; then PREFLIGHT_TZ="Etc/GMT-$_off"; else PREFLIGHT_TZ="Etc/GMT+${_off#-}"; fi   # POSIX sign is inverted
+fi
+[ "$PREFLIGHT_TZ" = keep ] || { export TZ="$PREFLIGHT_TZ"; echo "     (suites run with TZ=$TZ, local time $(date +%H:%M))"; }
 for s in $suites; do
   case " $_ALL_SUITES " in *" $s "*) ;; *) continue ;; esac   # helpers, not suites
   # Same isolation as conformance.sh's pool: job control (set -m) so INT traps install in background
