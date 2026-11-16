@@ -30,3 +30,16 @@
 /* Phone: a lane name wraps to two lines instead of truncating; its state gets its own line under it. */
 @media (max-width: 720px) { .pt-lanes li { grid-template-columns: 10px minmax(0, 1fr); align-items: start; } .pt-lanes .lnd { margin-top: .35em; } .pt-lanes .lnn { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } .pt-lanes .lnm { grid-column: 2; grid-row: auto; } .pt-lanes .lns { grid-column: 2; justify-self: start; text-align: left; white-space: normal; } }
 @media (max-width: 720px) { .rlanes .lnn { white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } }
+/* MC4: a stale stamp is a neutral outline pill; red reads as an error (Alex's rule). */
+.lst.stale, .stamp-top.stale { color: var(--ink); background: transparent; border: 1.5px solid color-mix(in srgb, currentColor 45%, transparent); }
+/* MC4: "Your plans" stays on one line at sidebar width. The stamp text ellipsizes before it wraps, and the
+   Refresh button is an icon that never shrinks, so nothing clips at the rail's edge. */
+.rail h2:has(#lstamp) { flex-wrap: nowrap; gap: 8px; min-width: 0; }
+.rail h2 .lfold { flex: none; white-space: nowrap; }
+#lstamp { display: inline-flex; align-items: center; gap: 4px; min-width: 0; flex: 0 1 auto; font-size: .75rem; }
+#lstamp .lstt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#lstamp .stw { display: none; }
+#lstamp.stale { padding: 1px 3px 1px 8px; }
+#lstamp .rfr { flex: none; margin-left: 2px; padding: 2px; gap: 0; font-size: 0; line-height: 0; }
+#lstamp .rfr svg { width: 13px; height: 13px; }
+@media (hover: none) { #lstamp .rfr { min-height: 28px; min-width: 28px; justify-content: center; } }

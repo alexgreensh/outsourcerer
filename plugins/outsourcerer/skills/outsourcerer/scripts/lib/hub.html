@@ -448,13 +448,13 @@ a.pill svg { width: 13px; height: 13px; }
   function applyProjects(snap) {
     const s = sig(snap); if (s === sigP && !firstPull && !pullErr) return; sigP = s;
     pullErr = '';
-    projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
+    projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).map((p) => (window.OSRC_HUB_CLEAN ? OSRC_HUB_CLEAN.project(p) : p)).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
     if (firstPull) { current = pickStart(); firstPull = false; } else if (current && !projects.some((p) => p.id === current)) current = null;
     renderRail(); pollRender();
   }
   function applyLimits(snap) {
     const s = sig(snap); if (s === sigL) return; sigL = s;
-    limits = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).sort((a, b) => (a.order || 99) - (b.order || 99));
+    limits = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).map((l) => (window.OSRC_HUB_CLEAN ? OSRC_HUB_CLEAN.limit(l) : l)).sort((a, b) => (a.order || 99) - (b.order || 99));
     renderLimits(); if (!current) pollRender(); paint(); keepHover();   // Home's plans tile reads limits (MC3)
   }
   function applyAnswers(snap) {
@@ -476,7 +476,7 @@ a.pill svg { width: 13px; height: 13px; }
     async function pull(name) {
       const data = name === 'answers' ? await api('/api/answers') : await api('/api/projects');
       if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }   // startup export still running: stay on "Loading", ask again (MC-8)
-      if (name === 'projects') { const a = JSON.stringify(Array.isArray(data.also) ? data.also : []); if (a !== alsoSig) { alsoSig = a; also = JSON.parse(a); sigP = ''; } }   // MC3 "Also running" rides in the export
+      if (name === 'projects') { const a = JSON.stringify(Array.isArray(data.also) ? data.also : []); if (a !== alsoSig) { alsoSig = a; also = JSON.parse(a).map((r) => (window.OSRC_HUB_CLEAN && r ? Object.assign({}, r, { name: OSRC_HUB_CLEAN.name(r.name, r.project || 'Claude Code session'), title: OSRC_HUB_CLEAN.idlike(r.title) ? '' : r.title }) : r)); sigP = ''; } }   // MC3 "Also running" rides in the export
       const snap = { docs: docsFor(name, data) };
       subs[name].slice().forEach((cb) => { try { cb(snap); } catch (e) { try { console.error('hub render (' + name + ')', e); } catch (e2) {} } });
     }
@@ -760,7 +760,7 @@ a.pill svg { width: 13px; height: 13px; }
     const at = Math.max(...working.map((l) => Date.parse(l.updatedAt || '') || 0));
     // MC3: one clock, the viewer's local time (Alex is UTC+2); never a UTC label.
     const localHM = (ms) => (H && H.localStamp ? H.localStamp(ms) : new Date(ms).toTimeString().slice(0, 5));
-    const ls = $('lstamp'); ls.textContent = at > 0 ? 'Checked ' + localHM(at) : '';
+    const ls = $('lstamp'), hm = at > 0 ? localHM(at) : ''; ls.replaceChildren(); if (hm) { ls.append(el('span', 'lstt', /^\d/.test(hm) ? 'Checked ' + hm : hm)); ls.title = 'Plans checked ' + hm; }   // MC4: short, one line
     ls.dataset.at = at > 0 ? new Date(at).toISOString() : ''; ls.dataset.live = '1'; ls.dataset.rk = 'limits'; staleCheck();
     if (!open && !working.length) box.appendChild(el('p', 'lnone', 'Nothing has room right now.'));
     shown.forEach((l) => {
@@ -855,7 +855,7 @@ a.pill svg { width: 13px; height: 13px; }
         c.append(ob);
       }
       c.setAttribute('aria-label', l.short + ', ' + (l.status || 'Building') + (pctOk(l) ? ', ' + l.pct + ' percent' : ''));
-      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status)); if (pctOk(l)) row.append(el('span', 'mono', l.pct + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.issues) { const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf); else h.append(el('p', null, 'Issues: ' + l.issues)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); if (l.session) h.append(el('p', 'where', 'Session: ' + l.session)); });
+      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status)); if (pctOk(l)) row.append(el('span', 'mono', l.pct + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.issues) { const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf); else h.append(el('p', null, 'Issues: ' + l.issues)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); });
       return c;
     };
     const norm = (s) => String(s || 'Building').toLowerCase();

@@ -60,17 +60,17 @@ _OSRC_HUB_TITLE_JQ='def agentclean: gsub("\\[[^\\]]*\\]"; " ") | gsub("\\s+"; " 
 def words($n): split(" ") | if length > $n then .[0:$n] | join(" ") | sub("[ ,;:.-]+$"; "") + "…" else join(" ") end;'
 
 # _osrc_hub_session_detail <sid> -> the session's title (MC3 "Titles"): the LAST custom-title (/rename,
-# always wins), else the last ai-title (Claude's own task title), else the last agent-name cleaned of
+# wins unless it is a slug like "total-recall-85" or "osrc-orch2", MC4 idlike), else the last ai-title (Claude's own task title), else the last agent-name cleaned of
 # tags/owner/ids, else the first real prompt cut to ~6 words; "" when nothing usable. Titles are appended,
 # so only the transcript's tail is read (OSRC_HUB_TITLE_TAIL bytes, 4 MB); the first prompt comes from
-# the first matching lines only. An old-format "summary" line is a last fallback after all four. Cached in $OSRC_HOME/hub/titles-v2/<sid> as "<size> <text>"
+# the first matching lines only. An old-format "summary" line is a last fallback after all four. Cached in $OSRC_HOME/hub/titles-v3/<sid> (v3: MC4 slug rule) as "<size> <text>"
 # (transcripts only grow, so an unchanged size means an unchanged transcript).
 _osrc_hub_session_detail() {
   local sid="$1" f c out='' t sz line n="${OSRC_HUB_DETAIL_LEN:-48}" tail_b="${OSRC_HUB_TITLE_TAIL:-4194304}" tl
   case "$sid" in ''|.*|*/*) return 0 ;; esac
   case "$tail_b" in ''|*[!0-9]*) tail_b=4194304 ;; esac
-  c="$OSRC_HOME/hub/titles-v2/$sid"
-  for f in "$HOME"/.claude/projects/*/"$sid".jsonl; do
+  c="$OSRC_HOME/hub/titles-v3/$sid"
+  for f in "${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid".jsonl; do
     [ -f "$f" ] || continue
     sz="$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)"
     if [ -n "$sz" ] && [ -f "$c" ] && [ ! -L "$c" ]; then
@@ -79,14 +79,14 @@ _osrc_hub_session_detail() {
     fi
     tl="$(tail -c "$tail_b" "$f" 2>/dev/null | grep -E '"type": ?"(custom-title|ai-title|agent-name)"')"
     t="$(printf '%s\n' "$tl" | grep -E '"type": ?"custom-title"' | tail -1)"
-    [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ"' (.customTitle // "") | clean | short('"$n"')' <<<"$t" 2>/dev/null)"
+    [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_IDLIKE_JQ"' (.customTitle // "") | if idlike then "" else clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
     if [ -z "$out" ]; then
       t="$(printf '%s\n' "$tl" | grep -E '"type": ?"ai-title"' | tail -1)"
       [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ"' (.aiTitle // "") | clean | short('"$n"')' <<<"$t" 2>/dev/null)"
     fi
     if [ -z "$out" ]; then
       t="$(printf '%s\n' "$tl" | grep -E '"type": ?"agent-name"' | tail -1)"
-      [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ"' (.agentName // "") | agentclean | clean | short('"$n"')' <<<"$t" 2>/dev/null)"
+      [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ $_OSRC_HUB_IDLIKE_JQ"' (.agentName // "") | if idlike then "" else agentclean | clean | short('"$n"') end' <<<"$t" 2>/dev/null)"
     fi
     [ -n "$out" ] || out="$(grep -m 40 -E '"type": ?"user"' "$f" 2>/dev/null | jq -rn "$_OSRC_HUB_NAME_JQ $_OSRC_HUB_TITLE_JQ"'
       first(inputs | select(.type == "user" and ((.isMeta // false) | not)) | .message.content
@@ -96,7 +96,7 @@ _osrc_hub_session_detail() {
       t="$(tail -c "$tail_b" "$f" 2>/dev/null | grep -E '"type": ?"summary"' | tail -1)"
       [ -z "$t" ] || out="$(jq -r "$_OSRC_HUB_NAME_JQ"' (.summary // "") | clean | short('"$n"')' <<<"$t" 2>/dev/null)"
     fi
-    if [ -n "$sz" ] && mkdir -p "$OSRC_HOME/hub/titles-v2" 2>/dev/null && [ ! -L "$c" ]; then
+    if [ -n "$sz" ] && mkdir -p "$OSRC_HOME/hub/titles-v3" 2>/dev/null && [ ! -L "$c" ]; then
       { if [ -n "$out" ]; then printf '%s %s\n' "$sz" "$out"; else printf '%s\n' "$sz"; fi; } > "$c.$$" 2>/dev/null && mv -f "$c.$$" "$c" 2>/dev/null
       rm -f "$c.$$" 2>/dev/null
     fi
