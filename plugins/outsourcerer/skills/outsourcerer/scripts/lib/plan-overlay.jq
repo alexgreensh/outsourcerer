@@ -90,8 +90,9 @@ def agy_fix:
 def devin_fix:
   ($p.devin // {}) as $d
   | if $d.ok == true and (($d.free // []) | length) > 0 then
-      . + {state: "ok", left: "Free models", note: ("Devin " + (if ($d.plan // "") != "" then "\($d.plan) plan" else "plan" end)
-            + ": \($d.free | length) models are free with no published usage limit (\($d.free[0:3] | join(", "))). Other models bill per token."),
+      . + {state: "ok", left: "Free · no limit", note: ("Devin " + (if ($d.plan // "") != "" then "\($d.plan) plan" else "plan" end)
+            + ": \($d.free | length) models are free with no usage limit (\($d.free[0:3] | join(", "))). Other models bill per token."
+            + " Devin Cloud runs use your plan's cloud quota, which the Devin CLI does not report: see it at app.devin.ai."),
            source: "devin models"} | checked($d.checked // $now)
     elif $d.ok == true then
       . + {state: "unknown", left: "Signed in", note: "Signed in to Devin, but `devin models` listed no free models; paid models bill per token."} | checked($d.checked // $now)

@@ -177,7 +177,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.16.3"
+OSRC_VERSION="0.16.4"
 # Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
 # picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
 # free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
@@ -19947,7 +19947,7 @@ main() {
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     hub)         cmd_hub "$@" ;;
-    mc|mission-control) cmd_hub_serve "$@" ;;                           # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
+    mc|mission-control) cmd_hub_mc "$@" ;;                             # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
     tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
