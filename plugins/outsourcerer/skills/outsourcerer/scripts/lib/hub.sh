@@ -796,3 +796,7 @@ cmd_hub() {
     *) die "hub: export [--project SLUG] | serve [--port N] [--no-open] [--new-token] | report --status/--pct/--eta/--next/--name/--ask/--done-ask" ;;
   esac
 }
+
+# Lane naming lives in lib/hub-lanename.sh (MC4). The engine's lib loader sources it first; suites and
+# helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
+type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }
