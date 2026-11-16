@@ -151,7 +151,8 @@ _osrc_probe_agy_screen() {
   sock="${OSRC_PROBE_TMUX_PREFIX:-osrc-probe}-agy-$$"
   cwd="$(_osrc_probe_dir)/agy-cwd"; mkdir -p "$cwd" 2>/dev/null || return 1
   secs="${OSRC_PROBE_AGY_SECS:-25}"; case "$secs" in ''|*[!0-9]*) secs=25 ;; esac
-  TMUX='' tmux -L "$sock" -f /dev/null new-session -d -s plans -x 120 -y 90 -c "$cwd" agy 2>/dev/null || return 1
+  # -u: draw UTF-8 even under a C locale (CI, launchd), or the composer's rule reads as "____".
+  TMUX='' tmux -u -L "$sock" -f /dev/null new-session -d -s plans -x 120 -y 90 -c "$cwd" agy 2>/dev/null || return 1
   end=$(( $(date +%s) + secs ))
   while [ "$(date +%s)" -lt "$end" ]; do
     sleep 1
@@ -166,7 +167,8 @@ _osrc_probe_agy_screen() {
       TMUX='' tmux -L "$sock" send-keys -t plans Enter 2>/dev/null; trusted=1; continue
     fi
     # The composer is the ">" line right under a full-width rule (it may hold placeholder text).
-    if [ "$typed" = 0 ] && awk -v r='─' 'index(prev, r) == 1 && /^>/ { f=1 } { prev=$0 } END { exit !f }' <<<"$scr"; then
+    # The rule may come back as "─", or as "_"/"-" when the terminal could not draw UTF-8.
+    if [ "$typed" = 0 ] && awk -v r='─' '(index(prev, r) == 1 || prev ~ /^[_-][_-][_-][_-]/) && /^>/ { f=1 } { prev=$0 } END { exit !f }' <<<"$scr"; then
       TMUX='' tmux -L "$sock" send-keys -t plans -l '/usage' 2>/dev/null; sleep 1
       TMUX='' tmux -L "$sock" send-keys -t plans Enter 2>/dev/null; typed=1
     fi

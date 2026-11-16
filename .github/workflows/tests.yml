@@ -28,9 +28,11 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
-            sudo apt-get install -y jq bubblewrap
-          elif ! command -v jq >/dev/null 2>&1; then
-            brew install jq
+            sudo apt-get install -y jq bubblewrap tmux
+          else
+            command -v jq >/dev/null 2>&1 || brew install jq
+            # tmux: the plan probes read Antigravity's /usage screen through it (test_plan_probe).
+            command -v tmux >/dev/null 2>&1 || brew install tmux
           fi
         shell: bash
 

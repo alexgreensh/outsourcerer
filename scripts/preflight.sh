@@ -42,7 +42,7 @@ for f in "$T"/test_*.py; do [ -e "$f" ] || continue; n="$(basename "$f" .py)"; c
 if [ -z "$unreg" ]; then echo "ok   all suites registered"; else echo "FAIL not in tests/conformance.sh:$unreg"; fail=1; fi
 
 stage "2. static lints"
-for l in test_no_pipe_grep_q test_sandbox_guard test_no_real_browser test_python_utf8 test_no_dead_pid_scan; do
+for l in test_no_pipe_grep_q test_sandbox_guard test_no_real_browser test_python_utf8 test_no_dead_pid_scan test_tests_set_home; do
   run "$l" bash "$T/$l.sh"
 done
 run "file size" python3 scripts/check_file_size.py

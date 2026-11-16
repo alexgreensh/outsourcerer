@@ -33,6 +33,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 H="$T/home"; B="$T/bin"; mkdir -p "$H" "$B" "$T/calls"
+export HOME="$T/home"   # never the developer's HOME (test_tests_set_home)
 for t in jq python3 tmux; do p="$(command -v "$t" 2>/dev/null)" && ln -s "$p" "$B/$t"; done
 
 # ---- fake CLIs ---------------------------------------------------------------------------------
@@ -125,10 +126,16 @@ jq -e '.state == "ok" and .left == "59% left" and .windows.codexwk.left == 59 an
 jq -e '(.note | test("codex app-server")) and (.note | test("prolite"))' >/dev/null <<<"$R" && ok "codex: note names the live source and plan" || bad "codex note: $R"
 
 R="$(row agy)"
+# The agy probe reads its screen through tmux; with no tmux on the machine it must say why, not guess.
+if [ ! -e "$B/tmux" ]; then
+  echo "SKIP: tmux not installed, agy /usage screen checks skipped"
+  jq -e '.left == "No reading" and (.note | test("could not be read"))' >/dev/null <<<"$R" && ok "agy: no tmux -> No reading with the reason" || bad "agy no-tmux: $R"
+else
 jq -e '.state == "out" and .left == "0% left · Claude and GPT Models" and .renews_at != null and .plan_seen == true and (.windows | length) == 5' >/dev/null <<<"$R" && ok "agy: headline is the tightest window across groups, named, with its refresh (Gemini 100% never hides Claude and GPT at 0%)" || bad "agy: $R"
 jq -e '[.windows[] | select(.label == "Claude and GPT Models · week")][0] | .left == 0 and (.renews_at | type) == "number" and .renews_at > now + 3*86400' >/dev/null <<<"$R" \
   && ok "agy: spent group keeps its refresh time (Refreshes in 94h 19m)" || bad "agy windows: $R"
 jq -e '.note | test("Claude and GPT Models: 0% left")' >/dev/null <<<"$R" && ok "agy: note names the other groups" || bad "agy note: $R"
+fi
 grep -q '@' <<<"$R" && bad "agy: an account email leaked into the feed" || ok "agy: no account email in the feed"
 if [ -n "$(ls "$TX"/*/ 2>/dev/null | grep -v '^osrc-test-PL' || true)" ]; then bad "agy: probe used a tmux socket not named osrc-test-PL*"; else ok "agy: probe tmux server is private and test-named"; fi
 
