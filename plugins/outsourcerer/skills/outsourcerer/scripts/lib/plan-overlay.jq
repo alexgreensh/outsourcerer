@@ -69,9 +69,13 @@ def agy_fix:
       | ($all | map(select(.group == $main.name and .left != null))) as $mw
       | ($all | map(select(.group != $main.name and .left != null and .kind == "week"))
          | map("\(.group): \(.left | pct)% left this week") | join("; ")) as $others
-      | (if ($mw | length) > 0 then ($mw | min_by(.left)) else null end) as $w
+      # Headline = the tightest window across ALL model groups, named when it is not the main group:
+      # Gemini at 100% must not hide Claude and GPT models at 0% until Friday (Alex, 2026-11-16).
+      | ($all | map(select(.left != null))) as $any
+      | (if ($any | length) > 0 then ($any | min_by(.left)) elif ($mw | length) > 0 then ($mw | min_by(.left)) else null end) as $w
       | . + (if $w == null then {state: "unknown", left: "No reading"}
-             else {state: st(100 - $w.left), left: "\($w.left | pct)% left", used: (100 - $w.left | num1), window: $w.k,
+             else {state: st(100 - $w.left), left: ("\($w.left | pct)% left" + (if $w.group != $main.name then " · \($w.group)" else "" end)),
+                   used: (100 - $w.left | num1), window: $w.k, plan_seen: true,
                    renews_at: (if $w.left < 100 then $w.renews_at else null end)} end)
       | . + {windows: ($all | map({(.k): ({label, left: (if .left == null then null else (.left | num1) end),
                                            used: (if .left == null then null else (100 - .left | num1) end), renews_at}

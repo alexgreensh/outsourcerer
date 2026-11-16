@@ -125,7 +125,7 @@ jq -e '.state == "ok" and .left == "59% left" and .windows.codexwk.left == 59 an
 jq -e '(.note | test("codex app-server")) and (.note | test("prolite"))' >/dev/null <<<"$R" && ok "codex: note names the live source and plan" || bad "codex note: $R"
 
 R="$(row agy)"
-jq -e '.state == "ok" and .left == "100% left" and (.windows | length) == 5' >/dev/null <<<"$R" && ok "agy: /usage screen read: Gemini group 100% left, 5 windows" || bad "agy: $R"
+jq -e '.state == "out" and .left == "0% left · Claude and GPT Models" and .renews_at != null and .plan_seen == true and (.windows | length) == 5' >/dev/null <<<"$R" && ok "agy: headline is the tightest window across groups, named, with its refresh (Gemini 100% never hides Claude and GPT at 0%)" || bad "agy: $R"
 jq -e '[.windows[] | select(.label == "Claude and GPT Models · week")][0] | .left == 0 and (.renews_at | type) == "number" and .renews_at > now + 3*86400' >/dev/null <<<"$R" \
   && ok "agy: spent group keeps its refresh time (Refreshes in 94h 19m)" || bad "agy windows: $R"
 jq -e '.note | test("Claude and GPT Models: 0% left")' >/dev/null <<<"$R" && ok "agy: note names the other groups" || bad "agy note: $R"
