@@ -35,6 +35,9 @@
 # `stat -f ... || stat -c ...` fallback is unreachable on Linux and yields garbage that silently fails
 # every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
 # GNU FIRST is the only ordering where the fallback actually happens on both.
+# PL: the active plan probes live in lib/plan-probe.sh; suites that source this file alone still get them.
+type _osrc_plan_overlay >/dev/null 2>&1 || { _osrc_lim_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_lim_d/plan-probe.sh" ] && . "$_osrc_lim_d/plan-probe.sh"; unset _osrc_lim_d; }
+
 _mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
 
 # _codex_rate_limits -> "5h%|wk%|5h_reset_epoch|wk_reset_epoch" from the newest Codex session
@@ -43,9 +46,9 @@ _mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf 
 # limits. Best-effort; empty when codex/jq/rollout unavailable.
 _codex_rate_limits() {
   have jq || return 1
-  local sdir="$HOME/.codex/sessions"; [ -d "$sdir" ] || return 1
-  local newest; newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
-  [ -n "$newest" ] || return 1
+  local sdir="$HOME/.codex/sessions" newest
+  newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
+  if [ -z "$newest" ]; then ! type _osrc_probe_codex_line >/dev/null 2>&1 || _osrc_probe_codex_line 2>/dev/null; return; fi
   # How OLD this reading is matters more than the number. Codex only records rate limits while it is
   # RUNNING, so with no recent codex session the newest rollout can be days old. Usage only ever rises
   # within a window, so a stale reading is a FLOOR, never a current value — and reporting it as current
@@ -56,6 +59,9 @@ _codex_rate_limits() {
   local _mt; _mt="$(_mtime "$newest")"; case "$_mt" in ''|*[!0-9]*) _mt="$(date +%s)" ;; esac
   local _age; _age=$(( $(date +%s) - _mt ))
   local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
+  # PL: a live `codex app-server` reading (lib/plan-probe.sh cache) wins when it is newer than the log.
+  local _pl=""; ! type _osrc_probe_codex_line >/dev/null 2>&1 || _pl="$(_osrc_probe_codex_line 2>/dev/null)"
+  if [ -n "$_pl" ] && { [ -z "$line" ] || [ "${_pl##*|}" -lt "$_age" ]; }; then printf '%s\n' "$_pl"; return 0; fi
   [ -n "$line" ] || return 1
   # Bucket by window_minutes, NOT slot position: Codex rollouts do NOT reliably put the 5h window in
   # .primary (observed: primary.window_minutes=10080 = weekly, secondary=null). Classify each present
@@ -621,7 +627,8 @@ _osrc_harness_detected() {
 #   low     fresh reading at/over conserve line but under OSRC_LANE_LIMIT_PCT
 #   out     fresh reading at/over the limit line, or a cap is tripped (dispatch refuses)
 #   wait    a meter exists but the only reading is stale — "waiting for reset/refresh"
-#   unknown no meter feed for this harness — left reads "not checked yet"
+#   unknown no meter feed for this harness — lib/plan-probe.sh's overlay then says what IS known
+#           (an active probe's answer, or the reason there is none) with a checked-at time
 _osrc_lane_summary_base() {
   local json=0; [ "${1:-}" = "--json" ] && json=1
   local mw="" _w _p _rst _age
@@ -657,7 +664,7 @@ EOF
     local cw; cw="$(_lane_field "$hlane" conserve_windows 2>/dev/null)"
     [ -n "$cw" ] && [ -n "$cline" ] && _osrc_cap_tripped "$hlane" "$cline" >/dev/null 2>&1 && captripped=true
     # meter state over the lane's declared windows
-    local state=unknown left="not checked yet" win="" used="" renews_at="" renews="" saw=0 stale_seen=0
+    local state=unknown left="No reading" win="" used="" renews_at="" renews="" saw=0 stale_seen=0
     if [ -n "$cw" ]; then
       local worst="" worstw="" wrow wp wr wa
       for w in $cw; do
@@ -682,7 +689,7 @@ EOF
         awk -v p="$used" -v t="$cons_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=low
         awk -v p="$used" -v t="$limit_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=out
       elif [ "$stale_seen" = "1" ]; then
-        state=wait; left=""   # page falls back to its "Waiting for reset" label
+        state=wait; left="No fresh reading"   # lib/plan-probe.sh overlays the live check and the reset time
       fi
     fi
     [ "$captripped" = true ] && [ "$state" != unknown ] && state=out
@@ -694,10 +701,12 @@ EOF
   done <<EOF
 $OSRC_HARNESS_TABLE
 EOF
-  if [ "$json" = "1" ]; then
-    _osrc_summary_json "$rows" "$mw"
+  if ! type _osrc_plan_overlay >/dev/null 2>&1; then
+    if [ "$json" = "1" ]; then _osrc_summary_json "$rows" "$mw"; else _osrc_summary_text "$rows"; fi
+  elif [ "$json" = "1" ]; then
+    _osrc_summary_json "$rows" "$mw" | _osrc_plan_overlay
   else
-    _osrc_summary_text "$rows"
+    _osrc_summary_json "$rows" "$mw" | _osrc_plan_overlay | _osrc_summary_text_json
   fi
 }
 

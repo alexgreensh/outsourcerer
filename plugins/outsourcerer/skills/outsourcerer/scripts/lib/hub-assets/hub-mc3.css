@@ -67,3 +67,15 @@
 .hx-note { margin: 0 0 10px; font-size: .9rem; }
 .hx section { margin-top: 28px; }
 @media (max-width: 720px) { .hx-list li { grid-template-columns: 18px minmax(0, 1fr) auto; } .hx-t { white-space: normal; } .hx-m { grid-column: 2; grid-row: 2; } .hx-d { grid-column: 3; grid-row: 1; } }
+/* PL: plans card. One line per plan window (5 hours, week, model groups), each with its renew time;
+   the pill never clips and the name never truncates at the 260px rail or a 390px phone. */
+.lrow .lwins { grid-column: 2 / 4; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lrow .lwin { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: .8rem; line-height: 1.3; min-width: 0; }
+.lrow .lwl { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.lrow .lwv { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
+.lrow .lwr { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.lrow .lwr svg { width: 12px; height: 12px; }
+.lrow .tags .paidtag { white-space: nowrap; }
+#hc .lwins { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
+#hc .lwin { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: .85rem; }
+.glance .gpv.gpt { font-size: .95rem; } /* PL: a word value (Free models, Pay per use) sits under the percentages, not over them */

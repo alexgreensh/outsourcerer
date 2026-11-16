@@ -8,6 +8,7 @@ All notable changes to the Outsourcerer plugin are documented here.
 
 - **Every project keeps its full history.** Each project page shows a timeline of every lane that ran and how it ended, every release shipped, every PR merged and every issue closed, with links. Home cards sum it up in one line. GitHub data is read only and refreshed at most every 10 minutes.
 - **All your plans at a glance.** The plans card lists every checked plan with what's left and when it renews.
+- **Every plan checks itself.** No plan on the card says "not checked yet" any more. Codex is read live from `codex app-server` (both windows, with reset times), Antigravity from its own `/usage` screen (each model group's weekly and 5-hour quota), Devin shows its free models and plan, Factory Droid confirms the sign-in and shows pay per use, and Claude shows its last statusline reading with its age. Checks run in the background, are cached, and every row says when it was checked. Names wrap instead of truncating, the icon sits beside the name, and pills no longer clip.
 
 ### Fixed
 
