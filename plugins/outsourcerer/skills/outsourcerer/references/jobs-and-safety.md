@@ -323,9 +323,14 @@ by L2's remote-lane command in lib/remote.sh — `lane ls` lists remote lanes; t
 
 `run`/`edit`/`yolo`/`bg`/`fanout`/`status`/`doctor`/`advise`/`consent` all work under Git Bash
 (ships with Git for Windows). `scripts/outsourcerer.cmd` / `scripts/outsourcerer.ps1` launch it
-from cmd/PowerShell and find Git Bash automatically. `session start` is not supported on Windows
-(it exits with `unverified Windows mutation support`); only `session read` uses the bundled winpty broker
-(`scripts/outsourcerer-winpty-broker.sh`). `run`/`edit`/`bg`/`fanout` cover the same ground headless.
+from cmd/PowerShell and find Git Bash automatically. `session` runs through the bundled winpty broker
+(`scripts/outsourcerer-winpty-broker.sh`, screen reading in `scripts/lib/winpty.sh`) instead of tmux:
+`start`/`send`/`answer <option-number>`/`read [--state]`/`state`/`clear`/`stop`, verified end to end with
+Codex on Windows 11 + Git for Windows winpty 0.4.3. winpty writes a line stream, not a screen, so a menu
+counts as open when it was drawn after the last composer row; `send` refuses while one is open (nothing
+is typed) and `answer` moves the cursor with arrow keys, then presses Enter. `start` fails loudly with the
+engine's output when it dies during boot. `session model` (the Devin picker keys) still exits with
+`unverified Windows mutation support`; `control`/`approve-policy`/`claim` are tmux-only.
 Isolated codex runs (`--ignore-user-config`) keep only your `[windows] sandbox` mode (and
 `[features] prefer_mxc`) from `~/.codex/config.toml` (or `$CODEX_HOME`); nothing else is loaded. Without
 a `[windows] sandbox` entry codex can block every write, and `doctor` warns when it is missing. The shared
