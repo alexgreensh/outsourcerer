@@ -57,3 +57,6 @@ plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
 .context/
 .osrc-sealed.*
 .evidence-*
+
+# scripts/preflight.sh task notes (LOAD-SENSITIVE.md); PREFLIGHT_OUT moves them
+/out/

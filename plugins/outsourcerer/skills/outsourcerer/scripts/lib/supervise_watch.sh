@@ -149,10 +149,12 @@ _sv_observe_watch() { # <id> <src> <owner>
 
 # A lane's done contract fingerprint (L6: $OSRC_HOME/done/<id>.json), so a re-hand-in is a new
 # `done` even when the screen did not change: file: -> the file's fingerprint, branch: -> the tip
-# sha. Empty for check:/pr: or no contract (the screen hash keys the event then).
+# sha. No contract: the watched hand-in file's fingerprint. Empty for check:/pr: or neither (the
+# screen hash keys the event then).
 _sv_done_fp() { # <id>
   local j spec cwd p
-  j="$OSRC_HOME/done/$1.json"; [ -f "$j" ] || return 0
+  j="$OSRC_HOME/done/$1.json"
+  if [ ! -f "$j" ]; then p="$(_sv_handin_file "$1")" && _sv_fp "$p"; return 0; fi
   spec="$(jq -r '.spec // ""' "$j" 2>/dev/null)"; cwd="$(jq -r '.cwd // ""' "$j" 2>/dev/null)"
   case "$spec" in
     file:*) p="${spec#file:}"; case "$p" in /*) ;; *) p="${cwd:-.}/$p" ;; esac; _sv_fp "$p" ;;

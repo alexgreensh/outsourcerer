@@ -26,10 +26,11 @@
 # Exit 0 = pass; non-zero = fail, printing `WHAT: <line>` lines and `FIX: <how to do it right>` lines
 # (joined with " | "). Bound: 120 s (OSRC_GUARDS_SECS); a timeout is a failure.
 #
-# Modes, per guard: --mode overrides all; else `<guard> = <mode>` in guards.conf (from base); else the
+# Modes, per guard: --mode overrides all; else `<guard> = <mode>` in guards.conf (from base); else
+# `default = <mode>` there, which covers built-ins too, so a repo can soften or harden them; else the
 # built-in's own default (slop = enforce: narration, excuse, unrequested markdown; slop-inflation =
-# observe; file-size = observe); else `default = <mode>` there; else observe. off = skip; observe = log
-# what would block to $OSRC_HOME/guard-state/observe.log and pass; enforce = exit 1 on failure.
+# observe; file-size = observe); else observe. off = skip; observe = log what would block to
+# $OSRC_HOME/guard-state/observe.log and pass; enforce = exit 1 on failure.
 #
 # Never strands work: --allow "<reason>" passes an enforce failure and records the reason. A block is
 # counted only for a diff not blocked before (its hash is stored in
@@ -112,9 +113,10 @@ _osrc_guards_mode_for() { # <name> <cfgdir> <flag-mode> <guard-path>
   local m="$3"
   [ -n "$m" ] || m="$(_osrc_guards_conf_get "$2/guards.conf" "$1" 2>/dev/null)"
   case "$m" in off|observe|enforce) printf '%s' "$m"; return ;; esac
-  case "$4" in "$_OSRC_GUARDS_LIBDIR"/*) m="$(_osrc_guards_builtin_mode "$1")" && { printf '%s' "$m"; return; } ;; esac
   m="$(_osrc_guards_conf_get "$2/guards.conf" default 2>/dev/null)"
-  case "$m" in off|observe|enforce) printf '%s' "$m" ;; *) printf observe ;; esac
+  case "$m" in off|observe|enforce) printf '%s' "$m"; return ;; esac
+  case "$4" in "$_OSRC_GUARDS_LIBDIR"/*) m="$(_osrc_guards_builtin_mode "$1")" && { printf '%s' "$m"; return; } ;; esac
+  printf observe
 }
 
 # _osrc_guards_collect <base> <dest-dir>: built-ins, then the base ref's .outsourcerer/guards/ blobs

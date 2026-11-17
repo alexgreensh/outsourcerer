@@ -80,13 +80,18 @@ _sv_observe_gone() { # <id>
 # for it (<lane>.DONE / <lane>-DONE, where the session id is <lane> or ends in -<lane>) was written
 # after the session started. A DONE file left over from an earlier round never counts.
 _sv_gone_handin() { # <id> <last-registry-record> -> reason on stdout
-  local id="$1" start w p f b stem m
-  if type osrc_done_state >/dev/null 2>&1 && [ "$(osrc_done_state "$id" 2>/dev/null)" = done ]; then
+  local f
+  if type osrc_done_state >/dev/null 2>&1 && [ "$(osrc_done_state "$1" 2>/dev/null)" = done ]; then
     printf 'done contract holds'; return 0
   fi
-  start="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs --arg id "$id" \
-    '[.[] | select(.session_id == $id and .event == "start") | (.ts // "" | fromdateiso8601? // empty)] | max // empty' 2>/dev/null)"
-  case "$start" in ''|*[!0-9]*) return 0 ;; esac
+  f="$(_sv_handin_file "$1")" && printf 'hand-in %s' "$(basename "$f")"
+  return 0
+}
+
+# The watched hand-in DONE file of a lane (rules above), newest first; rc 1 when there is none. The
+# watch folders are scanned before the registry is read, so a lane with no watch costs no jq.
+_sv_handin_file() { # <id>
+  local id="$1" start="" w p f b stem m best="" bm=0
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
     p="$(cat "$w" 2>/dev/null)"; [ -n "$p" ] || continue
@@ -95,11 +100,16 @@ _sv_gone_handin() { # <id> <last-registry-record> -> reason on stdout
       b="$(basename "$f")"; [ "$(_sv_handin_kind "$b")" = done ] || continue
       stem="$(printf '%s' "$b" | sed -E 's/[.-]?DONE$//')"; [ -n "$stem" ] || continue
       case "$id" in "$stem"|*-"$stem") ;; *) continue ;; esac
-      m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"
-      [ "${m:-0}" -ge "$start" ] 2>/dev/null && { printf 'hand-in %s' "$b"; return 0; }
+      if [ -z "$start" ]; then
+        start="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs --arg id "$id" \
+          '[.[] | select(.session_id == $id and .event == "start") | (.ts // "" | fromdateiso8601? // empty)] | max // empty' 2>/dev/null)"
+        case "$start" in ''|*[!0-9]*) return 1 ;; esac
+      fi
+      m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; m="$(_sv_num "$m" 0)"
+      [ "$m" -ge "$start" ] && [ "$m" -ge "$bm" ] && { best="$f"; bm="$m"; }
     done < <(_sv_watch_files "$p")
   done
-  return 0
+  [ -n "$best" ] && printf '%s' "$best"
 }
 
 # ---- 3. who is a waiter ----------------------------------------------------------------------------
