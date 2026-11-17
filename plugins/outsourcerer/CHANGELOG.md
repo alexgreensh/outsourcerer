@@ -2,6 +2,22 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.0
+
+### Added
+
+- **Lanes can't fool their own checks.** `outsourcerer guards run` checks a lane's changes before it hands in. Checks and their settings are always read from the main branch, so a lane can't loosen the check that judges it; if it edits one, the reviewer is told. New checks start in watch-only mode, and a blocked lane can still pass with a stated reason that goes to the reviewer, so work never gets stuck.
+- **No more comment slop.** A built-in check catches comments that narrate the edit ("added", "per the review"), excuse comments ("hack", "not sure why") and markdown files nobody asked for. Comment-heavy blocks are flagged in watch-only mode. Plain pattern matching: zero tokens, about 2 seconds.
+- **Done means proven.** `outsourcerer proof run` runs the lane's checks itself and writes the proof: commit, commands, exit codes, pass and fail counts. A hand-in without proof for its exact commit goes back to the lane automatically. Mission Control shows "proved: 139 pass, 0 fail" or "unverified" with the reason.
+- **Three tries, then a person.** A lane that fails its proof three times stops and lands on your needs-you list with the failing lines, instead of looping and burning tokens.
+- **Reviews say their verdict out loud.** Reviewers start with one line, `VERDICT: MERGE`, `CHANGES must-fix=2 nit=1` or `BLOCK`. Only must-fix findings send a lane back; nits and pre-existing issues become notes. Re-reviews see only what changed since the last round: 61% smaller prompts.
+- **Repos tune their own checks** in `.outsourcerer/guards.conf`, and `.outsourcerer/guards/`, `guards.conf` and `verify` can now be committed while lane state stays ignored.
+
+### Fixed
+
+- **Every wake arrives once.** The watcher no longer repeats an event it already delivered, never drops one when a lock is busy, and an old done file can't make a working lane look finished.
+- **Steadier tests.** test_supervise runs in about a minute instead of ten, with every check kept. Local checks run on a near-midnight clock so date bugs show up before CI.
+
 ## 0.16.4
 
 ### Added
