@@ -169,8 +169,9 @@ _osrc_flag_on() { case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
 _osrc_anthropic_redirect() {
   local u; u="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
+  [ -n "$u" ] || return 1
   while [ "${u%/}" != "$u" ]; do u="${u%/}"; done
-  case "$u" in ''|https://api.anthropic.com) return 1 ;; *) return 0 ;; esac
+  case "$u" in https://api.anthropic.com) return 1 ;; *) return 0 ;; esac
 }
 
 # _osrc_claude_settings_metered -> rc0 when the ACTIVE Claude config dir's
@@ -184,7 +185,8 @@ _osrc_anthropic_redirect() {
 _osrc_claude_settings_metered() {
   local f="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
   [ -f "$f" ] || return 1
-  if have jq; then
+  # A file jq cannot parse (trailing comma, comment) falls through to the plain grep below.
+  if have jq && jq empty "$f" >/dev/null 2>&1; then
     jq -e '.apiKeyHelper // empty' "$f" >/dev/null 2>&1 && return 0
     jq -e '[.env.ANTHROPIC_API_KEY, .env.ANTHROPIC_AUTH_TOKEN]
             | map(select(. != null and . != "" and . != "0" and . != "false")) | length > 0' \

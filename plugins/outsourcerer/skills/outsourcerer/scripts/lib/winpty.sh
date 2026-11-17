@@ -130,7 +130,7 @@ _winpty_composer_holds() {
     elif _winpty_is_busy_row "$l"; then edge=b; post="${post}b"
     elif _winpty_is_done_row "$l"; then edge=d; post="${post}d"
     fi
-  done < <(_winpty_clean "$f" 40)
+  done < <(_winpty_clean "$f" 120)
   case "$last" in *"$want"*) ;; *) return 1 ;; esac
   [ -n "$post" ] || return 0
   [ "$pre" = b ] || return 1

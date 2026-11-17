@@ -126,6 +126,10 @@ for u in http://api.anthropic.com https://api.anthropic.com/v1 https://api.anthr
 done
 b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL=)"
 [ "$b" = "subscription" ] && ok "billing: cc empty base URL -> subscription" || bad "billing: cc empty base URL -> '$b'"
+for u in / /// ' / '; do
+  b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL="$u")"
+  [ "$b" = "metered" ] && ok "billing: cc slash-only base URL '$u' -> metered (not empty)" || bad "billing: cc slash-only base URL '$u' -> '$b'"
+done
 # Same rule for settings.json env (the same class: the stock value written there is not a proxy).
 mkdir -p "$HB/.claude"
 for sj in '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"}}' '{"env":{"ANTHROPIC_BASE_URL":"HTTPS://API.ANTHROPIC.COM/ "}}' '{"env":{}}' '{"env":{"ANTHROPIC_BASE_URL":""}}'; do
@@ -135,6 +139,11 @@ done
 for sj in '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com.evil.tld"}}' '{"env":{"ANTHROPIC_BASE_URL":"http://api.anthropic.com"}}' '{"env":{"ANTHROPIC_BASE_URL":["https://api.anthropic.com"]}}' '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com","ANTHROPIC_AUTH_TOKEN":"t"}}'; do
   printf '%s' "$sj" > "$HB/.claude/settings.json"; b="$(_ccbill "$PLANJSON")"
   [ "$b" = "metered" ] && ok "billing: cc settings $sj -> metered" || bad "billing: cc settings $sj -> '$b'"
+done
+# A settings.json jq cannot parse still counts its proxy/key lines (plain grep fallback).
+for sj in '{"env":{"ANTHROPIC_BASE_URL":"https://proxy.example",}}' $'{\n  // proxy\n  "env":{"ANTHROPIC_API_KEY":"sk-x"}}'; do
+  printf '%s' "$sj" > "$HB/.claude/settings.json"; b="$(_ccbill "$PLANJSON")"
+  [ "$b" = "metered" ] && ok "billing: cc unparsable settings with a redirect -> metered" || bad "billing: cc unparsable settings $sj -> '$b'"
 done
 rm -f "$HB/.claude/settings.json"
 for st in pro team enterprise; do
