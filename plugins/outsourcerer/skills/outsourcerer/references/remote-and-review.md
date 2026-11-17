@@ -98,12 +98,20 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
 ```
 
 - The base is a sha pinned once per lane (`proof/<lane>/base.json`), at lane start: `session start
-  --done-when` pins it, a remote lane pins the fetched base at its first READY, `proof base` pins it by
+  --done-when` pins the lane's start HEAD (`lane-start`), a remote lane pins the fetched base at its first READY, `proof base` pins it by
   hand. Verify, `guards run --base <sha>` and the checks-changed diff all use it, so the base moving
   under a running lane changes nothing, and a lane working on main with no remote is judged against
   main's tip when it started. `proof.json` records `base` (the ref) and `base_sha`. Without a pin,
   the first `proof run` pins the base ref unless it is the checkout's own branch; then it prints the
-  `proof base` command and the guards report an error (not charged as a round), never a guess.
+  `proof base` command and the guards report an error (not charged as a round), never a guess. A lane's
+  `proof run --base` never moves an existing pin and never names its own branch or head; `proof base`
+  and `proof reset` are refused inside a lane session (a person's call).
+- Checks always run: the base verify and the done contract's `check:` run on every `proof run`;
+  `--cmd` only adds. `--method none|review` is refused when either exists, still runs the guards,
+  always needs a reviewer, and never resets the failed-round count. A diff touching `.outsourcerer/`
+  needs a reviewer too. Untracked files (outside .gitignore) fail the proof like uncommitted edits, and
+  a check that exits 0 but prints "N failed" with N > 0 fails. Review items and briefs show a stamp only
+  for the exact head ("unproved at <sha7>" otherwise).
 
 - `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
   command with exit code, seconds, pass/fail counts when the output shows them, last 30 lines, the
@@ -130,10 +138,11 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
   After `OSRC_PROOF_MAX_ROUNDS` (3) the lane is stopped (`proof run` exits 4, no more sendbacks) and
   Mission Control lists it under "needs you" with the last failing lines. `proof reset <lane>` is the
   person's call. Project cards count lanes that landed unverified.
-- Findings carry a severity tag, `[must-fix]`, `[nit]` or `[pre-existing]` (lib/review_sev.sh). Only
-  must-fix sends a lane back: CHANGES with only nits/pre-existing routes to MERGE (`verdict_raw` keeps
-  what the reviewer wrote), MERGE listing a must-fix routes to CHANGES, untagged findings keep the
-  first line. Pre-existing findings go to `review/notes/<lane>.md`, never a block. A re-review brief
+- Findings carry a severity tag, `[must-fix]` (or `[blocker]`), `[nit]` or `[pre-existing]`
+  (lib/review_sev.sh); list markup, checkboxes and bold around the tag are fine, indented lines belong
+  to the finding above, and an untagged finding counts as must-fix. Only must-fix sends a lane back:
+  CHANGES routes to MERGE only when every finding is a nit or pre-existing (`verdict_raw` keeps what
+  the reviewer wrote), MERGE listing a tagged must-fix routes to CHANGES. Pre-existing findings go to `review/notes/<lane>.md`, never a block. A re-review brief
   carries the diff since the last reviewed sha and only the prior must-fix findings; the lane brief is a
   pointer, not pasted again.
 

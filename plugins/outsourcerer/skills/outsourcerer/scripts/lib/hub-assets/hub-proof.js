@@ -14,6 +14,8 @@
       n.append(h.ic('hand'), h.el('span', null, (l.short || l.id) + ' stopped after ' + (l.proof.rounds || 3) + ' failed proof rounds. Needs you.'));
       n.title = [l.proof.why || ''].concat(l.proof.lines || []).filter(Boolean).join('\n');
       out.push(n);
+      const last = (l.proof.lines || []).slice(-4);   // the last failing lines, on the card itself
+      if (last.length) { const pre = h.el('pre', 'pt-proof-lines', last.join('\n')); out.push(pre); }
     });
     const u = p.unverifiedLanes || 0;
     if (u > 0) { const n = h.el('p', 'pt-proof'); n.append(h.ic('eye'), h.el('span', null, u + (u === 1 ? ' lane' : ' lanes') + ' landed unverified')); out.push(n); }

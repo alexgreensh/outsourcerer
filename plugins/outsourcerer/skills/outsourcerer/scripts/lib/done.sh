@@ -87,7 +87,7 @@ osrc_done_set() {
     # A new spec must not inherit the previous contract's cached verdict.
     rm -f "$dir/$name.checkcache" 2>/dev/null
     # Lane start: pin its base sha now (lib/proof.sh), before the lane commits on top of it.
-    ! type osrc_proof_pin_base >/dev/null 2>&1 || osrc_proof_pin_base "$name" "$cwd" "" start >/dev/null 2>&1 || true
+    ! type osrc_proof_pin_base >/dev/null 2>&1 || osrc_proof_pin_base "$name" "$cwd" HEAD start >/dev/null 2>&1 || true
   else
     rm -f "$tmp"; echo "osrc_done_set: jq failed" >&2; return 1
   fi

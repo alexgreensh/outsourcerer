@@ -102,7 +102,7 @@ _osrc_review_enqueue() {
   fi
   jq -n --arg id "$id" --arg lane "$lane" --arg head "$head" --arg branch "$branch" --arg url "$url" --arg tr "$transport" \
     --arg base "$base" --arg brief "$brief" --arg src "$src" --argjson now "$now" --argjson rer "$rer" \
-    --arg proof "$(type osrc_proof_stamp >/dev/null 2>&1 && osrc_proof_stamp "$lane")" '
+    --arg proof "$(type osrc_proof_stamp_for >/dev/null 2>&1 && osrc_proof_stamp_for "$lane" "$head")" '
     {id:$id, lane:$lane, proof:$proof, branch:$branch, url:$url, transport:$tr, base:$base, brief:$brief, source:$src,
      sha_at_ready:$head, sha_reviewed:"", head:$head, state:"queued", enq_ts:$now, sent_ts:0, rereview:$rer,
      verdict:"", verdict_ts:0, findings:"", stale:false, stale_by:"", acked:false, invalid_first_line:""}' > "$f.new" \
@@ -263,7 +263,7 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
   {
     printf '# Review request: %s @ %s\n\n' "$lane" "${head:0:7}"
     printf -- '- Lane: %s\n- Branch: %s\n- Head sha (review exactly this): %s\n- Remote: %s\n- Base to diff against: %s\n' "$lane" "$branch" "$head" "$fetch" "$base"
-    ! type osrc_proof_stamp >/dev/null 2>&1 || printf -- '- Proof: %s\n' "$(osrc_proof_stamp "$lane")"
+    ! type osrc_proof_stamp_for >/dev/null 2>&1 || printf -- '- Proof: %s\n' "$(osrc_proof_stamp_for "$lane" "$head")"
     ! type osrc_proof_review_note >/dev/null 2>&1 || osrc_proof_review_note "$lane" "$head" | sed 's/^/- Reviewer must check: /'
     printf '\n'
     printf '## Get the change\n\n```\ngit fetch %q %q && git log --oneline FETCH_HEAD -20\n' "$fetch" "$branch"
@@ -281,7 +281,7 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
     fi
     if [ -n "$prev" ]; then
       printf '## Prior must-fix findings: verify each fix with evidence\n\n'
-      if type _osrc_sev_prior >/dev/null 2>&1; then _osrc_sev_prior "$findings" | sed -E 's/^[[:space:]]*([-*]|[0-9]+[.)])?[[:space:]]*/- [ ] /'
+      if type _osrc_sev_prior >/dev/null 2>&1; then _osrc_sev_prior "$findings" | sed -E '/^[^[:space:]]/s/^([-*]|[0-9]+[.)])?[[:space:]]*/- [ ] /'
       else sed '1d; s/^/- [ ] /' "$findings"; fi
       printf '\n'
       if [ -f "$report" ] && [ ! -L "$report" ]; then

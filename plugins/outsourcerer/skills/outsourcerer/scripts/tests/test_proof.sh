@@ -32,10 +32,10 @@ out="$(P run --lane lane1 --dir "$R" --cmd 'echo "test summary: 139 passed, 0 fa
 PF="$OSRC_HOME/proof/lane1/proof.json"
 [ "$rc" = 0 ] && [ -f "$PF" ] && ok "proof run exits 0 and writes the lane folder's proof.json" || bad "proof run rc=$rc out=[$out]"
 [ "$(jq -r .head "$PF")" = "$H1" ] && ok "proof.json records the head sha" || bad "head: $(jq -r .head "$PF")"
-[ "$(jq -r '.method + "|" + .stamp' "$PF")" = "tests|proved: 139 pass, 0 fail" ] && ok "method tests, stamp 'proved: 139 pass, 0 fail'" || bad "stamp: $(jq -c '{method,stamp}' "$PF")"
+[ "$(jq -r '.method + "|" + .stamp' "$PF")" = "verify-run|proved: 144 pass, 0 fail" ] && ok "--cmd adds to the base verify (139 + 5): stamp 'proved: 144 pass, 0 fail'" || bad "stamp: $(jq -c '{method,stamp}' "$PF")"
 [ "$(jq -r '.commands[0].exit, (.commands[0].tail|length), .guards.passed, .guards.base_sha == .base_sha, .base_sha == $m' --arg m "$(git -C "$R" rev-parse main)" "$PF" | tr '\n' ' ')" = "0 1 true true true " ] \
   && ok "command exit, output tail, and the REAL guards verdict run against base_sha (main's sha)" || bad "record: $(jq -c . "$PF")"
-grep -q 'proved: 139 pass' <<<"$out" && ok "proof run prints the stamp" || bad "out: $out"
+grep -q 'proved: 144 pass' <<<"$out" && ok "proof run prints the stamp" || bad "out: $out"
 
 echo "=== a proof for an older sha does not count ==="
 gate="$(osrc_proof_gate lane1)"; [ $? = 0 ] && ok "gate accepts the proof for the current head ($gate)" || bad "gate: $gate"
@@ -157,10 +157,10 @@ _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV"
 P require on >/dev/null; : > "$W/out/strict.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
 [ "$(jq -r .kind <<<"$ev")" = failed ] && grep -q 'no proof.json for strict' <<<"$ev" && ok "proof require on: every DONE needs proof" || bad "strict: $ev"
 P require off >/dev/null
-mkdir -p "$OSRC_HOME/proof/osrc-auto-L9"; : > "$W/out/L9.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+mkdir -p "$OSRC_HOME/proof/osrc-auto-L9"; echo '{"fails":0}' > "$OSRC_HOME/proof/osrc-auto-L9/rounds.json"; : > "$W/out/L9.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
 grep -q 'osrc-auto-L9 hand-in not accepted' <<<"$ev" && ok "L9.DONE maps to the session lane osrc-auto-L9" || bad "stem map: $ev"
 cmd_guards() { echo '{"mode":"enforce","passed":true,"failed":[],"guards_changed":false,"allowed":"regex misfire on a string","reviewer_required":true}'; }
-P run --lane lane1 --dir "$R" --base main --cmd true >/dev/null; unset -f cmd_guards
+P run --lane lane1 --dir "$R" --base main --cmd true >/dev/null; eval "$REAL_GUARDS"
 touch -m -t 202601010202 "$W/out/lane1.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
 [ "$(jq -r .kind <<<"$ev")" = done ] && grep -q 'guards require a reviewer: guards were allowed through: regex misfire' <<<"$ev" \
   && grep -q '^osrc review queue add lane1 --repo ' <<<"$(jq -r .next <<<"$ev")" && ok "a hand-in that passed via --allow goes to the reviewer (NEXT review queue add)" || bad "rr handin: $ev"
@@ -238,6 +238,87 @@ echo "=== the CLI resolves lib/proof.sh through a symlinked launcher ==="
 ln -s "$SRC" "$TMP/outsourcerer"
 out="$(env -u OSRC_SOURCED bash "$TMP/outsourcerer" proof stamp docs1 2>&1)"
 [ "$out" = "unverified: docs-only change" ] && ok "outsourcerer proof stamp works via a symlink" || bad "symlink: [$out]"
+
+echo "=== Round 2 regressions (S2-REVIEW-1 must-fix 1-9 + nits; each fails on d4df36f) ==="
+# mk <dir> <verify-line>: main carries .outsourcerer/verify; branch lane is checked out at main's tip.
+mk() { mkdir -p "$1/.outsourcerer" && ( cd "$1" && git init -q -b main && printf '#!/bin/sh\n%s\n' "$2" > .outsourcerer/verify \
+  && chmod +x .outsourcerer/verify && echo a > a && git add -A && git commit -qm base && git checkout -qb lane ); }
+work() { ( cd "$1" && echo "$RANDOM" > "w.$RANDOM" && git add -A && git commit -qm work ); }
+FAILV='echo "0 passed, 1 failed"; exit 1'
+# M1: a lane-facing --base cannot move the lane-start pin to its own commits.
+D="$TMP/m1"; mk "$D" "$FAILV"; osrc_done_set m1 "check:true" "$D"; s0="$(git -C "$D" rev-parse HEAD)"
+( cd "$D" && printf '#!/bin/sh\necho "9 passed"\n' > .outsourcerer/verify && git commit -qam "lane rewrites verify" )
+for b in HEAD lane "$(git -C "$D" rev-parse HEAD)"; do
+  P run --lane m1 --dir "$D" --base "$b" --cmd true >/dev/null 2>&1; r=$?
+  [ "$r" != 0 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/m1/base.json")" = "$s0" ] && [ "$(jq -r '.ok // false' "$OSRC_HOME/proof/m1/proof.json" 2>/dev/null)" != true ] \
+    && ok "M1: proof run --base $( [ ${#b} -eq 40 ] && echo '<head sha>' || echo "$b") is refused; the lane-start pin stays" || bad "M1 --base $b: rc=$r pin=$(cat "$OSRC_HOME/proof/m1/base.json") proof=$(jq -c '{ok,base_sha}' "$OSRC_HOME/proof/m1/proof.json" 2>/dev/null)"
+done
+# M2: --cmd never replaces a failing base verify or the done contract's check.
+D="$TMP/m2"; mk "$D" "$FAILV"; work "$D"
+P run --lane m2 --dir "$D" --cmd true >/dev/null 2>&1
+[ "$(jq -r '.ok, (.commands|length)' "$OSRC_HOME/proof/m2/proof.json" | tr '\n' ' ')" = "false 2 " ] && ok "M2: --cmd true still runs the failing base verify, and the proof fails" || bad "M2: $(jq -c '{ok,commands:[.commands[].cmd]}' "$OSRC_HOME/proof/m2/proof.json")"
+mkdir -p "$TMP/m2b" && ( cd "$TMP/m2b" && git init -q -b main && echo a > a && git add -A && git commit -qm b && git checkout -qb lane && echo c > c && git add -A && git commit -qm w )
+jq -n --arg c "$TMP/m2b" '{spec:"check:echo contract-ran; exit 3", cwd:$c}' > "$OSRC_HOME/done/m2b.json"
+P run --lane m2b --dir "$TMP/m2b" --cmd true >/dev/null 2>&1
+[ "$(jq -r '.ok' "$OSRC_HOME/proof/m2b/proof.json")" = false ] && ok "M2: --cmd true still runs the failing done-contract check" || bad "M2b: $(jq -c . "$OSRC_HOME/proof/m2b/proof.json")"
+# M3: --method none is refused when checks exist; otherwise it still runs guards, needs review, keeps the round count.
+D="$TMP/m3"; mk "$D" 'echo "1 passed"'; work "$D"
+out="$(P run --lane m3 --dir "$D" --method none --reason "trust me" 2>&1)"; r=$?
+[ "$r" != 0 ] && grep -q 'lane has checks to run' <<<"$out" && ok "M3: --method none refused when a base verify exists" || bad "M3 refuse: rc=$r $out"
+D="$TMP/m3b"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && echo 'x=1' > a.sh && git add -A && git commit -qm b && git checkout -qb lane && echo 'y=2' >> a.sh && git commit -qam w )
+P run --lane m3b --dir "$D" --cmd false >/dev/null 2>&1
+printf '#!/bin/sh\n' > "$TMP/gargs"; GCALLED=""
+P run --lane m3b --dir "$D" --method none --reason "docs only" >/dev/null 2>&1
+[ "$(jq -r '.ok, .reviewer_required, (.guards|type)' "$OSRC_HOME/proof/m3b/proof.json" | tr '\n' ' ')" = "true true object " ] \
+  && [ "$(jq -r .fails "$OSRC_HOME/proof/m3b/rounds.json")" = 1 ] && ok "M3: method none still runs the real guards, needs a reviewer, and does not reset the failed round" || bad "M3b: $(jq -c '{ok,reviewer_required,guards}' "$OSRC_HOME/proof/m3b/proof.json") rounds=$(cat "$OSRC_HOME/proof/m3b/rounds.json")"
+# M4: a lane that edits .outsourcerer/ needs a reviewer even when everything passes.
+D="$TMP/m4"; mk "$D" 'echo "2 passed"'; ( cd "$D" && printf '#!/bin/sh\necho "2 passed"\nexit 0\n' > .outsourcerer/verify && git commit -qam "tweak verify" )
+P run --lane m4 --dir "$D" >/dev/null 2>&1
+[ "$(jq -r '.ok, .checks_changed, .reviewer_required' "$OSRC_HOME/proof/m4/proof.json" | tr '\n' ' ')" = "true true true " ] && ok "M4: checks_changed sets reviewer_required" || bad "M4: $(jq -c '{ok,checks_changed,reviewer_required}' "$OSRC_HOME/proof/m4/proof.json")"
+grep -q 'reviewer must look (the diff edits .outsourcerer/)' <<<"$(jq -r .stamp "$OSRC_HOME/proof/m4/proof.json")" && ok "M4: and the stamp says why" || bad "M4 stamp: $(jq -r .stamp "$OSRC_HOME/proof/m4/proof.json")"
+# M5: the lane-start pin is the lane's own start HEAD and does not opt the lane into the gate.
+D="$TMP/m5"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && echo a > a && git add -A && git commit -qm b && git checkout -qb rel && echo r > r && git add -A && git commit -qm rel )
+osrc_done_set m5 "check:true" "$D"
+[ "$(jq -r '.ref + " " + .sha' "$OSRC_HOME/proof/m5/base.json")" = "lane-start $(git -C "$D" rev-parse rel)" ] && ok "M5: session start pins the lane-start HEAD (release branch tip), not main" || bad "M5 pin: $(cat "$OSRC_HOME/proof/m5/base.json")"
+! osrc_proof_required m5 && ok "M5: a fresh --done-when lane is not gated just because its base was pinned" || bad "M5: gated without using proof"
+: > "$W/out/m5.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = done ] && [ ! -f "$OSRC_HOME/proof/m5/rounds.json" ] && ok "M5: its .DONE is a plain done, no round charged" || bad "M5 handin: $ev"
+# M6: CHANGES demotes to MERGE only when EVERY finding is a nit or pre-existing.
+for extra in 'c.sh:9 untagged bug' '**[must-fix]** d.sh:2 bold' '[blocker] f.sh:4' '[ ] [must-fix] e.sh:3 checklist'; do
+  i="$(mkitem "m6$RANDOM" "$S1" "$(printf 'CHANGES\n- [nit] a.sh:1 rename\n- %s' "$extra")")"
+  [ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "M6: nit + '$extra' stays CHANGES" || bad "M6 '$extra' -> $(jq -r .verdict "$OSRC_HOME/review/items/$i.json")"
+done
+i="$(mkitem m6ok "$S1" "$(printf 'CHANGES\n1. **nit:** a.sh:1 rename\n- [ ] [pre-existing] b.sh old')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = MERGE ] && ok "M6: all nit/pre-existing (any markup) still routes MERGE" || bad "M6 ok: $(jq -r .verdict "$OSRC_HOME/review/items/$i.json")"
+# M7: sendback and the next round keep untagged findings and continuation lines.
+i="$(mkitem m7 "$S1" "$(printf 'CHANGES\n- [must-fix] a.sh:1 race\n  repro: run twice in parallel\n- b.sh:2 untagged leak\n- [nit] c.sh typo')")"
+sb="$(_osrc_review_sendback "$i")"
+grep -q 'repro: run twice in parallel' <<<"$sb" && grep -q 'b.sh:2 untagged leak' <<<"$sb" && ok "M7: sendback keeps the continuation line and the untagged finding" || bad "M7 sendback: $sb"
+_OSRC_RV_BRANCH=m7 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue m7 "$S2" "" manual >/dev/null
+b7="$(cat "$(_osrc_review_write_brief "m7-${S2:0:7}")")"
+grep -q '^  repro: run twice in parallel' <<<"$b7" && grep -q '^- \[ \] - b.sh:2 untagged leak\|^- \[ \] b.sh:2 untagged leak' <<<"$b7" && ! grep -q 'c.sh typo' <<<"$b7" \
+  && ok "M7: re-review checklist keeps them too (continuation stays indented, not a new item)" || bad "M7 brief: $b7"
+# M8: the review item and brief show a stamp only for the exact head.
+P run --lane m8 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
+_OSRC_RV_BRANCH=m8 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue m8 "$S2" "" manual >/dev/null
+[ "$(jq -r .proof "$OSRC_HOME/review/items/m8-${S2:0:7}.json")" = "unproved at ${S2:0:7}" ] && ok "M8: a proof of another sha shows 'unproved at <sha7>'" || bad "M8: $(jq -r .proof "$OSRC_HOME/review/items/m8-${S2:0:7}.json")"
+grep -q "^- Proof: unproved at ${S2:0:7}" "$(_osrc_review_write_brief "m8-${S2:0:7}")" && ok "M8: the brief says so too" || bad "M8 brief"
+# M9: an untracked file means the head was not what ran.
+D="$TMP/m9"; mk "$D" 'echo "1 passed"'; work "$D"; echo new > "$D/new.sh"
+P run --lane m9 --dir "$D" >/dev/null 2>&1
+[ "$(jq -r .ok "$OSRC_HOME/proof/m9/proof.json")" = false ] && grep -q 'untracked' <<<"$(jq -r .why "$OSRC_HOME/proof/m9/proof.json")" && ok "M9: an untracked file fails the proof" || bad "M9: $(jq -c '{ok,why}' "$OSRC_HOME/proof/m9/proof.json")"
+# Nits
+D="$TMP/n1"; mk "$D" 'echo "1 passed"'; work "$D"
+P run --lane n1 --dir "$D" --cmd 'echo "10 passed, 3 failed"; exit 0' >/dev/null 2>&1
+[ "$(jq -r .ok "$OSRC_HOME/proof/n1/proof.json")" = false ] && ok "nit: exit 0 with '3 failed' in the output fails" || bad "nit fail count: $(jq -c '{ok,stamp}' "$OSRC_HOME/proof/n1/proof.json")"
+out="$(OSRC_LANE=n1 P reset n1 2>&1)"; [ $? != 0 ] && grep -q "a person's call" <<<"$out" && ok "nit: proof reset is refused inside a lane session" || bad "nit reset: $out"
+out="$(OSRC_LANE=n1 P base n1 --dir "$D" lane 2>&1)"; [ $? != 0 ] && ok "nit: re-pinning the base is refused inside a lane session" || bad "nit base: $out"
+D2="$TMP/n2other"; mk "$D2" 'echo "1 passed"'; work "$D2"; jq -n --arg c "$TMP/m9" '{spec:"check:true", cwd:$c}' > "$OSRC_HOME/done/n2.json"
+P run --lane n2 --dir "$D2" >/dev/null 2>&1; g="$(osrc_proof_gate n2)"
+[ $? = 1 ] && grep -q 'not in the lane checkout' <<<"$g" && ok "nit: a proof run in another repo does not pass the gate" || bad "nit dir: $g"
+D="$TMP/n3"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && echo a > a && git add -A && git commit -qm b )
+out="$(P run --lane n3 --dir "$D" --cmd true 2>&1)"; grep -q '^not counted: guards could not run' <<<"$out" && ! grep -q 'round 0 of' <<<"$out" && ok "nit: guards that could not run say so (no 'round 0 of 3 failed')" || bad "nit msg: $out"
+grep -q "slice(-4)" "$HERE/../lib/hub-assets/hub-proof.js" && ok "nit: the needs-you card shows the last failing lines (not hover-only)" || bad "nit card"
 
 echo
 echo "test_proof: $pass passed, $fail failed"

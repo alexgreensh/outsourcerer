@@ -127,6 +127,7 @@ osrc_proof_pin_base() {
   [ -n "$ref" ] || ref=main
   if [ "$how" != start ] && [ "$how" != force ] && _osrc_proof_own_branch "$dir" "$ref"; then return 1; fi
   sha="$(_osrc_proof_resolve "$dir" "$ref")" || return 1
+  [ "$ref" != HEAD ] || ref=lane-start   # the lane-start pin: the checkout's tip when the lane began
   mkdir -p "$(_osrc_proof_dir "$lane")" 2>/dev/null || return 1
   _osrc_proof_put "$f" "$(jq -cn --arg r "$ref" --arg s "$sha" --argjson t "$(date +%s)" '{ref:$r, sha:$s, ts:$t}')" || return 1
   printf '%s %s' "$ref" "$sha"
@@ -153,6 +154,8 @@ _osrc_proof_one() { # <dir> <shell-command> <log> <label>
   fi
   t1="$(date +%s)"
   counts="$(_osrc_proof_counts "$log")"; pc="${counts%% *}"; fc="${counts##* }"
+  # "exit 0" with "3 failed" in its own output is a failing check (a runner that swallows its status).
+  case "$fc" in ''|-|0|*[!0-9]*) ;; *) [ "$rc" != 0 ] || rc=1 ;; esac
   _PR_CMDS="$(jq -c --arg cmd "$label" --argjson rc "$rc" --argjson secs "$((t1 - t0))" --arg p "$pc" --arg f "$fc" \
     --arg tail "$(tail -n 30 "$log" 2>/dev/null | cut -c1-400)" \
     '. + [{cmd:$cmd, exit:$rc, secs:$secs, pass:(if $p=="-" then null else ($p|tonumber) end),
@@ -201,7 +204,9 @@ _osrc_proof_stamp_of() { # <proof-json> -> one line for review items and Mission
           + (if $c.fail != null then " (" + ($c.fail|tostring) + " fail)" else "" end) end
     elif .totals != null then "proved: " + (.totals.pass|tostring) + " pass, " + (.totals.fail|tostring) + " fail"
     else "proved: " + ((.commands|length)|tostring) + (if (.commands|length) == 1 then " check" else " checks" end) + " passed" end
-    + (if .ok == true and .reviewer_required == true then "; reviewer must look (guards " + (if .guards.allowed != null then "allowed: " + .guards.allowed else "changed" end) + ")" else "" end)' <<<"$1"
+    + (if .ok == true and .reviewer_required == true and .method != "none" and .method != "review" then "; reviewer must look ("
+        + (if (.guards|type) == "object" and .guards.allowed != null then "guards allowed: " + .guards.allowed
+           elif .checks_changed then "the diff edits .outsourcerer/" else "guards changed" end) + ")" else "" end)' <<<"$1"
 }
 
 # The engine behind `proof run` and the remote READY runner. Writes proof.json, counts the round.
@@ -217,7 +222,8 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
     return 4
   fi
   if [ -n "$dir" ]; then
-    [ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)" ] && dirty=true
+    # Tracked edits AND untracked files (outside .gitignore): either way the run did not test the head.
+    [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ] && dirty=true
     if [ -n "$base" ] && [ -n "$(git -C "$dir" diff --name-only "$base...$head" -- .outsourcerer 2>/dev/null)" ]; then changed=true; fi
   fi
   _PR_CMDS='[]'; _PR_GUARDS='"unavailable"'
@@ -233,12 +239,12 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
     esac
   done
   local grc=0 nocount=""
-  case "$method" in none|review) ;; *) _osrc_proof_guards "$dir" "$base" "$lane" || grc=$? ;; esac
+  [ -z "$dir" ] || _osrc_proof_guards "$dir" "$base" "$lane" || grc=$?
   case "$grc" in
     1) ok=false; why="guards blocked the change: $(jq -r '[.failed[]? | .guard] | join(", ")' <<<"$_PR_GUARDS")" ;;
     2) ok=false; nocount=1; why="guards could not run ($(jq -r . <<<"$_PR_GUARDS")); not counted against the lane" ;;
   esac
-  [ "$dirty" = false ] || { ok=false; why="tracked files have uncommitted changes, so the run did not test $head"; }
+  [ "$dirty" = false ] || { ok=false; why="uncommitted changes or untracked files in the checkout, so the run did not test $head (commit them or add them to .gitignore)"; }
   totals="$(jq -c 'if any(.[]; .pass != null or .fail != null)
                    then {pass:([.[].pass // 0]|add), fail:([.[].fail // 0]|add)} else null end' <<<"$_PR_CMDS")"
   rec="$(jq -cn --arg lane "$lane" --arg head "$head" --arg dir "$dir" --arg base "${_PR_BASE_REF:-$base}" --arg bsha "$base" --argjson dirty "$dirty" \
@@ -247,9 +253,12 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
     {schema:1, lane:$lane, head:$head, dir:$dir, base:$base, base_sha:$bsha, dirty:$dirty, ts:$ts, method:$method, reason:$reason,
      source:$source, ok:$ok, commands:$cmds, totals:$totals, guards:$guards, checks_changed:$changed}
     + (if $why == "" then {} else {why:$why} end)
-    + {reviewer_required:((($guards|type) == "object") and ($guards.reviewer_required == true))}')"
+    + {reviewer_required:((($guards|type) == "object" and $guards.reviewer_required == true) or $changed
+                          or $method == "none" or $method == "review")}')"
   stamp="$(_osrc_proof_stamp_of "$rec")"
-  if [ "$ok" = true ]; then _osrc_proof_note_pass "$lane"; n=0
+  if [ "$ok" = true ]; then
+    # Only a run that proved something resets the count; an unverified hand-in never clears failed rounds.
+    case "$method" in none|review) n="$(_osrc_proof_rounds "$lane" | jq -r .fails)" ;; *) _osrc_proof_note_pass "$lane"; n=0 ;; esac
   elif [ -n "$nocount" ]; then n="$(_osrc_proof_rounds "$lane" | jq -r .fails)"
   else
     n="$(_osrc_proof_note_fail "$lane" "" "$stamp" "$(jq -c '[.commands[] | select(.exit != 0) | .tail[]] | .[-30:]' <<<"$rec")")"
@@ -271,6 +280,15 @@ _osrc_proof_needs_you() { # <lane>
     "$(jq -c --arg lane "$1" --argjson ts "$(date +%s)" '{lane:$lane, ts:$ts, rounds:.fails, why:(.last.why // ""), lines:((.last.lines // [])[-12:])}' <<<"$r")"
 }
 
+# Inside a lane session? (OSRC_LANE set, or this shell runs in a tmux session the registry recorded as a
+# managed session.) Used to keep a person's calls (reset, re-pin) out of the lane's reach.
+_osrc_proof_in_lane() {
+  [ -n "${OSRC_LANE:-}" ] && return 0
+  [ -n "${TMUX:-}" ] || return 1
+  local s; s="$(tmux display-message -p '#S' 2>/dev/null)" || return 1
+  [ -n "$s" ] && _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -e --arg id "$s" 'select(.event=="start" and .session_id==$id)' >/dev/null 2>&1
+}
+
 cmd_proof() {
   local sub="${1:-}"; shift || true
   have jq || die "proof needs jq"
@@ -283,6 +301,7 @@ cmd_proof() {
       [ -f "$(_osrc_proof_dir "$1")/SENDBACK.md" ] || die "no sendback recorded for $1"
       echo "--- relay this to lane '$1' ---"; cat "$(_osrc_proof_dir "$1")/SENDBACK.md" ;;
     reset) _osrc_proof_id_ok "${1:-}" || die "proof reset <lane>"
+      ! _osrc_proof_in_lane || die "proof reset is a person's call: run it from the orchestrator, not inside a lane session"
       _osrc_proof_note_pass "$1" && rm -f "$(_osrc_proof_dir "$1")/needs-you.json" && echo "proof rounds reset for $1" ;;
     base) _osrc_proof_base_cmd "$@" ;;
     require) mkdir -p "$(_osrc_proof_root)"
@@ -301,6 +320,7 @@ _osrc_proof_base_cmd() {
   while [ "$#" -gt 0 ]; do case "$1" in --dir) dir="${2:-}"; shift 2 ;; *) ref="$1"; shift ;; esac; done
   f="$(_osrc_proof_dir "$lane")/base.json"
   if [ -z "$ref" ] && [ -f "$f" ]; then jq -r '"\(.ref) \(.sha)"' "$f"; return 0; fi
+  ! _osrc_proof_in_lane || die "proof base: the base is pinned by the orchestrator at lane start, not from inside a lane session"
   osrc_proof_pin_base "$lane" "$dir" "$ref" force || die "proof base: ${ref:-main} does not resolve to a commit in $dir"
   echo
 }
@@ -325,29 +345,43 @@ _osrc_proof_run() {
   if [ -z "$lane" ]; then lane="${OUTSOURCERER_TMUX:-}"; fi
   if [ -z "$lane" ]; then lane="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')"; fi
   _osrc_proof_id_ok "$lane" || die "proof run: bad lane id '$lane' (pass --lane, letters/digits/._- only)"
-  local pin
-  if [ -n "$base" ]; then pin="$(osrc_proof_pin_base "$lane" "$dir" "$base" force)" || die "proof run: --base $base does not resolve to a commit in $dir"
-  else pin="$(osrc_proof_pin_base "$lane" "$dir")" || pin=""; fi
+  local pin pinned="" want
+  # A lane-facing --base never moves an existing pin and never names the lane's own branch or HEAD:
+  # either would let a lane judge itself against its own commits.
+  [ -f "$(_osrc_proof_dir "$lane")/base.json" ] && pinned="$(jq -r '.sha // ""' "$(_osrc_proof_dir "$lane")/base.json" 2>/dev/null)"
+  if [ -n "$base" ]; then
+    _osrc_proof_own_branch "$dir" "$base" && die "proof run: --base $base is this checkout's own branch; the base is the branch the lane merges into"
+    want="$(_osrc_proof_resolve "$dir" "$base")" || die "proof run: --base $base does not resolve to a commit in $dir"
+    [ "$want" != "$head" ] || die "proof run: --base $base is the head itself; the base is the branch the lane merges into"
+    if [ -n "$pinned" ] && [ "$want" != "$pinned" ]; then
+      echo "proof: --base $base ignored: $lane is pinned to ${pinned:0:7} since lane start (only \`proof base\` outside the lane changes it)" >&2
+      base=""
+    fi
+  fi
+  pin="$(osrc_proof_pin_base "$lane" "$dir" "$base")" || pin=""
   _PR_BASE_REF="${pin%% *}"; base="${pin#* }"
   if [ -z "$pin" ]; then
     _PR_BASE_REF=""; base=""
     echo "proof: no base pinned for $lane (the base is this checkout's own branch, or it does not exist). Pin it at lane start: $(_osrc_self) proof base $lane --dir $dir <ref-or-sha>" >&2
   fi
+  # The base verify script and the done contract's check always run; --cmd only adds to them.
+  local own=() hasverify="" ncmd="${#_PR_ARGS[@]}"
+  if [ -n "$base" ] && git -C "$dir" cat-file -e "$base:.outsourcerer/verify" 2>/dev/null; then own+=("verify@$base"); hasverify=1; fi
+  cc="$(_osrc_proof_contract_cmd "$lane")"; [ -z "$cc" ] || own+=("$cc")
   case "$method" in
     none|review) [ -n "${reason//[[:space:]]/}" ] || die "proof run --method $method needs --reason \"<why this lane is not proved by a run>\""
-      [ "${#_PR_ARGS[@]}" -eq 0 ] || die "proof run: --method $method takes no --cmd"
+      [ "$ncmd" -eq 0 ] || die "proof run: --method $method takes no --cmd"
+      [ "${#own[@]}" -eq 0 ] || die "proof run: --method $method is refused: this lane has checks to run (${hasverify:+.outsourcerer/verify on base}${hasverify:+${cc:+, }}${cc:+the done contract}); run them"
       src=manual ;;
     ''|tests|verify-run)
-      if [ "${#_PR_ARGS[@]}" -gt 0 ]; then method=tests; src=cmd
-      else
-        src=""
-        if [ -n "$base" ] && git -C "$dir" cat-file -e "$base:.outsourcerer/verify" 2>/dev/null; then
-          _PR_ARGS+=("verify@$base"); method=verify-run; src=verify
-        fi
-        cc="$(_osrc_proof_contract_cmd "$lane")"
-        if [ -n "$cc" ]; then _PR_ARGS+=("$cc"); [ -n "$method" ] || method=tests; src="${src:+$src+}done-contract"; fi
-        [ "${#_PR_ARGS[@]}" -gt 0 ] || die "proof run: no checks for $lane. Pass --cmd \"<test command>\", commit .outsourcerer/verify on the base branch, set a done contract (check:...), or say why not: --method none --reason \"...\""
-      fi ;;
+      src=""; method=tests
+      [ -z "$hasverify" ] || { method=verify-run; src=verify; }
+      [ -z "$cc" ] || src="${src:+$src+}done-contract"
+      [ "$ncmd" -eq 0 ] || src="${src:+$src+}cmd"
+      if [ "${#own[@]}" -gt 0 ]; then
+        if [ "$ncmd" -gt 0 ]; then _PR_ARGS=("${own[@]}" "${_PR_ARGS[@]}"); else _PR_ARGS=("${own[@]}"); fi
+      fi
+      [ "${#_PR_ARGS[@]}" -gt 0 ] || die "proof run: no checks for $lane. Pass --cmd \"<test command>\", commit .outsourcerer/verify on the base branch, set a done contract (check:...), or say why not: --method none --reason \"...\"" ;;
     *) die "proof run: --method is none or review (verify-run and tests are set by what ran)" ;;
   esac
   if [ "${#_PR_ARGS[@]}" -gt 0 ]; then _osrc_proof_exec "$lane" "$dir" "$head" "$base" "$method" "$reason" "$src" "${_PR_ARGS[@]}" || rc=$?
@@ -360,6 +394,8 @@ _osrc_proof_run() {
     jq -r '.commands[] | select(.exit != 0) | "--- " + .cmd + " (exit " + (.exit|tostring) + "), last lines:", (.tail[-15:][])' <<<"$_PR_RECORD"
     jq -r 'if (.guards|type) == "object" and .guards.passed == false then (.guards.failed[]? | "--- guard " + .guard + ":", ((.what // [])[] | "  WHAT: " + .), "  FIX: " + (.fix // "")) else empty end' <<<"$_PR_RECORD"
     if osrc_proof_stopped "$lane"; then echo "STOPPED: $(_osrc_proof_max) failed rounds. Do not retry; a person looks next."
+    elif [ "$(jq -r '(.guards|type) == "string" and (.guards|startswith("error"))' <<<"$_PR_RECORD")" = true ]; then
+      echo "not counted: $(jq -r .why <<<"$_PR_RECORD"). Ask the orchestrator to fix the guards setup, then run proof again."
     else echo "round $(jq -r .round <<<"$_PR_RECORD") of $(_osrc_proof_max) failed: fix the failures above, commit, run proof again."; fi
   fi
   return "$rc"
@@ -388,6 +424,23 @@ osrc_proof_stamp() { # <lane> -> stamp line, or "no proof"
   if [ -f "$f" ]; then jq -r '.stamp // ""' "$f"; else printf 'no proof'; fi
 }
 
+# The proof's checkout must be the lane's own repo when the lane has a done contract (a lane cannot prove
+# itself from some other clean checkout). No contract, or a remote lane (dir ""), passes.
+_osrc_proof_same_repo() { # <lane> <proof-dir>
+  local cwd a b
+  cwd="$(jq -r '.cwd // ""' "$OSRC_HOME/done/$1.json" 2>/dev/null)"
+  [ -n "$cwd" ] && [ -n "$2" ] || return 0
+  a="$(cd "$cwd" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+  b="$(cd "$2" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# The stamp for exactly <head>: a proof of another sha says nothing about this one.
+osrc_proof_stamp_for() { # <lane> <head>
+  local f; f="$(_osrc_proof_file "$1")"
+  if [ -f "$f" ] && [ "$(jq -r '.head // ""' "$f")" = "$2" ]; then jq -r '.stamp // ""' "$f"; else printf 'unproved at %s' "${2:0:7}"; fi
+}
+
 # The READY / done gate. rc 0 prints the stamp; rc 1 prints why the hand-in goes back; rc 2 = stopped.
 # <head> defaults to the current HEAD of the checkout the proof ran in.
 osrc_proof_gate() { # <lane> [head]
@@ -400,6 +453,7 @@ osrc_proof_gate() { # <lane> [head]
     head="$(git -C "$(jq -r '.dir // ""' <<<"$p")" rev-parse -q --verify HEAD 2>/dev/null)" \
       || { printf 'the proof checkout %s is gone; rerun proof' "$(jq -r .dir <<<"$p")"; return 1; }
   fi
+  _osrc_proof_same_repo "$lane" "$(jq -r '.dir // ""' <<<"$p")" || { printf 'proof ran in %s, not in the lane checkout from its done contract; rerun proof there' "$(jq -r .dir <<<"$p")"; return 1; }
   [ "$(jq -r .head <<<"$p")" = "$head" ] || { printf 'proof is for %s but the head is %s; rerun proof on the new head' "$(jq -r '.head[0:7]' <<<"$p")" "${head:0:7}"; return 1; }
   [ "$(jq -r .ok <<<"$p")" = true ] || { printf 'proof failed: %s' "$(jq -r .stamp <<<"$p")"; return 1; }
   printf '%s' "$(jq -r .stamp <<<"$p")"
@@ -431,10 +485,14 @@ osrc_proof_sendback() { # <lane> <why> <key> [counted: the failed proof run alre
   return 0
 }
 
+# A lane "uses proof" once it has a proof.json or a rounds.json. The lane folder alone is not enough: the
+# lane-start base pin creates it for every --done-when lane.
+_osrc_proof_used() { [ -f "$(_osrc_proof_file "$1")" ] || [ -f "$(_osrc_proof_rounds_file "$1")" ]; }
+
 # Does a .DONE hand-in for <lane> need proof? Yes when `proof require on`, or the lane is proof-aware
 # (it has a lane folder: it ran proof before, or was sent back).
 osrc_proof_required() { # <lane>
-  [ -f "$(_osrc_proof_root)/require" ] || [ "${OSRC_PROOF_REQUIRE:-}" = 1 ] || [ -d "$(_osrc_proof_dir "$1")" ]
+  [ -f "$(_osrc_proof_root)/require" ] || [ "${OSRC_PROOF_REQUIRE:-}" = 1 ] || _osrc_proof_used "$1"
 }
 
 # supervise --watch hook: <lane>.DONE written. rc 0 = accept (event unchanged). rc 1 = replace the
@@ -444,8 +502,8 @@ osrc_proof_handin() { # <lane> <fingerprint>
   local lane="$1" fp="$2" why rc=0 d hit=""
   _osrc_proof_id_ok "$lane" || return 0
   # L1.DONE belongs to the session osrc-auto-L1 when that is the only proof folder ending in -L1.
-  if [ ! -d "$(_osrc_proof_dir "$lane")" ]; then
-    for d in "$(_osrc_proof_root)"/*-"$lane"; do [ -d "$d" ] || continue; [ -z "$hit" ] || { hit=""; break; }; hit="${d##*/}"; done
+  if ! _osrc_proof_used "$lane"; then
+    for d in "$(_osrc_proof_root)"/*-"$lane"; do _osrc_proof_used "${d##*/}" || continue; [ -z "$hit" ] || { hit=""; break; }; hit="${d##*/}"; done
     [ -z "$hit" ] || lane="$hit"
   fi
   osrc_proof_required "$lane" || return 0
@@ -551,7 +609,7 @@ osrc_proof_hub_lane() { # <lane-json> -> lane json + {proof:{stamp,method,ok,sto
   local l="$1" id f r
   id="$(jq -r '.id // ""' <<<"$l" 2>/dev/null)"; _osrc_proof_id_ok "$id" || { printf '%s' "$l"; return 0; }
   f="$(_osrc_proof_file "$id")"
-  [ -f "$f" ] || [ -d "$(_osrc_proof_dir "$id")" ] || { printf '%s' "$l"; return 0; }
+  _osrc_proof_used "$id" || { printf '%s' "$l"; return 0; }
   r="$(_osrc_proof_rounds "$id")"
   jq -c --slurpfile p <(cat "$f" 2>/dev/null || echo null) --argjson r "$r" '
     ($p[0]) as $p | . + {proof:({stopped:$r.stopped, rounds:$r.fails}
