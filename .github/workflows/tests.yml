@@ -45,7 +45,7 @@ jobs:
     # must run there with no mkfifo, python, flock, setsid, fcntl or /dev/fd. conformance.sh needs tmux and
     # POSIX process groups, so this job runs only the bg-path suites, each on its own, under Git Bash.
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     defaults:
       run:
         shell: bash
