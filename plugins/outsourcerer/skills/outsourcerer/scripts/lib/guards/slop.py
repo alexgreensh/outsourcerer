@@ -11,7 +11,7 @@ Inputs (set by lib/guards.sh, all read from the BASE ref, never from the lane):
   OSRC_GUARD_DIFF    unified diff of base...HEAD plus uncommitted and untracked files
   OSRC_GUARD_CFGDIR  dir holding the base copies of guards.conf and slop.allow (may be empty)
 guards.conf keys: slop.md_allow = <glob> ... (replaces the default list), slop.comment_min = N.
-slop.allow lines: `<path-glob> [class]  # reason` (no class = every class); a line with no reason
+guards/slop.allow lines: `<path-glob> [class]  # reason` (no class = every class); a line with no reason
 is ignored.
 Exit 0 = clean; exit 1 = findings, printed as WHAT:/FIX: lines.
 """

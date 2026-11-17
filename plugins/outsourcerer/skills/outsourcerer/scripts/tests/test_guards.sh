@@ -77,8 +77,9 @@ fi
 exit 0
 EOF
 printf 'default = enforce\nslop = off\nfile-size = off\n' > .outsourcerer/guards.conf
-printf '/.outsourcerer/\n' >> .git/info/exclude   # the engine excludes it for its worktrees; guards are force-added
-g add -f .outsourcerer && commit_all base-guards && g checkout -q lane && g merge -q --ff-only main
+printf '/.outsourcerer/\n' >> .git/info/exclude   # old-style exclude; the engine's helper migrates it
+( OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1; _osrc_git_exclude_state "$TMP/r2" )
+g add .outsourcerer && commit_all base-guards && g checkout -q lane && g merge -q --ff-only main
 printf 'exit 0\n' > .outsourcerer/guards/no-forbidden.sh
 printf 'default = off\n' > .outsourcerer/guards.conf
 printf 'FORBIDDEN\n' > code.txt
@@ -92,6 +93,8 @@ paths="$(jqr '.guards_changed_paths[]' "$out")"
 has "$paths" ".outsourcerer/guards/no-forbidden.sh" && has "$paths" ".outsourcerer/guards.conf" \
   && ok "guards_changed_paths lists the edited guard and conf" || bad "paths: $paths"
 [ "$(jqr '.skipped | join(",")' "$out")" = "file-size,slop" ] && ok "off guards listed in skipped" || bad "skipped: $out"
+[ "$(git ls-files .outsourcerer | sort | tr '\n' ' ')" = ".outsourcerer/guards.conf .outsourcerer/guards/no-forbidden.sh " ] \
+  && ok "guards committed with plain git add under the engine's exclude" || bad "tracked: $(git ls-files .outsourcerer)"
 
 # ---- 3. observe vs enforce; untracked files count --------------------------------------------
 new_repo "$TMP/r3"

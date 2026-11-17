@@ -11785,19 +11785,6 @@ _fg_run_cost() {
   printf '~0'
 }
 
-# _osrc_git_exclude_state <repo-root> -> keep our worktree folder (.outsourcerer/) out of `git status`
-# and `git add -A` in the user's repo. Uses the repo's local info/exclude (never the tracked .gitignore),
-# once, and silently gives up if git or the file can't be written.
-_osrc_git_exclude_state() {
-  local common ex
-  common="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 0
-  case "$common" in /*|[A-Za-z]:[/\\]*) ;; *) common="$1/$common" ;; esac
-  ex="$common/info/exclude"
-  grep -qxF '/.outsourcerer/' "$ex" 2>/dev/null && return 0
-  mkdir -p "$common/info" 2>/dev/null || return 0
-  printf '\n# outsourcerer worker worktrees (local, added automatically)\n/.outsourcerer/\n' >> "$ex" 2>/dev/null || true
-}
-
 # _factory_global_flags <args...> -> _FGF_ARGS without the global flags, which the factory commands
 # accept anywhere like every other command: --cloud-ack (remembered for this run) and --provider X
 # (becomes the default lane for tasks created by this command when they don't name their own).

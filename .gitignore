@@ -21,7 +21,7 @@
 .outsourcerer/*
 !.outsourcerer/guards/
 !.outsourcerer/guards.conf
-!.outsourcerer/slop.allow
+!.outsourcerer/verify
 
 # derived README preview
 readme-preview.html

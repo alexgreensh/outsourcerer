@@ -9,14 +9,15 @@
 #
 # A lane cannot edit its own checks. Guards and their config are read from the BASE ref with
 # `git show <base>:...` into a temp dir, never from the worktree. A diff that touches
-# .outsourcerer/guards/, .outsourcerer/guards.conf, .outsourcerer/slop.allow, .file-size-allow or
+# .outsourcerer/guards/ (incl. guards/slop.allow), .outsourcerer/guards.conf, .file-size-allow or
 # scripts/check_file_size.py is reported as guards_changed for the reviewer; the lane's copy never runs.
 #
 # Guards: built-ins ship in lib/guards/ (slop, file-size); a repo adds its own as files in
-# .outsourcerer/guards/<name>[.sh|.py] (a repo guard overrides a built-in of the same name).
+# .outsourcerer/guards/<name>[.sh|.py] (a repo guard overrides a built-in of the same name; *.allow,
+# *.md, *.txt and dotfiles there are data, not guards). lib/git-exclude.sh keeps these addable without -f.
 # Contract for a guard: cwd = repo top; env OSRC_GUARD_DIFF (diff file), OSRC_GUARD_FILES (changed
 # paths, one per line), OSRC_GUARD_BASE (merge-base sha), OSRC_GUARD_BASE_REF, OSRC_GUARD_CFGDIR
-# (base copies of guards.conf / slop.allow), OSRC_GUARD_TMP (scratch). Exit 0 = pass; non-zero =
+# (base copies of guards.conf / guards/slop.allow), OSRC_GUARD_TMP (scratch). Exit 0 = pass; non-zero =
 # fail, printing `WHAT: <line>` lines and `FIX: <how to do it right>` lines (joined with " | "). Bound: 120 s
 # (OSRC_GUARDS_SECS); a timeout is a failure.
 #
@@ -91,7 +92,7 @@ _osrc_guards_collect() {
     sha="${line%%	*}"; path="${line#*	}"
     [ "$type" = blob ] || continue
     f="$(basename "$path")"
-    case "$f" in .*|*.md|*.txt|README*) continue ;; esac
+    case "$f" in .*|*.md|*.txt|*.allow|README*) continue ;; esac
     git cat-file blob "$sha" >"$d/repo/$f" 2>/dev/null || continue
     chmod 700 "$d/repo/$f"
     n="${f%.*}"; [ -n "$n" ] || n="$f"
@@ -144,7 +145,7 @@ osrc_guards_run() {
   local T; T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-guards.XXXXXX")" || return 2
   mkdir -p "$T/cfg" "$T/out" "$T/scratch"
   git show "$base_sha:.outsourcerer/guards.conf" >"$T/cfg/guards.conf" 2>/dev/null || rm -f "$T/cfg/guards.conf"
-  git show "$base_sha:.outsourcerer/slop.allow" >"$T/cfg/slop.allow" 2>/dev/null || rm -f "$T/cfg/slop.allow"
+  git show "$base_sha:.outsourcerer/guards/slop.allow" >"$T/cfg/slop.allow" 2>/dev/null || rm -f "$T/cfg/slop.allow"
 
   # One diff: merge-base vs working tree, then every untracked file as a new file.
   git diff --no-color --no-ext-diff "$mb" -- . >"$T/diff" 2>/dev/null
@@ -158,7 +159,7 @@ osrc_guards_run() {
 
   local changed_paths=""
   while IFS= read -r u; do
-    case "$u" in .outsourcerer/guards/*|.outsourcerer/guards.conf|.outsourcerer/slop.allow|.file-size-allow|scripts/check_file_size.py)
+    case "$u" in .outsourcerer/guards/*|.outsourcerer/guards.conf|.file-size-allow|scripts/check_file_size.py)
       changed_paths="$changed_paths$u
 " ;; esac
   done <"$T/files"
