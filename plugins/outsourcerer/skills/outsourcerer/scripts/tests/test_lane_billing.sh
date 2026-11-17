@@ -111,6 +111,32 @@ for u in https://api.anthropic.com https://api.anthropic.com/ HTTPS://API.ANTHRO
 done
 b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL=https://proxy.example)"
 [ "$b" = "metered" ] && ok "billing: cc plan login + foreign base URL -> metered" || bad "billing: cc foreign base URL -> '$b'"
+# S5 (#78 review): the stock endpoint is matched exactly after trimming surrounding whitespace
+# (the SDK trims) and trailing slashes. Everything else fails toward metered: plain http, a path,
+# a port, userinfo, lookalike hosts, and the stock host buried in a foreign URL.
+for u in ' https://api.anthropic.com' $'https://api.anthropic.com\n' $'\thttps://api.anthropic.com/ ' 'https://api.anthropic.com///'; do
+  b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL="$u")"
+  [ "$b" = "subscription" ] && ok "billing: cc stock base URL with whitespace/slashes '$u' -> subscription" || bad "billing: cc stock base URL '$u' -> '$b'"
+done
+for u in http://api.anthropic.com https://api.anthropic.com/v1 https://api.anthropic.com:8443 \
+         https://api.anthropic.com.evil.tld https://evil.tld/api.anthropic.com https://api.anthropic.com@evil.tld \
+         api.anthropic.com 'https://api.anthropic .com' https://xapi.anthropic.com; do
+  b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL="$u")"
+  [ "$b" = "metered" ] && ok "billing: cc non-stock base URL $u -> metered" || bad "billing: cc non-stock base URL $u -> '$b'"
+done
+b="$(_ccbill "$PLANJSON" ANTHROPIC_BASE_URL=)"
+[ "$b" = "subscription" ] && ok "billing: cc empty base URL -> subscription" || bad "billing: cc empty base URL -> '$b'"
+# Same rule for settings.json env (the same class: the stock value written there is not a proxy).
+mkdir -p "$HB/.claude"
+for sj in '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com"}}' '{"env":{"ANTHROPIC_BASE_URL":"HTTPS://API.ANTHROPIC.COM/ "}}' '{"env":{}}' '{"env":{"ANTHROPIC_BASE_URL":""}}'; do
+  printf '%s' "$sj" > "$HB/.claude/settings.json"; b="$(_ccbill "$PLANJSON")"
+  [ "$b" = "subscription" ] && ok "billing: cc settings $sj -> subscription" || bad "billing: cc settings $sj -> '$b'"
+done
+for sj in '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com.evil.tld"}}' '{"env":{"ANTHROPIC_BASE_URL":"http://api.anthropic.com"}}' '{"env":{"ANTHROPIC_BASE_URL":["https://api.anthropic.com"]}}' '{"env":{"ANTHROPIC_BASE_URL":"https://api.anthropic.com","ANTHROPIC_AUTH_TOKEN":"t"}}'; do
+  printf '%s' "$sj" > "$HB/.claude/settings.json"; b="$(_ccbill "$PLANJSON")"
+  [ "$b" = "metered" ] && ok "billing: cc settings $sj -> metered" || bad "billing: cc settings $sj -> '$b'"
+done
+rm -f "$HB/.claude/settings.json"
 for st in pro team enterprise; do
   j="{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"$st\"}"
   b="$(_ccbill "$j")"

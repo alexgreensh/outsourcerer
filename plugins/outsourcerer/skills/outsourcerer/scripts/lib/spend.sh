@@ -162,10 +162,13 @@ _devin_default_free_model() {
 _osrc_flag_on() { case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in 1|true|yes|on) return 0 ;; *) return 1 ;; esac; }
 # _osrc_anthropic_redirect <url> -> rc0 when the URL sends Claude Code somewhere other than
 # Anthropic's own first-party API. Empty or the stock https://api.anthropic.com (any case,
-# trailing slashes) is NOT a redirect: the Claude desktop app exports exactly that default
-# into every session it spawns, and treating it as a proxy flagged plan logins as metered.
+# trailing slashes, surrounding whitespace, which the SDK trims) is NOT a redirect: the Claude
+# desktop app exports exactly that default into every session it spawns, and treating it as a
+# proxy flagged plan logins as metered. Anything else is a redirect, failing toward asking:
+# http://, a path (/v1), a port, userinfo (api.anthropic.com@evil.tld), a lookalike host.
 _osrc_anthropic_redirect() {
   local u; u="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
   while [ "${u%/}" != "$u" ]; do u="${u%/}"; done
   case "$u" in ''|https://api.anthropic.com) return 1 ;; *) return 0 ;; esac
 }
@@ -183,9 +186,13 @@ _osrc_claude_settings_metered() {
   [ -f "$f" ] || return 1
   if have jq; then
     jq -e '.apiKeyHelper // empty' "$f" >/dev/null 2>&1 && return 0
-    jq -e '[.env.ANTHROPIC_API_KEY, .env.ANTHROPIC_BASE_URL, .env.ANTHROPIC_AUTH_TOKEN]
+    jq -e '[.env.ANTHROPIC_API_KEY, .env.ANTHROPIC_AUTH_TOKEN]
             | map(select(. != null and . != "" and . != "0" and . != "false")) | length > 0' \
        "$f" >/dev/null 2>&1 && return 0
+    # A base URL is a redirect only when it is not the stock first-party endpoint (same rule as
+    # the env var). A non-string value counts as a redirect; an unparsable file stays as before.
+    local _bu; _bu="$(jq -r '.env.ANTHROPIC_BASE_URL | if . == null or . == "0" or . == "false" then "" elif type == "string" then . else "?" end' "$f" 2>/dev/null)" || _bu=""
+    _osrc_anthropic_redirect "$_bu" && return 0
     jq -e '[.env.CLAUDE_CODE_USE_BEDROCK, .env.CLAUDE_CODE_USE_VERTEX, .env.CLAUDE_CODE_USE_FOUNDRY]
             | map(select(. != null)) | map(tostring | ascii_downcase)
             | map(select(. != "" and . != "0" and . != "false")) | length > 0' \
