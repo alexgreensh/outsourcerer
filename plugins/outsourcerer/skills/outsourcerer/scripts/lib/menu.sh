@@ -300,7 +300,7 @@ _managed_menu_detect() { # <pane>
 _managed_menu_answer() { # <pane> <selector>
   local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i key pre=""
   _endpoint_mutation_lock "$pane" || return 1
-  type _sv_screen_hash >/dev/null 2>&1 && pre="$(_sv_screen_hash "$pane")"   # S4: the prompt as it was before the keys
+  type _sv_screen_hash >/dev/null 2>&1 && pre="$(_sv_screen_hash "$pane")"   # the prompt as it was before the keys
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
   # Revalidate the menu UNDER the lock — a concurrent send/control may have closed it since the
   # caller's detect. Detecting again here is the revalidation: "none" means the menu is gone and
@@ -341,7 +341,7 @@ _managed_menu_answer() { # <pane> <selector>
     *) echo "unrecognized menu kind '$kind'" >&2; _endpoint_mutation_unlock "$key"; return 1 ;;
   esac
   _endpoint_mutation_unlock "$key"
-  [ -z "$pre" ] || osrc_keys_sent "$pane" "session answer" "$pre"   # S4: supervise re-checks it landed
+  [ -z "$pre" ] || osrc_keys_sent "$pane" "session answer" "$pre"   # supervise re-checks it landed
   # Verify the menu closed: bounded poll until the follow-up detect returns "none". Read-only — the
   # lock is no longer held (the mutation is complete).
   i=0
@@ -350,8 +350,14 @@ _managed_menu_answer() { # <pane> <selector>
     sleep 0.1
     i=$((i + 1))
   done
-  echo "answer sent but the menu did not close (still detected). Re-check with: $0 session read" >&2
-  # S4 incident 2: never assume a keystroke landed. Log + print approval-not-landed so it is retried.
-  [ -z "$pre" ] || osrc_not_landed_emit "$pane" "session answer"
+  # Still the SAME prompt (screen hash as before the keys): the keystroke did not land, so log and print
+  # approval-not-landed for a retry. A different menu means the answer landed and a new prompt opened.
+  if [ -n "$pre" ] && [ "$(_sv_screen_hash "$pane")" = "$pre" ]; then
+    echo "answer sent but the same prompt is still open. Re-check with: $0 session read" >&2
+    osrc_not_landed_emit "$pane" "session answer"
+  else
+    [ -z "$pre" ] || osrc_keys_landed "$pane"
+    echo "answer sent; a menu is still showing (a new prompt?). Re-check with: $0 session read" >&2
+  fi
   return 1
 }

@@ -326,7 +326,7 @@ _osrc_hub_build_project() {
   # exactly (MC2 r3: relabelling an explicit "building" undid Move back).
   ! type osrc_proof_hub_counts >/dev/null 2>&1 || out="$(jq -c --argjson c "$(osrc_proof_hub_counts "$lanes")" '. + $c' <<<"$out")"
   out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and (has("status") | not) then .status="idle" else . end')"
-  ! type osrc_mc_alerts >/dev/null 2>&1 || out="$(osrc_mc_alerts "$slug" "$out")"   # S4: needs-you alerts + watcher gap (lib/mc_alive.sh)
+  ! type osrc_mc_alerts >/dev/null 2>&1 || out="$(osrc_mc_alerts "$slug" "$out")"   # needs-you alerts + watcher gap (lib/mc_alive.sh)
   printf '%s\n' "$out"
   type _osrc_hub_cache_put >/dev/null 2>&1 && _osrc_hub_cache_put "$slug" "$out"
   return 0
@@ -819,7 +819,7 @@ cmd_hub_mc() {
     [ -n "$url" ] || die "mc: Mission Control did not start within 15 s; see $log"
   fi
   echo "[outsourcerer] Mission Control: $url"
-  # mc ALWAYS opens the page, a reused hub included (S4 I); one opener for mc and the auto-open.
+  # mc always opens the page, a reused hub included; one opener for mc and the auto-open.
   [ "${OSRC_HUB_NO_OPEN:-0}" = 1 ] && return 0
   if type _osrc_mc_open_url >/dev/null 2>&1; then _osrc_mc_open_url "$url"; _osrc_mc_mark_opened
   else python3 -I -c 'import sys, webbrowser; webbrowser.open(sys.argv[1])' "$url" >/dev/null 2>&1 || true; fi

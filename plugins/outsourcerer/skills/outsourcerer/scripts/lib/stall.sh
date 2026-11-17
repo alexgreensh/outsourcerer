@@ -1,45 +1,50 @@
 # shellcheck shell=bash
-# lib/stall.sh: no lane ever waits unseen (S4, 0.17). Sourced by outsourcerer.sh (lib loader);
-# function definitions only. Screen reads and files, never a model call.
-#
-# Incidents this answers (briefs/S4-no-stalls.md):
-#  1. A lane ended its turn "after it reports I continue" while its background shell ran; nothing woke
-#     it for 20 min. -> `stalled` is its own event, distinct from idle, and supervise nudges once.
-#  2. An approval keystroke did not land and nobody re-checked. -> approval-not-landed.
-#  3. False idle alerts trained the orchestrator to ignore idle. -> a lane waiting on its own shell is
-#     never `idle`; a lane really stuck escalates as `stalled`.
-#  5. A supervise exited and nothing noticed. -> watcher liveness (osrc_watcher_gap).
+# lib/stall.sh: stalled lanes, the autonudge, reminder intervals, approval keystrokes that did not land,
+# and watcher liveness. Sourced by outsourcerer.sh (lib loader); function definitions only. Screen reads
+# and files, never a model call.
 #
 # A lane is STALLED when it is idle and
-#   bgshell  its own background shell still runs (Claude Code should wake it, and sometimes does not),
-#            for OSRC_STALL_MIN minutes (default 5) of unchanged screen; or
-#   promise  its last message promises to continue later ("after it reports I continue") with nothing
-#            running that could wake it: at once (after the usual confirm read); or
+#   bgshell  its own background shell still runs, and the screen has not changed for OSRC_STALL_MIN
+#            minutes (default 5); or
+#   promise  its last prose promises to continue when something finishes ("after it reports I
+#            continue") and nothing is running that could wake it: at once (after the confirm read); or
 #   quiet    a plain idle whose screen has not changed for OSRC_STALL_MIN minutes.
-# First stall of an episode: supervise types ONE nudge into the lane itself (OSRC_AUTONUDGE=0 turns it
-# off; then the stall wakes the orchestrator with a NEXT that nudges) and logs an informational
-# `nudged` row. Still stalled OSRC_STALL_MIN after the nudge: EVENT stalled to the orchestrator, plus a
-# needs-you row for Mission Control. A lane at a question or an approval is never nudged.
+# A lane whose last words wait on a person (you, a go-ahead, an approval, a review, the orchestrator, a
+# decision) is idle, never stalled: it raises the normal idle event.
+# A stall gets ONE nudge typed into the lane (OSRC_AUTONUDGE=0: none; the stall then wakes the
+# orchestrator with the nudge as NEXT), logged as an informational `nudged` row. Still stalled
+# OSRC_STALL_MIN after it: EVENT stalled plus a Mission Control needs-you row. A lane that worked after
+# its nudge and stalls again gets a fresh nudge, up to OSRC_NUDGE_MAX (3) before a stall escalates at
+# once. A lane at a question or an approval is never nudged.
 
 _sv_stall_secs() { printf '%s' $(( $(_sv_num "${OSRC_STALL_MIN:-}" 5) * 60 )); }
 
 # Reminder interval per kind: the prompt-like kinds re-report every 5 minutes, the rest every 20.
-# OSRC_SUPERVISE_REMIND (minutes) overrides every kind.
+# OSRC_SUPERVISE_REMIND (minutes) overrides every kind; an observation may set SV_RM (seconds) instead.
 _sv_remind_secs() { # <kind>
   if [ -n "${OSRC_SUPERVISE_REMIND:-}" ]; then printf '%s' $(( $(_sv_num "$OSRC_SUPERVISE_REMIND" 5) * 60 )); return 0; fi
   case "$1" in idle|stalled|question|approval|approval-not-landed) printf 300 ;; *) printf 1200 ;; esac
 }
 
-# ---- promise to continue later -------------------------------------------------------------------
+# ---- what an idle lane's last words say ---------------------------------------------------------------
 # Read from the last prose lines of the history region (never the composer, so the orchestrator's own
-# typed text is not evidence). Future tense about something the lane is waiting on.
-_SV_PROMISE_RE='((after|once|when) (it|that|this|they|the [^.;]{1,60}) (reports|report|finishes|finish|completes|complete|is done|are done|returns|lands|exits|comes back)|(i'"'"'ll|i will|i'"'"'m going to) (continue|resume|carry on|pick (it|this|that) (back )?up|check (back|its output|the output|on it))|(waiting|wait) (for|on) (it|that|this|the [^.;]{1,40}) to (finish|report|complete|return))'
-_sv_promise() { # -> 0 + the line, when the lane's last words promise to continue later
-  local line
-  line="$(_sv_history_tail 8 | grep -v '^[[:space:]]*$' | grep -Ev '^[[:space:]]*[^[:alnum:][:space:]]{1,3}[[:space:]]+[A-Z][a-z]+ for [0-9]' | tail -3 \
-    | grep -Ei "$_SV_PROMISE_RE" | tail -1)"
+# typed text is not evidence); the turn-summary line is skipped.
+_SV_PROMISE_RE='((after|once|when) (it|that|this|they|the [^.;]{1,60}) (reports|report|finishes|finish|completes|complete|is done|are done|returns|lands|exits|comes back)|(waiting|wait) (for|on) (it|that|this|the [^.;]{1,40}) to (finish|report|complete|return))'
+_SV_PERSON_RE='(^|[^[:alnum:]])(you|your|go-ahead|go ahead|approval|approve|review|reviewer|reviewed|orchestrator|decision|decide|sign-off|confirm|confirmation)([^[:alnum:]]|$)'
+_sv_last_words() { # -> the last 3 prose lines of the history region
+  _sv_history_tail 8 | grep -v '^[[:space:]]*$' | grep -Ev '^[[:space:]]*[^[:alnum:][:space:]]{1,3}[[:space:]]+[A-Z][a-z]+ for [0-9]' | tail -3
+}
+# _sv_idle_words -> "promise<TAB>line" | "person<TAB>line" | rc 1. Waiting on a person wins.
+_sv_idle_words() {
+  local w line
+  w="$(_sv_last_words)"; [ -n "$w" ] || return 1
+  line="$(printf '%s\n' "$w" | grep -Ei "$_SV_PROMISE_RE" | tail -1)"
+  if printf '%s\n' "$w" | grep -Eiq "$_SV_PERSON_RE"; then
+    line="$(printf '%s\n' "$w" | grep -Ei "$_SV_PERSON_RE" | tail -1)"
+    printf 'person\t%s' "$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//' | cut -c1-120)"; return 0
+  fi
   [ -n "$line" ] || return 1
-  printf '%s' "$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//' | cut -c1-120)"
+  printf 'promise\t%s' "$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//' | cut -c1-120)"
 }
 
 # ---- nudge ----------------------------------------------------------------------------------------
@@ -65,12 +70,27 @@ _sv_needs_set() { # <id> <kind> <since> <detail>
 }
 _sv_needs_clear() { rm -f "$(_sv_lanes)/needs/$1" 2>/dev/null; return 0; }
 
-# The lane worked again: a nudge more than two windows old is spent, the episode is over.
+# state/<id>.nudge = "<ts> <why> <sent|failed> <worked-after 0|1> <nudges this run>"
+_sv_nudge_read() { # <id> -> sets NG_TS NG_WHY NG_ST NG_OK NG_N (NG_TS empty: no record)
+  NG_TS=""; NG_WHY=""; NG_ST=""; NG_OK=0; NG_N=0
+  local f; f="$(_sv_lanes)/state/$1.nudge"
+  [ -f "$f" ] && read -r NG_TS NG_WHY NG_ST NG_OK NG_N 2>/dev/null < "$f"
+  NG_OK="$(_sv_num "$NG_OK" 0)"; NG_N="$(_sv_num "$NG_N" 0)"
+  [ -n "$NG_TS" ] && NG_TS="$(_sv_num "$NG_TS" 0)"
+  return 0
+}
+_sv_nudge_write() { # <id> <ts> <why> <status> <worked> <n>
+  local f; f="$(_sv_lanes)/state/$1.nudge"; mkdir -p "${f%/*}" 2>/dev/null
+  printf '%s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" > "$f"
+}
+
+# A real working read (spinner, not idle-with-shell). After a nudge it marks the nudge obeyed; two
+# windows of work after it end the run of nudges entirely.
 _sv_stall_working() { # <id> <now>
-  local f nts; f="$(_sv_lanes)/state/$1.nudge"
-  [ -f "$f" ] || { _sv_needs_clear "$1"; return 0; }
-  read -r nts _ 2>/dev/null < "$f"; nts="$(_sv_num "$nts" 0)"
-  if [ $(( $2 - nts )) -ge $(( 2 * $(_sv_stall_secs) )) ]; then rm -f "$f"; _sv_needs_clear "$1"; fi
+  _sv_needs_clear "$1"
+  _sv_nudge_read "$1"; [ -n "$NG_TS" ] || return 0
+  if [ $(( $2 - NG_TS )) -ge $(( 2 * $(_sv_stall_secs) )) ]; then rm -f "$(_sv_lanes)/state/$1.nudge"; return 0; fi
+  [ "$2" -gt "$NG_TS" ] && [ "$NG_OK" != 1 ] && _sv_nudge_write "$1" "$NG_TS" "$NG_WHY" "$NG_ST" 1 "$NG_N"
   return 0
 }
 _sv_stall_reset() { rm -f "$(_sv_lanes)/state/$1.nudge" 2>/dev/null; _sv_needs_clear "$1"; }
@@ -79,8 +99,8 @@ _sv_stall_reset() { rm -f "$(_sv_lanes)/state/$1.nudge" 2>/dev/null; _sv_needs_c
 # Called by _sv_observe with SVS_* loaded. rc 0 = a stall (SV_K/SV_D/SV_NX/SV_H set, or a nudge sent and
 # logged as `nudged`); rc 1 = not (yet) a stall, caller keeps its own reading.
 _sv_stall_observe() {
-  local id="$1" now="$2" why="$3" ev="$4" src="${5:-supervise}" owner="${6:-}" win f nts age what
-  win="$(_sv_stall_secs)"; age=$(( now - SVS_CHANGED ))
+  local id="$1" now="$2" why="$3" ev="$4" src="${5:-supervise}" owner="${6:-}" win age what max
+  win="$(_sv_stall_secs)"; age=$(( now - SVS_CHANGED )); max="$(_sv_num "${OSRC_NUDGE_MAX:-}" 3)"
   case "$why" in bgshell|quiet) [ "$age" -ge "$win" ] || return 1 ;; esac
   [ "$why" = quiet ] && _sv_is_reviewer "$id" && return 1
   case "$why" in
@@ -88,42 +108,50 @@ _sv_stall_observe() {
     promise) what="idle after promising to continue later, with nothing running to wake it: \"$ev\"" ;;
     *)       what="idle $(( age / 60 ))m with no hand-in and no change on screen" ;;
   esac
-  SV_OUT=1; f="$(_sv_lanes)/state/$id.nudge"
-  nts=""; [ -f "$f" ] && read -r nts _ 2>/dev/null < "$f"
-  if [ -z "$nts" ]; then
-    if [ "${OSRC_AUTONUDGE:-1}" = 0 ]; then
-      SV_K=stalled; SV_D="$what"; SV_H="$(printf 'stall:%s:%s' "$why" "$SVS_HASH" | cksum | awk '{print $1}')"
-      SV_NX="$(_sv_nudge_cmd "$id" "$why")"
-      _sv_needs_set "$id" stalled "$SVS_CHANGED" "$what"
+  SV_OUT=1
+  _sv_nudge_read "$id"
+  # A nudge the lane worked after is spent: this is a new stall, with its own nudge.
+  [ -n "$NG_TS" ] && [ "$NG_OK" = 1 ] && NG_TS=""
+  if [ -z "$NG_TS" ]; then
+    if [ "${OSRC_AUTONUDGE:-1}" = 0 ] || [ "$NG_N" -ge "$max" ]; then
+      SV_K=stalled; SV_NX="$(_sv_nudge_cmd "$id" "$why")"
+      if [ "$NG_N" -ge "$max" ] && [ "${OSRC_AUTONUDGE:-1}" != 0 ]; then SV_D="$what (stalled again after $NG_N autonudges)"; else SV_D="$what"; fi
+      SV_H="$(printf 'stall:%s:%s' "$why" "$SVS_HASH" | cksum | awk '{print $1}')"
+      _sv_needs_set "$id" stalled "$SVS_CHANGED" "$SV_D"
       return 0
     fi
-    mkdir -p "${f%/*}" 2>/dev/null; printf '%s %s\n' "$now" "$why" > "$f"
     if _sv_nudge_send "$id" "$why"; then
-      _sv_append nudged "$id" "autonudged once: $what" "OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read" "$src" "$owner"
+      _sv_nudge_write "$id" "$now" "$why" sent 0 $(( NG_N + 1 ))
+      _sv_append nudged "$id" "autonudged: $what" "OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read" "$src" "$owner"
       SV_PEND=1; return 0
     fi
-    # The nudge itself did not land: nobody else will move this lane, so wake the orchestrator now.
+    # The nudge could not be typed: nobody else will move this lane, so wake the orchestrator now.
+    _sv_nudge_write "$id" "$now" "$why" failed 0 $(( NG_N + 1 ))
     SV_K=stalled; SV_D="$what (the autonudge could not be sent)"; SV_NX="$(_sv_nudge_cmd "$id" "$why")"
     SV_H="$(printf 'escalate:%s' "$now" | cksum | awk '{print $1}')"
     _sv_needs_set "$id" stalled "$SVS_CHANGED" "$SV_D"
     return 0
   fi
-  nts="$(_sv_num "$nts" 0)"
-  if [ $(( now - nts )) -lt "$win" ]; then SV_PEND=1; return 0; fi
-  SV_K=stalled; SV_D="still stalled $(( (now - nts) / 60 ))m after one autonudge: $what"
-  SV_H="$(printf 'escalate:%s' "$nts" | cksum | awk '{print $1}')"   # one escalation per nudge, reminded every 5m
-  SV_NX="OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read"
-  _sv_needs_set "$id" stalled "$nts" "$SV_D"
+  if [ $(( now - NG_TS )) -lt "$win" ]; then SV_PEND=1; return 0; fi
+  SV_K=stalled
+  if [ "$NG_ST" = sent ]; then SV_D="still stalled $(( (now - NG_TS) / 60 ))m after one autonudge: $what"
+  else SV_D="still stalled $(( (now - NG_TS) / 60 ))m; the autonudge could not be sent: $what"; SV_NX="$(_sv_nudge_cmd "$id" "$why")"; fi
+  SV_H="$(printf 'escalate:%s' "$NG_TS" | cksum | awk '{print $1}')"   # one escalation per nudge, then reminders
+  [ -n "$SV_NX" ] || SV_NX="OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read"
+  _sv_needs_set "$id" stalled "$NG_TS" "$SV_D"
   return 0
 }
 
 # ---- age of an unresolved event --------------------------------------------------------------------
-# state/<id>.first = "<key> <first-seen>": the first time this exact event (kind+hash) was reported.
+# state/<id>.first holds "<key> <first-seen>" lines (newest 8): when each event (kind+hash) was first
+# reported, so a reminder says how long it has waited even after another kind was reported between.
 _sv_first_seen() { # <id> <key> <now> -> epoch the key was first reported (records it when new)
-  local f k t; f="$(_sv_lanes)/state/$1.first"
-  read -r k t 2>/dev/null < "$f"
-  if [ "$k" = "$2" ] && [ -n "$t" ]; then _sv_num "$t" "$3"; return 0; fi
-  mkdir -p "${f%/*}" 2>/dev/null; printf '%s %s\n' "$2" "$3" > "$f"; printf '%s' "$3"
+  local f t; f="$(_sv_lanes)/state/$1.first"
+  t="$(awk -v k="$2" '$1 == k { print $2; exit }' "$f" 2>/dev/null)"
+  if [ -n "$t" ]; then _sv_num "$t" "$3"; return 0; fi
+  mkdir -p "${f%/*}" 2>/dev/null
+  { tail -7 "$f" 2>/dev/null; printf '%s %s\n' "$2" "$3"; } > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  printf '%s' "$3"
 }
 
 # ---- approval keystrokes that did not land ---------------------------------------------------------

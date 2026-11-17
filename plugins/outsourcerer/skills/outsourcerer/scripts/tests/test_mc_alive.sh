@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_mc_alive.sh: Mission Control never looks dead (S4 G/H/I; lib/mc_alive.sh, lib/hub_server.py,
+# test_mc_alive.sh: Mission Control never looks dead (lib/mc_alive.sh, lib/hub_server.py,
 # lib/hub-assets/hub-alive.js).
-#   G  an old key gets a clear line and a token-less /reopen that only redirects same-origin navigation;
-#   H  live line, failure reason + age of the last good data, slow calls (tests/hub_alive_dom.js, fake clock);
-#   I  work starting opens the page once per hub process when no tab fetched data in 2 min; never in CI,
-#      never with OSRC_MC_AUTO_OPEN=0. The opener is a recorder: no real browser (test_no_real_browser).
+#   old key  a tab whose key an earlier hub retired gets the current URL from POST /reopen, nothing else
+#            does; the page explains it in the main pane (tests/hub_alive_dom.js);
+#   live     live line, failure reason + age of the last good data, slow calls (hub_alive_dom.js, fake clock);
+#   open     work starting opens the page once per hub process when no tab fetched data in 2 min; never in
+#            CI, never with OSRC_MC_AUTO_OPEN=0; a desktop is "the console user is this user", so tmux
+#            (launchctl says Background) still counts. The opener is a recorder: no real browser.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
@@ -28,7 +30,19 @@ EOF
 chmod +x "$TMP/bin/open-rec"
 opens() { grep -c . "$OSRC_HOME/opened.log" 2>/dev/null || echo 0; }
 
-echo "=== I: work starting opens Mission Control once per hub process ==="
+echo "=== a desktop is the console user, not launchctl's manager name ==="
+mkdir -p "$TMP/fake-mac"
+printf '#!/bin/sh\necho Darwin\n' > "$TMP/fake-mac/uname"
+printf '#!/bin/sh\necho Background\n' > "$TMP/fake-mac/launchctl"
+printf '#!/bin/sh\necho alex\n' > "$TMP/fake-mac/id"
+printf '#!/bin/sh\necho "${CONSOLE_USER:-alex}"\n' > "$TMP/fake-mac/stat"
+chmod +x "$TMP/fake-mac"/*
+hl() { ( PATH="$TMP/fake-mac:$PATH"; unset SSH_CONNECTION SSH_TTY CI; "$@"; lib _osrc_mc_headless ); }
+hl true; [ "$?" = 1 ] && ok "inside tmux on a desktop (launchctl: Background, console user = this user): a desktop" || no "tmux desktop read as headless"
+CONSOLE_USER=someone hl true; [ "$?" = 0 ] && ok "someone else at the console: headless" || no "other console user read as desktop"
+( PATH="$TMP/fake-mac:$PATH"; SSH_CONNECTION="1 2 3 4" lib _osrc_mc_headless ); [ "$?" = 0 ] && ok "over SSH: headless" || no "ssh read as desktop"
+
+echo "=== work starting opens Mission Control once per hub process ==="
 # A live "hub": this test's own shell stands in for its pid; serve.json is what hub_server.py writes.
 sleep 300 & HUBPID=$!
 printf '{"pid":%s,"port":8799,"started":1}\n' "$HUBPID" > "$OSRC_HOME/hub/serve.json"
@@ -63,39 +77,60 @@ rm -f "$OSRC_HOME/hub/serve.json"; : > "$OSRC_HOME/hub/autostart"
 err="$(desk lib osrc_mc_auto_open 2>&1)"
 [ -z "$err" ] && ok "no hub, but one was started under 2 min ago: nothing new is started" || no "autostart repeat: $err"
 
-echo "=== G: an old key, and /reopen ==="
+echo "=== an old key, and /reopen ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl not installed"; echo "RESULT: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
 PORT="$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null)"
 if [ -z "$PORT" ]; then ok "loopback denied by the sandbox: HTTP checks need a direct host run"; else
 rm -f "$OSRC_HOME/hub/token" "$OSRC_HOME/hub/tab.seen"   # left by the I section
-OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open >"$TMP/serve.log" 2>&1 & SRV=$!
-URL=""; for _ in $(seq 1 150); do
-  URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" 2>/dev/null | head -1)"; [ -n "$URL" ] && break
-  kill -0 "$SRV" 2>/dev/null || break; sleep 0.2; done
-[ -n "$URL" ] || { no "hub serve did not start: $(cat "$TMP/serve.log")"; echo "RESULT: $pass passed, $fail failed"; exit 1; }
-BASE="http://127.0.0.1:$PORT"; TOK="${URL##*t=}"
+start_hub() { # [hub serve args]: start on $PORT, set URL/TOK
+  OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open "$@" >"$TMP/serve.log" 2>&1 & SRV=$!
+  URL=""; for _ in $(seq 1 150); do
+    URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" 2>/dev/null | head -1)"; [ -n "$URL" ] && break
+    kill -0 "$SRV" 2>/dev/null || break; sleep 0.2; done
+  [ -n "$URL" ] || { no "hub serve did not start: $(cat "$TMP/serve.log")"; echo "RESULT: $pass passed, $fail failed"; exit 1; }
+  TOK="${URL##*t=}"
+}
+stop_hub() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""; }
+start_hub; OLD="$TOK"; stop_hub
+start_hub --new-token
+BASE="http://127.0.0.1:$PORT"
+[ "$TOK" != "$OLD" ] && ok "a restart with --new-token serves a new key (the old tab's key is now retired)" || no "token did not rotate"
 jq -e --argjson p "$PORT" '.port == $p and (.pid | type) == "number"' "$OSRC_HOME/hub/serve.json" >/dev/null && ok "the hub records who serves this OSRC_HOME (serve.json pid + port)" || no "serve.json: $(cat "$OSRC_HOME/hub/serve.json" 2>/dev/null)"
-code="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Hub-Token: deadbeefdeadbeefdeadbeefdeadbeef' "$BASE/api/answers")"
-[ "$code" = 403 ] && ok "a tab holding an older key gets 403 from the data API (the page shows the old-key line, hub_alive_dom.js)" || no "old key: $code"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $OLD" "$BASE/api/answers")"
+[ "$code" = 403 ] && ok "a tab holding the older key gets 403 from the data API" || no "old key: $code"
 [ ! -f "$OSRC_HOME/hub/tab.seen" ] && ok "an old key's request does not count as a watching tab" || no "tab.seen written for a bad key"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $TOK" "$BASE/api/answers")"
 [ "$code" = 200 ] && [ "$(( $(date +%s) - $(cat "$OSRC_HOME/hub/tab.seen" 2>/dev/null || echo 0) ))" -le 5 ] && ok "a data call with the current key stamps hub/tab.seen" || no "tab.seen: $code $(cat "$OSRC_HOME/hub/tab.seen" 2>/dev/null)"
-hdr() { curl -s -D - -o /dev/null "$@" "$BASE/reopen" | tr -d '\r'; }
-h="$(hdr -H 'Sec-Fetch-Site: same-origin' -H 'Sec-Fetch-Mode: navigate')"
-grep -q '^HTTP/1.1 302' <<<"$h" && grep -qx "Location: /?t=$TOK" <<<"$h" && ok "Reopen (same-origin navigation): 302 to the current key" || no "reopen same-origin: $h"
-h="$(hdr -H 'Sec-Fetch-Site: none')"; grep -q '^HTTP/1.1 302' <<<"$h" && ok "typed into the address bar (Sec-Fetch-Site: none): 302" || no "reopen none: $h"
-for v in "cross-site" "same-site"; do
-  h="$(hdr -H "Sec-Fetch-Site: $v")"; grep -q '^HTTP/1.1 403' <<<"$h" && ! grep -q "$TOK" <<<"$h" && ok "a $v request to /reopen: 403, no key" || no "reopen $v: $h"
-done
-h="$(hdr)"; grep -q '^HTTP/1.1 403' <<<"$h" && ok "no Sec-Fetch-Site (curl, scripts): 403, no key" || no "reopen bare: $h"
-h="$(hdr -H 'Sec-Fetch-Site: same-origin' -H 'Origin: http://evil.example')"; grep -q '^HTTP/1.1 403' <<<"$h" && ok "a foreign Origin: 403" || no "reopen origin: $h"
-h="$(hdr -H 'Sec-Fetch-Site: same-origin' -H "Host: evil.example:$PORT")"; grep -q '^HTTP/1.1 403' <<<"$h" && ok "a non-loopback Host (DNS rebinding): 403" || no "reopen host: $h"
-grep -q "$TOK" "$TMP/serve.log" && [ "$(grep -c "$TOK" "$TMP/serve.log")" -gt 1 ] && no "the key was logged by a request line" || ok "the redirect's key never reaches the hub log"
+# /reopen: only a tab holding a key this hub's predecessors issued gets the current URL.
+ro() { curl -s -w '\n%{http_code}' -X POST "$@" "$BASE/reopen"; }
+b="$(curl -s -w '\n%{http_code}' -H 'Sec-Fetch-Site: none' "$BASE/reopen")"
+[ "${b##*$'\n'}" = 403 ] && ! grep -q "$TOK" <<<"$b" && ok "GET /reopen typed or scripted (Sec-Fetch-Site: none): 403, no key" || no "GET none: $b"
+b="$(ro -H 'Sec-Fetch-Site: none')"
+[ "${b##*$'\n'}" = 403 ] && ! grep -q "$TOK" <<<"$b" && grep -q 'outsourcerer mc' <<<"$b" && ok "POST with no old key: 403 with the 'run outsourcerer mc' text, no key" || no "no old key: $b"
+b="$(ro -H 'X-Hub-Old-Token: 0123456789abcdef0123456789abcdef')"
+[ "${b##*$'\n'}" = 403 ] && ! grep -q "$TOK" <<<"$b" && ok "an unknown old key: 403, no key" || no "unknown key: $b"
+b="$(ro -H "X-Hub-Old-Token: $TOK")"
+[ "${b##*$'\n'}" = 403 ] && ok "the current key is not a retired one: 403 (that tab needs no reopen)" || no "current as old: $b"
+b="$(ro -H "X-Hub-Old-Token: $OLD" -H 'Sec-Fetch-Site: same-origin' -H "Origin: http://127.0.0.1:$PORT")"
+[ "${b##*$'\n'}" = 200 ] && [ "$(sed '$d' <<<"$b" | jq -r .url)" = "/?t=$TOK" ] && ok "the tab's retired key: 200 with the current page URL" || no "retired key: $b"
+b="$(ro -H "X-Hub-Old-Token: $OLD" -H 'Origin: http://evil.example')"; [ "${b##*$'\n'}" = 403 ] && ok "a foreign Origin with the old key: 403" || no "origin: $b"
+b="$(ro -H "X-Hub-Old-Token: $OLD" -H 'Sec-Fetch-Site: cross-site')"; [ "${b##*$'\n'}" = 403 ] && ok "a cross-site POST with the old key: 403" || no "cross-site: $b"
+b="$(ro -H "X-Hub-Old-Token: $OLD" -H "Host: evil.example:$PORT")"; [ "${b##*$'\n'}" = 403 ] && ok "a non-loopback Host (DNS rebinding) with the old key: 403" || no "host: $b"
+K="$OSRC_HOME/hub/keys.json"
+PERM="$(stat -c %a "$K" 2>/dev/null || stat -f %Lp "$K" 2>/dev/null)"
+[ "$PERM" = 600 ] && ! grep -q "$OLD" "$K" && ! grep -q "$TOK" "$K" && [ "$(jq length "$K")" = 2 ] && ok "keys.json is 0600 and holds salted hashes only (2 keys)" || no "keys.json: mode $PERM $(cat "$K")"
+jq '[.[] | if .current then . else .retired_at = (now - 8 * 86400 | floor) end]' "$K" > "$K.t" && mv "$K.t" "$K"
+b="$(ro -H "X-Hub-Old-Token: $OLD")"; [ "${b##*$'\n'}" = 403 ] && ok "a key retired over 7 days ago: 403" || no "expired key: $b"
+grep -q "$TOK" "$TMP/serve.log" && [ "$(grep -c "$TOK" "$TMP/serve.log")" -gt 1 ] && no "the key was logged by a request line" || ok "the current key never reaches the hub log through /reopen"
 pg="$(curl -s "$BASE/")"; grep -q 'assets/hub-alive.js' <<<"$pg" && ok "the page loads hub-alive.js" || no "page does not load hub-alive.js"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/hub-alive.js")" = 200 ] && ok "hub-alive.js is served (CSP script-src 'self')" || no "asset not served"
+stop_hub
+# Only the newest 5 keys are kept.
+for i in 1 2 3 4 5; do start_hub --new-token; stop_hub; done
+[ "$(jq length "$K")" = 5 ] && ok "keys.json keeps the newest 5 keys" || no "kept $(jq length "$K")"
 fi
 
-echo "=== H (and G page side): the liveness strip, fake clock ==="
+echo "=== the liveness strip and the old-key page, fake clock ==="
 if command -v node >/dev/null 2>&1; then
   out="$(node "$HERE/hub_alive_dom.js" "$HERE/../lib/hub-assets/hub-alive.js" 2>&1)"; rc=$?
   printf '%s\n' "$out" | grep -E '^(PASS|FAIL)'

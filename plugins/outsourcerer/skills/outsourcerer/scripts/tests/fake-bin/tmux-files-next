@@ -1,0 +1,10 @@
+#!/bin/bash
+# tmux-files plus one behavior: `send-keys ... Enter` to <t> swaps in $FAKE_TMUX_DIR/<t>.next when one is
+# staged (an answer that lands and opens a different prompt). FAKE_TMUX_FILES: path of tmux-files.
+if [ "$1" = send-keys ]; then
+  t=""; p=""
+  for a in "$@"; do [ "$p" = -t ] && t="${a#=}"; p="$a"; done
+  t="${t%%:*}"
+  case " $* " in *" Enter "*) [ -f "$FAKE_TMUX_DIR/$t.next" ] && mv -f "$FAKE_TMUX_DIR/$t.next" "$FAKE_TMUX_DIR/$t.screen" ;; esac
+fi
+exec "${FAKE_TMUX_FILES:?}" "$@"

@@ -433,10 +433,14 @@ shown with the next real wake, never a wake by itself). `EVENT done all` means n
 runs (Claude Code's `· 1 shell` footer or `1 shell still running` summary) is not idle and never raises
 `idle`. A lane is `stalled` when it is idle and its shell has run `OSRC_STALL_MIN` (5) minutes with no
 change on screen, when its last words promise to continue later ("after it reports I continue") with
-nothing running to wake it, or when a plain idle has not changed for `OSRC_STALL_MIN`. supervise first
-types ONE nudge into the lane itself ("check its output now; if it hung, kill it and rerun in the
-foreground") and logs an informational `nudged` row; still stalled `OSRC_STALL_MIN` later, it wakes you
-with `EVENT stalled ... after one autonudge` and Mission Control shows the lane as needs-you.
+nothing running to wake it, or when a plain idle has not changed for `OSRC_STALL_MIN`. A lane whose last
+words wait on a person (you, a go-ahead, an approval, a review, the orchestrator, a decision) is plain
+idle, never stalled. supervise first types ONE nudge into the lane itself ("check its output now; if it
+hung, kill it and rerun in the foreground") and logs an informational `nudged` row; still stalled
+`OSRC_STALL_MIN` later, it wakes you with `EVENT stalled ... after one autonudge` and Mission Control shows
+the lane as needs-you. A lane that worked after its nudge and stalls again gets a fresh nudge, up to
+`OSRC_NUDGE_MAX` (3), after which a new stall wakes you at once. A foreground tool whose screen has not
+moved for `OSRC_SUPERVISE_STALL` (15) minutes is reported once, then every 15 minutes.
 `OSRC_AUTONUDGE=0` skips the nudge: the first stall wakes you with the nudge as NEXT. A lane at a question
 or an approval, and the review queue's reviewer, are never nudged. `EVENT approval-not-landed` means an
 answer was typed (by `session answer`, the approver, or anything that noted it) and the same prompt was

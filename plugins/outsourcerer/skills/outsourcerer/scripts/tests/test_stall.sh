@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_stall.sh: no lane ever waits unseen (S4, lib/stall.sh + lib/mc_alive.sh). One regression per
-# incident in briefs/S4-no-stalls.md, plus the edges the brief names. Panes are real Claude Code
+# test_stall.sh: no lane ever waits unseen (lib/stall.sh + lib/mc_alive.sh). One regression per
+# incident in the 0.17 no-stalls brief, plus the edges the brief names. Panes are real Claude Code
 # captures (fixtures/supervise/cc-*-bgshell-footer*.txt, 2026-11-17, see the README) served by the
 # file-backed fake tmux. Fake clock: every observation is passed an explicit `now`, or the state file
 # that holds a time is moved back; nothing here sleeps to wait for a window.
@@ -11,7 +11,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-stall.XXXXXX")" || { echo "FAIL: no scratch dir" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
-mkdir -p "$TMP/bin" "$TMP/panes" "$TMP/home"; ln -s "$SCRIPT_DIR/fake-bin/tmux-files" "$TMP/bin/tmux"
+mkdir -p "$TMP/bin" "$TMP/panes" "$TMP/home"
+# The file-backed fake tmux, plus: Enter sent to <t> swaps in <t>.next when one is staged (an answer that
+# lands and opens a different prompt).
+ln -s "$SCRIPT_DIR/fake-bin/tmux-files-next" "$TMP/bin/tmux"; export FAKE_TMUX_FILES="$SCRIPT_DIR/fake-bin/tmux-files"
 export HOME="$TMP/home" PATH="$TMP/bin:$PATH" FAKE_TMUX_DIR="$TMP/panes" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_STREAM=1
 export OSRC_CLAUDE_PROJECTS_DIR="$TMP/projects" OSRC_CLAUDE_SESSIONS_DIR="$TMP/ccsessions" OSRC_MC_AUTO_OPEN=0
 unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID OSRC_SUPERVISE_REMIND OSRC_STALL_MIN OSRC_AUTONUDGE OSRC_HOLD_MIN
@@ -67,7 +70,7 @@ fresh 1b; own S s3; pane s3 cc-idle-bgshell-footer-only.txt
 obs s3 "$N0" >/dev/null; obs s3 $((N0 + 301)) >/dev/null
 out="$(OSRC_SUPERVISE_MAX_SECS=2 sup --session S)"
 grep -q '^EVENT nudged ' <<<"$out" && no "a nudged row woke the orchestrator: [$out]" || ok "supervise does not wake for the autonudge alone"
-printf '%s nudge\n' $((N0 - 400)) > "$OSRC_HOME/lanes/state/s3.nudge"   # fake clock: the nudge was 6+ min ago
+printf '%s bgshell sent 0 1\n' $((N0 - 400)) > "$OSRC_HOME/lanes/state/s3.nudge"   # fake clock: the nudge was 6+ min ago
 read -r h c rest < "$OSRC_HOME/lanes/state/s3"; echo "$h $((N0 - 700)) $rest" > "$OSRC_HOME/lanes/state/s3"
 out="$(sup --session S)"
 grep -q '^EVENT stalled s3 .*after one autonudge' <<<"$out" && grep -q '^NEXT OUTSOURCERER_TMUX=s3 .* session read' <<<"$out" \
@@ -164,6 +167,63 @@ case "$r" in "stalled|"*"(the autonudge could not be sent)|OUTSOURCERER_TMUX=d10
 fresh 11; own S rv; pane rv cc-idle-plain-2026-11-17.txt; mkdir -p "$OSRC_HOME/review"; jq -cn '{session:"rv"}' > "$OSRC_HOME/review/reviewer.json"
 obs rv "$N0" >/dev/null; obs rv "$N0" >/dev/null; obs rv $((N0 + 601)) >/dev/null
 [ "$(nudges rv)" = 0 ] && ok "the queue's reviewer, idle between items by design, is not nudged for being quiet" || no "reviewer nudged"
+
+echo "=== round 2 ==="
+# A message waiting on a person is idle for a person: the normal idle event, never a nudge.
+mkp() { sed "s/^⏺ The mutation run.*/⏺ $2/" "$FX/cc-idle-promise-noshell.txt" > "$TMP/panes/$1.screen"; }
+fresh 21; own S g21; mkp g21 "I'll continue with phase 2 when you give the go-ahead."
+r="$(obs g21 "$N0")"; r="$(obs g21 "$N0")"
+case "$r" in idle*) ok "'I'll continue ... when you give the go-ahead': the normal idle event" ;; *) no "go-ahead: $r" ;; esac
+obs g21 $((N0 + 700)) >/dev/null
+[ "$(nudges g21)" = 0 ] && [ "$(kinds g21)" = "idle idle " ] && ok "waiting on a person is never nudged or called stalled (11 min later: only idle reminders)" || no "person-wait: nudges=$(nudges g21) rows=$(kinds g21)"
+fresh 22; own S g22; mkp g22 "Once the reviewer finishes I continue with round 2."
+r="$(obs g22 "$N0")"; r="$(obs g22 "$N0")"
+[ "$(nudges g22)" = 0 ] && case "$r" in idle*) true ;; *) false ;; esac && ok "'once the reviewer finishes': a person, so idle, not a promise" || no "reviewer-wait: $r nudges=$(nudges g22)"
+fresh 23; own S g23; mkp g23 "I'll continue with phase 2."
+r="$(obs g23 "$N0")"; r="$(obs g23 "$N0")"
+[ "$(nudges g23)" = 0 ] && case "$r" in idle*) true ;; *) false ;; esac && ok "a bare 'I'll continue' is no promise: idle first, not an instant nudge" || no "bare continue: $r nudges=$(nudges g23)"
+
+# session answer: the answer landed and a DIFFERENT prompt opened -> no approval-not-landed.
+fresh 24; own S a24; pane a24 codex-approval.ansi; cp "$SCRIPT_DIR/fixtures/screen/cx-approval.ansi" "$TMP/panes/a24.next"
+cmp -s "$TMP/panes/a24.screen" "$TMP/panes/a24.next" && no "fixture: the two prompts must differ"
+out="$(OUTSOURCERER_TMUX=a24 perl -e 'alarm 30; exec @ARGV' "$SRC" session answer 1 2>"$TMP/err")"
+grep -q 'approval-not-landed' <<<"$out" && no "a landed answer followed by a new prompt reported as not landed: [$out]" || ok "answer landed, a different prompt opened: no approval-not-landed"
+[ "$(kinds a24)" = "" ] && ok "nothing logged for it" || no "rows: $(kinds a24)"
+
+# supervise: after an approval-not-landed, the open prompt is not logged again at once, and its age runs
+# from when the prompt was first seen.
+fresh 25; own S a25; pane a25 codex-approval.ansi
+obs a25 $((N0 - 600)) >/dev/null
+lib osrc_keys_sent a25 "hub button"; f="$OSRC_HOME/lanes/state/a25.keysent"
+ts=0; h=""; who=""; [ -f "$f" ] && IFS="$(printf '\t')" read -r ts h who < "$f"; printf '%s\t%s\t%s\n' $((ts - 8)) "$h" "$who" > "$f"
+obs a25 "$ts" >/dev/null; obs a25 $((ts + 10)) >/dev/null
+[ "$(kinds a25)" = "approval approval-not-landed " ] && ok "after approval-not-landed the same prompt is not re-logged as a new approval" || no "rows: $(kinds a25)"
+obs a25 $((ts + 301)) >/dev/null
+d="$(jq -r 'select(.target=="a25" and .kind=="approval") | .detail' "$OSRC_HOME/lanes/events.jsonl" | tail -1)"
+case "$d" in "still unresolved, waiting 1"[0-9]"m: "*) ok "the reminder keeps the original age ($d)" ;; *) no "age after not-landed: $d / rows $(kinds a25)" ;; esac
+
+# A long foreground tool (spinner, screen still): one stalled at 15 min, then every 15, not every 5.
+fresh 26; own S f26; pane f26 cc-working-bgshell-footer.txt
+obs f26 "$N0" >/dev/null; obs f26 $((N0 + 901)) >/dev/null; obs f26 $((N0 + 901 + 301)) >/dev/null
+[ "$(kinds f26)" = "stalled " ] && ok "a foreground run still at 15 min: one stalled, no 5-min repeat" || no "rows: $(kinds f26)"
+obs f26 $((N0 + 901 + 901)) >/dev/null
+[ "$(kinds f26)" = "stalled stalled " ] && ok "repeated after another 15 min" || no "rows: $(kinds f26)"
+
+# A nudge the lane obeyed (it worked after it) and a new stall: a fresh nudge, not an escalation.
+fresh 27; own S n27; pane n27 cc-idle-bgshell-footer-only.txt
+obs n27 "$N0" >/dev/null; obs n27 $((N0 + 301)) >/dev/null
+pane n27 cc-working-bgshell-footer.txt; obs n27 $((N0 + 320)) >/dev/null
+pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((N0 + 340)) >/dev/null; r="$(obs n27 $((N0 + 341 + 301)))"
+[ "$(nudges n27)" = 2 ] && case "$r" in stalled*) false ;; *) true ;; esac && ok "worked after its nudge, stalled again: a fresh nudge (2), no escalation" || no "obeyed: nudges=$(nudges n27) r=$r rows=$(kinds n27)"
+t=$((N0 + 341 + 301))   # nudge 2; each later cycle: works 20 s after its nudge, stalls again 5 min on
+for k in 1 2; do pane n27 cc-working-bgshell-footer.txt; obs n27 $((t + 20)) >/dev/null
+  pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((t + 40)) >/dev/null; t=$((t + 41 + 301)); r="$(obs n27 "$t")"; done
+case "$r" in "stalled|"*"stalled again after 3 autonudges"*) ok "after OSRC_NUDGE_MAX (3) nudges a new stall escalates at once" ;; *) no "cap: nudges=$(nudges n27) r=$r" ;; esac
+# A nudge that could not be sent never reads as "after one autonudge".
+fresh 28; own S x28; pane x28 cc-idle-bgshell-footer-only.txt
+OSRC_NUDGE_SEND_CMD=false obs x28 "$N0" >/dev/null; OSRC_NUDGE_SEND_CMD=false obs x28 $((N0 + 301)) >/dev/null
+r="$(OSRC_NUDGE_SEND_CMD=false obs x28 $((N0 + 602)))"
+case "$r" in *"after one autonudge"*) no "claims a nudge that was not sent: $r" ;; "stalled|still stalled"*"the autonudge could not be sent"*) ok "escalation after a failed nudge says it was not sent" ;; *) no "failed-nudge escalation: $r" ;; esac
 
 echo "=== lib loads through a symlinked engine (LOADER.md) ==="
 ln -s "$SRC" "$TMP/osrc-link.sh"

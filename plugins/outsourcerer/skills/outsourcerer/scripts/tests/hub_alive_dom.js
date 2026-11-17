@@ -1,4 +1,4 @@
-// hub_alive_dom.js <path to hub-alive.js>: runs Mission Control's liveness strip (S4 G/H) in node against a
+// hub_alive_dom.js <path to hub-alive.js>: runs Mission Control's liveness strip and old-key page in node against a
 // minimal DOM stub, a fake clock (window.OSRC_HUB_ALIVE_NOW) and a fake fetch. Prints PASS/FAIL lines.
 // Driven by test_mc_alive.sh. No browser, no network.
 'use strict';
@@ -30,31 +30,42 @@ function page(fetchImpl) {
   const h1 = new El('h1'); h1.textContent = 'Loading your projects'; const p = new El('p'); p.textContent = 'Each orchestrator...';
   welcome.append(h1, p);
   const pe = new El('p'); pe.setAttribute('id', 'plist-empty'); pe.textContent = 'Loading your projects…';
-  body.append(pe, welcome);
+  const main = new El('main'); main.setAttribute('id', 'main'); main.append(welcome);
+  body.append(pe, main);
+  const store = { 'osrc-hub-t': 'old0key0old0key0old0key0old0key0' };
+  const sessionStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
   const clock = { t: 1800000000000 };
   const location = { href: 'http://127.0.0.1:8788/', origin: 'http://127.0.0.1:8788' };
   const document = { readyState: 'complete', head, body, createElement: (t) => new El(t), createTextNode: (t) => new Text(t),
     getElementById: (id) => body.all().find((e) => e.id === id) || null, addEventListener() {} };
   const window = { fetch: fetchImpl, OSRC_HUB_ALIVE_NOW: () => clock.t };
-  vm.runInNewContext(code, { window, document, location, URL, Map, Date, setInterval: () => 0, console });
+  vm.runInNewContext(code, { window, document, location, sessionStorage, URL, Map, Date, setInterval: () => 0, console });
   const bar = () => body.all().find((e) => e.id === 'osrc-alive');
   const text = () => (bar() ? bar().querySelector('.al-text').textContent : '');
-  return { window, document, location, clock, bar, text, welcome: h1, plist: pe, paint: () => window.OSRC_HUB_ALIVE.paint() };
+  return { window, document, location, clock, bar, text, main, welcome: h1, plist: pe, paint: () => window.OSRC_HUB_ALIVE.paint() };
 }
 const res = (status, json) => ({ status, ok: status >= 200 && status < 300, clone() { return { json: () => Promise.resolve(json || {}) }; }, json: () => Promise.resolve(json || {}) });
 const tick = () => new Promise((r) => setImmediate(r));
 
 (async () => {
-  // G: a tab whose key is from an older Mission Control says so, with a Reopen that needs no token.
-  {
-    const P = page(() => Promise.resolve(res(403, { error: 'forbidden' })));
-    await P.window.fetch('/api/projects').catch(() => {}); await tick(); P.paint();
-    ok(/older Mission Control/.test(P.text()), 'G: 403 -> the strip says this tab is from an older Mission Control');
-    const dead = P.bar().querySelector('.al-dead');
-    ok(dead && !dead.hidden && /run outsourcerer mc/.test(dead.textContent), 'G: the line names the fix: run outsourcerer mc');
-    ok(P.welcome.textContent === 'This tab is from an older Mission Control' && !/Loading/.test(P.plist.textContent), 'G: the "Loading your projects" spinner text is replaced, not left spinning');
-    dead.querySelector('button').click();
-    ok(P.location.href === '/reopen', 'G: Reopen navigates to /reopen (the hub redirects a same-origin request to the current key)');
+  // An old key: one 'Not live' line in the strip; the explanation and the Reopen button live in the main
+  // pane only; Reopen POSTs this tab's old key and follows the URL the hub returns.
+  for (const retired of [true, false]) {
+    const calls = [];
+    const P = page((url, opts) => { calls.push({ url, opts }); if (url === '/reopen') return Promise.resolve(retired ? res(200, { url: '/?t=newkey' }) : res(403, { error: 'unknown key', text: "This tab's key is not one this Mission Control issued. Run outsourcerer mc to open the current one." })); return Promise.resolve(res(403, { error: 'forbidden' })); });
+    await P.window.fetch('/api/projects').catch(() => {}); await tick(); P.paint(); P.paint();
+    if (retired) {
+      ok(/^Not live: this tab's key is from an older Mission Control/.test(P.text()), 'old key: the strip keeps one "Not live" line');
+      ok(!P.bar().querySelector('button') && !P.bar().querySelector('.al-dead'), 'old key: no banner box or button in the strip');
+      ok(P.plist.textContent === 'Loading your projects…', 'old key: the rail is not given a copy of the message');
+      ok(P.welcome.textContent === 'This tab is from an older Mission Control', 'old key: the main pane says it (not a spinner)');
+      ok(P.main.all().filter((e) => e.className === 'al-reopen').length === 1, 'old key: exactly one Reopen box, in the main pane, after repaints');
+    }
+    P.main.querySelector('.al-reopen').querySelector('button').click(); await tick(); await tick(); await tick();
+    const rc = calls.find((c) => c.url === '/reopen');
+    ok(rc && rc.opts.method === 'POST' && rc.opts.headers['X-Hub-Old-Token'] === 'old0key0old0key0old0key0old0key0', 'Reopen POSTs /reopen with this tab\'s old key' + (retired ? '' : ' (unknown key case)'));
+    if (retired) ok(P.location.href === '/?t=newkey', 'a retired key: the tab moves to the URL the hub returned');
+    else ok(P.location.href === 'http://127.0.0.1:8788/' && /Run outsourcerer mc/.test(P.main.querySelector('.al-note').textContent), 'an unknown key: the tab stays and shows the run-outsourcerer-mc text');
   }
   // H: live line, a failed call with the age of the last good data, a slow call past 10 s.
   {

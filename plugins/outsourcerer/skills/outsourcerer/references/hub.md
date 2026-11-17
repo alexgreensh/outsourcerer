@@ -177,17 +177,18 @@ token if `/dev/urandom` is unreadable.
 
 **Never looks dead (0.17, `lib/hub-assets/hub-alive.js`, `lib/mc_alive.sh`).** A strip at the top always
 says whether the page is live: `Live · updated 12s ago`, or the reason a call failed with the age of the
-last good data, or `Waiting for Mission Control (11s)` past 10 s. A tab holding a key from an older hub
-(403) says so in one line with a **Reopen** button: `GET /reopen` needs no key and answers only a
-same-origin or typed-in navigation (`Sec-Fetch-Site: same-origin|none`) on a loopback `Host`, redirecting
-to `/?t=<current key>`; cross-site requests and clients that send no `Sec-Fetch-Site` get 403. The same
-strip lists needs-you rows from the export (`alerts`: a lane still stalled after its autonudge, a READY
-lane queued 15+ min with its age) and `No watcher for N min` (export `watcher`) when an orchestrator's
-live lanes have no supervise armed. The hub writes `hub/serve.json` (pid, port) and stamps
-`hub/tab.seen` on every data call with the current key. `session start`, a delegation or `fleet` opens
-the page once per hub process when no tab fetched data in 2 minutes, starting a hub if none runs
-(`OSRC_MC_AUTO_OPEN=0` disables; never in CI, over SSH, on Linux without a display, on macOS outside an
-interactive login, from a delegate, or under a HOME that is not the account's own). `mc` always opens it.
+last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: this tab's key is from an
+older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
+POSTs the tab's old key to `/reopen`. The hub keeps salted SHA-256 hashes of the keys it served in
+`hub/keys.json` (0600, newest 5, a retired key is honoured for 7 days) and answers with the current page
+URL only for a key it retired; no key, an unknown key or the current key gets 403 and the "run outsourcerer
+mc" text. `GET /reopen` is always 403. The strip also lists needs-you rows from the export (`alerts`: a lane
+still stalled after its autonudge, a READY lane queued 15+ min with its age) and `No watcher for N min`
+(export `watcher`). The hub writes `hub/serve.json` (pid, port) and stamps `hub/tab.seen` on every data call
+with the current key. `session start`, a delegation or `fleet` opens the page once per hub process when no
+tab fetched data in 2 minutes, starting a hub if none runs (`OSRC_MC_AUTO_OPEN=0` disables; never in CI or
+over SSH, on Linux without a display, on macOS when the console user is someone else, from a delegate, or
+under a HOME that is not the account's own). `mc` always opens it.
 
 Local mode makes **zero third-party requests**: Poppins (latin) and Noto Sans
 Hebrew are vendored as woff2 under `lib/hub-assets/fonts/` (provenance and OFL

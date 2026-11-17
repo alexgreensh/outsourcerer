@@ -1,15 +1,15 @@
 # shellcheck shell=bash
-# lib/mc_alive.sh: Mission Control never looks dead, and nobody works unwatched (S4, 0.17).
+# lib/mc_alive.sh: the per-command hook that warns about unwatched lanes and opens Mission Control.
 # Sourced by outsourcerer.sh (lib loader); function definitions only.
 #
-#  E. Watcher liveness: every `session` / `review` / `hub` / `mc` call by an orchestrator whose lanes
-#     have had no supervise armed for over 2 minutes prints one warning line (osrc_watcher_warn,
-#     lib/stall.sh). The hub export carries the same gap, so Mission Control shows "no watcher for N min".
-#  I. It pops when work starts: `session start`, a delegation (run/explore/research/edit/yolo/bg/fanout)
-#     or `fleet` opens Mission Control once per hub process when no tab fetched data in the last
-#     2 minutes. OSRC_MC_AUTO_OPEN=0 disables. Never in CI, never headless (Linux without DISPLAY or
-#     WAYLAND_DISPLAY, macOS outside an interactive Aqua login or over SSH), never from a delegate, and
-#     never under a HOME that is not the account's own (every test suite sets HOME to a scratch dir).
+#  Watcher warning: every `session` / `review` / `hub` / `mc` call by an orchestrator whose lanes have
+#  had no supervise armed for over 2 minutes prints one line (osrc_watcher_warn, lib/stall.sh). The hub
+#  export carries the same gap (osrc_mc_alerts), so Mission Control shows "no watcher for N min".
+#  Auto-open: `session start`, a delegation (run/explore/research/edit/yolo/bg/fanout) or `fleet` opens
+#  Mission Control once per hub process when no tab fetched data in the last 2 minutes.
+#  OSRC_MC_AUTO_OPEN=0 disables. Never in CI or over SSH, never without a desktop (Linux without DISPLAY
+#  or WAYLAND_DISPLAY; macOS when the console user is someone else), never from a delegate, and never
+#  under a HOME that is not the account's own (every test suite sets HOME to a scratch dir).
 #
 # The hub (lib/hub_server.py) writes $OSRC_HOME/hub/serve.json {pid, port} when it starts and
 # $OSRC_HOME/hub/tab.seen (epoch) whenever a tab fetches data with the current token.
@@ -38,7 +38,9 @@ _osrc_mc_headless() { # 0 when no person could see a browser window here
   _osrc_mc_test_desktop && return 1
   [ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] && return 0
   case "$(uname -s 2>/dev/null)" in
-    Darwin) [ "$(launchctl managername 2>/dev/null)" = Aqua ] || return 0 ;;
+    # The person logged in at the screen is this user. Not launchctl's manager name: inside tmux it
+    # reads "Background" even on a desktop session.
+    Darwin) [ "$(stat -f %Su /dev/console 2>/dev/null)" = "$(id -un 2>/dev/null)" ] || return 0 ;;
     *) [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] || return 0 ;;
   esac
   return 1

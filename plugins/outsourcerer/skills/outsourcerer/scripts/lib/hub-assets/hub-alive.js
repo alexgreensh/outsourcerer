@@ -1,12 +1,12 @@
-// hub-alive.js: Mission Control never looks dead (S4, 0.17). Loaded before the page script.
+// hub-alive.js: whether Mission Control is live, always visible. Loaded before the page script.
 // It watches the page's own /api/ calls (a fetch wrapper; the page code is unchanged) and keeps one
 // strip at the top of the page:
-//   G. a 401/403 means this tab holds a key from an older Mission Control: say so in one line, with a
-//      Reopen button (GET /reopen: same-origin navigation only, the hub redirects to /?t=<current>);
-//   H. "Live · updated Ns ago" is always visible; a call that fails or runs past 10 s shows the reason
-//      and the age of the last good data instead of a silent spinner;
-//   E/D. needs-you rows from the export: a lane stalled after its autonudge, a READY lane waiting for
-//      review (with its age), and "no watcher for N min" when nobody supervises live lanes.
+//   - "Live · updated Ns ago"; a call that fails or runs past 10 s shows the reason and the age of the
+//     last good data; a 401/403 reads "Not live: this tab's key is from an older Mission Control";
+//   - needs-you rows from the export: a lane stalled after its autonudge, a READY lane waiting for
+//     review (with its age), and "no watcher for N min" when nobody supervises live lanes.
+// On a 401/403 the main pane (not the strip) explains it and carries a Reopen button: POST /reopen
+// with this tab's old key; the hub answers with the current page URL only for a key it retired.
 // window.OSRC_HUB_ALIVE_NOW (tests) replaces the clock.
 (function () {
   'use strict';
@@ -40,7 +40,7 @@
     };
   }
 
-  let bar = null, line = null, list = null, deadBox = null;
+  let bar = null, line = null, list = null;
   function build() {
     if (bar || !document.body) return;
     const st = document.createElement('style');
@@ -48,28 +48,40 @@
       + '#osrc-alive .al-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#osrc-alive .al-dot{width:8px;height:8px;border-radius:50%;background:var(--dot-ok,#2f9e44);flex:none}'
       + '#osrc-alive.al-warn .al-dot{background:var(--down,#c92a2a)}#osrc-alive.al-slow .al-dot{background:var(--mark,#e8a400)}'
       + '#osrc-alive ul{margin:4px 0 0;padding:0;list-style:none}#osrc-alive li{padding:2px 0}#osrc-alive li b{font-weight:600}'
-      + '#osrc-alive .al-dead{margin-top:6px;padding:10px 12px;border:1px solid var(--down,#c92a2a);border-radius:8px;background:var(--down-bg,#fff0f0);display:flex;gap:12px;align-items:center;flex-wrap:wrap}'
-      + '#osrc-alive button{font:inherit;padding:4px 12px;border-radius:6px;border:1px solid var(--line,#8f8a7e);background:var(--card,#fff);color:var(--ink,#1f1f1c);cursor:pointer}'
+      + '.al-reopen{margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.al-reopen button{font:inherit;padding:6px 16px;border-radius:8px;border:1px solid var(--line,#8f8a7e);background:var(--card,#fff);color:var(--ink,#1f1f1c);cursor:pointer}'
       + '#osrc-alive code{font-family:var(--mono,ui-monospace,monospace)}';
     document.head.appendChild(st);
     bar = document.createElement('div'); bar.id = 'osrc-alive'; bar.setAttribute('role', 'status'); bar.setAttribute('aria-live', 'polite');
     line = document.createElement('div'); line.className = 'al-line';
     list = document.createElement('ul'); list.hidden = true;
-    deadBox = document.createElement('div'); deadBox.className = 'al-dead'; deadBox.hidden = true;
-    const msg = document.createElement('span');
-    msg.innerHTML = 'This tab is from an older Mission Control. Open the current one: run <code>outsourcerer mc</code>';
-    const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Reopen';
-    btn.addEventListener('click', () => { location.href = '/reopen'; });
-    deadBox.append(msg, btn);
-    bar.append(line, deadBox, list);
+    bar.append(line, list);
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
-  function setLoadingText(h, p) {
-    const w = document.getElementById('welcome'), pe = document.getElementById('plist-empty');
-    if (w && w.querySelector('h1')) { w.querySelector('h1').textContent = h; const q = w.querySelector('p'); if (q) q.textContent = p; }
-    if (pe) pe.textContent = h;
+  function oldKey() { try { return sessionStorage.getItem('osrc-hub-t') || ''; } catch (e) { return ''; } }
+  function reopen(note) {
+    note.textContent = 'Reopening…';
+    return realFetch('/reopen', { method: 'POST', headers: { 'X-Hub-Old-Token': oldKey() } })
+      .then((r) => r.json().then((j) => ({ r, j })))
+      .then(({ r, j }) => { if (r.ok && j && typeof j.url === 'string' && j.url.indexOf('/?t=') === 0) { location.href = j.url; } else { note.textContent = (j && j.text) || 'Run outsourcerer mc to open the current Mission Control.'; } })
+      .catch(() => { note.textContent = 'Mission Control is not answering. Run outsourcerer mc.'; });
   }
+  // The main pane carries the explanation and the one Reopen button; re-added after any re-render.
+  function mainReopen() {
+    const main = document.getElementById('main') || document.getElementById('welcome');
+    if (!main || main.querySelector('.al-reopen')) return;
+    const box = document.createElement('div'); box.className = 'al-reopen';
+    const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Reopen';
+    const note = document.createElement('span'); note.className = 'al-note';
+    btn.addEventListener('click', () => reopen(note));
+    box.append(btn, note); main.appendChild(box);
+  }
+
+  function setLoadingText(h, p) {   // main pane only: the rail and the strip keep their one line
+    const w = document.getElementById('welcome');
+    if (w && w.querySelector('h1')) { w.querySelector('h1').textContent = h; const q = w.querySelector('p'); if (q) q.textContent = p; }
+  }
+
 
   function alerts() {
     const rows = [], t = now();
@@ -99,15 +111,14 @@
     bar.className = cls;
     line.textContent = ''; const dot = document.createElement('span'); dot.className = 'al-dot'; const tx = document.createElement('span'); tx.className = 'al-text'; tx.textContent = text;
     line.append(dot, tx);
-    deadBox.hidden = !S.dead;
-    if (S.dead) setLoadingText('This tab is from an older Mission Control', 'Its key no longer opens the data. Press Reopen, or run "outsourcerer mc".');
+    if (S.dead) { setLoadingText('This tab is from an older Mission Control', 'Its key no longer opens the data. Press Reopen, or run "outsourcerer mc".'); mainReopen(); }
     else if (S.err && !S.lastGood) setLoadingText('Mission Control is not answering', S.err + '. Run "outsourcerer mc" to start or reopen it.');
     const rows = alerts();
     list.textContent = ''; list.hidden = !rows.length;
     rows.forEach((r) => { const li = document.createElement('li'); const b = document.createElement('b'); b.textContent = 'Needs you: ' + r[0]; li.append(b, document.createTextNode(' · ' + r[1])); list.append(li); });
   }
 
-  window.OSRC_HUB_ALIVE = { state: S, paint };
+  window.OSRC_HUB_ALIVE = { state: S, paint, reopen };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', paint); else paint();
   setInterval(paint, 1000);
 })();
