@@ -95,12 +95,41 @@ print("%s %s" % (p if p is not None else "-", f if f is not None else "-"))
 PY
 }
 
-# Resolve a base ref that exists in <dir>: the given one, else origin/<it>; empty when neither exists.
-_osrc_proof_base() { # <dir> <base>
-  local d="$1" b="$2"
-  [ -n "$b" ] || return 0
-  if git -C "$d" rev-parse -q --verify "$b^{commit}" >/dev/null 2>&1; then printf '%s' "$b"
-  elif git -C "$d" rev-parse -q --verify "origin/$b^{commit}" >/dev/null 2>&1; then printf 'origin/%s' "$b"; fi
+# ---- base pin: the lane's base resolved to a sha ONCE, at lane start --------------------------------
+# $OSRC_HOME/proof/<lane>/base.json {ref, sha, ts}. Verify, guards (--base <sha>) and the checks-changed
+# diff all use this sha, so a base branch that moves while the lane works (other lanes merging) does not
+# change what the lane is judged against, and a lane working on main with no remote still has a base:
+# main's tip when it started. Set by `proof base`, by `session start --done-when` (osrc_done_set), by a
+# remote lane's first READY proof, or by the first `proof run` when the base is not the lane's own branch.
+_osrc_proof_resolve() { # <dir> <ref-or-sha> -> full sha (local ref, else origin/<ref>)
+  git -C "$1" rev-parse -q --verify "$2^{commit}" 2>/dev/null \
+    || git -C "$1" rev-parse -q --verify "origin/$2^{commit}" 2>/dev/null
+}
+_osrc_proof_own_branch() { # <dir> <ref>: the ref IS the checkout's current branch (or HEAD)
+  local cur full
+  case "$2" in HEAD|@) return 0 ;; esac
+  cur="$(git -C "$1" symbolic-ref -q HEAD 2>/dev/null)" || return 1
+  full="$(git -C "$1" rev-parse --symbolic-full-name "$2" 2>/dev/null)"
+  [ -n "$full" ] && [ "$full" = "$cur" ]
+}
+# osrc_proof_pin_base <lane> <dir> [ref] [start|force] -> prints "<ref> <sha>"; rc 1 when it cannot pin.
+# start: called at lane start, so the checkout's own branch is fine (its tip IS the base right now).
+# force: an explicit ref replaces the stored pin. Otherwise a stored pin whose sha this checkout has wins.
+osrc_proof_pin_base() {
+  local lane="$1" dir="$2" ref="${3:-}" how="${4:-}" f sha
+  _osrc_proof_id_ok "$lane" || return 1
+  f="$(_osrc_proof_dir "$lane")/base.json"
+  if [ "$how" != force ] && [ -f "$f" ]; then
+    sha="$(jq -r '.sha // ""' "$f" 2>/dev/null)"
+    if [ -n "$sha" ] && git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null; then printf '%s %s' "$(jq -r .ref "$f")" "$sha"; return 0; fi
+  fi
+  [ -n "$ref" ] || ref="$(jq -r '.base // ""' "$OSRC_HOME/remote/$lane.json" 2>/dev/null)"
+  [ -n "$ref" ] || ref=main
+  if [ "$how" != start ] && [ "$how" != force ] && _osrc_proof_own_branch "$dir" "$ref"; then return 1; fi
+  sha="$(_osrc_proof_resolve "$dir" "$ref")" || return 1
+  mkdir -p "$(_osrc_proof_dir "$lane")" 2>/dev/null || return 1
+  _osrc_proof_put "$f" "$(jq -cn --arg r "$ref" --arg s "$sha" --argjson t "$(date +%s)" '{ref:$r, sha:$s, ts:$t}')" || return 1
+  printf '%s %s' "$ref" "$sha"
 }
 
 # The done contract's check command for a lane (session contract or remote lane), or nothing.
@@ -212,10 +241,10 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
   [ "$dirty" = false ] || { ok=false; why="tracked files have uncommitted changes, so the run did not test $head"; }
   totals="$(jq -c 'if any(.[]; .pass != null or .fail != null)
                    then {pass:([.[].pass // 0]|add), fail:([.[].fail // 0]|add)} else null end' <<<"$_PR_CMDS")"
-  rec="$(jq -cn --arg lane "$lane" --arg head "$head" --arg dir "$dir" --arg base "$base" --argjson dirty "$dirty" \
+  rec="$(jq -cn --arg lane "$lane" --arg head "$head" --arg dir "$dir" --arg base "${_PR_BASE_REF:-$base}" --arg bsha "$base" --argjson dirty "$dirty" \
     --argjson ts "$(date +%s)" --arg method "$method" --arg reason "$reason" --arg source "$source" --argjson ok "$ok" \
     --argjson cmds "$_PR_CMDS" --argjson totals "$totals" --argjson guards "$_PR_GUARDS" --argjson changed "$changed" --arg why "$why" '
-    {schema:1, lane:$lane, head:$head, dir:$dir, base:$base, dirty:$dirty, ts:$ts, method:$method, reason:$reason,
+    {schema:1, lane:$lane, head:$head, dir:$dir, base:$base, base_sha:$bsha, dirty:$dirty, ts:$ts, method:$method, reason:$reason,
      source:$source, ok:$ok, commands:$cmds, totals:$totals, guards:$guards, checks_changed:$changed}
     + (if $why == "" then {} else {why:$why} end)
     + {reviewer_required:((($guards|type) == "object") and ($guards.reviewer_required == true))}')"
@@ -255,13 +284,25 @@ cmd_proof() {
       echo "--- relay this to lane '$1' ---"; cat "$(_osrc_proof_dir "$1")/SENDBACK.md" ;;
     reset) _osrc_proof_id_ok "${1:-}" || die "proof reset <lane>"
       _osrc_proof_note_pass "$1" && rm -f "$(_osrc_proof_dir "$1")/needs-you.json" && echo "proof rounds reset for $1" ;;
+    base) _osrc_proof_base_cmd "$@" ;;
     require) mkdir -p "$(_osrc_proof_root)"
       case "${1:-}" in on) : > "$(_osrc_proof_root)/require"; echo "proof required on every .DONE hand-in" ;;
         off) rm -f "$(_osrc_proof_root)/require"; echo "proof required only for lanes that have run proof" ;;
         '') [ -f "$(_osrc_proof_root)/require" ] && echo on || echo off ;;
         *) die "proof require [on|off]" ;; esac ;;
-    *) die "proof: run [--lane ID] [--dir DIR] [--base REF] [--cmd \"<check>\"]... [--method none|review --reason R] [--json] | show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane> | require [on|off]" ;;
+    *) die "proof: run [--lane ID] [--dir DIR] [--base REF] [--cmd \"<check>\"]... [--method none|review --reason R] [--json] | show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane> | base <lane> [--dir DIR] [REF|SHA] | require [on|off]" ;;
   esac
+}
+
+# proof base <lane> [--dir DIR] [REF|SHA]: show the pinned base, or pin it now (run at lane start).
+_osrc_proof_base_cmd() {
+  local lane="${1:-}" dir="$PWD" ref="" f
+  _osrc_proof_id_ok "$lane" || die "proof base <lane> [--dir DIR] [REF|SHA]"; shift
+  while [ "$#" -gt 0 ]; do case "$1" in --dir) dir="${2:-}"; shift 2 ;; *) ref="$1"; shift ;; esac; done
+  f="$(_osrc_proof_dir "$lane")/base.json"
+  if [ -z "$ref" ] && [ -f "$f" ]; then jq -r '"\(.ref) \(.sha)"' "$f"; return 0; fi
+  osrc_proof_pin_base "$lane" "$dir" "$ref" force || die "proof base: ${ref:-main} does not resolve to a commit in $dir"
+  echo
 }
 
 _osrc_proof_run() {
@@ -284,9 +325,14 @@ _osrc_proof_run() {
   if [ -z "$lane" ]; then lane="${OUTSOURCERER_TMUX:-}"; fi
   if [ -z "$lane" ]; then lane="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')"; fi
   _osrc_proof_id_ok "$lane" || die "proof run: bad lane id '$lane' (pass --lane, letters/digits/._- only)"
-  [ -n "$base" ] || base="$(jq -r '.base // ""' "$OSRC_HOME/remote/$lane.json" 2>/dev/null)"
-  [ -n "$base" ] || base=main
-  base="$(_osrc_proof_base "$dir" "$base")"
+  local pin
+  if [ -n "$base" ]; then pin="$(osrc_proof_pin_base "$lane" "$dir" "$base" force)" || die "proof run: --base $base does not resolve to a commit in $dir"
+  else pin="$(osrc_proof_pin_base "$lane" "$dir")" || pin=""; fi
+  _PR_BASE_REF="${pin%% *}"; base="${pin#* }"
+  if [ -z "$pin" ]; then
+    _PR_BASE_REF=""; base=""
+    echo "proof: no base pinned for $lane (the base is this checkout's own branch, or it does not exist). Pin it at lane start: $(_osrc_self) proof base $lane --dir $dir <ref-or-sha>" >&2
+  fi
   case "$method" in
     none|review) [ -n "${reason//[[:space:]]/}" ] || die "proof run --method $method needs --reason \"<why this lane is not proved by a run>\""
       [ "${#_PR_ARGS[@]}" -eq 0 ] || die "proof run: --method $method takes no --cmd"
@@ -428,18 +474,21 @@ osrc_proof_handin() { # <lane> <fingerprint>
 # A cloud lane cannot write this machine's proof folder, so READY runs the proof here, in the throwaway
 # worktree remote.sh already makes for --done-when. The base branch is fetched into the lane cache as
 # refs/heads/osrc-base so .outsourcerer/verify is read from the base, never from the lane's branch.
-_osrc_proof_remote_base() { # <id> <lane-json> <cache> -> rc0 when refs/heads/osrc-base is fresh
+# The base sha is pinned at the first READY (osrc_proof_pin_base); later READYs reuse it while the cache has it.
+_osrc_proof_remote_base() { # <id> <lane-json> <cache> -> prints the pinned base sha
   local b url
   b="$(jq -r '.base // "main"' "$2" 2>/dev/null)"; url="$(_osrc_lane_fetch_url "$2" 2>/dev/null)"
   [ -n "$b" ] && [ -n "$url" ] || return 1
-  _osrc_net git --git-dir="$3" fetch -q --no-tags "$url" "+refs/heads/$b:refs/heads/osrc-base" >/dev/null 2>&1
+  _osrc_net git --git-dir="$3" fetch -q --no-tags "$url" "+refs/heads/$b:refs/heads/osrc-base" >/dev/null 2>&1 || return 1
+  osrc_proof_pin_base "$1" "$3" osrc-base start >/dev/null || return 1
+  jq -r .sha "$(_osrc_proof_dir "$1")/base.json"
 }
 
 # No --done-when on the lane: with a verify script on base, run it (rc0, _PR_REMOTE_CHECK set); with
 # nothing to run, record an honest method-none proof so the lane is reviewed and stamped unverified.
 osrc_proof_remote_ready() { # <id> <lane-json> <head>
   local id="$1" f="$2" head="$3" cache
-  _PR_REMOTE_CHECK=""
+  _PR_REMOTE_CHECK=""; _PR_BASE_REF=""
   _osrc_proof_id_ok "$id" || return 1
   # Proved by hand on this sha already: keep that proof. A failing one sends the READY back (rc 2).
   if [ "$(jq -r '.head // ""' "$(_osrc_proof_file "$id")" 2>/dev/null)" = "$head" ]; then
@@ -448,8 +497,9 @@ osrc_proof_remote_ready() { # <id> <lane-json> <head>
     return 2
   fi
   if osrc_proof_stopped "$id"; then return 2; fi
-  if cache="$(_osrc_lane_cache "$id" "$f" 2>/dev/null)" && _osrc_proof_remote_base "$id" "$f" "$cache" \
-     && git --git-dir="$cache" cat-file -e "osrc-base:.outsourcerer/verify" 2>/dev/null; then
+  local bsha
+  if cache="$(_osrc_lane_cache "$id" "$f" 2>/dev/null)" && bsha="$(_osrc_proof_remote_base "$id" "$f" "$cache")" \
+     && git --git-dir="$cache" cat-file -e "$bsha:.outsourcerer/verify" 2>/dev/null; then
     _PR_REMOTE_CHECK=__osrc_verify__; return 0
   fi
   _osrc_proof_exec "$id" "" "$head" "" none "no check configured: add --done-when to the lane or commit .outsourcerer/verify on the base branch" remote >/dev/null 2>&1
@@ -459,7 +509,8 @@ osrc_proof_remote_ready() { # <id> <lane-json> <head>
 osrc_proof_remote_run() { # <id> <worktree> <head> <check|__osrc_verify__> <log> <cache>   (background)
   local id="$1" wt="$2" head="$3" check="$4" log="$5" cache="$6" base="" method=tests rc=0
   _PR_ARGS=()
-  _osrc_proof_remote_base "$id" "$(_osrc_lane_json "$id")" "$cache" && base=osrc-base
+  base="$(_osrc_proof_remote_base "$id" "$(_osrc_lane_json "$id")" "$cache")" || base=""
+  _PR_BASE_REF="$(jq -r '.base // "main"' "$(_osrc_lane_json "$id")" 2>/dev/null)"
   if [ -n "$base" ] && git -C "$wt" cat-file -e "$base:.outsourcerer/verify" 2>/dev/null; then _PR_ARGS+=("verify@$base"); method=verify-run; fi
   [ "$check" = __osrc_verify__ ] || _PR_ARGS+=("$check")
   [ "${#_PR_ARGS[@]}" -gt 0 ] || { echo "proof: nothing to run" >>"$log"; return 125; }

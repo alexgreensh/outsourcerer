@@ -94,7 +94,16 @@ Run inside a lane worktree before READY: `outsourcerer guards run --base <branch
 ```
 proof run [--lane ID] [--dir DIR] [--base REF] [--cmd "<check>"]... [--method none|review --reason R] [--json]
 proof show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane> | require [on|off]
+proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
 ```
+
+- The base is a sha pinned once per lane (`proof/<lane>/base.json`), at lane start: `session start
+  --done-when` pins it, a remote lane pins the fetched base at its first READY, `proof base` pins it by
+  hand. Verify, `guards run --base <sha>` and the checks-changed diff all use it, so the base moving
+  under a running lane changes nothing, and a lane working on main with no remote is judged against
+  main's tip when it started. `proof.json` records `base` (the ref) and `base_sha`. Without a pin,
+  the first `proof run` pins the base ref unless it is the checkout's own branch; then it prints the
+  `proof base` command and the guards report an error (not charged as a round), never a guess.
 
 - `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
   command with exit code, seconds, pass/fail counts when the output shows them, last 30 lines, the

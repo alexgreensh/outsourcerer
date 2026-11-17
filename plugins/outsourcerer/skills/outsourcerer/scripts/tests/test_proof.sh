@@ -14,7 +14,7 @@ mkdir -p "$OSRC_HOME" "$HOME"
 export OSRC_SELF=osrc OSRC_TIME_UNIT=1 OSRC_REMOTE_POLL_SECS=0 OSRC_PROOF_NO_SEND=1 GIT_TERMINAL_PROMPT=0
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
-for fn in cmd_proof osrc_proof_gate osrc_proof_handin _osrc_sev_route _osrc_review_write_brief _sv_observe_watch; do
+for fn in cmd_guards cmd_proof osrc_proof_gate osrc_proof_handin _osrc_sev_route _osrc_review_write_brief _sv_observe_watch; do
   type -t "$fn" >/dev/null || { echo "FAIL: $fn not loaded"; exit 1; }
 done
 ok "lib/proof.sh and lib/review_sev.sh load with the engine"
@@ -33,8 +33,8 @@ PF="$OSRC_HOME/proof/lane1/proof.json"
 [ "$rc" = 0 ] && [ -f "$PF" ] && ok "proof run exits 0 and writes the lane folder's proof.json" || bad "proof run rc=$rc out=[$out]"
 [ "$(jq -r .head "$PF")" = "$H1" ] && ok "proof.json records the head sha" || bad "head: $(jq -r .head "$PF")"
 [ "$(jq -r '.method + "|" + .stamp' "$PF")" = "tests|proved: 139 pass, 0 fail" ] && ok "method tests, stamp 'proved: 139 pass, 0 fail'" || bad "stamp: $(jq -c '{method,stamp}' "$PF")"
-[ "$(jq -r '.commands[0].exit, (.commands[0].tail|length), .guards' "$PF" | tr '\n' ' ')" = "0 1 unavailable " ] \
-  && ok "command exit, output tail, and guards:'unavailable' when lane S1's guards are not loaded" || bad "record: $(jq -c . "$PF")"
+[ "$(jq -r '.commands[0].exit, (.commands[0].tail|length), .guards.passed, .guards.base_sha == .base_sha, .base_sha == $m' --arg m "$(git -C "$R" rev-parse main)" "$PF" | tr '\n' ' ')" = "0 1 true true true " ] \
+  && ok "command exit, output tail, and the REAL guards verdict run against base_sha (main's sha)" || bad "record: $(jq -c . "$PF")"
 grep -q 'proved: 139 pass' <<<"$out" && ok "proof run prints the stamp" || bad "out: $out"
 
 echo "=== a proof for an older sha does not count ==="
@@ -51,7 +51,7 @@ out="$(P run --lane lane1 --dir "$R" --base main)"; rc=$?
   && ok "no --cmd: runs .outsourcerer/verify from base (5 passed, not the lane's 999), checks_changed true" || bad "verify: rc=$rc $(jq -c '{method,totals,checks_changed,commands}' "$PF")"
 
 echo "=== a done contract check is a proof source ==="
-mkdir -p "$TMP/r2" && ( cd "$TMP/r2" && git init -q -b main && echo x > x && git add -A && git commit -q -m x )
+mkdir -p "$TMP/r2" && ( cd "$TMP/r2" && git init -q -b main && echo x > x && git add -A && git commit -q -m x && git checkout -q -b work )
 mkdir -p "$OSRC_HOME/done"; jq -n --arg c "$TMP/r2" '{spec:"check:echo ok 1; echo ok 2", cwd:$c}' > "$OSRC_HOME/done/dc1.json"
 P run --lane dc1 --dir "$TMP/r2" >/dev/null
 [ "$(jq -r '.method + "|" + .commands[0].cmd' "$OSRC_HOME/proof/dc1/proof.json")" = "tests|echo ok 1; echo ok 2" ] && ok "check: from the lane's done contract runs when no --cmd" || bad "dc: $(jq -c . "$OSRC_HOME/proof/dc1/proof.json")"
@@ -73,6 +73,7 @@ P run --lane dirty1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
 
 echo "=== guards hook (lane S1 round-3 contract: lib/guards.sh header) ==="
 # Stand-in for S1's cmd_guards: logs its argv, prints a human line then the JSON verdict, exits like S1.
+REAL_GUARDS="$(declare -f cmd_guards)"
 cmd_guards() { printf '%s\n' "$*" >> "$TMP/guards.args"; echo "guard lines"; ${GPRETTY:-echo} "$GJSON"; [ "$(jq -r .passed <<<"$GJSON")" = true ]; }
 pretty() { jq . <<<"$1"; }
 G() { P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1; jq -c . "$OSRC_HOME/proof/g1/proof.json"; }
@@ -81,7 +82,7 @@ out="$(P run --lane g0 --dir "$TMP/r2" --cmd true 2>&1)"
 grep -q '^  WHAT: a.sh:3 # added X' <<<"$out" && grep -q '^  FIX: delete the comment' <<<"$out" && ok "a guards block prints each WHAT and FIX (the retry brief)" || bad "what/fix: $out"
 g="$(G)"; [ "$(jq -r '[.ok, .guards.failed[0].guard] | join(" ")' <<<"$g")" = "false slop" ] && ok "passed:false fails the proof; the guards JSON is stored under .guards" || bad "guards: $g"
 grep -q 'guards blocked the change: slop' <<<"$(jq -r .stamp <<<"$g")" && ok "the stamp names the blocking guard" || bad "stamp: $(jq -r .stamp <<<"$g")"
-[ "$(tail -1 "$TMP/guards.args")" = "run --json --base main --lane g1" ] && ok "guards run is called with an explicit --base (the lane's base) and --lane" || bad "args: $(tail -1 "$TMP/guards.args")"
+[ "$(tail -1 "$TMP/guards.args")" = "run --json --base $(git -C "$TMP/r2" rev-parse main) --lane g1" ] && ok "guards run is called with an explicit --base (the lane's base) and --lane" || bad "args: $(tail -1 "$TMP/guards.args")"
 GJSON='{"mode":"observe","passed":false,"failed":[],"guards_changed":false,"allowed":null,"reviewer_required":false}'
 g="$(G)"; [ "$(jq -r .ok <<<"$g")" = false ] && ok "passed:false fails even in observe mode with an empty failed list (passed is the verdict)" || bad "observe false: $g"
 GJSON='{"mode":"observe","passed":true,"failed":[{"guard":"slop-inflation","mode":"observe","what":["x"],"fix":"y"}],"guards_changed":false,"allowed":null,"reviewer_required":false}'
@@ -97,7 +98,31 @@ cmd_guards() { echo "fatal: pin --base" >&2; return 2; }
 P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
 [ "$(jq -r '[.ok, (.guards|tostring)] | join(" ")' "$OSRC_HOME/proof/g1/proof.json")" = "false error: guards run gave no JSON verdict" ] \
   && [ "$(jq -r .fails "$OSRC_HOME/proof/g1/rounds.json")" = 0 ] && ok "guards that cannot run fail the proof but do not charge the lane a round" || bad "guards error: $(cat "$OSRC_HOME/proof/g1/proof.json")"
-unset -f cmd_guards; P reset g1 >/dev/null
+eval "$REAL_GUARDS"; P reset g1 >/dev/null
+
+echo "=== the base is a sha pinned once, at lane start ==="
+P run --lane pin1 --dir "$TMP/r2" --cmd true >/dev/null
+m0="$(git -C "$TMP/r2" rev-parse main)"
+[ "$(jq -r '.base + " " + .base_sha' "$OSRC_HOME/proof/pin1/proof.json")" = "main $m0" ] && ok "proof.json records base and base_sha" || bad "pin: $(jq -c '{base,base_sha}' "$OSRC_HOME/proof/pin1/proof.json")"
+( cd "$TMP/r2" && git checkout -q main && echo m >> m && git add m && git commit -qm "main moved" && git checkout -q work )
+P run --lane pin1 --dir "$TMP/r2" --cmd true >/dev/null
+[ "$(jq -r .base_sha "$OSRC_HOME/proof/pin1/proof.json")" = "$m0" ] && ok "main moving later does not change the lane's pinned base" || bad "repinned: $(jq -r .base_sha "$OSRC_HOME/proof/pin1/proof.json")"
+[ "$(P base pin1)" = "main $m0" ] && ok "proof base <lane> shows the pin" || bad "base show: $(P base pin1)"
+M="$TMP/mainonly"; mkdir -p "$M" && ( cd "$M" && git init -q -b main && echo 'x=1' > a.sh && git add -A && git commit -qm base )
+s0="$(git -C "$M" rev-parse HEAD)"
+osrc_done_set solo "check:true" "$M"   # session start --done-when: the lane starts here
+( cd "$M" && printf 'x=1\n# added the retry loop as requested\n' > a.sh && git commit -qam work )
+out="$(P run --lane solo --dir "$M" --cmd 'echo "1 passed"' 2>&1)"; rc=$?
+[ "$(jq -r .base_sha "$OSRC_HOME/proof/solo/proof.json")" = "$s0" ] && ok "a checkout on main with no remote: base pinned to main's tip at lane start" || bad "solo base: $(jq -c . "$OSRC_HOME/proof/solo/proof.json")"
+[ "$rc" = 1 ] && [ "$(jq -r '.guards.passed, .guards.failed[0].guard, .guards.base_sha' "$OSRC_HOME/proof/solo/proof.json" | tr '\n' ' ')" = "false slop $s0 " ] \
+  && grep -q 'WHAT: narration a.sh:2' <<<"$out" && ok "REAL guards end to end: the narration comment blocks the proof, judged against the pinned sha" || bad "solo guards rc=$rc: $out"
+( cd "$M" && printf 'x=1\n' > a.sh && git commit -qam clean )
+P run --lane solo --dir "$M" --cmd 'echo "1 passed"' >/dev/null; rc=$?
+[ "$rc" = 0 ] && [ "$(jq -r '.stamp, .guards.passed' "$OSRC_HOME/proof/solo/proof.json" | tr '\n' ' ')" = "proved: 1 pass, 0 fail true " ] && ok "fixed and committed: the real guards pass and the proof is green" || bad "solo clean rc=$rc: $(jq -c . "$OSRC_HOME/proof/solo/proof.json")"
+M2="$TMP/mainonly2"; mkdir -p "$M2" && ( cd "$M2" && git init -q -b main && echo y > y && git add -A && git commit -qm base )
+out="$(P run --lane nopin --dir "$M2" --cmd true 2>&1)"
+grep -q 'Pin it at lane start: osrc proof base nopin' <<<"$out" && [ "$(jq -r '.ok, (.guards|tostring)' "$OSRC_HOME/proof/nopin/proof.json" | tr '\n' ' ')" = "false error: no base ref to pin --base to " ] \
+  && [ "$(_osrc_proof_rounds nopin | jq -r .fails)" = 0 ] && ok "on its own branch with no pin: says how to pin, never guesses, not charged" || bad "nopin: $out"
 
 echo "=== three failed rounds, then a person ==="
 for i in 1 2 3; do out="$(P run --lane r3 --dir "$TMP/r2" --cmd 'echo "boom line"; echo "2 passed, 1 failed"; exit 1' 2>&1)"; done
