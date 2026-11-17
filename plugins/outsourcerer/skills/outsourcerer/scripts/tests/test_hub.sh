@@ -83,7 +83,7 @@ echo "$proj" | jq -e '.updatedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T")' >/dev/n
 cat > "$OSRC_HOME/hub/projects/stale-1.json" <<'EOF'
 {"name":"Stale Board","tagline":"has not moved in two hours","order":9}
 EOF
-touch -t "$(date -u -v-2H '+%Y%m%d%H%M.%S' 2>/dev/null || date -u -d '2 hours ago' '+%Y%m%d%H%M.%S')" "$OSRC_HOME/hub/projects/stale-1.json"
+touch -t "$(date -v-2H '+%Y%m%d%H%M.%S' 2>/dev/null || date -d '2 hours ago' '+%Y%m%d%H%M.%S')" "$OSRC_HOME/hub/projects/stale-1.json"   # touch -t reads LOCAL time
 outs="$(run hub export 2>/dev/null)"
 sproj="$(echo "$outs" | jq -c '.projects[] | select(.id=="stale-1")')"
 sage="$(echo "$sproj" | jq -r '(.updatedAt | sub("Z$";"+00:00")) + " epoch"' 2>/dev/null)"
