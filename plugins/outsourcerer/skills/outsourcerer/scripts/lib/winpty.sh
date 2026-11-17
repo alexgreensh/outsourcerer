@@ -113,21 +113,28 @@ _winpty_answer_move() {
 }
 
 # _winpty_composer_holds <out.log> <text> -> rc 0 when the LAST composer row still shows the start of
-# <text> AND no turn edge follows it (the send was typed but not submitted). The winpty log is
-# append-only, so a SUBMITTED line's echo is never erased: an echo with a busy or turn-end row after
-# it is the engine already working on that send, not an unsent composer, and a retry Enter would be
-# a duplicate (the 0.16.4 double-Enter bug on real Codex output).
+# <text> AND nothing after it proves the engine took it (the send was typed but not submitted). The
+# winpty log is append-only, so a SUBMITTED line's echo is never erased: an echo typed into an IDLE
+# engine with a busy or turn-end row after it is the engine already working on that send, and a retry
+# Enter would be a duplicate (the 0.16.4 double-Enter bug on real Codex output, #77).
+# Typed MID-TURN (the last edge before the echo is a busy row), an edge after the echo proves nothing:
+# the running turn keeps re-printing its "Working (Ns" timer and then its turn-end row whether or not
+# our Enter landed. There only a turn end followed by a NEW busy row (our queued message started)
+# proves the send; otherwise the text still counts as held and keeps its retries (S5 review of #77).
 _winpty_composer_holds() {
-  local f="$1" want l last="" ci=-1 ti=-1 i=0
+  local f="$1" want l last="" edge="" pre="" post=""
   want="$(printf '%s' "$2" | tr -s '[:space:]' ' ' | cut -c1-24)"
   [ -n "$want" ] || return 1
   while IFS= read -r l; do
-    _winpty_is_composer_row "$l" && { last="$l"; ci="$i"; }
-    { _winpty_is_busy_row "$l" || _winpty_is_done_row "$l"; } && ti="$i"
-    i=$((i + 1))
+    if _winpty_is_composer_row "$l"; then last="$l"; pre="$edge"; post=""
+    elif _winpty_is_busy_row "$l"; then edge=b; post="${post}b"
+    elif _winpty_is_done_row "$l"; then edge=d; post="${post}d"
+    fi
   done < <(_winpty_clean "$f" 40)
   case "$last" in *"$want"*) ;; *) return 1 ;; esac
-  [ "$ti" -gt "$ci" ] && return 1
+  [ -n "$post" ] || return 0
+  [ "$pre" = b ] || return 1
+  case "$post" in *d*b*) return 1 ;; esac
   return 0
 }
 

@@ -50,6 +50,14 @@ fx booting '› Ask Codex to do anything'; title booting $'\xe2\xa0\xa7 proj'
 fx typed '› Create a file named hello.txt containing' '  the single line WINPTY_OK' '  ? for shortcuts'
 fx echo_done '› first task' '› second task' '  Worked for 3s • 11:05 PM'
 fx typed_busy '› first task' '• Working (3s • esc to interrupt)' '› second task'
+# Typed MID-TURN: the running turn keeps re-printing its timer row (and later its turn-end row) AFTER
+# the typed text whether or not the Enter landed. Only a turn end then a NEW busy row proves it.
+fx typed_busy_tick '› first task' '• Working (3s • esc to interrupt)' '› second task' \
+  '• Working (4s • esc to interrupt)' '• Working (5s • esc to interrupt)'
+fx typed_busy_end '› first task' '• Working (3s • esc to interrupt)' '› second task' \
+  '• Working (4s • esc to interrupt)' '  Worked for 5s • 11:06 PM'
+fx typed_busy_next '› first task' '• Working (3s • esc to interrupt)' '› second task' \
+  '  Worked for 5s • 11:06 PM' '• Working (1s • esc to interrupt)'
 
 # ---- menu detection --------------------------------------------------------------------------------
 _winpty_menu "$TMP/fx/trust" >/dev/null && ok "trust prompt reads as an open menu" || bad "trust prompt not seen as a menu"
@@ -92,6 +100,12 @@ _winpty_composer_holds "$TMP/fx/echo_done" "second task" \
   && bad "a submitted echo after a fast-finished turn read as unsent text" || ok "a submitted echo with the turn already ended is not an unsent composer"
 _winpty_composer_holds "$TMP/fx/typed_busy" "second task" \
   && ok "text typed mid-turn with no turn edge after it still reads as unsent" || bad "a genuine hold (busy row older than the typing) was missed"
+_winpty_composer_holds "$TMP/fx/typed_busy_tick" "second task" \
+  && ok "text typed mid-turn stays unsent while only the running turn's timer ticks after it" || bad "a running turn's timer tick read as proof the mid-turn send landed"
+_winpty_composer_holds "$TMP/fx/typed_busy_end" "second task" \
+  && ok "text typed mid-turn stays unsent when the running turn merely ends after it" || bad "the running turn's end read as proof the mid-turn send landed"
+_winpty_composer_holds "$TMP/fx/typed_busy_next" "second task" \
+  && bad "a new turn starting after the running one ended still read as unsent" || ok "a mid-turn send is proven once a NEW turn starts after the running one ends"
 
 # ---- send retry loop: a retry Enter only for a verifiably unsent composer --------------------------
 # _winpty_cmd_send against a session dir whose out.log is a fixture; count the enter-* mailbox files.
@@ -101,6 +115,8 @@ expect "a submitted send (engine working on it) gets no retry Enters" "$(sent_to
 expect "a submitted send (turn already ended) gets no retry Enters" "$(sent_to echo_done 'second task')" "0"
 expect "a fresh empty composer (control) gets no retry Enters"     "$(sent_to idle 'second task')" "0"
 expect "a genuinely unsent composer still gets its justified retries" "$(sent_to typed 'Create a file named hello.txt containing the single line WINPTY_OK')" "2"
+expect "a mid-turn send under a ticking timer still gets its retries" "$(sent_to typed_busy_tick 'second task')" "2"
+expect "a mid-turn send proven by a new turn gets no retry Enters" "$(sent_to typed_busy_next 'second task')" "0"
 # Menu transition DURING the retry window: the loop's per-iteration menu check must stop the next
 # Enter, not only the guard at send time. The menu rows are appended by a watcher the moment the
 # FIRST retry Enter lands (not at a fixed wall-clock time), so they can never preempt the first
