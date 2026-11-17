@@ -3,7 +3,7 @@
 #
 # A finding is one top-level line of the verdict body (line 1 is the verdict) plus the indented lines
 # under it. Its severity is the tag at its start, after list markup ("- ", "1.", "- [ ] ", "**"):
-#   [must-fix] / must-fix: / [blocker] / blocker:   -> must-fix
+#   [must-fix] / must-fix: / [blocker] / blocker:   -> must-fix   (only "[tag]" or "tag:" is a tag)
 #   [nit] / nit:                                     -> nit
 #   [pre-existing] / pre-existing:                   -> pre-existing
 #   no tag                                           -> must-fix (a finding nobody downgraded blocks)
@@ -15,6 +15,10 @@
 
 # _osrc_sev_parse <verdict-file> -> one finding per record: "<severity>\t<explicit 0|1>\t<text>", the
 # text's continuation lines joined with \037 (unit separator; never in review prose).
+# A tag is ONLY "[tag]" or "tag:" (any case, optionally bold), after optional list/checkbox/heading
+# markup: "- Pre-existing callers break" and "nitro_mode() drops the lock" are untagged (must-fix).
+# A tagged heading is a finding and tags the untagged findings under it. A tagged indented line raises
+# its finding to must-fix when it says must-fix/blocker: a must-fix anywhere keeps CHANGES.
 _osrc_sev_parse() {
   python3 - "$1" <<'PY' 2>/dev/null
 import re, sys
@@ -22,24 +26,36 @@ try:
     lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().split("\n")[1:]
 except OSError:
     sys.exit(0)
-MARK = re.compile(r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s+)?")
-TAG = re.compile(r"^(?:\*\*|__)?\[?\s*(must[- ]?fix|blocker|nit|pre-?existing)\s*\]?(?:\*\*|__)?\s*:?(?:\*\*|__)?\s*", re.I)
-SEV = {"nit": "nit", "blocker": "must-fix"}
+MARK = re.compile(r"^(?:#+\s*)?(?:[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s+)?")
+W = r"(must[- ]?fix|blocker|nit|pre[- ]?existing)"
+B = r"(?:\*\*|__)?"
+TAG = re.compile(r"^" + B + r"(?:\[\s*" + W + r"\s*\]" + B + r"\s*:?|" + W + r"\s*" + B + r"\s*:" + B + r")(?:\s|$)", re.I)
+def sev_of(text):
+    m = TAG.match(MARK.sub("", text.strip(), count=1))
+    if not m:
+        return None
+    t = (m.group(1) or m.group(2)).lower().replace(" ", "-")
+    return "nit" if t == "nit" else "pre-existing" if t.startswith("pre") else "must-fix"
 out = []
+section = None
 for raw in lines:
     if not raw.strip():
         continue
+    sev = sev_of(raw)
     if raw[0] in " \t" and out:
         out[-1][2] += "\x1f" + raw.rstrip()
+        if sev == "must-fix":
+            out[-1][0], out[-1][1] = "must-fix", "1"
         continue
     if raw.lstrip().startswith("#"):
+        section = sev
+        if sev:
+            out.append([sev, "1", raw.rstrip()])
         continue
-    body = MARK.sub("", raw.strip(), count=1)
-    m = TAG.match(body)
-    if m:
-        t = m.group(1).lower().replace(" ", "-")
-        sev = SEV.get(t, "pre-existing" if t.startswith("pre") else "must-fix")
+    if sev:
         out.append([sev, "1", raw.rstrip()])
+    elif section:
+        out.append([section, "1", raw.rstrip()])
     else:
         out.append(["must-fix", "0", raw.rstrip()])
 for sev, exp, text in out:

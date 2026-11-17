@@ -315,10 +315,76 @@ out="$(OSRC_LANE=n1 P reset n1 2>&1)"; [ $? != 0 ] && grep -q "a person's call" 
 out="$(OSRC_LANE=n1 P base n1 --dir "$D" lane 2>&1)"; [ $? != 0 ] && ok "nit: re-pinning the base is refused inside a lane session" || bad "nit base: $out"
 D2="$TMP/n2other"; mk "$D2" 'echo "1 passed"'; work "$D2"; jq -n --arg c "$TMP/m9" '{spec:"check:true", cwd:$c}' > "$OSRC_HOME/done/n2.json"
 P run --lane n2 --dir "$D2" >/dev/null 2>&1; g="$(osrc_proof_gate n2)"
-[ $? = 1 ] && grep -q 'not in the lane checkout' <<<"$g" && ok "nit: a proof run in another repo does not pass the gate" || bad "nit dir: $g"
+[ $? = 1 ] && grep -q 'not in the lane worktree' <<<"$g" && ok "nit: a proof run in another repo does not pass the gate" || bad "nit dir: $g"
 D="$TMP/n3"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && echo a > a && git add -A && git commit -qm b )
 out="$(P run --lane n3 --dir "$D" --cmd true 2>&1)"; grep -q '^not counted: guards could not run' <<<"$out" && ! grep -q 'round 0 of' <<<"$out" && ok "nit: guards that could not run say so (no 'round 0 of 3 failed')" || bad "nit msg: $out"
 grep -q "slice(-4)" "$HERE/../lib/hub-assets/hub-proof.js" && ok "nit: the needs-you card shows the last failing lines (not hover-only)" || bad "nit card"
+
+echo "=== Round 3 regressions (S2 review round 2: must-fix 1-4 + nits; each fails on 25b300d) ==="
+route() { printf "$2" > "$TMP/r3v"; _osrc_sev_route "$1" "$TMP/r3v"; }
+# R1: a tag is "[tag]" or "tag:" only; words that merely start with a tag name are untagged findings.
+[ "$(route CHANGES 'CHANGES\n- Pre-existing callers break\n- [nit] typo\n')" = CHANGES ] && ok "R1: '- Pre-existing callers break' is an untagged finding, CHANGES stands" || bad "R1 pre-existing word"
+[ "$(route CHANGES 'CHANGES\n- nitro_mode() drops the lock\n- [nit] typo\n')" = CHANGES ] && ok "R1: '- nitro_mode() drops the lock' is not a nit, CHANGES stands" || bad "R1 nitro"
+[ "$(route CHANGES 'CHANGES\n- pre-existing: old leak\n- **nit**: typo\n- [Nit] spacing\n')" = MERGE ] && ok "R1: 'tag:', '**tag**:' and '[Tag]' still tag (all nit/pre-existing -> MERGE)" || bad "R1 real tags"
+[ "$(route MERGE 'MERGE\n- Must-fix the docs someday\n')" = MERGE ] && ok "R1: MERGE mentioning 'Must-fix ...' without a tag stays MERGE" || bad "R1 merge word"
+# R2: a must-fix anywhere (heading, indented, nested) keeps CHANGES.
+[ "$(route CHANGES 'CHANGES\n### [must-fix] the lock is dropped\n- [nit] typo\n')" = CHANGES ] && ok "R2: '### [must-fix]' heading plus a nit stays CHANGES" || bad "R2 heading"
+[ "$(route CHANGES 'CHANGES\n### [must-fix]\n- the lock is dropped\n### [nit]\n- typo\n')" = CHANGES ] && ok "R2: an item under a [must-fix] heading is must-fix" || bad "R2 section"
+[ "$(route CHANGES 'CHANGES\n- [nit] typo\n  - [must-fix] and the lock is dropped\n')" = CHANGES ] && ok "R2: an indented [must-fix] under a nit stays CHANGES" || bad "R2 indented"
+[ "$(route MERGE 'MERGE\n- [nit] a\n    [blocker] b\n')" = CHANGES ] && ok "R2: MERGE with a nested [blocker] routes to CHANGES" || bad "R2 nested merge"
+[ "$(route CHANGES 'CHANGES\n## [nit]\n- typo\n- spacing\n')" = MERGE ] && ok "R2: items under a [nit] heading are nits (MERGE)" || bad "R2 nit section"
+printf 'CHANGES\n- [nit] typo\n  - [must-fix] and the lock is dropped\n' > "$TMP/r3v"
+grep -q 'the lock is dropped' <<<"$(_osrc_sev_lines "$TMP/r3v" must-fix)" && ok "R2: the sendback carries the nested must-fix" || bad "R2 sendback"
+# R3: only a summary line with BOTH counts counts failures.
+D="$TMP/r3c"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"
+P run --lane r3c --dir "$D" --cmd 'echo "test_retry: recovers after 2 failed attempts ... ok"; echo "RESULT: 10 passed, 0 failed"' >/dev/null 2>&1
+[ "$(jq -r '.ok, .totals.fail' "$OSRC_HOME/proof/r3c/proof.json" | tr '\n' ' ')" = "true 0 " ] && ok "R3: a test title '2 failed attempts' is not a failure count" || bad "R3 title: $(jq -c '{ok,stamp}' "$OSRC_HOME/proof/r3c/proof.json")"
+P run --lane r3c --dir "$D" --cmd 'echo "retried after 2 failed attempts"; echo all good' >/dev/null 2>&1
+[ "$(jq -r .ok "$OSRC_HOME/proof/r3c/proof.json")" = true ] && ok "R3: a lone 'N failed' in free text does not fail a green run" || bad "R3 lone: $(jq -c '{ok,stamp}' "$OSRC_HOME/proof/r3c/proof.json")"
+for c in 'echo "passed=10 failed=2"' 'echo "10 pass 2 fail"'; do
+  P run --lane r3c --dir "$D" --cmd "$c" >/dev/null 2>&1
+  [ "$(jq -r '.ok, .commands[-1].fail' "$OSRC_HOME/proof/r3c/proof.json" | tr '\n' ' ')" = "false 2 " ] && ok "R3: summary '$c' with exit 0 still fails" || bad "R3 summary $c: $(jq -c '{ok,stamp}' "$OSRC_HOME/proof/r3c/proof.json")"
+done
+P reset r3c >/dev/null 2>&1
+# R4: a lane name reused after `session stop` is a new lane: new pin, rounds reset.
+DA="$TMP/r4a"; mk "$DA" "$FAILV"; work "$DA"; osrc_done_set r4 "check:true" "$DA"
+for _ in 1 2 3; do P run --lane r4 --dir "$DA" >/dev/null 2>&1; done
+osrc_proof_stopped r4 && ok "R4 setup: the old lane r4 is stopped after 3 rounds" || bad "R4 setup: $(_osrc_proof_rounds r4)"
+[ "$(jq -r '.dir == $d and .branch == "lane"' --arg d "$(cd "$DA" && pwd -P)" "$OSRC_HOME/proof/r4/base.json")" = true ] && ok "R4: base.json records the lane's worktree and branch" || bad "R4 ident: $(cat "$OSRC_HOME/proof/r4/base.json")"
+osrc_done_clear r4   # session stop
+DB="$TMP/r4b"; mk "$DB" 'echo "2 passed, 0 failed"'; ( cd "$DB" && git checkout -qb lane-two ); osrc_done_set r4 "check:true" "$DB"; work "$DB"
+P run --lane r4 --dir "$DB" >/dev/null 2>&1; r=$?
+[ "$r" = 0 ] && [ "$(_osrc_proof_rounds r4 | jq -r '.fails, .stopped' | tr '\n' ' ')" = "0 false " ] && ok "R4: the new lane's first run proves (no inherited stop, rounds reset)" || bad "R4 rc=$r $(_osrc_proof_rounds r4)"
+[ "$(jq -r '.sha == $s and .dir == $d' --arg s "$(git -C "$DB" rev-parse main)" --arg d "$(cd "$DB" && pwd -P)" "$OSRC_HOME/proof/r4/base.json")" = true ] && ok "R4: re-pinned to the new lane's start, in its worktree" || bad "R4 pin: $(cat "$OSRC_HOME/proof/r4/base.json")"
+# Without a lane start: a run from the orchestrator in another worktree also resets; a lane session with
+# failed rounds cannot clear them by moving.
+DC="$TMP/r4c"; mk "$DC" "$FAILV"; work "$DC"
+P run --lane r4c --dir "$DC" --base main >/dev/null 2>&1; P run --lane r4c --dir "$DC" >/dev/null 2>&1
+DD="$TMP/r4d"; mk "$DD" 'echo "3 passed, 0 failed"'; work "$DD"
+out="$(OSRC_LANE=r4c P run --lane r4c --dir "$DD" --base main 2>&1)"; r=$?
+[ "$r" = 4 ] && grep -q 'cannot clear them by moving' <<<"$out" && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 2 ] && ok "R4: inside the lane, moving to another worktree does not clear 2 failed rounds" || bad "R4 in-lane rc=$r [$out]"
+( cd "$DC" && git checkout -qb other ); out="$(OSRC_LANE=r4c P run --lane r4c --dir "$DC" 2>&1)"; r=$?
+[ "$r" = 4 ] && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 2 ] && ok "R4: nor does switching branch in the same worktree" || bad "R4 branch in-lane rc=$r [$out]"
+P run --lane r4c --dir "$DD" --base main >/dev/null 2>&1; r=$?
+[ "$r" = 0 ] && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 0 ] && ok "R4: from the orchestrator, a new worktree for the name is a new lane" || bad "R4 orch rc=$r $(_osrc_proof_rounds r4c)"
+# Nit: an unpinned lane's --base HEAD~1 (or <branch>~1, or a lane-only sha) is refused; the pin is the lane-start head.
+for b in 'HEAD~1' 'lane^' 'SHA'; do
+  D="$TMP/n4$RANDOM"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"; work "$D"; m="$(git -C "$D" rev-parse main)"
+  [ "$b" != SHA ] || b="$(git -C "$D" rev-parse HEAD~1)"
+  out="$(P run --lane n4 --dir "$D" --base "$b" --cmd true 2>&1)"
+  [ "$(jq -r '.sha + " " + .ref' "$OSRC_HOME/proof/n4/base.json")" = "$m lane-start" ] && grep -q 'refused' <<<"$out" && [ "$(jq -r .base_sha "$OSRC_HOME/proof/n4/proof.json")" = "$m" ] \
+    && ok "nit: unpinned --base ${b:0:10} is refused; pinned the lane-start head instead" || bad "nit base $b: $out $(cat "$OSRC_HOME/proof/n4/base.json" 2>/dev/null)"
+  rm -rf "$OSRC_HOME/proof/n4"
+done
+D="$TMP/n4main"; mkdir -p "$D" && ( cd "$D" && git init -q -b main && echo a > a && git add -A && git commit -qm a && echo b > b && git add -A && git commit -qm b )
+out="$(P run --lane n4m --dir "$D" --base HEAD~1 --cmd true 2>&1)"; r=$?
+[ "$r" != 0 ] && [ ! -f "$OSRC_HOME/proof/n4m/base.json" ] && grep -q 'proof base n4m' <<<"$out" && ok "nit: no lane-start head to find: refused, names the pin command, pins nothing" || bad "nit base main rc=$r [$out]"
+# Nit: a sibling worktree of the lane's repo is not the lane's worktree.
+D="$TMP/n5"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"; osrc_done_set n5 "check:true" "$D"
+git -C "$D" worktree add -q -b sib "$TMP/n5sib" >/dev/null 2>&1; work "$TMP/n5sib"
+P run --lane n5 --dir "$TMP/n5sib" >/dev/null 2>&1; g="$(osrc_proof_gate n5 "$(git -C "$TMP/n5sib" rev-parse HEAD)")"
+[ $? = 1 ] && grep -q 'not in the lane worktree' <<<"$g" && ok "nit: a proof from a sibling worktree does not pass the gate" || bad "nit sibling: $g"
+P run --lane n5 --dir "$D" >/dev/null 2>&1; g="$(osrc_proof_gate n5)"; [ $? = 0 ] && ok "nit: the lane's own worktree passes" || bad "nit own wt: $g"
 
 echo
 echo "test_proof: $pass passed, $fail failed"

@@ -68,29 +68,40 @@ _osrc_proof_note_pass() { # <lane>
 }
 
 # Pass/fail counts from a check's output, when the output shows them. Prints "<pass> <fail>" with "-"
-# for a count it could not see. Understands "139 passed, 2 failed" (pytest/jest/bats/this repo's
-# suites), "PASS: 12 FAIL: 0", TAP "ok N" / "not ok N", and per-line "PASS:" / "FAIL:" tallies.
+# for a count it could not see. Counts come from the LAST summary line that carries BOTH a pass count
+# and a fail count ("RESULT: 10 passed, 0 failed", "passed=10 failed=0", "10 pass 0 fail", "PASS: 12
+# FAIL: 0"); a lone "N failed" in free text (a test titled "retries after 2 failed attempts") is not a
+# count. With no such line: a lone pass count (display only, fail "-"), else TAP "ok N" / "not ok N" and
+# per-line "PASS:" / "FAIL:" tallies.
 _osrc_proof_counts() { # <logfile>
   python3 - "$1" <<'PY' 2>/dev/null || printf -- '- -'
 import re, sys
 t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+lines = t.splitlines()
 num_word = lambda words: re.compile(r"(\d+)\s+(?:tests?\s+)?(?:%s)\b" % words, re.I)
 word_num = lambda words: re.compile(r"\b(?:%s)\s*[:=]\s*(\d+)" % words, re.I)
-def last(pats):
+PASS = [num_word("passed|passing|pass|ok"), word_num("passed|pass")]
+FAIL = [num_word("failed|failing|fail|failures?|errors?"), word_num("failed|fail|failures")]
+def last(pats, text):
     best = None
     for p in pats:
-        for m in p.finditer(t):
+        for m in p.finditer(text):
             if best is None or m.start() > best[0]:
                 best = (m.start(), m.group(1))
     return best[1] if best else None
-p = last([num_word("passed|passing|pass|ok"), word_num("passed|pass")])
-f = last([num_word("failed|failing|fail|failures?|errors?"), word_num("failed|fail|failures")])
-if p is None and f is None:
-    lines = t.splitlines()
-    tp = sum(1 for l in lines if re.match(r"\s*(PASS:|ok \d)", l))
-    tf = sum(1 for l in lines if re.match(r"\s*(FAIL:|not ok \d)", l))
-    if tp or tf:
-        p, f = str(tp), str(tf)
+p = f = None
+for l in reversed(lines):
+    lp, lf = last(PASS, l), last(FAIL, l)
+    if lp is not None and lf is not None:
+        p, f = lp, lf
+        break
+if p is None:
+    p = last(PASS, t)
+    if p is None:
+        tp = sum(1 for l in lines if re.match(r"\s*(PASS:|ok \d)", l))
+        tf = sum(1 for l in lines if re.match(r"\s*(FAIL:|not ok \d)", l))
+        if tp or tf:
+            p, f = str(tp), str(tf)
 print("%s %s" % (p if p is not None else "-", f if f is not None else "-"))
 PY
 }
@@ -112,13 +123,47 @@ _osrc_proof_own_branch() { # <dir> <ref>: the ref IS the checkout's current bran
   full="$(git -C "$1" rev-parse --symbolic-full-name "$2" 2>/dev/null)"
   [ -n "$full" ] && [ "$full" = "$cur" ]
 }
-# osrc_proof_pin_base <lane> <dir> [ref] [start|force] -> prints "<ref> <sha>"; rc 1 when it cannot pin.
+# A lane's identity: its checkout's top level (physical path) and branch (empty when HEAD is detached).
+# base.json records it; the same lane name in another worktree or on another branch is a NEW lane.
+_osrc_proof_top() { # <dir> -> the checkout's top level, physical
+  local top
+  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" && [ -n "$top" ] && (cd "$top" 2>/dev/null && pwd -P) && return 0
+  (cd "$1" 2>/dev/null && pwd -P)
+}
+_osrc_proof_branch() { git -C "$1" symbolic-ref -q --short HEAD 2>/dev/null; return 0; }
+
+# A lane name reused after `session stop` must not inherit the old lane's pin, rounds or stop. When the
+# stored base.json names another worktree, or another branch (both known), the lane's proof state is
+# cleared so the caller pins afresh. rc 3: refused inside a lane session while the name has failed rounds
+# (or is STOPPED): a lane may not clear its own count by moving to another branch or worktree. Only a lane
+# start (osrc_done_set), `proof base`, or a run from outside the lane clears it.
+_osrc_proof_lane_check() { # <lane> <dir> [start|force]
+  local lane="$1" f d b top br
+  f="$(_osrc_proof_dir "$lane")/base.json"
+  [ -f "$f" ] || return 0
+  d="$(jq -r '.dir // ""' "$f" 2>/dev/null)"; b="$(jq -r '.branch // ""' "$f" 2>/dev/null)"
+  [ -n "$d" ] || return 0   # a pin from before identities were recorded
+  top="$(_osrc_proof_top "$2")"; br="$(_osrc_proof_branch "$2")"
+  if [ "$top" = "$d" ] && { [ -z "$b" ] || [ -z "$br" ] || [ "$b" = "$br" ]; }; then return 0; fi
+  if [ -z "${3:-}" ] && [ "$(_osrc_proof_rounds "$lane" | jq -r .fails)" != 0 ] && _osrc_proof_in_lane; then
+    echo "proof: $lane has failed proof rounds (it was ${b:-detached} at $d); a lane session cannot clear them by moving. If this is a new lane, the orchestrator runs: $(_osrc_self) proof base $lane --dir $top <ref-or-sha>" >&2
+    return 3
+  fi
+  echo "proof: $lane was ${b:-detached} at $d; this is ${br:-detached} at $top, a new lane: its old pin, rounds and proof are cleared" >&2
+  rm -f "$(_osrc_proof_dir "$lane")"/{base.json,proof.json,rounds.json,needs-you.json,SENDBACK.md} 2>/dev/null
+  return 0
+}
+
+# osrc_proof_pin_base <lane> <dir> [ref] [start|force] [label] -> prints "<ref> <sha>"; rc 1 when it
+# cannot pin, rc 3 when _osrc_proof_lane_check refuses.
 # start: called at lane start, so the checkout's own branch is fine (its tip IS the base right now).
 # force: an explicit ref replaces the stored pin. Otherwise a stored pin whose sha this checkout has wins.
+# label: the ref name to record (default: the ref; HEAD records as lane-start).
 osrc_proof_pin_base() {
-  local lane="$1" dir="$2" ref="${3:-}" how="${4:-}" f sha
+  local lane="$1" dir="$2" ref="${3:-}" how="${4:-}" label="${5:-}" f sha
   _osrc_proof_id_ok "$lane" || return 1
   f="$(_osrc_proof_dir "$lane")/base.json"
+  _osrc_proof_lane_check "$lane" "$dir" "$how" || return 3
   if [ "$how" != force ] && [ -f "$f" ]; then
     sha="$(jq -r '.sha // ""' "$f" 2>/dev/null)"
     if [ -n "$sha" ] && git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null; then printf '%s %s' "$(jq -r .ref "$f")" "$sha"; return 0; fi
@@ -128,8 +173,10 @@ osrc_proof_pin_base() {
   if [ "$how" != start ] && [ "$how" != force ] && _osrc_proof_own_branch "$dir" "$ref"; then return 1; fi
   sha="$(_osrc_proof_resolve "$dir" "$ref")" || return 1
   [ "$ref" != HEAD ] || ref=lane-start   # the lane-start pin: the checkout's tip when the lane began
+  [ -z "$label" ] || ref="$label"
   mkdir -p "$(_osrc_proof_dir "$lane")" 2>/dev/null || return 1
-  _osrc_proof_put "$f" "$(jq -cn --arg r "$ref" --arg s "$sha" --argjson t "$(date +%s)" '{ref:$r, sha:$s, ts:$t}')" || return 1
+  _osrc_proof_put "$f" "$(jq -cn --arg r "$ref" --arg s "$sha" --argjson t "$(date +%s)" --arg d "$(_osrc_proof_top "$dir")" --arg b "$(_osrc_proof_branch "$dir")" \
+    '{ref:$r, sha:$s, ts:$t, dir:$d, branch:$b}')" || return 1
   printf '%s %s' "$ref" "$sha"
 }
 
@@ -325,6 +372,26 @@ _osrc_proof_base_cmd() {
   echo
 }
 
+# The base expression names the lane's own history: HEAD/@/its branch/its head sha with any ~N ^N ^{}
+# @{} suffix, or a commit no ref other than the lane's own branch contains.
+_osrc_proof_lane_own() { # <dir> <expr> <sha>
+  local d="$1" stem cur
+  stem="$(printf '%s' "$2" | sed -E 's/(~[0-9]*|\^[0-9]*|\^\{[^}]*\}|@\{[^}]*\})+$//')"
+  case "$stem" in ''|@|HEAD) return 0 ;; esac
+  _osrc_proof_own_branch "$d" "$stem" && return 0
+  [ "$(_osrc_proof_resolve "$d" "$stem")" != "$(git -C "$d" rev-parse -q --verify HEAD 2>/dev/null)" ] || return 0
+  cur="$(git -C "$d" symbolic-ref -q HEAD 2>/dev/null)"
+  [ -z "$(git -C "$d" for-each-ref --contains "$3" --format='%(refname)' refs/heads refs/remotes refs/tags 2>/dev/null | grep -vxF "${cur:-//none}")" ]
+}
+
+# The lane-start head of the checkout's branch: where its reflog says the branch was created.
+_osrc_proof_branch_start() { # <dir>
+  local br l
+  br="$(git -C "$1" symbolic-ref -q HEAD 2>/dev/null)" || return 1
+  l="$(git -C "$1" reflog show --format='%H %gs' "$br" -- 2>/dev/null | tail -n 1)"
+  case "${l#* }" in "branch: Created from"*) printf '%s' "${l%% *}" ;; *) return 1 ;; esac
+}
+
 _osrc_proof_run() {
   local lane="" dir="" base="" method="" reason="" json="" head src vb cc rc=0
   _PR_ARGS=()
@@ -345,7 +412,8 @@ _osrc_proof_run() {
   if [ -z "$lane" ]; then lane="${OUTSOURCERER_TMUX:-}"; fi
   if [ -z "$lane" ]; then lane="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')"; fi
   _osrc_proof_id_ok "$lane" || die "proof run: bad lane id '$lane' (pass --lane, letters/digits/._- only)"
-  local pin pinned="" want
+  local pin pinned="" want prc=0 ls
+  _osrc_proof_lane_check "$lane" "$dir" || exit 4
   # A lane-facing --base never moves an existing pin and never names the lane's own branch or HEAD:
   # either would let a lane judge itself against its own commits.
   [ -f "$(_osrc_proof_dir "$lane")/base.json" ] && pinned="$(jq -r '.sha // ""' "$(_osrc_proof_dir "$lane")/base.json" 2>/dev/null)"
@@ -353,12 +421,22 @@ _osrc_proof_run() {
     _osrc_proof_own_branch "$dir" "$base" && die "proof run: --base $base is this checkout's own branch; the base is the branch the lane merges into"
     want="$(_osrc_proof_resolve "$dir" "$base")" || die "proof run: --base $base does not resolve to a commit in $dir"
     [ "$want" != "$head" ] || die "proof run: --base $base is the head itself; the base is the branch the lane merges into"
+    # No pin yet: a base the lane derives from its own commits (HEAD~1, <branch>^, a lane-only sha) would
+    # let it judge itself. Refuse it and pin the lane-start head (the branch's creation point) instead.
+    if [ -z "$pinned" ] && _osrc_proof_lane_own "$dir" "$base" "$want"; then
+      ls="$(_osrc_proof_branch_start "$dir")" \
+        || die "proof run: --base $base is refused: it is the lane's own history. The orchestrator pins the lane-start head: $(_osrc_self) proof base $lane --dir $dir <sha>"
+      echo "proof: --base $base is refused (the lane's own history); pinned the lane-start head ${ls:0:7} instead" >&2
+      osrc_proof_pin_base "$lane" "$dir" "$ls" force lane-start >/dev/null || die "proof run: could not pin the lane-start head"
+      base=""; pinned="$ls"
+    fi
     if [ -n "$pinned" ] && [ "$want" != "$pinned" ]; then
       echo "proof: --base $base ignored: $lane is pinned to ${pinned:0:7} since lane start (only \`proof base\` outside the lane changes it)" >&2
       base=""
     fi
   fi
-  pin="$(osrc_proof_pin_base "$lane" "$dir" "$base")" || pin=""
+  pin="$(osrc_proof_pin_base "$lane" "$dir" "$base")" || { prc=$?; pin=""; }
+  [ "$prc" != 3 ] || exit 4
   _PR_BASE_REF="${pin%% *}"; base="${pin#* }"
   if [ -z "$pin" ]; then
     _PR_BASE_REF=""; base=""
@@ -424,15 +502,18 @@ osrc_proof_stamp() { # <lane> -> stamp line, or "no proof"
   if [ -f "$f" ]; then jq -r '.stamp // ""' "$f"; else printf 'no proof'; fi
 }
 
-# The proof's checkout must be the lane's own repo when the lane has a done contract (a lane cannot prove
-# itself from some other clean checkout). No contract, or a remote lane (dir ""), passes.
+# The proof's checkout must be the lane's own worktree: the done contract's cwd (orchestrator-written),
+# else the worktree recorded in base.json. A sibling worktree of the same repo is not the lane. No record,
+# or a remote lane (the orchestrator proved it in a throwaway worktree), passes.
 _osrc_proof_same_repo() { # <lane> <proof-dir>
-  local cwd a b
+  local cwd want got
+  [ -n "$2" ] || return 0
+  [ ! -f "$OSRC_HOME/remote/$1.json" ] || return 0
   cwd="$(jq -r '.cwd // ""' "$OSRC_HOME/done/$1.json" 2>/dev/null)"
-  [ -n "$cwd" ] && [ -n "$2" ] || return 0
-  a="$(cd "$cwd" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
-  b="$(cd "$2" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
-  [ -n "$a" ] && [ "$a" = "$b" ]
+  [ -n "$cwd" ] || cwd="$(jq -r '.dir // ""' "$(_osrc_proof_dir "$1")/base.json" 2>/dev/null)"
+  [ -n "$cwd" ] || return 0
+  want="$(_osrc_proof_top "$cwd")"; got="$(_osrc_proof_top "$2")"
+  [ -n "$want" ] && [ "$want" = "$got" ]
 }
 
 # The stamp for exactly <head>: a proof of another sha says nothing about this one.
@@ -453,7 +534,7 @@ osrc_proof_gate() { # <lane> [head]
     head="$(git -C "$(jq -r '.dir // ""' <<<"$p")" rev-parse -q --verify HEAD 2>/dev/null)" \
       || { printf 'the proof checkout %s is gone; rerun proof' "$(jq -r .dir <<<"$p")"; return 1; }
   fi
-  _osrc_proof_same_repo "$lane" "$(jq -r '.dir // ""' <<<"$p")" || { printf 'proof ran in %s, not in the lane checkout from its done contract; rerun proof there' "$(jq -r .dir <<<"$p")"; return 1; }
+  _osrc_proof_same_repo "$lane" "$(jq -r '.dir // ""' <<<"$p")" || { printf 'proof ran in %s, not in the lane worktree (the done contract cwd or the pinned worktree); rerun proof there' "$(jq -r .dir <<<"$p")"; return 1; }
   [ "$(jq -r .head <<<"$p")" = "$head" ] || { printf 'proof is for %s but the head is %s; rerun proof on the new head' "$(jq -r '.head[0:7]' <<<"$p")" "${head:0:7}"; return 1; }
   [ "$(jq -r .ok <<<"$p")" = true ] || { printf 'proof failed: %s' "$(jq -r .stamp <<<"$p")"; return 1; }
   printf '%s' "$(jq -r .stamp <<<"$p")"
