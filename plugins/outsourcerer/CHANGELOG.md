@@ -16,6 +16,8 @@ All notable changes to the Outsourcerer plugin are documented here.
 ### Fixed
 
 - **Every wake arrives once.** The watcher no longer repeats an event it already delivered, never drops one when a lock is busy, and an old done file can't make a working lane look finished.
+- **The Claude desktop app's stock base URL no longer reads as a proxy.** `ANTHROPIC_BASE_URL=https://api.anthropic.com`, which the desktop app sets in every session, used to mark a plan login as billed per use. The stock value, in the environment or in `settings.json`, now counts as first-party, and any other host or path still counts as a redirect. Thanks @NehoraiHadad (#78).
+- **Windows `session send` stops pressing extra Enters.** Once the engine has visibly started or finished a turn after your text, the winpty broker no longer presses Enter again, so a send can't land twice. Text typed while a turn is still running keeps its retries until a new turn proves it went through. Thanks Alex G's Agent (#77).
 - **Steadier tests.** test_supervise runs in about a minute instead of ten, with every check kept. Local checks run on a near-midnight clock so date bugs show up before CI.
 
 ## 0.16.4
