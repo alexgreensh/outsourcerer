@@ -387,7 +387,7 @@ ev="$(osrc_review_events 2>/dev/null)"
   && grep -q '^EVENT question v4m .*back to the reviewer once' <<<"$ev" && grep -q '^NEXT .*session send .*VERDICT: CHANGES must-fix=<n>' <<<"$ev" \
   && ok "V4: a malformed first line goes back to the REVIEWER once (file set aside, NEXT tells it the exact format)" || bad "V4: $(jq -c . "$(IT "$i")") [$ev]"
 printf '**VERDICT: MERGE**\n' > "$OSRC_HOME/review/$i.VERDICT"; _osrc_review_ingest; ev="$(osrc_review_events 2>/dev/null)"
-[ "$(jq -r .state "$(IT "$i")")" = needs-you ] && grep -q '^EVENT failed v4m .*malformed verdict twice' <<<"$ev" && grep -q "^NEXT osrc review show $i" <<<"$ev" \
+[ "$(jq -r .state "$(IT "$i")")" = needs-you ] && grep -q '^EVENT failed v4m .*unusable verdict twice' <<<"$ev" && grep -q "^NEXT osrc review show $i" <<<"$ev" \
   && ok "V4: a second malformed verdict lands on needs-you (EVENT failed, never guessed, no loop)" || bad "V4b: $(jq -c . "$(IT "$i")") [$ev]"
 h="$(osrc_proof_hub_lane '{"id":"v4m","status":"Building"}')"
 [ "$(jq -r .reviewNeedsYou.item <<<"$h")" = "$i" ] && [ "$(osrc_proof_hub_counts "[$h]" | jq -r .needsYouLanes)" = 1 ] && grep -q reviewNeedsYou "$HERE/../lib/hub-assets/hub-proof.js" \
@@ -422,7 +422,7 @@ out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" --base "$old" 2>&1)"; r=$?
 out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" 2>&1)"; [ $? = 4 ] && ok "P2: a plain in-lane run on the switched branch exits 4 too" || bad "P2b [$out]"
 ( cd "$D" && git checkout -q lane ); ( cd "$D" && git commit -q --allow-empty -m m2 && git checkout -q main && git commit -q --allow-empty -m mainmoves && git checkout -q lane )
 out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" --base main 2>&1)"; r=$?
-[ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && ok "P3: in-lane --base <moved main> exits 4; the pin is unchanged" || bad "P3 rc=$r [$out]"
+[ "$r" = 0 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && grep -q 'ignored inside the lane; using the pinned base' <<<"$out" && ok "P3 (round 5): in-lane --base <moved main> is ignored with a notice; the pin is unchanged" || bad "P3 rc=$r [$out]"
 D2="$TMP/p4b"; mk "$D2" 'echo "1 passed, 0 failed"'; work "$D2"
 out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D2" 2>&1)"; r=$?
 [ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && [ "$(_osrc_proof_rounds p4 | jq -r .fails)" = 0 ] && ok "P4: in-lane run from another worktree (0 failed rounds) exits 4, nothing cleared" || bad "P4 rc=$r [$out]"
@@ -444,6 +444,69 @@ P run --lane c4 --dir "$D" --cmd 'echo "test_retry: 5 passed after 2 failed atte
 D="$TMP/t4"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"; work "$D"; ( cd "$D" && git tag x HEAD~1 ); m="$(git -C "$D" rev-parse main)"
 out="$(P run --lane t4 --dir "$D" --base x --cmd true 2>&1)"
 [ "$(jq -r '.sha + " " + .ref' "$OSRC_HOME/proof/t4/base.json")" = "$m lane-start" ] && grep -q refused <<<"$out" && ok "N2: a lane-made tag as --base is refused like HEAD~1 (lane-start pinned)" || bad "N2: [$out] $(cat "$OSRC_HOME/proof/t4/base.json" 2>/dev/null)"
+
+echo "=== Round 5 (review of the redesign: must-fix + nits a-e; each fails on 767ea2d) ==="
+# MUST-FIX: in-lane --base <ref> after <ref> moved: ignored with a notice, the pin stays, the rerun works.
+D="$TMP/q1"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set q1 "check:true" "$D"; work "$D"; pq="$(jq -r .sha "$OSRC_HOME/proof/q1/base.json")"
+( cd "$D" && git checkout -q main && git commit -q --allow-empty -m "main moves" && git checkout -q lane )
+for k in 1 2; do
+  out="$(OSRC_LANE=q1 P run --lane q1 --dir "$D" --base main 2>&1)"; r=$?
+  [ "$r" = 0 ] && grep -q "ignored inside the lane; using the pinned base ${pq:0:7}" <<<"$out" && [ "$(jq -r .sha "$OSRC_HOME/proof/q1/base.json")" = "$pq" ] && [ "$(jq -r .base_sha "$OSRC_HOME/proof/q1/proof.json")" = "$pq" ] \
+    && ok "MF.$k: in-lane --base <moved main> proves against the pinned base (notice, pin unchanged)" || bad "MF.$k rc=$r [$out]"
+done
+out="$(OSRC_LANE=q1 P run --lane q1 --dir "$D" --base HEAD 2>&1)"; [ $? = 0 ] && ok "MF: in-lane --base HEAD is ignored too (never an error)" || bad "MF HEAD [$out]"
+# The printed fix for a real mismatch is not a no-op: run it, and the lane's rerun proves.
+( cd "$D" && git checkout -qb q1other ); out="$(OSRC_LANE=q1 P run --lane q1 --dir "$D" 2>&1)"; r=$?
+fixc="$(sed -n 's/.*Fix (the orchestrator, outside the lane): osrc proof //p' <<<"$out")"
+[ "$r" = 4 ] && [ -n "$fixc" ] && P $fixc >/dev/null 2>&1 && OSRC_LANE=q1 P run --lane q1 --dir "$D" >/dev/null 2>&1 && ok "MF: the printed 'proof base ...' fixes it: the lane's rerun proves" || bad "MF fix rc=$r [$out] [$fixc]"
+# (a) counts that contradict the body bounce to the reviewer like a malformed line.
+export OSRC_VERDICT_SETTLE_SECS=0
+n=0; for case in \
+  'bounce|VERDICT: MERGE\n## Must-fix\n- a.sh:1 still open' \
+  'bounce|VERDICT: CHANGES must-fix=0 nit=1 pre-existing=0\n## Must-fix\n1. b.sh:2 rc ignored\n## Nits\n- typo' \
+  'bounce|VERDICT: CHANGES must-fix=2 nit=1 pre-existing=0\n## Nits\n- typo' \
+  'bounce|VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n## Must-fix\n- [x] old.sh:1 fixed' \
+  'MERGE|VERDICT: MERGE\n## Must-fix\n- none\n## Nits\n- spacing' \
+  'MERGE|VERDICT: MERGE\n## Must-fix\n- [x] [must-fix] run.sh:4 fixed\nMust-fix: none' \
+  'CHANGES|VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n## Must-fix\n- [x] old.sh:1 fixed\n- new.sh:2 open' ; do
+  n=$((n + 1)); want="${case%%|*}"; i="$(mkitem "ca$n" "$S1" "$(printf "${case#*|}")")"
+  got="$(jq -r 'if .state == "verdict" then .verdict elif (.bad_verdicts // 0) == 1 then "bounce" else .state end' "$(IT "$i")")"
+  [ "$got" = "$want" ] && ok "a.$n: -> $want$( [ "$want" != bounce ] || printf ' (%s)' "$(jq -r .invalid_why "$(IT "$i")")")" || bad "a.$n: want $want got $got"
+done
+ev="$(osrc_review_events 2>/dev/null)"; grep -q '^EVENT question ca1 .*not usable: it says MERGE but its ## Must-fix section lists 1 open item' <<<"$ev" && grep -q '^NEXT .*with counts that match the findings' <<<"$ev" \
+  && ok "a: the bounce tells the reviewer what contradicts what" || bad "a event: $ev"
+# (b) a needs-you item is cleared when the lane pushes a new head.
+i="$(mkitem nb "$S1" "$(printf 'MERGE')")"; printf 'nope\n' > "$OSRC_HOME/review/$i.VERDICT"; _osrc_review_ingest
+[ "$(jq -r .state "$(IT "$i")")" = needs-you ] && _osrc_review_supersede nb "$S2" && [ "$(jq -r '.state + " " + .stale_by' "$(IT "$i")")" = "superseded $S2" ] \
+  && [ "$(osrc_proof_hub_lane '{"id":"nb","status":"Building"}' | jq -r '.reviewNeedsYou // "none"')" = none ] && ok "b: needs-you is cleared (superseded) when the lane pushes a new head" || bad "b: $(jq -c . "$(IT "$i")")"
+# (c) pre-existing findings on a CHANGES verdict are kept as notes.
+i="$(mkitem nc "$S1" "$(printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=1\n## Must-fix\n- a.sh:1 race\n## Pre-existing\n- z.sh:9 old leak, not this change')")"
+[ "$(jq -r '.verdict + " " + .notes' "$(IT "$i")")" = "CHANGES $OSRC_HOME/review/$i.VERDICT" ] && grep -q 'z.sh:9 old leak' "$OSRC_HOME/review/notes/nc.md" && ! grep -q 'z.sh:9' <<<"$(_osrc_review_sendback "$i")" \
+  && ok "c: pre-existing on CHANGES: item .notes and review/notes/<lane>.md, never in the sendback" || bad "c: $(jq -c '{verdict,notes}' "$(IT "$i")")"
+unset OSRC_VERDICT_SETTLE_SECS
+# (d) an in-lane exit 4 raises an EVENT through the event chain supervise polls, and the fix clears it.
+D="$TMP/qd"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set qd "check:true" "$D"; work "$D"; ( cd "$D" && git checkout -qb qdother )
+OSRC_LANE=qd P run --lane qd --dir "$D" >/dev/null 2>&1; r=$?
+ev="$(osrc_remote_events 2>/dev/null)"
+[ "$r" = 4 ] && grep -q '^EVENT question qd .*proof run exited 4 inside the lane: qd is pinned on branch lane, this is qdother' <<<"$ev" && grep -q '^NEXT osrc proof base qd --dir ' <<<"$ev" \
+  && ok "d: in-lane exit 4 -> EVENT question with the fixing command as NEXT (osrc_remote_events, which supervise polls)" || bad "d rc=$r [$ev]"
+P base qd --dir "$D" "$(jq -r .sha "$OSRC_HOME/proof/qd/base.json")" >/dev/null 2>&1
+[ ! -f "$OSRC_HOME/proof/qd/blocked.json" ] && ! grep -q '^EVENT question qd ' <<<"$(osrc_proof_events)" && ok "d: running the fix clears the event" || bad "d clear"
+# (e) a reused lane name whose old lane never committed does not adopt the stale pin.
+D="$TMP/qe"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set qe "check:true" "$D"; stale="$(jq -r .sha "$OSRC_HOME/proof/qe/base.json")"
+osrc_done_clear qe   # session stop; the old lane never committed
+( cd "$D" && git checkout -q main && git commit -q --allow-empty -m "other lanes merged" && git checkout -qb lane2 ); m="$(git -C "$D" rev-parse main)"; work "$D"
+out="$(OSRC_LANE=qe P run --lane qe --dir "$D" 2>&1)"; r=$?
+[ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/qe/base.json")" = "$stale" ] && [ "$(jq -r '.branch_locked // false' "$OSRC_HOME/proof/qe/base.json")" = false ] && grep -q "proof base qe --dir .* $m" <<<"$out" \
+  && ok "e: in-lane, the new lane does not adopt the ended pin; the fix names its own start ($m)" || bad "e in-lane rc=$r [$out] $(cat "$OSRC_HOME/proof/qe/base.json")"
+D="$TMP/qf"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set qf "check:true" "$D"; stale="$(jq -r .sha "$OSRC_HOME/proof/qf/base.json")"; osrc_done_clear qf
+( cd "$D" && git checkout -q main && git commit -q --allow-empty -m "other lanes merged" && git checkout -q lane && git reset -q --hard main ); m="$(git -C "$D" rev-parse main)"
+osrc_done_set qf "check:true" "$D"
+[ "$(jq -r .sha "$OSRC_HOME/proof/qf/base.json")" = "$m" ] && ok "e: a new session start under the reused name (same branch, old lane never committed) pins its own start, not the stale pin" || bad "e start: $(cat "$OSRC_HOME/proof/qf/base.json")"
+D="$TMP/qg"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set qg "check:true" "$D"; keep="$(jq -r .sha "$OSRC_HOME/proof/qg/base.json")"; work "$D"; osrc_done_clear qg
+osrc_done_set qg "check:true" "$D"
+[ "$(jq -r '.sha + " " + (.ended // false | tostring)' "$OSRC_HOME/proof/qg/base.json")" = "$keep false" ] && OSRC_LANE=qg P run --lane qg --dir "$D" >/dev/null 2>&1 \
+  && ok "e control: the same lane restarted (it committed on its branch) keeps its pin and proves" || bad "e control: $(cat "$OSRC_HOME/proof/qg/base.json")"
 
 echo
 echo "test_proof: $pass passed, $fail failed"

@@ -105,9 +105,14 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
   main's tip when it started. `proof.json` records `base` (the ref) and `base_sha`. Without a pin,
   the first `proof run` pins the base ref unless it is the checkout's own branch; then it prints the
   `proof base` command and the guards report an error (not charged as a round), never a guess.
-  Inside a lane session the pin never moves: no plain `proof run`, branch change, worktree change or
-  `--base` clears or replaces it. Any mismatch exits 4 and prints the one fixing command,
-  `proof base <lane> --dir <top> <sha>`, which is itself refused inside a lane (as is `proof reset`).
+  Inside a lane session the pin never moves: no plain `proof run`, branch change or worktree change
+  clears or replaces it, and `--base` is ignored with a one-line notice (the pinned base is used). A
+  branch or worktree mismatch, or no pin, exits 4, prints the one fixing command
+  (`proof base <lane> --dir <top> <sha>`, itself refused inside a lane, as is `proof reset`) and writes
+  `proof/<lane>/blocked.json`, which `osrc_proof_events` (polled through `osrc_remote_events`) turns into
+  EVENT `question` with that command as NEXT. `session stop` and every new `session start` end the old
+  pin: a reused lane name never adopts it, and a lane start re-pins unless the checkout continues the
+  old lane (same branch, and it still contains the work the old lane had committed when it ended).
   A branch the lane creates after session start, on top of the pinned sha and with no commits left on
   the start branch, is adopted once. Outside a lane, a lane name reused in another worktree or on
   another branch is a new lane: its old pin, rounds and proof are cleared. Unpinned, a `--base` naming
@@ -150,9 +155,12 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
 - Severity is stated, never inferred (lib/review_sev.sh). Routing reads only the first line: CHANGES
   with must-fix>=1 sends the lane back; CHANGES with must-fix=0 is a MERGE with notes (`verdict_raw`
   CHANGES, `counts`, `notes` on the item, never a sendback); MERGE merges; BLOCK blocks. A missing or
-  malformed first line goes back to the REVIEWER once (the file moves to `<item>.VERDICT.bad1`, EVENT
+  malformed first line, or counts its own body contradicts (MERGE or must-fix=0 with an open item under
+  `## Must-fix`; must-fix>=1 with no must-fix findings), goes back to the REVIEWER once (the file moves to `<item>.VERDICT.bad1`, EVENT
   `question`); a second one parks the item in state `needs-you` (EVENT `failed`, Mission Control counts
-  it). `review requeue` clears the count. The findings text is only cut by its headings for the
+  it); a new head pushed by the lane clears it (superseded). `review requeue` clears the count.
+  Pre-existing findings are kept as notes on any verdict, CHANGES included: the item's `notes` and
+  `review/notes/<lane>.md`, never the sendback. The findings text is only cut by its headings for the
   sendback and the re-review checklist (checked `- [x] ... fixed` items are dropped). A re-review brief
   carries the diff since the last reviewed sha and only the prior `## Must-fix` section; the lane brief
   is a pointer, not pasted again.

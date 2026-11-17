@@ -424,6 +424,7 @@ osrc_remote_events() {
     fi
   done
   type osrc_review_events >/dev/null 2>&1 && osrc_review_events
+  type osrc_proof_events >/dev/null 2>&1 && osrc_proof_events   # lib/proof.sh: lanes stopped by a pin mismatch
   return 0
 }
 

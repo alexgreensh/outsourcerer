@@ -144,43 +144,89 @@ _osrc_proof_top() { # <dir> -> the checkout's top level, physical
 _osrc_proof_branch() { git -C "$1" symbolic-ref -q --short HEAD 2>/dev/null; return 0; }
 
 # Inside a lane session the base pin NEVER moves: nothing there clears or replaces it (not a plain
-# `proof run`, a branch change, a worktree change or --base). Any mismatch is rc 3 (proof run exits 4)
-# with the one command that fixes it, `proof base`, which is itself refused inside a lane.
+# `proof run`, a branch change or a worktree change; --base is ignored with a notice in _osrc_proof_run).
+# A mismatch is rc 3 (proof run exits 4) with the one command that fixes it, `proof base`, which is itself
+# refused inside a lane. It also writes proof/<lane>/blocked.json, which osrc_proof_events turns into an
+# EVENT so the orchestrator is woken (supervise polls it through osrc_remote_events).
 # A branch the lane creates after the pin, on top of the pinned sha, is adopted once (branch_locked), but
-# only when the lane made no commits on the branch it was pinned on.
+# only when the lane made no commits on the branch it was pinned on, and never for a pin whose lane
+# session ended (`session stop` / a new `session start`: osrc_proof_lane_ended): a reused lane name must
+# not inherit a stale pin.
 # Outside a lane (a person, the orchestrator, `session start --done-when`): a lane name reused in another
-# worktree or on another branch is a new lane, so its old pin, rounds and proof are cleared.
-_osrc_proof_lane_check() { # <lane> <dir> [start|force] [asked-base-sha]
-  local lane="$1" f d="" b="" sha="" lk="" top br why="" fix
+# worktree or on another branch is a new lane, so its old pin, rounds and proof are cleared. So is an
+# ended pin at a lane start, unless the checkout continues the old lane (same branch, which carries the
+# old lane's commits on top of the pin).
+_osrc_proof_lane_check() { # <lane> <dir> [start|force]
+  local lane="$1" f d="" b="" sha="" lk="" ended="" top br why="" fix
   f="$(_osrc_proof_dir "$lane")/base.json"
   top="$(_osrc_proof_top "$2")"; br="$(_osrc_proof_branch "$2")"
   if [ -f "$f" ]; then
     d="$(jq -r '.dir // ""' "$f" 2>/dev/null)"; b="$(jq -r '.branch // ""' "$f" 2>/dev/null)"
     sha="$(jq -r '.sha // ""' "$f" 2>/dev/null)"; lk="$(jq -r '.branch_locked // false' "$f" 2>/dev/null)"
+    ended="$(jq -r '.ended // false' "$f" 2>/dev/null)"
+    if [ "$ended" = true ] && _osrc_proof_continues "$2" "$b" "$sha" "$(jq -r '.end_head // ""' "$f" 2>/dev/null)"; then
+      _osrc_proof_put "$f" "$(jq -c 'del(.ended, .end_head)' "$f")" && ended=false   # the same lane, restarted
+    fi
     # Adopt only a branch that took over from the pinned start: the lane made no commits on the branch it
-    # was pinned on (detached, or still at the pin as far as HEAD's history goes). Leaving a branch the
-    # lane already committed to is a switch, not a start.
-    if [ "$lk" != true ] && [ -n "$br" ] && [ "$b" != "$br" ] && { [ -z "$d" ] || [ "$d" = "$top" ]; } \
-       && [ -n "$sha" ] && git -C "$2" merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
+    # was pinned on. Leaving a branch the lane already committed to is a switch, not a start.
+    if [ -z "${3:-}" ] && [ "$ended" != true ] && [ "$lk" != true ] && [ -n "$br" ] && [ "$b" != "$br" ] \
+       && { [ -z "$d" ] || [ "$d" = "$top" ]; } && [ -n "$sha" ] && git -C "$2" merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
        && { [ -z "$b" ] || [ "$(git -C "$2" merge-base "refs/heads/$b" HEAD 2>/dev/null)" = "$sha" ]; }; then
       _osrc_proof_put "$f" "$(jq -c --arg b "$br" --arg d "${d:-$top}" '. + {branch:$b, dir:$d, branch_locked:true}' "$f")" && { b="$br"; d="${d:-$top}"; }
     fi
   fi
   if [ -z "${3:-}" ] && _osrc_proof_in_lane; then
     if [ ! -f "$f" ] || [ -z "$sha" ]; then why="no base is pinned for $lane"
+    elif [ "$ended" = true ]; then why="the pin for $lane belongs to a lane session that ended"
     elif [ -n "$d" ] && [ "$d" != "$top" ]; then why="$lane is pinned in the worktree $d, this is $top"
     elif [ -n "$b" ] && [ -n "$br" ] && [ "$b" != "$br" ]; then why="$lane is pinned on branch $b, this is $br"
-    elif [ -n "${4:-}" ] && [ "$4" != "$sha" ]; then why="--base is ${4:0:7}, but $lane is pinned to ${sha:0:7}"
     fi
-    [ -n "$why" ] || return 0
-    fix="$sha"; [ -n "$fix" ] || fix="$(_osrc_proof_branch_start "$2")" || fix="<lane-start-sha>"
-    echo "proof: $why. Inside a lane the base pin never moves. Fix (the orchestrator, outside the lane): $(_osrc_self) proof base $lane --dir $top $fix" >&2
+    if [ -z "$why" ]; then rm -f "$(_osrc_proof_dir "$lane")/blocked.json" 2>/dev/null; return 0; fi
+    fix="$sha"; { [ -n "$fix" ] && [ "$ended" != true ]; } || fix="$(_osrc_proof_branch_start "$2")" || fix="<lane-start-sha>"
+    fix="$(_osrc_self) proof base $lane --dir $top $fix"
+    echo "proof: $why. Inside a lane the base pin never moves. Fix (the orchestrator, outside the lane): $fix" >&2
+    mkdir -p "$(_osrc_proof_dir "$lane")" 2>/dev/null \
+      && _osrc_proof_put "$(_osrc_proof_dir "$lane")/blocked.json" "$(jq -cn --arg why "$why" --arg fix "$fix" --argjson ts "$(date +%s)" '{why:$why, fix:$fix, ts:$ts}')"
     return 3
   fi
   [ -f "$f" ] && [ -n "$d" ] || return 0   # no pin, or one from before identities were recorded
-  if [ "$top" = "$d" ] && { [ -z "$b" ] || [ -z "$br" ] || [ "$b" = "$br" ]; }; then return 0; fi
-  echo "proof: $lane was ${b:-detached} at $d; this is ${br:-detached} at $top, a new lane: its old pin, rounds and proof are cleared" >&2
-  rm -f "$(_osrc_proof_dir "$lane")"/{base.json,proof.json,rounds.json,needs-you.json,SENDBACK.md} 2>/dev/null
+  if [ "$top" = "$d" ] && { [ -z "$b" ] || [ -z "$br" ] || [ "$b" = "$br" ]; }; then
+    # Same checkout: keep the pin, except an ended one at a lane start (a new lane under a reused name).
+    [ "$ended" = true ] && [ "${3:-}" = start ] || return 0
+  fi
+  echo "proof: $lane was ${b:-detached} at $d$( [ "$ended" != true ] || printf ' (its session ended)'); this is ${br:-detached} at $top, a new lane: its old pin, rounds and proof are cleared" >&2
+  rm -f "$(_osrc_proof_dir "$lane")"/{base.json,proof.json,rounds.json,needs-you.json,SENDBACK.md,blocked.json} 2>/dev/null
+  return 0
+}
+
+# The checkout continues the lane that pinned <sha> on <branch>: same branch, the old lane had moved past
+# the pin when its session ended (<end-head>, recorded by osrc_proof_lane_ended), and HEAD still contains
+# that work. A lane that never committed leaves nothing to continue, whatever was merged in since.
+_osrc_proof_continues() { # <dir> <branch> <sha> <end-head>
+  [ -n "$2" ] && [ -n "$3" ] && [ -n "$4" ] && [ "$4" != "$3" ] && [ "$(_osrc_proof_branch "$1")" = "$2" ] || return 1
+  git -C "$1" merge-base --is-ancestor "$4" HEAD 2>/dev/null
+}
+
+# session stop / a new session start (lib/done.sh osrc_done_clear): the lane session behind this pin ended.
+osrc_proof_lane_ended() { # <lane>
+  local f d b e=""; _osrc_proof_id_ok "${1:-}" || return 0
+  f="$(_osrc_proof_dir "$1")/base.json"; [ -f "$f" ] || return 0
+  [ "$(jq -r '.ended // false' "$f" 2>/dev/null)" != true ] || return 0   # keep the first end's record
+  d="$(jq -r '.dir // ""' "$f")"; b="$(jq -r '.branch // ""' "$f")"
+  if [ -n "$b" ]; then e="$(git -C "$d" rev-parse -q --verify "refs/heads/$b" 2>/dev/null)"; else e="$(git -C "$d" rev-parse -q --verify HEAD 2>/dev/null)"; fi
+  _osrc_proof_put "$f" "$(jq -c --arg e "${e:-}" '. + {ended:true, end_head:$e}' "$f")" || true
+}
+
+# Lanes that a pin mismatch stopped inside their session: one EVENT each, so the orchestrator wakes.
+osrc_proof_events() {
+  local b lane renotify
+  renotify="$(_osrc_mins "${OSRC_RENOTIFY_MIN:-15}" 2>/dev/null)" || renotify=900
+  for b in "$OSRC_HOME"/proof/*/blocked.json; do
+    [ -f "$b" ] || continue
+    lane="$(basename "$(dirname "$b")")"; _osrc_proof_id_ok "$lane" || continue
+    _osrc_ev_due "$lane" "proofblocked:$(jq -r '.ts // 0' "$b")" "$renotify" || continue
+    _osrc_emit question "$lane" "proof run exited 4 inside the lane: $(jq -r '.why // ""' "$b"); the lane cannot fix this itself" "$(jq -r '.fix // ""' "$b")"
+  done
   return 0
 }
 
@@ -207,6 +253,7 @@ osrc_proof_pin_base() {
   mkdir -p "$(_osrc_proof_dir "$lane")" 2>/dev/null || return 1
   _osrc_proof_put "$f" "$(jq -cn --arg r "$ref" --arg s "$sha" --argjson t "$(date +%s)" --arg d "$(_osrc_proof_top "$dir")" --arg b "$(_osrc_proof_branch "$dir")" \
     '{ref:$r, sha:$s, ts:$t, dir:$d, branch:$b}')" || return 1
+  rm -f "$(_osrc_proof_dir "$lane")/blocked.json" 2>/dev/null
   printf '%s %s' "$ref" "$sha"
 }
 
@@ -445,8 +492,13 @@ _osrc_proof_run() {
   if [ -z "$lane" ]; then lane="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')"; fi
   _osrc_proof_id_ok "$lane" || die "proof run: bad lane id '$lane' (pass --lane, letters/digits/._- only)"
   local pin pinned="" want="" prc=0 ls
+  _osrc_proof_lane_check "$lane" "$dir" || exit 4
+  # Inside a lane the pinned base is the base: --base is ignored (never an error, so the lane's rerun works).
+  if [ -n "$base" ] && _osrc_proof_in_lane; then
+    echo "proof: --base $base ignored inside the lane; using the pinned base $(jq -r '.sha[0:7]' "$(_osrc_proof_dir "$lane")/base.json" 2>/dev/null)" >&2
+    base=""
+  fi
   if [ -n "$base" ]; then want="$(_osrc_proof_resolve "$dir" "$base")" || die "proof run: --base $base does not resolve to a commit in $dir"; fi
-  _osrc_proof_lane_check "$lane" "$dir" "" "$want" || exit 4
   # A lane-facing --base never moves an existing pin and never names the lane's own branch or HEAD:
   # either would let a lane judge itself against its own commits.
   [ -f "$(_osrc_proof_dir "$lane")/base.json" ] && pinned="$(jq -r '.sha // ""' "$(_osrc_proof_dir "$lane")/base.json" 2>/dev/null)"
@@ -723,7 +775,7 @@ osrc_proof_hub_lane() { # <lane-json> -> lane json + {proof:{stamp,method,ok,sto
   id="$(jq -r '.id // ""' <<<"$l" 2>/dev/null)"; _osrc_proof_id_ok "$id" || { printf '%s' "$l"; return 0; }
   f="$(_osrc_proof_file "$id")"
   # A review whose verdict was malformed twice waits on a person (lib/review.sh state needs-you).
-  r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("malformed verdict twice: " + (.invalid_first_line // ""))}' 2>/dev/null)"
+  r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("unusable verdict twice: " + (.invalid_why // .invalid_first_line // ""))}' 2>/dev/null)"
   [ -z "$r" ] || l="$(jq -c --argjson r "$r" '. + {reviewNeedsYou:$r}' <<<"$l" 2>/dev/null || printf '%s' "$l")"
   _osrc_proof_used "$id" || { printf '%s' "$l"; return 0; }
   r="$(_osrc_proof_rounds "$id")"

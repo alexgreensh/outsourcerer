@@ -87,6 +87,9 @@ osrc_done_set() {
     # A new spec must not inherit the previous contract's cached verdict.
     rm -f "$dir/$name.checkcache" 2>/dev/null
     # Lane start: pin its base sha now (lib/proof.sh), before the lane commits on top of it.
+    # A lane start is a new session: any older pin under this name is ended first (kept only when this
+    # checkout continues that lane), so a reused name never inherits a stale pin.
+    ! type osrc_proof_lane_ended >/dev/null 2>&1 || osrc_proof_lane_ended "$name"
     ! type osrc_proof_pin_base >/dev/null 2>&1 || osrc_proof_pin_base "$name" "$cwd" HEAD start >/dev/null 2>&1 || true
   else
     rm -f "$tmp"; echo "osrc_done_set: jq failed" >&2; return 1
@@ -117,6 +120,7 @@ osrc_done_clear() {
     _osrc_guarded_mutex_release "$lock" || return 1
   fi
   rm -f "$dir/$name.json" "$dir/$name.checkcache" "$dir/$name.json.tmp."* 2>/dev/null
+  ! type osrc_proof_lane_ended >/dev/null 2>&1 || osrc_proof_lane_ended "$name"   # lib/proof.sh: this session's pin is no longer live
   return 0
 }
 

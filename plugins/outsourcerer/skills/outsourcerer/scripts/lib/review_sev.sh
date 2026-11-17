@@ -10,7 +10,8 @@
 #   CHANGES must-fix>=1 -> CHANGES (sendback)
 #   CHANGES must-fix=0  -> MERGE with notes (verdict_raw CHANGES; nits/pre-existing stay on the item)
 #   MERGE -> MERGE; BLOCK -> BLOCK
-# Anything else is malformed: review.sh hands it back to the REVIEWER once, then to a person.
+# Anything else is malformed: review.sh hands it back to the REVIEWER once, then to a person. So is a
+# stated line its own body contradicts (_osrc_sev_contradiction).
 # The body below line 1 is free text for people. _osrc_sev_findings only cuts it into sections for the
 # sendback and the re-review checklist; it never changes where the lane goes.
 
@@ -65,6 +66,37 @@ _osrc_sev_findings() {
       hi = m; while (hi >= lo && out[hi] ~ /^[ \t]*$/) hi--
       for (i = lo; i <= hi; i++) print out[i]
     }' "$1" 2>/dev/null
+}
+
+# Open items in an explicit "## Must-fix" section: top-level list items that are not checked ("- [x]")
+# and do not just say none / n/a / nothing.
+_osrc_sev_open_mustfix() { # <verdict-file> -> count
+  awk '
+    NR == 1 { next }
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^#+[ \t]/ { h = tolower(line); sub(/^#+[ \t]+/, "", h); sub(/[ \t:]+$/, "", h); in_mf = (h ~ /^must[- ]?fix/); next }
+    !in_mf { next }
+    line ~ /^([-*+]|[0-9]+[.)])[ \t]+/ {
+      t = line; sub(/^([-*+]|[0-9]+[.)])[ \t]+/, "", t)
+      if (t ~ /^\[[xX]\]/) next
+      sub(/^\[ \][ \t]*/, "", t); u = tolower(t); sub(/[ \t.!]+$/, "", u)
+      if (u ~ /^(none|n\/a|nothing|no findings?|no must-fix( findings)?)$/) next
+      n++
+    }
+    END { print n + 0 }' "$1" 2>/dev/null || echo 0
+}
+
+# A stated verdict whose counts contradict its own body is not used: it goes back to the reviewer like a
+# malformed line. MERGE (or must-fix=0) with an open Must-fix item; must-fix>=1 with no must-fix findings.
+_osrc_sev_contradiction() { # <verdict-file> <routed MERGE|CHANGES|BLOCK> <must-fix> <raw> -> reason, or nothing
+  local open
+  case "$2" in
+    MERGE) open="$(_osrc_sev_open_mustfix "$1")"
+      [ "$open" -eq 0 ] 2>/dev/null || printf '%s but its ## Must-fix section lists %s open item(s)' \
+        "$( [ "$4" = CHANGES ] && printf 'it says must-fix=0' || printf 'it says MERGE')" "$open" ;;
+    CHANGES) [ -n "$(_osrc_sev_findings "$1" must-fix | tr -d '[:space:]')" ] || printf 'it says must-fix=%s but lists no must-fix findings' "$3" ;;
+  esac
+  return 0
 }
 
 # What a re-review hands the reviewer from the previous round: the open must-fix findings.

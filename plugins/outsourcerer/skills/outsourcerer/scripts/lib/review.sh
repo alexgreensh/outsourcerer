@@ -138,6 +138,7 @@ _osrc_review_supersede() { # <lane> <new-head>
     case "$st" in
       queued) _osrc_jq_set "$p" --arg by "$new" '.state="superseded" | .stale=true | .stale_by=$by' ;;
       inflight|verdict) _osrc_jq_set "$p" --arg by "$new" '.stale=true | .stale_by=$by' ;;
+      needs-you) _osrc_jq_set "$p" --arg by "$new" '.state="superseded" | .stale=true | .stale_by=$by' ;;   # the new head gets its own review
     esac
   done
 }
@@ -192,7 +193,7 @@ type _osrc_sev_verdict >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/revi
 # Routing reads only that line. A malformed first line goes back to the REVIEWER once (the file is
 # moved to <item>.VERDICT.bad1 and .bad_verdicts=1); a second one parks the item in state needs-you.
 _osrc_review_ingest() {
-  local p id vf first raw v now settle age lane sv mf nit pre bad
+  local p id vf first raw v now settle age lane sv mf nit pre bad why
   now="$(_osrc_now)"; settle="${OSRC_VERDICT_SETTLE_SECS:-30}"
   for p in $(_osrc_review_items); do
     case "$(jq -r .state "$p")" in
@@ -209,8 +210,12 @@ _osrc_review_ingest() {
     esac
     id="$(jq -r .id "$p")"; vf="$OSRC_HOME/review/$id.VERDICT"
     [ -s "$vf" ] || continue
+    why="the first line is not a stated VERDICT line"
     if sv="$(_osrc_sev_verdict "$vf")"; then
         read -r first mf nit pre raw <<<"$sv"
+        why="$(_osrc_sev_contradiction "$vf" "$first" "$mf" "$raw")"
+    fi
+    if [ -z "$why" ]; then
         if [ "$first" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
           # Incremental success schedules a full round on this same head; it cannot finish a lane.
           _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0 | .acked=false'
@@ -220,19 +225,31 @@ _osrc_review_ingest() {
           --argjson mf "$mf" --argjson nit "$nit" --argjson pre "$pre" \
           '.state="verdict" | .verdict=$v | .verdict_raw=$raw | .verdict_ts=$now | .sha_reviewed=.head | .findings=$vf | .invalid_first_line=""
            | .counts={must_fix:$mf, nit:$nit, pre_existing:$pre}
-           | .notes=(if $v == "MERGE" and ($nit + $pre) > 0 then $vf else "" end)'
+           | .notes=(if ($v == "MERGE" and ($nit + $pre) > 0) or $pre > 0 then $vf else "" end)'
+        [ "$pre" -eq 0 ] || _osrc_review_note_pre "$(jq -r .lane "$p")" "$id" "$vf" "$pre"
     else
         age=$(( $(date +%s) - $(stat -c %Y "$vf" 2>/dev/null || stat -f %m "$vf" 2>/dev/null || date +%s) ))   # real file mtime vs real clock
         [ "$age" -ge "$settle" ] || continue
         bad="$(jq -r '.bad_verdicts // 0' "$p")"
         mv -f "$vf" "$vf.bad$((bad + 1))" 2>/dev/null || continue   # the reviewer rewrites it; never re-read the bad one
         if [ "$bad" -ge 1 ]; then
-          _osrc_jq_set "$p" --arg l "$(head -1 "$vf.bad$((bad + 1))" | cut -c1-60)" '.state="needs-you" | .bad_verdicts=2 | .invalid_first_line=$l'
+          _osrc_jq_set "$p" --arg l "$(head -1 "$vf.bad$((bad + 1))" | cut -c1-60)" --arg w "$why" '.state="needs-you" | .bad_verdicts=2 | .invalid_first_line=$l | .invalid_why=$w'
         else
-          _osrc_jq_set "$p" --arg l "$(head -1 "$vf.bad1" | cut -c1-60)" '.bad_verdicts=1 | .invalid_first_line=$l'
+          _osrc_jq_set "$p" --arg l "$(head -1 "$vf.bad1" | cut -c1-60)" --arg w "$why" '.bad_verdicts=1 | .invalid_first_line=$l | .invalid_why=$w'
         fi
     fi
   done
+}
+
+# Pre-existing findings (problems the change did not introduce) are kept as notes on any verdict, MERGE or
+# CHANGES: the item's .notes plus one section per item in review/notes/<lane>.md. Never a sendback.
+_osrc_review_note_pre() { # <lane> <item-id> <verdict-file> <count>
+  local d="$OSRC_HOME/review/notes" t
+  _osrc_id_ok "$1" 2>/dev/null || return 0
+  mkdir -p "$d" 2>/dev/null || return 0
+  grep -qxF "## $2" "$d/$1.md" 2>/dev/null && return 0
+  t="$(_osrc_sev_findings "$3" pre)"; [ -n "$t" ] || t="($4 pre-existing, no ## Pre-existing section: see $3)"
+  printf '## %s\n%s\n\n' "$2" "$t" >> "$d/$1.md"
 }
 
 # ---- brief -------------------------------------------------------------------------------------
@@ -380,10 +397,10 @@ osrc_review_events() {
         fi ;;
     esac
     if [ "$st" = inflight ] && [ "$(jq -r .invalid_first_line "$p")" != "" ] && _osrc_ev_due "$lane" "badverdict:$id" "$renotify"; then
-      _osrc_emit question "$lane" "verdict for $id is malformed (got: $(jq -r .invalid_first_line "$p")); back to the reviewer once, a second one goes to a person" "OUTSOURCERER_TMUX=$s $(_osrc_self) session send \"Rewrite $OSRC_HOME/review/$id.VERDICT: $(_osrc_sev_format | sed 's/"//g')\""
+      _osrc_emit question "$lane" "verdict for $id is not usable: $(jq -r '.invalid_why // "malformed"' "$p") (first line: $(jq -r .invalid_first_line "$p")); back to the reviewer once, a second one goes to a person" "OUTSOURCERER_TMUX=$s $(_osrc_self) session send \"Rewrite $OSRC_HOME/review/$id.VERDICT ($(jq -r '.invalid_why // "malformed"' "$p" | sed 's/"//g')): $(_osrc_sev_format | sed 's/"//g'), with counts that match the findings\""
     fi
     if [ "$st" = needs-you ] && _osrc_ev_due "$lane" "rvneedsyou:$id" "$renotify"; then
-      _osrc_emit failed "$lane" "review $id: the reviewer wrote a malformed verdict twice (last: $(jq -r .invalid_first_line "$p")); needs a person, the verdict is not guessed" "$(_osrc_self) review show $id"
+      _osrc_emit failed "$lane" "review $id: the reviewer wrote an unusable verdict twice (last: $(jq -r '.invalid_why // "malformed"' "$p")); needs a person, the verdict is not guessed" "$(_osrc_self) review show $id"
     fi
   done
   [ -n "$s" ] || return 0
@@ -561,7 +578,7 @@ _osrc_review_requeue() { # <item> [--force]
       return 1
     fi
   fi
-  _osrc_jq_set "$p" '.state="queued" | .sent_ts=0 | .bad_verdicts=0 | .invalid_first_line=""' && echo "requeued $i"
+  _osrc_jq_set "$p" '.state="queued" | .sent_ts=0 | .bad_verdicts=0 | .invalid_first_line="" | .invalid_why=""' && echo "requeued $i"
 }
 
 _osrc_review_show() {
