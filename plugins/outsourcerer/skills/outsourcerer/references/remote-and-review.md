@@ -51,8 +51,9 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - `review next` sends only to an idle reviewer (`osrc_screen_state` when L3 lands, otherwise a
   conservative pane reader that needs an empty composer and no spinner; L3's `composer` counts as idle only
   when its evidence says "no turn yet", never when the composer holds unsent text), never with another item in
-  flight. The brief is `review/<item>.md`; the reviewer writes `review/<item>.VERDICT`, first line
-  `MERGE`, `CHANGES` or `BLOCK`, findings below.
+  flight. The brief is `review/<item>.md`; the reviewer writes `review/<item>.VERDICT`. Its first line
+  is the stated verdict, exactly `VERDICT: MERGE`, `VERDICT: CHANGES must-fix=<n> nit=<n> pre-existing=<n>`
+  or `VERDICT: BLOCK`; findings go below under `## Must-fix`, `## Nits`, `## Pre-existing`.
 - **Verdict contract**: each item records `sha_at_ready`, `sha_reviewed`, `verdict`, `findings` (path).
   A push after READY supersedes a queued review of the old sha and marks an in-flight or finished one
   `stale`; the new READY head is enqueued as a re-review. A stale MERGE never makes the lane `done`.
@@ -89,6 +90,81 @@ Run inside a lane worktree before READY: `outsourcerer guards run --base <branch
 - `--json` prints one object: `{mode, passed, failed:[{guard, mode, what:[...], fix}], guards_changed, guards_changed_paths, allowed, reviewer_required, ran, skipped, base, base_sha, lane, elapsed_s}`. `passed` is the gate verdict (exit 0); `reviewer_required` means a person must look even though it passed. Feed `what` and `fix` straight into the retry brief.
 - Committing guards: Outsourcerer's `.git/info/exclude` block ignores `.outsourcerer/*` (worktrees, lane state) but carves out `guards/`, `guards.conf` and `verify`, so these commit with a plain `git add`; it migrates the old single `/.outsourcerer/` line on first use. A tracked `.gitignore` entry `.outsourcerer/` (directory form) defeats the carve-out; use `.outsourcerer/*` there.
 
+## Proof (lib/proof.sh): READY needs a proof for its head sha
+
+```
+proof run [--lane ID] [--dir DIR] [--base REF] [--cmd "<check>"]... [--method none|review --reason R] [--json]
+proof show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane> | require [on|off]
+proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
+```
+
+- The base is a sha pinned once per lane (`proof/<lane>/base.json`), at lane start: `session start
+  --done-when` pins the lane's start HEAD (`lane-start`), a remote lane pins the fetched base at its first READY, `proof base` pins it by
+  hand. Verify, `guards run --base <sha>` and the checks-changed diff all use it, so the base moving
+  under a running lane changes nothing, and a lane working on main with no remote is judged against
+  main's tip when it started. `proof.json` records `base` (the ref) and `base_sha`. Without a pin,
+  the first `proof run` pins the base ref unless it is the checkout's own branch; then it prints the
+  `proof base` command and the guards report an error (not charged as a round), never a guess.
+  Inside a lane session the pin never moves: no plain `proof run`, branch change or worktree change
+  clears or replaces it, and `--base` is ignored with a one-line notice (the pinned base is used). A
+  branch or worktree mismatch, or no pin, exits 4, prints the one fixing command
+  (`proof base <lane> --dir <top> <sha>`, itself refused inside a lane, as is `proof reset`) and writes
+  `proof/<lane>/blocked.json`, which `osrc_proof_events` (polled through `osrc_remote_events`) turns into
+  EVENT `question` with that command as NEXT. `session stop` and every new `session start` end the old
+  pin: a reused lane name never adopts it, and a lane start re-pins unless the checkout continues the
+  old lane (same branch, and it still contains the work the old lane had committed when it ended).
+  A branch the lane creates after session start, on top of the pinned sha and with no commits left on
+  the start branch, is adopted once. Outside a lane, a lane name reused in another worktree or on
+  another branch is a new lane: its old pin, rounds and proof are cleared. Unpinned, a `--base` naming
+  the lane's own history (`HEAD~1`, `<branch>^`, a lane-only sha, or a tag the lane made on it) is
+  refused and the branch's creation point is pinned as `lane-start`.
+- Checks always run: the base verify and the done contract's `check:` run on every `proof run`;
+  `--cmd` only adds. `--method none|review` is refused when either exists, still runs the guards,
+  always needs a reviewer, and never resets the failed-round count. A diff touching `.outsourcerer/`
+  needs a reviewer too. Untracked files (outside .gitignore) fail the proof like uncommitted edits, and
+  a check that exits 0 but whose last summary line (a line made only of counts, such as
+  "10 passed, 2 failed" or "passed=10 failed=2") shows failures fails; any other line with counts in it
+  (a test title) never overrides a green exit code. Review items and briefs show a stamp only
+  for the exact head ("unproved at <sha7>" otherwise).
+
+- `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
+  command with exit code, seconds, pass/fail counts when the output shows them, last 30 lines, the
+  `guards` JSON (lane S1's `guards run --json --base <lane base> --lane <id>`, always with an explicit
+  base; `"unavailable"` when guards are not installed). `passed: false` fails the proof (WHAT/FIX lines
+  are printed as the retry brief); guards that cannot run fail it without charging a round;
+  `reviewer_required: true` (an `--allow` or released-after-blocks pass, or edited checks) keeps the
+  proof but routes the lane to the reviewer: the stamp says so, the review brief lists what was let
+  through, and a `.DONE` hand-in's NEXT is `review queue add`. Then `method`: `verify-run`
+  (`.outsourcerer/verify` read from the BASE ref), `tests` (`--cmd` or the done contract's `check:`),
+  `review` or `none` (both need `--reason`). Never write proof.json by hand. Uncommitted tracked
+  changes fail the proof (the run did not test the head). A diff touching `.outsourcerer/` is
+  recorded as `checks_changed` for the reviewer.
+- Stamp, shown on review items, in the review brief and on Mission Control: `proved: 139 pass, 0 fail`,
+  `unverified: <reason>`, `review only: <reason>`, or `failed: <cmd> exit N`.
+- Remote READY: a cloud lane cannot write this machine's proof folder, so READY is proved here, on the
+  READY sha (`--done-when`, and/or `.outsourcerer/verify` from base). With no check at all the READY is
+  queued with an honest `method: none` proof (stamped unverified), never stranded. A failing proof
+  spends no review and NEXT is `proof sendback <lane>`.
+- `.DONE` hand-ins (`supervise --watch`): a lane that has run proof (or every lane after
+  `proof require on`) needs a passing proof for its current head; otherwise the hand-in is sent back
+  (`session send` to a live managed session, else NEXT `proof sendback <lane>`), no user ping.
+- Three rounds, then a person: every failed proof run or sent-back hand-in is a round; a pass resets.
+  After `OSRC_PROOF_MAX_ROUNDS` (3) the lane is stopped (`proof run` exits 4, no more sendbacks) and
+  Mission Control lists it under "needs you" with the last failing lines. `proof reset <lane>` is the
+  person's call. Project cards count lanes that landed unverified.
+- Severity is stated, never inferred (lib/review_sev.sh). Routing reads only the first line: CHANGES
+  with must-fix>=1 sends the lane back; CHANGES with must-fix=0 is a MERGE with notes (`verdict_raw`
+  CHANGES, `counts`, `notes` on the item, never a sendback); MERGE merges; BLOCK blocks. A missing or
+  malformed first line, or counts its own body contradicts (MERGE or must-fix=0 with an open item under
+  `## Must-fix`; must-fix>=1 with no must-fix findings), goes back to the REVIEWER once (the file moves to `<item>.VERDICT.bad1`, EVENT
+  `question`); a second one parks the item in state `needs-you` (EVENT `failed`, Mission Control counts
+  it); a new head pushed by the lane clears it (superseded). `review requeue` clears the count.
+  Pre-existing findings are kept as notes on any verdict, CHANGES included: the item's `notes` and
+  `review/notes/<lane>.md`, never the sendback. The findings text is only cut by its headings for the
+  sendback and the re-review checklist (checked `- [x] ... fixed` items are dropped). A re-review brief
+  carries the diff since the last reviewed sha and only the prior `## Must-fix` section; the lane brief
+  is a pointer, not pasted again.
+
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
 
 | kind | when |
@@ -98,7 +174,7 @@ Run inside a lane worktree before READY: `outsourcerer guards run --base <branch
 | `idle` | reviewer idle with queue non-empty (NEXT `review next` or `review rotate`); reviewer idle with no verdict past the send grace |
 | `stalled` | live lane, no push for `OSRC_REMOTE_STALL` minutes |
 | `failed` | done-when check failed; poll auth/rate/network failure; branch deleted; reviewer session gone |
-| `question` | verdict file whose first line is not MERGE/CHANGES/BLOCK |
+| `question` | verdict file whose first line is not a stated `VERDICT:` line (back to the reviewer once) |
 | `approval` | reviewer sitting at a prompt mid-review |
 
 Events dedupe by key and re-fire every `OSRC_RENOTIFY_MIN` (15) while the condition holds; READY is

@@ -26,7 +26,7 @@ class ReviewPacket(unittest.TestCase):
                 item = {'id': id, 'lane': 'L14b', 'head': head, 'state': state, 'stale': stale, 'verdict': 'MERGE', 'acked': True}
                 path = p / f'review/items/{id}.json'; path.write_text(json.dumps(item))
                 if registered: (p / 'remote/L14b.json').write_text(json.dumps({'head': head}))
-                if state == 'inflight': (p / f'review/{id}.VERDICT').write_text('MERGE\n')
+                if state == 'inflight': (p / f'review/{id}.VERDICT').write_text('VERDICT: MERGE\n')
                 shell = '. "$1"; . "$2"; OSRC_HOME="$3"; OSRC_NOW=100; _osrc_review_ingest'
                 subprocess.run(['/bin/bash', '-c', shell, 'bash', str(MODULE.parent / 'remote.sh'), str(MODULE), d], check=True)
                 result = json.loads(path.read_text())
@@ -45,7 +45,7 @@ class ReviewPacket(unittest.TestCase):
             oldsha, newsha = 'a' * 40, 'b' * 40
             oldid, newid = 'L1-aaaaaaa', 'L1-bbbbbbb'
             findings = p / ('review/' + oldid + '.VERDICT')
-            findings.write_text('CHANGES\nFix the race\nAdd a test\n')
+            findings.write_text('VERDICT: CHANGES must-fix=2 nit=0 pre-existing=0\nFix the race\nAdd a test\n')
             prior = {'id': oldid, 'lane': 'L1', 'state': 'verdict', 'head': oldsha, 'sha_reviewed': oldsha, 'verdict_ts': 42, 'findings': str(findings)}
             current = {'id': newid, 'lane': 'L1', 'state': 'queued', 'head': newsha, 'branch': 'feature', 'url': 'example/repo', 'transport': 'gh', 'base': 'main', 'brief': str(brief)}
             (p / ('review/items/' + oldid + '.json')).write_text(json.dumps(prior))

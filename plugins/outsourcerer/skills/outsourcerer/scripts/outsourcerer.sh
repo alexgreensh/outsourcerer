@@ -19919,7 +19919,7 @@ main() {
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
-    lane) cmd_lane "$@" ;; review) cmd_review "$@" ;; guards) cmd_guards "$@" ;;   # remote lanes + reviewer queue + diff guards (lib/remote.sh, lib/review.sh, lib/guards.sh)
+    lane) cmd_lane "$@" ;; review) cmd_review "$@" ;; guards) cmd_guards "$@" ;; proof) cmd_proof "$@" ;;   # remote lanes, reviewer queue, diff guards, proof files (lib/remote.sh, review.sh, guards.sh, proof.sh)
     team)        osrc_team "$@" ;;                         # one team score per plan/fleet: tests passed - token-cost penalty
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
