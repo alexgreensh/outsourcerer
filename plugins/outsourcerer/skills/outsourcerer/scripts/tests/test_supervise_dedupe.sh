@@ -40,20 +40,28 @@ out="$(OSRC_SUPERVISE_MAX_SECS=3 sup --session S)"
 grep -q "^EVENT idle i1 $ts " <<<"$out" && no "same idle row delivered twice: [$out]" || ok "a stale cursor does not re-deliver the idle row (ts $ts)"
 grep -q '^EVENT stalled supervise ' <<<"$out" && ok "the re-armed supervise keeps blocking on the live idle lane" || no "re-arm: [$out]"
 [ "$(rows i1)" = 1 ] && ok "one idle row in the log" || no "rows: $(rows i1)"
-grep -q "	idle	i1	" "$OSRC_HOME/supervise/S/delivered" && ok "the ledger records the delivered row" || no "ledger: $(cat "$OSRC_HOME/supervise/S/delivered" 2>/dev/null)"
+rid="$(jq -r 'select(.target=="i1") | .id' "$OSRC_HOME/lanes/events.jsonl" | head -1)"
+[ -n "$rid" ] && grep -q "	$rid\$" "$OSRC_HOME/supervise/S/delivered" && ok "the ledger records the delivered row by its own id ($rid)" || no "ledger: $(cat "$OSRC_HOME/supervise/S/delivered" 2>/dev/null)"
 # A new idle (the lane worked again, then stopped) is a new row and is delivered.
 cp "$FX/cc-working-turn.txt" "$TMP/panes/i1.screen"; lib _sv_observe_all beacon
-cp "$FX/cc-idle-after-work.txt" "$TMP/panes/i1.screen"; sleep 1
+cp "$FX/cc-idle-after-work.txt" "$TMP/panes/i1.screen"
 out="$(sup --session S)"; grep -q '^EVENT idle i1 ' <<<"$out" && ok "a later, new idle is still delivered" || no "new idle swallowed: [$out]"
 # Ledger rows older than 24 h are pruned.
-printf '1\tidle\told\tx\n' >> "$OSRC_HOME/supervise/S/delivered"
-lib _sv_ledger_add "$OSRC_HOME/supervise/S/delivered" "$(printf '6\t%s\tidle\tz\td\tn' "$(date +%s)")"
-grep -q '	old	' "$OSRC_HOME/supervise/S/delivered" && no "24h-old ledger row kept" || ok "ledger prunes rows older than 24 h"
+printf '1\told-row\n' >> "$OSRC_HOME/supervise/S/delivered"
+lib _sv_ledger_add "$OSRC_HOME/supervise/S/delivered" "$(printf '6\t%s\tidle\tz\td\tn\tnew-row' "$(date +%s)")"
+grep -q 'old-row' "$OSRC_HOME/supervise/S/delivered" && no "24h-old ledger row kept" || ok "ledger prunes rows older than 24 h"
+grep -q '	new-row$' "$OSRC_HOME/supervise/S/delivered" && ok "ledger keys on the row id column" || no "ledger add: $(cat "$OSRC_HOME/supervise/S/delivered")"
+# Two rows identical in ts/kind/target/detail are still two rows (review nit: key on a per-row id).
+lid="$OSRC_HOME/supervise/S/delivered"; t="$(date +%s)"
+got="$(lib _sv_ledger_filter "$lid" "$(printf '6\t%s\tidle\tq\tsame\tn\tid-a\n6\t%s\tidle\tq\tsame\tn\tid-b' "$t" "$t")")"
+lib _sv_ledger_add "$lid" "$(printf '6\t%s\tidle\tq\tsame\tn\tid-a' "$t")"
+got2="$(lib _sv_ledger_filter "$lid" "$(printf '6\t%s\tidle\tq\tsame\tn\tid-a\n6\t%s\tidle\tq\tsame\tn\tid-b' "$t" "$t")")"
+[ "$(printf '%s\n' "$got" | grep -c .)" = 2 ] && [ "$(printf '%s\n' "$got2" | awk -F '\t' '{print $7}')" = id-b ] \
+  && ok "two look-alike rows with different ids: delivering one does not hide the other" || no "look-alike rows: [$got] [$got2]"
 
 echo "=== per-target lock: two observers never log the same change twice ==="
 fresh 2; own S i2; pane i2 cc-idle-after-work.txt
 mkdir -p "$OSRC_HOME/lanes/state"; mkdir "$OSRC_HOME/lanes/state/i2.lock"   # another process is on i2
-got="$(lib sh -c '_sv_observe_emit i2 "$(date +%s)" supervise S; printf "%s %s %s" "${SV_K:-none}" "$SV_OUT" "$SV_PEND"' 2>/dev/null)"
 got="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _sv_observe_emit i2 "$(date +%s)" supervise S; printf '%s %s %s' "${SV_K:-none}" "$SV_OUT" "$SV_PEND" ) )"
 [ "$got" = "none 1 1" ] && [ "$(rows i2)" = 0 ] && ok "a held lock: no row, target stays pending and owed a waiter" || no "held lock: [$got] rows=$(rows i2)"
 touch -t "$(date -r $(( $(date +%s) - 600 )) +%Y%m%d%H%M.%S 2>/dev/null || date -d @$(( $(date +%s) - 600 )) +%Y%m%d%H%M.%S)" "$OSRC_HOME/lanes/state/i2.lock"
@@ -62,15 +70,38 @@ lib _sv_observe_emit i2 "$(date +%s)" supervise S; lib _sv_observe_emit i2 "$(da
 [ "$(rows i2)" = 1 ] && [ ! -d "$OSRC_HOME/lanes/state/i2.lock" ] && ok "a lock left by a killed run (10 min old) is broken and released" || no "stale lock: rows=$(rows i2)"
 lib _sv_observe_emit i2 "$(date +%s)" supervise S; lib _sv_observe_emit i2 "$(date +%s)" beacon S
 [ "$(rows i2)" = 1 ] && ok "repeat observers of an unchanged idle add no row" || no "repeat rows=$(rows i2)"
-# Two supervise processes at once for the same orchestrator: one row, one delivery in total.
-fresh 3; own S i3; pane i3 cc-idle-after-work.txt
-( sup --session S > "$TMP/a.out" ) & pa=$!; ( sup --session S > "$TMP/b.out" ) & pb=$!
-# whichever finishes first leaves the other blocking on the reported idle: end it once one is done
-i=0; while [ "$i" -lt 600 ] && ! grep -q '^EVENT' "$TMP/a.out" "$TMP/b.out" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
-sleep 3; kill "$pa" "$pb" 2>/dev/null; wait "$pa" "$pb" 2>/dev/null
-n="$(cat "$TMP/a.out" "$TMP/b.out" | grep -c '^EVENT idle i3 ')"
-[ "$(rows i3)" = 1 ] && ok "two concurrent supervises log one idle row" || no "concurrent rows=$(rows i3)"
-[ "$n" = 1 ] && ok "and deliver it once between them" || no "delivered $n times: $(cat "$TMP/a.out" "$TMP/b.out")"
+# Locks a run holds are released by its EXIT trap (TERM/INT/HUP exit through it).
+got="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _SV_HELD=""; _sv_target_lock zz && _sv_lock_try "$OSRC_HOME/supervise/S/delivered.lock" 30
+          trap '_sv_main_exit' EXIT; kill -TERM $BASHPID; sleep 5 ) 2>/dev/null; ls -d "$OSRC_HOME/lanes/state/zz.lock" "$OSRC_HOME/supervise/S/delivered.lock" 2>/dev/null)"
+[ -z "$got" ] && ok "TERM releases the target lock and the ledger lock this run held" || no "locks left after TERM: $got"
+
+echo "=== M3: two supervises armed for one session: only the newest delivers ==="
+fresh 3; own S i3; pane i3 cc-working-turn.txt
+armed_n() { ls "$OSRC_HOME/supervise/S"/armseq.[0-9]* 2>/dev/null | grep -c .; }
+waitfor() { local i=0; while [ "$i" -lt 600 ] && ! eval "$1"; do sleep 0.1; i=$((i+1)); done; eval "$1"; }
+( sup --session S > "$TMP/a.out" ) & pa=$!
+waitfor '[ "$(armed_n)" -ge 1 ]' || no "first supervise never armed"
+( sup --session S > "$TMP/b.out" ) & pb=$!
+waitfor '[ "$(armed_n)" -ge 2 ]' || no "second supervise never armed"
+cp "$FX/cc-idle-after-work.txt" "$TMP/panes/i3.screen"   # the event arrives after both are armed
+wait "$pa" "$pb"
+grep -q '^EVENT idle i3 ' "$TMP/b.out" && ok "the newest supervise delivers the idle" || no "newest did not deliver: a=[$(cat "$TMP/a.out")] b=[$(cat "$TMP/b.out")]"
+grep -q '^EVENT' "$TMP/a.out" && no "the older, unread supervise took an event: [$(cat "$TMP/a.out")]" || ok "the older supervise delivers nothing"
+grep -q 'superseded by a newer supervise for this session' "$TMP/a.out" && ok "the older one exits with a 'superseded' line" || no "no superseded line: [$(cat "$TMP/a.out")]"
+[ "$(rows i3)" = 1 ] && ok "one idle row logged between them" || no "concurrent rows=$(rows i3)"
+[ -z "$(ls "$OSRC_HOME/supervise/S"/armseq.[0-9]* 2>/dev/null)" ] && ok "both removed their arm records on exit" || no "arm records left: $(ls "$OSRC_HOME/supervise/S")"
+
+echo "=== M2: a busy ledger lock never moves the cursor past an undelivered event ==="
+fresh 7; own S q7; pane q7 cc-question-live.txt
+mkdir "$OSRC_HOME/supervise/S/delivered.lock"   # left by a run killed mid-delivery, still fresh
+out="$(OSRC_SUPERVISE_LEDGER_STALE=3600 OSRC_SUPERVISE_MAX_SECS=8 sup --session S)"
+grep -q '^EVENT question q7 ' <<<"$out" && no "delivered while the ledger was locked: [$out]" || ok "ledger locked: nothing printed"
+read -r cur _ 2>/dev/null < "$OSRC_HOME/supervise/S/cursor"
+[ "$(rows q7)" = 1 ] && [ "${cur:-0}" -lt "$(wc -c < "$OSRC_HOME/lanes/events.jsonl" | tr -d ' ')" ] \
+  && ok "the question is logged and the cursor did not move past it (cursor ${cur:-none})" || no "cursor moved past the undelivered question: cursor=${cur:-none} rows=$(rows q7)"
+rmdir "$OSRC_HOME/supervise/S/delivered.lock"
+out="$(sup --session S)"
+grep -q '^EVENT question q7 ' <<<"$out" && ok "the logged question is delivered once the lock is free (cursor was not advanced)" || no "question lost: [$out]"
 
 echo "=== an idle lane that handed in a watched <lane>.DONE is done, not idle ==="
 fresh 4; own S osrc-auto-S3; pane osrc-auto-S3 cc-idle-after-work.txt
@@ -97,6 +128,28 @@ mkdir -p "$TMP/out5"; : > "$TMP/out5/S4.DONE"; touch -t 202601010000 "$TMP/out5/
 reg osrc-auto-S4 "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 out="$(sup --session S --watch "$TMP/out5")"
 grep -q '^EVENT idle osrc-auto-S4 ' <<<"$out" && ok "a DONE older than the session start stays idle" || no "stale DONE: [$out]"
+echo "=== M1: a reused session's previous-round DONE never outranks its live screen ==="
+fresh 8; own S osrc-auto-S5; pane osrc-auto-S5 cc-idle-after-work.txt
+past() { date -r $(( $(date +%s) - $1 )) +%Y%m%d%H%M.%S 2>/dev/null || date -d @$(( $(date +%s) - $1 )) +%Y%m%d%H%M.%S; }
+reg osrc-auto-S5 "$(date -u -r $(( $(date +%s) - 120 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d @$(( $(date +%s) - 120 )) +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$TMP/out8"; : > "$TMP/out8/S5.DONE"; touch -t "$(past 60)" "$TMP/out8/S5.DONE"   # round 1, inside this session
+out="$(OSRC_SUPERVISE_SETTLE=5 sup --session S --watch "$TMP/out8")"
+grep -q '^EVENT done osrc-auto-S5 ' <<<"$out" && ok "round 1: S5.DONE -> done" || no "round 1: [$out]"
+# Round 2 on the same session: it works again (supervise sees it), then the screen changes.
+pane osrc-auto-S5 cc-working-turn.txt; lib _sv_observe_all beacon
+scr() { lib _sv_target_screen osrc-auto-S5 | head -1; }
+pane osrc-auto-S5 cc-idle-bg-shell.txt
+[ "$(scr)" = working ] && ok "round 2, background shell running: working, not the old DONE" || no "bg shell read as $(scr)"
+pane osrc-auto-S5 cc-question-live.txt
+[ "$(scr)" = question ] && ok "round 2, live question: question, not the old DONE" || no "question read as $(scr)"
+lib _sv_idle_owed osrc-auto-S5; [ "$?" = 0 ] && ok "round 2 question: owed a waiter" || no "round 2 question read as settled"
+pane osrc-auto-S5 cc-idle-after-work.txt
+[ "$(scr)" = idle ] && ok "round 2 stopped without a new DONE: idle" || no "round 2 idle read as $(scr)"
+lib _sv_idle_owed osrc-auto-S5; [ "$?" = 0 ] && ok "round 2 idle with only the old DONE: owed a waiter" || no "stale DONE settled the lane"
+lib _sv_observe_all beacon
+touch -t "$(past -5)" "$TMP/out8/S5.DONE"   # round 2's own hand-in (5 s ahead: never the same second as a read)
+[ "$(scr)" = done ] && ok "round 2's own DONE: done" || no "round 2 DONE read as $(scr)"
+
 # No watch and no contract: the idle says how to register a done marker.
 fresh 6; own S i6; pane i6 cc-idle-after-work.txt
 out="$(sup --session S)"; grep -q '^EVENT idle i6 .*no done marker registered: re-arm with --watch' <<<"$out" && ok "idle with nothing registered names --watch / --done-when" || no "hint: [$out]"

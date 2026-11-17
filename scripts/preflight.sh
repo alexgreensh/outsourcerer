@@ -148,6 +148,8 @@ done
 rm -rf "$L"
 
 echo
-[ -z "$loadsens" ] || echo "load-sensitive (not blocking, open tasks in ${PREFLIGHT_OUT:-out}/LOAD-SENSITIVE.md):$loadsens"
+if [ "$fail" = 0 ] && [ -n "$loadsens" ]; then
+  echo "preflight: LOAD-SENSITIVE ($(( $(date +%s) - t0 ))s). Not blocking, but not green:$loadsens failed under load and passed alone; open tasks in ${PREFLIGHT_OUT:-out}/LOAD-SENSITIVE.md."; exit 0
+fi
 if [ "$fail" = 0 ]; then echo "preflight: GREEN ($(( $(date +%s) - t0 ))s). Not covered here: Windows Git Bash and uutils (CI jobs) and suites reached only through outsourcerer.sh."; exit 0; fi
 echo "preflight: FAILED ($(( $(date +%s) - t0 ))s)."; exit 1

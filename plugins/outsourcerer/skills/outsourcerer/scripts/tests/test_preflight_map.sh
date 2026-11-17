@@ -38,6 +38,13 @@ grep -q 'FAIL: a timed out' "$f" && grep -q 'FAIL: b' "$f" && grep -q '^## .* te
 grep -q '^## .* test_y$' "$f" && [ "$(grep -c '^# Load-sensitive' "$f")" = 1 ] && ok "appends: second entry added, header written once" || no "append: $(cat "$f")"
 grep -q 'never add sleeps or retries' "$f" && ok "the entry is a task (fix or delete), not a pass" || no "task text"
 grep -q 'passed alone (load-sensitive)' scripts/preflight.sh && no "the old warn line is still there" || ok "the old 'passed alone -> warn' line is gone"
+# The closing line: a recorded load-sensitive suite says LOAD-SENSITIVE, never GREEN (review round 2).
+tail_logic="$(sed -n '/^if \[ "\$fail" = 0 \] && \[ -n "\$loadsens" \]/,/^echo "preflight: FAILED/p' scripts/preflight.sh)"
+run_tail() { ( fail=$1; loadsens="$2"; t0=$(date +%s); eval "$tail_logic" ) 2>/dev/null; }
+o1="$(run_tail 0 " test_x")"; o2="$(run_tail 0 "")"; o3="$(run_tail 1 " test_x")"
+grep -q '^preflight: LOAD-SENSITIVE .*test_x' <<<"$o1" && ! grep -q GREEN <<<"$o1" && ok "load-sensitive recorded -> 'preflight: LOAD-SENSITIVE', not GREEN" || no "wording: [$o1]"
+grep -q '^preflight: GREEN' <<<"$o2" && ok "nothing recorded -> GREEN" || no "green: [$o2]"
+grep -q '^preflight: FAILED' <<<"$o3" && ok "a real failure still says FAILED" || no "failed: [$o3]"
 git check-ignore -q out/LOAD-SENSITIVE.md && ok "<repo>/out/ is git-ignored, so the task file never enters a lane diff" || no "out/ not ignored"
 
 echo "RESULT: $pass passed, $fail failed"
