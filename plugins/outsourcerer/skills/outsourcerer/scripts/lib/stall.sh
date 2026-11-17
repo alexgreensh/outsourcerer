@@ -1,0 +1,198 @@
+# shellcheck shell=bash
+# lib/stall.sh: no lane ever waits unseen (S4, 0.17). Sourced by outsourcerer.sh (lib loader);
+# function definitions only. Screen reads and files, never a model call.
+#
+# Incidents this answers (briefs/S4-no-stalls.md):
+#  1. A lane ended its turn "after it reports I continue" while its background shell ran; nothing woke
+#     it for 20 min. -> `stalled` is its own event, distinct from idle, and supervise nudges once.
+#  2. An approval keystroke did not land and nobody re-checked. -> approval-not-landed.
+#  3. False idle alerts trained the orchestrator to ignore idle. -> a lane waiting on its own shell is
+#     never `idle`; a lane really stuck escalates as `stalled`.
+#  5. A supervise exited and nothing noticed. -> watcher liveness (osrc_watcher_gap).
+#
+# A lane is STALLED when it is idle and
+#   bgshell  its own background shell still runs (Claude Code should wake it, and sometimes does not),
+#            for OSRC_STALL_MIN minutes (default 5) of unchanged screen; or
+#   promise  its last message promises to continue later ("after it reports I continue") with nothing
+#            running that could wake it: at once (after the usual confirm read); or
+#   quiet    a plain idle whose screen has not changed for OSRC_STALL_MIN minutes.
+# First stall of an episode: supervise types ONE nudge into the lane itself (OSRC_AUTONUDGE=0 turns it
+# off; then the stall wakes the orchestrator with a NEXT that nudges) and logs an informational
+# `nudged` row. Still stalled OSRC_STALL_MIN after the nudge: EVENT stalled to the orchestrator, plus a
+# needs-you row for Mission Control. A lane at a question or an approval is never nudged.
+
+_sv_stall_secs() { printf '%s' $(( $(_sv_num "${OSRC_STALL_MIN:-}" 5) * 60 )); }
+
+# Reminder interval per kind: the prompt-like kinds re-report every 5 minutes, the rest every 20.
+# OSRC_SUPERVISE_REMIND (minutes) overrides every kind.
+_sv_remind_secs() { # <kind>
+  if [ -n "${OSRC_SUPERVISE_REMIND:-}" ]; then printf '%s' $(( $(_sv_num "$OSRC_SUPERVISE_REMIND" 5) * 60 )); return 0; fi
+  case "$1" in idle|stalled|question|approval|approval-not-landed) printf 300 ;; *) printf 1200 ;; esac
+}
+
+# ---- promise to continue later -------------------------------------------------------------------
+# Read from the last prose lines of the history region (never the composer, so the orchestrator's own
+# typed text is not evidence). Future tense about something the lane is waiting on.
+_SV_PROMISE_RE='((after|once|when) (it|that|this|they|the [^.;]{1,60}) (reports|report|finishes|finish|completes|complete|is done|are done|returns|lands|exits|comes back)|(i'"'"'ll|i will|i'"'"'m going to) (continue|resume|carry on|pick (it|this|that) (back )?up|check (back|its output|the output|on it))|(waiting|wait) (for|on) (it|that|this|the [^.;]{1,40}) to (finish|report|complete|return))'
+_sv_promise() { # -> 0 + the line, when the lane's last words promise to continue later
+  local line
+  line="$(_sv_history_tail 8 | grep -v '^[[:space:]]*$' | grep -Ev '^[[:space:]]*[^[:alnum:][:space:]]{1,3}[[:space:]]+[A-Z][a-z]+ for [0-9]' | tail -3 \
+    | grep -Ei "$_SV_PROMISE_RE" | tail -1)"
+  [ -n "$line" ] || return 1
+  printf '%s' "$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//' | cut -c1-120)"
+}
+
+# ---- nudge ----------------------------------------------------------------------------------------
+_SV_NUDGE_BG='You are idle while waiting on a background task. Check its output now; if it hung, kill it and rerun in the foreground, then continue your brief.'
+_SV_NUDGE_QUIET='You have been idle with no hand-in for a while. If your brief is finished, write its hand-in now; if you are waiting on something, check it now; otherwise continue your brief.'
+_sv_nudge_text() { case "$1" in quiet) printf '%s' "$_SV_NUDGE_QUIET" ;; *) printf '%s' "$_SV_NUDGE_BG" ;; esac; }
+_sv_nudge_cmd() { # <id> <why> -> the shell command that nudges (a NEXT)
+  printf 'OUTSOURCERER_TMUX=%s %s session send %q' "$1" "$SCRIPT_PATH" "$(_sv_nudge_text "$2")"
+}
+_sv_nudge_send() { # <id> <why>: through session send, which refuses to type into a menu and verifies
+  # the text was submitted. OSRC_NUDGE_SEND_CMD (tests) receives <id> <text> instead.
+  if [ -n "${OSRC_NUDGE_SEND_CMD:-}" ]; then "$OSRC_NUDGE_SEND_CMD" "$1" "$(_sv_nudge_text "$2")" >/dev/null 2>&1; return; fi
+  OUTSOURCERER_TMUX="$1" OSRC_STREAM=1 "$SCRIPT_PATH" session send "$(_sv_nudge_text "$2")" >/dev/null 2>&1
+}
+_sv_is_reviewer() { # <id>: the queue's reviewer sits idle between items by design
+  type _osrc_review_reviewer >/dev/null 2>&1 && [ "$(_osrc_review_reviewer 2>/dev/null)" = "$1" ]
+}
+
+# Mission Control needs-you rows: lanes/needs/<id> = "<kind>\t<since>\t<detail>".
+_sv_needs_set() { # <id> <kind> <since> <detail>
+  local d; d="$(_sv_lanes)/needs"; mkdir -p "$d" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\n' "$2" "$3" "$(printf '%s' "$4" | tr '\t\n' '  ' | cut -c1-200)" > "$d/$1.tmp.$$" && mv -f "$d/$1.tmp.$$" "$d/$1"
+}
+_sv_needs_clear() { rm -f "$(_sv_lanes)/needs/$1" 2>/dev/null; return 0; }
+
+# The lane worked again: a nudge more than two windows old is spent, the episode is over.
+_sv_stall_working() { # <id> <now>
+  local f nts; f="$(_sv_lanes)/state/$1.nudge"
+  [ -f "$f" ] || { _sv_needs_clear "$1"; return 0; }
+  read -r nts _ 2>/dev/null < "$f"; nts="$(_sv_num "$nts" 0)"
+  if [ $(( $2 - nts )) -ge $(( 2 * $(_sv_stall_secs) )) ]; then rm -f "$f"; _sv_needs_clear "$1"; fi
+  return 0
+}
+_sv_stall_reset() { rm -f "$(_sv_lanes)/state/$1.nudge" 2>/dev/null; _sv_needs_clear "$1"; }
+
+# _sv_stall_observe <id> <now> <why: bgshell|promise|quiet> <evidence> [src] [owner]
+# Called by _sv_observe with SVS_* loaded. rc 0 = a stall (SV_K/SV_D/SV_NX/SV_H set, or a nudge sent and
+# logged as `nudged`); rc 1 = not (yet) a stall, caller keeps its own reading.
+_sv_stall_observe() {
+  local id="$1" now="$2" why="$3" ev="$4" src="${5:-supervise}" owner="${6:-}" win f nts age what
+  win="$(_sv_stall_secs)"; age=$(( now - SVS_CHANGED ))
+  case "$why" in bgshell|quiet) [ "$age" -ge "$win" ] || return 1 ;; esac
+  [ "$why" = quiet ] && _sv_is_reviewer "$id" && return 1
+  case "$why" in
+    bgshell) what="idle $(( age / 60 ))m while its background shell still runs ($ev)" ;;
+    promise) what="idle after promising to continue later, with nothing running to wake it: \"$ev\"" ;;
+    *)       what="idle $(( age / 60 ))m with no hand-in and no change on screen" ;;
+  esac
+  SV_OUT=1; f="$(_sv_lanes)/state/$id.nudge"
+  nts=""; [ -f "$f" ] && read -r nts _ 2>/dev/null < "$f"
+  if [ -z "$nts" ]; then
+    if [ "${OSRC_AUTONUDGE:-1}" = 0 ]; then
+      SV_K=stalled; SV_D="$what"; SV_H="$(printf 'stall:%s:%s' "$why" "$SVS_HASH" | cksum | awk '{print $1}')"
+      SV_NX="$(_sv_nudge_cmd "$id" "$why")"
+      _sv_needs_set "$id" stalled "$SVS_CHANGED" "$what"
+      return 0
+    fi
+    mkdir -p "${f%/*}" 2>/dev/null; printf '%s %s\n' "$now" "$why" > "$f"
+    if _sv_nudge_send "$id" "$why"; then
+      _sv_append nudged "$id" "autonudged once: $what" "OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read" "$src" "$owner"
+      SV_PEND=1; return 0
+    fi
+    # The nudge itself did not land: nobody else will move this lane, so wake the orchestrator now.
+    SV_K=stalled; SV_D="$what (the autonudge could not be sent)"; SV_NX="$(_sv_nudge_cmd "$id" "$why")"
+    SV_H="$(printf 'escalate:%s' "$now" | cksum | awk '{print $1}')"
+    _sv_needs_set "$id" stalled "$SVS_CHANGED" "$SV_D"
+    return 0
+  fi
+  nts="$(_sv_num "$nts" 0)"
+  if [ $(( now - nts )) -lt "$win" ]; then SV_PEND=1; return 0; fi
+  SV_K=stalled; SV_D="still stalled $(( (now - nts) / 60 ))m after one autonudge: $what"
+  SV_H="$(printf 'escalate:%s' "$nts" | cksum | awk '{print $1}')"   # one escalation per nudge, reminded every 5m
+  SV_NX="OUTSOURCERER_TMUX=$id $SCRIPT_PATH session read"
+  _sv_needs_set "$id" stalled "$nts" "$SV_D"
+  return 0
+}
+
+# ---- age of an unresolved event --------------------------------------------------------------------
+# state/<id>.first = "<key> <first-seen>": the first time this exact event (kind+hash) was reported.
+_sv_first_seen() { # <id> <key> <now> -> epoch the key was first reported (records it when new)
+  local f k t; f="$(_sv_lanes)/state/$1.first"
+  read -r k t 2>/dev/null < "$f"
+  if [ "$k" = "$2" ] && [ -n "$t" ]; then _sv_num "$t" "$3"; return 0; fi
+  mkdir -p "${f%/*}" 2>/dev/null; printf '%s %s\n' "$2" "$3" > "$f"; printf '%s' "$3"
+}
+
+# ---- approval keystrokes that did not land ---------------------------------------------------------
+# Every outsourcerer path that types an answer into a prompt notes it: state/<id>.keysent =
+# "<ts>\t<screen hash>\t<who>". If the same prompt screen is still open OSRC_NOT_LANDED_SECS (default 5)
+# later, supervise reports approval-not-landed once, so the answer is retried instead of assumed.
+# Same capture path and normalization as _sv_observe's screen hash, so the two compare.
+_sv_screen_hash() { _sv_pane_text "$1" "${2:-$(_osrc_screen_capture "$1" 2>/dev/null)}" | cksum | awk '{print $1}'; }
+osrc_keys_sent() { # <pane> <who> [screen hash taken before the keys]
+  local f; f="$(_sv_lanes)/state/$1.keysent"; mkdir -p "${f%/*}" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\n' "$(_sv_now)" "${3:-$(_sv_screen_hash "$1")}" "$2" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
+osrc_keys_landed() { rm -f "$(_sv_lanes)/state/$1.keysent" 2>/dev/null; return 0; }
+_sv_not_landed() { # <id> <now> <screen-hash> -> 0 + detail when a sent answer left this prompt open
+  local f ts h who; f="$(_sv_lanes)/state/$1.keysent"
+  [ -f "$f" ] || return 1
+  IFS="$(printf '\t')" read -r ts h who 2>/dev/null < "$f"; ts="$(_sv_num "$ts" 0)"
+  [ $(( $2 - ts )) -ge "$(_sv_num "${OSRC_NOT_LANDED_SECS:-}" 5)" ] || return 1
+  rm -f "$f"
+  [ "$h" = "$3" ] || return 1   # the screen moved: the answer landed (a new prompt is its own event)
+  printf 'an answer was sent %ss ago (%s) but the same prompt is still open: retry it' "$(( $2 - ts ))" "${who:-unknown}"
+}
+# The answering command saw its own keystroke fail: log and print the event now (and clear the note,
+# so supervise does not report the same miss a second time).
+osrc_not_landed_emit() { # <pane> <who>
+  local id="$1" now d o next owners=""
+  now="$(_sv_now)"; d="the prompt is still open after $2 sent its answer: retry it"
+  next="OUTSOURCERER_TMUX=$id $SCRIPT_PATH session answer"
+  rm -f "$(_sv_lanes)/state/$id.keysent" 2>/dev/null
+  for o in "$OSRC_HOME"/owners/*/"$id"; do [ -e "$o" ] && owners="$owners $(basename "$(dirname "$o")")"; done
+  if [ -z "$owners" ]; then _sv_append approval-not-landed "$id" "$d" "$next" answer
+  else for o in $owners; do _sv_append approval-not-landed "$id" "$d" "$next" answer "$o"; done; fi
+  printf 'EVENT approval-not-landed %s %s %s\nNEXT %s\n' "$id" "$now" "$d" "$next"
+}
+
+# ---- watcher liveness -------------------------------------------------------------------------------
+# supervise stamps supervise/<key>/alive every poll. A session that owns live lanes with no supervise
+# armed for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
+osrc_watcher_alive() { printf '%s\n' "${2:-$(_sv_now)}" > "$1/alive" 2>/dev/null; return 0; }
+osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 when watched or nothing live
+  local sid="$1" now="${2:-$(_sv_now)}" d f pid last=0 start=0 m live=0 t
+  case "$sid" in ''|.*|*/*) return 1 ;; esac
+  d="$OSRC_HOME/owners/$sid"; [ -d "$d" ] || return 1
+  for f in "$OSRC_HOME/supervise/$sid"/armed.*; do
+    [ -f "$f" ] || continue; pid="${f##*.}"
+    kill -0 "$pid" 2>/dev/null && return 1
+  done
+  last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$sid/alive" 2>/dev/null)" 0)"
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    case "${f##*/}" in .*|watch.*) continue ;; esac
+    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; m="$(_sv_num "$m" 0)"
+    { [ "$start" = 0 ] || [ "$m" -lt "$start" ]; } && start="$m"
+  done
+  [ "$start" -gt 0 ] || return 1
+  [ "$last" -gt "$start" ] && start="$last"
+  [ $(( now - start )) -gt "$(_sv_num "${OSRC_WATCHER_GRACE:-}" 120)" ] || return 1
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue; t="${f##*/}"
+    case "$t" in .*|watch.*) continue ;; esac
+    case "$(_owned_live_state "$t" 2>/dev/null)" in live|waiting) live=$((live + 1)) ;; esac
+  done
+  [ "$live" -gt 0 ] || return 1
+  printf '%s %s\n' $(( (now - start) / 60 )) "$live"
+}
+osrc_watcher_warn() { # [sid]: one stderr line when this session's lanes have nobody watching
+  local sid="${1:-}" g
+  [ -n "$sid" ] || sid="$(_owner_sid 2>/dev/null)"
+  g="$(osrc_watcher_gap "$sid")" || return 0
+  printf '[outsourcerer] no watcher for %sm: %s live lane(s) owned by this session and no supervise armed. Run as a background command: %s supervise --session %s\n' \
+    "${g%% *}" "${g##* }" "$SCRIPT_PATH" "$sid" >&2
+}

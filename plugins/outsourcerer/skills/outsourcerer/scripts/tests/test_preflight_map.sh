@@ -23,6 +23,8 @@ for f in supervise_watch.sh remote.sh done.sh; do
   got="$(_suites_for "$L/$f")"
   has "$got" test_supervise && ok "lib/$f -> test_supervise (explicit map)" || no "lib/$f missed test_supervise: [$got]"
 done
+got="$(_suites_for "$L/stall.sh")"; has "$got" test_stall && has "$got" test_supervise && ok "lib/stall.sh -> test_stall + test_supervise (S4)" || no "stall: [$got]"
+got="$(_suites_for "$L/hub-assets/hub-alive.js")"; has "$got" test_mc_alive && ok "hub-assets/hub-alive.js -> test_mc_alive (S4)" || no "hub-alive: [$got]"
 got="$(_suites_for "$L/guards.sh")"; has "$got" test_guards && ok "basename grep still maps lib/guards.sh -> test_guards" || no "guards: [$got]"
 got="$(_suites_for "$T/test_guards.sh")"; [ "$got" = " test_guards" ] && ok "a changed suite runs itself" || no "suite: [$got]"
 got="$(_suites_for "$(printf '%s\n%s\n' "$L/remote.sh" "$L/done.sh")")"

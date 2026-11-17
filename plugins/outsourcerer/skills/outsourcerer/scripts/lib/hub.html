@@ -403,7 +403,7 @@ a.pill svg { width: 13px; height: 13px; }
 </div>
 <div class="hc" id="hc" role="tooltip" hidden></div>
 
-<script src="assets/hub-home.js"></script><script src="assets/hub-history.js"></script><script src="assets/hub-plans.js"></script>
+<script src="assets/hub-alive.js"></script><script src="assets/hub-home.js"></script><script src="assets/hub-history.js"></script><script src="assets/hub-plans.js"></script>
 <script src="assets/hub-decide.js"></script><script src="assets/hub-proof.js"></script>
 <script>
 (function () {
@@ -687,7 +687,7 @@ a.pill svg { width: 13px; height: 13px; }
     $('shipwrap').hidden = !done.length; $('scount').textContent = done.length ? String(done.length) : '';
     const sopen = shipOpen() || done.some((p) => p.id === current); $('sfold').setAttribute('aria-expanded', String(sopen)); slist.hidden = !sopen;
     if (projects.length && !live.length) list.appendChild(el('p', null, 'Nothing building right now.'));
-    if (!projects.length) { list.appendChild(el('p', null, pullErr ? 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')' : (db ? 'Nothing running. A project appears here when a Claude Code session hands work to Outsourcerer.' : 'Sign in on claude.ai to see your projects.'))); return; }
+    if (!projects.length) { list.appendChild(el('p', null, pullErr ? (/HTTP 40[13]/.test(pullErr) ? 'Older Mission Control key: press Reopen at the top, or run outsourcerer mc.' : 'Cannot reach the local hub — is `hub serve` running? (' + pullErr + ')') : (db ? 'Nothing running. A project appears here when a Claude Code session hands work to Outsourcerer.' : 'Sign in on claude.ai to see your projects.'))); return; }
     projects.forEach((p) => {
       const box = el('div', 'proj' + (current === p.id ? ' on' : ''));
       const b = el('button', 'pbtn'); b.type = 'button'; b.id = 'p-' + p.id;

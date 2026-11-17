@@ -298,8 +298,9 @@ _managed_menu_detect() { # <pane>
 # type into a composer. The lock is released after Enter, before the read-only close-verification
 # poll (holding it across a 1.5s poll would block sibling mutations for no safety benefit).
 _managed_menu_answer() { # <pane> <selector>
-  local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i key
+  local pane="$1" sel="$2" kind report line lab target_pos sel_pos n delta i key pre=""
   _endpoint_mutation_lock "$pane" || return 1
+  type _sv_screen_hash >/dev/null 2>&1 && pre="$(_sv_screen_hash "$pane")"   # S4: the prompt as it was before the keys
   key="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
   # Revalidate the menu UNDER the lock — a concurrent send/control may have closed it since the
   # caller's detect. Detecting again here is the revalidation: "none" means the menu is gone and
@@ -340,14 +341,17 @@ _managed_menu_answer() { # <pane> <selector>
     *) echo "unrecognized menu kind '$kind'" >&2; _endpoint_mutation_unlock "$key"; return 1 ;;
   esac
   _endpoint_mutation_unlock "$key"
+  [ -z "$pre" ] || osrc_keys_sent "$pane" "session answer" "$pre"   # S4: supervise re-checks it landed
   # Verify the menu closed: bounded poll until the follow-up detect returns "none". Read-only — the
   # lock is no longer held (the mutation is complete).
   i=0
   while [ "$i" -lt "${OSRC_MENU_CLOSE_POLLS:-15}" ]; do
-    [ "$(_managed_menu_detect "$pane" | head -1 | awk '{print $2}')" = "none" ] && return 0
+    [ "$(_managed_menu_detect "$pane" | head -1 | awk '{print $2}')" = "none" ] && { [ -z "$pre" ] || osrc_keys_landed "$pane"; return 0; }
     sleep 0.1
     i=$((i + 1))
   done
   echo "answer sent but the menu did not close (still detected). Re-check with: $0 session read" >&2
+  # S4 incident 2: never assume a keystroke landed. Log + print approval-not-landed so it is retried.
+  [ -z "$pre" ] || osrc_not_landed_emit "$pane" "session answer"
   return 1
 }

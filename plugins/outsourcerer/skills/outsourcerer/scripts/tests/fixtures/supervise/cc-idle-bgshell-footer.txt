@@ -1,0 +1,39 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Ran 1 shell command
+⏺ I've paused for about 12 seconds while a background capture of my own idle pane runs. It's a deliberate live repro of incident 1. I resume when it completes.
+✻ Baked for 8m 5s · done 9:57 AM · 1 shell still running
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 | med | demo-app | (main) | ████░░░░░░ 42% | Quality A 84
+  ⤸ resumable | Drag:bloated tool results | 8m | week 56%
+  ⏵⏵ auto mode on · 1 shell · ← 15 agents · ↓ to manage

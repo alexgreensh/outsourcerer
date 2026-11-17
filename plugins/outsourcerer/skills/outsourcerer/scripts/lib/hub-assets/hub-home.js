@@ -300,10 +300,10 @@
       const all = []; running.forEach((p) => openDecs(p).forEach((d) => all.push({ p, d })));
       const ph = el('header', 'ph home');
       const waitingOn = new Set(all.map((x) => x.p.id)).size;
-      const err = ctx.pullErr;
-      const head = !projects.length ? (err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
+      const err = ctx.pullErr, oldKey = /HTTP 40[13]/.test(err || '');   // S4 G: a key from an older hub is not "hub down"
+      const head = !projects.length ? (oldKey ? 'This tab is from an older Mission Control' : err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
         : all.length ? all.length + (all.length === 1 ? ' decision waits on you' : ' decisions wait on you') : running.length ? 'Nothing is waiting on you' : 'Nothing is running right now';
-      const sub = !projects.length ? (err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
+      const sub = !projects.length ? (oldKey ? 'Its key no longer opens the data. Press Reopen at the top, or run "outsourcerer mc".' : err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
         : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : 'Everything you started has shipped.';
       ph.append(el('h1', null, head), el('p', 'lede', sub));
       if (!projects.length && db && !err) {   // MC3: an empty page says how to start, never a blank

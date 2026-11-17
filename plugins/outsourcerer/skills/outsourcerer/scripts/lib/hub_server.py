@@ -55,6 +55,17 @@ SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
 
+def _write_small(path, text):
+    """Atomic best-effort write of a small state file (never raises)."""
+    try:
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 class Hub:
     def __init__(self, osrc_home, engine, page_path, token):
         self.osrc_home = osrc_home
@@ -85,6 +96,16 @@ class Hub:
         # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
         # self-contained file, so its blocks are knowable at startup.
         self.script_hashes = self._script_hashes()
+        self.tab_seen = 0.0
+
+    def note_tab(self):
+        """S4: a tab fetched data with the current token. The engine reads hub/tab.seen to decide
+        whether work starting should pop Mission Control (lib/mc_alive.sh). Throttled to 10 s."""
+        now = time.time()
+        if now - self.tab_seen < 10:
+            return
+        self.tab_seen = now
+        _write_small(os.path.join(self.osrc_home, "hub", "tab.seen"), "%d\n" % int(now))
 
     def _script_hashes(self):
         try:
@@ -428,11 +449,32 @@ def make_handler(hub):
         def _deny(self):
             self._send_json({"error": "forbidden"}, 403)
 
+        def _reopen(self):
+            # S4 G: a tab holding an older token re-enters without the token ever being typed or
+            # leaving this origin. Only a top-level navigation the browser marks same-origin (the
+            # page's Reopen button) or none (typed into the address bar) is redirected, on a
+            # loopback Host (checked by do_GET). Cross-site requests and clients that send no
+            # Sec-Fetch-Site (curl, scripts) get 403: they cannot read the token through here.
+            sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            origin = (self.headers.get("Origin") or "").strip().lower()
+            port = self.server.server_address[1]
+            if sfs not in ("same-origin", "none") or (origin and origin not in (
+                    "http://127.0.0.1:%d" % port, "http://localhost:%d" % port, "http://[::1]:%d" % port)):
+                return self._deny()
+            self.send_response(302)
+            self._sec_headers()
+            self.send_header("Location", "/?t=" + urllib.parse.quote(hub.token))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self):
             if not self._host_ok():
                 return self._deny()
             u = urllib.parse.urlparse(self.path)
             path = u.path
+            if path == "/reopen":
+                return self._reopen()
             if path.startswith("/assets/"):
                 # A font fetch means a page is open — count it as a poll so the
                 # idle timer reflects real use.
@@ -461,6 +503,7 @@ def make_handler(hub):
             if not self._token_ok():
                 return self._deny()
             hub.last_poll = time.time()
+            hub.note_tab()
             if path == "/api/projects":
                 if not hub.first_export.wait(timeout=STARTING_WAIT):
                     return self._send_json({"generated_at": int(time.time()), "projects": [], "starting": True})
@@ -545,6 +588,9 @@ def main():
     if port != args.port:
         sys.stderr.write("[hub] port %d busy — serving on %d instead\n" % (args.port, port))
     url = "http://127.0.0.1:%d/?t=%s" % (port, urllib.parse.quote(token))
+    # S4 I: who serves this OSRC_HOME, so work starting can open the page once per hub process.
+    serve_json = os.path.join(args.osrc_home, "hub", "serve.json")
+    _write_small(serve_json, json.dumps({"pid": os.getpid(), "port": port, "started": int(time.time())}) + "\n")
     print("[outsourcerer] hub: %s" % url, flush=True)
 
     # The URL is out first; the first export then runs in the background and the first

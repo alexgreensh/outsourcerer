@@ -100,14 +100,15 @@ t0=$(date +%s); out="$(T=60 OSRC_SUPERVISE_SETTLE=40 sup --session S)"; dt=$(( $
 [ "$(printf '%s\n' "$out" | grep -c '^EVENT ')" = 3 ] && [ "$(printf '%s\n' "$out" | grep -c '^NEXT ')" = 3 ] && ok "three targets -> three EVENT/NEXT pairs" || no "batch: [$out]"
 [ "$(printf '%s\n' "$out" | grep '^EVENT' | awk '{print $2}' | tr '\n' ' ')" = "approval question idle " ] && ok "approval > question > idle" || no "order: $(printf '%s\n' "$out" | grep '^EVENT' | awk '{print $2}' | tr '\n' ' ')"
 
-echo "=== dedupe + remind after 20 min ==="
+echo "=== dedupe + remind (5 min for approvals, S4) ==="
 fresh 11; own S r1; pane r1 codex-approval.ansi
 sup --session S >/dev/null
 out="$(sup --session S --once)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$out" ] && ok "the same unresolved approval is not re-reported on the next arm" || no "dedupe: rc=$rc [$out]"
 read -r h c ck ch cs lk lt < "$OSRC_HOME/lanes/state/r1"; echo "$h $c $ck $ch $cs $lk $((lt - 1300))" > "$OSRC_HOME/lanes/state/r1"
-out="$(sup --session S --once)"; m="$(sed -n 's/^EVENT approval r1 .*still unresolved after \([0-9]*\)m.*/\1/p' <<<"$out")"
-[ "${m:-0}" -ge 21 ] && ok "re-reported after OSRC_SUPERVISE_REMIND minutes (${m}m)" || no "remind: [$out]"
+read -r fk ft < "$OSRC_HOME/lanes/state/r1.first"; echo "$fk $((ft - 1300))" > "$OSRC_HOME/lanes/state/r1.first"   # first sight, same fake clock
+out="$(sup --session S --once)"; m="$(sed -n 's/^EVENT approval r1 .*still unresolved, waiting \([0-9]*\)m.*/\1/p' <<<"$out")"
+[ "${m:-0}" -ge 21 ] && ok "re-reported after the reminder interval, with its age since first sight (${m}m)" || no "remind: [$out]"
 
 echo "=== replay: events logged while nobody waited return at once ==="
 fresh 12; own S p1; pane p1 codex-approval.ansi

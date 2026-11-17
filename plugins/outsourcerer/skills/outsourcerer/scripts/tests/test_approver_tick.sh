@@ -57,7 +57,7 @@ out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 3 ] && [ -z "$out" ] && ok || bad "repeat hold was not quiet (rc=$rc out=$out)"
 # hold deadline: OSRC_HOLD_MIN=0 re-emits "still held"
 out="$(OSRC_HOLD_MIN=0 osrc_approver_tick sess sess)"; rc=$?
-[ "$rc" = 2 ] && grep -q 'still held after' <<<"$out" && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
+[ "$rc" = 2 ] && grep -q 'still held, waiting' <<<"$out" && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
 # prompt gone -> held record cleared, rc 1
 CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"

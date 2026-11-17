@@ -20,7 +20,8 @@
 # Dedupe: observe+emit of a target runs under a per-target lock, and every printed row goes into a
 # per-orchestrator delivered ledger so no second supervise prints it again (lib/supervise_dedupe.sh).
 # Per target, the last event's kind+screen hash is kept in $OSRC_HOME/lanes/state/<id>; the
-# same unresolved event is appended again only after OSRC_SUPERVISE_REMIND minutes (default 20), so
+# same unresolved event is appended again only after OSRC_SUPERVISE_REMIND minutes (default 5 for
+# idle/stalled/question/approval, 20 for the rest; lib/stall.sh), so
 # a skipped event cannot sleep forever. Batching: after the first new event, supervise keeps polling
 # for OSRC_SUPERVISE_SETTLE seconds (default 20) so near-simultaneous events land in one wake.
 # No owned live work -> `EVENT done all`. Any internal error -> `EVENT failed supervise`, exit 2.
@@ -142,6 +143,8 @@ _sv_target_screen() {
   [ -n "$q" ] && { printf 'question\n%s\n' "$q"; return 0; }
   # Turn ended but its own background shell still runs: Claude Code wakes it when the shell exits.
   if [ "$st" = idle ] && hit="$(_sv_bg_shell)"; then printf 'working\nbackground shell still running: %s\n' "$hit"; return 0; fi
+  # S4: idle after promising to continue later, with no shell to wake it (lib/stall.sh)
+  if [ "$st" = idle ] && type _sv_promise >/dev/null 2>&1 && hit="$(_sv_promise)"; then ev="promises to continue later: $hit"; fi
   hist="$(_sv_history_tail)"
   hit="$(printf '%s\n' "$hist" | tail -1)"
   if _sv_api_banner "${OSRC_SCR_ENGINE:-$eng}" "$hit" "$(printf '%s\n' "$hist" | sed '$d' | grep -v '^[[:space:]]*$' | tail -1)"; then printf 'failed\napi-error: %s\n' "$(printf '%s' "$hit" | cut -c1-160)"; return 0; fi
@@ -264,8 +267,10 @@ _sv_observe() { # <id> <now> [src] [owner]
         0) # approved and verified closed: informational, never a wake; the lane is working again
            _sv_append approved "$id" "$(_sv_ev_detail "$out")" "$(_sv_ev_next "$out")" "$src" "$owner"
            SV_OUT=1; SV_PEND=1; SVS_CK=-; SVS_LK=-; _sv_state_write "$id"; return 0 ;;
-        2) # held and reported now (new hold, or past OSRC_HOLD_MIN): the approver's line, its NEXT
-           _sv_append approval "$id" "$(_sv_ev_detail "$out")" "$(_sv_ev_next "$out")" "$src" "$owner"
+        2) # held and reported now (new hold, or past OSRC_HOLD_MIN): the approver's line, its NEXT; its kind
+           # is approval, or approval-not-landed when it pressed and the prompt stayed open (S4)
+           case "$out" in "EVENT approval-not-landed "*) code=approval-not-landed ;; *) code=approval ;; esac
+           _sv_append "$code" "$id" "$(_sv_ev_detail "$out")" "$(_sv_ev_next "$out")" "$src" "$owner"
            SV_OUT=1; SVS_CK=-; SVS_LK="approval:approver"; SVS_LT="$now"; _sv_state_write "$id"; return 0 ;;
         3) # held, already reported: the approver owns the reminder clock
            SV_OUT=1; SVS_CK=-; _sv_state_write "$id"; return 0 ;;
@@ -280,7 +285,11 @@ _sv_observe() { # <id> <now> [src] [owner]
     rf="$(_sv_lanes)/state/$id.retry"
     [ "$st" = failed ] || rm -f "$rf" 2>/dev/null
     case "$st" in
-      approval) SV_K=approval; SV_D="approval prompt open: $ev"; SV_OUT=1; SVS_CK=- ;;
+      approval) SV_K=approval; SV_D="approval prompt open: $ev"; SV_OUT=1; SVS_CK=-
+        # S4: an answer was typed and the same prompt is still there -> retry it, never assume it landed
+        if type _sv_not_landed >/dev/null 2>&1 && rf="$(_sv_not_landed "$id" "$now" "$h")"; then
+          SV_K=approval-not-landed; SV_D="$rf: $ev"; SV_H="nl$now"; SV_NX="OUTSOURCERER_TMUX=$id $SCRIPT_PATH session answer"
+        fi ;;
       limit) SV_K=limit; SV_D="plan limit hit: $ev"; SVS_CK=- ;;
       failed)
         # API/login error banner: one automatic `continue` (through session send, which refuses
@@ -305,17 +314,22 @@ _sv_observe() { # <id> <now> [src] [owner]
         esac ;;
       working)
         SV_OUT=1; SV_PEND=1; SVS_CK=-
-        # A long test run in a background shell keeps the screen still on purpose: wait longer.
-        case "$ev" in "background shell still running"*) stall=$(( $(_sv_num "${OSRC_SUPERVISE_BG_STALL:-}" 60) * 60 )) ;; esac
-        if [ $(( now - SVS_CHANGED )) -ge "$stall" ]; then
-          SV_K=stalled; SV_D="working but the screen has not changed for $(( (now - SVS_CHANGED) / 60 ))m: $ev"
-        else SVS_LK=-; fi ;;   # healthy: forget the last event so a repeat of it reports again
+        case "$ev" in
+          "background shell still running"*)
+            # S4 incident 1: its turn ended while its own shell runs. Claude Code should wake it and once
+            # did not for 20 min: after OSRC_STALL_MIN of unchanged screen it is stalled (lib/stall.sh).
+            _sv_stall_observe "$id" "$now" bgshell "${ev#background shell still running: }" "$src" "$owner" || SVS_LK=- ;;
+          *) _sv_stall_working "$id" "$now"
+             if [ $(( now - SVS_CHANGED )) -ge "$stall" ]; then
+               SV_K=stalled; SV_D="working but the screen has not changed for $(( (now - SVS_CHANGED) / 60 ))m: $ev"
+             else SVS_LK=-; fi ;;   # healthy: forget the last event so a repeat of it reports again
+        esac ;;
       *)
         case "$st" in question|idle|done) ;; *) st=unknown ;; esac
         if _sv_confirm "$st" "$h" "$now"; then
           case "$st" in
             question) SV_K=question; SV_D="stopped and asked: $ev"; SV_OUT=1 ;;
-            done) SV_K=done; SV_D="finished: $ev"
+            done) SV_K=done; SV_D="finished: $ev"; _sv_stall_reset "$id"
                   # Key on the hand-in (contract file or branch tip), not only the screen: a lane
                   # that re-hands in by rewriting its DONE file is a new event.
                   rf="$(_sv_done_fp "$id")"
@@ -324,7 +338,10 @@ _sv_observe() { # <id> <now> [src] [owner]
                   case "$ev:$SVS_LK" in "hand-in "*:"done:$SV_H") ;; "hand-in "*) _sv_handin_note "$id" "$rf" "$h" ;; esac ;;
             idle)
               SV_OUT=1   # short of done: report it once, then keep watching for its next change
-              if [ "$(type -t osrc_done_state >/dev/null 2>&1 && osrc_done_state "$id" 2>/dev/null)" = not-done ]; then
+              # S4: a promise to continue later, or a plain idle unchanged for OSRC_STALL_MIN, is a stall
+              case "$ev" in "promises to continue later: "*) rf=promise ;; *) rf=quiet ;; esac
+              if _sv_stall_observe "$id" "$now" "$rf" "${ev#promises to continue later: }" "$src" "$owner"; then :
+              elif [ "$(type -t osrc_done_state >/dev/null 2>&1 && osrc_done_state "$id" 2>/dev/null)" = not-done ]; then
                 SV_K=idle; SV_D="finished its turn but its done contract does not hold yet"
               elif [ -f "$OSRC_HOME/done/$id.json" ] || [ -n "$(ls "$OSRC_HOME/watch" 2>/dev/null)" ]; then
                 SV_K=idle; SV_D="finished its turn, composer empty (no done marker)"
@@ -374,13 +391,13 @@ _sv_append() { # <kind> <target> <detail> <next> <src> [owner]
 _sv_emit() { # <id> <now> <src> [owner]
   local id="$1" now="$2" key remind detail
   [ -n "$SV_K" ] || return 0
-  remind=$(( $(_sv_num "${OSRC_SUPERVISE_REMIND:-}" 20) * 60 ))
+  remind="$(_sv_remind_secs "$SV_K")"   # S4: 5 min for idle/stalled/question/approval, else 20
   key="$SV_K:$SV_H"
   _sv_state_read "$id"
   if [ "$SVS_LK" = "$key" ]; then
     [ $(( now - SVS_LT )) -ge "$remind" ] || return 0
-    detail="still unresolved after $(( (now - SVS_LT) / 60 ))m: $SV_D"
-  else detail="$SV_D"; fi
+    detail="still unresolved, waiting $(( (now - $(_sv_first_seen "$id" "$key" "$now")) / 60 ))m: $SV_D"
+  else _sv_first_seen "$id" "$key" "$now" >/dev/null; detail="$SV_D"; fi
   _sv_append "$SV_K" "$id" "$detail" "${SV_NX:-$(_sv_next "$SV_K" "$id")}" "$3" "${4:-}" || return 1
   SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "$id"
 }
@@ -416,7 +433,7 @@ _sv_remote_poll() { # <src>
         key="$kind:$(printf '%s\n%s' "$detail" "$head" | cksum | awk '{print $1}')"
         _sv_target_lock "remote.$tgt" || { kind=""; continue; }   # another supervise is logging it
         _sv_state_read "remote.$tgt"
-        if [ "$SVS_LK" != "$key" ] || [ $(( now - SVS_LT )) -ge $(( $(_sv_num "${OSRC_SUPERVISE_REMIND:-}" 20) * 60 )) ]; then
+        if [ "$SVS_LK" != "$key" ] || [ $(( now - SVS_LT )) -ge "$(_sv_remind_secs "$kind")" ]; then
           _sv_append "$kind" "$tgt" "$detail" "$next" "$1" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
         fi
         _sv_target_unlock "remote.$tgt"
@@ -433,7 +450,7 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   { if [ "$3" = - ]; then tail -c +"$(( $2 + 1 ))" "$1"; else tail -c +"$(( $2 + 1 ))" "$1" | head -c "$(( $3 - $2 ))"; fi; } 2>/dev/null \
   | jq -r --argjson set "$4" --arg owner "$5" --argjson since "$(( $(_sv_now) - 86400 ))" '
     select(type=="object" and .ts >= $since and (($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
-    | ({approval:1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
+    | ({approval:1,"approval-not-landed":1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
       [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
        ((.id // "\(.ts)/\(.kind)/\(.target)/\(.detail)") | f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
@@ -441,7 +458,7 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
 
 # Informational kinds are logged and shown with the next real wake, but never wake on their own:
 # an `approved` row waking the orchestrator would bring back the approval toil the approver removes.
-_sv_informational() { case "$1" in approved) return 0 ;; esac; return 1; }
+_sv_informational() { case "$1" in approved|nudged) return 0 ;; esac; return 1; }
 
 _sv_approval_summary() { # <new TSV rows>: report only at an actual wake
   local count; count="$(printf '%s\n' "$1" | awk -F '\t' '$3 == "approved" { n++ } END { print n+0 }')"
@@ -613,6 +630,7 @@ _sv_main() { # <sid> <once> [ids...]
     # SIGALRM): an orphan worker would poll on as a ghost waiter, covering the stop guard and holding
     # the caller's pipe open. Exit with it.
     kill -0 "$$" 2>/dev/null || exit 12
+    osrc_watcher_alive "$dir" "$now"   # S4: watcher liveness (lib/stall.sh osrc_watcher_gap)
     if ! _sv_tick "$dir" "$now"; then
       _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
       exit 11
@@ -649,7 +667,7 @@ _sv_main() { # <sid> <once> [ids...]
     new="$(printf '%s\n%s' "$older" "$(_sv_read_range "$f" "$cursor" "$size" "$tj" "$sid")" | grep .)"
     new="$(_sv_ledger_filter "$ledger" "$new")"   # rows another supervise for this orchestrator already printed
     case ",${OSRC_SUPERVISE_AUTO:-}," in *,done,*) new="$(_sv_auto_filter "$new" "$dir")" ;; esac
-    real="$(printf '%s\n' "$new" | awk -F '\t' '$3 != "approved"' | grep .)"
+    real="$(printf '%s\n' "$new" | awk -F '\t' '$3 != "approved" && $3 != "nudged"' | grep .)"
     if [ -n "$real" ]; then
       [ -n "$first" ] || first="$now"
       # Settle only while some target could still produce an event (working / not yet confirmed).
