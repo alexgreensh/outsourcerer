@@ -11,6 +11,9 @@ All notable changes to the Outsourcerer plugin are documented here.
 - **Done means proven.** `outsourcerer proof run` runs the lane's checks itself and writes the proof: commit, commands, exit codes, pass and fail counts. A hand-in without proof for its exact commit goes back to the lane automatically. Mission Control shows "proved: 139 pass, 0 fail" or "unverified" with the reason.
 - **Three tries, then a person.** A lane that fails its proof three times stops and lands on your needs-you list with the failing lines, instead of looping and burning tokens.
 - **Reviews say their verdict out loud.** Reviewers start with one line, `VERDICT: MERGE`, `CHANGES must-fix=2 nit=1` or `BLOCK`. Only must-fix findings send a lane back; nits and pre-existing issues become notes. Re-reviews see only what changed since the last round: 61% smaller prompts.
+- **No lane waits unseen.** A lane that sits idle while its own background job runs, or after promising to "continue when it finishes", is now `stalled`, a separate event from idle. The watcher nudges it once by itself and tells you if that doesn't get it moving. Lanes waiting on a person are never nudged.
+- **Prompts never wait quietly.** Approval prompts and questions repeat every 5 minutes with their age, and an answer keypress that didn't land is reported instead of assumed. If your lanes have no watcher running, the next engine call and Mission Control both say so.
+- **Mission Control never looks dead.** A "Live, updated 5s ago" line is always on screen. A tab left over from an older Mission Control says so and offers Reopen instead of spinning, and Mission Control opens by itself when work starts on your desktop (`OSRC_MC_AUTO_OPEN=0` turns that off).
 - **Repos tune their own checks** in `.outsourcerer/guards.conf`, and `.outsourcerer/guards/`, `guards.conf` and `verify` can now be committed while lane state stays ignored.
 
 ### Fixed
