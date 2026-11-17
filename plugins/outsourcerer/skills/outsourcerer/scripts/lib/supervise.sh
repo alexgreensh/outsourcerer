@@ -151,7 +151,11 @@ _sv_target_screen() {
   # running shell, an error banner, a limit or a question each outrank a file, which may be the
   # previous round's (_sv_handin_file only counts one newer than the latest working stretch).
   case "$st" in idle|composer)
-    if hit="$(_sv_handin_file "$id")"; then printf 'done\nhand-in %s written\n' "$(basename "$hit")"; return 0; fi ;;
+    if hit="$(_sv_handin_file "$id")"; then
+      if _sv_handin_moved_on "$id" "$(_sv_fp "$hit")" "$(_sv_pane_text "$id" "$cap" | cksum | awk '{print $1}')"; then
+        ev="$ev (screen changed since $(basename "$hit") was reported; no new hand-in)"
+      else printf 'done\nhand-in %s written\n' "$(basename "$hit")"; return 0; fi
+    fi ;;
   esac
   printf '%s\n%s\n' "$st" "$ev"
 }
@@ -315,7 +319,9 @@ _sv_observe() { # <id> <now> [src] [owner]
                   # Key on the hand-in (contract file or branch tip), not only the screen: a lane
                   # that re-hands in by rewriting its DONE file is a new event.
                   rf="$(_sv_done_fp "$id")"
-                  [ -n "$rf" ] && { SV_H="$(printf '%s' "$rf" | cksum | awk '{print $1}')"; SV_D="$SV_D (hand-in ${rf#*:})"; } ;;
+                  [ -n "$rf" ] && { SV_H="$(printf '%s' "$rf" | cksum | awk '{print $1}')"; SV_D="$SV_D (hand-in ${rf#*:})"; }
+                  # first report of a watched hand-in: remember the screen it was reported on
+                  case "$ev:$SVS_LK" in "hand-in "*:"done:$SV_H") ;; "hand-in "*) _sv_handin_note "$id" "$rf" "$h" ;; esac ;;
             idle)
               SV_OUT=1   # short of done: report it once, then keep watching for its next change
               if [ "$(type -t osrc_done_state >/dev/null 2>&1 && osrc_done_state "$id" 2>/dev/null)" = not-done ]; then
@@ -603,6 +609,10 @@ _sv_main() { # <sid> <once> [ids...]
   while :; do
     now="$(_sv_now)"
     if newer="$(_sv_superseded "$dir")"; then _sv_superseded_exit "$newer"; fi
+    # The parent (cmd_supervise, pid $$) died without forwarding a signal (SIGKILL, an uncaught
+    # SIGALRM): an orphan worker would poll on as a ghost waiter, covering the stop guard and holding
+    # the caller's pipe open. Exit with it.
+    kill -0 "$$" 2>/dev/null || exit 12
     if ! _sv_tick "$dir" "$now"; then
       _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
       exit 11

@@ -72,7 +72,19 @@ _sv_arm_seq() { # <dir>: give this supervise the next arm number for its key ($d
   _sv_lock_rel "$d/armseq.lock"
 }
 
-_sv_superseded() { # <dir> -> pid of a live supervise armed after this one (rc 0), else rc 1
+# A newer supervise supersedes this one only when its scope covers this one's: `*` covers all;
+# an explicit list covers a list it contains. `supervise --session S i2` never silences a
+# session-wide waiter, which still owes i1 its events.
+_sv_scope_covers() { # <newer armed file> <mine armed file>
+  local n m
+  n="$(cat "$1" 2>/dev/null)"; m="$(cat "$2" 2>/dev/null)"
+  [ -n "$n" ] || return 1
+  grep -qxF '*' <<<"$n" && return 0
+  grep -qxF '*' <<<"$m" && return 1
+  [ -z "$(grep -vxF -f <(printf '%s\n' "$n") <<<"$m" | grep .)" ]
+}
+
+_sv_superseded() { # <dir> -> pid of a live supervise armed after this one whose scope covers it (rc 0), else rc 1
   local d="$1" mine f p n
   mine="$(_sv_num "$(cat "$d/armseq.$$" 2>/dev/null)" 0)"
   for f in "$d"/armseq.*; do
@@ -80,7 +92,10 @@ _sv_superseded() { # <dir> -> pid of a live supervise armed after this one (rc 0
     case "$p" in ''|*[!0-9]*|"$$") continue ;; esac
     n="$(_sv_num "$(cat "$f" 2>/dev/null)" 0)"
     [ "$n" -gt "$mine" ] || continue
-    if kill -0 "$p" 2>/dev/null && ps -o command= -p "$p" 2>/dev/null | grep -q supervise; then printf '%s' "$p"; return 0; fi
+    if kill -0 "$p" 2>/dev/null && case "$(ps -o command= -p "$p" 2>/dev/null)" in *supervise*) true ;; *) false ;; esac; then
+      _sv_scope_covers "$d/armed.$p" "$d/armed.$$" || continue
+      printf '%s' "$p"; return 0
+    fi
     rm -f "$f" 2>/dev/null   # its supervise is gone
   done
   return 1

@@ -103,7 +103,21 @@ _sv_stretch_note() { # <id> <state> <now>
   mkdir -p "${f%/*}" 2>/dev/null && printf '%s %s %s\n' "$s" "$q" "$p" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
 }
 _sv_stretch_start() { # <id> -> epoch the latest working stretch began after (0 = none seen)
-  local s=0; read -r s _ < "$(_sv_lanes)/state/$1.stretch" 2>/dev/null; _sv_num "$s" 0
+  local s=0; read -r s _ 2>/dev/null < "$(_sv_lanes)/state/$1.stretch"; _sv_num "$s" 0
+}
+
+# A turn short enough to start and end between two polls leaves no working read, so its stretch is
+# never seen. What it does leave is a changed screen. state/<id>.handin = "<fp>\t<screen hash>" of the
+# hand-in last REPORTED as done: the same DONE fingerprint on a different screen is not a new
+# hand-in, the lane did more work after it, so it reads idle (and is reported) instead of done.
+_sv_handin_note() { # <id> <fp> <screen-hash>
+  local f; f="$(_sv_lanes)/state/$1.handin"
+  mkdir -p "${f%/*}" 2>/dev/null && printf '%s\t%s\n' "$2" "$3" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
+_sv_handin_moved_on() { # <id> <fp> <screen-hash> -> 0 when <fp> was reported on a different screen
+  local rfp rh
+  IFS="$(printf '\t')" read -r rfp rh 2>/dev/null < "$(_sv_lanes)/state/$1.handin" || return 1
+  [ "$rfp" = "$2" ] && [ -n "$rh" ] && [ "$rh" != "$3" ]
 }
 
 # The watched hand-in DONE file of a lane (rules above), newest first; rc 1 when there is none. It
