@@ -79,6 +79,16 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
   Installed plugins and skills are still inherited.
 - Nothing merges automatically.
 
+## Repo guards (`guards run`, lib/guards.sh)
+
+Run inside a lane worktree before READY: `outsourcerer guards run --base <branch the lane merges into> [--mode off|observe|enforce] [--json] [--allow "<reason>"]`. Always pin `--base`: a base naming HEAD or the checked-out branch is refused (exit 2), since its guards would come from the lane. Every guard sees one diff (merge-base of the base and HEAD against the working tree, plus untracked files), taken with `--text --no-textconv --no-renames` so `.gitattributes` cannot hide a file and a rename shows both paths. Guards and their config come from the BASE ref, never the lane: a diff touching `.outsourcerer/guards/`, `.outsourcerer/guards.conf`, any `.gitattributes`, `.file-size-allow` or `scripts/check_file_size.py` is reported as `guards_changed` for the reviewer and the lane's copy never runs.
+
+- Built-ins: `slop` (narration and excuse comments, new `*.md` outside the allowlist; regex only, zero model calls; default **enforce**), `slop-inflation` (comment-heavy hunks; default **observe**) and `file-size` (the base copy of `scripts/check_file_size.py` with the base `.file-size-allow`, over committed and uncommitted files; default observe). A repo adds guards in `.outsourcerer/guards/` as `*.sh`, `*.py` or a `#!` file; each exits non-zero with `WHAT:` and `FIX:` lines. Anything else there (`slop.allow`) is data.
+- Modes: `--mode` > `<guard> = off|observe|enforce` in `.outsourcerer/guards.conf` > the built-in's default > `default = ...` > observe. Slop keys: `slop.md_allow` (`dir/` = at the repo root, other entries are globs), `slop.comment_min`, `slop.skip`; per-path exceptions in `.outsourcerer/guards/slop.allow`, one `<glob> [class]  # reason` per line. Observe failures go to `$OSRC_HOME/guard-state/observe.log` and the run passes. Enforce exits 1.
+- Never strands work: `--allow "<reason>"` passes a block. Blocks are counted per distinct diff (rerunning an unchanged diff stays blocked and is not counted); after 2 counted blocks the next new diff passes as "allowed after 2 blocks". Both land in `$OSRC_HOME/guard-state/allowed.log` and set `allowed` and `reviewer_required` in the JSON.
+- `--json` prints one object: `{mode, passed, failed:[{guard, mode, what:[...], fix}], guards_changed, guards_changed_paths, allowed, reviewer_required, ran, skipped, base, base_sha, lane, elapsed_s}`. `passed` is the gate verdict (exit 0); `reviewer_required` means a person must look even though it passed. Feed `what` and `fix` straight into the retry brief.
+- Committing guards: Outsourcerer's `.git/info/exclude` block ignores `.outsourcerer/*` (worktrees, lane state) but carves out `guards/`, `guards.conf` and `verify`, so these commit with a plain `git add`; it migrates the old single `/.outsourcerer/` line on first use. A tracked `.gitignore` entry `.outsourcerer/` (directory form) defeats the carve-out; use `.outsourcerer/*` there.
+
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
 
 | kind | when |
