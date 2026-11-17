@@ -73,7 +73,7 @@ _osrc_proof_note_pass() { # <lane>
 _osrc_proof_counts() { # <logfile>
   python3 - "$1" <<'PY' 2>/dev/null || printf -- '- -'
 import re, sys
-t = open(sys.argv[1], errors="replace").read()
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 num_word = lambda words: re.compile(r"(\d+)\s+(?:tests?\s+)?(?:%s)\b" % words, re.I)
 word_num = lambda words: re.compile(r"\b(?:%s)\s*[:=]\s*(\d+)" % words, re.I)
 def last(pats):
@@ -131,16 +131,20 @@ _osrc_proof_one() { # <dir> <shell-command> <log> <label>
   return "$rc"
 }
 
-# S1's guards, when loaded. Sets _PR_GUARDS (JSON) and returns 1 only on a failing ENFORCE result.
-_osrc_proof_guards() { # <dir> <base>
-  local d="$1" b="$2" out j
+# S1's guards, when loaded (contract: lib/guards.sh header, S1 round 3). Sets _PR_GUARDS (JSON).
+# rc 0 passed | 1 passed == false (the gate verdict, whatever the mode) | 2 the guards could not run
+# (no base to pin, or no JSON): the proof fails, but the round is not charged to the lane.
+# --base is always explicit: without it guards would pick a default, which may be the lane's own branch.
+_osrc_proof_guards() { # <dir> <base> <lane>
+  local d="$1" b="$2" lane="$3" out j
   _PR_GUARDS='"unavailable"'
   declare -F cmd_guards >/dev/null 2>&1 || return 0
-  out="$( cd "$d" && cmd_guards run --json ${b:+--base "$b"} 2>/dev/null )"
+  [ -n "$b" ] || { _PR_GUARDS='"error: no base ref to pin --base to"'; return 2; }
+  out="$( cd "$d" && cmd_guards run --json --base "$b" --lane "$lane" 2>/dev/null )"
   # The contract is one JSON object; accept it pretty-printed too, else the last one-line object.
   j="$(printf '%s\n' "$out" | python3 -c '
 import json, re, sys
-t = sys.stdin.read(); best = ""; end = -1
+t = sys.stdin.buffer.read().decode("utf-8", "replace"); best = ""; end = -1
 for m in re.finditer(r"^[ \t]*\{", t, re.M):
     if m.start() < end:
         continue
@@ -151,9 +155,10 @@ for m in re.finditer(r"^[ \t]*\{", t, re.M):
     except ValueError:
         pass
 print(best)' 2>/dev/null)"
-  printf '%s' "$j" | jq -e 'type=="object"' >/dev/null 2>&1 || { _PR_GUARDS='"unavailable"'; return 0; }
+  printf '%s' "$j" | jq -e 'type=="object" and (.passed|type) == "boolean"' >/dev/null 2>&1 \
+    || { _PR_GUARDS='"error: guards run gave no JSON verdict"'; return 2; }
   _PR_GUARDS="$j"
-  [ "$(jq -r '(.mode // "") == "enforce" and (.passed == false)' <<<"$j")" = true ] && return 1
+  [ "$(jq -r .passed <<<"$j")" = true ] || return 1
   return 0
 }
 
@@ -166,7 +171,8 @@ _osrc_proof_stamp_of() { # <proof-json> -> one line for review items and Mission
       | if $c == null then "failed: " + (.why // "guards failed") else "failed: " + ($c.cmd | .[0:60]) + " exit " + ($c.exit|tostring)
           + (if $c.fail != null then " (" + ($c.fail|tostring) + " fail)" else "" end) end
     elif .totals != null then "proved: " + (.totals.pass|tostring) + " pass, " + (.totals.fail|tostring) + " fail"
-    else "proved: " + ((.commands|length)|tostring) + (if (.commands|length) == 1 then " check" else " checks" end) + " passed" end' <<<"$1"
+    else "proved: " + ((.commands|length)|tostring) + (if (.commands|length) == 1 then " check" else " checks" end) + " passed" end
+    + (if .ok == true and .reviewer_required == true then "; reviewer must look (guards " + (if .guards.allowed != null then "allowed: " + .guards.allowed else "changed" end) + ")" else "" end)' <<<"$1"
 }
 
 # The engine behind `proof run` and the remote READY runner. Writes proof.json, counts the round.
@@ -197,7 +203,12 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
       *) _osrc_proof_one "$dir" "$c" "$log" "$c" || ok=false ;;
     esac
   done
-  case "$method" in none|review) ;; *) _osrc_proof_guards "$dir" "$base" || { ok=false; why="guards failed (enforce)"; } ;; esac
+  local grc=0 nocount=""
+  case "$method" in none|review) ;; *) _osrc_proof_guards "$dir" "$base" "$lane" || grc=$? ;; esac
+  case "$grc" in
+    1) ok=false; why="guards blocked the change: $(jq -r '[.failed[]? | .guard] | join(", ")' <<<"$_PR_GUARDS")" ;;
+    2) ok=false; nocount=1; why="guards could not run ($(jq -r . <<<"$_PR_GUARDS")); not counted against the lane" ;;
+  esac
   [ "$dirty" = false ] || { ok=false; why="tracked files have uncommitted changes, so the run did not test $head"; }
   totals="$(jq -c 'if any(.[]; .pass != null or .fail != null)
                    then {pass:([.[].pass // 0]|add), fail:([.[].fail // 0]|add)} else null end' <<<"$_PR_CMDS")"
@@ -206,9 +217,11 @@ _osrc_proof_exec() { # <lane> <dir> <head> <base> <method> <reason> <source> <cm
     --argjson cmds "$_PR_CMDS" --argjson totals "$totals" --argjson guards "$_PR_GUARDS" --argjson changed "$changed" --arg why "$why" '
     {schema:1, lane:$lane, head:$head, dir:$dir, base:$base, dirty:$dirty, ts:$ts, method:$method, reason:$reason,
      source:$source, ok:$ok, commands:$cmds, totals:$totals, guards:$guards, checks_changed:$changed}
-    + (if $why == "" then {} else {why:$why} end)')"
+    + (if $why == "" then {} else {why:$why} end)
+    + {reviewer_required:((($guards|type) == "object") and ($guards.reviewer_required == true))}')"
   stamp="$(_osrc_proof_stamp_of "$rec")"
   if [ "$ok" = true ]; then _osrc_proof_note_pass "$lane"; n=0
+  elif [ -n "$nocount" ]; then n="$(_osrc_proof_rounds "$lane" | jq -r .fails)"
   else
     n="$(_osrc_proof_note_fail "$lane" "" "$stamp" "$(jq -c '[.commands[] | select(.exit != 0) | .tail[]] | .[-30:]' <<<"$rec")")"
   fi
@@ -299,6 +312,7 @@ _osrc_proof_run() {
   printf 'proof: %s\n' "$(_osrc_proof_file "$lane")"
   if [ "$rc" != 0 ]; then
     jq -r '.commands[] | select(.exit != 0) | "--- " + .cmd + " (exit " + (.exit|tostring) + "), last lines:", (.tail[-15:][])' <<<"$_PR_RECORD"
+    jq -r 'if (.guards|type) == "object" and .guards.passed == false then (.guards.failed[]? | "--- guard " + .guard + ":", ((.what // [])[] | "  WHAT: " + .), "  FIX: " + (.fix // "")) else empty end' <<<"$_PR_RECORD"
     if osrc_proof_stopped "$lane"; then echo "STOPPED: $(_osrc_proof_max) failed rounds. Do not retry; a person looks next."
     else echo "round $(jq -r .round <<<"$_PR_RECORD") of $(_osrc_proof_max) failed: fix the failures above, commit, run proof again."; fi
   fi
@@ -377,8 +391,9 @@ osrc_proof_required() { # <lane>
   [ -f "$(_osrc_proof_root)/require" ] || [ "${OSRC_PROOF_REQUIRE:-}" = 1 ] || [ -d "$(_osrc_proof_dir "$1")" ]
 }
 
-# supervise --watch hook: <lane>.DONE written. rc 0 = accept (event unchanged). rc 1 = sent back:
-# sets _PR_EV_KIND/_PR_EV_DETAIL/_PR_EV_NEXT for the replacement event.
+# supervise --watch hook: <lane>.DONE written. rc 0 = accept (event unchanged). rc 1 = replace the
+# event with _PR_EV_KIND/_PR_EV_DETAIL/_PR_EV_NEXT: sent back, stopped, or proved but guards say a
+# reviewer must look (an --allow or released-after-blocks pass, or edited checks).
 osrc_proof_handin() { # <lane> <fingerprint>
   local lane="$1" fp="$2" why rc=0 d hit=""
   _osrc_proof_id_ok "$lane" || return 0
@@ -389,7 +404,13 @@ osrc_proof_handin() { # <lane> <fingerprint>
   fi
   osrc_proof_required "$lane" || return 0
   why="$(osrc_proof_gate "$lane")" || rc=$?
-  [ "$rc" = 0 ] && return 0
+  if [ "$rc" = 0 ]; then
+    osrc_proof_reviewer_required "$lane" || return 0
+    _PR_EV_KIND=done
+    _PR_EV_DETAIL="$lane hand-in proved, but guards require a reviewer: $(osrc_proof_review_note "$lane" | tr '\n' ' ')"
+    _PR_EV_NEXT="$(_osrc_self) review queue add $(printf '%q' "$(git -C "$(jq -r .dir "$(_osrc_proof_file "$lane")")" rev-parse --abbrev-ref HEAD 2>/dev/null)") --repo $(printf '%q' "$(jq -r .dir "$(_osrc_proof_file "$lane")")")"
+    return 1
+  fi
   osrc_proof_sendback "$lane" "$why" "handin:$fp"
   _PR_EV_KIND=failed
   case "$_PR_SB_HOW" in
@@ -456,6 +477,22 @@ osrc_proof_remote_note() { # <id> -> "; proof round 2 of 3" or "; STOPPED ..." (
   local r; r="$(_osrc_proof_rounds "$1")"
   if [ "$(jq -r .stopped <<<"$r")" = true ]; then printf '; STOPPED after %s failed proof rounds, needs a person (%s proof show %s)' "$(_osrc_proof_max)" "$(_osrc_self)" "$1"
   elif [ "$(jq -r .fails <<<"$r")" -gt 0 ]; then printf '; proof round %s of %s' "$(jq -r .fails <<<"$r")" "$(_osrc_proof_max)"; fi
+}
+
+# Guards passed only because of --allow / the 2-block release, or the diff edits the checks: the proof
+# counts, but the lane must go through the reviewer. rc 0 when that is the case for the stored proof.
+osrc_proof_reviewer_required() { # <lane>
+  [ "$(jq -r '.ok == true and .reviewer_required == true' "$(_osrc_proof_file "$1")" 2>/dev/null)" = true ]
+}
+
+# Lines for the review brief: why the reviewer must look (empty when not required or not this head).
+osrc_proof_review_note() { # <lane> [head]
+  local f; f="$(_osrc_proof_file "$1")"
+  osrc_proof_reviewer_required "$1" || return 0
+  [ -z "${2:-}" ] || [ "$(jq -r .head "$f")" = "$2" ] || return 0
+  jq -r '(if .guards.allowed != null then "guards were allowed through: " + .guards.allowed else empty end),
+    (if (.guards.guards_changed_paths // []) | length > 0 then "the diff edits the checks: " + (.guards.guards_changed_paths | join(", ")) else empty end),
+    (.guards.failed[]? | "guard " + .guard + ": " + ((.what // [])[:3] | join(" | ")))' "$f"
 }
 
 # Mission Control: per-lane proof fields and the project's unverified count (lib/hub.sh calls these).

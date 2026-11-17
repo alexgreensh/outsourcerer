@@ -264,6 +264,7 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
     printf '# Review request: %s @ %s\n\n' "$lane" "${head:0:7}"
     printf -- '- Lane: %s\n- Branch: %s\n- Head sha (review exactly this): %s\n- Remote: %s\n- Base to diff against: %s\n' "$lane" "$branch" "$head" "$fetch" "$base"
     ! type osrc_proof_stamp >/dev/null 2>&1 || printf -- '- Proof: %s\n' "$(osrc_proof_stamp "$lane")"
+    ! type osrc_proof_review_note >/dev/null 2>&1 || osrc_proof_review_note "$lane" "$head" | sed 's/^/- Reviewer must check: /'
     printf '\n'
     printf '## Get the change\n\n```\ngit fetch %q %q && git log --oneline FETCH_HEAD -20\n' "$fetch" "$branch"
     if [ -n "$prev" ] && [ "$final" != final ]; then

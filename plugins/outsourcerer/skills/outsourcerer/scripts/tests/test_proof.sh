@@ -71,19 +71,33 @@ P run --lane dirty1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
 [ "$(jq -r '.ok|tostring' "$OSRC_HOME/proof/dirty1/proof.json")" = false ] && ok "dirty worktree: proof fails" || bad "dirty: $(jq -c . "$OSRC_HOME/proof/dirty1/proof.json")"
 ( cd "$TMP/r2" && git checkout -q -- x ); P reset dirty1 >/dev/null
 
-echo "=== guards hook (lane S1 contract) ==="
-GJSON='{"mode":"enforce","passed":false,"failed":[{"guard":"slop","what":["a.sh:3 # added X"],"fix":"delete the comment"}],"guards_changed":false}'
-cmd_guards() { echo "guard lines"; echo "$GJSON"; [ "$(jq -r .passed <<<"$GJSON")" = true ]; }
-P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
-[ "$(jq -r '.ok, .guards.failed[0].guard' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "false slop " ] && ok "failing enforce guards fail the proof and are stored under .guards" || bad "guards: $(jq -c . "$OSRC_HOME/proof/g1/proof.json")"
-GJSON='{"mode":"observe","passed":false,"failed":[{"guard":"slop","what":["x"],"fix":"y"}],"guards_changed":false}'
-P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
-[ "$(jq -r '.ok, .guards.mode' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "true observe " ] && ok "observe-mode guard failures are recorded but do not fail the proof" || bad "observe: $(jq -c . "$OSRC_HOME/proof/g1/proof.json")"
-cmd_guards() { echo "guard lines"; jq . <<<"$GJSON"; }   # pretty-printed JSON is the same contract
-GJSON='{"mode":"enforce","passed":false,"failed":[{"guard":"file-size","what":["big.sh"],"fix":"split it"}],"guards_changed":true}'
-P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
-[ "$(jq -r '.ok, .guards.failed[0].guard' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "false file-size " ] && ok "pretty-printed guards JSON is read too" || bad "pretty guards: $(jq -c .guards "$OSRC_HOME/proof/g1/proof.json")"
-unset -f cmd_guards
+echo "=== guards hook (lane S1 round-3 contract: lib/guards.sh header) ==="
+# Stand-in for S1's cmd_guards: logs its argv, prints a human line then the JSON verdict, exits like S1.
+cmd_guards() { printf '%s\n' "$*" >> "$TMP/guards.args"; echo "guard lines"; ${GPRETTY:-echo} "$GJSON"; [ "$(jq -r .passed <<<"$GJSON")" = true ]; }
+pretty() { jq . <<<"$1"; }
+G() { P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1; jq -c . "$OSRC_HOME/proof/g1/proof.json"; }
+GJSON='{"mode":"enforce","passed":false,"failed":[{"guard":"slop","mode":"enforce","what":["a.sh:3 # added X"],"fix":"delete the comment"}],"guards_changed":false,"allowed":null,"reviewer_required":false}'
+out="$(P run --lane g0 --dir "$TMP/r2" --cmd true 2>&1)"
+grep -q '^  WHAT: a.sh:3 # added X' <<<"$out" && grep -q '^  FIX: delete the comment' <<<"$out" && ok "a guards block prints each WHAT and FIX (the retry brief)" || bad "what/fix: $out"
+g="$(G)"; [ "$(jq -r '[.ok, .guards.failed[0].guard] | join(" ")' <<<"$g")" = "false slop" ] && ok "passed:false fails the proof; the guards JSON is stored under .guards" || bad "guards: $g"
+grep -q 'guards blocked the change: slop' <<<"$(jq -r .stamp <<<"$g")" && ok "the stamp names the blocking guard" || bad "stamp: $(jq -r .stamp <<<"$g")"
+[ "$(tail -1 "$TMP/guards.args")" = "run --json --base main --lane g1" ] && ok "guards run is called with an explicit --base (the lane's base) and --lane" || bad "args: $(tail -1 "$TMP/guards.args")"
+GJSON='{"mode":"observe","passed":false,"failed":[],"guards_changed":false,"allowed":null,"reviewer_required":false}'
+g="$(G)"; [ "$(jq -r .ok <<<"$g")" = false ] && ok "passed:false fails even in observe mode with an empty failed list (passed is the verdict)" || bad "observe false: $g"
+GJSON='{"mode":"observe","passed":true,"failed":[{"guard":"slop-inflation","mode":"observe","what":["x"],"fix":"y"}],"guards_changed":false,"allowed":null,"reviewer_required":false}'
+g="$(G)"; [ "$(jq -r '[.ok, .reviewer_required] | join(" ")' <<<"$g")" = "true false" ] && ok "passed:true with a non-empty failed list (observe hits) passes" || bad "observe true: $g"
+GJSON='{"mode":"enforce","passed":true,"failed":[{"guard":"slop","mode":"enforce","what":["b.sh:7 # hack"],"fix":"fix it"}],"guards_changed":false,"allowed":"allowed after 2 blocks","reviewer_required":true}'
+g="$(GPRETTY=pretty G)"
+[ "$(jq -r '[.ok, .reviewer_required] | join(" ")' <<<"$g")" = "true true" ] && ok "released-after-blocks pass: proof ok, reviewer_required carried (pretty-printed JSON read)" || bad "rr: $g"
+grep -q 'reviewer must look (guards allowed: allowed after 2 blocks)' <<<"$(jq -r .stamp <<<"$g")" && ok "the stamp says the reviewer must look" || bad "rr stamp: $(jq -r .stamp <<<"$g")"
+grep -q 'guard slop: b.sh:7 # hack' <<<"$(osrc_proof_review_note g1)" && ok "review note lists the allowed failures for the reviewer" || bad "note: $(osrc_proof_review_note g1)"
+GJSON='{"mode":"enforce","passed":true,"failed":[],"guards_changed":true,"guards_changed_paths":[".outsourcerer/guards.conf"],"allowed":null,"reviewer_required":true}'
+g="$(G)"; grep -q 'the diff edits the checks: .outsourcerer/guards.conf' <<<"$(osrc_proof_review_note g1)" && ok "guards_changed: reviewer told which check files changed" || bad "changed note: $(osrc_proof_review_note g1)"
+cmd_guards() { echo "fatal: pin --base" >&2; return 2; }
+P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
+[ "$(jq -r '[.ok, (.guards|tostring)] | join(" ")' "$OSRC_HOME/proof/g1/proof.json")" = "false error: guards run gave no JSON verdict" ] \
+  && [ "$(jq -r .fails "$OSRC_HOME/proof/g1/rounds.json")" = 0 ] && ok "guards that cannot run fail the proof but do not charge the lane a round" || bad "guards error: $(cat "$OSRC_HOME/proof/g1/proof.json")"
+unset -f cmd_guards; P reset g1 >/dev/null
 
 echo "=== three failed rounds, then a person ==="
 for i in 1 2 3; do out="$(P run --lane r3 --dir "$TMP/r2" --cmd 'echo "boom line"; echo "2 passed, 1 failed"; exit 1' 2>&1)"; done
@@ -120,6 +134,11 @@ P require on >/dev/null; : > "$W/out/strict.DONE"; _sv_observe_watch "$id" super
 P require off >/dev/null
 mkdir -p "$OSRC_HOME/proof/osrc-auto-L9"; : > "$W/out/L9.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
 grep -q 'osrc-auto-L9 hand-in not accepted' <<<"$ev" && ok "L9.DONE maps to the session lane osrc-auto-L9" || bad "stem map: $ev"
+cmd_guards() { echo '{"mode":"enforce","passed":true,"failed":[],"guards_changed":false,"allowed":"regex misfire on a string","reviewer_required":true}'; }
+P run --lane lane1 --dir "$R" --base main --cmd true >/dev/null; unset -f cmd_guards
+touch -m -t 202601010202 "$W/out/lane1.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = done ] && grep -q 'guards require a reviewer: guards were allowed through: regex misfire' <<<"$ev" \
+  && grep -q '^osrc review queue add lane1 --repo ' <<<"$(jq -r .next <<<"$ev")" && ok "a hand-in that passed via --allow goes to the reviewer (NEXT review queue add)" || bad "rr handin: $ev"
 
 echo "=== remote READY: proved on this machine, or stamped unverified, never stranded ==="
 REMOTE="$TMP/remote.git"; WORK="$TMP/work"
@@ -175,6 +194,10 @@ grep -q 'unchecked rc' <<<"$inc" && ! grep -q 'd.sh:5 typo' <<<"$inc" && ! grep 
 b3="$(_osrc_review_write_brief "sv4-${S2:0:7}" final)"; full="$(cat "$b3")"
 [ "${#inc}" -lt "${#full}" ] && ok "incremental brief is smaller than the full one (${#inc} < ${#full} bytes)" || bad "sizes ${#inc} vs ${#full}"
 grep -q '^- Proof: ' <<<"$full" && grep -q '\[must-fix\], \[nit\] or \[pre-existing\]' <<<"$full" && ok "brief shows the proof stamp and asks for severity tags" || bad "brief lines"
+
+_OSRC_RV_BRANCH=lane1 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue lane1 "$(git -C "$R" rev-parse HEAD)" "" manual >/dev/null
+b4="$(_osrc_review_write_brief "lane1-$(git -C "$R" rev-parse --short=7 HEAD)")"
+grep -q '^- Reviewer must check: guards were allowed through: regex misfire' "$b4" && ok "the review brief tells the reviewer what the guards let through" || bad "brief rr: $(head -12 "$b4")"
 
 echo "=== Mission Control fields ==="
 l="$(osrc_proof_hub_lane '{"id":"docs1","status":"Merged"}')"

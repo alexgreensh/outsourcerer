@@ -88,7 +88,12 @@ proof show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane>
 
 - `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
   command with exit code, seconds, pass/fail counts when the output shows them, last 30 lines, the
-  `guards` JSON (lane S1's `guards run --json`, or `"unavailable"`), and `method`: `verify-run`
+  `guards` JSON (lane S1's `guards run --json --base <lane base> --lane <id>`, always with an explicit
+  base; `"unavailable"` when guards are not installed). `passed: false` fails the proof (WHAT/FIX lines
+  are printed as the retry brief); guards that cannot run fail it without charging a round;
+  `reviewer_required: true` (an `--allow` or released-after-blocks pass, or edited checks) keeps the
+  proof but routes the lane to the reviewer: the stamp says so, the review brief lists what was let
+  through, and a `.DONE` hand-in's NEXT is `review queue add`. Then `method`: `verify-run`
   (`.outsourcerer/verify` read from the BASE ref), `tests` (`--cmd` or the done contract's `check:`),
   `review` or `none` (both need `--reason`). Never write proof.json by hand. Uncommitted tracked
   changes fail the proof (the run did not test the head). A diff touching `.outsourcerer/` is
