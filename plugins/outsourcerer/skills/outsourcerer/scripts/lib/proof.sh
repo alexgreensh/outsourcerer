@@ -67,42 +67,53 @@ _osrc_proof_note_pass() { # <lane>
   _osrc_proof_put "$(_osrc_proof_rounds_file "$1")" '{"fails":0,"stopped":false,"counted":[],"last":null}'
 }
 
-# Pass/fail counts from a check's output, when the output shows them. Prints "<pass> <fail>" with "-"
-# for a count it could not see. Counts come from the LAST summary line that carries BOTH a pass count
-# and a fail count ("RESULT: 10 passed, 0 failed", "passed=10 failed=0", "10 pass 0 fail", "PASS: 12
-# FAIL: 0"); a lone "N failed" in free text (a test titled "retries after 2 failed attempts") is not a
-# count. With no such line: a lone pass count (display only, fail "-"), else TAP "ok N" / "not ok N" and
-# per-line "PASS:" / "FAIL:" tallies.
+# Pass/fail counts from a check's output. Prints "<pass> <fail> <src>" ("-" for a count not seen).
+# src "summary": the LAST recognised summary line, a line made only of count tokens ("10 passed, 0 failed",
+# "passed=10 failed=0", "10 pass 0 fail", "PASS: 12 FAIL: 0", pytest's "== 2 failed, 8 passed in 0.5s =="),
+# optionally after one "label:" ("RESULT:", "test_proof:", "Tests:"). Only a summary fail count can turn
+# an exit-0 command into a failure. A test title carrying counts ("5 passed after 2 failed attempts ... ok")
+# is not a summary, so a green run trusts its exit code. src "tally": TAP "ok N"/"not ok N" and per-line
+# "PASS:"/"FAIL:" counts (display only). src "none": nothing seen.
 _osrc_proof_counts() { # <logfile>
-  python3 - "$1" <<'PY' 2>/dev/null || printf -- '- -'
+  python3 - "$1" <<'PY' 2>/dev/null || printf -- '- - none'
 import re, sys
-t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-lines = t.splitlines()
-num_word = lambda words: re.compile(r"(\d+)\s+(?:tests?\s+)?(?:%s)\b" % words, re.I)
-word_num = lambda words: re.compile(r"\b(?:%s)\s*[:=]\s*(\d+)" % words, re.I)
-PASS = [num_word("passed|passing|pass|ok"), word_num("passed|pass")]
-FAIL = [num_word("failed|failing|fail|failures?|errors?"), word_num("failed|fail|failures")]
-def last(pats, text):
-    best = None
-    for p in pats:
-        for m in p.finditer(text):
-            if best is None or m.start() > best[0]:
-                best = (m.start(), m.group(1))
-    return best[1] if best else None
-p = f = None
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+W = r"passed|passing|pass|ok|failed|failing|fail|failures?|errors?|skipped|skips?|todo|total|xfailed|xpassed|warnings?|deselected|pending"
+TOK = r"(?:\d+\s+(?:tests?\s+)?(?:%s)|(?:%s)\s*[:=]\s*\d+)" % (W, W)
+SUM = re.compile(r"^%s(?:\s*[,;|]?\s*%s)*$" % (TOK, TOK), re.I)
+TIME = re.compile(r"\s*(?:\bin\s+[\d.]+\s*(?:ms|s|sec|seconds|m)?|\(\s*[\d.]+\s*(?:ms|s|sec|seconds)?\s*\))\s*$", re.I)
+TOKS = re.compile(r"(\d+)\s+(?:tests?\s+)?(%s)\b|\b(%s)\s*[:=]\s*(\d+)" % (W, W), re.I)
+def counts(c):
+    p = f = None
+    for m in TOKS.finditer(c):
+        n, w = (m.group(1), m.group(2)) if m.group(1) else (m.group(4), m.group(3))
+        w = w.lower()
+        if w in ("passed", "passing", "pass", "ok") and p is None:
+            p = n
+        elif w.startswith("fail") or w.startswith("error"):
+            f = str(int(f or 0) + int(n))
+    return p, f
+def core(l):
+    c = re.sub(r"^[\s=*#\-\[\]>]+|[\s=*#\-\[\].!]+$", "", l)
+    return TIME.sub("", c).strip()
+def summary(l):
+    c = core(l)
+    if not c:
+        return None
+    if SUM.match(c):
+        return c
+    m = re.match(r"^[\w .\-/]{1,40}:\s*(.+)$", c)
+    return m.group(1).strip() if m and SUM.match(m.group(1).strip()) else None
 for l in reversed(lines):
-    lp, lf = last(PASS, l), last(FAIL, l)
-    if lp is not None and lf is not None:
-        p, f = lp, lf
-        break
-if p is None:
-    p = last(PASS, t)
-    if p is None:
-        tp = sum(1 for l in lines if re.match(r"\s*(PASS:|ok \d)", l))
-        tf = sum(1 for l in lines if re.match(r"\s*(FAIL:|not ok \d)", l))
-        if tp or tf:
-            p, f = str(tp), str(tf)
-print("%s %s" % (p if p is not None else "-", f if f is not None else "-"))
+    c = summary(l)
+    if c is not None:
+        p, f = counts(c)
+        if p is not None or f is not None:
+            print("%s %s summary" % (p or "-", f or "-"))
+            sys.exit(0)
+tp = sum(1 for l in lines if re.match(r"\s*(PASS:|ok \d)", l))
+tf = sum(1 for l in lines if re.match(r"\s*(FAIL:|not ok \d)", l))
+print("%d %d tally" % (tp, tf) if tp or tf else "- - none")
 PY
 }
 
@@ -132,23 +143,42 @@ _osrc_proof_top() { # <dir> -> the checkout's top level, physical
 }
 _osrc_proof_branch() { git -C "$1" symbolic-ref -q --short HEAD 2>/dev/null; return 0; }
 
-# A lane name reused after `session stop` must not inherit the old lane's pin, rounds or stop. When the
-# stored base.json names another worktree, or another branch (both known), the lane's proof state is
-# cleared so the caller pins afresh. rc 3: refused inside a lane session while the name has failed rounds
-# (or is STOPPED): a lane may not clear its own count by moving to another branch or worktree. Only a lane
-# start (osrc_done_set), `proof base`, or a run from outside the lane clears it.
-_osrc_proof_lane_check() { # <lane> <dir> [start|force]
-  local lane="$1" f d b top br
+# Inside a lane session the base pin NEVER moves: nothing there clears or replaces it (not a plain
+# `proof run`, a branch change, a worktree change or --base). Any mismatch is rc 3 (proof run exits 4)
+# with the one command that fixes it, `proof base`, which is itself refused inside a lane.
+# A branch the lane creates after the pin, on top of the pinned sha, is adopted once (branch_locked), but
+# only when the lane made no commits on the branch it was pinned on.
+# Outside a lane (a person, the orchestrator, `session start --done-when`): a lane name reused in another
+# worktree or on another branch is a new lane, so its old pin, rounds and proof are cleared.
+_osrc_proof_lane_check() { # <lane> <dir> [start|force] [asked-base-sha]
+  local lane="$1" f d="" b="" sha="" lk="" top br why="" fix
   f="$(_osrc_proof_dir "$lane")/base.json"
-  [ -f "$f" ] || return 0
-  d="$(jq -r '.dir // ""' "$f" 2>/dev/null)"; b="$(jq -r '.branch // ""' "$f" 2>/dev/null)"
-  [ -n "$d" ] || return 0   # a pin from before identities were recorded
   top="$(_osrc_proof_top "$2")"; br="$(_osrc_proof_branch "$2")"
-  if [ "$top" = "$d" ] && { [ -z "$b" ] || [ -z "$br" ] || [ "$b" = "$br" ]; }; then return 0; fi
-  if [ -z "${3:-}" ] && [ "$(_osrc_proof_rounds "$lane" | jq -r .fails)" != 0 ] && _osrc_proof_in_lane; then
-    echo "proof: $lane has failed proof rounds (it was ${b:-detached} at $d); a lane session cannot clear them by moving. If this is a new lane, the orchestrator runs: $(_osrc_self) proof base $lane --dir $top <ref-or-sha>" >&2
+  if [ -f "$f" ]; then
+    d="$(jq -r '.dir // ""' "$f" 2>/dev/null)"; b="$(jq -r '.branch // ""' "$f" 2>/dev/null)"
+    sha="$(jq -r '.sha // ""' "$f" 2>/dev/null)"; lk="$(jq -r '.branch_locked // false' "$f" 2>/dev/null)"
+    # Adopt only a branch that took over from the pinned start: the lane made no commits on the branch it
+    # was pinned on (detached, or still at the pin as far as HEAD's history goes). Leaving a branch the
+    # lane already committed to is a switch, not a start.
+    if [ "$lk" != true ] && [ -n "$br" ] && [ "$b" != "$br" ] && { [ -z "$d" ] || [ "$d" = "$top" ]; } \
+       && [ -n "$sha" ] && git -C "$2" merge-base --is-ancestor "$sha" HEAD 2>/dev/null \
+       && { [ -z "$b" ] || [ "$(git -C "$2" merge-base "refs/heads/$b" HEAD 2>/dev/null)" = "$sha" ]; }; then
+      _osrc_proof_put "$f" "$(jq -c --arg b "$br" --arg d "${d:-$top}" '. + {branch:$b, dir:$d, branch_locked:true}' "$f")" && { b="$br"; d="${d:-$top}"; }
+    fi
+  fi
+  if [ -z "${3:-}" ] && _osrc_proof_in_lane; then
+    if [ ! -f "$f" ] || [ -z "$sha" ]; then why="no base is pinned for $lane"
+    elif [ -n "$d" ] && [ "$d" != "$top" ]; then why="$lane is pinned in the worktree $d, this is $top"
+    elif [ -n "$b" ] && [ -n "$br" ] && [ "$b" != "$br" ]; then why="$lane is pinned on branch $b, this is $br"
+    elif [ -n "${4:-}" ] && [ "$4" != "$sha" ]; then why="--base is ${4:0:7}, but $lane is pinned to ${sha:0:7}"
+    fi
+    [ -n "$why" ] || return 0
+    fix="$sha"; [ -n "$fix" ] || fix="$(_osrc_proof_branch_start "$2")" || fix="<lane-start-sha>"
+    echo "proof: $why. Inside a lane the base pin never moves. Fix (the orchestrator, outside the lane): $(_osrc_self) proof base $lane --dir $top $fix" >&2
     return 3
   fi
+  [ -f "$f" ] && [ -n "$d" ] || return 0   # no pin, or one from before identities were recorded
+  if [ "$top" = "$d" ] && { [ -z "$b" ] || [ -z "$br" ] || [ "$b" = "$br" ]; }; then return 0; fi
   echo "proof: $lane was ${b:-detached} at $d; this is ${br:-detached} at $top, a new lane: its old pin, rounds and proof are cleared" >&2
   rm -f "$(_osrc_proof_dir "$lane")"/{base.json,proof.json,rounds.json,needs-you.json,SENDBACK.md} 2>/dev/null
   return 0
@@ -192,7 +222,7 @@ _osrc_proof_contract_cmd() { # <lane>
 
 # Run one check in <dir>, bounded, output to <log>; appends one command record to _PR_CMDS.
 _osrc_proof_one() { # <dir> <shell-command> <log> <label>
-  local d="$1" c="$2" log="$3" label="$4" t0 t1 rc=0 counts pc fc
+  local d="$1" c="$2" log="$3" label="$4" t0 t1 rc=0 pc fc src
   t0="$(date +%s)"
   if type _osrc_run_timeout >/dev/null 2>&1; then
     _osrc_run_timeout "${OSRC_PROOF_CMD_SECS:-1800}" "$d" "$c" </dev/null >"$log" 2>&1 || rc=$?
@@ -200,9 +230,10 @@ _osrc_proof_one() { # <dir> <shell-command> <log> <label>
     ( cd "$d" && bash -c "$c" ) </dev/null >"$log" 2>&1 || rc=$?
   fi
   t1="$(date +%s)"
-  counts="$(_osrc_proof_counts "$log")"; pc="${counts%% *}"; fc="${counts##* }"
-  # "exit 0" with "3 failed" in its own output is a failing check (a runner that swallows its status).
-  case "$fc" in ''|-|0|*[!0-9]*) ;; *) [ "$rc" != 0 ] || rc=1 ;; esac
+  read -r pc fc src <<<"$(_osrc_proof_counts "$log")"
+  # "exit 0" with "3 failed" on its summary line is a failing check (a runner that swallows its status).
+  # Any other count-bearing line (a test title) never overrides a green exit code.
+  if [ "$src" = summary ]; then case "$fc" in ''|-|0|*[!0-9]*) ;; *) [ "$rc" != 0 ] || rc=1 ;; esac; fi
   _PR_CMDS="$(jq -c --arg cmd "$label" --argjson rc "$rc" --argjson secs "$((t1 - t0))" --arg p "$pc" --arg f "$fc" \
     --arg tail "$(tail -n 30 "$log" 2>/dev/null | cut -c1-400)" \
     '. + [{cmd:$cmd, exit:$rc, secs:$secs, pass:(if $p=="-" then null else ($p|tonumber) end),
@@ -373,7 +404,8 @@ _osrc_proof_base_cmd() {
 }
 
 # The base expression names the lane's own history: HEAD/@/its branch/its head sha with any ~N ^N ^{}
-# @{} suffix, or a commit no ref other than the lane's own branch contains.
+# @{} suffix, or a commit no BRANCH other than the lane's own contains. Tags do not count: a lane can
+# make one (`git tag x HEAD~1`), so a tag on the lane's own history is refused like HEAD~1.
 _osrc_proof_lane_own() { # <dir> <expr> <sha>
   local d="$1" stem cur
   stem="$(printf '%s' "$2" | sed -E 's/(~[0-9]*|\^[0-9]*|\^\{[^}]*\}|@\{[^}]*\})+$//')"
@@ -381,7 +413,7 @@ _osrc_proof_lane_own() { # <dir> <expr> <sha>
   _osrc_proof_own_branch "$d" "$stem" && return 0
   [ "$(_osrc_proof_resolve "$d" "$stem")" != "$(git -C "$d" rev-parse -q --verify HEAD 2>/dev/null)" ] || return 0
   cur="$(git -C "$d" symbolic-ref -q HEAD 2>/dev/null)"
-  [ -z "$(git -C "$d" for-each-ref --contains "$3" --format='%(refname)' refs/heads refs/remotes refs/tags 2>/dev/null | grep -vxF "${cur:-//none}")" ]
+  [ -z "$(git -C "$d" for-each-ref --contains "$3" --format='%(refname)' refs/heads refs/remotes 2>/dev/null | grep -vxF "${cur:-//none}")" ]
 }
 
 # The lane-start head of the checkout's branch: where its reflog says the branch was created.
@@ -412,14 +444,14 @@ _osrc_proof_run() {
   if [ -z "$lane" ]; then lane="${OUTSOURCERER_TMUX:-}"; fi
   if [ -z "$lane" ]; then lane="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')"; fi
   _osrc_proof_id_ok "$lane" || die "proof run: bad lane id '$lane' (pass --lane, letters/digits/._- only)"
-  local pin pinned="" want prc=0 ls
-  _osrc_proof_lane_check "$lane" "$dir" || exit 4
+  local pin pinned="" want="" prc=0 ls
+  if [ -n "$base" ]; then want="$(_osrc_proof_resolve "$dir" "$base")" || die "proof run: --base $base does not resolve to a commit in $dir"; fi
+  _osrc_proof_lane_check "$lane" "$dir" "" "$want" || exit 4
   # A lane-facing --base never moves an existing pin and never names the lane's own branch or HEAD:
   # either would let a lane judge itself against its own commits.
   [ -f "$(_osrc_proof_dir "$lane")/base.json" ] && pinned="$(jq -r '.sha // ""' "$(_osrc_proof_dir "$lane")/base.json" 2>/dev/null)"
   if [ -n "$base" ]; then
     _osrc_proof_own_branch "$dir" "$base" && die "proof run: --base $base is this checkout's own branch; the base is the branch the lane merges into"
-    want="$(_osrc_proof_resolve "$dir" "$base")" || die "proof run: --base $base does not resolve to a commit in $dir"
     [ "$want" != "$head" ] || die "proof run: --base $base is the head itself; the base is the branch the lane merges into"
     # No pin yet: a base the lane derives from its own commits (HEAD~1, <branch>^, a lane-only sha) would
     # let it judge itself. Refuse it and pin the lane-start head (the branch's creation point) instead.
@@ -690,6 +722,9 @@ osrc_proof_hub_lane() { # <lane-json> -> lane json + {proof:{stamp,method,ok,sto
   local l="$1" id f r
   id="$(jq -r '.id // ""' <<<"$l" 2>/dev/null)"; _osrc_proof_id_ok "$id" || { printf '%s' "$l"; return 0; }
   f="$(_osrc_proof_file "$id")"
+  # A review whose verdict was malformed twice waits on a person (lib/review.sh state needs-you).
+  r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("malformed verdict twice: " + (.invalid_first_line // ""))}' 2>/dev/null)"
+  [ -z "$r" ] || l="$(jq -c --argjson r "$r" '. + {reviewNeedsYou:$r}' <<<"$l" 2>/dev/null || printf '%s' "$l")"
   _osrc_proof_used "$id" || { printf '%s' "$l"; return 0; }
   r="$(_osrc_proof_rounds "$id")"
   jq -c --slurpfile p <(cat "$f" 2>/dev/null || echo null) --argjson r "$r" '
@@ -700,5 +735,5 @@ osrc_proof_hub_lane() { # <lane-json> -> lane json + {proof:{stamp,method,ok,sto
 
 osrc_proof_hub_counts() { # <lanes-json-array> -> {unverifiedLanes, needsYouLanes}
   jq -c '{unverifiedLanes:([.[] | select(.proof.method? == "none" and ((.status // "") | test("^(Merged|Done|Shipped)$")))] | length),
-          needsYouLanes:([.[] | select(.proof.stopped? == true)] | length)}' <<<"$1" 2>/dev/null || printf '{}'
+          needsYouLanes:([.[] | select(.proof.stopped? == true or .reviewNeedsYou != null)] | length)}' <<<"$1" 2>/dev/null || printf '{}'
 }

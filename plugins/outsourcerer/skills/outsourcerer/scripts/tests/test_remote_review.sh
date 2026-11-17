@@ -145,7 +145,7 @@ first_item="$(jq -r 'select(.state=="inflight") | .id' "$OSRC_HOME"/review/items
 grep -q "Review request $first_item: read $OSRC_HOME/review/$first_item.md" "$FAKE_TMUX/rv.sent" && grep -q "$first_item.VERDICT" "$FAKE_TMUX/rv.sent" \
   && ok "the instruction points at the brief file and names the VERDICT path" || bad "instruction text wrong: $(cat "$FAKE_TMUX/rv.sent")"
 b="$OSRC_HOME/review/$first_item.md"
-grep -q "$(jq -r .head "$OSRC_HOME/review/items/$first_item.json")" "$b" && grep -q 'git diff origin/main...FETCH_HEAD' "$b" && grep -q 'MERGE, CHANGES or BLOCK' "$b" \
+grep -q "$(jq -r .head "$OSRC_HOME/review/items/$first_item.json")" "$b" && grep -q 'git diff origin/main...FETCH_HEAD' "$b" && grep -qxF 'VERDICT: CHANGES must-fix=<n> nit=<n> pre-existing=<n>' "$b" \
   && ok "generated brief has branch, head sha, diff command and the verdict contract" || bad "brief incomplete"
 cp "$FIX/cc-idle-composer-ctx37.txt" "$FAKE_TMUX/rv.screen"; : > "$FAKE_TMUX/rv.sent.keep"
 cmd_review next >/dev/null 2>&1; rc=$?
@@ -165,7 +165,7 @@ grep -q '^NEXT OUTSOURCERER_TMUX=rv osrc session read' <<<"$ev" && ok "NEXT read
 
 # ---- 6. verdict file -> done event, lane done ------------------------------------------------------
 lane1="$(jq -r .lane "$OSRC_HOME/review/items/$first_item.json")"; head1="$(jq -r .head "$OSRC_HOME/review/items/$first_item.json")"
-printf 'MERGE\nLooks fine, no findings.\n' > "$OSRC_HOME/review/$first_item.VERDICT"; tick 1
+printf 'VERDICT: MERGE\nLooks fine, no findings.\n' > "$OSRC_HOME/review/$first_item.VERDICT"; tick 1
 ev="$(events)"
 grep -q "^EVENT done $lane1 [0-9]* VERDICT MERGE ${head1:0:7}" <<<"$ev" && ok "verdict file appears: EVENT done with the verdict in the detail" || bad "no verdict event: $ev"
 it="$OSRC_HOME/review/items/$first_item.json"
@@ -234,13 +234,13 @@ h5a="$(push cloud/v5 "READY a")"; tick 1; events >/dev/null; h5b="$(push cloud/v
 # ---- 12. verdicts: CHANGES send-back, invalid first line ----------------------------------------------
 cd "$TMP"
 it2="$(jq -r 'select(.state=="queued") | .id' "$OSRC_HOME"/review/items/*.json | head -1)"; jq --arg i "$it2" '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/$it2.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/$it2.json"
-printf 'CHANGES\n1. a.sh:10 missing quote\n' > "$OSRC_HOME/review/$it2.VERDICT"; tick 1; ev="$(events)"
+printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n1. a.sh:10 missing quote\n' > "$OSRC_HOME/review/$it2.VERDICT"; tick 1; ev="$(events)"
 grep -q "VERDICT CHANGES" <<<"$ev" && grep -q "^NEXT osrc review sendback $it2" <<<"$ev" && ok "CHANGES verdict: NEXT is review sendback" || bad "CHANGES NEXT wrong: $ev"
 sb="$(cmd_review sendback "$it2")"; sha7="$(jq -r '.head[0:7]' "$OSRC_HOME/review/items/$it2.json")"
 [ -f "$OSRC_HOME/review/REVIEW-$it2.md" ] && grep -q 'missing quote' "$OSRC_HOME/review/REVIEW-$it2.md" && grep -q 'relay this to lane' <<<"$sb" && ok "send-back writes REVIEW-<lane>-<sha7>.md and prints a relay message" || bad "send-back wrong: $sb"
 it3="$(jq -r 'select(.state=="queued") | .id' "$OSRC_HOME"/review/items/*.json | head -1)"; jq '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/$it3.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/$it3.json"
 printf 'looks good to me\n' > "$OSRC_HOME/review/$it3.VERDICT"; tick 100; ev="$(OSRC_VERDICT_SETTLE_SECS=0 events)"
-grep -q '^EVENT question ' <<<"$ev" && ok "verdict file without MERGE/CHANGES/BLOCK first line: EVENT question" || bad "invalid verdict not flagged: $ev"
+grep -q '^EVENT question ' <<<"$ev" && ok "verdict file without a stated VERDICT: first line: EVENT question (back to the reviewer)" || bad "invalid verdict not flagged: $ev"
 
 cmd_review requeue "$it3" >/dev/null && [ "$(jq -r .state "$OSRC_HOME/review/items/$it3.json")" = queued ] && ok "review requeue returns a stuck in-flight item to the queue" || bad "requeue failed"
 # ---- 13. rotation ----------------------------------------------------------------------------------------
@@ -304,7 +304,7 @@ grep -q "^EVENT unreviewed dd .*no review item" <<<"$ev" && grep -q "^NEXT osrc 
 # ---- 19. finding 2: a lane sent CHANGES gets a stall clock -------------------------------------------------------
 cmd_lane add chg --branch cloud/chg --repo "$REMOTE" >/dev/null; hc="$(push cloud/chg "READY: v1")"; tick 1; events >/dev/null
 jq '.state="inflight" | .sent_ts=1' "$OSRC_HOME/review/items/chg-${hc:0:7}.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/chg-${hc:0:7}.json"
-printf 'CHANGES\n1. fix it\n' > "$OSRC_HOME/review/chg-${hc:0:7}.VERDICT"; tick 1; events >/dev/null
+printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n1. fix it\n' > "$OSRC_HOME/review/chg-${hc:0:7}.VERDICT"; tick 1; events >/dev/null
 [ "$(osrc_remote_state chg)" = live ] && ok "READY head with a CHANGES verdict: lane is live (the ball is back with it)" || bad "CHANGES state: $(osrc_remote_state chg)"
 cmd_review ack "chg-${hc:0:7}" >/dev/null; tick 6000; ev="$(events)"
 grep -q '^EVENT stalled chg ' <<<"$ev" && ok "CHANGES then silence past OSRC_REMOTE_STALL: EVENT stalled (clock starts at the verdict)" || bad "no stall after CHANGES: $ev"

@@ -17,13 +17,19 @@
       const last = (l.proof.lines || []).slice(-4);   // the last failing lines, on the card itself
       if (last.length) { const pre = h.el('pre', 'pt-proof-lines', last.join('\n')); out.push(pre); }
     });
+    (p.lanes || []).filter((l) => l.reviewNeedsYou).forEach((l) => {
+      const n = h.el('p', 'pt-proof stop');
+      n.append(h.ic('hand'), h.el('span', null, (l.short || l.id) + ': review ' + l.reviewNeedsYou.item + ' has no readable verdict after one retry. Needs you.'));
+      n.title = l.reviewNeedsYou.why || '';
+      out.push(n);
+    });
     const u = p.unverifiedLanes || 0;
     if (u > 0) { const n = h.el('p', 'pt-proof'); n.append(h.ic('eye'), h.el('span', null, u + (u === 1 ? ' lane' : ' lanes') + ' landed unverified')); out.push(n); }
     return out;
   }
 
   // Stopped lanes across projects, for the "things need you" tile.
-  function needs(projects) { return (projects || []).reduce((a, p) => a + stopped(p).length, 0); }
+  function needs(projects) { return (projects || []).reduce((a, p) => a + stopped(p).length + (p.lanes || []).filter((l) => l.reviewNeedsYou && !(l.proof && l.proof.stopped)).length, 0); }
 
   window.OSRC_HUB_PROOF = { stamp, tileLines, needs };
 })();

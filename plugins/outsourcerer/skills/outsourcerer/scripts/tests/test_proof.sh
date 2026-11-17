@@ -14,7 +14,7 @@ mkdir -p "$OSRC_HOME" "$HOME"
 export OSRC_SELF=osrc OSRC_TIME_UNIT=1 OSRC_REMOTE_POLL_SECS=0 OSRC_PROOF_NO_SEND=1 GIT_TERMINAL_PROMPT=0
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
-for fn in cmd_guards cmd_proof osrc_proof_gate osrc_proof_handin _osrc_sev_route _osrc_review_write_brief _sv_observe_watch; do
+for fn in cmd_guards cmd_proof osrc_proof_gate osrc_proof_handin _osrc_sev_verdict _osrc_review_write_brief _sv_observe_watch; do
   type -t "$fn" >/dev/null || { echo "FAIL: $fn not loaded"; exit 1; }
 done
 ok "lib/proof.sh and lib/review_sev.sh load with the engine"
@@ -189,7 +189,7 @@ ev="$(cmd_lane events 2>/dev/null)"
 grep -q '^EVENT failed cl3 .*proof round 1 of 3' <<<"$ev" && grep -q '^NEXT osrc proof sendback cl3$' <<<"$ev" && ok "failing proof on READY: EVENT failed with the round, NEXT relays the sendback" || bad "cl3 events: $ev"
 [ ! -f "$OSRC_HOME/review/items/cl3-${h:0:7}.json" ] && ok "no review spent on it" || bad "cl3 queued"
 
-echo "=== severity routing: only must-fix sends a lane back ==="
+echo "=== routing reads only the stated VERDICT line ==="
 mkitem() { # <lane> <sha> <verdict-body> -> item id, ingested
   local id="$1-${2:0:7}"
   _OSRC_RV_BRANCH="$1" _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue "$1" "$2" "" manual >/dev/null
@@ -197,16 +197,16 @@ mkitem() { # <lane> <sha> <verdict-body> -> item id, ingested
   printf '%s\n' "$3" > "$OSRC_HOME/review/$id.VERDICT"; _osrc_review_ingest; printf '%s' "$id"
 }
 S1=1111111111111111111111111111111111111111; S2=2222222222222222222222222222222222222222
-i="$(mkitem sv1 "$S1" "$(printf 'CHANGES\n- [nit] a.sh:3 rename x\n- [pre-existing] b.sh:9 old race')")"
-[ "$(jq -r '.verdict + "|" + .verdict_raw' "$OSRC_HOME/review/items/$i.json")" = "MERGE|CHANGES" ] && ok "CHANGES with only nit/pre-existing -> routed MERGE" || bad "nit-only: $(jq -c . "$OSRC_HOME/review/items/$i.json")"
-grep -q 'old race' "$OSRC_HOME/review/notes/sv1.md" && ok "pre-existing finding becomes a note, not a block" || bad "notes"
-i="$(mkitem sv2 "$S1" "$(printf 'MERGE\n- [must-fix] c.sh:1 deletes the wrong dir')")"
-[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "MERGE that lists a must-fix -> routed CHANGES" || bad "mf merge"
-i="$(mkitem sv3 "$S1" "$(printf 'CHANGES\nc.sh:1 untagged problem')")"
-[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "untagged CHANGES stands (older reviewers)" || bad "untagged"
-i="$(mkitem sv4 "$S1" "$(printf 'CHANGES\n- [must-fix] d.sh:2 unchecked rc\n- [nit] d.sh:5 typo\n- [pre-existing] e.sh old')")"
+i="$(mkitem sv1 "$S1" "$(printf 'VERDICT: CHANGES must-fix=0 nit=1 pre-existing=1\n## Nits\n- a.sh:3 rename x\n## Pre-existing\n- b.sh:9 old race')")"
+[ "$(jq -r '.verdict + "|" + .verdict_raw + "|" + .notes + "|" + (.counts|tostring)' "$OSRC_HOME/review/items/$i.json")" = "MERGE|CHANGES|$OSRC_HOME/review/$i.VERDICT|{\"must_fix\":0,\"nit\":1,\"pre_existing\":1}" ] \
+  && ok "CHANGES must-fix=0 -> MERGE with notes (raw CHANGES, counts, notes on the item)" || bad "mf0: $(jq -c . "$OSRC_HOME/review/items/$i.json")"
+i="$(mkitem sv2 "$S1" "$(printf 'VERDICT: MERGE\n- [must-fix] c.sh:1 deletes the wrong dir')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = MERGE ] && ok "VERDICT: MERGE merges whatever the text below says (no inference)" || bad "merge text"
+i="$(mkitem sv3 "$S1" "$(printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\nc.sh:1 untagged problem')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "CHANGES must-fix=1 sends back" || bad "mf1"
+i="$(mkitem sv4 "$S1" "$(printf 'VERDICT: CHANGES must-fix=1 nit=1 pre-existing=1\n## Must-fix\n- d.sh:2 unchecked rc\n## Nits\n- d.sh:5 typo\n## Pre-existing\n- e.sh old')")"
 sb="$(_osrc_review_sendback "$i")"
-grep -q 'unchecked rc' <<<"$sb" && grep -q 'Nits (optional)' <<<"$sb" && ! grep -q 'e.sh old' <<<"$sb" && ok "sendback carries must-fix, nits as optional, no pre-existing" || bad "sendback: $sb"
+grep -q 'unchecked rc' <<<"$sb" && grep -q 'Nits (optional)' <<<"$sb" && ! grep -q 'e.sh old' <<<"$sb" && ok "sendback carries the Must-fix section, nits as optional, no pre-existing" || bad "sendback: $sb"
 
 echo "=== re-review gets only the delta and the prior must-fix findings ==="
 printf '# Brief\nBRIEF-BODY-MARKER %s\n' "$(head -c 3000 /dev/zero | tr '\0' 'x')" > "$TMP/brief.md"
@@ -218,7 +218,7 @@ grep -q 'unchecked rc' <<<"$inc" && ! grep -q 'd.sh:5 typo' <<<"$inc" && ! grep 
 ! grep -q BRIEF-BODY-MARKER <<<"$inc" && grep -q "$TMP/brief.md" <<<"$inc" && ok "the lane brief is a pointer, not pasted again" || bad "brief pasted: $inc"
 b3="$(_osrc_review_write_brief "sv4-${S2:0:7}" final)"; full="$(cat "$b3")"
 [ "${#inc}" -lt "${#full}" ] && ok "incremental brief is smaller than the full one (${#inc} < ${#full} bytes)" || bad "sizes ${#inc} vs ${#full}"
-grep -q '^- Proof: ' <<<"$full" && grep -q '\[must-fix\], \[nit\] or \[pre-existing\]' <<<"$full" && ok "brief shows the proof stamp and asks for severity tags" || bad "brief lines"
+grep -q '^- Proof: ' <<<"$full" && grep -qxF 'VERDICT: CHANGES must-fix=<n> nit=<n> pre-existing=<n>' <<<"$full" && ok "brief shows the proof stamp and the exact VERDICT line formats" || bad "brief lines"
 
 _OSRC_RV_BRANCH=lane1 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue lane1 "$(git -C "$R" rev-parse HEAD)" "" manual >/dev/null
 b4="$(_osrc_review_write_brief "lane1-$(git -C "$R" rev-parse --short=7 HEAD)")"
@@ -283,20 +283,18 @@ osrc_done_set m5 "check:true" "$D"
 ! osrc_proof_required m5 && ok "M5: a fresh --done-when lane is not gated just because its base was pinned" || bad "M5: gated without using proof"
 : > "$W/out/m5.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
 [ "$(jq -r .kind <<<"$ev")" = done ] && [ ! -f "$OSRC_HOME/proof/m5/rounds.json" ] && ok "M5: its .DONE is a plain done, no round charged" || bad "M5 handin: $ev"
-# M6: CHANGES demotes to MERGE only when EVERY finding is a nit or pre-existing.
-for extra in 'c.sh:9 untagged bug' '**[must-fix]** d.sh:2 bold' '[blocker] f.sh:4' '[ ] [must-fix] e.sh:3 checklist'; do
-  i="$(mkitem "m6$RANDOM" "$S1" "$(printf 'CHANGES\n- [nit] a.sh:1 rename\n- %s' "$extra")")"
-  [ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "M6: nit + '$extra' stays CHANGES" || bad "M6 '$extra' -> $(jq -r .verdict "$OSRC_HOME/review/items/$i.json")"
-done
-i="$(mkitem m6ok "$S1" "$(printf 'CHANGES\n1. **nit:** a.sh:1 rename\n- [ ] [pre-existing] b.sh old')")"
-[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = MERGE ] && ok "M6: all nit/pre-existing (any markup) still routes MERGE" || bad "M6 ok: $(jq -r .verdict "$OSRC_HOME/review/items/$i.json")"
+# M6 (round 4: severity is stated): the counts decide, whatever the findings' markup says.
+i="$(mkitem m6 "$S1" "$(printf 'VERDICT: CHANGES must-fix=1 nit=1 pre-existing=0\n- [nit] a.sh:1 rename\n- c.sh:9 untagged bug')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "M6: must-fix=1 stays CHANGES" || bad "M6"
+i="$(mkitem m6ok "$S1" "$(printf 'VERDICT: CHANGES must-fix=0 nit=2 pre-existing=0\n- **[must-fix]** looks scary but the reviewer counted 0')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = MERGE ] && ok "M6: must-fix=0 merges, the text is not re-read" || bad "M6 ok"
 # M7: sendback and the next round keep untagged findings and continuation lines.
-i="$(mkitem m7 "$S1" "$(printf 'CHANGES\n- [must-fix] a.sh:1 race\n  repro: run twice in parallel\n- b.sh:2 untagged leak\n- [nit] c.sh typo')")"
+i="$(mkitem m7 "$S1" "$(printf 'VERDICT: CHANGES must-fix=2 nit=1 pre-existing=0\n## Must-fix\n- a.sh:1 race\n  repro: run twice in parallel\n- b.sh:2 untagged leak\n## Nits\n- c.sh typo')")"
 sb="$(_osrc_review_sendback "$i")"
 grep -q 'repro: run twice in parallel' <<<"$sb" && grep -q 'b.sh:2 untagged leak' <<<"$sb" && ok "M7: sendback keeps the continuation line and the untagged finding" || bad "M7 sendback: $sb"
 _OSRC_RV_BRANCH=m7 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue m7 "$S2" "" manual >/dev/null
 b7="$(cat "$(_osrc_review_write_brief "m7-${S2:0:7}")")"
-grep -q '^  repro: run twice in parallel' <<<"$b7" && grep -q '^- \[ \] - b.sh:2 untagged leak\|^- \[ \] b.sh:2 untagged leak' <<<"$b7" && ! grep -q 'c.sh typo' <<<"$b7" \
+grep -q '^  repro: run twice in parallel' <<<"$b7" && grep -q '^- \[ \] b.sh:2 untagged leak' <<<"$b7" && ! grep -q 'c.sh typo' <<<"$b7" \
   && ok "M7: re-review checklist keeps them too (continuation stays indented, not a new item)" || bad "M7 brief: $b7"
 # M8: the review item and brief show a stamp only for the exact head.
 P run --lane m8 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
@@ -321,20 +319,6 @@ out="$(P run --lane n3 --dir "$D" --cmd true 2>&1)"; grep -q '^not counted: guar
 grep -q "slice(-4)" "$HERE/../lib/hub-assets/hub-proof.js" && ok "nit: the needs-you card shows the last failing lines (not hover-only)" || bad "nit card"
 
 echo "=== Round 3 regressions (S2 review round 2: must-fix 1-4 + nits; each fails on 25b300d) ==="
-route() { printf "$2" > "$TMP/r3v"; _osrc_sev_route "$1" "$TMP/r3v"; }
-# R1: a tag is "[tag]" or "tag:" only; words that merely start with a tag name are untagged findings.
-[ "$(route CHANGES 'CHANGES\n- Pre-existing callers break\n- [nit] typo\n')" = CHANGES ] && ok "R1: '- Pre-existing callers break' is an untagged finding, CHANGES stands" || bad "R1 pre-existing word"
-[ "$(route CHANGES 'CHANGES\n- nitro_mode() drops the lock\n- [nit] typo\n')" = CHANGES ] && ok "R1: '- nitro_mode() drops the lock' is not a nit, CHANGES stands" || bad "R1 nitro"
-[ "$(route CHANGES 'CHANGES\n- pre-existing: old leak\n- **nit**: typo\n- [Nit] spacing\n')" = MERGE ] && ok "R1: 'tag:', '**tag**:' and '[Tag]' still tag (all nit/pre-existing -> MERGE)" || bad "R1 real tags"
-[ "$(route MERGE 'MERGE\n- Must-fix the docs someday\n')" = MERGE ] && ok "R1: MERGE mentioning 'Must-fix ...' without a tag stays MERGE" || bad "R1 merge word"
-# R2: a must-fix anywhere (heading, indented, nested) keeps CHANGES.
-[ "$(route CHANGES 'CHANGES\n### [must-fix] the lock is dropped\n- [nit] typo\n')" = CHANGES ] && ok "R2: '### [must-fix]' heading plus a nit stays CHANGES" || bad "R2 heading"
-[ "$(route CHANGES 'CHANGES\n### [must-fix]\n- the lock is dropped\n### [nit]\n- typo\n')" = CHANGES ] && ok "R2: an item under a [must-fix] heading is must-fix" || bad "R2 section"
-[ "$(route CHANGES 'CHANGES\n- [nit] typo\n  - [must-fix] and the lock is dropped\n')" = CHANGES ] && ok "R2: an indented [must-fix] under a nit stays CHANGES" || bad "R2 indented"
-[ "$(route MERGE 'MERGE\n- [nit] a\n    [blocker] b\n')" = CHANGES ] && ok "R2: MERGE with a nested [blocker] routes to CHANGES" || bad "R2 nested merge"
-[ "$(route CHANGES 'CHANGES\n## [nit]\n- typo\n- spacing\n')" = MERGE ] && ok "R2: items under a [nit] heading are nits (MERGE)" || bad "R2 nit section"
-printf 'CHANGES\n- [nit] typo\n  - [must-fix] and the lock is dropped\n' > "$TMP/r3v"
-grep -q 'the lock is dropped' <<<"$(_osrc_sev_lines "$TMP/r3v" must-fix)" && ok "R2: the sendback carries the nested must-fix" || bad "R2 sendback"
 # R3: only a summary line with BOTH counts counts failures.
 D="$TMP/r3c"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"
 P run --lane r3c --dir "$D" --cmd 'echo "test_retry: recovers after 2 failed attempts ... ok"; echo "RESULT: 10 passed, 0 failed"' >/dev/null 2>&1
@@ -362,7 +346,7 @@ DC="$TMP/r4c"; mk "$DC" "$FAILV"; work "$DC"
 P run --lane r4c --dir "$DC" --base main >/dev/null 2>&1; P run --lane r4c --dir "$DC" >/dev/null 2>&1
 DD="$TMP/r4d"; mk "$DD" 'echo "3 passed, 0 failed"'; work "$DD"
 out="$(OSRC_LANE=r4c P run --lane r4c --dir "$DD" --base main 2>&1)"; r=$?
-[ "$r" = 4 ] && grep -q 'cannot clear them by moving' <<<"$out" && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 2 ] && ok "R4: inside the lane, moving to another worktree does not clear 2 failed rounds" || bad "R4 in-lane rc=$r [$out]"
+[ "$r" = 4 ] && grep -q 'pin never moves' <<<"$out" && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 2 ] && ok "R4: inside the lane, moving to another worktree does not clear 2 failed rounds" || bad "R4 in-lane rc=$r [$out]"
 ( cd "$DC" && git checkout -qb other ); out="$(OSRC_LANE=r4c P run --lane r4c --dir "$DC" 2>&1)"; r=$?
 [ "$r" = 4 ] && [ "$(_osrc_proof_rounds r4c | jq -r .fails)" = 2 ] && ok "R4: nor does switching branch in the same worktree" || bad "R4 branch in-lane rc=$r [$out]"
 P run --lane r4c --dir "$DD" --base main >/dev/null 2>&1; r=$?
@@ -385,6 +369,81 @@ git -C "$D" worktree add -q -b sib "$TMP/n5sib" >/dev/null 2>&1; work "$TMP/n5si
 P run --lane n5 --dir "$TMP/n5sib" >/dev/null 2>&1; g="$(osrc_proof_gate n5 "$(git -C "$TMP/n5sib" rev-parse HEAD)")"
 [ $? = 1 ] && grep -q 'not in the lane worktree' <<<"$g" && ok "nit: a proof from a sibling worktree does not pass the gate" || bad "nit sibling: $g"
 P run --lane n5 --dir "$D" >/dev/null 2>&1; g="$(osrc_proof_gate n5)"; [ $? = 0 ] && ok "nit: the lane's own worktree passes" || bad "nit own wt: $g"
+
+echo "=== Round 4 (redesign): stated verdicts, the pin never moves in a lane; each fails on 5622f81 ==="
+IT() { printf '%s/review/items/%s.json' "$OSRC_HOME" "$1"; }
+# Stated verdicts: the text below line 1 never routes.
+i="$(mkitem v4a "$S1" "$(printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n### [nit]\n- run.sh:4 the lock is dropped on retry')")"
+[ "$(jq -r .verdict "$(IT "$i")")" = CHANGES ] && ok "V1: a '### [nit]' section over an untagged finding: the stated must-fix=1 routes CHANGES" || bad "V1: $(jq -c . "$(IT "$i")")"
+i="$(mkitem v4b "$S1" "$(printf 'VERDICT: MERGE\n## Must-fix\n- [x] [must-fix] run.sh:4 lock dropped: fixed\nMust-fix: none')")"
+[ "$(jq -r .verdict "$(IT "$i")")" = MERGE ] && ok "V2: '- [x] [must-fix] ... fixed' and 'Must-fix: none' under VERDICT: MERGE merge" || bad "V2: $(jq -c . "$(IT "$i")")"
+printf 'VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\n## Must-fix\n- [x] old.sh:1 fixed\n  checked with a test\n- [ ] new.sh:2 still racy\n' > "$TMP/v4c"
+pr="$(_osrc_sev_prior "$TMP/v4c")"; grep -q 'new.sh:2 still racy' <<<"$pr" && ! grep -q 'old.sh\|checked with' <<<"$pr" && ok "V3: checked '- [x] ... fixed' items (and their lines) never return as open must-fix" || bad "V3: $pr"
+# Malformed: back to the reviewer once, then a person.
+export OSRC_VERDICT_SETTLE_SECS=0
+i="$(mkitem v4m "$S1" "$(printf 'MERGE\nlooks fine')")"
+ev="$(osrc_review_events 2>/dev/null)"
+[ "$(jq -r '.state + " " + (.bad_verdicts|tostring)' "$(IT "$i")")" = "inflight 1" ] && [ -f "$OSRC_HOME/review/$i.VERDICT.bad1" ] && [ ! -f "$OSRC_HOME/review/$i.VERDICT" ] \
+  && grep -q '^EVENT question v4m .*back to the reviewer once' <<<"$ev" && grep -q '^NEXT .*session send .*VERDICT: CHANGES must-fix=<n>' <<<"$ev" \
+  && ok "V4: a malformed first line goes back to the REVIEWER once (file set aside, NEXT tells it the exact format)" || bad "V4: $(jq -c . "$(IT "$i")") [$ev]"
+printf '**VERDICT: MERGE**\n' > "$OSRC_HOME/review/$i.VERDICT"; _osrc_review_ingest; ev="$(osrc_review_events 2>/dev/null)"
+[ "$(jq -r .state "$(IT "$i")")" = needs-you ] && grep -q '^EVENT failed v4m .*malformed verdict twice' <<<"$ev" && grep -q "^NEXT osrc review show $i" <<<"$ev" \
+  && ok "V4: a second malformed verdict lands on needs-you (EVENT failed, never guessed, no loop)" || bad "V4b: $(jq -c . "$(IT "$i")") [$ev]"
+h="$(osrc_proof_hub_lane '{"id":"v4m","status":"Building"}')"
+[ "$(jq -r .reviewNeedsYou.item <<<"$h")" = "$i" ] && [ "$(osrc_proof_hub_counts "[$h]" | jq -r .needsYouLanes)" = 1 ] && grep -q reviewNeedsYou "$HERE/../lib/hub-assets/hub-proof.js" \
+  && ok "V4: Mission Control counts it under needs you" || bad "V4 hub: $h"
+cmd_review requeue "$i" --force >/dev/null 2>&1; [ "$(jq -r '.state + " " + (.bad_verdicts|tostring)' "$(IT "$i")")" = "queued 0" ] && ok "V4: review requeue (a person) clears the count" || bad "V4 requeue: $(jq -c . "$(IT "$i")")"
+# Ten realistic reviewer outputs.
+n=0; for case in \
+  'MERGE|VERDICT: MERGE\n\nClean diff, tests cover the new branch.' \
+  'MERGE|VERDICT: MERGE  \r\nNo findings.' \
+  'CHANGES|VERDICT: CHANGES must-fix=2 nit=1 pre-existing=0\n## Must-fix\n1. lib/a.sh:40 unquoted $dir\n2. lib/b.sh:9 rc ignored\n## Nits\n- typo' \
+  'MERGE|VERDICT: CHANGES must-fix=0 nit=3 pre-existing=1\n## Nits\n- a\n- b\n- c\n## Pre-existing\n- old leak in c.sh' \
+  'BLOCK|VERDICT: BLOCK\nThis deletes the user state dir; do not land.' \
+  'bounce|MERGE\nlgtm' \
+  'bounce|Here is my review.\nVERDICT: MERGE' \
+  'bounce|VERDICT: CHANGES must-fix=1\n- a.sh:1 bug' \
+  'bounce|## Verdict: CHANGES\n- [must-fix] a.sh:1' \
+  'bounce|VERDICT: CHANGES must-fix=one nit=0 pre-existing=0' ; do
+  n=$((n + 1)); want="${case%%|*}"; body="${case#*|}"
+  i="$(mkitem "real$n" "$S1" "$(printf "$body")")"
+  got="$(jq -r 'if .state == "verdict" then .verdict elif (.bad_verdicts // 0) == 1 then "bounce" else .state end' "$(IT "$i")")"
+  [ "$got" = "$want" ] && ok "V5.$n: realistic reviewer output -> $want" || bad "V5.$n: want $want got $got ($body)"
+done
+unset OSRC_VERDICT_SETTLE_SECS
+# The pin never moves inside a lane.
+D="$TMP/p4"; mk "$D" 'echo "1 passed, 0 failed"'; osrc_done_set p4 "check:true" "$D"; work "$D"
+pin0="$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")"
+OSRC_LANE=p4 P run --lane p4 --dir "$D" >/dev/null 2>&1; [ $? = 0 ] && ok "P1: in-lane run on the pinned branch and worktree proves" || bad "P1"
+( cd "$D" && git checkout -qb other ); old="$(git -C "$D" rev-parse main)"
+out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" --base "$old" 2>&1)"; r=$?
+[ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && grep -q "proof base p4 --dir $(cd "$D" && pwd -P) $pin0" <<<"$out" \
+  && ok "P2: in-lane branch switch + --base <old> exits 4 with the one fixing command; the pin is unchanged" || bad "P2 rc=$r [$out]"
+out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" 2>&1)"; [ $? = 4 ] && ok "P2: a plain in-lane run on the switched branch exits 4 too" || bad "P2b [$out]"
+( cd "$D" && git checkout -q lane ); ( cd "$D" && git commit -q --allow-empty -m m2 && git checkout -q main && git commit -q --allow-empty -m mainmoves && git checkout -q lane )
+out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D" --base main 2>&1)"; r=$?
+[ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && ok "P3: in-lane --base <moved main> exits 4; the pin is unchanged" || bad "P3 rc=$r [$out]"
+D2="$TMP/p4b"; mk "$D2" 'echo "1 passed, 0 failed"'; work "$D2"
+out="$(OSRC_LANE=p4 P run --lane p4 --dir "$D2" 2>&1)"; r=$?
+[ "$r" = 4 ] && [ "$(jq -r .sha "$OSRC_HOME/proof/p4/base.json")" = "$pin0" ] && [ "$(_osrc_proof_rounds p4 | jq -r .fails)" = 0 ] && ok "P4: in-lane run from another worktree (0 failed rounds) exits 4, nothing cleared" || bad "P4 rc=$r [$out]"
+D3="$TMP/p5"; mk "$D3" 'echo "1 passed, 0 failed"'; work "$D3"
+out="$(OSRC_LANE=p5 P run --lane p5 --dir "$D3" 2>&1)"; r=$?
+[ "$r" = 4 ] && [ ! -f "$OSRC_HOME/proof/p5/base.json" ] && grep -q 'proof base p5' <<<"$out" && ok "P5: in-lane with no pin exits 4 and pins nothing" || bad "P5 rc=$r [$out]"
+out="$(OSRC_LANE=p5 P base p5 --dir "$D3" main 2>&1)"; [ $? != 0 ] && P base p5 --dir "$D3" "$(git -C "$D3" rev-parse main)" >/dev/null 2>&1 && OSRC_LANE=p5 P run --lane p5 --dir "$D3" >/dev/null 2>&1 \
+  && ok "P5: the fixing command is refused in-lane, works from the orchestrator, then the lane proves" || bad "P5 fix [$out]"
+D4="$TMP/p6"; mkdir -p "$D4/.outsourcerer" && ( cd "$D4" && git init -q -b main && printf '#!/bin/sh\necho "1 passed, 0 failed"\n' > .outsourcerer/verify && chmod +x .outsourcerer/verify && git add -A && git commit -qm base )
+osrc_done_set p6 "check:true" "$D4"; pin6="$(jq -r .sha "$OSRC_HOME/proof/p6/base.json")"
+( cd "$D4" && git checkout -qb feat ); work "$D4"
+OSRC_LANE=p6 P run --lane p6 --dir "$D4" >/dev/null 2>&1; r=$?
+[ "$r" = 0 ] && [ "$(jq -r '.sha + " " + .branch + " " + (.branch_locked|tostring)' "$OSRC_HOME/proof/p6/base.json")" = "$pin6 feat true" ] && ok "P6: a lane that creates its branch after session start keeps its pin (branch adopted once)" || bad "P6 rc=$r $(cat "$OSRC_HOME/proof/p6/base.json")"
+( cd "$D4" && git checkout -qb feat2 ); out="$(OSRC_LANE=p6 P run --lane p6 --dir "$D4" 2>&1)"; [ $? = 4 ] && ok "P6: a second branch after that is a switch: exits 4" || bad "P6b [$out]"
+# Nits.
+D="$TMP/c4"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"
+P run --lane c4 --dir "$D" --cmd 'echo "test_retry: 5 passed after 2 failed attempts ... ok"' >/dev/null 2>&1
+[ "$(jq -r .ok "$OSRC_HOME/proof/c4/proof.json")" = true ] && ok "N1: a test title carrying both counts, no later summary: the green exit code stands" || bad "N1: $(jq -c '{ok,stamp}' "$OSRC_HOME/proof/c4/proof.json")"
+D="$TMP/t4"; mk "$D" 'echo "1 passed, 0 failed"'; work "$D"; work "$D"; ( cd "$D" && git tag x HEAD~1 ); m="$(git -C "$D" rev-parse main)"
+out="$(P run --lane t4 --dir "$D" --base x --cmd true 2>&1)"
+[ "$(jq -r '.sha + " " + .ref' "$OSRC_HOME/proof/t4/base.json")" = "$m lane-start" ] && grep -q refused <<<"$out" && ok "N2: a lane-made tag as --base is refused like HEAD~1 (lane-start pinned)" || bad "N2: [$out] $(cat "$OSRC_HOME/proof/t4/base.json" 2>/dev/null)"
 
 echo
 echo "test_proof: $pass passed, $fail failed"

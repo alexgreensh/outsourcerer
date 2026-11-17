@@ -51,8 +51,9 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
 - `review next` sends only to an idle reviewer (`osrc_screen_state` when L3 lands, otherwise a
   conservative pane reader that needs an empty composer and no spinner; L3's `composer` counts as idle only
   when its evidence says "no turn yet", never when the composer holds unsent text), never with another item in
-  flight. The brief is `review/<item>.md`; the reviewer writes `review/<item>.VERDICT`, first line
-  `MERGE`, `CHANGES` or `BLOCK`, findings below.
+  flight. The brief is `review/<item>.md`; the reviewer writes `review/<item>.VERDICT`. Its first line
+  is the stated verdict, exactly `VERDICT: MERGE`, `VERDICT: CHANGES must-fix=<n> nit=<n> pre-existing=<n>`
+  or `VERDICT: BLOCK`; findings go below under `## Must-fix`, `## Nits`, `## Pre-existing`.
 - **Verdict contract**: each item records `sha_at_ready`, `sha_reviewed`, `verdict`, `findings` (path).
   A push after READY supersedes a queued review of the old sha and marks an in-flight or finished one
   `stale`; the new READY head is enqueued as a re-review. A stale MERGE never makes the lane `done`.
@@ -103,14 +104,22 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
   under a running lane changes nothing, and a lane working on main with no remote is judged against
   main's tip when it started. `proof.json` records `base` (the ref) and `base_sha`. Without a pin,
   the first `proof run` pins the base ref unless it is the checkout's own branch; then it prints the
-  `proof base` command and the guards report an error (not charged as a round), never a guess. A lane's
-  `proof run --base` never moves an existing pin and never names its own branch or head; `proof base`
-  and `proof reset` are refused inside a lane session (a person's call).
+  `proof base` command and the guards report an error (not charged as a round), never a guess.
+  Inside a lane session the pin never moves: no plain `proof run`, branch change, worktree change or
+  `--base` clears or replaces it. Any mismatch exits 4 and prints the one fixing command,
+  `proof base <lane> --dir <top> <sha>`, which is itself refused inside a lane (as is `proof reset`).
+  A branch the lane creates after session start, on top of the pinned sha and with no commits left on
+  the start branch, is adopted once. Outside a lane, a lane name reused in another worktree or on
+  another branch is a new lane: its old pin, rounds and proof are cleared. Unpinned, a `--base` naming
+  the lane's own history (`HEAD~1`, `<branch>^`, a lane-only sha, or a tag the lane made on it) is
+  refused and the branch's creation point is pinned as `lane-start`.
 - Checks always run: the base verify and the done contract's `check:` run on every `proof run`;
   `--cmd` only adds. `--method none|review` is refused when either exists, still runs the guards,
   always needs a reviewer, and never resets the failed-round count. A diff touching `.outsourcerer/`
   needs a reviewer too. Untracked files (outside .gitignore) fail the proof like uncommitted edits, and
-  a check that exits 0 but prints "N failed" with N > 0 fails. Review items and briefs show a stamp only
+  a check that exits 0 but whose last summary line (a line made only of counts, such as
+  "10 passed, 2 failed" or "passed=10 failed=2") shows failures fails; any other line with counts in it
+  (a test title) never overrides a green exit code. Review items and briefs show a stamp only
   for the exact head ("unproved at <sha7>" otherwise).
 
 - `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
@@ -138,13 +147,15 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
   After `OSRC_PROOF_MAX_ROUNDS` (3) the lane is stopped (`proof run` exits 4, no more sendbacks) and
   Mission Control lists it under "needs you" with the last failing lines. `proof reset <lane>` is the
   person's call. Project cards count lanes that landed unverified.
-- Findings carry a severity tag, `[must-fix]` (or `[blocker]`), `[nit]` or `[pre-existing]`
-  (lib/review_sev.sh); list markup, checkboxes and bold around the tag are fine, indented lines belong
-  to the finding above, and an untagged finding counts as must-fix. Only must-fix sends a lane back:
-  CHANGES routes to MERGE only when every finding is a nit or pre-existing (`verdict_raw` keeps what
-  the reviewer wrote), MERGE listing a tagged must-fix routes to CHANGES. Pre-existing findings go to `review/notes/<lane>.md`, never a block. A re-review brief
-  carries the diff since the last reviewed sha and only the prior must-fix findings; the lane brief is a
-  pointer, not pasted again.
+- Severity is stated, never inferred (lib/review_sev.sh). Routing reads only the first line: CHANGES
+  with must-fix>=1 sends the lane back; CHANGES with must-fix=0 is a MERGE with notes (`verdict_raw`
+  CHANGES, `counts`, `notes` on the item, never a sendback); MERGE merges; BLOCK blocks. A missing or
+  malformed first line goes back to the REVIEWER once (the file moves to `<item>.VERDICT.bad1`, EVENT
+  `question`); a second one parks the item in state `needs-you` (EVENT `failed`, Mission Control counts
+  it). `review requeue` clears the count. The findings text is only cut by its headings for the
+  sendback and the re-review checklist (checked `- [x] ... fixed` items are dropped). A re-review brief
+  carries the diff since the last reviewed sha and only the prior `## Must-fix` section; the lane brief
+  is a pointer, not pasted again.
 
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
 
@@ -155,7 +166,7 @@ proof base <lane> [--dir DIR] [REF|SHA]      show or pin the lane's base sha
 | `idle` | reviewer idle with queue non-empty (NEXT `review next` or `review rotate`); reviewer idle with no verdict past the send grace |
 | `stalled` | live lane, no push for `OSRC_REMOTE_STALL` minutes |
 | `failed` | done-when check failed; poll auth/rate/network failure; branch deleted; reviewer session gone |
-| `question` | verdict file whose first line is not MERGE/CHANGES/BLOCK |
+| `question` | verdict file whose first line is not a stated `VERDICT:` line (back to the reviewer once) |
 | `approval` | reviewer sitting at a prompt mid-review |
 
 Events dedupe by key and re-fire every `OSRC_RENOTIFY_MIN` (15) while the condition holds; READY is
