@@ -12,7 +12,8 @@
 #   osrc_approver_tick <pane> [session-id]                         one pass; called by L1 supervise
 #       rc 0  approved (printed EVENT approved + NEXT)
 #       rc 2  held and reported now (printed EVENT approval + NEXT): new hold, or a hold older than
-#             OSRC_HOLD_MIN minutes (default 30) re-emitted as "still held"
+#             OSRC_HOLD_MIN minutes (default 5) re-emitted as "still held, waiting Nm"; a press that
+#             left the prompt open is EVENT approval-not-landed, once per prompt per OSRC_HOLD_MIN
 #       rc 3  held, already reported within OSRC_HOLD_MIN (prints nothing; do not re-wake)
 #       rc 1  nothing to do (policy off, no approval prompt open, or pane unreadable)
 # Every decision appends one JSON line to $OSRC_HOME/approvals.log.
@@ -188,11 +189,25 @@ osrc_approver_tick() { # <pane> [session-id]
       done
     fi
     [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
-    decision=hold; rule="approver pressed Enter but the prompt did not close"
+    # The keystroke did not land: reported as its own kind, once per prompt per OSRC_HOLD_MIN (the
+    # approver keeps re-pressing every OSRC_APPROVER_REPRESS_SECS meanwhile). The hold file is written
+    # before anything is printed, so the next tick knows it was already reported.
+    holdmin="${OSRC_HOLD_MIN:-5}"; case "$holdmin" in ''|*[!0-9]*) holdmin=5 ;; esac
+    key="$(printf '%s|%s|%s' "$OSRC_SCR_KIND" "$want_path" "$want_cmd" | cksum | awk '{print $1}')"
+    mkdir -p "$hdir" 2>/dev/null; hf="$hdir/$sid.$key"
+    first="$now"; last=0
+    [ -f "$hf" ] && read -r first last 2>/dev/null < "$hf"
+    case "$first" in ''|*[!0-9]*) first="$now" ;; esac; case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -lt $((holdmin * 60)) ] && return 3
+    printf '%s %s\n' "$first" "$now" > "$hf" || return 3
+    _osrc_approver_log "$sid" "$eng" "${cmd1:-$want_path}" hold "pressed Enter, prompt still open" "$root" "$OSRC_SCR_KIND" "$want_path"
+    printf 'EVENT approval-not-landed %s %s the approver pressed Enter but the prompt is still open (%s): %s\n' "$sid" "$now" "$rule" "${cmd1:-$want_path}"
+    _osrc_approver_next "$sid"
+    return 2
     fi
   fi
   # Held: report once, then again only after OSRC_HOLD_MIN minutes so a hold cannot sleep overnight.
-  holdmin="${OSRC_HOLD_MIN:-30}"; case "$holdmin" in ''|*[!0-9]*) holdmin=30 ;; esac
+  holdmin="${OSRC_HOLD_MIN:-5}"; case "$holdmin" in ''|*[!0-9]*) holdmin=5 ;; esac
   key="$(printf '%s|%s|%s' "$OSRC_SCR_KIND" "$OSRC_SCR_PATH" "$OSRC_SCR_CMD" | cksum | awk '{print $1}')"
   mkdir -p "$hdir" 2>/dev/null
   hf="$hdir/$sid.$key"
@@ -203,8 +218,8 @@ osrc_approver_tick() { # <pane> [session-id]
     if [ $((now - last)) -lt $((holdmin * 60)) ]; then return 3; fi
     age=$(( (now - first) / 60 ))
     printf '%s %s\n' "$first" "$now" > "$hf"
-    _osrc_approver_log "$sid" "$eng" "${cmd1:-$OSRC_SCR_PATH}" hold "still held after ${age}m: $rule" "$root" "$OSRC_SCR_KIND" "$OSRC_SCR_PATH"
-    printf 'EVENT approval %s %s still held after %sm (%s): %s\n' "$sid" "$now" "$age" "$rule" "${cmd1:-${OSRC_SCR_PATH:-$OSRC_SCR_EVIDENCE}}"
+    _osrc_approver_log "$sid" "$eng" "${cmd1:-$OSRC_SCR_PATH}" hold "still held, waiting ${age}m: $rule" "$root" "$OSRC_SCR_KIND" "$OSRC_SCR_PATH"
+    printf 'EVENT approval %s %s still held, waiting %sm (%s): %s\n' "$sid" "$now" "$age" "$rule" "${cmd1:-${OSRC_SCR_PATH:-$OSRC_SCR_EVIDENCE}}"
     _osrc_approver_next "$sid"
     return 2
   fi

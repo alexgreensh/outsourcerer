@@ -72,6 +72,7 @@ osrc_hub_seen_lane() {
 # statusline paths (tap, brief, help, hub export/serve, limits) never register anyone. Delegates that
 # run Outsourcerer inside a delegated run (OUTSOURCERER_DEPTH > 0) are lanes, not orchestrators.
 osrc_hub_beat_cmd() {
+  type osrc_mc_cmd_hook >/dev/null 2>&1 && osrc_mc_cmd_hook "$@"   # no-watcher warning, Mission Control auto-open (lib/mc_alive.sh)
   [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || return 0
   case "${OUTSOURCERER_DEPTH:-0}" in ''|0) ;; *) return 0 ;; esac
   case "${1:-}" in

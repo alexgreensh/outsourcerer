@@ -268,6 +268,7 @@ _osrc_hub_build_project() {
       case "${t##*/}" in .*|watch.*) continue ;; esac   # watch.*: a supervise --watch, not a lane
       lane="$(_osrc_hub_lane_for "${t##*/}" "$rmap")"
       [ -n "$lane" ] && type _osrc_hub_lane_live_fields >/dev/null 2>&1 && lane="$(_osrc_hub_lane_live_fields "$lane")"   # state + times (MC2 r2 #5)
+      [ -n "$lane" ] && type osrc_proof_hub_lane >/dev/null 2>&1 && lane="$(osrc_proof_hub_lane "$lane")"   # proof stamp (lib/proof.sh)
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
       act="$(_osrc_hub_lane_activity "${t##*/}")"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
@@ -278,6 +279,7 @@ _osrc_hub_build_project() {
   if type _osrc_hub_ended_ids >/dev/null 2>&1; then
     for t in $(_osrc_hub_ended_ids "$slug"); do
       lane="$(_osrc_hub_ended_lane "$t" "$rmap")"
+      [ -n "$lane" ] && type osrc_proof_hub_lane >/dev/null 2>&1 && lane="$(osrc_proof_hub_lane "$lane")"
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
       act="$(_osrc_hub_lane_activity "$t")"; [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
     done
@@ -322,7 +324,9 @@ _osrc_hub_build_project() {
   ')"
   # No live lane and no status of its own -> idle. A status the card or a Mark done / Move back set is kept
   # exactly (MC2 r3: relabelling an explicit "building" undid Move back).
+  ! type osrc_proof_hub_counts >/dev/null 2>&1 || out="$(jq -c --argjson c "$(osrc_proof_hub_counts "$lanes")" '. + $c' <<<"$out")"
   out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and (has("status") | not) then .status="idle" else . end')"
+  ! type osrc_mc_alerts >/dev/null 2>&1 || out="$(osrc_mc_alerts "$slug" "$out")"   # needs-you alerts + watcher gap (lib/mc_alive.sh)
   printf '%s\n' "$out"
   type _osrc_hub_cache_put >/dev/null 2>&1 && _osrc_hub_cache_put "$slug" "$out"
   return 0
@@ -778,6 +782,8 @@ cmd_hub_serve() {
     tok="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
     [ -n "$tok" ] || die "hub serve: cannot read /dev/urandom for the access token — refusing to run with a guessable one"
     ( umask 077 && printf '%s\n' "$tok" > "$tokf" ) || die "hub serve: cannot write $tokf"
+    # A rotation revokes: no retired key may redeem the new one through /reopen.
+    [ "$newtok" = 1 ] && rm -f "$OSRC_HOME/hub/keys.json"
     [ "$newtok" = 1 ] && echo "hub serve: rotated the access token — old bookmarks are dead" >&2
   fi
   chmod 600 "$tokf" 2>/dev/null || die "hub serve: cannot chmod 600 $tokf"
@@ -815,7 +821,10 @@ cmd_hub_mc() {
     [ -n "$url" ] || die "mc: Mission Control did not start within 15 s; see $log"
   fi
   echo "[outsourcerer] Mission Control: $url"
-  [ "${OSRC_HUB_NO_OPEN:-0}" = 1 ] || python3 -I -c 'import sys, webbrowser; webbrowser.open(sys.argv[1])' "$url" >/dev/null 2>&1 || true
+  # mc always opens the page, a reused hub included; one opener for mc and the auto-open.
+  [ "${OSRC_HUB_NO_OPEN:-0}" = 1 ] && return 0
+  if type _osrc_mc_open_url >/dev/null 2>&1; then _osrc_mc_open_url "$url"; _osrc_mc_mark_opened
+  else python3 -I -c 'import sys, webbrowser; webbrowser.open(sys.argv[1])' "$url" >/dev/null 2>&1 || true; fi
 }
 
 cmd_hub() {

@@ -177,7 +177,8 @@
       ls.forEach((l) => {
         const st = laneState(l), how = laneFor(l, st);
         const li = el('li', 'ln-' + st); li.id = (compact ? 'rl-' : 'pl-') + p.id + '-' + l.id;
-        const txt = LST[st] + (how ? ', ' + how : '');
+        const ps = window.OSRC_HUB_PROOF ? window.OSRC_HUB_PROOF.stamp(l) : '';
+        const txt = LST[st] + (how ? ', ' + how : '') + (ps ? ' · ' + ps : '');
         li.append(el('span', 'lnd'), el('span', 'lnn', l.short || l.id));
         if (!compact && l.model) li.append(el('span', 'lnm mono', l.model));
         li.append(el('span', 'lns', txt));
@@ -213,6 +214,7 @@
       const sl = sumLine(p); if (sl) meta.append(sl);
       if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
       const lanes = laneList(p, false); if (lanes) t.append(lanes);
+      const PF = window.OSRC_HUB_PROOF; if (PF) PF.tileLines(p, { el, ic }).forEach((n) => t.append(n));   // proof stamps (lib/proof.sh)
       // MC4: the full lane history folds up under "Finished (N)" (collapsed here, open on the project page),
       // and one line sums up the week (releases, PRs, issues) with a link to the History on the project page.
       const HX = window.OSRC_HUB_HISTORY, hf = HX && p.history ? HX.finishedFold({ el, ic }, p, false) : null;
@@ -247,9 +249,10 @@
       items.push({ v: String(running.length), l: running.length === 1 ? 'project running' : 'projects running',
         s: lanesOn ? lanesOn + (lanesOn === 1 ? ' lane working' : ' lanes working') : (running.length ? 'Between lanes' : 'Nothing started') });
       const asks = running.reduce((a, p) => a + liveLanes(p).filter((l) => ['approval', 'question'].includes(laneState(l))).length, 0);
-      const need = waiting + asks;
+      const proofStops = window.OSRC_HUB_PROOF ? window.OSRC_HUB_PROOF.needs(running) : 0;
+      const need = waiting + asks + proofStops;
       items.push({ v: String(need), l: need === 1 ? 'thing needs you' : 'things need you', hot: need > 0,
-        s: need ? [waiting ? waiting + (waiting === 1 ? ' decision' : ' decisions') : '', asks ? asks + (asks === 1 ? ' lane asking' : ' lanes asking') : ''].filter(Boolean).join(', ') : 'Nothing waiting' });
+        s: need ? [waiting ? waiting + (waiting === 1 ? ' decision' : ' decisions') : '', asks ? asks + (asks === 1 ? ' lane asking' : ' lanes asking') : '', proofStops ? proofStops + (proofStops === 1 ? ' lane stopped on proof' : ' lanes stopped on proof') : ''].filter(Boolean).join(', ') : 'Nothing waiting' });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
       const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
       // MC4 #5: every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
@@ -297,10 +300,10 @@
       const all = []; running.forEach((p) => openDecs(p).forEach((d) => all.push({ p, d })));
       const ph = el('header', 'ph home');
       const waitingOn = new Set(all.map((x) => x.p.id)).size;
-      const err = ctx.pullErr;
-      const head = !projects.length ? (err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
+      const err = ctx.pullErr, oldKey = /HTTP 40[13]/.test(err || '');   // a key from an older hub is not "hub down"
+      const head = !projects.length ? (oldKey ? 'This tab is from an older Mission Control' : err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
         : all.length ? all.length + (all.length === 1 ? ' decision waits on you' : ' decisions wait on you') : running.length ? 'Nothing is waiting on you' : 'Nothing is running right now';
-      const sub = !projects.length ? (err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
+      const sub = !projects.length ? (oldKey ? 'Its key no longer opens the data. Press Reopen below, or run "outsourcerer mc".' : err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
         : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : 'Everything you started has shipped.';
       ph.append(el('h1', null, head), el('p', 'lede', sub));
       if (!projects.length && db && !err) {   // MC3: an empty page says how to start, never a blank

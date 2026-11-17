@@ -302,7 +302,7 @@ printf '%s\\n%s\\n' "$_suite_rc" "$_suite_out"
             if legacy:
                 item.update(state='verdict', verdict='MERGE')
             (p / f'review/items/{id}.json').write_text(json.dumps(item))
-            prior_id = 'L14b-aaaaaaa'; vf = p / f'review/{prior_id}.VERDICT'; vf.write_text('CHANGES\nfix it\n')
+            prior_id = 'L14b-aaaaaaa'; vf = p / f'review/{prior_id}.VERDICT'; vf.write_text('VERDICT: CHANGES must-fix=1 nit=0 pre-existing=0\nfix it\n')
             prior = dict(item, id=prior_id, head='a' * 40, state='verdict', sha_reviewed='a' * 40,
                          verdict='CHANGES', verdict_ts=1, findings=str(vf))
             (p / f'review/items/{prior_id}.json').write_text(json.dumps(prior))
@@ -314,7 +314,7 @@ _osrc_jq_set() { local p="$1"; shift; jq "$@" "$p" > "$p.new" && mv "$p.new" "$p
 if [ "$5" != legacy ]; then
   _osrc_review_write_brief "$3" "$4" >/dev/null || exit
   [ "$7" != moved ] || _osrc_jq_set "$OSRC_HOME/review/items/$3.json" '.review_scope_head="wrong-head"'
-  printf 'MERGE\\n' > "$OSRC_HOME/review/$3.VERDICT"
+  printf 'VERDICT: MERGE\\n' > "$OSRC_HOME/review/$3.VERDICT"
   _osrc_review_ingest
 fi
 if [ "$6" = advance ]; then

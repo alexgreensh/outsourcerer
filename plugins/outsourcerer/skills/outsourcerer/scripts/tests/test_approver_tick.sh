@@ -46,6 +46,21 @@ out="$(osrc_approver_tick sess sess)"; rc=$?
 grep -q '^EVENT approved sess [0-9]* ' <<<"$out" && grep -q '^NEXT ' <<<"$out" && ok || bad "no EVENT approved/NEXT: $out"
 tail -1 "$LOG" | jq -e '.decision=="approve" and .session=="sess" and .engine=="cc" and (.command|contains("touch made-by-test.txt")) and (.rule|length>0)' >/dev/null && ok || bad "approve not logged: $(tail -1 "$LOG")"
 
+# A press that leaves the same prompt open: EVENT approval-not-landed once, the hold file written first, and
+# the approver's re-presses (every OSRC_APPROVER_REPRESS_SECS) stay quiet for OSRC_HOLD_MIN (round 2: a stuck
+# prompt logged 7 approval-not-landed in 2 minutes).
+rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; CAP="$FX/cc-permission-bash.ansi"; AFTER=""
+outs=""; for i in 1 2 3 4 5 6 7; do outs="$outs$(OSRC_APPROVER_REPRESS_SECS=0 osrc_approver_tick sess sess)
+"; done
+[ "$(grep -c '^EVENT approval-not-landed sess ' <<<"$outs")" = 1 ] && ok "pressed 7 times, prompt still open: one approval-not-landed" || bad "not-landed events: $(grep -c '^EVENT approval-not-landed' <<<"$outs") [$outs]"
+[ "$(grep -c 'send-keys -t sess Enter' "$KEYS")" = 7 ] && ok "the approver keeps retrying the press meanwhile" || bad "presses: $(grep -c Enter "$KEYS")"
+[ -n "$(ls "$OSRC_HOME/approver/held"/sess.* 2>/dev/null)" ] && ok "the hold file records the report" || bad "no hold file after not-landed"
+f="$(ls "$OSRC_HOME/approver/held"/sess.* | head -1)"; read -r a1 a2 < "$f"; echo "$a1 $((a2 - 301))" > "$f"
+out="$(OSRC_APPROVER_REPRESS_SECS=0 osrc_approver_tick sess sess)"
+grep -q '^EVENT approval-not-landed sess ' <<<"$out" && ok "5 min later, still not landed: reported again" || bad "no repeat after 5 min: [$out]"
+
+rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"
+
 # rm -rf outside the worktree: HOLD, no keys, EVENT approval + NEXT, logged
 : > "$KEYS"; CAP="$FX/cc-permission-bash-rm.ansi"; AFTER=""
 out="$(osrc_approver_tick sess sess)"; rc=$?
@@ -57,7 +72,7 @@ out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 3 ] && [ -z "$out" ] && ok || bad "repeat hold was not quiet (rc=$rc out=$out)"
 # hold deadline: OSRC_HOLD_MIN=0 re-emits "still held"
 out="$(OSRC_HOLD_MIN=0 osrc_approver_tick sess sess)"; rc=$?
-[ "$rc" = 2 ] && grep -q 'still held after' <<<"$out" && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
+[ "$rc" = 2 ] && grep -q 'still held, waiting' <<<"$out" && ok || bad "hold deadline did not re-emit (rc=$rc out=$out)"
 # prompt gone -> held record cleared, rc 1
 CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"

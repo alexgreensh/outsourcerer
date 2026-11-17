@@ -79,3 +79,6 @@
 #hc .lwins { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
 #hc .lwin { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: .85rem; }
 .glance .gpv.gpt { font-size: .95rem; } /* PL: a word value (Free · no limit, Pay per use) sits under the percentages, not over them */
+.pt-proof { margin: 0; font-size: .85rem; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.pt-proof.stop { font-weight: 700; }
+.pt-proof-lines { margin: 2px 0 0; padding: 6px 8px; font-size: .75rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--thumb); border-radius: 6px; max-height: 6.5em; overflow: hidden; }

@@ -109,9 +109,12 @@ cmd_stop_guard() {
         # Log the terminal event BEFORE the marker goes, tagged with this owner, so the next
         # supervise replays "finished" instead of reporting "nothing owned" (review finding 2).
         # If that log write fails, keep the marker: the next pass tries again.
+        # A supervise holding the target's lock is logging it right now: leave the marker to it.
         if type _sv_observe >/dev/null 2>&1; then
+          _sv_target_lock "$id" || continue
           _sv_observe "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1
-          _sv_emit "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1 || continue
+          _sv_emit "$id" "$(date +%s)" stopguard "$sid" >/dev/null 2>&1 || { _sv_target_unlock "$id"; continue; }
+          _sv_target_unlock "$id"
         fi
         rm -f "$dir/$id" 2>/dev/null
         type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id" ;;   # listed as finished (MC3)

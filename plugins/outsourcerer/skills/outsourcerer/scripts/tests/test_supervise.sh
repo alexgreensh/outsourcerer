@@ -20,7 +20,12 @@ export OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_CONFIRM=0 OSRC_SUPERVISE_SETTLE=0
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
-fresh() { export OSRC_HOME="$TMP/h$1"; mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/sessions"; rm -f "$TMP/panes"/*.screen; }
+# The hub/limits refresh tick (a full hub export, 3-6 s and probing the real agent CLIs) is not under
+# test here (test_supervise_tick.py owns it): stamp it fresh so it is skipped. Left in, it ate the
+# 20 s alarm under load (rc 142) and kept the stop-guard case's first supervise alive.
+fresh() { export OSRC_HOME="$TMP/h$1"; mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/sessions"; rm -f "$TMP/panes"/*.screen
+  for s in S G nobody orch; do mkdir -p "$OSRC_HOME/supervise/$s"; date +%s > "$OSRC_HOME/supervise/$s/tick.time"; done; }
+export OSRC_SUPERVISE_TICK_SECS=86400
 own() { mkdir -p "$OSRC_HOME/owners/$1"; : > "$OSRC_HOME/owners/$1/$2"; }
 pane() { cp "$FX/$2" "$TMP/panes/$1.screen"; }
 sup() { perl -e 'alarm shift; exec @ARGV' "${T:-20}" "$SRC" supervise "$@" 2>"$TMP/err"; }
@@ -95,13 +100,15 @@ t0=$(date +%s); out="$(T=60 OSRC_SUPERVISE_SETTLE=40 sup --session S)"; dt=$(( $
 [ "$(printf '%s\n' "$out" | grep -c '^EVENT ')" = 3 ] && [ "$(printf '%s\n' "$out" | grep -c '^NEXT ')" = 3 ] && ok "three targets -> three EVENT/NEXT pairs" || no "batch: [$out]"
 [ "$(printf '%s\n' "$out" | grep '^EVENT' | awk '{print $2}' | tr '\n' ' ')" = "approval question idle " ] && ok "approval > question > idle" || no "order: $(printf '%s\n' "$out" | grep '^EVENT' | awk '{print $2}' | tr '\n' ' ')"
 
-echo "=== dedupe + remind after 20 min ==="
+echo "=== dedupe + remind (5 min for approvals, S4) ==="
 fresh 11; own S r1; pane r1 codex-approval.ansi
 sup --session S >/dev/null
 out="$(sup --session S --once)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$out" ] && ok "the same unresolved approval is not re-reported on the next arm" || no "dedupe: rc=$rc [$out]"
 read -r h c ck ch cs lk lt < "$OSRC_HOME/lanes/state/r1"; echo "$h $c $ck $ch $cs $lk $((lt - 1300))" > "$OSRC_HOME/lanes/state/r1"
-out="$(sup --session S --once)"; grep -q '^EVENT approval r1 .*still unresolved after 21m' <<<"$out" && ok "re-reported after OSRC_SUPERVISE_REMIND minutes" || no "remind: [$out]"
+read -r fk ft < "$OSRC_HOME/lanes/state/r1.first"; echo "$fk $((ft - 1300))" > "$OSRC_HOME/lanes/state/r1.first"   # first sight, same fake clock
+out="$(sup --session S --once)"; m="$(sed -n 's/^EVENT approval r1 .*still unresolved, waiting \([0-9]*\)m.*/\1/p' <<<"$out")"
+[ "${m:-0}" -ge 21 ] && ok "re-reported after the reminder interval, with its age since first sight (${m}m)" || no "remind: [$out]"
 
 echo "=== replay: events logged while nobody waited return at once ==="
 fresh 12; own S p1; pane p1 codex-approval.ansi
@@ -128,11 +135,11 @@ fresh 15; own G rl1; mkdir -p "$OSRC_HOME/remote"; echo '{}' > "$OSRC_HOME/remot
 out="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; osrc_remote_state() { echo live; }; printf '{"session_id":"G"}' | cmd_stop_guard 2>/dev/null ) )"
 printf '%s' "$out" | jq -e '.decision=="block"' >/dev/null 2>&1 && ok "a remote lane with no waiter blocks the stop" || no "remote lane: [$out]"
 fresh 16; own G q8; pane q8 codex-approval.ansi
-"$SRC" supervise --session G >/dev/null 2>&1 & PIDS="$PIDS $!"   # approval already reported once... first arm returns; arm a blocking one:
-sleep 2; OSRC_SUPERVISE_REMIND=60 "$SRC" supervise --session G >/dev/null 2>&1 & SPID=$!; PIDS="$PIDS $SPID"
+sup --session G >/dev/null   # reports the approval and returns; the next arm has nothing new and blocks:
+OSRC_SUPERVISE_REMIND=60 "$SRC" supervise --session G >/dev/null 2>&1 & SPID=$!; PIDS="$PIDS $SPID"
 i=0; while [ $i -lt 150 ] && ! [ -e "$OSRC_HOME/supervise/G/armed.$SPID" ]; do sleep 0.2; i=$((i+1)); done
 out="$(guard G)"; [ -z "$out" ] && ok "a live supervise covers every owned target" || no "blocked despite supervise: [$out]"
-kill "$SPID" 2>/dev/null; sleep 1
+kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null   # exited: its armed file is gone or its pid is dead
 out="$(MAX=1 guard G)"; out="$(MAX=1 guard G)"
 [ -z "$out" ] && grep -q 'UNGUARDED' "$OSRC_HOME/owners/G/.unguarded" 2>/dev/null && ok "after max reminders the guard yields and writes .unguarded" || no "unguarded not written"
 msg="$( ( export CLAUDE_CODE_SESSION_ID=G OSRC_STREAM=0; "$SRC" tab 2>&1 >/dev/null ) )"

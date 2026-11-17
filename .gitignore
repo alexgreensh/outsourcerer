@@ -17,8 +17,11 @@
 *.orig
 *.tmp
 
-# Runtime state (Outsourcerer writes jobs/ledger under $HOME/.outsourcerer)
-.outsourcerer/
+# Runtime state (Outsourcerer writes jobs/ledger under $HOME/.outsourcerer); repo guards are tracked
+.outsourcerer/*
+!.outsourcerer/guards/
+!.outsourcerer/guards.conf
+!.outsourcerer/verify
 
 # derived README preview
 readme-preview.html
@@ -30,7 +33,6 @@ readme-preview.html
 __pycache__/
 *.pyc
 .torture-scratch/
-.outsourcerer/
 
 # Delegate scratch: a background job that dies mid-run leaves its working files behind.
 # They are working notes, not shipped code, and they carry internal task names.
@@ -55,3 +57,6 @@ plugins/outsourcerer/skills/outsourcerer/scripts/_*_tmp.sh
 .context/
 .osrc-sealed.*
 .evidence-*
+
+# scripts/preflight.sh task notes (LOAD-SENSITIVE.md); PREFLIGHT_OUT moves them
+/out/

@@ -206,8 +206,9 @@ stamp atomically before pressing. A second caller never presses the same prompt 
 `OSRC_APPROVER_REPRESS_SECS` (default 15); it returns 3 (nothing to report). The other side of that: the same command asked twice in a row waits quietly up to 15 s
 before the second prompt is pressed.
 
-A held prompt is reported once. If it is still open after `OSRC_HOLD_MIN` minutes (default 30),
-`EVENT approval … still held after Nm` is re-emitted so it cannot sleep overnight.
+A held prompt is reported once. If it is still open after `OSRC_HOLD_MIN` minutes (default 5),
+`EVENT approval … still held, waiting Nm` is re-emitted so it cannot sleep unseen. When the approver
+pressed and the prompt stayed open, it reports `EVENT approval-not-landed` at once instead.
 
 **Answering a held prompt.** `session answer` with no selector lists the prompt's rows, read
 from the same engine reader (row 1 included, even under the cursor). Answer with the row's

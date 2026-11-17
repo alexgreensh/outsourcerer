@@ -133,7 +133,12 @@ _sv_observe_watch() { # <id> <src> <owner>
       question) k=question; d="hand-in question $(basename "$f")"; nx="cat $(printf '%q' "$f")" ;;
       verdict) k=done; d="review verdict $(basename "$f")"; nx="cat $(printf '%q' "$f")" ;;
       *) k=done; d="hand-in $(basename "$f")"; rep="$(dirname "$f")/$(basename "$f" | sed -E 's/\.?DONE$//')-REPORT.md"
-         if [ -f "$rep" ]; then nx="cat $(printf '%q' "$rep")"; else nx="cat $(printf '%q' "$f")"; fi ;;
+         if [ -f "$rep" ]; then nx="cat $(printf '%q' "$rep")"; else nx="cat $(printf '%q' "$f")"; fi
+         # lib/proof.sh: a hand-in without proof for the lane's head goes back to the lane instead.
+         if type osrc_proof_handin >/dev/null 2>&1 && ! osrc_proof_handin "$(basename "$f" | sed -E 's/[.-]?DONE$//')" "$fp"; then
+           _sv_append "$_PR_EV_KIND" "$(basename "$f")" "$_PR_EV_DETAIL" "$_PR_EV_NEXT" "$2" "$3" && printf '%s\n' "$fp" > "$st"
+           continue
+         fi ;;
     esac
     [ -s "$st" ] && d="$d rewritten (re-hand-in)" || d="$d written"
     d="$d; fp ${fp#*:}"
@@ -144,10 +149,12 @@ _sv_observe_watch() { # <id> <src> <owner>
 
 # A lane's done contract fingerprint (L6: $OSRC_HOME/done/<id>.json), so a re-hand-in is a new
 # `done` even when the screen did not change: file: -> the file's fingerprint, branch: -> the tip
-# sha. Empty for check:/pr: or no contract (the screen hash keys the event then).
+# sha. No contract: the watched hand-in file's fingerprint. Empty for check:/pr: or neither (the
+# screen hash keys the event then).
 _sv_done_fp() { # <id>
   local j spec cwd p
-  j="$OSRC_HOME/done/$1.json"; [ -f "$j" ] || return 0
+  j="$OSRC_HOME/done/$1.json"
+  if [ ! -f "$j" ]; then p="$(_sv_handin_file "$1")" && _sv_fp "$p"; return 0; fi
   spec="$(jq -r '.spec // ""' "$j" 2>/dev/null)"; cwd="$(jq -r '.cwd // ""' "$j" 2>/dev/null)"
   case "$spec" in
     file:*) p="${spec#file:}"; case "$p" in /*) ;; *) p="${cwd:-.}/$p" ;; esac; _sv_fp "$p" ;;

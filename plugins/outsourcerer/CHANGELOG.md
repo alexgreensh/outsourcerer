@@ -2,6 +2,27 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.0
+
+### Added
+
+- **Lanes can't fool their own checks.** `outsourcerer guards run` checks a lane's changes before it hands in. Checks and their settings are always read from the main branch, so a lane can't loosen the check that judges it; if it edits one, the reviewer is told. New checks start in watch-only mode, and a blocked lane can still pass with a stated reason that goes to the reviewer, so work never gets stuck.
+- **No more comment slop.** A built-in check catches comments that narrate the edit ("added", "per the review"), excuse comments ("hack", "not sure why") and markdown files nobody asked for. Comment-heavy blocks are flagged in watch-only mode. Plain pattern matching: zero tokens, about 2 seconds.
+- **Done means proven.** `outsourcerer proof run` runs the lane's checks itself and writes the proof: commit, commands, exit codes, pass and fail counts. A hand-in without proof for its exact commit goes back to the lane automatically. Mission Control shows "proved: 139 pass, 0 fail" or "unverified" with the reason.
+- **Three tries, then a person.** A lane that fails its proof three times stops and lands on your needs-you list with the failing lines, instead of looping and burning tokens.
+- **Reviews say their verdict out loud.** Reviewers start with one line, `VERDICT: MERGE`, `CHANGES must-fix=2 nit=1` or `BLOCK`. Only must-fix findings send a lane back; nits and pre-existing issues become notes. Re-reviews see only what changed since the last round: 61% smaller prompts.
+- **No lane waits unseen.** A lane that sits idle while its own background job runs, or after promising to "continue when it finishes", is now `stalled`, a separate event from idle. The watcher nudges it once by itself and tells you if that doesn't get it moving. Lanes waiting on a person are never nudged.
+- **Prompts never wait quietly.** Approval prompts and questions repeat every 5 minutes with their age, and an answer keypress that didn't land is reported instead of assumed. If your lanes have no watcher running, the next engine call and Mission Control both say so.
+- **Mission Control never looks dead.** A "Live, updated 5s ago" line is always on screen. A tab left over from an older Mission Control says so and offers Reopen instead of spinning, and Mission Control opens by itself when work starts on your desktop (`OSRC_MC_AUTO_OPEN=0` turns that off).
+- **Repos tune their own checks** in `.outsourcerer/guards.conf`, and `.outsourcerer/guards/`, `guards.conf` and `verify` can now be committed while lane state stays ignored.
+
+### Fixed
+
+- **Every wake arrives once.** The watcher no longer repeats an event it already delivered, never drops one when a lock is busy, and an old done file can't make a working lane look finished.
+- **The Claude desktop app's stock base URL no longer reads as a proxy.** `ANTHROPIC_BASE_URL=https://api.anthropic.com`, which the desktop app sets in every session, used to mark a plan login as billed per use. The stock value now counts as first-party in the environment, and in `settings.json` when jq is installed. Any other host or path still counts as a redirect, and a `settings.json` that cannot be parsed is still checked line by line. Thanks @NehoraiHadad (#78).
+- **Windows `session send` stops pressing extra Enters.** Once the engine has visibly started or finished a turn after your text, the winpty broker no longer presses Enter again, so a send can't land twice. Text typed while a turn is still running keeps its retries until a new turn proves it went through. Thanks Alex G's Agent (#77).
+- **Steadier tests.** test_supervise runs in about a minute instead of ten, with every check kept. Local checks run on a near-midnight clock so date bugs show up before CI.
+
 ## 0.16.4
 
 ### Added
