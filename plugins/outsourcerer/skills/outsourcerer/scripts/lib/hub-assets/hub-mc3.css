@@ -79,3 +79,5 @@
 #hc .lwins { display: flex; flex-direction: column; gap: 2px; margin: 6px 0; }
 #hc .lwin { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: .85rem; }
 .glance .gpv.gpt { font-size: .95rem; } /* PL: a word value (Free · no limit, Pay per use) sits under the percentages, not over them */
+.pt-proof { margin: 0; font-size: .85rem; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.pt-proof.stop { font-weight: 700; }

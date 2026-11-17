@@ -133,7 +133,12 @@ _sv_observe_watch() { # <id> <src> <owner>
       question) k=question; d="hand-in question $(basename "$f")"; nx="cat $(printf '%q' "$f")" ;;
       verdict) k=done; d="review verdict $(basename "$f")"; nx="cat $(printf '%q' "$f")" ;;
       *) k=done; d="hand-in $(basename "$f")"; rep="$(dirname "$f")/$(basename "$f" | sed -E 's/\.?DONE$//')-REPORT.md"
-         if [ -f "$rep" ]; then nx="cat $(printf '%q' "$rep")"; else nx="cat $(printf '%q' "$f")"; fi ;;
+         if [ -f "$rep" ]; then nx="cat $(printf '%q' "$rep")"; else nx="cat $(printf '%q' "$f")"; fi
+         # lib/proof.sh: a hand-in without proof for the lane's head goes back to the lane instead.
+         if type osrc_proof_handin >/dev/null 2>&1 && ! osrc_proof_handin "$(basename "$f" | sed -E 's/[.-]?DONE$//')" "$fp"; then
+           _sv_append "$_PR_EV_KIND" "$(basename "$f")" "$_PR_EV_DETAIL" "$_PR_EV_NEXT" "$2" "$3" && printf '%s\n' "$fp" > "$st"
+           continue
+         fi ;;
     esac
     [ -s "$st" ] && d="$d rewritten (re-hand-in)" || d="$d written"
     d="$d; fp ${fp#*:}"

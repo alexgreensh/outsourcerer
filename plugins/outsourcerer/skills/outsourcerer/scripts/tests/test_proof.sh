@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
+# test_proof.sh -- lib/proof.sh (proof.json, READY gate, three-rounds cap, stamps) and lib/review_sev.sh
+# (severity routing, re-review delta). Local git repos only, no network, no tmux, no model.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
+TMP="$(mktemp -d "${TMPDIR%/}/.test-proof.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
+pass=0; fail=0
+ok()  { echo "PASS: $1"; pass=$((pass+1)); }
+bad() { echo "FAIL: $1"; fail=$((fail+1)); }
+
+export OSRC_HOME="$TMP/state" HOME="$TMP/home" CLAUDE_CODE_SESSION_ID="sess-test-s2"
+mkdir -p "$OSRC_HOME" "$HOME"
+export OSRC_SELF=osrc OSRC_TIME_UNIT=1 OSRC_REMOTE_POLL_SECS=0 OSRC_PROOF_NO_SEND=1 GIT_TERMINAL_PROMPT=0
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
+for fn in cmd_proof osrc_proof_gate osrc_proof_handin _osrc_sev_route _osrc_review_write_brief _sv_observe_watch; do
+  type -t "$fn" >/dev/null || { echo "FAIL: $fn not loaded"; exit 1; }
+done
+ok "lib/proof.sh and lib/review_sev.sh load with the engine"
+P() { ( cmd_proof "$@" ); }   # die exits the subshell, never the test
+
+# ---- a lane worktree: main with a verify script, branch lane1 ----------------------------------
+R="$TMP/repo"; mkdir -p "$R/.outsourcerer"
+( cd "$R" && git init -q -b main && printf '#!/bin/sh\necho "verify: 5 passed, 0 failed"\n' > .outsourcerer/verify \
+  && chmod +x .outsourcerer/verify && echo a > a.txt && git add -A && git commit -q -m base && git checkout -q -b lane1 \
+  && echo b > b.txt && git add -A && git commit -q -m work )
+H1="$(git -C "$R" rev-parse HEAD)"
+
+echo "=== proof run writes proof.json for the head sha ==="
+out="$(P run --lane lane1 --dir "$R" --cmd 'echo "test summary: 139 passed, 0 failed"')"; rc=$?
+PF="$OSRC_HOME/proof/lane1/proof.json"
+[ "$rc" = 0 ] && [ -f "$PF" ] && ok "proof run exits 0 and writes the lane folder's proof.json" || bad "proof run rc=$rc out=[$out]"
+[ "$(jq -r .head "$PF")" = "$H1" ] && ok "proof.json records the head sha" || bad "head: $(jq -r .head "$PF")"
+[ "$(jq -r '.method + "|" + .stamp' "$PF")" = "tests|proved: 139 pass, 0 fail" ] && ok "method tests, stamp 'proved: 139 pass, 0 fail'" || bad "stamp: $(jq -c '{method,stamp}' "$PF")"
+[ "$(jq -r '.commands[0].exit, (.commands[0].tail|length), .guards' "$PF" | tr '\n' ' ')" = "0 1 unavailable " ] \
+  && ok "command exit, output tail, and guards:'unavailable' when lane S1's guards are not loaded" || bad "record: $(jq -c . "$PF")"
+grep -q 'proved: 139 pass' <<<"$out" && ok "proof run prints the stamp" || bad "out: $out"
+
+echo "=== a proof for an older sha does not count ==="
+gate="$(osrc_proof_gate lane1)"; [ $? = 0 ] && ok "gate accepts the proof for the current head ($gate)" || bad "gate: $gate"
+( cd "$R" && echo c > c.txt && git add -A && git commit -q -m more )
+gate="$(osrc_proof_gate lane1)"; rc=$?
+[ "$rc" = 1 ] && grep -q "proof is for ${H1:0:7} but the head is" <<<"$gate" && ok "stale-sha proof rejected with the reason" || bad "stale gate rc=$rc [$gate]"
+gate="$(P check lane1 "$H1")"; [ $? = 0 ] && ok "proof check <lane> <sha> accepts the exact sha it proved" || bad "check old sha: $gate"
+
+echo "=== verify script is read from the BASE ref; an edit in the lane is flagged ==="
+( cd "$R" && printf '#!/bin/sh\necho "999 passed"\n' > .outsourcerer/verify && git commit -qam "edit verify" )
+out="$(P run --lane lane1 --dir "$R" --base main)"; rc=$?
+[ "$rc" = 0 ] && [ "$(jq -r '.method + "|" + (.totals.pass|tostring) + "|" + (.checks_changed|tostring)' "$PF")" = "verify-run|5|true" ] \
+  && ok "no --cmd: runs .outsourcerer/verify from base (5 passed, not the lane's 999), checks_changed true" || bad "verify: rc=$rc $(jq -c '{method,totals,checks_changed,commands}' "$PF")"
+
+echo "=== a done contract check is a proof source ==="
+mkdir -p "$TMP/r2" && ( cd "$TMP/r2" && git init -q -b main && echo x > x && git add -A && git commit -q -m x )
+mkdir -p "$OSRC_HOME/done"; jq -n --arg c "$TMP/r2" '{spec:"check:echo ok 1; echo ok 2", cwd:$c}' > "$OSRC_HOME/done/dc1.json"
+P run --lane dc1 --dir "$TMP/r2" >/dev/null
+[ "$(jq -r '.method + "|" + .commands[0].cmd' "$OSRC_HOME/proof/dc1/proof.json")" = "tests|echo ok 1; echo ok 2" ] && ok "check: from the lane's done contract runs when no --cmd" || bad "dc: $(jq -c . "$OSRC_HOME/proof/dc1/proof.json")"
+out="$(P run --lane nochecks --dir "$TMP/r2" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q -- '--method none --reason' <<<"$out" && ok "no checks anywhere: refuses and names the ways out" || bad "nochecks rc=$rc [$out]"
+
+echo "=== method none needs a reason ==="
+out="$(P run --lane docs1 --dir "$TMP/r2" --method none 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'needs --reason' <<<"$out" && ok "--method none without --reason is refused" || bad "none no reason: rc=$rc [$out]"
+P run --lane docs1 --dir "$TMP/r2" --method none --reason "docs-only change" >/dev/null
+[ "$(jq -r '.stamp + "|" + (.ok|tostring)' "$OSRC_HOME/proof/docs1/proof.json")" = "unverified: docs-only change|true" ] \
+  && ok "method none + reason: stamp 'unverified: <reason>'" || bad "none: $(jq -c . "$OSRC_HOME/proof/docs1/proof.json")"
+
+echo "=== uncommitted tracked changes never prove the head ==="
+( cd "$TMP/r2" && echo dirty >> x )
+P run --lane dirty1 --dir "$TMP/r2" --cmd true >/dev/null 2>&1
+[ "$(jq -r '.ok|tostring' "$OSRC_HOME/proof/dirty1/proof.json")" = false ] && ok "dirty worktree: proof fails" || bad "dirty: $(jq -c . "$OSRC_HOME/proof/dirty1/proof.json")"
+( cd "$TMP/r2" && git checkout -q -- x ); P reset dirty1 >/dev/null
+
+echo "=== guards hook (lane S1 contract) ==="
+GJSON='{"mode":"enforce","passed":false,"failed":[{"guard":"slop","what":["a.sh:3 # added X"],"fix":"delete the comment"}],"guards_changed":false}'
+cmd_guards() { echo "guard lines"; echo "$GJSON"; [ "$(jq -r .passed <<<"$GJSON")" = true ]; }
+P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
+[ "$(jq -r '.ok, .guards.failed[0].guard' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "false slop " ] && ok "failing enforce guards fail the proof and are stored under .guards" || bad "guards: $(jq -c . "$OSRC_HOME/proof/g1/proof.json")"
+GJSON='{"mode":"observe","passed":false,"failed":[{"guard":"slop","what":["x"],"fix":"y"}],"guards_changed":false}'
+P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
+[ "$(jq -r '.ok, .guards.mode' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "true observe " ] && ok "observe-mode guard failures are recorded but do not fail the proof" || bad "observe: $(jq -c . "$OSRC_HOME/proof/g1/proof.json")"
+cmd_guards() { echo "guard lines"; jq . <<<"$GJSON"; }   # pretty-printed JSON is the same contract
+GJSON='{"mode":"enforce","passed":false,"failed":[{"guard":"file-size","what":["big.sh"],"fix":"split it"}],"guards_changed":true}'
+P reset g1 >/dev/null; P run --lane g1 --dir "$TMP/r2" --cmd true >/dev/null
+[ "$(jq -r '.ok, .guards.failed[0].guard' "$OSRC_HOME/proof/g1/proof.json" | tr '\n' ' ')" = "false file-size " ] && ok "pretty-printed guards JSON is read too" || bad "pretty guards: $(jq -c .guards "$OSRC_HOME/proof/g1/proof.json")"
+unset -f cmd_guards
+
+echo "=== three failed rounds, then a person ==="
+for i in 1 2 3; do out="$(P run --lane r3 --dir "$TMP/r2" --cmd 'echo "boom line"; echo "2 passed, 1 failed"; exit 1' 2>&1)"; done
+RF="$OSRC_HOME/proof/r3/rounds.json"
+[ "$(jq -r '.fails, .stopped' "$RF" | tr '\n' ' ')" = "3 true " ] && ok "3 failed runs -> rounds.fails 3, stopped" || bad "rounds: $(cat "$RF")"
+grep -q 'STOPPED' <<<"$out" && ok "the 3rd failing run says STOPPED, do not retry" || bad "3rd out: $out"
+[ "$(jq -r '.lines | map(select(. == "boom line")) | length' "$OSRC_HOME/proof/r3/needs-you.json")" -ge 1 ] && ok "needs-you.json carries the last failing lines" || bad "needs-you: $(cat "$OSRC_HOME/proof/r3/needs-you.json" 2>&1)"
+out="$(P run --lane r3 --dir "$TMP/r2" --cmd true 2>&1)"; rc=$?
+[ "$rc" = 4 ] && grep -q 'a person must look' <<<"$out" && ok "4th run refused (rc 4): the lane cannot loop" || bad "4th run rc=$rc [$out]"
+gate="$(osrc_proof_gate r3)"; [ $? = 2 ] && ok "gate reports stopped (rc 2)" || bad "gate stopped: $gate"
+P run --lane r4 --dir "$TMP/r2" --cmd false >/dev/null 2>&1; P run --lane r4 --dir "$TMP/r2" --cmd true >/dev/null
+[ "$(jq -r .fails "$OSRC_HOME/proof/r4/rounds.json")" = 0 ] && ok "a passing round resets the count" || bad "reset by pass: $(cat "$OSRC_HOME/proof/r4/rounds.json")"
+[ "$(osrc_proof_remote_next r3)" = "osrc proof show r3" ] && ok "a stopped lane's NEXT is proof show, never another sendback" || bad "stopped next: $(osrc_proof_remote_next r3)"
+P reset r3 >/dev/null; [ ! -f "$OSRC_HOME/proof/r3/needs-you.json" ] && ! osrc_proof_stopped r3 && ok "proof reset clears the stop (a person's call)" || bad "reset"
+
+echo "=== READY/DONE hand-in without proof for the head is sent back ==="
+( cd "$R" && echo d > d.txt && git add -A && git commit -q -m "after the proof" )   # proof now stale
+W="$TMP/w"; mkdir -p "$W/out"; id="$(_sv_watch_add "$W/out")"
+: > "$W/out/lane1.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"
+EV="$OSRC_HOME/lanes/events.jsonl"
+ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = failed ] && grep -q 'not accepted (proof is for' <<<"$(jq -r .detail <<<"$ev")" && ok "lane1.DONE with a stale proof -> EVENT failed with the reason, not done" || bad "handin event: $ev"
+[ "$(jq -r .next <<<"$ev")" = "osrc proof sendback lane1" ] && ok "NEXT relays the sendback (no live session to type into)" || bad "next: $(jq -r .next <<<"$ev")"
+grep -q 'round 1 of 3' "$OSRC_HOME/proof/lane1/SENDBACK.md" && ok "SENDBACK.md written with the round" || bad "sendback file"
+_sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"
+[ "$(jq -r .fails "$OSRC_HOME/proof/lane1/rounds.json")" = 1 ] && ok "the same hand-in seen again is not a second round" || bad "dedupe: $(cat "$OSRC_HOME/proof/lane1/rounds.json")"
+P run --lane lane1 --dir "$R" --cmd 'echo 4 passed' >/dev/null; touch -m -t 202601010101 "$W/out/lane1.DONE"
+_sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = done ] && ok "with a fresh proof the re-hand-in is a plain EVENT done" || bad "proved handin: $ev"
+: > "$W/out/legacy.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = done ] && ok "a lane that never ran proof is not gated by default (proof require off)" || bad "legacy: $ev"
+P require on >/dev/null; : > "$W/out/strict.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+[ "$(jq -r .kind <<<"$ev")" = failed ] && grep -q 'no proof.json for strict' <<<"$ev" && ok "proof require on: every DONE needs proof" || bad "strict: $ev"
+P require off >/dev/null
+mkdir -p "$OSRC_HOME/proof/osrc-auto-L9"; : > "$W/out/L9.DONE"; _sv_observe_watch "$id" supervise "$CLAUDE_CODE_SESSION_ID"; ev="$(tail -1 "$EV")"
+grep -q 'osrc-auto-L9 hand-in not accepted' <<<"$ev" && ok "L9.DONE maps to the session lane osrc-auto-L9" || bad "stem map: $ev"
+
+echo "=== remote READY: proved on this machine, or stamped unverified, never stranded ==="
+REMOTE="$TMP/remote.git"; WORK="$TMP/work"
+git init -q --bare "$REMOTE"; git clone -q "$REMOTE" "$WORK" 2>/dev/null
+( cd "$WORK" && git checkout -q -b main && echo base > f && git add f && git commit -q -m base && git push -q origin main )
+pushr() { ( cd "$WORK" && { git checkout -q "$1" 2>/dev/null || git checkout -q -b "$1" main; } && echo "$RANDOM" > "c.$RANDOM" && git add -A && git commit -q -m "$2" && git push -q origin "$1" 2>/dev/null && git rev-parse HEAD ); }
+cmd_lane add cl1 --branch cloud/one --repo "$REMOTE" >/dev/null
+h="$(pushr cloud/one "feature READY")"; cmd_lane poll cl1 >/dev/null
+[ "$(jq -r '.method + "|" + .head' "$OSRC_HOME/proof/cl1/proof.json")" = "none|$h" ] && ok "no check configured: READY records an honest method-none proof" || bad "cl1 proof: $(cat "$OSRC_HOME/proof/cl1/proof.json" 2>&1)"
+it="$OSRC_HOME/review/items/cl1-${h:0:7}.json"
+[ -f "$it" ] && grep -q '^unverified: no check configured' <<<"$(jq -r .proof "$it")" && ok "and it is queued for review with the stamp 'unverified: ...'" || bad "cl1 item: $(cat "$it" 2>&1)"
+( cd "$WORK" && git checkout -q main && mkdir -p .outsourcerer && printf '#!/bin/sh\necho "7 passed, 0 failed"\n' > .outsourcerer/verify && chmod +x .outsourcerer/verify && git add -A && git commit -q -m verify && git push -q origin main )
+cmd_lane add cl2 --branch cloud/two --repo "$REMOTE" >/dev/null
+h="$(pushr cloud/two "READY: two")"; cmd_lane poll cl2 >/dev/null
+for i in $(seq 1 50); do [ -s "$OSRC_HOME/remote/cl2-${h:0:7}.rc" ] && break; sleep 0.2; done
+cmd_lane poll cl2 >/dev/null
+[ "$(jq -r '.method + "|" + .stamp' "$OSRC_HOME/proof/cl2/proof.json" 2>/dev/null)" = "verify-run|proved: 7 pass, 0 fail" ] && ok "verify on base: READY runs it on the READY sha (proved: 7 pass)" || bad "cl2: $(cat "$OSRC_HOME/proof/cl2/proof.json" 2>&1)"
+[ -f "$OSRC_HOME/review/items/cl2-${h:0:7}.json" ] && ok "a proved READY is queued" || bad "cl2 not queued"
+cmd_lane add cl3 --branch cloud/three --repo "$REMOTE" --done-when 'check:echo "1 passed, 1 failed"; exit 1' >/dev/null
+h="$(pushr cloud/three "READY")"; cmd_lane poll cl3 >/dev/null
+for i in $(seq 1 50); do [ -s "$OSRC_HOME/remote/cl3-${h:0:7}.rc" ] && break; sleep 0.2; done
+ev="$(cmd_lane events 2>/dev/null)"
+grep -q '^EVENT failed cl3 .*proof round 1 of 3' <<<"$ev" && grep -q '^NEXT osrc proof sendback cl3$' <<<"$ev" && ok "failing proof on READY: EVENT failed with the round, NEXT relays the sendback" || bad "cl3 events: $ev"
+[ ! -f "$OSRC_HOME/review/items/cl3-${h:0:7}.json" ] && ok "no review spent on it" || bad "cl3 queued"
+
+echo "=== severity routing: only must-fix sends a lane back ==="
+mkitem() { # <lane> <sha> <verdict-body> -> item id, ingested
+  local id="$1-${2:0:7}"
+  _OSRC_RV_BRANCH="$1" _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue "$1" "$2" "" manual >/dev/null
+  _osrc_jq_set "$OSRC_HOME/review/items/$id.json" '.state="inflight" | .review_scope="full" | .review_scope_head=.head'
+  printf '%s\n' "$3" > "$OSRC_HOME/review/$id.VERDICT"; _osrc_review_ingest; printf '%s' "$id"
+}
+S1=1111111111111111111111111111111111111111; S2=2222222222222222222222222222222222222222
+i="$(mkitem sv1 "$S1" "$(printf 'CHANGES\n- [nit] a.sh:3 rename x\n- [pre-existing] b.sh:9 old race')")"
+[ "$(jq -r '.verdict + "|" + .verdict_raw' "$OSRC_HOME/review/items/$i.json")" = "MERGE|CHANGES" ] && ok "CHANGES with only nit/pre-existing -> routed MERGE" || bad "nit-only: $(jq -c . "$OSRC_HOME/review/items/$i.json")"
+grep -q 'old race' "$OSRC_HOME/review/notes/sv1.md" && ok "pre-existing finding becomes a note, not a block" || bad "notes"
+i="$(mkitem sv2 "$S1" "$(printf 'MERGE\n- [must-fix] c.sh:1 deletes the wrong dir')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "MERGE that lists a must-fix -> routed CHANGES" || bad "mf merge"
+i="$(mkitem sv3 "$S1" "$(printf 'CHANGES\nc.sh:1 untagged problem')")"
+[ "$(jq -r .verdict "$OSRC_HOME/review/items/$i.json")" = CHANGES ] && ok "untagged CHANGES stands (older reviewers)" || bad "untagged"
+i="$(mkitem sv4 "$S1" "$(printf 'CHANGES\n- [must-fix] d.sh:2 unchecked rc\n- [nit] d.sh:5 typo\n- [pre-existing] e.sh old')")"
+sb="$(_osrc_review_sendback "$i")"
+grep -q 'unchecked rc' <<<"$sb" && grep -q 'Nits (optional)' <<<"$sb" && ! grep -q 'e.sh old' <<<"$sb" && ok "sendback carries must-fix, nits as optional, no pre-existing" || bad "sendback: $sb"
+
+echo "=== re-review gets only the delta and the prior must-fix findings ==="
+printf '# Brief\nBRIEF-BODY-MARKER %s\n' "$(head -c 3000 /dev/zero | tr '\0' 'x')" > "$TMP/brief.md"
+_osrc_jq_set "$OSRC_HOME/review/items/$i.json" --arg b "$TMP/brief.md" '.brief=$b'
+_OSRC_RV_BRANCH=sv4 _OSRC_RV_URL=x _OSRC_RV_TRANSPORT=git _osrc_review_enqueue sv4 "$S2" "$TMP/brief.md" manual >/dev/null
+b2="$(_osrc_review_write_brief "sv4-${S2:0:7}")"; inc="$(cat "$b2")"
+grep -q "git diff $S1 FETCH_HEAD" <<<"$inc" && ok "re-review diffs from the last reviewed sha" || bad "delta diff: $inc"
+grep -q 'unchecked rc' <<<"$inc" && ! grep -q 'd.sh:5 typo' <<<"$inc" && ! grep -q 'e.sh old' <<<"$inc" && ok "prior round: must-fix only (no nits, no pre-existing)" || bad "prior: $inc"
+! grep -q BRIEF-BODY-MARKER <<<"$inc" && grep -q "$TMP/brief.md" <<<"$inc" && ok "the lane brief is a pointer, not pasted again" || bad "brief pasted: $inc"
+b3="$(_osrc_review_write_brief "sv4-${S2:0:7}" final)"; full="$(cat "$b3")"
+[ "${#inc}" -lt "${#full}" ] && ok "incremental brief is smaller than the full one (${#inc} < ${#full} bytes)" || bad "sizes ${#inc} vs ${#full}"
+grep -q '^- Proof: ' <<<"$full" && grep -q '\[must-fix\], \[nit\] or \[pre-existing\]' <<<"$full" && ok "brief shows the proof stamp and asks for severity tags" || bad "brief lines"
+
+echo "=== Mission Control fields ==="
+l="$(osrc_proof_hub_lane '{"id":"docs1","status":"Merged"}')"
+[ "$(jq -r '.proof.stamp' <<<"$l")" = "unverified: docs-only change" ] && ok "lane gets proof.stamp" || bad "hub lane: $l"
+for k in 1 2 3; do P run --lane hubst --dir "$TMP/r2" --cmd 'echo hub-fail-line; exit 2' >/dev/null 2>&1; done
+s="$(osrc_proof_hub_lane '{"id":"hubst","status":"Building"}')"
+c="$(osrc_proof_hub_counts "[$l,$s,{\"id\":\"x\",\"status\":\"Merged\"}]")"
+[ "$(jq -c . <<<"$c")" = '{"unverifiedLanes":1,"needsYouLanes":1}' ] && ok "project counts: 1 landed unverified, 1 needs you" || bad "counts: $c"
+grep -q hub-fail-line <<<"$(jq -r '.proof.lines[]' <<<"$s")" && ok "a stopped lane carries its last failing lines to the page" || bad "lines: $s"
+grep -q 'assets/hub-proof.js' "$HERE/../lib/hub.html" && ok "the page loads assets/hub-proof.js" || bad "script tag"
+
+echo "=== the CLI resolves lib/proof.sh through a symlinked launcher ==="
+ln -s "$SRC" "$TMP/outsourcerer"
+out="$(env -u OSRC_SOURCED bash "$TMP/outsourcerer" proof stamp docs1 2>&1)"
+[ "$out" = "unverified: docs-only change" ] && ok "outsourcerer proof stamp works via a symlink" || bad "symlink: [$out]"
+
+echo
+echo "test_proof: $pass passed, $fail failed"
+[ "$fail" = 0 ]

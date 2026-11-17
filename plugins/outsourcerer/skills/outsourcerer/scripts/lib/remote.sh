@@ -290,6 +290,9 @@ _osrc_lane_poll_err() { # <id> <json> <now> <kind> <msg>
 _osrc_lane_check_and_enqueue() { # <id> <json> <head> <now>
   local id="$1" f="$2" head="$3" now="$4" check
   check="$(jq -r '.done_when // ""' "$f")"
+  if [ -z "$check" ] && type osrc_proof_remote_ready >/dev/null 2>&1; then
+    osrc_proof_remote_ready "$id" "$f" "$head"; case $? in 0) check="$_PR_REMOTE_CHECK" ;; 2) _osrc_jq_set "$f" --arg h "$head" '.proof_back=$h'; return 0 ;; esac   # lib/proof.sh
+  fi
   if [ -n "$check" ]; then _osrc_lane_check_start "$id" "$f" "$head" "$now" "$check"; return 0; fi
   type _osrc_review_enqueue >/dev/null 2>&1 || return 0
   _osrc_review_enqueue "$id" "$head" "$(jq -r '.brief // ""' "$f")" auto >/dev/null 2>&1 || true
@@ -314,7 +317,8 @@ _osrc_lane_check_run() { # <id> <cache> <head> <command> <log> <rcfile>   (backg
   wt="$OSRC_HOME/remote/wt/$id-${head:0:7}"
   mkdir -p "$OSRC_HOME/remote/wt"; rm -rf "$wt"
   if git --git-dir="$cache" worktree add -q --detach "$wt" "$head" >"$log" 2>&1; then
-    _osrc_run_timeout "${OSRC_CHECK_TIMEOUT:-900}" "$wt" "$check" >>"$log" 2>&1 || rc=$?
+    if type osrc_proof_remote_run >/dev/null 2>&1; then osrc_proof_remote_run "$id" "$wt" "$head" "$check" "$log" "$cache" || rc=$?
+    else _osrc_run_timeout "${OSRC_CHECK_TIMEOUT:-900}" "$wt" "$check" >>"$log" 2>&1 || rc=$?; fi
     git --git-dir="$cache" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
     git --git-dir="$cache" worktree prune >/dev/null 2>&1
   else
@@ -336,6 +340,7 @@ _osrc_lane_check_collect() { # <id> <json> <now>   (called under the lane lock)
   fi
   rc="$(cat "$rcfile")"; case "$rc" in ''|*[!0-9]*) rc=125 ;; esac
   _osrc_jq_set "$f" --argjson rc "$rc" '.check.state="done" | .check.rc=$rc'
+  [ "$rc" -eq 0 ] || ! type osrc_proof_sendback >/dev/null 2>&1 || OSRC_PROOF_NO_SEND=1 osrc_proof_sendback "$id" "proof failed on ${sha7}: $(osrc_proof_stamp "$id")" "remote:$head" counted
   # only a check on the CURRENT head may enqueue; a lane that has pushed since moved on
   if [ "$rc" -eq 0 ] && [ "$(jq -r '.head' "$f")" = "$head" ] && type _osrc_review_enqueue >/dev/null 2>&1; then
     _osrc_review_enqueue "$id" "$head" "$(jq -r '.brief // ""' "$f")" auto >/dev/null 2>&1 || true
@@ -350,6 +355,7 @@ osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no net
   head="$(jq -r '.head // ""' "$f")"
   ch_state=""; [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && ch_state="$(jq -r '.check.state // ""' "$f")"
   if [ "$ch_state" = done ] && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ]; then printf failed; return 0; fi
+  [ -z "$head" ] || [ "$(jq -r '.proof_back // ""' "$f")" != "$head" ] || { printf live; return 0; }   # sent back for proof
   if [ "$(jq -r '.head_ready' "$f")" = true ]; then
     [ "$ch_state" != running ] || { printf live; return 0; }     # done-when check still running
     v=""; type _osrc_review_verdict_for >/dev/null 2>&1 && v="$(_osrc_review_verdict_for "$id" "$head")"
@@ -389,7 +395,10 @@ osrc_remote_events() {
     fi
     if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.state // ""' "$f")" = done ] \
        && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
-      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$(jq -r .check.rc "$f")$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")" "tail -40 $(printf '%q' "$(jq -r '.check.log' "$f")")"
+      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$(jq -r .check.rc "$f")$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")$(type osrc_proof_remote_note >/dev/null 2>&1 && osrc_proof_remote_note "$id")" "$(nx=""; ! type osrc_proof_remote_next >/dev/null 2>&1 || nx="$(osrc_proof_remote_next "$id")"; [ -n "$nx" ] && printf '%s' "$nx" || printf 'tail -40 %q' "$(jq -r '.check.log' "$f")")"
+    fi
+    if [ -n "$head" ] && [ "$(jq -r '.proof_back // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "proofback:$head" "$renotify"; then
+      _osrc_emit failed "$id" "READY $sha7 not reviewed: $(osrc_proof_gate "$id" "$head")$(osrc_proof_remote_note "$id")" "$(osrc_proof_remote_next "$id")"
     fi
     st="$(osrc_remote_state "$id")"
     if [ "$st" = ready ] && [ "$(jq -r '.ready_head // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "ready:$head" 0; then

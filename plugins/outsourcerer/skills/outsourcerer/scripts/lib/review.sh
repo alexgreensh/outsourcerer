@@ -101,8 +101,9 @@ _osrc_review_enqueue() {
     branch="${_OSRC_RV_BRANCH:-$lane}"; url="${_OSRC_RV_URL:-}"; transport="${_OSRC_RV_TRANSPORT:-git}"; base="${_OSRC_RV_BASE:-main}"
   fi
   jq -n --arg id "$id" --arg lane "$lane" --arg head "$head" --arg branch "$branch" --arg url "$url" --arg tr "$transport" \
-    --arg base "$base" --arg brief "$brief" --arg src "$src" --argjson now "$now" --argjson rer "$rer" '
-    {id:$id, lane:$lane, branch:$branch, url:$url, transport:$tr, base:$base, brief:$brief, source:$src,
+    --arg base "$base" --arg brief "$brief" --arg src "$src" --argjson now "$now" --argjson rer "$rer" \
+    --arg proof "$(type osrc_proof_stamp >/dev/null 2>&1 && osrc_proof_stamp "$lane")" '
+    {id:$id, lane:$lane, proof:$proof, branch:$branch, url:$url, transport:$tr, base:$base, brief:$brief, source:$src,
      sha_at_ready:$head, sha_reviewed:"", head:$head, state:"queued", enq_ts:$now, sent_ts:0, rereview:$rer,
      verdict:"", verdict_ts:0, findings:"", stale:false, stale_by:"", acked:false, invalid_first_line:""}' > "$f.new" \
     && mv -f "$f.new" "$f" || { rm -f "$f" "$f.new"; return 1; }
@@ -186,7 +187,7 @@ _osrc_review_resolve() { # <id-or-unique-prefix> -> item id
 # ---- verdict ingestion ----------------------------------------------------------------------
 # A verdict file is <item>.VERDICT whose first line is MERGE|CHANGES|BLOCK (case-insensitive).
 _osrc_review_ingest() {
-  local p id vf first v now settle age lane
+  local p id vf first raw v now settle age lane
   now="$(_osrc_now)"; settle="${OSRC_VERDICT_SETTLE_SECS:-30}"
   for p in $(_osrc_review_items); do
     case "$(jq -r .state "$p")" in
@@ -206,13 +207,15 @@ _osrc_review_ingest() {
     first="$(head -1 "$vf" | tr -d '\r' | sed 's/^[[:space:]#*]*//; s/[[:space:]*:.-]*$//' | tr '[:lower:]' '[:upper:]')"
     case "$first" in
       MERGE|CHANGES|BLOCK)
+        raw="$first"; ! type _osrc_sev_route >/dev/null 2>&1 || first="$(_osrc_sev_route "$raw" "$vf")"   # lib/review_sev.sh
+        ! type _osrc_sev_note_preexisting >/dev/null 2>&1 || _osrc_sev_note_preexisting "$(jq -r .lane "$p")" "$id" "$vf"
         if [ "$first" = MERGE ] && { [ "$(jq -r '.review_scope // ""' "$p")" != full ] || [ "$(jq -r '.review_scope_head // ""' "$p")" != "$(jq -r .head "$p")" ]; }; then
           # Incremental success schedules a full round on this same head; it cannot finish a lane.
           _osrc_jq_set "$p" '.state="queued" | .needs_final=true | .verdict="" | .sent_ts=0 | .acked=false'
           continue
         fi
-        _osrc_jq_set "$p" --arg v "$first" --argjson now "$now" --arg vf "$vf" \
-          '.state="verdict" | .verdict=$v | .verdict_ts=$now | .sha_reviewed=.head | .findings=$vf | .invalid_first_line=""' ;;
+        _osrc_jq_set "$p" --arg v "$first" --arg raw "$raw" --argjson now "$now" --arg vf "$vf" \
+          '.state="verdict" | .verdict=$v | .verdict_raw=$raw | .verdict_ts=$now | .sha_reviewed=.head | .findings=$vf | .invalid_first_line=""' ;;
       *)
         age=$(( $(date +%s) - $(stat -c %Y "$vf" 2>/dev/null || stat -f %m "$vf" 2>/dev/null || date +%s) ))   # real file mtime vs real clock
         [ "$age" -ge "$settle" ] && _osrc_jq_set "$p" --arg l "$(head -1 "$vf" | cut -c1-60)" '.invalid_first_line=$l' ;;
@@ -259,7 +262,9 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
   if [ "$tr" = gh ]; then fetch="https://github.com/$url.git"; else fetch="$url"; fi
   {
     printf '# Review request: %s @ %s\n\n' "$lane" "${head:0:7}"
-    printf -- '- Lane: %s\n- Branch: %s\n- Head sha (review exactly this): %s\n- Remote: %s\n- Base to diff against: %s\n\n' "$lane" "$branch" "$head" "$fetch" "$base"
+    printf -- '- Lane: %s\n- Branch: %s\n- Head sha (review exactly this): %s\n- Remote: %s\n- Base to diff against: %s\n' "$lane" "$branch" "$head" "$fetch" "$base"
+    ! type osrc_proof_stamp >/dev/null 2>&1 || printf -- '- Proof: %s\n' "$(osrc_proof_stamp "$lane")"
+    printf '\n'
     printf '## Get the change\n\n```\ngit fetch %q %q && git log --oneline FETCH_HEAD -20\n' "$fetch" "$branch"
     if [ -n "$prev" ] && [ "$final" != final ]; then
       printf 'git diff %s FETCH_HEAD   # changes since the last reviewed commit\n' "$sha"
@@ -268,10 +273,15 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
       [ "$tr" = gh ] && printf 'gh api repos/%s/compare/%s...%s -H "Accept: application/vnd.github.diff"\n' "$url" "$base" "$branch"
     fi
     printf '```\n\nIf FETCH_HEAD is not %s, the lane moved: say so in the verdict and review %s anyway.\n\n' "${head:0:7}" "${head:0:7}"
-    if [ -n "$brief" ] && [ -f "$brief" ]; then printf '## The lane'"'"'s own brief (what it was asked to build)\n\n'; cat "$brief"; printf '\n\n'; fi
+    if [ -n "$brief" ] && [ -f "$brief" ]; then
+      # A re-review already judged the brief last round: point at it instead of pasting it again.
+      if [ "$scope" = incremental ]; then printf 'The lane'"'"'s brief: %s (you reviewed against it last round; open it only if a fix needs it).\n\n' "$brief"
+      else printf '## The lane'"'"'s own brief (what it was asked to build)\n\n'; cat "$brief"; printf '\n\n'; fi
+    fi
     if [ -n "$prev" ]; then
-      printf '## Prior findings: verify each fix with evidence\n\n'
-      sed '1d; s/^/- [ ] /' "$findings"
+      printf '## Prior must-fix findings: verify each fix with evidence\n\n'
+      if type _osrc_sev_prior >/dev/null 2>&1; then _osrc_sev_prior "$findings" | sed -E 's/^[[:space:]]*([-*]|[0-9]+[.)])?[[:space:]]*/- [ ] /'
+      else sed '1d; s/^/- [ ] /' "$findings"; fi
       printf '\n'
       if [ -f "$report" ] && [ ! -L "$report" ]; then
         printf '## Latest report round\n\n'
@@ -281,7 +291,7 @@ _osrc_review_write_brief() { # <item-id> [final] -> writes review/<id>.md
         printf '## Latest report round\n\nReport not available; request the current round from the lane.\n\n'
       fi
     fi
-    printf '## Where to write the verdict\n\nWrite exactly this file: %s\n\nFirst line: one word, MERGE, CHANGES or BLOCK. Below it: findings, most severe first, each with file:line and the fix. MERGE means no findings that must change before merge.\nDo not merge, push or edit the branch. You are the only reviewer; take items one at a time.\n' "$vf"
+    printf '## Where to write the verdict\n\nWrite exactly this file: %s\n\nFirst line: one word, MERGE, CHANGES or BLOCK. Below it: findings, most severe first, one per line, each starting with a tag, [must-fix], [nit] or [pre-existing], then file:line and the fix. Only [must-fix] sends the lane back; [pre-existing] (a problem the change did not introduce) becomes a separate note and never blocks. MERGE means no [must-fix] findings.\nDo not merge, push or edit the branch. You are the only reviewer; take items one at a time.\n' "$vf"
     [ "$scope" != incremental ] || printf '\nThis is an incremental round. A MERGE here queues a full-diff final round on this same head before the lane can finish.\n'
   } > "$out" || return 1
   _osrc_jq_set "$p" --arg scope "$scope" --arg head "$head" '.review_scope=$scope | .review_scope_head=$head' || return 1
@@ -455,7 +465,7 @@ _osrc_review_queue_ls() {
     any=1
     printf '%-34s %-10s %-8s %-7s %s\n' "$(jq -r .id "$p")" "$(jq -r .state "$p")" "$(jq -r '.verdict // ""' "$p")" \
       "$(( (now - $(jq -r .enq_ts "$p")) / ${OSRC_TIME_UNIT:-60} ))m" \
-      "$( [ "$(jq -r .stale "$p")" = true ] && printf 'STALE (lane at %s)' "$(jq -r '.stale_by[0:7]' "$p")"; [ "$(jq -r .rereview "$p")" = true ] && printf ' re-review')"
+      "$( [ "$(jq -r .stale "$p")" = true ] && printf 'STALE (lane at %s)' "$(jq -r '.stale_by[0:7]' "$p")"; [ "$(jq -r .rereview "$p")" = true ] && printf ' re-review'; [ -z "$(jq -r '.proof // ""' "$p")" ] || printf ' [%s]' "$(jq -r .proof "$p")")"
   done
   [ "$any" = 1 ] || echo "(queue empty)"
 }
@@ -549,13 +559,17 @@ _osrc_review_show() {
 }
 
 _osrc_review_sendback() {
-  local i p out v lane sha7
+  local i p out v lane sha7 vf
   i="$(_osrc_review_resolve "${1:-}")" || die "review sendback <item>"
   p="$(_osrc_rv_item "$i")"; v="$(jq -r .verdict "$p")"; [ -n "$v" ] || die "$i has no verdict yet"
   lane="$(jq -r .lane "$p")"; sha7="$(jq -r '.head[0:7]' "$p")"; out="$OSRC_HOME/review/REVIEW-$i.md"
   { printf '# Review of %s @ %s: %s\n\n' "$lane" "$sha7" "$v"
     [ "$(jq -r .stale "$p")" != true ] || printf 'NOTE: the lane has pushed %s since; findings apply to %s.\n\n' "$(jq -r '.stale_by[0:7]' "$p")" "$sha7"
-    tail -n +2 "$(jq -r .findings "$p")"; } > "$out"
+    vf="$(jq -r .findings "$p")"
+    if type _osrc_sev_lines >/dev/null 2>&1 && [ -n "$(_osrc_sev_lines "$vf" must-fix)$(_osrc_sev_lines "$vf" nit)$(_osrc_sev_lines "$vf" pre-existing)" ]; then
+      printf '## Must fix\n\n'; _osrc_sev_lines "$vf" must-fix; printf '\n'
+      [ -z "$(_osrc_sev_lines "$vf" nit)" ] || { printf '## Nits (optional)\n\n'; _osrc_sev_lines "$vf" nit; }
+    else tail -n +2 "$vf"; fi; } > "$out"
   echo "wrote $out"
   echo "--- relay this to lane '$lane' (cloud session message, PR comment, or relaunch brief) ---"
   printf 'Review of your branch %s at %s: %s. Findings are below; fix them, push, and mark the new head READY.\n\n' "$(jq -r .branch "$p")" "$sha7" "$v"

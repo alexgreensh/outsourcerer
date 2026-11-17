@@ -79,6 +79,40 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
   Installed plugins and skills are still inherited.
 - Nothing merges automatically.
 
+## Proof (lib/proof.sh): READY needs a proof for its head sha
+
+```
+proof run [--lane ID] [--dir DIR] [--base REF] [--cmd "<check>"]... [--method none|review --reason R] [--json]
+proof show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane> | require [on|off]
+```
+
+- `proof run` runs the checks itself and writes `$OSRC_HOME/proof/<lane>/proof.json`: head sha, each
+  command with exit code, seconds, pass/fail counts when the output shows them, last 30 lines, the
+  `guards` JSON (lane S1's `guards run --json`, or `"unavailable"`), and `method`: `verify-run`
+  (`.outsourcerer/verify` read from the BASE ref), `tests` (`--cmd` or the done contract's `check:`),
+  `review` or `none` (both need `--reason`). Never write proof.json by hand. Uncommitted tracked
+  changes fail the proof (the run did not test the head). A diff touching `.outsourcerer/` is
+  recorded as `checks_changed` for the reviewer.
+- Stamp, shown on review items, in the review brief and on Mission Control: `proved: 139 pass, 0 fail`,
+  `unverified: <reason>`, `review only: <reason>`, or `failed: <cmd> exit N`.
+- Remote READY: a cloud lane cannot write this machine's proof folder, so READY is proved here, on the
+  READY sha (`--done-when`, and/or `.outsourcerer/verify` from base). With no check at all the READY is
+  queued with an honest `method: none` proof (stamped unverified), never stranded. A failing proof
+  spends no review and NEXT is `proof sendback <lane>`.
+- `.DONE` hand-ins (`supervise --watch`): a lane that has run proof (or every lane after
+  `proof require on`) needs a passing proof for its current head; otherwise the hand-in is sent back
+  (`session send` to a live managed session, else NEXT `proof sendback <lane>`), no user ping.
+- Three rounds, then a person: every failed proof run or sent-back hand-in is a round; a pass resets.
+  After `OSRC_PROOF_MAX_ROUNDS` (3) the lane is stopped (`proof run` exits 4, no more sendbacks) and
+  Mission Control lists it under "needs you" with the last failing lines. `proof reset <lane>` is the
+  person's call. Project cards count lanes that landed unverified.
+- Findings carry a severity tag, `[must-fix]`, `[nit]` or `[pre-existing]` (lib/review_sev.sh). Only
+  must-fix sends a lane back: CHANGES with only nits/pre-existing routes to MERGE (`verdict_raw` keeps
+  what the reviewer wrote), MERGE listing a must-fix routes to CHANGES, untagged findings keep the
+  first line. Pre-existing findings go to `review/notes/<lane>.md`, never a block. A re-review brief
+  carries the diff since the last reviewed sha and only the prior must-fix findings; the lane brief is a
+  pointer, not pasted again.
+
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
 
 | kind | when |
