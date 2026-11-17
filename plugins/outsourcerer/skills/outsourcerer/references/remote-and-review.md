@@ -79,6 +79,15 @@ review show|ack|requeue|drop|sendback <item> | rotate | events
   Installed plugins and skills are still inherited.
 - Nothing merges automatically.
 
+## Repo guards (`guards run`, lib/guards.sh)
+
+Run inside a lane worktree before READY: `outsourcerer guards run [--base REF] [--mode off|observe|enforce] [--json] [--allow "<reason>"]`. Every guard sees one diff (merge-base of the base and HEAD against the working tree, plus untracked files). Guards and their config come from the BASE ref, never the lane: a diff touching `.outsourcerer/guards/`, `.outsourcerer/guards.conf`, `.outsourcerer/slop.allow`, `.file-size-allow` or `scripts/check_file_size.py` is reported as `guards_changed` for the reviewer and the lane's copy never runs.
+
+- Built-ins: `slop` (narration comments, excuse comments, comment-heavy hunks, new `*.md` outside the allowlist; regex only, zero model calls) and `file-size` (the repo's own `scripts/check_file_size.py`). A repo adds guards as files in `.outsourcerer/guards/`; each exits non-zero with `WHAT:` and `FIX:` lines. Outsourcerer excludes `.outsourcerer/` in `.git/info/exclude` for its worktrees, so commit guard files with `git add -f`.
+- Modes per guard in `.outsourcerer/guards.conf` (`<guard> = off|observe|enforce`, `default = ...`; slop keys `slop.md_allow`, `slop.comment_min`). New guards default to observe: failures go to `$OSRC_HOME/guards/observe.log` and the run passes. Enforce exits 1.
+- Never strands work: `--allow "<reason>"` passes a block and records it; after 2 enforce blocks in one lane the next run passes as "allowed after 2 blocks". Both land in `$OSRC_HOME/guards/allowed.log`.
+- `--json` prints one object: `{mode, passed, failed:[{guard, mode, what:[...], fix}], guards_changed, guards_changed_paths, allowed, ran, skipped, base, base_sha, lane, elapsed_s}`. `passed` is the gate verdict (exit 0). Feed `what` and `fix` straight into the retry brief.
+
 ## Events (see CONTRACT: `EVENT <kind> <target> <ts> <detail>` then `NEXT <command>`)
 
 | kind | when |
