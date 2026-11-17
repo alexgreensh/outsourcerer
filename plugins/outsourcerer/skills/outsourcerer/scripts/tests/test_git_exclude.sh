@@ -84,5 +84,24 @@ for p in .outsourcerer/worktrees/job1/file .outsourcerer/jobs/state.json .outsou
   g check-ignore -q "$p" && ok "lane state stays ignored: $p" || bad "not ignored: $p"
 done
 
+# ---- 6. review round 1 nits: symlink + mode kept, read-only info/ quiet, CRLF migrates -----------
+R="$TMP/link"; mkdir -p "$R" "$TMP/shared" && g init -q "$R"
+printf '/.outsourcerer/\n' >"$TMP/shared/exclude"; chmod 600 "$TMP/shared/exclude"
+rm -f "$R/.git/info/exclude"; ln -s "$TMP/shared/exclude" "$R/.git/info/exclude"
+exclude "$R"
+[ -L "$R/.git/info/exclude" ] && ok "symlinked exclude stays a symlink" || bad "symlink replaced"
+[ "$(our_lines "$TMP/shared/exclude")" = "$BLOCK" ] && ok "migration written through the symlink" || bad "target: $(cat "$TMP/shared/exclude")"
+mode="$(ls -l "$TMP/shared/exclude" | cut -c1-10)"
+[ "$mode" = "-rw-------" ] && ok "file mode 600 kept" || bad "mode now $mode"
+R="$TMP/ro"; mkdir -p "$R" && g init -q "$R"; rm -f "$R/.git/info/exclude"; chmod 500 "$R/.git/info"
+err="$( { exclude "$R"; } 2>&1 )"; chmod 700 "$R/.git/info"
+[ -z "$err" ] && ok "read-only info/: no error leaks" || bad "stderr: $err"
+R="$TMP/crlf"; mkdir -p "$R" && g init -q "$R"; EX="$R/.git/info/exclude"
+printf '*.log\r\n/.outsourcerer/\r\n*.tmp\r\n' >"$EX"
+exclude "$R"
+[ "$(grep -cxF -e '/.outsourcerer/' -e $'/.outsourcerer/\r' "$EX")" = 0 ] && [ "$(our_lines "$EX")" = "$BLOCK" ] && ok "CRLF old line migrates" || bad "crlf:"$'\n'"$(od -c "$EX" | head)"
+[ "$(grep -c $'^\\*\\.log\r$' "$EX")" = 1 ] && ok "other CRLF lines kept byte-exact" || bad "crlf other lines"
+cp "$EX" "$TMP/snap2"; exclude "$R"; cmp -s "$EX" "$TMP/snap2" && ok "CRLF file: rerun is a no-op" || bad "crlf rerun changed"
+
 echo "test_git_exclude: $pass passed, $fail failed"
 [ "$fail" = 0 ]

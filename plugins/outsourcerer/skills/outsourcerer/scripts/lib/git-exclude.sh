@@ -9,7 +9,10 @@
 #   !/.outsourcerer/verify      the repo's verify command
 # Migration: the old single `/.outsourcerer/` line (and any copy of the block lines) is replaced by one
 # block at the first such line; every other line stays as it was, in order. Rerunning is a no-op (the
-# file is not rewritten). Silently gives up if git or the file can't be written.
+# file is not rewritten). An old line ending in CRLF migrates too. The file is rewritten in place, so a
+# symlinked exclude stays a symlink and keeps its mode. Silently gives up if git or the file can't be
+# written. Caveat: a TRACKED .gitignore entry `.outsourcerer/` (a directory pattern) still hides the
+# carve-outs, because git never looks inside an ignored directory; repos use `.outsourcerer/*` there.
 # Moved out of outsourcerer.sh (the legacy file may only shrink); callers: the engine, factory-land.sh,
 # lib/cloudgate.sh.
 
@@ -22,8 +25,9 @@ _osrc_git_exclude_current() {
   [ -f "$1" ] || return 1
   awk -v want="$_OSRC_EXCLUDE_LINES" '
     BEGIN { n = split(want, w, "|"); for (i = 1; i <= n; i++) idx[w[i]] = i }
-    $0 == "/.outsourcerer/" { bad = 1 }
-    $0 in idx { seen[$0]++; if (idx[$0] != ++pos) bad = 1 }
+    { l = $0; sub(/\r$/, "", l) }
+    l == "/.outsourcerer/" { bad = 1 }
+    l in idx { if ($0 != l) bad = 1; seen[l]++; if (idx[l] != ++pos) bad = 1 }
     END { for (i = 1; i <= n; i++) if (seen[w[i]] != 1) bad = 1; exit bad }' "$1"
 }
 
@@ -34,17 +38,18 @@ _osrc_git_exclude_state() {
   ex="$common/info/exclude"
   _osrc_git_exclude_current "$ex" && return 0
   mkdir -p "$common/info" 2>/dev/null || return 0
-  tmp="$ex.osrc.$$"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/osrc-exclude.XXXXXX" 2>/dev/null)" || return 0
   if [ -f "$ex" ]; then
-    awk -v want="$_OSRC_EXCLUDE_LINES" '
+    { awk -v want="$_OSRC_EXCLUDE_LINES" '
       BEGIN { n = split(want, w, "|"); for (i = 1; i <= n; i++) ours[w[i]] = 1; ours["/.outsourcerer/"] = 1 }
-      $0 in ours { if (!done) { for (i = 1; i <= n; i++) print w[i]; done = 1 } next }
+      { l = $0; sub(/\r$/, "", l) }
+      l in ours { if (!done) { for (i = 1; i <= n; i++) print w[i]; done = 1 } next }
       { print }
       END { if (!done) { if (NR) print ""; print "# outsourcerer worker worktrees (local, added automatically)"
-                         for (i = 1; i <= n; i++) print w[i] } }' "$ex" >"$tmp" 2>/dev/null \
-      && mv -f "$tmp" "$ex" 2>/dev/null
+                         for (i = 1; i <= n; i++) print w[i] } }' "$ex" >"$tmp" \
+      && cat "$tmp" >"$ex"; } 2>/dev/null
   else
-    { echo '# outsourcerer worker worktrees (local, added automatically)'; tr '|' '\n' <<<"$_OSRC_EXCLUDE_LINES"; } >"$ex" 2>/dev/null
+    { { echo '# outsourcerer worker worktrees (local, added automatically)'; tr '|' '\n' <<<"$_OSRC_EXCLUDE_LINES"; } >"$ex"; } 2>/dev/null
   fi
   rm -f "$tmp" 2>/dev/null
   return 0

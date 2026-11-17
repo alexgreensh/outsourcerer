@@ -7,10 +7,16 @@ Four classes, each with its own FIX:
   inflation   a hunk whose added comment lines outnumber its added code lines (min 4 comments)
   markdown    a new *.md file outside the allowlist (CHANGELOG.md, README.md, docs/, repo-meta files by default)
 
+The built-in `slop` guard reports narration, excuse and markdown (default mode enforce); the
+`slop-inflation` guard runs this file with OSRC_SLOP_CLASSES=inflation (default mode observe).
+
 Inputs (set by lib/guards.sh, all read from the BASE ref, never from the lane):
   OSRC_GUARD_DIFF    unified diff of base...HEAD plus uncommitted and untracked files
   OSRC_GUARD_CFGDIR  dir holding the base copies of guards.conf and slop.allow (may be empty)
-guards.conf keys: slop.md_allow = <glob> ... (replaces the default list), slop.comment_min = N.
+  OSRC_SLOP_CLASSES  comma list of classes to report (default narration,excuse,markdown)
+guards.conf keys: slop.md_allow = <entry> ... (replaces the default list; `dir/` = that dir at the repo
+root, anything else is a glob where * also crosses /), slop.comment_min = N, slop.skip = <glob> ...
+(extra paths to skip).
 guards/slop.allow lines: `<path-glob> [class]  # reason` (no class = every class); a line with no reason
 is ignored.
 Exit 0 = clean; exit 1 = findings, printed as WHAT:/FIX: lines.
@@ -28,8 +34,12 @@ HASH_NAMES = {"makefile", "dockerfile", "gemfile", "rakefile", ".gitignore"}
 SLASH = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".css", ".scss", ".less", ".go", ".rs",
          ".java", ".kt", ".swift", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".php", ".dart"}
 HTML = {".html", ".htm", ".xml", ".svg", ".vue", ".svelte"}
-SKIP = ("node_modules/", "vendor/", "third_party/", "dist/", "build/", ".venv/", "venv/",
-        "__pycache__/", "fixtures/", "testdata/", "generated/", ".git/")
+# Skipped at any depth: package managers' and tools' own trees. Skipped at the repo root only: build
+# output. Test fixtures: only under a tests/ or test/ dir (captured text, not authored comments).
+SKIP_ANYWHERE = ("node_modules/", "vendor/", "third_party/", ".venv/", "venv/", "__pycache__/", ".git/",
+                 "testdata/")
+SKIP_ROOT = ("dist/", "build/", "generated/")
+SKIP_FIXTURES = ("tests/fixtures/", "test/fixtures/")
 SKIP_GLOBS = ("*.min.js", "*.min.css", "*.bundle.js", "*.map", "*_pb2.py", "*.generated.*",
               "*.lock", "package-lock.json", "*.snap")
 MD_DEFAULT = ["CHANGELOG.md", "README.md", "docs/", "LICENSE*.md", "SECURITY.md", "CONTRIBUTING.md",
@@ -71,14 +81,32 @@ def _match(path, g):
     return fnmatch.fnmatch(path, g) or fnmatch.fnmatch(os.path.basename(path), g)
 
 
-def skipped(path, allow):
+def skipped(path, allow, extra=()):
     p = "/" + path
-    if any(("/" + s) in p for s in SKIP):
+    if any(("/" + s) in p for s in SKIP_ANYWHERE + SKIP_FIXTURES) or path.startswith(SKIP_ROOT):
         return True
     name = os.path.basename(path)
-    if any(fnmatch.fnmatch(name, g) for g in SKIP_GLOBS):
+    if any(fnmatch.fnmatch(name, g) for g in SKIP_GLOBS) or any(fnmatch.fnmatch(path, g) for g in extra):
         return True
     return any(cls is None and _match(path, g) for g, cls in allow)
+
+
+def unquote(p):
+    """git C-quotes a path holding '"', '\\', control chars (quotePath=false keeps UTF-8 raw)."""
+    if not (len(p) >= 2 and p[0] == '"' and p[-1] == '"'):
+        return p
+    b, i, body = bytearray(), 0, p[1:-1]
+    esc = {"n": 10, "t": 9, "r": 13, '"': 34, "\\": 92, "a": 7, "b": 8, "f": 12, "v": 11}
+    while i < len(body):
+        c = body[i]
+        if c == "\\" and i + 1 < len(body):
+            n = body[i + 1]
+            octal = body[i + 1:i + 4]
+            if len(octal) == 3 and all(x in "01234567" for x in octal):
+                b.append(int(body[i + 1:i + 4], 8)); i += 4; continue
+            b.append(esc.get(n, ord(n))); i += 2; continue
+        b.extend(c.encode("utf-8")); i += 1
+    return b.decode("utf-8", errors="replace")
 
 
 def _code_part(line, marker):
@@ -111,8 +139,8 @@ def comment(line, kind, state):
             return None, False
         if s.startswith("#"):
             return s.lstrip("#").strip(), True
-        i = _code_part(line, " #")
-        return (line[i + 2:].strip(), False) if i >= 0 else (None, False)
+        i = _code_part(line, "#")
+        return (line[i + 1:].strip(), False) if i >= 0 else (None, False)
     if kind == "slash":
         if state.get("block"):
             if "*/" in s:
@@ -175,7 +203,7 @@ def md_allowed(path, globs):
     name = os.path.basename(path)
     for g in globs:
         if g.endswith("/"):
-            if path.startswith(g) or ("/" + g) in ("/" + path):
+            if path.startswith(g):
                 return True
         elif fnmatch.fnmatch(path, g) or fnmatch.fnmatch(name, g):
             return True
@@ -188,40 +216,42 @@ def scan(diff_text, conf, allow):
         cmin = max(1, int(conf.get("slop.comment_min", "4")))
     except ValueError:
         cmin = 4
+    extra_skip = conf.get("slop.skip", "").split()
     hits = []
     path, kind, new_file, state = None, None, False, {}
-    hunk = None
+    hunk, in_header = None, False
 
     def close_hunk():
         if hunk and hunk["comments"] >= cmin and hunk["comments"] > hunk["code"]:
             hits.append(("inflation", path, "%s:%d: %d comment lines vs %d code lines in one hunk"
                          % (path, hunk["start"], hunk["comments"], hunk["code"])))
 
-    for raw in diff_text.splitlines():
+    for raw in diff_text.split("\n"):
         if raw.startswith("diff --git "):
             close_hunk()
-            hunk, path, new_file, state = None, None, False, {}
+            hunk, path, new_file, state, in_header = None, None, False, {}, True
             continue
-        if raw.startswith("new file mode"):
+        if in_header and raw.startswith("new file mode"):
             new_file = True
             continue
-        if raw.startswith("+++ "):
-            p = raw[4:].strip()
+        if in_header and raw.startswith("+++ "):
+            p = unquote(raw[4:].rstrip("\r").strip())
             path = None if p == "/dev/null" else (p[2:] if p.startswith("b/") else p)
             kind = kind_of(path) if path else None
-            if path and (skipped(path, allow)):
+            if path and (skipped(path, allow, extra_skip)):
                 path = None
             elif path and new_file and path.lower().endswith(".md") and not md_allowed(path, md_globs):
                 hits.append(("markdown", path, "%s: new markdown file" % path))
             continue
-        if raw.startswith("@@"):
+        if raw.startswith("@@") and (in_header or hunk is not None):
             close_hunk()
+            in_header = False
             m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", raw)
             hunk = {"start": int(m.group(1)) if m else 0, "line": int(m.group(1)) if m else 0,
                     "comments": 0, "code": 0}
             state = {}
             continue
-        if hunk is None or path is None or kind is None:
+        if in_header or hunk is None or path is None or kind is None:
             continue
         if raw.startswith("+"):
             line = raw[1:]
@@ -241,6 +271,7 @@ def scan(diff_text, conf, allow):
                         break
         elif raw.startswith(" "):
             hunk["line"] += 1
+            comment(raw[1:], kind, state)  # keeps an open /* or <!-- block in step with the file
     close_hunk()
     return [h for h in hits if not any(cls == h[0] and _match(h[1], g) for g, cls in allow)]
 
@@ -254,7 +285,8 @@ def main():
     with open(diff_path, encoding="utf-8", errors="replace") as f:
         diff_text = f.read()
     conf, allow = read_conf(os.environ.get("OSRC_GUARD_CFGDIR", ""))
-    hits = scan(diff_text, conf, allow)
+    want = set(os.environ.get("OSRC_SLOP_CLASSES", "narration,excuse,markdown").split(","))
+    hits = [h for h in scan(diff_text, conf, allow) if h[0] in want]
     if not hits:
         return 0
     seen = []
