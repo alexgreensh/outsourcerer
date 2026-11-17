@@ -429,6 +429,24 @@ unread), then `unreviewed` and `drift` from other modules, and `approved` (infor
 shown with the next real wake, never a wake by itself). `EVENT done all` means nothing you own is live.
 `EVENT failed supervise` (exit 2) means supervise itself broke: run its NEXT to re-arm.
 
+**Stalls are not idle (0.17, lib/stall.sh).** A lane that ended its turn while its own background shell
+runs (Claude Code's `· 1 shell` footer or `1 shell still running` summary) is not idle and never raises
+`idle`. A lane is `stalled` when it is idle and its shell has run `OSRC_STALL_MIN` (5) minutes with no
+change on screen, when its last words promise to continue later ("after it reports I continue") with
+nothing running to wake it, or when a plain idle has not changed for `OSRC_STALL_MIN`. A lane whose last
+words wait on a person (you, a go-ahead, an approval, a review, the orchestrator, a decision) is plain
+idle, never stalled. supervise first types ONE nudge into the lane itself ("check its output now; if it
+hung, kill it and rerun in the foreground") and logs an informational `nudged` row; still stalled
+`OSRC_STALL_MIN` later, it wakes you with `EVENT stalled ... after one autonudge` and Mission Control shows
+the lane as needs-you. A lane that worked after its nudge and stalls again gets a fresh nudge, up to
+`OSRC_NUDGE_MAX` (3), after which a new stall wakes you at once. A foreground tool whose screen has not
+moved for `OSRC_SUPERVISE_STALL` (15) minutes is reported once, then every 15 minutes.
+`OSRC_AUTONUDGE=0` skips the nudge: the first stall wakes you with the nudge as NEXT. A lane at a question
+or an approval, and the review queue's reviewer, are never nudged. `EVENT approval-not-landed` means an
+answer was typed (by `session answer`, the approver, or anything that noted it) and the same prompt was
+still open seconds later: retry it, do not assume it landed. Every `session`, `review`, `hub` or `mc`
+call warns `no watcher for Nm` when the lanes you own have had no supervise armed for over 2 minutes.
+
 **With the approver** (`session approve-policy safe`, lib/approver.sh), supervise calls
 `osrc_approver_tick` on every open prompt before reporting it: approved once (logged as `approved`, no
 wake), held and new or older than `OSRC_HOLD_MIN` (the approver's own `EVENT approval` + `session answer`
@@ -440,7 +458,9 @@ is restarted (`heartbeat start` after stopping the old leader).
 Act on every NEXT in the batch, then arm `supervise` again. After the first event it waits up to
 `OSRC_SUPERVISE_SETTLE`=20 s while other targets could still report, so near-simultaneous events land in
 one wake. The same unresolved event is not repeated on the next arm, but comes back after
-`OSRC_SUPERVISE_REMIND`=20 min, so a skipped event never sleeps forever. Events are appended to
+5 min for `idle`, `stalled`, `question`, `approval` and `approval-not-landed` (20 min for the rest;
+`OSRC_SUPERVISE_REMIND` sets one interval for every kind), with its age (`still unresolved, waiting 10m`),
+so a skipped event never sleeps forever. Events are appended to
 `$OSRC_HOME/lanes/events.jsonl` by supervise and by the heartbeat beacon on every tick; each session
 keeps a cursor (offset + log generation, so a 5 MB rotation finishes the old file first), and every
 event carries its owner session, so a supervise re-armed after compaction, a restart or a reaped

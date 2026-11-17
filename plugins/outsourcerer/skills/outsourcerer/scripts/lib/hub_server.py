@@ -55,6 +55,17 @@ SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
 
+def _write_small(path, text):
+    """Atomic best-effort write of a small state file (never raises)."""
+    try:
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 class Hub:
     def __init__(self, osrc_home, engine, page_path, token):
         self.osrc_home = osrc_home
@@ -85,6 +96,71 @@ class Hub:
         # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
         # self-contained file, so its blocks are knowable at startup.
         self.script_hashes = self._script_hashes()
+        self.tab_seen = 0.0
+        self.keys_file = os.path.join(osrc_home, "hub", "keys.json")
+        self.remember_key()
+
+    # Keys this OSRC_HOME's hubs have served, as salted SHA-256 (never the key itself), in
+    # hub/keys.json (0600): [{salt, hash, current, retired_at}]. A key stops being current when a hub
+    # starts with a different one; it is accepted by /reopen for KEY_TTL after that, newest KEY_KEEP only.
+    KEY_TTL = 7 * 86400
+    KEY_KEEP = 5
+
+    @staticmethod
+    def _key_hash(salt, key):
+        return hashlib.sha256((salt + ":" + key).encode("utf-8", "replace")).hexdigest()
+
+    def _load_keys(self):
+        try:
+            with open(self.keys_file, encoding="utf-8") as f:
+                keys = json.load(f)
+            return [k for k in keys if isinstance(k, dict) and k.get("salt") and k.get("hash")]
+        except (OSError, ValueError):
+            return []
+
+    def _is_key(self, entry, key):
+        return hmac.compare_digest(self._key_hash(entry["salt"], key), entry["hash"])
+
+    def remember_key(self):
+        now = int(time.time())
+        keys = []
+        for k in self._load_keys():
+            if self._is_key(k, self.token):
+                continue
+            if k.get("current"):
+                k["current"] = False
+                k["retired_at"] = now
+            if now - int(k.get("retired_at") or 0) < self.KEY_TTL:
+                keys.append(k)
+        salt = os.urandom(16).hex()
+        keys = keys[-(self.KEY_KEEP - 1):] + [{"salt": salt, "hash": self._key_hash(salt, self.token), "current": True}]
+        tmp = "%s.tmp.%d" % (self.keys_file, os.getpid())
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(keys, f)
+            os.replace(tmp, self.keys_file)
+        except OSError:
+            pass
+
+    def retired_key_ok(self, key):
+        """True when <key> is a key an earlier hub served here, retired less than KEY_TTL ago."""
+        if not key or len(key) > 256:
+            return False
+        now = int(time.time())
+        for k in self._load_keys():
+            if not k.get("current") and now - int(k.get("retired_at") or 0) < self.KEY_TTL and self._is_key(k, key):
+                return True
+        return False
+
+    def note_tab(self):
+        """A tab fetched data with the current token. The engine reads hub/tab.seen to decide
+        whether work starting should pop Mission Control (lib/mc_alive.sh). Throttled to 10 s."""
+        now = time.time()
+        if now - self.tab_seen < 10:
+            return
+        self.tab_seen = now
+        _write_small(os.path.join(self.osrc_home, "hub", "tab.seen"), "%d\n" % int(now))
 
     def _script_hashes(self):
         try:
@@ -428,11 +504,24 @@ def make_handler(hub):
         def _deny(self):
             self._send_json({"error": "forbidden"}, 403)
 
+        REOPEN_DENIED = {"error": "unknown key",
+                         "text": "This tab's key is not one this Mission Control issued. Run outsourcerer mc to open the current one."}
+
+        def _reopen(self):
+            # POST /reopen with X-Hub-Old-Token: a tab holding a key an earlier hub here served (and
+            # retired within 7 days) gets the current page URL. Same-origin POST only, loopback Host
+            # (do_POST). A script with no old key, or an unknown one, gets 403 and nothing else.
+            if not hub.retired_key_ok((self.headers.get("X-Hub-Old-Token") or "").strip()):
+                return self._send_json(self.REOPEN_DENIED, 403)
+            self._send_json({"url": "/?t=" + urllib.parse.quote(hub.token)})
+
         def do_GET(self):
             if not self._host_ok():
                 return self._deny()
             u = urllib.parse.urlparse(self.path)
             path = u.path
+            if path == "/reopen":
+                return self._send_json(self.REOPEN_DENIED, 403)   # POST with the old key only
             if path.startswith("/assets/"):
                 # A font fetch means a page is open — count it as a poll so the
                 # idle timer reflects real use.
@@ -461,6 +550,7 @@ def make_handler(hub):
             if not self._token_ok():
                 return self._deny()
             hub.last_poll = time.time()
+            hub.note_tab()
             if path == "/api/projects":
                 if not hub.first_export.wait(timeout=STARTING_WAIT):
                     return self._send_json({"generated_at": int(time.time()), "projects": [], "starting": True})
@@ -474,6 +564,10 @@ def make_handler(hub):
                 self._send_json({"error": "not found"}, 404)
 
         def do_POST(self):
+            if urllib.parse.urlparse(self.path).path == "/reopen":
+                if not self._host_ok() or not self._post_origin_ok():
+                    return self._deny()
+                return self._reopen()
             if not self._host_ok() or not self._token_ok() or not self._post_origin_ok():
                 return self._deny()
             hub.last_poll = time.time()
@@ -545,6 +639,9 @@ def main():
     if port != args.port:
         sys.stderr.write("[hub] port %d busy — serving on %d instead\n" % (args.port, port))
     url = "http://127.0.0.1:%d/?t=%s" % (port, urllib.parse.quote(token))
+    # Who serves this OSRC_HOME, so work starting can open the page once per hub process.
+    serve_json = os.path.join(args.osrc_home, "hub", "serve.json")
+    _write_small(serve_json, json.dumps({"pid": os.getpid(), "port": port, "started": int(time.time())}) + "\n")
     print("[outsourcerer] hub: %s" % url, flush=True)
 
     # The URL is out first; the first export then runs in the background and the first

@@ -22,7 +22,9 @@
 # cannot reach either position. The summary drops `· N shell still running` the moment the shell
 # ends (verified live, fixtures/supervise/cc-bg-shell-finished-working.txt).
 _SV_BG_SUMMARY_RE='^[[:space:]]*[^[:alnum:][:space:]]{1,3}[[:space:]]+[A-Z][a-z]+ for [0-9].*[[:space:]][0-9]+ (background )?shells? still running[[:space:]]*$'
-_SV_BG_FOOTER_RE='[[:space:]][0-9]+ (background )?shells?[[:space:]]*$'
+# The footer's shell count is one `·`-separated item and may be followed by more
+# (`⏵⏵ auto mode on · 1 shell · ← 15 agents · ↓ to manage`); `← N agents` is not a shell.
+_SV_BG_FOOTER_RE='[[:space:]][0-9]+ (background )?shells?([[:space:]]+·|[[:space:]]*$)'
 
 _sv_bg_shell() { # -> 0 + evidence line when the analysed Claude Code frame shows a running background shell
   local end i n=0 l re

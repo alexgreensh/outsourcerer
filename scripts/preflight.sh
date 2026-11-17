@@ -16,7 +16,9 @@ T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
 # misses them (S2 changed supervise_watch.sh, remote.sh and done.sh and test_supervise never ran).
 _extra_suites() { # <basename> -> suite names
   case "$1" in
-    supervise_watch.sh|remote.sh|done.sh|lane_life.sh|owner_state.sh|supervise_dedupe.sh) echo test_supervise test_supervise_dedupe ;;
+    supervise_watch.sh|remote.sh|done.sh|lane_life.sh|owner_state.sh|supervise_dedupe.sh) echo test_supervise test_supervise_dedupe test_stall ;;
+    stall.sh|supervise.sh|approver.sh|menu.sh) echo test_stall test_supervise test_supervise_dedupe ;;
+    mc_alive.sh|hub-alive.js|hub_alive_dom.js) echo test_mc_alive ;;
   esac
 }
 
