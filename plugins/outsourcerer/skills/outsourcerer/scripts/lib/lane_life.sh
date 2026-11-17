@@ -80,13 +80,51 @@ _sv_observe_gone() { # <id>
 # for it (<lane>.DONE / <lane>-DONE, where the session id is <lane> or ends in -<lane>) was written
 # after the session started. A DONE file left over from an earlier round never counts.
 _sv_gone_handin() { # <id> <last-registry-record> -> reason on stdout
-  local id="$1" start w p f b stem m
-  if type osrc_done_state >/dev/null 2>&1 && [ "$(osrc_done_state "$id" 2>/dev/null)" = done ]; then
+  local f
+  if type osrc_done_state >/dev/null 2>&1 && [ "$(osrc_done_state "$1" 2>/dev/null)" = done ]; then
     printf 'done contract holds'; return 0
   fi
-  start="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs --arg id "$id" \
-    '[.[] | select(.session_id == $id and .event == "start") | (.ts // "" | fromdateiso8601? // empty)] | max // empty' 2>/dev/null)"
-  case "$start" in ''|*[!0-9]*) return 0 ;; esac
+  f="$(_sv_handin_file "$1")" && printf 'hand-in %s' "$(basename "$f")"
+  return 0
+}
+
+# Working stretches, so a reused session's previous-round DONE never counts: state/<id>.stretch holds
+# "<stretch-start> <last-quiet> <prev>". A working (or approval) read after a quiet one starts a new
+# stretch at that last quiet read: the work began after it, so any DONE written for this round is
+# newer. Written by supervise and the beacon on every read of the pane.
+_sv_stretch_note() { # <id> <state> <now>
+  local f s=0 q=0 p=quiet; f="$(_sv_lanes)/state/$1.stretch"
+  [ -f "$f" ] && read -r s q p < "$f" 2>/dev/null
+  s="$(_sv_num "$s" 0)"; q="$(_sv_num "$q" 0)"
+  case "$2" in
+    working|approval) [ "$p" = working ] || s="$q"; p=working ;;
+    *) q="$3"; p=quiet ;;
+  esac
+  mkdir -p "${f%/*}" 2>/dev/null && printf '%s %s %s\n' "$s" "$q" "$p" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
+_sv_stretch_start() { # <id> -> epoch the latest working stretch began after (0 = none seen)
+  local s=0; read -r s _ 2>/dev/null < "$(_sv_lanes)/state/$1.stretch"; _sv_num "$s" 0
+}
+
+# A turn short enough to start and end between two polls leaves no working read, so its stretch is
+# never seen. What it does leave is a changed screen. state/<id>.handin = "<fp>\t<screen hash>" of the
+# hand-in last REPORTED as done: the same DONE fingerprint on a different screen is not a new
+# hand-in, the lane did more work after it, so it reads idle (and is reported) instead of done.
+_sv_handin_note() { # <id> <fp> <screen-hash>
+  local f; f="$(_sv_lanes)/state/$1.handin"
+  mkdir -p "${f%/*}" 2>/dev/null && printf '%s\t%s\n' "$2" "$3" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+}
+_sv_handin_moved_on() { # <id> <fp> <screen-hash> -> 0 when <fp> was reported on a different screen
+  local rfp rh
+  IFS="$(printf '\t')" read -r rfp rh 2>/dev/null < "$(_sv_lanes)/state/$1.handin" || return 1
+  [ "$rfp" = "$2" ] && [ -n "$rh" ] && [ "$rh" != "$3" ]
+}
+
+# The watched hand-in DONE file of a lane (rules above), newest first; rc 1 when there is none. It
+# must be newer than the session start AND than the start of the lane's latest working stretch. The
+# watch folders are scanned before the registry is read, so a lane with no watch costs no jq.
+_sv_handin_file() { # <id>
+  local id="$1" start="" w p f b stem m best="" bm=0 ws
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
     p="$(cat "$w" 2>/dev/null)"; [ -n "$p" ] || continue
@@ -95,11 +133,17 @@ _sv_gone_handin() { # <id> <last-registry-record> -> reason on stdout
       b="$(basename "$f")"; [ "$(_sv_handin_kind "$b")" = done ] || continue
       stem="$(printf '%s' "$b" | sed -E 's/[.-]?DONE$//')"; [ -n "$stem" ] || continue
       case "$id" in "$stem"|*-"$stem") ;; *) continue ;; esac
-      m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"
-      [ "${m:-0}" -ge "$start" ] 2>/dev/null && { printf 'hand-in %s' "$b"; return 0; }
+      if [ -z "$start" ]; then
+        start="$(_state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -rs --arg id "$id" \
+          '[.[] | select(.session_id == $id and .event == "start") | (.ts // "" | fromdateiso8601? // empty)] | max // empty' 2>/dev/null)"
+        case "$start" in ''|*[!0-9]*) return 1 ;; esac
+        ws="$(_sv_stretch_start "$id")"
+      fi
+      m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; m="$(_sv_num "$m" 0)"
+      [ "$m" -ge "$start" ] && [ "$m" -gt "$ws" ] && [ "$m" -ge "$bm" ] && { best="$f"; bm="$m"; }
     done < <(_sv_watch_files "$p")
   done
-  return 0
+  [ -n "$best" ] && printf '%s' "$best"
 }
 
 # ---- 3. who is a waiter ----------------------------------------------------------------------------

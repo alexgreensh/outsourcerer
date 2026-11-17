@@ -17,7 +17,9 @@
 # re-armed after hours (compaction, restart, a reaped background shell) returns AT ONCE with
 # everything that happened while nobody was waiting. With the beacon down, supervise polls itself.
 #
-# Dedupe: per target, the last event's kind+screen hash is kept in $OSRC_HOME/lanes/state/<id>; the
+# Dedupe: observe+emit of a target runs under a per-target lock, and every printed row goes into a
+# per-orchestrator delivered ledger so no second supervise prints it again (lib/supervise_dedupe.sh).
+# Per target, the last event's kind+screen hash is kept in $OSRC_HOME/lanes/state/<id>; the
 # same unresolved event is appended again only after OSRC_SUPERVISE_REMIND minutes (default 20), so
 # a skipped event cannot sleep forever. Batching: after the first new event, supervise keeps polling
 # for OSRC_SUPERVISE_SETTLE seconds (default 20) so near-simultaneous events land in one wake.
@@ -145,6 +147,16 @@ _sv_target_screen() {
   if _sv_api_banner "${OSRC_SCR_ENGINE:-$eng}" "$hit" "$(printf '%s\n' "$hist" | sed '$d' | grep -v '^[[:space:]]*$' | tail -1)"; then printf 'failed\napi-error: %s\n' "$(printf '%s' "$hit" | cut -c1-160)"; return 0; fi
   hit="$(printf '%s\n' "$hist" | grep -Ei "$(_sv_plan_limit_re)" | tail -1 | cut -c1-160)"
   [ -z "$hit" ] || { printf 'limit\n%s\n' "$hit"; return 0; }
+  # A watched hand-in file named for this lane (out/<lane>.DONE) is a done marker, checked last: a
+  # running shell, an error banner, a limit or a question each outrank a file, which may be the
+  # previous round's (_sv_handin_file only counts one newer than the latest working stretch).
+  case "$st" in idle|composer)
+    if hit="$(_sv_handin_file "$id")"; then
+      if _sv_handin_moved_on "$id" "$(_sv_fp "$hit")" "$(_sv_pane_text "$id" "$cap" | cksum | awk '{print $1}')"; then
+        ev="$ev (screen changed since $(basename "$hit") was reported; no new hand-in)"
+      else printf 'done\nhand-in %s written\n' "$(basename "$hit")"; return 0; fi
+    fi ;;
+  esac
   printf '%s\n%s\n' "$st" "$ev"
 }
 
@@ -264,6 +276,7 @@ _sv_observe() { # <id> <now> [src] [owner]
     ev="$(printf '%s\n' "$out" | sed -n 2p | cut -c1-140)"
     h="$(_sv_pane_text "$id" "$cap" | cksum | awk '{print $1}')"; SV_H="$h"
     [ "$h" = "$SVS_HASH" ] || { SVS_HASH="$h"; SVS_CHANGED="$now"; }
+    _sv_stretch_note "$id" "$st" "$now"
     rf="$(_sv_lanes)/state/$id.retry"
     [ "$st" = failed ] || rm -f "$rf" 2>/dev/null
     case "$st" in
@@ -306,12 +319,16 @@ _sv_observe() { # <id> <now> [src] [owner]
                   # Key on the hand-in (contract file or branch tip), not only the screen: a lane
                   # that re-hands in by rewriting its DONE file is a new event.
                   rf="$(_sv_done_fp "$id")"
-                  [ -n "$rf" ] && { SV_H="$(printf '%s' "$rf" | cksum | awk '{print $1}')"; SV_D="$SV_D (hand-in ${rf#*:})"; } ;;
+                  [ -n "$rf" ] && { SV_H="$(printf '%s' "$rf" | cksum | awk '{print $1}')"; SV_D="$SV_D (hand-in ${rf#*:})"; }
+                  # first report of a watched hand-in: remember the screen it was reported on
+                  case "$ev:$SVS_LK" in "hand-in "*:"done:$SV_H") ;; "hand-in "*) _sv_handin_note "$id" "$rf" "$h" ;; esac ;;
             idle)
               SV_OUT=1   # short of done: report it once, then keep watching for its next change
               if [ "$(type -t osrc_done_state >/dev/null 2>&1 && osrc_done_state "$id" 2>/dev/null)" = not-done ]; then
                 SV_K=idle; SV_D="finished its turn but its done contract does not hold yet"
-              else SV_K=idle; SV_D="finished its turn, composer empty (no done marker)"; fi ;;
+              elif [ -f "$OSRC_HOME/done/$id.json" ] || [ -n "$(ls "$OSRC_HOME/watch" 2>/dev/null)" ]; then
+                SV_K=idle; SV_D="finished its turn, composer empty (no done marker)"
+              else SV_K=idle; SV_D="finished its turn, composer empty (no done marker registered: re-arm with --watch <hand-in dir>, or start lanes with --done-when)"; fi ;;
             unknown) SV_K=stalled; SV_D="screen unrecognised and unchanged for ${OSRC_SUPERVISE_CONFIRM:-20}s+: ${ev:-no signal}"; SV_OUT=1
                      [ "$SVS_LK" = "stalled:$h" ] || _sv_fixture_drop "$id" "supervise: persistent unknown" ;;
           esac
@@ -347,8 +364,10 @@ _sv_append() { # <kind> <target> <detail> <next> <src> [owner]
     # Rotation bumps the generation; a cursor from the previous generation finishes .1 first.
     mv -f "$f" "$f.1" 2>/dev/null && printf '%s\n' $(( $(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0) + 1 )) > "$(_sv_lanes)/events.gen"
   fi
+  _SV_SEQ=$(( ${_SV_SEQ:-0} + 1 ))   # row id: unique per append (ts, pid, sequence, random)
   jq -cn --argjson ts "$(_sv_now)" --arg k "$1" --arg t "$2" --arg d "$3" --arg n "$4" --arg src "$5" --arg o "${6:-}" \
-    '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$src} + (if $o == "" then {} else {owner:$o} end)' >> "$f"
+    --arg id "$(_sv_now)-$$-$_SV_SEQ-$RANDOM" \
+    '{id:$id,ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$src} + (if $o == "" then {} else {owner:$o} end)' >> "$f"
 }
 
 # Log SV_K for <id> unless the same kind+hash was logged within OSRC_SUPERVISE_REMIND minutes.
@@ -375,8 +394,7 @@ _sv_observe_all() { # [src]
     [ -d "$d" ] || continue
     o="$(basename "$d")"
     for id in $(ls -1 "$d" 2>/dev/null); do
-      _sv_observe "$id" "$now" "${1:-beacon}" "$o"
-      _sv_emit "$id" "$now" "${1:-beacon}" "$o"
+      _sv_observe_emit "$id" "$now" "${1:-beacon}" "$o"
     done
   done
   _sv_remote_poll "${1:-beacon}"
@@ -396,17 +414,19 @@ _sv_remote_poll() { # <src>
           head="$(jq -r '.head // ""' "$OSRC_HOME/remote/$tgt.json" 2>/dev/null)"
         fi
         key="$kind:$(printf '%s\n%s' "$detail" "$head" | cksum | awk '{print $1}')"
+        _sv_target_lock "remote.$tgt" || { kind=""; continue; }   # another supervise is logging it
         _sv_state_read "remote.$tgt"
         if [ "$SVS_LK" != "$key" ] || [ $(( now - SVS_LT )) -ge $(( $(_sv_num "${OSRC_SUPERVISE_REMIND:-}" 20) * 60 )) ]; then
           _sv_append "$kind" "$tgt" "$detail" "$next" "$1" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
         fi
+        _sv_target_unlock "remote.$tgt"
         kind="" ;;
     esac
   done
 }
 
 # Events in <file> between two byte offsets that belong to this orchestrator, as TSV:
-# prio ts kind target detail next. An event belongs when it carries this owner sid (so a target the
+# prio ts kind target detail next id (id: the row's own, or ts/kind/target/detail for rows without). An event belongs when it carries this owner sid (so a target the
 # stop guard or supervise already pruned still replays) or names one of the given targets.
 _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   [ -f "$1" ] || return 0
@@ -415,7 +435,8 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
     select(type=="object" and .ts >= $since and (($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
     | ({approval:1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
-      [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
+      [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
+       ((.id // "\(.ts)/\(.kind)/\(.target)/\(.detail)") | f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
 }
 
 # Informational kinds are logged and shown with the next real wake, but never wake on their own:
@@ -453,7 +474,7 @@ _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY ->
   local rows="$1" dir="$2" row p ts kind target detail next head state key mark
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    IFS="$(printf '\t')" read -r p ts kind target detail next <<< "$row"
+    IFS="$(printf '\t')" read -r p ts kind target detail next _id <<< "$row"
     if [ "$kind" = done ] && type _osrc_id_ok >/dev/null 2>&1 && _osrc_id_ok "$target" \
       && [ "$next" = "$(_osrc_self) review next" ] && [ -f "$OSRC_HOME/remote/$target.json" ]; then
       key="$(printf '%s' "$row" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
@@ -566,13 +587,15 @@ $w" ;;
 _sv_main() { # <sid> <once> [ids...]
   local sid="$1" once="$2"; shift 2
   local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list stopped_list=""
-  local gen cgen older="" real f armed armed_q
+  local gen cgen older="" real f armed ledger drc newer head
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
-  armed="$dir/armed.$$"; printf -v armed_q '%q' "$armed"
-  trap "rm -f -- $armed_q" EXIT
+  ledger="$dir/delivered"   # per orchestrator key: sid-less explicit-id runs get their own
+  armed="$dir/armed.$$"; _SV_HELD=""; _SV_MAIN_DIR="$dir"
+  trap '_sv_main_exit' EXIT   # removes the armed/arm-seq files and releases every lock this run holds
   trap 'exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
+  _sv_arm_seq "$dir" || exit 1
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
   fi
@@ -585,6 +608,11 @@ _sv_main() { # <sid> <once> [ids...]
   t0="$(_sv_now)"
   while :; do
     now="$(_sv_now)"
+    if newer="$(_sv_superseded "$dir")"; then _sv_superseded_exit "$newer"; fi
+    # The parent (cmd_supervise, pid $$) died without forwarding a signal (SIGKILL, an uncaught
+    # SIGALRM): an orphan worker would poll on as a ghost waiter, covering the stop guard and holding
+    # the caller's pipe open. Exit with it.
+    kill -0 "$$" 2>/dev/null || exit 12
     if ! _sv_tick "$dir" "$now"; then
       _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
       exit 11
@@ -593,8 +621,7 @@ _sv_main() { # <sid> <once> [ids...]
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
     out=0; pend=0; idle_list=""; stopped_list=""
     for id in $targets; do
-      _sv_observe "$id" "$now" supervise "$sid"
-      _sv_emit "$id" "$now" supervise "$sid"
+      _sv_observe_emit "$id" "$now" supervise "$sid"
       [ "$SV_OUT" = 1 ] && out=1
       [ "$SV_PEND" = 1 ] && pend=1
       [ "$SV_K" = idle ] && idle_list="$idle_list $id"
@@ -620,32 +647,33 @@ _sv_main() { # <sid> <once> [ids...]
     size="$(wc -c 2>/dev/null < "$f" | tr -d ' ')"; size="$(_sv_num "$size" 0)"
     [ "$cursor" -le "$size" ] || cursor=0
     new="$(printf '%s\n%s' "$older" "$(_sv_read_range "$f" "$cursor" "$size" "$tj" "$sid")" | grep .)"
+    new="$(_sv_ledger_filter "$ledger" "$new")"   # rows another supervise for this orchestrator already printed
     case ",${OSRC_SUPERVISE_AUTO:-}," in *,done,*) new="$(_sv_auto_filter "$new" "$dir")" ;; esac
     real="$(printf '%s\n' "$new" | awk -F '\t' '$3 != "approved"' | grep .)"
     if [ -n "$real" ]; then
       [ -n "$first" ] || first="$now"
       # Settle only while some target could still produce an event (working / not yet confirmed).
       if [ $(( now - first )) -ge "$settle" ] || [ "$pend" = 0 ]; then
-        _sv_approval_summary "$new"
-        # One pair per target: highest priority, then newest.
-        printf '%s\n' "$new" | sort -t "$(printf '\t')" -k1,1n -k2,2nr | awk -F '\t' '!seen[$4]++' \
-          | while IFS="$(printf '\t')" read -r _p ts kind tgt detail next; do
-              printf 'EVENT %s %s %s %s\n' "$kind" "$tgt" "$ts" "$detail"
-              printf 'NEXT %s\n' "$next"
-            done
-        printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-        printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
-        exit 0
+        # One pair per target; a row a concurrent supervise printed meanwhile is not printed again.
+        _SV_DIR="$dir" _sv_deliver "$ledger" "$new" batch; drc=$?
+        case "$drc" in
+          0) _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
+             printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
+             exit 0 ;;
+          1) first=""; older=""; cursor="$size"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor" ;;   # all delivered elsewhere
+          3) _sv_superseded_exit "$(_sv_superseded "$dir")" ;;
+          *) : ;;   # ledger busy (rc 2): keep the cursor and the batch, deliver on the next poll
+        esac
       fi
     elif [ "$out" = 0 ] && [ -z "$first" ]; then
-      _sv_approval_summary "$new"
       nl="$(printf '%s' "$targets" | wc -w | tr -d ' ')"
-      printf 'EVENT done all %s no owned live work (%s target(s) settled%s%s)\n' "$now" "$nl" "${idle_list:+; idle:$idle_list}" "${stopped_list:+; stopped:$stopped_list}"
-      printf 'NEXT %s fleet ls\n' "$SCRIPT_PATH"
-      printf '%s\n' "$new" | grep . | while IFS="$(printf '\t')" read -r _p ts kind tgt detail next; do
-        printf 'EVENT %s %s %s %s\nNEXT %s\n' "$kind" "$tgt" "$ts" "$detail" "$next"; done
-      printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-      exit 0
+      head="$(printf 'EVENT done all %s no owned live work (%s target(s) settled%s%s)\nNEXT %s fleet ls' "$now" "$nl" "${idle_list:+; idle:$idle_list}" "${stopped_list:+; stopped:$stopped_list}" "$SCRIPT_PATH")"
+      drc=1; [ -z "$new" ] || { _SV_DIR="$dir" _SV_HEAD="$head" _sv_deliver "$ledger" "$new" all; drc=$?; }
+      case "$drc" in
+        0|1) [ "$drc" = 0 ] || printf '%s\n' "$head"   # rc 0 printed the head with the rows
+             _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"; exit 0 ;;
+        3) _sv_superseded_exit "$(_sv_superseded "$dir")" ;;
+      esac   # rc 2, ledger busy: nothing printed, cursor kept; try again on the next poll
     fi
     if [ "$once" = 1 ] && [ -z "$first" ]; then exit 1; fi
     if [ "$maxs" -gt 0 ] && [ $(( now - t0 )) -ge "$maxs" ]; then

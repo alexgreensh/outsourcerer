@@ -176,6 +176,31 @@ sout="$(OSRC_GUARD_DIFF="$TMP/self.diff" python3 -I "$LIBDIR/guards/slop.py")"
 hits="$(grep -E '^WHAT: (narration|excuse)' <<<"$sout")"
 [ -z "$hits" ] && ok "no narration/excuse hits on lib/guards.sh, slop.py, git-exclude.sh, done.sh, review.sh" || bad "false positives:"$'\n'"$hits"
 
+# ---- S3-1. a repo's base guards.conf can soften or harden the built-ins ------------------------
+new_repo "$TMP/s31"
+cp "$FIX/slop/narration.sh" n.sh && cp "$FIX/slop/inflation.js" i.js && commit_all
+modes() { jqr '[.failed[] | "\(.guard)=\(.mode)"] | sort | join(",")' "$1"; }
+conf_on_main() { on_main sh -c "mkdir -p .outsourcerer && printf '$1' > .outsourcerer/guards.conf && git add -f .outsourcerer && git -c user.name=t -c user.email=t@e commit -qm conf"; }
+out="$(GUARDS --json 2>/dev/null)"; rc=$?
+[ "$rc" = 1 ] && [ "$(modes "$out")" = "slop-inflation=observe,slop=enforce" ] \
+  && ok "S3-1: no conf -> built-in defaults (slop enforce, slop-inflation observe)" || bad "S3-1 defaults rc=$rc $(modes "$out")"
+conf_on_main 'default = observe\n'
+out="$(GUARDS --json 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && [ "$(modes "$out")" = "slop-inflation=observe,slop=observe" ] \
+  && ok "S3-1: 'default = observe' softens the slop built-in (rc 0)" || bad "S3-1 default observe rc=$rc $(modes "$out")"
+conf_on_main 'default = observe\nslop = enforce\n'
+GUARDS --json >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && ok "S3-1: '<guard> = enforce' beats 'default'" || bad "S3-1 per-guard rc=$rc"
+conf_on_main 'slop = off\nslop-inflation = enforce\nfile-size = off\n'
+out="$(GUARDS --json 2>/dev/null)"; rc=$?
+[ "$rc" = 1 ] && [ "$(modes "$out")" = "slop-inflation=enforce" ] && [ "$(jqr '.skipped | sort | join(",")' "$out")" = "file-size,slop" ] \
+  && ok "S3-1: per-guard off/enforce on built-ins" || bad "S3-1 per-guard rc=$rc $out"
+conf_on_main 'default = enforce\n'
+out="$(GUARDS --json 2>/dev/null)"
+[ "$(modes "$out")" = "slop-inflation=enforce,slop=enforce" ] && ok "S3-1: 'default = enforce' hardens slop-inflation" || bad "S3-1 harden: $(modes "$out")"
+has "$(bash "$SRC" guards list --base main 2>&1)" "file-size       enforce" && ok "S3-1: guards list shows the repo default on built-ins" || bad "S3-1 list"
+GUARDS --mode observe >/dev/null 2>&1; [ "$?" = 0 ] && ok "S3-1: --mode still overrides the conf" || bad "S3-1 --mode"
+
 # ---- 7. through a symlink -----------------------------------------------------------------------
 mkdir -p "$TMP/bin" && ln -s "$SRC" "$TMP/bin/outsourcerer"
 cd "$TMP/r1" && out="$(bash "$TMP/bin/outsourcerer" guards run --base main --json 2>/dev/null)"
