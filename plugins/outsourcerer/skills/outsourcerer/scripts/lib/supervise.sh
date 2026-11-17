@@ -34,7 +34,7 @@
 _SV_SELF="${BASH_SOURCE[0]}"
 _sv_num() { case "${1:-}" in ''|*[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$1" ;; esac; }
 _sv_lanes() { printf '%s/lanes' "$OSRC_HOME"; }
-_sv_now() { date +%s; }
+_sv_now() { if [ -n "${OSRC_NOW:-}" ]; then printf '%s' "$OSRC_NOW"; else date +%s; fi; }   # OSRC_NOW pins the clock (tests)
 
 # ---- reading a target --------------------------------------------------------------------------
 # Screen classification is L3's (lib/screen.sh: osrc_screen_state / _osrc_screen_analyze_text). This

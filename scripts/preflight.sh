@@ -91,6 +91,8 @@ stage "2. static lints"
 for l in test_no_pipe_grep_q test_sandbox_guard test_no_real_browser test_python_utf8 test_no_dead_pid_scan test_tests_set_home; do
   run "$l" bash "$T/$l.sh"
 done
+# Whole-repo lints scan every file, so no changed-file mapping can pick them: always run them here.
+run "test_shell_scratch" python3 "$T/test_shell_scratch.py"
 run "file size" python3 scripts/check_file_size.py
 [ "$fail" = 0 ] || { echo; echo "preflight: FAILED at the static stage ($(( $(date +%s) - t0 ))s). Fix before running suites."; exit 1; }
 [ "$STATIC_ONLY" = 1 ] && { echo; echo "preflight: static stages green ($(( $(date +%s) - t0 ))s)."; exit 0; }

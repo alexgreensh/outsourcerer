@@ -92,9 +92,9 @@ start_hub() { # [hub serve args]: start on $PORT, set URL/TOK
 }
 stop_hub() { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; SRV=""; }
 start_hub; OLD="$TOK"; stop_hub
-start_hub --new-token
+rm -f "$OSRC_HOME/hub/token"; start_hub   # the token file is gone: the hub issues a new key and retires the old one
 BASE="http://127.0.0.1:$PORT"
-[ "$TOK" != "$OLD" ] && ok "a restart with --new-token serves a new key (the old tab's key is now retired)" || no "token did not rotate"
+[ "$TOK" != "$OLD" ] && ok "a restart without the token file serves a new key (the old tab's key is now retired)" || no "token did not rotate"
 jq -e --argjson p "$PORT" '.port == $p and (.pid | type) == "number"' "$OSRC_HOME/hub/serve.json" >/dev/null && ok "the hub records who serves this OSRC_HOME (serve.json pid + port)" || no "serve.json: $(cat "$OSRC_HOME/hub/serve.json" 2>/dev/null)"
 code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $OLD" "$BASE/api/answers")"
 [ "$code" = 403 ] && ok "a tab holding the older key gets 403 from the data API" || no "old key: $code"
@@ -125,8 +125,13 @@ grep -q "$TOK" "$TMP/serve.log" && [ "$(grep -c "$TOK" "$TMP/serve.log")" -gt 1 
 pg="$(curl -s "$BASE/")"; grep -q 'assets/hub-alive.js' <<<"$pg" && ok "the page loads hub-alive.js" || no "page does not load hub-alive.js"
 [ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/assets/hub-alive.js")" = 200 ] && ok "hub-alive.js is served (CSP script-src 'self')" || no "asset not served"
 stop_hub
+# --new-token revokes: no retired key redeems the new one.
+start_hub; R1="$TOK"; stop_hub; rm -f "$OSRC_HOME/hub/token"; start_hub; stop_hub
+start_hub --new-token
+b="$(ro -H "X-Hub-Old-Token: $R1")"; [ "${b##*$'\n'}" = 403 ] && ! grep -q "$TOK" <<<"$b" && [ "$(jq length "$K")" = 1 ] && ok "after --new-token a retired key gets 403 and keys.json holds only the new key" || no "rotation did not revoke: $b $(cat "$K")"
+stop_hub
 # Only the newest 5 keys are kept.
-for i in 1 2 3 4 5; do start_hub --new-token; stop_hub; done
+for i in 1 2 3 4 5; do rm -f "$OSRC_HOME/hub/token"; start_hub; stop_hub; done
 [ "$(jq length "$K")" = 5 ] && ok "keys.json keeps the newest 5 keys" || no "kept $(jq length "$K")"
 fi
 

@@ -110,7 +110,7 @@ osrc_mc_auto_open() {
 #                                              a READY lane queued for review 15+ min (with its age)
 osrc_mc_alerts() {
   local slug="$1" p="$2" g w='null' a='[]' f id k since txt now un
-  now="$(date +%s)"
+  now="${OSRC_NOW:-$(date +%s)}"
   if type osrc_watcher_gap >/dev/null 2>&1 && g="$(osrc_watcher_gap "$slug" "$now")"; then
     w="$(jq -cn --argjson m "${g%% *}" --argjson l "${g##* }" '{missingMin:$m, liveLanes:$l}')"
   fi

@@ -55,7 +55,7 @@ const tick = () => new Promise((r) => setImmediate(r));
     const P = page((url, opts) => { calls.push({ url, opts }); if (url === '/reopen') return Promise.resolve(retired ? res(200, { url: '/?t=newkey' }) : res(403, { error: 'unknown key', text: "This tab's key is not one this Mission Control issued. Run outsourcerer mc to open the current one." })); return Promise.resolve(res(403, { error: 'forbidden' })); });
     await P.window.fetch('/api/projects').catch(() => {}); await tick(); P.paint(); P.paint();
     if (retired) {
-      ok(/^Not live: this tab's key is from an older Mission Control/.test(P.text()), 'old key: the strip keeps one "Not live" line');
+      ok(/^Not live \(HTTP 40[13]\)$/.test(P.text()), 'old key: the strip keeps one "Not live" line');
       ok(!P.bar().querySelector('button') && !P.bar().querySelector('.al-dead'), 'old key: no banner box or button in the strip');
       ok(P.plist.textContent === 'Loading your projects…', 'old key: the rail is not given a copy of the message');
       ok(P.welcome.textContent === 'This tab is from an older Mission Control', 'old key: the main pane says it (not a spinner)');

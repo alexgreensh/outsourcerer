@@ -220,7 +220,7 @@ _osrc_guards_run() {
   [ -n "$lane" ] && [ "$lane" != HEAD ] || lane="$(basename "$top")"
   lane="$(printf '%s' "$lane" | tr -c 'A-Za-z0-9._-' '_')"
 
-  local T; T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-guards.XXXXXX")" || return 2
+  local T _tb="${TMPDIR:-/tmp}"; T="$(mktemp -d "${_tb%/}/osrc-guards.XXXXXX")" || return 2
   _OSRC_GUARDS_T="$T"
   mkdir -p "$T/cfg" "$T/out" "$T/scratch"
   git show "$base_sha:.outsourcerer/guards.conf" >"$T/cfg/guards.conf" 2>/dev/null || rm -f "$T/cfg/guards.conf"
@@ -320,12 +320,12 @@ $what}"
 
 osrc_guards_list() {
   ( _OSRC_GUARDS_T=""; trap 'rm -rf "${_OSRC_GUARDS_T:-/nonexistent}"' EXIT; trap 'exit 130' INT TERM HUP
-    local base="" T name path
+    local base="" T name path _tb
     case "${1:-}" in --base) base="${2:-}" ;; esac
     cd "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null && [ -n "$(git rev-parse --show-toplevel 2>/dev/null)" ] \
       || { echo "guards: not inside a git worktree" >&2; exit 2; }
     base="$(_osrc_guards_resolve_base "$base")" || exit 2
-    T="$(mktemp -d "${TMPDIR:-/tmp}/osrc-guards.XXXXXX")" || exit 2
+    _tb="${TMPDIR:-/tmp}"; T="$(mktemp -d "${_tb%/}/osrc-guards.XXXXXX")" || exit 2
     _OSRC_GUARDS_T="$T"; mkdir -p "$T/cfg"
     git show "$base:.outsourcerer/guards.conf" >"$T/cfg/guards.conf" 2>/dev/null || rm -f "$T/cfg/guards.conf"
     _osrc_guards_collect "$base" "$T/g"

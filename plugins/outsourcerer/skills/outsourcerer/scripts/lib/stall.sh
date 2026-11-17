@@ -84,13 +84,19 @@ _sv_nudge_write() { # <id> <ts> <why> <status> <worked> <n>
   printf '%s %s %s %s %s\n' "$2" "$3" "$4" "$5" "$6" > "$f"
 }
 
-# A real working read (spinner, not idle-with-shell). After a nudge it marks the nudge obeyed; two
-# windows of work after it end the run of nudges entirely.
+# A real working read (spinner, not idle-with-shell). NG_OK: 0 = no work seen since the nudge,
+# 1 = obeyed, any larger value = epoch of the first working read after it. A nudge counts as obeyed
+# only after OSRC_OBEY_SECS (default 90) of work, so a lane that answers "still running" and goes
+# idle again is not reset. Two windows of work after the nudge end the run of nudges entirely.
+_sv_obey_secs() { _sv_num "${OSRC_OBEY_SECS:-90}" 90; }
 _sv_stall_working() { # <id> <now>
   _sv_needs_clear "$1"
   _sv_nudge_read "$1"; [ -n "$NG_TS" ] || return 0
   if [ $(( $2 - NG_TS )) -ge $(( 2 * $(_sv_stall_secs) )) ]; then rm -f "$(_sv_lanes)/state/$1.nudge"; return 0; fi
-  [ "$2" -gt "$NG_TS" ] && [ "$NG_OK" != 1 ] && _sv_nudge_write "$1" "$NG_TS" "$NG_WHY" "$NG_ST" 1 "$NG_N"
+  [ "$2" -gt "$NG_TS" ] || return 0
+  if [ "$NG_OK" = 0 ]; then _sv_nudge_write "$1" "$NG_TS" "$NG_WHY" "$NG_ST" "$2" "$NG_N"
+  elif [ "$NG_OK" != 1 ] && [ $(( $2 - NG_OK )) -ge "$(_sv_obey_secs)" ]; then _sv_nudge_write "$1" "$NG_TS" "$NG_WHY" "$NG_ST" 1 "$NG_N"
+  fi
   return 0
 }
 _sv_stall_reset() { rm -f "$(_sv_lanes)/state/$1.nudge" 2>/dev/null; _sv_needs_clear "$1"; }
@@ -110,8 +116,10 @@ _sv_stall_observe() {
   esac
   SV_OUT=1
   _sv_nudge_read "$id"
-  # A nudge the lane worked after is spent: this is a new stall, with its own nudge.
+  # A nudge the lane worked after is spent: this is a new stall, with its own nudge. Work too short
+  # to count as obeyed leaves the nudge unspent, so this stall escalates on schedule.
   [ -n "$NG_TS" ] && [ "$NG_OK" = 1 ] && NG_TS=""
+  if [ -n "$NG_TS" ] && [ "$NG_OK" -gt 1 ]; then _sv_nudge_write "$id" "$NG_TS" "$NG_WHY" "$NG_ST" 0 "$NG_N"; NG_OK=0; fi
   if [ -z "$NG_TS" ]; then
     if [ "${OSRC_AUTONUDGE:-1}" = 0 ] || [ "$NG_N" -ge "$max" ]; then
       SV_K=stalled; SV_NX="$(_sv_nudge_cmd "$id" "$why")"

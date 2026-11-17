@@ -133,10 +133,10 @@ echo "=== incident 5: a watcher that went away ==="
 fresh 6; own S w6; pane w6 cc-working-turn.txt
 old="$(date -r $((N0 - 300)) +%Y%m%d%H%M.%S 2>/dev/null || date -d @$((N0 - 300)) +%Y%m%d%H%M.%S)"
 touch -t "$old" "$OSRC_HOME/owners/S/w6"; printf '%s\n' $((N0 - 240)) > "$OSRC_HOME/supervise/S/alive"   # last supervise poll 4 min ago
-err="$(CLAUDE_CODE_SESSION_ID=S OUTSOURCERER_TMUX=w6 perl -e 'alarm 30; exec @ARGV' "$SRC" session read 2>&1 >/dev/null)"
+err="$(OSRC_NOW="$N0" CLAUDE_CODE_SESSION_ID=S OUTSOURCERER_TMUX=w6 perl -e 'alarm 30; exec @ARGV' "$SRC" session read 2>&1 >/dev/null)"
 grep -q '^\[outsourcerer\] no watcher for 4m: 1 live lane(s) owned by this session and no supervise armed' <<<"$err" \
   && ok "the next engine call warns: no watcher for 4m, with the supervise command" || no "warning: [$err]"
-p="$(lib osrc_mc_alerts S '{"id":"S"}')"
+p="$(OSRC_NOW="$N0" lib osrc_mc_alerts S '{"id":"S"}')"
 jq -e '.watcher.missingMin == 4 and .watcher.liveLanes == 1' <<<"$p" >/dev/null && ok "Mission Control: no watcher for 4 min" || no "mc watcher: $p"
 printf '%s\n' "$(date +%s)" > "$OSRC_HOME/supervise/S/alive"
 err="$(CLAUDE_CODE_SESSION_ID=S OUTSOURCERER_TMUX=w6 perl -e 'alarm 30; exec @ARGV' "$SRC" session read 2>&1 >/dev/null)"
@@ -212,13 +212,20 @@ obs f26 $((N0 + 901 + 901)) >/dev/null
 # A nudge the lane obeyed (it worked after it) and a new stall: a fresh nudge, not an escalation.
 fresh 27; own S n27; pane n27 cc-idle-bgshell-footer-only.txt
 obs n27 "$N0" >/dev/null; obs n27 $((N0 + 301)) >/dev/null
-pane n27 cc-working-bgshell-footer.txt; obs n27 $((N0 + 320)) >/dev/null
-pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((N0 + 340)) >/dev/null; r="$(obs n27 $((N0 + 341 + 301)))"
+pane n27 cc-working-bgshell-footer.txt; obs n27 $((N0 + 320)) >/dev/null; obs n27 $((N0 + 420)) >/dev/null
+pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((N0 + 440)) >/dev/null; r="$(obs n27 $((N0 + 441 + 301)))"
 [ "$(nudges n27)" = 2 ] && case "$r" in stalled*) false ;; *) true ;; esac && ok "worked after its nudge, stalled again: a fresh nudge (2), no escalation" || no "obeyed: nudges=$(nudges n27) r=$r rows=$(kinds n27)"
-t=$((N0 + 341 + 301))   # nudge 2; each later cycle: works 20 s after its nudge, stalls again 5 min on
-for k in 1 2; do pane n27 cc-working-bgshell-footer.txt; obs n27 $((t + 20)) >/dev/null
-  pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((t + 40)) >/dev/null; t=$((t + 41 + 301)); r="$(obs n27 "$t")"; done
+t=$((N0 + 441 + 301))   # nudge 2; each later cycle: works 100 s after its nudge, stalls again 5 min on
+for k in 1 2; do pane n27 cc-working-bgshell-footer.txt; obs n27 $((t + 20)) >/dev/null; obs n27 $((t + 120)) >/dev/null
+  pane n27 cc-idle-bgshell-footer-only.txt; obs n27 $((t + 140)) >/dev/null; t=$((t + 141 + 301)); r="$(obs n27 "$t")"; done
 case "$r" in "stalled|"*"stalled again after 3 autonudges"*) ok "after OSRC_NUDGE_MAX (3) nudges a new stall escalates at once" ;; *) no "cap: nudges=$(nudges n27) r=$r" ;; esac
+# A lane that only flashes a spinner after its nudge ("still running") has not obeyed: no second
+# nudge, the stall escalates one window after the nudge.
+fresh 29; own S b29; pane b29 cc-idle-bgshell-footer-only.txt
+obs b29 "$N0" >/dev/null; obs b29 $((N0 + 301)) >/dev/null
+pane b29 cc-working-bgshell-footer.txt; obs b29 $((N0 + 320)) >/dev/null
+pane b29 cc-idle-bgshell-footer-only.txt; obs b29 $((N0 + 340)) >/dev/null; r="$(obs b29 $((N0 + 340 + 302)))"
+[ "$(nudges b29)" = 1 ] && case "$r" in stalled*) true ;; *) false ;; esac && ok "a 20 s spinner after the nudge is not obedience: one nudge, then escalation" || no "brief spinner: nudges=$(nudges b29) r=$r rows=$(kinds b29)"
 # A nudge that could not be sent never reads as "after one autonudge".
 fresh 28; own S x28; pane x28 cc-idle-bgshell-footer-only.txt
 OSRC_NUDGE_SEND_CMD=false obs x28 "$N0" >/dev/null; OSRC_NUDGE_SEND_CMD=false obs x28 $((N0 + 301)) >/dev/null

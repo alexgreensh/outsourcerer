@@ -32,13 +32,13 @@ _osrc_git_exclude_current() {
 }
 
 _osrc_git_exclude_state() {
-  local common ex tmp
+  local common ex tmp _tb
   common="$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" || return 0
   case "$common" in /*|[A-Za-z]:[/\\]*) ;; *) common="$1/$common" ;; esac
   ex="$common/info/exclude"
   _osrc_git_exclude_current "$ex" && return 0
   mkdir -p "$common/info" 2>/dev/null || return 0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/osrc-exclude.XXXXXX" 2>/dev/null)" || return 0
+  _tb="${TMPDIR:-/tmp}"; tmp="$(mktemp "${_tb%/}/osrc-exclude.XXXXXX" 2>/dev/null)" || return 0
   if [ -f "$ex" ]; then
     { awk -v want="$_OSRC_EXCLUDE_LINES" '
       BEGIN { n = split(want, w, "|"); for (i = 1; i <= n; i++) ours[w[i]] = 1; ours["/.outsourcerer/"] = 1 }

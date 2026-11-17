@@ -782,6 +782,8 @@ cmd_hub_serve() {
     tok="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
     [ -n "$tok" ] || die "hub serve: cannot read /dev/urandom for the access token — refusing to run with a guessable one"
     ( umask 077 && printf '%s\n' "$tok" > "$tokf" ) || die "hub serve: cannot write $tokf"
+    # A rotation revokes: no retired key may redeem the new one through /reopen.
+    [ "$newtok" = 1 ] && rm -f "$OSRC_HOME/hub/keys.json"
     [ "$newtok" = 1 ] && echo "hub serve: rotated the access token — old bookmarks are dead" >&2
   fi
   chmod 600 "$tokf" 2>/dev/null || die "hub serve: cannot chmod 600 $tokf"

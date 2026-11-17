@@ -2,7 +2,7 @@
 // It watches the page's own /api/ calls (a fetch wrapper; the page code is unchanged) and keeps one
 // strip at the top of the page:
 //   - "Live · updated Ns ago"; a call that fails or runs past 10 s shows the reason and the age of the
-//     last good data; a 401/403 reads "Not live: this tab's key is from an older Mission Control";
+//     last good data; a 401/403 reads "Not live (HTTP 403)";
 //   - needs-you rows from the export: a lane stalled after its autonudge, a READY lane waiting for
 //     review (with its age), and "no watcher for N min" when nobody supervises live lanes.
 // On a 401/403 the main pane (not the strip) explains it and carries a Reopen button: POST /reopen
@@ -102,7 +102,7 @@
     S.pending.forEach((t0) => { slow = Math.max(slow, t - t0); });
     const good = S.lastGood ? 'last good data ' + ago(t - S.lastGood) + ' ago' : 'no data yet';
     let text, cls = '';
-    if (S.dead) { text = 'Not live: this tab\'s key is from an older Mission Control (' + S.err + ')'; cls = 'al-warn'; }
+    if (S.dead) { text = 'Not live (' + S.err + ')'; cls = 'al-warn'; }
     else if (S.err) { text = 'Not live: ' + S.err + ' · ' + good; cls = 'al-warn'; }
     else if (slow >= 10000) { text = 'Waiting for Mission Control (' + ago(slow) + ') · ' + good; cls = 'al-slow'; }
     else if (S.lastGood) { text = 'Live · updated ' + ago(t - S.lastGood) + ' ago' + (S.exportedAt && t - S.exportedAt > 300000 ? ' · lane data from ' + ago(t - S.exportedAt) + ' ago' : ''); }

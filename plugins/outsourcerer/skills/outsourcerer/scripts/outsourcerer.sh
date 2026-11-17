@@ -19872,7 +19872,7 @@ main() {
   # passthrough even when OSRC_HOME is unwritable (a preflight die would silently kill the user's
   # real statusline). Its write paths self-guard. brief/mode are read-only/self-guarding likewise.
   case "$cmd" in ""|-h|--help|help|--version|-V|doctor|brief|mode|tap|exclude|parity|parity-*) ;; *) _state_home_preflight ;; esac
-  type osrc_hub_beat_cmd >/dev/null 2>&1 && osrc_hub_beat_cmd "$cmd" "$@"   # Mission Control heartbeat + S4 watcher/auto-open hook (lib/hub-report.sh)
+  type osrc_hub_beat_cmd >/dev/null 2>&1 && osrc_hub_beat_cmd "$cmd" "$@"   # Mission Control heartbeat + watcher/auto-open hook (lib/hub-report.sh)
   case "$cmd" in
     --version|-V) echo "outsourcerer $OSRC_VERSION"; exit 0 ;;
     __runjob) run_job "$@" ;;                             # internal: detached supervised job (cmd_bg)
