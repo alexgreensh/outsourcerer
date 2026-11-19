@@ -2,6 +2,16 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.3
+
+### Fixed
+
+- **Plans are always current.** Mission Control checks your plan limits the moment you open it and every 5 minutes after, and the refresh button forces a real check.
+- **Antigravity shows your Gemini quota.** The headline reads the Gemini pool, not the Claude and GPT pool that sat at 0.
+- **Refresh actually refreshes.** It re-reads every project and redraws the page, instead of timing out quietly.
+- **Done stays done.** A project you mark shipped stays shipped in every tab and after restarts, and "running" counts only lanes that are working.
+- **New Gemini models are picked up automatically.** Outsourcerer asks Antigravity what it serves, so gemini-pro now runs Gemini 4 Neon, --effort picks the matching rung, and advise warns when its benchmark scores are over a week old.
+
 ## 0.17.2
 
 ### Fixed
