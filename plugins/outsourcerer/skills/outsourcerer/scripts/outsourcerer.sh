@@ -606,6 +606,12 @@ gemini-flash|gemini-flash|gm|mid
 gemini-flash-lite|gemini-flash-lite|gm|budget
 gemini-neon|gemini-4-neon-high|gm|frontier
 gemini-4-neon-high|gemini-4-neon-high|gm|frontier
+gemini-4-neon|gemini-4-neon-high|gm|frontier
+claude-fable-5-2|claude-fable-5-2|cc|frontier
+claude-opus-5-5|claude-opus-5-5|cc|frontier
+claude-sonnet-5-5|claude-sonnet-5-5|cc|mid
+claude-haiku-5-5|claude-haiku-5-5|cc|budget
+gpt-6.2-astra|gpt-6.2-astra|cx|frontier
 nano-banana|nano-banana|gi|budget
 gpt-image|gpt-image-2|ci|budget
 codex-image|gpt-image-2|ci|budget
@@ -9874,10 +9880,17 @@ OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json"
 # gemini lanes) need explicit mapping because their resolved ids don't appear in the OR catalog.
 # Keyed by RESOLVED id (column 2 of OSRC_MODEL_TABLE), not the alias.
 _NATIVE_BENCH_MAP="
-fable|anthropic/claude-5-fable
-opus|anthropic/claude-4.8-opus
-sonnet|anthropic/claude-sonnet-5
-haiku|anthropic/claude-4.5-haiku
+claude-fable-5-2|anthropic/claude-5.2-fable
+claude-opus-5-5|anthropic/claude-5.5-opus
+gpt-6.2-astra|openai/gpt-6.2-astra
+claude-fable-5|anthropic/claude-5-fable
+claude-fable-5-1|anthropic/claude-5.1-fable
+claude-opus-4-8|anthropic/claude-4.8-opus
+claude-opus-5|anthropic/claude-5-opus
+claude-sonnet-5|anthropic/claude-sonnet-5
+claude-sonnet-5-5|anthropic/claude-5.5-sonnet
+claude-haiku-5-5|anthropic/claude-5.5-haiku
+claude-haiku-4-5-20251001|anthropic/claude-4.5-haiku
 gpt-5.6-sol|openai/gpt-5.6-sol
 gpt-5.6-terra|openai/gpt-5.6-terra
 gpt-5.6-luna|openai/gpt-5.6-luna
@@ -9890,6 +9903,13 @@ glm-5-3-flash-high|z-ai/glm-5.3-flash
 gemini-4-neon-high|google/gemini-4-neon
 gemini-4-neon|google/gemini-4-neon
 "
+# Floating aliases inherit the benchmark of their current launch id.
+_NATIVE_BENCH_MAP="$_NATIVE_BENCH_MAP
+$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v pairs="$OSRC_CLAUDE_CURRENT_IDS" '
+  NF==2 {slug[$1]=$2}
+  END {n=split(pairs, entries, " "); for(i=1;i<=n;i++) {
+    split(entries[i], pair, "[|]"); if(pair[2] in slug) print pair[1] "|" slug[pair[2]]
+  }}')"
 # Symbolic Gemini family aliases map to the NEWEST google/gemini-<ver>-<family> slug in the cached
 # OpenRouter catalog, so a benchmark lookup for gemini-flash follows the release train instead of a
 # row that goes stale. Empty when the catalog is not cached (the caller then has no score, as before).
@@ -10019,7 +10039,7 @@ _resolve_bench_slug() {
     *) mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')" ;;
   esac
   [ -n "$mapped" ] && { printf '%s' "$mapped"; return 0; }
-  printf '%s' "${1%:free}"
+  case "$1" in gpt-*) printf 'openai/%s' "$1" ;; *) printf '%s' "${1%:free}" ;; esac
 }
 
 # _bench_lookup <resolved-id> <field> -> "score\tprice_in\tprice_out" or empty.
@@ -10028,41 +10048,17 @@ _bench_lookup() {
   [ -f "$OSRC_BENCH_JSON" ] && have jq || return 0
   local slug; slug="$(_resolve_bench_slug "$1")"
   [ -n "$slug" ] || return 0
-  # Try exact match first, then prefix match sorted by slug length (shortest = most canonical).
-  local result
-  result="$(jq -r --arg slug "$slug" --arg field "$2" '
-    .data[] | select(.model_permaslug == $slug)
-    | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
-  ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
-  if [ -z "$result" ]; then
-    # Prefix match: collect into array, sort by slug length, take shortest. Empty array -> no output.
-    result="$(jq -r --arg slug "$slug" --arg field "$2" '
-      [.data[] | select(.model_permaslug | startswith($slug))]
-      | if length > 0 then sort_by(.model_permaslug | length) | .[0]
-        | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
-        else empty end
-    ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
-  fi
-  printf '%s' "$result"
+  jq -r --arg slug "$slug" --arg field "$2" '
+    [.data[]? | select(.model_permaslug == $slug or
+      (.model_permaslug | sub("-[0-9]{8}$"; "") == $slug))
+      | select(.[$field] | type == "number")]
+    | sort_by(.model_permaslug != $slug) | first // empty
+    | [.[$field], (.pricing.prompt // "0"), (.pricing.completion // "0")] | @tsv
+  ' "$OSRC_BENCH_JSON" 2>/dev/null
+
 }
 
-# _tier_score_proxy <tier> -> rough capability score when no benchmark data exists.
-_tier_score_proxy() {
-  case "$1" in
-    frontier) printf '55' ;;
-    capable)  printf '50' ;;
-    mid)      printf '40' ;;
-    budget)   printf '30' ;;
-    *)        printf '35' ;;
-  esac
-}
-
-# _tier_from_score <score> -> capability tier derived from a LIVE benchmark score, the inverse of
-# _tier_score_proxy. Used for dynamic pool candidates that have no hand-set tier in OSRC_MODEL_TABLE:
-# a never-before-seen model gets ranked by the same capability bands as the curated ones, so a new
-# strong model is recommendable on merit the day it appears. Empty/non-numeric -> raw (present in
-# the pool, ranks low, never silently promoted). awk does the numeric compare so a non-numeric
-# string can't crash under `set -u` or leak a shell error.
+# Catalog tier metadata for a measured model. Missing scores use the raw tier.
 _tier_from_score() {
   local s="${1:-}"
   case "$s" in ''|*[!0-9.-]*) printf 'raw'; return 0 ;; esac
@@ -10122,25 +10118,6 @@ _frontier_needed() {
   grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof' <<<"$lc"
 }
 
-# _score <base> <tier> <category> <effort> <difficulty> <model> -> selection score.
-# Capable models get a value preference, Kimi K3 gets a hard-work near-frontier adjustment, and an
-# explicit frontier requirement outweighs both. Benchmark and history remain the base evidence.
-# The Kimi adjustment is REASONING-SHAPED ONLY: it used to fire on every hard non-creative task, which
-# floated kimi to #1 (score 80) for an edit-run-verify job — where its long pure-reasoning bursts are
-# exactly the wrong shape (the 2026-09-15 incident: two ~17-min zero-write burns). Kimi's edge is deep
-# analysis; a hard reasoning task still lets it win, a hard code/agentic task does not.
-_score() {
-  local base="$1" tier="$2" category="$3" effort="$4" difficulty="$5" model="$6"
-  awk -v s="$base" -v t="$tier" -v c="$category" -v e="$effort" -v d="$difficulty" -v m="$model" '
-    BEGIN {
-      if (t == "capable") s += 8
-      if (t == "capable" && (e == "high" || e == "xhigh")) s += 2
-      if (m == "kimi-k3" && d == "hard" && c == "reasoning") s += 20
-      if (e == "max" && t == "frontier") s += 30
-      printf "%.4f", s
-    }'
-}
-
 # ---- VARIANT PREFERENCE (cheaper capable variant within a family) ---------------------------------
 # Devin ships families as effort/size variants (glm-5-3-high, glm-5-3-flash-high, deepseek-v4-pro-max).
 # When two variants of ONE family both clear the task threshold, the lighter one is the better
@@ -10171,89 +10148,6 @@ _variant_weight() {
   case "${2:-}" in minimal|low|none) target=0 ;; medium) target=1 ;; high) target=2 ;; xhigh|max) target=3 ;; esac
   if [ "$rung" -lt 0 ]; then d=1; else d=$(( rung - target )); [ "$d" -lt 0 ] && d=$(( -d )); fi
   printf '%s' $(( w + d ))
-}
-
-# _advise_candidate_rows [field] -> emit `alias|resolved|lane|tier` rows for the advise ranking
-# loop, replacing the old static-only `printf '%s\n' "$OSRC_MODEL_TABLE"` source. The pool is the
-# UNION of:
-#   1. OSRC_MODEL_TABLE verbatim   -- curated: lane+tier authoritative, and the offline fallback.
-#   2. live OpenRouter ids         -- from the cached models.json (.data[].id), SCORED-ONLY.
-# Static rows WIN on dedup: a resolved id present in OSRC_MODEL_TABLE is emitted from the static
-# row only, so curated lane routing (e.g. deepseek -> or vs dv) and hand-set tiers are preserved.
-# A dynamic id absent from the static table gets a tier DERIVED from its live benchmark score via
-# _tier_from_score, so a never-before-seen strong model is recommendable on merit the day it shows
-# up in the catalog, with zero manual table edits.
-#
-# Only OpenRouter ids are enumerated, and only those that CARRY a benchmark score. The Devin catalog
-# is deliberately NOT enumerated: its uids (glm-5-2, deepseek-v4-pro-high) do not match the
-# OpenRouter-keyed benchmark data, so every one would score empty and rank as raw -- pure noise and
-# a needless jq storm. Merit-based discovery only works where a score exists (OpenRouter); the
-# curated Devin models are already routed through OSRC_MODEL_TABLE. An id with no score has no merit
-# signal to be "recommended on merit" and is skipped.
-#
-# Cache-only and fail-open: reads the already-cached benchmarks.json + models.json DIRECTLY (never a
-# refresh/fetch -- that would block advise on the network). Missing/empty caches -> zero dynamic
-# rows and the static pool carries, byte-for-byte the offline behavior. Escape hatch
-# OSRC_ADVISE_DYNAMIC_POOL=0 forces the static-only pool. OSRC_ADVISE_DYNAMIC_MAX (default 25) caps
-# how many of the strongest-scoring discovered ids are added, bounding both the pool and the
-# downstream ranking cost. The optional <field> is the score field for the task category.
-_advise_candidate_rows() {
-  local field="${1:-intelligence_index}"
-  local _nl=$'\n' _tab; _tab="$(printf '\t')"
-  local seen="$_nl" alias resolved lane tier id sc bench_map or_ids scored
-  local max="${OSRC_ADVISE_DYNAMIC_MAX:-25}" added=0
-  case "$max" in ''|*[!0-9]*) max=25 ;; esac   # empty/non-numeric/negative -> safe default; 0 means none
-  # Static rows first. Iterate via process substitution (not a pipe) so `seen` accumulates in this
-  # shell and the dynamic pass can dedup against it without associative arrays (bash-3.2 safe).
-  while IFS='|' read -r alias resolved lane tier; do
-    [ -n "$alias" ] || continue
-    printf '%s|%s|%s|%s\n' "$alias" "$resolved" "$lane" "$tier"
-    seen="$seen$resolved$_nl"
-  done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
-  [ "${OSRC_ADVISE_DYNAMIC_POOL:-1}" = "0" ] && return 0
-  { [ -f "$OSRC_BENCH_JSON" ] && [ -f "$OSRC_MODELS_JSON" ] && have jq; } || return 0
-  # ONE jq pass builds a "permaslug<TAB>score" map; a SINGLE awk then joins EVERY OpenRouter id
-  # against it in-process. A per-id awk/subprocess lookup would reintroduce an O(N) latency cliff as
-  # the catalog grows -- the whole join runs in one awk instead. The match is boundary-aware: an id
-  # matches a permaslug only on an exact hit or at a '-' segment boundary, so a short id like
-  # openai/gpt-5 cannot steal a longer model's score (openai/gpt-5.6-...); ties break to the shortest
-  # (canonical) permaslug, mirroring _bench_lookup. Ids are charset-filtered (a third-party catalog id
-  # with a '|' or a shell metachar can't corrupt the alias|resolved|lane|tier row or reach any eval).
-  # The ranking loop recomputes the authoritative score, so this only gates scored-vs-not, the tier
-  # band, and the top-N selection.
-  bench_map="$(jq -r --arg f "$field" '.data[]? | select(.[$f] != null) | "\(.model_permaslug)\t\(.[$f])"' "$OSRC_BENCH_JSON" 2>/dev/null)"
-  [ -n "$bench_map" ] || return 0
-  or_ids="$(jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null)"
-  scored="$(awk -F"$_tab" '
-    # canon(): drop a trailing -<digits> release-date segment so a dated permaslug reduces to the
-    # bare model id (z-ai/glm-5.2-20260616 -> z-ai/glm-5.2). Matching is then an O(1) hash lookup,
-    # exact then canonical -- O(N+M) overall, and a short id can only match its OWN canonical id,
-    # never borrow a longer siblings score.
-    function canon(p,   c) { c=p; sub(/-[0-9]+$/, "", c); return c }
-    NR==FNR {
-      if (!($1 in exact)) exact[$1]=$2
-      c=canon($1); if (!(c in cano)) cano[c]=$2
-      next
-    }
-    {
-      id=$1
-      if (id !~ "^[A-Za-z0-9._/-]+$") next
-      s=id; sub(/:free$/, "", s)
-      if (s in exact)     print id "\t" exact[s]
-      else if (s in cano) print id "\t" cano[s]
-    }
-  ' <(printf '%s\n' "$bench_map") <(printf '%s\n' "$or_ids") | sort -t"$_tab" -k2 -rn)"
-  while IFS="$_tab" read -r id sc; do
-    [ "$added" -ge "$max" ] && break
-    [ -n "$id" ] || continue
-    case "$seen" in *"$_nl$id$_nl"*) continue ;; esac
-    printf '%s|%s|or|%s\n' "$id" "$id" "$(_tier_from_score "$sc")"
-    seen="$seen$id$_nl"
-    added=$((added + 1))
-  done <<EOF
-$scored
-EOF
-  return 0
 }
 
 # _model_lanes <canon-key> -> echo the space-separated set of lane codes whose CACHED catalog
@@ -10402,399 +10296,7 @@ _lane_marginal_cost() {
   esac
 }
 
-# cmd_advise: task-aware model recommendation with benchmark data.
-# Usage: advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
-# Classifies the task, scores all known models, recommends the best value model
-# that meets the capability threshold. Explains WHY it picked that model.
-# The candidate pool is the curated OSRC_MODEL_TABLE UNIONED with the live catalog (cached
-# dv.raw.json + models.json); see _advise_candidate_rows. OSRC_ADVISE_DYNAMIC_POOL=0 falls back to
-# the static-only pool. Cost-safety is unchanged: the winning id still flows through
-# _devin_resolve_model / _catalog_validate at delegate time.
-cmd_advise() {
-  local do_refresh=0 json_out=0 task="" selection_effort="${OUTSOURCERER_EFFORT:-}"
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --refresh) do_refresh=1; shift ;;
-      --json)    json_out=1; shift ;;
-      --effort|--reasoning)
-                 [ -n "${2:-}" ] || die "advise: --effort needs minimal|low|medium|high|xhigh|max|none"
-                 case "$2" in minimal|low|medium|high|xhigh|max|none) selection_effort="$2" ;;
-                   *) die "advise: invalid effort '$2' (use minimal|low|medium|high|xhigh|max|none)" ;; esac
-                 shift 2 ;;
-      --)        shift; task="${*:-}"; break ;;
-      --*)       task="${task:+$task }$1"; shift ;;   # unknown --flags treated as task text
-      *)         task="${task:+$task }$1"; shift ;;
-    esac
-  done
-  [ -n "$task" ] || die "advise needs a task description (try: $0 advise \"refactor auth module\")"
-  # JSON output requires jq; fail explicitly rather than emitting empty output.
-  if [ "$json_out" -eq 1 ] && ! have jq; then
-    die "advise --json requires jq (install it or run without --json for text output)"
-  fi
-
-  if [ "$do_refresh" -eq 1 ] || [ ! -f "$OSRC_BENCH_JSON" ]; then
-    # On explicit --refresh, show diagnostics (don't suppress stderr).
-    if [ "$do_refresh" -eq 1 ]; then
-      refresh_benchmarks || true
-    elif [ "$json_out" -eq 1 ]; then
-      # --json must emit ONLY JSON: suppress the refresh success line (stdout) too, not just stderr.
-      refresh_benchmarks >/dev/null 2>&1 || true
-    else
-      refresh_benchmarks 2>/dev/null || true
-    fi
-  fi
-
-  # Benchmark freshness: a cache dated >7 days ago refreshes automatically when an OpenRouter
-  # key is configured; otherwise the stale age is called out once in the output below.
-  local _bstale=""
-  _bstale="$(_bench_cache_stale 2>/dev/null)"
-  if [ -n "$_bstale" ] && { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value OPENROUTER_API_KEY)" ]; }; then
-    if [ "$json_out" -eq 1 ]; then refresh_benchmarks >/dev/null 2>&1 || true
-    else refresh_benchmarks 2>/dev/null || true; fi
-    _bstale="$(_bench_cache_stale 2>/dev/null)"
-  fi
-
-  local category field threshold difficulty frontier_needed=0
-  category="$(_classify_task "$task")"
-  field="$(_bench_score_field "$category")"
-  threshold="$(_bench_threshold_for "$category")"
-  difficulty="$(_task_difficulty "$task")"
-  if [ -z "$selection_effort" ]; then
-    case "$difficulty" in hard) selection_effort=high ;; *) selection_effort=medium ;; esac
-  fi
-  _frontier_needed "$task" "$selection_effort" && frontier_needed=1
-
-  # Live per-lane limits, read once, so a nearly-exhausted subscription lane is deprioritized in the
-  # recommendation itself (not only by the separate conserve-routing layer). Best-effort; empty -> no
-  # penalty anywhere. Opt out with OSRC_ADVISE_CONSERVE=0.
-  local _adv_limits="" conserve_seen="" conserve_notes=""
-  [ "${OSRC_ADVISE_CONSERVE:-1}" != "0" ] && _adv_limits="$(_session_limits 2>/dev/null)"
-  # L7 LIMIT GATE: a lane at/over OSRC_LANE_LIMIT_PCT on a FRESH meter is excluded outright — the
-  # hard edge, independent of the soft conserve haircut below. Stale readings count as unknown.
-  # OSRC_LANE_LIMIT_GATE=0 disables. Read once here, shared by every candidate in the loop.
-  local _gate_limits="" _limit_notes=""
-  [ "${OSRC_LANE_LIMIT_GATE:-1}" != "0" ] && _gate_limits="$(_session_limits 2>/dev/null)"
-  # Score each candidate from the alias table.
-  local results="" has_bench=0 bench_count=0 total_count=0
-  local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
-  while IFS='|' read -r alias resolved lane tier; do
-    [ -n "$alias" ] || continue
-    # skip image lanes — descriptor image_lane=yes on each image lane.
-    if _lane_flag "$lane" image_lane; then continue; fi
-    _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
-    _model_excluded "$alias" && continue      # user exclude list (#45), alias form (resolved form is in _model_denied)
-    # L7 LIMIT GATE: never pick a lane whose fresh meter is at/over OSRC_LANE_LIMIT_PCT.
-    if [ -n "$_gate_limits" ] && _osrc_limit_exceeded "$lane" "$_gate_limits" 2>/dev/null; then
-      local _olr; _olr="$(_osrc_lane_limit "$lane" "$_gate_limits" 2>/dev/null)"
-      _limit_notes="${_limit_notes:+$_limit_notes; }${_olr:-$lane} >= $(_osrc_limit_threshold)% -> $lane excluded"
-      continue
-    fi
-    total_count=$((total_count + 1))
-    bench_line="$(_bench_lookup "$resolved" "$field")"
-    if [ -n "$bench_line" ]; then
-      bench_count=$((bench_count + 1))
-      score="$(printf '%s' "$bench_line" | cut -f1)"
-      price_in="$(printf '%s' "$bench_line" | cut -f2)"
-      price_out="$(printf '%s' "$bench_line" | cut -f3)"
-    else
-      score="$(_tier_score_proxy "$tier")"
-      price_in="0"; price_out="0"
-      if [ -f "$OSRC_MODELS_JSON" ] && have jq; then
-        local p
-        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.prompt // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
-        [ -n "$p" ] && price_in="$p"
-        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.completion // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
-        [ -n "$p" ] && price_out="$p"
-      fi
-    fi
-    # Fold local outcome history into the score BEFORE threshold/value-ratio, so a lane that keeps
-    # failing THIS repo's checks drops out and a proven one rises. Zero history -> mult 1.00 (neutral).
-    local _hm _mult; _hm="$(_history_mult "$lane" "$resolved" "$category")"; _mult="${_hm%%|*}"
-    case "$_mult" in ''|*[!0-9.]*) _mult="1.00" ;; esac
-    score="$(awk -v s="$score" -v m="$_mult" 'BEGIN{printf "%.4f", s*m}')"
-    score="$(_score "$score" "$tier" "$category" "$selection_effort" "$difficulty" "$resolved")"
-    # Fold live per-lane conservation the SAME way as history: a measurable lane past the conserve line
-    # takes a gentle score haircut so limits-left steers the pick. Neutral (1.00) for unmeasurable lanes.
-    local _cmult; _cmult="$(_lane_conserve_mult "$lane" "$_adv_limits")"
-    case "$_cmult" in ''|*[!0-9.]*) _cmult="1.00" ;; esac
-    if awk -v m="$_cmult" 'BEGIN{exit !(m+0 < 1.0)}'; then
-      score="$(awk -v s="$score" -v m="$_cmult" 'BEGIN{printf "%.4f", s*m}')"
-      case " $conserve_seen " in *" $lane "*) : ;; *)
-        conserve_seen="$conserve_seen $lane"
-        local _clbl; _clbl="$(_lane_field "$lane" conserve_label 2>/dev/null)"
-        [ -n "$_clbl" ] || _clbl="$lane"
-        conserve_notes="${conserve_notes:+$conserve_notes; }$_clbl past conserve line -> score x$_cmult" ;;
-      esac
-    fi
-    # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
-    # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
-    # Descriptor plan_limited=yes, literal tail until dv ports.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then price_in="0"; price_out="0"; fi
-    # Value ratio = score / max(cost_per_m_input, 0.01). Zero-priced catalog models use a 0.01 floor.
-    cost_per_m="$(awk -v p="$price_in" 'BEGIN{printf "%.6f", p*1000000}')"
-    value_ratio="$(awk -v s="$score" -v c="$cost_per_m" 'BEGIN{if(c<0.01)c=0.01; printf "%.2f", s/c}')"
-    meets=0
-    awk -v s="$score" -v t="$threshold" 'BEGIN{exit (s+0 >= t+0) ? 0 : 1}' && meets=1
-    # Display label for subscription lanes.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then cost_per_m="plan limits"; fi
-    results="$results$alias|$resolved|$lane|$tier|$score|$cost_per_m|$value_ratio|$meets|0
-"
-  done < <(_advise_candidate_rows "$field")
-
-  # VARIANT PREFERENCE pass (see _variant_weight): among capable rows that MEET the threshold, find each
-  # family's lightest variant (per lane); every heavier sibling gets pref=1 = "a lighter sibling
-  # qualifies", which keeps it out of capable_best contention below (it stays listed, labeled). Off at
-  # effort=max or when the task requires the frontier — then the heavier rung is the point.
-  local variant_pref=1 fam_min="" _vf _vw _vmin _vrows=""
-  { [ "$selection_effort" = "max" ] || [ "$frontier_needed" = "1" ] || [ "${OSRC_ADVISE_VARIANT_PREF:-1}" = "0" ]; } && variant_pref=0
-  if [ "$variant_pref" = "1" ]; then
-    while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] && [ "$meets" = "1" ] && [ "$tier" = "capable" ] || continue
-      _vf="$(_variant_family "$resolved")|$lane"; _vw="$(_variant_weight "$resolved" "$selection_effort")"
-      _vmin="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" '($1"|"$2)==k{print $3; exit}')"
-      if [ -z "$_vmin" ]; then fam_min="$fam_min$_vf|$_vw
-"
-      elif [ "$_vw" -lt "$_vmin" ]; then fam_min="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" -v w="$_vw" '($1"|"$2)==k{print $1"|"$2"|"w; next} NF{print}')
-"
-      fi
-    done < <(printf '%s\n' "$results")
-    while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] || continue
-      if [ "$meets" = "1" ] && [ "$tier" = "capable" ]; then
-        _vf="$(_variant_family "$resolved")|$lane"; _vw="$(_variant_weight "$resolved" "$selection_effort")"
-        _vmin="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" '($1"|"$2)==k{print $3; exit}')"
-        [ -n "$_vmin" ] && [ "$_vw" -gt "$_vmin" ] && _pref=1
-      fi
-      _vrows="$_vrows$alias|$resolved|$lane|$tier|$score|$cost|$vr|$meets|$_pref
-"
-    done < <(printf '%s\n' "$results")
-    results="$_vrows"
-  fi
-
-  # Pick recommendation in two cohorts to avoid subscription lanes dominating value ratio.
-  # Subscription lanes (cx/cc/dv/gm): ranked by score (cost is plan-limited, not comparable to per-token).
-  # Paid lanes (or/codex): ranked by value ratio (score / cost_per_m).
-  # Prefer subscription if it meets threshold; else best paid by value ratio; else highest score overall.
-  local rec_alias="" rec_resolved="" rec_lane="" rec_tier="" rec_reason=""
-  local capable_best_alias="" capable_best_resolved="" capable_best_lane="" capable_best_tier="" capable_best_vr=-1 capable_best_w=999
-  local frontier_best_alias="" frontier_best_resolved="" frontier_best_lane="" frontier_best_tier="" frontier_best_score=-1
-  local sub_best_alias="" sub_best_resolved="" sub_best_lane="" sub_best_score=-1
-  local paid_best_alias="" paid_best_resolved="" paid_best_lane="" paid_best_vr=-1
-  local any_best_alias="" any_best_resolved="" any_best_lane="" any_best_score=-1
-  while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-    [ -n "$alias" ] || continue
-    # Track highest score overall (fallback when nothing meets threshold).
-    awk -v s="$score" -v b="$any_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-      any_best_score="$score"; any_best_alias="$alias"; any_best_resolved="$resolved"; any_best_lane="$lane"
-    }
-    [ "$meets" = "1" ] || continue
-    if [ "$tier" = "capable" ] && [ "${_pref:-0}" != "1" ]; then
-      # Equal value ratios are the NORM on plan lanes (flat "plan limits" cost, tier-proxy scores), so
-      # a strict `>` alone let TABLE ORDER pick the winner among ties. Tiebreak on the variant weight
-      # instead (lower = lighter/cheaper quota draw, rung closest to the requested effort): the same
-      # rule that ranks siblings within a family, applied across families when value is identical.
-      local _cw; _cw="$(_variant_weight "$resolved" "$selection_effort")"
-      if awk -v v="$vr" -v b="$capable_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' \
-         || { awk -v v="$vr" -v b="$capable_best_vr" 'BEGIN{exit (v+0 == b+0) ? 0 : 1}' && [ "$_cw" -lt "$capable_best_w" ]; }; then
-        capable_best_vr="$vr"; capable_best_w="$_cw"; capable_best_alias="$alias"; capable_best_resolved="$resolved"
-        capable_best_lane="$lane"; capable_best_tier="$tier"
-      fi
-    fi
-    if [ "$tier" = "frontier" ]; then
-      awk -v s="$score" -v b="$frontier_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-        frontier_best_score="$score"; frontier_best_alias="$alias"; frontier_best_resolved="$resolved"
-        frontier_best_lane="$lane"; frontier_best_tier="$tier"
-      }
-    fi
-    # Subscription lanes rank by score (cost is plan-limited, not per-token):
-    # descriptor plan_limited=yes, literal tail until dv ports.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then
-      awk -v s="$score" -v b="$sub_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-        sub_best_score="$score"; sub_best_alias="$alias"; sub_best_resolved="$resolved"; sub_best_lane="$lane"
-      }
-    else
-      awk -v v="$vr" -v b="$paid_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' && {
-        paid_best_vr="$vr"; paid_best_alias="$alias"; paid_best_resolved="$resolved"; paid_best_lane="$lane"
-      }
-    fi
-  done < <(printf '%s\n' "$results")
-
-  # Prefer capable-tier value unless the task explicitly needs the frontier.
-  if [ "$frontier_needed" = "1" ] && [ -n "$frontier_best_alias" ]; then
-    rec_alias="$frontier_best_alias"; rec_resolved="$frontier_best_resolved"; rec_lane="$frontier_best_lane"; rec_tier="$frontier_best_tier"
-    rec_reason="frontier required (score $frontier_best_score, ${category} threshold $threshold, effort $selection_effort)"
-  elif [ -n "$capable_best_alias" ]; then
-    rec_alias="$capable_best_alias"; rec_resolved="$capable_best_resolved"; rec_lane="$capable_best_lane"; rec_tier="$capable_best_tier"
-    rec_reason="best capable-tier value (ratio $capable_best_vr, meets ${category} threshold $threshold, effort $selection_effort)"
-  elif [ -n "$sub_best_alias" ]; then
-    rec_alias="$sub_best_alias"; rec_resolved="$sub_best_resolved"; rec_lane="$sub_best_lane"
-    rec_reason="best subscription model (score $sub_best_score, meets ${category} threshold $threshold, plan-limited cost)"
-  elif [ -n "$paid_best_alias" ]; then
-    rec_alias="$paid_best_alias"; rec_resolved="$paid_best_resolved"; rec_lane="$paid_best_lane"
-    rec_reason="best value (ratio $paid_best_vr, meets ${category} threshold $threshold)"
-  else
-    rec_alias="$any_best_alias"; rec_resolved="$any_best_resolved"; rec_lane="$any_best_lane"
-    rec_reason="highest score (score $any_best_score, no model met ${category} threshold $threshold, consider escalating)"
-  fi
-  if [ -z "$rec_tier" ]; then
-    local _rec_row; _rec_row="$(resolve_model_row "$rec_alias")"; rec_tier="${_rec_row##*|}"
-  fi
-
-  # Lane routing: the quality logic above chose the MODEL; keep it, but run it on its cheapest
-  # AVAILABLE lane. The same model often lives on a per-token cash lane (OpenRouter) AND a plan lane
-  # the user already pays for (a free Devin tier, a Warp/Claude/Codex sub), whose marginal cost is
-  # ~0 -- so a sunk subscription is spent before real cash. Only the lane moves; the winning model is
-  # never downgraded. A cost-unknown (BYOK) lane never wins on cost. OSRC_ADVISE_ROUTER=0 keeps the
-  # pre-router lane.
-  local rec_cost_basis=""
-  if [ "${OSRC_ADVISE_ROUTER:-1}" != "0" ] && [ -n "$rec_resolved" ]; then
-    local _rk _rlanes _l _lc _lcost _lbasis
-    _rk="$(_model_canon_key "$rec_resolved" 2>/dev/null)"
-    _rlanes="$(_model_lanes "$_rk" 2>/dev/null)"
-    # Seed with the current pick's own marginal cost so a tie keeps the originally-chosen lane.
-    _lc="$(_lane_marginal_cost "$rec_lane" "$rec_resolved" 2>/dev/null)"
-    _lcost="${_lc%% *}"; rec_cost_basis="${_lc##* }"
-    case "$_lcost" in ''|-1|*[!0-9.]*) _lcost="" ; rec_cost_basis="${_lc##* }" ;; esac
-    local _bestcost="$_lcost"
-    for _l in $_rlanes; do
-      [ "$_l" = "$rec_lane" ] && continue
-      _lc="$(_lane_marginal_cost "$_l" "$rec_resolved" 2>/dev/null)"
-      _lcost="${_lc%% *}"; _lbasis="${_lc##* }"
-      case "$_lcost" in ''|-1|*[!0-9.]*) continue ;; esac   # unknown/BYOK never wins on cost
-      if [ -z "$_bestcost" ] || awk -v a="$_lcost" -v b="$_bestcost" 'BEGIN{exit (a+0 < b+0)?0:1}'; then
-        _bestcost="$_lcost"; rec_lane="$_l"; rec_cost_basis="$_lbasis"
-      fi
-    done
-  fi
-
-  # Determine benchmark data quality: live (majority), partial, or none.
-  if [ "$bench_count" -gt 0 ] && [ "$total_count" -gt 0 ] && [ "$bench_count" -ge $((total_count / 2)) ]; then
-    has_bench=1
-  elif [ "$bench_count" -gt 0 ]; then
-    has_bench=2  # partial
-  else
-    has_bench=0
-  fi
-
-  # Guard: if no candidates at all (empty model table), fail gracefully.
-  if [ -z "$rec_alias" ] && [ -n "$_limit_notes" ]; then
-    die "advise: every candidate lane is at/over OSRC_LANE_LIMIT_PCT (${_limit_notes}). Wait for a window reset, or set OSRC_LANE_LIMIT_GATE=0."
-  fi
-  [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
-
-  # Recompute the recommended model's history for the human/json explanation (raw + effective).
-  local _rh rec_mult rec_neff rec_peff rec_scope _rhrest
-  _rh="$(_history_mult "$rec_lane" "$rec_resolved" "$category")"
-  rec_mult="${_rh%%|*}"; _rhrest="${_rh#*|}"; rec_neff="${_rhrest%%|*}"; _rhrest="${_rhrest#*|}"; rec_peff="${_rhrest%%|*}"; rec_scope="${_rh##*|}"
-  case "$rec_mult" in ''|*[!0-9.]*) rec_mult="1.00" ;; esac
-  local rec_pct; rec_pct="$(awk -v m="$rec_mult" 'BEGIN{printf "%+.0f", (m-1)*100}')"
-
-  # Ranked fallback shortlist: the SAME preference order the recommendation uses, as an ordered list so
-  # a caller can retry the next candidate when the top pick hits a transport failure (rate limit / 5xx /
-  # timeout). Rank groups mirror the picker exactly: capable value leads normally, frontier leads when
-  # required, and everything below threshold follows by score, so shortlist[0] IS
-  # the recommendation. Ordering only: this ranks candidates, it never asserts any of them will succeed.
-  local _sl="" _slg _slp
-  while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-    [ -n "$alias" ] || continue
-    if [ "$frontier_needed" = "1" ]; then
-      case "$meets:$tier" in 1:frontier) _slg=0; _slp="$score" ;; 1:capable) _slg=1; _slp="$vr" ;; *) _slg=2; _slp="$score" ;; esac
-    else
-      case "$meets:$tier" in 1:capable) _slg=0; _slp="$vr" ;; 1:*) _slg=1; _slp="$score" ;; *) _slg=2; _slp="$score" ;; esac
-    fi
-    # A demoted heavier variant (a lighter sibling qualifies) leaves the top group so shortlist[0] is
-    # never a row the recommendation itself passed over; it joins the "meets, not preferred" group.
-    [ "${_pref:-0}" = "1" ] && [ "$_slg" = "0" ] && { _slg=1; _slp="$score"; }
-    # Tertiary sort key = variant weight, the same tiebreak the recommendation uses. Plan-lane ties
-    # (flat cost, proxy scores) are common; without it shortlist[0] could be a different row than the
-    # recommendation whenever the top group tied on value.
-    _sl="$_sl$_slg|$_slp|$alias|$resolved|$lane|$meets|$score|$vr|${_pref:-0}|$(_variant_weight "$resolved" "$selection_effort")
-"
-  done < <(printf '%s\n' "$results")
-  # group asc, then the group-appropriate primary desc. -s (stable) so ties keep input (table) order,
-  # matching the picker's first-wins on equal score/ratio — this is what makes shortlist[0] == the pick.
-  local _sl_sorted; _sl_sorted="$(printf '%s' "$_sl" | grep -v '^$' | sort -s -t'|' -k1,1n -k2,2rn -k10,10n)"
-  local shortlist_json="[]"
-  if have jq; then
-    shortlist_json="$(printf '%s\n' "$_sl_sorted" \
-      | jq -R 'select(length>0)|split("|")|{alias:.[2],model:.[3],lane:.[4],meets:(.[5]=="1"),score:(.[6]|tonumber?),value_ratio:(.[7]|tonumber?),lighter_sibling_preferred:(.[8]=="1")}' 2>/dev/null \
-      | jq -s '.' 2>/dev/null)"
-    [ -n "$shortlist_json" ] || shortlist_json="[]"
-  fi
-
-  local _bstale_json=false _bench_asof=""
-  [ -n "$_bstale" ] && { _bstale_json=true; _bench_asof="${_bstale#*$'\t'}"; }
-  if [ "$json_out" -eq 1 ]; then
-    jq -n \
-      --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
-      --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
-      --arg rec_cost_basis "$rec_cost_basis" \
-      --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
-      --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
-      --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
-      --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
-      --arg bench_asof "$_bench_asof" --argjson bench_stale "$_bstale_json" \
-      --argjson shortlist "$shortlist_json" \
-      '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
-        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
-        shortlist:$shortlist,
-        conservation:(if $conserve=="" then null else $conserve end),
-        limit_gate:(if $limit_gate=="" then null else $limit_gate end),
-        benchmark_data_available:($has_bench=="1"),
-        benchmark_stale:$bench_stale,
-        benchmark_as_of:(if $bench_asof=="" then null else $bench_asof end),
-        benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
-        history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
-                 passed_effective:($hpeff|tonumber? // 0), scope:$hscope}}'
-
-  else
-    echo "== outsourcerer advise =="
-    echo "   task: $task"
-    echo "   category: $category"
-    echo "   difficulty: $difficulty"
-    echo "   effort: $selection_effort"
-    echo "   effort tip: start at this level, re-run the same task one rung lower; if quality holds, keep the cheaper rung (medium often matches high at lower cost)."
-    echo "   scoring by: $field (threshold: $threshold)"
-    if [ "$has_bench" = "1" ]; then
-      echo "   benchmark data: live (OpenRouter, $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null), $bench_count/$total_count models)"
-    elif [ "$has_bench" = "2" ]; then
-      echo "   benchmark data: partial ($bench_count/$total_count models have live scores, rest use tier proxy, run: $0 advise --refresh \"$task\")"
-    else
-      echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
-    fi
-    if [ -n "$_bstale" ]; then
-      local _bd="${_bstale%%$'\t'*}" _ba="${_bstale#*$'\t'}" _bage
-      if [ "$_bd" = "unknown" ]; then _bage="an unknown age"; else _bage="$_bd days old"; fi
-      echo "   benchmark cache is $_bage (as of $_ba); refresh: $0 advise --refresh \"$task\""
-    fi
-    [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
-    [ -n "$_limit_notes" ] && echo "   limit-gate: $_limit_notes (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"
-    echo
-    echo "--- recommendation ---"
-    echo "   model: $rec_alias ($rec_resolved)"
-    echo "   lane:  $rec_lane${rec_cost_basis:+ (cost: $rec_cost_basis)}"
-    echo "   why:   $rec_reason"
-    # Show the local-history adjustment when there is any (else stay silent — pure benchmark pick).
-    if [ "$rec_scope" != "none" ] && awk -v n="$rec_neff" 'BEGIN{exit (n+0>0)?0:1}'; then
-      echo "   local: ${rec_pct}% from ${rec_neff} effective runs (${rec_scope}: this ${category})"
-    fi
-    echo
-    echo "--- all candidates (sorted by value ratio, >> = recommended) ---"
-    printf '%s\n' "$results" | sort -t'|' -k7 -rn | while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] || continue
-      local mark="  " verdict
-      [ "$alias" = "$rec_alias" ] && mark=">>"
-      if [ "$meets" != "1" ]; then verdict='below threshold'
-      elif [ "${_pref:-0}" = "1" ]; then verdict='OK (lighter sibling preferred)'
-      else verdict=OK; fi
-      printf '%s %-16s %-28s lane=%-3s score=%-5s $/M=%-14s ratio=%-7s %s\n' \
-        "$mark" "$alias" "$resolved" "$lane" "$score" "$cost" "$vr" "$verdict"
-    done
-    echo
-    echo "Run with:  $0 run -m $rec_alias --effort $selection_effort \"$task\""
-    echo "Override:  $0 run -m <any-model> --effort $selection_effort \"$task\"   (you know better, pick your own)"
-  fi
-}
+# Benchmark selection and the fallback shortlist live in lib/advise.sh.
 
 # =============================================================================
 # LIVENESS / SUPERVISOR + BACKGROUND JOBS.

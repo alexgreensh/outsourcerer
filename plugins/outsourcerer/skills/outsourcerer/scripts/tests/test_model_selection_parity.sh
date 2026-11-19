@@ -27,39 +27,12 @@ ck "Kimi id remains stable on Droid" "$(_lane_model_for droid kimi-k3)" "kimi-k3
 ck "Kimi id remains stable on Warp" "$(_lane_model_for warp kimi-k3)" "kimi-k3"
 ck "Kimi has a Devin sibling" "$(_devin_model_for kimi)" "kimi-k3"
 
-hard_kimi="$(_score 50 capable code high hard kimi-k3)"
-hard_frontier="$(_score 55 frontier code high hard gpt-5.6-sol)"
-if awk -v k="$hard_kimi" -v f="$hard_frontier" 'BEGIN { exit !(k > f) }'; then
-  ok "high-effort hard work favors near-frontier value"
-else
-  bad "high-effort hard work scored Kimi $hard_kimi and frontier $hard_frontier"
-fi
-
-max_kimi="$(_score 50 capable code max hard kimi-k3)"
-max_frontier="$(_score 55 frontier code max hard gpt-5.6-sol)"
-if awk -v k="$max_kimi" -v f="$max_frontier" 'BEGIN { exit !(f > k) }'; then
-  ok "max effort can require a frontier model"
-else
-  bad "max effort scored Kimi $max_kimi and frontier $max_frontier"
-fi
-
-refresh_benchmarks() { return 1; }
-high_json="$(cmd_advise --json --effort high "implement a multi-step authentication refactor with tests and debug failures" 2>&1)"
-ck "advise records selection effort" "$(printf '%s' "$high_json" | jq -r '.effort')" "high"
-# Kimi's near-frontier bump is REASONING-shaped only (task-shape fix, 2026-09-16): a hard CODE/agentic
-# job must not float kimi to #1 — its long reasoning bursts are the wrong shape for edit-run-verify.
-# The pick is a capable plan-lane model that is not kimi; a hard REASONING task still picks kimi.
-_hard_pick="$(printf '%s' "$high_json" | jq -r '.recommendation.alias')"
-case "$_hard_pick" in kimi|kimi-k3|kimi-k2.7) bad "advise picked Kimi for hard CODE work ($_hard_pick); the bump must be reasoning-only" ;;
-  *) ok "advise does not pick Kimi for hard code work (pick: $_hard_pick)" ;; esac
-ck "advise returns a valid Devin model" "$(printf '%s' "$high_json" | jq -r '.recommendation.lane')" "dv"
-ck "advise marks the pick capable" "$(printf '%s' "$high_json" | jq -r '.recommendation.tier')" "capable"
-reason_json="$(cmd_advise --json --effort high "analyze and evaluate the tradeoffs of the two architectures, assess the implications, critique the strategy and justify the decision" 2>&1)"
-ck "advise picks Kimi for hard REASONING work" "$(printf '%s' "$reason_json" | jq -r '.recommendation.alias')" "kimi"
-ck "advise returns Kimi's Devin id" "$(printf '%s' "$reason_json" | jq -r '.recommendation.model')" "kimi-k3"
-
-max_json="$(cmd_advise --json --effort max "implement a multi-step authentication refactor with tests and debug failures" 2>&1)"
-ck "max-effort advise picks frontier tier" "$(printf '%s' "$max_json" | jq -r '.recommendation.tier')" "frontier"
+printf '%s\n' '{"data":[{"model_permaslug":"openai/gpt-5.6-sol","coding_index":77,"intelligence_index":59,"agentic_index":54}]}' > "$OSRC_BENCH_JSON"
+for effort in high max; do
+  json="$(cmd_advise --json --effort "$effort" "refactor a module")"
+  ck "advise records selection effort" "$(jq -r '.effort' <<<"$json")" "$effort"
+  ck "benchmark winner at $effort effort" "$(jq -r '.recommendation.model' <<<"$json")" gpt-5.6-sol
+done
 
 EFFORT=high
 prompt="$(_build_prompt kimi-k3 "inspect the module" capable)"

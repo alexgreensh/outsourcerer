@@ -1,14 +1,5 @@
 #!/usr/bin/env bash
-# test_advise_dynamic_pool.sh — the dynamic advise candidate pool + score-derived tiering.
-# Deterministic (seeded caches, no live CLI, no network). Covers:
-#   - _tier_from_score band mapping + non-numeric safety + real-score calibration.
-#   - _advise_candidate_rows: OpenRouter scored-only discovery, a never-seen model wins on merit,
-#     an UNSCORED id is skipped, no Devin catalog uid enters the pool, escape hatch, offline ==
-#     static baseline, empty/garbage cache fail-open, the top-N cap, no fetch on the hot path.
-#   - cost-safety + die-loud validation unchanged at delegate, suite registered.
-# The benchmark cache is keyed by OpenRouter permaslugs (e.g. z-ai/glm-5.2-...), so discovery
-# uses OpenRouter-form ids from models.json; Devin catalog uids do NOT match bench and are not
-# enumerated. Fixtures use real id forms so the id/bench matching is exercised for real.
+# Offline coverage for native and OpenRouter catalog discovery and benchmark ranking.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,6 +10,7 @@ command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent (dynamic pool no-ops)";
 
 T="$(mktemp -d)"; export HOME="$T/fakehome" OSRC_HOME="$T"; mkdir -p "$HOME"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/catalogs"
+unset CODEX_HOME OPENROUTER_API_KEY
 . "$SRC" >/dev/null 2>&1
 
 pass=0; fail=0
@@ -97,19 +89,20 @@ json="$(cmd_advise --json --effort max "refactor the authentication module" 2>&1
 rec="$(printf '%s' "$json" | jq -r '.recommendation.alias' 2>/dev/null)"
 [ "$rec" = "acme/nova-max-1" ] && ok "discovery: never-seen model wins on merit" || bad "advise picked '$rec' instead of acme/nova-max-1"
 
-# === Scored-only (perf + merit guard): an UNSCORED OpenRouter id is NOT added to the pool. ===
-grep -q 'or-unscored-xyz' <<<"$pool" && bad "scored-only violated: unscored id entered the pool" || ok "scored-only: an unscored OR id is skipped"
+grep -qx 'or-unscored-xyz|or-unscored-xyz|or|raw' <<<"$pool" && ok "unscored OR model included" || bad "missing unscored catalog model"
 
-# === No Devin noise: the pool's dv-lane rows are exactly the static table's (no discovered uids). ===
-# Seed a Devin catalog with a variant uid that is NOT in bench; it must NEVER appear as a candidate.
 cat > "$T/catalogs/dv.raw.json" <<'RAW'
 {"families":[{"family_uid":"phantom","aliases":[],"variants":[{"model_uid":"phantom-v9-high","cost_summary":"Free"}]}]}
 RAW
 pool2="$(_advise_candidate_rows intelligence_index)"
-grep -q 'phantom-v9-high' <<<"$pool2" && bad "a Devin catalog uid leaked into the pool" || ok "no Devin catalog uid enters the pool (bench-unmatched noise excluded)"
-dv_dyn="$(printf '%s\n' "$pool2" | awk -F'|' '$3=="dv"{print $2}' | sort -u)"
-dv_static="$(printf '%s\n' "$static_only" | awk -F'|' '$3=="dv"{print $2}' | sort -u)"
-[ "$dv_dyn" = "$dv_static" ] && ok "dv-lane candidates == static table only" || bad "dv-lane candidates diverged from the static table"
+grep -qx 'phantom-v9-high|phantom-v9-high|dv|raw' <<<"$pool2" && ok "Devin variant enters pool" || bad "missing Devin variant"
+printf '%s\n' 'gemini-9-test-high' > "$T/agy-models.txt"
+mkdir -p "$HOME/.codex"
+printf '%s\n' '{"models":[{"slug":"gpt-future"}]}' > "$HOME/.codex/models_cache.json"
+pool3="$(unset CODEX_HOME; _advise_candidate_rows)"
+grep -qx 'gemini-9-test-high|gemini-9-test-high|gm|raw' <<< "$pool3" && ok "agy catalog candidate" || bad "missing agy id"
+grep -qx 'gpt-future|gpt-future|cx|raw' <<< "$pool3" && ok "Codex catalog candidate" || bad "missing Codex id"
+rm -f "$T/agy-models.txt" "$HOME/.codex/models_cache.json"
 rm -f "$T/catalogs/dv.raw.json"
 
 # === Dedup, static wins: an id in both models.json and the static table appears once, static row. ===
@@ -130,6 +123,34 @@ top3="$(OSRC_ADVISE_DYNAMIC_MAX=3 _advise_candidate_rows | awk -F'|' '$3=="or" &
 [ "$top3" = "$(printf 'acme/m7\nacme/m8\nacme/m9')" ] && ok "top-N cap: keeps the strongest-scoring ids" || bad "top-N cap: kept '$top3' (want m7,m8,m9)"
 seed_bench
 
+# The tie window is anchored at the highest score, so it cannot chain through a third model.
+rank_rows=$'high|high|or|raw|80|0.0002|1\nnear|near|cc|raw|79|plan limits|1\nfar|far|cx|raw|78.9|plan limits|1\nmissing|missing|dv|raw|unscored|plan limits|1'
+ck "near tie chooses plan cost" "$(OSRC_ADVISE_TIE=1 _advise_rank 0 <<< "$rank_rows" | cut -d'|' -f1 | paste -sd, -)" "near,high,far,missing"
+ck "zero window chooses raw score" "$(OSRC_ADVISE_TIE=0 _advise_rank 0 <<< "$rank_rows" | cut -d'|' -f1 | paste -sd, -)" "high,near,far,missing"
+
+# Exercise filtering and missing fields through the public command with a tiny, deterministic pool.
+advice="$(
+  OSRC_MODEL_TABLE=$'free|gpt-6.2-astra|cx|frontier\npaid|acme/b|or|raw\nmissing|acme/c|or|raw'
+  OSRC_ADVISE_DYNAMIC_POOL=0
+  OSRC_ADVISE_ROUTER=0
+  OSRC_BENCH_JSON="$T/filter-bench.json"
+  printf '%s\n' '{"data":[{"model_permaslug":"openai/gpt-6.2-astra","coding_index":87},{"model_permaslug":"acme/b","coding_index":0},{"model_permaslug":"acme/c","intelligence_index":99}]}' > "$OSRC_BENCH_JSON"
+  _session_limits() { printf 'codexwk=100'; }
+  cmd_advise --json "refactor code"
+)"
+jq -e '.recommendation.alias=="paid" and .shortlist[0].score==0 and .shortlist[1].unscored and (.limit_gate|contains("cx excluded"))' <<< "$advice" >/dev/null \
+  && ok "exhausted lane skipped; measured zero beats missing coding score" || bad "incorrect limit or missing-field fallback"
+# Check the actual JSON contract, including a missing field alongside a true zero.
+jq -e 'has("conservation") and .conservation==null' <<< "$advice" >/dev/null && ok "JSON includes conservation metadata" || bad "JSON conservation field missing"
+(
+  OSRC_BENCH_JSON="$T/fable-vs-glm.json"
+  printf '%s\n' '{"data":[{"model_permaslug":"anthropic/claude-5.1-fable","intelligence_index":59.9},{"model_permaslug":"z-ai/glm-5.2","intelligence_index":59.1}]}' > "$OSRC_BENCH_JSON"
+  OSRC_ADVISE_DYNAMIC_POOL=0
+  OSRC_ADVISE_CONSERVE=0
+  OSRC_LANE_LIMIT_GATE=0
+  cmd_advise --json "Analyze the tradeoffs of three caching architectures and recommend one" |
+    jq -e '.recommendation.alias=="fable" and (.recommendation.reason|contains("highest intelligence score (59.9)")) and .shortlist[0].score==59.9'
+) >/dev/null && ok "Fable beats GLM by raw reasoning score" || bad "caching architecture recommendation"
 # === Escape hatch (R5): OSRC_ADVISE_DYNAMIC_POOL=0 == the static table, byte-identical. ===
 cat > "$OSRC_MODELS_JSON" <<'MJSON'
 {"data":[{"id":"acme/nova-max-1"},{"id":"z-ai/glm-5.2"}]}
@@ -178,9 +199,9 @@ _dr="$(_devin_resolve_model glm 2>/dev/null)"
 unset OSRC_CATALOG_TTL
 
 # === Source-level invariants: loop swapped, hatch + cap documented, suite registered. ===
-grep -q '_advise_candidate_rows "\$field"' "$SRC" && ok "ranking loop sources _advise_candidate_rows" || bad "ranking loop not swapped"
-grep -q 'OSRC_ADVISE_DYNAMIC_POOL' "$SRC" && ok "OSRC_ADVISE_DYNAMIC_POOL documented" || bad "OSRC_ADVISE_DYNAMIC_POOL not documented"
-grep -q 'OSRC_ADVISE_DYNAMIC_MAX'  "$SRC" && ok "OSRC_ADVISE_DYNAMIC_MAX documented" || bad "OSRC_ADVISE_DYNAMIC_MAX not documented"
+grep -q '_advise_candidate_rows "\$field"' "${SRC%/*}/lib/advise.sh" && ok "ranking loop sources _advise_candidate_rows" || bad "ranking loop not swapped"
+grep -q 'OSRC_ADVISE_DYNAMIC_POOL' "${SRC%/*}/lib/advise.sh" && ok "OSRC_ADVISE_DYNAMIC_POOL documented" || bad "OSRC_ADVISE_DYNAMIC_POOL not documented"
+grep -q 'OSRC_ADVISE_DYNAMIC_MAX'  "${SRC%/*}/lib/advise.sh" && ok "OSRC_ADVISE_DYNAMIC_MAX documented" || bad "OSRC_ADVISE_DYNAMIC_MAX not documented"
 grep -q '_tier_from_score' "$SRC" && ok "_tier_from_score present" || bad "_tier_from_score missing"
 grep -q 'test_advise_dynamic_pool' "$TESTS_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
 

@@ -55,16 +55,9 @@ ck "agentic threshold"   "$(_bench_threshold_for agentic)"   35
 ck "creative threshold"  "$(_bench_threshold_for creative)"  45
 ck "simple threshold"    "$(_bench_threshold_for simple)"    0
 
-# === 4. Tier score proxy (when no benchmark data). ===
-ck "frontier proxy" "$(_tier_score_proxy frontier)" 55
-ck "capable proxy"  "$(_tier_score_proxy capable)"  50
-ck "mid proxy"      "$(_tier_score_proxy mid)"      40
-ck "budget proxy"   "$(_tier_score_proxy budget)"   30
-ck "default proxy"  "$(_tier_score_proxy unknown)"  35
-
 # === 5. Native benchmark slug resolution. ===
-ck "fable slug"       "$(_resolve_bench_slug fable)"            anthropic/claude-5-fable
-ck "opus slug"        "$(_resolve_bench_slug opus)"             anthropic/claude-4.8-opus
+ck "fable slug"       "$(_resolve_bench_slug fable)"            anthropic/claude-5.1-fable
+ck "opus slug"        "$(_resolve_bench_slug opus)"             anthropic/claude-5.5-opus
 ck "sol slug"         "$(_resolve_bench_slug gpt-5.6-sol)"      openai/gpt-5.6-sol
 ck "glm-5.2 slug"     "$(_resolve_bench_slug glm-5.2)"          z-ai/glm-5.2
 ck "OR id slug"       "$(_resolve_bench_slug z-ai/glm-5.2)"     z-ai/glm-5.2
@@ -92,7 +85,7 @@ ck "bench lookup sol code price_in" "$(printf '%s' "$bl" | cut -f2)" 0.000005
 bl="$(_bench_lookup glm-5.2 agentic_index)"
 ck "bench lookup glm agentic score" "$(printf '%s' "$bl" | cut -f1)" 43.1
 
-bl="$(_bench_lookup haiku coding_index)"
+bl="$(_bench_lookup claude-haiku-4-5-20251001 coding_index)"
 ck "bench lookup haiku code score"  "$(printf '%s' "$bl" | cut -f1)" 43.9
 
 # Lookup for unknown model returns empty.
@@ -119,7 +112,7 @@ rm -f "$TMP/benchmarks.json"
 # Mock refresh_benchmarks to prevent network calls (it would succeed with OR key from ~/.env).
 refresh_benchmarks() { return 1; }
 out="$(cmd_advise "refactor the authentication module" 2>&1)"
-if grep -q 'benchmark data: none' <<< "$out"; then ok "advise falls back to tier proxy"; else bad "advise missing fallback message"; fi
+if grep -q 'benchmark data: none (all models unscored' <<< "$out"; then ok "advise reports missing benchmarks"; else bad "advise missing fallback message"; fi
 if grep -q 'recommendation' <<< "$out"; then ok "advise still recommends without benchmarks"; else bad "advise fails without benchmarks"; fi
 # Restore real refresh_benchmarks for subsequent tests.
 unset -f refresh_benchmarks
@@ -133,7 +126,7 @@ if printf '%s' "$out" | jq -e '.category == "simple"' >/dev/null 2>&1; then ok "
 err_msg="$(bash -c '. "$0" >/dev/null 2>&1; cmd_advise "" 2>&1' "$SRC" 2>&1)"
 if grep -q 'advise needs a task' <<< "$err_msg"; then ok "advise rejects empty task"; else bad "advise accepts empty task: '$err_msg'"; fi
 
-# === 12. cmd_advise recommendation favors capable value above the threshold. ===
+# === 12. cmd_advise recommendation uses the task benchmark. ===
 cat > "$TMP/benchmarks.json" <<'BJSON'
 {
   "data": [
@@ -146,13 +139,14 @@ cat > "$TMP/benchmarks.json" <<'BJSON'
 BJSON
 json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
 rec_alias="$(printf '%s' "$json" | jq -r '.recommendation.alias')"
-# The capable GLM lane clears the coding threshold and is preferred over a frontier model that is
-# unnecessary for this medium-effort task.
-if [ "$rec_alias" = "glm" ] || [ "$rec_alias" = "glm-5.2" ] || [ "$rec_alias" = "z-ai/glm-5.2" ]; then
-  ok "advise recommends capable value for ordinary code work"
-else
-  bad "advise recommended '$rec_alias' instead of a capable GLM lane"
-fi
+ck "highest coding score wins" "$rec_alias" sol
+jq '.data += [{model_permaslug:"anthropic/claude-5.1-fable",intelligence_index:59.9}]
+    | (.data[]|select(.model_permaslug|startswith("z-ai/"))).intelligence_index=59.1' \
+    "$OSRC_BENCH_JSON" > "$TMP/reasoning.json"
+json="$(OSRC_BENCH_JSON="$TMP/reasoning.json" cmd_advise --json "Analyze the tradeoffs of three caching architectures and recommend one")"
+ck "fable beats GLM on reasoning" "$(jq -r '.recommendation.alias' <<<"$json")" fable
+jq -e '(.shortlist|last|.unscored) and any(.shortlist[]; .alias=="kimi" and .unscored and .score==null)' <<<"$json" >/dev/null \
+  && ok "unscored Kimi follows measured models" || bad "unscored benchmark handling"
 
 # === 13. Image lanes are excluded from advisory. ===
 out="$(cmd_advise "refactor the authentication module" 2>&1)"
@@ -196,11 +190,11 @@ _adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/
 [ -n "$_advise_real_limits" ] && eval "$_advise_real_limits"   # restore real limits reader
 grep -qi 'conservation:' <<< "$_adv_on" && ok "advise surfaces the conservation line when a lane is past the line" || bad "advise did not surface conservation"
 grep -qi 'conservation:' <<< "$_adv_off" && bad "OSRC_ADVISE_CONSERVE=0 did not disable the haircut" || ok "OSRC_ADVISE_CONSERVE=0 disables conservation"
-grep -q 'conservation:(if $conserve==""' "$SRC" && ok "conservation exposed in --json output" || bad "conservation missing from json"
+jq -e 'has("conservation")' <<<"$json" >/dev/null && ok "conservation exposed in --json output" || bad "conservation missing from json"
 
 # === 15. Gemini-4 Neon reaches the advisor + benchmark-cache freshness. ===
 # agy now serves the Gemini-4 codenames; the gemini-neon table row must be scored like every other
-# candidate, its bench lookup must find the OpenRouter slug prefix (or degrade to the tier proxy),
+# candidate, its bench lookup must find the OpenRouter slug prefix (or be unscored),
 # and a benchmarks.json older than 7 days must be called out — or refreshed when a key is set.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/agy" <<'FAKE'
@@ -236,7 +230,7 @@ ck "argon bench slug from OR catalog" "$(_resolve_bench_slug gemini-4-argon-high
 rm -f "$OSRC_MODELS_JSON"
 ck "neon bench slug map fallback"     "$(_resolve_bench_slug gemini-4-neon-high)"  "google/gemini-4-neon"
 
-# Bench lookup: a dated permaslug under the prefix scores; no slug -> empty -> tier proxy.
+# Bench lookup: a dated permaslug under the prefix scores; no slug -> unscored.
 fresh_asof="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$OSRC_BENCH_JSON" <<BJSON
 {"data":[
@@ -247,7 +241,7 @@ BJSON
 bl="$(_bench_lookup gemini-4-neon-high intelligence_index)"
 ck "neon bench lookup score" "$(printf '%s' "$bl" | cut -f1)" 61.5
 [ -z "$(_bench_lookup gemini-4-hydrogen-high intelligence_index)" ] \
-  && ok "a Gemini-4 family with no OR slug scores empty (tier proxy path, not an error)" \
+  && ok "a Gemini-4 family with no OR slug scores empty (unscored)" \
   || bad "unmapped neon-family id unexpectedly scored"
 
 # Fresh cache -> no stale line, benchmark_stale=false in JSON.
