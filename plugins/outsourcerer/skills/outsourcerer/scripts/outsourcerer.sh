@@ -18164,17 +18164,13 @@ session() {
         echo "Session '$SESSION_NAME' already exists (name derives from \$PWD, so one session per directory). Use '$0 session stop' first, reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
         return 4
       fi
-      # The has-session check above is a TOCTOU: a concurrent `session start` on the
-      # same name can create the session between that check and here. tmux serializes
-      # new-session, so a duplicate name fails nonzero. Must catch it: without the
-      # guard, execution falls through to send-keys below and types THIS call's launch
-      # command into the OTHER session's pane (cross-session command injection). On a
-      # lost race, treat it exactly like the has-session hit above: report and return 4.
-      if ! tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD" 2>/dev/null; then
+      local pane_command="$launch"
+      # Create the pane atomically before sending anything to its shell.
+      if ! _session_create_pane 2>/dev/null; then
         echo "Session '$SESSION_NAME' was created concurrently (name derives from \$PWD + Claude session; a parallel 'session start' in this same context won the race). Reattach with 'tmux attach -t $SESSION_NAME', or set OUTSOURCERER_TMUX=<name> to run a second isolated session here." >&2
         return 4
       fi
-      if ! tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $launch" Enter; then
+      if ! tmux send-keys -t "$SESSION_NAME" "export PATH=\"\$HOME/.local/bin:\$PATH\"; clear; $pane_command" Enter; then
         _session_launch_cleanup "$SESSION_NAME" send-failed
         die "session start: tmux send-keys failed; the interactive command was not submitted."
       fi

@@ -202,6 +202,34 @@ if have codex; then
   else no "cx default: adapter produced no launch"; fi
 else echo "SKIP: codex not installed"; fi
 
+# Execute the short pane command with the environment tmux would give its shell.
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/claude" <<'FAKE'
+#!/bin/sh
+if [ "$1" = --help ]; then echo '  --model <model>'; exit 0; fi
+printf '%s\n' "$@"
+FAKE
+chmod +x "$HOME/.local/bin/claude"
+export PATH="$HOME/.local/bin:$PATH"
+if (
+  PROVIDER=claude PERM_PROFILE=safe SESSION_NAME=test MODEL_EXPLICIT=1 MODEL=claude-fable-5-2 EFFORT=""
+  _session_launch_adapter claude || exit 1
+  launch="$(_session_shell_command "${SESSION_LAUNCH[@]}")"; pane_command="$launch"
+  tmux() {
+    [ "$1" = new-session ] && [ "${11}" = -e ] || return 1
+    export "${12}"
+  }
+  _session_create_pane && [ "${#pane_command}" -lt 100 ] &&
+    bash -c "$pane_command" > "$TMP/fable.argv" &&
+    python3 - "$TMP/fable.argv" "$TMP/cc.txt" <<'PYTEST'
+import json, pathlib, sys
+args, rules = (pathlib.Path(p).read_text().splitlines() for p in sys.argv[1:])
+assert args == ["--model", "claude-fable-5-2", *rules]
+assert args[2] == "--allowedTools" and args[-2] == "--settings"
+assert "Bash(*-delete*)" in json.loads(args[-1])["permissions"]["ask"]
+PYTEST
+); then ok "safe Fable pane executes the complete policy argv"; else no "safe Fable pane argv"; fi
+
 PERM_UNDER_TEST=safe
 if have claude; then
   _l="$(_launch cc)" || _l=""

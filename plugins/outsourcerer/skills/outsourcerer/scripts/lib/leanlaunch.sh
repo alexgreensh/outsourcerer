@@ -18,3 +18,15 @@ _session_launch_cc() {
     fi
   fi
 }
+
+# A new pane may still have canonical terminal input enabled when send-keys arrives.
+# Carry the long Claude safe command in the pane environment and type only its invocation.
+_session_create_pane() {
+  local args=(new-session -d -s "$SESSION_NAME" -x 200 -y 50 -c "$PWD")
+  case "$PROVIDER:${PERM_PROFILE:-default}" in
+    cc:safe|claude:safe)
+      args+=(-e "OSRC_PANE_LAUNCH=$launch")
+      pane_command='bash -c "$OSRC_PANE_LAUNCH"' ;;
+  esac
+  tmux "${args[@]}"
+}

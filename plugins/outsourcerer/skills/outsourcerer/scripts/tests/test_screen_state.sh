@@ -29,6 +29,7 @@ cc-idle-after-work|cc|idle||
 cc-reply-numbered-list|cc|idle||
 cc-prose-question|cc|question||
 cc-askuserquestion|cc|question||
+cc-working-queued|cc|working||
 cc-working-hooks|cc|working||
 cc-working-hooks2|cc|working||
 cc-permission-bash|cc|approval|shell|touch made-by-test.txt && ls -la .

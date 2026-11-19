@@ -254,9 +254,6 @@ _osrc_scr_cc() {
 # Shared tail for engines with a composer box: decide working / idle / question / composer.
 _osrc_scr_after_composer() { # <user-line-glob> <assistant-glob>
   local ugl="$1" end="$OSRC_SCR_HIST_END" lo i l u d q
-  if [ -n "$OSRC_SCR_COMPOSER" ]; then
-    _osrc_scr_set composer "composer holds unsent text: $(printf '%s' "$OSRC_SCR_COMPOSER" | cut -c1-80)"; return 0
-  fi
   lo=$((end - 6)); [ "$lo" -ge 0 ] || lo=0
   i="$end"
   while [ "$i" -ge "$lo" ]; do
@@ -268,6 +265,9 @@ _osrc_scr_after_composer() { # <user-line-glob> <assistant-glob>
     esac
     i=$((i - 1))
   done
+  if [ -n "$OSRC_SCR_COMPOSER" ]; then
+    _osrc_scr_set composer "composer holds unsent text: $(printf '%s' "$OSRC_SCR_COMPOSER" | cut -c1-80)"; return 0
+  fi
   u="$(_osrc_scr_last "$ugl" 0 "$end")"
   d="$(_osrc_scr_last "* for [0-9]*s · done*" 0 "$end")"
   [ "$d" -ge 0 ] || d="$(_osrc_scr_last "* for [0-9]*m · done*" 0 "$end")"
