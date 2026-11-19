@@ -82,6 +82,8 @@ class Hub:
         # merges them last, so no card write can undo a status the user set.
         self.export_file = os.path.join(osrc_home, "hub", "export.json")
         self.cache = None          # {"generated_at": int, "projects": [...]}
+        self.export_lock = threading.Lock()
+        self.plans_finished = 0.0
         self.cache_ts = 0.0
         self.export_error = ""
         self.lock = threading.Lock()
@@ -191,11 +193,24 @@ class Hub:
                         continue
         return best
 
-    def run_export(self, timeout=90):
+    def run_export(self, timeout=90, check_plans=False):
+        requested = time.monotonic()
+        with self.export_lock:
+            if check_plans and self.plans_finished >= requested:
+                return self.cache
+            data = self._export(timeout, check_plans)
+            if check_plans:
+                self.plans_finished = time.monotonic()
+            return data
+
+    def _export(self, timeout, check_plans):
         env = dict(os.environ)
         env["OSRC_HOME"] = self.osrc_home
         # Settled-project cache + stale-while-revalidate limits (hub-perf.sh, MC2 r2 #4).
         env.setdefault("OSRC_HUB_FAST", "1")
+        if check_plans:
+            env.update(OSRC_HUB_CHECK_PLANS="1", OSRC_PROBE_SYNC="1", OSRC_PROBE_TTL="0",
+                       OSRC_PROBE_TTL_CODEX="0", OSRC_PROBE_TTL_AGY="0")
         proc = subprocess.run(
             [self.engine, "hub", "export"],
             capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, env=env,
@@ -583,7 +598,7 @@ def make_handler(hub):
                 # Refresh carries no payload; the page POSTs it empty.
                 hub.fresh_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
                 try:
-                    data = hub.run_export()
+                    data = hub.run_export(check_plans=(u.query == "plans"))
                 except Exception as e:
                     return self._send_json({"error": str(e)[:300]}, 500)
                 return self._send_json(data)

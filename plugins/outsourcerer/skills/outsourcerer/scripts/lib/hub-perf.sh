@@ -206,6 +206,7 @@ _osrc_hub_limits_cached() {
   if [ "${OSRC_HUB_FAST:-0}" != 1 ] || ! mkdir -p "$OSRC_HOME/hub" 2>/dev/null || [ -L "$f" ]; then
     local out; out="$(_osrc_hub_limits 2>/dev/null)"; case "$out" in ''|*'error'*) out='[]' ;; esac; printf '%s' "$out"; return 0
   fi
+  if [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ]; then _osrc_hub_limits_write "$f"; return; fi
   case "$ttl" in ''|*[!0-9]*) ttl=60 ;; esac
   changed=""
   if [ -f "$f" ]; then

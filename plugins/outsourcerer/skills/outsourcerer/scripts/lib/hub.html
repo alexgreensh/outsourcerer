@@ -375,7 +375,7 @@ a.pill svg { width: 13px; height: 13px; }
     <div class="plist" id="plist"><p id="plist-empty">Loading your projects…</p></div>
     <div id="shipwrap" hidden><h2><button type="button" class="lfold" id="sfold" aria-expanded="false" aria-controls="slist"><i data-lucide="chevron-right" class="chev"></i><span>Shipped</span></button><span class="mono" id="scount"></span></h2>
     <div class="plist" id="slist" hidden></div></div>
-    <h2><button type="button" class="lfold" id="lfold" aria-expanded="false" aria-controls="llist"><i data-lucide="chevron-right" class="chev"></i><span>Your plans</span></button><span class="mono lst" id="lstamp"></span></h2>
+    <h2><button type="button" class="lfold" id="lfold" aria-expanded="false" aria-controls="llist"><i data-lucide="chevron-right" class="chev"></i><span>Your plans</span></button><span class="mono lst" id="lstamp"></span><button type="button" id="checkplans" hidden>Refresh</button></h2>
     <div class="llist" id="llist"><p class="lnone">No limits reported yet.</p></div>
     </div>
     <div class="credits">
@@ -437,7 +437,7 @@ a.pill svg { width: 13px; height: 13px; }
     opts = opts || {};
     opts.headers = Object.assign({ 'X-Hub-Token': TOKEN }, opts.headers || {});
     // A stalled hub must never hang a send or a poll: abort after 15 s (MC-6).
-    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 15000); opts.signal = ac.signal;
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), path === '/api/refresh?plans' ? 210000 : 15000); opts.signal = ac.signal;
     return fetch(path, opts).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -465,9 +465,16 @@ a.pill svg { width: 13px; height: 13px; }
   // Local-mode adapter: same collection()/doc() surface the artifact db exposes,
   // backed by GET/POST /api/* on hub serve. Polls every 15s; limits ride inside
   // the /api/projects payload as a top-level array.
+  let plansChecked = 0;
   function makeLocalDb() {
     const subs = { projects: [], answers: [], limits: [] };
     let timer = null;
+    const stopPlans = window.OSRC_HUB_PLANS?.startChecks($('checkplans'), async () => {
+      const data = await api('/api/refresh?plans', { method: 'POST' });
+      plansChecked = data.exported_at * 1000;
+      const snap = { docs: docsFor('limits', data) };
+      subs.limits.forEach((notify) => notify(snap)); renderLimits();
+    });
     function docsFor(name, data) {
       if (name === 'projects') return (data.projects || []).map((p) => ({ id: p.id, data: () => p }));
       if (name === 'limits') return (data.limits || []).map((l) => ({ id: l.id, data: () => l }));
@@ -516,7 +523,7 @@ a.pill svg { width: 13px; height: 13px; }
           },
         };
       },
-      stop() { if (timer) clearInterval(timer); timer = null; },
+      stop() { if (stopPlans) stopPlans(); if (timer) clearInterval(timer); timer = null; },
     };
   }
   function subscribe(d) {
@@ -742,7 +749,7 @@ a.pill svg { width: 13px; height: 13px; }
       const t = Date.parse(st.dataset.at || ''); if (!st.dataset.live || isNaN(t)) return;
       const min = Math.floor((Date.now() - t) / 60000); const old = min > 45;
       st.classList.toggle('stale', old);
-      if (H) H.refreshBtn(st, old);
+      if (H && !(mode === 'local' && st.dataset.rk === 'limits')) H.refreshBtn(st, old);
       const age = min >= 120 ? Math.floor(min / 60) + ' h' : min + ' min';
       if (st.dataset.words) { const tx = st.querySelector('.lstx'); if (tx) tx.textContent = old ? 'No update for ' + age + ' · ' + st.dataset.base.replace(/^Updated /, '') : st.dataset.base; return; }
       let w = st.querySelector('.stw'); if (old) { if (!w) { w = el('span', 'stw'); st.append(w); } w.textContent = ' · not updated for ' + age; } else if (w) w.remove();
@@ -755,10 +762,7 @@ a.pill svg { width: 13px; height: 13px; }
     const open = limitsOpen(); const fb = $('lfold'); if (fb) fb.setAttribute('aria-expanded', String(open));
     const working = limits.filter((l) => ['ok', 'low'].includes(l.state || 'ok'));
     const shown = open ? limits : working;
-    // Newest working-row updatedAt decides both the stamp text and its stale
-    // state — sorting HH:MM strings goes wrong across midnight (finding 5).
-    const at = Math.max(...working.map((l) => Date.parse(l.updatedAt || '') || 0));
-    // MC3: one clock, the viewer's local time (Alex is UTC+2); never a UTC label.
+    const at = Math.max(plansChecked, ...limits.map((l) => Date.parse(l.updatedAt || '') || 0));
     const localHM = (ms) => (H && H.localStamp ? H.localStamp(ms) : new Date(ms).toTimeString().slice(0, 5));
     const ls = $('lstamp'), hm = at > 0 ? localHM(at) : ''; ls.replaceChildren(); if (hm) { ls.append(el('span', 'lstt', /^\d/.test(hm) ? 'Checked ' + hm : hm)); ls.title = 'Plans checked ' + hm; }   // MC4: short, one line
     ls.dataset.at = at > 0 ? new Date(at).toISOString() : ''; ls.dataset.live = '1'; ls.dataset.rk = 'limits'; staleCheck();
@@ -963,14 +967,8 @@ a.pill svg { width: 13px; height: 13px; }
       clearTimeout(timer);
       return;
     }
-    // No artifact db: local mode via hub serve (token from the bookmark URL,
-    // then kept in sessionStorage and sent as the X-Hub-Token header).
     mode = 'local';
     if (!TOKEN) {
-      // The shell itself is public (static, no data) so a reload after ?t= was
-      // stripped, or a bare link, still renders — but the data API stays
-      // locked. Without a token there is nothing to subscribe to: say how to
-      // get in instead of polling into 403s (r4 finding 1).
       clearTimeout(timer);
       const w = $('welcome'), pe = $('plist-empty');
       if (w) {

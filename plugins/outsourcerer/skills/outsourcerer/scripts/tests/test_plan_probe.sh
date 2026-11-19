@@ -131,7 +131,7 @@ if [ ! -e "$B/tmux" ]; then
   echo "SKIP: tmux not installed, agy /usage screen checks skipped"
   jq -e '.left == "No reading" and (.note | test("could not be read"))' >/dev/null <<<"$R" && ok "agy: no tmux -> No reading with the reason" || bad "agy no-tmux: $R"
 else
-jq -e '.state == "out" and .left == "0% left · Claude and GPT Models" and .renews_at != null and .plan_seen == true and (.windows | length) == 5' >/dev/null <<<"$R" && ok "agy: headline is the tightest window across groups, named, with its refresh (Gemini 100% never hides Claude and GPT at 0%)" || bad "agy: $R"
+jq -e '.state == "ok" and .left == "91% left" and .used == 9 and .plan_seen == true and (.windows | length) == 5' >/dev/null <<<"$R" && ok "agy: Gemini headline stays at 91% with a spent Claude and GPT pool" || bad "agy: $R"
 jq -e '[.windows[] | select(.label == "Claude and GPT Models · week")][0] | .left == 0 and (.renews_at | type) == "number" and .renews_at > now + 3*86400' >/dev/null <<<"$R" \
   && ok "agy: spent group keeps its refresh time (Refreshes in 94h 19m)" || bad "agy windows: $R"
 jq -e '.note | test("Claude and GPT Models: 0% left")' >/dev/null <<<"$R" && ok "agy: note names the other groups" || bad "agy note: $R"

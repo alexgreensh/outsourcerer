@@ -33,5 +33,25 @@
     });
     return box;
   }
-  window.OSRC_HUB_PLANS = { windows, list, renew };
+  function startChecks(button, refresh) {
+    async function check() {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.textContent = 'Checking…';
+      try {
+        await refresh();
+        button.textContent = 'Check again';
+      } catch {
+        button.textContent = 'Retry check';
+      } finally {
+        button.disabled = false;
+      }
+    }
+    button.hidden = false;
+    button.onclick = check;
+    check();
+    const timer = setInterval(check, 300000);
+    return () => clearInterval(timer);
+  }
+  window.OSRC_HUB_PLANS = { windows, list, renew, startChecks };
 })();

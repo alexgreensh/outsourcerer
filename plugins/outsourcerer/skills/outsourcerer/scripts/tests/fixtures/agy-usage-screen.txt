@@ -9,7 +9,7 @@ GEMINI MODELS
   Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash
 
   Weekly Limit Remaining
-    [██████████████████████████████████████████████████] 100.00%
+    [██████████████████████████████████████████████████] 91.00%
     Quota available
 
   Five Hour Limit Remaining

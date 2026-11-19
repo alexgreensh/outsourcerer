@@ -65,23 +65,20 @@ def agy_fix:
       ($a.groups | to_entries | map(.key as $gi | .value as $g | $g.windows[]
          | {k: "agy\($gi)\(.kind)", group: $g.name, kind, left, renews_at, note, disabled: (.disabled // false),
             label: "\($g.name) · \(if .kind == "5h" then "5 hours" else "week" end)"})) as $all
-      | (($a.groups | map(select(.name | test("^Gemini Models$"; "i"))) | first) // $a.groups[0]) as $main
+      | (($a.groups | map(select(.name | test("^Gemini Models$"; "i"))) | first) // {}) as $main
       | ($all | map(select(.group == $main.name and .left != null))) as $mw
       | ($all | map(select(.group != $main.name and .left != null and .kind == "week"))
          | map("\(.group): \(.left | pct)% left this week") | join("; ")) as $others
-      # Headline = the tightest window across ALL model groups, named when it is not the main group:
-      # Gemini at 100% must not hide Claude and GPT models at 0% until Friday (Alex, 2026-11-16).
-      | ($all | map(select(.left != null))) as $any
-      | (if ($any | length) > 0 then ($any | min_by(.left)) elif ($mw | length) > 0 then ($mw | min_by(.left)) else null end) as $w
+      | ($mw | map(select(.disabled != true)) | min_by(.left)) as $w
       | . + (if $w == null then {state: "unknown", left: "No reading"}
-             else {state: st(100 - $w.left), left: ("\($w.left | pct)% left" + (if $w.group != $main.name then " · \($w.group)" else "" end)),
+             else {state: st(100 - $w.left), left: "\($w.left | pct)% left",
                    used: (100 - $w.left | num1), window: $w.k, plan_seen: true,
                    renews_at: (if $w.left < 100 then $w.renews_at else null end)} end)
       | . + {windows: ($all | map({(.k): ({label, left: (if .left == null then null else (.left | num1) end),
                                            used: (if .left == null then null else (100 - .left | num1) end), renews_at}
                                           + (if (.note // "") != "" and .left == null then {note} else {} end))}) | add),
              models: ($main.models // null),
-             note: ("Checked live from Antigravity's /usage screen (\($main.name))." + (if $others != "" then " \($others)." else "" end)),
+             note: ("Checked live from Antigravity's /usage screen (\($main.name // "Gemini Models missing"))." + (if $others != "" then " \($others)." else "" end)),
              source: "agy /usage"}
       | checked($a.checked // $now)
     else . + {state: "unknown", left: "No reading", note: "Antigravity's /usage screen could not be read: \($a.why // "agy is not available")."} | checked($a.checked // $now)
