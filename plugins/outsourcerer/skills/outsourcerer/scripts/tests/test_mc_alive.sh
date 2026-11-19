@@ -8,6 +8,8 @@
 #   open     work starting opens the page once per hub process when no tab fetched data in 2 min; never in
 #            CI, never with OSRC_MC_AUTO_OPEN=0; a desktop is "the console user is this user", so tmux
 #            (launchctl says Background) still counts. The opener is a recorder: no real browser.
+#   merged   a queued review item whose head is already in its base closes as merged: no unreviewed
+#            alert from Mission Control or the events feed, lane reads done; an unmerged one still alerts.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
@@ -142,6 +144,56 @@ if command -v node >/dev/null 2>&1; then
   pass=$(( pass + $(printf '%s\n' "$out" | grep -c '^PASS') )); fail=$(( fail + $(printf '%s\n' "$out" | grep -c '^FAIL') ))
   [ "$rc" = 0 ] || [ "$(printf '%s\n' "$out" | grep -c '^FAIL')" -gt 0 ] || no "hub_alive_dom.js exited $rc: $out"
 else echo "SKIP: node not installed (liveness strip unit)"; fi
+
+echo "=== a queued review item whose head already merged closes instead of alerting ==="
+# A bare "remote" plus the clone the orchestrator merges in; no network, fake HOME/OSRC_HOME.
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+RR="$TMP/rr"; RMR="$RR/remote.git"; WRK="$RR/work"
+git init -q --bare "$RMR" && git clone -q "$RMR" "$WRK" 2>/dev/null \
+  && ( cd "$WRK" && git checkout -q -b main && echo base > f.txt && git add f.txt && git commit -q -m base && git push -q origin main ) \
+  && ( cd "$WRK" && git checkout -q -b lane/merged && echo m > m.txt && git add m.txt && git commit -q -m "READY: merged lane" && git push -q origin lane/merged ) \
+  && ( cd "$WRK" && git checkout -q -b lane/open main && echo o > o.txt && git add o.txt && git commit -q -m "READY: open lane" && git push -q origin lane/open ) \
+  || no "could not build the temp git repo"
+H_MERGED="$(git -C "$WRK" rev-parse lane/merged 2>/dev/null)"; H_OPEN="$(git -C "$WRK" rev-parse lane/open 2>/dev/null)"
+( cd "$WRK" && git checkout -q main && git merge -q --no-ff lane/merged -m "merge lane/merged" && git push -q origin main && git fetch -q origin )
+mkdir -p "$OSRC_HOME/remote" "$OSRC_HOME/review/items" "$OSRC_HOME/owners/S"
+NOW="$(date +%s)"; OLD=$(( NOW - 4000 ))
+# mg: lane record points at the clone (origin/main proves the merge); unm: at the bare remote (main);
+# br: no lane record at all, the item's own url is the only local path (a bare-branch queue add).
+jq -n --arg repo "$WRK" --arg url "$RMR" --arg head "$H_MERGED" --argjson now "$NOW" \
+  '{id:"mg", branch:"lane/merged", repo:$repo, url:$url, transport:"git", base:"main", head:$head,
+    head_msg:"READY: merged lane", head_ready:true, ready_head:$head, ready_ts:$now, last_push_ts:$now,
+    last_poll_ts:$now, last_ok_ts:$now, err_count:0, branch_deleted:false, seen_branch:true, check:null}' \
+  > "$OSRC_HOME/remote/mg.json"
+jq -n --arg repo "$RMR" --arg url "$RMR" --arg head "$H_OPEN" --argjson now "$NOW" \
+  '{id:"unm", branch:"lane/open", repo:$repo, url:$url, transport:"git", base:"main", head:$head,
+    head_msg:"READY: open lane", head_ready:true, ready_head:$head, ready_ts:$now, last_push_ts:$now,
+    last_poll_ts:$now, last_ok_ts:$now, err_count:0, branch_deleted:false, seen_branch:true, check:null}' \
+  > "$OSRC_HOME/remote/unm.json"
+mk_item() { # <lane> <head> <url>
+  jq -n --arg lane "$1" --arg head "$2" --arg url "$3" --argjson t "$OLD" \
+    '{id:($lane+"-"+$head[0:7]), lane:$lane, head:$head, base:"main", url:$url, state:"queued", enq_ts:$t, stale:false, acked:false}' \
+    > "$OSRC_HOME/review/items/$1-${2:0:7}.json"
+}
+mk_item mg "$H_MERGED" "$RMR"; mk_item unm "$H_OPEN" "$RMR"; mk_item br "$H_MERGED" "$RMR"
+: > "$OSRC_HOME/owners/S/mg"; : > "$OSRC_HOME/owners/S/unm"; : > "$OSRC_HOME/owners/S/br"
+p="$(lib osrc_mc_alerts S '{"id":"S"}')"
+jq -e '.state == "closed" and .closed_reason == "merged" and (.closed_ts | type) == "number"' \
+  "$OSRC_HOME/review/items/mg-${H_MERGED:0:7}.json" >/dev/null \
+  && ok "queued item whose head is in its base: closed with reason merged" || no "mg item: $(cat "$OSRC_HOME/review/items/mg-${H_MERGED:0:7}.json" 2>/dev/null)"
+jq -e '.state == "closed" and .closed_reason == "merged"' "$OSRC_HOME/review/items/br-${H_MERGED:0:7}.json" >/dev/null \
+  && ok "no lane record: the item's own url still proves the merge" || no "br item not closed"
+jq -e '[.alerts[]? | select(.kind == "unreviewed")] | length == 1 and .[0].lane == "unm"' <<<"$p" >/dev/null \
+  && ok "Mission Control: merged lanes raise no unreviewed alert, the unmerged one still does" || no "mc alerts: $p"
+[ "$(lib osrc_remote_state mg)" = done ] && [ "$(lib osrc_remote_state unm)" = ready ] \
+  && ok "lane state: merged head reads done, unmerged head stays ready" || no "states: mg=$(lib osrc_remote_state mg) unm=$(lib osrc_remote_state unm)"
+ev="$(lib osrc_review_events 2>/dev/null)"
+grep -q "^EVENT unreviewed unm " <<<"$ev" && ! grep -q "^EVENT unreviewed mg " <<<"$ev" && ! grep -q "^EVENT unreviewed br " <<<"$ev" \
+  && ok "supervise events: only the unmerged lane reports unreviewed" || no "events: $ev"
+ev2="$(lib osrc_remote_events 2>/dev/null)"
+! grep -q "^EVENT unreviewed" <<<"$ev2" \
+  && ok "remote events: no READY-no-review backstop once merged items close" || no "remote events: $ev2"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" = 0 ]

@@ -152,6 +152,66 @@ _osrc_review_lane_removed() { # <lane>: delete that lane's items and files; a la
   done
 }
 
+# ---- merged-head sweep -------------------------------------------------------------------------
+# A queued item whose head is already contained in its base landed without a verdict (merged by
+# hand, or reviewed somewhere the queue never saw); left queued it alerts "READY, no review
+# started" forever. Close it as merged. Local git only, queued items only, no fetch: a head that
+# cannot be proven merged stays queued.
+_osrc_review_item_merged() { # <item-json> -> 0 when .head is an ancestor of the item's .base
+  local p="$1" head base lane lf repo url u ref seen=" "
+  head="$(jq -r '.head // ""' "$p" 2>/dev/null)"; base="$(jq -r '.base // "main"' "$p" 2>/dev/null)"
+  case "$head" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  case "$base" in ''|-*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+  type git >/dev/null 2>&1 || return 1
+  type _osrc_lane_json >/dev/null 2>&1 || return 1
+  lane="$(jq -r '.lane // ""' "$p" 2>/dev/null)"
+  repo=""; url=""; lf="$(_osrc_lane_json "$lane")"
+  if [ -f "$lf" ]; then
+    repo="$(jq -r '.repo // ""' "$lf" 2>/dev/null)"; url="$(jq -r '.url // ""' "$lf" 2>/dev/null)"
+  fi
+  # Only a local path answers "is it merged" for free: the lane record's repo, its remote when that
+  # is a path, then the item's own url (a bare-branch queue add has no lane record).
+  for u in "$repo" "$url" "$(jq -r '.url // ""' "$p" 2>/dev/null)"; do
+    case "$u" in file://*) u="${u#file://}" ;; esac
+    case "$u" in /*) ;; *) continue ;; esac
+    [ -d "$u" ] || continue
+    case "$seen" in *" $u "*) continue ;; esac; seen="$seen$u "
+    for ref in "origin/$base" "$base"; do
+      git -C "$u" merge-base --is-ancestor "$head" "$ref" 2>/dev/null && return 0
+    done
+  done
+  return 1
+}
+
+_osrc_review_sweep_merged() { # [owner-slug]: close queued items whose head already landed in base
+  # Events and hub exports call this often; an unmerged item is re-proved at most every
+  # OSRC_REVIEW_MERGED_SECS (5 min, far under the 15 min alert threshold) via .merged_checked_ts.
+  local p slug="${1:-}" lane now last gap
+  now="$(_osrc_now)"; gap="${OSRC_REVIEW_MERGED_SECS:-300}"
+  for p in $(_osrc_review_items); do
+    [ "$(jq -r '.state // ""' "$p" 2>/dev/null)" = queued ] || continue
+    if [ -n "$slug" ]; then
+      lane="$(jq -r '.lane // ""' "$p" 2>/dev/null)"
+      [ -e "$OSRC_HOME/owners/$slug/$lane" ] || continue
+    fi
+    last="$(jq -r '.merged_checked_ts // 0' "$p" 2>/dev/null)"
+    [ "$last" -gt 0 ] 2>/dev/null && [ $(( now - last )) -lt "$gap" ] && continue
+    if _osrc_review_item_merged "$p"; then
+      _osrc_jq_set "$p" --argjson now "$now" '.state="closed" | .closed_reason="merged" | .closed_ts=$now'
+    else
+      _osrc_jq_set "$p" --argjson now "$now" '.merged_checked_ts=$now'
+    fi
+  done
+  return 0
+}
+
+_osrc_review_item_closed_merged() { # <lane> <head> -> rc0 when that head's item closed as merged
+  local p="$(_osrc_rv_item "$1-${2:0:7}")"
+  [ -f "$p" ] && [ "$(jq -r .head "$p" 2>/dev/null)" = "$2" ] \
+    && [ "$(jq -r '.state // ""' "$p" 2>/dev/null)" = closed ] \
+    && [ "$(jq -r '.closed_reason // ""' "$p" 2>/dev/null)" = merged ]
+}
+
 _osrc_review_verdict_for() { # <lane> <head> -> verdict of a VALID (non-stale) review of exactly this head
   local p="$(_osrc_rv_item "$1-${2:0:7}")"
   [ -f "$p" ] || return 0
@@ -377,6 +437,7 @@ osrc_review_events() {
   un="$(_osrc_mins "${OSRC_UNREVIEWED_MIN:-15}")"; renotify="$(_osrc_mins "${OSRC_RENOTIFY_MIN:-15}")"
   rv_renotify="$(_osrc_mins "${OSRC_REVIEW_IDLE_RENOTIFY_MIN:-2}")"; send_grace="${OSRC_REVIEW_SEND_GRACE_SECS:-45}"
   _osrc_review_ingest
+  _osrc_review_sweep_merged   # a head that already landed must not read as awaiting review
   for p in $(_osrc_review_items); do
     id="$(jq -r .id "$p")"; lane="$(jq -r .lane "$p")"; sha7="$(jq -r '.head[0:7]' "$p")"; st="$(jq -r .state "$p")"
     stale="$(jq -r .stale "$p")"

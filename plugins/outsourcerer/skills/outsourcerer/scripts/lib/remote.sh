@@ -361,6 +361,8 @@ osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no net
     v=""; type _osrc_review_verdict_for >/dev/null 2>&1 && v="$(_osrc_review_verdict_for "$id" "$head")"
     # CHANGES: the ball is back with the lane, so it is live (and gets a stall clock from the verdict)
     case "$v" in MERGE|BLOCK) printf done; return 0 ;; CHANGES) printf live; return 0 ;; esac
+    # An item closed as merged means this head already landed: the lane is done, not ready.
+    type _osrc_review_item_closed_merged >/dev/null 2>&1 && _osrc_review_item_closed_merged "$id" "$head" && { printf done; return 0; }
     printf ready; return 0
   fi
   printf live
@@ -408,7 +410,7 @@ osrc_remote_events() {
     # lost item) is the "sat READY for hours" class. Say so instead of staying quiet.
     if [ "$st" = ready ] && [ -n "$head" ] && type _osrc_review_item_state >/dev/null 2>&1; then
       case "$(_osrc_review_item_state "$id" "$head")" in
-        queued|inflight|verdict) ;;
+        queued|inflight|verdict|closed) ;;
         *) if _osrc_ev_due "$id" "noitem:$head" "$renotify"; then
              _osrc_emit unreviewed "$id" "READY $sha7 has no review item queued, in flight or finished" "$(_osrc_review_requeue_cmd "$id" "$head")"
            fi ;;

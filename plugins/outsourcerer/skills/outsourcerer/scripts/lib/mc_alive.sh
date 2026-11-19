@@ -121,6 +121,7 @@ osrc_mc_alerts() {
     a="$(jq -c --arg k "${k:-stalled}" --arg l "$id" --argjson s "$(_sv_num "$since" "$now")" --arg t "$txt" '. + [{kind:$k, lane:$l, since:$s, text:$t}]' <<<"$a")"
   done
   un=$(( $(_sv_num "${OSRC_UNREVIEWED_MIN:-}" 15) * 60 ))
+  type _osrc_review_sweep_merged >/dev/null 2>&1 && _osrc_review_sweep_merged "$slug"   # landed heads close as merged before they can alert
   for f in "$OSRC_HOME"/review/items/*.json; do
     [ -f "$f" ] || continue
     id="$(jq -r 'select(.state == "queued") | .lane // empty' "$f" 2>/dev/null)"; [ -n "$id" ] || continue
