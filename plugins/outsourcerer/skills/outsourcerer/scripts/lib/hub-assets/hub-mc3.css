@@ -82,3 +82,16 @@
 .pt-proof { margin: 0; font-size: .85rem; font-weight: 500; display: flex; align-items: center; gap: 6px; }
 .pt-proof.stop { font-weight: 700; }
 .pt-proof-lines { margin: 2px 0 0; padding: 6px 8px; font-size: .75rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--thumb); border-radius: 6px; max-height: 6.5em; overflow: hidden; }
+/* "Things need you" tile: each decision is a link to its card; the tile opens the most urgent one. */
+.glance li.gclick { cursor: pointer; }
+.glance li.gclick:hover { box-shadow: 5px 5px 0 var(--shadow); transform: translate(-1px, -1px); }
+.glance .gneed { margin: 8px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.glance .gnd { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; text-align: left; font: inherit; font-size: .9rem; font-weight: 600; color: inherit; background: rgba(255, 255, 255, .55); border: 1.5px solid currentColor; border-radius: 10px; padding: 6px 10px; cursor: pointer; }
+.glance .gnd:hover, .glance .gnd:focus-visible { box-shadow: 2px 2px 0 currentColor; }
+.glance .gndt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glance .gchore { margin-top: 10px; padding-top: 8px; border-top: 1.5px dashed currentColor; display: flex; flex-direction: column; gap: 2px; }
+.glance .gchh { font-size: .8rem; font-weight: 700; }
+.glance .gch { font: inherit; font-size: .82rem; text-align: left; color: inherit; background: none; border: 0; padding: 2px 0; cursor: pointer; }
+.glance .gch:hover { text-decoration: underline; }
+@media (max-width: 720px) { .glance li.gneedt { display: flex; flex-direction: column; } }
+.dec .dwhy, .dec .drec { margin: 0; font-size: .95rem; line-height: 1.45; }

@@ -243,16 +243,62 @@
     }
 
     // ---- At a glance (MC3): what is running, what needs me, what is left on my plans. -----------------
-    function glance(running, waiting) {
+    // The "things need you" tile lists the decisions themselves, each one a link to its card; the tile
+    // body opens the most urgent one. Lane housekeeping (READY lanes nobody reviewed, a project with no
+    // watcher) is the orchestrator's job, so it shows as one short "Claude's to-do" line per project,
+    // never as a needs-you alarm per lane.
+    const span = (m) => (m < 60 ? m + ' min' : m < 2880 ? Math.round(m / 60) + ' h' : Math.round(m / 1440) + ' days');
+    function chores(running) {
+      const out = [];
+      running.forEach((p) => {
+        const al = Array.isArray(p.alerts) ? p.alerts : [];
+        const rev = al.filter((a) => a.kind === 'unreviewed').length, stuck = al.filter((a) => a.kind !== 'unreviewed').length;
+        const bits = [];
+        if (stuck) bits.push(stuck + (stuck === 1 ? ' stalled lane' : ' stalled lanes') + ' to unstick');
+        if (rev) bits.push(rev + (rev === 1 ? ' finished lane' : ' finished lanes') + ' to review');
+        if (p.watcher && p.watcher.missingMin != null) bits.push('no watcher for ' + span(p.watcher.missingMin));
+        if (bits.length) out.push({ p, text: bits.join(', ') });
+      });
+      return out;
+    }
+    function needTile(li, need, all, askers, proofStops, running) {
+      const go = ctx.go, decs = all.slice().sort((a, b) => byWeight(a.d, b.d));
+      li.append(el('span', 'gv', String(need)), el('span', 'gl', need === 1 ? 'thing needs you' : 'things need you'));
+      if (!need) li.append(el('span', 'gs', 'Nothing waiting'));
+      const ul = el('div', 'gneed');
+      decs.slice(0, 4).forEach(({ p, d }) => {
+        const b = el('button', 'gnd'); b.type = 'button'; b.id = 'gn-' + p.id + '-' + d.id; b.title = d.q || '';
+        b.append(pri(d.weight), el('span', 'gndt', d.short || d.q));
+        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); });
+        ul.append(b);
+      });
+      if (decs.length > 4) { ul.append(el('span', 'gs', 'and ' + (decs.length - 4) + ' more below')); }
+      askers.forEach(({ p, n }) => {
+        const b = el('button', 'gnd'); b.type = 'button'; b.append(el('span', 'gndt', n + (n === 1 ? ' lane is asking you' : ' lanes are asking you') + ' · ' + p.name));
+        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); ul.append(b);
+      });
+      if (proofStops) { ul.append(el('span', 'gs', proofStops + (proofStops === 1 ? ' lane stopped on proof' : ' lanes stopped on proof'))); }
+      if (ul.children.length) li.append(ul);
+      const ch = chores(running);
+      if (ch.length) {
+        const cl = el('div', 'gchore'); cl.append(el('span', 'gchh', "Claude's to-do, not yours"));
+        ch.forEach(({ p, text }) => { const b = el('button', 'gch'); b.type = 'button'; b.append(el('b', null, p.name), document.createTextNode(': ' + text)); b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); cl.append(b); });
+        li.append(cl);
+      }
+      const first = decs[0] || null, ask0 = askers[0] || null;
+      if (first || ask0) { li.classList.add('gclick'); li.addEventListener('click', () => (first ? go(first.p.id, first.d.id) : go(ask0.p.id))); }
+    }
+    function glance(running, all) {
+      const waiting = all.length;
       const items = [];
       const lanesOn = running.reduce((a, p) => a + liveLanes(p).length, 0);
       items.push({ v: String(running.length), l: running.length === 1 ? 'project running' : 'projects running',
         s: lanesOn ? lanesOn + (lanesOn === 1 ? ' lane working' : ' lanes working') : (running.length ? 'Between lanes' : 'Nothing started') });
-      const asks = running.reduce((a, p) => a + liveLanes(p).filter((l) => ['approval', 'question'].includes(laneState(l))).length, 0);
+      const askers = running.map((p) => ({ p, n: liveLanes(p).filter((l) => ['approval', 'question'].includes(laneState(l))).length })).filter((x) => x.n);
+      const asks = askers.reduce((a, x) => a + x.n, 0);
       const proofStops = window.OSRC_HUB_PROOF ? window.OSRC_HUB_PROOF.needs(running) : 0;
       const need = waiting + asks + proofStops;
-      items.push({ v: String(need), l: need === 1 ? 'thing needs you' : 'things need you', hot: need > 0,
-        s: need ? [waiting ? waiting + (waiting === 1 ? ' decision' : ' decisions') : '', asks ? asks + (asks === 1 ? ' lane asking' : ' lanes asking') : '', proofStops ? proofStops + (proofStops === 1 ? ' lane stopped on proof' : ' lanes stopped on proof') : ''].filter(Boolean).join(', ') : 'Nothing waiting' });
+      items.push({ need, hot: need > 0, askers, proofStops });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
       const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
       // MC4 #5: every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
@@ -266,7 +312,8 @@
           li.append(el('span', 'gl', 'Left on your plans'));
           x.plans.forEach((q) => { const r = el('span', 'gp'); r.append(el('span', 'gpn', q.l.name || q.l.id), el('span', isFinite(q.n) ? 'gpv' : 'gpv gpt', isFinite(q.n) ? Math.round(q.n) + '%' : q.t));
             if (q.l.renews) r.append(el('span', 'gs gpr', 'Renews ' + q.l.renews)); li.append(r); });
-        } else { li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); }
+        } else if (x.askers) { li.classList.add('gneedt'); needTile(li, x.need, all, x.askers, x.proofStops, running); }
+        else { li.append(el('span', 'gv', x.v), el('span', 'gl', x.l)); if (x.s) li.append(el('span', 'gs', x.s)); }
         ul.append(li);
       });
       return ul;
@@ -313,7 +360,7 @@
         how.append(a, b); ph.append(how);
       }
       main.append(ph);
-      if (db && !err) main.append(glance(running, all.length));
+      if (db && !err) main.append(glance(running, all));
       const top = all.filter((x) => isTop(x.d)).sort((a, b) => byWeight(a.d, b.d));
       if (top.length) {
         const sec = el('section', 'card toppri'); const h = el('h2'); h.id = 'tp-h'; h.append(ic('hand'), el('span', null, 'These are top-priority decisions for you right now.')); sec.setAttribute('aria-labelledby', 'tp-h');

@@ -18,8 +18,13 @@
       const db = ctx.db;
       const c = el('div', 'card dec'); c.id = 'dec-' + d.id;
       c.append(tags(d), el('span', 'q', d.q));
-      if (d.rec) c.append(el('span', null, d.rec));
-      if (d.when) c.append(el('span', 'mono', 'Needed by ' + d.when));
+      // MC 0.17.1: a card stands on its own: what this is about, the orchestrator's pick, how long it waits.
+      if (d.why) c.append(el('p', 'dwhy', d.why));
+      if (d.rec) { const r = el('p', 'drec'); r.append(el('b', null, 'My pick: '), document.createTextNode(d.rec)); c.append(r); }
+      if (!d.why && !d.rec && !(d.options || []).length) c.append(el('p', 'dwhy', 'This question came without background. Ask ' + (p.name || 'that session') + ' what it needs, or answer below.'));
+      const asked = Date.parse(d.askedAt || ''), mins = isNaN(asked) ? -1 : Math.round((Date.now() - asked) / 60000);
+      const meta = [d.when ? 'Needed by ' + d.when : '', mins >= 0 ? 'Asked ' + (mins < 60 ? mins + ' min' : mins < 2880 ? Math.round(mins / 60) + ' h' : Math.round(mins / 1440) + ' days') + ' ago' : ''].filter(Boolean).join(' · ');
+      if (meta) c.append(el('span', 'mono', meta));
       const a = el('div', 'ans'); const opts = el('div', 'opts');
       const key = p.id + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
       (d.options || []).forEach((o, i) => {

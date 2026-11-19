@@ -335,6 +335,18 @@ _gate_int_sweep() {
 # PATH), not the suite's sandbox: a suite whose run auto-detached into a session was scoping the
 # developer's real Devin skills home and launching the real devin CLI. TMUX_TMPDIR moves the
 # default socket, so every pane a suite opens lands on a throwaway server with the suite's env.
+# OSRC_CONFORMANCE_SHARD=i/n runs every n-th suite starting at i (1-based), so CI can split the
+# ~30 min gate across parallel jobs. The static checks below still run in every shard (seconds).
+case "${OSRC_CONFORMANCE_SHARD:-}" in
+  '') ;;
+  */*) _sh_i="${OSRC_CONFORMANCE_SHARD%/*}"; _sh_n="${OSRC_CONFORMANCE_SHARD#*/}"
+       case "$_sh_i$_sh_n" in *[!0-9]*|'') echo "FAIL: OSRC_CONFORMANCE_SHARD must be i/n"; exit 1 ;; esac
+       [ "$_sh_n" -ge 1 ] && [ "$_sh_i" -ge 1 ] && [ "$_sh_i" -le "$_sh_n" ] || { echo "FAIL: OSRC_CONFORMANCE_SHARD out of range"; exit 1; }
+       _sh_list=""; _sh_k=0
+       for t in $_ALL_SUITES; do _sh_k=$((_sh_k + 1)); [ $(( (_sh_k - 1) % _sh_n + 1 )) -eq "$_sh_i" ] && _sh_list="$_sh_list $t"; done
+       _RUN_SUITES="$_sh_list"; echo "shard $_sh_i/$_sh_n:$(echo $_sh_list | wc -w) suites" ;;
+  *) echo "FAIL: OSRC_CONFORMANCE_SHARD must be i/n"; exit 1 ;;
+esac
 _conf_tmux_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
 [ -d "$_conf_tmux_dir" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 # A PATH shim routes EVERY tmux call a suite makes — its own and the engine's — onto a private
@@ -369,7 +381,7 @@ esac
 
 if [ "$_JOBS" -le 1 ]; then
   trap '_gate_int_sweep; _conf_tmux_end; exit 130' INT
-  for t in $_ALL_SUITES; do
+  for t in ${_RUN_SUITES-$_ALL_SUITES}; do
     _suite_path="$SCRIPT_DIR/$t.sh"; [ -f "$_suite_path" ] || _suite_path="$SCRIPT_DIR/$t.py"
     if [ -f "$_suite_path" ]; then
       _run_unit_suite_bounded "$_suite_path"
@@ -383,7 +395,7 @@ else
   # and leaves its result in files; results are reported in registry order, as soon as the next
   # suite in order is done, so the log reads the same as a serial run.
   _par_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-par.XXXXXX")" || { echo "FAIL: mktemp for the parallel pool"; exit 1; }
-  _par_order=(); for t in $_ALL_SUITES; do _par_order+=("$t"); done
+  _par_order=(); for t in ${_RUN_SUITES-$_ALL_SUITES}; do _par_order+=("$t"); done
   _par_n=${#_par_order[@]}; _par_pid=(); _par_done=()
   _par_sweep() {
     local k

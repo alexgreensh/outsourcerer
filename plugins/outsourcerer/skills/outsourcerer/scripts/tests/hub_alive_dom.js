@@ -89,17 +89,16 @@ const tick = () => new Promise((r) => setImmediate(r));
     P.paint();
     ok(/^Connecting to Mission Control/.test(P.text()), 'H: before the first call: connecting');
   }
-  // D/E: needs-you rows ride in the export: an unreviewed READY lane with its age, a missing watcher.
+  // D/E: lane alerts ride in the export but never become one strip row per lane (0.17.0 buried the page
+  // under 24 of them); Home's needs-you tile sums them per project instead.
   {
     const now = 1800000000;
     const P = page(() => Promise.resolve(res(200, { generated_at: now, projects: [{ id: 'S', name: 'TR build',
       watcher: { missingMin: 7, liveLanes: 3 }, alerts: [{ kind: 'unreviewed', lane: 'v185-x', since: now - 18 * 60, text: 'READY, no review started' },
         { kind: 'stalled', lane: 'S3', since: now - 11 * 60, text: 'still stalled 6m after one autonudge' }] }] })));
     await P.window.fetch('/api/projects'); await tick(); await tick(); P.paint();
-    const t = P.bar().querySelector('ul').textContent;
-    ok(/Needs you: No watcher for 7 min · TR build: 3 live lane\(s\), no supervise armed/.test(t), 'E: "No watcher for 7 min" is shown');
-    ok(/Needs you: v185-x waits for review, 18 min/.test(t), 'D: a READY lane waiting for review shows as needs-you with its age');
-    ok(/Needs you: S3 is stalled, 11 min · TR build: still stalled 6m after one autonudge/.test(t), 'B: an escalated stall shows as needs-you');
+    ok(!/Needs you|v185-x|S3|No watcher/.test(P.bar().textContent), 'D/E: the strip lists no per-lane alerts');
+    ok(/^Live · updated/.test(P.text()), 'D/E: the strip stays one Live line');
   }
   console.log('NODE: ' + pass + ' passed, ' + fail + ' failed');
   process.exit(fail ? 1 : 0);

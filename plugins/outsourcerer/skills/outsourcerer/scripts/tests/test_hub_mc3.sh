@@ -80,9 +80,17 @@ jq -e '.name == "Total Recall 1.8.6" and .status == "building" and .pct == 62 an
   && ok "every field reaches the card" || bad "card: $P"
 as "$MC3_SID_A" hub report --pct 70 >/dev/null 2>&1
 jq -e '.pct == 70 and .eta == "Tue 17 Nov" and .name == "Total Recall 1.8.6"' "$OSRC_HOME/hub/projects/$MC3_SID_A.json" >/dev/null && ok "a later report merges, keeping other fields" || bad "merge lost fields"
-as "$MC3_SID_A" hub report --ask "Ship tonight?" --weight Critical >/dev/null && as "$MC3_SID_A" hub report --ask "Bump the version?" >/dev/null
+as "$MC3_SID_A" hub report --ask "Ship tonight?" --why "The fixes are merged and the free gate is green." --rec "Yes, nothing is left." --when "Today" --weight Critical >/dev/null \
+  && as "$MC3_SID_A" hub report --ask "Bump the version?" --why "Two lanes changed the file format." --option "Bump to 1.9" --option "Keep 1.8" >/dev/null
 D="$(eng hub export | jq -c --arg s "$MC3_SID_A" '.projects[] | select(.id == $s) | .decisions')"
 jq -e 'length == 2 and .[0].id == "D1" and .[0].weight == "Critical" and .[1].id == "D2" and .[1].weight == "High" and all(.[]; .status == "wait")' >/dev/null <<<"$D" && ok "--ask adds open decisions D1, D2" || bad "asks: $D"
+jq -e '.[0].why == "The fixes are merged and the free gate is green." and .[0].rec == "Yes, nothing is left." and .[0].when == "Today" and .[1].options == ["Bump to 1.9","Keep 1.8"] and (.[1] | has("rec") | not)' >/dev/null <<<"$D" \
+  && ok "an ask carries its background, pick, deadline and choices to the card" || bad "ask detail: $D"
+for args in "--ask Bare?" "--ask Q --why" "--ask Q --rec R" "--ask Q --why W" "--ask Q --why W --option only-one" "--why W" "--option X"; do
+  # shellcheck disable=SC2086
+  if as "$MC3_SID_A" hub report $args >/dev/null 2>&1; then bad "accepted an ask without context: $args"; else ok "refuses an ask without context: $args"; fi
+done
+jq -e 'length == 2' "$OSRC_HOME/hub/decisions/$MC3_SID_A.json" >/dev/null && ok "a refused ask adds nothing" || bad "a refused ask was saved"
 as "$MC3_SID_A" hub report --done-ask D1 >/dev/null
 jq -e '.[0].status == "done" and .[1].status == "wait"' "$OSRC_HOME/hub/decisions/$MC3_SID_A.json" >/dev/null && ok "--done-ask closes exactly that question" || bad "done-ask"
 for args in "--status flying" "--pct 101" "--pct -3" "--pct 4x" "--name https://github.com/a/b" "--name alexgreensh/total-recall" "--name 0163abcdef0123456789" "--done-ask D9" "--eta" "--weight High" "--bogus 1"; do

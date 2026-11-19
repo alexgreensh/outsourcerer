@@ -2,6 +2,15 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.1
+
+### Fixed
+
+- **"Things need you" is clickable again.** Each decision sits in the tile as its own link and opens its card; the tile itself opens the most urgent one.
+- **No more wall of alerts.** The top strip is back to one "Live" line. Lanes waiting for review and missing watchers show as one short "Claude's to-do" line per project, since they are the orchestrator's job, not yours.
+- **Every question explains itself.** `hub report --ask` now needs `--why` (background in plain words) and `--rec` or two `--option`s, and the card shows the background, the pick, the choices and how long it has waited. An older bare question says it came without background.
+- **Faster CI.** The test gate runs in parallel slices, so a release check takes minutes instead of half an hour.
+
 ## 0.17.0
 
 ### Added

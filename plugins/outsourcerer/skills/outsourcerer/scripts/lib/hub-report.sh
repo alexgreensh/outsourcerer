@@ -145,26 +145,34 @@ _osrc_hub_report_usage() {
   cat <<'EOF'
 usage: outsourcerer hub report [--status building|review|waiting|shipped] [--pct N] [--eta "<text>"]
                                [--next "<one line>"] [--name "<project name>"]
-                               [--ask "<question for Alex>" [--weight Critical|High|Medium|Low]]
+                               [--ask "<question for Alex>" --why "<background>" --rec "<your pick and why>"
+                                [--option "<choice>"]... [--when "<needed by>"] [--weight Critical|High|Medium|Low]]
                                [--done-ask <id>]
 Run it from the orchestrator's own Claude Code session. Each flag updates one field of this
 session's Mission Control card; fields you leave out keep their last value.
+A question must stand on its own for someone who has not followed the work: --why says what this
+is about and what changes with the answer, in plain words; --rec gives your pick and why; --option
+(two or more) gives buttons. Use --done-ask the moment it is answered anywhere (chat, a board).
 EOF
 }
 
 cmd_hub_report() {
-  local st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" any=0 v
+  local st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" any=0 v why="" rec="" when="" opts='[]' nopt=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h|--help) _osrc_hub_report_usage; return 0 ;;
-      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask)
+      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask|--why|--rec|--when|--option)
         [ "$#" -ge 2 ] || die "hub report: $1 needs a value"
         v="$2"
         case "$1" in
           --status) st="$v" ;; --pct) pct="$v" ;; --eta) eta="$v" ;; --next) nxt="$v" ;;
           --name) name="$v" ;; --ask) ask="$v" ;; --weight) weight="$v" ;; --done-ask) done_ask="$v" ;;
+          --why) why="$v" ;; --rec) rec="$v" ;; --when) when="$v" ;;
+          --option) v="$(_osrc_hub_text 80 "$v")"; [ -n "$v" ] || die "hub report: --option is empty"
+                    nopt=$((nopt + 1)); [ "$nopt" -le 5 ] || die "hub report: at most 5 --option"
+                    opts="$(jq -c --arg o "$v" '. + [$o]' <<<"$opts")" ;;
         esac
-        [ "$1" = --weight ] || any=1
+        case "$1" in --weight|--why|--rec|--when|--option) ;; *) any=1 ;; esac
         shift 2 ;;
       *) _osrc_hub_report_usage >&2; die "hub report: unknown option '$1'" ;;
     esac
@@ -180,6 +188,13 @@ cmd_hub_report() {
   [ -z "$eta" ] || { eta="$(_osrc_hub_text 40 "$eta")"; [ -n "$eta" ] || die "hub report: --eta is empty"; }
   [ -z "$nxt" ] || { nxt="$(_osrc_hub_text 160 "$nxt")"; [ -n "$nxt" ] || die "hub report: --next is empty"; }
   [ -z "$ask" ] || { ask="$(_osrc_hub_text 240 "$ask")"; [ -n "$ask" ] || die "hub report: --ask is empty"; }
+  # A bare one-line question reads as jargon to anyone outside the session (MC 0.17.1): an ask
+  # carries its background and either a recommendation or real choices.
+  if [ -n "$ask" ]; then
+    why="$(_osrc_hub_text 600 "$why")"; rec="$(_osrc_hub_text 400 "$rec")"; when="$(_osrc_hub_text 40 "$when")"
+    [ -n "$why" ] || die "hub report: --ask needs --why \"<what this is about and what changes with the answer, in plain words>\""
+    [ -n "$rec" ] || [ "$nopt" -ge 2 ] || die "hub report: --ask needs --rec \"<your pick and why>\" or two or more --option"
+  elif [ -n "$why$rec$when" ] || [ "$nopt" -gt 0 ]; then die "hub report: --why, --rec, --option and --when go with --ask"; fi
   if [ -n "$name" ]; then
     name="$(_osrc_hub_text 60 "$name")"; [ -n "$name" ] || die "hub report: --name is empty"
     # A URL, a path, owner/repo (one token with a slash) or a long hex id is not a name.
@@ -218,8 +233,9 @@ cmd_hub_report() {
     [ -n "$newid" ] || newid="D1"
     _osrc_hub_write_json "$dfile" '
       (if type == "array" then . elif type == "object" and (.decisions | type) == "array" then .decisions else [] end)
-      + [{id:$id, q:$q, short:($q | if length > 70 then .[0:69] + "…" else . end), status:"wait", weight:$w, askedAt:$now}]' \
-      --arg id "$newid" --arg q "$ask" --arg w "$weight" --arg now "$now" || return 1
+      + [{id:$id, q:$q, short:($q | if length > 70 then .[0:69] + "…" else . end), status:"wait", weight:$w, askedAt:$now,
+          why:$why, options:$opts} + (if $rec == "" then {} else {rec:$rec} end) + (if $when == "" then {} else {when:$when} end)]' \
+      --arg id "$newid" --arg q "$ask" --arg w "$weight" --arg now "$now" --arg why "$why" --arg rec "$rec" --arg when "$when" --argjson opts "$opts" || return 1
   fi
   if [ -n "$done_ask" ]; then
     jq -e --arg id "$done_ask" '(if type == "array" then . else (.decisions // []) end) | any(.[]; .id == $id)' "$dfile" >/dev/null 2>&1 \

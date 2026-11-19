@@ -19,7 +19,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
+        # Four slices per platform run side by side: the whole gate took ~30 min in one job.
+        shard: [1, 2, 3, 4]
+    name: conformance (${{ matrix.os }}, ${{ matrix.shard }}/4)
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -39,13 +43,20 @@ jobs:
       - name: Run conformance tests
         run: bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh
         shell: bash
+        env:
+          OSRC_CONFORMANCE_SHARD: ${{ matrix.shard }}/4
 
   windows-bg-path:
     # Windows Git Bash is a supported platform, and the background route (bg-pin, preflight, stderr capture)
     # must run there with no mkfifo, python, flock, setsid, fcntl or /dev/fd. conformance.sh needs tmux and
     # POSIX process groups, so this job runs only the bg-path suites, each on its own, under Git Bash.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    name: windows-bg-path (${{ matrix.shard }})
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     defaults:
       run:
         shell: bash
@@ -71,11 +82,12 @@ jobs:
         run: |
           uname -a; bash --version | head -1; jq --version; python3 --version
           T=plugins/outsourcerer/skills/outsourcerer/scripts/tests
-          failed=""
+          failed=""; k=0
           for s in test_stderr_capture test_windows_portability test_codex_windows_sandbox \
                    test_no_phantom_jobs test_bg_provider_after_verb test_p56_r2 \
                    test_tool_bugs_062 test_no_pipe_grep_q test_opencode_lane test_windows_drive_script_path \
                    test_winpty_session; do
+            k=$((k + 1)); [ $(( k % 3 )) -eq ${{ matrix.shard }} ] || continue
             echo "::group::$s"
             start=$(date +%s)
             if bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi

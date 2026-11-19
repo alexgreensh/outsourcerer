@@ -3,8 +3,8 @@
 // strip at the top of the page:
 //   - "Live · updated Ns ago"; a call that fails or runs past 10 s shows the reason and the age of the
 //     last good data; a 401/403 reads "Not live (HTTP 403)";
-//   - needs-you rows from the export: a lane stalled after its autonudge, a READY lane waiting for
-//     review (with its age), and "no watcher for N min" when nobody supervises live lanes.
+//   Lane alerts (stalls, unreviewed READY lanes, no watcher) are NOT listed here: one row per lane buried
+//   the page (0.17.0). Home's "things need you" tile sums them per project as Claude's to-do (hub-home.js).
 // On a 401/403 the main pane (not the strip) explains it and carries a Reopen button: POST /reopen
 // with this tab's old key; the hub answers with the current page URL only for a key it retired.
 // window.OSRC_HUB_ALIVE_NOW (tests) replaces the clock.
@@ -40,21 +40,19 @@
     };
   }
 
-  let bar = null, line = null, list = null;
+  let bar = null, line = null;
   function build() {
     if (bar || !document.body) return;
     const st = document.createElement('style');
     st.textContent = '#osrc-alive{position:sticky;top:0;z-index:50;font:13px/1.4 var(--sans,system-ui,sans-serif);color:var(--ink,#1f1f1c);background:var(--paper,#fbfaf7);border-bottom:1px solid var(--line,#8f8a7e);padding:6px 16px}'
       + '#osrc-alive .al-line{display:flex;gap:8px;align-items:center;flex-wrap:wrap}#osrc-alive .al-dot{width:8px;height:8px;border-radius:50%;background:var(--dot-ok,#2f9e44);flex:none}'
       + '#osrc-alive.al-warn .al-dot{background:var(--down,#c92a2a)}#osrc-alive.al-slow .al-dot{background:var(--mark,#e8a400)}'
-      + '#osrc-alive ul{margin:4px 0 0;padding:0;list-style:none}#osrc-alive li{padding:2px 0}#osrc-alive li b{font-weight:600}'
-      + '.al-reopen{margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.al-reopen button{font:inherit;padding:6px 16px;border-radius:8px;border:1px solid var(--line,#8f8a7e);background:var(--card,#fff);color:var(--ink,#1f1f1c);cursor:pointer}'
+            + '.al-reopen{margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}.al-reopen button{font:inherit;padding:6px 16px;border-radius:8px;border:1px solid var(--line,#8f8a7e);background:var(--card,#fff);color:var(--ink,#1f1f1c);cursor:pointer}'
       + '#osrc-alive code{font-family:var(--mono,ui-monospace,monospace)}';
     document.head.appendChild(st);
     bar = document.createElement('div'); bar.id = 'osrc-alive'; bar.setAttribute('role', 'status'); bar.setAttribute('aria-live', 'polite');
     line = document.createElement('div'); line.className = 'al-line';
-    list = document.createElement('ul'); list.hidden = true;
-    bar.append(line, list);
+    bar.append(line);
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
@@ -83,19 +81,6 @@
   }
 
 
-  function alerts() {
-    const rows = [], t = now();
-    S.projects.forEach((p) => {
-      const who = p.name || p.id || 'session';
-      if (p.watcher && p.watcher.missingMin != null) rows.push(['No watcher for ' + p.watcher.missingMin + ' min', who + ': ' + (p.watcher.liveLanes || 0) + ' live lane(s), no supervise armed']);
-      (Array.isArray(p.alerts) ? p.alerts : []).forEach((a) => {
-        const age = a.since ? ago(t - a.since * 1000) : '';
-        rows.push([(a.lane || 'lane') + (a.kind === 'unreviewed' ? ' waits for review' : ' is stalled') + (age ? ', ' + age : ''), who + (a.text ? ': ' + a.text : '')]);
-      });
-    });
-    return rows;
-  }
-
   function paint() {
     build(); if (!bar) return;
     const t = now(); let slow = 0;
@@ -113,9 +98,6 @@
     line.append(dot, tx);
     if (S.dead) { setLoadingText('This tab is from an older Mission Control', 'Its key no longer opens the data. Press Reopen, or run "outsourcerer mc".'); mainReopen(); }
     else if (S.err && !S.lastGood) setLoadingText('Mission Control is not answering', S.err + '. Run "outsourcerer mc" to start or reopen it.');
-    const rows = alerts();
-    list.textContent = ''; list.hidden = !rows.length;
-    rows.forEach((r) => { const li = document.createElement('li'); const b = document.createElement('b'); b.textContent = 'Needs you: ' + r[0]; li.append(b, document.createTextNode(' · ' + r[1])); list.append(li); });
   }
 
   window.OSRC_HUB_ALIVE = { state: S, paint, reopen };
