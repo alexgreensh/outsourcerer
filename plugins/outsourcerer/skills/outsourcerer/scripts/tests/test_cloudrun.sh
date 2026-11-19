@@ -22,7 +22,9 @@ SCRIPT_PATH="$SRC"   # sourced mode: $0 is this harness; point preflight/self-ex
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
-cleanup() { [ -x "${STUB:-}/tmux" ] && "$STUB/tmux" kill-server 2>/dev/null; rm -rf "$TMP" "$OSRC_HOME"; }
+# Short socket paths: a long TMUX_TMPDIR (the conformance harness) overflows macOS's 104-byte limit.
+TSOCK_MAIN="/tmp/osrc-crm-$$"; TSOCK_CB="/tmp/osrc-crc-$$"
+cleanup() { for s in "$TSOCK_MAIN" "$TSOCK_CB"; do [ -S "$s" ] && tmux -S "$s" kill-server 2>/dev/null; rm -f "$s"; done; rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
 
@@ -95,7 +97,7 @@ chmod +x "$STUB"/*
 # The socket name differs from the $CB wrapper at the bottom on purpose — that test needs a
 # fresh server whose env carries $CB, not $STUB.
 if command -v tmux >/dev/null 2>&1; then
-  printf '#!/bin/sh\nexec "%s" -L osrc-test-cloudrun-main-%s "$@"\n' "$(command -v tmux)" "$$" > "$STUB/tmux"
+  printf '#!/bin/sh\nexec "%s" -S "%s" "$@"\n' "$(command -v tmux)" "$TSOCK_MAIN" > "$STUB/tmux"
   chmod +x "$STUB/tmux"
 fi
 
@@ -603,7 +605,7 @@ grep -q 't-claude' <<<"$link_out" \
 # A fake claude that refuses without a TTY, on a private tmux server so no real session is touched.
 CB="$TMP/cloudbin"; mkdir -p "$CB" "$TMP/croot"
 if command -v tmux >/dev/null 2>&1; then
-  printf '#!/bin/sh\nexec %s -L osrc-test-cloudrun-%s "$@"\n' "$(command -v tmux)" "$$" > "$CB/tmux"
+  printf '#!/bin/sh\nexec %s -S "%s" "$@"\n' "$(command -v tmux)" "$TSOCK_CB" > "$CB/tmux"
   printf '#!/bin/sh\n[ -z "${STALE_ACCOUNT+x}" ] && [ "$HOME" = "$EXPECTED_HOME" ] || exit 2\n[ -t 1 ] || { echo "Error: --cloud requires an interactive terminal" >&2; exit 1; }\necho "Session: https://claude.ai/code/session_TESTREF01"\nexit 0\n' > "$CB/claude"
   chmod +x "$CB/tmux" "$CB/claude"
   STALE_ACCOUNT=wrong HOME="$TMP/stale-home" PATH="/usr/bin:/bin" "$CB/tmux" new-session -d -s stale 'sleep 60'
@@ -613,10 +615,10 @@ if command -v tmux >/dev/null 2>&1; then
   if ( tmux() { if [ "$1" = pipe-pane ]; then return 1; fi; "$CB/tmux" "$@"; }
        PATH="$CB:$PATH" _cloudrun_launch claude /dev/null brief "$TMP/c3.log" "$TMP/c3.pid" "$TMP/croot" main ); then
     bad "failed pipe attachment accepted"
-  elif [ -s "$TMP/c3.log" ] || "$CB/tmux" list-sessions -F '#{session_name}' | grep -q '^osrc-cloud-'; then
+  elif [ -s "$TMP/c3.log" ] || grep -q '^osrc-cloud-' <<<"$("$CB/tmux" list-sessions -F '#{session_name}' 2>/dev/null)"; then
     bad "failed attachment left a launcher running"
   else ok "pipe attachment failure unwinds the pane"; fi
-  "$CB/tmux" kill-server 2>/dev/null
+  tmux -S "$TSOCK_CB" kill-server 2>/dev/null
 else
   ok "tmux absent: claude cloud terminal check skipped"
 fi

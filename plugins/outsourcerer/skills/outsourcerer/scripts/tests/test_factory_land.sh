@@ -677,7 +677,7 @@ mkdir "$HC/hooks"
 printf '#!/bin/sh\ntouch hook-ran\nexit 1\n' > "$HC/hooks/pre-commit"; chmod +x "$HC/hooks/pre-commit"
 git -C "$REPO" config core.hooksPath hooks
 if hc_commit && [ ! -e "$HC/hook-ran" ] && [ -z "$(git -C "$HC" status --porcelain)" ] &&
-    git -C "$HC" show HEAD:f.txt | grep -qx work; then ok "committed safely with checkout hooks disabled"
+    grep -qx work <<<"$(git -C "$HC" show HEAD:f.txt)"; then ok "committed safely with checkout hooks disabled"
 else bad "harness commit or hook isolation"; fi
 hc_commit && bad "committed clean checkout" || ok "clean checkout skipped"
 
