@@ -52,11 +52,12 @@ if command -v cygpath >/dev/null 2>&1; then
   # End to end: run the engine by its drive path from an unrelated cwd. The factory scripts locate
   # their own libs via BASH_SOURCE, so a lib count alone hides the defect; what proves it is the
   # engine's own loader seeing an UNEXPANDED `lib/*.sh` glob (it matched nothing) in xtrace.
-  trace="$(cd "$TMP" && OSRC_HOME="$TMP/home" bash -x "$WIN_SRC" __no_such_subcommand 2>&1)"
-  # Here-strings, not `printf | grep -q`: under pipefail an early grep exit SIGPIPEs printf.
-  if grep -qF "/lib/*.sh'" <<<"$trace"; then
+  # Grep a file: a large here-string fed to an early-exiting grep deadlocks on Git Bash,
+  # and `printf | grep -q` SIGPIPEs under pipefail.
+  (cd "$TMP" && OSRC_HOME="$TMP/home" bash -x "$WIN_SRC" __no_such_subcommand) > "$TMP/trace" 2>&1
+  if grep -qF "/lib/*.sh'" "$TMP/trace"; then
     bad "engine invoked by drive path: its lib/*.sh glob matched nothing (libs not sourced)"
-  elif grep -qE '^\+ \. [A-Za-z]:/.*/scripts/lib/[A-Za-z0-9_-]+\.sh$' <<<"$trace"; then
+  elif grep -qE '^\+ \. [A-Za-z]:/.*/scripts/lib/[A-Za-z0-9_-]+\.sh$' "$TMP/trace"; then
     ok "engine invoked by drive path sources its libs from the drive path"
   else
     bad "engine invoked by drive path: no lib load from the drive path seen in xtrace"
