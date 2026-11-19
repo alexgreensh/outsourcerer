@@ -157,38 +157,34 @@ _osrc_review_lane_removed() { # <lane>: delete that lane's items and files; a la
 # hand, or reviewed somewhere the queue never saw); left queued it alerts "READY, no review
 # started" forever. Close it as merged. Local git only, queued items only, no fetch: a head that
 # cannot be proven merged stays queued.
-_osrc_review_item_merged() { # <item-json> -> 0 when .head is an ancestor of the item's .base
-  local p="$1" head base lane lf repo url u ref seen=" "
-  head="$(jq -r '.head // ""' "$p" 2>/dev/null)"; base="$(jq -r '.base // "main"' "$p" 2>/dev/null)"
+_osrc_review_item_merged() { # <item-json> <head> -> 0 when the destination base contains head
+  local p="$1" head="$2" base lane lf repo url ref
+  base="$(jq -r '.base // "main"' "$p")"
   case "$head" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
-  case "$base" in ''|-*|*[!A-Za-z0-9._/-]*) return 1 ;; esac
-  type git >/dev/null 2>&1 || return 1
-  type _osrc_lane_json >/dev/null 2>&1 || return 1
-  lane="$(jq -r '.lane // ""' "$p" 2>/dev/null)"
-  repo=""; url=""; lf="$(_osrc_lane_json "$lane")"
+  git check-ref-format "refs/heads/$base" >/dev/null || return 1
+  lane="$(jq -r '.lane // ""' "$p")"; lf="$(_osrc_lane_json "$lane")"
   if [ -f "$lf" ]; then
-    repo="$(jq -r '.repo // ""' "$lf" 2>/dev/null)"; url="$(jq -r '.url // ""' "$lf" 2>/dev/null)"
+    url="$(_osrc_lane_fetch_url "$lf")" || return 1
+    repo="$(jq -r '.repo // ""' "$lf")"
+  else
+    url="$(jq -r '.url // ""' "$p")"; repo=""
   fi
-  # Only a local path answers "is it merged" for free: the lane record's repo, its remote when that
-  # is a path, then the item's own url (a bare-branch queue add has no lane record).
-  for u in "$repo" "$url" "$(jq -r '.url // ""' "$p" 2>/dev/null)"; do
-    case "$u" in file://*) u="${u#file://}" ;; esac
-    case "$u" in /*) ;; *) continue ;; esac
-    [ -d "$u" ] || continue
-    case "$seen" in *" $u "*) continue ;; esac; seen="$seen$u "
-    for ref in "origin/$base" "$base"; do
-      git -C "$u" merge-base --is-ancestor "$head" "$ref" 2>/dev/null && return 0
-    done
-  done
-  return 1
+  case "$url" in
+    /*|file:///*) repo="${url#file://}"; ref="refs/heads/$base" ;;
+    *)
+      [ -d "$repo" ] && [ "$(git -C "$repo" remote get-url origin 2>/dev/null)" = "$url" ] || return 1
+      ref="refs/remotes/origin/$base" ;;
+  esac
+  git -C "$repo" merge-base --is-ancestor "$head" "$ref" 2>/dev/null
 }
 
 _osrc_review_sweep_merged() { # [owner-slug]: close queued items whose head already landed in base
   # Events and hub exports call this often; an unmerged item is re-proved at most every
   # OSRC_REVIEW_MERGED_SECS (5 min, far under the 15 min alert threshold) via .merged_checked_ts.
-  local p slug="${1:-}" lane now last gap
+  local p slug="${1:-}" lane now last gap head update lk="$OSRC_HOME/review/.next.lock"
   now="$(_osrc_now)"; gap="${OSRC_REVIEW_MERGED_SECS:-300}"
-  for p in $(_osrc_review_items); do
+  for p in "$OSRC_HOME"/review/items/*.json; do
+    [ -f "$p" ] || continue
     [ "$(jq -r '.state // ""' "$p" 2>/dev/null)" = queued ] || continue
     if [ -n "$slug" ]; then
       lane="$(jq -r '.lane // ""' "$p" 2>/dev/null)"
@@ -196,11 +192,17 @@ _osrc_review_sweep_merged() { # [owner-slug]: close queued items whose head alre
     fi
     last="$(jq -r '.merged_checked_ts // 0' "$p" 2>/dev/null)"
     [ "$last" -gt 0 ] 2>/dev/null && [ $(( now - last )) -lt "$gap" ] && continue
-    if _osrc_review_item_merged "$p"; then
-      _osrc_jq_set "$p" --argjson now "$now" '.state="closed" | .closed_reason="merged" | .closed_ts=$now'
+    head="$(jq -er .head "$p")" || continue
+    if _osrc_review_item_merged "$p" "$head"; then
+      update='.state="closed" | .closed_reason="merged" | .closed_ts=$now'
     else
-      _osrc_jq_set "$p" --argjson now "$now" '.merged_checked_ts=$now'
+      update='.merged_checked_ts=$now'
     fi
+    _osrc_lock "$lk" || continue
+    if jq -e --arg head "$head" '.state=="queued" and .head==$head' "$p" >/dev/null; then
+      _osrc_jq_set "$p" --argjson now "$now" "$update"
+    fi
+    _osrc_unlock "$lk"
   done
   return 0
 }

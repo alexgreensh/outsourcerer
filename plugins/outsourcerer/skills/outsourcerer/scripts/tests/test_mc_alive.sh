@@ -159,14 +159,15 @@ H_MERGED="$(git -C "$WRK" rev-parse lane/merged 2>/dev/null)"; H_OPEN="$(git -C 
 ( cd "$WRK" && git checkout -q main && git merge -q --no-ff lane/merged -m "merge lane/merged" && git push -q origin main && git fetch -q origin )
 mkdir -p "$OSRC_HOME/remote" "$OSRC_HOME/review/items" "$OSRC_HOME/owners/S"
 NOW="$(date +%s)"; OLD=$(( NOW - 4000 ))
-# mg: lane record points at the clone (origin/main proves the merge); unm: at the bare remote (main);
+# mg and unm share a clone. Only mg reached the destination base.
 # br: no lane record at all, the item's own url is the only local path (a bare-branch queue add).
 jq -n --arg repo "$WRK" --arg url "$RMR" --arg head "$H_MERGED" --argjson now "$NOW" \
   '{id:"mg", branch:"lane/merged", repo:$repo, url:$url, transport:"git", base:"main", head:$head,
     head_msg:"READY: merged lane", head_ready:true, ready_head:$head, ready_ts:$now, last_push_ts:$now,
     last_poll_ts:$now, last_ok_ts:$now, err_count:0, branch_deleted:false, seen_branch:true, check:null}' \
   > "$OSRC_HOME/remote/mg.json"
-jq -n --arg repo "$RMR" --arg url "$RMR" --arg head "$H_OPEN" --argjson now "$NOW" \
+git -C "$WRK" merge -q --no-ff lane/open -m "local merge awaiting push" || no "fixture local merge"
+jq -n --arg repo "$WRK" --arg url "$RMR" --arg head "$H_OPEN" --argjson now "$NOW" \
   '{id:"unm", branch:"lane/open", repo:$repo, url:$url, transport:"git", base:"main", head:$head,
     head_msg:"READY: open lane", head_ready:true, ready_head:$head, ready_ts:$now, last_push_ts:$now,
     last_poll_ts:$now, last_ok_ts:$now, err_count:0, branch_deleted:false, seen_branch:true, check:null}' \
@@ -178,6 +179,22 @@ mk_item() { # <lane> <head> <url>
 }
 mk_item mg "$H_MERGED" "$RMR"; mk_item unm "$H_OPEN" "$RMR"; mk_item br "$H_MERGED" "$RMR"
 : > "$OSRC_HOME/owners/S/mg"; : > "$OSRC_HOME/owners/S/unm"; : > "$OSRC_HOME/owners/S/br"
+(
+  export OSRC_HOME="$TMP/Application Support/osrc"
+  mkdir -p "$OSRC_HOME/review/items"; mk_item spaced "$H_MERGED" "$RMR"
+  lib _osrc_review_sweep_merged
+  jq -e '.closed_reason=="merged"' "$OSRC_HOME"/review/items/spaced-*.json >/dev/null
+) && ok "merge sweep handles spaces in OSRC_HOME" || no "space in merge sweep path"
+for result in 0 1; do
+  (
+    export OSRC_HOME="$TMP/race$result"
+    mkdir -p "$OSRC_HOME/review/items"; mk_item racing "$H_MERGED" "$RMR"
+    OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1
+    _osrc_review_item_merged() { _osrc_jq_set "$1" '.state="inflight"'; return "$result"; }
+    _osrc_review_sweep_merged
+    jq -e '.state=="inflight" and .merged_checked_ts==null' "$OSRC_HOME"/review/items/racing-*.json >/dev/null
+  ) && ok "dispatch during ancestry check survives result $result" || no "sweep raced dispatch ($result)"
+done
 p="$(lib osrc_mc_alerts S '{"id":"S"}')"
 jq -e '.state == "closed" and .closed_reason == "merged" and (.closed_ts | type) == "number"' \
   "$OSRC_HOME/review/items/mg-${H_MERGED:0:7}.json" >/dev/null \

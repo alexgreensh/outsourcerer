@@ -226,6 +226,12 @@ _cloudrun_vehicle_quota() { # <vehicle> -> which plan the launch spends
   esac
 }
 
+_cloudrun_claude_path() {
+  local path
+  path="$(type -P claude)" || return 1
+  case "$path" in /*) printf '%s' "$path" ;; *) printf '%s/%s' "$PWD" "$path" ;; esac
+}
+
 # _cloudrun_vehicle_ok <vehicle> [codex-env-id] -> rc0 when usable; reason on stderr otherwise.
 # Probe output is CAPTURED before grepping: `cli | grep -q` lets grep -q exit early, SIGPIPE the
 # CLI, and an inherited `set -o pipefail` (SHELLOPTS) then reports a false "flag missing".
@@ -234,13 +240,14 @@ _cloudrun_vehicle_ok() {
   case "$v" in
     claude)
       have claude || { echo "claude CLI not on PATH" >&2; return 1; }
-      out="$(claude --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
+      local cli="${3-$(_cloudrun_claude_path)}"
+      out="$("$cli" --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
         || { echo "claude has no --cloud flag" >&2; return 1; }
       if have jq; then
-        [ "$(claude auth status 2>/dev/null | jq -r '.loggedIn // false' 2>/dev/null)" = "true" ] \
+        [ "$("$cli" auth status 2>/dev/null | jq -r '.loggedIn // false' 2>/dev/null)" = "true" ] \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       else
-        out="$(claude auth status 2>/dev/null)"; printf '%s' "$out" | grep -q '"loggedIn": *true' \
+        out="$("$cli" auth status 2>/dev/null)"; printf '%s' "$out" | grep -q '"loggedIn": *true' \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       fi ;;
     devin)
@@ -292,8 +299,9 @@ _cloudrun_claude_conserve() {
 # _cloudrun_pick_vehicle <requested> <codex-env> -> prints vehicle; rc1 + reasons when none usable.
 _cloudrun_pick_vehicle() {
   local req="${1:-auto}" env="${2:-}" order v reason skipped=""
+  local cli="${3-$(_cloudrun_claude_path)}"
   if [ "$req" != "auto" ]; then
-    reason="$(_cloudrun_vehicle_ok "$req" "$env" 2>&1)" && { printf '%s' "$req"; return 0; }
+    reason="$(_cloudrun_vehicle_ok "$req" "$env" "$cli" 2>&1)" && { printf '%s' "$req"; return 0; }
     printf '>>> [cloud] vehicle %s unusable: %s\n' "$req" "$reason" >&2; return 1
   fi
   # Subscription vehicles before metered devin: devin bills ACU and cloud start refuses it
@@ -301,7 +309,7 @@ _cloudrun_pick_vehicle() {
   # subscription lane. Conserve still drops claude last, but codex outranks devin either way.
   if _cloudrun_claude_conserve; then order="codex devin claude"; else order="claude codex devin"; fi
   for v in $order; do
-    reason="$(_cloudrun_vehicle_ok "$v" "$env" 2>&1)" && {
+    reason="$(_cloudrun_vehicle_ok "$v" "$env" "$cli" 2>&1)" && {
       [ -n "$skipped" ] && printf '%s\n' "$skipped" | sed 's/^/>>> [cloud] vehicle skipped: /' >&2
       printf '%s' "$v"; return 0; }
     skipped="$skipped$v: $reason | "
@@ -338,7 +346,7 @@ _cloudrun_launch() {
   local -a cmd=()
   case "$v" in
     claude)
-      cmd=(claude --cloud "$packtext")
+      cmd=("${11-$(_cloudrun_claude_path)}" --cloud "$packtext")
       [ -n "$claudeenv" ] && cmd+=(--environment "$claudeenv")
       [ -n "$model" ] && cmd+=(--model "$model") ;;
     devin)
@@ -353,8 +361,6 @@ _cloudrun_launch() {
     # so a nohup launch died at once (2026-11-19). It runs in its own tmux pane instead; the pane is
     # piped to the log, and the launcher waits for the pipe so no early line is lost.
     local sess fifo attempt name writer i
-    cmd[0]="$(type -P claude)" || return 1
-    case "${cmd[0]}" in /*) ;; *) cmd[0]="$PWD/${cmd[0]}" ;; esac
     attempt="$(mktemp -d "$log.XXXXXX")" || return 1
     sess="osrc-cloud-${attempt##*.}"; fifo="$attempt/start"
     mkfifo "$fifo" || { rmdir "$attempt"; return 1; }
@@ -568,7 +574,9 @@ _cloudrun_start() {
   local WITH_SPEC=""
   _secret_scan "$packtext" "cloudrun"     # dies on credential files in scope / secret values
   # vehicle + spend gate + consent + launch
-  local veh; veh="$(_cloudrun_pick_vehicle "$vehicle" "$env")" \
+  local claude_bin
+  claude_bin="$(_cloudrun_claude_path)" || claude_bin=""
+  local veh; veh="$(_cloudrun_pick_vehicle "$vehicle" "$env" "$claude_bin")" \
     || die "cloud: no usable hosted-session vehicle"
   [ "$veh" = codex ] && [ -z "$env" ] && die "cloud: codex vehicle needs --env <id> or OSRC_CODEX_CLOUD_ENV"
   # Spend gate, FAIL CLOSED + per-launch consent export (L10-r3 verdict finding C):
@@ -604,7 +612,7 @@ _cloudrun_start() {
   log="$(_cloudrun_cdir)/$id.launch.log"; pidfile="$log.pid"
   : > "$log" 2>/dev/null || die "cloud: cannot write $log"
   printf '>>> [cloud] launching %s session %s (spends: %s)\n' "$veh" "$id" "$(_cloudrun_vehicle_quota "$veh")" >&2
-  launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model")" || die "cloud: the $veh session did not start (see $log)"
+  launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model" "$claude_bin")" || die "cloud: the $veh session did not start (see $log)"
   pid="$(printf '%s' "$launch_out" | sed -n '1p')"; ref="$(printf '%s' "$launch_out" | sed -n '2p')"
   # No session link and the launcher already gone means the vehicle failed: say so, register nothing.
   if [ -z "$ref" ] && { [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; }; then

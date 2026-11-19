@@ -36,7 +36,8 @@ _osrc_harness_commit() (
       .env|.env.*|credentials|id_rsa|id_ed25519|id_ecdsa|id_dsa|*.pem|*.key|*.p12|*.pfx) return 1 ;;
     esac
   done < "$scratch/paths"
-  rc=0; _crew_scan_staged "$wt" || rc=$?
+  git -C "$wt" diff --cached --text --no-ext-diff --no-textconv --no-color > "$scratch/diff" || return 1
+  rc=0; grep -Eq "$OSRC_SECRET_ADDED_ERE" "$scratch/diff" || rc=$?
   [ "$rc" = 1 ] || return 1
   cp "$GIT_INDEX_FILE" "$lock" || return 1
   git -C "$wt" -c commit.gpgsign=false -c user.name="${OSRC_COMMIT_NAME:-outsourcerer}" -c user.email="${OSRC_COMMIT_EMAIL:-outsourcerer@localhost}" \

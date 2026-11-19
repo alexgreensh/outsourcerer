@@ -154,7 +154,7 @@ for brief in "Write release notes. The previous build crashed on my Mac." "Prepa
              "Add a regression test for the error message mentioning localhost and SQLite."; do
   [ "$(w "$brief")" = cloud ] && ok "cloud: $brief" || bad "misrouted: $brief"
 done
-for brief in "Debug the service on my Mac" "Inspect ~/Library/Logs/recall.log before preparing the release." \
+for brief in "The build failed yesterday, so debug the service on my Mac" "Debug the service on my Mac" "Inspect ~/Library/Logs/recall.log before preparing the release." \
              "Capture the attached USB webcam output for the bug report."; do
   [ "$(w "$brief")" = local ] && ok "local: $brief" || bad "misrouted: $brief"
 done
@@ -420,6 +420,10 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 [ $rc -eq 0 ] && grep -q 'devin session started' <<<"$out" \
   && ok "vehicle: missing claude -> auto skips to devin" || { bad "vehicle: skip-to-devin failed (rc=$rc)"; echo "SKIPDEBUG: $out" >&2; echo "STUBLOG: $(cat "$OSRC_STUB_LOG")" >&2; }
 grep -q 'vehicle skipped' <<<"$out" && ok "vehicle: skip reason printed" || bad "vehicle: skip reason missing"
+
+if ( claude() { return 1; }; export -f claude; PATH="$STUB:$PATH" _cloudrun_vehicle_ok claude ); then
+  ok "preflight uses the launch executable despite an exported claude function"
+else bad "preflight used the shell wrapper"; fi
 
 # ============================== default vehicle order =====================================
 # 0.17.2 bug: `cloud start` with no --vehicle could land on devin (metered ACU — and the start

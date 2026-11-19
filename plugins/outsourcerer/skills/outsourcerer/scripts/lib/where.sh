@@ -51,7 +51,7 @@ osrc_where() {
   local machine='(mac|machine|computer|laptop)([^[:alnum:]_]|$)'
   # Consider the clause containing the location. A past failure in the background
   # of a different request does not specify where the new work should run.
-  if tr '.!?;' '\n' <<<"$lc" | awk -v machine="$machine" '
+  if tr '.,!?;' '\n' <<<"$lc" | awk -v machine="$machine" '
     $0 ~ ("on (my|this|the user.s) " machine) &&
       $0 !~ /(failed|crashed|used to|previously|formerly|was|were)( [^ ]+)* +on (my|this|the user.s) / { local_run=1 }
     END { exit !local_run }

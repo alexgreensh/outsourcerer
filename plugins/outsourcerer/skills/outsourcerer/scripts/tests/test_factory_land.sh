@@ -650,6 +650,18 @@ base="$(git -C "$HC" rev-parse HEAD)"
 idx="$(git -C "$HC" rev-parse --absolute-git-dir)/index"
 echo work > "$HC/f.txt"
 before="$(cksum < "$idx")"
+if (
+  mktemp() {
+    local dir
+    dir="$(command mktemp "$@")" || return 1
+    case "$dir" in */harness.*) mkdir "$dir/diff" || return 1 ;; esac
+    printf '%s\n' "$dir"
+  }
+  export -f mktemp
+  hc_commit
+) || [ "$(git -C "$HC" rev-parse HEAD)" != "$base" ] || [ "$(cksum < "$idx")" != "$before" ]; then
+  bad "failed diff write allowed harness commit or altered index"
+else ok "harness fails closed when diff cannot be written"; fi
 for path in .env private.key ordinary.txt; do
   if [ "$path" = ordinary.txt ]; then printf 'ghp_%024d\n' 0 > "$HC/$path"; else echo fixture > "$HC/$path"; fi
   if hc_commit || [ "$(git -C "$HC" rev-parse HEAD)" != "$base" ] || [ "$(cksum < "$idx")" != "$before" ]; then
