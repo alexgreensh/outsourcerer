@@ -65,7 +65,7 @@ _agy_models_list() {
   f="$(_agy_models_cache)"
   if _agy_models_fresh; then cat "$f" 2>/dev/null; return; fi
   have agy || return 1
-  raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" agy models 2>/dev/null)"
+  raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy models 2>/dev/null)"
   [ -n "$raw" ] || return 1
   ids="$(_agy_models_parse "$raw")"
   printf '%s\n' "$ids" | grep -q '^gemini-' || return 1
@@ -137,6 +137,16 @@ _agy_catalog_knows() {
   return 1
 }
 
+# _agy_effort_rung <id> -> the same family at the rung --effort asked for, when agy serves it.
+# Gemini 4 ids name their effort (gemini-4-neon-high) and agy refuses a separate --effort flag, so
+# without this a family request with --effort low would still run the high rung.
+_agy_effort_rung() {
+  local id="$1" want base
+  case "${EFFORT:-}" in minimal|low) want=low ;; medium) want=medium ;; high) want=high ;; xhigh|max) want=xhigh ;; *) printf '%s' "$id"; return 0 ;; esac
+  case "$id" in *-low|*-medium|*-high|*-xhigh) base="${id%-*}" ;; *) printf '%s' "$id"; return 0 ;; esac
+  if grep -qx "$base-$want" <<<"$(_agy_models_list 2>/dev/null)"; then printf '%s' "$base-$want"; else printf '%s' "$id"; fi
+}
+
 # _agy_family_default <flash|pro> -> the id agy should run for a bare family request (see the
 # precedence above). agy has no flash-lite tier, so lite callers ask for flash.
 _agy_family_default() {
@@ -144,7 +154,7 @@ _agy_family_default() {
   case "$fam" in pro) pin="${OSRC_AGY_PRO_DEFAULT:-}" ;; *) fam=flash; pin="${OSRC_AGY_FLASH_DEFAULT:-}" ;; esac
   [ -n "$pin" ] && { printf '%s' "$pin"; return 0; }
   if [ "$fam" = pro ]; then
-    live="$(_agy_flagship)" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
+    live="$(_agy_flagship)" && [ -n "$live" ] && { _agy_effort_rung "$live"; return 0; }
   else
     live="$(_agy_newest flash)" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
   fi

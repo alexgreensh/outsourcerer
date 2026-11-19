@@ -205,6 +205,8 @@ echo keyless-dispatch
 FAKE2
 chmod +x "$TMP/bin/agy"
 export AGY_MODELS_CALLS="$TMP/agy_models_calls.txt"; : > "$AGY_MODELS_CALLS"
+# Resolve against this fake only, never an agy installed on the machine; keyless like dispatch.
+export PATH="$TMP/bin:$PATH"; unset GEMINI_API_KEY GOOGLE_API_KEY
 # Drop both caches so every id below is resolved against THIS fake's catalog, not the fixture above.
 rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
 
@@ -222,6 +224,11 @@ rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
 [ "$(_agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-neon-high" ] \
   && ok "gemini-pro resolves to the top Gemini 4 model agy serves (Neon)" \
   || bad "gemini-pro resolved to $(_agy_model_token gemini-pro 2>/dev/null)"
+[ "$(EFFORT=low _agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-neon-low" ] \
+  && ok "gemini-pro with --effort low runs the served low rung" \
+  || bad "effort low on gemini-pro resolved to $(EFFORT=low _agy_model_token gemini-pro 2>/dev/null)"
+[ "$(EFFORT=max _agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-neon-xhigh" ] \
+  && ok "--effort max maps to the xhigh rung" || bad "effort max on gemini-pro: $(EFFORT=max _agy_model_token gemini-pro 2>/dev/null)"
 [ "$(_agy_newest flash 2>/dev/null)" = "gemini-3.8-flash" ] \
   && ok "the newest served flash family resolves bare (gemini-3.8-flash)" \
   || bad "newest flash wrong: $(_agy_newest flash 2>/dev/null)"
