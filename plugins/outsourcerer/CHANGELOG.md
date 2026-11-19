@@ -2,6 +2,16 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.2
+
+### Fixed
+
+- **Finished lanes leave the review list.** Work that already landed on main closes its review item, so "waiting for review" counts stay honest.
+- **Watchers stay on their own session.** Supervise reports only your lanes, a stall reports once instead of on every re-arm, and auto-review claims only the exact item it checked.
+- **Sandboxed lanes ship their work.** When a lane's sandbox cannot commit, Outsourcerer commits it after a secret scan, with hooks off. Devin edit lanes may run their tests.
+- **Safer answers to prompts.** A plain "yes" never picks a lasting "always allow", and "yes" on a menu with two Yes rows is refused as ambiguous.
+- **Cloud and routing fixes.** Claude cloud launches run under the account that was checked and only count real session links. Gemini text runs stay keyless. "On my Mac" routes local, and SWE-2 Flash counts as free.
+
 ## 0.17.1
 
 ### Fixed
