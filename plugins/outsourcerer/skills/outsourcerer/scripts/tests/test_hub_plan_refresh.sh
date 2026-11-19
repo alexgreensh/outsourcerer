@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+_T_DIR="$(cd "$(dirname "$0")" && pwd)"
 lib="$(cd "$(dirname "$0")/../lib" && pwd)"
 home_dir="$(mktemp -d)"
 trap 'rm -rf "$home_dir"' EXIT
@@ -14,4 +15,6 @@ screen="$(python3 -I "$lib/plan_probe.py" agy-parse < "$(dirname "$0")/fixtures/
 printf '[{"id":"agy","state":"unknown"}]' |
   jq --argjson p "$(jq -n --argjson a "$screen" '{agy:$a}')" --argjson now 1 --argjson lt 90 --argjson ct 50 -f "$lib/plan-overlay.jq" |
   jq -e '.[0] | .left == "91% left" and .state == "ok" and .windows.agy1week.left == 0' >/dev/null
+# The page-side checks run here so CI covers them.
+node --test "$_T_DIR/test_hub_plan_checks.js" >/dev/null
 echo 'RESULT: 2 passed, 0 failed'

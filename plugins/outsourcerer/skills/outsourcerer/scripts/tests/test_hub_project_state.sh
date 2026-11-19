@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Unit checks for a stale export, a durable override and a manual refresh.
 set -eu
+_T_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$0")/../lib"
 python3 -IB - <<'PY'
 import json, os, pathlib, sys, tempfile
@@ -45,4 +46,6 @@ PY
   echo 1 > "$OSRC_JOBS/lane/exit"
   [ "$(_osrc_hub_job_state lane)" = failed ]
 )
+# The page-side checks run here so CI covers them.
+node "$_T_DIR/hub_refresh_dom.js" >/dev/null
 echo "hub project state and job liveness: 4 passed, 0 failed"

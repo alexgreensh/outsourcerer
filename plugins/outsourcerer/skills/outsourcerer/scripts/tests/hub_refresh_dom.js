@@ -7,7 +7,7 @@ const page = fs.readFileSync(require('node:path').join(__dirname, '../lib/hub.ht
 const adapter = page.slice(page.indexOf('  function makeLocalDb()'), page.indexOf('  function subscribe(d)'));
 async function main() {
   let release, posts = 0;
-  const state = { sigP: 'previous render', alsoSig: '[]', setInterval() {}, clearInterval() {},
+  const state = { window: {}, sigP: 'previous render', alsoSig: '[]', setInterval() {}, clearInterval() {},
     api(path, opts) {
       if (path === '/api/projects') return new Promise(resolve => { release = resolve; });
       assert.equal(path, '/api/refresh');
