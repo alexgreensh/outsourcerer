@@ -16,6 +16,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -196,13 +197,27 @@ class Hub:
 
     def run_export(self, timeout=300, force=False, check_plans=False):
         requested = time.monotonic()
-        with self.export_lock:
+        deadline = requested + timeout
+        if check_plans:
+            if not self.fresh_export.wait(timeout):
+                raise TimeoutError("plans check timed out waiting for startup")
+            if not self.export_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+                raise TimeoutError("plans check timed out waiting for export")
+        else:
+            self.export_lock.acquire()
+        try:
             if check_plans and self.plans_finished >= requested:
                 return self.cache
+            if check_plans:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    raise TimeoutError("plans check deadline expired")
             data = self._export(timeout, force, check_plans)
             if check_plans:
                 self.plans_finished = time.monotonic()
             return data
+        finally:
+            self.export_lock.release()
 
     def _export(self, timeout, force, check_plans):
         env = dict(os.environ)
@@ -439,7 +454,10 @@ class Hub:
         try:
             if os.path.islink(directory) or os.path.islink(path):
                 return {}
-            with open(path, encoding="utf-8") as f:
+            with open(path, encoding="utf-8", opener=lambda p, flags:
+                      os.open(p, flags | os.O_NONBLOCK | os.O_NOFOLLOW)) as f:
+                if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                    return {}
                 card = json.load(f)
             return card if isinstance(card, dict) else {}
         except (OSError, ValueError):
@@ -625,7 +643,8 @@ def make_handler(hub):
             raw = self.rfile.read(n) if n > 0 else b""
             if u.path == "/api/refresh":
                 # Refresh carries no payload; the page POSTs it empty.
-                hub.fresh_export.wait()
+                if u.query != "plans":
+                    hub.fresh_export.wait()
                 try:
                     data = hub.run_export(force=True, check_plans=(u.query == "plans"))
                 except Exception as e:

@@ -201,12 +201,16 @@ if [ "${1:-}" = "models" ]; then
   printf 'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n'
   exit 0
 fi
-echo keyless-dispatch
+if [ "${REJECT_AGY:-}" = 1 ]; then echo 'invalid model selection' >&2; exit 2; fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --model ]; then echo "$2"; exit 0; fi
+  shift
+done
 FAKE2
 chmod +x "$TMP/bin/agy"
 export AGY_MODELS_CALLS="$TMP/agy_models_calls.txt"; : > "$AGY_MODELS_CALLS"
 # Resolve against this fake only, never an agy installed on the machine; keyless like dispatch.
-export PATH="$TMP/bin:$PATH"; unset GEMINI_API_KEY GOOGLE_API_KEY
+export PATH="$TMP/bin:$PATH" GEMINI_API_KEY=fixture GOOGLE_API_KEY=fixture
 # Drop both caches so every id below is resolved against THIS fake's catalog, not the fixture above.
 rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
 
@@ -215,6 +219,17 @@ rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
 [ "$(_agy_model_token gemini-4-neon-high 2>/dev/null)" = "gemini-4-neon-high" ] \
   && ok "a served Gemini-4 id passes through untouched" \
   || bad "served gemini-4-neon-high was rewritten: $(_agy_model_token gemini-4-neon-high 2>/dev/null)"
+
+[ -s "$OSRC_HOME/catalogs/gm.json" ] && ok "concrete lookup cached the keyless catalog" || bad "concrete lookup failed with keys set"
+run_low() (
+  MODEL="$1"; EFFORT=low; REST=(probe)
+  IFS='|' read -r RESOLVED_ID lane TTIER <<<"$(resolve_model_row "$MODEL")"
+  record_ledger() { :; }
+  delegate_gmnative auto
+)
+for pair in gemini-neon:gemini-4-neon-low gemini-4-neon-high:gemini-4-neon-high; do
+  [ "$(run_low "${pair%:*}" 2>/dev/null)" = "${pair#*:}" ] && ok "low effort dispatch $pair" || bad "low effort dispatch $pair"
+done
 
 # The flagship pick: newest version first, then codename tier (neon > argon > hydrogen > pro),
 # then the high effort rung — agy's documented default thinking level for these families.
@@ -272,6 +287,12 @@ out="$(_agy_model_token gemini-4-neon-max 2>"$TMP/err-g4")"
 [ "$(OSRC_AGY_PRO_DEFAULT=gemini-4-argon-high _agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-argon-high" ] \
   && ok "OSRC_AGY_PRO_DEFAULT repins the flagship pick without editing any table" \
   || bad "pro pin lost to the live catalog"
+
+if REJECT_AGY=1 run_low gemini-pro >/dev/null 2>&1; then
+  bad "rejected model reported success"
+elif [ -e "$OSRC_HOME/catalogs/gm.json" ] || [ -e "$OSRC_HOME/agy-models.txt" ]; then
+  bad "rejected model survived in a catalog"
+else ok "model rejection drops both populated catalogs"; fi
 
 # agy missing entirely -> the last-known offline constants, never a guess.
 ( export OSRC_HOME="$TMP/osrc-noagy" PATH="/usr/bin:/bin"

@@ -32,6 +32,13 @@ with tempfile.TemporaryDirectory() as tmp:
     hub = restart()
     assert hub.write_status("demo", {"status": "restore"})[0] == 200
     assert status(hub) == status(restart()) == "review"
+    import signal
+    status_file = root / "hub/status/demo.json"
+    status_file.unlink()
+    os.mkfifo(status_file)
+    signal.alarm(5)
+    assert hub.run_export(force=True)["projects"][0]["status"] == "review"
+    signal.alarm(0)
 print("hub project state: 3 passed, 0 failed")
 PY
 (

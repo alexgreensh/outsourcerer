@@ -177,11 +177,19 @@ _agy_family_default() {
 _agy_model_token() {
   local want="$1" fam tok
   case "$want" in
+    gemini-neon) _agy_model_token gemini-4-neon-high gemini-neon; return ;;
     *-preview|*-lite) : ;;
     gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*|gemini-[0-9]*-flash*|gemini-[0-9]*-pro*|\
 gemini-[0-9]*-neon*|gemini-[0-9]*-argon*|gemini-[0-9]*-hydrogen*|gemini-[0-9]*-carbon*)
       _agy_catalog_knows "$want"
-      case $? in 0|2) printf '%s' "$want"; return 0 ;; esac
+      case $? in 0|2)
+        if [ "${2:-}" = gemini-neon ] && [ "$want" = gemini-4-neon-high ]; then
+          _agy_effort_rung "$want"
+        else
+          printf '%s' "$want"
+        fi
+        return 0 ;;
+      esac
       case "$want" in *pro*|*neon*|*argon*|*hydrogen*|*carbon*) fam=pro ;; *) fam=flash ;; esac
       tok="$(_agy_family_default "$fam")"
       printf '>>> [gemini] agy no longer serves "%s" (its live catalog is `agy models`); running %s, the newest %s it serves. To pin a different id: -m <id>, OSRC_AGY_%s_DEFAULT=<id>, or a "%s|<id>|gm|<tier>" row in %s/models.local.\n' \

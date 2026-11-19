@@ -1995,7 +1995,7 @@ _catalog_fetch_inner() {
       # lane serves: the ids rotate (3.5 -> 3.7 -> 3.8 flash within weeks) and agy hard-errors on a
       # retired one, so nothing downstream may hardcode a dated id.
       have agy || return 1
-      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" agy models 2>/dev/null)"
+      raw="$(_timeout "${OSRC_CATALOG_FETCH_TIMEOUT:-10}" env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy models 2>/dev/null)"
       ;;
     gi)
       # Gemini API model list for the gi image lane (GEMINI_API_KEY path — the gemini-cli
@@ -14110,7 +14110,7 @@ delegate_gmnative() {
 
   if [ "$vehicle" = "agy" ]; then
     have agy || die "OSRC_GEMINI_VEHICLE=agy but 'agy' not on PATH. Install it using the official guide: https://antigravity.google/docs/cli/install/"
-    local atok aflag posture; atok="$(_agy_model_token "$id")"
+    local atok aflag posture; atok="$(_agy_model_token "$id" "${MODEL:-}")"
     _exclude_refuse_resolved "$id" "$atok"   # #45: gemini-pro can resolve to an excluded dated id
     case "$tier" in
       auto)                    aflag=();                                          posture="READ-ONLY (headless -p; no auto-approve)" ;;
@@ -14166,7 +14166,7 @@ delegate_gmnative() {
     elif [ "${rc:-0}" -ne 0 ] && grep -qiE 'invalid model selection|not recognized as a known model|not supported for model' "$_aerr" 2>/dev/null; then
       # agy refused the id. Its catalog moved under us (or a pin names a retired id): drop the cached
       # catalog so the NEXT run re-reads `agy models` and self-heals, and say how to pin.
-      rm -f "$(_catalog_path gm)" 2>/dev/null || true
+      rm -f "$(_catalog_path gm)" "$(_agy_models_cache)" 2>/dev/null || true
       printf '>>> [gemini] agy refused model "%s". Its live catalog is `agy models`; this run cleared the cached copy so the next dispatch re-reads it.\n' "$atok" >&2
       printf '>>>   pin        : -m <served id>, OSRC_AGY_FLASH_DEFAULT / OSRC_AGY_PRO_DEFAULT=<id>, or a "gemini-flash|<id>|gm|mid" row in %s/models.local (wins over the built-in table, survives updates).\n' "$OSRC_HOME" >&2
       [ "${rc:-0}" = "0" ] && rc=2

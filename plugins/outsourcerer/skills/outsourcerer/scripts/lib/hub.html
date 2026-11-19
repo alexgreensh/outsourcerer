@@ -438,7 +438,7 @@ a.pill svg { width: 13px; height: 13px; }
     opts.headers = Object.assign({ 'X-Hub-Token': TOKEN }, opts.headers || {});
     // A stalled hub must never hang a send or a poll: abort ordinary polls after 15 s (MC-6).
     // A manual refresh or plans check may wait for the export it started.
-    const ac = new AbortController(), t = setTimeout(() => ac.abort(), path === '/api/refresh?plans' ? 210000 : path === '/api/refresh' ? 630000 : 15000); opts.signal = ac.signal;
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), path === '/api/refresh?plans' ? 315000 : path === '/api/refresh' ? 630000 : 15000); opts.signal = ac.signal;
     return fetch(path, opts).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -473,8 +473,7 @@ a.pill svg { width: 13px; height: 13px; }
     const stopPlans = window.OSRC_HUB_PLANS?.startChecks($('checkplans'), async () => {
       const data = await api('/api/refresh?plans', { method: 'POST' });
       plansChecked = data.exported_at * 1000;
-      const snap = { docs: docsFor('limits', data) };
-      subs.limits.forEach((notify) => notify(snap)); renderLimits();
+      await pull('limits', data); renderLimits();
     });
     function docsFor(name, data) {
       if (name === 'projects') return (data.projects || []).map((p) => ({ id: p.id, data: () => p }));

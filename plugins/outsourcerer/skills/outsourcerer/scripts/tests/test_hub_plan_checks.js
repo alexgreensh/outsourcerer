@@ -31,3 +31,21 @@ test('opening, recurring and manual checks share progress and retry feedback', a
   assert.equal(requests, 3);
   assert.equal(button.disabled, false);
 });
+
+test('a pending poll cannot replace the limits from a completed plans check', async () => {
+  const page = fs.readFileSync(path.join(__dirname, '../lib/hub.html'), 'utf8');
+  const adapter = page.slice(page.indexOf('  function makeLocalDb()'), page.indexOf('  function subscribe(d)'));
+  let check, release;
+  const ctx = { window: { OSRC_HUB_PLANS: { startChecks(_, fn) { check = fn; } } },
+    $() {}, setInterval() {}, renderLimits() {}, plansChecked: 0,
+    api(url) { return url === '/api/projects' ? new Promise(r => { release = r; }) :
+      Promise.resolve({ exported_at: 20, limits: [{ id: 'new' }] }); } };
+  const db = vm.runInNewContext(adapter + '\nmakeLocalDb()', ctx);
+  const seen = [];
+  db.collection('limits').onSnapshot(s => seen.push(s.docs[0].id));
+  await check();
+  release({ limits: [{ id: 'old' }] });
+  await new Promise(setImmediate);
+  assert.deepEqual(seen, ['new']);
+  assert.equal(ctx.plansChecked, 20000);
+});
