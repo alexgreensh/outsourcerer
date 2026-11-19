@@ -32,7 +32,7 @@ mk() { # <name> <verb> <lane> -> job dir (meta.json + private cwd)
 # A STREAMING delegate: one line per second for N seconds (so idle never grows); writes a file into its
 # cwd at second W (0 = never); snapshots its own status file EVERY second into $jd/witness.<i> so a test
 # can prove a flag was raised and later cleared (the growth-branch clear is silent by design).
-STREAM='n=$1; w=$2; s=$3; jd=$4; cwd=$5; i=0; echo "hello from the model"; while [ $i -lt $n ]; do i=$((i+1)); sleep 1; echo "reasoning step $i ..."; [ "$i" = "$w" ] && date > "$cwd/out.txt"; cat "$jd/status" > "$jd/witness.$i" 2>/dev/null; done; echo "OSRC::DONE"'
+STREAM='n=$1; w=$2; s=$3; jd=$4; cwd=$5; i=0; echo "hello from the model"; while [ $i -lt $n ]; do i=$((i+1)); sleep 1; if [ "$i" -gt "${QUIET_UNTIL:-0}" ]; then echo "reasoning step $i ..."; fi; cat "$jd/status" > "$jd/witness.$i" 2>/dev/null; if [ "$i" = "$w" ] || { [ "${WRITE_ON_STALL:-0}" = 1 ] && grep -qx no-progress-writes "$jd/witness.$i"; }; then date > "$cwd/out.txt"; fi; done; echo "OSRC::DONE"'
 wit() { cat "$1/witness.$2" 2>/dev/null; }
 sup() { # <jd> <verb> <n> <w> <s> [env...]  -> runs _supervise with wide silence windows so only the new arm can act
   local jd="$1" verb="$2" n="$3" w="$4" s="$5"; shift 5
@@ -42,9 +42,10 @@ sup() { # <jd> <verb> <n> <w> <s> [env...]  -> runs _supervise with wide silence
 }
 
 # 1. edit verb, streams 8s, never writes, OSRC_NOPROGRESS_SECS=3, no kill knob -> flagged mid-flight, survives.
-jd=$(mk c1 edit dv); sup "$jd" edit 8 0 6 OSRC_NOPROGRESS_SECS=3
+jd=$(mk c1 edit dv); sup "$jd" edit 10 0 6 OSRC_NOPROGRESS_SECS=3 QUIET_UNTIL=6
 [ "$(wit "$jd" 6)" = "no-progress-writes" ] && ok "edit+writeless past OSRC_NOPROGRESS_SECS -> state no-progress-writes while alive and streaming" \
   || bad "edit+writeless: witness@6='$(wit "$jd" 6)' (want no-progress-writes)"
+[ "$(wit "$jd" 10)" = running ] && ok "resumed output clears no-progress-writes" || bad "resumed output did not clear the stall"
 [ "$(wit "$jd" 2)" = "running" ] && ok "edit+writeless: still running BEFORE the threshold" || bad "edit+writeless: witness@2='$(wit "$jd" 2)'"
 grep -q 'Not killing it' "$jd/sup.err" && ok "default is SURFACE-ONLY: the WARN says it is not killing" || bad "surface-only WARN missing"
 case "$(cat "$jd/status")" in wedged|timeout) bad "job was KILLED without OSRC_NOPROGRESS_KILL_SECS (status=$(cat "$jd/status"))" ;; *) ok "job not killed by default (final status: $(cat "$jd/status"))" ;; esac
@@ -67,9 +68,9 @@ OSRC_TEXT_LANES="mylane" _lane_text_only mylane && ok "OSRC_TEXT_LANES extends t
 # 4. a write before the threshold -> never flagged; a write AFTER being flagged -> clears to running.
 jd=$(mk c5 edit dv); sup "$jd" edit 6 1 5 OSRC_NOPROGRESS_SECS=2
 [ "$(wit "$jd" 5)" = "running" ] && ok "an early write keeps the job running (never flagged)" || bad "early writer flagged: '$(wit "$jd" 5)'"
-jd=$(mk c6 yolo dv); sup "$jd" yolo 8 5 7 OSRC_NOPROGRESS_SECS=2
-[ "$(wit "$jd" 4)" = "no-progress-writes" ] && [ "$(wit "$jd" 7)" = "running" ] \
-  && ok "a late write clears no-progress-writes back to running (flagged@4, running@7)" || bad "late write: witness@4='$(wit "$jd" 4)' witness@7='$(wit "$jd" 7)'"
+jd=$(mk c6 yolo dv); sup "$jd" yolo 10 0 9 OSRC_NOPROGRESS_SECS=2 QUIET_UNTIL=10 WRITE_ON_STALL=1
+grep -qx no-progress-writes "$jd"/witness.* && [ "$(wit "$jd" 10)" = running ] \
+  && ok "a late write clears no-progress-writes back to running (flag observed before write)" || bad "late write: final witness=$(wit "$jd" 10)"
 
 # 5. opt-in hard bound: OSRC_NOPROGRESS_KILL_SECS=5 on a 30s writeless streamer -> wedged, reason, exit 125, fast.
 jd=$(mk c7 yolo dv); t0=$(date +%s); sup "$jd" yolo 30 0 99 OSRC_NOPROGRESS_SECS=2 OSRC_NOPROGRESS_KILL_SECS=5; el=$(( $(date +%s) - t0 ))

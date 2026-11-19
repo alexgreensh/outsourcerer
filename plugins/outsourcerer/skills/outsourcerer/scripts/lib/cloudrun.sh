@@ -313,10 +313,17 @@ _cloudrun_pick_vehicle() {
 # ---- launch -------------------------------------------------------------------------------------
 # _cloudrun_extract_ref <log> -> first session URL or id pattern the vehicle printed.
 _cloudrun_extract_ref() {
-  local log="$1" u
-  u="$(grep -oE 'https?://[^"'"'"' <>)\\]+' "$log" 2>/dev/null | head -1)"
+  local log="$1" v="$2" u url id
+  case "$v" in
+    claude) url='claude[.]ai/code/'; id='session_[A-Za-z0-9_-]{6,}' ;;
+    devin) url='app[.]devin[.]ai/sessions/'; id='(devin-)?[0-9a-f]{16,}' ;;
+    codex) url='chatgpt[.]com/codex/tasks/'; id='(task_|cse_)[A-Za-z0-9_-]{6,}' ;;
+    *) return 1 ;;
+  esac
+  u="$(grep -oE "https://${url}${id}" "$log" 2>/dev/null | head -1)"
   [ -n "$u" ] && { printf 'url:%s' "$u"; return 0; }
-  u="$(grep -oE 'devin-[0-9a-f]{16,}|session_[A-Za-z0-9_-]{6,}|cse_[A-Za-z0-9_-]{6,}' "$log" 2>/dev/null | head -1)"
+  [ "$v" != devin ] || id='devin-[0-9a-f]{16,}'
+  u="$(grep -Eo "(^|[[:space:]])${id}([[:space:]]|$)" "$log" 2>/dev/null | head -1 | tr -d '[:space:]')"
   [ -n "$u" ] && { printf 'id:%s' "$u"; return 0; }
   return 1
 }
@@ -345,27 +352,52 @@ _cloudrun_launch() {
     # `claude --cloud` refuses to run without a terminal ("--cloud requires an interactive terminal"),
     # so a nohup launch died at once (2026-11-19). It runs in its own tmux pane instead; the pane is
     # piped to the log, and the launcher waits for the pipe so no early line is lost.
-    local sess sh q; sess="osrc-cloud-$(basename "$log" .launch.log)"; sh="$log.sh"
-    q="$(printf '%q ' "${cmd[@]}")"
-    { printf 'i=0; while [ ! -f %q ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done\n' "$log.piped"
-      printf 'cd %q || exit 1\n%s\necho "OSRC_CLOUD_EXIT:$?"\n' "$root" "$q"; } > "$sh" || return 1
-    tmux new-session -d -s "$sess" "bash $(printf '%q' "$sh")" 2>/dev/null || return 1
-    tmux pipe-pane -o -t "$sess" "cat >> $(printf '%q' "$log")" 2>/dev/null
-    : > "$log.piped"
-    pid="$(tmux display-message -p -t "$sess" '#{pane_pid}' 2>/dev/null)"
+    local sess fifo attempt name writer i
+    cmd[0]="$(type -P claude)" || return 1
+    case "${cmd[0]}" in /*) ;; *) cmd[0]="$PWD/${cmd[0]}" ;; esac
+    attempt="$(mktemp -d "$log.XXXXXX")" || return 1
+    sess="osrc-cloud-${attempt##*.}"; fifo="$attempt/start"
+    mkfifo "$fifo" || { rmdir "$attempt"; return 1; }
+    # Bash reads its program from a private pipe. Its stdin stays connected to the pane.
+    pid="$(tmux new-session -d -P -F '#{pane_pid}' -s "$sess" /usr/bin/env -i /bin/bash "$fifo")" || {
+      rm -rf "$attempt"; return 1
+    }
+    if [ -z "$pid" ] || ! tmux pipe-pane -t "$sess" "/bin/cat >> $(printf '%q' "$log")"; then
+      tmux kill-session -t "$sess"; rm -rf "$attempt"; return 1
+    fi
+    # Only send the checked caller's environment once capture is attached. Credentials
+    # travel through the pipe, never through tmux's server environment or a saved script.
+    {
+      while IFS= read -r name; do
+        case "$name" in ''|*[!a-zA-Z0-9_]*|BASHOPTS|SHELLOPTS|PWD|OLDPWD|SHLVL|_) continue ;; esac
+        printf 'export %s=%q\n' "$name" "${!name}"
+      done < <(compgen -e)
+      printf 'cd %q || exit 1\n' "$root"
+      printf '%q ' "${cmd[@]}"
+      printf '\nprintf "%%s" "$?" > %q\n' "$attempt/exit"
+    } > "$fifo" &
+    writer=$!
+    for ((i=0; i<100; i++)); do kill -0 "$writer" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$writer" 2>/dev/null; then kill "$writer" 2>/dev/null; fi
+    if ! wait "$writer"; then
+      tmux kill-session -t "$sess"; rm -rf "$attempt"; return 1
+    fi
+    rm -f "$fifo"
   else
-    ( cd "$root" && exec nohup "${cmd[@]}" >"$log" 2>&1 ) &
+    local attempt; attempt="$(mktemp -d "$log.XXXXXX")" || return 1
+    ( cd "$root" && nohup "${cmd[@]}"; printf '%s' "$?" > "$attempt/exit" ) >"$log" 2>&1 &
     pid="$!"
   fi
   printf '%s' "$pid" > "$pidfile"
   local i=0 max="${OSRC_CLOUD_LAUNCH_WAIT:-30}" ref=""
   case "$max" in ''|*[!0-9]*) max=30 ;; esac
   while [ "$i" -lt "$max" ]; do
-    ref="$(_cloudrun_extract_ref "$log" 2>/dev/null)" && [ -n "$ref" ] && break
+    ref="$(_cloudrun_extract_ref "$log" "$v" 2>/dev/null)" && [ -n "$ref" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 1; i=$((i+1))
   done
-  ref="$(_cloudrun_extract_ref "$log" 2>/dev/null)"
+  ref="$(_cloudrun_extract_ref "$log" "$v" 2>/dev/null)"
+  if [ -s "$attempt/exit" ] && [ "$(cat "$attempt/exit")" != 0 ]; then return 1; fi
   if [ -n "$ref" ]; then printf '%s\n%s\n' "$pid" "$ref"; else printf '%s\n\n' "$pid"; fi
 }
 
@@ -406,7 +438,7 @@ _cloudrun_register() {
       "$id" "$branch" "$repo" "$transport" "$url" "$base" "$brief" "$donewhen" "$now" "$now" "$vehicle" "$ref" "$pack" > "$tmp" \
       && mv -f "$tmp" "$f" || { rm -f "$tmp"; die "cloud: could not write $f"; }
   fi
-  _owner_record "$id"
+  _owner_record "$id" || { rm -f "$f"; die "cannot register owner for $id"; }
   return 0
 }
 
@@ -572,7 +604,7 @@ _cloudrun_start() {
   log="$(_cloudrun_cdir)/$id.launch.log"; pidfile="$log.pid"
   : > "$log" 2>/dev/null || die "cloud: cannot write $log"
   printf '>>> [cloud] launching %s session %s (spends: %s)\n' "$veh" "$id" "$(_cloudrun_vehicle_quota "$veh")" >&2
-  launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model")"
+  launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model")" || die "cloud: the $veh session did not start (see $log)"
   pid="$(printf '%s' "$launch_out" | sed -n '1p')"; ref="$(printf '%s' "$launch_out" | sed -n '2p')"
   # No session link and the launcher already gone means the vehicle failed: say so, register nothing.
   if [ -z "$ref" ] && { [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; }; then

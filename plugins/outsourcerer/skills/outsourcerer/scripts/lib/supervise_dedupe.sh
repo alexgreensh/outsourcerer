@@ -107,20 +107,26 @@ _sv_superseded_exit() { # <newer-pid>
 }
 
 # ---- delivered ledger ("<ts>\t<row id>" lines) -------------------------------------------------
+_sv_stall_id() { printf 'stall/%s/%s' "$1" "$2"; }
+
 _sv_ledger_filter() { # <ledger> <rows>: drop rows (prio ts kind target detail next id) already delivered
   [ -n "$2" ] || return 0
   if [ -s "$1" ]; then
-    printf '%s\n' "$2" | awk -F '\t' 'NR == FNR { seen[$2] = 1; next } NF && !($7 in seen)' "$1" -
-  else printf '%s\n' "$2" | grep .; fi
+    printf '%s\n' "$2" | awk -F '\t' 'NR == FNR { seen[$2] = 1; next } NF && !seen[$7]++' "$1" -
+  else printf '%s\n' "$2" | awk -F '\t' 'NF && !seen[$7]++'; fi
 }
 
 _sv_ledger_add() { # <ledger> <rows>: record row ids, prune entries older than 24 h
   local f="$1" since; [ -n "$2" ] || return 0
   mkdir -p "${f%/*}" 2>/dev/null || return 1
   since=$(( $(_sv_now) - 86400 ))
-  { [ -f "$f" ] && awk -F '\t' -v s="$since" '$1 >= s' "$f"
+  { [ ! -f "$f" ] || cat "$f"
     printf '%s\n' "$2" | awk -F '\t' 'NF { print $2 FS $7 }'
-  } | awk '!seen[$0]++' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+  } | awk -F '\t' -v since="$since" '
+    $1 >= since { if (!seen[$2]++) print; next }
+    $2 ~ /^stall\// { split($2, parts, "/"); if ($1 > latest[parts[2]]) { previous[parts[2]]=$0; latest[parts[2]]=$1 } }
+    END { for (target in previous) print previous[target] }
+  ' > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
 }
 
 # Deliver <rows> once: under the ledger's lock, drop what another supervise already printed, print

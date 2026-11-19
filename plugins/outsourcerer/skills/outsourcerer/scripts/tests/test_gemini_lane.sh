@@ -43,10 +43,14 @@ mkdir -p "$TMP/bin" "$HOME/.antigravity"
 printf 'signed-in' > "$HOME/.antigravity/state"
 cat > "$TMP/bin/agy" <<'FAKE'
 #!/bin/sh
-[ "$1" = -p ] && [ -z "${GEMINI_API_KEY+x}${GOOGLE_API_KEY+x}" ] || exit 1
+[ -z "${GEMINI_API_KEY+x}${GOOGLE_API_KEY+x}" ] || exit 1
 echo keyless-dispatch
 FAKE
 chmod +x "$TMP/bin/agy"
+if ( export PATH="$TMP/bin:$PATH" GEMINI_API_KEY=fixture GOOGLE_API_KEY=fixture
+     MODEL_EXPLICIT=0; _session_launch_gm && "${SESSION_LAUNCH[@]}" ); then
+  ok "interactive agy starts without either exported key"
+else bad "interactive agy inherited a key"; fi
 for family in gemini-pro gemini-flash gemini-flash-lite; do
   if (
     export PATH="$TMP/bin:$PATH" GEMINI_API_KEY=fixture GOOGLE_API_KEY=fixture

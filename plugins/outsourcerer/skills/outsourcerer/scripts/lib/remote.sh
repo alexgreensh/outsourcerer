@@ -82,7 +82,7 @@ _osrc_ev_due() { # <scope> <key> <interval-secs>
 # _osrc_emit <kind> <target> <detail> <next-command>: the two-line contract.
 _osrc_emit() {
   local detail; detail="$(printf '%s' "$3" | tr '\n\r' '  ' | cut -c1-300)"
-  printf 'EVENT %s %s %s %s\n' "$1" "$2" "$(_osrc_now)" "$detail"
+  printf 'EVENT %s %s %s %s\n' "$1" "$2" "${5:-$(_osrc_now)}" "$detail"
   printf 'NEXT %s\n' "$4"
 }
 
@@ -421,7 +421,7 @@ osrc_remote_events() {
       vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
       [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
       if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "$id" stalled "$stall"; then
-        _osrc_emit stalled "$id" "no push on $(jq -r .branch "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id"
+        _osrc_emit stalled "$id" "no push on $(jq -r .branch "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id" "$last_move"
       fi
     fi
   done
@@ -501,7 +501,7 @@ _osrc_lane_add() {
      ready_head:"", ready_ts:0, check:null}' > "$(_osrc_lane_json "$id").new" && mv -f "$(_osrc_lane_json "$id").new" "$(_osrc_lane_json "$id")" \
     || die "could not write lane record"
   [ -s "$(_osrc_lane_json "$id")" ] || die "lane record was not written"
-  _owner_record "$id"
+  _owner_record "$id" || { rm -f "$(_osrc_lane_json "$id")"; die "cannot register owner for $id"; }
   printf 'lane %s registered: %s %s branch %s (READY marker: %s%s)\n' "$id" "$transport" "$url" "$branch" "$marker" "${donewhen:+, done-when check set}"
   _osrc_lane_poll "$id" force
   printf 'state: %s   (events: %s lane events)\n' "$(osrc_remote_state "$id")" "$(_osrc_self)"

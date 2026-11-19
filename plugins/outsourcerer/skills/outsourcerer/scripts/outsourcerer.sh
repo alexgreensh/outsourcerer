@@ -3826,7 +3826,8 @@ _session_launch_gm() {
   have "$gveh" || die "OSRC_GEMINI_VEHICLE=$gveh but '$gveh' not on PATH"
   [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable gemini "$gveh" --help
   SESSION_LAUNCH_ENGINE="$gveh"   # --perm resolves safe flags against the vehicle (agy vs gemini-cli)
-  if [ "$MODEL_EXPLICIT" = "1" ]; then SESSION_LAUNCH=("$gveh" "--model" "$MODEL"); else SESSION_LAUNCH=("$gveh"); fi
+  SESSION_LAUNCH=(env -u GEMINI_API_KEY -u GOOGLE_API_KEY "$gveh")
+  if [ "$MODEL_EXPLICIT" = "1" ]; then SESSION_LAUNCH+=(--model "$MODEL"); fi
 }
 
 # ---- gi (Gemini API image lane on a paid GEMINI_API_KEY — metered, image-only) ----
@@ -17972,10 +17973,8 @@ _winpty_session() {
       fi
 
       _session_registry_append start "$PROVIDER" "$MODEL" "${EFFORT:-}" started launch || die "cannot record session start"
-      # Windows arm gate (SPEC heartbeat-liveness A): arm+verify BEFORE the success claim, mirroring
-      # the tmux path's finalize gate. A "running" claim must never be emitted over an unverified
-      # watcher. rc 2 (opted out) keeps the plain success line; rc 1 says the session is live but
-      # UNSUPERVISED (the helper's loud NOT-ARMED goes to stderr).
+      _owner_record "$SESSION_NAME" || { _winpty_session stop; die "cannot register owner for $SESSION_NAME"; }
+      # An opted-out heartbeat is distinct from a failed arm on a live Windows session.
       _winpty_arm_rc=0
       _heartbeat_arm_verify || _winpty_arm_rc=$?
       # Durable supervision marker, winpty parity with _bg_launch (hardening): the session path
@@ -17992,7 +17991,6 @@ _winpty_session() {
         echo "Started winpty session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       fi
       echo "Give it ~8s to boot, then:  $0 session read [--state]   |   $0 session send \"…\"   |   $0 session answer [<option-number>]   |   $0 session clear   |   $0 session stop"
-      _owner_record "$SESSION_NAME"
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
@@ -18166,12 +18164,11 @@ session() {
         _session_launch_cleanup "$SESSION_NAME" send-failed
         die "session start: tmux send-keys failed; the interactive command was not submitted."
       fi
-      # The shared finalizer verifies liveness, persistence, supervision, and endpoint identity.
       _session_launch_finalize "$SESSION_NAME" "$PROVIDER" "$MODEL" "${EFFORT:-}" "$launch" || \
         die "session start: interactive launch did not become a supervised live session."
+      _owner_record "$SESSION_NAME" || { _session_launch_cleanup "$SESSION_NAME" owner-failed; die "cannot register owner for $SESSION_NAME"; }
       echo "Started tmux session '$SESSION_NAME' running $PROVIDER (model: $MODEL) in $PWD."
       echo "Give it ~8s to boot, then:  $0 session read   |   $0 session send \"…\"   |   $0 session answer [y|n|<i>|<label>]   |   $0 session control <interrupt|exit|relaunch>   |   $0 session clear   |   $0 session model [name]   |   $0 session stop"
-      _owner_record "$SESSION_NAME"
       if [ -n "$_done_when" ]; then
         osrc_done_set "$SESSION_NAME" "$_done_when" "$PWD" || die "session start: could not record the done contract for '$SESSION_NAME'"
         echo "Done contract recorded: $_done_when"
@@ -18834,7 +18831,7 @@ doctor() {
     if have agy; then
       local _agtok; _agtok="$(_agy_model_token gemini-flash 2>/dev/null)"
       if _model_excluded gemini-flash || _model_excluded "$_agtok"; then echo "      antigravity-agy: ping skipped ($_agtok is on your exclude list)"
-      else agy -p "reply PONG" --model "$(_agy_model_token gemini-flash)" --effort low --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
+      else env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy -p "reply PONG" --model "$(_agy_model_token gemini-flash)" --effort low --print-timeout 60s >/dev/null 2>&1 && echo "      antigravity-agy (keyless): PONG (Antigravity login active)" || echo "      antigravity-agy: no reply (open Antigravity / sign in once so agy inherits your login)"; fi
     fi
     # gemini-cli is RETIRED (Antigravity `agy` is the only Gemini text vehicle) — no ping.
   else
@@ -18955,7 +18952,7 @@ doctor() {
     elif _aglive="$(_agy_model_token gemini-flash 2>/dev/null)"; _model_excluded gemini-flash || _model_excluded "$_aglive"; then echo "    agy liveness: probe skipped ($_aglive is on your exclude list)"
     elif [ "${OSRC_DOCTOR_PROBE:-1}" = "1" ]; then
       local _pt _prc=0
-      _pt="$(agy -p "reply with the single word: ok" --model "$(_agy_model_token gemini-flash)" --effort low \
+      _pt="$(env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy -p "reply with the single word: ok" --model "$(_agy_model_token gemini-flash)" --effort low \
               --print-timeout "${OSRC_DOCTOR_PROBE_TIMEOUT:-25s}" 2>&1)" || _prc=$?
       case "$_pt" in
         *[Oo][Kk]*) echo "    agy liveness: RESPONDS (probed just now with a real request)" ;;

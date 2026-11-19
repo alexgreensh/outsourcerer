@@ -48,7 +48,14 @@ osrc_where() {
   local service='(whatsapp|browser|mac gui|gui app|applescript|appleevents|postgres(ql)?|mysql|mariadb|redis|mongodb|sqlite3?|tmux|iterm|screen session|database|db|webcam|camera|microphone|keychain)'
   local endpoint='((https?://)?(localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0))'
   local state='(/users/|/home/|~/|my (downloads|desktop|documents|pictures)|uncommitted changes|working tree|unpushed|local commits|files? outside (the )?(repo|repository))'
-  if grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|(run|execute|test|verify|install)( [[:alnum:]_-]+){0,4} on (my|this|the user.s) (mac|machine|computer|laptop)|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only' <<<"$lc"; then
+  local machine='(mac|machine|computer|laptop)([^[:alnum:]_]|$)'
+  # Consider the clause containing the location. A past failure in the background
+  # of a different request does not specify where the new work should run.
+  if tr '.!?;' '\n' <<<"$lc" | awk -v machine="$machine" '
+    $0 ~ ("on (my|this|the user.s) " machine) &&
+      $0 !~ /(failed|crashed|used to|previously|formerly|was|were)( [^ ]+)* +on (my|this|the user.s) / { local_run=1 }
+    END { exit !local_run }
+  ' || grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only' <<<"$lc"; then
     decision="local"; reason="the brief says keep it local"
   elif grep -qE "(^|[^[:alnum:]_])${action} +${qualifier}(${service}([^[:alnum:]_]|$)|${endpoint}([^[:alnum:]_]|$)|${state})" <<<"$lc"; then
     decision="local"; reason="the requested operation needs a service, device or file on this machine"

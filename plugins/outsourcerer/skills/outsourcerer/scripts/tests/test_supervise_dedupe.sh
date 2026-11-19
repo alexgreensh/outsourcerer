@@ -191,5 +191,20 @@ st="$(lib _sv_target_screen osrc-auto-S6 | head -1)"
 fresh 6; own S i6; pane i6 cc-idle-after-work.txt
 out="$(sup --session S)"; grep -q '^EVENT idle i6 .*no done marker registered: re-arm with --watch' <<<"$out" && ok "idle with nothing registered names --watch / --done-when" || no "hint: [$out]"
 
+fresh stall-rearm
+if ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+  _reconcile_status() { cat "$OSRC_JOBS/$1/status"; }
+  jd="$OSRC_JOBS/j"; mkdir -p "$jd"; : > "$jd/out.log"; echo no-progress-writes > "$jd/status"
+  _sv_observe_emit j 1000 test S; _sv_observe_emit j 1500 test S
+  rows="$(_sv_read_range "$OSRC_HOME/lanes/events.jsonl" 0 - '["j"]' S)"
+  [ "$(printf '%s\n' "$rows" | wc -l)" -eq 2 ] || exit 1
+  first="$(head -1 <<<"$rows")"; second="$(tail -1 <<<"$rows")"
+  _sv_ledger_add "$TMP/stalls" "$first"
+  [ -z "$(_sv_ledger_filter "$TMP/stalls" "$second")" ] || exit 1
+  touch -t 202001010101 "$jd/status"; _sv_observe_emit j 2000 test S
+  rows="$(_sv_read_range "$OSRC_HOME/lanes/events.jsonl" 0 - '["j"]' S)"
+  [ -n "$(_sv_ledger_filter "$TMP/stalls" "$rows")" ]
+); then ok "one delivery per job stall start across re-arms"; else no "stall delivery identity"; fi
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" = 0 ]

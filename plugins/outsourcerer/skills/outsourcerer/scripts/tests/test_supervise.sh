@@ -13,6 +13,7 @@ command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-supervise.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; PIDS=""
 trap 'for p in $PIDS; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/panes"; ln -s "$SCRIPT_DIR/fake-bin/tmux-files" "$TMP/bin/tmux"
+mkdir -p "$TMP/home"; export HOME="$TMP/home"
 export PATH="$TMP/bin:$PATH" FAKE_TMUX_DIR="$TMP/panes" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_STREAM=1
 export OSRC_CLAUDE_PROJECTS_DIR="$TMP/projects" OSRC_CLAUDE_SESSIONS_DIR="$TMP/ccsessions"
 unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID
@@ -407,6 +408,13 @@ if (
     [ "$(_osrc_review_item_state owned "$head")" = inflight ]
 ); then ok "auto review claims only the verified lane and full head"
 else no "exact auto review claim"; fi
+
+fresh owner-failure
+out="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+  _owner_record() { return 1; }; _osrc_repo_resolve() { printf 'git\tfixture'; }
+  _osrc_lane_add owner-test --repo fixture --branch work ) 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && [[ "$out" == *"cannot register owner"* ]] && [ ! -f "$OSRC_HOME/remote/owner-test.json" ] \
+  && ok "owner failure unwinds remote registration" || no "owner failure: $out"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

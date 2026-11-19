@@ -231,7 +231,7 @@ _sv_unknown_persistent() { # <session-id>
 
 _sv_observe() { # <id> <now> [src] [owner]
   local id="$1" now="$2" src="${3:-supervise}" owner="${4:-}" st code h out ev stall cap sig rf
-  SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""
+  SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""; SV_STALL_START=""
   case "$id" in watch.*) _sv_observe_watch "$id" "$src" "$owner"; return 0 ;; esac
   stall=$(( $(_sv_num "${OSRC_SUPERVISE_STALL:-}" 15) * 60 ))
   _sv_state_read "$id"
@@ -252,7 +252,9 @@ _sv_observe() { # <id> <now> [src] [owner]
       done|'done?') SV_K=done; SV_D="job finished ($st)"; SV_DROP=1 ;;
       blocked|permission-blocked) SV_K=approval; SV_D="headless job ended $st: it hit a permission wall"; SV_DROP=1 ;;
       failed|wedged|timeout|interrupted|canceled) SV_K=failed; SV_D="job $st: $(head -c 120 "$OSRC_JOBS/$id/reason" 2>/dev/null | tr '\n' ' ')"; SV_DROP=1 ;;
-      'stalled?'|no-progress-writes) SV_K=stalled; SV_D="job reports $st"; SV_OUT=1 ;;
+      'stalled?'|no-progress-writes)
+        SV_STALL_START="$(stat -c %Y "$OSRC_JOBS/$id/status" 2>/dev/null || stat -f %m "$OSRC_JOBS/$id/status")"
+        SV_K=stalled; SV_D="job reports $st"; SV_OUT=1 ;;
       *) SV_OUT=1; SV_PEND=1 ;;
     esac
   elif [ -e "$OSRC_HOME/autodetach/$id.log" ] || [ -e "$OSRC_HOME/autodetach/$id.rc" ]; then
@@ -389,7 +391,7 @@ _sv_append() { # <kind> <target> <detail> <next> <src> [owner]
   fi
   _SV_SEQ=$(( ${_SV_SEQ:-0} + 1 ))   # row id: unique per append (ts, pid, sequence, random)
   jq -cn --argjson ts "$(_sv_now)" --arg k "$1" --arg t "$2" --arg d "$3" --arg n "$4" --arg src "$5" --arg o "${6:-}" \
-    --arg id "$(_sv_now)-$$-$_SV_SEQ-$RANDOM" \
+    --arg id "${7:-$(_sv_now)-$$-$_SV_SEQ-$RANDOM}" \
     '{id:$id,ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$src} + (if $o == "" then {} else {owner:$o} end)' >> "$f"
 }
 
@@ -404,7 +406,9 @@ _sv_emit() { # <id> <now> <src> [owner]
     [ $(( now - SVS_LT )) -ge "$remind" ] || return 0
     detail="still unresolved, waiting $(( (now - $(_sv_first_seen "$id" "$key" "$now")) / 60 ))m: $SV_D"
   else _sv_first_seen "$id" "$key" "$now" >/dev/null; detail="$SV_D"; fi
-  _sv_append "$SV_K" "$id" "$detail" "${SV_NX:-$(_sv_next "$SV_K" "$id")}" "$3" "${4:-}" || return 1
+  local delivery_id=""
+  if [ "$SV_K" = stalled ]; then delivery_id="$(_sv_stall_id "$id" "${SV_STALL_START:-$SVS_CHANGED}")"; fi
+  _sv_append "$SV_K" "$id" "$detail" "${SV_NX:-$(_sv_next "$SV_K" "$id")}" "$3" "${4:-}" "$delivery_id" || return 1
   SVS_LK="${SV_HA:-$key}"; SVS_LT="$now"; _sv_state_write "$id"   # SV_HA: the event a not-landed stands for
 }
 
@@ -426,7 +430,7 @@ _sv_observe_all() { # [src]
 # L2's remote lanes print EVENT/NEXT pairs; distinguish done events for new branch heads.
 _sv_remote_poll() { # <src>
   type osrc_remote_events >/dev/null 2>&1 || return 0
-  local owner marker line kind="" tgt detail next key now _e _ts head; now="$(_sv_now)"
+  local owner marker line kind="" tgt detail next key now _e _ts head delivery_id; now="$(_sv_now)"
   osrc_remote_events 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       EVENT\ *) read -r _e kind tgt _ts detail <<< "$line"; next="" ;;
@@ -447,7 +451,9 @@ _sv_remote_poll() { # <src>
               owner="${marker%/*}"; owner="${owner##*/}"; break
             done ;;
           esac
-          _sv_append "$kind" "$tgt" "$detail" "$next" "$1" "$owner" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
+          delivery_id=""
+          [ "$kind" != stalled ] || delivery_id="$(_sv_stall_id "$tgt" "$_ts")"
+          _sv_append "$kind" "$tgt" "$detail" "$next" "$1" "$owner" "$delivery_id" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
         fi
         _sv_target_unlock "remote.$tgt"
         kind="" ;;

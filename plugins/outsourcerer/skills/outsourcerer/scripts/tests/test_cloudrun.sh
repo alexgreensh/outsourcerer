@@ -64,7 +64,8 @@ cat > "$STUB/devin" <<'EOF'
 case "${1:-}" in
   auth)   echo "Logged in (via Devin)."; exit 0 ;;
   --help|-h|help) echo "Usage: devin [options]"; echo "  --cloud"; echo "  -p, --print [<PROMPT>]"; echo "      --prompt-file <FILE>"; exit 0 ;;
-  --cloud) echo "Devin session: https://app.devin.ai/sessions/devin-0123456789abcdef"; exit 0 ;;
+  --cloud) if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
+           echo "Devin session: https://app.devin.ai/sessions/devin-0123456789abcdef"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -149,11 +150,11 @@ w() { local _w; _w="$( cd "$WORK" && osrc_where "$1" )"; printf '%s\n' "${_w%%$'
 [ "$(w 'continue my work on the current branch')" = "cloud" ] \
   && ok "where: current-branch w/o unpushed -> cloud" || bad "where: current-branch misrouted"
 [ "$(w '')" = "local" ] && ok "where: empty brief -> local" || bad "where: empty brief not local"
-for brief in "Prepare Total Recall release notes. The old build failed on the user's Mac under /Users/alex/Library." \
+for brief in "Write release notes. The previous build crashed on my Mac." "Prepare Total Recall release notes. The old build failed on the user's Mac under /Users/alex/Library." \
              "Add a regression test for the error message mentioning localhost and SQLite."; do
   [ "$(w "$brief")" = cloud ] && ok "cloud: $brief" || bad "misrouted: $brief"
 done
-for brief in "Inspect ~/Library/Logs/recall.log before preparing the release." \
+for brief in "Debug the service on my Mac" "Inspect ~/Library/Logs/recall.log before preparing the release." \
              "Capture the attached USB webcam output for the bug report."; do
   [ "$(w "$brief")" = local ] && ok "local: $brief" || bad "misrouted: $brief"
 done
@@ -246,6 +247,10 @@ out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
   cmd_cloud consent grant >/dev/null && cmd_cloud consent status
 ' 2>&1 )"
 grep -q 'GRANTED' <<<"$out" && ok "consent: cloud consent grant/status works" || bad "consent: grant subcommand failed: $out"
+
+out="$(FAKE_HELP_ONLY=1 start_cloud t-help --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'support.example.invalid/help' "$(_cloudrun_cdir)/t-help.launch.log" && [ ! -e "$OSRC_HOME/remote/t-help.json" ] && grep -q 'did not start' <<<"$out" \
+  && ok "failed launch with help URL stays unregistered" || bad "help URL accepted: $out"
 
 # ============================== L7 spend gate integration ==============================
 # when _osrc_spend_gate is loaded, cloud start calls it with the vehicle->lane mapping
@@ -595,10 +600,18 @@ grep -q 't-claude' <<<"$link_out" \
 CB="$TMP/cloudbin"; mkdir -p "$CB" "$TMP/croot"
 if command -v tmux >/dev/null 2>&1; then
   printf '#!/bin/sh\nexec %s -L osrc-test-cloudrun-%s "$@"\n' "$(command -v tmux)" "$$" > "$CB/tmux"
-  printf '#!/bin/sh\n[ -t 1 ] || { echo "Error: --cloud requires an interactive terminal" >&2; exit 1; }\necho "Session: https://claude.ai/code/session_TESTREF01"\nsleep 3\n' > "$CB/claude"
+  printf '#!/bin/sh\n[ -z "${STALE_ACCOUNT+x}" ] && [ "$HOME" = "$EXPECTED_HOME" ] || exit 2\n[ -t 1 ] || { echo "Error: --cloud requires an interactive terminal" >&2; exit 1; }\necho "Session: https://claude.ai/code/session_TESTREF01"\nexit 0\n' > "$CB/claude"
   chmod +x "$CB/tmux" "$CB/claude"
-  lo="$(PATH="$CB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=8 _cloudrun_launch claude /dev/null "brief" "$TMP/c1.launch.log" "$TMP/c1.pid" "$TMP/croot" main)"
+  STALE_ACCOUNT=wrong HOME="$TMP/stale-home" PATH="/usr/bin:/bin" "$CB/tmux" new-session -d -s stale 'sleep 60'
+  : > "$TMP/c1.launch.log.piped"
+  lo="$(EXPECTED_HOME="$HOME" PATH="$CB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=8 _cloudrun_launch claude /dev/null "brief" "$TMP/c1.launch.log" "$TMP/c1.pid" "$TMP/croot" main)"
   grep -q 'url:https://claude.ai/code/session_TESTREF01' <<<"$lo" && ok "claude cloud runs in a terminal and its session link is read" || bad "claude cloud launch: $lo / $(cat "$TMP/c1.launch.log" 2>/dev/null)"
+  if ( tmux() { if [ "$1" = pipe-pane ]; then return 1; fi; "$CB/tmux" "$@"; }
+       PATH="$CB:$PATH" _cloudrun_launch claude /dev/null brief "$TMP/c3.log" "$TMP/c3.pid" "$TMP/croot" main ); then
+    bad "failed pipe attachment accepted"
+  elif [ -s "$TMP/c3.log" ] || "$CB/tmux" list-sessions -F '#{session_name}' | grep -q '^osrc-cloud-'; then
+    bad "failed attachment left a launcher running"
+  else ok "pipe attachment failure unwinds the pane"; fi
   "$CB/tmux" kill-server 2>/dev/null
 else
   ok "tmux absent: claude cloud terminal check skipped"
