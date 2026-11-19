@@ -27,7 +27,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 # One temp home for the whole test. The catalog used to be written to a first temp home that the
 # line below then replaced, so the resolver fell through to the machine's real `agy models` and the
 # result depended on whatever agy served that day.
-TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"
+TMP="$(mktemp -d)"; export OSRC_HOME="$TMP" HOME="$TMP/home"
+mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$OSRC_HOME/catalogs"
 printf '["gemini-3.7-flash-high","gemini-3.7-flash-medium","gemini-3.7-flash-low","gemini-3.6-flash-high","gemini-3.6-flash-medium","gemini-3.5-flash-low","gemini-3.1-pro-high","gemini-3.1-pro-low"]' > "$OSRC_HOME/catalogs/gm.json"
@@ -36,6 +37,27 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 . "$SRC" >/dev/null 2>&1
+
+# A key for the separate image lane may coexist with the Google app login.
+mkdir -p "$TMP/bin" "$HOME/.antigravity"
+printf 'signed-in' > "$HOME/.antigravity/state"
+cat > "$TMP/bin/agy" <<'FAKE'
+#!/bin/sh
+[ "$1" = -p ] && [ -z "${GEMINI_API_KEY+x}${GOOGLE_API_KEY+x}" ] || exit 1
+echo keyless-dispatch
+FAKE
+chmod +x "$TMP/bin/agy"
+for family in gemini-pro gemini-flash gemini-flash-lite; do
+  if (
+    export PATH="$TMP/bin:$PATH" GEMINI_API_KEY=fixture GOOGLE_API_KEY=fixture
+    IFS='|' read -r RESOLVED_ID lane TTIER <<<"$(resolve_model_row "$family")"
+    [ "$lane" = gm ] && [ "$(osrc_lane_billing "$lane")" = subscription ] || exit 1
+    REST=(probe); EFFORT=low
+    record_ledger() { :; }
+    wrapped_output="$(delegate_gmnative auto)" && grep -qx keyless-dispatch <<<"$wrapped_output"
+  ); then ok "$family selects keyless agy with API keys present"
+  else bad "$family keyless dispatch"; fi
+done
 
 # --- effort must be legal for the specific model ---
 [ "$(_agy_effort gemini-3.1-pro medium 2>/dev/null)" = "high" ] \

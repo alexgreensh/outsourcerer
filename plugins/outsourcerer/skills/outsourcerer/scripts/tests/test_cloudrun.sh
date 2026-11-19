@@ -136,6 +136,14 @@ w() { local _w; _w="$( cd "$WORK" && osrc_where "$1" )"; printf '%s\n' "${_w%%$'
 [ "$(w 'continue my work on the current branch')" = "cloud" ] \
   && ok "where: current-branch w/o unpushed -> cloud" || bad "where: current-branch misrouted"
 [ "$(w '')" = "local" ] && ok "where: empty brief -> local" || bad "where: empty brief not local"
+for brief in "Prepare Total Recall release notes. The old build failed on the user's Mac under /Users/alex/Library." \
+             "Add a regression test for the error message mentioning localhost and SQLite."; do
+  [ "$(w "$brief")" = cloud ] && ok "cloud: $brief" || bad "misrouted: $brief"
+done
+for brief in "Inspect ~/Library/Logs/recall.log before preparing the release." \
+             "Capture the attached USB webcam output for the bug report."; do
+  [ "$(w "$brief")" = local ] && ok "local: $brief" || bad "misrouted: $brief"
+done
 # file input form
 _wf="$(osrc_where "$BRIEF_LOCAL")"; [ "${_wf%%$'\n'*}" = "local" ] \
   && ok "where: brief FILE input -> local" || bad "where: file input misrouted"

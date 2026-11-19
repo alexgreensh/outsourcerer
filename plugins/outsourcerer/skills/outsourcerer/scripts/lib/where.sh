@@ -43,14 +43,15 @@ osrc_where() {
   # NOTE: match against $lc via herestrings, never `printf | grep -q` — grep -q exits early,
   # SIGPIPEs a large brief, and an inherited `set -o pipefail` (SHELLOPTS) would misread it.
   # --- LOCAL: the user said local ---------------------------------------------------------
-  if grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|on my (mac|machine|laptop|computer)|this mac|my machine|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only' <<<"$lc"; then
+  local action='(open|read|inspect|query|restart|connect to|access|use|run|launch|capture|summarize|pull|check|click|edit|update|write to|copy|probe|test|fetch|curl|ping|attach to)'
+  local qualifier='((the|my|this|our|existing|latest|local|running|attached|physical|usb|on|at|from|to|in) +)*'
+  local service='(whatsapp|browser|mac gui|gui app|applescript|appleevents|postgres(ql)?|mysql|mariadb|redis|mongodb|sqlite3?|tmux|iterm|screen session|database|db|webcam|camera|microphone|keychain)'
+  local endpoint='((https?://)?(localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0))'
+  local state='(/users/|/home/|~/|my (downloads|desktop|documents|pictures)|uncommitted changes|working tree|unpushed|local commits|files? outside (the )?(repo|repository))'
+  if grep -qE 'keep (it|this|that|the work|everything|things) local|run( it| this)? locally|(run|execute|test|verify|install)( [[:alnum:]_-]+){0,4} on (my|this|the user.s) (mac|machine|computer|laptop)|do not use cloud|don.t use cloud|no cloud|not in the cloud|stay local|keep (it|this) on (my|the) (mac|machine)|offline only' <<<"$lc"; then
     decision="local"; reason="the brief says keep it local"
-  # --- LOCAL: local-only services / apps the cloud box cannot reach ------------------------
-  elif grep -qE 'whatsapp|\bbrowser\b|mac gui|\bgui app|apple(script|events)|\blocalhost\b|127\.0\.0\.1|0\.0\.0\.0|local (host )?(db|database)|postgres|postgresql|mysql|mariadb|redis|mongodb|\bsqlite3?\b|\btmux\b|\biterm\b|screen session' <<<"$lc"; then
-    decision="local"; reason="the brief needs a local-only service or app (cloud boxes cannot reach this machine)"
-  # --- LOCAL: files/state that only exist here ----------------------------------------------
-  elif grep -qE '/users/|/home/|~/|files? (outside|outside of) (the )?(repo|repository)|outside (the )?(repo|repository)|outside the codebase|my (downloads|desktop|documents|pictures)|uncommitted changes|working tree|not pushed|unpushed|local commits' <<<"$lc"; then
-    decision="local"; reason="the brief touches files or state that only exist on this machine"
+  elif grep -qE "(^|[^[:alnum:]_])${action} +${qualifier}(${service}([^[:alnum:]_]|$)|${endpoint}([^[:alnum:]_]|$)|${state})" <<<"$lc"; then
+    decision="local"; reason="the requested operation needs a service, device or file on this machine"
   # --- LOCAL: unpushed commits the brief builds on -------------------------------------------
   elif [ "$( _osrc_where_unpushed_count )" != "0" ] \
     && grep -qE 'current branch|my (local )?(changes|commits|branch|work)|this checkout|working (dir|directory)|head of|tip of' <<<"$lc"; then

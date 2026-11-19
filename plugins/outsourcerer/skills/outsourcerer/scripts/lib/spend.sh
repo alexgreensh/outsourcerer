@@ -277,12 +277,8 @@ osrc_lane_billing() {
       fi
       printf 'unknown\n'; return ;;
     gm)
-      # agy is Google app-login: subscription ONLY with the login dir present and no
-      # per-use key evidence. A Gemini/Google API key — exported or stored as api-key
-      # material inside ~/.antigravity — bills per token -> metered; dir alone without
-      # key material -> subscription; agy on PATH without the dir proves nothing.
-      if _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY \
-         || _osrc_dir_key_material "$HOME/.antigravity"; then printf 'metered\n'
+      # Stored Antigravity keys still count. Keyless dispatch removes ambient API keys.
+      if _osrc_dir_key_material "$HOME/.antigravity"; then printf 'metered\n'
       # Dir existence alone is not proof (same class as the credentials fix): a real
       # login writes at least one non-empty STATE file. Dotfiles (.DS_Store), argv.json
       # (written by an editor install before any sign-in) and logs do not count — only
@@ -293,6 +289,8 @@ osrc_lane_billing() {
                         ! -name '.*' ! -name 'argv.json' ! -name '*.log' \
                         -print -quit 2>/dev/null)" ]; then
         printf 'subscription\n'
+      elif _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY; then
+        printf 'metered\n'
       else printf 'unknown\n'; fi; return ;;
     dv)
       # Devin: live-catalog Free (or the two-id offline fallback) rides the plan; every other

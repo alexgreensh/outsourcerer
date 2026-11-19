@@ -14195,7 +14195,6 @@ _agy_effort() {
 }
 
 # delegate_gmnative <tier>, Gemini text/agentic lane. ONE vehicle:
-#   agy (Antigravity CLI), KEYLESS, rides the user's Antigravity/Google app login.
 # The gemini-cli vehicle is RETIRED (Alex 17:02 — Antigravity replaced it): it is never
 # auto-selected and OSRC_GEMINI_VEHICLE=gemini dies loudly, even if a `gemini` binary
 # is still installed. The paid Gemini API key path survives ONLY for the image lane (gi).
@@ -14246,7 +14245,7 @@ delegate_gmnative() {
     # (redirect to a file, then replay): a process-substitution tee (2> >(tee "$_aerr" >&2))
     # is still flushing when the retry grep runs, so the match can race the writer.
     local _aerr _tmp_base="${TMPDIR:-/tmp}"; _aerr="$(mktemp "${_tmp_base%/}/osrc-agy.XXXXXX")"
-    _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
+    _osrc_nojob env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" ${aeffflag[@]+"${aeffflag[@]}"} \
         --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
     [ -s "$_aerr" ] && cat "$_aerr" >&2
     # Self-heal the effort/model mismatch: some agy builds treat a concrete id (e.g. `gemini-3.5-flash`)
@@ -14262,7 +14261,7 @@ delegate_gmnative() {
        && grep -qiE -- '--effort.*not supported for model|not supported for model.*--effort' "$_aerr" 2>/dev/null; then
       printf '>>> [gemini] agy rejected --effort for "%s"; retrying once without it (the model runs at its own default).\n' "$atok" >&2
       aeffflag=(); rc=0; : > "$_aerr"
-      _osrc_nojob agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
+      _osrc_nojob env -u GEMINI_API_KEY -u GOOGLE_API_KEY agy -p "$wrapped" ${aflag[@]+"${aflag[@]}"} --model "$atok" \
           --print-timeout "${OSRC_AGY_PRINT_TIMEOUT:-5m}" 2> "$_aerr" || rc=$?
       [ -s "$_aerr" ] && cat "$_aerr" >&2
     fi
