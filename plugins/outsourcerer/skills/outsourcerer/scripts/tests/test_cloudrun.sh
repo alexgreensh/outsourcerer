@@ -150,7 +150,7 @@ w() { local _w; _w="$( cd "$WORK" && osrc_where "$1" )"; printf '%s\n' "${_w%%$'
 [ "$(w 'continue my work on the current branch')" = "cloud" ] \
   && ok "where: current-branch w/o unpushed -> cloud" || bad "where: current-branch misrouted"
 [ "$(w '')" = "local" ] && ok "where: empty brief -> local" || bad "where: empty brief not local"
-for brief in "Write release notes. The previous build crashed on my Mac." "Prepare Total Recall release notes. The old build failed on the user's Mac under /Users/alex/Library." \
+for brief in "Write release notes. The previous build crashed on my Mac." "Write release notes. The build failed twice, on my Mac." "Prepare Total Recall release notes. The old build failed on the user's Mac under /Users/alex/Library." \
              "Add a regression test for the error message mentioning localhost and SQLite."; do
   [ "$(w "$brief")" = cloud ] && ok "cloud: $brief" || bad "misrouted: $brief"
 done
