@@ -13,6 +13,9 @@ if [ ! -f "$SRC" ]; then echo FAIL: cannot find $SRC; exit 1; fi
 TMP="$(mktemp -d)"
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP"
 mkdir -p "$HOME"
+# Hermetic: an exported OPENROUTER_API_KEY would make advise's stale-cache auto-refresh fire a
+# real network call. The refresh path itself is exercised with a stubbed refresh_benchmarks below.
+unset OPENROUTER_API_KEY
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
@@ -194,6 +197,98 @@ _adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/
 grep -qi 'conservation:' <<< "$_adv_on" && ok "advise surfaces the conservation line when a lane is past the line" || bad "advise did not surface conservation"
 grep -qi 'conservation:' <<< "$_adv_off" && bad "OSRC_ADVISE_CONSERVE=0 did not disable the haircut" || ok "OSRC_ADVISE_CONSERVE=0 disables conservation"
 grep -q 'conservation:(if $conserve==""' "$SRC" && ok "conservation exposed in --json output" || bad "conservation missing from json"
+
+# === 15. Gemini-4 Neon reaches the advisor + benchmark-cache freshness. ===
+# agy now serves the Gemini-4 codenames; the gemini-neon table row must be scored like every other
+# candidate, its bench lookup must find the OpenRouter slug prefix (or degrade to the tier proxy),
+# and a benchmarks.json older than 7 days must be called out — or refreshed when a key is set.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/agy" <<'FAKE'
+#!/bin/sh
+if [ "${1:-}" = "models" ]; then
+  printf 'Fetching available models...\n'
+  printf 'gemini-4-neon-high\tGemini 4 Neon (High)\n'
+  printf 'gemini-4-neon-xhigh\tGemini 4 Neon (Extra High)\n'
+  printf 'gemini-4-argon-high\tGemini 4 Argon (High)\n'
+  printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
+  exit 0
+fi
+echo keyless-dispatch
+FAKE
+chmod +x "$TMP/bin/agy"
+_oldpath="$PATH"; export PATH="$TMP/bin:$PATH"
+rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
+
+# The agy-side resolution the advisor's new row dispatches through (fake agy models output).
+[ "$(_agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-neon-high" ] \
+  && ok "agy gemini-pro resolves to the served Gemini-4 flagship (neon)" \
+  || bad "agy gemini-pro resolved to $(_agy_model_token gemini-pro 2>/dev/null)"
+[ "$(resolve_model_row gemini-neon)" = "gemini-4-neon-high|gm|frontier" ] \
+  && ok "gemini-neon row is in the model table (alias -> gemini-4-neon-high, gm, frontier)" \
+  || bad "gemini-neon row missing/wrong: $(resolve_model_row gemini-neon)"
+
+# Bench slug: dynamic OpenRouter catalog first, the _NATIVE_BENCH_MAP row as fallback.
+cat > "$OSRC_MODELS_JSON" <<'MJSON'
+{"data":[{"id":"google/gemini-4-neon"},{"id":"google/gemini-4-argon"}]}
+MJSON
+ck "neon bench slug from OR catalog"  "$(_resolve_bench_slug gemini-4-neon-high)"  "google/gemini-4-neon"
+ck "argon bench slug from OR catalog" "$(_resolve_bench_slug gemini-4-argon-high)" "google/gemini-4-argon"
+rm -f "$OSRC_MODELS_JSON"
+ck "neon bench slug map fallback"     "$(_resolve_bench_slug gemini-4-neon-high)"  "google/gemini-4-neon"
+
+# Bench lookup: a dated permaslug under the prefix scores; no slug -> empty -> tier proxy.
+fresh_asof="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$OSRC_BENCH_JSON" <<BJSON
+{"data":[
+ {"model_permaslug":"google/gemini-4-neon-20261101","intelligence_index":61.5,"coding_index":70,"agentic_index":58,"pricing":{"prompt":"0.000002","completion":"0.00001"}},
+ {"model_permaslug":"anthropic/claude-4.5-haiku-20251001","intelligence_index":29.6,"coding_index":43.9,"agentic_index":16.4,"pricing":{"prompt":"0.000001","completion":"0.000005"}}
+],"meta":{"as_of":"$fresh_asof","model_count":2}}
+BJSON
+bl="$(_bench_lookup gemini-4-neon-high intelligence_index)"
+ck "neon bench lookup score" "$(printf '%s' "$bl" | cut -f1)" 61.5
+[ -z "$(_bench_lookup gemini-4-hydrogen-high intelligence_index)" ] \
+  && ok "a Gemini-4 family with no OR slug scores empty (tier proxy path, not an error)" \
+  || bad "unmapped neon-family id unexpectedly scored"
+
+# Fresh cache -> no stale line, benchmark_stale=false in JSON.
+out="$(cmd_advise "refactor the authentication module" 2>&1)"
+grep -q 'benchmark cache is' <<<"$out" && bad "fresh benchmark cache was called stale" || ok "fresh benchmark cache is not flagged stale"
+grep -q 'gemini-neon' <<<"$out" && ok "advise candidate list includes gemini-neon" || bad "advise does not score gemini-neon"
+grep -q 'gemini-4-neon-high' <<<"$out" && ok "advise shows the resolved neon id" || bad "advise missing resolved neon id"
+json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
+printf '%s' "$json" | jq -e '.benchmark_stale == false' >/dev/null 2>&1 \
+  && ok "json reports benchmark_stale=false for a fresh cache" || bad "json benchmark_stale wrong for fresh cache"
+
+# Stale cache (>7d), no key -> one line naming the age and the refresh command; json flags it.
+old_asof="$(date -u -v-10d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+jq --arg a "$old_asof" '.meta.as_of=$a' "$OSRC_BENCH_JSON" > "$OSRC_BENCH_JSON.tmp" && mv -f "$OSRC_BENCH_JSON.tmp" "$OSRC_BENCH_JSON"
+out="$(cmd_advise "refactor the authentication module" 2>&1)"
+grep -q 'benchmark cache is' <<<"$out" && grep -q 'advise --refresh' <<<"$out" \
+  && ok "stale benchmark cache is called out in one line with the refresh command" \
+  || bad "stale cache not surfaced: $(grep 'benchmark' <<<"$out")"
+json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
+printf '%s' "$json" | jq -e '.benchmark_stale == true' >/dev/null 2>&1 \
+  && ok "json reports benchmark_stale=true for a >7d cache" || bad "json benchmark_stale wrong for stale cache"
+printf '%s' "$json" | jq -e --arg a "$old_asof" '.benchmark_as_of == $a' >/dev/null 2>&1 \
+  && ok "json reports benchmark_as_of" || bad "json benchmark_as_of missing"
+
+# Stale cache + OPENROUTER_API_KEY set -> refresh_benchmarks runs automatically (stubbed: no
+# network), the cache is fresh again, and neither output mode mentions staleness.
+cp "$OSRC_BENCH_JSON" "$TMP/bench-stale.json"
+jq --arg a "$fresh_asof" '.meta.as_of=$a' "$TMP/bench-stale.json" > "$TMP/bench-fresh.json"
+: > "$TMP/refreshed.marker"
+refresh_benchmarks() { cp "$TMP/bench-fresh.json" "$OSRC_BENCH_JSON"; : > "$TMP/refreshed.marker"; return 0; }
+( export OPENROUTER_API_KEY="sk-test-not-a-real-key"
+  out="$(cmd_advise "refactor the authentication module" 2>&1)"
+  grep -q 'benchmark cache is' <<<"$out" && echo "FAIL: auto-refresh left the stale line" || echo "PASS: key set -> stale cache auto-refreshed, no stale line"
+  json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
+  printf '%s' "$json" | jq -e '.benchmark_stale == false' >/dev/null 2>&1 \
+    && echo "PASS: json benchmark_stale=false after auto-refresh" || echo "FAIL: json still stale after auto-refresh"
+) > "$TMP/sub-adv.out"
+[ -e "$TMP/refreshed.marker" ] && ok "advise invoked refresh_benchmarks automatically when a key was set" || bad "auto-refresh never ran"
+while IFS= read -r line; do case "$line" in PASS:*) ok "${line#PASS: }" ;; *) bad "${line#FAIL: }" ;; esac; done < "$TMP/sub-adv.out"
+unset -f refresh_benchmarks
+export PATH="$_oldpath"
 
 if [ "$fail" -ne 0 ]; then echo "RESULT: FAIL ($fail failures)" >&2; exit 1; fi
 echo "RESULT: PASS ($pass checks passed, 0 failures)"

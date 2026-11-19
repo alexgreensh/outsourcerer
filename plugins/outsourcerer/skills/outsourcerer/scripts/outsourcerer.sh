@@ -604,6 +604,8 @@ kimi-k2.7|kimi-k2.7|dv|capable
 gemini-pro|gemini-pro|gm|frontier
 gemini-flash|gemini-flash|gm|mid
 gemini-flash-lite|gemini-flash-lite|gm|budget
+gemini-neon|gemini-4-neon-high|gm|frontier
+gemini-4-neon-high|gemini-4-neon-high|gm|frontier
 nano-banana|nano-banana|gi|budget
 gpt-image|gpt-image-2|ci|budget
 codex-image|gpt-image-2|ci|budget
@@ -9885,6 +9887,8 @@ glm-5-3|z-ai/glm-5.3
 glm-5-3-high|z-ai/glm-5.3
 glm-5-3-flash|z-ai/glm-5.3-flash
 glm-5-3-flash-high|z-ai/glm-5.3-flash
+gemini-4-neon-high|google/gemini-4-neon
+gemini-4-neon|google/gemini-4-neon
 "
 # Symbolic Gemini family aliases map to the NEWEST google/gemini-<ver>-<family> slug in the cached
 # OpenRouter catalog, so a benchmark lookup for gemini-flash follows the release train instead of a
@@ -9930,7 +9934,9 @@ refresh_benchmarks() {
   have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
   have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
   # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
-  local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"
+  # ~/.env wins; an exported OPENROUTER_API_KEY is the fallback so `advise`'s auto-refresh
+  # and a bare `export OPENROUTER_API_KEY=...` shell both work.
+  local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$_k" ] || _k="${OPENROUTER_API_KEY:-}"
   [ -n "$_k" ] || { echo "OPENROUTER_API_KEY needed for benchmark data (put it in ~/.env)" >&2; return 1; }
   # Pass key via temp file to avoid exposure in process args (ps table).
   local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.$$.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
@@ -10008,6 +10014,8 @@ _resolve_bench_slug() {
     gemini-flash-lite) mapped="$(_gemini_bench_slug flash-lite)" ;;
     gemini-flash)      mapped="$(_gemini_bench_slug flash)" ;;
     gemini-pro)        mapped="$(_gemini_bench_slug pro)" ;;
+    gemini-*-neon*|gemini-*-argon*|gemini-*-hydrogen*|gemini-*-carbon*)
+                     mapped="$(_agy_or_bench_slug "$1")" ;;
     *) mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')" ;;
   esac
   [ -n "$mapped" ] && { printf '%s' "$mapped"; return 0; }
@@ -10436,6 +10444,16 @@ cmd_advise() {
     fi
   fi
 
+  # Benchmark freshness: a cache dated >7 days ago refreshes automatically when an OpenRouter
+  # key is configured; otherwise the stale age is called out once in the output below.
+  local _bstale=""
+  _bstale="$(_bench_cache_stale 2>/dev/null)"
+  if [ -n "$_bstale" ] && { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value OPENROUTER_API_KEY)" ]; }; then
+    if [ "$json_out" -eq 1 ]; then refresh_benchmarks >/dev/null 2>&1 || true
+    else refresh_benchmarks 2>/dev/null || true; fi
+    _bstale="$(_bench_cache_stale 2>/dev/null)"
+  fi
+
   local category field threshold difficulty frontier_needed=0
   category="$(_classify_task "$task")"
   field="$(_bench_score_field "$category")"
@@ -10704,6 +10722,8 @@ cmd_advise() {
     [ -n "$shortlist_json" ] || shortlist_json="[]"
   fi
 
+  local _bstale_json=false _bench_asof=""
+  [ -n "$_bstale" ] && { _bstale_json=true; _bench_asof="${_bstale#*$'\t'}"; }
   if [ "$json_out" -eq 1 ]; then
     jq -n \
       --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
@@ -10713,6 +10733,7 @@ cmd_advise() {
       --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
       --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
+      --arg bench_asof "$_bench_asof" --argjson bench_stale "$_bstale_json" \
       --argjson shortlist "$shortlist_json" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
@@ -10720,6 +10741,8 @@ cmd_advise() {
         conservation:(if $conserve=="" then null else $conserve end),
         limit_gate:(if $limit_gate=="" then null else $limit_gate end),
         benchmark_data_available:($has_bench=="1"),
+        benchmark_stale:$bench_stale,
+        benchmark_as_of:(if $bench_asof=="" then null else $bench_asof end),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
         history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
                  passed_effective:($hpeff|tonumber? // 0), scope:$hscope}}'
@@ -10738,6 +10761,11 @@ cmd_advise() {
       echo "   benchmark data: partial ($bench_count/$total_count models have live scores, rest use tier proxy, run: $0 advise --refresh \"$task\")"
     else
       echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
+    fi
+    if [ -n "$_bstale" ]; then
+      local _bd="${_bstale%%$'\t'*}" _ba="${_bstale#*$'\t'}" _bage
+      if [ "$_bd" = "unknown" ]; then _bage="an unknown age"; else _bage="$_bd days old"; fi
+      echo "   benchmark cache is $_bage (as of $_ba); refresh: $0 advise --refresh \"$task\""
     fi
     [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
     [ -n "$_limit_notes" ] && echo "   limit-gate: $_limit_notes (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"
@@ -14055,138 +14083,8 @@ delegate_ccnative() {
   return "$rc"
 }
 
-# ---- Gemini family resolution: LIVE catalog first, never a dated literal ---------------------
-# Google retires dated Gemini ids every few weeks (3.5-flash was gone within a month of 0.10.1 and
-# agy hard-errors on a retired id: "invalid model selection"/"not recognized as a known model"). So
-# the family aliases (gemini-flash / gemini-pro / gemini-flash-lite) are SYMBOLIC in the table and
-# resolve here, at dispatch time, to the NEWEST family member the vehicle actually serves:
-#   1. an explicit pin wins: OSRC_AGY_{FLASH,PRO}_DEFAULT / OSRC_GEMINI_{FLASH,PRO,FLASH_LITE}_API_ID
-#      (or a models.local row that maps the alias to a concrete id);
-#   2. else the newest matching id in the live catalog (`agy models`, cached OSRC_CATALOG_TTL secs);
-#   3. else, catalog unreachable, a LAST-KNOWN id so an offline run still has something to send.
-# The last-known constants below are the only dated ids left in this file. They are a fallback for a
-# vehicle we cannot ask, never the first choice, and a test pins that ordering.
-_AGY_FLASH_LASTKNOWN="gemini-3.8-flash"
-_AGY_PRO_LASTKNOWN="gemini-3.1-pro"
-_GI_FLASH_LASTKNOWN="gemini-3.5-flash"
-_GI_PRO_LASTKNOWN="gemini-3.1-pro-preview"
-_GI_FLASH_LITE_LASTKNOWN="gemini-3.1-flash-lite"
-_GI_IMAGE_LASTKNOWN="gemini-2.5-flash-image"
-
-# _gemini_newest <lane gm|gi> <family flash|pro|flash-lite|flash-image> -> newest family id in that
-# lane's live catalog (agy effort suffixes stripped; a -preview id is kept as named but loses to a GA
-# id of the same version), or empty.
-# Version order is numeric on major.minor, so 3.10 beats 3.8 and a two-digit minor never sorts wrong.
-_gemini_newest() {
-  local lane="$1" fam="$2" _cat
-  _cat="$(_catalog_load "$lane" 2>/dev/null)"; [ -n "$_cat" ] || return 1
-  printf '%s\n' "$_cat" \
-    | LC_ALL=C sed -n -E "s/^(gemini-[0-9]+(\.[0-9]+)?-${fam})(-(low|medium|high))?(-preview)?$/\1\5 \5/p" \
-    | awk '{ split($1, f, "-"); split(f[2], v, "."); pre=($2=="" ? 0 : 1);
-             printf "%d %d %d %s\n", v[1], (v[2]=="" ? 0 : v[2]), pre, $1 }' \
-    | sort -k1,1nr -k2,2nr -k3,3n | awk 'NR==1{print $4}'
-}
-
-# _agy_catalog_knows <token> -> 0 served (exactly, or as the bare family of an effort-suffixed id),
-# 1 NOT served by a reachable catalog, 2 catalog unreachable (the caller must fail OPEN on 2).
-_agy_catalog_knows() {
-  local tok="$1" _cat v
-  _cat="$(_catalog_load gm 2>/dev/null)"; [ -n "$_cat" ] || return 2
-  for v in "$tok" "$tok-low" "$tok-medium" "$tok-high"; do
-    grep -qxF "$v" <<<"$_cat" && return 0
-  done
-  return 1
-}
-
-# _agy_family_default <flash|pro> -> the id agy should run for a bare family request (see the
-# precedence above). agy has no flash-lite tier, so lite callers ask for flash.
-_agy_family_default() {
-  local fam="$1" pin="" live=""
-  case "$fam" in pro) pin="${OSRC_AGY_PRO_DEFAULT:-}" ;; *) fam=flash; pin="${OSRC_AGY_FLASH_DEFAULT:-}" ;; esac
-  [ -n "$pin" ] && { printf '%s' "$pin"; return 0; }
-  live="$(_gemini_newest gm "$fam")" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
-  case "$fam" in pro) printf '%s' "$_AGY_PRO_LASTKNOWN" ;; *) printf '%s' "$_AGY_FLASH_LASTKNOWN" ;; esac
-}
-
-# _agy_model_token <alias or id> -> the token the Antigravity `agy` CLI accepts.
-#   - a symbolic family alias (gemini-flash, gemini-pro, gemini-flash-lite, or an API-only
-#     -preview/-lite id) -> _agy_family_default;
-#   - an id already shaped like agy's catalog (gemini-<ver>-flash[...] / -pro[...], incl. the
-#     effort-suffixed forms) passes through UNCHANGED when the live catalog serves it, or when the
-#     catalog cannot be read (agy is the authority; it will say so itself);
-#   - an id the live catalog confirms is RETIRED is replaced by the family's newest member, LOUDLY,
-#     with the retired id named and every pin mechanism listed. Silent substitution was the 0.10.0
-#     bug (`-m gemini-3.7-flash` ran 3.5 with no notice); a hard failure on a retired default was
-#     the 0.10.1 bug (issue #21). Announced self-healing is the middle that keeps both promises.
-_agy_model_token() {
-  local want="$1" fam tok
-  case "$want" in
-    *-preview|*-lite) : ;;
-    gemini-[0-9]*.[0-9]*-flash*|gemini-[0-9]*.[0-9]*-pro*|gemini-[0-9]*-flash*|gemini-[0-9]*-pro*)
-      _agy_catalog_knows "$want"
-      case $? in 0|2) printf '%s' "$want"; return 0 ;; esac
-      case "$want" in *pro*) fam=pro ;; *) fam=flash ;; esac
-      tok="$(_agy_family_default "$fam")"
-      printf '>>> [gemini] agy no longer serves "%s" (its live catalog is `agy models`); running %s, the newest %s it serves. To pin a different id: -m <id>, OSRC_AGY_%s_DEFAULT=<id>, or a "%s|<id>|gm|<tier>" row in %s/models.local.\n' \
-        "$want" "$tok" "$fam" "$(printf '%s' "$fam" | tr a-z A-Z)" "$want" "$OSRC_HOME" >&2
-      printf '%s' "$tok"; return 0 ;;
-  esac
-  case "$want" in
-    *pro*)   _agy_family_default pro ;;
-    *flash*) _agy_family_default flash ;;   # covers flash + flash-lite (agy has no lite tier)
-    *)       printf '%s' "$want" ;;
-  esac
-}
-
-# _gemini_api_id <alias or id> -> a concrete id for the gemini-cli (API key) vehicle. Same
-# precedence as agy: env pin > newest in the live API model list > last-known. Explicit dated ids
-# pass through untouched (the API is the authority on its own catalog).
-_gemini_api_id() {
-  local want="$1" fam pin live
-  case "$want" in
-    gemini-flash-lite)             fam=flash-lite;  pin="${OSRC_GEMINI_FLASH_LITE_API_ID:-}" ;;
-    gemini-flash)                  fam=flash;       pin="${OSRC_GEMINI_FLASH_API_ID:-}" ;;
-    gemini-pro)                    fam=pro;         pin="${OSRC_GEMINI_PRO_API_ID:-}" ;;
-    nano-banana|gemini-flash-image) fam=flash-image; pin="${OSRC_GEMINI_IMAGE_API_ID:-}" ;;
-    *) printf '%s' "$want"; return 0 ;;
-  esac
-  [ -n "$pin" ] && { printf '%s' "$pin"; return 0; }
-  live="$(_gemini_newest gi "$fam")" && [ -n "$live" ] && { printf '%s' "$live"; return 0; }
-  case "$fam" in
-    pro)         printf '%s' "$_GI_PRO_LASTKNOWN" ;;
-    flash-lite)  printf '%s' "$_GI_FLASH_LITE_LASTKNOWN" ;;
-    flash-image) printf '%s' "$_GI_IMAGE_LASTKNOWN" ;;
-    *)           printf '%s' "$_GI_FLASH_LASTKNOWN" ;;
-  esac
-}
-
-# _agy_effort <agy-model-token> <requested-effort> -> an effort level that model actually accepts.
-# agy REQUIRES --effort for a BARE family id and rejects the run outright without it
-# ("invalid model selection (--model X --effort \"\"): requires --effort"), and the accepted set is
-# per-model: pro offers low|high with NO medium, flash offers low|medium|high. An unsupported level is
-# rounded UP rather than down, because silently giving less thinking than asked for is the failure the
-# caller cannot see; the clamp is announced.
-# The mirror image also holds and is easy to miss: an id that already NAMES its effort must be sent
-# with NO --effort at all, because agy rejects that pair just as hard ("--model gemini-3.7-flash-high
-# conflicts with --effort=medium"). Returning empty here is the signal to drop the flag.
-_agy_effort() {
-  local tok="$1" want="${2:-medium}" out
-  case "$want" in low|medium|high) ;; *) want=medium ;; esac
-  case "$tok" in
-    # An id that already NAMES its effort takes no --effort flag: agy rejects the pair outright
-    # ("--model gemini-3.7-flash-high conflicts with --effort=medium"). Every id in agy's catalog is
-    # of this form, so this is the normal case for an explicitly pinned model, not an edge case.
-    # Emit nothing and let the caller omit the flag.
-    *-low|*-medium|*-high) return 0 ;;
-  esac
-  case "$tok" in
-    *pro*)   case "$want" in medium) out=high ;; *) out="$want" ;; esac ;;
-    *flash*) out="$want" ;;
-    *)       out="$want" ;;
-  esac
-  [ "$out" != "$want" ] && printf '>>> [effort] %s has no "%s" level (accepts low|high) — using "%s" rather than quietly giving you less thinking.\n' "$tok" "$want" "$out" >&2
-  printf '%s' "$out"
-}
+# ---- Gemini family resolution lives in lib/agy-models.sh (live catalog first, never a dated
+# literal; the pro-class pick follows agy's served families, e.g. gemini-4-neon-high).
 
 # delegate_gmnative <tier>, Gemini text/agentic lane. ONE vehicle:
 # The gemini-cli vehicle is RETIRED (Alex 17:02 — Antigravity replaced it): it is never

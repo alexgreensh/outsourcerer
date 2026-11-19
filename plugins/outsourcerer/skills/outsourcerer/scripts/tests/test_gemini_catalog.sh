@@ -48,7 +48,7 @@ export PATH="$TMP/bin:$PATH" HOME="$TMP/home" OSRC_HOME="$TMP/osrc"
 unset OSRC_AGY_FLASH_DEFAULT OSRC_AGY_PRO_DEFAULT OSRC_GEMINI_FLASH_API_ID
 
 . "$SRC" >/dev/null 2>&1
-for f in _agy_model_token _agy_family_default _gemini_newest _agy_catalog_knows _gemini_api_id _catalog_load; do
+for f in _agy_model_token _agy_family_default _gemini_newest _agy_catalog_knows _gemini_api_id _catalog_load _agy_models_list _agy_newest _agy_flagship; do
   type -t "$f" >/dev/null || { echo "FAIL: $f not loaded"; exit 1; }
 done
 
@@ -69,7 +69,9 @@ case "$cat_json" in *Fetching*) bad "the 'Fetching available models...' status l
 [ "$(_agy_model_token gemini-flash 2>/dev/null)" = "gemini-3.10-flash" ] \
   && ok "gemini-flash (symbolic table id) resolves to the newest served flash" \
   || bad "gemini-flash resolved to $(_agy_model_token gemini-flash 2>/dev/null)"
-[ "$(_agy_model_token gemini-pro 2>/dev/null)" = "gemini-3.1-pro" ] && ok "gemini-pro resolves live" || bad "gemini-pro: $(_agy_model_token gemini-pro 2>/dev/null)"
+# The pro-class pick is the flagship family's concrete id: this stub catalog serves only the
+# legacy pro family, so the pick is its highest effort rung (high is agy's default thinking level).
+[ "$(_agy_model_token gemini-pro 2>/dev/null)" = "gemini-3.1-pro-high" ] && ok "gemini-pro resolves live to the flagship family's served id" || bad "gemini-pro: $(_agy_model_token gemini-pro 2>/dev/null)"
 [ "$(_agy_model_token gemini-flash-lite 2>/dev/null)" = "gemini-3.10-flash" ] && ok "gemini-flash-lite collapses to the newest flash (agy has no lite tier)" || bad "flash-lite: $(_agy_model_token gemini-flash-lite 2>/dev/null)"
 row="$(resolve_model_row gemini-flash)"
 case "$row" in gemini-flash\|gm\|*) ok "the built-in table no longer pins gemini-flash to a dated id" ;; *) bad "table row for gemini-flash is dated again: $row" ;; esac
@@ -132,7 +134,10 @@ grep -q "invalid model selection|not recognized as a known model" "$SRC" && ok "
 grep -q 'rm -f "$(_catalog_path gm)"' "$SRC" && ok "a refused model drops the cached catalog so the next run re-reads agy models" || bad "refused model does not invalidate the gm cache"
 
 # --- source-level guard: no dated Gemini id may reach a dispatch or probe again -------------------
-dated="$(grep -nE 'gemini-[0-9]+\.[0-9]+-(flash|pro)' "$SRC" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE '_(AGY|GI)_[A-Z_]+_LASTKNOWN=' || true)"
+# The resolution code moved to lib/agy-models.sh; scan BOTH files so a dated literal cannot creep
+# back in either place. Comment lines and the LASTKNOWN offline constants are the only allowed hits.
+dated="$(grep -nE 'gemini-[0-9]+\.[0-9]+-(flash|pro)' "$SRC" "$SCRIPT_DIR/../lib/agy-models.sh" 2>/dev/null \
+  | grep -vE ':[0-9]+:[[:space:]]*#' | grep -vE '_(AGY|GI)_[A-Z_]+_LASTKNOWN=' || true)"
 # (the image family is covered by the same regex: gemini-2.5-flash-image would match too)
 [ -z "$dated" ] && ok "no dated Gemini id is used outside the last-known offline constants" || bad "dated Gemini ids still hardcoded:
 $dated"

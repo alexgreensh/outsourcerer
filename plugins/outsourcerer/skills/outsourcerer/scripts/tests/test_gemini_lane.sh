@@ -174,6 +174,110 @@ fi
   && ok "with the override unset the bare flash default is unchanged" \
   || bad "the bare flash default changed when no override was set"
 
+# --- Gemini 4 codenames: agy's live catalog is the only source that knows them -----------------
+# `agy models` now serves the Gemini-4 families (neon/argon/hydrogen) plus 3.8-flash. The pro-class
+# alias must follow the flagship agy actually serves — neon — not a dated pro id, and the whole
+# `agy models` list is cached under OSRC_HOME for 24h so family picks do not respawn the CLI.
+cat > "$TMP/bin/agy" <<'FAKE2'
+#!/bin/sh
+[ -z "${GEMINI_API_KEY+x}${GOOGLE_API_KEY+x}" ] || exit 1
+if [ "${1:-}" = "models" ]; then
+  echo call >> "$AGY_MODELS_CALLS"
+  printf 'Fetching available models...\n'
+  printf 'gemini-4-neon-low\tGemini 4 Neon (Low)\n'
+  printf 'gemini-4-neon-medium\tGemini 4 Neon (Medium)\n'
+  printf 'gemini-4-neon-high\tGemini 4 Neon (High)\n'
+  printf 'gemini-4-neon-xhigh\tGemini 4 Neon (Extra High)\n'
+  printf 'gemini-4-argon-low\tGemini 4 Argon (Low)\n'
+  printf 'gemini-4-argon-medium\tGemini 4 Argon (Medium)\n'
+  printf 'gemini-4-argon-high\tGemini 4 Argon (High)\n'
+  printf 'gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\n'
+  printf 'gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n'
+  printf 'gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n'
+  printf 'gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (Extra High)\n'
+  printf 'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n'
+  printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\n'
+  printf 'gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n'
+  printf 'claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n'
+  exit 0
+fi
+echo keyless-dispatch
+FAKE2
+chmod +x "$TMP/bin/agy"
+export AGY_MODELS_CALLS="$TMP/agy_models_calls.txt"; : > "$AGY_MODELS_CALLS"
+# Drop both caches so every id below is resolved against THIS fake's catalog, not the fixture above.
+rm -f "$OSRC_HOME/agy-models.txt" "$OSRC_HOME/catalogs/gm.json"
+
+# An explicit id agy serves passes through untouched (and warms catalogs/gm.json for the
+# knows-checks below, so later `agy models` calls are only the 24h family-list cache).
+[ "$(_agy_model_token gemini-4-neon-high 2>/dev/null)" = "gemini-4-neon-high" ] \
+  && ok "a served Gemini-4 id passes through untouched" \
+  || bad "served gemini-4-neon-high was rewritten: $(_agy_model_token gemini-4-neon-high 2>/dev/null)"
+
+# The flagship pick: newest version first, then codename tier (neon > argon > hydrogen > pro),
+# then the high effort rung — agy's documented default thinking level for these families.
+[ "$(_agy_flagship 2>/dev/null)" = "gemini-4-neon-high" ] \
+  && ok "the pro-class flagship is gemini-4-neon-high (neon beats argon/hydrogen, high is the default rung)" \
+  || bad "flagship pick wrong: $(_agy_flagship 2>/dev/null)"
+[ "$(_agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-neon-high" ] \
+  && ok "gemini-pro resolves to the top Gemini 4 model agy serves (Neon)" \
+  || bad "gemini-pro resolved to $(_agy_model_token gemini-pro 2>/dev/null)"
+[ "$(_agy_newest flash 2>/dev/null)" = "gemini-3.8-flash" ] \
+  && ok "the newest served flash family resolves bare (gemini-3.8-flash)" \
+  || bad "newest flash wrong: $(_agy_newest flash 2>/dev/null)"
+[ "$(_agy_model_token gemini-flash 2>/dev/null)" = "gemini-3.8-flash" ] \
+  && ok "gemini-flash resolves to the newest flash agy serves" \
+  || bad "gemini-flash resolved to $(_agy_model_token gemini-flash 2>/dev/null)"
+[ "$(_agy_model_token gemini-flash-lite 2>/dev/null)" = "gemini-3.8-flash" ] \
+  && ok "gemini-flash-lite still collapses to the newest flash" \
+  || bad "flash-lite resolved to $(_agy_model_token gemini-flash-lite 2>/dev/null)"
+
+# The advisor's new alias row: gemini-neon -> gemini-4-neon-high, lane gm, tier frontier.
+[ "$(resolve_model_row gemini-neon)" = "gemini-4-neon-high|gm|frontier" ] \
+  && ok "gemini-neon table row resolves to gemini-4-neon-high on the gm lane at frontier tier" \
+  || bad "gemini-neon row wrong: $(resolve_model_row gemini-neon)"
+[ "$(_agy_model_token gemini-neon 2>/dev/null)" = "gemini-4-neon-high" ] \
+  && ok "the gemini-neon alias dispatches to the served Neon id" \
+  || bad "gemini-neon resolved to $(_agy_model_token gemini-neon 2>/dev/null)"
+
+# The 24h cache: agy-models.txt under OSRC_HOME, honored while fresh, refetched once stale.
+[ -f "$OSRC_HOME/agy-models.txt" ] && grep -qx 'gemini-4-neon-high' "$OSRC_HOME/agy-models.txt" \
+  && ok "the agy models list is cached at \$OSRC_HOME/agy-models.txt" \
+  || bad "no agy-models.txt cache written"
+calls_now="$(wc -l < "$AGY_MODELS_CALLS" | tr -d ' ')"
+_agy_model_token gemini-pro >/dev/null 2>&1; _agy_model_token gemini-flash >/dev/null 2>&1
+[ "$(wc -l < "$AGY_MODELS_CALLS" | tr -d ' ')" = "$calls_now" ] \
+  && ok "a fresh agy-models.txt is reused — no respawn of agy models" \
+  || bad "fresh cache was ignored (agy models called again)"
+touch -t 202001010000 "$OSRC_HOME/agy-models.txt"
+_agy_model_token gemini-pro >/dev/null 2>&1
+[ "$(wc -l < "$AGY_MODELS_CALLS" | tr -d ' ')" -gt "$calls_now" ] \
+  && ok "a cache older than 24h is refetched from agy models" \
+  || bad "stale agy-models.txt was not refetched"
+
+# A Gemini-4-family id agy does NOT serve heals to the flagship, loudly, like the flash/pro ids.
+out="$(_agy_model_token gemini-4-neon-max 2>"$TMP/err-g4")"
+[ "$out" = "gemini-4-neon-high" ] && grep -q 'gemini-4-neon-max' "$TMP/err-g4" \
+  && ok "a retired Gemini-4 id is replaced by the flagship pick, naming the retired id" \
+  || bad "retired neon id resolved to '$out' (notice: $(cat "$TMP/err-g4"))"
+
+# The env pin still beats the live catalog for the pro-class pick.
+[ "$(OSRC_AGY_PRO_DEFAULT=gemini-4-argon-high _agy_model_token gemini-pro 2>/dev/null)" = "gemini-4-argon-high" ] \
+  && ok "OSRC_AGY_PRO_DEFAULT repins the flagship pick without editing any table" \
+  || bad "pro pin lost to the live catalog"
+
+# agy missing entirely -> the last-known offline constants, never a guess.
+( export OSRC_HOME="$TMP/osrc-noagy" PATH="/usr/bin:/bin"
+  mkdir -p "$OSRC_HOME"
+  [ "$(_agy_model_token gemini-pro 2>/dev/null)" = "$_AGY_PRO_LASTKNOWN" ] \
+    && echo "PASS: no agy -> gemini-pro falls back to the last-known pro id" \
+    || echo "FAIL: no agy -> gemini-pro gave $(_agy_model_token gemini-pro 2>/dev/null)"
+  [ "$(_agy_model_token gemini-flash 2>/dev/null)" = "$_AGY_FLASH_LASTKNOWN" ] \
+    && echo "PASS: no agy -> gemini-flash falls back to the last-known flash id" \
+    || echo "FAIL: no agy -> gemini-flash gave $(_agy_model_token gemini-flash 2>/dev/null)"
+) > "$TMP/sub-g4.out"
+while IFS= read -r line; do case "$line" in PASS:*) ok "${line#PASS: }" ;; *) bad "${line#FAIL: }" ;; esac; done < "$TMP/sub-g4.out"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
