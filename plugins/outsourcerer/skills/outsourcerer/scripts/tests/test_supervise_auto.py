@@ -31,9 +31,9 @@ class AutoSupervision(unittest.TestCase):
                 return subprocess.run(['/bin/bash', '-c', SH, 'bash', str(MODULE), d, line], env=dict(os.environ, **extra), capture_output=True, text=True, check=True)
             valid = row()
             self.assertEqual(run(valid).stdout, '')
-            self.assertEqual((p / 'calls').read_text(), 'next\n')
+            self.assertEqual((p / 'calls').read_text(), 'next --exact lane abcdef0123456789\n')
             self.assertEqual(run(valid, STATE='inflight').stdout, '')
-            self.assertEqual((p / 'calls').read_text(), 'next\n')
+            self.assertEqual((p / 'calls').read_text(), 'next --exact lane abcdef0123456789\n')
             for bad in [row(kind='approval'), row(detail='VERDICT CHANGES'), row(detail='READY deadbee on branch'), row(target='../x'), row(next='osrc review next; touch ' + str(p / 'PWNED'))]:
                 with self.subTest(row=bad):
                     self.assertEqual(run(bad).stdout.strip(), bad)

@@ -382,5 +382,31 @@ out="$(CLAUDE_CODE_SESSION_ID=S sup --once)"
 out="$(CLAUDE_CODE_SESSION_ID=S sup --all --once)"
 [[ "$out" == *"EVENT done foreign "* ]] && ok "all watcher replays foreign remote event" || no "all scope: [$out]"
 
+fresh exact
+if (
+  OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1
+  mkdir -p "$OSRC_HOME/review/items" "$OSRC_HOME/remote"
+  _osrc_review_reviewer() { echo reviewer; }
+  tmux() { return 0; }
+  _osrc_review_ingest() { :; }
+  _osrc_review_screen() { echo idle; }
+  _osrc_review_rotation_due() { return 1; }
+  _osrc_review_write_brief() { echo brief; }
+  _osrc_review_send() { :; }
+  head=abcdef0123456789
+  for lane in foreign owned; do
+    ts=1; [ "$lane" = foreign ] || ts=2
+    jq -n --arg id "$lane-abcdef0" --arg lane "$lane" --arg head "$head" --argjson ts "$ts" \
+      '{id:$id,lane:$lane,head:$head,state:"queued",enq_ts:$ts}' > "$OSRC_HOME/review/items/$lane-abcdef0.json"
+  done
+  jq -n --arg h "$head" '{head:$h}' > "$OSRC_HOME/remote/owned.json"
+  row="$(printf '5\t1\tdone\towned\tREADY abcdef0 on branch\t%s review next\tevent' "$(_osrc_self)")"
+  ! _osrc_review_next --exact owned abcdef0999999999 >/dev/null &&
+    [ -z "$(_sv_auto_filter "$row" "$OSRC_HOME")" ] &&
+    [ "$(_osrc_review_item_state foreign "$head")" = queued ] &&
+    [ "$(_osrc_review_item_state owned "$head")" = inflight ]
+); then ok "auto review claims only the verified lane and full head"
+else no "exact auto review claim"; fi
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

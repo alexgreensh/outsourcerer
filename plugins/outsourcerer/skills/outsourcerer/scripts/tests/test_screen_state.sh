@@ -174,6 +174,9 @@ OPT 2 Yes, I trust this folder'
 [ "$(_osrc_menu_resolve "$yesno_rep" yes)" = 2 ] && [ "$(_osrc_menu_resolve "$yesno_rep" y)" = 2 ] \
   && [ "$(_osrc_menu_resolve "$yesno_rep" no)" = 1 ] && [ "$(_osrc_menu_resolve "$yesno_rep" n)" = 1 ] \
   && ok || bad "yes/no on trust report: yes='$(_osrc_menu_resolve "$yesno_rep" yes)' no='$(_osrc_menu_resolve "$yesno_rep" no)'"
+if _osrc_menu_resolve $'OPT 1 Yes, always allow\nOPT 2 No, exit' yes >/dev/null 2>&1; then
+  bad "a sole risky Yes row was accepted"
+else ok; fi
 num_rep="MENU numbered
 SEL 1 Yes
 OPT 2 Yes, and don't ask again for this command

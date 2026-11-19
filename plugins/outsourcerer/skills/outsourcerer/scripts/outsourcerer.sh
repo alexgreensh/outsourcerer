@@ -12918,7 +12918,7 @@ _crew_scan_staged() {
   # The diff is captured before matching: a staged diff larger than the pipe buffer would SIGPIPE
   # git on grep's early exit, and pipefail would then report a planted key as "clean" (rc 141).
   local _sd
-  _sd="$(git -C "$1" diff --cached --text --no-ext-diff --no-textconv --no-color 2>/dev/null)" || return 1
+  _sd="$(git -C "$1" diff --cached --text --no-ext-diff --no-textconv --no-color 2>/dev/null)" || return 2
   grep -Eq "$OSRC_SECRET_ADDED_ERE" <<<"$_sd"
 }
 # Live-secret VALUE shapes (never variable NAMES: code that reads OPENROUTER_API_KEY or
@@ -13873,7 +13873,7 @@ delegate_cxnative() {
   local sflag posture
   case "$tier" in
     auto)                    sflag=(--sandbox read-only);       posture="READ-ONLY sandbox" ;;
-    accept-edits|autonomous) sflag=(--sandbox workspace-write); _codex_worktree_index_args; posture="WORKSPACE-WRITE sandbox" ;;
+    accept-edits|autonomous) sflag=(--sandbox workspace-write); posture="WORKSPACE-WRITE sandbox" ;;
     dangerous)               sflag=(--dangerously-bypass-approvals-and-sandbox); posture="DANGER (no sandbox/approvals)" ;;
     *) die "bad tier: $tier" ;;
   esac

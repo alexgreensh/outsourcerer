@@ -38,9 +38,7 @@ repo="$TMP/managed repo"
 wt="$repo/.outsourcerer/worktrees/job"
 git init -q "$repo" && git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm seed --allow-empty &&
   git -C "$repo" worktree add -qb outsourcerer/job "$wt" || exit 1
-args_for() (cd "$1" || exit 1; sflag=(); _codex_worktree_index_args; printf '%s\n' ${sflag[@]+"${sflag[@]}"};)
-eq "managed checkout grants only its private metadata directory" "$(args_for "$wt")" "$(printf '%s\n' --add-dir "$(git -C "$wt" rev-parse --absolute-git-dir)")"
-eq "main checkout receives no additional roots" "$(args_for "$repo")" ""
+cd "$wt" || exit 1
 cfg() { printf '%s' "$1" > "$CH/config.toml"; }
 read1() { _codex_win_sandbox_read | tr '\n' ' ' | sed 's/ $//'; }
 
@@ -116,6 +114,7 @@ echo "=== (3) delegate_cxnative ==="
   case "$CODEX_ARGS" in *--ignore-user-config*) ok "isolation flag still passed" ;; *) bad "isolation flag missing: $CODEX_ARGS" ;; esac
   case "$CODEX_ARGS" in *"-c windows.sandbox=elevated"*) ok "Windows: windows.sandbox=elevated carried" ;; *) bad "Windows: sandbox not carried: $CODEX_ARGS" ;; esac
   case "$CODEX_ARGS" in *mcp_servers*|*evil*) bad "user config leaked: $CODEX_ARGS" ;; *) ok "no other user config leaked" ;; esac
+  case "$CODEX_ARGS" in *--add-dir*) bad "managed checkout received additional write roots" ;; *) ok "managed checkout gets no additional write roots" ;; esac
   case "$CODEX_ARGS" in *"--sandbox workspace-write"*) ok "workspace-write sandbox kept" ;; *) bad "workspace-write missing: $CODEX_ARGS" ;; esac
 
   OSRC_PLATFORM=linux

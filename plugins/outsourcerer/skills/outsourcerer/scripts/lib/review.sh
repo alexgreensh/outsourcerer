@@ -585,6 +585,11 @@ _osrc_review_set_reviewer() {
 
 _osrc_review_next() {
   local force="" final="" s p chosen="" inflight="" scr id brief msg vf now rot lk n
+  local target="" head=""
+  if [ "${1:-}" = --exact ]; then
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || return 2
+    target="$2"; head="$3"; shift 3
+  fi
   while [ "$#" -gt 0 ]; do case "$1" in --force) force=1 ;; --final) final=final ;; *) echo "review next: unknown option $1" >&2; return 2 ;; esac; shift; done
   s="$(_osrc_review_reviewer)"; [ -n "$s" ] || { echo "no reviewer set: review reviewer <tmux-session>" >&2; return 2; }
   tmux has-session -t "=$s" 2>/dev/null || { echo "reviewer session '$s' is gone: $(_osrc_self) review rotate" >&2; return 2; }
@@ -593,16 +598,20 @@ _osrc_review_next() {
   now="$(_osrc_now)"
   _osrc_review_ingest
   # oldest queued first (the items list is name-sorted, so order explicitly by enqueue time)
-  for p in $(_osrc_review_items); do
+  for p in "$OSRC_HOME"/review/items/*.json; do
+    [ -f "$p" ] || continue
     case "$(jq -r .state "$p")" in
       inflight) inflight="$(jq -r .id "$p")"; continue ;;
-      queued) ;;
+      queued)
+        if [ -n "$target" ]; then
+          jq -e --arg target "$target" --arg head "$head" '.lane==$target and .head==$head and .stale!=true' "$p" >/dev/null || continue
+        fi ;;
       *) continue ;;
     esac
     if [ -z "$chosen" ] || [ "$(jq -r .enq_ts "$p")" -lt "$(jq -r .enq_ts "$chosen")" ]; then chosen="$p"; fi
   done
   if [ -n "$inflight" ]; then _osrc_unlock "$lk"; echo "one review in flight already: $inflight (never more than one). Verdict goes to $OSRC_HOME/review/$inflight.VERDICT"; return 3; fi
-  if [ -z "$chosen" ]; then _osrc_unlock "$lk"; echo "queue empty"; return 0; fi
+  if [ -z "$chosen" ]; then _osrc_unlock "$lk"; echo "queue empty"; [ -z "$target" ] || return 1; return 0; fi
   scr="$(_osrc_review_screen "$s")"
   if [ "$scr" != idle ]; then _osrc_unlock "$lk"; echo "reviewer $s is $scr, not idle: not sending" >&2; return 4; fi
   if [ -z "$force" ] && rot="$(_osrc_review_rotation_due "$s")"; then
@@ -613,7 +622,7 @@ _osrc_review_next() {
   vf="$OSRC_HOME/review/$id.VERDICT"; rm -f "$vf"
   msg="Review request $id: read $brief and follow it. Write your verdict to $vf ($(_osrc_sev_format | sed 's/"//g')). One review at a time."
   if _osrc_review_send "$s" "$msg"; then
-    _osrc_jq_set "$chosen" --argjson now "$now" '.state="inflight" | .sent_ts=$now'
+    _osrc_jq_set "$chosen" --argjson now "$now" '.state="inflight" | .sent_ts=$now' || { _osrc_unlock "$lk"; return 1; }
     n="$OSRC_HOME/review/reviewer.json"
     [ -f "$n" ] && _osrc_jq_set "$n" '.reviews=((.reviews // 0) + 1)'
     _osrc_unlock "$lk"

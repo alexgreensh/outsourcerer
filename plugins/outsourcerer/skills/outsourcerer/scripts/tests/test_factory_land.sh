@@ -643,14 +643,31 @@ for state in held failed canceled todo; do
 done
 
 # A sandboxed lane leaves finished work uncommitted; the harness commits it, and leaves a clean tree alone.
-HC="$TMP/hc"; git init -q "$HC" && git -C "$HC" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+mk_task hc ship true
+HC="$(wt_of hc)"
+hc_commit() { drv _osrc_harness_commit "$HC" j-hc; }
+base="$(git -C "$HC" rev-parse HEAD)"
+idx="$(git -C "$HC" rev-parse --absolute-git-dir)/index"
 echo work > "$HC/f.txt"
-( . "$HERE/../lib/harness-commit.sh"; _osrc_harness_commit "$HC" job1 ) \
-  && [ -z "$(git -C "$HC" status --porcelain)" ] && git -C "$HC" log -1 --format=%s | grep -q 'lane job1' \
-  && ok "harness commits a sandboxed lane's leftover work" || bad "harness commit: $(git -C "$HC" status --porcelain) $(git -C "$HC" log -1 --format=%s)"
-n0="$(git -C "$HC" rev-list --count HEAD)"
-( . "$HERE/../lib/harness-commit.sh"; _osrc_harness_commit "$HC" job1 ) && bad "harness committed a clean tree" \
-  || { [ "$(git -C "$HC" rev-list --count HEAD)" = "$n0" ] && ok "a clean worktree gets no harness commit"; }
+before="$(cksum < "$idx")"
+for path in .env private.key ordinary.txt; do
+  if [ "$path" = ordinary.txt ]; then printf 'ghp_%024d\n' 0 > "$HC/$path"; else echo fixture > "$HC/$path"; fi
+  if hc_commit || [ "$(git -C "$HC" rev-parse HEAD)" != "$base" ] || [ "$(cksum < "$idx")" != "$before" ]; then
+    bad "unsafe $path altered the commit or index"
+  else ok "refused $path before touching HEAD or index"; fi
+  rm "$HC/$path"
+done
+git -C "$HC" checkout -qb wrong-harness-branch
+hc_commit && bad "wrong branch accepted" || ok "wrong branch refused"
+git -C "$HC" checkout -q outsourcerer/j-hc
+drv _osrc_harness_commit "$REPO" j-hc && bad "main checkout accepted" || ok "main checkout refused"
+mkdir "$HC/hooks"
+printf '#!/bin/sh\ntouch hook-ran\nexit 1\n' > "$HC/hooks/pre-commit"; chmod +x "$HC/hooks/pre-commit"
+git -C "$REPO" config core.hooksPath hooks
+if hc_commit && [ ! -e "$HC/hook-ran" ] && [ -z "$(git -C "$HC" status --porcelain)" ] &&
+    git -C "$HC" show HEAD:f.txt | grep -qx work; then ok "committed safely with checkout hooks disabled"
+else bad "harness commit or hook isolation"; fi
+hc_commit && bad "committed clean checkout" || ok "clean checkout skipped"
 
 echo
 echo "factory land: $pass passed, $fail failed"
