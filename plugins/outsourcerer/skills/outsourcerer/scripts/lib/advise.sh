@@ -23,13 +23,10 @@ _advise_rank() {
 }
 
 _advise_native_catalog_rows() {
-  local lane id path
+  local lane path
   for lane in gm cx dv; do
     path="$OSRC_HOME/catalogs/$lane.json"
-    while IFS= read -r id; do
-      case "$id" in ""|*[!a-zA-Z0-9._/-]*) continue ;; esac
-      printf '%s|%s|%s|raw\n' "$id" "$id" "$lane"
-    done < <({
+    {
       [ -r "$path" ] && jq -r '.[] | strings' "$path" 2>/dev/null
       local cx_cache="${CODEX_HOME:-$HOME/.codex}/models_cache.json"
       if [ "$lane" = cx ] && [ -r "$cx_cache" ]; then
@@ -39,43 +36,40 @@ _advise_native_catalog_rows() {
       if [ "$lane" = dv ] && [ -r "$OSRC_HOME/catalogs/dv.raw.json" ]; then
         jq -r '.families[]?.variants[]?.model_uid' "$OSRC_HOME/catalogs/dv.raw.json"
       fi
-    } | awk -F'|' -v lane="$lane" 'NR==FNR {if ($3==lane) seen[$2]=1;next} !seen[$0]++' <(printf '%s\n' "$OSRC_MODEL_TABLE") -)
+    } | LC_ALL=C awk -F'|' -v lane="$lane" '
+      FILENAME==ARGV[1] {if ($3==lane) seen[$2]=1; next}
+      /^[a-zA-Z0-9._\/-]+$/ && !seen[$0]++ {print $0 "|" $0 "|" lane "|raw"}
+    ' <(printf '%s\n' "$OSRC_MODEL_TABLE") -
   done
 }
 
 # Enumerate the cached OpenRouter catalog, including models awaiting measurements.
 _advise_candidate_rows() {
-  local field="${1:-intelligence_index}" id score tier max="${OSRC_ADVISE_DYNAMIC_MAX:-}" added=0
-  local seen=$'\n' alias resolved lane
-  while IFS='|' read -r alias resolved lane tier; do
-    [ -n "$alias" ] || continue
-    printf '%s|%s|%s|%s\n' "$alias" "$resolved" "$lane" "$tier"
-    [ "$lane" != or ] || seen="$seen$resolved"$'\n'
-  done <<< "$OSRC_MODEL_TABLE"
+  local field="${1:-intelligence_index}" max="${OSRC_ADVISE_DYNAMIC_MAX:-}"
+  printf '%s\n' "$OSRC_MODEL_TABLE" | awk 'NF'
   [ "${OSRC_ADVISE_DYNAMIC_POOL:-1}" != 0 ] || return 0
   _advise_native_catalog_rows
   [ -r "$OSRC_MODELS_JSON" ] && have jq || return 0
   case "$max" in *[!0-9]*) max="" ;; esac
-  while IFS='|' read -r id score; do
-    [ -z "$max" ] || [ "$added" -lt "$max" ] || break
-    case "$id" in ""|*[!a-zA-Z0-9._/:-]*) continue ;; esac
-    case "$seen" in *$'\n'"$id"$'\n'*) continue ;; esac
-    tier="$(_tier_from_score "$score")"
-    printf '%s|%s|or|%s\n' "$id" "$id" "$tier"
-    seen="$seen$id"$'\n'
-    added=$((added+1))
-  done < <(awk -F'|' '
+  awk -F'|' '
     FILENAME==ARGV[1] {score[$1]=$2; next}
     {id=$0; sub(/:free$/, "", id); print $0 "|" ((id in score)?score[id]:-1)}
   ' <(_advise_bench_rows "$field") <(jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null) |
-    LC_ALL=C sort -s -t'|' -k2,2rn)
+    LC_ALL=C sort -s -t'|' -k2,2rn |
+    awk -F'|' -v max="$max" -v f="$_TIER_BAND_FRONTIER" -v c="$_TIER_BAND_CAPABLE" \
+        -v m="$_TIER_BAND_MID" -v b="$_TIER_BAND_BUDGET" '
+      FILENAME==ARGV[1] {if ($3=="or") seen[$2]=1; next}
+      $1 ~ /^[a-zA-Z0-9._\/:-]+$/ && !seen[$1]++ && (max=="" || added<max) {
+        s=$2+0; tier=(s>=f?"frontier":s>=c?"capable":s>=m?"mid":s>=b?"budget":"raw")
+        print $1 "|" $1 "|or|" tier; added++
+      }' <(printf '%s\n' "$OSRC_MODEL_TABLE") -
 }
 
 # Emit canonical releases first and exact ids last so an exact score wins in the join.
 _advise_bench_rows() {
   [ -r "$OSRC_BENCH_JSON" ] && have jq || return 0
   jq -r --arg field "$1" '
-    [.data[]? | select(.[$field] | type == "number")] as $models
+    [.data[]? | select((.model_permaslug | type == "string") and (.[$field] | type == "number"))] as $models
     | (($models[] | select(.model_permaslug|test("-[0-9]{8}$")) |
        [(.model_permaslug|sub("-[0-9]{8}$"; "")), .[$field], (.pricing.prompt // "unknown")]),
        ($models[] | [.model_permaslug, .[$field], (.pricing.prompt // "unknown")]))
@@ -85,7 +79,8 @@ _advise_bench_rows() {
 
 _advise_scored_rows() {
   local field="$1" alias slug
-  awk -F'|' '
+  ADVISE_TABLE="$OSRC_MODEL_TABLE" awk -F'|' '
+    BEGIN {n=split(ENVIRON["ADVISE_TABLE"], rows, "\n"); for(i=1;i<=n;i++) fixed[rows[i]]=1}
     FILENAME==ARGV[1] {slug[$1]=$2; next}
     FILENAME==ARGV[2] {
       score[$1]=$2; price[$1]=$3
@@ -98,9 +93,14 @@ _advise_scored_rows() {
      else if ($3=="cx" && key ~ /^gpt-/) key="openai/" key
      else if ($3=="gm" && key ~ /^gemini-[0-9]/) {
        sub(/-(low|medium|high|xhigh|max)$/, "", key); key="google/" key
-     } else if ($3=="dv") {bare=key; gsub(/\./,"-",bare); key=provider[bare]}
+     } else if ($3=="dv" && !(key in score)) {bare=key; gsub(/\./,"-",bare); key=provider[bare]}
      sub(/:free$/, "", key)
+     if (!(key in score) && key ~ /^anthropic\/claude-[0-9.]+-(fable|opus|haiku|sonnet)$/) {
+       split(key, parts, "-"); key=parts[1] "-" parts[3] "-" parts[2]
+     }
+     if (!(key in score) && !($0 in fixed)) {omitted++; next}
      print $0 "|" ((key in score)?score[key]:"unscored") "|" ((key in price)?price[key]:"unknown")}
+    END {if (omitted) print "|count|" omitted}
   ' <({
     printf '%s\n' "$_NATIVE_BENCH_MAP"
     for alias in gemini-pro gemini-flash gemini-flash-lite; do
@@ -134,31 +134,26 @@ cmd_advise() {
     die "advise --json requires jq (install it or run without --json for text output)"
   fi
 
-  if [ "$do_refresh" -eq 1 ] || [ ! -f "$OSRC_BENCH_JSON" ]; then
-    # On explicit --refresh, show diagnostics (don't suppress stderr).
-    if [ "$do_refresh" -eq 1 ]; then
-      refresh_benchmarks >&2 || true
-    elif [ "$json_out" -eq 1 ]; then
-      # --json must emit ONLY JSON: suppress the refresh success line (stdout) too, not just stderr.
-      refresh_benchmarks >/dev/null 2>&1 || true
-    else
-      refresh_benchmarks 2>/dev/null || true
-    fi
-  fi
-
-  # Benchmark freshness: a cache dated >7 days ago refreshes automatically when an OpenRouter
-  # key is configured; otherwise the stale age is called out once in the output below.
-  local _bstale=""
-  _bstale="$(_bench_cache_stale 2>/dev/null)"
-  if [ -n "$_bstale" ] && { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value OPENROUTER_API_KEY)" ]; }; then
-    if [ "$json_out" -eq 1 ]; then refresh_benchmarks >/dev/null 2>&1 || true
-    else refresh_benchmarks 2>/dev/null || true; fi
-    _bstale="$(_bench_cache_stale 2>/dev/null)"
-  fi
-
   local category field threshold difficulty
   category="$(_classify_task "$task")"
   field="$(_bench_score_field "$category")"
+
+  # Older caches cover all three indices. Newer API responses can cover only the requested one.
+  local OSRC_BENCH_JSON="$OSRC_BENCH_JSON" task_type="${field%_index}" cache _bstale missing=0
+  cache="$OSRC_BENCH_JSON"
+  [ "$task_type" = intelligence ] || cache="${cache%.json}.$task_type.json"
+  if [ "$cache" != "$OSRC_BENCH_JSON" ] && [ -s "$cache" ]; then OSRC_BENCH_JSON="$cache"; fi
+  jq -e --arg f "$field" 'any(.data[]?; (.[$f]|type)=="number")' "$OSRC_BENCH_JSON" >/dev/null 2>&1 || missing=1
+  _bstale="$(_bench_cache_stale 2>/dev/null)"
+  if [ "$do_refresh" = 1 ] || { { [ "$missing" = 1 ] || [ -n "$_bstale" ]; } &&
+       { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value OPENROUTER_API_KEY)" ]; }; }; then
+    if [ "$do_refresh" = 1 ]; then
+      OSRC_BENCH_JSON="$cache" refresh_benchmarks "$task_type" >&2 && OSRC_BENCH_JSON="$cache"
+    else
+      OSRC_BENCH_JSON="$cache" refresh_benchmarks "$task_type" >/dev/null 2>&1 && OSRC_BENCH_JSON="$cache"
+    fi
+    _bstale="$(_bench_cache_stale 2>/dev/null)"
+  fi
   threshold="$(_bench_threshold_for "$category")"
   difficulty="$(_task_difficulty "$task")"
   if [ -z "$selection_effort" ]; then
@@ -172,13 +167,29 @@ cmd_advise() {
   fi
   [ "${OSRC_ADVISE_CONSERVE:-1}" = 0 ] || _adv_limits="$limits"
   [ "${OSRC_LANE_LIMIT_GATE:-1}" = 0 ] || _gate_limits="$limits"
-  local results="" has_bench=0 bench_count=0 total_count=0
+  local results="" has_bench=0 bench_count=0 total_count=0 omitted=0
   local alias resolved lane tier score price_in cost_per_m value_ratio meets
   local variant_pref="${OSRC_ADVISE_VARIANT_PREF:-1}" family weight
   _frontier_needed "$task" "$selection_effort" && variant_pref=0
   local last_lane="" image_lane plan_limited conserve blocked
+  local candidates names hits name
+  local -a check_names
+  candidates="$(_advise_scored_rows "$field")"
+  if _exclude_active; then
+    names="$(awk -F'|' '$1!="" {for(i=1;i<=3;i++) if(!seen[$i]++) print $i}' <<< "$candidates")"
+    check_names=()
+    while IFS= read -r name; do check_names+=("$name"); done <<< "$names"
+    hits="$(_exclude_hits "${check_names[@]}")"
+    # Prime the existing exclusion memo, including clean misses. A changed exclude file invalidates it.
+    _OSRC_EXCL_MEMO=$'\n'"$(awk -F'\t' '
+      FILENAME==ARGV[1] {hit[$1]=$0; next}
+      {print (($0 in hit)?hit[$0]:$0 "\t-")}' <(printf '%s\n' "$hits") - <<< "$names")"$'\n'
+  fi
   while IFS='|' read -r alias resolved lane tier score price_in; do
-    [ -n "$alias" ] || continue
+    if [ -z "$alias" ]; then
+      [ "$resolved" != count ] || omitted="$lane"
+      continue
+    fi
     if [ "$last_lane" != "$lane" ]; then
       last_lane="$lane"
       image_lane="$(_lane_field "$lane" image_lane)"
@@ -212,7 +223,7 @@ cmd_advise() {
     fi
     results="$results$alias|$resolved|$lane|$tier|$score|$price_in|$conserve|$family|$weight
 "
-  done < <(_advise_scored_rows "$field")
+  done <<< "$candidates"
 
   local rec_alias rec_resolved rec_lane rec_tier rec_score rec_reason highest
   results="$(printf '%s' "$results" | _advise_rank "$threshold")"
@@ -301,14 +312,14 @@ cmd_advise() {
       --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
       --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
       --arg bench_asof "$_bench_asof" --argjson bench_stale "$_bstale_json" \
-      --argjson shortlist "$shortlist_json" \
+      --argjson shortlist "$shortlist_json" --argjson omitted "$omitted" \
       '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
         recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
         shortlist:($shortlist | .[0].lane=$rec_lane),
         conservation:(if $conserve=="" then null else $conserve end),
         limit_gate:(if $limit_gate=="" then null else $limit_gate end),
         benchmark_data_available:($has_bench=="1"),
-        benchmark_stale:$bench_stale,
+        benchmark_stale:$bench_stale, unscored_catalog_count:$omitted,
         benchmark_as_of:(if $bench_asof=="" then null else $bench_asof end),
         benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
         history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
@@ -329,6 +340,7 @@ cmd_advise() {
     else
       echo "   benchmark data: none (all models unscored, run: $0 advise --refresh \"$task\")"
     fi
+    [ "$omitted" = 0 ] || echo "   unscored catalog entries omitted: $omitted"
     if [ -n "$_bstale" ]; then
       local _bd="${_bstale%%$'\t'*}" _ba="${_bstale#*$'\t'}" _bage
       if [ "$_bd" = "unknown" ]; then _bage="an unknown age"; else _bage="$_bd days old"; fi

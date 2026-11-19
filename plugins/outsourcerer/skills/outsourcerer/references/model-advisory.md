@@ -10,13 +10,16 @@ the cached benchmark for that model and category. Within `OSRC_ADVISE_TIE` point
 break the tie. A lighter measured Devin sibling can break a tie at the same cost. Set the window to 0 for strict score order. Thresholds describe the
 result. Effort sets the requested execution effort, including max.
 
-The pool includes the alias table and locally cached catalogs. Missing benchmark
-fields appear as **unscored**, after every measured model. JSON reports a null
-score and an unscored flag. If no candidate has a measurement the reason says so.
+The shortlist includes configured aliases and measured models from cached catalogs.
+Configured models missing the requested score appear last, marked **unscored**.
+JSON reports their score as null. Catalog-only entries missing that score are
+counted in `unscored_catalog_count`. If no candidate has a measurement the reason says so.
 
 Excluded models and lanes over their fresh usage limit are skipped. Selecting a paid
 model preserves the normal dispatch consent checks. A cache older than seven days
-is refreshed when an OpenRouter key is available. Use `--refresh` to request an update.
+is refreshed when an OpenRouter key is available, as is a cache missing the requested
+index entirely. Coding and agentic refreshes use separate cache files. Use
+`--refresh` to request an update.
 
 Set `OSRC_ADVISE_DYNAMIC_POOL=0` to use only the configured table. An explicit
 `OSRC_ADVISE_DYNAMIC_MAX` caps OpenRouter discovery, measured models first.

@@ -3218,8 +3218,8 @@ _OSRC_LANE_FIELDS
 _lane_by_token() {
   local t="${1:-}" l v pair
   [ -n "$t" ] || return 1
+  for l in $OSRC_LANE_REGISTRY; do [ "$t" != "$l" ] || { printf '%s' "$l"; return 0; }; done
   for l in $OSRC_LANE_REGISTRY; do
-    [ "$l" = "$t" ] && { printf '%s' "$l"; return 0; }
     v="$(_lane_field "$l" aliases)"; case " $v " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
     v="$(_lane_field "$l" disp)"; [ "$v" = "$t" ] && { printf '%s' "$l"; return 0; }
     _words_noglob "$(_lane_field "$l" disp_by_provider)"   # split WITHOUT globbing values against cwd (class-complete with the family/model_globs fix)
@@ -9948,12 +9948,10 @@ _TIER_BAND_MID=38
 _TIER_BAND_BUDGET=28
 
 # refresh_benchmarks: fetch benchmark data from OpenRouter API, cache locally.
-# Needs OPENROUTER_API_KEY. Graceful failure: returns 1, caller falls back to tier proxy.
 refresh_benchmarks() {
   _mkdir_private "$OSRC_HOME" || true
   have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
   have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
-  # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
   # ~/.env wins; an exported OPENROUTER_API_KEY is the fallback so `advise`'s auto-refresh
   # and a bare `export OPENROUTER_API_KEY=...` shell both work.
   local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$_k" ] || _k="${OPENROUTER_API_KEY:-}"
@@ -9963,15 +9961,15 @@ refresh_benchmarks() {
   printf 'Authorization: Bearer %s\n' "$_k" > "$_hdr"; chmod 600 "$_hdr"
   local _tmp; _tmp="$(mktemp "$OSRC_HOME/.bench.XXXXXX" 2>/dev/null)" || { rm -f "$_hdr"; echo "cannot create temp file" >&2; return 1; }
   if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" -H @"$_hdr" \
-    "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis&task_type=intelligence&max_results=100" \
+    "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis&task_type=${1:-intelligence}&max_results=100" \
     -o "$_tmp" 2>/dev/null; then
     # Validate JSON before promoting to cache (prevents HTML error pages / truncated responses from poisoning the cache).
-    if jq -e '.data | type == "array"' "$_tmp" >/dev/null 2>&1; then
+    if jq -e --arg f "${1:-intelligence}_index" 'any(.data[]?; (.[$f] | type) == "number")' "$_tmp" >/dev/null 2>&1; then
       mv -f "$_tmp" "$OSRC_BENCH_JSON" || { rm -f "$_tmp" "$_hdr"; echo "failed to write benchmark cache" >&2; return 1; }
       echo "refreshed benchmark cache ($(jq -r '.meta.model_count // "?"' "$OSRC_BENCH_JSON" 2>/dev/null) models, as of $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null))"
     else
       rm -f "$_tmp"
-      echo "benchmark refresh failed (response was not valid JSON with .data array)" >&2; rm -f "$_hdr"; return 1
+      echo "benchmark refresh failed (response contained no measured ${1:-intelligence} scores)" >&2; rm -f "$_hdr"; return 1
     fi
   else
     rm -f "$_tmp"
@@ -10128,10 +10126,10 @@ _frontier_needed() {
 # _variant_family <resolved-id> -> family key: provider prefix dropped, '.'->'-', size/effort suffixes
 # stripped repeatedly (glm-5-3-flash-high -> glm-5-3; glm-5.2 -> glm-5-2; deepseek-v4-pro-max -> deepseek-v4-pro).
 _variant_family() {
-  local id prev=""; id="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '.' '-')"; id="${id##*/}"
-  while [ "$id" != "$prev" ]; do
-    prev="$id"
-    id="$(printf '%s' "$id" | sed -E 's/-(none|minimal|low|medium|high|xhigh|max|1m|flash|lightning|mini|lite|turbo)$//')"
+  local id="${1##*/}"; id="${id//./-}"
+  case "$id" in *[[:upper:]]*) id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')" ;; esac
+  while :; do
+    case "$id" in *-none|*-minimal|*-low|*-medium|*-high|*-xhigh|*-max|*-1m|*-flash|*-lightning|*-mini|*-lite|*-turbo) id="${id%-*}" ;; *) break ;; esac
   done
   printf '%s' "$id"
 }
@@ -10141,7 +10139,8 @@ _variant_family() {
 # xhigh/max=3; an un-rung family id counts as distance 1), so at --effort high the -high rung of the
 # light member wins over its bare id and over every full-size rung.
 _variant_weight() {
-  local id w=10 rung=-1 target=2 d; id="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '.' '-')"; id="${id##*/}"
+  local id="${1##*/}" w=10 rung=-1 target=2 d; id="${id//./-}"
+  case "$id" in *[[:upper:]]*) id="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')" ;; esac
   case "$id" in *-flash|*-flash-*|*-lightning|*-lightning-*|*-mini|*-mini-*|*-lite|*-lite-*) w=0 ;; esac
   id="${id%-1m}"
   case "$id" in *-none|*-minimal|*-low) rung=0 ;; *-medium) rung=1 ;; *-high) rung=2 ;; *-xhigh|*-max) rung=3 ;; esac

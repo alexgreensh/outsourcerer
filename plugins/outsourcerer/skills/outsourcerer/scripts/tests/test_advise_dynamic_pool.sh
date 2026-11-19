@@ -105,6 +105,25 @@ grep -qx 'gpt-future|gpt-future|cx|raw' <<< "$pool3" && ok "Codex catalog candid
 rm -f "$T/agy-models.txt" "$HOME/.codex/models_cache.json"
 rm -f "$T/catalogs/dv.raw.json"
 
+(
+  OSRC_MODEL_TABLE=$'fable52|claude-fable-5-2|cc|frontier\nunknown|unknown|cc|raw'
+  OSRC_ADVISE_ROUTER=0
+  OSRC_BENCH_JSON="$T/real-shape.json"
+  cat > "$OSRC_BENCH_JSON" <<'JSON'
+{"meta":{"source":"artificial-analysis","task_type":"intelligence","as_of":"2026-11-19T12:00:35.472Z"},
+ "data":[{"source":"artificial-analysis","model_permaslug":"anthropic/claude-fable-5.2-20261109",
+          "intelligence_index":64.6,"coding_index":null,"agentic_index":null,"pricing":{"prompt":"0.000016"}},
+         {"model_permaslug":null,"intelligence_index":99}]}
+JSON
+  refresh_benchmarks() {
+    [ "$1" = coding ] || return 1
+    printf '%s\n' '{"data":[{"model_permaslug":"anthropic/claude-fable-5.2-20261109","coding_index":72.5}]}' > "$OSRC_BENCH_JSON"
+  }
+  export OPENROUTER_API_KEY=test
+  cmd_advise --json 'fix a bug' | jq -e '.shortlist[0].alias=="fable52" and .shortlist[0].score==72.5 and .unscored_catalog_count==3 and (.shortlist|length)==2' &&
+    cmd_advise --json 'analyze tradeoffs' | jq -e '.shortlist[0].score==64.6 and .shortlist[1].unscored'
+) >/dev/null && ok "task-specific refresh preserves intelligence and counts unscored catalog rows" || bad "real cache shape or task-specific refresh"
+
 # === Dedup, static wins: an id in both models.json and the static table appears once, static row. ===
 cat > "$OSRC_MODELS_JSON" <<'MJSON'
 {"data":[{"id":"z-ai/glm-5.2"}]}
