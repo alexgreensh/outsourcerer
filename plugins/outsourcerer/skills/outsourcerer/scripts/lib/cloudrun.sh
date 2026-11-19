@@ -296,7 +296,10 @@ _cloudrun_pick_vehicle() {
     reason="$(_cloudrun_vehicle_ok "$req" "$env" 2>&1)" && { printf '%s' "$req"; return 0; }
     printf '>>> [cloud] vehicle %s unusable: %s\n' "$req" "$reason" >&2; return 1
   fi
-  if _cloudrun_claude_conserve; then order="devin claude codex"; else order="claude devin codex"; fi
+  # Subscription vehicles before metered devin: devin bills ACU and cloud start refuses it
+  # without --spend-ok, so trying it early kills the launch instead of falling through to a
+  # subscription lane. Conserve still drops claude last, but codex outranks devin either way.
+  if _cloudrun_claude_conserve; then order="codex devin claude"; else order="claude codex devin"; fi
   for v in $order; do
     reason="$(_cloudrun_vehicle_ok "$v" "$env" 2>&1)" && {
       [ -n "$skipped" ] && printf '%s\n' "$skipped" | sed 's/^/>>> [cloud] vehicle skipped: /' >&2

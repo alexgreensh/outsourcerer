@@ -2,7 +2,8 @@
 # test_cloudrun.sh — L10 cloud-first delegation: osrc_where routing + `cloud start` lifecycle.
 # OFFLINE ONLY: vehicle CLIs (claude/devin/codex/gh) are PATH stubs that log argv and print a
 # fake session URL; git runs against a LOCAL bare repo standing in for the remote (no network).
-# Every OSRC_* state dir is a scratch mktemp dir, cleaned by trap. No tmux is used at all.
+# Every OSRC_* state dir is a scratch mktemp dir, cleaned by trap. tmux runs only on a private
+# -L server (claude --cloud needs a terminal); the default socket is never touched.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,7 +22,7 @@ SCRIPT_PATH="$SRC"   # sourced mode: $0 is this harness; point preflight/self-ex
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
-cleanup() { rm -rf "$TMP" "$OSRC_HOME"; }
+cleanup() { [ -x "${STUB:-}/tmux" ] && "$STUB/tmux" kill-server 2>/dev/null; rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
 
@@ -84,6 +85,18 @@ cat > "$STUB/gh" <<'EOF'
 echo "gh stub: not implemented" >&2; exit 1
 EOF
 chmod +x "$STUB"/*
+
+# claude --cloud launches inside a tmux pane (lib/cloudrun.sh). A pane inherits the tmux
+# SERVER's global env, not the caller's — on the default socket that env is whatever shell
+# started the server long ago (real $HOME/PATH, no $STUB, no $OSRC_STUB_LOG), so the pane ran
+# the REAL claude and the stub argv never reached the stub log. Route every tmux call the
+# suite makes onto a private -L server started by this suite: its global env IS this env.
+# The socket name differs from the $CB wrapper at the bottom on purpose — that test needs a
+# fresh server whose env carries $CB, not $STUB.
+if command -v tmux >/dev/null 2>&1; then
+  printf '#!/bin/sh\nexec "%s" -L osrc-test-cloudrun-main-%s "$@"\n' "$(command -v tmux)" "$$" > "$STUB/tmux"
+  chmod +x "$STUB/tmux"
+fi
 
 # ---------- fake remote + working clone (all local, zero network) ----------
 BARE="$TMP/origin.git"; WORK="$TMP/work"
@@ -402,6 +415,43 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 [ $rc -eq 0 ] && grep -q 'devin session started' <<<"$out" \
   && ok "vehicle: missing claude -> auto skips to devin" || { bad "vehicle: skip-to-devin failed (rc=$rc)"; echo "SKIPDEBUG: $out" >&2; echo "STUBLOG: $(cat "$OSRC_STUB_LOG")" >&2; }
 grep -q 'vehicle skipped' <<<"$out" && ok "vehicle: skip reason printed" || bad "vehicle: skip reason missing"
+
+# ============================== default vehicle order =====================================
+# 0.17.2 bug: `cloud start` with no --vehicle could land on devin (metered ACU — and the start
+# refuses it without --spend-ok) ahead of the subscription vehicles. Pick order is
+# claude -> codex -> devin; under claude conserve the conserved lane drops last but codex
+# still outranks devin.
+veh="$( cd "$WORK" && bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  PATH="'"$STUB"':$PATH" _cloudrun_pick_vehicle auto env-order-1
+' 2>/dev/null )"
+[ "$veh" = "claude" ] && ok "order: auto tries claude first" || bad "order: auto picked '$veh'"
+
+veh="$( cd "$WORK" && bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  have() { case "$1" in claude) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  PATH="'"$STUB"':$PATH" _cloudrun_pick_vehicle auto env-order-1
+' 2>/dev/null )"
+[ "$veh" = "codex" ] && ok "order: claude missing -> codex before devin" || bad "order: picked '$veh'"
+
+veh="$( cd "$WORK" && bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  have() { case "$1" in claude|codex) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  PATH="'"$STUB"':$PATH" _cloudrun_pick_vehicle auto env-order-1
+' 2>/dev/null )"
+[ "$veh" = "devin" ] && ok "order: only devin left -> devin still reachable" || bad "order: picked '$veh'"
+
+# end to end: auto with claude unavailable lands on codex — no --spend-ok passed, so a devin
+# pick would have refused outright; the subscription lane winning is the regression proof.
+out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  unset OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL CODEX_HOME
+  have() { case "$1" in claude) return 1 ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+  SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"; OSRC_STUB_LOG="'"$OSRC_STUB_LOG"'"
+  PATH="'"$STUB"':$PATH" _cloudrun_start t-order --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle auto --env env-order-9
+' 2>&1 )"; rc=$?
+[ $rc -eq 0 ] && grep -q 'codex session started' <<<"$out" \
+  && ok "order: cloud start auto lands on codex, not metered devin" || bad "order: auto start (rc=$rc): $out"
 
 # ============================== launch argv per vehicle ===============================
 : > "$OSRC_STUB_LOG"
