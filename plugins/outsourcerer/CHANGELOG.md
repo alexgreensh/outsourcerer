@@ -2,6 +2,15 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.4
+
+### Changed
+
+- **Model picks weigh quality against real cost.** Each task sets a quality bar from the best model you can run today: 75% of its score for light work, 85% for normal work, 97% for hard work. The cheapest model that clears the bar wins.
+- **Subscriptions are no longer treated as free.** Every model is priced at its real list price, since that is how fast it uses up your plan.
+- **Scores come from current data.** Code and agent tasks use Artificial Analysis engineering scores, and one refresh fetches every score. Models with no score are named, never guessed.
+- **Every model you can run is considered.** Candidates come from what Antigravity, Codex, Devin and OpenRouter report, not a fixed list, and a pick takes seconds.
+
 ## 0.17.3
 
 ### Fixed
