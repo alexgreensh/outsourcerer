@@ -92,30 +92,32 @@ ck "bench lookup haiku code score"  "$(printf '%s' "$bl" | cut -f1)" 43.9
 bl="$(_bench_lookup nonexistent-model coding_index)"
 ck "bench lookup unknown empty" "$bl" ""
 
-# === 7. cmd_advise end-to-end with synthetic benchmark data (human output). ===
-out="$(cmd_advise "refactor the authentication module" 2>&1)"
-if grep -q '== outsourcerer advise ==' <<< "$out"; then ok "advise prints header"; else bad "advise missing header"; fi
-if grep -q 'category: code' <<< "$out"; then ok "advise classifies as code"; else bad "advise wrong category"; fi
-if grep -q 'coding_index' <<< "$out"; then ok "advise uses coding_index field"; else bad "advise wrong field"; fi
-if grep -q 'recommendation' <<< "$out"; then ok "advise prints recommendation"; else bad "advise missing recommendation"; fi
-if grep -q 'Run with:' <<< "$out"; then ok "advise prints run command"; else bad "advise missing run command"; fi
-if grep -q 'benchmark data:' <<< "$out"; then ok "advise reports benchmark status"; else bad "advise missing benchmark status"; fi
-
-# === 8. cmd_advise JSON output. ===
-json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
-if printf '%s' "$json" | jq -e '.category == "code"' >/dev/null 2>&1; then ok "json has category=code"; else bad "json category wrong"; fi
-if printf '%s' "$json" | jq -e '.recommendation.alias' >/dev/null 2>&1; then ok "json has recommendation.alias"; else bad "json missing recommendation.alias"; fi
-if printf '%s' "$json" | jq -e '.benchmark_coverage' >/dev/null 2>&1; then ok "json reports benchmark_coverage"; else bad "json benchmark flag wrong"; fi
-
-# === 9. cmd_advise graceful degradation (no benchmark cache). ===
-rm -f "$TMP/benchmarks.json"
-# Mock refresh_benchmarks to prevent network calls (it would succeed with OR key from ~/.env).
-refresh_benchmarks() { return 1; }
-out="$(cmd_advise "refactor the authentication module" 2>&1)"
-if grep -q 'benchmark data: none (all models unscored' <<< "$out"; then ok "advise reports missing benchmarks"; else bad "advise missing fallback message"; fi
-if grep -q 'recommendation' <<< "$out"; then ok "advise still recommends without benchmarks"; else bad "advise fails without benchmarks"; fi
-# Restore real refresh_benchmarks for subsequent tests.
-unset -f refresh_benchmarks
+# Two differently priced subscription candidates and a measured frontier candidate.
+mkdir -p "$TMP/catalogs"
+printf '%s\n' '["model-a","model-b","model-c","model-d"]' > "$TMP/catalogs/dv.json"
+jq -n '{data:([["a",40,1],["b",70,2],["c",90,8]] | map({
+  model_permaslug:("vendor/model-"+.[0]+"-20261119"), intelligence_index:.[1],
+  engineering_index:.[1], coding_index:null, agentic_index:null,
+  pricing:{prompt:((.[2]/2000000)|tostring),completion:((.[2]*1.5/1000000)|tostring)}}))}' > "$OSRC_BENCH_JSON"
+check_pick() {
+  local want="$1" bar="$2" field="$3" result
+  shift 3
+  result="$(cmd_advise --json "$@")"
+  ck "winner for $*" "$(jq -r '.recommendation.model' <<<"$result")" "$want"
+  ck "bar for $*" "$(jq -r '.threshold' <<<"$result")" "$bar"
+  ck "index for $*" "$(jq -r '.score_field' <<<"$result")" "$field"
+}
+check_pick model-a 40 intelligence_index "Rename a CSS class across two files"
+check_pick model-b 70 engineering_index "Fix the dashboard refresh bug, run the test suite and verify"
+check_pick model-b 70 intelligence_index "Analyze the tradeoffs of three caching architectures and recommend one"
+check_pick model-c 90 engineering_index --effort max "Fix the database"
+json="$(cmd_advise --json "Fix the database")"
+ck "subscription blended price" "$(jq -r '.recommendation.price == 2' <<<"$json")" true
+ck "score per million-token dollar" "$(jq -r '.recommendation.value_ratio == 35' <<<"$json")" true
+ck "unscored catalog entry names both sources" "$(jq '.candidates[]|select(.model=="model-d")|.missing|length' <<<"$json")" 2
+mv "$OSRC_BENCH_JSON" "$TMP/saved-bench"
+ck "empty cache has no recommendation" "$(cmd_advise --json "Fix a bug" | jq '.recommendation')" null
+mv "$TMP/saved-bench" "$OSRC_BENCH_JSON"
 
 # === 10. cmd_advise flag parsing. ===
 out="$(cmd_advise --json "simple task" 2>&1)"
@@ -125,28 +127,6 @@ if printf '%s' "$out" | jq -e '.category == "simple"' >/dev/null 2>&1; then ok "
 # Run in a subshell so die() doesn't exit the test shell.
 err_msg="$(bash -c '. "$0" >/dev/null 2>&1; cmd_advise "" 2>&1' "$SRC" 2>&1)"
 if grep -q 'advise needs a task' <<< "$err_msg"; then ok "advise rejects empty task"; else bad "advise accepts empty task: '$err_msg'"; fi
-
-# === 12. cmd_advise recommendation uses the task benchmark. ===
-cat > "$TMP/benchmarks.json" <<'BJSON'
-{
-  "data": [
-    {"model_permaslug":"openai/gpt-5.6-sol-20260709","intelligence_index":58.9,"coding_index":77.4,"agentic_index":54,"pricing":{"prompt":"0.000005","completion":"0.00003"}},
-    {"model_permaslug":"z-ai/glm-5.2-20260616","intelligence_index":51.1,"coding_index":68.8,"agentic_index":43.1,"pricing":{"prompt":"0.0000014","completion":"0.0000044"}},
-    {"model_permaslug":"anthropic/claude-4.5-haiku-20251001","intelligence_index":29.6,"coding_index":43.9,"agentic_index":16.4,"pricing":{"prompt":"0.000001","completion":"0.000005"}}
-  ],
-  "meta":{"as_of":"2026-07-14T12:00:13.353Z","model_count":3}
-}
-BJSON
-json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
-rec_alias="$(printf '%s' "$json" | jq -r '.recommendation.alias')"
-ck "highest coding score wins" "$rec_alias" sol
-jq '.data += [{model_permaslug:"anthropic/claude-5.1-fable",intelligence_index:59.9}]
-    | (.data[]|select(.model_permaslug|startswith("z-ai/"))).intelligence_index=59.1' \
-    "$OSRC_BENCH_JSON" > "$TMP/reasoning.json"
-json="$(OSRC_BENCH_JSON="$TMP/reasoning.json" cmd_advise --json "Analyze the tradeoffs of three caching architectures and recommend one")"
-ck "fable beats GLM on reasoning" "$(jq -r '.recommendation.alias' <<<"$json")" fable
-jq -e '(.shortlist|last|.unscored) and any(.shortlist[]; .alias=="kimi" and .unscored and .score==null)' <<<"$json" >/dev/null \
-  && ok "unscored Kimi follows measured models" || bad "unscored benchmark handling"
 
 # === 13. Image lanes are excluded from advisory. ===
 out="$(cmd_advise "refactor the authentication module" 2>&1)"
@@ -179,19 +159,6 @@ _osrc_limit_exceeded cc 'claude5h=89' 2>/dev/null \
   || ok "cc at 89% is under the exclusion line (haircut zone, not excluded)"
 [ "$(_lane_conserve_mult dv 'claude5h=100')" = "1.00" ] && ok "devin lane is never haircut (unmeasured, never invent)" || bad "devin got a fabricated limit penalty"
 [ "$(_lane_conserve_mult or 'claude5h=100')" = "1.00" ] && ok "openrouter lane is never haircut (unmeasured)" || bad "openrouter got a fabricated limit penalty"
-# integration: with a lane forced past the line, advise prints the conservation line; opt-out silences it.
-# Stub _session_limits high, capture output, then restore the real definition.
-# Values sit ABOVE the 50% conserve line (haircut applies) but BELOW the 90% L7 limit gate — at/over
-# 90 the lane is hard-EXCLUDED instead of haircut (test_limit_gate.sh owns that contract).
-_advise_real_limits="$(declare -f _session_limits)"
-_session_limits() { printf 'claude5h=60 codexwk=70\n'; }
-_adv_on="$(cmd_advise "refactor the auth module" 2>/dev/null)"
-_adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/null)"
-[ -n "$_advise_real_limits" ] && eval "$_advise_real_limits"   # restore real limits reader
-grep -qi 'conservation:' <<< "$_adv_on" && ok "advise surfaces the conservation line when a lane is past the line" || bad "advise did not surface conservation"
-grep -qi 'conservation:' <<< "$_adv_off" && bad "OSRC_ADVISE_CONSERVE=0 did not disable the haircut" || ok "OSRC_ADVISE_CONSERVE=0 disables conservation"
-jq -e 'has("conservation")' <<<"$json" >/dev/null && ok "conservation exposed in --json output" || bad "conservation missing from json"
-
 # === 15. Gemini-4 Neon reaches the advisor + benchmark-cache freshness. ===
 # agy now serves the Gemini-4 codenames; the gemini-neon table row must be scored like every other
 # candidate, its bench lookup must find the OpenRouter slug prefix (or be unscored),
@@ -244,10 +211,11 @@ ck "neon bench lookup score" "$(printf '%s' "$bl" | cut -f1)" 61.5
   && ok "a Gemini-4 family with no OR slug scores empty (unscored)" \
   || bad "unmapped neon-family id unexpectedly scored"
 
+printf '%s\n' gemini-4-neon-high > "$OSRC_HOME/agy-models.txt"
 # Fresh cache -> no stale line, benchmark_stale=false in JSON.
 out="$(cmd_advise "refactor the authentication module" 2>&1)"
 grep -q 'benchmark cache is' <<<"$out" && bad "fresh benchmark cache was called stale" || ok "fresh benchmark cache is not flagged stale"
-grep -q 'gemini-neon' <<<"$out" && ok "advise candidate list includes gemini-neon" || bad "advise does not score gemini-neon"
+grep -q 'gemini-4-neon-high' <<<"$out" && ok "advise candidate list includes gemini-neon" || bad "advise does not score gemini-neon"
 grep -q 'gemini-4-neon-high' <<<"$out" && ok "advise shows the resolved neon id" || bad "advise missing resolved neon id"
 json="$(cmd_advise --json "refactor the authentication module" 2>&1)"
 printf '%s' "$json" | jq -e '.benchmark_stale == false' >/dev/null 2>&1 \
@@ -270,7 +238,6 @@ printf '%s' "$json" | jq -e --arg a "$old_asof" '.benchmark_as_of == $a' >/dev/n
 # network), the cache is fresh again, and neither output mode mentions staleness.
 cp "$OSRC_BENCH_JSON" "$TMP/bench-stale.json"
 jq --arg a "$fresh_asof" '.meta.as_of=$a' "$TMP/bench-stale.json" > "$TMP/bench-fresh.json"
-: > "$TMP/refreshed.marker"
 refresh_benchmarks() { cp "$TMP/bench-fresh.json" "$OSRC_BENCH_JSON"; : > "$TMP/refreshed.marker"; return 0; }
 ( export OPENROUTER_API_KEY="sk-test-not-a-real-key"
   out="$(cmd_advise "refactor the authentication module" 2>&1)"

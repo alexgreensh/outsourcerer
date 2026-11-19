@@ -9,7 +9,7 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
 TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"; export HOME="$TMP"
 cleanup() { rm -rf "$TMP"; }; trap cleanup EXIT
-export OSRC_ADVISE_CONSERVE=0 OSRC_ADVISE_DYNAMIC_POOL=0 OSRC_HEARTBEAT_DISABLED=1
+export OSRC_ADVISE_CONSERVE=0 OSRC_ADVISE_DYNAMIC_POOL=1 OSRC_HEARTBEAT_DISABLED=1
 . "$SRC" >/dev/null 2>&1
 refresh_benchmarks() { return 1; }   # never touch the network
 have jq || { echo "SKIP: jq required for advise"; exit 0; }
@@ -60,20 +60,14 @@ w_fh="$(_variant_weight glm-5-3-flash-high high)"; w_h="$(_variant_weight glm-5-
 [ "$w_fh" -lt "$w_f" ] && ok "weight@high: flash-high ($w_fh) beats bare flash ($w_f) at the requested rung" || bad "weight@high: flash-high $w_fh vs flash $w_f"
 [ "$(_variant_weight glm-5-3-flash-low low)" -lt "$(_variant_weight glm-5-3-flash-high low)" ] && ok "weight@low: the low rung wins at --effort low" || bad "weight@low: rung distance not honored"
 
-# === end-to-end advise ===
-_adv="$(cmd_advise --effort high "$EDIT_TASK" 2>/dev/null)"
-grep -q '^   category: agentic' <<<"$_adv" && ok "advise: edit-run-verify -> category agentic" || bad "advise: category not agentic"
-grep -q 'scoring by: agentic_index' <<<"$_adv" && ok "advise: scored on agentic_index" || bad "advise: wrong score field"
-_pick="$(printf '%s' "$_adv" | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}')"
-case "$_pick" in kimi|kimi-k3|kimi-k2.7) bad "advise: kimi is #1 on the edit-run-verify task ($_pick)" ;; *) ok "advise: kimi is NOT #1 (pick: $_pick)" ;; esac
-ck "agentic score selects sol" "$_pick" sol
-_json="$(cmd_advise --json --effort max "$EDIT_TASK")"
-ck "max effort keeps the benchmark winner" "$(jq -r '.shortlist[0].alias' <<<"$_json")" sol
-ck "unmeasured variant has null score" "$(jq -r '.shortlist[]|select(.alias=="glm-5.3-high")|.score' <<<"$_json")" null
-_r="$(cmd_advise --json --effort high "$REASON_TASK")"
-ck "reasoning classification" "$(jq -r '.category' <<<"$_r")" reasoning
-ck "reasoning difficulty" "$(jq -r '.difficulty' <<<"$_r")" hard
-ck "reasoning uses raw intelligence" "$(jq -r '.shortlist[0].score' <<<"$_r")" 58.9
+# A cache from before engineering_index uses the legacy numeric agentic index.
+mkdir -p "$OSRC_HOME/catalogs"
+echo '["model-a"]' > "$OSRC_HOME/catalogs/dv.json"
+echo '{"data":[{"model_permaslug":"vendor/model-a","agentic_index":54,"pricing":{"prompt":"0.000001","completion":"0.000003"}}]}' > "$OSRC_BENCH_JSON"
+json="$(cmd_advise --json --effort high "$EDIT_TASK")"
+ck "legacy agentic score field" "$(jq -r '.score_field' <<<"$json")" agentic_index
+ck "legacy agentic winner" "$(jq -r '.recommendation.model' <<<"$json")" model-a
+ck "hard reasoning classification" "$(_task_difficulty "$REASON_TASK")" hard
 
 echo "== $pass passed, $fail failed =="
 [ "$fail" -eq 0 ]

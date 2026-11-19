@@ -1,52 +1,32 @@
 # Model advisory
 
 Run `outsourcerer.sh advise [--json] [--refresh] [--effort LEVEL] "task"`.
-Coding tasks use the OpenRouter coding index. Multi-step tool use uses the agentic index.
-Reasoning, creative and simple tasks use the intelligence index.
 
-The recommendation and fallback shortlist use the same ranking. Each score comes from
-the cached benchmark for that model and category. Within `OSRC_ADVISE_TIE` points
-(default 1.0) of the best remaining score, lane headroom and lower input cost can
-break the tie. A lighter measured Devin sibling can break a tie at the same cost. Set the window to 0 for strict score order. Thresholds describe the
-result. Effort sets the requested execution effort, including max.
+Code and tool-use tasks use Artificial Analysis engineering scores. Older caches can
+supply the corresponding coding or agentic index. Other tasks use intelligence.
+A single OpenRouter intelligence benchmark refresh supplies all indices.
 
-The shortlist includes configured aliases and measured models from cached catalogs.
-Configured models missing the requested score appear last, marked **unscored**.
-JSON reports their score as null. Catalog-only entries missing that score are
-counted in `unscored_catalog_count`. If no candidate has a measurement the reason says so.
+The bar is the nearest-rank 25th percentile for light tasks, 50th for normal tasks,
+and 90th for hard or maximum-effort tasks. Each measured model counts once across
+eligible lanes. Among qualifying models, the highest score per dollar wins.
+Prices are dollars per million tokens, assuming equal input and output volumes.
+Subscription models use the same list price as other models because usage consumes
+plan limits. Cash dispatch retains its consent check.
 
-Excluded models and lanes over their fresh usage limit are skipped. Selecting a paid
-model preserves the normal dispatch consent checks. A cache older than seven days
-is refreshed when an OpenRouter key is available, as is a cache missing the requested
-index entirely. Coding and agentic refreshes use separate cache files. Use
-`--refresh` to request an update.
+Candidates come from CLI catalogs, the OpenRouter models cache and models.local.
+The shortlist includes missing measurements and prices so coverage can be audited.
 
-Set `OSRC_ADVISE_DYNAMIC_POOL=0` to use only the configured table. An explicit
-`OSRC_ADVISE_DYNAMIC_MAX` caps OpenRouter discovery, measured models first.
-The default includes the whole catalog. Native discovery reads the agy model list,
-the Codex model cache, and Devin catalog variants. It does not launch a model.
+In JSON, `candidates` contains every eligible catalog row and the missing-source
+details. `shortlist` contains only measured, priced rows that clear the bar, in
+dispatch order. With no qualifying row, `recommendation` is null. A published
+zero-price OpenRouter endpoint has unlimited value per dollar. Missing rates
+stay unknown. For equal score and value on the same release, the router prefers
+a plan lane, then OpenRouter, then an unknown-cost lane. Set
+`OSRC_ADVISE_ROUTER=0` to retain discovery order for these ties.
 
-A coding recommendation reads
-`picked X: highest coding score (78.8) among models you can run now`.
-JSON includes the selected benchmark field, shortlist, coverage, stale-cache flag,
-and the reason for skipping a model or lane. A measured zero counts as a score.
-
-Use `suggest` to find inexpensive options, `estimate` for a cost quote, and
-`models` to inspect the Devin catalog.
-
-## Task classification and effort
-
-The classifier counts distinct keyword matches. A prompt with a code signal and at
-least two agentic signals uses the agentic index. For example, “fix the bug, run the
-test suite, verify the fix” describes an edit-and-test workflow. Otherwise the most
-matches win. A prompt with no matches is classified as simple.
-
-The default threshold is 60 for coding, 35 for agentic tasks, 45 for reasoning or
-creative work, and 0 for simple tasks. The shortlist's `meets` field reports whether a
-measured score clears that threshold. Even below threshold, the best measured
-candidate is eligible. Hard tasks default to high effort and other tasks to medium.
-
-Set `OSRC_ADVISE_CONSERVE=0` to disable the headroom tiebreaker or
-`OSRC_ADVISE_VARIANT_PREF=0` to disable lighter-sibling preference. When a model
-runs on several lanes, the existing lane router can select a cheaper eligible lane
-for the same model. `OSRC_ADVISE_ROUTER=0` keeps the ranked lane.
+Discovery reads cached CLI inventories. `OSRC_ADVISE_DYNAMIC_POOL=0` limits
+discovery to models.local. `OSRC_ADVISE_DYNAMIC_MAX` caps OpenRouter discovery,
+highest measured scores first. Explicit refresh updates the benchmark cache.
+Without that flag, a stale cache or missing index triggers a refresh when a key
+is available. Benchmark record prices take precedence, with OpenRouter's model
+catalog supplying missing prices and the exact rate for free endpoints.

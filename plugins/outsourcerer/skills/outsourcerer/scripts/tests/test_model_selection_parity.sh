@@ -27,11 +27,12 @@ ck "Kimi id remains stable on Droid" "$(_lane_model_for droid kimi-k3)" "kimi-k3
 ck "Kimi id remains stable on Warp" "$(_lane_model_for warp kimi-k3)" "kimi-k3"
 ck "Kimi has a Devin sibling" "$(_devin_model_for kimi)" "kimi-k3"
 
-printf '%s\n' '{"data":[{"model_permaslug":"openai/gpt-5.6-sol","coding_index":77,"intelligence_index":59,"agentic_index":54}]}' > "$OSRC_BENCH_JSON"
+echo 'model-a|model-a|dv|mid' > "$OSRC_HOME/models.local"
+printf '%s\n' '{"data":[{"model_permaslug":"vendor/model-a","pricing":{"prompt":".000001","completion":".000002"},"coding_index":77,"intelligence_index":59,"agentic_index":54}]}' > "$OSRC_BENCH_JSON"
 for effort in high max; do
   json="$(cmd_advise --json --effort "$effort" "refactor a module")"
   ck "advise records selection effort" "$(jq -r '.effort' <<<"$json")" "$effort"
-  ck "benchmark winner at $effort effort" "$(jq -r '.recommendation.model' <<<"$json")" gpt-5.6-sol
+  ck "benchmark winner at $effort effort" "$(jq -r '.recommendation.model' <<<"$json")" model-a
 done
 
 EFFORT=high

@@ -50,13 +50,13 @@ case "$lanes" in *or*dv*|*dv*or*) ok "lanes: z-ai/turbo-9 found on both or and d
 # force it to win, and assert advise runs it on dv (free), not or (paid). Same model, cheaper lane.
 jq -n '{data:[{model_permaslug:"z-ai/turbo-9",intelligence_index:97,coding_index:97,agentic_index:97},{model_permaslug:"z-ai/glm-5.2",intelligence_index:51.1}]}' > "$OSRC_BENCH_JSON"
 # Isolate the router: rank the OR row alone while both lanes remain in the routing catalog.
-OSRC_ADVISE_DYNAMIC_POOL=0
-OSRC_MODEL_TABLE="turbo-9|z-ai/turbo-9|or|frontier"
+OSRC_ADVISE_DYNAMIC_POOL=1
+echo "turbo-9|z-ai/turbo-9|or|frontier" > "$OSRC_HOME/models.local"
 json="$(cmd_advise --json --effort max "refactor the auth module" 2>/dev/null)"
 rec_model="$(printf '%s' "$json" | jq -r '.recommendation.model')"
 rec_lane="$(printf '%s' "$json" | jq -r '.recommendation.lane')"
 rec_basis="$(printf '%s' "$json" | jq -r '.recommendation.cost_basis // "null"')"
-[ "$rec_model" = "z-ai/turbo-9" ] && ok "router: top model wins ($rec_model)" || bad "router: winner was '$rec_model' (want z-ai/turbo-9)"
+[ "$rec_model" = "turbo-9" ] && ok "router: top model wins ($rec_model)" || bad "router: winner was '$rec_model' (want z-ai/turbo-9)"
 [ "$rec_lane" = "dv" ] && ok "router: winning model routed to the FREE dv lane (not paid or)" || bad "router: lane was '$rec_lane' (want dv)"
 ck "fallback shortlist starts on the recommended lane" "$(jq -r '.shortlist[0].lane' <<<"$json")" "$rec_lane"
 case "$rec_basis" in plan|free) ok "router: cost_basis reflects the free/plan lane ($rec_basis)" ;; *) bad "router: cost_basis '$rec_basis' (want plan/free)" ;; esac
