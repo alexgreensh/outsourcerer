@@ -90,8 +90,8 @@ jobs:
             k=$((k + 1)); [ $(( k % 3 )) -eq ${{ matrix.shard }} ] || continue
             echo "::group::$s"
             start=$(date +%s)
-            # A hung suite fails after 5 minutes instead of eating the job's whole budget.
-            if timeout 300 bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi
+            # A hung suite fails after 15 minutes (opencode_lane alone takes ~9 here), not the whole job budget.
+            if timeout 900 bash "$T/$s.sh"; then r=ok; else r=FAILED; failed="$failed $s"; fi
             echo "::endgroup::"
             echo "$s: $r in $(( $(date +%s) - start ))s"
           done
