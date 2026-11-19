@@ -177,8 +177,10 @@ num_rep="MENU numbered
 SEL 1 Yes
 OPT 2 Yes, and don't ask again for this command
 OPT 3 No, and tell Claude what to do differently"
-[ "$(_osrc_menu_resolve "$num_rep" yes)" = 1 ] && [ "$(_osrc_menu_resolve "$num_rep" no)" = 3 ] \
-  && ok || bad "yes/no on numbered report: yes='$(_osrc_menu_resolve "$num_rep" yes)' no='$(_osrc_menu_resolve "$num_rep" no)'"
+# Two Yes rows: "yes" stays ambiguous so an approval always names its row; "no" is still one row.
+err="$(_osrc_menu_resolve "$num_rep" yes 2>&1)"; rc=$?
+[ "$rc" = 1 ] && case "$err" in *ambiguous*) true ;; *) false ;; esac && [ "$(_osrc_menu_resolve "$num_rep" no)" = 3 ] \
+  && ok || bad "yes/no on numbered report: yes rc=$rc err=$err no='$(_osrc_menu_resolve "$num_rep" no)'"
 no_yes_rep='MENU select
 SEL 1 Deny
 OPT 2 Approve once'

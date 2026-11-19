@@ -80,10 +80,12 @@ _osrc_menu_resolve() { # <report> <selector>
       case "$line" in "SEL "*|"OPT "*) ;; *) continue ;; esac
       idx="${line#* }"; lab="${idx#* }"; idx="${idx%% *}"
       case "$(printf '%s' "$lab" | tr '[:upper:]' '[:lower:]')" in "$want"*) ;; *) continue ;; esac
-      _osrc_menu_risky "$lab" && continue   # "yes" never means "yes, and don't ask again"
-      hits=$((hits + 1)); hit="$idx"
+      hits=$((hits + 1)); hit="$idx"; names="$names [$idx] $lab;"
     done <<<"$rep"
-    [ "$hits" -eq 1 ] || { echo "no single option starts with '$want'; answer with the option index instead" >&2; return 1; }
+    # Several Yes rows (a permission prompt: Yes / Yes, allow... / Yes, and auto mode) stay ambiguous,
+    # so approving a destructive command always takes an explicit index.
+    [ "$hits" -ge 1 ] || { echo "no option starts with '$want'; answer with the option index instead" >&2; return 1; }
+    [ "$hits" -eq 1 ] || { echo "'$want' is ambiguous, it matches:$names answer with the option index instead" >&2; return 1; }
     printf '%s' "$hit"; return 0
   fi
   case "$sel" in *[!0-9]*) ;; *)
