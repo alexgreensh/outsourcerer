@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
-# test_devin_edit_note.sh — a devin `edit` (accept-edits) prompt tells the delegate up front that a
-# command needing confirmation ends the run, so it finishes its edits and hands verification back.
-#
-# Why: devin -p in accept-edits refuses any exec it wants confirmed and ends the session (3000.11
-# prints "rejected a tool call that requires confirmation" and exits 0). In practice that is the
-# delegate's own test/build step after its edits, so the job stops right where it would verify.
+# Verify the edit prompt permits scoped checks and preserves the task's ledger classification.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -33,6 +28,7 @@ ok()  { echo "PASS: $1"; pass=$((pass + 1)); }
 bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
 
 export PATH="$FAKE_ROOT/bin:$PATH" HOME="$FAKE_ROOT" OSRC_HOME="$FAKE_ROOT/osrc" OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0
+unset OSRC_STREAM OSRC_RUN_ID OSRC_TASK_CLASS
 
 # Each dispatch runs in a fresh shell with the script sourced (OSRC_SOURCED=1 skips main).
 prompt_for() { # <perm> [env...]
@@ -55,22 +51,18 @@ ledger_class_for() { # <perm> <task>
 p="$(prompt_for accept-edits)"
 grep -q 'fix the parser' <<<"$p" \
   && ok "edit prompt still carries the task" || bad "edit prompt lost the task: $p"
-grep -q 'refused and ends the run' <<<"$p" \
-  && ok "edit prompt warns that a confirmation-needing command ends the run" \
-  || bad "edit prompt has no confirmation note"
-grep -q 'end your reply with the exact verification commands' <<<"$p" \
-  && ok "edit prompt hands verification back to the orchestrator" \
-  || bad "edit prompt does not ask for the verification commands"
+grep -q 'run the task.*own unit tests and requested --check' <<<"$p" \
+  && ok "edit prompt asks for task-scoped verification" || bad "edit prompt lost verification"
 
 p="$(prompt_for auto)"
 grep -q 'fix the parser' <<<"$p" && ok "read-only (auto) prompt still dispatches the task" || bad "read-only (auto) prompt was not captured"
-grep -q 'refused and ends the run' <<<"$p" \
+grep -q 'Finish your edits' <<<"$p" \
   && bad "read-only (auto) prompt got the edit note" \
   || ok "read-only (auto) prompt is unchanged"
 
 p="$(prompt_for accept-edits OSRC_DEVIN_EDIT_NOTE=0)"
 grep -q 'fix the parser' <<<"$p" || bad "opt-out edit prompt was not captured"
-grep -q 'refused and ends the run' <<<"$p" \
+grep -q 'Finish your edits' <<<"$p" \
   && bad "OSRC_DEVIN_EDIT_NOTE=0 did not remove the note" \
   || ok "OSRC_DEVIN_EDIT_NOTE=0 leaves the edit prompt untouched"
 
@@ -89,7 +81,7 @@ case "$cl" in
   *) bad "ledger: the edit note skewed task_class ($cl)" ;;
 esac
 p="$(cat "$FAKE_ROOT/prompt.class" 2>/dev/null)"
-grep -q 'say hi' <<<"$p" && grep -q 'refused and ends the run' <<<"$p" \
+grep -q 'say hi' <<<"$p" && grep -q 'Finish your edits' <<<"$p" \
   && ok "ledger: devin still received task + note together" || bad "ledger: captured prompt lost the task or the note"
 
 echo

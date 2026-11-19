@@ -577,5 +577,6 @@ _osrc_heavy_prompt() {
 TESTING RULE: run your own unit tests only, one at a time, niced (nice -n 19). Full/heavy suites
 (conformance, builds, installs, benchmarks) run in the cloud — do NOT run them on this machine;
 if the task genuinely needs one, say so in your result instead of running it.
+If the sandbox refuses nice, run the unit test at normal priority. Retry only if the test never started.
 OSRCHEAVY
 }

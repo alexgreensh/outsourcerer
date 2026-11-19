@@ -327,10 +327,11 @@ check "ship task in a plan without a repo fails closed" \
 FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"; printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/droid"; chmod +x "$FAKEBIN/droid"
 (cd "$REPO" && O plan new e2e --goal 'real launch' >/dev/null 2>&1)
 O task add 'real ship' --shape ship --check true --provider droid --plan e2e >/dev/null 2>&1
-jid="$(cd "$TMP" && PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O --spend-ok task start t1 --plan e2e 2>/dev/null | head -1)"
+jid="$(cd "$TMP" && CLAUDE_CODE_SESSION_ID=factory-e2e PATH="$FAKEBIN:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 O --spend-ok task start t1 --plan e2e 2>/dev/null | head -1)"
 i=0; while [ "$i" -lt 100 ]; do [ -f "$OSRC_HOME/jobs/$jid/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
 ej="$OSRC_HOME/plans/e2e/tasks/t1.json"
 if [ -n "$jid" ] && [ -f "$OSRC_HOME/jobs/$jid/meta.json" ]; then
+  if [ -f "$OSRC_HOME/owners/factory-e2e/$jid" ] && [ "$(jq -r .owner "$OSRC_HOME/jobs/$jid/meta.json")" = factory-e2e ]; then ok "factory job records its launching session"; else bad "factory job missing owner"; fi
   check "real bg launch: the job's worktree/branch/base match what the task recorded" \
     "[ \"\$(jq -r '[.worktree,.branch,.base_sha]|join(\"|\")' \"$OSRC_HOME/jobs/$jid/meta.json\")\" = \"\$(jq -r '[.worktree,.branch,.base_sha]|join(\"|\")' \"$ej\")\" ]"
   check "real bg launch: the task is running on that job" "[ \"\$(jq -r '.state + \"|\" + .job' \"$ej\")\" = \"running|$jid\" ]"
@@ -865,6 +866,15 @@ r3_adopted_verifier() (
   [ "$(cat "$OSRC_JOBS/$job/status")" = running ] && _task_get r3 "$id" | jq -e '.state=="verifying"' >/dev/null
 )
 check 'R3 S18 returning launcher preserves its adopted job after verification begins' r3_adopted_verifier
+
+owner_write_required() (
+  . "$LIB"
+  export CLAUDE_CODE_SESSION_ID=factory
+  mkdir -p "$OSRC_HOME/owners"
+  : > "$OSRC_HOME/owners/factory"
+  ! _owner_record example
+)
+check 'factory launch can detect a failed owner registration' owner_write_required
 
 echo "factory tasks: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

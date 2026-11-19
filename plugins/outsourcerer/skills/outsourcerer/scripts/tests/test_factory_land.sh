@@ -642,6 +642,16 @@ for state in held failed canceled todo; do
   grep -q -- '--plan other-plan' <<<"$out" && ok "S15: $state hint names the exact plan" || bad "$state hint omits plan ($out)"
 done
 
+# A sandboxed lane leaves finished work uncommitted; the harness commits it, and leaves a clean tree alone.
+HC="$TMP/hc"; git init -q "$HC" && git -C "$HC" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+echo work > "$HC/f.txt"
+( . "$HERE/../lib/harness-commit.sh"; _osrc_harness_commit "$HC" job1 ) \
+  && [ -z "$(git -C "$HC" status --porcelain)" ] && git -C "$HC" log -1 --format=%s | grep -q 'lane job1' \
+  && ok "harness commits a sandboxed lane's leftover work" || bad "harness commit: $(git -C "$HC" status --porcelain) $(git -C "$HC" log -1 --format=%s)"
+n0="$(git -C "$HC" rev-list --count HEAD)"
+( . "$HERE/../lib/harness-commit.sh"; _osrc_harness_commit "$HC" job1 ) && bad "harness committed a clean tree" \
+  || { [ "$(git -C "$HC" rev-list --count HEAD)" = "$n0" ] && ok "a clean worktree gets no harness commit"; }
+
 echo
 echo "factory land: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

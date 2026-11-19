@@ -494,7 +494,7 @@ _task_brief() {
     printf '## Done when\n\n'
     if [ "$shape" = ship ]; then
       printf -- '- You are in an isolated git worktree made for this task, on its own branch. Commit your finished work on that branch.\n'
-      printf -- '- Leave no uncommitted changes to tracked files. Do not push, merge, rebase onto other branches, or open a pull request.\n'
+      printf -- '- Leave no uncommitted changes to tracked files. Do not push, merge, rebase onto other branches, or open a pull request.\n'; printf -- '- If your sandbox denies the commit (index.lock, objects or refs not writable), that is not a blocker: leave the changes in the worktree, finish normally, and say so; Outsourcerer commits them for you.\n'
       printf -- '- Never commit secrets (keys, tokens, .env files). A secret in the diff blocks the task.\n'
     else
       printf -- '- Do not change any files. Your final message IS the deliverable.\n'

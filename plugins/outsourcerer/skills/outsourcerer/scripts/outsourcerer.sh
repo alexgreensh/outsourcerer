@@ -2649,15 +2649,10 @@ delegate() {
   local _ledger_task="${REST[*]}"
   _devin_with_prepare   # per-dispatch skill sync for this lane (dies loud on an unhonorable grant)
   [ -n "$DEVIN_WITH_PRE" ] && prompt="$DEVIN_WITH_PRE$prompt"
-  # accept-edits (the `edit` verb) auto-approves file edits, and devin still runs simple read-only
-  # commands, but any exec it wants confirmed is refused in -p mode and the run ends right there
-  # (devin 3000.11: warning on stderr, exit 0). That usually lands on the delegate's own test/build
-  # step after its edits, so say it up front: edits first, and hand verification back instead of
-  # attempting it. OSRC_DEVIN_EDIT_NOTE=0 leaves the prompt untouched.
   if [ "$perm" = "accept-edits" ] && [ "${OSRC_DEVIN_EDIT_NOTE:-1}" != "0" ]; then
     prompt="$prompt
 
-Note on this run: it is non-interactive and only file edits are auto-approved. Simple read-only shell commands (cat, ls, grep) run, but any command that needs confirmation (test runners, builds, package managers, deletes, chained cd ... && commands) is refused and ends the run immediately, skipping every remaining step. Make all of your file edits first. Do not run tests or builds; end your reply with the exact verification commands you would run."
+Finish your edits, then run the task's own unit tests and requested --check within the task's testing rules. Report the result or the exact command blocked by permissions."
   fi
   _utf8_guard_prompt prompt   # sanitize invalid UTF-8 in the effort-wrapped prompt before it reaches the devin CLI
   # Devin has no native reasoning-effort knob. If --effort was given, surface it as advisory
@@ -11188,7 +11183,6 @@ _bg_launch() {
     tries=$((tries+1))
     [ "$tries" -ge 8 ] && { echo "bg: could not allocate a unique job dir under $OSRC_JOBS" >&2; return 1; }
   done
-  _owner_record "$id"
   chmod 700 "$jd" 2>/dev/null
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$jd" job "$id" "$(git rev-parse --show-toplevel 2>/dev/null)" || true
   # L7 add-on: spend consent scoped to THIS job only, BOUND to the lane|model pairs the
@@ -11216,9 +11210,7 @@ _bg_launch() {
   cmd_gc --auto >&2 || true
   # If we cannot even record the initial status, the job never really started -- clean up and
   # fail loudly rather than emitting an id for a phantom job (which makes fanout's waiter hang forever).
-  # Verify the supervisor binary is actually runnable BEFORE we claim the job
-  # and background it -- otherwise nohup of a missing/non-exec SCRIPT_PATH fails asynchronously while we
-  # already printed an id and wrote status=running, leaving a phantom job the fanout waiter hangs on.
+  # Check before detaching so a missing supervisor cannot leave a phantom job.
   if [ ! -x "$SCRIPT_PATH" ] && ! command -v "$SCRIPT_PATH" >/dev/null 2>&1; then
     rm -rf "$jd" 2>/dev/null; echo "bg: supervisor not executable: $SCRIPT_PATH (nothing started)" >&2; return 1
   fi
@@ -11232,6 +11224,7 @@ _bg_launch() {
   if ! echo launching > "$jd/status" 2>/dev/null; then
     rm -rf "$jd" 2>/dev/null; echo "bg: cannot write job status under $jd (filesystem full/unwritable?)" >&2; return 1
   fi
+  _owner_record "$id" || { echo "bg: cannot register owner for $id" >&2; rm -rf "$jd"; return 1; }
   _osrc_pin_internal_args
   OSRC_PROVIDER_EXPLICIT="${PROVIDER_EXPLICIT:-0}" OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" OSRC_JOB_TOKEN="$OSRC_JOB_TOKEN" nohup "$SCRIPT_PATH" ${_OSRC_PIN_ARGS[@]+"${_OSRC_PIN_ARGS[@]}"} __runjob "$id" "$PROVIDER" "$@" >/dev/null 2>&1 &
   # Verified supervision arm (SPEC heartbeat-liveness A+B): nothing claims "armed" over a dead
@@ -11946,8 +11939,8 @@ run_job() {
     # lane cards and `status` can render "cap 40% weekly, now 31%" without re-deriving them.
     local _jcaps; _jcaps="$(_osrc_cap_specs_for "$lane" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
     jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
-       --arg cwd "$PWD" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" --arg caps "$_jcaps" \
-       '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st}
+       --arg cwd "$PWD" --arg owner "$(_owner_sid)" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" --arg caps "$_jcaps" \
+       '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st} + (if $owner=="" then {} else {owner:$owner} end)
         + (if $lane=="" then {} else {lane:$lane} end)
         + (if $caps=="" then {} else {caps:$caps} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
@@ -13880,7 +13873,7 @@ delegate_cxnative() {
   local sflag posture
   case "$tier" in
     auto)                    sflag=(--sandbox read-only);       posture="READ-ONLY sandbox" ;;
-    accept-edits|autonomous) sflag=(--sandbox workspace-write); posture="WORKSPACE-WRITE sandbox" ;;
+    accept-edits|autonomous) sflag=(--sandbox workspace-write); _codex_worktree_index_args; posture="WORKSPACE-WRITE sandbox" ;;
     dangerous)               sflag=(--dangerously-bypass-approvals-and-sandbox); posture="DANGER (no sandbox/approvals)" ;;
     *) die "bad tier: $tier" ;;
   esac

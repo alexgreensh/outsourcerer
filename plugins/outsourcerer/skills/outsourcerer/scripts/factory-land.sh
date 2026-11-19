@@ -113,7 +113,7 @@ _factory_gate_ship() {
   if [ -z "$base" ] || ! git -C "$wt" rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
     _FG_REASON="no usable base commit is on record, so new commits can't be counted"; return 1
   fi
-  _FG_BASE="$(git -C "$wt" rev-parse "$base^{commit}")"
+  _FG_BASE="$(git -C "$wt" rev-parse "$base^{commit}")"; [ "$_FG_HEAD" != "$_FG_BASE" ] || ! type _osrc_harness_commit >/dev/null 2>&1 || ! _osrc_harness_commit "$wt" "$job" || _FG_HEAD="$(git -C "$wt" rev-parse HEAD 2>/dev/null)"
   _FG_AHEAD="$(git -C "$wt" rev-list --count "$_FG_BASE..$_FG_HEAD" 2>/dev/null)"; _FG_AHEAD="${_FG_AHEAD:-0}"
   if [ "$_FG_AHEAD" -lt 1 ] 2>/dev/null; then
     _FG_REASON="the worker made no commits beyond the base ${_FG_BASE:0:12}; there is nothing to land"; return 1

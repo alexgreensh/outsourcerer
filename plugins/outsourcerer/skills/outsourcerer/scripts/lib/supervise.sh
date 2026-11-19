@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # lib/supervise.sh: ONE blocking waiter for everything an orchestrator owns.
 #
-#   outsourcerer.sh supervise [--session SID] [--watch DIR|FILE ...] [id ...]
+#   outsourcerer.sh supervise [--session SID | --all] [--watch DIR|FILE ...] [id ...]
 #   outsourcerer.sh supervise --unwatch DIR|FILE
 #
 # Blocks until something the current Claude Code session owns ($OSRC_HOME/owners/<sid>/, or the
@@ -426,7 +426,7 @@ _sv_observe_all() { # [src]
 # L2's remote lanes print EVENT/NEXT pairs; distinguish done events for new branch heads.
 _sv_remote_poll() { # <src>
   type osrc_remote_events >/dev/null 2>&1 || return 0
-  local line kind="" tgt detail next key now _e _ts head; now="$(_sv_now)"
+  local owner marker line kind="" tgt detail next key now _e _ts head; now="$(_sv_now)"
   osrc_remote_events 2>/dev/null | while IFS= read -r line; do
     case "$line" in
       EVENT\ *) read -r _e kind tgt _ts detail <<< "$line"; next="" ;;
@@ -440,7 +440,14 @@ _sv_remote_poll() { # <src>
         _sv_target_lock "remote.$tgt" || { kind=""; continue; }   # another supervise is logging it
         _sv_state_read "remote.$tgt"
         if [ "$SVS_LK" != "$key" ] || [ $(( now - SVS_LT )) -ge "$(_sv_remind_secs "$kind")" ]; then
-          _sv_append "$kind" "$tgt" "$detail" "$next" "$1" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
+          owner=""
+          case "$tgt" in */*|.|..) ;; *)
+            for marker in "$OSRC_HOME"/owners/*/"$tgt"; do
+              [ -f "$marker" ] || continue
+              owner="${marker%/*}"; owner="${owner##*/}"; break
+            done ;;
+          esac
+          _sv_append "$kind" "$tgt" "$detail" "$next" "$1" "$owner" && { SVS_LK="$key"; SVS_LT="$now"; _sv_state_write "remote.$tgt"; }
         fi
         _sv_target_unlock "remote.$tgt"
         kind="" ;;
@@ -454,8 +461,8 @@ _sv_remote_poll() { # <src>
 _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   [ -f "$1" ] || return 0
   { if [ "$3" = - ]; then tail -c +"$(( $2 + 1 ))" "$1"; else tail -c +"$(( $2 + 1 ))" "$1" | head -c "$(( $3 - $2 ))"; fi; } 2>/dev/null \
-  | jq -r --argjson set "$4" --arg owner "$5" --argjson since "$(( $(_sv_now) - 86400 ))" '
-    select(type=="object" and .ts >= $since and (($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
+  | jq -r --argjson set "$4" --arg all "${_sv_all:-0}" --arg owner "$5" --argjson since "$(( $(_sv_now) - 86400 ))" '
+    select(type=="object" and .ts >= $since and ($all == "1" or ($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
     | ({approval:1,"approval-not-landed":1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
       [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
@@ -541,13 +548,14 @@ _sv_fail() { # <reason> <rearm>
 }
 
 cmd_supervise() {
-  local sid="" ids="" once=0 rearm rc watches="" unwatch="" w wid auto="" kind
+  local _sv_all=0 scope="" sid="" ids="" once=0 rearm rc watches="" unwatch="" w wid auto="" kind
   # A signal before the worker starts must still print the failure line, never exit silently.
   trap '_sv_fail "killed by a signal before it armed" "$SCRIPT_PATH supervise"; exit 2' TERM INT HUP
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --session) sid="$(_owner_sid "${2:-}")"; shift 2 ;;
       --session=*) sid="$(_owner_sid "${1#--session=}")"; shift ;;
+      --all) _sv_all=1; shift ;;
       --once) once=1; shift ;;
       --auto|--auto=*)
         if [ "$1" = --auto ]; then [ "$#" -ge 2 ] || { _sv_fail "--auto needs a value" "$SCRIPT_PATH supervise"; return 2; }; auto="$2"; shift 2; else auto="${1#--auto=}"; shift; fi
@@ -565,7 +573,13 @@ $w" ;;
       *) case "$1" in */*|.|..) ;; *) ids="$ids $1" ;; esac; shift ;;
     esac
   done
-  [ -n "$sid" ] || sid="$(_owner_sid)"
+  if [ "$_sv_all" = 1 ]; then
+    if [ -n "$sid$ids$watches$unwatch" ]; then _sv_fail "--all requires a separate watcher" "$SCRIPT_PATH supervise --all"; return 2; fi
+    scope=" --all"
+  else
+    [ -n "$sid" ] || sid="$(_owner_sid)"
+    scope="${sid:+ --session $sid}"
+  fi
   if [ -n "$unwatch" ]; then
     wid="$(_sv_watch_rm "$unwatch" "$sid")"; printf '[outsourcerer] supervise: stopped watching %s (%s)\n' "$unwatch" "$wid" >&2; return 0
   fi
@@ -580,8 +594,8 @@ $w" ;;
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
   done <<< "$watches"
-  rearm="$SCRIPT_PATH supervise${sid:+ --session $sid}${auto:+ --auto $auto}${ids}"
-  if [ -z "$sid" ] && [ -z "$ids" ]; then
+  rearm="$SCRIPT_PATH supervise$scope${auto:+ --auto $auto}${ids}"
+  if [ "$_sv_all" = 0 ] && [ -z "$sid" ] && [ -z "$ids" ]; then
     _sv_fail "no Claude Code session id (CLAUDE_CODE_SESSION_ID unset) and no target ids" "$SCRIPT_PATH supervise --session <your-session-id>"
     return 2
   fi
@@ -610,8 +624,9 @@ $w" ;;
 _sv_main() { # <sid> <once> [ids...]
   local sid="$1" once="$2"; shift 2
   local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list stopped_list=""
-  local gen cgen older="" real f armed ledger drc newer head
+  local scope="${scope:-${sid:+ --session $sid}}" fowner gen cgen older="" real f armed ledger drc newer head
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
+  [ "${_sv_all:-0}" = 0 ] || key="@all"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
   ledger="$dir/delivered"   # per orchestrator key: sid-less explicit-id runs get their own
   armed="$dir/armed.$$"; _SV_HELD=""; _SV_MAIN_DIR="$dir"
@@ -638,10 +653,12 @@ _sv_main() { # <sid> <once> [ids...]
     kill -0 "$$" 2>/dev/null || exit 12
     osrc_watcher_alive "$dir" "$now"   # liveness stamp for osrc_watcher_gap (lib/stall.sh)
     if ! _sv_tick "$dir" "$now"; then
-      _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise${sid:+ --session $sid}${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
+      _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise$scope${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
       exit 11
     fi
-    if [ -n "$explicit" ]; then targets="$explicit"
+    if [ "${_sv_all:-0}" = 1 ]; then
+      targets="$(for fowner in "$OSRC_HOME"/owners/*/*; do [ ! -f "$fowner" ] || basename "$fowner"; done | sort -u)"
+    elif [ -n "$explicit" ]; then targets="$explicit"
     else targets="$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null | tr '\n' ' ')"; fi
     out=0; pend=0; idle_list=""; stopped_list=""
     for id in $targets; do
@@ -651,16 +668,13 @@ _sv_main() { # <sid> <once> [ids...]
       [ "$SV_K" = idle ] && idle_list="$idle_list $id"
       [ "$SV_STOPPED" = 1 ] && stopped_list="$stopped_list $id"   # ended by its owner: settled, not a crash
       [ -n "$SV_WT" ] && seen="$seen $SV_WT"   # hand-in files are their own event targets
-      if [ "$SV_DROP" = 1 ] && [ -z "$explicit" ]; then
+      if [ "${_sv_all:-0}" = 0 ] && [ "$SV_DROP" = 1 ] && [ -z "$explicit" ]; then
         # keep the target in this batch's filter, drop it from the registry
         rm -f "$OSRC_HOME/owners/$sid/$id" 2>/dev/null
         type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id"   # listed as finished (MC3)
       fi
     done
     _sv_remote_poll supervise
-    if type osrc_remote_events >/dev/null 2>&1 && [ -d "$OSRC_HOME/remote" ]; then
-      for id in $(ls -1 "$OSRC_HOME/remote" 2>/dev/null | sed -n 's/\.json$//p'); do targets="$targets $id"; done
-    fi
     seen="$(printf '%s\n' $seen $targets | sort -u | tr '\n' ' ')"   # a target dropped mid-settle still has its event in this batch
     tj="$(printf '%s\n' $seen supervise | jq -R . | jq -cs .)"
     gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"
@@ -682,7 +696,7 @@ _sv_main() { # <sid> <once> [ids...]
         _SV_DIR="$dir" _sv_deliver "$ledger" "$new" batch; drc=$?
         case "$drc" in
           0) _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-             printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
+             printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
              exit 0 ;;
           1) first=""; older=""; cursor="$size"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor" ;;   # all delivered elsewhere
           3) _sv_superseded_exit "$(_sv_superseded "$dir")" ;;
@@ -703,7 +717,7 @@ _sv_main() { # <sid> <once> [ids...]
     if [ "$maxs" -gt 0 ] && [ $(( now - t0 )) -ge "$maxs" ]; then
       _sv_approval_summary "$new"
       printf 'EVENT stalled supervise %s OSRC_SUPERVISE_MAX_SECS=%s reached with live work and no event\n' "$now" "$maxs"
-      printf 'NEXT %s supervise%s%s%s\n' "$SCRIPT_PATH" "${sid:+ --session $sid}" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}"
+      printf 'NEXT %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}"
       exit 0
     fi
     if [ -n "$first" ]; then

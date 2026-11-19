@@ -34,6 +34,13 @@ trap cleanup EXIT
 type _codex_win_sandbox_read >/dev/null 2>&1 || { echo "FAIL: _codex_win_sandbox_read not defined"; exit 1; }
 
 CH="$TMP/codexhome"; mkdir -p "$CH"; export CODEX_HOME="$CH"
+repo="$TMP/managed repo"
+wt="$repo/.outsourcerer/worktrees/job"
+git init -q "$repo" && git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm seed --allow-empty &&
+  git -C "$repo" worktree add -qb outsourcerer/job "$wt" || exit 1
+args_for() (cd "$1" || exit 1; sflag=(); _codex_worktree_index_args; printf '%s\n' ${sflag[@]+"${sflag[@]}"};)
+eq "managed checkout grants only its private metadata directory" "$(args_for "$wt")" "$(printf '%s\n' --add-dir "$(git -C "$wt" rev-parse --absolute-git-dir)")"
+eq "main checkout receives no additional roots" "$(args_for "$repo")" ""
 cfg() { printf '%s' "$1" > "$CH/config.toml"; }
 read1() { _codex_win_sandbox_read | tr '\n' ' ' | sed 's/ $//'; }
 

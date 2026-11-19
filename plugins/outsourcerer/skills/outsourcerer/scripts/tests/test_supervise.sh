@@ -371,5 +371,16 @@ jq -n '{head:"aaaaaaa111111111111111111111111111111111"}' > "$OSRC_HOME/remote/r
 [ "$(jq -s 'map(select(.target == "rh" and .kind == "done")) | length' "$OSRC_HOME/lanes/events.jsonl")" = 2 ] \
   && ok "remote re-hand-in with identical detail and new full sha fires once" || no "remote re-hand-in lost or duplicated"
 
+fresh scope
+own G foreign
+mkdir -p "$OSRC_HOME/remote" "$OSRC_HOME/lanes" "$OSRC_HOME/supervise/@all"
+date +%s > "$OSRC_HOME/supervise/@all/tick.time"
+echo '{}' > "$OSRC_HOME/remote/foreign.json"
+jq -cn '{ts:(now|floor),kind:"done",target:"foreign",detail:"queued for review",next:"inspect"}' > "$OSRC_HOME/lanes/events.jsonl"
+out="$(CLAUDE_CODE_SESSION_ID=S sup --once)"
+[[ "$out" == *"EVENT done all "* && "$out" != *"EVENT done foreign "* ]] && ok "default session excludes foreign remote replay" || no "wrong session scope: [$out]"
+out="$(CLAUDE_CODE_SESSION_ID=S sup --all --once)"
+[[ "$out" == *"EVENT done foreign "* ]] && ok "all watcher replays foreign remote event" || no "all scope: [$out]"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
