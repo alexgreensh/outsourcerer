@@ -163,6 +163,36 @@ CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; _managed_menu_answer p N
 CAP="$FX/cc-permission-bash-rm.ansi"; : > "$TMP/akeys"; _managed_menu_answer p 3 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Down|send-keys -t p Down|send-keys -t p Enter|" ] && ok || bad "answer 3 by index: $(tr '\n' '|' < "$TMP/akeys")"
 unset -f menu_of
 
+# ---- 0.17.2 G2: yes/no pick the row STARTING with Yes/No, skipping risky rows ---------------------
+# Claude's folder-trust menu lists "No, exit" first, so `session answer 1` exited instead of
+# trusting. y/yes and n/no resolve by the Yes/No prefix wherever the row sits, and never land on an
+# always/don't-ask-again/bypass row.
+yesno_rep='MENU select
+SEL 1 No, exit
+OPT 2 Yes, I trust this folder'
+[ "$(_osrc_menu_resolve "$yesno_rep" yes)" = 2 ] && [ "$(_osrc_menu_resolve "$yesno_rep" y)" = 2 ] \
+  && [ "$(_osrc_menu_resolve "$yesno_rep" no)" = 1 ] && [ "$(_osrc_menu_resolve "$yesno_rep" n)" = 1 ] \
+  && ok || bad "yes/no on trust report: yes='$(_osrc_menu_resolve "$yesno_rep" yes)' no='$(_osrc_menu_resolve "$yesno_rep" no)'"
+num_rep="MENU numbered
+SEL 1 Yes
+OPT 2 Yes, and don't ask again for this command
+OPT 3 No, and tell Claude what to do differently"
+[ "$(_osrc_menu_resolve "$num_rep" yes)" = 1 ] && [ "$(_osrc_menu_resolve "$num_rep" no)" = 3 ] \
+  && ok || bad "yes/no on numbered report: yes='$(_osrc_menu_resolve "$num_rep" yes)' no='$(_osrc_menu_resolve "$num_rep" no)'"
+no_yes_rep='MENU select
+SEL 1 Deny
+OPT 2 Approve once'
+err="$(_osrc_menu_resolve "$no_yes_rep" yes 2>&1)"; rc=$?
+[ "$rc" = 1 ] && ok || bad "yes on a menu with no Yes row was not refused (rc=$rc err=$err)"
+# end-to-end on the real capture: answer yes -> Down + Enter onto "Yes, I trust this folder";
+# answer no -> Enter alone on the highlighted "No, exit"
+CAP="$FX/cc-trust-folder-menu.ansi"; : > "$TMP/akeys"
+_managed_menu_answer p yes 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Down|send-keys -t p Enter|" ] \
+  && ok || bad "answer yes on cc trust menu: $(tr '\n' '|' < "$TMP/akeys")"
+CAP="$FX/cc-trust-folder-menu.ansi"; : > "$TMP/akeys"
+_managed_menu_answer p no 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Enter|" ] \
+  && ok || bad "answer no on cc trust menu: $(tr '\n' '|' < "$TMP/akeys")"
+
 # ---- E6: two identical sends to one session are both admitted (each is its own obligation) ---------
 _obligation_append "send.x.1.a" e6sess typing_started "" >/dev/null 2>&1
 o1="send.e6sess.123.$(date +%s).1"; o2="send.e6sess.123.$(date +%s).2"
