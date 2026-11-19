@@ -339,6 +339,10 @@ cu6="$(_osrc_url_clean 'ssh://user:p@ss@host.example/a.git')"
 parsed="$( _cloudrun_repo_parse 'https://u:p@github.com/acme/widgets.git' )"
 grep -qE 'u:p@|widgets' <<<"$parsed" && ! grep -q 'u:p@' <<<"$parsed" \
   && ok "urlclean: repo_parse emits credential-free url+display" || bad "urlclean: parse leaked: $parsed"
+# owner/name must reach git as one github URL (2026-11-19: it was wrapped twice, .git.git).
+parsed="$( _cloudrun_repo_parse 'acme/widgets' )"
+fu="$(_cloudrun_fetch_url "$(cut -f1 <<<"$parsed")" "$(cut -f2 <<<"$parsed")")"
+[ "$fu" = "https://github.com/acme/widgets.git" ] && ok "owner/name fetch url is wrapped once" || bad "owner/name fetch url: '$fu'"
 out="$( bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _secret_scan "clone https://u:p@github.com/acme/widgets.git and run tests" t-url
@@ -527,6 +531,24 @@ link_out="$(OSRC_HOME="$OSRC_HOME" "$TMP/osrc-link" cloud where 'refactor the au
 link_out="$(OSRC_HOME="$OSRC_HOME" "$TMP/osrc-link" cloud ls 2>&1)"; lrc=$?
 grep -q 't-claude' <<<"$link_out" \
   && ok "loader: symlink cloud ls works" || bad "loader: symlink cloud ls failed (rc=$lrc)"
+
+# claude --cloud needs a terminal (2026-11-19: a nohup launch died at once yet printed "started").
+# A fake claude that refuses without a TTY, on a private tmux server so no real session is touched.
+CB="$TMP/cloudbin"; mkdir -p "$CB" "$TMP/croot"
+if command -v tmux >/dev/null 2>&1; then
+  printf '#!/bin/sh\nexec %s -L osrc-test-cloudrun-%s "$@"\n' "$(command -v tmux)" "$$" > "$CB/tmux"
+  printf '#!/bin/sh\n[ -t 1 ] || { echo "Error: --cloud requires an interactive terminal" >&2; exit 1; }\necho "Session: https://claude.ai/code/session_TESTREF01"\nsleep 3\n' > "$CB/claude"
+  chmod +x "$CB/tmux" "$CB/claude"
+  lo="$(PATH="$CB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=8 _cloudrun_launch claude /dev/null "brief" "$TMP/c1.launch.log" "$TMP/c1.pid" "$TMP/croot" main)"
+  grep -q 'url:https://claude.ai/code/session_TESTREF01' <<<"$lo" && ok "claude cloud runs in a terminal and its session link is read" || bad "claude cloud launch: $lo / $(cat "$TMP/c1.launch.log" 2>/dev/null)"
+  "$CB/tmux" kill-server 2>/dev/null
+else
+  ok "tmux absent: claude cloud terminal check skipped"
+fi
+printf '#!/bin/sh\necho "boom: no auth" >&2; exit 1\n' > "$CB/devin"; chmod +x "$CB/devin"
+lo="$(PATH="$CB:$PATH" OSRC_CLOUD_LAUNCH_WAIT=3 _cloudrun_launch devin /dev/null "brief" "$TMP/c2.launch.log" "$TMP/c2.pid" "$TMP/croot" main)"
+[ -z "$(sed -n 2p <<<"$lo")" ] && ! kill -0 "$(sed -n 1p <<<"$lo")" 2>/dev/null && ok "a launcher that dies leaves no session link (start then refuses)" || bad "dead launcher: $lo"
+grep -q 'session did not start' "$SCRIPT_DIR/../lib/cloudrun.sh" && ok "cloud start refuses to say started when the launcher died with no link" || bad "no dead-launch refusal in cloud start"
 
 echo
 echo "=== $pass passed, $fail failed ==="

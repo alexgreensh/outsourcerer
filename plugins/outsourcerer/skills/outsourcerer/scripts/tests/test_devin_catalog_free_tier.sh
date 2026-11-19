@@ -50,6 +50,8 @@ eq "capped default -> probes the Free model" "$(_devin_plan_probe_model glm-5-2)
 
 # --- offline fallback: with the catalog check off, the static list still recognizes swe-2 --------
 eq "offline: swe-2 free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2 && echo yes || echo no)" yes
+eq "offline: swe-2-flash free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash && echo yes || echo no)" yes
+eq "offline: swe-2-flash-high free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash-high && echo yes || echo no)" yes
 eq "offline: nova-9 NOT known (no static, no catalog)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model nova-9 && echo yes || echo no)" no
 
 # --- source cross-check: the classification actually consults the catalog ------------------------

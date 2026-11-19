@@ -85,7 +85,10 @@ _cloudrun_repo_match() {
 }
 
 # _cloudrun_fetch_url <transport> <url> -> URL git can ls-remote/clone.
+# The parser already hands back a full URL for owner/name; wrapping it again built
+# https://github.com/https://github.com/o/n.git.git (seen 2026-11-19), so only a bare owner/name is wrapped.
 _cloudrun_fetch_url() {
+  case "$2" in *://*|git@*) printf '%s' "$2"; return 0 ;; esac
   if [ "$1" = gh ]; then printf 'https://github.com/%s.git' "$2"; else printf '%s' "$2"; fi
 }
 
@@ -334,9 +337,25 @@ _cloudrun_launch() {
     codex)
       cmd=(codex cloud exec --env "$cxenv" --branch "$base" "$packtext") ;;
   esac
-  ( cd "$root" && exec nohup "${cmd[@]}" >"$log" 2>&1 ) &
-  printf '%s' "$!" > "$pidfile"
-  local pid="$!" i=0 max="${OSRC_CLOUD_LAUNCH_WAIT:-30}" ref=""
+  local pid=""
+  if [ "$v" = claude ] && have tmux; then
+    # `claude --cloud` refuses to run without a terminal ("--cloud requires an interactive terminal"),
+    # so a nohup launch died at once (2026-11-19). It runs in its own tmux pane instead; the pane is
+    # piped to the log, and the launcher waits for the pipe so no early line is lost.
+    local sess sh q; sess="osrc-cloud-$(basename "$log" .launch.log)"; sh="$log.sh"
+    q="$(printf '%q ' "${cmd[@]}")"
+    { printf 'i=0; while [ ! -f %q ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done\n' "$log.piped"
+      printf 'cd %q || exit 1\n%s\necho "OSRC_CLOUD_EXIT:$?"\n' "$root" "$q"; } > "$sh" || return 1
+    tmux new-session -d -s "$sess" "bash $(printf '%q' "$sh")" 2>/dev/null || return 1
+    tmux pipe-pane -o -t "$sess" "cat >> $(printf '%q' "$log")" 2>/dev/null
+    : > "$log.piped"
+    pid="$(tmux display-message -p -t "$sess" '#{pane_pid}' 2>/dev/null)"
+  else
+    ( cd "$root" && exec nohup "${cmd[@]}" >"$log" 2>&1 ) &
+    pid="$!"
+  fi
+  printf '%s' "$pid" > "$pidfile"
+  local i=0 max="${OSRC_CLOUD_LAUNCH_WAIT:-30}" ref=""
   case "$max" in ''|*[!0-9]*) max=30 ;; esac
   while [ "$i" -lt "$max" ]; do
     ref="$(_cloudrun_extract_ref "$log" 2>/dev/null)" && [ -n "$ref" ] && break
@@ -552,6 +571,11 @@ _cloudrun_start() {
   printf '>>> [cloud] launching %s session %s (spends: %s)\n' "$veh" "$id" "$(_cloudrun_vehicle_quota "$veh")" >&2
   launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model")"
   pid="$(printf '%s' "$launch_out" | sed -n '1p')"; ref="$(printf '%s' "$launch_out" | sed -n '2p')"
+  # No session link and the launcher already gone means the vehicle failed: say so, register nothing.
+  if [ -z "$ref" ] && { [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; }; then
+    die "cloud: the $veh session did not start; its last output:
+$(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
+  fi
   _cloudrun_register "$id" "$veh" "$branch" "$transport" "$url" "$repo" "$base" "$brief" "$donewhen" "$pack" "$ref"
   _cloudrun_done_contract "$id" "$fetch" "$branch" "$top"
   printf 'cloud %s: %s session started on %s (branch %s)\n' "$id" "$veh" "$display" "$branch"

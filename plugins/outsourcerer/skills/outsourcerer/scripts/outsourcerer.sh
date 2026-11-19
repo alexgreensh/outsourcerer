@@ -1273,7 +1273,7 @@ _devin_is_free_model() {
   # non-plan pay-as-you-go price), so they can't be discovered from cost_tier and must be named here.
   # Also the offline fallback for the catalog-Free models (so swe-2 is still recognized with no network).
   case "$t" in
-    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|glm-5.3*|glm-5-3*|z-ai/glm-5.3*|swe-2|swe-2-high|swe-2-medium|swe-2-max|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|glm-5.3*|glm-5-3*|z-ai/glm-5.3*|swe-2|swe-2-high|swe-2-medium|swe-2-max|swe-2-flash|swe-2-flash-*|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
   esac
   # Catalog-driven union: any model the LIVE catalog marks cost_tier="Free" is free, so a newly added
   # or renamed Free model is recognized with no code change — this is what stops the list from drifting.

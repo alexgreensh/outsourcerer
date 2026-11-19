@@ -71,6 +71,21 @@ _osrc_menu_risky() { # <label>
 _osrc_menu_resolve() { # <report> <selector>
   local rep="$1" sel="$2" line idx lab hits=0 hit="" hitlab="" names=""
   [ -n "$sel" ] || { echo "empty selector" >&2; return 1; }
+  # y/yes and n/no pick the row that STARTS with Yes/No, wherever it sits: Claude's folder-trust menu
+  # lists "No, exit" first, so "answer 1" meant to trust the folder and exited instead.
+  case "$sel" in y|Y|yes|Yes|YES) sel="__yes__" ;; n|N|no|No|NO) sel="__no__" ;; esac
+  if [ "$sel" = "__yes__" ] || [ "$sel" = "__no__" ]; then
+    local want; [ "$sel" = "__yes__" ] && want="yes" || want="no"
+    while IFS= read -r line; do
+      case "$line" in "SEL "*|"OPT "*) ;; *) continue ;; esac
+      idx="${line#* }"; lab="${idx#* }"; idx="${idx%% *}"
+      case "$(printf '%s' "$lab" | tr '[:upper:]' '[:lower:]')" in "$want"*) ;; *) continue ;; esac
+      _osrc_menu_risky "$lab" && continue   # "yes" never means "yes, and don't ask again"
+      hits=$((hits + 1)); hit="$idx"
+    done <<<"$rep"
+    [ "$hits" -eq 1 ] || { echo "no single option starts with '$want'; answer with the option index instead" >&2; return 1; }
+    printf '%s' "$hit"; return 0
+  fi
   case "$sel" in *[!0-9]*) ;; *)
     printf '%s\n' "$rep" | grep -qE "^(SEL|OPT) $sel " || { echo "index $sel is not one of the offered options" >&2; return 1; }
     printf '%s' "$sel"; return 0 ;;
@@ -93,7 +108,7 @@ _osrc_menu_resolve() { # <report> <selector>
 _osrc_menu_how() { # <kind>: the answer hint printed under a menu report
   case "$1" in
     consent) echo "answer with:  $0 session answer y   |   $0 session answer n" ;;
-    *) echo "answer with:  $0 session answer <index>   (an OPT/SEL index above; a label works only when it matches exactly one row, and never picks an always/don't-ask-again/auto-mode/bypass row)" ;;
+    *) echo "answer with:  $0 session answer yes|no   or   $0 session answer <index>   (yes/no pick the row starting with Yes/No; an index is the OPT/SEL number above; a label works only when it matches exactly one row, and never picks an always/don't-ask-again/auto-mode/bypass row)" ;;
   esac
 }
 
