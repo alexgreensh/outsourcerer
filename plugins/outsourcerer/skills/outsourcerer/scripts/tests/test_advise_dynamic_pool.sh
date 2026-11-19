@@ -75,7 +75,7 @@ static_only="$(printf '%s\n' "$OSRC_MODEL_TABLE" | grep -v '^$')"
 # Only local entries and catalog IDs are candidates. Repeated lane IDs count once.
 printf '%s\n' '["model-a","model-a","model-b-high"]' > "$T/catalogs/dv.json"
 echo 'chosen|model-a|dv|mid' > "$T/models.local"
-echo '{"data":[{"model_permaslug":"vendor/model-a","intelligence_index":40,"pricing":{"prompt":".000001","completion":".000002"}},{"model_permaslug":"vendor/model-b-20261119","intelligence_index":80}]}' > "$OSRC_BENCH_JSON"
+echo '{"data":[{"model_permaslug":"vendor/model-a","intelligence_index":70,"pricing":{"prompt":".000001","completion":".000002"}},{"model_permaslug":"vendor/model-b-20261119","intelligence_index":80}]}' > "$OSRC_BENCH_JSON"
 json="$(cmd_advise --json hello)"
 ck "deduplicated catalog" "$(jq '.candidates|length' <<<"$json")" 2
 ck "local alias retained" "$(jq -r '.recommendation.alias' <<<"$json")" chosen
@@ -103,7 +103,8 @@ ck "hidden CLI ID is absent" "$(jq 'any(.candidates[];.model=="hidden")' <<<"$js
 ck "agy effort variant joins its provider" "$(jq '.candidates[]|select(.model=="model-d-high")|.score' <<<"$json")" 70
 ck "Devin raw variant is reported" "$(jq 'any(.candidates[];.model=="model-e" and .unscored)' <<<"$json")" true
 _session_limits() { echo codexwk=100; }
-json="$(cmd_advise --json --effort low "fix a bug")"
+# Bar 0 so a measured zero can win: the point is that 0 is a score, not "unscored".
+json="$(OSRC_ADVISE_BAR_LIGHT=0 cmd_advise --json --effort low "fix a bug")"
 ck "limit gate removes exhausted lane before ranking" "$(jq -r '.recommendation.model' <<<"$json")" vendor/model-f
 ck "limit note identifies lane" "$(jq -r '.limit_gate' <<<"$json")" cx
 ck "measured zero is valid" "$(jq '.recommendation.score' <<<"$json")" 0

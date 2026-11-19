@@ -95,7 +95,7 @@ ck "bench lookup unknown empty" "$bl" ""
 # Two differently priced subscription candidates and a measured frontier candidate.
 mkdir -p "$TMP/catalogs"
 printf '%s\n' '["model-a","model-b","model-c","model-d"]' > "$TMP/catalogs/dv.json"
-jq -n '{data:([["a",40,1],["b",70,2],["c",90,8]] | map({
+jq -n '{data:([["a",70,1],["b",80,2],["c",90,8]] | map({
   model_permaslug:("vendor/model-"+.[0]+"-20261119"), intelligence_index:.[1],
   engineering_index:.[1], coding_index:null, agentic_index:null,
   pricing:{prompt:((.[2]/2000000)|tostring),completion:((.[2]*1.5/1000000)|tostring)}}))}' > "$OSRC_BENCH_JSON"
@@ -107,13 +107,13 @@ check_pick() {
   ck "bar for $*" "$(jq -r '.threshold' <<<"$result")" "$bar"
   ck "index for $*" "$(jq -r '.score_field' <<<"$result")" "$field"
 }
-check_pick model-a 40 intelligence_index "Rename a CSS class across two files"
-check_pick model-b 70 engineering_index "Fix the dashboard refresh bug, run the test suite and verify"
-check_pick model-b 70 intelligence_index "Analyze the tradeoffs of three caching architectures and recommend one"
-check_pick model-c 90 engineering_index --effort max "Fix the database"
+check_pick model-a 67.5 intelligence_index "Rename a CSS class across two files"
+check_pick model-b 76.5 engineering_index "Fix the dashboard refresh bug, run the test suite and verify"
+check_pick model-b 76.5 intelligence_index "Analyze the tradeoffs of three caching architectures and recommend one"
+check_pick model-c 87.3 engineering_index --effort max "Fix the database"
 json="$(cmd_advise --json "Fix the database")"
 ck "subscription blended price" "$(jq -r '.recommendation.price == 2' <<<"$json")" true
-ck "score per million-token dollar" "$(jq -r '.recommendation.value_ratio == 35' <<<"$json")" true
+ck "score per million-token dollar" "$(jq -r '.recommendation.value_ratio == 40' <<<"$json")" true
 ck "unscored catalog entry names both sources" "$(jq '.candidates[]|select(.model=="model-d")|.missing|length' <<<"$json")" 2
 mv "$OSRC_BENCH_JSON" "$TMP/saved-bench"
 ck "empty cache has no recommendation" "$(cmd_advise --json "Fix a bug" | jq '.recommendation')" null

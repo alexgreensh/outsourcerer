@@ -6,9 +6,11 @@ Code and tool-use tasks use Artificial Analysis engineering scores. Older caches
 supply the corresponding coding or agentic index. Other tasks use intelligence.
 A single OpenRouter intelligence benchmark refresh supplies all indices.
 
-The bar is the nearest-rank 25th percentile for light tasks, 50th for normal tasks,
-and 90th for hard or maximum-effort tasks. Each measured model counts once across
-eligible lanes. Among qualifying models, the highest score per dollar wins.
+The bar is a share of the best score among models you can run now: 75% for light
+tasks, 85% for normal tasks, 97% for hard or maximum-effort tasks (override with
+OSRC_ADVISE_BAR_LIGHT, OSRC_ADVISE_BAR_NORMAL, OSRC_ADVISE_BAR_HARD). Measuring against
+the best runnable model, not the whole catalog, keeps old weak models from lowering it.
+Each measured model counts once across eligible lanes. Among qualifying models, the highest score per dollar wins.
 Prices are dollars per million tokens, assuming equal input and output volumes.
 Subscription models use the same list price as other models because usage consumes
 plan limits. Cash dispatch retains its consent check.
