@@ -87,6 +87,7 @@ class Hub:
         self.cache_ts = 0.0
         self.export_error = ""
         self.lock = threading.Lock()
+        self.export_lock = threading.Lock()
         self.last_poll = time.time()
         self.last_state_mtime = -1.0
         # Set once the first export has finished (ok or not). main() prints the URL before that
@@ -193,21 +194,23 @@ class Hub:
                         continue
         return best
 
-    def run_export(self, timeout=90, check_plans=False):
+    def run_export(self, timeout=300, force=False, check_plans=False):
         requested = time.monotonic()
         with self.export_lock:
             if check_plans and self.plans_finished >= requested:
                 return self.cache
-            data = self._export(timeout, check_plans)
+            data = self._export(timeout, force, check_plans)
             if check_plans:
                 self.plans_finished = time.monotonic()
             return data
 
-    def _export(self, timeout, check_plans):
+    def _export(self, timeout, force, check_plans):
         env = dict(os.environ)
         env["OSRC_HOME"] = self.osrc_home
         # Settled-project cache + stale-while-revalidate limits (hub-perf.sh, MC2 r2 #4).
         env.setdefault("OSRC_HUB_FAST", "1")
+        if force:
+            env["OSRC_HUB_REFRESH"] = "1"
         if check_plans:
             env.update(OSRC_HUB_CHECK_PLANS="1", OSRC_PROBE_SYNC="1", OSRC_PROBE_TTL="0",
                        OSRC_PROBE_TTL_CODEX="0", OSRC_PROBE_TTL_AGY="0")
@@ -221,6 +224,7 @@ class Hub:
         if not isinstance(data, dict) or "projects" not in data:
             raise RuntimeError("export output is not a SCHEMA document")
         data["exported_at"] = int(time.time())
+        data = self._with_status(data)
         self._safe_write("", "export.json", data)
         with self.lock:
             self.cache = data
@@ -233,7 +237,7 @@ class Hub:
         while True:
             try:
                 if time.time() - self.last_poll <= IDLE_SECS \
-                        and self.state_mtime() != self.last_state_mtime:
+                        and (self.state_mtime() != self.last_state_mtime or time.time() - self.cache_ts > REFRESH_SECS + 10):
                     self.run_export()
             except Exception as e:  # keep serving last good cache; surface the error
                 with self.lock:
@@ -259,12 +263,39 @@ class Hub:
             self.warming = True
         return True
 
+    def _with_status(self, data):
+        # A warm snapshot can predate a saved click, including after a failed export.
+        projects = []
+        for project in data.get("projects", []):
+            slug = project.get("id")
+            if isinstance(slug, str) and SLUG_RE.fullmatch(slug):
+                rec = self._read_project_file("status", slug)
+                if rec.get("shippedBy") == "user":
+                    project = dict(project, **{k: rec[k] for k in
+                                   ("shippedAt", "shippedBy", "prevStatus") if k in rec})
+                    project["status"] = "shipped"
+                elif rec.get("restoredBy") == "user" and project.get("status") == "shipped":
+                    card = self._read_card(slug)
+                    same_card = ("cardStatus" in rec and card.get("status") == rec["cardStatus"]
+                                 and card.get("shippedAt") == rec.get("cardShippedAt"))
+                    if same_card or (project.get("shippedBy") == "user" and card.get("status") != "shipped"):
+                        status = card.get("status")
+                        if not status or status == "shipped":
+                            status = rec.get("prevStatus") or "building"
+                        project = dict(project, status=status)
+                        for key in ("shippedBy", "shippedAt", "prevStatus"):
+                            project.pop(key, None)
+            projects.append(project)
+        return dict(data, projects=projects)
+
     def projects_payload(self):
+        data, error = self._projects_snapshot()
+        return self._with_status(data), error
+
+    def _projects_snapshot(self):
         self.first_export.wait(timeout=95)   # the startup export, not a second one racing it
         with self.lock:
-            if self.warming and self.cache is not None:
-                return self.cache, self.export_error
-            if self.cache is not None and time.time() - self.cache_ts < REFRESH_SECS + 10:
+            if self.cache is not None:
                 return self.cache, self.export_error
         try:
             return self.run_export(), ""
@@ -395,20 +426,18 @@ class Hub:
             self._safe_write("status", slug + ".json", rec)
         except OSError as e:
             return 409, {"error": str(e)[:300]}
-        try:
-            data = self.run_export()
-        except Exception as e:
-            # The override IS written; the next good export shows it. Say so
-            # instead of "not saved" (MC-5 #6), like /api/projects does.
-            return 200, {"ok": True, "override": rec, "export_error": str(e)[:300]}
-        proj = next((p for p in data.get("projects", []) if p.get("id") == slug), None)
+        proj = self._with_status({"projects": [cur]})["projects"][0]
         return 200, {"ok": True, "override": rec, "project": proj}
 
 
     def _read_card(self, slug):
-        path = os.path.join(self.osrc_home, "hub", "projects", slug + ".json")
+        return self._read_project_file("projects", slug)
+
+    def _read_project_file(self, folder, slug):
+        directory = os.path.join(self.osrc_home, "hub", folder)
+        path = os.path.join(directory, slug + ".json")
         try:
-            if os.path.islink(path):
+            if os.path.islink(directory) or os.path.islink(path):
                 return {}
             with open(path, encoding="utf-8") as f:
                 card = json.load(f)
@@ -596,9 +625,9 @@ def make_handler(hub):
             raw = self.rfile.read(n) if n > 0 else b""
             if u.path == "/api/refresh":
                 # Refresh carries no payload; the page POSTs it empty.
-                hub.fresh_export.wait(timeout=95)   # never a second export beside the startup one (MC-8 N1)
+                hub.fresh_export.wait()
                 try:
-                    data = hub.run_export(check_plans=(u.query == "plans"))
+                    data = hub.run_export(force=True, check_plans=(u.query == "plans"))
                 except Exception as e:
                     return self._send_json({"error": str(e)[:300]}, 500)
                 return self._send_json(data)

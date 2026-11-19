@@ -97,12 +97,25 @@ _osrc_hub_lane_status() {
 # _osrc_hub_emit_lane <json-args...> -> prints one lane object (jq -cn).
 # All fields optional-empty are dropped by the caller-side jq merge.
 
+_osrc_hub_job_state() {
+  local id="$1" jd="$OSRC_JOBS/$1" st rc
+  st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null)"
+  case "$st" in running|working|live|launching|stalled\?|exploring\?|no-progress-writes)
+    # A supervisor may outlive the delegate whose exit it has already recorded.
+    if [ -s "$jd/exit" ]; then
+      rc="$(cat "$jd/exit" 2>/dev/null)"
+      case "$rc" in 0) st=done ;; ''|*[!0-9]*) : ;; *) st=failed ;; esac
+    fi ;;
+  esac
+  printf '%s' "$st"
+}
+
 _osrc_hub_lane_job() { # <id> -> lane json or nothing
   local id="$1" jd="$OSRC_JOBS/$1"
   [ -d "$jd" ] || return 1
   have jq || return 1
   local st meta verb prov model lane cwd wt br task_ref reason note ds
-  st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null || echo '?')"
+  st="$(_osrc_hub_job_state "$id")"
   meta="$jd/meta.json"
   prov="$(jq -r '.provider // ""' "$meta" 2>/dev/null)"
   model="$(jq -r '.model // ""' "$meta" 2>/dev/null)"
@@ -272,7 +285,8 @@ _osrc_hub_build_project() {
       [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
       act="$(_osrc_hub_lane_activity "${t##*/}")"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
-      [ "${act##* }" = 1 ] && llive=1
+      if [ "${act##* }" = 1 ] && ! jq -e '.state == "idle" or .state == "done" or .state == "failed" or
+          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
     done
   fi
   # Lanes that left the registry stay listed as finished for a while (MC3, lib/hub-report.sh).
@@ -394,7 +408,7 @@ _osrc_hub_lane_activity() {
   local id="$1" b live=0 st ta
   b="$(_osrc_hub_mt "$OSRC_JOBS/$id"/* "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/review/items/$id"-*.json "$OSRC_HOME/autodetach/$id.log" "$OSRC_HOME/autodetach/$id.rc")"
   if [ -d "$OSRC_JOBS/$id" ]; then
-    st="$(_reconcile_status "$id" 2>/dev/null || cat "$OSRC_JOBS/$id/status" 2>/dev/null)"
+    st="$(_osrc_hub_job_state "$id")"
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
   elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
     type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
@@ -704,6 +718,7 @@ cmd_hub_export() {
   done
   if [ -z "$proj" ]; then
     local uj; uj="$(_osrc_hub_unowned_project "$now" "$upd")"
+    [ -z "$uj" ] || uj="$(_osrc_hub_status_override unowned "$uj")"
     [ -n "$uj" ] && jq -e '.liveLanes > 0' >/dev/null 2>&1 <<<"$uj" && projects="$(jq -cn --argjson a "$projects" --argjson b "$uj" '$a+[$b]')"
   elif [ "$found" = 0 ]; then
     echo "hub export: no project '$proj' (slugs: owners/*, hub/decisions/*.json, hub/projects/*.json)" >&2

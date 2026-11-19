@@ -371,7 +371,7 @@ a.pill svg { width: 13px; height: 13px; }
     </div>
     <div class="rail-mid">
     <button type="button" class="home-btn" id="homebtn"><i data-lucide="layout-grid"></i><span>Home</span><span class="hn" id="hcount"></span></button>
-    <h2><span>Running now</span><span class="mono" id="pcount"></span></h2>
+    <h2><span>Projects</span><span class="mono" id="pcount"></span></h2>
     <div class="plist" id="plist"><p id="plist-empty">Loading your projects…</p></div>
     <div id="shipwrap" hidden><h2><button type="button" class="lfold" id="sfold" aria-expanded="false" aria-controls="slist"><i data-lucide="chevron-right" class="chev"></i><span>Shipped</span></button><span class="mono" id="scount"></span></h2>
     <div class="plist" id="slist" hidden></div></div>
@@ -436,8 +436,9 @@ a.pill svg { width: 13px; height: 13px; }
   function api(path, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ 'X-Hub-Token': TOKEN }, opts.headers || {});
-    // A stalled hub must never hang a send or a poll: abort after 15 s (MC-6).
-    const ac = new AbortController(), t = setTimeout(() => ac.abort(), path === '/api/refresh?plans' ? 210000 : 15000); opts.signal = ac.signal;
+    // A stalled hub must never hang a send or a poll: abort ordinary polls after 15 s (MC-6).
+    // A manual refresh or plans check may wait for the export it started.
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), path === '/api/refresh?plans' ? 210000 : path === '/api/refresh' ? 630000 : 15000); opts.signal = ac.signal;
     return fetch(path, opts).then((r) => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -468,7 +469,7 @@ a.pill svg { width: 13px; height: 13px; }
   let plansChecked = 0;
   function makeLocalDb() {
     const subs = { projects: [], answers: [], limits: [] };
-    let timer = null;
+    let timer = null, seq = 0; const applied = {};
     const stopPlans = window.OSRC_HUB_PLANS?.startChecks($('checkplans'), async () => {
       const data = await api('/api/refresh?plans', { method: 'POST' });
       plansChecked = data.exported_at * 1000;
@@ -480,8 +481,9 @@ a.pill svg { width: 13px; height: 13px; }
       if (name === 'limits') return (data.limits || []).map((l) => ({ id: l.id, data: () => l }));
       return Object.keys(data).map((k) => ({ id: k, data: () => data[k] }));
     }
-    async function pull(name) {
-      const data = name === 'answers' ? await api('/api/answers') : await api('/api/projects');
+    async function pull(name, snapshot) {
+      const request = ++seq, data = snapshot || await api(name === 'answers' ? '/api/answers' : '/api/projects');
+      if (request < (applied[name] || 0)) return; applied[name] = request;
       if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }   // startup export still running: stay on "Loading", ask again (MC-8)
       if (name === 'projects') { const a = JSON.stringify(Array.isArray(data.also) ? data.also : []); if (a !== alsoSig) { alsoSig = a; also = JSON.parse(a).map((r) => (window.OSRC_HUB_CLEAN && r ? Object.assign({}, r, { name: OSRC_HUB_CLEAN.name(r.name, r.project || 'Claude Code session'), title: OSRC_HUB_CLEAN.idlike(r.title) ? '' : r.title }) : r)); sigP = ''; } }   // MC3 "Also running" rides in the export
       const snap = { docs: docsFor(name, data) };
@@ -513,7 +515,7 @@ a.pill svg { width: 13px; height: 13px; }
         }
         if (/^refresh\//.test(path)) {
           // Refresh on a stale stamp: re-export now (POST /api/refresh), then re-pull.
-          return { set() { return api('/api/refresh', { method: 'POST' }).then(() => Promise.all([pull('projects'), pull('limits')])); } };
+          return { set() { return api('/api/refresh', { method: 'POST' }).then((data) => { sigP = ''; return Promise.all([pull('projects', data), pull('limits', data)]); }); } };
         }
         return {
           set(obj) {
@@ -679,7 +681,6 @@ a.pill svg { width: 13px; height: 13px; }
   }
   const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
 
-  const runningNow = (p) => p.status !== 'shipped' && (p.liveLanes > 0 || openDecs(p).length > 0);
   const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
   const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty" (MC-8)
   function renderRail() {
@@ -687,7 +688,7 @@ a.pill svg { width: 13px; height: 13px; }
     const ae = document.activeElement, keep = ae && ae.id && ae.closest && ae.closest('.rail-mid') && ae.id !== 'homebtn' ? { id: ae.id } : null;   // keyboard focus survives a re-render (MC-5 #4)
     const list = $('plist'); list.replaceChildren(); const slist = $('slist'); slist.replaceChildren();
     const live = projects.filter((p) => p.status !== 'shipped'), done = projects.filter((p) => p.status === 'shipped');   // the export lists working sessions only (MC2 r3)
-    $('pcount').textContent = String(projects.filter(runningNow).length);
+    $('pcount').textContent = String(live.length);
     const hb = $('homebtn'); hb.classList.toggle('on', !current); hb.setAttribute('aria-current', current ? 'false' : 'page');
     const nOpen = live.reduce((a, p) => a + openDecs(p).length, 0); const hn = $('hcount'); hn.replaceChildren();
     if (nOpen) { const top = live.some((p) => openDecs(p).some((d) => d.weight === 'Critical' || d.weight === 'High')); const t = el('span', 'pri ' + (top ? 'p-high' : 'p-medium'), String(nOpen)); t.title = nOpen + (nOpen === 1 ? ' decision waits' : ' decisions wait') + ' on you'; hn.append(t); }

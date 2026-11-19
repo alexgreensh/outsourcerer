@@ -77,7 +77,7 @@ grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" 
 grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
 grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders (MC-5 #4)" || bad "hover re-anchor missing"
 grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render (MC-5 #4)" || bad "bars re-grow on every render"
-grep -q "new AbortController(), t = setTimeout(() => ac.abort(), 15000)" "$PAGE" && grep -q "'Not sent, try again'" "$DEC" \
+grep -Fq "path === '/api/refresh' ? 630000 : 15000" "$PAGE" && grep -q "'Not sent, try again'" "$DEC" \
   && ok "MC-6 #2: api() aborts after 15 s and the card says Not sent, try again" || bad "api timeout missing"
 grep -q "renderRail(); pollRender();" "$PAGE" && ! grep -q "^    if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" \
   && ok "MC-6 #2: only poll-driven renders wait for a send; navigation never does" || bad "renderMain still holds navigation"
@@ -180,7 +180,7 @@ echo "=== write_status slug guard alone (poisoned export) ==="
 sg="$(cd "$LIB" && OSRC_T="$TMP/sg" PAGE="$PAGE" python3 -I -c '
 import os, sys, time; sys.path.insert(0, os.getcwd()); import hub_server as h
 t = os.environ["OSRC_T"]; os.makedirs(t)
-hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x")
+hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x"); hub.first_export.set()
 for bad in ("../evil", ".hidden", "a/b", "alpha\n"):
     hub.cache = {"projects": [{"id": bad, "status": "building"}]}; hub.cache_ts = time.time()
     print(bad, hub.write_status(bad, {"status": "shipped"})[0])
@@ -188,24 +188,24 @@ print("escaped" if os.path.exists(os.path.join(t, "hub", "evil.json")) else "con
 sd = os.path.join(t, "hub", "status")
 print("nl-file" if os.path.isdir(sd) and any("\n" in n for n in os.listdir(sd)) else "no-nl-file")
 print("answer-nl", hub.write_answer({"id": "a--b\n", "choice": "x"})[1])
-# MC-5 #6: the override is written even when the re-export fails -> 200 + export_error, not "not saved".
+# Saving a status does not depend on the export engine.
 hub.cache = {"projects": [{"id": "ok1", "status": "review"}]}; hub.cache_ts = time.time()
 code, body = hub.write_status("ok1", {"status": "shipped"})
-print("exportfail", code, bool(body.get("export_error")), os.path.isfile(os.path.join(t, "hub", "status", "ok1.json")))
+print("exportfail", code, body.get("project", {}).get("status") == "shipped", os.path.isfile(os.path.join(t, "hub", "status", "ok1.json")))
 ' 2>&1)"
 grep -q '^\.\./evil 400$' <<<"$sg" && grep -q '^\.hidden 400$' <<<"$sg" && grep -q '^a/b 400$' <<<"$sg" && grep -q contained <<<"$sg" \
   && ok "slug regex alone refuses traversal ids even when the export lists them" || bad "slug guard: $sg"
 grep -q '^alpha$' <<<"$sg" && grep -q '^ 400$' <<<"$sg" && grep -q '^no-nl-file$' <<<"$sg" \
   && ok "slug with a trailing newline refused, no file (MC-5 #5)" || bad "trailing-newline slug: $sg"
 grep -q '^answer-nl bad answer id$' <<<"$sg" && ok "answer id with a trailing newline refused (MC-5 #5)" || bad "trailing-newline answer id: $sg"
-grep -q '^exportfail 200 True True$' <<<"$sg" && ok "failed re-export: 200 + export_error, override kept (MC-5 #6)" || bad "export failure reply: $sg"
+grep -q '^exportfail 200 True True$' <<<"$sg" && ok "saved status visible with offline engine" || bad "export failure reply: $sg"
 
 echo "=== symlink-safe writes (MC-5 #3) ==="
 sy="$(cd "$LIB" && OSRC_T="$TMP/sy" PAGE="$PAGE" python3 -I -c '
 import os, sys, time, stat; sys.path.insert(0, os.getcwd()); import hub_server as h
 t = os.environ["OSRC_T"]; os.makedirs(os.path.join(t, "hub", "status")); os.makedirs(os.path.join(t, "victim"))
 victim = os.path.join(t, "victim", "keep.txt"); open(victim, "w").write("original")
-hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x")
+hub = h.Hub(t, "/bin/false", os.environ["PAGE"], "x"); hub.first_export.set()
 hub.cache = {"projects": [{"id": "alpha", "status": "review"}]}; hub.cache_ts = time.time()
 os.symlink(victim, os.path.join(t, "hub", "status", "alpha.json.tmp"))      # the old fixed temp name
 c1, _ = hub.write_status("alpha", {"status": "shipped"})

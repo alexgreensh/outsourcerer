@@ -103,7 +103,7 @@ _osrc_hub_lane_state() {
     case "$st" in composer) st=idle ;; approval|question|working|idle|limit|failed|done) ;; *)
       case "$(_owned_live_state "$id" 2>/dev/null)" in live|working|running) st=working ;; waiting) st=approval ;; idle) st=idle ;; done) st=done ;; *) st=unknown ;; esac ;; esac
   elif [ -d "$OSRC_JOBS/$id" ]; then
-    st="$(_reconcile_status "$id" 2>/dev/null || cat "$OSRC_JOBS/$id/status" 2>/dev/null)"
+    st="$(_osrc_hub_job_state "$id")"
     c="$(_osrc_hub_mt "$OSRC_JOBS/$id/meta.json")"; a="$(_osrc_hub_mt "$OSRC_JOBS/$id"/*)"
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) st=working ;; waiting) st=approval ;;
       done|'done?') st=done ;; failed|wedged|timeout|blocked|permission-blocked) st=failed ;; canceled|interrupted) st=done ;; *) st=unknown ;; esac
@@ -146,7 +146,7 @@ _osrc_hub_cache_paths() { # <slug> -> every file or dir whose change invalidates
 
 # _osrc_hub_cache_get <slug> <now> <upd> -> cached project doc (stamps refreshed); rc 1 on a miss.
 _osrc_hub_cache_get() {
-  [ "${OSRC_HUB_FAST:-0}" = 1 ] || return 1
+  [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ "${OSRC_HUB_REFRESH:-0}" != 1 ] || return 1
   local slug="$1" f="$OSRC_HOME/hub/cache/$1.json" t id age p newer
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   age=$(( $(date +%s) - $(_osrc_hub_mt "$f") ))

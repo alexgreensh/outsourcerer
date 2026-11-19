@@ -126,11 +126,11 @@
       asked[key] = Date.now(); rb.disabled = true; rb.replaceChildren(ic('refresh-cw'), document.createTextNode('Refreshing…')); paint();
       const [kind, id] = key.split(':');
       try { await ctx.db.doc('refresh/' + key.replace(':', '--')).set({ kind, id: id || '', at: new Date().toISOString() }); }
-      catch (e) { delete asked[key]; if (rb.isConnected) { rb.disabled = false; rb.replaceChildren(ic('refresh-cw'), document.createTextNode('Not sent, try again')); paint(); } return; }
+      catch (e) { delete asked[key]; ctx.staleCheck(); utoast('Refresh failed. Try again.'); if (rb.isConnected) { rb.disabled = false; rb.replaceChildren(ic('refresh-cw'), document.createTextNode('Not sent, try again')); paint(); } return; }
       if (ctx.mode === 'local') {
         delete asked[key]; ctx.staleCheck();
         const still = document.querySelector('[data-rk="' + key + '"].stale');
-        if (still) utoast('Read again just now. Nothing newer from this build yet.');
+        utoast(still ? 'Refreshed just now. No newer build activity.' : 'Refreshed just now.');
       }
     }
 
@@ -342,16 +342,16 @@
       const projects = ctx.projects, db = ctx.db, go = ctx.go;
       const main = $('main'); main.replaceChildren();   // no hide(): an open card re-anchors after the render (keepHover)
       const live = projects.filter((p) => p.status !== 'shipped');
-      const running = live.filter((p) => p.status !== 'paused').concat(live.filter((p) => p.status === 'paused'));
+      const running = live.filter((p) => p.liveLanes == null ? liveLanes(p).length > 0 : p.liveLanes > 0);
       const shipped = projects.filter((p) => p.status === 'shipped');
-      const all = []; running.forEach((p) => openDecs(p).forEach((d) => all.push({ p, d })));
+      const all = []; live.forEach((p) => openDecs(p).forEach((d) => all.push({ p, d })));
       const ph = el('header', 'ph home');
       const waitingOn = new Set(all.map((x) => x.p.id)).size;
       const err = ctx.pullErr, oldKey = /HTTP 40[13]/.test(err || '');   // a key from an older hub is not "hub down"
       const head = !projects.length ? (oldKey ? 'This tab is from an older Mission Control' : err ? 'Cannot reach the local hub' : db ? 'Nothing is running right now' : 'Sign in to see your projects')
         : all.length ? all.length + (all.length === 1 ? ' decision waits on you' : ' decisions wait on you') : running.length ? 'Nothing is waiting on you' : 'Nothing is running right now';
       const sub = !projects.length ? (oldKey ? 'Its key no longer opens the data. Press Reopen below, or run "outsourcerer mc".' : err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
-        : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : 'Everything you started has shipped.';
+        : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : live.length ? 'No lanes are working.' : 'Everything you started has shipped.';
       ph.append(el('h1', null, head), el('p', 'lede', sub));
       if (!projects.length && db && !err) {   // MC3: an empty page says how to start, never a blank
         const how = el('div', 'empty-how');
@@ -376,14 +376,14 @@
         });
         sec.append(h, ul); main.append(sec);
       }
-      const list = running.length ? running : shipped;
+      const list = live.length ? live : shipped;
       if (list.length) {
-        const sec = el('section'); sec.append(el('h2', null, running.length ? 'Your projects' : 'Shipped'));
+        const sec = el('section'); sec.append(el('h2', null, live.length ? 'Your projects' : 'Shipped'));
         const grid = el('div', 'ptiles' + (list.length === 1 ? ' one' : '')); list.forEach((p) => grid.append(ptile(p)));
         sec.append(grid); main.append(sec);
       }
       const also = alsoRunning(); if (also) main.append(also);
-      if (running.length && shipped.length) main.append(el('p', 'foot', shipped.length + ' shipped, listed under Shipped in the sidebar.'));
+      if (live.length && shipped.length) main.append(el('p', 'foot', shipped.length + ' shipped, listed under Shipped in the sidebar.'));
       ctx.staleCheck(); paint();
     }
 
