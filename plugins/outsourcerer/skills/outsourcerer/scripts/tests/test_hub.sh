@@ -323,7 +323,13 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects?t=$TOK")"
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/refresh?t=$TOK")"
 [ "$code" = "403" ] && ok "valid ?t= refused on POST" || bad "?t= on POST got $code"
 
-pj="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects")"
+# The first answers can be {"starting":true} while the startup export runs; a busy Mac read that as
+# empty. Wait for the real export (the page does the same), up to 30 s.
+for _ in $(seq 1 150); do
+  pj="$(curl -s -H "X-Hub-Token: $TOK" "$BASE/api/projects")"
+  echo "$pj" | jq -e '.starting' >/dev/null 2>&1 || break
+  sleep 0.2
+done
 echo "$pj" | jq -e '.projects | length >= 1' >/dev/null && ok "GET /api/projects returns export" || bad "api/projects empty"
 echo "$pj" | jq -e '(.limits | type == "array") and (.limits[] | select(.id=="openrouter") | .paid == true)' >/dev/null \
   && ok "GET /api/projects carries the limits array" || bad "api/projects missing limits"
