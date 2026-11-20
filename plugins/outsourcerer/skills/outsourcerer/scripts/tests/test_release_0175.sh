@@ -457,14 +457,14 @@ for m in "Plan mode: research & plan only (shift+tab to cycle)" \
          "Best-of-N mode: fork into parallel arms and pick a winner (shift+tab to cycle)"; do
   printf '%s\n' '────' "> $m" '────' '? for shortcuts   auto' > "$T/box.txt"
   v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
-    LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL; _osrc_scr_load < "$T/box.txt"
-    _osrc_scr_composer_box ">" 3 || printf 'NOBOX n=%s b=%s ' "$_SCR_N" "$(wc -c <"$T/box.txt" 2>&1)"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
+    _osrc_screen_analyze_text agy < "$T/box.txt"
+    [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] || printf "NOBOX(%s) " "$OSRC_SCR_STATE"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
   [ -z "$v" ] && ok "mode hint variant clears: ${m%%:*}" || bad "mode hint variant leaks as draft: '$v'"
 done
 printf '%s\n' '────' '> ship the release by noon' '────' '? for shortcuts   auto' > "$T/box.txt"
 v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
-  LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL; _osrc_scr_load < "$T/box.txt"
-  _osrc_scr_composer_box ">" 3 || printf 'NOBOX n=%s b=%s ' "$_SCR_N" "$(wc -c <"$T/box.txt" 2>&1)"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
+  _osrc_screen_analyze_text agy < "$T/box.txt"
+  [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] || printf "NOBOX(%s) " "$OSRC_SCR_STATE"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
 [ "$v" = "ship the release by noon" ] && ok "a real typed draft is still reported" \
   || bad "placeholder filter ate a real draft: '$v'"
 
