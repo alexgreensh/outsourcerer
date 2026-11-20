@@ -431,7 +431,8 @@ grep -q 'OSRC_SESSION_LIVENESS_GRACE_SECS' "$SRC" \
   && ok "grace window env exists" || bad "no OSRC_SESSION_LIVENESS_GRACE_SECS in outsourcerer.sh"
 _desc_out="$( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
   bash -c 'bash -c "sleep 30; true" & wait' & w=$!
-  _session_pane_descendant "$w" && r=found || r=none
+  # The launch check polls; so does this. A fork right after `&` may not have its child yet.
+  r=none; n=0; while [ "$n" -lt 30 ]; do _session_pane_descendant "$w" && { r=found; break; }; sleep 0.1; n=$((n + 1)); done
   s=""; sleep 30 & s=$!
   _session_pane_descendant "$s" || r="$r+childless-none"
   kill "$w" "$s" 2>/dev/null; printf '%s' "$r" )"
@@ -443,6 +444,7 @@ grep -qx 'found+childless-none' <<<"$_desc_out" \
 grep -q '_session_pane_descendant' "$SRC" \
   && ok "grace gate is wired into the launch check" || bad "descendant probe not called by the check"
 
+_sec_arm   # each source of the engine is slow on a loaded runner; (b) gets its own bound
 # (b) agy's empty-composer mode hint ('Auto mode: ... (shift+tab to cycle)', rendered in a
 # muted 38;5;1xx the dim probe misses) read as 'unsent text'. The live capture is the fixture.
 v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
@@ -455,14 +457,14 @@ for m in "Plan mode: research & plan only (shift+tab to cycle)" \
          "Best-of-N mode: fork into parallel arms and pick a winner (shift+tab to cycle)"; do
   printf '%s\n' '────' "> $m" '────' '? for shortcuts   auto' > "$T/box.txt"
   v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
-    _osrc_scr_load < "$T/box.txt"
-    _osrc_scr_composer_box ">" 3 || printf 'NOBOX'; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
+    LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL; _osrc_scr_load < "$T/box.txt"
+    _osrc_scr_composer_box ">" 3 || printf 'NOBOX n=%s b=%s ' "$_SCR_N" "$(wc -c <"$T/box.txt" 2>&1)"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
   [ -z "$v" ] && ok "mode hint variant clears: ${m%%:*}" || bad "mode hint variant leaks as draft: '$v'"
 done
 printf '%s\n' '────' '> ship the release by noon' '────' '? for shortcuts   auto' > "$T/box.txt"
 v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
-  _osrc_scr_load < "$T/box.txt"
-  _osrc_scr_composer_box ">" 3 || printf 'NOBOX'; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
+  LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL; _osrc_scr_load < "$T/box.txt"
+  _osrc_scr_composer_box ">" 3 || printf 'NOBOX n=%s b=%s ' "$_SCR_N" "$(wc -c <"$T/box.txt" 2>&1)"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
 [ "$v" = "ship the release by noon" ] && ok "a real typed draft is still reported" \
   || bad "placeholder filter ate a real draft: '$v'"
 
