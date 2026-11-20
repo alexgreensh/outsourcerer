@@ -81,7 +81,7 @@ def _vocab_from_pool(pool_path):
     can land on an alias-shaped family as well as the resolved one."""
     fams = set()
     try:
-        with open(pool_path) as fh:
+        with open(pool_path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -275,7 +275,7 @@ _SOURCES = (("cursorbench", "cursorbench.html", parse_cursorbench),
 def _meta_read(path):
     d = {}
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 k, _, v = line.partition("=")
                 d[k.strip()] = v.rstrip("\n")
@@ -286,7 +286,7 @@ def _meta_read(path):
 
 def _meta_write(path, d):
     tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
+    with open(tmp, "w", encoding="utf-8") as fh:
         for k, v in d.items():
             fh.write("%s=%s\n" % (k, v))
     os.replace(tmp, path)
@@ -297,13 +297,13 @@ def cmd_parse(advise_dir, pool_path):
     out_path = os.path.join(advise_dir, "rows.jsonl")
     tmp_path = out_path + ".tmp"
     total, unmatched_total = 0, 0
-    with open(tmp_path, "w") as out:
+    with open(tmp_path, "w", encoding="utf-8") as out:
         for source, fname, fn in _SOURCES:
             raw = os.path.join(advise_dir, fname)
             meta_path = os.path.join(advise_dir, source + ".meta")
             meta = _meta_read(meta_path)
             try:
-                text = open(raw, errors="replace").read()
+                text = open(raw, encoding="utf-8", errors="replace").read()
             except OSError:
                 meta.update(status="missing", rows="0")
                 _meta_write(meta_path, meta)
@@ -387,7 +387,7 @@ def _nearest(rows, want_eff):
 def cmd_factors(advise_dir, category, want_eff):
     path = os.path.join(advise_dir, "rows.jsonl")
     try:
-        rows = [json.loads(l) for l in open(path) if l.strip()]
+        rows = [json.loads(l) for l in open(path, encoding="utf-8", errors="replace") if l.strip()]
     except OSError:
         return 1
     cb, tb, orb, ep = {}, {}, {}, {}
@@ -395,7 +395,7 @@ def cmd_factors(advise_dir, category, want_eff):
     # Read candidates first: unmatched source rows are re-matched HERE against the
     # lane-resolved ids (opus -> claude-opus-5-5), because the parse-time vocab only
     # knew the bare aliases. match_family's exact/suffix order applies unchanged.
-    cand_lines = [l.rstrip("\n") for l in sys.stdin]
+    cand_lines = [l.decode("utf-8", "replace").rstrip("\r\n") for l in sys.stdin.buffer]
     vocab = set()
     for line in cand_lines:
         parts = line.split("|")
@@ -528,8 +528,8 @@ def main(argv):
         return cmd_factors(opt("--dir"), opt("--category", "simple"),
                            opt("--effort", "high"))
     if cmd == "norm":
-        for line in sys.stdin:
-            n = line.rstrip("\n")
+        for line in sys.stdin.buffer:
+            n = line.decode("utf-8", "replace").rstrip("\r\n")
             fam, eff = norm_key(n)
             sys.stdout.write("%s\t%s\t%s\n" % (n, fam, eff))
         return 0

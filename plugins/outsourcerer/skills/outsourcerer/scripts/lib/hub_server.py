@@ -870,7 +870,7 @@ def main():
     eng_rp = os.path.realpath(args.engine)
     ver = ""
     try:
-        with open(eng_rp, "r", errors="replace") as ef:
+        with open(eng_rp, "r", encoding="utf-8", errors="replace") as ef:
             m = re.search(r'^OSRC_VERSION="([^"]+)"', ef.read(65536), re.M)
             ver = m.group(1) if m else ""
     except OSError:

@@ -343,7 +343,7 @@ scr="$(svscreen n2)"
   && ok "agy retry-backoff pane -> limit (never stalled)" \
   || bad "agy backoff pane -> '$(printf '%s\n' "$scr" | head -1)'"
 det="$(printf '%s\n' "$scr" | sed -n 2p)"
-printf '%s' "$det" | grep -q 'waiting on its own timer.*epoch [0-9]' \
+grep -q 'waiting on its own timer.*epoch [0-9]' <<<"$det" \
   && ok "backoff detail names the model's own timer: '$det'" \
   || bad "backoff detail wrong: '$det'"
 obs="$(svobs n2)"
@@ -429,12 +429,13 @@ _sec_arm
 # keeps waiting ONLY while the pane shell has a live descendant — never re-runs the launch.
 grep -q 'OSRC_SESSION_LIVENESS_GRACE_SECS' "$SRC" \
   && ok "grace window env exists" || bad "no OSRC_SESSION_LIVENESS_GRACE_SECS in outsourcerer.sh"
-( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+_desc_out="$( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
   bash -c 'bash -c "sleep 30; true" & wait' & w=$!
   _session_pane_descendant "$w" && r=found || r=none
   s=""; sleep 30 & s=$!
   _session_pane_descendant "$s" || r="$r+childless-none"
-  kill "$w" "$s" 2>/dev/null; printf '%s' "$r" ) | grep -qx 'found+childless-none' \
+  kill "$w" "$s" 2>/dev/null; printf '%s' "$r" )"
+grep -qx 'found+childless-none' <<<"$_desc_out" \
   && ok "_session_pane_descendant: grandchild behind a shell child found; childless pid missed" \
   || bad "_session_pane_descendant misread the boot/descendant shapes"
 # A dead pane (no descendants) must refuse at the FIRST grace poll, not after the full budget —

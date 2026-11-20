@@ -2,6 +2,14 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.6
+
+### Fixed
+
+- **Model picker reads files as UTF-8** on every system, and Mission Control's server does too.
+- **Limit and exclude lists show up in advise again.** A lane at its limit is named as parked with its quota, and excluded models are never scored.
+- **Test suite runs on every platform again**, including the new release checks.
+
 ## 0.17.5
 
 ### Changed

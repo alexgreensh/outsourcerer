@@ -144,7 +144,9 @@ R="$TMP/r7"; mkdir -p "$R/web"
 cap="$TMP/devin.cap"; calls="$TMP/devin.calls"
 # (4a) WITHOUT spend consent the metered lane must refuse before any dispatch: the billing
 # probe may run (metadata only), but no prompt-bearing (-p) call and no capture may appear.
-ref="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$TMP/devin.ref.cap" DEVIN_CALLS="$TMP/devin.ref.calls" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1; echo "rc=$?")"
+# OSRC_NO_AUTODETACH=1: swe-2 is a capable-tier lane now, so a non-TTY run would auto-detach into
+# tmux and the capture assertions below could never observe the dispatch synchronously.
+ref="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$TMP/devin.ref.cap" DEVIN_CALLS="$TMP/devin.ref.calls" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 bash "$SRC" --provider devin edit -m swe-2 "fix the parser" </dev/null 2>&1; echo "rc=$?")"
 case "$ref" in *"rc=0"*) bad "unconsented metered launch was not refused" ;; *) ok "unconsented metered launch refused" ;; esac
 grep -q 'spend gate' <<<"$ref" && ok "the refusal is the spend gate" || bad "refusal was not the spend gate: $(printf '%s' "$ref" | tail -2)"
 [ ! -s "$TMP/devin.ref.cap" ] && ok "refused launch dispatched nothing" || bad "refused launch still captured a run"
@@ -154,7 +156,7 @@ grep -q 'models list' "$TMP/devin.ref.calls" 2>/dev/null && ok "billing probe ra
 # from the environment at startup). Billing decides the spend ask, never data exposure: the
 # delegate must still land in the isolated tree.
 # Through the real `edit` command, so route_delegate's gate is in the path (delegate() sits below it).
-e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" DEVIN_CALLS="$calls" OSRC_CLOUD_ACK=1 bash "$SRC" --provider devin edit --spend-ok -m swe-2 "fix the parser" </dev/null 2>&1)"
+e2e="$(cd "$R" && env PATH="$TMP/bin:$PATH" DEVIN_CAPTURE="$cap" DEVIN_CALLS="$calls" OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 bash "$SRC" --provider devin edit --spend-ok -m swe-2 "fix the parser" </dev/null 2>&1)"
 if [ -s "$cap" ]; then ok "delegate launched (no gate kill)"; else bad "delegate never launched: $(printf '%s' "$e2e" | grep -m2 'CLOUD GATE\|error')"; fi
 grep -q ' -p ' "$calls" 2>/dev/null && ok "call log shows a real -p dispatch, not a probe" || bad "no -p dispatch in call log: $(cat "$calls" 2>/dev/null)"
 grep -q "^cwd=$R/.outsourcerer/worktrees/run-" "$cap" 2>/dev/null && ok "delegate cwd is the isolated worktree" || bad "delegate cwd: $(head -1 "$cap" 2>/dev/null)"

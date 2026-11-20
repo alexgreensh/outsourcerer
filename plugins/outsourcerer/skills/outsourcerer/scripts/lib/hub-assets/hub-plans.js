@@ -37,7 +37,7 @@
     async function check() {
       if (button.disabled) return;
       button.disabled = true;
-      button.dataset.state = 'checking';   // renderLimits reads this: the stamp yields to the one 'Checking…' state
+      if (button.dataset) button.dataset.state = 'checking';   // renderLimits reads this: the stamp yields to the one 'Checking…' state
       button.textContent = 'Checking…';
       try {
         await refresh();
@@ -46,7 +46,7 @@
         button.textContent = 'Retry check';
       } finally {
         button.disabled = false;
-        button.dataset.state = 'idle';
+        if (button.dataset) button.dataset.state = 'idle';
       }
     }
     button.hidden = false;

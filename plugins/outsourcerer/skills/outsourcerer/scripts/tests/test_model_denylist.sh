@@ -16,6 +16,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
+ADV_SCORE_LIB="$SCRIPT_DIR/../lib/advise-score.sh"
+[ -f "$ADV_SCORE_LIB" ] || { echo "FAIL: cannot find $ADV_SCORE_LIB"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
 TMP="$(mktemp -d)"; export OSRC_HOME="$TMP"
@@ -132,10 +134,16 @@ OSRC_MODEL_DENYLIST="z-ai/glm-5.2" _model_denied "$(resolve_model_row glm | cut 
   || bad "a denied model was reachable through one of its aliases"
 
 # --- both enforcement points are wired, and neither is the only one ---
-case "$(body_of cmd_advise)" in
-  *_model_denied*) ok "advise filters denied models out of its candidate scoring" ;;
+# cmd_advise lives in lib/advise-score.sh and reads OSRC_MODEL_DENYLIST itself, emitting D|<resolved>
+# rows the single-pass scorer drops (`res in deny`) — per-model _model_denied calls would rescan the
+# entry table once per candidate. Dispatch still funnels through _model_denied in route_delegate.
+case "$(awk -v f='^cmd_advise\\(\\)' '$0 ~ f, /^}/' "$ADV_SCORE_LIB")" in
+  *OSRC_MODEL_DENYLIST*) ok "advise filters denied models out of its candidate scoring" ;;
   *) bad "advise can still recommend a denied model" ;;
 esac
+grep -q 'res in deny' "$ADV_SCORE_LIB" \
+  && ok "the scorer drops candidates whose resolved id is denied" \
+  || bad "denied ids are collected but never excluded from scoring"
 case "$(body_of route_delegate)" in
   *_model_denied*) ok "dispatch refuses a denied model, so an explicit -m cannot bypass the list" ;;
   *) bad "-m <denied> still reaches a delegate" ;;

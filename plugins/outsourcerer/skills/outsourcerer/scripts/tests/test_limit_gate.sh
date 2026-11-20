@@ -347,15 +347,15 @@ esac
 
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: advise excludes the exhausted lane outright. cx candidates must not appear, and the
-# conservation line must name the exclusion.
+# limit-gate line must name the exclusion (the scorer renders "<lane> parked — <window> at N%").
 # ---------------------------------------------------------------------------------------------------
 H5="$TMP/ih5"; HH5="$TMP/hh5"; mkdir -p "$H5" "$HH5"
 fake_codex_rollout "$HH5" 98
 out="$( PATH="$FAKEBIN:$PATH" HOME="$HH5" OSRC_HOME="$H5" OSRC_SOURCED= \
     bash "$SRC" advise "refactor the parser" 2>&1 )"
 case "$out" in
-  *"codexwk=98"*"excluded"*|*"excluded"*"codexwk=98"*)
-    ok "integration: advise names the cx exclusion (codexwk=98 >= 90%)" ;;
+  *"cx parked"*"Codex weekly quota at 98%"*|*"Codex weekly quota at 98%"*"cx parked"*)
+    ok "integration: advise names the cx exclusion (Codex weekly quota at 98% >= 90%)" ;;
   *) bad "integration: advise did not surface the limit exclusion: $(printf '%s' "$out" | head -5)" ;;
 esac
 # The recommended lane must not be cx while it is exhausted.

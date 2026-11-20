@@ -63,15 +63,19 @@ n_tb="$(jq -r 'select(.source=="tbench")' "$AD/rows.jsonl" | grep -c '"family"' 
 # Trap: models with no candidate family are REPORTED unmatched, never guessed.
 un="$(grep '^unmatched=' "$AD/tbench.meta" | cut -d= -f2)"
 case "$un" in ''|*[!0-9]*|0) bad "tbench.meta reports no unmatched rows (Copilot Fusion should be unmatched): '$un'" ;; *) ok "tbench.meta reports $un unmatched rows" ;; esac
-grep '^unmatched_names=' "$AD/tbench.meta" | grep -qi 'Copilot Fusion' \
+un_names="$(grep '^unmatched_names=' "$AD/tbench.meta")"
+grep -qi 'Copilot Fusion' <<<"$un_names" \
   && ok "Copilot Fusion named in tbench.meta unmatched_names" || bad "Copilot Fusion not in meta unmatched_names"
-jq -r 'select(.source=="tbench" and (.matched|not)) | .name' "$AD/rows.jsonl" 2>/dev/null | grep -qi 'copilot fusion' \
+un_names="$(jq -r 'select(.source=="tbench" and (.matched|not)) | .name' "$AD/rows.jsonl" 2>/dev/null)"
+grep -qi 'copilot fusion' <<<"$un_names" \
   && ok "Copilot Fusion lands in unmatched (no family guess)" || bad "Copilot Fusion missing from unmatched rows"
 
 # Trap: date-suffixed display names still normalize to a family.
-jq -r 'select(.source=="tbench") | .name' "$AD/rows.jsonl" | grep -qi 'deepseek v4.1 flash' \
+ds_rows="$(jq -r 'select(.source=="tbench") | .name' "$AD/rows.jsonl")"
+grep -qi 'deepseek v4.1 flash' <<<"$ds_rows" \
   && ok "DeepSeek V4.1 Flash 1017 present in tbench rows" || bad "date-suffixed deepseek row missing"
-jq -r 'select(.source=="tbench" and .matched) | .family' "$AD/rows.jsonl" | grep -qi 'deepseek' \
+ds_fam="$(jq -r 'select(.source=="tbench" and .matched) | .family' "$AD/rows.jsonl")"
+grep -qi 'deepseek' <<<"$ds_fam" \
   && ok "date suffix strips to a matchable family" || true   # may legitimately stay unmatched if no candidate exists
 
 # Trap: a 0-cost row (Muse Spark 1.3) parses without corrupting cost math.

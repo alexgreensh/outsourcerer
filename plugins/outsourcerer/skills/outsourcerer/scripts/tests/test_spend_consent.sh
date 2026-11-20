@@ -117,6 +117,7 @@ printf '["swe-2","swe","swe-2-high","swe-2-max","glm-5.2","glm","glm-5-2"]\n' > 
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
     OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
+    OSRC_NO_AUTODETACH=1 \
     bash "$SRC" run "say hi" 2>&1 )"; rc=$?
 case "$out" in
   *"spend gate"*|*"PAID LANE"*) bad "r3.2 default-run: bare run on Free-catalog Devin asked for spend (rc=$rc)" ;;
@@ -131,6 +132,7 @@ DOH2="$TMP/dohome2"; mkdir -p "$DOH2"
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH2" OSRC_SOURCED= \
     OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
+    OSRC_NO_AUTODETACH=1 \
     bash "$SRC" run "say hi again" 2>&1 )"; rc=$?
 case "$out" in
   *"spend gate"*|*"PAID LANE"*) bad "r3.2 default-run: offline bare run asked for spend" ;;
