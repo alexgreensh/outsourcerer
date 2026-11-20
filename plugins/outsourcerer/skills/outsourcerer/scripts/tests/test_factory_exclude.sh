@@ -187,14 +187,43 @@ r="$(lib '_lane_down_active() { return 1; }; _fallback_lane_ready() { return 0; 
 o="$(lib '_escalate_ladder "" ""' 2>&1)"
 grep -q '^fable$' <<<"$o" && bad "escalate ladder kept fable: $o" \
   || { grep -q 'dropping ladder rung fable' <<<"$o" && ok "escalate default ladder drops the excluded rung, out loud" || bad "ladder notice: $o"; }
-: > "$OSRC_HOME/benchmarks.json"
-r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --json --effort max "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null)"
-if printf '%s' "$r" | jq -e '.recommendation.alias' >/dev/null 2>&1; then
-  grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)')" \
-    && bad "advise --json still lists a fable model" || ok "advise --json (recommendation + shortlist) never contains an excluded model"
-else bad "advise --json produced no JSON: $(printf '%s' "$r" | head -c 300)"; fi
-r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --effort max "architect a hard distributed consensus redesign" 2>&1)"
-grep -qi fable <<<"$r" && bad "advise text lists fable" || ok "advise text output never names an excluded model"
+# advise only lists catalog lanes since 0.17.4, so the fixture seeds a benchmark cache with a fable
+# model and an allowed one, and gives each a lane in models.local. A control home with no exclude
+# list proves fable is listed when allowed, so its absence below is the exclude list's doing.
+_seed_advise() {  # <state dir>
+  mkdir -p "$1/catalogs"
+  cat > "$1/benchmarks.json" <<'BJSON'
+{"data":[
+ {"model_permaslug":"anthropic/claude-5-fable-20260601","intelligence_index":60.2,"coding_index":78.0,"agentic_index":57,"pricing":{"prompt":"0.000015","completion":"0.000075"}},
+ {"model_permaslug":"z-ai/glm-5.2-20260616","intelligence_index":51.1,"coding_index":68.8,"agentic_index":43.1,"pricing":{"prompt":"0.0000014","completion":"0.0000044"}}],
+ "meta":{"as_of":"2026-11-19T00:00:00.000Z","model_count":2}}
+BJSON
+  printf 'fable|anthropic/claude-5-fable|cc|raw\nglm-5.2|z-ai/glm-5.2|or|raw\n' > "$1/models.local"
+}
+_adv() {  # <state dir> <args...> -> advise output with that state dir's exclude list and cache
+  local d="$1"; shift
+  OSRC_HOME="$d" OSRC_BENCH_JSON="$d/benchmarks.json" run advise "$@" "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null
+}
+CTL="$TMP/state-advise-control"; mkdir -p "$CTL"; _seed_advise "$CTL"; _seed_advise "$OSRC_HOME"
+r="$(_adv "$CTL" --json --effort max)"
+grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.candidates[].model' 2>/dev/null)" \
+  && ok "control: with no exclude list advise --json lists the fable model" || bad "control: advise did not list fable without an exclude list: $(printf '%s' "$r" | head -c 300)"
+r="$(_adv "$OSRC_HOME" --json --effort max)"
+if printf '%s' "$r" | jq -e '.candidates | length > 0' >/dev/null 2>&1; then
+  grep -qi fable <<<"$(printf '%s' "$r" | jq -r '[.recommendation.alias?, .recommendation.model?, (.shortlist[]? | .alias, .model), (.candidates[] | .alias?, .model?)] | .[] | select(. != null)')" \
+    && bad "advise --json still lists a fable model" || ok "advise --json (recommendation + shortlist + candidates) never contains an excluded model"
+else bad "advise --json produced no candidates: $(printf '%s' "$r" | head -c 300)"; fi
+# Text output: an excluded model may be named in the "skipped:" notice, but it must never be a
+# candidate row, the picked model, or the suggested command. The control home proves the same
+# patterns do match a fable candidate when nothing is excluded.
+_advt() { OSRC_HOME="$1" OSRC_BENCH_JSON="$1/benchmarks.json" run advise --effort max "architect a hard distributed consensus redesign" 2>&1; }
+_fable_picked() { grep -Ei '^[[:space:]]*model:.*fable|^[[:space:]]*[a-z0-9/.-]*fable[a-z0-9/.-]* lane=|^Run with:.*fable' <<<"$1"; }
+rc_t="$(_advt "$CTL")"; r="$(_advt "$OSRC_HOME")"
+[ -n "$(_fable_picked "$rc_t")" ] || [ -n "$(grep -Ei 'fable.* lane=' <<<"$rc_t")" ] \
+  && ok "control: advise text lists the fable candidate when nothing is excluded" || bad "control: advise text never showed fable without an exclude list: $(printf '%s' "$rc_t" | head -c 300)"
+grep -qi 'lane=' <<<"$r" || bad "advise text lists no candidate at all (fixture broken): $(printf '%s' "$r" | head -c 200)"
+[ -z "$(_fable_picked "$r")" ] && ! grep -Eqi 'fable.* lane=' <<<"$r" \
+  && ok "advise text never picks or lists an excluded model as a candidate" || bad "advise text offers fable: $(printf '%s' "$r" | head -c 300)"
 
 # second-opinion: default premium judge (fable) swaps to the next allowed premium and says so
 SO='_so_run() { echo "$1" >> "$SOLOG"; echo "answer from $1 $RANDOM"; }; _so_agree() { return 1; }; record_ledger() { :; }
