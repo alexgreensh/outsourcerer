@@ -15,6 +15,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+ADVISE_LIB="$SCRIPT_DIR/../lib/advise.sh"   # cmd_advise lives here since 0.17.4
+[ -f "$ADVISE_LIB" ] || { echo "FAIL: cannot find $ADVISE_LIB"; exit 1; }
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 
@@ -132,10 +134,39 @@ OSRC_MODEL_DENYLIST="z-ai/glm-5.2" _model_denied "$(resolve_model_row glm | cut 
   || bad "a denied model was reachable through one of its aliases"
 
 # --- both enforcement points are wired, and neither is the only one ---
-case "$(body_of cmd_advise)" in
-  *_model_denied*) ok "advise filters denied models out of its candidate scoring" ;;
-  *) bad "advise can still recommend a denied model" ;;
+# cmd_advise hands the denylist to the scorer in lib/advise.sh; the behavioural check below proves
+# the scorer honours it, so this only pins that the hand-off is still wired.
+case "$(awk '/^cmd_advise\(\)/,/^}/' "$ADVISE_LIB")" in
+  *OSRC_MODEL_DENYLIST*) ok "advise passes the denylist to its candidate scoring" ;;
+  *) bad "advise no longer passes OSRC_MODEL_DENYLIST to its scorer" ;;
 esac
+# Behaviour: with a seeded benchmark cache and two candidates, a denied model must disappear from
+# advise output, and must be present without the denylist (so the absence is the denylist's doing).
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+  _adv_json() {  # <denylist> -> the candidate model ids advise lists, one per line
+    ( refresh_benchmarks() { return 1; }
+      OSRC_MODEL_DENYLIST="$1" cmd_advise --json "refactor the parser" 2>/dev/null | jq -r '.candidates[].model' )
+  }
+  mkdir -p "$OSRC_HOME/catalogs"
+  cat > "$OSRC_BENCH_JSON" <<'BJSON'
+{"data":[
+ {"model_permaslug":"openai/gpt-5.6-sol-20260709","intelligence_index":58.9,"coding_index":77.4,"agentic_index":54,"pricing":{"prompt":"0.000005","completion":"0.00003"}},
+ {"model_permaslug":"z-ai/glm-5.2-20260616","intelligence_index":51.1,"coding_index":68.8,"agentic_index":43.1,"pricing":{"prompt":"0.0000014","completion":"0.0000044"}}],
+ "meta":{"as_of":"2026-11-19T00:00:00.000Z","model_count":2}}
+BJSON
+  printf 'gpt-5.6-sol|openai/gpt-5.6-sol|cx|raw\nglm-5.2|z-ai/glm-5.2|or|raw\n' > "$OSRC_HOME/models.local"
+  _open="$(_adv_json "")"; _denied="$(_adv_json "openai/gpt-5.6-sol")"
+  case "$_open" in *openai/gpt-5.6-sol*) ok "control: without a denylist advise lists the model" ;;
+    *) bad "control failed: advise did not list openai/gpt-5.6-sol with no denylist: $_open" ;; esac
+  case "$_denied" in
+    *openai/gpt-5.6-sol*) bad "advise listed a denied model: $_denied" ;;
+    *z-ai/glm-5.2*) ok "advise drops a denied model and keeps the allowed one" ;;
+    *) bad "denylist emptied advise instead of filtering one model: '$_denied'" ;;
+  esac
+  rm -f "$OSRC_HOME/models.local"
+else
+  echo "SKIP: jq or python3 absent (advise behaviour check)"
+fi
 case "$(body_of route_delegate)" in
   *_model_denied*) ok "dispatch refuses a denied model, so an explicit -m cannot bypass the list" ;;
   *) bad "-m <denied> still reaches a delegate" ;;
