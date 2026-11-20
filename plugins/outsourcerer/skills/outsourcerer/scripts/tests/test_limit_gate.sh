@@ -347,16 +347,40 @@ esac
 
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: advise excludes the exhausted lane outright. cx candidates must not appear, and the
-# conservation line must name the exclusion.
+# output must name the exclusion ("skipped: cx"). Since 0.17.4 advise only knows the lanes in its
+# catalog, so the fixture gives cx a model through Codex's own models cache, exactly as a real
+# install does; with no cx catalog there is nothing to exclude and nothing to name.
 # ---------------------------------------------------------------------------------------------------
 H5="$TMP/ih5"; HH5="$TMP/hh5"; mkdir -p "$H5" "$HH5"
 fake_codex_rollout "$HH5" 98
+printf '{"models":[{"slug":"gpt-5.6-sol","visibility":"list"}]}' > "$HH5/.codex/models_cache.json"
 out="$( PATH="$FAKEBIN:$PATH" HOME="$HH5" OSRC_HOME="$H5" OSRC_SOURCED= \
     bash "$SRC" advise "refactor the parser" 2>&1 )"
 case "$out" in
-  *"codexwk=98"*"excluded"*|*"excluded"*"codexwk=98"*)
-    ok "integration: advise names the cx exclusion (codexwk=98 >= 90%)" ;;
+  *"skipped: cx"*)
+    case "$out" in
+      *"gpt-5.6-sol lane=cx"*) bad "integration: advise still lists a cx candidate while cx is over the line: $out" ;;
+      *"limit-gate: codexwk=98 >= 90% -> cx excluded"*) ok "integration: advise names the cx exclusion with its reason and lists no cx candidate" ;;
+      *) bad "integration: advise skipped cx without saying why (want 'codexwk=98 >= 90% -> cx excluded'): $out" ;;
+    esac ;;
   *) bad "integration: advise did not surface the limit exclusion: $(printf '%s' "$out" | head -5)" ;;
+esac
+outj="$( PATH="$FAKEBIN:$PATH" HOME="$HH5" OSRC_HOME="$H5" OSRC_SOURCED= \
+    bash "$SRC" advise --json "refactor the parser" 2>&1 )"
+[ "$(printf '%s' "$outj" | jq -r '.limit_gate_reasons // empty' 2>/dev/null)" = "codexwk=98 >= 90% -> cx excluded" ] \
+  && ok "integration: advise --json carries the limit reason as limit_gate_reasons" \
+  || bad "integration: advise --json lost the limit reason: $(printf '%s' "$outj" | head -c 300)"
+# Control: the same fixture under the line lists the cx candidate and names no exclusion, so the
+# result above is the gate's doing and not a missing catalog.
+H6="$TMP/ih6"; HH6="$TMP/hh6"; mkdir -p "$H6" "$HH6"
+fake_codex_rollout "$HH6" 40
+printf '{"models":[{"slug":"gpt-5.6-sol","visibility":"list"}]}' > "$HH6/.codex/models_cache.json"
+out6="$( PATH="$FAKEBIN:$PATH" HOME="$HH6" OSRC_HOME="$H6" OSRC_SOURCED= \
+    bash "$SRC" advise "refactor the parser" 2>&1 )"
+case "$out6" in
+  *"skipped: cx"*|*"limit-gate:"*) bad "integration control: advise gated cx at 40% weekly: $out6" ;;
+  *"gpt-5.6-sol lane=cx"*) ok "integration control: under the line advise lists the cx candidate and skips nothing" ;;
+  *) bad "integration control: cx candidate missing from the fixture catalog: $(printf '%s' "$out6" | head -8)" ;;
 esac
 # The recommended lane must not be cx while it is exhausted.
 rec_lane="$(printf '%s\n' "$out" | grep -o 'lane=[a-z]*' | head -1)"
