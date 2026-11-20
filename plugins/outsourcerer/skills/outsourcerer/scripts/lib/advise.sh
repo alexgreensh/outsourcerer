@@ -49,16 +49,19 @@ cmd_advise() {
     case "$difficulty" in hard) selection_effort=high ;; light) selection_effort=low ;; *) selection_effort=medium ;; esac
   fi
 
-  local candidate_rows lanes lane limits="" skipped="" plans=" dv " names hits="" name
+  local candidate_rows lanes lane limits="" skipped="" limit_notes="" plans=" dv " names hits="" name reading
   local -a check_names
   candidate_rows="$(_advise_catalog)"
   lanes="$(awk -F'|' 'NF==4 && !seen[$3]++ {print $3}' <<<"$candidate_rows")"
   [ "${OSRC_LANE_LIMIT_GATE:-1}" = 0 ] || limits="$(_session_limits 2>/dev/null)"
   for lane in $lanes; do
     [ "$(_lane_field "$lane" plan_limited)" != yes ] || plans="$plans$lane "
-    if [ "$(_lane_field "$lane" image_lane)" = yes ] || _model_excluded "$lane" ||
-       { [ -n "$limits" ] && _osrc_limit_exceeded "$lane" "$limits"; }; then
+    if [ "$(_lane_field "$lane" image_lane)" = yes ] || _model_excluded "$lane"; then
       skipped="$skipped $lane"
+    elif [ -n "$limits" ] && _osrc_limit_exceeded "$lane" "$limits"; then
+      skipped="$skipped $lane"
+      reading="$(_osrc_lane_limit "$lane" "$limits" 2>/dev/null)"
+      limit_notes="${limit_notes:+$limit_notes; }${reading:-$lane} >= $(_osrc_limit_threshold)% -> $lane excluded"
     fi
   done
   if _exclude_active; then
@@ -81,7 +84,9 @@ cmd_advise() {
   fi
   if [ "$json_out" = 1 ]; then
     jq --arg task "$task" --arg effort "$selection_effort" --arg basis "$basis" --arg stale "$stale" \
+      --arg limits "$limit_notes" \
       --arg history "$history" '.task=$task | .effort=$effort | .benchmark_stale=($stale!="")
+      | if $limits != "" then .limit_gate_reasons=$limits else . end
       | if .recommendation then .recommendation.cost_basis=$basis else . end
       | ($history|split("|")) as $h | .history={multiplier:($h[0]|tonumber? // 1),
         effective_samples:($h[1]|tonumber? // 0),passed_effective:($h[2]|tonumber? // 0),scope:$h[3]}' <<<"$report"
@@ -91,8 +96,9 @@ cmd_advise() {
     echo "   category: $category"
     echo "   difficulty: $difficulty"
     echo "   effort: $selection_effort"
-    jq -r '"   scoring by: \(.score_field) (threshold: \(.threshold))",
+    jq -r --arg limits "$limit_notes" '"   scoring by: \(.score_field) (threshold: \(.threshold))",
       "   benchmark coverage: \(.benchmark_coverage)",
+      (select($limits != "") | "   limit-gate: \($limits) (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"),
       (select(.limit_gate) | "   skipped: \(.limit_gate)"),
       (if .recommendation then "   model: \(.recommendation.alias) (\(.recommendation.model))",
        "   lane:  \(.recommendation.lane)", "   why:   \(.recommendation.reason)"
@@ -145,7 +151,7 @@ bench, models, category, legacy, percentile, difficulty, skipped, denied, router
 
 def cache(path):
     try:
-        with open(path) as stream:
+        with open(path, encoding="utf-8") as stream:
             data = json.load(stream)
             return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -188,13 +194,13 @@ for r in cache(models).get("data", []):
         if catalog_prices[r["id"]] is not None:
             family_prices[key] = catalog_prices[r["id"]]
 
-with open(hits) as stream:
+with open(hits, encoding="utf-8") as stream:
     excluded = dict(line.rstrip().split("\t", 2)[:2] for line in stream if "\t" in line)
 skips = set(skipped.split())
 notes = sorted(skips)
 patterns = denied.replace(",", " ").split()
 rows, seen = [], set()
-for line in open("/dev/fd/4"):
+for line in open("/dev/fd/4", encoding="utf-8"):
     parts = line.rstrip().split("|")
     if len(parts) != 4 or not all(parts):
         continue
