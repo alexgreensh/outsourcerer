@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_plan_probe.sh -- PL (0.16.3): every plan on the Mission Control plans card is checked on its own.
-# Alex: "there IS NO EXCUSE to write 'not checked yet'." Fake CLIs on PATH (never the real ones):
+# test_plan_probe.sh -- every plan on the Mission Control plans card is checked on its own (0.16.3).
+# "there IS NO EXCUSE to write 'not checked yet'." Fake CLIs on PATH (never the real ones):
 #   codex   answers `app-server` JSON-RPC account/rateLimits/read (the shape the real 0.169 returns)
 #   agy     a fake TUI that draws the REAL captured `/usage` screen (fixtures/agy-usage-screen.txt) when
 #           `/usage` is typed; read through a private tmux server named osrc-test-PL-* with its own TMUX_TMPDIR
@@ -140,11 +140,11 @@ grep -q '@' <<<"$R" && bad "agy: an account email leaked into the feed" || ok "a
 if [ -n "$(ls "$TX"/*/ 2>/dev/null | grep -v '^osrc-test-PL' || true)" ]; then bad "agy: probe used a tmux socket not named osrc-test-PL*"; else ok "agy: probe tmux server is private and test-named"; fi
 
 R="$(row devin)"
-jq -e '.state == "ok" and .left == "Free · no limit" and (.note | test("Pro plan: 2 models are free")) and (.note | test("cloud quota"))' >/dev/null <<<"$R" && ok "devin: Free · no limit + cloud quota note, Pro plan, only true Free rows counted" || bad "devin: $R"
+jq -e '.state == "ok" and .left == "Pro subscription" and (.note | test("Pro subscription \\(paid monthly, not free\\): 2 models come with no per-use charge")) and (.note | test("cloud quota"))' >/dev/null <<<"$R" && ok "devin: Free · no limit + cloud quota note, Pro plan, only true Free rows counted" || bad "devin: $R"
 grep -qE 'fixture@example|Fixture Person' <<<"$J" && bad "devin: name/email leaked" || ok "devin: name and email never leave the probe"
 
 R="$(row droid)"
-jq -e '.state == "ok" and .left == "Pay per use" and (.note | test("Signed in to Factory")) and (.note | test("No cap set"))' >/dev/null <<<"$R" && ok "droid: pay per use, sign-in proven, no cap" || bad "droid: $R"
+jq -e '.state == "ok" and .left == "Subscription" and (.note | test("Signed in to Factory")) and (.note | test("No cap set"))' >/dev/null <<<"$R" && ok "droid: pay per use, sign-in proven, no cap" || bad "droid: $R"
 
 R="$(row claude)"
 jq -e '.left == "70% left" and .windows.claude5h.left == 70 and .windows.claude7d.left == 77 and (.note | test("Last reading 40 min ago"))' >/dev/null <<<"$R" \

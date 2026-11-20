@@ -9,6 +9,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+SRC_LIB="$SRC $SCRIPT_DIR/../lib/advise.sh $SCRIPT_DIR/../lib/advise-score.sh $SCRIPT_DIR/../lib/advise-fetch.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent"; echo "RESULT: 0 passed, 0 failed"; exit 0; }
 
@@ -69,9 +70,9 @@ lane_byok="$(cmd_advise --json --effort max "refactor the auth module" 2>/dev/nu
 [ "$lane_byok" = "or" ] && ok "byok/no-free: model stays on its priced or lane (no unknown-cost win)" || bad "byok: lane '$lane_byok' (want or)"
 
 # === Source invariants ===
-grep -q 'OSRC_ADVISE_ROUTER' "$SRC" && ok "OSRC_ADVISE_ROUTER documented" || bad "OSRC_ADVISE_ROUTER not documented"
-grep -q '_model_canon_key' "$SRC" && ok "_model_canon_key present" || bad "_model_canon_key missing"
-grep -q '_lane_marginal_cost' "$SRC" && ok "_lane_marginal_cost present" || bad "_lane_marginal_cost missing"
+grep -q 'OSRC_ADVISE_ROUTER' $SRC_LIB && ok "OSRC_ADVISE_ROUTER documented" || bad "OSRC_ADVISE_ROUTER not documented"
+grep -q '_model_canon_key' $SRC_LIB && ok "_model_canon_key present" || bad "_model_canon_key missing"
+grep -q '_lane_marginal_cost' $SRC_LIB && ok "_lane_marginal_cost present" || bad "_lane_marginal_cost missing"
 grep -q 'test_value_router' "$TESTS_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
 
 echo

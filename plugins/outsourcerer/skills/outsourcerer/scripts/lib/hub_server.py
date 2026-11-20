@@ -11,6 +11,7 @@ state under OSRC_HOME actually changed (idle dashboards cost no CPU).
 """
 import argparse
 import base64
+import glob
 import hashlib
 import hmac
 import json
@@ -39,19 +40,22 @@ class HubHTTPServer(ThreadingHTTPServer):
         self.server_port = port
 
 REFRESH_SECS = int(os.environ.get("OSRC_HUB_REFRESH_SECS") or 30)
+SNAP_EXPORT_SECS = int(os.environ.get("OSRC_HUB_SNAP_SECS") or 25)
 # A first GET /api/projects waits this long for the startup export, then answers {"starting": true}
-# so the page (15 s fetch abort) keeps "Loading" and asks again instead of failing (MC-8 r2).
+# so the page (15 s fetch abort) keeps "Loading" and asks again instead of failing.
 STARTING_WAIT = float(os.environ.get("OSRC_HUB_STARTING_WAIT") or 10)
 IDLE_SECS = int(os.environ.get("OSRC_HUB_IDLE_SECS") or 300)
 ANSWER_MAX = 16384
 # Directories whose mtimes count as "state changed" for the refresh loop.
 # Every tree the export reads must be here or a change under it never wakes
-# a re-export (r4 smaller: autodetach and review were missing).
+# a re-export (autodetach and review are included).
 WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")
+# Under hub/, only these hold user state the export reads; the rest is bookkeeping.
+HUB_WATCH_SUBDIRS = ("decisions", "projects", "status", "seen")
 WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
-# Always fullmatch: re.match with "$" also accepts a trailing newline (MC-5 #5).
+# Always fullmatch: re.match with "$" also accepts a trailing newline.
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
@@ -91,15 +95,20 @@ class Hub:
         self.export_lock = threading.Lock()
         self.last_poll = time.time()
         self.last_state_mtime = -1.0
+        self._scan = {}            # path -> mtime from the latest state_mtime walk
+        self._prev_scan = {}       # the scan absorbed by the last export
         # Set once the first export has finished (ok or not). main() prints the URL before that
-        # export runs (a slow export kept the URL back past the CI wait, MC-8); data requests wait here.
+        # export runs (a slow export kept the URL back past the CI wait); data requests wait here.
         self.first_export = threading.Event()
         self.warming = False       # serving the last saved export while the startup export runs
         self.fresh_export = threading.Event()   # the startup export itself finished (warm start or not)
-        # CSP hashes for the page's inline <script> blocks, computed once so
-        # script-src can drop 'unsafe-inline' (r4 finding 2). The page is one
-        # self-contained file, so its blocks are knowable at startup.
-        self.script_hashes = self._script_hashes()
+        # CSP hashes for the page's inline <script> blocks, computed lazily so
+        # script-src can drop 'unsafe-inline'. The page file can be
+        # replaced under a running server (an upgrade), so the hash is never
+        # frozen at startup: GET / hashes the exact bytes it serves, other routes
+        # use a cache keyed by the page's (mtime, size).
+        self._hash_key = None
+        self._hashes = []
         self.tab_seen = 0.0
         self.keys_file = os.path.join(osrc_home, "hub", "keys.json")
         self.remember_key()
@@ -166,34 +175,167 @@ class Hub:
         self.tab_seen = now
         _write_small(os.path.join(self.osrc_home, "hub", "tab.seen"), "%d\n" % int(now))
 
-    def _script_hashes(self):
-        try:
-            with open(self.page_path, "rb") as f:
-                data = f.read()
-        except OSError:
-            return []
+    @staticmethod
+    def _hashes_of(data):
         return [
             "sha256-" + base64.b64encode(hashlib.sha256(m.group(1)).digest()).decode()
             for m in re.finditer(rb"<script>(.*?)</script>", data, re.S)
         ]
 
+    def script_hashes(self, data=None):
+        # data given: hash exactly those bytes (the response being sent). Otherwise
+        # read page_path, cached on (mtime, size) so an upgraded page never keeps
+        # serving the startup hash — a stale hash makes the browser block the
+        # inline script and the page hangs on 'Loading your projects'.
+        if data is not None:
+            return self._hashes_of(data)
+        try:
+            st = os.stat(self.page_path)
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return []
+        if self._hash_key == key:
+            return self._hashes
+        try:
+            with open(self.page_path, "rb") as f:
+                page = f.read()
+        except OSError:
+            return []
+        self._hash_key = key
+        self._hashes = self._hashes_of(page)
+        return self._hashes
+
     def state_mtime(self):
-        # Newest mtime anywhere state can live; cheap walk, no file reads.
+        # Newest mtime anywhere state can live; cheap walk, no file reads. The per-path
+        # map is kept so a later change can be attributed to a single project (incremental
+        # merge in _projects_snapshot) instead of paying for a full export every edit.
         best = 0.0
+        scan = {}
         for name in WATCH_FILES:
+            p = os.path.join(self.osrc_home, name)
             try:
-                best = max(best, os.path.getmtime(os.path.join(self.osrc_home, name)))
+                scan[p] = os.path.getmtime(p)
+                best = max(best, scan[p])
             except OSError:
                 pass
         for sub in WATCH_DIRS:
             root = os.path.join(self.osrc_home, sub)
-            for dirpath, _dirnames, filenames in os.walk(root):
+            for dirpath, dirnames, filenames in os.walk(root):
+                if dirpath == root and sub == "hub":
+                    # Everything else under hub/ is export/server bookkeeping (caches,
+                    # titles, probes, token, export.json); their writes must not wake
+                    # another export or an export would chain forever.
+                    dirnames[:] = [d for d in dirnames if d in HUB_WATCH_SUBDIRS]
                 for n in filenames:
+                    if sub == "hub" and dirpath == root:
+                        continue
+                    p = os.path.join(dirpath, n)
                     try:
-                        best = max(best, os.path.getmtime(os.path.join(dirpath, n)))
+                        scan[p] = os.path.getmtime(p)
+                        best = max(best, scan[p])
                     except OSError:
                         continue
+        self._scan = scan
         return best
+
+    _IGNORE = 0   # _slug_for_path sentinel: our own bookkeeping, never blocks a merge
+
+    def _slug_for_path(self, path):
+        # The project a changed state file belongs to, _IGNORE for server-written
+        # bookkeeping (caches, token, answers, the export file itself), None when the
+        # path can't be attributed (forces a full export).
+        rel = os.path.relpath(path, self.osrc_home)
+        parts = rel.split(os.sep)
+        if len(parts) < 2:
+            return self._IGNORE
+        if parts[0] == "hub":
+            if parts[1] in ("decisions", "projects", "status") and len(parts) == 3 \
+                    and parts[2].endswith(".json"):
+                slug = parts[2][:-5]
+                return slug if SLUG_RE.fullmatch(slug) else None
+            if parts[1] == "seen" and len(parts) >= 3:
+                slug = parts[2]
+                return slug if SLUG_RE.fullmatch(slug) else None
+            return self._IGNORE   # hub/cache, titles-v4, answers, token, export.json
+        if parts[0] == "owners":
+            if len(parts) < 3:
+                return None       # a slug dir itself appeared or vanished
+            slug = parts[1]
+            return slug if SLUG_RE.fullmatch(slug) else None
+        if parts[0] in ("jobs", "remote", "autodetach", "review"):
+            lane = parts[1]
+            for owner in glob.glob(os.path.join(self.osrc_home, "owners", "*", lane)):
+                slug = os.path.basename(os.path.dirname(owner))
+                if SLUG_RE.fullmatch(slug):
+                    return slug
+            return self._IGNORE   # lane no project claims: nothing to merge into
+        return None               # WATCH_FILES and anything unexpected
+
+    def _single_changed_slug(self):
+        # One slug when every changed path since the last absorbed scan belongs to the
+        # same project (and that project is in the served list), else None.
+        slugs = set()
+        prev = self._prev_scan
+        scan = self._scan
+        for p, m in scan.items():
+            if prev.get(p) != m:
+                s = self._slug_for_path(p)
+                if s is self._IGNORE:
+                    continue
+                if s is None:
+                    return None
+                slugs.add(s)
+        for p in prev:
+            if p not in scan:
+                s = self._slug_for_path(p)
+                if s is self._IGNORE:
+                    continue
+                if s is None:
+                    return None
+                slugs.add(s)
+        if len(slugs) != 1:
+            return None
+        slug = slugs.pop()
+        with self.lock:
+            cached = self.cache
+        ids = {p.get("id") for p in cached.get("projects", [])} if cached else set()
+        return slug if slug in ids else None
+
+    def _merge_project_export(self, slug, timeout):
+        # Rebuild just this project and splice it into the served snapshot. The periodic
+        # refresh loop still runs full exports, so a merged doc self-corrects (e.g. a
+        # project that dropped out of the visible list) within REFRESH_SECS + 10.
+        env = dict(os.environ)
+        env["OSRC_HOME"] = self.osrc_home
+        env.setdefault("OSRC_HUB_FAST", "1")
+        proc = subprocess.run(
+            [self.engine, "hub", "export", "--project", slug],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, env=env,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "export failed").strip()[:300])
+        doc = json.loads(proc.stdout)
+        if not isinstance(doc, dict) or not isinstance(doc.get("projects"), list):
+            raise RuntimeError("export output is not a SCHEMA document")
+        pj = doc["projects"][0] if doc["projects"] else None
+        with self.lock:
+            data = dict(self.cache)
+            projects = [pj if isinstance(pj, dict) and p.get("id") == slug else p
+                        for p in data.get("projects", [])]
+            if pj is None:
+                projects = [p for p in data.get("projects", []) if p.get("id") != slug]
+            data["projects"] = projects
+            data["generated_at"] = int(time.time())
+        data["exported_at"] = int(time.time())
+        data = self._with_status(data)
+        self._safe_write("", "export.json", data)
+        with self.lock:
+            self.cache = data
+            self.cache_ts = time.time()
+            self.export_error = ""
+        self.last_state_mtime = self.state_mtime()
+        self._prev_scan = self._scan
+        return data
 
     def run_export(self, timeout=300, force=False, check_plans=False):
         requested = time.monotonic()
@@ -204,7 +346,8 @@ class Hub:
             if not self.export_lock.acquire(timeout=max(0, deadline - time.monotonic())):
                 raise TimeoutError("plans check timed out waiting for export")
         else:
-            self.export_lock.acquire()
+            if not self.export_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+                raise TimeoutError("export timed out waiting for the lock")
         try:
             if check_plans and self.plans_finished >= requested:
                 return self.cache
@@ -222,7 +365,7 @@ class Hub:
     def _export(self, timeout, force, check_plans):
         env = dict(os.environ)
         env["OSRC_HOME"] = self.osrc_home
-        # Settled-project cache + stale-while-revalidate limits (hub-perf.sh, MC2 r2 #4).
+        # Settled-project cache + stale-while-revalidate limits (hub-perf.sh).
         env.setdefault("OSRC_HUB_FAST", "1")
         if force:
             env["OSRC_HUB_REFRESH"] = "1"
@@ -246,6 +389,7 @@ class Hub:
             self.cache_ts = time.time()
             self.export_error = ""
         self.last_state_mtime = self.state_mtime()
+        self._prev_scan = self._scan
         return data
 
     def refresh_loop(self):
@@ -310,8 +454,22 @@ class Hub:
     def _projects_snapshot(self):
         self.first_export.wait(timeout=95)   # the startup export, not a second one racing it
         with self.lock:
-            if self.cache is not None:
-                return self.cache, self.export_error
+            cached = self.cache
+        if cached is not None:
+            # A state change since the last export re-exports inline: per-project caches make it an
+            # incremental export, so a card/decision edit lands in seconds, not on the poll tick.
+            if not self.export_lock.locked() and self.state_mtime() != self.last_state_mtime:
+                try:
+                    slug = self._single_changed_slug()
+                    if slug is not None:
+                        return self._merge_project_export(slug, timeout=SNAP_EXPORT_SECS), ""
+                    return self.run_export(timeout=SNAP_EXPORT_SECS), ""
+                except Exception as e:
+                    with self.lock:
+                        if self.cache is not None:
+                            return self.cache, str(e)[:300]
+                    return {"generated_at": int(time.time()), "projects": []}, str(e)[:300]
+            return cached, self.export_error
         try:
             return self.run_export(), ""
         except Exception as e:
@@ -349,7 +507,7 @@ class Hub:
         if note is None:
             note = ""
         # The page offers "your own answer" in the note, so a note alone is a full
-        # answer (MC-4: a typed-only answer used to 400 and vanish). One of the two
+        # answer (a typed-only answer used to 400 and vanish). One of the two
         # must carry text.
         if not isinstance(choice, str) or len(choice) > 4000:
             return None, "bad choice"
@@ -371,7 +529,7 @@ class Hub:
             return None, "cannot write answer: %s" % str(e)[:200]
         return rec, None
 
-    # ---- symlink-safe writes (MC-5 #3) ----------------------------------------------------
+    # ---- symlink-safe writes ----------------------------------------------------------------
     # Every file the server writes lives in <osrc_home>/hub[/<sub>]. A planted symlink (the
     # folder, the target, or a guessable temp name) must never redirect a write: the folder
     # must resolve to exactly where it should be, the temp file is created exclusively with
@@ -429,7 +587,7 @@ class Hub:
             rec = {"status": "shipped", "shippedAt": iso, "shippedBy": "user",
                    "prevStatus": prev}
         else:
-            # Move back (MC-5 #2): remember what the card said about shipping at
+            # Move back: remember what the card said about shipping at
             # click time. The restore holds through any number of card rewrites
             # (orchestrators rewrite the whole card to bump pct or the stamp) and
             # yields only when the card says something new about shipping: a
@@ -486,10 +644,10 @@ def make_handler(hub):
             # X-Hub-Token is the only credential, and it only guards data
             # routes. GET / and /assets/* are static and carry no state, so
             # they need none — which is what keeps a reload working after the
-            # page strips ?t= from the address bar (r4 finding 1). ?t= itself
+            # page strips ?t= from the address bar. ?t= itself
             # is read by the page's own script into sessionStorage; the server
             # never reads it, so a token never sits in an API URL or a log
-            # line (review A3). No cookie exists (review finding 4).
+            # line. No cookie exists.
             t = self.headers.get("X-Hub-Token", "")
             # compare_digest needs bytes on both sides; a non-ASCII token must not raise.
             return hmac.compare_digest(t.encode("utf-8", "replace"), hub.token.encode("utf-8"))
@@ -509,15 +667,17 @@ def make_handler(hub):
                 return False
             return True
 
-        def _sec_headers(self):
+        def _sec_headers(self, hashes=None):
             # Strict CSP: everything the page loads comes from this server.
             # The inline script is whitelisted by hash rather than
-            # 'unsafe-inline' (r4 finding 2); inline style stays allowed
+            # 'unsafe-inline'; inline style stays allowed
             # because style attributes pepper the markup and hashes cannot
-            # cover those. Nothing remote is reachable regardless (review A2).
+            # cover those. Nothing remote is reachable regardless.
+            if hashes is None:
+                hashes = hub.script_hashes()
             script_src = "script-src 'self'"
-            if hub.script_hashes:
-                script_src += " " + " ".join("'%s'" % h for h in hub.script_hashes)
+            if hashes:
+                script_src += " " + " ".join("'%s'" % h for h in hashes)
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; %s; "
@@ -594,7 +754,7 @@ def make_handler(hub):
                 # served without the token so a reload (which stripped ?t=)
                 # and a bare URL still render. With no token the page itself
                 # says to open the link `hub serve` printed; the API behind
-                # it stays header-token only (r4 finding 1).
+                # it stays header-token only.
                 hub.last_poll = time.time()
                 try:
                     with open(hub.page_path, "rb") as f:
@@ -602,7 +762,9 @@ def make_handler(hub):
                 except OSError:
                     return self._send_json({"error": "page missing"}, 500)
                 self.send_response(200)
-                self._sec_headers()
+                # Hash the exact bytes about to be served: an upgraded page file
+                # must never keep the hash it had at server start.
+                self._sec_headers(hub.script_hashes(data))
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
@@ -646,7 +808,7 @@ def make_handler(hub):
                 if u.query != "plans":
                     hub.fresh_export.wait()
                 try:
-                    data = hub.run_export(force=True, check_plans=(u.query == "plans"))
+                    data = hub.run_export(check_plans=(u.query == "plans"))
                 except Exception as e:
                     return self._send_json({"error": str(e)[:300]}, 500)
                 return self._send_json(data)
@@ -703,8 +865,18 @@ def main():
         sys.stderr.write("[hub] port %d busy — serving on %d instead\n" % (args.port, port))
     url = "http://127.0.0.1:%d/?t=%s" % (port, urllib.parse.quote(token))
     # Who serves this OSRC_HOME, so work starting can open the page once per hub process.
+    # engine+ver let `mc` spot a hub still running an older install's code and restart it.
     serve_json = os.path.join(args.osrc_home, "hub", "serve.json")
-    _write_small(serve_json, json.dumps({"pid": os.getpid(), "port": port, "started": int(time.time())}) + "\n")
+    eng_rp = os.path.realpath(args.engine)
+    ver = ""
+    try:
+        with open(eng_rp, "r", errors="replace") as ef:
+            m = re.search(r'^OSRC_VERSION="([^"]+)"', ef.read(65536), re.M)
+            ver = m.group(1) if m else ""
+    except OSError:
+        pass
+    _write_small(serve_json, json.dumps({"pid": os.getpid(), "port": port, "started": int(time.time()),
+                                        "engine": eng_rp, "ver": ver}) + "\n")
     print("[outsourcerer] hub: %s" % url, flush=True)
 
     # The URL is out first; the first export then runs in the background and the first

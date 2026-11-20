@@ -14,6 +14,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TESTS_DIR="$SCRIPT_DIR"   # sourcing outsourcerer.sh re-points SCRIPT_DIR at scripts/; keep ours
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+SRC_LIB="$SRC $SCRIPT_DIR/../lib/advise.sh $SCRIPT_DIR/../lib/advise-score.sh $SCRIPT_DIR/../lib/advise-fetch.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq absent (dynamic pool no-ops)"; echo "RESULT: 0 passed, 0 failed"; exit 0; }
 
@@ -178,10 +179,10 @@ _dr="$(_devin_resolve_model glm 2>/dev/null)"
 unset OSRC_CATALOG_TTL
 
 # === Source-level invariants: loop swapped, hatch + cap documented, suite registered. ===
-grep -q '_advise_candidate_rows "\$field"' "$SRC" && ok "ranking loop sources _advise_candidate_rows" || bad "ranking loop not swapped"
-grep -q 'OSRC_ADVISE_DYNAMIC_POOL' "$SRC" && ok "OSRC_ADVISE_DYNAMIC_POOL documented" || bad "OSRC_ADVISE_DYNAMIC_POOL not documented"
-grep -q 'OSRC_ADVISE_DYNAMIC_MAX'  "$SRC" && ok "OSRC_ADVISE_DYNAMIC_MAX documented" || bad "OSRC_ADVISE_DYNAMIC_MAX not documented"
-grep -q '_tier_from_score' "$SRC" && ok "_tier_from_score present" || bad "_tier_from_score missing"
+grep -q '_advise_candidate_rows "\$field"' $SRC_LIB && ok "ranking loop sources _advise_candidate_rows" || bad "ranking loop not swapped"
+grep -q 'OSRC_ADVISE_DYNAMIC_POOL' $SRC_LIB && ok "OSRC_ADVISE_DYNAMIC_POOL documented" || bad "OSRC_ADVISE_DYNAMIC_POOL not documented"
+grep -q 'OSRC_ADVISE_DYNAMIC_MAX'  $SRC_LIB && ok "OSRC_ADVISE_DYNAMIC_MAX documented" || bad "OSRC_ADVISE_DYNAMIC_MAX not documented"
+grep -q '_tier_from_score' $SRC_LIB && ok "_tier_from_score present" || bad "_tier_from_score missing"
 grep -q 'test_advise_dynamic_pool' "$TESTS_DIR/conformance.sh" && ok "suite registered in conformance.sh" || bad "suite not registered"
 
 echo

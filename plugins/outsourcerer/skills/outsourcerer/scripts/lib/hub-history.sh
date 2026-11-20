@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/hub-history.sh -- Mission Control History (MC4 items 6 + 7): one timeline per project, newest first.
+# lib/hub-history.sh -- Mission Control History: one timeline per project, newest first.
 #   * Lanes: every lane that ran for the orchestrator (registry start/end, jobs meta, remote lanes), with a
 #     human name (lib/hub-lanename.sh, never an id) and an outcome: running | finished | stopped | failed.
 #   * Releases, merged/closed PRs and closed issues of the project's GitHub repo, READ-ONLY through `gh`
@@ -76,6 +76,7 @@ _osrc_hub_gh_data() {
   case "$ttl" in ''|*[!0-9]*) ttl=600 ;; esac
   f="$OSRC_HOME/hub/cache/gh-$(printf '%s' "$repo" | tr '/' '_').json"
   [ -L "$f" ] && return 0
+  [ "$ttl" = 0 ] && { _osrc_hub_gh_fetch "$repo" "$f"; cat "$f" 2>/dev/null; return 0; }   # TTL 0 = no cache: fetch now
   if [ -f "$f" ] && jq -e 'objects' "$f" >/dev/null 2>&1; then
     age=$(( $(date +%s) - $(jq -r '.fetchedAt // 0' "$f" 2>/dev/null) ))
     if [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then
@@ -112,35 +113,41 @@ _osrc_hub_history_lanes() {
     } | grep -v '^\.' | grep . | sort -u > "$led.$$" 2>/dev/null && mv -f "$led.$$" "$led" 2>/dev/null
     rm -f "$led.$$" 2>/dev/null
   fi
-  # registry lanes, one row per session: start, end, receipt, provider, model, cc session, cwd
-  local reg='[]'
-  [ -f "${OSRC_SESSION_REGISTRY:-}" ] && reg="$(jq -sc '
-    map(select(type == "object" and (.session_id | type) == "string")) | group_by(.session_id) | map(. as $ev | {
-      id: $ev[0].session_id, src: "registry",
-      start: ([$ev[] | select(.event == "start") | .ts | sub("\\.[0-9]+"; "") | fromdateiso8601? // empty] | min),
-      end: (if ($ev | last | .event) == "end" then ($ev | last | .ts | sub("\\.[0-9]+"; "") | fromdateiso8601? // null) else null end),
-      receipt: (if ($ev | last | .event) == "end" then ($ev | last | .receipt // "") else "" end),
-      model: ([$ev[] | .resolved_model // .model // empty] | last // ""),
-      cwd: ([$ev[] | .cwd // empty] | last // "")})' "$OSRC_SESSION_REGISTRY" 2>/dev/null)" || reg='[]'
-  jq -e 'arrays' >/dev/null 2>&1 <<<"$reg" || reg='[]'
-  # job lanes
-  local jobs='[]' jd st
-  for jd in "$OSRC_JOBS"/*/; do
-    [ -f "$jd/meta.json" ] || continue
-    st="$(head -1 "$jd/status" 2>/dev/null)"
-    jobs="$(jq -c --argjson a "$jobs" --arg st "$st" --arg end "$(cat "$jd/exit" >/dev/null 2>&1 && _osrc_hub_mt "$jd/exit" 2>/dev/null)" '
-      $a + [{id: (.id // ""), src: "job", start: ((.started // "0") | tostring | if test("^[0-9]+$") then tonumber else 0 end), end: ($end | if test("^[0-9]+$") then tonumber else null end),
-             status: $st, model: (.model // ""), cwd: (.worktree // .cwd // "")}]' "$jd/meta.json" 2>/dev/null)" || true
-  done
-  jq -e 'arrays' >/dev/null 2>&1 <<<"$jobs" || jobs='[]'
-  cands="$(jq -c -n --argjson r "$reg" --argjson j "$jobs" '$r + $j | map(select(.id != ""))')"
+  # Pre-built candidates across registry + jobs (ONE jq per export when hub-fast.sh is loaded).
+  local cands_tsv="" row_lines=""
+  if type _osrc_hub_history_cands_fast >/dev/null 2>&1; then
+    cands_tsv="$(_osrc_hub_history_cands_fast)"
+  else
+    local reg='[]' jobs='[]' jd st cands
+    [ -f "${OSRC_SESSION_REGISTRY:-}" ] && reg="$(jq -sc '
+      map(select(type == "object" and (.session_id | type) == "string")) | group_by(.session_id) | map(. as $ev | {
+        id: $ev[0].session_id, src: "registry",
+        start: ([$ev[] | select(.event == "start") | .ts | sub("\\.[0-9]+"; "") | fromdateiso8601? // empty] | min),
+        end: (if ($ev | last | .event) == "end" then ($ev | last | .ts | sub("\\.[0-9]+"; "") | fromdateiso8601? // null) else null end),
+        receipt: (if ($ev | last | .event) == "end" then ($ev | last | .receipt // "") else "" end),
+        model: ([$ev[] | .resolved_model // .model // empty] | last // ""),
+        cwd: ([$ev[] | .cwd // empty] | last // "")})' "$OSRC_SESSION_REGISTRY" 2>/dev/null)" || reg='[]'
+    jq -e 'arrays' >/dev/null 2>&1 <<<"$reg" || reg='[]'
+    for jd in "$OSRC_JOBS"/*/; do
+      [ -f "$jd/meta.json" ] || continue
+      st="$(head -1 "$jd/status" 2>/dev/null)"
+      jobs="$(jq -c --argjson a "$jobs" --arg st "$st" --arg end "$(cat "$jd/exit" >/dev/null 2>&1 && _osrc_hub_mt "$jd/exit" 2>/dev/null)" '
+        $a + [{id: (.id // ""), src: "job", start: ((.started // "0") | tostring | if test("^[0-9]+$") then tonumber else 0 end), end: ($end | if test("^[0-9]+$") then tonumber else null end),
+               status: $st, model: (.model // ""), cwd: (.worktree // .cwd // "")}]' "$jd/meta.json" 2>/dev/null)" || true
+    done
+    jq -e 'arrays' >/dev/null 2>&1 <<<"$jobs" || jobs='[]'
+    cands="$(jq -c -n --argjson r "$reg" --argjson j "$jobs" '$r + $j | map(select(.id != ""))')"
+    cands_tsv="$(jq -r '.[] | [.id, .src, (.start // 0 | tostring), (.end // "" | tostring), (.receipt // ""), (.status // ""), (.model // ""), (.cwd // "")] | map(gsub("[|\t\n]"; " ")) | join("|")' <<<"$cands" 2>/dev/null)"
+  fi
+  local dr=""
   while IFS='|' read -r id src start end receipt status model cwd; do   # "|": a tab IFS merges empty fields
     [ -n "$id" ] || continue
     local mine=0
     grep -qxF "$id" "$led" 2>/dev/null && mine=1
     [ "$mine" = 1 ] || case "$id" in *-"$sid8") mine=1 ;; esac
     if [ "$mine" = 0 ] && [ -n "$repo" ] && [ -n "$cwd" ] && [ "${start:-0}" -ge "${since:-0}" ] 2>/dev/null; then
-      [ "$(_osrc_hub_dir_repo "$cwd")" = "$repo" ] && ! _osrc_hub_lane_owned_elsewhere "$id" "$sid" && mine=1
+      if type _osrc_hub_dir_repo_fast >/dev/null 2>&1; then dr="$(_osrc_hub_dir_repo_fast "$cwd")"; else dr="$(_osrc_hub_dir_repo "$cwd")"; fi
+      [ "$dr" = "$repo" ] && ! _osrc_hub_lane_owned_elsewhere "$id" "$sid" && mine=1
     fi
     [ "$mine" = 1 ] || continue
     local out=""
@@ -149,47 +156,50 @@ _osrc_hub_history_lanes() {
         canceled|cancelled|stopped) out=stopped ;; running|starting|queued|waiting|'') out=running ;; *) out=stopped ;; esac
     else
       if [ -z "$end" ]; then
-        if have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; then out=running; else out=stopped; fi
+        if type _osrc_hub_tmux_row >/dev/null 2>&1 && _osrc_hub_tmux_row "$id" >/dev/null 2>&1; then out=running
+        elif have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; then out=running; else out=stopped; fi
       else
         case "$receipt" in stop|exit|done|finished) out=finished ;; *fail*|*error*) out=failed ;; *) out=stopped ;; esac
       fi
     fi
-    type _osrc_hub_done_state >/dev/null 2>&1 && [ "$(_osrc_hub_done_state "$id" 2>/dev/null)" = done ] && [ "$out" != running ] && out=finished
+    local ds=""
+    if type _osrc_hub_done_state_fast >/dev/null 2>&1; then ds="$(_osrc_hub_done_state_fast "$id")"; elif type _osrc_hub_done_state >/dev/null 2>&1; then ds="$(_osrc_hub_done_state "$id" 2>/dev/null)"; fi
+    [ "$ds" = done ] && [ "$out" != running ] && out=finished
     local nm ml
     nm="$(_osrc_hub_lane_name "$id" 2>/dev/null)"; [ -n "$nm" ] || nm="Lane"
     ml="$model"; type _osrc_hub_model_label >/dev/null 2>&1 && ml="$(_osrc_hub_model_label "$model")"
-    rows="$(jq -cn --argjson a "$rows" --arg nm "$nm" --arg ml "$ml" --arg out "$out" --arg s "$start" --arg e "$end" --arg k "$(printf '%s' "$id" | cksum | awk '{print $1}')" '
-      $a + [{kind: "lane", key: $k, title: $nm, outcome: $out, start: ($s | if test("^[0-9]+$") then tonumber else null end), end: ($e | if test("^[0-9]+$") then tonumber else null end)}
-        + (if $ml == "" then {} else {model: $ml} end) | .at = (.end // .start // 0)]')"
+    row_lines="${row_lines}$(jq -cn --arg nm "$nm" --arg ml "$ml" --arg out "$out" --arg s "$start" --arg e "$end" --arg k "$(printf '%s' "$id" | cksum | awk '{print $1}')" '
+      {kind: "lane", key: $k, title: $nm, outcome: $out, start: ($s | if test("^[0-9]+$") then tonumber else null end), end: ($e | if test("^[0-9]+$") then tonumber else null end)}
+      + (if $ml == "" then {} else {model: $ml} end) | .at = (.end // .start // 0)')
+"
   done <<EOF
-$(jq -r '.[] | [.id, .src, (.start // 0 | tostring), (.end // "" | tostring), (.receipt // ""), (.status // ""), (.model // ""), (.cwd // "")] | map(gsub("[|\t\n]"; " ")) | join("|")' <<<"$cands" 2>/dev/null)
+$cands_tsv
 EOF
-  printf '%s' "$rows"
+  if [ -n "$row_lines" ]; then jq -cs . <<<"$row_lines" 2>/dev/null || printf '[]'; else printf '[]'; fi
 }
 
-# _osrc_hub_history <sid> <project-json> -> {repo, github: ok|unreachable|none, since, items[], summary{}, week{}}.
-# Cached per project for OSRC_HUB_HISTORY_TTL (30 s) under `hub serve`; plain `hub export` always computes.
-_osrc_hub_history() {
-  local sid="$1" pj="${2:-}" c ttl="${OSRC_HUB_HISTORY_TTL:-30}"
-  case "$sid" in ''|.*|*/*) printf 'null'; return 0 ;; esac
-  case "$ttl" in ''|*[!0-9]*) ttl=30 ;; esac
-  c="$OSRC_HOME/hub/cache/history-$sid.json"
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -f "$c" ] && [ ! -L "$c" ] && type _osrc_hub_mt >/dev/null 2>&1 \
-     && [ $(( $(date +%s) - $(_osrc_hub_mt "$c") )) -lt "$ttl" ] && jq -e 'objects' "$c" >/dev/null 2>&1; then
-    cat "$c"; return 0
-  fi
-  local now repo="" tf since="" f dir="" d gh='' lanes out ghs=none tags='[]'
+# _osrc_hub_history_build <sid> <project-json> <cache-file> -> prints history JSON and writes cache under FAST.
+_osrc_hub_history_build() {
+  local sid="$1" pj="${2:-}" c="${3:-}" now repo="" tf since="" f dir="" d gh='' lanes out ghs=none tags='[]' ev=""
   now="$(date +%s)"
   repo="$(_osrc_hub_gh_slug "$(jq -r '.repo // ""' <<<"$pj" 2>/dev/null)")"
   [ -n "$repo" ] || repo="$(_osrc_hub_gh_slug "$(jq -r '.repo // ""' "$OSRC_HOME/hub/projects/$sid.json" 2>/dev/null)")"
   # the repo the orchestrator's own lanes work in, else the folder it runs in
   for f in "$OSRC_HOME/owners/$sid"/* "$OSRC_HOME/hub/seen/$sid"/*; do
     [ -f "$f" ] || continue
-    d="$(jq -r --arg id "${f##*/}" 'select(.session_id == $id) | .cwd // empty' "${OSRC_SESSION_REGISTRY:-/dev/null}" 2>/dev/null | tail -1)"
-    [ -n "$d" ] || d="$(jq -r '.worktree // .cwd // ""' "$OSRC_JOBS/${f##*/}/meta.json" 2>/dev/null)"
+    d=""
+    if type _session_registry_last_event >/dev/null 2>&1; then
+      ev="$(_session_registry_last_event "${f##*/}" 2>/dev/null)"
+      [ -n "$ev" ] && d="$(jq -r '.cwd // ""' <<<"$ev" 2>/dev/null)"
+    elif [ -f "${OSRC_SESSION_REGISTRY:-}" ]; then
+      d="$(jq -r --arg id "${f##*/}" 'select(.session_id == $id) | .cwd // empty' "$OSRC_SESSION_REGISTRY" 2>/dev/null | tail -1)"
+    fi
+    [ -n "$d" ] || { [ -f "$OSRC_JOBS/${f##*/}/meta.json" ] && d="$(jq -r '.worktree // .cwd // ""' "$OSRC_JOBS/${f##*/}/meta.json" 2>/dev/null)"; }
     [ -d "$d" ] || continue
     [ -n "$dir" ] || dir="$d"
-    [ -n "$repo" ] || repo="$(_osrc_hub_dir_repo "$d")"
+    if [ -z "$repo" ]; then
+      if type _osrc_hub_dir_repo_fast >/dev/null 2>&1; then repo="$(_osrc_hub_dir_repo_fast "$d")"; else repo="$(_osrc_hub_dir_repo "$d")"; fi
+    fi
     [ -n "$repo" ] && break
   done
   tf="$(_osrc_hub_orch_transcript "$sid")"
@@ -197,7 +207,12 @@ _osrc_hub_history() {
     since="$(_osrc_hub_iso_epoch "$(head -c 262144 "$tf" 2>/dev/null | grep -m1 -o '"timestamp": *"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/')")"
     if [ -z "$repo" ] || [ -z "$dir" ]; then
       d="$(head -c 262144 "$tf" 2>/dev/null | grep -m1 -o '"cwd": *"[^"]*"' | sed -E 's/.*"([^"]*)"$/\1/')"
-      [ -d "$d" ] && { [ -n "$dir" ] || dir="$d"; [ -n "$repo" ] || repo="$(_osrc_hub_dir_repo "$d")"; }
+      if [ -d "$d" ]; then
+        [ -n "$dir" ] || dir="$d"
+        if [ -z "$repo" ]; then
+          if type _osrc_hub_dir_repo_fast >/dev/null 2>&1; then repo="$(_osrc_hub_dir_repo_fast "$d")"; else repo="$(_osrc_hub_dir_repo "$d")"; fi
+        fi
+      fi
     fi
   fi
   case "$since" in ''|*[!0-9]*) since=$(( now - 7 * 86400 )) ;; esac
@@ -236,8 +251,39 @@ _osrc_hub_history() {
     {github: $ghs, since: $since, items: $items, summary: counts($items), week: counts([$items[] | select(.at >= $now - 604800)])}
     + (if $repo == "" then {} else {repo: $repo} end)' 2>/dev/null)"
   jq -e 'objects' >/dev/null 2>&1 <<<"$out" || { printf 'null'; return 0; }
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && mkdir -p "$OSRC_HOME/hub/cache" 2>/dev/null && [ ! -L "$c" ]; then
+  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -n "$c" ] && mkdir -p "$OSRC_HOME/hub/cache" 2>/dev/null && [ ! -L "$c" ]; then
     printf '%s\n' "$out" > "$c.$$" 2>/dev/null && mv -f "$c.$$" "$c" 2>/dev/null; rm -f "$c.$$" 2>/dev/null
   fi
   printf '%s' "$out"
+}
+
+# _osrc_hub_history <sid> <project-json> -> {repo, github: ok|unreachable|none, since, items[], summary{}, week{}}.
+# Stale-while-revalidate under `hub serve` (OSRC_HUB_FAST=1); plain `hub export` always computes.
+_osrc_hub_history() {
+  local sid="$1" pj="${2:-}" c ttl="${OSRC_HUB_HISTORY_TTL:-60}" age lk grepo gat
+  case "$sid" in ''|.*|*/*) printf 'null'; return 0 ;; esac
+  case "$ttl" in ''|*[!0-9]*) ttl=60 ;; esac
+  c="$OSRC_HOME/hub/cache/history-$sid.json"
+  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -f "$c" ] && [ ! -L "$c" ] && jq -e 'objects' "$c" >/dev/null 2>&1; then
+    # GitHub data refreshed after this history was built makes the cached reachability a lie:
+    # ask gh_data (its own TTL/SWR rules apply) and rebuild now when its answer is newer.
+    grepo="$(jq -r '.repo // ""' "$c" 2>/dev/null)"
+    if [ -n "$grepo" ] && type _osrc_hub_mt >/dev/null 2>&1; then
+      gat="$(_osrc_hub_gh_data "$grepo" 2>/dev/null | jq -r '.fetchedAt // 0' 2>/dev/null)"
+      case "$gat" in ''|*[!0-9]*) gat=0 ;; esac
+      [ "$gat" -gt "$(_osrc_hub_mt "$c")" ] && { _osrc_hub_history_build "$sid" "$pj" "$c"; return 0; }
+    fi
+    if type _osrc_hub_mt >/dev/null 2>&1; then
+      age=$(( $(date +%s) - $(_osrc_hub_mt "$c") ))
+      if [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then
+        lk="$c.lock"
+        [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
+        if mkdir "$lk" 2>/dev/null; then
+          ( _OSRC_HUB_MEMO="" _osrc_hub_history_build "$sid" "$pj" "$c" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+        fi
+      fi
+    fi
+    cat "$c"; return 0
+  fi
+  _osrc_hub_history_build "$sid" "$pj" "$c"
 }

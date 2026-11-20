@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib/proof.sh -- proof files, the verification stamp and the three-rounds cap (0.17, lane S2).
+# lib/proof.sh -- proof files, the verification stamp and the three-rounds cap (0.17).
 #
 #   proof run [--lane ID] [--dir DIR] [--base REF] [--cmd "<check>"]... [--method none|review --reason R] [--json]
 #   proof show <lane> [--json] | stamp <lane> | check <lane> [sha] | sendback <lane> | reset <lane>
@@ -9,7 +9,7 @@
 #   proof.json   the last run, written ONLY by `proof run` (never by a model):
 #     {schema:1, lane, head, dir, base, dirty, ts, method, reason, source, ok, stamp, round,
 #      commands:[{cmd, exit, secs, pass, fail, tail:[<= 30 lines]}], totals:{pass,fail}|null,
-#      guards:<S1 `guards run --json` object>|"unavailable", checks_changed:bool}
+#      guards:<`guards run --json` object>|"unavailable", checks_changed:bool}
 #     method: verify-run (the repo's .outsourcerer/verify, read from the BASE ref) | tests (--cmd or
 #     the done contract's check:) | review | none. review and none carry a required reason.
 #   rounds.json  {fails, stopped, counted:[keys], last:{why, lines}}: failed proof rounds. Every
@@ -22,7 +22,7 @@
 # Checks come from the BASE ref or the orchestrator, never from the lane's worktree: the verify script
 # is `git show <base>:.outsourcerer/verify`, the done contract is $OSRC_HOME/done/<lane>.json. A diff
 # that edits .outsourcerer/ is recorded as checks_changed for the reviewer.
-# Guards (lane S1): when `guards` is loaded, `proof run` stores `guards run --json` under .guards and a
+# Guards: when `guards` is loaded, `proof run` stores `guards run --json` under .guards and a
 # failing enforce result fails the proof; otherwise .guards is "unavailable" and the proof continues.
 
 _osrc_proof_root() { printf '%s/proof' "$OSRC_HOME"; }
@@ -288,7 +288,7 @@ _osrc_proof_one() { # <dir> <shell-command> <log> <label>
   return "$rc"
 }
 
-# S1's guards, when loaded (contract: lib/guards.sh header, S1 round 3). Sets _PR_GUARDS (JSON).
+# The guards, when loaded (contract: lib/guards.sh header). Sets _PR_GUARDS (JSON).
 # rc 0 passed | 1 passed == false (the gate verdict, whatever the mode) | 2 the guards could not run
 # (no base to pin, or no JSON): the proof fails, but the round is not charged to the lane.
 # --base is always explicit: without it guards would pick a default, which may be the lane's own branch.
@@ -666,7 +666,7 @@ osrc_proof_required() { # <lane>
 osrc_proof_handin() { # <lane> <fingerprint>
   local lane="$1" fp="$2" why rc=0 d hit=""
   _osrc_proof_id_ok "$lane" || return 0
-  # L1.DONE belongs to the session osrc-auto-L1 when that is the only proof folder ending in -L1.
+  # A <lane>.DONE belongs to the session osrc-auto-<lane> when that is the only proof folder ending in -<lane>.
   if ! _osrc_proof_used "$lane"; then
     for d in "$(_osrc_proof_root)"/*-"$lane"; do _osrc_proof_used "${d##*/}" || continue; [ -z "$hit" ] || { hit=""; break; }; hit="${d##*/}"; done
     [ -z "$hit" ] || lane="$hit"
@@ -770,12 +770,17 @@ osrc_proof_review_note() { # <lane> [head]
 }
 
 # Mission Control: per-lane proof fields and the project's unverified count (lib/hub.sh calls these).
-osrc_proof_hub_lane() { # <lane-json> -> lane json + {proof:{stamp,method,ok,stopped,lines}}
-  local l="$1" id f r
-  id="$(jq -r '.id // ""' <<<"$l" 2>/dev/null)"; _osrc_proof_id_ok "$id" || { printf '%s' "$l"; return 0; }
+osrc_proof_hub_lane() { # <lane-json> [id] -> lane json + {proof:{stamp,method,ok,stopped,lines}}
+  local l="$1" id="${2:-}" f r=""
+  [ -n "$id" ] || id="$(jq -r '.id // ""' <<<"$l" 2>/dev/null)"
+  _osrc_proof_id_ok "$id" || { printf '%s' "$l"; return 0; }
   f="$(_osrc_proof_file "$id")"
   # A review whose verdict was malformed twice waits on a person (lib/review.sh state needs-you).
-  r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("unusable verdict twice: " + (.invalid_why // .invalid_first_line // ""))}' 2>/dev/null)"
+  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/rneeds/.indexed" ]; then
+    [ -f "$_OSRC_HUB_MEMO/rneeds/$id.json" ] && IFS= read -r r < "$_OSRC_HUB_MEMO/rneeds/$id.json" 2>/dev/null
+  else
+    r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("unusable verdict twice: " + (.invalid_why // .invalid_first_line // ""))}' 2>/dev/null)"
+  fi
   [ -z "$r" ] || l="$(jq -c --argjson r "$r" '. + {reviewNeedsYou:$r}' <<<"$l" 2>/dev/null || printf '%s' "$l")"
   _osrc_proof_used "$id" || { printf '%s' "$l"; return 0; }
   r="$(_osrc_proof_rounds "$id")"

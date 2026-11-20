@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# plan-probe.sh — every plan on the Mission Control plans card is checked on its own (PL, 0.16.3).
+# plan-probe.sh — every plan on the Mission Control plans card is checked on its own (0.16.3).
 #
-# Alex: "there IS NO EXCUSE to write 'not checked yet'." The card used to read only passive meters
+# "there IS NO EXCUSE to write 'not checked yet'." The card used to read only passive meters
 # (the Claude statusline artifact, the newest Codex session log), so any harness without one, or with
 # a stale one, said "not checked yet" or "Waiting for reset" with no time. Each detected harness now
 # has an ACTIVE, read-only probe, cached under $OSRC_HOME/hub/probes/<id>.json:
@@ -115,7 +115,11 @@ _osrc_probe_kick() {
     _osrc_probe_wanted "$id" || continue
     f="$dir/$id.json"; ttl="$(_osrc_probe_ttl "$id")"
     if [ ! -s "$f" ]; then
-      _osrc_probe_store "$id" & pids="$pids $!"
+      if [ "${OSRC_PROBE_NONBLOCK:-0}" = 1 ] && [ "${OSRC_PROBE_SYNC:-0}" != 1 ] && [ "${OSRC_HUB_CHECK_PLANS:-0}" != 1 ]; then
+        _osrc_probe_refresh_bg "$id"
+      else
+        _osrc_probe_store "$id" & pids="$pids $!"
+      fi
       continue
     fi
     age=$(( $(date +%s) - $(_osrc_probe_mt "$f") ))

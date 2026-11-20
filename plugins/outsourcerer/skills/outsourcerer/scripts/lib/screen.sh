@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# lib/screen.sh: the ONE screen reader for delegate panes (L3, 2026-11-13).
+# lib/screen.sh: the ONE screen reader for delegate panes.
 #
 # Every orchestrator used to hand-roll its own prompt regex, and each one broke a different way:
 # Claude Code's composer + status bar read as a menu, a reply ending in a numbered list blocked
@@ -177,12 +177,20 @@ _osrc_scr_composer_box() { # <glyph> <max-status-rows-below>
   text=""; dimflag="${_SCR_D[$((a + 1))]}"
   i=$((a + 1))
   while [ "$i" -lt "$b" ]; do
-    if [ "$i" -eq $((a + 1)) ]; then text="${_SCR_L[$i]#"$glyph"}"; else text="$text ${_SCR_L[$i]}"; fi
+    case "${_SCR_L[$i]}" in
+      # agy draws its mode hint ("Auto mode: ... (shift+tab to cycle)", rendered in a muted
+      # 38;5;1xx colour the dim probe misses) inside the composer box. It is a placeholder, not
+      # a draft; drop the row so an empty composer is not read as unsent text.
+      *[Mm]ode:*'(shift+tab to cycle)') ;;
+      *) if [ "$i" -eq $((a + 1)) ]; then text="${_SCR_L[$i]#"$glyph"}"; else text="$text ${_SCR_L[$i]}"; fi ;;
+    esac
     i=$((i + 1))
   done
   text="$(_osrc_scr_trim "$text")"
   [ "$dimflag" = 1 ] && [ "$b" -eq $((a + 2)) ] && text=""
-  case "$text" in 'Try "'*'"'|"Ask Devin to build features, fix bugs, or work on your code"|"Guide Devin while it works") text="" ;; esac
+  # The joined-text catch covers the hint when it wraps onto a second composer row (the
+  # fragment rows individually lack the full pattern, but the rejoined text matches).
+  case "$text" in 'Try "'*'"'|"Ask Devin to build features, fix bugs, or work on your code"|"Guide Devin while it works"|*[Mm]ode:*'(shift+tab to cycle)') text="" ;; esac
   OSRC_SCR_COMPOSER="$text"; OSRC_SCR_COMPOSER_FOUND=1; OSRC_SCR_HIST_END=$((a - 1))
   return 0
 }
@@ -330,7 +338,7 @@ _osrc_scr_devin() {
     OSRC_SCR_KIND=other
     # Menu row first, then the command: every row from the `$ ` row up to the menu is joined,
     # so a command Devin wraps onto a second row reaches the classifier whole (multi-line holds).
-    local m; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
+    local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
     i="$(_osrc_scr_last "*\$ *" "$lo" $((m - 1)))"
     case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*)
       OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")"; i=$((i + 1))
@@ -339,12 +347,42 @@ _osrc_scr_devin() {
 $(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
       done ;;
     esac
+    # Newer Devin modal: '▲ Approval required / This action requires your approval.' then the
+    # command (plain or inside a drawn box), then '❭ Allow ← ◼◼◼◼ → Once   Exec(prog)'. The
+    # Kind(target) tag on the menu row names the action; the command sits between the header
+    # and the menu. Lines are joined with a newline: the classifier holds multi-line commands
+    # rather than risk merging two real lines into a safe-looking single line.
+    if [ -z "$OSRC_SCR_CMD" ] && [ "$OSRC_SCR_KIND" = other ] && [ "$m" -lt "$n" ]; then
+      case "${_SCR_L[$m]}" in
+        *"Exec("*) OSRC_SCR_KIND=shell ;;
+        *"Write("*|*"Edit("*|*"Create("*|*"Overwrite("*) OSRC_SCR_KIND=write ;;
+        *"Read("*) OSRC_SCR_KIND=read ;;
+      esac
+      if [ "$OSRC_SCR_KIND" != other ]; then
+        OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
+        hdr="$(_osrc_scr_last "*requires your approval*" "$lo" $((m - 1)))"
+        [ "$hdr" -ge 0 ] || hdr="$(_osrc_scr_last "*Approval required*" "$lo" $((m - 1)))"
+        i=$((hdr + 1))
+        while [ "$i" -ge 1 ] && [ "$i" -lt "$m" ]; do
+          l="$(printf '%s' "${_SCR_L[$i]}" | sed -E 's/^[[:space:]│┃║|]+//; s/[[:space:]│┃║|]+$//')"
+          l="$(_osrc_scr_trim "$l")"
+          case "$l" in
+            ""|"❭ "*|*"requires your approval"*|*"Bypass mode"*|*"Deny"*) ;;
+            "Exec("*")"|"Write("*")"|"Edit("*")"|"Create("*")"|"Read("*")"|"Overwrite("*")") ;;
+            ─*|═*|━*|─*|┄*|┈*|"╭"─*|"╰"─*|"┌"─*|"└"─*) ;;
+            *) OSRC_SCR_CMD="${OSRC_SCR_CMD:+$OSRC_SCR_CMD
+}$l" ;;
+          esac
+          i=$((i + 1))
+        done
+      fi
+    fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
       l="$(_osrc_scr_trim "${_SCR_L[$i]#❭}")"; OSRC_SCR_SEL="${l%% *}"
       case "$l" in *"→ Once"*) OSRC_SCR_SCOPE=once ;; *"→ "*) OSRC_SCR_SCOPE="$(printf '%s' "${l#*→ }" | awk '{print $1}')" ;; esac
     fi
-    _osrc_scr_set approval "devin approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD}"; return 0
+    _osrc_scr_set approval "devin approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD:-$OSRC_SCR_PATH}"; return 0
   fi
   _osrc_scr_composer_box "❭" 3 || { _osrc_scr_generic; return 0; }
   case "$OSRC_SCR_COMPOSER" in "") ;; esac

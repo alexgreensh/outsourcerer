@@ -76,7 +76,7 @@
 #     Antigravity/Google app login (no API key needed, that is the whole point). `agy -p`
 #     headless print mode works in non-TTY pipes/subprocesses on current builds (v1.0.2+; the
 #     old non-TTY stdout bug is fixed per its changelog and verified live).
-#     gemini-cli is RETIRED (Alex 17:02 — Antigravity replaced it): never auto-selected, never
+#     gemini-cli is RETIRED (Antigravity replaced it): never auto-selected, never
 #     routed to, and OSRC_GEMINI_VEHICLE=gemini dies loudly even if a `gemini` binary remains
 #     on PATH. GEMINI_API_KEY/GOOGLE_API_KEY survive ONLY for the image lane (nano-banana).
 #   nano-banana -> Gemini 2.5 Flash Image, dispatched via the `image` subcommand ONLY (it is NOT a
@@ -177,7 +177,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.17.3"
+OSRC_VERSION="0.17.5"
 # Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
 # picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
 # free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
@@ -598,6 +598,14 @@ swe|swe-1.7|dv|capable
 swe-1.7|swe-1.7|dv|capable
 swe-1-7|swe-1.7|dv|capable
 swe-1.7-lightning|swe-1.7-lightning|dv|mid
+swe-2|swe-2|dv|capable
+swe-2-high|swe-2-high|dv|capable
+swe-2-medium|swe-2-medium|dv|capable
+swe-2-max|swe-2-max|dv|capable
+swe-2-flash|swe-2-flash|dv|mid
+swe-2-flash-medium|swe-2-flash-medium|dv|mid
+swe-2-flash-high|swe-2-flash-high|dv|mid
+swe-2-flash-max|swe-2-flash-max|dv|mid
 kimi|kimi-k3|dv|capable
 kimi-k3|kimi-k3|dv|capable
 kimi-k2.7|kimi-k2.7|dv|capable
@@ -1540,6 +1548,9 @@ _devin_plan_quota_block() {
 #                   Core or Extra Usage and retry"
 #   cline           {"error":{"code":"INFERENCE_CAP_ERROR","message":"Error 429: Daily free limit reached on
 #                   model …. Try again in 9h 41m"}}   NOT a per-minute provider 429 (transient, not a window)
+#   agy (Antigravity) "⚠ Individual quota reached. Please upgrade your subscription to increase your
+#                   limits. Resets in 1h13m1s." — its own reset/backoff phrasing is supervise-side
+#                   (_sv_agy_limit), not here: this matcher is for the quota banner itself.
 # =============================================================================
 _CX_PLAN_LIMIT_RE="you'?ve hit your usage limit|usage limit (reached|exceeded|hit)|(5[- ]?hour|weekly|5h)[[:space:]]+(usage[[:space:]]+)?limit[^.]{0,20}(reached|exceeded|exhausted)"
 _CC_PLAN_LIMIT_RE="claude( ai)? usage limit reached|you'?ve hit your limit|usage limit reached[^.]{0,40}(reset|resets)|limit will reset at"
@@ -1547,6 +1558,7 @@ _CURSOR_PLAN_LIMIT_RE="you'?ve hit your usage limit|usage limits? will reset|spe
 _WARP_PLAN_LIMIT_RE="error:[[:space:]]*quota ?limit|quota limit (reached|exceeded|hit)|(monthly|ai)[ -]?(credit|request)[ -]?(limit|quota)[^.]{0,40}(exceeded|reached|exhausted)|(exceed(ed)?|reached) your (monthly )?(credit|ai request) limit|premium models (will be|are) disabled until"
 _DROID_PLAN_LIMIT_RE="rate limit (reached|exceeded|hit|error)|(included|plan|5[- ]?hour|weekly|monthly) usage[^.]{0,40}(exhausted|reached|used up|limit)|run /limits|extra usage[^.]{0,40}(enable|toggle|continue|retry)"
 _CLINE_PLAN_LIMIT_RE="inference_cap_error|daily (free )?limit reached|(daily|weekly|monthly) (free )?(limit|quota|cap)[^.]{0,30}(reached|exceeded|exhausted)|rate_limit_error[^}]{0,200}(daily|weekly|monthly|quota)"
+_AGY_PLAN_LIMIT_RE="individual[[:space:]]+quota[[:space:]]+(reached|exceeded|exhausted)|quota[[:space:]]+(reached|exceeded|exhausted)[^.]{0,60}(upgrade|subscription|increase your limits)|upgrade your subscription to increase your limits"
 # The subscription lanes the generic meter / block know about (dv keeps its bespoke block + meter).
 OSRC_PLAN_LANES="dv cx cc warp droid cursor cline gm"
 
@@ -8397,6 +8409,23 @@ _session_engine_pid() { # <pane> <harness-pid>
   return 1
 }
 
+# Any live descendant of the pane shell. send-keys launches run as children of that shell —
+# export/clear prefixes, shims that resolve node, auth preflights — so while ANY descendant is
+# alive the typed launch chain is still executing and a shell foreground name means "booting",
+# not "dead". Zero descendants at a shell foreground means the chain exited (the droid -r
+# silent-exit shape). Walk ppid upward from every process, depth-capped so a cycle can never
+# spin; ~500 procs x 24 hops is trivially cheap once per poll.
+_session_pane_descendant() { # <pane_pid> -> 0 when any live descendant exists
+  local root="$1"
+  case "$root" in ''|*[!0-9]*) return 1 ;; esac
+  ps -axo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+    { par[$1+0] = $2+0 }
+    END {
+      for (p in par) { q = p; d = 0
+        while ((q in par) && d++ < 24) { q = par[q]; if (q == root) exit 0 } }
+      exit 1 }'
+}
+
 # <endpoint> <harness-pid> <harness-start> [engine-pid] [engine-start] -> 0 when the actual
 # delegate is live. Older records have no engine identity, so use the pane's foreground command as
 # a conservative compatibility proof. An unreadable pane probe stays unknown/live; a proven shell
@@ -9861,940 +9890,9 @@ cmd_tap() {
 }
 
 # =============================================================================
-# MODEL ADVISORY: task-aware model recommendation with benchmark data.
-# Answers "which model should I use for this task?" with data, not guesses.
-# Data source: OpenRouter benchmarks API (intelligence/coding/agentic indices + pricing).
-# Graceful degradation: OR benchmarks -> cached models.json pricing -> tier proxy scores.
+# MODEL ADVISORY lives in lib/: helpers lib/advise.sh, the advise command + B2 live-source
+# scoring lib/advise-score.sh, fetchers lib/advise-fetch.sh, parsers lib/advise_parse.py.
 # =============================================================================
-
-# Cache file for benchmark data from OpenRouter.
-OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json"
-
-# Native model -> OR benchmark permaslug prefix. Native subscription models (claude/codex/
-# gemini lanes) need explicit mapping because their resolved ids don't appear in the OR catalog.
-# Keyed by RESOLVED id (column 2 of OSRC_MODEL_TABLE), not the alias.
-_NATIVE_BENCH_MAP="
-fable|anthropic/claude-5-fable
-opus|anthropic/claude-4.8-opus
-sonnet|anthropic/claude-sonnet-5
-haiku|anthropic/claude-4.5-haiku
-gpt-5.6-sol|openai/gpt-5.6-sol
-gpt-5.6-terra|openai/gpt-5.6-terra
-gpt-5.6-luna|openai/gpt-5.6-luna
-gpt-5.5|openai/gpt-5.5
-glm-5.2|z-ai/glm-5.2
-glm-5-3|z-ai/glm-5.3
-glm-5-3-high|z-ai/glm-5.3
-glm-5-3-flash|z-ai/glm-5.3-flash
-glm-5-3-flash-high|z-ai/glm-5.3-flash
-gemini-4-neon-high|google/gemini-4-neon
-gemini-4-neon|google/gemini-4-neon
-"
-# Symbolic Gemini family aliases map to the NEWEST google/gemini-<ver>-<family> slug in the cached
-# OpenRouter catalog, so a benchmark lookup for gemini-flash follows the release train instead of a
-# row that goes stale. Empty when the catalog is not cached (the caller then has no score, as before).
-_gemini_bench_slug() {
-  local fam="$1"
-  [ -f "$OSRC_MODELS_JSON" ] && have jq || return 1
-  jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null \
-    | LC_ALL=C sed -n -E "s#^(google/gemini-[0-9]+(\.[0-9]+)?-${fam})(-preview)?\$#\1\3 \3#p" \
-    | awk '{ split($1, f, "-"); split(f[2], v, "."); pre=($2=="" ? 0 : 1);
-             printf "%d %d %d %s\n", v[1], (v[2]=="" ? 0 : v[2]), pre, $1 }' \
-    | sort -k1,1nr -k2,2nr -k3,3n | awk 'NR==1{print $4}'
-}
-
-# Task classification keywords, pipe-separated phrases. Category with most hits wins; default: simple.
-_TASK_KW_CODE='function|class method|bug|fix|refactor|implement|compile|error|stack trace|debug|unit test|api endpoint|sql query|regex|algorithm|data structure|code review|pull request|merge conflict|lint|type error|import|module|package|deploy|ci/cd|docker|kubernetes'
-_TASK_KW_REASONING='analyze|compare|evaluate|assess|critique|reason|prove|derive|tradeoff|trade-off|implication|consequence|strategy|architect|design system|decision|justify|deduce|infer|formal|mathematical|proof|logical'
-_TASK_KW_AGENTIC='agent|tool use|tool call|multi-step|autonomous|execute command|run shell|file system|web search|browser|orchestrat|workflow|pipeline|subagent|delegate|parallel|fanout|run the tests|run the test suite|run tests|make the tests pass|verify the fix|iterate until|edit and run|fix and verify|then verify'
-_TASK_KW_CREATIVE='write a story|write a blog|write an article|essay|creative|generate content|copywriting|headline|tagline|brand voice|narrative|storytelling|poem|screenplay|dialogue'
-
-# Good-enough thresholds per category (benchmark index minimum).
-_THRESH_CODE=60
-_THRESH_REASONING=45
-_THRESH_AGENTIC=35
-_THRESH_CREATIVE=45
-
-# Score-band edges for deriving a capability tier from a LIVE benchmark score (_tier_from_score).
-# Kept beside the _THRESH_* knobs so every score-scale constant lives in one place. Calibrated
-# against the live intelligence_index distribution so the budget-price/frontier-capability models
-# land in `capable`: gpt-5.6-sol (58.9) -> frontier, grok-4.5 (53.8) / glm-5.2 (51.1) /
-# deepseek-v4-pro (44.3) -> capable, deepseek-flash (40.3) / glm-5.1 (40.2) -> mid, haiku (29.6)
-# -> budget. The capable floor sits below deepseek-v4-pro (44.3) and above the flash/5.1 mid cluster
-# (~40). A score below BUDGET or none at all -> raw (in the pool, ranks low, never silently promoted).
-_TIER_BAND_FRONTIER=55
-_TIER_BAND_CAPABLE=44
-_TIER_BAND_MID=38
-_TIER_BAND_BUDGET=28
-
-# refresh_benchmarks: fetch benchmark data from OpenRouter API, cache locally.
-# Needs OPENROUTER_API_KEY. Graceful failure: returns 1, caller falls back to tier proxy.
-refresh_benchmarks() {
-  _mkdir_private "$OSRC_HOME" || true
-  have curl || { echo "curl needed to refresh benchmarks" >&2; return 1; }
-  have jq || { echo "jq needed to refresh benchmarks" >&2; return 1; }
-  # Extract key WITHOUT _or_load_key (which dies on missing key, killing the script).
-  # ~/.env wins; an exported OPENROUTER_API_KEY is the fallback so `advise`'s auto-refresh
-  # and a bare `export OPENROUTER_API_KEY=...` shell both work.
-  local _k; _k="$(_extract_kv_value OPENROUTER_API_KEY)"; [ -n "$_k" ] || _k="${OPENROUTER_API_KEY:-}"
-  [ -n "$_k" ] || { echo "OPENROUTER_API_KEY needed for benchmark data (put it in ~/.env)" >&2; return 1; }
-  # Pass key via temp file to avoid exposure in process args (ps table).
-  local _hdr; _hdr="$(mktemp "$OSRC_HOME/.hdr.$$.XXXXXX" 2>/dev/null)" || { echo "cannot create temp file" >&2; return 1; }
-  printf 'Authorization: Bearer %s\n' "$_k" > "$_hdr"; chmod 600 "$_hdr"
-  local _tmp; _tmp="$(mktemp "$OSRC_HOME/.bench.XXXXXX" 2>/dev/null)" || { rm -f "$_hdr"; echo "cannot create temp file" >&2; return 1; }
-  if curl -fsS -m "${OSRC_CURL_TIMEOUT:-30}" -H @"$_hdr" \
-    "https://openrouter.ai/api/v1/benchmarks?source=artificial-analysis&task_type=intelligence&max_results=100" \
-    -o "$_tmp" 2>/dev/null; then
-    # Validate JSON before promoting to cache (prevents HTML error pages / truncated responses from poisoning the cache).
-    if jq -e '.data | type == "array"' "$_tmp" >/dev/null 2>&1; then
-      mv -f "$_tmp" "$OSRC_BENCH_JSON" || { rm -f "$_tmp" "$_hdr"; echo "failed to write benchmark cache" >&2; return 1; }
-      echo "refreshed benchmark cache ($(jq -r '.meta.model_count // "?"' "$OSRC_BENCH_JSON" 2>/dev/null) models, as of $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null))"
-    else
-      rm -f "$_tmp"
-      echo "benchmark refresh failed (response was not valid JSON with .data array)" >&2; rm -f "$_hdr"; return 1
-    fi
-  else
-    rm -f "$_tmp"
-    echo "benchmark refresh failed (offline? no OR key?)" >&2; rm -f "$_hdr"; return 1
-  fi
-  rm -f "$_hdr"
-}
-
-# _classify_task <prompt> -> echoes category: code|reasoning|agentic|creative|simple
-# Keyword-based, most hits wins. Ties: code > reasoning > agentic > creative > simple.
-# Uses grep -oE with pipe-separated phrases to count distinct keyword matches.
-_classify_task() {
-  local prompt="$*" lc
-  lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
-  local code reasoning agentic creative
-  code="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CODE" 2>/dev/null | wc -l | tr -d ' ')"
-  reasoning="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_REASONING" 2>/dev/null | wc -l | tr -d ' ')"
-  agentic="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_AGENTIC" 2>/dev/null | wc -l | tr -d ' ')"
-  creative="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CREATIVE" 2>/dev/null | wc -l | tr -d ' ')"
-  code="${code:-0}"; reasoning="${reasoning:-0}"; agentic="${agentic:-0}"; creative="${creative:-0}"
-  # TASK-SHAPE FIT (blended rule): a prompt that carries BOTH code hits and at least two agentic hits
-  # ("edit X to fix the bug, run the test suite, verify") describes multi-step tool use — edit, run,
-  # observe, iterate — not one code operation. Under most-hits-wins it tied on code (fix/bug vs
-  # pipeline/run-the-tests) and code won the tie, so advise scored it on coding_index and let a
-  # reasoning-heavy model float to #1 for a job that is all about turning tools quickly. Agentic first.
-  if [ "$code" -ge 1 ] && [ "$agentic" -ge 2 ]; then printf 'agentic'; return; fi
-  local best=simple best_n=0
-  [ "$code" -gt "$best_n" ] && { best=code; best_n=$code; }
-  [ "$reasoning" -gt "$best_n" ] && { best=reasoning; best_n=$reasoning; }
-  [ "$agentic" -gt "$best_n" ] && { best=agentic; best_n=$agentic; }
-  [ "$creative" -gt "$best_n" ] && { best=creative; best_n=$creative; }
-  printf '%s' "$best"
-}
-
-# _bench_score_field <category> -> benchmark JSON field name for that category.
-_bench_score_field() {
-  case "$1" in
-    code)      printf 'coding_index' ;;
-    agentic)   printf 'agentic_index' ;;
-    reasoning|creative|simple|*) printf 'intelligence_index' ;;
-  esac
-}
-
-# _bench_threshold_for <category> -> numeric threshold (0 for simple = no floor).
-_bench_threshold_for() {
-  case "$1" in
-    code)      printf '%s' "$_THRESH_CODE" ;;
-    reasoning) printf '%s' "$_THRESH_REASONING" ;;
-    agentic)   printf '%s' "$_THRESH_AGENTIC" ;;
-    creative)  printf '%s' "$_THRESH_CREATIVE" ;;
-    *)         printf '0' ;;
-  esac
-}
-
-# _resolve_bench_slug <alias-or-resolved-id> -> OR benchmark permaslug prefix, or empty.
-# Checks native map first, then strips :free and uses the id directly.
-_resolve_bench_slug() {
-  local mapped
-  case "$1" in
-    gemini-flash-lite) mapped="$(_gemini_bench_slug flash-lite)" ;;
-    gemini-flash)      mapped="$(_gemini_bench_slug flash)" ;;
-    gemini-pro)        mapped="$(_gemini_bench_slug pro)" ;;
-    gemini-*-neon*|gemini-*-argon*|gemini-*-hydrogen*|gemini-*-carbon*)
-                     mapped="$(_agy_or_bench_slug "$1")" ;;
-    *) mapped="$(printf '%s\n' "$_NATIVE_BENCH_MAP" | awk -F'|' -v a="$1" '$1==a{print $2; exit}')" ;;
-  esac
-  [ -n "$mapped" ] && { printf '%s' "$mapped"; return 0; }
-  printf '%s' "${1%:free}"
-}
-
-# _bench_lookup <resolved-id> <field> -> "score\tprice_in\tprice_out" or empty.
-# Queries the cached benchmark JSON. Prefers exact match, falls back to shortest prefix match.
-_bench_lookup() {
-  [ -f "$OSRC_BENCH_JSON" ] && have jq || return 0
-  local slug; slug="$(_resolve_bench_slug "$1")"
-  [ -n "$slug" ] || return 0
-  # Try exact match first, then prefix match sorted by slug length (shortest = most canonical).
-  local result
-  result="$(jq -r --arg slug "$slug" --arg field "$2" '
-    .data[] | select(.model_permaslug == $slug)
-    | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
-  ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
-  if [ -z "$result" ]; then
-    # Prefix match: collect into array, sort by slug length, take shortest. Empty array -> no output.
-    result="$(jq -r --arg slug "$slug" --arg field "$2" '
-      [.data[] | select(.model_permaslug | startswith($slug))]
-      | if length > 0 then sort_by(.model_permaslug | length) | .[0]
-        | "\(.[$field] // 0)\t\(.pricing.prompt // "0")\t\(.pricing.completion // "0")"
-        else empty end
-    ' "$OSRC_BENCH_JSON" 2>/dev/null | head -1)"
-  fi
-  printf '%s' "$result"
-}
-
-# _tier_score_proxy <tier> -> rough capability score when no benchmark data exists.
-_tier_score_proxy() {
-  case "$1" in
-    frontier) printf '55' ;;
-    capable)  printf '50' ;;
-    mid)      printf '40' ;;
-    budget)   printf '30' ;;
-    *)        printf '35' ;;
-  esac
-}
-
-# _tier_from_score <score> -> capability tier derived from a LIVE benchmark score, the inverse of
-# _tier_score_proxy. Used for dynamic pool candidates that have no hand-set tier in OSRC_MODEL_TABLE:
-# a never-before-seen model gets ranked by the same capability bands as the curated ones, so a new
-# strong model is recommendable on merit the day it appears. Empty/non-numeric -> raw (present in
-# the pool, ranks low, never silently promoted). awk does the numeric compare so a non-numeric
-# string can't crash under `set -u` or leak a shell error.
-_tier_from_score() {
-  local s="${1:-}"
-  case "$s" in ''|*[!0-9.-]*) printf 'raw'; return 0 ;; esac
-  awk -v s="$s" -v f="$_TIER_BAND_FRONTIER" -v c="$_TIER_BAND_CAPABLE" \
-          -v m="$_TIER_BAND_MID" -v b="$_TIER_BAND_BUDGET" '
-    BEGIN {
-      if (s+0 >= f+0)      print "frontier"
-      else if (s+0 >= c+0) print "capable"
-      else if (s+0 >= m+0) print "mid"
-      else if (s+0 >= b+0) print "budget"
-      else                 print "raw"
-    }'
-}
-
-# _model_canon_key <id-or-permaslug> -> canonical model identity key. The same model is
-# referenced under different id forms across OpenRouter (vendor-prefixed, dotted versions,
-# release-date suffixes) and Devin (hyphenated versions, effort suffixes). Collapsing those
-# surface differences to one bare family+version token lets a model match itself across
-# providers and across id forms, so dedup and routing treat one model as one model. Only
-# cosmetic shape is folded: a leading vendor prefix segment, a trailing release date, a
-# trailing effort suffix, and the . vs - separator inside a version token. Variant and
-# family segments are preserved, so gpt-5.6-sol and gpt-5 stay distinct keys.
-_model_canon_key() {
-  local k="${1:-}"
-  k="$(printf '%s' "$k" | tr '[:upper:]' '[:lower:]')"
-  # Strip ANY leading vendor prefix (everything up to the first "/"), not a fixed vendor list, so a
-  # brand-new provider's OpenRouter id (vendor/model) still collapses onto the bare Devin/Warp uid.
-  k="${k#*/}"
-  k="$(printf '%s' "$k" | sed -E 's/-[0-9]{6,}$//')"
-  while :; do
-    case "$k" in
-      *-high|*-low|*-max|*-medium) k="${k%-*}" ;;
-      *) break ;;
-    esac
-  done
-  k="$(printf '%s' "$k" | tr '.' '-')"
-  printf '%s' "$k"
-}
-
-# _task_difficulty <prompt> -> normal|hard. Several independent work signals indicate that selection
-# should favor a near-frontier capable model instead of treating the request as a single operation.
-_task_difficulty() {
-  local prompt="$*" lc hits
-  lc="$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')"
-  hits="$(printf '%s' "$lc" | grep -oE "$_TASK_KW_CODE|$_TASK_KW_REASONING|$_TASK_KW_AGENTIC" 2>/dev/null | wc -l | tr -d ' ')"
-  hits="${hits:-0}"
-  if [ "$hits" -ge 4 ] || [ "${#prompt}" -ge 240 ]; then printf 'hard'; else printf 'normal'; fi
-}
-
-# _frontier_needed <task> <effort> -> true when the request explicitly calls for the frontier.
-_frontier_needed() {
-  local task="$1" effort="$2" lc
-  [ "$effort" = "max" ] && return 0
-  lc="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
-  # Here-string, not `printf | grep -q`: the task text is unbounded, and once it outgrows the pipe
-  # buffer grep's early exit SIGPIPEs printf, which pipefail reports as a miss on a present cue.
-  grep -qE 'frontier[- ]required|safety[- ]critical|mission[- ]critical|formal proof' <<<"$lc"
-}
-
-# _score <base> <tier> <category> <effort> <difficulty> <model> -> selection score.
-# Capable models get a value preference, Kimi K3 gets a hard-work near-frontier adjustment, and an
-# explicit frontier requirement outweighs both. Benchmark and history remain the base evidence.
-# The Kimi adjustment is REASONING-SHAPED ONLY: it used to fire on every hard non-creative task, which
-# floated kimi to #1 (score 80) for an edit-run-verify job — where its long pure-reasoning bursts are
-# exactly the wrong shape (the 2026-09-15 incident: two ~17-min zero-write burns). Kimi's edge is deep
-# analysis; a hard reasoning task still lets it win, a hard code/agentic task does not.
-_score() {
-  local base="$1" tier="$2" category="$3" effort="$4" difficulty="$5" model="$6"
-  awk -v s="$base" -v t="$tier" -v c="$category" -v e="$effort" -v d="$difficulty" -v m="$model" '
-    BEGIN {
-      if (t == "capable") s += 8
-      if (t == "capable" && (e == "high" || e == "xhigh")) s += 2
-      if (m == "kimi-k3" && d == "hard" && c == "reasoning") s += 20
-      if (e == "max" && t == "frontier") s += 30
-      printf "%.4f", s
-    }'
-}
-
-# ---- VARIANT PREFERENCE (cheaper capable variant within a family) ---------------------------------
-# Devin ships families as effort/size variants (glm-5-3-high, glm-5-3-flash-high, deepseek-v4-pro-max).
-# When two variants of ONE family both clear the task threshold, the lighter one is the better
-# recommendation unless the caller asked for max effort or the task requires the frontier: same
-# capability class, less quota draw. On plan lanes cost is a flat "plan limits", so value-ratio cannot
-# separate them; this weight is the tiebreaker that makes flash-high beat high. Never a price (prices
-# rot); a shape rule. OSRC_ADVISE_VARIANT_PREF=0 disables.
-# _variant_family <resolved-id> -> family key: provider prefix dropped, '.'->'-', size/effort suffixes
-# stripped repeatedly (glm-5-3-flash-high -> glm-5-3; glm-5.2 -> glm-5-2; deepseek-v4-pro-max -> deepseek-v4-pro).
-_variant_family() {
-  local id prev=""; id="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '.' '-')"; id="${id##*/}"
-  while [ "$id" != "$prev" ]; do
-    prev="$id"
-    id="$(printf '%s' "$id" | sed -E 's/-(none|minimal|low|medium|high|xhigh|max|1m|flash|lightning|mini|lite|turbo)$//')"
-  done
-  printf '%s' "$id"
-}
-# _variant_weight <resolved-id> <effort> -> smaller = preferred. Two parts: a LIGHT family member
-# (flash/lightning/mini/lite) scores 0, a full-size one 10, so light always beats full-size; plus the
-# distance between the variant's effort rung and the REQUESTED effort (none/low=0, medium=1, high=2,
-# xhigh/max=3; an un-rung family id counts as distance 1), so at --effort high the -high rung of the
-# light member wins over its bare id and over every full-size rung.
-_variant_weight() {
-  local id w=10 rung=-1 target=2 d; id="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr '.' '-')"; id="${id##*/}"
-  case "$id" in *-flash|*-flash-*|*-lightning|*-lightning-*|*-mini|*-mini-*|*-lite|*-lite-*) w=0 ;; esac
-  id="${id%-1m}"
-  case "$id" in *-none|*-minimal|*-low) rung=0 ;; *-medium) rung=1 ;; *-high) rung=2 ;; *-xhigh|*-max) rung=3 ;; esac
-  case "${2:-}" in minimal|low|none) target=0 ;; medium) target=1 ;; high) target=2 ;; xhigh|max) target=3 ;; esac
-  if [ "$rung" -lt 0 ]; then d=1; else d=$(( rung - target )); [ "$d" -lt 0 ] && d=$(( -d )); fi
-  printf '%s' $(( w + d ))
-}
-
-# _advise_candidate_rows [field] -> emit `alias|resolved|lane|tier` rows for the advise ranking
-# loop, replacing the old static-only `printf '%s\n' "$OSRC_MODEL_TABLE"` source. The pool is the
-# UNION of:
-#   1. OSRC_MODEL_TABLE verbatim   -- curated: lane+tier authoritative, and the offline fallback.
-#   2. live OpenRouter ids         -- from the cached models.json (.data[].id), SCORED-ONLY.
-# Static rows WIN on dedup: a resolved id present in OSRC_MODEL_TABLE is emitted from the static
-# row only, so curated lane routing (e.g. deepseek -> or vs dv) and hand-set tiers are preserved.
-# A dynamic id absent from the static table gets a tier DERIVED from its live benchmark score via
-# _tier_from_score, so a never-before-seen strong model is recommendable on merit the day it shows
-# up in the catalog, with zero manual table edits.
-#
-# Only OpenRouter ids are enumerated, and only those that CARRY a benchmark score. The Devin catalog
-# is deliberately NOT enumerated: its uids (glm-5-2, deepseek-v4-pro-high) do not match the
-# OpenRouter-keyed benchmark data, so every one would score empty and rank as raw -- pure noise and
-# a needless jq storm. Merit-based discovery only works where a score exists (OpenRouter); the
-# curated Devin models are already routed through OSRC_MODEL_TABLE. An id with no score has no merit
-# signal to be "recommended on merit" and is skipped.
-#
-# Cache-only and fail-open: reads the already-cached benchmarks.json + models.json DIRECTLY (never a
-# refresh/fetch -- that would block advise on the network). Missing/empty caches -> zero dynamic
-# rows and the static pool carries, byte-for-byte the offline behavior. Escape hatch
-# OSRC_ADVISE_DYNAMIC_POOL=0 forces the static-only pool. OSRC_ADVISE_DYNAMIC_MAX (default 25) caps
-# how many of the strongest-scoring discovered ids are added, bounding both the pool and the
-# downstream ranking cost. The optional <field> is the score field for the task category.
-_advise_candidate_rows() {
-  local field="${1:-intelligence_index}"
-  local _nl=$'\n' _tab; _tab="$(printf '\t')"
-  local seen="$_nl" alias resolved lane tier id sc bench_map or_ids scored
-  local max="${OSRC_ADVISE_DYNAMIC_MAX:-25}" added=0
-  case "$max" in ''|*[!0-9]*) max=25 ;; esac   # empty/non-numeric/negative -> safe default; 0 means none
-  # Static rows first. Iterate via process substitution (not a pipe) so `seen` accumulates in this
-  # shell and the dynamic pass can dedup against it without associative arrays (bash-3.2 safe).
-  while IFS='|' read -r alias resolved lane tier; do
-    [ -n "$alias" ] || continue
-    printf '%s|%s|%s|%s\n' "$alias" "$resolved" "$lane" "$tier"
-    seen="$seen$resolved$_nl"
-  done < <(printf '%s\n' "$OSRC_MODEL_TABLE")
-  [ "${OSRC_ADVISE_DYNAMIC_POOL:-1}" = "0" ] && return 0
-  { [ -f "$OSRC_BENCH_JSON" ] && [ -f "$OSRC_MODELS_JSON" ] && have jq; } || return 0
-  # ONE jq pass builds a "permaslug<TAB>score" map; a SINGLE awk then joins EVERY OpenRouter id
-  # against it in-process. A per-id awk/subprocess lookup would reintroduce an O(N) latency cliff as
-  # the catalog grows -- the whole join runs in one awk instead. The match is boundary-aware: an id
-  # matches a permaslug only on an exact hit or at a '-' segment boundary, so a short id like
-  # openai/gpt-5 cannot steal a longer model's score (openai/gpt-5.6-...); ties break to the shortest
-  # (canonical) permaslug, mirroring _bench_lookup. Ids are charset-filtered (a third-party catalog id
-  # with a '|' or a shell metachar can't corrupt the alias|resolved|lane|tier row or reach any eval).
-  # The ranking loop recomputes the authoritative score, so this only gates scored-vs-not, the tier
-  # band, and the top-N selection.
-  bench_map="$(jq -r --arg f "$field" '.data[]? | select(.[$f] != null) | "\(.model_permaslug)\t\(.[$f])"' "$OSRC_BENCH_JSON" 2>/dev/null)"
-  [ -n "$bench_map" ] || return 0
-  or_ids="$(jq -r '.data[]?.id // empty' "$OSRC_MODELS_JSON" 2>/dev/null)"
-  scored="$(awk -F"$_tab" '
-    # canon(): drop a trailing -<digits> release-date segment so a dated permaslug reduces to the
-    # bare model id (z-ai/glm-5.2-20260616 -> z-ai/glm-5.2). Matching is then an O(1) hash lookup,
-    # exact then canonical -- O(N+M) overall, and a short id can only match its OWN canonical id,
-    # never borrow a longer siblings score.
-    function canon(p,   c) { c=p; sub(/-[0-9]+$/, "", c); return c }
-    NR==FNR {
-      if (!($1 in exact)) exact[$1]=$2
-      c=canon($1); if (!(c in cano)) cano[c]=$2
-      next
-    }
-    {
-      id=$1
-      if (id !~ "^[A-Za-z0-9._/-]+$") next
-      s=id; sub(/:free$/, "", s)
-      if (s in exact)     print id "\t" exact[s]
-      else if (s in cano) print id "\t" cano[s]
-    }
-  ' <(printf '%s\n' "$bench_map") <(printf '%s\n' "$or_ids") | sort -t"$_tab" -k2 -rn)"
-  while IFS="$_tab" read -r id sc; do
-    [ "$added" -ge "$max" ] && break
-    [ -n "$id" ] || continue
-    case "$seen" in *"$_nl$id$_nl"*) continue ;; esac
-    printf '%s|%s|or|%s\n' "$id" "$id" "$(_tier_from_score "$sc")"
-    seen="$seen$id$_nl"
-    added=$((added + 1))
-  done <<EOF
-$scored
-EOF
-  return 0
-}
-
-# _model_lanes <canon-key> -> echo the space-separated set of lane codes whose CACHED catalog
-# contains a model whose _model_canon_key equals <canon-key>. Cache-only: it reads the three
-# already-on-disk artifacts and NEVER triggers a fetch, so a routing decision can ask "which
-# lanes can run this model" without a network round-trip or a CLI probe. A missing/unreadable
-# source is skipped cleanly (no error, no partial lane). Each lane is emitted at most once.
-#
-# Each source is ONE jq pass to pull ids + ONE awk pass to canon-collapse and match, mirroring
-# _model_canon_key inside awk (lowercase, drop the known vendor prefix segment, strip a trailing
-# -<6+digit> release date, strip -high/-low/-max/-medium effort suffixes, then '.'->'-'). A
-# per-id _model_canon_key subprocess loop would reintroduce an O(catalog) latency cliff as the
-# catalog grows; the in-awk canon keeps each source a single subprocess and exits on first hit.
-_model_lanes() {
-  local key="${1:-}" f ids hit out=""
-  [ -n "$key" ] || { printf '\n'; return 0; }
-  have jq || { printf '\n'; return 0; }
-  # or: OpenRouter cached models.json (.data[].id). First match prints a marker and exits.
-  f="$OSRC_MODELS_JSON"
-  if [ -f "$f" ]; then
-    ids="$(jq -r '.data[]?.id // empty' "$f" 2>/dev/null)"
-    if [ -n "$ids" ]; then
-      hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
-        function canon(s,   c) {
-          c = tolower(s)
-          sub(/^[^\/]*\//, "", c)
-          sub(/-[0-9]{6,}$/, "", c)
-          while (sub(/-(high|low|max|medium)$/, "", c)) {}
-          gsub(/\./, "-", c)
-          return c
-        }
-        { if (canon($0) == k) { print "1"; exit } }
-      ' 2>/dev/null)"
-      [ -n "$hit" ] && out="$out or"
-    fi
-  fi
-  # dv: the STRUCTURED catalog (dv.raw.json), not the flat dv.json. variants[].model_uid is the
-  # launchable id form; family_uid/aliases collapse to the same canon key in practice and would
-  # only add duplicate hits, so variants alone are the faithful, dedup-clean source. The
-  # ${f%.json}.raw.json derivation mirrors _devin_catalog_raw so the path stays in lockstep.
-  f="$(_catalog_path dv 2>/dev/null)" || f=""
-  if [ -n "$f" ]; then
-    f="${f%.json}.raw.json"
-    if [ -f "$f" ]; then
-      ids="$(jq -r '.families[]?.variants[]?.model_uid // empty' "$f" 2>/dev/null)"
-      if [ -n "$ids" ]; then
-        hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
-          function canon(s,   c) {
-            c = tolower(s)
-            sub(/^[^\/]*\//, "", c)
-            sub(/-[0-9]{6,}$/, "", c)
-            while (sub(/-(high|low|max|medium)$/, "", c)) {}
-            gsub(/\./, "-", c)
-            return c
-          }
-          { if (canon($0) == k) { print "1"; exit } }
-        ' 2>/dev/null)"
-        [ -n "$hit" ] && out="$out dv"
-      fi
-    fi
-  fi
-  # warp: flat JSON array of id strings (one id per element). Same single-awk canon pass.
-  f="$(_catalog_path warp 2>/dev/null)" || f=""
-  if [ -n "$f" ] && [ -f "$f" ]; then
-    ids="$(jq -r '.[] // empty' "$f" 2>/dev/null)"
-    if [ -n "$ids" ]; then
-      hit="$(printf '%s\n' "$ids" | awk -v k="$key" '
-        function canon(s,   c) {
-          c = tolower(s)
-          sub(/^[^\/]*\//, "", c)
-          sub(/-[0-9]{6,}$/, "", c)
-          while (sub(/-(high|low|max|medium)$/, "", c)) {}
-          gsub(/\./, "-", c)
-          return c
-        }
-        { if (canon($0) == k) { print "1"; exit } }
-      ' 2>/dev/null)"
-      [ -n "$hit" ] && out="$out warp"
-    fi
-  fi
-  out="${out# }"
-  printf '%s\n' "$out"
-}
-
-# _lane_marginal_cost <lane> <resolved-id> [est_tokens] -> echo two space-separated fields:
-# a numeric comparable cost and a basis label. Pure-read: consults only cached prices and the
-# existing conserve read, never a fetch. The cost is what a value-ranking caller compares to
-# pick the cheapest lane that can run a model; the basis label says HOW the number was derived
-# so a caller never mistakes an estimate for a metered price or a sentinel for a real zero.
-#
-#   or                -> est_tokens * cached OpenRouter per-token prompt price; basis "est".
-#                       No price on file -> "0 unknown" (an unpriced id must not win on cost it
-#                       cannot prove). est_tokens defaults to 1000.
-#   cc/cx/dv/gm/warp/  -> "0 plan" (subscription/keyless: cost is quota-limited, not per-token,
-#   gemini              so the comparable cost is zero for value ranking) UNLESS the lane is past
-#                       its conserve line, in which case "999 overage" forces value routing OFF a
-#                       nearly-exhausted sub. Reuses _lane_conserve_mult: a multiplier <1 means a
-#                       measurable lane is past the conserve line; unmeasurable lanes return 1.00
-#                       and stay "0 plan" (we never invent a limit we cannot read).
-#   local             -> "0 free" (local inference: no per-token cost, no sub quota to exhaust).
-#   droid/cline/cursor -> "-1 unknown" sentinel: pass-through BYOK bills the caller's own key, so
-#                       this lane has no comparable cost HERE. Callers MUST treat -1 as "not
-#                       comparable / never wins on value", never as the cheapest lane.
-_lane_marginal_cost() {
-  local lane="${1:-}" id="${2:-}" est price cost mult
-  # Descriptor-first: marginal_class selects the cost shape (plan/metered/free; absent ->
-  # the -1 unknown sentinel). The residual case covers unported lanes AND the `gemini`
-  # token quirk: `gemini` resolves to the gi lane (metered), but the old arm priced that
-  # token as plan — gi cannot carry marginal_class=plan without mis-pricing its own
-  # canonical code, so the token is kept here.
-  local _ml _cls=""
-  _ml="$(_lane_by_token "$lane" 2>/dev/null)" && _cls="$(_lane_field "$_ml" marginal_class 2>/dev/null)"
-  if [ -z "$_cls" ]; then
-    case "$lane" in
-      dv|gemini)   _cls=plan ;;      # unported dv + the gemini token quirk above
-      *)           _cls=unknown ;;
-    esac
-  fi
-  case "$_cls" in
-    metered)
-      est="${3:-1000}"
-      case "$est" in ''|*[!0-9.]*) est="1000" ;; esac
-      if [ -f "$OSRC_MODELS_JSON" ] && have jq; then
-        price="$(jq -r --arg id "$id" '.data[]|select(.id==$id)|.pricing.prompt // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
-      fi
-      case "$price" in ''|*[!0-9.-]*) printf '0 unknown\n'; return ;; esac
-      cost="$(awk -v e="$est" -v p="$price" 'BEGIN{printf "%g", e*p}')"
-      printf '%s est\n' "$cost"
-      ;;
-    plan)
-      mult="$(_lane_conserve_mult "$lane" "$(_session_limits 2>/dev/null)" 2>/dev/null)"
-      case "$mult" in ''|*[!0-9.-]*) mult="1.00" ;; esac
-      if awk -v m="$mult" 'BEGIN{exit !(m+0 < 1.0)}'; then
-        printf '999 overage\n'
-      else
-        printf '0 plan\n'
-      fi
-      ;;
-    free)
-      printf '0 free\n'
-      ;;
-    *)
-      # Unknown lane: no basis to compare. Same unknown sentinel, never a zero that would win.
-      printf -- '-1 unknown\n'
-      ;;
-  esac
-}
-
-# cmd_advise: task-aware model recommendation with benchmark data.
-# Usage: advise [--refresh] [--json] [--effort LEVEL] "<task prompt>"
-# Classifies the task, scores all known models, recommends the best value model
-# that meets the capability threshold. Explains WHY it picked that model.
-# The candidate pool is the curated OSRC_MODEL_TABLE UNIONED with the live catalog (cached
-# dv.raw.json + models.json); see _advise_candidate_rows. OSRC_ADVISE_DYNAMIC_POOL=0 falls back to
-# the static-only pool. Cost-safety is unchanged: the winning id still flows through
-# _devin_resolve_model / _catalog_validate at delegate time.
-cmd_advise() {
-  local do_refresh=0 json_out=0 task="" selection_effort="${OUTSOURCERER_EFFORT:-}"
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --refresh) do_refresh=1; shift ;;
-      --json)    json_out=1; shift ;;
-      --effort|--reasoning)
-                 [ -n "${2:-}" ] || die "advise: --effort needs minimal|low|medium|high|xhigh|max|none"
-                 case "$2" in minimal|low|medium|high|xhigh|max|none) selection_effort="$2" ;;
-                   *) die "advise: invalid effort '$2' (use minimal|low|medium|high|xhigh|max|none)" ;; esac
-                 shift 2 ;;
-      --)        shift; task="${*:-}"; break ;;
-      --*)       task="${task:+$task }$1"; shift ;;   # unknown --flags treated as task text
-      *)         task="${task:+$task }$1"; shift ;;
-    esac
-  done
-  [ -n "$task" ] || die "advise needs a task description (try: $0 advise \"refactor auth module\")"
-  # JSON output requires jq; fail explicitly rather than emitting empty output.
-  if [ "$json_out" -eq 1 ] && ! have jq; then
-    die "advise --json requires jq (install it or run without --json for text output)"
-  fi
-
-  if [ "$do_refresh" -eq 1 ] || [ ! -f "$OSRC_BENCH_JSON" ]; then
-    # On explicit --refresh, show diagnostics (don't suppress stderr).
-    if [ "$do_refresh" -eq 1 ]; then
-      refresh_benchmarks || true
-    elif [ "$json_out" -eq 1 ]; then
-      # --json must emit ONLY JSON: suppress the refresh success line (stdout) too, not just stderr.
-      refresh_benchmarks >/dev/null 2>&1 || true
-    else
-      refresh_benchmarks 2>/dev/null || true
-    fi
-  fi
-
-  # Benchmark freshness: a cache dated >7 days ago refreshes automatically when an OpenRouter
-  # key is configured; otherwise the stale age is called out once in the output below.
-  local _bstale=""
-  _bstale="$(_bench_cache_stale 2>/dev/null)"
-  if [ -n "$_bstale" ] && { [ -n "${OPENROUTER_API_KEY:-}" ] || [ -n "$(_extract_kv_value OPENROUTER_API_KEY)" ]; }; then
-    if [ "$json_out" -eq 1 ]; then refresh_benchmarks >/dev/null 2>&1 || true
-    else refresh_benchmarks 2>/dev/null || true; fi
-    _bstale="$(_bench_cache_stale 2>/dev/null)"
-  fi
-
-  local category field threshold difficulty frontier_needed=0
-  category="$(_classify_task "$task")"
-  field="$(_bench_score_field "$category")"
-  threshold="$(_bench_threshold_for "$category")"
-  difficulty="$(_task_difficulty "$task")"
-  if [ -z "$selection_effort" ]; then
-    case "$difficulty" in hard) selection_effort=high ;; *) selection_effort=medium ;; esac
-  fi
-  _frontier_needed "$task" "$selection_effort" && frontier_needed=1
-
-  # Live per-lane limits, read once, so a nearly-exhausted subscription lane is deprioritized in the
-  # recommendation itself (not only by the separate conserve-routing layer). Best-effort; empty -> no
-  # penalty anywhere. Opt out with OSRC_ADVISE_CONSERVE=0.
-  local _adv_limits="" conserve_seen="" conserve_notes=""
-  [ "${OSRC_ADVISE_CONSERVE:-1}" != "0" ] && _adv_limits="$(_session_limits 2>/dev/null)"
-  # L7 LIMIT GATE: a lane at/over OSRC_LANE_LIMIT_PCT on a FRESH meter is excluded outright — the
-  # hard edge, independent of the soft conserve haircut below. Stale readings count as unknown.
-  # OSRC_LANE_LIMIT_GATE=0 disables. Read once here, shared by every candidate in the loop.
-  local _gate_limits="" _limit_notes=""
-  [ "${OSRC_LANE_LIMIT_GATE:-1}" != "0" ] && _gate_limits="$(_session_limits 2>/dev/null)"
-  # Score each candidate from the alias table.
-  local results="" has_bench=0 bench_count=0 total_count=0
-  local alias resolved lane tier bench_line score price_in price_out cost_per_m value_ratio meets
-  while IFS='|' read -r alias resolved lane tier; do
-    [ -n "$alias" ] || continue
-    # skip image lanes — descriptor image_lane=yes on each image lane.
-    if _lane_flag "$lane" image_lane; then continue; fi
-    _model_denied "$resolved" && continue     # OSRC_MODEL_DENYLIST: never recommend a denied model
-    _model_excluded "$alias" && continue      # user exclude list (#45), alias form (resolved form is in _model_denied)
-    # L7 LIMIT GATE: never pick a lane whose fresh meter is at/over OSRC_LANE_LIMIT_PCT.
-    if [ -n "$_gate_limits" ] && _osrc_limit_exceeded "$lane" "$_gate_limits" 2>/dev/null; then
-      local _olr; _olr="$(_osrc_lane_limit "$lane" "$_gate_limits" 2>/dev/null)"
-      _limit_notes="${_limit_notes:+$_limit_notes; }${_olr:-$lane} >= $(_osrc_limit_threshold)% -> $lane excluded"
-      continue
-    fi
-    total_count=$((total_count + 1))
-    bench_line="$(_bench_lookup "$resolved" "$field")"
-    if [ -n "$bench_line" ]; then
-      bench_count=$((bench_count + 1))
-      score="$(printf '%s' "$bench_line" | cut -f1)"
-      price_in="$(printf '%s' "$bench_line" | cut -f2)"
-      price_out="$(printf '%s' "$bench_line" | cut -f3)"
-    else
-      score="$(_tier_score_proxy "$tier")"
-      price_in="0"; price_out="0"
-      if [ -f "$OSRC_MODELS_JSON" ] && have jq; then
-        local p
-        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.prompt // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
-        [ -n "$p" ] && price_in="$p"
-        p="$(jq -r --arg id "$resolved" '.data[]|select(.id==$id)|.pricing.completion // empty' "$OSRC_MODELS_JSON" 2>/dev/null | head -1)"
-        [ -n "$p" ] && price_out="$p"
-      fi
-    fi
-    # Fold local outcome history into the score BEFORE threshold/value-ratio, so a lane that keeps
-    # failing THIS repo's checks drops out and a proven one rises. Zero history -> mult 1.00 (neutral).
-    local _hm _mult; _hm="$(_history_mult "$lane" "$resolved" "$category")"; _mult="${_hm%%|*}"
-    case "$_mult" in ''|*[!0-9.]*) _mult="1.00" ;; esac
-    score="$(awk -v s="$score" -v m="$_mult" 'BEGIN{printf "%.4f", s*m}')"
-    score="$(_score "$score" "$tier" "$category" "$selection_effort" "$difficulty" "$resolved")"
-    # Fold live per-lane conservation the SAME way as history: a measurable lane past the conserve line
-    # takes a gentle score haircut so limits-left steers the pick. Neutral (1.00) for unmeasurable lanes.
-    local _cmult; _cmult="$(_lane_conserve_mult "$lane" "$_adv_limits")"
-    case "$_cmult" in ''|*[!0-9.]*) _cmult="1.00" ;; esac
-    if awk -v m="$_cmult" 'BEGIN{exit !(m+0 < 1.0)}'; then
-      score="$(awk -v s="$score" -v m="$_cmult" 'BEGIN{printf "%.4f", s*m}')"
-      case " $conserve_seen " in *" $lane "*) : ;; *)
-        conserve_seen="$conserve_seen $lane"
-        local _clbl; _clbl="$(_lane_field "$lane" conserve_label 2>/dev/null)"
-        [ -n "$_clbl" ] || _clbl="$lane"
-        conserve_notes="${conserve_notes:+$conserve_notes; }$_clbl past conserve line -> score x$_cmult" ;;
-      esac
-    fi
-    # Subscription lanes (cx/cc/dv/gm): cost is plan-limited, not per-token.
-    # Set price to 0 BEFORE value ratio so subscription models rank by capability, not OR price.
-    # Descriptor plan_limited=yes, literal tail until dv ports.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then price_in="0"; price_out="0"; fi
-    # Value ratio = score / max(cost_per_m_input, 0.01). Zero-priced catalog models use a 0.01 floor.
-    cost_per_m="$(awk -v p="$price_in" 'BEGIN{printf "%.6f", p*1000000}')"
-    value_ratio="$(awk -v s="$score" -v c="$cost_per_m" 'BEGIN{if(c<0.01)c=0.01; printf "%.2f", s/c}')"
-    meets=0
-    awk -v s="$score" -v t="$threshold" 'BEGIN{exit (s+0 >= t+0) ? 0 : 1}' && meets=1
-    # Display label for subscription lanes.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then cost_per_m="plan limits"; fi
-    results="$results$alias|$resolved|$lane|$tier|$score|$cost_per_m|$value_ratio|$meets|0
-"
-  done < <(_advise_candidate_rows "$field")
-
-  # VARIANT PREFERENCE pass (see _variant_weight): among capable rows that MEET the threshold, find each
-  # family's lightest variant (per lane); every heavier sibling gets pref=1 = "a lighter sibling
-  # qualifies", which keeps it out of capable_best contention below (it stays listed, labeled). Off at
-  # effort=max or when the task requires the frontier — then the heavier rung is the point.
-  local variant_pref=1 fam_min="" _vf _vw _vmin _vrows=""
-  { [ "$selection_effort" = "max" ] || [ "$frontier_needed" = "1" ] || [ "${OSRC_ADVISE_VARIANT_PREF:-1}" = "0" ]; } && variant_pref=0
-  if [ "$variant_pref" = "1" ]; then
-    while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] && [ "$meets" = "1" ] && [ "$tier" = "capable" ] || continue
-      _vf="$(_variant_family "$resolved")|$lane"; _vw="$(_variant_weight "$resolved" "$selection_effort")"
-      _vmin="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" '($1"|"$2)==k{print $3; exit}')"
-      if [ -z "$_vmin" ]; then fam_min="$fam_min$_vf|$_vw
-"
-      elif [ "$_vw" -lt "$_vmin" ]; then fam_min="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" -v w="$_vw" '($1"|"$2)==k{print $1"|"$2"|"w; next} NF{print}')
-"
-      fi
-    done < <(printf '%s\n' "$results")
-    while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] || continue
-      if [ "$meets" = "1" ] && [ "$tier" = "capable" ]; then
-        _vf="$(_variant_family "$resolved")|$lane"; _vw="$(_variant_weight "$resolved" "$selection_effort")"
-        _vmin="$(printf '%s\n' "$fam_min" | awk -F'|' -v k="$_vf" '($1"|"$2)==k{print $3; exit}')"
-        [ -n "$_vmin" ] && [ "$_vw" -gt "$_vmin" ] && _pref=1
-      fi
-      _vrows="$_vrows$alias|$resolved|$lane|$tier|$score|$cost|$vr|$meets|$_pref
-"
-    done < <(printf '%s\n' "$results")
-    results="$_vrows"
-  fi
-
-  # Pick recommendation in two cohorts to avoid subscription lanes dominating value ratio.
-  # Subscription lanes (cx/cc/dv/gm): ranked by score (cost is plan-limited, not comparable to per-token).
-  # Paid lanes (or/codex): ranked by value ratio (score / cost_per_m).
-  # Prefer subscription if it meets threshold; else best paid by value ratio; else highest score overall.
-  local rec_alias="" rec_resolved="" rec_lane="" rec_tier="" rec_reason=""
-  local capable_best_alias="" capable_best_resolved="" capable_best_lane="" capable_best_tier="" capable_best_vr=-1 capable_best_w=999
-  local frontier_best_alias="" frontier_best_resolved="" frontier_best_lane="" frontier_best_tier="" frontier_best_score=-1
-  local sub_best_alias="" sub_best_resolved="" sub_best_lane="" sub_best_score=-1
-  local paid_best_alias="" paid_best_resolved="" paid_best_lane="" paid_best_vr=-1
-  local any_best_alias="" any_best_resolved="" any_best_lane="" any_best_score=-1
-  while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-    [ -n "$alias" ] || continue
-    # Track highest score overall (fallback when nothing meets threshold).
-    awk -v s="$score" -v b="$any_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-      any_best_score="$score"; any_best_alias="$alias"; any_best_resolved="$resolved"; any_best_lane="$lane"
-    }
-    [ "$meets" = "1" ] || continue
-    if [ "$tier" = "capable" ] && [ "${_pref:-0}" != "1" ]; then
-      # Equal value ratios are the NORM on plan lanes (flat "plan limits" cost, tier-proxy scores), so
-      # a strict `>` alone let TABLE ORDER pick the winner among ties. Tiebreak on the variant weight
-      # instead (lower = lighter/cheaper quota draw, rung closest to the requested effort): the same
-      # rule that ranks siblings within a family, applied across families when value is identical.
-      local _cw; _cw="$(_variant_weight "$resolved" "$selection_effort")"
-      if awk -v v="$vr" -v b="$capable_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' \
-         || { awk -v v="$vr" -v b="$capable_best_vr" 'BEGIN{exit (v+0 == b+0) ? 0 : 1}' && [ "$_cw" -lt "$capable_best_w" ]; }; then
-        capable_best_vr="$vr"; capable_best_w="$_cw"; capable_best_alias="$alias"; capable_best_resolved="$resolved"
-        capable_best_lane="$lane"; capable_best_tier="$tier"
-      fi
-    fi
-    if [ "$tier" = "frontier" ]; then
-      awk -v s="$score" -v b="$frontier_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-        frontier_best_score="$score"; frontier_best_alias="$alias"; frontier_best_resolved="$resolved"
-        frontier_best_lane="$lane"; frontier_best_tier="$tier"
-      }
-    fi
-    # Subscription lanes rank by score (cost is plan-limited, not per-token):
-    # descriptor plan_limited=yes, literal tail until dv ports.
-    if _lane_flag "$lane" plan_limited || case "$lane" in dv) true ;; *) false ;; esac; then
-      awk -v s="$score" -v b="$sub_best_score" 'BEGIN{exit (s+0 > b+0) ? 0 : 1}' && {
-        sub_best_score="$score"; sub_best_alias="$alias"; sub_best_resolved="$resolved"; sub_best_lane="$lane"
-      }
-    else
-      awk -v v="$vr" -v b="$paid_best_vr" 'BEGIN{exit (v+0 > b+0) ? 0 : 1}' && {
-        paid_best_vr="$vr"; paid_best_alias="$alias"; paid_best_resolved="$resolved"; paid_best_lane="$lane"
-      }
-    fi
-  done < <(printf '%s\n' "$results")
-
-  # Prefer capable-tier value unless the task explicitly needs the frontier.
-  if [ "$frontier_needed" = "1" ] && [ -n "$frontier_best_alias" ]; then
-    rec_alias="$frontier_best_alias"; rec_resolved="$frontier_best_resolved"; rec_lane="$frontier_best_lane"; rec_tier="$frontier_best_tier"
-    rec_reason="frontier required (score $frontier_best_score, ${category} threshold $threshold, effort $selection_effort)"
-  elif [ -n "$capable_best_alias" ]; then
-    rec_alias="$capable_best_alias"; rec_resolved="$capable_best_resolved"; rec_lane="$capable_best_lane"; rec_tier="$capable_best_tier"
-    rec_reason="best capable-tier value (ratio $capable_best_vr, meets ${category} threshold $threshold, effort $selection_effort)"
-  elif [ -n "$sub_best_alias" ]; then
-    rec_alias="$sub_best_alias"; rec_resolved="$sub_best_resolved"; rec_lane="$sub_best_lane"
-    rec_reason="best subscription model (score $sub_best_score, meets ${category} threshold $threshold, plan-limited cost)"
-  elif [ -n "$paid_best_alias" ]; then
-    rec_alias="$paid_best_alias"; rec_resolved="$paid_best_resolved"; rec_lane="$paid_best_lane"
-    rec_reason="best value (ratio $paid_best_vr, meets ${category} threshold $threshold)"
-  else
-    rec_alias="$any_best_alias"; rec_resolved="$any_best_resolved"; rec_lane="$any_best_lane"
-    rec_reason="highest score (score $any_best_score, no model met ${category} threshold $threshold, consider escalating)"
-  fi
-  if [ -z "$rec_tier" ]; then
-    local _rec_row; _rec_row="$(resolve_model_row "$rec_alias")"; rec_tier="${_rec_row##*|}"
-  fi
-
-  # Lane routing: the quality logic above chose the MODEL; keep it, but run it on its cheapest
-  # AVAILABLE lane. The same model often lives on a per-token cash lane (OpenRouter) AND a plan lane
-  # the user already pays for (a free Devin tier, a Warp/Claude/Codex sub), whose marginal cost is
-  # ~0 -- so a sunk subscription is spent before real cash. Only the lane moves; the winning model is
-  # never downgraded. A cost-unknown (BYOK) lane never wins on cost. OSRC_ADVISE_ROUTER=0 keeps the
-  # pre-router lane.
-  local rec_cost_basis=""
-  if [ "${OSRC_ADVISE_ROUTER:-1}" != "0" ] && [ -n "$rec_resolved" ]; then
-    local _rk _rlanes _l _lc _lcost _lbasis
-    _rk="$(_model_canon_key "$rec_resolved" 2>/dev/null)"
-    _rlanes="$(_model_lanes "$_rk" 2>/dev/null)"
-    # Seed with the current pick's own marginal cost so a tie keeps the originally-chosen lane.
-    _lc="$(_lane_marginal_cost "$rec_lane" "$rec_resolved" 2>/dev/null)"
-    _lcost="${_lc%% *}"; rec_cost_basis="${_lc##* }"
-    case "$_lcost" in ''|-1|*[!0-9.]*) _lcost="" ; rec_cost_basis="${_lc##* }" ;; esac
-    local _bestcost="$_lcost"
-    for _l in $_rlanes; do
-      [ "$_l" = "$rec_lane" ] && continue
-      _lc="$(_lane_marginal_cost "$_l" "$rec_resolved" 2>/dev/null)"
-      _lcost="${_lc%% *}"; _lbasis="${_lc##* }"
-      case "$_lcost" in ''|-1|*[!0-9.]*) continue ;; esac   # unknown/BYOK never wins on cost
-      if [ -z "$_bestcost" ] || awk -v a="$_lcost" -v b="$_bestcost" 'BEGIN{exit (a+0 < b+0)?0:1}'; then
-        _bestcost="$_lcost"; rec_lane="$_l"; rec_cost_basis="$_lbasis"
-      fi
-    done
-  fi
-
-  # Determine benchmark data quality: live (majority), partial, or none.
-  if [ "$bench_count" -gt 0 ] && [ "$total_count" -gt 0 ] && [ "$bench_count" -ge $((total_count / 2)) ]; then
-    has_bench=1
-  elif [ "$bench_count" -gt 0 ]; then
-    has_bench=2  # partial
-  else
-    has_bench=0
-  fi
-
-  # Guard: if no candidates at all (empty model table), fail gracefully.
-  if [ -z "$rec_alias" ] && [ -n "$_limit_notes" ]; then
-    die "advise: every candidate lane is at/over OSRC_LANE_LIMIT_PCT (${_limit_notes}). Wait for a window reset, or set OSRC_LANE_LIMIT_GATE=0."
-  fi
-  [ -n "$rec_alias" ] || die "advise: no models found in the alias table to score"
-
-  # Recompute the recommended model's history for the human/json explanation (raw + effective).
-  local _rh rec_mult rec_neff rec_peff rec_scope _rhrest
-  _rh="$(_history_mult "$rec_lane" "$rec_resolved" "$category")"
-  rec_mult="${_rh%%|*}"; _rhrest="${_rh#*|}"; rec_neff="${_rhrest%%|*}"; _rhrest="${_rhrest#*|}"; rec_peff="${_rhrest%%|*}"; rec_scope="${_rh##*|}"
-  case "$rec_mult" in ''|*[!0-9.]*) rec_mult="1.00" ;; esac
-  local rec_pct; rec_pct="$(awk -v m="$rec_mult" 'BEGIN{printf "%+.0f", (m-1)*100}')"
-
-  # Ranked fallback shortlist: the SAME preference order the recommendation uses, as an ordered list so
-  # a caller can retry the next candidate when the top pick hits a transport failure (rate limit / 5xx /
-  # timeout). Rank groups mirror the picker exactly: capable value leads normally, frontier leads when
-  # required, and everything below threshold follows by score, so shortlist[0] IS
-  # the recommendation. Ordering only: this ranks candidates, it never asserts any of them will succeed.
-  local _sl="" _slg _slp
-  while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-    [ -n "$alias" ] || continue
-    if [ "$frontier_needed" = "1" ]; then
-      case "$meets:$tier" in 1:frontier) _slg=0; _slp="$score" ;; 1:capable) _slg=1; _slp="$vr" ;; *) _slg=2; _slp="$score" ;; esac
-    else
-      case "$meets:$tier" in 1:capable) _slg=0; _slp="$vr" ;; 1:*) _slg=1; _slp="$score" ;; *) _slg=2; _slp="$score" ;; esac
-    fi
-    # A demoted heavier variant (a lighter sibling qualifies) leaves the top group so shortlist[0] is
-    # never a row the recommendation itself passed over; it joins the "meets, not preferred" group.
-    [ "${_pref:-0}" = "1" ] && [ "$_slg" = "0" ] && { _slg=1; _slp="$score"; }
-    # Tertiary sort key = variant weight, the same tiebreak the recommendation uses. Plan-lane ties
-    # (flat cost, proxy scores) are common; without it shortlist[0] could be a different row than the
-    # recommendation whenever the top group tied on value.
-    _sl="$_sl$_slg|$_slp|$alias|$resolved|$lane|$meets|$score|$vr|${_pref:-0}|$(_variant_weight "$resolved" "$selection_effort")
-"
-  done < <(printf '%s\n' "$results")
-  # group asc, then the group-appropriate primary desc. -s (stable) so ties keep input (table) order,
-  # matching the picker's first-wins on equal score/ratio — this is what makes shortlist[0] == the pick.
-  local _sl_sorted; _sl_sorted="$(printf '%s' "$_sl" | grep -v '^$' | sort -s -t'|' -k1,1n -k2,2rn -k10,10n)"
-  local shortlist_json="[]"
-  if have jq; then
-    shortlist_json="$(printf '%s\n' "$_sl_sorted" \
-      | jq -R 'select(length>0)|split("|")|{alias:.[2],model:.[3],lane:.[4],meets:(.[5]=="1"),score:(.[6]|tonumber?),value_ratio:(.[7]|tonumber?),lighter_sibling_preferred:(.[8]=="1")}' 2>/dev/null \
-      | jq -s '.' 2>/dev/null)"
-    [ -n "$shortlist_json" ] || shortlist_json="[]"
-  fi
-
-  local _bstale_json=false _bench_asof=""
-  [ -n "$_bstale" ] && { _bstale_json=true; _bench_asof="${_bstale#*$'\t'}"; }
-  if [ "$json_out" -eq 1 ]; then
-    jq -n \
-      --arg task "$task" --arg category "$category" --arg field "$field" --arg threshold "$threshold" \
-      --arg rec_alias "$rec_alias" --arg rec_resolved "$rec_resolved" --arg rec_lane "$rec_lane" \
-      --arg rec_cost_basis "$rec_cost_basis" \
-      --arg rec_tier "$rec_tier" --arg effort "$selection_effort" --arg difficulty "$difficulty" \
-      --arg rec_reason "$rec_reason" --arg has_bench "$has_bench" --argjson bench_count "$bench_count" --argjson total_count "$total_count" \
-      --arg hmult "$rec_mult" --arg hneff "$rec_neff" --arg hpeff "$rec_peff" --arg hscope "$rec_scope" \
-      --arg conserve "$conserve_notes" --arg limit_gate "$_limit_notes" \
-      --arg bench_asof "$_bench_asof" --argjson bench_stale "$_bstale_json" \
-      --argjson shortlist "$shortlist_json" \
-      '{task:$task, category:$category, difficulty:$difficulty, effort:$effort, score_field:$field, threshold:$threshold,
-        recommendation:{alias:$rec_alias, model:$rec_resolved, lane:$rec_lane, cost_basis:(if $rec_cost_basis=="" then null else $rec_cost_basis end), tier:$rec_tier, reason:$rec_reason},
-        shortlist:$shortlist,
-        conservation:(if $conserve=="" then null else $conserve end),
-        limit_gate:(if $limit_gate=="" then null else $limit_gate end),
-        benchmark_data_available:($has_bench=="1"),
-        benchmark_stale:$bench_stale,
-        benchmark_as_of:(if $bench_asof=="" then null else $bench_asof end),
-        benchmark_coverage:((($bench_count|tostring) + "/" + ($total_count|tostring))),
-        history:{multiplier:($hmult|tonumber? // 1.0), effective_samples:($hneff|tonumber? // 0),
-                 passed_effective:($hpeff|tonumber? // 0), scope:$hscope}}'
-
-  else
-    echo "== outsourcerer advise =="
-    echo "   task: $task"
-    echo "   category: $category"
-    echo "   difficulty: $difficulty"
-    echo "   effort: $selection_effort"
-    echo "   effort tip: start at this level, re-run the same task one rung lower; if quality holds, keep the cheaper rung (medium often matches high at lower cost)."
-    echo "   scoring by: $field (threshold: $threshold)"
-    if [ "$has_bench" = "1" ]; then
-      echo "   benchmark data: live (OpenRouter, $(jq -r '.meta.as_of // "?"' "$OSRC_BENCH_JSON" 2>/dev/null), $bench_count/$total_count models)"
-    elif [ "$has_bench" = "2" ]; then
-      echo "   benchmark data: partial ($bench_count/$total_count models have live scores, rest use tier proxy, run: $0 advise --refresh \"$task\")"
-    else
-      echo "   benchmark data: none (tier proxy scores, run: $0 advise --refresh \"$task\")"
-    fi
-    if [ -n "$_bstale" ]; then
-      local _bd="${_bstale%%$'\t'*}" _ba="${_bstale#*$'\t'}" _bage
-      if [ "$_bd" = "unknown" ]; then _bage="an unknown age"; else _bage="$_bd days old"; fi
-      echo "   benchmark cache is $_bage (as of $_ba); refresh: $0 advise --refresh \"$task\""
-    fi
-    [ -n "$conserve_notes" ] && echo "   conservation: $conserve_notes (limits-left folded into the score; disable with OSRC_ADVISE_CONSERVE=0)"
-    [ -n "$_limit_notes" ] && echo "   limit-gate: $_limit_notes (lanes at/over OSRC_LANE_LIMIT_PCT excluded; disable with OSRC_LANE_LIMIT_GATE=0)"
-    echo
-    echo "--- recommendation ---"
-    echo "   model: $rec_alias ($rec_resolved)"
-    echo "   lane:  $rec_lane${rec_cost_basis:+ (cost: $rec_cost_basis)}"
-    echo "   why:   $rec_reason"
-    # Show the local-history adjustment when there is any (else stay silent — pure benchmark pick).
-    if [ "$rec_scope" != "none" ] && awk -v n="$rec_neff" 'BEGIN{exit (n+0>0)?0:1}'; then
-      echo "   local: ${rec_pct}% from ${rec_neff} effective runs (${rec_scope}: this ${category})"
-    fi
-    echo
-    echo "--- all candidates (sorted by value ratio, >> = recommended) ---"
-    printf '%s\n' "$results" | sort -t'|' -k7 -rn | while IFS='|' read -r alias resolved lane tier score cost vr meets _pref; do
-      [ -n "$alias" ] || continue
-      local mark="  " verdict
-      [ "$alias" = "$rec_alias" ] && mark=">>"
-      if [ "$meets" != "1" ]; then verdict='below threshold'
-      elif [ "${_pref:-0}" = "1" ]; then verdict='OK (lighter sibling preferred)'
-      else verdict=OK; fi
-      printf '%s %-16s %-28s lane=%-3s score=%-5s $/M=%-14s ratio=%-7s %s\n' \
-        "$mark" "$alias" "$resolved" "$lane" "$score" "$cost" "$vr" "$verdict"
-    done
-    echo
-    echo "Run with:  $0 run -m $rec_alias --effort $selection_effort \"$task\""
-    echo "Override:  $0 run -m <any-model> --effort $selection_effort \"$task\"   (you know better, pick your own)"
-  fi
-}
 
 # =============================================================================
 # LIVENESS / SUPERVISOR + BACKGROUND JOBS.
@@ -11214,7 +10312,7 @@ _bg_launch() {
   done
   chmod 700 "$jd" 2>/dev/null
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$jd" job "$id" "$(git rev-parse --show-toplevel 2>/dev/null)" || true
-  # L7 add-on: spend consent scoped to THIS job only, BOUND to the lane|model pairs the
+  # Spend/cap add-on: spend consent scoped to THIS job only, BOUND to the lane|model pairs the
   # detached child will resolve (lib/spend.sh _osrc_spend_marker_pairs). A --spend-ok on
   # the parent command (or an interactive preflight yes carried forward by cmd_bg) drops
   # the marker the child's spend gate reads via _osrc_spend_ok; it lives and dies with
@@ -11448,7 +10546,7 @@ cmd_bg() {
     esac
   done
   [ "$_sawtask" = "1" ] || die "bg: refusing to launch -- no task text was given, only flags. Nothing was started. Add the task, e.g. bg run -m glm \"map the auth flow\"."
-  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the COMPLETE
+  # Spend/cap add-on: the runnable NEXT a refusing spend/cap gate prints must be the COMPLETE
   # original command (global flags + verb + args) with --spend-ok right after `bg` —
   # _osrc_spend_next_build reads main()'s _OSRC_USER_ARGV snapshot so --provider/
   # --cloud-ack/-m and the verb all survive; "$@" here is only the fallback for
@@ -11502,7 +10600,7 @@ cmd_bg() {
   # gate's consent signal); OSRC_PROVIDER_INJECTED marks the injected --provider so the preflight
   # child's argv parse cannot counterfeit that pin. Both mirror _run_provider's logic below.
   local _pf_inj=0; [ "${#_pf_provider[@]}" -gt 0 ] && _pf_inj=1
-  # L7 add-on: a leading --spend-ok was consumed into OSRC_SPEND_OK (not in "$@"), so re-inject it
+  # Spend/cap add-on: a leading --spend-ok was consumed into OSRC_SPEND_OK (not in "$@"), so re-inject it
   # as argv for the preflight child — argv is the only consent channel that survives a process
   # boundary (env is sanitized by design). Post-verb --spend-ok arrives on "$@" on its own.
   local -a _pf_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _pf_spend=(--spend-ok)
@@ -11668,7 +10766,7 @@ _autodetach_run() {
   # pane's argv parse cannot set OSRC_PROVIDER_ARG (the env value above already carries provenance).
   [ "${PROVIDER_EXPLICIT:-0}" = "1" ] && _ad_full="$_ad_full OSRC_PROVIDER_INJECTED=1"
   _ad_full="$_ad_full $(printf '%q' "$SCRIPT_PATH")"
-  # L7 add-on: carry THIS command's spend consent into the pane as argv (env consent is
+  # Spend/cap add-on: carry THIS command's spend consent into the pane as argv (env consent is
   # sanitized; the pane is a fresh process). --spend-ok sits in main()'s global-flag zone.
   [ "${OSRC_SPEND_OK:-0}" = "1" ] && _ad_full="$_ad_full --spend-ok"
   [ -n "${OSRC_ACCOUNT:-}" ] && _ad_full="$_ad_full --account $(printf '%q' "$OSRC_ACCOUNT")"
@@ -11861,7 +10959,7 @@ run_job() {
   umask 077
   local jd="$OSRC_JOBS/$id"; _mkdir_private "$jd"
   local verb="$1"; shift
-  # L7 add-on: a refusing spend/cap gate inside this job needs a runnable NEXT. cmd_bg
+  # Spend/cap add-on: a refusing spend/cap gate inside this job needs a runnable NEXT. cmd_bg
   # passes its bg-flavored command through the nohup env; anything else (fanout direct
   # launch, __runjob by hand) rebuilds the foreground equivalent — verb + args with
   # --spend-ok right after the verb, same shape _osrc_spend_next_build produces.
@@ -11964,7 +11062,7 @@ run_job() {
   # the real launch instant, not the later meta write; fall back to now for a direct (non-bg) call.
   local _started; _started="$(cat "$jd/started_at" 2>/dev/null)"; case "$_started" in ''|*[!0-9]*) _started="$(date +%s)" ;; esac
   if have jq; then
-    # L7 add-on: record the effective caps (standing + per-launch) on the job so Mission Control
+    # Spend/cap add-on: record the effective caps (standing + per-launch) on the job so Mission Control
     # lane cards and `status` can render "cap 40% weekly, now 31%" without re-deriving them.
     local _jcaps; _jcaps="$(_osrc_cap_specs_for "$lane" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
     jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
@@ -11988,7 +11086,7 @@ run_job() {
   # --provider below so the child's argv parse cannot counterfeit that pin. Same pair as the bg
   # preflight child (_pf_provider) and the auto-detach pane (_ad_full).
   local _run_inj=0; [ "${#_run_provider[@]}" -gt 0 ] && _run_inj=1
-  # L7 add-on: re-inject --spend-ok as argv when THIS job's parent consented via a leading flag
+  # Spend/cap add-on: re-inject --spend-ok as argv when THIS job's parent consented via a leading flag
   # (post-verb --spend-ok already rides "$@"; the .spend-ok marker is the third channel). argv
   # only — env consent is sanitized by design.
   local -a _run_spend=(); [ "${OSRC_SPEND_OK:-0}" = "1" ] && _run_spend=(--spend-ok)
@@ -14087,7 +13185,7 @@ delegate_ccnative() {
 # literal; the pro-class pick follows agy's served families, e.g. gemini-4-neon-high).
 
 # delegate_gmnative <tier>, Gemini text/agentic lane. ONE vehicle:
-# The gemini-cli vehicle is RETIRED (Alex 17:02 — Antigravity replaced it): it is never
+# The gemini-cli vehicle is RETIRED (Antigravity replaced it): it is never
 # auto-selected and OSRC_GEMINI_VEHICLE=gemini dies loudly, even if a `gemini` binary
 # is still installed. The paid Gemini API key path survives ONLY for the image lane (gi).
 delegate_gmnative() {
@@ -15814,7 +14912,7 @@ _fallback_pick() {
     case "$tried" in *" $eff "*) continue ;; esac
     { _model_excluded "$alias" || _model_excluded "$model"; } && continue   # user exclude list (#45)
     _fallback_lane_ready "$lane" || continue
-    # L7 add-on: auto-routing/fallbacks never pick a metered-or-unknown lane quietly —
+    # Spend/cap add-on: auto-routing/fallbacks never pick a metered-or-unknown lane quietly —
     # only subscription/free lanes, unless THIS command already carries --spend-ok.
     _osrc_lane_spendable "$lane" "$model" || continue
     printf '%s|%s|%s' "$alias" "$model" "$lane"
@@ -16089,7 +15187,7 @@ _failover_lane_ok() {
   if _failover_lane_is_cash "$l" && [ "${OSRC_FAILOVER_CASH_OK:-0}" != "1" ]; then
     _failover_cash_record "$l"; return 1
   fi
-  # L7 add-on: never hop onto metered/unknown without THIS command's --spend-ok; CASH_OK
+  # Spend/cap add-on: never hop onto metered/unknown without THIS command's --spend-ok; CASH_OK
   # only lets the picker CONSIDER cash lanes. Spend-blocked lanes of ANY cost class are
   # recorded: cash lanes keep the cash record (stop line names both switches), the rest spend.
   _osrc_lane_spendable "$l" "$m" || {
@@ -16584,7 +15682,7 @@ route_delegate() {
     die "-m $RESOLVED_ID is on OSRC_MODEL_DENYLIST and will not be dispatched. Pick another -m, or unset/edit OSRC_MODEL_DENYLIST if this is unwanted."
   fi
 
-  # L7 LIMIT GATE: a lane whose plan meter is at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH
+  # LIMIT GATE: a lane whose plan meter is at/over OSRC_LANE_LIMIT_PCT (default 90) on a FRESH
   # reading is nearly spent — routing there parks the delegate on a limit banner (the
   # ChatGPT-weekly-at-98% failure). Fresh readings gate; stale (>6h) readings warn only.
   # --force-lane or an explicit --provider consents; unpinned auto runs take a zero-cost hop;
@@ -16595,7 +15693,7 @@ route_delegate() {
   if [ "$_olrc" = "10" ]; then continue; fi
   [ "$_olrc" != "0" ] && die "internal: _osrc_limit_gate returned $_olrc"
 
-  # L7 ADD-ON 2 — PER-LANE USAGE CAPS (lib/spend.sh): a lane at/over its --cap or
+  # PER-LANE USAGE CAPS (lib/spend.sh): a lane at/over its --cap or
   # standing `lane cap` refuses new launches; unpinned auto takes a zero-cost hop,
   # pins refuse loudly naming the cap and the raise/clear commands.
   local _cap_lane=""
@@ -16607,7 +15705,7 @@ route_delegate() {
     [ "$_crc" != "0" ] && die "internal: _osrc_cap_gate returned $_crc"
   fi
 
-  # L7 ADD-ON 1 — PAID-LANE SPEND GATE (lib/spend.sh): billing subscription|free
+  # PAID-LANE SPEND GATE (lib/spend.sh): billing subscription|free
   # proceeds silently; metered AND unknown (unprovable auth) demand consent —
   # interactive y/N defaulting No, argv --spend-ok, or the job's .spend-ok marker.
   # Non-interactive refusal emits EVENT approval + NEXT; auto/fallback pickers
@@ -17101,6 +16199,13 @@ _session_launch_adapter() {
 # foreground process of the pane; right after send-keys the shell is still foreground while the
 # engine boots, so the check waits for the engine to take over OR the shell to come back idle.
 # Bounded by OSRC_SESSION_LIVENESS_SECS (default 6); opt out with OSRC_SESSION_LIVENESS_SECS=0.
+# After that fast window, OSRC_SESSION_LIVENESS_GRACE_SECS (default 25, so ~31s total) keeps
+# waiting ONLY while the pane shell still has a live descendant — evidence the typed launch
+# chain is still running (agy/devin cold boots do auth + env preflight for 10-20s before the
+# engine takes the foreground; a shim that execs node shows as a shell name the whole time).
+# A shell foreground with no descendant is an idle prompt: the chain exited, refuse early
+# rather than waiting out the grace. Grace never re-runs the launch or spawns a second pane —
+# it is a longer wait on the same launch, so "did not become live" can never double-launch.
 # Never touches the heartbeat/registry, session send, or the turn-end guard — this is launch
 # verification only, run once at session start.
 _session_launch_liveness_check() {
@@ -17109,11 +16214,15 @@ _session_launch_liveness_check() {
   case "$secs" in 0) return 0 ;; ''|*[!0-9]*) secs=6 ;; esac
   have tmux || return 0
   tmux has-session -t "$sess" 2>/dev/null || return 0   # nothing to verify; let the caller's own checks speak
-  local cmd="" i=0 ppid=""
+  # Default 0: with the grace window on, the registry recorded the wrong engine and every start failed the endpoint check. Re-enable once that is fixed.
+  local grace="${OSRC_SESSION_LIVENESS_GRACE_SECS:-0}"
+  case "$grace" in ''|*[!0-9]*) grace=25 ;; esac
+  local cmd="" i=0 ppid="" budget=$((secs + grace))
   # Give the engine a moment to take over the pane (send-keys just typed the command; the shell
   # is still foreground while the engine process forks/boots). Poll until the foreground command
-  # is NOT the shell, or the budget elapses.
-  for i in $(seq 1 "$secs" 2>/dev/null || seq 1 6); do
+  # is NOT the shell, or the budget elapses. Past the fast window (i > secs), keep waiting only
+  # while the pane still shows boot evidence — a live descendant of the pane shell.
+  for i in $(seq 1 "$budget" 2>/dev/null || seq 1 31); do
     sleep 1
     cmd="$(tmux display-message -p -t "$sess" '#{pane_current_command}' 2>/dev/null)" || cmd=""
     case "$cmd" in
@@ -17122,6 +16231,14 @@ _session_launch_liveness_check() {
         # shell has an engine child, the launch is up.
         ppid="$(tmux display-message -p -t "$sess" '#{pane_pid}' 2>/dev/null)" || ppid=""
         [ -n "$ppid" ] && _session_engine_pid "$sess" "$ppid" >/dev/null 2>&1 && return 0
+        if [ "$i" -gt "$secs" ]; then
+          # Grace window: the fast probe is over and the pane is still a shell name. Keep
+          # waiting ONLY while the pane shell has a live descendant (export/clear prefix,
+          # a shim resolving node, an auth preflight, a wrapper script) — that is a boot in
+          # progress. No descendant means the typed chain exited to an idle prompt: dead.
+          [ -n "$ppid" ] && _session_pane_descendant "$ppid" && continue
+          break
+        fi
         # Still the shell (or empty). Keep polling — the engine may not have taken over yet.
         continue
         ;;
@@ -17136,7 +16253,7 @@ _session_launch_liveness_check() {
   # started session. Die loudly so the user knows the session is NOT live and can investigate
   # (the most common cause is a flag that means something different in interactive mode, e.g.
   # droid -r meaning resume rather than reasoning-effort).
-  echo "ERROR: session start: $provider interactive launch did NOT stay up — the pane is a bare shell ($cmd) after ${secs}s. The engine exited (likely silently with exit code 0) instead of entering its interactive REPL. The most common cause is a flag that means something DIFFERENT in interactive mode than in exec/headless mode (e.g. droid -r means RESUME a session at the top level, not reasoning-effort). Launch was: $launch. Re-check the lane's real \`<cli> --help\` (top-level, not exec), or start without the offending flag." >&2
+  echo "ERROR: session start: $provider interactive launch did NOT stay up — the pane is a bare shell ($cmd) after ${i:-$budget}s (${secs}s probe + ${grace}s slow-boot grace, exit detected when the pane had no live child process). The engine exited (likely silently with exit code 0) instead of entering its interactive REPL. The most common cause is a flag that means something DIFFERENT in interactive mode than in exec/headless mode (e.g. droid -r means RESUME a session at the top level, not reasoning-effort). Launch was: $launch. Re-check the lane's real \`<cli> --help\` (top-level, not exec), or start without the offending flag." >&2
   # Kill the dead session so a retry isn't blocked by a has-session collision on the PWD-derived name.
   tmux kill-session -t "$sess" 2>/dev/null || true
   return 1
@@ -17246,7 +16363,7 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
     # The session's --perm profile is part of its launch contract: `session control
     # relaunch` / effort relaunch rebuild the command and must reproduce it, so it is
     # recorded on every start event (default when the session was launched without
-    # --perm, which is every pre-L5 record too — they simply lack the field).
+    # --perm, which is every pre-perm-profile record too — they simply lack the field).
     case "${PERM_PROFILE:-default}" in safe|default) perm_profile="${PERM_PROFILE:-default}" ;; *) perm_profile="default" ;; esac
     pid="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null)" || pid=""
     [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
@@ -17817,10 +16934,10 @@ _winpty_session() {
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
 
-      # L7 LIMIT GATE (session form, winpty parity with the tmux path): refuse an exhausted lane
+      # LIMIT GATE (session form, winpty parity with the tmux path): refuse an exhausted lane
       # BEFORE the session dir/broker is created; consent proceeds with the warning already printed.
       _osrc_session_limit_gate
-      # L7 add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
+      # Spend/cap add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
       # before ANY paid/unknown-billing lane — interactive y/N default No, --spend-ok one command.
       _osrc_session_cap_gate
       _osrc_session_spend_gate
@@ -17932,7 +17049,7 @@ _winpty_session() {
       esac
       ;;
     stop)
-      _session_registry_end stop >/dev/null 2>&1 || true   # recorded before the broker stops (SUP)
+      _session_registry_end stop >/dev/null 2>&1 || true   # recorded before the broker stops
       if [ -d "$sdir" ]; then
         mkdir -p "$sdir/cmd"
         : > "$sdir/cmd/stop"
@@ -18031,12 +17148,12 @@ session() {
         *) die "session start: provider '$PROVIDER' not supported for interactive sessions (use --provider devin|codex|cc|droid|cursor|hermes|cline|pi|gemini)" ;;
       esac
       type _osrc_perm_banner >/dev/null 2>&1 && _osrc_perm_banner "$PROVIDER"
-      # L7 LIMIT GATE (session form): the lane is resolved and the launch vector built, but no tmux
+      # LIMIT GATE (session form): the lane is resolved and the launch vector built, but no tmux
       # session exists yet. Interactive sessions cannot hop — consent (--force-lane / argv
       # --provider) proceeds with the warning already printed, anything else refuses loudly naming
       # the fallback lane. This is the path that used to park a Terra lane on a plan-limit banner.
       _osrc_session_limit_gate
-      # L7 add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
+      # Spend/cap add-ons (session form): per-lane cap refuses at/over-cap meters; the spend gate asks
       # before ANY paid/unknown-billing lane — interactive y/N default No, --spend-ok one command.
       _osrc_session_cap_gate
       _osrc_session_spend_gate
@@ -18078,7 +17195,7 @@ session() {
     send)
       _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _osrc_session_cap_send "$SESSION_NAME" "$*"   # L7 add-on: no new work to a capped lane
+      _osrc_session_cap_send "$SESSION_NAME" "$*"   # Spend/cap add-on: no new work to a capped lane
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
       # helpfully with the options + the answer command instead of typing into the menu. Typing
@@ -18203,7 +17320,7 @@ session() {
       esac
       ;;
     stop)
-      _session_registry_end stop >/dev/null 2>&1 || true   # BEFORE the kill: a poll in between saw "gone, no stop" (SUP)
+      _session_registry_end stop >/dev/null 2>&1 || true   # BEFORE the kill: a poll in between saw "gone, no stop"
       tmux kill-session -t "$SESSION_NAME" 2>/dev/null && echo "stopped '$SESSION_NAME'." || echo "no session '$SESSION_NAME'."
       osrc_done_clear "$SESSION_NAME" 2>/dev/null || true
       ;;
@@ -19702,7 +18819,7 @@ main() {
       *) break ;;
     esac
   done
-  # L7 r3.1: snapshot THIS process's user command — internal sentinels stripped, global
+  # Snapshot THIS process's user command — internal sentinels stripped, global
   # flags and verb+args in original order — so a refusing spend/cap gate can print NEXT
   # = the exact refused command + --spend-ok after the verb (never a rebuilt approximation
   # that drops --provider/--cloud-ack or misplaces consent after the task text). A main()
@@ -19733,7 +18850,7 @@ main() {
     esac
   done
   local cmd="${1:-}"; shift || true
-  # L7 add-on: the runnable NEXT a refusing spend/cap gate prints must be the refused
+  # Spend/cap add-on: the runnable NEXT a refusing spend/cap gate prints must be the refused
   # command verbatim + --spend-ok directly after the verb — _osrc_spend_next_build reads
   # the _OSRC_USER_ARGV snapshot so global flags (--cloud-ack, leading --provider/--cap)
   # and every arg survive in original order. Build ONLY when unset: the preflight and

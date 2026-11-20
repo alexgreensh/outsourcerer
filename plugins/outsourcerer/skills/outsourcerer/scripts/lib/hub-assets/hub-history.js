@@ -1,4 +1,4 @@
-/* Mission Control History (MC4 items 6 + 7). Served by `hub serve` from /assets/hub-history.js (script-src 'self');
+/* Mission Control History. Served by `hub serve` from /assets/hub-history.js (script-src 'self');
    lives outside hub.html so the page stays under the 1,000-line rule. Reads p.history from the export
    (lib/hub-history.sh): lanes with outcomes, releases, merged/closed PRs, closed issues, newest first.
    Text only goes through el() (textContent); links are GitHub https URLs the export already filtered. */

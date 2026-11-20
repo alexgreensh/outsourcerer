@@ -1,11 +1,11 @@
 #!/bin/bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# L3: lib/screen.sh is the one screen reader. Every fixture under fixtures/screen/ is a REAL pane
+# lib/screen.sh is the one screen reader. Every fixture under fixtures/screen/ is a REAL pane
 # capture (tmux capture-pane -e -p) taken 2026-11-13 from throwaway sessions: Claude Code 2.1.323
 # (Haiku), Codex 0.167 (gpt-5.6-luna), Devin CLI 3000.12 (SWE-2), Antigravity CLI 1.5.5, gemini-cli.
 # Personal data scrubbed (home path, email, session URL). Also covers: LC_ALL=C (box glyphs must still
 # match), Gemini/agy trailing blank lines, text the orchestrator typed (never evidence), the menu gate
-# (false-menu composer, a reply ending in a numbered list), E6 duplicate sends, E7 status-bar redraw,
+# (false-menu composer, a reply ending in a numbered list), duplicate sends, status-bar redraw,
 # and the `session effort` lane resolution.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FX="$HERE/fixtures/screen"
@@ -47,11 +47,15 @@ dv-working|devin|working||
 dv-idle-after-work|devin|idle||
 dv-approval|devin|approval|shell|touch made-by-devin.txt && ls
 dv-approval-wrapped|devin|approval|shell|
+dv-approval-modal|devin|approval|shell|SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done
+dv-approval-modal-box|devin|approval|shell|jq -r .name out/report.json
+dv-approval-modal-rm|devin|approval|shell|rm -rf ~/Documents
 cc-idle-status-auto|cc|idle||
 cc-idle-status-bypass|cc|idle||
 cc-idle-status-plan|cc|idle||
 cc-idle-status-accept-edits|cc|idle||
 agy-idle|agy|composer||
+agy-mode-hint|agy|composer||
 agy-working|agy|working||
 agy-idle-after-work|agy|idle||
 agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
@@ -103,7 +107,7 @@ _osrc_screen_analyze_text cc < "$FX/cc-composer-typed-unsent.ansi"
 case "$OSRC_SCR_COMPOSER" in "When you finish, reply with exactly: ROUND4 DONE."*) ok ;; *) bad "typed composer text not extracted: $OSRC_SCR_COMPOSER" ;; esac
 [ "$OSRC_SCR_STATE" = composer ] && ok || bad "typed [y/N] text in the composer read as $OSRC_SCR_STATE"
 
-# ---- finding 4: a Devin command wrapped onto two rows is read whole (both rows, multi-line) -------
+# ---- a Devin command wrapped onto two rows is read whole (both rows, multi-line) -------
 _osrc_screen_analyze_text devin < "$FX/dv-approval-wrapped.ansi"
 want_cmd="ls -la src &&
 rm -rf ~/Documents"
@@ -123,7 +127,7 @@ tmux() { return 1; }; out="$(osrc_screen_state fake-pane cc)"
 _managed_provider() { printf cc; }
 tmux() { case "$1" in capture-pane) cat "$CAP" ;; *) return 0 ;; esac; }
 CAP="$FX/cc-fable-composer-false-menu.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "false-menu fixture still detected as a menu: $(_managed_menu_detect p | head -3 | tr '\n' ' ')"
-CAP="$FX/cc-reply-numbered-list.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "a reply ending in a numbered list blocked send (E8)"
+CAP="$FX/cc-reply-numbered-list.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "a reply ending in a numbered list blocked send"
 CAP="$FX/cc-idle-after-work.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" = "MENU none" ] && ok || bad "idle cc pane read as a menu"
 CAP="$FX/cc-permission-bash.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "real cc permission prompt not detected as a menu"
 CAP="$FX/cc-askuserquestion.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "cc question picker not detected as a menu"
@@ -134,7 +138,7 @@ CAP="$TMP/generic-composer.txt"; [ "$(_managed_menu_detect p 2>/dev/null | head 
 _managed_provider() { printf devin; }
 CAP="$FX/dv-approval.ansi"; [ "$(_managed_menu_detect p 2>/dev/null | head -1)" != "MENU none" ] && ok || bad "devin approval not detected as a menu"
 
-# ---- finding 7: the menu report comes from the engine reader; answers resolve safely ---------------
+# ---- the menu report comes from the engine reader; answers resolve safely ---------------
 _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
 menu_of() { _managed_provider() { printf '%s' "$1"; }; CAP="$FX/$2.ansi"; _managed_menu_detect p 2>/dev/null; }
 r="$(menu_of cc cc-permission-bash-rm)"
@@ -199,14 +203,14 @@ CAP="$FX/cc-trust-folder-menu.ansi"; : > "$TMP/akeys"
 _managed_menu_answer p no 2>/dev/null && [ "$(tr '\n' '|' < "$TMP/akeys")" = "send-keys -t p Enter|" ] \
   && ok || bad "answer no on cc trust menu: $(tr '\n' '|' < "$TMP/akeys")"
 
-# ---- E6: two identical sends to one session are both admitted (each is its own obligation) ---------
+# ---- two identical sends to one session are both admitted (each is its own obligation) ---------
 _obligation_append "send.x.1.a" e6sess typing_started "" >/dev/null 2>&1
 o1="send.e6sess.123.$(date +%s).1"; o2="send.e6sess.123.$(date +%s).2"
 _obligation_admit "$o1" e6sess && _obligation_append "$o1" e6sess delivery_unknown "" && ok || bad "first send not admitted"
-_obligation_admit "$o2" e6sess && ok || bad "an identical second send was refused (E6)"
+_obligation_admit "$o2" e6sess && ok || bad "an identical second send was refused"
 grep -q 'cksum | awk .{print $1}.).$(date +%s).$$$RANDOM' "$HERE/../lib/send.sh" && ok || bad "send obligation id has no per-send nonce"
 
-# ---- E7: Claude Code status bar redraws while the text sits in the composer -> NOT submitted -------
+# ---- Claude Code status bar redraws while the text sits in the composer -> NOT submitted -------
 # Build a pane where the composer holds the typed text and only the status row changes each capture.
 mk_cc() { # <composer-text> <status>
   printf '\033[38;5;244m%s\033[39m\n\342\235\257\302\240%s\n\033[38;5;244m%s\033[39m\n  \342\217\270 manual mode on \302\267 \342\206\220 15 agents\n  Haiku 5.5 | xhi | work | %s\n' \
@@ -236,7 +240,7 @@ tmux() {
 OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "please run the suite" composer 0 0; rc=$?
 [ "$rc" = 0 ] && ok || bad "cleared composer + spinner not accepted as submitted (rc=$rc $OSRC_SEND_EVIDENCE)"
 
-# ---- finding 8: a static pane is never a receipt; proof must be about THIS send --------------------
+# ---- a static pane is never a receipt; proof must be about THIS send --------------------
 # Baseline exactly as _managed_session_send takes it, then a pane that never changes.
 static_verify() { # <fixture> <snippet> -> rc of the verifier with a same-screen baseline, text never seen
   CAP="$FX/$1.ansi"
@@ -270,7 +274,7 @@ OSRC_SEND_VERIFY_SECS=2 _osrc_send_verify_screen p cc "brand new words here" idl
   _managed_session_send p "1 yes go ahead"; rc=$?
   [ "$rc" = 1 ] && [ "$OSRC_SEND_MODAL" = 1 ] && ! grep -q ' Enter$' "$TMP/fkeys" && case "$OSRC_SEND_EVIDENCE" in *"Enter NOT pressed"*) true ;; *) false ;; esac
 ) && ok || bad "send into a prompt that opened while typing pressed Enter or reported success: $(tr '\n' '|' < "$TMP/fkeys")"
-# round-2 review finding 1: an open modal gets ZERO keys (not even C-u), refused inside the lock
+# an open modal gets ZERO keys (not even C-u), refused inside the lock
 for spec in devin:dv-approval codex:cx-approval agy:agy-approval cc:cc-permission-bash-rm cc:cc-askuserquestion devin:dv-approval-wrapped; do
   (
     _managed_endpoint_live() { return 0; }; _obligation_admit() { return 0; }; _obligation_append() { return 0; }
@@ -283,7 +287,7 @@ for spec in devin:dv-approval codex:cx-approval agy:agy-approval cc:cc-permissio
     [ "$rc" = 1 ] && [ ! -s "$TMP/mkeys" ] && [ "$OSRC_SEND_MODAL" = 1 ] && [ "$LOCKED" = 0 ] && case "$OSRC_SEND_EVIDENCE" in "modal open"*) true ;; *) false ;; esac
   ) && ok || bad "send into open modal ${spec}: keys/reads=[$(tr '\n' '|' < "$TMP/mkeys")]"
 done
-# review round 3 #2: with no composer and a prompt open, the composer state is never "empty"
+# with no composer and a prompt open, the composer state is never "empty"
 for spec in devin:dv-approval codex:cx-approval agy:agy-approval; do
   ( _managed_provider() { printf '%s' "${spec%%:*}"; }; unset OSRC_EXTERNAL_COMPOSER_PROBE
     tmux() { case "$1" in capture-pane) cat "$FX/${spec#*:}.ansi" ;; *) return 0 ;; esac; }
@@ -317,7 +321,7 @@ open(sys.argv[2],"w").write("\n".join(l for l in s if not re.sub(r"\x1b\[[0-9;?]
     grep -q -- '-l -- status line test' "$TMP/skeys" && grep -q ' Enter$' "$TMP/skeys" && [ "${OSRC_SEND_MODAL:-0}" = 0 ]
   ) && ok || bad "send did not type into an idle cc pane with the $m status line: $(tr '\n' '|' < "$TMP/skeys")"
 done
-# review round 4 A: a status-LOOKING row under a tool's own menu never disables the menu guard.
+# a status-LOOKING row under a tool's own menu never disables the menu guard.
 # Whole `session send` command, fake tmux, keys recorded: refused with 0 keys on every engine.
 printf '%s\n' '$ ./deploy.sh' 'Select environment (use arrow keys)' '❯ production' '  staging' '⏵ deploy on' > "$TMP/deploy-menu.txt"
 printf '%s\n' '$ ./deploy.sh' 'Select environment (use arrow keys)' '❯ production' '  staging' '⏵⏵ auto mode on (shift+tab to cycle)' '  ⏸ manual mode on extra' > "$TMP/deploy-menu-cc-notlast.txt"

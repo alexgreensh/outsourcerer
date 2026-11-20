@@ -292,7 +292,12 @@ _osrc_done_check() { # <name> <cwd> <cmd> <spec>
   [ -d "$cwd" ] || { echo "error cwd-missing"; return 0; }
   cached="$(_osrc_done_cache_read "$name")" && { echo "$cached"; return 0; }
   last="$(_osrc_done_cache_peek "$name")"
-  _osrc_done_check_lock "$name" && _osrc_done_check_spawn "$name" "$cwd" "$cmd" "$spec"
+  # Cap in-flight probes: a hub export asking about ~100 contracts at once must not fork a
+  # hundred eval runs. Callers still answer from the last verdict; the next poll retries.
+  local d inflight=0
+  for d in "$(_osrc_done_dir)"/*.checklock; do [ -d "$d" ] && inflight=$((inflight + 1)); done
+  [ "$inflight" -lt "${OSRC_DONE_CHECK_MAX_INFLIGHT:-4}" ] \
+    && _osrc_done_check_lock "$name" && _osrc_done_check_spawn "$name" "$cwd" "$cmd" "$spec"
   echo "${last:-not-done}"
 }
 
@@ -345,7 +350,7 @@ osrc_done_state() {
   esac
 }
 
-# --- relocated from outsourcerer.sh (size ratchet; _session_record carries L5's perm_profile field) ---
+# --- relocated from outsourcerer.sh (size ratchet; _session_record carries the perm_profile field) ---
 
 # The current model generation of a managed session, from its latest start record (1 if none).
 # Non-start events must carry this forward: _session_registry_append defaults generation to 1, and
@@ -358,7 +363,7 @@ _session_current_generation() { # <session-id>
 }
 
 # Read a session's latest start record: "provider<TAB>model<TAB>effort<TAB>generation<TAB>perm_profile".
-# Field 5 (perm_profile) is "default" for records written before L5 or without --perm.
+# Field 5 (perm_profile) is "default" for records written before perm profiles or without --perm.
 _session_record() { # <session-id>
   _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" \
     'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring), (.perm_profile // "default")] | @tsv' | tail -1

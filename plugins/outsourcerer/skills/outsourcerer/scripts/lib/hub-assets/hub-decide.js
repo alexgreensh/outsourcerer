@@ -1,4 +1,4 @@
-/* Mission Control decision cards: the answer form and its drafts (MC-4), moved out of hub.html in MC-5 so the
+/* Mission Control decision cards: the answer form and its drafts, moved out of hub.html so the
    page stays under the 1,000-line rule. Served by `hub serve` from /assets/hub-decide.js (script-src 'self').
    hub.html calls window.OSRC_HUB_DECIDE(ctx) and gets back decCard(), busy() and capture().
    Drafts live in `forms`, keyed <project>--<decision> (choice, note, status line, textarea height + scroll), and
@@ -18,13 +18,15 @@
       const db = ctx.db;
       const c = el('div', 'card dec'); c.id = 'dec-' + d.id;
       c.append(tags(d), el('span', 'q', d.q));
-      // MC 0.17.1: a card stands on its own: what this is about, the orchestrator's pick, how long it waits.
+      // A card stands on its own: what this is about, the orchestrator's pick, how long it waits.
       if (d.why) c.append(el('p', 'dwhy', d.why));
       if (d.rec) { const r = el('p', 'drec'); r.append(el('b', null, 'My pick: '), document.createTextNode(d.rec)); c.append(r); }
       if (!d.why && !d.rec && !(d.options || []).length) c.append(el('p', 'dwhy', 'This question came without background. Ask ' + (p.name || 'that session') + ' what it needs, or answer below.'));
       const asked = Date.parse(d.askedAt || ''), mins = isNaN(asked) ? -1 : Math.round((Date.now() - asked) / 60000);
       const meta = [d.when ? 'Needed by ' + d.when : '', mins >= 0 ? 'Asked ' + (mins < 60 ? mins + ' min' : mins < 2880 ? Math.round(mins / 60) + ' h' : Math.round(mins / 1440) + ' days') + ' ago' : ''].filter(Boolean).join(' · ');
       if (meta) c.append(el('span', 'mono', meta));
+      const dsi = window.OSRC_HUB_CLEAN && window.OSRC_HUB_CLEAN.decStale ? window.OSRC_HUB_CLEAN.decStale(p, d) : null;
+      if (dsi) { c.classList.add('stale'); c.append(el('p', 'dec-stale', dsi.text)); }
       const a = el('div', 'ans'); const opts = el('div', 'opts');
       const key = p.id + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
       (d.options || []).forEach((o, i) => {
@@ -41,7 +43,7 @@
       ta.addEventListener('input', () => { f.note = ta.value; sync(); }); sync(); say(f.msg, f.err);
       if (!db) st.textContent = 'Answering works when you are signed in on claude.ai.';
       go2.addEventListener('click', async () => {
-        go2.disabled = true; say('Saving…'); saving++;   // renders hold while a send is in flight (MC-4)
+        go2.disabled = true; say('Saving…'); saving++;   // renders hold while a send is in flight
         try {
           await db.doc('answers/' + p.id + '--' + d.id).set({ project: p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
           say('Saved. Your orchestrator reads it when it checks Mission Control.'); delete forms[key];

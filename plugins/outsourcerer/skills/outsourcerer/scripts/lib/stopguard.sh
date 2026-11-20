@@ -69,7 +69,7 @@ _warn_unwatched() {
 # the stop is allowed and owners/<sid>/.unguarded is written. A new set blocks again.
 # OSRC_STOP_GUARD=0 turns the guard off. Any error allows the stop.
 #
-# _owner_sid / _owner_record live in lib/handover.sh (L8), one copy for every lane.
+# _owner_sid / _owner_record live in lib/handover.sh, one copy for every lane.
 
 # _owned_live_state lives in lib/owner_state.sh (shared with the hub, lane status and cleanup).
 
@@ -99,7 +99,10 @@ cmd_stop_guard() {
   sid="$(_owner_sid "$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)")"
   [ -n "$sid" ] || sid="$(_owner_sid)"
   [ -n "$sid" ] || return 0
-  type osrc_hub_beat_if_known >/dev/null 2>&1 && osrc_hub_beat_if_known "$sid"   # per-turn heartbeat (MC3)
+  type osrc_hub_beat_if_known >/dev/null 2>&1 && osrc_hub_beat_if_known "$sid"   # per-turn heartbeat
+  if type _sg_card_nag >/dev/null 2>&1 && reason="$(_sg_card_nag "$sid")"; then   # stale Mission Control card (lib/card_fresh.sh)
+    jq -cn --arg r "$reason" '{decision:"block", reason:$r}'; return 0
+  fi
   dir="$OSRC_HOME/owners/$sid"
   [ -d "$dir" ] || return 0
   for id in $(ls -1 "$dir" 2>/dev/null); do
@@ -107,7 +110,7 @@ cmd_stop_guard() {
     case "$state" in
       done|gone)
         # Log the terminal event BEFORE the marker goes, tagged with this owner, so the next
-        # supervise replays "finished" instead of reporting "nothing owned" (review finding 2).
+        # supervise replays "finished" instead of reporting "nothing owned".
         # If that log write fails, keep the marker: the next pass tries again.
         # A supervise holding the target's lock is logging it right now: leave the marker to it.
         if type _sv_observe >/dev/null 2>&1; then
@@ -117,8 +120,8 @@ cmd_stop_guard() {
           _sv_target_unlock "$id"
         fi
         rm -f "$dir/$id" 2>/dev/null
-        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id" ;;   # listed as finished (MC3)
-      # An idle lane short of its done contract stopped early: it is owed a waiter (SUP bug 1).
+        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id" ;;   # listed as finished
+      # An idle lane short of its done contract stopped early: it is owed a waiter.
       idle) if _sv_idle_owed "$id"; then need="$need $id"; else idle="$idle $id"; fi ;;
       *) need="$need $id" ;;
     esac

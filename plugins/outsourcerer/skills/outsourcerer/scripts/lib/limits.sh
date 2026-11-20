@@ -1,10 +1,10 @@
 # =============================================================================
-# limits.sh — session-limit meters, conservation advice, and the L7 limit gate.
+# limits.sh — session-limit meters, conservation advice, and the limit gate.
 # Sourced by outsourcerer.sh via the lib/*.sh loader near the top of that file; every
 # function here resolves its dependencies (lane descriptors, _session_limits callers,
 # route_delegate locals) at CALL time, so definition order does not matter.
 #
-# L7 LIMIT GATE — never route work onto a lane whose plan meter is spent. The failure it
+# LIMIT GATE — never route work onto a lane whose plan meter is spent. The failure it
 # kills: `brief` reads the meters (claude5h/claude7d/codex5h/codexwk) and prints a
 # conservation line, but a launch still resolved onto a lane at 98% weekly and the
 # delegate sat on a limit banner doing nothing. The gate is the hard edge:
@@ -35,7 +35,7 @@
 # `stat -f ... || stat -c ...` fallback is unreachable on Linux and yields garbage that silently fails
 # every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
 # GNU FIRST is the only ordering where the fallback actually happens on both.
-# PL: the active plan probes live in lib/plan-probe.sh; suites that source this file alone still get them.
+# The active plan probes live in lib/plan-probe.sh; suites that source this file alone still get them.
 type _osrc_plan_overlay >/dev/null 2>&1 || { _osrc_lim_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_lim_d/plan-probe.sh" ] && . "$_osrc_lim_d/plan-probe.sh"; unset _osrc_lim_d; }
 
 _mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
@@ -59,7 +59,7 @@ _codex_rate_limits() {
   local _mt; _mt="$(_mtime "$newest")"; case "$_mt" in ''|*[!0-9]*) _mt="$(date +%s)" ;; esac
   local _age; _age=$(( $(date +%s) - _mt ))
   local line; line="$(grep '"rate_limits"' "$newest" 2>/dev/null | tail -1)"
-  # PL: a live `codex app-server` reading (lib/plan-probe.sh cache) wins when it is newer than the log.
+  # a live `codex app-server` reading (lib/plan-probe.sh cache) wins when it is newer than the log.
   local _pl=""; ! type _osrc_probe_codex_line >/dev/null 2>&1 || _pl="$(_osrc_probe_codex_line 2>/dev/null)"
   if [ -n "$_pl" ] && { [ -z "$line" ] || [ "${_pl##*|}" -lt "$_age" ]; }; then printf '%s\n' "$_pl"; return 0; fi
   [ -n "$line" ] || return 1
@@ -166,7 +166,7 @@ EOF
 
 
 # _osrc_meter_windows -> per-window meter detail for DISPLAY/EXPORT (Mission Control's
-# "Lanes and limits" panel, L9 hub export). Same sources and freshness gates as
+# "Lanes and limits" panel, hub export). Same sources and freshness gates as
 # _session_limits — which remains the gating authority — but keeps the two things
 # _session_limits drops: each window's resets_at epoch and the codex rollout age.
 # Output: one TSV line per measured window, "window<TAB>pct<TAB>resets_at_epoch|-><TAB>age_secs|->".
@@ -324,7 +324,7 @@ _lane_conserve_mult() {
 }
 
 
-# ---- L7 LIMIT GATE ---------------------------------------------------------------------
+# ---- LIMIT GATE ---------------------------------------------------------------------
 
 # _osrc_limit_threshold -> the gate percentage, sanitized: a non-numeric
 # OSRC_LANE_LIMIT_PCT falls back to 90 rather than comparing against garbage.
@@ -407,7 +407,7 @@ _osrc_limit_fallback() {
   [ -n "$limits" ] || limits="$(_session_limits 2>/dev/null)"
   for l in local dv gm cx or; do
     _osrc_limit_exceeded "$l" "$limits" && continue
-    # L7 add-on: never SUGGEST a metered/unknown lane the spend gate would refuse —
+    # Spend/cap add-on: never SUGGEST a metered/unknown lane the spend gate would refuse —
     # subscription/free only unless this command already carries spend consent.
     _osrc_lane_spendable "$l" 2>/dev/null || continue
     _osrc_limit_lane_ready "$l" && { printf '%s' "$l"; return 0; }
@@ -519,18 +519,18 @@ _osrc_session_limit_gate() {
 }
 
 # =============================================================================
-# Limits summary feed — moved from lib/spend.sh (r4 finding 5: spend.sh had grown past
-# the size guideline; the MC "Lanes and limits" panel / L9 hub export lives with the
+# Limits summary feed — moved from lib/spend.sh (spend.sh had grown past
+# the size guideline; the "Lanes and limits" panel / hub export lives with the
 # other meter readers here). osrc_lane_summary composes _osrc_meter_windows + caps +
 # osrc_lane_billing at call time, so cross-lib deps resolve fine.
 # =============================================================================
 
-# ---- limits summary (Mission Control "Lanes and limits" panel / L9 hub export) ----
+# ---- limits summary (Mission Control "Lanes and limits" panel / hub export) ----
 
 # Harness registry: the agent products outsourcerer can drive, as "id|display|cli|lane|order".
-# id is the provider id the MC page keys its official icons on (claude, codex->openai icon via
+# id is the provider id the page keys its official icons on (claude, codex->openai icon via
 # the page's alias table, agy, warp, devin, droid, gemini-cli...). The gemini CLI harness is
-# RETIRED (Antigravity `agy` replaced it, Alex 17:02) and is deliberately absent: it is never
+# RETIRED (Antigravity `agy` replaced it) and is deliberately absent: it is never
 # detected, never listed, never routed — even if an old `gemini` binary is still on PATH.
 # Detection is per-user and honest: a harness appears ONLY when its CLI is installed AND login
 # or a plan/key is provable (_osrc_harness_auth). Installed-but-logged-out (e.g. cursor-agent
@@ -571,7 +571,7 @@ _osrc_harness_auth() {
       _osrc_dir_auth "$HOME/.codex" && return 0
       have codex && _timeout "${OSRC_BRIEF_TIMEOUT:-5}" codex login status 2>/dev/null \
         | grep -qi "logged in" ;;
-    agy)     [ -d "$HOME/.antigravity" ] ;;
+    agy)     [ -d "$HOME/.antigravity" ] || [ -s "${GEMINI_DIR:-$HOME/.gemini}/antigravity-cli/antigravity-oauth-token" ] ;;
     devin)   have devin && _timeout "${OSRC_DEVIN_AUTH_SECS:-5}" devin auth status 2>/dev/null \
                | grep -qi "logged in" ;;
     droid)   _osrc_dir_auth "$HOME/.factory" ;;
@@ -616,8 +616,8 @@ _osrc_harness_detected() {
   esac
 }
 
-# osrc_lane_summary [--json] -> one record per DETECTED harness for the MC "Lanes and
-# limits" panel / L9 hub export. Never a fixed list: only harnesses whose CLI is installed
+# osrc_lane_summary [--json] -> one record per DETECTED harness for the "Lanes and
+# limits" panel / hub export. Never a fixed list: only harnesses whose CLI is installed
 # and whose login/plan/key is provable appear. JSON fields match the page contract:
 # id, name, state (ok|low|out|wait|unknown), left, renews, cap, paid, plus billing, lane,
 # renews_at, updated, source, order and a windows detail object. No arg prints a table.
@@ -683,7 +683,7 @@ EOF
           left="$(awk -v u="$used" 'BEGIN{printf "%g%% left",100-u}')" ;;
         esac
         case "$renews_at" in ''|-|*[!0-9]*) renews_at=""; renews="" ;;
-          *) renews="$(_osrc_renew_text "$renews_at" 2>/dev/null)" ;;   # "in 4 days · Thu 19 Nov" (MC3)
+          *) renews="$(_osrc_renew_text "$renews_at" 2>/dev/null)" ;;   # "in 4 days · Thu 19 Nov"
         esac
         state=ok
         awk -v p="$used" -v t="$cons_thr" 'BEGIN{exit !(p+0>=t+0)}' && state=low

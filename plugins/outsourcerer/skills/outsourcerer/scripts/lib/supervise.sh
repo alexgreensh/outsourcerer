@@ -28,7 +28,7 @@
 # --watch: hand-in files (*.DONE, *VERDICT*, *QUESTION*) keyed on name+mtime+size+hash, so a lane
 # rewriting the same DONE file fires again (lib/supervise_watch.sh).
 #
-# Screen reading is NOT done here: osrc_screen_state (lib/screen.sh, L3) classifies a pane. Until it
+# Screen reading is NOT done here: osrc_screen_state (lib/screen.sh) classifies a pane. Until it
 # lands, a thin wrapper over the existing detectors stands in (defined only if it is missing).
 
 _SV_SELF="${BASH_SOURCE[0]}"
@@ -37,10 +37,10 @@ _sv_lanes() { printf '%s/lanes' "$OSRC_HOME"; }
 _sv_now() { if [ -n "${OSRC_NOW:-}" ]; then printf '%s' "$OSRC_NOW"; else date +%s; fi; }   # OSRC_NOW pins the clock (tests)
 
 # ---- reading a target --------------------------------------------------------------------------
-# Screen classification is L3's (lib/screen.sh: osrc_screen_state / _osrc_screen_analyze_text). This
-# module only adds the facts L1 owns, read from L3's history region (the lines above the composer,
+# Screen classification lives in lib/screen.sh (osrc_screen_state / _osrc_screen_analyze_text). This
+# module only adds the session facts, read from the screen reader's history region (the lines above the composer,
 # so text the orchestrator typed into the composer is never evidence): plan limits, API/login errors,
-# the done contract (L6), and the Claude transcript.
+# the done contract, and the Claude transcript.
 
 _sv_cc_busy_re() { printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]{1,4}[[:space:]]+[A-Z][^[:space:]]*…'; }
 
@@ -53,15 +53,15 @@ _sv_pane_text() { # <pane> [capture]
 }
 
 _sv_plan_limit_re() {
-  printf '%s|%s|%s|%s|%s|%s' "${_CX_PLAN_LIMIT_RE:-x^}" "${_CC_PLAN_LIMIT_RE:-x^}" "${_CURSOR_PLAN_LIMIT_RE:-x^}" \
-    "${_WARP_PLAN_LIMIT_RE:-x^}" "${_DROID_PLAN_LIMIT_RE:-x^}" "${_CLINE_PLAN_LIMIT_RE:-x^}"
+  printf '%s|%s|%s|%s|%s|%s|%s' "${_CX_PLAN_LIMIT_RE:-x^}" "${_CC_PLAN_LIMIT_RE:-x^}" "${_CURSOR_PLAN_LIMIT_RE:-x^}" \
+    "${_WARP_PLAN_LIMIT_RE:-x^}" "${_DROID_PLAN_LIMIT_RE:-x^}" "${_CLINE_PLAN_LIMIT_RE:-x^}" "${_AGY_PLAN_LIMIT_RE:-x^}"
 }
-# Integration fix 13:15: a reviewer sat 55 min on "Please run /login · API Error: 403 ... Cloudflare".
-# The BANNER, not words (review round 2: bare phrases matched a delegate's own question and a "Done"
+# A reviewer sat 55 min on "Please run /login · API Error: 403 ... Cloudflare".
+# The BANNER, not words (bare phrases matched a delegate's own question and a "Done"
 # summary, and supervise typed `continue` into them). Only the LAST history line counts, and only in
 # the shape the CLI prints it: Claude Code's `⎿` result line carrying `API Error: <code>` or
 # `Please run /login`; other engines: a line that STARTS with one of those (after at most a glyph).
-# Review r4: a TOOL RESULT has the same `⎿` shape (`⏺ Bash(tail -1 app.log)` then
+# A TOOL RESULT has the same `⎿` shape (`⏺ Bash(tail -1 app.log)` then
 # `⎿  API Error: 502 ...` is the log's text), so a line whose previous non-blank line is a tool-call
 # header (`⏺ Name(`) is never a banner.
 _sv_api_banner() { # <engine> <line> [line-above] -> 0 when <line> is an API/login error banner
@@ -74,12 +74,47 @@ _sv_api_banner() { # <engine> <line> [line-above] -> 0 when <line> is an API/log
   printf '%s\n' "$2" | grep -Eq "$re"
 }
 
-# The last N lines of L3's history region (needs _osrc_screen_analyze_text to have run in this shell).
+# The last N lines of the screen reader's history region (needs _osrc_screen_analyze_text to have run in this shell).
 _sv_history_tail() { # [n]
   local n="${1:-${OSRC_SUPERVISE_HISTORY_TAIL:-6}}" end i
   end="${OSRC_SCR_HIST_END:--1}"; [ "$end" -ge 0 ] 2>/dev/null || end=$(( ${_SCR_N:-0} - 1 ))
   i=$(( end - n + 1 )); [ "$i" -ge 0 ] || i=0
   while [ "$i" -le "$end" ]; do printf '%s\n' "${_SCR_L[$i]}"; i=$((i + 1)); done
+}
+
+# agy parks on its own plan timer: "⚠ Individual quota reached ... Resets in 1h13m1s", or a bare
+# retry/backoff countdown. Both are a limit (the lane cannot take a turn until the clock fires),
+# never "unrecognised". The detail names the model the footer shows and carries the reset two ways:
+# a clock for the person reading, an epoch for anything parsing the event. Needs the analyze
+# globals (_SCR_L, OSRC_SCR_HIST_END); reads the last 10 history lines for the banner and the whole
+# capture for the model name. -> "<Model> quota reached, resets HH:MM (epoch N)" | rc1
+_sv_agy_limit() {
+  local hist line kind model="" phrase="" secs="" ep="" clock="" i
+  hist="$(_sv_history_tail 10)"
+  line="$(printf '%s\n' "$hist" | grep -Ei "${_AGY_PLAN_LIMIT_RE:-individual[[:space:]]+quota[[:space:]]+(reached|exceeded|exhausted)}" | tail -1)"
+  if [ -n "$line" ]; then kind=quota
+  else
+    line="$(printf '%s\n' "$hist" | grep -Ei 'resets?[[:space:]]+in[[:space:]]+[0-9]+[smhd]|(retr(y|ying)|back ?off|rate[ -]?limited)[^.]{0,40}in[[:space:]]+[0-9]+[smh]' | tail -1)"
+    [ -n "$line" ] || return 1; kind=backoff
+  fi
+  i=0
+  while [ "$i" -lt "$_SCR_N" ]; do
+    case "${_SCR_L[$i]}" in *"Gemini 4 "*) model="$(printf '%s\n' "${_SCR_L[$i]}" | grep -oE 'Gemini 4 [A-Z][a-z]+' | head -1 | awk '{print $3}')" ;; esac
+    i=$((i + 1))
+  done
+  [ -n "$model" ] || model=Antigravity
+  phrase="$(printf '%s\n' "$hist" | grep -oiE '(resets?|retr(y|ying)|back ?off)[[:space:]]+in[[:space:]]+[0-9][0-9smhd :]*' | head -1 \
+    | sed -E 's/^.*[[:space:]]+in[[:space:]]+/resets in /i')"
+  [ -n "$phrase" ] && secs="$(_lane_limit_reset_secs "$phrase" 2>/dev/null)"
+  case "$secs" in ''|*[!0-9]*) ep="" ;; *) ep=$(( $(_sv_now) + secs )); clock="$(date -r "$ep" '+%H:%M' 2>/dev/null || date -d "@$ep" '+%H:%M' 2>/dev/null)" ;; esac
+  line="$(printf '%s' "$line" | tr -s ' ' | cut -c1-100)"
+  if [ "$kind" = backoff ]; then
+    if [ -n "$ep" ]; then printf '%s waiting on its own timer, next try %s (epoch %s)' "$model" "$clock" "$ep"
+    else printf '%s waiting on its own timer: %s' "$model" "$line"; fi
+  else
+    if [ -n "$ep" ]; then printf '%s quota reached, resets %s (epoch %s)' "$model" "$clock" "$ep"
+    else printf '%s quota reached: %s' "$model" "$line"; fi
+  fi
 }
 
 _sv_cc_transcript() { # <session-id>
@@ -114,13 +149,13 @@ _sv_transcript_question() { # <session-id>
   printf '%s' "$text" | grep -Eiq '(should I|shall I|do you want|would you like|want me to|let me know (if|whether|which|how)|please confirm|waiting for your|your call|which (one|option) (do|should|would))'
 }
 
-# _sv_target_screen <session-id> [capture] -> state \n evidence. L3's reader plus, in this order:
-#   a quiet pane whose done contract holds (L6 osrc_done_state) -> done, even if it closed politely
+# _sv_target_screen <session-id> [capture] -> state \n evidence. the screen reader plus, in this order:
+#   a quiet pane whose done contract holds (osrc_done_state) -> done, even if it closed politely
 #     with a question ("Done. Want me to also update the docs?" is done). This also wins over a
 #     composer holding unsent text: a finished lane's lost send is not worth a wake.
 #   a cc session whose last turn asks something (transcript or screen) -> question
-#   the LAST history line is an API/login error banner -> failed (integration fix 13:15)
-#   plan-limit banner in the history tail -> limit (never idle; E10)
+#   the LAST history line is an API/login error banner -> failed
+#   plan-limit banner in the history tail -> limit (never idle)
 _sv_target_screen() {
   local id="$1" cap="${2:-}" eng st ev hist hit q=""
   if [ -z "$cap" ]; then cap="$(_osrc_screen_capture "$id")" || { printf 'unknown\npane capture failed\n'; return 0; }; fi
@@ -128,9 +163,12 @@ _sv_target_screen() {
   _osrc_screen_analyze_text "$eng" <<<"$cap"
   st="${OSRC_SCR_STATE:-unknown}"; ev="$(printf '%s' "${OSRC_SCR_EVIDENCE:-}" | tr '\n' ' ' | cut -c1-160)"
   case "$st" in approval|working) printf '%s\n%s\n' "$st" "$ev"; return 0 ;; esac
+  # agy parked on its own quota timer / retry backoff is a limit, whatever shape the composer
+  # gives the screen — it must never reach the "no turn yet" shortcut or the unknown tail.
+  if [ "${OSRC_SCR_ENGINE:-$eng}" = agy ] && hit="$(_sv_agy_limit)"; then printf 'limit\n%s\n' "$hit"; return 0; fi
   case "$st:$ev" in composer:*"no turn yet"*) printf 'composer\n%s\n' "$ev"; return 0 ;; esac
   # A lane that asked something, or whose done contract holds, is never `failed`, whatever its
-  # text mentions: those checks come first (review round 2, finding 1).
+  # text mentions: those checks come first.
   [ "$st" = question ] && q="$ev"
   if [ -z "$q" ] && _sv_transcript_question "$id"; then q="last assistant turn asks for an answer (transcript)"; fi
   if type -t osrc_done_state >/dev/null 2>&1; then
@@ -166,7 +204,7 @@ _sv_target_screen() {
   printf '%s\n%s\n' "$st" "$ev"
 }
 
-# Fleet-row state for a managed pane (E1): managed rows used to be hardcoded "unknown".
+# Fleet-row state for a managed pane: managed rows used to be hardcoded "unknown".
 _sv_fleet_state() { # <endpoint> -> state<US>evidence
   local pane st ev out
   case "$1" in tmux:?*) pane="${1#tmux:}" ;; *) printf 'unknown\037managed registry'; return 0 ;; esac
@@ -217,7 +255,7 @@ _sv_fixture_drop() { # <pane> <why>: an unrecognised screen becomes a fixture fo
   ls -1t "$d" 2>/dev/null | tail -n +51 | while IFS= read -r old; do rm -f "$d/$old"; done
 }
 
-# E2: `wait` on a session whose pane stays unrecognised used to loop forever. 0 = persistent unknown.
+# `wait` on a session whose pane stays unrecognised used to loop forever. 0 = persistent unknown.
 _sv_unknown_persistent() { # <session-id>
   local id="$1" now h rc=1
   now="$(_sv_now)"; h="$(_sv_pane_text "$id" | cksum | awk '{print $1}')"
@@ -265,7 +303,7 @@ _sv_observe() { # <id> <now> [src] [owner]
     elif have tmux && tmux has-session -t "=$id" 2>/dev/null; then SV_OUT=1; SV_PEND=1
     else SV_K=failed; SV_D="run ended without an exit code (stopped or killed)"; SV_DROP=1; fi
   elif have tmux && tmux has-session -t "=$id" 2>/dev/null; then
-    # L3's approver acts first (policy `safe` approves read-only/test prompts once; `off` = rc 1).
+    # the approver acts first (policy `safe` approves read-only/test prompts once; `off` = rc 1).
     if type osrc_approver_tick >/dev/null 2>&1; then
       out="$(osrc_approver_tick "$id" "$id" 2>/dev/null)"; code=$?
       case "$code" in
@@ -314,7 +352,7 @@ _sv_observe() { # <id> <now> [src] [owner]
       composer)
         case "$ev" in
           *"no turn yet"*) SVS_CK=- ;;   # fresh session, nothing asked of it yet: not an event, not live
-          *) SV_OUT=1   # not done: still owed a waiter after the idle event (SUP bug 1)
+          *) SV_OUT=1   # not done: still owed a waiter after the idle event 
              if _sv_confirm composer "$h" "$now"; then SV_K=idle; SV_D="idle with unsent text in its composer (a send did not land): $ev"
              else SV_PEND=1; fi ;;
         esac ;;
@@ -376,6 +414,7 @@ _sv_next() { # <kind> <id> -> the command the orchestrator should run
   case "$1" in
     failed) printf '%s fleet ls' "$s" ;;
     approval) printf 'OUTSOURCERER_TMUX=%s %s session answer' "$id" "$s" ;;   # lists the options
+    limit) printf '%s fleet ls  # lane parked on its plan timer: move the work to another lane or wait for the reset' "$s" ;;
     *) printf 'OUTSOURCERER_TMUX=%s %s session read' "$id" "$s" ;;
   esac
 }
@@ -427,7 +466,7 @@ _sv_observe_all() { # [src]
   _sv_remote_poll "${1:-beacon}"
 }
 
-# L2's remote lanes print EVENT/NEXT pairs; distinguish done events for new branch heads.
+# Remote lanes print EVENT/NEXT pairs; distinguish done events for new branch heads.
 _sv_remote_poll() { # <src>
   type osrc_remote_events >/dev/null 2>&1 || return 0
   local owner marker line kind="" tgt detail next key now _e _ts head delivery_id; now="$(_sv_now)"
@@ -490,7 +529,7 @@ _sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits a
   last="$(_sv_num "$(cat "$dir/tick.time" 2>/dev/null)" 0)"
   [ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0
   type cmd_hub_export >/dev/null 2>&1 || return 1
-  # Keep each card's summary current from real lane state (MC-9), so the page never shows an old narrative.
+  # Keep each card's summary current from real lane state, so the page never shows an old narrative.
   if type osrc_hub_tick_touch >/dev/null 2>&1; then
     local od slug
     for od in "$OSRC_HOME"/owners/*/; do
@@ -677,7 +716,7 @@ _sv_main() { # <sid> <once> [ids...]
       if [ "${_sv_all:-0}" = 0 ] && [ "$SV_DROP" = 1 ] && [ -z "$explicit" ]; then
         # keep the target in this batch's filter, drop it from the registry
         rm -f "$OSRC_HOME/owners/$sid/$id" 2>/dev/null
-        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id"   # listed as finished (MC3)
+        type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$sid" "$id"   # listed as finished
       fi
     done
     _sv_remote_poll supervise
@@ -732,8 +771,8 @@ _sv_main() { # <sid> <once> [ids...]
   done
 }
 
-# ---- small fixes owned by L1 -----------------------------------------------------------------------
-# E11: `claude-sonnet-5-5` and the alias `sonnet` are the same model; string equality called it drift.
+# ---- small session fixes -----------------------------------------------------------------------
+# `claude-sonnet-5-5` and the alias `sonnet` are the same model; string equality called it drift.
 _osrc_model_canon() { # <model> -> lowercase id; a Claude family alias maps to its family
   local m; m="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/\[1m\]$//')"
   printf '%s' "$m" | sed -E 's/^(anthropic\/|us\.anthropic\.)?(claude-)?(opus|sonnet|haiku|fable)([-.][0-9][0-9.-]*)?(-latest)?$/\3/'
@@ -753,7 +792,7 @@ _session_model_matches() { # <requested> <resolved> <observed>
   return 1
 }
 
-# E12: `wait` rebuilt the whole fleet snapshot every 10 s per waiter. Reuse one collected within
+# `wait` rebuilt the whole fleet snapshot every 10 s per waiter. Reuse one collected within
 # OSRC_WAIT_SNAPSHOT_REUSE seconds (default 20) by anyone (beacon or another waiter).
 _sv_snapshot_recent() {
   local snap max; max="$(_sv_num "${OSRC_WAIT_SNAPSHOT_REUSE:-}" 20)"

@@ -160,13 +160,14 @@ if grep -q 'nano-banana' <<< "$out"; then bad "advise includes image lane (nano-
 if grep -q 'gpt-image' <<< "$out"; then bad "advise includes image lane (gpt-image)"; else ok "advise excludes gpt-image lane"; fi
 
 # === 14. Source-level invariants (conformance cross-check). ===
-grep -q 'cmd_advise'                 "$SRC" && ok "cmd_advise wired in source"           || bad "cmd_advise missing from source"
+SRC_LIB="$SRC $SCRIPT_DIR/../lib/advise.sh $SCRIPT_DIR/../lib/advise-score.sh $SCRIPT_DIR/../lib/advise-fetch.sh"
+grep -q 'cmd_advise'                 $SRC_LIB && ok "cmd_advise wired in source"           || bad "cmd_advise missing from source"
 grep -q 'advise)'                    "$SRC" && ok "advise in main() dispatch"            || bad "advise not in main() dispatch"
-grep -q '_classify_task'             "$SRC" && ok "_classify_task present"               || bad "_classify_task missing"
-grep -q '_bench_lookup'              "$SRC" && ok "_bench_lookup present"                || bad "_bench_lookup missing"
-grep -q 'refresh_benchmarks'         "$SRC" && ok "refresh_benchmarks present"           || bad "refresh_benchmarks missing"
-grep -q 'OSRC_BENCH_JSON'            "$SRC" && ok "OSRC_BENCH_JSON cache path defined"   || bad "OSRC_BENCH_JSON missing"
-grep -q '_NATIVE_BENCH_MAP'          "$SRC" && ok "_NATIVE_BENCH_MAP defined"            || bad "_NATIVE_BENCH_MAP missing"
+grep -q '_classify_task'             $SRC_LIB && ok "_classify_task present"               || bad "_classify_task missing"
+grep -q '_bench_lookup'              $SRC_LIB && ok "_bench_lookup present"                || bad "_bench_lookup missing"
+grep -q 'refresh_benchmarks'         $SRC_LIB && ok "refresh_benchmarks present"           || bad "refresh_benchmarks missing"
+grep -q 'OSRC_BENCH_JSON'            $SRC_LIB && ok "OSRC_BENCH_JSON cache path defined"   || bad "OSRC_BENCH_JSON missing"
+grep -q '_NATIVE_BENCH_MAP'          $SRC_LIB && ok "_NATIVE_BENCH_MAP defined"            || bad "_NATIVE_BENCH_MAP missing"
 # Help text includes advise.
 grep -q 'advise'                     "$SRC" && ok "advise in help text"                  || bad "advise not in help text"
 
@@ -187,7 +188,7 @@ _osrc_limit_exceeded cc 'claude5h=89' 2>/dev/null \
 [ "$(_lane_conserve_mult or 'claude5h=100')" = "1.00" ] && ok "openrouter lane is never haircut (unmeasured)" || bad "openrouter got a fabricated limit penalty"
 # integration: with a lane forced past the line, advise prints the conservation line; opt-out silences it.
 # Stub _session_limits high, capture output, then restore the real definition.
-# Values sit ABOVE the 50% conserve line (haircut applies) but BELOW the 90% L7 limit gate — at/over
+# Values sit ABOVE the 50% conserve line (haircut applies) but BELOW the 90% limit gate — at/over
 # 90 the lane is hard-EXCLUDED instead of haircut (test_limit_gate.sh owns that contract).
 _advise_real_limits="$(declare -f _session_limits)"
 _session_limits() { printf 'claude5h=60 codexwk=70\n'; }
@@ -196,7 +197,7 @@ _adv_off="$(OSRC_ADVISE_CONSERVE=0 cmd_advise "refactor the auth module" 2>/dev/
 [ -n "$_advise_real_limits" ] && eval "$_advise_real_limits"   # restore real limits reader
 grep -qi 'conservation:' <<< "$_adv_on" && ok "advise surfaces the conservation line when a lane is past the line" || bad "advise did not surface conservation"
 grep -qi 'conservation:' <<< "$_adv_off" && bad "OSRC_ADVISE_CONSERVE=0 did not disable the haircut" || ok "OSRC_ADVISE_CONSERVE=0 disables conservation"
-grep -q 'conservation:(if $conserve==""' "$SRC" && ok "conservation exposed in --json output" || bad "conservation missing from json"
+grep -q 'conservation:(if $conserve==""' $SRC_LIB && ok "conservation exposed in --json output" || bad "conservation missing from json"
 
 # === 15. Gemini-4 Neon reaches the advisor + benchmark-cache freshness. ===
 # agy now serves the Gemini-4 codenames; the gemini-neon table row must be scored like every other

@@ -1,0 +1,50 @@
+     [38;5;146m    with open('/Users/user/.gemini/oauth_creds.json') as f:[39m
+     [38;5;146m        data = json.load(f)[39m
+     [38;5;146m        keys = list(data.keys()) if isinstance(data, dict) else [][39m
+     [38;5;146m        print('oauth_creds keys:', keys)[39m
+     [38;5;146m        email = data.get('email') or data.get('account') or data.get('user') or data.get('active_account')[39m
+     [38;5;146m        print('Email found in oauth_creds:', email)[39m
+     [38;5;146mexcept Exception as e:[39m
+     [38;5;146m    print('Error:', e)[39m
+     [38;5;146m")[39m
+     [38;5;146m    • unsandboxed(python3 -c "[39m
+     [38;5;146mimport json, base64, time[39m
+     [38;5;146mtry:[39m
+     [38;5;146m    with open('/Users/user/.gemini/oauth_creds.json') as f:[39m
+     [38;5;146m        data = json.load(f)[39m
+     [38;5;146m        expiry = data.get('expiry_date')[39m
+     [38;5;146m        if expiry:[39m
+     [38;5;146m            exp_ts = expiry / 1000 if expiry > 1e11 else expiry[39m
+     [38;5;146m            print('Token expiry:', time.ctime(exp_ts), '(expired:', exp_ts < time.time(), ')')[39m
+     [38;5;146m        if 'id_token' in data and data['id_token']:[39m
+     [38;5;146m            parts = data['id_token'].split('.')[39m
+     [38;5;146m            if len(parts) >= 2:[39m
+     [38;5;146m                payload = json.loads(base64.urlsafe_b64decode(parts[1] + '==='))[39m
+     [38;5;146m                print('id_token email:', payload.get('email'))[39m
+     [38;5;146m                print('id_token name:', payload.get('name'))[39m
+     [38;5;146m                print('id_token exp:', time.ctime(payload.get('exp', 0)))[39m
+     [38;5;146mexcept Exception as e:[39m
+         [38;5;146mprint('Error:', e)[39m
+     [38;5;146m")[39m
+         [38;5;146m• unsandboxed(python3 -c "[39m
+     [38;5;146mimport json[39m
+     [38;5;146mtry:[39m
+     [38;5;146m    with open('/Users/user/.gemini/settings.json') as f:[39m
+     [38;5;146m        data = json.load(f)[39m
+     [38;5;146m        print('Top level keys in ~/.gemini/settings.json:', list(data.keys()))[39m
+     [38;5;146m        if 'auth' in data:[39m
+     [38;5;146m            print('auth section keys:', list(data['auth'].keys()))[39m
+     [38;5;146mexcept Exception as e:[39m
+     [38;5;146m    print('Error:', e)[39m
+     [38;5;146m")[39m
+
+     [38;5;146mFix: replace "unsandboxed" with "command" (e.g. command(git status)), or remove the rule. Edit the file directly or use /permissions.[39m
+
+
+ [38;5;221m┃[39m [1mAuto is now the default agent mode[0m
+ [38;5;221m┃[39m Press Shift+Tab to switch agent modes, or change Agent Mode in /config.
+ [38;5;221m┃[39m [38;5;109mesc to dismiss[39m
+[38;5;238m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;111m>[39m [38;5;109mAuto mode: edits & safe commands auto-approved (shift+tab to cycle)[39m
+[38;5;238m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;109m? for shortcuts[39m                                                                                                                                                              [38;5;214mauto[38;5;109m · Gemini 4 Neon · high

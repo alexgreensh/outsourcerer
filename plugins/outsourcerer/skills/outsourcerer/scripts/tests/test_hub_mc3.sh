@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_hub_mc3.sh -- Mission Control that is never empty (MC3): heartbeat visibility for an orchestrator
+# test_hub_mc3.sh -- Mission Control that is never empty: heartbeat visibility for an orchestrator
 # between lanes, finished lanes kept, no spam from sessions that never used Outsourcerer, `hub report`,
 # renewal text at three ranges (CLI table + export), the empty state, "Also running" rows and the
 # session-title priority. Sandboxed HOME + OSRC_HOME; no tmux; the only processes are our own sleeps.
@@ -80,16 +80,19 @@ jq -e '.name == "Total Recall 1.8.6" and .status == "building" and .pct == 62 an
   && ok "every field reaches the card" || bad "card: $P"
 as "$MC3_SID_A" hub report --pct 70 >/dev/null 2>&1
 jq -e '.pct == 70 and .eta == "Tue 17 Nov" and .name == "Total Recall 1.8.6"' "$OSRC_HOME/hub/projects/$MC3_SID_A.json" >/dev/null && ok "a later report merges, keeping other fields" || bad "merge lost fields"
-as "$MC3_SID_A" hub report --ask "Ship tonight?" --why "The fixes are merged and the free gate is green." --rec "Yes, nothing is left." --when "Today" --weight Critical >/dev/null \
-  && as "$MC3_SID_A" hub report --ask "Bump the version?" --why "Two lanes changed the file format." --option "Bump to 1.9" --option "Keep 1.8" >/dev/null
+as "$MC3_SID_A" hub report --ask "Ship tonight?" --why "The fixes are merged and the free gate is green, so shipping now unblocks users." --rec "Yes, nothing is left." --option "Ship tonight" --option "Wait for tomorrow" --when "Today" --weight Critical >/dev/null \
+  && as "$MC3_SID_A" hub report --ask "Bump the version?" --why "Two lanes changed the saved file format, so older builds cannot read new files." --rec "Bump to 1.9 for safety." --option "Bump to 1.9" --option "Keep 1.8" >/dev/null
 D="$(eng hub export | jq -c --arg s "$MC3_SID_A" '.projects[] | select(.id == $s) | .decisions')"
 jq -e 'length == 2 and .[0].id == "D1" and .[0].weight == "Critical" and .[1].id == "D2" and .[1].weight == "High" and all(.[]; .status == "wait")' >/dev/null <<<"$D" && ok "--ask adds open decisions D1, D2" || bad "asks: $D"
-jq -e '.[0].why == "The fixes are merged and the free gate is green." and .[0].rec == "Yes, nothing is left." and .[0].when == "Today" and .[1].options == ["Bump to 1.9","Keep 1.8"] and (.[1] | has("rec") | not)' >/dev/null <<<"$D" \
+jq -e '.[0].why == "The fixes are merged and the free gate is green, so shipping now unblocks users." and .[0].rec == "Yes, nothing is left." and .[0].options == ["Ship tonight","Wait for tomorrow"] and .[0].when == "Today" and .[1].options == ["Bump to 1.9","Keep 1.8"] and .[1].rec == "Bump to 1.9 for safety."' >/dev/null <<<"$D" \
   && ok "an ask carries its background, pick, deadline and choices to the card" || bad "ask detail: $D"
 for args in "--ask Bare?" "--ask Q --why" "--ask Q --rec R" "--ask Q --why W" "--ask Q --why W --option only-one" "--why W" "--option X"; do
   # shellcheck disable=SC2086
   if as "$MC3_SID_A" hub report $args >/dev/null 2>&1; then bad "accepted an ask without context: $args"; else ok "refuses an ask without context: $args"; fi
 done
+if as "$MC3_SID_A" hub report --ask "Short why?" --why "Too short to explain anything." --rec "Pick A" --option "A" --option "B" >/dev/null 2>&1; then bad "accepted --why under 40 chars"; else ok "refuses --why under 40 chars"; fi
+if as "$MC3_SID_A" hub report --ask "No rec?" --why "This background explanation is definitely longer than forty characters." --option "A" --option "B" >/dev/null 2>&1; then bad "accepted --ask without --rec"; else ok "refuses --ask without --rec"; fi
+if as "$MC3_SID_A" hub report --ask "No opts?" --why "This background explanation is definitely longer than forty characters." --rec "Pick A" >/dev/null 2>&1; then bad "accepted --ask without 2+ --option"; else ok "refuses --ask without 2+ --option"; fi
 jq -e 'length == 2' "$OSRC_HOME/hub/decisions/$MC3_SID_A.json" >/dev/null && ok "a refused ask adds nothing" || bad "a refused ask was saved"
 as "$MC3_SID_A" hub report --done-ask D1 >/dev/null
 jq -e '.[0].status == "done" and .[1].status == "wait"' "$OSRC_HOME/hub/decisions/$MC3_SID_A.json" >/dev/null && ok "--done-ask closes exactly that question" || bad "done-ask"

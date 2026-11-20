@@ -87,8 +87,9 @@ def agy_fix:
 def devin_fix:
   ($p.devin // {}) as $d
   | if $d.ok == true and (($d.free // []) | length) > 0 then
-      . + {state: "ok", left: "Free · no limit", note: ("Devin " + (if ($d.plan // "") != "" then "\($d.plan) plan" else "plan" end)
-            + ": \($d.free | length) models are free with no usage limit (\($d.free[0:3] | join(", "))). Other models bill per token."
+      . + {state: "ok", left: ((if ($d.plan // "") != "" then "\($d.plan) " else "" end) + "subscription"),
+           note: ("Devin " + (if ($d.plan // "") != "" then "\($d.plan) " else "" end) + "subscription (paid monthly, not free)"
+            + ": \($d.free | length) models come with no per-use charge (\($d.free[0:3] | join(", "))). Other models bill per token on top."
             + " Devin Cloud runs use your plan's cloud quota, which the Devin CLI does not report: see it at app.devin.ai."),
            source: "devin models"} | checked($d.checked // $now)
     elif $d.ok == true then
@@ -100,10 +101,10 @@ def droid_fix:
   ($p.droid // {}) as $d
   | (if (.cap // "") != "" then " Your cap: \(.cap)." else " No cap set in Outsourcerer." end) as $cap
   | if $d.ok == true then
-      . + {state: "ok", left: "Pay per use", source: "droid doctor",
+      . + {state: "ok", left: "Subscription", source: "droid doctor",
            note: ("Signed in to Factory" + (if ($d.token_until // "") != "" then " (token valid until \($d.token_until | epoch | if . then strflocaltime("%a %d %b %H:%M") else "later" end))" else "" end)
-                  + ". Factory bills per use and shows no remaining balance to the CLI." + $cap)} | checked($d.checked // $now)
-    else . + {state: "unknown", left: "Pay per use", note: ("Sign-in not confirmed: \($d.why // "droid is not available")." + $cap)} | checked($d.checked // $now)
+                  + ". Factory is a monthly subscription; the CLI shows no remaining balance." + $cap)} | checked($d.checked // $now)
+    else . + {state: "unknown", left: "Subscription", note: ("Sign-in not confirmed: \($d.why // "droid is not available")." + $cap)} | checked($d.checked // $now)
     end;
 
 def generic_fix:

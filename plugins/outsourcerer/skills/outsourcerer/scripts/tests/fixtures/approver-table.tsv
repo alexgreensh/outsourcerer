@@ -101,7 +101,7 @@ hold	other
 hold	shell		
 hold	shell		ls -la \⏎  && rm -rf /tmp/x
 hold	shell		git status⏎git push
-# ---- Round 2: every command from reviews/L3-VERDICT.md (finding number in the comment) ----
+# ---- destructive paths, brace expansion and odd redirect targets ----
 hold	shell		rm -rf ~root/Documents
 hold	shell		rm -rf ~+/../other
 hold	shell		rm -rf {src,/etc/hosts}
@@ -192,7 +192,7 @@ approve	shell		chmod 755 scripts/run.sh
 approve	shell		rg --files src
 hold	write	{ROOT}/.git/hooks/post-checkout	
 hold	write	~root/x	
-# ---- Round 3: reviews/L3-VERDICT.md round 2 findings 2, 3, 5 ----
+# ---- second-operand writes and interpreter exec forms ----
 hold	shell		uniq src/a /tmp/x
 hold	shell		uniq -c src/a ~/out.txt
 hold	shell		xxd src/a /tmp/x
@@ -229,12 +229,12 @@ hold	shell		jq -n 'input' src/a.json
 approve	shell		jq '.name' src/a.json
 hold	shell		awk '{system("rm -rf /")}' src/a
 hold	shell		find src -name '{a,b}' -exec rm {} ;
-# ---- Round 4: review round 3 finding 1 (gawk indirect calls, @load, ARGV/ARGC) ----
+# ---- interpreter escapes: indirect calls, @load, ARGV/ARGC ----
 hold	shell		gawk 'BEGIN{f="sys" "tem"; @f("touch /tmp/osrc-x")}'
 hold	shell		gawk '@load "filefuncs"; BEGIN{}' src/a
 hold	shell		awk 'BEGIN{ARGV[1]="~/.ssh/id_rsa";ARGC=2}{print}'
 approve	shell		gawk '{print $1}' src/a
-# ---- Round 4b: commands that print environment values hold; names-only `env | cut -d= -f1` approves ----
+# ---- env disclosure: value-printing forms hold, name lists approve ----
 hold	shell		env
 hold	shell		printenv
 hold	shell		printenv HOME
@@ -269,7 +269,7 @@ hold	shell		env | cut -f1 -d=
 hold	shell		env | cut -d = -f 1
 hold	shell		env | cut -d= -f1 | sort
 hold	shell		env | cut -d= -f1 | grep TOKEN
-# ---- Round 5: review round 4 B, C (multi-line env values; gawk symbol tables) ----
+# ---- env value extraction and interpreter symbol tables ----
 hold	shell		env | cut -d= -f2 -f1
 hold	shell		env | grep -o '^[A-Za-z_][A-Za-z0-9_]*='
 hold	shell		compgen -e | xargs printenv
@@ -278,7 +278,7 @@ hold	shell		gawk 'BEGIN{e="ENVI" "RON"; print SYMTAB[e]["GH_TOKEN"]}'
 hold	shell		gawk 'BEGIN{for(k in SYMTAB) print k, SYMTAB[k]}'
 hold	shell		gawk 'BEGIN{print PROCINFO["pid"]}'
 hold	shell		gawk 'BEGIN{for(f in FUNCTAB) print f}'
-# ---- Round 5: review round 4 D (git config can hold tokens) ----
+# ---- git config values can hold tokens ----
 hold	shell		git config --list
 hold	shell		git config -l
 hold	shell		git config --get http.extraheader
@@ -293,9 +293,61 @@ approve	shell		git config --get user.email
 approve	shell		git config --get core.autocrlf
 approve	shell		git config --get branch.main.remote
 approve	shell		git config --get init.defaultBranch
-# Round 5 follow-up: git remote URLs can hold a token (same class as git config --get remote.*.url)
+# git remote URLs can hold a token (same class as git config --get remote.*.url)
 approve	shell		git remote
 hold	shell		git remote -v
 hold	shell		git remote show origin
 hold	shell		git remote get-url origin
 approve	shell		git tag -l
+# ---- N2: VAR=... prefixes, &&/; chains, echo, nice -n N wrappers (approve when safe) ----
+hold	shell		SCRATCH=/tmp/osrc-scratch jq -r .name /tmp/osrc-scratch/report.json
+hold	shell		SCRATCH=/tmp/x && jq -r .name /tmp/x/report.json; echo done
+approve	shell		nice -n 19 cat src/a.txt
+approve	shell		nice --adjustment=10 cat src/a.txt
+approve	shell		echo done && cat a.txt; tail -5 out/log.txt
+hold	shell		nice -n 19 bash tests/test_x.sh
+hold	shell		nice rm -rf x
+hold	shell		nice -n 19 frobnicate x
+hold	shell		nice
+hold	shell		nice -n cat a.txt
+hold	shell		LD_PRELOAD=/tmp/evil.so cat a.txt
+hold	shell		LD_LIBRARY_PATH=/tmp/evil cat a.txt
+hold	shell		PYTHONPATH=/tmp/evil python3 -c "print(1)"
+hold	shell		FOO=$(id) cat a.txt
+hold	shell		FOO=`id` cat a.txt
+hold	shell		FOO=~/x cat a.txt
+hold	shell		SCRATCH=/tmp/x && jq . f && rm -rf x
+hold	shell		rm -rf src
+approve	shell		rm src/stale.txt
+# ---- env prefixes on commands approve only for inert names ----
+# A prefix like PAGER=x hands the child a program to run; a denylist always misses one, so the
+# allowlist is the structure. Standalone assignment segments are shell variables and approve.
+hold	shell		PAGER=x git log
+hold	shell		EDITOR=x git commit
+hold	shell		VISUAL=x git commit
+hold	shell		LESSOPEN=x less f
+hold	shell		BROWSER=x cat f
+hold	shell		SHELL=x make
+hold	shell		GIT_EDITOR=x git commit
+hold	shell		TERMINFO=x cat f
+hold	shell		SHELL=x cat f
+hold	shell		nice PAGER=x git log
+hold	shell		SSH_ASKPASS=x ssh host true
+hold	shell		SCRATCH=out && jq . out/a.json; echo done
+approve	shell		TZ=UTC date
+approve	shell		LC_ALL=C sort -u src/words.txt
+hold	shell		SCRATCH=out
+hold	shell		PATH=/tmp/evil
+hold	shell		HOME=/tmp/fake
+# ---- standalone assignments to possibly-exported names hold ----
+# 'PAGER=evil; git log' still runs evil if PAGER was already exported -- the approver cannot see
+# the export table. Exported names are conventionally ALL-CAPS: an all-uppercase non-inert name
+# holds; a name with a lowercase letter is a private shell variable and approves.
+hold	shell		PAGER=evil; git log
+hold	shell		EDITOR=x && git commit
+approve	shell		scratch=out && jq . out/a.json
+hold	shell		SCRATCH=out && jq . out/a.json
+hold	shell		FOO1=x
+hold	shell		nice SCRATCH=out
+approve	shell		scratch=1 myVar=2
+approve	shell		scratch=out && jq . out/a.json; echo done

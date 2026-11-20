@@ -1,10 +1,10 @@
-/* Mission Control Home, ported from the approved sessions/2026-11-13-autonomy/hub/mission-control.html.
+/* Mission Control Home, ported from an approved design mock.
    Lives outside hub.html so the page stays under the 1,000-line rule; served by `hub serve` from
    /assets/hub-home.js (script-src 'self'). hub.html calls window.OSRC_HUB_HOME(ctx) with getters for
    its live state and the helpers it already has, and gets back the Home renderer, the Mark done flow
    and the stale-stamp Refresh button. If this file fails to load, hub.html falls back to the project view. */
 (function () {
-  // ---- MC4: the page never prints an id or a stored renew string ------------------------------
+  // ---- the page never prints an id or a stored renew string ------------------------------------
   // Same id rules as lib/hub-lanename.sh (_OSRC_HUB_IDLIKE_JQ): Outsourcerer session prefixes, "--<digits>"
   // hash joins, hex runs of 6+ holding a digit, a whole value that is a slug ending in a number.
   const IDLIKE = [/(^|[^A-Za-z0-9])(osrc|outsourcerer)-/i, /--[0-9]/,
@@ -26,28 +26,97 @@
     else if (typeof o.renews !== 'string' || HOURS.test(o.renews)) delete o.renews;
     return o;
   }
+  function sentenceCase(s) {
+    const t = String(s || '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : '';
+  }
+  function isPromptTitle(s) {
+    if (typeof s !== 'string') return false;
+    return s.split(' · ').some((part) => {
+      const t = part.trim();
+      return t.startsWith('[') || t.length > 40 || /READ BEFORE/i.test(t);
+    });
+  }
+  function ageSpan(min) {
+    if (!(min >= 0)) return '';
+    return min < 60 ? Math.max(1, Math.floor(min)) + ' min' : min < 2880 ? Math.floor(min / 60) + ' h' : Math.floor(min / 1440) + ' days';
+  }
+  function cardStaleInfo(p, nowMs) {
+    if (!p || p.status === 'shipped') return null;
+    const hasText = Boolean(p.cardStale || p.next || p.eta || (typeof p.pct === 'number' && isFinite(p.pct)));
+    if (!hasText) return null;
+    const lim = (typeof p.cardStaleMin === 'number' && isFinite(p.cardStaleMin)) ? p.cardStaleMin : 30;
+    const now = nowMs || Date.now();
+    const rep = Date.parse(p.reportedAt || '');
+    const min = !isNaN(rep) ? Math.floor((now - rep) / 60000)
+      : (typeof p.cardAgeMin === 'number' && isFinite(p.cardAgeMin) ? p.cardAgeMin : null);
+    if (min == null) return p.cardStale ? { min: lim, text: 'Last update from its session: ' + ageSpan(lim) + ' ago' } : null;
+    if (min < lim) return null;
+    return { min, text: 'Last update from its session: ' + ageSpan(min) + ' ago' };
+  }
+  function decStaleInfo(p, d, nowMs) {
+    if (!d || d.status === 'done') return null;
+    const limH = (p && typeof p.decisionStaleH === 'number' && isFinite(p.decisionStaleH)) ? p.decisionStaleH : 2;
+    const now = nowMs || Date.now();
+    const raw = d.confirmedAt || d.askedAt || (p && p.reportedAt) || '';
+    const ts = Date.parse(raw);
+    if (isNaN(ts)) {
+      if (!d.stale) return null;
+      const h0 = Math.max(limH, Math.floor(d.staleHours || limH));
+      const s0 = h0 >= 48 ? Math.floor(h0 / 24) + ' days' : h0 + ' h';
+      return { hours: h0, text: 'Not re-confirmed for ' + s0 + ', may be out of date' };
+    }
+    const ageH = (now - ts) / 3600000;
+    if (!(ageH >= limH)) return null;
+    const h = Math.max(limH, Math.floor(ageH));
+    const s = h >= 48 ? Math.floor(h / 24) + ' days' : h + ' h';
+    return { hours: h, text: 'Not re-confirmed for ' + s + ', may be out of date' };
+  }
   // A project name keeps its human parts ("Total Recall Core · total-recall-85" -> "Total Recall Core").
+  // Prompt-text titles (starting with '[', over 40 chars, or containing 'READ BEFORE') fall back to the folder name in sentence case.
   function cleanName(s, fallback) {
     if (typeof s !== 'string') return fallback;
     const parts = s.split(' · ').filter((x) => x && !idlike(x));
     return parts.length ? parts.join(' · ') : fallback;
   }
-  function cleanProject(p) {
+  function cleanProject(p, nowMs) {
     const o = Object.assign({}, p);
     o.name = cleanName(o.name, 'Orchestrator session');
+    if (isPromptTitle(o.name)) {
+      const firstSeg = String(o.name).split(' · ').find((x) => x && !isPromptTitle(x) && !idlike(x));
+      o.name = (o.folder && sentenceCase(o.folder)) || (firstSeg && sentenceCase(firstSeg)) || 'Orchestrator session';
+    }
     if (Array.isArray(o.lanes)) o.lanes = o.lanes.map((l) => (idlike(l.short) || !l.short ? Object.assign({}, l, { short: l.model ? 'Lane · ' + l.model : 'Lane' }) : l));
+    if (cardStaleInfo(o, nowMs)) { o.cardStale = true; delete o.next; }
     return o;
   }
-  window.OSRC_HUB_CLEAN = { idlike, renewText, limit: cleanLimit, project: cleanProject, name: cleanName };
+  // "Ships X" for a tile/hover: an eta value may already carry the verb ("Ship target 17:00 today")
+  // or be a bare status word ("done"); never render "Ships Ship …" or "Ships done". "" hides the line.
+  function shipEta(eta) {
+    const et = String(eta || '').replace(/^ships?\s+/i, '').trim();
+    return et && !/^(done|shipped|live|cancelled?)$/i.test(et) ? 'Ships ' + et : '';
+  }
+  // sessionStamp(p) -> ms epoch of when the project's SESSION last reported its content:
+  // card reportedAt, else a parseable board.updated, else last real activity (updatedAt).
+  // Never the export/serve stamp — an 'Updated' label must say when the session's words
+  // were last reported, not when this page was built. null when nothing is known.
+  function sessionStamp(p) {
+    if (!p) return null;
+    for (const v of [p.reportedAt, p.boardUpdated, p.updatedAt]) {
+      const t = Date.parse(v || ''); if (!isNaN(t)) return t;
+    }
+    return null;
+  }
+  window.OSRC_HUB_CLEAN = { idlike, renewText, limit: cleanLimit, project: cleanProject, name: cleanName, sentenceCase, isPromptTitle, cardStale: cardStaleInfo, decStale: decStaleInfo, shipEta, sessionStamp };
 
   window.OSRC_HUB_HOME = function (ctx) {
     const { $, el, ic, pri, paint, openDecs, byWeight, stPill } = ctx;
     const isTop = (d) => d.weight === 'Critical' || d.weight === 'High';
-    const grown = new Set();   // a tile's bar animates the first time only; re-renders set it directly (MC-5 #4)
-    // Tiles use a short stamp (MC-5 #1), local time (MC3), from the project's real last change
+    const grown = new Set();   // a tile's bar animates the first time only; re-renders set it directly
+    // Tiles use a short stamp, local time, from the project's real last change
     // (updatedAt). The full stamp stays on the project page. Long stamps squeezed the bars and wrapped the stale pill.
     const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    // MC3: local time, never UTC. "23:00" today, "yesterday 23:00", else "Mon 16 Nov, 09:10".
+    // Local time, never UTC. "23:00" today, "yesterday 23:00", else "Mon 16 Nov, 09:10".
     const DAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     function localStamp(ms) {
       const d = new Date(ms), pad = (n) => String(n).padStart(2, '0'), hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
@@ -57,6 +126,25 @@
     }
     function shortStamp(iso, fallback) {
       const t = Date.parse(iso || ''); return isNaN(t) ? fallback : localStamp(t);
+    }
+    // Every 'Updated' on a project is the session's last report, never the export
+    // stamp. projFresh draws the project-page stamp + stale hero line (same cardStale rule as
+    // Home); etaAsOf dates a stale release line 'as of …'; freshText feeds the page footer.
+    const freshText = (p) => { const ep = sessionStamp(p); return ep ? localStamp(ep) : String((p && p.updated) || 'not yet'); };
+    function projFresh(p, host) {
+      const ep = sessionStamp(p);
+      if (p.updated || ep) {
+        const st = el('p', 'stamp-top'); st.dataset.rk = 'project:' + p.id; st.dataset.at = ep ? new Date(ep).toISOString() : (p.updatedAt || '');
+        st.dataset.live = p.status === 'shipped' ? '' : '1';
+        st.append(ic('clock'), el('span', null, 'Updated ' + freshText(p))); host.prepend(st);
+      }
+      const cst = cardStaleInfo(p); if (cst) host.append(el('p', 'pt-stale', cst.text));
+    }
+    function etaAsOf(p) {
+      if (!p || !p.eta || !cardStaleInfo(p)) return '';
+      const bu = Date.parse(p.boardUpdated || ''), rep = Date.parse(p.reportedAt || '');
+      const t = !isNaN(bu) ? localStamp(bu) : (!isNaN(rep) ? localStamp(rep) : String(p.boardUpdated || ''));
+      return t ? 'as of ' + t : '';
     }
 
     // ---- Undo toast (6 s) -------------------------------------------------------------------
@@ -71,7 +159,7 @@
       box.hidden = false; clearTimeout(utoastT); utoastT = setTimeout(() => { box.hidden = true; }, 6000);
     }
 
-    // ---- Mark done from the rail (Alex 11:58) ------------------------------------------------
+    // ---- Mark done from the rail --------------------------------------------------------------
     // Writes only through the viewer's own click. shippedBy:"user" tells every orchestrator to leave the
     // status alone; Move back clears it so the build can report again. Local mode: the adapter turns
     // db.doc('projects/<id>').update() into POST /api/projects/<id>/status.
@@ -98,7 +186,7 @@
       else utoast(p.name + ' is back in Running now');
     }
 
-    // One Mark done / Move back button, used in the rail card and the project page header (MC-7 #1: the header
+    // One Mark done / Move back button, used in the rail card and the project page header (the header
     // copy is the one a phone or a keyboard can reach). Same click, same Undo, same shippedBy/shippedAt.
     function doneBtn(p, id, after) {
       if (!ctx.db || ctx.canWrite === false) return null;
@@ -134,7 +222,7 @@
       }
     }
 
-    // ---- Live summary line (MC-10) ----------------------------------------------------------------
+    // ---- Live summary line ---------------------------------------------------------------------
     // The tick rewrites p.summary from real lane state ("5 lanes: 3 building, 1 done") every 10 min. It sits under
     // the progress bar with the Updated stamp, in the stamp's type; the tagline stays the description. None, no line.
     function sumLine(p) {
@@ -144,11 +232,11 @@
       return d;
     }
 
-    // ---- Progress (MC2 r2 #2) ---------------------------------------------------------------------
+    // ---- Progress -----------------------------------------------------------------------------
     // A project or lane that never reported progress has no pct: it shows no number and no bar. 0 is a real 0.
     const hasPct = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
 
-    // ---- Live lanes (MC2 r2 #5) ------------------------------------------------------------------
+    // ---- Live lanes ----------------------------------------------------------------------------
     // Every running card and rail entry lists its live lanes: name, model, what it is doing and for how long.
     // Export gives state (screen/job truth), startedAt and activeAt (epochs); old exports only had status.
     const LST = { working: 'working', approval: 'waiting for approval', question: 'asked a question', idle: 'idle',
@@ -189,6 +277,17 @@
     }
 
     // ---- Home: the first screen. One glance answers "what needs me". --------------------------
+    const cmpDec = (a, b) => (decStaleInfo(a.p, a.d) ? 1 : 0) - (decStaleInfo(b.p, b.d) ? 1 : 0) || byWeight(a.d, b.d);
+    function isQuiet(p) {
+      if (!p || p.status === 'shipped') return false;
+      const hasLive = p.liveLanes == null ? liveLanes(p).length > 0 : p.liveLanes > 0;
+      if (hasLive) return false;
+      if (openDecs(p).length > 0) return false;
+      const limH = (typeof p.staleHours === 'number' && isFinite(p.staleHours)) ? p.staleHours : 24;
+      const rep = Date.parse(p.reportedAt || '');
+      if (!isNaN(rep) && (Date.now() - rep) < limH * 3600000) return false;
+      return true;
+    }
     function ptile(p) {
       const go = ctx.go; const ds = openDecs(p);
       const t = el('article', 'card ptile' + (p.status === 'paused' ? ' paused' : '') + (ds.length ? ' waits' : '')); t.id = 'tile-' + p.id;
@@ -196,7 +295,9 @@
       const nb = el('button', 'pt-name', p.name); nb.type = 'button'; nb.id = 'ptn-' + p.id; nb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); });
       top.append(nb, stPill(p)); t.append(top);
       if (p.tagline) t.append(el('p', 'pt-tag', p.tagline));
-      if (p.next) { const n = el('p', 'pt-next'); n.append(el('b', null, 'Next'), el('span', null, p.next)); t.append(n); }   // MC3: hub report --next
+      const cst = cardStaleInfo(p);
+      if (cst) t.append(el('p', 'pt-stale', cst.text));
+      else if (p.next) { const n = el('p', 'pt-next'); n.append(el('b', null, 'Next'), el('span', null, p.next)); t.append(n); }   // from hub report --next
       const pr = el('div', 'pt-prog' + (hasPct(p) ? '' : ' nopct')); t.append(pr);
       if (hasPct(p)) {
         const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
@@ -205,27 +306,24 @@
         if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = p.pct + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = p.pct + '%'; }); }
       }
       const meta = el('div', 'pt-meta');
-      if (p.eta) { const e = el('span'); e.append(ic('rocket'), document.createTextNode('Ships ' + p.eta)); meta.append(e); }
-      if (p.updated) {
-        const u = el('span', 'lst'); u.dataset.at = p.updatedAt || ''; u.dataset.live = (p.status === 'shipped' || p.status === 'paused') ? '' : '1';
-        u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + shortStamp(p.updatedAt, p.updated);
+      const se = shipEta(p.eta); if (se) { const e = el('span'); e.append(ic('rocket'), document.createTextNode(se)); meta.append(e); }
+      const sEp = sessionStamp(p);
+      if (p.updated || sEp) {
+        const u = el('span', 'lst'); u.dataset.at = sEp ? new Date(sEp).toISOString() : (p.updatedAt || ''); u.dataset.live = (p.status === 'shipped' || p.status === 'paused') ? '' : '1';
+        u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + (sEp ? localStamp(sEp) : shortStamp(p.updatedAt, p.updated));
         u.append(ic(p.status === 'paused' ? 'pause' : 'clock'), el('span', 'lstx', u.dataset.base)); meta.append(u);
       }
-      const sl = sumLine(p); if (sl) meta.append(sl);
+      // Home tiles never show lane counts ("N lanes: x building, y done").
       if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
-      const lanes = laneList(p, false); if (lanes) t.append(lanes);
-      const PF = window.OSRC_HUB_PROOF; if (PF) PF.tileLines(p, { el, ic }).forEach((n) => t.append(n));   // proof stamps (lib/proof.sh)
-      // MC4: the full lane history folds up under "Finished (N)" (collapsed here, open on the project page),
-      // and one line sums up the week (releases, PRs, issues) with a link to the History on the project page.
-      const HX = window.OSRC_HUB_HISTORY, hf = HX && p.history ? HX.finishedFold({ el, ic }, p, false) : null;
-      if (hf) t.append(hf); else { const fin = endedLanes(p); if (fin) t.append(fin); }
-      const hsum = HX && HX.summary(p); if (hsum) { const hb = el('button', 'hx-sum', hsum); hb.type = 'button'; hb.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(hb); }
+      // A project tile shows the project and its decisions only. No lane or session lists,
+      // no lane history; only a stopped lane that needs a person surfaces, as a needs-you line.
+      const PF = window.OSRC_HUB_PROOF; if (PF) PF.tileLines(p, { el, ic }).filter((n) => n.classList.contains('stop')).forEach((n) => t.append(n));
       const topN = ds.filter(isTop).length;
-      const rest = ds.filter((d) => !isTop(d));
+      const rest = ds.filter((d) => !isTop(d)).sort((a, b) => cmpDec({ p, d: a }, { p, d: b }));
       if (topN) t.append(el('p', 'pt-top5', topN + (topN === 1 ? ' decision waiting, shown above' : ' decisions waiting, shown above')));
       if (rest.length) {
         const ul = el('ul', 'pt-decs');
-        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); ul.append(li); });
+        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); const dsi = decStaleInfo(p, d); if (dsi) li.append(el('span', 'dec-stale', dsi.text)); ul.append(li); });
         t.append(ul);
         if (rest.length > 2) { const m = el('button', 'pt-more', 'and ' + (rest.length - 2) + ' more'); m.type = 'button'; m.id = 'ptm-' + p.id; m.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(m); }
       } else if (!topN) { const n = el('p', 'pt-none'); n.append(ic('circle-check'), document.createTextNode('Nothing waiting on you.')); t.append(n); }
@@ -233,7 +331,7 @@
       return t;
     }
 
-    // ---- Finished lanes (MC3): a lane that ended stays listed under its project for a while. -------------
+    // ---- Finished lanes: a lane that ended stays listed under its project for a while. -------------
     function endedLanes(p) {
       const ls = (p.lanes || []).filter((l) => l.ended || ENDED.includes(l.status)); if (!ls.length) return null;
       const names = ls.map((l) => l.short || l.id), shown = names.slice(0, 3).join(', ');
@@ -242,7 +340,7 @@
       return f;
     }
 
-    // ---- At a glance (MC3): what is running, what needs me, what is left on my plans. -----------------
+    // ---- At a glance: what is running, what needs me, what is left on my plans. --------------------
     // The "things need you" tile lists the decisions themselves, each one a link to its card; the tile
     // body opens the most urgent one. Lane housekeeping (READY lanes nobody reviewed, a project with no
     // watcher) is the orchestrator's job, so it shows as one short "Claude's to-do" line per project,
@@ -262,7 +360,7 @@
       return out;
     }
     function needTile(li, need, all, askers, proofStops, running) {
-      const go = ctx.go, decs = all.slice().sort((a, b) => byWeight(a.d, b.d));
+      const go = ctx.go, decs = all.slice().sort(cmpDec);
       li.append(el('span', 'gv', String(need)), el('span', 'gl', need === 1 ? 'thing needs you' : 'things need you'));
       if (!need) li.append(el('span', 'gs', 'Nothing waiting'));
       const ul = el('div', 'gneed');
@@ -279,7 +377,7 @@
       });
       if (proofStops) { ul.append(el('span', 'gs', proofStops + (proofStops === 1 ? ' lane stopped on proof' : ' lanes stopped on proof'))); }
       if (ul.children.length) li.append(ul);
-      const ch = chores(running);
+      const ch = [];   // Claude's chores (no watcher etc.) never show on Home; the stop guard enforces them
       if (ch.length) {
         const cl = el('div', 'gchore'); cl.append(el('span', 'gchh', "Claude's to-do, not yours"));
         ch.forEach(({ p, text }) => { const b = el('button', 'gch'); b.type = 'button'; b.append(el('b', null, p.name), document.createTextNode(': ' + text)); b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); cl.append(b); });
@@ -291,19 +389,18 @@
     function glance(running, all) {
       const waiting = all.length;
       const items = [];
-      const lanesOn = running.reduce((a, p) => a + liveLanes(p).length, 0);
       items.push({ v: String(running.length), l: running.length === 1 ? 'project running' : 'projects running',
-        s: lanesOn ? lanesOn + (lanesOn === 1 ? ' lane working' : ' lanes working') : (running.length ? 'Between lanes' : 'Nothing started') });
+        s: running.length ? '' : 'Nothing started' });
       const askers = running.map((p) => ({ p, n: liveLanes(p).filter((l) => ['approval', 'question'].includes(laneState(l))).length })).filter((x) => x.n);
       const asks = askers.reduce((a, x) => a + x.n, 0);
       const proofStops = window.OSRC_HUB_PROOF ? window.OSRC_HUB_PROOF.needs(running) : 0;
-      const need = waiting + asks + proofStops;
-      items.push({ need, hot: need > 0, askers, proofStops });
+      const need = waiting + proofStops;   // decisions only; a lane asking is its orchestrator's job
+      items.push({ need, hot: need > 0, askers: [], proofStops });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
       const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
-      // MC4 #5: every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
+      // Every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
       const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)
-        .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // PL: checked plans with no percentage ("Free models", "Pay per use") get a line too
+        .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // checked plans with no percentage ("Free models", "Pay per use") get a line too
       if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), plans: lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') });
       const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));
       items.forEach((x) => {
@@ -319,7 +416,7 @@
       return ul;
     }
 
-    // ---- Also running (MC3 #5): other Claude Code sessions working now. Read-only, no actions. --------------
+    // ---- Also running: other Claude Code sessions working now. Read-only, no actions. --------------
     const ALSO_ST = { working: 'Working', waiting: 'Waiting on you' };
     function alsoRunning() {
       const rows = ctx.also || []; if (!rows.length) return null;
@@ -328,7 +425,7 @@
       rows.forEach((r) => {
         const li = el('li'); li.id = 'also-' + r.key;
         const st = ALSO_ST[r.state] || (r.idleMin >= 1 ? 'Idle ' + (r.idleMin >= 60 ? Math.floor(r.idleMin / 60) + ' h ' + (r.idleMin % 60) + ' min' : r.idleMin + ' min') : 'Idle, just now');
-        // "<Project> · <title>": the project in bold, the session's own title after it (MC3 Titles).
+        // "<Project> · <title>": the project in bold, the session's own title after it.
         const nm = el('span', 'an'); const p0 = r.project && r.name.indexOf(r.project + ' · ') === 0 ? r.project : '';
         if (p0) nm.append(el('b', null, p0), document.createTextNode(r.name.slice(p0.length))); else nm.append(el('b', null, r.name));
         li.append(el('span', 'dot ' + (r.state === 'working' ? 'ok' : r.state === 'waiting' ? 'waiting' : '')), nm, el('span', 'am', r.model || ''), el('span', 'as ' + (r.state || ''), st));
@@ -353,7 +450,7 @@
       const sub = !projects.length ? (oldKey ? 'Its key no longer opens the data. Press Reopen below, or run "outsourcerer mc".' : err ? 'Is hub serve running? (' + err + ')' : db ? 'This page fills in by itself the moment a Claude Code session hands work to Outsourcerer.' : 'Open this board on claude.ai while signed in.')
         : all.length ? 'Across ' + waitingOn + (waitingOn === 1 ? ' project.' : ' projects.') : running.length ? 'Everything is moving.' : live.length ? 'No lanes are working.' : 'Everything you started has shipped.';
       ph.append(el('h1', null, head), el('p', 'lede', sub));
-      if (!projects.length && db && !err) {   // MC3: an empty page says how to start, never a blank
+      if (!projects.length && db && !err) {   // an empty page says how to start, never a blank
         const how = el('div', 'empty-how');
         const a = el('p', null, 'To start one, ask Claude Code to outsource a task, for example “outsource the test fixes to Codex”.');
         const b = el('p'); b.append(document.createTextNode('Or run it yourself: '), el('code', null, 'outsourcerer bg edit "fix the failing tests"'));
@@ -361,12 +458,14 @@
       }
       main.append(ph);
       if (db && !err) main.append(glance(running, all));
-      const top = all.filter((x) => isTop(x.d)).sort((a, b) => byWeight(a.d, b.d));
+      const top = all.filter((x) => isTop(x.d)).sort(cmpDec);
       if (top.length) {
         const sec = el('section', 'card toppri'); const h = el('h2'); h.id = 'tp-h'; h.append(ic('hand'), el('span', null, 'These are top-priority decisions for you right now.')); sec.setAttribute('aria-labelledby', 'tp-h');
         const ul = el('ul', 'tplist');
         top.forEach(({ p, d }) => {
-          const li = el('li', 'tprow'); const q = el('div', 'tpq'); q.append(el('span', 'tpn', p.name), el('span', 'tpt', d.short || d.q));
+          const dsi = decStaleInfo(p, d);
+          const li = el('li', 'tprow' + (dsi ? ' stale' : '')); const q = el('div', 'tpq'); q.append(el('span', 'tpn', p.name), el('span', 'tpt', d.short || d.q));
+          if (dsi) q.append(el('span', 'tp-stale', dsi.text));
           // Only the first Decide is filled; the rest are ghost buttons so the eye lands on one call to action.
           const b = el('button', 'go' + (ul.children.length ? ' ghost' : '')); b.type = 'button'; b.id = 'tp-' + p.id + '-' + d.id; b.append(document.createTextNode('Decide'), ic('arrow-right')); b.setAttribute('aria-label', 'Decide: ' + (d.short || d.q));
           b.addEventListener('click', () => go(p.id, d.id));
@@ -376,17 +475,25 @@
         });
         sec.append(h, ul); main.append(sec);
       }
-      const list = live.length ? live : shipped;
+      const active = live.filter((p) => !isQuiet(p));
+      const quiet = live.filter((p) => isQuiet(p));
+      const list = active.length ? active : (!live.length ? shipped : []);
       if (list.length) {
-        const sec = el('section'); sec.append(el('h2', null, live.length ? 'Your projects' : 'Shipped'));
+        const sec = el('section'); sec.append(el('h2', null, active.length ? 'Your projects' : 'Shipped'));
         const grid = el('div', 'ptiles' + (list.length === 1 ? ' one' : '')); list.forEach((p) => grid.append(ptile(p)));
         sec.append(grid); main.append(sec);
       }
-      const also = alsoRunning(); if (also) main.append(also);
+      if (quiet.length) {
+        const det = el('details', 'quiet-fold'); det.id = 'quiet-fold';
+        det.append(el('summary', null, 'Quiet (' + quiet.length + ')'));
+        const qgrid = el('div', 'ptiles' + (quiet.length === 1 ? ' one' : '')); quiet.forEach((p) => qgrid.append(ptile(p)));
+        det.append(qgrid); main.append(det);
+      }
+      // No session lists on Home ("Also running" removed); projects and decisions only.
       if (live.length && shipped.length) main.append(el('p', 'foot', shipped.length + ' shipped, listed under Shipped in the sidebar.'));
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList, localStamp };
+    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList, localStamp, freshText, projFresh, etaAsOf, sessionStamp };
   };
 })();

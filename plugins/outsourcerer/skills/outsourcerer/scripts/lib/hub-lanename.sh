@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# lib/hub-lanename.sh -- Mission Control prints names a person would use, never an id (MC4), and never a
+# lib/hub-lanename.sh -- Mission Control prints names a person would use, never an id, and never a
 # stored display string for a time that moves (renews). Sourced by outsourcerer.sh (lib loader).
 #
-# Real-machine evidence (0.16.2, out/mc-0162-live.png): lane rows read "outsourcerer-video--1285105…"
+# Real-machine evidence (0.16.2): lane rows read "outsourcerer-video--1285105…"
 # (the tmux session name), a project card read "Total Recall Core · total-recall-85" (a /rename slug), and
 # the plans rail read "Renews in 92h 32m" from a limits cache an older build wrote.
 
@@ -31,7 +31,7 @@ _osrc_hub_folder_label() {
   [ -n "$b" ] || return 0
   b="${b%%--*}"                       # outsourcerer-<folder>--<hash>-<sid8> -> outsourcerer-<folder>
   case "$b" in outsourcerer-*) b="${b#outsourcerer-}" ;; osrc-*) b="${b#osrc-}" ;; esac
-  b="${b#wt-}"; b="${b#worktree-}"; b="${b#auto-}"   # wt-auto-SUP / osrc-auto-SUP -> SUP
+  b="${b#wt-}"; b="${b#worktree-}"; b="${b#auto-}"   # wt-auto-demo / osrc-auto-demo -> demo
   jq -rn --arg s "$b" "$_OSRC_HUB_IDLIKE_JQ"'
     $s | gsub("[-_.]+"; " ") | split(" ") | map(select(length > 0 and (idlike | not)))
     | join(" ") | if . == "" then "" else (.[0:1] | ascii_upcase) + .[1:] end' 2>/dev/null
@@ -51,28 +51,42 @@ _osrc_hub_text_name() {
 # cc_session_id -> custom-title > ai-title > agent-name > first prompt), the lane's folder in sentence case,
 # a remote lane's branch; else "<Provider> lane". Never the session name, a hash or a sid.
 _osrc_hub_lane_name() {
-  local id="$1" jd="$OSRC_JOBS/$1" t="" ev cc="" cwd="" prov="" br=""
+  local id="$1" jd="$OSRC_JOBS/$1" t="" ev="" cc="" cwd="" prov="" br="" raw_t=""
   case "$id" in ''|*/*) printf 'Lane'; return 0 ;; esac
+  if type _osrc_hub_lane_name_cache_get >/dev/null 2>&1 && t="$(_osrc_hub_lane_name_cache_get "$id")"; then
+    printf '%s' "$t"; return 0
+  fi
   if [ -f "$jd/meta.json" ]; then
-    t="$(_osrc_hub_text_name "$(jq -r '.title // .task // .brief_title // ""' "$jd/meta.json" 2>/dev/null)")"
-    [ -n "$t" ] || t="$(_osrc_hub_text_name "$(head -1 "$jd/task_ref" 2>/dev/null)")"
-    cwd="$(jq -r '.worktree // .cwd // ""' "$jd/meta.json" 2>/dev/null)"
-    prov="$(jq -r '.provider // .lane // ""' "$jd/meta.json" 2>/dev/null)"
+    IFS=$'\x1f' read -r raw_t cwd prov <<EOF
+$(jq -r '[(.title // .task // .brief_title // ""), (.worktree // .cwd // ""), (.provider // .lane // "")] | map(tostring | gsub("[\n\r\u001f]"; " ")) | join("\u001f")' "$jd/meta.json" 2>/dev/null)
+EOF
+    [ -n "$raw_t" ] && t="$(_osrc_hub_text_name "$raw_t")"
+    [ -n "$t" ] || [ ! -s "$jd/task_ref" ] || t="$(_osrc_hub_text_name "$(head -1 "$jd/task_ref" 2>/dev/null)")"
   fi
   if [ -z "$t" ] && [ -f "$OSRC_HOME/remote/$id.json" ]; then
-    t="$(_osrc_hub_text_name "$(jq -r '.title // .task // ""' "$OSRC_HOME/remote/$id.json" 2>/dev/null)")"
-    [ -n "$cwd" ] || cwd="$(jq -r '.cwd // .worktree // ""' "$OSRC_HOME/remote/$id.json" 2>/dev/null)"
-    br="$(jq -r '.branch // ""' "$OSRC_HOME/remote/$id.json" 2>/dev/null)"
-    [ -n "$prov" ] || prov="$(jq -r '.vehicle // .provider // ""' "$OSRC_HOME/remote/$id.json" 2>/dev/null)"
+    local rcwd="" rprov=""
+    IFS=$'\x1f' read -r raw_t rcwd br rprov <<EOF
+$(jq -r '[(.title // .task // ""), (.cwd // .worktree // ""), (.branch // ""), (.vehicle // .provider // "")] | map(tostring | gsub("[\n\r\u001f]"; " ")) | join("\u001f")' "$OSRC_HOME/remote/$id.json" 2>/dev/null)
+EOF
+    [ -n "$raw_t" ] && t="$(_osrc_hub_text_name "$raw_t")"
+    [ -n "$cwd" ] || cwd="$rcwd"
+    [ -n "$prov" ] || prov="$rprov"
   fi
-  if [ -z "$t" ] && [ -f "${OSRC_SESSION_REGISTRY:-}" ]; then
-    ev="$(jq -c --arg id "$id" 'select(.session_id == $id)' "$OSRC_SESSION_REGISTRY" 2>/dev/null | tail -1)"
+  if [ -z "$t" ]; then
+    if type _session_registry_last_event >/dev/null 2>&1; then
+      ev="$(_session_registry_last_event "$id" 2>/dev/null)"
+    elif [ -f "${OSRC_SESSION_REGISTRY:-}" ]; then
+      ev="$(jq -c --arg id "$id" 'select(.session_id == $id)' "$OSRC_SESSION_REGISTRY" 2>/dev/null | tail -1)"
+    fi
     if [ -n "$ev" ]; then
-      cc="$(jq -r '.cc_session_id // ""' <<<"$ev" 2>/dev/null)"
-      [ -n "$cwd" ] || cwd="$(jq -r '.cwd // ""' <<<"$ev" 2>/dev/null)"
-      [ -n "$prov" ] || prov="$(jq -r '.provider // ""' <<<"$ev" 2>/dev/null)"
+      local ecwd="" eprov=""
+      IFS=$'\x1f' read -r cc ecwd eprov <<EOF
+$(jq -r '[(.cc_session_id // ""), (.cwd // ""), (.provider // "")] | map(tostring | gsub("[\n\r\u001f]"; " ")) | join("\u001f")' <<<"$ev" 2>/dev/null)
+EOF
+      [ -n "$cwd" ] || cwd="$ecwd"
+      [ -n "$prov" ] || prov="$eprov"
       case "$cc" in ''|null|*/*) ;; *) type _osrc_hub_session_detail >/dev/null 2>&1 && t="$(_osrc_hub_session_detail "$cc" 2>/dev/null)" ;; esac
-      _osrc_hub_idlike "$t" && t=""
+      [ -z "$t" ] || { _osrc_hub_idlike "$t" && t=""; }
     fi
   fi
   [ -n "$t" ] || [ -d "$OSRC_JOBS/$id" ] || t="$(_osrc_hub_folder_label "$id")"   # osrc-auto-P56W -> P56W, even in a shared worktree
@@ -85,6 +99,7 @@ _osrc_hub_lane_name() {
       *) t="Lane" ;;
     esac
   fi
+  type _osrc_hub_lane_name_cache_put >/dev/null 2>&1 && _osrc_hub_lane_name_cache_put "$id" "$t"
   printf '%s' "$t"
 }
 
@@ -94,10 +109,12 @@ _osrc_hub_lane_for() {
   local lj short
   lj="$(_osrc_hub_lane_for_raw "$@")" || return 1
   [ -n "$lj" ] || return 1
+  type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lf.$1.raw"
   short="$(jq -r '.short // ""' <<<"$lj" 2>/dev/null)"
   if [ -z "$short" ] || [ "$short" = "$1" ] || _osrc_hub_idlike "$short"; then
     lj="$(jq -c --arg s "$(_osrc_hub_lane_name "$1")" '.short = $s' <<<"$lj" 2>/dev/null)" || return 1
   fi
+  type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lf.$1.name"
   printf '%s' "$lj"
 }
 
@@ -106,6 +123,7 @@ _osrc_hub_lane_for() {
 # (it was rendered by whichever build wrote the cache, at whatever time); a row with no epoch, or one already
 # past, has no renews at all. Window details (`windows.<w>`) get the same treatment.
 _osrc_hub_limits_fresh() {
+  if type _osrc_hub_limits_fresh_fast >/dev/null 2>&1; then _osrc_hub_limits_fresh_fast; return; fi
   local in now ep map='{}' t
   in="$(cat)"
   jq -e 'arrays' >/dev/null 2>&1 <<<"$in" || { printf '[]'; return 0; }

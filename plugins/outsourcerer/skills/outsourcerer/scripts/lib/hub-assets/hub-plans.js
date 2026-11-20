@@ -1,4 +1,4 @@
-/* Mission Control plans card helpers (PL, 0.16.3). Served from /assets/hub-plans.js; hub.html calls
+/* Mission Control plans card helpers (0.16.3). Served from /assets/hub-plans.js; hub.html calls
    window.OSRC_HUB_PLANS.windows(row, el, ic) and falls back to its single "Renews" line when this file
    is missing. A plan whose source publishes several windows (Claude and Codex 5-hour + weekly,
    Antigravity's model groups) gets one line per window, each with its own renew time. */
@@ -37,6 +37,7 @@
     async function check() {
       if (button.disabled) return;
       button.disabled = true;
+      button.dataset.state = 'checking';   // renderLimits reads this: the stamp yields to the one 'Checking…' state
       button.textContent = 'Checking…';
       try {
         await refresh();
@@ -45,6 +46,7 @@
         button.textContent = 'Retry check';
       } finally {
         button.disabled = false;
+        button.dataset.state = 'idle';
       }
     }
     button.hidden = false;

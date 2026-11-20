@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_hub_mc4.sh -- Mission Control on REAL-shaped data (MC4, 0.16.3). Seeds the shapes Alex's machine had on
-# 0.16.2 (out/mc-0162-live.png): a limits cache written by 0.16.0 ("renews":"in 92h 32m"), Outsourcerer tmux
+# test_hub_mc4.sh -- Mission Control on REAL-shaped data. Seeds the shapes a live 0.16.2 install had:
+# a limits cache written by 0.16.0 ("renews":"in 92h 32m"), Outsourcerer tmux
 # lane names (outsourcerer-<folder>--<hash>-<sid8>), a job lane with no task, and a /rename slug title
 # ("total-recall-85"). Asserts the export renders renew dates and human names, then a GUARD scans every
 # display field of the export for id-like tokens. No real tmux: a PATH shim answers has-session for the
@@ -68,7 +68,7 @@ tr_dir() { local d="$OSRC_CLAUDE_PROJECTS_DIR/$(printf '%s' "$1" | tr -c 'A-Za-z
 { printf '{"type":"user","message":{"role":"user","content":"Run the attention essay lanes"}}\n'
   printf '{"type":"ai-title","aiTitle":"Attention essay with Tom'"'"'s comments","sessionId":"%s"}\n' "$SA"; } > "$(tr_dir "$T/work/Prompts")/$SA.jsonl"
 { printf '{"type":"user","message":{"role":"user","content":"continue the TR release"}}\n'
-  printf '{"type":"ai-title","aiTitle":"Total Recall 1.9.85 orchestrator handover","sessionId":"%s"}\n' "$SC"
+  printf '{"type":"ai-title","aiTitle":"Total Recall 1.9.85 release handover","sessionId":"%s"}\n' "$SC"
   printf '{"type":"agent-name","agentName":"total-recall-85","sessionId":"%s"}\n' "$SC"
   printf '{"type":"custom-title","customTitle":"total-recall-85","sessionId":"%s"}\n' "$SC"; } > "$(tr_dir "$W")/$SC.jsonl"
 { printf '{"type":"user","message":{"role":"user","content":"Read the brief"}}\n'
@@ -127,7 +127,7 @@ grep -qx 'Video' <<<"$lanes" && ok "devin tmux lane reads 'Video' (folder), not 
 grep -qx 'F-TEST brief in total-recall' <<<"$lanes" && ok "Claude lane reads its own transcript title" || bad "claude lane name: $lanes"
 grep -qx 'V185 F4a' <<<"$lanes" && ok "job lane with no task reads its folder 'V185 F4a', not 'or yolo <hex>'" || bad "job lane name: $lanes"
 names="$(jq -r '.projects[].name' <<<"$X")"
-grep -q 'Total Recall 1.9.85 orchestrator handover' <<<"$names" && ok "slug /rename title skipped for the ai-title" || bad "project names: $names"
+grep -q 'Total Recall 1.9.85 release handover' <<<"$names" && ok "slug /rename title skipped for the ai-title" || bad "project names: $names"
 grep -q 'total-recall-85' <<<"$names" && bad "slug title still on a card" || ok "no 'total-recall-85' on a card"
 D="$(OSRC_SOURCED=1 bash -c '. "$1"; _osrc_hub_folder_label "$2"; _osrc_hub_folder_label "$3"; printf "[%s]" "$(_osrc_hub_folder_label "$4")"' _ "$ENG" "/x/v185-redo" "$LA" "/x/9f8e7d6c5b4a")"
 [ "$D" = "$(printf 'V185 redo\nVideo\n[]')" ] && ok "folder labels: 'V185 redo', 'Video', hex folder -> empty" || bad "folder labels: $(printf '%s' "$D" | tr '\n' '|')"
@@ -166,8 +166,8 @@ HO="$(OSRC_HUB_GH_TTL=0 bash "$ENG" hub export 2>/dev/null | jq -c --arg s "$SC"
 jq -e '.github == "unreachable" and ([.items[] | select(.kind == "release" and .local == true and .tag == "v1.9.84")] | length == 1)' >/dev/null <<<"$HO" && ok "offline: GitHub not reachable flag + local git tags" || bad "offline: $(jq -c '{github, r:[.items[]|select(.kind=="release")]}' <<<"$HO")"
 rm -f "$T/gh-offline"
 HJS="$S/lib/hub-assets/hub-history.js"
-grep -q "Finished (' + done.length" "$HJS" && grep -q 'finishedFold({ el, ic }, p, false)' "$S/lib/hub-assets/hub-home.js" && grep -q 'OSRC_HUB_HISTORY.section({ el, ic }, p)' "$S/lib/hub.html" \
-  && ok "page: Finished (N) fold open on the project page, collapsed on Home; History section wired" || bad "history page wiring missing"
+grep -q "Finished (' + done.length" "$HJS" && ! grep -q 'finishedFold({ el, ic }, p, false)' "$S/lib/hub-assets/hub-home.js" && ! grep -q 'OSRC_HUB_HISTORY.section({ el, ic }, p)' "$S/lib/hub.html" \
+  && ok "page: Home tiles and project page stay board-only (no lane folds or History section)" || bad "history/lane fold still wired on page"
 grep -q 'GitHub not reachable' "$HJS" && ok "page says 'GitHub not reachable' in one neutral line" || bad "offline line missing"
 grep -q "plans: lims" "$S/lib/hub-assets/hub-home.js" && ok "plans tile lists every checked plan (#5)" || bad "plans tile still shows one plan"
 
@@ -176,7 +176,7 @@ CSS="$S/lib/hub-assets/hub-mc3.css"; HJ="$S/lib/hub-assets/hub-home.js"; PG="$S/
 grep -q '\.lst\.stale, \.stamp-top\.stale { color: var(--ink); background: transparent' "$CSS" && ok "stale stamp is a neutral outline pill" || bad "stale stamp still red"
 grep -q '\.rail h2:has(#lstamp) { flex-wrap: nowrap' "$CSS" && grep -q '#lstamp \.rfr { flex: none' "$CSS" && grep -q '#lstamp \.lstt {.*text-overflow: ellipsis' "$CSS" \
   && ok "plans header: no wrap, stamp ellipsizes, refresh never shrinks" || bad "plans header CSS missing"
-grep -q "OSRC_HUB_CLEAN.limit(l)" "$PG" && grep -q "OSRC_HUB_CLEAN.project(p)" "$PG" && ok "page passes limits and projects through the MC4 cleaners" || bad "page does not clean intake"
+grep -q "OSRC_HUB_CLEAN.limit(l)" "$PG" && grep -q "OSRC_HUB_CLEAN.project(p)" "$PG" && ok "page passes limits and projects through the hub cleaners" || bad "page does not clean intake"
 grep -q "'Session: ' + l.session" "$PG" && bad "lane hover still prints the session id" || ok "lane hover no longer prints the session id"
 if [ -n "$NODE" ]; then
   NJ="$("$NODE" -e '

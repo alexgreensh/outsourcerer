@@ -4,15 +4,18 @@
 Deny by default. There is exactly ONE gate, is_safe(): it returns approve only when NO danger rule
 matched AND EVERY segment of the command is in the safe set. Anything not understood holds.
 
-Round 2 (review L3-VERDICT): the classifier no longer approves a command NAME with arbitrary
-flags, and no longer treats a token as a literal path when the shell would expand it.
+The classifier does not approve a command NAME with arbitrary
+flags, and does not treat a token as a literal path when the shell would expand it.
 - Anything the shell expands before running is held up front: any `$`, backticks, braces, `~user`
   / `~+` / `~-`, `=~`, a truncated `…`, a trailing operator, more than one line, any mention of
   OSRC_HOME.
 - Every approved command has a flag allowlist. An unknown flag (including attached forms such as
   `-XPUT`, `-osrc/x`, `--output=...`) holds.
-- Env prefixes hold (a tiny harmless list aside), with a named rule for OSRC_HOME, HOME, PATH,
-  TMUX*, GIT_*, BASH_ENV and *_OPTIONS. `env -u` is parsed; unsetting OSRC_HOME or HOME holds.
+- Env prefixes on a command hold unless the name is inert (TZ, LANG, LC_*, NO_COLOR, COLUMNS,
+  LINES, TERM, NO_COLOR, FORCE_COLOR, PYTHONDONTWRITEBYTECODE/-UNBUFFERED) -- names like PAGER,
+  EDITOR, VISUAL, BROWSER or LESSOPEN hand the child a program to run. Assignment-only segments
+  approve when the name is not a dangerous one. `env -u` is parsed; unsetting OSRC_HOME or HOME
+  holds.
 - Writes never touch `.git`. Paths compare case-folded on macOS.
 
 Usage:
@@ -523,8 +526,13 @@ def pkg_rule(name, rest, cwd, roots):
     raise Hold("package manager: " + name)
 
 
-def env_word_rule(word: str) -> None:
+def env_word_rule(word: str, standalone: bool) -> None:
+    # standalone=True: the whole segment is assignments ('SCRATCH=x && ...'); a shell variable is
+    # set and no program runs under it. standalone=False: the word prefixes a command, so the
+    # name must also be inert -- a name like PAGER/EDITOR is itself a program path to the child.
     nm = word.split("=", 1)[0]
+    if word in ENV_HARMLESS:
+        return
     if nm in ENV_NAMED:
         raise Hold(ENV_NAMED[nm])
     if nm.startswith("TMUX"):
@@ -533,8 +541,19 @@ def env_word_rule(word: str) -> None:
         raise Hold("sets %s (git can run programs or use another repo)" % nm)
     if nm.endswith(("_OPTIONS", "_OPTS", "_FLAGS")):
         raise Hold("sets %s (injects options into the program)" % nm)
-    if word not in ENV_HARMLESS:
-        raise Hold("environment prefix not on the allowlist: " + nm)
+    if nm in ENV_INJECT or nm.startswith(ENV_INJECT_PREFIX):
+        raise Hold("sets %s (injects code or a load path into the run)" % nm)
+    if not standalone:
+        if not (nm in ENV_INERT or nm.startswith(ENV_INERT_PREFIX)):
+            raise Hold("environment prefix not on the allowlist: " + nm)
+    elif not (nm in ENV_INERT or nm.startswith(ENV_INERT_PREFIX) or re.search(r"[a-z]", nm)):
+        # A standalone 'PAGER=evil; git log' still runs evil when PAGER is already exported --
+        # the assignment updates the exported value and the classifier cannot see the export
+        # table. Exported names are conventionally ALL-CAPS, so an all-uppercase name outside
+        # the inert list holds; a name with a lowercase letter is a private shell variable.
+        raise Hold("standalone assignment to a possibly-exported name: " + nm)
+    # The value itself is already proven literal: $, backticks, braces, ~ and second lines were
+    # rejected by pre_checks/check_tilde on the whole command.
 
 
 def env_rule(args: list[str]) -> list[str]:
@@ -551,7 +570,7 @@ def env_rule(args: list[str]) -> list[str]:
         if a.startswith("-"):
             raise Hold("env flag not on the allowlist: " + a)
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", a):
-            env_word_rule(a); i += 1; continue
+            env_word_rule(a, standalone=False); i += 1; continue
         break
     if i >= len(args):
         raise Hold("env dump (secrets)")
@@ -577,14 +596,39 @@ def classify_segment(tokens, prev_op, cwd, roots):
     for t in tokens:
         check_tilde(t)
     args = take_redirects(tokens, cwd, roots)
+    envs = []
     while args and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", args[0]):
-        env_word_rule(args[0])
-        args = args[1:]
+        envs.append(args[0]); args = args[1:]
     if args and args[0] == "env":
         args = env_rule(args[1:])
     if not args:
-        return "redirect-only", cwd
+        # Assignment-only segment: a shell variable is set, no program runs under it. The
+        # named/injection holds still apply -- a persisted PATH=/evil could aim later commands
+        # at other binaries if the delegate's shell is shared between prompts.
+        for w in envs:
+            env_word_rule(w, standalone=True)
+        return "env-assignment", cwd
+    for w in envs:
+        env_word_rule(w, standalone=False)
     name, rest = args[0], args[1:]
+    if name == "nice":
+        # nice -n N <cmd>: peel the adjustment flags, then judge the inner command on its own.
+        i = 0
+        while i < len(rest):
+            a = rest[i]
+            if a == "-n" and i + 1 < len(rest) and re.fullmatch(r"-?\d+", rest[i + 1]):
+                i += 2; continue
+            if re.fullmatch(r"-\d+", a) or re.fullmatch(r"--adjustment=-?\d+", a):
+                i += 1; continue
+            if a == "--adjustment" and i + 1 < len(rest) and re.fullmatch(r"-?\d+", rest[i + 1]):
+                i += 2; continue
+            break
+        if i >= len(rest):
+            raise Hold("bare nice")
+        rule, cur = classify_segment(rest[i:], prev_op, cwd, roots)
+        if rule.startswith("test/build"):
+            raise Hold("test and build runs wait for a person in this version")
+        return "nice:" + rule, cur
     if "/" in name:
         raise Hold("runs a program by path: " + name)
     if prev_op in ("|", "|&") and name in INTERPRETERS:
@@ -780,7 +824,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         rules, cur = [], cwd
         segs = split_segments(cmd)
         # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
-        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body: review round 4, B.)
+        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
         if [t for t, _ in segs] == [["compgen", "-e"]]:
             return True, "read-only:env names (compgen -e)"
         for seg, prev in segs:

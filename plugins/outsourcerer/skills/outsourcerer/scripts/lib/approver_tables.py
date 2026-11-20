@@ -1,5 +1,5 @@
 """Data tables for approver_classify.py: protected paths, secret names, env rules, flag specs.
-Split out in L3 round 3 so the classifier logic file stays well under the 1,000-line limit. Rules
+Split out so the classifier logic file stays well under the 1,000-line limit. Rules
 (the code that reads these) stay in approver_classify.py."""
 from __future__ import annotations
 
@@ -30,6 +30,18 @@ ENV_NAMED = {  # env names that get their own rule (every env prefix holds; thes
 ENV_HARMLESS = {"CI=1", "CI=true", "NO_COLOR=1", "FORCE_COLOR=0", "FORCE_COLOR=1", "TERM=dumb",
                 "PYTHONDONTWRITEBYTECODE=1", "PYTHONUNBUFFERED=1"}
 ENV_UNSET_OK = {"TMUX", "TMUX_PANE", "CLAUDECODE", "NO_COLOR"}
+# A literal value is still dangerous in these names: they feed code or a load path into the run.
+ENV_INJECT = {"IFS", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE", "PROMPT_COMMAND",
+              "PYTHONPATH", "PYTHONSTARTUP", "RUBYLIB", "RUBYOPT", "PERL5LIB", "PERLLIB",
+              "PERL5OPT", "PERL5DB", "NODE_PATH", "CLASSPATH", "SSH_ASKPASS", "SUDO_ASKPASS",
+              "MAKEFILES", "MAKEOVERRIDES"}
+ENV_INJECT_PREFIX = ("LD_", "DYLD_", "SUDO_", "GEM_", "NPM_CONFIG_")
+# An env PREFIX on a command (NAME=x cmd ...) approves only for these inert names: none of them
+# can name a program, a file or a load path the child would run. Everything else holds -- PAGER,
+# EDITOR, VISUAL, BROWSER, LESSOPEN, SHELL, TERMINFO, ... -- a denylist would always miss one.
+ENV_INERT = {"TZ", "LANG", "COLUMNS", "LINES", "NO_COLOR", "FORCE_COLOR", "TERM",
+             "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED"}
+ENV_INERT_PREFIX = ("LC_",)
 
 OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", "(", ")"}
 REDIR_OPS = {">", ">>", "<", ">&", "<<", "<<<", ">|", "&>", "&>>", "<>", "<&"}

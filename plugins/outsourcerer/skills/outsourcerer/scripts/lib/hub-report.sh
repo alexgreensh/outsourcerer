@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/hub-report.sh -- Mission Control that is never empty (MC3). Sourced by outsourcerer.sh; defines
+# lib/hub-report.sh -- Mission Control that is never empty. Sourced by outsourcerer.sh; defines
 # functions only. Bash 3.2 and Git Bash safe: no python, mkfifo, flock or /dev/fd on any path here.
 #
 # Three things live here:
@@ -9,7 +9,7 @@
 #     between lanes stays on the page. seen/<sid>/<target> remembers every lane it owned; a lane that left
 #     owners/<sid>/ (finished, reaped by stop-guard or supervise) stays listed as finished for a while.
 #     A session that never touched Outsourcerer has no seen/ dir and never appears.
-#  2. `hub report`: an orchestrator's own words (status, %, ETA, next step, name, questions for Alex),
+#  2. `hub report`: an orchestrator's own words (status, %, ETA, next step, name, questions for the user),
 #     merged atomically into hub/projects/<sid>.json and hub/decisions/<sid>.json.
 #  3. Renewal text for the limits table and the page: "in 4 days · Thu 19 Nov", "today · 18:40",
 #     "tomorrow · 09:10". Local time, 24h clock, never a count of hours.
@@ -85,15 +85,22 @@ osrc_hub_beat_cmd() {
 # _osrc_hub_ended_ids <sid> -> lanes this session owned that are no longer in owners/<sid>/, newest first,
 # ended within OSRC_HUB_ENDED_HOURS (default 12). One id per line.
 _osrc_hub_ended_ids() {
-  local d f id h="${OSRC_HUB_ENDED_HOURS:-12}"
+  local d f id h="${OSRC_HUB_ENDED_HOURS:-12}" cutoff now
   case "$h" in ''|*[!0-9]*) h=12 ;; esac
   d="$(_osrc_hub_seen "$1")"; [ -d "$d" ] && [ ! -L "$d" ] || return 0
-  for f in $(ls -1t "$d" 2>/dev/null); do
-    case "$f" in .*|watch.*) continue ;; esac
-    [ -e "$OSRC_HOME/owners/$1/$f" ] && continue
-    [ -n "$(find "$d/$f" -mmin "-$((h * 60))" 2>/dev/null)" ] || continue
-    printf '%s\n' "$f"
+  now="$(date +%s)"; cutoff=$(( now - h * 3600 ))
+  local -a files=()
+  for f in "$d"/*; do
+    [ -f "$f" ] || continue
+    id="${f##*/}"
+    case "$id" in .*|watch.*) continue ;; esac
+    [ -e "$OSRC_HOME/owners/$1/$id" ] && continue
+    files+=("$f")
   done
+  [ "${#files[@]}" -gt 0 ] || return 0
+  { stat -c '%Y %n' "${files[@]}" 2>/dev/null || stat -f '%m %N' "${files[@]}" 2>/dev/null; } \
+    | awk -v cut="$cutoff" '$1 + 0 >= cut { t=$1; sub(/^[^ ]+ /, ""); sub(/^.*\//, ""); print t "\t" $0 }' \
+    | sort -rn | cut -f2
 }
 
 # _osrc_hub_ended_lane <id> <rmap> -> lane JSON for a lane that left the registry. Uses the real record
@@ -145,9 +152,9 @@ _osrc_hub_report_usage() {
   cat <<'EOF'
 usage: outsourcerer hub report [--status building|review|waiting|shipped] [--pct N] [--eta "<text>"]
                                [--next "<one line>"] [--name "<project name>"]
-                               [--ask "<question for Alex>" --why "<background>" --rec "<your pick and why>"
+                               [--ask "<question for the user>" --why "<background>" --rec "<your pick and why>"
                                 [--option "<choice>"]... [--when "<needed by>"] [--weight Critical|High|Medium|Low]]
-                               [--done-ask <id>]
+                               [--done-ask <id>] [--board <board.json>]
 Run it from the orchestrator's own Claude Code session. Each flag updates one field of this
 session's Mission Control card; fields you leave out keep their last value.
 A question must stand on its own for someone who has not followed the work: --why says what this
@@ -157,17 +164,17 @@ EOF
 }
 
 cmd_hub_report() {
-  local st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" any=0 v why="" rec="" when="" opts='[]' nopt=0
+  local st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" board="" any=0 v why="" rec="" when="" opts='[]' nopt=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h|--help) _osrc_hub_report_usage; return 0 ;;
-      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask|--why|--rec|--when|--option)
+      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask|--why|--rec|--when|--option|--board)
         [ "$#" -ge 2 ] || die "hub report: $1 needs a value"
         v="$2"
         case "$1" in
           --status) st="$v" ;; --pct) pct="$v" ;; --eta) eta="$v" ;; --next) nxt="$v" ;;
           --name) name="$v" ;; --ask) ask="$v" ;; --weight) weight="$v" ;; --done-ask) done_ask="$v" ;;
-          --why) why="$v" ;; --rec) rec="$v" ;; --when) when="$v" ;;
+          --why) why="$v" ;; --rec) rec="$v" ;; --when) when="$v" ;; --board) [ -n "$v" ] || die "hub report: --board takes a JSON file"; board="$v" ;;
           --option) v="$(_osrc_hub_text 80 "$v")"; [ -n "$v" ] || die "hub report: --option is empty"
                     nopt=$((nopt + 1)); [ "$nopt" -le 5 ] || die "hub report: at most 5 --option"
                     opts="$(jq -c --arg o "$v" '. + [$o]' <<<"$opts")" ;;
@@ -188,7 +195,7 @@ cmd_hub_report() {
   [ -z "$eta" ] || { eta="$(_osrc_hub_text 40 "$eta")"; [ -n "$eta" ] || die "hub report: --eta is empty"; }
   [ -z "$nxt" ] || { nxt="$(_osrc_hub_text 160 "$nxt")"; [ -n "$nxt" ] || die "hub report: --next is empty"; }
   [ -z "$ask" ] || { ask="$(_osrc_hub_text 240 "$ask")"; [ -n "$ask" ] || die "hub report: --ask is empty"; }
-  # A bare one-line question reads as jargon to anyone outside the session (MC 0.17.1): an ask
+  # A bare one-line question reads as jargon to anyone outside the session: an ask
   # carries its background and either a recommendation or real choices.
   if [ -n "$ask" ]; then
     why="$(_osrc_hub_text 600 "$why")"; rec="$(_osrc_hub_text 400 "$rec")"; when="$(_osrc_hub_text 40 "$when")"
@@ -204,6 +211,11 @@ cmd_hub_report() {
     fi
   fi
   case "$done_ask" in '') ;; *[!A-Za-z0-9._-]*|.*) die "hub report: --done-ask takes a question id like D2" ;; esac
+  if [ -n "$ask" ]; then   # a question with no background or no buttons is not a question the user can answer
+    [ "${#why}" -ge 40 ] || die "hub report: --ask needs --why: 1-2 plain sentences (40+ chars) on what this is and what changes with the answer, for someone who has not followed the work"
+    [ -n "$rec" ] || die "hub report: --ask needs --rec: your pick and why"
+    [ "$(jq 'length' <<<"$opts")" -ge 2 ] || die "hub report: --ask needs two or more --option choices the user can click"
+  fi
   local hub="$OSRC_HOME/hub"
   for v in "$hub" "$hub/projects" "$hub/decisions"; do
     [ -L "$v" ] && die "hub report: refusing a symlinked hub folder"
@@ -212,6 +224,13 @@ cmd_hub_report() {
   chmod 700 "$hub" 2>/dev/null
   local now; now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   local said=""
+  if [ -n "$board" ]; then   # the board JSON drives the project page (lib/hub_board.sh)
+    [ -f "$board" ] && [ ! -L "$board" ] || die "hub report: --board takes a JSON file"
+    jq -e '(.tasks | type == "array" and length > 0) and all(.tasks[]; (.short | type == "string") and (.short | test(" ")))' "$board" >/dev/null 2>&1 \
+      || die "hub report: --board needs .tasks[] each with a human .short name (words, not a code name)"
+    _osrc_hub_write_json "$hub/projects/$sid.json" '(if type == "object" then . else {} end) + {board:$b[0], reportedAt:$now}' --slurpfile b "$board" --arg now "$now" || return 1
+    said="board"
+  fi
   if [ -n "$st$pct$eta$nxt$name" ]; then
     _osrc_hub_write_json "$hub/projects/$sid.json" '
       (if type == "object" then . else {} end)
@@ -276,7 +295,7 @@ _osrc_local_day() {
   printf '%s' $(( ($1 + off) / 86400 ))
 }
 
-# _osrc_hub_stamp [epoch] -> "23:00" today, "yesterday 23:00", else "Mon 16 Nov, 09:10" (local, 24h; MC3:
+# _osrc_hub_stamp [epoch] -> "23:00" today, "yesterday 23:00", else "Mon 16 Nov, 09:10" (local, 24h:
 # one clock across the page and the export, the viewer's own, never a UTC label).
 _osrc_hub_stamp() {
   local t="${1:-}" now d; now="$(date +%s)"

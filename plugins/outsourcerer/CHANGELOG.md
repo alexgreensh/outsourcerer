@@ -2,6 +2,25 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## 0.17.5
+
+### Changed
+
+- **Project pages look like the build board.** Done so far, release time and what waits on you up top, then the decisions, the ship steps and the work grouped by theme, all in plain words. Home and the sidebar show projects and decisions only, never lane or session lists.
+- **Stale is labelled stale.** A project whose session has not reported for 30 minutes says "Last update from its session: N h ago" and hides its old next step. A decision not re-confirmed for 2 hours says so and drops below fresh ones. Quiet projects fold away.
+- **Orchestrators keep their card current.** The stop guard asks a session to refresh its Mission Control card when it is older than 30 minutes or holds a stale decision. Questions need background, a recommendation and at least two choices.
+- **Model picker on live data.** `advise` scores models on CursorBench, Terminal-Bench and OpenRouter, compares every effort level, picks the cheapest that clears the bar on real cost per task, and parks lanes at their limit with the time they come back. Answers come from a warm cache in about a second.
+- **Session count.** Each project shows how many sessions are working now and how many it has run in total.
+
+### Fixed
+
+- **Mission Control is fast.** Edits show up in a few seconds, and a server left running by an older install is restarted automatically.
+- **No blank page after an upgrade.** The page's script hash is computed from the file actually served.
+- **Plan labels are right.** Devin and Factory Droid read as subscriptions; Antigravity's headline is the main Gemini pool, and its signed-in plan is never treated as paid. Free Devin models no longer ask for spend approval.
+- **Supervise reads quota screens.** An Antigravity "quota reached" or retry timer is reported as a limit with its reset time, not as a stall.
+- **Safer auto-approvals.** The safe policy reads Devin's new approval dialog and approves read-only commands, while environment settings that could run another program still wait for a person.
+- **Session start is steadier**, and the Antigravity input hint is no longer mistaken for unsent text.
+
 ## 0.17.3
 
 ### Fixed

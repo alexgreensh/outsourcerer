@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/hub-also.sh -- Mission Control "Also running" (MC3 item 5): the Claude Code sessions that are NOT
+# lib/hub-also.sh -- Mission Control "Also running": the Claude Code sessions that are NOT
 # Outsourcerer orchestrators or lanes but are working right now, or wrote their transcript within
 # OSRC_HUB_ACTIVE_MIN (30) minutes. Read-only: it reuses the fleet's peer observation
 # (_fleet_cc_peer_observations, which only reads ~/.claude/sessions + transcripts) and never attaches to,
@@ -48,7 +48,7 @@ _osrc_hub_also_rows() {
     det="$(_osrc_hub_session_detail "$sid" 2>/dev/null)"
     tf="$(_fleet_transcript_path "$sid" "$cwd" 2>/dev/null)"
     model="$(_osrc_hub_model_label "$(_osrc_hub_transcript_model "$tf")")"
-    # "<Project> · <title>" (MC3 Titles); the parts ride along so the page can set the project in bold.
+    # "<Project> · <title>"; the parts ride along so the page can set the project in bold.
     name="$(_osrc_hub_join_title "$proj" "$det")"; [ -n "$name" ] || name="Claude Code session"
     key="$(printf '%s' "$sid" | cksum | awk '{print $1}')"
     rows="$(jq -cn --argjson a "$rows" --arg key "$key" --arg name "$name" --arg proj "$proj" --arg doing "$det" --arg model "$model" \
@@ -67,17 +67,36 @@ EOF
 
 # _osrc_hub_also -> the rows, cached for OSRC_HUB_ALSO_TTL (30) seconds under `hub serve` (OSRC_HUB_FAST=1)
 # so a page poll never re-reads every peer. Plain `hub export` always computes.
-_osrc_hub_also() {
-  local f="$OSRC_HOME/hub/also-cache.json" ttl="${OSRC_HUB_ALSO_TTL:-30}" out
-  case "$ttl" in ''|*[!0-9]*) ttl=30 ;; esac
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -f "$f" ] && [ ! -L "$f" ] && type _osrc_hub_mt >/dev/null 2>&1 \
-     && [ $(( $(date +%s) - $(_osrc_hub_mt "$f") )) -lt "$ttl" ] && jq -e 'arrays' "$f" >/dev/null 2>&1; then
-    cat "$f"; return 0
-  fi
+_osrc_hub_also_write() {
+  local f="$1" out
   out="$(_osrc_hub_also_rows 2>/dev/null)"
   jq -e 'arrays' >/dev/null 2>&1 <<<"$out" || out='[]'
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ ! -L "$f" ] && mkdir -p "$OSRC_HOME/hub" 2>/dev/null; then
+  if [ ! -L "$f" ] && mkdir -p "$OSRC_HOME/hub" 2>/dev/null; then
     printf '%s\n' "$out" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null; rm -f "$f.$$" 2>/dev/null
   fi
+  printf '%s' "$out"
+}
+_osrc_hub_also() {
+  local f="$OSRC_HOME/hub/also-cache.json" ttl="${OSRC_HUB_ALSO_TTL:-30}" age lk
+  case "$ttl" in ''|*[!0-9]*) ttl=30 ;; esac
+  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -f "$f" ] && [ ! -L "$f" ] && jq -e 'arrays' "$f" >/dev/null 2>&1; then
+    if type _osrc_hub_mt >/dev/null 2>&1; then
+      age=$(( $(date +%s) - $(_osrc_hub_mt "$f") ))
+      if [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then
+        lk="$OSRC_HOME/hub/also-refresh.lock"
+        [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
+        if mkdir "$lk" 2>/dev/null; then
+          ( _osrc_hub_also_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+        fi
+      fi
+    fi
+    cat "$f"; return 0
+  fi
+  if [ "${OSRC_HUB_FAST:-0}" = 1 ]; then
+    _osrc_hub_also_write "$f"
+    return 0
+  fi
+  local out; out="$(_osrc_hub_also_rows 2>/dev/null)"
+  jq -e 'arrays' >/dev/null 2>&1 <<<"$out" || out='[]'
   printf '%s' "$out"
 }

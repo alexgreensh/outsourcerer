@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # sealed-run-requires: network
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_hub_home.sh -- MC-3 Mission Control Home port:
+# test_hub_home.sh -- Mission Control Home port:
 #   * POST /api/projects/<id>/status (Mark done / Move back): token, origin, strict id, known project only
 #   * hub export merges the user's override LAST (shippedBy "user" survives any card write)
 #   * Move back clears only a card "shipped" older than the click
@@ -19,7 +19,7 @@ DEC="$LIB/hub-assets/hub-decide.js"
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 
-TMP="$(mktemp -d "${TMPDIR%/}/hub-home-test.XXXXXX")"   # never beside the suites (MC-5 #8); trap removes it
+TMP="$(mktemp -d "${TMPDIR%/}/hub-home-test.XXXXXX")"   # never beside the suites; trap removes it
 SRV=""
 cleanup() { [ -n "$SRV" ] && { kill "$SRV" 2>/dev/null; wait "$SRV" 2>/dev/null; }; rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -51,13 +51,13 @@ grep -q "max-height: calc(100vh - 32px); overflow-y: auto" "$PAGE" && ok "hover 
 grep -q "target.closest('.prline')" "$PAGE" && ok "rail cards anchor past the row" || bad "rail card anchor missing"
 grep -q "const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf)" "$PAGE" && ok "lane hover: every issue its own link" || bad "lane hover refs missing"
 grep -q "Mark done, move to Shipped" "$JS" && grep -q "Move back to running" "$JS" && grep -q "H.doneBtn(p, null, hide)" "$PAGE" && ok "Mark done / Move back in the rail card" || bad "Mark done missing"
-# MC-7 (Alex approved all five proposals)
-grep -q "H.doneBtn(p, 'hdone-' + p.id)" "$PAGE" && grep -q "meta.append(k)" "$PAGE" && ok "MC-7 #1: Mark done also in the project page header (a button, in the tab order)" || bad "MC-7 #1: header Mark done missing"
-grep -q "@media (hover: none) { .ph .hcact { min-height: 44px; } }" "$PAGE" && ok "MC-7 #1: header button is a 44px touch target" || bad "MC-7 #1: header button touch size missing"
-grep -q ".app:has(.ph.home) .main > .ph.home { order: 1;" "$PAGE" && grep -q ".app:has(.ph.home) .main > .toppri { order: 1;" "$PAGE" && ok "MC-7 #2: phone Home puts the headline and top-priority bar above the rail list" || bad "MC-7 #2: phone Home order missing"
-grep -q "min-width: 1200px) { .pt-prog" "$PAGE" && bad "MC-7 #3: the tile stamp still shares the bar row at 1200px+" || { grep -q ".pt-meta { display: flex; flex-direction: column;" "$PAGE" && ok "MC-7 #3: tile stamp on its own row at every width" || bad "MC-7 #3: pt-meta is not a column"; }
-grep -q ".tprow { display: grid; grid-template-columns: 4.25rem minmax(0, 1fr) auto;" "$PAGE" && ok "MC-7 #4: fixed pill column in the top-priority rows" || bad "MC-7 #4: pill column not fixed"
-grep -q "row.append(stPill(p)" "$PAGE" && grep -q "top.append(nb, stPill(p))" "$JS" && grep -q "' st-wait'" "$PAGE" && ok "MC-7 #5: hover card and tile share one status pill" || bad "MC-7 #5: hover pill differs from the tile"
+# project header, Home ordering, fixed pill column, one shared status pill
+grep -q "H.doneBtn(p, 'hdone-' + p.id)" "$PAGE" && grep -q "meta.append(k)" "$PAGE" && ok "Mark done also in the project page header (a button, in the tab order)" || bad "header Mark done missing"
+grep -q "@media (hover: none) { .ph .hcact { min-height: 44px; } }" "$PAGE" && ok "header button is a 44px touch target" || bad "header button touch size missing"
+grep -q ".app:has(.ph.home) .main > .ph.home { order: 1;" "$PAGE" && grep -q ".app:has(.ph.home) .main > .toppri { order: 1;" "$PAGE" && ok "phone Home puts the headline and top-priority bar above the rail list" || bad "phone Home order missing"
+grep -q "min-width: 1200px) { .pt-prog" "$PAGE" && bad "the tile stamp still shares the bar row at 1200px+" || { grep -q ".pt-meta { display: flex; flex-direction: column;" "$PAGE" && ok "tile stamp on its own row at every width" || bad "pt-meta is not a column"; }
+grep -q ".tprow { display: grid; grid-template-columns: 4.25rem minmax(0, 1fr) auto;" "$PAGE" && ok "fixed pill column in the top-priority rows" || bad "pill column not fixed"
+grep -q "row.append(stPill(p)" "$PAGE" && grep -q "top.append(nb, stPill(p))" "$JS" && grep -q "' st-wait'" "$PAGE" && ok "hover card and tile share one status pill" || bad "hover pill differs from the tile"
 grep -q "}, 6000);" "$JS" && grep -q "'Undo'" "$JS" && ok "Undo toast, 6 s" || bad "Undo toast missing"
 miss=""; for i in layout-grid hand arrow-right circle-check chevron-right rotate-ccw refresh-cw clock pause rocket check; do
   grep -q "^    '$i': '<" "$PAGE" || miss="$miss $i"
@@ -68,22 +68,22 @@ grep -q 'border-left: *[0-9.]*px solid var(--hi)' "$PAGE" && bad "border-left ac
 [ "$(wc -l < "$PAGE")" -le 1000 ] && [ "$(wc -l < "$JS")" -le 1000 ] && [ "$(wc -l < "$DEC")" -le 1000 ] && [ "$(wc -l < "$LIB/hub_server.py")" -le 1000 ] && [ "$(wc -l < "$LIB/hub.sh")" -le 1000 ] \
   && ok "hub.html/hub-home.js/hub_server.py/hub.sh each <= 1000 lines" || bad "a hub file passed 1000 lines"
 
-echo "=== MC-4: drafts survive re-renders (page contract) ==="
+echo "=== drafts survive re-renders (page contract) ==="
 grep -q "const key = p.id + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$DEC" && ok "decision draft keyed <project>--<decision> in forms" || bad "draft store missing"
 grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
 grep -q "ta.value = f.note" "$DEC" && grep -q "String(o === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
 grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
 grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
-grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders (MC-5 #4)" || bad "hover re-anchor missing"
-grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render (MC-5 #4)" || bad "bars re-grow on every render"
+grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders" || bad "hover re-anchor missing"
+grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render" || bad "bars re-grow on every render"
 grep -Fq "path === '/api/refresh' ? 630000 : 15000" "$PAGE" && grep -q "'Not sent, try again'" "$DEC" \
-  && ok "MC-6 #2: api() aborts after 15 s and the card says Not sent, try again" || bad "api timeout missing"
+  && ok "api() aborts after 15 s and the card says Not sent, try again" || bad "api timeout missing"
 grep -q "renderRail(); pollRender();" "$PAGE" && ! grep -q "^    if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" \
-  && ok "MC-6 #2: only poll-driven renders wait for a send; navigation never does" || bad "renderMain still holds navigation"
+  && ok "only poll-driven renders wait for a send; navigation never does" || bad "renderMain still holds navigation"
 grep -q "document.addEventListener('focusout', (e) => { if (composing && e.target === compEl) { composing = false; flush(); } })" "$PAGE" \
   && grep -q "if (composing && compEl !== document.activeElement) composing = false;" "$PAGE" \
-  && ok "MC-6 #3: losing the composing field clears the hold" || bad "composition flag can stick"
+  && ok "losing the composing field clears the hold" || bad "composition flag can stick"
 grep -q "resetForms" "$PAGE" "$JS" "$DEC" && bad "Home still resets drafts" || ok "going Home keeps drafts"
 
 echo "=== refreshBtn: only on a stale stamp (node, no browser) ==="
@@ -116,7 +116,7 @@ EOF
   grep -q 'undo-kept=1' <<<"$rb" && ok "a late info toast never replaces a live Undo" || bad "Undo toast replaced: $rb"
 else echo "SKIP: node not installed (refreshBtn unit)"; fi
 
-echo "=== MC-10: live lane summary under the bar (node, no browser) ==="
+echo "=== live lane summary under the bar (node, no browser) ==="
 if command -v node >/dev/null 2>&1; then
   sm="$(node - "$JS" <<'EOF' 2>&1
 const fs = require('fs'), vm = require('vm');
@@ -128,29 +128,27 @@ const main = mk('main');
 const now = new Date().toISOString();
 const ctx = { $: (id) => (id === 'main' ? main : null), el: (t, c, x) => mk(t, c, x), ic: () => mk('i'), pri: () => mk('span'), paint() {}, openDecs: () => [], byWeight: () => 0,
   stPill: () => mk('span', 'pill'), go() {}, staleCheck() {}, db: {}, canWrite: null, mode: 'local',
-  projects: [{ id: 'a', name: 'A', status: 'building', pct: 40, tagline: 'The tagline', updated: 'x', updatedAt: now, summary: '5 lanes: 3 building, 1 done', summaryAt: now },
-             { id: 'b', name: 'B', status: 'building', pct: 10, tagline: 'Other', updated: 'x', updatedAt: now },
-             { id: 'c', name: 'C', status: 'building', pct: 10, updated: 'x', updatedAt: now, summary: '   ' }] };
+  projects: [{ id: 'a', name: 'A', status: 'building', pct: 40, tagline: 'The tagline', updated: 'x', updatedAt: now, reportedAt: now, summary: '5 lanes: 3 building, 1 done', summaryAt: now },
+             { id: 'b', name: 'B', status: 'building', pct: 10, tagline: 'Other', updated: 'x', updatedAt: now, reportedAt: now },
+             { id: 'c', name: 'C', status: 'building', pct: 10, updated: 'x', updatedAt: now, reportedAt: now, summary: '   ' }] };
 const H = win.OSRC_HUB_HOME(ctx); H.renderHome();
 const all = []; (function walk(n) { if (!n || typeof n !== 'object') return; all.push(n); (n.children || []).forEach(walk); })(main);
 const tile = (id) => all.find((n) => n.id === 'tile-' + id);
 const find = (root, cls) => { const r = []; (function w(n) { if (!n || typeof n !== 'object') return; if ((n.className || '').split(' ').includes(cls)) r.push(n); (n.children || []).forEach(w); })(root); return r; };
-const sa = find(tile('a'), 'psum'), meta = find(tile('a'), 'pt-meta')[0];
-console.log('a-line=' + (sa.length === 1 && sa[0].text === '5 lanes: 3 building, 1 done' ? 1 : 0));
-console.log('a-in-meta-after-stamp=' + (meta && meta.children.indexOf(sa[0]) > meta.children.indexOf(find(meta, 'lst')[0]) ? 1 : 0));
+const sa = find(tile('a'), 'psum');
+console.log('a-no-lane-count=' + (sa.length === 0 ? 1 : 0));
 console.log('a-tagline-kept=' + (find(tile('a'), 'pt-tag')[0] || {}).text);
-console.log('a-title=' + (/^Lane summary as of /.test(sa[0] && sa[0].title) ? 1 : 0));
 console.log('b-none=' + find(tile('b'), 'psum').length + ' c-blank=' + find(tile('c'), 'psum').length);
 console.log('hover-helper=' + (typeof H.sumLine === 'function' && H.sumLine({ id: 'z', summary: 's' }).className === 'psum' && H.sumLine({ id: 'z' }) === null ? 1 : 0));
 EOF
 )"
-  grep -q 'a-line=1' <<<"$sm" && grep -q 'a-in-meta-after-stamp=1' <<<"$sm" && grep -q 'a-tagline-kept=The tagline' <<<"$sm" && grep -q 'a-title=1' <<<"$sm" \
-    && ok "MC-10: tile shows the live summary as its own line beside the Updated stamp, tagline kept" || bad "MC-10 tile summary line wrong: $sm"
-  grep -q 'b-none=0 c-blank=0' <<<"$sm" && ok "MC-10: no summary line when the summary is absent or blank" || bad "MC-10 summary line shown when absent: $sm"
+  grep -q 'a-no-lane-count=1' <<<"$sm" && grep -q 'a-tagline-kept=The tagline' <<<"$sm" \
+    && ok "N3: Home tiles omit 'N lanes: ...' summary line while keeping tagline" || bad "Home tile summary check wrong: $sm"
+  grep -q 'b-none=0 c-blank=0' <<<"$sm" && ok "no summary line when the summary is absent or blank" || bad "summary line shown when absent: $sm"
   grep -q 'hover-helper=1' <<<"$sm" && grep -q "H.sumLine(p)" "$PAGE" \
-    && ok "MC-10: the rail hover card uses the same summary line" || bad "MC-10 hover card has no summary line: $sm"
-  grep -qE '^\.lst, \.psum \{' "$PAGE" && ok "MC-10: summary line wears the stamp's type (shared rule)" || bad "MC-10: .psum not styled with .lst"
-else echo "SKIP: node not installed (MC-10 summary unit)"; fi
+    && ok "the rail hover card uses the same summary line" || bad "hover card has no summary line: $sm"
+  grep -qE '^\.lst, \.psum \{' "$PAGE" && ok "summary line wears the stamp's type (shared rule)" || bad ".psum not styled with .lst"
+else echo "SKIP: node not installed"; fi
 
 echo "=== export merges the Mark done override ==="
 echo '{"name":"Alpha","status":"review","pct":80,"order":1}' > "$OSRC_HOME/hub/projects/alpha.json"
@@ -166,7 +164,7 @@ rm -f "$OSRC_HOME/hub/status/beta.json"
 echo '{"restoredBy":"user","restoredAt":"x","prevStatus":"building","cardStatus":"shipped","cardShippedAt":null}' > "$OSRC_HOME/hub/status/beta.json"
 [ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back clears the card's shipped" || bad "restore ignored: $(st_of beta)"
 sleep 1; echo '{"name":"Beta","status":"shipped","pct":100,"order":2}' > "$OSRC_HOME/hub/projects/beta.json"   # heartbeat rewrites the same card
-[ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back survives a rewrite of the same card (MC-5 #2)" || bad "card rewrite undid Move back: $(st_of beta)"
+[ "$(st_of beta | jq -r .status)" = "building" ] && ok "Move back survives a rewrite of the same card" || bad "card rewrite undid Move back: $(st_of beta)"
 echo '{"name":"Beta","status":"shipped","shippedAt":"2026-11-20T09:00:00Z","pct":100,"order":2}' > "$OSRC_HOME/hub/projects/beta.json"
 [ "$(st_of beta | jq -r .status)" = "shipped" ] && ok "a card that ships again (new shippedAt) wins over Move back" || bad "restore pinned forever: $(st_of beta)"
 mkdir -p "$TMP/elsewhere" && echo '{"status":"shipped","shippedBy":"user"}' > "$TMP/elsewhere/alpha.json"
@@ -196,11 +194,11 @@ print("exportfail", code, body.get("project", {}).get("status") == "shipped", os
 grep -q '^\.\./evil 400$' <<<"$sg" && grep -q '^\.hidden 400$' <<<"$sg" && grep -q '^a/b 400$' <<<"$sg" && grep -q contained <<<"$sg" \
   && ok "slug regex alone refuses traversal ids even when the export lists them" || bad "slug guard: $sg"
 grep -q '^alpha$' <<<"$sg" && grep -q '^ 400$' <<<"$sg" && grep -q '^no-nl-file$' <<<"$sg" \
-  && ok "slug with a trailing newline refused, no file (MC-5 #5)" || bad "trailing-newline slug: $sg"
-grep -q '^answer-nl bad answer id$' <<<"$sg" && ok "answer id with a trailing newline refused (MC-5 #5)" || bad "trailing-newline answer id: $sg"
+  && ok "slug with a trailing newline refused, no file" || bad "trailing-newline slug: $sg"
+grep -q '^answer-nl bad answer id$' <<<"$sg" && ok "answer id with a trailing newline refused" || bad "trailing-newline answer id: $sg"
 grep -q '^exportfail 200 True True$' <<<"$sg" && ok "saved status visible with offline engine" || bad "export failure reply: $sg"
 
-echo "=== symlink-safe writes (MC-5 #3) ==="
+echo "=== symlink-safe writes ==="
 sy="$(cd "$LIB" && OSRC_T="$TMP/sy" PAGE="$PAGE" python3 -I -c '
 import os, sys, time, stat; sys.path.insert(0, os.getcwd()); import hub_server as h
 t = os.environ["OSRC_T"]; os.makedirs(os.path.join(t, "hub", "status")); os.makedirs(os.path.join(t, "victim"))
@@ -221,12 +219,12 @@ grep -q "^tmp 200 original False 0o600 0o700$" <<<"$sy" && ok "planted temp-name
 grep -q "^dir 409 \['keep.txt'\]$" <<<"$sy" && ok "symlinked status folder: 409, nothing written outside" || bad "status folder symlink: $sy"
 grep -q "^ans True \[\]$" <<<"$sy" && ok "symlinked answers folder: refused, nothing written outside" || bad "answers folder symlink: $sy"
 
-echo "=== serve prints its URL before the first export (MC-8) ==="
+echo "=== serve prints its URL before the first export ==="
 # CI macOS runner: the first export ran before the port was bound, outlasted the test wait and left an
 # empty log. Fake engine: 12 s per export, logs start/end. The URL must not wait for it; a first
 # /api/projects answers {"starting":true} after OSRC_HUB_STARTING_WAIT (3 s here, 10 s by default, under
 # the page's 15 s abort) so the page keeps "Loading" instead of claiming an empty board; a later call gets
-# the export's projects; POST /api/refresh during startup waits instead of exporting beside it (MC-8 r2).
+# the export's projects; POST /api/refresh during startup waits instead of exporting beside it.
 SLOW="$TMP/slow-engine"; SLOG="$TMP/slow-engine.log"
 printf '#!/bin/sh\necho start >> "%s"\nsleep 12\necho end >> "%s"\necho %s\n' "$SLOG" "$SLOG" "'{\"projects\":[{\"id\":\"slowp\",\"name\":\"Slow\"}]}'" > "$SLOW"; chmod +x "$SLOW"
 mkdir -p "$TMP/slowhome"; STK=0123456789abcdef0123456789abcdef
@@ -250,7 +248,7 @@ grep -q "const loading = () => firstPull && !pullErr && mode === 'local';" "$PAG
   && ok "rail and Home stay on Loading until the first projects answer or a failure" || bad "page can claim an empty board before the first projects answer"
 grep -q "if (data && data.starting) { await new Promise((r) => setTimeout(r, 1000)); return pull(name); }" "$PAGE" && ok "page treats starting:true as still loading and asks again" || bad "page ignores starting:true"
 
-# CI run 5 (macOS runner): the stock HTTPServer bind calls socket.getfqdn(), a reverse-DNS lookup that hung
+# On a macOS runner: the stock HTTPServer bind calls socket.getfqdn(), a reverse-DNS lookup that hung
 # past 24 s before the URL printed. The hub's server must bind without it.
 fq="$(python3 -I -c '
 import socket, sys
@@ -269,7 +267,7 @@ echo '{"name":"Alpha","status":"review","pct":80,"order":1}' > "$OSRC_HOME/hub/p
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open >"$TMP/serve.log" 2>&1 &
 SRV=$!
-# 30 s headroom for a loaded CI runner; the loop leaves as soon as the URL is out (MC-8).
+# 30 s headroom for a loaded CI runner; the loop leaves as soon as the URL is out.
 URL=""; for _ in $(seq 1 120); do URL="$(grep -o 'http://127\.0\.0\.1:[0-9]*/?t=[A-Za-z0-9]*' "$TMP/serve.log" | head -1)"; [ -n "$URL" ] && break; kill -0 "$SRV" 2>/dev/null || break; sleep 0.25; done
 [ -n "$URL" ] || { bad "hub serve did not start ($(kill -0 "$SRV" 2>/dev/null && echo still running || echo exited)): $(head -5 "$TMP/serve.log")"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
 B="${URL%%\?*}"; TOK="${URL##*t=}"
@@ -294,7 +292,7 @@ c="$(post /api/projects/alpha/status '{"status":"restore"}' -H "X-Hub-Token: $TO
 [ "$c" = 200 ] && jq -e '.project.status=="review" and (.project.shippedBy==null)' "$TMP/body" >/dev/null \
   && ok "Move back restores the previous status" || bad "restore failed ($c): $(cat "$TMP/body")"
 [ "$(post /api/answers '{"id":"alpha--D1\n","choice":"x"}' -H "X-Hub-Token: $TOK")" = 400 ] && ok "HTTP: answer id with trailing newline -> 400" || bad "trailing-newline answer id accepted"
-# MC-4: the page offers "your own answer" in the note, so a note-only answer must land.
+# the page offers "your own answer" in the note, so a note-only answer must land.
 c="$(post /api/answers '{"id":"alpha--N1","choice":"","note":"my own answer"}' -H "X-Hub-Token: $TOK")"
 [ "$c" = 200 ] && jq -e '.choice=="" and .note=="my own answer"' "$OSRC_HOME/hub/answers/alpha--N1.json" >/dev/null \
   && ok "note-only answer accepted and stored" || bad "note-only answer refused ($c): $(cat "$TMP/body")"

@@ -9,6 +9,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"
+SRC_LIB="$SRC $SCRIPT_DIR/../lib/advise.sh $SCRIPT_DIR/../lib/advise-score.sh $SCRIPT_DIR/../lib/advise-fetch.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 bash -n "$SRC" || { echo "FAIL: bash -n failed for $SRC"; exit 1; }
 
@@ -56,8 +57,8 @@ for a in glm-5.3:glm-5-3 glm-5.3-high:glm-5-3-high glm-5.3-flash:glm-5-3-flash g
   _devin_is_free_model "${a##*:}" && ok "plan-included: ${a##*:}" || bad "plan-included predicate misses ${a##*:}"
 done
 ck "offline sibling map: glm-5.3-flash-high" "$(OSRC_DEVIN_DYNAMIC_RESOLVE=0 _devin_resolve_model glm-5.3-flash-high)" glm-5-3-flash-high
-grep -q '^glm-5-3-flash-high|z-ai/glm-5.3-flash$' "$SRC" && ok "bench map: glm-5-3-flash-high -> z-ai/glm-5.3-flash" || bad "bench map entry missing for glm-5-3-flash-high"
-grep -q '^glm-5-3|z-ai/glm-5.3$' "$SRC" && ok "bench map: glm-5-3 -> z-ai/glm-5.3" || bad "bench map entry missing for glm-5-3"
+grep -q '^glm-5-3-flash-high|z-ai/glm-5.3-flash$' $SRC_LIB && ok "bench map: glm-5-3-flash-high -> z-ai/glm-5.3-flash" || bad "bench map entry missing for glm-5-3-flash-high"
+grep -q '^glm-5-3|z-ai/glm-5.3$' $SRC_LIB && ok "bench map: glm-5-3 -> z-ai/glm-5.3" || bad "bench map entry missing for glm-5-3"
 
 # === variant preference helpers ===
 ck "family: glm-5-3-flash-high" "$(_variant_family glm-5-3-flash-high)" glm-5-3
@@ -73,7 +74,7 @@ w_fh="$(_variant_weight glm-5-3-flash-high high)"; w_h="$(_variant_weight glm-5-
 pick() { cmd_advise --effort "$1" "$2" 2>/dev/null | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}'; }
 _adv="$(cmd_advise --effort high "$EDIT_TASK" 2>/dev/null)"
 grep -q '^   category: agentic' <<<"$_adv" && ok "advise: edit-run-verify -> category agentic" || bad "advise: category not agentic"
-grep -q 'scoring by: agentic_index' <<<"$_adv" && ok "advise: scored on agentic_index" || bad "advise: wrong score field"
+grep -q 'score field: agentic_index' <<<"$_adv" && ok "advise: scored on agentic_index" || bad "advise: wrong score field"
 _pick="$(printf '%s' "$_adv" | awk -F': *' '/^   model:/{print $2; exit}' | awk '{print $1}')"
 case "$_pick" in kimi|kimi-k3|kimi-k2.7) bad "advise: kimi is #1 on the edit-run-verify task ($_pick)" ;; *) ok "advise: kimi is NOT #1 (pick: $_pick)" ;; esac
 [ "$_pick" = "glm-5.3-flash-high" ] && ok "advise: recommends glm-5.3-flash-high" || bad "advise: pick '$_pick' (want glm-5.3-flash-high)"

@@ -1,5 +1,5 @@
 # =============================================================================
-# lib/spend.sh — paid-lane spend gate + per-lane usage caps (L7 add-ons, Alex 14:30/14:32)
+# lib/spend.sh — paid-lane spend gate + per-lane usage caps
 #
 # Two guards that sit NEXT TO the plan-meter gate (lib/limits.sh):
 #
@@ -11,7 +11,7 @@
 #     per-job .spend-ok marker a consenting bg parent drops for its detached
 #     child — the marker is BOUND to the resolved lane|model pair and consumed
 #     (deleted) once dispatch starts. Non-interactive refusals emit
-#     `EVENT approval ... paid-lane:...` + NEXT so L1's supervise replays them.
+#     `EVENT approval ... paid-lane:...` + NEXT so supervise replays them.
 #     --spend-ok is NEVER persisted, never implied by auto mode, the
 #     cloud-consent file, or an inherited env var (the env block unsets
 #     OSRC_SPEND_OK/OSRC_SPEND_GATE/OSRC_CAP_GATE before parsing; there is no
@@ -137,7 +137,7 @@ _devin_catalog_free_ids() {
 
 # _devin_default_free_model -> the dv lane's implicit default, picked at RUN TIME from
 # the live catalog's Free set so a bare `run`/`bg` never lands on a metered model by
-# default (Alex's rule: free models before any spend). Preference inside the Free set:
+# default (free models before any spend). Preference inside the Free set:
 # swe-2-high, then swe-2-flash-high, then the first Free id the catalog lists. Catalog
 # unreachable or nothing Free -> swe-2-high, the proven offline-free fallback; if it is
 # ever metered the spend gate still asks rather than silently picking another paid id.
@@ -216,11 +216,14 @@ _osrc_claude_settings_metered() {
 # settings helpers), and BYOK paths are `metered` even when a plan login also exists. A CLI on
 # PATH with no provable login is `unknown` — never assumed subscription. unknown is treated as
 # metered by the spend gate (ask first, never assume free). The third arg (disp/vehicle) is
-# NOT display-only: a disp containing cloud|hosted is metered on any lane — L10's `cloud
-# start` relies on this for hosted Devin sessions (CONTRACT.md L7 sign-off).
+# NOT display-only: a disp containing cloud|hosted is metered on any lane — `cloud
+# start` relies on this for hosted Devin sessions.
 osrc_lane_billing() {
   local tok="${1:-}" model="${2:-}" disp="${3:-}" lane=""
   [ -n "$tok" ] || { printf 'unknown\n'; return; }
+  # Engine names the session path passes ("devin", "agy", "factory") are not registry
+  # tokens; unmapped they fell through to "unknown" and the gate called a plan model paid.
+  case "$tok" in devin) tok=dv ;; agy|antigravity) tok=gm ;; factory) tok=droid ;; esac
   lane="$(_lane_by_disp "$tok" 2>/dev/null)" || lane=""
   [ -n "$lane" ] || lane="$(_lane_by_token "$tok" 2>/dev/null)" || lane=""
   [ -n "$lane" ] || lane="$(_lane_by_native "$tok" 2>/dev/null)" || lane=""
@@ -288,6 +291,13 @@ osrc_lane_billing() {
            && [ -n "$(find "$HOME/.antigravity" -maxdepth 1 -type f -size +0c \
                         ! -name '.*' ! -name 'argv.json' ! -name '*.log' \
                         -print -quit 2>/dev/null)" ]; then
+        printf 'subscription\n'
+      # agy keeps its Google sign-in under ~/.gemini, not ~/.antigravity (Antigravity is a
+      # subscription lane; checking only ~/.antigravity labelled a signed-in plan "unknown" = paid).
+      # The token file is not stable (agy rotated it away overnight), so a Google OAuth login with a
+      # refresh token in ~/.gemini/oauth_creds.json counts too. API keys are judged by the branch above.
+      elif have agy && { [ -s "${GEMINI_DIR:-$HOME/.gemini}/antigravity-cli/antigravity-oauth-token" ] \
+           || jq -e '(.refresh_token // "") | length > 0' "${GEMINI_DIR:-$HOME/.gemini}/oauth_creds.json" >/dev/null 2>&1; }; then
         printf 'subscription\n'
       elif _osrc_billing_key GEMINI_API_KEY || _osrc_billing_key GOOGLE_API_KEY; then
         printf 'metered\n'
@@ -524,7 +534,7 @@ _osrc_bg_preflight_capture() {
   return "$rc"
 }
 
-# ---- event emission (L1 lanes/events.jsonl contract) ---------------------------
+# ---- event emission (lanes/events.jsonl contract) ---------------------------
 # Schema matches lib/supervise.sh's _sv_append: {ts,kind,target,detail,next,src}.
 # Prints the `EVENT <kind> <target> <ts> <detail>` + `NEXT <cmd>` pair supervise replays.
 _osrc_event() {  # <kind> <target> <detail> <next> [src]

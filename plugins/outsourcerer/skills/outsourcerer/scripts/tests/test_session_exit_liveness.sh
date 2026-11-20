@@ -30,21 +30,26 @@ pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-# --- fake tmux: has-session always succeeds; display-message -p prints a controllable
-#     #{pane_current_command}; kill-session is a no-op. The command to report is read from a file
-#     so each subtest can set it (and change it mid-poll to simulate the engine taking over). ---
+# --- fake tmux: has-session always succeeds; display-message -p answers #{pane_current_command}
+#     from a file (changeable mid-poll to simulate the engine taking over) and #{pane_pid} from a
+#     second file (the slow-boot tests point it at a REAL pid whose children are the boot-evidence
+#     the grace window keys on); kill-session is a no-op. ---
 TMUX_CMD_FILE="$TMP/pane_cmd"
+TMUX_PID_FILE="$TMP/pane_pid"
 echo "bash" > "$TMUX_CMD_FILE"
+echo "999999" > "$TMUX_PID_FILE"
 cat > "$BIN/tmux" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
   has-session) exit 0 ;;
   kill-session) exit 0 ;;
   display-message)
-    # The real call is: display-message -p -t <sess> #{pane_current_command}
-    # The format is always the last arg; we only care about pane_current_command, so just emit
-    # the controllable file contents regardless of which -t target was passed.
-    cat "$TMUX_CMD_FILE" 2>/dev/null || echo bash
+    # The format string is the last argument.
+    case "\${!#}" in
+      *pane_pid*)             cat "$TMUX_PID_FILE" 2>/dev/null || echo 999999 ;;
+      *pane_current_command*) cat "$TMUX_CMD_FILE" 2>/dev/null || echo bash ;;
+      *)                      cat "$TMUX_CMD_FILE" 2>/dev/null || echo bash ;;
+    esac
     exit 0
     ;;
   *) exit 0 ;;
@@ -126,7 +131,76 @@ else
 fi
 unset OSRC_SESSION_LIVENESS_SECS
 
-# --- 6. the droid launch built by _session_launch_adapter must NEVER contain -r (the leak that
+# --- 6. SLOW BOOT tolerated (agy/devin take 10-20s): the pane stays a shell name past the fast
+#        window while the pane shell still has a live descendant (the typed launch chain — an
+#        export/clear prefix, a shim resolving node, an auth preflight — is still running).
+#        The grace window must keep waiting on the SAME pane and pass when the engine takes
+#        over. The descendant must be a GRANDCHILD behind a shell child — a non-shell direct
+#        child already counts as the engine via _session_engine_pid, so the real miss shape is
+#        pane-shell -> bash wrapper -> engine. Nested bash models exactly that: the inner bash
+#        is skipped as a shell, the sleep behind it is the boot evidence. ---
+bash -c 'bash -c "sleep 60; true" & wait' & _WRAP_PID=$!
+echo "$_WRAP_PID" > "$TMUX_PID_FILE"
+echo "bash" > "$TMUX_CMD_FILE"
+export OSRC_SESSION_LIVENESS_SECS=2 OSRC_SESSION_LIVENESS_GRACE_SECS=15
+( sleep 4; echo "agy" > "$TMUX_CMD_FILE" ) &
+_bg=$!
+if ( _session_launch_liveness_check osrc-test gemini "agy --mode auto" ) >/dev/null 2>&1; then
+  ok "slow boot: grace waited past the fast window for a live-descendant pane, passed on engine take-over"
+else
+  no "slow boot: check refused a pane still booting with a live descendant (the reported 'did not become live' bug)"
+fi
+wait $_bg 2>/dev/null || true
+
+# --- 7. DEAD launch exits the grace window EARLY: bare shell + pane shell has NO descendants
+#        means the typed chain exited — refuse at the first grace poll, not after the full
+#        budget. pane_pid points at a childless `sleep` (a real pid with no descendants). ---
+sleep 60 & _CHILDLESS=$!
+echo "$_CHILDLESS" > "$TMUX_PID_FILE"
+echo "bash" > "$TMUX_CMD_FILE"
+export OSRC_SESSION_LIVENESS_SECS=2 OSRC_SESSION_LIVENESS_GRACE_SECS=15
+_t0=$SECONDS
+if ( _session_launch_liveness_check osrc-test droid "droid --auto medium" ) >/dev/null 2>&1; then
+  no "dead launch: check WRONGLY passed a bare shell with no live descendant"
+else
+  [ $((SECONDS - _t0)) -le 5 ] \
+    && ok "dead launch: refused early in the grace window (~$((SECONDS - _t0))s, not the full budget)" \
+    || no "dead launch: refused but waited $((SECONDS - _t0))s — the descendant probe did not short-circuit"
+fi
+
+# --- 8. grace opt-out: OSRC_SESSION_LIVENESS_GRACE_SECS=0 restores the old contract — a slow
+#        booting pane (descendant alive) still refuses at the fast budget. ---
+echo "$_WRAP_PID" > "$TMUX_PID_FILE"
+echo "bash" > "$TMUX_CMD_FILE"
+export OSRC_SESSION_LIVENESS_SECS=2 OSRC_SESSION_LIVENESS_GRACE_SECS=0
+_t0=$SECONDS
+if ( _session_launch_liveness_check osrc-test gemini "agy --mode auto" ) >/dev/null 2>&1; then
+  no "grace opt-out: check WRONGLY passed a still-booting shell pane"
+else
+  [ $((SECONDS - _t0)) -le 4 ] \
+    && ok "grace opt-out (GRACE=0): refused at the fast budget (~$((SECONDS - _t0))s)" \
+    || no "grace opt-out: refused but waited $((SECONDS - _t0))s beyond the fast budget"
+fi
+
+# --- 9. bounded: a pane that stays a shell WITH a live descendant for the whole grace still
+#        refuses at the deadline — the retry window is bounded, never an open-ended wait. ---
+echo "$_WRAP_PID" > "$TMUX_PID_FILE"
+echo "bash" > "$TMUX_CMD_FILE"
+export OSRC_SESSION_LIVENESS_SECS=1 OSRC_SESSION_LIVENESS_GRACE_SECS=2
+_t0=$SECONDS
+if ( _session_launch_liveness_check osrc-test gemini "agy --mode auto" ) >/dev/null 2>&1; then
+  no "bounded grace: check WRONGLY passed a pane that never became an engine"
+else
+  _el=$((SECONDS - _t0))
+  [ "$_el" -ge 3 ] && [ "$_el" -le 6 ] \
+    && ok "bounded grace: refused at the deadline (~${_el}s = 1s fast + 2s grace)" \
+    || no "bounded grace: refused after ${_el}s — expected ~3s, the window is not bounded"
+fi
+unset OSRC_SESSION_LIVENESS_SECS OSRC_SESSION_LIVENESS_GRACE_SECS
+kill "$_WRAP_PID" "$_CHILDLESS" 2>/dev/null || true
+echo "999999" > "$TMUX_PID_FILE"; echo "bash" > "$TMUX_CMD_FILE"
+
+# --- 10. the droid launch built by _session_launch_adapter must NEVER contain -r (the leak that
 #        caused the silent exits). Re-assert here so this test owns the liveness contract end-to-end. ---
 PROVIDER=droid; MODEL_EXPLICIT=0; MODEL=""; EFFORT=""
 SESSION_LAUNCH=()
