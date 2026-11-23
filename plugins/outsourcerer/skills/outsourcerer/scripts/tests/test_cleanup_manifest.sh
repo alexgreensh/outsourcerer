@@ -338,6 +338,67 @@ run cleanup job-leg --force >/dev/null 2>&1
 git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/job-leg >/dev/null 2>&1 \
   && bad "force cleanup left branch" || ok "force cleanup removed branch"
 
+echo "=== recorded base_sha is not preservation on its own (issue #84) ==="
+BR="$TMP/repo-base"; mkrepo "$BR"
+git -C "$BR" checkout -qb feat
+printf 'local-only\n' > "$BR/lo.txt"; git -C "$BR" add lo.txt; git -C "$BR" commit -qm local-only
+FEAT="$(git -C "$BR" rev-parse HEAD)"
+git -C "$BR" checkout -q main
+# Worktree cut from the local-only branch, no new commits, then the source branch is deleted:
+# the worktree branch is the LAST ref holding FEAT.
+git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-lo" -b outsourcerer/wt-lo "$FEAT"
+git -C "$BR" branch -q -D feat
+bm() { OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$@"; echo "rc=$?"' _ "$@" 2>&1 | tail -1; }
+[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=1" ] \
+  && ok "base held only by the worktree branch is not preservation (#84)" || bad "local-only base counted as preserved"
+# A remote-tracking ref holding the base makes the shortcut valid again.
+git -C "$BR" update-ref refs/remotes/origin/feat "$FEAT"
+[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=0" ] \
+  && ok "base held by a remote-tracking ref still preserves the branch" || bad "remote-held base not accepted"
+# Branch with a commit past the remote-held base is not preserved.
+( cd "$BR/.outsourcerer/worktrees/wt-lo" && printf 'more\n' > more.txt && git add more.txt && git commit -qm more )
+[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=1" ] \
+  && ok "commit past a remote-held base is not preserved" || bad "post-base commit counted as preserved"
+# Recorded base newer than every remote ref.
+XB="$(git -C "$BR" rev-parse outsourcerer/wt-lo)"
+[ "$(bm "$BR" outsourcerer/wt-lo "$XB")" = "rc=1" ] \
+  && ok "base newer than every remote ref is not preservation" || bad "unpushed base counted as preserved"
+[ "$(bm "$BR" outsourcerer/wt-lo "")" = "rc=1" ] && ok "empty base falls through to ASK" || bad "empty base mishandled"
+git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
+[ "$(bm "$BR" outsourcerer/wt-main "")" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
+[ "$(bm "$BR" outsourcerer/wt-main "not-a-sha")" = "rc=0" ] && ok "garbage base does not break main containment" || bad "garbage base broke verdict"
+# End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
+R3="$TMP/repo-base2"; mkrepo "$R3"
+git -C "$R3" checkout -qb feat; printf 'lo\n' > "$R3/lo.txt"; git -C "$R3" add lo.txt; git -C "$R3" commit -qm lo
+F3="$(git -C "$R3" rev-parse HEAD)"; git -C "$R3" checkout -q main
+git -C "$R3" worktree add -q "$R3/.outsourcerer/worktrees/wt-e2e" -b outsourcerer/wt-e2e "$F3"; git -C "$R3" branch -q -D feat
+owner wt-e2e
+jq -cn --arg p "$R3/.outsourcerer/worktrees/wt-e2e" --arg b outsourcerer/wt-e2e --arg bs "$F3" \
+  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/wt-e2e/worktree.json"
+manifest "$R3/.outsourcerer/worktrees/wt-e2e" worktree wt-e2e "$R3"
+age "$R3/.outsourcerer/worktrees/wt-e2e"
+out84="$(run cleanup 2>&1)"
+grep -q "ASK.*wt-e2e" <<<"$out84" && ok "cleanup dry run: local-only worktree is ASK (#84)" || bad "wt-e2e not ASK: $(echo "$out84" | grep wt-e2e)"
+run cleanup --apply >/dev/null 2>&1
+git -C "$R3" rev-parse --verify -q refs/heads/outsourcerer/wt-e2e >/dev/null && [ -d "$R3/.outsourcerer/worktrees/wt-e2e" ] \
+  && ok "cleanup --apply keeps the only ref to local-only commits (#84)" || bad "apply deleted the last ref to local-only commits"
+
+# Legacy `cleanup <id>`: zero commits past the base is not enough when the base is local-only.
+R4="$TMP/repo-base3"; mkrepo "$R4"
+git -C "$R4" checkout -qb feat; printf 'lo\n' > "$R4/lo.txt"; git -C "$R4" add lo.txt; git -C "$R4" commit -qm lo
+F4="$(git -C "$R4" rev-parse HEAD)"; git -C "$R4" checkout -q main
+git -C "$R4" worktree add -q "$R4/.outsourcerer/worktrees/job-lo" -b outsourcerer/job-lo "$F4"; git -C "$R4" branch -q -D feat
+mkdir -p "$OSRC_HOME/jobs/job-lo"
+jq -cn --arg p "$R4/.outsourcerer/worktrees/job-lo" --arg b outsourcerer/job-lo --arg bs "$F4" \
+  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/job-lo/worktree.json"
+lo="$(run cleanup job-lo 2>&1)"; lorc=$?
+[ "$lorc" != "0" ] && grep -q 'only ref' <<<"$lo" && git -C "$R4" rev-parse --verify -q refs/heads/outsourcerer/job-lo >/dev/null \
+  && ok "cleanup <id> refuses to drop the only ref to a local-only base (#84)" || bad "legacy cleanup dropped or mis-reported (rc=$lorc): $lo"
+git -C "$R4" update-ref refs/remotes/origin/feat "$F4"
+lo2="$(run cleanup job-lo 2>&1)"; lo2rc=$?
+[ "$lo2rc" = "0" ] && ! git -C "$R4" rev-parse --verify -q refs/heads/outsourcerer/job-lo >/dev/null \
+  && ok "cleanup <id> removes it once a remote-tracking ref holds the base" || bad "legacy cleanup still refuses (rc=$lo2rc): $lo2"
+
 echo "=== gc compat ==="
 OLD="$OSRC_HOME/jobs/job-ancient"; mkdir -p "$OLD"; echo done > "$OLD/status"
 RECENT="$OSRC_HOME/jobs/job-fresh"; mkdir -p "$RECENT"; echo done > "$RECENT/status"
