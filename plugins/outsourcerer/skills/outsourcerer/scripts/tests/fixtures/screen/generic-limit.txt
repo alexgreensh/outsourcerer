@@ -1,0 +1,8 @@
+$ worker --pipeline build
+stage 3 of 5 complete
+writes flushed to journal
+⚠ Rate limit exceeded · try again in 30s
+──────────────────────────────
+engine: generic-tui | ctx 12% | tok 4.2k
+queue: 1 waiting | cost today $0.03
+status: paused

@@ -1,0 +1,8 @@
+scan complete: 1,204 files indexed
+resolving symbol graph
+⣻  Weaving the dependency graph (3m 12s elapsed)
+──────────────────────────────
+lane: weave-7 | engine auto | ctx 88%
+tok 48k | cost today $1.42
+workers 4/8 busy | queue depth 2
+status: nominal

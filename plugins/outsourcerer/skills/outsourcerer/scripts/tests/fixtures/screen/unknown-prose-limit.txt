@@ -1,0 +1,5 @@
+⏺ Done. The client now retries on 429 Too Many Requests with backoff.
+  All 14 tests pass.
+──────────────────────────────
+lane: prose-check | ctx 9%
+status: idle

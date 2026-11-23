@@ -61,7 +61,10 @@ agy-idle-after-work|agy|idle||
 agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
 agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
 agy-trust-folder-menu|agy|approval|trust|
-gm-trust-folder-menu|gemini|approval|trust|'
+gm-trust-folder-menu|gemini|approval|trust|
+cc-limit-usage|cc|limit||
+cx-limit-usage|codex|limit||
+dv-limit-plan|devin|limit||'
 
 check_table() { # <label> [hint-mode: hint|guess]
   local mode="$1" f eng want kind what hint n=0

@@ -7,7 +7,7 @@
 # orchestrator's own typed text matched as "DONE", and a C-locale shell never matched a box glyph.
 # This module is the single owner of that job. Callers ask `osrc_screen_state <pane> [engine]`.
 #
-#   osrc_screen_state <pane> [engine]   -> line 1: approval|question|working|idle|composer|unknown
+#   osrc_screen_state <pane> [engine]   -> line 1: approval|question|working|idle|composer|unknown|limit|dead
 #                                          line 2: evidence (one line)
 #   osrc_screen_report <pane> [engine]  -> KEY=value lines (state, engine, pending command, ...)
 #   _osrc_screen_analyze_text [engine]  -> same analysis on text read from STDIN (fixtures, logs)
@@ -20,6 +20,10 @@
 #   idle      the composer is ready and a turn has finished since the last prompt
 #   composer  the composer is ready and no turn has finished (fresh boot), OR it holds text that
 #             was typed and never submitted (evidence says which)
+#   limit     a rate-limit / quota banner is the newest signal: the provider is parked until a
+#             stated reset, whatever the composer shows
+#   dead      pane-level only (never from analyze_text): tmux proves the pane's process exited
+#             but its last frame is still held (remain-on-exit), so the capture is a corpse
 #   unknown   none of the above could be proven
 #
 # Design rules (each one is a failure that happened):
@@ -153,6 +157,7 @@ _osrc_scr_reset() {
   OSRC_SCR_STATE=unknown; OSRC_SCR_EVIDENCE="no recognized signal"; OSRC_SCR_ENGINE=""
   OSRC_SCR_KIND=""; OSRC_SCR_CMD=""; OSRC_SCR_PATH=""; OSRC_SCR_SEL=""; OSRC_SCR_SCOPE=""
   OSRC_SCR_COMPOSER=""; OSRC_SCR_COMPOSER_FOUND=0; OSRC_SCR_HIST_END=-1; OSRC_SCR_GENERIC=0
+  OSRC_SCR_LIMIT_DETAIL=""; OSRC_SCR_PANE_DEAD=""
 }
 _osrc_scr_set() { OSRC_SCR_STATE="$1"; OSRC_SCR_EVIDENCE="$(_osrc_scr_trim "$2")"; }
 
@@ -480,8 +485,111 @@ _osrc_scr_generic() {
       *"esc to interrupt"*|*"esc twice to interrupt"*|*"Thinking"*|*"Running"*|*"⠋"*|*"⠙"*|*"⠹"*|*"⠸"*|*"⠼"*|*"⠴"*|*"⠦"*|*"⠧"*|*"⠇"*|*"⠏"*) _osrc_scr_set working "$l"; return 0 ;;
     esac
   done
+  # A bare prompt glyph at the very bottom stays `idle` even with a busy marker further up: the
+  # wider scan below may only rescue `unknown`, never override a proven-ready prompt.
   case "$last" in *'$'|*'$ '|*'%'|*'% '|*'>'|*'> '|*'❯'|*'❯ '|*'#') _osrc_scr_set idle "$last"; return 0 ;; esac
+  # Wider tail for engines whose busy chrome this reader does not know -- the stall-storm shape: a
+  # healthy agent in an unrecognized layout sat `unknown`, the screen hash froze for the confirm
+  # window, and the lane woke as stalled. Structural signals only (interrupt hints, "Verb… (detail)"
+  # rows, spinner-led status lines), never bare prose words; and a marker counts only BELOW the
+  # last turn-completion summary, so the same frame above a `· done`/`Worked for` row stays
+  # scrollback from a finished turn rather than proof of life.
+  local done_at=-1 t
+  lo=$((n - 12)); [ "$lo" -ge 0 ] || lo=0
+  i="$lo"
+  while [ "$i" -lt "$n" ]; do
+    case "${_SCR_L[$i]}" in *"· done"*|*"Worked for"*) done_at=$i ;; esac
+    i=$((i + 1))
+  done
+  i=$((n - 4))
+  while [ "$i" -ge "$lo" ] && [ "$i" -gt "$done_at" ]; do
+    l="${_SCR_L[$i]}"
+    case "$l" in
+      *"esc to interrupt"*|*"esc twice to interrupt"*|*"ctrl+c to interrupt"*|*"ctrl+c:"*|\
+      *"… ("*|*"Working ("*) _osrc_scr_set working "$l"; return 0 ;;
+    esac
+    t="$(_osrc_scr_trim "$l")"
+    case "$t" in
+      "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*|"⣻"*|"⣽"*|"⣟"*|"⡿"*|"⢿"*|"⣷"*|"⣯"*|"⠿"*|"⢰"*|"⠀"*|\
+      "✢"*|"✶"*|"✳"*|"✻"*|"✽"*|"●"*|"◐"*|"◓"*|"◑"*|"◒"*)
+        case "$t" in
+          *"· done"*|*"Worked for"*) ;;
+          *[A-Za-z]*) case "$t" in *…*|*"..."*|*"("*) _osrc_scr_set working "$t"; return 0 ;; esac ;;
+        esac ;;
+    esac
+    i=$((i - 1))
+  done
   _osrc_scr_set unknown "no recognized signal in tail"
+}
+
+# ---- rate limits / quota -------------------------------------------------------------------------
+# A lane parked on a provider limit cannot take a turn until a clock fires; whatever the composer
+# looks like the honest state is `limit` — never idle/composer/unknown, and never `stalled` (the
+# incident: hundreds of "screen unrecognised" stalls buried the lanes actually parked on quota).
+# Only banner-shaped lines count, read over the history region (OSRC_SCR_HIST_END when the engine
+# has a composer box, else the live tail): strict engine phrases anywhere, or a warning/error
+# prefix plus a blocking verb. Prose and tool output never match: ⏺/❯/›/>-led lines are skipped,
+# and a ⎿ result line under a ⏺ tool-call header is the command's own output, not a banner.
+_osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL when the live region shows a limit banner
+  local end lo i t tl bi="" phrase="" secs="" ep="" now
+  end="${OSRC_SCR_HIST_END:--1}"
+  case "$end" in ''|-*|*[!0-9]*) end=$((_SCR_N - 1)) ;; esac
+  [ "$end" -ge 0 ] || return 1
+  lo=$((end - 13)); [ "$lo" -ge 0 ] || lo=0
+  i="$end"
+  while [ "$i" -ge "$lo" ]; do
+    t="$(_osrc_scr_trim "${_SCR_L[$i]}")"
+    case "$t" in ""|"⏺"*|"❯"*|"›"*|">"*) i=$((i - 1)); continue ;; esac
+    case "$t" in "⎿"*)
+      if [ "$i" -gt 0 ]; then
+        case "${_SCR_L[$((i - 1))]:-}" in *"⏺"*"("*) i=$((i - 1)); continue ;; esac
+      fi ;;
+    esac
+    tl="$(printf '%s' "$t" | tr 'A-Z' 'a-z')"
+    case "$tl" in
+      *"you've hit your usage limit"*|*"you have hit your usage limit"*|*"you've hit your limit"*|\
+      *"you have hit your limit"*|*"hit your usage limit"*|*"hit your weekly limit"*|\
+      *"hit your rate limit"*|*"hit your plan limit"*|*"usage limit reached"*|*"usage limit exceeded"*|\
+      *"usage limit hit"*|*"weekly limit reached"*|*"rate limit reached"*|*"rate limit exceeded"*|\
+      *"rate limit hit"*|*"plan limit reached"*|*"plan usage limit reached"*|*"quota reached"*|\
+      *"quota exceeded"*|*"quota exhausted"*|*"individual quota reached"*|*"exceeded your quota"*|\
+      *"exceeded your usage limit"*|*"exceeded your plan"*|*"insufficient credits"*|\
+      *"insufficient funds"*|*"insufficient balance"*|*"insufficient quota"*|*"credit balance is too low"*|\
+      *"out of credits"*|*"resource_exhausted"*|*"resource exhausted"*) bi="$i" ;;
+    esac
+    if [ -z "$bi" ]; then
+      case "$t" in
+        "⚠"*|"⛔"*|"⎿"*|"!"*|"Error"*|"ERROR"*|"FATAL"*|"WARNING"*|"WARN"*|"✖"*|"✗"*|"×"*|"⨯"*|"■"*)
+          case "$tl" in
+            *reach*|*exceed*|*exhaust*|*"hit your"*|*"hit the rate"*|*"hit the usage"*|*"hit the plan"*|\
+            *"hit the limit"*|*"try again"*|*"rate limited"*|*"usage limit"*|*"rate limit"*|\
+            *"plan limit"*|*blocked*|*"cannot"*|*"can't"*|*denied*|*throttl*|*"too many"*|*insufficient*|*credit*|*"429"*)
+              bi="$i" ;;
+          esac ;;
+      esac
+    fi
+    [ -n "$bi" ] && break
+    i=$((i - 1))
+  done
+  [ -n "$bi" ] || return 1
+  # The reset the banner states, verbatim: "Resets in 1h13m1s", "try again at 22:28", "resets 3pm".
+  phrase="$(printf '%s\n' "$t" "${_SCR_L[$((bi + 1))]:-}" "${_SCR_L[$((bi + 2))]:-}" | LC_ALL=C grep -oiE \
+    '(resets?|refreshes|retry(ing)?|back ?off|try again)[[:space:]]+(in|at)[[:space:]]+([0-9]+[smhd]([[:space:]]+[0-9]+[smhd])+|[0-9]+[smhd]([0-9]+[smhd])*|[0-9]{1,2}:[0-9]{2}([[:space:]]*[ap]m)?|[0-9]{1,2}[[:space:]]*[ap]m|[0-9]+[[:space:]]*(hours?|hrs?|minutes?|mins?|seconds?|secs?)([[:space:]]+[0-9]+[[:space:]]*(hours?|hrs?|minutes?|mins?|seconds?|secs?))*)' | head -1)"
+  phrase="$(printf '%s' "$phrase" | sed -E 's/[[:space:]]+$//')"
+  if [ -z "$phrase" ]; then
+    phrase="$(printf '%s\n' "$t" "${_SCR_L[$((bi + 1))]:-}" "${_SCR_L[$((bi + 2))]:-}" | LC_ALL=C grep -oiE \
+      '(resets?|reset)[[:space:]]+[0-9]{1,2}:[0-9]{2}|(resets?|reset)[[:space:]]+[0-9]{1,2}[[:space:]]*[ap]m([^a-z]|$)' | head -1)"
+    phrase="$(printf '%s' "$phrase" | sed -E 's/[[:space:]]+$//; s/([^a-zA-Z])$//')"
+  fi
+  if [ -n "$phrase" ] && type _lane_limit_reset_secs >/dev/null 2>&1; then
+    secs="$(_lane_limit_reset_secs "$(printf '%s' "$phrase" | sed -E 's/^(refreshes|retrying|retry|back ?off)([[:space:]]+(in|at)[[:space:]])/resets \3 /I')" 2>/dev/null)"
+    case "$secs" in ''|*[!0-9]*) secs="" ;; *)
+      now="${OSRC_NOW:-$(date +%s)}"; ep=$(( now + secs ))
+      phrase="$phrase (epoch $ep)" ;;
+    esac
+  fi
+  OSRC_SCR_LIMIT_DETAIL="$(printf '%s' "$t" | cut -c1-100)${phrase:+ · reset: $phrase}"
+  return 0
 }
 
 # 0 when <snippet> (whitespace-collapsed) appears in the history region above the composer.
@@ -527,6 +635,12 @@ _osrc_screen_analyze_text() { # [engine]
     gemini) _osrc_scr_gemini ;;
     *) _osrc_scr_generic ;;
   esac
+  # A limit banner outranks every quiet state: the composer can look ready while the provider is
+  # parked. Actionable states (approval/question) and proven activity (working) keep precedence.
+  case "$OSRC_SCR_STATE" in
+    idle|composer|unknown)
+      if _osrc_scr_limit; then _osrc_scr_set limit "$OSRC_SCR_LIMIT_DETAIL"; fi ;;
+  esac
   return 0
 }
 
@@ -545,13 +659,27 @@ _osrc_screen_capture() { # <pane> -> raw ANSI capture; rc 2 when the pane cannot
   printf '%s\n' "$cap"
 }
 
+# Pane liveness: tmux keeps a dead pane's last frame on screen (remain-on-exit), so a successful
+# capture can still describe a corpse that will never change again. -> rc 0 proven dead | rc 1
+# proven alive | rc 2 cannot tell (no tmux, an old tmux without pane_dead, an odd answer). Only a
+# positive "1" counts as dead; everything else falls through to the normal screen verdict.
+_osrc_screen_pane_dead() { # <pane>
+  local d
+  d="$(tmux display-message -p -t "$1" '#{pane_dead}' 2>/dev/null)" || return 2
+  case "$(_osrc_scr_trim "$d")" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
+}
+
 osrc_screen_state() { # <pane> [engine]
   local LC_ALL; LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL
   local pane="$1" eng="${2:-}" cap
   [ -n "$eng" ] || eng="$(_osrc_screen_engine_of "$pane")"
   if ! cap="$(_osrc_screen_capture "$pane")"; then printf 'unknown\npane capture failed: %s\n' "$pane"; return 0; fi
   _osrc_screen_analyze_text "$eng" <<<"$cap"
-  printf '%s\n%s\n' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"
+  if _osrc_screen_pane_dead "$pane"; then
+    printf 'dead\npane process dead; last frame before exit: %s\n' "$OSRC_SCR_EVIDENCE"
+  else
+    printf '%s\n%s\n' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"
+  fi
 }
 
 osrc_screen_report() { # <pane> [engine] -> KEY=value lines (values are single-line; CMD newlines -> ' ; ')
@@ -560,17 +688,24 @@ osrc_screen_report() { # <pane> [engine] -> KEY=value lines (values are single-l
   [ -n "$eng" ] || eng="$(_osrc_screen_engine_of "$pane")"
   if ! cap="$(_osrc_screen_capture "$pane")"; then printf 'STATE=unknown\nEVIDENCE=pane capture failed\n'; return 0; fi
   _osrc_screen_analyze_text "$eng" <<<"$cap"
+  _osrc_screen_pane_dead "$pane"; OSRC_SCR_PANE_DEAD=$?
+  case "$OSRC_SCR_PANE_DEAD" in 0) OSRC_SCR_PANE_DEAD=1; OSRC_SCR_STATE=dead
+    OSRC_SCR_EVIDENCE="pane process dead; last frame before exit: $OSRC_SCR_EVIDENCE" ;;
+    1) OSRC_SCR_PANE_DEAD=0 ;; *) OSRC_SCR_PANE_DEAD=? ;;
+  esac
   _osrc_screen_report_print
 }
 _osrc_screen_report_print() {
-  printf 'STATE=%s\nENGINE=%s\nEVIDENCE=%s\nKIND=%s\nCMD=%s\nPATH=%s\nSEL=%s\nSCOPE=%s\nCOMPOSER=%s\n' \
+  printf 'STATE=%s\nENGINE=%s\nEVIDENCE=%s\nKIND=%s\nCMD=%s\nPATH=%s\nSEL=%s\nSCOPE=%s\nCOMPOSER=%s\nPANE_DEAD=%s\n' \
     "$OSRC_SCR_STATE" "$OSRC_SCR_ENGINE" "$OSRC_SCR_EVIDENCE" "$OSRC_SCR_KIND" \
-    "$(printf '%s' "$OSRC_SCR_CMD" | awk 'NR>1{printf " ; "} {printf "%s", $0}')" "$OSRC_SCR_PATH" "$OSRC_SCR_SEL" "$OSRC_SCR_SCOPE" "$OSRC_SCR_COMPOSER"
+    "$(printf '%s' "$OSRC_SCR_CMD" | awk 'NR>1{printf " ; "} {printf "%s", $0}')" "$OSRC_SCR_PATH" "$OSRC_SCR_SEL" "$OSRC_SCR_SCOPE" "$OSRC_SCR_COMPOSER" "${OSRC_SCR_PANE_DEAD:-?}"
 }
 
 # ---- legacy JSON classifier (session read --state, control receipts) -----------------------------
 # Kept as the JSON face of the same reader so there is ONE set of rules. Mapping:
 #   approval|question -> waiting-approval, working -> working, idle|composer -> idle, else unknown.
+#   `limit` deliberately lands on unknown here: the legacy vocabulary has no "blocked on quota"
+#   value, and reporting `idle` would invite a send into a lane that cannot take a turn.
 _pane_state_json() { # <state> <evidence>  -> {"state","evidence"}
   local state="$1" evidence="$2"
   if have jq; then
