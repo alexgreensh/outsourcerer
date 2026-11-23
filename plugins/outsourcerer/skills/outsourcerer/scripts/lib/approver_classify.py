@@ -7,8 +7,9 @@ matched AND EVERY segment of the command is in the safe set. Anything not unders
 The classifier does not approve a command NAME with arbitrary
 flags, and does not treat a token as a literal path when the shell would expand it.
 - Anything the shell expands before running is held up front: any `$`, backticks, braces, `~user`
-  / `~+` / `~-`, `=~`, a truncated `…`, a trailing operator, more than one line, any mention of
-  OSRC_HOME.
+  / `~+` / `~-`, `=~`, a truncated `…`, a trailing operator, a carriage return, any mention of
+  OSRC_HOME. A multi-line command is judged line by line; any newline that is not a plain command
+  boundary (quotes, continuation, here-document, unfinished operator) holds the whole command.
 - Every approved command has a flag allowlist. An unknown flag (including attached forms such as
   `-XPUT`, `-osrc/x`, `--output=...`) holds.
 - Env prefixes on a command hold unless the name is inert (TZ, LANG, LC_*, NO_COLOR, COLUMNS,
@@ -36,6 +37,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))   # -I drops the script dir
 from approver_tables import *  # noqa: E402,F401,F403  (tables only; logic stays here)
 from approver_tables import COLOR, Spec  # noqa: E402
+from approver_lines import LineHold, logical_lines  # noqa: E402
 HOME = os.path.expanduser("~")
 FOLD = sys.platform == "darwin"   # macOS file systems are case-insensitive by default
 
@@ -165,8 +167,10 @@ def outside_single_quotes(cmd: str) -> str:
     return "".join(out)
 
 
-def pre_checks(cmd: str) -> None:
-    if "\n" in cmd or "\r" in cmd:
+def pre_checks(cmd: str, multiline: bool = False) -> None:
+    if "\r" in cmd:
+        raise Hold("carriage return in command")
+    if not multiline and "\n" in cmd:
         raise Hold("multi-line command (continuation lines, heredoc or wrapped text)")
     bare = outside_single_quotes(cmd)
     if "`" in bare or "$(" in bare or "<(" in bare or ">(" in bare:
@@ -207,8 +211,9 @@ def split_segments(cmd: str):
                 raise Hold("subshell")
             if t == "&":
                 raise Hold("background job")
-            if cur:
-                segs.append((cur, prev))
+            if not cur:
+                raise Hold("operator without a command before it: " + t)
+            segs.append((cur, prev))
             cur, prev = [], t
         else:
             cur.append(t)
@@ -818,25 +823,31 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         cmd = cmd.strip()
         if not cmd:
             raise Hold("no command visible")
-        pre_checks(cmd)
+        pre_checks(cmd, multiline=True)
         if sealed_runner(cmd, cwd, roots[0]):
             return True, "test/build:sealed runner with verified OS isolation"
+        lines = logical_lines(cmd)
+        if not lines:
+            raise Hold("no command visible")
         rules, cur = [], cwd
-        segs = split_segments(cmd)
-        # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
-        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
-        if [t for t, _ in segs] == [["compgen", "-e"]]:
-            return True, "read-only:env names (compgen -e)"
-        for seg, prev in segs:
-            rule, cur = classify_segment(seg, prev, cur, roots)
-            rules.append(rule)
+        single = len(lines) == 1
+        for line in lines:
+            pre_checks(line)
+            segs = split_segments(line)
+            # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
+            # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
+            if single and [t for t, _ in segs] == [["compgen", "-e"]]:
+                return True, "read-only:env names (compgen -e)"
+            for seg, prev in segs:
+                rule, cur = classify_segment(seg, prev, cur, roots)
+                rules.append(rule)
         if not rules:
             raise Hold("empty command")
         if any(r.startswith("test/build") for r in rules):
             # A test or build script can run arbitrary code with the lane's full rights.
             raise Hold("test and build runs wait for a person in this version")
         return True, " + ".join(dict.fromkeys(rules))
-    except Hold as h:
+    except (Hold, LineHold) as h:
         return False, str(h)
 
 

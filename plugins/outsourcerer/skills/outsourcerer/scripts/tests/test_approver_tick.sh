@@ -78,7 +78,7 @@ CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
 
 # other engines' real prompts
-for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "codex|cx-approval|0" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
+for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "codex|cx-approval|0" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
   PROV="${spec%%|*}"; rest="${spec#*|}"; f="${rest%%|*}"; want="${rest#*|}"
   rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
   [ "$PROV" = cc ] || AFTER="$FX/dv-idle-after-work.ansi"

