@@ -312,6 +312,34 @@ gate3="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   _osrc_free_kb() { printf "51200"; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'refusing new lane launches' <<<"$gate3" && ok "stale ack cannot match a changed list (finding 8)" || bad "gate passed on stale ack: $gate3"
+
+echo "=== disk gate vs failed state refresh (issue 86) ==="
+# The gate's refresh write can fail exactly when the gate runs (full disk,
+# unwritable state dir). The ack decision must come from the live scan, never
+# from a state.json the refresh failed to replace. Setup: ack the CURRENT list
+# (state.json and ask-ack agree), make the state dir unwritable, then add one
+# more ASK item so the live list no longer matches either record.
+run cleanup --ack >/dev/null 2>&1
+chmod a-w "$OSRC_HOME/cleanup"
+mkdir -p "$OSRC_HOME/jobs/job-later"; echo blocked > "$OSRC_HOME/jobs/job-later/status"; age2h "$OSRC_HOME/jobs/job-later"
+manifest "$OSRC_HOME/jobs/job-later" job job-later ""
+gate4="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "51200"; }
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+grep -q 'refusing new lane launches' <<<"$gate4" && ok "failed refresh cannot admit a stale ack (issue 86)" || bad "gate admitted a stale ack after failed refresh: $gate4"
+# The mirror image: with the dir still unwritable, re-ack the current list (the
+# ack write goes to a writable path), and the gate must still admit — a failed
+# refresh alone must not deadlock launches the user has acknowledged.
+chmod u+w "$OSRC_HOME/cleanup"
+run cleanup --ack >/dev/null 2>&1
+chmod a-w "$OSRC_HOME/cleanup"
+gate5="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "51200"; }
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+chmod u+w "$OSRC_HOME/cleanup"
+grep -q 'gate-rc=0' <<<"$gate5" && ok "failed refresh still admits an ack that matches the live list (issue 86)" || bad "gate deadlocked on failed refresh: $gate5"
 echo "=== 0-ASK disk pressure (finding 8) ==="
 mkdir -p "$TMP/osrc2/jobs"
 g0="$(OSRC_HOME="$TMP/osrc2" OSRC_SOURCED=1 bash -c '

@@ -384,6 +384,14 @@ _osrc_cleanup_items() {
   done
 }
 
+# _osrc_cleanup_ask_hash <items-json-lines> -> cksum of the sorted ASK path+kind
+# list. THE single definition: the state file, --ack, the tick and the disk gate
+# must agree on what "the current ASK list" hashes to, or an ack can silently
+# stop matching the live list (issue #86).
+_osrc_cleanup_ask_hash() {
+  printf '%s' "$1" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}'
+}
+
 # _osrc_cleanup_state_write <items-json-lines> -> state.json for the disk gate.
 _osrc_cleanup_state_write() {
   local items="$1" free_kb free_gb ask_hash n_safe n_ask
@@ -392,7 +400,7 @@ _osrc_cleanup_state_write() {
   free_gb=$(( free_kb / 1048576 ))
   n_safe="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; n_safe="${n_safe:-0}"
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
-  ask_hash="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+  ask_hash="$(_osrc_cleanup_ask_hash "$items")"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 1
   jq -cn --argjson ts "$(date +%s)" --argjson fg "$free_gb" --argjson t "$n_safe" --argjson a "$n_ask" --arg h "$ask_hash" \
     '{ts:$ts, free_gb:$fg, safe:$t, ask:$a, ask_hash:$h}' > "$(_osrc_cl_state).tmp.$$" 2>/dev/null \
@@ -498,7 +506,7 @@ _osrc_cleanup_ack() {
   items="$(_osrc_cleanup_items --no-size)"
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
   [ "${n_ask:-0}" -gt 0 ] || { echo "[outsourcerer] cleanup: no ASK items — nothing to acknowledge."; return 0; }
-  ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+  ah="$(_osrc_cleanup_ask_hash "$items")"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || die "cannot create $(_osrc_cl_root)"
   printf '%s\n' "$ah" > "$(_osrc_cl_ack)"
   echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below ${OSRC_DISK_MIN_GB:-10}GB free until reviewed."
@@ -520,7 +528,7 @@ _osrc_cleanup_tick_run() {
   # Review finding 6: until the SAFE-verdict findings are proven the heartbeat
   # SCANS and WAKES only — it never applies. Apply stays a typed `cleanup --apply`.
   if [ "$n_ask" -gt 0 ] && type _wake_append >/dev/null 2>&1; then
-    ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+    ah="$(_osrc_cleanup_ask_hash "$items")"
     alert_dir="$(_osrc_cl_root)"; mkdir -p "$alert_dir" 2>/dev/null || return 0
     last_alerted="$(cat "$alert_dir/.alerted" 2>/dev/null)"
     if [ "$ah" != "$last_alerted" ]; then
@@ -579,27 +587,31 @@ _osrc_cleanup_tick() {
 # pressure it rescans live: the tick's state file can be an hour old, and an ack
 # must match the list as it is now (review finding 8).
 _osrc_disk_gate() {
-  local free_kb free_gb state ah ch an ns items top
+  local free_kb free_gb ah ch an ns items top
   free_kb="$(_osrc_free_kb)"
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
   [ "$free_gb" -lt "${OSRC_DISK_MIN_GB:-10}" ] || return 0
   items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
+  # Best-effort refresh for the tick and other readers. The gate itself decides
+  # from the LIVE scan below, never from the persisted file: when this write
+  # fails (full disk, unwritable state dir -- exactly when the gate runs) a
+  # stale state.json would let an old ack admit a launch after the ASK list
+  # changed (issue #86).
   _osrc_cleanup_state_write "$items" || true
-  state="$(_osrc_cl_state)"
-  if [ ! -f "$state" ]; then
+  if ! have jq 2>/dev/null; then
     die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and cleanup state is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
   fi
-  an="$(jq -r '.ask // 0' "$state" 2>/dev/null)"
+  an="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; an="${an:-0}"
   if [ "${an:-0}" -gt 0 ]; then
-    ah="$(jq -r '.ask_hash // ""' "$state" 2>/dev/null)"
+    ah="$(_osrc_cleanup_ask_hash "$items")"
     ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
     [ -n "$ah" ] && [ "$ah" = "$ch" ] && return 0
     die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
   fi
   # ASK list is empty: never demand an ack of nothing. Say the disk is full and
   # name what is using it (review finding 8).
-  ns="$(jq -r '.safe // 0' "$state" 2>/dev/null)"
+  ns="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; ns="${ns:-0}"
   top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
   if [ "${ns:-0}" -gt 0 ]; then
     die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}"
