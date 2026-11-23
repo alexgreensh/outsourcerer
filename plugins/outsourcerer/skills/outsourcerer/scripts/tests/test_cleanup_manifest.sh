@@ -367,6 +367,12 @@ XB="$(git -C "$BR" rev-parse outsourcerer/wt-lo)"
 git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
 [ "$(bm "$BR" outsourcerer/wt-main "")" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
 [ "$(bm "$BR" outsourcerer/wt-main "not-a-sha")" = "rc=0" ] && ok "garbage base does not break main containment" || bad "garbage base broke verdict"
+# No main-ish ref at all (trunk-named repo, no remotes) under the engine's `set -u`: an empty bases
+# array must not abort with "unbound variable" (bash 3.2), and the verdict is a plain ASK.
+RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
+trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk ""; echo "rc=$?"' _ "$RT" 2>&1)"
+[ "$(tail -1 <<<"$trk")" = "rc=1" ] && ! grep -qi 'unbound' <<<"$trk" \
+  && ok "no main-ish refs and empty base: plain ASK, no unbound-variable abort" || bad "empty bases array mishandled: $trk"
 # End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
 R3="$TMP/repo-base2"; mkrepo "$R3"
 git -C "$R3" checkout -qb feat; printf 'lo\n' > "$R3/lo.txt"; git -C "$R3" add lo.txt; git -C "$R3" commit -qm lo
