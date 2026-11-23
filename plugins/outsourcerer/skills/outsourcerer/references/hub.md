@@ -234,8 +234,11 @@ deleted; `lib/cleanup.sh` is the authority when this summary and the code disagr
 
 Disk gate: while free disk is below `OSRC_DISK_MIN_GB` (10), new lane launches (`bg`, routed
 delegations, `session start`) are refused unless there are ASK items and the current ASK list has
-been acknowledged (`cleanup --ack`; the ack must match the list as it is now). If no cleanup state
-file exists after the rescan, it refuses as "cleanup state is unknown". With no ASK items it
+been acknowledged (`cleanup --ack`; the ack must match the ASK hash in `cleanup/state.json`). The
+gate rescans and rewrites that file first but ignores a failed write, so when it cannot be replaced
+(disk full, unwritable directory) the gate reads the previous count and hash, and an ack of the old
+list can still admit a launch. If no cleanup state file exists after the rescan, it refuses as
+"cleanup state is unknown". With no ASK items it
 still refuses, and says whether SAFE items can be applied or the space is held outside Outsourcerer.
 `OSRC_DISK_MIN_GB=0` overrides.
 
