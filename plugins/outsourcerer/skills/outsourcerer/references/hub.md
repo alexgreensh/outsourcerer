@@ -203,19 +203,29 @@ and it renders fully with the network off. CJK stays on system fonts.
 
 ## Cleanup manifest, SAFE/ASK rules, disk gate (`cleanup`, lib/cleanup.sh)
 
-Every durable thing Outsourcerer creates gets one line in `$OSRC_HOME/created.jsonl`
+The manifest records what Outsourcerer leaves behind: jobs, background worktrees and branches,
+fanouts, loops and autodetach logs, one line each in `$OSRC_HOME/created.jsonl`
 (`{"path","kind","session","repo","ts"}`). `cleanup` with no target is a DRY RUN over that manifest:
 each item gets its size and a verdict, SAFE or ASK (with a reason). `cleanup --apply` deletes SAFE
 items only and logs each deletion to `$OSRC_HOME/cleanup.log`. `cleanup --ack` records that the user
 has seen the current ASK list. `cleanup <job-id|fanout-gid> [--force]` keeps its old meaning: remove
-that target's git worktree(s).
+that target's git worktree(s). Auto-isolated cloud-gate copies are not in the manifest: a run that
+the gate moved into `$OSRC_HOME/isolated/<run-id>/` (receipt `worktree.json`) plus its repo worktree
+at `<repo>/.outsourcerer/worktrees/<id>` on branch `outsourcerer/<id>` is invisible to `cleanup`
+with no target and to the disk gate; remove it with `cleanup <id> --force`, the command the
+cloud-gate banner prints.
 
 SAFE requires ALL of: owning session done or gone, older than 1h, no process has a file open under
 it, path under the manifest's recorded root (the age and open-file checks do not apply to `branch`
 entries, which instead need a valid branch name and a resolvable repo). Worktrees additionally need a
 clean git status (untracked files count) and no ignored files other than a top-level
-`node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree; worktrees and branches need their
-tip contained in the remote or main, or in a merged PR whose head is that tip. Fanout entries need
+`node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree;
+worktrees and branches need their tip contained in the recorded base commit (the `base_sha` the
+worktree was cut from), in one of the main-ish refs (`origin/HEAD`, `origin/main`, `origin/master`,
+`main`, `master`, `upstream/main`, `upstream/master`), or in a merged PR whose head is that tip.
+The base-commit case means a worktree with no new commits past its base counts as preserved even
+when no remote holds that base, so a local-only base branch that was deleted can lose its last ref
+on `cleanup --apply`. Fanout entries need
 every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
 result collected; a clean finish whose result was never collected stays ASK at any age, and only a
 non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
