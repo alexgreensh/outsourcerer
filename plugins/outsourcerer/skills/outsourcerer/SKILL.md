@@ -64,7 +64,7 @@ The exclude list (`brief` prints it; `exclude add|rm|ls`) filters visible model 
 
 `run`/`explore` (read-only) · `research` (sandboxed exec, devin/codex) · `edit` (auto-accept edits) · `yolo` (all tools, no sandbox; use sparingly). Wrap any verb in `bg` for supervised background work (poll `status`), or `fanout` for N parallel jobs.
 
-**`session` is the default delegation mode.** You act as the user toward each delegate: `session read` shows its real work, `session send "…"` steers it and answers its approval prompts so it never stalls, `session model <name>` switches its model (`session model fable` re-pins a Fable session that drifted to Opus; run it while idle), `session stop` ends it. `session start --perm safe` reduces approval-prompt toil using each engine's own pre-allow rung: claude gets an explicit allow-list (read-only/git-read/test-build commands + workspace edits; deletes, redirects, exec-flags and everything else still prompt), devin/codex/cursor get their model- or classifier-judged auto rungs, agy and gemini-cli get their vendor auto modes, and engines with no faithful rung (droid, hermes, cline, pi) launch with default permissions and the banner says so. `--perm default` (the default) launches exactly as before, and the chosen profile is recorded so `session control relaunch`/`session effort` reproduce it. The reason: a headless `bg`/`fanout` delegate that hits an approval wall goes `permission-blocked` and dies unseen. Use headless only for a non-interactive, CI, or detached caller, or a wide fan-out of independent one-shot jobs, and say so. Fable-pin, heartbeat, Windows broker, claims: `references/mechanism.md`.
+**`session` is the default delegation mode.** You act as the user toward each delegate: `session read` shows its real work, `session send "…"` steers it and answers its approval prompts so it never stalls, `session model <name>` switches its model (`session model fable` re-pins a Fable session that drifted to Opus; run it while idle), `session stop` ends it. `session start --perm safe` reduces approval-prompt toil using each engine's own pre-allow rung: claude gets an explicit allow-list (read-only/git-read/test-build commands + workspace edits; deletes, redirects, exec-flags and everything else still prompt), devin/codex/cursor get their model- or classifier-judged auto rungs, agy and gemini-cli get their vendor auto modes, and engines with no faithful rung (droid, hermes, cline, pi) launch with default permissions and the banner says so. `--perm default` (the default) launches exactly as before, and the chosen profile is recorded so `session control relaunch`/`session effort` reproduce it. The reason: a headless `bg`/`fanout` delegate that hits an approval wall goes `permission-blocked` and dies unseen. Use headless only for a non-interactive, CI, or detached caller, or a wide fan-out of independent one-shot jobs, and say so. Fable-pin, heartbeat, claims: `references/mechanism.md`; Windows broker: `references/jobs-and-safety.md`.
 
 ## Loops: work that has to be checked, not just done
 
@@ -155,10 +155,9 @@ For multi-step work, use a **plan**: disk-backed tasks receive a supplied spec a
 - `references/agentic-local.md`: local models driven inside the harness
 - `references/vocabulary-hygiene.md`: `sanitize` and fallback-trigger vocabulary
 - `references/factory.md`: plans, done contract, held decisions, merge gate, flows, crash recovery
-- `references/hub.md`: `hub export`/`hub serve`: Mission Control state, loopback token server, answer files
 - `references/factory-tasks-cli.md`: every `plan` and `task` flag, the brief, plan files
 - `references/factory-land-cli.md`: every `land` flag, done-contract rules, `evidence.json`
 - `references/factory-flow-cli.md`: `plan run`, `flow`, and the flow JSON format
 - `references/lanes.md`: `lane msg`/`lane inbox` lane-to-lane messages, `team score`/`record`/`budget`
-- `references/hub.md`: the `team` field `hub export` embeds
-- `references/hub.md`: Mission Control `hub export`/`hub serve`, the cleanup manifest, SAFE/ASK rules, disk gate
+- `references/remote-and-review.md`: remote lanes, READY rule, one-reviewer queue, review rounds, `guards run`
+- `references/hub.md`: Mission Control `hub export`/`hub serve` state, loopback token server, answer files, the embedded `team` field, the cleanup manifest, SAFE/ASK rules, disk gate
