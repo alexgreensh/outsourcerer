@@ -85,6 +85,37 @@ distinct handling:
   records an actionable reason; re-run in the foreground (`--wait`) or a shell that allows background
   processes. A stillborn/meta-less job still appears in `status --json` (never silently dropped).
 
+## Disk pressure policy
+
+Three floors, all derived from the volume holding `$OSRC_HOME` (so a big disk is not treated like a
+small one): **launch** = max(10GB, 5% of volume) — no new lane launches under it; **pause** =
+max(4GB, 2%) — running supervised jobs get `SIGSTOP` under it; **critical** = ~0.5% clamped to
+1–4GB — nothing launches under it, not even with `--ack` or `OSRC_DISK_OK`. A **resume** floor sits
+between pause and launch so a hovering disk cannot flap jobs.
+
+While a job is paused its supervisor is frozen too (no watchdog wall-clock arm can fire), its
+`out.log` gets a `>>> [outsourcerer] disk-policy:` keepalive line, and the owner is woken once per
+episode (`disk-paused`/`disk-resumed`/`disk-critical` events in the wake queue, throttled by
+`OSRC_DISK_WAKE_SECS`, default 300s).
+Nothing is ever killed, and only processes recorded in `$OSRC_JOBS/*/{pid,pgid,supervisor_pid}` with
+a proven pid+start-time match are signalled — a foreign or unverifiable process is never touched.
+When free space recovers past the resume floor everything is `SIGCONT`ed and the marker removed; the
+monitor also resumes whatever it paused before it exits. A detached monitor (`$OSRC_HOME/disk-policy/`)
+is armed on every launch path and self-terminates after `OSRC_DISK_MONITOR_IDLE_TICKS` (default 40)
+empty ticks at `OSRC_DISK_POLICY_POLL` (default 30s). Under pressure it first reclaims ONLY
+manifest items that are verdict-SAFE **and** kind `worktree`/`branch` — artifacts of a lane proven
+merged — logging each deletion to `cleanup.log`; jobs, loops, autodetach logs, tmp dirs, every ASK
+item, and all user data stay manual (`cleanup --apply` / `--ack`). Each pressure episode writes one
+report (free/total, floors, swap, biggest dirs under `OSRC_HOME`, reclaimable counts) to
+`disk-policy/monitor.log`.
+
+Overrides, all explicit and per-command: `OSRC_DISK_MIN_GB` replaces the launch floor,
+`OSRC_DISK_PAUSE_GB`/`OSRC_DISK_CRITICAL_GB` the others, `OSRC_DISK_OK=1` launches once under the
+launch floor (logged to `disk-policy/override.log`, never below critical), `OSRC_DISK_MIN_GB=0`
+disables launch blocking entirely, `OSRC_DISK_RECLAIM_MAX` bounds auto-reclaim deletes per tick
+(default 10, 0 disables), and `OSRC_DISK_POLICY_OFF=1` restores the legacy flat 10GB gate with no
+pause/reclaim.
+
 ## Post-hoc classification (classify)
 
 After a job terminates, especially a `wedged`/`timeout`/`failed` one, the orchestrator needs to

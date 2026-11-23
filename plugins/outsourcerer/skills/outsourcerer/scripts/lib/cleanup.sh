@@ -573,38 +573,71 @@ _osrc_cleanup_tick() {
   return 0
 }
 
-# _osrc_disk_gate -> refuse new lane launches while free disk < OSRC_DISK_MIN_GB (10)
-# and the CURRENT ASK list has not been acknowledged. Called from _bg_launch,
-# route_delegate and session start; dies with the fix when it refuses. Under
-# pressure it rescans live: the tick's state file can be an hour old, and an ack
-# must match the list as it is now (review finding 8).
+# _osrc_disk_gate -> refuse new lane launches under the disk-policy floors
+# (lib/disk_policy.sh): launch = max(OSRC_DISK_MIN_GB|10GB, 5% of volume); a lower
+# critical floor is NEVER bypassed — not by --ack and not by OSRC_DISK_OK (the
+# explicit one-command override, logged to disk-policy/override.log). Between the
+# floors an acknowledged ASK list still passes, exactly as before. Called from
+# _bg_launch, route_delegate and session start; dies with the fix when it refuses.
+# Under pressure it rescans live: the tick's state file can be an hour old, and an
+# ack must match the list as it is now (review finding 8). Every call also arms the
+# while-running disk monitor (self-deduping, best-effort).
 _osrc_disk_gate() {
-  local free_kb free_gb state ah ch an ns items top
+  local free_kb free_gb floors launch_kb pause_kb crit_kb launch_gb crit_gb ah ch an ns items top
   free_kb="$(_osrc_free_kb)"
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
-  [ "$free_gb" -lt "${OSRC_DISK_MIN_GB:-10}" ] || return 0
-  items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
-  _osrc_cleanup_state_write "$items" || true
-  state="$(_osrc_cl_state)"
-  if [ ! -f "$state" ]; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and cleanup state is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  # A broken/missing policy must never wedge a session: any surprise falls back to
+  # the legacy flat 10GB launch floor with no critical line.
+  floors="$(_osrc_disk_floors_kb 2>/dev/null)"
+  launch_kb="${floors%% *}"
+  pause_kb="$(printf '%s' "$floors" | awk '{print $2}')"
+  crit_kb="$(printf '%s' "$floors" | awk '{print $3}')"
+  case "$launch_kb" in ''|*[!0-9]*) launch_kb="" ;; esac
+  case "$pause_kb" in ''|*[!0-9]*) pause_kb="" ;; esac
+  case "$crit_kb" in ''|*[!0-9]*) crit_kb="" ;; esac
+  if [ -z "$launch_kb" ] || [ -z "$pause_kb" ] || [ -z "$crit_kb" ]; then
+    launch_kb=10485760; pause_kb=0; crit_kb=0   # legacy flat floor, no critical line
   fi
-  an="$(jq -r '.ask // 0' "$state" 2>/dev/null)"
-  if [ "${an:-0}" -gt 0 ]; then
-    ah="$(jq -r '.ask_hash // ""' "$state" 2>/dev/null)"
+  launch_gb=$(( launch_kb / 1048576 )); crit_gb=$(( crit_kb / 1048576 ))
+  # Arm the while-running watcher on every launch path (it pauses heavy jobs under
+  # the pause floor and reclaims merged-lane artifacts; never kills, never touches
+  # processes Outsourcerer did not launch).
+  type _osrc_disk_monitor_ensure >/dev/null 2>&1 && { _osrc_disk_monitor_ensure || true; }
+  # Critical floor: NOTHING bypasses — not --ack, not OSRC_DISK_OK. Free space first.
+  if [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ]; then
+    die "outsourcerer: free disk is ${free_gb}GB — under the critical floor (${crit_gb}GB); refusing new lane launches, not even with --ack or OSRC_DISK_OK. Free space first: '$0 cleanup --apply', then '$0 cleanup' for what remains. $(_osrc_disk_report_oneline 2>/dev/null)"
+  fi
+  [ "$free_kb" -lt "$launch_kb" ] || return 0
+  # Explicit per-command override: logged once to disk-policy/override.log, never
+  # persisted, never inherited as consent — and still never below the critical floor.
+  if [ "${OSRC_DISK_OK:-0}" = "1" ]; then
+    type _osrc_disk_override_log >/dev/null 2>&1 && { _osrc_disk_override_log "$free_kb" "$launch_kb" || true; }
+    return 0
+  fi
+  items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
+  # Issue #86: the verdict comes from THIS live scan, never the on-disk state file
+  # (which can be an hour stale) and never an ack matched against it. If the state
+  # cannot be refreshed, the file and every stored ack are untrusted -> refuse as
+  # state unknown instead of reading either.
+  if ! _osrc_cleanup_state_write "$items"; then
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and cleanup state could not be refreshed — state unknown, refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  fi
+  an="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; an="${an:-0}"
+  ns="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; ns="${ns:-0}"
+  if [ "$an" -gt 0 ]; then
+    ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
     ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
     [ -n "$ah" ] && [ "$ah" = "$ch" ] && return 0
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
   fi
   # ASK list is empty: never demand an ack of nothing. Say the disk is full and
   # name what is using it (review finding 8).
-  ns="$(jq -r '.safe // 0' "$state" 2>/dev/null)"
   top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
   if [ "${ns:-0}" -gt 0 ]; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}"
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}"
   fi
-  die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or launch with OSRC_DISK_MIN_GB=0 to override."
+  die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or launch once with OSRC_DISK_OK=1 to override (logged, one command only)."
 }
 
 # =============================================================================

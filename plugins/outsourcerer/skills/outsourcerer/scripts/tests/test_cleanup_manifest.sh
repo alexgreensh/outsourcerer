@@ -18,6 +18,8 @@ TMP="$(mktemp -d "${TMPDIR%/}/.cleanup-test.XXXXXX")" || { echo "FAIL: cannot cr
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" XDG_CONFIG_HOME="$TMP/xdg"
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1 OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0
+# Disk-policy monitors spawned by the gate must die fast in tests (1 tick, ~1s).
+export OSRC_DISK_POLICY_POLL=1 OSRC_DISK_MONITOR_IDLE_TICKS=1
 mkdir -p "$HOME" "$OSRC_HOME" "$XDG_CONFIG_HOME" "$OSRC_HOME/jobs"
 printf '[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n' > "$GIT_CONFIG_GLOBAL"
 
@@ -291,7 +293,7 @@ git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/wt-unmerged >/dev/null
 echo "=== ack + disk gate ==="
 gate="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
-  _osrc_free_kb() { printf "51200"; }
+  _osrc_free_kb() { printf "6291456"; }   # 6GB: above critical (<=4GB), below launch (>=10GB) on any volume
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'refusing new lane launches' <<<"$gate" && ok "disk gate refuses under 10GB with unanswered ASK" || bad "gate did not refuse: $gate"
 run cleanup --ack >/dev/null 2>&1 && [ -f "$OSRC_HOME/cleanup/ask-ack" ] \
@@ -300,7 +302,7 @@ run cleanup --ack >/dev/null 2>&1 && [ -f "$OSRC_HOME/cleanup/ask-ack" ] \
 rm -f "$OSRC_HOME/cleanup/state.json"
 gate2="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
-  _osrc_free_kb() { printf "51200"; }
+  _osrc_free_kb() { printf "6291456"; }   # 6GB: above critical (<=4GB), below launch (>=10GB) on any volume
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'gate-rc=0' <<<"$gate2" && ok "gate rescans live and passes after ack (finding 8)" || bad "gate still refused after ack: $gate2"
 # An ack taken against an older list no longer matches once the list changes:
@@ -309,14 +311,14 @@ mkdir -p "$OSRC_HOME/jobs/job-late"; echo blocked > "$OSRC_HOME/jobs/job-late/st
 manifest "$OSRC_HOME/jobs/job-late" job job-late ""
 gate3="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
-  _osrc_free_kb() { printf "51200"; }
+  _osrc_free_kb() { printf "6291456"; }   # 6GB: above critical (<=4GB), below launch (>=10GB) on any volume
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'refusing new lane launches' <<<"$gate3" && ok "stale ack cannot match a changed list (finding 8)" || bad "gate passed on stale ack: $gate3"
 echo "=== 0-ASK disk pressure (finding 8) ==="
 mkdir -p "$TMP/osrc2/jobs"
 g0="$(OSRC_HOME="$TMP/osrc2" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
-  _osrc_free_kb() { printf "51200"; }
+  _osrc_free_kb() { printf "6291456"; }   # 6GB: above critical (<=4GB), below launch (>=10GB) on any volume
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'held elsewhere' <<<"$g0" && ok "0-ASK gate names the real problem (finding 8)" || bad "0-ASK gate wrong: $g0"
 grep -q 'ack' <<<"$g0" && bad "0-ASK gate demanded an ack of nothing" || ok "0-ASK gate does not demand ack"
