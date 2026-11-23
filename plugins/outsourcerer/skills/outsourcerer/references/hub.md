@@ -201,6 +201,33 @@ for `style=` attributes), `X-Content-Type-Options: nosniff`, and
 `Referrer-Policy: no-referrer`,
 and it renders fully with the network off. CJK stays on system fonts.
 
+## Cleanup manifest, SAFE/ASK rules, disk gate (`cleanup`, lib/cleanup.sh)
+
+Every durable thing Outsourcerer creates gets one line in `$OSRC_HOME/created.jsonl`
+(`{"path","kind","session","repo","ts"}`). `cleanup` with no target is a DRY RUN over that manifest:
+each item gets its size and a verdict, SAFE or ASK (with a reason). `cleanup --apply` deletes SAFE
+items only and logs each deletion to `$OSRC_HOME/cleanup.log`. `cleanup --ack` records that the user
+has seen the current ASK list. `cleanup <job-id|fanout-gid> [--force]` keeps its old meaning: remove
+that target's git worktree(s).
+
+SAFE requires ALL of: owning session done or gone, older than 1h, no process has a file open under
+it, path under the manifest's recorded root (the age and open-file checks do not apply to `branch`
+entries, which instead need a valid branch name and a resolvable repo). Worktrees additionally need a
+clean git status (untracked files count) and no ignored files other than a top-level
+`node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree; worktrees and branches need their
+tip contained in the remote or main, or in a merged PR whose head is that tip. Fanout entries need
+every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
+result collected; a clean finish whose result was never collected stays ASK at any age, and only a
+non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
+deleted; `lib/cleanup.sh` is the authority when this summary and the code disagree.
+
+Disk gate: while free disk is below `OSRC_DISK_MIN_GB` (10), new lane launches (`bg`, routed
+delegations, `session start`) are refused unless there are ASK items and the current ASK list has
+been acknowledged (`cleanup --ack`; the ack must match the list as it is now). If no cleanup state
+file exists after the rescan, it refuses as "cleanup state is unknown". With no ASK items it
+still refuses, and says whether SAFE items can be applied or the space is held outside Outsourcerer.
+`OSRC_DISK_MIN_GB=0` overrides.
+
 ## Hub export: the `team` field (L12)
 
 `outsourcerer hub export` (L9's Mission Control surface) embeds the team score in each project
