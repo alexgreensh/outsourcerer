@@ -134,20 +134,29 @@ _osrc_lsof_busy() {
 }
 
 # _osrc_branch_merged <repo> <branch> [base_sha] -> 0 when the branch's commits are
-# preserved: tip is an ancestor of the recorded base or any main-ish ref, or a MERGED
-# PR exists for it. 1 otherwise (caller ASK).
+# preserved: tip is an ancestor of any main-ish ref, or of the recorded base when that
+# base is itself held by a remote-tracking ref, or a MERGED PR exists for it.
+# The recorded base alone is NOT evidence: a worktree cut from a local-only branch
+# records a base no other ref may hold, and deleting the worktree branch would then
+# drop the last ref to those commits (issue #84). 1 otherwise (caller ASK).
 _osrc_branch_merged() {
   local repo="$1" br="$2" base="${3:-}" ref
   git -C "$repo" rev-parse --verify "refs/heads/$br" >/dev/null 2>&1 || return 1
   local -a bases=()
-  [ -n "$base" ] && bases+=("$base")
   for ref in origin/HEAD origin/main origin/master main master upstream/main upstream/master; do
     git -C "$repo" rev-parse --verify -q "$ref" >/dev/null 2>&1 && bases+=("$ref")
   done
   local b
-  for b in "${bases[@]}"; do
+  for b in ${bases[@]+"${bases[@]}"}; do
     git -C "$repo" merge-base --is-ancestor "$br" "$b" 2>/dev/null && return 0
   done
+  # Recorded base: only when a remote-tracking ref (any branch) already holds it.
+  if [ -n "$base" ] && git -C "$repo" rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1 \
+     && git -C "$repo" merge-base --is-ancestor "$br" "$base" 2>/dev/null; then
+    # One call: does any remote-tracking ref contain the base commit?
+    [ -n "$(git -C "$repo" for-each-ref --count=1 --contains "$base" --format='%(refname)' refs/remotes 2>/dev/null)" ] \
+      && return 0
+  fi
   # No local ref contains it: a merged PR preserves the work ONLY when the PR's
   # merged head is this branch's current tip — commits made after the merge are
   # not preserved by that PR (review finding 2).
@@ -653,14 +662,23 @@ _cmd_cleanup_target() {
   else
     dirty="$(jq -r '.dirty' "$wj")"; ahead="$(jq -r '.ahead // 0' "$wj")"
   fi
+  local maindir="${path%/.outsourcerer/worktrees/*}"
+  [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
+  # A branch with no commits past its recorded base can still hold the LAST ref to that base
+  # (cut from a local-only branch that was later deleted): deleting it would orphan those commits.
+  if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] && [ -n "$maindir" ] && [ -d "$maindir/.git" ] \
+     && git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
+     && ! _osrc_branch_merged "$maindir" "$branch" "$base"; then
+    echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (not on main, a remote, or a merged PR)." >&2
+    echo "  inspect: git -C \"$path\" log --oneline -3; push or branch it first, or force-remove: outsourcerer cleanup $target --force" >&2
+    return 1
+  fi
   if [ "$force" != 1 ] && { [ "$dirty" = "true" ] || [ "${ahead:-0}" -gt 0 ]; }; then
     echo "[outsourcerer] REFUSING to remove $target: branch '$branch' has unmerged work (dirty=$dirty ahead=$ahead)." >&2
     echo "  inspect: git -C \"$path\" log --oneline; git -C \"$path\" status" >&2
     echo "  integrate e.g.: git cherry-pick $branch   OR force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi
-  local maindir="${path%/.outsourcerer/worktrees/*}"
-  [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
   if [ -n "$maindir" ] && [ -d "$maindir/.git" ]; then
     git -C "$maindir" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
     git -C "$maindir" branch -D "$branch" 2>/dev/null || true
