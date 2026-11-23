@@ -206,7 +206,8 @@ and it renders fully with the network off. CJK stays on system fonts.
 The manifest records what Outsourcerer leaves behind: jobs, background worktrees and branches,
 fanouts, loops and autodetach logs, one line each in `$OSRC_HOME/created.jsonl`
 (`{"path","kind","session","repo","ts"}`). `cleanup` with no target is a DRY RUN over that manifest:
-each item gets its size and a verdict, SAFE or ASK (with a reason). `cleanup --apply` deletes SAFE
+each item gets a verdict, SAFE or ASK (with a reason), and directories also get their `du` size;
+file entries such as autodetach `.log`/`.rc` are not sized and show `0KB`. `cleanup --apply` deletes SAFE
 items only and logs each deletion to `$OSRC_HOME/cleanup.log`. `cleanup --ack` records that the user
 has seen the current ASK list. `cleanup <job-id|fanout-gid> [--force]` keeps its old meaning: remove
 that target's git worktree(s). Auto-isolated cloud-gate copies are not in the manifest: a run that
