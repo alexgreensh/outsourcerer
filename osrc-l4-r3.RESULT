@@ -1,0 +1,3 @@
+sha=cde001546ddb9049d4045f11a6743a32f28aaeb5
+rc=0
+Round 3: approver fails closed. Deleted wrap guessing, cd/tree tracking and prose heuristics; multi-row commands approve only on breaks after &&/||/|; cd in chains and path-replacing steps followed by anything hold; nice judged by inner rule; masked single-pass tokenizer; NBSP preserved; Devin exact status only; Codex scans bounded by the selected row; Gemini approvals hold; recapture recomputes the verdict. All 11 findings mapped with regression tests. lib/ +132/-339. Conformance 241 passed, 6 failed (same environmental six as round 2).

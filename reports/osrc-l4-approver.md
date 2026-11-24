@@ -213,7 +213,12 @@ Rows that changed from approve to hold on purpose: `ls⏎cat README.md`, `git st
 - `nice -n 19 python3 tests/test_approval_audit.py` — exit 0. `nice -n 19 python3 tests/test_sandbox_final.py` — exit 0 (1 skipped).
 - `OSRC_HOME=<scratch> nice -n 19 python3 tests/test_sealed_runner.py` — exit 0 (without `OSRC_HOME` it errors
   on `KeyError: 'OSRC_HOME'`; conformance sets it).
-- Conformance: see below.
+- `nice -n 19 bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (from the repo root) — exit 1,
+  `241 passed, 6 failed, 1 skipped`. The six are the same six round 2 recorded as failing on an untouched base in
+  this container: `test_harness_isolation`, `test_vocab_hygiene` (running as root, a write that should fail
+  succeeds), `test_supervise_pgroup_kill`, `test_parity_insource_refresh`, `test_conformance_suite_timeout`,
+  `test_sealed_fixes` (`MATRIX_DENIED: OS guard unavailable`). `test_approver_table`, `test_approver_tick`,
+  `test_screen_state`, `test_release_0175` and `test_sealed_runner` pass inside conformance.
 
 ### Unproven
 
