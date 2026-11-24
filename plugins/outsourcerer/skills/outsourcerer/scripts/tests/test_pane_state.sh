@@ -31,10 +31,14 @@ wp='Reading file src/foo.sh
 (esc to interrupt)'
 [ "$(state_of "$wp")" = "working" ] && ok "spinner/esc -> working" || bad "spinner misclassified"
 
-# 2b. "Running" label -> working
+# 2b. a spinner-led "Running" row -> working; the bare word is prose, not a busy signal (osrc-l3:
+# one structural busy matcher, so plain text never proves a send landed)
+rp='Compiling project
+⠋ Running tests'
+[ "$(state_of "$rp")" = "working" ] && ok "spinner-led Running row -> working" || bad "Running row misclassified"
 rp='Compiling project
 Running tests'
-[ "$(state_of "$rp")" = "working" ] && ok "Running label -> working" || bad "Running label misclassified"
+[ "$(state_of "$rp")" != "working" ] && ok "bare 'Running tests' prose is not a busy signal" || bad "bare prose word read as working"
 
 # 3. bare prompt -> idle
 ip='Previous output line one
