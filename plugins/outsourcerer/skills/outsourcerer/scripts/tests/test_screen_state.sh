@@ -41,8 +41,6 @@ cx-idle|codex|composer||
 cx-working|codex|working||
 cx-idle-after-work|codex|idle||
 cx-approval|codex|approval|shell|touch made-by-codex.txt
-cx-edit-approval|codex|approval|write|notes.txt
-cx-edit-approval-multi|codex|approval|write|
 cx-trust-folder-menu|codex|approval|trust|
 dv-idle|devin|composer||
 dv-working|devin|working||
@@ -68,8 +66,7 @@ agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-works
 agy-trust-folder-menu|agy|approval|trust|
 gm-trust-folder-menu|gemini|approval|trust|
 gm-approval-shell|gemini|approval|other|
-gm-approval-edit|gemini|approval|other|
-gm-approval-other|gemini|approval|other|'
+'
 
 check_table() { # <label> [hint-mode: hint|guess]
   local mode="$1" f eng want kind what hint n=0

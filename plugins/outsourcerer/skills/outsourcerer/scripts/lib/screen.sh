@@ -85,7 +85,7 @@ _osrc_scr_load() {
       gsub(/\033[()][0-9A-Za-z]/, "", s); gsub(/\r/, "", s)
       # A no-break space right after a glyph (CC draws "⏺\302\240") reads as a space; anywhere else it
       # stays, so command text reaches the classifier as drawn (it holds U+00A0).
-      while (match(s, /[\200-\377]\302\240/)) s = substr(s, 1, RSTART) " " substr(s, RSTART + 3)
+      while (match(s, /[\342][\200-\277][\200-\277]\302\240/)) s = substr(s, 1, RSTART + 2) " " substr(s, RSTART + 5)
       sub(/[ \t]+$/, "", s)
       if (s ~ /^[ \t]*$/) next
       dim = (raw ~ /\033\[2m/ || raw ~ /\033\[38;2;124;124;124m/ || raw ~ /\033\[90m/) ? 1 : 0
@@ -308,17 +308,8 @@ $l"; else case "$l" in "\$ "?*) c="${l#\$ }" ;; esac; fi
       done
       OSRC_SCR_CMD="$c"
     fi
-    i="$(_osrc_scr_last "*Would you like to make the following edits?*" "$lo")"
-    if [ "$OSRC_SCR_KIND" = other ] && [ "$i" -ge 0 ] && [ "$m" -gt "$i" ]; then
-      OSRC_SCR_KIND=write; j=$((i + 1)); c=0
-      # Every "<path> (+N -M)" row up to the selected menu row is a target: exactly one names the
-      # file; none or several (a multi-file edit, or a row that only looks like one) hold.
-      while [ "$j" -lt "$m" ]; do
-        l="$(_osrc_scr_trim "${_SCR_L[$j]}")"
-        case "$l" in *" (+"[0-9]*" -"[0-9]*")") c=$((c + 1)); OSRC_SCR_PATH="${l% (+*}" ;; esac
-        j=$((j + 1))
-      done
-      [ "$c" = 1 ] || OSRC_SCR_PATH=""
+    if [ "$OSRC_SCR_KIND" = other ] && _osrc_scr_any "*Would you like to make the following edits?*" "$lo"; then
+      OSRC_SCR_KIND=write   # no path: an edit holds until a real capture shows how Codex draws its target
     fi
     _osrc_scr_set approval "codex approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD}"; return 0
   fi
@@ -355,7 +346,8 @@ _osrc_scr_devin() {
     # Menu row first, then the command: every row from the `$ ` row up to the menu is joined,
     # so a command Devin wraps onto a second row reaches the classifier whole (multi-line holds).
     local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
-    i="$(_osrc_scr_last "*\$ *" "$lo" $((m - 1)))"
+    i=$lo
+    while [ "$i" -lt "$m" ]; do case "${_SCR_L[$i]}" in *"└ \$ "*|"\$ "*|" \$ "*) break ;; esac; i=$((i + 1)); done
     case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*)
       OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")"; i=$((i + 1))
       while [ "$i" -lt "$m" ]; do
@@ -376,15 +368,17 @@ $(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
       esac
       if [ "$OSRC_SCR_KIND" != other ]; then
         OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
-        hdr="$(_osrc_scr_last "*requires your approval*" "$lo" $((m - 1)))"
-        [ "$hdr" -ge 0 ] || hdr="$(_osrc_scr_last "*Approval required*" "$lo" $((m - 1)))"
+        # Rows are skipped by position only: the first header row above, the menu row below. No row is
+        # dropped for what it says, so a command row reading "Deny" or "Exec(x)" stays in the command.
+        hdr=$lo; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
+        if [ "$hdr" -ge "$m" ]; then hdr=$lo; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"Approval required"*) break ;; esac; hdr=$((hdr + 1)); done; fi
+        [ "$hdr" -lt "$m" ] || hdr=-1
         i=$((hdr + 1))
         while [ "$i" -ge 1 ] && [ "$i" -lt "$m" ]; do
           l="$(printf '%s' "${_SCR_L[$i]}" | sed -E 's/^[[:space:]│┃║|]+//; s/[[:space:]│┃║|]+$//')"
           l="$(_osrc_scr_trim "$l")"
           case "$l" in
-            ""|"❭ "*|*"requires your approval"*|*"Bypass mode"*|*"Deny"*) ;;
-            "Exec("*")"|"Write("*")"|"Edit("*")"|"Create("*")"|"Read("*")"|"Overwrite("*")") ;;
+            ""|"❭ "*) ;;
             ─*|═*|━*|─*|┄*|┈*|"╭"─*|"╰"─*|"┌"─*|"└"─*) ;;
             "The agent is waiting for your approval"*) [ -n "$OSRC_SCR_CMD" ] && OSRC_SCR_CMD="$OSRC_SCR_CMD
 $l" ;;   # Devin's status message, only above the command

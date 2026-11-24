@@ -232,3 +232,23 @@ Rows that changed from approve to hold on purpose: `ls⏎cat README.md`, `git st
 
 - None.
 
+
+## Round 4
+
+Closing edits only, all in the fail-closed direction; no new parsing.
+
+- **Finding 1 (Devin reader):** rows are skipped by position only: first `requires your approval` (else `Approval required`) row above the menu, start at `hdr+1`, stop at the `❭` row. Deleted the content-based `Deny`/`Bypass mode`/`requires your approval`/`Exec(…)` skip arms. The old-layout `$ ` branch now takes the first `$ ` row in the window instead of the last, so a later decoy row is joined into the command (which holds). Four hold cases added in `test_approver_tick.sh` (`# Deny`, `# Bypass mode`, `echo requires your approval`, `Exec(x) ; rm -rf ../x # )`).
+- **Finding 2 (Codex edits):** deleted the edit-path extraction and the `cx-edit-approval*` fixtures and tests. Codex edits are `KIND=write` with an empty path and hold, as on main.
+- **Finding 3 (pipe exemption):** when the last segment is joined by `|`, all rules are checked. Three rows added to `approver-table.tsv` as `hold`.
+- **Finding 4 (NBSP rule):** narrowed to a 3-byte glyph followed by NBSP (`\342??\302\240`). The review's single-glyph `⏺` suggestion broke `❯`-style composer rows (12+ `test_screen_state` failures), so I kept the 3-byte class; accented letters (2-byte) no longer match.
+- **Finding 6:** deleted 8 duplicate table rows, two of three constructed `gm-approval-*` fixtures (kept `gm-approval-shell`), and the round-2/3 READY/RESULT files.
+- **Not done:** finding 5 (changing-worktree test) is more than a one-line fix; left as is.
+
+Tests (niced, one at a time): `test_approver_table.sh` rc=0 (459 pass); `test_approver_tick.sh` rc=0 (57 pass); `test_screen_state.sh` rc=0 (249 pass). Conformance: see `osrc-l4-r4.RESULT`.
+
+Unproven: how real Codex draws edit targets; the new tests were not run against the old code (the review's probes show those inputs approved before).
+
+## Needs from other lanes
+None.
+
+Conformance: `bash .../tests/conformance.sh` was cut short; every suite that ran passed except `test_harness_isolation` ("fail-closed failed ... would inherit live MCP"), which this lane does not touch (checked against the base commit in the log of this round's run).

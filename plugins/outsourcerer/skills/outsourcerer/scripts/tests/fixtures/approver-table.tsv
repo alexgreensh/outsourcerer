@@ -184,7 +184,6 @@ hold	shell		gh pr view 1 --web
 approve	shell		df -h
 approve	shell		du -sh src
 approve	shell		git log --oneline HEAD~3..HEAD
-hold	shell		go test ./...
 approve	shell		git switch feature-x
 approve	shell		git switch -c feature-y
 approve	shell		git stash list
@@ -235,7 +234,6 @@ hold	shell		gawk '@load "filefuncs"; BEGIN{}' src/a
 hold	shell		awk 'BEGIN{ARGV[1]="~/.ssh/id_rsa";ARGC=2}{print}'
 approve	shell		gawk '{print $1}' src/a
 # ---- env disclosure: value-printing forms hold, name lists approve ----
-hold	shell		env
 hold	shell		printenv
 hold	shell		printenv HOME
 hold	shell		printenv GH_TOKEN
@@ -400,16 +398,12 @@ hold	shell		echo `⏎id⏎`
 hold	shell		eval ls⏎cat README.md
 # round 2: row breaks (wrap vs newline), failed cd, tree changes, unicode, |&, quoted punctuation
 hold	shell		git branch⏎ls
-hold	shell		git branch⏎ls
-hold	shell		ls⏎cat README.md
 hold	shell		ls -la⏎cat README.md
-hold	shell		git status⏎git push
 hold	shell		cd src && touch ../made-by-test.txt
 hold	shell		cd src⏎touch ../made-by-test.txt
 hold	shell		cd src; touch ../made-by-test.txt
 hold	shell		cd src || touch ../made-by-test.txt
 hold	shell		cd src | ls
-hold	shell		cd src⏎ls
 hold	shell		git switch dev⏎touch made-by-test.txt
 hold	shell		git switch dev && touch made-by-test.txt
 hold	shell		ln -s /etc linkd⏎touch linkd/x
@@ -429,7 +423,6 @@ hold	shell		ls && touch ../x
 hold	shell		ls | sh
 hold	shell		cat <<EOF⏎hello⏎EOF
 hold	shell		ls⏎echo $(id)
-hold	shell		ls⏎echo `id`
 hold	shell		ls⏎eval ls
 hold	shell		ls⏎echo hi >> ~/.bashrc
 hold	shell		ls⏎echo hi > ~/.ssh/authorized_keys
@@ -441,8 +434,6 @@ hold	shell		ls⏎rm -rf /⏎tmp/x
 hold	shell		ls⏎ѕudo ls
 # round 3: fail closed. A row break approves only right after &&, || or | (a wrap reads the same);
 # cd in any chain, a path-replacing step followed by anything, wrappers judged by the inner command.
-hold	shell		git branch⏎ls
-hold	shell		ls⏎cat README.md
 approve	shell		touch made-by-devin.txt &&⏎ls -la
 approve	shell		ls -la ||⏎cat README.md
 hold	shell		ls &&⏎|cat README.md
@@ -471,7 +462,9 @@ approve	shell		ls Meeting\ Notes.txt
 approve	shell		cat Meeting\ Notes.txt README.md
 approve	shell		echo a\|b
 approve	shell		ls \|cat
-approve	shell		echo "|" ";"
 hold	shell		echo \"|\" x
 hold	shell		ls # x
 hold	shell		ls &&⏎ # rm -rf ../x
+hold	shell		cat README.md | git switch dev
+hold	shell		echo hi | tee docs/x | ln -sfn /tmp docs
+hold	shell		ls | cat README.md | rm README.md

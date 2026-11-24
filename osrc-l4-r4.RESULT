@@ -1,0 +1,3 @@
+sha=599636b482b39148d64b2a247124afc819717f53
+rc=0
+Round 4 closing edits applied (findings 1,2,3,4,6). test_approver_table/tick/screen_state pass. conformance.sh was stopped partway: all suites passed except test_harness_isolation (1 failure, files not touched by this lane; see report).

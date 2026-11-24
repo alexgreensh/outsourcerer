@@ -905,7 +905,7 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
             raise Hold("test and build runs wait for a person in this version")
         if len(rules) > 1 and "cd" in rules:
             raise Hold("cd inside a chain (it can fail or be skipped, so the rest may run elsewhere)")
-        if any(r.startswith("write-in-worktree") and not r.startswith(_IN_PLACE_WRITES) for r in rules[:-1]):
+        if any(r.startswith("write-in-worktree") and not r.startswith(_IN_PLACE_WRITES) for r in (rules if segs[-1][1] == "|" else rules[:-1])):
             raise Hold("a step that can replace files or switch branches is followed by more")
         return True, " + ".join(dict.fromkeys(rules))
     except Hold as h:
