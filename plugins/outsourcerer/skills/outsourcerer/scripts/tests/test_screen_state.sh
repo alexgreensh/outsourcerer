@@ -67,8 +67,8 @@ agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
 agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
 agy-trust-folder-menu|agy|approval|trust|
 gm-trust-folder-menu|gemini|approval|trust|
-gm-approval-shell|gemini|approval|shell|touch made-by-gemini.txt
-gm-approval-edit|gemini|approval|write|
+gm-approval-shell|gemini|approval|other|
+gm-approval-edit|gemini|approval|other|
 gm-approval-other|gemini|approval|other|'
 
 check_table() { # <label> [hint-mode: hint|guess]

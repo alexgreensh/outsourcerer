@@ -165,14 +165,14 @@ OS isolation holds the command. Continue to use the engine's own sandbox for oth
   expands nothing inside '…'), `~user`/`~+`/`~-`, brace expansion `{a,b}`, `…`, a trailing
   `&&`/`||`/`|`/`;`, `|&` (bash 3.2 rejects it), and any whitespace, control or invisible character
   other than space, tab and newline.
-- A multi-line command is judged line by line and approves only if every line is safe. The reader
-  tells the classifier how each row break was drawn: a short row followed by another is a real
-  newline; a row as wide as the pane could be a terminal wrap, so the command must be safe read
-  both ways (`git branch` / `ls` as a wrap is `git branch ls`, which holds). These still hold for
-  a person: a newline inside quotes, a backslash continuation, a here-document, an unfinished
-  operator or redirect, a `cd` whose failure would let a later relative write leave the
-  worktree (only `cd X && …` is known to run in X), and a write or `cd` after a step that can
-  swap files for links (`git switch`, `mv`, `rm`, `ln`, `cp`).
+- Anything ambiguous holds; a hold costs minutes, a wrong approval is a safety hole. The reader
+  cannot prove a command box's width, so every row break may be a display wrap: a command drawn on
+  several rows approves only when each break sits right after `&&`, `||` or `|` (a wrap, a space
+  and a newline mean the same there), outside quotes, and the text is ASCII. In a chain of two or
+  more parts, `cd` holds (it can fail or be skipped), and so does any step that can replace files
+  or switch branches (`git switch`, `git checkout -b`, `mv`, `rm`, `ln`, `cp`, ...) unless it is
+  the last part; `nice` is judged by the command it runs. Gemini approval menus, and Codex edits
+  that do not name exactly one file above the selected row, hold.
 - git push, reset --hard, any force/-D flag, checkout/restore that discards work, commit
   `--amend`/`--no-verify`, `git stash` other than list/show (the stash is shared by every
   worktree), `git switch -C`/`--discard-changes`, `git init`, any git global flag except

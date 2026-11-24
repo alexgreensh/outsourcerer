@@ -82,7 +82,11 @@ _osrc_scr_load() {
   done < <(LC_ALL=C awk '
     { raw=$0; s=$0
       gsub(/\033\][^\007\033]*(\007|\033\\)/, "", s); gsub(/\033\[[0-9;?<=>]*[ -\/]*[@-~]/, "", s)
-      gsub(/\033[()][0-9A-Za-z]/, "", s); gsub(/\r/, "", s); gsub(/\302\240/, " ", s); sub(/[ \t]+$/, "", s)
+      gsub(/\033[()][0-9A-Za-z]/, "", s); gsub(/\r/, "", s)
+      # A no-break space right after a glyph (CC draws "⏺\302\240") reads as a space; anywhere else it
+      # stays, so command text reaches the classifier as drawn (it holds U+00A0).
+      while (match(s, /[\200-\377]\302\240/)) s = substr(s, 1, RSTART) " " substr(s, RSTART + 3)
+      sub(/[ \t]+$/, "", s)
       if (s ~ /^[ \t]*$/) next
       dim = (raw ~ /\033\[2m/ || raw ~ /\033\[38;2;124;124;124m/ || raw ~ /\033\[90m/) ? 1 : 0
       print dim "|" s }')
@@ -151,7 +155,7 @@ _osrc_scr_engine_norm() { # <provider/engine alias> -> cc|codex|devin|agy|gemini
 # ---- analysis results (globals, reset per call) --------------------------------------------------
 _osrc_scr_reset() {
   OSRC_SCR_STATE=unknown; OSRC_SCR_EVIDENCE="no recognized signal"; OSRC_SCR_ENGINE=""
-  OSRC_SCR_KIND=""; OSRC_SCR_CMD=""; OSRC_SCR_PATH=""; OSRC_SCR_SEL=""; OSRC_SCR_SCOPE=""; OSRC_SCR_BREAKS=""
+  OSRC_SCR_KIND=""; OSRC_SCR_CMD=""; OSRC_SCR_PATH=""; OSRC_SCR_SEL=""; OSRC_SCR_SCOPE=""
   OSRC_SCR_COMPOSER=""; OSRC_SCR_COMPOSER_FOUND=0; OSRC_SCR_HIST_END=-1; OSRC_SCR_GENERIC=0
 }
 _osrc_scr_set() { OSRC_SCR_STATE="$1"; OSRC_SCR_EVIDENCE="$(_osrc_scr_trim "$2")"; }
@@ -286,33 +290,36 @@ _osrc_scr_after_composer() { # <user-line-glob> <assistant-glob>
 }
 
 _osrc_scr_codex() {
-  local n=$_SCR_N lo i j l c
+  local n=$_SCR_N lo i j l c m
   lo=$((n - 30)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*Press enter to confirm or esc to cancel*" $((n - 3 > 0 ? n - 3 : 0)); then
     OSRC_SCR_KIND=other
+    m="$(_osrc_scr_last "› *" "$lo")"; [ "$m" -ge 0 ] && OSRC_SCR_SEL="$(_osrc_scr_trim "${_SCR_L[$m]#› }")"
     i="$(_osrc_scr_last "*Would you like to run the following command?*" "$lo")"
     if [ "$i" -ge 0 ]; then
+      # The command is the first "$ " row and every row after it up to the selected menu row; no row
+      # text (a wrapped "1. ..." or "$ ...") ends or restarts it early.
       OSRC_SCR_KIND=shell; j=$((i + 1)); c=""
-      while [ "$j" -lt "$n" ]; do
+      while [ "$j" -lt "$m" ]; do
         l="$(_osrc_scr_trim "${_SCR_L[$j]}")"
-        case "$l" in "\$ "*) c="${l#\$ }" ;; "› 1."*|"1. "*) break ;; *) [ -n "$c" ] && c="$c
-$l" ;; esac
+        if [ -n "$c" ]; then c="$c
+$l"; else case "$l" in "\$ "?*) c="${l#\$ }" ;; esac; fi
         j=$((j + 1))
       done
       OSRC_SCR_CMD="$c"
-    elif i="$(_osrc_scr_last "*Would you like to make the following edits?*" "$lo")"; [ "$i" -ge 0 ]; then
+    fi
+    i="$(_osrc_scr_last "*Would you like to make the following edits?*" "$lo")"
+    if [ "$OSRC_SCR_KIND" = other ] && [ "$i" -ge 0 ] && [ "$m" -gt "$i" ]; then
       OSRC_SCR_KIND=write; j=$((i + 1)); c=0
-      # The file row reads "<path> (+N -M)". One such row names the target; none or several
-      # (a multi-file edit) leave the path empty, so the prompt holds.
-      while [ "$j" -lt "$n" ]; do
+      # Every "<path> (+N -M)" row up to the selected menu row is a target: exactly one names the
+      # file; none or several (a multi-file edit, or a row that only looks like one) hold.
+      while [ "$j" -lt "$m" ]; do
         l="$(_osrc_scr_trim "${_SCR_L[$j]}")"
-        case "$l" in "› 1."*|"1. "*) break ;; esac
         case "$l" in *" (+"[0-9]*" -"[0-9]*")") c=$((c + 1)); OSRC_SCR_PATH="${l% (+*}" ;; esac
         j=$((j + 1))
       done
       [ "$c" = 1 ] || OSRC_SCR_PATH=""
     fi
-    i="$(_osrc_scr_last "› *" "$lo")"; [ "$i" -ge 0 ] && OSRC_SCR_SEL="$(_osrc_scr_trim "${_SCR_L[$i]#› }")"
     _osrc_scr_set approval "codex approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD}"; return 0
   fi
   if _osrc_scr_any "*enter continue · esc back*" $((n - 3 > 0 ? n - 3 : 0)); then
@@ -338,15 +345,6 @@ $l" ;; esac
   if q="$(_osrc_scr_prose_question "› *" $((i - 1)))"; then _osrc_scr_set question "$q"; return 0; fi
   if [ "$d" -gt "$u" ]; then _osrc_scr_set idle "${_SCR_L[$d]}"; return 0; fi
   _osrc_scr_set idle "composer ready after: $(printf '%s' "${_SCR_L[$u]}" | cut -c1-80)"
-}
-
-# A row of plain sentence text (status line), not a shell command: capitalised word, a lowercase
-# word, no shell punctuation; or ending in an ellipsis.
-_osrc_scr_is_prose() { # <row>
-  case "$1" in *[\$\;\&\|\<\>\(\)\`\"\'\\=/]*) return 1 ;; esac
-  case "$1" in *"…"|*"...") return 0 ;; esac
-  case "$1" in [A-Z][a-z]*" "[a-z]*) return 0 ;; esac
-  return 1
 }
 
 _osrc_scr_devin() {
@@ -388,21 +386,13 @@ $(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
             ""|"❭ "*|*"requires your approval"*|*"Bypass mode"*|*"Deny"*) ;;
             "Exec("*")"|"Write("*")"|"Edit("*")"|"Create("*")"|"Read("*")"|"Overwrite("*")") ;;
             ─*|═*|━*|─*|┄*|┈*|"╭"─*|"╰"─*|"┌"─*|"└"─*) ;;
-            *) # Status prose ("The agent is waiting ...") above the command is not part of it.
-               if [ -z "$OSRC_SCR_CMD" ] && _osrc_scr_is_prose "$l"; then :; else
-                 OSRC_SCR_CMD="${OSRC_SCR_CMD:+$OSRC_SCR_CMD
-}$l"
-               fi ;;
+            "The agent is waiting for your approval"*) [ -n "$OSRC_SCR_CMD" ] && OSRC_SCR_CMD="$OSRC_SCR_CMD
+$l" ;;   # Devin's status message, only above the command
+            *) OSRC_SCR_CMD="${OSRC_SCR_CMD:+$OSRC_SCR_CMD
+}$l" ;;
           esac
           i=$((i + 1))
         done
-        # The menu row's Exec(prog) names the program the command starts with; a first row that
-        # does not hold it is not the command, so nothing is extracted and the prompt holds.
-        if [ "$OSRC_SCR_KIND" = shell ] && [ -n "$OSRC_SCR_CMD" ]; then
-          l=" ${OSRC_SCR_CMD%%
-*} "
-          case "$l" in *[!A-Za-z0-9_.-]"$OSRC_SCR_PATH"[!A-Za-z0-9_.-]*) ;; *) OSRC_SCR_CMD="" ;; esac
-        fi
       fi
     fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
@@ -457,26 +447,14 @@ _osrc_scr_agy() {
 }
 
 _osrc_scr_gemini() {
-  # gemini-cli (keyed). Fixtures: trust menu only (the CLI refused OAuth on this machine on
-  # 2026-11-13), so approval wording below is from the CLI's documented prompts and is unproven;
-  # fixtures gm-approval-* are constructed from that wording, not captured.
-  local n=$_SCR_N lo i l
+  # gemini-cli (keyed). Approval menus stay "other" and hold: the only approval layout ever matched
+  # was constructed, and the real 0.58 one puts the command in a separate box no capture here covers.
+  local n=$_SCR_N lo i
   lo=$((n - 30)); [ "$lo" -ge 0 ] || lo=0
   i="$(_osrc_scr_last "*● 1. *" "$lo")"
   if [ "$i" -ge 0 ]; then
-    l="$(printf '%s' "${_SCR_L[$i]#*● }" | sed -E 's/[[:space:]│┃║|]+$//')"; OSRC_SCR_SEL="$(_osrc_scr_trim "$l")"; OSRC_SCR_KIND=other
+    OSRC_SCR_SEL="$(_osrc_scr_trim "${_SCR_L[$i]#*● }")"; OSRC_SCR_KIND=other
     _osrc_scr_any "*Do you trust the files in this folder?*" "$lo" && OSRC_SCR_KIND=trust
-    # Approval menus: "Allow execution of: 'cmd'?" names a shell command; "Apply this change?" an edit
-    # whose target the capture does not name. Any other numbered menu stays "other" and holds.
-    if [ "$OSRC_SCR_KIND" = other ]; then
-      local q; q="$(_osrc_scr_last "*Allow execution of: *" "$lo" "$i")"
-      if [ "$q" -ge 0 ]; then
-        l="$(printf '%s' "${_SCR_L[$q]#*Allow execution of: }" | sed -E 's/[[:space:]│┃║|]+$//')"; l="$(_osrc_scr_trim "$l")"
-        case "$l" in "'"*"'?") OSRC_SCR_KIND=shell; OSRC_SCR_CMD="${l#\'}"; OSRC_SCR_CMD="${OSRC_SCR_CMD%\'?}" ;; esac
-      elif _osrc_scr_any "*Apply this change?*" "$lo" "$i"; then
-        OSRC_SCR_KIND=write
-      fi
-    fi
     _osrc_scr_set approval "gemini menu: $OSRC_SCR_SEL"; return 0
   fi
   _osrc_scr_generic
@@ -549,43 +527,6 @@ _osrc_scr_history_count() { # <snippet>
   printf '%s' "$n"
 }
 
-# How was each row break of a multi-row OSRC_SCR_CMD drawn? One letter per break, for the classifier:
-#   n  a shell newline for sure: row + the next word would still fit the pane (no wrap needed);
-#   s  a newline or a terminal wrap at a word boundary;  h  also a wrap through a word (row is full).
-# A row that cannot be found on screen, or holds non-ASCII (width unknown), is "h". Pane width is
-# unknown here, so the widest captured row stands in, capped at 60 columns (apps wrap no narrower).
-_osrc_scr_breaks() {
-  OSRC_SCR_BREAKS=""
-  case "$OSRC_SCR_CMD" in *"
-"*) ;; *) return 0 ;; esac
-  local W=0 i k=0 r t line idx len w c cnt=0 raw_idx rows
-  raw_idx=(); rows=()
-  i=0; while [ "$i" -lt "$_SCR_N" ]; do [ "${#_SCR_L[$i]}" -gt "$W" ] && W=${#_SCR_L[$i]}; i=$((i + 1)); done
-  [ "$W" -le 60 ] || W=60
-  while IFS= read -r r; do rows[$cnt]="$r"; cnt=$((cnt + 1)); done <<<"$OSRC_SCR_CMD"
-  while [ "$k" -lt "$cnt" ]; do
-    r="${rows[$k]}"; idx=-1; i=$((_SCR_N - 1))
-    while [ "$i" -ge 0 ] && [ -n "$r" ]; do
-      line="$(printf '%s' "${_SCR_L[$i]}" | sed -E 's/[[:space:]│┃║|]+$//')"
-      case "$line" in *"$r") idx=$i; break ;; esac
-      i=$((i - 1))
-    done
-    raw_idx[$k]=$idx; k=$((k + 1))
-  done
-  k=0
-  while [ "$k" -lt $((cnt - 1)) ]; do
-    c=h; i="${raw_idx[$k]}"
-    if [ "$i" -ge 0 ] && [ "${raw_idx[$((k + 1))]}" -ge 0 ] && [ "${raw_idx[$((k + 1))]}" -eq $((i + 1)) ]; then
-      t="${rows[$((k + 1))]}"; w="${t%% *}"; len=${#_SCR_L[$i]}
-      if printf '%s\n%s' "${rows[$k]}" "$t" | LC_ALL=C grep -q '[^ -~]'; then c=h
-      elif [ "$len" -ge "$W" ]; then c=h
-      elif [ $((len + 1 + ${#w})) -gt "$W" ]; then c=s
-      else c=n; fi
-    fi
-    OSRC_SCR_BREAKS="$OSRC_SCR_BREAKS$c"; k=$((k + 1))
-  done
-}
-
 # ---- public API ----------------------------------------------------------------------------------
 # Analyze text (ANSI allowed) on stdin. Sets the OSRC_SCR_* globals. [engine] is a provider name or
 # alias; empty = guess from the screen.
@@ -604,7 +545,6 @@ _osrc_screen_analyze_text() { # [engine]
     gemini) _osrc_scr_gemini ;;
     *) _osrc_scr_generic ;;
   esac
-  _osrc_scr_breaks
   return 0
 }
 

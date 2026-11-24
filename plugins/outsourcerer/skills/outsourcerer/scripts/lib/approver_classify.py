@@ -8,8 +8,11 @@ The classifier does not approve a command NAME with arbitrary
 flags, and does not treat a token as a literal path when the shell would expand it.
 - Anything the shell expands before running is held up front: any `$`, backticks, braces, `~user`
   / `~+` / `~-`, `=~`, a truncated `…`, a trailing operator, a carriage return, any mention of
-  OSRC_HOME. A multi-line command is judged line by line; any newline that is not a plain command
-  boundary (quotes, continuation, here-document, unfinished operator) holds the whole command.
+  OSRC_HOME, any whitespace other than space and tab, any control or invisible character.
+- Fail closed on anything ambiguous. A command drawn on several rows approves only when every row
+  break sits right after `&&`, `||` or `|` (where a display wrap and a newline mean the same) and the
+  text is ASCII. In a chain of two or more parts, `cd` holds, and so does any step that can replace
+  files or switch branches unless it is the last part.
 - Every approved command has a flag allowlist. An unknown flag (including attached forms such as
   `-XPUT`, `-osrc/x`, `--output=...`) holds.
 - Env prefixes on a command hold unless the name is inert (TZ, LANG, LC_*, NO_COLOR, COLUMNS,
@@ -37,8 +40,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))   # -I drops the script dir
 from approver_tables import *  # noqa: E402,F401,F403  (tables only; logic stays here)
 from approver_tables import COLOR, Spec  # noqa: E402
-from approver_lines import LineHold, check_characters, interpretations, logical_lines  # noqa: E402
-from approver_flow import run_lines  # noqa: E402
+import unicodedata  # noqa: E402
 HOME = os.path.expanduser("~")
 FOLD = sys.platform == "darwin"   # macOS file systems are case-insensitive by default
 
@@ -168,10 +170,48 @@ def outside_single_quotes(cmd: str) -> str:
     return "".join(out)
 
 
-def pre_checks(cmd: str, multiline: bool = False) -> None:
+def check_characters(cmd: str) -> None:
+    """Hold whitespace other than space/tab/newline and any control or invisible character: bash
+    treats U+00A0 or U+2003 as a word character, so a row that looks blank or like a comment can run."""
+    for ch in cmd:
+        if ch not in " \t\n" and (ch.isspace() or unicodedata.category(ch) in ("Cc", "Cf", "Zs", "Zl", "Zp", "Co", "Cs", "Cn")):
+            raise Hold("whitespace, control or invisible character U+%04X" % ord(ch))
+
+
+_PUNCT = ";&|()<>"
+
+
+def _tokens(cmd: str) -> list[str]:
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=_PUNCT)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        return list(lex)
+    except ValueError as e:
+        raise Hold("unparseable: %s" % e)
+
+
+def join_rows(cmd: str) -> str:
+    """One line for a command the screen drew on several rows, or Hold. The reader cannot prove the
+    box width, so every row break may be a display wrap. Only a break right after &&, || or | (next row
+    starting a plain word, outside quotes) means the same as a wrap, a space or a newline."""
+    rows = [r.strip(" \t") for r in cmd.split("\n")]
+    if len(rows) == 1:
+        return cmd
+    if not cmd.isascii():
+        raise Hold("non-ASCII text in a command drawn on several rows")
+    for a, b in zip(rows, rows[1:]):
+        if not re.search(r"\s(&&|\|\||\|)$", a) or not re.match(r"[A-Za-z0-9_./]", b):
+            raise Hold("a row break that may be a display wrap (only a break after &&, || or | is unambiguous)")
+    if _tokens(" ".join(rows)) != _tokens("".join(rows)):
+        raise Hold("a row break inside quotes")
+    return " ".join(rows)
+
+
+def pre_checks(cmd: str) -> None:
     if "\r" in cmd:
         raise Hold("carriage return in command")
-    if not multiline and "\n" in cmd:
+    if "\n" in cmd:
         raise Hold("multi-line command (continuation lines, heredoc or wrapped text)")
     bare = outside_single_quotes(cmd)
     if "`" in bare or "$(" in bare or "<(" in bare or ">(" in bare:
@@ -197,22 +237,29 @@ def check_tilde(tok: str) -> None:
         raise Hold("tilde expansion inside an assignment-like word: " + tok)
 
 
+def _mask_literal(cmd: str) -> str:
+    """cmd with each quoted or backslash-escaped ;&|()<> replaced by "_": what stays punctuation is
+    a real shell operator. (A quoted "|" and an operator | lex to the same token.)"""
+    out, q, i = [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if c == "\\" and q != "'" and i + 1 < len(cmd):
+            out.append(c + ("_" if cmd[i + 1] in _PUNCT else cmd[i + 1])); i += 2; continue
+        if q is None and c in "'\"":
+            q = c
+        elif c == q:
+            q = None
+        out.append("_" if q and c in _PUNCT else c); i += 1
+    return "".join(out)
+
+
 def split_segments(cmd: str):
-    lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
-    lex.whitespace_split = True
-    lex.commenters = ""
-    raw = shlex.shlex(cmd, posix=False, punctuation_chars=";&|()<>")   # keeps the quotes
-    raw.whitespace_split = True
-    raw.commenters = ""
-    try:
-        toks, rawtoks = list(lex), list(raw)
-    except ValueError as e:
-        raise Hold("unparseable: %s" % e)
-    if len(toks) != len(rawtoks):
-        raise Hold("cannot tell quoted punctuation from shell operators")
+    toks, marks = _tokens(cmd), _tokens(_mask_literal(cmd))
+    if len(toks) != len(marks):
+        raise Hold("cannot tell quoted or escaped punctuation from shell operators")
     segs, cur, prev = [], [], None
-    for t, r in zip(toks, rawtoks):
-        if t in OPERATORS and r == t:   # a quoted "|" or ";" is just an argument
+    for t, m in zip(toks, marks):
+        if t in OPERATORS and m == t:   # a quoted "|" or ";" is just an argument
             if t in ("(", ")"):
                 raise Hold("subshell")
             if t == "&":
@@ -641,7 +688,9 @@ def classify_segment(tokens, prev_op, cwd, roots):
         rule, cur = classify_segment(rest[i:], prev_op, cwd, roots)
         if rule.startswith("test/build"):
             raise Hold("test and build runs wait for a person in this version")
-        return "nice:" + rule, cur
+        if rule == "cd":
+            raise Hold("nice cd (cd cannot run under nice)")
+        return rule, cur   # the inner command's own rule: chain checks see what it really does
     if "/" in name:
         raise Hold("runs a program by path: " + name)
     if prev_op in ("|", "|&") and name in INTERPRETERS:
@@ -807,33 +856,14 @@ def sealed_runner(cmd: str, cwd: str, root: str) -> bool:
         return False
 
 
-def judge_command(cmd: str, cwd: str, roots: list[str]) -> str:
-    """The rule of one shell command text (any number of lines); raises Hold when anything is unsafe."""
-    pre_checks(cmd, multiline=True)
-    if sealed_runner(cmd, cwd, roots[0]):
-        return "test/build:sealed runner with verified OS isolation"
-    lines = logical_lines(cmd)
-    if not lines:
-        raise Hold("no command visible")
-    if len(lines) == 1 and [t for t, _ in split_segments(lines[0])] == [["compgen", "-e"]]:
-        pre_checks(lines[0])
-        # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
-        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
-        return "read-only:env names (compgen -e)"
-    rules = run_lines(lines, cwd, roots, pre_checks, split_segments, classify_segment, Hold)
-    if not rules:
-        raise Hold("empty command")
-    if any(r.startswith("test/build") for r in rules):
-        # A test or build script can run arbitrary code with the lane's full rights.
-        raise Hold("test and build runs wait for a person in this version")
-    return " + ".join(dict.fromkeys(rules))
+# Writes that edit or create one file or directory in place; they cannot swap a path for a link
+# or switch branches, so a later step in the same chain still sees the tree that was checked.
+_IN_PLACE_WRITES = ("write-in-worktree:touch", "write-in-worktree:mkdir", "write-in-worktree:tee",
+                    "write-in-worktree:sed -i", "write-in-worktree:git add", "write-in-worktree:git commit")
 
 
-def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str], breaks: str = "") -> tuple[bool, str]:
-    """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set.
-
-    `breaks` says how the screen reader saw each row break of a multi-row command (see
-    approver_lines.interpretations); the command is approved only if every reading is safe."""
+def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple[bool, str]:
+    """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set."""
     try:
         if kind == "trust":
             raise Hold("folder trust prompt (never auto-approved)")
@@ -856,19 +886,34 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str], breaks: 
         if kind != "shell":
             raise Hold("unrecognised prompt kind: " + (kind or "none"))
         check_characters(cmd)
-        cmd = cmd.strip(" \t\n")
+        cmd = join_rows(cmd.strip(" \t\n"))
         if not cmd:
             raise Hold("no command visible")
-        shown = []
-        for text in interpretations(cmd, breaks):
-            shown.append(judge_command(text, cwd, roots))
-        return True, shown[0]
-    except (Hold, LineHold) as h:
+        pre_checks(cmd)
+        if sealed_runner(cmd, cwd, roots[0]):
+            return True, "test/build:sealed runner with verified OS isolation"
+        segs = split_segments(cmd)
+        # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
+        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
+        if [t for t, _ in segs] == [["compgen", "-e"]]:
+            return True, "read-only:env names (compgen -e)"
+        rules = [classify_segment(seg, prev, cwd, roots)[0] for seg, prev in segs]
+        if not rules:
+            raise Hold("empty command")
+        if any(r.startswith("test/build") for r in rules):
+            # A test or build script can run arbitrary code with the lane's full rights.
+            raise Hold("test and build runs wait for a person in this version")
+        if len(rules) > 1 and "cd" in rules:
+            raise Hold("cd inside a chain (it can fail or be skipped, so the rest may run elsewhere)")
+        if any(r.startswith("write-in-worktree") and not r.startswith(_IN_PLACE_WRITES) for r in rules[:-1]):
+            raise Hold("a step that can replace files or switch branches is followed by more")
+        return True, " + ".join(dict.fromkeys(rules))
+    except Hold as h:
         return False, str(h)
 
 
 def main(argv: list[str]) -> int:
-    root, extras, kind, path, breaks = None, [], "shell", "", ""
+    root, extras, kind, path = None, [], "shell", ""
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -880,8 +925,6 @@ def main(argv: list[str]) -> int:
             kind = argv[i + 1]; i += 2
         elif a == "--path" and i + 1 < len(argv):
             path = argv[i + 1]; i += 2
-        elif a == "--breaks" and i + 1 < len(argv):
-            breaks = argv[i + 1]; i += 2
         else:
             print("hold usage error: " + a); return 2
     if not root or not os.path.isdir(root):
@@ -896,7 +939,7 @@ def main(argv: list[str]) -> int:
         cmd = sys.stdin.buffer.read().decode("utf-8")
     except UnicodeDecodeError:
         print("hold command is not valid UTF-8"); return 0
-    ok, rule = is_safe(cmd, kind, path, root, roots, breaks)
+    ok, rule = is_safe(cmd, kind, path, root, roots)
     print(("approve " if ok else "hold ") + rule.replace("\n", " "))
     return 0
 

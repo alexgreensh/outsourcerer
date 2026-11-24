@@ -78,7 +78,7 @@ CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
 
 # other engines' real prompts
-for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "devin|dv-approval-modal-status-line|0" "devin|dv-approval-modal-wide-wrap|2" "codex|cx-approval|0" "codex|cx-edit-approval|0" "codex|cx-edit-approval-multi|2" "gemini|gm-approval-shell|0" "gemini|gm-approval-edit|2" "gemini|gm-approval-other|2" "gemini|gm-trust-folder-menu|2" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
+for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "devin|dv-approval-modal-status-line|0" "devin|dv-approval-modal-wide-wrap|2" "codex|cx-approval|0" "codex|cx-edit-approval|0" "codex|cx-edit-approval-multi|2" "gemini|gm-approval-shell|2" "gemini|gm-approval-edit|2" "gemini|gm-approval-other|2" "gemini|gm-trust-folder-menu|2" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
   PROV="${spec%%|*}"; rest="${spec#*|}"; f="${rest%%|*}"; want="${rest#*|}"
   rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
   [ "$PROV" = cc ] || AFTER="$FX/dv-idle-after-work.ansi"
@@ -86,23 +86,92 @@ for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approv
   [ "$rc" = "$want" ] && ok || bad "$f: want rc $want got $rc ($out)"
 done
 
-# round 2: the reader extracts exactly the command (or target) the screen names, and says how each row
-# break was drawn. A status row above the command is dropped; the command keeps both of its rows.
+# The reader extracts exactly the command (or target) the screen names. A known status row above the
+# command is dropped; the command keeps both of its rows.
 _extract() { # <engine> <fixture> -> sets OSRC_SCR_* from the capture
   _osrc_screen_analyze_text "$1" < "$FX/$2.ansi"
 }
 NLX="$(printf '\nx')"; NLX="${NLX%x}"
 _extract devin dv-approval-modal-status-line
 [ "$OSRC_SCR_CMD" = "touch made-by-devin.txt &&${NLX}ls -la" ] && [ "$OSRC_SCR_KIND" = shell ] && ok "devin status row above the command is not part of it" || bad "devin status line leaked: kind=$OSRC_SCR_KIND cmd=[$OSRC_SCR_CMD]"
-_extract devin dv-approval-modal-safe-wrapped
-[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt &&${NLX}ls -la" ] && [ "$OSRC_SCR_BREAKS" = n ] && ok "short rows are real newlines" || bad "safe-wrapped: breaks=$OSRC_SCR_BREAKS cmd=[$OSRC_SCR_CMD]"
-_extract devin dv-approval-modal-wide-wrap
-case "$OSRC_SCR_BREAKS" in h|s) ok "a full-width row could be a terminal wrap: breaks=$OSRC_SCR_BREAKS" ;; *) bad "full-width row read as a newline: breaks=[$OSRC_SCR_BREAKS]" ;; esac
 _extract devin dv-approval-modal; [ "$OSRC_SCR_CMD" = "SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done" ] && ok || bad "devin modal command: [$OSRC_SCR_CMD]"
 _extract codex cx-edit-approval; [ "$OSRC_SCR_KIND" = write ] && [ "$OSRC_SCR_PATH" = notes.txt ] && ok "codex edit names its file" || bad "codex edit: kind=$OSRC_SCR_KIND path=[$OSRC_SCR_PATH]"
 _extract codex cx-edit-approval-multi; [ "$OSRC_SCR_KIND" = write ] && [ -z "$OSRC_SCR_PATH" ] && ok "codex multi-file edit leaves the path empty" || bad "codex multi edit: path=[$OSRC_SCR_PATH]"
-_extract gemini gm-approval-shell; [ "$OSRC_SCR_KIND" = shell ] && [ "$OSRC_SCR_CMD" = "touch made-by-gemini.txt" ] && ok "gemini allow-execution menu names its command" || bad "gemini shell: [$OSRC_SCR_KIND] [$OSRC_SCR_CMD]"
 _extract gemini gm-approval-other; [ "$OSRC_SCR_KIND" = other ] && ok "gemini unknown numbered menu stays other" || bad "gemini other: $OSRC_SCR_KIND"
+
+# ---- round 3 (Astra round-2 review): one case per screen/approver finding, each must HOLD -------
+# _variant <src fixture> <out name> <python bytes.replace pairs...>: a capture built from a real one.
+_variant() {
+  python3 - "$FX/$1.ansi" "$TMP/$2.ansi" "${@:3}" <<'PY'
+import sys
+b = open(sys.argv[1], "rb").read()
+for i in range(3, len(sys.argv), 2):
+    old, new = (x.encode().decode("unicode_escape").encode("latin-1") for x in sys.argv[i:i + 2])
+    assert old in b, old; b = b.replace(old, new, 1)
+open(sys.argv[2], "wb").write(b)
+PY
+}
+_tick_fx() { # <engine> <capture file> -> rc of one tick, no keys may be sent for a hold
+  PROV="$1"; rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; CAP="$2"; AFTER="$FX/dv-idle-after-work.ansi"
+  osrc_approver_tick sess sess >/dev/null; echo $?
+}
+# 1: a narrow box can wrap `git branch ls` after "branch"; the break is not after &&/||/|, so it holds.
+_variant dv-approval-modal-safe-wrapped f1 ' touch made-by-devin.txt &&\n ls -la' ' git branch\n ls' 'Exec(touch)' 'Exec(git)'
+[ "$(_tick_fx devin "$TMP/f1.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "finding 1: a row break that may be a wrap holds" || bad "finding 1: git branch / ls not held"
+# 6: an unknown status row ("Make all") is kept as part of the command, which then holds.
+_variant dv-approval-modal-status-line f6 'The agent is waiting for your approval to run this' 'Make all'
+_osrc_screen_analyze_text devin < "$TMP/f6.ansi"
+case "$OSRC_SCR_CMD" in "Make all${NLX}"*) ok "finding 6: only the exact Devin status message is skipped" ;; *) bad "finding 6: Make all dropped: [$OSRC_SCR_CMD]" ;; esac
+[ "$(_tick_fx devin "$TMP/f6.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 6: Make all row approved"
+# 7: a no-break space before "#" reaches the classifier as drawn (it was a plain space) and holds.
+_variant dv-approval-modal-safe-wrapped f7 ' ls -la' ' \xc2\xa0# touch ../x'
+_osrc_screen_analyze_text devin < "$TMP/f7.ansi"
+case "$OSRC_SCR_CMD" in *"$(printf '\302\240')# touch ../x") ok "finding 7: U+00A0 preserved through extraction" ;; *) bad "finding 7: NBSP rewritten: [$OSRC_SCR_CMD]" ;; esac
+[ "$(_tick_fx devin "$TMP/f7.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 7: NBSP comment row approved"
+# 8: a second file named "1. notes.txt" does not end the target list; two targets hold.
+_variant cx-edit-approval-multi f8 'other.txt (+2 -0)' '1. other.txt (+2 -0)'
+_osrc_screen_analyze_text codex < "$TMP/f8.ansi"
+[ "$OSRC_SCR_KIND" = write ] && [ -z "$OSRC_SCR_PATH" ] && ok "finding 8: file row named '1. ...' still counts" || bad "finding 8: path=[$OSRC_SCR_PATH]"
+[ "$(_tick_fx codex "$TMP/f8.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 8: multi-file edit approved"
+# 8b (same flaw in the shell scan): a wrapped command row starting "1. " no longer ends the command.
+_variant cx-approval f8b '  $ \x1b[38;2;137;180;250mtouch\x1b[38;2;205;214;244m made-by-codex.txt\x1b[39m' '  $ touch made-by-codex.txt\n  1. ; rm -rf ../x'
+_osrc_screen_analyze_text codex < "$TMP/f8b.ansi"
+[ "$OSRC_SCR_CMD" = "touch made-by-codex.txt${NLX}1. ; rm -rf ../x" ] && ok "finding 8b: codex command runs up to the selected row" || bad "finding 8b: codex command cut short: [$OSRC_SCR_CMD]"
+[ "$(_tick_fx codex "$TMP/f8b.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 8b: truncated codex command approved"
+# 9: Gemini approval menus hold: a shell question left above an edit modal, and the 0.58 layout
+# ("Allow execution of [Shell]?" with the command in its own box).
+_variant gm-approval-edit f9a 'Installed with npm. Attempting to automatically update now...' "Allow execution of: 'ls'?                                    "
+_variant gm-approval-shell f9b "Allow execution of: 'touch made-by-gemini.txt'?" 'Allow execution of [Shell]?                    '
+for f in f9a f9b; do
+  [ "$(_tick_fx gemini "$TMP/$f.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "finding 9: gemini $f holds" || bad "finding 9: gemini $f approved"
+done
+# 2: the locked recapture changes a decision input but not the command text (kind shell -> write,
+# then the pane's worktree): no Enter.
+_variant dv-approval-modal-status-line f2 'Exec(touch)' 'Write(touch)'
+for change in kind root; do
+  rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; PROV=devin; echo 0 > "$TMP/ncap"
+  tmux() {
+    case "$1" in
+      capture-pane) k=$(( $(cat "$TMP/ncap") + 1 )); echo "$k" > "$TMP/ncap"
+        if [ "$k" -gt 1 ] && [ "$change" = kind ]; then cat "$TMP/f2.ansi"; else cat "$FX/dv-approval-modal-status-line.ansi"; fi ;;
+      display-message) if [ "$change" = root ] && [ "$(cat "$TMP/ncap")" -gt 1 ]; then printf '%s\n' "$TMP/wt2"; else printf '%s\n' "$ROOT"; fi ;;
+      send-keys) printf '%s\n' "$*" >> "$KEYS" ;;
+      *) return 0 ;;
+    esac
+  }
+  mkdir -p "$TMP/wt2"; git -C "$TMP/wt2" init -q; osrc_approver_tick sess sess >/dev/null
+  ! grep -q Enter "$KEYS" && ok "finding 2: recapture with a changed $change does not press" || bad "finding 2: pressed after the $change changed"
+done
+tmux() {
+  case "$1" in
+    capture-pane) if [ -n "$AFTER" ] && grep -q Enter "$KEYS"; then cat "$AFTER"; else cat "$CAP"; fi ;;
+    display-message) printf '%s\n' "$ROOT" ;;
+    send-keys) printf '%s\n' "$*" >> "$KEYS" ;;
+    *) return 0 ;;
+  esac
+}
+# no regression (finding 11 class): the unchanged two-row safe command still approves end to end.
+[ "$(_tick_fx devin "$FX/dv-approval-modal-status-line.ansi")" = 0 ] && ok "safe two-row Devin command still approves" || bad "safe two-row Devin command no longer approves"
 
 # cursor NOT on the approve-once row -> hold even for a safe command
 PROV=cc; rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; AFTER=""

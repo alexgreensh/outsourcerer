@@ -3,9 +3,9 @@
 # L3 approver policy table: every row of fixtures/approver-table.tsv must classify exactly as
 # expected (approve|hold). Rows are real commands from orchestrator sessions (FINDINGS 2026-11-13)
 # plus the dangerous shapes that must HOLD: rm outside the worktree, redirects out, $(...),
-# backticks, git push/reset --hard, stopping the whole tmux server, multi-line (continuation) commands, secrets,
-# installs, publishing, another worktree. "⏎" in a row stands for a newline the screen reader
-# established (a short row cannot be a terminal wrap); "↩" for a row break it could not tell from a wrap.
+# backticks, git push/reset --hard, stopping the whole tmux server, multi-row commands, secrets,
+# installs, publishing, another worktree. "⏎" in a row stands for a row break on screen, which may be
+# a newline or a display wrap: the classifier is never told which.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CLS="$HERE/../lib/approver_classify.py"
@@ -40,16 +40,9 @@ while IFS= read -r line; do
   rows=$((rows+1))
   cmd="${cmd//\{HOMEPARENT\}/$HOMEPARENT}"; cmd="${cmd//\{TMPDIR\}/$TMPDIR_ROW}"
   cmd="${cmd//\{ROOT\}/$ROOT}"; cmd="${cmd//\{OTHER\}/$OTHER}"
-  breaks=""; rest="$cmd"; cmd=""
-  while :; do
-    case "$rest" in *⏎*|*↩*) ;; *) break ;; esac
-    a="${rest%%⏎*}"; b="${rest%%↩*}"
-    if [ "${#a}" -le "${#b}" ]; then cmd="$cmd$a$NL"; rest="${rest#*⏎}"; breaks="${breaks}n"
-    else cmd="$cmd$b$NL"; rest="${rest#*↩}"; breaks="${breaks}h"; fi
-  done
-  cmd="$cmd$rest"
+  cmd="${cmd//⏎/$NL}"
   path="${path//\{ROOT\}/$ROOT}"; path="${path//\{OTHER\}/$OTHER}"
-  got="$(printf '%s' "$cmd" | (cd "$ROOT" && python3 -I "$CLS" --root "$ROOT" --kind "$kind" --path "$path" ${breaks:+--breaks "$breaks"}))"
+  got="$(printf '%s' "$cmd" | (cd "$ROOT" && python3 -I "$CLS" --root "$ROOT" --kind "$kind" --path "$path"))"
   case "$want" in approve) approves=$((approves+1)) ;; hold) holds=$((holds+1)) ;; esac
   if [ "${got%% *}" = "$want" ]; then ok "[$kind] $want: $cmd"; else bad "[$kind] '$cmd' expected $want, got: $got"; fi
 done < "$TABLE"
