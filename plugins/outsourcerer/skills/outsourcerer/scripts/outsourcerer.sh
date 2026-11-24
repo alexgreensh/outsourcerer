@@ -6770,34 +6770,6 @@ _external_receipt_valid() { # <receipt> <pane> <obligation-id> <generation>
     '.obligation_id==$obligation and .endpoint==$endpoint and .generation==$generation and .target_transition==true' >/dev/null 2>&1
 }
 
-_obligation_append() { # <id> <session-id> <state> <receipt>
-  local id="$1" session_id="$2" state="$3" receipt="$4" now record
-  _external_session_id_valid "$session_id" || return 1
-  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
-    '{schema_version:"1",obligation_id:$id,session_id:$session,state:$state,receipt:(if $receipt=="" then null else $receipt end),ts:$ts}')" || return 1
-  _state_append "$OSRC_OBLIGATIONS" "$record"
-}
-
-# The decision to create an obligation is a mutation authority boundary.  A plain
-# read followed by _state_append races under two reply processes, so hold the
-# durable state lock through both the read and the pending record.
-_obligation_admit() { # <id> <session-id>
-  local id="$1" session_id="$2" latest now record rc=0
-  _mkdir_private "$OSRC_HOME" || return 1
-  ( umask 077; : >> "$OSRC_OBLIGATIONS" ) 2>/dev/null || return 1
-  _state_lock_acquire "$OSRC_OBLIGATIONS" || return 1
-  latest="$(_obligation_latest_state "$id")"
-  case "$latest" in submitted|delivery_unknown|pending|typing_started) _state_lock_release "$OSRC_OBLIGATIONS"; return 2 ;; esac
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg ts "$now" '{schema_version:"1",obligation_id:$id,session_id:$session,state:"pending",receipt:null,ts:$ts}')" || rc=1
-  [ "$rc" -ne 0 ] || printf '%s\n' "$record" >> "$OSRC_OBLIGATIONS" 2>/dev/null || rc=1
-  [ "$rc" -ne 0 ] || _state_sync "$OSRC_OBLIGATIONS" || rc=1
-  _state_lock_release "$OSRC_OBLIGATIONS"
-  return "$rc"
-}
-
 # The endpoint mutation lock deliberately does NOT reuse _state_lock_acquire. That primitive is one
 # global fd 9 plus one global kind variable, so a state write inside the critical section (send
 # appends an obligation record while holding this lock) clobbered it: on flock hosts the mutation
@@ -6881,10 +6853,6 @@ _obligation_guard_end() {
   [ -n "${_OBLIGATION_GUARD_INT:-}" ] && eval "$_OBLIGATION_GUARD_INT"
   [ -n "${_OBLIGATION_GUARD_TERM:-}" ] && eval "$_OBLIGATION_GUARD_TERM"
   unset _OBLIGATION_GUARD_EXIT _OBLIGATION_GUARD_INT _OBLIGATION_GUARD_TERM
-}
-
-_obligation_latest_state() { # <id>
-  _state_jsonl_read "$OSRC_OBLIGATIONS" 2>/dev/null | jq -r --arg id "$1" 'select(.obligation_id==$id) | .state' | tail -1
 }
 
 _external_reply() { # <session-id> <message> [allow-effort]
@@ -8247,7 +8215,7 @@ _heartbeat_tick() {
         ;;
     esac
   done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead" or .state == "unresponsive?" or .state == "blocked?")) or (.owner == "managed" and (.state == "idle" or .state == "completed" or .state == "done")))')
-  _sv_observe_all beacon >/dev/null 2>&1 || true   # durable lanes/events.jsonl that supervise replays
+  _sv_observe_all beacon >/dev/null 2>&1 || true; _osrc_lease_renew_live >/dev/null 2>&1 || true   # supervise replay log; live holders keep their file leases (lib/lease.sh)
   if [ "$wake_cursor" != "$generation" ]; then
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi
@@ -18920,7 +18888,7 @@ main() {
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
     lane) cmd_lane "$@" ;; review) cmd_review "$@" ;; guards) cmd_guards "$@" ;; proof) cmd_proof "$@" ;;   # remote lanes, reviewer queue, diff guards, proof files (lib/remote.sh, review.sh, guards.sh, proof.sh)
-    team)        osrc_team "$@" ;;                         # one team score per plan/fleet: tests passed - token-cost penalty
+    team)        osrc_team "$@" ;; lease) osrc_lease "$@" ;;   # team score (tests passed - token-cost penalty); file leases (lib/lease.sh)
     wait)        cmd_wait "$@" ;;                          # BLOCK until a job is terminal; honest exit code (0 done|done?, 3 blocked|permission-blocked, 1 other failure, 124 --for elapsed while live)
     result)      cmd_result "$@" ;;                        # print a job's final message (last.txt)
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)

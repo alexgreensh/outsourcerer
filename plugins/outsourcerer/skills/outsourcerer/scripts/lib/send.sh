@@ -13,6 +13,64 @@
 # - Long messages (> OSRC_SEND_MAX_CHARS, default 1500) are written to <delegate cwd>/.osrc-msgs/ and
 #   the delegate is sent a one-line "read <file>" instead, so nothing lands as an unsubmitted paste.
 
+# ---- the obligation ledger -----------------------------------------------------------------------
+# Every send writes the ledger under its state lock. Two sends to different lanes at nearly the same
+# time queue on that lock; one acquire attempt gives up after ~5 s, and the second send used to be
+# refused there. A writer now WAITS for the lock up to OSRC_SEND_LOCK_WAIT_SECS (default 30) and only
+# then fails, with a message that names the cause. Records are whole lines appended under the lock,
+# so concurrent writers never interleave.
+_obligation_lock() {
+  local bound="${OSRC_SEND_LOCK_WAIT_SECS:-30}" deadline
+  case "$bound" in ''|*[!0-9]*) bound=30 ;; esac
+  deadline=$(( $(date +%s) + bound ))
+  until _state_lock_acquire "$OSRC_OBLIGATIONS"; do
+    [ "$(date +%s)" -lt "$deadline" ] && continue
+    printf 'outsourcerer: the obligation ledger %s stayed locked for over %ss, so nothing was sent. Another outsourcerer process is holding it; retry, or raise OSRC_SEND_LOCK_WAIT_SECS.\n' "$OSRC_OBLIGATIONS" "$bound" >&2
+    return 1
+  done
+}
+
+# Last state of one obligation. The grep keeps the read cheap on a long ledger (the old reader forked
+# one jq per line while holding the lock, which is what kept the lock busy); ids are [A-Za-z0-9._-],
+# so the literal key match is exact, and jq re-checks it.
+_obligation_latest_state() { # <id>
+  [ -f "$OSRC_OBLIGATIONS" ] && [ ! -L "$OSRC_OBLIGATIONS" ] || return 0
+  grep -F "\"obligation_id\":\"$1\"" "$OSRC_OBLIGATIONS" 2>/dev/null \
+    | jq -Rr --arg id "$1" 'fromjson? | select(.obligation_id==$id) | .state' 2>/dev/null | tail -1
+}
+
+_obligation_append() { # <id> <session-id> <state> <receipt>
+  local id="$1" session_id="$2" state="$3" receipt="$4" now record rc=0
+  _external_session_id_valid "$session_id" || return 1
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg state "$state" --arg receipt "$receipt" --arg ts "$now" \
+    '{schema_version:"1",obligation_id:$id,session_id:$session,state:$state,receipt:(if $receipt=="" then null else $receipt end),ts:$ts}')" || return 1
+  _mkdir_private "$OSRC_HOME" || return 1
+  ( umask 077; : >> "$OSRC_OBLIGATIONS" ) 2>/dev/null || return 1
+  _obligation_lock || return 1
+  _state_append_locked "$OSRC_OBLIGATIONS" "$record" || rc=1
+  _state_lock_release "$OSRC_OBLIGATIONS"
+  return "$rc"
+}
+
+# Creating an obligation is a mutation authority boundary: hold the lock through the read and the
+# pending record, or two reply processes race. rc 2 = this id already has a live or settled state.
+_obligation_admit() { # <id> <session-id>
+  local id="$1" session_id="$2" latest now record rc=0
+  _mkdir_private "$OSRC_HOME" || return 1
+  ( umask 077; : >> "$OSRC_OBLIGATIONS" ) 2>/dev/null || return 1
+  _obligation_lock || return 1
+  latest="$(_obligation_latest_state "$id")"
+  case "$latest" in submitted|delivery_unknown|pending|typing_started) _state_lock_release "$OSRC_OBLIGATIONS"; return 2 ;; esac
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  record="$(jq -cn --arg id "$id" --arg session "$session_id" --arg ts "$now" '{schema_version:"1",obligation_id:$id,session_id:$session,state:"pending",receipt:null,ts:$ts}')" || rc=1
+  [ "$rc" -ne 0 ] || printf '%s\n' "$record" >> "$OSRC_OBLIGATIONS" 2>/dev/null || rc=1
+  [ "$rc" -ne 0 ] || _state_sync "$OSRC_OBLIGATIONS" || rc=1
+  _state_lock_release "$OSRC_OBLIGATIONS"
+  return "$rc"
+}
+
 _managed_composer_state() { # <session-id> <pane> -> empty|unknown|unreadable (a prompt is open)
   local session_id="$1" pane="$2" prov
   case "$(_external_probe_configured "${OSRC_EXTERNAL_COMPOSER_PROBE:-}"; echo $?)" in

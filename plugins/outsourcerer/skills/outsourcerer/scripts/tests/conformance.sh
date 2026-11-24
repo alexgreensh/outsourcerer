@@ -157,6 +157,7 @@ _ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_
 _ALL_SUITES="$_ALL_SUITES test_no_dead_pid_scan"
 _ALL_SUITES="$_ALL_SUITES test_python_utf8"
 _ALL_SUITES="$_ALL_SUITES test_release_0175"
+_ALL_SUITES="$_ALL_SUITES test_lane_coord test_send_lock_wait"   # file leases + inbox --wait; concurrent sends wait for the ledger lock
 _PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_sealed_fixes test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final test_shell_scratch"
 _ALL_SUITES="$_ALL_SUITES $_PYTHON_SUITES"
 # Per-suite wall-clock bound. A suite that wedges must fail the gate loudly and quickly, not park

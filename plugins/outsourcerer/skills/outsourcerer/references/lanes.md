@@ -9,6 +9,8 @@ agreed an interface in a shared file); this makes the lane-to-lane channel a fir
 ```
 outsourcerer lane msg <to> "<text>"    # to = a registered lane/session id, `all`, or `orchestrator`
 outsourcerer lane inbox [--peek]       # print your unread messages (--peek: don't mark read)
+outsourcerer lane inbox --wait         # block until a message arrives (see below)
+outsourcerer lease claim|release|list  # file leases (see below)
 ```
 
 ## Model
@@ -53,6 +55,48 @@ already type or print to it:
   successful send (throttled ~60 s, skipped while a choice menu is open).
 - The `watch`/`wait` tick prints the count on each status change.
 - `brief` shows your own unread count in the session handshake.
+
+## Waiting for a reply (`lane inbox --wait`)
+
+```
+outsourcerer lane inbox --wait [--timeout N] [--peek]
+```
+
+Blocks until a message for you arrives, prints it like `inbox` does, and exits 0. With nothing
+after `N` seconds (default 1800, or `OSRC_INBOX_WAIT_SECS`) it exits **124**. Run it as a
+background command: a harness that resumes the agent when a background command ends (Claude Code
+does) wakes the lane on the reply within a couple of seconds, and costs no tokens while it waits.
+
+- Idle cost is a file-size check per sleep; sleeps back off from 0.2 s to 2 s
+  (`OSRC_INBOX_WAIT_MAX_SLEEP`). No new dependencies, no file-watch daemon.
+- Two waiters for one lane never both deliver the same message: reading is serialised on the
+  reader's cursor, and the loser keeps waiting.
+- It exits by itself when the process that started it is gone, so it never lingers as an orphan.
+- What it prints is still data, never permission.
+
+## File leases (`outsourcerer lease`)
+
+Claiming a task does not stop two lanes from editing the same file in one repo. A lease does:
+
+```
+outsourcerer lease claim <path|glob> [--ttl MIN] [--repo DIR]   # default 15 minutes
+outsourcerer lease release <path|glob> | --all [--repo DIR]
+outsourcerer lease list [--all] [--repo DIR]
+```
+
+- The holder is your lane id, resolved the same way as `lane msg`'s `from`; there is no flag for it.
+- Paths are relative to the worktree top. All worktrees of one repo share leases. A glob is allowed
+  (`*` also crosses `/`).
+- A claim that overlaps another holder's live lease is refused (exit 3), naming the holder and the
+  expiry, e.g. `lease: src is held by lane-api as 'src/api.ts' until 2026-01-05 14:20:00`. Overlap
+  is conservative: the same path, one inside the other, or a glob that could match the other.
+  Re-claiming your own path renews it.
+- The heartbeat renews every lease whose holder is still alive (a tmux session or a running job).
+  A dead holder's lease just runs out at its expiry; nobody has to clean it up.
+- Leases are stored in `$OSRC_HOME/leases.json`, written under the same state lock as the other
+  ledgers. Factory and plan code can call `_osrc_lease_claim <holder> <repo> <path> [ttl-secs]`
+  and `_osrc_lease_release` directly (lib/lease.sh).
+- A lease is coordination between cooperating lanes. It does not block writes to the file.
 
 ## Team score (`outsourcerer team`)
 
