@@ -28,6 +28,8 @@ class SuperviseSignal(unittest.TestCase):
                 '''[ "$signalled" != 1 ] || return 2''': ':',
                 '''10) _sv_fail "killed by a signal" "$rearm"; return 2 ;;''': '10) return 2 ;;',
                 "trap 'exit 10' TERM INT HUP": '''trap '_sv_fail "killed by a signal" "$SCRIPT_PATH supervise"; exit 10' TERM INT HUP''',
+                # the old code also ran the refresh in the worker's foreground (now it is bounded in a child)
+                '''_sv_bounded "$(_sv_num "${OSRC_SUPERVISE_TICK_TIMEOUT:-}" 120)" _sv_tick "$dir" "$now"; rc=$?''': '''_sv_tick "$dir" "$now"; rc=$?''',
             }
             for before, after in changes.items():
                 self.assertEqual(source.count(before), 1)

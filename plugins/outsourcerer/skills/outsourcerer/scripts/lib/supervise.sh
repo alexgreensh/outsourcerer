@@ -576,14 +576,35 @@ _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY ->
   done <<< "$rows"
 }
 
-_sv_armed_cover() { # <sid> -> `*` or the explicit ids a live supervise for <sid> covers
-  local f pid
+# A live pid is not a live waiter: a supervise hung in a probe kept its armed file and pid while it
+# logged and delivered nothing (7 h unwatched; a done row 37 min undelivered). It covers only while it
+# has polled (supervise/<sid>/alive) or armed within OSRC_SUPERVISE_HUNG seconds (default 600).
+_sv_armed_cover() { # <sid> -> `*` or the explicit ids a live, polling supervise for <sid> covers
+  local f pid last m
+  last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$1/alive" 2>/dev/null)" 0)"
   for f in "$OSRC_HOME/supervise/$1"/armed.*; do
     [ -f "$f" ] || continue
     pid="${f##*.}"
-    if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'supervise'; then cat "$f"
+    if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'supervise'; then
+      m="$(_sv_num "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" 0)"; [ "$m" -gt "$last" ] && last="$m"
+      [ $(( $(_sv_now) - last )) -le "$(_sv_num "${OSRC_SUPERVISE_HUNG:-}" 600)" ] && cat "$f"
     else rm -f "$f"; fi
   done
+}
+
+# Run <cmd> with a deadline; rc 124 when it had to be killed. A probe that never returns must not
+# stop a waiter from observing and delivering.
+_sv_bounded() { # <secs> <cmd...>
+  local n p i=0; n=$(( $(_sv_num "$1" 60) * 10 )); shift
+  "$@" & p=$!
+  while kill -0 "$p" 2>/dev/null; do
+    if [ "$i" -ge "$n" ]; then
+      command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$p" 2>/dev/null
+      kill -TERM "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124
+    fi
+    sleep 0.1; i=$((i + 1))
+  done
+  wait "$p"
 }
 
 # ---- the command ----------------------------------------------------------------------------------
@@ -669,7 +690,7 @@ $w" ;;
 _sv_main() { # <sid> <once> [ids...]
   local sid="$1" once="$2"; shift 2
   local explicit="$*" seen="" pend=0 key dir cursor size targets tj now poll settle first="" maxs t0 id out=0 new nl idle_list stopped_list=""
-  local scope="${scope:-${sid:+ --session $sid}}" fowner gen cgen older="" real f armed ledger drc newer head
+  local scope="${scope:-${sid:+ --session $sid}}" fowner gen cgen older="" real f armed ledger drc newer head rc
   key="${sid:-ids-$(printf '%s' "$explicit" | cksum | awk '{print $1}')}"
   [ "${_sv_all:-0}" = 0 ] || key="@all"
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
@@ -679,9 +700,6 @@ _sv_main() { # <sid> <once> [ids...]
   trap 'exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
   _sv_arm_seq "$dir" || exit 1
-  # Arming a session waiter also (re)affirms the persistent watcher: when THIS supervise exits,
-  # the service keeps observing and waking. One stat when healthy; OSRC_WATCH_FALLBACK=0 opts out.
-  type _osrc_watch_ensure >/dev/null 2>&1 && { _osrc_watch_ensure >/dev/null 2>&1 || true; }
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
   fi
@@ -700,7 +718,12 @@ _sv_main() { # <sid> <once> [ids...]
     # the caller's pipe open. Exit with it.
     kill -0 "$$" 2>/dev/null || exit 12
     osrc_watcher_alive "$dir" "$now"   # liveness stamp for osrc_watcher_gap (lib/stall.sh)
-    if ! _sv_tick "$dir" "$now"; then
+    # The refresh probes agent CLIs; bounded so a hung probe cannot starve the observe loop below.
+    _sv_bounded "$(_sv_num "${OSRC_SUPERVISE_TICK_TIMEOUT:-}" 120)" _sv_tick "$dir" "$now"; rc=$?
+    if [ "$rc" = 124 ]; then
+      printf '%s\n' "$now" > "$dir/tick.time"   # retry after the normal interval, not every poll
+      printf '[outsourcerer] supervise: project and limits refresh timed out; watching on\n' >&2
+    elif [ "$rc" != 0 ]; then
       _sv_fail "project and limits refresh failed" "$SCRIPT_PATH supervise$scope${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}${explicit:+ $explicit}"
       exit 11
     fi

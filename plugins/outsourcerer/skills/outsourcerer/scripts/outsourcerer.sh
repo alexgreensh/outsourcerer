@@ -18915,8 +18915,7 @@ main() {
     bearings)    cmd_bearings "$@" ;;                      # render the last normalized fleet snapshot
     heartbeat)   cmd_heartbeat "$@" ;;                     # verified supervision arm: start|status
     watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
-    supervise)   cmd_supervise "$@" ;;                     # ONE blocking waiter for everything this session owns: EVENT/NEXT lines (lib/supervise.sh)
-    watcher)     cmd_watcher "$@" ;;                       # per-user watcher service: install|uninstall|status|run|tick|ensure (lib/watchsvc.sh)
+    supervise) cmd_supervise "$@" ;; watcher) cmd_watcher "$@" ;;   # ONE blocking waiter for this session's work (lib/supervise.sh); the per-user watcher (lib/watchsvc.sh)
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
