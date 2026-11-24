@@ -20,6 +20,12 @@ def renew($t): if ($t | type) != "number" or $t <= $now then null
   | if $d == 0 then "today · " + ($t | strflocaltime("%H:%M")) elif $d == 1 then "tomorrow · " + ($t | strflocaltime("%H:%M"))
     else "in \($d) days · " + ($t | strflocaltime("%a %e %b") | gsub("  +"; " ")) end end;
 def wlabel: if . == "claude5h" or . == "codex5h" then "5 hours" else "Week" end;
+# The newest reading wins: a cached live probe only replaces a row that already has its own reading
+# (the session log) when the probe is not older than it.
+def stale_secs: ($ARGS.named.stale // 7200);
+def low_pct: ($ARGS.named.ll // 10);
+def row_age: ([.windows[]?.age_s | numbers] | min);
+def probe_newer: (row_age) as $a | $a == null or ($now - ($p.codex.checked // $now)) <= $a;
 def unmeasured: (.state == "unknown" or .state == "wait");
 def checked($t): . + {updated: ($t | todate), checked_at: $t};
 
@@ -112,7 +118,7 @@ def generic_fix:
   else . + {left: "No usage meter", note: "\(.name) publishes no usage limit Outsourcerer can read, so runs are not gated on one."} | checked($now) end;
 
 map(if (type == "object") | not then .
-    elif .id == "codex" and ($p.codex.ok // false) == true then codex_fix   # the live reading names its source
+    elif .id == "codex" and ($p.codex.ok // false) == true and probe_newer then codex_fix   # the live reading names its source
     elif unmeasured then
       (if .id == "claude" then claude_fix elif .id == "codex" then codex_fix elif .id == "agy" then agy_fix
        elif .id == "devin" then devin_fix elif .id == "droid" then droid_fix else generic_fix end)
@@ -121,5 +127,17 @@ map(if (type == "object") | not then .
     | if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end
     | if (.windows | type) == "object" then .windows |= map_values(if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end) else . end
     | if (.left // "") == "" or .left == "not checked yet" then .left = "No reading" else . end
+    # A session-log reading keeps its own age as its checked-at time.
+    | if (.checked_at | type) != "number" and row_age != null then . + {checked_at: ($now - row_age)} else . end
+    # Every measured reading carries its age. Past $stale it is unknown, never headroom (an exhausted
+    # one stays exhausted: stale only ever understates use). Under the low line it says so.
+    | if (.used | type) == "number" and (.checked_at | type) == "number" then
+        (($now - .checked_at) | if . < 0 then 0 else . end) as $age
+        | . + {age_s: $age}
+        | if $age > stale_secs then . + {stale: true, left: "\(.left) · checked \(ago($now - $age)) ago"}
+            | if .state == "ok" or .state == "low" then .state = "unknown" else . end
+          elif (100 - .used) <= low_pct then . + {low: true, left: "\(.left) · LOW: stop routing here"}
+          else . end
+      else . end
     # "Waiting for reset" never shows without the reset time.
     | if .state == "wait" and ((.renews_at // null) == null) then .state = "unknown" else . end)

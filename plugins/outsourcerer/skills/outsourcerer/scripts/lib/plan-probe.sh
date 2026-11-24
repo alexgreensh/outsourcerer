@@ -46,6 +46,7 @@ _osrc_probe_wanted() {
   case "$1" in
     codex)
       _osrc_probe_has codex || return 1
+      [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ] && return 0   # the page's refresh asked: always re-read
       # Active only when the passive session-log reading is missing or stale.
       local sdir="$HOME/.codex/sessions" newest age
       newest="$(ls -t "$sdir"/*/*/*/*.jsonl 2>/dev/null | head -1)"
@@ -91,7 +92,16 @@ _osrc_probe_store() {
   local id="$1" dir f
   dir="$(_osrc_probe_dir)"; f="$dir/$id.json"
   mkdir -p "$dir" 2>/dev/null && [ ! -L "$dir" ] && [ ! -L "$f" ] || return 1
-  _osrc_probe_fetch "$id" > "$f.$$" 2>/dev/null && [ -s "$f.$$" ] && mv -f "$f.$$" "$f" 2>/dev/null
+  _osrc_probe_fetch "$id" > "$f.$$" 2>/dev/null
+  # A failed probe keeps the last good value (with its original checked time, so its age stays honest)
+  # and records why; the file's mtime still moves, so the retry waits a failed-answer interval.
+  if [ -s "$f.$$" ] && _osrc_probe_has jq && [ -s "$f" ] && jq -e '.ok == true' "$f" >/dev/null 2>&1 \
+     && ! jq -e '.ok == true' "$f.$$" >/dev/null 2>&1; then
+    jq -c --slurpfile n "$f.$$" '. + {refresh_failed: ($n[0].why // "probe gave no answer")}' "$f" > "$f.$$.k" 2>/dev/null \
+      && [ -s "$f.$$.k" ] && mv -f "$f.$$.k" "$f.$$"
+    rm -f "$f.$$.k" 2>/dev/null
+  fi
+  [ -s "$f.$$" ] && mv -f "$f.$$" "$f" 2>/dev/null
   rm -f "$f.$$" 2>/dev/null
   return 0
 }
@@ -124,9 +134,9 @@ _osrc_probe_kick() {
     fi
     age=$(( $(date +%s) - $(_osrc_probe_mt "$f") ))
     # A failed answer is retried sooner than a good one.
-    grep -q '"ok":false' "$f" 2>/dev/null && [ "$ttl" -gt 120 ] && ttl=120
-    [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] && continue
-    if [ "${OSRC_PROBE_SYNC:-0}" = 1 ]; then _osrc_probe_store "$id" & pids="$pids $!"
+    grep -Eq '"ok":false|"refresh_failed"' "$f" 2>/dev/null && [ "$ttl" -gt 120 ] && ttl=120
+    [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] && [ "${OSRC_HUB_CHECK_PLANS:-0}" != 1 ] && continue
+    if [ "${OSRC_PROBE_SYNC:-0}" = 1 ] || [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ]; then _osrc_probe_store "$id" & pids="$pids $!"
     else _osrc_probe_refresh_bg "$id"; fi
   done
   for p in $pids; do wait "$p" 2>/dev/null; done
@@ -215,7 +225,10 @@ _osrc_plan_overlay() {
   now="$(date +%s)"
   lt="$(_osrc_limit_threshold 2>/dev/null)"; case "$lt" in ''|*[!0-9.]*) lt=90 ;; esac
   ct="${OSRC_CONSERVE_THRESHOLD:-50}"; case "$ct" in ''|*[!0-9.]*) ct=50 ;; esac
-  jq -c --argjson p "$pj" --argjson now "$now" --argjson lt "$lt" --argjson ct "$ct" -f "$(dirname "$(_osrc_probe_py)")/plan-overlay.jq" <<<"$in" 2>/dev/null \
+  local st ll
+  st="${OSRC_LIMITS_STALE_SECS:-7200}"; case "$st" in ''|*[!0-9]*) st=7200 ;; esac
+  ll="${OSRC_LIMIT_LOW_PCT:-10}"; case "$ll" in ''|*[!0-9.]*) ll=10 ;; esac
+  jq -c --argjson p "$pj" --argjson now "$now" --argjson lt "$lt" --argjson ct "$ct" --argjson stale "$st" --argjson ll "$ll" -f "$(dirname "$(_osrc_probe_py)")/plan-overlay.jq" <<<"$in" 2>/dev/null \
     || printf '%s\n' "$in"
 }
 

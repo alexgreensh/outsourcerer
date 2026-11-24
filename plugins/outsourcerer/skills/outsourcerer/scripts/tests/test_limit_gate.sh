@@ -8,7 +8,7 @@
 #   * advise never picks an exhausted lane (hard exclude, not a score haircut),
 #   * a direct launch warns ONCE naming the meter + suggested fallback, then proceeds only with
 #     --force-lane or a user --provider pin; unpinned auto takes a zero-cost hop; pins refuse,
-#   * stale readings (> OSRC_LIMITS_STALE_SECS = 6h, carried as codexage=) are UNKNOWN, not
+#   * stale readings (> OSRC_LIMITS_STALE_SECS = 2h, carried as codexage=) are UNKNOWN, not
 #     exhausted: warn only, never gate,
 #   * fallback suggestion follows the SKILL.md conservation order (local -> Devin -> Gemini ->
 #     Codex -> OpenRouter) filtered to ready, non-exhausted lanes.
@@ -76,14 +76,14 @@ _session_limits() { printf 'codexwk=98\n'; }
 _osrc_limit_exceeded cx "codexwk=98" && ok "unit: fresh codexwk=98 exceeds" || bad "unit: fresh 98 not exceeded"
 _osrc_limit_exceeded cx "codexwk=89" && bad "unit: codexwk=89 exceeded" || ok "unit: codexwk=89 under line clears"
 _osrc_limit_exceeded cx "codexwk=90" && ok "unit: exactly-at-threshold counts (>=)" || bad "unit: 90 did not count as exhausted"
-# Stale: codexage older than 6h -> unknown, NOT exhausted, even at 100%.
+# Stale: codexage older than 2h -> unknown, NOT exhausted, even at 100%.
 _osrc_limit_exceeded cx "codexwk=100 codexage=99999" \
   && bad "unit: STALE codexwk=100 treated as exhausted" \
   || ok "unit: stale codexwk=100 is unknown, not exhausted"
-# codexage between OSRC_LIMITS_MAX_AGE (2h) and 6h -> still a live reading, still gates.
-_osrc_limit_exceeded cx "codexwk=98 codexage=10000" \
-  && ok "unit: 2-6h-old reading still gates (fresh per the 6h rule)" \
-  || bad "unit: codexage=10000 wrongly treated as stale"
+# codexage under the stale line (2h) -> still a live reading, still gates.
+_osrc_limit_exceeded cx "codexwk=98 codexage=5000" \
+  && ok "unit: under-2h reading still gates" \
+  || bad "unit: codexage=5000 wrongly treated as stale"
 # Missing meter -> never gated.
 _osrc_limit_exceeded cx "claude5h=99" \
   && bad "unit: lane with no codex reading gated" \

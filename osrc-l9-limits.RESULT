@@ -1,0 +1,3 @@
+sha=ea34fe0db6872dbd92d5eb9cbbd21e58e35f79b0
+rc=0
+Newest limit reading wins; stale readings show age and count as unknown; failed probe keeps old value; low line (10% left) alerts once via brief and a limit-low event. Conformance had unrelated env failures, see reports/osrc-l9-limits.md.
