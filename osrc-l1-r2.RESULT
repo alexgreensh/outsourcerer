@@ -1,0 +1,8 @@
+sha=75670caa753fada18c0867681d054b85b34cdc4f
+rc=0
+Replaced the WIP watcher (739 -> 373 lines). Per-user watcher: launchd, systemd --user or a fallback loop; explicit, idempotent install; one-command uninstall.
+It observes every owner and wakes the owning session through a verified channel (delivery command, tmux pane, or opt-in resume). Failed wakes retry with backoff and show up as .wakefail, in status and as an OS notification.
+It sends one continue per provider-limit reset to lanes still parked on that limit.
+supervise: the hub refresh now has a deadline, and a supervise that has stopped polling no longer counts as a waiter (incidents 1 and 2; root cause hypothesised, not proven).
+The stop guard counts the watcher as a waiter only when it can wake the session. A yield now starts a watcher and notifies.
+test_watchsvc: 46/46 pass. Conformance rc 1: its 6 failing suites fail the same way on the base commit (root container). See reports/osrc-l1-watchdog.md.

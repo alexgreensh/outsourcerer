@@ -158,7 +158,22 @@ All commands run from `plugins/outsourcerer/skills/outsourcerer/scripts`, niced:
 | `test_tests_set_home`, `test_windows_portability`, `test_noglob_splitting`, `test_no_dead_pid_scan` | rc 0 |
 | `bash tests/test_vocab_hygiene.sh` | rc 1, also rc 1 on the untouched base: a pre-existing environment failure (write-failure simulation while running as root) |
 
-The conformance result is under **Conformance** below.
+### Conformance
+
+`OSRC_CONFORMANCE_JOBS=2 bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`
+finished with rc 1: 242 passed, 6 failed, 1 skipped (live lanes).
+
+`test_watchsvc`, `test_supervise` and `test_stop_guard` are green. The six failing suites all fail
+the same way on the untouched base commit 75670ca, each run alone in this container (uid 0):
+- `test_harness_isolation`
+- `test_vocab_hygiene`
+- `test_supervise_pgroup_kill` (the job watchdog in `lib/watchdog.sh`, not this lane's `supervise.sh`)
+- `test_parity_insource_refresh`
+- `test_conformance_suite_timeout`
+- `test_sealed_fixes`
+
+They are environment failures from running as root in this container, not regressions from this
+lane.
 
 ### Unproven
 
