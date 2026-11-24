@@ -47,14 +47,14 @@ OSRC_NOW=1000000; export OSRC_NOW
 printf 'gh: error connecting to api.github.com\n' > "$GH_ERR"
 add c2
 for _ in 1 2 3 4 5 6; do cmd_lane poll c2; done
-osrc_remote_events 2>&1 | grep -q 'EVENT failed c2 .*polling failed' && ok "real network errors still surface" || bad "network error hidden"
+out="$(osrc_remote_events 2>&1)"; grep -q 'EVENT failed c2 .*polling failed' <<<"$out" && ok "real network errors still surface" || bad "network error hidden"
 
 # Evidence-based ls: a lane that pushed once, then went quiet past the stall timeout, is stale not live.
 rm -f "$GH_ERR"
 printf '{"sha":"%s","commit":{"message":"wip"},"files":[]}\n' "$(printf 'a%.0s' $(seq 40))" > "$GH_OUT"
 add c3; cmd_lane poll c3
-grep -E '^c3 ' <<<"$(cmd_lane ls)" | grep -q ' live ' && ok "fresh push shows live" || bad "ls: $(cmd_lane ls)"
+row="$(cmd_lane ls | grep -E '^c3 ')"; grep -q ' live ' <<<"$row" && ok "fresh push shows live" || bad "ls: $(cmd_lane ls)"
 OSRC_NOW=$((1000000 + 91)); export OSRC_NOW
-grep -E '^c3 ' <<<"$(cmd_lane ls)" | grep -q ' stale ' && ok "no evidence past the timeout shows stale" || bad "ls: $(cmd_lane ls)"
+row="$(cmd_lane ls | grep -E '^c3 ')"; grep -q ' stale ' <<<"$row" && ok "no evidence past the timeout shows stale" || bad "ls: $(cmd_lane ls)"
 
 echo "=== $pass passed, $fail failed ==="; [ "$fail" -eq 0 ]

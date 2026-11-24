@@ -287,7 +287,7 @@ if command -v tmux >/dev/null 2>&1; then
   rm -f "$OSRC_STUB_MODE"
   [ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-trust.json" ] && grep -qi 'trust this folder yet' <<<"$out" && grep -q 'never accepts trust' <<<"$out" \
     && ok "trust prompt: launch fails with a clear message, nothing registered" || bad "trust prompt not handled (rc=$rc): $out"
-  tmux list-sessions 2>/dev/null | grep -q osrc-cloud && bad "trust prompt: launcher pane left running" || ok "trust prompt: launcher pane torn down"
+  _ls="$(tmux list-sessions 2>/dev/null)"; grep -q osrc-cloud <<<"$_ls" && bad "trust prompt: launcher pane left running" || ok "trust prompt: launcher pane torn down"
 fi
 
 # ============================== L7 spend gate integration ==============================

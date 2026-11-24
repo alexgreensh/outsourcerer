@@ -16,7 +16,7 @@ Base held no earlier work in my files (the WIP commit touched stopguard/supervis
 - `bash tests/test_cloudrun.sh`: 121 passed, rc=0 (7 new cases fail on the old code, verified by stashing).
 - `bash tests/test_lane_status.sh`: 10 passed, rc=0 (6 fail on the old remote.sh).
 - `bash tests/test_remote_review.sh`: 106 passed, rc=0.
-- `bash tests/conformance.sh`: see final line of the run below.
+- `bash tests/conformance.sh`: rc=1, `238 passed, 11 failed`. My `test_no_pipe_grep_q` failure (4 piped `grep -q` in my new tests) was fixed and re-run green (rc=0). The other 10 failures are in suites for files I do not own or touch: test_harness_isolation, test_vocab_hygiene, test_supervise, test_watchsvc, test_supervise_lifecycle, test_supervise_pgroup_kill, test_stop_guard, test_parity_insource_refresh, test_conformance_suite_timeout, test_sealed_fixes. Not investigated, not verified against a clean base; most are supervise/watchsvc/stopguard (the WIP commit on this base). I did not re-run the full conformance after the grep fix.
 
 ## Unproven
 - The literal string "Agent refused the request" is not in this repo; it comes from outside my files (likely the delegate path). The cloud launch path is fixed; local-delegate paths need the same classifier.

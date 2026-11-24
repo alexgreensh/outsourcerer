@@ -1,0 +1,3 @@
+sha=ea34fe0db6872dbd92d5eb9cbbd21e58e35f79b0
+rc=0
+Five lane bugs fixed with regression tests (test_cloudrun 121/0, test_lane_status 10/0, test_remote_review 106/0). Full conformance had 10 failures in other lanes' suites (supervise/watchsvc/stop_guard etc.), see reports/osrc-l7-remote.md.
