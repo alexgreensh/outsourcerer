@@ -1,0 +1,3 @@
+sha=17d57526a7fb4313da6ea6ec247c398a9c54059f
+rc=0
+All 3 P1 and every P2/P3 round-1 finding fixed. test_limits_staleness: 19 pass, 10 of its checks fail on base. Conformance cut off by my 590s timeout (rc=124): test_vocab_hygiene and test_harness_isolation fail the same on base; test_supervise_pgroup_kill not compared. See reports/osrc-l9-limits.md "Round 2".

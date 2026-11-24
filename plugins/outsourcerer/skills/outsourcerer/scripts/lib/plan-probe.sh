@@ -95,7 +95,7 @@ _osrc_probe_store() {
   _osrc_probe_fetch "$id" > "$f.$$" 2>/dev/null
   # A failed probe keeps the last good value (with its original checked time, so its age stays honest)
   # and records why; the file's mtime still moves, so the retry waits a failed-answer interval.
-  if [ -s "$f.$$" ] && _osrc_probe_has jq && [ -s "$f" ] && jq -e '.ok == true' "$f" >/dev/null 2>&1 \
+  if [ -s "$f.$$" ] && _osrc_probe_has jq && [ -s "$f" ] && case "$id" in codex|agy) true ;; *) false ;; esac && jq -e '.ok == true' "$f" >/dev/null 2>&1 \
      && ! jq -e '.ok == true' "$f.$$" >/dev/null 2>&1; then
     jq -c --slurpfile n "$f.$$" '. + {refresh_failed: ($n[0].why // "probe gave no answer")}' "$f" > "$f.$$.k" 2>/dev/null \
       && [ -s "$f.$$.k" ] && mv -f "$f.$$.k" "$f.$$"
@@ -135,8 +135,8 @@ _osrc_probe_kick() {
     age=$(( $(date +%s) - $(_osrc_probe_mt "$f") ))
     # A failed answer is retried sooner than a good one.
     grep -Eq '"ok":false|"refresh_failed"' "$f" 2>/dev/null && [ "$ttl" -gt 120 ] && ttl=120
-    [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] && [ "${OSRC_HUB_CHECK_PLANS:-0}" != 1 ] && continue
-    if [ "${OSRC_PROBE_SYNC:-0}" = 1 ] || [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ]; then _osrc_probe_store "$id" & pids="$pids $!"
+    [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] && continue
+    if [ "${OSRC_PROBE_SYNC:-0}" = 1 ]; then _osrc_probe_store "$id" & pids="$pids $!"
     else _osrc_probe_refresh_bg "$id"; fi
   done
   for p in $pids; do wait "$p" 2>/dev/null; done

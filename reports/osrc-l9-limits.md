@@ -40,3 +40,28 @@ A failed probe also overwrote the last good value with `{"ok":false}`.
 - `lib/advise-score.sh:451` still defaults `OSRC_LIMITS_STALE_SECS` to 21600; change it to 7200 so advise agrees.
 - `lib/hub-assets/hub-plans.js`: optionally style rows with `stale` / `low` and show `age_s`.
 - `lib/lanemsg.sh` brief: nothing required (the low line arrives through `_conserve_reco`); supervise may want to list the `limit-low` kind.
+
+## Round 2
+
+Fixes for the three P1 and every P2/P3 finding of the round-1 review. Paths under `plugins/outsourcerer/skills/outsourcerer/scripts/`.
+
+- **P1-1** `lib/limits.sh`: `_osrc_summary_json` now writes `age_s` into each window (`wa3` was read and dropped), so the overlay can compare the probe's age with the session log's.
+- **P1-2** `tests/test_limits_staleness.sh` now builds rows with the real `_osrc_lane_summary_base --json | _osrc_plan_overlay` path. Only `_osrc_meter_windows` and harness detection are stubbed. 10 checks fail on the base `17d5752` and all 19 pass now.
+- **P1-3** `lib/plan-overlay.jq`: the codex session-log fallback is stamped with the log's own age (`row_age`), not the probe's failure time, so the stale block applies.
+- **P2-4** The launch gate default is back to 6 h (`_osrc_lane_limit_stale`), which matches advise and the warning text. The 2 h default is for page display only. Comments updated.
+- **P2-5** keep-last-good now applies to `codex` and `agy` only. A kept reading whose refresh failed is shown stale, with the reason and state `unknown`, in the overlay. Devin and droid report a failure again.
+- **P2-6** the `low` flag depends only on `.used`, not on `checked_at`.
+- **P2-7** the low-scan seen-file keeps windows that have no token in this call. Only a present reading back over the line clears one.
+- **P3-8** the low scan compares `codexage` against `OSRC_LIMITS_STALE_SECS`. **P3-9** removed the redundant `OSRC_HUB_CHECK_PLANS` edits in `plan-probe.sh` (the `_osrc_probe_wanted` one stays). **P3-10** the overlay uses `$stale` and `$ll` directly.
+- **P3-11** see Tests below.
+
+### Tests
+- `nice bash tests/test_limits_staleness.sh`: rc=0, 19 passed. On base lib files (stash of `lib/`): 10 FAIL.
+- `nice timeout 590 bash tests/conformance.sh`: rc=124 (my timeout cut it before its summary; 157 PASS lines). Three suites FAILED: `test_vocab_hygiene` and `test_harness_isolation` fail identically with my `lib/` and `tests/` changes stashed, so they are not caused by this round (likely running as root here). `test_supervise_pgroup_kill` was not compared against base. Conformance therefore did not finish green and I make no claim it did.
+
+### Unproven
+- Live codex/agy probes were not run against real CLIs here.
+- The two suites that failed in round 1 were not compared against base.
+
+## Needs from other lanes
+None.
