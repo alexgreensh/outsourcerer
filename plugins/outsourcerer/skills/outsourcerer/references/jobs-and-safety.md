@@ -87,34 +87,48 @@ distinct handling:
 
 ## Disk pressure policy
 
-Three floors, all derived from the volume holding `$OSRC_HOME` (so a big disk is not treated like a
-small one): **launch** = max(10GB, 5% of volume) — no new lane launches under it; **pause** =
-max(4GB, 2%) — running supervised jobs get `SIGSTOP` under it; **critical** = ~0.5% clamped to
-1–4GB — nothing launches under it, not even with `--ack` or `OSRC_DISK_OK`. A **resume** floor sits
-between pause and launch so a hovering disk cannot flap jobs.
+Three floors, derived from the volume holding `$OSRC_HOME`: **launch** = max(10GB, 5% of the
+volume), capped at a quarter of a small volume so an empty small disk is never blocked forever;
+**pause** = max(4GB, 2%), kept under the launch floor; **critical** = 0.5% clamped to 1–4GB. A
+**resume** floor sits halfway between pause and launch so a hovering disk cannot flap jobs.
 
-While a job is paused its supervisor is frozen too (no watchdog wall-clock arm can fire), its
-`out.log` gets a `>>> [outsourcerer] disk-policy:` keepalive line, and the owner is woken once per
-episode (`disk-paused`/`disk-resumed`/`disk-critical` events in the wake queue, throttled by
-`OSRC_DISK_WAKE_SECS`, default 300s).
-Nothing is ever killed, and only processes recorded in `$OSRC_JOBS/*/{pid,pgid,supervisor_pid}` with
-a proven pid+start-time match are signalled — a foreign or unverifiable process is never touched.
-When free space recovers past the resume floor everything is `SIGCONT`ed and the marker removed; the
-monitor also resumes whatever it paused before it exits. A detached monitor (`$OSRC_HOME/disk-policy/`)
-is armed on every launch path and self-terminates after `OSRC_DISK_MONITOR_IDLE_TICKS` (default 40)
-empty ticks at `OSRC_DISK_POLICY_POLL` (default 30s). Under pressure it first reclaims ONLY
-manifest items that are verdict-SAFE **and** kind `worktree`/`branch` — artifacts of a lane proven
-merged — logging each deletion to `cleanup.log`; jobs, loops, autodetach logs, tmp dirs, every ASK
-item, and all user data stay manual (`cleanup --apply` / `--ack`). Each pressure episode writes one
-report (free/total, floors, swap, biggest dirs under `OSRC_HOME`, reclaimable counts) to
-`disk-policy/monitor.log`.
+**Settings.** Put overrides in `$OSRC_HOME/disk-policy/settings`, one `NAME=value` per line (read,
+never sourced): `OSRC_DISK_MIN_GB` (launch floor; `0` disables launch blocking and the critical
+line), `OSRC_DISK_PAUSE_GB`, `OSRC_DISK_CRITICAL_GB`, `OSRC_DISK_RECLAIM_MAX` (lanes reclaimed per
+pressure episode, default 10, `0` disables), `OSRC_DISK_POLICY_OFF=1` (legacy flat 10GB gate, no
+pause or reclaim). The same names as environment variables apply to one command's launch gate only;
+the shared monitor reads only the settings file, so one command's environment never governs later
+jobs.
 
-Overrides, all explicit and per-command: `OSRC_DISK_MIN_GB` replaces the launch floor,
-`OSRC_DISK_PAUSE_GB`/`OSRC_DISK_CRITICAL_GB` the others, `OSRC_DISK_OK=1` launches once under the
-launch floor (logged to `disk-policy/override.log`, never below critical), `OSRC_DISK_MIN_GB=0`
-disables launch blocking entirely, `OSRC_DISK_RECLAIM_MAX` bounds auto-reclaim deletes per tick
-(default 10, 0 disables), and `OSRC_DISK_POLICY_OFF=1` restores the legacy flat 10GB gate with no
-pause/reclaim.
+**Launch gate.** Below the critical floor nothing launches — not `cleanup --ack`, not an override.
+Between critical and launch, an acknowledged ASK list passes (free space is re-read after the
+cleanup scan), and so does the explicit override: a refusal prints a one-use code, and
+`OSRC_DISK_OK=<code> <same command>` admits that one command and its internal launches. The code
+expires after 15 minutes, binds to the first process that uses it, is removed from the environment
+before any delegate runs, and is refused unless its use is appended to `disk-policy/override.log`.
+
+**While jobs run.** A detached monitor (one per `$OSRC_HOME`, owned through
+`disk-policy/monitor.lock`) watches supervised bg jobs, foreground launches and tmux sessions
+started by `session start`. Under the pause floor it first writes a pause record naming each process
+and its start-time identity, then `SIGSTOP`s them (a job's supervisor too); if the record cannot be
+written the job keeps running and the owner is told. It then wakes the owner once per pressure
+episode (`disk-paused`, `disk-critical`, `disk-resumed` events), and only after that writes the
+pressure report (free space, swap, biggest dirs, reclaimable items by path) to
+`disk-policy/monitor.log` and reclaims merged lanes. Nothing is ever killed; a process whose
+identity cannot be proven is never signalled. When free space reaches the resume floor, or the
+monitor exits for any reason, every recorded process is `SIGCONT`ed; a TUI that its pane shell
+parked in job control is brought back with `fg`, its terminal mode restored and redrawn.
+`outsourcerer disk resume` does the same immediately and holds new pauses until space recovers or
+falls under the critical floor; `outsourcerer disk status` prints the report. Each job's paused
+time accumulates in `disk-paused-secs` (`_osrc_disk_paused_secs`) for the watchdog.
+
+**Automatic reclaim** removes only artifacts of a lane proven merged: the lane's worktree (its live
+branch must match the receipt and its HEAD be the proven commit; any untracked, ignored or protected
+content keeps it), its recorded branch (deleted only if the tip is still the proven commit and no
+worktree has it checked out), and its SAFE scratch under `$OSRC_HOME/tmp`. `.env`, `.venv`,
+`node_modules`, backups, `store`/`state` directories and everything not in the manifest are never
+auto-deleted; they stay in `outsourcerer cleanup` for you to decide. Each deletion is logged to
+`cleanup.log`.
 
 ## Post-hoc classification (classify)
 

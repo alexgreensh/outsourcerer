@@ -1,0 +1,5 @@
+sha=1849ad0ff090e2f34d847dc7040ad49c28c1a0de
+rc=0
+Disk policy round 2: every review P1/P2 addressed in lib/disk_policy.sh + _osrc_disk_gate; test_disk_policy 80/80.
+Partial (needs other lanes): watchdog must subtract _osrc_disk_paused_secs; Windows pause not implemented (fail-safe, never signals).
+Conformance: remaining failures reproduce identically on base (root container). See reports/osrc-l2-disk.md Round 2.

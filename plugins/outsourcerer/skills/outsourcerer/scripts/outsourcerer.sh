@@ -17075,6 +17075,7 @@ _winpty_session() {
 # ---- interactive tmux session (opt-in) ----
 session() {
   _validate_session_name
+  [ "${1:-}" = start ] && type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate   # disk floors (lib/cleanup.sh), every platform
   if [ "$OSRC_PLATFORM" = "windows" ]; then
     _winpty_session "$@"
     return
@@ -17124,9 +17125,6 @@ session() {
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude
       # (fable/opus/...), not just Devin. Each launches its own interactive TUI inside tmux; the generic
       # send/read/stop below drive any of them. Switch lane with --provider devin|codex|cc.
-      # Disk-pressure gate: refuse new lane launches while free disk is under
-      # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
-      type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
       local launch
       case "$PROVIDER" in
         devin|dv)
@@ -18926,6 +18924,7 @@ main() {
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
+    disk)        _osrc_disk_cmd "$@" ;;                    # disk status | resume (lib/disk_policy.sh)
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     hub)         cmd_hub "$@" ;;
     mc|mission-control) cmd_hub_mc "$@" ;;                             # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)

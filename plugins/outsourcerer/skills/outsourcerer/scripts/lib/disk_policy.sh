@@ -1,595 +1,706 @@
 #!/usr/bin/env bash
-# lib/disk_policy.sh — disk pressure policy: launch floors, while-running pause/resume of
-# supervised jobs, merged-lane auto-reclaim, and the detached monitor that enforces it.
+# lib/disk_policy.sh — disk pressure policy: launch floors, while-running pause/resume of the
+# processes Outsourcerer launched, merged-lane auto-reclaim, and the detached monitor.
 # Sourced by the lib loader; defines functions only, runs nothing at load time. Bash 3.2 + Git Bash.
 #
-# Floors (all in KB, derived from the volume holding $OSRC_HOME):
-#   launch   = max(OSRC_DISK_MIN_GB|unset->10GB, 5% of volume)  — no NEW lane launches under it
-#   pause    = max(OSRC_DISK_PAUSE_GB|unset->4GB, 2% of volume) — live jobs get SIGSTOPped under it
-#   critical = clamp(0.5% of volume or OSRC_DISK_CRITICAL_GB, 1GB..4GB)
-#   resume   = pause + half the pause->launch gap (hysteresis: no pause/resume flapping)
+# Floors (KB, from the volume holding $OSRC_HOME; see references/jobs-and-safety.md):
+#   launch   = OSRC_DISK_MIN_GB, else max(10GB, 5% of volume) capped at 25% of a small volume
+#   pause    = OSRC_DISK_PAUSE_GB, else max(4GB, 2% of volume), always under 3/4 of launch
+#   critical = OSRC_DISK_CRITICAL_GB, else 0.5% of volume clamped to 1..4GB, always under launch
+#   resume   = pause + half the pause->launch gap (hysteresis)
+# Settings: a per-command env var wins at the launch gate; the shared file
+# $OSRC_HOME/disk-policy/settings (NAME=value lines, never sourced) is the only source the
+# fleet-wide monitor reads, so one command's environment never governs later jobs.
 #
-# Rules this file keeps:
-#   * An ack (--ack) or OSRC_DISK_OK=1 can NEVER launch below the critical floor.
-#   * OSRC_DISK_OK=1 is the explicit per-command override: logged to
-#     $OSRC_HOME/disk-policy/override.log, never persisted, never inherited as consent.
-#   * The monitor only ever signals processes recorded in $OSRC_JOBS/*/{pid,pgid,
-#     supervisor_pid} AFTER pid+start-time identity proof. It never kills, never touches
-#     a process Outsourcerer did not launch, and resumes everything it paused before exit.
-#   * Auto-reclaim deletes ONLY manifest items verdict-SAFE AND kind worktree|branch —
-#     artifacts of a lane proven merged. Jobs, loops, autodetach logs, tmp dirs and every
-#     ASK item stay manual (`cleanup --apply` / `--ack`).
-#
-# Escape hatches: OSRC_DISK_POLICY_OFF=1 disables pause/reclaim (floors fall back to the
-# legacy flat 10GB launch gate); OSRC_DISK_RECLAIM_MAX=0 disables auto-reclaim;
-# OSRC_DISK_POLICY_POLL (default 30s) and OSRC_DISK_MONITOR_IDLE_TICKS (default 40) tune
-# the monitor; OSRC_DISK_WAKE_SECS (default 300) throttles repeat wakes.
+# Rules: nothing bypasses the critical floor. OSRC_DISK_OK takes only the one-use code a
+# refusal prints, binds to one command, is scrubbed from the delegate environment, and needs
+# a successful audit append. Pausing writes its record BEFORE any SIGSTOP, signals only
+# identity-verified processes Outsourcerer launched, never kills, and every monitor exit
+# resumes what it paused. Auto-reclaim touches only a lane proven merged at a pinned commit.
+
+_osrc_disk_dir() { printf '%s/disk-policy' "$OSRC_HOME"; }
+
+# _osrc_disk_conf <NAME> -> setting value (see header). NAME is always an internal literal.
+_osrc_disk_conf() {
+  local v=""
+  [ "${_OSRC_DISK_MONITOR:-0}" = 1 ] || v="${!1:-}"
+  [ -n "$v" ] || v="$(sed -n "s/^$1=//p" "$(_osrc_disk_dir)/settings" 2>/dev/null | tail -1 | tr -d '[:space:]')"
+  printf '%s' "$v"
+}
 
 # ---- floors ----------------------------------------------------------------------
 
-# _osrc_disk_vol_kb -> total KB of the filesystem holding OSRC_HOME (df -kP field 2), or "".
-_osrc_disk_vol_kb() {
-  df -kP "$OSRC_HOME" 2>/dev/null | awk 'NR==2 {print $2}'
-}
+_osrc_disk_vol_kb() { df -kP "$OSRC_HOME" 2>/dev/null | awk 'NR==2 {print $2}'; }
 
 # _osrc_disk_gb_kb <n> -> KB for a non-negative integer GB, or "" when not a plain integer.
 _osrc_disk_gb_kb() {
   case "${1:-}" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$(( $1 * 1048576 ))" ;; esac
 }
 
-# _osrc_disk_floors_kb -> "<launch_kb> <pause_kb> <crit_kb>". Defaults scale with volume so a
-# big disk is not treated like a small one; explicit OSRC_DISK_*_GB env overrides win.
-# Ordering is enforced: crit < launch whenever launch > 0 (a zero launch floor means the
-# user disabled launch blocking, which also disables the critical line); pause is capped
-# below launch so the resume band can never invert.
+# _osrc_disk_floors_kb -> "<launch_kb> <pause_kb> <crit_kb>". A zero launch floor (the
+# user disabled launch blocking) also disables the critical line.
 _osrc_disk_floors_kb() {
-  local vol launch="" pause="" crit="" pmax
-  if [ "${OSRC_DISK_POLICY_OFF:-0}" = "1" ]; then
-    printf '10485760 0 0\n'; return 0
-  fi
+  local vol launch pause crit
+  if [ "$(_osrc_disk_conf OSRC_DISK_POLICY_OFF)" = "1" ]; then printf '10485760 0 0\n'; return 0; fi
   vol="$(_osrc_disk_vol_kb)"; case "$vol" in ''|*[!0-9]*) vol=0 ;; esac
-  # launch: explicit OSRC_DISK_MIN_GB (GB) wins outright; else max(10GB, 5% of volume).
-  if [ -n "${OSRC_DISK_MIN_GB:-}" ]; then
-    launch="$(_osrc_disk_gb_kb "$OSRC_DISK_MIN_GB")"
-    case "$launch" in ''|*[!0-9]*) launch="" ;; esac
+  launch="$(_osrc_disk_gb_kb "$(_osrc_disk_conf OSRC_DISK_MIN_GB)")"
+  if [ -z "$launch" ]; then
+    launch=$(( vol * 5 / 100 )); [ "$launch" -lt 10485760 ] && launch=10485760
+    # A small volume must not be blocked forever by a default it can never satisfy.
+    [ "$vol" -gt 0 ] && [ "$launch" -gt $(( vol / 4 )) ] && launch=$(( vol / 4 ))
   fi
-  [ -n "$launch" ] || { launch=$(( vol * 5 / 100 )); [ "$launch" -lt 10485760 ] && launch=10485760; }
-  # pause: explicit OSRC_DISK_PAUSE_GB wins; else max(4GB, 2% of volume).
-  if [ -n "${OSRC_DISK_PAUSE_GB:-}" ]; then
-    pause="$(_osrc_disk_gb_kb "$OSRC_DISK_PAUSE_GB")"
-    case "$pause" in ''|*[!0-9]*) pause="" ;; esac
-  fi
+  pause="$(_osrc_disk_gb_kb "$(_osrc_disk_conf OSRC_DISK_PAUSE_GB)")"
   [ -n "$pause" ] || { pause=$(( vol * 2 / 100 )); [ "$pause" -lt 4194304 ] && pause=4194304; }
-  # critical: explicit OSRC_DISK_CRITICAL_GB wins; else clamp(0.5% of volume, 1GB, 4GB).
-  if [ -n "${OSRC_DISK_CRITICAL_GB:-}" ]; then
-    crit="$(_osrc_disk_gb_kb "$OSRC_DISK_CRITICAL_GB")"
-    case "$crit" in ''|*[!0-9]*) crit="" ;; esac
-  fi
+  crit="$(_osrc_disk_gb_kb "$(_osrc_disk_conf OSRC_DISK_CRITICAL_GB)")"
   if [ -z "$crit" ]; then
-    crit=$(( vol / 200 ))
-    [ "$crit" -lt 1048576 ] && crit=1048576
-    [ "$crit" -gt 4194304 ] && crit=4194304
+    crit=$(( vol / 200 )); [ "$crit" -lt 1048576 ] && crit=1048576; [ "$crit" -gt 4194304 ] && crit=4194304
   fi
-  # Ordering clamps (a broken ordering must never wedge the session).
-  if [ "$launch" -le 0 ]; then
-    crit=0                      # launch floor fully disabled -> no critical line either
+  if [ "$launch" -le 0 ]; then crit=0
   else
     [ "$crit" -ge "$launch" ] && crit=$(( launch / 2 ))
-    pmax=$(( launch * 3 / 4 ))
-    [ "$pause" -gt "$pmax" ] && pause="$pmax"
-    [ "$pause" -lt 0 ] && pause=0
+    [ "$pause" -gt $(( launch * 3 / 4 )) ] && pause=$(( launch * 3 / 4 ))
   fi
   printf '%s %s %s\n' "$launch" "$pause" "$crit"
 }
 
-# _osrc_disk_resume_kb <launch_kb> <pause_kb> -> resume threshold: pause floor plus half the
-# gap to the launch floor (min 1GB headroom) so a hovering disk cannot flap jobs.
-_osrc_disk_resume_kb() {
+_osrc_disk_resume_kb() { # <launch_kb> <pause_kb>
   local l="${1:-0}" p="${2:-0}"
-  case "$l$p" in *[!0-9\ ]*) printf '0\n'; return 0 ;; esac
+  case "$l$p" in *[!0-9]*) printf '0\n'; return 0 ;; esac
   if [ "$l" -gt "$p" ]; then printf '%s\n' "$(( p + (l - p) / 2 ))"; else printf '%s\n' "$(( p + 1048576 ))"; fi
 }
 
-# _osrc_disk_fmt_kb <kb> -> "6.2G" / "800M" style, one decimal under 10G.
-_osrc_disk_fmt_kb() {
+_osrc_disk_fmt_kb() { # <kb> -> "6.2G" / "800M"
   local k="${1:-0}" g
   case "$k" in ''|*[!0-9]*) k=0 ;; esac
-  if [ "$k" -ge 1048576 ]; then
-    g=$(( k * 10 / 1048576 ))
-    printf '%s.%sG' "$(( g / 10 ))" "$(( g % 10 ))"
+  if [ "$k" -ge 1048576 ]; then g=$(( k * 10 / 1048576 )); printf '%s.%sG' "$(( g / 10 ))" "$(( g % 10 ))"
   elif [ "$k" -ge 1024 ]; then printf '%sM' "$(( k / 1024 ))"; else printf '%sK' "$k"; fi
 }
 
 # ---- reporting --------------------------------------------------------------------
 
-# _osrc_disk_swap -> "used/total" human swap reading, or "?" when unmeasurable.
-# macOS: sysctl vm.swapusage (units M or G, kept verbatim). Linux/Git Bash: /proc/meminfo.
+# _osrc_disk_swap -> "used/total" swap, or "?". macOS sysctl; Linux/Git Bash /proc/meminfo.
 _osrc_disk_swap() {
-  local line tot used
+  local line tot used fr
   line="$(sysctl -n vm.swapusage 2>/dev/null)"
-  if [ -n "$line" ]; then
-    tot="$(printf '%s' "$line" | sed -n 's/.*total = \([0-9.]*[MG]\).*/\1/p' | head -1)"
-    used="$(printf '%s' "$line" | sed -n 's/.*used = \([0-9.]*[MG]\).*/\1/p' | head -1)"
-    case "$tot$used" in *[!0-9.MG]*) : ;; *)
-      [ -n "$tot" ] && [ -n "$used" ] && { printf '%s/%s' "$used" "$tot"; return 0; } ;;
-    esac
-  fi
-  if [ -r /proc/meminfo ]; then
-    tot="$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
-    local free_k; free_k="$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null)"
-    case "$tot" in ''|*[!0-9]*) tot=0 ;; esac
-    case "$free_k" in ''|*[!0-9]*) free_k=0 ;; esac
-    if [ "$tot" -gt 0 ]; then printf '%sM/%sM' "$(( (tot - free_k) / 1024 ))" "$(( tot / 1024 ))"; return 0; fi
-  fi
+  tot="$(printf '%s' "$line" | sed -n 's/.*total = \([0-9.]*[MG]\).*/\1/p')"
+  used="$(printf '%s' "$line" | sed -n 's/.*used = \([0-9.]*[MG]\).*/\1/p')"
+  [ -n "$tot" ] && [ -n "$used" ] && { printf '%s/%s' "$used" "$tot"; return 0; }
+  tot="$(awk '/^SwapTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+  fr="$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null)"
+  case "$tot$fr" in ''|*[!0-9]*) printf '?'; return 0 ;; esac
+  [ "$tot" -gt 0 ] && { printf '%sM/%sM' "$(( (tot - fr) / 1024 ))" "$(( tot / 1024 ))"; return 0; }
   printf '?'
 }
 
-# _osrc_disk_report -> human report: volume, swap, biggest dirs under OSRC_HOME, and the
-# count of Outsourcerer-created items still SAFE to reclaim. Best-effort; never fails.
-_osrc_disk_report() {
-  local free_kb vol_kb free_g launch pause crit floors top safe_n ask_n items
-  free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) free_kb=0 ;; esac
-  vol_kb="$(_osrc_disk_vol_kb)"; case "$vol_kb" in ''|*[!0-9]*) vol_kb=0 ;; esac
-  floors="$(_osrc_disk_floors_kb 2>/dev/null)"
-  launch="${floors%% *}"; pause="$(printf '%s' "$floors" | awk '{print $2}')"; crit="${floors##* }"
-  case "$launch" in ''|*[!0-9]*) launch=0 ;; esac
-  case "$pause" in ''|*[!0-9]*) pause=0 ;; esac
-  case "$crit" in ''|*[!0-9]*) crit=0 ;; esac
-  printf 'free %s of %s; floors launch>=%s pause>=%s critical>=%s; swap %s\n' \
-    "$(_osrc_disk_fmt_kb "$free_kb")" "$(_osrc_disk_fmt_kb "$vol_kb")" \
-    "$(_osrc_disk_fmt_kb "$launch")" "$(_osrc_disk_fmt_kb "$pause")" "$(_osrc_disk_fmt_kb "$crit")" \
-    "$(_osrc_disk_swap)"
-  top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{n=$2; sub(/.*\//,"",n); printf "%s=%s ", n, $1}')"
-  printf 'top under OSRC_HOME: %s\n' "${top:-none}"
-  if have jq 2>/dev/null && [ -f "$OSRC_HOME/created.jsonl" ]; then
-    items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
-    safe_n="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; safe_n="${safe_n:-0}"
-    ask_n="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; ask_n="${ask_n:-0}"
-    printf 'outsourcerer-created reclaimable: %s SAFE item(s) (auto-eligible only when lane-merged: worktree/branch); %s ASK need review; dry run: %s cleanup\n' \
-      "$safe_n" "$ask_n" "$0"
-  fi
-}
-
-# _osrc_disk_report_oneline -> one-line variant for gate/wake messages. Cheap: no du, no scan.
 _osrc_disk_report_oneline() {
-  local free_kb vol_kb floors launch crit
-  free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) free_kb=0 ;; esac
-  vol_kb="$(_osrc_disk_vol_kb)"; case "$vol_kb" in ''|*[!0-9]*) vol_kb=0 ;; esac
-  floors="$(_osrc_disk_floors_kb 2>/dev/null)"
-  launch="${floors%% *}"; case "$launch" in ''|*[!0-9]*) launch=0 ;; esac
-  crit="${floors##* }"; case "$crit" in ''|*[!0-9]*) crit=0 ;; esac
-  printf '(free %s/%s, launch floor %s, critical %s, swap %s)' \
-    "$(_osrc_disk_fmt_kb "$free_kb")" "$(_osrc_disk_fmt_kb "$vol_kb")" \
-    "$(_osrc_disk_fmt_kb "$launch")" "$(_osrc_disk_fmt_kb "$crit")" "$(_osrc_disk_swap)"
+  local free_kb vol_kb launch pause crit
+  free_kb="$(_osrc_free_kb 2>/dev/null)"; vol_kb="$(_osrc_disk_vol_kb)"
+  read -r launch pause crit <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
+  printf '(free %s/%s, launch floor %s, pause %s, critical %s, swap %s)' \
+    "$(_osrc_disk_fmt_kb "$free_kb")" "$(_osrc_disk_fmt_kb "$vol_kb")" "$(_osrc_disk_fmt_kb "$launch")" \
+    "$(_osrc_disk_fmt_kb "$pause")" "$(_osrc_disk_fmt_kb "$crit")" "$(_osrc_disk_swap)"
 }
 
-# ---- override logging ---------------------------------------------------------------
-
-# _osrc_disk_override_log <free_kb> <launch_kb> — record one OSRC_DISK_OK use. Best-effort.
-_osrc_disk_override_log() {
-  local dir f
-  dir="$OSRC_HOME/disk-policy"; _mkdir_private "$dir" >/dev/null 2>&1 || return 0
-  f="$dir/override.log"
-  printf '%s\tfree_kb=%s\tlaunch_kb=%s\tpid=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "${BASHPID:-$$}" >> "$f" 2>/dev/null || true
-  return 0
-}
-
-# ---- wakes ---------------------------------------------------------------------------
-
-# _osrc_disk_wake <kind> <event_id> <summary> — throttled durable wake. kind file
-# .wake-<kind> holds the last wake epoch; repeat wakes of the same kind wait
-# OSRC_DISK_WAKE_SECS (default 300). _wake_append dedupes unacked ids itself.
-_osrc_disk_wake() {
-  local kind="$1" eid="$2" summary="$3" dir stamp now last
-  [ -n "${OSRC_HOME:-}" ] || return 0
-  type _wake_append >/dev/null 2>&1 || return 0
+# _osrc_disk_report [items] -> free space, swap, biggest dirs under OSRC_HOME, and a bounded
+# list of the Outsourcerer-created items that could free space. Best-effort; never fails.
+_osrc_disk_report() {
+  local items="${1:-}" top
+  printf 'disk %s\n' "$(_osrc_disk_report_oneline)"
+  top="$(_timeout 20 du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{n=$2; sub(/.*\//,"",n); printf "%s=%sK ", n, $1}')"
+  printf 'top under OSRC_HOME: %s\n' "${top:-none}"
   have jq 2>/dev/null || return 0
-  dir="$OSRC_HOME/disk-policy"; _mkdir_private "$dir" >/dev/null 2>&1 || return 0
-  stamp="$dir/.wake-$kind"; now="$(date +%s)"
-  last="$(cat "$stamp" 2>/dev/null)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  [ $(( now - last )) -ge "${OSRC_DISK_WAKE_SECS:-300}" ] || return 0
-  _wake_append "$(jq -cn --arg eid "$eid" --arg k "disk-$kind" --arg s "$summary" \
-    '{event_id:$eid,kind:$k,state:"disk",task_summary:$s}' 2>/dev/null)" >/dev/null 2>&1 || return 0
-  printf '%s\n' "$now" > "$stamp" 2>/dev/null || true
-  return 0
+  [ -n "$items" ] || items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
+  [ -n "$items" ] || { printf 'outsourcerer-created reclaimable: none recorded\n'; return 0; }
+  printf 'outsourcerer-created reclaimable (first 10; auto = deleted under pressure once the lane is proven merged):\n'
+  printf '%s\n' "$items" | jq -r 'select(.verdict=="SAFE")
+    | (if (.kind=="worktree" or .kind=="branch" or .kind=="tmp") then "auto" else "manual" end)
+      + "  " + .kind + "  " + .path' 2>/dev/null | head -10 | sed 's/^/  /'
+  printf '  %s ASK item(s) need review; dry run: %s cleanup\n' \
+    "$(printf '%s\n' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)" "$0"
 }
 
-# ---- job pause/resume ---------------------------------------------------------------
+# ---- override (explicit, one command, logged) -------------------------------------
 
-# _osrc_disk_terminal_status <status> -> 0 when the job is finished (nothing to pause).
-_osrc_disk_terminal_status() {
-  case "${1:-}" in
-    done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) return 0 ;;
-  esac
+# _osrc_disk_override_offer -> mint a one-use code (15 min) and print how to use it.
+_osrc_disk_override_offer() {
+  local code d; d="$(_osrc_disk_dir)"
+  _mkdir_private "$d" >/dev/null 2>&1 || return 0
+  code="$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+  [ "${#code}" = 8 ] || return 0
+  printf '%s %s\n' "$code" "$(( $(date +%s) + 900 ))" > "$d/override.code" 2>/dev/null || return 0
+  printf ' To launch this one command anyway: OSRC_DISK_OK=%s <same command> (one command, expires in 15 min, logged to %s/override.log; never below the critical floor).' "$code" "$d"
+}
+
+# _osrc_disk_override_take <free_kb> <launch_kb> -> 0 when this command holds valid consent.
+# Always scrubs OSRC_DISK_OK so no delegate inherits it. The code binds to the first process
+# ($$ + start identity) that uses it; subshells of that command share $$, others are refused.
+_osrc_disk_override_take() {
+  local v="${OSRC_DISK_OK:-}" d code exp bound me now
+  unset OSRC_DISK_OK
+  me="$$|$(_pid_start_identity "$$" 2>/dev/null)"
+  [ "${_OSRC_DISK_OVERRIDE_OK:-}" = "$me" ] && return 0
+  [ -n "$v" ] || return 1
+  d="$(_osrc_disk_dir)"; now="$(date +%s)"
+  read -r code exp bound < "$d/override.code" 2>/dev/null || return 1
+  case "$exp" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$v" = "$code" ] && [ "$now" -le "$exp" ] || return 1
+  if [ -n "$bound" ]; then [ "$bound" = "$me" ] || return 1
+  else printf '%s %s %s\n' "$code" "$exp" "$me" > "$d/override.code" 2>/dev/null || return 1
+  fi
+  printf '%s\tfree_kb=%s\tlaunch_kb=%s\tpid=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$$" \
+    >> "$d/override.log" 2>/dev/null || return 1
+  _OSRC_DISK_OVERRIDE_OK="$me"
+}
+
+# ---- process identity + trees ----------------------------------------------------------
+
+# _osrc_disk_same <pid> <identity> -> 0 when pid is alive and still that process.
+_osrc_disk_same() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$2" ] && kill -0 "$1" 2>/dev/null && [ "$(_pid_start_identity "$1" 2>/dev/null)" = "$2" ]
+}
+
+# _osrc_disk_etime <pid> -> seconds since the process started ("" when unknown).
+_osrc_disk_etime() {
+  local e d=0 a b c
+  e="$(ps -o etime= -p "$1" 2>/dev/null | tr -d ' ')"
+  case "$e" in ''|*[!0-9:-]*) return 1 ;; esac
+  case "$e" in *-*) d="${e%%-*}"; e="${e#*-}" ;; esac
+  IFS=: read -r a b c <<<"$e"
+  [ -n "$c" ] || { c="$b"; b="$a"; a=0; }
+  printf '%s' "$(( 10#$d * 86400 + 10#$a * 3600 + 10#$b * 60 + 10#$c ))"
+}
+
+# _osrc_disk_tree <root> -> live descendants of root, excluding this process, the monitor
+# (a launcher may be its parent) and their children.
+_osrc_disk_tree() {
+  local m; m="$(cut -d'|' -f1 "$(_osrc_disk_dir)/monitor.lock/owner" 2>/dev/null)"
+  ps -axo pid=,ppid= 2>/dev/null | awk -v r="$1" -v x="${_OSRC_DISK_ME:-$$}" -v m="${m:-0}" '
+    { par[$1+0] = $2+0 }
+    END { for (p in par) { if (p == x || p == m || p == r) continue; q = p; d = 0
+            while ((q in par) && d++ < 32) { q = par[q]; if (q == x || q == m) break; if (q == r) { print p; break } } } }'
+}
+
+# ---- pause records ---------------------------------------------------------------------
+# A record holds 'since|<epoch>', 'proc|<d|s>|<pid>|<group 0|1>|<start identity>' (d = work
+# process, s = supervisor) and, for a tmux lane, 'pane|<session>|<tty>|<stty -g>'.
+# Jobs: $OSRC_JOBS/<id>/disk-paused. Foreground/tmux lanes: disk-policy/paused/<reg>.
+
+_osrc_disk_records() {
+  local f
+  for f in "$OSRC_JOBS"/*/disk-paused "$(_osrc_disk_dir)"/paused/*; do [ -f "$f" ] && printf '%s\n' "$f"; done
+}
+_osrc_disk_any_paused() {
+  local f
+  for f in "$OSRC_JOBS"/*/disk-paused "$(_osrc_disk_dir)"/paused/*; do [ -f "$f" ] && return 0; done
+  return 1
+}
+_osrc_disk_recorded_pids() { _osrc_disk_records | while IFS= read -r f; do awk -F'|' '$1=="proc"{print $3}' "$f" 2>/dev/null; done; }
+
+# _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact.
+_osrc_disk_rec_write() {
+  local f="$1"
+  if printf '%s' "$2" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null \
+     && [ "$(cat "$f" 2>/dev/null)" = "$(printf '%s' "$2")" ]; then return 0; fi
+  rm -f "$f.tmp" "$f" 2>/dev/null
   return 1
 }
 
-# _osrc_disk_job_pids <jd> -> prints "<delegate_pid> <pgid> <supervisor_pid>" for a job whose
-# delegate pid is PROVABLY the recorded process (pid + pid_start identity, rc 0 only; rc 2
-# "cannot tell" is treated as NOT ours — never signal it). Prints nothing when the job is
-# terminal, unverifiable, self-referential, or has no live delegate.
-_osrc_disk_job_pids() {
-  local jd="$1" st pid pgid spid
-  st="$(cat "$jd/status" 2>/dev/null)"
-  _osrc_disk_terminal_status "$st" && return 1
-  pid="$(cat "$jd/pid" 2>/dev/null)"; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pid" != "$$" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  _pid_start_file_match "$pid" "$jd/pid_start" >/dev/null 2>&1 || return 1
-  pgid="$(cat "$jd/pgid" 2>/dev/null)"; case "$pgid" in ''|*[!0-9]*) pgid="" ;; esac
-  # The recorded PGID is only safe when the live delegate still sits in it (same guard
-  # _kill_job uses against PID/PGID recycling).
-  if [ -n "$pgid" ]; then
-    [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pgid" ] || pgid=""
-  fi
-  spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"; case "$spid" in ''|*[!0-9]*) spid="" ;; esac
-  printf '%s %s %s\n' "$pid" "$pgid" "$spid"
+_osrc_disk_log() { printf '%s disk-policy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(_osrc_disk_dir)/monitor.log" 2>/dev/null || true; }
+
+_osrc_disk_keepalive() { # <jd> <paused|resumed>
+  printf '>>> [outsourcerer] disk-policy: job %s (free %s)\n' "$2" "$(_osrc_disk_fmt_kb "$(_osrc_free_kb 2>/dev/null)")" \
+    >> "$1/out.log" 2>/dev/null || true
 }
 
-# _osrc_disk_stop_verified <pid> <start-file> -> rc 0 when pid is proven ours (liveness plus
-# pid+start identity). Used for the supervisor, which is stopped by single pid only: its
-# process group is the CALLER's group and must never be group-signalled.
-_osrc_disk_stop_verified() {
-  local pid="$1" sf="$2"
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pid" != "$$" ] || return 1
-  kill -0 "$pid" 2>/dev/null || return 1
-  _pid_start_file_match "$pid" "$sf" >/dev/null 2>&1
+_osrc_disk_terminal_status() {
+  case "${1:-}" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) return 0 ;; esac
+  return 1
 }
 
-# _osrc_disk_own_pgid -> this process's pgid (never a valid pause target).
-_osrc_disk_own_pgid() { ps -o pgid= -p "$$" 2>/dev/null | tr -d ' '; }
+# _osrc_disk_stop_rec <record> — SIGSTOP every process the (already persisted) record names.
+_osrc_disk_stop_rec() {
+  local tag role pid grp id
+  while IFS='|' read -r tag role pid grp id; do
+    [ "$tag" = proc ] && _osrc_disk_same "$pid" "$id" || continue
+    if [ "$grp" = 1 ]; then kill -STOP -- "-$pid" 2>/dev/null; else kill -STOP "$pid" 2>/dev/null; fi
+  done < "$1"
+}
 
-# _osrc_disk_pause_job <jd> — SIGSTOP the delegate's process group (whole tree, including
-# re-parented grandchildren that would keep writing) and the supervisor so no watchdog
-# wall-clock arm can fire while frozen. Writes $jd/disk-paused. Never signals an unverified
-# pid or our own process group. rc 0 when at least the delegate was stopped.
+# _osrc_disk_pause_job <jd> -> 0 paused, 1 nothing to pause, 2 unverifiable, 3 record failed.
 _osrc_disk_pause_job() {
-  local jd="$1" ids pid pgid spid own stopped=0
-  ids="$(_osrc_disk_job_pids "$jd")" || return 1
-  pid="${ids%% *}"; pgid="$(printf '%s' "$ids" | awk '{print $2}')"; spid="$(printf '%s' "$ids" | awk '{print $3}')"
-  own="$(_osrc_disk_own_pgid)"
-  if [ -n "$pgid" ] && [ "$pgid" != "$own" ] && [ "$pgid" -gt 1 ] 2>/dev/null; then
-    kill -STOP -- "-$pgid" 2>/dev/null && stopped=1
-  else
-    # No verified isolated group: stop only the proven delegate root (partial pause —
-    # grandchildren may keep running; still ours, still safe).
-    kill -STOP "$pid" 2>/dev/null && stopped=1
+  local jd="$1" pid spid did sid grp=0 own c q
+  _osrc_disk_terminal_status "$(cat "$jd/status" 2>/dev/null)" && return 1
+  [ -f "$jd/disk-paused" ] && return 1
+  pid="$(cat "$jd/pid" 2>/dev/null)"; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ "$pid" != "$$" ] && [ "$pid" != "${_OSRC_DISK_ME:-$$}" ] || return 1
+  _pid_start_file_match "$pid" "$jd/pid_start" >/dev/null 2>&1 || return 2
+  did="$(_pid_start_identity "$pid" 2>/dev/null)" || return 2
+  # Group-signal only a delegate-led group: recorded pgid == pid == live pgid, and not ours.
+  own="$(ps -o pgid= -p "${_OSRC_DISK_ME:-$$}" 2>/dev/null | tr -d ' ')"
+  [ "$(cat "$jd/pgid" 2>/dev/null)" = "$pid" ] && [ "$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" = "$pid" ] \
+    && [ "$own" != "$pid" ] && grp=1
+  c="since|$(date +%s)"$'\n'"proc|d|$pid|$grp|$did"$'\n'
+  if [ "$grp" = 0 ]; then
+    for q in $(_osrc_disk_tree "$pid"); do c="${c}proc|d|$q|0|$(_pid_start_identity "$q" 2>/dev/null)"$'\n'; done
   fi
-  [ "$stopped" = 1 ] || return 1
-  if [ -n "$spid" ] && _osrc_disk_stop_verified "$spid" "$jd/supervisor_pid_start"; then
-    kill -STOP "$spid" 2>/dev/null || true
+  spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
+  if _pid_start_file_match "$spid" "$jd/supervisor_pid_start" >/dev/null 2>&1 && sid="$(_pid_start_identity "$spid" 2>/dev/null)"; then
+    c="${c}proc|s|$spid|0|$sid"$'\n'
   fi
-  printf '%s\t%s\n' "$(date +%s)" "$(_osrc_free_kb 2>/dev/null)" > "$jd/disk-paused" 2>/dev/null || true
-  # Keepalive: one appended line now and one per tick while paused. If the supervisor was
-  # left running it reads this as liveness; if it was frozen, the size delta on resume
-  # resets its idle clock. '>>> ' prefix keeps it out of every delegate-output check.
-  _osrc_disk_keepalive "$jd" paused || true
-  return 0
+  _osrc_disk_rec_write "$jd/disk-paused" "$c" || { _osrc_disk_log "cannot record pause of $jd; left running"; return 3; }
+  _osrc_disk_stop_rec "$jd/disk-paused"
+  _osrc_disk_keepalive "$jd" "paused under the disk pause floor; resumes automatically when space returns, or now: $0 disk resume"
 }
 
-# _osrc_disk_resume_job <jd> — SIGCONT what _osrc_disk_pause_job stopped, then drop the
-# marker. Re-verifies identity at resume time: a pid that died or was recycled while
-# paused is NEVER signalled (its group may now belong to someone else).
-_osrc_disk_resume_job() {
-  local jd="$1" ids pid pgid spid own
-  [ -f "$jd/disk-paused" ] || return 1
-  # Order: feed the log first so a thawed supervisor sees fresh bytes, then thaw delegate
-  # group, then the supervisor (it reaps/classifies a delegate that died mid-pause).
-  _osrc_disk_keepalive "$jd" resumed || true
-  ids="$(_osrc_disk_job_pids "$jd")" && {
-    pid="${ids%% *}"; pgid="$(printf '%s' "$ids" | awk '{print $2}')"; spid="$(printf '%s' "$ids" | awk '{print $3}')"
-    own="$(_osrc_disk_own_pgid)"
-    if [ -n "$pgid" ] && [ "$pgid" != "$own" ] && [ "$pgid" -gt 1 ] 2>/dev/null; then
-      kill -CONT -- "-$pgid" 2>/dev/null || true
-    else
-      kill -CONT "$pid" 2>/dev/null || true
-    fi
-    if [ -n "$spid" ] && _osrc_disk_stop_verified "$spid" "$jd/supervisor_pid_start"; then
-      kill -CONT "$spid" 2>/dev/null || true
-    fi
-  } || {
-    # Delegate unverifiable/dead: still thaw a proven supervisor so the job can be reaped
-    # and classified instead of sitting frozen forever.
-    spid="$(cat "$jd/supervisor_pid" 2>/dev/null)"
-    _osrc_disk_stop_verified "$spid" "$jd/supervisor_pid_start" \
-      && kill -CONT "$spid" 2>/dev/null || true
-    printf 'disk-policy: delegate unverifiable at resume; possible stopped leftovers in job group (inspect %s)\n' "$jd" \
-      >> "$OSRC_HOME/disk-policy/monitor.log" 2>/dev/null || true
-  }
-  rm -f "$jd/disk-paused" 2>/dev/null || true
-  return 0
-}
+# ---- foreground and tmux lanes ----------------------------------------------------------
+# The launch gate registers what it cannot see in $OSRC_JOBS: a foreground launcher process
+# (fg|pid|identity) or a tmux session about to start (tmux|name|registered-at|pane_pid|identity|
+# launcher pid). A tmux registration stays pending, with no tmux call, while its launcher lives.
 
-# _osrc_disk_keepalive <jd> <paused|resumed> — append the liveness/pause line to out.log.
-_osrc_disk_keepalive() {
-  local jd="$1" what="$2" free_g fk
-  fk="$(_osrc_free_kb 2>/dev/null)"; case "$fk" in ''|*[!0-9]*) fk=0 ;; esac
-  free_g=$(( fk / 1048576 ))
-  case "$what" in
-    paused)  printf '>>> [outsourcerer] disk-policy: job paused (free %sGB under pause floor); resumes automatically when space returns\n' "$free_g" >> "$jd/out.log" 2>/dev/null || true ;;
-    resumed) printf '>>> [outsourcerer] disk-policy: job resumed (free %sGB)\n' "$free_g" >> "$jd/out.log" 2>/dev/null || true ;;
+_osrc_disk_register_caller() { # <calling function>
+  local d; d="$(_osrc_disk_dir)/procs"
+  case "${1:-}" in
+    route_delegate)
+      [ -z "${OSRC_RUN_ID:-}" ] || return 0          # inside a bg job: the job record covers it
+      local id; id="$(_pid_start_identity "$$" 2>/dev/null)" || return 0
+      _mkdir_private "$d" >/dev/null 2>&1 && printf 'fg|%s|%s\n' "$$" "$id" > "$d/fg-$$" 2>/dev/null ;;
+    session)
+      [ "${OSRC_PLATFORM:-}" != windows ] && have tmux || return 0
+      case "${SESSION_NAME:-}" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+      _mkdir_private "$d" >/dev/null 2>&1 && printf 'tmux|%s|%s|||%s\n' "$SESSION_NAME" "$(date +%s)" "$$" > "$d/tmux-$SESSION_NAME" 2>/dev/null ;;
   esac
+  return 0
 }
 
-# _osrc_disk_paused_jobs -> one job dir per line that carries a disk-paused marker.
-_osrc_disk_paused_jobs() {
-  local f
-  for f in "$OSRC_JOBS"/*/disk-paused; do
-    [ -f "$f" ] && printf '%s\n' "${f%/disk-paused}"
+# _osrc_disk_reg_root <reg> -> the verified root pid whose descendants are the lane's work.
+# Drops a registration that no longer names the process/session it was made for. A tmux
+# pane binds on first sight, and only when its shell started after the registration.
+_osrc_disk_reg_root() {
+  local r="$1" kind a b c d e cur et
+  IFS='|' read -r kind a b c d e < "$r" 2>/dev/null || return 1
+  [ "$kind" = tmux ] && [ -z "$c" ] && [ -n "$e" ] && kill -0 "$e" 2>/dev/null && return 1
+  case "$kind" in
+    fg) _osrc_disk_same "$a" "$b" && { printf '%s' "$a"; return 0; } ;;
+    tmux)
+      if have tmux && tmux has-session -t "=$a" 2>/dev/null; then
+        cur="$(tmux display-message -p -t "=$a:" '#{pane_pid}' 2>/dev/null)"
+        if [ -z "$c" ]; then
+          et="$(_osrc_disk_etime "$cur")" && [ $(( $(date +%s) - et + 5 )) -ge "${b:-0}" ] \
+            && d="$(_pid_start_identity "$cur" 2>/dev/null)" \
+            && printf 'tmux|%s|%s|%s|%s\n' "$a" "$b" "$cur" "$d" > "$r" 2>/dev/null && { printf '%s' "$cur"; return 0; }
+        elif [ "$cur" = "$c" ] && _osrc_disk_same "$c" "$d"; then printf '%s' "$c"; return 0
+        fi
+      fi ;;
+  esac
+  rm -f "$r" 2>/dev/null; return 1
+}
+
+# _osrc_disk_pause_reg <reg> -> 0 paused, 1 nothing to pause, 3 record failed.
+_osrc_disk_pause_reg() {
+  local r="$1" key root c q have_pids tty="" st="" name
+  key="${r##*/}"
+  [ -f "$(_osrc_disk_dir)/paused/$key" ] && return 1
+  root="$(_osrc_disk_reg_root "$r")" || return 1
+  have_pids=" $(_osrc_disk_recorded_pids | tr '\n' ' ') "
+  c="since|$(date +%s)"$'\n'
+  for q in $(_osrc_disk_tree "$root"); do
+    case "$have_pids" in *" $q "*) continue ;; esac
+    c="${c}proc|d|$q|0|$(_pid_start_identity "$q" 2>/dev/null)"$'\n'
   done
+  case "$c" in *proc*) : ;; *) return 1 ;; esac
+  case "$key" in tmux-*)
+    name="${key#tmux-}"
+    tty="$(tmux display-message -p -t "=$name:" '#{pane_tty}' 2>/dev/null)"
+    [ -c "$tty" ] && st="$(stty -g < "$tty" 2>/dev/null)"
+    c="${c}pane|$name|$tty|$st"$'\n' ;;
+  esac
+  _mkdir_private "$(_osrc_disk_dir)/paused" >/dev/null 2>&1
+  _osrc_disk_rec_write "$(_osrc_disk_dir)/paused/$key" "$c" || { _osrc_disk_log "cannot record pause of $key; left running"; return 3; }
+  _osrc_disk_stop_rec "$(_osrc_disk_dir)/paused/$key"
 }
 
-# _osrc_disk_marker_sweep — drop disk-paused markers whose job is terminal or whose
-# delegate is provably gone (nothing left to resume). Runs every tick.
-_osrc_disk_marker_sweep() {
-  local jd st pid
-  while IFS= read -r jd; do
-    [ -n "$jd" ] || continue
-    st="$(cat "$jd/status" 2>/dev/null)"
-    if _osrc_disk_terminal_status "$st"; then rm -f "$jd/disk-paused" 2>/dev/null; continue; fi
-    pid="$(cat "$jd/pid" 2>/dev/null)"
-    case "$pid" in ''|*[!0-9]*) continue ;; esac   # launching: keep marker, job may appear
-    kill -0 "$pid" 2>/dev/null || rm -f "$jd/disk-paused" 2>/dev/null
-  done <<_OSRC_PAUSED
-$(_osrc_disk_paused_jobs)
-_OSRC_PAUSED
+# _osrc_disk_pane_restore <session> <tty> <stty> <pids> — after SIGCONT, a TUI that its pane
+# shell parked in job control is brought back with `fg`, its saved terminal mode is restored
+# and it is told to redraw.
+_osrc_disk_pane_restore() {
+  local name="$1" tty="$2" st="$3" pids="$4" cur i=0 p
+  have tmux && tmux has-session -t "=$name" 2>/dev/null || return 0
+  cur="$(tmux display-message -p -t "=$name:" '#{pane_current_command}' 2>/dev/null)"
+  case "${cur#-}" in bash|zsh|sh|dash|ksh|fish)
+    tmux send-keys -t "=$name:" fg Enter 2>/dev/null
+    while [ "$i" -lt 30 ]; do
+      cur="$(tmux display-message -p -t "=$name:" '#{pane_current_command}' 2>/dev/null)"
+      case "${cur#-}" in bash|zsh|sh|dash|ksh|fish) sleep 0.1; i=$((i+1)) ;; *) break ;; esac
+    done ;;
+  esac
+  [ -n "$st" ] && [ -c "$tty" ] && stty "$st" < "$tty" 2>/dev/null
+  for p in $pids; do kill -WINCH "$p" 2>/dev/null; done
+  return 0
 }
 
-# _osrc_disk_pause_sweep — pause every live supervised job not already paused.
-# Returns the number newly paused.
+# ---- resume -----------------------------------------------------------------------------
+
+# _osrc_disk_resume_rec <record> -> 0 when retired. SIGCONTs every recorded process that is
+# still the same process; keeps the record if any required SIGCONT fails.
+_osrc_disk_resume_rec() {
+  local rec="$1" tag a b c d since="" keep=0 live="" panes="" jd now
+  [ -f "$rec" ] || return 0
+  while IFS='|' read -r tag a b c d; do
+    case "$tag" in
+      since) since="$a" ;;
+      proc)
+        _osrc_disk_same "$b" "$d" || continue
+        [ "$c" = 1 ] && [ "$(ps -o pgid= -p "$b" 2>/dev/null | tr -d ' ')" = "$b" ] && { kill -CONT -- "-$b" 2>/dev/null || keep=1; }
+        kill -CONT "$b" 2>/dev/null || keep=1
+        live="$live $b" ;;
+      pane) panes="$panes$a|$b|$c"$'\n' ;;
+    esac
+  done < "$rec"
+  [ "$keep" = 0 ] || { _osrc_disk_log "SIGCONT failed for $rec; record kept"; return 1; }
+  while IFS='|' read -r a b c; do [ -n "$a" ] && _osrc_disk_pane_restore "$a" "$b" "$c" "$live"; done <<<"$panes"
+  case "$rec" in */disk-paused)
+    jd="${rec%/disk-paused}"; now="$(date +%s)"
+    case "$since" in ''|*[!0-9]*) : ;; *)
+      b="$(cat "$jd/disk-paused-secs" 2>/dev/null)"; case "$b" in ''|*[!0-9]*) b=0 ;; esac
+      printf '%s\n' "$(( b + now - since ))" > "$jd/disk-paused-secs" 2>/dev/null ;;
+    esac
+    _osrc_disk_keepalive "$jd" resumed ;;
+  esac
+  rm -f "$rec" 2>/dev/null
+}
+
+_osrc_disk_resume_all() {
+  local r n=0
+  while IFS= read -r r; do [ -n "$r" ] && _osrc_disk_resume_rec "$r" && n=$((n+1)); done <<<"$(_osrc_disk_records)"
+  printf '%s' "$n"
+}
+
+# _osrc_disk_paused_secs <jd> -> total seconds the job has spent disk-paused, including an
+# ongoing pause. The watchdog subtracts this from its wall-clock deadlines.
+_osrc_disk_paused_secs() {
+  local t s
+  t="$(cat "$1/disk-paused-secs" 2>/dev/null)"; case "$t" in ''|*[!0-9]*) t=0 ;; esac
+  s="$(sed -n 's/^since|//p' "$1/disk-paused" 2>/dev/null)"
+  case "$s" in ''|*[!0-9]*) : ;; *) t=$(( t + $(date +%s) - s )) ;; esac
+  printf '%s' "$t"
+}
+
+# _osrc_disk_record_sweep — retire records whose work is over: the job turned terminal (e.g.
+# canceled while paused) or no recorded work process survives. Survivors (a stopped
+# supervisor) are resumed first, so nothing is left frozen.
+_osrc_disk_record_sweep() {
+  local r tag a b c d alive
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    case "$r" in */disk-paused)
+      _osrc_disk_terminal_status "$(cat "${r%/disk-paused}/status" 2>/dev/null)" && { _osrc_disk_resume_rec "$r"; continue; } ;;
+    esac
+    alive=0
+    while IFS='|' read -r tag a b c d; do
+      [ "$tag$a" = procd ] && _osrc_disk_same "$b" "$d" && { alive=1; break; }
+    done < "$r"
+    [ "$alive" = 1 ] || _osrc_disk_resume_rec "$r"
+  done <<<"$(_osrc_disk_records)"
+}
+
+# _osrc_disk_pause_sweep -> "<paused> <unverifiable>" counts for this sweep.
 _osrc_disk_pause_sweep() {
-  local jd n=0 already
-  already="$(_osrc_disk_paused_jobs)"
+  local jd r n=0 u=0 rc
   for jd in "$OSRC_JOBS"/*/; do
     [ -d "$jd" ] || continue
-    printf '%s\n' "$already" | grep -qxF "${jd%/}" && continue
-    _osrc_disk_pause_job "${jd%/}" && n=$((n+1))
+    _osrc_disk_pause_job "${jd%/}"; rc=$?
+    case "$rc" in 0) n=$((n+1)) ;; 2|3) u=$((u+1)) ;; esac
   done
+  for r in "$(_osrc_disk_dir)"/procs/*; do
+    [ -f "$r" ] || continue
+    _osrc_disk_pause_reg "$r"; rc=$?
+    case "$rc" in 0) n=$((n+1)) ;; 3) u=$((u+1)) ;; esac
+  done
+  printf '%s %s' "$n" "$u"
+}
+
+# ---- wakes (one per transition per pressure episode) -----------------------------------
+
+_osrc_disk_episode() { # -> current episode id, creating one when asked (arg "new")
+  local f e; f="$(_osrc_disk_dir)/.episode"
+  e="$(cat "$f" 2>/dev/null)"
+  if [ -z "$e" ] && [ "${1:-}" = new ]; then
+    e="$(date +%s).$$.$RANDOM"; printf '%s\n' "$e" > "$f" 2>/dev/null
+  fi
+  printf '%s' "$e"
+}
+
+_osrc_disk_wake() { # <kind> <summary>
+  local d ep; d="$(_osrc_disk_dir)"
+  type _wake_append >/dev/null 2>&1 && have jq 2>/dev/null || return 0
+  ep="$(_osrc_disk_episode)"; [ -n "$ep" ] || ep="$(date +%s)"
+  [ "$(cat "$d/.woke-$1" 2>/dev/null)" = "$ep" ] && return 0
+  _wake_append "$(jq -cn --arg eid "disk.$ep.$1" --arg k "disk-$1" --arg s "$2" \
+    '{event_id:$eid,kind:$k,state:"disk",task_summary:$s}' 2>/dev/null)" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$ep" > "$d/.woke-$1" 2>/dev/null
+  return 0
+}
+
+_osrc_disk_episode_end() { rm -f "$(_osrc_disk_dir)/.episode" "$(_osrc_disk_dir)/hold" 2>/dev/null; }
+
+# ---- merged-lane auto-reclaim -------------------------------------------------------------
+
+# _osrc_disk_protected_inside <dir> -> 0 when the tree holds anything never auto-deleted.
+_osrc_disk_protected_inside() {
+  [ -n "$(find "$1" -mindepth 1 \( -path "$1/.git" -prune \) -o \( -name '.env' -o -name '.env.*' \
+    -o -name .venv -o -name venv -o -name node_modules -o -name '*[Bb]ackup*' -o -name '*.bak' \
+    -o -name .git -o -name store -o -name state \) -print 2>/dev/null | head -1)" ]
+}
+
+# _osrc_disk_lane_sha <repo> <branch> <base> -> the branch tip, only when it is preserved
+# on main/remote (or a tip-matched merged PR) and did not move during the proof.
+_osrc_disk_lane_sha() {
+  local sha
+  sha="$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" || return 1
+  _osrc_branch_merged "$1" "$2" "$3" || return 1
+  [ "$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" = "$sha" ] && printf '%s' "$sha"
+}
+
+_osrc_disk_cl_log() { printf '%s\t%s\tdisk-policy\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >> "$(_osrc_cl_log)" 2>/dev/null || true; }
+
+# _osrc_disk_reclaim_lane <session> <items> -> count deleted. Order: worktree (live branch
+# must match the receipt and HEAD must be the proven commit; no untracked, ignored or
+# protected content), then the recorded branch (conditional on the proven commit and not
+# checked out anywhere), then the lane's SAFE scratch (no protected content).
+_osrc_disk_reclaim_lane() {
+  local s="$1" items="$2" wj br base repo wt sha pp n=0 t
+  wj="$OSRC_JOBS/$s/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$s/worktree.json"
+  br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
+  [ -n "$br" ] || { printf 0; return 0; }
+  # Any worktree of this lane that is not SAFE (dirty, live owner...) keeps the whole lane.
+  [ -z "$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="ASK") | .path' 2>/dev/null)" ] || { printf 0; return 0; }
+  repo="$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and (.kind=="worktree" or .kind=="branch")) | .repo' 2>/dev/null | head -1)"
+  [ -n "$repo" ] || { printf 0; return 0; }
+  sha="$(_osrc_disk_lane_sha "$repo" "$br" "$base")" || { printf 0; return 0; }
+  wt="$(printf '%s\n' "$items" | jq -c --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="SAFE")' 2>/dev/null | head -1)"
+  if [ -n "$wt" ]; then
+    [ "$(_osrc_cleanup_verdict "$(jq -c 'del(.verdict,.why,.size_kb)' <<<"$wt")" 2>/dev/null | cut -f1)" = SAFE ] || { printf 0; return 0; }
+    pp="$(_osrc_realpath "$(jq -r '.path' <<<"$wt")" 2>/dev/null)" || { printf 0; return 0; }
+    if [ "$(git -C "$pp" symbolic-ref -q HEAD 2>/dev/null)" != "refs/heads/$br" ] \
+       || [ "$(git -C "$pp" rev-parse -q --verify HEAD 2>/dev/null)" != "$sha" ]; then
+      _osrc_disk_log "kept $pp: live HEAD is not the receipt branch at the proven commit"; printf 0; return 0
+    fi
+    if [ -n "$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null | head -1)" ] \
+       || _osrc_disk_protected_inside "$pp"; then
+      _osrc_disk_log "kept $pp: untracked, ignored or protected content (review: $0 cleanup)"; printf 0; return 0
+    fi
+    git -C "$repo" worktree remove "$pp" >/dev/null 2>&1 || { printf 0; return 0; }
+    _osrc_disk_cl_log removed-worktree "$pp"; n=$((n+1))
+  fi
+  if [ -n "$(printf '%s\n' "$items" | jq -r --arg s "$s" --arg b "$br" 'select(.session==$s and .kind=="branch" and .path==$b) | .path' 2>/dev/null)" ] \
+     && ! _osrc_branch_checked_out "$repo" "$br" \
+     && git -C "$repo" update-ref -d "refs/heads/$br" "$sha" >/dev/null 2>&1; then
+    _osrc_disk_cl_log removed-branch "$br@$sha ($repo)"; n=$((n+1))
+  fi
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    [ "$(_osrc_cleanup_verdict "$t" 2>/dev/null | cut -f1)" = SAFE ] || continue
+    pp="$(jq -r '.path' <<<"$t")"
+    _osrc_disk_protected_inside "$pp" && { _osrc_disk_log "kept scratch $pp: protected content"; continue; }
+    rm -rf "$pp" 2>/dev/null && [ ! -e "$pp" ] && { _osrc_disk_cl_log removed-scratch "$pp"; n=$((n+1)); }
+  done <<<"$(printf '%s\n' "$items" | jq -c --arg s "$s" 'select(.session==$s and .kind=="tmp" and .verdict=="SAFE") | del(.verdict,.why,.size_kb)' 2>/dev/null)"
   printf '%s' "$n"
 }
 
-# _osrc_disk_resume_sweep — resume every marked job (or drop the marker for dead ones).
-_osrc_disk_resume_sweep() {
-  local jd
-  while IFS= read -r jd; do
-    [ -n "$jd" ] || continue
-    _osrc_disk_resume_job "$jd" || rm -f "$jd/disk-paused" 2>/dev/null
-  done <<_OSRC_PAUSED
-$(_osrc_disk_paused_jobs)
-_OSRC_PAUSED
-}
-
-# _osrc_disk_keepalive_sweep — append the pause keepalive to every still-paused job.
-_osrc_disk_keepalive_sweep() {
-  local jd
-  while IFS= read -r jd; do
-    [ -n "$jd" ] && [ -f "$jd/disk-paused" ] && _osrc_disk_keepalive "$jd" paused
-  done <<_OSRC_PAUSED
-$(_osrc_disk_paused_jobs)
-_OSRC_PAUSED
-}
-
-# ---- merged-lane auto-reclaim ---------------------------------------------------------
-
-# _osrc_disk_reclaim — under disk pressure, delete ONLY manifest items that are verdict-SAFE
-# AND kind worktree|branch: the artifacts of a lane proven merged (clean tree, tip preserved
-# on remote/main or a tip-matched merged PR, owner done, aged, no open files). Everything else
-# — job evidence, loops, autodetach logs, tmp dirs, every ASK item — stays manual. Each item is
-# re-verified fresh at delete time; worktrees delete before branches (a branch is only SAFE
-# once its worktree is gone, so branches are re-scanned after worktree deletion).
-# OSRC_DISK_RECLAIM_MAX bounds deletes per call (default 10).
+# _osrc_disk_reclaim [items] -> count deleted, at most OSRC_DISK_RECLAIM_MAX lanes' worth
+# (default 10, 0 disables).
 _osrc_disk_reclaim() {
-  have jq 2>/dev/null || { printf '0'; return 0; }
-  local max="${OSRC_DISK_RECLAIM_MAX:-10}" n=0 log
-  case "$max" in ''|*[!0-9]*) max=10 ;; esac
-  [ "$max" -gt 0 ] || { printf '0'; return 0; }
-  log="$(_osrc_cl_log)"; mkdir -p "$(_osrc_cl_root)" 2>/dev/null || true
-  n="$(_osrc_disk_reclaim_kinds worktree "$max" "$log")"
-  local left=$(( max - ${n:-0} ))
-  [ "$left" -gt 0 ] && n=$(( ${n:-0} + $(_osrc_disk_reclaim_kinds branch "$left" "$log") ))
-  [ "${n:-0}" -gt 0 ] && _osrc_cleanup_state_write "$(_osrc_cleanup_items --no-size 2>/dev/null)" || true
-  printf '%s' "${n:-0}"
-}
-
-# _osrc_disk_reclaim_kinds <worktree|branch> <max> <log> -> count deleted this phase.
-_osrc_disk_reclaim_kinds() {
-  local want="$1" max="$2" log="$3" items cands item raw verdict
-  local path kind repo pp n=0
-  items="$(_osrc_cleanup_items --no-size 2>/dev/null)" || return 0
-  cands="$(printf '%s\n' "$items" | jq -sc --arg w "$want" '
-    [ .[] | select(.verdict=="SAFE" and .kind==$w) ] | sort_by(.path) | .[]' 2>/dev/null)"
-  [ -n "$cands" ] || { printf '0'; return 0; }
-  while IFS= read -r item; do
-    [ -n "$item" ] || continue
-    [ "$n" -ge "$max" ] && break
-    raw="$(jq -c 'del(.verdict,.why,.size_kb)' <<<"$item" 2>/dev/null)" || continue
-    verdict="$(_osrc_cleanup_verdict "$raw" 2>/dev/null)"
-    [ "${verdict%%$'\t'*}" = "SAFE" ] || continue
-    path="$(jq -r '.path // ""' <<<"$item")"; repo="$(jq -r '.repo // ""' <<<"$item")"
-    [ -n "$path" ] || continue
-    if [ "$want" = "worktree" ]; then
-      pp="$(_osrc_realpath "$path" 2>/dev/null)" || continue
-      # stdout must stay clean: this function's return is captured as a count.
-      if git -C "$repo" worktree remove "$pp" >/dev/null 2>&1; then
-        git -C "$repo" worktree prune >/dev/null 2>&1 || true
-        printf '%s\tremoved-worktree\tdisk-policy\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pp" >> "$log" 2>/dev/null || true
-        n=$((n+1))
-      fi
-    else
-      if git -C "$repo" branch -D "$path" >/dev/null 2>&1; then
-        printf '%s\tremoved-branch\tdisk-policy\t%s (%s)\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$path" "$repo" >> "$log" 2>/dev/null || true
-        n=$((n+1))
-      fi
-    fi
-  done <<_OSRC_CANDS
-$cands
-_OSRC_CANDS
+  local max items s n=0 k
+  have jq 2>/dev/null || { printf 0; return 0; }
+  max="$(_osrc_disk_conf OSRC_DISK_RECLAIM_MAX)"; case "$max" in ''|*[!0-9]*) max=10 ;; esac
+  [ "$max" -gt 0 ] || { printf 0; return 0; }
+  items="${1:-$(_osrc_cleanup_items --no-size 2>/dev/null)}"
+  while IFS= read -r s; do
+    [ -n "$s" ] && [ "$max" -gt 0 ] || continue
+    k="$(_osrc_disk_reclaim_lane "$s" "$items")"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
+    n=$((n+k)); max=$((max-1))
+  done <<<"$(printf '%s\n' "$items" | jq -r 'select(.verdict=="SAFE" and (.kind=="worktree" or .kind=="branch")) | .session' 2>/dev/null | sort -u)"
   printf '%s' "$n"
 }
 
-# ---- the policy tick -----------------------------------------------------------------
+# ---- the policy tick --------------------------------------------------------------------
 
-# _osrc_disk_monitor_tick — one policy pass. Safe to call from the monitor loop AND
-# synchronously; never dies, always returns 0. Order: dead-marker sweep -> resume when
-# recovered -> dead-zone hold -> pressure (episode report, reclaim, then pause+wake).
+# _osrc_disk_monitor_tick — one pass; never fails. Order under pressure: pause and wake
+# first, then the (slow) report scan and bounded reclaim, then remeasure and maybe resume.
 _osrc_disk_monitor_tick() {
-  local free_kb floors launch_kb pause_kb crit_kb resume_kb free_gb n pcount paused_now ph
+  local d free_kb launch pause crit resume counts n u items k
+  d="$(_osrc_disk_dir)"; _mkdir_private "$d" >/dev/null 2>&1
   free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
-  floors="$(_osrc_disk_floors_kb 2>/dev/null)"
-  case "$floors" in ''|*[!0-9\ ]*) return 0 ;; esac
-  launch_kb="${floors%% *}"; pause_kb="$(printf '%s' "$floors" | awk '{print $2}')"; crit_kb="${floors##* }"
-  case "$pause_kb$crit_kb" in *[!0-9]*) return 0 ;; esac
-  resume_kb="$(_osrc_disk_resume_kb "$launch_kb" "$pause_kb")"
-  free_gb=$(( free_kb / 1048576 ))
-  local dir; dir="$OSRC_HOME/disk-policy"
-  _mkdir_private "$dir" >/dev/null 2>&1 || true
-  _osrc_disk_marker_sweep
-  if [ "$free_kb" -ge "$resume_kb" ]; then
-    rm -f "$dir/.pressure" 2>/dev/null || true
-    if _osrc_disk_paused_jobs | grep -q .; then
-      _osrc_disk_resume_sweep
-      _osrc_disk_wake resumed "disk.resume.$(date +%s)" \
-        "disk recovered to $(_osrc_disk_fmt_kb "$free_kb") (resume floor $(_osrc_disk_fmt_kb "$resume_kb")); paused jobs resumed" || true
+  read -r launch pause crit <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
+  case "$launch$pause$crit" in ''|*[!0-9]*) return 0 ;; esac
+  resume="$(_osrc_disk_resume_kb "$launch" "$pause")"
+  _osrc_disk_record_sweep
+  if [ "$free_kb" -ge "$resume" ]; then
+    if _osrc_disk_any_paused; then
+      k="$(_osrc_disk_resume_all)"
+      _osrc_disk_wake resumed "disk recovered to $(_osrc_disk_fmt_kb "$free_kb"); $k paused lane(s) resumed"
     fi
-    return 0
+    _osrc_disk_episode_end; return 0
   fi
-  if [ "$free_kb" -ge "$pause_kb" ]; then
-    # Dead zone between pause and resume floors: hold existing pauses, add none, keep
-    # paused supervisors fed so an unfrozen one cannot stall-kill a frozen delegate.
-    _osrc_disk_keepalive_sweep
-    return 0
+  [ "$free_kb" -ge "$pause" ] && return 0      # between pause and resume: hold, add nothing
+  _osrc_disk_episode new >/dev/null
+  if [ -f "$d/hold" ] && [ "$free_kb" -ge "$crit" ]; then counts="0 0"   # owner ran `disk resume`
+  else counts="$(_osrc_disk_pause_sweep)"; fi
+  read -r n u <<<"$counts"
+  if _osrc_disk_any_paused || [ "${u:-0}" -gt 0 ]; then
+    _osrc_disk_wake paused "disk pressure: free $(_osrc_disk_fmt_kb "$free_kb") under the pause floor; $(_osrc_disk_records | grep -c .) lane(s) SIGSTOPped (never killed), ${u:-0} could not be verified and keep running. They resume when space returns; resume now: $0 disk resume. $(_osrc_disk_report_oneline)"
   fi
-  # Pressure: one full report per episode, then reclaim merged-lane artifacts — freeing
-  # beats freezing.
-  if [ ! -f "$dir/.pressure" ]; then
-    { printf '=== disk pressure %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; _osrc_disk_report; } \
-      >> "$dir/monitor.log" 2>/dev/null || true
-    date +%s > "$dir/.pressure" 2>/dev/null || true
-  fi
-  n="$(_osrc_disk_reclaim 2>/dev/null)"; n="${n:-0}"
-  case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  if [ "$n" -gt 0 ]; then
-    free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) free_kb=0 ;; esac
-    free_gb=$(( free_kb / 1048576 ))
-    printf 'disk-policy: reclaimed %s merged-lane item(s); free now %s\n' "$n" "$(_osrc_disk_fmt_kb "$free_kb")" \
-      >> "$dir/monitor.log" 2>/dev/null || true
-  fi
-  if [ "$free_kb" -ge "$resume_kb" ]; then
-    rm -f "$dir/.pressure" 2>/dev/null || true
-    _osrc_disk_paused_jobs | grep -q . && _osrc_disk_resume_sweep
-    _osrc_disk_wake resumed "disk.resume.$(date +%s)" \
-      "disk recovered to $(_osrc_disk_fmt_kb "$free_kb") after reclaim; paused jobs resumed" || true
-    return 0
-  fi
-  if [ "$free_kb" -ge "$pause_kb" ]; then
-    _osrc_disk_keepalive_sweep; return 0
-  fi
-  # Still under the pause floor: freeze live jobs and wake the owner (throttled).
-  paused_now="$(_osrc_disk_pause_sweep)"
-  _osrc_disk_keepalive_sweep
-  pcount="$( _osrc_disk_paused_jobs | grep -c . 2>/dev/null)"; pcount="${pcount:-0}"
-  if [ "${paused_now:-0}" -gt 0 ] || [ "$pcount" -gt 0 ]; then
-    ph="$( _osrc_disk_paused_jobs | sed 's|.*/||' | sort | cksum | awk '{print $1}')"
-    _osrc_disk_wake paused "disk.pause.$ph" \
-      "disk pressure: free $free_gb GB under pause floor $(_osrc_disk_fmt_kb "$pause_kb"); ${pcount} job(s) SIGSTOPped (never killed), ${n} merged-lane item(s) reclaimed; they resume when space returns. $(_osrc_disk_report_oneline)" || true
-  fi
-  if [ "$free_kb" -lt "$crit_kb" ] && [ "$crit_kb" -gt 0 ]; then
-    _osrc_disk_wake critical "disk.critical" \
-      "CRITICAL disk: free $free_gb GB under critical floor $(_osrc_disk_fmt_kb "$crit_kb"); launches refused even with --ack/OSRC_DISK_OK. Free space now: $0 cleanup --apply, then empty Trash/caches. $(_osrc_disk_report_oneline)" || true
+  [ "$crit" -gt 0 ] && [ "$free_kb" -lt "$crit" ] && _osrc_disk_wake critical \
+    "CRITICAL disk: free $(_osrc_disk_fmt_kb "$free_kb") under the critical floor; launches refused. Free space: $0 cleanup, then empty Trash/caches. $(_osrc_disk_report_oneline)"
+  [ "$(cat "$d/.reported" 2>/dev/null)" = "$(_osrc_disk_episode)" ] && return 0
+  _osrc_disk_episode > "$d/.reported" 2>/dev/null
+  have jq 2>/dev/null && items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
+  { printf '=== disk pressure %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; _osrc_disk_report "${items:-}"; } >> "$d/monitor.log" 2>/dev/null
+  k="$(_osrc_disk_reclaim "${items:-}")"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
+  [ "$k" -gt 0 ] || return 0
+  free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
+  _osrc_disk_log "reclaimed $k merged-lane item(s); free now $(_osrc_disk_fmt_kb "$free_kb")"
+  if [ "$free_kb" -ge "$resume" ]; then
+    k="$(_osrc_disk_resume_all)"
+    _osrc_disk_wake resumed "disk recovered to $(_osrc_disk_fmt_kb "$free_kb") after merged-lane reclaim; $k lane(s) resumed"
+    _osrc_disk_episode_end
   fi
   return 0
 }
 
-# ---- monitor --------------------------------------------------------------------------------
+# ---- monitor ------------------------------------------------------------------------------
+# Ownership is a lock dir (monitor.lock/owner = "pid|start identity") held for the monitor's
+# whole life and re-verified every tick. A launch writes a fresh demand token BEFORE checking
+# the owner; the monitor releases the lock BEFORE its last demand check, so a launch racing an
+# idle exit either keeps the old monitor running or spawns a new one.
 
-# _osrc_disk_fleet_live -> rc 0 when at least one supervised job is non-terminal with a
-# live-or-launching delegate. Drives the monitor's idle self-termination.
+_osrc_disk_lock_alive() {
+  local lk c pid id m; lk="$(_osrc_disk_dir)/monitor.lock"
+  [ -d "$lk" ] || return 1
+  c="$(cat "$lk/owner" 2>/dev/null)"
+  if [ -z "$c" ]; then   # being created: alive for a few seconds
+    m="$(stat -c %Y "$lk" 2>/dev/null || stat -f %m "$lk" 2>/dev/null || echo 0)"
+    [ $(( $(date +%s) - m )) -lt 10 ]; return
+  fi
+  pid="${c%%|*}"; id="${c#*|}"
+  if [ -n "$id" ]; then _osrc_disk_same "$pid" "$id"; else kill -0 "$pid" 2>/dev/null; fi
+}
+
+_osrc_disk_lock_take() {
+  local lk; lk="$(_osrc_disk_dir)/monitor.lock"
+  if ! mkdir "$lk" 2>/dev/null; then
+    _osrc_disk_lock_alive && return 1
+    mv "$lk" "$lk.stale.$_OSRC_DISK_ME" 2>/dev/null && rm -rf "$lk.stale.$_OSRC_DISK_ME"
+    mkdir "$lk" 2>/dev/null || return 1
+  fi
+  printf '%s|%s\n' "$_OSRC_DISK_ME" "$_OSRC_DISK_ME_ID" > "$lk/owner" 2>/dev/null && return 0
+  rm -rf "$lk"; return 1
+}
+_osrc_disk_lock_mine() { [ "$(cat "$(_osrc_disk_dir)/monitor.lock/owner" 2>/dev/null)" = "$_OSRC_DISK_ME|$_OSRC_DISK_ME_ID" ]; }
+_osrc_disk_lock_release() { _osrc_disk_lock_mine && rm -rf "$(_osrc_disk_dir)/monitor.lock"; _OSRC_DISK_OWNER=0; }
+
+# Every orderly exit and TERM/INT goes through here: resume what we paused, then let go.
+_osrc_disk_monitor_exit() {
+  [ "${_OSRC_DISK_OWNER:-0}" = 1 ] || return 0
+  _osrc_disk_resume_all >/dev/null
+  _osrc_disk_lock_release
+  _osrc_disk_log "monitor $_OSRC_DISK_ME exited; recorded pauses resumed"
+}
+
+# _osrc_disk_fleet_live -> 0 while any job, registered lane or pause record is live.
 _osrc_disk_fleet_live() {
-  local jd st pid
-  [ -d "$OSRC_JOBS" ] || return 1
+  local jd pid r
+  _osrc_disk_any_paused && return 0
   for jd in "$OSRC_JOBS"/*/; do
     [ -d "$jd" ] || continue
-    st="$(cat "$jd/status" 2>/dev/null)"
-    _osrc_disk_terminal_status "$st" && continue
-    case "$st" in running|launching|stalled\?|exploring\?|no-progress-writes) : ;; *) continue ;; esac
+    _osrc_disk_terminal_status "$(cat "$jd/status" 2>/dev/null)" && continue
     pid="$(cat "$jd/pid" 2>/dev/null)"
-    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    case "$pid" in ''|*[!0-9]*) [ "$(cat "$jd/status" 2>/dev/null)" = launching ] && return 0; continue ;; esac
     kill -0 "$pid" 2>/dev/null && return 0
   done
+  for r in "$(_osrc_disk_dir)"/procs/*; do [ -f "$r" ] && _osrc_disk_reg_root "$r" >/dev/null && return 0; done
   return 1
 }
 
-# _osrc_disk_monitor_loop — the detached watcher. Stamps liveness, runs one policy tick per
-# OSRC_DISK_POLICY_POLL (default 30s), exits after OSRC_DISK_MONITOR_IDLE_TICKS (default 40)
-# ticks with no live fleet — ALWAYS resuming anything it paused before leaving, and dropping
-# its liveness files so the next ensure respawns immediately.
 _osrc_disk_monitor_loop() {
   trap '' HUP
-  local dir poll maxidle idle=0 now sz
-  dir="$OSRC_HOME/disk-policy"
-  # Log inside the loop so a full disk can never fail the spawn itself.
-  exec >>"$dir/monitor.log" 2>&1 || exec >/dev/null 2>&1
-  poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*) poll=30 ;; esac
-  [ "$poll" -lt 1 ] && poll=30
+  local d poll maxidle idle=0 dem last sz
+  d="$(_osrc_disk_dir)"
+  _OSRC_DISK_MONITOR=1
+  unset OSRC_DISK_OK OSRC_DISK_MIN_GB OSRC_DISK_PAUSE_GB OSRC_DISK_CRITICAL_GB OSRC_DISK_POLICY_OFF OSRC_DISK_RECLAIM_MAX
+  exec >>"$d/monitor.log" 2>&1 || exec >/dev/null 2>&1
+  _OSRC_DISK_ME="${BASHPID:-}"
+  if [ -z "$_OSRC_DISK_ME" ]; then   # bash 3.2: a direct child's PPID is this subshell
+    sz="$(mktemp "$d/.me.XXXXXX" 2>/dev/null)" && sh -c 'echo "$PPID"' > "$sz" 2>/dev/null
+    _OSRC_DISK_ME="$(cat "$sz" 2>/dev/null)"; rm -f "$sz" 2>/dev/null
+  fi
+  case "$_OSRC_DISK_ME" in ''|*[!0-9]*) exit 0 ;; esac
+  _OSRC_DISK_ME_ID="$(_pid_start_identity "$_OSRC_DISK_ME" 2>/dev/null)"
+  _osrc_disk_lock_take || exit 0
+  _OSRC_DISK_OWNER=1
+  trap '_osrc_disk_monitor_exit' EXIT
+  trap 'exit 0' TERM INT
+  poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*|0) poll=30 ;; esac
   maxidle="${OSRC_DISK_MONITOR_IDLE_TICKS:-40}"; case "$maxidle" in ''|*[!0-9]*) maxidle=40 ;; esac
+  last="$(cat "$d/demand" 2>/dev/null)"
+  _osrc_disk_log "monitor $_OSRC_DISK_ME started"
   while :; do
-    now="$(date +%s)"
-    printf '%s\n' "$now" > "$dir/alive" 2>/dev/null || break
-    # Rotate the log if it ever grows past ~512K.
-    sz="$(wc -c < "$dir/monitor.log" 2>/dev/null | tr -d ' ')"
-    case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
-    if [ "$sz" -gt 524288 ]; then
-      tail -n 200 "$dir/monitor.log" > "$dir/monitor.log.tmp" 2>/dev/null \
-        && mv -f "$dir/monitor.log.tmp" "$dir/monitor.log" 2>/dev/null || rm -f "$dir/monitor.log.tmp"
+    _osrc_disk_lock_mine || { _OSRC_DISK_OWNER=0; exit 0; }   # another monitor owns it now
+    sz="$(wc -c < "$d/monitor.log" 2>/dev/null | tr -d ' ')"
+    if [ "${sz:-0}" -gt 524288 ] 2>/dev/null; then
+      tail -n 200 "$d/monitor.log" > "$d/monitor.log.tmp" 2>/dev/null && mv -f "$d/monitor.log.tmp" "$d/monitor.log" 2>/dev/null
     fi
-    if _osrc_disk_fleet_live; then idle=0; else idle=$(( idle + 1 )); fi
-    _osrc_disk_monitor_tick || true
+    dem="$(cat "$d/demand" 2>/dev/null)"; [ "$dem" = "$last" ] || { idle=0; last="$dem"; }
+    if _osrc_disk_fleet_live; then idle=0; else idle=$((idle+1)); fi
+    _osrc_disk_monitor_tick
     if [ "$idle" -ge "$maxidle" ]; then
-      _osrc_disk_resume_sweep || true
-      _osrc_disk_marker_sweep || true
-      rm -f "$dir/alive" "$dir/monitor.pid" 2>/dev/null || true
-      printf 'disk-policy monitor: no live jobs for %s ticks; exiting\n' "$maxidle"
-      break
+      _osrc_disk_lock_release
+      dem="$(cat "$d/demand" 2>/dev/null)"
+      if [ "$dem" != "$last" ] && _osrc_disk_lock_take; then _OSRC_DISK_OWNER=1; idle=0; last="$dem"; continue; fi
+      _osrc_disk_log "monitor $_OSRC_DISK_ME idle; exiting"
+      exit 0
     fi
     sleep "$poll"
   done
+}
+
+# _osrc_disk_monitor_ensure — called on every launch: post demand, spawn a monitor unless a
+# verified owner is alive. The child closes every inherited descriptor (fd 5 is a caller's
+# stderr during background preflight) so it never holds a caller's pipe open.
+_osrc_disk_monitor_ensure() {
+  [ "$(_osrc_disk_conf OSRC_DISK_POLICY_OFF)" = "1" ] && return 0
+  [ -n "${OSRC_HOME:-}" ] && [ -d "$OSRC_HOME" ] || return 0
+  local d; d="$(_osrc_disk_dir)"
+  _mkdir_private "$d" >/dev/null 2>&1 || return 0
+  printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$d/demand" 2>/dev/null
+  _osrc_disk_lock_alive && return 0
+  ( _osrc_disk_monitor_loop ) 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- </dev/null >/dev/null 2>&1 &
   return 0
 }
 
-# _osrc_disk_monitor_ensure — spawn the detached monitor unless a fresh liveness stamp says
-# one is already running. Deduped by an atomic spawn claim; safe to call on every launch.
-_osrc_disk_monitor_ensure() {
-  [ "${OSRC_DISK_POLICY_OFF:-0}" = "1" ] && return 0
-  [ -n "${OSRC_HOME:-}" ] && [ -d "$OSRC_HOME" ] || return 0
-  local dir poll now alive claim cage mpid fresh
-  dir="$OSRC_HOME/disk-policy"
-  _mkdir_private "$dir" >/dev/null 2>&1 || return 0
-  poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*) poll=30 ;; esac
-  [ "$poll" -lt 1 ] && poll=30
-  now="$(date +%s)"
-  alive="$(cat "$dir/alive" 2>/dev/null)"; case "$alive" in ''|*[!0-9]*) alive=0 ;; esac
-  # Fresh stamp -> a monitor ticked recently -> it is alive. Freshness = 3 polls, min 120s.
-  fresh=$(( poll * 3 )); [ "$fresh" -lt 120 ] && fresh=120
-  [ $(( now - alive )) -lt "$fresh" ] && return 0
-  claim="$dir/.spawn"
-  if [ -d "$claim" ]; then
-    cage=$(( now - $(stat -c %Y "$claim" 2>/dev/null || stat -f %m "$claim" 2>/dev/null || echo 0) ))
-    case "$cage" in ''|*[!0-9]*) cage=999999 ;; esac
-    [ "$cage" -le 120 ] && return 0
-    rm -rf "$claim" 2>/dev/null || true
-  fi
-  _osrc_atomic_mkdir "$claim" 2>/dev/null || return 0
-  # Re-check under the claim: a monitor may have stamped between our first read and the mkdir.
-  alive="$(cat "$dir/alive" 2>/dev/null)"; case "$alive" in ''|*[!0-9]*) alive=0 ;; esac
-  if [ $(( now - alive )) -lt "$fresh" ]; then rmdir "$claim" 2>/dev/null || true; return 0; fi
-  # fds 7/8/9 are the codebase's lock channels (state/endpoint/election); the beacon closes
-  # them for the same reason — an inherited flock would be held for the monitor's lifetime.
-  ( _osrc_disk_monitor_loop ) 7>&- 8>&- 9>&- </dev/null >/dev/null 2>&1 &
-  mpid=$!
-  printf '%s\n' "$now" > "$dir/alive" 2>/dev/null || true
-  printf '%s\n' "$mpid" > "$dir/monitor.pid" 2>/dev/null || true
-  rmdir "$claim" 2>/dev/null || true
+# _osrc_disk_heartbeat — the heartbeat's recovery hook: pause records with no live monitor
+# (it died abruptly) get a fresh monitor, which resumes them once space allows.
+_osrc_disk_heartbeat() {
+  _osrc_disk_any_paused || return 0
+  _osrc_disk_lock_alive || _osrc_disk_monitor_ensure
   return 0
+}
+
+# `outsourcerer disk [status|resume]` — resume is the one-command way back: it resumes every
+# paused lane now (TUIs return to the foreground) and holds new pauses until the disk
+# recovers or crosses the critical floor.
+_osrc_disk_cmd() {
+  local d; d="$(_osrc_disk_dir)"
+  case "${1:-status}" in
+    status)
+      _osrc_disk_report
+      _osrc_disk_records | sed 's/^/paused: /' ;;
+    resume)
+      _mkdir_private "$d" >/dev/null 2>&1
+      date +%s > "$d/hold" 2>/dev/null
+      printf '[outsourcerer] disk: resumed %s paused lane(s); no new pauses until space recovers or falls under the critical floor.\n' "$(_osrc_disk_resume_all)" ;;
+    *) die "disk: status | resume" ;;
+  esac
 }

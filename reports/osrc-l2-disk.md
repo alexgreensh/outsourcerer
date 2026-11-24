@@ -108,3 +108,79 @@ monitor ensure/dedupe/idle-exit/respawn; and disk report contents (swap via
 - If PR #85 changes `_osrc_cleanup_state_write`'s contract or the manifest item
   schema (`verdict`/`kind`/`path` fields the gate and reclaim consume), the gate's
   live-scan jq and the reclaim filter need a matching update.
+
+## Round 2 (branch `cloud/osrc-l2-r2`, base `1849ad0`)
+
+The independent review of round 1 found P1/P2 defects in automatic cleanup, pause/resume and the
+launch gate. Round 1's `disk_policy.sh` was rewritten around four ideas: a pause **record is written
+and read back before any SIGSTOP**; the monitor **owns a lock for its whole life**; reclaim is
+**per lane, pinned to a proven commit**; the override is a **one-use code**.
+
+### Fixes by finding
+
+| Finding | Fix |
+|---|---|
+| P1 protected files deleted with a merged worktree | Auto-removal needs `git status --porcelain --ignored --untracked-files=all` empty AND no `.env*`, `.venv`, `venv`, `node_modules`, `*backup*`, `*.bak`, `.git`, `store`, `state` inside. Otherwise the worktree is kept and shown in `cleanup`. |
+| P1 wrong commit verified | The live worktree must be on the receipt branch (`symbolic-ref`) and its HEAD must equal the proven tip; detached or repurposed worktrees are kept with the whole lane. |
+| P1 branch moves before deletion | `git update-ref -d refs/heads/<b> <proven-sha>` (fails if the tip moved), after the checked-out guard. |
+| P1 repo-wide prune | Removed from auto-reclaim. (`_osrc_cleanup_apply`, the manual path, still prunes: not mine, see Needs.) |
+| P1 pgid field splitting | Records use `|` fields read with `IFS='|'`; group signal only when recorded pgid == pid == live pgid and not our group; otherwise pid + its descendants by pid. |
+| P1 marker written after SIGSTOP | `_osrc_disk_rec_write` writes tmp, renames, reads back; on failure nothing is stopped and the owner wake says how many lanes keep running. |
+| P1 monitor exits with jobs frozen | One EXIT handler (TERM/INT route through it) resumes all records and releases the lock; no exit on a failed liveness write (that file is gone). `_osrc_disk_heartbeat` restarts a monitor when records exist and no owner lives; hooked in `_osrc_cleanup_tick` (one line). |
+| P1 cancel while paused | The sweep resumes every surviving verified process of a terminal or delegate-less record before retiring it; a failed SIGCONT keeps the record. |
+| P1 paused time vs watchdog deadlines | **Partly.** Each job accumulates `disk-paused-secs`; `_osrc_disk_paused_secs <jd>` returns total incl. an ongoing pause. Using it in `watchdog.sh` is another lane's file: see Needs. |
+| P1 report/reclaim before pause | Tick order under pressure: pause → wakes → (once per episode) report scan → reclaim → remeasure → maybe resume. |
+| P1 monitor election | `disk-policy/monitor.lock/owner` = pid + start identity, verified every tick (a demoted monitor exits). Launch posts a demand token before checking the owner; an idle monitor releases the lock before its last demand check, so a racing launch never ends unwatched. |
+| P1 fd 5 held open | Monitor child closes fds 3–9. |
+| P1 foreground / tmux lanes | The gate registers its caller (via `FUNCNAME`): `route_delegate` outside a bg job registers the launcher process; `session start` registers the tmux session, bound on first sight only if the pane started after registration. Their descendants (never the monitor) are paused, count as fleet liveness, and a paused TUI is restored: SIGCONT, `fg` into the pane shell if job control took it, saved `stty -g` reapplied, SIGWINCH. |
+| P1 Windows | **Partly.** The gate now runs at the top of `session()` for `start`, before the `_winpty_session` branch. Pausing on Git Bash is not implemented: MSYS `ps` gives no start identity, so no Windows process is ever signalled; the owner wake reports them as "could not be verified, keep running". |
+| P2 pipefail | Direct `_osrc_disk_any_paused` glob check; no `| grep -q`. |
+| P2 episode wakes | Each pressure episode gets an id; events are `disk.<episode>.<paused|critical|resumed>`, once each. |
+| P1 state write returns 0 | `_osrc_cleanup_state_write` returns 1 after cleaning up its temp file (one line). |
+| P1 slow ack check | Free space re-read after the scan; below critical refuses. |
+| P1 inherited override | `OSRC_DISK_OK` must hold the one-use code a refusal printed (15 min), binds to the first process ($$ + start identity) — subshells of that command share it — is unset before any delegate runs, and needs a successful append to `override.log`. `OSRC_DISK_OK=1` no longer works. |
+| P2 first launcher's settings | Settings file `$OSRC_HOME/disk-policy/settings`; the monitor scrubs `OSRC_DISK_*` env and reads only the file. Env applies to one command's gate. |
+| P2 small volumes | Default launch floor capped at 25% of the volume (8 GiB → 2 GiB). |
+| P2 scratch uncovered | Manifest `tmp` items of a proven-merged lane (same session) are removed if SAFE and free of protected content. |
+| P2 report has no names | Report lists up to 10 SAFE items as `auto|manual  kind  path`. |
+| P3 lifecycle test | Tests read the verified lock-owner pid and watch that pid exit. |
+| Owner: one-command resume | `outsourcerer disk resume` (new dispatch line) resumes everything and holds new pauses until recovery or the critical floor; `disk status` prints the report. |
+
+`outsourcerer.sh` shrank by one line (gate moved, `disk` dispatch added). Docs:
+`references/jobs-and-safety.md` "Disk pressure policy" rewritten.
+
+### Tests (Linux, bash 5.2, tmux and lsof installed, run as root)
+
+| Command | Result |
+|---|---|
+| `nice -n 19 bash tests/test_disk_policy.sh` | `RESULTS: 80 passed, 0 failed`, exit 0 (~75 s) |
+| same suite against base `1849ad0` code | 24 FAIL in floors/gate/pause/fg/tmux sections, then hangs in the monitor section on the fd-5 case (caller blocked until killed by `timeout 400`, exit 124); reclaim section not reached there |
+| `nice -n 19 bash tests/test_cleanup_manifest.sh` | `RESULTS: 66 pass 0 fail`, exit 0 |
+| `nice -n 19 bash tests/test_session_capabilities.sh` | `RESULT: 12 passed, 0 failed` (failed in the first conformance run: a monitor probed tmux for a still-launching session; fixed with pending registrations + test) |
+| `bash tests/conformance.sh` (once, before that fix; overlapped with other test runs) | exit 1, `239 passed, 9 failed, 1 skipped` |
+
+Conformance failures, each re-run alone on this branch and on the unmodified base:
+`test_session_capabilities` (mine, fixed, now green); `test_cleanup_manifest`, `test_release_0175`
+pass alone on both (the conformance failures came from concurrent runs); `test_vocab_hygiene`,
+`test_harness_isolation`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+`test_conformance_suite_timeout`, `test_sealed_fixes` (exit 127) fail identically on base — this
+container runs as root (permission-based fixtures do not fail) and lacks some tools. Conformance
+was not re-run after the session fix.
+
+### Unproven
+
+- macOS bash 3.2: only syntax-level care (no 4.x features; `BASHPID` fallback via `sh -c 'echo $PPID'`); not executed on a Mac here.
+- Windows Git Bash: no pause at all (fail-safe), not exercised.
+- TUI restore tested with `bash -i` + `stty raw; sleep`, not a real agent TUI; zsh/fish job control untested.
+- Watchdog deadlines still count paused time until the watchdog lane wires the helper in.
+- Auto-detached (`OSRC_REQUIRE_INTERACTIVE`) tmux runs are not registered (their session is created outside `session start`).
+
+## Needs from other lanes
+
+- **watchdog lane (`lib/watchdog.sh`)**: subtract `$(_osrc_disk_paused_secs "$jd")` from the
+  wall-clock ages in the no-init (`now - ni0`), hard-timeout (`now - t0`) and stall/no-write checks,
+  and test a real `_supervise` across a pause longer than its init timeout.
+- **PR #85 owner (`lib/cleanup.sh`)**: `_osrc_cleanup_apply` still runs repo-wide `git worktree prune`
+  and `branch -D` by name; the manual path deserves the same lane-pinned deletion.
+- **auto-detach path (`outsourcerer.sh` ~10784)**: call `_osrc_disk_register_caller session` with
+  `SESSION_NAME="$_ad_sess"` before `tmux new-session` so those panes are paused too.
