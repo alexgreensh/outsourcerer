@@ -53,7 +53,7 @@ fresh 2; mkdir -p "$OSRC_HOME/supervise/sess2"; log done L9 'job finished (done)
 out="$(OSRC_SUPERVISE_TICK_SECS=1 OSRC_SUPERVISE_TICK_TIMEOUT=2 OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0 perl -e 'alarm 20; exec @ARGV' \
   bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1; cmd_hub_export() { x="$(sleep 120)"; }; cmd_supervise --session sess2' "$SRC" 2>/dev/null)"
 grep -q '^EVENT done L9 ' <<<"$out" && ok "supervise delivers the done row although the hub refresh hangs" || no "done row held back by a hung refresh [$out]"
-S 'probe() { x="$(sleep 4711)"; }; _sv_bounded 1 probe'; rc=$?; sleep 0.5
+S 'probe() { x="$(sleep 4711; :)"; }; _sv_bounded 1 probe'; rc=$?; sleep 0.5
 [ "$rc" = 124 ] && ! pgrep -f 'sleep 4711' >/dev/null 2>&1 && ok "a timed-out probe dies with its grandchildren (no leak per refresh)" || { no "bounded probe leaked [rc $rc]"; pkill -f 'sleep 4711'; }
 
 echo "=== incident 3: the watcher wakes the owner when no waiter is armed ==="

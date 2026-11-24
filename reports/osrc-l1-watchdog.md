@@ -282,9 +282,66 @@ P3s:
 - **Timed-out delivery keeps running**: fixed; `_ws_settle` kills the delivery tree with
   `_kill_tree`. The `claude agents` probe no longer exists.
 - **Custom notifiers get invalid JSON**: not changed. The watcher's contract is its own and
-  documented: summary in `$1`, EVENT/NEXT lines on stdin and in `OSRC_WAKE_EVENT`. It is not the
-  heartbeat's JSON contract; the header no longer claims it is.
+  documented in the `lib/watchsvc.sh` header: summary in `$1`, EVENT/NEXT lines on stdin and in
+  `OSRC_WAKE_EVENT`. The round-2 report's line "it follows the heartbeat wake contract" was wrong:
+  the heartbeat passes JSON. Nothing parses the watcher's text as JSON.
 - **Failures visible after recovery, invisible in status**: fixed (finding 3; status reads both paths).
 - **Conformance leaves detached watchers**: no longer applies; nothing but `install` and an
   installed fallback's refresh starts a loop.
 - **Reset tests' negative cases**: no longer applies; every lane is registered with `own`.
+
+### Files (round 3)
+
+| File | Change |
+| --- | --- |
+| `lib/watchsvc.sh` | all fixes above; 374 → 410 lines (header, launcher and uninstall code added; resume, tick and transient code removed) |
+| `lib/supervise.sh` | `_sv_bounded` kills the whole process tree |
+| `lib/stopguard.sh` | the guard starts nothing; "ask the user to run"; one notification per yield; `_warn_unwatched` calls `_ws_refresh` |
+| `tests/test_watchsvc.sh` | 46 → 74 checks |
+| `osrc-l1-r2.READY`, `osrc-l1-r2.RESULT` | deleted |
+| `osrc-l1-r3.READY`, `osrc-l1-r3.RESULT` | new |
+
+### Tests (round 3)
+
+Run from `plugins/outsourcerer/skills/outsourcerer/scripts`, one at a time, under `nice`:
+
+| Command | Result |
+| --- | --- |
+| `bash tests/test_watchsvc.sh` | rc 0, 74 passed |
+| the same file against the round-2 code (`git archive beacb4b`) | rc 1, 48 passed, 26 failed. Every new regression check fails there, except the tmux positive path, a coverage test the brief asked for and not a fix. |
+| grandchild-probe check alone, both versions | round 2: the `sleep` leaks; round 3: clean. My first version of this check used `$(sleep N)`, which bash runs as a direct child, so it passed on round 2 too. It now uses `$(sleep N; :)`. |
+| `bash tests/test_stop_guard.sh` | rc 0, 19 passed |
+| `bash tests/test_supervise.sh` | rc 0, 99 passed |
+| `bash tests/test_supervise_lifecycle.sh` | rc 0, 43 passed |
+| `bash tests/test_supervise_dedupe.sh` | rc 0, 47 passed |
+| `test_no_pipe_grep_q`, `test_windows_portability`, `test_noglob_splitting`, `test_tests_set_home`, `test_no_dead_pid_scan` | each rc 0 |
+| `python3 tests/test_supervise_tick.py`, `python3 tests/test_supervise_signal.py` | each rc 0 |
+
+CONFORMANCE_PLACEHOLDER
+
+### Unproven (round 3)
+
+- **launchd.** Its code changed (launcher, `$BASH`, retried bootstrap, fallback on failure) and
+  still never runs here: no macOS. Only systemd is driven, with a fake `systemctl`.
+- **Git Bash.** The `ps -o` fallback is tested with a fake `ps` on Linux, not on Windows.
+  `_kill_tree`'s `ps -ef` path on MSYS is existing code, not exercised here.
+- **The real tmux and Claude Code screen.** The tmux test uses a fake `tmux` with the repo's
+  recorded Claude Code screens (`cc-composer-idle`, then `cc-working-hooks` after Enter). A live
+  pane can differ.
+- **Absolute limit phrases ("resets 11pm") on a row the watcher first reads long after it was
+  logged.** For example, the watcher was installed after the row, or the machine slept before the
+  first tick. The phrase is parsed against the current clock and can land a day late. Reminder rows
+  no longer cause this; only a late first read can.
+- **Plain terminal, IDE or desktop app, without a delivery command.** No wake is possible. The
+  watcher notifies and keeps the events pending, and the stop guard keeps asking for `supervise`.
+  After `OSRC_STOP_GUARD_MAX` blocks the guard still yields (loop safety), leaving `.unguarded`.
+- **Two plugin copies in use at once.** Each call repoints the launcher, so the copy used last wins.
+
+### Needs from other lanes (round 3, in addition to round 2's)
+
+- Docs owner (`SKILL.md`, `references/jobs-and-safety.md`): say that waking needs tmux, or
+  `OSRC_WATCH_DELIVER_CMD` (summary as `$1`, EVENT/NEXT lines on stdin). Say that `watcher install`
+  is a user decision. Drop `OSRC_WATCH_RESUME`, `OSRC_WATCH_TMUX`, `OSRC_WATCH_FALLBACK`,
+  `OSRC_WATCH_IDLE_EXIT` and `watcher tick` if any doc mentions them (none in this branch does).
+- Release/merge owner: keep every `osrc-l1-r*.READY` and `osrc-l1-r*.RESULT` file out of anything
+  merged to main.
