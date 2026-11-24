@@ -35,7 +35,8 @@ printf '[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n' > "
 pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
-mkrepo() { local d="$1"; mkdir -p "$d"; ( cd "$d" && git init -q && printf 'v1\n' > app.txt \
+mkrepo() { local d="$1"; mkdir -p "$d/state"; ( cd "$d" && git init -q && printf 'v1\n' > app.txt \
+  && echo K=v > .env.example && echo s > state/keep.txt \
   && printf '.env\nnode_modules/\nout/\n' > .gitignore && git add -A && git commit -qm init ); }
 age() { find "$@" -exec touch -t 202001010000 {} + 2>/dev/null; }
 manifest() { jq -cn --arg p "$1" --arg k "$2" --arg s "$3" --arg r "$4" --argjson t "$(date +%s)" \
@@ -57,37 +58,48 @@ wait_for() { local i=0; while [ "$i" -lt "${2:-50}" ]; do eval "$1" && return 0;
 echo "=== floors and settings ==="
 fl="$(osrc "$TMP/f1" '_osrc_disk_floors_kb')"; set -- $fl
 [ "$#" -eq 3 ] && [ "$3" -lt "$1" ] && [ "$2" -lt "$1" ] && ok "default floors ordered: $fl" || bad "default floors wrong: '$fl'"
-fl="$(OSRC_DISK_MIN_GB=20 OSRC_DISK_PAUSE_GB=6 OSRC_DISK_CRITICAL_GB=2 osrc "$TMP/f1" '_osrc_disk_floors_kb')"
-[ "$fl" = "20971520 6291456 2097152" ] && ok "explicit floors exact" || bad "override floors: '$fl'"
-fl="$(OSRC_DISK_POLICY_OFF=1 osrc "$TMP/f1" '_osrc_disk_floors_kb')"
-[ "$fl" = "10485760 0 0" ] && ok "policy off -> flat 10GB" || bad "policy-off floors: '$fl'"
-fl="$(OSRC_DISK_MIN_GB=0 osrc "$TMP/f1" '_osrc_disk_floors_kb')"; set -- $fl
-[ "$1" = 0 ] && [ "$3" = 0 ] && [ "$2" -gt 0 ] && ok "MIN_GB=0 disables launch+critical, keeps pause" || bad "MIN_GB=0: '$fl'"
+# P1: no environment variable moves a floor; an inherited export cannot open the gate.
+[ "$(OSRC_DISK_MIN_GB=0 OSRC_DISK_CRITICAL_GB=0 OSRC_DISK_POLICY_OFF=1 osrc "$TMP/f1" '_osrc_disk_floors_kb')" = "$fl" ] \
+  && ok "env floor variables are ignored" || bad "env moved a floor"
+settings "$TMP/f2" 'OSRC_DISK_MIN_GB=20
+OSRC_DISK_PAUSE_GB=6
+OSRC_DISK_CRITICAL_GB=2
+'
+fl="$(osrc "$TMP/f2" '_osrc_disk_floors_kb')"
+[ "$fl" = "20971520 6291456 2097152" ] && ok "settings file sets exact floors" || bad "settings floors: '$fl'"
+settings "$TMP/f2" 'OSRC_DISK_POLICY_OFF=1
+'
+fl="$(osrc "$TMP/f2" '_osrc_disk_floors_kb')"
+[ "$fl" = "10485760 0 1048576" ] && ok "policy off -> flat 10GB launch, no pause, critical kept" || bad "policy-off floors: '$fl'"
+settings "$TMP/f2" 'OSRC_DISK_MIN_GB=0
+'
+fl="$(osrc "$TMP/f2" '_osrc_disk_floors_kb')"; set -- $fl
+[ "$1" = 0 ] && [ "$3" = 1048576 ] && [ "$2" -gt 0 ] && ok "MIN_GB=0 disables launch blocking, keeps critical and pause" || bad "MIN_GB=0: '$fl'"
 # P2: an 8GiB volume must get a launch floor it can satisfy; an empty one launches.
 fl="$(osrc "$TMP/f1" '_osrc_disk_vol_kb() { echo 8388608; }; _osrc_disk_floors_kb')"; set -- $fl
 [ "$1" -le 2097152 ] && [ "$3" -lt "$1" ] && [ "$2" -lt "$1" ] && ok "small volume caps the default launch floor: $fl" || bad "small volume floors: '$fl'"
 mkdir -p "$TMP/small/jobs"; setfree 7340032
 g="$(osrc "$TMP/small" '_osrc_disk_vol_kb() { echo 8388608; }; _osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && ok "empty small volume is not blocked by the default" || bad "small volume blocked: $g"
-# The settings file is the documented setting; the monitor reads ONLY it.
-settings "$TMP/f2" 'OSRC_DISK_RECLAIM_MAX=0
-'
-fl="$(osrc "$TMP/f2" '_osrc_disk_floors_kb')"
-[ "${fl%% *}" = 10485760 ] && ok "settings file sets the launch floor" || bad "settings ignored: '$fl'"
-v="$(OSRC_DISK_RECLAIM_MAX=7 osrc "$TMP/f2" 'printf "%s/" "$(_osrc_disk_conf OSRC_DISK_RECLAIM_MAX)"; _OSRC_DISK_MONITOR=1; _osrc_disk_conf OSRC_DISK_RECLAIM_MAX')"
-[ "$v" = "7/0" ] && ok "env wins per command; the monitor reads only shared settings" || bad "conf precedence: '$v'"
 
 echo "=== incident 1: gate, ack and override ==="
 GH="$TMP/gate"; export OSRC_HOME="$GH"; mkdir -p "$GH/jobs" "$TMP/outside-gate"
 manifest "$TMP/outside-gate" job gate-sess ""
 OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
 [ -f "$GH/cleanup/ask-ack" ] && ok "--ack wrote ask-ack" || bad "--ack did not write ask-ack"
-export OSRC_DISK_MIN_GB=10 OSRC_DISK_CRITICAL_GB=1
-setfree 51200
+settings "$GH"; setfree 51200
 g="$(osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'critical floor' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "ack cannot bypass the critical floor" || bad "critical with ack: $g"
 g="$(OSRC_DISK_OK=1 osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'critical floor' <<<"$g" && ok "OSRC_DISK_OK cannot bypass the critical floor" || bad "OSRC_DISK_OK bypassed critical: $g"
+# P1: an exported zero floor (profile, or an agent prefixing it after a refusal) opens nothing.
+g="$(OSRC_DISK_MIN_GB=0 OSRC_DISK_CRITICAL_GB=0 osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
+grep -q 'critical floor' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "env zero floors cannot pass the critical floor" || bad "env floor bypass: $g"
+settings "$GH" 'OSRC_DISK_MIN_GB=0
+'
+g="$(osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
+grep -q 'critical floor' <<<"$g" && ok "settings MIN_GB=0 keeps the critical floor" || bad "MIN_GB=0 dropped critical: $g"
+settings "$GH"
 setfree 6291456
 g="$(osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && ok "acknowledged ASK passes in the launch band" || bad "band refused despite ack: $g"
@@ -107,7 +119,7 @@ g="$(OSRC_DISK_OK=1 osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && bad "inherited OSRC_DISK_OK=1 admitted a launch" || ok "inherited OSRC_DISK_OK=1 is not consent"
 code="$(sed -n 's/.*OSRC_DISK_OK=\([0-9a-f]\{8\}\).*/\1/p' <<<"$g" | head -1)"
 g="$(OSRC_DISK_OK="$code" osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?; ( _osrc_disk_gate; echo sub-rc=$? ); env | grep -c "^OSRC_DISK_OK=" ')"
-grep -q 'gate-rc=0' <<<"$g" && grep -q 'sub-rc=0' <<<"$g" && ok "code admits this command and its internal launches" || bad "code refused: $g"
+grep -q 'gate-rc=0' <<<"$g" && grep -q 'sub-rc=0' <<<"$g" && ok "code admits this command and its subshells" || bad "code refused: $g"
 [ "$(tail -1 <<<"$g")" = 0 ] && ok "OSRC_DISK_OK scrubbed before any delegate runs" || bad "OSRC_DISK_OK still exported: $g"
 grep -q 'free_kb=6291456' "$GH/disk-policy/override.log" 2>/dev/null && ok "override logged" || bad "override not logged"
 g="$(OSRC_DISK_OK="$code" osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
@@ -117,8 +129,11 @@ rm -f "$GH/disk-policy/override.log"; mkdir "$GH/disk-policy/override.log"
 g="$(OSRC_DISK_OK="$code" osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && bad "override admitted without an audit record" || ok "override needs a successful audit append"
 rmdir "$GH/disk-policy/override.log"
-g="$(OSRC_DISK_MIN_GB=0 osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
-grep -q 'gate-rc=0' <<<"$g" && ok "MIN_GB=0 disables the launch gate" || bad "MIN_GB=0 gate: $g"
+settings "$GH" 'OSRC_DISK_MIN_GB=0
+'
+g="$(osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
+grep -q 'gate-rc=0' <<<"$g" && ok "settings MIN_GB=0 disables the launch gate above critical" || bad "MIN_GB=0 gate: $g"
+settings "$GH"
 # P1 (#86): the REAL state writer must report a failed write; the gate then refuses.
 if [ -w /dev/full ]; then
   OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
@@ -127,21 +142,44 @@ if [ -w /dev/full ]; then
   grep -q 'write-rc=1' <<<"$g" && ok "real state writer returns failure after a write error" || bad "state writer masked failure: $g"
   grep -q 'state unknown' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "gate refuses on a failed state refresh" || bad "gate passed on failed write: $g"
 else echo "SKIP: no /dev/full for the state-write failure case"; fi
-unset OSRC_DISK_MIN_GB OSRC_DISK_CRITICAL_GB
+
+echo "=== P1: the override reaches a real bg job ==="
+# Floors put this host's real free space in the band (above a 1GB critical, under a huge
+# launch floor); pausing is off so the monitor leaves the job alone.
+BH="$TMP/bgh"; mkdir -p "$BH/jobs" "$TMP/bin" "$TMP/work"
+settings "$BH" 'OSRC_DISK_MIN_GB=1000000
+OSRC_DISK_PAUSE_GB=0
+'
+printf '#!/usr/bin/env bash\necho "fine"; echo "OSRC::DONE ok"\n' > "$TMP/bin/codex"; chmod +x "$TMP/bin/codex"
+bgrun() { ( cd "$TMP/work" && OSRC_HOME="$BH" PATH="$TMP/bin:$PATH" OSRC_CLOUD_ACK=1 OSRC_NO_ADVISE=1 OSRC_HEARTBEAT_DISABLED=1 \
+  bash "$SRC" bg --spend-ok --provider codex run -m gpt-6-testmodel "say fine" ); }
+g="$(bgrun 2>&1)"; code="$(sed -n 's/.*OSRC_DISK_OK=\([0-9a-f]\{8\}\).*/\1/p' <<<"$g" | head -1)"
+if [ -n "$code" ]; then
+  jid="$(OSRC_DISK_OK="$code" bgrun 2>/dev/null | tail -1)"
+  wait_for 'case "$(cat "$BH/jobs/$jid/status" 2>/dev/null)" in launching|running|"") false ;; esac' 100
+  st="$(cat "$BH/jobs/$jid/status" 2>/dev/null)"
+  [ -n "$jid" ] && [ "$st" = done ] && ok "OSRC_DISK_OK=<code> bg: the detached job passes its own gate and finishes" || bad "bg job '$jid' status '$st'"
+  grep -q 'job-admit' "$BH/disk-policy/override.log" 2>/dev/null && ok "the job's admission is logged" || bad "no job-admit log line"
+  [ -z "$(ls "$BH"/disk-policy/admit.* 2>/dev/null)" ] && ok "admit token consumed" || bad "admit token left behind"
+  grep -q '_OSRC_DISK_ADMIT\|OSRC_DISK_OK' "$BH/jobs/$jid/out.log" 2>/dev/null && bad "override leaked to the delegate" || ok "delegate output carries no override"
+else bad "bg refusal printed no code: $g"; fi
 
 echo "=== incident 2: pause, hold, resume ==="
 JH="$TMP/jobs"; mkdir -p "$JH/jobs"
-export OSRC_DISK_MIN_GB=10 OSRC_DISK_PAUSE_GB=4 OSRC_DISK_CRITICAL_GB=1   # resume floor 7GB
+settings "$JH"   # launch 10GB, pause 4GB, critical 1GB, resume 7GB
 mkjob() { # <name> <pid> <pgid> <sup_pid> -> job dir with verified identities
   local jd="$JH/jobs/$1"; mkdir -p "$jd"; echo running > "$jd/status"; : > "$jd/out.log"
   echo "$2" > "$jd/pid"; printf '%s\n' "$3" > "$jd/pgid"; lstart "$2" > "$jd/pid_start"
   [ -n "$4" ] && { echo "$4" > "$jd/supervisor_pid"; lstart "$4" > "$jd/supervisor_pid_start"; }
   printf '%s' "$jd"
 }
-set -m; ( exec sleep 300 ) & DEL=$!; ( exec sleep 300 ) & FRN=$!; set +m
+set -m; ( exec sleep 300 ) & DEL=$!; ( exec sleep 300 ) & FRN=$!
+( exec bash -c 'set -m; sleep 300 & echo $! > "$0"; wait' "$TMP/gchild" ) & GL=$!; set +m
 sleep 300 & SUP=$!; sleep 300 & UNV=$!; sleep 300 & D2=$!; sleep 300 & S2=$!; sleep 300 & SIB=$!
-KILL="$DEL $FRN $SUP $UNV $D2 $S2 $SIB"; disown $KILL 2>/dev/null
+wait_for '[ -s "$TMP/gchild" ]' 25; GC="$(cat "$TMP/gchild")"
+KILL="$DEL $FRN $SUP $UNV $D2 $S2 $SIB $GL $GC"; disown $KILL 2>/dev/null
 JD="$(mkjob job-a "$DEL" "$DEL" "$SUP")"
+JG="$(mkjob job-grp "$GL" "$GL" "")"
 JU="$(mkjob job-unver "$UNV" "" "")"; echo bogus-start > "$JU/pid_start"
 # P1: no recorded pgid -> must stop the delegate alone, never another group.
 J2="$(mkjob job-nopgid "$D2" "" "$S2")"
@@ -152,6 +190,7 @@ case "$(cat "$JH/stat-at-scan" 2>/dev/null)" in *T*) ok "jobs paused before the 
 stopped "$DEL" && ok "delegate group frozen under the pause floor" || bad "delegate not stopped"
 stopped "$SUP" && ok "supervisor frozen" || bad "supervisor not stopped"
 stopped "$D2" && stopped "$S2" && ok "job without a pgid record: delegate and supervisor stopped by pid" || bad "no-pgid job not paused: $(pstat "$D2") $(pstat "$S2")"
+stopped "$GC" && ok "group-led job: a descendant in its own group is stopped too" || bad "own-group descendant kept writing: $(pstat "$GC")"
 stopped "$SIB" && bad "a process sharing the delegate's group was stopped" || ok "no group signal without a delegate-led group"
 stopped "$FRN" && bad "FOREIGN process stopped" || ok "foreign process untouched"
 stopped "$UNV" && bad "unverifiable job stopped" || ok "unverifiable job untouched"
@@ -159,14 +198,14 @@ grep -q "^proc|d|$DEL|1|" "$JD/disk-paused" && grep -q "^proc|s|$SUP|0|" "$JD/di
   && ok "pause record names each process, its group flag and identity" || bad "record: $(cat "$JD/disk-paused")"
 ev1="$(jq -r 'select(.kind=="disk-paused")|.event_id' "$JH/wake-queue.jsonl" 2>/dev/null | tail -1)"
 [ -n "$ev1" ] && ok "owner woken: $ev1" || bad "no disk-paused wake"
-grep -q "auto  worktree\|reclaimable" "$JH/disk-policy/monitor.log" 2>/dev/null; grep -q 'swap' "$JH/disk-policy/monitor.log" && ok "pressure report logged" || bad "no report"
+grep -q 'reclaimable' "$JH/disk-policy/monitor.log" 2>/dev/null && grep -q 'swap' "$JH/disk-policy/monitor.log" && ok "pressure report logged" || bad "no report"
 t="$(tick 5242880)"
 stopped "$DEL" && ok "hysteresis holds the pause" || bad "dead zone resumed early"
-osrc "$JH" 'printf "%s" "$(_osrc_disk_paused_secs '"$JD"')"' > "$TMP/ps1"
-[ "$(cat "$TMP/ps1")" -ge 0 ] 2>/dev/null && ok "watchdog can read paused seconds while paused" || bad "paused_secs: $(cat "$TMP/ps1")"
+sleep 1; osrc "$JH" 'printf "%s" "$(_osrc_disk_paused_secs '"$JD"')"' > "$TMP/ps1"
+[ "$(cat "$TMP/ps1")" -ge 1 ] 2>/dev/null && ok "watchdog can read paused seconds while paused" || bad "paused_secs: $(cat "$TMP/ps1")"
 t="$(tick 8388608)"
-! stopped "$DEL" && ! stopped "$SUP" && ! stopped "$D2" && ! stopped "$S2" && ok "all resumed on recovery" || bad "still stopped after recovery"
-[ ! -f "$JD/disk-paused" ] && [ -f "$JD/disk-paused-secs" ] && ok "record retired, pause time accumulated" || bad "record/secs wrong"
+! stopped "$DEL" && ! stopped "$SUP" && ! stopped "$D2" && ! stopped "$S2" && ! stopped "$GC" && ok "all resumed on recovery" || bad "still stopped after recovery"
+[ ! -f "$JD/disk-paused" ] && [ "$(cat "$JD/disk-paused-secs" 2>/dev/null)" -ge 1 ] && ok "record retired, pause time banked" || bad "record/secs wrong"
 grep -q '"disk-resumed"' "$JH/wake-queue.jsonl" && ok "resume wake" || bad "no resume wake"
 # P2: a second episode gets a new event id.
 t="$(tick 3145728)"
@@ -184,11 +223,27 @@ t="$(tick 3145728)"
 grep -q 'could not be verified' "$JH/wake-queue.jsonl" && ok "owner told some lanes keep running" || bad "unrecorded job not reported"
 rmdir "$J2/disk-paused.tmp"; t="$(tick 8388608)"
 # P2: recovery under pipefail with a long record list.
-mkdir -p "$TMP/many/jobs"
+mkdir -p "$TMP/many/jobs"; settings "$TMP/many"
 i=0; while [ "$i" -lt 1500 ]; do mkdir -p "$TMP/many/jobs/j$i"; printf 'since|1\n' > "$TMP/many/jobs/j$i/disk-paused"; i=$((i+1)); done
 setfree 8388608
 osrc "$TMP/many" 'set -o pipefail; _osrc_disk_record_sweep() { :; }; _osrc_disk_monitor_tick' >/dev/null
 [ -z "$(ls "$TMP"/many/jobs/*/disk-paused 2>/dev/null)" ] && ok "recovery sweeps every record under pipefail" || bad "records left under pipefail"
+
+echo "=== P1: watchdog clocks skip disk-paused time (real _supervise) ==="
+WH="$TMP/wd"; WJ="$WH/jobs/job-w"; mkdir -p "$WJ"; settings "$WH"
+OSRC_HOME="$WH" OSRC_POLL=1 OSRC_NOINIT_SECS=6 OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1
+  _supervise "$1" 30 45 12 -- sleep 60 >/dev/null 2>&1' "$SRC" "$WJ" >/dev/null 2>&1 &
+wait_for '[ -s "$WJ/supervisor_pid_start" ] && [ -s "$WJ/pid_start" ]' 25
+WS="$(cat "$WJ/supervisor_pid")"; WD="$(cat "$WJ/pid")"; KILL="$KILL $WS $WD"
+osrc "$WH" '_osrc_disk_pause_job "'"$WJ"'"' >/dev/null
+stopped "$WS" && stopped "$WD" && ok "supervised job and its watchdog frozen" || bad "real job not paused: $(pstat "$WS") $(pstat "$WD")"
+sleep 14   # longer than both the no-init (6s) and hard (12s) deadlines
+osrc "$WH" '_osrc_disk_resume_rec "'"$WJ"'/disk-paused"' >/dev/null
+sleep 3
+st="$(cat "$WJ/status" 2>/dev/null)"
+[ "$st" = running ] && kill -0 "$WD" 2>/dev/null && ok "resumed job survives its watchdog's first polls" || bad "watchdog killed a paused job on resume: $st $(cat "$WJ/reason" 2>/dev/null)"
+wait_for 'case "$(cat "$WJ/status" 2>/dev/null)" in wedged|timeout) true ;; *) false ;; esac' 75 \
+  && ok "watchdog still enforces its deadlines on active time: $(cat "$WJ/reason" 2>/dev/null)" || bad "watchdog never fired: $(cat "$WJ/status")"
 
 echo "=== foreground and tmux lanes ==="
 FH="$TMP/fg"; mkdir -p "$FH/jobs"; settings "$FH"; setfree 20971520
@@ -220,6 +275,18 @@ if command -v tmux >/dev/null 2>&1; then
   [ "$(stty -g < "$PTTY")" = "$RAW" ] && ok "TUI terminal mode restored" || bad "tty mode not restored"
   osrc "$TH" '_osrc_disk_monitor_tick' >/dev/null
   [ "$(tmux display-message -p -t osrc-tui '#{pane_current_command}')" = sleep ] && ok "manual resume holds new pauses" || bad "re-paused after manual resume"
+  # P2: a second `session start` for a live session keeps that session's bound record.
+  osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  [ -n "$(cut -d'|' -f4 "$TH/disk-policy/procs/tmux-osrc-tui" 2>/dev/null)" ] && ok "repeat session start keeps the live registration" || bad "live session unregistered: $(cat "$TH/disk-policy/procs/tmux-osrc-tui" 2>/dev/null)"
+  # P2: a lane whose pane process is a non-exec wrapper shell is never typed into.
+  osrc "$TH" 'SESSION_NAME=wrap; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  tmux new-session -d -s wrap -x 80 -y 24 "bash -c 'sleep 600; :'"
+  wait_for '[ -n "$(ps -o pid= --ppid "$(tmux display-message -p -t wrap "#{pane_pid}")" 2>/dev/null)" ] || pgrep -P "$(tmux display-message -p -t wrap "#{pane_pid}")" >/dev/null' 25
+  rm -f "$TH/disk-policy/hold"
+  osrc "$TH" '_osrc_disk_pause_reg "$OSRC_HOME/disk-policy/procs/tmux-wrap"' >/dev/null
+  [ -f "$TH/disk-policy/paused/tmux-wrap" ] && ok "wrapper lane paused" || bad "wrapper lane not paused"
+  osrc "$TH" '_osrc_disk_resume_rec "$OSRC_HOME/disk-policy/paused/tmux-wrap"' >/dev/null; sleep 1
+  tmux capture-pane -p -t wrap | grep -q 'fg' && bad "typed fg into a foreground lane" || ok "nothing typed into a foreground lane"
   # A session that predates the registration (the user's own) is never bound.
   tmux new-session -d -s user-own "sleep 600"
   printf 'tmux|user-own|%s|||\n' "$(( $(date +%s) + 100 ))" > "$TH/disk-policy/procs/tmux-user-own"
@@ -270,8 +337,16 @@ ns="$(grep -c 'started' "$MH/disk-policy/monitor.log")"
 osrc "$MH" '_osrc_disk_monitor_ensure' >/dev/null
 wait_for '[ "$(grep -c started "$MH/disk-policy/monitor.log")" -gt '"$ns"' ]' 25 && ok "launch after idle exit gets a fresh monitor" || bad "no respawn"
 
+# P2: a late claimant of a stale lock (it judged the owner dead before another took it) leaves
+# exactly one owner, and never removes the lock directory.
+LH="$TMP/lk"; mkdir -p "$LH/disk-policy/monitor.lock"; echo "999999|gone" > "$LH/disk-policy/monitor.lock/owner"
+osrc "$LH" '_OSRC_DISK_ME=111 _OSRC_DISK_ME_ID=a; _osrc_disk_lock_take' >/dev/null
+osrc "$LH" '_OSRC_DISK_ME=222 _OSRC_DISK_ME_ID=b; _osrc_disk_lock_alive() { return 1; }; _osrc_disk_lock_take' >/dev/null
+[ "$(cat "$LH/disk-policy/monitor.lock/owner" 2>/dev/null)" = "222|b" ] && [ "$(ls "$LH/disk-policy" | grep -c .)" = 1 ] \
+  && ok "stale-lock takeover leaves one owner and no debris" || bad "lock state: $(ls -R "$LH/disk-policy")"
+
 echo "=== incident 3: merged-lane reclaim ==="
-RH="$TMP/reclaim"; mkdir -p "$RH/jobs" "$RH/tmp"; export OSRC_HOME="$RH"
+RH="$TMP/reclaim"; mkdir -p "$RH/jobs"; export OSRC_HOME="$RH"
 R="$TMP/repo"; mkrepo "$R"
 lane() { # <name> -> worktree + branch + receipt, merged (at main), owner done
   git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/$1" -b "outsourcerer/$1" HEAD
@@ -280,10 +355,6 @@ lane() { # <name> -> worktree + branch + receipt, merged (at main), owner done
   manifest "$R/.outsourcerer/worktrees/$1" worktree "$1" "$R"; manifest "outsourcerer/$1" branch "$1" "$R"
 }
 lane gone; lane deps; lane detached; lane race
-mkdir -p "$RH/tmp/gone-scratch" "$RH/tmp/keep-scratch" "$RH/tmp/user-notes"
-echo x > "$RH/tmp/gone-scratch/build.o"; echo x > "$RH/tmp/keep-scratch/build.o"; echo mine > "$RH/tmp/user-notes/n.txt"
-manifest "$RH/tmp/gone-scratch" tmp gone ""; manifest "$RH/tmp/keep-scratch" tmp wt-keep ""
-mkdir -p "$RH/tmp/gone-env"; echo SECRET=1 > "$RH/tmp/gone-env/.env"; manifest "$RH/tmp/gone-env" tmp gone ""
 # Unmerged lane.
 git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/wt-keep" -b outsourcerer/wt-keep HEAD
 ( cd "$R/.outsourcerer/worktrees/wt-keep" && echo w > wip.txt && git add wip.txt && git commit -qm wip )
@@ -296,32 +367,26 @@ mkdir -p "$R/.outsourcerer/worktrees/deps/node_modules/pkg"; echo TOKEN=1 > "$R/
 FIX="$(git -C "$R/.outsourcerer/worktrees/detached" rev-parse HEAD)"
 # P1: unrelated worktree on a "disconnected drive" keeps its admin record (no prune).
 git -C "$R" worktree add -q "$TMP/usb-wt" -b user/usb HEAD; rm -rf "$TMP/usb-wt"
-age "$R/.outsourcerer/worktrees" "$RH/jobs" "$RH/tmp"
+age "$R/.outsourcerer/worktrees" "$RH/jobs"
 rep="$(osrc "$RH" '_osrc_disk_report')"
 grep -q "auto  worktree  $R/.outsourcerer/worktrees/gone" <<<"$rep" && ok "report names reclaimable items by path and kind" || bad "report: $rep"
-n="$(OSRC_DISK_RECLAIM_MAX=0 osrc "$RH" '_osrc_disk_reclaim')"
-[ "$n" = 0 ] && [ -d "$R/.outsourcerer/worktrees/gone" ] && ok "RECLAIM_MAX=0 disables reclaim" || bad "max=0: $n"
-# P2: the shared setting governs a monitor regardless of a launch's env.
 settings "$RH" 'OSRC_DISK_RECLAIM_MAX=0
 '
-n="$(OSRC_DISK_RECLAIM_MAX=10 osrc "$RH" '_OSRC_DISK_MONITOR=1; _osrc_disk_reclaim')"
-[ "$n" = 0 ] && [ -d "$R/.outsourcerer/worktrees/gone" ] && ok "monitor reclaim obeys the shared setting, not launch env" || bad "env overrode shared setting: $n"
+n="$(OSRC_DISK_RECLAIM_MAX=10 osrc "$RH" '_osrc_disk_reclaim')"
+[ "$n" = 0 ] && [ -d "$R/.outsourcerer/worktrees/gone" ] && ok "RECLAIM_MAX=0 in settings disables reclaim; env cannot re-enable it" || bad "max=0: $n"
 rm -f "$RH/disk-policy/settings"
 # P1: a branch that moves just before deletion is kept (conditional ref delete).
 n="$(osrc "$RH" '_osrc_branch_checked_out() { [ "${FUNCNAME[1]}" = _osrc_disk_reclaim_lane ] && [ "$2" = outsourcerer/race ] && git -C "$1" update-ref refs/heads/outsourcerer/race "$(git -C "$1" commit-tree -p refs/heads/outsourcerer/race -m moved "refs/heads/outsourcerer/race^{tree}")"; return 1; }
   _osrc_disk_reclaim')"
 git -C "$R" rev-parse -q --verify refs/heads/outsourcerer/race >/dev/null && ok "branch that moved after the proof survives" || bad "moved branch deleted"
-[ ! -d "$R/.outsourcerer/worktrees/gone" ] && ok "merged worktree removed" || bad "merged worktree kept"
+[ ! -d "$R/.outsourcerer/worktrees/gone" ] && ok "merged worktree removed, though it tracks .env.example and state/ (P2)" || bad "merged worktree kept"
 git -C "$R" rev-parse -q --verify refs/heads/outsourcerer/gone >/dev/null && bad "merged branch kept" || ok "merged branch removed"
-[ ! -d "$RH/tmp/gone-scratch" ] && ok "merged lane's scratch removed (incident 3)" || bad "scratch left behind"
-[ -f "$RH/tmp/gone-env/.env" ] && ok "scratch holding .env kept" || bad ".env scratch deleted!"
-[ -d "$RH/tmp/keep-scratch" ] && [ -f "$RH/tmp/user-notes/n.txt" ] && ok "unmerged lane's scratch and user data kept" || bad "adjacent data deleted!"
 [ -f "$R/.outsourcerer/worktrees/deps/node_modules/pkg/.env" ] && ok "worktree with ignored node_modules/.env kept" || bad "protected files deleted!"
 git -C "$R" cat-file -e "$FIX" 2>/dev/null && [ -d "$R/.outsourcerer/worktrees/detached" ] && ok "detached worktree with an unmerged fix kept" || bad "detached fix lost"
 [ -d "$R/.outsourcerer/worktrees/wt-keep" ] && git -C "$R" rev-parse -q --verify refs/heads/outsourcerer/wt-keep >/dev/null \
   && ok "unmerged lane kept" || bad "UNMERGED lane deleted!"
 [ -d "$R/.git/worktrees/usb-wt" ] && ok "unrelated worktree's admin record not pruned" || bad "repository-wide prune ran"
-grep -q 'removed-branch.*outsourcerer/gone@' "$RH/cleanup.log" && grep -q removed-scratch "$RH/cleanup.log" \
+grep -q 'removed-branch.*outsourcerer/gone@' "$RH/cleanup.log" && grep -q 'removed-worktree' "$RH/cleanup.log" \
   && ok "deletions logged with the verified commit" || bad "cleanup.log: $(cat "$RH/cleanup.log" 2>/dev/null)"
 
 echo ""

@@ -501,7 +501,7 @@ _osrc_cleanup_ack() {
   ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || die "cannot create $(_osrc_cl_root)"
   printf '%s\n' "$ah" > "$(_osrc_cl_ack)"
-  echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below ${OSRC_DISK_MIN_GB:-10}GB free until reviewed."
+  echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below the disk launch floor until reviewed."
 }
 
 # ---- supervisor hook ------------------------------------------------------------
@@ -582,6 +582,9 @@ _osrc_cleanup_tick() {
 # arms it. Under pressure it rescans live: an ack must match the list as it is now (#86).
 _osrc_disk_gate() {
   local free_kb free_gb launch_kb pause_kb crit_kb launch_gb crit_gb ah ch an ns items top
+  # A bg route preflight is a dry dispatch check, not a launch: _bg_launch gates right after it,
+  # and a preflight child must not consume the one-use override code or register itself.
+  [ "${OSRC_PREFLIGHT:-0}" = 1 ] && return 0
   free_kb="$(_osrc_free_kb)"
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
@@ -596,7 +599,7 @@ _osrc_disk_gate() {
   if [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ]; then
     die "outsourcerer: free disk is ${free_gb}GB — under the critical floor (${crit_gb}GB); refusing new lane launches, not even with --ack or OSRC_DISK_OK. Free space first: '$0 cleanup --apply', then '$0 cleanup' for what remains. $(_osrc_disk_report_oneline 2>/dev/null)"
   fi
-  [ "$free_kb" -lt "$launch_kb" ] || return 0
+  [ "$free_kb" -lt "$launch_kb" ] || { unset OSRC_DISK_OK _OSRC_DISK_ADMIT; return 0; }
   type _osrc_disk_override_take >/dev/null 2>&1 && _osrc_disk_override_take "$free_kb" "$launch_kb" && return 0
   items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
   # Issue #86: decide from THIS live scan; if the state cannot be refreshed, refuse as unknown.

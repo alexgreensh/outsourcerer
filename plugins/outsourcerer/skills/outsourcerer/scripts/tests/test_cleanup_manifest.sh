@@ -19,9 +19,10 @@ trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" XDG_CONFIG_HOME="$TMP/xdg"
 export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1 OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0
 # Disk-policy monitors spawned by the gate must die fast in tests (1 tick, ~1s). Pin the
-# launch/critical floors so the 6GB gate fixtures sit in the band on any volume size.
-export OSRC_DISK_POLICY_POLL=1 OSRC_DISK_MONITOR_IDLE_TICKS=1 OSRC_DISK_MIN_GB=10 OSRC_DISK_CRITICAL_GB=1
+# launch/critical floors (settings file) so the 6GB gate fixtures sit in the band on any volume.
+export OSRC_DISK_POLICY_POLL=1 OSRC_DISK_MONITOR_IDLE_TICKS=1
 mkdir -p "$HOME" "$OSRC_HOME" "$XDG_CONFIG_HOME" "$OSRC_HOME/jobs"
+for _h in "$OSRC_HOME" "$TMP/osrc2"; do mkdir -p "$_h/disk-policy"; printf 'OSRC_DISK_MIN_GB=10\nOSRC_DISK_CRITICAL_GB=1\n' > "$_h/disk-policy/settings"; done
 printf '[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n' > "$GIT_CONFIG_GLOBAL"
 
 pass=0; fail=0
