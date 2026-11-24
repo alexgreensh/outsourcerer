@@ -221,12 +221,13 @@ it, path under the manifest's recorded root (the age and open-file checks do not
 entries, which instead need a valid branch name and a resolvable repo). Worktrees additionally need a
 clean git status (untracked files count) and no ignored files other than a top-level
 `node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree;
-worktrees and branches need their tip contained in the recorded base commit (the `base_sha` the
-worktree was cut from), in one of the main-ish refs (`origin/HEAD`, `origin/main`, `origin/master`,
-`main`, `master`, `upstream/main`, `upstream/master`), or in a merged PR whose head is that tip.
-The base-commit case means a worktree with no new commits past its base counts as preserved even
-when no remote holds that base, so a local-only base branch that was deleted can lose its last ref
-on `cleanup --apply`. Fanout entries need
+worktrees and branches need their tip contained in one of the main-ish refs (`origin/HEAD`,
+`origin/main`, `origin/master`, `main`, `master`, `upstream/main`, `upstream/master`), in the
+recorded base commit (the `base_sha` the worktree was cut from) when a remote-tracking ref also
+holds that base, or in a merged PR whose head is that tip. A recorded base that no remote or
+main-ish ref holds is not preservation by itself: a worktree cut from a local-only branch stays
+ASK, because deleting its branch would drop the last ref to those commits. `cleanup <id>` applies
+the same test and refuses such a branch without `--force`. Fanout entries need
 every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
 result collected; a clean finish whose result was never collected stays ASK at any age, and only a
 non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
@@ -234,13 +235,12 @@ deleted; `lib/cleanup.sh` is the authority when this summary and the code disagr
 
 Disk gate: while free disk is below `OSRC_DISK_MIN_GB` (10), new lane launches (`bg`, routed
 delegations, `session start`) are refused unless there are ASK items and the current ASK list has
-been acknowledged (`cleanup --ack`; the ack must match the ASK hash in `cleanup/state.json`). The
-gate rescans and rewrites that file first but ignores a failed write, so when it cannot be replaced
-(disk full, unwritable directory) the gate reads the previous count and hash, and an ack of the old
-list can still admit a launch. If no cleanup state file exists after the rescan, it refuses as
-"cleanup state is unknown". With no ASK items it
-still refuses, and says whether SAFE items can be applied or the space is held outside Outsourcerer.
-`OSRC_DISK_MIN_GB=0` overrides.
+been acknowledged (`cleanup --ack`). The gate decides from a live scan of the manifest, never from
+`cleanup/state.json`: it still tries to refresh that file for the tick and other readers, but a
+failed write (disk full, unwritable directory) changes nothing, and the ack must match the ASK
+hash of the list as it is now. Without `jq` it cannot scan and refuses as "cleanup state is
+unknown". With no ASK items it still refuses, and says whether SAFE items can be applied or the
+space is held outside Outsourcerer. `OSRC_DISK_MIN_GB=0` overrides.
 
 ## Hub export: the `team` field (L12)
 
