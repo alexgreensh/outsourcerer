@@ -599,8 +599,7 @@ _sv_bounded() { # <secs> <cmd...>
   "$@" & p=$!
   while kill -0 "$p" 2>/dev/null; do
     if [ "$i" -ge "$n" ]; then
-      command -v pkill >/dev/null 2>&1 && pkill -TERM -P "$p" 2>/dev/null
-      kill -TERM "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124
+      _kill_tree "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124   # the probe sits below a $(...): kill the whole tree
     fi
     sleep 0.1; i=$((i + 1))
   done

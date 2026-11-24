@@ -41,6 +41,7 @@ _sg_print_unguarded() {
 
 # _warn_unwatched -> loud, actionable notice on stderr when live jobs are going unobserved.
 _warn_unwatched() {
+  type _ws_refresh >/dev/null 2>&1 && _ws_refresh   # an installed watcher follows this plugin copy (lib/watchsvc.sh)
   _sg_print_unguarded
   local out n; out="$(_unwatched_jobs)"; [ -n "$out" ] || return 0
   n="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
@@ -68,12 +69,13 @@ _warn_unwatched() {
 #
 # Ownership: every launch made from a Claude Code session records its id under
 # $OSRC_HOME/owners/<session-id>/. Other sessions' work never blocks this one.
-# The per-user watcher (lib/watchsvc.sh) is a waiter too, for a session it can actually wake (its
-# tmux pane, recorded here from the hook's environment, or a delivery command).
+# The per-user watcher (lib/watchsvc.sh) is a waiter too, but only while it runs and can actually
+# wake this session (its tmux pane, recorded here from the hook's environment, or a delivery
+# command). Outside tmux, without a delivery command, the guard keeps asking for `supervise`.
+# The guard never installs or starts the watcher; it only names the command for the user to run.
 # Loop safety: the same unwaited set is blocked at most OSRC_STOP_GUARD_MAX times (default 2), then
-# the stop is allowed, but never into silence: a watcher loop is started if none runs (a transient
-# one unless installed; OSRC_WATCH_FALLBACK=0 opts out), owners/<sid>/.unguarded is written (every
-# later call prints it) and an OS notification is shown. A new set blocks again.
+# the stop is allowed, but never into silence: owners/<sid>/.unguarded is written (every later call
+# prints it) and one OS notification is shown when it first appears. A new set blocks again.
 # OSRC_STOP_GUARD=0 turns the guard off. Any error allows the stop.
 #
 # _owner_sid / _owner_record live in lib/handover.sh, one copy for every lane.
@@ -157,17 +159,17 @@ cmd_stop_guard() {
   cnt="$(awk -v k="$key" '$1==k{print $2}' "$dir/.stop-blocks" 2>/dev/null)"; cnt="${cnt:-0}"
   if [ "$cnt" -ge "$max" ]; then
     reason="NO watcher is running"
-    if type _ws_ensure >/dev/null 2>&1 && _ws_ensure >/dev/null 2>&1; then reason="a watcher loop observes them and will notify, but cannot wake this session itself"; fi
-    printf '%s UNGUARDED: %s owned by this session have no waiter that can wake you (stop-guard yielded after %s reminders; %s). Arm: %s supervise --session %s (or run Claude Code inside tmux with: %s watcher install)\n' \
+    type _ws_alive >/dev/null 2>&1 && _ws_alive && reason="the watcher observes them and notifies, but has no channel that can wake this session"
+    [ -s "$dir/.unguarded" ] || { type _ws_notify >/dev/null 2>&1 && _ws_notify "outsourcerer: lanes unwatched" "Session $sid: $unwaited have no waiter that can wake it."; }
+    printf '%s UNGUARDED: %s owned by this session have no waiter that can wake you (stop-guard yielded after %s reminders; %s). Arm: %s supervise --session %s (or ask the user to run Claude Code inside tmux and, once: %s watcher install)\n' \
       "$(date '+%Y-%m-%d %H:%M:%S')" "$unwaited" "$cnt" "$reason" "$SCRIPT_PATH" "$sid" "$SCRIPT_PATH" > "$dir/.unguarded" 2>/dev/null
-    type _ws_notify >/dev/null 2>&1 && _ws_notify "outsourcerer: lanes unwatched" "Session $sid: $unwaited have no waiter that can wake it."
     printf '[outsourcerer] stop-guard: %s need a waiter; letting the turn end after %s reminders (%s). Recorded in %s.\n' "$unwaited" "$cnt" "$reason" "$dir/.unguarded" >&2
     return 0
   fi
   printf '%s %s\n' "$key" "$((cnt + 1))" > "$dir/.stop-blocks" 2>/dev/null
   n="$(printf '%s\n' $unwaited | grep -c .)"
   reason="$(printf 'Outsourcerer: %s delegate(s) you own still need you (%s), and nothing will wake you when they do. Before ending your turn, start ONE background command (Bash with run_in_background: true):\n  %s supervise --session %s' "$n" "$unwaited" "$SCRIPT_PATH" "$sid")"
-  reason="$reason$(printf '\nIt returns with EVENT/NEXT lines the moment any of them is blocked, asks a question, finishes, or stalls. Run each NEXT, then arm supervise again. Tell the user what is running.\nTo stop re-arming for good: run Claude Code inside tmux and %s watcher install once.' "$SCRIPT_PATH")"
+  reason="$reason$(printf '\nIt returns with EVENT/NEXT lines the moment any of them is blocked, asks a question, finishes, or stalls. Run each NEXT, then arm supervise again. Tell the user what is running.\nTo stop re-arming for good, ask the user to run Claude Code inside tmux and, once: %s watcher install' "$SCRIPT_PATH")"
   jq -cn --arg r "$reason" '{decision:"block", reason:$r}'
   return 0
 }

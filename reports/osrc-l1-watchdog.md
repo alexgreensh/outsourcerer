@@ -204,3 +204,87 @@ lane.
   incident 1. The watcher already avoids the problem.
 - `references/jobs-and-safety.md` and `SKILL.md` (docs owner): document `watcher install`, the
   channels, and the `OSRC_WATCH_*` settings.
+
+## Round 3
+
+Fix round for the Fable review of round 2 (`VERDICT: FIX`) and the earlier round-1 review. Base
+`cloud/osrc-l1-r2` at `beacb4b`. Paths below are relative to
+`plugins/outsourcerer/skills/outsourcerer/scripts/`.
+
+### Orchestrator decisions, as implemented
+
+- **Finding 7: the stop guard never installs or starts a daemon.** The yield path no longer calls
+  anything that spawns. `--transient` mode, `_ws_ensure`, `OSRC_WATCH_FALLBACK` and
+  `OSRC_WATCH_IDLE_EXIT` are deleted. The guard's block reason and `.unguarded` now say "ask the
+  user to run ... `watcher install`". Typing into a tmux pane and the limit `continue` also require
+  `watchsvc/installed`, so a hand-started `watcher run` only observes and wakes through a delivery
+  command the user configured.
+  The one thing that still starts a loop without an `install` in the same call: once the user has
+  installed the **fallback** backend (no launchd/systemd), an ordinary outsourcerer call
+  (`_warn_unwatched` → `_ws_refresh`) restarts that loop if it died. That is the consented service
+  being kept alive, like launchd `KeepAlive`; the stop guard does not do it.
+- **Finding 8: waking needs tmux or a delivery command.** This is now stated in the `watcher help`
+  text and the `lib/watchsvc.sh` header: a Claude Code session in a plain terminal, an IDE or the
+  desktop app cannot be typed into from outside. For such a session `_ws_channel` finds nothing, so
+  `_ws_covers` is false and the stop guard keeps blocking with the `supervise` instruction instead
+  of trusting the watcher (test: "watcher alive but no channel to this session: still blocks").
+  The loop-safety yield after `OSRC_STOP_GUARD_MAX` blocks stays: a guard must never wedge a session.
+  The tmux path now has an end-to-end test (below). The user-facing docs are owned elsewhere; see
+  Needs.
+
+### Fable round-2 findings
+
+| # | Fix | Regression test (`tests/test_watchsvc.sh`) |
+| --- | --- | --- |
+| 1 P1 | `_ws_limits` ignores `still unresolved, waiting ` rows, so only a banner's first row sets the reset | "a reminder of a relative banner does not push the reset later" |
+| 2 | `_sv_bounded` kills the whole tree with the existing `_kill_tree` (pgrep, or `ps -ef` on Git Bash) | "a timed-out probe dies with its grandchildren"; incident 2's fake refresh is now `x="$(sleep 120)"` |
+| 3 | the empty-rows branch also removes `try`, `wakefail` and `owners/<sid>/.wakefail` | "once a supervise delivered the rows, the failure notice and retry state are gone" (also checks the owner dir can be removed) |
+| 4 | `_ws_pid_ok` falls back to `kill -0` when `ps -o` prints nothing; the loop exits once `run.lock/pid` is not its own; a lock with no pid yet is not stolen for 10 s | "without ps -o (Git Bash) a live loop still holds its lock", "a loop whose lock was taken over exits" |
+| 5 | the unit runs `watchsvc/launch`, which every call repoints at the current `SCRIPT_PATH` (`_ws_refresh`) | "the unit runs a launcher under $BASH, never the versioned plugin path", "a call from a new plugin copy repoints the launcher" |
+| 6 | `uninstall` removes both backends' units whatever `installed` says; a failed systemd/launchd start removes the unit and uses the fallback loop; `bootstrap` is retried once after 1 s | "a failed systemd start removes the unit and falls back", "and one uninstall removes it", "uninstall removes a unit even with no install record" |
+| 7 | see above | "the yield starts no daemon; it names the install command", "the block reason asks the user to install", "a watcher nobody installed never types a continue / into the pane" |
+| 8 | see above; fake-pane tmux test | "tmux: the wake is typed into the session's empty composer and verified on screen" |
+| 9 | the `|| [ -f "$s/pane" ]` exception is gone | "a session with a recorded pane but nothing owned is reclaimed" |
+| 10 | `osrc-l1-r2.READY` / `.RESULT` deleted; new `osrc-l1-r3.*` written from the real results | n/a |
+
+P3s:
+
+| Item | Fix | Test |
+| --- | --- | --- |
+| settle race | re-read `rc` after `kill -0` fails | "a delivery that finishes between the two checks counts as delivered" |
+| ledger lock | no lock after 50 tries: leave `inflight`, retry next tick | "ledger lock held by a supervise: settle waits", "and records it once the lock is free" |
+| coverage env | `_ws_covers` judges the channel after `_ws_env` (install-time `OSRC_WATCH_*` only), and needs a live loop pid, not only a fresh stamp | "coverage is judged by the watcher's settings", "a fresh stamp without a live watcher process is not a waiter" |
+| owner twice per tick | one `sort -u` list | "an owner in both lists is processed once per tick" |
+| unit vs running loop | `install` stops a running loop first | "install stops a loop that was already running" |
+| unverified continue | `.done` and `limit-resumed` only on `session send` rc 0, or rc 2 (submitted, unverified: marked so in the row, never resent, since a resend would be a second `continue`); other rc retried next tick | "a failed continue is not logged as sent; it is retried", "the retry sends it once" |
+| `/bin/bash` in the unit | `$BASH` (systemd and launchd) | the launcher test checks `ExecStart="$BASH"` |
+| limit cursor vs rotation | cursor stores `size gen`; after a rotation the rest of `events.jsonl.1` is read first | "a limit row logged just before log rotation is still seen" |
+| hub not told | `osrc_hub_seen_lane` when a delivered finished lane leaves the registry | "the finished lane is marked seen on the hub" |
+| notification per turn end / hourly | the guard notifies only when `.unguarded` first appears; `_ws_failed` only at the attempt that reaches the max | "one notification per yield", "a failing wake notifies once" |
+| unbounded `service.log` | trimmed to its last 64 KiB once above 256 KiB, checked each tick | "service.log stays bounded" |
+| bloat | deleted: the `resume` channel and `_ws_session_running`, `watcher tick`, `OSRC_WATCH_TMUX`, `--transient` | removed tests with them |
+
+### Round-1 reviewer findings, rechecked against the current code
+
+- **Wakes bypass the spend gate**: no longer applies. The only channel that launched `claude` (`resume`) is deleted.
+- **Stale tmux mapping**: no longer applies. A pane is used only if its process tree runs this very
+  session id (`_fleet_cc_session_for_pane`), its composer is empty and the screen state is idle,
+  and the send is verified with `_osrc_send_verify_screen`. Now also only when installed.
+- **Guard accepts a watcher that cannot wake**: fixed in round 2 (channel required), tightened here
+  (live loop pid required, the daemon's own settings). `watcher tick` is gone.
+- **Failed and deferred wakes lost**: no longer applies; the cursor moves only when nothing is owed.
+- **Distinct messages suppress each other**: no longer applies; the ledger is keyed by row id.
+- **Concurrent passes deliver twice**: `watcher tick` deleted; lock not stolen before its pid is
+  published (10 s grace); a loop that lost its lock exits on its next pass.
+- **Resets consumed before due / success recorded on failure**: the first no longer applies
+  (per-lane reset files); the second is fixed (unverified-continue row above).
+- **Receipt path with spaces**: no longer applies; `inflight` holds `pid t0 channel` only.
+- **Timed-out delivery keeps running**: fixed; `_ws_settle` kills the delivery tree with
+  `_kill_tree`. The `claude agents` probe no longer exists.
+- **Custom notifiers get invalid JSON**: not changed. The watcher's contract is its own and
+  documented: summary in `$1`, EVENT/NEXT lines on stdin and in `OSRC_WAKE_EVENT`. It is not the
+  heartbeat's JSON contract; the header no longer claims it is.
+- **Failures visible after recovery, invisible in status**: fixed (finding 3; status reads both paths).
+- **Conformance leaves detached watchers**: no longer applies; nothing but `install` and an
+  installed fallback's refresh starts a loop.
+- **Reset tests' negative cases**: no longer applies; every lane is registered with `own`.
