@@ -27,6 +27,7 @@ TSOCK_MAIN="/tmp/osrc-crm-$$"; TSOCK_CB="/tmp/osrc-crc-$$"
 cleanup() { for s in "$TSOCK_MAIN" "$TSOCK_CB"; do [ -S "$s" ] && tmux -S "$s" kill-server 2>/dev/null; rm -f "$s"; done; rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
+export OSRC_STUB_MODE="$TMP/stub.mode"
 
 # ---------- stubs: claude / devin / codex / gh (log argv, fake auth, fake session URL) ----------
 STUB="$TMP/bin"; mkdir -p "$STUB"
@@ -56,7 +57,10 @@ case "${1:-}" in
 JSONEOF
            exit 0 ;;
   --help|-h|help) echo "Usage: claude [options] [prompt]"; echo "  --cloud [description|session_id|url]"; echo "  --environment <environment_id>"; exit 0 ;;
-  --cloud) echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
+  --cloud) case "$(cat "$OSRC_STUB_MODE" 2>/dev/null)" in
+             trust) printf ' Is this a project you created or one you trust?\n  1. Yes, I trust this folder\n> 2. No, exit\n'; sleep 30; exit 0 ;;
+           esac
+           echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -66,7 +70,11 @@ cat > "$STUB/devin" <<'EOF'
 case "${1:-}" in
   auth)   echo "Logged in (via Devin)."; exit 0 ;;
   --help|-h|help) echo "Usage: devin [options]"; echo "  --cloud"; echo "  -p, --print [<PROMPT>]"; echo "      --prompt-file <FILE>"; exit 0 ;;
-  --cloud) if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
+  --cloud) case "${FAKE_DEVIN_MODE:-}" in
+             nolink) echo "Preparing devin session..."; sleep 30; exit 0 ;;
+             quota)  echo '{"error":"out_of_quota","message":"Agent refused the request"}'; exit 1 ;;
+           esac
+           if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
            echo "Devin session: https://app.devin.ai/sessions/devin-0123456789abcdef"; exit 0 ;;
 esac
 exit 0
@@ -253,6 +261,34 @@ grep -q 'GRANTED' <<<"$out" && ok "consent: cloud consent grant/status works" ||
 out="$(FAKE_HELP_ONLY=1 start_cloud t-help --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'support.example.invalid/help' "$(_cloudrun_cdir)/t-help.launch.log" && [ ! -e "$OSRC_HOME/remote/t-help.json" ] && grep -q 'did not start' <<<"$out" \
   && ok "failed launch with help URL stays unregistered" || bad "help URL accepted: $out"
+
+# ---- regression: a launch is started only once the vehicle printed a session URL or id ----
+# Incident: a Devin cloud launch that printed no session link (but whose process was still alive)
+# was counted as started and registered.
+out="$(FAKE_DEVIN_MODE=nolink OSRC_CLOUD_LAUNCH_WAIT=2 start_cloud t-nolink --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-nolink.json" ] && grep -q 'Preparing devin session' <<<"$out" && grep -q 'did not start' <<<"$out" \
+  && ok "no session link: launch fails, output shown, nothing registered" || bad "no-link launch counted as started (rc=$rc): $out"
+
+# ---- regression: quota/billing errors are named as such, never as a refusal ----
+out="$(FAKE_DEVIN_MODE=quota start_cloud t-quota --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'out of quota' <<<"$out" && grep -q -- '--vehicle claude' <<<"$out" && grep -qi 'not refusing' <<<"$out" && [ ! -e "$OSRC_HOME/remote/t-quota.json" ] \
+  && ok "out_of_quota: surfaced as quota with a next step (another vehicle / local)" || bad "quota misreported (rc=$rc): $out"
+_cl="$TMP/cls.log"
+for pair in "billing:HTTP 402 Payment Required:billing" "rl:error 429 too many requests:ratelimit" "q2:usage limit reached:quota" "o:something odd:other"; do
+  printf '%s\n' "$(printf '%s' "$pair" | cut -d: -f2)" > "$_cl"
+  [ "$(_cloudrun_classify_failure devin "$_cl" | cut -f1)" = "$(printf '%s' "$pair" | cut -d: -f3)" ] \
+    && ok "classify: ${pair%%:*}" || bad "classify: ${pair%%:*} -> $(_cloudrun_classify_failure devin "$_cl" | cut -f1)"
+done
+
+# ---- regression: folder-trust prompt in the claude --cloud pane fails the launch, never accepted ----
+if command -v tmux >/dev/null 2>&1; then
+  printf trust > "$OSRC_STUB_MODE"
+  out="$(OSRC_CLOUD_LAUNCH_WAIT=10 start_cloud t-trust --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+  rm -f "$OSRC_STUB_MODE"
+  [ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-trust.json" ] && grep -qi 'trust this folder yet' <<<"$out" && grep -q 'never accepts trust' <<<"$out" \
+    && ok "trust prompt: launch fails with a clear message, nothing registered" || bad "trust prompt not handled (rc=$rc): $out"
+  tmux list-sessions 2>/dev/null | grep -q osrc-cloud && bad "trust prompt: launcher pane left running" || ok "trust prompt: launcher pane torn down"
+fi
 
 # ============================== L7 spend gate integration ==============================
 # when _osrc_spend_gate is loaded, cloud start calls it with the vehicle->lane mapping

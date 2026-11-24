@@ -161,7 +161,7 @@ _osrc_gh_err_kind() { # <stderr-text> -> auth|rate|missing|net
   case "$1" in
     *"rate limit"*|*"API rate"*|*"secondary rate"*|*"abuse detection"*) printf rate ;;
     *"HTTP 401"*|*"Bad credentials"*|*"gh auth login"*|*"authentication"*|*"not logged"*|*"HTTP 403"*) printf auth ;;
-    *"HTTP 404"*|*"Not Found"*) printf missing ;;
+    *"HTTP 404"*|*"Not Found"*|*"HTTP 422"*|*"No commit found"*) printf missing ;;   # gh answers 422 for a branch that does not exist yet
     *) printf net ;;
   esac
 }
@@ -416,6 +416,11 @@ osrc_remote_events() {
            fi ;;
       esac
     fi
+    # a lane that never pushes: report once, as "never started", with whatever the vehicle said
+    if [ "$st" = live ] && [ -z "$head" ] && [ "$(jq -r '.seen_branch' "$f")" != true ] && _osrc_lane_never_started "$f" "$now" \
+       && _osrc_ev_due "$id" neverstarted 0; then
+      _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - $(jq -r '.created_ts' "$f")) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
+    fi
     if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ]; then
       last_move="$(jq -r '.last_push_ts // .created_ts' "$f")"
       vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
@@ -428,6 +433,42 @@ osrc_remote_events() {
   type osrc_review_events >/dev/null 2>&1 && osrc_review_events
   type osrc_proof_events >/dev/null 2>&1 && osrc_proof_events   # lib/proof.sh: lanes stopped by a pin mismatch
   return 0
+}
+
+# A lane that has not pushed within OSRC_REMOTE_NEVER_START minutes (default 45) never started.
+_osrc_lane_never_started() { # <json> <now>
+  local t; t="$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")"
+  [ "$t" -gt 0 ] && [ $(( $2 - $(jq -r '.created_ts' "$1") )) -ge "$t" ]
+}
+
+# ", vehicle <v>: <last line it printed>" when the launch recorded a vehicle; empty otherwise.
+_osrc_lane_vehicle_note() { # <id> <json>
+  local v last
+  v="$(jq -r '.vehicle // ""' "$2")"; [ -n "$v" ] || return 0
+  last="$(grep -v '^[[:space:]]*$' "$OSRC_HOME/cloud/$1.launch.log" 2>/dev/null | tail -1 | cut -c1-120)"
+  printf ', vehicle %s (%s)%s' "$v" "$(jq -r '.session_ref // "no session"' "$2")" "${last:+, last output: $last}"
+}
+
+# Evidence-based lane status for `lane ls`: "<state>\t<why>". The cached state is trusted only while
+# there is evidence the lane is alive: a push (or, before the first push, its age) inside the timeout.
+_osrc_lane_status() { # <id>
+  local id="$1" f st now head last stall
+  f="$(_osrc_lane_json "$id")"; st="$(osrc_remote_state "$id")"; now="$(_osrc_now)"
+  head="$(jq -r '.head // ""' "$f")"
+  if [ "$st" = live ]; then
+    stall="$(_osrc_mins "${OSRC_REMOTE_STALL:-90}")"
+    if [ -z "$head" ]; then
+      if _osrc_lane_never_started "$f" "$now"; then printf 'stale\tnever pushed %s' "$(jq -r .branch "$f")"
+      else printf 'starting\tno branch yet'; fi
+      return 0
+    fi
+    last="$(jq -r '.last_push_ts // .created_ts' "$f")"
+    if [ "$stall" -gt 0 ] && [ $(( now - last )) -ge "$stall" ]; then printf 'stale\tno push for %sm' "$(( (now - last) / ${OSRC_TIME_UNIT:-60} ))"; return 0; fi
+  fi
+  case "$st" in
+    failed) [ "$(jq -r '.branch_deleted' "$f")" = true ] && { printf 'failed\tbranch deleted'; return 0; } ;;
+  esac
+  printf '%s\t' "$st"
 }
 
 _osrc_next_for_ready() { # best next command when something just became READY
@@ -508,12 +549,13 @@ _osrc_lane_add() {
 }
 
 _osrc_lane_ls() {
-  local id f any=0
-  printf '%-22s %-7s %-30s %-8s %s\n' LANE STATE BRANCH HEAD LAST-PUSH
+  local id f any=0 row now; now="$(_osrc_now)"
+  printf '%-22s %-8s %-30s %-8s %-10s %s\n' LANE STATE BRANCH HEAD LAST-PUSH NOTE
   for id in $(_osrc_remote_ids); do
     f="$(_osrc_lane_json "$id")"; any=1
-    printf '%-22s %-7s %-30s %-8s %s\n' "$id" "$(osrc_remote_state "$id")" "$(jq -r .branch "$f" | cut -c1-30)" \
-      "$(jq -r '.head[0:7]' "$f")" "$(( ( $(_osrc_now) - $(jq -r '.last_push_ts' "$f") ) / ${OSRC_TIME_UNIT:-60} ))m ago"
+    row="$(_osrc_lane_status "$id")"
+    printf '%-22s %-8s %-30s %-8s %-10s %s\n' "$id" "${row%%	*}" "$(jq -r .branch "$f" | cut -c1-30)" \
+      "$(jq -r '.head[0:7]' "$f")" "$(( ( now - $(jq -r '.last_push_ts' "$f") ) / ${OSRC_TIME_UNIT:-60} ))m ago" "${row#*	}"
   done
   [ "$any" = 1 ] || echo "(no remote lanes; add one with: lane add <id> --branch <b> --repo <owner/name>)"
 }
