@@ -78,13 +78,31 @@ CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
 
 # other engines' real prompts
-for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "codex|cx-approval|0" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
+for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "devin|dv-approval-modal-status-line|0" "devin|dv-approval-modal-wide-wrap|2" "codex|cx-approval|0" "codex|cx-edit-approval|0" "codex|cx-edit-approval-multi|2" "gemini|gm-approval-shell|0" "gemini|gm-approval-edit|2" "gemini|gm-approval-other|2" "gemini|gm-trust-folder-menu|2" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
   PROV="${spec%%|*}"; rest="${spec#*|}"; f="${rest%%|*}"; want="${rest#*|}"
-  rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
+  rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
   [ "$PROV" = cc ] || AFTER="$FX/dv-idle-after-work.ansi"
   out="$(osrc_approver_tick sess sess)"; rc=$?
   [ "$rc" = "$want" ] && ok || bad "$f: want rc $want got $rc ($out)"
 done
+
+# round 2: the reader extracts exactly the command (or target) the screen names, and says how each row
+# break was drawn. A status row above the command is dropped; the command keeps both of its rows.
+_extract() { # <engine> <fixture> -> sets OSRC_SCR_* from the capture
+  _osrc_screen_analyze_text "$1" < "$FX/$2.ansi"
+}
+NLX="$(printf '\nx')"; NLX="${NLX%x}"
+_extract devin dv-approval-modal-status-line
+[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt &&${NLX}ls -la" ] && [ "$OSRC_SCR_KIND" = shell ] && ok "devin status row above the command is not part of it" || bad "devin status line leaked: kind=$OSRC_SCR_KIND cmd=[$OSRC_SCR_CMD]"
+_extract devin dv-approval-modal-safe-wrapped
+[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt &&${NLX}ls -la" ] && [ "$OSRC_SCR_BREAKS" = n ] && ok "short rows are real newlines" || bad "safe-wrapped: breaks=$OSRC_SCR_BREAKS cmd=[$OSRC_SCR_CMD]"
+_extract devin dv-approval-modal-wide-wrap
+case "$OSRC_SCR_BREAKS" in h|s) ok "a full-width row could be a terminal wrap: breaks=$OSRC_SCR_BREAKS" ;; *) bad "full-width row read as a newline: breaks=[$OSRC_SCR_BREAKS]" ;; esac
+_extract devin dv-approval-modal; [ "$OSRC_SCR_CMD" = "SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done" ] && ok || bad "devin modal command: [$OSRC_SCR_CMD]"
+_extract codex cx-edit-approval; [ "$OSRC_SCR_KIND" = write ] && [ "$OSRC_SCR_PATH" = notes.txt ] && ok "codex edit names its file" || bad "codex edit: kind=$OSRC_SCR_KIND path=[$OSRC_SCR_PATH]"
+_extract codex cx-edit-approval-multi; [ "$OSRC_SCR_KIND" = write ] && [ -z "$OSRC_SCR_PATH" ] && ok "codex multi-file edit leaves the path empty" || bad "codex multi edit: path=[$OSRC_SCR_PATH]"
+_extract gemini gm-approval-shell; [ "$OSRC_SCR_KIND" = shell ] && [ "$OSRC_SCR_CMD" = "touch made-by-gemini.txt" ] && ok "gemini allow-execution menu names its command" || bad "gemini shell: [$OSRC_SCR_KIND] [$OSRC_SCR_CMD]"
+_extract gemini gm-approval-other; [ "$OSRC_SCR_KIND" = other ] && ok "gemini unknown numbered menu stays other" || bad "gemini other: $OSRC_SCR_KIND"
 
 # cursor NOT on the approve-once row -> hold even for a safe command
 PROV=cc; rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; AFTER=""

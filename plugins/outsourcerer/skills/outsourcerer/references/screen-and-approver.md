@@ -163,7 +163,16 @@ OS isolation holds the command. Continue to use the engine's own sandbox for oth
   is on the short harmless list.
 - Any `$` outside single quotes (variables, `$?`, `$HOME`; `awk '{print $1}'` is fine, the shell
   expands nothing inside '…'), `~user`/`~+`/`~-`, brace expansion `{a,b}`, `…`, a trailing
-  `&&`/`||`/`|`/`;`, and multi-line commands (Devin's and Claude's wrapped rows are joined first).
+  `&&`/`||`/`|`/`;`, `|&` (bash 3.2 rejects it), and any whitespace, control or invisible character
+  other than space, tab and newline.
+- A multi-line command is judged line by line and approves only if every line is safe. The reader
+  tells the classifier how each row break was drawn: a short row followed by another is a real
+  newline; a row as wide as the pane could be a terminal wrap, so the command must be safe read
+  both ways (`git branch` / `ls` as a wrap is `git branch ls`, which holds). These still hold for
+  a person: a newline inside quotes, a backslash continuation, a here-document, an unfinished
+  operator or redirect, a `cd` whose failure would let a later relative write leave the
+  worktree (only `cd X && …` is known to run in X), and a write or `cd` after a step that can
+  swap files for links (`git switch`, `mv`, `rm`, `ln`, `cp`).
 - git push, reset --hard, any force/-D flag, checkout/restore that discards work, commit
   `--amend`/`--no-verify`, `git stash` other than list/show (the stash is shared by every
   worktree), `git switch -C`/`--discard-changes`, `git init`, any git global flag except

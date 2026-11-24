@@ -84,6 +84,7 @@ _osrc_approver_root() { # <pane> -> the delegate's worktree (git toplevel of the
 
 _osrc_approver_classify() { # <root> <kind> <path> <cmd> -> "approve <rule>" | "hold <rule>"
   local args=(--root "$1" --kind "$2" --path "$3") d old_ifs
+  [ -n "${OSRC_SCR_BREAKS:-}" ] && args+=(--breaks "$OSRC_SCR_BREAKS")
   if [ -n "${OSRC_APPROVER_EXTRA_DIRS:-}" ]; then
     old_ifs="$IFS"; IFS=:
     for d in $OSRC_APPROVER_EXTRA_DIRS; do [ -n "$d" ] && args+=(--extra "$d"); done
@@ -101,7 +102,7 @@ _osrc_approver_once_row() { # uses OSRC_SCR_ENGINE / OSRC_SCR_SEL / OSRC_SCR_SCO
     cc:"1. Yes") return 0 ;;
     codex:"1. Yes, proceed"*) return 0 ;;
     devin:Allow) [ "$OSRC_SCR_SCOPE" = once ] && return 0 ;;
-    agy:"1. Yes, run command"|agy:"1. Yes, allow creation"|agy:"1. Yes, allow edit"*) return 0 ;;
+    gemini:"1. Allow once"|agy:"1. Yes, run command"|agy:"1. Yes, allow creation"|agy:"1. Yes, allow edit"*) return 0 ;;
   esac
   return 1
 }

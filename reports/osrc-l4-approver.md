@@ -86,3 +86,56 @@ any line that is unsafe or cannot be parsed confidently holds the whole command.
 - `references/screen-and-approver.md`: update the "multi-line commands held" wording to describe
   line-by-line judgment and the remaining hold cases above.
 - No change needed in `lib/approver.sh`; it already forwards `OSRC_SCR_KIND`/`OSRC_SCR_CMD`.
+
+## Round 2
+
+Branch `cloud/osrc-l4-r2` (from `cloud/osrc-l4-approver` @ bcdcc75). Fixes Astra's P1–P3 findings.
+
+### What changed
+
+- **Wrap vs newline (P1-1)**: `lib/screen.sh` `_osrc_scr_breaks` sets `OSRC_SCR_BREAKS`, one letter per break
+  between command rows: `n` newline for sure (row + next word fit in the widest captured row, capped at 60
+  columns), `s` newline-or-wrap, `h` also a mid-word wrap (row is full width, row not found, non-ASCII).
+  `approver.sh` forwards it as `--breaks`. `lib/approver_lines.py:interpretations()` expands every ambiguous break
+  into each possible text; the command approves only if **all** readings are safe. No breaks given = all `h`.
+- **Failed `cd` (P1-2)**: new `lib/approver_flow.py` judges each segment in every directory it may run in; only a
+  segment chained by `&&` after `cd` uses the new directory alone. `cd` inside a pipeline holds.
+- **Earlier step changes path resolution (P1-3)**: after `git switch`, `mv`, `rm`, `ln`, `cp`, `rmdir`, `chmod`, `git mv/rm`
+  any later write, redirect or `cd` holds (touch, mkdir, tee, sed -i, git add/commit are exempt).
+- **Unicode whitespace (P1-4)**: comment detection strips only space/tab; `check_characters()` holds any other
+  whitespace, control, format or invisible character before parsing.
+- **Devin status line (P2-5)**: modal reader drops leading prose rows, and keeps the command only if its first row
+  contains the menu's `Exec(prog)` word; otherwise nothing is extracted (hold).
+- **Layouts (P2-6)**: Codex edit prompts set `PATH` from the single `<file> (+N -M)` row (none/several = empty = hold).
+  Gemini `Allow execution of: 'cmd'?` -> shell + command, `Apply this change?` -> write (no path = hold); other
+  numbered menus stay `other`. `gemini:"1. Allow once"` is now an approve-once row.
+- **`|&` (P2-7)**: held (bash 3.2 rejects it); removed from continuation joining.
+- **Quoted punctuation (P3-8)**: `split_segments` compares a quote-preserving lex with the posix one, so `echo "|" ";"` approves again.
+- **Docs (P3-9)**: `references/screen-and-approver.md` held-command list rewritten.
+- Housekeeping: `test_screen_state.sh` table gained the fixtures the base branch added without rows (it failed on the base).
+  `approver_classify.py` 905 lines; no file over 1000.
+
+### Tests (exact commands, exit codes)
+
+- `nice -n 19 bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/test_approver_table.sh` — exit 0, `432 passed, 0 failed`
+  (40 new rows; table now marks `⏎` = reader-established newline, `↩` = ambiguous row break).
+  Before the fix the new rows for wrap, failed cd, tree change, U+2003, `|&` and quoted punctuation approved/held wrongly
+  (probed against bcdcc75's lib: `git branch⏎ls`, `cd src⏎touch ../x`, `git switch dev⏎touch f`, ` #`, `pwd |& cat` all approved; `echo "|" ";"` held).
+- `nice -n 19 bash .../tests/test_approver_tick.sh` — exit 0, `48 passed, 0 failed` (exact-extraction asserts, status-line fixture, Codex/Gemini layouts).
+- `nice -n 19 bash .../tests/test_screen_state.sh` — exit 0, `261 passed, 0 failed`.
+- `nice -n 19 bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` — exit 1, `241 passed, 6 failed, 1 skipped`.
+  The 6 failures are `test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+  `test_conformance_suite_timeout`, `test_sealed_fixes`. I re-ran each on an untouched checkout of bcdcc75 in this container
+  (running as root, no OS guard for the sealed matrix) and they fail the same way there, so they are environmental, not from this change.
+  `test_approver_table`, `test_approver_tick`, `test_screen_state`, `test_sealed_runner` and `test_release_0175` pass inside conformance.
+
+### Unproven
+
+- The Gemini and Codex-edit fixtures are **constructed** from documented wording, not captured from a real session.
+- `n` classification assumes apps wrap no narrower than 60 columns; a TUI wrapping narrower than that inside a wider pane could
+  be read as a real newline. Rows over 60 columns are always ambiguous.
+- Git Bash / Linux execution of the full suites was not run here (only Linux, bash 5).
+
+## Needs from other lanes
+
+- None. (`lib/approver.sh` got a 2-line change to forward `--breaks` and the Gemini once-row; `lib/screen.sh` and `test_screen_state.sh` were edited because the findings point there.)

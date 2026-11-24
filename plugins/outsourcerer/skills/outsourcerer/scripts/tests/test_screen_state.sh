@@ -41,6 +41,8 @@ cx-idle|codex|composer||
 cx-working|codex|working||
 cx-idle-after-work|codex|idle||
 cx-approval|codex|approval|shell|touch made-by-codex.txt
+cx-edit-approval|codex|approval|write|notes.txt
+cx-edit-approval-multi|codex|approval|write|
 cx-trust-folder-menu|codex|approval|trust|
 dv-idle|devin|composer||
 dv-working|devin|working||
@@ -50,6 +52,9 @@ dv-approval-wrapped|devin|approval|shell|
 dv-approval-modal|devin|approval|shell|SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done
 dv-approval-modal-box|devin|approval|shell|jq -r .name out/report.json
 dv-approval-modal-rm|devin|approval|shell|rm -rf ~/Documents
+dv-approval-modal-safe-wrapped|devin|approval|shell|
+dv-approval-modal-status-line|devin|approval|shell|
+dv-approval-modal-wide-wrap|devin|approval|shell|
 cc-idle-status-auto|cc|idle||
 cc-idle-status-bypass|cc|idle||
 cc-idle-status-plan|cc|idle||
@@ -61,7 +66,10 @@ agy-idle-after-work|agy|idle||
 agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
 agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
 agy-trust-folder-menu|agy|approval|trust|
-gm-trust-folder-menu|gemini|approval|trust|'
+gm-trust-folder-menu|gemini|approval|trust|
+gm-approval-shell|gemini|approval|shell|touch made-by-gemini.txt
+gm-approval-edit|gemini|approval|write|
+gm-approval-other|gemini|approval|other|'
 
 check_table() { # <label> [hint-mode: hint|guess]
   local mode="$1" f eng want kind what hint n=0

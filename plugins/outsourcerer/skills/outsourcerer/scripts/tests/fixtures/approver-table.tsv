@@ -398,3 +398,44 @@ hold	shell		echo hi > ~/.zshrc⏎ls
 hold	shell		rm -rf src⏎echo done
 hold	shell		echo `⏎id⏎`
 hold	shell		eval ls⏎cat README.md
+# round 2: row breaks (wrap vs newline), failed cd, tree changes, unicode, |&, quoted punctuation
+hold	shell		git branch↩ls
+approve	shell		git branch⏎ls
+hold	shell		ls↩cat README.md
+approve	shell		ls -la↩cat README.md
+hold	shell		git status⏎git push
+approve	shell		cd src && touch ../made-by-test.txt
+hold	shell		cd src⏎touch ../made-by-test.txt
+hold	shell		cd src; touch ../made-by-test.txt
+hold	shell		cd src || touch ../made-by-test.txt
+hold	shell		cd src | ls
+approve	shell		cd src⏎ls
+hold	shell		git switch dev⏎touch made-by-test.txt
+hold	shell		git switch dev && touch made-by-test.txt
+hold	shell		ln -s /etc linkd⏎touch linkd/x
+hold	shell		mv src moved⏎touch moved/x
+approve	shell		git switch dev && ls -la
+hold	shell		ls⏎ # touch ../outside.txt
+hold	shell		ls # touch ../outside.txt
+hold	shell		ls​⏎ls
+hold	shell		ls⏎ # rm -rf ../x
+hold	shell		pwd |&⏎cat
+hold	shell		pwd |& cat
+approve	shell		echo "|" ";"
+approve	shell		echo "&&" ls
+hold	shell		ls; rm -rf ../x
+hold	shell		ls⏎rm -rf ../x
+hold	shell		ls && touch ../x
+hold	shell		ls | sh
+hold	shell		cat <<EOF⏎hello⏎EOF
+hold	shell		ls⏎echo $(id)
+hold	shell		ls⏎echo `id`
+hold	shell		ls⏎eval ls
+hold	shell		ls⏎echo hi >> ~/.bashrc
+hold	shell		ls⏎echo hi > ~/.ssh/authorized_keys
+hold	shell		ls⏎r\⏎m -rf x
+hold	shell		ls\⏎touch ../x
+hold	shell		ls⏎r↩m -rf ../x
+hold	shell		ls⏎ｒｍ -rf ../x
+hold	shell		ls⏎rm -rf /↩tmp/x
+hold	shell		ls⏎ѕudo ls

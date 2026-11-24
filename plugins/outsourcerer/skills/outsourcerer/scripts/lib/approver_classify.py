@@ -37,7 +37,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))   # -I drops the script dir
 from approver_tables import *  # noqa: E402,F401,F403  (tables only; logic stays here)
 from approver_tables import COLOR, Spec  # noqa: E402
-from approver_lines import LineHold, logical_lines  # noqa: E402
+from approver_lines import LineHold, check_characters, interpretations, logical_lines  # noqa: E402
+from approver_flow import run_lines  # noqa: E402
 HOME = os.path.expanduser("~")
 FOLD = sys.platform == "darwin"   # macOS file systems are case-insensitive by default
 
@@ -200,17 +201,24 @@ def split_segments(cmd: str):
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=";&|()<>")
     lex.whitespace_split = True
     lex.commenters = ""
+    raw = shlex.shlex(cmd, posix=False, punctuation_chars=";&|()<>")   # keeps the quotes
+    raw.whitespace_split = True
+    raw.commenters = ""
     try:
-        toks = list(lex)
+        toks, rawtoks = list(lex), list(raw)
     except ValueError as e:
         raise Hold("unparseable: %s" % e)
+    if len(toks) != len(rawtoks):
+        raise Hold("cannot tell quoted punctuation from shell operators")
     segs, cur, prev = [], [], None
-    for t in toks:
-        if t in OPERATORS:
+    for t, r in zip(toks, rawtoks):
+        if t in OPERATORS and r == t:   # a quoted "|" or ";" is just an argument
             if t in ("(", ")"):
                 raise Hold("subshell")
             if t == "&":
                 raise Hold("background job")
+            if t == "|&":
+                raise Hold("|& is not understood by bash 3.2 (macOS default shell)")
             if not cur:
                 raise Hold("operator without a command before it: " + t)
             segs.append((cur, prev))
@@ -799,14 +807,40 @@ def sealed_runner(cmd: str, cwd: str, root: str) -> bool:
         return False
 
 
-def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple[bool, str]:
-    """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set."""
+def judge_command(cmd: str, cwd: str, roots: list[str]) -> str:
+    """The rule of one shell command text (any number of lines); raises Hold when anything is unsafe."""
+    pre_checks(cmd, multiline=True)
+    if sealed_runner(cmd, cwd, roots[0]):
+        return "test/build:sealed runner with verified OS isolation"
+    lines = logical_lines(cmd)
+    if not lines:
+        raise Hold("no command visible")
+    if len(lines) == 1 and [t for t, _ in split_segments(lines[0])] == [["compgen", "-e"]]:
+        pre_checks(lines[0])
+        # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
+        # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
+        return "read-only:env names (compgen -e)"
+    rules = run_lines(lines, cwd, roots, pre_checks, split_segments, classify_segment, Hold)
+    if not rules:
+        raise Hold("empty command")
+    if any(r.startswith("test/build") for r in rules):
+        # A test or build script can run arbitrary code with the lane's full rights.
+        raise Hold("test and build runs wait for a person in this version")
+    return " + ".join(dict.fromkeys(rules))
+
+
+def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str], breaks: str = "") -> tuple[bool, str]:
+    """THE gate. (True, rule) only if no danger rule fires AND every segment is in the safe set.
+
+    `breaks` says how the screen reader saw each row break of a multi-row command (see
+    approver_lines.interpretations); the command is approved only if every reading is safe."""
     try:
         if kind == "trust":
             raise Hold("folder trust prompt (never auto-approved)")
         if kind in ("write", "edit"):
             if not path:
                 raise Hold("file write with no visible path")
+            check_characters(path)
             pre_checks(path)
             check_tilde(path)
             check_path(path, cwd, roots, write=True)
@@ -814,45 +848,27 @@ def is_safe(cmd: str, kind: str, path: str, cwd: str, roots: list[str]) -> tuple
         if kind == "read":
             if not path:
                 raise Hold("file read with no visible path")
+            check_characters(path)
             pre_checks(path)
             check_tilde(path)
             check_path(path, cwd, roots, write=False)
             return True, "read-only:file " + path
         if kind != "shell":
             raise Hold("unrecognised prompt kind: " + (kind or "none"))
-        cmd = cmd.strip()
+        check_characters(cmd)
+        cmd = cmd.strip(" \t\n")
         if not cmd:
             raise Hold("no command visible")
-        pre_checks(cmd, multiline=True)
-        if sealed_runner(cmd, cwd, roots[0]):
-            return True, "test/build:sealed runner with verified OS isolation"
-        lines = logical_lines(cmd)
-        if not lines:
-            raise Hold("no command visible")
-        rules, cur = [], cwd
-        single = len(lines) == 1
-        for line in lines:
-            pre_checks(line)
-            segs = split_segments(line)
-            # Names only, and only a form that cannot print a value: `compgen -e` alone. (`env | cut
-            # -d= -f1` printed whole rows of multi-line values, e.g. a PEM body.)
-            if single and [t for t, _ in segs] == [["compgen", "-e"]]:
-                return True, "read-only:env names (compgen -e)"
-            for seg, prev in segs:
-                rule, cur = classify_segment(seg, prev, cur, roots)
-                rules.append(rule)
-        if not rules:
-            raise Hold("empty command")
-        if any(r.startswith("test/build") for r in rules):
-            # A test or build script can run arbitrary code with the lane's full rights.
-            raise Hold("test and build runs wait for a person in this version")
-        return True, " + ".join(dict.fromkeys(rules))
+        shown = []
+        for text in interpretations(cmd, breaks):
+            shown.append(judge_command(text, cwd, roots))
+        return True, shown[0]
     except (Hold, LineHold) as h:
         return False, str(h)
 
 
 def main(argv: list[str]) -> int:
-    root, extras, kind, path = None, [], "shell", ""
+    root, extras, kind, path, breaks = None, [], "shell", "", ""
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -864,6 +880,8 @@ def main(argv: list[str]) -> int:
             kind = argv[i + 1]; i += 2
         elif a == "--path" and i + 1 < len(argv):
             path = argv[i + 1]; i += 2
+        elif a == "--breaks" and i + 1 < len(argv):
+            breaks = argv[i + 1]; i += 2
         else:
             print("hold usage error: " + a); return 2
     if not root or not os.path.isdir(root):
@@ -878,7 +896,7 @@ def main(argv: list[str]) -> int:
         cmd = sys.stdin.buffer.read().decode("utf-8")
     except UnicodeDecodeError:
         print("hold command is not valid UTF-8"); return 0
-    ok, rule = is_safe(cmd, kind, path, root, roots)
+    ok, rule = is_safe(cmd, kind, path, root, roots, breaks)
     print(("approve " if ok else "hold ") + rule.replace("\n", " "))
     return 0
 

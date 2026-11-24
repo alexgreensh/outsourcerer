@@ -1,0 +1,13 @@
+MacBook-Pro:work-dv dev$ devin --model 'swe-2-medium' --respect-workspace-trust false
+ Devin CLI v3000.13.2
+ Pro · 80% remaining
+> Run this shell command wrapped safe
+ ⏺ Running command
+▲ Approval required
+This action requires your approval.
+ touch aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ ls -la
+❭ Allow       ← ◼◼◼◼ → Once     Exec(touch)
+  Bypass mode
+  Deny
+↑↓ select · ←→ 1-4 scope · e edit · ↵ confirm · esc cancel

@@ -1,0 +1,3 @@
+sha=bcdcc75cabdcf4d91f9ef77a179b2d6e624e20ce
+rc=0
+Round 2 fixes for Astra P1-P3 on the safe approver: wrap-vs-newline readings, failed cd, tree-change holds, Unicode whitespace, |& hold, Devin status line, Codex/Gemini layouts, quoted punctuation, docs. Conformance: 241 passed, 6 failed; the 6 fail identically on the base in this root container.
