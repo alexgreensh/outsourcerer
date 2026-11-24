@@ -68,6 +68,7 @@ _ALL_SUITES="$_ALL_SUITES test_tool_bugs_062"
 _ALL_SUITES="$_ALL_SUITES test_stderr_capture"
 _ALL_SUITES="$_ALL_SUITES test_managed_send"
 _ALL_SUITES="$_ALL_SUITES test_supervise"
+_ALL_SUITES="$_ALL_SUITES test_watchsvc"   # per-user watcher service: observe/wake/limit/install
 _ALL_SUITES="$_ALL_SUITES test_supervise_lifecycle test_supervise_dedupe test_preflight_map"
 _ALL_SUITES="$_ALL_SUITES test_stall test_mc_alive"   # stalled lanes + autonudge; Mission Control liveness
 _ALL_SUITES="$_ALL_SUITES test_parity_autoheal"

@@ -679,6 +679,9 @@ _sv_main() { # <sid> <once> [ids...]
   trap 'exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
   _sv_arm_seq "$dir" || exit 1
+  # Arming a session waiter also (re)affirms the persistent watcher: when THIS supervise exits,
+  # the service keeps observing and waking. One stat when healthy; OSRC_WATCH_FALLBACK=0 opts out.
+  type _osrc_watch_ensure >/dev/null 2>&1 && { _osrc_watch_ensure >/dev/null 2>&1 || true; }
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
   fi

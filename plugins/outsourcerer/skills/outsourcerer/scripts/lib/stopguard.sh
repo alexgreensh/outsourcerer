@@ -30,10 +30,17 @@ _unwatched_jobs() {
 # The stop guard yields after OSRC_STOP_GUARD_MAX blocks (loop safety). When it does, the owned work
 # has NO waiter, so it leaves a loud note that every later outsourcerer call prints until a
 # `supervise` is armed (which clears it) or the owned work is settled (the guard clears it).
+# .wakefail (watcher delivery failures) and pending wakes print the same way: a yield nobody can
+# see is a silent one.
 _sg_print_unguarded() {
-  local s f; s="$(_owner_sid)"; [ -n "$s" ] || return 0
-  f="$OSRC_HOME/owners/$s/.unguarded"; [ -s "$f" ] || return 0
-  sed 's/^/>>> [outsourcerer] /' "$f" >&2
+  local s f p; s="$(_owner_sid)"; [ -n "$s" ] || return 0
+  f="$OSRC_HOME/owners/$s/.unguarded"; [ -s "$f" ] && sed 's/^/>>> [outsourcerer] /' "$f" >&2
+  f="$OSRC_HOME/owners/$s/.wakefail"; [ -s "$f" ] && sed 's/^/>>> [outsourcerer] /' "$f" >&2
+  if type _osrc_watch_pending >/dev/null 2>&1; then
+    p="$(_osrc_watch_pending "$s" 2>/dev/null)"
+    [ -n "$p" ] && printf '>>> [outsourcerer] watcher has %s event(s) pending a wake for this session: %s supervise --session %s\n' \
+      "$p" "$SCRIPT_PATH" "$s" >&2
+  fi
 }
 
 # _warn_unwatched -> loud, actionable notice on stderr when live jobs are going unobserved.
@@ -137,6 +144,15 @@ cmd_stop_guard() {
     rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
     return 0
   fi
+  # The watcher service IS a waiter: it observes every owner's lanes each tick and delivers wakes
+  # without this session re-arming anything. When it covers, unwaited work does not block the stop.
+  if type _osrc_watch_covered >/dev/null 2>&1 && _osrc_watch_covered; then
+    rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
+    return 0
+  fi
+  # No watcher at all: arm the detached fallback now (cheap stamp check when already armed) so the
+  # NEXT unwaited stop finds coverage instead of yielding into silence.
+  type _osrc_watch_ensure >/dev/null 2>&1 && _osrc_watch_ensure >/dev/null 2>&1 || true
   for id in $need; do printf '%s\n' "$waited" | grep -qxF "$id" || unwaited="$unwaited $id"; done
   unwaited="${unwaited# }"
   [ -n "$unwaited" ] || return 0
@@ -144,8 +160,10 @@ cmd_stop_guard() {
   key="$(printf '%s' "$unwaited" | cksum | awk '{print $1}')"
   cnt="$(awk -v k="$key" '$1==k{print $2}' "$dir/.stop-blocks" 2>/dev/null)"; cnt="${cnt:-0}"
   if [ "$cnt" -ge "$max" ]; then
-    printf '%s UNGUARDED: %s owned by this session have NO waiter (stop-guard yielded after %s reminders). Nothing will wake you. Arm: %s supervise --session %s\n' \
-      "$(date '+%Y-%m-%d %H:%M:%S')" "$unwaited" "$cnt" "$SCRIPT_PATH" "$sid" > "$dir/.unguarded" 2>/dev/null
+    printf '%s UNGUARDED: %s owned by this session have NO waiter (stop-guard yielded after %s reminders). Nothing will wake you. Arm: %s supervise --session %s — or install the persistent watcher: %s watcher install\n' \
+      "$(date '+%Y-%m-%d %H:%M:%S')" "$unwaited" "$cnt" "$SCRIPT_PATH" "$sid" "$SCRIPT_PATH" > "$dir/.unguarded" 2>/dev/null
+    type _osrc_watch_notify >/dev/null 2>&1 && _osrc_watch_notify "outsourcerer: lanes unwaited" \
+      "$unwaited owned by session ${sid}: no watcher — arm supervise or install watcher" || true
     printf '[outsourcerer] stop-guard: %s need a waiter and have none; letting the turn end after %s reminders. Recorded in %s.\n' "$unwaited" "$cnt" "$dir/.unguarded" >&2
     return 0
   fi
