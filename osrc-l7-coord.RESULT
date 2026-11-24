@@ -1,8 +1,0 @@
-sha=ea34fe0db6872dbd92d5eb9cbbd21e58e35f79b0
-rc=0
-File leases (lib/lease.sh: lease claim|release|list, TTL, heartbeat renewal, refusal names holder+expiry),
-lane inbox --wait [--timeout N] (exit 124 on timeout, backoff, race-safe, no orphan), and concurrent
-session send now waits for the obligation-ledger lock (bounded, clear error) instead of failing at 5 s.
-New suites test_lane_coord and test_send_lock_wait pass. The full conformance run exits 1; 10 of its
-11 failures also fail on the base, and the 11th (test_lane_coord) passes when re-run. Details in
-reports/osrc-l7-coord.md.
