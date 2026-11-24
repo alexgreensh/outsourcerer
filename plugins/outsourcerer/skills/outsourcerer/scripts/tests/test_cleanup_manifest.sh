@@ -326,6 +326,7 @@ manifest "$OSRC_HOME/jobs/job-later" job job-later ""
 gate4="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
+  _osrc_cleanup_state_write() { return 1; }  # root ignores chmod a-w: force the failed refresh
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'refusing new lane launches' <<<"$gate4" && ok "failed refresh cannot admit a stale ack (issue 86)" || bad "gate admitted a stale ack after failed refresh: $gate4"
 # The mirror image: with the dir still unwritable, re-ack the current list (the
@@ -337,6 +338,7 @@ chmod a-w "$OSRC_HOME/cleanup"
 gate5="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
   _osrc_free_kb() { printf "51200"; }
+  _osrc_cleanup_state_write() { return 1; }
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 chmod u+w "$OSRC_HOME/cleanup"
 grep -q 'gate-rc=0' <<<"$gate5" && ok "failed refresh still admits an ack that matches the live list (issue 86)" || bad "gate deadlocked on failed refresh: $gate5"

@@ -188,6 +188,12 @@ o="$(lib '_escalate_ladder "" ""' 2>&1)"
 grep -q '^fable$' <<<"$o" && bad "escalate ladder kept fable: $o" \
   || { grep -q 'dropping ladder rung fable' <<<"$o" && ok "escalate default ladder drops the excluded rung, out loud" || bad "ladder notice: $o"; }
 : > "$OSRC_HOME/benchmarks.json"
+# Control: a state dir with NO exclude list must still surface a fable model for this task, so the
+# "never contains fable" check below cannot pass just because advise produced nothing to list.
+CTL="$TMP/state-advise-control"; mkdir -p "$CTL"; : > "$CTL/benchmarks.json"
+r="$(OSRC_HOME="$CTL" OSRC_BENCH_JSON="$CTL/benchmarks.json" run advise --json --effort max "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null)"
+grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[]? | .alias, .model)' 2>/dev/null)" \
+  && ok "control: with no exclude list advise --json lists a fable model" || bad "control: advise never lists fable without an exclude list (excluded-model check below would be vacuous): $(printf '%s' "$r" | head -c 300)"
 r="$(OSRC_BENCH_JSON="$OSRC_HOME/benchmarks.json" run advise --json --effort max "architect a hard distributed consensus redesign with deep reasoning" 2>/dev/null)"
 if printf '%s' "$r" | jq -e '.recommendation.alias' >/dev/null 2>&1; then
   grep -qi fable <<<"$(printf '%s' "$r" | jq -r '.recommendation.alias, .recommendation.model, (.shortlist[] | .alias, .model)')" \
