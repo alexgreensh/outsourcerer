@@ -1,0 +1,3 @@
+$ worker --config demo.toml
+Error: permission denied opening config
+worker exited 1

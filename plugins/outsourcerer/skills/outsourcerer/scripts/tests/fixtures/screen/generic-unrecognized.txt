@@ -1,0 +1,4 @@
+render loop: frame 4,210
+layout: grid 3x2 · panes 6
+agent: demo-lane
+status: busy

@@ -1,181 +1,178 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
-# test_screen_alerts.sh -- osrc-l3-alerts lane regressions for the stall/limit incident:
-#   962 of 1,024 "stalled" events were a healthy busy agent whose screen format the reader did
-#   not know (state `unknown`, hash frozen 20s, woke as stalled), while dead panes re-emitted
-#   `failed` for hours and real rate-limit screens hid inside the noise.
-#
-#   1. limit/quota banners classify `limit` with the stated reset (cc, codex, devin, agy, generic)
-#   2. an unrecognized-but-busy screen classifies `working`, never `unknown` -> cannot stall
-#   3. prose and tool output that merely MENTION limits never classify `limit`
-#   4. a proven-dead pane reports `dead`/`PANE_DEAD=1`, never the frozen frame's state
-#   5. supervise e2e: busy-unknown emits nothing, a real stall still fires, limit emits once and
-#      dedupes across re-observation (file-backed state = survives watcher restart), a vanished
-#      pane reports `failed` exactly once inside the dedupe window
+# test_screen_alerts.sh -- alerts people can trust (lane osrc-l3). The incident: 962 of 1,024
+# "stalled" events were a healthy agent whose screen format the reader did not know; dead panes
+# re-reported `failed` for hours; real rate-limit screens hid inside the noise.
+#   1. provider refusals classify `limit` with the stated reset, exactly (cc, codex, devin, agy, generic)
+#   2. text that merely mentions limits (errors, prose, tool output, older turns) never does
+#   3. a busy row and a refusal: the newer one wins; a live approval keeps precedence
+#   4. one busy matcher at every pane height
+#   5. pane liveness: report survives `set -e`; a corpse reads dead
+#   6. osrc_screen_alert: unknown vs stalled windows, a real stall still fires, every state change
+#      reported once across fresh watchers (restart) and past the 20-minute reminder interval
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 FX="$SCRIPT_DIR/fixtures/screen"; SFX="$SCRIPT_DIR/fixtures/supervise"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
-command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-screen-alerts.XXXXXX")" || { echo "FAIL: no scratch dir" >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/panes" "$TMP/home"
-ln -s "$SCRIPT_DIR/fake-bin/tmux-files-next" "$TMP/bin/tmux"; export FAKE_TMUX_FILES="$SCRIPT_DIR/fake-bin/tmux-files"
-export HOME="$TMP/home" PATH="$TMP/bin:$PATH" FAKE_TMUX_DIR="$TMP/panes" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_STREAM=1
-export OSRC_CLAUDE_PROJECTS_DIR="$TMP/projects" OSRC_CLAUDE_SESSIONS_DIR="$TMP/ccsessions" OSRC_MC_AUTO_OPEN=0
-unset TMUX TMUX_PANE CLAUDE_CODE_SESSION_ID OSRC_SUPERVISE_REMIND OSRC_STALL_MIN OSRC_AUTONUDGE OSRC_HOLD_MIN OSRC_SUPERVISE_STALL
-export OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_CONFIRM=0 OSRC_SUPERVISE_SETTLE=0 OSRC_SUPERVISE_TICK_SECS=86400
+export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+unset TMUX TMUX_PANE OSRC_NOW OSRC_SCREEN_UNKNOWN_SECS OSRC_SCREEN_STALL_SECS OSRC_SCREEN_UNKNOWN_CPU
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
-fresh() { export OSRC_HOME="$TMP/h$1"; mkdir -p "$OSRC_HOME/jobs" "$OSRC_HOME/sessions" "$OSRC_HOME/supervise/S" "$OSRC_HOME/lanes"
-  date +%s > "$OSRC_HOME/supervise/S/tick.time"; rm -f "$TMP/panes"/*.screen "$TMP/panes"/*.next "$TMP/panes"/*.log; }
-own() { mkdir -p "$OSRC_HOME/owners/$1"; : > "$OSRC_HOME/owners/$1/$2"; }
-pane() { cp "$1" "$TMP/panes/$2.screen"; }
-lib() { ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; "$@" ); }
-obs() { ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; _sv_observe_emit "$1" "$2" supervise S; printf '%s|%s|%s\n' "${SV_K:-none}" "$SV_D" "$SV_NX" ); }
-kinds() { jq -r --arg t "$1" 'select(.target==$t) | .kind' "$OSRC_HOME/lanes/events.jsonl" 2>/dev/null | tr '\n' ' '; }
-scr_state() { _osrc_screen_analyze_text "$2" < "$1"; printf '%s|%s' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"; }
-
-echo "=== 1. limit/quota banners -> state limit, reset carried in evidence ==="
-OSRC_SOURCED=1; export OSRC_SOURCED; set --; . "$SRC" >/dev/null 2>&1
-lim() { # <file> <engine> <label>
-  local row; row="$(scr_state "$1" "$2")"
-  case "$row" in
-    limit\|*reset*) ok "$3 -> limit with reset: ${row#*|}" ;;
-    *) no "$3 -> want limit+reset, got: $row" ;;
-  esac
+set --; . "$SRC" >/dev/null 2>&1
+type osrc_screen_alert >/dev/null 2>&1 || { echo "FAIL: lib/screen.sh not loaded"; exit 1; }
+scr() { _osrc_screen_analyze_text "$2" < "$1"; printf '%s|%s' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"; }
+want() { # <file> <engine> <glob for "state|evidence"> <label>
+  local row; row="$(scr "$1" "$2")"
+  # shellcheck disable=SC2254
+  case "$row" in $3) ok "$4 -> $row" ;; *) no "$4 -> got: $row" ;; esac
 }
-lim "$FX/cc-limit-usage.ansi" cc "cc usage-limit banner"
-lim "$FX/cx-limit-usage.ansi" codex "codex usage-limit banner"
-lim "$FX/dv-limit-plan.ansi" devin "devin plan-limit banner"
-lim "$FX/generic-limit.txt" "" "generic-engine rate-limit banner"
-lim "$SFX/agy-quota-reached.txt" agy "agy individual-quota banner (real capture)"
-lim "$SFX/agy-retry-backoff.txt" agy "agy retry-backoff banner (real capture)"
-# Engine guess must land on the same verdict (no hint).
-for spec in "cc-limit-usage.ansi|cc" "cx-limit-usage.ansi|codex" "dv-limit-plan.ansi|devin"; do
-  IFS='|' read -r f e <<<"$spec"
-  row="$(scr_state "$FX/$f" "")"
-  case "$row" in limit\|*) ok "guess-engine $f -> limit" ;; *) no "guess-engine $f -> $row" ;; esac
+
+echo "=== 1. refusals -> limit, with the reset when one is shown ==="
+want "$FX/cc-limit-usage.ansi" cc 'limit|*reset: reset at 3pm (epoch *' "claude usage-limit banner"
+want "$FX/cc-limit-429.txt" cc 'limit|*API Error: 429*' "claude API Error 429 banner"
+want "$FX/cx-limit-usage.ansi" codex 'limit|*reset: Try again at 22:28 (epoch *' "codex usage-limit banner"
+want "$FX/dv-limit-plan.ansi" devin 'limit|*reset: resets in 1h 5m' "devin plan-limit banner"
+want "$SFX/agy-quota-reached.txt" agy 'limit|*reset: Resets in 1h13m1s' "antigravity individual-quota banner"
+want "$SFX/agy-retry-backoff.txt" agy 'limit|*reset: Retrying in 42s' "antigravity retry-backoff banner"
+want "$FX/generic-limit.txt" "" 'limit|*reset: try again in 30s' "generic rate-limit banner"
+for spec in cc-limit-usage.ansi cx-limit-usage.ansi dv-limit-plan.ansi cc-limit-429.txt; do
+  want "$FX/$spec" "" 'limit|*' "engine guessed: $spec"
 done
-# A numeric epoch rides along when the reset phrase parses.
-row="$(scr_state "$FX/cx-limit-usage.ansi" codex)"
-case "$row" in *"epoch "[0-9]*) ok "codex limit evidence carries a reset epoch" ;; *) no "no epoch in: $row" ;; esac
-
-echo "=== 2. unrecognized-but-busy screens -> working, never unknown ==="
-busy() { # <file> <label>
-  local row; row="$(scr_state "$FX/$1" "")"
-  case "$row" in
-    working\|*) ok "$2 -> working: ${row#*|}" ;;
-    *) no "$2 -> want working, got: $row" ;;
-  esac
-}
-busy unknown-busy-esc.txt "interrupt-hint busy line 7 rows above the tail"
-busy unknown-busy-spinner.txt "spinner-led status line above the tail"
-row="$(scr_state "$FX/unknown-busy-stale.txt" "")"
+want "$FX/generic-limit-clock.txt" "" 'limit|*reset: Resets 22:28 (epoch *' "bare clock reset keeps all four digits"
+# A zone in the banner is kept and honoured, on a machine that is not on UTC.
+row="$(TZ=XYZ5 scr "$FX/generic-limit-utc.txt" "")"
+n="$(date +%s)"; exp=$(( n - n % 86400 + 9 * 3600 )); [ "$exp" -le "$n" ] && exp=$((exp + 86400))
+ep="${row##*(epoch }"; ep="${ep%)}"
 case "$row" in
-  unknown\|*) ok "busy marker above a done summary stays unrecognized (scrollback, not life): ${row#*|}" ;;
-  *) no "stale busy marker misread as live: $row" ;;
+  "limit|"*"reset: Resets at 09:00 UTC (epoch "*")")
+    # the reader and this test each read the clock once; allow that one-second tick, nothing more
+    if [ "$ep" = "$exp" ] || [ "$ep" = "$((exp + 1))" ]; then ok "UTC reset under TZ=XYZ5 -> epoch $ep (next 09:00 UTC)"
+    else no "UTC reset epoch $ep, want $exp"; fi ;;
+  *) no "UTC reset phrase lost: $row" ;;
 esac
-row="$(scr_state "$FX/unknown-busy-prompt.txt" "")"
-case "$row" in
-  idle\|*) ok "busy marker above a bare shell prompt stays idle: ${row#*|}" ;;
-  *) no "prompt-precedence broke: $row" ;;
-esac
+want "$FX/generic-limit-relative.txt" "" 'limit|*reset: Try again in 2h' "relative reset alone carries no invented epoch"
 
-echo "=== 3. limit mentions that are NOT banners never classify limit ==="
-neg() { # <file> <engine> <label>
-  local row; row="$(scr_state "$1" "$2")"
-  case "$row" in
-    limit\|*) no "$3 -> false limit: $row" ;;
-    *) ok "$3 -> ${row%%|*} (not limit)" ;;
-  esac
-}
-neg "$FX/unknown-prose-limit.txt" "" "prose reply mentioning '429 Too Many Requests'"
-neg "$FX/unknown-toolresult-429.txt" "" "tool output 'HTTP 429' under a Bash( call header"
-neg "$FX/cx-idle.ansi" codex "codex low-weekly-limit WARNING line (not a block)"
-neg "$FX/dv-idle.ansi" devin "devin 'Pro · 0% remaining (resets in 43m)' status (not a block)"
-neg "$FX/cc-idle-after-work.ansi" cc "plain finished turn (control)"
+echo "=== 2. mentions that are not refusals never classify limit ==="
+nolim() { local row; row="$(scr "$1" "$2")"; case "$row" in limit\|*) no "$3 -> false limit: $row" ;; *) ok "$3 -> ${row%%|*}" ;; esac; }
+nolim "$FX/generic-error-not-limit.txt" "" "Error: permission denied opening config"
+nolim "$FX/cx-prose-quota.txt" codex "codex assistant reply that says 'quota exceeded'"
+nolim "$FX/unknown-prose-limit.txt" "" "claude-style prose about 429"
+nolim "$FX/unknown-toolresult-429.txt" "" "tool output 'HTTP 429' under a Bash( header"
+nolim "$FX/cc-tool-multiline-429.txt" cc "claude multiline tool output with an indented rate-limit error"
+nolim "$FX/cx-tool-quota.txt" codex "codex multiline tool output with an indented quota error"
+nolim "$FX/cx-limit-recovered.txt" codex "refusal followed by a finished turn (Worked for 3s)"
+want "$FX/cx-composer-empty-history.txt" codex 'composer|*no turn yet*' "recognized composer, empty history: footer is not history"
+nolim "$FX/cx-idle.ansi" codex "codex low-weekly-limit warning"
+nolim "$FX/dv-idle.ansi" devin "devin '0% remaining (resets in 43m)' status"
 
-echo "=== 4. pane_dead: a corpse never reports its frozen frame ==="
-CAPF="$FX/cc-idle-after-work.ansi"
-mkdir -p "$TMP/bin-pd"
-cat > "$TMP/bin-pd/tmux" <<'EOF'
+echo "=== 3. busy row vs refusal: the newer one wins ==="
+want "$FX/generic-spinner-then-limit.txt" "" 'limit|*Rate limit exceeded*' "spinner, then refusal"
+want "$FX/generic-limit-then-spinner.txt" "" 'working|*Syncing*' "refusal, then a newer spinner"
+want "$FX/generic-limit-under-approval.txt" "" 'approval|*' "live approval prompt under a refusal"
+
+echo "=== 4. one busy matcher at every height ==="
+want "$FX/generic-busy-low.txt" "" 'working|*Weaving the graph*' "braille spinner in the last three rows"
+want "$FX/unknown-busy-spinner.txt" "" 'working|*' "spinner row higher up"
+want "$FX/unknown-busy-esc.txt" "" 'working|*' "interrupt hint higher up"
+row="$(scr "$FX/generic-prose-ellipsis.txt" "")"
+case "$row" in working\|*) no "prose 'See documentation… (appendix A)' read as busy: $row" ;; *) ok "ellipsis prose is not busy -> ${row%%|*}" ;; esac
+want "$FX/unknown-busy-stale.txt" "" 'unknown|*' "spinner above a done summary is scrollback"
+want "$FX/unknown-busy-prompt.txt" "" 'idle|*' "bare prompt below an old busy row"
+
+echo "=== 5. pane liveness ==="
+# fake tmux: panes are files; <pane>.dead holds #{pane_dead}; pane_pid is always 100
+cat > "$TMP/bin/tmux" <<'EOF'
 #!/bin/bash
+t=""; for a in "$@"; do [ "$prev" = -t ] && t="$a"; prev="$a"; done
 case "$1" in
-  capture-pane) cat "$CAPF" ;;
-  display-message) [ "$PD_ANS" = FAIL ] && exit 1; printf '%s\n' "$PD_ANS" ;;
+  capture-pane) [ -f "$FAKE_PANES/$t.screen" ] || exit 1; cat "$FAKE_PANES/$t.screen" ;;
+  display-message)
+    [ -f "$FAKE_PANES/$t.screen" ] || exit 1
+    case "$*" in *pane_dead*) cat "$FAKE_PANES/$t.dead" 2>/dev/null || echo 0 ;; *pane_pid*) echo 100 ;; esac ;;
   *) exit 0 ;;
 esac
 EOF
-chmod +x "$TMP/bin-pd/tmux"
-pd() { # <pane_dead-answer|FAIL> -> "STATE|PANE_DEAD" from osrc_screen_report
-  ( export CAPF="$CAPF" PD_ANS="$1" PATH="$TMP/bin-pd:$PATH"
-    OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
-    osrc_screen_report p1 cc | awk -F= '/^STATE=/{s=$2}/^PANE_DEAD=/{d=$2}END{print s"|"d}' )
+# fake ps: the pane's process tree (pid 100 + a child) with CPU time from <FAKE_PANES>/cpu ("-" = ps fails)
+cat > "$TMP/bin/ps" <<'EOF'
+#!/bin/bash
+c="$(cat "$FAKE_PANES/cpu" 2>/dev/null || echo 0)"; [ "$c" = - ] && exit 1
+printf '  100     1 00:00:%02d\n  101   100 00:00:01\n  900     1 00:09:00\n' "$c"
+EOF
+chmod +x "$TMP/bin/tmux" "$TMP/bin/ps"
+export PATH="$TMP/bin:$PATH" FAKE_PANES="$TMP/panes"
+cp "$FX/cx-working.ansi" "$TMP/panes/p1.screen"; echo 0 > "$TMP/panes/p1.dead"
+out="$( set -e; osrc_screen_report p1 codex; echo REACHED )"
+case "$out" in *"STATE=working"*"PANE_DEAD=0"*REACHED) ok "osrc_screen_report on a live pane completes under set -e" ;;
+  *) no "report under set -e: $(printf '%s' "$out" | tr '\n' ' ')" ;; esac
+echo 1 > "$TMP/panes/p1.dead"
+out="$(osrc_screen_report p1 codex)"
+case "$out" in *"STATE=dead"*"PANE_DEAD=1"*) ok "remain-on-exit corpse with a working frame -> STATE=dead" ;; *) no "corpse report: $out" ;; esac
+
+echo "=== 6. osrc_screen_alert: one report per change, restart-safe ==="
+T0=1900000000
+al() { ( OSRC_NOW="$2"; osrc_screen_alert "$1" "${3:-}" ) | cut -f1,2 | tr '\t' ' '; }   # fresh watcher each call
+seq_is() { # <label> <want> <got...>
+  local label="$1" w="$2"; shift 2
+  [ "$*" = "$w" ] && ok "$label: $*" || no "$label: want '$w' got '$*'"
 }
-row="$(pd 1)"; [ "$row" = "dead|1" ] && ok "pane_dead=1 -> STATE=dead PANE_DEAD=1" || no "pane_dead=1 -> $row"
-out="$( ( export CAPF="$CAPF" PD_ANS=1 PATH="$TMP/bin-pd:$PATH"
-  OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; osrc_screen_state p1 cc ) | head -1 )"
-[ "$out" = dead ] && ok "osrc_screen_state prints 'dead' for a corpse" || no "osrc_screen_state corpse -> $out"
-row="$(pd 0)"; case "$row" in idle\|0) ok "pane_dead=0 -> STATE=idle PANE_DEAD=0" ;; *) no "pane_dead=0 -> $row" ;; esac
-row="$(pd FAIL)"; case "$row" in idle\|?*) ok "pane_dead unreadable -> normal state, PANE_DEAD=$row" ;; *) no "pane_dead FAIL -> $row" ;; esac
-
-echo "=== 5. supervise e2e: the incident shapes ==="
-fresh 1; own S n1
-pane "$FX/unknown-busy-esc.txt" n1
-now="$(date +%s)"
-scr="$(lib _sv_target_screen n1)"
-[ "$(printf '%s\n' "$scr" | head -1)" = working ] \
-  && ok "supervise sees the unrecognized busy pane as working (was: unknown -> stalled)" \
-  || no "_sv_target_screen busy-unknown -> '$(printf '%s\n' "$scr" | head -1)'"
-o="$(obs n1 "$now")"; o2="$(obs n1 "$((now + 30))")"
-case "$o$o2" in *stalled*|*failed*) no "busy-unknown pane emitted: $o / $o2" ;;
-  *) ok "two polls of the busy-unknown pane emit no stalled/failed event" ;; esac
-[ -z "$(kinds n1)" ] && ok "events.jsonl has no rows for the busy-unknown lane" || no "events for n1: $(kinds n1)"
-
-fresh 2; own S n2
-pane "$FX/unknown-busy-stale.txt" n2
-now="$(date +%s)"
-obs n2 "$now" >/dev/null; o="$(obs n2 "$((now + 1))")"
-case "$o" in stalled\|*) ok "a genuinely unrecognized frozen screen still stalls: ${o#*|}" ;;
-  *) no "real stall hidden by the noise fix: $o" ;; esac
-k2="$(kinds n2)"; case "$k2" in *stalled*) ok "stalled row logged for the frozen pane" ;; *) no "no stalled row: '$k2'" ;; esac
-
-# A working screen that stops changing is the other real stall: freeze cx-working, STALL=0.
-fresh 3; own S n3
-pane "$FX/cx-working.ansi" n3
-now="$(date +%s)"
-OSRC_SUPERVISE_STALL=0 o="$(obs n3 "$now")"
-case "$o" in stalled\|*) ok "frozen working screen still reports stalled (noise fix did not blunt it)" ;;
-  *) no "frozen working pane: $o" ;; esac
-unset OSRC_SUPERVISE_STALL
-
-fresh 4; own S n4
-pane "$FX/cx-working.ansi" n4
-now="$(date +%s)"
-obs n4 "$now" >/dev/null                                   # alive once: hash recorded
-cp "$FX/cx-limit-usage.ansi" "$TMP/panes/n4.screen"        # state change: working -> limit
-o="$(obs n4 "$((now + 1))")"
-case "$o" in limit\|*) ok "working -> limit transition emits EVENT limit" ;; *) no "transition: $o" ;; esac
-o="$(obs n4 "$((now + 2))")"; o="$(obs n4 "$((now + 3))")"
-[ "$(kinds n4 | tr -d ' ')" = "limit" ] \
-  && ok "limit reported exactly once; re-observation dedupes (state file = restart-safe)" \
-  || no "limit rows: '$(kinds n4)' (obs: $o)"
-jq -e 'select(.target=="n4" and .kind=="limit") | .detail | test("usage limit")' "$OSRC_HOME/lanes/events.jsonl" >/dev/null 2>&1 \
-  && ok "limit event detail carries the banner" || no "limit detail missing banner"
-
-fresh 5; own S n5
-pane "$FX/cx-working.ansi" n5
-now="$(date +%s)"
-obs n5 "$now" >/dev/null                                   # alive once
-rm -f "$TMP/panes/n5.screen"                               # pane dies: has-session fails
-o="$(obs n5 "$((now + 1))")"
-case "$o" in failed\|*) ok "vanished pane reports failed once: ${o#*|}" ;; *) no "gone pane: $o" ;; esac
-o="$(obs n5 "$((now + 2))")"; o="$(obs n5 "$((now + 3))")"
-[ "$(kinds n5 | tr -d ' ')" = "failed" ] \
-  && ok "failed reported exactly once inside the dedupe window" \
-  || no "failed rows: '$(kinds n5)'"
+# Incident 1: a healthy busy agent in an unrecognized format, quiet screen, CPU moving.
+cp "$FX/generic-unrecognized.txt" "$TMP/panes/u1.screen"; echo 5 > "$TMP/panes/cpu"
+a="$(al u1 $T0)"; b="$(al u1 $((T0 + 25)))"; echo 30 > "$TMP/panes/cpu"; c="$(al u1 $((T0 + 700)))"
+seq_is "healthy unrecognized agent at 0s / 25s / 700s (CPU moving)" "unknown new | unknown seen | unknown seen" "$a |" "$b |" "$c"
+# Both sides of the unknown window with CPU flat (independent evidence that work stopped).
+cp "$FX/generic-unrecognized.txt" "$TMP/panes/u2.screen"; echo 5 > "$TMP/panes/cpu"
+a="$(al u2 $T0)"; b="$(al u2 $((T0 + 599)))"; c="$(al u2 $((T0 + 600)))"; d="$(al u2 $((T0 + 601)))"; e="$(al u2 $((T0 + 600 + 1300)))"
+seq_is "unknown, CPU flat: 0 / 599 / 600 / 601 / +20min" "unknown new | unknown seen | stalled new | stalled seen | stalled seen" "$a |" "$b |" "$c |" "$d |" "$e"
+cp "$FX/generic-unrecognized.txt" "$TMP/panes/u2b.screen"
+a="$( export OSRC_SCREEN_UNKNOWN_SECS=60; al u2b $T0; al u2b $((T0 + 59)); al u2b $((T0 + 60)) )"
+seq_is "the unknown window is configurable (60s)" "unknown new unknown seen stalled new" $a
+# CPU unreadable: twice the window stands in for the missing evidence.
+cp "$FX/generic-unrecognized.txt" "$TMP/panes/u3.screen"; echo - > "$TMP/panes/cpu"
+a="$(al u3 $T0)"; b="$(al u3 $((T0 + 1199)))"; c="$(al u3 $((T0 + 1200)))"
+seq_is "unknown, CPU unreadable: 0 / 1199 / 1200" "unknown new | unknown seen | stalled new" "$a |" "$b |" "$c"
+echo 5 > "$TMP/panes/cpu"
+# A screen change resets the quiet clock.
+cp "$FX/generic-unrecognized.txt" "$TMP/panes/u4.screen"
+al u4 $T0 >/dev/null; printf 'tick\n' >> "$TMP/panes/u4.screen"
+seq_is "a changed unrecognized screen restarts its window" "unknown seen" "$(al u4 $((T0 + 650)))"
+# Deliverable 4: a recognized working frame that freezes is still a stall.
+cp "$FX/cx-working.ansi" "$TMP/panes/w1.screen"
+a="$(al w1 $T0 codex)"; b="$(al w1 $((T0 + 899)) codex)"; c="$(al w1 $((T0 + 900)) codex)"; d="$(al w1 $((T0 + 900 + 1300)) codex)"
+seq_is "frozen working frame: 0 / 899 / 900 / +20min" "working new | working seen | stalled new | stalled seen" "$a |" "$b |" "$c |" "$d"
+# Incident 2: a dead pane whose working frame is still readable reports failed once.
+cp "$FX/cx-working.ansi" "$TMP/panes/d1.screen"; echo 0 > "$TMP/panes/d1.dead"
+a="$(al d1 $T0 codex)"; echo 1 > "$TMP/panes/d1.dead"
+b="$(al d1 $((T0 + 10)) codex)"; c="$(al d1 $((T0 + 20)) codex)"; d="$(al d1 $((T0 + 10 + 1300)) codex)"; e="$(al d1 $((T0 + 7200)) codex)"
+seq_is "dead pane, working frame readable: live / dead / again / +20min / +2h" "working new | failed new | failed seen | failed seen | failed seen" "$a |" "$b |" "$c |" "$d |" "$e"
+ev="$( OSRC_NOW=$((T0 + 30)); osrc_screen_alert d1 codex | cut -f3 )"
+case "$ev" in "pane process exited; last frame read: working"*) ok "dead evidence names the frozen frame: $ev" ;; *) no "dead evidence: $ev" ;; esac
+# A pane that vanished entirely.
+cp "$FX/cx-working.ansi" "$TMP/panes/g1.screen"
+a="$(al g1 $T0 codex)"; rm -f "$TMP/panes/g1.screen"
+b="$(al g1 $((T0 + 10)))"; c="$(al g1 $((T0 + 10 + 1300)))"
+seq_is "vanished pane: live / gone / +20min" "working new | failed new | failed seen" "$a |" "$b |" "$c"
+# Incident 3 at the alert layer: limit once for the whole parked stretch, again only after recovery.
+cp "$FX/cx-working.ansi" "$TMP/panes/l1.screen"
+a="$(al l1 $T0 codex)"; cp "$FX/cx-limit-usage.ansi" "$TMP/panes/l1.screen"
+b="$(al l1 $((T0 + 10)) codex)"; c="$(al l1 $((T0 + 10 + 1300)) codex)"; d="$(al l1 $((T0 + 7200)) codex)"
+cp "$FX/cx-working.ansi" "$TMP/panes/l1.screen"; e="$(al l1 $((T0 + 7300)) codex)"
+cp "$FX/cx-limit-usage.ansi" "$TMP/panes/l1.screen"; f="$(al l1 $((T0 + 7400)) codex)"
+seq_is "limit: working / limit / +20min / +2h / recovered / new incident" "working new | limit new | limit seen | limit seen | working new | limit new" "$a |" "$b |" "$c |" "$d |" "$e |" "$f"
+cp "$FX/cc-limit-429.txt" "$TMP/panes/l2.screen"
+seq_is "claude 429 banner alerts as limit, never failed" "limit new" "$(al l2 $T0 cc)"
+# A frozen relative countdown keeps one deadline.
+cp "$FX/generic-limit-relative.txt" "$TMP/panes/r1.screen"
+e1="$( OSRC_NOW=$T0; osrc_screen_alert r1 | cut -f3 )"; e2="$( OSRC_NOW=$((T0 + 3600)); osrc_screen_alert r1 | cut -f3 )"
+case "$e1|$e2" in *"(epoch $((T0 + 7200)),"*"|"*"(epoch $((T0 + 7200)),"*) ok "frozen 'Try again in 2h' -> epoch T0+7200 at T0 and at T0+1h" ;;
+  *) no "frozen countdown moved: '$e1' then '$e2'" ;; esac
+# A ticking countdown re-anchors to now.
+printf '%s\n' 'sync stage 2 of 4' '⚠ Rate limited. Try again in 1h' 'status: parked' > "$TMP/panes/r1.screen"
+e3="$( OSRC_NOW=$((T0 + 3600)); osrc_screen_alert r1 | cut -f3 )"
+case "$e3" in *"(epoch $((T0 + 7200)),"*) ok "ticking countdown (2h -> 1h an hour later) keeps the same deadline" ;; *) no "ticking countdown: $e3" ;; esac
 
 echo "=== done: $pass passed, $fail failed ==="
 [ "$fail" -eq 0 ]
