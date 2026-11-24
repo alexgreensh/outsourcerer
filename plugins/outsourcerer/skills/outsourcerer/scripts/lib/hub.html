@@ -678,7 +678,7 @@ a.pill svg { width: 13px; height: 13px; }
     nums.forEach((n) => { const a = el('a'); a.href = 'https://github.com/' + repo + '/issues/' + n.slice(1); a.target = '_blank'; a.rel = 'noopener'; a.title = 'Open ' + n + ' on GitHub'; a.append(ghSvg(), document.createTextNode(n)); a.addEventListener('click', (e) => e.stopPropagation()); box.appendChild(a); });
     return box;
   }
-  const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
+  const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[(d.owner || p.id) + '--' + d.id]).sort(byWeight);
 
   const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
   const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty"
@@ -816,7 +816,7 @@ a.pill svg { width: 13px; height: 13px; }
     const stats = el('div', 'stats');
     // Only real numbers. A card with nothing reported is left out, never "Not set"; 4 cards go 2x2.
     const cards = [], card = (k, cls) => { const c = el('div', 'card stat' + (cls || '')); c.append(k); cards.push(c); return c; }, key = (icn, t) => { const k = el('span', 'k'); if (icn) k.append(ic(icn)); k.append(document.createTextNode(t)); return k; };
-    if (pctOk(p)) { const bar = el('div', 'bar'), fill = el('span'); bar.appendChild(fill); const d0 = card(key(null, 'Done so far')); d0.append(el('span', 'big', p.pct + '%'), bar); if (p.boardTracks) d0.append(el('span', null, 'Average across ' + p.boardTracks + ' work tracks')); if (p.sessionsRun) d0.append(el('span', null, (p.sessionsNow ? p.sessionsNow + (p.sessionsNow === 1 ? ' session working now, ' : ' sessions working now, ') : 'No session working now, ') + p.sessionsRun + ' run so far'));
+    if (pctOk(p)) { const bar = el('div', 'bar'), fill = el('span'); bar.appendChild(fill); const d0 = card(key(null, 'Done so far')); d0.append(el('span', 'big', p.pct + '%'), bar); if (p.boardTracks && p.source !== 'live') d0.append(el('span', null, 'Average across ' + p.boardTracks + ' work tracks')); if (p.sessionsRun) d0.append(el('span', null, (p.sessionsNow ? p.sessionsNow + (p.sessionsNow === 1 ? ' session working now, ' : ' sessions working now, ') : 'No session working now, ') + p.sessionsRun + ' run so far'));
       if (grown.has(p.id)) { fill.style.transition = 'none'; fill.style.width = p.pct + '%'; } else { grown.add(p.id); requestAnimationFrame(() => { fill.style.width = p.pct + '%'; }); } }
     if (p.eta || p.freeze) { const s2 = card(key('rocket', 'Release goes live')); if (p.eta) s2.append(el('span', 'mid', p.eta));
       if (p.freeze) { const fz = el('span'); fz.append(ic('snowflake'), document.createTextNode(' Code freeze '), el('b', 'mono', p.freeze)); s2.append(fz); } if (p.etaNote && !p.boardTracks) s2.append(el('span', null, p.etaNote)); const ao = H && H.etaAsOf ? H.etaAsOf(p) : ''; if (ao) s2.append(el('span', 'eta-asof', ao)); }   // a board keeps its plan in the Live step's card; stale card dates the release text
@@ -833,10 +833,10 @@ a.pill svg { width: 13px; height: 13px; }
         ds.forEach((d) => grid.appendChild(D ? D.decCard(p, d) : el('div', 'card dec', d.q)));
         sec.appendChild(grid);
       }
-      const done = (p.decisions || []).filter((d) => d.status === 'done' || answers[p.id + '--' + d.id]);
+      const done = (p.decisions || []).filter((d) => d.status === 'done' || answers[(d.owner || p.id) + '--' + d.id]);
       if (done.length) {
         const det = el('details', 'card decided'); det.appendChild(el('summary', null, 'Already decided (' + done.length + ')'));
-        const ul = el('ul'); done.forEach((d) => { const a = answers[p.id + '--' + d.id]; const li = el('li', 'dli'); li.append(tags(d), el('span', null, (d.q || d.short) + (a ? ' Your answer: ' + (a.choice || a.note) : ''))); ul.appendChild(li); });
+        const ul = el('ul'); done.forEach((d) => { const a = answers[(d.owner || p.id) + '--' + d.id]; const li = el('li', 'dli'); li.append(tags(d), el('span', null, (d.q || d.short) + (a ? ' Your answer: ' + (a.choice || a.note) : ''))); ul.appendChild(li); });
         det.appendChild(ul); sec.appendChild(det);
       }
       main.appendChild(sec);

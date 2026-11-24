@@ -28,7 +28,7 @@
       const dsi = window.OSRC_HUB_CLEAN && window.OSRC_HUB_CLEAN.decStale ? window.OSRC_HUB_CLEAN.decStale(p, d) : null;
       if (dsi) { c.classList.add('stale'); c.append(el('p', 'dec-stale', dsi.text)); }
       const a = el('div', 'ans'); const opts = el('div', 'opts');
-      const key = p.id + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
+      const key = (d.owner || p.id) + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
       (d.options || []).forEach((o, i) => {
         const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + p.id + '-' + d.id + '-' + i; b.setAttribute('aria-pressed', String(o === f.choice));
         b.addEventListener('click', () => { f.choice = f.choice === o ? '' : o; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
@@ -45,7 +45,7 @@
       go2.addEventListener('click', async () => {
         go2.disabled = true; say('Saving…'); saving++;   // renders hold while a send is in flight
         try {
-          await db.doc('answers/' + p.id + '--' + d.id).set({ project: p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
+          await db.doc('answers/' + (d.owner || p.id) + '--' + d.id).set({ project: d.owner || p.id, decision: d.id, question: d.q, choice: f.choice, note: ta.value.trim(), at: new Date().toISOString() });
           say('Saved. Your orchestrator reads it when it checks Mission Control.'); delete forms[key];
         } catch (e) { say(e && e.timeout ? 'Not sent, try again' : 'Not saved: ' + ((e && e.message) || 'try again'), true); sync(); }
         finally { saving--; ctx.flush(!c.isConnected); }   // navigated away mid-send: re-render so the live card shows the outcome

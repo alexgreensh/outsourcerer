@@ -42,7 +42,7 @@
     return min < 60 ? Math.max(1, Math.floor(min)) + ' min' : min < 2880 ? Math.floor(min / 60) + ' h' : Math.floor(min / 1440) + ' days';
   }
   function cardStaleInfo(p, nowMs) {
-    if (!p || p.status === 'shipped') return null;
+    if (!p || p.status === 'shipped' || p.source === 'live') return null;   // derived from live lanes: current by construction
     const hasText = Boolean(p.cardStale || p.next || p.eta || (typeof p.pct === 'number' && isFinite(p.pct)));
     if (!hasText) return null;
     const lim = (typeof p.cardStaleMin === 'number' && isFinite(p.cardStaleMin)) ? p.cardStaleMin : 30;
@@ -288,6 +288,23 @@
       if (!isNaN(rep) && (Date.now() - rep) < limH * 3600000) return false;
       return true;
     }
+    // ---- Truth lines: the loud orchestrator alerts, each session's state, and the report's age ----------
+    // (lib/hub-truth.sh). "lanes running, orchestrator idle N min" and "lane finished N min ago, nobody
+    // picked it up" are the failures that cost the most time, so they sit on the tile itself.
+    const LOUD = ['orch-idle', 'unpicked'];
+    function truthLines(p) {
+      const out = [];
+      (Array.isArray(p.alerts) ? p.alerts : []).filter((a) => LOUD.includes(a.kind)).slice(0, 3)
+        .forEach((a) => { const n = el('p', 'pt-stale'); n.append(ic('triangle-alert'), document.createTextNode(' ' + a.text)); out.push(n); });
+      const os = Array.isArray(p.orchestrators) ? p.orchestrators : [];
+      if (os.length > 1) out.push(el('p', 'pt-tag', 'Sessions: ' + os.map((o) => (o.state === 'working' ? 'working' : o.state === 'gone' ? 'gone' : 'idle ' + ageSpan(o.idleMin || 0)) + (o.lanes ? ' (' + o.lanes + (o.lanes === 1 ? ' lane)' : ' lanes)') : '')).join(' · ')));
+      const r = p.reported;
+      if (p.source === 'live' && r && typeof r.ageMin === 'number') {
+        const said = [r.status, typeof r.pct === 'number' ? r.pct + '%' : '', r.next].filter(Boolean).join(', ');
+        if (said) out.push(el('p', 'pt-tag', 'Its session last said ' + ageSpan(Math.max(1, r.ageMin)) + ' ago: ' + said));
+      }
+      return out;
+    }
     function ptile(p) {
       const go = ctx.go; const ds = openDecs(p);
       const t = el('article', 'card ptile' + (p.status === 'paused' ? ' paused' : '') + (ds.length ? ' waits' : '')); t.id = 'tile-' + p.id;
@@ -298,6 +315,7 @@
       const cst = cardStaleInfo(p);
       if (cst) t.append(el('p', 'pt-stale', cst.text));
       else if (p.next) { const n = el('p', 'pt-next'); n.append(el('b', null, 'Next'), el('span', null, p.next)); t.append(n); }   // from hub report --next
+      truthLines(p).forEach((n) => t.append(n));
       const pr = el('div', 'pt-prog' + (hasPct(p) ? '' : ' nopct')); t.append(pr);
       if (hasPct(p)) {
         const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
@@ -350,7 +368,7 @@
       const out = [];
       running.forEach((p) => {
         const al = Array.isArray(p.alerts) ? p.alerts : [];
-        const rev = al.filter((a) => a.kind === 'unreviewed').length, stuck = al.filter((a) => a.kind !== 'unreviewed').length;
+        const rev = al.filter((a) => a.kind === 'unreviewed').length, stuck = al.filter((a) => a.kind !== 'unreviewed' && !LOUD.includes(a.kind)).length;
         const bits = [];
         if (stuck) bits.push(stuck + (stuck === 1 ? ' stalled lane' : ' stalled lanes') + ' to unstick');
         if (rev) bits.push(rev + (rev === 1 ? ' finished lane' : ' finished lanes') + ' to review');

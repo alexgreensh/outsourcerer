@@ -69,7 +69,7 @@ grep -q 'border-left: *[0-9.]*px solid var(--hi)' "$PAGE" && bad "border-left ac
   && ok "hub.html/hub-home.js/hub_server.py/hub.sh each <= 1000 lines" || bad "a hub file passed 1000 lines"
 
 echo "=== drafts survive re-renders (page contract) ==="
-grep -q "const key = p.id + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$DEC" && ok "decision draft keyed <project>--<decision> in forms" || bad "draft store missing"
+grep -q "const key = (d.owner || p.id) + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$DEC" && ok "decision draft keyed <owning session>--<decision> in forms" || bad "draft store missing"
 grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
 grep -q "ta.value = f.note" "$DEC" && grep -q "String(o === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"

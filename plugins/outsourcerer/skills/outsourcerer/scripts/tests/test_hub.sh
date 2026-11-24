@@ -67,8 +67,8 @@ echo "$out" | jq -e '.projects | type == "array" and length >= 1' >/dev/null && 
 
 proj="$(echo "$out" | jq -c '.projects[] | select(.id=="sess-1")')"
 [ -n "$proj" ] || { bad "sess-1 project missing"; echo "RESULTS: $pass pass $fail fail"; exit 1; }
-echo "$proj" | jq -e '.name == "Mission Control" and .tagline == "one page for every lane" and .repo == "alexgreensh/outsourcerer" and .status == "building" and .pct == 40' >/dev/null \
-  && ok "card fields applied from projects file" || bad "card fields wrong: $proj"
+echo "$proj" | jq -e '.name == "Mission Control" and .tagline == "one page for every lane" and .repo == "alexgreensh/outsourcerer" and .status == "building" and .pct == 50 and .reported.pct == 40 and .source == "live"' >/dev/null \
+  && ok "card fields applied from projects file; newer live lanes set pct (50), the older report rides along (40)" || bad "card fields wrong: $proj"
 echo "$proj" | jq -e '.lanes | map(.id) | sort == ["job-1","lane-9"]' >/dev/null \
   && ok "lanes: job + remote lane both present" || bad "lanes wrong: $(echo "$proj" | jq -c .lanes)"
 echo "$proj" | jq -e '.lanes[] | select(.id=="job-1") | .status == "Done" and .pct == 100' >/dev/null \
@@ -600,7 +600,7 @@ a9="$(age sa)"; b9="$(age sb)"; c9="$(age sc)"
 # MC-9 r2 (REV9 findings 1-3): libs sourced in a subshell, tmux is an in-process stub (no binary, no server).
 R9="$TMP/mc9r2"; mkdir -p "$R9/osrc/owners/p" "$R9/osrc/hub/projects" "$R9/osrc/jobs/jl" "$R9/osrc/sessions" "$R9/osrc/autodetach" "$R9/w"
 r9="$(cd "$R9" && OSRC_HOME="$R9/osrc" OSRC_JOBS="$R9/osrc/jobs" OSRC_SESSION_REGISTRY="$R9/osrc/sessions/registry.jsonl" LIB="$(dirname "$SRC")/lib" bash -c '
-. "$LIB/hub.sh"; . "$LIB/done.sh"
+. "$LIB/hub.sh"; . "$LIB/done.sh"; . "$LIB/hub-report.sh"
 have() { command -v "$1" >/dev/null 2>&1; }
 _reconcile_status() { cat "$OSRC_JOBS/$1/status" 2>/dev/null; }
 _owned_live_state() { printf live; }
@@ -616,14 +616,14 @@ old "$OSRC_HOME/autodetach/ses.log" "$OSRC_HOME/done/ses.json" w/ses.done
 a="$(_osrc_hub_lane_activity ses)"; echo "ses ${a##* } $(fresh "$a")"
 echo "{\"name\":\"P\",\"tagline\":\"keep me\",\"status\":\"building\"}" > "$OSRC_HOME/hub/projects/p.json"
 : > "$OSRC_HOME/owners/p/jl"; echo running > "$OSRC_JOBS/jl/status"; echo "{\"provider\":\"codex\"}" > "$OSRC_JOBS/jl/meta.json"
-osrc_hub_tick_touch p; jq -c "{summary, keep: .tagline, fresh: ((.summaryAt // \"1970-01-01T00:00:00Z\") | fromdateiso8601 > (now - 120))}" "$OSRC_HOME/hub/projects/p.json"
-_osrc_hub_build_project p "$(date +%s)" now | jq -r "\"exported \" + (.summary // \"none\") + \" \" + (if .summaryAt then \"at\" else \"noat\" end)"
+OSRC_HUB_AUTO_SYNC=1 osrc_hub_tick_touch p; jq -c "{summary, keep: $(jq -c .tagline "$OSRC_HOME/hub/projects/p.json"), fresh: ((.at // \"1970-01-01T00:00:00Z\") | fromdateiso8601 > (now - 120))}" "$OSRC_HOME/hub/auto/p.json"
+_osrc_hub_truth "$(_osrc_hub_build_project p "$(date +%s)" now)" "$(date +%s)" | jq -r "\"exported \" + (.summary // \"none\") + \" \" + (if .summaryAt then \"at\" else \"noat\" end)"
 ' 2>"$TMP/r9.err")"
 grep -q '^reg fresh$' <<<"$r9" && ok "a new session registry event is lane activity" || bad "registry event ignored: $r9 $(head -2 "$TMP/r9.err")"
 grep -q '^hin fresh$' <<<"$r9" && ok "a new done-contract file hand-in is lane activity" || bad "file hand-in ignored: $r9"
 grep -q '^ses 0 old$' <<<"$r9" && ok "a satisfied done contract ends 'working' for a session lane (quiet 3 h stays old)" || bad "finished session stays falsely fresh: $r9"
-grep -q '^{"summary":"1 lane: 1 building","keep":"keep me","fresh":true}$' <<<"$r9" && ok "tick rewrites the card summary + summaryAt and keeps other fields" || bad "tick summary: $r9"
-grep -q '^exported 1 lane: 1 building at$' <<<"$r9" && ok "the export carries the tick's summary + summaryAt to the page" || bad "summary not exported: $r9"
+grep -q '^{"summary":"1 lane: 1 working","keep":"keep me","fresh":true}$' <<<"$r9" && ok "tick writes the derived auto-report and leaves the card alone" || bad "tick summary: $r9"
+grep -q '^exported 1 lane: 1 working at$' <<<"$r9" && ok "the export derives the summary + summaryAt from live lanes" || bad "summary not exported: $r9"
 # CI run 5: on Linux GNU `stat -f %m` is filesystem status (junk, rc 0). Emulate GNU stat; the file's mtime must come back.
 g9="$(LIB="$(dirname "$SRC")/lib" F="$R9/osrc/hub/projects/p.json" bash -c '
 . "$LIB/hub.sh"

@@ -154,25 +154,28 @@ usage: outsourcerer hub report [--status building|review|waiting|shipped] [--pct
                                [--next "<one line>"] [--name "<project name>"]
                                [--ask "<question for the user>" --why "<background>" --rec "<your pick and why>"
                                 [--option "<choice>"]... [--when "<needed by>"] [--weight Critical|High|Medium|Low]]
-                               [--done-ask <id>] [--board <board.json>]
+                               [--done-ask <id>] [--board <board.json>] [--project <key>]
 Run it from the orchestrator's own Claude Code session. Each flag updates one field of this
 session's Mission Control card; fields you leave out keep their last value.
 A question must stand on its own for someone who has not followed the work: --why says what this
 is about and what changes with the answer, in plain words; --rec gives your pick and why; --option
 (two or more) gives buttons. Use --done-ask the moment it is answered anywhere (chat, a board).
+--project <key> joins every session that reports the same key into one Mission Control card.
+Status, percent, summary and next step are also derived from your lanes; your words show with
+their age and never hide newer lane activity.
 EOF
 }
 
 cmd_hub_report() {
-  local st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" board="" any=0 v why="" rec="" when="" opts='[]' nopt=0
+  local pkey="" st="" pct="" eta="" nxt="" name="" ask="" weight="High" done_ask="" board="" any=0 v why="" rec="" when="" opts='[]' nopt=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h|--help) _osrc_hub_report_usage; return 0 ;;
-      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask|--why|--rec|--when|--option|--board)
+      --status|--pct|--eta|--next|--name|--ask|--weight|--done-ask|--why|--rec|--when|--option|--board|--project)
         [ "$#" -ge 2 ] || die "hub report: $1 needs a value"
         v="$2"
         case "$1" in
-          --status) st="$v" ;; --pct) pct="$v" ;; --eta) eta="$v" ;; --next) nxt="$v" ;;
+          --project) pkey="$v" ;; --status) st="$v" ;; --pct) pct="$v" ;; --eta) eta="$v" ;; --next) nxt="$v" ;;
           --name) name="$v" ;; --ask) ask="$v" ;; --weight) weight="$v" ;; --done-ask) done_ask="$v" ;;
           --why) why="$v" ;; --rec) rec="$v" ;; --when) when="$v" ;; --board) [ -n "$v" ] || die "hub report: --board takes a JSON file"; board="$v" ;;
           --option) v="$(_osrc_hub_text 80 "$v")"; [ -n "$v" ] || die "hub report: --option is empty"
@@ -210,6 +213,8 @@ cmd_hub_report() {
       die "hub report: --name is what a person calls the project (\"Total Recall 1.9\"), not a path, URL or id"
     fi
   fi
+  case "$pkey" in '') ;; *[!A-Za-z0-9._-]*|.*) die "hub report: --project takes a short key like my-app (letters, digits, . _ -)" ;; esac
+  [ "${#pkey}" -le 64 ] || die "hub report: --project key is too long"
   case "$done_ask" in '') ;; *[!A-Za-z0-9._-]*|.*) die "hub report: --done-ask takes a question id like D2" ;; esac
   if [ -n "$ask" ]; then   # a question with no background or no buttons is not a question the user can answer
     [ "${#why}" -ge 40 ] || die "hub report: --ask needs --why: 1-2 plain sentences (40+ chars) on what this is and what changes with the answer, for someone who has not followed the work"
@@ -231,7 +236,7 @@ cmd_hub_report() {
     _osrc_hub_write_json "$hub/projects/$sid.json" '(if type == "object" then . else {} end) + {board:$b[0], reportedAt:$now}' --slurpfile b "$board" --arg now "$now" || return 1
     said="board"
   fi
-  if [ -n "$st$pct$eta$nxt$name" ]; then
+  if [ -n "$st$pct$eta$nxt$name$pkey" ]; then
     _osrc_hub_write_json "$hub/projects/$sid.json" '
       (if type == "object" then . else {} end)
       + (if $st == "" then {} else {status:$st} end)
@@ -240,8 +245,9 @@ cmd_hub_report() {
       + (if $eta == "" then {} else {eta:$eta} end)
       + (if $nxt == "" then {} else {next:$nxt} end)
       + (if $name == "" then {} else {name:$name} end)
+      + (if $pk == "" then {} else {project:$pk} end)
       + {reportedAt:$now}' \
-      --arg st "$st" --arg pct "$pct" --arg eta "$eta" --arg nxt "$nxt" --arg name "$name" --arg now "$now" || return 1
+      --arg pk "$pkey" --arg st "$st" --arg pct "$pct" --arg eta "$eta" --arg nxt "$nxt" --arg name "$name" --arg now "$now" || return 1
     [ -n "$st" ] && said="$st"
     [ -n "$pct" ] && said="${said:+$said, }$pct%"
   fi

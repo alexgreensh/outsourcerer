@@ -1,0 +1,5 @@
+sha=ea34fe0db6872dbd92d5eb9cbbd21e58e35f79b0
+rc=0
+Mission Control cards are now derived from live lane evidence (reports become an aged overlay), sessions on one project merge into one card,
+each orchestrator shows working/idle N min/gone with loud alerts, osrc_hub_auto_report exists for supervise/stop guard,
+and hub export is bounded (41 s -> 2.8 s with 150 observed sessions) and single-flight. See reports/osrc-l8-mc.md.
