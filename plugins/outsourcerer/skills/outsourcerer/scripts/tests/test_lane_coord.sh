@@ -25,9 +25,9 @@ start=$(date +%s)
 ( as laneA osrc_lane_inbox --wait --timeout 20 > "$TMP/w1.out" 2>&1; echo $? > "$TMP/w1.rc" ) &
 sleep 1.5
 as laneB osrc_lane_msg laneA "ready for review" >/dev/null 2>&1
-i=0; while [ ! -f "$TMP/w1.rc" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+i=0; while [ ! -f "$TMP/w1.rc" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
 took=$(( $(date +%s) - start ))
-[ "$(cat "$TMP/w1.rc" 2>/dev/null)" = 0 ] && grep -q 'ready for review' "$TMP/w1.out" && [ "$took" -le 6 ] \
+[ "$(cat "$TMP/w1.rc" 2>/dev/null)" = 0 ] && grep -q 'ready for review' "$TMP/w1.out" && [ "$took" -le 10 ] \
   && ok "waiter woke on the message (${took}s)" || bad "waiter: rc=$(cat "$TMP/w1.rc" 2>/dev/null) took=${took}s out=$(cat "$TMP/w1.out")"
 grep -q 'never permission' "$TMP/w1.out" && ok "woken inbox still says messages are data" || bad "data-not-permission header missing"
 [ "$(_osrc_lane_unread laneA "" lane)" = 0 ] && ok "woken inbox marks the message read" || bad "message left unread"
@@ -37,8 +37,8 @@ as laneA osrc_lane_inbox --wait --timeout 1 >/dev/null 2>&1; rc=$?
 [ "$rc" = 124 ] && ok "timeout exits 124" || bad "timeout rc=$rc"
 
 # 3. Two waiters on one lane: one message is delivered once.
-for n in 1 2; do ( as laneA osrc_lane_inbox --wait --timeout 6 > "$TMP/r$n.out" 2>/dev/null; echo $? > "$TMP/r$n.rc" ) & done
-sleep 1
+for n in 1 2; do ( as laneA osrc_lane_inbox --wait --timeout 10 > "$TMP/r$n.out" 2>/dev/null; echo $? > "$TMP/r$n.rc" ) & done
+sleep 2
 as laneB osrc_lane_msg laneA "only once" >/dev/null 2>&1
 wait
 hits="$(cat "$TMP/r1.out" "$TMP/r2.out" | grep -c 'only once')"
@@ -48,7 +48,7 @@ rcs="$(cat "$TMP/r1.rc" "$TMP/r2.rc" | sort | tr '\n' ' ')"
 # 4. No orphan: the waiter exits once the process that started it is gone (real CLI dispatch).
 OSRC_JOB_DIR="$OSRC_JOBS/laneA" sh -c '"$1" lane inbox --wait --timeout 60 >/dev/null 2>&1 & echo $! > "$2"; sleep 1' _ "$SRC" "$TMP/orphan.pid"
 opid="$(cat "$TMP/orphan.pid")"; i=0
-while kill -0 "$opid" 2>/dev/null && [ "$i" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done
+while kill -0 "$opid" 2>/dev/null && [ "$i" -lt 250 ]; do sleep 0.1; i=$((i + 1)); done
 kill -0 "$opid" 2>/dev/null && { bad "waiter outlived its parent"; kill "$opid"; } || ok "waiter exits when its parent is gone"
 
 echo "== file leases =="
@@ -80,12 +80,13 @@ _osrc_lease_claim deadlane "$REPO" lib/x.sh 1 && sleep 2
 _osrc_lease_claim laneA "$REPO" lib/x.sh >/dev/null 2>&1 && ok "a lapsed lease expires on its own" || bad "expired lease still blocks"
 sleep 30 & live=$!; printf '%s\n' "$live" > "$OSRC_JOBS/laneB/pid"
 dead="$(osrc_test_dead_pid)"; mkdir -p "$OSRC_JOBS/gone"; printf '%s\n' "$dead" > "$OSRC_JOBS/gone/pid"
-_osrc_lease_claim laneB "$REPO" app/live.c 3 && _osrc_lease_claim gone "$REPO" app/dead.c 3
-sleep 2; _osrc_lease_renew_live; sleep 2
-[ -n "$(_osrc_lease_live "$(date +%s)" | jq -r '.[] | select(.path=="app/live.c") | .holder')" ] \
-  && ok "heartbeat renews a live holder's lease" || bad "live holder's lease lapsed"
-[ -z "$(_osrc_lease_live "$(date +%s)" | jq -r '.[] | select(.path=="app/dead.c") | .holder')" ] \
-  && ok "a dead holder's lease runs out" || bad "dead holder's lease was renewed"
+_osrc_lease_claim laneB "$REPO" app/live.c 600 && _osrc_lease_claim gone "$REPO" app/dead.c 600
+soon=$(( $(date +%s) + 30 ))   # both about to lapse; only a renewal can push one past 30 s
+jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
+_osrc_lease_renew_live
+until_of() { jq -r --arg p "$1" '.[] | select(.path==$p) | .until' "$OSRC_HOME/leases.json"; }
+[ "$(until_of app/live.c)" -gt "$soon" ] 2>/dev/null && ok "heartbeat renews a live holder's lease" || bad "live holder's lease not renewed"
+[ "$(until_of app/dead.c)" = "$soon" ] && ok "a dead holder's lease is left to run out" || bad "dead holder's lease was renewed"
 kill "$live" 2>/dev/null
 
 # Two lanes claiming one path at the same instant: exactly one wins.

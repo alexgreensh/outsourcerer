@@ -69,14 +69,34 @@ I checked it: `tests/test_watchsvc.sh` fails 7 of 38 with and without my changes
 | `nice bash scripts/tests/test_send_lock_wait.sh` before the fix | 1 (2 of 5 failed: fails fast at 5 s, no error text) |
 | `nice bash scripts/tests/test_send_lock_wait.sh` after | 0 (5/5) |
 | `nice bash scripts/tests/test_lane_coord.sh` before (new code removed) | 1 (16 of 20 failed) |
-| `nice bash scripts/tests/test_lane_coord.sh` after | 0 (21/21) |
+| `nice bash scripts/tests/test_lane_coord.sh` after | 0 (21/21; also 4 and 6 copies in parallel, all 0) |
 | `test_lanemsg.sh` | 0 (80/80) |
 | `test_obligations.sh`, `test_session_send_verify.sh`, `test_endpoint_mutation_lock.sh`, `test_external_send_opt_in.sh`, `test_session_reply_safety.sh` | 0 each |
 | `test_heartbeat_stale_alarm.sh`, `test_wake_queue.sh`, `test_tests_set_home.sh`, `test_no_pipe_grep_q.sh`, `test_no_dead_pid_scan.sh`, `test_lib_symlink_loader.sh` | 0 each |
 | `test_watchsvc.sh` (from the base WIP commit, not mine) | 1 (31 passed, 7 failed), identical with my changes stashed |
-| `bash scripts/tests/conformance.sh` | see "Conformance" below |
+| `nice -n 19 bash scripts/tests/conformance.sh` | 1 (239 passed, 11 failed, 1 skipped); see "Conformance" below |
 
 Both new suites are registered in `tests/conformance.sh`.
+
+## Conformance
+`nice -n 19 bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` → **exit 1**:
+239 passed, 11 failed, 1 skipped (live probes).
+- 10 of the failures also fail on the untouched base (`75670ca`, run one by one in a separate
+  worktree, all exit 1): test_harness_isolation, test_vocab_hygiene, test_supervise, test_watchsvc,
+  test_supervise_lifecycle, test_supervise_pgroup_kill, test_stop_guard,
+  test_parity_insource_refresh, test_conformance_suite_timeout, test_sealed_fixes.
+  - test_vocab_hygiene and test_harness_isolation look environmental: this container runs as root,
+    so a "write must fail" or "fail closed" check cannot fail. Their failing assertions are the
+    same with and without my changes.
+  - The supervise, watchsvc and stop_guard suites cover what the base WIP commit touched.
+- The 11th was **test_lane_coord** (mine). It passed every time on its own, in 4 and 6 parallel
+  copies, and through a copy of the conformance harness limited to my suites. I edited the suite
+  and lib/lease.sh while that gate run was in progress, so the cause is either that edit or a
+  timing bound tripping under 4-way load. I removed the timing sensitivity anyway:
+  - The renewal check now sets expiry directly instead of racing a 3 s TTL against sleeps.
+  - The wake, race and orphan bounds are wider.
+  The final suite passed through the harness copy (test_lane_coord, test_send_lock_wait,
+  test_lanemsg and test_obligations all green). I did not re-run the full gate after that change.
 
 ## What remains unproven
 - The mkdir-lock path (stock macOS with no `flock`) for the send wait and for leases. The logic
