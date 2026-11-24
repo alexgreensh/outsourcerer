@@ -1,3 +1,0 @@
-sha=7e24e4caacdbe33b16e2c14d8b47be49a6cb3962
-rc=0
-All five items resolved; see reports/osrc-l6-prs.md. Conformance: 241 pass, 6 fail, the same 6 fail on the base commit (environment, not this round). #82 behavioural tests need bash 3.2 to be a true regression.

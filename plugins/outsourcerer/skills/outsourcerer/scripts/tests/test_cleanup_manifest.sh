@@ -103,9 +103,12 @@ owner wt-dist
 # pr-old has a MERGED PR but a post-merge commit on top (ASK, finding 2).
 git -C "$R" checkout -qb tmp-side
 printf 'side\n' > "$R/side.txt"; git -C "$R" add side.txt; git -C "$R" commit -qm side
+printf 'post\n' > "$R/post.txt"; git -C "$R" add post.txt; git -C "$R" commit -qm post
 git -C "$R" branch outsourcerer/pr-old
+git -C "$R" checkout -q -B tmp-side2 main
 printf 'side2\n' > "$R/side2.txt"; git -C "$R" add side2.txt; git -C "$R" commit -qm side2
 git -C "$R" branch outsourcerer/pr-hit
+git -C "$R" branch -q -D tmp-side tmp-side2 2>/dev/null
 git -C "$R" checkout -q main
 owner job-pr
 
@@ -408,12 +411,11 @@ XB="$(git -C "$BR" rev-parse outsourcerer/wt-lo)"
 git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
 [ "$(bm "$BR" outsourcerer/wt-main "")" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
 [ "$(bm "$BR" outsourcerer/wt-main "not-a-sha")" = "rc=0" ] && ok "garbage base does not break main containment" || bad "garbage base broke verdict"
-# No main-ish ref at all (trunk-named repo, no remotes) under the engine's `set -u`: an empty bases
-# array must not abort with "unbound variable" (bash 3.2), and the verdict is a plain ASK.
+# Trunk-named repo, no remotes: another local branch holds the tip, so it is preserved.
 RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
 trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk ""; echo "rc=$?"' _ "$RT" 2>&1)"
-[ "$(tail -1 <<<"$trk")" = "rc=1" ] && ! grep -qi 'unbound' <<<"$trk" \
-  && ok "no main-ish refs and empty base: plain ASK, no unbound-variable abort" || bad "empty bases array mishandled: $trk"
+[ "$(tail -1 <<<"$trk")" = "rc=0" ] && ! grep -qi 'unbound' <<<"$trk" \
+  && ok "tip still held by another local branch is preserved (no main-ish ref needed)" || bad "trunk-shaped repo cried wolf: $trk"
 # End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
 R3="$TMP/repo-base2"; mkrepo "$R3"
 git -C "$R3" checkout -qb feat; printf 'lo\n' > "$R3/lo.txt"; git -C "$R3" add lo.txt; git -C "$R3" commit -qm lo
@@ -499,5 +501,18 @@ gc_out="$(run gc --older-than 1 2>&1)"
 [ ! -d "$OLD" ] && [ -d "$RECENT" ] && [ -d "$RUNNING" ] \
   && ok "gc --older-than 1 removes only old completed jobs" || bad "gc compat broken: $gc_out"
 
+echo "=== round 4: detached live HEAD and truncated manifest ==="
+R7="$TMP/repo-r4"; mkrepo "$R7"
+mkwt "$R7" wt-dh "$(git -C "$R7" rev-parse HEAD)"; owner wt-dh
+( cd "$R7/.outsourcerer/worktrees/wt-dh" && git checkout -q --detach && printf 'x\n' > x && git add x && git commit -qm x )
+jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg b outsourcerer/wt-dh --arg bs "$(git -C "$R7" rev-parse HEAD)" \
+  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/wt-dh/worktree.json"
+age "$R7/.outsourcerer/worktrees/wt-dh"
+v="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_cleanup_verdict "$1"' _ "$(jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg r "$R7" '{path:$p,kind:"worktree",session:"wt-dh",repo:$r}')" 2>&1)"
+grep -q '^ASK' <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
+mf="$OSRC_HOME/created.jsonl"; cp "$mf" "$mf.bak"; printf '{"path":"/x","ki' >> "$mf"
+sc="$(run cleanup 2>&1)"; scrc=$?
+[ "$scrc" = "0" ] && ! grep -qi 'did not finish' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"
+mv "$mf.bak" "$mf"
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

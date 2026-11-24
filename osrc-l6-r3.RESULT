@@ -1,4 +1,0 @@
-sha=aa11661b666696121af22eedabf592cbcea40be2
-rc=0
-Round 3 fixes for Astra findings 1-8 (see reports/osrc-l6-prs.md, "## Round 3"). cleanup.sh: detached/foreign-HEAD refusal, qualified branch ref resolved once, linked-checkout removal via git with receipt kept on failure, scanner returns nonzero and the disk gate refuses on a partial scan (one-line gate change to carry into osrc-l2-r2). outsourcerer.sh: engine arms no EXIT trap inside $( ). Tests: PR #80 quota/denylist behaviour checks ported; hub.md recovery-before---force restored.
-Focused suites pass (cleanup_manifest 85, exit_trap_chain 28, limit_gate 127, model_denylist 25, no_pipe_grep_q, factory_exclude). conformance.sh: rc=1, 240 pass / 7 fail; six failures are the same undiagnosed suites as round 2; the seventh (test_no_pipe_grep_q) was mine, fixed and re-run alone rc=0. Unproven: bash 3.2 behaviour (no 3.2 available here).

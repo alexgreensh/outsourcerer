@@ -120,3 +120,27 @@ placed before `_osrc_cleanup_state_write` and the ack comparison. It only works 
 
 - osrc-l2-r2: carry the `_osrc_disk_gate` one-liner and the `_osrc_cleanup_items` rewrite above; keep one `_osrc_cleanup_ask_hash`.
 - A macOS bash 3.2 run of `test_exit_trap_chain.sh` and `test_release_0175.sh`.
+
+## Round 4 (osrc-l6-r4): closing edits
+
+Smallest change per finding, no new design.
+
+- **P2-1** `_osrc_branch_merged`: replaced the main-ish loop and recorded-base block with one check, "does any ref other than `refs/heads/$br` (heads, remotes, tags) contain the tip". Still catches #84. The unused `base` argument is gone from the function and its callers. Trunk test flipped to rc=0.
+- **P2-2** `worktree)` verdict: ASK unless the live `HEAD` is `refs/heads/$br`.
+- **P2-3** scanner reads the manifest with `jq -R 'fromjson?'`, so a truncated last line no longer hides the rest or fails the scan.
+- **P3-6** deleted the dead `if ! have jq` block in `_osrc_disk_gate`. **P3-8** removed the two comment lines at `outsourcerer.sh:375` (engine back to 19005 lines). **P3-7** hub.md wording fixed.
+- **P3-10** `git rm` of the r2/r3 READY/RESULT files. `reports/osrc-l6-prs.md` stays: it is the required report for this lane; strip it before main.
+- Fixture fix: the `pr-old` branch in the suite sat under `pr-hit`, so it was legitimately held by another ref. It is now on its own line.
+- Not done: P3-4, P3-5 (unreachable `|| continue`), P3-9, P3-11.
+
+### Tests
+| Command | rc |
+|---|---|
+| `bash .../tests/test_cleanup_manifest.sh` | 0 (87 pass) |
+| same with the pre-fix `lib/cleanup.sh` | 1 (3 new tests fail: trunk, detached HEAD, truncated manifest) |
+| `bash .../tests/conformance.sh` | CONF_RC |
+
+Not run on bash 3.2. The six undiagnosed conformance failures from round 3 are unchanged unless listed above.
+
+## Needs from other lanes (round 4)
+- A macOS bash 3.2 run of `test_cleanup_manifest.sh`.

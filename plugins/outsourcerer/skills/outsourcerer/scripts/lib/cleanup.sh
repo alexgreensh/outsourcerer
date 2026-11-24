@@ -133,35 +133,19 @@ _osrc_lsof_busy() {
   return 1
 }
 
-# _osrc_branch_merged <repo> <branch> [base_sha] -> 0 when the branch's commits are
-# preserved: tip is an ancestor of any main-ish ref, or of the recorded base when that
-# base is itself held by a remote-tracking ref, or a MERGED PR exists for it.
-# The recorded base alone is NOT evidence: a worktree cut from a local-only branch
-# records a base no other ref may hold, and deleting the worktree branch would then
-# drop the last ref to those commits (issue #84). 1 otherwise (caller ASK).
+# _osrc_branch_merged <repo> <branch> -> 0 when the branch's commits are
+# preserved: any ref other than the branch itself (branch, remote, tag) holds the tip, or
+# a MERGED PR exists for it. Deleting the branch must never drop the last ref to commits
+# (issue #84). 1 otherwise (caller ASK).
 _osrc_branch_merged() {
-  local repo="$1" br="$2" base="${3:-}" ref tip
+  local repo="$1" br="$2" tip
   # Resolve the FULLY QUALIFIED branch once; every check below uses that commit, never the
   # short name (a same-named tag would win a short-name lookup while `branch -D` deletes
   # the branch).
   tip="$(git -C "$repo" rev-parse --verify -q "refs/heads/$br^{commit}" 2>/dev/null)" || return 1
   [ -n "$tip" ] || return 1
-  local -a bases=()
-  for ref in refs/remotes/origin/HEAD refs/remotes/origin/main refs/remotes/origin/master \
-             refs/heads/main refs/heads/master refs/remotes/upstream/main refs/remotes/upstream/master; do
-    git -C "$repo" rev-parse --verify -q "$ref" >/dev/null 2>&1 && bases+=("$ref")
-  done
-  local b
-  for b in ${bases[@]+"${bases[@]}"}; do
-    git -C "$repo" merge-base --is-ancestor "$tip" "$b" 2>/dev/null && return 0
-  done
-  # Recorded base: only when a remote-tracking ref (any branch) already holds it.
-  if [ -n "$base" ] && base="$(git -C "$repo" rev-parse --verify -q "$base^{commit}" 2>/dev/null)" \
-     && [ -n "$base" ] && git -C "$repo" merge-base --is-ancestor "$tip" "$base" 2>/dev/null; then
-    # One call: does any remote-tracking ref contain the base commit?
-    [ -n "$(git -C "$repo" for-each-ref --count=1 --contains "$base" --format='%(refname)' refs/remotes 2>/dev/null)" ] \
-      && return 0
-  fi
+  # Any ref other than the branch itself (local, remote, tag) holding the tip keeps the commits.
+  [ -n "$(git -C "$repo" for-each-ref --contains "$tip" --format='%(refname)' refs/heads refs/remotes refs/tags 2>/dev/null | grep -vxF "refs/heads/$br" | head -n 1)" ] && return 0
   # No local ref contains it: a merged PR preserves the work ONLY when the PR's
   # merged head is this branch's current tip — commits made after the merge are
   # not preserved by that PR (review finding 2).
@@ -305,21 +289,22 @@ _osrc_cleanup_verdict() {
         done <<<"$ig"
         [ -z "$igbad" ] || { printf 'ASK\tignored files in worktree: %s\n' "$igbad"; return 0; }
       fi
-      local wj br base
+      local wj br
       wj="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$sess/worktree.json"
-      br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
+      br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"
       [ -n "$br" ] || br="$(git -C "$pp" rev-parse --abbrev-ref HEAD 2>/dev/null)"
       [ -n "$br" ] && [ "$br" != "HEAD" ] || { printf 'ASK\tcannot determine worktree branch\n'; return 0; }
-      _osrc_branch_merged "$repo" "$br" "$base" \
+      [ "$(git -C "$pp" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/$br" ] \
+        || { printf 'ASK\tworktree HEAD is not on branch %s (detached commits would be lost)\n' "$br"; return 0; }
+      _osrc_branch_merged "$repo" "$br" \
         || { printf 'ASK\tbranch %s has commits missing from remote/main and no merged PR\n' "$br"; return 0; }
       ;;
     branch)
       _osrc_branch_checked_out "$repo" "$path" \
         && { printf 'ASK\tbranch still checked out in a worktree\n'; return 0; }
-      local wj2 base2
+      local wj2
       wj2="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj2" ] || wj2="$OSRC_HOME/loops/$sess/worktree.json"
-      base2="$(jq -r '.base_sha // ""' "$wj2" 2>/dev/null)"
-      _osrc_branch_merged "$repo" "$path" "$base2" \
+      _osrc_branch_merged "$repo" "$path" \
         || { printf 'ASK\tcommits missing from remote/main and no merged PR\n'; return 0; }
       ;;
     fanout)
@@ -377,7 +362,7 @@ _osrc_cleanup_items() {
   [ -f "$mf" ] || return 0
   # Read in this shell (no pipeline subshell) so a failure on any item reaches the caller:
   # a partial list must never look like a complete one.
-  grouped="$(jq -cs 'group_by(.path + "" + .kind) | map(last) | .[]' "$mf" 2>/dev/null)" || return 1
+  grouped="$(jq -R 'fromjson?' "$mf" 2>/dev/null | jq -cs 'group_by(.path + "" + .kind) | map(last) | .[]' 2>/dev/null)" || return 1
   while IFS= read -r item; do
     [ -n "$item" ] || continue
     verdict="$(_osrc_cleanup_verdict "$item")" || { rc=1; continue; }
@@ -613,9 +598,6 @@ _osrc_disk_gate() {
   # stale state.json would let an old ack admit a launch after the ASK list
   # changed (issue #86).
   _osrc_cleanup_state_write "$items" || true
-  if ! have jq 2>/dev/null; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and cleanup state is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
-  fi
   an="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; an="${an:-0}"
   if [ "${an:-0}" -gt 0 ]; then
     ah="$(_osrc_cleanup_ask_hash "$items")"
@@ -697,7 +679,7 @@ _cmd_cleanup_target() {
   fi
   if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] && [ -n "$maindir" ] \
      && git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
-     && ! _osrc_branch_merged "$maindir" "$branch" "$base"; then
+     && ! _osrc_branch_merged "$maindir" "$branch"; then
     echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (not on main, a remote, or a merged PR)." >&2
     echo "  inspect: git -C \"$path\" log --oneline -3; push or branch it first, or force-remove: outsourcerer cleanup $target --force" >&2
     return 1

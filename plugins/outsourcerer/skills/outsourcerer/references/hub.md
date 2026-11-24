@@ -241,8 +241,7 @@ delegations, `session start`) are refused unless there are ASK items and the cur
 been acknowledged (`cleanup --ack`). The gate decides from a live scan of the manifest, never from
 `cleanup/state.json`: it still tries to refresh that file for the tick and other readers, but a
 failed write (disk full, unwritable directory) changes nothing, and the ack must match the ASK
-hash of the list as it is now. Without `jq` it cannot scan and refuses as "cleanup state is
-unknown". With no ASK items it still refuses, and says whether SAFE items can be applied or the
+hash of the list as it is now. Any failed scan (including no `jq`) refuses with "the cleanup scan did not finish". With no ASK items it still refuses, and says whether SAFE items can be applied or the
 space is held outside Outsourcerer. `OSRC_DISK_MIN_GB=0` overrides.
 
 ## Hub export: the `team` field (L12)
