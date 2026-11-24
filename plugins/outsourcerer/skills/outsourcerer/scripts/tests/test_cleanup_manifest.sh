@@ -342,6 +342,17 @@ gate5="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 chmod u+w "$OSRC_HOME/cleanup"
 grep -q 'gate-rc=0' <<<"$gate5" && ok "failed refresh still admits an ack that matches the live list (issue 86)" || bad "gate deadlocked on failed refresh: $gate5"
+# A scan that dies after emitting an acknowledged ASK item has not seen the rest of the
+# list: the gate must refuse, not admit on the partial list (review round 3, finding 2).
+run cleanup --ack >/dev/null 2>&1
+gate6="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "51200"; }
+  eval "_real_items() $(declare -f _osrc_cleanup_items | tail -n +2)"
+  _osrc_cleanup_items() { _real_items "$@"; return 1; }
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+grep -q 'refusing new lane launches' <<<"$gate6" && ! grep -q 'gate-rc=0' <<<"$gate6" \
+  && ok "gate refuses when the scan exits nonzero after emitting an acked list" || bad "gate admitted on a partial scan: $gate6"
 echo "=== 0-ASK disk pressure (finding 8) ==="
 mkdir -p "$TMP/osrc2/jobs"
 g0="$(OSRC_HOME="$TMP/osrc2" OSRC_SOURCED=1 bash -c '
@@ -434,6 +445,50 @@ git -C "$R4" update-ref refs/remotes/origin/feat "$F4"
 lo2="$(run cleanup job-lo 2>&1)"; lo2rc=$?
 [ "$lo2rc" = "0" ] && ! git -C "$R4" rev-parse --verify -q refs/heads/outsourcerer/job-lo >/dev/null \
   && ok "cleanup <id> removes it once a remote-tracking ref holds the base" || bad "legacy cleanup still refuses (rc=$lo2rc): $lo2"
+
+echo "=== cleanup <id> preservation edge cases (review round 3) ==="
+mkwt() { # <repo> <id> <base_sha> -> worktree on outsourcerer/<id> at base, receipt in jobs/<id>
+  git -C "$1" worktree add -q "$1/.outsourcerer/worktrees/$2" -b "outsourcerer/$2" "$3"
+  mkdir -p "$OSRC_HOME/jobs/$2"
+  jq -cn --arg p "$1/.outsourcerer/worktrees/$2" --arg b "outsourcerer/$2" --arg bs "$3" \
+    '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/$2/worktree.json"
+}
+# (1) detached at a local-only base with the recorded branch deleted: the worktree holds the
+# last reference to that commit.
+R5="$TMP/repo-detach"; mkrepo "$R5"
+git -C "$R5" checkout -qb feat; printf 'lo\n' > "$R5/lo.txt"; git -C "$R5" add lo.txt; git -C "$R5" commit -qm lo
+F5="$(git -C "$R5" rev-parse HEAD)"; git -C "$R5" checkout -q main
+mkwt "$R5" job-dt "$F5"; git -C "$R5" branch -q -D feat
+git -C "$R5/.outsourcerer/worktrees/job-dt" checkout -q --detach
+git -C "$R5" branch -q -D outsourcerer/job-dt
+dt="$(run cleanup job-dt 2>&1)"; dtrc=$?
+[ "$dtrc" != "0" ] && [ -d "$R5/.outsourcerer/worktrees/job-dt" ] && git -C "$R5" cat-file -e "$F5^{commit}" \
+  && [ -f "$OSRC_HOME/jobs/job-dt/worktree.json" ] \
+  && ok "cleanup <id> refuses a detached worktree whose branch is gone" || bad "detached worktree removed (rc=$dtrc): $dt"
+# (2) a tag named like the branch, pointing at merged work, must not vouch for a branch
+# that holds local-only commits.
+R6="$TMP/repo-tag"; mkrepo "$R6"
+git -C "$R6" checkout -qb feat; printf 'lo\n' > "$R6/lo.txt"; git -C "$R6" add lo.txt; git -C "$R6" commit -qm lo
+F6="$(git -C "$R6" rev-parse HEAD)"; git -C "$R6" checkout -q main
+mkwt "$R6" job-tg "$F6"; git -C "$R6" branch -q -D feat
+git -C "$R6" tag outsourcerer/job-tg main
+tg="$(run cleanup job-tg 2>&1)"; tgrc=$?
+[ "$tgrc" != "0" ] && git -C "$R6" rev-parse --verify -q refs/heads/outsourcerer/job-tg >/dev/null \
+  && ok "cleanup <id> ignores a same-named tag when judging the branch" || bad "same-named tag vouched for local-only branch (rc=$tgrc): $tg"
+# (3) job started from a linked checkout: both parent and job worktree have a .git FILE.
+R7="$TMP/repo-linked"; mkrepo "$R7"
+P7="$TMP/linked-co"; git -C "$R7" worktree add -q "$P7" -b parentbr
+M7="$(git -C "$P7" rev-parse HEAD)"
+mkwt "$P7" job-lk "$M7"; mkwt "$P7" job-lc "$M7"
+lk="$(run cleanup job-lk 2>&1)"; lkrc=$?
+[ "$lkrc" = "0" ] && ! git -C "$P7" rev-parse --verify -q refs/heads/outsourcerer/job-lk >/dev/null \
+  && ! grep -q 'worktrees/job-lk' <<<"$(git -C "$P7" worktree list --porcelain)" && [ ! -f "$OSRC_HOME/jobs/job-lk/worktree.json" ] \
+  && ok "cleanup <id> from a linked checkout removes the worktree and branch through git" || bad "linked-checkout cleanup incomplete (rc=$lkrc): $lk"
+# (4) git cannot remove it (locked): report failure and keep the receipt.
+git -C "$P7" worktree lock "$P7/.outsourcerer/worktrees/job-lc"
+lc="$(run cleanup job-lc 2>&1)"; lcrc=$?
+[ "$lcrc" != "0" ] && [ -f "$OSRC_HOME/jobs/job-lc/worktree.json" ] && git -C "$P7" rev-parse --verify -q refs/heads/outsourcerer/job-lc >/dev/null \
+  && ok "cleanup <id> keeps the receipt and reports failure when git cannot remove the worktree" || bad "failed removal reported success or lost the receipt (rc=$lcrc): $lc"
 
 echo "=== gc compat ==="
 OLD="$OSRC_HOME/jobs/job-ancient"; mkdir -p "$OLD"; echo done > "$OLD/status"

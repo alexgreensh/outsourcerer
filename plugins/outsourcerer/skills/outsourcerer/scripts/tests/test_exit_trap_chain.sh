@@ -158,5 +158,23 @@ run_child_srcs_notrap() {
 SB="$BASE/j"; run_child_srcs_notrap "$SB"
 [ -f "$SB/mcpalive" ] && ok "srcs-notrap: engine cleanup did not fire at \$( ) exit"   || bad "srcs-notrap: \$( ) sourcing removed the main shell's with-mcp file (bash 3.2 trap-level bug)"
 
+# --- (k) a $( ) that installs its OWN EXIT handler before sourcing keeps it ---------
+# A wrapper that takes a lock in the substitution and releases it from its own EXIT trap
+# must still run that handler when the engine is sourced after it (bash 3.2 lost it when
+# the engine re-armed the trap inside the substitution; the lock then leaked).
+run_child_own_trap() {
+  local sb="$1"
+  mkdir -p "$sb/home"
+  env HOME="$sb" OSRC_HOME="$sb/home" OSRC_SOURCED=1 bash -c '
+    sb="$1"; src="$2"; set --
+    trap "echo parent >> \"$sb/parent\"" EXIT
+    _out="$( trap "echo own >> \"$sb/own\"" EXIT; . "$src" >/dev/null 2>&1; echo inner )"
+    exit 0
+  ' _ "$sb" "$SRC"
+}
+SB="$BASE/k"; run_child_own_trap "$SB"
+[ "$(cat "$SB/own" 2>/dev/null)" = "own" ] && ok "own-trap: the substitution's own EXIT handler ran once" || bad "own-trap: substitution handler ran '$(cat "$SB/own" 2>/dev/null | wc -l | tr -d " ")' times, want 1"
+[ "$(cat "$SB/parent" 2>/dev/null)" = "parent" ] && ok "own-trap: parent handler ran once, at the real exit" || bad "own-trap: parent handler ran '$(cat "$SB/parent" 2>/dev/null | wc -l | tr -d " ")' times, want 1"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

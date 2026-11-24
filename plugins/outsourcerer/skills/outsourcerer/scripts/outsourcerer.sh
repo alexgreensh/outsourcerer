@@ -372,7 +372,9 @@ _osrc_exit_chain() {  # <action>
         || trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
   esac
 }
-_osrc_exit_chain '_osrc_engine_exit'
+# Sourced inside a $( ) substitution the engine arms nothing: the substitution's own EXIT
+# handler (bash 3.2 may not run it if replaced) and the parent's both stay as they were.
+[ "${BASH_SUBSHELL:-0}" -eq 0 ] && _osrc_exit_chain '_osrc_engine_exit'
 # ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
 # (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
 # lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One

@@ -213,8 +213,10 @@ has seen the current ASK list. `cleanup <job-id|fanout-gid> [--force]` keeps its
 that target's git worktree(s). Auto-isolated cloud-gate copies are not in the manifest: a run that
 the gate moved into `$OSRC_HOME/isolated/<run-id>/` (receipt `worktree.json`) plus its repo worktree
 at `<repo>/.outsourcerer/worktrees/<id>` on branch `outsourcerer/<id>` is invisible to `cleanup`
-with no target and to the disk gate; remove it with `cleanup <id> --force`, the command the
-cloud-gate banner prints.
+with no target and to the disk gate. Bring the delegate's edits back first (the cloud-gate banner
+prints the `git diff ... | git apply` command), and only then remove it with `cleanup <id> --force`:
+`--force` deletes the worktree and branch even with uncommitted or unmerged work, so use it only
+after the result is saved or you have decided to discard it.
 
 SAFE requires ALL of: owning session done or gone, older than 1h, no process has a file open under
 it, path under the manifest's recorded root (the age and open-file checks do not apply to `branch`
@@ -227,7 +229,8 @@ recorded base commit (the `base_sha` the worktree was cut from) when a remote-tr
 holds that base, or in a merged PR whose head is that tip. A recorded base that no remote or
 main-ish ref holds is not preservation by itself: a worktree cut from a local-only branch stays
 ASK, because deleting its branch would drop the last ref to those commits. `cleanup <id>` applies
-the same test and refuses such a branch without `--force`. Fanout entries need
+the same test and refuses such a branch without `--force`, and also refuses a worktree whose live
+`HEAD` is not the recorded branch (for example detached after its branch was deleted). Fanout entries need
 every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
 result collected; a clean finish whose result was never collected stays ASK at any age, and only a
 non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
