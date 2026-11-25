@@ -135,7 +135,7 @@ _cloudrun_pack() {
     printf -- '- Clone %s and base your work on branch `%s` (it contains commit `%s`).\n' "$repo" "$base" "$sha"
     printf -- '- Do ALL work on a new branch `%s` and push it when done.\n' "$branch"
     printf -- '- Your final commit MUST add a file `%s.READY` at the repository root containing exactly one line: `READY %s`.\n' "$id" "$id"
-    printf -- '- Also write `%s.RESULT` at the repository root: first line `sha=%s`, second line `rc=<0 if your work is complete>`, then a short summary.\n' "$id" "$sha"
+    printf -- '- Also write `%s.RESULT` at the repository root: first line `sha=%s` (this pinned commit, not your own head), second line `rc=0` only if your work is complete AND every check you ran passed, else the failing exit code (a red check is never rc=0, even if you believe it predates you), then a short summary naming your own head commit.\n' "$id" "$sha"
     printf -- '- If your environment can open pull requests, open one from `%s` to `%s`. Do NOT merge it.\n' "$branch" "$base"
     [ -n "$donewhen" ] && printf -- '- Additional done check requested by the delegator: `%s`\n' "$donewhen"
     printf -- '- Testing discipline: run only the unit tests relevant to your change, one at a time, niced; leave full/heavy suites to CI — heavy suites run in dedicated cloud lanes.\n'

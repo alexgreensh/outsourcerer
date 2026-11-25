@@ -462,6 +462,10 @@ out="$(start_cloud t-packsha --repo "$WORK" --base main --brief "$BRIEF" --vehic
 PK="$(ls "$OSRC_HOME"/cloud/t-packsha.pack.md 2>/dev/null)"
 [ -n "$PK" ] && grep -q 'pinned commit:' "$PK" && grep -q 'sha=' "$PK" \
   && ok "pack: sha pinned + RESULT echo required" || bad "pack: missing sha contract (rc=$rc)"
+# Three lanes wrote rc=0 over a red conformance run: the old wording ("0 if your work is complete")
+# allowed it. The pack must tie rc=0 to every check passing.
+[ -n "$PK" ] && grep -q 'every check you ran passed' "$PK" && ! grep -q 'rc=<0 if your work is complete>' "$PK" \
+  && ok "pack: rc=0 only when every check passed" || bad "pack lets a red check read rc=0"
 
 # --sha carries an offer's exact pinned commit through (finding F); refuses unpushed/unknown
 SHA_PIN="$(git -C "$WORK" rev-parse HEAD)"
