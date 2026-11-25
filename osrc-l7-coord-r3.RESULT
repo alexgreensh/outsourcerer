@@ -1,0 +1,4 @@
+sha=7517b2b195813740357f15299f04605f70d788dc
+rc=0
+Every P1, P2 and cheap P3 from the round-2 review is fixed, each with a regression test that fails on 7517b2b (test_lane_coord 40/40, test_send_lock_wait 8/8; 17 and 4 failures on base).
+conformance.sh exit 1: 243 passed, 6 failed, 1 skipped. All 6 failing suites also fail on untouched 7517b2b and are outside this lane. Details in reports/osrc-l7-coord.md, Round 3.
