@@ -234,3 +234,5 @@ Closing edits only. Base `cloud/osrc-l8-r2` at `50af717`.
 ### Needs from other lanes
 - Unchanged from Round 2 (`lib/supervise.sh` dead `osrc_hub_tick_touch` loop).
 - The lane artifacts (`reports/osrc-l8-mc.md`, READY/RESULT) should not be merged to `main`.
+
+**Conformance (Round 3)**: `nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` rc 1, 242 passed, 7 failed. Six are the round 2 failures (not re-run on base). The seventh, `test_hub_home`, was mine: it greps the source for `String(o === f.choice)`, which the rename changed. I fixed the grep (`test_hub_home.sh` now 90 pass, rc 0) but did not re-run all of conformance after that fix.

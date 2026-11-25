@@ -71,7 +71,7 @@ grep -q 'border-left: *[0-9.]*px solid var(--hi)' "$PAGE" && bad "border-left ac
 echo "=== drafts survive re-renders (page contract) ==="
 grep -q "const key = (d.owner || p.id) + '--' + d.id, f = forms\[key\] || (forms\[key\] =" "$DEC" && ok "decision draft keyed <owning session>--<decision> in forms" || bad "draft store missing"
 grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" || ok "renderMain no longer wipes the drafts"
-grep -q "ta.value = f.note" "$DEC" && grep -q "String(o === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
+grep -q "ta.value = f.note" "$DEC" && grep -q "String(opt === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
 grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
 grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
