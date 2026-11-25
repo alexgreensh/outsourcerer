@@ -44,9 +44,10 @@ case "$(jq -r '.[0].left' <<<"$o")" in "28% left"*) ok "a newer probe beats an o
 # 3. a 3 h old reading is stale: shown with its age, and unknown (not headroom) for routing.
 rm -f "$OSRC_HOME/hub/probes/codex.json"
 o="$(row 40 10800)"
-case "$(jq -r '.[0].left' <<<"$o")" in *"60% left · checked 3 h ago"*) ok "stale reading shows its age" ;; *) bad "no age: $(jq -r '.[0].left' <<<"$o")" ;; esac
+case "$(jq -r '.[0].left' <<<"$o")" in *"60% left, checked 3 h ago"*) ok "stale reading shows its age" ;; *) bad "no age: $(jq -r '.[0].left' <<<"$o")" ;; esac
 [ "$(jq -r '.[0].state' <<<"$o")" = unknown ] && [ "$(jq -r '.[0].stale' <<<"$o")" = true ] && ok "stale reading is unknown, not ok" || bad "stale reading kept state $(jq -r '.[0].state' <<<"$o")"
 o="$(row 40 600)"
+[ "$(jq -r '.[0].updated | fromdateiso8601' <<<"$o")" -le $(( NOW - 590 )) ] && ok "a 10 min old log reading is not stamped as checked now" || bad "fresh stamp on an old reading: $(jq -r '.[0].updated' <<<"$o")"
 [ "$(jq -r '.[0].state' <<<"$o")" = ok ] && [ "$(jq -r '.[0].stale // false' <<<"$o")" = false ] && ok "a fresh reading stays ok" || bad "fresh reading wrongly stale"
 o="$(row 100 10800)"
 [ "$(jq -r '.[0].state' <<<"$o")" = out ] && ok "a stale exhausted reading stays out" || bad "stale 100% became headroom"
@@ -100,17 +101,46 @@ _osrc_limits_low_scan "claude5h=95" >/dev/null; _osrc_limits_low_scan "codexwk=1
 
 # 10. the launch gate keeps its 6 h horizon: a 2.5 h old codex reading at the limit still gates.
 _osrc_lane_limit_stale cx "codexwk=100 codexage=9000" && bad "2.5 h old reading no longer gates" || ok "2.5 h old reading still gates the launch"
-a="$(OSRC_LIMITS_STALE_SECS=21600 _osrc_limits_low_scan "codexwk=99 codexage=10800")"
-case "$a" in *"ChatGPT weekly"*) ok "low scan honours OSRC_LIMITS_STALE_SECS" ;; *) bad "low scan ignored the setting" ;; esac
+a="$(OSRC_LIMITS_STALE_SECS=7200 _osrc_limits_low_scan "codexwk=99 codexage=10800")"
+[ -z "$a" ] && ok "low scan honours OSRC_LIMITS_STALE_SECS" || bad "low scan ignored the setting: $a"
 
 # 11. a stale log row is not overridden by an older kept probe: the exhausted log stays out.
 printf '{"ok":true,"windows":{"codexwk":{"used":20,"renews_at":%s}},"checked":%s,"refresh_failed":"timed out"}\n' "$RESET" $(( NOW - 172800 )) > "$OSRC_HOME/hub/probes/codex.json"
 o="$(row 100 10800)"
 [ "$(jq -r '.[0].state' <<<"$o")" = out ] && [ "$(jq -r '.[0].used' <<<"$o")" = 100 ] && ok "newer stale log beats an older kept probe" || bad "old probe won: $(jq -c '.[0]|{state,left,used}' <<<"$o")"
 
-# 12. one failed refresh does not blank a reading younger than the probe TTL; an older one is stale.
-probe 72 100; _osrc_probe_store codex
+# 12. one failed refresh does not blank a young reading, on the page-refresh path (TTL 0, synchronous
+# refresh through _osrc_probe_kick); past 15 minutes the kept reading is stale.
+_osrc_probe_has() { [ "$1" = jq ] && command -v jq >/dev/null; [ "$1" = codex ] || [ "$1" = jq ]; }
+probe 72 400; touch -d "@$(( NOW - 400 ))" "$OSRC_HOME/hub/probes/codex.json" 2>/dev/null
+OSRC_PROBE=1 OSRC_HUB_CHECK_PLANS=1 OSRC_PROBE_SYNC=1 OSRC_PROBE_TTL_CODEX=0 _osrc_probe_kick codex
+[ -n "$(jq -r '.refresh_failed // empty' "$OSRC_HOME/hub/probes/codex.json")" ] && ok "the kick ran the failed refresh" || bad "kick did not refresh: $(cat "$OSRC_HOME/hub/probes/codex.json")"
 o="$(row 10 5000)"
-[ "$(jq -r ".[0].state" <<<"$o")" != unknown ] && [ "$(jq -r ".[0].stale // false" <<<"$o")" = false ] && ok "young kept probe stays usable after one failed refresh" || bad "young probe blanked: $(jq -c '.[0]|{state,stale}' <<<"$o")"
+[ "$(jq -r ".[0].state" <<<"$o")" = low ] && [ "$(jq -r ".[0].stale // false" <<<"$o")" = false ] && ok "a 400 s old kept probe stays usable after one failed refresh" || bad "young probe blanked: $(jq -c '.[0]|{state,stale,left}' <<<"$o")"
+probe 72 1000; OSRC_PROBE=1 OSRC_HUB_CHECK_PLANS=1 OSRC_PROBE_SYNC=1 OSRC_PROBE_TTL_CODEX=0 _osrc_probe_kick codex
+o="$(row 10 5000)"
+[ "$(jq -r ".[0].stale" <<<"$o")" = true ] && ok "a 1000 s old kept probe after a failed refresh is stale" || bad "old kept probe not stale: $(jq -c '.[0]|{state,stale}' <<<"$o")"
+
+# 13. the limit-low event carries the orchestrator's owner, so that orchestrator's supervise waiter sees it.
+( unset -f _osrc_lane_event; . "$HERE/../lib/lanemsg.sh"; rm -f "$OSRC_HOME/limits-low-seen"
+  CLAUDE_CODE_SESSION_ID=sess-demo _osrc_limits_low_scan "codexwk=97" >/dev/null
+  f="$(_osrc_lanes_dir)/events.jsonl"
+  [ "$(_sv_read_range "$f" 0 - '[]' sess-demo | awk -F '\t' '$3 == "limit-low"' | wc -l | tr -d ' ')" = 1 ] ) \
+  && ok "the owner's supervise waiter receives limit-low" || bad "limit-low reaches no waiter"
+
+# 14. the visible page row (lib/hub.html renderLimits) shows the reading's age and the LOW marker,
+# rendered from rows the real export (_osrc_hub_limits) builds out of a fixture state.
+if command -v node >/dev/null 2>&1; then
+  rm -f "$OSRC_HOME/hub/probes/codex.json"
+  vis() { _osrc_hub_limits | node "$HERE/hub_limits_row.js" | awk -F '\t' '$1 == "codex" { print $2 "|" $3 }'; }
+  eval "_osrc_meter_windows() { printf 'codexwk\t40\t$RESET\t10800\n'; }"; v="$(vis)"
+  [ "$v" = "unknown|60% left, checked 3 h ago" ] && ok "page row: a 3 h old reading shows its age, not free room" || bad "page row hides the age: $v"
+  eval "_osrc_meter_windows() { printf 'codexwk\t96\t$RESET\t120\n'; }"; v="$(vis)"
+  case "$v" in *"|4% left, LOW: stop routing here") ok "page row: 4% left shows LOW" ;; *) bad "page row hides LOW: $v" ;; esac
+else echo "SKIP: node not installed (page row checks)"; fi
+
+# 15. the `lane summary` text table keeps its columns: LEFT is short and the marker fits.
+t="$(printf '[{"id":"codex","name":"ChatGPT","state":"low","left":"4%% left, LOW: stop routing here","low":true,"renews":"today","billing":"subscription"}]' | _osrc_summary_text_json | tail -1)"
+[ "$(printf '%s' "$t" | awk '{print $4, $5, $6}')" = "4% left LOW" ] && [ "$(printf '%s' "$t" | cut -c52-56)" = today ] && ok "summary table columns stay aligned" || bad "summary row: $t"
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

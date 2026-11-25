@@ -13,7 +13,7 @@ _osrc_hub_limits_cached | jq -e '.[0].id == "agy"' >/dev/null
 jq -e '.[0].id == "agy"' "$OSRC_HOME/hub/limits-cache.json" >/dev/null
 screen="$(python3 -I "$lib/plan_probe.py" agy-parse < "$(dirname "$0")/fixtures/agy-usage-screen.txt")"
 printf '[{"id":"agy","state":"unknown"}]' |
-  jq --argjson p "$(jq -n --argjson a "$screen" '{agy:$a}')" --argjson now 1 --argjson lt 90 --argjson ct 50 -f "$lib/plan-overlay.jq" |
+  jq --argjson p "$(jq -n --argjson a "$screen" '{agy:$a}')" --argjson now 1 --argjson lt 90 --argjson ct 50 --argjson stale 7200 --argjson ll 10 -f "$lib/plan-overlay.jq" |
   jq -e '.[0] | .left == "91% left" and .state == "ok" and .windows.agy1week.left == 0' >/dev/null
 cd "$lib"
 python3 -IB - <<'UNIT'

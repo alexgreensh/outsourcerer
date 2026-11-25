@@ -219,7 +219,7 @@ _osrc_plan_overlay() {
   for id in codex agy devin droid; do
     case " $ids " in *" $id "*) ;; *) continue ;; esac
     c="$(_osrc_probe_cache "$id")"; jq -e 'objects' >/dev/null 2>&1 <<<"$c" || continue
-    pj="$(jq -c --arg k "$id" --argjson v "$c" --argjson ttl "$(_osrc_probe_ttl "$id")" '. + {($k): ($v + {ttl: $ttl})}' <<<"$pj")"
+    pj="$(jq -c --arg k "$id" --argjson v "$c" '. + {($k): $v}' <<<"$pj")"
   done
   case " $ids " in *" claude "*) c="$(_osrc_probe_claude_reading)" && jq -e 'objects' >/dev/null 2>&1 <<<"$c" && pj="$(jq -c --argjson v "$c" '. + {claude: $v}' <<<"$pj")" ;; esac
   now="$(date +%s)"
@@ -235,7 +235,7 @@ _osrc_plan_overlay() {
 # _osrc_summary_text_json : stdin JSON rows -> the `lane summary` table (same columns as before).
 _osrc_summary_text_json() {
   printf '%-9s %-18s %-8s %-12s %-24s %-6s %s\n' ID NAME STATE LEFT RENEWS CAP BILLING
-  jq -r '.[] | [.id, .name, .state, (.left // "-"), (.renews // "-"), (.cap // "-"),
+  jq -r '.[] | [.id, .name, .state, ((.left // "-") | split(", ")[0]) + (if .stale == true then " (old)" elif .low == true then " LOW" else "" end), (.renews // "-"), (.cap // "-"),
           (if .billing == "metered" then "pay per use" elif .billing == "unknown" then "plan not confirmed" else "-" end)
           + (if .cap_tripped == true then " [cap tripped]" else "" end)] | @tsv' 2>/dev/null \
   | while IFS='	' read -r a b s l r c bl; do

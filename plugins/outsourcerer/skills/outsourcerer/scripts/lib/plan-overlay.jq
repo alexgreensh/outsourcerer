@@ -26,10 +26,10 @@ def row_age: ([.windows[]?.age_s | numbers] | min);
 def probe_newer: (row_age) as $a | $a == null or ($now - ($p.codex.checked // $now)) <= $a;
 def unmeasured: (.state == "unknown" or .state == "wait");
 # A kept last-good probe whose refresh failed says so; it is stale (never headroom) only once older than
-# its own cache TTL, so one failed refresh does not blank a seconds-old reading.
+# 15 minutes, so one failed refresh does not blank a young reading (the page refresh runs with TTL 0).
 def refresh_flag($c): if ($c.refresh_failed // "") != "" then
     . + {note: "\(.note // "") Refresh failed (\($c.refresh_failed)); showing the last good reading."}
-    | if ($now - ($c.checked // $now)) > ($c.ttl // 0) then
+    | if ($now - ($c.checked // $now)) > 900 then
         . + {stale: true} | if .state == "ok" or .state == "low" then .state = "unknown" else . end
       else . end
   else . end;
@@ -134,16 +134,17 @@ map(if (type == "object") | not then .
     | if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end
     | if (.windows | type) == "object" then .windows |= map_values(if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end) else . end
     | if (.left // "") == "" or .left == "not checked yet" then .left = "No reading" else . end
-    # A session-log reading keeps its own age as its checked-at time.
-    | if (.checked_at | type) != "number" and row_age != null then . + {checked_at: ($now - row_age)} else . end
+    # A session-log reading keeps its own age as its checked-at (and shown "Checked") time.
+    | if (.checked_at | type) != "number" and row_age != null then checked($now - row_age) else . end
     # Every measured reading carries its age. Past $stale it is unknown, never headroom (an exhausted
-    # one stays exhausted: stale only ever understates use). Under the low line it says so.
+    # one stays exhausted: stale only ever understates use). Under the low line it says so. Joined with ", "
+    # because the page row keeps only the text before the first " · ".
     | if (.used | type) == "number" then
         (if (.checked_at | type) == "number" then (($now - .checked_at) | if . < 0 then 0 else . end) else null end) as $age
         | (if $age != null then . + {age_s: $age} else . end)
-        | if $age != null and $age > $stale then . + {stale: true, left: "\(.left) · checked \(ago($now - $age)) ago"}
+        | if $age != null and $age > $stale then . + {stale: true, left: "\(.left), checked \(ago($now - $age)) ago"}
             | if .state == "ok" or .state == "low" then .state = "unknown" else . end
-          elif (100 - .used) <= $ll then . + {low: true, left: "\(.left) · LOW: stop routing here"}
+          elif (100 - .used) <= $ll then . + {low: true, left: "\(.left), LOW: stop routing here"}
           else . end
       else . end
     # "Waiting for reset" never shows without the reset time.

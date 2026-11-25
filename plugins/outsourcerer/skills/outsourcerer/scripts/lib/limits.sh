@@ -237,7 +237,7 @@ _osrc_limits_low_scan() {
     printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"
     case " $seen " in *" $w "*) ;; *)
       if type _osrc_lane_event >/dev/null 2>&1; then
-        _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" >/dev/null 2>&1 || true
+        _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" "$(_owner_sid 2>/dev/null)" >/dev/null 2>&1 || true
       fi ;;
     esac
   done
