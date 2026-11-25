@@ -478,15 +478,15 @@ _osrc_scr_generic() {
   i="$(_osrc_scr_last "*Press enter to confirm or esc to cancel*" $((n - 2 > 0 ? n - 2 : 0)))"
   if [ "$i" -ge 0 ]; then OSRC_SCR_KIND=other; _osrc_scr_set approval "${_SCR_L[$i]}"; return 0; fi
   # Busy only from the engine's own indicator, in the bottom status region (no rule: the last 4 rows).
-  local b=-1 t lo=$((n - 4))
-  _osrc_scr_bottom && lo=$((OSRC_SCR_BOTTOM - 1)); i=$((n - 1))
+  local b=-1 t lo=$((n - 4)) near=$((n - 2))   # no rule: a busy row outranks a shell prompt only in the last 2 rows
+  _osrc_scr_bottom && { lo=$((OSRC_SCR_BOTTOM - 1)); near=$((n - 3)); }; i=$((n - 1))
   while [ "$i" -ge "$lo" ] && [ "$i" -ge 0 ]; do
     l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
     case "$t" in *"· done"*|*"Worked for"*) break ;; esac
     if _osrc_scr_busy_row "$t"; then b=$i; break; fi
     i=$((i - 1))
   done
-  if [ "$b" -ge 0 ] && [ "$b" -ge $((n - 3)) ]; then _osrc_scr_set working "${_SCR_L[$b]}" "$b"; return 0; fi
+  if [ "$b" -ge 0 ] && [ "$b" -ge "$near" ]; then _osrc_scr_set working "${_SCR_L[$b]}" "$b"; return 0; fi
   case "$last" in *'$'|*'$ '|*'%'|*'% '|*'>'|*'> '|*'❯'|*'❯ '|*'#') _osrc_scr_set idle "$last"; return 0 ;; esac
   if [ "$b" -ge 0 ]; then _osrc_scr_set working "${_SCR_L[$b]}" "$b"; return 0; fi
   _osrc_scr_set unknown "no recognized signal in tail"
@@ -519,14 +519,13 @@ _osrc_scr_busy_row() { # <row>
 }
 
 # ---- rate limits / quota -------------------------------------------------------------------------
-# `limit` comes only from the engine's banner, a WHOLE row: a column-0 row that is the last content row
-# (blank/rule rows skipped) or sits above one plain trailer (agy's `Error ID:`), or Claude's `⎿` "limit
-# reached" row when it is the last content row, whatever is above it. Anything below it = history.
+# `limit` comes only from the engine's banner, a WHOLE row: a column-0 row or Claude's `⎿` "limit
+# reached" row that is the last content row or sits above one plain trailer (agy's `Error ID:`,
+# Claude's `/upgrade ...`), whatever is above it. A prompt, glyph or tool row below it = history.
 _OSRC_SCR_LIMIT_RE="^((⎿|⚠|⛔|✖|■)[[:space:]]+)?(error:[[:space:]]+)?(claude( ai)? usage limit reached|you('|’)?ve hit your (usage )?limit|individual quota reached|rate limited|([0-9]+-hour|weekly|opus weekly|sonnet weekly|session|plan usage|usage|rate) limit (reached|exceeded))([.!]?[[:space:]]*(·|∙|\|)?[[:space:]]*(your (limit|quota)( will)? resets?|resets?|try again|retrying|please upgrade)([[:space:]].*)?)?[.!]?$"
 _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status region holds the engine's limit banner
   local end i l t tl bi="" phrase="" secs="" clk
   if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom || :; end="$OSRC_SCR_BOTTOM"; fi
-  while [ "$end" -ge 0 ]; do case "${_SCR_L[$end]#"${_SCR_L[$end]%%[! ]*}"}" in ""|"──"*) end=$((end - 1)) ;; *) break ;; esac; done
   for i in "$end" $((end - 1)); do
     [ "$i" -ge 0 ] || return 1
     if [ "$i" -lt "$end" ]; then   # the row below must be a plain trailer, not a prompt, glyph or tool row
@@ -534,7 +533,7 @@ _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status 
     fi
     l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
     case "$l" in
-      "⎿"*|" ⎿"*|"  ⎿"*) case "$i:$t" in "$end:"*[Ll]"imit reached"*|"$end:"*"hit your"*[Ll]"imit"*) ;; *) continue ;; esac ;;
+      "⎿"*|" ⎿"*|"  ⎿"*) case "$t" in *"⎿"*[Ee]"rror:"*) continue ;; *[Ll]"imit reached"*|*"hit your"*[Ll]"imit"*) ;; *) continue ;; esac ;;   # Error: = a tool's output
       " "*) continue ;;
     esac
     case "$t" in *[Ll][Ii][Mm][Ii][Tt]*|*[Qq][Uu][Oo][Tt][Aa]*) ;; *) continue ;; esac   # cheap gate before the fork

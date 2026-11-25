@@ -73,6 +73,14 @@ txt '❯ run it' '⏺ Bash(make test)' '  ⎿  12 passed, 0 failed' '' "$B" "${C
 want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner after a tool block"
 txt '❯ why does it say "5-hour limit reached ∙ resets 3pm"?' '⏺ That is the plan banner; it clears at the reset.' "${CC_FOOT[@]}"
 nolim "$TMP/s.txt" cc "quoted banner in the prompt, turn continues below"
+# Round-5 review: Claude's /upgrade trailer under the banner is still a limit (P1); a finished command at a
+# shell prompt is idle, not working (P2); a tool's `Error: ... limit reached` output is not the banner (P3).
+txt '❯ continue' "$B" '     /upgrade to increase your usage limit.' "${CC_FOOT[@]}"
+want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner with its /upgrade trailer"
+txt '⠋ Installing deps' 'build ok' 'user@host:~$'
+want "$TMP/s.txt" "" 'idle|*' "finished command at a shell prompt reads idle"
+txt '❯ run it' '⏺ Bash(./fetch.sh)' '  ⎿  Error: Rate limit reached' "${CC_FOOT[@]}"
+nolim "$TMP/s.txt" cc "a tool's Error: rate-limit output is not the plan banner"
 txt '❯ continue' "$B" '⏺ Resumed after the reset. All 12 tests pass.' "${CC_FOOT[@]}"
 nolim "$TMP/s.txt" cc "old banner with a later reply below it"
 
