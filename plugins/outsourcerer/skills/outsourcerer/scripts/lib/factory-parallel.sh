@@ -1,46 +1,20 @@
-# factory-parallel.sh: the one task-list-to-running-plan flow (lane osrc-l5-parallel).
-# Sourced by outsourcerer.sh's lib/*.sh glob BEFORE the factory scripts; every function here only
-# CALLS factory functions at run time, so load order does not matter. It also holds the scheduler
-# functions moved out of factory-flow.sh (_ff_next_default, _ff_apply_defaults, _ff_dispatch,
-# _ff_review_failed) so that file only shrinks under the 1,000-line ratchet.
-#
-#   outsourcerer plan run [plan] [--max-parallel N] [--once] [--auto-land] [--interval S]
-#     runs a plan until it is done, blocked or escalated. Ready work starts in parallel by
-#     default (cap: --max-parallel, else OSRC_FACTORY_PARALLEL, else the profile's factory.parallel,
-#     else 3). Files each task declares (.files, or legacy .owns) conflict-serialize it against
-#     running and same-batch tasks; free commands run locally on the host. The flow stops instead
-#     of guessing: on a missing answer whose default is irreversible, paid or publishing (never
-#     auto-applied), and on a review round past the cap without an escalation record.
-#
-# Safe per-repo overrides live in <repo>/.outsourcerer.toml (never .outsourcerer/config.toml,
-# which owns shared budget defaults). Example:
-#
-#   [factory]
-#   check = "scripts/check_file_size.py"
-#   gate = "scripts/resource_gate.sh"
-#   parallel = 4
-#   [factory.heavy]
-#   "npm test" = "devin"
-#   "make test" = "devin"
-#   [factory.bench]
-#   "bench/" = true
-#
-# check: a free local command that verifies changed files (prose -> `git diff --check`).
-# gate: an optional executable run as `<gate> can-run` before each launch pass; rc1 pauses launches
-#   (absent file or rc>=2 fails open; the hard disk gate in the launch path still applies).
-# parallel: default launch cap when --max-parallel and OSRC_FACTORY_PARALLEL are unset.
-# heavy: command -> lane, run in an isolated worktree on a heavy lane. bench: path prefixes where
-# a benchmark with numbers is justified.
-#
-# Settings: OSRC_FACTORY_PARALLEL (default cap, 1-16, default 3), OSRC_FACTORY_CHECK (overrides the
-# profile check), OSRC_FACTORY_GATE (overrides the profile gate), OSRC_FACTORY_REVIEW_ROUNDS
-# (review cap, default 3). "gate"/"check" paths resolve against the repo root or OSRC_FACTORY_ROOT.
-# Decisions carry --default and a deadline; the flow applies the default at the deadline unless
-# `task hold --risk` marks it irreversible, paid or publishing (any non-safe risk never
-# auto-applies). A review round past the cap needs an approved escalation record at
-# .outsourcerer/plans/<plan>/escalations/<reviewer>.json:
-#   {"task":"t5","round":4,"reason":"why round four is justified","by":"who approved",
-#    "approved":true,"at":"iso"}
+# factory-parallel.sh: the scheduler pieces behind `plan run` (lane osrc-l5). Sourced by
+# outsourcerer.sh's lib/*.sh glob; every function here only CALLS factory functions at run time, so
+# load order does not matter. _ff_next_default, _ff_apply_defaults, _ff_dispatch, _ff_review_failed
+# and _task_worker_prompt moved here from factory-flow.sh / factory-tasks.sh (size ratchet).
+# What this adds, documented for users in references/factory-flow-cli.md:
+#   - launch cap: --max-parallel, else OSRC_FACTORY_PARALLEL, else the profile's parallel, else a
+#     default from the CPU count (3; 2 on <=4 cores; 1 on <=2 cores). Whole number 1-16.
+#   - resource gate: before each launch pass. Profile `gate`/OSRC_FACTORY_GATE names a command run as
+#     `<gate> can-run` (rc1 pauses; other failures fail open). Built in: free disk under
+#     OSRC_DISK_MIN_GB (10) or 1-minute load per core over OSRC_FACTORY_LOAD_MAX (2) pauses launches.
+#     OSRC_FACTORY_GATE=off turns every gate off. A gate only delays launches; it never fails a task.
+#   - file ownership: tasks declaring overlapping .files wait for each other, with the reason shown.
+#   - held decisions with --default and --until apply the default at the deadline unless the hold is
+#     --risk irreversible|paid|publish (or any unknown label): those wait for the captain.
+#   - review cap: OSRC_FACTORY_REVIEW_ROUNDS (3); a further round needs an approved escalation record.
+#   - optional per-repo profile <repo>/.outsourcerer.toml ([factory] check, gate, parallel;
+#     [factory.heavy] "cmd" = "where"; [factory.bench] "path/" = true). Read line by line, never sourced.
 
 _osrc_fp_jq() { jq "$@" | tr -d '\r'; return "${PIPESTATUS[0]}"; }
 
@@ -53,263 +27,218 @@ _osrc_fp_root() {
   (cd "$top" && pwd -P)
 }
 
-# _osrc_fp_profile_file [root] -> prints the per-repo profile path (<root>/.outsourcerer.toml).
-_osrc_fp_profile_file() { printf '%s/.outsourcerer.toml' "${1:-$OSRC_FACTORY_ROOT:-.}"; }
-
-# _osrc_fp_parse_value <raw> -> normalized scalar from one TOML key = value line.
-_osrc_fp_parse_value() {
+# _osrc_fp_unq <text> -> trimmed, with one pair of surrounding "..." or '...' removed.
+_osrc_fp_unq() {
   local v="$1"
-  v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+  v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
   printf '%s' "$v"
 }
 
-# _osrc_fp_get <section> <key> -> echoes the parsed value of <key> under [<section>] in the
-# profile. <key> may be bare or quoted; both sides are unquoted before comparing. Never sources
-# the file: each line is pattern-matched, so profile content cannot execute.
+# _osrc_fp_profile -> every "section<TAB>key<TAB>value" in the repo profile (OSRC_FACTORY_PROFILE, else
+# <repo>/.outsourcerer.toml under OSRC_FACTORY_ROOT or the current folder). Nothing when absent.
+# Keys may be bare or quoted ("npm test"); a trailing "# comment" after an unquoted value is dropped.
+_osrc_fp_profile() {
+  local file="${OSRC_FACTORY_PROFILE:-}" root line sec="" k v
+  if [ -z "$file" ]; then
+    root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" || return 0
+    file="$root/.outsourcerer.toml"
+  fi
+  [ -f "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(printf '%s' "$line" | tr -d '\r')"
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in
+      ''|\#*) continue ;;
+      \[*\]*) sec="${line#\[}"; sec="${sec%%\]*}"; sec="$(printf '%s' "$sec" | tr -d '[:space:]')"; continue ;;
+      *=*) ;;
+      *) continue ;;
+    esac
+    case "$line" in
+      \"*) k="${line#\"}"; k="${k%%\"*}"; v="${line#\"$k\"}" ;;
+      *) k="${line%%=*}"; v="${line#"$k"}" ;;
+    esac
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v#=}"; v="${v#"${v%%[![:space:]]*}"}"
+    case "$v" in
+      \"*) v="${v#\"}"; v="${v%%\"*}" ;;
+      \'*) v="${v#\'}"; v="${v%%\'*}" ;;
+      *) v="${v%%#*}" ;;
+    esac
+    k="$(_osrc_fp_unq "$k")"; v="$(_osrc_fp_unq "$v")"
+    [ -n "$k" ] && printf '%s\t%s\t%s\n' "$sec" "$k" "$v"
+  done < "$file"
+}
+
+# _osrc_fp_get <section> <key> -> the value, else nothing.
 _osrc_fp_get() {
-  local want_sec="$1" want_key="$2" file root line section="" k v
-  want_key="${want_key%\"}"; want_key="${want_key#\"}"
-  want_key="${want_key%\'}"; want_key="${want_key#\'}"
-  [ -n "${OSRC_FACTORY_PROFILE:-}" ] && file="$OSRC_FACTORY_PROFILE" \
-    || { root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}" 2>/dev/null)" || return 0; file="$(_osrc_fp_profile_file "$root")"; }
-  [ -f "$file" ] || return 0
-  while IFS= read -r line; do
-    case "$line" in
-      \[*\]*) section="$(printf '%s' "$line" | sed -e 's/^\[//; s/\].*//; s/[[:space:]]//g')"; continue ;;
-      ''|\#*) continue ;;
-    esac
-    [ "$section" = "$want_sec" ] || continue
-    k="$(printf '%s' "$line" | sed -n 's/^[[:space:]]*\("[^"]*"|'"'"'[^'"'"']*'"'"'\|[A-Za-z0-9_.-]*\)[[:space:]]*=.*/\1/p')"
-    [ -n "$k" ] || continue
-    k="${k%\"}"; k="${k#\"}"; k="${k%\'}"; k="${k#\'}"
-    [ "$k" = "$want_key" ] || continue
-    v="$(printf '%s' "$line" | sed -e 's/^[^=]*=//' -e 's/[[:space:]]*#.*$//')"
-    v="$(_osrc_fp_parse_value "$v")"
-    printf '%s' "$v"
-    return 0
-  done < "$file"
-  return 0
+  _osrc_fp_profile | awk -F '\t' -v s="$1" -v k="$2" '$1 == s && $2 == k { print $3; exit }'
 }
 
-# _osrc_fp_section <section> -> every "key = value" pair under [factory.<section>] as lines.
+# _osrc_fp_section <section> -> "key<TAB>value" lines under [<section>].
 _osrc_fp_section() {
-  local want="$1" file root line section="" k v
-  [ -n "${OSRC_FACTORY_PROFILE:-}" ] && file="$OSRC_FACTORY_PROFILE" \
-    || { root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}" 2>/dev/null)" || return 0; file="$(_osrc_fp_profile_file "$root")"; }
-  [ -f "$file" ] || return 0
-  while IFS= read -r line; do
-    case "$line" in
-      \[*\]*) section="$(printf '%s' "$line" | sed -e 's/^\[//; s/\].*//; s/[[:space:]]//g')"; continue ;;
-      ''|\#*) continue ;;
-    esac
-    [ "$section" = "factory.$want" ] || continue
-    k="$(printf '%s' "$line" | sed -n 's/^[[:space:]]*\([A-Za-z0-9_.-]*\)[[:space:]]*=.*/\1/p')"
-    [ -n "$k" ] || continue
-    v="$(printf '%s' "$line" | sed -e 's/^[^=]*=//' -e 's/[[:space:]]*#.*$//')"
-    v="$(_osrc_fp_parse_value "$v")"
-    [ -n "$k" ] && [ -n "$v" ] && printf '%s\t%s\n' "$k" "$v"
-  done < "$file"
+  _osrc_fp_profile | awk -F '\t' -v s="$1" '$1 == s { print $2 "\t" $3 }'
 }
 
-# _osrc_fp_check -> the repo's free local check: OSRC_FACTORY_CHECK, then profile "check", then
-# "git diff --check". Printed once per launch so the check is visible in the run record.
+# _osrc_fp_check -> the repo's free local check: OSRC_FACTORY_CHECK, then profile check, else empty.
 _osrc_fp_check() {
   local c="${OSRC_FACTORY_CHECK:-}"
   [ -n "$c" ] || c="$(_osrc_fp_get factory check)"
-  [ -n "$c" ] || c='git diff --check'
   printf '%s' "$c"
 }
 
-# _osrc_fp_heavy_for <cmd> -> the configured heavy lane for a command, else empty.
-_osrc_fp_heavy_for() {
-  local cmd="$1" k v
-  while IFS="$(printf '\t')" read -r k v; do
-    [ -n "$k" ] || continue
-    case "$cmd" in "$k"|"$k "*|*" $k"|*" $k "*) printf '%s' "$v"; return 0 ;; esac
-  done <<EOF
-$(_osrc_fp_section heavy)
+# _osrc_fp_brief_rules [files...] -> the profile's repo rules as a short brief section: heavy
+# commands and where they run, and which given files sit under a benchmark path. Empty when the
+# profile declares neither.
+_osrc_fp_brief_rules() {
+  local heavy bench k v f hit=""
+  heavy="$(_osrc_fp_section factory.heavy)"; bench="$(_osrc_fp_section factory.bench)"
+  for f in "$@"; do
+    while IFS="$(printf '\t')" read -r k v; do
+      [ -n "$k" ] && [ "$v" != false ] && [ "$v" != 0 ] || continue
+      case "$f" in "$k"*) hit="$hit $f"; break ;; esac
+    done <<EOF
+$bench
 EOF
-  return 0
-}
-
-# _osrc_fp_bench_for <path> -> "yes" when the path sits under a profile bench prefix.
-_osrc_fp_bench_for() {
-  local p="$1" k
-  while IFS="$(printf '\t')" read -r k v; do
-    case "$p" in "$k"*|*/"$k"*) [ "$v" != "false" ] && [ "$v" != "0" ] && { printf 'yes'; return 0; } ;;
-    esac
-  done <<EOF
-$(_osrc_fp_section bench)
-EOF
-  return 0
+  done
+  [ -n "$heavy$bench" ] || return 0
+  printf '\n## Repo rules (from .outsourcerer.toml)\n'
+  [ -z "$heavy" ] || printf '%s\n' "$heavy" | awk -F '\t' 'NF { printf "- Heavy command `%s` runs on %s, not on this machine.\n", $1, $2 }'
+  if [ -n "$hit" ]; then printf -- '- A benchmark with numbers is justified for:%s\n' "$hit"
+  elif [ -n "$bench" ]; then printf -- '- No benchmark is needed: none of your files sit under a benchmark path.\n'; fi
 }
 
 # ---------------------------------------------------------------- file ownership
 
-# _osrc_fp_task_files <plan> <task-id> -> prints one repo-relative path per line, from the
-# task's .files field (explicit ownership) or the legacy .owns field. Empty when undeclared.
+# _osrc_fp_task_files <plan> <task-id> -> one repo-relative path per line from the task's .files
+# (or legacy .owns). Empty when undeclared.
 _osrc_fp_task_files() {
-  local plan="$1" id="$2" t
-  t="$(_task_get "$plan" "$id" 2>/dev/null)" || return 0
-  printf '%s' "$t" | _osrc_fp_jq -r '(.files // .owns // [])[]? | strings' 2>/dev/null \
-    | while IFS= read -r f; do
-        printf '%s' "$f" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's#^\./##' -e 's#/$##'
-      done | grep -v '^$' | sort -u
+  local t
+  t="$(_task_get "$1" "$2" 2>/dev/null)" || return 0
+  printf '%s' "$t" | _osrc_fp_jq -r '(.files // .owns // [])[]? | strings
+    | gsub("^\\s+|\\s+$"; "") | sub("^\\./+"; "") | sub("/+$"; "") | select(. != "")' 2>/dev/null | sort -u
 }
 
-# _osrc_fp_hit <x> <y> -> rc0 when two repo-relative paths collide (equal, or one a "/"-boundary
-# prefix of the other: "src/a.sh" vs "src").
-_osrc_fp_hit() {
-  [ -n "$1" ] && [ -n "$2" ] || return 1
-  if [ "$1" = "$2" ] || [ "${1%/}/" = "${2%/}/" ]; then return 0; fi
-  case "$2" in "$1"/*) return 0 ;; esac
-  case "$1" in "$2"/*) return 0 ;; esac
-  return 1
-}
-
-# _osrc_fp_overlap <list-a> <list-b> -> rc 0 when any path in the newline-separated lists
-# prefix-collides. Empty lists never overlap.
-_osrc_fp_overlap() {
-  local a="$1" b="$2" x y
-  [ -n "$a" ] && [ -n "$b" ] || return 1
-  while IFS= read -r x; do
-    [ -n "$x" ] || continue
-    while IFS= read -r y; do
-      [ -n "$y" ] || continue
-      _osrc_fp_hit "$x" "$y" && return 0
-    done <<EOF2
-$b
-EOF2
-  done <<EOF1
-$a
-EOF1
-  return 1
-}
-
-# _osrc_fp_conflict <list-a> <list-b> -> prints "path-a -> path-b" for the first colliding pair,
-# nothing when the lists are disjoint. Used for the "why is this task waiting" line.
+# _osrc_fp_conflict <list-a> <list-b> -> "path-a -> path-b" for the first colliding pair (equal, or
+# one a folder of the other), nothing when disjoint or either list is empty.
 _osrc_fp_conflict() {
-  local a="$1" b="$2" x y
-  [ -n "$a" ] && [ -n "$b" ] || return 0
+  local x y
+  [ -n "$1" ] && [ -n "$2" ] || return 0
   while IFS= read -r x; do
     [ -n "$x" ] || continue
     while IFS= read -r y; do
       [ -n "$y" ] || continue
-      if _osrc_fp_hit "$x" "$y"; then printf '%s -> %s' "$x" "$y"; return 0; fi
+      case "$x" in "$y"|"$y"/*) printf '%s -> %s' "$x" "$y"; return 0 ;; esac
+      case "$y" in "$x"/*) printf '%s -> %s' "$x" "$y"; return 0 ;; esac
     done <<EOF2
-$b
+$2
 EOF2
   done <<EOF1
-$a
+$1
 EOF1
   return 0
 }
 
-# ---------------------------------------------------------------- resource gate
+# ---------------------------------------------------------------- resources
 
-# _osrc_fp_gate_can_run -> rc0 when new worker launches may proceed this pass.
-# The gate is OPTIONAL: no profile "gate" key and no OSRC_FACTORY_GATE means open. When set it
-# names an executable (absolute, or relative to the repo root) run as `<gate> can-run`:
-#   rc0  -> launch; rc1 -> pause launches this pass (its stdout is the reason, kept in
-#           _OSRC_FP_GATE_REASON); any other rc or a spawn failure -> warn once and FAIL OPEN,
-#           because the hard disk gate inside the launch path still protects every real launch.
-# A missing file also fails open. This is a scheduling hint only; it never marks a task failed.
+# _osrc_fp_ncpu -> online CPU count, else nothing.
+_osrc_fp_ncpu() {
+  local n
+  n="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*|0) return 0 ;; esac
+  printf '%s' "$n"
+}
+
+# _osrc_fp_load1 -> the 1-minute load average, else nothing.
+_osrc_fp_load1() {
+  if [ -r /proc/loadavg ]; then cut -d' ' -f1 /proc/loadavg 2>/dev/null; return 0; fi
+  uptime 2>/dev/null | sed -n 's/.*load averages*:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1
+}
+
+# _osrc_fp_gate_can_run -> rc0 when new launches may proceed this pass. rc1 sets _OSRC_FP_GATE_REASON.
+# Every reading that is missing or broken counts as "go": the gate must never wedge a plan, and the
+# hard disk gate inside the real launch path still applies.
 _OSRC_FP_GATE_REASON=""
 _osrc_fp_gate_can_run() {
-  local g root out rc
+  local g root out rc kb n l
   _OSRC_FP_GATE_REASON=""
   g="${OSRC_FACTORY_GATE:-}"
+  [ "$g" = off ] && return 0
   [ -n "$g" ] || g="$(_osrc_fp_get factory gate)"
-  [ -n "$g" ] || return 0
-  case "$g" in /*) ;; *)
-    root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}" 2>/dev/null)" || return 0
-    g="$root/$g" ;;
-  esac
-  [ -f "$g" ] || return 0
-  if [ -x "$g" ]; then out="$("$g" can-run 2>&1)"; rc=$?
-  else out="$(sh "$g" can-run 2>&1)"; rc=$?; fi
-  case "$rc" in
-    0) return 0 ;;
-    1) _OSRC_FP_GATE_REASON="$(printf '%s' "$out" | head -1 | cut -c1-200)"; [ -n "$_OSRC_FP_GATE_REASON" ] || _OSRC_FP_GATE_REASON="resource gate $g said no"; return 1 ;;
-    *) printf 'outsourcerer: resource gate %s failed (rc=%s); ignoring it this pass\n' "$g" "$rc" >&2; return 0 ;;
-  esac
+  if [ -n "$g" ]; then
+    case "$g" in /*) ;; *) root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" && g="$root/$g" ;; esac
+    if [ -f "$g" ]; then
+      if [ -x "$g" ]; then out="$("$g" can-run 2>&1)"; rc=$?; else out="$(sh "$g" can-run 2>&1)"; rc=$?; fi
+      case "$rc" in
+        0) ;;
+        1) _OSRC_FP_GATE_REASON="$(printf '%s' "$out" | head -1 | cut -c1-200)"
+           _OSRC_FP_GATE_REASON="${_OSRC_FP_GATE_REASON:-the repo resource gate said no}"; return 1 ;;
+        *) printf 'outsourcerer: resource gate %s failed (rc=%s); ignoring it this pass\n' "$g" "$rc" >&2 ;;
+      esac
+    fi
+  fi
+  if type _osrc_free_kb >/dev/null 2>&1; then
+    kb="$(_osrc_free_kb 2>/dev/null)"
+    if [ -n "$kb" ] && [ -z "$(printf '%s' "$kb" | tr -d '0-9')" ] && [ $(( kb / 1048576 )) -lt "${OSRC_DISK_MIN_GB:-10}" ]; then
+      _OSRC_FP_GATE_REASON="free disk is $(( kb / 1048576 ))GB, under ${OSRC_DISK_MIN_GB:-10}GB; outsourcerer cleanup shows what can go"; return 1
+    fi
+  fi
+  if [ "$(uname -s 2>/dev/null)" = Darwin ] && type _osrc_mac_overloaded >/dev/null 2>&1; then
+    _osrc_mac_overloaded && { _OSRC_FP_GATE_REASON="this Mac is overloaded (load or swap)"; return 1; }
+    return 0
+  fi
+  n="$(_osrc_fp_ncpu)"; l="$(_osrc_fp_load1)"
+  [ -n "$n" ] && [ -n "$l" ] && [ -z "$(printf '%s' "$l" | tr -d '0-9.')" ] || return 0
+  if awk -v l="$l" -v n="$n" -v m="${OSRC_FACTORY_LOAD_MAX:-2}" 'BEGIN { exit !(m + 0 > 0 && l / n > m + 0) }'; then
+    _OSRC_FP_GATE_REASON="load is $l on $n cores, over ${OSRC_FACTORY_LOAD_MAX:-2} per core"; return 1
+  fi
+  return 0
 }
 
-# ---------------------------------------------------------------- concurrency
-
-# _osrc_fp_max_parallel [explicit] -> the effective launch cap: explicit flag, else
-# OSRC_FACTORY_PARALLEL, else the repo profile's factory.parallel, else 3. Whole number 1-16;
-# rc1 (message on stderr) on a bad value.
+# _osrc_fp_max_parallel [explicit] -> the launch cap (see header). rc1 with a message on a bad value.
 _osrc_fp_max_parallel() {
-  local v="${1:-}" src=flag
-  if [ -z "$v" ]; then v="${OSRC_FACTORY_PARALLEL:-}"; [ -n "$v" ] && src=env; fi
-  if [ -z "$v" ]; then v="$(_osrc_fp_get factory parallel)"; [ -n "$v" ] && src=profile; fi
-  [ -n "$v" ] || { printf '3'; return 0; }
-  case "$v" in ''|*[!0-9]*) printf 'outsourcerer: parallel limit (%s) must be a whole number\n' "$src" >&2; return 1 ;; esac
-  while [ "${#v}" -gt 1 ] && [ "${v#0}" != "$v" ]; do v="${v#0}"; done
-  v="${v:-0}"
-  [ "$v" -ge 1 ] && [ "$v" -le 16 ] || { printf 'outsourcerer: parallel limit must be 1-16\n' >&2; return 1; }
+  local v="${1:-}" src=--max-parallel n
+  if [ -z "$v" ]; then v="${OSRC_FACTORY_PARALLEL:-}"; src=OSRC_FACTORY_PARALLEL; fi
+  if [ -z "$v" ]; then v="$(_osrc_fp_get factory parallel)"; src="the repo profile's parallel"; fi
+  if [ -z "$v" ]; then
+    n="$(_osrc_fp_ncpu)"; v=3
+    [ -n "$n" ] && [ "$n" -le 4 ] && v=2
+    [ -n "$n" ] && [ "$n" -le 2 ] && v=1
+    printf '%s' "$v"; return 0
+  fi
+  case "$v" in *[!0-9]*) printf 'outsourcerer: %s (%s) must be a whole number 1-16\n' "$src" "$v" >&2; return 1 ;; esac
+  v="$(printf '%s' "$v" | sed 's/^0*//')"
+  [ -n "$v" ] && [ "$v" -ge 1 ] && [ "$v" -le 16 ] || { printf 'outsourcerer: %s must be 1-16\n' "$src" >&2; return 1; }
   printf '%s' "$v"
-}
-
-# ---------------------------------------------------------------- held decisions
-
-# _osrc_fp_defaultable <task-json> -> rc0 when the hold may auto-apply at its deadline.
-# A hold is defaultable only with a non-empty default and a future/past positive deadline AND a
-# risk class that allows automation: .hold.risk absent/empty/"reversible"/"safe". Any other risk
-# (irreversible, paid, publish, or an unknown label) NEVER auto-applies: those waits end only with
-# the captain's answer.
-_osrc_fp_defaultable() {
-  printf '%s' "$1" | _osrc_fp_jq -e '
-    (.state == "held")
-    and (((.hold.default // "") | test("\\S")))
-    and (((.hold.until_epoch // 0) | type) == "number") and ((.hold.until_epoch // 0) > 0)
-    and (((.hold.risk // "") as $r | $r == "" or $r == "reversible" or $r == "safe"))' \
-    >/dev/null 2>&1
-}
-
-# _osrc_fp_risky_hold <task-json> -> rc0 when the hold declares a risk that forbids auto-apply.
-_osrc_fp_risky_hold() {
-  printf '%s' "$1" | _osrc_fp_jq -e '
-    (.state == "held") and (((.hold.risk // "") as $r | $r != "" and $r != "reversible" and $r != "safe"))' \
-    >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------- review cap + escalation
 
-# _osrc_fp_review_cap -> max review rounds before an escalation record is required.
-# OSRC_FACTORY_REVIEW_ROUNDS, default 3; a non-numeric or <1 value falls back to 3.
+# _osrc_fp_review_cap -> review rounds allowed before an escalation record is required (default 3).
 _osrc_fp_review_cap() {
   local v="${OSRC_FACTORY_REVIEW_ROUNDS:-3}"
   case "$v" in ''|*[!0-9]*) v=3 ;; esac
-  while [ "${#v}" -gt 1 ] && [ "${v#0}" != "$v" ]; do v="${v#0}"; done
-  [ "${v:-0}" -ge 1 ] || v=3
-  printf '%s' "$v"
+  v="$(printf '%s' "$v" | sed 's/^0*//')"
+  printf '%s' "${v:-3}"
 }
 
 # _osrc_fp_esc_path <plan> <tid> -> the escalation record path for a task.
 _osrc_fp_esc_path() { printf '%s/escalations/%s.json' "$(_plan_dir "$1")" "$2"; }
 
-# _osrc_fp_escalation_ok <plan> <tid> <round> -> rc0 when an APPROVED escalation record exists for
-# exactly that review round: {"task":"t5","round":4,"reason":"...","by":"...","approved":true}.
-# A pending record (no approved:true) does not count. Never executes record content.
+# _osrc_fp_escalation_ok <plan> <tid> <round> -> rc0 when an APPROVED record exists for that round:
+# {"task":"t5","round":4,"reason":"...","by":"...","approved":true}. A pending record does not count.
 _osrc_fp_escalation_ok() {
-  local f
-  f="$(_osrc_fp_esc_path "$1" "$2")"
+  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
   [ -f "$f" ] || return 1
   _osrc_fp_jq -e --argjson r "$3" '.approved == true and (.round == $r)' "$f" >/dev/null 2>&1
 }
 
-# _osrc_fp_escalation_write <plan> <tid> <round> <reason> -> create a PENDING escalation record when
-# none exists (an approved record is never overwritten). Prints the path. Best-effort: rc1 when the
-# directory cannot be written; callers treat that as "hold anyway".
+# _osrc_fp_escalation_write <plan> <tid> <round> <reason> -> write a PENDING record (an approved one
+# for the same round is never overwritten) and print its path. rc1 when it cannot be written.
 _osrc_fp_escalation_write() {
-  local plan="$1" tid="$2" round="$3" reason="$4" f d
-  f="$(_osrc_fp_esc_path "$plan" "$tid")"
-  [ -f "$f" ] && _osrc_fp_jq -e '.approved == true' "$f" >/dev/null 2>&1 && { printf '%s' "$f"; return 0; }
+  local f d; f="$(_osrc_fp_esc_path "$1" "$2")"
+  _osrc_fp_escalation_ok "$1" "$2" "$3" && { printf '%s' "$f"; return 0; }
   d="$(dirname "$f")"; mkdir -p "$d" 2>/dev/null || return 1
-  _osrc_fp_jq -n --arg t "$tid" --argjson r "$round" --arg reason "$reason" --arg at "$(_factory_now)" \
+  _osrc_fp_jq -n --arg t "$2" --argjson r "$3" --arg reason "$4" --arg at "$(_factory_now)" \
     '{task:$t, round:$r, reason:$reason, status:"pending", approved:false, at:$at}' > "$f.tmp" 2>/dev/null \
     && mv -f "$f.tmp" "$f" 2>/dev/null || { rm -f "$f.tmp"; return 1; }
   printf '%s' "$f"
@@ -338,13 +267,16 @@ _task_worker_prompt() {
   # their own workspace, and the brief lives under OSRC_HOME. 16KB keeps the whole command line well
   # under the Windows 32,767-character limit. Larger briefs go by path.
   local bsize; bsize="$(wc -c < "$brief" 2>/dev/null | tr -d ' ')"
+  # shellcheck disable=SC2046
   if [ -n "$bsize" ] && [ "$bsize" -le "${OSRC_BRIEF_INLINE_MAX:-16384}" ]; then
     printf '\nYour full brief follows. It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly. (Saved copy: %s)\n\n' "$brief"
     cat "$brief"
-    return 0
+  else
+    printf '\nBefore anything else, read your full brief: %s\n' "$brief"
+    printf 'It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly.\n'
   fi
-  printf '\nBefore anything else, read your full brief: %s\n' "$brief"
-  printf 'It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly.\n'
+  # The repo profile's heavy commands and benchmark paths (nothing when the repo declares none).
+  _osrc_fp_brief_rules $(_osrc_fp_task_files "$plan" "$tid") 2>/dev/null || true
 }
 
 # _ff_next_default <plan> -> "<epoch> <tid>" of the soonest held decision whose default may

@@ -910,13 +910,13 @@ cmd_plan_run() {
   [ "$interval" -gt 0 ] && [ "$maxmin" -gt 0 ] || die "plan run limits must be greater than zero"
   _ff_need_jq
   _ff_need_fns _plan_dir _plan_resolve _task_get _task_update _task_list _task_view _task_ready _task_dispatch _factory_done_check _osrc_fp_max_parallel _osrc_fp_gate_can_run
-  # Launch cap: --max-parallel, else OSRC_FACTORY_PARALLEL, else the repo profile's factory.parallel,
-  # else 3 (lib/factory-parallel.sh). Validated there (whole number 1-16).
-  max="$(_osrc_fp_max_parallel "$max")" || return 1
   plan="$(_plan_resolve ${plan:+"$plan"})" || return 1
   [ -n "$plan" ] || die "no plan given and no current plan; name one: plan run <plan>"
   pd="$(_plan_dir "$plan")" || return 1
   [ -d "$pd" ] || die "no plan named '$plan' (see: plan ls)"
+  # The repo profile is the plan's repo's, wherever this runs from. Launch cap and gate: lib/factory-parallel.sh.
+  local OSRC_FACTORY_ROOT="${OSRC_FACTORY_ROOT:-$(_ff_jq -r '.repo // ""' "$pd/plan.json" 2>/dev/null)}"
+  max="$(_osrc_fp_max_parallel "$max")" || return 1
 
   _ff_lock_acquire "$pd/run.lock"; rc=$?
   if [ "$rc" -eq 1 ]; then
