@@ -31,10 +31,12 @@ export PATH="$FAKE_ROOT/bin:$PATH" HOME="$FAKE_ROOT" OSRC_HOME="$FAKE_ROOT/osrc"
 unset OSRC_STREAM OSRC_RUN_ID OSRC_TASK_CLASS
 
 # Each dispatch runs in a fresh shell with the script sourced (OSRC_SOURCED=1 skips main).
+# A direct delegate() call is spend-gated and bare swe-2 is not proven Free: consent per call keeps
+# this suite about the edit note (the refusal is test_devin_launch_gate's job).
 prompt_for() { # <perm> [env...]
   local perm="$1"; shift
   local cap="$FAKE_ROOT/prompt.$perm.$#"
-  env DEVIN_CAPTURE="$cap" "$@" bash -c 'f="$1"; perm="$2"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; PROVIDER=devin; delegate "$perm" "" -m swe-2 "fix the parser"' _ "$SRC" "$perm" >/dev/null 2>&1
+  env DEVIN_CAPTURE="$cap" "$@" bash -c 'f="$1"; perm="$2"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; PROVIDER=devin; OSRC_SPEND_OK=1 delegate "$perm" "" -m swe-2 "fix the parser"' _ "$SRC" "$perm" >/dev/null 2>&1
   cat "$cap" 2>/dev/null
 }
 
@@ -44,7 +46,7 @@ prompt_for() { # <perm> [env...]
 ledger_class_for() { # <perm> <task>
   local perm="$1" task="$2" cap="$FAKE_ROOT/prompt.class"
   env DEVIN_CAPTURE="$cap" bash -c 'f="$1"; perm="$2"; task="$3"; set --; OSRC_SOURCED=1; . "$f" >/dev/null 2>&1; PROVIDER=devin
-    delegate "$perm" "" -m swe-2 "$task" >/dev/null 2>&1
+    OSRC_SPEND_OK=1 delegate "$perm" "" -m swe-2 "$task" >/dev/null 2>&1
     printf "want=%s got=%s\n" "$(_classify_task "$task")" "$(tail -n 1 "$OSRC_LEDGER" 2>/dev/null | jq -r .task_class 2>/dev/null)"' _ "$SRC" "$perm" "$task" 2>/dev/null
 }
 
