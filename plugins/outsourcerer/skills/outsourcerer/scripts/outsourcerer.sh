@@ -18784,12 +18784,10 @@ main() {
   # local: callees (cmd_bg, run_job, the spend gate) see it by dynamic scope; each process
   # (preflight child, detached job child) snapshots its own argv.
   local -a _OSRC_USER_ARGV=("$@")
-  # Surface neglected jobs on EVERY invocation. The orchestrator forgetting to watch is the observed
-  # failure, so the reminder has to come from the tool at the moment of next contact, not from a rule
-  # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
-  # commands whose whole purpose is already to look.
+  # Surface neglected jobs on EVERY invocation (forgetting to watch is the observed failure), except
+  # inside a detached job (it IS the work) and in commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|supervise|lane|review|team|lease|"") ;;
+    __runjob|__heartbeat-beacon|watch|watcher|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|supervise|lane|review|team|lease|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -18874,6 +18872,7 @@ main() {
     heartbeat)   cmd_heartbeat "$@" ;;                     # verified supervision arm: start|status
     watch)       cmd_watch "$@" ;;                         # bounded ~15s status poll (OSRC_STATUS_DEADLINE); run-to-terminal callers use `wait`
     supervise)   cmd_supervise "$@" ;;                     # ONE blocking waiter for everything this session owns: EVENT/NEXT lines (lib/supervise.sh)
+    watcher)     cmd_watcher "$@" ;;                       # the per-user watcher: install|uninstall|status|run (lib/watchsvc.sh)
     stop-guard)  cmd_stop_guard "$@" ;;                  # Claude Code Stop hook: block a turn end while owned runs have no waiter (#48)
     adopt)       cmd_adopt "$@" ;;                        # session handover: move another session's owned targets here (adopt --list | adopt <old-sid>)
     handover)    cmd_handover "$@" ;;                     # write the markdown brief a fresh session picks this fleet up with [--out FILE]
@@ -18948,7 +18947,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|supervise|lane|review|team|lease|explain|classify|session|\
+    watch|watcher|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|supervise|lane|review|team|lease|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue|cloud)
       if ! _blind_turn_guard; then
