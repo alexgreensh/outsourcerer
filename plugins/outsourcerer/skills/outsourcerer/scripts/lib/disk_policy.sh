@@ -647,8 +647,8 @@ _osrc_disk_monitor_loop() {
 }
 
 # _osrc_disk_monitor_ensure — called on every launch: post demand, spawn a monitor unless a
-# verified owner is alive. The child closes every inherited descriptor (fd 5 is a caller's
-# stderr during background preflight) so it never holds a caller's pipe open.
+# verified owner is alive. The child closes every inherited descriptor 3-31 (a caller's fd 5, or
+# bash's saved copies of a capture pipe at 10+) so it never holds a caller's pipe open.
 _osrc_disk_monitor_ensure() {
   [ "$(_osrc_disk_conf OSRC_DISK_POLICY_OFF)" = "1" ] && return 0
   [ -n "${OSRC_HOME:-}" ] && [ -d "$OSRC_HOME" ] || return 0
@@ -656,7 +656,7 @@ _osrc_disk_monitor_ensure() {
   _mkdir_private "$d" >/dev/null 2>&1 || return 0
   printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$d/demand" 2>/dev/null
   _osrc_disk_lock_alive && return 0
-  ( _osrc_disk_monitor_loop ) 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- </dev/null >/dev/null 2>&1 &
+  ( i=3; while [ "$i" -lt 32 ]; do eval "exec $i>&-"; i=$((i+1)); done; _osrc_disk_monitor_loop ) </dev/null >/dev/null 2>&1 &
   return 0
 }
 

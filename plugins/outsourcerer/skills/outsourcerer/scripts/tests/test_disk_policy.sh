@@ -304,9 +304,9 @@ MH="$TMP/mon"; mkdir -p "$MH/jobs"; settings "$MH"
 sleep 300 & MJ=$!; KILL="$KILL $MJ"; disown "$MJ" 2>/dev/null
 MJD="$MH/jobs/job-m"; mkdir -p "$MJD"; echo running > "$MJD/status"; echo "$MJ" > "$MJD/pid"; lstart "$MJ" > "$MJD/pid_start"; : > "$MJD/out.log"
 setfree 3145728
-# P1: the monitor must not hold the caller's fd 5 (background preflight stderr) open.
+# P1: the monitor must not hold a caller's pipe open (fd 5, or bash's saved fds at 10+).
 t0="$(date +%s)"
-out="$(OSRC_DISK_MONITOR_IDLE_TICKS=30 osrc "$MH" 'exec 5>&1; _osrc_disk_monitor_ensure; echo launched')"
+out="$(OSRC_DISK_MONITOR_IDLE_TICKS=30 osrc "$MH" 'exec 5>&1 12>&1; _osrc_disk_monitor_ensure; echo launched')"
 el=$(( $(date +%s) - t0 ))
 [ "$el" -lt 8 ] && grep -q launched <<<"$out" && ok "captured launch returns while the monitor runs (${el}s)" || bad "caller blocked ${el}s"
 wait_for '[ -n "$(owner_pid "$MH")" ] && stopped '"$MJ" 40
