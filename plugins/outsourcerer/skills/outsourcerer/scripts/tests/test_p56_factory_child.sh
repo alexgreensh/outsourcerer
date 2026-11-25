@@ -4,6 +4,8 @@ set -uo pipefail
 D="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d "${TMPDIR%/}/p56-factory.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 export HOME="$T/user" OSRC_HOME="$T/state" OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=t@example.com
 mkdir -p "$HOME" "$OSRC_HOME" "$T/bin" "$T/repo"
 git -C "$T/repo" init -q

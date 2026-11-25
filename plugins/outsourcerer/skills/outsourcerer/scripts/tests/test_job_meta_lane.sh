@@ -6,6 +6,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 command -v jq >/dev/null 2>&1 || { echo "SKIP: jq missing"; exit 0; }
 E="$(mktemp -d)"; E="$(cd "$E" && pwd -P)"; trap 'rm -rf "$E"' EXIT
 export HOME="$E/home" OSRC_HOME="$E/state" GIT_CEILING_DIRECTORIES="$E"; mkdir -p "$HOME" "$E/bin" "$E/work"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 pass=0; fail=0; ok() { echo "PASS: $1"; pass=$((pass+1)); }; bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 printf '#!/usr/bin/env bash\necho "fine"; echo "OSRC::DONE ok"\n' > "$E/bin/codex"; chmod +x "$E/bin/codex"
 jid="$(cd "$E/work" && PATH="$E/bin:$PATH" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_HEARTBEAT_DISABLED=1 \

@@ -7,6 +7,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR%/}/.account-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 trap 'rm -rf "$TEST_ROOT"' EXIT
 export HOME="$TEST_ROOT/home" OSRC_HOME="$TEST_ROOT/state"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 mkdir -p "$OSRC_HOME/bin" "$OSRC_HOME/a/token-optimizer" "$OSRC_HOME/b/token-optimizer" "$OSRC_HOME/unknown"
 for cli in codex devin droid cursor-agent agent agy gemini cline pi hermes warp curl gh; do
   printf '#!/bin/bash\nexit 99\n' > "$OSRC_HOME/bin/$cli"

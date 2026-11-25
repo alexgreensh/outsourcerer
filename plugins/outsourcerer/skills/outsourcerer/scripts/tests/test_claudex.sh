@@ -9,6 +9,8 @@ SRC="$SCRIPT_DIR/../outsourcerer.sh"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 
 export OSRC_HOME="${TMPDIR%/}/osrc-claudex-test-$$"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 export HOME="$OSRC_HOME/fakehome"
 mkdir -p "$OSRC_HOME" "$HOME"
 trap 'rm -rf "$OSRC_HOME"' EXIT

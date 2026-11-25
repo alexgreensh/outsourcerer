@@ -70,6 +70,8 @@ chmod +x "$FAKE_BIN/tmux"
 echo "=== (a) Default OSRC_REQUIRE_INTERACTIVE=1 → interactive tmux, no bg job ==="
 {
   RI_HOME_A="$TMPDIR_RI/home-a"
+  # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+  mkdir -p "$RI_HOME_A/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$RI_HOME_A/disk-policy/settings"
   RI_JOBS_A="$RI_HOME_A/jobs"
   RI_TMUX_A="$TMPDIR_RI/tmux-a"
   mkdir -p -m 700 "$RI_HOME_A" "$RI_TMUX_A"
@@ -141,6 +143,8 @@ echo ""
 echo "=== (b) tmux new-session fails → die loudly, no silent headless fallback ==="
 {
   RI_HOME_B="$TMPDIR_RI/home-b"
+  # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+  mkdir -p "$RI_HOME_B/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$RI_HOME_B/disk-policy/settings"
   RI_JOBS_B="$RI_HOME_B/jobs"
   RI_TMUX_B="$TMPDIR_RI/tmux-b"
   mkdir -p -m 700 "$RI_HOME_B" "$RI_TMUX_B"
@@ -186,6 +190,8 @@ echo ""
 echo "=== (c) OSRC_REQUIRE_INTERACTIVE=0 → bg job created (opt-out works) ==="
 {
   RI_HOME_C="$TMPDIR_RI/home-c"
+  # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+  mkdir -p "$RI_HOME_C/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$RI_HOME_C/disk-policy/settings"
   RI_JOBS_C="$RI_HOME_C/jobs"
   RI_TMUX_C="$TMPDIR_RI/tmux-c"
   mkdir -p -m 700 "$RI_HOME_C" "$RI_TMUX_C"
@@ -231,6 +237,8 @@ echo ""
 echo "=== (d) OSRC_NO_AUTODETACH=1 → foreground, no tmux, no bg job ==="
 {
   RI_HOME_D="$TMPDIR_RI/home-d"
+  # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+  mkdir -p "$RI_HOME_D/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$RI_HOME_D/disk-policy/settings"
   RI_JOBS_D="$RI_HOME_D/jobs"
   RI_TMUX_D="$TMPDIR_RI/tmux-d"
   mkdir -p -m 700 "$RI_HOME_D" "$RI_TMUX_D"

@@ -37,6 +37,8 @@ class LeanLaunch(unittest.TestCase):
             bindir = p / 'bin'; bindir.mkdir()
             for name in ('claude', 'tmux'):
                 stub = bindir / name; stub.write_text('#!/bin/sh\nexit 99\n'); stub.chmod(0o755)
+            # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+            (p / 'osrc' / 'disk-policy').mkdir(parents=True); (p / 'osrc' / 'disk-policy' / 'settings').write_text('OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n')
             env = dict(os.environ, HOME=d, OSRC_HOME=str(p / 'osrc'), OSRC_LEAN_LAUNCH='1', OSRC_LEAN_MCP_CONFIG=str(cfg), OUTSOURCERER_TMUX='osrc-test-L14b-link', PATH=str(bindir) + os.pathsep + os.environ['PATH'], OSRC_HEARTBEAT_DISABLED='1')
             result = subprocess.run(['/bin/bash', str(link), '--provider', 'cc', 'session', 'start'], cwd=ROOT, env=env, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)

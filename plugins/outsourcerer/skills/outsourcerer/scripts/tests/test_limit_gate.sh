@@ -34,6 +34,8 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-limitgate.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 # Source the REAL script (OSRC_SOURCED=1 skips main). $0 is this test, so SCRIPT_DIR resolves to
 # the tests dir and loader 1 finds nothing — loader 2 (_OSRC_FACTORY_DIR, symlinks followed)
 # must find lib/; that is exactly the path the symlink cases below also prove.
@@ -397,6 +399,8 @@ fi
 # id is minted; the --provider control proves consent still flows when the user actually typed it.
 # ---------------------------------------------------------------------------------------------------
 H7="$TMP/ih7"; HH7="$TMP/hh7"; BGCWD="$TMP/bgcwd"; mkdir -p "$H7" "$HH7" "$BGCWD"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H7/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H7/disk-policy/settings"
 fake_codex_rollout "$HH7" 98
 out="$( cd "$BGCWD" && PATH="$FAKEBIN:$PATH" HOME="$HH7" OSRC_HOME="$H7" OSRC_SOURCED= \
     OUTSOURCERER_PROVIDER=codex OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
@@ -441,6 +445,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$SFBIN/devin"; chmod +x "$SFBIN/devin"
 SPY="$TMP/tmux.spy"; : > "$SPY"
 
 H8="$TMP/ih8"; HH8="$TMP/hh8"; SFCWD="$TMP/sfcwd"; mkdir -p "$H8" "$HH8" "$SFCWD"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H8/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H8/disk-policy/settings"
 fake_codex_rollout "$HH8" 98
 out="$( cd "$SFCWD" && TMUX_SPY="$SPY" PATH="$SFBIN:$FAKEBIN:$PATH" HOME="$HH8" OSRC_HOME="$H8" \
     OSRC_SOURCED= OUTSOURCERER_TMUX=l7sess OSRC_NO_ADVISE=1 \
@@ -761,6 +767,8 @@ esac
 # Dedicated OSRC_HOME: the shared test home already holds r3job/r3poll dirs, so "no job
 # minted" is only provable against a clean jobs tree.
 BH="$TMP/bhhome"; BGCWD2="$TMP/bgcwd2"; mkdir -p "$BH" "$BGCWD2"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$BH/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$BH/disk-policy/settings"
 out="$( cd "$BGCWD2" && PATH="$FAKEBIN:$PATH" HOME="$HB" OSRC_HOME="$BH" OSRC_SOURCED= \
     OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
     bash "$SRC" bg run --provider cc "hi" 2>&1 )"; rc=$?

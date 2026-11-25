@@ -178,6 +178,8 @@ chmod +x "$FAKE_BIN/devin"
 REENTRY_HOME="$TMPDIR_AD/reentry-home"
 REENTRY_JOBS="$REENTRY_HOME/jobs"
 mkdir -p -m 700 "$REENTRY_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$REENTRY_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$REENTRY_HOME/disk-policy/settings"
 
 # Run the REAL engine with HOME set to our fake home (so ~/.local/bin/devin is the fake),
 # stdout redirected (non-TTY), cloud acked.
@@ -393,6 +395,8 @@ else
   SAB_HOME="$TMPDIR_AD/sab-home"
   SAB_JOBS="$SAB_HOME/jobs"
   mkdir -p -m 700 "$SAB_HOME"
+  # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+  mkdir -p "$SAB_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$SAB_HOME/disk-policy/settings"
 
   # EXECUTE the sabotaged engine on a non-interactive slow-lane run (same as Part 2 but no auto-detach).
   # With the branch removed, route_delegate falls through to _fg_guard -> __osrc_fg_dispatch -> delegate()

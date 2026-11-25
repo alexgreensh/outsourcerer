@@ -21,6 +21,8 @@ command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-pfenv.XXXXXX")" || { echo "FAIL: mktemp"; exit 1; }
 trap "env -u TMUX -u TMUX_PANE TMUX_TMPDIR=\"\$TMP/tmux\" tmux -L osrc-test-$$ kill-server >/dev/null 2>&1; rm -rf \"\$TMP\"" EXIT
 export OSRC_HOME="$TMP/state"; export HOME="$TMP/home"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin" "$TMP/tmux"
 # Step 1 auto-detaches into an interactive session. On the developer's own tmux server that pane
 # inherits the server's env (real HOME, real PATH): it scoped the real Devin skills home and

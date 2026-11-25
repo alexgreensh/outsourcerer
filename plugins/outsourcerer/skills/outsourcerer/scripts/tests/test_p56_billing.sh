@@ -4,6 +4,8 @@ set -uo pipefail
 D="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d "${TMPDIR%/}/p56.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 export OSRC_HOME="$T/home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 mkdir -p "$OSRC_HOME" "$T/bin" "$T/work" "$T/user"
 export HOME="$T/user"
 printf '#!/bin/sh\necho "tmux stub"\n' > "$T/bin/tmux"

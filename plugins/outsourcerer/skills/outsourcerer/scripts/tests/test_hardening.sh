@@ -15,6 +15,8 @@ done
 TMP="$(mktemp -d)"
 export OSRC_HOME="$TMP"
 export HOME="$TMP"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 

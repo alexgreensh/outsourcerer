@@ -32,6 +32,8 @@ TMP="$(mktemp -d "${TMPDIR%/}/.test-done-contract.XXXXXX")" || { echo "FAIL: can
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"
 export OSRC_HOME="$TMP/state" GIT_CEILING_DIRECTORIES="$TMP"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 mkdir -p "$HOME" "$OSRC_HOME"
 
 pass=0; fail=0

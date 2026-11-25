@@ -34,6 +34,8 @@ TMP="$(mktemp -d "${TMPDIR%/}/osrc-bgprov.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 SRC_ONLY="$TMP/src.sh"
 sed '/^[[:space:]]*main "\$@"[[:space:]]*$/d' "$SRC" > "$SRC_ONLY"
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$HOME" "$OSRC_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1
 type -t _bg_capture_provider >/dev/null || { echo "FAIL: _bg_capture_provider not defined (fix missing?)"; exit 1; }
@@ -124,6 +126,8 @@ if have jq; then
   e2e_lane() {   # <lane> <bg-args...>
     local lane="$1"; shift
     local home="$TMP/e2e.$RANDOM"; mkdir -p "$home"
+    # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+    mkdir -p "$home/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$home/disk-policy/settings"
     local id
     # OSRC_SOURCED must be UNSET for the child: we exported it =1 to source functions above, but the child
     # is a real run and OSRC_SOURCED=1 would make it skip main() and never launch.

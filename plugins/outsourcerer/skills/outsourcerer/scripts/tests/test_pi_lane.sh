@@ -10,6 +10,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh
 bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-pi.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP/home"; mkdir -p "$HOME" "$OSRC_HOME" "$TMP/bin" "$TMP/work"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 pass=0; fail=0
 ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }

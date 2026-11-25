@@ -25,6 +25,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 # on a broken setup. Under set -e this aborts immediately — the failure is visible, not silent.
 TMP="$(mktemp -d)" || { echo "FAIL: mktemp -d failed"; exit 1; }
 export HOME="$TMP/fakehome" OSRC_HOME="$TMP"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 mkdir -p "$HOME"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0

@@ -5,6 +5,8 @@ D="$(cd "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d "${TMPDIR%/}/p56r2.XXXXXX")"; trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/home" "$T/user" "$T/bin" "$T/work"
 export OSRC_HOME="$T/home" HOME="$T/user" OSRC_SOURCED=1 OSRC_HEARTBEAT_DISABLED=1 PATH="$T/bin:$PATH"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 cat > "$T/bin/opencode" <<EOF_STUB
 #!/bin/sh
 [ "\${1:-}" = --standalone ] && shift

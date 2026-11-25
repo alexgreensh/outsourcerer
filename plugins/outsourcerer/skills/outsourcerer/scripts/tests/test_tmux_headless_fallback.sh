@@ -36,6 +36,8 @@ run() { # <extra-env> <home> -> sets RC/ERR
 
 # (a) default: tmux absent -> fall back to bg (rc0), a job is created, and it recommends tmux.
 H1="$TMP/h1"; mkdir -p "$H1"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H1/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H1/disk-policy/settings"
 run "$H1" ""
 [ "$RC" -eq 0 ]                                            && ok "tmux-absent: run does not die (rc0)"           || bad "tmux-absent: rc=$RC (expected 0)"
 [ "$(find "$H1/jobs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -ge 1 ] && ok "tmux-absent: a bg job was created (fell back)" || bad "tmux-absent: no bg job created"
@@ -43,6 +45,8 @@ grep -q "RECOMMENDED: install tmux" "$ERR"                 && ok "tmux-absent: r
 
 # (b) OSRC_REQUIRE_TMUX=1: tmux absent -> die, no job.
 H2="$TMP/h2"; mkdir -p "$H2"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H2/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H2/disk-policy/settings"
 run "$H2" "OSRC_REQUIRE_TMUX=1"
 [ "$RC" -ne 0 ]                                            && ok "OSRC_REQUIRE_TMUX=1: dies when tmux absent"    || bad "OSRC_REQUIRE_TMUX=1: rc=$RC (expected nonzero)"
 [ "$(find "$H2/jobs" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')" -eq 0 ] && ok "OSRC_REQUIRE_TMUX=1: no bg job created" || bad "OSRC_REQUIRE_TMUX=1: a job leaked"

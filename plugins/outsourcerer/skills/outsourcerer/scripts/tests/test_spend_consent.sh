@@ -24,6 +24,8 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-spendconsent.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home"; export OSRC_SOURCED=1; mkdir -p "$OSRC_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 # Source the REAL script (OSRC_SOURCED=1 skips main); lib/* load via the symlink-safe
 # fallback loader exactly like test_limit_gate.sh.
 # shellcheck disable=SC1090
@@ -94,6 +96,8 @@ unset _OSRC_USER_ARGV
 # catalog does NOT ask for spend consent and dispatches the catalog's Free pick.
 DBIN="$TMP/dbin"; DHOME="$TMP/dhome"; DOH="$TMP/dohome"
 mkdir -p "$DBIN" "$DHOME" "$DOH/catalogs"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$DOH/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$DOH/disk-policy/settings"
 cat > "$DBIN/devin" <<'EOF'
 #!/usr/bin/env bash
 echo "devin $*" >> "${DEVIN_STUB_LOG:-/dev/null}"
@@ -129,6 +133,8 @@ grep -q -- '--model swe-2-high' "$TMP/devin-stub.log" \
   || bad "r3.2 default-run: stub log lacks --model swe-2-high: $(cat "$TMP/devin-stub.log" 2>/dev/null | head -5)"
 # Offline catalog -> swe-2-high fallback still does not ask.
 DOH2="$TMP/dohome2"; mkdir -p "$DOH2"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$DOH2/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$DOH2/disk-policy/settings"
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH2" OSRC_SOURCED= \
     OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
@@ -254,6 +260,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/claude"; chmod +x "$FAKEBIN/c
 # F2 e2e: bg --spend-ok on a METERED lane — caller says launched, the job must pass the gate
 # (token+marker) and consume the marker, not refuse itself.
 E2="$TMP/e2e"; mkdir -p "$E2/home" "$E2/osrc"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$E2/osrc/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$E2/osrc/disk-policy/settings"
 out="$( cd "$TMP" && HOME="$E2/home" OSRC_HOME="$E2/osrc" OSRC_SOURCED= \
     OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 ANTHROPIC_API_KEY=sk-test \
     PATH="$FAKEBIN:$PATH" bash "$SRC" bg --spend-ok --provider cc "say hi" 2>&1 )"; rc=$?

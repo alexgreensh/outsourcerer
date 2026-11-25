@@ -22,6 +22,8 @@ TMP="$(mktemp -d "${TMPDIR%/}/osrc-attrib.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/fakehome"
 mkdir -p "$HOME"
 export OSRC_HOME="$TMP/home"; mkdir -p "$OSRC_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 SRC_ONLY="$TMP/src.sh"; sed '/^\[ "${OSRC_SOURCED:-}" = "1" \] || main "\$@"$/d' "$SRC" > "$SRC_ONLY"
 # shellcheck disable=SC1090
 . "$SRC_ONLY" >/dev/null 2>&1
@@ -47,6 +49,8 @@ run_droid() {  # <home> <dumpfile> [extra env via leading VAR=x args] -- real fg
 
 # 1) Default: delegate child sees the noreply identity.
 H1="$TMP/h1"; mkdir -p "$H1"; D1="$TMP/d1.env"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H1/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H1/disk-policy/settings"
 run_droid "$H1" "$D1"
 if [ -f "$D1" ] && grep -q '^GIT_AUTHOR_EMAIL=outsourcerer-delegate@users\.noreply\.github\.com$' "$D1" \
    && grep -q '^GIT_COMMITTER_EMAIL=outsourcerer-delegate@users\.noreply\.github\.com$' "$D1"; then
@@ -57,6 +61,8 @@ fi
 
 # 2) Operator-set GIT_* env is never overridden (all-or-nothing).
 H2="$TMP/h2"; mkdir -p "$H2"; D2="$TMP/d2.env"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H2/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H2/disk-policy/settings"
 env -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
   HOME="$FAKEHOME" PATH="$FAKEBIN:$PATH" OSRC_HOME="$H2" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
   OSRC_NO_ADVISE=1 OSRC_ENV_DUMP="$D2" OUTSOURCERER_DEPTH=0 GIT_AUTHOR_NAME="Operator Name" \
@@ -69,6 +75,8 @@ fi
 
 # 3) Opt-out: OSRC_DELEGATE_GIT_IDENTITY=0 -> no identity injection.
 H3="$TMP/h3"; mkdir -p "$H3"; D3="$TMP/d3.env"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$H3/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$H3/disk-policy/settings"
 env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
   HOME="$FAKEHOME" PATH="$FAKEBIN:$PATH" OSRC_HOME="$H3" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
   OSRC_NO_ADVISE=1 OSRC_ENV_DUMP="$D3" OUTSOURCERER_DEPTH=0 OSRC_DELEGATE_GIT_IDENTITY=0 \

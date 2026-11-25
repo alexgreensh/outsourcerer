@@ -14,6 +14,8 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 bash -n "$SCRIPT_DIR/../lib/lane-opencode.sh" || { echo "FAIL: lane-opencode.sh bash -n failed"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-oc.XXXXXX")"; trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/home" OSRC_HEARTBEAT_DISABLED=1; mkdir -p "$OSRC_HOME" "$TMP/bin" "$TMP/work" "$TMP/nohome"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 printf '#!/bin/sh\necho "tmux stub"\n' > "$TMP/bin/tmux"; chmod +x "$TMP/bin/tmux"
 export HOME="$TMP/nohome"
 pass=0; fail=0

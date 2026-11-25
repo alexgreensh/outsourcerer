@@ -54,6 +54,8 @@ EOF
 chmod +x "$FB/claude"
 export PATH="$FB:$PATH"
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
+# Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 export OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0 OSRC_NO_ADVISE=1 OSRC_BRIEF_NO_HEAL=1 OSRC_DOCTOR_OFFLINE=1
 unset OSRC_EXCLUDE_MODELS OSRC_MODEL_DENYLIST OSRC_SECOND_OPINION_MODELS OSRC_SECOND_OPINION_PREMIUM OSRC_ESCALATE_LADDER OR_OFFLOAD_CHAIN 2>/dev/null || true
 
@@ -235,7 +237,8 @@ grep -q 'excluded models: none' <<<"$o" && ok "doctor says none when nothing is 
 
 # ================================================================ REVIEW-2 findings (one block each)
 # Every block below runs against its own state home so the saved list above never leaks in.
-xh() { local d="$TMP/xh-$1"; rm -rf "$d"; mkdir -p "$d"; printf '%s' "$d"; }
+# Each home lifts the launch and pause disk floors (the host's free disk must not decide this test).
+xh() { local d="$TMP/xh-$1"; rm -rf "$d"; mkdir -p "$d/disk-policy"; printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$d/disk-policy/settings"; printf '%s' "$d"; }
 xc() { bash "$SRC" exclude check "$1" >/dev/null 2>&1; }   # rc0 = excluded
 
 # ---- #45 exact scenario: `exclude add claude-fable-5`, the user has no Fable subscription
