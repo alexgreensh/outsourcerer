@@ -196,7 +196,7 @@ _osrc_lease_when() { # <epoch> -> local time, portable (GNU date -d, BSD date -r
 }
 
 osrc_lease() { # claim|release|list ...
-  local sub="${1:-}" path="" ttl="" repo_dir="." all=0 repo holder rc leases min
+  local sub="${1:-}" path="" ttl="" repo_dir="." all=0 repo holder rc leases
   [ "$#" -gt 0 ] && shift
   have jq || die "lease needs jq"
   while [ "$#" -gt 0 ]; do case "$1" in

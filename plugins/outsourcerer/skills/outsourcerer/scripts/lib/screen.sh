@@ -362,7 +362,7 @@ _osrc_scr_devin() {
       hdr=0; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
       l="$(_osrc_scr_trim "${_SCR_L[$((m - 1))]:-}")"
       if [ "$OSRC_SCR_KIND" = shell ] && [ "$hdr" -gt 0 ] && [ "$hdr" -eq $((m - 2)) ]; then
-        case "${_SCR_L[$((hdr - 1))]}|${_SCR_L[$hdr]}" in *"Approval required"*"|This action requires your approval"*)
+        case "${_SCR_L[$((hdr - 1))]}|${_SCR_L[$hdr]}" in "▲ Approval required"*"|This action requires your approval"*)
           case "$l" in ""|"\$ "*) ;; *) OSRC_SCR_CMD="$l" ;; esac ;;
         esac
       fi
@@ -494,7 +494,7 @@ _osrc_scr_bottom() { # [window]
 _osrc_scr_busy_row() { # <row>
   local t="${1#[[]}"   # one leading bracket allowed: "[⠋] Compiling crate 12/40"
   case "$t" in
-    *"("*"esc"*"to interrupt)"|*"("*"esc"*"to interrupt) · "*|*"(esc to interrupt · "*")"|*"· esc to interrupt"|"Working ("*|"• Working ("*) return 0 ;;
+    *"("*"esc to interrupt)"|*"("*"esc to interrupt) · "*|*"(esc to interrupt · "*")"|*"· esc to interrupt"|"Working ("*) return 0 ;;
     "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*|"⣻"*|"⣽"*|"⣟"*|"⡿"*|"⢿"*|"⣷"*|"⣯"*|"⠿"*|"⢰"*)
       case "$t" in *[A-Za-z]*) return 0 ;; esac ;;
     "✢"*|"✶"*|"✳"*|"✻"*|"✽"*|"◐"*|"◓"*|"◑"*|"◒"*)

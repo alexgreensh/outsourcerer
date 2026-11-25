@@ -19,6 +19,8 @@ export OSRC_APPROVER_VERIFY_POLLS=3
 ROOT="$TMP/wt"; mkdir -p "$ROOT"; git -C "$ROOT" init -q
 _endpoint_mutation_lock() { return 0; }; _endpoint_mutation_unlock() { return 0; }
 CAP=""; AFTER=""; KEYS="$TMP/keys"; : > "$KEYS"; PROV=cc
+# Gemini fixtures are Gemini CLI screens; with agy installed the reader would pick agy for "gemini".
+export OSRC_GEMINI_VEHICLE=gemini
 _managed_provider() { printf '%s' "$PROV"; }
 tmux() {
   case "$1" in

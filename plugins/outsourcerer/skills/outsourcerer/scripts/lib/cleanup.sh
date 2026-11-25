@@ -429,7 +429,7 @@ _osrc_cleanup_remote_branches() {
     [ "$(_osrc_review_verdict_for "$id" "$head" 2>/dev/null)" = BLOCK ] || _osrc_review_item_closed_merged "$id" "$head" 2>/dev/null || continue
     names="$(jq -r '.poll_branch // .branch' "$f")"   # the branch the lane actually pushed: a missing target fails the whole push
     url="$(jq -r 'if .transport=="gh" then "https://github.com/" + .url + ".git" else .url end' "$f" 2>/dev/null)"
-    echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $names"
+    echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $(printf '%q' "$names")"
   done
 }
 

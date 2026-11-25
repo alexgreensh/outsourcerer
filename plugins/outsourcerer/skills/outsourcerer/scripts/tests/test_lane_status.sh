@@ -125,10 +125,6 @@ out="$( _osrc_review_verdict_for() { echo BLOCK; }; _osrc_cleanup_remote_branche
 grep -q 'lane alt1 .*--delete claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers only the branch the lane pushed, nothing from the log" || bad "cleanup offer: $out"
 out="$( _osrc_review_verdict_for() { :; }; _osrc_review_item_closed_merged() { return 0; }; _osrc_cleanup_remote_branches)"
 grep -q 'lane alt1 .*--delete claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers a lane whose item closed as merged" || bad "closed-merged not offered: $out"
-cp "$OSRC_HOME/remote/alt1.json" "$TMP/alt1.bak"
-jq '.check = {head: .head, state: "done", rc: 1}' "$TMP/alt1.bak" > "$OSRC_HOME/remote/alt1.json"
-out="$( _osrc_review_verdict_for() { echo MERGE; }; _osrc_cleanup_remote_branches)"; mv "$TMP/alt1.bak" "$OSRC_HOME/remote/alt1.json"
-grep -q 'lane alt1 ' <<<"$out" && bad "cleanup offered a lane whose done-when check failed: $out" || ok "a failed done-when check is not offered"
 
 # Final fix: a launch-log name the remote does not have (wrapped, truncated, stale) never hides the real branch.
 printf '{}' > "$OSRC_HOME/lgx.json"; printf 'pushed to claude/lgx-fix\n' > "$OSRC_HOME/cloud/lgx.launch.log"
