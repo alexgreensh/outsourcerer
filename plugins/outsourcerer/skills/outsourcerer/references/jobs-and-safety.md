@@ -267,7 +267,9 @@ login also exists. A CLI on PATH with no provable login is `unknown`, and `unkno
 as `metered`: when billing cannot be proven, the lane asks first. Devin is the strict case —
 `subscription` only when the LIVE `devin models list` catalog tags the exact model
 `cost_tier="Free"` (reachable catalog overrides everything); offline, only `swe-2-high` and
-`swe-2-flash-high` count. Plan-included-but-not-Free models (glm-5.2 etc.) are `metered`.
+`swe-2-flash-high` count. `cost_summary` is never proof: Fusion rows can end in
+`Sidekick: Free` while the main model remains High cost. Plan-included-but-not-Free models
+(glm-5.2 etc.) are `metered`.
 Before ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing,
 fallback hops, retries — the spend gate demands consent: interactive prompts show lane, model,
 reason and an estimate, `y/N` defaulting to No; non-interactive refuses with
@@ -286,8 +288,9 @@ instead of picking OpenRouter quietly.
 
 `OUTSOURCERER_MODEL` sets the script-level `DEFAULT_MODEL` fallback only: lanes with a
 descriptor `default_model` use theirs, and `dv` ignores it entirely — a bare Devin run
-picks its model at run time from the live catalog's Free set (`swe-2-high` offline), so
-the env var never reaches a `dv` dispatch. Pin Devin explicitly with `-m <free-id>`.
+picks its model at run time from the live catalog's exact Free set — newest mainline
+`-high` first, then the strongest/newest Free id, with `swe-2-high` only as the offline
+fallback — so the env var never reaches a `dv` dispatch. Pin Devin explicitly with `-m <free-id>`.
 
 Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
 name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing

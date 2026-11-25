@@ -81,7 +81,9 @@ _osrc_devin_free_for_spend() {
     if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
       # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
       # Normalize the catalog side identically so a dotted/uppercase uid still matches.
-      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
+      # Normalize PER TOKEN: stripping ^[^/]*/ across the whole space-joined line would
+      # eat every id before the first provider prefix (Neon review, verified).
+      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | tr ' ' '\n' | sed -E 's#^[^/]*/##; s/\./-/g' | tr '\n' ' ')"
       case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
     fi
   fi
@@ -114,43 +116,113 @@ _devin_catalog_free_ids() {
   _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
   [ -f "$rawf" ] || return 1
   cf="$OSRC_HOME/.devin-free-ids"
-  mt="$(stat -f %m "$rawf" 2>/dev/null || stat -c %Y "$rawf" 2>/dev/null || echo 0)"
-  if [ -f "$cf" ]; then
-    IFS='|' read -r cmt cids < "$cf" 2>/dev/null
-    if [ "$cmt" = "$mt" ]; then
+  # GNU-first order (matches outsourcerer.sh's catalog mtime): on Linux `stat -f` is
+  # --file-system and its output poisoned every cache line; BSD stat rejects -c silently.
+  mt="$(stat -c %Y "$rawf" 2>/dev/null || stat -f %m "$rawf" 2>/dev/null || echo 0)"
+  case "$mt" in ''|*[!0-9]*|0) mt=0 ;; esac
+  if [ "$mt" != "0" ] && [ -f "$cf" ]; then
+    # v2: the extractor version is part of the cache key. v1 rows were produced
+    # by the cost_summary substring matcher and can contain paid Fusion ids whose
+    # price text merely ends in "Sidekick: Free"; never trust them after the fix.
+    local cver
+    { IFS='|' read -r cver cmt cids < "$cf"; } 2>/dev/null
+    if [ "$cver" = "v2" ] && [ "$cmt" = "$mt" ]; then
       _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$cids"
       printf '%s' "$cids"; return 0
     fi
   fi
-  ids="$(jq -r '
-    def isfree(o): (((o.cost_tier // "") + " " + (o.cost_summary // ""))|test("free";"i"));
+  local jqrc rawids
+  rawids="$(jq -r '
+    def isfree(o): (((o.cost_tier | strings) // "") | ascii_downcase) == "free";
+    def uidok: (type == "string") and (test("^[A-Za-z0-9._/-]+$"));
     [ .families[]?
-      | ( select((.variants|length) > 0 and all(.variants[]?; isfree(.))) | .family_uid ),
+      | ( select((.variants|type) == "array" and (.variants|length) > 0 and all(.variants[]?; isfree(.))) | .family_uid ),
         ( .variants[]? | select(isfree(.)) | .model_uid ) ]
-    | unique | .[]
-  ' "$rawf" 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
-  ( umask 077; printf '%s|%s\n' "$mt" "$ids" > "$cf" ) 2>/dev/null || true
+    | map(select(uidok)) | unique | .[]
+  ' "$rawf" 2>/dev/null)"; jqrc=$?
+  ids="$(printf '%s' "$rawids" | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//')"
+  # Never cache a jq failure: a corrupt/half-written raw catalog would otherwise pin an
+  # empty Free set for this mtime and silently degrade discovery to the offline fallback.
+  # Atomic write: a truncated concurrent read under fanout would otherwise decode garbage.
+  [ "$jqrc" -eq 0 ] && [ "$mt" != "0" ] && {
+    ( umask 077; printf 'v2|%s|%s\n' "$mt" "$ids" > "$cf.tmp.$$" && mv -f "$cf.tmp.$$" "$cf" ) 2>/dev/null || rm -f "$cf.tmp.$$" 2>/dev/null
+  }
   _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$ids"
   printf '%s' "$ids"
   return 0
 }
 
+# _osrc_rank_free_ids -> tab-separated rank rows for exact catalog Free ids:
+# budget, qualifier-penalty, version-key, tier, raw-id. Design notes (Neon review):
+# - Letters are meaningless across families and qualifier segments (-mini/-preview)
+#   must not inflate a version, so the version key is DIGIT RUNS ONLY, zero-padded
+#   (BSD sort has no -V). swe-2.1 > swe-2 and swe-10 > swe-2 both fall out naturally.
+# - Matching is case-insensitive but column 5 keeps the catalog's exact raw id.
+# - -none variants (zero reasoning, present in the live catalog) are tier 0.
+_osrc_rank_free_ids() {
+  awk '
+  NF == 0 { next }
+  {
+    id = $0
+    lid = tolower(id)
+    budget = (lid ~ /(flash|fast|lightning)/) ? 1 : 0
+    tier = 0
+    base = lid
+    if (lid ~ /-max$/)         { tier = 5; sub(/-max$/, "", base) }
+    else if (lid ~ /-xhigh$/)  { tier = 4; sub(/-xhigh$/, "", base) }
+    else if (lid ~ /-high$/)   { tier = 3; sub(/-high$/, "", base) }
+    else if (lid ~ /-medium$/) { tier = 2; sub(/-medium$/, "", base) }
+    else if (lid ~ /-low$/)    { tier = 1; sub(/-low$/, "", base) }
+    else if (lid ~ /-none$/)   { tier = 0; sub(/-none$/, "", base) }
+    gsub(/\./, "-", base)
+    rest = base; vk = ""
+    while (match(rest, /[0-9]+/)) {
+      vk = vk sprintf("%012d", substr(rest, RSTART, RLENGTH) + 0) "-"
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+    nseg = split(base, seg, /-/); qual = 0; seen = 0
+    for (i = 1; i <= nseg; i++) if (seg[i] ~ /^[a-z]+$/) { if (seen) qual++; seen = 1 }
+    printf "%d\t%d\t%s\t%d\t%s\n", budget, qual, vk, tier, id
+  }'
+}
+
+# Space-separated ids -> newline rows without glob expansion or IFS dependence
+# (unquoted expansion of the id list could glob-match files in $PWD — Neon review).
+_osrc_free_lines() { printf '%s' "$1" | tr ' ' '\n' | awk 'NF'; }
+
+# _osrc_pick_best_free -> best id from newline rows on stdin: newest -high first
+# (the lane default), otherwise the strongest/newest. sort drains fully into awk so
+# no SIGPIPE can hit the producer under pipefail. LC_ALL=C pins byte-order collation.
+_osrc_pick_best_free() {
+  local rows high
+  rows=$(cat)
+  [ -n "$rows" ] || return 1
+  high=$(printf '%s\n' "$rows" | awk 'tolower($0) ~ /-high$/')
+  if [ -n "$high" ]; then printf '%s\n' "$high"; else printf '%s\n' "$rows"; fi     | _osrc_rank_free_ids     | LC_ALL=C sort -t$'\t' -k1,1n -k2,2n -k3,3r -k4,4nr     | awk -F'\t' 'NR == 1 { out = $5 } END { if (out != "") print out }'
+}
+
 # _devin_default_free_model -> the dv lane's implicit default, picked at RUN TIME from
-# the live catalog's Free set so a bare `run`/`bg` never lands on a metered model by
-# default (free models before any spend). Preference inside the Free set:
-# swe-2-high, then swe-2-flash-high, then the first Free id the catalog lists. Catalog
-# unreachable or nothing Free -> swe-2-high, the proven offline-free fallback; if it is
-# ever metered the spend gate still asks rather than silently picking another paid id.
-# Lives here (not the engine) for the engine-size budget; callers: _route_provider_default_model,
-# osrc_lane_billing dv.
+# the live catalog's exact Free set so a bare `run`/`bg` prefers free models before any
+# spend. Preference order (both reviewers verified the old one inverted it):
+#   1. mainline partition first — flash/fast/lightning are used only when NO mainline
+#      Free id exists at all;
+#   2. the SWE coding family preferred within that partition, never required;
+#   3. newest -high variant, then strongest/newest remaining.
+# Catalog unreachable or nothing Free -> swe-2-high, the deliberately conservative offline
+# fallback. Offline there is no fresh proof either way: swe-2-high/flash-high are static
+# free-for-spend ids, so a bare run on them does NOT ask; if Devin re-prices them while
+# the catalog is unreachable that is the accepted offline exception, never a silent hop
+# to a DIFFERENT paid id. Lives here (not the engine) for the engine-size budget; callers:
+# _route_provider_default_model, osrc_lane_billing dv.
 _devin_default_free_model() {
-  local ids norm cand
-  if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
-    norm="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
-    for cand in swe-2-high swe-2-flash-high; do
-      case " $norm " in *" $cand "*) printf '%s' "$cand"; return 0 ;; esac
-    done
-    cand="${ids%% *}"                       # first catalog Free id, raw uid
+  local ids rows main swe cand
+  if ids="$(_devin_catalog_free_ids 2>/dev/null)" && [ -n "$ids" ]; then
+    rows="$(_osrc_free_lines "$ids")"
+    main=$(printf '%s\n' "$rows" | awk 'tolower($0) !~ /(flash|fast|lightning)/')
+    [ -n "$main" ] || main="$rows"
+    swe=$(printf '%s\n' "$main" | awk 'tolower($0) == "swe" || index(tolower($0), "swe-") == 1')
+    [ -n "$swe" ] && main="$swe"
+    cand=$(printf '%s\n' "$main" | _osrc_pick_best_free 2>/dev/null)
     [ -n "$cand" ] && { printf '%s' "$cand"; return 0; }
   fi
   printf 'swe-2-high'
