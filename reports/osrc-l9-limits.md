@@ -89,3 +89,34 @@ Conformance never completed. The five failures above are unattributed.
 
 ## Needs from other lanes
 - Unchanged from round 1/2.
+
+## Round 4
+
+Closing round for the round-3 review. Paths are under `plugins/outsourcerer/skills/outsourcerer/scripts/`. Base confirmed with `git log --oneline -3`: `50b5c16`. Code commit: `67e4c87`.
+
+What the user now sees: the ChatGPT row on Mission Control reads `60% left, checked 3 h ago` with state "No reading" for a 3 h old reading, and `4% left, LOW: stop routing here` at 4% left. Before this round the page cut both to `60% left` and `4% left`.
+
+- **P1-1** `tests/test_hub_plan_refresh.sh` passes `--argjson stale 7200 --argjson ll 10` to the overlay. On base it failed with rc=4 (jq compile errors). Now 2/2.
+- **P2-2** `lib/limits.sh`: the `limit-low` event carries `$(_owner_sid)` as its owner. New check 13 uses the real `_osrc_lane_event` and `_sv_read_range` with `CLAUDE_CODE_SESSION_ID` set, and confirms that owner's waiter gets the row.
+- **P2-3** `lib/plan-overlay.jq` `refresh_flag`: a kept probe whose refresh failed is stale only after a fixed 15 min (900 s). The `ttl` plumbing in `lib/plan-probe.sh` is deleted. Check 12 now goes through `_osrc_probe_kick` on the page-refresh path (`OSRC_HUB_CHECK_PLANS=1 OSRC_PROBE_SYNC=1 OSRC_PROBE_TTL_CODEX=0`): a 400 s old reading stays usable and a 1000 s old one is stale.
+- **P2-4** `lib/plan-overlay.jq`: a session-log reading uses `checked($now - row_age)`, so `updated` (the page's "Checked" stamp) is the reading's own time. Check 3 asserts it.
+- **P2-5** The age and LOW suffixes are joined with `, ` so the page row (`hub.html` keeps the text before the first ` · `) shows them. New check 14 exports rows with the real `_osrc_hub_limits` from a fixture meter state and renders them with `hub.html`'s own `renderLimits` in `tests/hub_limits_row.js` (node vm, minimal fake DOM). It skips if node is missing.
+- **P3-6** Check 10b sets `OSRC_LIMITS_STALE_SECS=7200` and expects no LOW line for a 3 h old reading.
+- **P3-7** `_osrc_summary_text_json` prints LEFT as the part before `, ` plus ` LOW` or ` (old)`. New check 15 checks the column positions.
+- **P3-8** RESULT: the contract asks for `sha=<pinned base>` on line 1, and this brief asks for my own head. Line 1 keeps the contract format and line 3 is `head=<my code commit>`. The READY/RESULT commit cannot name itself.
+
+### Tests (all run in this sandbox, niced)
+- `bash tests/test_limits_staleness.sh`: rc=0, 28 passed, 0 failed. With `lib/` stashed (base code, new tests): rc=1, 7 failed (age text, updated stamp, young kept probe, limit-low owner, both page-row checks, summary column).
+- `bash tests/test_hub_plan_refresh.sh`: rc=0. The base version of the test on base code: rc=4.
+- `test_plan_probe` 38/38, `test_limits_freshness` 10/10, `test_limit_gate` 124/124, `test_hub` 139/139, `test_hub_home` 90/90. All rc=0.
+- `OSRC_CONFORMANCE_VERBOSE=1 bash tests/conformance.sh`, with no timeout, ran to completion this time.
+  - **Head:** rc=1, 242 passed, 6 failed, 1 skipped. The failing suites were test_harness_isolation, test_parity_insource_refresh, test_release_0175, test_sealed_fixes, test_supervise_pgroup_kill and test_vocab_hygiene.
+  - **Base** (`50b5c16` worktree): rc=1, 239 passed, 9 failed. The same six suites failed, plus test_hub_plan_refresh (P1, now fixed), test_conformance_suite_timeout and test_sandbox_final.
+  - **Attribution:** all six head failures are pre-existing. I compared the failure lines for release_0175, vocab_hygiene, sealed_fixes and harness_isolation, and they are identical on base and head. They involve hub process handling, read-only write checks as root, and MCP isolation, and none touch limits files. None of the failures are mine.
+
+### Unproven
+- I did not probe the live codex or agy CLIs.
+- The page-row test runs `renderLimits` against a fake DOM, not a browser.
+
+## Needs from other lanes
+- The six pre-existing conformance failures above belong to their owning lanes. They look like artifacts of running as root in this sandbox, but I did not prove that.

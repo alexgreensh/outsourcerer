@@ -1,3 +1,0 @@
-sha=cab325fac772ce140c45972ba1767c2c7e225a2b
-rc=124
-Conformance timed out at 900 s (rc=124); not a completed green run. Round-3 edits done: limits suites pass (staleness 21/21, gate 124/124, plan_probe 38/38). Failing conformance suites listed in reports/osrc-l9-limits.md are unattributed.
