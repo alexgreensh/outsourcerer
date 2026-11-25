@@ -159,3 +159,89 @@ Conformance: see the end of this file.
 base `09a7803` in the same container, and each also fails there with rc=1. None of them touches a file
 this lane changed. They check read-only writes, kill and isolation behaviour, which differs when the
 tests run as root here. Every hub, cleanup and cloud suite passes, and so does the new `test_hub_speed`.
+
+## Round 2
+
+Base: `cloud/osrc-l8-speed` at `7eef90a` (confirmed with `git log --oneline -3`). Work branch
+`cloud/osrc-l8-speed-r2`. The base's READY/RESULT files (this lane's and the five other lanes' that came in
+with the base) are removed. `osrc-l8-speed-r2.READY`/`.RESULT` replace them.
+
+All paths below are under `plugins/outsourcerer/skills/outsourcerer/scripts/`. Library code is net
+smaller: +33/−45 lines over `lib/`.
+
+### Review findings
+
+| # | Fix | Test (fails on `7eef90a`?) |
+|---|---|---|
+| P2 1 `pr:` lags one export | Deferral kept, as the brief wants no network on the export. The memo comment now says that a `pr:` merged since its last verdict reads done one export later. **Correction to round 1:** "identical lane states" held for `check:` lanes only. For `pr:` a one-shot export shows the last verdict, and the export after it is right. | `test_hub_speed` "pr: export shows the last verdict (working), its worker asks gh, the next export shows done". This is coverage of intended behaviour, so it also passes on base. |
+| P2 2 probe check proved nothing | `slow()` no longer starts probes (`OSRC_DONE_CHECK_MAX_INFLIGHT=0`), and it asserts it left no marker. Before the captured export the markers are deleted, and a new check asserts the export's own worker writes one. | The base code was right and the test was wrong, so the fixed test passes on base too. |
+| P2 3 test races its 20 s probe | Each probe now repeats its lane's verdict (c-1 exits 0, c-3 exits 1). A probe that ends mid-test changes no answer, and `slow()` spawns none. | Same as above: test-only. |
+| P2 4 RESULT said rc=0 | Old RESULT removed. The new one names this branch's head and the conformance rc actually measured below. | n/a |
+| P2 5 3 s target | Not met. See below. | n/a |
+| P3 cache version | `_OSRC_HUB_CACHE_V=7`, so settled-project docs written before the board-percent fix (zeroed pct, no `pctSource`) are never served. | "settled-project docs of the previous cache version are not served": **fails on base** |
+| P3 empty arrays, bash 3.2 | `${dl[@]+"${dl[@]}"}` in `_osrc_hub_scr_read` and `_osrc_hub_scr_dep_epoch`. | Static check (bash 4.4+ cannot reproduce the abort): **fails on base** |
+| P3 gh cache of any age | `_osrc_hub_gh_data` fetches inline once the cache is older than `OSRC_HUB_GH_MAX` (default 86400 s). Under that it is served and refreshed detached, as before. | "an hour-old cache is served, a week-old one is fetched again": **fails on base** |
+| P3 `check:` error masked | The memo reads spec and cwd in one jq. A `check:` whose cwd is gone goes to the raw reader, which answers `error cwd-missing` without spawning. | "check: with a vanished cwd says error cwd-missing inside the export": **fails on base** |
+| P3 dead code | `_osrc_hub_scr_refresh_bg` and the no-memo branch of `_osrc_hub_scr_get` deleted (26 lines). | deletion |
+| P3 misplaced comment | `_osrc_hub_scr_flush_wanted`'s header moved back above it. | deletion/move |
+| P3 `lane rm` leaves the done source | `_osrc_lane_rm` deletes `cloud/<id>.done.sh` and calls `osrc_done_clear <id>` (contract, verdict cache, lock). | "lane rm drops its done contract and probe script, nothing of other lanes": **fails on base** |
+| P3 `xargs stat -f` on Linux (`hub-fast.sh`, ended-lane cache) | Fixed rather than ticketed, because it is in this lane's file. GNU `stat -c '%Y %n'` is tried first, BSD second. A **second bug** sat on the same line: the awk got `-F'\t'` *after* its program, so awk read it as a file name and failed silently. Even with correct mtimes, no ended lane was ever marked stale. `-F` moved before the program. | "an ended lane's cache is reused, then rebuilt once an input is newer (real mtimes)": **fails on base** (`cached|cached`) |
+
+### Stalled vs finished (`lib/remote.sh`)
+
+The stall is raised in `osrc_remote_events` for a lane whose state is `live`. The lane's tip was
+`osrc-l8-speed: RESULT`. That commit changed only `<id>.RESULT`, so the READY rule (marker in the tip
+subject, or a READY file in the tip commit's own changes) said not ready, and the lane was `live` with a
+90-minute clock. The fix is narrow: it applies at poll time to the tip that moved and is checked at the
+stall site.
+
+- When a push is not READY but its commit touches `<id>.READY` or `<id>.RESULT`, the poll lists the
+  tip's root tree: `git ls-tree` on the local cache, or one `gh api repos/<repo>/git/trees/<sha>` call on
+  gh lanes, made only for such a push. If both files are there, it records `.tip_finished=true`.
+- `osrc_remote_events` raises no stall for a lane with `.tip_finished`.
+- `head_ready` and the review queue are unchanged. A later WIP push that does not touch those files
+  clears the flag, so a lane that went back to work can stall again.
+
+Test (`test_remote_review.sh`, section 9): lane `fin1` pushes `fin1: conformance result, READY` with
+`fin1.READY`, then `fin1: RESULT` with `fin1.RESULT`. After 6000 s of fake time it gets no stall event.
+Lane `fin2` pushes only `fin2: RESULT` and still stalls.
+
+### P2 5: unchanged export, profiled again
+
+I built a scratch fixture larger than round 1's: 6 projects, 18 finished jobs, 4 tmux panes, 6 cloud lanes with
+4 s `check:` probes, 300 files under `cloud/`, and a 20,000-line session registry. I ran the export twice to warm
+it, then three unchanged exports with `OSRC_HUB_PROF`.
+
+| | base `7eef90a` | this branch |
+|---|---|---|
+| unchanged export | 8.8 / 9.2 / 9.3 s | 8.8 / 8.9 / 9.0 s |
+
+Where the 8.7 s goes (one run, summed by phase): lane builders `lf.*.raw` 1.9 s (about 80 ms for each of
+28 lanes, no outlier), limits rail 1.1 s, remote done read `dsf` 0.9 s (6 lanes), project close `proj.*.end`
+0.85 s, board 0.77 s, lane done 0.66 s, lane names 0.49 s, alerts 0.31 s. The memo registry index costs 0.09 s
+on a 20,000-line registry here, so it is not the cost on this shape.
+
+**No single simple change gets this under 3 s.** The time is spread evenly over about 28 lanes × 5 small
+jq/stat steps and 6 projects × 4 jq steps. Reaching 3 s means one jq per project for the whole lane
+set, or a per-export limits memo (see the round 1 "Needs" list). Each is a restructure, not a one-line
+change, and the brief rules out caching on top of the existing caches. I made no speed change this round.
+
+### Tests run (Linux, bash 5, as root, each alone, niced)
+
+- `timeout 600 nice bash tests/test_hub_speed.sh`: **rc=0**, 25 passed, 0 failed (27 s).
+  The same file run against base `7eef90a` code: rc=1, 19 passed, 6 failed (the six marked above).
+- `timeout 900 nice bash tests/test_remote_review.sh`: **rc=0**, 108 passed, 0 failed.
+  Against base code: see below.
+
+### Not proven
+
+- macOS bash 3.2 and Git Bash were not run here. The new code uses `< <(...)`, `${a[@]+...}`, `grep -F -e`,
+  `stat -c` with a `stat -f` fallback, and `awk -F'\t'`, all of which bash 3.2 and BSD tools have.
+- The gh-transport tree call (`git/trees/<sha>`) is not exercised by a test. The suite's fake gh answers
+  every call the same way. Only the git-transport path is tested.
+
+### Needs from other lanes
+
+Unchanged from round 1 (done-runner fd closing in `lib/done.sh`, a per-export limits memo, one jq in
+`osrc_remote_state`). Add one more: a 3 s unchanged export on this shape needs the lane builders in
+`lib/hub.sh` to emit all of a project's lanes from one jq. Today each lane makes about 5 jq calls.

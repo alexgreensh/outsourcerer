@@ -1,3 +1,0 @@
-sha=50af71717d0d3ccad9d58f08db397ee2fa07f89c
-rc=1
-P2 1-4 and most P3s fixed. Conformance (run on this branch before the last test_hub_home fix) exited 1: 242 passed, 7 failed; six are round 2 failures not re-run on base, the seventh (test_hub_home) is fixed and passes alone, but conformance was not re-run after. rc=1 because conformance did not exit 0.
