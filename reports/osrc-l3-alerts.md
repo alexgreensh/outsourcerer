@@ -384,3 +384,75 @@ the following.
 2. **Failed and limit dedupe.** Keep the `SVS_LK` dedupe from round 2's item 4 in supervise's own
    state file. Clear it when a lane name is reused.
 3. Round 2's items 1 and 3 stand unchanged.
+
+## Round 4
+
+Base `cloud/osrc-l3-r3` at `11295d4` (confirmed with `git log --oneline -3`). Branch `cloud/osrc-l3-r4`.
+Files: `lib/screen.sh`, `tests/test_screen_alerts.sh`, two fixtures deleted, this report. The
+round-3 markers (`osrc-l3-r3.READY`/`.RESULT`) are deleted.
+
+### Design change (instead of a fourth round of patches)
+
+Three rounds each added a text guard and each review found a new false reading. Round 4 changes
+the rule:
+
+- **`limit` comes only from the engine's own banner, matched as a whole row, in the bottom status
+  region.** The region is the last history row above the composer, or the row above it when that
+  last row is a plain trailer (agy's `Error ID: ...`, Claude's `/upgrade ...`). With no
+  recognized composer, `_osrc_scr_bottom` gives the row above the last rule or bare input prompt
+  in the last six rows, or else the last row. The banner must start at column 0
+  (`⚠ You've hit your usage limit. Try again at 22:28.`), or, for Claude, be a `⎿` row that hangs
+  directly under the user's prompt or the turn summary, which puts it below the last tool or
+  bullet block. The row, lowercased, must match `_OSRC_SCR_LIMIT_RE` from start to end: an
+  optional glyph, an optional `Error:`, one closed set of headlines, and an optional
+  reset/upgrade clause. The headlines are taken from the banners in `fixtures/screen/*limit*` and
+  `fixtures/supervise/agy-*`, plus the six Claude wordings the round-3 review verified. Text
+  anywhere else never yields `limit`. That covers tool output, todo rows, bullets, wrapped prose,
+  quoted errors, line numbers and counts.
+- **`working` for unknown engines comes only from a busy indicator in that same region.** One
+  helper, `_osrc_scr_busy_row`, accepts an interrupt hint in a status shape (`(`… or `· `…), a
+  row starting `Working (`, a braille spinner followed by a word, or a spinner frame followed by a
+  word and `…`/`...`. `●` is no longer a spinner frame. The per-engine readers (cc, codex, devin,
+  agy) already read busy from their own live region and are unchanged.
+- **Anything else reads `unknown`**, as before. `unknown` raises no alert by itself.
+- **Deleted:** `_OSRC_SCR_LIMIT_HEAD`, `_OSRC_SCR_LIMIT_WORDS`, `_OSRC_SCR_TOOL_HDR`, the
+  14-row newest-first scan with its stop list, the block walk-up, the 12-row generic busy scan
+  that forked once per row, the stale `OSRC_SCR_LIMIT_SECS` comment, a dead
+  `case ... in "") ;; esac` line in the Devin reader, a no-op `sed` on the reset phrase, the
+  unused fixture `generic-unrecognized.txt`, and `cc-limit-429.txt`, which is now an inline
+  negative case.
+
+Net lines: `lib/screen.sh` +61 −81. Code and tests together: +98 −104. Including markers and
+the report, the total goes up only because of this report section.
+
+### Review findings
+
+| # | Finding | Now |
+|---|---|---|
+| P1 1 | todo row under the spinner read `limit` | `working` (3 todo variants tested) |
+| P2 2 | `● Bash(` / MCP tool output read `limit` | not `limit`: `⎿` under anything but a prompt or summary is not a banner (3 cases) |
+| P2 3 | `429` line number / count read `limit` | not `limit`: no headline matches (2 cases) |
+| P2 4 | `● Done. See the notes...` above `$` read `working` | `idle` |
+| P3 | refusal followed by 4 output rows, no prompt, read `limit` | not `limit`: the banner must be the last row or sit above one trailer |
+| P3 | prose `press esc to interrupt` 6 rows up read `working` | not `working`: the hint needs a status shape, inside the region |
+| P3 | fork per row in the generic scan | gone: inline trims, and at most 2 `tr` forks, only on rows containing `limit`/`quota` |
+| P3 | stale `OSRC_SCR_LIMIT_SECS` comment | deleted |
+| P3 | r3 markers at the repo root | deleted |
+
+**Behaviour change, on purpose:** Claude's `⎿  API Error: 429 ...` under a prose bullet no longer
+reads `limit`. It was an invented fixture, not a real capture, and it hangs inside a bullet
+block. supervise's own `_sv_api_banner` (`lib/supervise.sh`) already reads that row as
+`api-error`. There is no separate `refused` state in `lib/screen.sh`. Provider refusals with a
+limit banner are `limit`. The API/login error banner is supervise's `failed api-error`, which I
+did not touch (not my file).
+
+**Not changed:** bare `Thinking…` / `Running…` still read `unknown` for unknown engines (round 3's
+decision, P3). A spinner-led row reads `working`. Needs item 1 (longer unknown window in
+supervise) is still the fix for unknown layouts. `dead` is still only groundwork.
+
+### Tests (Linux, bash 5, niced)
+
+The 12 new cases (4 review findings, expanded, plus 2 P3 cases) were first run against the r3
+`lib/screen.sh`: `test_screen_alerts.sh` gave 49 passed, 12 failed, and every failure was a new
+case. After the change:
+
