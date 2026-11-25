@@ -298,7 +298,7 @@ sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
 mkdir -p "$OSRC_HOME/jobs/R4"; echo running > "$OSRC_HOME/jobs/R4/status"; echo "$w" > "$OSRC_HOME/jobs/R4/pid"; echo "$w" > "$OSRC_HOME/jobs/R4/supervisor_pid"; own "$U" R4
 bash -c 'sleep 300; : watcher run' & wp=$!; PIDS="$PIDS $wp"; mkdir -p "$OSRC_HOME/watchsvc/run.lock"; echo "$wp" > "$OSRC_HOME/watchsvc/run.lock/pid"; date +%s > "$OSRC_HOME/watchsvc/alive"; sleep 0.3
 g11() { rm -f "$OSRC_HOME/owners/$U/.stop-blocks"; printf '{"session_id":"%s","cwd":"%s"}' "$U" "$TMP/proj" | TMUX="$1,1,0" TMUX_PANE=%7 "$SRC" stop-guard 2>/dev/null; }
-out="$(g11 "$(S '_ws_sock')")"; [ -z "$out" ] && ok "a session on the watcher's (default) tmux server is covered" || no "default server blocked [$out]"
+out="$(g11 "$(S 'unset TMUX_TMPDIR; _ws_sock')")"; [ -z "$out" ] && ok "a session on the watcher's (default) tmux server is covered" || no "default server blocked [$out]"
 out="$(g11 "$TMP/work-sock")"; grep -q '"decision":"block"' <<<"$out" && ok "a session on another tmux server (tmux -L/-S) is not covered: the daemon cannot reach it" || no "trusted a pane the daemon cannot reach [$out]"
 printf 'export PATH=%q\nexport TMUX=%q\n' "$PATH" "$TMP/work-sock" > "$OSRC_HOME/watchsvc/env"
 out="$(g11 "$TMP/work-sock")"; [ -z "$out" ] && ok "a watcher installed from that tmux server covers it" || no "captured server not matched [$out]"
