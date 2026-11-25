@@ -304,3 +304,15 @@ only `case`, `[ ]` and the existing helpers.
 
 ## Needs from other lanes
 None.
+
+### Round 5 conformance
+
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` rc=1: 240 passed, 7 failed,
+1 skipped (live probes). Failing suites: `test_harness_isolation`, `test_vocab_hygiene`,
+`test_supervise_pgroup_kill`, `test_parity_insource_refresh`, `test_conformance_suite_timeout`,
+`test_sealed_fixes`, `test_release_0175`. The first six were each run alone on the base commit `caf8b00`
+in a separate worktree and fail there too (rc=1); this lane does not touch them (`test_vocab_hygiene`
+asserts a failed write, which this container's root user does not get). `test_release_0175` failed
+only on a Mission Control hub-restart timing case under conformance load ("path-stale hub survived");
+run alone at this head it is rc=0 (83 passed). A first conformance attempt was killed by a 590 s
+timeout and is not counted.
