@@ -181,11 +181,11 @@ _cloudrun_private_check() {
     [ -n "$line" ] || continue
     bad=0
     if [ -n "$HOME" ] && grep -qF -- "$HOME" <<<"$line"; then bad=1
-    elif grep -qiE '/Users/|/home/|~/|[A-Za-z]:[\\/]Users[\\/]' <<<"$line"; then
+    elif grep -qE '/Users/|/home/|~/|[A-Za-z]:[\\/][Uu][Ss][Ee][Rr][Ss][\\/]' <<<"$line"; then
       while IFS= read -r tok; do
         [ -n "$tok" ] || continue
         _cloudrun_path_generic "$tok" || bad=1
-      done < <(grep -oiE '([A-Za-z]:[\\/]Users[\\/]|/Users/|/home/|~/)[^[:space:]`"'"'"'),;]*' <<<"$line")
+      done < <(grep -oE '([A-Za-z]:[\\/][Uu][Ss][Ee][Rr][Ss][\\/]|/Users/|/home/|~/)[^[:space:]`"'"'"'),;]*' <<<"$line")
     fi
     if [ "$bad" = 1 ]; then
       printf 'PRIVATE PATH: pack contains a machine-local path the cloud box cannot see: %s\n' "$(printf '%s' "$line" | cut -c1-160)" >&2

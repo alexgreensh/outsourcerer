@@ -267,17 +267,20 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
 # (the remote, else the name in the launch log), or nothing. Ownership is exact: a branch that a
 # longer registered lane id also names (lane `a` vs `a-r2` and claude/a-r2-x) is never adopted.
 _osrc_lane_alt_branch() {
-  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" c cands="" pb
+  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" c logc remote="" pb
   pb="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"
   case "$pb" in claude/*) printf '%s' "$pb"; return 0 ;; esac
-  cands="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"   # launch-log name first
+  logc="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"; logc="${logc%.}"
   if [ "$transport" = gh ]; then
-    ! have gh || cands="$cands $(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[].ref' 2>/dev/null)"
+    ! have gh || remote="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[].ref' 2>/dev/null)"
   else
-    cands="$cands $(printf '%s\n' "$lsout" | awk '{print $2}')"
+    remote="$(printf '%s\n' "$lsout" | awk '{print $2}')"
   fi
-  for c in $cands; do
-    c="${c#refs/heads/}"; c="${c%.}"   # a log line may end the name with prose punctuation
+  remote="$(printf '%s\n' "$remote" | sed 's#^refs/heads/##')"
+  # The launch-log name is preferred, but only a branch the remote really has counts: a wrapped,
+  # truncated or stale log name must never hide the real one.
+  for c in $logc $remote; do
+    grep -qxF -- "$c" <<<"$remote" || continue
     _osrc_lane_owns_branch "$id" "$c" && { printf '%s' "$c"; return 0; }
   done
   return 0

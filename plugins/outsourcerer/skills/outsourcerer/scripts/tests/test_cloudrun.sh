@@ -301,6 +301,8 @@ pc 'see ~/.claude/plugins/cache/<plugin>/x' && pc 'under /home/<user>/.config/<a
   && ok "one placeholder does not excuse a literal folder under home" || bad "literal home folder passed"
 pc 'open C:\Users\<user>\<project>\README.md' && pc 'in C:/Users/<user>/AppData/Roaming/<app>/' && pc 'see ~/<repo>/src' \
   && ok "invented Windows and home template paths are allowed" || bad "a template path was rejected"
+pc 'add GET /users/:id to src/users/x.rb' && pc 'route /api/users/42 returns 404' && pc 'see app/Home/index.tsx' \
+  && ok "app routes and folders named users/Home are not home paths" || bad "a /users/ route or Home folder was blocked"
 ! pc 'open C:\Users\bob\proj\x' && ! pc 'open C:\Users\<user>\clients\acme\<f>' && ! pc 'at D:/Users/bob/<x>' \
   && ok "real Windows home paths are blocked" || bad "a real Windows path slipped through"
 

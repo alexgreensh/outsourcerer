@@ -124,6 +124,15 @@ grep -q 'lane alt1 ' <<<"$out" && bad "cleanup offered approved-but-unmerged wor
 out="$( _osrc_review_verdict_for() { echo BLOCK; }; _osrc_cleanup_remote_branches)"
 grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers a rejected lane's branches, nothing from the log" || bad "cleanup offer: $out"
 
+# Final fix: a launch-log name the remote does not have (wrapped, truncated, stale) never hides the real branch.
+printf '{}' > "$OSRC_HOME/lgx.json"; printf 'pushed to claude/lgx-fix\n' > "$OSRC_HOME/cloud/lgx.launch.log"
+b="$(_osrc_lane_alt_branch lgx "$OSRC_HOME/lgx.json" git x "$(printf 'abc\trefs/heads/claude/lgx-fixes-8v\n')")"
+[ "$b" = claude/lgx-fixes-8v ] && ok "absent launch-log name falls back to the remote's real branch" || bad "followed an absent log name: '$b'"
+printf 'pushed to claude/lgx-fixes-8v.\n' > "$OSRC_HOME/cloud/lgx.launch.log"
+b="$(_osrc_lane_alt_branch lgx "$OSRC_HOME/lgx.json" git x "$(printf 'a\trefs/heads/claude/lgx-aaa\nb\trefs/heads/claude/lgx-fixes-8v\n')")"
+[ "$b" = claude/lgx-fixes-8v ] && ok "launch-log name still preferred when the remote has it" || bad "log preference lost: '$b'"
+rm -f "$OSRC_HOME/lgx.json" "$OSRC_HOME/cloud/lgx.launch.log"
+
 # Round 3 (P2-5): the gh transport finds the session branch via matching-refs, and drops a longer lane's.
 rm -f "$GH_ERR"; printf 'gh: No commit found for SHA: cloud/g1 (HTTP 422)\n' > "$GH_ERR"
 export GH_REFS="$TMP/refs.json" GH_ALT="$TMP/alt.json"
