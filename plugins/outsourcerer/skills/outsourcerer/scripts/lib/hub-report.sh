@@ -278,6 +278,10 @@ cmd_hub_report() {
   fi
   osrc_hub_beat "$sid"
   printf 'Mission Control updated%s%s%s.\n' "${said:+ ($said)}" "${newid:+; question $newid is waiting on you}" "${done_ask:+; $done_ask closed}"
+  if [ -n "$board" ] && type _sg_board_unnamed >/dev/null 2>&1; then
+    local _un; _un="$(jq '{board:.}' "$board" 2>/dev/null > "$board.osrc-chk.$$" && _sg_board_unnamed "$board.osrc-chk.$$")"; rm -f "$board.osrc-chk.$$"
+    [ -z "$_un" ] || printf 'warning: these board tracks name no "model" or "lane", so their hover card cannot say who built them: %s\n' "$_un" >&2
+  fi
   [ -z "$board" ] || ! type _osrc_hub_board_pct_says >/dev/null 2>&1 \
     || _osrc_hub_board_pct_says "$board" "$(jq -r '.pct // "" | tostring' "$hub/projects/$sid.json" 2>/dev/null)"
 }

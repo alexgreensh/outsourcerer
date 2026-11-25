@@ -268,6 +268,7 @@ osrc_lane_cap() {
   lane="$(_lane_by_token "$_tok" 2>/dev/null)"; [ -n "$lane" ] || lane="$(_lane_by_native "$_tok" 2>/dev/null)"
   [ -n "$lane" ] || lane="$(_lane_by_provider "$_tok" 2>/dev/null)"
   [ -n "$lane" ] || die "lane cap: unknown lane '$_tok' (use a lane code like cx/cc/dv/gm or a provider name like codex/claude)"
+  [ "$lane" != gi ] || lane=gm   # "gemini": the image lane shares the Antigravity pool; the text lane is metered
   local cf; cf="$(_lane_caps_file)"
   if [ "$act" = "--clear" ] || [ "$act" = "clear" ]; then
     # Cap-event dedupe markers are per (job|session,spec): clearing the caps must also

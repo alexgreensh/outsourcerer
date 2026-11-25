@@ -3822,7 +3822,7 @@ lane_descriptor_gm() {
     "plan_limited=yes" \
     "fallback_provider=gemini" \
     "session_provider=gemini" \
-    "conserve_match= gemini=keyless " \
+    "conserve_match= gemini=keyless " "conserve_windows=gemini5h geminiwk" \
     "conserve_name=keyless Gemini" \
     "conserve_why=Antigravity login, no API key" \
     "participates_health=yes"

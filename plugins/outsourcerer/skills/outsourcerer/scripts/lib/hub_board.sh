@@ -40,6 +40,7 @@ _osrc_hub_apply_board() {
           | ((.id // ("T" + (($k + 1) | tostring))) | tostring) as $tid
           | {id:$tid, short:((.short // $tid) | tostring), status:((.status // .state // "Building") | tostring),
              theme, model, issues, note}
+          + ({lane, reviewer, prs, branch, worktree, repo:(.repo // $b.repo)} | with_entries(select(.value | type == "string" and . != "")))
           + (tpct as $x | if $x == null then {} else {pct:$x} end)
           + (if .plats then {plats} else {} end))) as $lanes
       | [$lanes[] | .pct | numbers] as $nums
@@ -59,7 +60,8 @@ _osrc_hub_apply_board() {
         | (if ($b.freeze | type) == "string" then $b.freeze else "" end) as $bfz
         | (if ($b.release | type) == "string" then $b.release else "" end) as $brel
         | (if ($b.releaseNote | type) == "string" then $b.releaseNote else "" end) as $brn
-        | . + {lanes:$lanes, boardTracks:($lanes | length), sessionsRun:($p.sessionsTotal // ($jobs | length)),
+        | . + (if ($b.repo | type) == "string" and $b.repo != "" then {repo:$b.repo} else {} end)
+        + {lanes:$lanes, boardTracks:($lanes | length), sessionsRun:($p.sessionsTotal // ($jobs | length)),
                sessionsNow:($jobs | map(select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$"; "i") | not) and ((.state // "") != "idle"))) | length),
                flow:((if ($b.flow | type) == "array" and ($b.flow | length) > 0 then $b.flow else $fl end)
                      | map(if type == "string" then {t:.} elif type == "object" then . else empty end

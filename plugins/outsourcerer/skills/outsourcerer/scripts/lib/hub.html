@@ -850,7 +850,7 @@ a.pill svg { width: 13px; height: 13px; }
       const c = el('div', 'tile' + (l.session ? ' has-open' : '')); c.tabIndex = 0; c.id = 'lane-' + p.id + '-' + l.id; c.setAttribute('role', 'group');
       const nm = el('span', 'nm'); const nt = el('span', null, l.short);
       if (Array.isArray(l.plats) && l.plats.length) { const pl = el('span', 'plats'); l.plats.forEach((x) => pl.appendChild(logo(x))); nt.appendChild(pl); }
-      nm.append(nt); const rf = refs(l.repo || p.repo, l.issues); if (rf) nm.append(rf);
+      nm.append(nt); const rf = refs(l.repo || p.repo, [l.issues, l.prs].filter(Boolean).join(' ')); if (rf) nm.append(rf);
       c.append(ring(l.pct), nm, chip(l.status));
       if (l.session) {
         const ob = el('button', 'open', 'Open session'); ob.type = 'button'; ob.id = 'open-' + p.id + '-' + l.id;
@@ -859,7 +859,7 @@ a.pill svg { width: 13px; height: 13px; }
         c.append(ob);
       }
       c.setAttribute('aria-label', l.short + ', ' + (l.status || 'Building') + (pctOk(l) ? ', ' + l.pct + ' percent' : ''));
-      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status)); if (pctOk(l)) row.append(el('span', 'mono', l.pct + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.issues) { const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf); else h.append(el('p', null, 'Issues: ' + l.issues)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); });
+      hover(c, (h) => { h.append(el('div', 'ht', l.short)); const row = el('div', 'row'); row.append(chip(l.status)); if (pctOk(l)) row.append(el('span', 'mono', l.pct + '%')); if (l.model) row.append(el('span', null, l.model)); h.append(row); if (l.lane) h.append(el('p', null, 'Lane: ' + l.lane)); if (l.reviewer) h.append(el('p', null, 'Reviewed by: ' + l.reviewer)); const iz = [l.issues, l.prs].filter(Boolean).join(' '); if (iz) { const rf = refs(l.repo || p.repo, iz); if (rf) h.append(rf); else h.append(el('p', null, 'Issues and PRs: ' + iz)); } if (l.note) h.append(el('p', null, l.note)); if (l.branch) h.append(el('p', 'where', 'Branch: ' + l.branch)); if (l.worktree) h.append(el('p', 'where', 'Worktree: ' + l.worktree)); });
       return c;
     };
     const norm = (s) => String(s || 'Building').toLowerCase();

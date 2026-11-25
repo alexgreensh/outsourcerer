@@ -543,6 +543,13 @@ _sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits a
   fi
   mv -f "$tmp" "$dir/hub.json" || return 1
   printf '%s\n' "$now" > "$dir/tick.time"
+  _sv_card_event "${dir##*/}"
+}
+
+_sv_card_event() { # <owner sid>: the stop-guard card check (lib/card_fresh.sh), as a wake for orchestrators that rarely stop
+  local why; type _sg_card_nag >/dev/null 2>&1 && [ -f "$OSRC_HOME/hub/projects/$1.json" ] || return 0
+  why="$(_sg_card_nag "$1")" || return 0
+  _sv_append card card "$(printf '%s' "$why" | head -1 | cut -c1-400)" "$SCRIPT_PATH hub report --board <board.json> --next \"<one line>\"" supervise "$1"
 }
 
 _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY -> review next
@@ -762,7 +769,7 @@ _sv_main() { # <sid> <once> [ids...]
     done
     _sv_remote_poll supervise
     seen="$(printf '%s\n' $seen $targets | sort -u | tr '\n' ' ')"   # a target dropped mid-settle still has its event in this batch
-    tj="$(printf '%s\n' $seen supervise | jq -R . | jq -cs .)"
+    tj="$(printf '%s\n' $seen supervise card | jq -R . | jq -cs .)"
     gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"
     if [ "$cgen" != "$gen" ]; then
       [ "$cgen" = $(( gen - 1 )) ] && older="$older$(_sv_read_range "$f.1" "$cursor" - "$tj" "$sid")"

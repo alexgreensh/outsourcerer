@@ -5,12 +5,22 @@
 # hook (cmd_stop_guard) asks this first: when the session's card was last reported more than
 # OSRC_CARD_STALE_MIN minutes ago (default 30), or a question on it has waited more than
 # OSRC_DECISION_STALE_H hours (default 2) without being re-confirmed, the stop is blocked with the
-# exact `hub report` commands to run. Loop safety: at most one block per OSRC_CARD_STALE_MIN window.
+# exact `hub report` commands to run. A board track that names no model or lane is stale too: the
+# hover card is where the user reads who built it. Supervise turns the same check into an EVENT card
+# on its 10-min tick, so an orchestrator that rarely ends a turn is still asked.
+# Loop safety: at most one block per OSRC_CARD_STALE_MIN window.
 # OSRC_CARD_GUARD=0 turns it off. Any error allows the stop.
 
 _sg_iso_age() { # <iso-utc> -> seconds since, or empty
   local t; t="$(jq -rn --arg s "$1" '$s | sub("\\.[0-9]+";"") | fromdateiso8601? // empty' 2>/dev/null)"
   [ -n "$t" ] && printf '%s' $(( $(date +%s) - t ))
+}
+
+# _sg_board_unnamed <project-json> -> the board tracks that name no model or no lane, comma-joined.
+_sg_board_unnamed() {
+  jq -r '[(.board.tasks // [])[]? | objects
+      | select(((.model // "") | tostring) == "" or ((.lane // "") | tostring) == "")
+      | ((.short // .name // .id // "?") | tostring)[0:50]] | join(", ")' "$1" 2>/dev/null
 }
 
 # _sg_card_nag <sid> -> prints a block reason and returns 0 when the card needs a refresh now.
@@ -45,7 +55,8 @@ _sg_card_nag() {
   fi
   if [ ! -f "$pf" ] && [ -z "$old" ]; then return 1; fi
   local hasb; hasb="$(jq -r 'if (.board | type) == "object" and (.board.tasks | type) == "array" and (.board.tasks | length) > 0 then 1 else 0 end' "$pf" 2>/dev/null)"
-  if [ -z "$old" ] && [ "$hasb" = 1 ] && [ -n "$age" ] && [ "$age" -lt $(( smin * 60 )) ]; then return 1; fi
+  local unnamed=""; [ "$hasb" != 1 ] || unnamed="$(_sg_board_unnamed "$pf")"
+  if [ -z "$old" ] && [ -z "$unnamed" ] && [ "$hasb" = 1 ] && [ -n "$age" ] && [ "$age" -lt $(( smin * 60 )) ]; then return 1; fi
   local mkd="$OSRC_HOME/hub/card-nag"
   mk="$mkd/$sid"
   [ -L "$OSRC_HOME/hub" ] || [ -L "$mkd" ] || [ -L "$mk" ] && return 1
@@ -58,10 +69,12 @@ _sg_card_nag() {
   n="$( [ -n "$age" ] && printf '%s min ago' $(( age / 60 )) || printf 'never')"
   printf 'Outsourcerer: the user reads Mission Control as the truth, and your card for "%s" was last reported %s.' "$name" "$n"
   [ -z "$old" ] || printf ' These questions on it are over %s h old: %s.' "$dh" "$old"
+  [ -z "$unnamed" ] || printf ' These board tracks do not say who built them: %s.' "$unnamed"
   printf '\nBefore ending your turn, from this session:\n  %s hub report --pct <N> --next "<one line>" [--status building|review|waiting|shipped]\n' "$SCRIPT_PATH"
   printf '  For every question already answered anywhere (chat, a board): %s hub report --done-ask <id>\n' "$SCRIPT_PATH"
   printf '  A question still open: re-ask it with --why "<background>" --rec "<your pick>" and close the old id, so its age is honest.\n'
   printf '  Publish your board (the same JSON your board page renders: release, freeze, themes, tasks with human names, decisions): %s hub report --board <board.json>\n' "$SCRIPT_PATH"
+  printf '  Every task names its "model" and "lane" (e.g. "Opus 5.5", "Claude cloud"), plus "issues"/"prs" ("#80 #82"), "reviewer" and "branch" when known: the hover card shows them.\n'
   printf 'Plain human words only: no code names, job ids or lane ids anywhere the user reads.'
   return 0
 }

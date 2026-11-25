@@ -156,6 +156,14 @@ EOF
   [ -n "$c7" ] && line="$line claude7d=$c7"
   [ -n "$x5" ] && line="$line codex5h=$x5"
   [ -n "$xw" ] && line="$line codexwk=$xw"
+  # Antigravity's "Gemini Models" group (Neon and friends): its weekly and 5-hour use from the agy
+  # /usage probe (lib/plan-probe.sh). A reading older than OSRC_LIMITS_MAX_AGE is unknown, never 0.
+  if type _osrc_probe_cache >/dev/null 2>&1 && have jq; then
+    line="$line$(_osrc_probe_cache agy 2>/dev/null | jq -r --argjson now "$(date +%s)" --argjson max "${OSRC_LIMITS_MAX_AGE:-7200}" '
+      select(.ok == true and ($now - (.checked // 0)) <= $max) | [.groups[]? | select((.name // "") | test("Gemini"))][0] // empty
+      | .windows[]? | select(.left | type == "number") | (if .kind == "week" then "geminiwk" elif .kind == "5h" then "gemini5h" else empty end) as $w
+      | " \($w)=\(100 - .left | . * 10 | round / 10)"' 2>/dev/null | tr -d '\n')"
+  fi
   # Mark the codex figures stale rather than dropping them: a floor with its age attached is useful,
   # a confident wrong number is not.
   case "$xage" in ''|*[!0-9]*) xage=0 ;; esac
