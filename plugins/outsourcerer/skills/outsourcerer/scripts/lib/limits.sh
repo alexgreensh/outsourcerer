@@ -19,7 +19,7 @@
 #       - takes a zero-cost fallback hop when the run is unpinned auto-tier,
 #       - refuses loudly otherwise (mutating tier, pinned -m, exhausted fallbacks).
 #   * stale readings are UNKNOWN, not exhausted: codex meters older than
-#     OSRC_LIMITS_STALE_SECS (default 6h, carried as codexage=<secs> in the limits
+#     OSRC_LIMITS_STALE_SECS (default 6h for the launch gate; the page marks a reading stale after 2h; carried as codexage=<secs> in the limits
 #     line) warn and proceed; they never gate. Claude readings are already
 #     freshness-gated upstream (dropped at OSRC_LIMITS_MAX_AGE=2h), so an absent
 #     claude meter is simply "no reading", never "exhausted".
@@ -211,11 +211,49 @@ EOF
 }
 
 
-# _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
+# _osrc_limits_low_scan <limits-line> -> one LOUD line per window at or under OSRC_LIMIT_LOW_PCT (default
+# 10) percent left, printed every call while it is low (the brief must keep saying it). The supervise
+# event ("limit-low") fires ONCE per crossing: $OSRC_HOME/limits-low-seen remembers which windows were
+# already announced and forgets a window when it climbs back over the line. A stale codex reading is
+# unknown, so it never alerts. Known gap: a mark survives a window reset until a call sees that window back
+# over the line, so the next window's first crossing can go unannounced (the LIMIT LOW line still prints).
+# Never fails, never blocks.
+_osrc_limits_low_scan() {
+  local limits="${1:-}" thr tok w v seen f lines="" left name stale=0 present="" s
+  thr="${OSRC_LIMIT_LOW_PCT:-10}"; case "$thr" in ''|*[!0-9.]*) thr=10 ;; esac
+  f="$OSRC_HOME/limits-low-seen"
+  for tok in $limits; do case "$tok" in codexage=*) [ "${tok#*=}" -gt "${OSRC_LIMITS_STALE_SECS:-21600}" ] 2>/dev/null && stale=1 ;; esac; done
+  seen="$(cat "$f" 2>/dev/null)"
+  for tok in $limits; do
+    case "$tok" in claude5h=*|claude7d=*|codex5h=*|codexwk=*) ;; *) continue ;; esac
+    w="${tok%%=*}"; v="${tok#*=}"
+    case "$v" in ''|*[!0-9.]*) continue ;; esac
+    if [ "$stale" = 1 ]; then case "$w" in codex*) continue ;; esac; fi
+    present="$present $w"
+    awk -v u="$v" -v t="$thr" 'BEGIN{exit !(100-u <= t+0)}' || continue
+    left="$(awk -v u="$v" 'BEGIN{printf "%g",100-u}')"
+    case "$w" in claude5h) name="Claude 5h" ;; claude7d) name="Claude weekly" ;; codex5h) name="ChatGPT 5h" ;; *) name="ChatGPT weekly" ;; esac
+    lines="$lines $w"
+    printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"
+    case " $seen " in *" $w "*) ;; *)
+      if type _osrc_lane_event >/dev/null 2>&1; then
+        _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" "$(_owner_sid 2>/dev/null)" >/dev/null 2>&1 || true
+      fi ;;
+    esac
+  done
+  # A window with no reading in this call keeps its mark; only a present reading back over the line clears it.
+  for s in $seen; do case " $present " in *" $s "*) ;; *) lines="$lines $s" ;; esac; done
+  mkdir -p "$OSRC_HOME" 2>/dev/null && printf '%s\n' "${lines# }" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null
+  rm -f "$f.$$" 2>/dev/null
+  return 0
+}
+
+# _conserve_reco <limits-line> <lanes-line> -> the conservation line, then any LIMIT LOW lines. Threshold is
 # OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
 # local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.
-_conserve_reco() {
+_conserve_reco() { _conserve_reco_line "$@"; local rc=$?; _osrc_limits_low_scan "${1:-}"; return $rc; }
+_conserve_reco_line() {
   local limits="${1:-}" lanes="${2:-}" tok c5="" c7="" x5="" xw="" xstale="" posture lane="" why="" tight=0
   for tok in $limits; do case "$tok" in
     claude5h=*) c5="${tok#*=}" ;; claude7d=*) c7="${tok#*=}" ;; codex5h=*) x5="${tok#*=}" ;; codexwk=*) xw="${tok#*=}" ;;
@@ -634,7 +672,7 @@ _osrc_lane_summary_base() {
   local mw="" _w _p _rst _age
   mw="$(_osrc_meter_windows 2>/dev/null)"
   local stale_secs limit_thr cons_thr cline=""
-  stale_secs="${OSRC_LIMITS_STALE_SECS:-21600}"
+  stale_secs="${OSRC_LIMITS_STALE_SECS:-7200}"
   limit_thr="$(_osrc_limit_threshold 2>/dev/null)"; limit_thr="${limit_thr:-90}"
   cons_thr="${OSRC_CONSERVE_THRESHOLD:-50}"
   while IFS='	' read -r _w _p _rst _age; do
@@ -727,16 +765,16 @@ _osrc_summary_json() {  # <rows> <meter-windows-tsv>
     [ -n "$hid" ] || continue
     [ "$first" = 1 ] || printf ','
     first=0
-    local cw2 wdet="" w2 wrow2 wp2 wr2 wa2 l2 r2
+    local cw2 wdet="" w2 wrow2 wp2 wr2 wa2 wa3 l2 r2
     cw2="$(_lane_field "$hlane" conserve_windows 2>/dev/null)"
     if [ -n "$cw2" ]; then
       for w2 in $cw2; do
         wrow2="$(printf '%s\n' "$mw" | awk -F'\t' -v w="$w2" '$1==w{print; exit}')"
         [ -n "$wrow2" ] || continue
-        wp2="$(printf '%s' "$wrow2" | cut -f2)"; wr2="$(printf '%s' "$wrow2" | cut -f3)"
+        wp2="$(printf '%s' "$wrow2" | cut -f2)"; wr2="$(printf '%s' "$wrow2" | cut -f3)"; wa3="$(printf '%s' "$wrow2" | cut -f4)"
         l2="$(awk -v u="$wp2" 'BEGIN{printf "%g",100-u}' 2>/dev/null)"
         r2=""; case "$wr2" in ''|-|*[!0-9]*) ;; *) r2="$(_osrc_renew_text "$wr2" 2>/dev/null)" ;; esac
-        wdet="$wdet\"$w2\":{\"used\":$(_osrc_jnum "$wp2"),\"left\":$(_osrc_jnum "$l2"),\"renews_at\":$(_osrc_jnum "$wr2"),\"renews\":$(_osrc_jstr_or_null "$r2")},"
+        wdet="$wdet\"$w2\":{\"used\":$(_osrc_jnum "$wp2"),\"left\":$(_osrc_jnum "$l2"),\"renews_at\":$(_osrc_jnum "$wr2"),\"renews\":$(_osrc_jstr_or_null "$r2"),\"age_s\":$(_osrc_jnum "$wa3")},"
       done
       wdet="{${wdet%,}}"
     else wdet="{}"; fi

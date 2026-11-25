@@ -183,9 +183,9 @@ U="$(python3 -I "$P" agy-parse 1794816644 < "$FIX")"
 jq -e '.ok and (.groups | length) == 3 and .groups[1].windows[0].left == 0 and .groups[1].windows[0].renews_at == (1794816644 + 94*3600 + 19*60) and .groups[1].windows[1].disabled' >/dev/null <<<"$U" \
   && ok "agy-parse: real screen -> 3 groups, spent group with refresh time, paused 5h" || bad "agy-parse: $U"
 U="$(printf 'nothing here\n' | python3 -I "$P" agy-parse)"; jq -e '.ok == false and (.why | length) > 0' >/dev/null <<<"$U" && ok "agy-parse: no screen -> ok:false with a reason" || bad "agy-parse fail: $U"
-U="$(printf '[{"id":"codex","name":"Codex","state":"wait","left":"x"}]' | jq -c --argjson p '{}' --argjson now 1 --argjson lt 90 --argjson ct 50 -f "$S/lib/plan-overlay.jq")"
+U="$(printf '[{"id":"codex","name":"Codex","state":"wait","left":"x"}]' | jq -c --argjson p '{}' --argjson now 1 --argjson lt 90 --argjson ct 50 --argjson stale 7200 --argjson ll 10 -f "$S/lib/plan-overlay.jq")"
 jq -e '.[0].state != "wait" and .[0].left == "No reading"' >/dev/null <<<"$U" && ok "overlay: wait without a reset time never reaches the page" || bad "overlay wait: $U"
-U="$(printf '[{"id":"warp","name":"Warp","state":"unknown","left":"not checked yet"}]' | jq -c --argjson p '{}' --argjson now 1 --argjson lt 90 --argjson ct 50 -f "$S/lib/plan-overlay.jq")"
+U="$(printf '[{"id":"warp","name":"Warp","state":"unknown","left":"not checked yet"}]' | jq -c --argjson p '{}' --argjson now 1 --argjson lt 90 --argjson ct 50 --argjson stale 7200 --argjson ll 10 -f "$S/lib/plan-overlay.jq")"
 jq -e '.[0].left == "No usage meter" and (.[0].note | test("Warp"))' >/dev/null <<<"$U" && ok "overlay: unmetered harness says so, with a reason" || bad "overlay generic: $U"
 
 # ---- 6. loads when limits.sh / hub.sh are sourced alone -------------------------------------------

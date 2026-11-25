@@ -20,7 +20,19 @@ def renew($t): if ($t | type) != "number" or $t <= $now then null
   | if $d == 0 then "today · " + ($t | strflocaltime("%H:%M")) elif $d == 1 then "tomorrow · " + ($t | strflocaltime("%H:%M"))
     else "in \($d) days · " + ($t | strflocaltime("%a %e %b") | gsub("  +"; " ")) end end;
 def wlabel: if . == "claude5h" or . == "codex5h" then "5 hours" else "Week" end;
+# The newest reading wins: a cached live probe only replaces a row that already has its own reading
+# (the session log) when the probe is not older than it.
+def row_age: ([.windows[]?.age_s | numbers] | min);
+def probe_newer: (row_age) as $a | $a == null or ($now - ($p.codex.checked // $now)) <= $a;
 def unmeasured: (.state == "unknown" or .state == "wait");
+# A kept last-good probe whose refresh failed says so; it is stale (never headroom) only once older than
+# 15 minutes, so one failed refresh does not blank a young reading (the page refresh runs with TTL 0).
+def refresh_flag($c): if ($c.refresh_failed // "") != "" then
+    . + {note: "\(.note // "") Refresh failed (\($c.refresh_failed)); showing the last good reading."}
+    | if ($now - ($c.checked // $now)) > 900 then
+        . + {stale: true} | if .state == "ok" or .state == "low" then .state = "unknown" else . end
+      else . end
+  else . end;
 def checked($t): . + {updated: ($t | todate), checked_at: $t};
 
 # rows: [{k, label, used, renews_at}] -> the row fields for the tightest live window.
@@ -47,15 +59,16 @@ def claude_fix:
 
 def codex_fix:
   ($p.codex // {}) as $c
-  | if $c.ok == true then
+  | if $c.ok == true and probe_newer then
       ($c.windows | to_entries | map({k: .key, label: (.key | wlabel), used: .value.used, renews_at: (.value.renews_at | epoch)})) as $ws
       | ("Checked live with codex app-server" + (if ($c.plan // "") != "" then " (plan \($c.plan))" else "" end) + "."
          + (if ($c.resets_available // 0) > 0 then " \($c.resets_available) free full resets available." else "" end)) as $why
-      | . + from_windows($ws; $why) | . + {note: (.note // $why), source: "codex app-server"} | checked($c.checked // $now)
+      | . + from_windows($ws; $why) | . + {note: (.note // $why), source: "codex app-server"} | checked($c.checked // $now) | refresh_flag($c)
     elif ((.windows // {}) | length) > 0 then
-      (.windows | to_entries | map({k: .key, label: (.key | wlabel), used: .value.used, renews_at: (.value.renews_at | epoch)})) as $ws
+      row_age as $ra
+      | (.windows | to_entries | map({k: .key, label: (.key | wlabel), used: .value.used, renews_at: (.value.renews_at | epoch)})) as $ws
       | ("Live check failed (\($c.why // "codex app-server unavailable")); showing the last Codex session-log reading. Usage can only have risen since.") as $why
-      | . + from_windows($ws; $why) | . + {note: (.note // $why)} | checked($c.checked // $now)
+      | . + from_windows($ws; $why) | . + {note: (.note // $why)} | checked(if $ra != null then $now - $ra else ($c.checked // $now) end)
     else . + {state: "unknown", left: "No reading", note: "Live check failed: \($c.why // "codex app-server is not available")."} | checked($c.checked // $now)
     end;
 
@@ -80,7 +93,7 @@ def agy_fix:
              models: ($main.models // null),
              note: ("Checked live from Antigravity's /usage screen (\($main.name // "Gemini Models missing"))." + (if $others != "" then " \($others)." else "" end)),
              source: "agy /usage"}
-      | checked($a.checked // $now)
+      | checked($a.checked // $now) | refresh_flag($a)
     else . + {state: "unknown", left: "No reading", note: "Antigravity's /usage screen could not be read: \($a.why // "agy is not available")."} | checked($a.checked // $now)
     end;
 
@@ -112,7 +125,7 @@ def generic_fix:
   else . + {left: "No usage meter", note: "\(.name) publishes no usage limit Outsourcerer can read, so runs are not gated on one."} | checked($now) end;
 
 map(if (type == "object") | not then .
-    elif .id == "codex" and ($p.codex.ok // false) == true then codex_fix   # the live reading names its source
+    elif .id == "codex" and ($p.codex.ok // false) == true and probe_newer then codex_fix   # the live reading names its source
     elif unmeasured then
       (if .id == "claude" then claude_fix elif .id == "codex" then codex_fix elif .id == "agy" then agy_fix
        elif .id == "devin" then devin_fix elif .id == "droid" then droid_fix else generic_fix end)
@@ -121,5 +134,18 @@ map(if (type == "object") | not then .
     | if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end
     | if (.windows | type) == "object" then .windows |= map_values(if (.renews_at | type) == "number" and (.renews // null) == null then .renews = renew(.renews_at) else . end) else . end
     | if (.left // "") == "" or .left == "not checked yet" then .left = "No reading" else . end
+    # A session-log reading keeps its own age as its checked-at (and shown "Checked") time.
+    | if (.checked_at | type) != "number" and row_age != null then checked($now - row_age) else . end
+    # Every measured reading carries its age. Past $stale it is unknown, never headroom (an exhausted
+    # one stays exhausted: stale only ever understates use). Under the low line it says so. Joined with ", "
+    # because the page row keeps only the text before the first " · ".
+    | if (.used | type) == "number" then
+        (if (.checked_at | type) == "number" then (($now - .checked_at) | if . < 0 then 0 else . end) else null end) as $age
+        | (if $age != null then . + {age_s: $age} else . end)
+        | if $age != null and $age > $stale then . + {stale: true, left: "\(.left), checked \(ago($now - $age)) ago"}
+            | if .state == "ok" or .state == "low" then .state = "unknown" else . end
+          elif (100 - .used) <= $ll then . + {low: true, left: "\(.left), LOW: stop routing here"}
+          else . end
+      else . end
     # "Waiting for reset" never shows without the reset time.
     | if .state == "wait" and ((.renews_at // null) == null) then .state = "unknown" else . end)
