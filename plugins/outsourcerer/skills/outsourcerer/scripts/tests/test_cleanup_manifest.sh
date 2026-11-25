@@ -107,10 +107,13 @@ owner wt-dist
 # pr-old has a MERGED PR but a post-merge commit on top (ASK, finding 2).
 git -C "$R" checkout -qb tmp-side
 printf 'side\n' > "$R/side.txt"; git -C "$R" add side.txt; git -C "$R" commit -qm side
+printf 'post\n' > "$R/post.txt"; git -C "$R" add post.txt; git -C "$R" commit -qm post
 git -C "$R" branch outsourcerer/pr-old
+git -C "$R" checkout -q -B tmp-side2 main
 printf 'side2\n' > "$R/side2.txt"; git -C "$R" add side2.txt; git -C "$R" commit -qm side2
 git -C "$R" branch outsourcerer/pr-hit
 git -C "$R" checkout -q main
+git -C "$R" branch -q -D tmp-side tmp-side2
 owner job-pr
 
 # gh stub: answers `pr list --head <br> --state merged --json headRefOid`.
@@ -316,6 +319,47 @@ gate3="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
   _osrc_free_kb() { printf "6291456"; }   # 6GB: above critical (<=4GB), below launch (>=10GB) on any volume
   _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
 grep -q 'refusing new lane launches' <<<"$gate3" && ok "stale ack cannot match a changed list (finding 8)" || bad "gate passed on stale ack: $gate3"
+
+echo "=== disk gate vs failed state refresh (issue 86) ==="
+# The gate's refresh write can fail exactly when the gate runs (full disk,
+# unwritable state dir). The ack decision must come from the live scan, never
+# from a state.json the refresh failed to replace. Setup: ack the CURRENT list
+# (state.json and ask-ack agree), make the state dir unwritable, then add one
+# more ASK item so the live list no longer matches either record.
+run cleanup --ack >/dev/null 2>&1
+chmod a-w "$OSRC_HOME/cleanup"
+mkdir -p "$OSRC_HOME/jobs/job-later"; echo blocked > "$OSRC_HOME/jobs/job-later/status"; age2h "$OSRC_HOME/jobs/job-later"
+manifest "$OSRC_HOME/jobs/job-later" job job-later ""
+gate4="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "5242880"; }   # 5GB: above the critical floor, under launch
+  _osrc_cleanup_state_write() { return 1; }  # root ignores chmod a-w: force the failed refresh
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+grep -q 'refusing new lane launches' <<<"$gate4" && grep -q 'need your decision' <<<"$gate4" && ok "failed refresh cannot admit a stale ack (issue 86)" || bad "gate admitted a stale ack after failed refresh: $gate4"
+# The mirror image: with the dir still unwritable, re-ack the current list (the
+# ack write goes to a writable path), and the gate must still admit — a failed
+# refresh alone must not deadlock launches the user has acknowledged.
+chmod u+w "$OSRC_HOME/cleanup"
+run cleanup --ack >/dev/null 2>&1
+chmod a-w "$OSRC_HOME/cleanup"
+gate5="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "5242880"; }   # 5GB: above the critical floor, under launch
+  _osrc_cleanup_state_write() { return 1; }
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+chmod u+w "$OSRC_HOME/cleanup"
+grep -q 'gate-rc=0' <<<"$gate5" && ok "failed refresh still admits an ack that matches the live list (issue 86)" || bad "gate deadlocked on failed refresh: $gate5"
+# A scan that dies after emitting an acknowledged ASK item has not seen the rest of the
+# list: the gate must refuse, not admit on the partial list (review round 3, finding 2).
+run cleanup --ack >/dev/null 2>&1
+gate6="$(OSRC_HOME="$OSRC_HOME" OSRC_SOURCED=1 bash -c '
+  . "'"$SRC"'" >/dev/null 2>&1
+  _osrc_free_kb() { printf "5242880"; }   # 5GB: above the critical floor, under launch
+  eval "_real_items() $(declare -f _osrc_cleanup_items | tail -n +2)"
+  _osrc_cleanup_items() { _real_items "$@"; return 1; }
+  _osrc_disk_gate; echo "gate-rc=$?"' 2>&1)"
+grep -q 'refusing new lane launches' <<<"$gate6" && ! grep -q 'gate-rc=0' <<<"$gate6" && grep -q 'scan did not finish' <<<"$gate6" \
+  && ok "gate refuses when the scan exits nonzero after emitting an acked list" || bad "gate admitted on a partial scan: $gate6"
 echo "=== 0-ASK disk pressure (finding 8) ==="
 mkdir -p "$TMP/osrc2/jobs"
 g0="$(OSRC_HOME="$TMP/osrc2" OSRC_SOURCED=1 bash -c '
@@ -342,6 +386,110 @@ run cleanup job-leg --force >/dev/null 2>&1
 git -C "$R" rev-parse --verify -q refs/heads/outsourcerer/job-leg >/dev/null 2>&1 \
   && bad "force cleanup left branch" || ok "force cleanup removed branch"
 
+echo "=== recorded base_sha is not preservation on its own (issue #84) ==="
+BR="$TMP/repo-base"; mkrepo "$BR"
+git -C "$BR" checkout -qb feat
+printf 'local-only\n' > "$BR/lo.txt"; git -C "$BR" add lo.txt; git -C "$BR" commit -qm local-only
+FEAT="$(git -C "$BR" rev-parse HEAD)"
+git -C "$BR" checkout -q main
+# Worktree cut from the local-only branch, no new commits, then the source branch is deleted:
+# the worktree branch is the LAST ref holding FEAT.
+git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-lo" -b outsourcerer/wt-lo "$FEAT"
+git -C "$BR" branch -q -D feat
+bm() { OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$@"; echo "rc=$?"' _ "$@" 2>&1 | tail -1; }
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=1" ] \
+  && ok "base held only by the worktree branch is not preservation (#84)" || bad "local-only base counted as preserved"
+# A remote-tracking ref holding the base makes the shortcut valid again.
+git -C "$BR" update-ref refs/remotes/origin/feat "$FEAT"
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=0" ] \
+  && ok "base held by a remote-tracking ref still preserves the branch" || bad "remote-held base not accepted"
+# Branch with a commit past the remote-held base is not preserved.
+( cd "$BR/.outsourcerer/worktrees/wt-lo" && printf 'more\n' > more.txt && git add more.txt && git commit -qm more )
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=1" ] \
+  && ok "commit past a remote-held base is not preserved" || bad "post-base commit counted as preserved"
+git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
+[ "$(bm "$BR" outsourcerer/wt-main)" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
+# Trunk-named repo, no remotes: another local branch holds the tip, so it is preserved.
+RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
+trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk ""; echo "rc=$?"' _ "$RT" 2>&1)"
+[ "$(tail -1 <<<"$trk")" = "rc=0" ] \
+  && ok "tip still held by another local branch is preserved (no main-ish ref needed)" || bad "trunk-shaped repo cried wolf: $trk"
+# End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
+R3="$TMP/repo-base2"; mkrepo "$R3"
+git -C "$R3" checkout -qb feat; printf 'lo\n' > "$R3/lo.txt"; git -C "$R3" add lo.txt; git -C "$R3" commit -qm lo
+F3="$(git -C "$R3" rev-parse HEAD)"; git -C "$R3" checkout -q main
+git -C "$R3" worktree add -q "$R3/.outsourcerer/worktrees/wt-e2e" -b outsourcerer/wt-e2e "$F3"; git -C "$R3" branch -q -D feat
+owner wt-e2e
+jq -cn --arg p "$R3/.outsourcerer/worktrees/wt-e2e" --arg b outsourcerer/wt-e2e --arg bs "$F3" \
+  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/wt-e2e/worktree.json"
+manifest "$R3/.outsourcerer/worktrees/wt-e2e" worktree wt-e2e "$R3"
+age "$R3/.outsourcerer/worktrees/wt-e2e"
+out84="$(run cleanup 2>&1)"
+grep -q "ASK.*wt-e2e" <<<"$out84" && ok "cleanup dry run: local-only worktree is ASK (#84)" || bad "wt-e2e not ASK: $(echo "$out84" | grep wt-e2e)"
+run cleanup --apply >/dev/null 2>&1
+git -C "$R3" rev-parse --verify -q refs/heads/outsourcerer/wt-e2e >/dev/null && [ -d "$R3/.outsourcerer/worktrees/wt-e2e" ] \
+  && ok "cleanup --apply keeps the only ref to local-only commits (#84)" || bad "apply deleted the last ref to local-only commits"
+
+# Legacy `cleanup <id>`: zero commits past the base is not enough when the base is local-only.
+R4="$TMP/repo-base3"; mkrepo "$R4"
+git -C "$R4" checkout -qb feat; printf 'lo\n' > "$R4/lo.txt"; git -C "$R4" add lo.txt; git -C "$R4" commit -qm lo
+F4="$(git -C "$R4" rev-parse HEAD)"; git -C "$R4" checkout -q main
+git -C "$R4" worktree add -q "$R4/.outsourcerer/worktrees/job-lo" -b outsourcerer/job-lo "$F4"; git -C "$R4" branch -q -D feat
+mkdir -p "$OSRC_HOME/jobs/job-lo"
+jq -cn --arg p "$R4/.outsourcerer/worktrees/job-lo" --arg b outsourcerer/job-lo --arg bs "$F4" \
+  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/job-lo/worktree.json"
+lo="$(run cleanup job-lo 2>&1)"; lorc=$?
+[ "$lorc" != "0" ] && grep -q 'only ref' <<<"$lo" && git -C "$R4" rev-parse --verify -q refs/heads/outsourcerer/job-lo >/dev/null \
+  && ok "cleanup <id> refuses to drop the only ref to a local-only base (#84)" || bad "legacy cleanup dropped or mis-reported (rc=$lorc): $lo"
+git -C "$R4" update-ref refs/remotes/origin/feat "$F4"
+lo2="$(run cleanup job-lo 2>&1)"; lo2rc=$?
+[ "$lo2rc" = "0" ] && ! git -C "$R4" rev-parse --verify -q refs/heads/outsourcerer/job-lo >/dev/null \
+  && ok "cleanup <id> removes it once a remote-tracking ref holds the base" || bad "legacy cleanup still refuses (rc=$lo2rc): $lo2"
+
+echo "=== cleanup <id> preservation edge cases (review round 3) ==="
+mkwt() { # <repo> <id> <base_sha> -> worktree on outsourcerer/<id> at base, receipt in jobs/<id>
+  git -C "$1" worktree add -q "$1/.outsourcerer/worktrees/$2" -b "outsourcerer/$2" "$3"
+  mkdir -p "$OSRC_HOME/jobs/$2"
+  jq -cn --arg p "$1/.outsourcerer/worktrees/$2" --arg b "outsourcerer/$2" --arg bs "$3" \
+    '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/$2/worktree.json"
+}
+# (1) detached at a local-only base with the recorded branch deleted: the worktree holds the
+# last reference to that commit.
+R5="$TMP/repo-detach"; mkrepo "$R5"
+git -C "$R5" checkout -qb feat; printf 'lo\n' > "$R5/lo.txt"; git -C "$R5" add lo.txt; git -C "$R5" commit -qm lo
+F5="$(git -C "$R5" rev-parse HEAD)"; git -C "$R5" checkout -q main
+mkwt "$R5" job-dt "$F5"; git -C "$R5" branch -q -D feat
+git -C "$R5/.outsourcerer/worktrees/job-dt" checkout -q --detach
+git -C "$R5" branch -q -D outsourcerer/job-dt
+dt="$(run cleanup job-dt 2>&1)"; dtrc=$?
+[ "$dtrc" != "0" ] && [ -d "$R5/.outsourcerer/worktrees/job-dt" ] && git -C "$R5" cat-file -e "$F5^{commit}" \
+  && [ -f "$OSRC_HOME/jobs/job-dt/worktree.json" ] \
+  && ok "cleanup <id> refuses a detached worktree whose branch is gone" || bad "detached worktree removed (rc=$dtrc): $dt"
+# (2) a tag named like the branch, pointing at merged work, must not vouch for a branch
+# that holds local-only commits.
+R6="$TMP/repo-tag"; mkrepo "$R6"
+git -C "$R6" checkout -qb feat; printf 'lo\n' > "$R6/lo.txt"; git -C "$R6" add lo.txt; git -C "$R6" commit -qm lo
+F6="$(git -C "$R6" rev-parse HEAD)"; git -C "$R6" checkout -q main
+mkwt "$R6" job-tg "$F6"; git -C "$R6" branch -q -D feat
+git -C "$R6" tag outsourcerer/job-tg main
+tg="$(run cleanup job-tg 2>&1)"; tgrc=$?
+[ "$tgrc" != "0" ] && git -C "$R6" rev-parse --verify -q refs/heads/outsourcerer/job-tg >/dev/null \
+  && ok "cleanup <id> ignores a same-named tag when judging the branch" || bad "same-named tag vouched for local-only branch (rc=$tgrc): $tg"
+# (3) job started from a linked checkout: both parent and job worktree have a .git FILE.
+R7="$TMP/repo-linked"; mkrepo "$R7"
+P7="$TMP/linked-co"; git -C "$R7" worktree add -q "$P7" -b parentbr
+M7="$(git -C "$P7" rev-parse HEAD)"
+mkwt "$P7" job-lk "$M7"; mkwt "$P7" job-lc "$M7"
+lk="$(run cleanup job-lk 2>&1)"; lkrc=$?
+[ "$lkrc" = "0" ] && ! git -C "$P7" rev-parse --verify -q refs/heads/outsourcerer/job-lk >/dev/null \
+  && ! grep -q 'worktrees/job-lk' <<<"$(git -C "$P7" worktree list --porcelain)" && [ ! -f "$OSRC_HOME/jobs/job-lk/worktree.json" ] \
+  && ok "cleanup <id> from a linked checkout removes the worktree and branch through git" || bad "linked-checkout cleanup incomplete (rc=$lkrc): $lk"
+# (4) git cannot remove it (locked): report failure and keep the receipt.
+git -C "$P7" worktree lock "$P7/.outsourcerer/worktrees/job-lc"
+lc="$(run cleanup job-lc 2>&1)"; lcrc=$?
+[ "$lcrc" != "0" ] && [ -f "$OSRC_HOME/jobs/job-lc/worktree.json" ] && git -C "$P7" rev-parse --verify -q refs/heads/outsourcerer/job-lc >/dev/null \
+  && ok "cleanup <id> keeps the receipt and reports failure when git cannot remove the worktree" || bad "failed removal reported success or lost the receipt (rc=$lcrc): $lc"
+
 echo "=== gc compat ==="
 OLD="$OSRC_HOME/jobs/job-ancient"; mkdir -p "$OLD"; echo done > "$OLD/status"
 RECENT="$OSRC_HOME/jobs/job-fresh"; mkdir -p "$RECENT"; echo done > "$RECENT/status"
@@ -351,5 +499,18 @@ gc_out="$(run gc --older-than 1 2>&1)"
 [ ! -d "$OLD" ] && [ -d "$RECENT" ] && [ -d "$RUNNING" ] \
   && ok "gc --older-than 1 removes only old completed jobs" || bad "gc compat broken: $gc_out"
 
+echo "=== round 4: detached live HEAD and truncated manifest ==="
+R7="$TMP/repo-r4"; mkrepo "$R7"
+mkwt "$R7" wt-dh "$(git -C "$R7" rev-parse HEAD)"; owner wt-dh
+( cd "$R7/.outsourcerer/worktrees/wt-dh" && git checkout -q --detach && printf 'x\n' > x && git add x && git commit -qm x )
+age "$R7/.outsourcerer/worktrees/wt-dh"
+v="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_cleanup_verdict "$1"' _ "$(jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg r "$R7" '{path:$p,kind:"worktree",session:"wt-dh",repo:$r}')" 2>&1)"
+grep -q '^ASK.*not on branch' <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
+mf="$OSRC_HOME/created.jsonl"; cp "$mf" "$mf.bak"; printf '{"path":"/x","ki' >> "$mf"
+sc="$(run cleanup 2>&1)"; scrc=$?
+[ "$scrc" = "0" ] && grep -q 'wt-e2e' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"
+OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_created_record /real/wt worktree s1 /real' 2>/dev/null
+[ -n "$(jq -R 'fromjson?|select(.path=="/real/wt")' "$mf")" ] && ok "record after a truncated line is not glued to it" || bad "record lost after truncated line"
+mv "$mf.bak" "$mf"
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

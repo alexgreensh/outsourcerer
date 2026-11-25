@@ -226,6 +226,49 @@ for `style=` attributes), `X-Content-Type-Options: nosniff`, and
 `Referrer-Policy: no-referrer`,
 and it renders fully with the network off. CJK stays on system fonts.
 
+## Cleanup manifest, SAFE/ASK rules, disk gate (`cleanup`, lib/cleanup.sh)
+
+The manifest records what Outsourcerer leaves behind: jobs, background worktrees and branches,
+fanouts, loops and autodetach logs, one line each in `$OSRC_HOME/created.jsonl`
+(`{"path","kind","session","repo","ts"}`). `cleanup` with no target is a DRY RUN over that manifest:
+each item gets a verdict, SAFE or ASK (with a reason), and directories also get their `du` size;
+file entries such as autodetach `.log`/`.rc` are not sized and show `0KB`. `cleanup --apply` deletes SAFE
+items only and logs each deletion to `$OSRC_HOME/cleanup.log`. `cleanup --ack` records that the user
+has seen the current ASK list. `cleanup <job-id|fanout-gid> [--force]` keeps its old meaning: remove
+that target's git worktree(s). Auto-isolated cloud-gate copies are not in the manifest: a run that
+the gate moved into `$OSRC_HOME/isolated/<run-id>/` (receipt `worktree.json`) plus its repo worktree
+at `<repo>/.outsourcerer/worktrees/<id>` on branch `outsourcerer/<id>` is invisible to `cleanup`
+with no target and to the disk gate. Bring the delegate's edits back first (the cloud-gate banner
+prints the `git diff ... | git apply` command), and only then remove it with `cleanup <id> --force`:
+`--force` deletes the worktree and branch even with uncommitted or unmerged work, so use it only
+after the result is saved or you have decided to discard it.
+
+SAFE requires ALL of: owning session done or gone, older than 1h, no process has a file open under
+it, path under the manifest's recorded root (the age and open-file checks do not apply to `branch`
+entries, which instead need a valid branch name and a resolvable repo). Worktrees additionally need a
+clean git status (untracked files count) and no ignored files other than a top-level
+`node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree;
+worktrees and branches need their tip contained in one of the main-ish refs (`origin/HEAD`,
+`origin/main`, `origin/master`, `main`, `master`, `upstream/main`, `upstream/master`), in the
+recorded base commit (the `base_sha` the worktree was cut from) when a remote-tracking ref also
+holds that base, or in a merged PR whose head is that tip. A recorded base that no remote or
+main-ish ref holds is not preservation by itself: a worktree cut from a local-only branch stays
+ASK, because deleting its branch would drop the last ref to those commits. `cleanup <id>` applies
+the same test and refuses such a branch without `--force`, and also refuses a worktree whose live
+`HEAD` is not the recorded branch (for example detached after its branch was deleted). Fanout entries need
+every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
+result collected; a clean finish whose result was never collected stays ASK at any age, and only a
+non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
+deleted; `lib/cleanup.sh` is the authority when this summary and the code disagree.
+
+Disk gate: while free disk is below `OSRC_DISK_MIN_GB` (10), new lane launches (`bg`, routed
+delegations, `session start`) are refused unless there are ASK items and the current ASK list has
+been acknowledged (`cleanup --ack`). The gate decides from a live scan of the manifest, never from
+`cleanup/state.json`: it still tries to refresh that file for the tick and other readers, but a
+failed write (disk full, unwritable directory) changes nothing, and the ack must match the ASK
+hash of the list as it is now. Any failed scan (including no `jq`) refuses with "the cleanup scan did not finish". With no ASK items it still refuses, and says whether SAFE items can be applied or the
+space is held outside Outsourcerer. `OSRC_DISK_MIN_GB=0` overrides.
+
 ## Hub export: the `team` field (L12)
 
 `outsourcerer hub export` (L9's Mission Control surface) embeds the team score in each project

@@ -77,7 +77,7 @@ mcp_gone "$SB" && ok "bare: engine cleanup runs unchanged with no caller trap" |
 
 # --- (c2) no prior trap: the armed EXIT trap is the engine's plain cleanup trap,
 # byte-identical to the pre-chain form (no _osrc_rc capture, no trailing exit) --
-exp='trap -- '"'"'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi'"'"' EXIT'
+exp='trap -- '"'"'if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ "${BASH_SUBSHELL:-0}" = "${_OSRC_ARMED_LVL:-0}" ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi'"'"' EXIT'
 SB="$BASE/c2"; run_child notrap "$SB" 0
 [ "$(cat "$SB/trapout" 2>/dev/null)" = "$exp" ] \
   && ok "notrap: trap -p is byte-identical to the plain engine cleanup trap" \
@@ -115,6 +115,66 @@ SB="$BASE/h"; run_child cs "$SB" 0; rc=$?
 [ -f "$SB/csalive" ] && ok "cs: caller handler did not fire inside \$( )" || bad "cs: \$( ) ran the caller handler early"
 fx_gone "$SB" && ok "cs: caller handler still fires at real exit" || bad "cs: fixture leaked"
 count_is "$SB" 1 && ok "cs: handler ran exactly once" || bad "cs: handler fired '$(wc -l < "$SB/count" 2>/dev/null | tr -d " ")' times"
+
+# --- (i) engine sourced DIRECTLY inside $( ) must not run the caller handler there ---
+# The release-suite shape: a suite arms `trap cleanup EXIT`, then a check does
+# `v="$( . "$SRC"; ... )"` with no inner ( ) wrapper. `trap -p` shows the caller's
+# handler inside the substitution, so the chain captures it; bash 3.2 (macOS CI) fires
+# the substitution's EXIT trap with BASH_SUBSHELL already reset to 0, and the chain's
+# level guard used to mistake that for the real exit -- running the caller's
+# `rm -rf "$T"` mid-suite (test_release_0175 macOS shard: scratch dir deleted at
+# section 15, mode-hint checks then passed vacuously on empty input). The armed-level
+# record must hold the handler for the sourcing shell's own exit.
+run_child_srcs_trap() {
+  local sb="$1"
+  mkdir -p "$sb/fx" "$sb/home"
+  env HOME="$sb" OSRC_HOME="$sb/home" OSRC_SOURCED=1 bash -c '
+    sb="$1"; src="$2"; set --
+    trap "rm -rf \"$sb/fx\"; echo fired >> \"$sb/count\"" EXIT
+    _out="$( . "$src" >/dev/null 2>&1; echo inner )"
+    [ -d "$sb/fx" ] && : > "$sb/csalive"
+    exit 0
+  ' _ "$sb" "$SRC"
+}
+SB="$BASE/i"; run_child_srcs_trap "$SB"
+[ -f "$SB/csalive" ] && ok "srcs: caller handler did not fire at \$( ) exit"   || bad "srcs: \$( ) sourcing ran the caller handler early (bash 3.2 trap-level bug)"
+fx_gone "$SB" && ok "srcs: caller handler still fires at real exit" || bad "srcs: fixture leaked"
+count_is "$SB" 1 && ok "srcs: handler ran exactly once"   || bad "srcs: handler fired '$(wc -l < "$SB/count" 2>/dev/null | tr -d " ")' times"
+
+# --- (j) same shape with NO caller trap: engine cleanup must not fire at $( ) exit ---
+# The plain engine trap (no chain) armed inside a command substitution used to remove
+# the sourcing shell's own with-mcp temp at substitution exit under bash 3.2.
+run_child_srcs_notrap() {
+  local sb="$1"
+  mkdir -p "$sb/home"
+  env HOME="$sb" OSRC_HOME="$sb/home" OSRC_SOURCED=1 bash -c '
+    sb="$1"; src="$2"; set --
+    touch "$OSRC_HOME/with-mcp-$$.json"
+    _out="$( . "$src" >/dev/null 2>&1; echo inner )"
+    [ -e "$OSRC_HOME/with-mcp-$$.json" ] && : > "$sb/mcpalive"
+    exit 0
+  ' _ "$sb" "$SRC"
+}
+SB="$BASE/j"; run_child_srcs_notrap "$SB"
+[ -f "$SB/mcpalive" ] && ok "srcs-notrap: engine cleanup did not fire at \$( ) exit"   || bad "srcs-notrap: \$( ) sourcing removed the main shell's with-mcp file (bash 3.2 trap-level bug)"
+
+# --- (k) a $( ) that installs its OWN EXIT handler before sourcing keeps it ---------
+# A wrapper that takes a lock in the substitution and releases it from its own EXIT trap
+# must still run that handler when the engine is sourced after it (bash 3.2 lost it when
+# the engine re-armed the trap inside the substitution; the lock then leaked).
+run_child_own_trap() {
+  local sb="$1"
+  mkdir -p "$sb/home"
+  env HOME="$sb" OSRC_HOME="$sb/home" OSRC_SOURCED=1 bash -c '
+    sb="$1"; src="$2"; set --
+    trap "echo parent >> \"$sb/parent\"" EXIT
+    _out="$( trap "echo own >> \"$sb/own\"" EXIT; . "$src" >/dev/null 2>&1; echo inner )"
+    exit 0
+  ' _ "$sb" "$SRC"
+}
+SB="$BASE/k"; run_child_own_trap "$SB"
+[ "$(cat "$SB/own" 2>/dev/null)" = "own" ] && ok "own-trap: the substitution's own EXIT handler ran once" || bad "own-trap: substitution handler ran '$(cat "$SB/own" 2>/dev/null | wc -l | tr -d " ")' times, want 1"
+[ "$(cat "$SB/parent" 2>/dev/null)" = "parent" ] && ok "own-trap: parent handler ran once, at the real exit" || bad "own-trap: parent handler ran '$(cat "$SB/parent" 2>/dev/null | wc -l | tr -d " ")' times, want 1"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

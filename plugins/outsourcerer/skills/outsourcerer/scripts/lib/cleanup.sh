@@ -29,6 +29,7 @@ _osrc_created_record() {
   case "$p" in *$'\n'*|*$'\r'*) return 0 ;; esac
   local f="$OSRC_HOME/created.jsonl"
   _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || mkdir -p "$OSRC_HOME" 2>/dev/null || return 0
+  [ -z "$(tail -c1 "$f" 2>/dev/null)" ] || echo >> "$f" 2>/dev/null
   jq -cn --arg p "$p" --arg k "$k" --arg s "$s" --arg r "$r" --argjson t "$(date +%s)" \
     '{path:$p,kind:$k,session:$s,repo:$r,ts:$t}' >> "$f" 2>/dev/null || true
   return 0
@@ -133,30 +134,25 @@ _osrc_lsof_busy() {
   return 1
 }
 
-# _osrc_branch_merged <repo> <branch> [base_sha] -> 0 when the branch's commits are
-# preserved: tip is an ancestor of the recorded base or any main-ish ref, or a MERGED
-# PR exists for it. 1 otherwise (caller ASK).
+# _osrc_branch_merged <repo> <branch> -> 0 when the branch's commits are
+# preserved: any ref other than the branch itself (branch, remote, tag) holds the tip, or
+# a MERGED PR exists for it. Deleting the branch must never drop the last ref to commits
+# (issue #84). 1 otherwise (caller ASK).
 _osrc_branch_merged() {
-  local repo="$1" br="$2" base="${3:-}" ref
-  git -C "$repo" rev-parse --verify "refs/heads/$br" >/dev/null 2>&1 || return 1
-  local -a bases=()
-  [ -n "$base" ] && bases+=("$base")
-  for ref in origin/HEAD origin/main origin/master main master upstream/main upstream/master; do
-    git -C "$repo" rev-parse --verify -q "$ref" >/dev/null 2>&1 && bases+=("$ref")
-  done
-  local b
-  for b in "${bases[@]}"; do
-    git -C "$repo" merge-base --is-ancestor "$br" "$b" 2>/dev/null && return 0
-  done
+  local repo="$1" br="$2" tip
+  # Resolve the FULLY QUALIFIED branch once; every check below uses that commit, never the
+  # short name (a same-named tag would win a short-name lookup while `branch -D` deletes
+  # the branch).
+  tip="$(git -C "$repo" rev-parse --verify -q "refs/heads/$br^{commit}" 2>/dev/null)" || return 1
+  [ -n "$tip" ] || return 1
+  # Any ref other than the branch itself (local, remote, tag) holding the tip keeps the commits.
+  [ -n "$(git -C "$repo" for-each-ref --contains "$tip" --format='%(refname)' refs/heads refs/remotes refs/tags 2>/dev/null | grep -vxF "refs/heads/$br" | head -n 1)" ] && return 0
   # No local ref contains it: a merged PR preserves the work ONLY when the PR's
   # merged head is this branch's current tip — commits made after the merge are
   # not preserved by that PR (review finding 2).
   if have gh 2>/dev/null; then
-    local tip
-    tip="$(git -C "$repo" rev-parse "$br" 2>/dev/null)"
-    [ -n "$tip" ] \
-      && (cd "$repo" 2>/dev/null && gh pr list --head "$br" --state merged \
-            --json headRefOid --jq '.[].headRefOid' 2>/dev/null | grep -qx "$tip") \
+    (cd "$repo" 2>/dev/null && gh pr list --head "$br" --state merged \
+          --json headRefOid --jq '.[].headRefOid' 2>/dev/null | grep -qx "$tip") \
       && return 0
   fi
   return 1
@@ -294,22 +290,21 @@ _osrc_cleanup_verdict() {
         done <<<"$ig"
         [ -z "$igbad" ] || { printf 'ASK\tignored files in worktree: %s\n' "$igbad"; return 0; }
       fi
-      local wj br base
+      local wj br
       wj="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$sess/worktree.json"
-      br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
+      br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"
       [ -n "$br" ] || br="$(git -C "$pp" rev-parse --abbrev-ref HEAD 2>/dev/null)"
       [ -n "$br" ] && [ "$br" != "HEAD" ] || { printf 'ASK\tcannot determine worktree branch\n'; return 0; }
-      _osrc_branch_merged "$repo" "$br" "$base" \
-        || { printf 'ASK\tbranch %s has commits missing from remote/main and no merged PR\n' "$br"; return 0; }
+      [ "$(git -C "$pp" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/$br" ] \
+        || { printf 'ASK\tworktree HEAD is not on branch %s (detached commits would be lost)\n' "$br"; return 0; }
+      _osrc_branch_merged "$repo" "$br" \
+        || { printf 'ASK\tbranch %s has commits no other branch, remote or tag holds, and no merged PR\n' "$br"; return 0; }
       ;;
     branch)
       _osrc_branch_checked_out "$repo" "$path" \
         && { printf 'ASK\tbranch still checked out in a worktree\n'; return 0; }
-      local wj2 base2
-      wj2="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj2" ] || wj2="$OSRC_HOME/loops/$sess/worktree.json"
-      base2="$(jq -r '.base_sha // ""' "$wj2" 2>/dev/null)"
-      _osrc_branch_merged "$repo" "$path" "$base2" \
-        || { printf 'ASK\tcommits missing from remote/main and no merged PR\n'; return 0; }
+      _osrc_branch_merged "$repo" "$path" \
+        || { printf 'ASK\tcommits missing: no other branch, remote or tag holds them, and no merged PR\n'; return 0; }
       ;;
     fanout)
       local gd2="$OSRC_HOME/fanout/$sess" jid2 st2 bad=0
@@ -361,27 +356,38 @@ _osrc_cleanup_verdict() {
 # with verdict+why). Args: [--no-size] skips du.
 _osrc_cleanup_items() {
   have jq 2>/dev/null || return 1
-  local mf="$OSRC_HOME/created.jsonl" nosize=0 a line item verdict why ksize
+  local mf="$OSRC_HOME/created.jsonl" nosize=0 line item verdict why ksize rc=0 grouped out pp du_out
   [ "${1:-}" = "--no-size" ] && nosize=1
   [ -f "$mf" ] || return 0
-  jq -cs 'group_by(.path + "" + .kind) | map(last)' "$mf" 2>/dev/null | jq -c '.[]' | \
+  # Read in this shell (no pipeline subshell) so a failure on any item reaches the caller:
+  # a partial list must never look like a complete one.
+  grouped="$(jq -R 'fromjson?' "$mf" 2>/dev/null | jq -cs 'group_by(.path + "" + .kind) | map(last) | .[]' 2>/dev/null)" || return 1
   while IFS= read -r item; do
     [ -n "$item" ] || continue
-    verdict="$(_osrc_cleanup_verdict "$item")"
+    verdict="$(_osrc_cleanup_verdict "$item")" || { rc=1; continue; }
     why="${verdict#*$'\t'}"; verdict="${verdict%%$'\t'*}"
     ksize=""
     if [ "$nosize" = 0 ] && [ "$verdict" != "GONE" ]; then
-      local pp; pp="$(jq -r '.path' <<<"$item")"
+      pp="$(jq -r '.path' <<<"$item")"
       if [ -d "$pp" ]; then
-        local du_out du_rc
         du_out="$(_timeout "${OSRC_CLEANUP_DU_TIMEOUT:-30}" du -sk "$pp" 2>/dev/null | awk '{print $1}')"
         case "$du_out" in ''|*[!0-9]*) du_out="" ;; esac
         ksize="$du_out"
       fi
     fi
-    jq -cn --argjson m "$item" --arg v "$verdict" --arg w "$why" --arg k "$ksize" \
-      '$m + {verdict:$v, why:$w, size_kb:(if $k=="" then null else ($k|tonumber) end)}'
-  done
+    out="$(jq -cn --argjson m "$item" --arg v "$verdict" --arg w "$why" --arg k "$ksize" \
+      '$m + {verdict:$v, why:$w, size_kb:(if $k=="" then null else ($k|tonumber) end)}')" || { rc=1; continue; }
+    printf '%s\n' "$out"
+  done <<<"$grouped"
+  return "$rc"
+}
+
+# _osrc_cleanup_ask_hash <items-json-lines> -> cksum of the sorted ASK path+kind
+# list. THE single definition: the state file, --ack, the tick and the disk gate
+# must agree on what "the current ASK list" hashes to, or an ack can silently
+# stop matching the live list (issue #86).
+_osrc_cleanup_ask_hash() {
+  printf '%s' "$1" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}'
 }
 
 # _osrc_cleanup_state_write <items-json-lines> -> state.json for the disk gate.
@@ -392,7 +398,7 @@ _osrc_cleanup_state_write() {
   free_gb=$(( free_kb / 1048576 ))
   n_safe="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; n_safe="${n_safe:-0}"
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
-  ask_hash="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+  ask_hash="$(_osrc_cleanup_ask_hash "$items")"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 1
   jq -cn --argjson ts "$(date +%s)" --argjson fg "$free_gb" --argjson t "$n_safe" --argjson a "$n_ask" --arg h "$ask_hash" \
     '{ts:$ts, free_gb:$fg, safe:$t, ask:$a, ask_hash:$h}' > "$(_osrc_cl_state).tmp.$$" 2>/dev/null \
@@ -518,7 +524,7 @@ _osrc_cleanup_ack() {
   items="$(_osrc_cleanup_items --no-size)"
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
   [ "${n_ask:-0}" -gt 0 ] || { echo "[outsourcerer] cleanup: no ASK items — nothing to acknowledge."; return 0; }
-  ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+  ah="$(_osrc_cleanup_ask_hash "$items")"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || die "cannot create $(_osrc_cl_root)"
   printf '%s\n' "$ah" > "$(_osrc_cl_ack)"
   echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below the disk launch floor until reviewed."
@@ -540,7 +546,7 @@ _osrc_cleanup_tick_run() {
   # Review finding 6: until the SAFE-verdict findings are proven the heartbeat
   # SCANS and WAKES only — it never applies. Apply stays a typed `cleanup --apply`.
   if [ "$n_ask" -gt 0 ] && type _wake_append >/dev/null 2>&1; then
-    ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+    ah="$(_osrc_cleanup_ask_hash "$items")"
     alert_dir="$(_osrc_cl_root)"; mkdir -p "$alert_dir" 2>/dev/null || return 0
     last_alerted="$(cat "$alert_dir/.alerted" 2>/dev/null)"
     if [ "$ah" != "$last_alerted" ]; then
@@ -621,15 +627,14 @@ _osrc_disk_gate() {
   fi
   [ "$free_kb" -lt "$launch_kb" ] || { unset OSRC_DISK_OK _OSRC_DISK_ADMIT; return 0; }
   type _osrc_disk_override_take >/dev/null 2>&1 && _osrc_disk_override_take "$free_kb" "$launch_kb" && return 0
-  items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
-  # Issue #86: decide from THIS live scan; if the state cannot be refreshed, refuse as unknown.
-  if ! _osrc_cleanup_state_write "$items"; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and cleanup state could not be refreshed — state unknown, refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
-  fi
+  items="$(_osrc_cleanup_items --no-size 2>/dev/null)" || die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and the cleanup scan did not finish, so the leftover list is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'.$(_osrc_disk_override_offer 2>/dev/null)"
+  # Issue #86: the gate decides from THIS live scan, never the persisted file, so a failed write
+  # (full disk, exactly when the gate runs) cannot let an old ack admit a changed list. Best effort.
+  _osrc_cleanup_state_write "$items" || true
   an="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; an="${an:-0}"
   ns="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; ns="${ns:-0}"
   if [ "$an" -gt 0 ]; then
-    ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
+    ah="$(_osrc_cleanup_ask_hash "$items")"
     ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
     if [ -n "$ah" ] && [ "$ah" = "$ch" ]; then
       # The scan can take minutes; another build may have drained the disk meanwhile.
@@ -693,18 +698,48 @@ _cmd_cleanup_target() {
   else
     dirty="$(jq -r '.dirty' "$wj")"; ahead="$(jq -r '.ahead // 0' "$wj")"
   fi
+  # The parent may itself be a linked worktree (its .git is a FILE): ask git, not `-d .git`.
+  local maindir="${path%/.outsourcerer/worktrees/*}" livehead
+  git -C "$maindir" rev-parse --git-dir >/dev/null 2>&1 || maindir=""
+  # A branch with no commits past its recorded base can still hold the LAST ref to that base
+  # (cut from a local-only branch that was later deleted): deleting it would orphan those commits.
+  # A worktree whose live HEAD is not the recorded branch (detached at a local-only base, the
+  # branch deleted or moved) holds commits no recorded ref covers: refuse rather than orphan them.
+  if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] \
+     && git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    livehead="$(git -C "$path" symbolic-ref -q HEAD 2>/dev/null)"
+    if [ "$livehead" != "refs/heads/$branch" ]; then
+      echo "[outsourcerer] REFUSING to remove $target: its HEAD (${livehead:-detached}) is not the recorded branch '$branch', so its commits may have no other ref." >&2
+      echo "  inspect: git -C \"$path\" log --oneline -3; branch or push it first, or force-remove: outsourcerer cleanup $target --force" >&2
+      return 1
+    fi
+  fi
+  if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] && [ -n "$maindir" ] \
+     && git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
+     && ! _osrc_branch_merged "$maindir" "$branch"; then
+    echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (no other branch, remote or tag holds it, and no merged PR)." >&2
+    echo "  inspect: git -C \"$path\" log --oneline -3; push or branch it first, or force-remove: outsourcerer cleanup $target --force" >&2
+    return 1
+  fi
   if [ "$force" != 1 ] && { [ "$dirty" = "true" ] || [ "${ahead:-0}" -gt 0 ]; }; then
     echo "[outsourcerer] REFUSING to remove $target: branch '$branch' has unmerged work (dirty=$dirty ahead=$ahead)." >&2
     echo "  inspect: git -C \"$path\" log --oneline; git -C \"$path\" status" >&2
     echo "  integrate e.g.: git cherry-pick $branch   OR force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi
-  local maindir="${path%/.outsourcerer/worktrees/*}"
-  [ -d "$maindir/.git" ] || maindir="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
-  if [ -n "$maindir" ] && [ -d "$maindir/.git" ]; then
-    git -C "$maindir" worktree remove --force "$path" 2>/dev/null || rm -rf "$path"
-    git -C "$maindir" branch -D "$branch" 2>/dev/null || true
+  if [ -n "$maindir" ]; then
+    # Keep the receipt when git cannot remove the worktree or branch: a silent rm -rf would
+    # leave the registration and branch behind with nothing left to find them by.
+    if ! git -C "$maindir" worktree remove --force "$path" 2>/dev/null; then
+      echo "[outsourcerer] could not remove worktree $path via git; receipt kept so cleanup can be retried." >&2
+      return 1
+    fi
+    git -C "$maindir" branch -D "$branch" >/dev/null 2>&1 || true
     git -C "$maindir" worktree prune 2>/dev/null || true
+    if git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1; then
+      echo "[outsourcerer] worktree removed but branch '$branch' could not be deleted; receipt kept." >&2
+      return 1
+    fi
   else
     rm -rf "$path"
   fi

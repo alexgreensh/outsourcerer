@@ -41,6 +41,7 @@ SEC_LIMIT="${OSRC_TEST_SEC_LIMIT:-120}"
 _SEC_GEN=0
 _sec_arm() {
   _SEC_GEN=$(( _SEC_GEN + 1 ))
+  [ -d "$T" ] || bad "scratch dir $T vanished mid-suite (section bound disarmed, fixture writes would be meaningless)"
   printf '%s' "$_SEC_GEN" > "$T/.secgen" 2>/dev/null
   ( sleep "$SEC_LIMIT"
     [ "$(cat "$T/.secgen" 2>/dev/null)" = "$_SEC_GEN" ] || exit 0
@@ -429,6 +430,10 @@ _sec_arm
 # keeps waiting ONLY while the pane shell has a live descendant — never re-runs the launch.
 grep -q 'OSRC_SESSION_LIVENESS_GRACE_SECS' "$SRC" \
   && ok "grace window env exists" || bad "no OSRC_SESSION_LIVENESS_GRACE_SECS in outsourcerer.sh"
+# This check sources the engine DIRECTLY inside the command substitution (no inner ( )
+# wrapper like the others) - the shape is deliberate: it is the exit-chain arm-level
+# regression (bash 3.2 fires a $( ) EXIT trap with BASH_SUBSHELL=0; the chain must not
+# run this suite's cleanup here). test_exit_trap_chain.sh (i)/(j) own the focused cases.
 _desc_out="$( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
   bash -c 'bash -c "sleep 30; true" & wait' & w=$!
   # The launch check polls; so does this. A fork right after `&` may not have its child yet.
@@ -455,18 +460,21 @@ v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
 for m in "Plan mode: research & plan only (shift+tab to cycle)" \
          "Accept-edits mode: file edits auto-approved (shift+tab to cycle)" \
          "Best-of-N mode: fork into parallel arms and pick a winner (shift+tab to cycle)"; do
-  printf '%s\n' '────' "> $m" '────' '? for shortcuts   auto' > "$T/box.txt"
+  { printf '%s\n' '────' "> $m" '────' '? for shortcuts   auto' > "$T/box.txt" && [ -s "$T/box.txt" ]; } \
+    || bad "mode-hint fixture unwritable (scratch $T intact?)"
   v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
     _osrc_screen_analyze_text agy < "$T/box.txt"
-    [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] || printf "NOBOX(%s) " "$OSRC_SCR_STATE"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
-  [ -z "$v" ] && ok "mode hint variant clears: ${m%%:*}" || bad "mode hint variant leaks as draft: '$v'"
+    printf 'FOUND=%s|%s' "${OSRC_SCR_COMPOSER_FOUND:-unset}" "${OSRC_SCR_COMPOSER:-}" ) )"
+  [ "$v" = "FOUND=1|" ] && ok "mode hint variant clears: ${m%%:*}" \
+    || bad "mode hint variant check wrong (want 'FOUND=1|'): '$v'"
 done
-printf '%s\n' '────' '> ship the release by noon' '────' '? for shortcuts   auto' > "$T/box.txt"
+{ printf '%s\n' '────' '> ship the release by noon' '────' '? for shortcuts   auto' > "$T/box.txt" && [ -s "$T/box.txt" ]; } \
+  || bad "real-draft fixture unwritable (scratch $T intact?)"
 v="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
   _osrc_screen_analyze_text agy < "$T/box.txt"
-  [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ] || printf "NOBOX(%s) " "$OSRC_SCR_STATE"; printf '%s' "$OSRC_SCR_COMPOSER" ) )"
-[ "$v" = "ship the release by noon" ] && ok "a real typed draft is still reported" \
-  || bad "placeholder filter ate a real draft: '$v'"
+  printf 'FOUND=%s|%s' "${OSRC_SCR_COMPOSER_FOUND:-unset}" "${OSRC_SCR_COMPOSER:-}" ) )"
+[ "$v" = "FOUND=1|ship the release by noon" ] && ok "a real typed draft is still reported" \
+  || bad "placeholder filter ate a real draft (or analyze never ran): '$v'"
 
 echo "=== 16. stale content: cards, decisions, Quiet fold, no lane counts, prompt-title fallback ==="
 _sec_arm

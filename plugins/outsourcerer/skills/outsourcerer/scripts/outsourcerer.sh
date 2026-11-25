@@ -331,7 +331,7 @@ OSRC_FLEET_COMPACT="${OSRC_FLEET_COMPACT:-suggest}"
 _OSRC_CALLER_EXIT="${_OSRC_CALLER_EXIT:-}"
 _osrc_rc_restore() { return "${1:-0}"; }   # set $? to the captured pending status
 _osrc_engine_exit() {
-  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ "${BASH_SUBSHELL:-0}" = "${_OSRC_ARMED_LVL:-0}" ] || return 0  # bash 3.2 fires a $( ) EXIT trap one level low; only the arming level may run the chain
   _devin_skills_lock_release 2>/dev/null
   rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null
   if [ -n "$_OSRC_CALLER_EXIT" ]; then
@@ -355,10 +355,10 @@ _osrc_exit_chain() {  # <action>
   case "$_prev" in
     *'_osrc_engine_exit'*|*'with-mcp'*)
       [ "$1" = "_osrc_engine_exit" ] && return 0
-      trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
+      _OSRC_ARMED_LVL="${BASH_SUBSHELL:-0}"; trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
     '')
       if [ "$1" = "_osrc_engine_exit" ]; then
-        trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
+        _OSRC_ARMED_LVL="${BASH_SUBSHELL:-0}"; trap 'if [ "${BASH_SUBSHELL:-0}" -eq 0 ] && [ "${BASH_SUBSHELL:-0}" = "${_OSRC_ARMED_LVL:-0}" ]; then _devin_skills_lock_release 2>/dev/null; rm -f "$OSRC_HOME/with-mcp-$$.json" "$OSRC_HOME/.hdr.$$."* 2>/dev/null; fi' EXIT
       else
         trap "$1" EXIT
       fi ;;
@@ -366,13 +366,13 @@ _osrc_exit_chain() {  # <action>
       _prev="${_prev#trap -- }"; _prev="${_prev#trap }"; _prev="${_prev% EXIT}"
       # _prev is trap -p's single-quoted, eval-safe rendering of the action; decode it to the
       # bare action text (eval + printf %s is quoting-proof) so it can be run by eval later.
-      _OSRC_CALLER_EXIT="$(eval "printf '%s' $_prev")"
+      _OSRC_CALLER_EXIT="$(eval "printf '%s' $_prev")"; _OSRC_ARMED_LVL="${BASH_SUBSHELL:-0}"
       [ "$1" = "_osrc_engine_exit" ] \
         && trap '_osrc_rc=$?; _osrc_engine_exit; exit "$_osrc_rc"' EXIT \
         || trap '_osrc_rc=$?; '"$1"'; _osrc_engine_exit; exit "$_osrc_rc"' EXIT ;;
   esac
 }
-_osrc_exit_chain '_osrc_engine_exit'
+[ "${BASH_SUBSHELL:-0}" -eq 0 ] && _osrc_exit_chain '_osrc_engine_exit'
 # ---- state-home writability preflight (FAIL FAST, self-explaining). A sandboxed harness shell
 # (e.g. Claude Code sandbox whose allowWrite covers ~/.local/share/devin but NOT ~/.outsourcerer)
 # lets jobs launch with nowhere to write: terminal status, truncated out.log, sessions lost. One

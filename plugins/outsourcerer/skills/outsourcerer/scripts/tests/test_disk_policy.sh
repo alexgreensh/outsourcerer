@@ -138,7 +138,9 @@ settings "$GH"
 OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
 g="$(osrc "$GH" 'mkdir -p "$(_osrc_cl_state).tmp.$$"; _osrc_cleanup_state_write "{}"; echo write-rc=$?; _osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'write-rc=1' <<<"$g" && ok "real state writer returns failure after a write error" || bad "state writer masked failure: $g"
-grep -q 'state unknown' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "gate refuses on a failed state refresh" || bad "gate passed on failed write: $g"
+# The gate decides from the live scan (issue #86): an ack of the CURRENT list still admits on a full
+# disk; a stale ack after a failed write is refused (tests/test_cleanup_manifest.sh, issue 86 section).
+grep -q 'gate-rc=0' <<<"$g" && ok "failed state write: the live scan and a current ack decide" || bad "gate refused a current ack on a failed write: $g"
 
 echo "=== P1: the override reaches a real bg job ==="
 # Floors put this host's real free space in the band (above a 1GB critical, under a huge

@@ -358,12 +358,36 @@ case "$out" in
     ok "integration: advise names the cx exclusion (Codex weekly quota at 98% >= 90%)" ;;
   *) bad "integration: advise did not surface the limit exclusion: $(printf '%s' "$out" | head -5)" ;;
 esac
-# The recommended lane must not be cx while it is exhausted.
-rec_lane="$(printf '%s\n' "$out" | grep -o 'lane=[a-z]*' | head -1)"
-case "$rec_lane" in
-  "lane=cx"|"lane=cxnative") bad "integration: advise still recommends exhausted cx ($rec_lane)" ;;
-  *) ok "integration: advise recommendation is not the exhausted lane" ;;
-esac
+# Behaviour on the JSON shape: the recommendation is not the exhausted lane, no cx candidate is
+# shortlisted, and limit_gate names the exclusion. The control (40% weekly, same fixture) must
+# shortlist cx candidates, so the exclusion above is the gate's doing and not an empty catalog.
+if command -v jq >/dev/null 2>&1; then
+  outj="$( PATH="$FAKEBIN:$PATH" HOME="$HH5" OSRC_HOME="$H5" OSRC_SOURCED= \
+      bash "$SRC" advise --json "refactor the parser" 2>&1 )"
+  [ -n "$(printf '%s' "$outj" | jq -r '.recommendation.lane // empty' 2>/dev/null)" ] \
+    || bad "integration: advise --json gave no recommendation lane: $(printf '%s' "$outj" | head -c 200)"
+  case "$(printf '%s' "$outj" | jq -r '.recommendation.lane // empty' 2>/dev/null)" in
+    cx|cxnative) bad "integration: advise still recommends exhausted cx" ;;
+    ?*) ok "integration: advise recommendation is not the exhausted lane (.recommendation.lane)" ;;
+  esac
+  [ "$(printf '%s' "$outj" | jq '[.shortlist[]?|select(.lane=="cx")]|length' 2>/dev/null)" = "0" ] \
+    && ok "integration: no cx candidate in .shortlist while cx is over the line" \
+    || bad "integration: .shortlist still lists a cx candidate at 98%"
+  [ "$(printf '%s' "$outj" | jq -r '.limit_gate // empty' 2>/dev/null)" = "codexwk=98 >= 90% -> cx excluded" ] \
+    && ok "integration: .limit_gate names the cx exclusion and its reason" \
+    || bad "integration: .limit_gate wrong: $(printf '%s' "$outj" | jq -r '.limit_gate' 2>/dev/null)"
+  H6="$TMP/ih6"; HH6="$TMP/hh6"; mkdir -p "$H6" "$HH6"
+  fake_codex_rollout "$HH6" 40
+  printf '{"models":[{"slug":"gpt-5.6-sol","visibility":"list"}]}' > "$HH6/.codex/models_cache.json"
+  outc="$( PATH="$FAKEBIN:$PATH" HOME="$HH6" OSRC_HOME="$H6" OSRC_SOURCED= \
+      bash "$SRC" advise --json "refactor the parser" 2>&1 )"
+  [ "$(printf '%s' "$outc" | jq '[.shortlist[]?|select(.lane=="cx")]|length' 2>/dev/null)" -gt 0 ] 2>/dev/null \
+    && [ -z "$(printf '%s' "$outc" | jq -r '.limit_gate // empty' 2>/dev/null)" ] \
+    && ok "integration control: at 40% weekly cx candidates are shortlisted and limit_gate is empty" \
+    || bad "integration control: cx missing or gated at 40%: $(printf '%s' "$outc" | jq -c '{g:.limit_gate,c:[.shortlist[]?.lane]|unique}' 2>/dev/null)"
+else
+  echo "SKIP: jq absent (advise JSON behaviour checks)"
+fi
 
 # ---------------------------------------------------------------------------------------------------
 # INTEGRATION: `bg run` with the provider coming from the ENVIRONMENT must still be gated. Env

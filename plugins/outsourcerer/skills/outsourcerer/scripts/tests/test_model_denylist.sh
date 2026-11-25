@@ -141,6 +141,34 @@ case "$(awk -v f='^cmd_advise\\(\\)' '$0 ~ f, /^}/' "$ADV_SCORE_LIB")" in
   *OSRC_MODEL_DENYLIST*) ok "advise filters denied models out of its candidate scoring" ;;
   *) bad "advise can still recommend a denied model" ;;
 esac
+# Behaviour, not source text: seeded benchmark cache, two candidates. The denied model must leave
+# .shortlist (and never be the recommendation); without the denylist it is listed, so its absence
+# is the denylist's doing.
+if command -v jq >/dev/null 2>&1; then
+  _adv_models() {  # <denylist> -> recommended model, then shortlisted models matching "sol"
+    ( refresh_benchmarks() { return 1; }
+      OSRC_MODEL_DENYLIST="$1" cmd_advise --json "refactor the parser" 2>/dev/null \
+        | jq -r '.recommendation.model, (.shortlist[]?|select(.model|test("sol"))|.model)' )
+  }
+  cat > "$OSRC_BENCH_JSON" <<'BJSON'
+{"data":[
+ {"model_permaslug":"openai/gpt-5.6-sol-20260709","intelligence_index":58.9,"coding_index":77.4,"agentic_index":54,"pricing":{"prompt":"0.000005","completion":"0.00003"}},
+ {"model_permaslug":"z-ai/glm-5.2-20260616","intelligence_index":51.1,"coding_index":68.8,"agentic_index":43.1,"pricing":{"prompt":"0.0000014","completion":"0.0000044"}}],
+ "meta":{"as_of":"2026-11-19T00:00:00.000Z","model_count":2}}
+BJSON
+  printf 'gpt-5.6-sol|openai/gpt-5.6-sol|cx|raw\nglm-5.2|z-ai/glm-5.2|or|raw\n' > "$OSRC_HOME/models.local"
+  _open="$(_adv_models "")"; _denied="$(_adv_models "gpt-5.6-sol")"
+  case "$_open" in *gpt-5.6-sol*) ok "control: without a denylist advise shortlists gpt-5.6-sol" ;;
+    *) bad "control failed: gpt-5.6-sol absent with no denylist: $_open" ;; esac
+  case "$_denied" in
+    *gpt-5.6-sol*) bad "advise shortlisted or recommended a denied model: $_denied" ;;
+    ?*) ok "advise drops the denied model from .shortlist and .recommendation" ;;
+    *) bad "denylist emptied advise instead of filtering one model" ;;
+  esac
+  rm -f "$OSRC_HOME/models.local" "$OSRC_BENCH_JSON"
+else
+  echo "SKIP: jq absent (advise behaviour check)"
+fi
 grep -q 'res in deny' "$ADV_SCORE_LIB" \
   && ok "the scorer drops candidates whose resolved id is denied" \
   || bad "denied ids are collected but never excluded from scoring"
