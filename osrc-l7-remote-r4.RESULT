@@ -1,0 +1,6 @@
+sha=ff0a7707b0753cbcdf65423d1532f4e4a4cf91d4
+rc=0
+Work head: 6cb0ca0 on claude/osrc-l7-remote-r4-fixes-8vwcb1 (session-assigned branch; the next commit only adds these markers).
+Fixed P2-1, P2-2, P3-3..8. test_lane_status 27/27, test_cloudrun 133/133, remote_review 106, cleanup_manifest 66, done_contract 53, all rc=0. P2 regression tests fail on the base libs.
+Conformance run once: rc=0 on the wrapper, RESULT 241 passed, 7 failed, 1 skipped. Six failures are the root-container ones from round 3; test_release_0175 failed under load but passes alone (83/0, rc=0) and on the base.
+Net lines +10 (lib +4); not zero. Strip these marker files before main.

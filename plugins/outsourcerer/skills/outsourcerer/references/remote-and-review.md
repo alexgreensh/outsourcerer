@@ -33,6 +33,7 @@ lane ls | show <id> | poll [id] | rm <id> | events
 - **Failure is loud**: `gh` auth failure or rate limit emits `EVENT failed` with the reason on the first
   poll; other poll errors after `OSRC_REMOTE_ERR_MAX` (5) in a row; a deleted branch the lane once had.
 - `stalled`: no push for `OSRC_REMOTE_STALL` minutes (90) while the lane is live.
+- `failed ... never started`: a lane that never pushed its branch within `OSRC_REMOTE_NEVER_START` minutes (45), reported once. Until then a missing branch (gh HTTP 404/422) is "starting", not an error. `lane ls` shows `starting` / `stale` from evidence (age, push), not the cached `live`.
 
 ## Review queue (one reviewer, one item in flight)
 

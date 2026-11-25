@@ -95,7 +95,7 @@ _osrc_review_enqueue() {
   if ( set -C; : > "$f" ) 2>/dev/null; then :; else return 1; fi
   lf="$(_osrc_lane_json "$lane")"; now="$(_osrc_now)"
   if [ -f "$lf" ]; then
-    branch="$(jq -r .branch "$lf")"; url="$(jq -r .url "$lf")"; transport="$(jq -r .transport "$lf")"; base="$(jq -r '.base // "main"' "$lf")"
+    branch="$(jq -r '.poll_branch // .branch' "$lf")"; url="$(jq -r .url "$lf")"; transport="$(jq -r .transport "$lf")"; base="$(jq -r '.base // "main"' "$lf")"
     [ -n "$brief" ] || brief="$(jq -r '.brief // ""' "$lf")"
   else
     branch="${_OSRC_RV_BRANCH:-$lane}"; url="${_OSRC_RV_URL:-}"; transport="${_OSRC_RV_TRANSPORT:-git}"; base="${_OSRC_RV_BASE:-main}"

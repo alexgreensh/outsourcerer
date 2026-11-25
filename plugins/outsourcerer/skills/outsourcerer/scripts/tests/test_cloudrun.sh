@@ -27,6 +27,7 @@ TSOCK_MAIN="/tmp/osrc-crm-$$"; TSOCK_CB="/tmp/osrc-crc-$$"
 cleanup() { for s in "$TSOCK_MAIN" "$TSOCK_CB"; do [ -S "$s" ] && tmux -S "$s" kill-server 2>/dev/null; rm -f "$s"; done; rm -rf "$TMP" "$OSRC_HOME"; }
 trap cleanup EXIT
 export OSRC_STUB_LOG="$TMP/stub.log"; : > "$OSRC_STUB_LOG"
+export OSRC_STUB_MODE="$TMP/stub.mode"
 
 # ---------- stubs: claude / devin / codex / gh (log argv, fake auth, fake session URL) ----------
 STUB="$TMP/bin"; mkdir -p "$STUB"
@@ -56,7 +57,10 @@ case "${1:-}" in
 JSONEOF
            exit 0 ;;
   --help|-h|help) echo "Usage: claude [options] [prompt]"; echo "  --cloud [description|session_id|url]"; echo "  --environment <environment_id>"; exit 0 ;;
-  --cloud) echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
+  --cloud) case "$(cat "$OSRC_STUB_MODE" 2>/dev/null)" in
+             trust) printf ' Is this a project you created or one you trust?\n  1. Yes, I trust this folder\n> 2. No, exit\n'; sleep 30; exit 0 ;;
+           esac
+           echo "Claude session started: https://claude.ai/code/session_test123"; exit 0 ;;
 esac
 exit 0
 EOF
@@ -66,7 +70,11 @@ cat > "$STUB/devin" <<'EOF'
 case "${1:-}" in
   auth)   echo "Logged in (via Devin)."; exit 0 ;;
   --help|-h|help) echo "Usage: devin [options]"; echo "  --cloud"; echo "  -p, --print [<PROMPT>]"; echo "      --prompt-file <FILE>"; exit 0 ;;
-  --cloud) if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
+  --cloud) case "${FAKE_DEVIN_MODE:-}" in
+             nolink) echo $$ > "$OSRC_STUB_LOG.pid"; echo "Preparing devin session..."; sleep 30; exit 0 ;;
+             quota)  echo '{"error":"out_of_quota","message":"Agent refused the request"}'; exit 1 ;;
+           esac
+           if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
            echo "Devin session: https://app.devin.ai/sessions/devin-0123456789abcdef"; exit 0 ;;
 esac
 exit 0
@@ -253,6 +261,77 @@ grep -q 'GRANTED' <<<"$out" && ok "consent: cloud consent grant/status works" ||
 out="$(FAKE_HELP_ONLY=1 start_cloud t-help --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'support.example.invalid/help' "$(_cloudrun_cdir)/t-help.launch.log" && [ ! -e "$OSRC_HOME/remote/t-help.json" ] && grep -q 'did not start' <<<"$out" \
   && ok "failed launch with help URL stays unregistered" || bad "help URL accepted: $out"
+
+# ---- regression: a launch is started only once the vehicle printed a session URL or id ----
+# Incident: a Devin cloud launch that printed no session link (but whose process was still alive)
+# was counted as started and registered.
+out="$(FAKE_DEVIN_MODE=nolink OSRC_CLOUD_LAUNCH_WAIT=2 start_cloud t-nolink --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-nolink.json" ] && grep -q 'Preparing devin session' <<<"$out" && grep -q 'did not start' <<<"$out" \
+  && ok "no session link: launch fails, output shown, nothing registered" || bad "no-link launch counted as started (rc=$rc): $out"
+
+# Round 2: a failed launch must stop the vehicle CLI itself (not only the wrapper), and the message
+# must not claim more than is known.
+spid="$(cat "$OSRC_STUB_LOG.pid" 2>/dev/null)"
+# (a killed process may linger as a zombie until its reaper runs; that is dead). `ps -o stat=` is
+# not supported on Git Bash, where an empty answer would pass vacuously: kill -0 decides there.
+_pst="$(ps -o stat= -p "${spid:-0}" 2>/dev/null | tr -d ' ')"
+[ -n "$_pst" ] || ! kill -0 "${spid:-0}" 2>/dev/null || _pst=alive
+[ -n "$spid" ] && case "$_pst" in ''|Z*) true ;; *) false ;; esac && ok "failed launch: the vehicle process is gone" || bad "vehicle pid '$spid' survived a failed launch"
+grep -q 'OSRC_CLOUD_LAUNCH_WAIT' <<<"$out" && grep -q 'dashboard' <<<"$out" && ok "failure message names the wait knob and the dashboard" || bad "message overstates: $out"
+
+# Round 2: --base X from a checkout whose HEAD is not X is refused.
+git -C "$WORK" checkout -q -b side-r2 && git -C "$WORK" commit -q --allow-empty -m side && git -C "$WORK" push -q origin side-r2
+out="$(start_cloud t-headmis --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-headmis.json" ] && grep -q "is not the tip of base 'main'" <<<"$out" \
+  && ok "HEAD != base tip: launch refused" || bad "launch from the wrong HEAD allowed (rc=$rc): $out"
+# Round 3: --sha does not skip the guard: HEAD must be the pinned commit (heavy lanes always pass --sha).
+out="$(start_cloud t-headsha --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok --sha "$(git -C "$WORK" rev-parse main)" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-headsha.json" ] && grep -q "is not the pinned --sha" <<<"$out" && ! grep -q 'or pass --sha' <<<"$out" \
+  && ok "--sha with HEAD elsewhere: launch refused" || bad "--sha skipped the HEAD guard (rc=$rc): $out"
+git -C "$WORK" checkout -q main
+
+# Round 2: generic placeholder paths pass the private check; real paths stay blocked.
+pc() { printf '%s\n' "$1" > "$TMP/pc.md"; _cloudrun_private_check "$TMP/pc.md" 2>/dev/null; }
+pc 'see ~/.claude/plugins/cache/<plugin>/x' && pc 'under /home/<user>/.config/<app>/' \
+  && ok "placeholder paths are allowed" || bad "placeholder path rejected"
+! pc 'read ~/notes.md' && ! pc 'at /Users/bob/plan.md' && ! pc 'at /home/bob/<x>/y' && ! pc 'a ~/.claude/real/path' \
+  && ok "real paths still blocked" || bad "a real path slipped through"
+# Round 3: every user-specific segment must be a placeholder; Windows home paths follow the same rule.
+! pc 'see /home/<user>/../bob/<f>' && ! pc 'see c:\users\bob\x' && ! pc 'see ~/clients/acme-corp/<file>' && ! pc 'at /home/<user>/clients/acme/<f>' \
+  && ok "one placeholder does not excuse a literal folder under home" || bad "literal home folder passed"
+pc 'open C:\Users\<user>\<project>\README.md' && pc 'in C:/Users/<user>/AppData/Roaming/<app>/' && pc 'see ~/<repo>/src' \
+  && ok "invented Windows and home template paths are allowed" || bad "a template path was rejected"
+pc 'add GET /users/:id to src/users/x.rb' && pc 'route /api/users/42 returns 404' && pc 'see app/Home/index.tsx' \
+  && ok "app routes and folders named users/Home are not home paths" || bad "a /users/ route or Home folder was blocked"
+! pc 'open C:\Users\bob\proj\x' && ! pc 'open C:\Users\<user>\clients\acme\<f>' && ! pc 'at D:/Users/bob/<x>' \
+  && ok "real Windows home paths are blocked" || bad "a real Windows path slipped through"
+
+# Round 2: only the end of the log classifies a failure (an echoed prompt must not).
+printf 'Brief: fix billing and rate limit handling\n' > "$TMP/cl.log"; for i in $(seq 25); do echo "line $i" >> "$TMP/cl.log"; done
+[ "$(_cloudrun_classify_failure devin "$TMP/cl.log" | cut -f1)" = other ] && ok "old log lines do not classify the failure" || bad "classifier read the whole log"
+echo 'HTTP 402 payment required' >> "$TMP/cl.log"
+[ "$(_cloudrun_classify_failure devin "$TMP/cl.log" | cut -f1)" = billing ] && ok "recent billing line still classifies" || bad "billing missed"
+
+# ---- regression: quota/billing errors are named as such, never as a refusal ----
+out="$(FAKE_DEVIN_MODE=quota start_cloud t-quota --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'out of quota' <<<"$out" && grep -q -- '--vehicle claude' <<<"$out" && grep -qi 'not refusing' <<<"$out" && [ ! -e "$OSRC_HOME/remote/t-quota.json" ] \
+  && ok "out_of_quota: surfaced as quota with a next step (another vehicle / local)" || bad "quota misreported (rc=$rc): $out"
+_cl="$TMP/cls.log"
+for pair in "billing:HTTP 402 Payment Required:billing" "rl:error 429 too many requests:ratelimit" "q2:usage limit reached:quota" "o:something odd:other"; do
+  printf '%s\n' "$(printf '%s' "$pair" | cut -d: -f2)" > "$_cl"
+  [ "$(_cloudrun_classify_failure devin "$_cl" | cut -f1)" = "$(printf '%s' "$pair" | cut -d: -f3)" ] \
+    && ok "classify: ${pair%%:*}" || bad "classify: ${pair%%:*} -> $(_cloudrun_classify_failure devin "$_cl" | cut -f1)"
+done
+
+# ---- regression: folder-trust prompt in the claude --cloud pane fails the launch, never accepted ----
+if command -v tmux >/dev/null 2>&1; then
+  printf trust > "$OSRC_STUB_MODE"
+  out="$(OSRC_CLOUD_LAUNCH_WAIT=10 start_cloud t-trust --repo "$WORK" --base main --brief "$BRIEF" --vehicle claude 2>&1)"; rc=$?
+  rm -f "$OSRC_STUB_MODE"
+  [ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-trust.json" ] && grep -qi 'trust this folder yet' <<<"$out" && grep -q 'never accepts trust' <<<"$out" \
+    && ok "trust prompt: launch fails with a clear message, nothing registered" || bad "trust prompt not handled (rc=$rc): $out"
+  _ls="$(tmux list-sessions 2>/dev/null)"; grep -q osrc-cloud <<<"$_ls" && bad "trust prompt: launcher pane left running" || ok "trust prompt: launcher pane torn down"
+fi
 
 # ============================== L7 spend gate integration ==============================
 # when _osrc_spend_gate is loaded, cloud start calls it with the vehicle->lane mapping
@@ -559,6 +638,14 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^check:bash //')"
 [ -n "$done_script" ] && [ -x "$done_script" ] && grep -q 'cloud/t-l6' "$done_script" \
   && ok "done contract: generated check script verifies cloud/<id> + READY" || bad "done contract: check script bad ($done_script)"
+# Round 3: READY on the session's own branch (recorded by the poll as .poll_branch) passes the check
+# (run from the checkout, as the done contract does: the fetch URL may be relative).
+git -C "$WORK" checkout -q -b sess-r3 && printf 'READY t-l6\n' > "$WORK/t-l6.READY" && git -C "$WORK" add t-l6.READY \
+  && git -C "$WORK" commit -q -m "t-l6 READY" && git -C "$WORK" push -q origin HEAD:refs/heads/claude/t-l6-Qx1 && git -C "$WORK" checkout -q main
+_s="$(mktemp -d)"; mkdir -p "$_s/remote"; printf '{"poll_branch":"claude/t-l6-Qx1"}\n' > "$_s/remote/t-l6.json"
+sed "s#$OSRC_HOME/remote/#$_s/remote/#g" "$done_script" > "$_s/check.sh"   # scratch registry: the launched lane's own json stays untouched
+[ -n "$done_script" ] && (cd "$WORK" && bash "$_s/check.sh") && ok "done contract: READY on the followed session branch passes" || bad "done check cannot see the session branch"
+rm -rf "$_s"
 
 # Both helpers present: real lane registry and done contract, not stubs.
 out="$(start_cloud t-real --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
