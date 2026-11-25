@@ -422,3 +422,106 @@ Run from the scripts directory, one at a time, under `nice`:
 | `python3 tests/test_supervise_signal.py`, `python3 tests/test_supervise_tick.py` | each rc 0 |
 | `test_no_pipe_grep_q` | rc 1 on my first draft (two `| grep -q` in the new loop test), fixed, now rc 0 |
 | `test_windows_portability`, `test_noglob_splitting`, `test_tests_set_home`, `test_no_dead_pid_scan` | each rc 0 |
+| the same, inside the gate's environment (per-suite `TMUX_TMPDIR`, tmux shim on PATH) | rc 0, 91 passed. My first head gate run failed `test_watchsvc` here; see below. |
+
+### Conformance (round 4), base and head
+
+`OSRC_CONFORMANCE_JOBS=2 nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`
+from the repo root of each tree:
+
+| Tree | Result |
+| --- | --- |
+| base `86957d6` (separate worktree) | rc 1, 241 passed, 7 failed, 1 skipped |
+| head `e89208e` (first try) | rc 1, 241 passed, 7 failed, 1 skipped |
+| head `d39f68c` (final code; this commit adds only the report and READY/RESULT) | **rc 1, 242 passed, 6 failed, 1 skipped** |
+
+| Failing suite | Base | Head (final) | Whose |
+| --- | --- | --- | --- |
+| `test_harness_isolation` | FAIL | FAIL | pre-existing |
+| `test_vocab_hygiene` | FAIL | FAIL | pre-existing |
+| `test_supervise_pgroup_kill` | FAIL | FAIL | pre-existing |
+| `test_parity_insource_refresh` | FAIL | FAIL | pre-existing |
+| `test_conformance_suite_timeout` | FAIL | FAIL | pre-existing |
+| `test_sealed_fixes` | FAIL | FAIL | pre-existing |
+| `test_sandbox_final` | FAIL | pass (both head runs) | pre-existing, intermittent; no file of this lane touches it |
+| `test_watchsvc` | pass | FAIL on `e89208e`, pass on `d39f68c` | **mine, fixed**: the gate exports a per-suite `TMUX_TMPDIR`, and my new "default tmux server is covered" check computed the expected socket with it while the guard (correctly) judges by the watcher's captured settings, where it is absent. Test-only fix in `d39f68c`; the product behaviour was right. |
+
+None of the six remaining failures is in a file this lane owns. They match round 2's list of suites
+that fail on the untouched base in this root container.
+
+### launchd: what to run on a real Mac (integration)
+
+From a checkout of this branch, in Terminal (not inside tmux, unless you want to prove the tmux
+capture too), with macOS's own `/bin/bash` 3.2. This replaces any real
+`com.outsourcerer.watcher` agent for the duration; the last step removes it.
+
+```bash
+S="$PWD/plugins/outsourcerer/skills/outsourcerer/scripts/outsourcerer.sh"
+export OSRC_HOME="$(mktemp -d)/osrc" OSRC_WATCH_LAUNCHD_DIR="$(mktemp -d)" OSRC_WATCH_INTERVAL=5
+mkdir -p "$OSRC_HOME"
+/bin/bash "$S" watcher install; echo "install rc=$?"         # expect: watcher installed (launchd, .../com.outsourcerer.watcher.plist), rc 0
+plutil -lint "$OSRC_WATCH_LAUNCHD_DIR/com.outsourcerer.watcher.plist"   # expect: OK
+launchctl print "gui/$(id -u)/com.outsourcerer.watcher" | grep -E 'state|pid ='   # expect: state = running, a pid
+sleep 15; /bin/bash "$S" watcher status; echo "status rc=$?" # expect: installed=launchd daemon=<pid> last_tick=<10s ago, rc 0
+p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid")"; ps -o command= -p "$p"   # expect: .../outsourcerer.sh watcher run
+kill "$p"; sleep 20; /bin/bash "$S" watcher status            # KeepAlive: a NEW daemon pid, rc 0
+cp -R "$(dirname "$S")" /tmp/osrc-v2 && /bin/bash /tmp/osrc-v2/outsourcerer.sh status >/dev/null 2>&1
+sleep 25; ps -o command= -p "$(cat "$OSRC_HOME/watchsvc/run.lock/pid")"   # expect: /tmp/osrc-v2/outsourcerer.sh watcher run (P2-4)
+/bin/bash "$S" watcher uninstall; echo "uninstall rc=$?"     # expect: rc 0
+launchctl print "gui/$(id -u)/com.outsourcerer.watcher" >/dev/null 2>&1; echo "print rc=$?"   # expect: non-zero (unloaded)
+ls "$OSRC_WATCH_LAUNCHD_DIR" "$OSRC_HOME/watchsvc" 2>&1; pgrep -fl 'watcher run'   # expect: empty dir, no watchsvc, no process
+rm -rf /tmp/osrc-v2
+```
+
+Report each "expect" that did not hold. A `launchctl bootstrap` failure (for example over SSH with
+no GUI login) must print "using the fallback loop instead" and still end with rc 0 and a running
+fallback loop; that is the designed fallback, not a pass of launchd.
+
+### Unproven (round 4)
+
+- **launchd**: still never run (no macOS here); steps above.
+- **Real tmux servers**: `-L`/`-S`/`TMUX_TMPDIR` handling is tested with a fake `tmux`, a
+  recorded `$TMUX` and a fake socket path. That tmux honours an exported `TMUX=<socket>` without
+  the `,pid,index` suffix is from tmux's client code (it cuts `$TMUX` at the first comma), not run
+  here. A user who runs `watcher install` outside tmux and Claude Code inside `tmux -L work` is
+  now *correctly* not covered (the guard asks for `supervise`); `watcher install` from inside that
+  server fixes it. Lanes started on that server are still observed on the daemon's server, so they
+  can look gone to a daemon installed elsewhere; that is the remaining half of finding 2. No
+  test drives a real `tmux -L` server.
+- **Two plugin copies in use at once**: each call repoints the launcher, and now the loop also
+  restarts on each flip. Rare, but it costs a restart per flip.
+- **The tmux channel after a `cd`**: not investigated this round (Fable's unproven item 3).
+- **Git Bash**: the `ps -o` fallbacks are tested with a fake `ps` on Linux only. With no `ps -o`
+  the watcher never tree-kills a timed-out delivery (it cannot prove it is its own); it gives up on
+  it after `OSRC_WATCH_DELIVER_TIMEOUT` and moves on.
+- **`jobs -pr` from an EXIT trap** is how `_sv_bounded_kill` proves the child is its own; tested on
+  Linux bash 5. On bash 3.2 it is the same builtin; not run here.
+
+### Needs from other lanes (round 4)
+
+- Owner of `lib/stall.sh`: `osrc_watcher_gap` counts a waiter only through `supervise/<sid>/armed.*`.
+  Make it also accept `loop.*` (same pid check), so a `supervise --loop` is not reported as a
+  watcher gap between batches (it would need more than 120 s between batches to show today).
+- Docs owner: document `supervise --session SID --loop` for wrapper scripts and streaming monitors,
+  and that `watcher install` should be run from inside the tmux server Claude Code runs in when that
+  server is not the default one (`tmux -L/-S`, `TMUX_TMPDIR`).
+- Release/merge owner: keep `osrc-l1-r4.READY` / `.RESULT` (and every earlier `osrc-l1-r*` pair)
+  out of main.
+
+### Files changed (round 4)
+
+| File | Change |
+| --- | --- |
+| `lib/watchsvc.sh` | P2 1-5, P3s above; 410 → 433 lines |
+| `lib/supervise.sh` | `_sv_bounded_kill` (EXIT traps), `loop.*` in `_sv_armed_cover`, `supervise --loop`; 829 → 846 lines |
+| `outsourcerer.sh` | dispatch split back to one command per line, comment shortened; 19005 → 19004 lines |
+| `tests/test_watchsvc.sh` | 74 → 91 checks; removed dead knobs |
+| `osrc-l1-r3.READY`, `osrc-l1-r3.RESULT` | deleted |
+| `osrc-l1-r4.READY`, `osrc-l1-r4.RESULT` | new |
+
+`lib/stopguard.sh` is unchanged: the guard picks up the `.wakefail`, tmux-server and `loop.*` rules
+through `_ws_covers` and `_waited_ids`.
+
+Note on `osrc-l1-r4.RESULT`: the contract fixes its first line as `sha=86957d6…` (the pinned base),
+so it cannot carry this work's sha. The work is the branch head `cloud/osrc-l1-r4`; the last code
+commit is `d39f68c`.
