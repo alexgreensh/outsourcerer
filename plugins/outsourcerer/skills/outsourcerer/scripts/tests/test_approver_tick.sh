@@ -78,7 +78,7 @@ CAP="$FX/cc-idle-after-work.ansi"; out="$(osrc_approver_tick sess sess)"; rc=$?
 [ "$rc" = 1 ] && [ -z "$(ls "$OSRC_HOME/approver/held/" 2>/dev/null)" ] && ok || bad "held record not cleared after the prompt closed"
 
 # other engines' real prompts
-for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|0" "devin|dv-approval-modal-status-line|0" "devin|dv-approval-modal-wide-wrap|2" "codex|cx-approval|0" "gemini|gm-approval-shell|2" "gemini|gm-trust-folder-menu|2" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
+for spec in "devin|dv-approval|2" "devin|dv-approval-wrapped|2" "devin|dv-approval-modal-safe-wrapped|2" "devin|dv-approval-modal-status-line|2" "devin|dv-approval-modal-box|2" "devin|dv-approval-modal-rm|2" "devin|dv-approval-modal-wide-wrap|2" "codex|cx-approval|0" "gemini|gm-approval-shell|2" "gemini|gm-trust-folder-menu|2" "agy|agy-approval|0" "agy|agy-trust-folder-menu|2" "cc|cc-trust-folder-menu|2"; do
   PROV="${spec%%|*}"; rest="${spec#*|}"; f="${rest%%|*}"; want="${rest#*|}"
   rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; CAP="$FX/$f.ansi"; AFTER="$FX/cc-idle-after-work.ansi"
   [ "$PROV" = cc ] || AFTER="$FX/dv-idle-after-work.ansi"
@@ -86,15 +86,15 @@ for spec in "devin|dv-approval|0" "devin|dv-approval-wrapped|2" "devin|dv-approv
   [ "$rc" = "$want" ] && ok || bad "$f: want rc $want got $rc ($out)"
 done
 
-# The reader extracts exactly the command (or target) the screen names. A known status row above the
-# command is dropped; the command keeps both of its rows.
+# The reader returns a command only for header row, one command row, menu; anything else is empty.
 _extract() { # <engine> <fixture> -> sets OSRC_SCR_* from the capture
   _osrc_screen_analyze_text "$1" < "$FX/$2.ansi"
 }
 NLX="$(printf '\nx')"; NLX="${NLX%x}"
-_extract devin dv-approval-modal-status-line
-[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt &&${NLX}ls -la" ] && [ "$OSRC_SCR_KIND" = shell ] && ok "devin status row above the command is not part of it" || bad "devin status line leaked: kind=$OSRC_SCR_KIND cmd=[$OSRC_SCR_CMD]"
 _extract devin dv-approval-modal; [ "$OSRC_SCR_CMD" = "SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done" ] && ok || bad "devin modal command: [$OSRC_SCR_CMD]"
+for f in dv-approval dv-approval-modal-status-line dv-approval-modal-safe-wrapped dv-approval-modal-box; do
+  _extract devin $f; [ -z "$OSRC_SCR_CMD" ] && [ "$OSRC_SCR_KIND" = shell ] && ok "devin $f: no command" || bad "devin $f: read [$OSRC_SCR_CMD]"
+done
 
 # ---- round 3 (Astra round-2 review): one case per screen/approver finding, each must HOLD -------
 # _variant <src fixture> <out name> <python bytes.replace pairs...>: a capture built from a real one.
@@ -115,24 +115,27 @@ _tick_fx() { # <engine> <capture file> -> rc of one tick, no keys may be sent fo
 # 1: a narrow box can wrap `git branch ls` after "branch"; the break is not after &&/||/|, so it holds.
 _variant dv-approval-modal-safe-wrapped f1 ' touch made-by-devin.txt &&\n ls -la' ' git branch\n ls' 'Exec(touch)' 'Exec(git)'
 [ "$(_tick_fx devin "$TMP/f1.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "finding 1: a row break that may be a wrap holds" || bad "finding 1: git branch / ls not held"
-# 6: an unknown status row ("Make all") is kept as part of the command, which then holds.
-_variant dv-approval-modal-status-line f6 'The agent is waiting for your approval to run this' 'Make all'
-_osrc_screen_analyze_text devin < "$TMP/f6.ansi"
-case "$OSRC_SCR_CMD" in "Make all${NLX}"*) ok "finding 6: only the exact Devin status message is skipped" ;; *) bad "finding 6: Make all dropped: [$OSRC_SCR_CMD]" ;; esac
-[ "$(_tick_fx devin "$TMP/f6.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 6: Make all row approved"
-# 7: a no-break space before "#" reaches the classifier as drawn (it was a plain space) and holds.
-_variant dv-approval-modal-safe-wrapped f7 ' ls -la' ' \xc2\xa0# touch ../x'
-_osrc_screen_analyze_text devin < "$TMP/f7.ansi"
-case "$OSRC_SCR_CMD" in *"$(printf '\302\240')# touch ../x") ok "finding 7: U+00A0 preserved through extraction" ;; *) bad "finding 7: NBSP rewritten: [$OSRC_SCR_CMD]" ;; esac
-[ "$(_tick_fx devin "$TMP/f7.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "finding 7: NBSP comment row approved"
-# R4 finding 1: a command row that merely contains Deny / Bypass mode / requires your approval / Exec(..) stays in the command.
+# Round 5: every multi-row or decoy Devin modal holds; only header, one row, menu is read.
 i=0
-for row in 'rm -rf ../x # Deny' 'rm -rf ../x # Bypass mode' 'echo requires your approval' 'Exec(x) ; rm -rf ../x # )'; do
-  i=$((i+1)); _variant dv-approval-modal-safe-wrapped r4a$i ' touch made-by-devin.txt &&\n ls -la' " ls\n $row"
-  _osrc_screen_analyze_text devin < "$TMP/r4a$i.ansi"
-  case "$OSRC_SCR_CMD" in *"$row") ok "r4 finding 1: row kept [$row]" ;; *) bad "r4 finding 1: row dropped [$row]: [$OSRC_SCR_CMD]" ;; esac
-  [ "$(_tick_fx devin "$TMP/r4a$i.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok || bad "r4 finding 1: [$row] approved"
+for body in ' ls -la\n  \xc2\xa0# touch ../x' ' ls -la\n rm -rf ../x # Deny' ' ls -la\n echo requires your approval' \
+            ' ls -la\n Exec(x) ; rm -rf ../x # )' ' touch ../x\n $ ls' 'The agent is waiting for your approval; touch ../x\n ls'; do
+  i=$((i+1)); _variant dv-approval-modal-safe-wrapped r5a$i ' touch made-by-devin.txt &&\n ls -la' "$body" 'Exec(touch)' 'Exec(ls)'
+  [ "$(_tick_fx devin "$TMP/r5a$i.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "r5: two-row modal holds [$body]" || bad "r5: approved [$body]"
 done
+# A `$ ` row as the only row holds too (review finding 1: modal row "$ ls" below "touch ../x").
+_variant dv-approval-modal-rm r5b ' rm -rf ~/Documents' ' $ ls' 'Exec(rm)' 'Exec(ls)'
+[ "$(_tick_fx devin "$TMP/r5b.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "r5: lone \$ row holds" || bad "r5: lone \$ row approved"
+# Old layout with a decoy `$` row (review finding 4).
+_variant dv-approval r5c ' $ \x1b[38;2;220;220;170mtouch\x1b[39m made-by-devin.txt \x1b[38;2;255;255;255m&&\x1b[39m \x1b[38;2;220;220;170mls\x1b[39m' ' $ touch ../y\necho \xe2\x94\x94 $ ls' 'Exec(touch)' 'Exec(ls)'
+[ "$(_tick_fx devin "$TMP/r5c.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "r5: old-layout decoy holds" || bad "r5: old-layout decoy approved"
+# A tall command whose real header is pushed above the window, with a decoy header row (review finding 3).
+tall=" touch ../x ||"; for k in $(seq 24); do tall="$tall\n ls ||"; done
+_variant dv-approval-modal-rm r5d ' rm -rf ~/Documents' "$tall\nThis action requires your approval.\n ls" 'Exec(rm)' 'Exec(ls)'
+[ "$(_tick_fx devin "$TMP/r5d.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "r5: tall command with decoy header holds" || bad "r5: tall decoy approved"
+# A plain one-row read-only command still approves.
+_variant dv-approval-modal-rm r5ok ' rm -rf ~/Documents' ' ls -la' 'Exec(rm)' 'Exec(ls)'
+_osrc_screen_analyze_text devin < "$TMP/r5ok.ansi"
+[ "$OSRC_SCR_CMD" = "ls -la" ] && [ "$(_tick_fx devin "$TMP/r5ok.ansi")" = 0 ] && grep -q Enter "$KEYS" && ok "r5: one-row ls -la approves" || bad "r5: one-row ls -la not approved [$OSRC_SCR_CMD]"
 # 8b (same flaw in the shell scan): a wrapped command row starting "1. " no longer ends the command.
 _variant cx-approval f8b '  $ \x1b[38;2;137;180;250mtouch\x1b[38;2;205;214;244m made-by-codex.txt\x1b[39m' '  $ touch made-by-codex.txt\n  1. ; rm -rf ../x'
 _osrc_screen_analyze_text codex < "$TMP/f8b.ansi"
@@ -144,13 +147,13 @@ _variant gm-approval-shell f9b "Allow execution of: 'touch made-by-gemini.txt'?"
 [ "$(_tick_fx gemini "$TMP/f9b.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "finding 9: gemini f9b holds" || bad "finding 9: gemini f9b approved"
 # 2: the locked recapture changes a decision input but not the command text (kind shell -> write,
 # then the pane's worktree): no Enter.
-_variant dv-approval-modal-status-line f2 'Exec(touch)' 'Write(touch)'
+_variant dv-approval-modal f2 'Exec(jq)' 'Write(jq)'
 for change in kind root; do
   rm -rf "$OSRC_HOME/approver/held" "$OSRC_HOME/approver/pressed"; : > "$KEYS"; PROV=devin; echo 0 > "$TMP/ncap"
   tmux() {
     case "$1" in
       capture-pane) k=$(( $(cat "$TMP/ncap") + 1 )); echo "$k" > "$TMP/ncap"
-        if [ "$k" -gt 1 ] && [ "$change" = kind ]; then cat "$TMP/f2.ansi"; else cat "$FX/dv-approval-modal-status-line.ansi"; fi ;;
+        if [ "$k" -gt 1 ] && [ "$change" = kind ]; then cat "$TMP/f2.ansi"; else cat "$FX/dv-approval-modal.ansi"; fi ;;
       display-message) if [ "$change" = root ] && [ "$(cat "$TMP/ncap")" -gt 1 ]; then printf '%s\n' "$TMP/wt2"; else printf '%s\n' "$ROOT"; fi ;;
       send-keys) printf '%s\n' "$*" >> "$KEYS" ;;
       *) return 0 ;;
@@ -167,8 +170,6 @@ tmux() {
     *) return 0 ;;
   esac
 }
-# no regression (finding 11 class): the unchanged two-row safe command still approves end to end.
-[ "$(_tick_fx devin "$FX/dv-approval-modal-status-line.ansi")" = 0 ] && ok "safe two-row Devin command still approves" || bad "safe two-row Devin command no longer approves"
 
 # cursor NOT on the approve-once row -> hold even for a safe command
 PROV=cc; rm -rf "$OSRC_HOME/approver/held"; : > "$KEYS"; AFTER=""

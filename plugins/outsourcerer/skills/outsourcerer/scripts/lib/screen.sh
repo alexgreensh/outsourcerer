@@ -343,51 +343,25 @@ _osrc_scr_devin() {
   lo=$((n - 25)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*confirm · esc cancel*" $((n - 2 > 0 ? n - 2 : 0)); then
     OSRC_SCR_KIND=other
-    # Menu row first, then the command: every row from the `$ ` row up to the menu is joined,
-    # so a command Devin wraps onto a second row reaches the classifier whole (multi-line holds).
+    # Fail closed: a command is read only when the modal is the header row 'This action requires your
+    # approval.' (the first one on screen, at column 0, inside the window), then exactly one command row,
+    # then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra rows) gives no
+    # command, so the approval is held for a person. The menu's Kind(target) tag names the action.
     local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
-    i=$lo
-    while [ "$i" -lt "$m" ]; do case "${_SCR_L[$i]}" in *"└ \$ "*|"\$ "*|" \$ "*) break ;; esac; i=$((i + 1)); done
-    case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*)
-      OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")"; i=$((i + 1))
-      while [ "$i" -lt "$m" ]; do
-        OSRC_SCR_CMD="$OSRC_SCR_CMD
-$(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
-      done ;;
-    esac
-    # Newer Devin modal: '▲ Approval required / This action requires your approval.' then the
-    # command (plain or inside a drawn box), then '❭ Allow ← ◼◼◼◼ → Once   Exec(prog)'. The
-    # Kind(target) tag on the menu row names the action; the command sits between the header
-    # and the menu. Lines are joined with a newline: the classifier holds multi-line commands
-    # rather than risk merging two real lines into a safe-looking single line.
-    if [ -z "$OSRC_SCR_CMD" ] && [ "$OSRC_SCR_KIND" = other ] && [ "$m" -lt "$n" ]; then
+    if [ "$m" -lt "$n" ]; then
       case "${_SCR_L[$m]}" in
         *"Exec("*) OSRC_SCR_KIND=shell ;;
         *"Write("*|*"Edit("*|*"Create("*|*"Overwrite("*) OSRC_SCR_KIND=write ;;
         *"Read("*) OSRC_SCR_KIND=read ;;
       esac
-      if [ "$OSRC_SCR_KIND" != other ]; then
-        OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
-        # Rows are skipped by position only: the first header row above, the menu row below. No row is
-        # dropped for what it says, so a command row reading "Deny" or "Exec(x)" stays in the command.
-        hdr=$lo; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
-        if [ "$hdr" -ge "$m" ]; then hdr=$lo; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"Approval required"*) break ;; esac; hdr=$((hdr + 1)); done; fi
-        [ "$hdr" -lt "$m" ] || hdr=-1
-        i=$((hdr + 1))
-        while [ "$i" -ge 1 ] && [ "$i" -lt "$m" ]; do
-          l="$(printf '%s' "${_SCR_L[$i]}" | sed -E 's/^[[:space:]│┃║|]+//; s/[[:space:]│┃║|]+$//')"
-          l="$(_osrc_scr_trim "$l")"
-          case "$l" in
-            ""|"❭ "*) ;;
-            ─*|═*|━*|─*|┄*|┈*|"╭"─*|"╰"─*|"┌"─*|"└"─*) ;;
-            "The agent is waiting for your approval"*) [ -n "$OSRC_SCR_CMD" ] && OSRC_SCR_CMD="$OSRC_SCR_CMD
-$l" ;;   # Devin's status message, only above the command
-            *) OSRC_SCR_CMD="${OSRC_SCR_CMD:+$OSRC_SCR_CMD
-}$l" ;;
-          esac
-          i=$((i + 1))
-        done
-      fi
+      OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
+      hdr=0; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
+      l="$(_osrc_scr_trim "${_SCR_L[$((m - 1))]:-}")"
+      case "${_SCR_L[$hdr]}" in "This action requires your approval"*)
+        if [ "$OSRC_SCR_KIND" != other ] && [ "$hdr" -ge "$lo" ] && [ "$hdr" -eq $((m - 2)) ]; then
+          case "$l" in ""|"\$ "*|[│┃║\|─═━┄┈╭╰┌└]*) ;; *) OSRC_SCR_CMD="$l" ;; esac
+        fi ;;
+      esac
     fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
