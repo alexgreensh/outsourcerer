@@ -1,0 +1,4 @@
+sha=09a780321c55ce5d88be25e14115688cd46a13cd
+rc=0
+head=a8a08b9e3f0593f27653352583f00b4811df6b8f (work commit; this RESULT commit follows it)
+All three items done with regression tests (tests/test_hub_speed.sh, test_hub_truth jq bound). Fixture export 33.6s -> 7.3s first, 5.7s unchanged; identical lane states. Hub/cleanup/cloud suites rc=0. conformance.sh rc=1: 6 suites that also fail on base 09a7803 as root here. <3s unchanged not reached in this container; see reports/osrc-l8-speed.md.
