@@ -58,4 +58,12 @@ _obligation_admit send.d.1 lane-d 2>/dev/null; [ $? = 2 ] && ok "a NUL byte does
 printf '{ "obligation_id": "send.e.1", "session_id": "lane-e", "state": "submitted" }\n' >> "$OSRC_OBLIGATIONS"
 [ "$(_obligation_latest_state send.e.1)" = submitted ] && ok "a non-compact record still counts" || bad "non-compact record missed"
 
+# 7. The mkdir lock (no flock: stock macOS) is bounded by the clock, not just by its try count: under
+#    load each try forks and a 1 s wait took 4 s. Slow tries (0.3 s each, like a loaded Mac) must still
+#    give up within 2 s of a 1 s wait.
+if command -v flock >/dev/null 2>&1; then ok "mkdir-lock clock bound: n/a (flock present)"
+else
+  ( _mkdir_claim() { sleep 0.3; return 1; }; s0=$SECONDS; _OSRC_LOCK_WAIT=1 _state_lock_acquire "$TMP/slow.jsonl"; echo "rc=$? took=$(( SECONDS - s0 ))" ) > "$TMP/slow.out" 2>/dev/null
+  case "$(cat "$TMP/slow.out")" in "rc=1 took="[012]) ok "slow mkdir-lock tries stop on the clock ($(cat "$TMP/slow.out"))" ;; *) bad "mkdir-lock wait overshot: $(cat "$TMP/slow.out")" ;; esac
+fi
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

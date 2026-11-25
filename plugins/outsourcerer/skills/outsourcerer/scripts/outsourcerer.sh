@@ -6380,8 +6380,8 @@ _state_lock_acquire() {
   # This process's real pid, resolved once: used both to publish our own owner record and to name the
   # disposable corpse dir when breaking someone else's. Set before the loop so the contention path
   # (where the claim block never runs) still has it under `set -u`.
-  _ownpid="${BASHPID:-$$}"
-  while [ "$tries" -lt "$(( ${_OSRC_LOCK_WAIT:-5} * 10 ))" ]; do
+  _ownpid="${BASHPID:-$$}"; local _t0="$SECONDS"   # tries fork, so under load 10 took ~4 s: bound by SECONDS (builtin) too
+  while [ "$tries" -lt "$(( ${_OSRC_LOCK_WAIT:-5} * 10 ))" ] && [ $(( SECONDS - _t0 )) -lt "$(( ${_OSRC_LOCK_WAIT:-5} + 1 ))" ]; do
     if _mkdir_claim "$lock"; then
       # Record the REAL holder pid, not $$: inside a subshell (a command substitution, say) $$ is still
       # the PARENT pid, so a subshell that acquired the lock then crashed would name the long-lived
