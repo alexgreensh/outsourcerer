@@ -13,8 +13,9 @@
 #
 # SAFE requires ALL of: owning session done or gone, older than 1h, no process has a
 # file open under it, path under the manifest's recorded root. Worktrees and branches
-# additionally need a clean git status, no commits missing from the remote or main,
-# and the lane's PR merged. Anything failing a check is ASK, shown, never deleted.
+# additionally need a clean git status and their tip preserved: another ref (branch,
+# remote, tag) holds it, or the lane's PR merged. Anything failing a check is ASK, shown,
+# never deleted.
 
 # ---- manifest recording -------------------------------------------------------
 
