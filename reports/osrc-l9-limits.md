@@ -65,3 +65,27 @@ Fixes for the three P1 and every P2/P3 finding of the round-1 review. Paths unde
 
 ## Needs from other lanes
 None.
+
+## Round 3
+
+Closing edits for the round-2 review. Paths under `plugins/outsourcerer/skills/outsourcerer/scripts/`. Base confirmed: `cab325f`.
+
+- **P2-1** `lib/plan-overlay.jq` `codex_fix`: the kept probe is used only when `probe_newer`. A stale log row now falls to the log branch, so a 3 h old 100% log beats a 2-day-old kept 20% probe and stays `out`. Test 11.
+- **P2-2** `tests/test_limit_gate.sh` restored to its pre-lane state (no diff; the `codexage=10000` check again proves the 6 h gate). `test_limits_staleness.sh` check 10 now calls `_osrc_lane_limit_stale cx`. Checked by hand: with `OSRC_LIMITS_STALE_SECS=7200` the `cx codexage=10000` call returns stale (the guard would fail), with the default it does not. I started a full-suite run of `test_limit_gate.sh` with the gate set to 2 h, but its output was lost; I did not see that suite fail under the mutation.
+- **P3-3** `lib/plan-overlay.jq` `refresh_flag`: a kept reading after a failed refresh is marked `stale` and downgraded only when older than its probe TTL (`lib/plan-probe.sh` adds `ttl` to the cached object). The note still says the refresh failed. Test 12; test 8 now uses a 1000 s old probe.
+- **P3-4** Documented, not changed: a seen mark can outlive a window reset (comment in `lib/limits.sh`). The limits line carries no `renews_at`, so a fix would need a wider change.
+- **P3-5** RESULT `rc` comes only from a real run: conformance again ended `rc=124` (900 s timeout), so RESULT says `rc=124`.
+- **P3-6** Removed `ov()` and every `| ov`; the `_conserve_reco` comment now says it also appends `LIMIT LOW` lines; `references/jobs-and-safety.md` documents `OSRC_LIMIT_LOW_PCT`, the 2 h page default and that `OSRC_LIMITS_STALE_SECS` moves both.
+- Also fixed: two `test_plan_probe.sh` overlay unit calls lacked `--argjson stale/ll` since round 2 (failed on base too); 38/38 now.
+
+### Tests
+- `nice bash tests/test_limits_staleness.sh`: 21 passed, 0 failed (rc=0). On base lib code: 2 failed (checks 11 and 12).
+- `nice bash tests/test_limit_gate.sh`: 124 passed, 0 failed.
+- `nice bash tests/test_plan_probe.sh`: 38 passed (36 + 2 fixed).
+- `nice timeout 900 bash tests/conformance.sh`: rc=124 (timeout). Failing suites seen before the cutoff: test_harness_isolation, test_vocab_hygiene, test_supervise_pgroup_kill, test_parity_insource_refresh, test_conformance_suite_timeout. I did not compare these with base (this sandbox is root/slow); none touch limits files.
+
+### Unproven
+Conformance never completed. The five failures above are unattributed.
+
+## Needs from other lanes
+- Unchanged from round 1/2.
