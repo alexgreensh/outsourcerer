@@ -272,8 +272,10 @@ out="$(FAKE_DEVIN_MODE=nolink OSRC_CLOUD_LAUNCH_WAIT=2 start_cloud t-nolink --re
 # Round 2: a failed launch must stop the vehicle CLI itself (not only the wrapper), and the message
 # must not claim more than is known.
 spid="$(cat "$OSRC_STUB_LOG.pid" 2>/dev/null)"
-# (a killed process may linger as a zombie until its reaper runs; that is dead)
+# (a killed process may linger as a zombie until its reaper runs; that is dead). `ps -o stat=` is
+# not supported on Git Bash, where an empty answer would pass vacuously: kill -0 decides there.
 _pst="$(ps -o stat= -p "${spid:-0}" 2>/dev/null | tr -d ' ')"
+[ -n "$_pst" ] || ! kill -0 "${spid:-0}" 2>/dev/null || _pst=alive
 [ -n "$spid" ] && case "$_pst" in ''|Z*) true ;; *) false ;; esac && ok "failed launch: the vehicle process is gone" || bad "vehicle pid '$spid' survived a failed launch"
 grep -q 'OSRC_CLOUD_LAUNCH_WAIT' <<<"$out" && grep -q 'dashboard' <<<"$out" && ok "failure message names the wait knob and the dashboard" || bad "message overstates: $out"
 
@@ -282,6 +284,10 @@ git -C "$WORK" checkout -q -b side-r2 && git -C "$WORK" commit -q --allow-empty 
 out="$(start_cloud t-headmis --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-headmis.json" ] && grep -q "is not the tip of base 'main'" <<<"$out" \
   && ok "HEAD != base tip: launch refused" || bad "launch from the wrong HEAD allowed (rc=$rc): $out"
+# Round 3: --sha does not skip the guard: HEAD must be the pinned commit (heavy lanes always pass --sha).
+out="$(start_cloud t-headsha --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok --sha "$(git -C "$WORK" rev-parse main)" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-headsha.json" ] && grep -q "is not the pinned --sha" <<<"$out" && ! grep -q 'or pass --sha' <<<"$out" \
+  && ok "--sha with HEAD elsewhere: launch refused" || bad "--sha skipped the HEAD guard (rc=$rc): $out"
 git -C "$WORK" checkout -q main
 
 # Round 2: generic placeholder paths pass the private check; real paths stay blocked.
@@ -290,6 +296,13 @@ pc 'Copy from $HOME/.claude/plugins/cache/<plugin>/ here' && pc 'see ~/.claude/p
   && ok "placeholder paths are allowed" || bad "placeholder path rejected"
 ! pc 'read ~/notes.md' && ! pc 'at /Users/bob/plan.md' && ! pc 'at /home/bob/<x>/y' && ! pc 'a ~/.claude/real/path' \
   && ok "real paths still blocked" || bad "a real path slipped through"
+# Round 3: every user-specific segment must be a placeholder; Windows home paths follow the same rule.
+! pc 'see ~/clients/acme-corp/<file>' && ! pc 'at /home/<user>/clients/acme/<f>' \
+  && ok "one placeholder does not excuse a literal folder under home" || bad "literal home folder passed"
+pc 'open C:\Users\<user>\<project>\README.md' && pc 'in C:/Users/<user>/AppData/Roaming/<app>/' && pc 'see ~/<repo>/src' \
+  && ok "invented Windows and home template paths are allowed" || bad "a template path was rejected"
+! pc 'open C:\Users\bob\proj\x' && ! pc 'open C:\Users\<user>\clients\acme\<f>' && ! pc 'at D:/Users/bob/<x>' \
+  && ok "real Windows home paths are blocked" || bad "a real Windows path slipped through"
 
 # Round 2: only the end of the log classifies a failure (an echoed prompt must not).
 printf 'Brief: fix billing and rate limit handling\n' > "$TMP/cl.log"; for i in $(seq 25); do echo "line $i" >> "$TMP/cl.log"; done
@@ -623,6 +636,13 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^check:bash //')"
 [ -n "$done_script" ] && [ -x "$done_script" ] && grep -q 'cloud/t-l6' "$done_script" \
   && ok "done contract: generated check script verifies cloud/<id> + READY" || bad "done contract: check script bad ($done_script)"
+# Round 3: READY on the session's own branch (recorded by the poll as .poll_branch) passes the check
+# (run from the checkout, as the done contract does: the fetch URL may be relative).
+git -C "$WORK" checkout -q -b sess-r3 && printf 'READY t-l6\n' > "$WORK/t-l6.READY" && git -C "$WORK" add t-l6.READY \
+  && git -C "$WORK" commit -q -m "t-l6 READY" && git -C "$WORK" push -q origin HEAD:refs/heads/claude/t-l6-Qx1 && git -C "$WORK" checkout -q main
+mkdir -p "$OSRC_HOME/remote"; printf '{"poll_branch":"claude/t-l6-Qx1"}\n' > "$OSRC_HOME/remote/t-l6.json"
+[ -n "$done_script" ] && (cd "$WORK" && bash "$done_script") && ok "done contract: READY on the followed session branch passes" || bad "done check cannot see the session branch"
+rm -f "$OSRC_HOME/remote/t-l6.json"
 
 # Both helpers present: real lane registry and done contract, not stubs.
 out="$(start_cloud t-real --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?

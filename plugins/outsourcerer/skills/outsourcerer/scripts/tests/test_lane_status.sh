@@ -15,6 +15,11 @@ mkdir -p "$OSRC_HOME" "$HOME" "$TMP/bin"
 export OSRC_TIME_UNIT=1 OSRC_REMOTE_POLL_SECS=0 OSRC_SELF=osrc OSRC_NOW=1000000 OSRC_REMOTE_STALL=90 OSRC_REMOTE_NEVER_START=45
 cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
+# Round 3: optional routes for the session-branch lookup (matching-refs, then that branch's commit)
+case "$*" in
+  *matching-refs*) if [ -f "${GH_REFS:-}" ]; then cat "$GH_REFS"; exit 0; fi ;;
+  *commits/claude/*) if [ -f "${GH_ALT:-}" ]; then cat "$GH_ALT"; exit 0; fi ;;
+esac
 if [ -f "$GH_ERR" ]; then cat "$GH_ERR" >&2; exit 1; fi
 cat "$GH_OUT"
 SH
@@ -84,7 +89,50 @@ cmd_lane add alt1 --branch cloud/alt1 --repo "$O" >/dev/null 2>&1; cmd_lane poll
   && ok "READY on the session's own claude/<id>-* branch is seen" || bad "alt branch missed: $(jq -c . "$OSRC_HOME/remote/alt1.json")"
 OSRC_REMOTE_NEVER_START=45 cmd_lane add alt2 --branch cloud/alt2 --repo "$O" >/dev/null 2>&1; cmd_lane poll alt2
 [ "$(jq -r .head "$OSRC_HOME/remote/alt2.json")" = "" ] && ok "another lane's session branch is not adopted" || bad "alt2 adopted a foreign branch"
+# Round 3 (P2-2): the review item and the done event name the branch the READY commit is on.
+item="$(ls "$OSRC_HOME"/review/items/alt1-*.json 2>/dev/null | head -1)"
+[ -n "$item" ] && [ "$(jq -r .branch "$item")" = claude/alt1-Xk3Q ] && ok "review item fetches the session branch" || bad "review item branch: $(jq -c . "$item" 2>/dev/null)"
+out="$(osrc_remote_events 2>&1)"
+grep -q 'EVENT done alt1 .*READY .* on claude/alt1-Xk3Q' <<<"$out" && ok "done event names the session branch" || bad "done event: $out"
+
+# Round 3 (P1): lane ids that are prefixes of each other: `alt` must not adopt claude/alt-r2-*.
+git -C "$W" push -q "$O" HEAD:refs/heads/claude/alt-r2-fixes-x9
+cmd_lane add alt-r2 --branch cloud/alt-r2 --repo "$O" >/dev/null 2>&1
+cmd_lane add alt --branch cloud/alt --repo "$O" >/dev/null 2>&1
+cmd_lane poll alt; cmd_lane poll alt-r2
+[ "$(jq -r .head "$OSRC_HOME/remote/alt.json")" = "" ] && ok "lane alt does not adopt claude/alt-r2-* (git)" || bad "alt adopted: $(jq -c . "$OSRC_HOME/remote/alt.json")"
+[ "$(jq -r .poll_branch "$OSRC_HOME/remote/alt-r2.json")" = claude/alt-r2-fixes-x9 ] && ok "lane alt-r2 still follows its own branch" || bad "alt-r2 lost its branch"
+
+# Round 3 (P2-3): a lane branch seen once and then deleted is reported deleted, not swapped for the session branch.
+git -C "$W" push -q "$O" HEAD:refs/heads/cloud/alt3 && cmd_lane add alt3 --branch cloud/alt3 --repo "$O" >/dev/null 2>&1 && cmd_lane poll alt3
+git -C "$W" push -q "$O" HEAD:refs/heads/claude/alt3-k2 && git -C "$W" push -q "$O" :refs/heads/cloud/alt3; cmd_lane poll alt3
+[ "$(jq -r .branch_deleted "$OSRC_HOME/remote/alt3.json")" = true ] && [ "$(jq -r .poll_branch "$OSRC_HOME/remote/alt3.json")" = cloud/alt3 ] \
+  && ok "deleted lane branch is reported, not silently swapped" || bad "deleted branch swapped: $(jq -c . "$OSRC_HOME/remote/alt3.json")"
+
+# Round 3 (P3-8): cleanup offers only finished lanes, and only their recorded branches.
 out="$(_osrc_cleanup_remote_branches)"
-grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q' <<<"$out" && ok "cleanup offers the claude/<id>-* branch with the lane's own" || bad "cleanup offer: $out"
+grep -q 'lane alt1 ' <<<"$out" && bad "cleanup offered a READY (unfinished) lane: $out" || ok "cleanup never offers an unfinished lane"
+grep -q 'lane alt3 .*delete cloud/alt3$' <<<"$out" && ok "cleanup offers a failed lane's own branch" || bad "cleanup offer: $out"
+_osrc_review_verdict_for() { echo MERGE; }
+mkdir -p "$OSRC_HOME/cloud"; printf 'pushed to claude/alt1-Zz9.\n' > "$OSRC_HOME/cloud/alt1.launch.log"
+out="$(_osrc_cleanup_remote_branches)"
+grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers a done lane's claude/<id>-* branch, nothing from the log" || bad "cleanup offer: $out"
+unset -f _osrc_review_verdict_for
+
+# Round 3 (P2-5): the gh transport finds the session branch via matching-refs, and drops a longer lane's.
+rm -f "$GH_ERR"; printf 'gh: No commit found for SHA: cloud/g1 (HTTP 422)\n' > "$GH_ERR"
+export GH_REFS="$TMP/refs.json" GH_ALT="$TMP/alt.json"
+printf '[{"ref":"refs/heads/claude/g1-r2-zz"},{"ref":"refs/heads/claude/g1-Ab12"}]\n' > "$GH_REFS"
+printf '{"sha":"%s","commit":{"message":"g1: READY"},"files":[]}\n' "$(printf 'b%.0s' $(seq 40))" > "$GH_ALT"
+add g1-r2; add g1; cmd_lane poll g1
+[ "$(jq -r .poll_branch "$OSRC_HOME/remote/g1.json")" = claude/g1-Ab12 ] && [ "$(jq -r .head_ready "$OSRC_HOME/remote/g1.json")" = true ] \
+  && ok "gh: session branch found via matching-refs, READY seen" || bad "gh alt path: $(jq -c . "$OSRC_HOME/remote/g1.json")"
+unset GH_REFS GH_ALT
+
+# Round 3 (P3-6): "never started" is not claimed while polls are failing (nobody checked).
+printf 'gh: error connecting to api.github.com\n' > "$GH_ERR"
+OSRC_NOW=1000000; export OSRC_NOW; add n1; cmd_lane poll n1
+OSRC_NOW=$((1000000 + 46)); export OSRC_NOW
+grep -q 'EVENT failed n1 .*never started' <<<"$(osrc_remote_events 2>&1)" && bad "never started claimed while polls fail" || ok "no 'never started' while polls are failing"
 
 echo "=== $pass passed, $fail failed ==="; [ "$fail" -eq 0 ]

@@ -1,3 +1,0 @@
-sha=2235be9265ff7acf51098a2a154c63e77b846fc1
-rc=0
-Round 2 fixes: P1 orphaned launcher, P2 2-4, P3 5-6, plus claude/<id>-* session branch, HEAD==base guard, placeholder paths. test_cloudrun 128/0, test_lane_status 16/0, test_remote_review 106/0. Conformance: 6 failing suites also fail on the base in this container; see reports/osrc-l7-remote.md. Branch pushed: claude/osrc-l7-remote-r2-fixes-35ohjs.

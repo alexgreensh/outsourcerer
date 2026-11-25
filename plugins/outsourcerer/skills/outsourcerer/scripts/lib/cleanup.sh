@@ -409,18 +409,17 @@ _osrc_human_kb() { # <kb> -> "1.2G" style
   else printf '%sK' "$k"; fi
 }
 
-# Remote lane branches: never deleted here (the remote is the user's); offered with the exact command.
-# A cloud session may push only to its own claude/<id>-<suffix> branch, so that is offered too.
+# Remote lane branches: never deleted here (the remote is the user's); offered with the exact command,
+# and only for lanes that are finished (done or failed): a live lane's branches are never offered.
+# A cloud session may push only to its own claude/<id>-<suffix> branch (.poll_branch), offered too.
 _osrc_cleanup_remote_branches() {
   local f id url br names alt
   for f in "$OSRC_HOME"/remote/*.json; do
     [ -f "$f" ] || continue
     id="$(basename "$f" .json)"; br="$(jq -r '.branch // ""' "$f" 2>/dev/null)"; [ -n "$br" ] || continue
+    case "$(osrc_remote_state "$id" 2>/dev/null)" in done|failed) ;; *) continue ;; esac
     names="$br"
     alt="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"; [ -z "$alt" ] || [ "$alt" = "$br" ] || names="$names $alt"
-    alt="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
-    case " $names " in *" $alt "*) alt="" ;; esac
-    [ -z "$alt" ] || names="$names $alt"
     url="$(jq -r 'if .transport=="gh" then "https://github.com/" + .url + ".git" else .url end' "$f" 2>/dev/null)"
     echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $names"
   done

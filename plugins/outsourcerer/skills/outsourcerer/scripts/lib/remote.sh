@@ -217,6 +217,8 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   # lane branch is absent, look for that one and follow it (a READY marker there counts).
   if [ -z "$head" ] && [ "$pass" = 1 ]; then
     pass=2; branch="$(_osrc_lane_alt_branch "$id" "$f" "$transport" "$url" "$lsout")"
+    # a lane branch seen before and now gone is "deleted", not a cue to adopt another branch
+    [ "$(jq -r '.seen_branch' "$f")" != true ] || [ "$branch" = "$(jq -r '.poll_branch // ""' "$f")" ] || branch=""
     [ -n "$branch" ] && [ "$branch" != "$prim" ] && continue
     branch="$prim"
   fi
@@ -261,18 +263,32 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   return 0
 }
 
-# <id> <json> <transport> <url> -> the session's own branch claude/<id>-<suffix> (the remote, else
-# the name in the launch log), or nothing.
+# <id> <json> <transport> <url> [ls-remote output] -> the session's own branch claude/<id>-<suffix>
+# (the remote, else the name in the launch log), or nothing. Ownership is exact: a branch that a
+# longer registered lane id also names (lane `a` vs `a-r2` and claude/a-r2-x) is never adopted.
 _osrc_lane_alt_branch() {
-  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" b out=""
-  b="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
+  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" c cands=""
   if [ "$transport" = gh ]; then
-    ! have gh || out="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[0].ref // ""' 2>/dev/null)"
+    ! have gh || cands="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[].ref' 2>/dev/null)"
   else
-    out="$(printf '%s\n' "$lsout" | awk '$2 ~ /^refs\/heads\/claude\//{print $2; exit}')"
+    cands="$(printf '%s\n' "$lsout" | awk '{print $2}')"
   fi
-  [ -z "$out" ] || b="${out#refs/heads/}"
-  printf '%s' "$b"
+  cands="$cands
+$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
+  for c in $cands; do
+    c="${c#refs/heads/}"; c="${c%.}"   # a log line may end the name with prose punctuation
+    _osrc_lane_owns_branch "$id" "$c" && { printf '%s' "$c"; return 0; }
+  done
+  return 0
+}
+_osrc_lane_owns_branch() { # <id> <branch>: claude/<id>-<suffix> and no longer registered id claims it
+  local id="$1" b="$2" o
+  case "$b" in "claude/$id-"?*) ;; *) return 1 ;; esac
+  for o in $(_osrc_remote_ids); do
+    [ "${#o}" -gt "${#id}" ] || continue
+    case "$b" in "claude/$o-"?*) return 1 ;; esac
+  done
+  return 0
 }
 
 # ONE marker rule, shared with the done contract (lib/done.sh, _osrc_done_marker_hit) when loaded: the
@@ -433,7 +449,7 @@ osrc_remote_events() {
     fi
     st="$(osrc_remote_state "$id")"
     if [ "$st" = ready ] && [ "$(jq -r '.ready_head // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "ready:$head" 0; then
-      _osrc_emit done "$id" "READY $sha7 on $(jq -r .branch "$f"): $(jq -r .head_msg "$f") (queued for review)" "$(_osrc_next_for_ready)"
+      _osrc_emit done "$id" "READY $sha7 on $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .head_msg "$f") (queued for review)" "$(_osrc_next_for_ready)"
     fi
     # backstop: READY with no live review item for this head (removed and re-added lane, dropped or
     # lost item) is the "sat READY for hours" class. Say so instead of staying quiet.
@@ -446,7 +462,7 @@ osrc_remote_events() {
       esac
     fi
     # a lane that never pushes: report once, as "never started", with whatever the vehicle said
-    if [ "$st" = live ] && [ -z "$head" ] && [ "$(jq -r '.seen_branch' "$f")" != true ] && _osrc_lane_never_started "$f" "$now" \
+    if [ "$st" = live ] && [ -z "$head" ] && [ "$errn" = 0 ] && [ "$(jq -r '.seen_branch' "$f")" != true ] && _osrc_lane_never_started "$f" "$now" \
        && _osrc_ev_due "$id" neverstarted 0; then
       _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - $(jq -r '.created_ts' "$f")) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
     fi

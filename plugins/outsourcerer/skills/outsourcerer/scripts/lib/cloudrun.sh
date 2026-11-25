@@ -99,6 +99,7 @@ _cloudrun_preflight() {
   have git || die "cloud start needs git"
   out="$(git ls-remote "$url" "refs/heads/$base" 2>&1)" || die "cloud preflight: cannot reach $url (git ls-remote failed): $(printf '%s' "$out" | tail -1)"
   [ -n "$out" ] || die "cloud preflight: base branch '$base' does not exist on the remote — pick a pushed base; this tool never pushes for you"
+  _CLOUDRUN_BASE_TIP="$(printf '%s\n' "$out" | awk 'NR==1{print $1}')"   # the HEAD guard reuses it
   # Work the cloud box cannot see: commits on HEAD reachable from no remote ref.
   n="$(git -C "$top" rev-list --count HEAD --not --remotes 2>/dev/null)"
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
@@ -151,19 +152,21 @@ _cloudrun_pack() {
 # no pre-existing implementation was found in the repo, so this checks (a) absolute home paths
 # the cloud box cannot resolve and (b) names listed in $OSRC_HOME/cloud-private-names.txt
 # (one per line, # comments, case-insensitive substring match).
-# _cloudrun_path_generic <token> -> rc0 when a "/Users/..", "/home/..", "~/.." or "$HOME/.." path is a
-# template, not a real path: it has a <placeholder> segment, and for /Users and /home the user
-# segment itself is one (`/home/<user>/x`). `~/notes.md` and `/Users/bob/x` stay blocked.
+# _cloudrun_path_generic <token> -> rc0 when a home path ("~/..", "/Users/..", "/home/..", or a
+# Windows "C:\Users\..") is a template, not a real path: every user-specific segment is a
+# <placeholder>. User-specific = the user name and the first folder under home, unless that folder
+# is an app folder (a dot-folder, AppData, Library). At least one segment must be a placeholder.
+# `~/notes.md`, `/Users/bob/x`, `~/clients/acme/<file>` and `C:\Users\bob\x` stay blocked.
 _cloudrun_path_generic() {
-  local t="$1" rest seg ph=0
+  local t="${1//\\//}" rest seg first ph=0
   case "$t" in
-    '$HOME/'*) rest="${t#'$HOME/'}" ;;
-    '${HOME}/'*) rest="${t#'${HOME}/'}" ;;
     '~/'*) rest="${t#'~/'}" ;;
-    /Users/*|/home/*) rest="${t#/*/}"; seg="${rest%%/*}"
-      case "$seg" in \<*\>) ;; *) return 1 ;; esac ;;
+    /Users/*|/home/*|[A-Za-z]:/Users/*) rest="${t#*/*/}"; seg="${rest%%/*}"; rest="${rest#*/}"
+      case "$seg" in \<*\>) ph=1 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
   esac
+  first="${rest%%/*}"
+  case "$first" in ''|\<*\>|.?*|AppData|Library) ;; *) return 1 ;; esac
   local IFS=/
   for seg in $rest; do
     case "$seg" in \<[A-Za-z0-9_.-]*\>) ph=1 ;; esac
@@ -177,11 +180,11 @@ _cloudrun_private_check() {
     [ -n "$line" ] || continue
     bad=0
     if [ -n "$HOME" ] && grep -qF -- "$HOME" <<<"$line"; then bad=1
-    elif grep -qE '/Users/|/home/|~/' <<<"$line"; then
+    elif grep -qE '/Users/|/home/|~/|[A-Za-z]:[\\/]Users[\\/]' <<<"$line"; then
       while IFS= read -r tok; do
         [ -n "$tok" ] || continue
         _cloudrun_path_generic "$tok" || bad=1
-      done < <(grep -oE '(/Users/|/home/|~/|[$]HOME/|[$][{]HOME[}]/)[^[:space:]`"'"'"'),;]*' <<<"$line")
+      done < <(grep -oE '([A-Za-z]:[\\/]Users[\\/]|/Users/|/home/|~/)[^[:space:]`"'"'"'),;]*' <<<"$line")
     fi
     if [ "$bad" = 1 ]; then
       printf 'PRIVATE PATH: pack contains a machine-local path the cloud box cannot see: %s\n' "$(printf '%s' "$line" | cut -c1-160)" >&2
@@ -534,9 +537,11 @@ _cloudrun_done_contract() {
   dir="$(_cloudrun_cdir)"; _mkdir_private "$dir" 2>/dev/null || return 0
   script="$dir/$id.done.sh"
   {
-    printf '#!/usr/bin/env bash\n# done check for cloud lane %s: exit 0 when %s tip contains %s.READY\nset -u\n' "$id" "$branch" "$id"
+    printf '#!/usr/bin/env bash\n# done check for cloud lane %s: exit 0 when the %s (or session branch) tip contains %s.READY\nset -u\n' "$id" "$branch" "$id"
     printf 'd="%s/%s.verify.git"\nrm -rf "$d" 2>/dev/null\n' "$dir" "$id"
-    printf 'git clone -q --depth 1 --branch "%s" "%s" "$d" >/dev/null 2>&1 || exit 1\n' "$branch" "$url"
+    # READY may sit on the session's own claude/<id>-* branch: use the branch the lane poll follows
+    printf 'b="$(jq -r '"'"'.poll_branch // empty'"'"' %q 2>/dev/null)"; [ -n "$b" ] || b=%q\n' "$OSRC_HOME/remote/$id.json" "$branch"
+    printf 'git clone -q --depth 1 --branch "$b" "%s" "$d" >/dev/null 2>&1 || exit 1\n' "$url"
     printf 'git -C "$d" cat-file -e "HEAD:%s.READY" 2>/dev/null\n' "$id"
   } > "$script" 2>/dev/null && chmod 700 "$script" 2>/dev/null
   [ -x "$script" ] || { printf '>>> [cloud] done contract: could not write %s — skipped\n' "$script" >&2; return 0; }
@@ -636,12 +641,12 @@ _cloudrun_start() {
   # preflight: pushed base + no unpushed work + repo match (above)
   _cloudrun_preflight "$fetch" "$base" "$top"
   # The pack pins HEAD but the hosted clone starts from the remote base: they must be the same commit.
-  if [ -z "$pinsha" ]; then
-    local btip bhead; btip="$(git ls-remote "$fetch" "refs/heads/$base" 2>/dev/null | awk 'NR==1{print $1}')"
-    bhead="$(git -C "$top" rev-parse HEAD 2>/dev/null)"
-    [ -z "$btip" ] || [ "$btip" = "$bhead" ] \
-      || die "cloud: this checkout's HEAD (${bhead:0:7}) is not the tip of base '$base' (${btip:0:7}): the lane would be built on the wrong code. Check out and update '$base' first, or pass --sha."
-  fi
+  # With --sha the checkout must be that pinned commit: the vehicle launches from this checkout.
+  local btip bhead bwhat="the tip of base '$base'"
+  btip="${_CLOUDRUN_BASE_TIP:-}"; bhead="$(git -C "$top" rev-parse HEAD 2>/dev/null)"
+  [ -z "$pinsha" ] || { btip="$(git -C "$top" rev-parse "${pinsha}^{commit}" 2>/dev/null)"; bwhat="the pinned --sha"; }
+  [ -z "$btip" ] || [ "$btip" = "$bhead" ] \
+    || die "cloud: this checkout's HEAD (${bhead:0:7}) is not $bwhat (${btip:0:7}): the lane would be built on the wrong code. Check out that commit first."
   # context pack + gates (refusals before any vehicle probe or launch)
   local pack packtext; pack="$(_cloudrun_pack "$id" "$display" "$base" "$branch" "$brief" "$donewhen" "$pinsha")"
   packtext="$(cat "$pack")"
@@ -704,11 +709,10 @@ its last output:
 $(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
   fi
   pid="$(printf '%s' "$launch_out" | sed -n '1p')"; ref="$(printf '%s' "$launch_out" | sed -n '2p')"
-  [ -n "$ref" ] || die "cloud: the $veh session did not start (no session link). Nothing was registered. See $log"
   _cloudrun_register "$id" "$veh" "$branch" "$transport" "$url" "$repo" "$base" "$brief" "$donewhen" "$pack" "$ref"
   _cloudrun_done_contract "$id" "$fetch" "$branch" "$top"
   printf 'cloud %s: %s session started on %s (branch %s)\n' "$id" "$veh" "$display" "$branch"
-  [ -n "$ref" ] && printf '  session: %s\n' "$ref"
+  printf '  session: %s\n' "$ref"
   printf '  quota   : %s\n' "$(_cloudrun_vehicle_quota "$veh")"
   printf '  log     : %s (launcher pid %s)\n' "$log" "$pid"
   printf '  track   : %s lane ls · %s lane events · READY = %s.READY at %s tip\n' "$0" "$0" "$id" "$branch"
