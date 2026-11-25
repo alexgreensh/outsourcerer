@@ -1,0 +1,3 @@
+sha=883704e1bda280c26fd4b7bf6eb2bd461bd0a0b8
+rc=0
+Fixed P2 1-3 and P3 6,7,8,10. test_cleanup_manifest.sh 87/87 (3 new tests fail pre-fix). conformance.sh hit a 590s timeout (rc=124) before finishing; not a full pass. Not run on bash 3.2.
