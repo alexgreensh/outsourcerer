@@ -251,7 +251,9 @@ covers() { [ "$(S "_waited_ids $1" 2>/dev/null | grep -cx '\*')" -ge 1 ]; }
 until_t() { local i=0; until eval "$1" || [ "$i" -ge 40 ]; do sleep 0.2; i=$((i+1)); done; eval "$1"; }
 export OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0
 fresh 13a; own sessH N1   # owned, never dropped, nothing live (a lane with "no turn yet")
-out="$(perl -e 'alarm 8; exec @ARGV' bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1
+# The alarm only catches a hot spin (which prints many done-all lines); 30 s, not 8, so a loaded machine
+# that ends correctly but slowly is not failed (seen at load 34).
+out="$(perl -e 'alarm 30; exec @ARGV' bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1
   _sv_observe() { SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""; SV_STALL_START=""; }
   cmd_supervise --session sessH --loop' "$SRC" 2>/dev/null)"; rc=$?
 [ "$rc" = 0 ] && [ "$(grep -c '^EVENT done all' <<<"$out")" = 1 ] && ok "--loop ends on done all (no hot spin while a lane has no turn yet)" || no "rc=$rc, $(grep -c '^EVENT done all' <<<"$out") done-all lines"
