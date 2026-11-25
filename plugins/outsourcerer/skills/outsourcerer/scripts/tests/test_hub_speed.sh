@@ -71,6 +71,11 @@ for j in j-run:running j-ok:done; do
   printf '{"provider":"codex","lane":"codex","verb":"run"}\n' > "$OSRC_JOBS/$id/meta.json"; echo "task $id" > "$OSRC_JOBS/$id/task_ref"
 done
 
+# Owner records of long-dead lanes (nothing left: no job, remote, tmux or autodetach) are most of a
+# real state home. One keeps a review item, so it still counts for activity and must reach the builders.
+for i in $(seq 1 40); do own "gone-$i"; done
+own rv-only; mkdir -p "$OSRC_HOME/review/items"; echo '{}' > "$OSRC_HOME/review/items/rv-only-1.json"
+
 echo "=== same: export lane states equal the uncached readers ==="
 # The uncached readers must not start probes themselves: only the export's own worker may leave a mark.
 slow() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; OSRC_DONE_CHECK_MAX_INFLIGHT=0
@@ -80,7 +85,7 @@ slow() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$
   done ) | jq -sc 'map({id, status, state}) | sort_by(.id)'; }
 fast() { jq -c '[.projects[] | select(.id == "s-main") | .lanes[] | {id, status, state}] | sort_by(.id)' <<<"$1"; }
 want="$(slow)"; [ ! -e "$TMP/probe-ran.c-3" ] || no "the uncached readers started a probe"
-t0="$(date +%s)"; e1="$(lib cmd_hub_export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
+t0="$(date +%s)"; e1="$(OSRC_HUB_PROF="$TMP/prof1" lib cmd_hub_export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
 got1="$(fast "$e1")"; e2="$(lib cmd_hub_export 2>/dev/null)"; got2="$(fast "$e2")"
 [ "$(jq length <<<"$want")" = 9 ] && [ "$got1" = "$want" ] && [ "$got2" = "$want" ] \
   && ok "9 lanes: first and repeat export match the uncached readers" || no "lane states differ: slow=$want first=$got1 repeat=$got2"
@@ -88,6 +93,11 @@ jq -e 'map(select(.id == "c-1"))[0].state == "done" and map(select(.id == "c-3")
   && ok "a check: lane answers from its last verdict (done stays done, none is not done)" || no "verdicts: $got1"
 jq -e 'map(select(.id == "t-ask"))[0].state == "question" and map(select(.id == "t-busy"))[0].state == "working"' >/dev/null <<<"$got2" \
   && ok "pane states survive the reuse (question, working)" || no "pane states: $got2"
+
+[ "$(grep -c ' lane\.gone-[0-9]*\.for$' "$TMP/prof1")" = 0 ] && [ "$(grep -c ' lane\.rv-only\.for$' "$TMP/prof1")" = 1 ] \
+  && [ "$(grep -c ' lane\.t-idle\.for$' "$TMP/prof1")" = 1 ] \
+  && ok "40 dead owner records skip the lane builders; a review-item lane and a pane still reach them" \
+  || no "lane builders per id: gone=$(grep -c ' lane\.gone-' "$TMP/prof1") rv-only=$(grep -c ' lane\.rv-only\.for$' "$TMP/prof1") t-idle=$(grep -c ' lane\.t-idle\.for$' "$TMP/prof1")"
 
 echo "=== probe: a 20 s clone check never holds the export ==="
 [ "$dt" -lt 15 ] && ok "export with two 20 s probes took ${dt}s" || no "export waited on the probe: ${dt}s"

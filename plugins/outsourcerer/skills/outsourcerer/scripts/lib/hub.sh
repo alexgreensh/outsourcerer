@@ -224,6 +224,21 @@ _osrc_hub_lane_fallback() { # <id> -> lane json or nothing
      + (if $note=="" then {} else {note:$note} end)'
 }
 
+# _osrc_hub_lane_absent <id> -> rc 0 when an owner record names a lane with nothing left: no remote
+# file, job dir, autodetach log/rc, review item or live tmux session. Every builder below then returns
+# no row and _osrc_hub_lane_activity finds no file, so the caller can skip it. Fork-free on purpose: a
+# real state copy held 532 such records, and the 3-4 subshells each cost ~37 s of a 71 s export.
+_osrc_hub_lane_absent() {
+  local id="$1" f
+  [ -e "$OSRC_HOME/remote/$id.json" ] || [ -d "$OSRC_JOBS/$id" ] && return 1
+  [ -e "$OSRC_HOME/autodetach/$id.log" ] || [ -e "$OSRC_HOME/autodetach/$id.rc" ] && return 1
+  for f in "$OSRC_HOME/review/items/$id"-*.json; do [ -e "$f" ] && return 1; done
+  # Only the export's memoised tmux list answers without a fork; without it, never claim absent.
+  [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/tmux" ] || return 1
+  _osrc_hub_tmux_row "$id" >/dev/null 2>&1 && return 1
+  return 0
+}
+
 # _osrc_hub_lane_for_raw <id> <rmap> -> lane json: remote -> job -> session -> fallback (named by lib/hub-lanename.sh).
 _osrc_hub_lane_for_raw() {
   local id="$1" rmap="$2"
@@ -288,6 +303,7 @@ _osrc_hub_build_project() {
     for t in "$sid_dir"/*; do
       [ -f "$t" ] || continue
       case "${t##*/}" in .*|watch.*) continue ;; esac   # watch.*: a supervise --watch, not a lane
+      _osrc_hub_lane_absent "${t##*/}" && continue   # nothing left of it: no row, no activity
       lane="$(_osrc_hub_lane_for "${t##*/}" "$rmap")"
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.for"
       [ -n "$lane" ] && type _osrc_hub_lane_live_fields >/dev/null 2>&1 && lane="$(_osrc_hub_lane_live_fields "$lane")"   # state + times
