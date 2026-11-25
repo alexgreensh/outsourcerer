@@ -86,3 +86,22 @@ Base confirmed: `git log --oneline -3` showed `f0ab993` (r2 tip). Fixes for the 
 - `lib/review.sh` owner: line 98 now reads `.poll_branch // .branch` (one line, changed here because the brief requires that review never points at a missing branch). Please keep it.
 - Six conformance suites fail when run as root (see above). Their owners should skip or adapt the permission cases under uid 0.
 - Unchanged from round 2: some watchsvc/signal/tick suite writes `alive` files into the repo root. It should use `mktemp` under `$TMPDIR`.
+
+## Round 4
+
+Base confirmed: `git log --oneline -3` showed `ff0a770` (r3 READY). Six small fixes for the Fable review of round 3; r3 marker files removed (P3-7). Work pushed on the session-assigned branch `claude/osrc-l7-remote-r4-fixes-8vwcb1`, not `cloud/osrc-l7-remote-r4`.
+
+- **P2-1** `_osrc_lane_alt_branch` returns `.poll_branch` when it is a `claude/` branch; a fresh lane tries the launch-log name before the remote list (this also drops the gh path to two calls per poll once a branch is followed). Test: lane follows `claude/alt1-Xk3Q`, `claude/alt1-AAA-new` is pushed, lane is not flipped to deleted. Fails on base.
+- **P2-2** cleanup offers a lane only when its verdict is BLOCK or its review item closed as merged, and never when `branch_deleted=true`. Tests: not offered for READY, deleted, or MERGE-unmerged; offered for BLOCK. 3 assertions fail on base.
+- **P3-3** `..` segment rejected under home; Windows `users` and both greps are case-insensitive. Test: `/home/<user>/../bob/<f>` and `c:\users\bob\x` blocked. Fails on base.
+- **P3-4** deleted / auth / rate / stalled events name `.poll_branch // .branch`.
+- **P3-5** narrowed (launch-log name tried first); the `lane rm` gap from round 3 remains.
+- **P3-6** test hygiene: verdict stub runs in subshells; the t-l6 done check uses a scratch copy of the script and registry; the vacuous `$HOME/` case is deleted.
+- **P3-8** the six vehicle probes use `grep … <<<"$out"`.
+
+### Tests (run here, niced, from `scripts/`)
+- `test_lane_status.sh` 27 passed rc=0 (base libs: 4 failures). `test_cloudrun.sh` 133 passed rc=0 (base libs: 1 failure). Other suites and conformance: see the RESULT file.
+- Net lines: +10 overall (two regression tests cost more than the fixes saved); the lib code alone is +4. Not zero, stated honestly.
+
+## Needs from other lanes
+- None new.

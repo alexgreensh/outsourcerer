@@ -1,6 +1,0 @@
-sha=f0ab9935b26923800a411d01acec27999b3931e6
-rc=0
-Work head (all code, tests, report): 2f151f048d4a363c32bb34993493b1c3d2812ff9 on cloud/osrc-l7-remote-r3; the next commit only adds these two marker files.
-Fixed P1-1, P2-2..5, P3-6..12 and the Windows placeholder paths. Lane-status 25/25 rc=0, cloudrun 133/133 rc=0, remote_review 106 rc=0, cleanup_manifest 66 rc=0, done_contract 53 rc=0.
-Conformance run once at the end: rc=1, 242 passed, 6 failed. All six also failed on the base in this root container (see reports/osrc-l7-remote.md, Round 3).
-Strip these marker files before merging to main.

@@ -161,10 +161,11 @@ _cloudrun_path_generic() {
   local t="${1//\\//}" rest seg first ph=0
   case "$t" in
     '~/'*) rest="${t#'~/'}" ;;
-    /Users/*|/home/*|[A-Za-z]:/Users/*) rest="${t#*/*/}"; seg="${rest%%/*}"; rest="${rest#*/}"
+    /Users/*|/home/*|[A-Za-z]:/[Uu][Ss][Ee][Rr][Ss]/*) rest="${t#*/*/}"; seg="${rest%%/*}"; rest="${rest#*/}"
       case "$seg" in \<*\>) ph=1 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
   esac
+  case "/$rest/" in */../*) return 1 ;; esac
   first="${rest%%/*}"
   case "$first" in ''|\<*\>|.?*|AppData|Library) ;; *) return 1 ;; esac
   local IFS=/
@@ -180,11 +181,11 @@ _cloudrun_private_check() {
     [ -n "$line" ] || continue
     bad=0
     if [ -n "$HOME" ] && grep -qF -- "$HOME" <<<"$line"; then bad=1
-    elif grep -qE '/Users/|/home/|~/|[A-Za-z]:[\\/]Users[\\/]' <<<"$line"; then
+    elif grep -qiE '/Users/|/home/|~/|[A-Za-z]:[\\/]Users[\\/]' <<<"$line"; then
       while IFS= read -r tok; do
         [ -n "$tok" ] || continue
         _cloudrun_path_generic "$tok" || bad=1
-      done < <(grep -oE '([A-Za-z]:[\\/]Users[\\/]|/Users/|/home/|~/)[^[:space:]`"'"'"'),;]*' <<<"$line")
+      done < <(grep -oiE '([A-Za-z]:[\\/]Users[\\/]|/Users/|/home/|~/)[^[:space:]`"'"'"'),;]*' <<<"$line")
     fi
     if [ "$bad" = 1 ]; then
       printf 'PRIVATE PATH: pack contains a machine-local path the cloud box cannot see: %s\n' "$(printf '%s' "$line" | cut -c1-160)" >&2
@@ -271,27 +272,27 @@ _cloudrun_vehicle_ok() {
     claude)
       have claude || { echo "claude CLI not on PATH" >&2; return 1; }
       local cli="${3-$(_cloudrun_claude_path)}"
-      out="$("$cli" --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
+      out="$("$cli" --help 2>/dev/null)"; grep -q -- '--cloud' <<<"$out" \
         || { echo "claude has no --cloud flag" >&2; return 1; }
       if have jq; then
         [ "$("$cli" auth status 2>/dev/null | jq -r '.loggedIn // false' 2>/dev/null)" = "true" ] \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       else
-        out="$("$cli" auth status 2>/dev/null)"; printf '%s' "$out" | grep -q '"loggedIn": *true' \
+        out="$("$cli" auth status 2>/dev/null)"; grep -q '"loggedIn": *true' <<<"$out" \
           || { echo "claude not signed in (claude auth login)" >&2; return 1; }
       fi ;;
     devin)
       have devin || { echo "devin CLI not on PATH" >&2; return 1; }
-      out="$(devin --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--cloud' \
+      out="$(devin --help 2>/dev/null)"; grep -q -- '--cloud' <<<"$out" \
         || { echo "devin has no --cloud flag" >&2; return 1; }
-      out="$(devin auth status 2>/dev/null)"; printf '%s' "$out" | grep -qi 'Logged in' \
+      out="$(devin auth status 2>/dev/null)"; grep -qi 'Logged in' <<<"$out" \
         || { echo "devin not signed in (devin auth login)" >&2; return 1; } ;;
     codex)
       have codex || { echo "codex CLI not on PATH" >&2; return 1; }
-      out="$(codex cloud exec --help 2>/dev/null)"; printf '%s' "$out" | grep -q -- '--env' \
+      out="$(codex cloud exec --help 2>/dev/null)"; grep -q -- '--env' <<<"$out" \
         || { echo "codex cloud exec has no --env (EXPERIMENTAL surface changed)" >&2; return 1; }
       [ -n "$env" ] || { echo "codex cloud needs an environment id (--env or OSRC_CODEX_CLOUD_ENV; see 'codex cloud')" >&2; return 1; }
-      out="$(codex login status 2>/dev/null)"; printf '%s' "$out" | grep -qi 'logged in' \
+      out="$(codex login status 2>/dev/null)"; grep -qi 'logged in' <<<"$out" \
         || { echo "codex not signed in (codex login)" >&2; return 1; } ;;
     *) echo "unknown vehicle '$v' (claude|devin|codex)" >&2; return 1 ;;
   esac

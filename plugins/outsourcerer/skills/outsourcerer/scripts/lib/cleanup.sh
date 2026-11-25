@@ -410,14 +410,16 @@ _osrc_human_kb() { # <kb> -> "1.2G" style
 }
 
 # Remote lane branches: never deleted here (the remote is the user's); offered with the exact command,
-# and only for lanes that are finished (done or failed): a live lane's branches are never offered.
+# and only for a finished lane whose work is merged or rejected (BLOCK): a live lane's branches are never offered.
 # A cloud session may push only to its own claude/<id>-<suffix> branch (.poll_branch), offered too.
 _osrc_cleanup_remote_branches() {
-  local f id url br names alt
+  local f id url br names alt head
   for f in "$OSRC_HOME"/remote/*.json; do
     [ -f "$f" ] || continue
     id="$(basename "$f" .json)"; br="$(jq -r '.branch // ""' "$f" 2>/dev/null)"; [ -n "$br" ] || continue
     case "$(osrc_remote_state "$id" 2>/dev/null)" in done|failed) ;; *) continue ;; esac
+    [ "$(jq -r '.branch_deleted' "$f")" != true ] || continue; head="$(jq -r '.head // ""' "$f")"   # gone: nothing to delete
+    [ "$(_osrc_review_verdict_for "$id" "$head" 2>/dev/null)" = BLOCK ] || _osrc_review_item_closed_merged "$id" "$head" 2>/dev/null || continue
     names="$br"
     alt="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"; [ -z "$alt" ] || [ "$alt" = "$br" ] || names="$names $alt"
     url="$(jq -r 'if .transport=="gh" then "https://github.com/" + .url + ".git" else .url end' "$f" 2>/dev/null)"

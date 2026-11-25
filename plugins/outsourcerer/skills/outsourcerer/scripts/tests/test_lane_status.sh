@@ -109,15 +109,20 @@ git -C "$W" push -q "$O" HEAD:refs/heads/claude/alt3-k2 && git -C "$W" push -q "
 [ "$(jq -r .branch_deleted "$OSRC_HOME/remote/alt3.json")" = true ] && [ "$(jq -r .poll_branch "$OSRC_HOME/remote/alt3.json")" = cloud/alt3 ] \
   && ok "deleted lane branch is reported, not silently swapped" || bad "deleted branch swapped: $(jq -c . "$OSRC_HOME/remote/alt3.json")"
 
-# Round 3 (P3-8): cleanup offers only finished lanes, and only their recorded branches.
+# Round 4 (P2-1): a followed session branch stays followed when a second claude/<id>-* branch sorts first.
+git -C "$W" push -q "$O" HEAD:refs/heads/claude/alt1-AAA-new; cmd_lane poll alt1
+[ "$(jq -r .poll_branch "$OSRC_HOME/remote/alt1.json")" = claude/alt1-Xk3Q ] && [ "$(jq -r .branch_deleted "$OSRC_HOME/remote/alt1.json")" = false ] \
+  && ok "followed branch kept when another claude/<id>-* sorts first" || bad "followed lane flipped: $(jq -c . "$OSRC_HOME/remote/alt1.json")"
+
+# Round 4 (P2-2): cleanup offers only merged or BLOCKed work, never a live lane, never a deleted branch.
 out="$(_osrc_cleanup_remote_branches)"
 grep -q 'lane alt1 ' <<<"$out" && bad "cleanup offered a READY (unfinished) lane: $out" || ok "cleanup never offers an unfinished lane"
-grep -q 'lane alt3 .*delete cloud/alt3$' <<<"$out" && ok "cleanup offers a failed lane's own branch" || bad "cleanup offer: $out"
-_osrc_review_verdict_for() { echo MERGE; }
+grep -q 'lane alt3 ' <<<"$out" && bad "cleanup offered a branch-deleted lane: $out" || ok "cleanup skips a lane whose branch is gone"
 mkdir -p "$OSRC_HOME/cloud"; printf 'pushed to claude/alt1-Zz9.\n' > "$OSRC_HOME/cloud/alt1.launch.log"
-out="$(_osrc_cleanup_remote_branches)"
-grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers a done lane's claude/<id>-* branch, nothing from the log" || bad "cleanup offer: $out"
-unset -f _osrc_review_verdict_for
+out="$( _osrc_review_verdict_for() { echo MERGE; }; _osrc_cleanup_remote_branches)"
+grep -q 'lane alt1 ' <<<"$out" && bad "cleanup offered approved-but-unmerged work: $out" || ok "cleanup keeps a MERGE verdict that has not landed"
+out="$( _osrc_review_verdict_for() { echo BLOCK; }; _osrc_cleanup_remote_branches)"
+grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q$' <<<"$out" && ok "cleanup offers a rejected lane's branches, nothing from the log" || bad "cleanup offer: $out"
 
 # Round 3 (P2-5): the gh transport finds the session branch via matching-refs, and drops a longer lane's.
 rm -f "$GH_ERR"; printf 'gh: No commit found for SHA: cloud/g1 (HTTP 422)\n' > "$GH_ERR"

@@ -267,14 +267,15 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
 # (the remote, else the name in the launch log), or nothing. Ownership is exact: a branch that a
 # longer registered lane id also names (lane `a` vs `a-r2` and claude/a-r2-x) is never adopted.
 _osrc_lane_alt_branch() {
-  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" c cands=""
+  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" c cands="" pb
+  pb="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"
+  case "$pb" in claude/*) printf '%s' "$pb"; return 0 ;; esac
+  cands="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"   # launch-log name first
   if [ "$transport" = gh ]; then
-    ! have gh || cands="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[].ref' 2>/dev/null)"
+    ! have gh || cands="$cands $(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[].ref' 2>/dev/null)"
   else
-    cands="$(printf '%s\n' "$lsout" | awk '{print $2}')"
+    cands="$cands $(printf '%s\n' "$lsout" | awk '{print $2}')"
   fi
-  cands="$cands
-$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
   for c in $cands; do
     c="${c#refs/heads/}"; c="${c%.}"   # a log line may end the name with prose punctuation
     _osrc_lane_owns_branch "$id" "$c" && { printf '%s' "$c"; return 0; }
@@ -431,14 +432,14 @@ osrc_remote_events() {
     if [ "$errn" -gt 0 ] && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
       if _osrc_ev_due "$id" "pollerr:$errk" "$renotify"; then
         case "$errk" in
-          auth) _osrc_emit failed "$id" "gh/git auth failure polling $(jq -r .branch "$f"): $(jq -r .err_msg "$f")" "gh auth status" ;;
-          rate) _osrc_emit failed "$id" "rate limited polling $(jq -r .branch "$f"): $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
+          auth) _osrc_emit failed "$id" "gh/git auth failure polling $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .err_msg "$f")" "gh auth status" ;;
+          rate) _osrc_emit failed "$id" "rate limited polling $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
           *) _osrc_emit failed "$id" "polling failed ${errn}x ($errk): $(jq -r .err_msg "$f")" "$(_osrc_self) lane poll $id" ;;
         esac
       fi
     fi
     if [ "$(jq -r '.branch_deleted' "$f")" = true ] && _osrc_ev_due "$id" deleted "$renotify"; then
-      _osrc_emit failed "$id" "branch $(jq -r .branch "$f") was deleted from the remote" "$(_osrc_self) lane show $id"
+      _osrc_emit failed "$id" "branch $(jq -r '.poll_branch // .branch' "$f") was deleted from the remote" "$(_osrc_self) lane show $id"
     fi
     if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.state // ""' "$f")" = done ] \
        && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
@@ -470,7 +471,7 @@ osrc_remote_events() {
        && { [ -n "$head" ] || [ "$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")" -le 0 ]; }; then
       last_move="$(_osrc_lane_last_move "$id" "$f")"
       if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "$id" stalled "$stall"; then
-        _osrc_emit stalled "$id" "no push on $(jq -r .branch "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id" "$last_move"
+        _osrc_emit stalled "$id" "no push on $(jq -r '.poll_branch // .branch' "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id" "$last_move"
       fi
     fi
   done

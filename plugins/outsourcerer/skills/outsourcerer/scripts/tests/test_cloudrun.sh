@@ -292,12 +292,12 @@ git -C "$WORK" checkout -q main
 
 # Round 2: generic placeholder paths pass the private check; real paths stay blocked.
 pc() { printf '%s\n' "$1" > "$TMP/pc.md"; _cloudrun_private_check "$TMP/pc.md" 2>/dev/null; }
-pc 'Copy from $HOME/.claude/plugins/cache/<plugin>/ here' && pc 'see ~/.claude/plugins/cache/<plugin>/x' && pc 'under /home/<user>/.config/<app>/' \
+pc 'see ~/.claude/plugins/cache/<plugin>/x' && pc 'under /home/<user>/.config/<app>/' \
   && ok "placeholder paths are allowed" || bad "placeholder path rejected"
 ! pc 'read ~/notes.md' && ! pc 'at /Users/bob/plan.md' && ! pc 'at /home/bob/<x>/y' && ! pc 'a ~/.claude/real/path' \
   && ok "real paths still blocked" || bad "a real path slipped through"
 # Round 3: every user-specific segment must be a placeholder; Windows home paths follow the same rule.
-! pc 'see ~/clients/acme-corp/<file>' && ! pc 'at /home/<user>/clients/acme/<f>' \
+! pc 'see /home/<user>/../bob/<f>' && ! pc 'see c:\users\bob\x' && ! pc 'see ~/clients/acme-corp/<file>' && ! pc 'at /home/<user>/clients/acme/<f>' \
   && ok "one placeholder does not excuse a literal folder under home" || bad "literal home folder passed"
 pc 'open C:\Users\<user>\<project>\README.md' && pc 'in C:/Users/<user>/AppData/Roaming/<app>/' && pc 'see ~/<repo>/src' \
   && ok "invented Windows and home template paths are allowed" || bad "a template path was rejected"
@@ -640,9 +640,10 @@ done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^ch
 # (run from the checkout, as the done contract does: the fetch URL may be relative).
 git -C "$WORK" checkout -q -b sess-r3 && printf 'READY t-l6\n' > "$WORK/t-l6.READY" && git -C "$WORK" add t-l6.READY \
   && git -C "$WORK" commit -q -m "t-l6 READY" && git -C "$WORK" push -q origin HEAD:refs/heads/claude/t-l6-Qx1 && git -C "$WORK" checkout -q main
-mkdir -p "$OSRC_HOME/remote"; printf '{"poll_branch":"claude/t-l6-Qx1"}\n' > "$OSRC_HOME/remote/t-l6.json"
-[ -n "$done_script" ] && (cd "$WORK" && bash "$done_script") && ok "done contract: READY on the followed session branch passes" || bad "done check cannot see the session branch"
-rm -f "$OSRC_HOME/remote/t-l6.json"
+_s="$(mktemp -d)"; mkdir -p "$_s/remote"; printf '{"poll_branch":"claude/t-l6-Qx1"}\n' > "$_s/remote/t-l6.json"
+sed "s#$OSRC_HOME/remote/#$_s/remote/#g" "$done_script" > "$_s/check.sh"   # scratch registry: the launched lane's own json stays untouched
+[ -n "$done_script" ] && (cd "$WORK" && bash "$_s/check.sh") && ok "done contract: READY on the followed session branch passes" || bad "done check cannot see the session branch"
+rm -rf "$_s"
 
 # Both helpers present: real lane registry and done contract, not stubs.
 out="$(start_cloud t-real --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
