@@ -1,0 +1,10 @@
+Booting worker node 7
+connected to queue gamma
+claiming shard 12 of 48
+⠋ Pondering the next move… (esc to interrupt · 14s)
+──────────────────────────────
+model: fast-lane | ctx 44% | tok 12k
+uptime 03:12 | load 0.42
+jobs 3 running · 1 queued
+mem 61% · disk 22%
+net ok · lat 12ms

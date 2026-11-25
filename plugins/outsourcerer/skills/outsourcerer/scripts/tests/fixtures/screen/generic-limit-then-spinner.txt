@@ -1,0 +1,3 @@
+$ worker --sync
+⚠ Rate limit exceeded. Try again in 30s
+⠋ Syncing… (esc to interrupt)

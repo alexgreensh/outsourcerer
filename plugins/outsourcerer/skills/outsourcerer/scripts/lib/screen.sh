@@ -7,7 +7,7 @@
 # orchestrator's own typed text matched as "DONE", and a C-locale shell never matched a box glyph.
 # This module is the single owner of that job. Callers ask `osrc_screen_state <pane> [engine]`.
 #
-#   osrc_screen_state <pane> [engine]   -> line 1: approval|question|working|idle|composer|unknown
+#   osrc_screen_state <pane> [engine]   -> line 1: approval|question|working|idle|composer|unknown|limit|dead
 #                                          line 2: evidence (one line)
 #   osrc_screen_report <pane> [engine]  -> KEY=value lines (state, engine, pending command, ...)
 #   _osrc_screen_analyze_text [engine]  -> same analysis on text read from STDIN (fixtures, logs)
@@ -20,6 +20,10 @@
 #   idle      the composer is ready and a turn has finished since the last prompt
 #   composer  the composer is ready and no turn has finished (fresh boot), OR it holds text that
 #             was typed and never submitted (evidence says which)
+#   limit     the engine's own rate-limit / quota banner sits in the bottom status region: the
+#             provider is parked until a stated reset, whatever the composer shows
+#   dead      pane-level only (never from analyze_text): tmux proves the pane's process exited
+#             but its last frame is still held (remain-on-exit), so the capture is a corpse
 #   unknown   none of the above could be proven
 #
 # Design rules (each one is a failure that happened):
@@ -157,8 +161,10 @@ _osrc_scr_reset() {
   OSRC_SCR_STATE=unknown; OSRC_SCR_EVIDENCE="no recognized signal"; OSRC_SCR_ENGINE=""
   OSRC_SCR_KIND=""; OSRC_SCR_CMD=""; OSRC_SCR_PATH=""; OSRC_SCR_SEL=""; OSRC_SCR_SCOPE=""
   OSRC_SCR_COMPOSER=""; OSRC_SCR_COMPOSER_FOUND=0; OSRC_SCR_HIST_END=-1; OSRC_SCR_GENERIC=0
+  OSRC_SCR_LIMIT_DETAIL=""; OSRC_SCR_LIMIT_AT=-1; OSRC_SCR_PANE_DEAD=""; OSRC_SCR_AT=-1
 }
-_osrc_scr_set() { OSRC_SCR_STATE="$1"; OSRC_SCR_EVIDENCE="$(_osrc_scr_trim "$2")"; }
+# <state> <evidence> [row]: row = index of the line that proved the state (-1 = not one line)
+_osrc_scr_set() { OSRC_SCR_STATE="$1"; OSRC_SCR_EVIDENCE="$(_osrc_scr_trim "$2")"; OSRC_SCR_AT="${3:--1}"; }
 
 # Composer box: the last pair of rules with only status rows (<= max_after lines) below it. Sets
 # OSRC_SCR_COMPOSER (typed text, placeholder removed), OSRC_SCR_COMPOSER_FOUND, OSRC_SCR_HIST_END
@@ -271,9 +277,9 @@ _osrc_scr_after_composer() { # <user-line-glob> <assistant-glob>
   while [ "$i" -ge "$lo" ]; do
     l="${_SCR_L[$i]}"
     case "$l" in
-      *"esc to interrupt"*|*"esc twice to interrupt"*) _osrc_scr_set working "$l"; return 0 ;;
+      *"esc to interrupt"*|*"esc twice to interrupt"*) _osrc_scr_set working "$l" "$i"; return 0 ;;
       *" for "[0-9]*"s · done"*|*" for "[0-9]*"m · done"*|*" for "[0-9]*"h "*"done"*) break ;;
-      *"… ("*|*"…") case "$l" in "⎿"*|" "*) ;; *) _osrc_scr_set working "$l"; return 0 ;; esac ;;
+      *"… ("*|*"…") case "$l" in "⎿"*|" "*) ;; *) _osrc_scr_set working "$l" "$i"; return 0 ;; esac ;;
     esac
     i=$((i - 1))
   done
@@ -327,7 +333,7 @@ $l"; else case "$l" in "\$ "?*) c="${l#\$ }" ;; esac; fi
   if [ -n "$c" ]; then _osrc_scr_set composer "composer holds unsent text: $(printf '%s' "$c" | cut -c1-80)"; return 0; fi
   j=$((i - 1))
   while [ "$j" -ge $((i - 6)) ] && [ "$j" -ge 0 ]; do
-    case "${_SCR_L[$j]}" in *"esc to interrupt"*|"• Working ("*) _osrc_scr_set working "${_SCR_L[$j]}"; return 0 ;; esac
+    case "${_SCR_L[$j]}" in *"esc to interrupt"*|"• Working ("*) _osrc_scr_set working "${_SCR_L[$j]}" "$j"; return 0 ;; esac
     j=$((j - 1))
   done
   local u d q
@@ -371,11 +377,10 @@ _osrc_scr_devin() {
     _osrc_scr_set approval "devin approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD:-$OSRC_SCR_PATH}"; return 0
   fi
   _osrc_scr_composer_box "❭" 3 || { _osrc_scr_generic; return 0; }
-  case "$OSRC_SCR_COMPOSER" in "") ;; esac
   i=$((OSRC_SCR_HIST_END + 2))
-  case "${_SCR_L[$i]}" in *"Guide Devin while it works"*) [ -z "$OSRC_SCR_COMPOSER" ] && { _osrc_scr_set working "${_SCR_L[$i]}"; return 0; } ;; esac
+  case "${_SCR_L[$i]}" in *"Guide Devin while it works"*) [ -z "$OSRC_SCR_COMPOSER" ] && { _osrc_scr_set working "${_SCR_L[$i]}" "$i"; return 0; } ;; esac
   i="$(_osrc_scr_last "*esc twice to interrupt*" $((OSRC_SCR_HIST_END - 4 > 0 ? OSRC_SCR_HIST_END - 4 : 0)) "$OSRC_SCR_HIST_END")"
-  [ "$i" -ge 0 ] && [ -z "$OSRC_SCR_COMPOSER" ] && { _osrc_scr_set working "${_SCR_L[$i]}"; return 0; }
+  [ "$i" -ge 0 ] && [ -z "$OSRC_SCR_COMPOSER" ] && { _osrc_scr_set working "${_SCR_L[$i]}" "$i"; return 0; }
   _osrc_scr_after_composer "❭ *" " ⏺ *"
 }
 
@@ -409,7 +414,7 @@ _osrc_scr_agy() {
   fi
   _osrc_scr_composer_box ">" 3 || { _osrc_scr_generic; return 0; }
   if [ -z "$OSRC_SCR_COMPOSER" ] && _osrc_scr_any "esc to cancel*" $((n - 1)); then
-    _osrc_scr_set working "agy footer: esc to cancel (turn in progress)"; return 0
+    _osrc_scr_set working "agy footer: esc to cancel (turn in progress)" $((n - 1)); return 0
   fi
   _osrc_scr_after_composer "> *" "  *"
 }
@@ -458,16 +463,85 @@ _osrc_scr_generic() {
   fi
   i="$(_osrc_scr_last "*Press enter to confirm or esc to cancel*" $((n - 2 > 0 ? n - 2 : 0)))"
   if [ "$i" -ge 0 ]; then OSRC_SCR_KIND=other; _osrc_scr_set approval "${_SCR_L[$i]}"; return 0; fi
-  lo=$((n - 3)); [ "$lo" -ge 0 ] || lo=0
-  i="$n"
-  while [ "$i" -gt "$lo" ]; do
-    i=$((i - 1)); l="${_SCR_L[$i]}"
-    case "$l" in
-      *"esc to interrupt"*|*"esc twice to interrupt"*|*"Thinking"*|*"Running"*|*"⠋"*|*"⠙"*|*"⠹"*|*"⠸"*|*"⠼"*|*"⠴"*|*"⠦"*|*"⠧"*|*"⠇"*|*"⠏"*) _osrc_scr_set working "$l"; return 0 ;;
-    esac
+  # Busy only from the engine's own indicator, in the bottom status region (no rule: the last 4 rows).
+  local b=-1 t lo=$((n - 4)) near=$((n - 2))   # no rule: a busy row outranks a shell prompt only in the last 2 rows
+  _osrc_scr_bottom && { lo=$((OSRC_SCR_BOTTOM - 1)); near=$((n - 3)); }; i=$((n - 1))
+  while [ "$i" -ge "$lo" ] && [ "$i" -ge 0 ]; do
+    l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
+    case "$t" in *"· done"*|*"Worked for"*) break ;; esac
+    if _osrc_scr_busy_row "$t"; then b=$i; break; fi
+    i=$((i - 1))
   done
+  if [ "$b" -ge 0 ] && [ "$b" -ge "$near" ]; then _osrc_scr_set working "${_SCR_L[$b]}" "$b"; return 0; fi
   case "$last" in *'$'|*'$ '|*'%'|*'% '|*'>'|*'> '|*'❯'|*'❯ '|*'#') _osrc_scr_set idle "$last"; return 0 ;; esac
+  if [ "$b" -ge 0 ]; then _osrc_scr_set working "${_SCR_L[$b]}" "$b"; return 0; fi
   _osrc_scr_set unknown "no recognized signal in tail"
+}
+
+# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last 12 rows (rows
+# under it are footer, even if they are output), else the last row and rc 1.
+_osrc_scr_bottom() {
+  local i=$((_SCR_N - 1)) l; OSRC_SCR_BOTTOM=$((_SCR_N - 1))
+  while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - 12)) ]; do
+    l="${_SCR_L[$i]}"; l="${l#"${l%%[! ]*}"}"
+    case "$l" in "──"*|">"|"❯"|"›") OSRC_SCR_BOTTOM=$((i - 1)); return 0 ;; esac
+    i=$((i - 1))
+  done
+  return 1
+}
+
+# 0 for a busy indicator: an interrupt hint ENDING the row ("(esc to interrupt · 14s)"), "Working (",
+# braille spinner + a word, or spinner frame + a word + "…"/"...". A bullet (● ⏺ •) is no spinner.
+_osrc_scr_busy_row() { # <row>
+  local t="${1#[[]}"   # one leading bracket allowed: "[⠋] Compiling crate 12/40"
+  case "$t" in
+    *"("*"to interrupt)"|*"("*"to interrupt · "*")"|*"· "*"to interrupt"|"Working ("*) return 0 ;;
+    "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*|"⣻"*|"⣽"*|"⣟"*|"⡿"*|"⢿"*|"⣷"*|"⣯"*|"⠿"*|"⢰"*)
+      case "$t" in *[A-Za-z]*) return 0 ;; esac ;;
+    "✢"*|"✶"*|"✳"*|"✻"*|"✽"*|"◐"*|"◓"*|"◑"*|"◒"*)
+      case "$t" in *[A-Za-z]*…*|*[A-Za-z]*"..."*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# ---- rate limits / quota -------------------------------------------------------------------------
+# `limit` comes only from the engine's banner, a WHOLE row: a column-0 row or Claude's `⎿` "limit
+# reached" row that is the last content row or sits above one plain trailer (agy's `Error ID:`,
+# Claude's `/upgrade ...`), whatever is above it. A prompt, glyph or tool row below it = history.
+_OSRC_SCR_LIMIT_RE="^((⎿|⚠|⛔|✖|■)[[:space:]]+)?(error:[[:space:]]+)?(claude( ai)? usage limit reached|you('|’)?ve hit your (usage )?limit|individual quota reached|rate limited|([0-9]+-hour|weekly|opus weekly|sonnet weekly|session|plan usage|usage|rate) limit (reached|exceeded))([.!]?[[:space:]]*(·|∙|\|)?[[:space:]]*(your (limit|quota)( will)? resets?|resets?|try again|retrying|please upgrade)([[:space:]].*)?)?[.!]?$"
+_osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status region holds the engine's limit banner
+  local end i l t tl bi="" phrase="" secs="" clk
+  if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom || :; end="$OSRC_SCR_BOTTOM"; fi
+  for i in "$end" $((end - 1)); do
+    [ "$i" -ge 0 ] || return 1
+    if [ "$i" -lt "$end" ]; then   # the row below must be a plain trailer, not a prompt, glyph or tool row
+      case "${_SCR_L[$end]}" in *'$'|*'%'|*'#'|*'>') return 1 ;; [A-Za-z" "]*) ;; *) return 1 ;; esac
+    fi
+    l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
+    case "$l" in
+      "⎿"*|" ⎿"*|"  ⎿"*) case "$t" in *"⎿"*[Ee]"rror:"*) continue ;; *[Ll]"imit reached"*|*"hit your"*[Ll]"imit"*) ;; *) continue ;; esac ;;   # Error: = a tool's output
+      " "*) continue ;;
+    esac
+    case "$t" in *[Ll][Ii][Mm][Ii][Tt]*|*[Qq][Uu][Oo][Tt][Aa]*) ;; *) continue ;; esac   # cheap gate before the fork
+    tl="$(printf '%s' "$t" | tr 'A-Z' 'a-z')"
+    if [[ $tl =~ $_OSRC_SCR_LIMIT_RE ]]; then bi="$i"; break; fi
+  done
+  [ -n "$bi" ] || return 1
+  # The reset the banner states, kept whole ("Resets in 1h13m1s", "Try again at 22:28",
+  # "resets at 09:00 UTC", "reset at 3pm"), zone included; the match stops before punctuation.
+  clk='[0-9]{1,2}:[0-9]{2}([[:space:]]*[ap]m)?([[:space:]]*(utc|gmt))?|[0-9]{1,2}[[:space:]]*[ap]m([[:space:]]*(utc|gmt))?'
+  phrase="$(printf '%s\n' "$t" "${_SCR_L[$((bi + 1))]:-}" | LC_ALL=C grep -oiE \
+    "(resets?|refreshes|retry(ing)?|back ?off|try again)[[:space:]]+(in[[:space:]]+([0-9]+[[:space:]]*[a-z]+([[:space:]]*[0-9]+[[:space:]]*[a-z]+)*)|(at[[:space:]]+)?($clk))" | head -1)"
+  if [ -n "$phrase" ] && type _lane_limit_reset_secs >/dev/null 2>&1; then
+    # normalize the verb only: "Try again at 22:28" -> "resets at 22:28", "Resets 22:28" -> "resets at 22:28"
+    secs="$(_lane_limit_reset_secs "$(printf '%s' "$phrase" | tr 'A-Z' 'a-z' | sed -E 's/^(refreshes|retrying|retry|back ?off|try again|resets?)[[:space:]]+(in|at)?[[:space:]]*/resets \2 /; s/^resets  /resets at /')" 2>/dev/null)"
+    case "$secs" in ''|*[!0-9]*) secs="" ;; esac
+  fi
+  OSRC_SCR_LIMIT_AT="$bi"
+  # a relative reset's start is unknown here, so only a clock reset gets an epoch
+  case "$phrase" in *[Ii]n" "[0-9]*) ;; *) [ -n "$secs" ] && phrase="$phrase (epoch $(( $(date +%s) + secs )))" ;; esac
+  OSRC_SCR_LIMIT_DETAIL="$(printf '%s' "$t" | cut -c1-100)${phrase:+ · reset: $phrase}"
+  return 0
 }
 
 # 0 when <snippet> (whitespace-collapsed) appears in the history region above the composer.
@@ -513,6 +587,13 @@ _osrc_screen_analyze_text() { # [engine]
     gemini) _osrc_scr_gemini ;;
     *) _osrc_scr_generic ;;
   esac
+  # The limit banner outranks every quiet state (the composer can look ready while the provider is
+  # parked) and an OLDER busy row; a live approval/question and a newer busy row keep precedence.
+  case "$OSRC_SCR_STATE" in idle|composer|unknown|working)
+    if _osrc_scr_limit && { [ "$OSRC_SCR_STATE" != working ] || [ "$OSRC_SCR_LIMIT_AT" -gt "$OSRC_SCR_AT" ]; }; then
+      _osrc_scr_set limit "$OSRC_SCR_LIMIT_DETAIL" "$OSRC_SCR_LIMIT_AT"
+    fi ;;
+  esac
   return 0
 }
 
@@ -531,13 +612,27 @@ _osrc_screen_capture() { # <pane> -> raw ANSI capture; rc 2 when the pane cannot
   printf '%s\n' "$cap"
 }
 
+# Pane liveness: tmux keeps a dead pane's last frame on screen (remain-on-exit), so a successful
+# capture can still describe a corpse that will never change again. -> rc 0 proven dead | rc 1
+# proven alive | rc 2 cannot tell (no tmux, an old tmux without pane_dead, an odd answer). Only a
+# positive "1" counts as dead; everything else falls through to the normal screen verdict.
+_osrc_screen_pane_dead() { # <pane>
+  local d
+  d="$(tmux display-message -p -t "$1" '#{pane_dead}' 2>/dev/null)" || return 2
+  case "$(_osrc_scr_trim "$d")" in 1) return 0 ;; 0) return 1 ;; *) return 2 ;; esac
+}
+
 osrc_screen_state() { # <pane> [engine]
   local LC_ALL; LC_ALL="$(_osrc_utf8_locale)"; export LC_ALL
   local pane="$1" eng="${2:-}" cap
   [ -n "$eng" ] || eng="$(_osrc_screen_engine_of "$pane")"
   if ! cap="$(_osrc_screen_capture "$pane")"; then printf 'unknown\npane capture failed: %s\n' "$pane"; return 0; fi
   _osrc_screen_analyze_text "$eng" <<<"$cap"
-  printf '%s\n%s\n' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"
+  if _osrc_screen_pane_dead "$pane"; then
+    printf 'dead\npane process dead; last frame before exit: %s\n' "$OSRC_SCR_EVIDENCE"
+  else
+    printf '%s\n%s\n' "$OSRC_SCR_STATE" "$OSRC_SCR_EVIDENCE"
+  fi
 }
 
 osrc_screen_report() { # <pane> [engine] -> KEY=value lines (values are single-line; CMD newlines -> ' ; ')
@@ -546,17 +641,24 @@ osrc_screen_report() { # <pane> [engine] -> KEY=value lines (values are single-l
   [ -n "$eng" ] || eng="$(_osrc_screen_engine_of "$pane")"
   if ! cap="$(_osrc_screen_capture "$pane")"; then printf 'STATE=unknown\nEVIDENCE=pane capture failed\n'; return 0; fi
   _osrc_screen_analyze_text "$eng" <<<"$cap"
+  OSRC_SCR_PANE_DEAD=0; _osrc_screen_pane_dead "$pane" || OSRC_SCR_PANE_DEAD=$?   # set -e safe
+  case "$OSRC_SCR_PANE_DEAD" in 0) OSRC_SCR_PANE_DEAD=1; OSRC_SCR_STATE=dead
+    OSRC_SCR_EVIDENCE="pane process dead; last frame before exit: $OSRC_SCR_EVIDENCE" ;;
+    1) OSRC_SCR_PANE_DEAD=0 ;; *) OSRC_SCR_PANE_DEAD=? ;;
+  esac
   _osrc_screen_report_print
 }
 _osrc_screen_report_print() {
-  printf 'STATE=%s\nENGINE=%s\nEVIDENCE=%s\nKIND=%s\nCMD=%s\nPATH=%s\nSEL=%s\nSCOPE=%s\nCOMPOSER=%s\n' \
+  printf 'STATE=%s\nENGINE=%s\nEVIDENCE=%s\nKIND=%s\nCMD=%s\nPATH=%s\nSEL=%s\nSCOPE=%s\nCOMPOSER=%s\nPANE_DEAD=%s\n' \
     "$OSRC_SCR_STATE" "$OSRC_SCR_ENGINE" "$OSRC_SCR_EVIDENCE" "$OSRC_SCR_KIND" \
-    "$(printf '%s' "$OSRC_SCR_CMD" | awk 'NR>1{printf " ; "} {printf "%s", $0}')" "$OSRC_SCR_PATH" "$OSRC_SCR_SEL" "$OSRC_SCR_SCOPE" "$OSRC_SCR_COMPOSER"
+    "$(printf '%s' "$OSRC_SCR_CMD" | awk 'NR>1{printf " ; "} {printf "%s", $0}')" "$OSRC_SCR_PATH" "$OSRC_SCR_SEL" "$OSRC_SCR_SCOPE" "$OSRC_SCR_COMPOSER" "${OSRC_SCR_PANE_DEAD:-?}"
 }
 
 # ---- legacy JSON classifier (session read --state, control receipts) -----------------------------
 # Kept as the JSON face of the same reader so there is ONE set of rules. Mapping:
 #   approval|question -> waiting-approval, working -> working, idle|composer -> idle, else unknown.
+#   `limit` deliberately lands on unknown here: the legacy vocabulary has no "blocked on quota"
+#   value, and reporting `idle` would invite a send into a lane that cannot take a turn.
 _pane_state_json() { # <state> <evidence>  -> {"state","evidence"}
   local state="$1" evidence="$2"
   if have jq; then

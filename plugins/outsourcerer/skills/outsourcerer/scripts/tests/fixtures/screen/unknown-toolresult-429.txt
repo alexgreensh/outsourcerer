@@ -1,0 +1,5 @@
+⏺ Bash(curl -s https://example.invalid/status)
+  ⎿  HTTP 429 Too Many Requests
+──────────────────────────────
+lane: tool-check | ctx 9%
+status: idle

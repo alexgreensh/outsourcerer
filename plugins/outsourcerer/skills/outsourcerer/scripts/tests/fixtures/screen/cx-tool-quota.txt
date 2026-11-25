@@ -1,0 +1,7 @@
+› probe the api
+• Ran curl -s https://example.invalid/limits
+  └ HTTP/1.1 200 OK
+    Error: quota exceeded for project demo (sample payload)
+• The probe returned sample data; no change needed.
+› Ask Codex to do anything
+  ← for agents · ? for shortcuts

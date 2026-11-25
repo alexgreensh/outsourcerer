@@ -1,0 +1,6 @@
+› run the tests
+⚠ You've hit your usage limit. Try again at 22:28.
+• All 12 tests pass.
+  Worked for 3s • 10:02
+› Ask Codex to do anything
+  ← for agents · ? for shortcuts

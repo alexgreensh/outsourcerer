@@ -1,0 +1,4 @@
+scan complete: 1,204 files indexed
+resolving symbol graph
+⣻ Weaving the graph (3m elapsed)
+status: nominal

@@ -1,0 +1,10 @@
+❯ check the endpoint
+⏺ Bash(curl -si https://example.invalid/api)
+  ⎿  HTTP/1.1 200 OK
+     content-type: application/json
+     Error: rate limit exceeded (429) for key demo
+⏺ The endpoint answers; the 429 line above is sample text in the body.
+──────────────────────────────
+❯ 
+──────────────────────────────
+  ⏸ manual mode on

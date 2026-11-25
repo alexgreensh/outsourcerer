@@ -1,0 +1,4 @@
+› fix the parser
+• The handler now detects quota exceeded in API responses.
+› Ask Codex to do anything
+  ← for agents · ? for shortcuts

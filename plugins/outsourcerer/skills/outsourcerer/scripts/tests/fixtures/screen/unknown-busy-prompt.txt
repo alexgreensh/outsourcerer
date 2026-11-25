@@ -1,0 +1,5 @@
+⠋ Pondering the next move… (esc to interrupt · 14s)
+──────────────────────────────
+lane: prompt-check | ctx 9%
+build finished, shell ready
+$

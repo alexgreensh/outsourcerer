@@ -1,0 +1,9 @@
+⠋ Pondering the next move… (esc to interrupt · 14s)
+✻ Weaving for 3m 12s · done 14:22
+──────────────────────────────
+lane: weave-7 | ctx 12%
+status row alpha
+status row beta
+status row gamma
+status row delta
+status row epsilon

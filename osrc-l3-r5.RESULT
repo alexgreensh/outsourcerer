@@ -1,0 +1,4 @@
+sha=d88533083acff234581dc402a9a95819d11be1d8
+rc=1
+head=387692d60e3660c596e67054d61f489df74268eb (work head before this marker commit; base is the sha above)
+Claude limit = `⎿` limit-reached row that is the last content row; P2 2 footer window; busy hint must end the row. test_screen_alerts rc=0 70/70 (7 new cases fail on base). conformance.sh rc=1: 242 passed, 6 failed (uid-0 permission/process suites, same set as round 4 on base), 1 skipped.
