@@ -525,3 +525,60 @@ through `_ws_covers` and `_waited_ids`.
 Note on `osrc-l1-r4.RESULT`: the contract fixes its first line as `sha=86957d6…` (the pinned base),
 so it cannot carry this work's sha. The work is the branch head `cloud/osrc-l1-r4`; the last code
 commit is `d39f68c`.
+
+## Round 5
+
+Final round, for the Fable review of round 4 (`VERDICT: FIX`). Base `cloud/osrc-l1-r4` at
+`f85ee37` (confirmed with `git log --oneline -3`: `f85ee37`, `d39f68c`, `e89208e`). Paths are
+relative to `plugins/outsourcerer/skills/outsourcerer/scripts/`. The brief preferred deleting a
+mechanism to patching it, so the `--loop` cover rule was replaced rather than extended, and two dead
+helpers went. Net lib lines: `lib/supervise.sh` 846 → 845, `lib/watchsvc.sh` 433 → 433, total
+1279 → 1278. `outsourcerer.sh` is untouched (19004).
+
+### P2 findings
+
+| # | Fix | Regression test (`tests/test_watchsvc.sh`), fails on the base |
+| --- | --- | --- |
+| 1 | A `--loop` worker exits **20** after a delivered batch, and nowhere else. The parent re-arms on rc 20 alone and maps it to 0 on the way out. `EVENT done all`, a superseded exit (rc 0), the `MAX_SECS` exit and every error end the loop. The "owners dir not empty" check is gone: it is no longer needed. | "--loop ends on done all (no hot spin while a lane has no turn yet)": a session owning one lane that is never live and never dropped; base prints 19 `done all` lines in 8 s and is killed by the alarm. "two --loop arms and a plain supervise: each older one is superseded once and stays gone (no ping-pong)": loop A, then loop B, then plain C on one session; head: A and B each print `superseded` once and exit, C keeps running. Base: A and B both still alive, 5-6 `superseded` lines each, and C was superseded too. |
+| 2 | After its `while`, a loop that left because the launcher names another plugin copy (still installed, still holding the lock) releases the lock and `exec`s `watchsvc/launch`. That is the same pid, so it works on all three backends, and launchd/systemd see no exit. If the new copy is missing, the exec fails once with rc 127; the next call's `_ws_refresh` starts it again. | "a fallback loop whose launcher now names another plugin copy re-runs itself there": the same pid ends up running `plugin-v2/outsourcerer.sh watcher run` and holds the lock. Base: the loop exits and nothing runs. |
+| 3 | New `_ws_foreign <sid>`: the session's recorded tmux socket differs from the watcher's. Three places use it. (a) `_ws_channel` returns "no channel" first, whatever the channel, so `_ws_covers` (stop guard) and status follow. The tmux branch's own socket comparison is deleted. (b) `_ws_owner` skips the session, so it gets no wake, no `.wakefail` and no settle that drops markers. (c) `_sv_observe_all watcher` skips that owner's lanes, so no false gone/failed rows are logged for them. | "a session on another tmux server is skipped even with a delivery command (no rows, no wake, markers kept)", "and the stop guard does not count the watcher for it (it does once the session is on the watcher's server)". Base: delivered through `OSRC_WATCH_DELIVER_CMD`, and the guard trusted the watcher. |
+| 4 | `_ws_run` writes `alive` right after publishing its pid, and `_ws_tick` writes it as each tick starts. The end-of-tick stamp is gone. | "without ps -o a loop in its first (slow) tick is still known as the watcher (no rival)". Base: the starting loop is not recognised. |
+| 5 | `--loop` is a waiter only with a proven reader. The parent creates `supervise/<sid>/loop.<pid>` with an old mtime (`touch -t 200001010000`). The worker touches it after a batch was written while its stdout is a pipe or a terminal (`[ -p /dev/stdout ] \|\| [ -t 1 ]`). `_sv_armed_cover` ignores the loop worker's own `armed.<pid>` (the one beside `loop.<pid>`) and counts `loop.<pid>` only within `OSRC_SUPERVISE_HUNG` (600 s) of that touch. So output into a file (how an agent's background task is captured) never covers. A pipe whose reader died kills the worker with SIGPIPE, and a reader that stops reading blocks the write, so the stamp ages out. The `--help` header now says it is for wrapper scripts reading stdout, never an agent's background task. | "a --loop writing into a file (an agent's background task) never satisfies the stop guard", "a --loop into a pipe covers nothing before a batch went through it", "after a batch went into the pipe it covers the session", "and delivers batch after batch with no gap in between", "and stops covering once it exits". Base: the file-backed and the not-yet-read loops both covered. |
+
+### P3 findings
+
+| Item | Fix | Test (fails on the base) |
+| --- | --- | --- |
+| `--help` cut mid-sentence | `sed -n '2,/^$/p'`: prints the header up to its first blank line, so it cannot be cut again when the header grows | "supervise --help prints the whole header" |
+| restart fails a running delivery | `_ws_settle`: a live delivery pid is pending until its `rc` or the timeout, whoever started it. Only a fork recorded by THIS loop and proven by `_ws_ours` is ever signalled. A dead pid with no `rc` is a failed delivery, as before. | "a delivery an earlier loop started is pending while it runs, not failed"; the two round-4 "never signalled" tests still pass |
+| no test for how `--loop` ends | covered by the P2-1 tests above (ends on `done all`, on supersession, and on a signal) | as above |
+| `rmdir owners/<sid>` race | comment only, as suggested | n/a |
+| stale `limits/<id>.try` | `rm -f "$d/$t.try"` whenever a new banner's epoch is recorded | "a new limit banner does not inherit the old banner's backoff" |
+| RESULT carries the base sha | the contract fixes line 1 as `sha=f85ee37…` (the pinned base). The brief asks RESULT to name this lane's own head, so its summary names the code commit and says the RESULT commit is its child (a file cannot hold the sha of the commit that adds it). `rc=` is the exit code of a run I actually made. `osrc-l1-r4.READY`/`.RESULT` are deleted. | n/a |
+| glob `rm` of `loop.$$` on every supervise | `[ "$loop" = 0 ] \|\| rm -f "$OSRC_HOME/supervise/$sid/loop.$$"` | n/a |
+
+Deleted as dead code: `_sv_informational` (defined, never called) and `_ws_mtime` (one caller,
+inlined). The worker's `cp armed loop.$$` is gone; the parent now creates the loop file once.
+
+### Tests (round 5)
+
+All run from `plugins/outsourcerer/skills/outsourcerer/scripts/tests/`, one at a time, `nice`d:
+
+| Command | Head | Base `f85ee37` (separate worktree, the new test file copied in) |
+| --- | --- | --- |
+| `bash test_watchsvc.sh` | **rc 0, 102 passed, 0 failed** | rc 1, 91 passed, **11 failed**: exactly the 11 new round-5 tests |
+| `bash test_supervise.sh` | rc 0 | |
+| `bash test_supervise_dedupe.sh` | rc 0 | |
+| `bash test_supervise_lifecycle.sh` | rc 0 | |
+| `bash test_stall.sh` | rc 0 | |
+| `bash test_stop_guard.sh` | rc 0 | |
+| `bash test_heartbeat_arm_liveness.sh` | rc 0 | |
+| `bash test_supervise_pid_baseline.sh` | rc 0 | |
+| `bash test_supervise_pgroup_kill.sh` | rc 1 ("wedge: … SIGKILL did not take") | rc 1, same assertion: pre-existing in this container |
+| `python3 test_supervise_signal.py` / `test_supervise_auto.py` / `test_supervise_tick.py` | rc 0 / 0 / 0 | |
+
+One self-inflicted false failure while building: I first ran the base and head copies of
+`test_watchsvc.sh` at the same time. The suite uses machine-wide `pgrep`/`pkill -f` patterns, so the
+two runs disturbed each other. Every number above comes from runs made one at a time. A test-race
+in my first version of the P2-2 test (it read the lock before the re-run loop published its pid) is
+fixed in the test.

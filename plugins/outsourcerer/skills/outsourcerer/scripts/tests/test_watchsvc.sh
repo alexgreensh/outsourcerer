@@ -228,9 +228,9 @@ fresh 6b; mkdir -p "$OSRC_HOME/watchsvc"; printf '# script: %s\n' "$SRC" > "$OSR
 ln -s "$SCRIPT_DIR/.." "$TMP/plugin-v2"
 OSRC_WATCH_INTERVAL=1 "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1.5
 kill -0 "$d" 2>/dev/null || no "setup: loop did not start under its own launcher"
-S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; until { ps -o command= -p "$d" 2>/dev/null | grep -q 'plugin-v2/outsourcerer.sh watcher run' && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)" = "$d" ]; } || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
+S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; until { grep -q 'plugin-v2/outsourcerer.sh watcher run' <<<"$(ps -o command= -p "$d" 2>/dev/null)" && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)" = "$d" ]; } || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
 p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"
-[ "$p" = "$d" ] && ps -o command= -p "$d" | grep -q 'plugin-v2/outsourcerer.sh watcher run' && ok "a fallback loop whose launcher now names another plugin copy re-runs itself there (nobody has to restart it)" || no "repointed loop not running on the new copy [pid $p: $(ps -o command= -p "$d" 2>/dev/null)]"
+[ "$p" = "$d" ] && grep -q 'plugin-v2/outsourcerer.sh watcher run' <<<"$(ps -o command= -p "$d" 2>/dev/null)" && ok "a fallback loop whose launcher now names another plugin copy re-runs itself there (nobody has to restart it)" || no "repointed loop not running on the new copy [pid $p: $(ps -o command= -p "$d" 2>/dev/null)]"
 S '_ws_stop_loop'
 fresh 6c; OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { x="$(sleep 4713; :)"; }; _ws_run' "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
 i=0; until pgrep -f '^sleep 4713' >/dev/null 2>&1 || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
