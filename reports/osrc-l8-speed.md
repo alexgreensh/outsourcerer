@@ -149,3 +149,13 @@ Conformance: see the end of this file.
   (`_osrc_lane_summary_base` / `_osrc_harness_detected` launch ~120 processes). It needs its own
   per-export memo or a cache keyed on everything it reads, PATH-detected harnesses included.
 - **remote lanes (`lib/remote.sh`)**: `osrc_remote_state` makes 5-8 jq calls; one jq would do.
+
+## Conformance
+
+`bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (Linux, as root): **rc=1**,
+247 passed, 6 failed, 1 skipped. The six failing suites are `test_harness_isolation`,
+`test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+`test_conformance_suite_timeout` and `test_sealed_fixes`. I ran each of them alone on the unmodified
+base `09a7803` in the same container, and each also fails there with rc=1. None of them touches a file
+this lane changed. They check read-only writes, kill and isolation behaviour, which differs when the
+tests run as root here. Every hub, cleanup and cloud suite passes, and so does the new `test_hub_speed`.
