@@ -477,10 +477,9 @@ _osrc_scr_generic() {
   fi
   i="$(_osrc_scr_last "*Press enter to confirm or esc to cancel*" $((n - 2 > 0 ? n - 2 : 0)))"
   if [ "$i" -ge 0 ]; then OSRC_SCR_KIND=other; _osrc_scr_set approval "${_SCR_L[$i]}"; return 0; fi
-  # Busy is claimed only from the engine's own indicator, matched whole, in the bottom status region.
+  # Busy only from the engine's own indicator, in the bottom status region (no rule: the last 4 rows).
   local b=-1 t lo=$((n - 4))
-  _osrc_scr_bottom && lo=$((OSRC_SCR_BOTTOM - 1))
-  i=$((n - 1))
+  _osrc_scr_bottom && lo=$((OSRC_SCR_BOTTOM - 1)); i=$((n - 1))
   while [ "$i" -ge "$lo" ] && [ "$i" -ge 0 ]; do
     l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
     case "$t" in *"· done"*|*"Worked for"*) break ;; esac
@@ -493,12 +492,10 @@ _osrc_scr_generic() {
   _osrc_scr_set unknown "no recognized signal in tail"
 }
 
-# Bottom of a pane with no recognized composer: OSRC_SCR_BOTTOM = the row above the last separator
-# (rule or bare input prompt) in the last twelve rows (rows under it are footer); else the last
-# row, and rc 1. A rule in ordinary output that close to the end hides the rows under it.
+# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last 12 rows (rows
+# under it are footer, even if they are output), else the last row and rc 1.
 _osrc_scr_bottom() {
-  local i=$((_SCR_N - 1)) l
-  OSRC_SCR_BOTTOM=$i
+  local i=$((_SCR_N - 1)) l; OSRC_SCR_BOTTOM=$((_SCR_N - 1))
   while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - 12)) ]; do
     l="${_SCR_L[$i]}"; l="${l#"${l%%[! ]*}"}"
     case "$l" in "──"*|">"|"❯"|"›") OSRC_SCR_BOTTOM=$((i - 1)); return 0 ;; esac
@@ -507,8 +504,7 @@ _osrc_scr_bottom() {
   return 1
 }
 
-# 0 when the row is a busy indicator: an interrupt hint that ENDS the row ("(esc to interrupt)",
-# "(esc to interrupt · 14s)", "· ctrl+c to interrupt"), "Working (",
+# 0 for a busy indicator: an interrupt hint ENDING the row ("(esc to interrupt · 14s)"), "Working (",
 # braille spinner + a word, or spinner frame + a word + "…"/"...". A bullet (● ⏺ •) is no spinner.
 _osrc_scr_busy_row() { # <row>
   local t="${1#[[]}"   # one leading bracket allowed: "[⠋] Compiling crate 12/40"
@@ -523,12 +519,9 @@ _osrc_scr_busy_row() { # <row>
 }
 
 # ---- rate limits / quota -------------------------------------------------------------------------
-# `limit` comes only from the engine's own banner, matched as a WHOLE row, in the bottom status region:
-# the last content row (no composer: _osrc_scr_bottom; blank and rule rows skipped), or the one above
-# a plain trailer (agy's `Error ID:`, a generic `status:` row). It opens its row at column 0, or, for
-# Claude, is a `⎿` "limit reached"/"hit your limit" row that is itself the last content row, whatever
-# sits above it. A phrase with any later content below it is history, not a limit. Shapes: banners in
-# fixtures/screen/*limit*, supervise/agy-*; the Claude `⎿` frames are hand-built, not live captures.
+# `limit` comes only from the engine's banner, a WHOLE row: a column-0 row that is the last content row
+# (blank/rule rows skipped) or sits above one plain trailer (agy's `Error ID:`), or Claude's `⎿` "limit
+# reached" row when it is the last content row, whatever is above it. Anything below it = history.
 _OSRC_SCR_LIMIT_RE="^((⎿|⚠|⛔|✖|■)[[:space:]]+)?(error:[[:space:]]+)?(claude( ai)? usage limit reached|you('|’)?ve hit your (usage )?limit|individual quota reached|rate limited|([0-9]+-hour|weekly|opus weekly|sonnet weekly|session|plan usage|usage|rate) limit (reached|exceeded))([.!]?[[:space:]]*(·|∙|\|)?[[:space:]]*(your (limit|quota)( will)? resets?|resets?|try again|retrying|please upgrade)([[:space:]].*)?)?[.!]?$"
 _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status region holds the engine's limit banner
   local end i l t tl bi="" phrase="" secs="" clk
@@ -541,8 +534,7 @@ _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status 
     fi
     l="${_SCR_L[$i]}"; t="${l#"${l%%[! ]*}"}"
     case "$l" in
-      "⎿"*|" ⎿"*|"  ⎿"*) [ "$i" -eq "$end" ] || continue
-        case "$t" in *[Ll]"imit reached"*|*"hit your"*[Ll]"imit"*) ;; *) continue ;; esac ;;
+      "⎿"*|" ⎿"*|"  ⎿"*) case "$i:$t" in "$end:"*[Ll]"imit reached"*|"$end:"*"hit your"*[Ll]"imit"*) ;; *) continue ;; esac ;;
       " "*) continue ;;
     esac
     case "$t" in *[Ll][Ii][Mm][Ii][Tt]*|*[Qq][Uu][Oo][Tt][Aa]*) ;; *) continue ;; esac   # cheap gate before the fork
