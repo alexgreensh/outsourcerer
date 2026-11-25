@@ -396,7 +396,7 @@ _osrc_cleanup_state_write() {
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || return 1
   jq -cn --argjson ts "$(date +%s)" --argjson fg "$free_gb" --argjson t "$n_safe" --argjson a "$n_ask" --arg h "$ask_hash" \
     '{ts:$ts, free_gb:$fg, safe:$t, ask:$a, ask_hash:$h}' > "$(_osrc_cl_state).tmp.$$" 2>/dev/null \
-    && mv -f "$(_osrc_cl_state).tmp.$$" "$(_osrc_cl_state)" || rm -f "$(_osrc_cl_state).tmp.$$"
+    && mv -f "$(_osrc_cl_state).tmp.$$" "$(_osrc_cl_state)" || { rm -f "$(_osrc_cl_state).tmp.$$"; return 1; }
 }
 
 # ---- user-facing commands -------------------------------------------------------
@@ -501,7 +501,7 @@ _osrc_cleanup_ack() {
   ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
   mkdir -p "$(_osrc_cl_root)" 2>/dev/null || die "cannot create $(_osrc_cl_root)"
   printf '%s\n' "$ah" > "$(_osrc_cl_ack)"
-  echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below ${OSRC_DISK_MIN_GB:-10}GB free until reviewed."
+  echo "[outsourcerer] cleanup: ASK list acknowledged. New leftovers will re-block launches below the disk launch floor until reviewed."
 }
 
 # ---- supervisor hook ------------------------------------------------------------
@@ -536,6 +536,7 @@ _osrc_cleanup_tick_run() {
 # tick; the real scan runs detached in _osrc_cleanup_tick_run.
 _osrc_cleanup_tick() {
   local stamp now age
+  type _osrc_disk_heartbeat >/dev/null 2>&1 && _osrc_disk_heartbeat
   stamp="$(_osrc_cl_root)/.tick"
   now="$(date +%s)"
   if [ -f "$stamp" ]; then
@@ -573,38 +574,57 @@ _osrc_cleanup_tick() {
   return 0
 }
 
-# _osrc_disk_gate -> refuse new lane launches while free disk < OSRC_DISK_MIN_GB (10)
-# and the CURRENT ASK list has not been acknowledged. Called from _bg_launch,
-# route_delegate and session start; dies with the fix when it refuses. Under
-# pressure it rescans live: the tick's state file can be an hour old, and an ack
-# must match the list as it is now (review finding 8).
+# _osrc_disk_gate -> refuse new lane launches under the disk-policy floors (lib/disk_policy.sh).
+# Below the critical floor nothing passes: not --ack, not OSRC_DISK_OK. Between critical and
+# launch an acknowledged ASK list passes (re-checked against a fresh free-space reading after
+# the slow scan), as does OSRC_DISK_OK holding the one-use code a refusal printed. Called from
+# _bg_launch, route_delegate and session start; registers the caller with the disk monitor and
+# arms it. Under pressure it rescans live: an ack must match the list as it is now (#86).
 _osrc_disk_gate() {
-  local free_kb free_gb state ah ch an ns items top
+  local free_kb free_gb launch_kb pause_kb crit_kb launch_gb crit_gb ah ch an ns items top
+  # A bg route preflight is a dry dispatch check, not a launch: _bg_launch gates right after it,
+  # and a preflight child must not consume the one-use override code or register itself.
+  [ "${OSRC_PREFLIGHT:-0}" = 1 ] && return 0
   free_kb="$(_osrc_free_kb)"
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
-  [ "$free_gb" -lt "${OSRC_DISK_MIN_GB:-10}" ] || return 0
+  read -r launch_kb pause_kb crit_kb <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
+  # A broken policy must never wedge a session: fall back to the legacy flat 10GB floor.
+  case "$launch_kb:$pause_kb:$crit_kb" in *[!0-9:]*|:*|*::*|*:) launch_kb=10485760; crit_kb=0 ;; esac
+  launch_gb=$(( launch_kb / 1048576 )); crit_gb=$(( crit_kb / 1048576 ))
+  if type _osrc_disk_monitor_ensure >/dev/null 2>&1; then
+    _osrc_disk_register_caller "${FUNCNAME[1]:-}" || true
+    _osrc_disk_monitor_ensure || true
+  fi
+  if [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ]; then
+    die "outsourcerer: free disk is ${free_gb}GB — under the critical floor (${crit_gb}GB); refusing new lane launches, not even with --ack or OSRC_DISK_OK. Free space first: '$0 cleanup --apply', then '$0 cleanup' for what remains. $(_osrc_disk_report_oneline 2>/dev/null)"
+  fi
+  [ "$free_kb" -lt "$launch_kb" ] || { unset OSRC_DISK_OK _OSRC_DISK_ADMIT; return 0; }
+  type _osrc_disk_override_take >/dev/null 2>&1 && _osrc_disk_override_take "$free_kb" "$launch_kb" && return 0
   items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
-  _osrc_cleanup_state_write "$items" || true
-  state="$(_osrc_cl_state)"
-  if [ ! -f "$state" ]; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and cleanup state is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  # Issue #86: decide from THIS live scan; if the state cannot be refreshed, refuse as unknown.
+  if ! _osrc_cleanup_state_write "$items"; then
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and cleanup state could not be refreshed — state unknown, refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
   fi
-  an="$(jq -r '.ask // 0' "$state" 2>/dev/null)"
-  if [ "${an:-0}" -gt 0 ]; then
-    ah="$(jq -r '.ask_hash // ""' "$state" 2>/dev/null)"
+  an="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; an="${an:-0}"
+  ns="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; ns="${ns:-0}"
+  if [ "$an" -gt 0 ]; then
+    ah="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")|.path+""+.kind]|sort|join("\n")' 2>/dev/null | cksum | awk '{print $1}')"
     ch="$(cat "$(_osrc_cl_ack)" 2>/dev/null)"
-    [ -n "$ah" ] && [ "$ah" = "$ch" ] && return 0
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+    if [ -n "$ah" ] && [ "$ah" = "$ch" ]; then
+      # The scan can take minutes; another build may have drained the disk meanwhile.
+      free_kb="$(_osrc_free_kb)"; case "$free_kb" in ''|*[!0-9]*) free_kb=0 ;; esac
+      [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ] \
+        && die "outsourcerer: free disk fell to $(( free_kb / 1048576 ))GB during the cleanup scan — under the critical floor (${crit_gb}GB); refusing new lane launches even with --ack. $(_osrc_disk_report_oneline 2>/dev/null)"
+      return 0
+    fi
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'.$(_osrc_disk_override_offer 2>/dev/null)"
   fi
-  # ASK list is empty: never demand an ack of nothing. Say the disk is full and
-  # name what is using it (review finding 8).
-  ns="$(jq -r '.safe // 0' "$state" 2>/dev/null)"
   top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
   if [ "${ns:-0}" -gt 0 ]; then
-    die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}"
+    die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}$(_osrc_disk_override_offer 2>/dev/null)"
   fi
-  die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or launch with OSRC_DISK_MIN_GB=0 to override."
+  die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or lower the floor in $OSRC_HOME/disk-policy/settings (OSRC_DISK_MIN_GB=<n>).$(_osrc_disk_override_offer 2>/dev/null)"
 }
 
 # =============================================================================

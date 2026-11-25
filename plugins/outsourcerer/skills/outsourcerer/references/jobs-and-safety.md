@@ -85,6 +85,52 @@ distinct handling:
   records an actionable reason; re-run in the foreground (`--wait`) or a shell that allows background
   processes. A stillborn/meta-less job still appears in `status --json` (never silently dropped).
 
+## Disk pressure policy
+
+Three floors, derived from the volume holding `$OSRC_HOME`: **launch** = max(10GB, 5% of the
+volume), capped at a quarter of a small volume so an empty small disk is never blocked forever;
+**pause** = max(4GB, 2%), kept under the launch floor; **critical** = 0.5% clamped to 1–4GB. A
+**resume** floor sits halfway between pause and launch so a hovering disk cannot flap jobs.
+
+**Settings.** Floors come only from `$OSRC_HOME/disk-policy/settings`, one `NAME=value` per line
+(read, never sourced): `OSRC_DISK_MIN_GB` (launch floor; `0` turns launch blocking off, the
+critical floor stays), `OSRC_DISK_PAUSE_GB`, `OSRC_DISK_CRITICAL_GB`, `OSRC_DISK_RECLAIM_MAX`
+(lanes reclaimed per pressure episode, default 10, `0` disables), `OSRC_DISK_POLICY_OFF=1` (flat
+10GB launch gate, no pause or reclaim, critical floor kept). Environment variables of these names
+are ignored, so an inherited export cannot open the gate.
+
+**Launch gate.** Below the critical floor nothing launches — not `cleanup --ack`, not an override.
+Between critical and launch, an acknowledged ASK list passes (free space is re-read after the
+cleanup scan), and so does the explicit override: a refusal prints a one-use code, and
+`OSRC_DISK_OK=<code> <same command>` admits that one command. The code expires after 15 minutes,
+binds to the first process that uses it, is removed from the environment before any delegate
+runs, and is refused unless its use is appended to `disk-policy/override.log`. A `bg` or `fanout`
+job it launches gets a one-use admit token for the job's own gate, logged as `job-admit`.
+
+**While jobs run.** A detached monitor (one per `$OSRC_HOME`, owned through
+`disk-policy/monitor.lock`) watches supervised bg jobs, foreground launches and tmux sessions
+started by `session start`. Under the pause floor it first writes a pause record naming each process
+(a job's delegate, every descendant, and its supervisor) and its start-time identity, then
+`SIGSTOP`s them; if the record cannot be written the job keeps running and the owner is told. It
+then wakes the owner once per pressure episode (`disk-paused`, `disk-critical`, `disk-resumed`
+events), and only after that writes the pressure report (free space, swap, biggest dirs,
+reclaimable items by path) to `disk-policy/monitor.log` and reclaims merged lanes. Nothing is ever
+killed; a process whose identity cannot be proven is never signalled. When free space reaches the
+resume floor, or the monitor exits for any reason, every recorded process is `SIGCONT`ed. `fg` is
+typed into a tmux pane only when its shell holds the terminal at a job-control prompt; a lane still
+in the foreground just gets its terminal mode back and a redraw; any other pane is never typed into,
+stays parked and raises one `disk-parked-<session>` event. `outsourcerer disk resume` does the same
+immediately and, if it resumed anything, holds new pauses until space recovers or falls under the
+critical floor; `outsourcerer disk status` prints the report. A job's paused time is banked in
+`disk-paused-secs`, and the watchdog shifts its no-init, stall and hard-timeout clocks past it.
+
+**Automatic reclaim** removes only artifacts of a lane proven merged: the lane's worktree (its live
+branch must match the receipt, its HEAD be the proven commit, and `git status --ignored` be empty,
+so every file in it is tracked at a preserved commit) and its recorded branch (deleted only if the
+tip is still the proven commit and no worktree has it checked out). Scratch directories, ignored
+files such as `.env` or `node_modules`, and everything not in the manifest are never auto-deleted;
+they stay in `outsourcerer cleanup` for you to decide. Each deletion is logged to `cleanup.log`.
+
 ## Post-hoc classification (classify)
 
 After a job terminates, especially a `wedged`/`timeout`/`failed` one, the orchestrator needs to

@@ -163,7 +163,7 @@ _supervise() {
   # and parked cloud lanes can leave the child alive forever with only our disclosure header in the
   # log. Give initialization its own short, lane-agnostic deadline; after any real delegate output,
   # this arm is permanently disarmed and the existing stall/false-stall logic remains authoritative.
-  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0" ni_start="$t0" ni_cap
+  local noinit="${OSRC_NOINIT_SECS:-150}" initialized=0 qt0="$t0" ni0="$t0" ni_start="$t0" ni_cap dp_seen=0 _dp _dd
   case "$noinit" in ''|*[!0-9]*|??????????*) noinit=150 ;; *) noinit=$((10#$noinit)) ;; esac
   while kill -0 "$pid" 2>/dev/null; do
     # PID-reuse guard: verify the process is still ours.
@@ -184,6 +184,9 @@ _supervise() {
     # `wait` + OSRC:: classification below decide what actually happened.
     kill -0 "$pid" 2>/dev/null || break
     now=$(date +%s)
+    # Time frozen by the disk policy (lib/disk_policy.sh) is not the job's: shift every clock past it.
+    _dp="$(_osrc_disk_paused_secs "$jd" 2>/dev/null)"; case "$_dp" in ''|*[!0-9]*) _dp=0 ;; esac
+    [ "$_dp" -gt "$dp_seen" ] && { _dd=$(( _dp - dp_seen )); dp_seen=$_dp; t0=$((t0+_dd)); qt0=$((qt0+_dd)); ni0=$((ni0+_dd)); ni_start=$((ni_start+_dd)); last_change=$((last_change+_dd)); }
     size=$(wc -c < "$jd/out.log" 2>/dev/null || echo 0)
     # L7 add-on: per-lane usage cap on every supervise poll. A lane that crosses its cap gets ONE
     # EVENT limit + wrap-up NEXT (deduped per job+spec inside _osrc_cap_poll); the job is never

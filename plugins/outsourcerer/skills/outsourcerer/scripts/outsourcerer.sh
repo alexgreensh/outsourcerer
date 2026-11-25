@@ -10165,28 +10165,22 @@ _fg_guard() {
   if ! mkfifo "$fifo" 2>/dev/null; then "$fn"; return $?; fi     # no fifo -> never block the user, run inline
   export OSRC_FG_GUARD_ACTIVE=1
   tee "$cap" < "$fifo" & local tp=$!
-  # The rc file is written from an EXIT trap, NOT a follow-up statement: when $fn exits internally
-  # (die is `exit`), a `"$fn"; echo $? > rcf` sequence never reaches the echo, the rc file stays
-  # missing, and the default below reported 124 — indistinguishable from a real hard timeout. Any
-  # caller that treats 124 as retryable infra would then RETRY an internal abort like "not logged
-  # in" instead of surfacing it. The trap fires on plain return AND on internal exit; only a
-  # hard-killed subshell (watchdog SIGKILL) writes nothing, so 124-by-default now means exactly
-  # "killed", and the hard/teardown/interrupt arms below still override rc for their cases.
-  # (TERM/INT are mapped to their conventional codes first: on a bare TERM the EXIT trap would
-  # otherwise record $?=0 — a killed run must never read as success.)
+  # The rc file is written from an EXIT trap, so an internal `exit` (die) still records its rc instead
+  # of reading as 124 (hard timeout, which callers retry). Only a hard-killed subshell writes nothing,
+  # so 124-by-default means exactly "killed"; the hard/teardown/interrupt arms below override rc.
+  # (TERM/INT map to 143/130 first: a bare TERM would make the EXIT trap record $?=0.)
   ( trap 'exit 143' TERM; trap 'exit 130' INT; trap 'echo $? > "$rcf"' EXIT; "$fn" </dev/null > "$fifo" ) & local prod=$!   # stdout->fifo (streamed+captured); stderr stays on terminal
-  ( local t0 now mk=0; t0=$(date +%s)
+  ( local t0 now mk=0 p; t0=$(date +%s); p=$t0
     while kill -0 "$prod" 2>/dev/null; do
-      sleep 2; now=$(date +%s)
+      sleep 2; now=$(date +%s)   # a gap >10s means this guard was frozen (disk pause): both clocks skip it
+      [ $((now-p)) -gt 10 ] && { t0=$((t0+now-p)); [ "$mk" = 0 ] || mk=$((mk+now-p)); }; p=$now
       [ "$mk" = 0 ] && [ -n "$(_fg_teardown_seen "$cap")" ] && mk=$now
       if [ "$mk" != 0 ] && [ $((now-mk)) -ge "$tdl" ]; then echo teardown > "$hit"; _kill_tree "$prod"; break; fi
       if [ $((now-t0)) -ge "$hard" ];               then echo hard     > "$hit"; _kill_tree "$prod"; break; fi
     done ) & local gd=$!
-  # NB: the trap must NOT delete the marker files here. It records `interrupt` into $hit and kills the
-  # tree, then control resumes after `wait` and the rc/hval read below turns that into rc=130. Removing
-  # $base.* inside the trap erased BOTH the interrupt marker and the rc file, so the read defaulted to
-  # rc=124 (== hard-timeout) and a caller that retries transport would auto-retry a user Ctrl-C. The
-  # end-of-function cleanup already removes these files on every return path.
+  # NB: the trap must NOT delete $base.* : it records `interrupt` into $hit, and the read below turns
+  # that into rc=130. Deleting them made a Ctrl-C read as rc=124 (hard timeout), which callers retry.
+  # The end-of-function cleanup removes these files on every return path.
   trap 'echo interrupt > "'"$hit"'"; _kill_tree "'"$prod"'" 2>/dev/null; kill "'"$gd"'" "'"$tp"'" 2>/dev/null' INT TERM
   wait "$prod" 2>/dev/null
   kill "$gd" 2>/dev/null; wait "$gd" 2>/dev/null; wait "$tp" 2>/dev/null
@@ -10266,8 +10260,7 @@ _bg_launch() {
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
   _mkdir_private "$OSRC_JOBS" || true
-  # Disk-pressure gate: under OSRC_DISK_MIN_GB free, refuse new lanes until the cleanup ASK list
-  # is answered (cleanup --apply / --ack). Runs before the job-dir claim so a refusal leaves nothing.
+  # Disk-pressure gate (lib/cleanup.sh): runs before the job-dir claim so a refusal leaves nothing.
   type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   local id jd tries=0 _arm_rc=0 _bpid
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
@@ -15356,8 +15349,7 @@ _failover_notice() {
 route_delegate() {
   if [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_ACTIVE:-0}" != 1 ]; then local _OSRC_PREFLIGHT_ACTIVE=1; _osrc_route_dispatch "$@"; return $?; fi
   local tier="$1" verb="$2"; shift 2
-  # Disk-pressure gate: refuse new lane launches while free disk is under
-  # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
+  # Disk-pressure gate: refuse new lane launches under the disk-policy floors (lib/cleanup.sh).
   type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   # Mutating verbs get the BUILD DISCIPLINE preamble (write early, don't over-explore). See _build_discipline.
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1
@@ -17043,6 +17035,7 @@ _winpty_session() {
 # ---- interactive tmux session (opt-in) ----
 session() {
   _validate_session_name
+  [ "${1:-}" = start ] && type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate   # disk floors (lib/cleanup.sh), every platform
   if [ "$OSRC_PLATFORM" = "windows" ]; then
     _winpty_session "$@"
     return
@@ -17092,9 +17085,6 @@ session() {
       # Provider-aware interactive session: works for devin, codex (sol/terra/luna), and claude
       # (fable/opus/...), not just Devin. Each launches its own interactive TUI inside tmux; the generic
       # send/read/stop below drive any of them. Switch lane with --provider devin|codex|cc.
-      # Disk-pressure gate: refuse new lane launches while free disk is under
-      # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
-      type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
       local launch
       case "$PROVIDER" in
         devin|dv)
@@ -18894,6 +18884,7 @@ main() {
     logs)        cmd_logs "$@" ;;                          # tail a job's raw log (forensics only)
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
     cleanup)     cmd_cleanup "$@" ;;                       # manifest dry run; <id> [--force] removes a worktree; --apply/--ack
+    disk)        _osrc_disk_cmd "$@" ;;                    # disk status | resume (lib/disk_policy.sh)
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     hub)         cmd_hub "$@" ;;
     mc|mission-control) cmd_hub_mc "$@" ;;                             # mission control: export (SCHEMA json) | serve (local page, 127.0.0.1+token)
