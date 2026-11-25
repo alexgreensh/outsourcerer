@@ -245,3 +245,12 @@ change, and the brief rules out caching on top of the existing caches. I made no
 Unchanged from round 1 (done-runner fd closing in `lib/done.sh`, a per-export limits memo, one jq in
 `osrc_remote_state`). Add one more: a 3 s unchanged export on this shape needs the lane builders in
 `lib/hub.sh` to emit all of a project's lanes from one jq. Today each lane makes about 5 jq calls.
+
+### Conformance (round 2)
+
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (Linux, as root): **rc=1**,
+247 passed, 6 failed, 1 skipped. The six failures are the same suites as round 1: `test_harness_isolation`,
+`test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+`test_conformance_suite_timeout`, `test_sealed_fixes`. None touches a file changed here. Round 1 reported
+they fail on the unmodified base too. I did not re-run them on base this round. Every hub, remote and
+cleanup suite inside conformance passed, including `test_hub_speed` and `test_remote_review`.
