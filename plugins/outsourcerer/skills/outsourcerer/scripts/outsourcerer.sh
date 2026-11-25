@@ -10298,8 +10298,7 @@ _bg_launch() {
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
   _mkdir_private "$OSRC_JOBS" || true
-  # Disk-pressure gate: under OSRC_DISK_MIN_GB free, refuse new lanes until the cleanup ASK list
-  # is answered (cleanup --apply / --ack). Runs before the job-dir claim so a refusal leaves nothing.
+  # Disk-pressure gate (lib/cleanup.sh): runs before the job-dir claim so a refusal leaves nothing.
   type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   local id jd tries=0 _arm_rc=0 _bpid
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
@@ -15388,8 +15387,7 @@ _failover_notice() {
 route_delegate() {
   if [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_ACTIVE:-0}" != 1 ]; then local _OSRC_PREFLIGHT_ACTIVE=1; _osrc_route_dispatch "$@"; return $?; fi
   local tier="$1" verb="$2"; shift 2
-  # Disk-pressure gate: refuse new lane launches while free disk is under
-  # OSRC_DISK_MIN_GB and the cleanup ASK list is unanswered (lib/cleanup.sh).
+  # Disk-pressure gate: refuse new lane launches under the disk-policy floors (lib/cleanup.sh).
   type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
   # Mutating verbs get the BUILD DISCIPLINE preamble (write early, don't over-explore). See _build_discipline.
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1

@@ -194,20 +194,13 @@ _osrc_disk_records() {
   local f
   for f in "$OSRC_JOBS"/*/disk-paused "$(_osrc_disk_dir)"/paused/*; do [ -f "$f" ] && printf '%s\n' "$f"; done
 }
-_osrc_disk_any_paused() {
-  local f
-  for f in "$OSRC_JOBS"/*/disk-paused "$(_osrc_disk_dir)"/paused/*; do [ -f "$f" ] && return 0; done
-  return 1
-}
+_osrc_disk_any_paused() { [ -n "$(_osrc_disk_records)" ]; }
 _osrc_disk_recorded_pids() { _osrc_disk_records | while IFS= read -r f; do awk -F'|' '$1=="proc"{print $3}' "$f" 2>/dev/null; done; }
 
 # _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact.
 _osrc_disk_rec_write() {
-  local f="$1"
-  if printf '%s' "$2" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null \
-     && [ "$(cat "$f" 2>/dev/null)" = "$(printf '%s' "$2")" ]; then return 0; fi
-  rm -f "$f.tmp" "$f" 2>/dev/null
-  return 1
+  printf '%s' "$2" > "$1.tmp" 2>/dev/null && mv -f "$1.tmp" "$1" 2>/dev/null && [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
+  rm -f "$1.tmp" "$1" 2>/dev/null; return 1
 }
 
 _osrc_disk_log() { printf '%s disk-policy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(_osrc_disk_dir)/monitor.log" 2>/dev/null || true; }
@@ -217,10 +210,7 @@ _osrc_disk_keepalive() { # <jd> <paused|resumed>
     >> "$1/out.log" 2>/dev/null || true
 }
 
-_osrc_disk_terminal_status() {
-  case "${1:-}" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) return 0 ;; esac
-  return 1
-}
+_osrc_disk_terminal_status() { case "${1:-}" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) return 0 ;; esac; return 1; }
 
 # _osrc_disk_stop_rec <record> — SIGSTOP every process the (already persisted) record names.
 _osrc_disk_stop_rec() {
@@ -437,11 +427,8 @@ _osrc_disk_pause_sweep() {
 # ---- wakes (one per transition per pressure episode) -----------------------------------
 
 _osrc_disk_episode() { # -> current episode id, creating one when asked (arg "new")
-  local f e; f="$(_osrc_disk_dir)/.episode"
-  e="$(cat "$f" 2>/dev/null)"
-  if [ -z "$e" ] && [ "${1:-}" = new ]; then
-    e="$(date +%s).$$.$RANDOM"; printf '%s\n' "$e" > "$f" 2>/dev/null
-  fi
+  local f e; f="$(_osrc_disk_dir)/.episode"; e="$(cat "$f" 2>/dev/null)"
+  [ -z "$e" ] && [ "${1:-}" = new ] && { e="$(date +%s).$$.$RANDOM"; printf '%s\n' "$e" > "$f" 2>/dev/null; }
   printf '%s' "$e"
 }
 
@@ -526,7 +513,7 @@ _osrc_disk_reclaim() {
 # ---- the policy tick --------------------------------------------------------------------
 
 # _osrc_disk_monitor_tick — one pass; never fails. Order under pressure: pause and wake
-# first, then the (slow) report scan and bounded reclaim, then remeasure and maybe resume.
+# first, then the (slow) report scan and bounded reclaim.
 _osrc_disk_monitor_tick() {
   local d free_kb launch pause crit resume counts n u items k
   d="$(_osrc_disk_dir)"; _mkdir_private "$d" >/dev/null 2>&1
@@ -556,15 +543,8 @@ _osrc_disk_monitor_tick() {
   _osrc_disk_episode > "$d/.reported" 2>/dev/null
   have jq 2>/dev/null && items="$(_osrc_cleanup_items --no-size 2>/dev/null)"
   { printf '=== disk pressure %s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; _osrc_disk_report "${items:-}"; } >> "$d/monitor.log" 2>/dev/null
-  k="$(_osrc_disk_reclaim "${items:-}")"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
-  [ "$k" -gt 0 ] || return 0
-  free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
-  _osrc_disk_log "reclaimed $k merged-lane item(s); free now $(_osrc_disk_fmt_kb "$free_kb")"
-  if [ "$free_kb" -ge "$resume" ]; then
-    k="$(_osrc_disk_resume_all)"
-    _osrc_disk_wake resumed "disk recovered to $(_osrc_disk_fmt_kb "$free_kb") after merged-lane reclaim; $k lane(s) resumed"
-    _osrc_disk_episode_end
-  fi
+  k="$(_osrc_disk_reclaim "${items:-}")"   # the next tick resumes once reclaim freed enough
+  [ "${k:-0}" = 0 ] || _osrc_disk_log "reclaimed $k merged-lane item(s); free now $(_osrc_disk_fmt_kb "$(_osrc_free_kb 2>/dev/null)")"
   return 0
 }
 

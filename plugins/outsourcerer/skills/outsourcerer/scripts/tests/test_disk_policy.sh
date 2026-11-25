@@ -4,7 +4,7 @@
 # lib/cleanup.sh). Regression coverage for the lane incidents and every review finding:
 #   1. an acknowledged ASK list let a launch through with almost no disk left
 #   2. a build launched above the floor drained the disk while running and nothing reacted
-#   3. a merged lane's worktree and scratch data stayed behind
+#   3. a merged lane's worktree and branch stayed behind
 # Real sleeps stand in for delegates; every signal the policy sends is checked with `ps`.
 set -uo pipefail
 
