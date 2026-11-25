@@ -404,9 +404,16 @@ _osrc_hub_scr_put() { # <id> <output-file>: persist a screen read for later expo
 
 # ---- export phase profiling (OSRC_HUB_PROF=/path file -> "epoch_ns tag" rows) -------------------
 # The export asks _osrc_hub_prof at phase boundaries; when unset the calls are free.
+# Nanoseconds, portably: bash 5's EPOCHREALTIME; else GNU date's %N; else (macOS date prints a literal
+# N, bash 3.2 has no EPOCHREALTIME) whole seconds, still a valid number for the reader.
 _osrc_hub_prof() { # <tag>
   [ -n "${OSRC_HUB_PROF:-}" ] || return 0
-  printf '%s %s\n' "$(date +%s%N 2>/dev/null || printf 0)" "$1" >> "$OSRC_HUB_PROF" 2>/dev/null
+  local t="${EPOCHREALTIME:-}" u
+  case "$t" in
+    *[.,]*) u="${t#*[.,]}000000"; t="${t%%[.,]*}${u:0:6}000" ;;
+    *) t="$(date +%s%N 2>/dev/null)"; case "$t" in ''|*[!0-9]*) t="$(date +%s)000000000" ;; esac ;;
+  esac
+  printf '%s %s\n' "$t" "$1" >> "$OSRC_HUB_PROF" 2>/dev/null
 }
 
 # ---- fast pre-check: does unowned have ANY live lane? (avoids 6s work when none live) ----------

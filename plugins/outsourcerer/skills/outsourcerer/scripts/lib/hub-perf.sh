@@ -282,13 +282,13 @@ _osrc_hub_limits_write() { # <file> : compute and store atomically
 }
 _osrc_hub_limits_cached() {
   local f="$OSRC_HOME/hub/limits-cache.json" ttl="${OSRC_HUB_LIMITS_TTL:-60}" age changed p lk
-  if [ "${OSRC_HUB_FAST:-0}" != 1 ] || ! mkdir -p "$OSRC_HOME/hub" 2>/dev/null || [ -L "$f" ]; then
+  if ! mkdir -p "$OSRC_HOME/hub" 2>/dev/null || [ -L "$f" ]; then
     local out; out="$(_osrc_hub_limits 2>/dev/null)"; case "$out" in ''|*'error'*) out='[]' ;; esac; printf '%s' "$out"; return 0
   fi
   if [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ]; then _osrc_hub_limits_write "$f"; return; fi
   case "$ttl" in ''|*[!0-9]*) ttl=60 ;; esac
   if [ ! -f "$f" ] || ! jq -e 'arrays' "$f" >/dev/null 2>&1; then
-    OSRC_PROBE_NONBLOCK=1 _osrc_hub_limits_write "$f"
+    if [ "${OSRC_HUB_FAST:-0}" = 1 ]; then OSRC_PROBE_NONBLOCK=1 _osrc_hub_limits_write "$f"; else _osrc_hub_limits_write "$f"; fi
     return 0
   fi
   local cmt imt
@@ -303,6 +303,12 @@ EOF
     [ "$imt" -gt "$cmt" ] 2>/dev/null && changed=1
   fi
   age=$(( $(date +%s) - cmt ))
+  # A plain export computes the rail unless the stored one is younger than the TTL and no meter input
+  # changed since it was written: an unchanged machine reuses it (the rail cost 1-4 s per export).
+  if [ "${OSRC_HUB_FAST:-0}" != 1 ]; then
+    if [ -n "$changed" ] || [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then _osrc_hub_limits_write "$f"; else jq -c . "$f" 2>/dev/null || printf '[]'; fi
+    return 0
+  fi
   # Changed meters do not block the export either: the statusline rewrites its rate-limits file every
   # turn, so "recompute when an input changed" meant recomputing (7 s) on nearly every export.
   if [ -n "$changed" ] || [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then

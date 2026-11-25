@@ -94,7 +94,7 @@ _osrc_hub_also() {
         lk="$OSRC_HOME/hub/also-refresh.lock"
         [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
         if mkdir "$lk" 2>/dev/null; then
-          ( _osrc_hub_also_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+          ( type _osrc_hub_close_fds >/dev/null 2>&1 && _osrc_hub_close_fds; _osrc_hub_also_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
         fi
       fi
     fi

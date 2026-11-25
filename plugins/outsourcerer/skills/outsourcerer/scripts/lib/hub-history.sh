@@ -79,14 +79,13 @@ _osrc_hub_gh_data() {
   [ "$ttl" = 0 ] && { _osrc_hub_gh_fetch "$repo" "$f"; cat "$f" 2>/dev/null; return 0; }   # TTL 0 = no cache: fetch now
   if [ -f "$f" ] && jq -e 'objects' "$f" >/dev/null 2>&1; then
     age=$(( $(date +%s) - $(jq -r '.fetchedAt // 0' "$f" 2>/dev/null) ))
+    # Stale: serve it and refresh detached, in every mode. Three gh calls per project used to sit on
+    # a plain export's clock every 10 minutes. Only a repo with no cache at all is fetched inline.
     if [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then
-      if [ "${OSRC_HUB_FAST:-0}" = 1 ]; then
-        lk="$f.lock"
-        [ -d "$lk" ] && type _osrc_hub_mt >/dev/null 2>&1 && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
-        mkdir "$lk" 2>/dev/null && ( _osrc_hub_gh_fetch "$repo" "$f"; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
-      else
-        _osrc_hub_gh_fetch "$repo" "$f"
-      fi
+      lk="$f.lock"
+      [ -d "$lk" ] && type _osrc_hub_mt >/dev/null 2>&1 && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
+      mkdir "$lk" 2>/dev/null && ( type _osrc_hub_close_fds >/dev/null 2>&1 && _osrc_hub_close_fds
+        _osrc_hub_gh_fetch "$repo" "$f"; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
     fi
   else
     _osrc_hub_gh_fetch "$repo" "$f"
@@ -279,7 +278,8 @@ _osrc_hub_history() {
         lk="$c.lock"
         [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
         if mkdir "$lk" 2>/dev/null; then
-          ( _OSRC_HUB_MEMO="" _osrc_hub_history_build "$sid" "$pj" "$c" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+          ( type _osrc_hub_close_fds >/dev/null 2>&1 && _osrc_hub_close_fds
+            _OSRC_HUB_MEMO="" _osrc_hub_history_build "$sid" "$pj" "$c" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
         fi
       fi
     fi

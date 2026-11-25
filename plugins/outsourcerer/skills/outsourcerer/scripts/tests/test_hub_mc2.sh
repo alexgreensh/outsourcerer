@@ -123,7 +123,12 @@ sleep 1; touch "$OSRC_JOBS/old-job/status"
 # Limits: served from the cache under FAST, computed under a plain export.
 printf '[{"id":"cached-row"}]\n' > "$OSRC_HOME/hub/limits-cache.json"
 OSRC_HUB_FAST=1 bash "$ROOT/outsourcerer.sh" hub export 2>/dev/null | jq -e '[.limits[].id] == ["cached-row"]' >/dev/null || fail 'limits cache unused'
-bash "$ROOT/outsourcerer.sh" hub export 2>/dev/null | jq -e '[.limits[]?.id] | index("cached-row") | not' >/dev/null || fail 'plain export read the limits cache'
+# A plain export reuses the rail only while it is young and no meter input is newer than it.
+bash "$ROOT/outsourcerer.sh" hub export 2>/dev/null | jq -e '[.limits[].id] == ["cached-row"]' >/dev/null || fail 'plain export recomputed an unchanged young rail'
+sleep 1; printf '{}\n' > "$OSRC_HOME/rate-limits.json"
+bash "$ROOT/outsourcerer.sh" hub export 2>/dev/null | jq -e '[.limits[]?.id] | index("cached-row") | not' >/dev/null || fail 'plain export kept the rail after a meter input changed'
+printf '[{"id":"cached-row"}]\n' > "$OSRC_HOME/hub/limits-cache.json"; touch -t 202001010000 "$OSRC_HOME/hub/limits-cache.json"
+bash "$ROOT/outsourcerer.sh" hub export 2>/dev/null | jq -e '[.limits[]?.id] | index("cached-row") | not' >/dev/null || fail 'plain export kept a rail older than the TTL'
 printf 'PASS: MC2 r2 #4 memo, settled cache and limits cache\n'
 
 # ---- Round 3: names a person would say, working sessions only ----------------------------------
