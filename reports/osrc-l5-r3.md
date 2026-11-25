@@ -68,7 +68,7 @@ Base: `cloud/osrc-l5-parallel` @ 0da2dd0 (one `WIP:` commit over main ea34fe0). 
 | `bash scripts/tests/test_perm_profiles.sh` (expectation updated for the lean flags) | 0 |
 | accounts, codex_code_mode_host, droid_session, gemini_lane, interactive_default, session_capabilities, session_effort_guard, session_exit_liveness, session_model_pin_guard, session_probe_sigpipe | 0 each |
 | `python3 scripts/check_file_size.py --base ea34fe0` | 0 |
-| `bash scripts/tests/conformance.sh` | see below |
+| `bash scripts/tests/conformance.sh` (239 passed, 8 failed, 1 skipped) | 1 |
 
 New checks (test_factory_flow.sh, `L5` prefix): 3 independent tasks start in one pass at cap 3; overlapping files
 wait with the reason; an open decision does not stop other tasks; the default applies at the deadline; a paid
@@ -102,4 +102,20 @@ gate pauses and tolerates its own absence; profile parsing feeds check/cap/heavy
 
 ## Conformance
 
-`test_harness_isolation` fails in this container for a reason unrelated to this lane: the container runs as root, so its "uncreatable" path `/nonexistent-root-cannot-create` gets created and the fail-closed check sees rc 0. That code (`build_mcp_flags_cc`) is untouched here. I left the directory in place (removing a root-level path needed an approval nobody could give).
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`: rc=1, 239 passed, 8 failed, 1 skipped.
+I ran each failing suite alone against this head and against main (ea34fe0, a worktree):
+
+| suite | main | this head | cause |
+|---|---|---|---|
+| test_harness_isolation | 1 | 1 | container runs as root: the "uncreatable" `/nonexistent-root-cannot-create` gets created |
+| test_vocab_hygiene | 1 | 1 | root ignores read-only files ("failed rewrite reported success") |
+| test_parity_insource_refresh | 1 | 1 | same, read-only target written as root |
+| test_supervise_pgroup_kill | 1 | 1 | fails on main too (not investigated, outside this lane) |
+| test_conformance_suite_timeout | 1 | 1 | fails on main too |
+| test_sealed_fixes | 1 | 1 | fails on main too |
+| test_release_0175 | 0 | 0 | passes alone on both; failed only under the full suite's load |
+| test_no_pipe_grep_q | 0 | 1 -> 0 | **mine**: new L5 checks piped `printf | grep -q`. Fixed with here-strings; suite now rc=0, test_factory_flow 196/196 |
+
+After that fix I did not rerun the full conformance suite; the remaining failures are identical on main.
+`/nonexistent-root-cannot-create` (created by test_harness_isolation as root) was left in place: removing a
+root-level path needed an approval nobody could give.

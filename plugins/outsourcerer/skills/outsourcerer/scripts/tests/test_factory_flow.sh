@@ -875,7 +875,7 @@ mkplan own 't1||ship|0' 't2||ship|0' 't3||ship|0'
 _task_update own t1 '.files = ["src"]' >/dev/null; _task_update own t2 '.files = ["src/a.sh"]' >/dev/null; _task_update own t3 '.files = ["docs"]' >/dev/null
 : > "$TMP/launches"
 out="$( cmd_plan_run own --once --max-parallel 3 2>&1 )"
-[ "$(st own t2)" = todo ] && [ "$(st own t3)" = running ] && printf '%s' "$out" | grep -q 't2: waits.*t1 (src/a.sh -> src)' \
+[ "$(st own t2)" = todo ] && [ "$(st own t3)" = running ] && grep -q 't2: waits.*t1 (src/a.sh -> src)' <<<"$out" \
   && ok "L5-1: overlapping files are ordered with the reason; disjoint files run alongside" || bad "L5-1 files: $(st own t2)/$(st own t3) $out"
 for t in t1 t2 t3 t4; do rm -f "$TMP/outcomes/$t"; done
 
@@ -917,7 +917,7 @@ case "$(OSRC_FACTORY_PARALLEL= OSRC_FACTORY_PROFILE=/nonexistent _osrc_fp_max_pa
 printf '#!/bin/sh\necho "nightly backup running"; exit 1\n' > "$TMP/gate.sh"; chmod +x "$TMP/gate.sh"
 mkplan gated 't1||scout|0'
 out="$( OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once 2>&1 )"
-[ "$(st gated t1)" = todo ] && printf '%s' "$out" | grep -q 'launches paused: nightly backup running' && ok "L5: a repo gate that says no pauses launches" || bad "L5 gate: $out"
+[ "$(st gated t1)" = todo ] && grep -q 'launches paused: nightly backup running' <<<"$out" && ok "L5: a repo gate that says no pauses launches" || bad "L5 gate: $out"
 printf '#!/bin/sh\nexit 7\n' > "$TMP/gate.sh"
 ( OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once >/dev/null 2>&1 )
 [ "$(st gated t1)" != todo ] && ok "L5: a broken gate fails open" || bad "L5 broken gate wedged the plan"
@@ -951,8 +951,8 @@ docs | document the endpoint | files=docs
 lint | tidy the api module | files=src/api/util.sh
 TASKS
 out="$( cd "$REPO" && cmd_plan_start ps "$TMP/tasks.txt" --max-parallel 3 --dry-run 2>&1 )"
-printf '%s' "$out" | grep -q 'ui *after api (declared)' && printf '%s' "$out" | grep -q 'lint *after api (both touch src/api/util.sh -> src/api)' \
-  && printf '%s' "$out" | grep -q 'docs *starts now' && [ ! -d "$OSRC_HOME/plans/ps" ] \
+grep -q 'ui *after api (declared)' <<<"$out" && grep -q 'lint *after api (both touch src/api/util.sh -> src/api)' <<<"$out" \
+  && grep -q 'docs *starts now' <<<"$out" && [ ! -d "$OSRC_HOME/plans/ps" ] \
   && ok "L5: plan start --dry-run shows the order and why, and creates nothing" || bad "L5 dry run: $out"
 for t in t1 t2 t3 t4; do echo running > "$TMP/outcomes/$t"; done
 : > "$TMP/launches"
