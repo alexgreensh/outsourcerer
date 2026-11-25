@@ -82,7 +82,11 @@ _osrc_scr_load() {
   done < <(LC_ALL=C awk '
     { raw=$0; s=$0
       gsub(/\033\][^\007\033]*(\007|\033\\)/, "", s); gsub(/\033\[[0-9;?<=>]*[ -\/]*[@-~]/, "", s)
-      gsub(/\033[()][0-9A-Za-z]/, "", s); gsub(/\r/, "", s); gsub(/\302\240/, " ", s); sub(/[ \t]+$/, "", s)
+      gsub(/\033[()][0-9A-Za-z]/, "", s); gsub(/\r/, "", s)
+      # A no-break space right after a glyph (CC draws "⏺\302\240") reads as a space; anywhere else it
+      # stays, so command text reaches the classifier as drawn (it holds U+00A0).
+      while (match(s, /[\342][\200-\277][\200-\277]\302\240/)) s = substr(s, 1, RSTART + 2) " " substr(s, RSTART + 5)
+      sub(/[ \t]+$/, "", s)
       if (s ~ /^[ \t]*$/) next
       dim = (raw ~ /\033\[2m/ || raw ~ /\033\[38;2;124;124;124m/ || raw ~ /\033\[90m/) ? 1 : 0
       print dim "|" s }')
@@ -286,24 +290,27 @@ _osrc_scr_after_composer() { # <user-line-glob> <assistant-glob>
 }
 
 _osrc_scr_codex() {
-  local n=$_SCR_N lo i j l c
+  local n=$_SCR_N lo i j l c m
   lo=$((n - 30)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*Press enter to confirm or esc to cancel*" $((n - 3 > 0 ? n - 3 : 0)); then
     OSRC_SCR_KIND=other
+    m="$(_osrc_scr_last "› *" "$lo")"; [ "$m" -ge 0 ] && OSRC_SCR_SEL="$(_osrc_scr_trim "${_SCR_L[$m]#› }")"
     i="$(_osrc_scr_last "*Would you like to run the following command?*" "$lo")"
     if [ "$i" -ge 0 ]; then
+      # The command is the first "$ " row and every row after it up to the selected menu row; no row
+      # text (a wrapped "1. ..." or "$ ...") ends or restarts it early.
       OSRC_SCR_KIND=shell; j=$((i + 1)); c=""
-      while [ "$j" -lt "$n" ]; do
+      while [ "$j" -lt "$m" ]; do
         l="$(_osrc_scr_trim "${_SCR_L[$j]}")"
-        case "$l" in "\$ "*) c="${l#\$ }" ;; "› 1."*|"1. "*) break ;; *) [ -n "$c" ] && c="$c
-$l" ;; esac
+        if [ -n "$c" ]; then c="$c
+$l"; else case "$l" in "\$ "?*) c="${l#\$ }" ;; esac; fi
         j=$((j + 1))
       done
       OSRC_SCR_CMD="$c"
-    elif _osrc_scr_any "*Would you like to make the following edits?*" "$lo"; then
-      OSRC_SCR_KIND=write
     fi
-    i="$(_osrc_scr_last "› *" "$lo")"; [ "$i" -ge 0 ] && OSRC_SCR_SEL="$(_osrc_scr_trim "${_SCR_L[$i]#› }")"
+    if [ "$OSRC_SCR_KIND" = other ] && _osrc_scr_any "*Would you like to make the following edits?*" "$lo"; then
+      OSRC_SCR_KIND=write   # no path: an edit holds until a real capture shows how Codex draws its target
+    fi
     _osrc_scr_set approval "codex approval [${OSRC_SCR_KIND}] ${OSRC_SCR_CMD}"; return 0
   fi
   if _osrc_scr_any "*enter continue · esc back*" $((n - 3 > 0 ? n - 3 : 0)); then
@@ -336,46 +343,25 @@ _osrc_scr_devin() {
   lo=$((n - 25)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*confirm · esc cancel*" $((n - 2 > 0 ? n - 2 : 0)); then
     OSRC_SCR_KIND=other
-    # Menu row first, then the command: every row from the `$ ` row up to the menu is joined,
-    # so a command Devin wraps onto a second row reaches the classifier whole (multi-line holds).
+    # Fail closed: a command is read only when the modal is the header row 'This action requires your
+    # approval.' (the first one on screen, at column 0, inside the window), then exactly one command row,
+    # then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra rows) gives no
+    # command, so the approval is held for a person. The menu's Kind(target) tag names the action.
     local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
-    i="$(_osrc_scr_last "*\$ *" "$lo" $((m - 1)))"
-    case "${_SCR_L[$i]:-}" in *"└ \$ "*|"\$ "*|" \$ "*)
-      OSRC_SCR_KIND=shell; OSRC_SCR_CMD="$(_osrc_scr_trim "${_SCR_L[$i]#*\$ }")"; i=$((i + 1))
-      while [ "$i" -lt "$m" ]; do
-        OSRC_SCR_CMD="$OSRC_SCR_CMD
-$(_osrc_scr_trim "${_SCR_L[$i]}")"; i=$((i + 1))
-      done ;;
-    esac
-    # Newer Devin modal: '▲ Approval required / This action requires your approval.' then the
-    # command (plain or inside a drawn box), then '❭ Allow ← ◼◼◼◼ → Once   Exec(prog)'. The
-    # Kind(target) tag on the menu row names the action; the command sits between the header
-    # and the menu. Lines are joined with a newline: the classifier holds multi-line commands
-    # rather than risk merging two real lines into a safe-looking single line.
-    if [ -z "$OSRC_SCR_CMD" ] && [ "$OSRC_SCR_KIND" = other ] && [ "$m" -lt "$n" ]; then
+    if [ "$m" -lt "$n" ]; then
       case "${_SCR_L[$m]}" in
         *"Exec("*) OSRC_SCR_KIND=shell ;;
         *"Write("*|*"Edit("*|*"Create("*|*"Overwrite("*) OSRC_SCR_KIND=write ;;
         *"Read("*) OSRC_SCR_KIND=read ;;
       esac
-      if [ "$OSRC_SCR_KIND" != other ]; then
-        OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
-        hdr="$(_osrc_scr_last "*requires your approval*" "$lo" $((m - 1)))"
-        [ "$hdr" -ge 0 ] || hdr="$(_osrc_scr_last "*Approval required*" "$lo" $((m - 1)))"
-        i=$((hdr + 1))
-        while [ "$i" -ge 1 ] && [ "$i" -lt "$m" ]; do
-          l="$(printf '%s' "${_SCR_L[$i]}" | sed -E 's/^[[:space:]│┃║|]+//; s/[[:space:]│┃║|]+$//')"
-          l="$(_osrc_scr_trim "$l")"
-          case "$l" in
-            ""|"❭ "*|*"requires your approval"*|*"Bypass mode"*|*"Deny"*) ;;
-            "Exec("*")"|"Write("*")"|"Edit("*")"|"Create("*")"|"Read("*")"|"Overwrite("*")") ;;
-            ─*|═*|━*|─*|┄*|┈*|"╭"─*|"╰"─*|"┌"─*|"└"─*) ;;
-            *) OSRC_SCR_CMD="${OSRC_SCR_CMD:+$OSRC_SCR_CMD
-}$l" ;;
-          esac
-          i=$((i + 1))
-        done
-      fi
+      OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
+      hdr=0; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
+      l="$(_osrc_scr_trim "${_SCR_L[$((m - 1))]:-}")"
+      case "${_SCR_L[$hdr]}" in "This action requires your approval"*)
+        if [ "$OSRC_SCR_KIND" != other ] && [ "$hdr" -ge "$lo" ] && [ "$hdr" -eq $((m - 2)) ]; then
+          case "$l" in ""|"\$ "*|[│┃║\|─═━┄┈╭╰┌└]*) ;; *) OSRC_SCR_CMD="$l" ;; esac
+        fi ;;
+      esac
     fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
@@ -429,8 +415,8 @@ _osrc_scr_agy() {
 }
 
 _osrc_scr_gemini() {
-  # gemini-cli (keyed). Fixtures: trust menu only (the CLI refused OAuth on this machine on
-  # 2026-11-13), so approval wording below is from the CLI's documented prompts and is unproven.
+  # gemini-cli (keyed). Approval menus stay "other" and hold: the only approval layout ever matched
+  # was constructed, and the real 0.58 one puts the command in a separate box no capture here covers.
   local n=$_SCR_N lo i
   lo=$((n - 30)); [ "$lo" -ge 0 ] || lo=0
   i="$(_osrc_scr_last "*● 1. *" "$lo")"

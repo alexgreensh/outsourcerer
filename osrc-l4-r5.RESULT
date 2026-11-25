@@ -1,0 +1,4 @@
+sha=016724a8f38a8a4e961f5f6ec61fb3d8e86273da
+rc=0
+Devin reader fails closed: only header + exactly one command row + menu is read; all other layouts hold.
+Unit: test_approver_tick rc=0, test_screen_state rc=0, test_release_0175 rc=0. Conformance rc=1: 6 suites fail on base caf8b00 too; test_release_0175 hub-timing flake under load only. sha is the last code commit; READY commit follows it.

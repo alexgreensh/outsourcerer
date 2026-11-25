@@ -395,8 +395,8 @@ row="$(scranz dv-approval-modal-box)"
 IFS='|' read -r _st _kind _sel _scope _path _cmd <<EOF
 $row
 EOF
-[ "$_kind" = shell ] && [ "$_cmd" = 'jq -r .name out/report.json' ]   && ok "boxed command row: borders stripped, command whole"   || bad "boxed cmd wrong: '$_cmd' kind=$_kind"
-v="$(classify "$_cmd" "$_path")"; case "$v" in approve\ *) ok "boxed jq approves" ;; *) bad "boxed jq held: $v" ;; esac
+[ "$_kind" = shell ] && [ -z "$_cmd" ] && ok "boxed command (3 rows) gives no command" || bad "boxed cmd read: '$_cmd' kind=$_kind"
+v="$(classify "$_cmd" "$_path")"; case "$v" in hold\ *) ok "boxed jq holds" ;; *) bad "boxed jq approved: $v" ;; esac
 
 row="$(scranz dv-approval-modal-rm)"
 IFS='|' read -r _st _kind _sel _scope _path _cmd <<EOF
@@ -404,11 +404,11 @@ $row
 EOF
 v="$(classify "$_cmd" "$_path")"; case "$v" in hold\ *) ok "Exec(rm) 'rm -rf ~' still holds" ;; *) bad "rm -rf approved: $v" ;; esac
 
-# The pre-modal shapes still parse exactly as before.
+# The pre-modal '└ $' shape gives no command, so it holds.
 row="$(scranz dv-approval)"; IFS='|' read -r _st _kind _sel _scope _path _cmd <<EOF
 $row
 EOF
-[ "$_kind" = shell ] && [ "$_cmd" = 'touch made-by-devin.txt && ls' ]   && ok "old '└ $' prompt still parses" || bad "old prompt broke: $_kind '$_cmd'"
+[ "$_kind" = shell ] && [ -z "$_cmd" ] && ok "old '└ $' prompt gives no command" || bad "old prompt read: $_kind '$_cmd'"
 
 # 'Bypass mode' can never be an approve-once row, whatever the command is.
 ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1

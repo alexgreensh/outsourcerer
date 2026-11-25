@@ -143,9 +143,12 @@ osrc_approver_tick() { # <pane> [session-id]
       _endpoint_mutation_lock "$pane" || return 1
       lockkey="$(printf '%s' "$pane" | cksum | awk '{print $1}')"
     fi
-    local want_cmd="$OSRC_SCR_CMD" want_path="$OSRC_SCR_PATH"
+    # Every decision input is read again and the verdict recomputed: kind, path, command, selected
+    # row, worktree. Anything that changed (a resize redraw included) is a different prompt.
+    local want_cmd="$OSRC_SCR_CMD" want_path="$OSRC_SCR_PATH" want_kind="$OSRC_SCR_KIND"
     cap="$(_osrc_screen_capture "$pane")"; _osrc_screen_analyze_text "$eng" <<<"$cap"
-    if [ "$OSRC_SCR_STATE" != approval ] || [ "$OSRC_SCR_CMD" != "$want_cmd" ] || [ "$OSRC_SCR_PATH" != "$want_path" ] || ! _osrc_approver_once_row; then
+    if [ "$OSRC_SCR_STATE" != approval ] || [ "$OSRC_SCR_KIND|$OSRC_SCR_PATH|$OSRC_SCR_CMD" != "$want_kind|$want_path|$want_cmd" ] || ! _osrc_approver_once_row \
+      || [ "$(_osrc_approver_root "$pane")" != "$root" ] || [ "$(_osrc_approver_classify "$root" "$OSRC_SCR_KIND" "$OSRC_SCR_PATH" "$OSRC_SCR_CMD")" != "$verdict" ]; then
       [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
       return 1
     fi

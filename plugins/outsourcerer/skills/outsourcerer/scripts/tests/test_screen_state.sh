@@ -45,11 +45,14 @@ cx-trust-folder-menu|codex|approval|trust|
 dv-idle|devin|composer||
 dv-working|devin|working||
 dv-idle-after-work|devin|idle||
-dv-approval|devin|approval|shell|touch made-by-devin.txt && ls
+dv-approval|devin|approval|shell|
 dv-approval-wrapped|devin|approval|shell|
 dv-approval-modal|devin|approval|shell|SCRATCH=/tmp/osrc-scratch && jq -r .name /tmp/osrc-scratch/report.json; echo done
-dv-approval-modal-box|devin|approval|shell|jq -r .name out/report.json
+dv-approval-modal-box|devin|approval|shell|
 dv-approval-modal-rm|devin|approval|shell|rm -rf ~/Documents
+dv-approval-modal-safe-wrapped|devin|approval|shell|
+dv-approval-modal-status-line|devin|approval|shell|
+dv-approval-modal-wide-wrap|devin|approval|shell|
 cc-idle-status-auto|cc|idle||
 cc-idle-status-bypass|cc|idle||
 cc-idle-status-plan|cc|idle||
@@ -61,7 +64,8 @@ agy-idle-after-work|agy|idle||
 agy-approval|agy|approval|shell|touch made-by-agy.txt && ls
 agy-file-approval|agy|approval|write|/Users/dev/work/demo-projects/example-workspace/project/outsourcerer/outputs/build/wt-auto-L3/.osrc-test-L3/work-agy/notes.txt
 agy-trust-folder-menu|agy|approval|trust|
-gm-trust-folder-menu|gemini|approval|trust|'
+gm-trust-folder-menu|gemini|approval|trust|
+gm-approval-shell|gemini|approval|other|'
 
 check_table() { # <label> [hint-mode: hint|guess]
   local mode="$1" f eng want kind what hint n=0
@@ -107,14 +111,11 @@ _osrc_screen_analyze_text cc < "$FX/cc-composer-typed-unsent.ansi"
 case "$OSRC_SCR_COMPOSER" in "When you finish, reply with exactly: ROUND4 DONE."*) ok ;; *) bad "typed composer text not extracted: $OSRC_SCR_COMPOSER" ;; esac
 [ "$OSRC_SCR_STATE" = composer ] && ok || bad "typed [y/N] text in the composer read as $OSRC_SCR_STATE"
 
-# ---- a Devin command wrapped onto two rows is read whole (both rows, multi-line) -------
-_osrc_screen_analyze_text devin < "$FX/dv-approval-wrapped.ansi"
-want_cmd="ls -la src &&
-rm -rf ~/Documents"
-[ "$OSRC_SCR_STATE" = approval ] && [ "$OSRC_SCR_CMD" = "$want_cmd" ] && ok || bad "devin wrapped command read as [$OSRC_SCR_CMD]"
-[ "$OSRC_SCR_SEL" = Allow ] && [ "$OSRC_SCR_SCOPE" = once ] && ok || bad "devin wrapped: sel=$OSRC_SCR_SEL scope=$OSRC_SCR_SCOPE"
-_osrc_screen_analyze_text devin < "$FX/dv-approval.ansi"
-[ "$OSRC_SCR_CMD" = "touch made-by-devin.txt && ls" ] && ok || bad "devin single-row command now reads [$OSRC_SCR_CMD]"
+# ---- old-layout Devin rows ("$ " command) give no command; the menu is still read -------
+for f in dv-approval-wrapped dv-approval; do
+  _osrc_screen_analyze_text devin < "$FX/$f.ansi"
+  [ "$OSRC_SCR_STATE" = approval ] && [ -z "$OSRC_SCR_CMD" ] && [ "$OSRC_SCR_SEL" = Allow ] && [ "$OSRC_SCR_SCOPE" = once ] && ok || bad "devin $f: cmd=[$OSRC_SCR_CMD] sel=$OSRC_SCR_SEL scope=$OSRC_SCR_SCOPE"
+done
 
 # ---- osrc_screen_state through a fake tmux (contract: 2 lines) -------------------------------------
 CAP=""; tmux() { case "$1" in capture-pane) cat "$CAP" ;; display-message) printf '%s\n' "$TMP" ;; send-keys) printf '%s\n' "$*" >> "$TMP/keys" ;; *) return 0 ;; esac; }
