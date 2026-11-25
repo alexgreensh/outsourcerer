@@ -189,7 +189,7 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   transport="$(jq -r '.transport' "$f")"; branch="$(jq -r '.branch' "$f")"; url="$(jq -r '.url' "$f")"
   prev="$(jq -r '.head // ""' "$f")"; marker="$(jq -r '.ready_marker' "$f")"
   names=""
-  local prim="$branch" pass=1
+  local prim="$branch" pass=1 lsout=""
   while :; do
   head=""; msg=""; names=""; rc=0
   if [ "$transport" = gh ]; then
@@ -205,15 +205,18 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
       names="$(printf '%s' "$out" | jq -r '.files[]?.filename' 2>/dev/null)"
     fi
   else
-    out="$(_osrc_net git ls-remote "$url" "refs/heads/$branch" 2>"$f.err")" || rc=$?
-    err="$(cat "$f.err" 2>/dev/null)"; rm -f "$f.err"
-    if [ "$rc" -ne 0 ]; then _osrc_lane_poll_err "$id" "$f" "$now" net "$err"; return 0; fi
-    head="$(printf '%s\n' "$out" | awk 'NR==1{print $1}')"
+    # one call covers the lane branch and the session's own claude/<id>-* branch
+    if [ "$pass" = 1 ]; then
+      lsout="$(_osrc_net git ls-remote "$url" "refs/heads/$branch" "refs/heads/claude/$id-*" 2>"$f.err")" || rc=$?
+      err="$(cat "$f.err" 2>/dev/null)"; rm -f "$f.err"
+      if [ "$rc" -ne 0 ]; then _osrc_lane_poll_err "$id" "$f" "$now" net "$err"; return 0; fi
+    fi
+    head="$(printf '%s\n' "$lsout" | awk -v r="refs/heads/$branch" '$2==r{print $1; exit}')"
   fi
   # Claude cloud sessions sometimes push only to their own claude/<id>-<suffix> branch: when the
   # lane branch is absent, look for that one and follow it (a READY marker there counts).
   if [ -z "$head" ] && [ "$pass" = 1 ]; then
-    pass=2; branch="$(_osrc_lane_alt_branch "$id" "$f" "$transport" "$url")"
+    pass=2; branch="$(_osrc_lane_alt_branch "$id" "$f" "$transport" "$url" "$lsout")"
     [ -n "$branch" ] && [ "$branch" != "$prim" ] && continue
     branch="$prim"
   fi
@@ -261,12 +264,12 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
 # <id> <json> <transport> <url> -> the session's own branch claude/<id>-<suffix> (the remote, else
 # the name in the launch log), or nothing.
 _osrc_lane_alt_branch() {
-  local id="$1" f="$2" transport="$3" url="$4" b out=""
+  local id="$1" f="$2" transport="$3" url="$4" lsout="${5:-}" b out=""
   b="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
   if [ "$transport" = gh ]; then
     ! have gh || out="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[0].ref // ""' 2>/dev/null)"
   else
-    out="$(_osrc_net git ls-remote "$url" "refs/heads/claude/$id-*" 2>/dev/null | awk 'NR==1{print $2}')"
+    out="$(printf '%s\n' "$lsout" | awk '$2 ~ /^refs\/heads\/claude\//{print $2; exit}')"
   fi
   [ -z "$out" ] || b="${out#refs/heads/}"
   printf '%s' "$b"

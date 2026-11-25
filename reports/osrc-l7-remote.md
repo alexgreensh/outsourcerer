@@ -43,7 +43,8 @@ Fixes for the review of `2235be9` plus three bugs seen live. Files: `lib/cloudru
 ### Tests
 - `bash tests/test_cloudrun.sh`: 128 passed, rc=0.
 - `bash tests/test_lane_status.sh`: 16 passed, rc=0.
-- Conformance and `test_remote_review`: see the RESULT file.
+- `bash tests/test_remote_review.sh`: 106 passed, rc=0. A first conformance run caught a real regression of mine (an extra `ls-remote` per poll while the lane branch was missing; test "poll rate limit"). Fixed: one `ls-remote` call now covers both the lane branch and `claude/<id>-*`.
+- `bash tests/conformance.sh` (before that fix): rc=1, 240 passed, 8 failed. Six of the failures (test_harness_isolation, test_vocab_hygiene, test_supervise_pgroup_kill, test_parity_insource_refresh, test_conformance_suite_timeout, test_sealed_fixes) also fail on the unmodified base `2235be9` in this root-user container. test_release_0175 passed alone (rc=0) and failed only under load. test_remote_review is the regression above. Conformance was not re-run after the fix; the affected suites were re-run individually and pass.
 
 ### Unproven / choices
 - P3-7 and P3-8 (session-state evidence, live trust screen text) are not addressed: they need a vehicle status API and a live capture.
