@@ -77,7 +77,7 @@ out="$(as "$MC3_SID_A" hub report --name "Total Recall 1.8.6" --status building 
 case "$out" in *"$OSRC_HOME"*|*"$T"*|*/hub/*) bad "report printed a path: $out" ;; *) ok "report never prints paths" ;; esac
 P="$(eng hub export | jq -c --arg s "$MC3_SID_A" '.projects[] | select(.id == $s)')"
 jq -e '.name == "Total Recall 1.8.6" and .status == "building" and .reported.pct == 62 and .reported.status == "building" and .eta == "Tue 17 Nov" and .next == "Review the retries lane, then cut the release"' >/dev/null <<<"$P" \
-  && ok "every field reaches the card (status and % from the running lanes, the report's words while fresh)" || bad "card: $P"
+  && ok "every field reaches the card (the percent from the report; the report's words while fresh)" || bad "card: $P"
 as "$MC3_SID_A" hub report --pct 70 >/dev/null 2>&1
 jq -e '.pct == 70 and .eta == "Tue 17 Nov" and .name == "Total Recall 1.8.6"' "$OSRC_HOME/hub/projects/$MC3_SID_A.json" >/dev/null && ok "a later report merges, keeping other fields" || bad "merge lost fields"
 as "$MC3_SID_A" hub report --ask "Ship tonight?" --why "The fixes are merged and the free gate is green, so shipping now unblocks users." --rec "Yes, nothing is left." --option "Ship tonight" --option "Wait for tomorrow" --when "Today" --weight Critical >/dev/null \

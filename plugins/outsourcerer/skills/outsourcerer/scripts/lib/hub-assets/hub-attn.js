@@ -16,6 +16,7 @@
   function Tracker() {
     const st = {}; let gen = null, prev = null;
     function update(projects, openDecs) {
+      if (prev === null && !projects.length) return { count: 0, fresh: [] };   // not the first real data: later items are not "new"
       const g = projects.map((p) => p.exported_at || 0).join(',');
       if (g !== gen) {
         gen = g; const live = {};

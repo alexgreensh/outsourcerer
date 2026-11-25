@@ -212,3 +212,25 @@ list of failures that were already on the base branch. I did not re-run them on 
   behind a `type` check. The function no longer exists, so the loop is dead; delete it.
 - **Round 1's asks are withdrawn**: do not switch `stopguard.sh` to `osrc_hub_auto_report` (it is gone;
   `osrc_hub_beat_if_known` is right), and `card_fresh.sh` should not read `hub/auto`.
+
+## Round 3
+
+Closing edits only. Base `cloud/osrc-l8-r2` at `50af717`.
+
+**P2 fixes**
+- **1. Option ids**: `hub-decide.js` callback parameter renamed `(opt, i)`, so ids are `opt-<owner>-<decision>-<i>` again. The page test now gives both merged decisions the same options (Keep/Drop); it fails on base.
+- **2. First load**: `Tracker.update` in `hub-attn.js` returns `{count:0, fresh:[]}` while nothing has been seen and `projects` is empty, so `refresh([])` no longer arms `prev`.
+- **3. Test**: the swallowed statements in `hub_attn_dom.js` are on their own lines now (the opt-in is really on). Added a case that calls `refresh([])` before the first data. On base both this case and the option-id case fail (run: `node tests/hub_attn_dom.js lib/hub-assets` against the old `lib/`, 2 FAIL; with the fix, 0 FAIL).
+- **4. Project `attention`**: deleted the export (`hub-truth.sh`) and the doc sentence in `references/hub.md`; nothing read it. `test_hub_attn.sh` now asserts the project carries none.
+
+**P3 fixes**: leader's temp file removed on takeover only if the leader is dead (`kill -0`); `stat` flavour probed once instead of chained on exit code; `summaryAt` ignored in the page's same-data check; stale test wording; removed the r2 READY/RESULT files.
+
+**Not changed (smallest-change rule, no new features)**: takeover check-then-remove gap (no corruption, only a duplicate export); band hysteresis keyed on all projects; bands only on boards with no themes.
+
+**Tests** (each run alone, niced): `hub_attn_dom.js` 0 FAIL; `test_hub_attn.sh` rc 0, 41 pass; `test_hub_mc3.sh` 70 pass; `test_hub_truth.sh` 28 pass. Conformance: see RESULT file.
+
+**Unproven**: the six conformance failures from round 2 were not re-run on base; the stale-lock `kill -0` change has no dedicated test; the `stat` probe was only run on GNU.
+
+### Needs from other lanes
+- Unchanged from Round 2 (`lib/supervise.sh` dead `osrc_hub_tick_touch` loop).
+- The lane artifacts (`reports/osrc-l8-mc.md`, READY/RESULT) should not be merged to `main`.

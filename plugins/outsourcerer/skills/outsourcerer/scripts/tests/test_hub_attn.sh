@@ -28,20 +28,16 @@ in='{"lanes":[{"id":"w","state":"working","status":"Building"},{"id":"r","status
  {"id":"a","state":"approval"},{"id":"p","status":"Building","proof":{"stopped":true}}],
  "alerts":[{"kind":"stalled","lane":"s","text":"x"},{"kind":"unreviewed","lane":"w","text":"y"}]}'
 out="$(lib _osrc_hub_truth "$in" "$(date +%s)")"
-jq -e '[.lanes[] | "\(.id)=\(.attention)"] == ["w=working","r=ready","d=finished","l=limit","s=stalled","v=review","f=failed","q=question","a=approval","p=proof"] and .attention == "approval"' >/dev/null <<<"$out" \
-  && ok "each lane gets one attention; the project shows the highest (held approval)" || no "lanes: $(jq -c '[.lanes[]|.id+"="+.attention], .attention' <<<"$out")"
-out="$(lib _osrc_hub_truth '{"lanes":[{"id":"w","status":"Building"}],"decisions":[{"id":"D1","status":"wait"}]}' "$(date +%s)")"
-jq -e '.attention == "question"' >/dev/null <<<"$out" && ok "an open question outranks a working lane on the project" || no "open question: $out"
-out="$(lib _osrc_hub_truth '{"lanes":[{"id":"w","status":"Building"}],"decisions":[{"id":"D1","status":"done"}]}' "$(date +%s)")"
-jq -e '.attention == "working"' >/dev/null <<<"$out" && ok "an answered question does not" || no "answered: $out"
+jq -e '[.lanes[] | "\(.id)=\(.attention)"] == ["w=working","r=ready","d=finished","l=limit","s=stalled","v=review","f=failed","q=question","a=approval","p=proof"] and (has("attention") | not)' >/dev/null <<<"$out" \
+  && ok "each lane gets one attention; the project carries none" || no "lanes: $(jq -c '[.lanes[]|.id+"="+.attention], .attention' <<<"$out")"
 
 echo "=== export ==="
 mkdir -p "$OSRC_HOME/owners/s-at/" "$OSRC_JOBS/j1" "$OSRC_JOBS/j2"
 for j in j1:running j2:done; do : > "$OSRC_HOME/owners/s-at/${j%%:*}"; echo "${j#*:}" > "$OSRC_JOBS/${j%%:*}/status"; echo '{"provider":"codex"}' > "$OSRC_JOBS/${j%%:*}/meta.json"; done
 mkdir -p "$OSRC_HOME/hub/seen/s-at"; touch "$OSRC_HOME/hub/seen/s-at/.beat"
 c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-at")')"
-jq -e '([.lanes[] | {(.id): .attention}] | add) == {"j1":"working","j2":"finished"} and .attention == "working"' >/dev/null <<<"$c" \
-  && ok "the export tags every lane and the project" || no "export: $(jq -c '{a:.attention, l:[.lanes[]?|{id,attention}]}' <<<"$c")"
+jq -e '([.lanes[] | {(.id): .attention}] | add) == {"j1":"working","j2":"finished"}' >/dev/null <<<"$c" \
+  && ok "the export tags every lane" || no "export: $(jq -c '{a:.attention, l:[.lanes[]?|{id,attention}]}' <<<"$c")"
 
 echo "=== page ==="
 if command -v node >/dev/null 2>&1; then

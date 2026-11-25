@@ -445,7 +445,7 @@ a.pill svg { width: 13px; height: 13px; }
     }, (e) => { const x = new Error(ac.signal.aborted ? 'Not sent, try again' : ((e && e.message) || 'unreachable')); x.timeout = ac.signal.aborted; throw x; }).finally(() => clearTimeout(t));
   }
   // A poll that brings the same data re-renders nothing (exported_at changes on every export, so it is ignored).
-  const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' ? undefined : v));
+  const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' || k === 'summaryAt' ? undefined : v));
   function applyProjects(snap) {
     const s = sig(snap); if (s === sigP && !firstPull && !pullErr) return; sigP = s;
     pullErr = '';

@@ -87,15 +87,19 @@ decs = [{ id: 'D1', owner: 's1', q: 'Keep the old planner?', options: ['Keep', '
 doc.hidden = false; A.refresh(proj(2));
 ok(doc.title === '(1) Mission Control' && icon.href === 'data:image/png;base64,DOT', 'one open question: "(1) Mission Control" and a dot on the favicon');
 ok(notes.length === 0, 'no notification while the tab is visible');
-decs.push({ id: 'D1', owner: 's2', q: 'Ship tonight?', options: ['Yes', 'No'] });
+decs.push({ id: 'D1', owner: 's2', q: 'Ship tonight?', options: ['Keep', 'Drop'] });
 doc.hidden = true; A.refresh(proj(3));
 ok(notes.length === 1 && notes[0].o.body === 'Garden app: something is waiting on you' && notes[0].o.tag, 'hidden tab + opted in: one grouped notification on the transition');
 A.refresh(proj(4));
 ok(notes.length === 1, 'no repeat while the same items keep waiting');
 store['osrc-hub-notify'] = '0'; decs.push({ id: 'D2', owner: 's2', q: 'More?', options: ['a'] }); A.refresh(proj(5));
 ok(notes.length === 1, 'never without the opt-in click');
-const A2 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();   // one page, one key handler store['osrc-hub-notify'] = '1'; doc.hidden = true; A2.refresh(proj(6));
+const A2 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();   // one page, one key handler
+store['osrc-hub-notify'] = '1'; doc.hidden = true; A2.refresh(proj(6));
 ok(notes.length === 1, 'never on first load');
+const A3 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();
+A3.refresh([]); A3.refresh(proj(7));
+ok(notes.length === 1, 'never on first load, even when limits or answers render before the projects arrive');
 
 // Merged card: two sessions' D1 -> distinct ids (P5).
 const card = { id: 's1', name: 'Garden app' };

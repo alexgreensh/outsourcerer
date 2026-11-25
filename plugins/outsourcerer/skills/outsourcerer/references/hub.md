@@ -142,8 +142,8 @@ A half-typed answer survives every poll and re-render: the page keeps a per-deci
 
 ## Attention
 
-Each export gives every lane one `attention` value, from signals it already has, and each project the
-highest of its lanes (an open question on the card counts as `question`). The order, most urgent first:
+Each export gives every lane one `attention` value, from signals it already has (the page counts open
+questions itself). The order, most urgent first:
 
 1. `approval`: the lane's screen holds a permission prompt.
 2. `question`: the lane asks a question, or the card has an open decision.

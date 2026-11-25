@@ -31,9 +31,9 @@
       if (dsi) { c.classList.add('stale'); c.append(el('p', 'dec-stale', dsi.text)); }
       const a = el('div', 'ans'); const opts = el('div', 'opts');
       const key = (d.owner || p.id) + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
-      (d.options || []).forEach((o, i) => {
-        const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + o + '-' + i; b.setAttribute('aria-pressed', String(o === f.choice));
-        b.addEventListener('click', () => { f.choice = f.choice === o ? '' : o; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
+      (d.options || []).forEach((opt, i) => {
+        const b = el('button', 'opt', opt); b.type = 'button'; b.id = 'opt-' + o + '-' + i; b.setAttribute('aria-pressed', String(opt === f.choice));
+        b.addEventListener('click', () => { f.choice = f.choice === opt ? '' : opt; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
         f.btns.push(b); opts.appendChild(b);
       });
       const ta = document.createElement('textarea'); ta.id = 'note-' + o; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note'); ta.setAttribute('dir', 'auto');

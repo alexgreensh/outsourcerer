@@ -106,7 +106,7 @@ EOF
   # One stat for every transcript (GNU first: GNU `stat -f` is filesystem status), joined by path.
   local mt=""
   if [ "${#tps[@]}" -gt 0 ]; then
-    mt="$(stat -c '%Y|%n' "${tps[@]}" 2>/dev/null)" || mt="$(stat -f '%m|%N' "${tps[@]}" 2>/dev/null)"
+    if stat -c %Y / >/dev/null 2>&1; then mt="$(stat -c '%Y|%n' "${tps[@]}" 2>/dev/null)"; else mt="$(stat -f '%m|%N' "${tps[@]}" 2>/dev/null)"; fi
   fi
   # The mtimes go in on stdin ahead of the rows: macOS awk rejects a multi-line -v ("newline in string").
   { [ -z "$mt" ] || printf '%s\n' "$mt"; printf '@rows\n%s' "$rows"; } | awk -F'|' -v OFS='|' '
@@ -186,12 +186,9 @@ _osrc_hub_truth() {
           | select(mins($f.at) >= $pm and ($or.lastAt // 0) < $f.at)
           | {kind:"unpicked", lane:$f.id, since:$f.at, text:("lane \($f.short) finished \(mins($f.at)) min ago, nobody picked it up")}]) as $al
     | (if ($al | length) > 0 then .alerts = ((.alerts // []) + $al) else . end)
-    # One attention per lane; the project shows its highest (an open question counts too).
+    # One attention per lane.
     | ([.alerts[]? | select(.lane != null and ((.kind // "") | IN("unreviewed", "unpicked") | not)) | .lane]) as $st
     | (if has("lanes") then .lanes |= map(. + {attention: lattn($st)}) else . end)
-    | ([.lanes[]?.attention] + (if any(.decisions[]?; (.status // "wait") != "done") then ["question"] else [] end)) as $as
-    | (attn_order | map(select(IN($as[]))) | .[0]) as $pa
-    | (if $pa then .attention = $pa else del(.attention) end)
     | del(.derived)
   ' <<<"$1" 2>/dev/null || printf '%s' "$1"
 }
@@ -288,7 +285,7 @@ _osrc_hub_single_flight() {
     fi
     pid="$(cat "$lk/pid" 2>/dev/null)"; age=$(( $(date +%s) - $(_osrc_hub_mt "$lk") ))
     if [ "$age" -gt "$stale" ] || { [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; } || { [ -z "$pid" ] && [ "$age" -gt 10 ]; }; then
-      rm -rf "$lk" 2>/dev/null; [ -z "$pid" ] || rm -f "$out.$pid" 2>/dev/null; continue
+      rm -rf "$lk" 2>/dev/null; { [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null; } || rm -f "$out.$pid" 2>/dev/null; continue
     fi
     seen=1; sleep 0.2 2>/dev/null || sleep 1
     [ $(( $(date +%s) - start )) -lt "$wait" ] || { "$@"; return; }

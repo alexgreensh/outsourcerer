@@ -1,3 +1,0 @@
-sha=54581a0e70546513e1c41d68f685f8a1b7a5096e
-rc=0
-Round 2 of Mission Control: P1 1-2 (macOS awk, bash 3.2 cache), P1 3 (tick is not orchestrator life), P2 4-7 (stale lock, merged-card ids, no lane-count percent, auto-report removed), selected P3s, plus attention/bands/title+favicon+notification/keys. Regression tests fail on base and pass here. Conformance: 242 pass, 7 fail (1 mine, fixed; 6 already on base per round 1). Not run on a real Mac: bash 3.2 was emulated, BSD awk tested with original-awk. See reports/osrc-l8-mc.md, Round 2.
