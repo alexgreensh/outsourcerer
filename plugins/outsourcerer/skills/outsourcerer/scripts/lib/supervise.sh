@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # lib/supervise.sh: ONE blocking waiter for everything an orchestrator owns.
 #
-#   outsourcerer.sh supervise [--session SID | --all] [--watch DIR|FILE ...] [id ...]
+#   outsourcerer.sh supervise [--session SID | --all] [--loop] [--watch DIR|FILE ...] [id ...]
 #   outsourcerer.sh supervise --unwatch DIR|FILE
 #
 # Blocks until something the current Claude Code session owns ($OSRC_HOME/owners/<sid>/, or the
@@ -27,6 +27,8 @@
 # No owned live work -> `EVENT done all`. Any internal error -> `EVENT failed supervise`, exit 2.
 # --watch: hand-in files (*.DONE, *VERDICT*, *QUESTION*) keyed on name+mtime+size+hash, so a lane
 # rewriting the same DONE file fires again (lib/supervise_watch.sh).
+# --loop (with a session): after each delivery it prints the next batch instead of exiting, and keeps
+# covering the session between batches (supervise/<sid>/loop.<pid>) until nothing is owned.
 #
 # Screen reading is NOT done here: osrc_screen_state (lib/screen.sh) classifies a pane. Until it
 # lands, a thin wrapper over the existing detectors stands in (defined only if it is missing).
@@ -582,7 +584,7 @@ _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY ->
 _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live, polling supervise for <sid> covers
   local f pid last m
   last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$1/alive" 2>/dev/null)" 0)"
-  for f in "$OSRC_HOME/supervise/$1"/armed.*; do
+  for f in "$OSRC_HOME/supervise/$1"/armed.* "$OSRC_HOME/supervise/$1"/loop.*; do
     [ -f "$f" ] || continue
     pid="${f##*.}"
     if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'supervise'; then
@@ -596,14 +598,20 @@ _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live, polling supervise
 # stop a waiter from observing and delivering.
 _sv_bounded() { # <secs> <cmd...>
   local n p i=0; n=$(( $(_sv_num "$1" 60) * 10 )); shift
-  "$@" & p=$!
+  "$@" & p=$!; _SV_BOUNDED="$p"
   while kill -0 "$p" 2>/dev/null; do
     if [ "$i" -ge "$n" ]; then
-      _kill_tree "$p" 2>/dev/null; wait "$p" 2>/dev/null; return 124   # the probe sits below a $(...): kill the whole tree
+      _sv_bounded_kill; wait "$p" 2>/dev/null; return 124   # the probe sits below a $(...): kill the whole tree
     fi
     sleep 0.1; i=$((i + 1))
   done
-  wait "$p"
+  _SV_BOUNDED=""; wait "$p"
+}
+# Also from an EXIT trap: a waiter signalled mid-probe takes the probe with it. Only a child this
+# shell still lists as running is signalled, never a pid that may have been reused.
+_sv_bounded_kill() {
+  case " $(jobs -pr 2>/dev/null | tr '\n' ' ') " in *" ${_SV_BOUNDED:-x} "*) _kill_tree "$_SV_BOUNDED" 2>/dev/null ;; esac
+  _SV_BOUNDED=""
 }
 
 # ---- the command ----------------------------------------------------------------------------------
@@ -613,7 +621,7 @@ _sv_fail() { # <reason> <rearm>
 }
 
 cmd_supervise() {
-  local _sv_all=0 scope="" sid="" ids="" once=0 rearm rc watches="" unwatch="" w wid auto="" kind
+  local _sv_all=0 scope="" sid="" ids="" once=0 loop=0 rearm rc watches="" unwatch="" w wid auto="" kind
   # A signal before the worker starts must still print the failure line, never exit silently.
   trap '_sv_fail "killed by a signal before it armed" "$SCRIPT_PATH supervise"; exit 2' TERM INT HUP
   while [ "$#" -gt 0 ]; do
@@ -622,6 +630,7 @@ cmd_supervise() {
       --session=*) sid="$(_owner_sid "${1#--session=}")"; shift ;;
       --all) _sv_all=1; shift ;;
       --once) once=1; shift ;;
+      --loop) loop=1; shift ;;
       --auto|--auto=*)
         if [ "$1" = --auto ]; then [ "$#" -ge 2 ] || { _sv_fail "--auto needs a value" "$SCRIPT_PATH supervise"; return 2; }; auto="$2"; shift 2; else auto="${1#--auto=}"; shift; fi
         case "$auto" in ''|,*|*,|*,,*|*[!A-Za-z,]*) _sv_fail "--auto needs done and/or limits" "$SCRIPT_PATH supervise"; return 2 ;; esac
@@ -633,7 +642,7 @@ cmd_supervise() {
         watches="$watches
 $w" ;;
       --unwatch) unwatch="${2:-}"; shift 2 ;;   # tests: one pass (plus settle), exit 1 when nothing is new
-      -h|--help) sed -n '2,28p' "$_SV_SELF" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
+      -h|--help) sed -n '2,30p' "$_SV_SELF" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
       -*) _sv_fail "unknown flag $1" "$SCRIPT_PATH supervise"; return 2 ;;
       *) case "$1" in */*|.|..) ;; *) ids="$ids $1" ;; esac; shift ;;
     esac
@@ -659,23 +668,30 @@ $w" ;;
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
   done <<< "$watches"
-  rearm="$SCRIPT_PATH supervise$scope${auto:+ --auto $auto}${ids}"
+  rearm="$SCRIPT_PATH supervise$scope${auto:+ --auto $auto}$([ "$loop" = 0 ] || printf ' --loop')${ids}"
   if [ "$_sv_all" = 0 ] && [ -z "$sid" ] && [ -z "$ids" ]; then
     _sv_fail "no Claude Code session id (CLAUDE_CODE_SESSION_ID unset) and no target ids" "$SCRIPT_PATH supervise --session <your-session-id>"
     return 2
   fi
   have jq || { _sv_fail "jq is required" "$rearm"; return 2; }
+  [ "$loop" = 0 ] || [ -n "$sid" ] || { _sv_fail "--loop needs a session" "$SCRIPT_PATH supervise --session <your-session-id> --loop"; return 2; }
   # The worker may be inside a redirected refresh when signalled. The parent owns the event so
   # its output cannot disappear into that refresh's temporary file.
-  local child signalled=0
-  export OSRC_SUPERVISE_AUTO="$auto"
-  ( _sv_main "$sid" "$once" $ids ) & child=$!
+  local child="" signalled=0
+  export OSRC_SUPERVISE_AUTO="$auto" OSRC_SUPERVISE_LOOP="$loop"
   trap 'if [ "$signalled" = 0 ]; then signalled=1; _sv_fail "killed by a signal" "$rearm"; fi; kill -TERM "$child" 2>/dev/null' TERM INT HUP
-  while :; do
-    wait "$child"; rc=$?
-    kill -0 "$child" 2>/dev/null || break
+  while [ "$signalled" = 0 ]; do
+    ( _sv_main "$sid" "$once" $ids ) & child=$!
+    [ "$signalled" = 0 ] || kill -TERM "$child" 2>/dev/null   # a signal that landed just before the fork
+    while :; do
+      wait "$child"; rc=$?
+      kill -0 "$child" 2>/dev/null || break
+    done
+    # --loop: the next batch, while the session still owns something (loop.<pid> covers the gap).
+    [ "$loop" = 1 ] && [ "$rc" = 0 ] && [ -n "$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null)" ] || break
   done
   trap - TERM INT HUP
+  rm -f "$OSRC_HOME"/supervise/*/loop.$$ 2>/dev/null
   [ "$signalled" != 1 ] || return 2
   case "$rc" in
     0) return 0 ;;
@@ -695,9 +711,10 @@ _sv_main() { # <sid> <once> [ids...]
   dir="$OSRC_HOME/supervise/$key"; mkdir -p "$dir" "$(_sv_lanes)" || exit 1
   ledger="$dir/delivered"   # per orchestrator key: sid-less explicit-id runs get their own
   armed="$dir/armed.$$"; _SV_HELD=""; _SV_MAIN_DIR="$dir"
-  trap '_sv_main_exit' EXIT   # removes the armed/arm-seq files and releases every lock this run holds
+  trap '_sv_bounded_kill; _sv_main_exit' EXIT   # removes the armed/arm-seq files and releases every lock this run holds
   trap 'exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
+  [ "${OSRC_SUPERVISE_LOOP:-0}" = 0 ] || cp -f "$armed" "$dir/loop.$$"   # $$ is the parent, which removes it
   _sv_arm_seq "$dir" || exit 1
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
@@ -766,7 +783,7 @@ _sv_main() { # <sid> <once> [ids...]
         _SV_DIR="$dir" _sv_deliver "$ledger" "$new" batch; drc=$?
         case "$drc" in
           0) _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-             printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
+             [ "${OSRC_SUPERVISE_LOOP:-0}" = 1 ] || printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
              exit 0 ;;
           1) first=""; older=""; cursor="$size"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor" ;;   # all delivered elsewhere
           3) _sv_superseded_exit "$(_sv_superseded "$dir")" ;;

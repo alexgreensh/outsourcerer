@@ -45,7 +45,7 @@ fresh 1b; own sess1 L1; fake_supervise sess1 3000
 [ "$(S '_waited_ids sess1' | grep -cx '\*')" = 0 ] && ok "a live supervise pid with no poll for 50 min no longer covers (hang is visible)" || no "hung supervise still counted as a waiter"
 sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
 mkdir -p "$OSRC_HOME/jobs/L1"; echo running > "$OSRC_HOME/jobs/L1/status"; echo "$w" > "$OSRC_HOME/jobs/L1/pid"; echo "$w" > "$OSRC_HOME/jobs/L1/supervisor_pid"
-out="$(printf '{"session_id":"sess1"}' | OSRC_WATCH_FALLBACK=0 "$SRC" stop-guard 2>/dev/null)"
+out="$(printf '{"session_id":"sess1"}' | "$SRC" stop-guard 2>/dev/null)"
 grep -q '"decision":"block"' <<<"$out" && ok "stop guard blocks: the hung supervise does not satisfy it" || no "guard allowed the stop under a hung supervise [$out]"
 
 echo "=== incident 2: a hung refresh cannot hold a logged done row back ==="
@@ -74,15 +74,15 @@ PRE=""
 for i in 1 2 3; do S '_ws_tick'; done
 [ "$(grep -c '^EVENT' "$TMP/got3")" = 1 ] && ok "one wake per row: later ticks deliver nothing again" || no "redelivered: $(grep -c '^EVENT' "$TMP/got3")"
 
-fresh 3b; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'; rm -f "$TMP/got3"
+fresh 3b; own sess1 .keep; S '_ws_tick'; rm -f "$TMP/got3"
 log idle L2 'finished its turn'; rid="$(tail -1 "$OSRC_HOME/lanes/events.jsonl" | jq -r .id)"
 mkdir -p "$OSRC_HOME/supervise/sess1"; printf '%s\t%s\n' "$(date +%s)" "$rid" > "$OSRC_HOME/supervise/sess1/delivered"
 S '_ws_tick'; sleep 1; S '_ws_tick'; [ ! -s "$TMP/got3" ] && ok "a row a supervise already printed is not woken again" || no "duplicated a supervise delivery"
-fresh 3c; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'; rm -f "$TMP/got3"; fake_supervise sess1 2; log idle L2 'finished its turn'
+fresh 3c; own sess1 .keep; S '_ws_tick'; rm -f "$TMP/got3"; fake_supervise sess1 2; log idle L2 'finished its turn'
 S '_ws_tick'; sleep 1; S '_ws_tick'; [ ! -s "$TMP/got3" ] && [ -s "$OSRC_HOME/watchsvc/sess1/pending" ] && ok "a live, polling supervise delivers instead; the row stays pending" || no "watcher raced a live supervise"
 
 echo "=== incident 3: failed delivery retries with backoff and becomes loud ==="
-fresh 3d; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'
+fresh 3d; own sess1 .keep; S '_ws_tick'
 export OSRC_WATCH_DELIVER_CMD="echo try >> '$TMP/tries'; exit 1"; log question L3 'stopped and asked'
 tick_until '[ -f "$OSRC_HOME/watchsvc/sess1/try" ]'; t0="$(date +%s)"
 [ "$(wc -l < "$TMP/tries")" = 1 ] && ok "failed delivery recorded (attempt 1)" || no "tries: $(cat "$TMP/tries")"
@@ -96,18 +96,20 @@ export OSRC_WATCH_DELIVER_CMD="cat > '$TMP/got3d'"
 OSRC_NOW=$((t0 + 4000)) tick_until "[ -s '$TMP/got3d' ] && [ ! -f '$OSRC_HOME/watchsvc/sess1/inflight' ]"
 [ ! -e "$OSRC_HOME/owners/sess1/.wakefail" ] && grep -q '^EVENT question L3' "$TMP/got3d" && ok "a later success delivers and clears the failure" || no "recovery failed"
 unset OSRC_WATCH_DELIVER_CMD
-fresh 3g; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'; log question L6 'stopped and asked'; rid="$(tail -1 "$OSRC_HOME/lanes/events.jsonl" | jq -r .id)"
+fresh 3g; own sess1 .keep; S '_ws_tick'; log question L6 'stopped and asked'; rid="$(tail -1 "$OSRC_HOME/lanes/events.jsonl" | jq -r .id)"
 OSRC_WATCH_WAKE_MAX=1 S '_ws_tick'
 [ -s "$OSRC_HOME/owners/sess1/.wakefail" ] || no "setup: no .wakefail"
 mkdir -p "$OSRC_HOME/supervise/sess1"; printf '%s\t%s\n' "$(date +%s)" "$rid" > "$OSRC_HOME/supervise/sess1/delivered"   # the recommended supervise got it
 S '_ws_tick'
-[ ! -e "$OSRC_HOME/owners/sess1/.wakefail" ] && [ ! -e "$OSRC_HOME/watchsvc/sess1/try" ] && rmdir "$OSRC_HOME/owners/sess1" 2>/dev/null \
+[ ! -e "$OSRC_HOME/owners/sess1/.wakefail" ] && [ ! -e "$OSRC_HOME/watchsvc/sess1/try" ] \
   && ok "once a supervise delivered the rows, the failure notice and retry state are gone" || no "stale .wakefail kept"
+rm -f "$OSRC_HOME/owners/sess1/.keep"; S '_ws_tick'
+[ ! -d "$OSRC_HOME/owners/sess1" ] && [ ! -d "$OSRC_HOME/watchsvc/sess1" ] && ok "an owner dir with nothing owned or owed leaves the loop" || no "empty owner dir kept: polled forever"
 fresh 3h; mkdir -p "$OSRC_HOME/watchsvc/gone1"; echo '%9' > "$OSRC_HOME/watchsvc/gone1/pane"; S '_ws_tick'
 [ ! -d "$OSRC_HOME/watchsvc/gone1" ] && ok "a session with a recorded pane but nothing owned is reclaimed" || no "pane dir kept forever"
 fresh 3i; mkdir -p "$OSRC_HOME/owners/sess1" "$OSRC_HOME/watchsvc/sess1"
 [ "$(S "_ws_owner() { echo \"\$1\"; }; _ws_tick")" = sess1 ] && ok "an owner in both lists is processed once per tick" || no "owner processed twice"
-mkdir -p "$OSRC_HOME/watchsvc/sess1"; echo 999999 > "$OSRC_HOME/watchsvc/sess1/inflight"
+mkdir -p "$OSRC_HOME/watchsvc/sess1"; echo "999999 0 custom $$" > "$OSRC_HOME/watchsvc/sess1/inflight"
 S 'kill() { [ "$1" = -0 ] && { echo 0 > "$OSRC_HOME/watchsvc/sess1/rc"; return 1; }; builtin kill "$@"; }; _ws_settle sess1 "$OSRC_HOME/watchsvc/sess1"'
 [ ! -e "$OSRC_HOME/watchsvc/sess1/try" ] && [ -f "$OSRC_HOME/watchsvc/sess1/sent" ] && ok "a delivery that finishes between the two checks counts as delivered" || no "settle race scored a success as failed"
 printf '1\tr-x\n' > "$OSRC_HOME/watchsvc/sess1/rows"; echo "1 $(date +%s) custom" > "$OSRC_HOME/watchsvc/sess1/inflight"; echo 0 > "$OSRC_HOME/watchsvc/sess1/rc"
@@ -116,17 +118,23 @@ S '_ws_settle sess1 "$OSRC_HOME/watchsvc/sess1"'
 [ -f "$OSRC_HOME/watchsvc/sess1/inflight" ] && [ ! -s "$OSRC_HOME/supervise/sess1/delivered" ] && ok "ledger lock held by a supervise: settle waits for the next tick" || no "wrote the ledger without its lock"
 rmdir "$OSRC_HOME/supervise/sess1/delivered.lock"; S '_ws_settle sess1 "$OSRC_HOME/watchsvc/sess1"'
 [ ! -f "$OSRC_HOME/watchsvc/sess1/inflight" ] && [ -s "$OSRC_HOME/supervise/sess1/delivered" ] && ok "and records it once the lock is free" || no "never settled"
+sleep 300 & st=$!; PIDS="$PIDS $st"; rm -f "$OSRC_HOME/watchsvc/sess1/rc"
+echo "$st 1 custom" > "$OSRC_HOME/watchsvc/sess1/inflight"; S '_ws_settle sess1 "$OSRC_HOME/watchsvc/sess1"'
+kill -0 "$st" 2>/dev/null && [ ! -f "$OSRC_HOME/watchsvc/sess1/inflight" ] && ok "a delivery recorded before a restart is over: its pid (now a stranger's) is never signalled" || no "killed a process the watcher did not start"
+echo "$st 1 custom $$" > "$OSRC_HOME/watchsvc/sess1/inflight"; S '_ws_settle sess1 "$OSRC_HOME/watchsvc/sess1"'
+kill -0 "$st" 2>/dev/null && [ ! -f "$OSRC_HOME/watchsvc/sess1/inflight" ] && ok "a timed-out pid that is not this loop's fork is given up on, not killed" || no "killed a reused pid"
+kill "$st" 2>/dev/null
 printf '#!/bin/sh\necho "$*" >> %s/notes\n' "$TMP" > "$TMP/bin/notify-send"; chmod +x "$TMP/bin/notify-send"
 PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 OSRC_PLATFORM=linux S 'for i in 1 2 3 4 5 6 7 8 9; do _ws_failed sess1 "$OSRC_HOME/watchsvc/sess1" test; done'; sleep 0.5
 [ "$(grep -c . "$TMP/notes" 2>/dev/null)" = 1 ] && ok "a failing wake notifies once, not hourly forever" || no "notifications: $(grep -c . "$TMP/notes" 2>/dev/null)"
 rm -f "$TMP/notes"
 head -c 300000 /dev/zero | tr '\0' 'x' > "$OSRC_HOME/watchsvc/service.log"; S '_ws_tick'
 [ "$(wc -c < "$OSRC_HOME/watchsvc/service.log" | tr -d ' ')" -le 262144 ] && ok "service.log stays bounded" || no "service.log unbounded"
-fresh 3e; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'; log idle L4 'finished its turn'; S '_ws_tick'
+fresh 3e; own sess1 .keep; S '_ws_tick'; log idle L4 'finished its turn'; S '_ws_tick'
 [ -f "$OSRC_HOME/watchsvc/sess1/try" ] && [ ! -f "$OSRC_HOME/watchsvc/sess1/inflight" ] && ok "no channel (not in tmux, no command, session open): counted as a failed wake, not dropped" || no "no-channel case"
 
 echo "=== reminders do not re-wake within OSRC_WATCH_REWAKE ==="
-fresh 3f; mkdir -p "$OSRC_HOME/owners/sess1"; S '_ws_tick'; export OSRC_WATCH_DELIVER_CMD="cat >> '$TMP/got3f'"
+fresh 3f; own sess1 .keep; S '_ws_tick'; export OSRC_WATCH_DELIVER_CMD="cat >> '$TMP/got3f'"
 log idle L5 'finished its turn'; tick_until "[ -s '$TMP/got3f' ] && [ ! -f '$OSRC_HOME/watchsvc/sess1/inflight' ]"
 log idle L5 'still unresolved, waiting 5m: finished its turn'; for i in 1 2 3; do S '_ws_tick'; done
 [ "$(grep -c '^EVENT' "$TMP/got3f")" = 1 ] && ok "an ignored lane's reminder rows do not burn a wake every 5 min" || no "reminder re-woke"
@@ -144,11 +152,10 @@ log limit A "plan limit hit: quota reached, resets 23:00 (epoch $((now - 10)))"
 log limit B "plan limit hit: quota reached, resets later (epoch $((now + 3600)))"
 log limit C "plan limit hit: quota reached (epoch $((now - 10)))"
 lim() { S "SCRIPT_PATH='$TMP/bin/fake-osrc'; ${1:-} _ws_limits"; }
-mkdir -p "$OSRC_HOME/watchsvc/limits"; echo 0 > "$OSRC_HOME/watchsvc/limits/.cursor"
 lim; [ ! -s "$TMP/sent4" ] && ok "a watcher nobody installed never types a continue" || no "uninstalled watcher continued a lane"
-echo fallback > "$OSRC_HOME/watchsvc/installed"; echo 0 > "$OSRC_HOME/watchsvc/limits/.cursor"
-lim
-grep -qx 'A session send continue' "$TMP/sent4" && ok "reset passed + still limit-parked -> one continue" || no "no continue for A [$(cat "$TMP/sent4" 2>/dev/null)]"
+mkdir -p "$OSRC_HOME/watchsvc"; echo fallback > "$OSRC_HOME/watchsvc/installed"
+lim   # no limits/.cursor yet: banners logged before the install still count
+grep -qx 'A session send continue' "$TMP/sent4" && ok "reset passed + still limit-parked -> one continue, also for a banner older than the install" || no "no continue for A [$(cat "$TMP/sent4" 2>/dev/null)]"
 ! grep -q '^B ' "$TMP/sent4" && ok "reset not yet passed -> waits" || no "B continued early"
 ! grep -q '^C ' "$TMP/sent4" && ok "a lane no longer on the limit is never continued" || no "C continued"
 grep -q '"kind":"limit-resumed","target":"A"' "$OSRC_HOME/lanes/events.jsonl" && ok "the continue is logged (informational row)" || no "no limit-resumed row"
@@ -162,10 +169,13 @@ own sess1 D; limit_state D limit:444; t0=$((now + 20000))
 OSRC_NOW=$t0 log limit D "plan limit hit: try again in 2 hours"; lim "OSRC_NOW=$t0"
 OSRC_NOW=$((t0 + 1200)) log limit D "still unresolved, waiting 20m: plan limit hit: try again in 2 hours"; lim "OSRC_NOW=$((t0 + 1200))"
 lim "OSRC_NOW=$((t0 + 7300))"; grep -q '^D ' "$TMP/sent4" && ok "a reminder of a relative banner does not push the reset later" || no "reset snoozed by its own reminder [$(cat "$OSRC_HOME/watchsvc/limits/D")]"
-own sess1 E; limit_state E limit:555; printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/fail-osrc"; chmod +x "$TMP/bin/fail-osrc"
+own sess1 E; limit_state E limit:555; printf '#!/bin/sh\necho x >> %s/fails4; exit 1\n' "$TMP" > "$TMP/bin/fail-osrc"; chmod +x "$TMP/bin/fail-osrc"
 log limit E "plan limit hit: x (epoch $((now - 5)))"; S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"
 [ ! -e "$OSRC_HOME/watchsvc/limits/E.done" ] && ! grep -q '"kind":"limit-resumed","target":"E"' "$OSRC_HOME/lanes/events.jsonl" && ok "a failed continue is not logged as sent; it is retried" || no "failed continue marked done"
-lim; [ "$(grep -c '^E ' "$TMP/sent4")" = 1 ] && ok "the retry sends it once" || no "E retry"
+S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"; [ "$(grep -c . "$TMP/fails4")" = 1 ] && ok "a failed continue backs off (no full script spawn every tick)" || no "retried at once: $(grep -c . "$TMP/fails4")"
+lim "OSRC_NOW=$((now + 61))"; [ "$(grep -c '^E ' "$TMP/sent4")" = 1 ] && ok "the retry sends it once" || no "E retry"
+own sess1 G; limit_state G limit:777; log limit G "plan limit hit: z (epoch $((now + 100)))"; lim; rm -f "$OSRC_HOME/owners/sess1/G"
+lim "OSRC_NOW=$((now + 200))"; ! grep -q '^G ' "$TMP/sent4" && ok "ownership is checked again when the continue is due" || no "continued a lane disowned after its banner"
 own sess1 F; limit_state F limit:666; log limit F "plan limit hit: y (epoch $((now - 5)))"
 f4="$OSRC_HOME/lanes/events.jsonl"; mv "$f4" "$f4.1"; : > "$f4"; echo 1 > "$OSRC_HOME/lanes/events.gen"
 lim; [ "$(grep -c '^F ' "$TMP/sent4")" = 1 ] && ok "a limit row logged just before log rotation is still seen" || no "rotation skipped the limit row"
@@ -174,20 +184,25 @@ echo "=== stop guard: a watcher that can wake the session is a waiter; the guard
 fresh 5; sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
 mkdir -p "$OSRC_HOME/jobs/R1"; echo running > "$OSRC_HOME/jobs/R1/status"; echo "$w" > "$OSRC_HOME/jobs/R1/pid"; echo "$w" > "$OSRC_HOME/jobs/R1/supervisor_pid"; own sess5 R1
 guard() { printf '{"session_id":"sess5","cwd":"%s"}' "$TMP" | "$SRC" stop-guard 2>"$TMP/err5"; }
+guard >/dev/null; [ ! -e "$OSRC_HOME/watchsvc" ] && ok "no watcher on this machine: the hook leaves no watcher state" || no "watchsvc/<sid> made with no watcher"
+rm -f "$OSRC_HOME/owners/sess5/.stop-blocks"
 mkdir -p "$OSRC_HOME/watchsvc"; date +%s > "$OSRC_HOME/watchsvc/alive"
-out="$(OSRC_WATCH_FALLBACK=0 guard)"; grep -q '"decision":"block"' <<<"$out" && ok "watcher alive but no channel to this session: still blocks" || no "allowed with no channel [$out]"
+out="$(guard)"; grep -q '"decision":"block"' <<<"$out" && ok "watcher alive but no channel to this session: still blocks" || no "allowed with no channel [$out]"
 out="$(OSRC_WATCH_DELIVER_CMD=true guard)"; grep -q '"decision":"block"' <<<"$out" && ok "a fresh stamp without a live watcher process is not a waiter" || no "allowed with no watcher process [$out]"
 bash -c 'sleep 300; : watcher run' & wp=$!; PIDS="$PIDS $wp"; mkdir -p "$OSRC_HOME/watchsvc/run.lock"; echo "$wp" > "$OSRC_HOME/watchsvc/run.lock/pid"; sleep 0.3
 out="$(OSRC_WATCH_DELIVER_CMD=true guard)"; [ -z "$out" ] && ok "watcher alive and able to wake the session: the stop is allowed" || no "blocked [$out]"
+echo 'WAKE NOT DELIVERED: test' > "$OSRC_HOME/owners/sess5/.wakefail"
+out="$(OSRC_WATCH_DELIVER_CMD=true guard)"; grep -q '"decision":"block"' <<<"$out" && ok "a channel that keeps failing (.wakefail) is not a waiter" || no "failing channel trusted [$out]"
+rm -f "$OSRC_HOME/owners/sess5/.wakefail" "$OSRC_HOME/owners/sess5/.stop-blocks"
 printf 'export PATH=%q\n' "$PATH" > "$OSRC_HOME/watchsvc/env"
 out="$(OSRC_WATCH_DELIVER_CMD=true guard)"; grep -q '"decision":"block"' <<<"$out" && ok "coverage is judged by the watcher's settings, not the hook's" || no "hook-only delivery command trusted [$out]"
 rm -f "$OSRC_HOME/watchsvc/env"; kill "$wp" 2>/dev/null; rm -rf "$OSRC_HOME/watchsvc/run.lock"
 [ "$(cat "$OSRC_HOME/watchsvc/sess5/cwd" 2>/dev/null)" = "$TMP" ] && ok "the hook records the session's cwd for the channels" || no "cwd not recorded"
 rm -f "$OSRC_HOME/watchsvc/alive"
-OSRC_WATCH_FALLBACK=0 guard >/dev/null; out="$(OSRC_WATCH_FALLBACK=0 guard)"; out="$(OSRC_WATCH_FALLBACK=0 guard)"
+guard >/dev/null; out="$(guard)"; out="$(guard)"
 [ -z "$out" ] && grep -q 'NO watcher is running' "$OSRC_HOME/owners/sess5/.unguarded" && ok "loop safety kept: yields after the max, and says no watcher runs" || no "yield [$out] $(cat "$OSRC_HOME/owners/sess5/.unguarded" 2>/dev/null)"
 rm -f "$OSRC_HOME/owners/sess5/.stop-blocks" "$OSRC_HOME/owners/sess5/.unguarded"; guard >/dev/null; guard >/dev/null
-out="$(PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 OSRC_HEARTBEAT_DISABLED=0 guard)"; out="$(PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 guard)"; sleep 1
+out="$(PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 guard)"; out="$(PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 guard)"; sleep 1
 [ -z "$out" ] && [ ! -d "$OSRC_HOME/watchsvc/run.lock" ] && ! grep -rq 'watcher run' "$OSRC_HOME/watchsvc/service.log" 2>/dev/null \
   && grep -q 'ask the user to run' "$OSRC_HOME/owners/sess5/.unguarded" && ok "the yield starts no daemon; it names the install command for the user" || no "guard started a watcher [$out]"
 [ "$(grep -c . "$TMP/notes" 2>/dev/null)" = 1 ] && ok "one notification per yield, not one per turn end" || no "notifications: $(grep -c . "$TMP/notes" 2>/dev/null)"
@@ -202,8 +217,36 @@ grep -q 'already running' <<<"$("$SRC" watcher run 2>&1)" && ok "a second run ex
 mkdir -p "$TMP/nops"; printf '#!/bin/sh\ncase " $* " in *" -o "*) exit 1 ;; esac\nexec %s "$@"\n' "$(command -v ps)" > "$TMP/nops/ps"; chmod +x "$TMP/nops/ps"
 grep -q 'already running' <<<"$(PATH="$TMP/nops:$PATH" perl -e 'alarm 5; exec @ARGV' "$SRC" watcher run 2>&1)" && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid")" = "$d" ] \
   && ok "without ps -o (Git Bash) a live loop still holds its lock" || no "lock stolen when ps -o is missing"
+sleep 300 & st=$!; PIDS="$PIDS $st"; mkdir -p "$TMP/h6x/watchsvc/run.lock"; echo "$st" > "$TMP/h6x/watchsvc/run.lock/pid"
+[ -z "$(PATH="$TMP/nops:$PATH" OSRC_HOME="$TMP/h6x" S '_ws_daemon_pid')" ] && ok "without ps -o a live pid with no fresh tick is not the watcher (never signalled)" || no "stranger pid taken for the watcher"
+kill "$st" 2>/dev/null
 echo 1 > "$OSRC_HOME/watchsvc/run.lock/pid"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 ! kill -0 "$d" 2>/dev/null && ok "a loop whose lock was taken over exits (no pile-up)" || no "loop kept running without its lock"
+fresh 6b; mkdir -p "$OSRC_HOME/watchsvc"; printf '# script: %s\n' "$SRC" > "$OSRC_HOME/watchsvc/launch"
+OSRC_WATCH_INTERVAL=1 "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1.5
+kill -0 "$d" 2>/dev/null || no "setup: loop did not start under its own launcher"
+S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
+! kill -0 "$d" 2>/dev/null && ok "a loop whose launcher now names another plugin copy exits (its unit restarts it there)" || no "loop kept running the old copy"
+fresh 6c; OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { x="$(sleep 4713; :)"; }; _ws_run' "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
+i=0; until pgrep -f 'sleep 4713' >/dev/null 2>&1 || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
+S '_ws_stop_loop'; sleep 0.5
+! kill -0 "$d" 2>/dev/null && ! pgrep -f 'sleep 4713' >/dev/null 2>&1 && ok "stopping the loop takes its in-flight tick with it" || { no "tick orphaned by stop"; pkill -f 'sleep 4713'; }
+fresh 6d; mkdir -p "$OSRC_HOME/supervise/sess6"
+OSRC_SUPERVISE_TICK_SECS=1 OSRC_SUPERVISE_TICK_TIMEOUT=600 bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1; cmd_hub_export() { x="$(sleep 4714; :)"; }; cmd_supervise --session sess6' "$SRC" >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
+i=0; until pgrep -f 'sleep 4714' >/dev/null 2>&1 || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
+kill -TERM "$d"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.2; i=$((i+1)); done; sleep 0.5
+! pgrep -f 'sleep 4714' >/dev/null 2>&1 && ok "a supervise signalled mid-refresh takes the hung probe with it" || { no "probe orphaned by a signalled supervise"; pkill -f 'sleep 4714'; }
+
+echo "=== supervise --loop: a looping caller stays a waiter between batches ==="
+fresh 13; sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
+mkdir -p "$OSRC_HOME/jobs/R3"; echo running > "$OSRC_HOME/jobs/R3/status"; echo "$w" > "$OSRC_HOME/jobs/R3/pid"; echo "$w" > "$OSRC_HOME/jobs/R3/supervisor_pid"; own sessL R3
+OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0 OSRC_SUPERVISE_MAX_SECS=1 "$SRC" supervise --session sessL --loop > "$TMP/loop13" 2>/dev/null & lp=$!; PIDS="$PIDS $lp"
+i=0; until [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 1 ] || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
+gaps=0; for i in $(seq 1 40); do [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 1 ] || gaps=$((gaps+1)); sleep 0.1; done
+[ "$gaps" = 0 ] && [ "$(grep -c '^EVENT ' "$TMP/loop13")" -ge 2 ] && ok "supervise --loop delivers batch after batch and covers the session in between" || no "gaps=$gaps events=$(grep -c '^EVENT ' "$TMP/loop13")"
+kill "$lp"; i=0; while kill -0 "$lp" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
+[ -z "$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null)" ] && [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 0 ] && ok "and stops covering once it exits" || no "loop marker left behind"
+kill "$w" 2>/dev/null
 
 echo "=== install / uninstall: explicit, idempotent, reversible ==="
 fresh 7; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd.log\n' "$TMP" > "$TMP/bin/systemctl"; chmod +x "$TMP/bin/systemctl"
@@ -237,18 +280,31 @@ fresh 10; mkdir -p "$TMP/units"; echo stale > "$TMP/units/outsourcerer-watcher.s
 inst uninstall >/dev/null; [ ! -e "$TMP/units/outsourcerer-watcher.service" ] && ok "uninstall removes a unit even with no install record" || no "orphan unit kept"
 
 echo "=== tmux wake, end to end (fake pane) ==="
-fresh 11; U=11111111-2222-4333-8444-555555555555; mkdir -p "$TMP/proj" "$TMP/pane" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_HOME/owners/$U" "$OSRC_HOME/watchsvc/$U"
+fresh 11; U=11111111-2222-4333-8444-555555555555; mkdir -p "$TMP/proj" "$TMP/pane" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_HOME/watchsvc/$U"; own "$U" .keep
 sleep 300 & cc=$!; PIDS="$PIDS $cc"
 printf '{"pid":%s,"cwd":"%s","sessionId":"%s","startedAt":%s000}\n' "$cc" "$TMP/proj" "$U" "$(date +%s)" > "$OSRC_CLAUDE_SESSIONS_DIR/a.json"
 printf '#!/bin/bash\nD=%s; c="$1"; shift\ncase "$c" in\n display-message) echo %s ;;\n capture-pane) cat "$D/screen" ;;\n send-keys) echo "$*" >> "$D/keys.log"; case " $* " in *" Enter "*) [ -f "$D/next" ] && mv -f "$D/next" "$D/screen" ;; esac ;;\nesac\n' "$TMP/pane" "$$" > "$TMP/bin/tmux"; chmod +x "$TMP/bin/tmux"
 cp "$SCRIPT_DIR/fixtures/screen/cc-composer-idle.ansi" "$TMP/pane/screen"; cp "$SCRIPT_DIR/fixtures/screen/cc-working-hooks.ansi" "$TMP/pane/next"
-echo '%7' > "$OSRC_HOME/watchsvc/$U/pane"; echo "$TMP/proj" > "$OSRC_HOME/watchsvc/$U/cwd"
+echo '%7' > "$OSRC_HOME/watchsvc/$U/pane"; echo "$TMP/proj" > "$OSRC_HOME/watchsvc/$U/cwd"; S '_ws_sock' > "$OSRC_HOME/watchsvc/$U/sock"
 export PATH="$TMP/bin:$PATH"; S '_ws_tick'; log idle L7 'finished its turn' "$U"
 S '_ws_tick'; [ -f "$OSRC_HOME/watchsvc/$U/try" ] && [ ! -s "$TMP/pane/keys.log" ] && ok "a watcher nobody installed never types into the pane" || no "uninstalled watcher typed"
 rm -f "$OSRC_HOME/watchsvc/$U/try"; echo fallback > "$OSRC_HOME/watchsvc/installed"
 OSRC_SEND_VERIFY_SECS=3 tick_until "[ -f '$OSRC_HOME/watchsvc/$U/sent' ]"
 grep -q -- '-l -- \[outsourcerer\] watcher: 1 event(s)' "$TMP/pane/keys.log" && grep -q ' Enter' "$TMP/pane/keys.log" && [ ! -f "$OSRC_HOME/watchsvc/$U/try" ] \
   && ok "tmux: the wake is typed into the session's empty composer and verified on screen" || no "tmux wake [$(cat "$TMP/pane/keys.log" 2>/dev/null)] try=$(cat "$OSRC_HOME/watchsvc/$U/try" 2>/dev/null)"
+
+echo "=== the guard judges a tmux channel on the watcher's tmux server ==="
+sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
+mkdir -p "$OSRC_HOME/jobs/R4"; echo running > "$OSRC_HOME/jobs/R4/status"; echo "$w" > "$OSRC_HOME/jobs/R4/pid"; echo "$w" > "$OSRC_HOME/jobs/R4/supervisor_pid"; own "$U" R4
+bash -c 'sleep 300; : watcher run' & wp=$!; PIDS="$PIDS $wp"; mkdir -p "$OSRC_HOME/watchsvc/run.lock"; echo "$wp" > "$OSRC_HOME/watchsvc/run.lock/pid"; date +%s > "$OSRC_HOME/watchsvc/alive"; sleep 0.3
+g11() { rm -f "$OSRC_HOME/owners/$U/.stop-blocks"; printf '{"session_id":"%s","cwd":"%s"}' "$U" "$TMP/proj" | TMUX="$1,1,0" TMUX_PANE=%7 "$SRC" stop-guard 2>/dev/null; }
+out="$(g11 "$(S '_ws_sock')")"; [ -z "$out" ] && ok "a session on the watcher's (default) tmux server is covered" || no "default server blocked [$out]"
+out="$(g11 "$TMP/work-sock")"; grep -q '"decision":"block"' <<<"$out" && ok "a session on another tmux server (tmux -L/-S) is not covered: the daemon cannot reach it" || no "trusted a pane the daemon cannot reach [$out]"
+printf 'export PATH=%q\nexport TMUX=%q\n' "$PATH" "$TMP/work-sock" > "$OSRC_HOME/watchsvc/env"
+out="$(g11 "$TMP/work-sock")"; [ -z "$out" ] && ok "a watcher installed from that tmux server covers it" || no "captured server not matched [$out]"
+inst2="$(cd "$TMP" && TMUX="$TMP/work-sock,9,0" TMUX_TMPDIR="$TMP" OSRC_WATCH_BACKEND=fallback OSRC_WATCH_INTERVAL=1 OSRC_HOME="$TMP/h11b" "$SRC" watcher install 2>&1)"
+grep -qx "export TMUX=$TMP/work-sock" "$TMP/h11b/watchsvc/env" && grep -qx "export TMUX_TMPDIR=$TMP" "$TMP/h11b/watchsvc/env" && ok "install captures the tmux server (socket and TMUX_TMPDIR) for the daemon" || no "tmux server not captured [$inst2]"
+OSRC_HOME="$TMP/h11b" "$SRC" watcher uninstall >/dev/null 2>&1
 
 echo
 echo "watchsvc: $pass passed, $fail failed"
