@@ -1,3 +1,0 @@
-sha=6d98b31753702e6787d1eb8135626385837191df
-rc=0
-All 8 rows addressed; full conformance as non-root on code head bf7c032: rc=0, RESULT: 259 passed, 0 failed, 16 skipped. test_release_0175 race not reproduced (see reports/osrc-int-fix-c.md). Branch head: the commit adding this file.
