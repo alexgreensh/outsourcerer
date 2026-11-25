@@ -2712,7 +2712,7 @@ continue_turn() {
   need_devin
   # Same alias-resolution requirement as delegate(): an unresolved alias fails the continue at launch.
   local _req="$MODEL"
-  MODEL="$(_devin_resolve_model "$MODEL")"
+  MODEL="$(_osrc_dv_model_or_default "$MODEL")"   # no -m: the Free default the gate judges, never an empty --model
   _exclude_refuse_resolved "$_req" "$MODEL" continue
   _osrc_spend_gate dv "$MODEL" devin "continue"   # continue launches a model too: same consent rule
   _devin_guard_before_delegation "$MODEL"
@@ -16734,14 +16734,7 @@ _session_droid_effort_supported() {
   grep -Eqi '(^|[[:space:],])-r([[:space:],]|$).*reason|reason.*effort' <<<"$help_text"
 }
 
-_session_relaunch_effort() { # <provider> <model> <effort>
-  local provider="$1" model="$2" effort="$3"
-  # Effort changes replace the pane process just like control relaunch. Reuse that complete
-  # lifecycle path so the new generation is proved live, persisted, supervised, and endpoint-verified
-  # before the caller records the effort event. A bare respawn leaves the old dead identity current,
-  # so the next registry reap can append crash-reap over the healthy replacement.
-  _session_control_relaunch "$SESSION_NAME" "$provider" "$model" "$effort" >/dev/null
-}
+# _session_relaunch_effort: lib/spend-paths.sh (spend-gated relaunch).
 
 # ---- interactive winpty session broker for Windows ----
 _winpty_session() {
@@ -16769,7 +16762,7 @@ _winpty_session() {
       local LAUNCH=()
       case "$PROVIDER" in
         devin|dv)
-          need_devin; _exclude_session_default_guard devin; local _sreq="$MODEL"; MODEL="$(_devin_resolve_model "$MODEL")"; _exclude_refuse_resolved "$_sreq" "$MODEL" "session start"; _devin_guard_before_delegation "$MODEL"
+          need_devin; _exclude_session_default_guard devin; local _sreq="$MODEL"; MODEL="$(_osrc_dv_model_or_default "$MODEL")"; _exclude_refuse_resolved "$_sreq" "$MODEL" "session start"; _devin_guard_before_delegation "$MODEL"
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
           # Effort is NOT silently dropped (see the tmux devin case): Devin's interactive TUI has no
           # reasoning control this tool can set, so a requested --effort cannot be enforced here.
@@ -16981,7 +16974,7 @@ session() {
       local launch
       case "$PROVIDER" in
         devin|dv)
-          need_devin; _exclude_session_default_guard devin; local _sreq="$MODEL"; MODEL="$(_devin_resolve_model "$MODEL")"; _exclude_refuse_resolved "$_sreq" "$MODEL" "session start"; _devin_guard_before_delegation "$MODEL"
+          need_devin; _exclude_session_default_guard devin; local _sreq="$MODEL"; MODEL="$(_osrc_dv_model_or_default "$MODEL")"; _exclude_refuse_resolved "$_sreq" "$MODEL" "session start"; _devin_guard_before_delegation "$MODEL"
           [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable devin devin --help
           # Effort is NOT silently dropped: the Devin interactive TUI exposes no reasoning control this
           # tool can drive, so a requested --effort cannot be enforced on a session. Say so loudly rather
@@ -17105,7 +17098,7 @@ session() {
       case "$_ctrl" in
         interrupt) _session_control_interrupt "$SESSION_NAME" "$_cprov" || die "control interrupt did not verify: the busy signal did not clear. Re-check with: $0 session read" ;;
         exit)      _session_control_exit "$SESSION_NAME" "$_cprov" || die "control exit did not verify: the delegate did not return to a shell. Re-check with: $0 session read" ;;
-        relaunch)  _session_control_relaunch "$SESSION_NAME" "$_cprov" "$_cmodel" "$_ceffort" || die "control relaunch did not complete (see the reason above; if none was printed, the pane PID did not change). Re-check with: $0 session read" ;;
+        relaunch)  _osrc_session_relaunch_gated "$SESSION_NAME" "$_cprov" "$_cmodel" "$_ceffort" || die "control relaunch did not complete (see the reason above; if none was printed, the pane PID did not change). Re-check with: $0 session read" ;;
         *) die "session control needs: interrupt | exit | relaunch" ;;
       esac
       ;;
@@ -17138,7 +17131,7 @@ session() {
         *) die "mid-session model switch is wired for Devin and claude-native only. For a $PROVIDER session, stop and restart with a new model:  $0 session stop && $0 --provider $PROVIDER session start -m <model>" ;;
       esac
       # Optional NAME filters the picker (devin: "Type to search"; cc: the target model, e.g. fable).
-      [ -n "${1:-}" ] && _exclude_refuse "$1" "session model"
+      _osrc_session_model_gate "${1:-}"   # exclude + spend gate (lib/spend-paths.sh)
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
       _managed_session_model "$SESSION_NAME" "${1:-}" || die "session model switch did not complete: the model picker did not open + verify. For a claude-native session this usually means a turn is still generating (the /model picker only opens between turns) — read it with '$0 session read' and retry once it's idle. It can also mean the pane could not be proven live."
       echo "model switch sent${1:+ (filter: $1)}. Confirm with: $0 session read   (active model shows in the footer)."

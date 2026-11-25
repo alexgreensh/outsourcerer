@@ -121,8 +121,12 @@ bill() { PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_CA
   || bad "exact: offline swe-2-high billed '$(bill swe-2-high 0)'"
 [ "$(bill vendor/swe-1-7-high 1)" = metered ] && ok "exact: catalog vendor/swe-1-7-high is not the Free swe-1-7-high" \
   || bad "exact: catalog vendor/swe-1-7-high billed '$(bill vendor/swe-1-7-high 1)'"
-[ "$(bill SWE-1.7-HIGH 1)" = subscription ] && ok "exact: case/dot folding still matches the catalog id" \
+# A spelling is judged as spelled (a pinned launch passes it verbatim); routed runs still resolve
+# SWE-1.7-HIGH to the catalog uid swe-1-7-high first (tests/test_spend_attack.sh spell: cases).
+[ "$(bill SWE-1.7-HIGH 1)" = metered ] && ok "exact: SWE-1.7-HIGH is judged as spelled, not as the Free uid" \
   || bad "exact: SWE-1.7-HIGH billed '$(bill SWE-1.7-HIGH 1)'"
+[ "$(bill swe-1-7-high 1)" = subscription ] && ok "exact: the catalog's exact Free uid is still Free" \
+  || bad "exact: swe-1-7-high billed '$(bill swe-1-7-high 1)'"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

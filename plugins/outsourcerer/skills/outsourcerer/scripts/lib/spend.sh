@@ -75,16 +75,15 @@ _osrc_dir_key_material() {
 # spend gate asks. Stricter than _devin_is_free_model, whose plan-included static list
 # answers a different question (does it draw the paid ACU balance, not "is it free to run").
 _osrc_devin_free_for_spend() {
-  local m="${1:-}" t ids
-  # Exact id only (case and dots folded, like the resolver's keyify): stripping a vendor/
-  # prefix proved `x/swe-2-high` Free while the launcher passed `x/swe-2-high` verbatim.
-  t="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | sed -E 's/\./-/g')"
+  local t="${1:-}" ids
+  # The EXACT id that launches, byte for byte: no vendor/ stripping and no case or dot
+  # folding. Folding judged SWE-2-HIGH / swe.2.high Free while the launcher passed that
+  # spelling verbatim (offline, or a bg pin), so the judged id was not the launched one.
+  # Routed launches still match: the resolver returns the catalog's exact uid.
   [ -n "$t" ] || return 1
   if [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ]; then
     if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
       # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
-      # Normalize the catalog side identically so a dotted/uppercase uid still matches.
-      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's/\./-/g')"
       case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
     fi
   fi
@@ -638,6 +637,9 @@ _osrc_event() {  # <kind> <target> <detail> <next> [src]
 _osrc_spend_gate() {
   local lane="${1:-}" model="${2:-}" disp="${3:-}" why="${4:-launch}"
   local bill; bill="$(osrc_lane_billing "$lane" "$model" "$disp" 2>/dev/null)"
+  # Devin bills per model: a caller that cannot name the model it launches (a picker choice)
+  # gets no Free default. Launch paths with no -m pass the default id itself (lib/spend-paths.sh).
+  case "$lane" in dv|devin) [ -n "$model" ] || bill=unknown ;; esac
   # unknown is treated as METERED everywhere — cloud sessions included. A hosted
   # session's plan login is proven by the same billing probes as a local launch
   # (claude auth status / codex login status / devin catalog), and hosted-session
