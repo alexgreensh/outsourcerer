@@ -965,10 +965,11 @@ cmd_hub_mc() {
   if [ -z "$url" ]; then
     mkdir -p "$OSRC_HOME/hub" && chmod 700 "$OSRC_HOME/hub" 2>/dev/null
     [ -L "$log" ] && die "mc: $log is a symlink, refusing to write it"
+    : >"$log" 2>/dev/null || die "mc: cannot write $log"   # empty first: never read a dead hub's URL
     ( OSRC_HUB_NO_OPEN=1 nohup bash "$dir/outsourcerer.sh" hub serve --no-open >"$log" 2>&1 & ) >/dev/null 2>&1
     for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
       url="$(grep -oE 'http://127\.0\.0\.1:[0-9]+/\?t=[0-9a-fA-F]+' "$log" 2>/dev/null | tail -1)"
-      [ -n "$url" ] && break; sleep 0.5
+      [ -n "$url" ] && { ! type _osrc_mc_url_live >/dev/null 2>&1 || _osrc_mc_url_live "$url"; } && break; url=""; sleep 0.5
     done
     [ -n "$url" ] || die "mc: Mission Control did not start within 15 s; see $log"
   fi

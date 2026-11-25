@@ -236,3 +236,14 @@ osrc_mc_alerts() {
   [ "$w" = "null" ] && [ "$a" = "[]" ] && { printf '%s' "$p"; return 0; }
   jq -c --argjson w "$w" --argjson a "$a" '. + (if $w == null then {} else {watcher:$w} end) + (if ($a|length) > 0 then {alerts:$a} else {} end)' <<<"$p" 2>/dev/null || printf '%s' "$p"
 }
+
+# _osrc_mc_url_live <url> -> 0 when serve.json names the URL's port and a live pid. The hub writes
+# serve.json before it prints its URL, so a URL with no matching record came from a stale serve.log
+# (a dead hub's line), and `mc` must keep waiting instead of reporting a server that is not up.
+_osrc_mc_url_live() {
+  local sp port pid
+  sp="$(jq -r '"\(.port // "")|\(.pid // "")"' "$(_osrc_mc_dir)/serve.json" 2>/dev/null)" || return 1
+  port="${sp%%|*}"; pid="${sp#*|}"
+  case "$port$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "${1:-}" in "http://127.0.0.1:$port/"*) kill -0 "$pid" 2>/dev/null ;; *) return 1 ;; esac
+}
