@@ -459,16 +459,26 @@ grep -q -- '--model' "$TMP/devin-stub.log" \
 
 # A2: with --spend-ok the SAME run dispatches exactly the id the gate classified —
 # gate input == launched id, the whole point of the round-2 fix.
+# OSRC_CLOUD_ACK=1 is REQUIRED on every positive-dispatch row: the first real launch hits
+# the one-time cloud consent gate otherwise, and the row passes on a dev machine only
+# because the variable leaks in from the interactive shell's env (CI sees red).
 : > "$TMP/devin-stub.log"
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$PACAT/osrc/catalogs/dv.raw.json" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$PACAT/home" OSRC_HOME="$PACAT/osrc" OSRC_SOURCED= \
-    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 \
     bash "$SRC" run --spend-ok -m swe "post-promo task" 2>&1 </dev/null )"; rc=$?
 if [ $rc -eq 0 ] && grep -q -- '--model swe-2-1-high ' "$TMP/devin-stub.log"; then
   ok "r3.4 e2e: consented run launches exactly the gated id swe-2-1-high"
 else
   bad "r3.4 e2e: consented run rc=$rc launched: $(grep -- '--model' "$TMP/devin-stub.log" | head -1)"
 fi
+# The cloud disclosure a person reads before consenting must name the LAUNCHED id, not
+# the static-table id — the round-4 display fix (spend line already named swe-2-1-high
+# while the disclosure said swe-1.7, two different models on one consent screen).
+case "$out" in
+  *"CLOUD DISCLOSURE: delegating to a CLOUD lane (devin / swe-2-1-high)"*) ok "r3.4 e2e: cloud disclosure names the launched id, not the table id" ;;
+  *) bad "r3.4 e2e: cloud disclosure wrong: $(printf '%s' "$out" | grep 'CLOUD DISCLOSURE' | head -1)" ;;
+esac
 
 # A3: post-promo MIXED catalog — paid -high, Free -max in one family. Cost outranks
 # effort end to end: no consent asked and the FREE -max is what launches.
@@ -485,7 +495,7 @@ printf '["swe-2-1","swe-2-1-high","swe-2-1-max","swe-2","swe","swe-2-high"]\n' >
 : > "$TMP/devin-stub.log"
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$MCAT/osrc/catalogs/dv.raw.json" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$MCAT/home" OSRC_HOME="$MCAT/osrc" OSRC_SOURCED= \
-    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 \
     bash "$SRC" run -m swe "post-promo free task" 2>&1 </dev/null )"; rc=$?
 case "$out" in
   *"spend gate"*|*"PAID LANE"*|*"EVENT approval"*) bad "r3.4 e2e: free-max resolution asked for spend: $(printf '%s' "$out" | head -4)" ;;
