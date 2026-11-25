@@ -752,7 +752,7 @@ _osrc_spend_next_build() {
 _osrc_route_launched_model() {
   local rid="${RESOLVED_ID:-${ROUTE_MODEL:-}}"
   case "${ROUTE_LANE:-}" in
-    devin|dv)   rid="$(_devin_resolve_model "${MODEL:-}" 2>/dev/null)" ;;
+    devin|dv)   rid="${_OSRC_DV_LAUNCH_ID:-$(_devin_resolve_model "${MODEL:-}" 2>/dev/null)}" ;;   # the gated launch id
     droid|warp) rid="$(_lane_model_for "$ROUTE_LANE" "${RESOLVED_ID:-${MODEL:-}}" 2>/dev/null)" ;;
   esac
   printf '%s' "${rid:-${RESOLVED_ID:-${ROUTE_MODEL:-}}}"

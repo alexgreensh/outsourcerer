@@ -103,7 +103,7 @@ eq "offline: swe-2-flash-high free via static list" "$(OSRC_FREE_CATALOG_CHECK=0
 eq "offline: nova-9 NOT known (no static, no catalog)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model nova-9 && echo yes || echo no)" no
 
 # --- source cross-check: the classification actually consults the catalog ------------------------
-grep -q '_devin_catalog_free_set' "$SRC" && ok "source: _devin_is_free_model consults the catalog set" \
+grep -q 'set="$(_devin_catalog_free_set)"' "$(dirname "$SRC")/lib/devin-free.sh" && ok "source: _devin_is_free_model consults the catalog set" \
   || bad "source: catalog-driven free check removed"
 
 echo "---- $pass passed, $fail failed ----"

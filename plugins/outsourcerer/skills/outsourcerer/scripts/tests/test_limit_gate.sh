@@ -17,6 +17,11 @@
 # --osrc-preflight-internal route against a fake codex rollout under a fake $HOME; nothing
 # dispatches). No tmux anywhere.
 set -uo pipefail
+# Billing reads these from the environment; a developer shell holding any of them made
+# billing classify metered and failed this suite. Fixtures set exactly what each case needs.
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX \
+  CLAUDE_CODE_USE_FOUNDRY CLAUDE_CONFIG_DIR OPENAI_API_KEY CODEX_API_KEY OPENAI_BASE_URL CODEX_HOME \
+  CURSOR_API_KEY GEMINI_API_KEY GOOGLE_API_KEY GEMINI_DIR OPENROUTER_API_KEY OSRC_ACCOUNT_DIR
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRIPT_DIR/../outsourcerer.sh"

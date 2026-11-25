@@ -318,6 +318,9 @@ as `metered`: when billing cannot be proven, the lane asks first. Devin is the s
 `swe-2-flash-high` count. `cost_summary` is never proof: Fusion rows can end in
 `Sidekick: Free` while the main model remains High cost. Plan-included-but-not-Free models
 (glm-5.2 etc.) are `metered`.
+For Devin the gate checks the exact id that launches: the `-m` token is resolved once, gated,
+and passed verbatim to `devin --model`. Launches that skip the routed gate (the OpenRouter ->
+Devin self-heal, `continue -m`) are gated on their own resolved id.
 Before ANY metered/unknown launch — `run`, `bg`, `fanout`, `session start`, auto-routing,
 fallback hops, retries — the spend gate demands consent: interactive prompts show lane, model,
 reason and an estimate, `y/N` defaulting to No; non-interactive refuses with

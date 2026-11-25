@@ -93,6 +93,7 @@ _ALL_SUITES="$_ALL_SUITES test_advise_fixtures"
 _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_tmux_headless_fallback"
 _ALL_SUITES="$_ALL_SUITES test_devin_catalog_free_tier"
+_ALL_SUITES="$_ALL_SUITES test_devin_launch_gate"   # gated Devin id == launched id
 _ALL_SUITES="$_ALL_SUITES test_remote_review"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"
 _ALL_SUITES="$_ALL_SUITES test_session_send_verify"
