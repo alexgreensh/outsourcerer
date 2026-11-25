@@ -493,3 +493,63 @@ case. After the change:
 ### Needs from other lanes (round 4)
 
 Unchanged from round 3, including the longer `unknown` window in `lib/supervise.sh`.
+
+## Round 5 (lane osrc-l3-r5, final)
+
+Base: `cloud/osrc-l3-r4` at `d885330` (confirmed with `git log --oneline -3`).
+
+**All Claude limit frames in this report and its tests are hand-built frames, not live captures.**
+No capture of a real Claude limit banner exists in this repo except the two round-1 fixtures, and
+those are real frames with the banner row inserted by hand.
+
+### What changed
+
+- **One Claude limit rule, the neighbour-row rule deleted.** A Claude limit is a `⎿` row that
+  says "limit reached" or "hit your limit", matches the limit regex, and is the LAST content row
+  above the composer/footer. Blank and rule rows below it are skipped. What sits above it no
+  longer matters: one-row prompt, wrapped prompt, `⏺` reply, tool output, done summary. A limit
+  phrase with any later content below it is history, not a limit. The old check (the row above the
+  `⎿` must start with `❯ `/`> ` or be the done summary) is gone. This fixes review P1 1 and P2 3.
+  The "limit reached / hit your limit" guard keeps tool errors such as
+  `⎿  Error: rate limit exceeded` under `● Bash(...)` out, so the round-3 false-limit fixtures
+  read as they did.
+- **P2 2, as the review said:** `_osrc_scr_bottom` looks for a rule or bare prompt in the last 12
+  rows (was 6) and returns rc 1 when it finds none. With no rule, the generic busy scan reaches
+  back to `n - 4` (was `n - 2`).
+- **P3, busy hint must end the row:** `(... to interrupt)`, `(... to interrupt · <x>)` or
+  `· <key> to interrupt` at the end of the row. `Tip (press ctrl+c to interrupt a run)` and
+  `keys · esc to interrupt · q to quit` no longer read `working`.
+- **P3, markers:** `osrc-l3-r4.READY`/`.RESULT` deleted. The new RESULT names this lane's own head
+  and the rc of the conformance run I actually ran.
+
+Net lines in `lib/screen.sh`: +17 −20. The tests add 27 lines and remove 3.
+
+### P3s accepted, not changed
+
+- **One output row under an expired generic refusal still reads `limit`.** That is the one-trailer
+  allowance. The generic fixtures (`status: parked`) and agy (`Error ID: ...`) need it. A plain
+  output row cannot be told apart from a status trailer without knowing the engine. Accepted for
+  generic panes only. Claude, codex and devin have a composer and are not affected.
+- **A rule near the bottom hides the rows under it.** For panes with no composer, rows under the
+  last rule are treated as footer. The P2 2 fix widens that window to 12 rows, as the review asked,
+  so this now reaches further. This is the same verdict as the base. The code comment says so.
+
+### Cases (each new one fails on the base reader and passes on head)
+
+I ran `tests/test_screen_alerts.sh` against a copy of the scripts tree with the base
+`lib/screen.sh`. Result: 63 passed, 7 failed, and the 7 failures are exactly the new cases. On
+head: 70 passed. A diff of every case's `state|evidence` between base and head (reset epochs
+removed) differs only in those 7 lines. Every other case, including every round-3 false-limit
+fixture, reads the same on both.
+
+| Case | Base | Head |
+|---|---|---|
+| banner under a wrapped (two-row) prompt | idle | limit |
+| banner mid-turn after `⏺ Running the suite now.` | idle | limit |
+| banner after a tool block (`⏺ Bash(...)`, `⎿ 12 passed`, blank) | idle | limit |
+| quoted banner in the prompt, `⏺` reply below | not limit | not limit |
+| old banner with a `⏺` reply below it | not limit | not limit |
+| spinner above 3 status rows, no rule | unknown | working |
+| spinner above a rule and 7 footer rows | unknown | working |
+| `Tip (press ctrl+c to interrupt a run)` last row | working | unknown |
+| `keys · esc to interrupt · q to quit` above `$` | working | idle |
