@@ -57,7 +57,7 @@ want "$FX/generic-limit-relative.txt" "" 'limit|*reset: Try again in 2h' "relati
 want "$FX/cc-limit-5hour.ansi" cc 'limit|*5-hour limit reached*reset: resets 3pm (epoch *' "claude '5-hour limit reached' banner"
 # Claude: a `⎿` limit-reached row is a limit when it is the LAST content row above the composer,
 # whatever sits above it (round-4 review P1, P2 3). Hand-built frames, not live captures.
-CC_FOOT=('' '────────' '❯ ' '────────' '  ⏸ manual mode on'); CX_FOOT=('› Ask Codex to do anything' '  ← for agents · ? for shortcuts')
+CC_FOOT=('────────' '❯ ' '────────' '  ⏸ manual mode on'); CX_FOOT=('› Ask Codex to do anything' '  ← for agents · ? for shortcuts')
 txt() { printf '%s\n' "$@" > "$TMP/s.txt"; }
 for b in '5-hour limit reached ∙ resets 3pm' 'Weekly limit reached ∙ resets Oct 9, 10am' 'Opus weekly limit reached ∙ resets Oct 9, 10am' \
          'Session limit reached ∙ resets 3pm' "You've hit your limit · resets 3pm (Europe/Paris)" 'Claude usage limit reached. Your limit will reset at 3pm.'; do
@@ -69,7 +69,7 @@ txt '❯ refactor the client so that every call' '  backs off and retries with j
 want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner under a wrapped prompt"
 txt '❯ run it' '⏺ Running the suite now.' '  ⎿  Weekly limit reached ∙ resets Oct 9, 10am' "${CC_FOOT[@]}"
 want "$TMP/s.txt" cc 'limit|*Weekly*' "claude banner mid-turn after a ⏺ reply"
-txt '❯ run it' '⏺ Bash(make test)' '  ⎿  12 passed, 0 failed' '' "$B" "${CC_FOOT[@]}"
+txt '❯ run it' '⏺ Bash(make test)' '  ⎿  12 passed, 0 failed' "$B" "${CC_FOOT[@]}"
 want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner after a tool block"
 txt '❯ why does it say "5-hour limit reached ∙ resets 3pm"?' '⏺ That is the plan banner; it clears at the reset.' "${CC_FOOT[@]}"
 nolim "$TMP/s.txt" cc "quoted banner in the prompt, turn continues below"
@@ -163,6 +163,14 @@ for c in 'make all|Tip (press ctrl+c to interrupt a run)' 'keys · esc to interr
   txt 'log' "${c%%|*}" "${c#*|}"
   row="$(scr "$TMP/s.txt" "")"; case "$row" in working\|*) no "hint inside prose read as busy: $c -> $row" ;; *) ok "hint inside prose is not busy: $c -> ${row%%|*}" ;; esac
 done
+# integration fixup (l3-r5 P3s): only an esc hint is the engine's; a status tail after it is still busy;
+# a limit row above a rule and ten output rows is history, not the banner.
+txt 'log' 'start the server (press ctrl+c to interrupt)'
+row="$(scr "$TMP/s.txt" "")"; case "$row" in working\|*) no "ctrl+c hint read as busy: $row" ;; *) ok "ctrl+c hint is not busy -> ${row%%|*}" ;; esac
+txt 'log' '• Working (5s • esc to interrupt) · 1 background terminal running'
+want "$TMP/s.txt" "" 'working|*Working*' "busy hint with a status tail after it"
+txt 'log' '⚠ Rate limit exceeded. Try again in 30s' '────────' 'o1' 'o2' 'o3' 'o4' 'o5' 'o6' 'o7' 'o8' 'o9' 'o10'
+nolim "$TMP/s.txt" "" "limit row above a rule and ten output rows"
 
 echo "=== 5. pane liveness ==="
 # fake tmux: panes are files; <pane>.dead holds #{pane_dead}

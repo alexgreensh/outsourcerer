@@ -476,11 +476,11 @@ _osrc_scr_generic() {
   _osrc_scr_set unknown "no recognized signal in tail"
 }
 
-# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last 12 rows (rows
-# under it are footer, even if they are output), else the last row and rc 1.
-_osrc_scr_bottom() {
+# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last [window] rows
+# (default 12; rows under it are footer, even if they are output), else the last row and rc 1.
+_osrc_scr_bottom() { # [window]
   local i=$((_SCR_N - 1)) l; OSRC_SCR_BOTTOM=$((_SCR_N - 1))
-  while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - 12)) ]; do
+  while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - ${1:-12})) ]; do
     l="${_SCR_L[$i]}"; l="${l#"${l%%[! ]*}"}"
     case "$l" in "──"*|">"|"❯"|"›") OSRC_SCR_BOTTOM=$((i - 1)); return 0 ;; esac
     i=$((i - 1))
@@ -488,12 +488,13 @@ _osrc_scr_bottom() {
   return 1
 }
 
-# 0 for a busy indicator: an interrupt hint ENDING the row ("(esc to interrupt · 14s)"), "Working (",
+# 0 for a busy indicator: an esc interrupt hint in parens ENDING the row ("(esc to interrupt · 14s)"),
+# or followed only by " · <status>"; "· esc to interrupt" ending the row; "Working (" / "• Working (";
 # braille spinner + a word, or spinner frame + a word + "…"/"...". A bullet (● ⏺ •) is no spinner.
 _osrc_scr_busy_row() { # <row>
   local t="${1#[[]}"   # one leading bracket allowed: "[⠋] Compiling crate 12/40"
   case "$t" in
-    *"("*"to interrupt)"|*"("*"to interrupt · "*")"|*"· "*"to interrupt"|"Working ("*) return 0 ;;
+    *"("*"esc"*"to interrupt)"|*"("*"esc"*"to interrupt) · "*|*"(esc to interrupt · "*")"|*"· esc to interrupt"|"Working ("*|"• Working ("*) return 0 ;;
     "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*|"⣻"*|"⣽"*|"⣟"*|"⡿"*|"⢿"*|"⣷"*|"⣯"*|"⠿"*|"⢰"*)
       case "$t" in *[A-Za-z]*) return 0 ;; esac ;;
     "✢"*|"✶"*|"✳"*|"✻"*|"✽"*|"◐"*|"◓"*|"◑"*|"◒"*)
@@ -509,7 +510,7 @@ _osrc_scr_busy_row() { # <row>
 _OSRC_SCR_LIMIT_RE="^((⎿|⚠|⛔|✖|■)[[:space:]]+)?(error:[[:space:]]+)?(claude( ai)? usage limit reached|you('|’)?ve hit your (usage )?limit|individual quota reached|rate limited|([0-9]+-hour|weekly|opus weekly|sonnet weekly|session|plan usage|usage|rate) limit (reached|exceeded))([.!]?[[:space:]]*(·|∙|\|)?[[:space:]]*(your (limit|quota)( will)? resets?|resets?|try again|retrying|please upgrade)([[:space:]].*)?)?[.!]?$"
 _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status region holds the engine's limit banner
   local end i l t tl bi="" phrase="" secs="" clk
-  if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom || :; end="$OSRC_SCR_BOTTOM"; fi
+  if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom 6 || :; end="$OSRC_SCR_BOTTOM"; fi
   for i in "$end" $((end - 1)); do
     [ "$i" -ge 0 ] || return 1
     if [ "$i" -lt "$end" ]; then   # the row below must be a plain trailer, not a prompt, glyph or tool row
