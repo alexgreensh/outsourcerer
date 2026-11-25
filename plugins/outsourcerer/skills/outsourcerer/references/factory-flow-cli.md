@@ -2,6 +2,38 @@
 
 Source: `scripts/factory-flow.sh`. Tests: `scripts/tests/test_factory_flow.sh`.
 
+## `plan start <plan> <tasks-file|-> [--goal "..."] [--max-parallel N] [--run] [--dry-run]`
+
+The one entry from a list of tasks to a running plan. One task per line; blank lines and `#` lines are skipped:
+
+```
+<key> | <what to do> [| after=k1,k2] [| files=a/b.sh,docs/] [| shape=ship|scout] [| verb=...] [| model=...]
+      [| provider=...] [| check="cmd"] [| retries=N] [| hold=question]
+```
+
+- `after` names keys of earlier lines only, so a list cannot form a cycle. A bad list creates nothing.
+- `files` declares the paths a task owns; a task with `files` defaults to `shape=ship`.
+- The default `check` is the repo profile's `check` (or `OSRC_FACTORY_CHECK`) when one is declared.
+- It prints, per task, `starts now`, `after X (declared)` or `after X (both touch a -> b)`, creates the plan in the
+  current repo, adds every task through `task add`, then runs one `plan run --once` pass so the first wave starts in
+  parallel. `--run` drives the plan to the end instead; `--dry-run` prints the order and creates nothing.
+
+## Repo profile (optional): `<repo>/.outsourcerer.toml`
+
+```toml
+[factory]
+check = "make lint"          # the free local check; default --check for plan start
+gate = "scripts/can-run.sh"  # optional resource gate, run as `<gate> can-run`
+parallel = 4                 # launch cap when no flag or OSRC_FACTORY_PARALLEL
+[factory.heavy]
+"npm run e2e" = "a cloud lane"   # heavy command -> where it runs; told to every worker
+[factory.bench]
+"bench/" = true              # paths where a benchmark with numbers is justified
+```
+
+The file is read line by line and never executed. `plan run` reads the profile of the plan's repo
+(`OSRC_FACTORY_PROFILE` points at another file). Without it, every default above applies.
+
 ## `plan run [plan | --plan name] [--max-parallel N] [--once] [--interval S] [--auto-land] [--max-minutes M] [--setup CMD]`
 
 Drives a plan until it is finished or needs you. Each pass ("tick") does two things:
@@ -31,14 +63,28 @@ Drives a plan until it is finished or needs you. Each pass ("tick") does two thi
      - **too_big** twice in a row is held for you to re-plan (split the task, or answer to try once more), even on the
        last attempt. **model** twice in a row is held the same way while retries remain; out of retries it fails.
    - Held decisions with a default (`task hold --default ... --until ...`) whose deadline has passed are released
-     with that default at the start of each pass, exactly as if you had answered. While such a deadline is still
+     with that default at the start of each pass, exactly as if you had answered. A hold marked
+     `--risk irreversible|paid|publish` (or any label other than `reversible`) never auto-applies its default. While such a deadline is still
      ahead and nothing else can move, `plan run` waits for it instead of stopping (within `--max-minutes`); `--once` stops (exit 3) and
      names when the default applies.
    - Job blocked (worker needs input): the task is held for you, with a wake event and the exact command
      (`task release tX --answer "..." --plan p`; a new worker starts with your answer).
    - A captain's decision or a land step found running a worker (someone ran `task start` on it) is held: a
      worker's output never completes a decision or a land.
-2. **Start ready work**, up to `--max-parallel` (default 3) at once, counting what is already running.
+2. **Start ready work** together, up to the launch cap, counting what is already running. The cap is
+   `--max-parallel`, else `OSRC_FACTORY_PARALLEL`, else the repo profile's `parallel`, else 3 (2 on machines with
+   4 cores or fewer, 1 on 2 or fewer); 1-16.
+   - Resource gate, checked once per pass: a repo gate command (profile `gate` or `OSRC_FACTORY_GATE`, run as
+     `<gate> can-run`; exit 1 pauses with its first output line as the reason, any other failure is ignored), then
+     free disk under `OSRC_DISK_MIN_GB` (10), then load per core over `OSRC_FACTORY_LOAD_MAX` (2; on macOS the
+     engine's load-and-swap check). A paused pass starts nothing and fails nothing. Missing readings never pause.
+     `OSRC_FACTORY_GATE=off` turns the gate off.
+   - File ownership: a task whose `files` overlap (same path, or one inside the other) a running task's or one
+     started earlier in this pass waits, and the pass prints `tX: waits — its files touch tY (a -> b)`.
+   - Review cap: each dispatch of a reviewer counts a round (`review_rounds`). After a FAIL, a further round past
+     `OSRC_FACTORY_REVIEW_ROUNDS` (default 3) is held until an approved escalation record exists at
+     `<plan>/escalations/<reviewer-tid>.json` with that `round` and `"approved": true`. The hold writes a pending
+     record there. A captain's `task release <reviewer> --answer "..."` is itself the escalation.
    - A launch failure counts as a failed attempt and is retried within the task's `retries`.
    - A brief too thin to act on is held before any worker starts, without using an attempt: a task with no prompt
      or title, or a hand-added ship task (not a flow stage) with no spec, no check, no dependency and no captain's

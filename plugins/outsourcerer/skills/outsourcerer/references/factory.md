@@ -25,6 +25,26 @@ For untrusted work, use sandboxed verbs and lanes; a worktree alone is not a sec
 - **Several parallel edits to one repo:** use a plan. Each ship task works in its own worktree, and
   the merge gate lands them one at a time with the check re-run on the merged result.
 
+## The fast path: `plan start`
+
+Most plans start from a list. Write one line per task and start them all in one command:
+
+```
+outsourcerer.sh plan start auth-retry tasks.txt
+```
+
+with `tasks.txt`:
+
+```
+map    | map every auth call site                 | verb=research
+client | add backoff to the auth client           | after=map | files=src/auth | check=npm test -- auth
+docs   | document the retry policy                | files=docs/auth.md
+```
+
+It shows the order and why each task waits, then launches every independent task at once up to
+the launch cap. Shared files serialize; disjoint files run side by side. Reference:
+`factory-flow-cli.md` (`plan start`, launch cap, resource gate, review cap, repo profile).
+
 ## A first plan in six commands
 
 ```
