@@ -12,18 +12,18 @@
 #   repo    the git common dir of the checkout (so every worktree of one repo shares its leases),
 #           or the physical directory outside git;
 #   path    relative to the worktree top, `//` collapsed, lowercased where git says the checkout is
-#           case-insensitive (core.ignorecase); `.` is the whole repo; a shell glob is allowed
-#           (`*` also crosses `/`);
+#           case-insensitive (core.ignorecase); `.` is the whole repo; a glob with `*` or `?` is allowed
+#           (`*` also crosses `/`; `[` is a plain character);
 #   holder  the caller's lane id, resolved like `lane msg` does (process ancestry, job dir, Claude
 #           session), never from a flag. Factory/plan code calls _osrc_lease_claim with a task id.
 # A claim that overlaps a live lease of another holder is refused, naming the holder and the expiry.
 # Overlap is conservative: equal paths, one inside the other's directory, a glob matching the other
 # path, or a glob whose literal head nests with the other side (src/*/x.ts and src/api overlap, as do
 # src/*.ts and src/*.md).
-# Renewal: a holder's own `lease`, `lane inbox` and `lane msg` calls push its leases out (this runs on
-# every platform), and the heartbeat beacon also renews holders it can prove alive (a tmux session, or
-# a job pid whose recorded start still matches). A TTL is never shorter than two heartbeat beats plus a
-# minute. A dead holder's lease simply runs out. A ledger that does not parse is never rewritten: every
+# Renewal: only a holder's own `lease`, `lane inbox` and `lane msg` calls push its leases out (a
+# waiting `lane inbox --wait` renews about once a minute). Nothing renews for a lane that went quiet,
+# so an idle or dead lane's leases run out on their own. A TTL is never shorter than two heartbeat
+# beats plus a minute. A ledger that does not parse is never rewritten: every
 # change is refused until someone moves it aside. Leases are advisory coordination, not a permission
 # system.
 
@@ -35,7 +35,7 @@ _osrc_lease_repo() {
   [ -d "$d" ] || return 1
   c="$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)" || c=""
   if [ -n "$c" ]; then
-    case "$c" in /*|?:/*) ;; *) c="$(cd "$d" && cd "$c" && pwd -P)" || return 1 ;; esac
+    c="$(cd "$d" && cd "$c" && pwd -P)" || return 1   # absolute or relative, always the physical spelling
     printf '%s\n' "$c"; return 0
   fi
   (cd "$d" && pwd -P)
@@ -49,7 +49,8 @@ _osrc_lease_norm() {
   top="$(cd "$top" && pwd -P)" || return 1   # physical, so Git Bash's C:/x and /c/x compare equal
   while :; do case "$p" in *//*) p="${p%%//*}/${p#*//}" ;; *) break ;; esac; done
   case "$p" in
-    /*|?:/*) p="$(_osrc_lease_phys "$p")"
+    /*|?:/*|..|../*|*/..|*/../*|./*|*/./*) case "$p" in /*|?:/*) ;; *) p="$(cd "$d" && pwd -P)/$p" ;; esac
+      p="$(_osrc_lease_phys "$p")"
       case "$p" in "$top") p=. ;; "$top"/*) p="${p#"$top"/}" ;; *) return 1 ;; esac ;;
     *) local pre; pre="$(git -C "$d" rev-parse --show-prefix 2>/dev/null)"; p="$pre$p" ;;
   esac
@@ -76,13 +77,17 @@ _osrc_lease_phys() {
 
 # _osrc_lease_overlap <a> <b> -> 0 when the two paths/globs can name the same file.
 _osrc_lease_overlap() {
-  local a="$1" b="$2" ha hb
+  local a="$1" b="$2" ha hb pa pb
   [ "$a" = "$b" ] || [ "$a" = . ] || [ "$b" = . ] && return 0
+  # A side is a glob only when it has `*` or `?`; a `[` alone is a real name (Next.js app/[id]/page.tsx).
+  pa="$a"; pb="$b"
+  case "$a" in *[\*\?]*) ;; *) pa="${a//\[/\\[}" ;; esac
+  case "$b" in *[\*\?]*) ;; *) pb="${b//\[/\\[}" ;; esac
   # shellcheck disable=SC2254  # unquoted on purpose: each side is matched as a pattern
-  case "$b" in $a|$a/*) return 0 ;; esac
+  case "$b" in $pa|$pa/*) return 0 ;; esac
   # shellcheck disable=SC2254
-  case "$a" in $b|$b/*) return 0 ;; esac
-  ha="${a%%[\*\?\[]*}"; hb="${b%%[\*\?\[]*}"
+  case "$a" in $pb|$pb/*) return 0 ;; esac
+  ha="${a%%[\*\?]*}"; hb="${b%%[\*\?]*}"
   [ "$ha" = "$a" ] && [ "$hb" = "$b" ] && return 1   # two plain paths: the cases above decide
   # A glob can reach anything that starts with its literal head (a plain path is all head)...
   [ "$ha" = "$a" ] || case "$hb" in "$ha"*) return 0 ;; esac
@@ -193,34 +198,6 @@ _osrc_lease_touch() {
   [ -n "${1:-}" ] && [ -s "$f" ] || return 0
   grep -aF "\"holder\":\"$1\"" "$f" >/dev/null 2>&1 || return 0
   _osrc_lease_extend "$1"
-}
-
-# _osrc_lease_holder_alive <holder> -> 0 for a live tmux session, or a job whose pid runs and is
-# still the recorded process (a reused pid is not; no start record to compare: alive). Orchestrator
-# sessions and factory task ids have no such proof, so they renew through their own calls.
-_osrc_lease_holder_alive() {
-  local id="$1" pf pid mrc
-  have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null && return 0
-  for pf in "$OSRC_JOBS/$id/pid" "$OSRC_JOBS/$id/supervisor_pid"; do
-    [ -f "$pf" ] || continue
-    pid="$(tr -d '[:space:]' < "$pf" 2>/dev/null)"
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null || continue
-    mrc=0; _pid_start_file_match "$pid" "${pf}_start" || mrc=$?
-    [ "$mrc" = 1 ] || return 0
-  done
-  return 1
-}
-
-# _osrc_lease_renew_live -> the heartbeat hook: renew every holder proven alive. Never fails the beat.
-_osrc_lease_renew_live() {
-  local leases alive="" h
-  leases="$(_osrc_lease_live "$(date +%s)" 2>/dev/null)" || return 0
-  for h in $(printf '%s' "$leases" | jq -r '.[].holder' | sort -u); do
-    _osrc_lease_holder_alive "$h" && alive="$alive$h
-"
-  done
-  _osrc_lease_extend "$alive"
 }
 
 _osrc_lease_when() { # <epoch> -> local time, portable (GNU date -d, BSD date -r)

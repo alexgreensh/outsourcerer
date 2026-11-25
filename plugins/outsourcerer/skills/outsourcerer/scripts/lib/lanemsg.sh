@@ -344,14 +344,15 @@ _ol_inbox_sig() { # <self> <kind>
 #   harness (not checked when started already re-parented to pid 1, as under a native Windows
 #   parent). A waiting lane is alive: it renews its own file leases about once a minute.
 osrc_lane_inbox() {
-  local peek=0 wait=0 timeout="${OSRC_INBOX_WAIT_SECS:-1800}"
+  local peek=0 wait=0 timeout="${OSRC_INBOX_WAIT_SECS:-1800}" flag=0
+  case "$timeout" in ''|*[!0-9]*) timeout=1800 ;; esac
   while [ "$#" -gt 0 ]; do case "$1" in
     --peek) peek=1 ;;
     --wait) wait=1 ;;
-    --timeout) timeout="${2:-}"; [ "$#" -gt 1 ] && shift ;;
+    --timeout) timeout="${2:-}"; flag=1; [ "$#" -gt 1 ] && shift ;;
     *) die "lane inbox: unknown flag '$1' (use --peek, --wait [--timeout N])" ;;
   esac; shift; done
-  case "$timeout" in ''|*[!0-9]*) die "lane inbox: --timeout needs whole seconds" ;; esac
+  [ "$flag" = 0 ] || case "$timeout" in ''|*[!0-9]*) die "lane inbox: --timeout needs whole seconds" ;; esac
   timeout=$((10#$timeout))
   _osrc_lane_self || die "lane inbox: cannot determine your lane id (no registered tmux session, job dir, or Claude session)"
   local self="$_OL_SELF" kind="$_OL_SELF_KIND" touch=: rc
@@ -359,6 +360,7 @@ osrc_lane_inbox() {
   "$touch" "$self"
   if [ "$wait" = 0 ]; then
     _ol_inbox_drain "$self" "$kind" "$peek"; rc=$?
+    [ "$rc" -ne 2 ] || { printf 'lane inbox: busy (the read cursor is locked); try again\n' >&2; return 1; }
     [ "$rc" -eq 0 ] || { _ol_inbox_header "$self"; printf '(no unread lane messages)\n'; }
     return 0
   fi

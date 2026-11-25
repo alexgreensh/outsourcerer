@@ -208,3 +208,29 @@ inside the gate.
   should call it.
 - Round 1's asks still stand: the `lane` usage line in `lib/remote.sh` (`inbox --wait`), factory
   wiring for leases, and ledger compaction for obligations.
+
+## Round 4
+
+Closing edits against the round-3 review; no new design.
+
+| # | change |
+|---|---|
+| P2 1 | `lease.sh`: the repo key always goes through `cd "$d" && cd "$c" && pwd -P`, so the main checkout and a worktree get one spelling. |
+| P2 2 | Beacon renewal deleted (`_osrc_lease_holder_alive`, `_osrc_lease_renew_live`, the heartbeat hook, 3 tests). Only a lane's own `lease`, `lane inbox` and `lane msg` calls renew (`inbox --wait` renews every minute), so an idle lane's leases expire after their TTL. |
+| P2 3 | READY/RESULT rewritten; RESULT names the real head sha and the real conformance rc. |
+| P3 4 | Plain `inbox` with the cursor lock busy prints "busy, try again" on stderr and returns 1. |
+| P3 5 | Garbage `OSRC_INBOX_WAIT_SECS` falls back to 1800; only the `--timeout` flag dies. |
+| P3 6 | Relative paths holding a `.`/`..` segment resolve through the absolute branch. |
+| P3 7 | A side is a glob only with `*` or `?`; `[` is a plain character (so `app/[id]/page.tsx` locks only itself). Char-class globs such as `[ab]*.c` are no longer recognised. |
+| P3 8 | `sed -En` scrub in `test_lane_coord.sh` and `test_lanemsg.sh`. |
+| P3 9 | `test_send_lock_wait.sh` bound allows 3 s. |
+| P3 10 | Tests: CLI exit 3 on a refused claim, orphan waiter exit, `lane msg` renewal, busy cursor lock, garbage env. |
+| P3 11 | Header help lists `inbox --wait` and `lease`. `lib/remote.sh:463` is still stale (not our file). |
+
+Tests (all niced): `tests/test_lane_coord.sh` rc 0, 48/48 (6 of its checks fail against the round-3 lib code). `test_lanemsg.sh` rc 0, 80/80. `test_send_lock_wait.sh` rc 0, 8/8.
+`conformance.sh` once at the end: rc 1, 243 passed, 6 failed, 1 skipped. Failing: test_harness_isolation, test_vocab_hygiene, test_supervise_pgroup_kill, test_parity_insource_refresh, test_sealed_fixes (all failing in round 3 too) and test_release_0175, which failed in the gate but passes alone (rc 0, 83/83), so it looks load-sensitive. Round 3 listed test_conformance_suite_timeout instead. I did not re-run the base to compare.
+
+Unproven: the P2 1 Git Bash key fix and the 3 s bound on stock macOS were not run there. Not tested: the `exit 125` code itself (the test asserts the orphaned waiter exits, not the number). The `rc` is checked only through process exit.
+
+### Needs from other lanes
+- `lib/remote.sh:463` usage line for `lane inbox --wait`.

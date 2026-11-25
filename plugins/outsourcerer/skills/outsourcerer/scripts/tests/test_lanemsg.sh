@@ -49,7 +49,7 @@ unset OL_PSMAP OL_PANES TMUX_STUB_SESSION TMUX_STUB_RC
 # Hermetic: drop every identity source an ambient shell (Claude Code, devin, tmux) may carry —
 # a caller's real CLAUDE_CODE_SESSION_ID/TMUX_PANE must never leak into `from` here. Each case
 # below sets the identity it needs inline.
-for _v in $(env | sed -n 's/^\(CLAUDE_[A-Za-z0-9_]*\|OSRC_[A-Za-z0-9_]*\|TMUX[A-Za-z0-9_]*\)=.*/\1/p'); do
+for _v in $(env | sed -En 's/^((CLAUDE_|OSRC_|TMUX)[A-Za-z0-9_]*)=.*/\1/p'); do
   case "$_v" in OSRC_HOME|OSRC_SOURCED) ;; *) unset "$_v" 2>/dev/null || true ;; esac
 done
 unset _v CLAUDE_CODE_SESSION_ID OSRC_LANE_ID OSRC_JOB_DIR TMUX TMUX_PANE

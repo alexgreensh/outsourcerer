@@ -9,7 +9,7 @@ TMP="$(mktemp -d "${TMPDIR%/}/.test-lane-coord.XXXXXX")" || { echo "FAIL: no scr
 TEST_TMP="$TMP"; trap 'jobs -p | xargs kill 2>/dev/null; rm -rf "$TEST_TMP"' EXIT
 pass=0; fail=0; ok(){ echo "PASS: $1"; pass=$((pass+1)); }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 
-for _v in $(env | sed -n 's/^\(CLAUDE_[A-Za-z0-9_]*\|OSRC_[A-Za-z0-9_]*\|TMUX[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$_v"; done
+for _v in $(env | sed -En 's/^((CLAUDE_|OSRC_|TMUX)[A-Za-z0-9_]*)=.*/\1/p'); do unset "$_v"; done
 export HOME="$TMP/home" OSRC_HOME="$TMP/osrc" OSRC_MC_AUTO_OPEN=0
 mkdir -p "$HOME" "$TMP/bin"
 printf '#!/bin/sh\ncase "$1" in has-session) exit "${TMUX_STUB_RC:-1}" ;; esac\nexit 0\n' > "$TMP/bin/tmux"; chmod +x "$TMP/bin/tmux"
@@ -73,6 +73,20 @@ as laneA osrc_lane_inbox --wait --timeout 08 > "$TMP/z.out" 2>&1 && grep -q zero
 OSRC_INBOX_WAIT_MAX_SLEEP=junk as laneA osrc_lane_inbox --wait --timeout 3 > /dev/null 2> "$TMP/ms.err"; rc=$?
 [ "$rc" = 124 ] && ! grep -q 'sleep' "$TMP/ms.err" && ok "a garbage OSRC_INBOX_WAIT_MAX_SLEEP falls back" || bad "max sleep knob: rc=$rc $(cat "$TMP/ms.err")"
 
+# Garbage OSRC_INBOX_WAIT_SECS does not kill a plain inbox; a busy cursor lock is not "no unread".
+OSRC_INBOX_WAIT_SECS=30s as laneA osrc_lane_inbox >/dev/null 2>&1 && ok "garbage OSRC_INBOX_WAIT_SECS does not break plain inbox" || bad "plain inbox died on a garbage env"
+as laneB osrc_lane_msg laneA "behind a lock" >/dev/null 2>&1
+_state_lock_acquire() { return 1; }
+as laneA osrc_lane_inbox > "$TMP/busy.out" 2>"$TMP/busy.err"; rc=$?
+unset -f _state_lock_acquire; OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1
+[ "$rc" != 0 ] && ! grep -q 'no unread' "$TMP/busy.out" && grep -q busy "$TMP/busy.err" \
+  && ok "a busy cursor lock says busy, not 'no unread'" || bad "busy lock: rc=$rc out=$(cat "$TMP/busy.out")"
+as laneA osrc_lane_inbox >/dev/null 2>&1
+# Exit 125 when the starter is gone (asserted by code, not by text).
+OSRC_JOB_DIR="$OSRC_JOBS/laneA" sh -c '"$1" lane inbox --wait --timeout 60 >/dev/null 2>&1 & echo $! > "$2"; sleep 1' _ "$SRC" "$TMP/p125"
+i=0; while kill -0 "$(cat "$TMP/p125")" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+kill -0 "$(cat "$TMP/p125")" 2>/dev/null && { bad "125 waiter outlived parent"; kill "$(cat "$TMP/p125")"; } || ok "orphaned waiter exits (125 path)"
+
 echo "== file leases =="
 R="$TMP/repo"; git init -q "$R"; git -C "$R" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m init
 git -C "$R" worktree add -q "$TMP/wt" -b side 2>/dev/null
@@ -101,24 +115,10 @@ REPO="$(_osrc_lease_repo .)"
 _osrc_lease_claim deadlane "$REPO" lib/x.sh
 jq -c --argjson u "$(( $(date +%s) - 1 ))" 'map(if .holder == "deadlane" then .until = $u else . end)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
 _osrc_lease_claim laneA "$REPO" lib/x.sh >/dev/null 2>&1 && ok "a lapsed lease expires on its own" || bad "expired lease still blocks"
-sleep 30 & live=$!; printf '%s\n' "$live" > "$OSRC_JOBS/laneB/pid"
-dead="$(osrc_test_dead_pid)"; mkdir -p "$OSRC_JOBS/gone"; printf '%s\n' "$dead" > "$OSRC_JOBS/gone/pid"
-_osrc_lease_claim laneB "$REPO" app/live.c 600 && _osrc_lease_claim gone "$REPO" app/dead.c 600
-soon=$(( $(date +%s) + 30 ))   # both about to lapse; only a renewal can push one past 30 s
-jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
-_osrc_lease_renew_live
+soon=$(( $(date +%s) + 30 ))   # about to lapse; only a renewal can push one past 30 s
 until_of() { jq -r --arg p "$1" '.[] | select(.path==$p) | .until' "$OSRC_HOME/leases.json"; }
-[ "$(until_of app/live.c)" -gt "$soon" ] 2>/dev/null && ok "heartbeat renews a live holder's lease" || bad "live holder's lease not renewed"
-[ "$(until_of app/dead.c)" = "$soon" ] && ok "a dead holder's lease is left to run out" || bad "dead holder's lease was renewed"
-# A reused pid: alive, but not the process the job recorded. Its lease is not renewed.
-sleep 30 & reused=$!; mkdir -p "$OSRC_JOBS/reused"; printf '%s\n' "$reused" > "$OSRC_JOBS/reused/pid"
-printf 'Mon Jan  1 00:00:00 2001\n' > "$OSRC_JOBS/reused/pid_start"
-_osrc_lease_claim reused "$REPO" app/reused.c 600
-jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
-_osrc_lease_renew_live
-[ "$(until_of app/reused.c)" = "$soon" ] && ok "a reused pid does not keep a dead job's lease" || bad "reused pid renewed the lease"
-kill "$live" "$reused" 2>/dev/null
-
+# An idle lane (tmux session alive, no calls) must not hold leases forever: nothing renews them.
+type _osrc_lease_renew_live >/dev/null 2>&1 && bad "a beacon still renews idle lanes' leases" || ok "no beacon renewal: an idle lane's leases run out"
 # A live holder renews its own leases through its own calls, beacon or not (Git Bash has none).
 as laneA osrc_lease claim own/file >/dev/null 2>&1
 jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
@@ -153,10 +153,29 @@ mkdir -p "$TMP/solo"; git init -q "$TMP/solo"
 # A ledger that does not parse is never overwritten by a claim, release or renewal.
 cp "$OSRC_HOME/leases.json" "$TMP/good.json"; head -c 40 "$TMP/good.json" > "$OSRC_HOME/leases.json"; cp "$OSRC_HOME/leases.json" "$TMP/bad.json"
 as laneA osrc_lease claim new/file >/dev/null 2>"$TMP/corrupt.err"; rc=$?
-as laneA osrc_lease release --all >/dev/null 2>&1; _osrc_lease_renew_live; as laneA osrc_lane_inbox >/dev/null 2>&1
+as laneA osrc_lease release --all >/dev/null 2>&1; as laneA osrc_lane_inbox >/dev/null 2>&1
 [ "$rc" != 0 ] && cmp -s "$OSRC_HOME/leases.json" "$TMP/bad.json" && grep -q unreadable "$TMP/corrupt.err" \
   && ok "a corrupt ledger is refused, not wiped" || bad "corrupt ledger: rc=$rc err=$(cat "$TMP/corrupt.err") now=$(cat "$OSRC_HOME/leases.json")"
 cp "$TMP/good.json" "$OSRC_HOME/leases.json"
+
+# lane msg renews the sender's leases; the CLI exits 3 on a refused claim; in-repo dot segments; [ is a name.
+as laneA osrc_lease claim msg/own >/dev/null 2>&1
+jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
+as laneA osrc_lane_msg laneB "hello" >/dev/null 2>&1
+[ "$(until_of msg/own)" -gt "$soon" ] 2>/dev/null && ok "lane msg renews the sender's leases" || bad "lane msg did not renew"
+as laneA osrc_lease claim cli/x >/dev/null 2>&1
+OSRC_JOB_DIR="$OSRC_JOBS/laneB" "$SRC" lease claim cli/x >/dev/null 2>&1; rc=$?
+[ "$rc" = 3 ] && ok "the CLI exits 3 on a refused claim" || bad "CLI refused-claim rc=$rc"
+mkdir -p "$R/dots/sub"
+( cd "$R/dots/sub" && as laneA osrc_lease claim ../up.c >/dev/null 2>&1 && as laneA osrc_lease claim ./here.c >/dev/null 2>&1 )
+as laneB osrc_lease claim dots/up.c >/dev/null 2>&1; [ $? = 3 ] && ok "'../x' resolves inside the repo" || bad "../ claim not stored as dots/up.c"
+as laneB osrc_lease claim dots/sub/here.c >/dev/null 2>&1; [ $? = 3 ] && ok "'./x' resolves inside the repo" || bad "./ claim not stored"
+as laneA osrc_lease claim 'br/[id]/page.tsx' >/dev/null 2>&1
+as laneB osrc_lease claim br/other.tsx >/dev/null 2>&1 && ok "a '[' name does not lock its siblings" || bad "[id] treated as a glob"
+as laneB osrc_lease claim 'br/[id]/page.tsx' >/dev/null 2>&1; [ $? = 3 ] && ok "the '[' name itself stays protected" || bad "[id] file not protected"
+# Idle lane: the orchestrator-visible expiry. A lease past its until is gone.
+# Repo key is one spelling for the main checkout and a worktree.
+[ "$(_osrc_lease_repo "$R")" = "$(_osrc_lease_repo "$TMP/wt")" ] && ok "main checkout and worktree share a repo key" || bad "repo keys differ"
 
 # Two lanes claiming one path at the same instant: exactly one wins.
 ( _osrc_lease_claim racer1 "$REPO" hot/file 2>/dev/null; echo $? > "$TMP/c1" ) &
