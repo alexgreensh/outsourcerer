@@ -17345,7 +17345,7 @@ _blind_turn_guard() {
     [ "$(printf '%s' "$self_anc" | wc -w | tr -d ' ')" -ge 2 ] 2>/dev/null && self_anc_usable=true ;;
   esac
   # One bounded pass over the snapshot. Tab-separated: class \t owner \t id \t name \t waiting_for \t cwd
-  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" --argjson self_anc_usable "$self_anc_usable" '
+  needs="$(printf '%s' "$snapshot" | jq -r --arg self_sid "$self_sid" --arg self_anc "$self_anc" --argjson self_anc_usable "$self_anc_usable" --arg others "$(_osrc_owned_by_others 2>/dev/null)" '
     def clean(v): (v // "") | tostring | gsub("[[:cntrl:]]"; " ") | gsub(" +"; " ") | .[0:80];
     def caller: (.pid // null) as $p | .owner == "cc-peer"
       and (($p != null and ($self_anc | contains(" " + ($p | tostring) + " ")))
@@ -17354,7 +17354,7 @@ _blind_turn_guard() {
                     or $p == null
                     or ($self_anc | contains(" " + ($p | tostring) + " ")))));
     .items[]
-    | select(caller | not)
+    | select(caller | not) | select(((.job_id // .session_id // "") | tostring) as $i | $i == "" or ($others | contains(" " + $i + " ") | not))   # lib/owner_scope.sh
     | select(.state == "blocked?" or .state == "blocked" or .state == "unresponsive?")
     | (if (.state == "blocked?" or .state == "blocked") then "needs-you" else "maybe-stuck" end) + "\t"
       + (.owner // "unknown") + "\t"

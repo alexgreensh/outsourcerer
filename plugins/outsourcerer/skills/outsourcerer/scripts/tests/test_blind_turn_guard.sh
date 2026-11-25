@@ -438,6 +438,21 @@ out="$(_blind_turn_guard 2>&1)"; rc=$?
   && ok "40 working delegates stay silent (healthy fleet, bounded pass)" \
   || bad "40 working delegates were not silent (rc=$rc)"
 
+# --- another orchestrator's parked run is not "yours": owners/<other sid>/<id> hides it ---
+other_blocked='{"owner":"managed","job_id":"job-other","session_id":null,"state":"blocked?","state_label":"Waiting on you","waiting_for":"approval prompt","display_name":"their task","cwd":"/repo"}'
+mkdir -p "$OSRC_HOME/owners/sess-other" "$OSRC_HOME/owners/sess-me"; : > "$OSRC_HOME/owners/sess-other/job-other"
+write_snapshot "$(snapshot_with "$other_blocked")"
+out="$(CLAUDE_CODE_SESSION_ID=sess-me _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! grep -q 'job-other' <<<"$out" \
+  && ok "another orchestrator's parked run does not hold this turn" || bad "another orchestrator's run was blamed on this one (rc=$rc): $out"
+: > "$OSRC_HOME/owners/sess-me/job-other"
+out="$(CLAUDE_CODE_SESSION_ID=sess-me _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && grep -q 'job-other' <<<"$out" && ok "a run owned by both sessions still shows" || bad "a co-owned run was hidden (rc=$rc)"
+write_snapshot "$(snapshot_with "$managed_blocked")"
+out="$(CLAUDE_CODE_SESSION_ID=sess-me _blind_turn_guard 2>&1)"; rc=$?
+[ "$rc" = 7 ] && grep -q 'job-7' <<<"$out" && ok "a run with no owner record still shows (gaps never silence a wait)" || bad "an unowned run was hidden (rc=$rc)"
+rm -rf "$OSRC_HOME/owners"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
