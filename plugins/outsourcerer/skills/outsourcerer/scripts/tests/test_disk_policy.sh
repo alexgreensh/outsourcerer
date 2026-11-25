@@ -267,8 +267,10 @@ g="$(OSRC_RUN_ID=x osrc "$TMP/fg2" 'mkdir -p "$OSRC_HOME"; _osrc_disk_register_c
 if command -v tmux >/dev/null 2>&1; then
   export TMUX_TMPDIR="$TMP/tmux"; mkdir -p "$TMUX_TMPDIR"; unset TMUX
   TH="$TMP/tui"; mkdir -p "$TH/jobs"
+  # Product panes run the login shell itself (pane_pid = the job-control shell). tmux runs a pane
+  # command through "$SHELL -c", and dash forks rather than exec'ing, so `exec` keeps that shape.
   osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
-  tmux new-session -d -s osrc-tui -x 80 -y 24 "env PS1='$ ' bash --norc --noprofile -i"
+  tmux new-session -d -s osrc-tui -x 80 -y 24 "exec env PS1='$ ' bash --norc --noprofile -i"
   sleep 0.5; tmux send-keys -t osrc-tui "bash -c 'stty raw -echo; exec sleep 600'" Enter
   wait_for '[ "$(tmux display-message -p -t osrc-tui "#{pane_current_command}")" = sleep ]' 25
   PTTY="$(tmux display-message -p -t osrc-tui '#{pane_tty}')"; RAW="$(stty -g < "$PTTY")"
@@ -306,7 +308,7 @@ if command -v tmux >/dev/null 2>&1; then
   [ -f "$TH/disk-policy/procs/tmux-not-yet" ] && [ ! -f "$TH/tmux-calls" ] && ok "pending tmux registration makes no tmux call" || bad "pending registration probed tmux"
   # P3: a resumed lane parked behind another foreground program is never typed into; one parked event.
   osrc "$TH" 'SESSION_NAME=park; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
-  tmux new-session -d -s park -x 80 -y 24 "env PS1='$ ' bash --norc --noprofile -i"; sleep 0.5; tmux send-keys -t park "sleep 600" Enter; sleep 0.5
+  tmux new-session -d -s park -x 80 -y 24 "exec env PS1='$ ' bash --norc --noprofile -i"; sleep 0.5; tmux send-keys -t park "sleep 600" Enter; sleep 0.5
   rm -f "$TH/disk-policy/hold"; osrc "$TH" '_osrc_disk_pause_reg "$OSRC_HOME/disk-policy/procs/tmux-park"' >/dev/null
   wait_for '[ "$(tmux display-message -p -t park "#{pane_current_command}")" = bash ]' 25; tmux send-keys -t park "sleep 601" Enter; sleep 0.5
   osrc "$TH" '_osrc_disk_resume_rec "$OSRC_HOME/disk-policy/paused/tmux-park"' >/dev/null

@@ -96,9 +96,13 @@ grep -q 'load is 12.00 on 4 cores (3.00 per core), over 2 per core (OSRC_FACTORY
 # Disk: the launch path's own gate decides, cleanup ack included (P2 3).
 out="$( calm; _osrc_free_kb() { echo $(( 8 * 1048576 )); }; _osrc_cleanup_items() { echo '{"verdict":"ASK","path":"/w/old","kind":"worktree"}'; }
   _osrc_fp_gate_can_run || echo "no: $_OSRC_FP_GATE_REASON"; _osrc_cleanup_ack >/dev/null; _osrc_fp_gate_can_run && echo "acked: go" )"
-grep -q 'no: .*need your decision.*Override: OSRC_DISK_MIN_GB=0' <<<"$out" && grep -q 'acked: go' <<<"$out" \
+grep -q 'no: .*need your decision.*OSRC_DISK_MIN_GB=0 in .*/disk-policy/settings' <<<"$out" && grep -q 'acked: go' <<<"$out" \
   && ok "L5: low disk pauses until the cleanup ASK list is acked, as at launch" || bad "L5 disk ack: $out"
-( calm; _osrc_free_kb() { echo $(( 8 * 1048576 )); }; OSRC_DISK_MIN_GB=0 _osrc_fp_gate_can_run ) && ok "L5: OSRC_DISK_MIN_GB=0 lifts the disk pause" || bad "L5: disk override ignored"
+# Floors come only from the settings file (lib/disk_policy.sh): the gate's hint must name it, and an
+# inherited export must not open the gate.
+( calm; _osrc_free_kb() { echo $(( 8 * 1048576 )); }; OSRC_DISK_MIN_GB=0 _osrc_fp_gate_can_run ) 2>/dev/null && bad "L5: an OSRC_DISK_MIN_GB export opened the disk gate" || ok "L5: an OSRC_DISK_MIN_GB export does not move the floor"
+( calm; mkdir -p "$OSRC_HOME/disk-policy"; echo OSRC_DISK_MIN_GB=0 > "$OSRC_HOME/disk-policy/settings"; _osrc_free_kb() { echo $(( 8 * 1048576 )); }
+  _osrc_fp_gate_can_run; r=$?; rm -f "$OSRC_HOME/disk-policy/settings"; exit $r ) && ok "L5: OSRC_DISK_MIN_GB=0 in the settings file lifts the disk pause" || bad "L5: disk override ignored"
 # A pause prints once, not on every pass.
 mkplan quiet 't1||scout|0'
 out="$( calm; _osrc_fp_load1() { echo 99; }; cmd_plan_run quiet --once 2>&1; cmd_plan_run quiet --once 2>&1 )"

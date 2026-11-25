@@ -87,9 +87,12 @@ grep -q '_wake_on_finish_hint "$_ad_sess"' "$SRC" && ok "an auto-detached run pr
 
 if tmux -L osrc-test-T5 -V >/dev/null 2>&1; then
   echo "=== real tmux: a running wrapper counts as a live launch ==="
+  # tmux runs a pane command through "$SHELL -c". dash (a common /bin/sh login shell) forks
+  # instead of exec'ing it, which would leave the wrapper a grandchild of pane_pid. The product's
+  # panes run the login shell itself (new-session with no command), so `exec` mirrors that here.
   mkdir -p "$TMP/w"
   printf '#!/usr/bin/env bash\nsleep 8\n' > "$TMP/w/outsourcerer.sh"; chmod +x "$TMP/w/outsourcerer.sh"
-  tmux new-session -d -s wl-live -x 100 -y 20 "bash --norc --noprofile" 2>/dev/null
+  tmux new-session -d -s wl-live -x 100 -y 20 "exec bash --norc --noprofile" 2>/dev/null
   tmux send-keys -t wl-live "$TMP/w/outsourcerer.sh" Enter
   OSRC_SESSION_LIVENESS_SECS=3 _session_launch_liveness_check wl-live cursor "outsourcerer.sh" 2>/dev/null \
     && ok "a pane running outsourcerer.sh passes the launch check" || no "a running wrapper was called a dead launch (#47)"
@@ -97,7 +100,7 @@ if tmux -L osrc-test-T5 -V >/dev/null 2>&1; then
   [ -n "$(_session_engine_pid wl-live "$pp")" ] && ok "the wrapper is recorded as the engine (heartbeat sees it alive)" \
     || no "no engine pid for a running wrapper"
   tmux kill-session -t wl-live 2>/dev/null
-  tmux new-session -d -s wl-idle -x 100 -y 20 "bash --norc --noprofile" 2>/dev/null
+  tmux new-session -d -s wl-idle -x 100 -y 20 "exec bash --norc --noprofile" 2>/dev/null
   OSRC_SESSION_LIVENESS_SECS=2 _session_launch_liveness_check wl-idle droid "droid -r high" 2>/dev/null \
     && no "an idle prompt passed the launch check" || ok "an idle prompt still fails the launch check (droid -r guard kept)"
   tmux kill-session -t wl-idle 2>/dev/null

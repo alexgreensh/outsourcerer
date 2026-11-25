@@ -200,6 +200,9 @@ elif _wait_gone "$gp"; then
   # grandchild. A recycled PID will have a different start time and a different pgid.
   live_start="$(ps -o lstart= -p "$gp" 2>/dev/null | tr -s ' ')"
   live_pgid="$(ps -o pgid= -p "$gp" 2>/dev/null | tr -d '[:space:]')"
+  # _proc_gone counts an unreaped zombie as gone: SIGKILL took. Some container inits reap orphans
+  # late, so a zombie still shows its old start/pgid; only a non-zombie with them is a survivor.
+  case "$(ps -o stat= -p "$gp" 2>/dev/null | tr -d '[:space:]')" in Z*) live_start="" ;; esac
   if [ -n "$gstart" ] && [ -n "$live_start" ] && [ "$live_start" = "$gstart" ] && [ "$live_pgid" = "$gc_pgid" ]; then
     bad "wedge: PID $gp matches our grandchild's start/pgid yet reads live — SIGKILL did not take (REGRESSION)"
   else

@@ -233,10 +233,16 @@ _wd_assert_dead() {   # <label> <bound-secs> <suite.sh>; asserts the watchdog's 
     bad "watchdog timer was never observable during the $label run (cannot assert its death)"
   else
     wait "$wrp" 2>/dev/null
-    sleep 1
-    kill -0 "$wdt" 2>/dev/null \
+    # Dead means gone or an unreaped zombie: the killed timer is orphaned to init, and some
+    # container inits reap late, so kill -0 alone would call a dead timer alive. Bounded at 1-2s.
+    dln=$(( SECONDS + 2 ))
+    while kill -0 "$wdt" 2>/dev/null && [ "$SECONDS" -lt "$dln" ]; do
+      case "$(ps -o stat= -p "$wdt" 2>/dev/null | tr -d ' ')" in Z*) break ;; esac
+      sleep 0.1
+    done
+    kill -0 "$wdt" 2>/dev/null && case "$(ps -o stat= -p "$wdt" 2>/dev/null | tr -d ' ')" in Z*|'') false ;; *) true ;; esac \
       && bad "watchdog timer $wdt survived the gate's return on the $label path" \
-      || ok "watchdog timer $wdt dead within 1s of the gate returning ($label path)"
+      || ok "watchdog timer $wdt dead within 2s of the gate returning ($label path)"
   fi
 }
 cat > "$TMP/outlives-bound.sh" <<'EOF'

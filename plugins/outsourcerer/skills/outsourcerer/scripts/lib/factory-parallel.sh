@@ -165,7 +165,7 @@ _osrc_fp_gate_can_run() {
   # does at launch. It dies when it refuses, hence the subshell.
   if type _osrc_disk_gate >/dev/null 2>&1 && ! out="$( _osrc_disk_gate 2>&1 )"; then
     out="$(printf '%s' "$out" | tail -1 | sed 's/^ERROR: //; s/^outsourcerer: //' | cut -c1-400)"
-    _OSRC_FP_GATE_REASON="${out:-free disk is low}. Override: OSRC_DISK_MIN_GB=0"; return 1
+    _OSRC_FP_GATE_REASON="${out:-free disk is low}. To lift the floor: OSRC_DISK_MIN_GB=0 in $OSRC_HOME/disk-policy/settings"; return 1
   fi
   n="$(_osrc_fp_ncpu)"; l="$(_osrc_fp_load1)"
   if [ -n "$n" ] && [ -n "$l" ] && [ -z "$(printf '%s' "$l" | tr -d '0-9.')" ]; then
