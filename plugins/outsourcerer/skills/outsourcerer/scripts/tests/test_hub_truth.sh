@@ -194,9 +194,11 @@ echo junk > "$OSRC_HOME/hub/flight/all.f00.json.$dead"
 rm -f "$OSRC_HOME/runs"; sf 3
 [ "$(cat "$TMP/sf.3")" = '{"run":1}' ] && [ ! -d "$lk" ] && [ ! -e "$OSRC_HOME/hub/flight/all.f00.json.$dead" ] \
   && ok "a lock left by a dead export is taken over, with its temp file" || no "dead leader: $(cat "$TMP/sf.3")"
+echo junk > "$OSRC_HOME/hub/flight/all.f00.json.99999"; ago 120 "$OSRC_HOME/hub/flight/all.f00.json.99999"
 # A SIGKILLed leader whose pid now belongs to a long-lived process ($$): the lock is old, so it is taken over.
 mkdir -p "$lk"; echo "$$" > "$lk/pid"; ago 2 "$lk"
 rm -f "$OSRC_HOME/runs"; t0="$(date +%s)"; OSRC_HUB_EXPORT_WAIT=8 sf 4
+[ ! -e "$OSRC_HOME/hub/flight/all.f00.json.99999" ] && ok "an hour-old temp file of a reused pid is swept" || no "temp file of a reused pid leaked"
 [ "$(cat "$TMP/sf.4")" = '{"run":1}' ] && [ ! -d "$lk" ] && [ $(( $(date +%s) - t0 )) -lt 6 ] \
   && ok "a stale lock with a reused live pid is taken over at once and cleared" || no "reused pid: $(cat "$TMP/sf.4") lock=$([ -d "$lk" ] && echo left) took $(( $(date +%s) - t0 ))s"
 rm -rf "$lk"

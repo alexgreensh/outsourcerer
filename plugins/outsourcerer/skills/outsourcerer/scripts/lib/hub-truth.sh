@@ -12,7 +12,7 @@
 #     finished, nobody picked it up".
 #  3. One card per project: sessions on the same project (explicit key, or same repo + name) merge.
 #  4. One registry pass per export (_osrc_hub_cc_rows) and a single-flight export (cmd_hub_export).
-#  5. attention: one value per lane and per project, in the order references/hub.md writes down.
+#  5. attention: one value per lane, in the order references/hub.md writes down.
 
 # ---- 1. derive ----------------------------------------------------------------------------------
 # dcount: lanes -> counts and the lanes worth naming. A lane's category comes from its status
@@ -58,7 +58,6 @@ def dmerge: reduce .[] as $c ({n:0,working:0,blocked:0,idle:0,ready:0,done:0,mer
   | .finished += ($c.finished // []) | .evidenceAt = ([.evidenceAt, ($c.evidenceAt // 0)] | max));
 # attention: what a lane asks of you, most urgent first (references/hub.md, "Attention"). Stalled lanes
 # are the ones whose nudge did not help (lib/mc_alive.sh needs-you alerts).
-def attn_order: ["approval","question","proof","review","stalled","limit","ready","failed","working","finished"];
 def lattn($stalled): if .state == "approval" then "approval" elif .state == "question" then "question"
   elif (.proof.stopped? // false) == true then "proof" elif .reviewNeedsYou != null then "review"
   elif ((.id // "") | IN($stalled[])) then "stalled" elif .state == "limit" then "limit"
@@ -299,7 +298,8 @@ _osrc_hub_single_flight() {
     fi
     pid="$(cat "$lk/pid" 2>/dev/null)"; age=$(( $(date +%s) - $(_osrc_hub_mt "$lk") ))
     if [ "$age" -gt "$stale" ] || { [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; } || { [ -z "$pid" ] && [ "$age" -gt 10 ]; }; then
-      rm -rf "$lk" 2>/dev/null; { [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null; } || rm -f "$out.$pid" 2>/dev/null; continue
+      rm -rf "$lk" 2>/dev/null; { [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null; } || rm -f "$out.$pid" 2>/dev/null
+      find "$d" -name "$key.json.*" -mmin +60 -exec rm -f {} + 2>/dev/null; continue
     fi
     seen=1; sleep 0.2 2>/dev/null || sleep 1
     [ $(( $(date +%s) - start )) -lt "$wait" ] || { "$@"; return; }

@@ -97,9 +97,9 @@ ok(notes.length === 1, 'never without the opt-in click');
 const A2 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();   // one page, one key handler
 store['osrc-hub-notify'] = '1'; doc.hidden = true; A2.refresh(proj(6));
 ok(notes.length === 1, 'never on first load');
-const A3 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();
-A3.refresh([]); A3.refresh(proj(7));
-ok(notes.length === 1, 'never on first load, even when limits or answers render before the projects arrive');
+const A4 = win.OSRC_HUB_ATTN({ el, openDecs: () => decs }); doc.listeners.keydown.pop();
+A4.refresh([]); A4.refresh(proj(7));
+ok(notes.length === 2, 'an empty board then a first question still notifies');
 
 // Merged card: two sessions' D1 -> distinct ids (P5).
 const card = { id: 's1', name: 'Garden app' };

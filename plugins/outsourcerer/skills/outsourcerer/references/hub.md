@@ -146,7 +146,7 @@ Each export gives every lane one `attention` value, from signals it already has 
 questions itself). The order, most urgent first:
 
 1. `approval`: the lane's screen holds a permission prompt.
-2. `question`: the lane asks a question, or the card has an open decision.
+2. `question`: the lane asks a question.
 3. `proof`: the lane is stopped after its failed proof rounds.
 4. `review`: the review of the lane has no readable verdict.
 5. `stalled`: the lane stalled and the nudge did not help.
