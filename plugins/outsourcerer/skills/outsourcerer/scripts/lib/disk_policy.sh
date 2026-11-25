@@ -199,8 +199,8 @@ _osrc_disk_recorded_pids() { _osrc_disk_records | while IFS= read -r f; do awk -
 
 # _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact.
 _osrc_disk_rec_write() {
-  printf '%s' "$2" > "$1.tmp" 2>/dev/null && mv -f "$1.tmp" "$1" 2>/dev/null && [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
-  rm -f "$1.tmp" "$1" 2>/dev/null; return 1
+  printf '%s' "$2" > "$1.${_OSRC_DISK_ME:-$$}" 2>/dev/null && mv -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null && [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
+  rm -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null; return 1
 }
 
 _osrc_disk_log() { printf '%s disk-policy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(_osrc_disk_dir)/monitor.log" 2>/dev/null || true; }
@@ -223,10 +223,10 @@ _osrc_disk_stop_rec() {
 
 # _osrc_disk_pause_job <jd> -> 0 paused, 1 nothing to pause, 2 unverifiable, 3 record failed.
 _osrc_disk_pause_job() {
-  local jd="$1" pid spid did sid grp=0 own c q
-  _osrc_disk_terminal_status "$(cat "$jd/status" 2>/dev/null)" && return 1
+  local jd="$1" pid="" spid did sid grp=0 own c q st=""
+  read -r st < "$jd/status" 2>/dev/null; _osrc_disk_terminal_status "$st" && return 1
   [ -f "$jd/disk-paused" ] && return 1
-  pid="$(cat "$jd/pid" 2>/dev/null)"; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  read -r pid < "$jd/pid" 2>/dev/null; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   [ "$pid" != "$$" ] && [ "$pid" != "${_OSRC_DISK_ME:-$$}" ] || return 1
   _pid_start_file_match "$pid" "$jd/pid_start" >/dev/null 2>&1 || return 2
@@ -263,8 +263,8 @@ _osrc_disk_register_caller() { # <calling function>
     session)
       [ "${OSRC_PLATFORM:-}" != windows ] && have tmux || return 0
       case "${SESSION_NAME:-}" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-      local k n t c i   # a record bound to a still-live pane is a running session: keep it
-      IFS='|' read -r k n t c i < "$d/tmux-$SESSION_NAME" 2>/dev/null && _osrc_disk_same "$c" "$i" && return 0
+      local k n t c i e   # keep a record bound to a live pane, or pending from an earlier (finished) start
+      IFS='|' read -r k n t c i e < "$d/tmux-$SESSION_NAME" 2>/dev/null && { _osrc_disk_same "$c" "$i" || { [ -z "$c" ] && ! kill -0 "${e:-0}" 2>/dev/null; }; } && return 0
       _mkdir_private "$d" >/dev/null 2>&1 && printf 'tmux|%s|%s|||%s\n' "$SESSION_NAME" "$(date +%s)" "$$" > "$d/tmux-$SESSION_NAME" 2>/dev/null ;;
   esac
   return 0
@@ -349,12 +349,12 @@ _osrc_disk_pane_restore() {
 # required SIGCONT fails. A job's pause time is banked BEFORE any SIGCONT, so the watchdog
 # reading _osrc_disk_paused_secs never counts it twice or misses it.
 _osrc_disk_resume_rec() {
-  local rec="$1" tag a b c d keep=0 live="" panes="" jd=""
+  local rec="$1" tag a b c d keep=0 live="" panes="" jd="" t
   [ -f "$rec" ] || return 0
   case "$rec" in */disk-paused)
-    jd="${rec%/disk-paused}"
+    jd="${rec%/disk-paused}"; t="$rec.${_OSRC_DISK_ME:-$$}"   # a failed rewrite keeps the old record
     printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null \
-      && grep -v '^since|' "$rec" > "$rec.tmp" 2>/dev/null; mv -f "$rec.tmp" "$rec" 2>/dev/null ;;
+      && grep -v '^since|' "$rec" > "$t" 2>/dev/null && mv -f "$t" "$rec" 2>/dev/null || rm -f "$t" 2>/dev/null ;;
   esac
   while IFS='|' read -r tag a b c d; do
     case "$tag" in
@@ -464,7 +464,7 @@ _osrc_disk_cl_log() { printf '%s\t%s\tdisk-policy\t%s\n' "$(date -u +%Y-%m-%dT%H
 # every visible file is tracked at a preserved commit), then the recorded branch (conditional
 # on the proven commit and not checked out anywhere).
 _osrc_disk_reclaim_lane() {
-  local s="$1" items="$2" wj br base repo wt sha pp n=0
+  local s="$1" items="$2" wj br base repo wt sha pp n=0 k
   wj="$OSRC_JOBS/$s/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$s/worktree.json"
   br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
   [ -n "$br" ] || { printf 0; return 0; }
@@ -481,7 +481,7 @@ _osrc_disk_reclaim_lane() {
        || [ "$(git -C "$pp" rev-parse -q --verify HEAD 2>/dev/null)" != "$sha" ]; then
       _osrc_disk_log "kept $pp: live HEAD is not the receipt branch at the proven commit"; printf 0; return 0
     fi
-    if [ -n "$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null | head -1)" ]; then
+    if ! k="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || [ -n "$k" ]; then
       _osrc_disk_log "kept $pp: untracked or ignored content (review: $0 cleanup)"; printf 0; return 0
     fi
     git -C "$repo" worktree remove "$pp" >/dev/null 2>&1 || { printf 0; return 0; }
@@ -521,7 +521,8 @@ _osrc_disk_monitor_tick() {
   free_kb="$(_osrc_free_kb 2>/dev/null)"; case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   read -r launch pause crit <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
   case "$launch$pause$crit" in ''|*[!0-9]*) return 0 ;; esac
-  resume="$(_osrc_disk_resume_kb "$launch" "$pause")"
+  resume="$(_osrc_disk_resume_kb "$launch" "$pause")"; [ "$pause" -gt 0 ] || resume=0   # pausing off: resume all
+  for k in "$d"/admit.*; do read -r n < "$k" 2>/dev/null; [ "${n:-0}" -lt "$(date +%s)" ] 2>/dev/null && rm -f "$k"; done
   _osrc_disk_record_sweep
   if [ "$free_kb" -ge "$resume" ]; then
     if _osrc_disk_any_paused; then
@@ -555,10 +556,10 @@ _osrc_disk_monitor_tick() {
 # the owner; the monitor releases the lock BEFORE its last demand check, so a launch racing an
 # idle exit either keeps the old monitor running or spawns a new one.
 
-_osrc_disk_lock_alive() {
+_osrc_disk_lock_alive() { # [owner file]
   local lk c pid id m; lk="$(_osrc_disk_dir)/monitor.lock"
   [ -d "$lk" ] || return 1
-  c="$(cat "$lk/owner" 2>/dev/null)"
+  c="$(cat "${1:-$lk/owner}" 2>/dev/null)"
   if [ -z "$c" ]; then   # being created: alive for a few seconds
     m="$(stat -c %Y "$lk" 2>/dev/null || stat -f %m "$lk" 2>/dev/null || echo 0)"
     [ $(( $(date +%s) - m )) -lt 10 ]; return
@@ -567,17 +568,16 @@ _osrc_disk_lock_alive() {
   if [ -n "$id" ]; then _osrc_disk_same "$pid" "$id"; else kill -0 "$pid" 2>/dev/null; fi
 }
 
-# A stale owner is claimed by renaming its owner file: one rename wins, a loser leaves the lock
-# alone, and of two late claimants the last writer owns it while the other sees it is not its
-# own at the next tick and exits. The directory itself is never moved or removed by a taker.
+# The only claim is an exclusive create of owner, so exactly one claimant wins. A stale owner is
+# first renamed aside (a rename that grabbed a live owner puts it back). The dir is never removed.
 _osrc_disk_lock_take() {
-  local lk; lk="$(_osrc_disk_dir)/monitor.lock"
+  local lk t; lk="$(_osrc_disk_dir)/monitor.lock"; t="$lk/owner.$_OSRC_DISK_ME"
   if ! mkdir "$lk" 2>/dev/null; then
     _osrc_disk_lock_alive && return 1
-    mv "$lk/owner" "$lk/owner.$_OSRC_DISK_ME" 2>/dev/null || [ ! -e "$lk/owner" ] || return 1
-    rm -f "$lk/owner.$_OSRC_DISK_ME"
+    mv "$lk/owner" "$t" 2>/dev/null && _osrc_disk_lock_alive "$t" && { mv "$t" "$lk/owner"; return 1; }
+    rm -f "$t"
   fi
-  printf '%s|%s\n' "$_OSRC_DISK_ME" "$_OSRC_DISK_ME_ID" > "$lk/owner" 2>/dev/null
+  ( set -C; printf '%s|%s\n' "$_OSRC_DISK_ME" "$_OSRC_DISK_ME_ID" > "$lk/owner" ) 2>/dev/null
 }
 _osrc_disk_lock_mine() { [ "$(cat "$(_osrc_disk_dir)/monitor.lock/owner" 2>/dev/null)" = "$_OSRC_DISK_ME|$_OSRC_DISK_ME_ID" ]; }
 _osrc_disk_lock_release() { _osrc_disk_lock_mine && rm -rf "$(_osrc_disk_dir)/monitor.lock"; _OSRC_DISK_OWNER=0; }
@@ -592,13 +592,12 @@ _osrc_disk_monitor_exit() {
 
 # _osrc_disk_fleet_live -> 0 while any job, registered lane or pause record is live.
 _osrc_disk_fleet_live() {
-  local jd pid r
+  local jd pid r st
   _osrc_disk_any_paused && return 0
   for jd in "$OSRC_JOBS"/*/; do
-    [ -d "$jd" ] || continue
-    _osrc_disk_terminal_status "$(cat "$jd/status" 2>/dev/null)" && continue
-    pid="$(cat "$jd/pid" 2>/dev/null)"
-    case "$pid" in ''|*[!0-9]*) [ "$(cat "$jd/status" 2>/dev/null)" = launching ] && return 0; continue ;; esac
+    st=""; pid=""; read -r st < "$jd/status" 2>/dev/null; _osrc_disk_terminal_status "$st" && continue
+    read -r pid < "$jd/pid" 2>/dev/null
+    case "$pid" in ''|*[!0-9]*) [ "$st" = launching ] && return 0; continue ;; esac
     kill -0 "$pid" 2>/dev/null && return 0
   done
   for r in "$(_osrc_disk_dir)"/procs/*; do [ -f "$r" ] && _osrc_disk_reg_root "$r" >/dev/null && return 0; done
@@ -622,8 +621,8 @@ _osrc_disk_monitor_loop() {
   _OSRC_DISK_OWNER=1
   trap '_osrc_disk_monitor_exit' EXIT
   trap 'exit 0' TERM
-  poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*|0) poll=30 ;; esac
-  maxidle="${OSRC_DISK_MONITOR_IDLE_TICKS:-40}"; case "$maxidle" in ''|*[!0-9]*) maxidle=40 ;; esac
+  poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*|0) poll=30 ;; esac; [ "$poll" -le 30 ] || poll=30   # env may only poll faster
+  maxidle="${OSRC_DISK_MONITOR_IDLE_TICKS:-40}"; case "$maxidle" in ''|*[!0-9]*|0) maxidle=40 ;; esac
   last="$(cat "$d/demand" 2>/dev/null)"
   _osrc_disk_log "monitor $_OSRC_DISK_ME started"
   while :; do
@@ -660,13 +659,8 @@ _osrc_disk_monitor_ensure() {
   return 0
 }
 
-# _osrc_disk_heartbeat — the heartbeat's recovery hook: pause records with no live monitor
-# (it died abruptly) get a fresh monitor, which resumes them once space allows.
-_osrc_disk_heartbeat() {
-  _osrc_disk_any_paused || return 0
-  _osrc_disk_lock_alive || _osrc_disk_monitor_ensure
-  return 0
-}
+# _osrc_disk_heartbeat — pause records whose monitor died abruptly get a fresh one, which resumes them.
+_osrc_disk_heartbeat() { _osrc_disk_any_paused && ! _osrc_disk_lock_alive && _osrc_disk_monitor_ensure; return 0; }
 
 # `outsourcerer disk [status|resume]` — resume is the one-command way back: it resumes every
 # paused lane now (TUIs return to the foreground) and holds new pauses until the disk

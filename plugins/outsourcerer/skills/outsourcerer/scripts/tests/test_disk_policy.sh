@@ -134,14 +134,11 @@ settings "$GH" 'OSRC_DISK_MIN_GB=0
 g="$(osrc "$GH" '_osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && ok "settings MIN_GB=0 disables the launch gate above critical" || bad "MIN_GB=0 gate: $g"
 settings "$GH"
-# P1 (#86): the REAL state writer must report a failed write; the gate then refuses.
-if [ -w /dev/full ]; then
-  OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
-  g="$(osrc "$GH" 'ln -sf /dev/full "$(_osrc_cl_state).tmp.$$"; _osrc_cleanup_state_write "{}"; echo write-rc=$?
-    ln -sf /dev/full "$(_osrc_cl_state).tmp.$$"; _osrc_disk_gate; echo gate-rc=$?')"
-  grep -q 'write-rc=1' <<<"$g" && ok "real state writer returns failure after a write error" || bad "state writer masked failure: $g"
-  grep -q 'state unknown' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "gate refuses on a failed state refresh" || bad "gate passed on failed write: $g"
-else echo "SKIP: no /dev/full for the state-write failure case"; fi
+# P1 (#86): the REAL state writer must report a failed write; the gate then refuses (no /dev/full needed).
+OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
+g="$(osrc "$GH" 'mkdir -p "$(_osrc_cl_state).tmp.$$"; _osrc_cleanup_state_write "{}"; echo write-rc=$?; _osrc_disk_gate; echo gate-rc=$?')"
+grep -q 'write-rc=1' <<<"$g" && ok "real state writer returns failure after a write error" || bad "state writer masked failure: $g"
+grep -q 'state unknown' <<<"$g" && ! grep -q 'gate-rc=0' <<<"$g" && ok "gate refuses on a failed state refresh" || bad "gate passed on failed write: $g"
 
 echo "=== P1: the override reaches a real bg job ==="
 # Floors put this host's real free space in the band (above a 1GB critical, under a huge
@@ -217,11 +214,14 @@ t="$(tick 3145728)"
 ! stopped "$SUP" && [ ! -f "$JD/disk-paused" ] && ok "canceled job: supervisor resumed, then record retired" || bad "supervisor stranded: $(pstat "$SUP")"
 t="$(tick 8388608)"
 # P1: the record must be durable BEFORE any SIGSTOP.
-mkdir "$J2/disk-paused.tmp"
-t="$(tick 3145728)"
+t="$(setfree 3145728; osrc "$JH" 'mv() { return 1; }; _osrc_disk_monitor_tick')"
 ! stopped "$D2" && [ ! -f "$J2/disk-paused" ] && ok "no record -> job left running" || bad "stopped without a durable record"
 grep -q 'could not be verified' "$JH/wake-queue.jsonl" && ok "owner told some lanes keep running" || bad "unrecorded job not reported"
-rmdir "$J2/disk-paused.tmp"; t="$(tick 8388608)"
+t="$(tick 8388608)"; t="$(tick 3145728)"
+# P2: a failed record rewrite on resume (disk full) keeps the record and still resumes everything.
+osrc "$JH" 'grep() { return 2; }; _osrc_disk_resume_rec "'"$J2"'/disk-paused"' >/dev/null
+! stopped "$D2" && ! stopped "$S2" && ok "failed record rewrite still resumes every process" || bad "frozen with no record: $(pstat "$D2") $(pstat "$S2")"
+t="$(tick 8388608)"
 # P2: recovery under pipefail with a long record list.
 mkdir -p "$TMP/many/jobs"; settings "$TMP/many"
 i=0; while [ "$i" -lt 1500 ]; do mkdir -p "$TMP/many/jobs/j$i"; printf 'since|1\n' > "$TMP/many/jobs/j$i/disk-paused"; i=$((i+1)); done
@@ -255,6 +255,11 @@ stopped "$FC" && ok "foreground lane's work paused" || bad "fg child not paused:
 setfree 8388608; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null
 ! stopped "$FC" && ok "foreground lane resumed" || bad "fg child stranded"
 wait "$LP" 2>/dev/null
+# P2: a foreground lane paused longer than its hard cap is not killed by _fg_guard on resume.
+setfree 20971520; osrc "$FH" 'route_delegate() { _osrc_disk_gate; }; route_delegate; f() { i=0; while [ $i -lt 6 ]; do sleep 1; i=$((i+1)); done; }
+  OSRC_FG_TIMEOUT=10 _fg_guard f x >/dev/null 2>&1; echo "$?" > "$OSRC_HOME/fg-rc"' >/dev/null 2>&1 &
+LP=$!; sleep 2; setfree 3145728; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null; sleep 14; setfree 8388608; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null
+wait "$LP" 2>/dev/null; [ "$(cat "$FH/fg-rc" 2>/dev/null)" = 0 ] && ok "paused foreground lane survives its guard's hard cap" || bad "fg guard killed a paused lane: rc=$(cat "$FH/fg-rc" 2>/dev/null)"
 g="$(OSRC_RUN_ID=x osrc "$TMP/fg2" 'mkdir -p "$OSRC_HOME"; _osrc_disk_register_caller route_delegate; ls "$OSRC_HOME/disk-policy/procs" 2>/dev/null | wc -l')"
 [ "$(tail -1 <<<"$g" | tr -d ' ')" = 0 ] && ok "inside a bg job: no duplicate fg registration" || bad "bg job registered as fg: $g"
 if command -v tmux >/dev/null 2>&1; then
@@ -297,6 +302,13 @@ if command -v tmux >/dev/null 2>&1; then
   printf 'tmux|not-yet|%s|||%s\n' "$(date +%s)" "$$" > "$TH/disk-policy/procs/tmux-not-yet"
   osrc "$TH" 'tmux() { echo called >> "$OSRC_HOME/tmux-calls"; command tmux "$@"; }; _osrc_disk_reg_root "$OSRC_HOME/disk-policy/procs/tmux-not-yet"' >/dev/null
   [ -f "$TH/disk-policy/procs/tmux-not-yet" ] && [ ! -f "$TH/tmux-calls" ] && ok "pending tmux registration makes no tmux call" || bad "pending registration probed tmux"
+  # P3: a resumed lane parked behind another foreground program is never typed into; one parked event.
+  osrc "$TH" 'SESSION_NAME=park; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  tmux new-session -d -s park -x 80 -y 24 "env PS1='$ ' bash --norc --noprofile -i"; sleep 0.5; tmux send-keys -t park "sleep 600" Enter; sleep 0.5
+  rm -f "$TH/disk-policy/hold"; osrc "$TH" '_osrc_disk_pause_reg "$OSRC_HOME/disk-policy/procs/tmux-park"' >/dev/null
+  wait_for '[ "$(tmux display-message -p -t park "#{pane_current_command}")" = bash ]' 25; tmux send-keys -t park "sleep 601" Enter; sleep 0.5
+  osrc "$TH" '_osrc_disk_resume_rec "$OSRC_HOME/disk-policy/paused/tmux-park"' >/dev/null
+  grep -q '"disk-parked-park"' "$TH/wake-queue.jsonl" 2>/dev/null && ok "parked lane: owner gets a disk-parked event" || bad "no parked event"
 else echo "SKIP: tmux not installed (TUI resume cases)"; fi
 
 echo "=== monitor lifecycle ==="
@@ -337,13 +349,12 @@ ns="$(grep -c 'started' "$MH/disk-policy/monitor.log")"
 osrc "$MH" '_osrc_disk_monitor_ensure' >/dev/null
 wait_for '[ "$(grep -c started "$MH/disk-policy/monitor.log")" -gt '"$ns"' ]' 25 && ok "launch after idle exit gets a fresh monitor" || bad "no respawn"
 
-# P2: a late claimant of a stale lock (it judged the owner dead before another took it) leaves
-# exactly one owner, and never removes the lock directory.
-LH="$TMP/lk"; mkdir -p "$LH/disk-policy/monitor.lock"; echo "999999|gone" > "$LH/disk-policy/monitor.lock/owner"
-osrc "$LH" '_OSRC_DISK_ME=111 _OSRC_DISK_ME_ID=a; _osrc_disk_lock_take' >/dev/null
-osrc "$LH" '_OSRC_DISK_ME=222 _OSRC_DISK_ME_ID=b; _osrc_disk_lock_alive() { return 1; }; _osrc_disk_lock_take' >/dev/null
-[ "$(cat "$LH/disk-policy/monitor.lock/owner" 2>/dev/null)" = "222|b" ] && [ "$(ls "$LH/disk-policy" | grep -c .)" = 1 ] \
-  && ok "stale-lock takeover leaves one owner and no debris" || bad "lock state: $(ls -R "$LH/disk-policy")"
+# P2: two claimants that both judged an owner-less lock stale: exactly one wins, no debris.
+LH="$TMP/lk"; mkdir -p "$LH/disk-policy/monitor.lock"; sleep 300 & LV=$!; KILL="$KILL $LV"; disown "$LV" 2>/dev/null
+claim() { osrc "$LH" 'eval "$(declare -f _osrc_disk_lock_alive | sed "1s/_osrc_disk_lock_alive/_real_alive/")"; _osrc_disk_lock_alive() { [ $# -gt 0 ] && _real_alive "$@"; }
+  _OSRC_DISK_ME='"$1"'; _OSRC_DISK_ME_ID="$(_pid_start_identity '"$1"')"; _osrc_disk_lock_take && echo won'; }
+w="$(claim "$LV")$(claim "$$")"; [ "$w" = won ] && [ "$(owner_pid "$LH")" = "$LV" ] && [ "$(ls -A "$LH/disk-policy/monitor.lock")" = owner ] \
+  && ok "stale-lock race: one claimant wins, no debris" || bad "lock race: '$w' $(ls -RA "$LH/disk-policy")"
 
 echo "=== incident 3: merged-lane reclaim ==="
 RH="$TMP/reclaim"; mkdir -p "$RH/jobs"; export OSRC_HOME="$RH"
