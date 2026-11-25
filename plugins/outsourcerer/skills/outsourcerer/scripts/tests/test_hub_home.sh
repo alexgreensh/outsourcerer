@@ -49,7 +49,7 @@ grep -q "pointer-events: none" "$PAGE" && bad "hover card still ignores the poin
 grep -q "if (pinned && owner && owner.isConnected) place(owner)" "$PAGE" && ok "pinned card survives scroll" || bad "pinned card closes on scroll"
 grep -q "max-height: calc(100vh - 32px); overflow-y: auto" "$PAGE" && ok "hover card max-height scroll" || bad "hover card max-height missing"
 grep -q "target.closest('.prline')" "$PAGE" && ok "rail cards anchor past the row" || bad "rail card anchor missing"
-grep -q "const rf = refs(l.repo || p.repo, l.issues); if (rf) h.append(rf)" "$PAGE" && ok "lane hover: every issue its own link" || bad "lane hover refs missing"
+grep -q "const rf = refs(l.repo || p.repo, iz); if (rf) h.append(rf)" "$PAGE" && ok "lane hover: every issue its own link" || bad "lane hover refs missing"
 grep -q "Mark done, move to Shipped" "$JS" && grep -q "Move back to running" "$JS" && grep -q "H.doneBtn(p, null, hide)" "$PAGE" && ok "Mark done / Move back in the rail card" || bad "Mark done missing"
 # project header, Home ordering, fixed pill column, one shared status pill
 grep -q "H.doneBtn(p, 'hdone-' + p.id)" "$PAGE" && grep -q "meta.append(k)" "$PAGE" && ok "Mark done also in the project page header (a button, in the tab order)" || bad "header Mark done missing"

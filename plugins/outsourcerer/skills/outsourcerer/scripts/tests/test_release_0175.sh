@@ -127,7 +127,7 @@ echo '[{"id":"D1","q":123,"askedAt":"2020-01-01T00:00:00Z"}]' > "$OSRC_HOME/hub/
 o1="$(guard sess-odd)"
 jq -e '.decision == "block" and (.reason | test("D1 \\(123\\)"))' >/dev/null 2>&1 <<<"$o1" \
   && ok "numeric .q in stale decision still detected without jq crash" || bad "numeric .q missed: $o1"
-printf '{"name":"BadDf","status":"building","reportedAt":"%s","board":{"tasks":[{"id":"t1","short":"Fix auth bug","pct":50}]}}\n' "$now_iso" > "$OSRC_HOME/hub/projects/sess-baddf.json"
+printf '{"name":"BadDf","status":"building","reportedAt":"%s","board":{"tasks":[{"id":"t1","short":"Fix auth bug","pct":50,"model":"Opus 5.5","lane":"Claude cloud"}]}}\n' "$now_iso" > "$OSRC_HOME/hub/projects/sess-baddf.json"
 echo '{"decisions":"bad"}' > "$OSRC_HOME/hub/decisions/sess-baddf.json"
 o2="$(guard sess-baddf)"
 [ -z "$o2" ] && ok "malformed decisions field does not crash fresh card" || bad "malformed decisions blocked fresh card: $o2"
