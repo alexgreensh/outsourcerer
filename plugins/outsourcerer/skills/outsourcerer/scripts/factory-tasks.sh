@@ -853,7 +853,7 @@ cmd_plan() {
       case "$sub" in *[!a-z_]*) ;; *)
         if type "cmd_plan_$sub" >/dev/null 2>&1; then "cmd_plan_$sub" "$@"; return $?; fi ;;
       esac
-      die "unknown plan command '$sub'. Try: plan new|ls|show|use|rm|run" ;;
+      die "unknown plan command '$sub'. Try: plan new|ls|show|use|rm|run|start" ;;
   esac
 }
 
@@ -865,6 +865,7 @@ outsourcerer plan show [name]
 outsourcerer plan use <name>
 outsourcerer plan rm <name> [--force]
 outsourcerer plan run [name] ...        (needs factory-flow.sh)
+outsourcerer plan start <name> <tasks-file|-> [--dry-run] [--run]   (one list -> a running plan)
 EOF
 }
 
