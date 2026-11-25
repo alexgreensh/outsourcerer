@@ -119,3 +119,110 @@ I ran each failing suite alone against this head and against main (ea34fe0, a wo
 After that fix I did not rerun the full conformance suite; the remaining failures are identical on main.
 `/nonexistent-root-cannot-create` (created by test_harness_isolation as root) was left in place: removing a
 root-level path needed an approval nobody could give.
+
+## Round 4 (lane osrc-l5-r4)
+
+Base `cloud/osrc-l5-r3` @ b55651c (confirmed with `git log --oneline -3`). Work branch `cloud/osrc-l5-r4`.
+All five P2s and every P3 from the review are fixed. Where I could, I deleted a mechanism instead of patching it.
+
+### P2 fixes
+
+1. **Escalation record is now an audit trail, not a second approval path.** I deleted `_osrc_fp_escalation_ok` and
+   the "set `approved: true`" wording. After the cap, the reviewer is held. The pending record is written at
+   `$OSRC_HOME/plans/<plan>/escalations/<tid>.json`, and the hold lists the usual commands. `task release --answer`
+   runs the next round, and the scheduler's captain path then stamps the record `approved` with the answer
+   (`_osrc_fp_escalation_approve`). Test: the cap hold no longer asks anyone to edit the record. Release with no
+   record edit runs round four, and the record reads `approved` with that answer.
+2. **Gate tests never read the machine.** `calm()` stubs every reading the gate uses: `_osrc_free_kb` (read by
+   `_osrc_disk_gate`), `_osrc_cleanup_items`, `_osrc_fp_load1`, `_osrc_fp_ncpu`, and `uname` plus `osrc_mac_load` for
+   macOS swap. Each check then overrides one reading. The base fails the macOS-at-85%-swap check; that is the
+   reviewer's Mac.
+3. **The disk gate is the launch gate.** The built-in free-KB check is deleted. The pass runs `_osrc_disk_gate`
+   itself in a subshell (it `die`s when it refuses), so the ASK-list hash and ack file are the same code. The reason
+   is that gate's own message plus `Override: OSRC_DISK_MIN_GB=0`. Test: at 8 GB free with one ASK item the pass
+   pauses; after the real `_osrc_cleanup_ack` it goes. `OSRC_DISK_MIN_GB=0` lifts the pause.
+4. **macOS has its own swap rule for plan launches.** `_osrc_mac_overloaded` (the heavy-command rule, 80%) is no
+   longer called. Load per core uses the same reading on every OS (`OSRC_FACTORY_LOAD_MAX`, 2). Swap on macOS
+   (`_osrc_fp_swap_pct` from `osrc_mac_load`) uses `OSRC_FACTORY_SWAP_MAX_PCT`, default 95, because macOS grows swap
+   on demand. Each reason names the reading and the variable ("swap is 97% used, over 95% (OSRC_FACTORY_SWAP_MAX_PCT;
+   0 turns it off)"). All four variables, including the heavy-command `OSRC_MAC_LOAD_MAX_PC` and
+   `OSRC_MAC_SWAP_MAX_PCT`, are documented in `references/factory-flow-cli.md`. SKILL.md names the plan ones.
+5. **Ordering by files is dropped, and the overlap is reported.** I deleted the scheduler's file-ownership wait. In
+   its place, `plan start` prints `note: b and a both touch x -> y ...` for every overlap.
+   - Why not the other design: making the later task start from the earlier one's landed work needs one of two
+     things. (a) `plan start` auto-lands into the user's base branch, a merge with nobody approving it. (b) Ship
+     worktrees are cut from a dependency's branch, a new base mechanism that would also change what `land`
+     merges.
+   - Both are larger and touch the merge path. Dropping the wait is the smaller correct change. The wait only
+     delayed work; it never gave the later task the earlier task's commits. The merge gate still reports a real
+     conflict at land.
+   - Test: three ship tasks with overlapping `files` all start in one pass.
+
+### P3 fixes
+
+- **Dotted keys:** dep lookup is an exact `case` match (`_osrc_fs_lookup`), not a `sed` regex. Test: `after=a.b`
+  with keys `a.b` and `axb` gives exactly `t1`.
+- **Printed order:** with no file wait, the order is `starts now` or `after X (declared)`, which matches the
+  scheduler. Test: the reviewer's `z`/`a`/`b` case.
+- **`after=` globbing:** `after` is checked against the key pattern before the loop. Test: `after=*` is refused.
+- **Review rounds:** `review_rounds` now counts failed rounds. It goes up in the redo commit (`_ff_review_failed`),
+  not before dispatch, so a lost claim or failed launch no longer burns a round. The cap test still holds round
+  four after three reviews.
+- **Cap test:** split into two checks.
+- **MCP config copy:** `_session_registry_end`, which runs on tmux stop, winpty stop, control exit and failed
+  launch, now removes `sessions/mcp-<name>.json`. The path comes from `_session_mcp_copy` in `lib/leanlaunch.sh`.
+  outsourcerer.sh changed one line in place (no growth). Test: in `test_lean_launch.py`, the copy is gone after
+  `_session_registry_end stop`.
+  - Not covered: a user who quits claude inside the pane with no stop or control command. The copy stays until
+    the next start with that session name overwrites it.
+- **`OSRC_CLAUDE_USER_CONFIG=1`:** interactive lanes now treat it like `OSRC_SESSION_MCP=full`, matching headless
+  lanes. Combined with `OSRC_LEAN_LAUNCH=1` it still refuses, as headless does. Test added.
+- **Gate with arguments:** a gate path that is not a file is ignored with one warning per value. Test added.
+- **Repeated wait lines:** the pause reason prints when it changes, not every pass. Test: two passes, one line.
+- **`plan start` decisions and reruns:**
+  - `hold=` lines take `default=`, `until=` and `risk=`. The task is created held, then `task hold` adds those
+    fields, so `task hold`'s rules apply: unknown risk refused, default needs until. If that step fails, the task
+    stays held, which is the safe side.
+  - A rerun reuses an existing plan and skips keys that are already task titles there.
+  - Tests: default, deadline and `risk=paid` are stored; a rerun on a half-built plan adds only the missing task.
+- **SKILL.md path:** now `$OSRC_HOME/plans/<plan>/escalations/<tid>.json`, worded around `task release`.
+- **RESULT:** this round's RESULT carries this branch's own sha and the real conformance rc (see below).
+
+### Size
+
+- `scripts/lib` (factory-parallel + factory-start + leanlaunch): 712 lines on the base, 710 now.
+- `outsourcerer.sh`: one line changed in place.
+- The L5 checks moved to `scripts/tests/lib_factory_flow_l5.sh`, a part file sourced by `test_factory_flow.sh` with
+  the same fixtures. It is not a suite, so there is no new registration. This keeps the test file under 1,000 lines.
+
+### Tests (this container, niced)
+
+| command | rc |
+|---|---|
+| `bash scripts/tests/test_factory_flow.sh` (209 passed) | 0 |
+| same suite and `test_lean_launch.py` against the base code (b55651c worktree): 15 flow failures, including every P2 test, plus 2 lean failures | 1 (expected) |
+| `python3 scripts/tests/test_lean_launch.py` (7 tests) | 0 |
+| `bash scripts/tests/test_factory_tasks.sh` (175) / `test_factory_e2e.sh` (10) / `test_factory_land.sh` (116) | 0 / 0 / 0 |
+| `bash scripts/tests/test_perm_profiles.sh` (94) / `test_heavy.sh` (123) / `test_no_pipe_grep_q.sh` | 0 / 0 / 0 |
+| `python3 scripts/check_file_size.py --base b55651c` | 0 |
+
+### Not proven
+
+- macOS and Git Bash were not run. The macOS path is tested only through the `uname` and `osrc_mac_load` seams.
+- On a real Mac, `_osrc_fp_load1` reads `uptime`. A locale that prints a comma decimal ("4,15") reads as 4, which
+  is a little lenient, never a wedge.
+
+### Open questions (decided by the lane)
+
+- **P2 5 design:** drop the file ordering and report overlaps, rather than auto-landing or cutting from a
+  dependency's branch (reasons above).
+- **macOS plan-launch swap threshold:** 95% by default; 0 turns it off.
+- **Approval stamp location:** written by the scheduler's captain-release path (`lib/factory-parallel.sh`), not in
+  `_task_cli_release`. factory-tasks.sh is over the size ratchet and may not grow, and the stamp then happens only
+  when the round really runs.
+- **Branch:** pushed to `cloud/osrc-l5-r4` as the brief says. No pull request, per the lane rules.
+
+### Needs from other lanes
+
+- Removing the MCP config copy when a user quits claude inside the pane, with no stop or control command, needs a
+  pane-exit hook in the session launch builder (outsourcerer.sh owner).
