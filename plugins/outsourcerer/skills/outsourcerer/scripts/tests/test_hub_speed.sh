@@ -138,8 +138,11 @@ OSRC_HUB_FAST=1 lib _osrc_hub_cache_get s-old "$NOW" now >/dev/null 2>&1 && no "
 gh_case() { # <age-seconds> -> the tag the history serves for a cache of that age
   printf '{"fetchedAt":%s,"ok":true,"releases":[{"tagName":"v-old"}],"prs":[],"issues":[]}\n' "$((NOW - $1))" > "$OSRC_HOME/hub/cache/gh-example_hist.json"
   _osrc_hub_gh_data example/hist | jq -r '.releases[0].tagName // "none"'; }
-r="$(PATH="$TMP/ghbin:$PATH" lib gh_case 3600)|$(PATH="$TMP/ghbin:$PATH" lib gh_case 604800)"
-[ "$r" = "v-old|none" ] && ok "gh history: an hour-old cache is served, a week-old one is fetched again" || no "gh history by age: $r"
+# Week-old case first: the hour-old case starts a detached refresh that must not race its fixture.
+r="$(PATH="$TMP/ghbin:$PATH" lib gh_case 604800)"; st="$(jq -r '"\(.stale // false) \(.failedAt // 0 | . > 0)"' "$OSRC_HOME/hub/cache/gh-example_hist.json")"
+[ "$r" = "v-old" ] && [ "$st" = "true true" ] && ok "gh history: a week-old cache is fetched inline; a failed fetch keeps it, marked stale" || no "week-old history: $r $st"
+r="$(PATH="$TMP/ghbin:$PATH" lib gh_case 3600)"
+[ "$r" = "v-old" ] && ok "gh history: an hour-old cache is served" || no "hour-old history: $r"
 el_case() {
   OSRC_HUB_FAST=1; _osrc_hub_memo_begin
   _osrc_hub_ended_ids() { echo e-1; }; _osrc_hub_ended_lane() { printf '{"id":"e-1","v":"fresh"}'; }; _osrc_hub_lane_activity() { echo 0; }

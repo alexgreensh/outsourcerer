@@ -58,21 +58,29 @@ _osrc_hub_lane_owned_elsewhere() {
 # `hub serve` (OSRC_HUB_FAST=1) a stale cache is served while one detached refresher rewrites it.
 _osrc_hub_gh_fetch() { # <repo> <file>
   local repo="$1" f="$2" rel prs iss ok=true
+  # Bounded: an inline fetch sits on the export's clock, so a hung network must not hold it.
+  _osrc_hub_gh() { if type _osrc_net >/dev/null 2>&1; then OSRC_NET_TIMEOUT="${OSRC_HUB_GH_TIMEOUT:-10}" _osrc_net gh "$@"; else gh "$@"; fi; }
   if have gh 2>/dev/null; then
-    rel="$(gh release list -R "$repo" --limit 40 --json tagName,name,publishedAt,isDraft 2>/dev/null)" || ok=false
-    [ "$ok" = true ] && { prs="$(gh pr list -R "$repo" --state all --limit 100 --json number,title,closedAt,mergedAt,url 2>/dev/null)" || ok=false; }
-    [ "$ok" = true ] && { iss="$(gh issue list -R "$repo" --state closed --limit 100 --json number,title,closedAt,url,stateReason 2>/dev/null)" || ok=false; }
+    rel="$(_osrc_hub_gh release list -R "$repo" --limit 40 --json tagName,name,publishedAt,isDraft 2>/dev/null)" || ok=false
+    [ "$ok" = true ] && { prs="$(_osrc_hub_gh pr list -R "$repo" --state all --limit 100 --json number,title,closedAt,mergedAt,url 2>/dev/null)" || ok=false; }
+    [ "$ok" = true ] && { iss="$(_osrc_hub_gh issue list -R "$repo" --state closed --limit 100 --json number,title,closedAt,url,stateReason 2>/dev/null)" || ok=false; }
   else ok=false; fi
   jq -e 'arrays' >/dev/null 2>&1 <<<"${rel:-}" || { rel='[]'; ok=false; }
   jq -e 'arrays' >/dev/null 2>&1 <<<"${prs:-}" || { prs='[]'; ok=false; }
   jq -e 'arrays' >/dev/null 2>&1 <<<"${iss:-}" || { iss='[]'; ok=false; }
   mkdir -p "${f%/*}" 2>/dev/null || return 0
+  # A failed fetch never wipes good history: keep it, marked stale, and note when it failed so the
+  # next export serves it instead of retrying inline.
+  if [ "$ok" = false ] && jq -e '.ok == true' "$f" >/dev/null 2>&1; then
+    jq -c --argjson at "$(date +%s)" '. + {stale:true, failedAt:$at}' "$f" > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null
+    rm -f "$f.$$" 2>/dev/null; return 0
+  fi
   jq -cn --argjson at "$(date +%s)" --argjson ok "$ok" --argjson r "$rel" --argjson p "$prs" --argjson i "$iss" \
     '{fetchedAt:$at, ok:$ok, releases:$r, prs:$p, issues:$i}' > "$f.$$" 2>/dev/null && mv -f "$f.$$" "$f" 2>/dev/null
   rm -f "$f.$$" 2>/dev/null
 }
 _osrc_hub_gh_data() {
-  local repo="$1" ttl="${OSRC_HUB_GH_TTL:-600}" f age lk
+  local repo="$1" ttl="${OSRC_HUB_GH_TTL:-600}" f age lk failed
   case "$ttl" in ''|*[!0-9]*) ttl=600 ;; esac
   f="$OSRC_HOME/hub/cache/gh-$(printf '%s' "$repo" | tr '/' '_').json"
   [ -L "$f" ] && return 0
@@ -82,7 +90,8 @@ _osrc_hub_gh_data() {
     # Stale: serve it and refresh detached, in every mode. Three gh calls per project used to sit on
     # a plain export's clock every 10 minutes. A repo with no cache, or one older than a day
     # (OSRC_HUB_GH_MAX), is fetched inline: week-old history must not show as current.
-    if [ "$age" -ge "${OSRC_HUB_GH_MAX:-86400}" ] 2>/dev/null; then
+    failed=$(( $(date +%s) - $(jq -r '.failedAt // 0' "$f" 2>/dev/null) ))
+    if [ "$age" -ge "${OSRC_HUB_GH_MAX:-86400}" ] 2>/dev/null && [ "$failed" -ge "$ttl" ]; then
       _osrc_hub_gh_fetch "$repo" "$f"
     elif [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then
       lk="$f.lock"
