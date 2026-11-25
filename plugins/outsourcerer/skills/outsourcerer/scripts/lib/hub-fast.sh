@@ -6,7 +6,7 @@
 # _osrc_hub_fast_memo_init <memo-dir>: pre-compute export-wide indexes once instead of per-project.
 _osrc_hub_fast_memo_init() {
   local d="$1" rv_dir="$OSRC_HOME/review/items"
-  mkdir -p "$d/lname" "$d/jstate" "$d/rstate" "$d/dstate" "$d/rlabel" "$d/drepo" "$d/rneeds" 2>/dev/null
+  mkdir -p "$d/lname" "$d/jstate" "$d/rstate" "$d/rlabel" "$d/drepo" "$d/rneeds" 2>/dev/null
   # Pre-compute review map + needs-you + queued items in ONE jq over review/items/*.json.
   if [ -d "$rv_dir" ] && have jq; then
     local -a rfiles=()
@@ -67,18 +67,6 @@ _osrc_hub_job_state_fast() {
     return 0
   fi
   _osrc_hub_job_state "$id"
-}
-
-_osrc_hub_remote_state_fast() {
-  local id="$1"
-  type osrc_remote_state >/dev/null 2>&1 || return 1
-  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -d "$_OSRC_HUB_MEMO/rstate" ] && _osrc_hub_slug_ok "$id"; then
-    local f="$_OSRC_HUB_MEMO/rstate/$id"
-    [ -f "$f" ] || osrc_remote_state "$id" 2>/dev/null > "$f"
-    cat "$f"
-    return 0
-  fi
-  osrc_remote_state "$id" 2>/dev/null
 }
 
 _osrc_hub_hash_key() { printf '%s' "$1" | cksum | awk '{print $1 "_" $2}'; }
@@ -270,43 +258,30 @@ _osrc_hub_limits_fresh_fast() {
 # still match. OSRC_HUB_SCR_TTL (default 20s) bounds the staleness either way; a forced
 # OSRC_HUB_REFRESH export always reads the pane again.
 _osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen inputs (0 = unknown)
-  local id="$1" depf max=0 m pair ccid cwd tp w p f
-  depf="$OSRC_HOME/hub/cache/scr/.deps.$$.$id"
-  : > "$depf" 2>/dev/null || { printf '0'; return; }
-  for p in "$OSRC_HOME/done/$id.json" "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/lanes/state/$id" \
-           "$OSRC_HOME/lanes/state/$id.handin" "$OSRC_HOME/autodetach/$id".* "$OSRC_JOBS/$id/"*; do
-    [ -e "$p" ] && printf '%s\n' "$p" >> "$depf"
-  done
-  [ -e "$OSRC_SESSION_REGISTRY" ] && printf '%s\n' "$OSRC_SESSION_REGISTRY" >> "$depf"
+  local id="$1" pair tp w p
+  local -a deps=("$OSRC_HOME/done/$id.json" "$OSRC_HOME/done/$id.checkcache" "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/lanes/state/$id" \
+    "$OSRC_HOME/lanes/state/$id.handin" "$OSRC_HOME/lanes/state/$id.cc" "$OSRC_HOME/autodetach/$id".* "$OSRC_JOBS/$id/"* "$OSRC_SESSION_REGISTRY")
   # done-contract file: targets live outside OSRC_HOME.
   if [ -f "$OSRC_HOME/done/$id.json" ]; then
     pair="$(jq -r '[(.spec // ""), (.cwd // ".")] | @tsv' "$OSRC_HOME/done/$id.json" 2>/dev/null)"
-    case "${pair%%	*}" in file:*)
-      p="${pair%%	*}"; p="${p#file:}"; case "$p" in /*) ;; *) p="${pair#*	}/$p" ;; esac
-      [ -e "$p" ] && printf '%s\n' "$p" >> "$depf" ;; esac
+    case "${pair%%	*}" in
+      file:*) p="${pair%%	*}"; p="${p#file:}"; case "$p" in /*) ;; *) p="${pair#*	}/$p" ;; esac
+        deps+=("$p") ;;
+      branch:*) printf 'x'; return 0 ;;   # a git ref has no stable file to watch: never reuse this reading
+    esac
   fi
   # Transcript tail feed (question check): resolve cc id via the same cache _sv_cc_transcript uses.
   if type _sv_cc_transcript >/dev/null 2>&1 && type _fleet_transcript_path >/dev/null 2>&1; then
     pair="$(_sv_cc_transcript "$id" 2>/dev/null)"
-    if [ -n "$pair" ]; then
-      tp="$(_fleet_transcript_path "${pair%%	*}" "${pair#*	}" 2>/dev/null)"
-      [ -n "$tp" ] && [ -e "$tp" ] && printf '%s\n' "$tp" >> "$depf"
-    fi
+    [ -z "$pair" ] || { tp="$(_fleet_transcript_path "${pair%%	*}" "${pair#*	}" 2>/dev/null)"; [ -z "$tp" ] || deps+=("$tp"); }
   fi
   # Watched hand-in DONE files: a new file bumps its parent dir's mtime.
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
     IFS= read -r p < "$w" 2>/dev/null || p=""
-    [ -n "$p" ] || continue
-    [ -d "$p" ] && printf '%s\n' "$p" >> "$depf"
-    [ -d "$p/out" ] && printf '%s\n' "$p/out" >> "$depf"
+    [ -n "$p" ] && deps+=("$p" "$p/out")
   done
-  if [ -s "$depf" ]; then
-    max="$(sort -u "$depf" | tr '\n' '\0' | xargs -0 stat -f '%m' 2>/dev/null | sort -rn | head -1)"
-    case "$max" in ''|*[!0-9]*) max=0 ;; esac
-  fi
-  rm -f "$depf"
-  printf '%s' "${max:-0}"
+  _osrc_hub_mt "${deps[@]}"
 }
 
 # _osrc_hub_scr_refresh_bg <id> <activity>: detached re-read; one per lane at a time via a lock dir.

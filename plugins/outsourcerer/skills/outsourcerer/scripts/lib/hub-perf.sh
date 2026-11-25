@@ -46,7 +46,7 @@ _osrc_hub_memo_begin() {
   fi
   tmux list-sessions -F '#{session_name} #{session_created} #{window_activity}' > "$d/tmux" 2>/dev/null || rm -f "$d/tmux"   # no file = list failed: callers fall back to has-session, never "zero sessions"
   type _osrc_hub_fast_memo_init >/dev/null 2>&1 && _osrc_hub_fast_memo_init "$d"
-  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event osrc_done_state; do
+  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event osrc_done_state osrc_remote_state; do
     type "$fn" >/dev/null 2>&1 || continue
     _OSRC_HUB_MEMO_SAVED="$_OSRC_HUB_MEMO_SAVED $fn"
     eval "$(declare -f "$fn" | sed "1s/^$fn /_osrc_hub_raw$fn /")"
@@ -65,7 +65,7 @@ _osrc_hub_memo_begin() {
       if [ ! -f "$f" ]; then
         # Cross-export reuse first (hub-fast.sh scr cache); a miss reads the pane for real.
         if ! { type _osrc_hub_scr_get >/dev/null 2>&1 && _osrc_hub_scr_get "$1" > "$f" 2>/dev/null && [ -s "$f" ]; }; then
-          _osrc_hub_raw_sv_target_screen "$1" > "$f" 2>/dev/null
+          _osrc_hub_scr_read "$1" > "$f" 2>/dev/null
           type _osrc_hub_scr_put >/dev/null 2>&1 && _osrc_hub_scr_put "$1" "$f"
         fi
       fi
@@ -95,6 +95,14 @@ _osrc_hub_memo_begin() {
       esac
       printf '%s\n' "$v" > "$m" 2>/dev/null; printf '%s\n' "$v"
     } ;; esac
+  # A remote lane's state is read four times per export (row, live fields, owner state, activity).
+  case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_remote_state "*)
+    osrc_remote_state() {
+      local m="$_OSRC_HUB_MEMO/rstate/${1:-}" v
+      _osrc_hub_slug_ok "${1:-}" && [ -d "$_OSRC_HUB_MEMO/rstate" ] || { _osrc_hub_rawosrc_remote_state "$@"; return; }
+      [ -f "$m" ] || { v="$(_osrc_hub_rawosrc_remote_state "$1")"; printf '%s' "$v" > "$m"; }
+      cat "$m"
+    } ;; esac
   case " $_OSRC_HUB_MEMO_SAVED " in *" _session_registry_last_event "*)
     _session_registry_last_event() {
       [ -f "$_OSRC_HUB_MEMO/reg/.indexed" ] && _osrc_hub_slug_ok "$1" || { _osrc_hub_raw_session_registry_last_event "$@"; return; }
@@ -102,6 +110,28 @@ _osrc_hub_memo_begin() {
       return 0
     } ;; esac
   return 0
+}
+
+# _osrc_hub_scr_read <id> -> what _sv_target_screen prints, reused across exports while the pane text
+# and every input of the reading are unchanged. The key is the raw capture's checksum plus the newest
+# mtime of the lane's inputs (done contract and verdict, supervise state, transcript, registry, hand-in
+# dirs: _osrc_hub_scr_dep_epoch). A long-lived pane costs one capture and one stat pass, not the
+# transcript and registry scans behind a full reading.
+_osrc_hub_scr_read() {
+  local id="$1" cap key k0 pf="$OSRC_HOME/hub/cache/scr/$1.ck"
+  if ! type _osrc_hub_scr_dep_epoch >/dev/null 2>&1 || [ "${OSRC_HUB_REFRESH:-0}" = 1 ] \
+      || ! cap="$(_osrc_screen_capture "$id")"; then
+    _osrc_hub_raw_sv_target_screen "$id"; return
+  fi
+  key="$(_osrc_hub_scr_dep_epoch "$id")"
+  case "$key" in ''|*[!0-9]*) _osrc_hub_raw_sv_target_screen "$id" "$cap"; return ;; esac
+  key="$(printf '%s' "$cap" | cksum | tr ' ' _) $key"
+  if [ -f "$pf" ] && [ ! -L "$pf" ] && IFS= read -r k0 < "$pf" && [ "$k0" = "$key" ]; then
+    tail -n +2 "$pf"; return 0
+  fi
+  _osrc_hub_raw_sv_target_screen "$id" "$cap" > "$pf.$$" 2>/dev/null
+  { printf '%s\n' "$key"; cat "$pf.$$"; } > "$pf.n.$$" 2>/dev/null && mv -f "$pf.n.$$" "$pf" 2>/dev/null
+  cat "$pf.$$"; rm -f "$pf.$$" "$pf.n.$$" 2>/dev/null
 }
 
 # _osrc_hub_memo_end: restore the original readers and drop the memo.
@@ -135,8 +165,7 @@ _osrc_hub_lane_state() {
     c="$(jq -r '.created // .started // 0 | if type == "number" then floor else (try fromdateiso8601 catch 0) end' "$OSRC_HOME/remote/$id.json" 2>/dev/null)"
     a="$(_osrc_hub_mt "$OSRC_HOME/remote/$id.json")"
     local rst=""
-    if type _osrc_hub_remote_state_fast >/dev/null 2>&1; then rst="$(_osrc_hub_remote_state_fast "$id")"
-    elif type osrc_remote_state >/dev/null 2>&1; then rst="$(osrc_remote_state "$id" 2>/dev/null)"; fi
+    type osrc_remote_state >/dev/null 2>&1 && rst="$(osrc_remote_state "$id" 2>/dev/null)"
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lstate.$id.rst"
     case "$rst" in live) st=working ;; ready|done) st=done ;; failed) st=failed ;; *) st=unknown ;; esac
   else
