@@ -357,3 +357,68 @@ from the repo root: **rc 1**, 241 passed, 7 failed, 1 skipped (live lanes).
   `OSRC_WATCH_IDLE_EXIT` and `watcher tick` if any doc mentions them (none in this branch does).
 - Release/merge owner: keep every `osrc-l1-r*.READY` and `osrc-l1-r*.RESULT` file out of anything
   merged to main.
+
+## Round 4
+
+Closing round for the Fable review of round 3 (`VERDICT: FIX`). Base `cloud/osrc-l1-r3` at
+`86957d6` (confirmed with `git log --oneline -3`). Paths are relative to
+`plugins/outsourcerer/skills/outsourcerer/scripts/`.
+
+### P2 findings
+
+| # | Fix | Regression test (`tests/test_watchsvc.sh`), fails on the base |
+| --- | --- | --- |
+| 5 | `_ws_settle` signals a delivery only if the `inflight` record names THIS loop (`$$`, new 4th field) and the pid still has the loop's own command line (`_ws_ours`). A record from an earlier loop (reboot, restart) is treated as a finished, failed delivery: retried, nothing signalled. Past the timeout, a pid that cannot be proven ours (pid reuse, or no `ps -o`) is given up on, not killed. | "a delivery recorded before a restart is over: its pid (now a stranger's) is never signalled", "a timed-out pid that is not this loop's fork is given up on, not killed" |
+| 1 | `_ws_limits` starts at byte 0 when `limits/.cursor` is absent, so a lane parked on a limit before `install` (or after `uninstall` + `install`) is continued after its reset. The test no longer seeds `.cursor`. | "reset passed + still limit-parked -> one continue, also for a banner older than the install" |
+| 2 | The hook records the session's tmux socket (`watchsvc/<sid>/sock`, from `$TMUX`, directory resolved like tmux does, so macOS `/tmp` → `/private/tmp` matches). `install` captures the caller's tmux server (`TMUX` socket only, and `TMUX_TMPDIR`) into `watchsvc/env`, so the daemon's tmux calls and lane observation use that server. `_ws_env` (daemon) and `_ws_covers` (guard) drop the caller's `TMUX`/`TMUX_PANE`/`TMUX_TMPDIR` first, and the tmux channel exists only when the session's socket equals the daemon's. | "a session on another tmux server (tmux -L/-S) is not covered", plus "a session on the watcher's (default) tmux server is covered", "a watcher installed from that tmux server covers it", "install captures the tmux server" |
+| 3 | `_ws_covers` also requires no `owners/<sid>/.wakefail`. | "a channel that keeps failing (.wakefail) is not a waiter" |
+| 4 | The loop condition also checks that `watchsvc/launch` (when present) still names its own `SCRIPT_PATH`; when a call from another plugin copy repoints the launcher, the loop exits. launchd `KeepAlive`, systemd `Restart=always`, or the next call's `_ws_refresh` (fallback) restarts it on the new copy. | "a loop whose launcher now names another plugin copy exits" |
+
+### P3 findings
+
+| Item | Fix | Test (all fail on the base) |
+| --- | --- | --- |
+| orphaned tick after stop | `_sv_bounded` records its child; `_sv_bounded_kill` tree-kills it, only if this shell still lists it as a running job (`jobs -pr`), so a reused pid is never hit. The watcher loop's EXIT trap calls it. `_ws_stop_loop` itself still sends a plain TERM to the loop, so no tree is signalled on a pid it cannot prove. | "stopping the loop takes its in-flight tick with it" |
+| hung probe orphaned on signal | the same `_sv_bounded_kill`, in `_sv_main`'s EXIT trap | "a supervise signalled mid-refresh takes the hung probe with it" |
+| empty owner dirs | `rmdir owners/<sid>` in the nothing-owed branch | "an owner dir with nothing owned or owed leaves the loop" |
+| failed `continue` retries every tick | `limits/<id>.try` with the same 1/5/15 min backoff (`_ws_backoff`/`_ws_due`, now shared with `_ws_failed`) | "a failed continue backs off" |
+| no ownership recheck at send time | the ownership check moved from row recording to the per-lane send loop (one check, not two) | "ownership is checked again when the continue is due" |
+| empty `ps` output | `_ws_pid_ok` with no `ps -o` output accepts a live pid only while the `alive` stamp is fresh | "without ps -o a live pid with no fresh tick is not the watcher" |
+| state on machines without a watcher | `_ws_note_session` returns unless `installed` or `run.lock` exists | "no watcher on this machine: the hook leaves no watcher state" |
+| `osrc-l1-r3.RESULT` | `osrc-l1-r3.READY`/`.RESULT` deleted; `osrc-l1-r4.*` written | n/a |
+| bloat | deleted `OSRC_WATCH_FALLBACK=0` (5 uses) and `OSRC_HEARTBEAT_DISABLED=0` from the test; `_ws_launcher`'s `/*` relative-path case (SCRIPT_PATH is always absolute, and that case mangled `C:/` paths on Git Bash); the per-owner `att`/`next` parsing (now `_ws_due`). The two-commands-on-one-line dispatch is split back into `supervise)` and `watcher)` lines; to pay for the line, the 4-line comment above the `_warn_unwatched` case is now 2 lines. `outsourcerer.sh`: 19005 → 19004 lines (below `ea34fe0`'s 19005). | n/a |
+
+Test-only changes: tests that used an empty `owners/sess1` as a stand-in owner now put a dotfile in
+it (`.keep`, as `.unguarded` does in real use), since an empty owner dir now leaves the loop.
+
+### Looping supervise callers (seen live)
+
+`supervise --session SID --loop`: after each delivered batch it prints the next one instead of
+exiting, and stops once the session owns nothing. The worker copies its `armed` file to
+`supervise/<sid>/loop.<parent-pid>`, which only the parent removes when it exits, so the session
+stays covered between batches. `_sv_armed_cover` reads `loop.*` with the same liveness, `supervise`
+command-line and poll-freshness checks as `armed.*`; the stop guard and the watcher both use it.
+`armed.*` and the dedupe/supersede logic are unchanged, so `loop.*` never supersedes anyone.
+`--loop` requires a session. In loop mode the "re-arm" hint is not printed. Documented in the
+`supervise --help` header. Test: "supervise --loop delivers batch after batch and covers the
+session in between" (40 samples over 4 s across several batches, zero gaps), "and stops covering
+once it exits". A plain wrapper `while :; do supervise; done` is still uncovered between rounds; the
+answer for it is `--loop`. Note that Claude Code wakes an agent only when a background command
+exits, so `--loop` is for wrapper scripts and output-streaming monitors, not a Claude Bash
+background task.
+
+### Tests (round 4)
+
+Run from the scripts directory, one at a time, under `nice`:
+
+| Command | Result |
+| --- | --- |
+| `bash tests/test_watchsvc.sh` | rc 0, 91 passed, 0 failed |
+| the same test file against the base code (`git archive 86957d6`) | rc 1, 71 passed, 20 failed: every new check fails, plus five existing limit checks that fail with it because the base never reads the pre-install banner |
+| `bash tests/test_stop_guard.sh` | rc 0, 19 passed |
+| `bash tests/test_supervise.sh` | rc 0, 99 passed |
+| `bash tests/test_supervise_dedupe.sh` | rc 0, 47 passed |
+| `bash tests/test_supervise_lifecycle.sh` | rc 0, 43 passed |
+| `python3 tests/test_supervise_signal.py`, `python3 tests/test_supervise_tick.py` | each rc 0 |
+| `test_no_pipe_grep_q` | rc 1 on my first draft (two `| grep -q` in the new loop test), fixed, now rc 0 |
+| `test_windows_portability`, `test_noglob_splitting`, `test_tests_set_home`, `test_no_dead_pid_scan` | each rc 0 |

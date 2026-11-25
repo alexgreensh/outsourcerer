@@ -241,8 +241,8 @@ echo "=== supervise --loop: a looping caller stays a waiter between batches ==="
 fresh 13; sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
 mkdir -p "$OSRC_HOME/jobs/R3"; echo running > "$OSRC_HOME/jobs/R3/status"; echo "$w" > "$OSRC_HOME/jobs/R3/pid"; echo "$w" > "$OSRC_HOME/jobs/R3/supervisor_pid"; own sessL R3
 OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0 OSRC_SUPERVISE_MAX_SECS=1 "$SRC" supervise --session sessL --loop > "$TMP/loop13" 2>/dev/null & lp=$!; PIDS="$PIDS $lp"
-i=0; until S '_waited_ids sessL' | grep -qx '\*' || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
-gaps=0; for i in $(seq 1 40); do S '_waited_ids sessL' 2>/dev/null | grep -qx '\*' || gaps=$((gaps+1)); sleep 0.1; done
+i=0; until [ "$(S '_waited_ids sessL' | grep -cx '\*')" -ge 1 ] || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
+gaps=0; for i in $(seq 1 40); do [ "$(S '_waited_ids sessL' 2>/dev/null | grep -cx '\*')" -ge 1 ] || gaps=$((gaps+1)); sleep 0.1; done
 [ "$gaps" = 0 ] && [ "$(grep -c '^EVENT ' "$TMP/loop13")" -ge 2 ] && ok "supervise --loop delivers batch after batch and covers the session in between" || no "gaps=$gaps events=$(grep -c '^EVENT ' "$TMP/loop13")"
 kill "$lp"; i=0; while kill -0 "$lp" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -z "$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null)" ] && [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 0 ] && ok "and stops covering once it exits" || no "loop marker left behind"
