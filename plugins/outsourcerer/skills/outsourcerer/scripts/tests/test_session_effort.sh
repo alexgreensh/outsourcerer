@@ -83,7 +83,8 @@ after="$(wc -l < "$OSRC_SESSION_REGISTRY")"
 [ "$before" = "$after" ] && ok "invalid effort leaves registry unchanged" || bad "invalid effort changed registry"
 
 : > "$TMUX_LOG"
-out="$(session effort high 2>&1)"; rc=$?
+# The relaunch is spend-gated (tests/test_spend_attack.sh); this case consents and checks bookkeeping.
+out="$(OSRC_SPEND_OK=1 session effort high 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ] && [ -s "$ARM_LOG" ] && grep -q 'receipt.*relaunch' <<<"$out" \
    && grep -q 'model_reasoning_effort=high' "$TMUX_LOG" \
    && tail -1 "$OSRC_SESSION_REGISTRY" | jq -e '.effort == "high" and .receipt == "relaunch"' >/dev/null; then

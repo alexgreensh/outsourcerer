@@ -25,7 +25,8 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-spendatk.XXXXXX")"
-tkill() { TMUX_TMPDIR="$TMP" tmux kill-server >/dev/null 2>&1; }
+unset TMUX   # never reach a real tmux server from inside a pane; every server here lives under $TMP
+tkill() { env -u TMUX TMUX_TMPDIR="$TMP" tmux kill-server >/dev/null 2>&1; }
 trap 'tkill; rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
 DOH="$TMP/osrc"; OFF="$TMP/osrc-off"; DBIN="$TMP/bin"; LOG="$TMP/argv.log"
@@ -91,7 +92,7 @@ inproc() {  # source the engine and run a snippet (functions in-process)
 }
 # headless launches recorded by the stub: the --model value of each `-p` / `-c` run
 launched_ids() { grep -E -- ' -p( |$)| -c ' "$LOG" 2>/dev/null | sed -nE 's/.*--model ([^ ]*).*/\1/p'; }
-launched() { launched_ids | grep -qxF -- "$1"; }
+launched() { local ids; ids="$(launched_ids)"; grep -qxF -- "$1" <<<"$ids"; }
 nolaunch() { [ -z "$(grep -E -- ' -p( |$)| -c |--respect-workspace-trust' "$LOG" 2>/dev/null | grep -vF -- '--model __list__')" ]; }
 wait_log() { local i=0; while [ "$i" -lt 40 ]; do grep -qE -- "$1" "$LOG" 2>/dev/null && return 0; sleep 0.25; i=$((i+1)); done; return 1; }
 refuses_paid() {  # <label> <output> <rc> <id>: nothing launched, rc!=0, refusal names the id
