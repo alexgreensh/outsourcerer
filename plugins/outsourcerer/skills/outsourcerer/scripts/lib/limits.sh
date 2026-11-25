@@ -234,9 +234,11 @@ _osrc_limits_low_scan() {
     left="$(awk -v u="$v" 'BEGIN{printf "%g",100-u}')"
     case "$w" in claude5h) name="Claude 5h" ;; claude7d) name="Claude weekly" ;; codex5h) name="ChatGPT 5h" ;; *) name="ChatGPT weekly" ;; esac
     own="$(_owner_sid 2>/dev/null)"
-    [ -n "$own" ] || case " $seen " in *" $w "*) ;; *) printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"; continue ;; esac   # no owner: no event, no mark
-    lines="$lines $w"
     printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"
+    # No owner (a plain shell): print only, no event and no mark, so a later owned run still alerts.
+    # supervise --all waiters therefore no longer get ownerless limit-low events; the line above stays.
+    [ -n "$own" ] || case " $seen " in *" $w "*) ;; *) continue ;; esac
+    lines="$lines $w"
     case " $seen " in *" $w "*) ;; *)
       if type _osrc_lane_event >/dev/null 2>&1; then
         _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" "$own" >/dev/null 2>&1 || true

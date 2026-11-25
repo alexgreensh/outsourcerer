@@ -15,6 +15,8 @@ pass=0; fail=0
 ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 . "$SRC" >/dev/null 2>&1
+# Checks 5 and 9 count owner events; a plain terminal or CI has no Claude session id.
+export CLAUDE_CODE_SESSION_ID=sess-test
 export OSRC_PROBE=0   # no live probes: only the cached answers placed below
 NOW="$(date +%s)"; RESET=$(( NOW + 86400 ))
 
@@ -135,7 +137,7 @@ a="$( unset CLAUDE_CODE_SESSION_ID; _osrc_limits_low_scan "codexwk=97" )"
 
 # 17. a good probe merely older than the log is not reported as a failed check.
 probe 20 20000; o="$(row 10 10800)"
-case "$(jq -r '.[0].note' <<<"$o")" in *"Live check failed"*) bad "healthy older probe called failed: $(jq -r '.[0].note' <<<"$o")" ;; *) ok "an older good probe is not a failed live check" ;; esac
+case "$(jq -r '.[0].note' <<<"$o")" in *"Live check failed"*) bad "healthy older probe called failed: $(jq -r '.[0].note' <<<"$o")" ;; *"session log is newer than the live check"*) ok "an older good probe is not a failed live check" ;; *) bad "older probe note: $(jq -r '.[0].note' <<<"$o")" ;; esac
 
 # 14. the visible page row (lib/hub.html renderLimits) shows the reading's age and the LOW marker,
 # rendered from rows the real export (_osrc_hub_limits) builds out of a fixture state.
@@ -150,8 +152,8 @@ else echo "SKIP: node not installed (page row checks)"; fi
 
 # 15. the `lane summary` text table keeps its columns: LEFT is short and the marker fits.
 t="$(printf '[{"id":"codex","name":"ChatGPT","state":"low","left":"4%% left, LOW: stop routing here","low":true,"renews":"today","billing":"subscription"}]' | _osrc_summary_text_json | tail -1)"
-[ "$(printf '%s' "$t" | awk '{print $4, $5, $6}')" = "4% left LOW" ] && [ "$(printf '%s' "$t" | cut -c52-56)" = today ] && ok "summary table columns stay aligned" || bad "summary row: $t"
+[ "$(printf '%s' "$t" | awk '{print $4, $5, $6}')" = "4% left LOW" ] && [ "$(printf '%s' "$t" | cut -c53-57)" = today ] && ok "summary table columns stay aligned" || bad "summary row: $t"
 t="$(printf '[{"id":"codex","name":"ChatGPT","state":"unknown","left":"60%% left, checked 3 h ago","stale":true,"renews":"today · 18:40","billing":"subscription"}]' | _osrc_summary_text_json | tail -1)"
-[ "$(printf '%s' "$t" | cut -c52-56)" = today ] && ok "a stale row keeps the table columns" || bad "stale summary row: $t"
+[ "$(printf '%s' "$t" | cut -c53-57)" = today ] && ok "a stale row keeps the table columns" || bad "stale summary row: $t"
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

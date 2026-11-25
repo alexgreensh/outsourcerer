@@ -201,6 +201,15 @@
     // project or the limits. Pending asks are remembered for 10 min so re-renders keep the state.
     // Local mode re-exports right away (POST /api/refresh) and re-pulls, so nothing stays pending.
     const asked = {};
+    // Plans for the Home tile: the tightest real reading heads it, every checked plan gets a line, lowest
+    // first. A stale ok/low reading is already "unknown" (plan-overlay.jq), so it drops out; a stale
+    // out/wait reading keeps its state on purpose (usage only rises, an empty plan is still empty) and
+    // stays, so the tile stays hot. Checked plans with no percentage ("Free models") get a text line.
+    function planReadings(limits) {
+      const real = (limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n) && x.l.state !== 'unknown').sort((a, b) => a.n - b.n);
+      const lims = real.concat((limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));
+      return { lim: real[0], lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') };
+    }
     function refreshBtn(st, old) {
       let rb = st.querySelector('.rfr'); const key = st.dataset.rk;
       if (!(old && key && ctx.db && ctx.canWrite !== false)) { if (rb) rb.remove(); return; }
@@ -415,11 +424,8 @@
       const need = waiting + proofStops;   // decisions only; a lane asking is its orchestrator's job
       items.push({ need, hot: need > 0, askers: [], proofStops });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
-      const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n) && !x.l.stale).sort((a, b) => a.n - b.n)[0];
-      // Every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
-      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n) && !x.l.stale).sort((a, b) => a.n - b.n)
-        .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // checked plans with no percentage ("Free models", "Pay per use") get a line too
-      if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), plans: lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') });
+      const pr = planReadings(ctx.limits);
+      if (pr.lim) items.push({ v: Math.round(pr.lim.n) + '%', l: 'left on ' + (pr.lim.l.name || pr.lim.l.id), plans: pr.lims, hot: pr.hot });
       const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));
       items.forEach((x) => {
         const li = el('li', (x.hot ? 'hot' : '') + (x.plans ? ' gplans' : '') || null);
@@ -512,6 +518,6 @@
       ctx.staleCheck(); paint();
     }
 
-    return { renderHome, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList, localStamp, freshText, projFresh, etaAsOf, sessionStamp };
+    return { renderHome, planReadings, refreshBtn, setShipped, utoast, doneBtn, sumLine, hasPct, laneList, localStamp, freshText, projFresh, etaAsOf, sessionStamp };
   };
 })();
