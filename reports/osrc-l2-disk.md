@@ -266,3 +266,70 @@ later, then still end `wedged`/`timeout` on active time (P1-3).
   (after `now=$(date +%s)`). Keep it if you rewrite that loop.
 - The round 2 asks stand: `_osrc_cleanup_apply` repo-wide prune (PR #85 owner) and registering
   auto-detached tmux sessions (`outsourcerer.sh` auto-detach path).
+
+## Round 4 (branch `cloud/osrc-l2-r4`, base `75eb289`)
+
+Closing round: the three review P2s and every P3, each with the smallest change. No new design.
+Lines (code + tests vs base): `lib/disk_policy.sh` +30/-36, `outsourcerer.sh` +10/-16 (comment trims
+in `_fg_guard` pay for the one-line fix), `tests/test_disk_policy.sh` +29/-18. Net -1.
+
+### P2 fixes
+
+1. **Failed record rewrite on resume** (`_osrc_disk_resume_rec`). The `since`-stripping rewrite is now
+   `grep > tmp && mv tmp rec || rm tmp`, so a failed write (disk full, TERM) keeps the old record and
+   the loop still SIGCONTs everything in it. Test: pause a real job, resume with `grep` failing; on the
+   base the delegate and supervisor stay `T` (`FAIL: frozen with no record: TN TN`).
+2. **Paused foreground lane killed on resume** (`_fg_guard`, `outsourcerer.sh`). The guard keeps its
+   previous poll time; a gap over 10 s (the guard itself was frozen with the lane) shifts both `t0`
+   and the teardown clock `mk`. Test: a real `_fg_guard` (hard cap 10 s) under a registered
+   foreground launcher, paused by the real monitor tick for 14 s, must return 0; base returns 124.
+3. **Two monitors after a stale-lock takeover** (`_osrc_disk_lock_take`). The only claim is now an
+   exclusive create of `owner` (`set -C`), so exactly one claimant wins. A stale owner is first renamed
+   aside; a rename that grabbed a live owner (checked with `_osrc_disk_lock_alive <file>`) puts it back
+   and loses. Record temp files are per process (`<record>.<monitor pid>`). Test: two claimants that
+   both judged an owner-less lock stale; base prints `wonwon`, now exactly one wins, no debris.
+
+### P3 fixes
+
+- Fork per job dir: `read -r` replaces `$(cat status)`/`$(cat pid)` in `_osrc_disk_pause_job` and
+  `_osrc_disk_fleet_live`.
+- Environment knobs only tighten: `OSRC_DISK_POLICY_POLL` is clamped to at most 30 s (default), and
+  `OSRC_DISK_MONITOR_IDLE_TICKS=0` falls back to 40 (0 made a live monitor exit after one tick).
+- Repeat `session start` before first bind keeps a pending record whose launcher is dead.
+- Expired `admit.<hex>` tokens are swept every tick.
+- `disk-parked-<session>` now has a tmux test: a paused lane with another program in the pane's
+  foreground at resume gets the event and nothing typed.
+- The #86 state-write test no longer needs `/dev/full` (a directory at the temp path makes the write
+  fail), so it runs on macOS.
+- Reclaim treats a failing `git status` as dirty (worktree kept).
+- Pausing off (pause floor 0, e.g. `OSRC_DISK_POLICY_OFF=1` mid-episode) resumes every paused lane
+  on the next tick.
+- `osrc-l2-r3.READY/RESULT` removed; `osrc-l2-r4.*` written and RESULT names this round's base pin.
+- `_osrc_disk_heartbeat` collapsed to one line.
+
+### Tests run
+
+- `nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/test_disk_policy.sh` on this
+  branch: `RESULTS: 92 passed, 0 failed`, exit 0.
+- The same new test file against the base tree (worktree at `75eb289`): `RESULTS: 89 passed,
+  3 failed`. The three failures are exactly the three new P2 tests. (That run exited 143: on the base
+  the losing lock claimant writes the test shell's pid as owner, and the test cleanup kills it.)
+- `nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`: `RESULT: 242 passed,
+  6 failed, 1 skipped`, exit 1. The 6 are exactly round 3's known container/base failures
+  (`test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`,
+  `test_parity_insource_refresh`, `test_conformance_suite_timeout`, `test_sealed_fixes`); none touch
+  the disk policy. `test_disk_policy` is green inside it.
+
+### Unproven
+
+- macOS bash 3.2 and Git Bash not executed. New code uses `set -C` (POSIX noclobber, `O_EXCL`),
+  `read -r` from files and arithmetic only. Exclusive create on Git Bash NTFS is assumed atomic.
+- The restore after renaming a live owner can race a third claimant that judged the lock stale
+  before both; the lock directory's fresh mtime makes any newer claimant back off, but this residue
+  is reasoned, not reproduced.
+- The repeat-start and admit-sweep P3s have no dedicated test (line budget); both are one-line
+  conditions exercised by existing paths.
+
+### Needs from other lanes
+
+- None new. Round 3's asks stand.

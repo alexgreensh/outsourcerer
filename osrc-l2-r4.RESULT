@@ -1,0 +1,4 @@
+sha=75eb28983d6fe50b6e24ac6cbcd569911ebc24c9
+rc=0
+head=400bc4e (fix commit on cloud/osrc-l2-r4; this marker commit sits on top of it). rc=0 is the exit code of test_disk_policy.sh on that head (92 passed, 0 failed); the 3 new P2 tests fail on the base (89/3).
+Disk policy round 4: failed resume rewrite keeps the record (P2-1), _fg_guard clocks skip frozen time (P2-2), monitor lock claimed only by exclusive create (P2-3); P3s: no forks per job dir, env poll/idle knobs only tighten, pending tmux record kept on repeat start, expired admit tokens swept, parked-event test, /dev/full-free state-write test, git status failure keeps worktree, pause floor 0 resumes all. conformance 242/6/1 exit 1, the 6 are the known container/base failures. Code+tests net -1 line.
