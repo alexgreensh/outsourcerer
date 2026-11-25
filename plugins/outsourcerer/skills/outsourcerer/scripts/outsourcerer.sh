@@ -15770,6 +15770,11 @@ route_delegate() {
   # gated on table id swe-1.7 (static-free) while dispatch resolved `swe` to a paid
   # newest-generation -high (codex review, verified end-to-end). The pin case mirrors
   # dispatch too: a pinned route launches MODEL verbatim.
+  # MODEL is never EMPTY here, bare run included: the MODEL_EXPLICIT!=1 branch above
+  # already pinned it to the provider default (the runtime Free-catalog pick for dv),
+  # which is exactly the id delegate() re-resolves and launches — so resolved-or-MODEL
+  # classifies the exact launched id on every path. The gate's own empty-model lane-default
+  # fallback (lib/spend.sh) is second-line defense only, never the normal route.
   local _gate_model="$RESOLVED_ID"
   case "$disp" in
     devin|dv)
