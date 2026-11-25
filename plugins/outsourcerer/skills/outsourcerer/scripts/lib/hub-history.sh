@@ -233,7 +233,8 @@ _osrc_hub_history_build() {
   since="$(jq -r --argjson s "$since" '[$s] + [.[] | .start // empty] | min' <<<"$lanes" 2>/dev/null)"
   if [ -n "$repo" ]; then
     gh="$(_osrc_hub_gh_data "$repo")"
-    if jq -e '.ok == true' >/dev/null 2>&1 <<<"$gh"; then ghs=ok; else ghs=unreachable; tags="$(_osrc_hub_local_tags "$dir")"; fi
+    # A stale cache is good history kept after the latest fetch failed: show it, but GitHub is unreachable.
+    if jq -e '.ok == true and (.stale | not)' >/dev/null 2>&1 <<<"$gh"; then ghs=ok; else ghs=unreachable; tags="$(_osrc_hub_local_tags "$dir")"; fi
   fi
   jq -e 'objects' >/dev/null 2>&1 <<<"$gh" || gh='{"releases":[],"prs":[],"issues":[]}'
   out="$(jq -c -n --argjson lanes "$lanes" --argjson gh "$gh" --argjson tags "$tags" --arg repo "$repo" --arg ghs "$ghs" \

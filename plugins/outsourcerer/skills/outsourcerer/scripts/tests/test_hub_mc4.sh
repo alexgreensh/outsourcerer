@@ -169,7 +169,7 @@ HJS="$S/lib/hub-assets/hub-history.js"
 grep -q "Finished (' + done.length" "$HJS" && ! grep -q 'finishedFold({ el, ic }, p, false)' "$S/lib/hub-assets/hub-home.js" && ! grep -q 'OSRC_HUB_HISTORY.section({ el, ic }, p)' "$S/lib/hub.html" \
   && ok "page: Home tiles and project page stay board-only (no lane folds or History section)" || bad "history/lane fold still wired on page"
 grep -q 'GitHub not reachable' "$HJS" && ok "page says 'GitHub not reachable' in one neutral line" || bad "offline line missing"
-grep -q "plans: lims" "$S/lib/hub-assets/hub-home.js" && ok "plans tile lists every checked plan (#5)" || bad "plans tile still shows one plan"
+grep -q "plans: pr.lims" "$S/lib/hub-assets/hub-home.js" && ok "plans tile lists every checked plan (#5; planReadings renders in test_hub_home)" || bad "plans tile still shows one plan"
 
 echo "=== 3. page: header on one line, neutral stale pill, page-side guards ==="
 CSS="$S/lib/hub-assets/hub-mc3.css"; HJ="$S/lib/hub-assets/hub-home.js"; PG="$S/lib/hub.html"
