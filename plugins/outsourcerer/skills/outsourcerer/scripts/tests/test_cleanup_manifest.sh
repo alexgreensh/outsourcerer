@@ -506,7 +506,7 @@ mf="$OSRC_HOME/created.jsonl"; cp "$mf" "$mf.bak"; printf '{"path":"/x","ki' >> 
 sc="$(run cleanup 2>&1)"; scrc=$?
 [ "$scrc" = "0" ] && grep -q 'wt-e2e' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"
 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_created_record /real/wt worktree s1 /real' 2>/dev/null
-jq -R 'fromjson?|.path' "$mf" | grep -q '/real/wt' && ok "record after a truncated line is not glued to it" || bad "record lost after truncated line"
+[ -n "$(jq -R 'fromjson?|select(.path=="/real/wt")' "$mf")" ] && ok "record after a truncated line is not glued to it" || bad "record lost after truncated line"
 mv "$mf.bak" "$mf"
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

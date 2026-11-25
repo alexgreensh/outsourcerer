@@ -152,7 +152,7 @@ Not run on bash 3.2. The six undiagnosed conformance failures from round 3 are u
 - **3, 4, 6** Tests: detached-HEAD greps `ASK.*not on branch`; truncated-manifest asserts `wt-e2e` is still listed; dropped redundant `bm` assertions, the third arguments, the `unbound` grep and the rewritten `worktree.json`.
 - **5** Removed dead `wj2` lines. **7** gate message names `OSRC_DISK_MIN_GB=0`. **8** wording now "no other branch, remote or tag holds it".
 - **9** r4 READY/RESULT removed; new RESULT names this head's base sha and a run rc.
-- **10** Not done: bash 3.2 run; full conformance run is recorded in `osrc-l6-r5.RESULT`.
+- **10** Not done: bash 3.2 run. conformance.sh finished rc=1 (6 pre-existing/environmental suite failures, see RESULT).
 - Net lines: 15 added, 22 removed in code/tests (before this report).
 
 Tests: `bash tests/test_cleanup_manifest.sh` rc=0 (85 pass); with base `lib/cleanup.sh`, 1 fail (finding 1).
