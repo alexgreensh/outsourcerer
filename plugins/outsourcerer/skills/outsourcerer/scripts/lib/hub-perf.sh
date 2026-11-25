@@ -113,19 +113,24 @@ _osrc_hub_memo_begin() {
 }
 
 # _osrc_hub_scr_read <id> -> what _sv_target_screen prints, reused across exports while the pane text
-# and every input of the reading are unchanged. The key is the raw capture's checksum plus the newest
-# mtime of the lane's inputs (done contract and verdict, supervise state, transcript, registry, hand-in
-# dirs: _osrc_hub_scr_dep_epoch). A long-lived pane costs one capture and one stat pass, not the
-# transcript and registry scans behind a full reading.
+# and every input of the reading are unchanged. The key is one checksum of the raw capture plus the
+# list of the lane's inputs that exist (done contract and verdict, supervise state, transcript,
+# registry, hand-in dirs: _osrc_hub_scr_deps), and their newest mtime: a new, changed or deleted input
+# reads the pane again. A long-lived pane costs one capture and one stat, not the transcript and
+# registry scans behind a full reading.
 _osrc_hub_scr_read() {
-  local id="$1" cap key k0 pf="$OSRC_HOME/hub/cache/scr/$1.ck"
-  if ! type _osrc_hub_scr_dep_epoch >/dev/null 2>&1 || [ "${OSRC_HUB_REFRESH:-0}" = 1 ] \
+  local id="$1" cap deps key k0 p pf="$OSRC_HOME/hub/cache/scr/$1.ck"
+  local -a dl=()
+  if ! type _osrc_hub_scr_deps >/dev/null 2>&1 || [ "${OSRC_HUB_REFRESH:-0}" = 1 ] \
       || ! cap="$(_osrc_screen_capture "$id")"; then
     _osrc_hub_raw_sv_target_screen "$id"; return
   fi
-  key="$(_osrc_hub_scr_dep_epoch "$id")"
-  case "$key" in ''|*[!0-9]*) _osrc_hub_raw_sv_target_screen "$id" "$cap"; return ;; esac
-  key="$(printf '%s' "$cap" | cksum | tr ' ' _) $key"
+  deps="$(_osrc_hub_scr_deps "$id")"
+  [ "$deps" != x ] || { _osrc_hub_raw_sv_target_screen "$id" "$cap"; return; }
+  while IFS= read -r p; do [ -n "$p" ] && dl+=("$p"); done <<EOF
+$deps
+EOF
+  key="$(printf '%s\n@deps\n%s' "$cap" "$deps" | cksum | tr ' ' _) $(_osrc_hub_mt "${dl[@]}")"
   if [ -f "$pf" ] && [ ! -L "$pf" ] && IFS= read -r k0 < "$pf" && [ "$k0" = "$key" ]; then
     tail -n +2 "$pf"; return 0
   fi
@@ -282,13 +287,13 @@ _osrc_hub_limits_write() { # <file> : compute and store atomically
 }
 _osrc_hub_limits_cached() {
   local f="$OSRC_HOME/hub/limits-cache.json" ttl="${OSRC_HUB_LIMITS_TTL:-60}" age changed p lk
-  if ! mkdir -p "$OSRC_HOME/hub" 2>/dev/null || [ -L "$f" ]; then
+  if [ "${OSRC_HUB_FAST:-0}" != 1 ] || ! mkdir -p "$OSRC_HOME/hub" 2>/dev/null || [ -L "$f" ]; then
     local out; out="$(_osrc_hub_limits 2>/dev/null)"; case "$out" in ''|*'error'*) out='[]' ;; esac; printf '%s' "$out"; return 0
   fi
   if [ "${OSRC_HUB_CHECK_PLANS:-0}" = 1 ]; then _osrc_hub_limits_write "$f"; return; fi
   case "$ttl" in ''|*[!0-9]*) ttl=60 ;; esac
   if [ ! -f "$f" ] || ! jq -e 'arrays' "$f" >/dev/null 2>&1; then
-    if [ "${OSRC_HUB_FAST:-0}" = 1 ]; then OSRC_PROBE_NONBLOCK=1 _osrc_hub_limits_write "$f"; else _osrc_hub_limits_write "$f"; fi
+    OSRC_PROBE_NONBLOCK=1 _osrc_hub_limits_write "$f"
     return 0
   fi
   local cmt imt
@@ -303,12 +308,6 @@ EOF
     [ "$imt" -gt "$cmt" ] 2>/dev/null && changed=1
   fi
   age=$(( $(date +%s) - cmt ))
-  # A plain export computes the rail unless the stored one is younger than the TTL and no meter input
-  # changed since it was written: an unchanged machine reuses it (the rail cost 1-4 s per export).
-  if [ "${OSRC_HUB_FAST:-0}" != 1 ]; then
-    if [ -n "$changed" ] || [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then _osrc_hub_limits_write "$f"; else jq -c . "$f" 2>/dev/null || printf '[]'; fi
-    return 0
-  fi
   # Changed meters do not block the export either: the statusline rewrites its rate-limits file every
   # turn, so "recompute when an input changed" meant recomputing (7 s) on nearly every export.
   if [ -n "$changed" ] || [ "$age" -ge "$ttl" ] || [ "$age" -lt 0 ]; then

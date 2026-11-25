@@ -257,7 +257,8 @@ _osrc_hub_limits_fresh_fast() {
 # hub/cache/scr/<id> stores "activity dep_epoch cached_epoch" + output and is reused while all three
 # still match. OSRC_HUB_SCR_TTL (default 20s) bounds the staleness either way; a forced
 # OSRC_HUB_REFRESH export always reads the pane again.
-_osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen inputs (0 = unknown)
+_osrc_hub_scr_deps() { # <id> -> the existing paths a lane's screen reading depends on, one per line;
+  # "x" when one input cannot be watched by mtime (a branch: done contract reads a git ref)
   local id="$1" pair tp w p
   local -a deps=("$OSRC_HOME/done/$id.json" "$OSRC_HOME/done/$id.checkcache" "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/lanes/state/$id" \
     "$OSRC_HOME/lanes/state/$id.handin" "$OSRC_HOME/lanes/state/$id.cc" "$OSRC_HOME/autodetach/$id".* "$OSRC_JOBS/$id/"* "$OSRC_SESSION_REGISTRY")
@@ -267,7 +268,7 @@ _osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen input
     case "${pair%%	*}" in
       file:*) p="${pair%%	*}"; p="${p#file:}"; case "$p" in /*) ;; *) p="${pair#*	}/$p" ;; esac
         deps+=("$p") ;;
-      branch:*) printf 'x'; return 0 ;;   # a git ref has no stable file to watch: never reuse this reading
+      branch:*) printf 'x\n'; return 0 ;;
     esac
   fi
   # Transcript tail feed (question check): resolve cc id via the same cache _sv_cc_transcript uses.
@@ -278,9 +279,17 @@ _osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen input
   # Watched hand-in DONE files: a new file bumps its parent dir's mtime.
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
-    IFS= read -r p < "$w" 2>/dev/null || p=""
+    deps+=("$w"); IFS= read -r p < "$w" 2>/dev/null || p=""
     [ -n "$p" ] && deps+=("$p" "$p/out")
   done
+  for p in "${deps[@]}"; do [ -e "$p" ] && printf '%s\n' "$p"; done
+  return 0
+}
+_osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen inputs (0 = unknown)
+  local p; local -a deps=()
+  while IFS= read -r p; do [ -n "$p" ] && [ "$p" != x ] && deps+=("$p"); done <<EOF
+$(_osrc_hub_scr_deps "$1")
+EOF
   _osrc_hub_mt "${deps[@]}"
 }
 

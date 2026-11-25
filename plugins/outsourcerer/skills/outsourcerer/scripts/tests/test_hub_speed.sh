@@ -102,14 +102,15 @@ scr_case() {
   _osrc_hub_raw_sv_target_screen() { echo raw >> "$OSRC_HOME/raw.calls"; printf 'idle\nseen %s\n' "$(wc -l < "$OSRC_HOME/raw.calls" | tr -d ' ')"; }
   _osrc_screen_capture() { cat "$FAKE_PANES/t-idle.screen"; }
   mkdir -p "$OSRC_HOME/hub/cache/scr"; rm -f "$OSRC_HOME/raw.calls" "$OSRC_HOME/hub/cache/scr/t-idle.ck"
-  local a b c d
+  local a b c d e
   a="$(_osrc_hub_scr_read t-idle)"; b="$(_osrc_hub_scr_read t-idle)"
   echo "more text" >> "$FAKE_PANES/t-idle.screen"; c="$(_osrc_hub_scr_read t-idle)"
   sleep 1; mkdir -p "$OSRC_HOME/lanes/state"; : > "$OSRC_HOME/lanes/state/t-idle"; d="$(_osrc_hub_scr_read t-idle)"
-  printf '%s|%s|%s|%s\n' "${a#*seen }" "${b#*seen }" "${c#*seen }" "${d#*seen }"
+  rm -f "$OSRC_HOME/lanes/state/t-idle"; e="$(_osrc_hub_scr_read t-idle)"
+  printf '%s|%s|%s|%s|%s\n' "${a#*seen }" "${b#*seen }" "${c#*seen }" "${d#*seen }" "${e#*seen }"
 }
 r="$(lib scr_case 2>/dev/null)"
-[ "$r" = "1|1|2|3" ] && ok "same pane: reused; new pane text: read; newer supervise state: read" || no "screen reuse: $r"
+[ "$r" = "1|1|2|3|4" ] && ok "same pane: reused; new pane text, a new or a deleted input: read again" || no "screen reuse: $r"
 
 echo "=== stat: one stat per list, same answers ==="
 mkdir -p "$TMP/mt"; : > "$TMP/mt/a"; : > "$TMP/mt/b"; touch -t 202001020304 "$TMP/mt/a"; touch -t 202101020304 "$TMP/mt/b"
