@@ -409,9 +409,32 @@ _osrc_human_kb() { # <kb> -> "1.2G" style
   else printf '%sK' "$k"; fi
 }
 
+# _osrc_cleanup_verify_clones [--apply]: a cloud lane's done check clones its branch into
+# $OSRC_HOME/cloud/<id>.verify.git (about 70 MB) and rebuilds it on every check, so a clone whose lane
+# is no longer tracked ($OSRC_HOME/remote/<id>.json gone) is scratch nobody will read. Lists those
+# clones; --apply removes them. Nothing else under $OSRC_HOME/cloud is touched.
+_osrc_cleanup_verify_clones() {
+  local d id n=0
+  for d in "$OSRC_HOME"/cloud/*.verify.git; do
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    id="${d##*/}"; id="${id%.verify.git}"
+    [ -n "$id" ] && [ ! -e "$OSRC_HOME/remote/$id.json" ] || continue
+    n=$((n + 1))
+    if [ "${1:-}" = --apply ]; then
+      rm -rf "$d" 2>/dev/null
+      [ -e "$d" ] || printf '%s\tremoved-verify-clone\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$d" >> "$(_osrc_cl_log)"
+    else
+      echo "  SAFE  verify clone of removed lane $id  $d"
+    fi
+  done
+  [ "$n" = 0 ] || [ "${1:-}" = --apply ] || echo "[outsourcerer] $n unused verify clone(s) delete with: $0 cleanup --apply"
+  return 0
+}
+
 _osrc_cleanup_dryrun() {
   have jq 2>/dev/null || die "cleanup needs jq"
   local mf="$OSRC_HOME/created.jsonl" items n_safe n_ask n_gone free_gb
+  _osrc_cleanup_verify_clones
   if [ ! -f "$mf" ]; then
     echo "[outsourcerer] cleanup: no manifest yet ($mf). Nothing Outsourcerer-created is recorded."
     return 0
@@ -434,6 +457,7 @@ _osrc_cleanup_dryrun() {
 _osrc_cleanup_apply() {
   have jq 2>/dev/null || die "cleanup --apply needs jq"
   local mf="$OSRC_HOME/created.jsonl"
+  _osrc_cleanup_verify_clones --apply
   [ -f "$mf" ] || { echo "[outsourcerer] cleanup: no manifest yet."; return 0; }
   local items line item verdict path kind repo sess pp deleted=0 failed=0
   # Order matters: a branch is only SAFE once its worktree is gone (checked-out check),

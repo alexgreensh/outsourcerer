@@ -525,6 +525,7 @@ _osrc_lane_rm() {
   [ -f "$(_osrc_lane_json "$id")" ] || die "no lane '$id'"
   rm -f "$(_osrc_lane_json "$id")"
   rm -rf "$OSRC_HOME/remote/$id.git" "$OSRC_HOME/remote/$id.lock" "$OSRC_HOME/remote/.ev/$id"
+  rm -rf "$OSRC_HOME/cloud/$id.verify.git"   # the done check's scratch clone (lib/cloudrun.sh), ~70 MB
   # exactly <id>-<sha7>: a bare "$id-*" glob would also hit lane "$id-other"
   for w in "$OSRC_HOME/remote/wt/$id"-$h7; do [ -e "$w" ] && rm -rf "$w"; done
   for w in "$OSRC_HOME/remote/$id"-$h7.check.log "$OSRC_HOME/remote/$id"-$h7.rc; do [ -e "$w" ] && rm -f "$w"; done

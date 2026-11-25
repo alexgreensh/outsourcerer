@@ -89,7 +89,21 @@ _osrc_hub_cc_rows() {
   [ "${#fs[@]}" -gt 0 ] || return 0
   flt='objects | [(.sessionId // ""), (.cwd // ""), (.status // ""), (.statusUpdatedAt // .updatedAt // 0), (.pid // ""), (.jobId // ""), (.waitingFor // "")]
        | map(tostring | gsub("[|\t\n\r]"; " ")) | join("|")'
-  raw="$(jq -r "$flt" "${fs[@]}" 2>/dev/null)" || raw="$(for f in "${fs[@]}"; do jq -r "$flt" "$f" 2>/dev/null; done)"
+  # A malformed file used to send every file through its own jq (150 sessions: 150 jq). Read line-wise
+  # instead: a one-line file parses on its line; a file with a line that does not parse alone (pretty-
+  # printed, or broken) is dropped from that pass and read whole on its own, where only a broken one
+  # yields nothing. Lines carry their file name (\002) until then.
+  raw="$(jq -rR "select(test(\"\\\\S\")) | input_filename as \$fn | (try (fromjson | $flt | \$fn + \"\\u0002\" + .) catch (\"\\u0001\" + \$fn))" "${fs[@]}" 2>/dev/null)"
+  case "$raw" in *$'\001'*)
+    local bad
+    bad="$(printf '%s\n' "$raw" | grep $'^\001' | cut -c2- | sort -u)"
+    raw="$(printf '%s\n' "$raw" | awk -F'\002' 'NR == FNR { b[$0] = 1; next } index($0, "\001") != 1 && !($1 in b)' <(printf '%s\n' "$bad") -)"
+    while IFS= read -r f; do [ -n "$f" ] && raw="$raw
+$(jq -r "$flt" "$f" 2>/dev/null)"; done <<EOF2
+$bad
+EOF2
+    ;; esac
+  raw="$(printf '%s\n' "$raw" | sed $'s/^[^\002]*\002//')"
   local rows=""
   while IFS='|' read -r sid cwd st su pid job wf; do
     case "$sid" in ''|.*|*[!A-Za-z0-9._-]*) continue ;; esac
@@ -165,7 +179,7 @@ _osrc_hub_truth() {
         # Words stay while the report is younger than the card-stale window. Percent: the board one, else the
         # report percent while fresh; never one made from lane counts.
         | ($rep != null and ($now - $rep) < ((.cardStaleMin // 30) * 60)) as $fresh
-        | (if (.boardTracks // 0) > 0 or $fresh then . else del(.pct) end)
+        | (if ((.boardTracks // 0) > 0 and .pctSource != "report") or $fresh then . else del(.pct) end)
         | (if $fresh and ($r.next // "") != "" then .next = $r.next elif $d.next == null then del(.next) else .next = $d.next end)
         | (if ($fresh | not) and $r and $r.eta == .eta then del(.eta, .etaNote) else . end)
       else
