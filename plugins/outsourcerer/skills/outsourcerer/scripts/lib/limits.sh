@@ -215,7 +215,9 @@ EOF
 # 10) percent left, printed every call while it is low (the brief must keep saying it). The supervise
 # event ("limit-low") fires ONCE per crossing: $OSRC_HOME/limits-low-seen remembers which windows were
 # already announced and forgets a window when it climbs back over the line. A stale codex reading is
-# unknown, so it never alerts. Never fails, never blocks.
+# unknown, so it never alerts. Known gap: a mark survives a window reset until a call sees that window back
+# over the line, so the next window's first crossing can go unannounced (the LIMIT LOW line still prints).
+# Never fails, never blocks.
 _osrc_limits_low_scan() {
   local limits="${1:-}" thr tok w v seen f lines="" left name stale=0 present="" s
   thr="${OSRC_LIMIT_LOW_PCT:-10}"; case "$thr" in ''|*[!0-9.]*) thr=10 ;; esac
@@ -246,7 +248,7 @@ _osrc_limits_low_scan() {
   return 0
 }
 
-# _conserve_reco <limits-line> <lanes-line> -> ONE actionable conservation line. Threshold is
+# _conserve_reco <limits-line> <lanes-line> -> the conservation line, then any LIMIT LOW lines. Threshold is
 # OSRC_CONSERVE_THRESHOLD (default 50%). Priority when the Claude 5h window is tight:
 # local (no cash or plan use) > Devin GLM/SWE (Devin plan) > keyless Gemini > Codex Sol/Terra (only if ChatGPT plan has
 # headroom) > OpenRouter(only if funded). "All lanes tight" is handled first.

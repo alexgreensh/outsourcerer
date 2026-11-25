@@ -250,7 +250,9 @@ bookkeeping only) and is bounded by `OSRC_FAILOVER_MAX` per job (default 2).
 over `OSRC_LANE_LIMIT_PCT` (default 90) on a FRESH reading is never dispatched to: `advise`
 excludes it, an unpinned run hops to the next ready lane for free, a pinned `-m` refuses loudly,
 and `session start` refuses before tmux exists. Stale readings (older than
-`OSRC_LIMITS_STALE_SECS`, default 6h) are "unknown, not exhausted": warn only, never block.
+`OSRC_LIMITS_STALE_SECS`, default 6h) are "unknown, not exhausted": warn only, never block. The Mission Control page uses the same
+setting with a 2h default (set it and both move). `OSRC_LIMIT_LOW_PCT` (default 10) is the percent left at or under
+which `brief` prints `LIMIT LOW` and the page marks the row low; `limit-low` fires once per crossing.
 Consent to proceed anyway: `--force-lane`, or `--provider` typed on the command line —
 env-selected providers (`OSRC_PROVIDER`, `OUTSOURCERER_PROVIDER`, `OSRC_PROVIDER_EXPLICIT`) pick
 the lane but do NOT count as consent. Kill switch: `OSRC_LANE_LIMIT_GATE=0`.

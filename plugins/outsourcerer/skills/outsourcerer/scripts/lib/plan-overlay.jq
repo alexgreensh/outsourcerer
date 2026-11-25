@@ -25,10 +25,14 @@ def wlabel: if . == "claude5h" or . == "codex5h" then "5 hours" else "Week" end;
 def row_age: ([.windows[]?.age_s | numbers] | min);
 def probe_newer: (row_age) as $a | $a == null or ($now - ($p.codex.checked // $now)) <= $a;
 def unmeasured: (.state == "unknown" or .state == "wait");
-# A kept last-good probe whose refresh failed is stale: shown with the reason, never headroom.
+# A kept last-good probe whose refresh failed says so; it is stale (never headroom) only once older than
+# its own cache TTL, so one failed refresh does not blank a seconds-old reading.
 def refresh_flag($c): if ($c.refresh_failed // "") != "" then
-    . + {stale: true, note: "\(.note // "") Refresh failed (\($c.refresh_failed)); showing the last good reading."}
-    | if .state == "ok" or .state == "low" then .state = "unknown" else . end else . end;
+    . + {note: "\(.note // "") Refresh failed (\($c.refresh_failed)); showing the last good reading."}
+    | if ($now - ($c.checked // $now)) > ($c.ttl // 0) then
+        . + {stale: true} | if .state == "ok" or .state == "low" then .state = "unknown" else . end
+      else . end
+  else . end;
 def checked($t): . + {updated: ($t | todate), checked_at: $t};
 
 # rows: [{k, label, used, renews_at}] -> the row fields for the tightest live window.
@@ -55,7 +59,7 @@ def claude_fix:
 
 def codex_fix:
   ($p.codex // {}) as $c
-  | if $c.ok == true then
+  | if $c.ok == true and probe_newer then
       ($c.windows | to_entries | map({k: .key, label: (.key | wlabel), used: .value.used, renews_at: (.value.renews_at | epoch)})) as $ws
       | ("Checked live with codex app-server" + (if ($c.plan // "") != "" then " (plan \($c.plan))" else "" end) + "."
          + (if ($c.resets_available // 0) > 0 then " \($c.resets_available) free full resets available." else "" end)) as $why

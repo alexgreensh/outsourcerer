@@ -219,7 +219,7 @@ _osrc_plan_overlay() {
   for id in codex agy devin droid; do
     case " $ids " in *" $id "*) ;; *) continue ;; esac
     c="$(_osrc_probe_cache "$id")"; jq -e 'objects' >/dev/null 2>&1 <<<"$c" || continue
-    pj="$(jq -c --arg k "$id" --argjson v "$c" '. + {($k): $v}' <<<"$pj")"
+    pj="$(jq -c --arg k "$id" --argjson v "$c" --argjson ttl "$(_osrc_probe_ttl "$id")" '. + {($k): ($v + {ttl: $ttl})}' <<<"$pj")"
   done
   case " $ids " in *" claude "*) c="$(_osrc_probe_claude_reading)" && jq -e 'objects' >/dev/null 2>&1 <<<"$c" && pj="$(jq -c --argjson v "$c" '. + {claude: $v}' <<<"$pj")" ;; esac
   now="$(date +%s)"
