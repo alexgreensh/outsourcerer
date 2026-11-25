@@ -1,0 +1,10 @@
+sha=9d43a90c5f6644fca6b13d29174be515a8c72a45
+rc=0
+Every P1/P2/P3 finding from the review is fixed on the screen side (lib/screen.sh), and each has a
+regression test that fails on 9d43a90 and passes now (test_screen_alerts.sh: 48 passed; 30 of the
+48 fail on the base). New osrc_screen_alert gives separate working / stalled / unknown states
+(unknown escalates only after a configurable window plus CPU evidence), checks liveness first, and
+de-duplicates through a record on disk, so a watcher restart does not repeat an alert. The four
+supervise.sh changes it needs (owner osrc-l1-r2) are listed exactly in
+reports/osrc-l3-alerts.md ## Round 2. conformance.sh exit 1: 6 suites fail the same way on the base
+or are missing; see the report.
