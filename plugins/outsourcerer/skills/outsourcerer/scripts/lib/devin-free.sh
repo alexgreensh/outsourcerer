@@ -198,3 +198,20 @@ _devin_is_free_model() {
   case "$set" in *" v:$norm "*|*" f:$norm "*) return 0 ;; esac
   return 1
 }
+
+# _devin_probe_pick <preferred...> -> the first health-probe model that is NOT on the user's
+# exclude list (#45: a probe is still a request to that model) and does NOT draw the paid ACU
+# balance. A probe sends a request with no consent prompt, so a caller-passed or overridden
+# paid id (OSRC_DEVIN_PROBE_MODEL, a refused model) is skipped, never pinged. The built-in
+# fallbacks are plan-included (daily quota, no cash). rc1 when nothing qualifies.
+_devin_probe_pick() {
+  local c skip="${OSRC_DEVIN_PROBE_SKIP:-}"
+  for c in "$@" glm-5-2 swe-2-high swe-1-7 kimi-k3; do
+    [ -n "$c" ] || continue
+    [ -n "$skip" ] && [ "$(printf '%s' "$c" | tr '[:upper:]._' '[:lower:]--')" = "$skip" ] && continue
+    _model_excluded "$c" && continue
+    _devin_is_free_model "$c" || continue
+    printf '%s' "$c"; return 0
+  done
+  return 1
+}

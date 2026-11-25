@@ -111,6 +111,12 @@ pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" \
 [ "$pick" = "swe-2-high" ] && ok "probe: fallback after glm-5-2 is the exact Free swe-2-high" \
   || bad "probe: fallback pick '$pick' (want swe-2-high)"
 
+# --- a probe never pings a paid id passed in or overridden (it runs with no consent prompt) ----
+pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_FREE_CATALOG_CHECK=0 SRC="$SRC" \
+    bash -c '. "$SRC" >/dev/null 2>&1; _devin_probe_pick fusion-opus-max' 2>/dev/null )"
+[ "$pick" = "glm-5-2" ] && ok "probe: a paid caller-passed id is skipped for a plan-included one" \
+  || bad "probe: paid id would be pinged with no consent: '$pick' (want glm-5-2)"
+
 # --- the Free proof compares exact ids: a vendor/ prefix is not stripped into a Free id -------
 bill() { PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_CATALOG_TTL=999999 \
     DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" SRC="$SRC" M="$1" OSRC_FREE_CATALOG_CHECK="$2" \

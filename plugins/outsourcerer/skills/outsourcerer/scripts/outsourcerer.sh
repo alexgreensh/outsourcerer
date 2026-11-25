@@ -918,19 +918,7 @@ _devin_free_own_quota() { # <model> <text>
     && grep -qiE 'exhausted|depleted|exceeded|0%[[:space:]]*(remaining|left)' <<<"$text"
 }
 
-# _devin_probe_pick <preferred...> -> the first health-probe model NOT on the user's exclude list
-# (#45: a probe is still a request to that model), falling back through the plan-included/free ids.
-# rc1 when every candidate is excluded (the caller then skips the probe).
-_devin_probe_pick() {
-  local c skip="${OSRC_DEVIN_PROBE_SKIP:-}"
-  for c in "$@" glm-5-2 swe-2-high swe-1-7 kimi-k3; do
-    [ -n "$c" ] || continue
-    [ -n "$skip" ] && [ "$(printf '%s' "$c" | tr '[:upper:]._' '[:lower:]--')" = "$skip" ] && continue
-    _model_excluded "$c" && continue
-    printf '%s' "$c"; return 0
-  done
-  return 1
-}
+# _devin_probe_pick lives in lib/devin-free.sh (probes only a proven-Free model).
 
 # A real, minimal request against the known plan-included model. _timeout is
 # bash-native, captures output safely, and returns 124 when the bound fires.
