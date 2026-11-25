@@ -252,3 +252,55 @@ Unproven: how real Codex draws edit targets; the new tests were not run against 
 None.
 
 Conformance: `bash .../tests/conformance.sh` was cut short; every suite that ran passed except `test_harness_isolation` ("fail-closed failed ... would inherit live MCP"), which this lane does not touch (checked against the base commit in the log of this round's run).
+
+
+## Round 5
+
+Stopped parsing harder. The Devin reader (`lib/screen.sh`, `_osrc_scr_devin`) now fails closed:
+
+- It returns a command only when the first `requires your approval` row on screen (searched from row 0)
+  starts at column 0 with `This action requires your approval`, lies inside the 25-row window, and sits
+  exactly two rows above the `❭` menu row. The one row between is the whole command, unless it is blank,
+  starts with `$ `, or starts with a box/rule glyph. Anything else gives an empty command; the classifier
+  holds an empty shell command ("no command visible").
+- Deleted: the old-layout `└ $` / `$ ` scan and its join loop, the `Approval required` header fallback,
+  and every per-row skip arm (blank, `❭`, rule/box rows, the `The agent is waiting for your approval`
+  status arm).
+- Kind and path still come from the menu's `Kind(target)` tag; selection and scope parsing are unchanged.
+
+Behaviour changes (all toward holding): the old `└ $` layout, wrapped commands, boxed commands, and the
+status-line layout now hold for a person. A single-row modal (`dv-approval-modal`, and a variant with
+`ls -la`) still approves.
+
+Review findings:
+- **1** (`$ ` row in the modal) — closed: a `$ ` row is never read. Probes `touch ../x⏎$ ls` and a lone `$ ls` hold.
+- **2** (status-line arm) — closed: arm deleted; `dv-approval-modal-status-line` now holds (tick spec flipped).
+  Probe `The agent is waiting for your approval; touch ../x⏎ls` holds.
+- **3** (tall command, header outside window) — closed: header searched from row 0 and must be at `m-2`
+  inside the window. Probe with 25 command rows and a decoy header row at column 0 holds.
+- **4** (missing tests) — old-layout decoy `└ $ touch ../y⏎echo └ $ ls` added as a hold case. The Codex
+  `cx-edit` coverage gap is outside this change and left as is.
+- **5** — `osrc-l4-r4.READY/RESULT` deleted; table closing quote in `test_screen_state.sh` put back on the last row.
+
+Tests changed: `test_approver_tick.sh` (spec flips, extraction asserts that multi-row fixtures give no
+command, 11 round-5 hold probes, one approve probe; the recapture test now uses the one-row
+`dv-approval-modal` so it still exercises a would-approve prompt), `test_screen_state.sh` (old-layout rows
+expect no command), `test_release_0175.sh` (boxed and old-layout shapes expect no command and hold).
+Removed tests for behaviour that no longer exists (status-row skipping, NBSP survival through the join,
+`Make all` kept in a joined command); their inputs are now two-row modals and are in the hold probes.
+
+Ran against the old `screen.sh` (new tests, base reader): `test_approver_tick.sh` 12 failed,
+`test_screen_state.sh` 2 failed. With the fix:
+- `nice bash tests/test_approver_tick.sh` rc=0 (59 passed)
+- `nice bash tests/test_screen_state.sh` rc=0 (248 passed)
+- `nice bash tests/test_release_0175.sh` rc=0 (83 passed)
+- Conformance: see below.
+
+Size: `git diff --shortstat caf8b00 -- plugins` is 50 insertions, 78 deletions (net −28).
+
+Unproven: real Devin layouts other than the captured ones now always hold; if Devin wraps routine
+commands often, users will see more held prompts. Not run on macOS bash 3.2 or Git Bash; the code uses
+only `case`, `[ ]` and the existing helpers.
+
+## Needs from other lanes
+None.
