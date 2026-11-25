@@ -226,3 +226,11 @@ All five P2s and every P3 from the review are fixed. Where I could, I deleted a 
 
 - Removing the MCP config copy when a user quits claude inside the pane, with no stop or control command, needs a
   pane-exit hook in the session launch builder (outsourcerer.sh owner).
+
+### Conformance
+
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`: **rc=1**, 241 passed, 6 failed, 1 skipped.
+The six failures are `test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`,
+`test_parity_insource_refresh`, `test_conformance_suite_timeout` and `test_sealed_fixes`. The round-3 table above
+shows these same six failing on main. I did not rerun them against main this round. `test_no_pipe_grep_q` and
+`test_release_0175` pass in this run. The RESULT says `rc=1`.

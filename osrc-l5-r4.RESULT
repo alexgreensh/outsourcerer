@@ -1,0 +1,8 @@
+sha=c23c968f4754a6adf516c61989da77727574a413
+rc=1
+conformance.sh: 241 passed, 6 failed, 1 skipped (rc=1). The 6 failing suites (test_harness_isolation, test_vocab_hygiene,
+test_supervise_pgroup_kill, test_parity_insource_refresh, test_conformance_suite_timeout, test_sealed_fixes) are the
+same six the round-3 report showed failing on main ea34fe0 too (root-in-container and pre-existing). None of them were
+rerun against main in this round. Lane work: P2 1-5 and all P3 fixed. test_factory_flow 209/209 (15 fail on base),
+test_lean_launch 7/7, factory tasks/e2e/land, perm_profiles, heavy, no_pipe_grep_q, check_file_size: all rc=0.
+sha is the work head before this RESULT commit (a file cannot carry its own commit's sha).
