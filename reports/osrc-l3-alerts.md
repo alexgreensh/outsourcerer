@@ -456,3 +456,40 @@ The 12 new cases (4 review findings, expanded, plus 2 P3 cases) were first run a
 `lib/screen.sh`: `test_screen_alerts.sh` gave 49 passed, 12 failed, and every failure was a new
 case. After the change:
 
+- `bash tests/test_screen_alerts.sh`: rc=0, 61 passed, 0 failed.
+- `bash tests/test_screen_state.sh`: rc=0, 252 passed, 0 failed.
+- `bash tests/test_pane_state.sh`: rc=0, 15 passed, 0 failed.
+- `bash tests/test_session_send_verify.sh`: rc=0, 49 passed. `test_stall.sh`: rc=0, 58 passed.
+  `test_supervise.sh`: rc=0, 99 passed. `test_done_contract.sh`: rc=0, 53 passed.
+  `test_pr10_falsestall_before_quota.sh`: rc=0, 7 passed. `test_managed_send.sh`: rc=0, 12 passed.
+- `bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`: **rc=1**, 241 passed,
+  7 failed, 1 skipped (live). Six failures are the same as round 3: `test_harness_isolation`,
+  `test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+  `test_conformance_suite_timeout` and `test_sealed_fixes`. I ran each of the six on an untouched
+  `11295d4` worktree here. Each fails there too: rc=1, and rc=127 for `test_sealed_fixes`.
+  `test_vocab_hygiene` fails with the same two assertions on both trees ("original was damaged on
+  failed write"). The container runs as uid 0, so the permission probes succeed when they are
+  meant to be refused. The seventh failure, `test_release_0175`, passes when run alone (rc=0, 83
+  passed, 0 failed). It failed only inside the full conformance run, so I count it as load or
+  timing flake, not a regression. None of the seven touch `lib/screen.sh`.
+- Timing: 10 generic analyses of `unknown-busy-esc.txt` take 0.37 s wall on Linux. The scan no
+  longer forks per row.
+
+### What remains unproven (round 4)
+
+- Not run on macOS bash 3.2 or Git Bash. The new code uses `case` globs, `${var#...}` trims, a
+  `for` over two indices and the `[[ $x =~ $re ]]` variable form the reader already used. The
+  regex includes the multibyte `’`, `·` and `∙` as literal alternatives, not inside brackets.
+- The banner shapes are only as real as the fixtures. The cc, codex and devin banner rows were
+  inserted into real captured frames in round 1. The agy rows come from `fixtures/supervise`. The
+  six Claude wordings are the review's list. A real banner worded differently reads its
+  underlying state (idle, composer or unknown), which fails safe: no false alert, and supervise
+  still checks the done contract.
+- A Claude limit banner that hangs under a prose bullet mid-turn (not under the prompt or the
+  summary) is not read as `limit` by design. I have no capture showing Claude does that.
+- For panes with no composer, the region rules (a separator in the last six rows, one plain
+  trailer row) are tested only on synthetic fixtures.
+
+### Needs from other lanes (round 4)
+
+Unchanged from round 3, including the longer `unknown` window in `lib/supervise.sh`.
