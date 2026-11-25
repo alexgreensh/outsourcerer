@@ -219,7 +219,7 @@ EOF
 # over the line, so the next window's first crossing can go unannounced (the LIMIT LOW line still prints).
 # Never fails, never blocks.
 _osrc_limits_low_scan() {
-  local limits="${1:-}" thr tok w v seen f lines="" left name stale=0 present="" s
+  local limits="${1:-}" thr tok w v seen f lines="" own left name stale=0 present="" s
   thr="${OSRC_LIMIT_LOW_PCT:-10}"; case "$thr" in ''|*[!0-9.]*) thr=10 ;; esac
   f="$OSRC_HOME/limits-low-seen"
   for tok in $limits; do case "$tok" in codexage=*) [ "${tok#*=}" -gt "${OSRC_LIMITS_STALE_SECS:-21600}" ] 2>/dev/null && stale=1 ;; esac; done
@@ -233,11 +233,13 @@ _osrc_limits_low_scan() {
     awk -v u="$v" -v t="$thr" 'BEGIN{exit !(100-u <= t+0)}' || continue
     left="$(awk -v u="$v" 'BEGIN{printf "%g",100-u}')"
     case "$w" in claude5h) name="Claude 5h" ;; claude7d) name="Claude weekly" ;; codex5h) name="ChatGPT 5h" ;; *) name="ChatGPT weekly" ;; esac
+    own="$(_owner_sid 2>/dev/null)"
+    [ -n "$own" ] || case " $seen " in *" $w "*) ;; *) printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"; continue ;; esac   # no owner: no event, no mark
     lines="$lines $w"
     printf 'LIMIT LOW: %s has %s%% left. Stop routing work to it until it renews; use another lane.\n' "$name" "$left"
     case " $seen " in *" $w "*) ;; *)
       if type _osrc_lane_event >/dev/null 2>&1; then
-        _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" "$(_owner_sid 2>/dev/null)" >/dev/null 2>&1 || true
+        _osrc_lane_event limit-low "$w" "$name has $left% left" "stop routing work to this plan until it renews" "$own" >/dev/null 2>&1 || true
       fi ;;
     esac
   done

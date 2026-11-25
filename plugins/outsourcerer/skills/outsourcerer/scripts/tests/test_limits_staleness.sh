@@ -128,6 +128,15 @@ o="$(row 10 5000)"
   [ "$(_sv_read_range "$f" 0 - '[]' sess-demo | awk -F '\t' '$3 == "limit-low"' | wc -l | tr -d ' ')" = 1 ] ) \
   && ok "the owner's supervise waiter receives limit-low" || bad "limit-low reaches no waiter"
 
+# 16. no owner (plain shell): the line prints, but no event goes out and the window is not marked as announced.
+EV="$TMP/events3"; : > "$EV"; rm -f "$OSRC_HOME/limits-low-seen"
+a="$( unset CLAUDE_CODE_SESSION_ID; _osrc_limits_low_scan "codexwk=97" )"
+[ -n "$a" ] && [ ! -s "$EV" ] && ! grep -q codexwk "$OSRC_HOME/limits-low-seen" && ok "ownerless scan sends no event and keeps no mark" || bad "ownerless scan: ev=$(cat "$EV") seen=$(cat "$OSRC_HOME/limits-low-seen" 2>/dev/null)"
+
+# 17. a good probe merely older than the log is not reported as a failed check.
+probe 20 20000; o="$(row 10 10800)"
+case "$(jq -r '.[0].note' <<<"$o")" in *"Live check failed"*) bad "healthy older probe called failed: $(jq -r '.[0].note' <<<"$o")" ;; *) ok "an older good probe is not a failed live check" ;; esac
+
 # 14. the visible page row (lib/hub.html renderLimits) shows the reading's age and the LOW marker,
 # rendered from rows the real export (_osrc_hub_limits) builds out of a fixture state.
 if command -v node >/dev/null 2>&1; then
@@ -136,11 +145,13 @@ if command -v node >/dev/null 2>&1; then
   eval "_osrc_meter_windows() { printf 'codexwk\t40\t$RESET\t10800\n'; }"; v="$(vis)"
   [ "$v" = "unknown|60% left, checked 3 h ago" ] && ok "page row: a 3 h old reading shows its age, not free room" || bad "page row hides the age: $v"
   eval "_osrc_meter_windows() { printf 'codexwk\t96\t$RESET\t120\n'; }"; v="$(vis)"
-  case "$v" in *"|4% left, LOW: stop routing here") ok "page row: 4% left shows LOW" ;; *) bad "page row hides LOW: $v" ;; esac
+  case "$v" in "out|4% left, LOW: stop routing here") ok "page row: 4% left shows LOW" ;; *) bad "page row hides LOW: $v" ;; esac
 else echo "SKIP: node not installed (page row checks)"; fi
 
 # 15. the `lane summary` text table keeps its columns: LEFT is short and the marker fits.
 t="$(printf '[{"id":"codex","name":"ChatGPT","state":"low","left":"4%% left, LOW: stop routing here","low":true,"renews":"today","billing":"subscription"}]' | _osrc_summary_text_json | tail -1)"
 [ "$(printf '%s' "$t" | awk '{print $4, $5, $6}')" = "4% left LOW" ] && [ "$(printf '%s' "$t" | cut -c52-56)" = today ] && ok "summary table columns stay aligned" || bad "summary row: $t"
+t="$(printf '[{"id":"codex","name":"ChatGPT","state":"unknown","left":"60%% left, checked 3 h ago","stale":true,"renews":"today · 18:40","billing":"subscription"}]' | _osrc_summary_text_json | tail -1)"
+[ "$(printf '%s' "$t" | cut -c52-56)" = today ] && ok "a stale row keeps the table columns" || bad "stale summary row: $t"
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

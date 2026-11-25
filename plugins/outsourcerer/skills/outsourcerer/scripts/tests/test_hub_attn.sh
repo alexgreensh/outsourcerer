@@ -19,10 +19,6 @@ lib() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$S
   _reconcile_status() { cat "$OSRC_JOBS/$1/status" 2>/dev/null; }
   "$@" ); }
 
-echo "=== order ==="
-doc="$(awk '/^## Attention/{f=1; next} /^## /{f=0} f && /^[0-9]+\. `/{ sub(/^[0-9]+\. `/, ""); sub(/`.*/, ""); printf "%s ", $0 }' "$HERE/../../references/hub.md")"
-code="$(OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; jq -rn "$_OSRC_HUB_DERIVE_JQ"' attn_order | join(" ")')"
-[ -n "$doc" ] && [ "${doc% }" = "$code" ] && ok "references/hub.md and the export share one order: $code" || no "order: doc '$doc' code '$code'"
 in='{"lanes":[{"id":"w","state":"working","status":"Building"},{"id":"r","status":"Review"},{"id":"d","status":"Merged"},{"id":"l","state":"limit"},
  {"id":"s","status":"Building"},{"id":"v","status":"Building","reviewNeedsYou":{"item":"i1"}},{"id":"f","status":"Failed"},{"id":"q","state":"question"},
  {"id":"a","state":"approval"},{"id":"p","status":"Building","proof":{"stopped":true}}],

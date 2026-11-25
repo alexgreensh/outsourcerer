@@ -1,0 +1,3 @@
+sha=a492df7e38d4b5fa01382b85a922b1f81d0df0bc
+rc=1
+All in-lane fixes done and tested; conformance hit my 580 s cap (exit 124), so rc=1. See reports/osrc-int-fix-a.md.

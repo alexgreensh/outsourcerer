@@ -67,7 +67,7 @@ def codex_fix:
     elif ((.windows // {}) | length) > 0 then
       row_age as $ra
       | (.windows | to_entries | map({k: .key, label: (.key | wlabel), used: .value.used, renews_at: (.value.renews_at | epoch)})) as $ws
-      | ("Live check failed (\($c.why // "codex app-server unavailable")); showing the last Codex session-log reading. Usage can only have risen since.") as $why
+      | ((if $c.ok != true then "Live check failed (\($c.why // "codex app-server unavailable")); showing" else "The Codex session log is newer than the live check; showing" end) + " the last Codex session-log reading. Usage can only have risen since.") as $why
       | . + from_windows($ws; $why) | . + {note: (.note // $why)} | checked(if $ra != null then $now - $ra else ($c.checked // $now) end)
     else . + {state: "unknown", left: "No reading", note: "Live check failed: \($c.why // "codex app-server is not available")."} | checked($c.checked // $now)
     end;

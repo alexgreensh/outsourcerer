@@ -793,7 +793,7 @@ a.pill svg { width: 13px; height: 13px; }
 
   const grown = new Set();   // bars animate the first time only; a re-render sets the width directly
   function renderMain() {
-    if (A) A.refresh(projects);   // bands, tab title, favicon dot, opt-in notification
+    if (A && !firstPull) A.refresh(projects);   // (the first pull is not "new") bands, tab title, favicon dot, opt-in notification
     const p = projects.find((x) => x.id === current);
     const main = $('main'); if (!p && loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && main.contains(ae) ? { id: ae.id, s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection } : null;

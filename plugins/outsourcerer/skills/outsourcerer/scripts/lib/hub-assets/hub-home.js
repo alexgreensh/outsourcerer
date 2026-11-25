@@ -415,9 +415,9 @@
       const need = waiting + proofStops;   // decisions only; a lane asking is its orchestrator's job
       items.push({ need, hot: need > 0, askers: [], proofStops });
       // Plans: the tightest real reading. No reading, no tile (never a placeholder number).
-      const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)[0];
+      const lim = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n) && !x.l.stale).sort((a, b) => a.n - b.n)[0];
       // Every checked plan on its own line, lowest first; unchecked plans stay in the sidebar only.
-      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n)).sort((a, b) => a.n - b.n)
+      const lims = (ctx.limits || []).map((l) => ({ l, n: parseFloat(String(l.left || '')) })).filter((x) => isFinite(x.n) && !x.l.stale).sort((a, b) => a.n - b.n)
         .concat((ctx.limits || []).filter((l) => !isFinite(parseFloat(String(l.left || ''))) && l.left && ['ok', 'low'].includes(l.state)).map((l) => ({ l, n: NaN, t: l.left })));   // checked plans with no percentage ("Free models", "Pay per use") get a line too
       if (lim) items.push({ v: Math.round(lim.n) + '%', l: 'left on ' + (lim.l.name || lim.l.id), plans: lims, hot: lims.some((x) => x.l.state === 'out' || x.l.state === 'wait') });
       const ul = el('ul', 'glance'); ul.setAttribute('aria-label', 'At a glance'); if (ul.style && ul.style.setProperty) ul.style.setProperty('--cols', String(items.length));

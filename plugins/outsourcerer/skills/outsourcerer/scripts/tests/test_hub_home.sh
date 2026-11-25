@@ -74,7 +74,9 @@ grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" ||
 grep -q "ta.value = f.note" "$DEC" && grep -q "String(opt === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
 grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
-grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
+grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && grep -q "k === 'summaryAt'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
+[ "$(grep -c 'isFinite(x.n) && !x.l.stale' "$JS")" = 2 ] && ok "Home tile never counts a stale reading as free room" || bad "Home tile counts stale readings"
+grep -q "if (A && !firstPull) A.refresh(projects)" "$PAGE" && ok "attention tracker starts at the first real pull" || bad "attention tracker armed by an empty first render"
 grep -q "function keepHover" "$PAGE" && grep -q "target._hb = build" "$PAGE" && ok "an open hover card re-anchors across re-renders" || bad "hover re-anchor missing"
 grep -q "grown.has(p.id)" "$JS" && grep -q "grown.has(p.id)" "$PAGE" && ok "bars animate once, not on every re-render" || bad "bars re-grow on every render"
 grep -Fq "path === '/api/refresh' ? 630000 : 15000" "$PAGE" && grep -q "'Not sent, try again'" "$DEC" \
