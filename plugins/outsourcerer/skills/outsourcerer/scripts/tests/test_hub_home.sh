@@ -279,7 +279,15 @@ echo "=== POST /api/projects/<id>/status ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl"; echo "RESULTS: $pass pass $fail fail"; [ "$fail" -eq 0 ]; exit $?; }
 rm -f "$OSRC_HOME/hub/status/"*.json
 echo '{"name":"Alpha","status":"review","pct":80,"order":1}' > "$OSRC_HOME/hub/projects/alpha.json"
-PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+# A free port BELOW every OS's outgoing-connection range (Linux 32768+, macOS/Windows 49152+): a port
+# from bind(0) is in that range, and under load another connection can take it between a hub's
+# kill and the strict re-bind.
+PORT="$(python3 -c 'import random, socket
+for p in random.sample(range(20000, 30000), 200):
+  s = socket.socket()
+  try: s.bind(("127.0.0.1", p))
+  except OSError: s.close(); continue
+  s.close(); print(p); break')"
 OSRC_HOME="$OSRC_HOME" bash "$SRC" hub serve --port "$PORT" --no-open >"$TMP/serve.log" 2>&1 &
 SRV=$!
 # 30 s headroom for a loaded CI runner; the loop leaves as soon as the URL is out.

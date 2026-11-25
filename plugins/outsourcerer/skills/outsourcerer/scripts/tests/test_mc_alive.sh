@@ -81,7 +81,15 @@ err="$(desk lib osrc_mc_auto_open 2>&1)"
 
 echo "=== an old key, and /reopen ==="
 command -v curl >/dev/null 2>&1 || { echo "SKIP: curl not installed"; echo "RESULT: $pass passed, $fail failed"; [ "$fail" = 0 ]; exit; }
-PORT="$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null)"
+# A free port BELOW every OS's outgoing-connection range (Linux 32768+, macOS/Windows 49152+): a port
+# from bind(0) is in that range, and under load another connection can take it between a hub's
+# kill and the strict re-bind.
+PORT="$(python3 -I -c 'import random, socket
+for p in random.sample(range(20000, 30000), 200):
+  s = socket.socket()
+  try: s.bind(("127.0.0.1", p))
+  except OSError: s.close(); continue
+  s.close(); print(p); break' 2>/dev/null)"
 if [ -z "$PORT" ]; then ok "loopback denied by the sandbox: HTTP checks need a direct host run"; else
 rm -f "$OSRC_HOME/hub/token" "$OSRC_HOME/hub/tab.seen"   # left by the I section
 start_hub() { # [hub serve args]: start on $PORT, set URL/TOK

@@ -222,7 +222,15 @@ if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
   # A random free HIGH port, never the 8788-8798 scan range: a real Mission Control can own
   # 127.0.0.1:8788, and a default `hub serve` would scan into it (and `mc`'s probe would wait
   # on it). OSRC_HUB_PORT covers `mc`'s detached respawn; --port pins the direct serves.
-  HUBPORT="$(python3 -I -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null)"
+  # A free port BELOW every OS's outgoing-connection range (Linux 32768+, macOS/Windows 49152+): a port
+  # from bind(0) is in that range, and under load another connection can take it between a hub's
+  # kill and the strict re-bind.
+  HUBPORT="$(python3 -I -c 'import random, socket
+for p in random.sample(range(20000, 30000), 200):
+  s = socket.socket()
+  try: s.bind(("127.0.0.1", p))
+  except OSError: s.close(); continue
+  s.close(); print(p); break' 2>/dev/null)"
   case "$HUBPORT" in ''|*[!0-9]*) HUBPORT="" ;; esac
 fi
 if [ -n "${HUBPORT:-}" ]; then

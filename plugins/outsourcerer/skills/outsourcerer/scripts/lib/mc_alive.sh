@@ -151,7 +151,9 @@ _osrc_mc_stale_hub() {
   # 8788-8798 scan) can take its place; it usually reclaims the same bookmarked port.
   kill "$pid" 2>/dev/null || return 1
   for i in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+  # After SIGKILL, wait (bounded) until it is gone: the fresh hub binds the same port, and a dying
+  # process still holding it makes a strict --port bind fail.
+  kill -0 "$pid" 2>/dev/null && { kill -9 "$pid" 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done; }
   [ -n "$f" ] && [ -f "$f" ] && [ "$sp" = "$p" ] && [ "$spid" = "$pid" ] && rm -f "$f" 2>/dev/null
   printf '[outsourcerer] restarted Mission Control: the running hub was built from older code\n' >&2
   return 0
