@@ -52,7 +52,9 @@ PROVIDER=devin
 check() {
   local alias="$1" expected="$2" got out rc capture
   capture="$TMP/$alias.model"
-  out="$(DEVIN_CAPTURE="$capture" delegate auto "" -m "$alias" "reply PONG" 2>&1)"
+  # A direct delegate() call is a launch outside route_delegate, so it is spend-gated; consent
+  # here keeps this suite about alias resolution (the refusal is test_devin_launch_gate's job).
+  out="$(OSRC_SPEND_OK=1 DEVIN_CAPTURE="$capture" delegate auto "" -m "$alias" "reply PONG" 2>&1)"
   rc=$?
   got="$(cat "$capture" 2>/dev/null)"
   if [ "$rc" -eq 0 ] && [ "$got" = "$expected" ]; then
