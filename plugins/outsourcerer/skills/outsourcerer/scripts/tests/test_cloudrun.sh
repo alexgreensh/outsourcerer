@@ -373,7 +373,7 @@ out="$(start_cloud t-devin-nook --repo "$WORK" --base main --brief "$BRIEF" --ve
 out="$(start_cloud t-devin-ok --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ $rc -eq 0 ] && grep -q 'devin session started' <<<"$out" \
   && ok "spend: --spend-ok approves THIS devin launch only" || bad "spend: --spend-ok failed (rc=$rc): $out"
-# subscription lanes proceed with a printed note when the gate is absent.
+# An absent spend gate REFUSES the launch (torture-room arch F2): no "launch with a note" path.
 # L7 merged: lib/spend.sh IS loaded in this suite, so simulate its absence for this check.
 out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
   . "'"$SRC"'" >/dev/null 2>&1
@@ -381,8 +381,8 @@ out="$( cd "$WORK" && PATH="$STUB:$PATH" bash -c '
   SCRIPT_PATH="'"$SRC"'"; OSRC_HOME="'"$OSRC_HOME"'"
   _cloudrun_start t-claude-nogate --repo "'"$WORK"'" --base main --brief "'"$BRIEF"'" --vehicle claude
 ' 2>&1 )"; rc=$?
-[ $rc -eq 0 ] && grep -q 'spend gate not loaded' <<<"$out" \
-  && ok "spend: claude subscription lane proceeds with note" || bad "spend: claude no-gate path (rc=$rc): $out"
+[ $rc -ne 0 ] && ! grep -q 'session started' <<<"$out" && grep -q 'spend gate refused' <<<"$out" \
+  && ok "spend: a missing spend gate refuses the cloud launch" || bad "spend: claude no-gate path launched or did not refuse (rc=$rc): $out"
 
 # ---- finding C: --spend-ok exports OSRC_SPEND_OK, devin always asks, OSRC_SPEND_NEXT set ----
 # gate loaded AND permissive: devin STILL refuses without the flag (gate is additive, not a substitute)

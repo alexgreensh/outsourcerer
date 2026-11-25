@@ -79,7 +79,7 @@ EOF
 # stale allowlist rows hide a removed gate path: every row must still match a real site
 while IFS='|' read -r f fn p _rest; do
   [ -n "$f" ] || continue
-  printf '%s\n' "$found" | grep -qxF -- "$f|$fn|$p" || bad "stale ALLOW row $f|$fn|$p (no such launch site)"
+  grep -qxF -- "$f|$fn|$p" <<<"$found" || bad "stale ALLOW row $f|$fn|$p (no such launch site)"
 done <<EOF
 $ALLOW
 EOF

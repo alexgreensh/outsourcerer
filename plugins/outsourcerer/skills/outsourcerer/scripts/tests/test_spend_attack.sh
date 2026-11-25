@@ -29,7 +29,7 @@ unset TMUX   # never reach a real tmux server from inside a pane; every server h
 # tmux's socket lives in a SHORT dir of its own: a unix socket path is capped (104 bytes on macOS,
 # 108 on Linux), and $TMP under a long TMPDIR (a Mac scratchpad) made every tmux new-session fail,
 # so the two launching session-start cases returned rc 4 on the host, not on the product.
-TSOCK="$(mktemp -d /tmp/osrc-sa.XXXXXX 2>/dev/null || mktemp -d)"
+TSOCK="$(mktemp -d "/tmp/osrc-sa.XXXXXX")" || { echo "FAIL: cannot create a short tmux socket dir"; exit 1; }
 tkill() { env -u TMUX TMUX_TMPDIR="$TSOCK" tmux kill-server >/dev/null 2>&1; }
 trap 'tkill; rm -rf "$TMP" "$TSOCK"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
