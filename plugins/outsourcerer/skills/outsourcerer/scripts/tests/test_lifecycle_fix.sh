@@ -221,6 +221,7 @@ SH
   _session_launch_liveness_check() { return 0; }
   _heartbeat_start() { return 0; }
   _managed_endpoint_live() { return 0; }
+  OSRC_SPEND_OK=1   # this case tests bookkeeping; the relaunch is spend-gated (tests/test_spend_attack.sh)
   _session_relaunch_effort codex sol high >/dev/null 2>&1 || exit 1
   latest="$(jq -rs --arg id "$SESSION_NAME" '[.[] | select(.session_id==$id)] | sort_by(.ts) | last' "$OSRC_SESSION_REGISTRY")"
   [ "$(printf '%s' "$latest" | jq -r '.event')" = start ] || exit 1
