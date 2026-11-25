@@ -142,7 +142,7 @@ if command -v original-awk >/dev/null 2>&1; then
 fi
 # bash 3.2: the export's bare `local _OSRC_HUB_CC_ROWS` leaves it set and empty; that is not a cache.
 _OSRC_HUB_CC_ROWS="" lib _osrc_hub_cc_rows | rows_ok && ok "an empty, set _OSRC_HUB_CC_ROWS (bash 3.2 local) is not taken as the cache" || no "bash 3.2 cache: empty rows"
-_OSRC_HUB_CC_ROWS="x|y" _OSRC_HUB_CC_ROWS_SET=1 lib _osrc_hub_cc_rows | grep -qx 'x|y' && ok "the export's computed rows are reused" || no "cache not reused"
+[ "$(_OSRC_HUB_CC_ROWS="x|y" _OSRC_HUB_CC_ROWS_SET=1 lib _osrc_hub_cc_rows)" = 'x|y' ] && ok "the export's computed rows are reused" || no "cache not reused"
 # A crashed-then-resumed session leaves its old file behind: the live row wins.
 ( exit 0 ) & dead=$!; wait "$dead"
 printf '{"pid":%s,"sessionId":"s-res","cwd":"/nowhere","status":"busy","statusUpdatedAt":%s}\n' "$dead" "${NOW}000" > "$OSRC_CLAUDE_SESSIONS_DIR/0.json"

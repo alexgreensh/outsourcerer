@@ -184,7 +184,27 @@ in `hub-attn.js` and five rules in `hub-mc3.css`.
 
 ### Tests (Linux, bash 5, as root; each `nice bash <suite>` from `tests/`)
 
-RESULTS_PLACEHOLDER
+| suite | rc | result |
+|---|---|---|
+| `test_hub_truth.sh` | 0 | 29 pass. With this round's lib changes stashed (base code, new test): 16 pass, 13 fail, which are exactly the new regression checks |
+| `test_hub_attn.sh` (new, registered in `conformance.sh`) | 0 | 42 pass (34 of them from `hub_attn_dom.js` in node). With the base `hub-decide.js`, the merged-card id check fails (`dec-D1, dec-D1`) |
+| `test_hub.sh` | 0 | 138 pass |
+| `test_hub_home.sh` | 0 | 90 pass |
+| `test_hub_mc2.sh` | 0 | |
+| `test_hub_mc3.sh` | 0 | 70 pass |
+| `test_hub_mc4.sh` | 0 | 47 pass |
+| `test_hub_csp.sh` | 0 | 3 pass |
+| `test_mc_alive.sh` | 0 | 58 pass |
+| `test_release_0175.sh` | 0 | 83 pass. It first failed with "hub.html grew to 999 (> 998)"; I folded one line and the page is now 998 |
+| `test_hub_project_state.sh`, `test_hub_plan_refresh.sh` | 0 | |
+| `test_proof.sh` | 0 | 160 pass |
+| `test_no_pipe_grep_q.sh` | 0 | It flagged one `| grep -q` in the new truth test (found by conformance); fixed and re-run |
+
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`, run once: **rc 1, 242 passed,
+7 failed, 1 skipped (live probes)**. One of the 7 was mine (`test_no_pipe_grep_q`, fixed above and re-run
+alone, rc 0). The other six (`test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`,
+`test_parity_insource_refresh`, `test_conformance_suite_timeout`, `test_sealed_fixes`) are all on round 1's
+list of failures that were already on the base branch. I did not re-run them on the base this round.
 
 ### Needs from other lanes
 
