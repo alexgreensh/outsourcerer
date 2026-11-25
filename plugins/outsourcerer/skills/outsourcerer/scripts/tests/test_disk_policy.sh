@@ -286,7 +286,7 @@ if command -v tmux >/dev/null 2>&1; then
   osrc "$TH" '_osrc_disk_pause_reg "$OSRC_HOME/disk-policy/procs/tmux-wrap"' >/dev/null
   [ -f "$TH/disk-policy/paused/tmux-wrap" ] && ok "wrapper lane paused" || bad "wrapper lane not paused"
   osrc "$TH" '_osrc_disk_resume_rec "$OSRC_HOME/disk-policy/paused/tmux-wrap"' >/dev/null; sleep 1
-  tmux capture-pane -p -t wrap | grep -q 'fg' && bad "typed fg into a foreground lane" || ok "nothing typed into a foreground lane"
+  grep -q 'fg' <<<"$(tmux capture-pane -p -t wrap)" && bad "typed fg into a foreground lane" || ok "nothing typed into a foreground lane"
   # A session that predates the registration (the user's own) is never bound.
   tmux new-session -d -s user-own "sleep 600"
   printf 'tmux|user-own|%s|||\n' "$(( $(date +%s) + 100 ))" > "$TH/disk-policy/procs/tmux-user-own"

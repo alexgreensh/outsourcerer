@@ -263,7 +263,8 @@ _osrc_disk_register_caller() { # <calling function>
     session)
       [ "${OSRC_PLATFORM:-}" != windows ] && have tmux || return 0
       case "${SESSION_NAME:-}" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
-      tmux has-session -t "=$SESSION_NAME" 2>/dev/null && return 0   # live session: keep its record
+      local k n t c i   # a record bound to a still-live pane is a running session: keep it
+      IFS='|' read -r k n t c i < "$d/tmux-$SESSION_NAME" 2>/dev/null && _osrc_disk_same "$c" "$i" && return 0
       _mkdir_private "$d" >/dev/null 2>&1 && printf 'tmux|%s|%s|||%s\n' "$SESSION_NAME" "$(date +%s)" "$$" > "$d/tmux-$SESSION_NAME" 2>/dev/null ;;
   esac
   return 0
