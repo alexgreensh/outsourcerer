@@ -184,3 +184,85 @@ was not re-run after the session fix.
   and `branch -D` by name; the manual path deserves the same lane-pinned deletion.
 - **auto-detach path (`outsourcerer.sh` ~10784)**: call `_osrc_disk_register_caller session` with
   `SESSION_NAME="$_ad_sess"` before `tmux new-session` so those panes are paused too.
+
+## Round 3 (branch `cloud/osrc-l2-r3`, base `789c6c1`)
+
+Fixes for the round 2 review: three P1s, P2 4, 5, 7, 8. For P2 6 and 9 the reclaim code was cut
+back, not extended. Paths are under `scripts/`.
+
+### Fixes by finding
+
+| Finding | Fix |
+|---|---|
+| P1-1 env bypasses every floor | `_osrc_disk_conf` reads only `disk-policy/settings`; no environment variable moves a floor (`OSRC_DISK_MIN_GB`, `_CRITICAL_GB`, `_POLICY_OFF`, `_RECLAIM_MAX` from env are ignored). The critical floor stays when launch blocking is off (`MIN_GB=0` or `POLICY_OFF=1`). The only per-command override is still the one-use `OSRC_DISK_OK` code, never below critical, logged on every use. |
+| P1-2 override dead for `bg`/`fanout` | (a) The bg route preflight child (`OSRC_PREFLIGHT=1`) no longer runs the gate: it consumed and bound the code in a throwaway process. `_bg_launch` gates right after it. (b) When a code admits a `_bg_launch`, the taker writes `disk-policy/admit.<random>` (15 min) and exports `_OSRC_DISK_ADMIT`. The detached job's own gate consumes it with `rm` (one taker), logs `job-admit` and unsets it. The gate scrubs both variables above the floor too, so no delegate inherits them. |
+| P1-3 watchdog kills a paused job on resume | `lib/watchdog.sh` (4 lines): each poll reads `_osrc_disk_paused_secs` and shifts `t0`, `qt0`, `ni0`, `ni_start` and `last_change` by any growth, so the no-init, stall and hard-timeout clocks count only active time. Resume banks the pause into `disk-paused-secs` and drops the record's `since` line before any SIGCONT, so a poll never counts a pause twice or misses it. |
+| P2-4 second `session start` unregisters a live session | `session)` registration returns early when the existing record is bound to a pane that is still the same process. (The suggested `tmux has-session` broke `test_session_capabilities`, which forbids any tmux call before the capability probe; this check makes no tmux call.) |
+| Found while fixing P1-2: monitor held a caller's pipe | With the preflight no longer spawning the monitor, the first monitor came from inside `id=$(_bg_launch ...)` and inherited bash's saved copies of the capture pipe at fd 10/11, so `plan run` never saw EOF (`test_factory_e2e` hung). The monitor child now closes every fd 3-31, not just 3-9. The fd test also holds fd 12. |
+| P2-5 `fg` typed into a live agent | Shell-name list dropped. `fg` is typed only when `ps -o tpgid=` of the pane process equals its own pgid and no paused pid shares that group: a job-control prompt. A lane still in the foreground gets `stty` and SIGWINCH only. Anything else is never typed into, stays parked, and raises one `disk-parked-<session>` event. |
+| P2-6 scratch reclaim dead | Deleted: the scratch loop, `tmp` in the report, the doc sentence, the test cases. |
+| P2-7 group-led jobs skip descendants | The descendant walk always runs. |
+| P2-8 stale-lock takeover race | A taker never moves or removes the lock directory. It claims a stale owner by renaming `owner`; a loser of that rename returns. Of two late claimants, the last writer owns the lock and the other exits at its next ownership check. |
+| P2-9 reclaim never fires | `_osrc_disk_protected_inside` deleted. An empty `git status --porcelain --ignored --untracked-files=all` at the proven commit already shows every file is tracked and preserved; ignored `.env`/`node_modules` still keep the worktree. |
+| P3 stale hold | `disk resume` writes `hold` only when it resumed something. |
+| P3 stranded group | Resume SIGCONTs the group of a dead group leader. |
+| P3 registration litter | `_osrc_disk_register_caller` returns under `POLICY_OFF=1`. |
+| P3 weak tests | The report assertion needs both lines; paused seconds must be at least 1, and banked seconds too. `/dev/full` still skips on macOS. |
+| P3 lane markers | `osrc-l2-r2.READY`/`.RESULT` deleted. |
+| P3 docs ahead of code | `references/jobs-and-safety.md` rewritten to match (settings-only floors, job admit, watchdog shift, pane rules, reclaim scope). |
+| P3 inert trap | `INT` dropped from the monitor trap. |
+
+Also trimmed: the tick no longer re-measures and resumes right after a reclaim (the next tick does);
+small helpers compacted. `test_lifecycle_fix.sh` and `test_cleanup_manifest.sh` set floors through the
+settings file instead of the env bypass they relied on. `outsourcerer.sh` shrank by 2 comment lines.
+
+**Line counts vs round 2** (`git diff --numstat 789c6c1`): code (`lib/` + `outsourcerer.sh`)
++123 / -138, net **-15**. Docs +1. Tests +67 (new regressions). Lane markers -6 / +6. Report: this section.
+So code went down; the whole diff did not, because of the required regression tests and this report.
+
+### Tests (Linux, bash 5.2, tmux, root)
+
+| Command | Result |
+|---|---|
+| `nice -n 19 bash tests/test_disk_policy.sh` | `RESULTS: 89 passed, 0 failed`, exit 0 |
+| same suite file run against the base `789c6c1` code (temporary worktree) | `RESULTS: 75 passed, 14 failed`. Failing: env floors (3 floor cases, 2 gate cases), real `bg` override (2), own-group descendant, real `_supervise` killed on resume (`wedged no-init ... after 15s`), repeat session start, `fg` typed into a foreground lane, reclaim on a repo tracking `.env.example`/`state/` (3). The P2-8 lock case passes on base too (the race is not deterministic). |
+| `nice -n 19 bash tests/test_cleanup_manifest.sh` | `RESULTS: 66 pass 0 fail`, exit 0 |
+| `nice -n 19 bash tests/test_lifecycle_fix.sh` | `RESULT: 16 passed, 0 failed`, exit 0 |
+| `nice -n 19 bash tests/test_noinit_cap.sh` | `passed=6 failed=0`, exit 0 |
+| `nice -n 19 bash tests/test_supervise.sh` | `RESULT: 99 passed, 0 failed`, exit 0 |
+| `nice -n 19 bash tests/test_nowrite_watchdog.sh` | `22 passed, 0 failed`, exit 0 |
+| `nice -n 19 bash tests/test_session_capabilities.sh` | `RESULT: 12 passed, 0 failed`, exit 0 |
+| `nice -n 19 bash tests/test_factory_e2e.sh` | `10 passed, 0 failed`, exit 0 (hung before the fd fix; base passes) |
+| `bash tests/test_no_pipe_grep_q.sh` | pass (it caught a `| grep -q` I had added to the test; fixed) |
+| `nice -n 19 bash tests/conformance.sh` (first run, before the last three fixes) | exit 1, `239 passed, 9 failed, 1 skipped`: `test_session_capabilities`, `test_no_pipe_grep_q`, `test_factory_e2e` were mine and are fixed above |
+| `nice -n 19 bash tests/conformance.sh` (final code, HEAD before this report) | exit 1, `241 passed, 7 failed, 1 skipped` |
+
+The 7 failures in the final conformance run: `test_harness_isolation`, `test_vocab_hygiene`,
+`test_supervise_pgroup_kill`, `test_parity_insource_refresh`, `test_conformance_suite_timeout` and
+`test_sealed_fixes` are the six round 2 recorded as failing identically on base in this container
+(it runs as root, so permission fixtures do not fail, and some tools are missing). `test_vocab_hygiene`'s two
+failures are its root-permission write cases. `test_release_0175` passes alone
+(`RESULT: 83 passed, 0 failed`, exit 0); it failed only under the conformance run's load, as round 2 also saw.
+
+New regression tests, one per P1: env zero floors cannot pass the gate or move a floor (P1-1); a
+real `outsourcerer bg` with a fake `codex` on PATH is refused, then run with the printed code, and the
+detached job must finish `done` with a `job-admit` log line and no token left (P1-2); a real
+`_supervise` (no-init 6 s, hard 12 s) is paused for 14 s, resumed, and must still be `running` 3 s
+later, then still end `wedged`/`timeout` on active time (P1-3).
+
+### Unproven
+
+- macOS bash 3.2 and Git Bash not executed here. The fd close loop uses `eval "exec $i>&-"`. New code uses `ps -o tpgid=` (BSD and procps both
+  have it) and `od`; no bash 4 features. The P2-5 test's child wait uses GNU `ps --ppid` with a
+  `pgrep -P` fallback.
+- Pane rules checked with a `bash -i` job-control pane and a non-exec `bash -c` wrapper pane, not real
+  agent TUIs or zsh/fish.
+- The P2-8 race is reasoned, not reproduced: the test only shows a late claimant leaves one owner.
+- `fanout` admission rides the same `_bg_launch` path as `bg` but has no test of its own.
+
+### Needs from other lanes
+
+- Watchdog lane: `lib/watchdog.sh` now has a 4-line clock shift in the `_supervise` poll loop
+  (after `now=$(date +%s)`). Keep it if you rewrite that loop.
+- The round 2 asks stand: `_osrc_cleanup_apply` repo-wide prune (PR #85 owner) and registering
+  auto-detached tmux sessions (`outsourcerer.sh` auto-detach path).

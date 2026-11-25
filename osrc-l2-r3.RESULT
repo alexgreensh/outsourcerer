@@ -1,0 +1,3 @@
+sha=789c6c10021294f61a151d916c75ef0ee868c873
+rc=0
+Disk policy round 3: floors from the settings file only (critical kept), OSRC_DISK_OK reaches bg/fanout jobs via a one-use admit token, watchdog clocks skip disk-paused time, fg typed only at a job-control prompt, descendants always paused, safer stale-lock takeover, scratch reclaim and the name scan deleted, monitor closes inherited fds 3-31. test_disk_policy 89/0 (14 fail on base); conformance 241/7/1, the 7 are known container/base failures. Code lines net -15.
