@@ -317,7 +317,19 @@ Run from `plugins/outsourcerer/skills/outsourcerer/scripts`, one at a time, unde
 | `test_no_pipe_grep_q`, `test_windows_portability`, `test_noglob_splitting`, `test_tests_set_home`, `test_no_dead_pid_scan` | each rc 0 |
 | `python3 tests/test_supervise_tick.py`, `python3 tests/test_supervise_signal.py` | each rc 0 |
 
-CONFORMANCE_PLACEHOLDER
+### Conformance (round 3)
+
+`OSRC_CONFORMANCE_JOBS=2 nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`
+from the repo root: **rc 1**, 241 passed, 7 failed, 1 skipped (live lanes).
+
+- `test_watchsvc` and `test_stop_guard` are green inside the gate.
+- Six failing suites are the ones round 2 recorded as failing the same way on the untouched base
+  in this container (uid 0): `test_harness_isolation`, `test_vocab_hygiene`,
+  `test_supervise_pgroup_kill`, `test_parity_insource_refresh`, `test_conformance_suite_timeout`,
+  `test_sealed_fixes`. I did not rerun them on the base this round; that comparison is round 2's.
+- `test_release_0175` failed inside the gate (three Mission Control hub restart checks; no file of
+  this lane touches the hub). Run alone it passes: rc 0 on round 3 and rc 0 on round 2. I count it
+  as a failure under parallel load, not a regression, but it is unproven which.
 
 ### Unproven (round 3)
 

@@ -1,0 +1,7 @@
+sha=beacb4b16872e5966f02b8bc3a436758e6121e50
+rc=0
+Round 3 fixes every P0-P2 and P3 of the round-2 review in lib/watchsvc.sh, lib/supervise.sh and lib/stopguard.sh, each with a regression test (tests/test_watchsvc.sh: 74 pass; against the round-2 code 26 fail).
+The stop guard never starts a watcher; it tells the agent to ask the user to run `watcher install`. Waking needs tmux or OSRC_WATCH_DELIVER_CMD; otherwise the guard keeps asking for supervise. The tmux wake has an end-to-end fake-pane test.
+Removed: resume channel, `watcher tick`, --transient, OSRC_WATCH_TMUX.
+Related suites all rc 0. Full conformance: rc 1 (241 passed, 7 failed): six suites round 2 recorded as failing on the base in this root container, plus test_release_0175, which passes alone on both round 2 and round 3.
+rc=0 means the lane's work is complete; it is not the conformance exit code. Unproven: launchd, Windows Git Bash, a live tmux pane. See reports/osrc-l1-watchdog.md, ## Round 3.
