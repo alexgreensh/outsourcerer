@@ -13,7 +13,7 @@ TABLE="$HERE/fixtures/approver-table.tsv"
 TMP="$(mktemp -d "${TMPDIR%/}/.test-approver.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; ok(){ pass=$((pass+1)); echo "PASS: ${1:-line ${BASH_LINENO[0]}}"; }; bad(){ echo "FAIL: $1"; fail=$((fail+1)); }
 export HOME="$TMP/fakehome"
-mkdir -p "$HOME"
+mkdir -p "$HOME/.gemini/config/plugins/token-optimizer"; : > "$HOME/.gemini/config/plugins/token-optimizer/bash_compress.py"   # {TOC} rows
 export OSRC_HOME="$TMP/osrc-home"; mkdir -p "$OSRC_HOME"
 ROOT="$TMP/repo"; OTHER="$TMP/other-wt"
 mkdir -p "$ROOT/src" "$ROOT/tests" "$OTHER/src"; git -C "$ROOT" init -q; git -C "$OTHER" init -q
@@ -39,7 +39,7 @@ while IFS= read -r line; do
   case "$want" in ''|'#'*) continue ;; esac
   rows=$((rows+1))
   cmd="${cmd//\{HOMEPARENT\}/$HOMEPARENT}"; cmd="${cmd//\{TMPDIR\}/$TMPDIR_ROW}"
-  cmd="${cmd//\{ROOT\}/$ROOT}"; cmd="${cmd//\{OTHER\}/$OTHER}"
+  cmd="${cmd//\{ROOT\}/$ROOT}"; cmd="${cmd//\{OTHER\}/$OTHER}"; cmd="${cmd//\{TOC\}/$HOME/.gemini/config/plugins/token-optimizer/bash_compress.py}"
   cmd="${cmd//⏎/$NL}"
   path="${path//\{ROOT\}/$ROOT}"; path="${path//\{OTHER\}/$OTHER}"
   got="$(printf '%s' "$cmd" | (cd "$ROOT" && python3 -I "$CLS" --root "$ROOT" --kind "$kind" --path "$path"))"

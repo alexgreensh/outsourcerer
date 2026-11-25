@@ -308,6 +308,17 @@ hold	shell		nice rm -rf x
 hold	shell		nice -n 19 frobnicate x
 hold	shell		nice
 hold	shell		nice -n cat a.txt
+# ---- Token Optimizer's compressor wraps each agy command: judge the inner command ({TOC} = its install) ----
+approve	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC} git status -sb
+approve	shell		/usr/bin/python3 -E -s {TOC} cat src/a.txt
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC} rm -rf x
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC} git push
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC} bash tests/test_x.sh
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC} cd src
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {TOC}
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 {TOC} git status
+hold	shell		{ROOT}/bin/python3 -E -s {TOC} git status
+hold	shell		/opt/homebrew/opt/python@3.15/bin/python3.15 -E -s {ROOT}/bash_compress.py git status
 hold	shell		LD_PRELOAD=/tmp/evil.so cat a.txt
 hold	shell		LD_LIBRARY_PATH=/tmp/evil cat a.txt
 hold	shell		PYTHONPATH=/tmp/evil python3 -c "print(1)"

@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 
@@ -652,6 +653,36 @@ for _n in ("kill", "killall", "pkill", "shutdown", "reboot", "halt", "launchctl"
     NOT_SAFE[_n] = "not in the safe set (process control, interactive, unbounded, or runs another command)"
 
 
+def wrapped(inner, what, prev_op, cwd, roots):
+    """A wrapper that runs one inner command without a shell: judge the inner command on its own."""
+    rule, cur = classify_segment(inner, prev_op, cwd, roots)
+    if rule.startswith("test/build"):
+        raise Hold("test and build runs wait for a person in this version")
+    if rule == "cd":
+        raise Hold("cd under %s (cd cannot run inside another program)" % what)
+    return rule, cur   # the inner command's own rule: chain checks see what it really does
+
+
+# Token Optimizer's Antigravity bridge wraps every agy command as
+# `<python3> -E -s ~/.gemini/config/plugins/token-optimizer/bash_compress.py <cmd>`, which runs <cmd>
+# with no shell and only compresses its output. Only that exact install counts: a regular file owned
+# by this user, not a link, not group/world writable, run by a system or Homebrew python.
+_COMPRESSOR = os.path.join(HOME, ".gemini/config/plugins/token-optimizer/bash_compress.py")
+_SYSTEM_PY = re.compile(r"/(?:opt/homebrew|usr/local|usr)/(?:opt/python@3\.\d+/)?bin/python3(?:\.\d+)?")
+
+
+def to_compressor_inner(name, rest):
+    if not _SYSTEM_PY.fullmatch(name) or rest[:3] != ["-E", "-s", _COMPRESSOR] or len(rest) < 4:
+        return None
+    try:
+        st = os.lstat(_COMPRESSOR)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o022:
+        return None
+    return rest[3:]
+
+
 def classify_segment(tokens, prev_op, cwd, roots):
     for t in tokens:
         check_tilde(t)
@@ -685,12 +716,10 @@ def classify_segment(tokens, prev_op, cwd, roots):
             break
         if i >= len(rest):
             raise Hold("bare nice")
-        rule, cur = classify_segment(rest[i:], prev_op, cwd, roots)
-        if rule.startswith("test/build"):
-            raise Hold("test and build runs wait for a person in this version")
-        if rule == "cd":
-            raise Hold("nice cd (cd cannot run under nice)")
-        return rule, cur   # the inner command's own rule: chain checks see what it really does
+        return wrapped(rest[i:], "nice", prev_op, cwd, roots)
+    inner = to_compressor_inner(name, rest)
+    if inner is not None:
+        return wrapped(inner, "the Token Optimizer compressor", prev_op, cwd, roots)
     if "/" in name:
         raise Hold("runs a program by path: " + name)
     if prev_op in ("|", "|&") and name in INTERPRETERS:
