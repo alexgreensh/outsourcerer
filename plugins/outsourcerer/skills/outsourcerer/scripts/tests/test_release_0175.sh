@@ -254,7 +254,8 @@ if [ -n "${HUBPORT:-}" ]; then
   wait "$HP1" 2>/dev/null || true
 
   # Script path differs: a copied tree's server serves this OSRC_HOME; same version, other path.
-  kill "$(jq -r .pid "$OSRC_HOME/hub/serve.json")" 2>/dev/null; sleep 0.5
+  # The old-tree server binds the same strict port: wait (bounded) until the hub holding it is dead.
+  pid2="$(jq -r .pid "$OSRC_HOME/hub/serve.json")"; kill "$pid2" 2>/dev/null; wait_dead "$pid2" || bad "hub $pid2 did not stop on TERM"
   rm -f "$OSRC_HOME/hub/serve.json"
   cp -R "$S" "$T/oldtree" 2>/dev/null
   OSRC_HUB_NO_OPEN=1 bash "$T/oldtree/outsourcerer.sh" hub serve --port "$HUBPORT" --no-open >"$T/mc-serve-old.log" 2>&1 &
