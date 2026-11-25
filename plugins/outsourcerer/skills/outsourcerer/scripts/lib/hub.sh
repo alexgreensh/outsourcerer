@@ -59,22 +59,10 @@ _osrc_hub_review_map() {
 # _osrc_hub_review_verdict <lane> <map-json> -> verdict or empty
 _osrc_hub_review_verdict() { jq -r --arg l "$1" '.[$l] // ""' <<<"$2" 2>/dev/null; }
 
-# _osrc_hub_done_state <id> -> "done" | "" (uses osrc_done_state when defined). Under a fast export,
-# check:/pr: contracts serve the last cached verdict inline and queue the real probe for the deferred
-# worker: the check-lock mutex spin and the spawned eval runs must never sit on the export's clock.
+# _osrc_hub_done_state <id> -> "done" | "" (uses osrc_done_state when defined). Inside an export the
+# memo answers check:/pr: contracts from their last verdict (lib/hub-perf.sh): no probe on the clock.
 _osrc_hub_done_state() {
   type osrc_done_state >/dev/null 2>&1 || return 0
-  local spec
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -n "${_OSRC_HUB_MEMO:-}" ] \
-      && [ -f "$(_osrc_done_dir)/$1.json" ] && type _osrc_done_cache_peek >/dev/null 2>&1; then
-    spec="$(jq -r '.spec // empty' "$(_osrc_done_dir)/$1.json" 2>/dev/null)"
-    case "$spec" in
-      check:*|pr:*)
-        [ "$(_osrc_done_cache_peek "$1" 2>/dev/null)" = done ] && printf 'done'
-        printf '%s\n' "$1" >> "$OSRC_HOME/hub/cache/scr/.dwant.$$" 2>/dev/null
-        return 0 ;;
-    esac
-  fi
   case "$(osrc_done_state "$1" 2>/dev/null)" in done*) printf 'done' ;; esac
   return 0
 }

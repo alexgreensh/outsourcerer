@@ -25,7 +25,7 @@ _osrc_hub_memo_begin() {
     kill -0 "$op" 2>/dev/null || rm -rf "$old" 2>/dev/null
   done
   rm -rf "$d" 2>/dev/null; mkdir -m 700 "$d" 2>/dev/null || return 0
-  mkdir -p "$d/reg" "$d/scr" "$d/own" 2>/dev/null
+  mkdir -p "$d/reg" "$d/scr" "$d/own" "$d/done" "$OSRC_HOME/hub/cache/scr" 2>/dev/null
   # Export start, backdated 1 s so an input written in the same second (1 s mtime filesystems) still
   # counts as newer. Cached docs carry this mtime (see _osrc_hub_cache_put).
   local s1; s1=$(( $(date +%s) - 1 ))
@@ -46,7 +46,7 @@ _osrc_hub_memo_begin() {
   fi
   tmux list-sessions -F '#{session_name} #{session_created} #{window_activity}' > "$d/tmux" 2>/dev/null || rm -f "$d/tmux"   # no file = list failed: callers fall back to has-session, never "zero sessions"
   type _osrc_hub_fast_memo_init >/dev/null 2>&1 && _osrc_hub_fast_memo_init "$d"
-  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event; do
+  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event osrc_done_state; do
     type "$fn" >/dev/null 2>&1 || continue
     _OSRC_HUB_MEMO_SAVED="$_OSRC_HUB_MEMO_SAVED $fn"
     eval "$(declare -f "$fn" | sed "1s/^$fn /_osrc_hub_raw$fn /")"
@@ -77,6 +77,23 @@ _osrc_hub_memo_begin() {
       local f="$_OSRC_HUB_MEMO/own/$1"
       [ -f "$f" ] || _osrc_hub_raw_owned_live_state "$1" > "$f" 2>/dev/null
       cat "$f"
+    } ;; esac
+  # Done contracts, once per lane. check:/pr: answer from their last verdict (the probe clones or asks
+  # the network) and are queued for the export's detached worker (_osrc_hub_scr_flush_wanted), which
+  # refreshes the verdict for the next export. A synchronous probe here cost 3-6 s per cloud lane.
+  case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_done_state "*)
+    osrc_done_state() {
+      local m="$_OSRC_HUB_MEMO/done/${1:-}" v spec
+      _osrc_hub_slug_ok "${1:-}" || { _osrc_hub_rawosrc_done_state "$@"; return; }
+      [ -f "$m" ] && { cat "$m"; return 0; }
+      spec=""; [ -f "$(_osrc_done_dir)/$1.json" ] && spec="$(jq -r '.spec // empty' "$(_osrc_done_dir)/$1.json" 2>/dev/null)"
+      case "$spec" in
+        check:*|pr:*)
+          v="$(_osrc_done_cache_peek "$1" 2>/dev/null)"; v="${v:-not-done}"
+          printf '%s\n' "$1" >> "$OSRC_HOME/hub/cache/scr/.dwant.$$" 2>/dev/null ;;
+        *) v="$(_osrc_hub_rawosrc_done_state "$1")" ;;
+      esac
+      printf '%s\n' "$v" > "$m" 2>/dev/null; printf '%s\n' "$v"
     } ;; esac
   case " $_OSRC_HUB_MEMO_SAVED " in *" _session_registry_last_event "*)
     _session_registry_last_event() {
@@ -125,7 +142,7 @@ _osrc_hub_lane_state() {
   else
     return 1
   fi
-  local dsf=""; if type _osrc_hub_done_state_fast >/dev/null 2>&1; then dsf="$(_osrc_hub_done_state_fast "$id")"; else dsf="$(_osrc_hub_done_state "$id")"; fi
+  local dsf; dsf="$(_osrc_hub_done_state "$id")"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lstate.$id.dsf"
   [ "$dsf" = done ] && st=done
   case "$c" in ''|*[!0-9]*) c=0 ;; esac; case "$a" in ''|*[!0-9]*) a=0 ;; esac
@@ -264,7 +281,8 @@ EOF
     # one refresher at a time; a lock older than 5 min is a crashed refresher
     [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
     if mkdir "$lk" 2>/dev/null; then
-      ( _osrc_hub_limits_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+      ( type _osrc_hub_close_fds >/dev/null 2>&1 && _osrc_hub_close_fds
+        _osrc_hub_limits_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
     fi
   fi
   jq -c . "$f" 2>/dev/null || printf '[]'

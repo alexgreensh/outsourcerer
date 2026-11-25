@@ -163,7 +163,7 @@ _osrc_hub_history_lanes() {
       fi
     fi
     local ds=""
-    if type _osrc_hub_done_state_fast >/dev/null 2>&1; then ds="$(_osrc_hub_done_state_fast "$id")"; elif type _osrc_hub_done_state >/dev/null 2>&1; then ds="$(_osrc_hub_done_state "$id" 2>/dev/null)"; fi
+    type _osrc_hub_done_state >/dev/null 2>&1 && ds="$(_osrc_hub_done_state "$id" 2>/dev/null)"
     [ "$ds" = done ] && [ "$out" != running ] && out=finished
     local nm ml
     nm="$(_osrc_hub_lane_name "$id" 2>/dev/null)"; [ -n "$nm" ] || nm="Lane"

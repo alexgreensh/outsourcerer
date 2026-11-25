@@ -81,17 +81,6 @@ _osrc_hub_remote_state_fast() {
   osrc_remote_state "$id" 2>/dev/null
 }
 
-_osrc_hub_done_state_fast() {
-  local id="$1"
-  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -d "$_OSRC_HUB_MEMO/dstate" ] && _osrc_hub_slug_ok "$id"; then
-    local f="$_OSRC_HUB_MEMO/dstate/$id"
-    [ -f "$f" ] || _osrc_hub_done_state "$id" > "$f"
-    cat "$f"
-    return 0
-  fi
-  _osrc_hub_done_state "$id"
-}
-
 _osrc_hub_hash_key() { printf '%s' "$1" | cksum | awk '{print $1 "_" $2}'; }
 
 _osrc_hub_repo_label_fast() {
@@ -330,7 +319,8 @@ _osrc_hub_scr_refresh_bg() { # <id> <activity>
     [ -z "$(find "$pf.lock" -maxdepth 0 -mmin -1 2>/dev/null)" ] && rmdir "$pf.lock" 2>/dev/null
   fi
   mkdir "$pf.lock" 2>/dev/null || return 1
-  ( local out dep
+  ( _osrc_hub_close_fds
+    local out dep
     out="$(_osrc_hub_raw_sv_target_screen "$id" 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
       dep="$(_osrc_hub_scr_dep_epoch "$id")"; case "$dep" in ''|*[!0-9]*) dep=0 ;; esac
@@ -383,10 +373,23 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
 # _osrc_hub_scr_flush_wanted: run once at export end (still inside the memo, so the raw reader is
 # defined). Re-reads every queued lane in ONE detached worker: the export never pays the pane reads
 # and the next export serves fresh screens.
+# _osrc_hub_close_fds: first call of a detached worker. Bash keeps a saved copy of a redirected fd
+# (`fn > file`, single-flight's `"$@" > out`) on a high fd; a worker forked inside inherits it and holds
+# the caller's `$(...)` or the server's pipe open until it exits, so the export waited for the worker.
+_osrc_hub_close_fds() {
+  local f n
+  for f in /dev/fd/*; do
+    n="${f##*/}"; case "$n" in ''|*[!0-9]*|0|1|2|255) continue ;; esac
+    eval "exec $n>&-" 2>/dev/null
+  done
+  return 0
+}
+
 _osrc_hub_scr_flush_wanted() {
   local wf="$OSRC_HOME/hub/cache/scr/.wanted.$$" dwf="$OSRC_HOME/hub/cache/scr/.dwant.$$"
   [ -s "$wf" ] || [ -s "$dwf" ] || return 0
-  ( local id act pf out dep
+  ( _osrc_hub_close_fds
+    local id act pf out dep
     while read -r id act; do
       [ -n "$id" ] || continue
       _osrc_hub_slug_ok "$id" || continue
@@ -401,9 +404,9 @@ _osrc_hub_scr_flush_wanted() {
       fi
       rmdir "$pf.lock" 2>/dev/null
     done < "$wf" 2>/dev/null
-    # Queued done-contract probes: one osrc_done_state each spawns/refreshes its own verdict cache.
+    # Queued done-contract probes (lib/hub-perf.sh): the real reader spawns/refreshes each verdict cache.
     while read -r id; do
-      [ -n "$id" ] && osrc_done_state "$id" >/dev/null 2>&1
+      [ -n "$id" ] && _osrc_hub_rawosrc_done_state "$id" >/dev/null 2>&1
     done < "$dwf" 2>/dev/null
     rm -f "$wf" "$dwf" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
@@ -483,7 +486,7 @@ EOF
     fi
     st="$(_osrc_hub_job_state_fast "$id")"
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes)
-      [ "$(_osrc_hub_done_state_fast "$id")" = done ] && continue
+      [ "$(_osrc_hub_done_state "$id")" = done ] && continue
       return 0 ;;
     esac
   done
