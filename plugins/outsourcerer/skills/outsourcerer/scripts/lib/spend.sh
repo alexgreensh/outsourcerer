@@ -81,11 +81,9 @@ _osrc_devin_free_for_spend() {
   # spelling verbatim (offline, or a bg pin), so the judged id was not the launched one.
   # Routed launches still match: the resolver returns the catalog's exact uid.
   [ -n "$t" ] || return 1
-  if [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ]; then
-    if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
-      # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
-      case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
-    fi
+  if _devin_free_ids_get; then
+    # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
+    case " $_OSRC_DV_FREE_IDS " in *" $t "*) return 0 ;; *) return 1 ;; esac
   fi
   case "$t" in
     swe-2-high|swe-2-flash-high) return 0 ;;
@@ -112,8 +110,9 @@ _devin_catalog_free_ids() {
   [ -n "$_OSRC_DV_FREE_IDS_DONE" ] && { printf '%s' "$_OSRC_DV_FREE_IDS_MEMO"; return 0; }
   local rawf cf mt cmt cids ids
   rawf="$(_devin_catalog_rawf)" || return 1
-  _catalog_load dv >/dev/null 2>&1 || true    # refresh attempt; freshness below decides
-  _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
+  # Only a LIVE (or just-fetched) catalog proves Free. Freshness first: the refresh (which also
+  # jq-parses the flat list) runs only when the cache is stale, so a cache hit is one stat + read.
+  _catalog_fresh dv || { _catalog_load dv >/dev/null 2>&1; _catalog_fresh dv; } || return 1
   [ -f "$rawf" ] || return 1
   cf="$OSRC_HOME/.devin-free-ids"
   # GNU-first order (matches outsourcerer.sh's catalog mtime): on Linux `stat -f` is
@@ -150,6 +149,18 @@ _devin_catalog_free_ids() {
   _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$ids"
   printf '%s' "$ids"
   return 0
+}
+
+# _devin_free_ids_get -> sets _OSRC_DV_FREE_IDS (the exact Free ids) in the CALLER's shell, rc as
+# _devin_catalog_free_ids. Memoized in the caller, an unprovable answer too (DONE=0), so the
+# billing, label and default-model checks of one process share one lookup — call it directly,
+# never through $( ). OSRC_FREE_CATALOG_CHECK=0 is checked first, every time.
+_OSRC_DV_FREE_IDS=""; _OSRC_DV_FREE_IDS_GOT=""
+_devin_free_ids_get() {
+  [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || return 1
+  case "$_OSRC_DV_FREE_IDS_GOT" in 1) return 0 ;; 0) return 1 ;; esac
+  if _OSRC_DV_FREE_IDS="$(_devin_catalog_free_ids 2>/dev/null)"; then _OSRC_DV_FREE_IDS_GOT=1; return 0; fi
+  _OSRC_DV_FREE_IDS=""; _OSRC_DV_FREE_IDS_GOT=0; return 1
 }
 
 # _osrc_rank_free_ids -> tab-separated rank rows for exact catalog Free ids:
@@ -233,7 +244,7 @@ _osrc_pick_best_free() {
 # _route_provider_default_model, osrc_lane_billing dv.
 _devin_default_free_model() {
   local ids rows main swe cand
-  if ids="$(_devin_catalog_free_ids 2>/dev/null)" && [ -n "$ids" ]; then
+  if _devin_free_ids_get && ids="$_OSRC_DV_FREE_IDS" && [ -n "$ids" ]; then
     rows="$(_osrc_free_lines "$ids")"
     main=$(printf '%s\n' "$rows" | awk 'tolower($0) !~ /(flash|fast|lightning)/')
     [ -n "$main" ] || main="$rows"

@@ -17,10 +17,12 @@ bash -n "$SRC" || { echo "FAIL: bash -n failed"; exit 1; }
 set --; . "$SRC" >/dev/null 2>&1
 
 # ---- bug 1: free-tier detection ----------------------------------------------------------------
-for m in glm glm-5.2 swe-2 swe-2-high swe-2-max swe swe-1.7 swe-1.7-lightning deepseek deepseek-v4-pro kimi kimi-k3; do
+for m in glm-5.2 glm-5-2 swe-2-high swe-2-flash-high swe-1.7 deepseek-v4-pro; do
   _devin_is_free_model "$m" && ok "free-tier: $m recognized" || bad "free-tier: $m NOT recognized"
 done
-for m in opus fable claude-opus-4-8 gpt-5.6 sonnet; do
+# Bare aliases resolve inside Devin (swe -> the paid swe-1.7-lightning family) and the paid
+# -lightning / -max / kimi-k3 ids are catalog-priced: no static label for any of them.
+for m in opus fable claude-opus-4-8 gpt-5.6 sonnet glm swe swe-2 swe-2-max swe-1.7-lightning deepseek kimi kimi-k3 swe-2-flash-high-lightning; do
   _devin_is_free_model "$m" && bad "free-tier: $m wrongly flagged free" || ok "free-tier: $m correctly not-free"
 done
 

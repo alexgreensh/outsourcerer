@@ -97,8 +97,8 @@ eq "mixed-only catalog: fusion sidekick row never free" "$_bill" metered
 rm -rf "$TMP2"
 
 # --- offline fallback: with the catalog check off, the static list still recognizes swe-2 --------
-eq "offline: swe-2 free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2 && echo yes || echo no)" yes
-eq "offline: swe-2-flash free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash && echo yes || echo no)" yes
+eq "offline: bare swe-2 alias is NOT labelled free (Devin resolves it)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2 && echo yes || echo no)" no
+eq "offline: bare swe-2-flash alias is NOT labelled free" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash && echo yes || echo no)" no
 eq "offline: swe-2-flash-high free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash-high && echo yes || echo no)" yes
 eq "offline: nova-9 NOT known (no static, no catalog)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model nova-9 && echo yes || echo no)" no
 
@@ -185,7 +185,7 @@ grep -q '_osrc_dv_launch_prepare; _gate_model="${_OSRC_DV_LAUNCH_ID' "$SRC" \
   || bad "source: spend gate input diverged from dispatch (codex regression)"
 
 # --- source cross-check: the classification actually consults the catalog ------------------------
-grep -q 'set="$(_devin_catalog_free_set)"' "$(dirname "$SRC")/lib/devin-free.sh" && ok "source: _devin_is_free_model consults the catalog set" \
+grep -q '^  _devin_catalog_free_set$' "$(dirname "$SRC")/lib/devin-free.sh" && ok "source: _devin_is_free_model consults the catalog set" \
   || bad "source: catalog-driven free check removed"
 
 echo "---- $pass passed, $fail failed ----"

@@ -94,6 +94,7 @@ _ALL_SUITES="$_ALL_SUITES test_bg_provider_after_verb"
 _ALL_SUITES="$_ALL_SUITES test_tmux_headless_fallback"
 _ALL_SUITES="$_ALL_SUITES test_devin_catalog_free_tier"
 _ALL_SUITES="$_ALL_SUITES test_devin_launch_gate"   # gated Devin id == launched id
+_ALL_SUITES="$_ALL_SUITES test_devin_probe_strict"  # no-consent probe needs strict Free proof
 _ALL_SUITES="$_ALL_SUITES test_spend_attack"        # attack every launch path; assert on launched argv
 _ALL_SUITES="$_ALL_SUITES test_remote_review"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"

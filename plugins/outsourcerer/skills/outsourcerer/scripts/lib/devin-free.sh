@@ -45,38 +45,19 @@ _osrc_dv_launch_id() {
 }
 
 
-# The set of Devin models Devin's OWN live catalog marks cost_tier="Free" (canon-keyed, space-padded),
-# so the free tier self-heals as Devin adds/renames Free models instead of drifting behind a hardcoded
-# list. COST-SAFE: a bare family id counts only when EVERY variant in it is Free (a mixed family lists
-# just its Free variants), so a paid variant never rides in on a family match. Memoized in-process (the
-# catalog walk is ~100ms; every later lookup is a string match), and skippable via OSRC_FREE_CATALOG_CHECK=0.
-_OSRC_CAT_FREE_MEMO_SET=""; _OSRC_CAT_FREE_MEMO_DONE=""
+# _devin_catalog_free_set -> sets _OSRC_CAT_FREE_SET (space-padded, normalized: lowercase, vendor/
+# and date stamp stripped, dots folded) in the CALLER's shell. Built from _devin_catalog_free_ids,
+# the spend gate's own extractor, so both share ONE freshness rule (only a fresh catalog proves
+# Free) and one mtime-keyed parse. Call it directly, never through $( ): the memo lives in the
+# caller. Offline or OSRC_FREE_CATALOG_CHECK=0 -> " " (fail closed: nothing catalog-Free).
+_OSRC_CAT_FREE_SET=" "; _OSRC_CAT_FREE_SRC=""; _OSRC_CAT_FREE_SET_MEMO=" "
 _devin_catalog_free_set() {
-  [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || { printf ' '; return; }
-  [ -n "$_OSRC_CAT_FREE_MEMO_DONE" ] && { printf '%s' "$_OSRC_CAT_FREE_MEMO_SET"; return; }
-  _OSRC_CAT_FREE_MEMO_DONE=1
-  local raw set=""
-  raw="$(_devin_catalog_raw 2>/dev/null)" || raw=""
-  if [ -n "$raw" ]; then
-    set="$(jq -r '
-      def norm(s): (s|ascii_downcase|sub("^[^/]*/";"")|sub("-[0-9]{6,}$";"")|gsub("\\.";"-"));
-      def isfree(o): (((o.cost_tier | strings) // "") | ascii_downcase) == "free";
-      def uidok(s): ((s|type) == "string") and (s|test("^[A-Za-z0-9._/-]+$"));
-      # v: tokens are exact free variants (no tier-stripping — a paid -max sibling must
-      # never ride in on its free -high sibling). f: tokens are all-free family ids/slugs,
-      # the only ids a bare family-shaped probe may match. uids are shape-filtered: the
-      # live catalog carries spaced display labels, and one spaced uid would otherwise
-      # split into bogus free tokens (Neon review, verified).
-      [ .families[]?
-        | ( select((.variants|type) == "array" and (.variants|length) > 0 and all(.variants[]?; isfree(.)))
-            | ( (select(uidok(.family_uid)) | "f:"+norm(.family_uid)),
-                (select(((.slug // "") != "") and uidok(.slug)) | "f:"+norm(.slug)) ) ),
-          ( .variants[]? | select(isfree(.) and uidok(.model_uid)) | "v:"+norm(.model_uid) ) ]
-      | unique | .[]
-    ' 2>/dev/null <<<"$raw" | tr "\n" " ")"
-  fi
-  _OSRC_CAT_FREE_MEMO_SET=" $set"
-  printf '%s' "$_OSRC_CAT_FREE_MEMO_SET"
+  _OSRC_CAT_FREE_SET=" "
+  _devin_free_ids_get || return 0
+  [ -n "$_OSRC_CAT_FREE_SRC" ] && [ "$_OSRC_CAT_FREE_SRC" = "x$_OSRC_DV_FREE_IDS" ] && { _OSRC_CAT_FREE_SET="$_OSRC_CAT_FREE_SET_MEMO"; return 0; }
+  _OSRC_CAT_FREE_SET=" $(printf '%s' "$_OSRC_DV_FREE_IDS" | tr ' ' '\n' | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's#^[^/]*/##; s/-[0-9]{6,}$//; s/\./-/g' | tr '\n' ' ') "
+  _OSRC_CAT_FREE_SRC="x$_OSRC_DV_FREE_IDS"; _OSRC_CAT_FREE_SET_MEMO="$_OSRC_CAT_FREE_SET"
 }
 
 # A launchable id for a truly-Free model (exact cost_tier=Free, no daily quota) discovered
@@ -176,44 +157,36 @@ _devin_resolve_dynamic() {
       end' 2>/dev/null
 }
 
-# _devin_is_free_model <alias-or-devin-id> -> rc0 if it runs on Devin's plan-INCLUDED (free) tier.
-# These do NOT draw on the separate paid ACU balance, so a "0% remaining" figure in Devin's own output
-# (which reports that paid balance) must never be read as blocking them. This is the bug-1 anchor:
-# free-tier models must run regardless of the paid-quota display.
-# swe-2 is added because Devin's live catalog marks it cost_tier="Free" (its own separate tier, outside
-# the shared glm/swe-1.7/kimi daily plan bucket). It was previously unrecognized, so a swe-2 dispatch —
-# the escape when the shared bucket is spent — was treated as a paid model.
+# _devin_is_free_model <devin-id> -> rc0 if it runs on Devin's plan-INCLUDED (free) tier, so a
+# "0% remaining" paid-ACU figure must not be read as blocking it. A LABEL for the dispatch banner,
+# the failure classifier and the plan meter; it gates no spend (that is _osrc_devin_free_for_spend).
+# Static set = exact plan-included ids the catalog rates at their pay-as-you-go price, plus the two
+# offline-proven Free ids. Exact literals only: a bare alias (swe, glm, kimi, swe-2) resolves inside
+# Devin, possibly to a paid variant, and a glob matched paid -lightning/-fast/-max siblings.
 _devin_is_free_model() {
-  local t; t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  # Static set = the plan-INCLUDED models Devin's catalog does NOT tag "Free" (it rates them by their
-  # non-plan pay-as-you-go price), so they can't be discovered from cost_tier and must be named here.
-  # Also the offline fallback for the catalog-Free models (so swe-2 is still recognized with no network).
+  local t norm; t="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
   case "$t" in
-    glm|glm-5.2|glm-5-2|z-ai/glm-5.2|glm-5.3*|glm-5-3*|z-ai/glm-5.3*|swe-2|swe-2-high|swe-2-medium|swe-2-max|swe-2-flash|swe-2-flash-*|swe|swe-1.7|swe-1-7|swe-1.7-lightning|deepseek|deepseek-v4-pro|deepseek/deepseek-v4-pro|kimi|kimi-k3) return 0 ;;
+    glm-5.2|glm-5-2|z-ai/glm-5.2|swe-1.7|swe-1-7|deepseek-v4-pro|deepseek/deepseek-v4-pro|swe-2-high|swe-2-flash-high) return 0 ;;
   esac
-  # Catalog-driven union: any model the LIVE catalog marks cost_tier="Free" is free, so a newly added
-  # or renamed Free model is recognized with no code change — this is what stops the list from drifting.
-  # Exact-token match only: v: for the probe's own exact id, f: when the probe IS a bare
-  # all-free family id. Never strip the probe's tier suffix — a paid -max sibling canonizing
-  # onto its free -high sibling was the paid-billing hole (Neon/GLM review finding).
-  local norm set; norm="$(printf '%s' "$t" | sed -E 's#^[^/]*/##; s/-[0-9]{6,}$//; s/\./-/g')"
-  set="$(_devin_catalog_free_set)"
-  case "$set" in *" v:$norm "*|*" f:$norm "*) return 0 ;; esac
+  # Live catalog cost_tier="Free" (exact variant, or an all-Free family id); never tier-stripped.
+  norm="$(printf '%s' "$t" | sed -E 's#^[^/]*/##; s/-[0-9]{6,}$//; s/\./-/g')"
+  _devin_catalog_free_set
+  case "$_OSRC_CAT_FREE_SET" in *" $norm "*) return 0 ;; esac
   return 1
 }
 
-# _devin_probe_pick <preferred...> -> the first health-probe model that is NOT on the user's
-# exclude list (#45: a probe is still a request to that model) and does NOT draw the paid ACU
-# balance. A probe sends a request with no consent prompt, so a caller-passed or overridden
-# paid id (OSRC_DEVIN_PROBE_MODEL, a refused model) is skipped, never pinged. The built-in
-# fallbacks are plan-included (daily quota, no cash). rc1 when nothing qualifies.
+# _devin_probe_pick <preferred...> -> the first health-probe model that is NOT excluded (#45) and is
+# PROVEN free to request: a probe asks no consent, so it needs the spend gate's own proof
+# (_osrc_devin_free_for_spend: exact id, catalog Free, offline only swe-2-high / swe-2-flash-high)
+# or the exact plan-included literal glm-5-2 (daily plan quota, no cash; Devin refuses, not bills,
+# when it is spent). A caller-passed or overridden id without that proof is skipped, never pinged.
 _devin_probe_pick() {
   local c skip="${OSRC_DEVIN_PROBE_SKIP:-}"
-  for c in "$@" glm-5-2 swe-2-high swe-1-7 kimi-k3; do
+  for c in "$@" glm-5-2 swe-2-high; do
     [ -n "$c" ] || continue
     [ -n "$skip" ] && [ "$(printf '%s' "$c" | tr '[:upper:]._' '[:lower:]--')" = "$skip" ] && continue
     _model_excluded "$c" && continue
-    _devin_is_free_model "$c" || continue
+    [ "$c" = glm-5-2 ] || _osrc_devin_free_for_spend "$c" || continue
     printf '%s' "$c"; return 0
   done
   return 1

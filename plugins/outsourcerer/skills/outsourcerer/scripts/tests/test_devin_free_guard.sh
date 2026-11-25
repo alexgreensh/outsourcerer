@@ -44,6 +44,9 @@ eval "$(sed -n '/^_devin_is_free_model() {/,/^}/p' "$SCRIPT_DIR/../lib/devin-fre
 eval "$(sed -n '/^_devin_free_own_quota() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_probe_classify() {/,/^}/p' "$SRC")"
 eval "$(sed -n '/^_devin_probe_pick() {/,/^}/p' "$SCRIPT_DIR/../lib/devin-free.sh")"
+eval "$(sed -n '/^_osrc_devin_free_for_spend() {/,/^}/p' "$SCRIPT_DIR/../lib/spend.sh")"   # the probe's strict proof
+eval "$(sed -n '/^_devin_free_ids_get() {/,/^}/p' "$SCRIPT_DIR/../lib/spend.sh")"
+_devin_catalog_free_ids() { return 1; }   # offline: only the two static Free ids prove Free
 eval "$(sed -n '/^_devin_free_probe() {/,/^}/p' "$SRC")"
 _model_excluded() { return 1; }   # no exclude list in this suite (the probe-model pick consults it)
 
