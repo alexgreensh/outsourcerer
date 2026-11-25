@@ -1,0 +1,4 @@
+sha=2f7d58be27f4c78c1345b466ac572fc869f1c6e7
+rc=0
+osrc-spend-attack: 7 spend-gate holes fixed (H1-H7), tests/test_spend_attack.sh 59/0, full conformance 262 passed 0 failed 15 skipped rc=0 as uid 30033.
+Tested head: 89de11b3442f3dba569850fd673a4849e287d0a2 (code); this RESULT/READY commit adds only hand-in files on top. Branch cloud/osrc-spend-attack.

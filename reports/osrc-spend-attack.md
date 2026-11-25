@@ -1,5 +1,3 @@
-started
-
 # osrc-spend-attack: map every free-or-paid decision, attack the spend gate
 
 Model id this lane ran as: `claude-opus-5-5`.
@@ -62,6 +60,11 @@ different model id on the same lane cannot turn paid into free.
 `outsourcerer.sh` shrank 18856 -> 18849 (one function moved out, call sites replaced in place).
 `python3 scripts/check_file_size.py --base 2f7d58b` -> `file-size: OK (7 changed file(s) checked, limit 1000)`.
 
+Tests of other suites adjusted (all were passing on 2f7d58b; each now consents explicitly to a
+launch that is now spend-gated, the subject of those suites is bookkeeping, not spend):
+- `test_lifecycle_fix.sh`: `OSRC_SPEND_OK=1` before its direct `_session_relaunch_effort codex sol high`.
+- `test_session_effort.sh`: `OSRC_SPEND_OK=1` on its `session effort high` codex relaunch call.
+
 Changed test of the previous lane: `test_devin_launch_gate.sh` asserted `osrc_lane_billing dv SWE-1.7-HIGH`
 = subscription (folding). It now asserts metered for the folded spelling and subscription for the exact
 uid. This makes the assertion stricter, not weaker.
@@ -77,3 +80,68 @@ uid. This makes the assertion stricter, not weaker.
 7. No catalog, non-interactive, no `--spend-ok`: glm-5.2, swe-2-max, swe-2, swe-2-1-high refuse; claude with no provable login refuses; offline session start swe-2-max refuses. Nothing launched.
 8. `--spend-ok` once: the next command refuses; env vars and forged markers grant nothing; the job's own marker consents once and is consumed.
 9. Hops: bound consent does not cover a hop; pickers skip paid Devin; cc -> Devin self-heal refuses; relaunch, effort relaunch and model switch ask.
+
+## Suite results (each run alone, `nice bash <suite>`, as user `lane`, after the final code)
+
+| Suite | rc | Result |
+|---|---|---|
+| test_spend_attack.sh (new) | 0 | 59 passed, 0 failed (on 2f7d58b: 46 passed, 13 failed; 12 are the holes above, 1 was a test-side fanout timing bug since fixed) |
+| test_devin_launch_gate.sh | 0 | 12 passed, 0 failed |
+| test_spend_consent.sh | 0 | 46 passed, 0 failed |
+| test_devin_catalog_free_tier.sh | 0 | 25 passed, 0 failed |
+| test_lane_billing.sh | 0 | 143 passed, 0 failed |
+| test_limit_gate.sh | 0 | 127 passed, 0 failed |
+| test_session_control.sh | 0 | 16 passed, 0 failed |
+| test_session_effort_guard.sh | 0 | 55 passed, 0 failed |
+| test_session_effort.sh | 0 | 7 passed, 0 failed |
+| test_relaunch_bookkeeping.sh | 0 | 12 passed, 0 failed |
+| test_model_drift.sh | 0 | 17 passed, 0 failed |
+| test_lifecycle_fix.sh | 0 | 17 passed, 0 failed |
+| test_factory_exclude.sh | 0 | 74 passed, 0 failed |
+| test_no_silent_escalation.sh | 0 | 21 passed, 0 failed |
+| test_utf8_guard.sh | 0 | 38 passed, 0 failed |
+| test_winpty_session.sh | 0 | 45 passed, 0 failed |
+| test_tmux_kill_safety.sh | 0 | PASS |
+| test_no_pipe_grep_q.sh | 0 | PASS |
+| test_screen_state.sh | 0 | 265 passed, 0 failed |
+
+## Full conformance
+
+`bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` as `lane` (`id -u` = 30033):
+- Run 1 (commit before the test-hygiene fix): `RESULT: 258 passed, 4 failed, 15 skipped`, rc=1. All four were
+  caused by this lane: test_session_effort (relaunch now gated; the case now consents), test_tmux_kill_safety
+  and test_screen_state (my `tkill` did not clear TMUX; fixed with `unset TMUX` + `env -u TMUX`),
+  test_no_pipe_grep_q (a `producer | grep -q` in my test; fixed).
+- Run 2 (final code): `RESULT: 262 passed, 0 failed, 15 skipped`, **rc=0**. The 15 skips are the live lane
+  probes (`OSRC_CONFORMANCE_LIVE=1` not set) and suites that skip on this host.
+
+## Open questions (decided by the lane)
+
+- `continue` / `session start` with no `-m` on Devin: launch the lane's Free default (the same id a bare `run`
+  uses) instead of asking. Before, Devin itself picked a model nobody judged. Safest choice that still works
+  for a stranger with no flags; a bare continue now continues on the Free default model.
+- Bare `session model` (Devin picker, no NAME): asks (unknown choice) rather than assuming the cursor stays
+  on the current model. Non-interactive orchestrators need `--spend-ok` for it.
+- `session model NAME` on Devin judges the exact NAME. The picker's own search could highlight another entry
+  for a non-exact NAME; with an exact catalog uid it selects that uid. Only an exact Free uid passes silently.
+- The bg job marker (`$OSRC_HOME/jobs/<id>/.spend-ok` + `OSRC_JOB_TOKEN`) is the designed consent channel for a
+  detached child. A caller that writes both the per-job secret into the env and the marker file can launch once;
+  that is no stronger than passing `--spend-ok`, and the marker is consumed after one use (tested). Kept.
+- Diagnostic probes (`doctor`, plan-quota verification) still send one `PONG` to glm-5-2 / swe-2-high and, if
+  those are excluded, the bare families swe-1-7 and kimi-k3 without asking. Documented plan-included health
+  probes; left unchanged.
+
+## Unproven
+
+- Real Devin CLI behaviour: what an exact-uid picker search selects, what `devin -c` did with `--model ""`,
+  whether the CLI treats `SWE-2-HIGH` as `swe-2-high`. All tested with stubs; the fixes ask in every case where
+  the launched id is not an exact proven-Free id, so the answer does not change safety.
+- The consented `session control relaunch` was asserted on the stub's argv only: the stub cannot satisfy the
+  relaunch lifecycle checks, so the full lifecycle after a consented relaunch is covered by the existing
+  test_session_control / test_lifecycle_fix suites, not by this one.
+- macOS bash 3.2 and Git Bash were not available here; the new code uses no bash-4 features.
+- `cloud start` with a non-Devin vehicle bills by the lane's proven login (as designed); not attacked live.
+
+## Needs from other lanes
+
+None.
