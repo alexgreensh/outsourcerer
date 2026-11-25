@@ -1,0 +1,4 @@
+sha=a492df7e38d4b5fa01382b85a922b1f81d0df0bc
+rc=1
+Conformance red: 250 passed, 7 failed. All 7 failing suites also fail on the base a492df7, and none covers this lane's files. Work head: c317c75 (code) on cloud/osrc-int-fix-b.
+Fixed: approver P2 1/P2 6 plus P3s; alerts P3s (P1/P2 were already fixed in 301f8f7); coord 1-9, send-lock test made deterministic; remote P3s (P2s were already fixed in ad5eba8); PR-lane P3s 2/4/5. Every behaviour fix has a test that fails on the base. Details in reports/osrc-int-fix-b.md.

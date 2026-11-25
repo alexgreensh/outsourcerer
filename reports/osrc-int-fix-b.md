@@ -82,7 +82,9 @@ New tests in `tests/test_screen_alerts.sh`: ctrl+c hint is not busy; a busy hint
 
 ## Conformance
 
-CONFORMANCE_PLACEHOLDER
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` at c317c75 (all code changes in) gave **rc=1: 250 passed, 7 failed, 1 skipped** (live probes skipped).
+
+Failed suites: `test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`, `test_conformance_suite_timeout`, `test_hub_mc4`, `test_sealed_fixes`. I re-ran each one alone on a clean worktree of the base `a492df7`, and **all 7 fail there too**: rc 1 each, and `test_sealed_fixes` rc 127. `test_vocab_hygiene` shows the same two failures on both ("original was damaged on failed write"), which looks like a write-permission test running as root in this container. None of these suites covers files this lane changed. The gate is still red, so RESULT says `rc=1`.
 
 ## Unproven
 
@@ -96,6 +98,7 @@ CONFORMANCE_PLACEHOLDER
 
 - **Approver P2 1:** the brief says "header on row 0 holds". I implemented the stricter form, "the modal's title row must be directly above the header", which implies it. This also holds the review's probe, where the decoy header is not on row 0. Chosen because it is fail-closed and every real capture satisfies it.
 - **Busy hints:** only `esc` interrupt hints count. A future engine that says `ctrl+c to interrupt` would read `unknown` (the stall path), not `working`. That is the safer error.
+- **RESULT sha:** the hosted-session contract says line 1 is the pinned base `sha=a492df7…`, and `lib/cloudrun.sh` checks it against that. The lane rules say "own head". I followed the contract and give the work head in the RESULT summary.
 - **Branch:** pushed to `cloud/osrc-int-fix-b` as the brief requires. No PR was opened, because the lane rules forbid it.
 
 ## Needs from other lanes
