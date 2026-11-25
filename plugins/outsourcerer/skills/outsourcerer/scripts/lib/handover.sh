@@ -22,6 +22,9 @@ _owner_record() { # <job-or-session-id>
   [ -n "$s" ] && [ -n "${1:-}" ] || return 0
   case "$1" in */*|.|..) return 0 ;; esac
   mkdir -p "$OSRC_HOME/owners/$s" && : > "$OSRC_HOME/owners/$s/$1" || return 1
+  # Record the session's tmux server now, not at its first Stop: a watcher on another server must
+  # skip these lanes from the first tick (it cannot see them and would log them gone).
+  type _ws_note_session >/dev/null 2>&1 && _ws_note_session "$s" "$PWD"
   type osrc_hub_seen_lane >/dev/null 2>&1 && osrc_hub_seen_lane "$s" "$1"   # Mission Control remembers it (MC3)
   return 0
 }

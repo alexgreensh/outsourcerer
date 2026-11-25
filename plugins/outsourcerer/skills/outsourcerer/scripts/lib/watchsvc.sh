@@ -29,7 +29,7 @@
 # every backend's unit and all watcher state. Nothing else ever starts the watcher.
 
 _ws_root() { printf '%s/watchsvc' "$OSRC_HOME"; }
-_ws_stale() { _sv_num "${OSRC_WATCH_STALE:-}" 180; }
+_ws_stale() { _sv_num "${OSRC_WATCH_STALE:-}" 360; }   # > tick timeout + interval, so a slow tick gets no rival
 _ws_alive() { [ $(( $(_sv_now) - $(_sv_num "$(cat "$(_ws_root)/alive" 2>/dev/null)" 0) )) -le "$(_ws_stale)" ]; }
 _ws_log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$(_ws_root)/service.log" 2>/dev/null; }
 # Git Bash `ps` has no -o: a live pid then counts only while the loop's alive stamp is fresh.
@@ -95,7 +95,8 @@ _ws_owner() { # <sid>
   local sid="$1" s f gen size cur cg rows older="" tj now cover last
   s="$(_ws_root)/$sid"; mkdir -p "$s" 2>/dev/null || return 1
   [ -f "$s/inflight" ] && { _ws_settle "$sid" "$s"; return 0; }
-  _ws_foreign "$sid" && return 0   # its lanes live on a tmux server this watcher cannot see
+  # Its lanes live on a tmux server this watcher cannot see: clear what this watcher left, then skip.
+  _ws_foreign "$sid" && { rm -f "$OSRC_HOME/owners/$sid/.wakefail"; [ -d "$OSRC_HOME/owners/$sid" ] || rm -rf "$s"; return 0; }
   now="$(_sv_now)"; f="$(_sv_lanes)/events.jsonl"
   gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"
   size="$(_sv_num "$({ wc -c < "$f"; } 2>/dev/null | tr -d ' ')" 0)"; cur=""; cg=""
@@ -165,7 +166,9 @@ _ws_settle() { # <sid> <dir>: finish an in-flight delivery once its result is in
   if [ -z "$rc" ]; then
     # A live delivery is pending until its rc or the timeout, also one an earlier loop started (a
     # restart must not fail it while it lands). Only THIS loop's own fork is ever signalled.
-    if kill -0 "$(_sv_num "$pid" 0)" 2>/dev/null; then
+    # A reused pid (reboot, crash) is no delivery: pending only while it is still a watcher fork.
+    local cmd; cmd="$(ps -o command= -p "$(_sv_num "$pid" 0)" 2>/dev/null)"
+    if kill -0 "$(_sv_num "$pid" 0)" 2>/dev/null && case "$cmd" in ''|*" watcher run"*) true ;; *) false ;; esac; then
       [ $(( $(_sv_now) - $(_sv_num "$t0" 0) )) -ge "$(_sv_num "${OSRC_WATCH_DELIVER_TIMEOUT:-}" 1800)" ] || return 0
       [ "$own" = "$$" ] && _ws_ours "$pid" && _kill_tree "$pid" 2>/dev/null; rc=124   # the whole delivery, not just its wrapper
     else rc="$(cat "$s/rc" 2>/dev/null)"; rc="${rc:-1}"; fi   # it may have finished since the first read

@@ -29,6 +29,7 @@
 # rewriting the same DONE file fires again (lib/supervise_watch.sh).
 # --loop (with a session; for wrapper scripts reading stdout, NEVER an agent's background task) arms again
 # after each delivered batch. A waiter only for OSRC_SUPERVISE_HUNG s after a batch went to a pipe/terminal.
+# Into a file nobody reads it runs once, like plain supervise, so its exit still wakes the agent.
 #
 # Screen reading is NOT done here: osrc_screen_state (lib/screen.sh) classifies a pane. Until it
 # lands, a thin wrapper over the existing detectors stands in (defined only if it is missing).
@@ -629,7 +630,7 @@ cmd_supervise() {
       --session=*) sid="$(_owner_sid "${1#--session=}")"; shift ;;
       --all) _sv_all=1; shift ;;
       --once) once=1; shift ;;
-      --loop) loop=1; shift ;;
+      --loop) { [ -p /dev/stdout ] || [ -t 1 ]; } && loop=1; shift ;;   # into a file nobody reads: plain supervise, whose exit wakes the agent
       --auto|--auto=*)
         if [ "$1" = --auto ]; then [ "$#" -ge 2 ] || { _sv_fail "--auto needs a value" "$SCRIPT_PATH supervise"; return 2; }; auto="$2"; shift 2; else auto="${1#--auto=}"; shift; fi
         case "$auto" in ''|,*|*,|*,,*|*[!A-Za-z,]*) _sv_fail "--auto needs done and/or limits" "$SCRIPT_PATH supervise"; return 2 ;; esac
@@ -781,7 +782,7 @@ _sv_main() { # <sid> <once> [ids...]
         _SV_DIR="$dir" _sv_deliver "$ledger" "$new" batch; drc=$?
         case "$drc" in
           0) _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-             [ "${OSRC_SUPERVISE_LOOP:-0}" = 0 ] || { { [ -p /dev/stdout ] || [ -t 1 ]; } && touch "$dir/loop.$$"; exit 20; }   # a file has no reader
+             [ "${OSRC_SUPERVISE_LOOP:-0}" = 0 ] || { touch "$dir/loop.$$"; exit 20; }
              printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
              exit 0 ;;
           1) first=""; older=""; cursor="$size"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor" ;;   # all delivered elsewhere
