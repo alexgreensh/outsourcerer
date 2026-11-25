@@ -286,3 +286,64 @@ These replace round 1's list.
    already resets `SVS_LK=-` on recovery, so the next limit is a new incident. Test: emit at T,
    then from a fresh process at T+1300s and T+7200s; exactly one row each for `limit` and for an
    explicitly watched vanished pane's `failed`.
+
+## Round 3
+
+Base `cloud/osrc-l3-r2b` at `a4944f2` (confirmed with `git log --oneline -3`). Branch `cloud/osrc-l3-r3`.
+Files: `lib/screen.sh`, `tests/test_screen_alerts.sh`, `tests/test_screen_state.sh`, two new fixtures,
+this report. The round-2 handoff markers (`osrc-l3-r2b.READY`/`.RESULT`) are deleted.
+
+### What changed and why (by review finding)
+
+- **P1 1, a finished lane read `limit`.** `_osrc_scr_limit` now requires the refusal to be the
+  newest row of the turn. The newest-first scan stops (no limit) at any assistant or tool row
+  (`⏺ • ● ✦ ✓ ✔`), a shell prompt (a row ending `$`/`%`/`#`, or `$ cmd`) and the Devin prompt `❭ `
+  (P3), as well as the old user-prompt and `Worked for`/`· done` boundaries. In the block walk-up, a
+  space-indented row under prose is a wrapped reply line, not a banner. Only a `⎿` row may sit under
+  prose, because Claude prints its own errors that way (`cc-limit-429.txt` still reads `limit`).
+  A finished lane now reads `idle`, so supervise's done-contract check runs again.
+- **P2 2, bullets with parentheses read `working`.** `(` was dropped from the non-braille spinner
+  arm; that arm now needs `…` or `...`.
+- **P2 3 and 4, the unwired alert layer.** `osrc_screen_alert`, `_osrc_scr_cpu`, `_osrc_scr_num`,
+  the `screen-alerts/<pane>` state files, the three `OSRC_SCREEN_*` settings and
+  `OSRC_SCR_LIMIT_SECS` are deleted. I did not wire them into supervise: `lib/supervise.sh` is
+  another lane's file, and supervise stays the only owner of alert state. The negative-CPU stall
+  (P2 3), the stale `screen-alerts` file, the undocumented settings, the doubled clock read in the
+  alert and the "capture failure means pane gone" issue all go with the deleted code. Their tests
+  (old section 6 and the fake `ps`) are deleted as well. No regression test can fail on code that
+  no longer exists. The CPU idea is carried forward under Needs.
+- **P2 5, an expired limit never cleared.** The newest-row rule covers this case: a refusal
+  followed by output and a prompt reads `idle`. Nothing anchors an epoch any more, because the
+  alert layer is gone.
+- **P2 6, a Claude banner was missed.** `[0-9]+-hour|opus|sonnet` was added to the limit-kind
+  alternation. The new fixture `cc-limit-5hour.ansi` is the real `cc-limit-usage.ansi` capture with
+  its banner replaced by the reported string `⎿  5-hour limit reached ∙ resets 3pm`.
+- **P3 Devin turn boundary.** `❭ ` now ends the scan. The fixture `dv-limit-then-continue.ansi` is the
+  real `dv-limit-plan.ansi` capture plus `❭ continue please` and a reply.
+- **P3 mid-line spinners.** The busy matcher allows one leading `[`, so `[⠋] Compiling crate 12/40`
+  reads `working` again.
+- **P3 cost.** A `case` glob over the refusal words now runs before any `tr` fork, and the main
+  scan trims rows with parameter expansion instead of a subshell. Here are 10 analyses per fixture
+  on Linux, measured with the Bash tool:
+  - `cx-working`: 200 ms on `ea34fe0`, 268 ms now.
+  - `cx-idle`: 246 ms on `ea34fe0`, 342 ms now.
+  - `generic-limit` with both fixtures together: 1628 ms on r2b, 1413 ms now.
+
+  A screen that does read `limit` still pays for the reset-phrase parse (grep, sed and
+  `_lane_limit_reset_secs`). That cost falls only on parked lanes.
+
+### Not fixed
+
+- **Epoch can flap by one second.** `_lane_limit_reset_secs`, in `outsourcerer.sh`, which is not
+  my file, reads the clock and the reader adds `date +%s` again. The test still tolerates one
+  second.
+
+### Tests (Linux, bash 5, niced)
+
+Each new case was run against the r2b `lib/screen.sh`, swapped in temporarily: all 10 FAIL there
+and pass here.
+- `bash tests/test_screen_alerts.sh`: rc=0, 45 passed, 0 failed. On base, 35 passed and 10 failed.
+- `bash tests/test_screen_state.sh`: rc=0, 252 passed, 0 failed. It has two new table rows, one for
+  each new fixture.
+- `bash tests/test_pane_state.sh`: rc=0, 15 passed.
+- `bash tests/test_session_send_verify.sh`: rc=0, 49 passed.

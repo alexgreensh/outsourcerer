@@ -64,7 +64,9 @@ agy-trust-folder-menu|agy|approval|trust|
 gm-trust-folder-menu|gemini|approval|trust|
 cc-limit-usage|cc|limit||
 cx-limit-usage|codex|limit||
-dv-limit-plan|devin|limit||'
+dv-limit-plan|devin|limit||
+cc-limit-5hour|cc|limit||
+dv-limit-then-continue|devin|idle||'
 
 check_table() { # <label> [hint-mode: hint|guess]
   local mode="$1" f eng want kind what hint n=0
