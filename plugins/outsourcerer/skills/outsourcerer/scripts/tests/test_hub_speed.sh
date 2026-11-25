@@ -54,14 +54,15 @@ cp "$FIX/cc-idle-after-work.txt" "$TMP/panes/t-idle.screen"; own t-idle
 cp "$FIX/cc-question-live.txt" "$TMP/panes/t-ask.screen"; own t-ask
 cp "$FIX/cc-working-turn.txt" "$TMP/panes/t-busy.screen"; own t-busy
 # Cloud lanes: two carry a check: contract whose probe takes 20 s (the clone); one has a cached
-# verdict of done, one has none yet. The probe leaves a mark so the test sees it ran later.
+# verdict of done, one has none yet. The probe leaves a mark so the test sees it ran later, and it
+# repeats each lane's verdict (c-1 exits 0), so a probe ending mid-test changes no answer.
 for i in 1 2 3 4; do
   own "c-$i"
   printf '{"id":"c-%s","branch":"b%s","repo":"example/garden","url":"https://example.invalid/g.git","head":"abc%s","head_msg":"wip\\tstep","head_ready":%s,"created_ts":%s,"check":null}\n' \
     "$i" "$i" "$i" "$([ "$i" -le 2 ] && echo true || echo false)" "$NOW" > "$OSRC_HOME/remote/c-$i.json"
 done
 for i in 1 3; do
-  printf '#!/bin/sh\n: > "%s/probe-ran.c-%s"; sleep 20; exit 1\n' "$TMP" "$i" > "$OSRC_HOME/cloud/c-$i.done.sh"; chmod 700 "$OSRC_HOME/cloud/c-$i.done.sh"
+  printf '#!/bin/sh\n: > "%s/probe-ran.c-%s"; sleep 20; exit %s\n' "$TMP" "$i" "$([ "$i" = 1 ] && echo 0 || echo 1)" > "$OSRC_HOME/cloud/c-$i.done.sh"; chmod 700 "$OSRC_HOME/cloud/c-$i.done.sh"
   printf '{"spec":"check:sh %s","cwd":"%s"}\n' "$OSRC_HOME/cloud/c-$i.done.sh" "$TMP" > "$OSRC_HOME/done/c-$i.json"
 done
 printf '%s done\n' "$((NOW - 3600))" > "$OSRC_HOME/done/c-1.checkcache"   # old verdict: done
@@ -71,13 +72,14 @@ for j in j-run:running j-ok:done; do
 done
 
 echo "=== same: export lane states equal the uncached readers ==="
-slow() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+# The uncached readers must not start probes themselves: only the export's own worker may leave a mark.
+slow() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; OSRC_DONE_CHECK_MAX_INFLIGHT=0
   _reconcile_status() { cat "$OSRC_JOBS/$1/status" 2>/dev/null; }
   for t in "$OSRC_HOME/owners/s-main"/*; do
     l="$(_osrc_hub_lane_for "${t##*/}" '{}')" && [ -n "$l" ] && _osrc_hub_lane_live_fields "$l" && echo
   done ) | jq -sc 'map({id, status, state}) | sort_by(.id)'; }
 fast() { jq -c '[.projects[] | select(.id == "s-main") | .lanes[] | {id, status, state}] | sort_by(.id)' <<<"$1"; }
-want="$(slow)"
+want="$(slow)"; [ ! -e "$TMP/probe-ran.c-3" ] || no "the uncached readers started a probe"
 t0="$(date +%s)"; e1="$(lib cmd_hub_export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
 got1="$(fast "$e1")"; e2="$(lib cmd_hub_export 2>/dev/null)"; got2="$(fast "$e2")"
 [ "$(jq length <<<"$want")" = 9 ] && [ "$got1" = "$want" ] && [ "$got2" = "$want" ] \
@@ -92,10 +94,28 @@ echo "=== probe: a 20 s clone check never holds the export ==="
 n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -e "$TMP/probe-ran.c-3" ] && ok "the probe still runs, detached, after the export" || no "the deferred probe never ran"
 # The probe's own shell must not hold the caller's pipe either: a capture of the whole engine returns.
-t0="$(date +%s)"; rm -f "$OSRC_HOME"/done/*.checkcache "$OSRC_HOME"/done/*.checklock 2>/dev/null; rm -rf "$OSRC_HOME"/done/*.checklock*
+t0="$(date +%s)"; rm -f "$OSRC_HOME"/done/*.checkcache "$OSRC_HOME"/done/*.checklock "$TMP"/probe-ran.* 2>/dev/null; rm -rf "$OSRC_HOME"/done/*.checklock*
 out="$(bash "$SRC" hub export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
 [ "$dt" -lt 15 ] && jq -e '.projects | length > 0' >/dev/null <<<"$out" && ok "\$(outsourcerer hub export) returns in ${dt}s while probes run" || no "captured export took ${dt}s"
+n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
+[ -e "$TMP/probe-ran.c-3" ] && ok "the captured export's own worker ran the probe" || no "the captured export never ran the deferred probe"
 pkill -f "probe-ran" 2>/dev/null; pkill -f "$OSRC_HOME/cloud/c-" 2>/dev/null
+
+echo "=== pr: a merged PR reads done one export after its last verdict, and only then ==="
+mkdir -p "$TMP/ghbin"; printf '#!/bin/sh\ncase "$*" in "pr view"*) : > "%s/gh-pr-asked"; echo "{\\"state\\":\\"MERGED\\"}" ;; *) exit 1 ;; esac\n' "$TMP" > "$TMP/ghbin/gh"; chmod +x "$TMP/ghbin/gh"
+own c-5; printf '{"id":"c-5","branch":"b5","repo":"example/garden","url":"https://example.invalid/g.git","head":"abc5","head_msg":"wip","head_ready":false,"created_ts":%s,"check":null}\n' "$NOW" > "$OSRC_HOME/remote/c-5.json"
+printf '{"spec":"pr:example/garden#7","cwd":"%s"}\n' "$TMP" > "$OSRC_HOME/done/c-5.json"; printf '%s not-done\n' "$((NOW - 3600))" > "$OSRC_HOME/done/c-5.checkcache"
+p1="$(PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"
+s1="$(fast "$p1" | jq -r 'map(select(.id == "c-5"))[0].state')"
+n=0; while ! grep -q ' done' "$OSRC_HOME/done/c-5.checkcache" 2>/dev/null && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
+s2="$(PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"; s2="$(fast "$s2" | jq -r 'map(select(.id == "c-5"))[0].state')"
+[ "$s1" = working ] && [ -e "$TMP/gh-pr-asked" ] && [ "$s2" = done ] && ok "pr: export shows the last verdict (working), its worker asks gh, the next export shows done" || no "pr: lag: first=$s1 asked=$([ -e "$TMP/gh-pr-asked" ] && echo y || echo n) next=$s2"
+rm -f "$OSRC_HOME/remote/c-5.json" "$OSRC_HOME/done/c-5".* "$OSRC_HOME/owners/s-main/c-5"
+pkill -f "$OSRC_HOME/cloud/c-" 2>/dev/null
+memo_done() { _osrc_hub_memo_begin; osrc_done_state "$1"; _osrc_hub_memo_end; }
+printf '{"spec":"check:true","cwd":"%s/vanished"}\n' "$TMP" > "$OSRC_HOME/done/c-6.json"; printf '%s done\n' "$NOW" > "$OSRC_HOME/done/c-6.checkcache"
+r="$(lib memo_done c-6)"; rm -f "$OSRC_HOME/done/c-6".*
+[ "$r" = "error cwd-missing" ] && ok "check: with a vanished cwd says error cwd-missing inside the export, not its old done" || no "vanished cwd in memo: $r"
 
 echo "=== screen: a reading is reused only while pane and inputs are unchanged ==="
 scr_case() {
@@ -111,6 +131,28 @@ scr_case() {
 }
 r="$(lib scr_case 2>/dev/null)"
 [ "$r" = "1|1|2|3|4" ] && ok "same pane: reused; new pane text, a new or a deleted input: read again" || no "screen reuse: $r"
+
+echo "=== caches: no stale doc, history or lane survives what changed under it ==="
+mkdir -p "$OSRC_HOME/hub/cache"; printf '{"_cacheV":6,"id":"s-old","pct":0}\n' > "$OSRC_HOME/hub/cache/s-old.json"
+OSRC_HUB_FAST=1 lib _osrc_hub_cache_get s-old "$NOW" now >/dev/null 2>&1 && no "a settled-project doc from the old cache version was served" || ok "settled-project docs of the previous cache version are not served"
+gh_case() { # <age-seconds> -> the tag the history serves for a cache of that age
+  printf '{"fetchedAt":%s,"ok":true,"releases":[{"tagName":"v-old"}],"prs":[],"issues":[]}\n' "$((NOW - $1))" > "$OSRC_HOME/hub/cache/gh-example_hist.json"
+  _osrc_hub_gh_data example/hist | jq -r '.releases[0].tagName // "none"'; }
+r="$(PATH="$TMP/ghbin:$PATH" lib gh_case 3600)|$(PATH="$TMP/ghbin:$PATH" lib gh_case 604800)"
+[ "$r" = "v-old|none" ] && ok "gh history: an hour-old cache is served, a week-old one is fetched again" || no "gh history by age: $r"
+el_case() {
+  OSRC_HUB_FAST=1; _osrc_hub_memo_begin
+  _osrc_hub_ended_ids() { echo e-1; }; _osrc_hub_ended_lane() { printf '{"id":"e-1","v":"fresh"}'; }; _osrc_hub_lane_activity() { echo 0; }
+  local d="$OSRC_HOME/hub/cache/ended" a; mkdir -p "$d"
+  printf '{"id":"e-1","v":"cached"}\n' > "$d/e-1.lane"; echo 0 > "$d/e-1.act"; : > "$d/e-1.regts"; touch -t 202001010000 "$d"/e-1.*
+  _osrc_hub_ended_lanes_fast s-x '{}'; a="$_OSRC_EL_LANES"
+  printf '{"spec":"file:x","cwd":"/"}\n' > "$OSRC_HOME/done/e-1.json"
+  _osrc_hub_ended_lanes_fast s-x '{}'; _osrc_hub_memo_end; rm -f "$OSRC_HOME/done/e-1.json"
+  printf '%s|%s' "$(jq -r '.[0].v' <<<"$a")" "$(jq -r '.[0].v' <<<"$_OSRC_EL_LANES")"; }
+r="$(lib el_case 2>/dev/null)"
+[ "$r" = "cached|fresh" ] && ok "an ended lane's cache is reused, then rebuilt once an input is newer (real mtimes)" || no "ended-lane cache: $r"
+# bash 3.2 under set -u aborts on "${a[@]}" of an empty array (bash 4.4+ does not, so this is static).
+grep -nE '_osrc_hub_mt "\$\{(dl|deps)\[@\]\}"' "$HERE/../lib/hub-perf.sh" "$HERE/../lib/hub-fast.sh" && no "an empty dependency list aborts under set -u on bash 3.2" || ok "empty dependency lists are expanded the bash 3.2 way"
 
 echo "=== stat: one stat per list, same answers ==="
 mkdir -p "$TMP/mt"; : > "$TMP/mt/a"; : > "$TMP/mt/b"; touch -t 202001020304 "$TMP/mt/a"; touch -t 202101020304 "$TMP/mt/b"
@@ -142,7 +184,10 @@ c="$(lib cmd_hub_export --project s-board 2>/dev/null | jq -c '.projects[0] | {p
 echo "=== verify: unused verify clones go, nothing else ==="
 for id in c-1 c-2 gone-1; do mkdir -p "$OSRC_HOME/cloud/$id.verify.git/objects"; head -c 1000 /dev/zero > "$OSRC_HOME/cloud/$id.verify.git/objects/pack"; done
 mkdir -p "$OSRC_HOME/cloud/notes.git"; : > "$OSRC_HOME/cloud/gone-1.done.sh"; : > "$OSRC_HOME/cloud/gone-1.launch.log"
+printf '{"spec":"check:sh %s/cloud/c-2.done.sh","cwd":"%s"}\n' "$OSRC_HOME" "$TMP" > "$OSRC_HOME/done/c-2.json"; : > "$OSRC_HOME/cloud/c-2.done.sh"; echo "1 done" > "$OSRC_HOME/done/c-2.checkcache"
 lib cmd_lane rm c-2 >/dev/null 2>&1
+[ ! -e "$OSRC_HOME/done/c-2.json" ] && [ ! -e "$OSRC_HOME/done/c-2.checkcache" ] && [ ! -e "$OSRC_HOME/cloud/c-2.done.sh" ] && [ -f "$OSRC_HOME/done/c-1.json" ] \
+  && ok "lane rm drops its done contract and probe script, nothing of other lanes" || no "lane rm left the done contract: $(ls "$OSRC_HOME/done" "$OSRC_HOME/cloud")"
 [ ! -e "$OSRC_HOME/cloud/c-2.verify.git" ] && [ -d "$OSRC_HOME/cloud/c-1.verify.git" ] && ok "lane rm deletes its own verify clone only" || no "lane rm verify clone: $(ls "$OSRC_HOME/cloud")"
 dry="$(lib cmd_cleanup 2>&1)"
 case "$dry" in *"gone-1"*) ok "cleanup dry run lists the orphan clone" ;; *) no "dry run: $dry" ;; esac

@@ -290,31 +290,7 @@ _osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen input
   while IFS= read -r p; do [ -n "$p" ] && [ "$p" != x ] && deps+=("$p"); done <<EOF
 $(_osrc_hub_scr_deps "$1")
 EOF
-  _osrc_hub_mt "${deps[@]}"
-}
-
-# _osrc_hub_scr_refresh_bg <id> <activity>: detached re-read; one per lane at a time via a lock dir.
-# Serving code never waits on it — the served stale read is replaced in place for the next export.
-_osrc_hub_scr_refresh_bg() { # <id> <activity>
-  local id="$1" act="$2" pf="$OSRC_HOME/hub/cache/scr/$1"
-  mkdir -p "${pf%/*}" 2>/dev/null || return 1
-  if [ -d "$pf.lock" ]; then
-    # a crashed refresh leaves the dir behind; clear one older than a minute
-    [ -z "$(find "$pf.lock" -maxdepth 0 -mmin -1 2>/dev/null)" ] && rmdir "$pf.lock" 2>/dev/null
-  fi
-  mkdir "$pf.lock" 2>/dev/null || return 1
-  ( _osrc_hub_close_fds
-    local out dep
-    out="$(_osrc_hub_raw_sv_target_screen "$id" 2>/dev/null)" || out=""
-    if [ -n "$out" ]; then
-      dep="$(_osrc_hub_scr_dep_epoch "$id")"; case "$dep" in ''|*[!0-9]*) dep=0 ;; esac
-      { printf '%s %s %s\n' "$act" "$dep" "$(date +%s)"; printf '%s\n' "$out"; } > "$pf.$$" 2>/dev/null \
-        && mv -f "$pf.$$" "$pf" 2>/dev/null
-      rm -f "$pf.$$" 2>/dev/null
-    fi
-    rmdir "$pf.lock" 2>/dev/null
-  ) </dev/null >/dev/null 2>&1 &
-  return 0
+  _osrc_hub_mt ${deps[@]+"${deps[@]}"}
 }
 
 _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller must compute
@@ -345,18 +321,11 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
   # read is queued for ONE deferred worker (_osrc_hub_scr_flush_wanted, run at export end) rather
   # than forked here: live pane reads hammering the tmux server mid-export stall the export's own
   # tmux calls. Screen state is a display input; supervise confirms quiet lanes on its own cadence.
-  if [ -n "${_OSRC_HUB_MEMO:-}" ]; then
-    printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
-  else
-    _osrc_hub_scr_refresh_bg "$id" "$act" || true
-  fi
+  printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "scr.$id.swr"
   tail -n +2 "$pf" 2>/dev/null
 }
 
-# _osrc_hub_scr_flush_wanted: run once at export end (still inside the memo, so the raw reader is
-# defined). Re-reads every queued lane in ONE detached worker: the export never pays the pane reads
-# and the next export serves fresh screens.
 # _osrc_hub_close_fds: first call of a detached worker. Bash keeps a saved copy of a redirected fd
 # (`fn > file`, single-flight's `"$@" > out`) on a high fd; a worker forked inside inherits it and holds
 # the caller's `$(...)` or the server's pipe open until it exits, so the export waited for the worker.
@@ -369,6 +338,9 @@ _osrc_hub_close_fds() {
   return 0
 }
 
+# _osrc_hub_scr_flush_wanted: run once at export end (still inside the memo, so the raw reader is
+# defined). Re-reads every queued lane in ONE detached worker: the export never pays the pane reads
+# and the next export serves fresh screens.
 _osrc_hub_scr_flush_wanted() {
   local wf="$OSRC_HOME/hub/cache/scr/.wanted.$$" dwf="$OSRC_HOME/hub/cache/scr/.dwant.$$"
   [ -s "$wf" ] || [ -s "$dwf" ] || return 0
@@ -569,10 +541,12 @@ _osrc_hub_ended_lanes_fast() {
 $(jq -r '[(input_filename | sub(".*/";"") | sub("\\.json$";"")), (.spec // ""), (.cwd // "")] | @tsv' $dlist 2>/dev/null | awk -F'\t' '$2 ~ /^file:/')
 EOF
     fi
-    cut -f3 "$depf" | tr '\n' '\0' | xargs -0 stat -f '%m %N' > "$mtf" 2>/dev/null || stat -f '%m %N' $(cut -f3 "$depf") > "$mtf" 2>/dev/null || : > "$mtf"
-    stale="$(awk 'NR==FNR { m=$0; sub(/ .*/,"",m); p=$0; sub(/^[^ ]+ /,"",p); mt[p]=m+0; next }
+    # GNU first: GNU `stat -f` is filesystem status, so the lane cache only ever expired by TTL.
+    local sfl=-c sfm='%Y %n'; stat -c %Y "$depf" >/dev/null 2>&1 || { sfl=-f; sfm='%m %N'; }
+    cut -f3 "$depf" | tr '\n' '\0' | xargs -0 stat "$sfl" "$sfm" > "$mtf" 2>/dev/null
+    stale="$(awk -F'\t' 'NR==FNR { m=$0; sub(/ .*/,"",m); p=$0; sub(/^[^ ]+ /,"",p); mt[p]=m+0; next }
       { if ($2=="C") cmt[$1]=mt[$3]+0; else if ((mt[$3]+0) > dm[$1]) dm[$1]=mt[$3]+0 }
-      END { for (i in cmt) if (dm[i] > cmt[i]) print i }' -F'\t' "$mtf" "$depf" 2>/dev/null)"
+      END { for (i in cmt) if (dm[i] > cmt[i]) print i }' "$mtf" "$depf" 2>/dev/null)"
     for id in $cand; do case "$_nl$stale$_nl" in *"$_nl$id$_nl"*) ;; *) valid="$valid $id" ;; esac; done
   fi
   # Phase 3: assemble in ended_ids order — cached lanes read their records, the rest rebuild

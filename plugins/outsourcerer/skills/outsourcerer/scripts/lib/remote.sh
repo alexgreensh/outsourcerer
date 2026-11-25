@@ -230,10 +230,18 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   if _osrc_msg_ready "$msg" "$marker" || printf '%s\n' "$names" | grep -qxE "$marker|$id\\.$marker"; then
     ready=true
   fi
+  # A push that writes the lane's own <id>.READY or <id>.RESULT onto a tree carrying both (a RESULT
+  # committed after its READY) is a finished lane: never stalled (see osrc_remote_events).
+  local tree="" fin=false
+  if [ "$ready" != true ] && printf '%s\n' "$names" | grep -qxF -e "$id.READY" -e "$id.RESULT"; then
+    if [ "$transport" = gh ]; then tree="$(_osrc_net gh api "repos/$url/git/trees/$head" --jq '.tree[].path' 2>/dev/null)"
+    else tree="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"; fi
+    printf '%s\n' "$tree" | grep -qxF "$id.READY" && printf '%s\n' "$tree" | grep -qxF "$id.RESULT" && fin=true
+  fi
   sha7="${head:0:7}"
   _osrc_jq_set "$f" --arg head "$head" --arg msg "$(printf '%s' "$msg" | head -1 | cut -c1-160)" \
-    --argjson now "$now" --argjson ready "$ready" \
-    '.head=$head | .head_msg=$msg | .last_push_ts=$now | .head_ready=$ready'
+    --argjson now "$now" --argjson ready "$ready" --argjson fin "$fin" \
+    '.head=$head | .head_msg=$msg | .last_push_ts=$now | .head_ready=$ready | .tip_finished=$fin'
   # a push invalidates reviews of older heads, whether or not the new head is READY
   type _osrc_review_supersede >/dev/null 2>&1 && _osrc_review_supersede "$id" "$head"
   if [ "$ready" = true ]; then
@@ -416,7 +424,7 @@ osrc_remote_events() {
            fi ;;
       esac
     fi
-    if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ]; then
+    if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ] && [ "$(jq -r '.tip_finished // false' "$f")" != true ]; then
       last_move="$(jq -r '.last_push_ts // .created_ts' "$f")"
       vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
       [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
@@ -526,6 +534,7 @@ _osrc_lane_rm() {
   rm -f "$(_osrc_lane_json "$id")"
   rm -rf "$OSRC_HOME/remote/$id.git" "$OSRC_HOME/remote/$id.lock" "$OSRC_HOME/remote/.ev/$id"
   rm -rf "$OSRC_HOME/cloud/$id.verify.git"   # the done check's scratch clone (lib/cloudrun.sh), ~70 MB
+  rm -f "$OSRC_HOME/cloud/$id.done.sh"; ! type osrc_done_clear >/dev/null 2>&1 || osrc_done_clear "$id"   # else a later done read re-clones it
   # exactly <id>-<sha7>: a bare "$id-*" glob would also hit lane "$id-other"
   for w in "$OSRC_HOME/remote/wt/$id"-$h7; do [ -e "$w" ] && rm -rf "$w"; done
   for w in "$OSRC_HOME/remote/$id"-$h7.check.log "$OSRC_HOME/remote/$id"-$h7.rc; do [ -e "$w" ] && rm -f "$w"; done

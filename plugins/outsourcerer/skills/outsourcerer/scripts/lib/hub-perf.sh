@@ -81,12 +81,14 @@ _osrc_hub_memo_begin() {
   # Done contracts, once per lane. check:/pr: answer from their last verdict (the probe clones or asks
   # the network) and are queued for the export's detached worker (_osrc_hub_scr_flush_wanted), which
   # refreshes the verdict for the next export. A synchronous probe here cost 3-6 s per cloud lane.
+  # So a pr: merged since its last verdict reads done one export later.
   case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_done_state "*)
     osrc_done_state() {
-      local m="$_OSRC_HUB_MEMO/done/${1:-}" v spec
+      local m="$_OSRC_HUB_MEMO/done/${1:-}" v spec="" cwd=""
       _osrc_hub_slug_ok "${1:-}" || { _osrc_hub_rawosrc_done_state "$@"; return; }
       [ -f "$m" ] && { cat "$m"; return 0; }
-      spec=""; [ -f "$(_osrc_done_dir)/$1.json" ] && spec="$(jq -r '.spec // empty' "$(_osrc_done_dir)/$1.json" 2>/dev/null)"
+      [ -f "$(_osrc_done_dir)/$1.json" ] && { IFS= read -r spec; IFS= read -r cwd; } < <(jq -r '.spec // "", .cwd // ""' "$(_osrc_done_dir)/$1.json" 2>/dev/null)
+      case "$spec" in check:*) [ -d "$cwd" ] || spec="" ;; esac   # error cwd-missing, not the old verdict
       case "$spec" in
         check:*|pr:*)
           v="$(_osrc_done_cache_peek "$1" 2>/dev/null)"; v="${v:-not-done}"
@@ -130,7 +132,7 @@ _osrc_hub_scr_read() {
   while IFS= read -r p; do [ -n "$p" ] && dl+=("$p"); done <<EOF
 $deps
 EOF
-  key="$(printf '%s\n@deps\n%s' "$cap" "$deps" | cksum | tr ' ' _) $(_osrc_hub_mt "${dl[@]}")"
+  key="$(printf '%s\n@deps\n%s' "$cap" "$deps" | cksum | tr ' ' _) $(_osrc_hub_mt ${dl[@]+"${dl[@]}"})"
   if [ -f "$pf" ] && [ ! -L "$pf" ] && IFS= read -r k0 < "$pf" && [ "$k0" = "$key" ]; then
     tail -n +2 "$pf"; return 0
   fi
@@ -196,7 +198,7 @@ _osrc_hub_lane_live_fields() {
 # $OSRC_HOME/hub/cache/<slug>.json holds the last doc of a project with nothing that can move on its own:
 # no live lane, no tmux session, no remote lane, every lane terminal. It is reused while no input under
 # the project is newer than the cache file and it is under an hour old. Anything live is rebuilt.
-_OSRC_HUB_CACHE_V=6   # r6: derived card (.derived, .reported), no idle fallback before _osrc_hub_truth
+_OSRC_HUB_CACHE_V=7   # r7: board percent keeps the report (pctSource); r6 docs carry a zeroed pct
 
 _osrc_hub_cache_paths() { # <slug> -> every file or dir whose change invalidates the project
   local slug="$1" t id rf
