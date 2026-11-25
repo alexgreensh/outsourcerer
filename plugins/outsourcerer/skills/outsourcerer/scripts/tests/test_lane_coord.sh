@@ -79,13 +79,13 @@ as laneB osrc_lane_msg laneA "behind a lock" >/dev/null 2>&1
 _state_lock_acquire() { return 1; }
 as laneA osrc_lane_inbox > "$TMP/busy.out" 2>"$TMP/busy.err"; rc=$?
 unset -f _state_lock_acquire; OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1
-[ "$rc" != 0 ] && ! grep -q 'no unread' "$TMP/busy.out" && grep -q busy "$TMP/busy.err" \
+[ "$rc" != 0 ] && ! grep -q 'no unread' "$TMP/busy.out" && grep -q busy "$TMP/busy.err" && grep -q -- '--peek' "$TMP/busy.err" \
   && ok "a busy cursor lock says busy, not 'no unread'" || bad "busy lock: rc=$rc out=$(cat "$TMP/busy.out")"
 as laneA osrc_lane_inbox >/dev/null 2>&1
-# Exit 125 when the starter is gone (asserted by code, not by text).
-OSRC_JOB_DIR="$OSRC_JOBS/laneA" sh -c '"$1" lane inbox --wait --timeout 60 >/dev/null 2>&1 & echo $! > "$2"; sleep 1' _ "$SRC" "$TMP/p125"
-i=0; while kill -0 "$(cat "$TMP/p125")" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-kill -0 "$(cat "$TMP/p125")" 2>/dev/null && { bad "125 waiter outlived parent"; kill "$(cat "$TMP/p125")"; } || ok "orphaned waiter exits (125 path)"
+# Exit 125 when the starter is gone: the function runs in-process, so its own return code is recorded.
+OSRC_JOB_DIR="$OSRC_JOBS/laneA" sh -c 'bash -c "OSRC_SOURCED=1 . \"\$0\" >/dev/null 2>&1; osrc_lane_inbox --wait --timeout 60 2>/dev/null; echo \$? > \"\$1\"" "$1" "$2" & sleep 1' _ "$SRC" "$TMP/rc125"
+i=0; while [ ! -s "$TMP/rc125" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
+[ "$(cat "$TMP/rc125" 2>/dev/null)" = 125 ] && ok "orphaned waiter returns 125" || bad "orphaned waiter rc=[$(cat "$TMP/rc125" 2>/dev/null)]"
 
 echo "== file leases =="
 R="$TMP/repo"; git init -q "$R"; git -C "$R" -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m init
@@ -110,24 +110,22 @@ as laneB osrc_lease release src/a.ts >/dev/null 2>&1 && bad "non-holder released
 as laneA osrc_lease release src/a.ts >/dev/null 2>&1 && as laneB osrc_lease claim src >/dev/null 2>&1 \
   && ok "release frees the path" || bad "release did not free the path"
 
-# Expiry and heartbeat renewal.
+# Expiry and renewal by the holder's own calls.
 REPO="$(_osrc_lease_repo .)"
 _osrc_lease_claim deadlane "$REPO" lib/x.sh
 jq -c --argjson u "$(( $(date +%s) - 1 ))" 'map(if .holder == "deadlane" then .until = $u else . end)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
 _osrc_lease_claim laneA "$REPO" lib/x.sh >/dev/null 2>&1 && ok "a lapsed lease expires on its own" || bad "expired lease still blocks"
 soon=$(( $(date +%s) + 30 ))   # about to lapse; only a renewal can push one past 30 s
 until_of() { jq -r --arg p "$1" '.[] | select(.path==$p) | .until' "$OSRC_HOME/leases.json"; }
-# An idle lane (tmux session alive, no calls) must not hold leases forever: nothing renews them.
-type _osrc_lease_renew_live >/dev/null 2>&1 && bad "a beacon still renews idle lanes' leases" || ok "no beacon renewal: an idle lane's leases run out"
 # A live holder renews its own leases through its own calls, beacon or not (Git Bash has none).
 as laneA osrc_lease claim own/file >/dev/null 2>&1
 jq -c --argjson u "$soon" 'map(.until = $u)' "$OSRC_HOME/leases.json" > "$TMP/l.json" && mv "$TMP/l.json" "$OSRC_HOME/leases.json"
 as laneA osrc_lane_inbox >/dev/null 2>&1
 [ "$(until_of own/file)" -gt "$soon" ] 2>/dev/null && ok "lane inbox renews the caller's own leases" || bad "own call did not renew"
-# A TTL shorter than two heartbeat beats is raised, so a live lane never lapses between beats.
-as laneB osrc_lease claim short/ttl --ttl 1 >/dev/null 2>&1
-[ "$(jq -r '.[] | select(.path=="short/ttl") | .until - .ts' "$OSRC_HOME/leases.json")" -ge 660 ] 2>/dev/null \
-  && ok "--ttl 1 is raised to the minimum" || bad "short TTL kept: $(jq -c '.[] | select(.path=="short/ttl")' "$OSRC_HOME/leases.json")"
+# A short TTL is kept as asked: nothing beats for leases, so no heartbeat knob stretches it.
+OSRC_HEARTBEAT_CADENCE=3600 as laneB osrc_lease claim short/ttl --ttl 1 >/dev/null 2>&1
+[ "$(jq -r '.[] | select(.path=="short/ttl") | .until - .ts' "$OSRC_HOME/leases.json")" = 60 ] \
+  && ok "--ttl 1 is one minute" || bad "short TTL changed: $(jq -c '.[] | select(.path=="short/ttl")' "$OSRC_HOME/leases.json")"
 as laneB osrc_lease claim octal/ttl --ttl 08 >/dev/null 2>"$TMP/oct.err" && ok "--ttl 08 is decimal" || bad "--ttl 08: $(cat "$TMP/oct.err")"
 
 # Spellings of one file, a glob against a directory, the repo root, paths outside the repo.
@@ -173,9 +171,11 @@ as laneB osrc_lease claim dots/sub/here.c >/dev/null 2>&1; [ $? = 3 ] && ok "'./
 as laneA osrc_lease claim 'br/[id]/page.tsx' >/dev/null 2>&1
 as laneB osrc_lease claim br/other.tsx >/dev/null 2>&1 && ok "a '[' name does not lock its siblings" || bad "[id] treated as a glob"
 as laneB osrc_lease claim 'br/[id]/page.tsx' >/dev/null 2>&1; [ $? = 3 ] && ok "the '[' name itself stays protected" || bad "[id] file not protected"
-# Idle lane: the orchestrator-visible expiry. A lease past its until is gone.
 # Repo key is one spelling for the main checkout and a worktree.
 [ "$(_osrc_lease_repo "$R")" = "$(_osrc_lease_repo "$TMP/wt")" ] && ok "main checkout and worktree share a repo key" || bad "repo keys differ"
+# git printing an absolute common dir through a symlink (Git Bash style) still gives the physical key.
+k="$( git() { case "$*" in *--git-common-dir*) printf '%s\n' "$TMP/link/.git" ;; *) command git "$@" ;; esac; }; _osrc_lease_repo "$R" )"
+[ "$k" = "$(cd "$R/.git" && pwd -P)" ] && ok "a symlinked absolute common dir gives the physical repo key" || bad "repo key through symlink: $k"
 
 # Two lanes claiming one path at the same instant: exactly one wins.
 ( _osrc_lease_claim racer1 "$REPO" hot/file 2>/dev/null; echo $? > "$TMP/c1" ) &

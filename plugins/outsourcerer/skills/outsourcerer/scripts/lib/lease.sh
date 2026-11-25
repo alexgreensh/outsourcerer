@@ -22,9 +22,8 @@
 # src/*.ts and src/*.md).
 # Renewal: only a holder's own `lease`, `lane inbox` and `lane msg` calls push its leases out (a
 # waiting `lane inbox --wait` renews about once a minute). Nothing renews for a lane that went quiet,
-# so an idle or dead lane's leases run out on their own. A TTL is never shorter than two heartbeat
-# beats plus a minute. A ledger that does not parse is never rewritten: every
-# change is refused until someone moves it aside. Leases are advisory coordination, not a permission
+# so an idle or dead lane's leases run out on their own. A ledger that does not parse is never
+# rewritten: every change is refused until someone moves it aside. Leases are advisory coordination, not a permission
 # system.
 
 _osrc_lease_file() { printf '%s/leases.json' "$OSRC_HOME"; }
@@ -122,13 +121,6 @@ _osrc_lease_lock() {
   return 1
 }
 
-# The shortest TTL: two heartbeat beats plus a minute, so one missed beat never lapses a live lease.
-_osrc_lease_min_ttl() {
-  local c="${OSRC_HEARTBEAT_CADENCE:-300}"
-  case "$c" in ''|*[!0-9]*) c=300 ;; esac
-  printf '%s' $(( 2 * 10#$c + 60 ))
-}
-
 # _osrc_lease_claim <holder> <repo> <path> [ttl-secs] -> rc 0 claimed (or renewed: same holder,
 # same path), rc 3 refused (a line per conflicting lease on stderr), rc 1 ledger trouble.
 _osrc_lease_claim() {
@@ -136,7 +128,6 @@ _osrc_lease_claim() {
   case "$ttl" in ''|*[!0-9]*) ttl=0 ;; esac
   min="${OSRC_LEASE_TTL_MIN:-15}"; case "$min" in ''|*[!0-9]*) min=15 ;; esac
   ttl=$((10#$ttl)); [ "$ttl" -gt 0 ] || ttl=$(( 10#$min * 60 ))
-  min="$(_osrc_lease_min_ttl)"; [ "$ttl" -ge "$min" ] || ttl="$min"
   [ -n "$holder" ] && [ -n "$repo" ] && [ -n "$path" ] || return 1
   _osrc_lease_lock || return 1
   now="$(date +%s)"
@@ -236,9 +227,7 @@ osrc_lease() { # claim|release|list ...
     path="$(_osrc_lease_norm "$path" "$repo_dir")" || die "lease: the path must stay inside the repo (use . for the whole repo)"
   fi
   case "$ttl" in '') ;; *[!0-9]*) die "lease: --ttl takes whole minutes" ;; *) ttl=$((10#$ttl * 60))
-    [ "$ttl" -gt 0 ] || die "lease: --ttl takes whole minutes"
-    min="$(_osrc_lease_min_ttl)"
-    [ "$ttl" -ge "$min" ] || printf 'lease: --ttl raised to %s s, two heartbeat beats plus a minute\n' "$min" >&2 ;;
+    [ "$ttl" -gt 0 ] || die "lease: --ttl takes whole minutes" ;;
   esac
   _osrc_lease_touch "$holder"
   if [ "$sub" = claim ]; then

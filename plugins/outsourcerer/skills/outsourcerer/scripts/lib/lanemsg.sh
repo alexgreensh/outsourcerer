@@ -360,7 +360,7 @@ osrc_lane_inbox() {
   "$touch" "$self"
   if [ "$wait" = 0 ]; then
     _ol_inbox_drain "$self" "$kind" "$peek"; rc=$?
-    [ "$rc" -ne 2 ] || { printf 'lane inbox: busy (the read cursor is locked); try again\n' >&2; return 1; }
+    [ "$rc" -ne 2 ] || { printf 'lane inbox: busy (the read cursor is locked); try again, or read without marking: lane inbox --peek\n' >&2; return 1; }
     [ "$rc" -eq 0 ] || { _ol_inbox_header "$self"; printf '(no unread lane messages)\n'; }
     return 0
   fi
