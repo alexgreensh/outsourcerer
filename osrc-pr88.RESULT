@@ -1,6 +1,0 @@
-sha=45d3e2501daa8c290eea406d7c7b4b8cd3e3ff5f
-rc=1
-Full conformance (run once, at c5dddfa) exited 1: RESULT 254 passed, 7 failed, 13 skipped. Four failures were fallout from this lane and are fixed
-and re-run alone (test_devin_alias_resolution, test_devin_free_guard, test_devin_edit_note, test_no_pipe_grep_q).
-Three also fail on base 45d3e25 in this root container (test_harness_isolation, test_vocab_hygiene, test_parity_insource_refresh).
-PR #88 vetted clean and merged; P1 fixed (gate == launch id) plus 4 more paid-as-free holes, each with a regression test. Lane head: 5470f8a (READY commit follows).
