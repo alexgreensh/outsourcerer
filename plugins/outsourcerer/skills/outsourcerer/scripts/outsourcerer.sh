@@ -16477,7 +16477,7 @@ _session_registry_reap_one_if_current() { # <id> <pid> <pid-start> <generation>
       model="$(printf '%s' "$latest" | jq -r '.model // .requested_model // empty')"
       effort="$(printf '%s' "$latest" | jq -r '.effort // empty')"
       resolved="$(printf '%s' "$latest" | jq -r '.resolved_model // .model // empty')"
-      SESSION_NAME="$id" _session_registry_append end "$provider" "$model" "$effort" ended crash-reap "$resolved" "$generation" 1 || rc=1
+      SESSION_NAME="$id" _session_registry_append end "$provider" "$model" "$effort" ended crash-reap "$resolved" "$generation" 1 || rc=1; rm -f "$(SESSION_NAME="$id" _session_mcp_copy)" 2>/dev/null
     fi
   fi
   _state_lock_release "$OSRC_SESSION_REGISTRY"

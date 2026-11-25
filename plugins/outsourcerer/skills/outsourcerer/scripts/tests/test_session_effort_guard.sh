@@ -266,6 +266,11 @@ grep -q 'MAX_THINKING_TOKENS=24000' <<<"$Relaunch_out" \
   && ok "cc relaunch carries env cap + --effort high + --continue" \
   || bad "cc relaunch missing session-scoped effort/continue: [$Relaunch_out]"
 
+grep -qF -- "--strict-mcp-config --mcp-config $(printf %q '{"mcpServers":{}}')" <<<"$Relaunch_out" \
+  && ok "cc relaunch stays lean (no user MCP servers) like session start" || bad "cc relaunch lost lean mode: [$Relaunch_out]"
+Relaunch_full="$(OSRC_SESSION_MCP=full _session_relaunch_cc fable high 2>/dev/null)"
+case "$Relaunch_full" in *strict-mcp-config*) bad "OSRC_SESSION_MCP=full relaunch still lean" ;; *) ok "OSRC_SESSION_MCP=full relaunch keeps the full set" ;; esac
+
 Relaunch_min="$(_session_relaunch_cc fable minimal 2>/dev/null)"
 grep -q -- '--effort low' <<<"$Relaunch_min" \
   && grep -q 'MAX_THINKING_TOKENS=0' <<<"$Relaunch_min" \

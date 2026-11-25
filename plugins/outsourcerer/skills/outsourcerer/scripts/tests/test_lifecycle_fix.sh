@@ -230,6 +230,19 @@ SH
 ) && ok "effort relaunch records a live generation before reap and remains steerable" \
   || bad "effort relaunch left the old dead generation for the reaper"
 
+# A crash reap removes the session's private MCP config copy (it can hold server tokens).
+(
+  set --
+  export OSRC_HOME="$TMP/reap-mcp-home" OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
+  mkdir -p "$OSRC_HOME/sessions"
+  . "$SRC" >/dev/null 2>&1
+  dead_pid="$(osrc_test_dead_pid)"
+  jq -cn --argjson pid "$dead_pid" '{schema_version:"1",event:"start",session_id:"reap-mcp",provider:"cc",model:"opus",model_generation:1,state:"running",receipt:"r",endpoint:"tmux:reap-mcp",harness_pid:($pid|tostring),pid_start:"Mon Jan 1 00:00:00 2024",owner:"managed",ts:"2026-01-01T00:00:00Z"}' > "$OSRC_SESSION_REGISTRY"
+  echo '{"mcpServers":{"x":{"env":{"TOKEN":"t"}}}}' > "$OSRC_HOME/sessions/mcp-reap-mcp.json"
+  _session_registry_reap_one_if_current reap-mcp "$dead_pid" "Mon Jan 1 00:00:00 2024" 1 >/dev/null 2>&1
+  grep -q '"receipt":"crash-reap"' "$OSRC_SESSION_REGISTRY" && [ ! -e "$OSRC_HOME/sessions/mcp-reap-mcp.json" ]
+) && ok "a crash reap removes the private MCP config copy" || bad "crash reap left the MCP config copy (or did not reap)"
+
 # Every non-start registry event must preserve the last known process identity.
 (
   set --

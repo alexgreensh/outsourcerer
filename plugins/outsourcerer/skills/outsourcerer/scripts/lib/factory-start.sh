@@ -103,8 +103,7 @@ EOF
       [ "$k2" != "$key" ] || break
       cp="$(_osrc_fs_conflict "$(_osrc_fs_files "$files")" "$(_osrc_fs_files "$f2")")"
       [ -n "$cp" ] || continue
-      printf '  note: %s and %s both touch %s. Each branches from the plan base, so they may conflict when landed; after=%s only delays %s, it does not give it %s'"'"'s commits.\n' \
-        "$key" "$k2" "$cp" "$k2" "$key" "$k2"
+      printf '  note: %s and %s both touch %s\n' "$key" "$k2" "$cp"
     done <<EOF
 $rows
 EOF
@@ -135,6 +134,10 @@ cmd_plan_start() {
   _osrc_fs_order "$rows"
   [ "$dry" = 0 ] || { echo "(dry run: nothing was created)"; return 0; }
   if [ -f "$(_plan_dir "$plan")/plan.json" ]; then
+    _task_list "$plan" | _osrc_fp_jq -e --argjson ks "$(printf '%s\n' "$rows" | cut -d "$(printf '\036')" -f1 | jq -R . | jq -cs .)" \
+      'any(.[]; .title as $t | $ks | index($t))' >/dev/null 2>&1 \
+      || die "plan start: plan '$plan' already exists and none of its tasks are in $file. Pick a new plan name (or add tasks with task add)."
+    [ -z "$goal" ] || echo "plan '$plan' exists, so --goal is ignored (the plan keeps its goal)."
     reuse=1; echo "plan '$plan' exists; tasks already in it are kept, the rest are added."
   else _plan_cli_new "$plan" ${goal:+--goal "$goal"} >/dev/null || return 1; fi
   us="$(printf '\037')"

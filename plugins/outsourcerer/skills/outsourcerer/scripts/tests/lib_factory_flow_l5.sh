@@ -40,7 +40,7 @@ for t in t1 t2 t3; do _task_update cap "$t" '.state = "done"' >/dev/null; done
 _task_update cap t4 '.retries = 9' >/dev/null
 echo "VERDICT: FAIL - still broken" > "$TMP/lasttxt-t5"
 out="$( cmd_plan_run cap --interval 1 2>&1 )"; rc=$?
-esc="$OSRC_HOME/plans/cap/escalations/t5.json"
+esc="$OSRC_HOME/plans/cap/escalations/t5-r4.json"
 [ "$rc" = 3 ] && [ "$(cat "$TMP/count-cap-t5")" = 3 ] && [ "$(st cap t5)" = held ] && jq -e '.round == 4 and .approved == false' "$esc" >/dev/null \
   && _task_get cap t5 | jq -e '(.hold.reason | test("review cap is 3")) and (.hold.reason | test("approved") | not)' >/dev/null \
   && ok "L5-3: round four is held after three reviews; the record is pending and nothing asks to edit it" || bad "L5-3: rc=$rc reviews=$(cat "$TMP/count-cap-t5") $(_task_get cap t5 | jq -c '{state,review_rounds,hold}') $out"
@@ -50,6 +50,16 @@ rm -f "$TMP/lasttxt-t5"; setlt cap t5 "VERDICT: PASS" 4
 ( cmd_plan_run cap --interval 1 >/dev/null 2>&1 )
 [ "$(cat "$TMP/count-cap-t5")" = 4 ] && jq -e '.approved == true and .status == "approved" and .answer == "fixture fixed upstream"' "$esc" >/dev/null \
   && ok "L5-3: task release runs round four and stamps the escalation record approved" || bad "L5-3 release: reviews=$(cat "$TMP/count-cap-t5") $(st cap t5) $(cat "$esc")"
+
+r5="$(_osrc_fp_escalation_write cap t5 5 "round 5 after FAIL: again")"
+_osrc_fp_escalation_approve cap t5 "second answer"
+[ "$r5" = "$OSRC_HOME/plans/cap/escalations/t5-r5.json" ] && jq -e '.answer == "fixture fixed upstream"' "$esc" >/dev/null \
+  && jq -e '.round == 5 and .approved == true and .answer == "second answer"' "$r5" >/dev/null \
+  && ok "L5-3: each round keeps its own record; a later approval stamps only the newest" || bad "L5-3 rounds: $(cat "$esc") $(cat "$r5" 2>/dev/null)"
+# The profile reader stops matching without closing its pipe early (no 'Broken pipe' noise).
+{ echo '[gate]'; echo 'k = first'; for i in $(seq 1 3000); do echo "k$i = v$i"; done; } > "$TMP/big.profile"
+e="$( OSRC_FACTORY_PROFILE="$TMP/big.profile" _osrc_fp_get gate k 2>&1 >/dev/null )"; v="$( OSRC_FACTORY_PROFILE="$TMP/big.profile" _osrc_fp_get gate k 2>/dev/null )"
+[ "$v" = first ] && [ -z "$e" ] && ok "L5: the profile reader prints the first match and writes nothing to stderr" || bad "L5 profile reader: v=$v err=$e"
 
 # Launch cap and gate settings.
 [ "$(OSRC_FACTORY_PARALLEL=5 _osrc_fp_max_parallel)" = 5 ] && ok "L5: the cap reads OSRC_FACTORY_PARALLEL" || bad "L5 cap env"
@@ -77,7 +87,9 @@ out="$( calm; OSRC_FACTORY_GATE="/x/g.sh --fast"; _osrc_fp_gate_can_run 2>&1; _o
 # A loaded Mac on its usual high swap ratio still launches; only its own threshold pauses (P2 4).
 ( calm; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=85 (load1=4 cores=8 swap=850M/1000M)'; }; _osrc_fp_gate_can_run ) \
   && ok "L5: macOS swap at 85% does not pause plan launches" || bad "L5: 85% swap paused launches"
-out="$( calm; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=97 (load1=4 cores=8 swap=970M/1000M)'; }; _osrc_fp_gate_can_run || echo "$_OSRC_FP_GATE_REASON" )"
+( calm; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=97 (load1=4 cores=8 swap=970M/1000M)'; }; _osrc_fp_gate_can_run ) \
+  && ok "L5: the swap check is off by default (a healthy Mac sits at 90%+ swap)" || bad "L5: 97% swap paused launches with no setting"
+out="$( calm; export OSRC_FACTORY_SWAP_MAX_PCT=95; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=97 (load1=4 cores=8 swap=970M/1000M)'; }; _osrc_fp_gate_can_run || echo "$_OSRC_FP_GATE_REASON" )"
 grep -q 'swap is 97% used, over 95% (OSRC_FACTORY_SWAP_MAX_PCT' <<<"$out" && ok "L5: macOS swap over its own threshold pauses and names the reading and setting" || bad "L5 swap: $out"
 out="$( calm; _osrc_fp_load1() { echo 12.00; }; _osrc_fp_gate_can_run || echo "$_OSRC_FP_GATE_REASON" )"
 grep -q 'load is 12.00 on 4 cores (3.00 per core), over 2 per core (OSRC_FACTORY_LOAD_MAX' <<<"$out" && ok "L5: high load pauses and names OSRC_FACTORY_LOAD_MAX" || bad "L5 load: $out"
@@ -129,6 +141,10 @@ out="$( cd "$REPO" && OSRC_FACTORY_CHECK="git diff --check" cmd_plan_start ps "$
   && _task_get ps t4 | jq -e '.files == ["src/api/util.sh"] and .shape == "ship" and .check == "git diff --check"' >/dev/null \
   && ok "L5: plan start adds every task and launches the independent ones together" || bad "L5 plan start rc=$rc launches=$(cat "$TMP/launches") $out"
 for t in t1 t2 t3 t4; do rm -f "$TMP/outcomes/$t"; done
+printf 'other | something unrelated\n' > "$TMP/typo.txt"; n0="$(_task_list ps | jq length)"
+out="$( cd "$REPO" && cmd_plan_start ps "$TMP/typo.txt" 2>&1 )" && bad "L5: plan start reused a plan with no shared task" \
+  || { [ "$(_task_list ps | jq length)" = "$n0" ] && grep -q 'already exists and none of its tasks' <<<"$out" \
+       && ok "L5: plan start refuses an existing plan that shares no task, and adds nothing" || bad "L5 reuse: $out"; }
 printf 'a | x\nb | y | after=c\nc | z\n' > "$TMP/bad.txt"
 ( cd "$REPO" && cmd_plan_start pbad "$TMP/bad.txt" ) >/dev/null 2>&1 && bad "L5: forward after= accepted" || { [ ! -d "$OSRC_HOME/plans/pbad" ] && ok "L5: after= must name an earlier line; nothing is created" || bad "L5: bad list left a plan"; }
 printf 'a | x\nb | y | after=*\n' > "$TMP/bad.txt"

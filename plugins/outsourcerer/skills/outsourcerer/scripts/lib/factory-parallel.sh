@@ -8,12 +8,12 @@
 #   - resource gate: before each launch pass. Profile `gate`/OSRC_FACTORY_GATE names a script run as
 #     `<gate> can-run` (rc1 pauses; other failures fail open). Built in: the launch path's own disk
 #     gate (_osrc_disk_gate, cleanup ack included), 1-minute load per core over OSRC_FACTORY_LOAD_MAX
-#     (2), and on macOS swap use over OSRC_FACTORY_SWAP_MAX_PCT (95). OSRC_FACTORY_GATE=off turns every
+#     (2), and on macOS swap use over OSRC_FACTORY_SWAP_MAX_PCT (off by default). OSRC_FACTORY_GATE=off turns every
 #     gate off. A gate only delays launches; it never fails a task.
 #   - held decisions with --default and --until apply the default at the deadline unless the hold is
 #     --risk irreversible|paid|publish (or any unknown label): those wait for the captain.
 #   - review cap: OSRC_FACTORY_REVIEW_ROUNDS (3); a further round waits for the captain's release,
-#     recorded in <plan>/escalations/<reviewer>.json (pending, then approved on release).
+#     recorded in <plan>/escalations/<reviewer>-r<round>.json (pending, then approved on release).
 #   - optional per-repo profile <repo>/.outsourcerer.toml ([factory] check, gate, parallel;
 #     [factory.heavy] "cmd" = "where"; [factory.bench] "path/" = true). Read line by line, never sourced.
 
@@ -72,7 +72,7 @@ _osrc_fp_profile() {
 
 # _osrc_fp_get <section> <key> -> the value, else nothing.
 _osrc_fp_get() {
-  _osrc_fp_profile | awk -F '\t' -v s="$1" -v k="$2" '$1 == s && $2 == k { print $3; exit }'
+  _osrc_fp_profile | awk -F '\t' -v s="$1" -v k="$2" '!f && $1 == s && $2 == k { print $3; f = 1 }'
 }
 
 # _osrc_fp_section <section> -> "key<TAB>value" lines under [<section>].
@@ -175,8 +175,8 @@ _osrc_fp_gate_can_run() {
     fi
   fi
   s="$(_osrc_fp_swap_pct)"
-  if _osrc_fp_over "$s" "${OSRC_FACTORY_SWAP_MAX_PCT:-95}"; then
-    _OSRC_FP_GATE_REASON="swap is ${s}% used, over ${OSRC_FACTORY_SWAP_MAX_PCT:-95}% (OSRC_FACTORY_SWAP_MAX_PCT; 0 turns it off)"; return 1
+  if _osrc_fp_over "$s" "${OSRC_FACTORY_SWAP_MAX_PCT:-0}"; then
+    _OSRC_FP_GATE_REASON="swap is ${s}% used, over ${OSRC_FACTORY_SWAP_MAX_PCT:-0}% (OSRC_FACTORY_SWAP_MAX_PCT; 0 turns it off)"; return 1
   fi
   return 0
 }
@@ -200,12 +200,15 @@ _osrc_fp_max_parallel() {
 
 # ---------------------------------------------------------------- review cap + escalation
 
-# _osrc_fp_esc_path <plan> <tid> -> the escalation record path for a task.
-_osrc_fp_esc_path() { printf '%s/escalations/%s.json' "$(_plan_dir "$1")" "$2"; }
+# _osrc_fp_esc_path <plan> <tid> <round> -> the escalation record for one round of a task. One file per
+# round keeps the audit trail: a FAIL in an approved round writes a new record, never over the old one.
+# "pending" means the captain has not released that round for a redo; a task closed another way
+# (task done --force, cancel, release --done) leaves it pending, which is still true.
+_osrc_fp_esc_path() { printf '%s/escalations/%s-r%s.json' "$(_plan_dir "$1")" "$2" "$3"; }
 
 # _osrc_fp_escalation_write <plan> <tid> <round> <reason> -> write a PENDING record of the ask, print its path.
 _osrc_fp_escalation_write() {
-  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
+  local f; f="$(_osrc_fp_esc_path "$1" "$2" "$3")"
   mkdir -p "$(dirname "$f")" 2>/dev/null || return 1
   _osrc_fp_jq -n --arg t "$2" --argjson r "$3" --arg reason "$4" --arg at "$(_factory_now)" \
     '{task:$t, round:$r, reason:$reason, status:"pending", approved:false, at:$at}' > "$f.tmp" 2>/dev/null \
@@ -214,10 +217,10 @@ _osrc_fp_escalation_write() {
 }
 
 # _osrc_fp_escalation_approve <plan> <tid> <answer> -> stamp a pending record approved by the captain's
-# release. No record, or one already decided: nothing to do.
+# release: the newest round's record. No record, or one already decided: nothing to do.
 _osrc_fp_escalation_approve() {
-  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
-  [ -f "$f" ] || return 0
+  local f; f="$(ls -1 "$(_plan_dir "$1")/escalations/$2"-r*.json 2>/dev/null | sed 's/.*-r\([0-9]*\)\.json$/\1 &/' | sort -n | tail -1 | cut -d' ' -f2-)"
+  [ -n "$f" ] && [ -f "$f" ] || return 0
   _osrc_fp_jq --arg a "$3" --arg at "$(_factory_now)" 'if .status != "pending" then . else .status = "approved"
     | .approved = true | .by = "captain (task release)" | .answer = $a | .approved_at = $at end' \
     "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null || rm -f "$f.tmp"
@@ -383,7 +386,7 @@ _ff_dispatch() {   # <plan> <max-parallel>
 # Review-round cap (lane osrc-l5): .review_rounds counts review rounds that FAILed and were sent back
 # (raised in the redo commit below, so a lost claim or failed launch never burns one). Past
 # OSRC_FACTORY_REVIEW_ROUNDS (default 3) the reviewer is held and a PENDING record is written at
-# <plan>/escalations/<reviewer>.json; the captain's `task release --answer` runs the round and
+# <plan>/escalations/<reviewer>-r<round>.json; the captain's `task release --answer` runs the round and
 # stamps that record approved.
 _ff_review_failed() (
   local plan="$1" vt="$2" tasks="$3" who="${4:-}" v r target n retries rstate landed br head out note vnote answer cmds pd

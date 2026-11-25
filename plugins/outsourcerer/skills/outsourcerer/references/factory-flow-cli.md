@@ -82,16 +82,16 @@ Drives a plan until it is finished or needs you. Each pass ("tick") does two thi
    - Resource gate, checked once per pass: a repo gate script (profile `gate` or `OSRC_FACTORY_GATE`: one path, no
      arguments, run as `<gate> can-run`; exit 1 pauses with its first output line as the reason, any other failure
      is ignored; a path that is not a file is ignored with one warning), then the launch disk gate (free disk under
-     `OSRC_DISK_MIN_GB`, 10, pauses until `cleanup --ack` acknowledges the ASK list, exactly as at launch), then
+     `OSRC_DISK_MIN_GB`, 10, pauses until free disk is back over the floor, exactly as at launch: free space, `cleanup --apply`, or `cleanup --ack` for an ASK list; `OSRC_DISK_MIN_GB=0` turns it off), then
      1-minute load per core over `OSRC_FACTORY_LOAD_MAX` (2), then on macOS swap use over
-     `OSRC_FACTORY_SWAP_MAX_PCT` (95; macOS grows swap on demand, so a high ratio alone is normal). The reason names
+     `OSRC_FACTORY_SWAP_MAX_PCT` (off by default: a healthy Mac sits at 90%+ because macOS grows swap on demand; set a percent to turn it on). The reason names
      the reading and the setting; 0 turns a check off. A paused pass starts nothing and fails nothing, and the
      reason prints when it changes. Missing readings never pause. `OSRC_FACTORY_GATE=off` turns the gate off.
      (Heavy commands use their own macOS thresholds, `OSRC_MAC_LOAD_MAX_PC`, 2, and `OSRC_MAC_SWAP_MAX_PCT`, 80.)
    - Review cap: `review_rounds` counts review rounds that failed and were sent back. A further round past
      `OSRC_FACTORY_REVIEW_ROUNDS` (default 3) holds the reviewer for the captain and writes a pending record at
-     `$OSRC_HOME/plans/<plan>/escalations/<reviewer-tid>.json`. `task release <reviewer> --answer "..."` runs the
-     round and stamps the record `"approved": true` with the answer.
+     `$OSRC_HOME/plans/<plan>/escalations/<reviewer-tid>-r<round>.json`, one per round. `task release <reviewer> --answer "..."` runs the
+     round and stamps the newest record `"approved": true` with the answer. "pending" means not released for a redo.
    - A launch failure counts as a failed attempt and is retried within the task's `retries`.
    - A brief too thin to act on is held before any worker starts, without using an attempt: a task with no prompt
      or title, or a hand-added ship task (not a flow stage) with no spec, no check, no dependency and no captain's
