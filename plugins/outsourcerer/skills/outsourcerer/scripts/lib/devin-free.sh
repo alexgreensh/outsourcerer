@@ -12,7 +12,10 @@
 # route_delegate used to gate RESOLVED_ID (the alias table's target, e.g. swe -> swe-1.7) while
 # delegate() re-parsed ORIG and resolved the raw -m token (swe) through the live catalog. The two
 # lookups could pick different variants, so a Free id was gated and a paid one launched.
-_OSRC_DV_LAUNCH_ID=""
+# _OSRC_DV_LAUNCH_FOR keys the id to the -m token it was resolved for: delegate() honours it only
+# for that same token, and consumes it (one gated id = one launch), so a later delegate() in the
+# same shell with a different -m (a retry, a sibling task) is resolved and gated afresh.
+_OSRC_DV_LAUNCH_ID=""; _OSRC_DV_LAUNCH_FOR=""
 
 # _osrc_dv_launch_token -> the -m token delegate()'s parse_model will read from ORIG (parsed in
 # a subshell with the SAME parser, so the prediction cannot drift), else route_delegate's MODEL
@@ -27,7 +30,7 @@ _osrc_dv_launch_token() {
 # this route: a bg pin launches verbatim, everything else through _devin_resolve_model. Called by
 # route_delegate right before the spend gate; delegate() launches this id without re-resolving.
 _osrc_dv_launch_prepare() {
-  local tok; tok="$(_osrc_dv_launch_token)"
+  local tok; tok="$(_osrc_dv_launch_token)"; _OSRC_DV_LAUNCH_FOR="$tok"
   if [ "${_OSRC_PIN_DISP:-}" = devin ]; then _OSRC_DV_LAUNCH_ID="$tok"
   else _OSRC_DV_LAUNCH_ID="$(_devin_resolve_model "$tok" 2>/dev/null)"; fi
 }
@@ -36,7 +39,9 @@ _osrc_dv_launch_prepare() {
 # route_delegate prepared one; otherwise (a launch that never went through route_delegate's
 # gate, e.g. the cc -> Devin self-heal) resolve now and spend-gate THAT exact id before launch.
 _osrc_dv_launch_id() {
-  _OSRC_DV_ID="${_OSRC_DV_LAUNCH_ID:-}"
+  _OSRC_DV_ID=""
+  [ -n "$_OSRC_DV_LAUNCH_ID" ] && [ "${1:-}" = "$_OSRC_DV_LAUNCH_FOR" ] && _OSRC_DV_ID="$_OSRC_DV_LAUNCH_ID"
+  _OSRC_DV_LAUNCH_ID=""; _OSRC_DV_LAUNCH_FOR=""
   [ -n "$_OSRC_DV_ID" ] && return 0
   if [ "${_OSRC_PIN_DISP:-}" = devin ]; then _OSRC_DV_ID="${1:-}"
   else _OSRC_DV_ID="$(_devin_resolve_model "${1:-}")"; fi
@@ -191,3 +196,4 @@ _devin_probe_pick() {
   done
   return 1
 }
+_OSRC_LIBEND_DEVINFREE=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)

@@ -336,6 +336,15 @@ on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call
 a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless
 the command already carries consent; when only paid lanes remain, the run stops and asks
 instead of picking OpenRouter quietly.
+Consent names what it was shown and nothing more: an OpenRouter consent covers the chain
+the prompt listed ("on transport failure escalates to: ..."), never a model outside it; a factory
+command's one `--spend-ok` binds to the first task's `lane|model`, and a task on a different paid
+model asks on its own. The Devin health probe (`doctor`, limit checks) sends a request with no
+prompt, so it pings only an id with the spend gate's own Free proof or the plan-included
+`glm-5-2`; an `OSRC_DEVIN_PROBE_MODEL` without that proof is skipped. A cap that cannot be
+verified (no fresh meter reading, or a malformed spec such as `weekly<=4O`) refuses an auto
+launch on that lane (hop, else refuse; `--force-lane` overrides). If a spend or cap library is
+missing or damaged (an interrupted update), every launch refuses with exit 70 until reinstall.
 
 `OUTSOURCERER_MODEL` sets the script-level `DEFAULT_MODEL` fallback only: lanes with a
 descriptor `default_model` use theirs, and `dv` ignores it entirely — a bare Devin run

@@ -528,5 +528,17 @@ grep -q -- '--model' "$TMP/devin-stub.log" \
   || ok "r3.4 e2e: mixed-case refused run dispatched nothing"
 
 echo
+# --- arch F5: one factory --spend-ok binds to the first task's pair, not every task ---------------
+FJ="$OSRC_HOME/jobs"; mkdir -p "$FJ/f1" "$FJ/f2" "$FJ/f3" "$FJ/f4"
+f5="$( bash -c '. "'"$SRC"'" >/dev/null 2>&1; OSRC_SPEND_OK=1
+  w() { ( OSRC_TASK_REF="$1" OSRC_JOB_TOKEN="tok$2"; _osrc_spend_marker_write "'"$FJ"'/f$2" cc run --provider cc -m "$3" ); }
+  w plan/t1 1 glm-5.2; w plan/t2 2 deepseek/deepseek-v4-pro; w plan/t3 3 glm-5.2
+  ( OSRC_JOB_TOKEN=tok4; _osrc_spend_marker_write "'"$FJ"'/f4" cc run --provider cc -m deepseek/deepseek-v4-pro )' 2>&1)"
+[ -f "$FJ/f1/.spend-ok" ] && [ ! -e "$FJ/f2/.spend-ok" ] && [ -f "$FJ/f3/.spend-ok" ] \
+  && ok "F5: factory consent covers the first task's pair (and same-pair tasks), not a different paid model" \
+  || bad "F5: factory markers f1=$([ -f "$FJ/f1/.spend-ok" ] && echo y) f2=$([ -f "$FJ/f2/.spend-ok" ] && echo y) f3=$([ -f "$FJ/f3/.spend-ok" ] && echo y): $f5"
+case "$f5" in *"plan/t2 needs"*) ok "F5: the uncovered task is named" ;; *) bad "F5: no notice for the uncovered task: $f5" ;; esac
+[ -f "$FJ/f4/.spend-ok" ] && ok "F5: a non-factory bg keeps its own marker" || bad "F5: non-factory bg lost its marker"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

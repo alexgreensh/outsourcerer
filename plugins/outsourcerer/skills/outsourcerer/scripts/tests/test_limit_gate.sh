@@ -868,11 +868,25 @@ grep -q '^cx 5h<=80$' "$CF2" \
   && ok "r3.1 cap: lane cap codex resolves provider name -> cx row" \
   || bad "r3.1 cap: lane cap codex wrote wrong row: $(cat "$CF2" 2>/dev/null)"
 rm -f "$CF2"
-# Unread meter: standing cx cap + NO meter reading -> unpinned warns but proceeds; pinned refuses.
+# Unread meter: standing cx cap + NO meter reading -> an unpinned auto launch does NOT proceed on
+# the capped lane (hop rc10 or refuse; error-handling F9); --force-lane proceeds; pinned refuses.
 printf 'cx weekly<=40\n' > "$CF2"
 _session_limits() { printf '\n'; }; _reset_snap
 out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
-[ $rc -eq 0 ] && case "$out" in *"no fresh reading"*) ok "r3.1 cap: unread capped meter warns, unpinned proceeds" ;; *) bad "r3.1 cap: unread unpinned wrong (rc=$rc): $out" ;; esac
+[ $rc -ne 0 ] && case "$out" in *"no fresh reading"*) ok "r3.1 cap: unread capped meter refuses an unpinned auto launch (rc=$rc)" ;; *) bad "r3.1 cap: unread unpinned wrong (rc=$rc): $out" ;; esac
+out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative nohop 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && [ $rc -ne 10 ] && ok "r3.1 cap: unread cap, no hop possible -> refuses" || bad "r3.1 cap: unread nohop rc=$rc: $out"
+( OSRC_FORCE_LANE=1 _fb_user_pinned=0 _osrc_cap_gate cx x cxnative >/dev/null 2>&1 </dev/null ) \
+  && ok "r3.1 cap: --force-lane still proceeds past an unread cap" || bad "r3.1 cap: --force-lane blocked by an unread cap"
+# Malformed standing spec (hand edit) with a live reading: never silently skipped.
+for bad_spec in 'weekly<=4O' 'weekly=<40'; do
+  printf 'cx %s\n' "$bad_spec" > "$CF2"
+  _session_limits() { printf 'codexwk=10\n'; }; _reset_snap
+  out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative nohop 2>&1 </dev/null )"; rc=$?
+  [ $rc -ne 0 ] && case "$out" in *malformed*) ok "F9 cap: malformed '$bad_spec' refuses an auto launch" ;; *) bad "F9 cap: '$bad_spec' wrong output (rc=$rc): $out" ;; esac \
+    || bad "F9 cap: malformed '$bad_spec' let the launch through silently: $out"
+done
+printf 'cx weekly<=40\n' > "$CF2"; _session_limits() { printf '\n'; }; _reset_snap
 out="$( _fb_user_pinned=1 MODEL_EXPLICIT=1 _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
 [ $rc -ne 0 ] && case "$out" in *"unverifiable cap"*|*"cap gate"*) ok "r3.1 cap: unread capped meter refuses under a pin" ;; *) bad "r3.1 cap: unread pinned wrong (rc=$rc): $out" ;; esac
 rm -f "$CF2"

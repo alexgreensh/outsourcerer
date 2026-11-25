@@ -477,7 +477,10 @@ _osrc_spend_ok() {
   local lane="${1:-}" model="${2:-}"
   if [ "${OSRC_SPEND_OK:-0}" = "1" ]; then
     if [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
-      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] && [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || return 1
+      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] || return 1
+      # The pair, or a member of the OpenRouter chain the consent prompt listed (_osrc_or_set).
+      [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || case " ${_OSRC_SPEND_BOUND_SET:-} " in
+        *" $model "*) [ -n "$model" ] ;; *) return 1 ;; esac || return 1
     fi
     # A supervised job's marker limits even a forwarded flag to its approved pair.
     local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest _mf _header _l _m _match=0
@@ -609,16 +612,33 @@ _osrc_spend_marker_pairs() {
 _osrc_spend_marker_write() {
   local jd="${1:-}" prov="${2:-}"; shift 2 || true
   [ "${OSRC_SPEND_OK:-0}" = "1" ] && [ -n "$jd" ] && [ -n "${OSRC_JOB_TOKEN:-}" ] || return 0
-  local mf="$jd/.spend-ok"
-  ( umask 077
-    printf '#osrc-spend-ok token=%s\n' "$OSRC_JOB_TOKEN"
-    if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then
-      printf '%s\n' "$_OSRC_PREFLIGHT_PAIR"
-    else
-      _osrc_spend_marker_pairs "$prov" "$@"
-    fi
-  ) > "$mf" 2>/dev/null || true
-  [ -s "$mf" ] || rm -f "$mf" 2>/dev/null
+  local mf="$jd/.spend-ok" pairs
+  if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then pairs="$_OSRC_PREFLIGHT_PAIR"
+  else pairs="$(_osrc_spend_marker_pairs "$prov" "$@")"; fi
+  _osrc_spend_task_bind "$pairs" || return 0
+  ( umask 077; printf '#osrc-spend-ok token=%s\n%s\n' "$OSRC_JOB_TOKEN" "$pairs" ) > "$mf" 2>/dev/null || true
+  [ -n "$pairs" ] || rm -f "$mf" 2>/dev/null
+}
+
+# _osrc_spend_task_bind <pairs> -> rc0 when a factory task may carry this command's --spend-ok.
+# One factory command (flow/plan run) dispatches every task from a subshell that shares $$, so
+# the FIRST task's lane|model pairs bind the consent for the whole command; a task naming a
+# different paid pair gets no marker, and its job's gate refuses with its own EVENT + NEXT
+# (torture-room arch F5). Outside a factory task (OSRC_TASK_REF unset) this is a no-op.
+_osrc_spend_task_bind() {
+  case "${OSRC_TASK_REF:-}" in ?*/?*) ;; *) return 0 ;; esac
+  local bf="$OSRC_HOME/.spend-bind.$$" f p cur
+  for f in "$OSRC_HOME"/.spend-bind.*; do       # prune bindings of commands that have exited
+    [ -f "$f" ] || continue; p="${f##*.}"
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$p" 2>/dev/null || rm -f "$f" 2>/dev/null
+  done
+  ( umask 077; set -C; printf '%s\n' "$1" > "$bf" ) 2>/dev/null && return 0
+  cur="$(cat "$bf" 2>/dev/null)"
+  [ "$cur" = "$1" ] && return 0
+  printf '>>> [spend] --spend-ok on this command was given for %s; task %s needs %s, so it asks on its own.\n' \
+    "$(printf '%s' "$cur" | head -n 1)" "$OSRC_TASK_REF" "$(printf '%s' "$1" | head -n 1)" >&2
+  return 1
 }
 
 # Buffer diagnostics while fd 5 keeps an interactive spend prompt on the terminal.
@@ -678,7 +698,7 @@ _osrc_spend_gate() {
   # consent never substitutes for spend approval (CONTRACT.md).
   case "$bill" in subscription|free)
     if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
-      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET=""
     fi
     _osrc_preflight_record "$lane" "$model" "${OSRC_SPEND_OK:-0}"
     return 0 ;;
@@ -690,8 +710,13 @@ _osrc_spend_gate() {
   local mname; mname="${model:-}"
   [ -n "$mname" ] || mname="$(_lane_field "$lane" default_model 2>/dev/null)"
   [ -n "$mname" ] || mname="default"
+  # OpenRouter escalates through a chain on transport failure: list it, and bind consent to it.
+  local orset=""; [ "$lane" = or ] && orset="$(_osrc_or_set "$model")"
+  case " $orset " in *" $model "*) [ "$orset" = "$model" ] || why="$why; on transport failure escalates to: ${orset#"$model "}" ;; esac
   if _osrc_spend_ok "$lane" "$model"; then
-    _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    if [ "${_OSRC_SPEND_BOUND_LANE:-}" != "$lane" ]; then
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET="$orset"
+    fi
     _osrc_preflight_record "$lane" "$model" 1
     # Marker consent is single-use: consume it now that dispatch is committed, so it
     # cannot authorize a second launch (or leak into a sibling job via a shared dir).
@@ -715,7 +740,7 @@ _osrc_spend_gate() {
     case "$ans" in
       y|Y|yes|YES)
         OSRC_SPEND_OK=1
-        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET="$orset"
         _osrc_preflight_record "$lane" "$model" 1
         printf '>>> [spend] approved for this command only (never persisted).\n' >&"$prompt_fd"
         return 0 ;;
@@ -725,6 +750,17 @@ _osrc_spend_gate() {
   fi
   _osrc_event approval "${lane:-launch}" "$detail" "$nexthint" spend >&2
   die "spend gate: $lname ($disp / $mname) bills $bill and this run is non-interactive — refusing rather than spending silently. Re-run with --spend-ok to approve THIS command only (never persisted), or pick a subscription/free lane."
+}
+
+# _osrc_or_set <model> -> the OpenRouter models this launch may run, model first: the delegate's own
+# _or_chain (escalation on transport failure) when <model> heads it, else <model> alone. The gate
+# lists the rest in its prompt and binds consent to exactly this set (torture-room arch F6).
+_osrc_or_set() {
+  local m="${1:-}" c rest=""
+  c="$(_or_chain "${tier:-auto}" 2>/dev/null)" || c=""
+  case "$c" in "$m"|"$m "*) ;; *) printf '%s' "$m"; return 0 ;; esac
+  for c in $c; do [ "$c" = "$m" ] || rest="$rest $c"; done
+  printf '%s%s' "$m" "$rest"
 }
 
 # _osrc_session_spend_gate -> session-start form: resolves PROVIDER to its native
@@ -890,3 +926,14 @@ _osrc_claude_plan_login() {
 # The implementation moved to lib/limits.sh with the rest of the meter readers; this
 # alias keeps the old entry point working. `lane summary` is the CLI surface.
 osrc_limits_summary() { osrc_lane_summary "$@"; }
+
+# _osrc_spend_libs_ok -> rc0 when every spend-path lib loaded WHOLE: each ends with a sentinel
+# line, so a missing, unreadable or truncated lib (bash drops everything after a syntax error)
+# fails this. outsourcerer.sh's lib loader then swaps every gate entry point for a refusal, so a
+# half-installed update refuses launches instead of skipping the gate (torture-room arch F2).
+_OSRC_SPEND_GATE_FNS="_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate"
+_osrc_spend_libs_ok() {
+  [ "${_OSRC_LIBEND_SPEND:-}${_OSRC_LIBEND_SPENDPATHS:-}${_OSRC_LIBEND_DEVINFREE:-}${_OSRC_LIBEND_CAPS:-}" = 1111 ] || return 1
+  declare -F $_OSRC_SPEND_GATE_FNS >/dev/null 2>&1
+}
+_OSRC_LIBEND_SPEND=1   # last line: the loader proves this lib loaded whole

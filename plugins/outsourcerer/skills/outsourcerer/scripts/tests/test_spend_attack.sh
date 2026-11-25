@@ -26,8 +26,12 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-spendatk.XXXXXX")"
 unset TMUX   # never reach a real tmux server from inside a pane; every server here lives under $TMP
-tkill() { env -u TMUX TMUX_TMPDIR="$TMP" tmux kill-server >/dev/null 2>&1; }
-trap 'tkill; rm -rf "$TMP"' EXIT
+# tmux's socket lives in a SHORT dir of its own: a unix socket path is capped (104 bytes on macOS,
+# 108 on Linux), and $TMP under a long TMPDIR (a Mac scratchpad) made every tmux new-session fail,
+# so the two launching session-start cases returned rc 4 on the host, not on the product.
+TSOCK="$(mktemp -d /tmp/osrc-sa.XXXXXX 2>/dev/null || mktemp -d)"
+tkill() { env -u TMUX TMUX_TMPDIR="$TSOCK" tmux kill-server >/dev/null 2>&1; }
+trap 'tkill; rm -rf "$TMP" "$TSOCK"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
 DOH="$TMP/osrc"; OFF="$TMP/osrc-off"; DBIN="$TMP/bin"; LOG="$TMP/argv.log"
 for d in "$DOH" "$OFF"; do
@@ -59,8 +63,8 @@ exit 0
 EOF
 chmod +x "$DBIN/devin" "$DBIN/claude"
 # Catalog: swe-1.7 has ONE Free variant; every other variant is paid in a different malformed way.
-# swe-2-1 is newer, has a PAID -high (Fusion text says Free) and a Free -max, so `-m swe` resolves
-# to the paid swe-2-1-high.
+# swe-2-1 is newer, has a PAID -high (Fusion text says Free) and a Free but unlaunchable -none, so
+# even with cost ranked before effort (PR #88) `-m swe` resolves to the paid swe-2-1-high.
 cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
 {"families":[
  {"family_uid":"swe-1.7","aliases":[],"variants":[
@@ -73,16 +77,16 @@ cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
    {"model_uid":"swe-1-7-promo","cost_tier":1,"cost_summary":"promo: free this week"}]},
  {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
    {"model_uid":"swe-2-1-high","cost_tier":"High cost","cost_summary":"$8/MTok · Sidekick: Free"},
-   {"model_uid":"swe-2-1-max","cost_tier":"Free"}]}]}
+   {"model_uid":"swe-2-1-none","cost_tier":"Free"}]}]}
 EOF
-printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-1-7-xhigh","swe-1-7-low","swe-1-7-medium","swe-1-7-none","swe-1-7-promo","swe-2-1","swe-2-1-high","swe-2-1-max","swe"]\n' \
+printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-1-7-xhigh","swe-1-7-low","swe-1-7-medium","swe-1-7-none","swe-1-7-promo","swe-2-1","swe-2-1-high","swe-2-1-none","swe"]\n' \
   > "$DOH/catalogs/dv.json"
 
 engine() {  # real engine against the stubs, non-interactive (stdin /dev/null); HOME_DIR picks OSRC_HOME
   ( cd "$TMP" && STUB_LOG="$LOG" DEVIN_STUB_CATALOG="${CAT-$DOH/catalogs/dv.raw.json}" \
       PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="${HOME_DIR:-$DOH}" OSRC_SOURCED= OSRC_CATALOG_TTL=999999 \
       OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
-      TMUX= TMUX_TMPDIR="$TMP" bash "$SRC" "$@" 2>&1 </dev/null )
+      TMUX= TMUX_TMPDIR="$TSOCK" bash "$SRC" "$@" 2>&1 </dev/null )
 }
 offline() { CAT=/dev/null HOME_DIR="$OFF" engine "$@"; }
 inproc() {  # source the engine and run a snippet (functions in-process)
@@ -160,14 +164,14 @@ tkill
 : > "$LOG"; out="$(engine continue "follow up")"; rc=$?
 ids="$(launched_ids | tr '\n' ' ')"
 case "$ids" in
-  "swe-1-7-high "|"swe-2-1-max ") ok "default:bare continue launches the judged Free default ($ids)" ;;
+  "swe-1-7-high ") ok "default:bare continue launches the judged Free default ($ids)" ;;
   *) bad "default:bare continue launched --model '$ids' (rc=$rc; empty = Devin picks, unjudged)" ;;
 esac
 : > "$LOG"; out="$(engine session start)"; rc=$?
 wait_log 'respect-workspace-trust' || true
 sm="$(grep -E -- '--respect-workspace-trust' "$LOG" | sed -nE "s/.*--model ([^ ]*) .*/\1/p" | head -1)"
 case "$sm" in
-  swe-1-7-high|swe-2-1-max) ok "default:bare session start launches the judged Free default ($sm)" ;;
+  swe-1-7-high) ok "default:bare session start launches the judged Free default ($sm)" ;;
   *) bad "default:bare session start launched --model '$sm' (rc=$rc)" ;;
 esac
 tkill

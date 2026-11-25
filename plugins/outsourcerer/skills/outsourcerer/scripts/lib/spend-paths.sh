@@ -54,3 +54,13 @@ _osrc_session_model_gate() {
   [ -n "${OSRC_SPEND_NEXT:-}" ] || OSRC_SPEND_NEXT="$0 --spend-ok session model${name:+ $(printf '%q' "$name")}"
   _osrc_spend_gate "$(_osrc_session_lane "${PROVIDER:-}")" "$name" "${PROVIDER:-}" "session model switch"
 }
+# _osrc_or_member_gate <model> -> delegate_cc / delegate_codex judge EVERY OpenRouter chain member
+# before launching it. route_delegate showed (and the user consented to) one model; on a transport
+# failure the chain escalates to the next metered model, which must be judged and shown too, so a
+# consent bound to the first model never covers a different one (torture-room arch F6).
+_osrc_or_member_gate() {
+  [ -n "${OSRC_SPEND_NEXT:-}" ] || OSRC_SPEND_NEXT="$0 --spend-ok run -m $(printf '%q' "${1:-}")"
+  _osrc_spend_gate or "${1:-}" openrouter "OpenRouter chain model ${1:-} (consent names one model)"
+}
+
+_OSRC_LIBEND_SPENDPATHS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)

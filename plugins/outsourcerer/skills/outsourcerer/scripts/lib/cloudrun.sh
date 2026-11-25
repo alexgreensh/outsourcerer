@@ -681,14 +681,11 @@ _cloudrun_start() {
   # orchestrator one runnable command (never a dead end that re-asks the same way).
   spendnext="$spendnext --spend-ok"
   OSRC_SPEND_NEXT="$spendnext"; export OSRC_SPEND_NEXT
-  if declare -F _osrc_spend_gate >/dev/null 2>&1; then
-    _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \
-      || die "cloud: spend gate refused the hosted-session launch (NEXT: $OSRC_SPEND_NEXT)"
-  fi
+  # Unguarded: a missing spend gate is a refusal (rc 127), never a launch with a note.
+  _osrc_spend_gate "$_sp_lane" "$model" "$veh" "cloud session $id" \
+    || die "cloud: spend gate refused the hosted-session launch (NEXT: $OSRC_SPEND_NEXT)"
   if [ "$veh" = "devin" ]; then
     [ "$spendok" = "1" ] || die "cloud: devin cloud bills metered usage — re-run with --spend-ok to approve THIS launch only"
-  elif ! declare -F _osrc_spend_gate >/dev/null 2>&1; then
-    printf '>>> [cloud] note: L7 spend gate not loaded — %s is a subscription lane; per-launch billing unchecked\n' "$veh" >&2
   fi
   _cloudrun_consent "$veh" "$(_cloudrun_vehicle_quota "$veh")"
   local cenv="$claudeenv"; [ "$veh" = claude ] || cenv=""

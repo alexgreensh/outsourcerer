@@ -37,7 +37,8 @@ EOF
 chmod +x "$DBIN/devin"
 for cli in codex claude; do printf '#!/usr/bin/env bash\nexit 0\n' > "$DBIN/$cli"; chmod +x "$DBIN/$cli"; done
 # The Codex review's catalog: the older swe-1.7 family has a Free -high; the newer swe-2-1
-# family has a PAID -high and a Free -max (so it still "has a Free variant").
+# family has a PAID -high and a Free but unlaunchable -none (so it still "has a Free variant"
+# while cost-before-effort can only land on the paid -high).
 cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
 {"families":[
  {"family_uid":"swe-1.7","aliases":[],"variants":[
@@ -45,11 +46,11 @@ cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
    {"model_uid":"swe-1-7-max","cost_tier":"High cost"}]},
  {"family_uid":"swe-2-1","aliases":[],"variants":[
    {"model_uid":"swe-2-1-high","cost_tier":"High cost","cost_summary":"$8/MTok · Sidekick: Free"},
-   {"model_uid":"swe-2-1-max","cost_tier":"Free"}]},
+   {"model_uid":"swe-2-1-none","cost_tier":"Free"}]},
  {"family_uid":"glm-5.2","aliases":["glm"],"variants":[
    {"model_uid":"glm-5-2","cost_tier":"Plan"}]}]}
 EOF
-printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-2-1","swe-2-1-high","swe-2-1-max","glm-5.2","glm","glm-5-2"]\n' > "$DOH/catalogs/dv.json"
+printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-2-1","swe-2-1-high","swe-2-1-none","glm-5.2","glm","glm-5-2"]\n' > "$DOH/catalogs/dv.json"
 
 engine() {  # run the real engine against the stubs, non-interactive
   ( cd "$TMP" && DEVIN_STUB_LOG="$LOG" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
@@ -106,10 +107,15 @@ grep -q -- '-c --model swe-1-7-high' "$LOG" && ok "continue: Free model still co
   || bad "continue: Free model blocked (rc=$rc): $(printf '%s' "$out" | tail -3)"
 
 # --- probe fallback names an exact Free variant, never the bare swe-2 family ----------------
-pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" \
+# (offline: a reachable catalog that does not tag swe-2-high Free must NOT be overridden by it)
+pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" OSRC_FREE_CATALOG_CHECK=0 \
     bash -c '. "$SRC" >/dev/null 2>&1; _model_excluded() { [ "$1" = glm-5-2 ]; }; _devin_probe_pick' 2>/dev/null )"
 [ "$pick" = "swe-2-high" ] && ok "probe: fallback after glm-5-2 is the exact Free swe-2-high" \
   || bad "probe: fallback pick '$pick' (want swe-2-high)"
+pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" OSRC_CATALOG_TTL=999999 \
+    bash -c '. "$SRC" >/dev/null 2>&1; _model_excluded() { [ "$1" = glm-5-2 ]; }; _devin_probe_pick || echo none' 2>/dev/null )"
+[ "$pick" = "none" ] && ok "probe: catalog not tagging swe-2-high Free -> nothing probed" \
+  || bad "probe: picked '$pick' although the live catalog does not prove it Free"
 
 # --- a probe never pings a paid id passed in or overridden (it runs with no consent prompt) ----
 pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_FREE_CATALOG_CHECK=0 SRC="$SRC" \
@@ -133,6 +139,22 @@ bill() { PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_CA
   || bad "exact: SWE-1.7-HIGH billed '$(bill SWE-1.7-HIGH 1)'"
 [ "$(bill swe-1-7-high 1)" = subscription ] && ok "exact: the catalog's exact Free uid is still Free" \
   || bad "exact: swe-1-7-high billed '$(bill swe-1-7-high 1)'"
+
+# --- arch F4: a prepared launch id applies only to the token it was resolved for, and only once ----
+lid() { PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_CATALOG_TTL=999999 SRC="$SRC" \
+    bash -c '. "$SRC" >/dev/null 2>&1; _osrc_spend_gate() { echo "gate:$2" >&2; }
+      _OSRC_DV_LAUNCH_ID=swe-1-7-high; _OSRC_DV_LAUNCH_FOR=swe
+      _osrc_dv_launch_id swe-2-1-high; a="$_OSRC_DV_ID"
+      _OSRC_DV_LAUNCH_ID=swe-1-7-high; _OSRC_DV_LAUNCH_FOR=swe
+      _osrc_dv_launch_id swe; b="$_OSRC_DV_ID"; _osrc_dv_launch_id swe; c="$_OSRC_DV_ID"
+      printf "%s|%s|%s" "$a" "$b" "$c"' 2>&1 | tr '\n' ' '; }
+r="$(lid)"
+case "$r" in
+  *"gate:swe-2-1-high"*"swe-2-1-high|swe-1-7-high|"*) ok "F4: launch id keyed to its token; reused once, a different -m is resolved and gated" ;;
+  *) bad "F4: stale launch id leaked to another model or reused: $r" ;;
+esac
+case "$r" in *"|swe-1-7-high|swe-1-7-high"*) bad "F4: launch id reused for a second launch: $r" ;;
+  *) ok "F4: a consumed launch id is not reused (second launch re-resolves)" ;; esac
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

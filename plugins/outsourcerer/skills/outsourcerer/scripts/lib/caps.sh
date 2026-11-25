@@ -126,6 +126,19 @@ EOF
   printf '%s' "$out"; return 0
 }
 
+# _osrc_cap_invalid <lane> -> prints this lane's cap specs that fail _osrc_cap_valid (a hand edit
+# such as weekly<=4O or =<), which the other readers skip and so could never trip. rc1 when none.
+_osrc_cap_invalid() {
+  local spec out=""
+  while IFS= read -r spec; do
+    [ -n "$spec" ] && ! _osrc_cap_valid "$spec" && out="$out $spec"
+  done <<EOF
+$(_osrc_cap_specs_for "${1:-}")
+EOF
+  out="${out# }"; [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
 # _osrc_cap_gate <lane> <model> <disp> [nohop] -> pre-launch cap check, placed next
 # to _osrc_limit_gate in route_delegate and the session paths. rc0 clear/consented;
 # dies on refusal; rc10 = a zero-cost hop was armed (caller `continue`s).
@@ -136,18 +149,29 @@ _osrc_cap_gate() {
     # Clear of a TRIPPED cap — but a cap that cannot be evaluated is not "clear":
     # unbound specs warn (they can never trip), bound specs with no fresh reading warn
     # too, and under an explicit pin both refuse loudly instead of silently proceeding.
-    local unb unr lname0
+    # An unread or malformed cap refuses an AUTO launch too (hop away, else refuse): the user set
+    # a limit on this lane, and "cannot check it" must not mean "launch" (error-handling F9).
+    local unb unr inv lname0
     lname0="$(_lane_plan_display "$lane" 2>/dev/null)"; [ -n "$lname0" ] || lname0="$lane"
     unb="$(_osrc_cap_unbound "$lane" 2>/dev/null)"
     unr="$(_osrc_cap_unread "$lane" 2>/dev/null)"
-    if [ -n "$unb$unr" ]; then
-      [ -n "$unb" ] && printf '>>> [cap] %s: cap spec(s) %s do not bind to any %s window — they can never trip.\n' "$lname0" "$unb" "$lane" >&2
-      [ -n "$unr" ] && printf '>>> [cap] %s: capped meter has no fresh reading for %s — cap cannot be verified.\n' "$lname0" "$unr" >&2
-      if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
-        die "cap gate: ${lname0} has unverifiable cap(s) (${unb:+unbound:$unb }${unr:+unread:$unr}) and this run pinned ${model:-?} — refusing rather than launching with a cap that cannot be checked. Fix the cap (lane cap ${lane} ...) or re-run unpinned."
-      fi
+    inv="$(_osrc_cap_invalid "$lane" 2>/dev/null)"
+    [ -n "$unb$unr$inv" ] || return 0
+    [ -n "$unb" ] && printf '>>> [cap] %s: cap spec(s) %s do not bind to any %s window — they can never trip.\n' "$lname0" "$unb" "$lane" >&2
+    [ -n "$unr" ] && printf '>>> [cap] %s: capped meter has no fresh reading for %s — cap cannot be verified.\n' "$lname0" "$unr" >&2
+    [ -n "$inv" ] && printf '>>> [cap] %s: cap spec(s) %s are malformed (want <meter><=<pct>) — cap cannot be verified.\n' "$lname0" "$inv" >&2
+    local why="${unb:+unbound:$unb }${unr:+unread:$unr }${inv:+malformed:$inv}"
+    if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
+      die "cap gate: ${lname0} has unverifiable cap(s) (${why% }) and this run pinned ${model:-?} — refusing rather than launching with a cap that cannot be checked. Fix the cap (lane cap ${lane} ...) or re-run unpinned."
     fi
-    return 0
+    [ -n "$unr$inv" ] || return 0                     # unbound alone stays a warning on auto
+    [ "${OSRC_FORCE_LANE:-0}" = "1" ] && return 0
+    if [ "$nohop" != "nohop" ] && _fallback_enabled && [ "${tier:-auto}" = "auto" ] && _gate_hop "$disp"; then
+      printf '>>> [cap] %s cap cannot be verified — skipping to %s (lane %s); no dispatch, so this skip is free.\n' \
+        "$lname0" "${_fb_alias:-?}" "${_fb_lane:-?}" >&2
+      return 10
+    fi
+    die "cap gate: ${lname0} has a cap that cannot be verified (${why% }) — refusing rather than launching past it. Fix the cap (lane cap ${lane} ... or --clear), switch lane, or re-run with --force-lane."
   }
   local spec nowpct m p w
   spec="${hit%% now*}"; nowpct="${hit##* now}"
@@ -335,3 +359,4 @@ osrc_lane_limits() {
     printf '%-10s %-12s %s\n' "$l" "$b" "$caps"
   done
 }
+_OSRC_LIBEND_CAPS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)

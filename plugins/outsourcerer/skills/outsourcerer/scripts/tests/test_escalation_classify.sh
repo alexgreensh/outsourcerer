@@ -17,6 +17,7 @@ trap cleanup EXIT
 
 # Source the main script. main runs with no args and prints help (suppressed); functions stay defined.
 . "$SRC" >/dev/null 2>&1
+OSRC_SPEND_OK=1   # these cases drive delegate_* directly; consent stands in for route_delegate's spend gate
 
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
@@ -148,6 +149,16 @@ rc=$?
 calls=$(cat "$HOME/.claude_call_count" 2>/dev/null || echo 0)
 if [ "$rc" -eq 0 ]; then ok "cc: 429 escalates to a successful model" ; else bad "cc: 429 did not escalate (rc=$rc)"; fi
 if [ "$calls" -eq 2 ]; then ok "cc: 429 used 2 models in chain" ; else bad "cc: 429 calls=$calls"; fi
+
+# --- arch F6: consent that named ONE OpenRouter model does not cover escalating to another. ---
+rm -f "$HOME/.claude_call_count"; export CLAU_ERR_1='HTTP 429 rate limit' CLAU_RC_1=1 CLAU_ERR_2='' CLAU_RC_2=0
+out="$TMP/cc_f6.out"
+( _OSRC_SPEND_BOUND_LANE=or _OSRC_SPEND_BOUND_MODEL=m1 _OSRC_SPEND_BOUND_SET=m1; delegate_cc auto "do a thing" ) > "$out" 2>&1 </dev/null
+rc=$?; calls=$(cat "$HOME/.claude_call_count" 2>/dev/null || echo 0)
+if [ "$rc" -ne 0 ] && [ "$calls" -eq 1 ] && grep -q 'paid-lane:or/m2' "$out"; then ok "F6: escalation to m2 on m1-only consent is refused, m2 never runs"
+else bad "F6: escalation past a one-model consent (rc=$rc calls=$calls): $(grep -E 'spend|EVENT' "$out" | head -3)"; fi
+f6p="$( OSRC_SPEND_OK=0; MODEL_EXPLICIT=0; _osrc_spend_gate or m1 ccor run 2>&1 </dev/null )"
+case "$f6p" in *"escalates to: m2"*) ok "F6: the consent refusal lists the escalation chain it would cover" ;; *) bad "F6: chain not shown: $f6p" ;; esac
 
 # --- Scenario 3: normal 'npm test' exit 1 in delegate_cc does NOT escalate. ---
 rm -f "$HOME/.claude_call_count"; export CLAU_ERR_1='npm test failed' CLAU_RC_1=1

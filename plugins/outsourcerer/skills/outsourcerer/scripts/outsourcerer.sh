@@ -277,7 +277,7 @@ unset OSRC_PROVIDER_INJECTED
 # parents pass it to children explicitly (bg -> preflight/job child). Every command entry
 # point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
 # display hint the gate never executes.
-unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_PREFLIGHT_PAIR
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -300,7 +300,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
-for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib; _osrc_spend_libs_ok 2>/dev/null || for _osrc_lib in ${_OSRC_SPEND_GATE_FNS:-_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate}; do eval "$_osrc_lib() { echo \"ERROR: a spend/cap gate library under \$SCRIPT_DIR/lib is missing or damaged; refusing to launch anything. Reinstall outsourcerer.\" >&2; exit 70; }"; done; unset _osrc_lib
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
@@ -13965,7 +13965,7 @@ delegate_cc() {
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for fg cost resolution
   _or_chain "$tier" >/dev/null   # in-process first: an all-excluded chain dies HERE, not inside $(...)
   for m in $(_or_chain "$tier"); do
-    ttier="$(resolve_tier "$m" "")"
+    _osrc_or_member_gate "$m" || die "spend gate refused OpenRouter model $m"; ttier="$(resolve_tier "$m" "")"
     _with_preamble_render "bundle+mcp"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
     wrapped="$(_build_prompt "$m" "$prompt" "" "bundle+mcp")"
     _tier_banner "cc-openrouter" "$m" "$ttier" "$posture | env: $load_note"
@@ -14514,7 +14514,7 @@ delegate_codex() {
   _codex_win_sandbox_args; [ "${#_or_iso[@]}" -eq 0 ] || _or_iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   _or_chain "$tier" >/dev/null   # in-process first: an all-excluded chain dies HERE, not inside $(...)
   for m in $(_or_chain "$tier"); do
-    ttier="$(resolve_tier "$m" "")"
+    _osrc_or_member_gate "$m" || die "spend gate refused OpenRouter model $m"; ttier="$(resolve_tier "$m" "")"
     _with_preamble_render "bundle"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
     wrapped="$(_build_prompt "$m" "$prompt" "" "bundle")"
     _tier_banner "codex-openrouter" "$m" "$ttier" "$posture"
@@ -15550,12 +15550,10 @@ route_delegate() {
   # never select a metered lane on their own (_osrc_lane_spendable).
   # UNCONDITIONAL: it runs even when lane resolution produced no _cap_lane — an
   # empty lane is billing=unknown and must refuse, never silently dispatch.
-  local _src=0
   # Devin: resolve ONCE, gate exactly that id; delegate() launches it verbatim (lib/devin-free.sh).
   local _gate_model="$RESOLVED_ID"; _OSRC_DV_LAUNCH_ID=""
   case "$disp" in devin|dv) _osrc_dv_launch_prepare; _gate_model="${_OSRC_DV_LAUNCH_ID:-$RESOLVED_ID}" ;; esac
-  _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || _src=$?
-  [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
+  _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || die "internal: _osrc_spend_gate returned $?"
 
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
