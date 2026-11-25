@@ -183,15 +183,15 @@ _devin_is_free_model() {
 # _devin_probe_pick <preferred...> -> the first health-probe model that is NOT excluded (#45) and is
 # PROVEN free to request: a probe asks no consent, so it needs the spend gate's own proof
 # (_osrc_devin_free_for_spend: exact id, catalog Free, offline only swe-2-high / swe-2-flash-high)
-# or the exact plan-included literal glm-5-2 (daily plan quota, no cash; Devin refuses, not bills,
-# when it is spent). A caller-passed or overridden id without that proof is skipped, never pinged.
+# or an exact plan-included literal, glm-5-2 / swe-1-7 (daily plan quota, no cash; Devin refuses,
+# not bills, when it is spent). A caller-passed or overridden id without that proof is skipped.
 _devin_probe_pick() {
   local c skip="${OSRC_DEVIN_PROBE_SKIP:-}"
   for c in "$@" glm-5-2 swe-2-high; do
     [ -n "$c" ] || continue
     [ -n "$skip" ] && [ "$(printf '%s' "$c" | tr '[:upper:]._' '[:lower:]--')" = "$skip" ] && continue
     _model_excluded "$c" && continue
-    [ "$c" = glm-5-2 ] || _osrc_devin_free_for_spend "$c" || continue
+    case "$c" in glm-5-2|swe-1-7) ;; *) _osrc_devin_free_for_spend "$c" || continue ;; esac
     printf '%s' "$c"; return 0
   done
   return 1
