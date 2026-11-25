@@ -1,4 +1,0 @@
-sha=50b5c16161d5aa8ced74c5062e85b97294a8000b
-rc=0
-head=67e4c8741a0e1f8c6489c2204e2b0fae95cce121
-All round-3 review findings fixed (P1 1, P2 2-5, P3 6-8). test_limits_staleness rc=0 (28/28; 7 new checks fail on base). Full conformance completed: head rc=1 with 6 failures, all also failing on base (base rc=1, 9 failures); none are from this lane. Details in reports/osrc-l9-limits.md, Round 4.

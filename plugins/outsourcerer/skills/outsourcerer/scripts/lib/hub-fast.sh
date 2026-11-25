@@ -6,7 +6,7 @@
 # _osrc_hub_fast_memo_init <memo-dir>: pre-compute export-wide indexes once instead of per-project.
 _osrc_hub_fast_memo_init() {
   local d="$1" rv_dir="$OSRC_HOME/review/items"
-  mkdir -p "$d/lname" "$d/jstate" "$d/rstate" "$d/dstate" "$d/rlabel" "$d/drepo" "$d/rneeds" 2>/dev/null
+  mkdir -p "$d/lname" "$d/jstate" "$d/rstate" "$d/rlabel" "$d/drepo" "$d/rneeds" 2>/dev/null
   # Pre-compute review map + needs-you + queued items in ONE jq over review/items/*.json.
   if [ -d "$rv_dir" ] && have jq; then
     local -a rfiles=()
@@ -67,29 +67,6 @@ _osrc_hub_job_state_fast() {
     return 0
   fi
   _osrc_hub_job_state "$id"
-}
-
-_osrc_hub_remote_state_fast() {
-  local id="$1"
-  type osrc_remote_state >/dev/null 2>&1 || return 1
-  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -d "$_OSRC_HUB_MEMO/rstate" ] && _osrc_hub_slug_ok "$id"; then
-    local f="$_OSRC_HUB_MEMO/rstate/$id"
-    [ -f "$f" ] || osrc_remote_state "$id" 2>/dev/null > "$f"
-    cat "$f"
-    return 0
-  fi
-  osrc_remote_state "$id" 2>/dev/null
-}
-
-_osrc_hub_done_state_fast() {
-  local id="$1"
-  if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -d "$_OSRC_HUB_MEMO/dstate" ] && _osrc_hub_slug_ok "$id"; then
-    local f="$_OSRC_HUB_MEMO/dstate/$id"
-    [ -f "$f" ] || _osrc_hub_done_state "$id" > "$f"
-    cat "$f"
-    return 0
-  fi
-  _osrc_hub_done_state "$id"
 }
 
 _osrc_hub_hash_key() { printf '%s' "$1" | cksum | awk '{print $1 "_" $2}'; }
@@ -280,67 +257,40 @@ _osrc_hub_limits_fresh_fast() {
 # hub/cache/scr/<id> stores "activity dep_epoch cached_epoch" + output and is reused while all three
 # still match. OSRC_HUB_SCR_TTL (default 20s) bounds the staleness either way; a forced
 # OSRC_HUB_REFRESH export always reads the pane again.
-_osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen inputs (0 = unknown)
-  local id="$1" depf max=0 m pair ccid cwd tp w p f
-  depf="$OSRC_HOME/hub/cache/scr/.deps.$$.$id"
-  : > "$depf" 2>/dev/null || { printf '0'; return; }
-  for p in "$OSRC_HOME/done/$id.json" "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/lanes/state/$id" \
-           "$OSRC_HOME/lanes/state/$id.handin" "$OSRC_HOME/autodetach/$id".* "$OSRC_JOBS/$id/"*; do
-    [ -e "$p" ] && printf '%s\n' "$p" >> "$depf"
-  done
-  [ -e "$OSRC_SESSION_REGISTRY" ] && printf '%s\n' "$OSRC_SESSION_REGISTRY" >> "$depf"
+_osrc_hub_scr_deps() { # <id> -> the existing paths a lane's screen reading depends on, one per line;
+  # "x" when one input cannot be watched by mtime (a branch: done contract reads a git ref)
+  local id="$1" pair tp w p
+  local -a deps=("$OSRC_HOME/done/$id.json" "$OSRC_HOME/done/$id.checkcache" "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/lanes/state/$id" \
+    "$OSRC_HOME/lanes/state/$id.handin" "$OSRC_HOME/lanes/state/$id.cc" "$OSRC_HOME/autodetach/$id".* "$OSRC_JOBS/$id/"* "$OSRC_SESSION_REGISTRY")
   # done-contract file: targets live outside OSRC_HOME.
   if [ -f "$OSRC_HOME/done/$id.json" ]; then
     pair="$(jq -r '[(.spec // ""), (.cwd // ".")] | @tsv' "$OSRC_HOME/done/$id.json" 2>/dev/null)"
-    case "${pair%%	*}" in file:*)
-      p="${pair%%	*}"; p="${p#file:}"; case "$p" in /*) ;; *) p="${pair#*	}/$p" ;; esac
-      [ -e "$p" ] && printf '%s\n' "$p" >> "$depf" ;; esac
+    case "${pair%%	*}" in
+      file:*) p="${pair%%	*}"; p="${p#file:}"; case "$p" in /*) ;; *) p="${pair#*	}/$p" ;; esac
+        deps+=("$p") ;;
+      branch:*) printf 'x\n'; return 0 ;;
+    esac
   fi
   # Transcript tail feed (question check): resolve cc id via the same cache _sv_cc_transcript uses.
   if type _sv_cc_transcript >/dev/null 2>&1 && type _fleet_transcript_path >/dev/null 2>&1; then
     pair="$(_sv_cc_transcript "$id" 2>/dev/null)"
-    if [ -n "$pair" ]; then
-      tp="$(_fleet_transcript_path "${pair%%	*}" "${pair#*	}" 2>/dev/null)"
-      [ -n "$tp" ] && [ -e "$tp" ] && printf '%s\n' "$tp" >> "$depf"
-    fi
+    [ -z "$pair" ] || { tp="$(_fleet_transcript_path "${pair%%	*}" "${pair#*	}" 2>/dev/null)"; [ -z "$tp" ] || deps+=("$tp"); }
   fi
   # Watched hand-in DONE files: a new file bumps its parent dir's mtime.
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
-    IFS= read -r p < "$w" 2>/dev/null || p=""
-    [ -n "$p" ] || continue
-    [ -d "$p" ] && printf '%s\n' "$p" >> "$depf"
-    [ -d "$p/out" ] && printf '%s\n' "$p/out" >> "$depf"
+    deps+=("$w"); IFS= read -r p < "$w" 2>/dev/null || p=""
+    [ -n "$p" ] && deps+=("$p" "$p/out")
   done
-  if [ -s "$depf" ]; then
-    max="$(sort -u "$depf" | tr '\n' '\0' | xargs -0 stat -f '%m' 2>/dev/null | sort -rn | head -1)"
-    case "$max" in ''|*[!0-9]*) max=0 ;; esac
-  fi
-  rm -f "$depf"
-  printf '%s' "${max:-0}"
-}
-
-# _osrc_hub_scr_refresh_bg <id> <activity>: detached re-read; one per lane at a time via a lock dir.
-# Serving code never waits on it — the served stale read is replaced in place for the next export.
-_osrc_hub_scr_refresh_bg() { # <id> <activity>
-  local id="$1" act="$2" pf="$OSRC_HOME/hub/cache/scr/$1"
-  mkdir -p "${pf%/*}" 2>/dev/null || return 1
-  if [ -d "$pf.lock" ]; then
-    # a crashed refresh leaves the dir behind; clear one older than a minute
-    [ -z "$(find "$pf.lock" -maxdepth 0 -mmin -1 2>/dev/null)" ] && rmdir "$pf.lock" 2>/dev/null
-  fi
-  mkdir "$pf.lock" 2>/dev/null || return 1
-  ( local out dep
-    out="$(_osrc_hub_raw_sv_target_screen "$id" 2>/dev/null)" || out=""
-    if [ -n "$out" ]; then
-      dep="$(_osrc_hub_scr_dep_epoch "$id")"; case "$dep" in ''|*[!0-9]*) dep=0 ;; esac
-      { printf '%s %s %s\n' "$act" "$dep" "$(date +%s)"; printf '%s\n' "$out"; } > "$pf.$$" 2>/dev/null \
-        && mv -f "$pf.$$" "$pf" 2>/dev/null
-      rm -f "$pf.$$" 2>/dev/null
-    fi
-    rmdir "$pf.lock" 2>/dev/null
-  ) </dev/null >/dev/null 2>&1 &
+  for p in "${deps[@]}"; do [ -e "$p" ] && printf '%s\n' "$p"; done
   return 0
+}
+_osrc_hub_scr_dep_epoch() { # <id> -> newest mtime among the lane's screen inputs (0 = unknown)
+  local p; local -a deps=()
+  while IFS= read -r p; do [ -n "$p" ] && [ "$p" != x ] && deps+=("$p"); done <<EOF
+$(_osrc_hub_scr_deps "$1")
+EOF
+  _osrc_hub_mt ${deps[@]+"${deps[@]}"}
 }
 
 _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller must compute
@@ -371,13 +321,21 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
   # read is queued for ONE deferred worker (_osrc_hub_scr_flush_wanted, run at export end) rather
   # than forked here: live pane reads hammering the tmux server mid-export stall the export's own
   # tmux calls. Screen state is a display input; supervise confirms quiet lanes on its own cadence.
-  if [ -n "${_OSRC_HUB_MEMO:-}" ]; then
-    printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
-  else
-    _osrc_hub_scr_refresh_bg "$id" "$act" || true
-  fi
+  printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "scr.$id.swr"
   tail -n +2 "$pf" 2>/dev/null
+}
+
+# _osrc_hub_close_fds: first call of a detached worker. Bash keeps a saved copy of a redirected fd
+# (`fn > file`, single-flight's `"$@" > out`) on a high fd; a worker forked inside inherits it and holds
+# the caller's `$(...)` or the server's pipe open until it exits, so the export waited for the worker.
+_osrc_hub_close_fds() {
+  local f n
+  for f in /dev/fd/*; do
+    n="${f##*/}"; case "$n" in ''|*[!0-9]*|0|1|2|255) continue ;; esac
+    eval "exec $n>&-" 2>/dev/null
+  done
+  return 0
 }
 
 # _osrc_hub_scr_flush_wanted: run once at export end (still inside the memo, so the raw reader is
@@ -386,7 +344,8 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
 _osrc_hub_scr_flush_wanted() {
   local wf="$OSRC_HOME/hub/cache/scr/.wanted.$$" dwf="$OSRC_HOME/hub/cache/scr/.dwant.$$"
   [ -s "$wf" ] || [ -s "$dwf" ] || return 0
-  ( local id act pf out dep
+  ( _osrc_hub_close_fds
+    local id act pf out dep
     while read -r id act; do
       [ -n "$id" ] || continue
       _osrc_hub_slug_ok "$id" || continue
@@ -401,9 +360,9 @@ _osrc_hub_scr_flush_wanted() {
       fi
       rmdir "$pf.lock" 2>/dev/null
     done < "$wf" 2>/dev/null
-    # Queued done-contract probes: one osrc_done_state each spawns/refreshes its own verdict cache.
+    # Queued done-contract probes (lib/hub-perf.sh): the real reader spawns/refreshes each verdict cache.
     while read -r id; do
-      [ -n "$id" ] && osrc_done_state "$id" >/dev/null 2>&1
+      [ -n "$id" ] && _osrc_hub_rawosrc_done_state "$id" >/dev/null 2>&1
     done < "$dwf" 2>/dev/null
     rm -f "$wf" "$dwf" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
@@ -426,9 +385,16 @@ _osrc_hub_scr_put() { # <id> <output-file>: persist a screen read for later expo
 
 # ---- export phase profiling (OSRC_HUB_PROF=/path file -> "epoch_ns tag" rows) -------------------
 # The export asks _osrc_hub_prof at phase boundaries; when unset the calls are free.
+# Nanoseconds, portably: bash 5's EPOCHREALTIME; else GNU date's %N; else (macOS date prints a literal
+# N, bash 3.2 has no EPOCHREALTIME) whole seconds, still a valid number for the reader.
 _osrc_hub_prof() { # <tag>
   [ -n "${OSRC_HUB_PROF:-}" ] || return 0
-  printf '%s %s\n' "$(date +%s%N 2>/dev/null || printf 0)" "$1" >> "$OSRC_HUB_PROF" 2>/dev/null
+  local t="${EPOCHREALTIME:-}" u
+  case "$t" in
+    *[.,]*) u="${t#*[.,]}000000"; t="${t%%[.,]*}${u:0:6}000" ;;
+    *) t="$(date +%s%N 2>/dev/null)"; case "$t" in ''|*[!0-9]*) t="$(date +%s)000000000" ;; esac ;;
+  esac
+  printf '%s %s\n' "$t" "$1" >> "$OSRC_HUB_PROF" 2>/dev/null
 }
 
 # ---- fast pre-check: does unowned have ANY live lane? (avoids 6s work when none live) ----------
@@ -483,7 +449,7 @@ EOF
     fi
     st="$(_osrc_hub_job_state_fast "$id")"
     case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes)
-      [ "$(_osrc_hub_done_state_fast "$id")" = done ] && continue
+      [ "$(_osrc_hub_done_state "$id")" = done ] && continue
       return 0 ;;
     esac
   done
@@ -575,10 +541,12 @@ _osrc_hub_ended_lanes_fast() {
 $(jq -r '[(input_filename | sub(".*/";"") | sub("\\.json$";"")), (.spec // ""), (.cwd // "")] | @tsv' $dlist 2>/dev/null | awk -F'\t' '$2 ~ /^file:/')
 EOF
     fi
-    cut -f3 "$depf" | tr '\n' '\0' | xargs -0 stat -f '%m %N' > "$mtf" 2>/dev/null || stat -f '%m %N' $(cut -f3 "$depf") > "$mtf" 2>/dev/null || : > "$mtf"
-    stale="$(awk 'NR==FNR { m=$0; sub(/ .*/,"",m); p=$0; sub(/^[^ ]+ /,"",p); mt[p]=m+0; next }
+    # GNU first: GNU `stat -f` is filesystem status, so the lane cache only ever expired by TTL.
+    local sfl=-c sfm='%Y %n'; stat -c %Y "$depf" >/dev/null 2>&1 || { sfl=-f; sfm='%m %N'; }
+    cut -f3 "$depf" | tr '\n' '\0' | xargs -0 stat "$sfl" "$sfm" > "$mtf" 2>/dev/null
+    stale="$(awk -F'\t' 'NR==FNR { m=$0; sub(/ .*/,"",m); p=$0; sub(/^[^ ]+ /,"",p); mt[p]=m+0; next }
       { if ($2=="C") cmt[$1]=mt[$3]+0; else if ((mt[$3]+0) > dm[$1]) dm[$1]=mt[$3]+0 }
-      END { for (i in cmt) if (dm[i] > cmt[i]) print i }' -F'\t' "$mtf" "$depf" 2>/dev/null)"
+      END { for (i in cmt) if (dm[i] > cmt[i]) print i }' "$mtf" "$depf" 2>/dev/null)"
     for id in $cand; do case "$_nl$stale$_nl" in *"$_nl$id$_nl"*) ;; *) valid="$valid $id" ;; esac; done
   fi
   # Phase 3: assemble in ended_ids order — cached lanes read their records, the rest rebuild

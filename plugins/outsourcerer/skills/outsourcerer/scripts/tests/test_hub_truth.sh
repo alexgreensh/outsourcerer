@@ -171,11 +171,16 @@ for i in $(seq 1 150); do
     "$([ $((i % 3)) = 0 ] && echo busy || echo idle)" "${NOW}000" > "$OSRC_CLAUDE_SESSIONS_DIR/$i.json"
 done
 printf '{"pid":%s,"sessionId":"broken"' "$$" > "$OSRC_CLAUDE_SESSIONS_DIR/zz.json"   # one malformed file
+# Speed is measured by work, not by the clock: a loaded machine stretches seconds, never jq launches.
+# The slow export ran ~20 jq per observed session (3000+ here); the bound is per export, not per session.
+mkdir -p "$TMP/jqcount"; real_jq="$(command -v jq)"
+printf '#!/bin/sh\necho x >> "%s/jqcount/n"\nexec "%s" "$@"\n' "$TMP" "$real_jq" > "$TMP/jqcount/jq"; chmod +x "$TMP/jqcount/jq"
 t0="$(python3 -c 'import time; print(time.time())')"
-out="$(lib cmd_hub_export 2>/dev/null)"
+out="$(PATH="$TMP/jqcount:$PATH" lib cmd_hub_export 2>/dev/null)"
 dt="$(python3 -c "import time; print(round(time.time() - $t0, 1))")"
-max="${OSRC_TEST_EXPORT_MAX:-5}"
-python3 -c "import sys; sys.exit(0 if $dt < $max else 1)" && ok "export with 150 observed sessions took ${dt}s (limit ${max}s; was ~41s)" || no "export took ${dt}s"
+njq="$(wc -l < "$TMP/jqcount/n" | tr -d ' ')"; maxjq="${OSRC_TEST_EXPORT_MAX_JQ:-150}"; max="${OSRC_TEST_EXPORT_MAX:-60}"
+[ "$njq" -lt "$maxjq" ] && python3 -c "import sys; sys.exit(0 if $dt < $max else 1)" \
+  && ok "export with 150 observed sessions: $njq jq launches (limit $maxjq; was 3000+), ${dt}s" || no "export: $njq jq launches (limit $maxjq), ${dt}s (limit ${max}s)"
 jq -e '(.also | length) == 12 and (.also[0].state == "working") and any(.projects[]; .id == "s-fast")' >/dev/null <<<"$out" \
   && ok "Also running lists 12 sessions, busy first, despite a malformed session file" || no "also: $(jq -c '[.also[]?.state]' <<<"$out")"
 sf() { ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1

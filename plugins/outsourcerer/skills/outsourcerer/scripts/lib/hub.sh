@@ -59,22 +59,10 @@ _osrc_hub_review_map() {
 # _osrc_hub_review_verdict <lane> <map-json> -> verdict or empty
 _osrc_hub_review_verdict() { jq -r --arg l "$1" '.[$l] // ""' <<<"$2" 2>/dev/null; }
 
-# _osrc_hub_done_state <id> -> "done" | "" (uses osrc_done_state when defined). Under a fast export,
-# check:/pr: contracts serve the last cached verdict inline and queue the real probe for the deferred
-# worker: the check-lock mutex spin and the spawned eval runs must never sit on the export's clock.
+# _osrc_hub_done_state <id> -> "done" | "" (uses osrc_done_state when defined). Inside an export the
+# memo answers check:/pr: contracts from their last verdict (lib/hub-perf.sh): no probe on the clock.
 _osrc_hub_done_state() {
   type osrc_done_state >/dev/null 2>&1 || return 0
-  local spec
-  if [ "${OSRC_HUB_FAST:-0}" = 1 ] && [ -n "${_OSRC_HUB_MEMO:-}" ] \
-      && [ -f "$(_osrc_done_dir)/$1.json" ] && type _osrc_done_cache_peek >/dev/null 2>&1; then
-    spec="$(jq -r '.spec // empty' "$(_osrc_done_dir)/$1.json" 2>/dev/null)"
-    case "$spec" in
-      check:*|pr:*)
-        [ "$(_osrc_done_cache_peek "$1" 2>/dev/null)" = done ] && printf 'done'
-        printf '%s\n' "$1" >> "$OSRC_HOME/hub/cache/scr/.dwant.$$" 2>/dev/null
-        return 0 ;;
-    esac
-  fi
   case "$(osrc_done_state "$1" 2>/dev/null)" in done*) printf 'done' ;; esac
   return 0
 }
@@ -157,7 +145,7 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
 }
 
 _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach target)
-  local id="$1" st prov model state
+  local id="$1" st model state
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.pre"
   { type _osrc_hub_tmux_row >/dev/null 2>&1 && _osrc_hub_tmux_row "$id" >/dev/null 2>&1; } \
     || { have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; } || return 1
@@ -166,7 +154,6 @@ _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach targe
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.ols"
   ds=""; ds="$(_osrc_hub_done_state "$id")"; [ "$ds" = "done" ] && st="done"
   case "$st" in gone) return 1 ;; esac
-  prov="$(type _session_registry_last_event >/dev/null 2>&1 && _session_registry_last_event "$id" 2>/dev/null | jq -r '.provider // ""' 2>/dev/null)"
   model="$(type _session_registry_last_event >/dev/null 2>&1 && _session_registry_last_event "$id" 2>/dev/null | jq -r '.resolved_model // .model // ""' 2>/dev/null)"
   local note=""
   if [ -s "$OSRC_HOME/autodetach/$id.rc" ]; then note="auto-detached run finished (rc $(cat "$OSRC_HOME/autodetach/$id.rc" 2>/dev/null | tr -dc '0-9'))"
@@ -196,10 +183,12 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
     [ "$(jq -r '.head_ready // false' "$f")" = "true" ] && st="ready"
   fi
   case "$st" in gone) return 1 ;; esac
-  branch="$(jq -r '.branch // ""' "$f")"
-  head="$(jq -r '.head // ""' "$f")"; head7="${head:0:7}"
-  msg="$(_osrc_hub_note "$(jq -r '.head_msg // ""' "$f")")"
-  repo="$(_osrc_hub_repo_name "$(jq -r '.repo // ""' "$f")" "$(jq -r '.url // ""' "$f")")"
+  # One jq for the five fields (was five). \037 separates; tabs/newlines become spaces as the note does.
+  local url
+  IFS=$'\037' read -r branch head msg repo url < <(jq -r 'def c: (if type == "string" then . else tojson end) | sub("\n+$"; "") | gsub("[\t\n]"; " ");
+    [(.branch // "" | c), (.head // "" | c), (.head_msg // "" | c), (.repo // "" | c), (.url // "" | c)] | join("\u001f")' "$f" 2>/dev/null)
+  head7="${head:0:7}"; msg="$(_osrc_hub_note "$msg")"
+  repo="$(_osrc_hub_repo_name "$repo" "$url")"
   # Verdict from the review queue when present; ready+verdict refines the state.
   rv=""
   if type _osrc_review_verdict_for >/dev/null 2>&1 && [ -n "$head" ]; then
@@ -290,7 +279,7 @@ _osrc_hub_build_project() {
   local slug="$1" now="$2" upd="$3"
   _osrc_hub_slug_ok "$slug" || return 1
   have jq || return 1
-  local sid_dir="$OSRC_HOME/owners/$slug" lanes='[]' t lane act lact=0 llive=0
+  local sid_dir="$OSRC_HOME/owners/$slug" lanes='[]' olanes='' t lane act lact=0 llive=0
   type _osrc_hub_cache_get >/dev/null 2>&1 && _osrc_hub_cache_get "$slug" "$now" "$upd" && return 0   # settled project
   local rmap; rmap="$(_osrc_hub_review_map)"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.rmap"
@@ -304,7 +293,8 @@ _osrc_hub_build_project() {
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.livef"
       [ -n "$lane" ] && type osrc_proof_hub_lane >/dev/null 2>&1 && lane="$(osrc_proof_hub_lane "$lane")"   # proof stamp (lib/proof.sh)
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.proof"
-      [ -n "$lane" ] && lanes="$(jq -cn --argjson a "$lanes" --argjson b "$lane" '$a + [$b]')"
+      [ -n "$lane" ] && olanes="$olanes$lane
+"
       act="$(_osrc_hub_lane_activity "${t##*/}")"
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.done"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
@@ -312,6 +302,7 @@ _osrc_hub_build_project() {
           (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
     done
   fi
+  [ -z "$olanes" ] || lanes="$(printf '%s' "$olanes" | jq -cs . 2>/dev/null)" || lanes='[]'   # one jq, not one per lane
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.owned"
   # Lanes that left the registry stay listed as finished for a while (lib/hub-report.sh).
   if type _osrc_hub_ended_ids >/dev/null 2>&1; then
@@ -335,40 +326,37 @@ _osrc_hub_build_project() {
   lanes="$(_osrc_hub_apply_lane_overrides "$lanes" "$card")"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.card"
   # name: card > decisions-file already folded into card; fallback slug.
-  local name order status pct eta etanote tagline repo themes flow extralinks
+  local name
   name="$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)"; [ -n "$name" ] || name="$(_osrc_hub_derived_name "$slug")"
-  order="$(jq -r '.order // 99' <<<"$card")"
-  status="$(jq -r '.status // ""' <<<"$card")"
-  pct="$(jq -r '.pct // ""' <<<"$card")"
-  eta="$(jq -r '.eta // ""' <<<"$card")"
-  etanote="$(jq -r '.etaNote // ""' <<<"$card")"
-  tagline="$(jq -r '.tagline // ""' <<<"$card")"
-  repo="$(jq -r '.repo // ""' <<<"$card")"
   local upda stale_hours="${OSRC_HUB_STALE_HOURS:-24}" card_stale_min="${OSRC_CARD_STALE_MIN:-30}" dec_stale_h="${OSRC_DECISION_STALE_H:-2}"
   case "$stale_hours" in ''|*[!0-9]*) stale_hours=24 ;; esac
   case "$card_stale_min" in ''|*[!0-9]*) card_stale_min=30 ;; esac
   case "$dec_stale_h" in ''|*[!0-9]*) dec_stale_h=2 ;; esac
   upda="$(_osrc_hub_project_mtime "$slug" "$lact" "$llive")"
-  local rep_at folder="" pf="$OSRC_HOME/hub/projects/$slug.json" derived
+  local folder="" pf="$OSRC_HOME/hub/projects/$slug.json" derived
   derived="$(type _osrc_hub_derive >/dev/null 2>&1 && _osrc_hub_derive "$lanes" "$lact")"; [ -n "$derived" ] || derived=null
-  rep_at="$(jq -r '.reportedAt // ""' <<<"$card")"
-  if [ -z "$rep_at" ] && [ -f "$pf" ] && [ ! -L "$pf" ]; then
-    local pmt; pmt="$(_osrc_hub_mt "$pf")"
-    [ "${pmt:-0}" -gt 0 ] 2>/dev/null && rep_at="$(date -u -r "$pmt" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$pmt" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '')"
-  fi
+  local pmt=0   # a card without reportedAt reports at its file's mtime (formatted in the jq below)
+  [ -f "$pf" ] && [ ! -L "$pf" ] && pmt="$(_osrc_hub_mt "$pf")"
+  case "$pmt" in ''|*[!0-9]*) pmt=0 ;; esac
   type _osrc_hub_project_folder >/dev/null 2>&1 && folder="$(_osrc_hub_project_folder "$slug")"
   local stot=0
   type _osrc_hub_sessions_total >/dev/null 2>&1 && stot="$(_osrc_hub_sessions_total "$slug")"
   case "$stot" in ''|*[!0-9]*) stot=0 ;; esac
+  # Card fields are read inside this one jq (they were eight jq calls): `s` is what `jq -r '.x // ""'`
+  # printed, so values keep their old text form; an order that is not a number still fails the build.
   out="$(jq -cn \
-    --arg id "$slug" --arg name "$name" --argjson order "$order" --arg upd "$upd" \
+    --arg id "$slug" --arg name "$name" --arg upd "$upd" \
     --arg upda "$upda" --argjson live "$llive" --argjson staleHours "$stale_hours" \
     --argjson cardStaleMin "$card_stale_min" --argjson decisionStaleH "$dec_stale_h" \
-    --arg rep_at "$rep_at" --arg folder "$folder" --argjson stot "$stot" \
+    --argjson pmt "$pmt" --arg folder "$folder" --argjson stot "$stot" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
-    --arg status "$status" --arg pct "$pct" --arg eta "$eta" --arg etanote "$etanote" \
-    --arg tagline "$tagline" --arg repo "$repo" --argjson card "$card" --argjson derived "$derived" '
-    {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
+    --argjson card "$card" --argjson derived "$derived" '
+    def s: (. // "") | if type == "string" then sub("\n+$"; "") else tojson end;
+    ($card.order // 99 | if type == "string" then fromjson else . end) as $order
+    | ($card.status | s) as $status | ($card.pct | s) as $pct | ($card.eta | s) as $eta | ($card.etaNote | s) as $etanote
+    | ($card.tagline | s) as $tagline | ($card.repo | s) as $repo
+    | ($card.reportedAt | s | if . == "" and $pmt > 0 then ($pmt | todate) else . end) as $rep_at
+    | {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
      liveLanes:$live, staleHours:$staleHours, cardStaleMin:$cardStaleMin, decisionStaleH:$decisionStaleH, sessionsTotal:$stot,
      sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
     + (if $upda=="" then {} else {updatedAt:$upda} end)
@@ -464,18 +452,14 @@ _osrc_hub_status_override() {
 
 # _osrc_hub_mt <path...> -> newest mtime (epoch) of the paths that exist, 0 when none. Stat only.
 _osrc_hub_mt() {
-  local b=0 f m
-  # One perl stat() pass when the list is long: a fork per path is the slowest part of
-  # validating ~100-lane projects. Same result, same rules (nonexistent paths skipped).
-  if [ "$#" -gt 20 ] && command -v perl >/dev/null 2>&1; then
-    perl -e 'my $b=0; for (@ARGV) { my @s = stat $_; $b = $s[9] if @s && $s[9] > $b } print $b' "$@" 2>/dev/null
-    return 0
-  fi
-  for f in "$@"; do
-    [ -e "$f" ] || continue
-    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"   # GNU first: GNU `stat -f` is filesystem status (CI run 5)
-    [ "$m" -gt "$b" ] 2>/dev/null && b="$m"
-  done
+  local b=0 f m out
+  local -a ex=()
+  for f in "$@"; do [ -e "$f" ] && ex+=("$f"); done
+  [ "${#ex[@]}" -gt 0 ] || { printf '0'; return 0; }
+  # ONE stat for the whole list (a fork per path was ~480 forks per export). GNU first: GNU `stat -f`
+  # is filesystem status. A path that vanished since the -e test only drops its own line.
+  out="$(stat -c %Y "${ex[@]}" 2>/dev/null)"; [ -n "$out" ] || out="$(stat -f %m "${ex[@]}" 2>/dev/null)"
+  for m in $out; do [ "$m" -gt "$b" ] 2>/dev/null && b="$m"; done
   printf '%s' "$b"
 }
 

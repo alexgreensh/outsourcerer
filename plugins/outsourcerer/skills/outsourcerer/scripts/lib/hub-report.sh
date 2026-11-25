@@ -271,6 +271,8 @@ cmd_hub_report() {
   fi
   osrc_hub_beat "$sid"
   printf 'Mission Control updated%s%s%s.\n' "${said:+ ($said)}" "${newid:+; question $newid is waiting on you}" "${done_ask:+; $done_ask closed}"
+  [ -z "$board" ] || ! type _osrc_hub_board_pct_says >/dev/null 2>&1 \
+    || _osrc_hub_board_pct_says "$board" "$(jq -r '.pct // "" | tostring' "$hub/projects/$sid.json" 2>/dev/null)"
 }
 
 # ---- 3. time text (renewals; plus two helpers moved verbatim from outsourcerer.sh) -----------------

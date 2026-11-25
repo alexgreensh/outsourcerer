@@ -193,6 +193,19 @@ grep -q '^EVENT stalled cloud3 ' <<<"$ev" && ok "no push for OSRC_REMOTE_STALL m
 grep -q '^EVENT stalled cloud3 ' <<<"$(events)" && bad "stalled repeats immediately" || ok "stalled is throttled, not repeated each poll"
 h3b="$(push cloud/v3 "back to work")"; tick 1; events >/dev/null
 tick 50; grep -q '^EVENT stalled cloud3 ' <<<"$(events)" && bad "stalled right after a fresh push" || ok "a fresh push resets the stall clock"
+# A lane that committed <id>.READY, then <id>.RESULT on top (tip subject "<id>: RESULT") is finished,
+# not stalled. A RESULT with no READY in the tree still stalls.
+cmd_lane add fin1 --branch cloud/fin1 --repo "$REMOTE" >/dev/null; cmd_lane add fin2 --branch cloud/fin2 --repo "$REMOTE" >/dev/null
+push cloud/fin1 "fin1: conformance result, READY" fin1.READY >/dev/null; tick 1; events >/dev/null
+hf1="$(push cloud/fin1 "fin1: RESULT" fin1.RESULT)"; push cloud/fin2 "fin2: RESULT" fin2.RESULT >/dev/null; tick 1; ev1="$(events)"
+grep -q "^EVENT done fin1 .*READY ${hf1:0:7}" <<<"$ev1" && ok "a RESULT pushed after READY is READY at the new head: done event, queued for review" || bad "finished lane went silent: $ev1"
+# Both commits between two polls: only the tip's files are read, the tree still shows both.
+cmd_lane add fin3 --branch cloud/fin3 --repo "$REMOTE" >/dev/null; push cloud/fin3 "wip" >/dev/null; tick 1; events >/dev/null
+push cloud/fin3 "fin3: READY" fin3.READY >/dev/null; hf3="$(push cloud/fin3 "fin3: RESULT" fin3.RESULT)"; tick 1
+grep -q "^EVENT done fin3 .*READY ${hf3:0:7}" <<<"$(events)" && ok "READY and RESULT landing between two polls: READY at the tip" || bad "fin3 READY missed in one poll"
+tick 6000; ev="$(events)"
+grep -q '^EVENT stalled fin1 ' <<<"$ev" && bad "a lane whose tip carries its READY and RESULT was reported stalled: $ev" || ok "tip carrying <id>.READY and <id>.RESULT: finished, never stalled"
+grep -q '^EVENT stalled fin2 ' <<<"$ev" && ok "a RESULT without a READY in the tree still stalls" || bad "fin2 not stalled: $ev"
 
 # ---- 10. done-when check (runs in the background; events never wait for it) -------------------------------
 waitrc() { local i; for i in $(seq 1 60); do [ -s "$1" ] && return 0; sleep 0.2; done; return 1; }

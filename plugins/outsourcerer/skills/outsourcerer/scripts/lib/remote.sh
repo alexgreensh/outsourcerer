@@ -247,6 +247,15 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   if _osrc_msg_ready "$msg" "$marker" || printf '%s\n' "$names" | grep -qxE "$marker|$id\\.$marker"; then
     ready=true
   fi
+  # A push that writes the lane's own <id>.READY or <id>.RESULT onto a tree carrying both (a RESULT
+  # committed after its READY, or both landing between two polls) is READY at this head: queued for
+  # review like any READY tip, so it is neither stalled nor left with nobody woken.
+  local tree=""
+  if [ "$ready" != true ] && printf '%s\n' "$names" | grep -qxF -e "$id.READY" -e "$id.RESULT"; then
+    if [ "$transport" = gh ]; then tree="$(_osrc_net gh api "repos/$url/git/trees/$head" --jq '.tree[].path' 2>/dev/null)"
+    else tree="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"; fi
+    printf '%s\n' "$tree" | grep -qxF "$id.READY" && printf '%s\n' "$tree" | grep -qxF "$id.RESULT" && ready=true
+  fi
   sha7="${head:0:7}"
   _osrc_jq_set "$f" --arg head "$head" --arg msg "$(printf '%s' "$msg" | head -1 | cut -c1-160)" \
     --argjson now "$now" --argjson ready "$ready" \
@@ -625,6 +634,8 @@ _osrc_lane_rm() {
   [ -f "$(_osrc_lane_json "$id")" ] || die "no lane '$id'"
   rm -f "$(_osrc_lane_json "$id")"
   rm -rf "$OSRC_HOME/remote/$id.git" "$OSRC_HOME/remote/$id.lock" "$OSRC_HOME/remote/.ev/$id"
+  rm -rf "$OSRC_HOME/cloud/$id.verify.git"   # the done check's scratch clone (lib/cloudrun.sh), ~70 MB
+  rm -f "$OSRC_HOME/cloud/$id.done.sh"; ! type osrc_done_clear >/dev/null 2>&1 || { osrc_done_clear "$id" || echo "lane $id: done contract not cleared" >&2; }   # else a later done read re-clones it
   # exactly <id>-<sha7>: a bare "$id-*" glob would also hit lane "$id-other"
   for w in "$OSRC_HOME/remote/wt/$id"-$h7; do [ -e "$w" ] && rm -rf "$w"; done
   for w in "$OSRC_HOME/remote/$id"-$h7.check.log "$OSRC_HOME/remote/$id"-$h7.rc; do [ -e "$w" ] && rm -f "$w"; done

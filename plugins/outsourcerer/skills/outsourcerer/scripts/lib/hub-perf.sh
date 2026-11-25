@@ -25,7 +25,7 @@ _osrc_hub_memo_begin() {
     kill -0 "$op" 2>/dev/null || rm -rf "$old" 2>/dev/null
   done
   rm -rf "$d" 2>/dev/null; mkdir -m 700 "$d" 2>/dev/null || return 0
-  mkdir -p "$d/reg" "$d/scr" "$d/own" 2>/dev/null
+  mkdir -p "$d/reg" "$d/scr" "$d/own" "$d/done" "$OSRC_HOME/hub/cache/scr" 2>/dev/null
   # Export start, backdated 1 s so an input written in the same second (1 s mtime filesystems) still
   # counts as newer. Cached docs carry this mtime (see _osrc_hub_cache_put).
   local s1; s1=$(( $(date +%s) - 1 ))
@@ -46,7 +46,7 @@ _osrc_hub_memo_begin() {
   fi
   tmux list-sessions -F '#{session_name} #{session_created} #{window_activity}' > "$d/tmux" 2>/dev/null || rm -f "$d/tmux"   # no file = list failed: callers fall back to has-session, never "zero sessions"
   type _osrc_hub_fast_memo_init >/dev/null 2>&1 && _osrc_hub_fast_memo_init "$d"
-  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event; do
+  for fn in _state_jsonl_read _sv_target_screen _owned_live_state _session_registry_last_event osrc_done_state osrc_remote_state; do
     type "$fn" >/dev/null 2>&1 || continue
     _OSRC_HUB_MEMO_SAVED="$_OSRC_HUB_MEMO_SAVED $fn"
     eval "$(declare -f "$fn" | sed "1s/^$fn /_osrc_hub_raw$fn /")"
@@ -65,7 +65,7 @@ _osrc_hub_memo_begin() {
       if [ ! -f "$f" ]; then
         # Cross-export reuse first (hub-fast.sh scr cache); a miss reads the pane for real.
         if ! { type _osrc_hub_scr_get >/dev/null 2>&1 && _osrc_hub_scr_get "$1" > "$f" 2>/dev/null && [ -s "$f" ]; }; then
-          _osrc_hub_raw_sv_target_screen "$1" > "$f" 2>/dev/null
+          _osrc_hub_scr_read "$1" > "$f" 2>/dev/null
           type _osrc_hub_scr_put >/dev/null 2>&1 && _osrc_hub_scr_put "$1" "$f"
         fi
       fi
@@ -78,6 +78,33 @@ _osrc_hub_memo_begin() {
       [ -f "$f" ] || _osrc_hub_raw_owned_live_state "$1" > "$f" 2>/dev/null
       cat "$f"
     } ;; esac
+  # Done contracts, once per lane. check:/pr: answer from their last verdict (the probe clones or asks
+  # the network) and are queued for the export's detached worker (_osrc_hub_scr_flush_wanted), which
+  # refreshes the verdict for the next export. A synchronous probe here cost 3-6 s per cloud lane.
+  # So a pr: merged since its last verdict reads done one export later.
+  case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_done_state "*)
+    osrc_done_state() {
+      local m="$_OSRC_HUB_MEMO/done/${1:-}" v spec="" cwd=""
+      _osrc_hub_slug_ok "${1:-}" || { _osrc_hub_rawosrc_done_state "$@"; return; }
+      [ -f "$m" ] && { cat "$m"; return 0; }
+      [ -f "$(_osrc_done_dir)/$1.json" ] && { IFS= read -r spec; IFS= read -r cwd; } < <(jq -r '.spec // "", .cwd // ""' "$(_osrc_done_dir)/$1.json" 2>/dev/null)
+      case "$spec" in check:*) [ -d "$cwd" ] || spec="" ;; esac   # error cwd-missing, not the old verdict
+      case "$spec" in
+        check:*|pr:*)
+          v="$(_osrc_done_cache_peek "$1" 2>/dev/null)"; v="${v:-not-done}"
+          printf '%s\n' "$1" >> "$OSRC_HOME/hub/cache/scr/.dwant.$$" 2>/dev/null ;;
+        *) v="$(_osrc_hub_rawosrc_done_state "$1")" ;;
+      esac
+      printf '%s\n' "$v" > "$m" 2>/dev/null; printf '%s\n' "$v"
+    } ;; esac
+  # A remote lane's state is read four times per export (row, live fields, owner state, activity).
+  case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_remote_state "*)
+    osrc_remote_state() {
+      local m="$_OSRC_HUB_MEMO/rstate/${1:-}" v
+      _osrc_hub_slug_ok "${1:-}" && [ -d "$_OSRC_HUB_MEMO/rstate" ] || { _osrc_hub_rawosrc_remote_state "$@"; return; }
+      [ -f "$m" ] || { v="$(_osrc_hub_rawosrc_remote_state "$1")"; printf '%s' "$v" > "$m"; }
+      cat "$m"
+    } ;; esac
   case " $_OSRC_HUB_MEMO_SAVED " in *" _session_registry_last_event "*)
     _session_registry_last_event() {
       [ -f "$_OSRC_HUB_MEMO/reg/.indexed" ] && _osrc_hub_slug_ok "$1" || { _osrc_hub_raw_session_registry_last_event "$@"; return; }
@@ -85,6 +112,33 @@ _osrc_hub_memo_begin() {
       return 0
     } ;; esac
   return 0
+}
+
+# _osrc_hub_scr_read <id> -> what _sv_target_screen prints, reused across exports while the pane text
+# and every input of the reading are unchanged. The key is one checksum of the raw capture plus the
+# list of the lane's inputs that exist (done contract and verdict, supervise state, transcript,
+# registry, hand-in dirs: _osrc_hub_scr_deps), and their newest mtime: a new, changed or deleted input
+# reads the pane again. A long-lived pane costs one capture and one stat, not the transcript and
+# registry scans behind a full reading.
+_osrc_hub_scr_read() {
+  local id="$1" cap deps key k0 p pf="$OSRC_HOME/hub/cache/scr/$1.ck"
+  local -a dl=()
+  if ! type _osrc_hub_scr_deps >/dev/null 2>&1 || [ "${OSRC_HUB_REFRESH:-0}" = 1 ] \
+      || ! cap="$(_osrc_screen_capture "$id")"; then
+    _osrc_hub_raw_sv_target_screen "$id"; return
+  fi
+  deps="$(_osrc_hub_scr_deps "$id")"
+  [ "$deps" != x ] || { _osrc_hub_raw_sv_target_screen "$id" "$cap"; return; }
+  while IFS= read -r p; do [ -n "$p" ] && dl+=("$p"); done <<EOF
+$deps
+EOF
+  key="$(printf '%s\n@deps\n%s' "$cap" "$deps" | cksum | tr ' ' _) $(_osrc_hub_mt ${dl[@]+"${dl[@]}"})"
+  if [ -f "$pf" ] && [ ! -L "$pf" ] && IFS= read -r k0 < "$pf" && [ "$k0" = "$key" ]; then
+    tail -n +2 "$pf"; return 0
+  fi
+  _osrc_hub_raw_sv_target_screen "$id" "$cap" > "$pf.$$" 2>/dev/null
+  { printf '%s\n' "$key"; cat "$pf.$$"; } > "$pf.n.$$" 2>/dev/null && mv -f "$pf.n.$$" "$pf" 2>/dev/null
+  cat "$pf.$$"; rm -f "$pf.$$" "$pf.n.$$" 2>/dev/null
 }
 
 # _osrc_hub_memo_end: restore the original readers and drop the memo.
@@ -118,14 +172,13 @@ _osrc_hub_lane_state() {
     c="$(jq -r '.created // .started // 0 | if type == "number" then floor else (try fromdateiso8601 catch 0) end' "$OSRC_HOME/remote/$id.json" 2>/dev/null)"
     a="$(_osrc_hub_mt "$OSRC_HOME/remote/$id.json")"
     local rst=""
-    if type _osrc_hub_remote_state_fast >/dev/null 2>&1; then rst="$(_osrc_hub_remote_state_fast "$id")"
-    elif type osrc_remote_state >/dev/null 2>&1; then rst="$(osrc_remote_state "$id" 2>/dev/null)"; fi
+    type osrc_remote_state >/dev/null 2>&1 && rst="$(osrc_remote_state "$id" 2>/dev/null)"
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lstate.$id.rst"
     case "$rst" in live) st=working ;; ready|done) st=done ;; failed) st=failed ;; *) st=unknown ;; esac
   else
     return 1
   fi
-  local dsf=""; if type _osrc_hub_done_state_fast >/dev/null 2>&1; then dsf="$(_osrc_hub_done_state_fast "$id")"; else dsf="$(_osrc_hub_done_state "$id")"; fi
+  local dsf; dsf="$(_osrc_hub_done_state "$id")"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lstate.$id.dsf"
   [ "$dsf" = done ] && st=done
   case "$c" in ''|*[!0-9]*) c=0 ;; esac; case "$a" in ''|*[!0-9]*) a=0 ;; esac
@@ -145,7 +198,7 @@ _osrc_hub_lane_live_fields() {
 # $OSRC_HOME/hub/cache/<slug>.json holds the last doc of a project with nothing that can move on its own:
 # no live lane, no tmux session, no remote lane, every lane terminal. It is reused while no input under
 # the project is newer than the cache file and it is under an hour old. Anything live is rebuilt.
-_OSRC_HUB_CACHE_V=6   # r6: derived card (.derived, .reported), no idle fallback before _osrc_hub_truth
+_OSRC_HUB_CACHE_V=7   # r7: board percent keeps the report (pctSource); r6 docs carry a zeroed pct
 
 _osrc_hub_cache_paths() { # <slug> -> every file or dir whose change invalidates the project
   local slug="$1" t id rf
@@ -264,7 +317,8 @@ EOF
     # one refresher at a time; a lock older than 5 min is a crashed refresher
     [ -d "$lk" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rmdir "$lk" 2>/dev/null
     if mkdir "$lk" 2>/dev/null; then
-      ( _osrc_hub_limits_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+      ( type _osrc_hub_close_fds >/dev/null 2>&1 && _osrc_hub_close_fds
+        _osrc_hub_limits_write "$f" >/dev/null 2>&1; rmdir "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
     fi
   fi
   jq -c . "$f" 2>/dev/null || printf '[]'
