@@ -132,6 +132,25 @@ _variant dv-approval r5c ' $ \x1b[38;2;220;220;170mtouch\x1b[39m made-by-devin.t
 tall=" touch ../x ||"; for k in $(seq 24); do tall="$tall\n ls ||"; done
 _variant dv-approval-modal-rm r5d ' rm -rf ~/Documents' "$tall\nThis action requires your approval.\n ls" 'Exec(rm)' 'Exec(ls)'
 [ "$(_tick_fx devin "$TMP/r5d.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "r5: tall command with decoy header holds" || bad "r5: tall decoy approved"
+# Integration fixup (l4-r5 finding 1/2): the same tall decoy at column 0 once the real title and header
+# have scrolled off the visible capture holds, and so does a header on capture row 0.
+_variant dv-approval-modal-rm r5e '\xe2\x96\xb2 Approval required\nThis action requires your approval.\n rm -rf ~/Documents' "$tall\nThis action requires your approval.\n ls" 'Exec(rm)' 'Exec(ls)'
+[ "$(_tick_fx devin "$TMP/r5e.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "fixup: tall decoy at column 0, real header off screen, holds" || bad "fixup: tall decoy approved"
+_variant dv-approval-modal-rm r5row0s ' rm -rf ~/Documents' ' ls -la' 'Exec(rm)' 'Exec(ls)'
+python3 - "$TMP/r5row0s.ansi" "$TMP/r5row0.ansi" <<'PY2'
+import sys
+b = open(sys.argv[1], "rb").read(); k = b.index(b"This action requires")
+open(sys.argv[2], "wb").write(b[b.rindex(b"\n", 0, k) + 1:])
+PY2
+_osrc_screen_analyze_text devin < "$TMP/r5row0.ansi"
+[ -z "$OSRC_SCR_CMD" ] && [ "$(_tick_fx devin "$TMP/r5row0.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "fixup: header on row 0 holds" || bad "fixup: header on row 0 read [$OSRC_SCR_CMD]"
+# l4-r5 finding 6: Devin write/read tags are not read (no captured write modal); two-row and headerless bodies hold.
+_variant dv-approval-modal-rm w2 ' rm -rf ~/Documents' ' notes.txt\n ../../elsewhere/notes.txt' 'Exec(rm)' 'Write(notes.txt)'
+_variant dv-approval-modal-rm w0 'This action requires your approval.\n rm -rf ~/Documents' ' notes.txt' 'Exec(rm)' 'Write(notes.txt)'
+for w in w2 w0; do
+  _osrc_screen_analyze_text devin < "$TMP/$w.ansi"
+  [ "$OSRC_SCR_KIND" = other ] && [ "$(_tick_fx devin "$TMP/$w.ansi")" = 2 ] && [ ! -s "$KEYS" ] && ok "fixup: devin write body $w holds" || bad "fixup: devin write $w kind=$OSRC_SCR_KIND"
+done
 # A plain one-row read-only command still approves.
 _variant dv-approval-modal-rm r5ok ' rm -rf ~/Documents' ' ls -la' 'Exec(rm)' 'Exec(ls)'
 _osrc_screen_analyze_text devin < "$TMP/r5ok.ansi"

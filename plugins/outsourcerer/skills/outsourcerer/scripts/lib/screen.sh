@@ -349,25 +349,23 @@ _osrc_scr_devin() {
   lo=$((n - 25)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*confirm · esc cancel*" $((n - 2 > 0 ? n - 2 : 0)); then
     OSRC_SCR_KIND=other
-    # Fail closed: a command is read only when the modal is the header row 'This action requires your
-    # approval.' (the first one on screen, at column 0, inside the window), then exactly one command row,
-    # then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra rows) gives no
-    # command, so the approval is held for a person. The menu's Kind(target) tag names the action.
+    # Fail closed: a command is read only when the modal is the title row '▲ Approval required', the
+    # header row 'This action requires your approval.' (the first one on screen, at column 0), exactly
+    # one command row, then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra
+    # rows, a header on row 0 whose true top may have scrolled off) gives no command, so the approval
+    # is held for a person. Only an Exec tag is read: write/read tags have no captured modal yet, so
+    # those kinds stay 'other' and hold.
     local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
     if [ "$m" -lt "$n" ]; then
-      case "${_SCR_L[$m]}" in
-        *"Exec("*) OSRC_SCR_KIND=shell ;;
-        *"Write("*|*"Edit("*|*"Create("*|*"Overwrite("*) OSRC_SCR_KIND=write ;;
-        *"Read("*) OSRC_SCR_KIND=read ;;
-      esac
+      case "${_SCR_L[$m]}" in *"Exec("*) OSRC_SCR_KIND=shell ;; esac
       OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
       hdr=0; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
       l="$(_osrc_scr_trim "${_SCR_L[$((m - 1))]:-}")"
-      case "${_SCR_L[$hdr]}" in "This action requires your approval"*)
-        if [ "$OSRC_SCR_KIND" != other ] && [ "$hdr" -ge "$lo" ] && [ "$hdr" -eq $((m - 2)) ]; then
-          case "$l" in ""|"\$ "*|[│┃║\|─═━┄┈╭╰┌└]*) ;; *) OSRC_SCR_CMD="$l" ;; esac
-        fi ;;
-      esac
+      if [ "$OSRC_SCR_KIND" = shell ] && [ "$hdr" -gt 0 ] && [ "$hdr" -eq $((m - 2)) ]; then
+        case "${_SCR_L[$((hdr - 1))]}|${_SCR_L[$hdr]}" in *"Approval required"*"|This action requires your approval"*)
+          case "$l" in ""|"\$ "*) ;; *) OSRC_SCR_CMD="$l" ;; esac ;;
+        esac
+      fi
     fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
