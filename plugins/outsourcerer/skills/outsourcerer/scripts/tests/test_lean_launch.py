@@ -45,10 +45,43 @@ class LeanLaunch(unittest.TestCase):
     def run_launch(self, **extra):
         return subprocess.run(['/bin/bash', '-c', SH, 'bash', str(MODULE)], env=dict(os.environ, **extra), capture_output=True, text=True)
 
-    def test_default_and_empty_strict_profile(self):
-        default = self.run_launch()
+    def test_default_launch_is_lean(self):
+        # osrc-l5: a local lane must not start the user's whole MCP set unless asked.
+        env = {k: v for k, v in os.environ.items() if k not in ('OSRC_LEAN_LAUNCH', 'OSRC_SESSION_MCP', 'OSRC_LEAN_MCP_CONFIG')}
+        default = subprocess.run(['/bin/bash', '-c', SH, 'bash', str(MODULE)], env=env, capture_output=True, text=True)
         self.assertEqual(default.returncode, 0, default.stderr)
-        self.assertNotIn('--strict-mcp-config', default.stdout.splitlines())
+        args = default.stdout.splitlines()
+        self.assertIn('--strict-mcp-config', args)
+        self.assertEqual(json.loads(args[args.index('--mcp-config') + 1]), {'mcpServers': {}})
+        full = self.run_launch(OSRC_SESSION_MCP='full')
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertNotIn('--strict-mcp-config', full.stdout.splitlines())
+        forced = self.run_launch(OSRC_SESSION_MCP='full', OSRC_LEAN_LAUNCH='1')
+        self.assertIn('--strict-mcp-config', forced.stdout.splitlines())
+        bad = self.run_launch(OSRC_SESSION_MCP='everything')
+        self.assertNotEqual(bad.returncode, 0)
+
+    def test_declared_servers_only(self):
+        with tempfile.TemporaryDirectory(prefix='.lean-decl-', dir=str(ROOT)) as d:
+            home = Path(d)
+            (home / '.claude.json').write_text(json.dumps({'mcpServers': {'browser': {'command': 'b'}, 'mail': {'command': 'm'}}}))
+            sh = '''. "$1"; . "$2"
+have() { return 0; }
+die() { echo "$*" >&2; exit 1; }
+_cc_effort_flag() { :; }
+MODEL_EXPLICIT=0; MODEL=''; EFFORT=''; WITH_SPEC=' mcp=browser'; SESSION_NAME=decl
+_session_launch_cc
+printf '%s\\n' "${SESSION_LAUNCH[@]}"
+'''
+            run = subprocess.run(['/bin/bash', '-c', sh, 'bash', str(SCRIPT), str(MODULE)],
+                                 env=dict(os.environ, HOME=d, OSRC_HOME=str(home / 'osrc'), OSRC_SOURCED='1', OSRC_HEARTBEAT_DISABLED='1'),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            args = run.stdout.splitlines()
+            cfg = json.loads(Path(args[args.index('--mcp-config') + 1]).read_text())
+            self.assertEqual(sorted(cfg['mcpServers']), ['browser'])
+
+    def test_empty_strict_profile(self):
         lean = self.run_launch(OSRC_LEAN_LAUNCH='1')
         self.assertEqual(lean.returncode, 0, lean.stderr)
         args = lean.stdout.splitlines()

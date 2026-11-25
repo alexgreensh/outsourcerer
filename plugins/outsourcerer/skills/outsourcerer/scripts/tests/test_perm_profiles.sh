@@ -224,8 +224,9 @@ if (
     python3 - "$TMP/fable.argv" "$TMP/cc.txt" <<'PYTEST'
 import json, pathlib, sys
 args, rules = (pathlib.Path(p).read_text().splitlines() for p in sys.argv[1:])
-assert args == ["--model", "claude-fable-5-2", *rules]
-assert args[2] == "--allowedTools" and args[-2] == "--settings"
+lean = ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
+assert args == ["--model", "claude-fable-5-2", *lean, *rules]
+assert args[5] == "--allowedTools" and args[-2] == "--settings"
 assert "Bash(*-delete*)" in json.loads(args[-1])["permissions"]["ask"]
 PYTEST
 ); then ok "safe Fable pane executes the complete policy argv"; else no "safe Fable pane argv"; fi

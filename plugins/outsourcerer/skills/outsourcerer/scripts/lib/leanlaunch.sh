@@ -1,4 +1,9 @@
 # Claude interactive launch shared by session start and winpty.
+#
+# Lean by default (lane osrc-l5): a local lane loads ONLY the MCP servers the brief or task
+# declares (--with mcp=a,b, or OSRC_LEAN_MCP_CONFIG=<file>), else none. Each full MCP set cost about
+# 17 helper processes and 0.85 GB per lane. OSRC_SESSION_MCP=full opts back in to the user's whole
+# set. The engine's own flags do the work: --strict-mcp-config --mcp-config <json|file>.
 _session_launch_cc() {
   have claude || die "claude not on PATH (needed for a claude session)"
   [ "$MODEL_EXPLICIT" = "1" ] && _session_assert_model_pinnable cc claude --help
@@ -9,14 +14,34 @@ _session_launch_cc() {
   [ "$MODEL_EXPLICIT" = "1" ] && SESSION_LAUNCH+=("--model" "$MODEL")
   local _ccflag; _ccflag="$(_cc_effort_flag "${EFFORT:-}")"
   if [ -n "$_ccflag" ] && _session_cc_effort_supported; then SESSION_LAUNCH+=("--effort" "$_ccflag"); fi
-  if [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ]; then
-    if [ -n "${OSRC_LEAN_MCP_CONFIG:-}" ]; then
-      [ -f "$OSRC_LEAN_MCP_CONFIG" ] && jq -e '.mcpServers | type == "object"' "$OSRC_LEAN_MCP_CONFIG" >/dev/null 2>&1 || die "lean launch: invalid MCP config"
-      SESSION_LAUNCH+=(--strict-mcp-config --mcp-config "$OSRC_LEAN_MCP_CONFIG")
-    else
-      SESSION_LAUNCH+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
-    fi
+  _session_cc_mcp_flags
+}
+
+# _session_cc_mcp_flags -> append the MCP isolation flags for an interactive Claude lane.
+# OSRC_LEAN_LAUNCH=1 always means lean, even when OSRC_SESSION_MCP=full is set elsewhere.
+_session_cc_mcp_flags() {
+  case "${OSRC_SESSION_MCP:-lean}" in
+    full) [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ] || return 0 ;;
+    lean|'') ;;
+    *) die "OSRC_SESSION_MCP must be lean or full (got '${OSRC_SESSION_MCP}')" ;;
+  esac
+  if [ -n "${OSRC_LEAN_MCP_CONFIG:-}" ]; then
+    [ -f "$OSRC_LEAN_MCP_CONFIG" ] && jq -e '.mcpServers | type == "object"' "$OSRC_LEAN_MCP_CONFIG" >/dev/null 2>&1 || die "lean launch: invalid MCP config"
+    SESSION_LAUNCH+=(--strict-mcp-config --mcp-config "$OSRC_LEAN_MCP_CONFIG")
+    return 0
   fi
+  # Declared servers (--with mcp=a,b): reuse the headless lanes' filter, then keep a private copy that
+  # outlives this process (the pane starts claude after session start exits and removes its temp file).
+  if type _with_mcp_requested >/dev/null 2>&1 && _with_mcp_requested; then
+    [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || die "lean launch: --with mcp= needs strict MCP isolation; unset OSRC_CLAUDE_USER_CONFIG or use OSRC_SESSION_MCP=full"
+    local cfg="$OSRC_HOME/sessions/mcp-${SESSION_NAME:-$$}.json"
+    build_mcp_flags_cc && [ -f "${CC_MCP_FLAGS[2]:-}" ] || die "lean launch: could not build the declared MCP config"
+    _mkdir_private "$OSRC_HOME/sessions" 2>/dev/null || mkdir -p "$OSRC_HOME/sessions" || die "lean launch: cannot write $OSRC_HOME/sessions"
+    ( umask 077; cp "${CC_MCP_FLAGS[2]}" "$cfg" ) || die "lean launch: cannot write $cfg"
+    SESSION_LAUNCH+=(--strict-mcp-config --mcp-config "$cfg")
+    return 0
+  fi
+  SESSION_LAUNCH+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
 }
 
 # A new pane may still have canonical terminal input enabled when send-keys arrives.
