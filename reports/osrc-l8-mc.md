@@ -130,3 +130,65 @@ Most of these touch the watcher/supervise/stop-guard WIP already on the base bra
 - **`lib/card_fresh.sh` (owner unclear)**: the stop-guard card nag still blocks a stop when `reportedAt`
   is over 30 min old. Status, percent and summary are now derived, so the nag could accept a fresh
   `hub/auto/<sid>.json` and ask only about open questions.
+
+## Round 2 (lane osrc-l8-r2)
+
+Base `cloud/osrc-l8-mc` at `54581a0`. Branch `cloud/osrc-l8-r2`. Paths below are relative to
+`plugins/outsourcerer/skills/outsourcerer/scripts/`.
+
+### Review findings
+
+| # | Finding | Fix | Regression test (fails on base, passes here) |
+|---|---|---|---|
+| P1-1 | macOS awk rejects the multi-line `-v m=` in `_osrc_hub_cc_rows` | mtimes go in on stdin ahead of the rows (marker line `@rows`), no `-v` | `test_hub_truth.sh` "macos": a stand-in awk that refuses a newline in a `-v` value (as macOS awk 20200816 does), and the real One True AWK (`original-awk`, the source of macOS awk) when installed. Both fail on base with `newline in string` |
+| P1-2 | bash 3.2's bare `local _OSRC_HUB_CC_ROWS` is set+empty, so the cache guard returned "" | cache counts only with `_OSRC_HUB_CC_ROWS_SET=1`, set after the rows are computed | `_OSRC_HUB_CC_ROWS="" _osrc_hub_cc_rows` (bash 3.2's state) must still read the registry; fails on base |
+| P1-3 | supervisor tick beat for the orchestrator and wrote `hub/auto`, hiding the loud alerts | `osrc_hub_tick_touch` and the auto-report are deleted; `hub/auto` is no longer a liveness input. The beat stays in the session's own commands and the stop guard | alerts fixture now runs supervise's real `_sv_tick` with a reported card: the `.beat` mtime is unchanged, no `hub/auto`, and both flags survive. Fails on base (idleMin 0, no alerts) |
+| P2-4 | stale export lock with a reused pid froze the export | a lock older than `OSRC_HUB_EXPORT_STALE` (60 s) is taken over whatever its pid; a taken-over leader's temp file is removed; a leader only removes a lock that still holds its pid | lock with a live pid (`$$`) aged 2 min: taken over at once and cleared (base: waits, runs without the lock, leaves it); dead leader's `*.json.<pid>` removed |
+| P2-5 | duplicate DOM ids on merged cards | decision ids carry the owning session: `dec-/opt-/note-/send-<owner>-<id>`, home `ptd-`, and every `go(pid, did)` caller passes `<owner>-<id>` | `hub_attn_dom.js`: two sessions' D1 on one card get distinct ids (base: `dec-D1, dec-D1`) |
+| P2-6 | percent from lane counts (2 of 20 steps read 100%) | no percent is derived from lanes. A board's percent is kept; otherwise the reported percent stays only while the report is fresh (card-stale window), else it is omitted. The "Average across N work tracks" label is back for board cards | "pct": 2 of 3 lanes done shows no percent; a fresh `--pct 15` stays; a board's 10% with 20 tracks is kept while lanes run. All fail on base (66%) |
+| P2-7 | nobody read `hub/auto/*.json` | deleted `osrc_hub_auto_report`, `_osrc_hub_auto_write`, `OSRC_HUB_AUTO_SYNC` and the `auto` entries in `hub_server.py`. The stop guard already beats through `osrc_hub_beat_if_known`, so no replacement call was kept | covered by the tick test (`hub/auto` never appears) |
+
+P3 items taken: the live registry row wins over a dead leftover (test: resumed session reads `working`;
+base: `gone`); a follower no longer waits through back-to-back leaders (it takes a result that changed
+since it arrived; test fails on base); killed leaders' temp files are cleaned on takeover; the speed
+test limit is now 5 s (measured well under 1 s here); `cmd_hub_export` moved into `hub-truth.sh`, so
+`lib/hub.sh` is 987 lines. Not taken: the flight key still includes FAST, because a plain `hub export`
+must never get a fast-path (cached) result. Grouping of two never-named sessions on one repo is unchanged
+(the MC2 r3 test requires unrelated work in one repo to stay apart).
+
+Not done: running on a real Mac. This container has no bash 3.2 (the GNU mirrors are blocked by the proxy),
+so P1-2 is tested by putting the variable in the exact state bash 3.2 leaves it in. On a Mac,
+`/bin/bash tests/test_hub_truth.sh` is the direct check.
+
+### Mission Control ideas
+
+1. **Attention** (`lib/hub-truth.sh`, in `_osrc_hub_truth`): every lane gets one `attention` from signals
+   the export already has (screen state, proof stop, `reviewNeedsYou`, needs-you stall alerts, status);
+   the project gets its highest, and an open decision counts as `question`. The order is written once in
+   `references/hub.md` ("Attention"), and `test_hub_attn.sh` checks that the doc and `attn_order` agree.
+2. **Bands** (`lib/hub-assets/hub-attn.js`): waiting on you / back from work / working (one line). The
+   page tracks each lane's band and moves it only when the new band shows in two exports in a row (keyed
+   on `exported_at`). With a board that has its own themes, the board's themes stay. A project with no
+   board shows band counts, not lane names, following the page's existing rule.
+3. **Title, favicon, notification**: `(N) Mission Control` (N = lanes waiting on you + open questions);
+   the dot is drawn on a canvas over the existing emoji icon, then restored at 0. The notification is
+   off until a click in the `?` panel grants permission (stored per browser in localStorage). It fires
+   only on a new waiting item, only while the tab is hidden, never on first load, as one notification
+   (fixed tag) with project names and a fixed headline.
+4. **Keys**: `n`/`p`, `1`-`9`, `Enter`, `?`; ignored in text fields and with modifiers. A card takes keys
+   only after about one second on screen and unmoved (sampled every 200 ms). `Enter` acts only when the
+   card itself has focus, so the browser keeps Enter on buttons.
+
+No new dependency, no network call, no chat box or diff viewer. `hub.html` is 999 lines; the new logic is
+in `hub-attn.js` and five rules in `hub-mc3.css`.
+
+### Tests (Linux, bash 5, as root; each `nice bash <suite>` from `tests/`)
+
+RESULTS_PLACEHOLDER
+
+### Needs from other lanes
+
+- **`lib/supervise.sh` (osrc-l1-r2)**: `_sv_tick` still loops over owners calling `osrc_hub_tick_touch`
+  behind a `type` check. The function no longer exists, so the loop is dead; delete it.
+- **Round 1's asks are withdrawn**: do not switch `stopguard.sh` to `osrc_hub_auto_report` (it is gone;
+  `osrc_hub_beat_if_known` is right), and `card_fresh.sh` should not read `hub/auto`.
