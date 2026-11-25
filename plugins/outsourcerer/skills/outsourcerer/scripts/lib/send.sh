@@ -20,23 +20,28 @@
 # then fails, with a message that names the cause. Records are whole lines appended under the lock,
 # so concurrent writers never interleave.
 _obligation_lock() {
-  local bound="${OSRC_SEND_LOCK_WAIT_SECS:-30}" deadline
+  local bound="${OSRC_SEND_LOCK_WAIT_SECS:-30}" deadline _OSRC_LOCK_WAIT
   case "$bound" in ''|*[!0-9]*) bound=30 ;; esac
-  deadline=$(( $(date +%s) + bound ))
-  until _state_lock_acquire "$OSRC_OBLIGATIONS"; do
+  bound=$((10#$bound)); deadline=$(( $(date +%s) + bound ))
+  while :; do
+    # Each attempt waits only what is left of the bound (at most 5 s, at least 1), so the bound holds.
+    _OSRC_LOCK_WAIT=$(( deadline - $(date +%s) ))
+    [ "$_OSRC_LOCK_WAIT" -le 5 ] || _OSRC_LOCK_WAIT=5
+    [ "$_OSRC_LOCK_WAIT" -ge 1 ] || _OSRC_LOCK_WAIT=1
+    _state_lock_acquire "$OSRC_OBLIGATIONS" && return 0
     [ "$(date +%s)" -lt "$deadline" ] && continue
     printf 'outsourcerer: the obligation ledger %s stayed locked for over %ss, so nothing was sent. Another outsourcerer process is holding it; retry, or raise OSRC_SEND_LOCK_WAIT_SECS.\n' "$OSRC_OBLIGATIONS" "$bound" >&2
     return 1
   done
 }
 
-# Last state of one obligation. The grep keeps the read cheap on a long ledger (the old reader forked
-# one jq per line while holding the lock, which is what kept the lock busy); ids are [A-Za-z0-9._-],
-# so the literal key match is exact, and jq re-checks it.
+# Last state of one obligation: one jq pass over raw lines (the old reader forked one jq per line
+# while holding the lock, which is what kept the lock busy). Raw lines, so a NUL-padded crash tail or
+# any other unparseable line is skipped instead of hiding every record, and a record in any JSON
+# layout still counts.
 _obligation_latest_state() { # <id>
   [ -f "$OSRC_OBLIGATIONS" ] && [ ! -L "$OSRC_OBLIGATIONS" ] || return 0
-  grep -F "\"obligation_id\":\"$1\"" "$OSRC_OBLIGATIONS" 2>/dev/null \
-    | jq -Rr --arg id "$1" 'fromjson? | select(.obligation_id==$id) | .state' 2>/dev/null | tail -1
+  jq -Rr --arg id "$1" 'fromjson? | objects | select(.obligation_id==$id) | .state' "$OSRC_OBLIGATIONS" 2>/dev/null | tail -1
 }
 
 _obligation_append() { # <id> <session-id> <state> <receipt>

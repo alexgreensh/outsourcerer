@@ -6363,7 +6363,7 @@ _state_lock_acquire() {
   if command -v flock >/dev/null 2>&1; then
     [ ! -L "$lock" ] || return 1
     { exec 9>>"$lock"; } 2>/dev/null || return 1
-    flock -w 5 9 2>/dev/null || { exec 9>&-; return 1; }
+    flock -w "${_OSRC_LOCK_WAIT:-5}" 9 2>/dev/null || { exec 9>&-; return 1; }   # _OSRC_LOCK_WAIT: caller's bound, s
     _STATE_LOCK_KIND="flock"
     return 0
   fi
@@ -6381,7 +6381,7 @@ _state_lock_acquire() {
   # disposable corpse dir when breaking someone else's. Set before the loop so the contention path
   # (where the claim block never runs) still has it under `set -u`.
   _ownpid="${BASHPID:-$$}"
-  while [ "$tries" -lt 50 ]; do
+  while [ "$tries" -lt "$(( ${_OSRC_LOCK_WAIT:-5} * 10 ))" ]; do
     if _mkdir_claim "$lock"; then
       # Record the REAL holder pid, not $$: inside a subshell (a command substitution, say) $$ is still
       # the PARENT pid, so a subshell that acquired the lock then crashed would name the long-lived
@@ -18799,7 +18799,7 @@ main() {
   # someone has to remember mid-session. Suppressed inside a detached job (it IS the work) and for the
   # commands whose whole purpose is already to look.
   case "${1:-}" in
-    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|supervise|lane|review|team|"") ;;
+    __runjob|__heartbeat-beacon|watch|status|result|logs|cancel|gc|rundown|bearings|fleet|stop-guard|supervise|lane|review|team|lease|"") ;;
     *) [ "${OSRC_STREAM:-0}" = "1" ] || _warn_unwatched || true ;;
   esac
   # GLOBAL flags are accepted in ANY order before the subcommand (and --provider/--cloud-ack are
@@ -18957,7 +18957,7 @@ main() {
   fi
   case "$cmd" in
     __runjob|__heartbeat-beacon|__gencost|__runcost|__so-agree|__escalate-ladder|\
-    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|supervise|lane|review|team|explain|classify|session|\
+    watch|status|result|logs|cancel|gc|rundown|bearings|heartbeat|fleet|wait|stop-guard|supervise|lane|review|team|lease|explain|classify|session|\
     ""|-h|--help|help|--version|-V) ;;
     run|explore|research|edit|yolo|bg|fanout|crew|loop|continue|cloud)
       if ! _blind_turn_guard; then

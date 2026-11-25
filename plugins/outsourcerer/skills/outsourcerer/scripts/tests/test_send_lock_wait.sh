@@ -45,8 +45,16 @@ rm -f "$TMP/held"; hold_lock 12
 start=$(date +%s)
 OSRC_SEND_LOCK_WAIT_SECS=1 _obligation_admit send.c.1 lane-c 2>"$TMP/e3"; r3=$?
 took=$(( $(date +%s) - start )); kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
-[ "$r3" -ne 0 ] && [ "$took" -lt 11 ] && grep -q 'obligation ledger' "$TMP/e3" \
+[ "$r3" -ne 0 ] && [ "$took" -le 2 ] && grep -q 'obligation ledger' "$TMP/e3" \
   && ok "lock wait is bounded (${took}s) with a clear error" || bad "bound: rc=$r3 took=${took}s err=$(cat "$TMP/e3")"
 [ -z "$(_obligation_latest_state send.c.1)" ] && ok "a refused writer leaves no record" || bad "refused writer wrote a record"
+
+# 4. A binary byte (a crash's NUL-padded tail) or a non-compact record must not hide a live state,
+#    or the same reply is admitted and sent twice.
+_obligation_append send.d.1 lane-d typing_started "" && printf '\000\000\000\n' >> "$OSRC_OBLIGATIONS"
+[ "$(_obligation_latest_state send.d.1)" = typing_started ] && ok "a NUL byte in the ledger hides no state" || bad "NUL hid the state"
+_obligation_admit send.d.1 lane-d 2>/dev/null; [ $? = 2 ] && ok "a NUL byte does not let a live obligation be admitted again" || bad "re-admitted after NUL"
+printf '{ "obligation_id": "send.e.1", "session_id": "lane-e", "state": "submitted" }\n' >> "$OSRC_OBLIGATIONS"
+[ "$(_obligation_latest_state send.e.1)" = submitted ] && ok "a non-compact record still counts" || bad "non-compact record missed"
 
 echo "RESULT: $pass passed, $fail failed"; [ "$fail" -eq 0 ]

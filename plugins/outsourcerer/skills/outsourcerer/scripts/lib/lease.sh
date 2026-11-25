@@ -11,14 +11,21 @@
 # second locking system. A lease is {repo, path, holder, ttl, until, ts}:
 #   repo    the git common dir of the checkout (so every worktree of one repo shares its leases),
 #           or the physical directory outside git;
-#   path    relative to the worktree top; a shell glob is allowed (`*` also crosses `/`);
+#   path    relative to the worktree top, `//` collapsed, lowercased where git says the checkout is
+#           case-insensitive (core.ignorecase); `.` is the whole repo; a shell glob is allowed
+#           (`*` also crosses `/`);
 #   holder  the caller's lane id, resolved like `lane msg` does (process ancestry, job dir, Claude
 #           session), never from a flag. Factory/plan code calls _osrc_lease_claim with a task id.
 # A claim that overlaps a live lease of another holder is refused, naming the holder and the expiry.
 # Overlap is conservative: equal paths, one inside the other's directory, a glob matching the other
-# path, or two globs whose literal heads nest (src/*.ts and src/*.md count as overlapping).
-# The heartbeat beacon renews every lease whose holder is still alive (tmux session or job pid); a
-# dead holder's lease simply runs out. Leases are advisory coordination, not a permission system.
+# path, or a glob whose literal head nests with the other side (src/*/x.ts and src/api overlap, as do
+# src/*.ts and src/*.md).
+# Renewal: a holder's own `lease`, `lane inbox` and `lane msg` calls push its leases out (this runs on
+# every platform), and the heartbeat beacon also renews holders it can prove alive (a tmux session, or
+# a job pid whose recorded start still matches). A TTL is never shorter than two heartbeat beats plus a
+# minute. A dead holder's lease simply runs out. A ledger that does not parse is never rewritten: every
+# change is refused until someone moves it aside. Leases are advisory coordination, not a permission
+# system.
 
 _osrc_lease_file() { printf '%s/leases.json' "$OSRC_HOME"; }
 
@@ -38,38 +45,62 @@ _osrc_lease_repo() {
 # that leaves the worktree or is empty.
 _osrc_lease_norm() {
   local p="$1" d="${2:-.}" top
-  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || top="$(cd "$d" && pwd -P)"
+  top="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" || top="$d"
+  top="$(cd "$top" && pwd -P)" || return 1   # physical, so Git Bash's C:/x and /c/x compare equal
+  while :; do case "$p" in *//*) p="${p%%//*}/${p#*//}" ;; *) break ;; esac; done
   case "$p" in
-    /*) case "$p" in "$top"/*) p="${p#"$top"/}" ;; *) return 1 ;; esac ;;
+    /*|?:/*) p="$(_osrc_lease_phys "$p")"
+      case "$p" in "$top") p=. ;; "$top"/*) p="${p#"$top"/}" ;; *) return 1 ;; esac ;;
     *) local pre; pre="$(git -C "$d" rev-parse --show-prefix 2>/dev/null)"; p="$pre$p" ;;
   esac
-  while :; do case "$p" in ./*) p="${p#./}" ;; */) p="${p%/}" ;; *) break ;; esac; done
-  case "/$p/" in *"/../"*|*"/./"*|//) return 1 ;; esac
+  while :; do case "$p" in ./?*) p="${p#./}" ;; */.) p="${p%/.}" ;; ?*/) p="${p%/}" ;; *) break ;; esac; done
+  [ -n "$p" ] || p=.
+  case "/$p/" in *"/../"*|*"/./"*) [ "$p" = . ] || return 1 ;; esac
+  [ "$(git -C "$d" config --bool core.ignorecase 2>/dev/null)" = true ] && p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
   printf '%s\n' "$p"
+}
+
+# _osrc_lease_phys <absolute path> -> the path with its longest existing directory resolved by pwd -P
+# (symlinks, and Git Bash's drive spellings); the rest is kept as written. Unresolvable: unchanged.
+_osrc_lease_phys() {
+  local head="$1" tail="" r
+  while :; do
+    [ -n "$head" ] || head=/
+    [ -d "$head" ] && break
+    case "$head" in */*) tail="/${head##*/}$tail"; head="${head%/*}" ;; *) printf '%s\n' "$1"; return 0 ;; esac
+  done
+  r="$(cd "$head" && pwd -P)" || { printf '%s\n' "$1"; return 0; }
+  [ "$r" = / ] && r=""
+  printf '%s%s\n' "$r" "$tail"
 }
 
 # _osrc_lease_overlap <a> <b> -> 0 when the two paths/globs can name the same file.
 _osrc_lease_overlap() {
   local a="$1" b="$2" ha hb
-  [ "$a" = "$b" ] && return 0
+  [ "$a" = "$b" ] || [ "$a" = . ] || [ "$b" = . ] && return 0
   # shellcheck disable=SC2254  # unquoted on purpose: each side is matched as a pattern
   case "$b" in $a|$a/*) return 0 ;; esac
   # shellcheck disable=SC2254
   case "$a" in $b|$b/*) return 0 ;; esac
-  case "$a" in *[\*\?\[]*) ;; *) return 1 ;; esac
-  case "$b" in *[\*\?\[]*) ;; *) return 1 ;; esac
   ha="${a%%[\*\?\[]*}"; hb="${b%%[\*\?\[]*}"
-  case "$ha" in "$hb"*) return 0 ;; esac
-  case "$hb" in "$ha"*) return 0 ;; esac
+  [ "$ha" = "$a" ] && [ "$hb" = "$b" ] && return 1   # two plain paths: the cases above decide
+  # A glob can reach anything that starts with its literal head (a plain path is all head)...
+  [ "$ha" = "$a" ] || case "$hb" in "$ha"*) return 0 ;; esac
+  [ "$hb" = "$b" ] || case "$ha" in "$hb"*) return 0 ;; esac
+  # ...and a plain path may be a directory that holds the glob's head (src/*/x.ts vs src/api).
+  case "$ha" in "$hb"/*) return 0 ;; esac
+  case "$hb" in "$ha"/*) return 0 ;; esac
   return 1
 }
 
-# Read the ledger with expired leases dropped (an unreadable ledger reads as empty: fail open on
-# coordination, never wedge a lane).
+# Read the ledger with expired leases dropped. Only a missing (or empty) ledger reads as empty: one
+# that does not parse returns 1, so no caller ever writes a fresh array over the other lanes' leases.
 _osrc_lease_live() { # <now>
   local f; f="$(_osrc_lease_file)"
-  [ -f "$f" ] && [ ! -L "$f" ] || { printf '[]'; return 0; }
-  jq -c --argjson now "$1" '[ .[]? | select((.until // 0) > $now) ]' "$f" 2>/dev/null || printf '[]'
+  [ ! -L "$f" ] && { [ ! -s "$f" ] && printf '[]' && return 0
+    jq -ce --argjson now "$1" 'if type == "array" then [ .[] | select(type == "object" and (.until // 0) > $now) ] else error("not an array") end' "$f" 2>/dev/null; } && return 0
+  printf 'lease: the ledger %s is unreadable, so nothing was changed; move it aside to start over\n' "$f" >&2
+  return 1
 }
 
 _osrc_lease_write() { # <json-array>; caller holds the lock
@@ -86,23 +117,34 @@ _osrc_lease_lock() {
   return 1
 }
 
+# The shortest TTL: two heartbeat beats plus a minute, so one missed beat never lapses a live lease.
+_osrc_lease_min_ttl() {
+  local c="${OSRC_HEARTBEAT_CADENCE:-300}"
+  case "$c" in ''|*[!0-9]*) c=300 ;; esac
+  printf '%s' $(( 2 * 10#$c + 60 ))
+}
+
 # _osrc_lease_claim <holder> <repo> <path> [ttl-secs] -> rc 0 claimed (or renewed: same holder,
 # same path), rc 3 refused (a line per conflicting lease on stderr), rc 1 ledger trouble.
 _osrc_lease_claim() {
-  local holder="$1" repo="$2" path="$3" ttl="${4:-}" now leases conflicts rc=0 p h u
-  case "$ttl" in ''|*[!0-9]*|0) ttl=$(( ${OSRC_LEASE_TTL_MIN:-15} * 60 )) ;; esac
+  local holder="$1" repo="$2" path="$3" ttl="${4:-}" now leases conflicts rc=0 p h u min
+  case "$ttl" in ''|*[!0-9]*) ttl=0 ;; esac
+  min="${OSRC_LEASE_TTL_MIN:-15}"; case "$min" in ''|*[!0-9]*) min=15 ;; esac
+  ttl=$((10#$ttl)); [ "$ttl" -gt 0 ] || ttl=$(( 10#$min * 60 ))
+  min="$(_osrc_lease_min_ttl)"; [ "$ttl" -ge "$min" ] || ttl="$min"
   [ -n "$holder" ] && [ -n "$repo" ] && [ -n "$path" ] || return 1
   _osrc_lease_lock || return 1
-  now="$(date +%s)"; leases="$(_osrc_lease_live "$now")"
+  now="$(date +%s)"
+  if ! leases="$(_osrc_lease_live "$now")"; then _state_lock_release "$(_osrc_lease_file)"; return 1; fi
   conflicts=""
   while IFS="$(printf '\t')" read -r p h u; do
     [ -n "$p" ] || continue
     _osrc_lease_overlap "$path" "$p" || continue
     conflicts="${conflicts}lease: $path is held by $h as '$p' until $(_osrc_lease_when "$u")
 "
-  done <<EOF
+  done <<EOT
 $(printf '%s' "$leases" | jq -r --arg r "$repo" --arg h "$holder" '.[] | select(.repo==$r and .holder!=$h) | [.path,.holder,(.until|tostring)] | @tsv')
-EOF
+EOT
   if [ -n "$conflicts" ]; then
     printf '%s' "$conflicts" >&2; rc=3
   else
@@ -118,7 +160,8 @@ EOF
 _osrc_lease_release() {
   local holder="$1" repo="$2" path="$3" now leases before after rc=0
   _osrc_lease_lock || return 1
-  now="$(date +%s)"; leases="$(_osrc_lease_live "$now")"
+  now="$(date +%s)"
+  if ! leases="$(_osrc_lease_live "$now")"; then _state_lock_release "$(_osrc_lease_file)"; return 1; fi
   before="$(printf '%s' "$leases" | jq 'length')"
   leases="$(printf '%s' "$leases" | jq -c --arg r "$repo" --arg p "$path" --arg h "$holder" \
     '[ .[] | select((.holder==$h and .repo==$r and ($p=="--all" or .path==$p)) | not) ]')" || leases=""
@@ -129,35 +172,55 @@ _osrc_lease_release() {
   return "$rc"
 }
 
-# _osrc_lease_holder_alive <holder> -> 0 for a live tmux session or a job whose pid runs.
+# _osrc_lease_extend <holders, one per line> -> push out those holders' leases and drop expired
+# ones. Best-effort: a busy or unreadable ledger is left as it is.
+_osrc_lease_extend() {
+  local f now leases; f="$(_osrc_lease_file)"
+  [ -n "$1" ] && [ -s "$f" ] || return 0
+  _state_lock_acquire "$f" || return 0
+  now="$(date +%s)"
+  leases="$(_osrc_lease_live "$now" 2>/dev/null)" && leases="$(printf '%s' "$leases" | jq -c --arg hs "$1" --argjson now "$now" \
+    '($hs | split("\n")) as $a | [ .[] | if (.holder as $h | any($a[]; . == $h)) then .until = ($now + .ttl) else . end ]')" \
+    && _osrc_lease_write "$leases"
+  _state_lock_release "$f"
+  return 0
+}
+
+# _osrc_lease_touch <holder> -> a holder renews its own leases whenever it calls `lease`, `lane inbox`
+# or `lane msg`: the renewal path that runs on every platform, beacon or not. Cheap when it holds none.
+_osrc_lease_touch() {
+  local f; f="$(_osrc_lease_file)"
+  [ -n "${1:-}" ] && [ -s "$f" ] || return 0
+  grep -aF "\"holder\":\"$1\"" "$f" >/dev/null 2>&1 || return 0
+  _osrc_lease_extend "$1"
+}
+
+# _osrc_lease_holder_alive <holder> -> 0 for a live tmux session, or a job whose pid runs and is
+# still the recorded process (a reused pid is not; no start record to compare: alive). Orchestrator
+# sessions and factory task ids have no such proof, so they renew through their own calls.
 _osrc_lease_holder_alive() {
-  local id="$1" pf pid
+  local id="$1" pf pid mrc
   have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null && return 0
   for pf in "$OSRC_JOBS/$id/pid" "$OSRC_JOBS/$id/supervisor_pid"; do
     [ -f "$pf" ] || continue
     pid="$(tr -d '[:space:]' < "$pf" 2>/dev/null)"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
-    kill -0 "$pid" 2>/dev/null && return 0
+    kill -0 "$pid" 2>/dev/null || continue
+    mrc=0; _pid_start_file_match "$pid" "${pf}_start" || mrc=$?
+    [ "$mrc" = 1 ] || return 0
   done
   return 1
 }
 
-# _osrc_lease_renew_live -> the heartbeat hook: push out the expiry of every lease whose holder is
-# alive, and drop the expired ones. Best-effort; never fails the beat.
+# _osrc_lease_renew_live -> the heartbeat hook: renew every holder proven alive. Never fails the beat.
 _osrc_lease_renew_live() {
-  local f now leases alive="" h
-  f="$(_osrc_lease_file)"; [ -f "$f" ] || return 0
-  now="$(date +%s)"; leases="$(_osrc_lease_live "$now")"
+  local leases alive="" h
+  leases="$(_osrc_lease_live "$(date +%s)" 2>/dev/null)" || return 0
   for h in $(printf '%s' "$leases" | jq -r '.[].holder' | sort -u); do
     _osrc_lease_holder_alive "$h" && alive="$alive$h
 "
   done
-  _state_lock_acquire "$f" || return 0
-  leases="$(_osrc_lease_live "$now" | jq -c --arg alive "$alive" --argjson now "$now" \
-    '($alive | split("\n")) as $a | [ .[] | if (.holder as $h | any($a[]; . == $h)) then .until = ($now + .ttl) else . end ]')" \
-    && _osrc_lease_write "$leases"
-  _state_lock_release "$f"
-  return 0
+  _osrc_lease_extend "$alive"
 }
 
 _osrc_lease_when() { # <epoch> -> local time, portable (GNU date -d, BSD date -r)
@@ -165,7 +228,7 @@ _osrc_lease_when() { # <epoch> -> local time, portable (GNU date -d, BSD date -r
 }
 
 osrc_lease() { # claim|release|list ...
-  local sub="${1:-}" path="" ttl="" repo_dir="." all=0 repo holder rc
+  local sub="${1:-}" path="" ttl="" repo_dir="." all=0 repo holder rc leases min
   [ "$#" -gt 0 ] && shift
   have jq || die "lease needs jq"
   while [ "$#" -gt 0 ]; do case "$1" in
@@ -178,7 +241,8 @@ osrc_lease() { # claim|release|list ...
   repo="$(_osrc_lease_repo "$repo_dir")" || die "lease: no such directory '$repo_dir'"
   case "$sub" in
     list|ls)
-      _osrc_lease_live "$(date +%s)" | jq -r --arg r "$repo" --argjson all "$all" \
+      leases="$(_osrc_lease_live "$(date +%s)")" || return 1
+      printf '%s' "$leases" | jq -r --arg r "$repo" --argjson all "$all" \
         '.[] | select($all==1 or .repo==$r) | [.holder, .path, (.until|tostring), .repo] | @tsv' \
         | while IFS="$(printf '\t')" read -r h p u r; do
             printf '%-24s %-40s until %s%s\n' "$h" "$p" "$(_osrc_lease_when "$u")" "$([ "$all" = 1 ] && printf '  (%s)' "$r")"
@@ -192,9 +256,14 @@ osrc_lease() { # claim|release|list ...
   if [ "$sub" = release ] && [ "$all" = 1 ]; then path="--all"
   else
     [ -n "$path" ] || die "lease $sub needs a path"
-    path="$(_osrc_lease_norm "$path" "$repo_dir")" || die "lease: the path must stay inside the repo"
+    path="$(_osrc_lease_norm "$path" "$repo_dir")" || die "lease: the path must stay inside the repo (use . for the whole repo)"
   fi
-  case "$ttl" in '') ;; *[!0-9]*|0) die "lease: --ttl takes whole minutes" ;; *) ttl=$((ttl * 60)) ;; esac
+  case "$ttl" in '') ;; *[!0-9]*) die "lease: --ttl takes whole minutes" ;; *) ttl=$((10#$ttl * 60))
+    [ "$ttl" -gt 0 ] || die "lease: --ttl takes whole minutes"
+    min="$(_osrc_lease_min_ttl)"
+    [ "$ttl" -ge "$min" ] || printf 'lease: --ttl raised to %s s, two heartbeat beats plus a minute\n' "$min" >&2 ;;
+  esac
+  _osrc_lease_touch "$holder"
   if [ "$sub" = claim ]; then
     _osrc_lease_claim "$holder" "$repo" "$path" "$ttl"; rc=$?
     [ "$rc" -eq 0 ] && printf 'lease: %s holds %s\n' "$holder" "$path"

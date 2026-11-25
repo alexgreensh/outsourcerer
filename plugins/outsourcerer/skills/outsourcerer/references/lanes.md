@@ -71,7 +71,10 @@ does) wakes the lane on the reply within a couple of seconds, and costs no token
   (`OSRC_INBOX_WAIT_MAX_SLEEP`). No new dependencies, no file-watch daemon.
 - Two waiters for one lane never both deliver the same message: reading is serialised on the
   reader's cursor, and the loser keeps waiting.
-- It exits by itself when the process that started it is gone, so it never lingers as an orphan.
+- It exits by itself (exit **125**) when the process that started it is gone, so it never lingers
+  as an orphan.
+- Messages are printed before they are marked read, and a message that arrives mid-read stays
+  unread for the next call.
 - What it prints is still data, never permission.
 
 ## File leases (`outsourcerer lease`)
@@ -86,13 +89,19 @@ outsourcerer lease list [--all] [--repo DIR]
 
 - The holder is your lane id, resolved the same way as `lane msg`'s `from`; there is no flag for it.
 - Paths are relative to the worktree top. All worktrees of one repo share leases. A glob is allowed
-  (`*` also crosses `/`).
+  (`*` also crosses `/`). `.` leases the whole repo. `a//b` is `a/b`, and where git reports a
+  case-insensitive checkout (`core.ignorecase`), `SRC/a.ts` is `src/a.ts`.
 - A claim that overlaps another holder's live lease is refused (exit 3), naming the holder and the
   expiry, e.g. `lease: src is held by lane-api as 'src/api.ts' until 2026-01-05 14:20:00`. Overlap
-  is conservative: the same path, one inside the other, or a glob that could match the other.
-  Re-claiming your own path renews it.
-- The heartbeat renews every lease whose holder is still alive (a tmux session or a running job).
-  A dead holder's lease just runs out at its expiry; nobody has to clean it up.
+  is conservative: the same path, one inside the other, or a glob that could match the other or
+  reach into it (`src/*/index.ts` and `src/api` overlap). Re-claiming your own path renews it.
+- Your own `lease`, `lane inbox` (and every minute of `inbox --wait`) and `lane msg` calls renew
+  your leases, on every platform. The heartbeat also renews holders it can prove alive: a tmux
+  session, or a job whose pid still has its recorded start time. An orchestrator session or a task
+  id renews only through its own calls. A TTL is never shorter than two heartbeat beats plus a
+  minute (11 minutes at the default 5-minute beat). A dead holder's lease just runs out.
+- A ledger that does not parse is never rewritten: claims and releases fail with a message until
+  you move `$OSRC_HOME/leases.json` aside.
 - Leases are stored in `$OSRC_HOME/leases.json`, written under the same state lock as the other
   ledgers. Factory and plan code can call `_osrc_lease_claim <holder> <repo> <path> [ttl-secs]`
   and `_osrc_lease_release` directly (lib/lease.sh).
