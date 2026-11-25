@@ -1,3 +1,0 @@
-sha=a4944f2057f4711f3f5f2181248e541ebdc5e223
-rc=0
-osrc-l3-r3: limit reader requires the refusal to be the newest row (finished lanes read idle/done, not limit); 5-hour/opus/sonnet banners; Devin turn boundary; "(" no longer marks bullets busy; bracketed spinners read working; unwired osrc_screen_alert deleted; r2b markers removed. 10 regression cases fail on base, pass here. conformance rc=1 from 6 suites that fail identically on base (uid 0 container).

@@ -1,7 +1,0 @@
-❯ run the suite
-⏺ Starting the run.
-  ⎿  API Error: 429 Too Many Requests · rate_limit_error
-──────────────────────────────
-❯ 
-──────────────────────────────
-  ⏸ manual mode on
