@@ -132,7 +132,7 @@ _sv_handin_file() { # <id>
     p="$(cat "$w" 2>/dev/null)"; [ -n "$p" ] || continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
-      b="$(basename "$f")"; [ "$(_sv_handin_kind "$b")" = done ] || continue
+      b="${f##*/}"; _sv_handin_kind_v "$b"; [ "$SV_KIND" = done ] || continue
       stem="$(printf '%s' "$b" | sed -E 's/[.-]?DONE$//')"; [ -n "$stem" ] || continue
       case "$id" in "$stem"|*-"$stem") ;; *) continue ;; esac
       if [ -z "$start" ]; then

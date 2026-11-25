@@ -147,8 +147,9 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
 _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach target)
   local id="$1" st model state
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.pre"
-  { type _osrc_hub_tmux_row >/dev/null 2>&1 && _osrc_hub_tmux_row "$id" >/dev/null 2>&1; } \
-    || { have tmux 2>/dev/null && tmux has-session -t "=$id" 2>/dev/null; } || return 1
+  # The export's memoised tmux list is the answer when it exists: a miss used to fall through to a
+  # tmux has-session per candidate id (532 on a real state copy, ~30 s of a 58 s export).
+  _osrc_ols_tmux_live "$id" || return 1
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.has"
   st="$(_owned_live_state "$id" 2>/dev/null)"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.ols"
@@ -475,7 +476,14 @@ _osrc_hub_reg_ts() {
 # _osrc_hub_tmux_row <id> -> "<created> <activity>" for a live tmux session (memo list, else tmux).
 _osrc_hub_tmux_row() {
   if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/tmux" ]; then
-    awk -v s="$1" '$1 == s { print $2, $3; f = 1; exit } END { exit !f }' "$_OSRC_HUB_MEMO/tmux"
+    # Fork-free: runs once per candidate id (hundreds per export). read -d '' loads the list with no
+    # subshell; a miss is the common case and returns before any parsing.
+    local tab="" l _n=$'\n'; IFS= read -r -d '' tab < "$_OSRC_HUB_MEMO/tmux"
+    case "$_n$tab" in *"$_n$1 "*) ;; *) return 1 ;; esac
+    while IFS= read -r l; do
+      case "$l" in "$1 "*) set -- $l; printf '%s %s\n' "$2" "$3"; return 0 ;; esac
+    done <<< "$tab"
+    return 1
   else
     tmux has-session -t "=$1" 2>/dev/null && tmux display-message -p -t "=$1" '#{session_created} #{window_activity}' 2>/dev/null
   fi

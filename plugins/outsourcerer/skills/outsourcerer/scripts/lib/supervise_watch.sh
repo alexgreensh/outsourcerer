@@ -34,14 +34,18 @@ _sv_fp() { # <path>
 }
 
 # Hand-in kind of a file name: done | question | verdict | empty (not a hand-in).
-_sv_handin_kind() { # <basename>
-  local u; u="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
-  case "$u" in
-    *QUESTION*) printf question ;;
-    *VERDICT*) printf verdict ;;
-    *.DONE|*-DONE|DONE) printf done ;;
+# Fork-free (no tr, no subshell): it runs once per file of every watched folder on every screen read,
+# and the forks cost ~7 s per live lane on a Mission Control export over a few hundred files.
+# _sv_handin_kind_v sets SV_KIND; _sv_handin_kind prints it for callers that want a string.
+_sv_handin_kind_v() { # <basename>
+  SV_KIND=""
+  case "$1" in
+    *[Qq][Uu][Ee][Ss][Tt][Ii][Oo][Nn]*) SV_KIND=question ;;
+    *[Vv][Ee][Rr][Dd][Ii][Cc][Tt]*) SV_KIND=verdict ;;
+    *.[Dd][Oo][Nn][Ee]|*-[Dd][Oo][Nn][Ee]|[Dd][Oo][Nn][Ee]) SV_KIND=done ;;
   esac
 }
+_sv_handin_kind() { _sv_handin_kind_v "$1"; printf '%s' "$SV_KIND"; }
 
 _sv_handin_name_ok() { # <basename>
   case "${1:-}" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -80,8 +84,8 @@ _sv_watch_files() { # <path> [watch-id]
   return 0
 }
 _sv_watch_one() { # <file> <watch-id> [any: a watched file needs no hand-in name]
-  local b; b="$(basename "$1")"
-  [ -n "${3:-}" ] || [ -n "$(_sv_handin_kind "$b")" ] || return 0
+  local b="${1##*/}"
+  [ -n "${3:-}" ] || { _sv_handin_kind_v "$b"; [ -n "$SV_KIND" ]; } || return 0
   if [ -z "${3:-}" ] && [ -L "$1" ]; then [ -z "$2" ] || _sv_handin_ignored "$2" "$1" symlink; return 0; fi
   if _sv_handin_name_ok "$b"; then printf '%s\n' "$1"
   elif [ -n "$2" ]; then _sv_handin_ignored "$2" "$1"; fi

@@ -416,5 +416,16 @@ out="$( ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
 [ "$rc" -ne 0 ] && [[ "$out" == *"cannot register owner"* ]] && [ ! -f "$OSRC_HOME/remote/owner-test.json" ] \
   && ok "owner failure unwinds remote registration" || no "owner failure: $out"
 
+# A watched folder of a few hundred files must not cost per-file forks on every screen read (it
+# took ~7 s per live lane on each Mission Control export on a real state copy). Spy basename/tr.
+fresh 90; W="$TMP/ws90"; mkdir -p "$W/out" "$TMP/spy90"
+for i in $(seq 1 300); do : > "$W/out/note-$i.md"; done; : > "$W/out/lane-q.DONE"
+for c in basename tr; do printf '#!/bin/sh\necho %s >> "%s/calls"\nexec %s "$@"\n' "$c" "$TMP/spy90" "$(command -v $c)" > "$TMP/spy90/$c"; chmod +x "$TMP/spy90/$c"; done
+out="$(PATH="$TMP/spy90:$PATH" OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1; rm -f "$1/calls"; _sv_watch_files "$2"' "$SRC" "$TMP/spy90" "$W/out" 2>/dev/null)"
+[ "$out" = "$W/out/lane-q.DONE" ] && [ ! -s "$TMP/spy90/calls" ] \
+  && ok "listing a 300-file watched folder forks no basename/tr per file" || no "watch listing: out=[$out] forks=$(grep -c . "$TMP/spy90/calls" 2>/dev/null)"
+k="$(OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1; for n in L1.DONE l1-done DONE lane.Done x-QUESTION.md reviews-verdict.md VERDICT.DONE notdone done.md; do printf "%s=%s " "$n" "$(_sv_handin_kind "$n")"; done' "$SRC" 2>/dev/null)"
+[ "$k" = "L1.DONE=done l1-done=done DONE=done lane.Done=done x-QUESTION.md=question reviews-verdict.md=verdict VERDICT.DONE=verdict notdone= done.md= " ] \
+  && ok "hand-in kinds unchanged (case-insensitive, question and verdict before done)" || no "kinds: [$k]"
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
