@@ -553,3 +553,37 @@ fixture, reads the same on both.
 | spinner above a rule and 7 footer rows | unknown | working |
 | `Tip (press ctrl+c to interrupt a run)` last row | working | unknown |
 | `keys · esc to interrupt · q to quit` above `$` | working | idle |
+
+### Tests (Linux, bash 5, niced, run one at a time)
+
+Run from `plugins/outsourcerer/skills/outsourcerer/scripts`:
+
+- `bash tests/test_screen_alerts.sh`: rc=0, 70 passed, 0 failed. Against the base `lib/screen.sh`: rc=1, 63 passed, 7 failed (the new cases).
+- `bash tests/test_screen_state.sh`: rc=0, 252 passed. `bash tests/test_pane_state.sh`: rc=0, 15 passed.
+- `test_session_send_verify.sh`: rc=0, 49 passed. `test_stall.sh`: rc=0, 58 passed. `test_supervise.sh`: rc=0, 99 passed.
+  `test_done_contract.sh`: rc=0, 53 passed. `test_pr10_falsestall_before_quota.sh`: rc=0, 7 passed. `test_managed_send.sh`: rc=0, 12 passed.
+- `bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (from the repo root): **rc=1**, 242 passed,
+  6 failed, 1 skipped. The six failures are the same suites round 4 reproduced on the untouched base:
+  `test_harness_isolation`, `test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+  `test_conformance_suite_timeout` and `test_sealed_fixes`. Their failing assertions are permission and
+  process probes, which are wrong in a container that runs as uid 0. I did not re-run them on the base
+  this round, and none of them touch `lib/screen.sh`. `test_release_0175` passed in this run.
+
+### What remains unproven (round 5)
+
+- **No live capture of any Claude limit banner.** Every Claude limit frame is hand-built. The rule
+  assumes that Claude prints the banner as a `⎿` row and that nothing but blank rows, rules, the
+  composer and the footer follows it while the lane is parked. If Claude prints the banner
+  somewhere else, the pane reads its underlying state (idle or composer). That fails safe: there
+  is no false alert, but the limit is missed. supervise's own `_sv_plan_limit_re` grep is not mine
+  and I did not check it.
+- A tool that writes its own `⎿  ... limit reached` line as the very last row of a turn would read
+  `limit`. That is the price of "what sits above no longer matters".
+- Not run on macOS bash 3.2 or Git Bash this round. The new code uses only `case` globs (with a
+  quoted `"$end:"` prefix), `${var#...}` trims, and arithmetic, all of which the round-4 reader
+  already relied on.
+
+### Needs from other lanes (round 5)
+
+Unchanged from round 3: a longer `unknown` window in `lib/supervise.sh`. Also, one real Claude
+limit capture (pane text at the moment of a 5-hour or weekly limit), added under `tests/fixtures/screen/`.
