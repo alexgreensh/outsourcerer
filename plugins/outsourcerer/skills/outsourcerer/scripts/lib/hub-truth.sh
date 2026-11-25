@@ -11,8 +11,8 @@
 #     heartbeat and the transcript. Loud alerts for "lanes running, orchestrator idle" and "lane
 #     finished, nobody picked it up".
 #  3. One card per project: sessions on the same project (explicit key, or same repo + name) merge.
-#  4. osrc_hub_auto_report: a cheap derived report the supervisor and the stop guard call each wake.
-#  5. One registry pass per export (_osrc_hub_cc_rows) and a single-flight export.
+#  4. One registry pass per export (_osrc_hub_cc_rows) and a single-flight export (cmd_hub_export).
+#  5. attention: one value per lane and per project, in the order references/hub.md writes down.
 
 # ---- 1. derive ----------------------------------------------------------------------------------
 # dcount: lanes -> counts and the lanes worth naming. A lane's category comes from its status
@@ -40,7 +40,6 @@ def dtext: . as $c
      elif .working + .blocked > 0 then "building"
      elif .ready > 0 then "review"
      else "idle" end) as $st
-  | ((.n - .canceled) as $d | if $d > 0 then (100 * (.ready + .done + .merged) / $d | floor) else null end) as $pct
   | (if .n == 0 then null else
       dplural(.n; "lane") + ": " + ([["working","working"],["blocked","waiting for approval"],["idle","idle"],
         ["ready","ready for review"],["done","done"],["merged","merged"],["failed","failed"],["canceled","canceled"]]
@@ -51,7 +50,7 @@ def dtext: . as $c
      elif .failed > 0 and .working == 0 then "Look at the failed " + dnames(.pick.failed; .failed)
      elif .working > 0 then "Wait for " + dplural(.working; "working lane")
      else null end) as $next
-  | {status: $st, pct: $pct, summary: $sum, next: $next};
+  | {status: $st, summary: $sum, next: $next};
 def dmerge: reduce .[] as $c ({n:0,working:0,blocked:0,idle:0,ready:0,done:0,merged:0,failed:0,canceled:0,
     pick:{blocked:[],ready:[],done:[],failed:[]}, finished:[], evidenceAt:0};
   reduce ("n","working","blocked","idle","ready","done","merged","failed","canceled") as $k (.; .[$k] += ($c[$k] // 0))
@@ -59,7 +58,9 @@ def dmerge: reduce .[] as $c ({n:0,working:0,blocked:0,idle:0,ready:0,done:0,mer
   | .finished += ($c.finished // []) | .evidenceAt = ([.evidenceAt, ($c.evidenceAt // 0)] | max));
 def iso_ep: if type == "string" and length > 0 then (sub("\\.[0-9]+"; "") | fromdateiso8601? // null) else null end;'
 
-# _osrc_hub_derive <lanes-json> <evidence-epoch> -> derived JSON {counts..., evidenceAt, status, pct, summary, next}.
+# _osrc_hub_derive <lanes-json> <evidence-epoch> -> derived JSON {counts..., evidenceAt, status, summary, next}.
+# No percent: finished lanes over lanes says nothing about a plan (2 of a 20-step plan's first 2 lanes
+# done is not 100%), so a percent comes only from a board or the orchestrator's own report.
 _osrc_hub_derive() {
   jq -c --argjson ev "${2:-0}" "$_OSRC_HUB_DERIVE_JQ"' dcount + {evidenceAt: $ev} | . + dtext' <<<"$1" 2>/dev/null
 }
@@ -68,9 +69,10 @@ _osrc_hub_derive() {
 # _osrc_hub_cc_rows -> one line per Claude Code session file:
 #   sid|cwd|status|status-updated-ms|pid|job|waiting-for|alive(0/1)|transcript-mtime
 # ONE jq over every file (per-file only if one is malformed), kill -0 per pid and one stat pass for
-# the transcripts. The export computes it once (_OSRC_HUB_CC_ROWS) and every reader reuses it.
+# the transcripts. The export computes it once (_OSRC_HUB_CC_ROWS) and every reader reuses it. The cache
+# counts only once _OSRC_HUB_CC_ROWS_SET=1: bash 3.2's bare `local X` leaves X set and empty.
 _osrc_hub_cc_rows() {
-  if [ -n "${_OSRC_HUB_CC_ROWS+x}" ]; then printf '%s' "$_OSRC_HUB_CC_ROWS"; return 0; fi
+  if [ "${_OSRC_HUB_CC_ROWS_SET:-}" = 1 ]; then printf '%s' "${_OSRC_HUB_CC_ROWS:-}"; return 0; fi
   local d="${OSRC_CLAUDE_SESSIONS_DIR:-$HOME/.claude/sessions}" pd="${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
   local f raw flt sid cwd st su pid job wf alive tp
   [ -d "$d" ] && have jq || return 0
@@ -98,22 +100,24 @@ EOF
   if [ "${#tps[@]}" -gt 0 ]; then
     mt="$(stat -c '%Y|%n' "${tps[@]}" 2>/dev/null)" || mt="$(stat -f '%m|%N' "${tps[@]}" 2>/dev/null)"
   fi
-  printf '%s' "$rows" | awk -F'|' -v OFS='|' -v m="$mt" '
-    BEGIN { n = split(m, ls, "\n"); for (i = 1; i <= n; i++) { p = index(ls[i], "|"); if (p) t[substr(ls[i], p + 1)] = substr(ls[i], 1, p - 1) } }
+  # The mtimes go in on stdin ahead of the rows: macOS awk rejects a multi-line -v ("newline in string").
+  { [ -z "$mt" ] || printf '%s\n' "$mt"; printf '@rows\n%s' "$rows"; } | awk -F'|' -v OFS='|' '
+    !r { if ($0 == "@rows") r = 1; else { p = index($0, "|"); if (p) t[substr($0, p + 1)] = substr($0, 1, p - 1) }; next }
     NF >= 9 { tp = $9; $9 = (tp in t) ? t[tp] : 0; print }'
 }
 
 # _osrc_hub_orch_state <sid> <now> -> {id, state: working|idle|gone, idleMin, lastAt}.
-# Evidence: the session registry (process alive, busy/idle), the heartbeat (lib/hub-report.sh), the
-# auto-report and the transcript. A live process that is not busy is idle since its last sign of life;
+# Evidence: the session registry (process alive, busy/idle), the heartbeat (lib/hub-report.sh: the
+# session's own commands and stop guard; a supervisor's tick never beats) and the transcript. A live process that is not busy is idle since its last sign of life;
 # no live process and no sign of life for OSRC_MC_ORCH_GONE_MIN (240) min is gone.
 _osrc_hub_orch_state() {
   local sid="$1" now="$2" last row st su alive tm gone="${OSRC_MC_ORCH_GONE_MIN:-240}" state idle
   case "$gone" in ''|*[!0-9]*) gone=240 ;; esac
-  last="$(_osrc_hub_mt "$OSRC_HOME/hub/seen/$sid/.beat" "$OSRC_HOME/hub/auto/$sid.json" \
+  last="$(_osrc_hub_mt "$OSRC_HOME/hub/seen/$sid/.beat" \
     "${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"/*/"$sid".jsonl)"
   case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  row="$(_osrc_hub_cc_rows | awk -F'|' -v s="$sid" '$1 == s { print; exit }')"
+  # A resumed session can leave an older file behind: the live row wins.
+  row="$(_osrc_hub_cc_rows | awk -F'|' -v s="$sid" '$1 == s { if ($8 == 1) { print; f = 1; exit } if (r == "") r = $0 } END { if (!f && r != "") print r }')"
   if [ -n "$row" ]; then
     IFS='|' read -r _ _ st su _ _ _ alive tm <<EOF
 $row
@@ -150,16 +154,16 @@ _osrc_hub_truth() {
     | if $live then
         . + {source:"live", status:$d.status, summary:$d.summary, summaryAt:($now | todate), cardStale:false}
         | del(.cardAgeMin)
-        | (if $d.pct == null then del(.pct) else .pct = $d.pct end)
-        # Words stay while the report is younger than the card-stale window; numbers are always live.
+        # Words stay while the report is younger than the card-stale window. Percent: the board one, else the
+        # report percent while fresh; never one made from lane counts.
         | ($rep != null and ($now - $rep) < ((.cardStaleMin // 30) * 60)) as $fresh
+        | (if (.boardTracks // 0) > 0 or $fresh then . else del(.pct) end)
         | (if $fresh and ($r.next // "") != "" then .next = $r.next elif $d.next == null then del(.next) else .next = $d.next end)
         | (if ($fresh | not) and $r and $r.eta == .eta then del(.eta, .etaNote) else . end)
       else
         . + {source:(if $r then "report" else "live" end)}
         | (if $d == null then . else
             (if (.status // "") == "" and $d.status then .status = $d.status else . end)
-            | (if (.pct | type) != "number" and $d.pct != null then .pct = $d.pct else . end)
             | (if ((.summary // "") == "" or ($r != null and ($r.summary // null) == null)) and $d.summary then
                  .summary = $d.summary | .summaryAt = ($now | todate) else . end)
             | (if (.next // "") == "" and (.cardStale // false | not) and $d.next then .next = $d.next else . end)
@@ -232,66 +236,46 @@ _osrc_hub_group() {
     | map(del(._gk, ._hasStatus))' <<<"$1" 2>/dev/null || printf '%s' "$1"
 }
 
-# ---- 5. auto-report -------------------------------------------------------------------------------
-# osrc_hub_auto_report [sid]: the calling orchestrator is alive (heartbeat), and its derived report
-# ($OSRC_HOME/hub/auto/<sid>.json: status, pct, summary, next, counts, at) is rewritten from live lane
-# state at most every OSRC_HUB_AUTO_SECS (60) s, in a detached worker: the caller (the stop guard, a
-# supervise wake) never waits for it and never fails because of it. Only sessions that are already
-# orchestrators count. The write also wakes `hub serve`, so a working orchestrator's card is re-exported.
-osrc_hub_auto_report() {
-  local s d f lk gap now
-  s="$(_osrc_hub_sid "${1:-}")"; [ -n "$s" ] || return 0
-  _osrc_hub_is_orch "$s" || return 0
-  osrc_hub_beat "$s"
-  have jq || return 0
-  d="$OSRC_HOME/hub/auto"; f="$d/$s.json"; lk="$d/.$s.lock"
-  [ -L "$OSRC_HOME/hub" ] || [ -L "$d" ] || [ -L "$f" ] && return 0
-  gap="${OSRC_HUB_AUTO_SECS:-60}"; case "$gap" in ''|*[!0-9]*) gap=60 ;; esac
-  now="$(date +%s)"
-  [ -f "$f" ] && [ $(( now - $(_osrc_hub_mt "$f") )) -lt "$gap" ] && return 0
-  mkdir -p "$d" 2>/dev/null || return 0
-  [ -d "$lk" ] && [ $(( now - $(_osrc_hub_mt "$lk") )) -gt 300 ] && rm -rf "$lk" 2>/dev/null
-  mkdir "$lk" 2>/dev/null || return 0
-  if [ "${OSRC_HUB_AUTO_SYNC:-0}" = 1 ]; then _osrc_hub_auto_write "$s"; rm -rf "$lk" 2>/dev/null
-  else ( _osrc_hub_auto_write "$s"; rm -rf "$lk" 2>/dev/null ) </dev/null >/dev/null 2>&1 & fi
-  return 0
+# ---- 5. single-flight export ----------------------------------------------------------------------
+# cmd_hub_export [--project <slug>] -> SCHEMA docs JSON on stdout (_osrc_hub_export_run, lib/hub.sh).
+# Single-flight per argument set: a second caller reuses the export already running.
+cmd_hub_export() {
+  local k="all" a
+  for a in "$@"; do _osrc_hub_slug_ok "$a" && k="p-$a"; done
+  _osrc_hub_single_flight "$k.f${OSRC_HUB_FAST:-0}${OSRC_HUB_REFRESH:-0}" _osrc_hub_export_run "$@"
 }
 
-_osrc_hub_auto_write() { # <sid>: build the session's card once and keep its derived report
-  local s="$1" f="$OSRC_HOME/hub/auto/$1.json" now pj
-  now="$(date +%s)"
-  pj="$(_osrc_hub_build_project "$s" "$now" "$(_osrc_hub_now_stamp)" 2>/dev/null)" || return 0
-  jq -c --argjson now "$now" "$_OSRC_HUB_DERIVE_JQ"' (.derived // ([] | dcount + {evidenceAt:0})) | . + dtext + {at: ($now | todate)}' \
-    <<<"$pj" > "$f.$$" 2>/dev/null && [ -s "$f.$$" ] && mv -f "$f.$$" "$f" 2>/dev/null
-  rm -f "$f.$$" 2>/dev/null
-  return 0
-}
-
-# ---- 6. single-flight export ----------------------------------------------------------------------
 # _osrc_hub_single_flight <key> <cmd...>: one export per key at a time. A caller that finds one in
 # flight waits for it and prints its result (written after the caller arrived) instead of starting
-# a second one. A leader that died (its pid is gone) is replaced; after OSRC_HUB_EXPORT_WAIT (180) s
-# the caller runs its own export, so a wedged lock can never block an export for good.
+# a second one. A lock whose leader died, or one older than OSRC_HUB_EXPORT_STALE (60) s whatever pid
+# it records (a SIGKILLed leader's pid can be reused), is taken over along with the leader's temp file;
+# after OSRC_HUB_EXPORT_WAIT (180) s the caller runs its own export, so a lock never blocks for good.
 _osrc_hub_single_flight() {
-  local key="$1" d="$OSRC_HOME/hub/flight" lk out start pid rc wait="${OSRC_HUB_EXPORT_WAIT:-180}" me seen=0; shift
-  case "$wait" in ''|*[!0-9]*) wait=180 ;; esac
+  local key="$1" d="$OSRC_HOME/hub/flight" lk out start pid rc age me m m0 seen=0
+  local wait="${OSRC_HUB_EXPORT_WAIT:-180}" stale="${OSRC_HUB_EXPORT_STALE:-60}"; shift
+  case "$wait" in ''|*[!0-9]*) wait=180 ;; esac; case "$stale" in ''|*[!0-9]*) stale=60 ;; esac
   lk="$d/$key.lock"; out="$d/$key.json"; start="$(date +%s)"
   { [ ! -L "$OSRC_HOME/hub" ] && [ ! -L "$d" ] && mkdir -p "$d" 2>/dev/null; } || { "$@"; return; }
   me="$(exec sh -c 'echo $PPID')"   # this (sub)shell's pid; bash 3.2 has no BASHPID
+  m0="$(_osrc_hub_mt "$out")"
   while :; do
-    # A follower reuses the result the leader it waited on wrote after it arrived.
-    if [ "$seen" = 1 ] && [ ! -d "$lk" ] && [ -f "$out" ] && [ "$(_osrc_hub_mt "$out")" -ge "$start" ]; then cat "$out"; return 0; fi
+    # A follower reuses the result written after it arrived: one that changed since then, even while the
+    # next leader runs, or one from this second once the lock is gone.
+    if [ "$seen" = 1 ] && [ -f "$out" ]; then m="$(_osrc_hub_mt "$out")"
+      if [ "$m" != "$m0" ] || { [ ! -d "$lk" ] && [ "$m" -ge "$start" ]; }; then cat "$out"; return 0; fi
+    fi
     if mkdir "$lk" 2>/dev/null; then
       printf '%s\n' "$me" > "$lk/pid" 2>/dev/null
       "$@" > "$out.$me"; rc=$?
       [ "$rc" = 0 ] && [ -s "$out.$me" ] && mv -f "$out.$me" "$out" 2>/dev/null
-      rm -rf "$lk" 2>/dev/null
+      [ "$(cat "$lk/pid" 2>/dev/null)" = "$me" ] && rm -rf "$lk" 2>/dev/null   # a lock taken over is not ours
       if [ -f "$out.$me" ]; then cat "$out.$me"; rm -f "$out.$me"; else cat "$out"; fi
       return "$rc"
     fi
-    pid="$(cat "$lk/pid" 2>/dev/null)"
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then rm -rf "$lk" 2>/dev/null; continue; fi
-    [ -z "$pid" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$lk") )) -gt 10 ] && { rm -rf "$lk" 2>/dev/null; continue; }
+    pid="$(cat "$lk/pid" 2>/dev/null)"; age=$(( $(date +%s) - $(_osrc_hub_mt "$lk") ))
+    if [ "$age" -gt "$stale" ] || { [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; } || { [ -z "$pid" ] && [ "$age" -gt 10 ]; }; then
+      rm -rf "$lk" 2>/dev/null; [ -z "$pid" ] || rm -f "$out.$pid" 2>/dev/null; continue
+    fi
     seen=1; sleep 0.2 2>/dev/null || sleep 1
     [ $(( $(date +%s) - start )) -lt "$wait" ] || { "$@"; return; }
   done

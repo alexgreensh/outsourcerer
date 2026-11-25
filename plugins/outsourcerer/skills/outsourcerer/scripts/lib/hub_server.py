@@ -51,7 +51,7 @@ ANSWER_MAX = 16384
 # a re-export (autodetach and review are included).
 WATCH_DIRS = ("jobs", "hub", "owners", "remote", "autodetach", "review")
 # Under hub/, only these hold user state the export reads; the rest is bookkeeping.
-HUB_WATCH_SUBDIRS = ("decisions", "projects", "status", "seen", "auto")
+HUB_WATCH_SUBDIRS = ("decisions", "projects", "status", "seen")
 WATCH_FILES = ("rate-limits.json",)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 # Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
@@ -249,7 +249,7 @@ class Hub:
         if len(parts) < 2:
             return self._IGNORE
         if parts[0] == "hub":
-            if parts[1] in ("decisions", "projects", "status", "auto") and len(parts) == 3 \
+            if parts[1] in ("decisions", "projects", "status") and len(parts) == 3 \
                     and parts[2].endswith(".json"):
                 slug = parts[2][:-5]
                 return slug if SLUG_RE.fullmatch(slug) else None

@@ -8,8 +8,11 @@
 #   silent   an orchestrator that supervises but never ran `hub report` still gets status, % and summary;
 #   alerts   "lanes running, orchestrator idle N min" and "lane finished N min ago, nobody picked it up";
 #   report   a report newer than every lane still wins; --project KEY merges sessions in different folders;
-#   auto     osrc_hub_auto_report writes a derived report for orchestrators only, at most once a minute;
-#   speed    an export with 150 observed sessions stays bounded; two exports at once run one export.
+#   tick     a supervisor's tick is not orchestrator life: the loud alerts survive it;
+#   macos    the registry reader under macOS awk (no multi-line -v) and bash 3.2 (a bare `local` is set);
+#   pct      a percent comes from a board or a fresh report, never from lane counts;
+#   speed    an export with 150 observed sessions stays bounded; two exports at once run one export;
+#            a stale lock (dead or reused pid) never freezes the export.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"
 command -v jq >/dev/null || { echo "SKIP: jq required"; exit 0; }
@@ -22,6 +25,7 @@ ok(){ echo "PASS: $1"; pass=$((pass+1)); }
 no(){ echo "FAIL: $1"; fail=$((fail+1)); }
 NOW="$(date +%s)"
 ago() { python3 -c 'import os,sys,time; t=time.time()-int(sys.argv[1])*60; [os.utime(f,(t,t)) for f in sys.argv[2:]]' "$@"; }   # <min> <paths...>
+_mt() { python3 -c 'import os,sys; print(int(os.path.getmtime(sys.argv[1])))' "$1"; }
 iso() { date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ'; }
 
 home() { # <name>: a fresh HOME + OSRC_HOME
@@ -57,8 +61,8 @@ cards="$(jq '[.projects[] | select(.repo == "example/garden")] | length' <<<"$ou
 c="$(jq -c '.projects[] | select(.repo == "example/garden")' <<<"$out" 2>/dev/null)"
 jq -e '.name == "Garden app" and (.lanes | length) == 19 and (.members | sort) == ["s-new","s-old"]' >/dev/null <<<"$c" \
   && ok "the merged card keeps the reported name and all 19 lanes" || no "merged card: $(jq -c '{name, members, n:(.lanes|length)}' <<<"$c")"
-jq -e '.source == "live" and .status == "building" and .pct == 0 and .summary == "19 lanes: 19 working" and (has("eta") | not)' >/dev/null <<<"$c" \
-  && ok "status, percent and summary come from the running lanes, not the 4-day-old 90%" || no "derived: $(jq -c '{source,status,pct,summary,eta}' <<<"$c")"
+jq -e '.source == "live" and .status == "building" and (has("pct") | not) and .summary == "19 lanes: 19 working" and (has("eta") | not)' >/dev/null <<<"$c" \
+  && ok "status and summary come from the running lanes; the 4-day-old 90% is dropped, not replaced by a lane count" || no "derived: $(jq -c '{source,status,pct,summary,eta}' <<<"$c")"
 jq -e '.reported.summary == "Three lanes left." and .reported.ageMin >= 4320 and .cardStale == false and ([.. | numbers] | index(90) | not)' >/dev/null <<<"$c" \
   && ok "the newest report rides along with its age, the older 90% is gone, and the live card is not called stale" || no "reported: $(jq -c '{reported,cardStale}' <<<"$c")"
 jq -e '[.orchestrators[] | {id, state}] | sort_by(.id) == [{"id":"s-new","state":"working"},{"id":"s-old","state":"idle"}]' >/dev/null <<<"$c" \
@@ -68,8 +72,8 @@ echo "=== silent: supervising, never reported ==="
 home silent
 lane s-sup a1 running "Build the importer"; lane s-sup a2 ready "Write the exporter"; beat s-sup
 c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-sup")')"
-jq -e '.status == "building" and .pct == 50 and .summary == "2 lanes: 1 working, 1 ready for review" and .next == "Review Write the exporter" and .source == "live" and (has("reported") | not)' >/dev/null <<<"$c" \
-  && ok "an orchestrator that never reported gets status, percent, summary and next step" || no "silent card: $(jq -c '{status,pct,summary,next,source}' <<<"$c")"
+jq -e '.status == "building" and (has("pct") | not) and .summary == "2 lanes: 1 working, 1 ready for review" and .next == "Review Write the exporter" and .source == "live" and (has("reported") | not)' >/dev/null <<<"$c" \
+  && ok "an orchestrator that never reported gets status, summary and next step (no percent from 1 of 2 lanes)" || no "silent card: $(jq -c '{status,pct,summary,next,source}' <<<"$c")"
 
 echo "=== alerts: lanes running with the orchestrator idle; a finished lane nobody picked up ==="
 home alerts
@@ -84,6 +88,15 @@ jq -e 'any(.alerts[]?; .kind == "orch-idle" and (.text | test("^lanes running, o
   && ok "flag: lanes running, orchestrator idle N min" || no "orch-idle alert: $(jq -c .alerts <<<"$c")"
 jq -e 'any(.alerts[]?; .kind == "unpicked" and .lane == "d1" and (.text | test("^lane Fix the login form finished (19|20|21) min ago, nobody picked it up$")))' >/dev/null <<<"$c" \
   && ok "flag: lane finished N min ago, nobody picked it up" || no "unpicked alert: $(jq -c .alerts <<<"$c")"
+# The orchestrator reported once (so its supervisor ticks its card); a tick is not the orchestrator's life.
+printf '{"name":"Scheduler port","reportedAt":"%s"}\n' "$(iso $((NOW - 7200)))" > "$OSRC_HOME/hub/projects/s-idle.json"; ago 120 "$OSRC_HOME/hub/projects/s-idle.json"
+mkdir -p "$TMP/alerts/sv"; b0="$(_mt "$OSRC_HOME/hub/seen/s-idle/.beat")"
+lib _sv_tick "$TMP/alerts/sv" "$NOW" >/dev/null 2>&1
+[ -s "$TMP/alerts/sv/hub.json" ] || no "the supervisor tick did not run its export"
+c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-idle")')"
+[ "$(_mt "$OSRC_HOME/hub/seen/s-idle/.beat")" = "$b0" ] && [ ! -e "$OSRC_HOME/hub/auto" ] \
+  && jq -e '([.alerts[]? | select(.kind == "orch-idle" or .kind == "unpicked")] | length) == 2 and .orchestrators[0].idleMin >= 24' >/dev/null <<<"$c" \
+  && ok "a supervisor's tick does not beat for the orchestrator: both flags survive it" || no "tick hid the alerts: $(jq -c '{o:.orchestrators, a:.alerts}' <<<"$c")"
 beat s-idle; touch "$OSRC_CLAUDE_SESSIONS_DIR/1.json"
 printf '{"pid":%s,"sessionId":"s-idle","cwd":"/nowhere","status":"busy","statusUpdatedAt":%s}\n' "$SLEEPER" "${NOW}000" > "$OSRC_CLAUDE_SESSIONS_DIR/1.json"
 c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-idle")')"
@@ -111,22 +124,41 @@ jq -e 'length == 1 and (.[0].decisions | map(.owner) | sort) == ["k-one","k-two"
   && ok "--project KEY joins sessions into one card; each question keeps its owning session" || no "project key: $(jq -c 'map({id, members, d:[.decisions[]|{id,owner}]})' <<<"$c")"
 ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; CLAUDE_CODE_SESSION_ID=k-one cmd_hub_report --project 'bad key' 2>/dev/null ) && no "a bad --project key was accepted" || ok "a bad --project key is refused"
 
-echo "=== auto: a derived report per orchestrator wake ==="
-home auto
-lane s-auto z1 running "Index the photos"
-lib osrc_hub_auto_report s-auto; sleep 1
-for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$OSRC_HOME/hub/auto/s-auto.json" ] && break; sleep 0.5; done
-jq -e '.summary == "1 lane: 1 working" and .status == "building" and (.at | fromdateiso8601) > (now - 120)' "$OSRC_HOME/hub/auto/s-auto.json" >/dev/null 2>&1 \
-  && ok "the auto-report (detached) writes the derived status for a never-reported orchestrator" || no "auto: $(cat "$OSRC_HOME/hub/auto/s-auto.json" 2>&1)"
-[ -f "$OSRC_HOME/hub/seen/s-auto/.beat" ] && [ ! -f "$OSRC_HOME/hub/projects/s-auto.json" ] \
-  && ok "it beats the heartbeat and never writes the orchestrator's own card" || no "auto touched the card or missed the beat"
-m1="$(cat "$OSRC_HOME/hub/auto/s-auto.json")"; ago 0 "$OSRC_HOME/hub/auto/s-auto.json"; lane s-auto z2 running
-OSRC_HUB_AUTO_SYNC=1 lib osrc_hub_auto_report s-auto
-[ "$(cat "$OSRC_HOME/hub/auto/s-auto.json")" = "$m1" ] && ok "a second wake within a minute does no work" || no "auto rewrote within the gap"
-ago 2 "$OSRC_HOME/hub/auto/s-auto.json"; OSRC_HUB_AUTO_SYNC=1 lib osrc_hub_auto_report s-auto
-jq -e '.n == 2' "$OSRC_HOME/hub/auto/s-auto.json" >/dev/null && ok "after the gap it reflects the new lane" || no "auto stale: $(cat "$OSRC_HOME/hub/auto/s-auto.json")"
-OSRC_HUB_AUTO_SYNC=1 lib osrc_hub_auto_report stranger
-[ ! -e "$OSRC_HOME/hub/auto/stranger.json" ] && [ ! -e "$OSRC_HOME/hub/seen/stranger" ] && ok "a session that never used Outsourcerer is left alone" || no "auto registered a stranger"
+echo "=== macos: BSD awk and bash 3.2 semantics in the registry reader ==="
+home macos
+mkdir -p "$TMP/macos/w1" "$TMP/macos/bin"
+for n in 1 2; do sid="bbbbbbbb-0000-4000-8000-00000000000$n"
+  td="$OSRC_CLAUDE_PROJECTS_DIR/$(printf '%s' "$TMP/macos/w1" | tr -c 'A-Za-z0-9' '-')"; mkdir -p "$td"; : > "$td/$sid.jsonl"; ago 3 "$td/$sid.jsonl"
+  printf '{"pid":%s,"sessionId":"%s","cwd":"%s","status":"idle","statusUpdatedAt":0}\n' "$$" "$sid" "$TMP/macos/w1" > "$OSRC_CLAUDE_SESSIONS_DIR/$n.json"
+done
+# A stand-in for macOS awk (20200816): a -v value with a newline is "newline in string", rc 2.
+printf '#!/bin/sh\nv=0; for a in "$@"; do case "$v$a" in 1*"\n"*|0-v*"\n"*) echo "awk: newline in string" >&2; exit 2 ;; esac; v=0; [ "$a" = -v ] && v=1; done\nexec %s "$@"\n' "$(command -v awk)" > "$TMP/macos/bin/awk"
+chmod 755 "$TMP/macos/bin/awk"
+rows_ok() { awk -F'|' -v t="$(( $(date +%s) - 180 ))" 'NF == 9 && $9 >= t - 30 && $9 <= t + 5 { n++ } END { exit !(n == 2) }'; }
+PATH="$TMP/macos/bin:$PATH" lib _osrc_hub_cc_rows | rows_ok && ok "the registry reader works where awk rejects a multi-line -v (macOS awk)" || no "rows under BSD-style awk: $(PATH="$TMP/macos/bin:$PATH" lib _osrc_hub_cc_rows 2>&1)"
+if command -v original-awk >/dev/null 2>&1; then
+  ln -sf "$(command -v original-awk)" "$TMP/macos/bin/awk"
+  PATH="$TMP/macos/bin:$PATH" lib _osrc_hub_cc_rows | rows_ok && ok "the registry reader works under the One True AWK (macOS awk's source)" || no "rows under original-awk: $(PATH="$TMP/macos/bin:$PATH" lib _osrc_hub_cc_rows 2>&1)"
+fi
+# bash 3.2: the export's bare `local _OSRC_HUB_CC_ROWS` leaves it set and empty; that is not a cache.
+_OSRC_HUB_CC_ROWS="" lib _osrc_hub_cc_rows | rows_ok && ok "an empty, set _OSRC_HUB_CC_ROWS (bash 3.2 local) is not taken as the cache" || no "bash 3.2 cache: empty rows"
+_OSRC_HUB_CC_ROWS="x|y" _OSRC_HUB_CC_ROWS_SET=1 lib _osrc_hub_cc_rows | grep -qx 'x|y' && ok "the export's computed rows are reused" || no "cache not reused"
+# A crashed-then-resumed session leaves its old file behind: the live row wins.
+( exit 0 ) & dead=$!; wait "$dead"
+printf '{"pid":%s,"sessionId":"s-res","cwd":"/nowhere","status":"busy","statusUpdatedAt":%s}\n' "$dead" "${NOW}000" > "$OSRC_CLAUDE_SESSIONS_DIR/0.json"
+printf '{"pid":%s,"sessionId":"s-res","cwd":"/nowhere","status":"busy","statusUpdatedAt":%s}\n' "$$" "${NOW}000" > "$OSRC_CLAUDE_SESSIONS_DIR/9.json"
+lib _osrc_hub_orch_state s-res "$NOW" | jq -e '.state == "working"' >/dev/null && ok "a resumed session reads from its live registry row, not a dead leftover" || no "resumed: $(lib _osrc_hub_orch_state s-res "$NOW")"
+
+echo "=== pct: board or fresh report only ==="
+home pct
+lane s-pct p1 done "Step one"; lane s-pct p2 done "Step two"; lane s-pct p3 running "Step three"; beat s-pct
+c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-pct")')"
+jq -e 'has("pct") | not' >/dev/null <<<"$c" && ok "2 of 3 lanes done invents no percent" || no "pct from lane counts: $(jq -c '{pct}' <<<"$c")"
+( export CLAUDE_CODE_SESSION_ID=s-pct; OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1; cmd_hub_report --pct 15 >/dev/null )
+c="$(lib cmd_hub_export 2>/dev/null | jq -c '.projects[] | select(.id == "s-pct")')"
+jq -e '.pct == 15 and .source == "live"' >/dev/null <<<"$c" && ok "a fresh reported percent stays while lanes run" || no "fresh pct: $(jq -c '{pct,source}' <<<"$c")"
+c="$(lib _osrc_hub_truth '{"liveLanes":1,"boardTracks":20,"pct":10,"reportedAt":"2020-01-01T00:00:00Z","reported":{"pct":10},"derived":{"n":3,"working":1,"blocked":0,"idle":0,"ready":0,"done":2,"merged":0,"failed":0,"canceled":0,"pick":{"blocked":[],"ready":[],"done":["a","b"],"failed":[]},"finished":[],"evidenceAt":0}}' "$NOW")"
+jq -e '.pct == 10 and .source == "live"' >/dev/null <<<"$c" && ok "a board's percent (20 tracks) is kept while lanes run" || no "board pct: $c"
 
 echo "=== speed: 150 observed sessions; single-flight ==="
 home speed
@@ -153,8 +185,22 @@ rm -f "$OSRC_HOME/runs"; sf 1 & p1=$!; sleep 0.5; sf 2 & p2=$!; wait "$p1" "$p2"
 [ "$(grep -c x "$OSRC_HOME/runs")" = 1 ] && [ "$(cat "$TMP/sf.1")" = '{"run":1}' ] && [ "$(cat "$TMP/sf.2")" = '{"run":1}' ] \
   && ok "two exports at once run one export; the second caller reuses its result" || no "single-flight: runs=$(grep -c x "$OSRC_HOME/runs") out1=$(cat "$TMP/sf.1") out2=$(cat "$TMP/sf.2")"
 lk="$OSRC_HOME/hub/flight/all.f00.lock"; mkdir -p "$lk"; ( exit 0 ) & dead=$!; wait "$dead"; echo "$dead" > "$lk/pid"
+echo junk > "$OSRC_HOME/hub/flight/all.f00.json.$dead"
 rm -f "$OSRC_HOME/runs"; sf 3
-[ "$(cat "$TMP/sf.3")" = '{"run":1}' ] && [ ! -d "$lk" ] && ok "a lock left by a dead export is taken over" || no "dead leader: $(cat "$TMP/sf.3")"
+[ "$(cat "$TMP/sf.3")" = '{"run":1}' ] && [ ! -d "$lk" ] && [ ! -e "$OSRC_HOME/hub/flight/all.f00.json.$dead" ] \
+  && ok "a lock left by a dead export is taken over, with its temp file" || no "dead leader: $(cat "$TMP/sf.3")"
+# A SIGKILLed leader whose pid now belongs to a long-lived process ($$): the lock is old, so it is taken over.
+mkdir -p "$lk"; echo "$$" > "$lk/pid"; ago 2 "$lk"
+rm -f "$OSRC_HOME/runs"; t0="$(date +%s)"; OSRC_HUB_EXPORT_WAIT=8 sf 4
+[ "$(cat "$TMP/sf.4")" = '{"run":1}' ] && [ ! -d "$lk" ] && [ $(( $(date +%s) - t0 )) -lt 6 ] \
+  && ok "a stale lock with a reused live pid is taken over at once and cleared" || no "reused pid: $(cat "$TMP/sf.4") lock=$([ -d "$lk" ] && echo left) took $(( $(date +%s) - t0 ))s"
+rm -rf "$lk"
+# Back-to-back leaders: a follower takes the first result written after it arrived.
+mkdir -p "$lk"; echo "$$" > "$lk/pid"
+( sleep 1; printf '{"run":"other"}\n' > "$OSRC_HOME/hub/flight/w"; mv -f "$OSRC_HOME/hub/flight/w" "$OSRC_HOME/hub/flight/all.f00.json" ) &
+OSRC_HUB_EXPORT_WAIT=6 sf 5; wait
+[ "$(cat "$TMP/sf.5")" = '{"run":"other"}' ] && ok "a follower does not wait through the next leader once a fresh result exists" || no "follower starved: $(cat "$TMP/sf.5")"
+rm -rf "$lk"
 
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

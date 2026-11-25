@@ -546,10 +546,6 @@ _osrc_hub_project_mtime() {
   date -u -r "$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf ''
 }
 
-# osrc_hub_tick_touch <owner-session-id>: supervise's tick calls this; it is the auto-report now
-# (lib/hub-truth.sh), which never writes the orchestrator's own card.
-osrc_hub_tick_touch() { type osrc_hub_auto_report >/dev/null 2>&1 && osrc_hub_auto_report "$@"; }
-
 # _osrc_hub_unowned_project -> project doc for targets no owner session claims
 # (jobs launched without CLAUDE_CODE_SESSION_ID, remote lanes added the same way).
 _osrc_hub_unowned_project() {
@@ -778,16 +774,7 @@ _osrc_hub_need() {
   [ -z "$miss" ] || die "hub: required tool(s) not on PATH:$miss"
 }
 
-# cmd_hub_export [--project <slug>] -> SCHEMA docs JSON on stdout. Single-flight per argument set
-# (lib/hub-truth.sh): a second caller reuses the export already running instead of starting another.
-cmd_hub_export() {
-  local k="all" a
-  for a in "$@"; do _osrc_hub_slug_ok "$a" && k="p-$a"; done
-  k="$k.f${OSRC_HUB_FAST:-0}${OSRC_HUB_REFRESH:-0}"
-  if type _osrc_hub_single_flight >/dev/null 2>&1; then _osrc_hub_single_flight "$k" _osrc_hub_export_run "$@"
-  else _osrc_hub_export_run "$@"; fi
-}
-
+# _osrc_hub_export_run: the export itself; cmd_hub_export (lib/hub-truth.sh) runs it single-flight.
 _osrc_hub_export_run() {
   # The fast path is the export under `hub serve` (hub_server.py exports with OSRC_HUB_FAST=1):
   # settled-project caches, memoised tmux/registry reads, stale-while-revalidate screens and queued
@@ -803,7 +790,8 @@ _osrc_hub_export_run() {
   now="$(date +%s)"; upd="$(_osrc_hub_now_stamp)"
   type _osrc_hub_memo_begin >/dev/null 2>&1 && _osrc_hub_memo_begin   # one pane read per lane per export
   # One pass over the Claude session registry for the whole export (liveness + "Also running").
-  local _OSRC_HUB_CC_ROWS; type _osrc_hub_cc_rows >/dev/null 2>&1 && _OSRC_HUB_CC_ROWS="$(_osrc_hub_cc_rows)"
+  local _OSRC_HUB_CC_ROWS="" _OSRC_HUB_CC_ROWS_SET=""
+  type _osrc_hub_cc_rows >/dev/null 2>&1 && _OSRC_HUB_CC_ROWS="$(_osrc_hub_cc_rows)" && _OSRC_HUB_CC_ROWS_SET=1
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "memo.begin.done"
   # Slugs: every owner session + every decisions/projects file + unowned.
   local slugs=""
