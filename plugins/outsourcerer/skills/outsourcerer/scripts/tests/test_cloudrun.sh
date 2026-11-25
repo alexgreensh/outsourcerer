@@ -71,7 +71,7 @@ case "${1:-}" in
   auth)   echo "Logged in (via Devin)."; exit 0 ;;
   --help|-h|help) echo "Usage: devin [options]"; echo "  --cloud"; echo "  -p, --print [<PROMPT>]"; echo "      --prompt-file <FILE>"; exit 0 ;;
   --cloud) case "${FAKE_DEVIN_MODE:-}" in
-             nolink) echo "Preparing devin session..."; sleep 30; exit 0 ;;
+             nolink) echo $$ > "$OSRC_STUB_LOG.pid"; echo "Preparing devin session..."; sleep 30; exit 0 ;;
              quota)  echo '{"error":"out_of_quota","message":"Agent refused the request"}'; exit 1 ;;
            esac
            if [ "${FAKE_HELP_ONLY:-}" = 1 ]; then echo "https://support.example.invalid/help"; exit 3; fi
@@ -268,6 +268,34 @@ out="$(FAKE_HELP_ONLY=1 start_cloud t-help --repo "$WORK" --base main --brief "$
 out="$(FAKE_DEVIN_MODE=nolink OSRC_CLOUD_LAUNCH_WAIT=2 start_cloud t-nolink --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-nolink.json" ] && grep -q 'Preparing devin session' <<<"$out" && grep -q 'did not start' <<<"$out" \
   && ok "no session link: launch fails, output shown, nothing registered" || bad "no-link launch counted as started (rc=$rc): $out"
+
+# Round 2: a failed launch must stop the vehicle CLI itself (not only the wrapper), and the message
+# must not claim more than is known.
+spid="$(cat "$OSRC_STUB_LOG.pid" 2>/dev/null)"
+# (a killed process may linger as a zombie until its reaper runs; that is dead)
+_pst="$(ps -o stat= -p "${spid:-0}" 2>/dev/null | tr -d ' ')"
+[ -n "$spid" ] && case "$_pst" in ''|Z*) true ;; *) false ;; esac && ok "failed launch: the vehicle process is gone" || bad "vehicle pid '$spid' survived a failed launch"
+grep -q 'OSRC_CLOUD_LAUNCH_WAIT' <<<"$out" && grep -q 'dashboard' <<<"$out" && ok "failure message names the wait knob and the dashboard" || bad "message overstates: $out"
+
+# Round 2: --base X from a checkout whose HEAD is not X is refused.
+git -C "$WORK" checkout -q -b side-r2 && git -C "$WORK" commit -q --allow-empty -m side && git -C "$WORK" push -q origin side-r2
+out="$(start_cloud t-headmis --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && [ ! -e "$OSRC_HOME/remote/t-headmis.json" ] && grep -q "is not the tip of base 'main'" <<<"$out" \
+  && ok "HEAD != base tip: launch refused" || bad "launch from the wrong HEAD allowed (rc=$rc): $out"
+git -C "$WORK" checkout -q main
+
+# Round 2: generic placeholder paths pass the private check; real paths stay blocked.
+pc() { printf '%s\n' "$1" > "$TMP/pc.md"; _cloudrun_private_check "$TMP/pc.md" 2>/dev/null; }
+pc 'Copy from $HOME/.claude/plugins/cache/<plugin>/ here' && pc 'see ~/.claude/plugins/cache/<plugin>/x' && pc 'under /home/<user>/.config/<app>/' \
+  && ok "placeholder paths are allowed" || bad "placeholder path rejected"
+! pc 'read ~/notes.md' && ! pc 'at /Users/bob/plan.md' && ! pc 'at /home/bob/<x>/y' && ! pc 'a ~/.claude/real/path' \
+  && ok "real paths still blocked" || bad "a real path slipped through"
+
+# Round 2: only the end of the log classifies a failure (an echoed prompt must not).
+printf 'Brief: fix billing and rate limit handling\n' > "$TMP/cl.log"; for i in $(seq 25); do echo "line $i" >> "$TMP/cl.log"; done
+[ "$(_cloudrun_classify_failure devin "$TMP/cl.log" | cut -f1)" = other ] && ok "old log lines do not classify the failure" || bad "classifier read the whole log"
+echo 'HTTP 402 payment required' >> "$TMP/cl.log"
+[ "$(_cloudrun_classify_failure devin "$TMP/cl.log" | cut -f1)" = billing ] && ok "recent billing line still classifies" || bad "billing missed"
 
 # ---- regression: quota/billing errors are named as such, never as a refusal ----
 out="$(FAKE_DEVIN_MODE=quota start_cloud t-quota --repo "$WORK" --base main --brief "$BRIEF" --vehicle devin --spend-ok 2>&1)"; rc=$?

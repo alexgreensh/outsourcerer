@@ -150,7 +150,7 @@ _osrc_lane_fetch_url() { # <lane-json> -> URL git can fetch
 # Fetch the lane branch into a per-lane bare cache; prints the cache dir. rc!=0 on failure.
 _osrc_lane_cache() { # <id> <lane-json>
   local c="$OSRC_HOME/remote/$1.git" url b
-  url="$(_osrc_lane_fetch_url "$2")"; b="$(jq -r '.branch' "$2")"
+  url="$(_osrc_lane_fetch_url "$2")"; b="$(jq -r '.poll_branch // .branch' "$2")"
   [ -d "$c" ] || git init -q --bare "$c" 2>/dev/null || return 1
   _osrc_net git --git-dir="$c" fetch -q --no-tags "$url" "+refs/heads/$b:refs/heads/lane" 2>>"$OSRC_HOME/remote/$1.fetch.err" || return 1
   printf '%s' "$c"
@@ -189,6 +189,9 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   transport="$(jq -r '.transport' "$f")"; branch="$(jq -r '.branch' "$f")"; url="$(jq -r '.url' "$f")"
   prev="$(jq -r '.head // ""' "$f")"; marker="$(jq -r '.ready_marker' "$f")"
   names=""
+  local prim="$branch" pass=1
+  while :; do
+  head=""; msg=""; names=""; rc=0
   if [ "$transport" = gh ]; then
     have gh || { _osrc_lane_poll_err "$id" "$f" "$now" auth "gh CLI not installed or not on PATH"; return 0; }
     out="$(_osrc_net gh api "repos/$url/commits/$branch" 2>"$f.err")" || rc=$?
@@ -207,6 +210,15 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     if [ "$rc" -ne 0 ]; then _osrc_lane_poll_err "$id" "$f" "$now" net "$err"; return 0; fi
     head="$(printf '%s\n' "$out" | awk 'NR==1{print $1}')"
   fi
+  # Claude cloud sessions sometimes push only to their own claude/<id>-<suffix> branch: when the
+  # lane branch is absent, look for that one and follow it (a READY marker there counts).
+  if [ -z "$head" ] && [ "$pass" = 1 ]; then
+    pass=2; branch="$(_osrc_lane_alt_branch "$id" "$f" "$transport" "$url")"
+    [ -n "$branch" ] && [ "$branch" != "$prim" ] && continue
+    branch="$prim"
+  fi
+  break
+  done
   # success path: clear error state, record the poll
   _osrc_jq_set "$f" --argjson now "$now" '.last_poll_ts=$now | .last_ok_ts=$now | .err_count=0 | .err_kind="" | .err_msg=""'
   if [ -z "$head" ]; then
@@ -216,7 +228,7 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     fi
     return 0
   fi
-  _osrc_jq_set "$f" '.branch_deleted=false | .seen_branch=true'
+  _osrc_jq_set "$f" --arg pb "$branch" '.branch_deleted=false | .seen_branch=true | .poll_branch=$pb'
   [ "$head" != "$prev" ] || return 0
 
   # head moved: find the commit message and READY evidence for the NEW tip
@@ -244,6 +256,20 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     _osrc_lane_check_and_enqueue "$id" "$f" "$head" "$now"
   fi
   return 0
+}
+
+# <id> <json> <transport> <url> -> the session's own branch claude/<id>-<suffix> (the remote, else
+# the name in the launch log), or nothing.
+_osrc_lane_alt_branch() {
+  local id="$1" f="$2" transport="$3" url="$4" b out=""
+  b="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
+  if [ "$transport" = gh ]; then
+    ! have gh || out="$(_osrc_net gh api "repos/$url/git/matching-refs/heads/claude/$id-" 2>/dev/null | jq -r '.[0].ref // ""' 2>/dev/null)"
+  else
+    out="$(_osrc_net git ls-remote "$url" "refs/heads/claude/$id-*" 2>/dev/null | awk 'NR==1{print $2}')"
+  fi
+  [ -z "$out" ] || b="${out#refs/heads/}"
+  printf '%s' "$b"
 }
 
 # ONE marker rule, shared with the done contract (lib/done.sh, _osrc_done_marker_hit) when loaded: the
@@ -421,10 +447,9 @@ osrc_remote_events() {
        && _osrc_ev_due "$id" neverstarted 0; then
       _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - $(jq -r '.created_ts' "$f")) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
     fi
-    if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ]; then
-      last_move="$(jq -r '.last_push_ts // .created_ts' "$f")"
-      vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
-      [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
+    if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ] \
+       && { [ -n "$head" ] || [ "$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")" -le 0 ]; }; then
+      last_move="$(_osrc_lane_last_move "$id" "$f")"
       if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "$id" stalled "$stall"; then
         _osrc_emit stalled "$id" "no push on $(jq -r .branch "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id" "$last_move"
       fi
@@ -433,6 +458,16 @@ osrc_remote_events() {
   type osrc_review_events >/dev/null 2>&1 && osrc_review_events
   type osrc_proof_events >/dev/null 2>&1 && osrc_proof_events   # lib/proof.sh: lanes stopped by a pin mismatch
   return 0
+}
+
+# Last sign the lane moved: its last push or its last review verdict, whichever is later. ONE rule
+# for `lane events` (stalled) and `lane ls` (stale).
+_osrc_lane_last_move() { # <id> <json>
+  local lm vts
+  lm="$(jq -r '.last_push_ts // .created_ts' "$2")"
+  vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$1" || echo 0)"
+  [ "$vts" -gt "$lm" ] 2>/dev/null && lm="$vts"
+  printf '%s' "$lm"
 }
 
 # A lane that has not pushed within OSRC_REMOTE_NEVER_START minutes (default 45) never started.
@@ -462,7 +497,7 @@ _osrc_lane_status() { # <id>
       else printf 'starting\tno branch yet'; fi
       return 0
     fi
-    last="$(jq -r '.last_push_ts // .created_ts' "$f")"
+    last="$(_osrc_lane_last_move "$id" "$f")"
     if [ "$stall" -gt 0 ] && [ $(( now - last )) -ge "$stall" ]; then printf 'stale\tno push for %sm' "$(( (now - last) / ${OSRC_TIME_UNIT:-60} ))"; return 0; fi
   fi
   case "$st" in

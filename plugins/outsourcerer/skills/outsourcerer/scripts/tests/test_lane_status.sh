@@ -42,6 +42,11 @@ out="$(osrc_remote_events 2>&1)"
 grep -q 'never started' <<<"$out" && bad "never-started repeated" || ok "never-started is reported once"
 grep -q 'stale' <<<"$(cmd_lane ls)" && ok "lane ls shows the never-pushed lane stale" || bad "ls: $(cmd_lane ls)"
 
+# Round 2: "never started" is the ONLY report for a headless lane; no stalled event 90m later.
+OSRC_NOW=$((1000000 + 91)); export OSRC_NOW
+out="$(osrc_remote_events 2>&1)"
+grep -q 'EVENT stalled c1' <<<"$out" && bad "headless lane also reported stalled: $out" || ok "headless lane is not reported stalled after never started"
+
 # Real network errors still surface (and a missing branch must not mask them).
 OSRC_NOW=1000000; export OSRC_NOW
 printf 'gh: error connecting to api.github.com\n' > "$GH_ERR"
@@ -56,5 +61,30 @@ add c3; cmd_lane poll c3
 row="$(cmd_lane ls | grep -E '^c3 ')"; grep -q ' live ' <<<"$row" && ok "fresh push shows live" || bad "ls: $(cmd_lane ls)"
 OSRC_NOW=$((1000000 + 91)); export OSRC_NOW
 row="$(cmd_lane ls | grep -E '^c3 ')"; grep -q ' stale ' <<<"$row" && ok "no evidence past the timeout shows stale" || bad "ls: $(cmd_lane ls)"
+
+# Round 2: ls and events share one last-move rule: a recent review verdict keeps a lane live in both.
+rm -f "$GH_ERR"; OSRC_NOW=1000000; export OSRC_NOW
+add c4; cmd_lane poll c4
+_osrc_review_last_verdict_ts() { echo "${FAKE_VTS:-0}"; }
+OSRC_NOW=$((1000000 + 91)); FAKE_VTS=$((1000000 + 80)); export OSRC_NOW FAKE_VTS
+row="$(cmd_lane ls | grep -E '^c4 ')"; grep -q ' live ' <<<"$row" && ok "ls honours the last review verdict (not stale)" || bad "ls ignored the verdict: $row"
+out="$(osrc_remote_events 2>&1)"
+grep -q 'EVENT stalled c4' <<<"$out" && bad "events stalled c4 despite verdict" || ok "events agree: not stalled"
+unset -f _osrc_review_last_verdict_ts
+
+# Round 2: a session that pushed only to its own claude/<id>-<suffix> branch is found; READY there counts.
+OSRC_NOW=1000000; export OSRC_NOW
+O="$TMP/origin.git"; W="$TMP/w"
+git init -q --bare "$O" && git init -q "$W" && git -C "$W" config user.email t@example.invalid && git -C "$W" config user.name t
+git -C "$W" commit -q --allow-empty -m init && git -C "$W" push -q "$O" HEAD:refs/heads/main
+printf 'READY alt1\n' > "$W/alt1.READY"; git -C "$W" add alt1.READY && git -C "$W" commit -q -m "alt1: done READY"
+git -C "$W" push -q "$O" HEAD:refs/heads/claude/alt1-Xk3Q
+cmd_lane add alt1 --branch cloud/alt1 --repo "$O" >/dev/null 2>&1; cmd_lane poll alt1
+[ "$(jq -r .head_ready "$OSRC_HOME/remote/alt1.json")" = true ] && [ "$(jq -r .poll_branch "$OSRC_HOME/remote/alt1.json")" = claude/alt1-Xk3Q ] \
+  && ok "READY on the session's own claude/<id>-* branch is seen" || bad "alt branch missed: $(jq -c . "$OSRC_HOME/remote/alt1.json")"
+OSRC_REMOTE_NEVER_START=45 cmd_lane add alt2 --branch cloud/alt2 --repo "$O" >/dev/null 2>&1; cmd_lane poll alt2
+[ "$(jq -r .head "$OSRC_HOME/remote/alt2.json")" = "" ] && ok "another lane's session branch is not adopted" || bad "alt2 adopted a foreign branch"
+out="$(_osrc_cleanup_remote_branches)"
+grep -q 'lane alt1 .*delete cloud/alt1 claude/alt1-Xk3Q' <<<"$out" && ok "cleanup offers the claude/<id>-* branch with the lane's own" || bad "cleanup offer: $out"
 
 echo "=== $pass passed, $fail failed ==="; [ "$fail" -eq 0 ]

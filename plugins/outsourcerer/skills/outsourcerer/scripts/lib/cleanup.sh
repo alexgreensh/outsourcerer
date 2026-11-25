@@ -409,11 +409,29 @@ _osrc_human_kb() { # <kb> -> "1.2G" style
   else printf '%sK' "$k"; fi
 }
 
+# Remote lane branches: never deleted here (the remote is the user's); offered with the exact command.
+# A cloud session may push only to its own claude/<id>-<suffix> branch, so that is offered too.
+_osrc_cleanup_remote_branches() {
+  local f id url br names alt
+  for f in "$OSRC_HOME"/remote/*.json; do
+    [ -f "$f" ] || continue
+    id="$(basename "$f" .json)"; br="$(jq -r '.branch // ""' "$f" 2>/dev/null)"; [ -n "$br" ] || continue
+    names="$br"
+    alt="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"; [ -z "$alt" ] || [ "$alt" = "$br" ] || names="$names $alt"
+    alt="$(grep -oE "claude/$id-[A-Za-z0-9._-]+" "$OSRC_HOME/cloud/$id.launch.log" 2>/dev/null | tail -1)"
+    case " $names " in *" $alt "*) alt="" ;; esac
+    [ -z "$alt" ] || names="$names $alt"
+    url="$(jq -r 'if .transport=="gh" then "https://github.com/" + .url + ".git" else .url end' "$f" 2>/dev/null)"
+    echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $names"
+  done
+}
+
 _osrc_cleanup_dryrun() {
   have jq 2>/dev/null || die "cleanup needs jq"
   local mf="$OSRC_HOME/created.jsonl" items n_safe n_ask n_gone free_gb
   if [ ! -f "$mf" ]; then
     echo "[outsourcerer] cleanup: no manifest yet ($mf). Nothing Outsourcerer-created is recorded."
+    _osrc_cleanup_remote_branches
     return 0
   fi
   items="$(_osrc_cleanup_items)"
@@ -428,6 +446,7 @@ _osrc_cleanup_dryrun() {
       + (if .why != "" then "  — " + .why else "" end)' 2>/dev/null
   [ "$n_gone" -gt 0 ] && echo "  ($n_gone manifest entries already gone; left in the log.)"
   echo "[outsourcerer] SAFE items delete with: $0 cleanup --apply"
+  _osrc_cleanup_remote_branches
   [ "$n_ask" -gt 0 ] && echo "[outsourcerer] ASK items need your call; after reviewing: $0 cleanup --ack"
 }
 

@@ -151,12 +151,39 @@ _cloudrun_pack() {
 # no pre-existing implementation was found in the repo, so this checks (a) absolute home paths
 # the cloud box cannot resolve and (b) names listed in $OSRC_HOME/cloud-private-names.txt
 # (one per line, # comments, case-insensitive substring match).
+# _cloudrun_path_generic <token> -> rc0 when a "/Users/..", "/home/..", "~/.." or "$HOME/.." path is a
+# template, not a real path: it has a <placeholder> segment, and for /Users and /home the user
+# segment itself is one (`/home/<user>/x`). `~/notes.md` and `/Users/bob/x` stay blocked.
+_cloudrun_path_generic() {
+  local t="$1" rest seg ph=0
+  case "$t" in
+    '$HOME/'*) rest="${t#'$HOME/'}" ;;
+    '${HOME}/'*) rest="${t#'${HOME}/'}" ;;
+    '~/'*) rest="${t#'~/'}" ;;
+    /Users/*|/home/*) rest="${t#/*/}"; seg="${rest%%/*}"
+      case "$seg" in \<*\>) ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+  local IFS=/
+  for seg in $rest; do
+    case "$seg" in \<[A-Za-z0-9_.-]*\>) ph=1 ;; esac
+  done
+  [ "$ph" = 1 ]
+}
+
 _cloudrun_private_check() {
-  local f="$1" pf="$OSRC_HOME/cloud-private-names.txt" line pat hits=0
+  local f="$1" pf="$OSRC_HOME/cloud-private-names.txt" line pat hits=0 tok bad
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if { [ -n "$HOME" ] && printf '%s' "$line" | grep -qF -- "$HOME"; } \
-       || printf '%s' "$line" | grep -qE '/Users/|/home/|~/'; then
+    bad=0
+    if [ -n "$HOME" ] && grep -qF -- "$HOME" <<<"$line"; then bad=1
+    elif grep -qE '/Users/|/home/|~/' <<<"$line"; then
+      while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        _cloudrun_path_generic "$tok" || bad=1
+      done < <(grep -oE '(/Users/|/home/|~/|[$]HOME/|[$][{]HOME[}]/)[^[:space:]`"'"'"'),;]*' <<<"$line")
+    fi
+    if [ "$bad" = 1 ]; then
       printf 'PRIVATE PATH: pack contains a machine-local path the cloud box cannot see: %s\n' "$(printf '%s' "$line" | cut -c1-160)" >&2
       hits=1
     fi
@@ -320,23 +347,25 @@ _cloudrun_pick_vehicle() {
 
 # ---- launch failure diagnosis ------------------------------------------------------------------
 # _cloudrun_trust_prompt <log> -> rc0 when claude is waiting on the folder-trust screen.
+_cloudrun_log_tail() { grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -20; }
 _cloudrun_trust_prompt() {
-  grep -qiE 'project you created or one you trust|do you trust the files in this folder' "$1" 2>/dev/null
+  grep -qiE 'project you created or one you trust|do you trust the files in this folder' <<<"$(_cloudrun_log_tail "$1")"
 }
 
 # _cloudrun_classify_failure <vehicle> <log> -> prints "<kind>\t<next step>" (kind: trust|quota|billing|
 # ratelimit|other). Quota, billing and rate limits are NEVER a refusal of the request: the vehicle
 # is out of capacity, so the next step is another vehicle or local work.
 _cloudrun_classify_failure() {
-  local v="$1" log="$2" alt
+  local v="$1" log="$2" alt tail
+  tail="$(_cloudrun_log_tail "$log")"   # only the end of the log: an echoed prompt or old line must not classify
   case "$v" in claude) alt="--vehicle devin or codex" ;; devin) alt="--vehicle claude or codex" ;; *) alt="--vehicle claude or devin" ;; esac
   if _cloudrun_trust_prompt "$log"; then
     printf 'trust\tClaude Code does not trust this folder yet. Trust it once (run `claude` here and accept the prompt) or launch from an already trusted checkout; this tool never accepts trust for you.'
-  elif grep -qiE 'out_of_quota|quota (exceeded|exhausted|reached)|exceeded (your )?(usage )?quota|usage limit|limit reached' "$log" 2>/dev/null; then
+  elif grep -qiE 'out_of_quota|quota (exceeded|exhausted|reached)|exceeded (your )?(usage )?quota|usage limit|limit reached' <<<"$tail"; then
     printf 'quota\t%s is out of quota, not refusing the task. Retry with %s, or run the work locally.' "$v" "$alt"
-  elif grep -qiE 'billing|payment required|insufficient[ _](credit|fund|balance)|out of (credits|acus)|credit balance|HTTP 402|\b402\b' "$log" 2>/dev/null; then
+  elif grep -qiE 'billing|payment required|insufficient[ _](credit|fund|balance)|out of (credits|acus)|credit balance|HTTP 402|\b402\b' <<<"$tail"; then
     printf 'billing\t%s reports a billing problem (not a refusal). Fix billing for that plan, retry with %s, or run the work locally.' "$v" "$alt"
-  elif grep -qiE 'rate.?limit|too many requests|HTTP 429|\b429\b|overloaded' "$log" 2>/dev/null; then
+  elif grep -qiE 'rate.?limit|too many requests|HTTP 429|\b429\b|overloaded' <<<"$tail"; then
     printf 'ratelimit\t%s is rate limited (not a refusal). Wait and retry, use %s, or run the work locally.' "$v" "$alt"
   else
     printf 'other\t'
@@ -416,7 +445,12 @@ _cloudrun_launch() {
     rm -f "$fifo"
   else
     attempt="$(mktemp -d "$log.XXXXXX")" || return 1
-    ( cd "$root" && nohup "${cmd[@]}"; printf '%s' "$?" > "$attempt/exit" ) >"$log" 2>&1 &
+    # The wrapper subshell's pid is not the vehicle's: record the vehicle pid (cpid) so a failed
+    # launch can stop the real CLI, not just the wrapper.
+    ( cd "$root" || { printf 1 > "$attempt/exit"; exit 1; }
+      nohup "${cmd[@]}" & cp=$!
+      printf '%s' "$cp" > "$attempt/cpid"
+      wait "$cp"; printf '%s' "$?" > "$attempt/exit" ) >"$log" 2>&1 &
     pid="$!"
   fi
   printf '%s' "$pid" > "$pidfile"
@@ -434,6 +468,7 @@ _cloudrun_launch() {
     # Started means a session URL/id was printed. Anything else is a failed launch: stop the
     # launcher so it cannot create an unregistered session later (and never answer a trust prompt).
     [ -z "$sess" ] || tmux kill-session -t "$sess" 2>/dev/null
+    [ -s "$attempt/cpid" ] && kill "$(cat "$attempt/cpid")" 2>/dev/null
     kill "$pid" 2>/dev/null
     return 1
   fi
@@ -600,6 +635,13 @@ _cloudrun_start() {
   fi
   # preflight: pushed base + no unpushed work + repo match (above)
   _cloudrun_preflight "$fetch" "$base" "$top"
+  # The pack pins HEAD but the hosted clone starts from the remote base: they must be the same commit.
+  if [ -z "$pinsha" ]; then
+    local btip bhead; btip="$(git ls-remote "$fetch" "refs/heads/$base" 2>/dev/null | awk 'NR==1{print $1}')"
+    bhead="$(git -C "$top" rev-parse HEAD 2>/dev/null)"
+    [ -z "$btip" ] || [ "$btip" = "$bhead" ] \
+      || die "cloud: this checkout's HEAD (${bhead:0:7}) is not the tip of base '$base' (${btip:0:7}): the lane would be built on the wrong code. Check out and update '$base' first, or pass --sha."
+  fi
   # context pack + gates (refusals before any vehicle probe or launch)
   local pack packtext; pack="$(_cloudrun_pack "$id" "$display" "$base" "$branch" "$brief" "$donewhen" "$pinsha")"
   packtext="$(cat "$pack")"
@@ -649,8 +691,14 @@ _cloudrun_start() {
   if ! launch_out="$(_cloudrun_launch "$veh" "$pack" "$packtext" "$log" "$pidfile" "$top" "$base" "$env" "$cenv" "$model" "$claude_bin")"; then
     # Failed launch (no session URL/id, or the vehicle exited non-zero): show the vehicle's output,
     # name the real cause, register nothing.
-    local cls; cls="$(_cloudrun_classify_failure "$veh" "$log")"
-    die "cloud: the $veh session did not start; no session link was printed. Nothing was registered.
+    local cls fref; cls="$(_cloudrun_classify_failure "$veh" "$log")"
+    fref="$(_cloudrun_extract_ref "$log" "$veh" 2>/dev/null)"
+    if [ -n "$fref" ]; then
+      fref="the $veh session printed ${fref#*:} and then the launch failed"
+    else
+      fref="no session link appeared within ${OSRC_CLOUD_LAUNCH_WAIT:-30}s (raise OSRC_CLOUD_LAUNCH_WAIT if the vehicle is slow)"
+    fi
+    die "cloud: the $veh session did not start: $fref. A session may still have been created: check the vehicle dashboard. Nothing was registered.
 ${cls#*	}
 its last output:
 $(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
