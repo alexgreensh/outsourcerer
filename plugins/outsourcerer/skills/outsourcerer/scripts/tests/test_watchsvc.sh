@@ -11,6 +11,8 @@
 #   round 3: reminder rows never move a reset later, hung probes die with their whole tree, stale
 #   failure notices clear, a loop without `ps -o` still knows itself, the unit survives a plugin move,
 #   a failed install leaves nothing behind, and the tmux wake works end to end.
+#   round 5: --loop re-arms only on its own exit code (no spin, no ping-pong) and covers only with a
+#   reader; a repointed fallback loop re-runs itself; other tmux servers are skipped whatever the channel.
 # Run: bash test_watchsvc.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
@@ -222,11 +224,14 @@ sleep 300 & st=$!; PIDS="$PIDS $st"; mkdir -p "$TMP/h6x/watchsvc/run.lock"; echo
 kill "$st" 2>/dev/null
 echo 1 > "$OSRC_HOME/watchsvc/run.lock/pid"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 ! kill -0 "$d" 2>/dev/null && ok "a loop whose lock was taken over exits (no pile-up)" || no "loop kept running without its lock"
-fresh 6b; mkdir -p "$OSRC_HOME/watchsvc"; printf '# script: %s\n' "$SRC" > "$OSRC_HOME/watchsvc/launch"
+fresh 6b; mkdir -p "$OSRC_HOME/watchsvc"; printf '# script: %s\n' "$SRC" > "$OSRC_HOME/watchsvc/launch"; echo fallback > "$OSRC_HOME/watchsvc/installed"
+ln -s "$SCRIPT_DIR/.." "$TMP/plugin-v2"
 OSRC_WATCH_INTERVAL=1 "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1.5
 kill -0 "$d" 2>/dev/null || no "setup: loop did not start under its own launcher"
-S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
-! kill -0 "$d" 2>/dev/null && ok "a loop whose launcher now names another plugin copy exits (its unit restarts it there)" || no "loop kept running the old copy"
+S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; until { ps -o command= -p "$d" 2>/dev/null | grep -q 'plugin-v2/outsourcerer.sh watcher run' && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)" = "$d" ]; } || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
+p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"
+[ "$p" = "$d" ] && ps -o command= -p "$d" | grep -q 'plugin-v2/outsourcerer.sh watcher run' && ok "a fallback loop whose launcher now names another plugin copy re-runs itself there (nobody has to restart it)" || no "repointed loop not running on the new copy [pid $p: $(ps -o command= -p "$d" 2>/dev/null)]"
+S '_ws_stop_loop'
 fresh 6c; OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { x="$(sleep 4713; :)"; }; _ws_run' "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
 i=0; until pgrep -f '^sleep 4713' >/dev/null 2>&1 || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
 S '_ws_stop_loop'; sleep 0.5
@@ -237,16 +242,63 @@ i=0; until pgrep -f '^sleep 4714' >/dev/null 2>&1 || [ "$i" -ge 50 ]; do sleep 0
 kill -TERM "$d"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.2; i=$((i+1)); done; sleep 0.5
 ! pgrep -f '^sleep 4714' >/dev/null 2>&1 && ok "a supervise signalled mid-refresh takes the hung probe with it" || { no "probe orphaned by a signalled supervise"; pkill -f '^sleep 4714'; }
 
-echo "=== supervise --loop: a looping caller stays a waiter between batches ==="
-fresh 13; sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
-mkdir -p "$OSRC_HOME/jobs/R3"; echo running > "$OSRC_HOME/jobs/R3/status"; echo "$w" > "$OSRC_HOME/jobs/R3/pid"; echo "$w" > "$OSRC_HOME/jobs/R3/supervisor_pid"; own sessL R3
-OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0 OSRC_SUPERVISE_MAX_SECS=1 "$SRC" supervise --session sessL --loop > "$TMP/loop13" 2>/dev/null & lp=$!; PIDS="$PIDS $lp"
-i=0; until [ "$(S '_waited_ids sessL' | grep -cx '\*')" -ge 1 ] || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
-gaps=0; for i in $(seq 1 40); do [ "$(S '_waited_ids sessL' 2>/dev/null | grep -cx '\*')" -ge 1 ] || gaps=$((gaps+1)); sleep 0.1; done
-[ "$gaps" = 0 ] && [ "$(grep -c '^EVENT ' "$TMP/loop13")" -ge 2 ] && ok "supervise --loop delivers batch after batch and covers the session in between" || no "gaps=$gaps events=$(grep -c '^EVENT ' "$TMP/loop13")"
-kill "$lp"; i=0; while kill -0 "$lp" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
-[ -z "$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null)" ] && [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 0 ] && ok "and stops covering once it exits" || no "loop marker left behind"
-kill "$w" 2>/dev/null
+echo "=== supervise --loop: re-arms only after a delivered batch, covers only with a reader ==="
+job() { sleep 300 >/dev/null 2>&1 & local w=$!; PIDS="$PIDS $w"; mkdir -p "$OSRC_HOME/jobs/$1"; echo running > "$OSRC_HOME/jobs/$1/status"; echo "$w" > "$OSRC_HOME/jobs/$1/pid"; echo "$w" > "$OSRC_HOME/jobs/$1/supervisor_pid"; own "$2" "$1"; }
+covers() { [ "$(S "_waited_ids $1" 2>/dev/null | grep -cx '\*')" -ge 1 ]; }
+until_t() { local i=0; until eval "$1" || [ "$i" -ge 40 ]; do sleep 0.2; i=$((i+1)); done; eval "$1"; }
+export OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0
+fresh 13a; own sessH N1   # owned, never dropped, nothing live (a lane with "no turn yet")
+out="$(perl -e 'alarm 8; exec @ARGV' bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1
+  _sv_observe() { SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""; SV_STALL_START=""; }
+  cmd_supervise --session sessH --loop' "$SRC" 2>/dev/null)"; rc=$?
+[ "$rc" = 0 ] && [ "$(grep -c '^EVENT done all' <<<"$out")" = 1 ] && ok "--loop ends on done all (no hot spin while a lane has no turn yet)" || no "rc=$rc, $(grep -c '^EVENT done all' <<<"$out") done-all lines"
+fresh 13b; job R5 sessP
+"$SRC" supervise --session sessP --loop > "$TMP/pa" 2>&1 & a=$!; PIDS="$PIDS $a"; sleep 2.5
+"$SRC" supervise --session sessP --loop > "$TMP/pb" 2>&1 & b=$!; PIDS="$PIDS $b"; sleep 4
+"$SRC" supervise --session sessP > "$TMP/pc" 2>&1 & c=$!; PIDS="$PIDS $c"; sleep 4
+! kill -0 "$a" 2>/dev/null && ! kill -0 "$b" 2>/dev/null && kill -0 "$c" 2>/dev/null \
+  && [ "$(grep -c superseded "$TMP/pa")" = 1 ] && [ "$(grep -c superseded "$TMP/pb")" = 1 ] && ! grep -q superseded "$TMP/pc" \
+  && ok "two --loop arms and a plain supervise: each older one is superseded once and stays gone (no ping-pong)" \
+  || no "ping-pong: alive a=$(kill -0 "$a" 2>/dev/null && echo y) b=$(kill -0 "$b" 2>/dev/null && echo y) c=$(kill -0 "$c" 2>/dev/null && echo y); superseded a=$(grep -c superseded "$TMP/pa") b=$(grep -c superseded "$TMP/pb") c=$(grep -c superseded "$TMP/pc")"
+kill "$c" "$a" "$b" 2>/dev/null
+fresh 13c; job R6 sessR
+"$SRC" supervise --session sessR --loop > "$TMP/lf" 2>/dev/null & lf=$!; PIDS="$PIDS $lf"; sleep 1.5
+log idle R6 'finished its turn' sessR; until_t "grep -q '^EVENT idle R6' '$TMP/lf'"; sleep 0.5
+kill -0 "$lf" && ! covers sessR && ok "a --loop writing into a file (an agent's background task) never satisfies the stop guard" || no "file-backed loop covered the session"
+kill "$lf"; until_t "! kill -0 $lf 2>/dev/null"
+fresh 13d; job R3 sessL
+( "$SRC" supervise --session sessL --loop 2>/dev/null | cat > "$TMP/loop13" ) & lp=$!; PIDS="$PIDS $lp"
+until_t "ls '$OSRC_HOME/supervise/sessL'/loop.* >/dev/null 2>&1"; sleep 1
+! covers sessL && ok "a --loop into a pipe covers nothing before a batch went through it" || no "loop covered with no reader proven"
+log idle R3 'finished its turn' sessL; until_t "covers sessL" && ok "after a batch went into the pipe it covers the session" || no "piped loop never covered"
+gaps=0; for i in $(seq 1 40); do covers sessL || gaps=$((gaps+1)); [ "$i" = 15 ] && log idle R3 'finished its turn again' sessL; sleep 0.1; done
+until_t "[ \$(grep -c '^EVENT ' '$TMP/loop13') -ge 2 ]"
+[ "$gaps" = 0 ] && [ "$(grep -c '^EVENT ' "$TMP/loop13")" -ge 2 ] && ok "and delivers batch after batch with no gap in between" || no "gaps=$gaps events=$(grep -c '^EVENT ' "$TMP/loop13")"
+f="$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null | head -1)"; kill "${f##*.}"; until_t "[ -z \"\$(ls '$OSRC_HOME/supervise/sessL'/loop.* 2>/dev/null)\" ]"
+[ -z "$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null)" ] && ! covers sessL && ok "and stops covering once it exits" || no "loop marker left behind"
+unset OSRC_SUPERVISE_POLL OSRC_SUPERVISE_SETTLE
+h="$(sed -n '2,/^$/p' "$SCRIPT_DIR/../lib/supervise.sh" | grep . | tail -1 | sed 's/^# //')"
+[ "$("$SRC" supervise --help | grep . | tail -1)" = "$h" ] && ok "supervise --help prints the whole header" || no "help cut short"
+
+echo "=== round 5: other tmux servers, a watcher's first tick, deliveries across a restart, limit backoff ==="
+fresh 17; own sessF G1; mkdir -p "$OSRC_HOME/watchsvc/sessF"; echo "$TMP/other-sock" > "$OSRC_HOME/watchsvc/sessF/sock"
+export OSRC_WATCH_DELIVER_CMD="cat > '$TMP/got17'"; S '_ws_tick'; log idle G1 'finished its turn' sessF; S '_ws_tick'; sleep 1; S '_ws_tick'; unset OSRC_WATCH_DELIVER_CMD
+[ ! -e "$TMP/got17" ] && [ -f "$OSRC_HOME/owners/sessF/G1" ] && ! grep -q '"src":"watcher"' "$OSRC_HOME/lanes/events.jsonl" \
+  && ok "a session on another tmux server is skipped even with a delivery command (no rows, no wake, markers kept)" || no "foreign session handled: got=$(cat "$TMP/got17" 2>/dev/null) rows=$(grep -c watcher "$OSRC_HOME/lanes/events.jsonl")"
+bash -c 'sleep 300; : watcher run' & wp=$!; PIDS="$PIDS $wp"; mkdir -p "$OSRC_HOME/watchsvc/run.lock"; echo "$wp" > "$OSRC_HOME/watchsvc/run.lock/pid"; date +%s > "$OSRC_HOME/watchsvc/alive"; sleep 0.3
+! OSRC_WATCH_DELIVER_CMD=true S '_ws_covers sessF' && OSRC_WATCH_DELIVER_CMD=true S 'rm -f "$OSRC_HOME/watchsvc/sessF/sock"; _ws_covers sessF' \
+  && ok "and the stop guard does not count the watcher for it (it does once the session is on the watcher's server)" || no "guard trusts a watcher on another tmux server"
+kill "$wp" 2>/dev/null
+fresh 18; OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { sleep 30; }; _ws_run' "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1
+[ "$(PATH="$TMP/nops:$PATH" S '_ws_daemon_pid')" = "$d" ] && ok "without ps -o a loop in its first (slow) tick is still known as the watcher (no rival)" || no "starting loop not recognised without ps -o"
+kill "$d" 2>/dev/null
+fresh 19; mkdir -p "$OSRC_HOME/watchsvc/sessI"; sleep 300 & st=$!; PIDS="$PIDS $st"
+echo "$st $(date +%s) custom 999999" > "$OSRC_HOME/watchsvc/sessI/inflight"; S '_ws_settle sessI "$OSRC_HOME/watchsvc/sessI"'
+[ -f "$OSRC_HOME/watchsvc/sessI/inflight" ] && [ ! -e "$OSRC_HOME/watchsvc/sessI/try" ] && kill -0 "$st" && ok "a delivery an earlier loop started is pending while it runs, not failed" || no "running delivery failed by a restart"
+kill "$st" 2>/dev/null
+fresh 20; mkdir -p "$OSRC_HOME/watchsvc/limits"; echo fallback > "$OSRC_HOME/watchsvc/installed"; own sess1 K; S "_sv_state_read K; SVS_LK='limit:1'; _sv_state_write K"
+echo "3 $(( $(date +%s) + 900 ))" > "$OSRC_HOME/watchsvc/limits/K.try"; log limit K "plan limit hit: x (epoch $(( $(date +%s) - 5 )))"
+S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"; grep -q '^K ' "$TMP/sent4" && ok "a new limit banner does not inherit the old banner's backoff" || no "new banner waited out a stale backoff"
 
 echo "=== install / uninstall: explicit, idempotent, reversible ==="
 fresh 7; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd.log\n' "$TMP" > "$TMP/bin/systemctl"; chmod +x "$TMP/bin/systemctl"

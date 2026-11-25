@@ -27,8 +27,8 @@
 # No owned live work -> `EVENT done all`. Any internal error -> `EVENT failed supervise`, exit 2.
 # --watch: hand-in files (*.DONE, *VERDICT*, *QUESTION*) keyed on name+mtime+size+hash, so a lane
 # rewriting the same DONE file fires again (lib/supervise_watch.sh).
-# --loop (with a session): after each delivery it prints the next batch instead of exiting, and keeps
-# covering the session between batches (supervise/<sid>/loop.<pid>) until nothing is owned.
+# --loop (with a session; for wrapper scripts reading stdout, NEVER an agent's background task) arms again
+# after each delivered batch. A waiter only for OSRC_SUPERVISE_HUNG s after a batch went to a pipe/terminal.
 #
 # Screen reading is NOT done here: osrc_screen_state (lib/screen.sh) classifies a pane. Until it
 # lands, a thin wrapper over the existing detectors stands in (defined only if it is missing).
@@ -461,6 +461,7 @@ _sv_observe_all() { # [src]
   for d in "$OSRC_HOME"/owners/*/; do
     [ -d "$d" ] || continue
     o="$(basename "$d")"
+    [ "${1:-}" != watcher ] || ! _ws_foreign "$o" || continue   # lanes on a tmux server the watcher cannot see
     for id in $(ls -1 "$d" 2>/dev/null); do
       _sv_observe_emit "$id" "$now" "${1:-beacon}" "$o"
     done
@@ -515,10 +516,6 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
       [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
        ((.id // "\(.ts)/\(.kind)/\(.target)/\(.detail)") | f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
 }
-
-# Informational kinds are logged and shown with the next real wake, but never wake on their own:
-# an `approved` row waking the orchestrator would bring back the approval toil the approver removes.
-_sv_informational() { case "$1" in approved|nudged) return 0 ;; esac; return 1; }
 
 _sv_approval_summary() { # <new TSV rows>: report only at an actual wake
   local count; count="$(printf '%s\n' "$1" | awk -F '\t' '$3 == "approved" { n++ } END { print n+0 }')"
@@ -580,16 +577,18 @@ _sv_auto_filter() { # <rows> <owner state dir>: only consume a verified READY ->
 
 # A live pid is not a live waiter: a supervise hung in a probe kept its armed file and pid while it
 # logged and delivered nothing (7 h unwatched; a done row 37 min undelivered). It covers only while it
-# has polled (supervise/<sid>/alive) or armed within OSRC_SUPERVISE_HUNG seconds (default 600).
+# has polled (supervise/<sid>/alive) or armed within OSRC_SUPERVISE_HUNG seconds (default 600). A --loop
+# counts only through loop.<pid>: its mtime is its last batch written into a pipe or terminal (created old).
 _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live, polling supervise for <sid> covers
-  local f pid last m
-  last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$1/alive" 2>/dev/null)" 0)"
+  local f pid alive m
+  alive="$(_sv_num "$(cat "$OSRC_HOME/supervise/$1/alive" 2>/dev/null)" 0)"
   for f in "$OSRC_HOME/supervise/$1"/armed.* "$OSRC_HOME/supervise/$1"/loop.*; do
     [ -f "$f" ] || continue
     pid="${f##*.}"
     if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'supervise'; then
-      m="$(_sv_num "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" 0)"; [ "$m" -gt "$last" ] && last="$m"
-      [ $(( $(_sv_now) - last )) -le "$(_sv_num "${OSRC_SUPERVISE_HUNG:-}" 600)" ] && cat "$f" 2>/dev/null
+      m="$(_sv_num "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" 0)"
+      case "$f" in */armed.*) [ ! -f "${f%/*}/loop.$pid" ] || continue; [ "$m" -gt "$alive" ] || m="$alive" ;; esac
+      [ $(( $(_sv_now) - m )) -le "$(_sv_num "${OSRC_SUPERVISE_HUNG:-}" 600)" ] && cat "$f" 2>/dev/null
     else rm -f "$f"; fi
   done
 }
@@ -642,7 +641,7 @@ cmd_supervise() {
         watches="$watches
 $w" ;;
       --unwatch) unwatch="${2:-}"; shift 2 ;;   # tests: one pass (plus settle), exit 1 when nothing is new
-      -h|--help) sed -n '2,30p' "$_SV_SELF" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
+      -h|--help) sed -n '2,/^$/p' "$_SV_SELF" 2>/dev/null | sed 's/^# \{0,1\}//'; return 0 ;;
       -*) _sv_fail "unknown flag $1" "$SCRIPT_PATH supervise"; return 2 ;;
       *) case "$1" in */*|.|..) ;; *) ids="$ids $1" ;; esac; shift ;;
     esac
@@ -679,6 +678,7 @@ $w" ;;
   # its output cannot disappear into that refresh's temporary file.
   local child="" signalled=0
   export OSRC_SUPERVISE_AUTO="$auto" OSRC_SUPERVISE_LOOP="$loop"
+  w="$OSRC_HOME/supervise/$sid/loop.$$"; [ "$loop" = 0 ] || { mkdir -p "${w%/*}" && printf '%s\n' ${ids:-'*'} > "$w" && touch -t 200001010000 "$w"; } || return 2
   trap 'if [ "$signalled" = 0 ]; then signalled=1; _sv_fail "killed by a signal" "$rearm"; fi; kill -TERM "$child" 2>/dev/null' TERM INT HUP
   while [ "$signalled" = 0 ]; do
     ( _sv_main "$sid" "$once" $ids ) & child=$!
@@ -687,11 +687,10 @@ $w" ;;
       wait "$child"; rc=$?
       kill -0 "$child" 2>/dev/null || break
     done
-    # --loop: the next batch, while the session still owns something (loop.<pid> covers the gap).
-    [ "$loop" = 1 ] && [ "$rc" = 0 ] && [ -n "$(ls -1 "$OSRC_HOME/owners/$sid" 2>/dev/null)" ] || break
+    [ "$rc" = 20 ] || break; rc=0   # --loop: only after a delivered batch, never on done all, superseded (ping-pong) or error
   done
   trap - TERM INT HUP
-  rm -f "$OSRC_HOME"/supervise/*/loop.$$ 2>/dev/null
+  [ "$loop" = 0 ] || rm -f "$OSRC_HOME/supervise/$sid/loop.$$"
   [ "$signalled" != 1 ] || return 2
   case "$rc" in
     0) return 0 ;;
@@ -714,7 +713,6 @@ _sv_main() { # <sid> <once> [ids...]
   trap '_sv_bounded_kill; _sv_main_exit' EXIT   # removes the armed/arm-seq files and releases every lock this run holds
   trap 'exit 10' TERM INT HUP
   printf '%s\n' "${explicit:-*}" | tr ' ' '\n' | grep . > "$armed"
-  [ "${OSRC_SUPERVISE_LOOP:-0}" = 0 ] || cp -f "$armed" "$dir/loop.$$"   # $$ is the parent, which removes it
   _sv_arm_seq "$dir" || exit 1
   if [ -n "$sid" ] && [ -s "$OSRC_HOME/owners/$sid/.unguarded" ]; then
     sed 's/^/[outsourcerer] was: /' "$OSRC_HOME/owners/$sid/.unguarded" >&2; rm -f "$OSRC_HOME/owners/$sid/.unguarded"
@@ -783,7 +781,8 @@ _sv_main() { # <sid> <once> [ids...]
         _SV_DIR="$dir" _sv_deliver "$ledger" "$new" batch; drc=$?
         case "$drc" in
           0) _sv_approval_summary "$new"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor"
-             [ "${OSRC_SUPERVISE_LOOP:-0}" = 1 ] || printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
+             [ "${OSRC_SUPERVISE_LOOP:-0}" = 0 ] || { { [ -p /dev/stdout ] || [ -t 1 ]; } && touch "$dir/loop.$$"; exit 20; }   # a file has no reader
+             printf '[outsourcerer] supervise: act on each NEXT, then re-arm: %s supervise%s%s%s\n' "$SCRIPT_PATH" "$scope" "${OSRC_SUPERVISE_AUTO:+ --auto $OSRC_SUPERVISE_AUTO}" "${explicit:+ $explicit}" >&2
              exit 0 ;;
           1) first=""; older=""; cursor="$size"; printf '%s %s\n' "$size" "$gen" > "$dir/cursor" ;;   # all delivered elsewhere
           3) _sv_superseded_exit "$(_sv_superseded "$dir")" ;;

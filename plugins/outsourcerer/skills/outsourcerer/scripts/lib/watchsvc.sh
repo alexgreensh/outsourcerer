@@ -37,7 +37,6 @@ _ws_pid_ok() { kill -0 "$1" 2>/dev/null && case "$(ps -o command= -p "$1" 2>/dev
 # <pid> was forked by this loop: same command line as $$ (nothing to compare without `ps -o`: not provable).
 _ws_ours() { local c; c="$(ps -o command= -p "$1" 2>/dev/null)"; [ -n "$c" ] && [ "$c" = "$(ps -o command= -p "$$" 2>/dev/null)" ]; }
 _ws_daemon_pid() { local p; p="$(cat "$(_ws_root)/run.lock/pid" 2>/dev/null)"; [ -n "$p" ] && _ws_pid_ok "$p" && printf '%s' "$p"; }
-_ws_mtime() { _sv_num "$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" 0; }
 _ws_env() { # the daemon's settings are the ones captured at install, not whatever the caller has set
   local v; [ -f "$(_ws_root)/env" ] && [ -O "$(_ws_root)/env" ] || return 0
   unset TMUX TMUX_PANE TMUX_TMPDIR   # the daemon's tmux server is the one captured at install, not the caller's
@@ -54,26 +53,27 @@ _ws_run() {
   if ! mkdir "$l" 2>/dev/null; then
     [ -n "$(_ws_daemon_pid)" ] && { echo "outsourcerer: watcher already running" >&2; return 0; }
     # a starter that has not published its pid yet keeps the lock for 10 s
-    [ -f "$l/pid" ] || [ $(( $(_sv_now) - $(_ws_mtime "$l") )) -ge 10 ] || { echo "outsourcerer: watcher already starting" >&2; return 0; }
+    [ -f "$l/pid" ] || [ $(( $(_sv_now) - $(_sv_num "$(stat -c %Y "$l" 2>/dev/null || stat -f %m "$l" 2>/dev/null)" 0) )) -ge 10 ] || { echo "outsourcerer: watcher already starting" >&2; return 0; }
     rm -rf "$l"; mkdir "$l" 2>/dev/null || return 0
   fi
-  printf '%s\n' "$$" > "$l/pid"
+  printf '%s\n' "$$" > "$l/pid"; _sv_now > "$(_ws_root)/alive"   # known as alive from its first second (no `ps -o`)
   trap '_sv_bounded_kill; [ "$(cat "$(_ws_root)/run.lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$(_ws_root)/run.lock"' EXIT
   trap 'exit 0' INT TERM HUP
   iv="$(_sv_num "${OSRC_WATCH_INTERVAL:-}" 30)"; [ "$iv" -ge 1 ] || iv=30
   tmo="$(_sv_num "${OSRC_WATCH_TICK_TIMEOUT:-}" 300)"
   _ws_log "watcher run pid $$ every ${iv}s"
-  # The lock is re-checked every pass: a loop whose lock was taken over (or removed by uninstall) exits,
-  # and so does one whose launcher now names another plugin copy (its unit or the next call restarts it there).
+  # The lock is re-checked every pass: a loop whose lock was taken over (or removed by uninstall) exits.
+  # One whose launcher now names another plugin copy re-runs itself from there, on every backend.
   while [ -d "$OSRC_HOME" ] && [ "$(cat "$l/pid" 2>/dev/null)" = "$$" ] \
         && { [ ! -f "$(_ws_root)/launch" ] || grep -qxF "# script: $SCRIPT_PATH" "$(_ws_root)/launch"; }; do
     _sv_bounded "$tmo" _ws_tick || _ws_log "tick failed or timed out (rc $?)"   # a hung probe never stops the loop
     sleep "$iv" & wait "$!" 2>/dev/null
   done
+  [ -f "$(_ws_root)/installed" ] && [ -f "$(_ws_root)/launch" ] && [ "$(cat "$l/pid" 2>/dev/null)" = "$$" ] && { rm -rf "$l"; trap - EXIT; exec "$BASH" "$(_ws_root)/launch"; }
 }
 
 _ws_tick() {
-  local sid r f; r="$(_ws_root)"
+  local sid r f; r="$(_ws_root)"; _sv_now > "$r/alive" 2>/dev/null   # stamped as it starts: a long tick is still a live loop
   # A session seen for the first time starts here: rows logged from this tick on are owed a wake.
   _WS_T0="$(_sv_num "$({ wc -c < "$(_sv_lanes)/events.jsonl"; } 2>/dev/null | tr -d ' ')" 0)"
   _sv_observe_all watcher >/dev/null 2>&1 || true
@@ -83,8 +83,6 @@ _ws_tick() {
     [ -d "$OSRC_HOME/owners/$sid" ] || [ -d "$r/$sid" ] || continue
     _ws_owner "$sid" || true
   done
-  [ -d "$r" ] || return 0   # uninstalled meanwhile: leave nothing behind
-  printf '%s\n' "$(_sv_now)" > "$r/alive"
   f="$r/service.log"
   [ "$(_sv_num "$({ wc -c < "$f"; } 2>/dev/null | tr -d ' ')" 0)" -le 262144 ] || { tail -c 65536 "$f" > "$f.1" && mv -f "$f.1" "$f"; }
   return 0
@@ -97,6 +95,7 @@ _ws_owner() { # <sid>
   local sid="$1" s f gen size cur cg rows older="" tj now cover last
   s="$(_ws_root)/$sid"; mkdir -p "$s" 2>/dev/null || return 1
   [ -f "$s/inflight" ] && { _ws_settle "$sid" "$s"; return 0; }
+  _ws_foreign "$sid" && return 0   # its lanes live on a tmux server this watcher cannot see
   now="$(_sv_now)"; f="$(_sv_lanes)/events.jsonl"
   gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"
   size="$(_sv_num "$({ wc -c < "$f"; } 2>/dev/null | tr -d ' ')" 0)"; cur=""; cg=""
@@ -122,7 +121,7 @@ _ws_owner() { # <sid>
     # Nothing owed (delivered by us or by a supervise): any failure notice is stale now.
     printf '%s %s\n' "$size" "$gen" > "$s/cursor"
     rm -f "$s/pending" "$s/try" "$s/wakefail" "$OSRC_HOME/owners/$sid/.wakefail"
-    rmdir "$OSRC_HOME/owners/$sid" 2>/dev/null   # owns nothing, owed nothing: out of the loop
+    rmdir "$OSRC_HOME/owners/$sid" 2>/dev/null   # owns nothing, owed nothing: out (a marker written across it is lost; microseconds)
     [ -d "$OSRC_HOME/owners/$sid" ] || rm -rf "$s"
     return 0
   fi
@@ -164,11 +163,11 @@ _ws_settle() { # <sid> <dir>: finish an in-flight delivery once its result is in
   pid=""; t0=""; ch=""; own=""; read -r pid t0 ch own 2>/dev/null < "$s/inflight"
   rc="$(cat "$s/rc" 2>/dev/null)"
   if [ -z "$rc" ]; then
-    # Only a delivery THIS loop started is waited for or signalled: after a reboot or a restart the
-    # recorded pid may be anyone's, so that delivery is over (failed), and nothing is killed.
-    if [ "$own" = "$$" ] && kill -0 "$(_sv_num "$pid" 0)" 2>/dev/null; then
+    # A live delivery is pending until its rc or the timeout, also one an earlier loop started (a
+    # restart must not fail it while it lands). Only THIS loop's own fork is ever signalled.
+    if kill -0 "$(_sv_num "$pid" 0)" 2>/dev/null; then
       [ $(( $(_sv_now) - $(_sv_num "$t0" 0) )) -ge "$(_sv_num "${OSRC_WATCH_DELIVER_TIMEOUT:-}" 1800)" ] || return 0
-      _ws_ours "$pid" && _kill_tree "$pid" 2>/dev/null; rc=124   # the whole delivery, not just its wrapper
+      [ "$own" = "$$" ] && _ws_ours "$pid" && _kill_tree "$pid" 2>/dev/null; rc=124   # the whole delivery, not just its wrapper
     else rc="$(cat "$s/rc" 2>/dev/null)"; rc="${rc:-1}"; fi   # it may have finished since the first read
   fi
   if [ "$rc" = 0 ]; then
@@ -214,17 +213,18 @@ _ws_failed() { # <sid> <dir> <why>: back off and say so loudly, once
 # The tmux server this process's tmux talks to ($TMUX's socket, else the default), directory resolved as tmux does.
 _ws_sock() { local t="${TMUX:-}" d; t="${t%%,*}"; [ -n "$t" ] || t="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default"
   d="$(cd "${t%/*}" 2>/dev/null && pwd -P)" || d="${t%/*}"; printf '%s/%s' "$d" "${t##*/}"; }
+_ws_foreign() { local k; k="$(cat "$(_ws_root)/$1/sock" 2>/dev/null)" && [ -n "$k" ] && [ "$k" != "$(_ws_sock)" ]; }
 _ws_pane_ok() { # <sid> <pane>: the pane still runs THIS Claude Code session
   local pp; pp="$(tmux display-message -p -t "$2" '#{pane_pid}' 2>/dev/null)" || return 1
   [ "$(_fleet_cc_session_for_pane "$pp" "$(cat "$(_ws_root)/$1/cwd" 2>/dev/null)" 2>/dev/null | cut -f1)" = "$1" ]
 }
 _ws_channel() { # <sid> -> custom | tmux
   local p
+  _ws_foreign "$1" && return 1   # on another tmux server (`tmux -L/-S`, TMUX_TMPDIR): out of reach, whatever the channel
   [ -n "${OSRC_WATCH_DELIVER_CMD:-}" ] && { printf custom; return 0; }
   [ -f "$(_ws_root)/installed" ] || return 1   # typing into the user's pane is for a watcher they installed
   p="$(cat "$(_ws_root)/$1/pane" 2>/dev/null)"
-  # Only a pane on the watcher's own tmux server (`tmux -L/-S`, TMUX_TMPDIR): the daemon cannot reach another.
-  [ -n "$p" ] && [ "$(cat "$(_ws_root)/$1/sock" 2>/dev/null)" = "$(_ws_sock)" ] && have tmux && _ws_pane_ok "$1" "$p" && { printf tmux; return 0; }
+  [ -n "$p" ] && have tmux && _ws_pane_ok "$1" "$p" && { printf tmux; return 0; }
   return 1
 }
 _ws_send() { # <channel> <sid> <dir> <wake-file>: rc 0 only with proof the session got it
@@ -285,7 +285,7 @@ _ws_limits() {
       secs="$(_lane_limit_reset_secs "$ph" 2>/dev/null)"; case "$secs" in ''|*[!0-9]*) continue ;; esac
       case "$ph" in *" in "*) ep=$(( $(_sv_num "$ts" "$now") + secs )) ;; *) ep=$((now + secs)) ;; esac
     fi
-    printf '%s\n' "$ep" > "$d/$t"
+    printf '%s\n' "$ep" > "$d/$t"; rm -f "$d/$t.try"   # a new banner starts without the old backoff
   done < <({ [ -z "$older" ] || tail -c +"$((cur + 1))" "$older"; tail -c +"$((c2 + 1))" "$f" | head -c "$((size - c2))"; } 2>/dev/null \
     | jq -r 'select(type == "object" and .kind == "limit" and ((.detail // "") | tostring | startswith("still unresolved, waiting ") | not))
              | [.target, .detail, (.ts | tostring)] | map(tostring | gsub("[\t\n]"; " ")) | join("\t")' 2>/dev/null)
