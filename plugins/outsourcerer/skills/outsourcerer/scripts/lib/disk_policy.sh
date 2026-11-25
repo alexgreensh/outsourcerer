@@ -349,11 +349,12 @@ _osrc_disk_pane_restore() {
 # required SIGCONT fails. A job's pause time is banked BEFORE any SIGCONT, so the watchdog
 # reading _osrc_disk_paused_secs never counts it twice or misses it.
 _osrc_disk_resume_rec() {
-  local rec="$1" tag a b c d keep=0 live="" panes="" jd="" t
+  local rec="$1" tag a b c d keep=0 banked=1 live="" panes="" jd="" t
   [ -f "$rec" ] || return 0
   case "$rec" in */disk-paused)
     jd="${rec%/disk-paused}"; t="$rec.${_OSRC_DISK_ME:-$$}"   # a failed rewrite keeps the old record
-    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null \
+    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null || banked=0
+    [ "$banked" = 1 ] \
       && grep -v '^since|' "$rec" > "$t" 2>/dev/null && mv -f "$t" "$rec" 2>/dev/null || rm -f "$t" 2>/dev/null ;;
   esac
   while IFS='|' read -r tag a b c d; do
@@ -372,7 +373,8 @@ _osrc_disk_resume_rec() {
   fi
   while IFS='|' read -r a b c; do [ -n "$a" ] && _osrc_disk_pane_restore "$a" "$b" "$c" "$live"; done <<<"$panes"
   [ -n "$jd" ] && _osrc_disk_keepalive "$jd" resumed
-  rm -f "$rec" 2>/dev/null
+  # Bank lost (full disk): keep the record so its since line still shifts the job's clocks.
+  [ "$banked" = 1 ] && rm -f "$rec" 2>/dev/null
 }
 
 _osrc_disk_resume_all() {
@@ -574,7 +576,7 @@ _osrc_disk_lock_take() {
   local lk t; lk="$(_osrc_disk_dir)/monitor.lock"; t="$lk/owner.$_OSRC_DISK_ME"
   if ! mkdir "$lk" 2>/dev/null; then
     _osrc_disk_lock_alive && return 1
-    mv "$lk/owner" "$t" 2>/dev/null && _osrc_disk_lock_alive "$t" && { mv "$t" "$lk/owner"; return 1; }
+    mv "$lk/owner" "$t" 2>/dev/null && [ -s "$t" ] && _osrc_disk_lock_alive "$t" && { mv "$t" "$lk/owner"; return 1; }   # empty = a claim whose write failed: dead
     rm -f "$t"
   fi
   ( set -C; printf '%s|%s\n' "$_OSRC_DISK_ME" "$_OSRC_DISK_ME_ID" > "$lk/owner" ) 2>/dev/null

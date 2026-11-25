@@ -355,6 +355,15 @@ claim() { osrc "$LH" 'eval "$(declare -f _osrc_disk_lock_alive | sed "1s/_osrc_d
   _OSRC_DISK_ME='"$1"'; _OSRC_DISK_ME_ID="$(_pid_start_identity '"$1"')"; _osrc_disk_lock_take && echo won'; }
 w="$(claim "$LV")$(claim "$$")"; [ "$w" = won ] && [ "$(owner_pid "$LH")" = "$LV" ] && [ "$(ls -A "$LH/disk-policy/monitor.lock")" = owner ] \
   && ok "stale-lock race: one claimant wins, no debris" || bad "lock race: '$w' $(ls -RA "$LH/disk-policy")"
+# P1: a claim whose owner write failed (full disk) leaves an empty owner; it must not lock everyone out.
+LE="$TMP/lke"; mkdir -p "$LE/disk-policy/monitor.lock"; : > "$LE/disk-policy/monitor.lock/owner"; touch -t 202001010000 "$LE/disk-policy/monitor.lock/owner" "$LE/disk-policy/monitor.lock"
+sleep 300 & LW=$!; KILL="$KILL $LW"; disown "$LW" 2>/dev/null
+w="$(osrc "$LE" '_OSRC_DISK_ME='"$LW"'; _OSRC_DISK_ME_ID="$(_pid_start_identity '"$LW"')"; _osrc_disk_lock_take && echo won')"
+[ "$w" = won ] && [ "$(owner_pid "$LE")" = "$LW" ] && ok "empty owner file is dead: a new monitor claims the lock" || bad "empty owner locked out the monitor: '$w'"
+# P2: when banking pause time fails on resume, the record stays so the watchdog still shifts its clocks.
+BJ="$TMP/bank/jobs/j1"; mkdir -p "$BJ/disk-paused-secs"; printf 'since|%s\n' "$(( $(date +%s) - 30 ))" > "$BJ/disk-paused"
+osrc "$TMP/bank" '_osrc_disk_resume_rec "'"$BJ"'/disk-paused"' >/dev/null 2>&1
+grep -q '^since|' "$BJ/disk-paused" 2>/dev/null && ok "failed bank keeps the pause record and its since line" || bad "record dropped after a failed bank: job would be killed"
 
 echo "=== incident 3: merged-lane reclaim ==="
 RH="$TMP/reclaim"; mkdir -p "$RH/jobs"; export OSRC_HOME="$RH"
