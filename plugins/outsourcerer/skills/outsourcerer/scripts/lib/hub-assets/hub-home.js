@@ -341,7 +341,7 @@
       if (topN) t.append(el('p', 'pt-top5', topN + (topN === 1 ? ' decision waiting, shown above' : ' decisions waiting, shown above')));
       if (rest.length) {
         const ul = el('ul', 'pt-decs');
-        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); const dsi = decStaleInfo(p, d); if (dsi) li.append(el('span', 'dec-stale', dsi.text)); ul.append(li); });
+        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + (d.owner || p.id) + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, (d.owner || p.id) + '-' + d.id); }); li.append(b); const dsi = decStaleInfo(p, d); if (dsi) li.append(el('span', 'dec-stale', dsi.text)); ul.append(li); });
         t.append(ul);
         if (rest.length > 2) { const m = el('button', 'pt-more', 'and ' + (rest.length - 2) + ' more'); m.type = 'button'; m.id = 'ptm-' + p.id; m.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(m); }
       } else if (!topN) { const n = el('p', 'pt-none'); n.append(ic('circle-check'), document.createTextNode('Nothing waiting on you.')); t.append(n); }
@@ -385,7 +385,7 @@
       decs.slice(0, 4).forEach(({ p, d }) => {
         const b = el('button', 'gnd'); b.type = 'button'; b.id = 'gn-' + p.id + '-' + d.id; b.title = d.q || '';
         b.append(pri(d.weight), el('span', 'gndt', d.short || d.q));
-        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); });
+        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, (d.owner || p.id) + '-' + d.id); });
         ul.append(b);
       });
       if (decs.length > 4) { ul.append(el('span', 'gs', 'and ' + (decs.length - 4) + ' more below')); }
@@ -402,7 +402,7 @@
         li.append(cl);
       }
       const first = decs[0] || null, ask0 = askers[0] || null;
-      if (first || ask0) { li.classList.add('gclick'); li.addEventListener('click', () => (first ? go(first.p.id, first.d.id) : go(ask0.p.id))); }
+      if (first || ask0) { li.classList.add('gclick'); li.addEventListener('click', () => (first ? go(first.p.id, (first.d.owner || first.p.id) + '-' + first.d.id) : go(ask0.p.id))); }
     }
     function glance(running, all) {
       const waiting = all.length;
@@ -486,10 +486,10 @@
           if (dsi) q.append(el('span', 'tp-stale', dsi.text));
           // Only the first Decide is filled; the rest are ghost buttons so the eye lands on one call to action.
           const b = el('button', 'go' + (ul.children.length ? ' ghost' : '')); b.type = 'button'; b.id = 'tp-' + p.id + '-' + d.id; b.append(document.createTextNode('Decide'), ic('arrow-right')); b.setAttribute('aria-label', 'Decide: ' + (d.short || d.q));
-          b.addEventListener('click', () => go(p.id, d.id));
+          b.addEventListener('click', () => go(p.id, (d.owner || p.id) + '-' + d.id));
           const chev = ic('chevron-right'); chev.setAttribute('class', 'chev');
           li.append(pri(d.weight), q, b, chev); ul.append(li);
-          li.addEventListener('click', (e) => { if (window.innerWidth <= 520 && e.target !== b) go(p.id, d.id); });
+          li.addEventListener('click', (e) => { if (window.innerWidth <= 520 && e.target !== b) go(p.id, (d.owner || p.id) + '-' + d.id); });
         });
         sec.append(h, ul); main.append(sec);
       }

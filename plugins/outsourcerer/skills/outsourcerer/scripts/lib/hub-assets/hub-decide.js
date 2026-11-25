@@ -16,7 +16,9 @@
 
     function decCard(p, d) {
       const db = ctx.db;
-      const c = el('div', 'card dec'); c.id = 'dec-' + d.id;
+      // Ids carry the owning session: two sessions' D1 on one merged card stay distinct (focus, deep links).
+      const o = (d.owner || p.id) + '-' + d.id, c = el('div', 'card dec'); c.id = 'dec-' + o;
+      c.dataset.wait = 'd:' + (d.owner || p.id) + '--' + d.id; c.tabIndex = -1;   // n / p / 1-9 / Enter (hub-attn.js)
       c.append(tags(d), el('span', 'q', d.q));
       // A card stands on its own: what this is about, the orchestrator's pick, how long it waits.
       if (d.why) c.append(el('p', 'dwhy', d.why));
@@ -30,13 +32,13 @@
       const a = el('div', 'ans'); const opts = el('div', 'opts');
       const key = (d.owner || p.id) + '--' + d.id, f = forms[key] || (forms[key] = { choice: '', note: '', msg: '', err: false }); f.btns = [];
       (d.options || []).forEach((o, i) => {
-        const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + p.id + '-' + d.id + '-' + i; b.setAttribute('aria-pressed', String(o === f.choice));
+        const b = el('button', 'opt', o); b.type = 'button'; b.id = 'opt-' + o + '-' + i; b.setAttribute('aria-pressed', String(o === f.choice));
         b.addEventListener('click', () => { f.choice = f.choice === o ? '' : o; f.btns.forEach((x) => x.setAttribute('aria-pressed', String(x.textContent === f.choice))); sync(); });
         f.btns.push(b); opts.appendChild(b);
       });
-      const ta = document.createElement('textarea'); ta.id = 'note-' + p.id + '-' + d.id; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note'); ta.setAttribute('dir', 'auto');
+      const ta = document.createElement('textarea'); ta.id = 'note-' + o; ta.placeholder = 'Anything to add, or your own answer'; ta.setAttribute('aria-label', 'Note'); ta.setAttribute('dir', 'auto');
       ta.dataset.k = key; ta.value = f.note; if (f.h) ta.style.height = f.h; if (f.top) requestAnimationFrame(() => { ta.scrollTop = f.top; });
-      const go2 = el('button', 'go'); go2.append(ic('send'), document.createTextNode('Send answer')); go2.type = 'button'; go2.id = 'send-' + p.id + '-' + d.id;
+      const go2 = el('button', 'go'); go2.append(ic('send'), document.createTextNode('Send answer')); go2.type = 'button'; go2.id = 'send-' + o;
       const st = el('span', 'saved'); st.setAttribute('aria-live', 'polite');
       const sync = () => { go2.disabled = !db || (!f.choice && !ta.value.trim()); };
       const say = (m, err) => { f.msg = m; f.err = !!err; st.textContent = m; st.classList.toggle('err', !!err); };

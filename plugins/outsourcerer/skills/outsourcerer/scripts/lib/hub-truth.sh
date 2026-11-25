@@ -56,6 +56,14 @@ def dmerge: reduce .[] as $c ({n:0,working:0,blocked:0,idle:0,ready:0,done:0,mer
   reduce ("n","working","blocked","idle","ready","done","merged","failed","canceled") as $k (.; .[$k] += ($c[$k] // 0))
   | reduce ("blocked","ready","done","failed") as $k (.; .pick[$k] = ((.pick[$k] + ($c.pick[$k] // []))[0:3]))
   | .finished += ($c.finished // []) | .evidenceAt = ([.evidenceAt, ($c.evidenceAt // 0)] | max));
+# attention: what a lane asks of you, most urgent first (references/hub.md, "Attention"). Stalled lanes
+# are the ones whose nudge did not help (lib/mc_alive.sh needs-you alerts).
+def attn_order: ["approval","question","proof","review","stalled","limit","ready","failed","working","finished"];
+def lattn($stalled): if .state == "approval" then "approval" elif .state == "question" then "question"
+  elif (.proof.stopped? // false) == true then "proof" elif .reviewNeedsYou != null then "review"
+  elif ((.id // "") | IN($stalled[])) then "stalled" elif .state == "limit" then "limit"
+  else (dcat | if . == "ready" then "ready" elif . == "failed" then "failed"
+               elif IN("done","merged","canceled") then "finished" else "working" end) end;
 def iso_ep: if type == "string" and length > 0 then (sub("\\.[0-9]+"; "") | fromdateiso8601? // null) else null end;'
 
 # _osrc_hub_derive <lanes-json> <evidence-epoch> -> derived JSON {counts..., evidenceAt, status, summary, next}.
@@ -178,6 +186,12 @@ _osrc_hub_truth() {
           | select(mins($f.at) >= $pm and ($or.lastAt // 0) < $f.at)
           | {kind:"unpicked", lane:$f.id, since:$f.at, text:("lane \($f.short) finished \(mins($f.at)) min ago, nobody picked it up")}]) as $al
     | (if ($al | length) > 0 then .alerts = ((.alerts // []) + $al) else . end)
+    # One attention per lane; the project shows its highest (an open question counts too).
+    | ([.alerts[]? | select(.lane != null and ((.kind // "") | IN("unreviewed", "unpicked") | not)) | .lane]) as $st
+    | (if has("lanes") then .lanes |= map(. + {attention: lattn($st)}) else . end)
+    | ([.lanes[]?.attention] + (if any(.decisions[]?; (.status // "wait") != "done") then ["question"] else [] end)) as $as
+    | (attn_order | map(select(IN($as[]))) | .[0]) as $pa
+    | (if $pa then .attention = $pa else del(.attention) end)
     | del(.derived)
   ' <<<"$1" 2>/dev/null || printf '%s' "$1"
 }

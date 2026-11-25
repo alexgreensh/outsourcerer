@@ -140,6 +140,31 @@ A half-typed answer survives every poll and re-render: the page keeps a per-deci
 - **Also running.** Other Claude Code sessions (not orchestrators, not lanes) that are working, waiting on you, or wrote their transcript within `OSRC_HUB_ACTIVE_MIN`, from the fleet's peer observation (`_fleet_cc_peer_observations`). Read-only: nothing attaches to or sends to them. Export field `also`; cached `OSRC_HUB_ALSO_TTL` (30) s under `hub serve`.
 - **Renewals** read "in 4 days · Thu 19 Nov", "today · 18:40", "tomorrow · 09:10" (local time, 24h clock) in the page, the export and `lane summary`.
 
+## Attention
+
+Each export gives every lane one `attention` value, from signals it already has, and each project the
+highest of its lanes (an open question on the card counts as `question`). The order, most urgent first:
+
+1. `approval`: the lane's screen holds a permission prompt.
+2. `question`: the lane asks a question, or the card has an open decision.
+3. `proof`: the lane is stopped after its failed proof rounds.
+4. `review`: the review of the lane has no readable verdict.
+5. `stalled`: the lane stalled and the nudge did not help.
+6. `limit`: the lane hit a usage limit.
+7. `ready`: the lane handed in READY and nobody has reviewed it.
+8. `failed`: the lane failed.
+9. `working`: the lane is working.
+10. `finished`: done, merged or canceled.
+
+The project page puts lanes in three bands: waiting on you (1-6), back from work (7, 8, 10), and working,
+folded to one line. A lane changes band only after its new state held for one more export. The tab title
+reads `(N) Mission Control` with N things waiting on you (those lanes plus open questions), and the
+favicon gets a dot. A browser notification is off until you turn it on in the keys help (`?`); it fires only
+when something new starts waiting while the tab is in the background, never on first load, as one
+notification with the project names and a fixed headline, never lane output. Keys, ignored in text
+fields: `n` / `p` next or previous waiting item, `1`-`9` pick an option on that question, `Enter` send,
+`?` help. A card takes keys only once it has been on screen and unmoved for about a second.
+
 ## Local mode (any browser)
 
 `outsourcerer hub serve [--port N] [--new-token]` runs the same page on

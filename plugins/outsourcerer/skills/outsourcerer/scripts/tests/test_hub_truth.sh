@@ -174,7 +174,7 @@ printf '{"pid":%s,"sessionId":"broken"' "$$" > "$OSRC_CLAUDE_SESSIONS_DIR/zz.jso
 t0="$(python3 -c 'import time; print(time.time())')"
 out="$(lib cmd_hub_export 2>/dev/null)"
 dt="$(python3 -c "import time; print(round(time.time() - $t0, 1))")"
-max="${OSRC_TEST_EXPORT_MAX:-10}"
+max="${OSRC_TEST_EXPORT_MAX:-5}"
 python3 -c "import sys; sys.exit(0 if $dt < $max else 1)" && ok "export with 150 observed sessions took ${dt}s (limit ${max}s; was ~41s)" || no "export took ${dt}s"
 jq -e '(.also | length) == 12 and (.also[0].state == "working") and any(.projects[]; .id == "s-fast")' >/dev/null <<<"$out" \
   && ok "Also running lists 12 sessions, busy first, despite a malformed session file" || no "also: $(jq -c '[.also[]?.state]' <<<"$out")"
