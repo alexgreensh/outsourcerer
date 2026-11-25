@@ -8,13 +8,18 @@ The one entry from a list of tasks to a running plan. One task per line; blank l
 
 ```
 <key> | <what to do> [| after=k1,k2] [| files=a/b.sh,docs/] [| shape=ship|scout] [| verb=...] [| model=...]
-      [| provider=...] [| check="cmd"] [| retries=N] [| hold=question]
+      [| provider=...] [| check="cmd"] [| retries=N] [| hold=question [| default=answer | until=+2h] [| risk=paid]]
 ```
 
 - `after` names keys of earlier lines only, so a list cannot form a cycle. A bad list creates nothing.
-- `files` declares the paths a task owns; a task with `files` defaults to `shape=ship`.
+- `files` declares the paths a task changes; a task with `files` defaults to `shape=ship`. Files never order tasks:
+  each build branches from the plan base, so a wait would not give the later task the earlier work. `plan start`
+  prints `note: b and a both touch x -> y` for each overlap instead; expect a conflict at land, or split the work.
+- `hold=` creates the task held. With `default=` and `until=` it goes ahead with the default at the deadline;
+  `risk=irreversible|paid|publish` never auto-applies (`task hold` rules).
+- A rerun of the same list on an existing plan keeps the tasks whose title is already a key and adds the rest.
 - The default `check` is the repo profile's `check` (or `OSRC_FACTORY_CHECK`) when one is declared.
-- It prints, per task, `starts now`, `after X (declared)` or `after X (both touch a -> b)`, creates the plan in the
+- It prints, per task, `starts now` or `after X (declared)`, creates the plan in the
   current repo, adds every task through `task add`, then runs one `plan run --once` pass so the first wave starts in
   parallel. `--run` drives the plan to the end instead; `--dry-run` prints the order and creates nothing.
 
@@ -74,17 +79,19 @@ Drives a plan until it is finished or needs you. Each pass ("tick") does two thi
 2. **Start ready work** together, up to the launch cap, counting what is already running. The cap is
    `--max-parallel`, else `OSRC_FACTORY_PARALLEL`, else the repo profile's `parallel`, else 3 (2 on machines with
    4 cores or fewer, 1 on 2 or fewer); 1-16.
-   - Resource gate, checked once per pass: a repo gate command (profile `gate` or `OSRC_FACTORY_GATE`, run as
-     `<gate> can-run`; exit 1 pauses with its first output line as the reason, any other failure is ignored), then
-     free disk under `OSRC_DISK_MIN_GB` (10), then load per core over `OSRC_FACTORY_LOAD_MAX` (2; on macOS the
-     engine's load-and-swap check). A paused pass starts nothing and fails nothing. Missing readings never pause.
-     `OSRC_FACTORY_GATE=off` turns the gate off.
-   - File ownership: a task whose `files` overlap (same path, or one inside the other) a running task's or one
-     started earlier in this pass waits, and the pass prints `tX: waits — its files touch tY (a -> b)`.
-   - Review cap: each dispatch of a reviewer counts a round (`review_rounds`). After a FAIL, a further round past
-     `OSRC_FACTORY_REVIEW_ROUNDS` (default 3) is held until an approved escalation record exists at
-     `<plan>/escalations/<reviewer-tid>.json` with that `round` and `"approved": true`. The hold writes a pending
-     record there. A captain's `task release <reviewer> --answer "..."` is itself the escalation.
+   - Resource gate, checked once per pass: a repo gate script (profile `gate` or `OSRC_FACTORY_GATE`: one path, no
+     arguments, run as `<gate> can-run`; exit 1 pauses with its first output line as the reason, any other failure
+     is ignored; a path that is not a file is ignored with one warning), then the launch disk gate (free disk under
+     `OSRC_DISK_MIN_GB`, 10, pauses until `cleanup --ack` acknowledges the ASK list, exactly as at launch), then
+     1-minute load per core over `OSRC_FACTORY_LOAD_MAX` (2), then on macOS swap use over
+     `OSRC_FACTORY_SWAP_MAX_PCT` (95; macOS grows swap on demand, so a high ratio alone is normal). The reason names
+     the reading and the setting; 0 turns a check off. A paused pass starts nothing and fails nothing, and the
+     reason prints when it changes. Missing readings never pause. `OSRC_FACTORY_GATE=off` turns the gate off.
+     (Heavy commands use their own macOS thresholds, `OSRC_MAC_LOAD_MAX_PC`, 2, and `OSRC_MAC_SWAP_MAX_PCT`, 80.)
+   - Review cap: `review_rounds` counts review rounds that failed and were sent back. A further round past
+     `OSRC_FACTORY_REVIEW_ROUNDS` (default 3) holds the reviewer for the captain and writes a pending record at
+     `$OSRC_HOME/plans/<plan>/escalations/<reviewer-tid>.json`. `task release <reviewer> --answer "..."` runs the
+     round and stamps the record `"approved": true` with the answer.
    - A launch failure counts as a failed attempt and is retried within the task's `retries`.
    - A brief too thin to act on is held before any worker starts, without using an attempt: a task with no prompt
      or title, or a hand-added ship task (not a flow stage) with no spec, no check, no dependency and no captain's

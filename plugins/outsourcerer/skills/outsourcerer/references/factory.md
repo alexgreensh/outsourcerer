@@ -41,8 +41,9 @@ client | add backoff to the auth client           | after=map | files=src/auth |
 docs   | document the retry policy                | files=docs/auth.md
 ```
 
-It shows the order and why each task waits, then launches every independent task at once up to
-the launch cap. Shared files serialize; disjoint files run side by side. Reference:
+It shows the order and notes tasks that share files, then launches every task without `after` at
+once up to the launch cap. Shared files do not serialize (each build branches from the plan base);
+expect a conflict at land or split the work. Reference:
 `factory-flow-cli.md` (`plan start`, launch cap, resource gate, review cap, repo profile).
 
 ## A first plan in six commands

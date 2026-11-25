@@ -80,6 +80,20 @@ printf '%s\\n' "${SESSION_LAUNCH[@]}"
             args = run.stdout.splitlines()
             cfg = json.loads(Path(args[args.index('--mcp-config') + 1]).read_text())
             self.assertEqual(sorted(cfg['mcpServers']), ['browser'])
+            # The copy can hold server tokens: ending the session removes it (review P3).
+            copy = Path(args[args.index('--mcp-config') + 1])
+            end = subprocess.run(['/bin/bash', '-c', '. "$1"; SESSION_NAME=decl _session_registry_end stop; [ ! -e "$2" ]', 'bash', str(SCRIPT), str(copy)],
+                                 env=dict(os.environ, HOME=d, OSRC_HOME=str(home / 'osrc'), OSRC_SOURCED='1', OSRC_HEARTBEAT_DISABLED='1'),
+                                 capture_output=True, text=True)
+            self.assertEqual(end.returncode, 0, end.stderr)
+
+    def test_user_config_escape_hatch_means_full(self):
+        # OSRC_CLAUDE_USER_CONFIG=1 means the full MCP set for headless lanes; interactive lanes match.
+        full = self.run_launch(OSRC_CLAUDE_USER_CONFIG='1')
+        self.assertEqual(full.returncode, 0, full.stderr)
+        self.assertNotIn('--strict-mcp-config', full.stdout.splitlines())
+        both = self.run_launch(OSRC_CLAUDE_USER_CONFIG='1', OSRC_LEAN_LAUNCH='1')
+        self.assertNotEqual(both.returncode, 0)
 
     def test_empty_strict_profile(self):
         lean = self.run_launch(OSRC_LEAN_LAUNCH='1')

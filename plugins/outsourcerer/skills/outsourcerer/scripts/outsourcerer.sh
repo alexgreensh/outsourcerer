@@ -16442,7 +16442,7 @@ _session_registry_last_event() { # <session_id>
 # event is already `end` is not re-ended (a duplicate stop or a reap after a stop is a no-op).
 _session_registry_end() { # <reason>
   local reason="${1:-ended}" last provider model effort resolved generation event
-  have jq || return 1
+  rm -f "$(_session_mcp_copy 2>/dev/null)" 2>/dev/null; have jq || return 1   # lib/leanlaunch.sh
   last="$(_session_registry_last_event "$SESSION_NAME" 2>/dev/null)" || return 1
   [ -n "$last" ] || return 0   # nothing to end (e.g. stop on a never-started session)
   event="$(printf '%s' "$last" | jq -r '.event // empty' 2>/dev/null)"

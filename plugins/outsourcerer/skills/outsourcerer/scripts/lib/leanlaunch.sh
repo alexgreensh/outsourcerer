@@ -17,11 +17,19 @@ _session_launch_cc() {
   _session_cc_mcp_flags
 }
 
+# _session_mcp_copy -> the private per-session copy of the declared MCP config. It can hold server env
+# tokens, so _session_registry_end (every stop, exit and failed launch) removes it.
+_session_mcp_copy() { printf '%s/sessions/mcp-%s.json' "$OSRC_HOME" "${SESSION_NAME:-$$}"; }
+
 # _session_cc_mcp_flags -> append the MCP isolation flags for an interactive Claude lane.
+# OSRC_CLAUDE_USER_CONFIG=1 (the headless lanes' escape hatch) means OSRC_SESSION_MCP=full here too.
 # OSRC_LEAN_LAUNCH=1 always means lean, even when OSRC_SESSION_MCP=full is set elsewhere.
 _session_cc_mcp_flags() {
-  case "${OSRC_SESSION_MCP:-lean}" in
-    full) [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ] || return 0 ;;
+  local mode="${OSRC_SESSION_MCP:-lean}"
+  [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || mode=full
+  case "$mode" in
+    full) [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ] || return 0
+      [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || die "lean launch requires strict MCP isolation; unset OSRC_CLAUDE_USER_CONFIG or OSRC_LEAN_LAUNCH" ;;
     lean|'') ;;
     *) die "OSRC_SESSION_MCP must be lean or full (got '${OSRC_SESSION_MCP}')" ;;
   esac
@@ -33,8 +41,7 @@ _session_cc_mcp_flags() {
   # Declared servers (--with mcp=a,b): reuse the headless lanes' filter, then keep a private copy that
   # outlives this process (the pane starts claude after session start exits and removes its temp file).
   if type _with_mcp_requested >/dev/null 2>&1 && _with_mcp_requested; then
-    [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || die "lean launch: --with mcp= needs strict MCP isolation; unset OSRC_CLAUDE_USER_CONFIG or use OSRC_SESSION_MCP=full"
-    local cfg="$OSRC_HOME/sessions/mcp-${SESSION_NAME:-$$}.json"
+    local cfg; cfg="$(_session_mcp_copy)"
     build_mcp_flags_cc && [ -f "${CC_MCP_FLAGS[2]:-}" ] || die "lean launch: could not build the declared MCP config"
     _mkdir_private "$OSRC_HOME/sessions" 2>/dev/null || mkdir -p "$OSRC_HOME/sessions" || die "lean launch: cannot write $OSRC_HOME/sessions"
     ( umask 077; cp "${CC_MCP_FLAGS[2]}" "$cfg" ) || die "lean launch: cannot write $cfg"

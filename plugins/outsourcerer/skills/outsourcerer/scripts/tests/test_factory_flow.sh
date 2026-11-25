@@ -870,13 +870,14 @@ for t in t1 t2 t3 t4; do echo running > "$TMP/outcomes/$t"; done
 out="$( cmd_plan_run par --once --max-parallel 3 2>&1 )"
 [ "$(grep -c '^par/' "$TMP/launches")" = 3 ] && [ "$(st par t4)" = todo ] \
   && ok "L5-1: three independent tasks start in one pass at cap 3; the fourth waits" || bad "L5-1: launches=$(cat "$TMP/launches") $out"
-# Files: a task touching a folder another task owns waits, and the reason names both.
+# Files never order tasks: each ship task branches from the plan base, so a wait would not give the
+# later task the earlier work (review P2 5). Overlap is reported by plan start instead.
 mkplan own 't1||ship|0' 't2||ship|0' 't3||ship|0'
 _task_update own t1 '.files = ["src"]' >/dev/null; _task_update own t2 '.files = ["src/a.sh"]' >/dev/null; _task_update own t3 '.files = ["docs"]' >/dev/null
 : > "$TMP/launches"
 out="$( cmd_plan_run own --once --max-parallel 3 2>&1 )"
-[ "$(st own t2)" = todo ] && [ "$(st own t3)" = running ] && grep -q 't2: waits.*t1 (src/a.sh -> src)' <<<"$out" \
-  && ok "L5-1: overlapping files are ordered with the reason; disjoint files run alongside" || bad "L5-1 files: $(st own t2)/$(st own t3) $out"
+[ "$(grep -c '^own/' "$TMP/launches")" = 3 ] && ! grep -q 'waits' <<<"$out" \
+  && ok "L5-1: shared files do not delay a task (no wait that cannot carry the earlier work)" || bad "L5-1 files: $(st own t2) $out"
 for t in t1 t2 t3 t4; do rm -f "$TMP/outcomes/$t"; done
 
 # Incident 2: a held decision with a default and deadline does not stop unrelated work, and the
@@ -902,28 +903,55 @@ echo "VERDICT: FAIL - still broken" > "$TMP/lasttxt-t5"
 out="$( cmd_plan_run cap --interval 1 2>&1 )"; rc=$?
 esc="$OSRC_HOME/plans/cap/escalations/t5.json"
 [ "$rc" = 3 ] && [ "$(cat "$TMP/count-cap-t5")" = 3 ] && [ "$(st cap t5)" = held ] && jq -e '.round == 4 and .approved == false' "$esc" >/dev/null \
-  && _task_get cap t5 | jq -e '.hold.reason | test("review cap is 3")' >/dev/null \
-  && ok "L5-3: round four is held for an escalation record after three reviews" || bad "L5-3: rc=$rc reviews=$(cat "$TMP/count-cap-t5") $(_task_get cap t5 | jq -c '{state,review_rounds}') $out"
-jq '.approved = true | .by = "captain" | .reason = "flaky fixture fixed upstream"' "$esc" > "$esc.tmp" && mv "$esc.tmp" "$esc"
+  && _task_get cap t5 | jq -e '(.hold.reason | test("review cap is 3")) and (.hold.reason | test("approved") | not)' >/dev/null \
+  && ok "L5-3: round four is held after three reviews; the record is pending and nothing asks to edit it" || bad "L5-3: rc=$rc reviews=$(cat "$TMP/count-cap-t5") $(_task_get cap t5 | jq -c '{state,review_rounds,hold}') $out"
+# The captain's release is the approval: it runs round four and stamps the record (review P2 1).
 rm -f "$TMP/lasttxt-t5"; setlt cap t5 "VERDICT: PASS" 4
-( cmd_task release t5 --plan cap --answer "approved round four" >/dev/null 2>&1 )
+( cmd_task release t5 --plan cap --answer "fixture fixed upstream" >/dev/null 2>&1 )
 ( cmd_plan_run cap --interval 1 >/dev/null 2>&1 )
-[ "$(cat "$TMP/count-cap-t5")" = 4 ] && ok "L5-3: an approved escalation lets round four run" || bad "L5-3 approved: reviews=$(cat "$TMP/count-cap-t5") $(st cap t5)"
+[ "$(cat "$TMP/count-cap-t5")" = 4 ] && jq -e '.approved == true and .status == "approved" and .answer == "fixture fixed upstream"' "$esc" >/dev/null \
+  && ok "L5-3: task release runs round four and stamps the escalation record approved" || bad "L5-3 release: reviews=$(cat "$TMP/count-cap-t5") $(st cap t5) $(cat "$esc")"
 
 # Launch cap and gate settings.
-[ "$(OSRC_FACTORY_PARALLEL=5 _osrc_fp_max_parallel)" = 5 ] && ( _osrc_fp_max_parallel 0 ) 2>/dev/null; [ $? -ne 0 ] \
-  && ok "L5: the cap reads OSRC_FACTORY_PARALLEL and refuses 0" || bad "L5 cap"
+[ "$(OSRC_FACTORY_PARALLEL=5 _osrc_fp_max_parallel)" = 5 ] && ok "L5: the cap reads OSRC_FACTORY_PARALLEL" || bad "L5 cap env"
+( _osrc_fp_max_parallel 0 ) 2>/dev/null && bad "L5: a cap of 0 was accepted" || ok "L5: the cap refuses 0"
 case "$(OSRC_FACTORY_PARALLEL= OSRC_FACTORY_PROFILE=/nonexistent _osrc_fp_max_parallel)" in 1|2|3) ok "L5: a default cap exists without settings";; *) bad "L5 default cap";; esac
+# Gate checks never read this machine: disk, load and swap come through the seams the gate reads
+# (_osrc_free_kb, _osrc_fp_load1, _osrc_fp_ncpu, and uname + osrc_mac_load for macOS swap). The
+# defaults below are a healthy machine; each check overrides one reading (review P2 2).
+calm() {
+  _osrc_free_kb() { echo $(( 500 * 1048576 )); }; _osrc_fp_load1() { echo 0.50; }; _osrc_fp_ncpu() { echo 4; }
+  uname() { echo Linux; }; osrc_mac_load() { echo 'load_per_core=0.12 swap_pct=0 (load1=0.5 cores=4 swap=0M/0M)'; }
+  _osrc_cleanup_items() { :; }
+  unset OSRC_FACTORY_GATE OSRC_DISK_MIN_GB OSRC_FACTORY_LOAD_MAX OSRC_FACTORY_SWAP_MAX_PCT
+}
 printf '#!/bin/sh\necho "nightly backup running"; exit 1\n' > "$TMP/gate.sh"; chmod +x "$TMP/gate.sh"
 mkplan gated 't1||scout|0'
-out="$( OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once 2>&1 )"
+out="$( calm; OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once 2>&1 )"
 [ "$(st gated t1)" = todo ] && grep -q 'launches paused: nightly backup running' <<<"$out" && ok "L5: a repo gate that says no pauses launches" || bad "L5 gate: $out"
 printf '#!/bin/sh\nexit 7\n' > "$TMP/gate.sh"
-( OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once >/dev/null 2>&1 )
+( calm; OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once >/dev/null 2>&1 )
 [ "$(st gated t1)" != todo ] && ok "L5: a broken gate fails open" || bad "L5 broken gate wedged the plan"
-( OSRC_FACTORY_GATE=/nonexistent/gate OSRC_DISK_MIN_GB=999999 _osrc_fp_gate_can_run ); r1=$?
-( unset -f _osrc_free_kb; OSRC_FACTORY_GATE=/nonexistent/gate OSRC_DISK_MIN_GB=999999 OSRC_FACTORY_LOAD_MAX=0 _osrc_fp_gate_can_run ); r2=$?
-[ "$r1" = 1 ] && [ "$r2" = 0 ] && ok "L5: the built-in disk gate pauses launches and its absence is tolerated" || bad "L5 disk gate r1=$r1 r2=$r2"
+out="$( calm; OSRC_FACTORY_GATE="/x/g.sh --fast"; _osrc_fp_gate_can_run 2>&1; _osrc_fp_gate_can_run 2>&1 )"; r1=$?
+[ "$r1" = 0 ] && [ "$(grep -c 'is not a file' <<<"$out")" = 1 ] && ok "L5: a gate that is not a file is ignored with one warning" || bad "L5 gate warn r=$r1 $out"
+( calm; unset -f _osrc_disk_gate _osrc_fp_load1 _osrc_fp_ncpu osrc_mac_load; _osrc_fp_ncpu() { :; }; _osrc_fp_gate_can_run ) && ok "L5: missing readings never pause launches" || bad "L5: a missing reading paused launches"
+# A loaded Mac on its usual high swap ratio still launches; only its own threshold pauses (P2 4).
+( calm; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=85 (load1=4 cores=8 swap=850M/1000M)'; }; _osrc_fp_gate_can_run ) \
+  && ok "L5: macOS swap at 85% does not pause plan launches" || bad "L5: 85% swap paused launches"
+out="$( calm; uname() { echo Darwin; }; osrc_mac_load() { echo 'load_per_core=0.50 swap_pct=97 (load1=4 cores=8 swap=970M/1000M)'; }; _osrc_fp_gate_can_run || echo "$_OSRC_FP_GATE_REASON" )"
+grep -q 'swap is 97% used, over 95% (OSRC_FACTORY_SWAP_MAX_PCT' <<<"$out" && ok "L5: macOS swap over its own threshold pauses and names the reading and setting" || bad "L5 swap: $out"
+out="$( calm; _osrc_fp_load1() { echo 12.00; }; _osrc_fp_gate_can_run || echo "$_OSRC_FP_GATE_REASON" )"
+grep -q 'load is 12.00 on 4 cores (3.00 per core), over 2 per core (OSRC_FACTORY_LOAD_MAX' <<<"$out" && ok "L5: high load pauses and names OSRC_FACTORY_LOAD_MAX" || bad "L5 load: $out"
+# Disk: the launch path's own gate decides, cleanup ack included (P2 3).
+out="$( calm; _osrc_free_kb() { echo $(( 8 * 1048576 )); }; _osrc_cleanup_items() { echo '{"verdict":"ASK","path":"/w/old","kind":"worktree"}'; }
+  _osrc_fp_gate_can_run || echo "no: $_OSRC_FP_GATE_REASON"; _osrc_cleanup_ack >/dev/null; _osrc_fp_gate_can_run && echo "acked: go" )"
+grep -q 'no: .*need your decision.*Override: OSRC_DISK_MIN_GB=0' <<<"$out" && grep -q 'acked: go' <<<"$out" \
+  && ok "L5: low disk pauses until the cleanup ASK list is acked, as at launch" || bad "L5 disk ack: $out"
+( calm; _osrc_free_kb() { echo $(( 8 * 1048576 )); }; OSRC_DISK_MIN_GB=0 _osrc_fp_gate_can_run ) && ok "L5: OSRC_DISK_MIN_GB=0 lifts the disk pause" || bad "L5: disk override ignored"
+# A pause prints once, not on every pass.
+mkplan quiet 't1||scout|0'
+out="$( calm; _osrc_fp_load1() { echo 99; }; cmd_plan_run quiet --once 2>&1; cmd_plan_run quiet --once 2>&1 )"
+[ "$(grep -c 'launches paused' <<<"$out")" = 1 ] && ok "L5: the pause reason prints when it changes, not every pass" || bad "L5 repeat: $out"
 
 # Repo profile: optional; quoted keys, comments; feeds the check and the worker's repo rules.
 cat > "$TMP/profile.toml" <<'TOML'
@@ -951,18 +979,41 @@ docs | document the endpoint | files=docs
 lint | tidy the api module | files=src/api/util.sh
 TASKS
 out="$( cd "$REPO" && cmd_plan_start ps "$TMP/tasks.txt" --max-parallel 3 --dry-run 2>&1 )"
-grep -q 'ui *after api (declared)' <<<"$out" && grep -q 'lint *after api (both touch src/api/util.sh -> src/api)' <<<"$out" \
+grep -q 'ui *after api (declared)' <<<"$out" && grep -q 'lint *starts now' <<<"$out" \
+  && grep -q 'note: lint and api both touch src/api/util.sh -> src/api' <<<"$out" \
   && grep -q 'docs *starts now' <<<"$out" && [ ! -d "$OSRC_HOME/plans/ps" ] \
-  && ok "L5: plan start --dry-run shows the order and why, and creates nothing" || bad "L5 dry run: $out"
+  && ok "L5: plan start --dry-run shows the order, reports shared files, and creates nothing" || bad "L5 dry run: $out"
 for t in t1 t2 t3 t4; do echo running > "$TMP/outcomes/$t"; done
 : > "$TMP/launches"
 out="$( cd "$REPO" && OSRC_FACTORY_CHECK="git diff --check" cmd_plan_start ps "$TMP/tasks.txt" --max-parallel 3 2>&1 )"; rc=$?
-[ "$rc" = 0 ] && [ "$(sort "$TMP/launches" | tr '\n' ' ')" = "ps/t1 ps/t3 " ] && _task_get ps t2 | jq -e '.deps == ["t1"]' >/dev/null \
+[ "$rc" = 0 ] && [ "$(sort "$TMP/launches" | tr '\n' ' ')" = "ps/t1 ps/t3 ps/t4 " ] && _task_get ps t2 | jq -e '.deps == ["t1"]' >/dev/null \
   && _task_get ps t4 | jq -e '.files == ["src/api/util.sh"] and .shape == "ship" and .check == "git diff --check"' >/dev/null \
   && ok "L5: plan start adds every task and launches the independent ones together" || bad "L5 plan start rc=$rc launches=$(cat "$TMP/launches") $out"
 for t in t1 t2 t3 t4; do rm -f "$TMP/outcomes/$t"; done
 printf 'a | x\nb | y | after=c\nc | z\n' > "$TMP/bad.txt"
 ( cd "$REPO" && cmd_plan_start pbad "$TMP/bad.txt" ) >/dev/null 2>&1 && bad "L5: forward after= accepted" || { [ ! -d "$OSRC_HOME/plans/pbad" ] && ok "L5: after= must name an earlier line; nothing is created" || bad "L5: bad list left a plan"; }
+printf 'a | x\nb | y | after=*\n' > "$TMP/bad.txt"
+( cd "$REPO" && cmd_plan_start pbad "$TMP/bad.txt" ) >/dev/null 2>&1 && bad "L5: after=* accepted" || ok "L5: after= takes keys only (no glob)"
+# Dotted keys: after=a.b names a.b only, never axb (a regex dot matched both).
+printf 'a.b | x\naxb | y\nc | z | after=a.b\n' > "$TMP/dot.txt"
+( cd "$REPO" && cmd_plan_start pdot "$TMP/dot.txt" --dry-run ) >/dev/null 2>&1
+( cd "$REPO" && cmd_plan_start pdot "$TMP/dot.txt" ) >/dev/null 2>&1
+_task_get pdot t3 | jq -e '.deps == ["t1"]' >/dev/null && ok "L5: a dotted key names exactly one task" || bad "L5 dotted: $(_task_get pdot t3 | jq -c .deps)"
+# Printed order matches what starts: b has no after, so it starts now (no file wait any more).
+printf 'z | x\na | y | after=z | files=src\nb | w | files=src\n' > "$TMP/ord.txt"
+out="$( cd "$REPO" && cmd_plan_start pord "$TMP/ord.txt" --dry-run 2>&1 )"
+grep -q 'b *starts now' <<<"$out" && grep -q 'a *after z (declared)' <<<"$out" && ok "L5: the printed order matches the scheduler" || bad "L5 order: $out"
+# A decision with a default, deadline and risk, and a rerun that finishes a half-built plan.
+printf 'pick | choose the cache | hold=redis or memcached? | default=redis | until=+2h\nbuy | size the runner | hold=buy the bigger runner? | default=yes | until=+1h | risk=paid\nlast | y\n' > "$TMP/hold.txt"
+( cd "$REPO" && cmd_plan_start phold "$TMP/hold.txt" ) >/dev/null 2>&1
+_task_get phold t1 | jq -e '.state == "held" and .hold.default == "redis" and .hold.until_epoch > 0' >/dev/null \
+  && _task_get phold t2 | jq -e '.state == "held" and .hold.risk == "paid"' >/dev/null \
+  && ok "L5: plan start carries a decision's default, deadline and risk" || bad "L5 hold: $(_task_get phold t1 | jq -c .hold) $(_task_get phold t2 | jq -c .hold)"
+printf 'a | x\nb | y | after=a\n' > "$TMP/re.txt"
+mkplan pre; _task_cli_add a --prompt x --plan pre >/dev/null 2>&1
+( cd "$REPO" && cmd_plan_start pre "$TMP/re.txt" ) >/dev/null 2>&1
+[ "$(_task_list pre | jq length)" = 2 ] && _task_get pre t2 | jq -e '.title == "b" and .deps == ["t1"]' >/dev/null \
+  && ok "L5: a rerun reuses the plan and adds only the missing tasks" || bad "L5 rerun: $(_task_list pre | jq -c 'map({id,title,deps})')"
 
 echo "---"
 echo "test_factory_flow: $pass passed, $fail failed"

@@ -67,7 +67,7 @@ or an explicit `--force` override.
 | `--deliver local\|branch\|pr` | `land` merges locally, verifies and records the branch without merging, or pushes and opens a PR, respectively. | local |
 | `--retries N` | Automatic retries the scheduler may spend. | 1 |
 | `--hold "question"` | Create the task already held for a decision. | not held |
-| `--files a/b.sh,docs/` (alias `--owns`) | Paths this task changes. `plan run` never runs two tasks with overlapping files at once. | none |
+| `--files a/b.sh,docs/` (alias `--owns`) | Paths this task changes: matched against the repo profile's benchmark paths in the brief. Not a lock; overlapping tasks still run side by side. | none |
 | `--flow <name> --stage <id>` | Provenance when a flow made the task. | empty |
 
 ## States

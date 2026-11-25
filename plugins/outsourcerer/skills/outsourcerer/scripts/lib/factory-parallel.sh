@@ -5,14 +5,15 @@
 # What this adds, documented for users in references/factory-flow-cli.md:
 #   - launch cap: --max-parallel, else OSRC_FACTORY_PARALLEL, else the profile's parallel, else a
 #     default from the CPU count (3; 2 on <=4 cores; 1 on <=2 cores). Whole number 1-16.
-#   - resource gate: before each launch pass. Profile `gate`/OSRC_FACTORY_GATE names a command run as
-#     `<gate> can-run` (rc1 pauses; other failures fail open). Built in: free disk under
-#     OSRC_DISK_MIN_GB (10) or 1-minute load per core over OSRC_FACTORY_LOAD_MAX (2) pauses launches.
-#     OSRC_FACTORY_GATE=off turns every gate off. A gate only delays launches; it never fails a task.
-#   - file ownership: tasks declaring overlapping .files wait for each other, with the reason shown.
+#   - resource gate: before each launch pass. Profile `gate`/OSRC_FACTORY_GATE names a script run as
+#     `<gate> can-run` (rc1 pauses; other failures fail open). Built in: the launch path's own disk
+#     gate (_osrc_disk_gate, cleanup ack included), 1-minute load per core over OSRC_FACTORY_LOAD_MAX
+#     (2), and on macOS swap use over OSRC_FACTORY_SWAP_MAX_PCT (95). OSRC_FACTORY_GATE=off turns every
+#     gate off. A gate only delays launches; it never fails a task.
 #   - held decisions with --default and --until apply the default at the deadline unless the hold is
 #     --risk irreversible|paid|publish (or any unknown label): those wait for the captain.
-#   - review cap: OSRC_FACTORY_REVIEW_ROUNDS (3); a further round needs an approved escalation record.
+#   - review cap: OSRC_FACTORY_REVIEW_ROUNDS (3); a further round waits for the captain's release,
+#     recorded in <plan>/escalations/<reviewer>.json (pending, then approved on release).
 #   - optional per-repo profile <repo>/.outsourcerer.toml ([factory] check, gate, parallel;
 #     [factory.heavy] "cmd" = "where"; [factory.bench] "path/" = true). Read line by line, never sourced.
 
@@ -107,37 +108,6 @@ EOF
   elif [ -n "$bench" ]; then printf -- '- No benchmark is needed: none of your files sit under a benchmark path.\n'; fi
 }
 
-# ---------------------------------------------------------------- file ownership
-
-# _osrc_fp_task_files <plan> <task-id> -> one repo-relative path per line from the task's .files
-# (or legacy .owns). Empty when undeclared.
-_osrc_fp_task_files() {
-  local t
-  t="$(_task_get "$1" "$2" 2>/dev/null)" || return 0
-  printf '%s' "$t" | _osrc_fp_jq -r '(.files // .owns // [])[]? | strings
-    | gsub("^\\s+|\\s+$"; "") | sub("^\\./+"; "") | sub("/+$"; "") | select(. != "")' 2>/dev/null | sort -u
-}
-
-# _osrc_fp_conflict <list-a> <list-b> -> "path-a -> path-b" for the first colliding pair (equal, or
-# one a folder of the other), nothing when disjoint or either list is empty.
-_osrc_fp_conflict() {
-  local x y
-  [ -n "$1" ] && [ -n "$2" ] || return 0
-  while IFS= read -r x; do
-    [ -n "$x" ] || continue
-    while IFS= read -r y; do
-      [ -n "$y" ] || continue
-      case "$x" in "$y"|"$y"/*) printf '%s -> %s' "$x" "$y"; return 0 ;; esac
-      case "$y" in "$x"/*) printf '%s -> %s' "$x" "$y"; return 0 ;; esac
-    done <<EOF2
-$2
-EOF2
-  done <<EOF1
-$1
-EOF1
-  return 0
-}
-
 # ---------------------------------------------------------------- resources
 
 # _osrc_fp_ncpu -> online CPU count, else nothing.
@@ -154,12 +124,24 @@ _osrc_fp_load1() {
   uptime 2>/dev/null | sed -n 's/.*load averages*:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1
 }
 
-# _osrc_fp_gate_can_run -> rc0 when new launches may proceed this pass. rc1 sets _OSRC_FP_GATE_REASON.
-# Every reading that is missing or broken counts as "go": the gate must never wedge a plan, and the
-# hard disk gate inside the real launch path still applies.
-_OSRC_FP_GATE_REASON=""
+# _osrc_fp_swap_pct -> swap use in percent on macOS (from the engine's osrc_mac_load), else nothing.
+_osrc_fp_swap_pct() {
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && type osrc_mac_load >/dev/null 2>&1 || return 0
+  osrc_mac_load 2>/dev/null | sed -n 's/.*swap_pct=\([0-9][0-9]*\) .*/\1/p' | head -1
+}
+
+# _osrc_fp_over <reading> <max> -> rc0 when max > 0 and reading > max (both plain numbers).
+_osrc_fp_over() {
+  case "$1$2" in ''|*[!0-9.]*) return 1 ;; esac
+  awk -v a="$1" -v m="$2" 'BEGIN { exit !(m + 0 > 0 && a + 0 > m + 0) }'
+}
+
+# _osrc_fp_gate_can_run -> rc0 when new launches may proceed this pass. rc1 sets _OSRC_FP_GATE_REASON,
+# which names the reading and the setting that tunes it. Every reading that is missing or broken
+# counts as "go": the gate must never wedge a plan.
+_OSRC_FP_GATE_REASON=""; _OSRC_FP_GATE_WARNED=""
 _osrc_fp_gate_can_run() {
-  local g root out rc kb n l
+  local g root out rc n l lpc s
   _OSRC_FP_GATE_REASON=""
   g="${OSRC_FACTORY_GATE:-}"
   [ "$g" = off ] && return 0
@@ -174,22 +156,27 @@ _osrc_fp_gate_can_run() {
            _OSRC_FP_GATE_REASON="${_OSRC_FP_GATE_REASON:-the repo resource gate said no}"; return 1 ;;
         *) printf 'outsourcerer: resource gate %s failed (rc=%s); ignoring it this pass\n' "$g" "$rc" >&2 ;;
       esac
+    elif [ "$_OSRC_FP_GATE_WARNED" != "$g" ]; then
+      _OSRC_FP_GATE_WARNED="$g"
+      printf 'outsourcerer: resource gate %s is not a file (name one script, no arguments); ignoring it\n' "$g" >&2
     fi
   fi
-  if type _osrc_free_kb >/dev/null 2>&1; then
-    kb="$(_osrc_free_kb 2>/dev/null)"
-    if [ -n "$kb" ] && [ -z "$(printf '%s' "$kb" | tr -d '0-9')" ] && [ $(( kb / 1048576 )) -lt "${OSRC_DISK_MIN_GB:-10}" ]; then
-      _OSRC_FP_GATE_REASON="free disk is $(( kb / 1048576 ))GB, under ${OSRC_DISK_MIN_GB:-10}GB; outsourcerer cleanup shows what can go"; return 1
-    fi
-  fi
-  if [ "$(uname -s 2>/dev/null)" = Darwin ] && type _osrc_mac_overloaded >/dev/null 2>&1; then
-    _osrc_mac_overloaded && { _OSRC_FP_GATE_REASON="this Mac is overloaded (load or swap)"; return 1; }
-    return 0
+  # Disk: ask the launch path's own gate (lib/cleanup.sh), so a cleanup ack counts here exactly as it
+  # does at launch. It dies when it refuses, hence the subshell.
+  if type _osrc_disk_gate >/dev/null 2>&1 && ! out="$( _osrc_disk_gate 2>&1 )"; then
+    out="$(printf '%s' "$out" | tail -1 | sed 's/^ERROR: //; s/^outsourcerer: //' | cut -c1-400)"
+    _OSRC_FP_GATE_REASON="${out:-free disk is low}. Override: OSRC_DISK_MIN_GB=0"; return 1
   fi
   n="$(_osrc_fp_ncpu)"; l="$(_osrc_fp_load1)"
-  [ -n "$n" ] && [ -n "$l" ] && [ -z "$(printf '%s' "$l" | tr -d '0-9.')" ] || return 0
-  if awk -v l="$l" -v n="$n" -v m="${OSRC_FACTORY_LOAD_MAX:-2}" 'BEGIN { exit !(m + 0 > 0 && l / n > m + 0) }'; then
-    _OSRC_FP_GATE_REASON="load is $l on $n cores, over ${OSRC_FACTORY_LOAD_MAX:-2} per core"; return 1
+  if [ -n "$n" ] && [ -n "$l" ] && [ -z "$(printf '%s' "$l" | tr -d '0-9.')" ]; then
+    lpc="$(awk -v l="$l" -v n="$n" 'BEGIN { printf "%.2f", l / n }')"
+    if _osrc_fp_over "$lpc" "${OSRC_FACTORY_LOAD_MAX:-2}"; then
+      _OSRC_FP_GATE_REASON="load is $l on $n cores ($lpc per core), over ${OSRC_FACTORY_LOAD_MAX:-2} per core (OSRC_FACTORY_LOAD_MAX; 0 turns it off)"; return 1
+    fi
+  fi
+  s="$(_osrc_fp_swap_pct)"
+  if _osrc_fp_over "$s" "${OSRC_FACTORY_SWAP_MAX_PCT:-95}"; then
+    _OSRC_FP_GATE_REASON="swap is ${s}% used, over ${OSRC_FACTORY_SWAP_MAX_PCT:-95}% (OSRC_FACTORY_SWAP_MAX_PCT; 0 turns it off)"; return 1
   fi
   return 0
 }
@@ -213,42 +200,31 @@ _osrc_fp_max_parallel() {
 
 # ---------------------------------------------------------------- review cap + escalation
 
-# _osrc_fp_review_cap -> review rounds allowed before an escalation record is required (default 3).
-_osrc_fp_review_cap() {
-  local v="${OSRC_FACTORY_REVIEW_ROUNDS:-3}"
-  case "$v" in ''|*[!0-9]*) v=3 ;; esac
-  v="$(printf '%s' "$v" | sed 's/^0*//')"
-  printf '%s' "${v:-3}"
-}
-
 # _osrc_fp_esc_path <plan> <tid> -> the escalation record path for a task.
 _osrc_fp_esc_path() { printf '%s/escalations/%s.json' "$(_plan_dir "$1")" "$2"; }
 
-# _osrc_fp_escalation_ok <plan> <tid> <round> -> rc0 when an APPROVED record exists for that round:
-# {"task":"t5","round":4,"reason":"...","by":"...","approved":true}. A pending record does not count.
-_osrc_fp_escalation_ok() {
-  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
-  [ -f "$f" ] || return 1
-  _osrc_fp_jq -e --argjson r "$3" '.approved == true and (.round == $r)' "$f" >/dev/null 2>&1
-}
-
-# _osrc_fp_escalation_write <plan> <tid> <round> <reason> -> write a PENDING record (an approved one
-# for the same round is never overwritten) and print its path. rc1 when it cannot be written.
+# _osrc_fp_escalation_write <plan> <tid> <round> <reason> -> write a PENDING record of the ask, print its path.
 _osrc_fp_escalation_write() {
-  local f d; f="$(_osrc_fp_esc_path "$1" "$2")"
-  _osrc_fp_escalation_ok "$1" "$2" "$3" && { printf '%s' "$f"; return 0; }
-  d="$(dirname "$f")"; mkdir -p "$d" 2>/dev/null || return 1
+  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 1
   _osrc_fp_jq -n --arg t "$2" --argjson r "$3" --arg reason "$4" --arg at "$(_factory_now)" \
     '{task:$t, round:$r, reason:$reason, status:"pending", approved:false, at:$at}' > "$f.tmp" 2>/dev/null \
     && mv -f "$f.tmp" "$f" 2>/dev/null || { rm -f "$f.tmp"; return 1; }
   printf '%s' "$f"
 }
 
+# _osrc_fp_escalation_approve <plan> <tid> <answer> -> stamp a pending record approved by the captain's
+# release. No record, or one already decided: nothing to do.
+_osrc_fp_escalation_approve() {
+  local f; f="$(_osrc_fp_esc_path "$1" "$2")"
+  [ -f "$f" ] || return 0
+  _osrc_fp_jq --arg a "$3" --arg at "$(_factory_now)" 'if .status != "pending" then . else .status = "approved"
+    | .approved = true | .by = "captain (task release)" | .answer = $a | .approved_at = $at end' \
+    "$f" > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null || rm -f "$f.tmp"
+}
+
 # ================================================================ scheduler (moved from factory-flow.sh)
-# These functions live here so the parallel/file-ownership/resource/cap changes land in a module
-# under the 1,000-line ratchet instead of growing factory-flow.sh / factory-tasks.sh. They are
-# defined before the factory scripts are sourced but only CALLED at run time, so every
-# _ff_*/_task_* they use resolves normally. Guarded callers (_ff_need_fns) still verify the pieces.
+# Defined before the factory scripts are sourced but only CALLED at run time (see header).
 
 # _task_worker_prompt <plan> <tid> <brief-path> -> the SHORT prompt passed on the worker's command
 # line: the task title, the plan goal's first line, and the absolute path of the full brief to read
@@ -276,7 +252,7 @@ _task_worker_prompt() {
     printf 'It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly.\n'
   fi
   # The repo profile's heavy commands and benchmark paths (nothing when the repo declares none).
-  _osrc_fp_brief_rules $(_osrc_fp_task_files "$plan" "$tid") 2>/dev/null || true
+  _osrc_fp_brief_rules $(_task_get "$plan" "$tid" 2>/dev/null | _osrc_fp_jq -r '(.files // [])[]? | strings' 2>/dev/null) 2>/dev/null || true
 }
 
 # _ff_next_default <plan> -> "<epoch> <tid>" of the soonest held decision whose default may
@@ -307,7 +283,7 @@ _ff_apply_defaults() {
   done
 }
 
-_FF_MOVED=0
+_FF_MOVED=0; _OSRC_FP_PAUSE_SAID=""
 _ff_dispatch() {   # <plan> <max-parallel>
   local plan="$1" max="$2" tasks active tid t out rc st answer target m lf ready
   _FF_MOVED=0
@@ -318,15 +294,9 @@ _ff_dispatch() {   # <plan> <max-parallel>
   _plan_unlock "$plan"
   tasks="$(_task_list "$plan")" || return 1
   active="$(printf '%s' "$tasks" | _ff_jq '[.[] | select(.state == "running" or .state == "verifying")] | length')"
-  # File-ownership serialization (lane osrc-l5-parallel): a ready task whose declared .files/.owns
-  # touch a running task's or an already-picked task's declared files waits, and the reason names
-  # the owner and the colliding paths. Tasks that declare no files never conflict on files; declared
-  # deps still order everything. owners = ids running now; picked = ids launched this pass.
-  local owners picked cf of oid cp gate_ok gate_said
-  owners="$(printf '%s' "$tasks" | _ff_jq -r '.[] | select(.state == "running" or .state == "verifying") | .id')"
-  picked=""
-  gate_ok=1; gate_said=0
+  local gate_ok=1
   _osrc_fp_gate_can_run || gate_ok=0
+  [ "$gate_ok" = 1 ] && _OSRC_FP_PAUSE_SAID=""
   for tid in $ready; do
     _ff_out_of_time && return 0
     t="$(_task_get "$plan" "$tid")" || continue
@@ -359,25 +329,13 @@ _ff_dispatch() {   # <plan> <max-parallel>
       continue
     fi
     [ "$active" -lt "$max" ] || continue
-    # Optional resource gate (profile "gate" / OSRC_FACTORY_GATE): when it says no, launches pause
-    # but holds, lands and decisions above still run. Tasks stay todo; nothing is marked failed.
+    # Resource gate: when it says no, launches pause but holds, lands and decisions above still run.
+    # Tasks stay todo; nothing is marked failed. The reason prints when it changes, not every pass.
     if [ "$gate_ok" != 1 ]; then
-      [ "$gate_said" = 1 ] || { printf '  launches paused: %s\n' "${_OSRC_FP_GATE_REASON:-the resource gate said no}"; gate_said=1; }
+      _OSRC_FP_GATE_REASON="${_OSRC_FP_GATE_REASON:-the resource gate said no}"
+      [ "$_OSRC_FP_PAUSE_SAID" = "$_OSRC_FP_GATE_REASON" ] || printf '  launches paused: %s\n' "$_OSRC_FP_GATE_REASON"
+      _OSRC_FP_PAUSE_SAID="$_OSRC_FP_GATE_REASON"
       continue
-    fi
-    # File overlap vs running tasks and tasks picked this pass.
-    cf="$(_osrc_fp_task_files "$plan" "$tid")"; cp=""
-    if [ -n "$cf" ]; then
-      for oid in $owners $picked; do
-        [ "$oid" != "$tid" ] || continue
-        of="$(_osrc_fp_task_files "$plan" "$oid")"
-        cp="$(_osrc_fp_conflict "$cf" "$of")"
-        if [ -n "$cp" ]; then
-          printf '  %s: waits — its files touch %s (%s); it starts after that work finishes\n' "$tid" "$oid" "$cp"
-          break
-        fi
-      done
-      [ -z "$cp" ] || continue
     fi
     # Model: skip one the exclude list now names; the stored fallbacks keep the stage's intent.
     m="$(_ff_next_model "$t" dispatch)"
@@ -388,16 +346,14 @@ _ff_dispatch() {   # <plan> <max-parallel>
     if [ "$(printf '%s' "$t" | _ff_jq -r '.require_verdict // false')" = true ]; then
       target="$(_ff_review_target "$t" "$(_task_list "$plan")")"
       if [ -n "$target" ]; then
-        # review_rounds counts dispatches to review; _ff_review_failed caps them (escalation past
-        # OSRC_FACTORY_REVIEW_ROUNDS, default 3).
         _task_update "$plan" "$tid" 'if .state != "todo" then error("moved") else . end
-          | .reviewed_head = $h | .review_target = $t | .review_rounds = ((.review_rounds // 0) + 1)' \
+          | .reviewed_head = $h | .review_target = $t' \
           --arg h "$(_task_get "$plan" "$target" | _ff_jq -r '.head_sha // ""')" --arg t "$target" >/dev/null 2>&1 || continue
       fi
     fi
     out="$( _task_dispatch "$plan" "$tid" 2>&1 )"; rc=$?
     if [ "$rc" -eq 0 ]; then
-      active=$((active + 1)); picked="$picked $tid"
+      active=$((active + 1))
       printf '  %s: started job %s\n' "$tid" "$(printf '%s' "$out" | tail -1)"
     else
       out="$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | sed 's/^ERROR: //' | cut -c1-200)"
@@ -424,10 +380,11 @@ _ff_dispatch() {   # <plan> <max-parallel>
 # hold the reviewer with the exact commands. $1..$3 plus optional 4th arg "captain" = the captain
 # asked for one more round (the captain's own answer IS the escalation; the cap does not apply).
 #
-# Review-round cap (lane osrc-l5-parallel): .review_rounds counts dispatches to review (set in
-# _ff_dispatch). Past OSRC_FACTORY_REVIEW_ROUNDS (default 3) the next round needs an approved
-# escalation record at <plan>/escalations/<reviewer>.json naming that round; until then the
-# reviewer is held and a PENDING record is written so the ask is visible and durable.
+# Review-round cap (lane osrc-l5): .review_rounds counts review rounds that FAILed and were sent back
+# (raised in the redo commit below, so a lost claim or failed launch never burns one). Past
+# OSRC_FACTORY_REVIEW_ROUNDS (default 3) the reviewer is held and a PENDING record is written at
+# <plan>/escalations/<reviewer>.json; the captain's `task release --answer` runs the round and
+# stamps that record approved.
 _ff_review_failed() (
   local plan="$1" vt="$2" tasks="$3" who="${4:-}" v r target n retries rstate landed br head out note vnote answer cmds pd
   _plan_lock "$plan" || return 1
@@ -471,20 +428,17 @@ _ff_review_failed() (
     _ff_hold "$plan" "$vt" "the reviewer said FAIL on $target ($r); $why. Read the review: $out. $cmds" || return 1
     return 0
   fi
-  # Review-round cap: the redo below starts another review round. Past the cap (default 3) it needs
-  # an approved escalation record naming that round; the captain's own redo request skips this gate.
-  if [ "$who" != captain ]; then
-    local rounds need cap ep
-    rounds="$(_ff_num "$(printf '%s' "$v" | _ff_jq -r '.review_rounds // 0')" 0)"
-    cap="$(_osrc_fp_review_cap)"; need=$(( rounds + 1 ))
-    if [ "$need" -gt "$cap" ] && ! _osrc_fp_escalation_ok "$plan" "$vt" "$need"; then
-      ep="$(_osrc_fp_escalation_write "$plan" "$vt" "$need" "review round $need of $target after FAIL: $r" 2>/dev/null)"
-      [ -n "$ep" ] || ep="$(_osrc_fp_esc_path "$plan" "$vt")"
-      _task_update "$plan" "$vt" '.verdict_failed = {target: $t, reason: $r} | .result = ("review round cap (" + $cap + ") reached; round " + $n + " needs an escalation: " + $r)' \
-        --arg t "$target" --arg r "$r" --arg n "$need" --arg cap "$cap" >/dev/null 2>&1
-      _ff_hold "$plan" "$vt" "the review cap is $cap round(s) and round $need of $target would be next (the reviewer said FAIL: $r). Approve it with an escalation record at $ep — set \"approved\": true and \"round\": $need — or decide yourself: $(_ff_cmd "$plan" task release "$vt" --answer '"<your decision>"'). $cmds" || return 1
-      return 0
-    fi
+  # Review-round cap: the redo below starts another review round. Past the cap (default 3) only the
+  # captain's release runs it; the pending record is the audit trail of the ask.
+  local rounds cap ep
+  rounds=$(( $(_ff_num "$(printf '%s' "$v" | _ff_jq -r '.review_rounds // 0')" 0) + 1 ))
+  cap="${OSRC_FACTORY_REVIEW_ROUNDS:-3}"; case "$cap" in ''|*[!0-9]*|0*) cap=3 ;; esac
+  if [ "$who" != captain ] && [ $(( rounds + 1 )) -gt "$cap" ]; then
+    ep="$(_osrc_fp_escalation_write "$plan" "$vt" "$(( rounds + 1 ))" "review round $(( rounds + 1 )) of $target after FAIL: $r" 2>/dev/null)"
+    _task_update "$plan" "$vt" '.verdict_failed = {target: $t, reason: $r} | .result = ("review round cap (" + $cap + ") reached; the captain decides: " + $r)' \
+      --arg t "$target" --arg r "$r" --arg cap "$cap" >/dev/null 2>&1
+    _ff_hold "$plan" "$vt" "the review cap is $cap round(s) and round $(( rounds + 1 )) of $target would be next (the reviewer said FAIL: $r).${ep:+ The ask is recorded at $ep.} $cmds" || return 1
+    return 0
   fi
   br="$(printf '%s' "$t" | _ff_jq -r '.branch // ""')"; head="$(printf '%s' "$t" | _ff_jq -r '.head_sha // ""')"
   note="A reviewer ($vt) did not pass your previous attempt: $r"
@@ -510,9 +464,10 @@ That build was redone. Review the new attempt from scratch, and check that this 
      | .prompt = (.prompt_orig + "\n\n## Earlier review\n\n" + $note)
      | .state = "todo" | .job = "" | .evidence = "" | .result = "" | del(.verdict_failed)
      | .hold = ((.hold // {}) + {answer: ""}) | del(.verifying_at) | del(.verifying_pid, .verifying_start, .verifying_token)
-     | .attempt_base = ([(.attempts // 0), ((.jobs // []) | length)] | max)' \
-    --arg note "$vnote")" || return 1
+     | .review_rounds = $rr | .attempt_base = ([(.attempts // 0), ((.jobs // []) | length)] | max)' \
+    --arg note "$vnote" --argjson rr "$rounds")" || return 1
   _ff_pair_commit "$plan" "$t" "$nt" "$v" "$nv" || return 1
+  [ "$who" != captain ] || _osrc_fp_escalation_approve "$plan" "$vt" "$answer"
   _ff_event "$plan" "$vt" review-failed "redo $target: $r"
   printf '  %s: reviewer said FAIL (%s); %s goes back for a redo, then %s reviews again\n' "$vt" "$r" "$target" "$vt"
   _FF_MOVED=1
