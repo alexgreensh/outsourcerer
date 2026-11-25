@@ -161,7 +161,7 @@ osrc_approver_tick() { # <pane> [session-id]
     find "$pdir" -type f -mmin +60 -exec rm -f {} + 2>/dev/null
     # Atomic claim (noclobber = O_EXCL): of two callers, exactly one creates the stamp and presses.
     if ! ( set -C; printf '%s\n' "$now" > "$pf" ) 2>/dev/null; then
-      read -r pts < "$pf" 2>/dev/null; case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
+      read -r pts 2>/dev/null < "$pf"; case "$pts" in ''|*[!0-9]*) pts=0 ;; esac
       if [ $((now - pts)) -lt "${OSRC_APPROVER_REPRESS_SECS:-15}" ] || ! { rm -f "$pf"; ( set -C; printf '%s\n' "$now" > "$pf" ) 2>/dev/null; }; then
         [ -n "$lockkey" ] && _endpoint_mutation_unlock "$lockkey"
         return 3
@@ -215,7 +215,7 @@ osrc_approver_tick() { # <pane> [session-id]
   mkdir -p "$hdir" 2>/dev/null
   hf="$hdir/$sid.$key"
   if [ -f "$hf" ]; then
-    read -r first last < "$hf" 2>/dev/null
+    read -r first last 2>/dev/null < "$hf"
     case "$first" in ''|*[!0-9]*) first="$now" ;; esac
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
     if [ $((now - last)) -lt $((holdmin * 60)) ]; then return 3; fi

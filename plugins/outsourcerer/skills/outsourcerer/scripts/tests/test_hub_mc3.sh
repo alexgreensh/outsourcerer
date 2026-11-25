@@ -152,7 +152,7 @@ jq -e 'all(.[]; (tostring | test("[0-9a-f]{8}-[0-9a-f]{4}|/Users/|/home/|\\.mc3|
 [ "$before" = "$after" ] && ok "read-only: the Claude sessions folder is untouched" || bad "sessions dir changed"
 
 echo "=== 6. titles ==="
-jq -e 'any(.[]; .name == "Marketing Site · Total Recall Core")' >/dev/null <<<"$A" && ok "agent-name cleaned: [cloud] owner/ and the id dropped" || bad "agent-name: $A"
+jq -e 'any(.[]; .name == "Marketing Site · Widget Core")' >/dev/null <<<"$A" && ok "agent-name cleaned: [cloud] owner/ and the id dropped" || bad "agent-name: $A"
 grep -qx "Outsourcerer 0.16.2" <<<"$(eng hub export | jq -r '.projects[].name')" && ok "custom-title wins over a later ai-title; no 'Outsourcerer · Outsourcerer'" || bad "custom-title"
 rm -f "$OSRC_HOME/hub/projects/$MC3_SID_A.json"
 grep -qx "Total Recall · TR v1.8.6 build" <<<"$(eng hub export | jq -r '.projects[].name')" && ok "card with no --name: Project · last ai-title" || bad "ai-title card: $(eng hub export | jq -r '.projects[].name')"

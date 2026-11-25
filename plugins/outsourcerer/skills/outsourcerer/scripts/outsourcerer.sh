@@ -11031,7 +11031,7 @@ run_job() {
        '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st} + (if $owner=="" then {} else {owner:$owner} end)
         + (if $lane=="" then {} else {lane:$lane} end)
         + (if $caps=="" then {} else {caps:$caps} end)
-        + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
+        + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json.tmp" 2>/dev/null && mv -f "$jd/meta.json.tmp" "$jd/meta.json" || true   # atomic: a reader never sees it half-written
   fi
   # Run the real dispatch (foreground path) under the watchdog, in stream mode so we get last.txt+cost.
   # OUTSOURCERER_DEPTH is NOT reset here: the detached child inherits the caller's depth so

@@ -777,7 +777,7 @@ osrc_proof_hub_lane() { # <lane-json> [id] -> lane json + {proof:{stamp,method,o
   f="$(_osrc_proof_file "$id")"
   # A review whose verdict was malformed twice waits on a person (lib/review.sh state needs-you).
   if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/rneeds/.indexed" ]; then
-    [ -f "$_OSRC_HUB_MEMO/rneeds/$id.json" ] && IFS= read -r r < "$_OSRC_HUB_MEMO/rneeds/$id.json" 2>/dev/null
+    [ -f "$_OSRC_HUB_MEMO/rneeds/$id.json" ] && IFS= read -r r 2>/dev/null < "$_OSRC_HUB_MEMO/rneeds/$id.json"
   else
     r="$(cat "$OSRC_HOME"/review/items/"$id"-*.json 2>/dev/null | jq -cs --arg l "$id" '[.[] | select(.lane == $l and .state == "needs-you")] | .[0] // empty | {item:.id, why:("unusable verdict twice: " + (.invalid_why // .invalid_first_line // ""))}' 2>/dev/null)"
   fi

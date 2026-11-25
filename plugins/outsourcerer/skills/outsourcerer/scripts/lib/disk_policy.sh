@@ -135,11 +135,11 @@ _osrc_disk_override_take() {
   me="$$|$(_pid_start_identity "$$" 2>/dev/null)"
   d="$(_osrc_disk_dir)"; now="$(date +%s)"
   if [ "${_OSRC_DISK_OVERRIDE_OK:-}" = "$me" ]; then how=same-command
-  elif case "$a" in ''|*[!0-9a-f]*) false ;; esac && read -r exp < "$d/admit.$a" 2>/dev/null \
+  elif case "$a" in ''|*[!0-9a-f]*) false ;; esac && read -r exp 2>/dev/null < "$d/admit.$a" \
        && rm "$d/admit.$a" 2>/dev/null && [ "$now" -le "${exp:-0}" ] 2>/dev/null; then how=job-admit  # rm: one taker
   else
     [ -n "$v" ] || return 1
-    read -r code exp bound < "$d/override.code" 2>/dev/null || return 1
+    read -r code exp bound 2>/dev/null < "$d/override.code" || return 1
     case "$exp" in ''|*[!0-9]*) return 1 ;; esac
     [ "$v" = "$code" ] && [ "$now" -le "$exp" ] || return 1
     if [ -n "$bound" ]; then [ "$bound" = "$me" ] || return 1
@@ -224,9 +224,9 @@ _osrc_disk_stop_rec() {
 # _osrc_disk_pause_job <jd> -> 0 paused, 1 nothing to pause, 2 unverifiable, 3 record failed.
 _osrc_disk_pause_job() {
   local jd="$1" pid="" spid did sid grp=0 own c q st=""
-  read -r st < "$jd/status" 2>/dev/null; _osrc_disk_terminal_status "$st" && return 1
+  read -r st 2>/dev/null < "$jd/status"; _osrc_disk_terminal_status "$st" && return 1
   [ -f "$jd/disk-paused" ] && return 1
-  read -r pid < "$jd/pid" 2>/dev/null; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  read -r pid 2>/dev/null < "$jd/pid"; case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   [ "$pid" != "$$" ] && [ "$pid" != "${_OSRC_DISK_ME:-$$}" ] || return 1
   _pid_start_file_match "$pid" "$jd/pid_start" >/dev/null 2>&1 || return 2
@@ -264,7 +264,7 @@ _osrc_disk_register_caller() { # <calling function>
       [ "${OSRC_PLATFORM:-}" != windows ] && have tmux || return 0
       case "${SESSION_NAME:-}" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
       local k n t c i e   # keep a record bound to a live pane, or pending from an earlier (finished) start
-      IFS='|' read -r k n t c i e < "$d/tmux-$SESSION_NAME" 2>/dev/null && { _osrc_disk_same "$c" "$i" || { [ -z "$c" ] && ! kill -0 "${e:-0}" 2>/dev/null; }; } && return 0
+      IFS='|' read -r k n t c i e 2>/dev/null < "$d/tmux-$SESSION_NAME" && { _osrc_disk_same "$c" "$i" || { [ -z "$c" ] && ! kill -0 "${e:-0}" 2>/dev/null; }; } && return 0
       _mkdir_private "$d" >/dev/null 2>&1 && printf 'tmux|%s|%s|||%s\n' "$SESSION_NAME" "$(date +%s)" "$$" > "$d/tmux-$SESSION_NAME" 2>/dev/null ;;
   esac
   return 0
@@ -275,7 +275,7 @@ _osrc_disk_register_caller() { # <calling function>
 # pane binds on first sight, and only when its shell started after the registration.
 _osrc_disk_reg_root() {
   local r="$1" kind a b c d e cur et
-  IFS='|' read -r kind a b c d e < "$r" 2>/dev/null || return 1
+  IFS='|' read -r kind a b c d e 2>/dev/null < "$r" || return 1
   [ "$kind" = tmux ] && [ -z "$c" ] && [ -n "$e" ] && kill -0 "$e" 2>/dev/null && return 1
   case "$kind" in
     fg) _osrc_disk_same "$a" "$b" && { printf '%s' "$a"; return 0; } ;;
@@ -524,7 +524,7 @@ _osrc_disk_monitor_tick() {
   read -r launch pause crit <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
   case "$launch$pause$crit" in ''|*[!0-9]*) return 0 ;; esac
   resume="$(_osrc_disk_resume_kb "$launch" "$pause")"; [ "$pause" -gt 0 ] || resume=0   # pausing off: resume all
-  for k in "$d"/admit.*; do read -r n < "$k" 2>/dev/null; [ "${n:-0}" -lt "$(date +%s)" ] 2>/dev/null && rm -f "$k"; done
+  for k in "$d"/admit.*; do read -r n 2>/dev/null < "$k"; [ "${n:-0}" -lt "$(date +%s)" ] 2>/dev/null && rm -f "$k"; done
   _osrc_disk_record_sweep
   if [ "$free_kb" -ge "$resume" ]; then
     if _osrc_disk_any_paused; then
@@ -597,8 +597,8 @@ _osrc_disk_fleet_live() {
   local jd pid r st
   _osrc_disk_any_paused && return 0
   for jd in "$OSRC_JOBS"/*/; do
-    st=""; pid=""; read -r st < "$jd/status" 2>/dev/null; _osrc_disk_terminal_status "$st" && continue
-    read -r pid < "$jd/pid" 2>/dev/null
+    st=""; pid=""; read -r st 2>/dev/null < "$jd/status"; _osrc_disk_terminal_status "$st" && continue
+    read -r pid 2>/dev/null < "$jd/pid"
     case "$pid" in ''|*[!0-9]*) [ "$st" = launching ] && return 0; continue ;; esac
     kill -0 "$pid" 2>/dev/null && return 0
   done

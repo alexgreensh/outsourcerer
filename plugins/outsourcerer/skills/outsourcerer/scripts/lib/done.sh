@@ -176,7 +176,7 @@ _osrc_done_cache_read() { # <name> -> fresh cached verdict on stdout, rc 1 when 
   [ -f "$cache" ] || return 1
   now="$(date +%s)"
   cts=""; cstate=""
-  read -r cts cstate < "$cache" 2>/dev/null || return 1
+  read -r cts cstate 2>/dev/null < "$cache" || return 1
   case "$cts" in ''|*[!0-9]*) return 1 ;; esac
   case "$cstate" in done|not-done) ;; *) return 1 ;; esac
   [ $((now - cts)) -lt "${OSRC_DONE_CACHE_SECS:-60}" ] || return 1
@@ -198,7 +198,7 @@ _osrc_done_cache_peek() { # <name>
   cache="$(_osrc_done_dir)/$name.checkcache"
   [ -f "$cache" ] || return 1
   cts=""; cstate=""
-  read -r cts cstate < "$cache" 2>/dev/null || return 1
+  read -r cts cstate 2>/dev/null < "$cache" || return 1
   case "$cts" in ''|*[!0-9]*) return 1 ;; esac
   case "$cstate" in done|not-done) ;; *) return 1 ;; esac
   printf '%s\n' "$cstate"
@@ -231,7 +231,7 @@ _osrc_done_check_lock_inner() { # <name>, caller owns recovery mutex
   local name="$1" dir lock now le stale_dir age
   dir="$(_osrc_done_dir)"; lock="$dir/$name.checklock"; now="$(date +%s)"
   if _osrc_atomic_mkdir "$lock"; then return 0; fi
-  le=""; read -r le < "$lock/epoch" 2>/dev/null || le=""
+  le=""; read -r le 2>/dev/null < "$lock/epoch" || le=""
   case "$le" in ''|*[!0-9]*)
     age="$(_mtime "$lock" 2>/dev/null || echo 0)"
     case "$age" in ''|*[!0-9]*) return 1 ;; esac

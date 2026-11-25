@@ -1,7 +1,7 @@
 # Mission Control names: what a person would call the project. Never an owner/repo path, a URL,
 # a session id or hex. Read without touching credential material.
 
-# _osrc_hub_humanize <raw> -> "alexgreensh/total-recall-core.git" -> "Total Recall Core".
+# _osrc_hub_humanize <raw> -> "acme/widget-core.git" -> "Widget Core".
 _osrc_hub_humanize() {
   local n="${1%/}"
   n="${n##*/}"; n="${n%.git}"
@@ -31,7 +31,7 @@ _osrc_hub_derived_name() {
         cmt="$(_osrc_hub_mt "$cf")"
         imt="$(_osrc_hub_mt "$OSRC_HOME/owners/$sid" "$OSRC_HOME/hub/seen/$sid")"
         if [ "$imt" -le "$cmt" ] 2>/dev/null; then
-          IFS= read -r repo < "$cf" 2>/dev/null || repo=""
+          IFS= read -r repo 2>/dev/null < "$cf" || repo=""
           printf '%s' "$repo"; return 0
         fi
       fi ;;
@@ -80,7 +80,7 @@ _OSRC_HUB_NAME_JQ='def clean: gsub("<command-(name|message)>[^<]*</command-(name
 def short($n): if length <= $n then . else .[0:$n] as $c | ($c | sub(" [^ ]*$"; "")) as $w
   | (if ($w | length) >= ($n / 2) then $w else $c end) | sub("[ ,;:.-]+$"; "") + "…" end;'
 
-# agentclean: "[cloud] alexgreensh/total-recall-core 0163xupZjM" -> "Total Recall Core" (no tags, no owner/,
+# agentclean: "[cloud] acme/widget-core 0163xupZjM" -> "Widget Core" (no tags, no owner/,
 # no trailing id token). words($n): the first $n words, with an ellipsis when cut.
 _OSRC_HUB_TITLE_JQ='def agentclean: gsub("\\[[^\\]]*\\]"; " ") | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "")
   | split(" ") | (if length > 1 and (.[-1] | test("^(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{6,}$")) then .[:-1] else . end)
@@ -103,7 +103,7 @@ _osrc_hub_session_detail() {
     [ -f "$f" ] || continue
     sz="$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f" 2>/dev/null)"
     if [ -n "$sz" ] && [ -f "$c" ] && [ ! -L "$c" ]; then
-      IFS= read -r line < "$c" 2>/dev/null || true
+      IFS= read -r line 2>/dev/null < "$c" || true
       [ "${line%% *}" = "$sz" ] && { [ "$line" = "$sz" ] || printf '%s' "${line#* }"; return 0; }
     fi
     tl="$(tail -c "$tail_b" "$f" 2>/dev/null | grep -E '"type": ?"(custom-title|ai-title|agent-name)"')"
@@ -134,7 +134,7 @@ _osrc_hub_session_detail() {
   return 0
 }
 
-# _osrc_hub_sentence_case <raw> -> "total-recall-core" -> "Total recall core", "Prompts" -> "Prompts".
+# _osrc_hub_sentence_case <raw> -> "widget-core" -> "Widget core", "Prompts" -> "Prompts".
 _osrc_hub_sentence_case() {
   local n="${1%/}"
   n="${n##*/}"; n="${n%.git}"

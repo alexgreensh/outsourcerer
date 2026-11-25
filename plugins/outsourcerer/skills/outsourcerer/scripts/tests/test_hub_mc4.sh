@@ -46,11 +46,11 @@ LC=outsourcerer-v185-redo--2690552210-c41817f1
 JOB=20261113-131318-79b27c9782a0
 printf '%s\n%s\n' "$LA" "$LC" > "$T/live-sessions"
 
-# folders: a Prompts tree and a total-recall-core worktree with a GitHub origin
+# folders: a Prompts tree and a widget-core worktree with a GitHub origin
 P="$T/work/Prompts/PERSONAL_OS/PROJECTS/agent-self-assessment/proposals/video"
-W="$T/work/total-recall-core-worktrees/v185-redo"; WF="$T/work/total-recall-core-worktrees/v185-F4a"
+W="$T/work/widget-core-worktrees/v185-redo"; WF="$T/work/widget-core-worktrees/v185-F4a"
 mkdir -p "$P" "$W" "$WF"
-for d in "$W" "$WF"; do git -C "$d" init -q && git -C "$d" remote add origin git@github.com:alexgreensh/total-recall-core.git; done
+for d in "$W" "$WF"; do git -C "$d" init -q && git -C "$d" remote add origin git@github.com:acme/widget-core.git; done
 
 # ownership + registry (real 0.16.2 field names)
 mkdir -p "$OSRC_HOME/owners/$SA" "$OSRC_HOME/owners/$SC"
@@ -91,8 +91,8 @@ echo "\$*" >> "$T/gh.log"
 [ -f "$T/gh-offline" ] && exit 1
 case "\$1 \$2" in
   "release list") printf '[{"tagName":"v1.9.85","name":"Total Recall 1.9.85","publishedAt":"$GHN","isDraft":false}]' ;;
-  "pr list") printf '[{"number":71,"title":"Fix hub names","closedAt":"$GHN","mergedAt":"$GHN","url":"https://github.com/alexgreensh/total-recall-core/pull/71"},{"number":70,"title":"Drop idea","closedAt":"$GHN","mergedAt":null,"url":"https://github.com/alexgreensh/total-recall-core/pull/70"}]' ;;
-  "issue list") printf '[{"number":62,"title":"Stale guidance","closedAt":"$GHN","url":"https://github.com/alexgreensh/total-recall-core/issues/62","stateReason":"COMPLETED"}]' ;;
+  "pr list") printf '[{"number":71,"title":"Fix hub names","closedAt":"$GHN","mergedAt":"$GHN","url":"https://github.com/acme/widget-core/pull/71"},{"number":70,"title":"Drop idea","closedAt":"$GHN","mergedAt":null,"url":"https://github.com/acme/widget-core/pull/70"}]' ;;
+  "issue list") printf '[{"number":62,"title":"Stale guidance","closedAt":"$GHN","url":"https://github.com/acme/widget-core/issues/62","stateReason":"COMPLETED"}]' ;;
   *) echo "gh shim: refused \$*" >&2; exit 9 ;;
 esac
 EOF
@@ -146,14 +146,14 @@ leaks="$(jq -r '
 for s in "$LA" "outsourcerer-v185-redo--269…" "total-recall-85" "osrc-orch2" "or yolo 79b27c9782a0"; do
   jq -en --arg s "$s" "$(sed -n '/^_OSRC_HUB_IDLIKE_JQ=/,/;.$/p' "$S/lib/hub-lanename.sh" | sed "1s/^_OSRC_HUB_IDLIKE_JQ='//; \$s/'\$//")"' $s | idlike' >/dev/null 2>&1 && ok "idlike catches '$s'" || bad "idlike missed '$s'"
 done
-for s in "Video" "V185 redo" "Total Recall Core" "F-TEST brief in total-recall" "10x-animation" "FABLE-BRIEF-2026-11-15 video proposal" "Outsourcerer 0.16.2"; do
+for s in "Video" "V185 redo" "Widget Core" "F-TEST brief in total-recall" "10x-animation" "FABLE-BRIEF-2026-11-15 video proposal" "Outsourcerer 0.16.2"; do
   jq -en --arg s "$s" "$(sed -n '/^_OSRC_HUB_IDLIKE_JQ=/,/;.$/p' "$S/lib/hub-lanename.sh" | sed "1s/^_OSRC_HUB_IDLIKE_JQ='//; \$s/'\$//")"' $s | idlike' >/dev/null 2>&1 && bad "idlike flags a real name '$s'" || ok "idlike leaves '$s' alone"
 done
 
 echo "=== 7. History: lanes + releases + PRs + issues, cached, read-only ==="
 H="$(jq -c --arg s "$SC" '.projects[] | select(.id == $s) | .history' <<<"$X")"
-jq -e '.repo == "alexgreensh/total-recall-core" and .github == "ok"' >/dev/null <<<"$H" && ok "history repo from the lanes' git remote, GitHub reachable" || bad "history head: $(jq -c '{repo,github}' <<<"$H")"
-jq -e '[.items[] | select(.kind == "release" and .title == "Total Recall 1.9.85" and (.url | startswith("https://github.com/alexgreensh/total-recall-core/releases/tag/")))] | length == 1' >/dev/null <<<"$H" && ok "release listed with its link" || bad "release: $(jq -c '[.items[]|select(.kind=="release")]' <<<"$H")"
+jq -e '.repo == "acme/widget-core" and .github == "ok"' >/dev/null <<<"$H" && ok "history repo from the lanes' git remote, GitHub reachable" || bad "history head: $(jq -c '{repo,github}' <<<"$H")"
+jq -e '[.items[] | select(.kind == "release" and .title == "Total Recall 1.9.85" and (.url | startswith("https://github.com/acme/widget-core/releases/tag/")))] | length == 1' >/dev/null <<<"$H" && ok "release listed with its link" || bad "release: $(jq -c '[.items[]|select(.kind=="release")]' <<<"$H")"
 jq -e '[.items[] | select(.kind == "pr")] | map("\(.number):\(.outcome)") | sort == ["70:closed","71:merged"]' >/dev/null <<<"$H" && ok "PR #71 merged, PR #70 closed unmerged" || bad "prs: $(jq -c '[.items[]|select(.kind=="pr")]' <<<"$H")"
 jq -e '[.items[] | select(.kind == "issue" and .number == 62)] | length == 1' >/dev/null <<<"$H" && ok "closed issue #62 listed" || bad "issues: $(jq -c '[.items[]|select(.kind=="issue")]' <<<"$H")"
 jq -e '[.items[] | select(.kind == "lane")] | map("\(.title)=\(.outcome)") | sort == ["F-TEST brief in total-recall=running","V185 F4a=finished"]' >/dev/null <<<"$H" && ok "every lane with outcome: live Claude lane running, finished job green" || bad "lanes: $(jq -c '[.items[]|select(.kind=="lane")|{title,outcome}]' <<<"$H")"
@@ -182,9 +182,9 @@ if [ -n "$NODE" ]; then
   NJ="$("$NODE" -e '
     global.window = {}; require(process.argv[1]); const C = window.OSRC_HUB_CLEAN, now = Date.UTC(2026, 10, 16, 10, 0) ;
     const a = C.limit({ renews: "in 92h 32m" }, now), b = C.limit({ renews: "x", renews_at: now / 1000 + 4 * 86400 }, now);
-    const p = C.project({ name: "Total Recall Core · total-recall-85", lanes: [{ short: "outsourcerer-video--1285105…", model: "glm-5.2" }, { short: "Video" }] });
+    const p = C.project({ name: "Widget Core · total-recall-85", lanes: [{ short: "outsourcerer-video--1285105…", model: "glm-5.2" }, { short: "Video" }] });
     console.log(JSON.stringify({ a: a.renews === undefined, b: /^in 4 days · [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2}$/.test(b.renews), n: p.name, l0: p.lanes[0].short, l1: p.lanes[1].short }));' "$HJ" 2>&1)"
-  [ "$NJ" = '{"a":true,"b":true,"n":"Total Recall Core","l0":"Lane · glm-5.2","l1":"Video"}' ] && ok "page cleaners: drop 'Nh Nm', rebuild from renews_at, strip slug/id names" || bad "page cleaners: $NJ"
+  [ "$NJ" = '{"a":true,"b":true,"n":"Widget Core","l0":"Lane · glm-5.2","l1":"Video"}' ] && ok "page cleaners: drop 'Nh Nm', rebuild from renews_at, strip slug/id names" || bad "page cleaners: $NJ"
 else echo "SKIP: node not installed (page cleaner unit)"; fi
 [ "$(wc -l < "$PG" | tr -d ' ')" -le 1000 ] && ok "hub.html stays within 1,000 lines" || bad "hub.html over 1,000 lines"
 

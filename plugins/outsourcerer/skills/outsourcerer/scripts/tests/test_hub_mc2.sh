@@ -131,7 +131,7 @@ ex() { bash "$ROOT/outsourcerer.sh" hub export "$@" 2>/dev/null; }
 pname() { printf '%s' "$1" | jq -r --arg id "$2" '.projects[] | select(.id == $id) | .name'; }
 shown() { printf '%s' "$1" | jq -e --arg id "$2" 'any(.projects[]; .id == $id)' >/dev/null; }
 old() { touch -t "$(date -r $(( $(date +%s) - $1 * 60 )) '+%Y%m%d%H%M.%S' 2>/dev/null || date -d "@$(( $(date +%s) - $1 * 60 ))" '+%Y%m%d%H%M.%S')" "$2"; }
-[ "$(_osrc_hub_humanize alexgreensh/total-recall-core)" = 'Total Recall Core' ] || fail 'humanize owner/repo'
+[ "$(_osrc_hub_humanize acme/widget-core)" = 'Widget Core' ] || fail 'humanize owner/repo'
 [ "$(_osrc_hub_humanize outsourcerer.git)" = 'Outsourcerer' ] || fail 'humanize plain repo'
 [ "$(_osrc_hub_humanize git@x:me/my_tool)" = 'My Tool' ] || fail "humanize underscores: $(_osrc_hub_humanize git@x:me/my_tool)"
 # Three working sessions in one repo, told apart by what each is doing, never by an id.

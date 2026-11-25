@@ -81,7 +81,7 @@ mc3_seed() {
   touch -t "$(date -r $(( $(date +%s) - 10800 )) +%Y%m%d%H%M 2>/dev/null || date -d "@$(( $(date +%s) - 10800 ))" +%Y%m%d%H%M)" \
     "$HOME/.claude/projects/$(printf '%s' "$notes" | tr -c 'A-Za-z0-9' '-')/$MC3_SID_E.jsonl"
   # F: a cloud session whose only title is an agent-name: "[cloud] owner/repo <id>" must read as the repo.
-  _mc3_transcript "$MC3_SID_F" agent "[cloud] alexgreensh/total-recall-core 0163xupZjM" "$web"; _mc3_peer "$MC3_SID_F" "$web" busy
+  _mc3_transcript "$MC3_SID_F" agent "[cloud] acme/widget-core 0163xupZjM" "$web"; _mc3_peer "$MC3_SID_F" "$web" busy
   # A is an orchestrator with a live peer registration too: it must not repeat under "Also running".
   _mc3_peer "$MC3_SID_A" "$tr" busy
   # Limits: 5h window at 30% resetting in ~3h, weekly at 55% resetting in ~92h.

@@ -111,7 +111,7 @@ _osrc_hub_lane_name_cache_get() { # <id> -> prints name, rc 0 on hit
   [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] || return 1
   imt="$(_osrc_hub_mt "$OSRC_JOBS/$id/meta.json" "$OSRC_JOBS/$id/task_ref" "$OSRC_HOME/remote/$id.json")"
   [ "$imt" -le "$cmt" ] 2>/dev/null || return 1
-  local val; IFS= read -r val < "$cf" 2>/dev/null || true
+  local val; IFS= read -r val 2>/dev/null < "$cf" || true
   [ -n "$val" ] || return 1
   if [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -d "$_OSRC_HUB_MEMO/lname" ]; then
     printf '%s' "$val" > "$_OSRC_HUB_MEMO/lname/$id"
@@ -151,8 +151,8 @@ _osrc_hub_ended_lane_fast() { # <id> <rmap>
           "$OSRC_HOME/proof/$id/proof.json" "$OSRC_HOME/proof/$id/rounds.json" "$OSRC_HOME/done/$id.json" \
           "$OSRC_HOME/review/items/$id"-*.json)"
         if [ "$imt" -le "$cmt" ] 2>/dev/null; then
-          IFS= read -r _OSRC_ENDED_LANE < "$lf" 2>/dev/null || _OSRC_ENDED_LANE=""
-          IFS= read -r _OSRC_ENDED_ACT < "$af" 2>/dev/null || _OSRC_ENDED_ACT=0
+          IFS= read -r _OSRC_ENDED_LANE 2>/dev/null < "$lf" || _OSRC_ENDED_LANE=""
+          IFS= read -r _OSRC_ENDED_ACT 2>/dev/null < "$af" || _OSRC_ENDED_ACT=0
           [ -n "$_OSRC_ENDED_LANE" ] && return 0
         fi
       fi
@@ -200,7 +200,7 @@ _osrc_hub_history_cands_fast() {
     [ -f "$jd/meta.json" ] || continue
     mfiles+=("$jd/meta.json")
     id="${jd%/}"; id="${id##*/}"
-    st=""; [ -f "$jd/status" ] && IFS= read -r st < "$jd/status" 2>/dev/null || true
+    st=""; [ -f "$jd/status" ] && IFS= read -r st 2>/dev/null < "$jd/status" || true
     exmt=""; [ -f "$jd/exit" ] && exmt="$(_osrc_hub_mt "$jd/exit")"
     st_lines="${st_lines}${id}	${st}	${exmt}
 "
@@ -279,7 +279,7 @@ _osrc_hub_scr_deps() { # <id> -> the existing paths a lane's screen reading depe
   # Watched hand-in DONE files: a new file bumps its parent dir's mtime.
   for w in "$OSRC_HOME"/watch/*.path; do
     [ -f "$w" ] || continue
-    deps+=("$w"); IFS= read -r p < "$w" 2>/dev/null || p=""
+    deps+=("$w"); IFS= read -r p 2>/dev/null < "$w" || p=""
     [ -n "$p" ] && deps+=("$p" "$p/out")
   done
   for p in "${deps[@]}"; do [ -e "$p" ] && printf '%s\n' "$p"; done
@@ -299,7 +299,7 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
     && [ -f "$pf" ] && [ ! -L "$pf" ] || return 1
   row="$(_osrc_hub_tmux_row "$id" 2>/dev/null)" || return 1
   act="${row##* }"; case "$act" in ''|*[!0-9]*) return 1 ;; esac
-  read -r act0 dep ep < "$pf" 2>/dev/null || return 1
+  read -r act0 dep ep 2>/dev/null < "$pf" || return 1
   case "$ep" in ''|*[!0-9]*) return 1 ;; esac
   now="${OSRC_NOW:-$(date +%s)}"
   floor="${OSRC_HUB_SCR_FLOOR:-4}"; ttl="${OSRC_HUB_SCR_TTL:-60}"
@@ -441,10 +441,10 @@ EOF
     [ -d "$jd" ] || continue
     id="${jd%/}"; id="${id##*/}"
     case "$_nl$claimed" in *"$_nl$id$_nl"*) continue ;; esac
-    st=""; [ -f "$jd/status" ] && IFS= read -r st < "$jd/status" 2>/dev/null || true
+    st=""; [ -f "$jd/status" ] && IFS= read -r st 2>/dev/null < "$jd/status" || true
     case "$st" in done|'done?'|failed|blocked|timeout|wedged|canceled|permission-blocked|interrupted) continue ;; esac
     if [ -s "$jd/exit" ]; then
-      IFS= read -r rc < "$jd/exit" 2>/dev/null || rc=""
+      IFS= read -r rc 2>/dev/null < "$jd/exit" || rc=""
       case "$rc" in ''|*[!0-9]*) ;; *) continue ;; esac
     fi
     st="$(_osrc_hub_job_state_fast "$id")"
@@ -467,7 +467,7 @@ _osrc_hub_ended_pid_live() { # <id> -> rc0 when a recorded job pid is still runn
   local jd="$OSRC_JOBS/$1" p v
   [ -d "$jd" ] || return 1
   for p in pid supervisor_pid; do
-    v=""; [ -f "$jd/$p" ] && IFS= read -r v < "$jd/$p" 2>/dev/null
+    v=""; [ -f "$jd/$p" ] && IFS= read -r v 2>/dev/null < "$jd/$p"
     case "$v" in ''|*[!0-9]*) ;; *) kill -0 "$v" 2>/dev/null && return 0 ;; esac
   done
   return 1
@@ -511,8 +511,8 @@ _osrc_hub_ended_lanes_fast() {
       && [ ! -L "$d/$id.lane" ] && [ ! -L "$d/$id.act" ] && [ ! -L "$d/$id.regts" ] || continue
     case "$_nl$tmux_tab$_nl" in *"$_nl$id "*) continue ;; esac
     _osrc_hub_ended_pid_live "$id" && continue
-    rts=""; [ -f "$_OSRC_HUB_MEMO/reg/$id.ts" ] && IFS= read -r rts < "$_OSRC_HUB_MEMO/reg/$id.ts" 2>/dev/null
-    local stored=""; IFS= read -r stored < "$d/$id.regts" 2>/dev/null || stored=""
+    rts=""; [ -f "$_OSRC_HUB_MEMO/reg/$id.ts" ] && IFS= read -r rts 2>/dev/null < "$_OSRC_HUB_MEMO/reg/$id.ts"
+    local stored=""; IFS= read -r stored 2>/dev/null < "$d/$id.regts" || stored=""
     [ "$rts" = "$stored" ] || continue
     cand="$cand $id"
   done
@@ -557,8 +557,8 @@ EOF
     lane=""; act=0
     case " $valid " in
       *" $id "*)
-        IFS= read -r lane < "$d/$id.lane" 2>/dev/null || lane=""
-        IFS= read -r act < "$d/$id.act" 2>/dev/null || act=0 ;;
+        IFS= read -r lane 2>/dev/null < "$d/$id.lane" || lane=""
+        IFS= read -r act 2>/dev/null < "$d/$id.act" || act=0 ;;
     esac
     if [ -z "$lane" ]; then
       lane="$(_osrc_hub_ended_lane "$id" "$rmap")"

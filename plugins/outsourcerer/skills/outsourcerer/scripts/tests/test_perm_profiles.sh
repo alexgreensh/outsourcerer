@@ -364,10 +364,13 @@ exit 0
 EOF
 chmod +x "$TMP/tmuxbin/tmux"
 : > "$TMP/tmux.log"
+# This probe is about the loader, not free space: lift the disk floor in the test's own home so a full
+# host disk cannot turn it into a SKIP (floors come only from the settings file, never an export).
+mkdir -p "$OSRC_HOME/disk-policy" && echo OSRC_DISK_MIN_GB=0 > "$OSRC_HOME/disk-policy/settings"
 ( unset OSRC_SOURCED; cd "$WD" && \
   env -u OSRC_SOURCED OSRC_TMUX_LOG="$TMP/tmux.log" PATH="$TMP/tmuxbin:$PATH" \
     OSRC_HOME="$OSRC_HOME" OSRC_SESSION_NAME="l5-symlink-probe" \
-    "$TMP/linkdir/outsourcerer.sh" --provider cc session start --perm safe >/dev/null 2>"$TMP/symlink.err" )
+    "$TMP/linkdir/outsourcerer.sh" --provider cc session start --spend-ok --perm safe >/dev/null 2>"$TMP/symlink.err" )
 _rc=$?
 if [ -s "$TMP/tmux.log" ]; then
   ok "exec via symlink reached tmux (perm.sh loaded; session start --perm safe built a launch)"
@@ -380,7 +383,7 @@ else
   if grep -q "perm.sh" "$TMP/symlink.err"; then
     no "exec via symlink died on missing perm.sh (LOADER regression): $(cat "$TMP/symlink.err")"
   else
-    echo "SKIP: symlink exec did not reach tmux for a non-perm reason (rc=$_rc): $(head -3 "$TMP/symlink.err")"
+    echo "SKIP: symlink exec did not reach tmux for a non-perm reason (rc=$_rc): $(grep -E '^ERROR' "$TMP/symlink.err" | head -1)"
   fi
 fi
 

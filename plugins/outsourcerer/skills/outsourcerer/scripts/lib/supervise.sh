@@ -230,7 +230,7 @@ _sv_fleet_state() { # <endpoint> -> state<US>evidence
 _sv_state_read() { # <id> -> sets SVS_* globals
   SVS_HASH=-; SVS_CHANGED=0; SVS_CK=-; SVS_CH=-; SVS_CS=0; SVS_LK=-; SVS_LT=0
   local f; f="$(_sv_lanes)/state/$1"
-  [ -f "$f" ] && read -r SVS_HASH SVS_CHANGED SVS_CK SVS_CH SVS_CS SVS_LK SVS_LT < "$f" 2>/dev/null
+  [ -f "$f" ] && read -r SVS_HASH SVS_CHANGED SVS_CK SVS_CH SVS_CS SVS_LK SVS_LT 2>/dev/null < "$f"
   SVS_CHANGED="$(_sv_num "$SVS_CHANGED" 0)"; SVS_CS="$(_sv_num "$SVS_CS" 0)"; SVS_LT="$(_sv_num "$SVS_LT" 0)"
   return 0
 }

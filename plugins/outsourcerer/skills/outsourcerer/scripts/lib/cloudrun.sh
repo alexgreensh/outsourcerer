@@ -542,8 +542,10 @@ _cloudrun_done_contract() {
     printf 'd="%s/%s.verify.git"\nrm -rf "$d" 2>/dev/null\n' "$dir" "$id"
     # READY may sit on the session's own claude/<id>-* branch: use the branch the lane poll follows
     printf 'b="$(jq -r '"'"'.poll_branch // empty'"'"' %q 2>/dev/null)"; [ -n "$b" ] || b=%q\n' "$OSRC_HOME/remote/$id.json" "$branch"
-    printf 'git clone -q --depth 1 --branch "$b" "%s" "$d" >/dev/null 2>&1 || exit 1\n' "$url"
-    printf 'git -C "$d" cat-file -e "HEAD:%s.READY" 2>/dev/null\n' "$id"
+    # Only the file list is needed: no blobs, no checkout (about 120 KB instead of the ~70 MB repo),
+    # and the scratch clone goes as soon as the answer is known.
+    printf 'git clone -q --depth 1 --filter=blob:none --no-checkout --branch "$b" "%s" "$d" >/dev/null 2>&1 || { rm -rf "$d"; exit 1; }\n' "$url"
+    printf 'git -C "$d" ls-tree --name-only HEAD -- %q 2>/dev/null | grep -qxF -- %q; r=$?\nrm -rf "$d" 2>/dev/null\nexit $r\n' "$id.READY" "$id.READY"
   } > "$script" 2>/dev/null && chmod 700 "$script" 2>/dev/null
   [ -x "$script" ] || { printf '>>> [cloud] done contract: could not write %s — skipped\n' "$script" >&2; return 0; }
   if osrc_done_set "$id" "check:bash $script" "$root" 2>/dev/null; then

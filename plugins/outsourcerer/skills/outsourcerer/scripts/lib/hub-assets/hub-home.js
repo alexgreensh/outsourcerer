@@ -72,7 +72,7 @@
     const s = h >= 48 ? Math.floor(h / 24) + ' days' : h + ' h';
     return { hours: h, text: 'Not re-confirmed for ' + s + ', may be out of date' };
   }
-  // A project name keeps its human parts ("Total Recall Core · total-recall-85" -> "Total Recall Core").
+  // A project name keeps its human parts ("Widget Core · total-recall-85" -> "Widget Core").
   // Prompt-text titles (starting with '[', over 40 chars, or containing 'READ BEFORE') fall back to the folder name in sentence case.
   function cleanName(s, fallback) {
     if (typeof s !== 'string') return fallback;

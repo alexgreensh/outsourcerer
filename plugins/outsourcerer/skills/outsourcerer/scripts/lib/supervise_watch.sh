@@ -29,7 +29,7 @@ _sv_fp() { # <path>
   [ -f "$1" ] || return 0
   local m s c
   m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)"
-  read -r c s _ < <(cksum < "$1" 2>/dev/null)
+  read -r c s _ < <(cksum 2>/dev/null < "$1")
   printf '%s:%s:%s:%s' "$(basename "$1")" "${m:-0}" "${s:-0}" "${c:-0}"
 }
 

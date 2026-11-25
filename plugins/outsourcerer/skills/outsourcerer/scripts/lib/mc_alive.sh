@@ -205,7 +205,7 @@ osrc_mc_alerts() {
   for f in "$OSRC_HOME/owners/$slug"/*; do
     [ -f "$f" ] || continue; id="${f##*/}"
     [ -f "$OSRC_HOME/lanes/needs/$id" ] || continue
-    IFS="$(printf '\t')" read -r k since txt < "$OSRC_HOME/lanes/needs/$id" 2>/dev/null
+    IFS="$(printf '\t')" read -r k since txt 2>/dev/null < "$OSRC_HOME/lanes/needs/$id"
     a="$(jq -c --arg k "${k:-stalled}" --arg l "$id" --argjson s "$(_sv_num "$since" "$now")" --arg t "$txt" '. + [{kind:$k, lane:$l, since:$s, text:$t}]' <<<"$a")"
   done
   un=$(( $(_sv_num "${OSRC_UNREVIEWED_MIN:-}" 15) * 60 ))

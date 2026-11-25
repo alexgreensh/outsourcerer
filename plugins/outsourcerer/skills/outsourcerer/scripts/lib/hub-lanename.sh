@@ -3,7 +3,7 @@
 # stored display string for a time that moves (renews). Sourced by outsourcerer.sh (lib loader).
 #
 # Real-machine evidence (0.16.2): lane rows read "outsourcerer-video--1285105…"
-# (the tmux session name), a project card read "Total Recall Core · total-recall-85" (a /rename slug), and
+# (the tmux session name), a project card read "Widget Core · total-recall-85" (a /rename slug), and
 # the plans rail read "Renews in 92h 32m" from a limits cache an older build wrote.
 
 # idlike: true for text that reads like an identifier rather than a name. Shared by the lane namer, the

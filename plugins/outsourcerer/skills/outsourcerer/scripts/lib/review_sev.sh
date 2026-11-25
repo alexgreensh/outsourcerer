@@ -19,7 +19,7 @@
 _osrc_sev_verdict() {
   local l="" cr a b c x n
   cr="$(printf '\r')"
-  IFS= read -r l < "$1" 2>/dev/null || [ -n "$l" ] || return 1
+  IFS= read -r l 2>/dev/null < "$1" || [ -n "$l" ] || return 1
   l="${l%"$cr"}"; while [ "${l% }" != "$l" ]; do l="${l% }"; done
   case "$l" in
     "VERDICT: MERGE") printf 'MERGE 0 0 0 MERGE'; return 0 ;;

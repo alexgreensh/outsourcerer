@@ -116,7 +116,7 @@ _devin_catalog_free_ids() {
   cf="$OSRC_HOME/.devin-free-ids"
   mt="$(stat -f %m "$rawf" 2>/dev/null || stat -c %Y "$rawf" 2>/dev/null || echo 0)"
   if [ -f "$cf" ]; then
-    IFS='|' read -r cmt cids < "$cf" 2>/dev/null
+    IFS='|' read -r cmt cids 2>/dev/null < "$cf"
     if [ "$cmt" = "$mt" ]; then
       _OSRC_DV_FREE_IDS_DONE=1; _OSRC_DV_FREE_IDS_MEMO="$cids"
       printf '%s' "$cids"; return 0

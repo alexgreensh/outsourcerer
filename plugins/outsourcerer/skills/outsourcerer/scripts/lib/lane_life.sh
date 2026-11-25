@@ -96,7 +96,7 @@ _sv_gone_handin() { # <id> <last-registry-record> -> reason on stdout
 # newer. Written by supervise and the beacon on every read of the pane.
 _sv_stretch_note() { # <id> <state> <now>
   local f s=0 q=0 p=quiet; f="$(_sv_lanes)/state/$1.stretch"
-  [ -f "$f" ] && read -r s q p < "$f" 2>/dev/null
+  [ -f "$f" ] && read -r s q p 2>/dev/null < "$f"
   s="$(_sv_num "$s" 0)"; q="$(_sv_num "$q" 0)"
   case "$2" in
     working|approval) [ "$p" = working ] || s="$q"; p=working ;;
