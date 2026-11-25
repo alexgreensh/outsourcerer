@@ -40,6 +40,7 @@ _osrc_dv_launch_id() {
   [ -n "$_OSRC_DV_ID" ] && return 0
   if [ "${_OSRC_PIN_DISP:-}" = devin ]; then _OSRC_DV_ID="${1:-}"
   else _OSRC_DV_ID="$(_devin_resolve_model "${1:-}")"; fi
+  _exclude_refuse_resolved "${1:-}" "$_OSRC_DV_ID"   # an excluded id is refused before any spend prompt
   _osrc_spend_gate dv "$_OSRC_DV_ID" devin "Devin launch outside the routed gate"
 }
 

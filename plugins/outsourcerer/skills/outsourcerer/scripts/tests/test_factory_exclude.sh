@@ -428,7 +428,7 @@ second_opinion "is the sky blue"'
 (
   export OSRC_HOME; OSRC_HOME="$(xh f11)"
   r="$(OSRC_EXCLUDE_MODELS=glm lib '_devin_probe_pick glm-5-2; echo; OSRC_DEVIN_PROBE_MODEL_ALT=swe-2 _devin_plan_probe_model kimi-k3; echo; _devin_probe_pick glm-5-2 >/dev/null; echo rc=$?' 2>/dev/null | tr '\n' ' ')"
-  [ "$r" = "swe-2 swe-2 rc=0 " ] || { echo "  pick: '$r'"; exit 1; }
+  [ "$r" = "swe-2-high swe-2-high rc=0 " ] || { echo "  pick: '$r'"; exit 1; }
   r="$(OSRC_EXCLUDE_MODELS='glm swe kimi' lib '_devin_probe_pick glm-5-2; echo "rc=$?"; _lane_free_probe dv' 2>/dev/null | tr '\n' ' ')"
   [ "$r" = "rc=1 unreachable" ] || { echo "  all excluded: '$r'"; exit 1; }
 ) && ok "F11: Devin probes pick the next allowed model and never request an excluded one" || bad "F11 devin probes"

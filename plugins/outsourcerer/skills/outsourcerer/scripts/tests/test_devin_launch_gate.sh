@@ -111,5 +111,18 @@ pick="$( HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" \
 [ "$pick" = "swe-2-high" ] && ok "probe: fallback after glm-5-2 is the exact Free swe-2-high" \
   || bad "probe: fallback pick '$pick' (want swe-2-high)"
 
+# --- the Free proof compares exact ids: a vendor/ prefix is not stripped into a Free id -------
+bill() { PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 OSRC_CATALOG_TTL=999999 \
+    DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" SRC="$SRC" M="$1" OSRC_FREE_CATALOG_CHECK="$2" \
+    bash -c '. "$SRC" >/dev/null 2>&1; osrc_lane_billing dv "$M" devin' 2>/dev/null; }
+[ "$(bill vendor/swe-2-high 0)" = metered ] && ok "exact: offline vendor/swe-2-high is not the Free swe-2-high" \
+  || bad "exact: offline vendor/swe-2-high billed '$(bill vendor/swe-2-high 0)'"
+[ "$(bill swe-2-high 0)" = subscription ] && ok "exact: offline swe-2-high still Free" \
+  || bad "exact: offline swe-2-high billed '$(bill swe-2-high 0)'"
+[ "$(bill vendor/swe-1-7-high 1)" = metered ] && ok "exact: catalog vendor/swe-1-7-high is not the Free swe-1-7-high" \
+  || bad "exact: catalog vendor/swe-1-7-high billed '$(bill vendor/swe-1-7-high 1)'"
+[ "$(bill SWE-1.7-HIGH 1)" = subscription ] && ok "exact: case/dot folding still matches the catalog id" \
+  || bad "exact: SWE-1.7-HIGH billed '$(bill SWE-1.7-HIGH 1)'"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

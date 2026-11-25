@@ -76,14 +76,15 @@ _osrc_dir_key_material() {
 # answers a different question (does it draw the paid ACU balance, not "is it free to run").
 _osrc_devin_free_for_spend() {
   local m="${1:-}" t ids
-  t="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | sed -E 's#^[^/]*/##; s/\./-/g')"
+  # Exact id only (case and dots folded, like the resolver's keyify): stripping a vendor/
+  # prefix proved `x/swe-2-high` Free while the launcher passed `x/swe-2-high` verbatim.
+  t="$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]' | sed -E 's/\./-/g')"
+  [ -n "$t" ] || return 1
   if [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ]; then
     if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
       # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
       # Normalize the catalog side identically so a dotted/uppercase uid still matches.
-      # Normalize PER TOKEN: stripping ^[^/]*/ across the whole space-joined line would
-      # eat every id before the first provider prefix (Neon review, verified).
-      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | tr ' ' '\n' | sed -E 's#^[^/]*/##; s/\./-/g' | tr '\n' ' ')"
+      ids="$(printf '%s' "$ids" | tr '[:upper:]' '[:lower:]' | sed -E 's/\./-/g')"
       case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
     fi
   fi
