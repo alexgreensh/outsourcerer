@@ -24,6 +24,8 @@ bad() { echo "FAIL: $1"; fail=$((fail + 1)); }
 OSRC_SOURCED=1 . "$SRC" >/dev/null 2>&1
 . "$FLOW"
 export OSRC_HEARTBEAT_DISABLED=1
+# Load and disk vary per machine: the scheduler gate is tested on its own below, off elsewhere.
+export OSRC_FACTORY_GATE=off
 
 # Review content precedes the engine's completion protocol. Fenced examples are never verdicts.
 mkdir -p "$OSRC_JOBS/verdict-regression"
@@ -859,6 +861,9 @@ mkdir -p "$OSRC_JOBS/kbjob"; echo running > "$OSRC_JOBS/kbjob/status"; printf 'k
 ( OSRC_FACTORY_LAUNCH_GRACE=0 _ff_reconcile keepbase ) >/dev/null 2>&1
 _task_get keepbase t1 | jq -e '.job=="kbjob" and .base_sha=="cafe" and .branch=="b1" and .worktree=="/w"' >/dev/null \
   && ok 'S18: early adoption keeps base, branch and worktree' || bad "S18: adoption result $(_task_get keepbase t1 | jq -c '{job,base_sha,branch,worktree}')"
+
+# Lane osrc-l5 checks live in their own part file (size ratchet); they share these fixtures.
+. "$HERE/lib_factory_flow_l5.sh"
 
 echo "---"
 echo "test_factory_flow: $pass passed, $fail failed"

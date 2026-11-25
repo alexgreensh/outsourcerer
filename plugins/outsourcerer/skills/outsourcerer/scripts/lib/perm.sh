@@ -582,6 +582,10 @@ _session_relaunch_cc() {
   else printf ' --continue'; fi
   printf '%s' "$suffix"
   if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
+  # Lean like session start (lib/leanlaunch.sh): the declared copy if this session has one, else no servers.
+  [ "${OSRC_SESSION_MCP:-lean}" = full ] && [ "${OSRC_LEAN_LAUNCH:-0}" != 1 ] && return 0
+  local mc; mc="$(_session_mcp_copy)"; [ -f "$mc" ] || mc='{"mcpServers":{}}'
+  printf ' --strict-mcp-config --mcp-config %q' "$mc"
 }
 
 # Relaunch command for codex/cx. --perm safe applies the SAME substitution as

@@ -9,6 +9,9 @@
 #   Wakes: the task store already sends a wake whenever a task turns held or failed, so this file
 #   only adds "plan finished" and "auto-land failed" wakes (never a second one for held/failed).
 #   Track C (factory-land.sh):  _factory_done_check cmd_land
+#   lib/factory-parallel.sh:     _ff_next_default _ff_apply_defaults _ff_dispatch _ff_review_failed
+#                               (moved here for the size ratchet; they add file-ownership ordering,
+#                               the optional resource gate, risky-hold and review-cap guards)
 #   Track A (optional):         _model_excluded <model>  (rc0 = excluded)
 #   Engine:                     die have cmd_wait _reconcile_status _wake_append _mkdir_claim
 #                               _pid_start_identity
@@ -498,84 +501,6 @@ _factory_review_verdict() {
   esac
 }
 
-# _ff_review_failed <plan> <reviewer-tid> <tasks-json>: the reviewer said FAIL. Send the build it
-# reviewed back for a redo (with the reviewer's reason in its brief) and re-run the review after it,
-# while the build still has retries left. Otherwise hold the reviewer with the exact commands.
-# $1..$3 plus optional 4th arg "captain" = the captain asked for one more round (ignores the budget).
-_ff_review_failed() (
-  local plan="$1" vt="$2" tasks="$3" who="${4:-}" v r target n retries rstate landed br head out note vnote answer cmds pd
-  _plan_lock "$plan" || return 1
-  trap '_plan_unlock "$plan"' EXIT
-  _ff_pair_recover "$plan" || return 1
-  v="$(_task_get "$plan" "$vt")" || return 1
-  local expected="${5:-$v}" guard nv nt
-  guard="$(_ff_guard "$expected")"
-  printf '%s' "$v" | _ff_jq -e "$guard" >/dev/null || return 1
-  if [ "$who" = captain ]; then
-    [ "$(printf '%s' "$v" | _ff_jq -r .state)" = todo ] || return 1
-  else
-    [ "$(printf '%s' "$v" | _ff_jq -r .state)" = verifying ] || return 1
-  fi
-  pd="$(_plan_dir "$plan")"
-  # This pass's verdict line; the reason stored at the last hold only when the captain asks for a redo.
-  if [ "$who" = captain ]; then r="$(printf '%s' "$v" | _ff_jq -r '.verdict_failed.reason // ""')"
-  else r="${_FF_VERDICT_LINE#VERDICT: FAIL}"; r="${r# - }"; fi
-  [ -n "$r" ] || r="no reason given"
-  answer="$(printf '%s' "$v" | _ff_jq -r '.hold.answer // ""')"
-  # The build under review: the reviewer's direct dependencies that are build (ship) tasks.
-  target="$(printf '%s' "$tasks" | _ff_jq -r --argjson d "$(printf '%s' "$v" | _ff_jq -c '.deps // []')" \
-    '[.[] | select((.id as $i | $d | index($i)) != null) | select((.shape // "") == "ship") | .id] | if length == 1 then .[0] else "" end')"
-  out="$OSRC_JOBS/$(printf '%s' "$v" | _ff_jq -r '.job // ""')/last.txt"
-  [ -f "$out" ] || out="$pd/tasks/$vt/report.md"
-  cmds="Accept the build anyway: $(_ff_cmd "$plan" task done "$vt" --force). One more redo: $(_ff_cmd "$plan" task release "$vt" --answer '"<what to fix>"'). Stop here: $(_ff_cmd "$plan" task cancel "$vt")"
-  if [ -z "$target" ]; then
-    _task_update "$plan" "$vt" '.verdict_failed = {target: "", reason: $r} | .result = ("reviewer said FAIL: " + $r)' --arg r "$r" >/dev/null 2>&1
-    _ff_hold "$plan" "$vt" "the reviewer said FAIL ($r) and there is no single build task to redo. Read the review: $out. $cmds" || return 1
-    return 0
-  fi
-  local t; t="$(_task_get "$plan" "$target")" || return 1
-  rstate="$(printf '%s' "$t" | _ff_jq -r '.state')"; landed="$(printf '%s' "$t" | _ff_jq -r '.landed // false')"
-  n="$(_ff_num "$(_ff_attempts "$t")" 0)"; retries="$(_ff_num "$(printf '%s' "$t" | _ff_jq -r '.retries // 0')" 0)"
-  if [ "$rstate" != done ] || [ "$landed" = true ] || { [ "$who" != captain ] && [ "$n" -gt "$retries" ]; }; then
-    local why="its redo budget is used up ($n attempt(s))"
-    [ "$rstate" != done ] && why="$target is $rstate, not done"
-    [ "$landed" = true ] && why="$target has already landed"
-    _task_update "$plan" "$vt" '.verdict_failed = {target: $t, reason: $r} | .result = ("reviewer said FAIL: " + $r)' \
-      --arg t "$target" --arg r "$r" >/dev/null 2>&1
-    _ff_hold "$plan" "$vt" "the reviewer said FAIL on $target ($r); $why. Read the review: $out. $cmds" || return 1
-    return 0
-  fi
-  br="$(printf '%s' "$t" | _ff_jq -r '.branch // ""')"; head="$(printf '%s' "$t" | _ff_jq -r '.head_sha // ""')"
-  note="A reviewer ($vt) did not pass your previous attempt: $r"
-  [ -n "$answer" ] && note="$note
-The captain adds: $answer"
-  note="$note
-Full review: $out"
-  [ -n "$br" ] && note="$note
-Your previous attempt is on branch $br${head:+ at commit $head}; you may start from it (for example: git merge $br) and fix what the reviewer found."
-  # The build goes back in line with the review in its prompt (replaced, never piled up); its retries
-  # budget counts this redo. The captain's extra round raises the budget by one so the count stays honest.
-  nt="$(printf '%s' "$t" | _ff_jq -c \
-    'if .state != "done" or (.landed // false) then error("moved") else . end
-     | .prompt_orig = (.prompt_orig // .prompt)
-     | .prompt = (.prompt_orig + "\n\n## Review of your previous attempt\n\n" + $note)
-     | .state = "todo" | .job = "" | .worktree = "" | .branch = "" | .base_sha = "" | .head_sha = "" | .evidence = ""
-     | .result = "" | del(.land_error) | (if $cap == "1" then .retries = ((.retries // 0) + 1) else . end)' \
-    --arg note "$note" --arg cap "$( [ "$who" = captain ] && echo 1 || echo 0)")" || return 1
-  vnote="You reviewed an earlier attempt of $target and failed it: $r
-That build was redone. Review the new attempt from scratch, and check that this problem is fixed."
-  nv="$(printf '%s' "$v" | _ff_jq -c \
-    '.prompt_orig = (.prompt_orig // .prompt)
-     | .prompt = (.prompt_orig + "\n\n## Earlier review\n\n" + $note)
-     | .state = "todo" | .job = "" | .evidence = "" | .result = "" | del(.verdict_failed)
-     | .hold = ((.hold // {}) + {answer: ""}) | del(.verifying_at) | del(.verifying_pid, .verifying_start, .verifying_token)
-     | .attempt_base = ([(.attempts // 0), ((.jobs // []) | length)] | max)' \
-    --arg note "$vnote")" || return 1
-  _ff_pair_commit "$plan" "$t" "$nt" "$v" "$nv" || return 1
-  _ff_event "$plan" "$vt" review-failed "redo $target: $r"
-  printf '  %s: reviewer said FAIL (%s); %s goes back for a redo, then %s reviews again\n' "$vt" "$r" "$target" "$vt"
-  _FF_MOVED=1
-)
 
 # ---------------------------------------------------------------- scheduler: verify + land
 
@@ -747,31 +672,8 @@ _ff_land_stage_recover() {
 
 # ---------------------------------------------------------------- scheduler: reconcile
 
-# _ff_apply_defaults <plan>: a held decision with a default answer and a deadline that has passed is
-# released with that default, exactly as if the captain had answered it, so an unattended plan does
-# not stall overnight on a question that already had a sensible answer. Guarded per task.
-# _ff_next_default <plan> -> "<epoch> <tid>" for the held decision whose default fires soonest, or
-# nothing when no held task has a default waiting.
-_ff_next_default() {
-  _task_list "$1" | _ff_jq -r '[.[] | select(.state == "held" and ((.hold.default // "") | test("\\S"))
-      and ((.hold.until_epoch // 0) | type == "number") and (.hold.until_epoch // 0) > 0)]
-    | sort_by(.hold.until_epoch) | first // empty | "\(.hold.until_epoch | floor) \(.id)"' 2>/dev/null
-}
-
-_ff_apply_defaults() {
-  local plan="$1" tid now d
-  now="$(date +%s)"
-  for tid in $(_task_list "$plan" | _ff_jq -r --argjson now "$now" '.[]
-      | select(.state == "held" and ((.hold.default // "") | test("\\S")) and ((.hold.until_epoch // 0) | type == "number")
-               and (.hold.until_epoch // 0) > 0 and (.hold.until_epoch // 0) <= $now) | .id'); do
-    d="$(_task_get "$plan" "$tid" | _ff_jq -r '.hold.default // ""')"
-    FACTORY_EVENT_NOTE="no answer by the deadline; used the default: $d" _task_update "$plan" "$tid" \
-      'if .state != "held" or ((.hold.until_epoch // 0) > $now) or (.hold.until_epoch // 0) <= 0 or (.hold.default // "") == "" then error("moved")
-       else .state = "todo" | .hold.answer = .hold.default | .hold.defaulted = true | .hold.until_epoch = 0 end' \
-      --argjson now "$now" >/dev/null 2>&1 || continue
-    printf '  %s: nobody answered by the deadline, so it goes ahead with the default: %s\n' "$tid" "$d"
-  done
-}
+# _ff_next_default / _ff_apply_defaults moved to lib/factory-parallel.sh (size ratchet). The moved
+# versions add the .hold.risk guard: irreversible, paid or publishing decisions never auto-apply.
 
 _ff_reconcile() {   # <plan>
   local plan="$1" tasks tid t st job grace age now vstale vpid j tok guard me ident vtoken old target head reviewed receipt w br base rc
@@ -903,84 +805,6 @@ _ff_reconcile() {   # <plan>
 # ---------------------------------------------------------------- scheduler: dispatch
 
 _FF_MOVED=0
-_ff_dispatch() {   # <plan> <max-parallel>
-  local plan="$1" max="$2" tasks active tid t out rc st answer target m lf ready
-  _FF_MOVED=0
-  _plan_lock "$plan" || return 1
-  if [ -f "$(_plan_dir "$plan")/flow-expansion.json" ]; then _plan_unlock "$plan"; return 1; fi
-  _ff_pair_recover "$plan" || { _plan_unlock "$plan"; return 1; }
-  ready="$(_task_ready "$plan")"
-  _plan_unlock "$plan"
-  tasks="$(_task_list "$plan")" || return 1
-  active="$(printf '%s' "$tasks" | _ff_jq '[.[] | select(.state == "running" or .state == "verifying")] | length')"
-  for tid in $ready; do
-    _ff_out_of_time && return 0
-    t="$(_task_get "$plan" "$tid")" || continue
-    [ "$(printf '%s' "$t" | _ff_jq -r '.state')" = todo ] || continue
-    if [ "$(printf '%s' "$t" | _ff_jq -r '.hold_after_deps // false')" = "true" ]; then
-      _ff_hold "$plan" "$tid" "captain's decision: $(printf '%s' "$t" | _ff_jq -r '.title // ""')$(_ff_pick_hint "$plan" "$t" "$tasks"). Decide: $(_ff_cmd "$plan" task release "$tid" --answer '"<your decision>"')" '.state == "todo"'
-      _FF_MOVED=1
-      continue
-    fi
-    target="$(printf '%s' "$t" | _ff_jq -r '.land_target // ""')"
-    if [ -n "$target" ]; then
-      _ff_land_stage "$plan" "$tid" "$target"
-      continue
-    fi
-    answer="$(printf '%s' "$t" | _ff_jq -r '.hold.answer // ""')"
-    if [ "$(printf '%s' "$t" | _ff_jq -r '.gate // false')" = "true" ]; then
-      # A decision gate is done only with the captain's answer (`task release --answer`).
-      if [ -z "$answer" ]; then
-        _ff_hold "$plan" "$tid" "captain's decision: $(printf '%s' "$t" | _ff_jq -r '.title // ""'). Decide: $(_ff_cmd "$plan" task release "$tid" --answer '"<your decision>"')" '.state == "todo"'
-      else
-        _task_update "$plan" "$tid" 'if .state != "todo" then error("moved") else . end | .state = "done" | .result = $a' --arg a "$answer" >/dev/null 2>&1 \
-          && printf '  %s: decided by the captain: %s\n' "$tid" "$answer"
-      fi
-      _FF_MOVED=1
-      continue
-    fi
-    # A reviewer the captain released after a FAIL: the answer asks for one more redo of the build.
-    if [ -n "$answer" ] && [ -n "$(printf '%s' "$t" | _ff_jq -r '.verdict_failed.target // ""')" ]; then
-      _ff_review_failed "$plan" "$tid" "$tasks" captain && _FF_MOVED=1
-      continue
-    fi
-    [ "$active" -lt "$max" ] || continue
-    # Model: skip one the exclude list now names; the stored fallbacks keep the stage's intent.
-    m="$(_ff_next_model "$t" dispatch)"
-    if [ "$m" != "$(printf '%s' "$t" | _ff_jq -r '.model // ""')" ]; then
-      _task_update "$plan" "$tid" 'if .state != "todo" then error("moved") else . end | .model = $m' --arg m "$m" >/dev/null 2>&1 \
-        && printf '  %s: model %s is excluded now; using %s\n' "$tid" "$(printf '%s' "$t" | _ff_jq -r '.model // "(none)"')" "${m:-whatever the router picks}"
-    fi
-    if [ "$(printf '%s' "$t" | _ff_jq -r '.require_verdict // false')" = true ]; then
-      target="$(_ff_review_target "$t" "$(_task_list "$plan")")"
-      if [ -n "$target" ]; then
-        _task_update "$plan" "$tid" 'if .state != "todo" then error("moved") else . end
-          | .reviewed_head = $h | .review_target = $t' \
-          --arg h "$(_task_get "$plan" "$target" | _ff_jq -r '.head_sha // ""')" --arg t "$target" >/dev/null 2>&1 || continue
-      fi
-    fi
-    out="$( _task_dispatch "$plan" "$tid" 2>&1 )"; rc=$?
-    if [ "$rc" -eq 0 ]; then
-      active=$((active + 1))
-      printf '  %s: started job %s\n' "$tid" "$(printf '%s' "$out" | tail -1)"
-    else
-      out="$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | sed 's/^ERROR: //' | cut -c1-200)"
-      t="$(_task_get "$plan" "$tid")"
-      st="$(printf '%s' "$t" | _ff_jq -r '.state')"
-      if [ "$st" = failed ]; then
-        # A launch failure counts as a failed attempt: retried within the task's budget. The task
-        # store marks it with launch_failed:true when it can; older stores leave the reason text.
-        lf="$(printf '%s' "$t" | _ff_jq -r 'if has("launch_failed") then (.launch_failed | tostring) else ((.result // "") | test("did not launch") | tostring) end')"
-        if [ "$lf" = true ]; then
-          _ff_fail_or_retry "$plan" "$tid" "the worker did not launch: $out" "$(_ff_guard "$t")"
-        else
-          printf '  %s: could not start: %s\n' "$tid" "$out"
-        fi
-      elif [ "$st" = held ]; then printf '  %s: held for the captain: %s\n' "$tid" "$(printf '%s' "$t" | _ff_jq -r '.hold.reason // ""')"
-      else printf '  %s: not started this pass (%s); will try again\n' "$tid" "$out"; fi
-    fi
-  done
-}
 
 # _ff_pick_hint <plan> <task-json> <tasks-json>: for a decision that picks among builds (best-of-n),
 # say how to land the winner once picked, since a flow never lands a candidate on its own.
@@ -1059,13 +883,13 @@ _ff_on_signal() {   # <exit-code>: stop now, release the lock, put the caller's 
 _ff_sleep() { sleep "$1" & _FF_SLEEPER=$!; wait "$_FF_SLEEPER" 2>/dev/null; _FF_SLEEPER=""; }
 
 cmd_plan_run() {
-  local plan="" max=3 once=0 interval=30 maxmin=240 a pd t0 tick=0 c total done_n canceled failed held running ready todo landfail why sl rc pass pend="" lastpend=""
+  local plan="" max="" once=0 interval=30 maxmin=240 a pd t0 tick=0 c total done_n canceled failed held running ready todo landfail why sl rc pass pend="" lastpend=""
   _FF_AUTO_LAND=0; _FF_SETUP=""
   while [ "$#" -gt 0 ]; do
     a="$1"
     case "$a" in
-      --max-parallel) _factory_optval "$1" "$#" || return 1; max="$2"; shift 2 ;;
-      --max-parallel=*) max="${a#*=}"; shift ;;
+      --max-parallel) _factory_optval "$1" "$#" || return 1; [ -n "$2" ] || die "plan run --max-parallel needs a value"; max="$2"; shift 2 ;;
+      --max-parallel=*) max="${a#*=}"; [ -n "$max" ] || die "plan run --max-parallel needs a value"; shift ;;
       --interval) _factory_optval "$1" "$#" || return 1; interval="$2"; shift 2 ;;
       --interval=*) interval="${a#*=}"; shift ;;
       --max-minutes) _factory_optval "$1" "$#" || return 1; maxmin="$2"; shift 2 ;;
@@ -1080,17 +904,19 @@ cmd_plan_run() {
       *) [ -z "$plan" ] || die "plan run takes one plan name (got '$plan' and '$a')"; plan="$a"; shift ;;
     esac
   done
-  case "$max" in ''|*[!0-9]*|0) die "plan run --max-parallel needs a whole number of 1 or more" ;; esac
   case "$interval" in ''|*[!0-9]*|0) die "plan run --interval needs a whole number of seconds (1 or more)" ;; esac
   case "$maxmin" in ''|*[!0-9]*|0) die "plan run --max-minutes needs a whole number of minutes (1 or more)" ;; esac
-  max="$(_ff_num "$max")"; interval="$(_ff_num "$interval")"; maxmin="$(_ff_num "$maxmin")"
-  [ "$max" -gt 0 ] && [ "$interval" -gt 0 ] && [ "$maxmin" -gt 0 ] || die "plan run limits must be greater than zero"
+  interval="$(_ff_num "$interval")"; maxmin="$(_ff_num "$maxmin")"
+  [ "$interval" -gt 0 ] && [ "$maxmin" -gt 0 ] || die "plan run limits must be greater than zero"
   _ff_need_jq
-  _ff_need_fns _plan_dir _plan_resolve _task_get _task_update _task_list _task_view _task_ready _task_dispatch _factory_done_check
+  _ff_need_fns _plan_dir _plan_resolve _task_get _task_update _task_list _task_view _task_ready _task_dispatch _factory_done_check _osrc_fp_max_parallel _osrc_fp_gate_can_run
   plan="$(_plan_resolve ${plan:+"$plan"})" || return 1
   [ -n "$plan" ] || die "no plan given and no current plan; name one: plan run <plan>"
   pd="$(_plan_dir "$plan")" || return 1
   [ -d "$pd" ] || die "no plan named '$plan' (see: plan ls)"
+  # The repo profile is the plan's repo's, wherever this runs from. Launch cap and gate: lib/factory-parallel.sh.
+  local OSRC_FACTORY_ROOT="${OSRC_FACTORY_ROOT:-$(_ff_jq -r '.repo // ""' "$pd/plan.json" 2>/dev/null)}"
+  max="$(_osrc_fp_max_parallel "$max")" || return 1
 
   _ff_lock_acquire "$pd/run.lock"; rc=$?
   if [ "$rc" -eq 1 ]; then
@@ -1173,7 +999,12 @@ _ff_wake_finished() {   # <plan> <done-count>: one wake per distinct finished st
 _ff_plan_run_usage() {
   cat <<'EOF'
 usage: plan run [plan] [--max-parallel N] [--once] [--interval S] [--auto-land] [--max-minutes M] [--setup CMD]
-  Drives a plan: checks running work, finishes or retries it, starts ready tasks (up to N at once, default 3).
+  Drives a plan: checks running work, finishes or retries it, starts ready tasks (up to N at once).
+  N defaults to OSRC_FACTORY_PARALLEL, else the repo's .outsourcerer.toml factory.parallel, else 3.
+  Tasks that declare files (.files/--files) serialize on shared paths; the optional repo gate
+  pauses launches when the machine is loaded. Held decisions apply their default at the deadline
+  unless held --risk irreversible|paid|publish. Reviews cap at OSRC_FACTORY_REVIEW_ROUNDS (3);
+  a further round needs an escalation record (see references/factory-flow-cli.md).
   --once         one pass, then exit (for the heartbeat or an orchestrator turn)
   --interval S   seconds between passes (default 30)
   --auto-land    land each finished plain build task through the merge gate (flow builds land through

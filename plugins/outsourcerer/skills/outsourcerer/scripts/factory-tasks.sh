@@ -675,30 +675,7 @@ _task_dispatch_fail() {
   echo "outsourcerer: $2 could not start: $3" >&2
 }
 
-# _task_worker_prompt <plan> <tid> <brief-path> -> the SHORT prompt passed on the worker's command
-# line: the task title, the plan goal's first line, and the absolute path of the full brief to read
-# first. The brief itself can be large (spec, dependency results), and a command line cannot: Linux
-# caps one argument at 128KB and Windows a whole command line at 32,767 characters.
-_task_worker_prompt() {
-  local plan="$1" tid="$2" brief="$3" title goal
-  # Task and plan JSON go through stdin, never jq's own argv (a huge prompt would hit the same limit).
-  local firstline='def line(n): (. // "" | tostring | split("\n") | map(select(test("\\S"))) | (.[0] // "") | if length > n then .[0:n] + "..." else . end);'
-  title="$(_task_get "$plan" "$tid" 2>/dev/null | _ft_jq -r "$firstline .title | line(200)" 2>/dev/null)"
-  goal="$(_ft_jq -r "$firstline .goal | line(300)" "$(_plan_dir "$plan")/plan.json" 2>/dev/null)"
-  printf 'Task %s/%s: %s\n' "$plan" "$tid" "$title"
-  [ -n "$goal" ] && printf 'Plan goal: %s\n' "$goal"
-  # Inline the brief when it fits: some lanes (sandboxed or chat-only) cannot read a file outside
-  # their own workspace, and the brief lives under OSRC_HOME. 16KB keeps the whole command line well
-  # under the Windows 32,767-character limit. Larger briefs go by path.
-  local bsize; bsize="$(wc -c < "$brief" 2>/dev/null | tr -d ' ')"
-  if [ -n "$bsize" ] && [ "$bsize" -le "${OSRC_BRIEF_INLINE_MAX:-16384}" ]; then
-    printf '\nYour full brief follows. It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly. (Saved copy: %s)\n\n' "$brief"
-    cat "$brief"
-    return 0
-  fi
-  printf '\nBefore anything else, read your full brief: %s\n' "$brief"
-  printf 'It is the whole assignment: the task, the spec, the rules for when you are done, and the results of earlier work you build on. Follow it exactly.\n'
-}
+# _task_worker_prompt moved to lib/factory-parallel.sh (size ratchet; dispatch support).
 
 # Reuse the scheduler's fallback order when loaded; the task store also works alone.
 _task_dispatch_model() {
@@ -876,7 +853,7 @@ cmd_plan() {
       case "$sub" in *[!a-z_]*) ;; *)
         if type "cmd_plan_$sub" >/dev/null 2>&1; then "cmd_plan_$sub" "$@"; return $?; fi ;;
       esac
-      die "unknown plan command '$sub'. Try: plan new|ls|show|use|rm|run" ;;
+      die "unknown plan command '$sub'. Try: plan new|ls|show|use|rm|run|start" ;;
   esac
 }
 
@@ -888,6 +865,7 @@ outsourcerer plan show [name]
 outsourcerer plan use <name>
 outsourcerer plan rm <name> [--force]
 outsourcerer plan run [name] ...        (needs factory-flow.sh)
+outsourcerer plan start <name> <tasks-file|-> [--dry-run] [--run]   (one list -> a running plan)
 EOF
 }
 
@@ -1076,10 +1054,11 @@ _task_cli_help() {
   cat <<'EOF'
 outsourcerer task add "<title>" [--prompt "..." | --prompt-file f] [--shape ship|scout] [--deps t1,t2]
         [--spec file] [--check "cmd"] [--verb run|research|edit|yolo] [-m model] [--provider p]
-        [--deliver local|branch|pr] [--retries N] [--hold "question"] [--plan p]
+        [--deliver local|branch|pr] [--retries N] [--hold "question"] [--files a/b.c,c/d/]
+        [--plan p]
 outsourcerer task ls [--state s] [--plan p]          outsourcerer task show <tid> [--json] [--plan p]
 outsourcerer task ready [--plan p]                   outsourcerer task start <tid> [--plan p]
-outsourcerer task hold <tid> --reason "..." [--until "..."]
+outsourcerer task hold <tid> --reason "..." [--until "..."] [--default "..."] [--risk reversible|irreversible|paid|publish]
 outsourcerer task release <tid> --answer "..." [--done] [--plan p]
 outsourcerer task done <tid> [--result "..."] [--force] [--plan p]
 outsourcerer task fail <tid> [--reason "..."] [--plan p]  outsourcerer task cancel <tid> [--plan p]
@@ -1104,7 +1083,7 @@ _task_cli_args() {
 _task_cli_add() {
   _task_cli_args "$@"; set -- ${_TASK_ARGV[@]+"${_TASK_ARGV[@]}"}
   local plan="$_TASK_PLAN" title="" prompt="" shape="" deps="" spec="" check="" verb="" model="" provider=""
-  local deliver="local" retries=1 hold="" flow="" stage="" fields tid
+  local deliver="local" retries=1 hold="" flow="" stage="" files="" fields tid
   while [ $# -gt 0 ]; do
     case "$1" in
       --prompt) _factory_optval "$1" $#; prompt="$2"; shift 2 ;;
@@ -1122,6 +1101,7 @@ _task_cli_add() {
       --deliver) _factory_optval "$1" $#; deliver="$2"; shift 2 ;;
       --retries) _factory_optval "$1" $#; retries="$2"; shift 2 ;;
       --hold) _factory_optval "$1" $#; hold="$2"; shift 2 ;;
+      --files|--owns) _factory_optval "$1" $#; files="$2"; shift 2 ;;
       --flow) _factory_optval "$1" $#; flow="$2"; shift 2 ;;
       --stage) _factory_optval "$1" $#; stage="$2"; shift 2 ;;
       -*) die "task add: unknown option '$1'" ;;
@@ -1144,16 +1124,18 @@ _task_cli_add() {
     spec="$(cd "$(dirname "$spec")" && pwd -P)/$(basename "$spec")"
   fi
   local d; deps="$(printf '%s' "$deps" | tr ', ' '\n\n' | sed '/^$/d')"
+  files="$(printf '%s' "$files" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sed '/^$/d')"
   for d in $deps; do _task_id_ok "$d" || die "task add: '$d' is not a task id (they look like t1, t2)."; done
   # The prompt (possibly a large --prompt-file) goes through stdin, not jq's argv.
   fields="$(printf '%s' "$prompt" | _ft_jq -Rsc --arg title "$title" --arg shape "$shape" --arg deps "$deps" --arg spec "$spec" \
     --arg check "$check" --arg verb "$verb" --arg model "$model" --arg provider "$provider" --arg deliver "$deliver" \
-    --argjson retries "$retries" --arg hold "$hold" --arg flow "$flow" --arg stage "$stage" '
+    --argjson retries "$retries" --arg hold "$hold" --arg flow "$flow" --arg stage "$stage" --arg files "$files" '
     . as $prompt | {title:$title,prompt:$prompt,shape:$shape,
      deps:($deps | split("\n") | map(select(. != "")) | reduce .[] as $d ([]; if any(.[]; . == $d) then . else . + [$d] end)),
      spec:$spec,check:$check,verb:$verb,model:$model,provider:$provider,deliver:$deliver,retries:$retries,
      flow:{name:$flow,stage:$stage}}
-    + (if $hold != "" then {state:"held",hold:{reason:$hold,until:"",answer:""}} else {} end)')"
+    + (if $hold != "" then {state:"held",hold:{reason:$hold,until:"",answer:""}} else {} end)
+    + (if $files != "" then {files:($files | split("\n") | map(gsub("^\\s+|\\s+$";"") | sub("^\\./+";"") | sub("/+$";"") | select(. != "")) | unique)} else {} end)')"
   tid="$(_task_new "$plan" "$fields")" || exit 1
   printf '%s\n' "$tid"
   echo "added $tid to plan '$plan' ($shape)${deps:+, after $(printf '%s' "$deps" | tr '\n' ' ' | sed 's/ $//;s/ /, /g')}${hold:+, held for a decision}." >&2
@@ -1261,18 +1243,21 @@ _task_deadline() {
 
 _task_cli_hold() {
   _task_cli_args "$@"; set -- ${_TASK_ARGV[@]+"${_TASK_ARGV[@]}"}
-  local tid="" reason="" until="" def="" dl="" ue=0
+  local tid="" reason="" until="" def="" risk="" dl="" ue=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --reason) _factory_optval "$1" $#; reason="$2"; shift 2 ;;
       --until) _factory_optval "$1" $#; until="$2"; shift 2 ;;
       --default) _factory_optval "$1" $#; def="$2"; shift 2 ;;
+      --risk) _factory_optval "$1" $#; risk="$2"; shift 2 ;;
       -*) die "task hold: unknown option '$1'" ;;
       *) tid="$1"; shift ;;
     esac
   done
   _task_id_ok "$tid" || die "task hold needs a task id, e.g. outsourcerer task hold t3 --plan $_TASK_PLAN --reason \"pick A or B\""
   [ -n "$reason" ] || die "task hold needs --reason \"<the question for the captain>\"."
+  case "$risk" in ''|reversible|safe|irreversible|paid|publish) ;;
+    *) die "task hold: --risk must be reversible, irreversible, paid or publish (irreversible/paid/publish never auto-apply a default)." ;; esac
   if [ -n "$until" ]; then
     if dl="$(_task_deadline "$until")"; then ue="${dl%% *}"; until="${dl#* }"
     elif [ -n "$def" ]; then die "task hold: --until '$until' is not a time. Use +30m, +2h, +1d, or an ISO time like 2026-10-24T09:00Z."
@@ -1283,11 +1268,16 @@ _task_cli_hold() {
   fi
   FACTORY_EVENT_NOTE="$reason" _task_update "$_TASK_PLAN" "$tid" \
     'if (.state == "todo" or .state == "failed" or .state == "verifying" or .state == "held") | not
-       then error("bad state") else .state = "held" | .hold = {reason:$r, until:$u, until_epoch:$ue, default:$d, answer:""} end' \
-    --arg r "$reason" --arg u "$until" --argjson ue "$ue" --arg d "$def" \
+       then error("bad state") else .state = "held" | .hold = {reason:$r, until:$u, until_epoch:$ue, default:$d, answer:"", risk:$k} end' \
+    --arg r "$reason" --arg u "$until" --argjson ue "$ue" --arg d "$def" --arg k "$risk" \
     || die "$tid can be held only while it waits, is being checked, or has failed. If it is running, cancel it first."
   echo "$tid is held for a decision ($reason). Answer with: outsourcerer task release $tid --plan $_TASK_PLAN --answer \"...\""
-  [ -n "$def" ] && echo "With no answer by $until, plan run goes ahead with the default: $def"
+  if [ -n "$def" ]; then
+    case "$risk" in
+      ''|reversible|safe) echo "With no answer by $until, plan run goes ahead with the default: $def" ;;
+      *) echo "NOTE: risk=$risk — plan run NEVER applies the default by itself; only your answer releases it." ;;
+    esac
+  fi
   return 0
 }
 
