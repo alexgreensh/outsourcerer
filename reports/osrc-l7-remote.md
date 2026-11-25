@@ -54,3 +54,23 @@ Fixes for the review of `2235be9` plus three bugs seen live. Files: `lib/cloudru
 
 ## Needs from other lanes
 - Some suite (watchsvc/signal/tick tests) writes `alive` files into the repo root with `'`, space and `$` in the path. It should use `mktemp` under `$TMPDIR`. Not fixed here.
+
+## Round 3 (osrc-l7-remote-r3)
+
+Base confirmed: `git log --oneline -3` showed `f0ab993` (r2 tip). Fixes for the Fable review of round 2. Files: `lib/remote.sh`, `lib/cloudrun.sh`, `lib/cleanup.sh`, one line in `lib/review.sh`, tests in `test_lane_status.sh` and `test_cloudrun.sh`. The r2 READY/RESULT files are removed.
+
+- **P1-1 exact branch ownership.** `_osrc_lane_alt_branch` now looks at every `claude/<id>-*` candidate (gh `matching-refs`, the ls-remote output, then the launch log) and keeps one only if `_osrc_lane_owns_branch` agrees: it must be `claude/<id>-<suffix>` and no longer registered lane id may also name it (`claude/alt-r2-x` belongs to `alt-r2`, never to `alt`). Tests: `alt` vs `alt-r2` on the git transport, `g1` vs `g1-r2` on the gh transport.
+- **P2-2 review and done point at the branch the READY commit is on.** `_osrc_review_enqueue` uses `.poll_branch // .branch` (`lib/review.sh:98`, one line outside my files: the brief requires that review never points at a missing branch, and this is the smallest change that does it). The `done` event names the same branch. The generated done-contract script reads `.poll_branch` from the lane json at run time and falls back to `cloud/<id>`. Tests: review item branch, done event text, and the generated script passing against READY on `claude/<id>-*`.
+- **P2-3 no silent swap after delete.** Once `cloud/<id>` has been seen, the session branch is followed only if it is already the `poll_branch`. Test: push, delete `cloud/alt3`, push `claude/alt3-k2` -> `branch_deleted=true`, `poll_branch` unchanged.
+- **P2-4 HEAD guard with `--sha`.** With `--sha` the checkout HEAD must be the pinned commit; without, the base tip. The message no longer suggests `--sha`. Test: `--sha <main>` from a side branch is refused.
+- **P2-5 gh path tested** with a stub that answers `matching-refs` and the session branch's `commits/` call.
+- **P3-6** "never started" requires `err_count == 0`. Test: failing polls past 45m do not claim it.
+- **P3-7 + Windows paths.** Rule: every user-specific segment is a `<placeholder>`: the user name (for `/Users`, `/home`, `X:\Users`) and the first folder under home unless it is an app folder (a dot-folder, `AppData`, `Library`); at least one placeholder overall. Windows drive paths (`C:\Users\…`, `C:/Users/…`) are now checked the same way: `C:\Users\<user>\<project>\README.md` passes, `C:\Users\bob\proj\x` and `C:\Users\<user>\clients\acme\<f>` are blocked. `~/clients/acme-corp/<file>` is blocked. The dead `$HOME/` and `${HOME}/` arms are deleted, as the review suggested. Choice: literal `$HOME/…` text is not inspected (as on the base; it names no user) and other drive paths such as `D:\work\x` are not home paths and are not checked.
+- **P3-8 cleanup** offers only lanes whose state is `done` or `failed`, and only `.branch` and `.poll_branch`; the launch-log grep is gone. Tests: a READY lane is not offered, a failed and a done lane are, and a prose name ending in `.` from the log is not added.
+- **P3-9** dead `die` and `[ -n "$ref" ] &&` removed. **P3-10** preflight keeps the base tip it fetched (`_CLOUDRUN_BASE_TIP`); the guard makes no second `ls-remote`.
+- **P3-11 cost, stated honestly:** while `cloud/<id>` is missing, the gh transport makes up to three API calls per poll (`commits/cloud/<id>`, `matching-refs`, `commits/<session branch>`); the git transport stays at one `ls-remote`. Fine at the default 60s poll.
+- **P3-12** the vehicle-gone test falls back to `kill -0` when `ps -o stat=` gives nothing (Git Bash). It cannot fail on this Linux base, so it has no before/after proof.
+
+### Tests (all run here, `nice bash …` from `scripts/`)
+- `tests/test_lane_status.sh`: 25 passed, rc=0. With the four lib files reverted to the base: 9 of the new assertions fail.
+- `tests/test_cloudrun.sh`: 133 passed, rc=0. With the libs reverted: 4 new assertions fail (HEAD guard with --sha, literal home folder, real Windows path, done check on the session branch).
