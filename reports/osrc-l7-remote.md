@@ -74,3 +74,15 @@ Base confirmed: `git log --oneline -3` showed `f0ab993` (r2 tip). Fixes for the 
 ### Tests (all run here, `nice bash …` from `scripts/`)
 - `tests/test_lane_status.sh`: 25 passed, rc=0. With the four lib files reverted to the base: 9 of the new assertions fail.
 - `tests/test_cloudrun.sh`: 133 passed, rc=0. With the libs reverted: 4 new assertions fail (HEAD guard with --sha, literal home folder, real Windows path, done check on the session branch).
+- `tests/test_remote_review.sh`: 106 passed, rc=0. `tests/test_cleanup_manifest.sh`: 66 pass, rc=0. `tests/test_done_contract.sh`: 53 passed, rc=0.
+- `bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (one final run, after every fix): rc=1, `242 passed, 6 failed, 1 skipped`. The six are the same suites round 2 found failing on the unmodified base in this root-user container: test_harness_isolation, test_vocab_hygiene, test_supervise_pgroup_kill, test_parity_insource_refresh, test_conformance_suite_timeout, test_sealed_fixes. I re-ran two alone: test_vocab_hygiene fails on "original was damaged on failed write" (a write meant to fail succeeds as root) and test_harness_isolation on "fail-closed failed" (same root cause). None of the six touch my files. I did not re-prove the other four on the base this round.
+
+### Unproven / still open
+- Ownership compares against registered lanes only. A longer lane that was removed with `lane rm` can no longer veto, so `a` could then adopt `claude/a-r2-x`. Once a branch is adopted it stays (P2-3), so this matters only for lanes that have not pushed yet.
+- Earlier P3-7 and P3-8 (no session-state evidence from a vehicle API, and trust-screen text proven only against a stub) are still open: they need a vehicle status API and a live capture.
+- P3-12 has no failing-before proof on Linux.
+
+## Needs from other lanes
+- `lib/review.sh` owner: line 98 now reads `.poll_branch // .branch` (one line, changed here because the brief requires that review never points at a missing branch). Please keep it.
+- Six conformance suites fail when run as root (see above). Their owners should skip or adapt the permission cases under uid 0.
+- Unchanged from round 2: some watchsvc/signal/tick suite writes `alive` files into the repo root. It should use `mktemp` under `$TMPDIR`.
