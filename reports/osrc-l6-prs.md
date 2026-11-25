@@ -138,7 +138,7 @@ Smallest change per finding, no new design.
 |---|---|
 | `bash .../tests/test_cleanup_manifest.sh` | 0 (87 pass) |
 | same with the pre-fix `lib/cleanup.sh` | 1 (3 new tests fail: trunk, detached HEAD, truncated manifest) |
-| `bash .../tests/conformance.sh` | 124 (hit my 590s timeout mid-run; no FAIL line seen before the cut, suites after test_advise_task_shape did not run) |
+| `bash .../tests/conformance.sh` | 124 (hit my 590s timeout mid-run; 3 suite FAILs before the cut: test_harness_isolation, test_vocab_hygiene, test_supervise_pgroup_kill, all on the round-3 undiagnosed list; suites after test_advise_task_shape did not run) |
 
 Not run on bash 3.2. The six undiagnosed conformance failures from round 3 are unchanged unless listed above.
 
