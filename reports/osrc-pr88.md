@@ -116,8 +116,29 @@ environment. The suites did not clear them, so a developer shell carrying any of
 | test_p56_billing.sh | 0 | 16 passed, 0 failed |
 | test_bg_provider_after_verb.sh | 0 | 27 passed, 0 failed |
 | test_tests_set_home.sh | 0 | 5 passed, 0 failed |
+| test_devin_alias_resolution.sh | 0 | 6 passed, 0 failed (after the consent fix below) |
+| test_devin_free_guard.sh | 0 | 22 passed, 0 failed (after the extraction-path fix below) |
+| test_devin_edit_note.sh | 0 | 8 passed, 0 failed (after the consent fix below) |
+| test_no_pipe_grep_q.sh | 0 | pass (after fixing my own `launched()` helper) |
 
-Full conformance: see `## Conformance` below.
+## Conformance
+
+Command: `nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (run once, at `c5dddfa`).
+Exit code **1**. RESULT line: `RESULT: 254 passed, 7 failed, 13 skipped`.
+
+| Failed suite | Cause | Status |
+|---|---|---|
+| test_devin_alias_resolution | calls `delegate()` directly with metered ids; now spend-gated by design | fixed in the test: `OSRC_SPEND_OK=1` on the call (resolution is what it checks). 6/0 |
+| test_devin_edit_note | same, with bare `swe-2` | fixed the same way. 8/0 |
+| test_devin_free_guard | extracts `_devin_is_free_model` from `outsourcerer.sh` by `sed`, and that function moved | now reads `lib/devin-free.sh`. 22/0 |
+| test_no_pipe_grep_q | my new `launched()` helper piped into `grep -q` | single `grep -qE`. pass |
+| test_harness_isolation | "fail-closed ... would inherit live MCP" | also fails on base `45d3e25` in this container. Not touched |
+| test_vocab_hygiene | relies on `chmod 500` blocking writes; container runs as root (uid 0) | also fails on base. Environmental |
+| test_parity_insource_refresh | same read-only-dir assumption under root | also fails on base. Environmental |
+
+I did not re-run the full suite after these four fixes, because the brief allows one full run. Each fixed suite was
+re-run alone (results above). The three environmental failures predate this lane. They need a non-root runner,
+and for harness isolation a runner with no live MCP config.
 
 ## Open questions (decided by the lane)
 
@@ -137,7 +158,18 @@ Full conformance: see `## Conformance` below.
   not by forcing a real OpenRouter transport failure.
 - The glm health probe above.
 
+## Test files changed outside my new suite (and why)
+
+- `test_lane_billing.sh`, `test_limit_gate.sh`: unset billing env vars (environment-dependence fix).
+- `test_factory_exclude.sh` F11: expects the exact `swe-2-high` probe fallback.
+- `test_devin_alias_resolution.sh`, `test_devin_edit_note.sh`: consent on their direct `delegate()` calls.
+- `test_devin_free_guard.sh`, `test_devin_catalog_free_tier.sh`: point at `lib/devin-free.sh` for the moved functions.
+- Removed a stray `tests/list` that an earlier failing run of my code had written into the repo through
+  `test_factory_exclude`'s `devin() { ... >> "$2"; }` mock. It is not recreated by the final code.
+
 ## Needs from other lanes
 
-- None required. Suites owned by L7 that I changed, because the brief asked for these fixes:
+- Conformance owners: `test_harness_isolation`, `test_vocab_hygiene`, `test_parity_insource_refresh` fail on base
+  `45d3e25` under a root container. They need either a non-root runner or a root-aware skip.
+- Otherwise none required. Suites owned by L7 that I changed, because the brief asked for these fixes:
   `test_lane_billing.sh`, `test_limit_gate.sh` (env scrub) and `test_factory_exclude.sh` (F11 expectation).

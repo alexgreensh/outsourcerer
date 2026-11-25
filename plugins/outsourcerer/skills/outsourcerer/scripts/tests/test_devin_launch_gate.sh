@@ -57,7 +57,7 @@ engine() {  # run the real engine against the stubs, non-interactive
       OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
       bash "$SRC" "$@" 2>&1 </dev/null )
 }
-launched() { grep -- "--model $1" "$LOG" 2>/dev/null | grep -q -- ' -p '; }
+launched() { grep -qE -- "--model $1 .* -p( |\$)" "$LOG" 2>/dev/null; }
 
 # --- P1: -m swe must gate the id it launches --------------------------------------------------
 : > "$LOG"
