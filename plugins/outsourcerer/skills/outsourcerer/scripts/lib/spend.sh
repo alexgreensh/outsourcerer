@@ -177,12 +177,21 @@ _osrc_rank_free_ids() {
     gsub(/\./, "-", base)
     rest = base; vk = ""
     while (match(rest, /[0-9]+/)) {
-      vk = vk sprintf("%012d", substr(rest, RSTART, RLENGTH) + 0) "-"
+      # Digit runs of 5+ digits are dates or build stamps (x-20250514-high), not versions:
+      # left in, their magnitude outranks every real version key (Instinct review, verified).
+      if (RLENGTH < 5) vk = vk sprintf("%012d", substr(rest, RSTART, RLENGTH) + 0) "-"
       rest = substr(rest, RSTART + RLENGTH)
     }
+    # Version recency is meaningful only WITHIN a family: comparing digit runs across
+    # families ranked gpt-5 over claude-4 for no quality reason. The family key strips
+    # digits and dashes; famidx is first-seen (catalog) order, so across families the
+    # catalog decides and only same-family rows compare version keys (Instinct MED).
+    famkey = base; gsub(/[0-9]/, "", famkey); gsub(/-/, "", famkey)
+    if (!(famkey in famseen)) famseen[famkey] = ++famn
+    famidx = famseen[famkey]
     nseg = split(base, seg, /-/); qual = 0; seen = 0
     for (i = 1; i <= nseg; i++) if (seg[i] ~ /^[a-z]+$/) { if (seen) qual++; seen = 1 }
-    printf "%d\t%d\t%s\t%d\t%s\n", budget, qual, vk, tier, id
+    printf "%d\t%d\t%d\t%s\t%d\t%s\n", budget, qual, famidx, vk, tier, id
   }'
 }
 
@@ -191,14 +200,19 @@ _osrc_rank_free_ids() {
 _osrc_free_lines() { printf '%s' "$1" | tr ' ' '\n' | awk 'NF'; }
 
 # _osrc_pick_best_free -> best id from newline rows on stdin: newest -high first
-# (the lane default), otherwise the strongest/newest. sort drains fully into awk so
+# (the lane default), otherwise the strongest/newest. Sort keys: budget partition,
+# qualifier-segment penalty, first-seen family order (catalog order across families),
+# family-scoped version key (string reverse), tier. sort drains fully into awk so
 # no SIGPIPE can hit the producer under pipefail. LC_ALL=C pins byte-order collation.
 _osrc_pick_best_free() {
   local rows high
   rows=$(cat)
   [ -n "$rows" ] || return 1
   high=$(printf '%s\n' "$rows" | awk 'tolower($0) ~ /-high$/')
-  if [ -n "$high" ]; then printf '%s\n' "$high"; else printf '%s\n' "$rows"; fi     | _osrc_rank_free_ids     | LC_ALL=C sort -t$'\t' -k1,1n -k2,2n -k3,3r -k4,4nr     | awk -F'\t' 'NR == 1 { out = $5 } END { if (out != "") print out }'
+  if [ -n "$high" ]; then printf '%s\n' "$high"; else printf '%s\n' "$rows"; fi \
+    | _osrc_rank_free_ids \
+    | LC_ALL=C sort -t$'\t' -k1,1n -k2,2n -k3,3n -k4,4r -k5,5nr \
+    | awk -F'\t' 'NR == 1 { out = $6 } END { if (out != "") print out }'
 }
 
 # _devin_default_free_model -> the dv lane's implicit default, picked at RUN TIME from
@@ -207,7 +221,10 @@ _osrc_pick_best_free() {
 #   1. mainline partition first — flash/fast/lightning are used only when NO mainline
 #      Free id exists at all;
 #   2. the SWE coding family preferred within that partition, never required;
-#   3. newest -high variant, then strongest/newest remaining.
+#   3. newest -high variant, then strongest/newest remaining. Version recency is
+#      family-scoped: across families digit runs mean nothing (gpt-5 is not newer
+#      than claude-4), so catalog order decides and date-like digit runs are not
+#      versions at all (see _osrc_rank_free_ids).
 # Catalog unreachable or nothing Free -> swe-2-high, the deliberately conservative offline
 # fallback. Offline there is no fresh proof either way: swe-2-high/flash-high are static
 # free-for-spend ids, so a bare run on them does NOT ask; if Devin re-prices them while
@@ -225,6 +242,10 @@ _devin_default_free_model() {
     cand=$(printf '%s\n' "$main" | _osrc_pick_best_free 2>/dev/null)
     [ -n "$cand" ] && { printf '%s' "$cand"; return 0; }
   fi
+  # The fallback is a money-relevant decision (swe-2-high is a static free-for-spend id whose
+  # pricing is unverifiable offline), so it must never be silent — one line, stderr only,
+  # stdout stays the bare id every caller expects.
+  printf '>>> [model] live catalog unreachable or no verified Free model — using offline fallback swe-2-high (static free-for-spend id; see docs: offline exception).\n' >&2
   printf 'swe-2-high'
 }
 

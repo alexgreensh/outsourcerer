@@ -148,9 +148,8 @@ _devin_resolve_dynamic() {
     | if $exactidx != null then $allvars[$exactidx]
       else
         ( [ .families[]?
-            | select( (.family_uid|ascii_downcase) == ($tok|ascii_downcase)
-                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+"-"))
-                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+".")) ) ] ) as $fams
+            | select( keyify(.family_uid) == keyify($tok)
+                      or (keyify(.family_uid) | startswith(keyify($tok)+"-")) ) ] ) as $fams
         | if ($fams|length)==0 then ""
           else
             ( ($fams | map(select(.family_uid | test("flash|fast|lightning";"i")|not))) as $nf
@@ -165,9 +164,13 @@ _devin_resolve_dynamic() {
             | ( ($fam.variants // []) | map(select(.model_uid | test("-(1m|none)$";"i")|not)) ) as $vars
             | if ($vars|length)==0 then ""
               else
-                ( $vars | map(select(.model_uid | endswith("-"+$eff))) ) as $esfx
-                | if ($esfx|length)>0 then ($esfx | sort_by(costrank,(.model_uid|length)) | .[0].model_uid)
-                  else ($vars | sort_by(costrank,(.model_uid|length)) | .[0].model_uid) end
+                # Cost outranks effort: the effort-suffix filter running FIRST let a paid -high
+                # win over a free -max in the same family (eff defaults to high), so a bare alias
+                # resolved onto a paid variant although a free one existed. Effort is only a
+                # tiebreak within the same cost class (advisory on the Devin lane anyway).
+                ( $vars | sort_by([ costrank,
+                                    (if (.model_uid | endswith("-"+$eff)) then 0 else 1 end),
+                                    (.model_uid|length) ]) | .[0].model_uid )
               end
           end
       end' 2>/dev/null
