@@ -589,7 +589,7 @@ _sv_armed_cover() { # <sid> -> `*` or the explicit ids a live, polling supervise
     pid="${f##*.}"
     if kill -0 "$pid" 2>/dev/null && ps -o command= -p "$pid" 2>/dev/null | grep -q 'supervise'; then
       m="$(_sv_num "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)" 0)"; [ "$m" -gt "$last" ] && last="$m"
-      [ $(( $(_sv_now) - last )) -le "$(_sv_num "${OSRC_SUPERVISE_HUNG:-}" 600)" ] && cat "$f"
+      [ $(( $(_sv_now) - last )) -le "$(_sv_num "${OSRC_SUPERVISE_HUNG:-}" 600)" ] && cat "$f" 2>/dev/null
     else rm -f "$f"; fi
   done
 }

@@ -173,7 +173,7 @@ own sess1 E; limit_state E limit:555; printf '#!/bin/sh\necho x >> %s/fails4; ex
 log limit E "plan limit hit: x (epoch $((now - 5)))"; S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"
 [ ! -e "$OSRC_HOME/watchsvc/limits/E.done" ] && ! grep -q '"kind":"limit-resumed","target":"E"' "$OSRC_HOME/lanes/events.jsonl" && ok "a failed continue is not logged as sent; it is retried" || no "failed continue marked done"
 S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"; [ "$(grep -c . "$TMP/fails4")" = 1 ] && ok "a failed continue backs off (no full script spawn every tick)" || no "retried at once: $(grep -c . "$TMP/fails4")"
-lim "OSRC_NOW=$((now + 61))"; [ "$(grep -c '^E ' "$TMP/sent4")" = 1 ] && ok "the retry sends it once" || no "E retry"
+lim "OSRC_NOW=$(( $(date +%s) + 61 ))"; [ "$(grep -c '^E ' "$TMP/sent4")" = 1 ] && ok "the retry sends it once" || no "E retry"
 own sess1 G; limit_state G limit:777; log limit G "plan limit hit: z (epoch $((now + 100)))"; lim; rm -f "$OSRC_HOME/owners/sess1/G"
 lim "OSRC_NOW=$((now + 200))"; ! grep -q '^G ' "$TMP/sent4" && ok "ownership is checked again when the continue is due" || no "continued a lane disowned after its banner"
 own sess1 F; limit_state F limit:666; log limit F "plan limit hit: y (epoch $((now - 5)))"
@@ -228,21 +228,21 @@ kill -0 "$d" 2>/dev/null || no "setup: loop did not start under its own launcher
 S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 ! kill -0 "$d" 2>/dev/null && ok "a loop whose launcher now names another plugin copy exits (its unit restarts it there)" || no "loop kept running the old copy"
 fresh 6c; OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { x="$(sleep 4713; :)"; }; _ws_run' "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
-i=0; until pgrep -f 'sleep 4713' >/dev/null 2>&1 || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
+i=0; until pgrep -f '^sleep 4713' >/dev/null 2>&1 || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
 S '_ws_stop_loop'; sleep 0.5
-! kill -0 "$d" 2>/dev/null && ! pgrep -f 'sleep 4713' >/dev/null 2>&1 && ok "stopping the loop takes its in-flight tick with it" || { no "tick orphaned by stop"; pkill -f 'sleep 4713'; }
+! kill -0 "$d" 2>/dev/null && ! pgrep -f '^sleep 4713' >/dev/null 2>&1 && ok "stopping the loop takes its in-flight tick with it" || { no "tick orphaned by stop"; pkill -f '^sleep 4713'; }
 fresh 6d; mkdir -p "$OSRC_HOME/supervise/sess6"
 OSRC_SUPERVISE_TICK_SECS=1 OSRC_SUPERVISE_TICK_TIMEOUT=600 bash -c 'export OSRC_SOURCED=1; . "$0" >/dev/null 2>&1; cmd_hub_export() { x="$(sleep 4714; :)"; }; cmd_supervise --session sess6' "$SRC" >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"
-i=0; until pgrep -f 'sleep 4714' >/dev/null 2>&1 || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
+i=0; until pgrep -f '^sleep 4714' >/dev/null 2>&1 || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
 kill -TERM "$d"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 40 ]; do sleep 0.2; i=$((i+1)); done; sleep 0.5
-! pgrep -f 'sleep 4714' >/dev/null 2>&1 && ok "a supervise signalled mid-refresh takes the hung probe with it" || { no "probe orphaned by a signalled supervise"; pkill -f 'sleep 4714'; }
+! pgrep -f '^sleep 4714' >/dev/null 2>&1 && ok "a supervise signalled mid-refresh takes the hung probe with it" || { no "probe orphaned by a signalled supervise"; pkill -f '^sleep 4714'; }
 
 echo "=== supervise --loop: a looping caller stays a waiter between batches ==="
 fresh 13; sleep 300 >/dev/null 2>&1 & w=$!; PIDS="$PIDS $w"
 mkdir -p "$OSRC_HOME/jobs/R3"; echo running > "$OSRC_HOME/jobs/R3/status"; echo "$w" > "$OSRC_HOME/jobs/R3/pid"; echo "$w" > "$OSRC_HOME/jobs/R3/supervisor_pid"; own sessL R3
 OSRC_SUPERVISE_POLL=1 OSRC_SUPERVISE_SETTLE=0 OSRC_SUPERVISE_MAX_SECS=1 "$SRC" supervise --session sessL --loop > "$TMP/loop13" 2>/dev/null & lp=$!; PIDS="$PIDS $lp"
-i=0; until [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 1 ] || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
-gaps=0; for i in $(seq 1 40); do [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 1 ] || gaps=$((gaps+1)); sleep 0.1; done
+i=0; until S '_waited_ids sessL' | grep -qx '\*' || [ "$i" -ge 50 ]; do sleep 0.2; i=$((i+1)); done
+gaps=0; for i in $(seq 1 40); do S '_waited_ids sessL' 2>/dev/null | grep -qx '\*' || gaps=$((gaps+1)); sleep 0.1; done
 [ "$gaps" = 0 ] && [ "$(grep -c '^EVENT ' "$TMP/loop13")" -ge 2 ] && ok "supervise --loop delivers batch after batch and covers the session in between" || no "gaps=$gaps events=$(grep -c '^EVENT ' "$TMP/loop13")"
 kill "$lp"; i=0; while kill -0 "$lp" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 [ -z "$(ls "$OSRC_HOME/supervise/sessL"/loop.* 2>/dev/null)" ] && [ "$(S '_waited_ids sessL' | grep -cx '\*')" = 0 ] && ok "and stops covering once it exits" || no "loop marker left behind"
