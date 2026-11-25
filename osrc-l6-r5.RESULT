@@ -1,4 +1,0 @@
-sha=6d71cd9b7d9d30cc25e0f2da02b2cfe473fea2ae
-rc=0
-Findings 1-9 fixed; head is the commit adding this file on cloud/osrc-l6-r5. test_cleanup_manifest.sh rc=0 (85 pass); with base lib/cleanup.sh it fails 1 (record lost after truncated line); with the gh merged-PR path neutralised it fails 1. test_no_pipe_grep_q rc=0 after fixing my own pipe-grep-q line.
-conformance.sh run to completion: rc=1, 6 suite FAILs not from this lane (harness_isolation, vocab_hygiene, supervise_pgroup_kill, parity_insource_refresh, conformance_suite_timeout, sealed_fixes: sealed_fixes fails identically on the base, MATRIX_DENIED sandbox guard); test_no_pipe_grep_q was the 7th and is fixed. Not re-run in full after the fix. Not run on bash 3.2.

@@ -1,9 +1,0 @@
-sha=f63dfba7f3c20f19c6b8d5a0d96568070a9843d3
-rc=1
-Lane head before this commit: f63dfba7f3c20f19c6b8d5a0d96568070a9843d3 (base 7eef90ac74f1f5b57ce3a054ced8057af06d171e).
-rc is conformance as run: 247 passed, 6 failed (test_harness_isolation, test_vocab_hygiene,
-test_supervise_pgroup_kill, test_parity_insource_refresh, test_conformance_suite_timeout,
-test_sealed_fixes; none touches this lane's files, round 1 found them red on base too).
-All review P2 1-4 and P3 fixed with tests (test_hub_speed 25/25 rc=0, test_remote_review 108/108 rc=0).
-Finished remote lanes (tip carries <id>.READY and <id>.RESULT) no longer raise stalled.
-P2 5: unchanged export 8.8-9.0 s on the larger fixture (base same); no simple change reaches 3 s, see report.
