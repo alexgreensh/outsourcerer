@@ -1007,7 +1007,7 @@ _devin_plan_probe_model() {
   # capped) — so probing it discovers whether free work can still run on the lane, which is the whole
   # point of the "one refusal does not prove every model is spent" check.
   # alt = a truly-Free model discovered from the live catalog (self-heals as Devin changes its Free
-  # tier), falling back to swe-2 (the known Free model) when the catalog is unavailable or the env
+  # tier), falling back to swe-2-high (the exact known Free variant) when the catalog is unavailable or the env
   # override is unset.
   probe="${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}"
   # The alt lookup is a live (bounded) catalog refresh, so it is evaluated only when it will actually
@@ -1015,7 +1015,7 @@ _devin_plan_probe_model() {
   # the catalog. Evaluating it eagerly made every plan-quota block spend a `devin models list` fetch
   # on a value it then discarded.
   if [ "$(printf '%s' "$probe" | tr '[:upper:]' '[:lower:]' | tr '._' '--')" = "$refused" ]; then
-    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2}"
+    alt="${OSRC_DEVIN_PROBE_MODEL_ALT:-$(_devin_first_catalog_free_model)}"; probe="${alt:-swe-2-high}"
   fi
   # #45: never probe a model the user excluded; pick the next allowed one that is not the refused model.
   if _model_excluded "$probe"; then probe="$(OSRC_DEVIN_PROBE_SKIP="$refused" _devin_probe_pick)" || probe=""; fi
@@ -1192,29 +1192,56 @@ _devin_catalog_free_set() {
   raw="$(_devin_catalog_raw 2>/dev/null)" || raw=""
   if [ -n "$raw" ]; then
     set="$(jq -r '
-      def canon(s): (s|ascii_downcase|sub("^[^/]*/";"")|sub("-(high|low|max|medium)$";"")|sub("-[0-9]{6,}$";"")|gsub("\\.";"-"));
-      def isfree(o): (((o.cost_tier // "") + " " + (o.cost_summary // ""))|test("free";"i"));
+      def norm(s): (s|ascii_downcase|sub("^[^/]*/";"")|sub("-[0-9]{6,}$";"")|gsub("\\.";"-"));
+      def isfree(o): (((o.cost_tier | strings) // "") | ascii_downcase) == "free";
+      def uidok(s): ((s|type) == "string") and (s|test("^[A-Za-z0-9._/-]+$"));
+      # v: tokens are exact free variants (no tier-stripping — a paid -max sibling must
+      # never ride in on its free -high sibling). f: tokens are all-free family ids/slugs,
+      # the only ids a bare family-shaped probe may match. uids are shape-filtered: the
+      # live catalog carries spaced display labels, and one spaced uid would otherwise
+      # split into bogus free tokens (Neon review, verified).
       [ .families[]?
-        | ( select((.variants|length) > 0 and all(.variants[]?; isfree(.))) | (.family_uid, (.slug // empty)) ),
-          ( .variants[]? | select(isfree(.)) | .model_uid ) ]
-      | map(canon(.)) | unique | .[]
+        | ( select((.variants|type) == "array" and (.variants|length) > 0 and all(.variants[]?; isfree(.)))
+            | ( (select(uidok(.family_uid)) | "f:"+norm(.family_uid)),
+                (select(((.slug // "") != "") and uidok(.slug)) | "f:"+norm(.slug)) ) ),
+          ( .variants[]? | select(isfree(.) and uidok(.model_uid)) | "v:"+norm(.model_uid) ) ]
+      | unique | .[]
     ' 2>/dev/null <<<"$raw" | tr "\n" " ")"
   fi
   _OSRC_CAT_FREE_MEMO_SET=" $set"
   printf '%s' "$_OSRC_CAT_FREE_MEMO_SET"
 }
 
-# A launchable id for a truly-Free model (cost_tier=Free, no daily quota) discovered from the catalog —
-# the right escape-hatch to probe when the shared plan bucket is spent. Prefers a family id whose every
-# variant is Free (launchable bare, e.g. swe-2); empty when the catalog is unavailable.
+# A launchable id for a truly-Free model (exact cost_tier=Free, no daily quota) discovered
+# from the catalog — the right escape-hatch to probe when the shared plan bucket is spent.
+# Budget lanes partition first, then newest mainline Free -high variant, then the
+# strongest/newest Free id. Empty when unavailable.
 _devin_first_catalog_free_model() {
   [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || { printf ''; return; }
   local raw; raw="$(_devin_catalog_raw 2>/dev/null)" || raw=""
   [ -n "$raw" ] || { printf ''; return; }
   jq -r '
-    def isfree(o): (((o.cost_tier // "") + " " + (o.cost_summary // ""))|test("free";"i"));
-    [ .families[]? | select((.variants|length) > 0 and all(.variants[]?; isfree(.))) | .family_uid ]
-    | (first // empty)
+    def isfree(o): (((o.cost_tier | strings) // "") | ascii_downcase) == "free";
+    def uidok(s): ((s|type) == "string") and (s|test("^[A-Za-z0-9._/-]+$"));
+    def vernums: [ scan("[0-9]+") | tonumber ];
+    def tiernum: if (.model_uid|endswith("-max")) then 5
+      elif (.model_uid|endswith("-xhigh")) then 4
+      elif (.model_uid|endswith("-high")) then 3
+      elif (.model_uid|endswith("-medium")) then 2
+      elif (.model_uid|endswith("-low")) then 1 else 0 end;
+    def nonbudget: (.model_uid|ascii_downcase|test("flash|fast|lightning")|not);
+    def best:
+      ( (map(select(nonbudget))) as $nb | (if ($nb|length)>0 then $nb else . end)
+        | sort_by([(.model_uid|vernums), tiernum]) | reverse | .[0].model_uid );
+    # Budget lanes partition FIRST (flash/fast/lightning never outrank mainline), then
+    # newest mainline -high, then strongest remaining. No family-id preference: a bare
+    # family id is no more launchable than a variant id, and preferring it inverted the
+    # documented version order whenever an old all-free family coexisted with a newer
+    # mixed one (Neon + GLM review findings).
+    ([ .families[]?.variants[]? | select(isfree(.) and uidok(.model_uid)) ]) as $free
+    | ([ $free[] | select(nonbudget) ]) as $nb
+    | (if ($nb | length) > 0 then $nb else $free end) as $pool
+    | (([$pool[] | select(.model_uid|endswith("-high"))] | best) // ($pool | best) // empty)
   ' 2>/dev/null <<<"$raw"
 }
 
@@ -1240,15 +1267,20 @@ _devin_resolve_dynamic() {
   [ "${OSRC_CATALOG_VALIDATE:-1}" = "0" ] && return 1         # same knob that skips the live catalog gate
   eff="$(_deepseek_effort_suffix)"
   cat="$(_devin_catalog_raw)"; [ -n "$cat" ] || return 1
-  # costrank reads cost_tier AND cost_summary. The LIVE catalog puts "Free" in cost_tier and leaves
-  # cost_summary null on plan-included models (verified against `devin models list --format json`,
-  # 2026-08-15), so keying on cost_summary alone would rank every free variant as paid and fall back
-  # to the shortest-name tiebreak by luck rather than by cost.
+  # costrank reads ONLY exact cost_tier=Free. cost_summary is not a cost authority: Fusion rows
+  # end with "Sidekick: Free" while the main model is still High cost, so matching that text would
+  # rank a paid Fusion id as free.
   printf '%s' "$cat" | jq -r --arg tok "$tok" --arg eff "$eff" '
     def vernums: [ scan("[0-9]+") | tonumber ];
-    def costrank: if ((((.cost_tier // "") + " " + (.cost_summary // "")))|test("free";"i")) then 0 else 1 end;
+    def costrank: if (((.cost_tier | strings) // "") | ascii_downcase) == "free" then 0 else 1 end;
+    # Exact-match normalization must mirror the spend gate (lowercase, dots folded) and
+    # return the catalog exact uid — a case/dot variation that bypassed the gate check
+    # but resolved to a DIFFERENT paid variant was the end-to-end spend bypass (Neon,
+    # verified end-to-end).
+    def keyify(s): (s | ascii_downcase | gsub("\\.";"-"));
     ( [ .families[]?.variants[]?.model_uid ] ) as $allvars
-    | if ($allvars | index($tok)) then $tok
+    | ( $allvars | map(keyify(.)) | index(keyify($tok)) ) as $exactidx
+    | if $exactidx != null then $allvars[$exactidx]
       else
         ( [ .families[]?
             | select( (.family_uid|ascii_downcase) == ($tok|ascii_downcase)
@@ -1258,7 +1290,13 @@ _devin_resolve_dynamic() {
           else
             ( ($fams | map(select(.family_uid | test("flash|fast|lightning";"i")|not))) as $nf
               | (if ($nf|length)>0 then $nf else $fams end) ) as $cand
-            | ( $cand | sort_by(.family_uid|vernums) | reverse | .[0] ) as $fam
+            # An unversioned family alias prefers a family that still HAS a Free variant:
+            # when a promo ends on the newest generation, `swe` must resolve to the Free
+            # older generation rather than silently landing on the paid newest one (Neon).
+            # Explicit paid pins are unaffected — they hit the exact-match branch above.
+            | ( ($cand | map(select([(.variants // [])[]? | select(costrank == 0)] | length > 0))) as $cfam
+                | (if ($cfam|length)>0 then $cfam else $cand end) ) as $pool
+            | ( $pool | sort_by(.family_uid|vernums) | reverse | .[0] ) as $fam
             | ( ($fam.variants // []) | map(select(.model_uid | test("-(1m|none)$";"i")|not)) ) as $vars
             | if ($vars|length)==0 then ""
               else
@@ -1287,8 +1325,12 @@ _devin_is_free_model() {
   esac
   # Catalog-driven union: any model the LIVE catalog marks cost_tier="Free" is free, so a newly added
   # or renamed Free model is recognized with no code change — this is what stops the list from drifting.
-  local canon; canon="$(printf '%s' "$t" | sed -E 's#^[^/]*/##; s/-(high|low|max|medium)$//; s/-[0-9]{6,}$//; s/\./-/g')"
-  case "$(_devin_catalog_free_set)" in *" $canon "*) return 0 ;; esac
+  # Exact-token match only: v: for the probe's own exact id, f: when the probe IS a bare
+  # all-free family id. Never strip the probe's tier suffix — a paid -max sibling canonizing
+  # onto its free -high sibling was the paid-billing hole (Neon/GLM review finding).
+  local norm set; norm="$(printf '%s' "$t" | sed -E 's#^[^/]*/##; s/-[0-9]{6,}$//; s/\./-/g')"
+  set="$(_devin_catalog_free_set)"
+  case "$set" in *" v:$norm "*|*" f:$norm "*) return 0 ;; esac
   return 1
 }
 # The OpenRouter ALIAS a free Devin model also runs under (so the advertised fallback resolves to the
@@ -15673,7 +15715,18 @@ route_delegate() {
   # UNCONDITIONAL: it runs even when lane resolution produced no _cap_lane — an
   # empty lane is billing=unknown and must refuse, never silently dispatch.
   local _src=0
-  _osrc_spend_gate "${_cap_lane:-$disp}" "$RESOLVED_ID" "$disp" "dispatch $verb" || _src=$?
+  # Gate the id that will actually LAUNCH, not the raw -m token. Devin resolution
+  # (alias -> catalog id, effort suffixing) happens inside delegate() AFTER this gate;
+  # a case/dot variation or family alias could pass here as Free and then resolve to a
+  # paid variant downstream — the end-to-end bypass Neon verified. Resolution is
+  # deterministic, so resolving here once classifies exactly what delegate() launches.
+  local _gate_model="$RESOLVED_ID"
+  case "$disp" in
+    devin|dv)
+      local _gm; _gm="$(_devin_resolve_model "$RESOLVED_ID" 2>/dev/null)"
+      [ -n "$_gm" ] && _gate_model="$_gm" ;;
+  esac
+  _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || _src=$?
   [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
 
   _route_resolution "$disp" "$RESOLVED_ID"

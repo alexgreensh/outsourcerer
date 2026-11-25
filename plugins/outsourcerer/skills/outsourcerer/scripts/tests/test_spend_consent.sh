@@ -44,12 +44,14 @@ HB="$TMP/hb"; mkdir -p "$HB"
 # token-bound exact .spend-ok markers.
 # ---------------------------------------------------------------------------------------------------
 
-# F1 unit: _devin_default_free_model picks from the live catalog's Free set, prefers
-# swe-2-high, falls back to swe-2-high offline — never a metered id.
+# F1 unit: _devin_default_free_model picks from the live catalog's exact Free set,
+# preferring the newest mainline high variant and falling back to swe-2-high offline.
 b="$( _devin_catalog_free_ids() { printf 'swe-2-max swe-2-high '; return 0; }; _devin_default_free_model )"
 [ "$b" = "swe-2-high" ] && ok "r3.2 default: catalog Free set -> swe-2-high preferred" || bad "r3.2 default: catalog pick -> '$b'"
+b="$( _devin_catalog_free_ids() { printf 'zzz-9-high swe-2-high swe-2-1-high swe-2-flash-high '; return 0; }; _devin_default_free_model )"
+[ "$b" = "swe-2-1-high" ] && ok "r3.2 default: newest mainline SWE high beats older/flash/other-family" || bad "r3.2 default: version-aware pick -> '$b'"
 b="$( _devin_catalog_free_ids() { printf 'glm-5.2 swe-2-max '; return 0; }; _devin_default_free_model )"
-[ "$b" = "glm-5.2" ] && ok "r3.2 default: no preferred id -> first catalog Free id" || bad "r3.2 default: first-free pick -> '$b'"
+[ "$b" = "swe-2-max" ] && ok "r3.2 default: no high -> strongest/newest Free id" || bad "r3.2 default: fallback-free pick -> '$b'"
 b="$( _devin_catalog_free_ids() { return 1; }; _devin_default_free_model )"
 [ "$b" = "swe-2-high" ] && ok "r3.2 default: catalog unreachable -> swe-2-high fallback" || bad "r3.2 default: offline -> '$b'"
 b="$( _devin_catalog_free_ids() { printf ' '; return 0; }; _devin_default_free_model )"
@@ -110,14 +112,39 @@ EOF
 chmod +x "$DBIN/devin"
 cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
 {"families":[
+ {"family_uid":"swe-2-1","aliases":[],"variants":[
+   {"model_uid":"swe-2-1-high","cost_tier":"Free","cost_summary":null},
+   {"model_uid":"swe-2-1-max","cost_tier":"Free","cost_summary":null},
+   {"model_uid":"swe-2-1-high-lightning","cost_tier":"High cost","cost_summary":"$5/MTok"}]},
  {"family_uid":"swe-2","aliases":["swe"],"variants":[
    {"model_uid":"swe-2-high","cost_tier":"Free","cost_summary":null},
    {"model_uid":"swe-2-max","cost_tier":"Paid","cost_summary":"$5/MTok"}]},
+ {"family_uid":"fusion","aliases":[],"variants":[
+   {"model_uid":"fusion-claude-opus-sidekick-swe-2-medium","cost_tier":"High cost","cost_summary":"$4/MTok · Sidekick: Free"}]},
  {"family_uid":"glm-5.2","aliases":["glm"],"variants":[
    {"model_uid":"glm-5-2","cost_tier":"Plan","cost_summary":"plan-included"}]}]}
 EOF
-printf '["swe-2","swe","swe-2-high","swe-2-max","glm-5.2","glm","glm-5-2"]\n' > "$DOH/catalogs/dv.json"
+printf '["swe-2-1","swe-2-1-high","swe-2-1-max","swe-2","swe","swe-2-high","swe-2-max","fusion-claude-opus-sidekick-swe-2-medium","glm-5.2","glm","glm-5-2"]\n' > "$DOH/catalogs/dv.json"
 : > "$TMP/devin-stub.log"
+# Exact-cost extraction: a Fusion row whose price text ends in "Sidekick: Free"
+# is still High cost for the main model and must never enter the Free proof set.
+# Poison the cache in the pre-fix v1 format too: the extractor-versioned v2 key
+# must ignore it, or an upgraded install keeps treating paid Fusion ids as Free.
+rfmt=$(stat -f %m "$DOH/catalogs/dv.raw.json" 2>/dev/null || stat -c %Y "$DOH/catalogs/dv.raw.json" 2>/dev/null)
+printf '%s|fusion-claude-opus-sidekick-swe-2-medium\n' "$rfmt" > "$DOH/.devin-free-ids"
+idsout="$(HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _devin_catalog_free_ids' 2>/dev/null)"
+case " $idsout " in
+  *" swe-2-1-high "*) ok "r3.2 free-ids: exact swe-2-1-high included" ;;
+  *) bad "r3.2 free-ids: swe-2-1-high missing: $idsout" ;;
+esac
+case " $idsout " in
+  *fusion*) bad "r3.2 free-ids: Sidekick-only Fusion leaked into Free set: $idsout" ;;
+  *) ok "r3.2 free-ids: Sidekick-only Fusion excluded" ;;
+esac
+case "$(head -1 "$DOH/.devin-free-ids" 2>/dev/null)" in
+  v2\|*) ok "r3.2 free-ids: cache rewritten with extractor version v2" ;;
+  *) bad "r3.2 free-ids: cache not versioned: $(head -1 "$DOH/.devin-free-ids" 2>/dev/null | cut -c1-80)" ;;
+esac
 out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$DOH/catalogs/dv.raw.json" \
     PATH="$DBIN:$FAKEBIN:$PATH" HOME="$DHOME" OSRC_HOME="$DOH" OSRC_SOURCED= \
     OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 \
@@ -128,9 +155,9 @@ case "$out" in
   *) [ $rc -eq 0 ] && ok "r3.2 default-run: bare run on logged-in Devin does not ask" \
        || bad "r3.2 default-run: bare run rc=$rc: $(printf '%s' "$out" | head -6)" ;;
 esac
-grep -q -- '--model swe-2-high' "$TMP/devin-stub.log" \
-  && ok "r3.2 default-run: dispatched the catalog Free pick swe-2-high" \
-  || bad "r3.2 default-run: stub log lacks --model swe-2-high: $(cat "$TMP/devin-stub.log" 2>/dev/null | head -5)"
+grep -q -- '--model swe-2-1-high' "$TMP/devin-stub.log" \
+  && ok "r3.2 default-run: dispatched newest catalog Free pick swe-2-1-high" \
+  || bad "r3.2 default-run: stub log lacks --model swe-2-1-high: $(cat "$TMP/devin-stub.log" 2>/dev/null | head -5)"
 # Offline catalog -> swe-2-high fallback still does not ask.
 DOH2="$TMP/dohome2"; mkdir -p "$DOH2"
 # Lift the launch and pause disk floors for this fake home only (the host's free disk must not decide this test).
