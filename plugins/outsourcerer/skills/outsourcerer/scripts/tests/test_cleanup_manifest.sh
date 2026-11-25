@@ -108,8 +108,8 @@ git -C "$R" branch outsourcerer/pr-old
 git -C "$R" checkout -q -B tmp-side2 main
 printf 'side2\n' > "$R/side2.txt"; git -C "$R" add side2.txt; git -C "$R" commit -qm side2
 git -C "$R" branch outsourcerer/pr-hit
-git -C "$R" branch -q -D tmp-side tmp-side2 2>/dev/null
 git -C "$R" checkout -q main
+git -C "$R" branch -q -D tmp-side tmp-side2
 owner job-pr
 
 # gh stub: answers `pr list --head <br> --state merged --json headRefOid`.
@@ -393,28 +393,22 @@ git -C "$BR" checkout -q main
 git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-lo" -b outsourcerer/wt-lo "$FEAT"
 git -C "$BR" branch -q -D feat
 bm() { OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$@"; echo "rc=$?"' _ "$@" 2>&1 | tail -1; }
-[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=1" ] \
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=1" ] \
   && ok "base held only by the worktree branch is not preservation (#84)" || bad "local-only base counted as preserved"
 # A remote-tracking ref holding the base makes the shortcut valid again.
 git -C "$BR" update-ref refs/remotes/origin/feat "$FEAT"
-[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=0" ] \
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=0" ] \
   && ok "base held by a remote-tracking ref still preserves the branch" || bad "remote-held base not accepted"
 # Branch with a commit past the remote-held base is not preserved.
 ( cd "$BR/.outsourcerer/worktrees/wt-lo" && printf 'more\n' > more.txt && git add more.txt && git commit -qm more )
-[ "$(bm "$BR" outsourcerer/wt-lo "$FEAT")" = "rc=1" ] \
+[ "$(bm "$BR" outsourcerer/wt-lo)" = "rc=1" ] \
   && ok "commit past a remote-held base is not preserved" || bad "post-base commit counted as preserved"
-# Recorded base newer than every remote ref.
-XB="$(git -C "$BR" rev-parse outsourcerer/wt-lo)"
-[ "$(bm "$BR" outsourcerer/wt-lo "$XB")" = "rc=1" ] \
-  && ok "base newer than every remote ref is not preservation" || bad "unpushed base counted as preserved"
-[ "$(bm "$BR" outsourcerer/wt-lo "")" = "rc=1" ] && ok "empty base falls through to ASK" || bad "empty base mishandled"
 git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
-[ "$(bm "$BR" outsourcerer/wt-main "")" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
-[ "$(bm "$BR" outsourcerer/wt-main "not-a-sha")" = "rc=0" ] && ok "garbage base does not break main containment" || bad "garbage base broke verdict"
+[ "$(bm "$BR" outsourcerer/wt-main)" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
 # Trunk-named repo, no remotes: another local branch holds the tip, so it is preserved.
 RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
 trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk ""; echo "rc=$?"' _ "$RT" 2>&1)"
-[ "$(tail -1 <<<"$trk")" = "rc=0" ] && ! grep -qi 'unbound' <<<"$trk" \
+[ "$(tail -1 <<<"$trk")" = "rc=0" ] \
   && ok "tip still held by another local branch is preserved (no main-ish ref needed)" || bad "trunk-shaped repo cried wolf: $trk"
 # End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
 R3="$TMP/repo-base2"; mkrepo "$R3"
@@ -505,14 +499,14 @@ echo "=== round 4: detached live HEAD and truncated manifest ==="
 R7="$TMP/repo-r4"; mkrepo "$R7"
 mkwt "$R7" wt-dh "$(git -C "$R7" rev-parse HEAD)"; owner wt-dh
 ( cd "$R7/.outsourcerer/worktrees/wt-dh" && git checkout -q --detach && printf 'x\n' > x && git add x && git commit -qm x )
-jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg b outsourcerer/wt-dh --arg bs "$(git -C "$R7" rev-parse HEAD)" \
-  '{path:$p,branch:$b,base_sha:$bs}' > "$OSRC_HOME/jobs/wt-dh/worktree.json"
 age "$R7/.outsourcerer/worktrees/wt-dh"
 v="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_cleanup_verdict "$1"' _ "$(jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg r "$R7" '{path:$p,kind:"worktree",session:"wt-dh",repo:$r}')" 2>&1)"
-grep -q '^ASK' <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
+grep -q '^ASK.*not on branch' <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
 mf="$OSRC_HOME/created.jsonl"; cp "$mf" "$mf.bak"; printf '{"path":"/x","ki' >> "$mf"
 sc="$(run cleanup 2>&1)"; scrc=$?
-[ "$scrc" = "0" ] && ! grep -qi 'did not finish' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"
+[ "$scrc" = "0" ] && grep -q 'wt-e2e' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"
+OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_created_record /real/wt worktree s1 /real' 2>/dev/null
+jq -R 'fromjson?|.path' "$mf" | grep -q '/real/wt' && ok "record after a truncated line is not glued to it" || bad "record lost after truncated line"
 mv "$mf.bak" "$mf"
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

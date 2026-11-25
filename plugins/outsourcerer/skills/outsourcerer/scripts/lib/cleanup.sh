@@ -29,6 +29,7 @@ _osrc_created_record() {
   case "$p" in *$'\n'*|*$'\r'*) return 0 ;; esac
   local f="$OSRC_HOME/created.jsonl"
   _mkdir_private "$OSRC_HOME" >/dev/null 2>&1 || mkdir -p "$OSRC_HOME" 2>/dev/null || return 0
+  [ -z "$(tail -c1 "$f" 2>/dev/null)" ] || echo >> "$f" 2>/dev/null
   jq -cn --arg p "$p" --arg k "$k" --arg s "$s" --arg r "$r" --argjson t "$(date +%s)" \
     '{path:$p,kind:$k,session:$s,repo:$r,ts:$t}' >> "$f" 2>/dev/null || true
   return 0
@@ -297,15 +298,13 @@ _osrc_cleanup_verdict() {
       [ "$(git -C "$pp" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/$br" ] \
         || { printf 'ASK\tworktree HEAD is not on branch %s (detached commits would be lost)\n' "$br"; return 0; }
       _osrc_branch_merged "$repo" "$br" \
-        || { printf 'ASK\tbranch %s has commits missing from remote/main and no merged PR\n' "$br"; return 0; }
+        || { printf 'ASK\tbranch %s has commits no other branch, remote or tag holds, and no merged PR\n' "$br"; return 0; }
       ;;
     branch)
       _osrc_branch_checked_out "$repo" "$path" \
         && { printf 'ASK\tbranch still checked out in a worktree\n'; return 0; }
-      local wj2
-      wj2="$OSRC_JOBS/$sess/worktree.json"; [ -f "$wj2" ] || wj2="$OSRC_HOME/loops/$sess/worktree.json"
       _osrc_branch_merged "$repo" "$path" \
-        || { printf 'ASK\tcommits missing from remote/main and no merged PR\n'; return 0; }
+        || { printf 'ASK\tcommits missing: no other branch, remote or tag holds them, and no merged PR\n'; return 0; }
       ;;
     fanout)
       local gd2="$OSRC_HOME/fanout/$sess" jid2 st2 bad=0
@@ -591,7 +590,7 @@ _osrc_disk_gate() {
   case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
   free_gb=$(( free_kb / 1048576 ))
   [ "$free_gb" -lt "${OSRC_DISK_MIN_GB:-10}" ] || return 0
-  items="$(_osrc_cleanup_items --no-size 2>/dev/null)" || die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and the cleanup scan did not finish, so the leftover list is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'."
+  items="$(_osrc_cleanup_items --no-size 2>/dev/null)" || die "outsourcerer: free disk is ${free_gb}GB (< ${OSRC_DISK_MIN_GB:-10}GB) and the cleanup scan did not finish, so the leftover list is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack', or launch with OSRC_DISK_MIN_GB=0."
   # Best-effort refresh for the tick and other readers. The gate itself decides
   # from the LIVE scan below, never from the persisted file: when this write
   # fails (full disk, unwritable state dir -- exactly when the gate runs) a
@@ -680,7 +679,7 @@ _cmd_cleanup_target() {
   if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] && [ -n "$maindir" ] \
      && git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
      && ! _osrc_branch_merged "$maindir" "$branch"; then
-    echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (not on main, a remote, or a merged PR)." >&2
+    echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (no other branch, remote or tag holds it, and no merged PR)." >&2
     echo "  inspect: git -C \"$path\" log --oneline -3; push or branch it first, or force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi

@@ -144,3 +144,18 @@ Not run on bash 3.2. The six undiagnosed conformance failures from round 3 are u
 
 ## Needs from other lanes (round 4)
 - A macOS bash 3.2 run of `test_cleanup_manifest.sh`.
+
+## Round 5 (closing edits)
+
+- **1 (P2)** `_osrc_created_record` now adds a newline when the manifest's last byte is not one, so a record appended after a truncated line is no longer glued to it and dropped by `fromjson?`. Test fails on the base (`record lost after truncated line`).
+- **2 (P2)** Fixture: `checkout main` now precedes `branch -D tmp-side tmp-side2` (no `2>/dev/null`). The merged-PR test runs again; with the gh path neutralised it fails ("tip-matched merged-PR branch survived").
+- **3, 4, 6** Tests: detached-HEAD greps `ASK.*not on branch`; truncated-manifest asserts `wt-e2e` is still listed; dropped redundant `bm` assertions, the third arguments, the `unbound` grep and the rewritten `worktree.json`.
+- **5** Removed dead `wj2` lines. **7** gate message names `OSRC_DISK_MIN_GB=0`. **8** wording now "no other branch, remote or tag holds it".
+- **9** r4 READY/RESULT removed; new RESULT names this head's base sha and a run rc.
+- **10** Not done: bash 3.2 run; full conformance run is recorded in `osrc-l6-r5.RESULT`.
+- Net lines: 15 added, 22 removed in code/tests (before this report).
+
+Tests: `bash tests/test_cleanup_manifest.sh` rc=0 (85 pass); with base `lib/cleanup.sh`, 1 fail (finding 1).
+
+## Needs from other lanes (round 5)
+- A macOS bash 3.2 run of `test_cleanup_manifest.sh`; strip `reports/` and lane markers before main.
