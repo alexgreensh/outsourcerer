@@ -72,6 +72,7 @@ _capture_report() {   # <suite-name>
   rm -f "$TMP/rep"
   ( ok()  { printf 'OK:%s\n' "$1" >> "$TMP/rep"; }
     bad() { printf 'BAD:%s\n' "$1" >> "$TMP/rep"; }
+    note() { printf 'SKIP:%s\n' "$1" >> "$TMP/rep"; }
     _report_unit_suite_result "$1" ) 2>&1
 }
 
@@ -257,6 +258,14 @@ EOF
 _wd_assert_dead "timeout" 2  "$TMP/outlives-bound.sh"
 _wd_assert_dead "TERM"    60 "$TMP/finishes-first.sh"
 unset OSRC_SUITE_TIMEOUT
+
+# A green suite's SKIP lines (a missing precondition) count as gate skips, never as passes.
+_suite_timed_out=0; _suite_rc=0; _suite_out="$(printf 'PASS: a\nSKIP: no bwrap here\nRESULT: 1 passed\n')"
+_capture_report skipper >/dev/null; rep_f="$(cat "$TMP/rep")"
+[ "$rep_f" = "$(printf 'OK:unit suite skipper green\nSKIP:skipper: no bwrap here')" ] && ok "a green suite's SKIP line is counted as a gate skip" \
+  || bad "inner SKIP not counted: $(printf '%s' "$rep_f" | tr '\n' '|')"
+_suite_out="PASS: a"; _capture_report plain >/dev/null
+[ "$(cat "$TMP/rep")" = "OK:unit suite plain green" ] && ok "a green suite with no SKIP line adds no skip" || bad "phantom skip: $(tr '\n' '|' < "$TMP/rep")"
 
 # ------------------------------------------------------- 3. failing suite: ordinary failure, not timeout
 cat > "$TMP/failing.sh" <<'EOF'

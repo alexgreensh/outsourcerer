@@ -311,6 +311,8 @@ _report_unit_suite_result() {   # <suite-name>; reads the _suite_* state _run_un
     bad "unit suite $1 printed FAIL lines but exited 0 (its last line must exit non-zero on failure)"
     printf '%s\n' "$_suite_out" | grep -E '^FAIL' | sed 's/^/      /'
   elif [ "$_suite_rc" -eq 0 ]; then ok "unit suite $1 green"
+    # A check a suite skipped for a missing precondition counts as skipped, not passed.
+    while IFS= read -r _skl; do [ -n "$_skl" ] && note "$1: ${_skl#SKIP: }"; done <<<"$(printf '%s\n' "$_suite_out" | grep -E '^SKIP: ')"
   else
     bad "unit suite $1 FAILED"
     printf '%s\n' "$_suite_out" | grep -E '^(FAIL|SKIP)' | sed 's/^/      /'

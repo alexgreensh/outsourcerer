@@ -343,6 +343,14 @@ delegate_local auto
         fake.chmod(0o755)
         bindir = self.base / 'bin'
         bindir.mkdir()
+        guard = {'Darwin': '/usr/bin/sandbox-exec', 'Linux': '/usr/bin/bwrap'}.get(os.uname().sysname)
+        if not (guard and Path(guard).exists()):
+            # No OS guard on this host: the matrix must refuse to run, never run unguarded.
+            with self.assertRaisesRegex(RuntimeError, 'MATRIX_DENIED: OS guard unavailable'):
+                matrix.direct_command([str(fake)], bindir, agent_paths=[fake])
+            print('\nSKIP: no OS guard here (%s is missing); checked only that the matrix refuses'
+                  % (guard or 'no supported guard for ' + os.uname().sysname), flush=True)
+            self.skipTest('no OS guard on this host')
         command = matrix.direct_command([str(fake)], bindir, agent_paths=[fake])
         # Check the sandbox boundary argv/profile here. The host probe executes it.
         self.assertNotEqual(command, [str(fake)])
