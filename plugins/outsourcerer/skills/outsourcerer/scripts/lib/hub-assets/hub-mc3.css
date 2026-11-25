@@ -105,3 +105,10 @@
 .quiet-fold { margin-top: 8px; }
 .quiet-fold > summary { cursor: pointer; font-weight: 700; font-size: 1rem; padding: 6px 0; }
 .quiet-fold > .ptiles { margin-top: 12px; }
+/* hub-attn.js: three lane bands, the keys help, the key target. */
+.bands .band-you { background: var(--hi-soft); }
+.bands .attn { display: block; margin-top: 4px; font-size: .8rem; }
+.bands .band-work { margin: 12px 0 0; }
+[data-wait]:focus { outline: 3px solid var(--hi-line); outline-offset: 2px; }
+.kb-help { position: fixed; right: 16px; bottom: 16px; z-index: 60; max-width: min(340px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 8px; }
+.kb-help ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }

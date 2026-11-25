@@ -42,7 +42,7 @@
     return min < 60 ? Math.max(1, Math.floor(min)) + ' min' : min < 2880 ? Math.floor(min / 60) + ' h' : Math.floor(min / 1440) + ' days';
   }
   function cardStaleInfo(p, nowMs) {
-    if (!p || p.status === 'shipped') return null;
+    if (!p || p.status === 'shipped' || p.source === 'live') return null;   // derived from live lanes: current by construction
     const hasText = Boolean(p.cardStale || p.next || p.eta || (typeof p.pct === 'number' && isFinite(p.pct)));
     if (!hasText) return null;
     const lim = (typeof p.cardStaleMin === 'number' && isFinite(p.cardStaleMin)) ? p.cardStaleMin : 30;
@@ -288,6 +288,23 @@
       if (!isNaN(rep) && (Date.now() - rep) < limH * 3600000) return false;
       return true;
     }
+    // ---- Truth lines: the loud orchestrator alerts, each session's state, and the report's age ----------
+    // (lib/hub-truth.sh). "lanes running, orchestrator idle N min" and "lane finished N min ago, nobody
+    // picked it up" are the failures that cost the most time, so they sit on the tile itself.
+    const LOUD = ['orch-idle', 'unpicked'];
+    function truthLines(p) {
+      const out = [];
+      (Array.isArray(p.alerts) ? p.alerts : []).filter((a) => LOUD.includes(a.kind)).slice(0, 3)
+        .forEach((a) => { const n = el('p', 'pt-stale'); n.append(ic('triangle-alert'), document.createTextNode(' ' + a.text)); out.push(n); });
+      const os = Array.isArray(p.orchestrators) ? p.orchestrators : [];
+      if (os.length > 1) out.push(el('p', 'pt-tag', 'Sessions: ' + os.map((o) => (o.state === 'working' ? 'working' : o.state === 'gone' ? 'gone' : 'idle ' + ageSpan(o.idleMin || 0)) + (o.lanes ? ' (' + o.lanes + (o.lanes === 1 ? ' lane)' : ' lanes)') : '')).join(' · ')));
+      const r = p.reported;
+      if (p.source === 'live' && r && typeof r.ageMin === 'number') {
+        const said = [r.status, typeof r.pct === 'number' ? r.pct + '%' : '', r.next].filter(Boolean).join(', ');
+        if (said) out.push(el('p', 'pt-tag', 'Its session last said ' + ageSpan(Math.max(1, r.ageMin)) + ' ago: ' + said));
+      }
+      return out;
+    }
     function ptile(p) {
       const go = ctx.go; const ds = openDecs(p);
       const t = el('article', 'card ptile' + (p.status === 'paused' ? ' paused' : '') + (ds.length ? ' waits' : '')); t.id = 'tile-' + p.id;
@@ -298,6 +315,7 @@
       const cst = cardStaleInfo(p);
       if (cst) t.append(el('p', 'pt-stale', cst.text));
       else if (p.next) { const n = el('p', 'pt-next'); n.append(el('b', null, 'Next'), el('span', null, p.next)); t.append(n); }   // from hub report --next
+      truthLines(p).forEach((n) => t.append(n));
       const pr = el('div', 'pt-prog' + (hasPct(p) ? '' : ' nopct')); t.append(pr);
       if (hasPct(p)) {
         const bar = el('div', 'bar'); const fill = el('span'); bar.appendChild(fill);
@@ -323,7 +341,7 @@
       if (topN) t.append(el('p', 'pt-top5', topN + (topN === 1 ? ' decision waiting, shown above' : ' decisions waiting, shown above')));
       if (rest.length) {
         const ul = el('ul', 'pt-decs');
-        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + p.id + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); }); li.append(b); const dsi = decStaleInfo(p, d); if (dsi) li.append(el('span', 'dec-stale', dsi.text)); ul.append(li); });
+        rest.slice(0, 2).forEach((d) => { const li = el('li'); const b = el('button', 'dbtn'); b.type = 'button'; b.id = 'ptd-' + (d.owner || p.id) + '-' + d.id; b.append(pri(d.weight), el('span', null, d.short || d.q)); b.title = d.q || ''; b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, (d.owner || p.id) + '-' + d.id); }); li.append(b); const dsi = decStaleInfo(p, d); if (dsi) li.append(el('span', 'dec-stale', dsi.text)); ul.append(li); });
         t.append(ul);
         if (rest.length > 2) { const m = el('button', 'pt-more', 'and ' + (rest.length - 2) + ' more'); m.type = 'button'; m.id = 'ptm-' + p.id; m.addEventListener('click', (e) => { e.stopPropagation(); go(p.id); }); t.append(m); }
       } else if (!topN) { const n = el('p', 'pt-none'); n.append(ic('circle-check'), document.createTextNode('Nothing waiting on you.')); t.append(n); }
@@ -350,7 +368,7 @@
       const out = [];
       running.forEach((p) => {
         const al = Array.isArray(p.alerts) ? p.alerts : [];
-        const rev = al.filter((a) => a.kind === 'unreviewed').length, stuck = al.filter((a) => a.kind !== 'unreviewed').length;
+        const rev = al.filter((a) => a.kind === 'unreviewed').length, stuck = al.filter((a) => a.kind !== 'unreviewed' && !LOUD.includes(a.kind)).length;
         const bits = [];
         if (stuck) bits.push(stuck + (stuck === 1 ? ' stalled lane' : ' stalled lanes') + ' to unstick');
         if (rev) bits.push(rev + (rev === 1 ? ' finished lane' : ' finished lanes') + ' to review');
@@ -367,7 +385,7 @@
       decs.slice(0, 4).forEach(({ p, d }) => {
         const b = el('button', 'gnd'); b.type = 'button'; b.id = 'gn-' + p.id + '-' + d.id; b.title = d.q || '';
         b.append(pri(d.weight), el('span', 'gndt', d.short || d.q));
-        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, d.id); });
+        b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, (d.owner || p.id) + '-' + d.id); });
         ul.append(b);
       });
       if (decs.length > 4) { ul.append(el('span', 'gs', 'and ' + (decs.length - 4) + ' more below')); }
@@ -384,7 +402,7 @@
         li.append(cl);
       }
       const first = decs[0] || null, ask0 = askers[0] || null;
-      if (first || ask0) { li.classList.add('gclick'); li.addEventListener('click', () => (first ? go(first.p.id, first.d.id) : go(ask0.p.id))); }
+      if (first || ask0) { li.classList.add('gclick'); li.addEventListener('click', () => (first ? go(first.p.id, (first.d.owner || first.p.id) + '-' + first.d.id) : go(ask0.p.id))); }
     }
     function glance(running, all) {
       const waiting = all.length;
@@ -468,10 +486,10 @@
           if (dsi) q.append(el('span', 'tp-stale', dsi.text));
           // Only the first Decide is filled; the rest are ghost buttons so the eye lands on one call to action.
           const b = el('button', 'go' + (ul.children.length ? ' ghost' : '')); b.type = 'button'; b.id = 'tp-' + p.id + '-' + d.id; b.append(document.createTextNode('Decide'), ic('arrow-right')); b.setAttribute('aria-label', 'Decide: ' + (d.short || d.q));
-          b.addEventListener('click', () => go(p.id, d.id));
+          b.addEventListener('click', () => go(p.id, (d.owner || p.id) + '-' + d.id));
           const chev = ic('chevron-right'); chev.setAttribute('class', 'chev');
           li.append(pri(d.weight), q, b, chev); ul.append(li);
-          li.addEventListener('click', (e) => { if (window.innerWidth <= 520 && e.target !== b) go(p.id, d.id); });
+          li.addEventListener('click', (e) => { if (window.innerWidth <= 520 && e.target !== b) go(p.id, (d.owner || p.id) + '-' + d.id); });
         });
         sec.append(h, ul); main.append(sec);
       }

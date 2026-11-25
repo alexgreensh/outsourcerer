@@ -404,7 +404,7 @@ a.pill svg { width: 13px; height: 13px; }
 <div class="hc" id="hc" role="tooltip" hidden></div>
 
 <script src="assets/hub-alive.js"></script><script src="assets/hub-home.js"></script><script src="assets/hub-history.js"></script><script src="assets/hub-plans.js"></script>
-<script src="assets/hub-decide.js"></script><script src="assets/hub-proof.js"></script>
+<script src="assets/hub-decide.js"></script><script src="assets/hub-proof.js"></script><script src="assets/hub-attn.js"></script>
 <script>
 (function () {
   const root = document.documentElement;
@@ -429,7 +429,7 @@ a.pill svg { width: 13px; height: 13px; }
   const pri = (w) => el('span', 'pri p-' + String(w || 'Medium').toLowerCase(), w || 'Medium');
   const STATUS_TXT = { building: 'Building', waiting: 'Waiting on you', review: 'In review', shipped: 'Shipped', paused: 'Paused', idle: 'Between lanes' };
   const stPill = (p) => { const w = openDecs(p).length; return el('span', 'pill' + (w ? ' st-wait' : p.status === 'paused' || p.status === 'shipped' ? ' st-' + p.status : ''), w ? 'Waiting on you' : STATUS_TXT[p.status] || 'Building'); };   // tile and hover card share one pill
-  let projects = [], answers = {}, limits = [], also = [], alsoSig = '', db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false;  // drafts: hub-decide.js
+  let projects = [], answers = {}, limits = [], also = [], alsoSig = '', db = null, current = null, canWrite = null, firstPull = true, sigP = '', sigA = '', sigL = '', composing = false, pending = false, A = null;  // drafts: hub-decide.js; A: hub-attn.js
   // ---- data adapter: artifact db (window.claude) or local API (hub serve) ----
   let mode = 'none', pullErr = '', unsubs = [];
   const TOKEN = (() => { try { const t = new URLSearchParams(location.search).get('t') || ''; if (t) { sessionStorage.setItem('osrc-hub-t', t); try { const u = new URL(location.href); u.searchParams.delete('t'); history.replaceState(null, '', u.pathname + u.search + u.hash); } catch (e2) {} } return t || sessionStorage.getItem('osrc-hub-t') || ''; } catch (e) { return ''; } })();
@@ -445,13 +445,13 @@ a.pill svg { width: 13px; height: 13px; }
     }, (e) => { const x = new Error(ac.signal.aborted ? 'Not sent, try again' : ((e && e.message) || 'unreachable')); x.timeout = ac.signal.aborted; throw x; }).finally(() => clearTimeout(t));
   }
   // A poll that brings the same data re-renders nothing (exported_at changes on every export, so it is ignored).
-  const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' ? undefined : v));
+  const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' || k === 'summaryAt' ? undefined : v));
   function applyProjects(snap) {
     const s = sig(snap); if (s === sigP && !firstPull && !pullErr) return; sigP = s;
     pullErr = '';
     projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).map((p) => (window.OSRC_HUB_CLEAN ? OSRC_HUB_CLEAN.project(p) : p)).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
     if (firstPull) { current = pickStart(); firstPull = false; } else if (current && !projects.some((p) => p.id === current)) current = null;
-    renderRail(); pollRender();
+    renderRail(); if (A) A.refresh(projects); pollRender();   // the title counts even while a render is held
   }
   function applyLimits(snap) {
     const s = sig(snap); if (s === sigL) return; sigL = s;
@@ -678,7 +678,7 @@ a.pill svg { width: 13px; height: 13px; }
     nums.forEach((n) => { const a = el('a'); a.href = 'https://github.com/' + repo + '/issues/' + n.slice(1); a.target = '_blank'; a.rel = 'noopener'; a.title = 'Open ' + n + ' on GitHub'; a.append(ghSvg(), document.createTextNode(n)); a.addEventListener('click', (e) => e.stopPropagation()); box.appendChild(a); });
     return box;
   }
-  const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[p.id + '--' + d.id]).sort(byWeight);
+  const openDecs = (p) => (p.decisions || []).filter((d) => d.status !== 'done' && !answers[(d.owner || p.id) + '--' + d.id]).sort(byWeight);
 
   const pctOk = (x) => typeof (x && x.pct) === 'number' && isFinite(x.pct);
   const loading = () => firstPull && !pullErr && mode === 'local';   // before the first projects answer nothing may say "empty"
@@ -713,7 +713,7 @@ a.pill svg { width: 13px; height: 13px; }
         ds.forEach((d) => {
           const li = el('li'); const db2 = el('button', 'dbtn'); db2.type = 'button'; db2.id = 'pd-' + p.id + '-' + d.id;
           db2.append(pri(d.weight), el('span', null, d.short || d.q));
-          db2.addEventListener('click', () => { hide(); go(p.id, d.id); });
+          db2.addEventListener('click', () => { hide(); go(p.id, (d.owner || p.id) + '-' + d.id); });
           hover(db2, (c) => { const row = el('div', 'row'); row.append(pri(d.weight)); if (d.when) row.append(el('span', 'mono', 'By ' + d.when)); c.append(row, el('div', 'ht', d.q)); if (d.rec) c.append(el('p', null, d.rec)); }, true);
           li.appendChild(db2); ul.appendChild(li);
         });
@@ -793,6 +793,7 @@ a.pill svg { width: 13px; height: 13px; }
 
   const grown = new Set();   // bars animate the first time only; a re-render sets the width directly
   function renderMain() {
+    if (A) A.refresh(projects);   // bands, tab title, favicon dot, opt-in notification
     const p = projects.find((x) => x.id === current);
     const main = $('main'); if (!p && loading()) return;
     const ae = document.activeElement, keep = ae && ae.id && main.contains(ae) ? { id: ae.id, s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection } : null;
@@ -833,10 +834,10 @@ a.pill svg { width: 13px; height: 13px; }
         ds.forEach((d) => grid.appendChild(D ? D.decCard(p, d) : el('div', 'card dec', d.q)));
         sec.appendChild(grid);
       }
-      const done = (p.decisions || []).filter((d) => d.status === 'done' || answers[p.id + '--' + d.id]);
+      const done = (p.decisions || []).filter((d) => d.status === 'done' || answers[(d.owner || p.id) + '--' + d.id]);
       if (done.length) {
         const det = el('details', 'card decided'); det.appendChild(el('summary', null, 'Already decided (' + done.length + ')'));
-        const ul = el('ul'); done.forEach((d) => { const a = answers[p.id + '--' + d.id]; const li = el('li', 'dli'); li.append(tags(d), el('span', null, (d.q || d.short) + (a ? ' Your answer: ' + (a.choice || a.note) : ''))); ul.appendChild(li); });
+        const ul = el('ul'); done.forEach((d) => { const a = answers[(d.owner || p.id) + '--' + d.id]; const li = el('li', 'dli'); li.append(tags(d), el('span', null, (d.q || d.short) + (a ? ' Your answer: ' + (a.choice || a.note) : ''))); ul.appendChild(li); });
         det.appendChild(ul); sec.appendChild(det);
       }
       main.appendChild(sec);
@@ -869,7 +870,7 @@ a.pill svg { width: 13px; height: 13px; }
       { t: 'Live', match: ['shipped'], w: p.eta || 'Not set', d: 'Released to users.' }
     ];
     if (lanes.length && !p.boardTracks) {   // humans only. No board = no job names; plain counts and the next step
-      const FN = /^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$/i, nf = lanes.filter((l) => FN.test(l.status || '')).length, nw = lanes.length - nf; const sec = el('section'), c = el('div', 'card'); sec.append(el('h2', null, 'What is happening')); c.append(el('p', null, (nw ? nw + (nw === 1 ? ' piece of work is running' : ' pieces of work are running') : 'Nothing is running right now') + (nf ? ', ' + nf + ' finished.' : '.'))); if (p.next) c.append(el('p', null, 'Next: ' + p.next)); c.append(el('p', 'sub', 'The orchestrator has not published its board yet, so the work is not named here.')); sec.append(c); main.appendChild(sec);
+      const FN = /^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$/i, nf = lanes.filter((l) => FN.test(l.status || '')).length, nw = lanes.length - nf; const sec = el('section'), c = el('div', 'card'); sec.append(el('h2', null, 'What is happening')); c.append(el('p', null, (nw ? nw + (nw === 1 ? ' piece of work is running' : ' pieces of work are running') : 'Nothing is running right now') + (nf ? ', ' + nf + ' finished.' : '.'))); if (p.next) c.append(el('p', null, 'Next: ' + p.next)); c.append(el('p', 'sub', 'The orchestrator has not published its board yet, so the work is not named here.')); sec.append(c); main.appendChild(sec); if (A) main.appendChild(A.bands(p, lanes, laneTile, false));
     } else if (lanes.length) {
       const sec = el('section'); sec.append(el('h2', null, 'How a fix gets to your users'), el('p', 'sub', 'Numbers show how many tracks sit at each step right now.'));
       const row = el('div', 'flow'); const sc = el('div', 'flow-scroll'); sc.appendChild(row);
@@ -908,7 +909,7 @@ a.pill svg { width: 13px; height: 13px; }
           const i = hgt[0] <= hgt[1] ? 0 : 1; cols[i].appendChild(c); hgt[i] += w;
         });
         wrap.replaceChildren(...cols.filter((c) => c.children.length)); }   // one card keeps its half width: never a full-width monolith
-      sec2.appendChild(wrap); main.appendChild(sec2);
+      sec2.appendChild(wrap); main.appendChild(A && !(p.themes && p.themes.length) ? A.bands(p, lanes, laneTile, true) : sec2);   // no board themes: three bands
     }
     if (!ds.length) decSec();
     /* No 'Every lane' or 'History' sections; the page is the board. */   main.appendChild(el('p', 'foot', 'Last updated ' + (H && H.freshText ? H.freshText(p) : (p.updated || 'not yet')) + '. Each orchestrator refreshes its own project here as tracks move.'));
@@ -953,7 +954,7 @@ a.pill svg { width: 13px; height: 13px; }
     get projects() { return projects; }, get also() { return also; }, get limits() { return limits; }, LSTATE, hlogo, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
-  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null;
+  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null; A = typeof window.OSRC_HUB_ATTN === 'function' ? window.OSRC_HUB_ATTN({ el, openDecs }) : null;
 
   (async () => {
     const timer = setTimeout(() => { if (!projects.length) { renderRail(); if (db) renderMain(); } }, 10000);

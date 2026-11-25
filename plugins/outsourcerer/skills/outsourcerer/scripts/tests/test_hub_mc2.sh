@@ -92,7 +92,8 @@ lv() { printf '%s' "$out" | jq -r --arg n "osrc-test-MC2-$1" '.projects[] | sele
 [ "$(lv perm | cut -d' ' -f1)" = approval ] || fail "approval lane: $(lv perm)"
 [ "$(lv idle | cut -d' ' -f1)" = idle ] || fail "idle lane: $(lv idle)"
 printf '%s' "$out" | jq -e '.projects[] | select(.id == "live-sess") | .pct == 0' >/dev/null || fail 'real 0% lost'
-bash "$ROOT/outsourcerer.sh" hub export --project old-session 2>/dev/null | jq -e '.projects[] | select(.id == "old-session") | has("pct") | not' >/dev/null || fail 'unknown pct invented'
+# No report and no board: no percent, never one made from lane counts (lib/hub-truth.sh).
+bash "$ROOT/outsourcerer.sh" hub export --project old-session 2>/dev/null | jq -e '.projects[] | select(.id == "old-session") | (has("pct") | not) and .source == "live"' >/dev/null || fail 'unknown pct invented'
 printf 'PASS: MC2 r2 #2 pct and #5 lane state from real captures\n'
 
 # #4 per-export memo: the stock readers come back after the export, and the memo dir is gone.

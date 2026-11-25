@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # lib/hub-also.sh -- Mission Control "Also running": the Claude Code sessions that are NOT
 # Outsourcerer orchestrators or lanes but are working right now, or wrote their transcript within
-# OSRC_HUB_ACTIVE_MIN (30) minutes. Read-only: it reuses the fleet's peer observation
-# (_fleet_cc_peer_observations, which only reads ~/.claude/sessions + transcripts) and never attaches to,
-# sends to or changes a session. No naming model is called: names come from the folder's project and
+# OSRC_HUB_ACTIVE_MIN (30) minutes. Read-only: it reads ~/.claude/sessions and transcripts in one pass
+# (_osrc_hub_cc_rows) and never attaches to, sends to or changes a session. No naming model is called: names come from the folder's project and
 # the session's own title or first prompt (_osrc_hub_session_detail). Sourced by outsourcerer.sh.
 
 # _osrc_hub_model_label <model-id> -> "Opus 5.5" for claude-opus-5-5, the id otherwise, "" when empty.
@@ -21,33 +20,42 @@ _osrc_hub_transcript_model() {
 }
 
 # _osrc_hub_also_rows -> JSON array: {key, name ("<Project> · <title>"), project, title, model, state: working|waiting|idle, idleMin, since}.
+# Bounded: the registry is read in one pass (_osrc_hub_cc_rows, lib/hub-truth.sh); only the 12 rows that
+# are shown get names and models (title reads are cached by transcript size in hub/titles-v4).
 _osrc_hub_also_rows() {
   have jq || { printf '[]'; return 0; }
-  type _fleet_cc_peer_observations >/dev/null 2>&1 || { printf '[]'; return 0; }
-  local m="${OSRC_HUB_ACTIVE_MIN:-30}" now peers rows='[]' p sid cwd st alive tm job kind proj det model st2 age key name tf
+  type _osrc_hub_cc_rows >/dev/null 2>&1 || { printf '[]'; return 0; }
+  local m="${OSRC_HUB_ACTIVE_MIN:-30}" now rows='[]' sid cwd st su pid job wf alive tm st2 age key name proj det model claimed rk f pick=""
+  local _nl='
+'
   case "$m" in ''|*[!0-9]*) m=30 ;; esac
   now="$(date +%s)"
-  peers="$(_fleet_cc_peer_observations 2>/dev/null)" || peers='[]'
-  while IFS='|' read -r sid cwd st alive tm job kind; do   # "|", not a tab: whitespace IFS merges empty fields
-    [ -n "$sid" ] || continue
+  claimed="$(for f in "$OSRC_HOME"/owners/*/*; do [ -f "$f" ] && printf '%s\n' "${f##*/}"; done 2>/dev/null)"
+  while IFS='|' read -r sid cwd st su pid job wf alive tm; do
+    [ -n "$sid" ] && [ "$alive" = 1 ] && [ -z "$job" ] || continue
+    [ "$sid" = "${CLAUDE_CODE_SESSION_ID:-}" ] && continue
     # Orchestrators and their lanes are projects above, not "also running".
-    [ -z "$job" ] || continue
     [ -d "$OSRC_HOME/hub/seen/$sid" ] || [ -d "$OSRC_HOME/owners/$sid" ] || [ -f "$OSRC_HOME/hub/projects/$sid.json" ] && continue
-    ls "$OSRC_HOME"/owners/*/"$sid" >/dev/null 2>&1 && continue
+    case "$_nl$claimed$_nl" in *"$_nl$sid$_nl"*) continue ;; esac
     case "$tm" in ''|*[!0-9]*) tm=0 ;; esac
+    if [ -n "$wf" ]; then st2=waiting; else case "$st" in
+      working|busy|running) st2=working ;;
+      waiting|permission-waiting|needs-input|needs_you|blocked|permission-blocked) st2=waiting ;;
+      *) st2=idle ;; esac; fi
     age=$(( now - tm )); [ "$age" -ge 0 ] || age=0
-    case "$st" in
-      working|unresponsive\?) st2=working ;;
-      blocked|blocked\?) st2=waiting ;;
-      *) st2=idle ;;
-    esac
-    [ "$alive" = true ] || continue
     [ "$st2" != idle ] || { [ "$tm" -gt 0 ] && [ "$age" -le $(( m * 60 )) ]; } || continue
+    case "$st2" in waiting) rk=0 ;; working) rk=1 ;; *) rk=2 ;; esac
+    pick="$pick$rk|$tm|$sid|$cwd|$st2$_nl"
+  done <<EOF
+$(_osrc_hub_cc_rows)
+EOF
+  while IFS='|' read -r rk tm sid cwd st2; do
+    [ -n "$sid" ] || continue
+    age=$(( now - tm )); [ "$age" -ge 0 ] || age=0
     proj=""; [ -n "$cwd" ] && [ "$cwd" != "$HOME" ] && [ -d "$cwd" ] && proj="$(_osrc_hub_repo_label "$cwd")"
     [ -n "$proj" ] || { [ -n "$cwd" ] && [ "$cwd" != "$HOME" ] && [ "$cwd" != / ] && proj="$(_osrc_hub_humanize "$cwd")"; }
     det="$(_osrc_hub_session_detail "$sid" 2>/dev/null)"
-    tf="$(_fleet_transcript_path "$sid" "$cwd" 2>/dev/null)"
-    model="$(_osrc_hub_model_label "$(_osrc_hub_transcript_model "$tf")")"
+    model="$(_osrc_hub_model_label "$(_osrc_hub_transcript_model "${OSRC_CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}/${cwd//[!A-Za-z0-9]/-}/$sid.jsonl")")"
     # "<Project> · <title>"; the parts ride along so the page can set the project in bold.
     name="$(_osrc_hub_join_title "$proj" "$det")"; [ -n "$name" ] || name="Claude Code session"
     key="$(printf '%s' "$sid" | cksum | awk '{print $1}')"
@@ -60,9 +68,9 @@ _osrc_hub_also_rows() {
         + (if $st == "idle" then {idleMin:$idle} else {} end)
         + (if $tm > 0 then {activeAt:$tm} else {} end)]')"
   done <<EOF
-$(printf '%s' "$peers" | jq -r '.[] | select((.self // 0) != 1) | [.session_id, (.cwd // ""), (.state // ""), (.alive | tostring), (.transcript_mtime // 0), (.job_id // ""), (.kind // "")] | map(tostring | gsub("[|\t\n]"; " ")) | join("|")' 2>/dev/null)
+$(printf '%s' "$pick" | sort -t'|' -k1,1n -k2,2nr | head -12)
 EOF
-  jq -c 'sort_by((if .state == "waiting" then 0 elif .state == "working" then 1 else 2 end), -(.activeAt // 0)) | .[0:12]' <<<"$rows"
+  printf '%s' "$rows"
 }
 
 # _osrc_hub_also -> the rows, cached for OSRC_HUB_ALSO_TTL (30) seconds under `hub serve` (OSRC_HUB_FAST=1)

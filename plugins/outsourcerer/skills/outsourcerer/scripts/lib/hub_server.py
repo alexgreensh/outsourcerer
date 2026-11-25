@@ -298,7 +298,10 @@ class Hub:
         slug = slugs.pop()
         with self.lock:
             cached = self.cache
-        ids = {p.get("id") for p in cached.get("projects", [])} if cached else set()
+        # A card that merges several sessions (one project) is rebuilt by a full export only:
+        # a one-session export would drop the other sessions' lanes from it.
+        ids = {p.get("id") for p in cached.get("projects", [])
+               if len(p.get("members") or []) < 2} if cached else set()
         return slug if slug in ids else None
 
     def _merge_project_export(self, slug, timeout):

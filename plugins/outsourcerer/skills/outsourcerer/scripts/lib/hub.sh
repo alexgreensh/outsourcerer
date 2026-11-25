@@ -268,7 +268,7 @@ _osrc_hub_card() {
     base="$(jq -c '{name:(.name // empty), tagline:(.tagline // empty)} | with_entries(select(.value != null and .value != ""))' "$decfile" 2>/dev/null || printf '{}')"
   fi
   if [ -f "$pf" ]; then
-    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,next,reportedAt,shippedAt,summary,summaryAt,lanes,board}
+    base="$(jq -cn --argjson a "$base" --argjson b "$(jq -c '{name,tagline,order,repo,themes,flow,extraLinks,status,pct,eta,etaNote,next,reportedAt,shippedAt,summary,summaryAt,lanes,board,project}
       | .extraLinks |= (if .==null then null else [.[]? | select(.url | type == "string" and startswith("https://"))] end)
       | with_entries(select(.value != null))' "$pf" 2>/dev/null || printf '{}')" '$a + $b')"
   fi
@@ -349,7 +349,8 @@ _osrc_hub_build_project() {
   case "$card_stale_min" in ''|*[!0-9]*) card_stale_min=30 ;; esac
   case "$dec_stale_h" in ''|*[!0-9]*) dec_stale_h=2 ;; esac
   upda="$(_osrc_hub_project_mtime "$slug" "$lact" "$llive")"
-  local rep_at folder="" pf="$OSRC_HOME/hub/projects/$slug.json"
+  local rep_at folder="" pf="$OSRC_HOME/hub/projects/$slug.json" derived
+  derived="$(type _osrc_hub_derive >/dev/null 2>&1 && _osrc_hub_derive "$lanes" "$lact")"; [ -n "$derived" ] || derived=null
   rep_at="$(jq -r '.reportedAt // ""' <<<"$card")"
   if [ -z "$rep_at" ] && [ -f "$pf" ] && [ ! -L "$pf" ]; then
     local pmt; pmt="$(_osrc_hub_mt "$pf")"
@@ -366,7 +367,7 @@ _osrc_hub_build_project() {
     --arg rep_at "$rep_at" --arg folder "$folder" --argjson stot "$stot" \
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
     --arg status "$status" --arg pct "$pct" --arg eta "$eta" --arg etanote "$etanote" \
-    --arg tagline "$tagline" --arg repo "$repo" --argjson card "$card" '
+    --arg tagline "$tagline" --arg repo "$repo" --argjson card "$card" --argjson derived "$derived" '
     {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
      liveLanes:$live, staleHours:$staleHours, cardStaleMin:$cardStaleMin, decisionStaleH:$decisionStaleH, sessionsTotal:$stot,
      sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
@@ -385,13 +386,16 @@ _osrc_hub_build_project() {
     + (if ($card.next|type)=="string" and $card.next!="" then {next:$card.next} else {} end)
     + (if ($card.shippedAt|type)=="string" then {shippedAt:$card.shippedAt} else {} end)
     + (if ($card.summary|type)=="string" and $card.summary!="" then {summary:$card.summary} + (if ($card.summaryAt|type)=="string" then {summaryAt:$card.summaryAt} else {} end) else {} end)
+    + (if $derived == null then {} else {derived:$derived} end)
+    + ($card | {status, pct, eta, next, summary} | with_entries(select(.value != null and .value != "")) | if length > 0 then {reported:.} else {} end)
+    + (if ($card.project|type)=="string" and $card.project!="" then {projectKey:$card.project} else {} end)
   ')"
   # No live lane and no status of its own -> idle. A status the card or a Mark done / Move back set is kept
   # exactly (relabelling an explicit "building" undid Move back).
   ! type osrc_proof_hub_counts >/dev/null 2>&1 || out="$(jq -c --argjson c "$(osrc_proof_hub_counts "$lanes")" '. + $c' <<<"$out")"
   ! type _osrc_hub_apply_board >/dev/null 2>&1 || out="$(_osrc_hub_apply_board "$out" "$card")"   # the orchestrator's board drives the page (lib/hub_board.sh)
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.board"
-  out="$(_osrc_hub_status_override "$slug" "$out" | jq -c 'if .liveLanes == 0 and (has("status") | not) then .status="idle" else . end')"
+  out="$(_osrc_hub_status_override "$slug" "$out")"   # status left empty here is derived later (_osrc_hub_truth)
   out="$(_osrc_hub_annotate_freshness "$out" "$now" "$card_stale_min" "$dec_stale_h")"
   ! type osrc_mc_alerts >/dev/null 2>&1 || out="$(osrc_mc_alerts "$slug" "$out")"   # needs-you alerts + watcher gap (lib/mc_alive.sh)
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.alerts"
@@ -540,20 +544,6 @@ _osrc_hub_project_mtime() {
   [ "${3:-0}" = 1 ] && best="$(date +%s)"
   [ "$best" -gt 0 ] || { printf ''; return 0; }
   date -u -r "$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$best" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf ''
-}
-
-# osrc_hub_tick_touch <owner-session-id>: supervise's tick (every <= 10 min while an orchestrator runs)
-# calls this. It rewrites the card's summary from the live lanes ("3 lanes: 2 building, 1 done") and
-# summaryAt, keeping every other card field, so the narrative never reads older than one tick.
-osrc_hub_tick_touch() {
-  local slug="${1:-}" f pj sum now tmp
-  f="$OSRC_HOME/hub/projects/$slug.json"
-  _osrc_hub_slug_ok "$slug" && [ -f "$f" ] && [ ! -L "$f" ] && have jq || return 1
-  pj="$(_osrc_hub_build_project "$slug" "$(date +%s)" "$(_osrc_hub_now_stamp)")" || return 1
-  sum="$(jq -r '(.lanes // []) as $l | if ($l|length)==0 then "No lanes running." else
-    "\($l|length) lane\(if ($l|length)==1 then "" else "s" end): " + ([$l[].status // "Building" | ascii_downcase] | group_by(.) | map("\(length) \(.[0])") | join(", ")) end' <<<"$pj" 2>/dev/null)" || return 1
-  now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; tmp="$f.tick.$$"
-  jq --arg s "$sum" --arg at "$now" '. + {summary:$s, summaryAt:$at}' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
 }
 
 # _osrc_hub_unowned_project -> project doc for targets no owner session claims
@@ -784,8 +774,8 @@ _osrc_hub_need() {
   [ -z "$miss" ] || die "hub: required tool(s) not on PATH:$miss"
 }
 
-# cmd_hub_export [--project <slug>] -> SCHEMA docs JSON on stdout.
-cmd_hub_export() {
+# _osrc_hub_export_run: the export itself; cmd_hub_export (lib/hub-truth.sh) runs it single-flight.
+_osrc_hub_export_run() {
   # The fast path is the export under `hub serve` (hub_server.py exports with OSRC_HUB_FAST=1):
   # settled-project caches, memoised tmux/registry reads, stale-while-revalidate screens and queued
   # done-probes. A plain `hub export` stays synchronous so a one-shot caller never reads a cached
@@ -799,6 +789,9 @@ cmd_hub_export() {
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "export.start"
   now="$(date +%s)"; upd="$(_osrc_hub_now_stamp)"
   type _osrc_hub_memo_begin >/dev/null 2>&1 && _osrc_hub_memo_begin   # one pane read per lane per export
+  # One pass over the Claude session registry for the whole export (liveness + "Also running").
+  local _OSRC_HUB_CC_ROWS="" _OSRC_HUB_CC_ROWS_SET=""
+  type _osrc_hub_cc_rows >/dev/null 2>&1 && _OSRC_HUB_CC_ROWS="$(_osrc_hub_cc_rows)" && _OSRC_HUB_CC_ROWS_SET=1
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "memo.begin.done"
   # Slugs: every owner session + every decisions/projects file + unowned.
   local slugs=""
@@ -822,9 +815,16 @@ cmd_hub_export() {
     fi
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.detail"
     ! type _osrc_hub_history >/dev/null 2>&1 || pj="$(jq -c --argjson h "$(_osrc_hub_history "$slug" "$pj" 2>/dev/null || echo null)" '. + {history:$h}' <<<"$pj" 2>/dev/null || printf '%s' "$pj")"   # project history
+    type _osrc_hub_with_orch >/dev/null 2>&1 && pj="$(_osrc_hub_with_orch "$pj" "$slug" "$now")"   # orchestrator liveness
+    [ -f "$OSRC_HOME/hub/status/$slug.json" ] && pj="$(jq -c '. + {_hasStatus:true}' <<<"$pj")"
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.end"
     [ -n "$pj" ] && { projects="$(jq -cn --argjson a "$projects" --argjson b "$pj" '$a+[$b]')"; [ "$slug" = "$proj" ] && found=1; }
   done
+  # One card per project, then live evidence vs reports (lib/hub-truth.sh).
+  [ -n "$proj" ] || ! type _osrc_hub_group >/dev/null 2>&1 || projects="$(_osrc_hub_group "$projects")"
+  if type _osrc_hub_truth >/dev/null 2>&1; then
+    projects="$(jq -c '.[]' <<<"$projects" | while IFS= read -r pj; do _osrc_hub_truth "$pj" "$now"; printf '\n'; done | jq -cs 'map(del(._hasStatus))')"
+  fi
   if [ -z "$proj" ]; then
     local uj; uj="$(_osrc_hub_unowned_project "$now" "$upd")"
     [ -z "$uj" ] || uj="$(_osrc_hub_status_override unowned "$uj")"
@@ -983,4 +983,5 @@ cmd_hub() {
 
 # Lane naming lives in lib/hub-lanename.sh. The engine's lib loader sources it first; suites and
 # helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
+type _osrc_hub_truth >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-truth.sh" ] && . "$_osrc_hub_d/hub-truth.sh"; unset _osrc_hub_d; }
 type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }
