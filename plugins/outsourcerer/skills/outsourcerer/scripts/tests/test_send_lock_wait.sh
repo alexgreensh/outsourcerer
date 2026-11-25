@@ -40,11 +40,12 @@ n="$(jq -r 'select(.obligation_id|startswith("send.race.")) | .state' "$OSRC_OBL
   || bad "racing writers: rc=$rc bad_lines=$bad_lines records=$n"
 [ "$(_obligation_latest_state send.race.3)" = submitted ] && ok "latest state still read per id" || bad "latest state wrong"
 
-# 3. The wait is bounded and the error names the cause.
-rm -f "$TMP/held"; hold_lock 12
+# 3. The wait is bounded and the error names the cause. The holder releases on its own: killing it
+#    would strand a mkdir lock on bash 3.2 without flock (no BASHPID, so it names the live test shell).
+rm -f "$TMP/held"; hold_lock 4
 start=$(date +%s)
 OSRC_SEND_LOCK_WAIT_SECS=1 _obligation_admit send.c.1 lane-c 2>"$TMP/e3"; r3=$?
-took=$(( $(date +%s) - start )); kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+took=$(( $(date +%s) - start )); wait "$HOLDER" 2>/dev/null
 [ "$r3" -ne 0 ] && [ "$took" -le 3 ] && grep -q 'obligation ledger' "$TMP/e3" \
   && ok "lock wait is bounded (${took}s) with a clear error" || bad "bound: rc=$r3 took=${took}s err=$(cat "$TMP/e3")"
 [ -z "$(_obligation_latest_state send.c.1)" ] && ok "a refused writer leaves no record" || bad "refused writer wrote a record"

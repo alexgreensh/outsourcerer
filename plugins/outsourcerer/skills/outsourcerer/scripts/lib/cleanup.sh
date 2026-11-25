@@ -13,8 +13,9 @@
 #
 # SAFE requires ALL of: owning session done or gone, older than 1h, no process has a
 # file open under it, path under the manifest's recorded root. Worktrees and branches
-# additionally need a clean git status, no commits missing from the remote or main,
-# and the lane's PR merged. Anything failing a check is ASK, shown, never deleted.
+# additionally need a clean git status and their tip preserved: another ref (branch,
+# remote, tag) holds it, or the lane's PR merged. Anything failing a check is ASK, shown,
+# never deleted.
 
 # ---- manifest recording -------------------------------------------------------
 
@@ -417,19 +418,18 @@ _osrc_human_kb() { # <kb> -> "1.2G" style
 
 # Remote lane branches: never deleted here (the remote is the user's); offered with the exact command,
 # and only for a finished lane whose work is merged or rejected (BLOCK): a live lane's branches are never offered.
-# A cloud session may push only to its own claude/<id>-<suffix> branch (.poll_branch), offered too.
+# A cloud session may push only to its own claude/<id>-<suffix> branch: the followed .poll_branch is offered.
 _osrc_cleanup_remote_branches() {
-  local f id url br names alt head
+  local f id url br names head
   for f in "$OSRC_HOME"/remote/*.json; do
     [ -f "$f" ] || continue
     id="$(basename "$f" .json)"; br="$(jq -r '.branch // ""' "$f" 2>/dev/null)"; [ -n "$br" ] || continue
     case "$(osrc_remote_state "$id" 2>/dev/null)" in done|failed) ;; *) continue ;; esac
     [ "$(jq -r '.branch_deleted' "$f")" != true ] || continue; head="$(jq -r '.head // ""' "$f")"   # gone: nothing to delete
     [ "$(_osrc_review_verdict_for "$id" "$head" 2>/dev/null)" = BLOCK ] || _osrc_review_item_closed_merged "$id" "$head" 2>/dev/null || continue
-    names="$br"
-    alt="$(jq -r '.poll_branch // ""' "$f" 2>/dev/null)"; [ -z "$alt" ] || [ "$alt" = "$br" ] || names="$names $alt"
+    names="$(jq -r '.poll_branch // .branch' "$f")"   # the branch the lane actually pushed: a missing target fails the whole push
     url="$(jq -r 'if .transport=="gh" then "https://github.com/" + .url + ".git" else .url end' "$f" 2>/dev/null)"
-    echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $names"
+    echo "  OFFER  remote branches of lane $id (yours to delete): git push $(printf '%q' "$url") --delete $(printf '%q' "$names")"
   done
 }
 

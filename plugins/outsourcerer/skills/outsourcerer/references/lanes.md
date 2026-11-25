@@ -95,11 +95,10 @@ outsourcerer lease list [--all] [--repo DIR]
   expiry, e.g. `lease: src is held by lane-api as 'src/api.ts' until 2026-01-05 14:20:00`. Overlap
   is conservative: the same path, one inside the other, or a glob that could match the other or
   reach into it (`src/*/index.ts` and `src/api` overlap). Re-claiming your own path renews it.
-- Your own `lease`, `lane inbox` (and every minute of `inbox --wait`) and `lane msg` calls renew
-  your leases, on every platform. The heartbeat also renews holders it can prove alive: a tmux
-  session, or a job whose pid still has its recorded start time. An orchestrator session or a task
-  id renews only through its own calls. A TTL is never shorter than two heartbeat beats plus a
-  minute (11 minutes at the default 5-minute beat). A dead holder's lease just runs out.
+- Only your own calls renew: `lease`, `lane inbox` (and every minute of `inbox --wait`) and
+  `lane msg`, on every platform. A lease not renewed within its TTL is gone, so re-claim or keep
+  `lane inbox --wait` running in the background during long work. `--ttl` is kept as given.
+- `[` is a plain character in a lease path (`app/[id]/page.tsx` is one file), not a glob.
 - A ledger that does not parse is never rewritten: claims and releases fail with a message until
   you move `$OSRC_HOME/leases.json` aside.
 - Leases are stored in `$OSRC_HOME/leases.json`, written under the same state lock as the other

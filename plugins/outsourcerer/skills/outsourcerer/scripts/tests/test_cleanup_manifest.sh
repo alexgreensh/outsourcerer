@@ -411,7 +411,7 @@ git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcer
 [ "$(bm "$BR" outsourcerer/wt-main)" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
 # Trunk-named repo, no remotes: another local branch holds the tip, so it is preserved.
 RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
-trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk ""; echo "rc=$?"' _ "$RT" 2>&1)"
+trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk; echo "rc=$?"' _ "$RT" 2>&1)"
 [ "$(tail -1 <<<"$trk")" = "rc=0" ] \
   && ok "tip still held by another local branch is preserved (no main-ish ref needed)" || bad "trunk-shaped repo cried wolf: $trk"
 # End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
@@ -505,7 +505,8 @@ mkwt "$R7" wt-dh "$(git -C "$R7" rev-parse HEAD)"; owner wt-dh
 ( cd "$R7/.outsourcerer/worktrees/wt-dh" && git checkout -q --detach && printf 'x\n' > x && git add x && git commit -qm x )
 age "$R7/.outsourcerer/worktrees/wt-dh"
 v="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_cleanup_verdict "$1"' _ "$(jq -cn --arg p "$R7/.outsourcerer/worktrees/wt-dh" --arg r "$R7" '{path:$p,kind:"worktree",session:"wt-dh",repo:$r}')" 2>&1)"
-grep -q '^ASK.*not on branch' <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
+pat='^ASK'; [ "$have_lsof" = 1 ] && pat='^ASK.*not on branch'   # without lsof the open-file check asks first
+grep -q "$pat" <<<"$v" && ok "worktree with detached HEAD is ASK in the verdict" || bad "detached worktree not ASK: $v"
 mf="$OSRC_HOME/created.jsonl"; cp "$mf" "$mf.bak"; printf '{"path":"/x","ki' >> "$mf"
 sc="$(run cleanup 2>&1)"; scrc=$?
 [ "$scrc" = "0" ] && grep -q 'wt-e2e' <<<"$sc" && ok "truncated manifest line does not hide the rest" || bad "truncated line broke the scan (rc=$scrc): $sc"

@@ -58,8 +58,8 @@
 #                                  <old-sid> moves that session's owned targets into THIS session.
 #   handover [--out FILE]          Write the markdown brief (targets, kind, state, model, cwd,
 #                                  adopt + wait commands) the NEXT session runs to pick up the fleet.
-#   lane msg|inbox                 Lane-to-lane messages: msg <to|all|orchestrator> "<text>",
-#                                  inbox [--peek] [--wait [--timeout N]]; lease claim|release|list <path>. DATA, never permission.
+#   lane msg|inbox                 Lane-to-lane messages: msg <to|all|orchestrator> "<text>", inbox [--peek] [--wait [--timeout N]].
+#   lease claim|release|list <path>  File leases between lanes. Both are DATA, never permission. references/lanes.md.
 #   team score|record|budget       One team score per plan/fleet: tests passed on handed-in
 #                                  shas minus a token-cost penalty. `fleet status` prints it.
 #   hub export|serve [--port N]    Mission Control: SCHEMA project docs as JSON (export), or the
@@ -8215,7 +8215,7 @@ _heartbeat_tick() {
         ;;
     esac
   done < <(printf '%s' "$snapshot" | jq -c '.items[] | select(((.owner != "external") and (.state == "blocked" or .state == "unknown" or .state == "dead" or .state == "unresponsive?" or .state == "blocked?")) or (.owner == "managed" and (.state == "idle" or .state == "completed" or .state == "done")))')
-  _sv_observe_all beacon >/dev/null 2>&1 || true;   # supervise replay log
+  _sv_observe_all beacon >/dev/null 2>&1 || true   # supervise replay log
   if [ "$wake_cursor" != "$generation" ]; then
     [ "$wake_ok" -eq 0 ] || _heartbeat_cursor_write wakes "$generation" || wake_ok=0
   fi

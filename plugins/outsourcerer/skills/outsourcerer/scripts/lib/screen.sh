@@ -349,25 +349,23 @@ _osrc_scr_devin() {
   lo=$((n - 25)); [ "$lo" -ge 0 ] || lo=0
   if _osrc_scr_any "*confirm · esc cancel*" $((n - 2 > 0 ? n - 2 : 0)); then
     OSRC_SCR_KIND=other
-    # Fail closed: a command is read only when the modal is the header row 'This action requires your
-    # approval.' (the first one on screen, at column 0, inside the window), then exactly one command row,
-    # then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra rows) gives no
-    # command, so the approval is held for a person. The menu's Kind(target) tag names the action.
+    # Fail closed: a command is read only when the modal is the title row '▲ Approval required', the
+    # header row 'This action requires your approval.' (the first one on screen, at column 0), exactly
+    # one command row, then the menu. Any other layout (old '$ ' rows, wrapped or boxed commands, extra
+    # rows, a header on row 0 whose true top may have scrolled off) gives no command, so the approval
+    # is held for a person. Only an Exec tag is read: write/read tags have no captured modal yet, so
+    # those kinds stay 'other' and hold.
     local m hdr; m="$(_osrc_scr_last "❭ *" "$lo")"; [ "$m" -ge 0 ] || m=$n
     if [ "$m" -lt "$n" ]; then
-      case "${_SCR_L[$m]}" in
-        *"Exec("*) OSRC_SCR_KIND=shell ;;
-        *"Write("*|*"Edit("*|*"Create("*|*"Overwrite("*) OSRC_SCR_KIND=write ;;
-        *"Read("*) OSRC_SCR_KIND=read ;;
-      esac
+      case "${_SCR_L[$m]}" in *"Exec("*) OSRC_SCR_KIND=shell ;; esac
       OSRC_SCR_PATH="$(printf '%s' "${_SCR_L[$m]}" | sed -nE 's/.*[A-Za-z]+\(([^()]*)\).*/\1/p')"
       hdr=0; while [ "$hdr" -lt "$m" ]; do case "${_SCR_L[$hdr]}" in *"requires your approval"*) break ;; esac; hdr=$((hdr + 1)); done
       l="$(_osrc_scr_trim "${_SCR_L[$((m - 1))]:-}")"
-      case "${_SCR_L[$hdr]}" in "This action requires your approval"*)
-        if [ "$OSRC_SCR_KIND" != other ] && [ "$hdr" -ge "$lo" ] && [ "$hdr" -eq $((m - 2)) ]; then
-          case "$l" in ""|"\$ "*|[│┃║\|─═━┄┈╭╰┌└]*) ;; *) OSRC_SCR_CMD="$l" ;; esac
-        fi ;;
-      esac
+      if [ "$OSRC_SCR_KIND" = shell ] && [ "$hdr" -gt 0 ] && [ "$hdr" -eq $((m - 2)) ]; then
+        case "${_SCR_L[$((hdr - 1))]}|${_SCR_L[$hdr]}" in "▲ Approval required"*"|This action requires your approval"*)
+          case "$l" in ""|"\$ "*) ;; *) OSRC_SCR_CMD="$l" ;; esac ;;
+        esac
+      fi
     fi
     i=$m; [ "$i" -lt "$n" ] || i=-1
     if [ "$i" -ge 0 ]; then
@@ -478,11 +476,11 @@ _osrc_scr_generic() {
   _osrc_scr_set unknown "no recognized signal in tail"
 }
 
-# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last 12 rows (rows
-# under it are footer, even if they are output), else the last row and rc 1.
-_osrc_scr_bottom() {
+# No composer: OSRC_SCR_BOTTOM = the row above the last rule/bare prompt in the last [window] rows
+# (default 12; rows under it are footer, even if they are output), else the last row and rc 1.
+_osrc_scr_bottom() { # [window]
   local i=$((_SCR_N - 1)) l; OSRC_SCR_BOTTOM=$((_SCR_N - 1))
-  while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - 12)) ]; do
+  while [ "$i" -ge 1 ] && [ "$i" -ge $((_SCR_N - ${1:-12})) ]; do
     l="${_SCR_L[$i]}"; l="${l#"${l%%[! ]*}"}"
     case "$l" in "──"*|">"|"❯"|"›") OSRC_SCR_BOTTOM=$((i - 1)); return 0 ;; esac
     i=$((i - 1))
@@ -490,12 +488,13 @@ _osrc_scr_bottom() {
   return 1
 }
 
-# 0 for a busy indicator: an interrupt hint ENDING the row ("(esc to interrupt · 14s)"), "Working (",
+# 0 for a busy indicator: an esc interrupt hint in parens ENDING the row ("(esc to interrupt · 14s)"),
+# or followed only by " · <status>"; "· esc to interrupt" ending the row; "Working (" / "• Working (";
 # braille spinner + a word, or spinner frame + a word + "…"/"...". A bullet (● ⏺ •) is no spinner.
 _osrc_scr_busy_row() { # <row>
   local t="${1#[[]}"   # one leading bracket allowed: "[⠋] Compiling crate 12/40"
   case "$t" in
-    *"("*"to interrupt)"|*"("*"to interrupt · "*")"|*"· "*"to interrupt"|"Working ("*) return 0 ;;
+    *"("*"esc to interrupt)"|*"("*"esc to interrupt) · "*|*"(esc to interrupt · "*")"|*"· esc to interrupt"|"Working ("*) return 0 ;;
     "⠋"*|"⠙"*|"⠹"*|"⠸"*|"⠼"*|"⠴"*|"⠦"*|"⠧"*|"⠇"*|"⠏"*|"⣻"*|"⣽"*|"⣟"*|"⡿"*|"⢿"*|"⣷"*|"⣯"*|"⠿"*|"⢰"*)
       case "$t" in *[A-Za-z]*) return 0 ;; esac ;;
     "✢"*|"✶"*|"✳"*|"✻"*|"✽"*|"◐"*|"◓"*|"◑"*|"◒"*)
@@ -511,7 +510,7 @@ _osrc_scr_busy_row() { # <row>
 _OSRC_SCR_LIMIT_RE="^((⎿|⚠|⛔|✖|■)[[:space:]]+)?(error:[[:space:]]+)?(claude( ai)? usage limit reached|you('|’)?ve hit your (usage )?limit|individual quota reached|rate limited|([0-9]+-hour|weekly|opus weekly|sonnet weekly|session|plan usage|usage|rate) limit (reached|exceeded))([.!]?[[:space:]]*(·|∙|\|)?[[:space:]]*(your (limit|quota)( will)? resets?|resets?|try again|retrying|please upgrade)([[:space:]].*)?)?[.!]?$"
 _osrc_scr_limit() { # -> rc0 + OSRC_SCR_LIMIT_DETAIL/_AT when the bottom status region holds the engine's limit banner
   local end i l t tl bi="" phrase="" secs="" clk
-  if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom || :; end="$OSRC_SCR_BOTTOM"; fi
+  if [ "$OSRC_SCR_COMPOSER_FOUND" = 1 ]; then end="$OSRC_SCR_HIST_END"; else _osrc_scr_bottom 6 || :; end="$OSRC_SCR_BOTTOM"; fi
   for i in "$end" $((end - 1)); do
     [ "$i" -ge 0 ] || return 1
     if [ "$i" -lt "$end" ]; then   # the row below must be a plain trailer, not a prompt, glyph or tool row

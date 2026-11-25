@@ -647,7 +647,9 @@ done_script="$(grep 'DONESET|t-l6' "$OSRC_STUB_LOG" | cut -d'|' -f3 | sed 's/^ch
 git -C "$WORK" checkout -q -b sess-r3 && printf 'READY t-l6\n' > "$WORK/t-l6.READY" && git -C "$WORK" add t-l6.READY \
   && git -C "$WORK" commit -q -m "t-l6 READY" && git -C "$WORK" push -q origin HEAD:refs/heads/claude/t-l6-Qx1 && git -C "$WORK" checkout -q main
 _s="$(mktemp -d)"; mkdir -p "$_s/remote"; printf '{"poll_branch":"claude/t-l6-Qx1"}\n' > "$_s/remote/t-l6.json"
-sed "s#$OSRC_HOME/remote/#$_s/remote/#g" "$done_script" > "$_s/check.sh"   # scratch registry: the launched lane's own json stays untouched
+# scratch registry, so the launched lane's own json stays untouched; a literal swap of the %q-quoted path
+Q="$(printf '%q' "$OSRC_HOME/remote/t-l6.json")" R="$(printf '%q' "$_s/remote/t-l6.json")" \
+  awk '{ o = ""; while ((i = index($0, ENVIRON["Q"])) > 0) { o = o substr($0, 1, i - 1) ENVIRON["R"]; $0 = substr($0, i + length(ENVIRON["Q"])) } print o $0 }' "$done_script" > "$_s/check.sh"
 [ -n "$done_script" ] && (cd "$WORK" && bash "$_s/check.sh") && ok "done contract: READY on the followed session branch passes" || bad "done check cannot see the session branch"
 rm -rf "$_s"
 
