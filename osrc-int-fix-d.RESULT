@@ -1,0 +1,4 @@
+sha=7cd93e36306f1a1509b7b159d82f259f9e23e5b8
+rc=1
+Normal-disk full conformance was red twice on one load flake each (test_cleanup_manifest, then test_release_0175); both pass alone and neither was edited.
+Full-disk conformance with the fixes: 260 passed, 0 failed (rc=0). Fix commit 75fe943 on cloud/osrc-int-fix-d; the final head is the commit adding this file.
