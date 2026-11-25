@@ -1,0 +1,7 @@
+sha=0da2dd021774720d268cba25a6d0f3587c3ee18d
+rc=0
+head=fcf551ec21bfa3b9140454bfa9508ce1003ad295 (work branch cloud/osrc-l5-r3; READY/RESULT commit follows it)
+Work complete. plan start entry flow, resource-aware cap + gate, non-blocking decisions (paid/irreversible/publish never auto-apply), optional repo profile, review cap 3 with escalation record, lean MCP launch for local Claude lanes, SKILL.md 138 lines.
+Lane suites rc=0: test_factory_flow 196/196, test_factory_tasks, test_factory_e2e, test_factory_land, test_lean_launch.py, test_perm_profiles, test_no_pipe_grep_q.
+Full conformance.sh rc=1 (239 pass / 8 fail): 7 failures fail identically on main or only under load (root container); the one caused here (test_no_pipe_grep_q) is fixed. See reports/osrc-l5-r3.md.
+Not done: Devin has no per-run MCP limit flag; Codex interactive launch unchanged.
