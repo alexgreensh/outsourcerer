@@ -15629,7 +15629,7 @@ route_delegate() {
   # worktree first, so the gate below scans (and the delegate reads) the tree the repo actually holds.
   # Same process as the dispatch, so the cd sticks. `continue` resumes a session tied to this cwd: skip.
   [ "$verb" = "continue" ] || _cloud_autoisolate "$disp" || true
-  _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
+  _cloud_disclose "$disp" "$_gate_model" "${REST[*]:-}"
 
   # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to an INTERACTIVE tmux session by
   # default (OSRC_REQUIRE_INTERACTIVE=1), NOT a headless bg job. Reuses the session-start machinery
