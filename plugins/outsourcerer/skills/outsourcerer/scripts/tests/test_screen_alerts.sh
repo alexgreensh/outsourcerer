@@ -29,6 +29,8 @@ want() { # <file> <engine> <glob for "state|evidence"> <label>
   case "$row" in $3) ok "$4 -> $row" ;; *) no "$4 -> got: $row" ;; esac
 }
 
+nolim() { local row; row="$(scr "$1" "$2")"; case "$row" in limit\|*) no "$3 -> false limit: $row" ;; *) ok "$3 -> ${row%%|*}" ;; esac; }
+
 echo "=== 1. refusals -> limit, with the reset when one is shown ==="
 want "$FX/cc-limit-usage.ansi" cc 'limit|*reset: reset at 3pm (epoch *' "claude usage-limit banner"
 want "$FX/cx-limit-usage.ansi" codex 'limit|*reset: Try again at 22:28 (epoch *' "codex usage-limit banner"
@@ -53,17 +55,28 @@ case "$row" in
 esac
 want "$FX/generic-limit-relative.txt" "" 'limit|*reset: Try again in 2h' "relative reset alone carries no invented epoch"
 want "$FX/cc-limit-5hour.ansi" cc 'limit|*5-hour limit reached*reset: resets 3pm (epoch *' "claude '5-hour limit reached' banner"
-# Claude's own banner wordings, hanging under the user's prompt
-CC_FOOT=('────────' '❯ ' '────────' '  ⏸ manual mode on'); CX_FOOT=('› Ask Codex to do anything' '  ← for agents · ? for shortcuts')
+# Claude: a `⎿` limit-reached row is a limit when it is the LAST content row above the composer,
+# whatever sits above it (round-4 review P1, P2 3). Hand-built frames, not live captures.
+CC_FOOT=('' '────────' '❯ ' '────────' '  ⏸ manual mode on'); CX_FOOT=('› Ask Codex to do anything' '  ← for agents · ? for shortcuts')
 txt() { printf '%s\n' "$@" > "$TMP/s.txt"; }
 for b in '5-hour limit reached ∙ resets 3pm' 'Weekly limit reached ∙ resets Oct 9, 10am' 'Opus weekly limit reached ∙ resets Oct 9, 10am' \
          'Session limit reached ∙ resets 3pm' "You've hit your limit · resets 3pm (Europe/Paris)" 'Claude usage limit reached. Your limit will reset at 3pm.'; do
   txt '❯ continue the refactor' "  ⎿  $b" "${CC_FOOT[@]}"
   want "$TMP/s.txt" cc "limit|*" "claude banner under the prompt: $b"
 done
+B='  ⎿  5-hour limit reached ∙ resets 3pm'
+txt '❯ refactor the client so that every call' '  backs off and retries with jitter' "$B" "${CC_FOOT[@]}"
+want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner under a wrapped prompt"
+txt '❯ run it' '⏺ Running the suite now.' '  ⎿  Weekly limit reached ∙ resets Oct 9, 10am' "${CC_FOOT[@]}"
+want "$TMP/s.txt" cc 'limit|*Weekly*' "claude banner mid-turn after a ⏺ reply"
+txt '❯ run it' '⏺ Bash(make test)' '  ⎿  12 passed, 0 failed' '' "$B" "${CC_FOOT[@]}"
+want "$TMP/s.txt" cc 'limit|*5-hour*' "claude banner after a tool block"
+txt '❯ why does it say "5-hour limit reached ∙ resets 3pm"?' '⏺ That is the plan banner; it clears at the reset.' "${CC_FOOT[@]}"
+nolim "$TMP/s.txt" cc "quoted banner in the prompt, turn continues below"
+txt '❯ continue' "$B" '⏺ Resumed after the reset. All 12 tests pass.' "${CC_FOOT[@]}"
+nolim "$TMP/s.txt" cc "old banner with a later reply below it"
 
 echo "=== 2. mentions that are not refusals never classify limit ==="
-nolim() { local row; row="$(scr "$1" "$2")"; case "$row" in limit\|*) no "$3 -> false limit: $row" ;; *) ok "$3 -> ${row%%|*}" ;; esac; }
 nolim "$FX/generic-error-not-limit.txt" "" "Error: permission denied opening config"
 nolim "$FX/cx-prose-quota.txt" codex "codex assistant reply that says 'quota exceeded'"
 nolim "$FX/unknown-prose-limit.txt" "" "claude-style prose about 429"
@@ -131,6 +144,17 @@ want "$TMP/s.txt" "" 'idle|*' "'● Done. See the notes...' above a shell prompt
 # round-3 review P3: an interrupt hint in prose is not the engine's busy indicator
 txt 'README: press esc to interrupt a run' 'row one' 'row two' 'row three' 'row four' 'row five'
 row="$(scr "$TMP/s.txt" "")"; case "$row" in working\|*) no "prose interrupt hint read as busy: $row" ;; *) ok "prose interrupt hint is not busy -> ${row%%|*}" ;; esac
+# round-4 review P2 2: a tall footer (no rule, or a rule above seven rows) keeps the spinner in view
+SPIN='⠋ Pondering the next move… (esc to interrupt · 14s)'
+txt 'claiming shard 12' "$SPIN" 'model: fast-lane | ctx 44%' 'uptime 03:12 | load 0.42' 'jobs 3 running · 1 queued'
+want "$TMP/s.txt" "" 'working|*Pondering*' "spinner above three status rows, no rule"
+txt 'claiming shard 12' "$SPIN" '────────' 'f1' 'f2' 'f3' 'f4' 'f5' 'f6' 'f7'
+want "$TMP/s.txt" "" 'working|*Pondering*' "spinner above a rule and seven footer rows"
+# round-4 review P3: the hint must end the row, as the engine's own indicator does
+for c in 'make all|Tip (press ctrl+c to interrupt a run)' 'keys · esc to interrupt · q to quit|user@host:~$'; do
+  txt 'log' "${c%%|*}" "${c#*|}"
+  row="$(scr "$TMP/s.txt" "")"; case "$row" in working\|*) no "hint inside prose read as busy: $c -> $row" ;; *) ok "hint inside prose is not busy: $c -> ${row%%|*}" ;; esac
+done
 
 echo "=== 5. pane liveness ==="
 # fake tmux: panes are files; <pane>.dead holds #{pane_dead}

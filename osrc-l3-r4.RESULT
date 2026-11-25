@@ -1,4 +1,0 @@
-sha=11295d4109205080031845aa9883e5258316e621
-rc=0
-head=5577f39849cb5a779fa89c8c07eea6113d0e2985 (work head before this marker commit; base is the sha above)
-screen: limit/busy only from the engine banner/indicator in the bottom status region; 4 review cases added as tests (fail on r3, pass now). Targeted suites rc=0; conformance.sh rc=1 (6 failures identical on base under uid 0, plus test_release_0175 which passes alone).
