@@ -1,7 +1,0 @@
-sha=86957d66022d7beda0775deccd6608dae9fac156
-rc=0
-Round 4 (base cloud/osrc-l1-r3 @ 86957d6; last code commit d39f68c on cloud/osrc-l1-r4) fixes all five P2s and every P3 of the Fable round-3 review in lib/watchsvc.sh and lib/supervise.sh. P2-5 first: the watcher signals a delivery only when the record names this loop and the pid still has the loop's command line.
-Also new: `supervise --session SID --loop` keeps a looping caller covered between batches (supervise/<sid>/loop.<pid>).
-Each P2 has a regression test. tests/test_watchsvc.sh: 91 pass on head; the same file against the base code: 20 fail. Related suites are all rc 0.
-Conformance: base rc 1 (241/7/1). Final head rc 1 (242/6/1). All six head failures also fail on base. test_watchsvc failed in my first head gate (a test-only TMUX_TMPDIR expectation) and is fixed.
-rc=0 means the lane's work is complete, not the conformance exit code. Unproven: launchd (exact Mac steps in the report), real tmux -L servers, Git Bash. See reports/osrc-l1-watchdog.md, ## Round 4.

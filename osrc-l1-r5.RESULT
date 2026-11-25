@@ -1,0 +1,6 @@
+sha=f85ee3711c3f8356158628f3f0e0f8ba3d4509fb
+rc=0
+Round 5 (base cloud/osrc-l1-r4 @ f85ee37). This lane's head is the commit adding this file; its parent 07d9d09 is the last code commit. rc=0 is the exit code of `bash tests/test_watchsvc.sh` at 07d9d09 (102 passed, 0 failed).
+The same test file against base code: rc 1, 11 failed, exactly the 11 new round-5 tests.
+Fixes Fable round-4 P2 1-5 and its P3s. --loop re-arms only on exit 20, so it cannot hot-spin or ping-pong, and it covers only after a batch went into a pipe or terminal. A repointed loop execs the new launcher. Sessions on another tmux server are skipped whatever the channel. The watcher stamps alive from its first second.
+Net lib lines 1279 -> 1278. Conformance at 07d9d09: rc 1, 242 passed, 6 failed, 1 skipped; the same six fail on the untouched base. Details: reports/osrc-l1-watchdog.md, ## Round 5.

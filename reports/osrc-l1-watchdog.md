@@ -582,3 +582,61 @@ One self-inflicted false failure while building: I first ran the base and head c
 two runs disturbed each other. Every number above comes from runs made one at a time. A test-race
 in my first version of the P2-2 test (it read the lock before the re-run loop published its pid) is
 fixed in the test.
+
+### Conformance (round 5)
+
+`nice bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` from the repo root:
+
+| Tree | Result |
+| --- | --- |
+| head `61db68c` (first try) | rc 1, 240 passed, 8 failed, 1 skipped |
+| head `07d9d09` (final code; the next commit adds only this report section and READY/RESULT) | **rc 1, 242 passed, 6 failed, 1 skipped** |
+
+The first try failed two extra suites. `test_no_pipe_grep_q` was mine: two lines of my new P2-2 test
+piped `ps` into `grep -q`. They now use here-strings, and that suite passes on its own with rc 0.
+`test_cleanup_manifest` passed on its own (66 pass, 0 fail) and in the final gate, so it was flaky
+under load; no file of this lane touches it. The six remaining failures (`test_harness_isolation`,
+`test_vocab_hygiene`, `test_supervise_pgroup_kill`, `test_parity_insource_refresh`,
+`test_conformance_suite_timeout`, `test_sealed_fixes`) are exactly round 4's list for the untouched
+base in this root container. `test_supervise_pgroup_kill` was re-run on base `f85ee37` this round:
+rc 1, same assertion.
+
+### Unproven (round 5)
+
+- **Does an agent's background task look like a pipe?** P2-5 relies on output into a regular file
+  proving no reader. If some Claude Code build captures a background task's stdout through a pipe
+  that it drains, a `--loop` run that way would count as covered after its first batch. The
+  `--help` text forbids that use. A sturdier proof (a reader acknowledgement) would change the
+  stdout contract, so I did not add one.
+- **A quiet `--loop` with a real reader** stops covering `OSRC_SUPERVISE_HUNG` (600 s) after its last
+  batch. Then the guard asks for `supervise` and the watcher may deliver instead. The shared ledger
+  keeps any row from being printed twice. This follows the brief ("only while a reader has consumed
+  its output recently"), and it is a behaviour change for wrapper scripts.
+- **A write into a pipe** proves a live reader and a buffer that is not full. It does not prove the
+  reader has read that batch yet (up to one pipe buffer, 64 KiB on Linux).
+- **`exec` from the loop** is tested on the fallback backend with a symlinked second copy. On
+  launchd/systemd the same pid carries on, so the unit sees no exit; neither was run here. `[ -p
+  /dev/stdout ]` and `touch -t` are POSIX and present on macOS and Git Bash, but were run on Linux
+  bash 5 only.
+- Carried over: launchd never run (round 4's Mac steps still apply), real `tmux -L` servers (fake
+  tmux only), Git Bash.
+
+### Needs from other lanes (round 5)
+
+- Owner of `lib/stall.sh`: round 4's `loop.*` request for `osrc_watcher_gap` is withdrawn. A loop's
+  worker keeps an `armed.*` file while it polls, and the gap between two workers is one fork.
+- Docs owner: `supervise --loop` is for wrapper scripts that read its stdout through a pipe. It is
+  never for an agent's background task, and it covers the session only for 10 minutes after a batch.
+  Keep round 4's note on running `watcher install` from inside a non-default tmux server.
+- Release/merge owner: keep `osrc-l1-r5.READY` / `.RESULT` (and every earlier `osrc-l1-r*` pair) out
+  of main.
+
+### Files changed (round 5)
+
+| File | Change |
+| --- | --- |
+| `lib/supervise.sh` | P2-1 (exit 20), P2-5 (reader-proven `loop.<pid>`), `_sv_observe_all` skips foreign owners, help range, `_sv_informational` deleted; 846 → 845 lines |
+| `lib/watchsvc.sh` | P2-2 (`exec` the launcher), P2-3 (`_ws_foreign`), P2-4 (`alive` stamps), inflight and `.try` P3s, `_ws_mtime` inlined; 433 → 433 lines |
+| `tests/test_watchsvc.sh` | 91 → 102 checks; the old `--loop` section (batches forced by `MAX_SECS`) is replaced |
+| `osrc-l1-r4.READY`, `osrc-l1-r4.RESULT` | deleted |
+| `osrc-l1-r5.READY`, `osrc-l1-r5.RESULT` | new |
