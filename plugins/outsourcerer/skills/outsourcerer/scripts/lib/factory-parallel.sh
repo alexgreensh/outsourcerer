@@ -137,8 +137,11 @@ _osrc_fp_over() {
 }
 
 # _osrc_fp_gate_can_run -> rc0 when new launches may proceed this pass. rc1 sets _OSRC_FP_GATE_REASON,
-# which names the reading and the setting that tunes it. Every reading that is missing or broken
-# counts as "go": the gate must never wedge a plan.
+# which names the reading and the setting that tunes it. A repo resource gate fails closed: any rc
+# but 0 (a "no", a crash, a missing interpreter) or a run past OSRC_FACTORY_GATE_TIMEOUT (30s) holds
+# this pass, and the next pass asks again, so a broken gate holds launches without wedging the plan.
+# The disk check asks the launch gate in probe mode (no override taken or minted). A missing load or
+# swap reading counts as "go".
 _OSRC_FP_GATE_REASON=""; _OSRC_FP_GATE_WARNED=""
 _osrc_fp_gate_can_run() {
   local g root out rc n l lpc s
@@ -149,21 +152,23 @@ _osrc_fp_gate_can_run() {
   if [ -n "$g" ]; then
     case "$g" in /*) ;; *) root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" && g="$root/$g" ;; esac
     if [ -f "$g" ]; then
-      if [ -x "$g" ]; then out="$("$g" can-run 2>&1)"; rc=$?; else out="$(sh "$g" can-run 2>&1)"; rc=$?; fi
+      if [ -x "$g" ]; then out="$(_timeout "${OSRC_FACTORY_GATE_TIMEOUT:-30}" "$g" can-run)"; rc=$?
+      else out="$(_timeout "${OSRC_FACTORY_GATE_TIMEOUT:-30}" sh "$g" can-run)"; rc=$?; fi
       case "$rc" in
         0) ;;
         1) _OSRC_FP_GATE_REASON="$(printf '%s' "$out" | head -1 | cut -c1-200)"
            _OSRC_FP_GATE_REASON="${_OSRC_FP_GATE_REASON:-the repo resource gate said no}"; return 1 ;;
-        *) printf 'outsourcerer: resource gate %s failed (rc=%s); ignoring it this pass\n' "$g" "$rc" >&2 ;;
+        124) _OSRC_FP_GATE_REASON="resource gate $g did not answer within ${OSRC_FACTORY_GATE_TIMEOUT:-30}s (OSRC_FACTORY_GATE_TIMEOUT); holding this pass"; return 1 ;;
+        *) _OSRC_FP_GATE_REASON="resource gate $g failed (rc=$rc); holding this pass until it answers 0 or 1: $(printf '%s' "$out" | head -1 | cut -c1-160)"; return 1 ;;
       esac
     elif [ "$_OSRC_FP_GATE_WARNED" != "$g" ]; then
       _OSRC_FP_GATE_WARNED="$g"
       printf 'outsourcerer: resource gate %s is not a file (name one script, no arguments); ignoring it\n' "$g" >&2
     fi
   fi
-  # Disk: ask the launch path's own gate (lib/cleanup.sh), so a cleanup ack counts here exactly as it
-  # does at launch. It dies when it refuses, hence the subshell.
-  if type _osrc_disk_gate >/dev/null 2>&1 && ! out="$( _osrc_disk_gate 2>&1 )"; then
+  # Disk: ask the launch path's own gate (lib/cleanup.sh) in probe mode, so a cleanup ack counts here
+  # exactly as it does at launch. It dies when it refuses, hence the subshell; a missing gate holds.
+  if ! out="$( _osrc_disk_gate probe 2>&1 )"; then
     out="$(printf '%s' "$out" | tail -1 | sed 's/^ERROR: //; s/^outsourcerer: //' | cut -c1-400)"
     _OSRC_FP_GATE_REASON="${out:-free disk is low}. To lift the floor: OSRC_DISK_MIN_GB=0 in $OSRC_HOME/disk-policy/settings"; return 1
   fi

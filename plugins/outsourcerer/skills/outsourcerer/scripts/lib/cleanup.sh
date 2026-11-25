@@ -8,14 +8,15 @@
 # target is a DRY RUN over the manifest: each item gets its size and a verdict,
 # SAFE or ASK(with reason). `cleanup --apply` deletes SAFE items only and logs each
 # deletion to $OSRC_HOME/cleanup.log. `cleanup --ack` records that the user has seen
-# the current ASK list, which unblocks the <10GB launch gate. `cleanup <job-id|fanout-gid>
+# the current ASK list, which unblocks the launch floor (never the critical floor). `cleanup <job-id|fanout-gid>
 # [--force]` keeps its old meaning: remove that target's git worktree(s).
 #
 # SAFE requires ALL of: owning session done or gone, older than 1h, no process has a
 # file open under it, path under the manifest's recorded root. Worktrees and branches
-# additionally need a clean git status and their tip preserved: another ref (branch,
-# remote, tag) holds it, or the lane's PR merged. Anything failing a check is ASK, shown,
-# never deleted.
+# additionally need a clean git status (a git status that fails is ASK) and their tip
+# preserved: a remote-tracking ref holds it, or a MERGED PR's head is that exact tip. A
+# local branch or tag does not count (it can be deleted the same way). Anything failing a
+# check is ASK, shown, never deleted.
 
 # ---- manifest recording -------------------------------------------------------
 
@@ -119,42 +120,42 @@ _osrc_job_collected() {
 # listing itself is the signal (empty stdout = nothing open, any row = busy).
 # Directories use `lsof +D`; plain files `lsof --` (lsof +D on a file only warns).
 # stderr is discarded inside the wrapped call so a WARNING never reads as "busy"
-# through _timeout's merged capture.
+# through _timeout's merged capture. "Clear" needs proof that lsof ran to the end: the
+# wrapped command prints a sentinel line with lsof's rc after it, and the capture must
+# end with it. _timeout's own rc cannot tell (it returns 1 when it cannot even make its
+# capture file, e.g. a full or unwritable OSRC_HOME), so no sentinel = cannot verify.
 _osrc_lsof_busy() {
   have lsof 2>/dev/null || return 2
-  local out rc
-  if [ -d "$1" ]; then
-    out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" bash -c 'exec lsof +D "$1" 2>/dev/null' _ "$1")"
-  else
-    out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" bash -c 'exec lsof -- "$1" 2>/dev/null' _ "$1")"
-  fi
-  rc=$?
-  case "$rc" in 124) return 2 ;; esac   # timed out: doubt -> ASK
-  case "$rc" in 0|1) : ;; *) return 2 ;; esac
-  [ -n "$out" ] && return 0
+  local out flag=--
+  [ -d "$1" ] && flag=+D
+  out="$(_timeout "${OSRC_CLEANUP_LSOF_TIMEOUT:-25}" bash -c 'lsof "$1" "$2" 2>/dev/null; echo "__osrc_lsof_rc=$?"' _ "$flag" "$1")"
+  case "${out##*$'\n'}" in __osrc_lsof_rc=0|__osrc_lsof_rc=1) : ;; *) return 2 ;; esac
+  case "$out" in *$'\n'*) return 0 ;; esac   # any row before the sentinel = busy
   return 1
 }
 
-# _osrc_branch_merged <repo> <branch> -> 0 when the branch's commits are
-# preserved: any ref other than the branch itself (branch, remote, tag) holds the tip, or
-# a MERGED PR exists for it. Deleting the branch must never drop the last ref to commits
-# (issue #84). 1 otherwise (caller ASK).
+# _osrc_branch_merged <repo> <branch> [--any-ref] -> 0 when the branch's commits are
+# preserved: a remote-tracking ref holds the tip, or a MERGED PR's head is exactly the tip
+# (the SAFE rule; references/hub.md). --any-ref also accepts another local branch or tag:
+# only the user-typed `cleanup <job-id>` uses it. Deleting the branch must never drop the
+# last ref to commits (issue #84). 1 otherwise (caller ASK); a gh call that hangs past
+# OSRC_CLEANUP_GH_TIMEOUT (15s) proves nothing, so it is 1 too.
 _osrc_branch_merged() {
-  local repo="$1" br="$2" tip
+  local repo="$1" br="$2" tip refs=refs/remotes
   # Resolve the FULLY QUALIFIED branch once; every check below uses that commit, never the
   # short name (a same-named tag would win a short-name lookup while `branch -D` deletes
   # the branch).
   tip="$(git -C "$repo" rev-parse --verify -q "refs/heads/$br^{commit}" 2>/dev/null)" || return 1
   [ -n "$tip" ] || return 1
-  # Any ref other than the branch itself (local, remote, tag) holding the tip keeps the commits.
-  [ -n "$(git -C "$repo" for-each-ref --contains "$tip" --format='%(refname)' refs/heads refs/remotes refs/tags 2>/dev/null | grep -vxF "refs/heads/$br" | head -n 1)" ] && return 0
+  [ "${3:-}" = --any-ref ] && refs="refs/heads refs/remotes refs/tags"
+  # shellcheck disable=SC2086
+  [ -n "$(git -C "$repo" for-each-ref --contains "$tip" --format='%(refname)' $refs 2>/dev/null | grep -vxF "refs/heads/$br" | head -n 1)" ] && return 0
   # No local ref contains it: a merged PR preserves the work ONLY when the PR's
   # merged head is this branch's current tip — commits made after the merge are
   # not preserved by that PR (review finding 2).
   if have gh 2>/dev/null; then
-    (cd "$repo" 2>/dev/null && gh pr list --head "$br" --state merged \
-          --json headRefOid --jq '.[].headRefOid' 2>/dev/null | grep -qx "$tip") \
-      && return 0
+    _timeout "${OSRC_CLEANUP_GH_TIMEOUT:-15}" bash -c 'cd "$1" && gh pr list --head "$2" --state merged \
+          --json headRefOid --jq ".[].headRefOid" 2>/dev/null' _ "$repo" "$br" | grep -qx "$tip" && return 0
   fi
   return 1
 }
@@ -258,8 +259,10 @@ _osrc_cleanup_verdict() {
       [ -d "$pp" ] || { printf 'ASK\tworktree path is not a directory\n'; return 0; }
       # --untracked-files=all beats a repo's status.showUntrackedFiles=no:
       # hidden untracked files must still read as uncommitted changes (review B1).
-      [ -z "$(git -C "$pp" status --porcelain --untracked-files=all 2>/dev/null | head -1)" ] \
-        || { printf 'ASK\tworktree has uncommitted changes\n'; return 0; }
+      local gst
+      gst="$(git -C "$pp" status --porcelain --untracked-files=all 2>/dev/null)" \
+        || { printf 'ASK\tgit status failed in the worktree\n'; return 0; }
+      [ -z "$gst" ] || { printf 'ASK\tworktree has uncommitted changes\n'; return 0; }
       # Ignored files are invisible to the check above: a .env or a gitignored
       # deliverable would die with a "clean" worktree. Disposable caches only;
       # .env* and anything else is ASK, named (review finding 1). This call uses
@@ -267,7 +270,9 @@ _osrc_cleanup_verdict() {
       # showUntrackedFiles=no but keeps ignored dirs collapsed to '!! dir/', so
       # an allowlisted cache like node_modules/ matches whole (finding 1, r3).
       local ig ifile igbad=""
-      ig="$(git -C "$pp" status --porcelain --ignored --untracked-files=normal 2>/dev/null | sed -n 's/^!! //p')"
+      ig="$(git -C "$pp" status --porcelain --ignored --untracked-files=normal 2>/dev/null)" \
+        || { printf 'ASK\tgit status failed in the worktree\n'; return 0; }
+      ig="$(printf '%s\n' "$ig" | sed -n 's/^!! //p')"
       if [ -n "$ig" ]; then
         while IFS= read -r ifile; do
           [ -n "$ifile" ] || continue
@@ -299,13 +304,13 @@ _osrc_cleanup_verdict() {
       [ "$(git -C "$pp" symbolic-ref -q HEAD 2>/dev/null)" = "refs/heads/$br" ] \
         || { printf 'ASK\tworktree HEAD is not on branch %s (detached commits would be lost)\n' "$br"; return 0; }
       _osrc_branch_merged "$repo" "$br" \
-        || { printf 'ASK\tbranch %s has commits no other branch, remote or tag holds, and no merged PR\n' "$br"; return 0; }
+        || { printf 'ASK\tbranch %s: no remote holds its commits and no merged PR has its tip\n' "$br"; return 0; }
       ;;
     branch)
       _osrc_branch_checked_out "$repo" "$path" \
         && { printf 'ASK\tbranch still checked out in a worktree\n'; return 0; }
       _osrc_branch_merged "$repo" "$path" \
-        || { printf 'ASK\tcommits missing: no other branch, remote or tag holds them, and no merged PR\n'; return 0; }
+        || { printf 'ASK\tno remote holds its commits and no merged PR has its tip\n'; return 0; }
       ;;
     fanout)
       local gd2="$OSRC_HOME/fanout/$sess" jid2 st2 bad=0
@@ -624,33 +629,43 @@ _osrc_cleanup_tick() {
   return 0
 }
 
-# _osrc_disk_gate -> refuse new lane launches under the disk-policy floors (lib/disk_policy.sh).
-# Below the critical floor nothing passes: not --ack, not OSRC_DISK_OK. Between critical and
-# launch an acknowledged ASK list passes (re-checked against a fresh free-space reading after
-# the slow scan), as does OSRC_DISK_OK holding the one-use code a refusal printed. Called from
-# _bg_launch, route_delegate and session start; registers the caller with the disk monitor and
-# arms it. Under pressure it rescans live: an ack must match the list as it is now (#86).
+# _osrc_disk_gate <fg|job|tmux|tmux-respawn|probe> -> refuse new lane launches under the
+# disk-policy floors (lib/disk_policy.sh). The kind says what is launching: fg (route_delegate),
+# job (_bg_launch), tmux (session start / model switch), tmux-respawn (relaunch / effort: the
+# pane gets a new pid), probe (the factory asks "would a launch pass?": no registration, no
+# override taken or offered, so a factory pass never invalidates a code a user was shown).
+# Below the critical floor nothing passes: not --ack, not OSRC_DISK_OK. A free-space reading
+# that cannot be read refuses too (its own message), but takes the one-use override so a
+# machine whose df never parses is not wedged. Between critical and launch an acknowledged ASK
+# list passes (re-checked against a fresh reading after the slow scan), as does OSRC_DISK_OK
+# holding the one-use code a refusal printed. Under pressure it rescans live (#86). A
+# disk-policy lib that did not fully load refuses: a missing gate must never read as "pass".
+# The launch registers with the monitor only once admitted, so a refused launch leaves no record and
+# the gate's own scan is never part of a lane the monitor pauses. No kind: gate only, no registration.
 _osrc_disk_gate() {
-  local free_kb free_gb launch_kb pause_kb crit_kb launch_gb crit_gb ah ch an ns items top
+  local _OSRC_DISK_KIND="${1:-}" free_kb free_gb launch_kb pause_kb crit_kb launch_gb crit_gb ah ch an ns items top
   # A bg route preflight is a dry dispatch check, not a launch: _bg_launch gates right after it,
   # and a preflight child must not consume the one-use override code or register itself.
   [ "${OSRC_PREFLIGHT:-0}" = 1 ] && return 0
-  free_kb="$(_osrc_free_kb)"
-  case "$free_kb" in ''|*[!0-9]*) return 0 ;; esac
-  free_gb=$(( free_kb / 1048576 ))
+  # The last function of each lib: proves both files parsed to the end.
+  declare -F cmd_gc _osrc_disk_cmd >/dev/null 2>&1 \
+    || die "outsourcerer: the disk policy library did not load (lib/cleanup.sh, lib/disk_policy.sh); refusing new lane launches. Reinstall or update Outsourcerer."
   read -r launch_kb pause_kb crit_kb <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
-  # A broken policy must never wedge a session: fall back to the legacy flat 10GB floor.
-  case "$launch_kb:$pause_kb:$crit_kb" in *[!0-9:]*|:*|*::*|*:) launch_kb=10485760; crit_kb=0 ;; esac
+  # A broken policy must never wedge a session, nor drop the critical floor: flat 10GB / 1GB.
+  case "$launch_kb:$pause_kb:$crit_kb" in *[!0-9:]*|:*|*::*|*:) launch_kb=10485760; crit_kb=1048576 ;; esac
   launch_gb=$(( launch_kb / 1048576 )); crit_gb=$(( crit_kb / 1048576 ))
-  if type _osrc_disk_monitor_ensure >/dev/null 2>&1; then
-    _osrc_disk_register_caller "${FUNCNAME[1]:-}" || true
-    _osrc_disk_monitor_ensure || true
-  fi
+  [ "$_OSRC_DISK_KIND" = probe ] || _osrc_disk_monitor_ensure || true
+  free_kb="$(_osrc_free_kb)"
+  case "$free_kb" in ''|*[!0-9]*)
+    [ "$_OSRC_DISK_KIND" != probe ] && _osrc_disk_override_take "?" "$launch_kb" && { _osrc_disk_admit; return 0; }
+    die "outsourcerer: cannot read free disk for $OSRC_HOME ('df -kP' failed or printed no number); refusing new lane launches. Check: df -kP \"$OSRC_HOME\"$(_osrc_disk_override_offer 2>/dev/null)" ;;
+  esac
+  free_gb=$(( free_kb / 1048576 ))
   if [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ]; then
     die "outsourcerer: free disk is ${free_gb}GB — under the critical floor (${crit_gb}GB); refusing new lane launches, not even with --ack or OSRC_DISK_OK. Free space first: '$0 cleanup --apply', then '$0 cleanup' for what remains. $(_osrc_disk_report_oneline 2>/dev/null)"
   fi
-  [ "$free_kb" -lt "$launch_kb" ] || { unset OSRC_DISK_OK _OSRC_DISK_ADMIT; return 0; }
-  type _osrc_disk_override_take >/dev/null 2>&1 && _osrc_disk_override_take "$free_kb" "$launch_kb" && return 0
+  [ "$free_kb" -lt "$launch_kb" ] || { unset OSRC_DISK_OK _OSRC_DISK_ADMIT; _osrc_disk_admit; return 0; }
+  [ "$_OSRC_DISK_KIND" != probe ] && _osrc_disk_override_take "$free_kb" "$launch_kb" && { _osrc_disk_admit; return 0; }
   items="$(_osrc_cleanup_items --no-size 2>/dev/null)" || die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and the cleanup scan did not finish, so the leftover list is unknown — refusing new lane launches. Run '$0 cleanup' to see what can go, then '$0 cleanup --apply' and/or '$0 cleanup --ack'.$(_osrc_disk_override_offer 2>/dev/null)"
   # Issue #86: the gate decides from THIS live scan, never the persisted file, so a failed write
   # (full disk, exactly when the gate runs) cannot let an old ack admit a changed list. Best effort.
@@ -665,16 +680,18 @@ _osrc_disk_gate() {
       free_kb="$(_osrc_free_kb)"; case "$free_kb" in ''|*[!0-9]*) free_kb=0 ;; esac
       [ "$crit_kb" -gt 0 ] && [ "$free_kb" -lt "$crit_kb" ] \
         && die "outsourcerer: free disk fell to $(( free_kb / 1048576 ))GB during the cleanup scan — under the critical floor (${crit_gb}GB); refusing new lane launches even with --ack. $(_osrc_disk_report_oneline 2>/dev/null)"
-      return 0
+      _osrc_disk_admit; return 0
     fi
     die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${an} leftover item(s) need your decision — refusing new lane launches. Run '$0 cleanup' (dry run), then '$0 cleanup --apply' and/or '$0 cleanup --ack'.$(_osrc_disk_override_offer 2>/dev/null)"
   fi
-  top="$(du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
+  top="$(_timeout 20 du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s(%sK) ", $2, $1}')"
   if [ "${ns:-0}" -gt 0 ]; then
     die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor); ${ns} recorded item(s) are SAFE to delete — run '$0 cleanup --apply' (no ASK items need acknowledging). Biggest under OSRC_HOME: ${top:-unknown}$(_osrc_disk_override_offer 2>/dev/null)"
   fi
   die "outsourcerer: free disk is ${free_gb}GB (< ${launch_gb}GB launch floor) and nothing Outsourcerer-created is pending cleanup — the space is held elsewhere. Biggest under OSRC_HOME: ${top:-unknown} Free space outside Outsourcerer, or lower the floor in $OSRC_HOME/disk-policy/settings (OSRC_DISK_MIN_GB=<n>).$(_osrc_disk_override_offer 2>/dev/null)"
 }
+
+_osrc_disk_admit() { [ "${_OSRC_DISK_KIND:-probe}" = probe ] || _osrc_disk_register_caller "$_OSRC_DISK_KIND" || true; }
 
 # =============================================================================
 # cmd_cleanup <job-id|fanout-gid> [--force] -> remove a job's (or a whole fanout's) git
@@ -740,7 +757,7 @@ _cmd_cleanup_target() {
   fi
   if [ "$force" != 1 ] && [ "$dirty" != "true" ] && [ "${ahead:-0}" -eq 0 ] && [ -n "$maindir" ] \
      && git -C "$maindir" rev-parse --verify -q "refs/heads/$branch" >/dev/null 2>&1 \
-     && ! _osrc_branch_merged "$maindir" "$branch"; then
+     && ! _osrc_branch_merged "$maindir" "$branch" --any-ref; then
     echo "[outsourcerer] REFUSING to remove $target: branch '$branch' may be the only ref to its commits (no other branch, remote or tag holds it, and no merged PR)." >&2
     echo "  inspect: git -C \"$path\" log --oneline -3; push or branch it first, or force-remove: outsourcerer cleanup $target --force" >&2
     return 1

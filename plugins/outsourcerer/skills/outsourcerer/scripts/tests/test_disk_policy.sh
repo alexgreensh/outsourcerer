@@ -249,7 +249,7 @@ wait_for 'case "$(cat "$WJ/status" 2>/dev/null)" in wedged|timeout) true ;; *) f
 
 echo "=== foreground and tmux lanes ==="
 FH="$TMP/fg"; mkdir -p "$FH/jobs"; settings "$FH"; setfree 20971520
-osrc "$FH" 'route_delegate() { _osrc_disk_gate; }; route_delegate; sleep 300 & echo $! > "$OSRC_HOME/child"; disown; sleep 3' >/dev/null &
+osrc "$FH" 'route_delegate() { _osrc_disk_gate fg; }; route_delegate; sleep 300 & echo $! > "$OSRC_HOME/child"; disown; sleep 3' >/dev/null &
 LP=$!; wait_for '[ -s "$FH/child" ]' 20; FC="$(cat "$FH/child" 2>/dev/null)"; KILL="$KILL $FC"
 ls "$FH"/disk-policy/procs/fg-* >/dev/null 2>&1 && ok "foreground launch registered" || bad "no fg registration"
 setfree 3145728; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null
@@ -258,18 +258,18 @@ setfree 8388608; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null
 ! stopped "$FC" && ok "foreground lane resumed" || bad "fg child stranded"
 wait "$LP" 2>/dev/null
 # P2: a foreground lane paused longer than its hard cap is not killed by _fg_guard on resume.
-setfree 20971520; osrc "$FH" 'route_delegate() { _osrc_disk_gate; }; route_delegate; f() { i=0; while [ $i -lt 6 ]; do sleep 1; i=$((i+1)); done; }
+setfree 20971520; osrc "$FH" 'route_delegate() { _osrc_disk_gate fg; }; route_delegate; f() { i=0; while [ $i -lt 6 ]; do sleep 1; i=$((i+1)); done; }
   OSRC_FG_TIMEOUT=10 _fg_guard f x >/dev/null 2>&1; echo "$?" > "$OSRC_HOME/fg-rc"' >/dev/null 2>&1 &
 LP=$!; sleep 2; setfree 3145728; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null; sleep 14; setfree 8388608; osrc "$FH" '_osrc_disk_monitor_tick' >/dev/null
 wait "$LP" 2>/dev/null; [ "$(cat "$FH/fg-rc" 2>/dev/null)" = 0 ] && ok "paused foreground lane survives its guard's hard cap" || bad "fg guard killed a paused lane: rc=$(cat "$FH/fg-rc" 2>/dev/null)"
-g="$(OSRC_RUN_ID=x osrc "$TMP/fg2" 'mkdir -p "$OSRC_HOME"; _osrc_disk_register_caller route_delegate; ls "$OSRC_HOME/disk-policy/procs" 2>/dev/null | wc -l')"
+g="$(OSRC_RUN_ID=x osrc "$TMP/fg2" 'mkdir -p "$OSRC_HOME"; _osrc_disk_register_caller fg; ls "$OSRC_HOME/disk-policy/procs" 2>/dev/null | wc -l')"
 [ "$(tail -1 <<<"$g" | tr -d ' ')" = 0 ] && ok "inside a bg job: no duplicate fg registration" || bad "bg job registered as fg: $g"
 if command -v tmux >/dev/null 2>&1; then
   export TMUX_TMPDIR="$TMP/tmux"; mkdir -p "$TMUX_TMPDIR"; unset TMUX
   TH="$TMP/tui"; mkdir -p "$TH/jobs"
   # Product panes run the login shell itself (pane_pid = the job-control shell). tmux runs a pane
   # command through "$SHELL -c", and dash forks rather than exec'ing, so `exec` keeps that shape.
-  osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller tmux' >/dev/null
   tmux new-session -d -s osrc-tui -x 80 -y 24 "exec env PS1='$ ' bash --norc --noprofile -i"
   sleep 0.5; tmux send-keys -t osrc-tui "bash -c 'stty raw -echo; exec sleep 600'" Enter
   wait_for '[ "$(tmux display-message -p -t osrc-tui "#{pane_current_command}")" = sleep ]' 25
@@ -285,10 +285,10 @@ if command -v tmux >/dev/null 2>&1; then
   osrc "$TH" '_osrc_disk_monitor_tick' >/dev/null
   [ "$(tmux display-message -p -t osrc-tui '#{pane_current_command}')" = sleep ] && ok "manual resume holds new pauses" || bad "re-paused after manual resume"
   # P2: a second `session start` for a live session keeps that session's bound record.
-  osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  osrc "$TH" 'SESSION_NAME=osrc-tui; OSRC_PLATFORM=linux; _osrc_disk_register_caller tmux' >/dev/null
   [ -n "$(cut -d'|' -f4 "$TH/disk-policy/procs/tmux-osrc-tui" 2>/dev/null)" ] && ok "repeat session start keeps the live registration" || bad "live session unregistered: $(cat "$TH/disk-policy/procs/tmux-osrc-tui" 2>/dev/null)"
   # P2: a lane whose pane process is a non-exec wrapper shell is never typed into.
-  osrc "$TH" 'SESSION_NAME=wrap; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  osrc "$TH" 'SESSION_NAME=wrap; OSRC_PLATFORM=linux; _osrc_disk_register_caller tmux' >/dev/null
   tmux new-session -d -s wrap -x 80 -y 24 "bash -c 'sleep 600; :'"
   wait_for '[ -n "$(ps -o pid= --ppid "$(tmux display-message -p -t wrap "#{pane_pid}")" 2>/dev/null)" ] || pgrep -P "$(tmux display-message -p -t wrap "#{pane_pid}")" >/dev/null' 25
   rm -f "$TH/disk-policy/hold"
@@ -307,7 +307,7 @@ if command -v tmux >/dev/null 2>&1; then
   osrc "$TH" 'tmux() { echo called >> "$OSRC_HOME/tmux-calls"; command tmux "$@"; }; _osrc_disk_reg_root "$OSRC_HOME/disk-policy/procs/tmux-not-yet"' >/dev/null
   [ -f "$TH/disk-policy/procs/tmux-not-yet" ] && [ ! -f "$TH/tmux-calls" ] && ok "pending tmux registration makes no tmux call" || bad "pending registration probed tmux"
   # P3: a resumed lane parked behind another foreground program is never typed into; one parked event.
-  osrc "$TH" 'SESSION_NAME=park; OSRC_PLATFORM=linux; _osrc_disk_register_caller session' >/dev/null
+  osrc "$TH" 'SESSION_NAME=park; OSRC_PLATFORM=linux; _osrc_disk_register_caller tmux' >/dev/null
   tmux new-session -d -s park -x 80 -y 24 "exec env PS1='$ ' bash --norc --noprofile -i"; sleep 0.5; tmux send-keys -t park "sleep 600" Enter; sleep 0.5
   rm -f "$TH/disk-policy/hold"; osrc "$TH" '_osrc_disk_pause_reg "$OSRC_HOME/disk-policy/procs/tmux-park"' >/dev/null
   wait_for '[ "$(tmux display-message -p -t park "#{pane_current_command}")" = bash ]' 25; tmux send-keys -t park "sleep 601" Enter; sleep 0.5
@@ -333,13 +333,14 @@ stopped "$MJ" && ok "running monitor paused the job" || bad "monitor did not pau
 for i in 1 2 3; do osrc "$MH" '_osrc_disk_monitor_ensure' >/dev/null; done; sleep 2
 [ "$(grep -c 'monitor .* started' "$MH/disk-policy/monitor.log")" = 1 ] && [ "$(owner_pid "$MH")" = "$M1" ] \
   && ok "one watcher across concurrent launches" || bad "watchers: $(grep -c 'started' "$MH/disk-policy/monitor.log")"
-# P1: TERM resumes everything it paused.
-kill -TERM "$M1"
+# P1: TERM resumes everything it paused once space is back over the pause floor (under it the
+# records stay for the next monitor: tests/test_disk_gate_failsafe.sh).
+setfree 5242880; kill -TERM "$M1"
 wait_for '! kill -0 '"$M1"' 2>/dev/null' 40 && ok "monitor $M1 exited on TERM" || bad "monitor ignored TERM"
 ! stopped "$MJ" && ok "TERM exit resumed the paused job" || bad "job frozen after monitor exit"
 [ ! -d "$MH/disk-policy/monitor.lock" ] && ok "lock released on exit" || bad "lock left behind"
 # P1: abrupt death -> heartbeat brings a monitor back, which resumes once space returns.
-osrc "$MH" '_osrc_disk_monitor_tick' >/dev/null; stopped "$MJ" || bad "re-pause for kill -9 case failed"
+setfree 3145728; osrc "$MH" '_osrc_disk_monitor_tick' >/dev/null; stopped "$MJ" || bad "re-pause for kill -9 case failed"
 mkdir -p "$MH/disk-policy/monitor.lock"; echo "999999|Mon Jan  1 00:00:00 2001" > "$MH/disk-policy/monitor.lock/owner"
 setfree 8388608
 osrc "$MH" '_osrc_disk_heartbeat' >/dev/null
@@ -372,6 +373,7 @@ grep -q '^since|' "$BJ/disk-paused" 2>/dev/null && ok "failed bank keeps the pau
 echo "=== incident 3: merged-lane reclaim ==="
 RH="$TMP/reclaim"; mkdir -p "$RH/jobs"; export OSRC_HOME="$RH"
 R="$TMP/repo"; mkrepo "$R"
+git -C "$R" update-ref refs/remotes/origin/main HEAD   # main pushed: a remote holds merged lanes' commits
 lane() { # <name> -> worktree + branch + receipt, merged (at main), owner done
   git -C "$R" worktree add -q "$R/.outsourcerer/worktrees/$1" -b "outsourcerer/$1" HEAD
   mkdir -p "$RH/jobs/$1"; echo done > "$RH/jobs/$1/status"
