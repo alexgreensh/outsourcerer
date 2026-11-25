@@ -231,7 +231,7 @@ change, and the brief rules out caching on top of the existing caches. I made no
 - `timeout 600 nice bash tests/test_hub_speed.sh`: **rc=0**, 25 passed, 0 failed (27 s).
   The same file run against base `7eef90a` code: rc=1, 19 passed, 6 failed (the six marked above).
 - `timeout 900 nice bash tests/test_remote_review.sh`: **rc=0**, 108 passed, 0 failed.
-  Against base code: see below.
+  Against base code: rc=1, 107 passed, 1 failed (only the new finished-lane check).
 
 ### Not proven
 
