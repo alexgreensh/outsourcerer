@@ -105,3 +105,5 @@ Base confirmed: `git log --oneline -3` showed `ff0a770` (r3 READY). Six small fi
 
 ## Needs from other lanes
 - None new.
+
+Conformance (one run, rc=0): 241 passed, 7 failed, 1 skipped. The six root-container failures from round 3 plus `test_release_0175`, which passes alone (83 passed, rc=0) and is unrelated to my files.
