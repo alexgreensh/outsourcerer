@@ -1283,9 +1283,8 @@ _devin_resolve_dynamic() {
     | if $exactidx != null then $allvars[$exactidx]
       else
         ( [ .families[]?
-            | select( (.family_uid|ascii_downcase) == ($tok|ascii_downcase)
-                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+"-"))
-                      or (.family_uid|ascii_downcase | startswith(($tok|ascii_downcase)+".")) ) ] ) as $fams
+            | select( keyify(.family_uid) == keyify($tok)
+                      or (keyify(.family_uid) | startswith(keyify($tok)+"-")) ) ] ) as $fams
         | if ($fams|length)==0 then ""
           else
             ( ($fams | map(select(.family_uid | test("flash|fast|lightning";"i")|not))) as $nf
@@ -1300,9 +1299,14 @@ _devin_resolve_dynamic() {
             | ( ($fam.variants // []) | map(select(.model_uid | test("-(1m|none)$";"i")|not)) ) as $vars
             | if ($vars|length)==0 then ""
               else
-                ( $vars | map(select(.model_uid | endswith("-"+$eff))) ) as $esfx
-                | if ($esfx|length)>0 then ($esfx | sort_by(costrank,(.model_uid|length)) | .[0].model_uid)
-                  else ($vars | sort_by(costrank,(.model_uid|length)) | .[0].model_uid) end
+                # Cost outranks effort: the effort-suffix filter running FIRST let a paid -high
+                # win over a free -max in the same family (eff defaults to high), so a bare alias
+                # could resolve onto a paid variant although a free one existed — the launch-half
+                # of the codex bypass. Effort is only a tiebreak within the same cost class; the
+                # Devin lane treats it as advisory anyway (no native effort knob).
+                ( $vars | sort_by([ costrank,
+                                    (if (.model_uid | endswith("-"+$eff)) then 0 else 1 end),
+                                    (.model_uid|length) ]) | .[0].model_uid )
               end
           end
       end' 2>/dev/null
@@ -15760,11 +15764,19 @@ route_delegate() {
   # a case/dot variation or family alias could pass here as Free and then resolve to a
   # paid variant downstream — the end-to-end bypass Neon verified. Resolution is
   # deterministic, so resolving here once classifies exactly what delegate() launches.
+  # The input MUST be the same token dispatch resolves: delegate() runs
+  # _devin_resolve_model("$MODEL"), never RESOLVED_ID. Gating on RESOLVED_ID instead
+  # diverged whenever the static table target differed from the raw token — `-m swe`
+  # gated on table id swe-1.7 (static-free) while dispatch resolved `swe` to a paid
+  # newest-generation -high (codex review, verified end-to-end). The pin case mirrors
+  # dispatch too: a pinned route launches MODEL verbatim.
   local _gate_model="$RESOLVED_ID"
   case "$disp" in
     devin|dv)
-      local _gm; _gm="$(_devin_resolve_model "$RESOLVED_ID" 2>/dev/null)"
-      [ -n "$_gm" ] && _gate_model="$_gm" ;;
+      local _gm
+      if [ "${_OSRC_PIN_DISP:-}" = devin ]; then _gm="$MODEL"
+      else _gm="$(_devin_resolve_model "$MODEL" 2>/dev/null)"; fi
+      _gate_model="${_gm:-$MODEL}" ;;
   esac
   _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || _src=$?
   [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
