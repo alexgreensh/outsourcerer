@@ -347,3 +347,40 @@ and pass here.
   each new fixture.
 - `bash tests/test_pane_state.sh`: rc=0, 15 passed.
 - `bash tests/test_session_send_verify.sh`: rc=0, 49 passed.
+- `bash tests/test_stall.sh`: rc=0, 58 passed. `test_supervise.sh`: rc=0, 99 passed.
+  `test_done_contract.sh`: rc=0, 53 passed. `test_pr10_falsestall_before_quota.sh`: rc=0, 7 passed.
+  `test_managed_send.sh`: rc=0, 12 passed.
+- `bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh`: rc=1. It reported
+  242 passed, 6 failed and 1 skipped (live). These 6 suites fail:
+  - `test_harness_isolation`
+  - `test_vocab_hygiene`
+  - `test_supervise_pgroup_kill`
+  - `test_parity_insource_refresh`
+  - `test_conformance_suite_timeout`
+  - `test_sealed_fixes`
+
+  Each one also fails with rc=1 on an untouched `a4944f2` worktree in this container. The container
+  runs as uid 0, so the read-only and permission probes succeed when they are meant to be refused.
+  None of these suites touch `lib/screen.sh`.
+
+### What remains unproven
+
+- Not run on macOS bash 3.2 or Git Bash. The new code uses only `case` globs, `${var#pattern}`
+  trims and the existing `[[ =~ ]]`-with-variable form.
+- **Shell-prompt boundary.** A row ending `$`, `%` or `#` ends the limit scan. An unknown TUI whose
+  refusal is followed by a status row ending in `%`, such as `ctx 12%`, would read its underlying
+  state instead of `limit`. That direction fails safe: the lane is never parked.
+- `⎿ ... limit` under a prose `⏺` still counts as a refusal, since that is how Claude prints its own
+  errors. This rests on `cc-limit-429.txt`, an invented fixture, not a real capture.
+
+### Needs from other lanes (round 3), `lib/supervise.sh` (owner osrc-l1)
+
+Round 2's Needs items 2 and 4 pointed at `osrc_screen_alert`, which is deleted. Replace them with
+the following.
+
+1. **Unknown escalation.** In `_sv_observe`'s `unknown)` arm, wait for a longer configurable window
+   (`OSRC_SUPERVISE_UNKNOWN_SECS`) before calling the lane stalled. If you use process-tree CPU as
+   evidence, a negative delta (a child exited) must count as activity and re-baseline the sample.
+2. **Failed and limit dedupe.** Keep the `SVS_LK` dedupe from round 2's item 4 in supervise's own
+   state file. Clear it when a lane name is reused.
+3. Round 2's items 1 and 3 stand unchanged.
