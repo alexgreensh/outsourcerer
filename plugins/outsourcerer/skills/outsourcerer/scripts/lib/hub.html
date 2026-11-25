@@ -954,8 +954,7 @@ a.pill svg { width: 13px; height: 13px; }
     get projects() { return projects; }, get also() { return also; }, get limits() { return limits; }, LSTATE, hlogo, get db() { return db; }, get mode() { return mode; }, get pullErr() { return pullErr; },
     get canWrite() { return canWrite; }, set canWrite(v) { canWrite = v; },
   }) : null;
-  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null;
-  A = typeof window.OSRC_HUB_ATTN === 'function' ? window.OSRC_HUB_ATTN({ el, openDecs }) : null;
+  const D = typeof window.OSRC_HUB_DECIDE === 'function' ? window.OSRC_HUB_DECIDE({ el, ic, tags, flush: (f) => flush(f), get db() { return db; } }) : null; A = typeof window.OSRC_HUB_ATTN === 'function' ? window.OSRC_HUB_ATTN({ el, openDecs }) : null;
 
   (async () => {
     const timer = setTimeout(() => { if (!projects.length) { renderRail(); if (db) renderMain(); } }, 10000);
