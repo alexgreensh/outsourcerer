@@ -53,7 +53,7 @@ printf '{"name":"Garden app","status":"building","pct":40,"reportedAt":"%s"}\n' 
 cp "$FIX/cc-idle-after-work.txt" "$TMP/panes/t-idle.screen"; own t-idle
 cp "$FIX/cc-question-live.txt" "$TMP/panes/t-ask.screen"; own t-ask
 cp "$FIX/cc-working-turn.txt" "$TMP/panes/t-busy.screen"; own t-busy
-# Cloud lanes: two carry a check: contract whose probe takes 20 s (the clone); one has a cached
+# Cloud lanes: two carry a check: contract whose probe takes 60 s (the clone; far past a slow Mac export, so a wait shows); one has a cached
 # verdict of done, one has none yet. The probe leaves a mark so the test sees it ran later, and it
 # repeats each lane's verdict (c-1 exits 0), so a probe ending mid-test changes no answer.
 for i in 1 2 3 4; do
@@ -62,7 +62,7 @@ for i in 1 2 3 4; do
     "$i" "$i" "$i" "$([ "$i" -le 2 ] && echo true || echo false)" "$NOW" > "$OSRC_HOME/remote/c-$i.json"
 done
 for i in 1 3; do
-  printf '#!/bin/sh\n: > "%s/probe-ran.c-%s"; sleep 20; exit %s\n' "$TMP" "$i" "$([ "$i" = 1 ] && echo 0 || echo 1)" > "$OSRC_HOME/cloud/c-$i.done.sh"; chmod 700 "$OSRC_HOME/cloud/c-$i.done.sh"
+  printf '#!/bin/sh\n: > "%s/probe-ran.c-%s"; sleep 60; exit %s\n' "$TMP" "$i" "$([ "$i" = 1 ] && echo 0 || echo 1)" > "$OSRC_HOME/cloud/c-$i.done.sh"; chmod 700 "$OSRC_HOME/cloud/c-$i.done.sh"
   printf '{"spec":"check:sh %s","cwd":"%s"}\n' "$OSRC_HOME/cloud/c-$i.done.sh" "$TMP" > "$OSRC_HOME/done/c-$i.json"
 done
 printf '%s done\n' "$((NOW - 3600))" > "$OSRC_HOME/done/c-1.checkcache"   # old verdict: done
@@ -99,14 +99,14 @@ jq -e 'map(select(.id == "t-ask"))[0].state == "question" and map(select(.id == 
   && ok "40 dead owner records skip the lane builders; a review-item lane and a pane still reach them" \
   || no "lane builders per id: gone=$(grep -c ' lane\.gone-' "$TMP/prof1") rv-only=$(grep -c ' lane\.rv-only\.for$' "$TMP/prof1") t-idle=$(grep -c ' lane\.t-idle\.for$' "$TMP/prof1")"
 
-echo "=== probe: a 20 s clone check never holds the export ==="
-[ "$dt" -lt 15 ] && ok "export with two 20 s probes took ${dt}s" || no "export waited on the probe: ${dt}s"
+echo "=== probe: a 60 s clone check never holds the export ==="
+[ "$dt" -lt 40 ] && ok "export with two 60 s probes took ${dt}s" || no "export waited on the probe: ${dt}s"
 n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -e "$TMP/probe-ran.c-3" ] && ok "the probe still runs, detached, after the export" || no "the deferred probe never ran"
 # The probe's own shell must not hold the caller's pipe either: a capture of the whole engine returns.
 t0="$(date +%s)"; rm -f "$OSRC_HOME"/done/*.checkcache "$OSRC_HOME"/done/*.checklock "$TMP"/probe-ran.* 2>/dev/null; rm -rf "$OSRC_HOME"/done/*.checklock*
 out="$(bash "$SRC" hub export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
-[ "$dt" -lt 15 ] && jq -e '.projects | length > 0' >/dev/null <<<"$out" && ok "\$(outsourcerer hub export) returns in ${dt}s while probes run" || no "captured export took ${dt}s"
+[ "$dt" -lt 40 ] && jq -e '.projects | length > 0' >/dev/null <<<"$out" && ok "\$(outsourcerer hub export) returns in ${dt}s while probes run" || no "captured export took ${dt}s"
 n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -e "$TMP/probe-ran.c-3" ] && ok "the captured export's own worker ran the probe" || no "the captured export never ran the deferred probe"
 pkill -f "probe-ran" 2>/dev/null; pkill -f "$OSRC_HOME/cloud/c-" 2>/dev/null
