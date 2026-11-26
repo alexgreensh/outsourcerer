@@ -257,7 +257,7 @@ _osrc_hub_cache_put() {
   # Only inside an export, whose start stamp the cache file takes: an input written while this export
   # ran is then newer than the cache and invalidates it, instead of hiding behind a later write time.
   [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/start" ] || return 0
-  jq -e '(.liveLanes // 0) == 0 and all(.lanes[]?; (.status // "") as $s | ["Done","Merged","Failed","Canceled","Shipped"] | index($s) != null)' >/dev/null 2>&1 <<<"$pj" || { rm -f "$d/$slug.json" 2>/dev/null; return 0; }
+  jq -e '(.liveLanes // 0) == 0 and all(.lanes[]?; (.status // "") as $s | ["Done","Merged","Failed","Canceled","Shipped","Closed"] | index($s) != null)' >/dev/null 2>&1 <<<"$pj" || { rm -f "$d/$slug.json" 2>/dev/null; return 0; }
   for t in "$OSRC_HOME/owners/$slug"/*; do
     [ -f "$t" ] || continue; id="${t##*/}"
     [ -f "$OSRC_HOME/remote/$id.json" ] && return 0

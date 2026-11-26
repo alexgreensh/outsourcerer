@@ -104,19 +104,20 @@ _osrc_hub_ended_ids() {
 }
 
 # _osrc_hub_ended_lane <id> <rmap> -> lane JSON for a lane that left the registry. Uses the real record
-# when one is left (job dir, remote lane file); a closed tmux session reads as finished.
+# when one is left (job dir, remote lane file). Without done evidence (nothing left, a killed session, a
+# last status of Building or Idle) it reads "Closed": the session ended, nobody proved the work done.
 _osrc_hub_ended_lane() {
   local id="$1" lane=""
   # A lane with nothing left gets the fixed row below either way; skipping the builders saves 3-4
   # subshells per id (hundreds of ended lanes on a real state home).
   if type _osrc_hub_lane_absent >/dev/null 2>&1 && _osrc_hub_lane_absent "$id"; then
     # The same row the jq below builds, without two jq forks, for an id that needs no JSON escaping.
-    case "$id" in *[!A-Za-z0-9._-]*|'') ;; *) printf '{"id":"%s","short":"%s","status":"Done","note":"session closed","ended":true}\n' "$id" "$id"; return 0 ;; esac
+    case "$id" in *[!A-Za-z0-9._-]*|'') ;; *) printf '{"id":"%s","short":"%s","status":"Closed","note":"session closed","ended":true}\n' "$id" "$id"; return 0 ;; esac
   else
     type _osrc_hub_lane_for >/dev/null 2>&1 && lane="$(_osrc_hub_lane_for "$id" "$2" 2>/dev/null)"
   fi
-  [ -n "$lane" ] || lane="$(jq -cn --arg id "$id" '{id:$id, short:$id, status:"Done", note:"session closed"}')"
-  jq -c '. + {ended:true} | if (.status // "") == "" or .status == "Building" or .status == "Idle" then .status = "Done" else . end' <<<"$lane"
+  [ -n "$lane" ] || lane="$(jq -cn --arg id "$id" '{id:$id, short:$id, status:"Closed", note:"session closed"}')"
+  jq -c '. + {ended:true} | if (.status // "") == "" or .status == "Building" or .status == "Idle" then .status = "Closed" else . end' <<<"$lane"
 }
 
 # _osrc_hub_active <sid> -> rc0 when the orchestrator reported, beat, or wrote its transcript within

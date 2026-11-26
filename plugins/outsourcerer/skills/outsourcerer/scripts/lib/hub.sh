@@ -87,7 +87,7 @@ _osrc_hub_lane_status() {
     failed|wedged|timeout) st="Failed" ;;
     canceled|interrupted) st="Canceled" ;;
     gone) st="" ;;
-    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused) : ;;
+    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused|Closed) : ;;
     *) st="Building" ;;
   esac
   local pct=""
@@ -308,7 +308,7 @@ _osrc_hub_build_project() {
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.done"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
       if [ "${act##* }" = 1 ] && ! jq -e '.state == "idle" or .state == "done" or .state == "failed" or
-          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped", "Unverified"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
+          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped", "Unverified", "Closed"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
     done
   fi
   [ -z "$olanes" ] || lanes="$(printf '%s' "$olanes" | jq -cs . 2>/dev/null)" || lanes='[]'   # one jq, not one per lane

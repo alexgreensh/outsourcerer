@@ -107,5 +107,19 @@ if on F37; then
   [ "$(lib _osrc_hub_job_state f37b)" = failed ] && ok "F37: a non-zero exit still reads failed" || no "F37: rc 3 reads $(lib _osrc_hub_job_state f37b)"
 fi
 
+if on F38; then
+  # Lanes that left the registry: nothing behind them, or a last status of Building or Idle, is "Closed";
+  # only done evidence (a Done row) reads Done.
+  r1="$(lib _osrc_hub_ended_lane gone-lane '{}' | jq -r '"\(.status)|\(.note)|\(.ended)"')"
+  r2="$(lib eval '_osrc_hub_lane_absent() { return 1; }; _osrc_hub_lane_for() { printf "{\"id\":\"$1\",\"status\":\"Building\"}"; }; _osrc_hub_ended_lane b1 "{}"' | jq -r .status)"
+  r3="$(lib eval '_osrc_hub_lane_absent() { return 1; }; _osrc_hub_lane_for() { printf "{\"id\":\"$1\",\"status\":\"Done\"}"; }; _osrc_hub_ended_lane d1 "{}"' | jq -r .status)"
+  [ "$r1" = "Closed|session closed|true" ] && ok "F38: a lane with nothing left reads Closed, not Done" || no "F38: nothing left reads $r1"
+  [ "$r2" = Closed ] && ok "F38: an ended lane last seen Building reads Closed" || no "F38: Building ended reads $r2"
+  [ "$r3" = Done ] && ok "F38: an ended lane with done evidence still reads Done" || no "F38: Done ended reads $r3"
+  r4="$(lib _osrc_hub_truth '{"lanes":[{"id":"c","status":"Closed","ended":true}]}' "$(date +%s)" | jq -c '{a: .lanes[0].attention, s: .derived.summary}')"
+  case "$r4" in *'"a":"working"'*|*working*) no "F38: a Closed lane counts as working: $r4" ;; *) ok "F38: a Closed lane is not counted as working ($r4)" ;; esac
+  grep -q "'Closed'" "$LIB/hub-assets/hub-home.js" && ok "F38: the page lists Closed among ended lanes" || no "F38: hub-home.js ENDED lacks Closed"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

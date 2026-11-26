@@ -250,7 +250,7 @@
     // Export gives state (screen/job truth), startedAt and activeAt (epochs); old exports only had status.
     const LST = { working: 'working', approval: 'waiting for approval', question: 'asked a question', idle: 'idle',
       limit: 'hit a plan limit', failed: 'failed', unknown: 'state unknown' };
-    const ENDED = ['Done', 'Merged', 'Failed', 'Canceled', 'Shipped'];
+    const ENDED = ['Done', 'Merged', 'Failed', 'Canceled', 'Shipped', 'Closed'];
     function laneState(l) {
       if (l.state && LST[l.state]) return l.state;
       const s = String(l.status || '').toLowerCase();
