@@ -157,7 +157,8 @@ limit_state A limit:111; limit_state B limit:222; limit_state C working:1
 log limit A "plan limit hit: quota reached, resets 23:00 (epoch $((now - 10)))"
 log limit B "plan limit hit: quota reached, resets later (epoch $((now + 3600)))"
 log limit C "plan limit hit: quota reached (epoch $((now - 10)))"
-lim() { S "SCRIPT_PATH='$TMP/bin/fake-osrc'; ${1:-} _ws_limits"; }
+CONT_OK='_ws_continue_ok() { return 0; };'   # billing + screen re-read: covered by its own block below
+lim() { S "SCRIPT_PATH='$TMP/bin/fake-osrc'; $CONT_OK ${1:-} _ws_limits"; }
 lim; [ ! -s "$TMP/sent4" ] && ok "a watcher nobody installed never types a continue" || no "uninstalled watcher continued a lane"
 mkdir -p "$OSRC_HOME/watchsvc"; echo fallback > "$OSRC_HOME/watchsvc/installed"
 lim   # no limits/.cursor yet: banners logged before the install still count
@@ -176,9 +177,9 @@ OSRC_NOW=$t0 log limit D "plan limit hit: try again in 2 hours"; lim "OSRC_NOW=$
 OSRC_NOW=$((t0 + 1200)) log limit D "still unresolved, waiting 20m: plan limit hit: try again in 2 hours"; lim "OSRC_NOW=$((t0 + 1200))"
 lim "OSRC_NOW=$((t0 + 7300))"; grep -q '^D ' "$TMP/sent4" && ok "a reminder of a relative banner does not push the reset later" || no "reset snoozed by its own reminder [$(cat "$OSRC_HOME/watchsvc/limits/D")]"
 own sess1 E; limit_state E limit:555; printf '#!/bin/sh\necho x >> %s/fails4; exit 1\n' "$TMP" > "$TMP/bin/fail-osrc"; chmod +x "$TMP/bin/fail-osrc"
-log limit E "plan limit hit: x (epoch $((now - 5)))"; S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"
+log limit E "plan limit hit: x (epoch $((now - 5)))"; S "SCRIPT_PATH='$TMP/bin/fail-osrc'; $CONT_OK _ws_limits"
 [ ! -e "$OSRC_HOME/watchsvc/limits/E.done" ] && ! grep -q '"kind":"limit-resumed","target":"E"' "$OSRC_HOME/lanes/events.jsonl" && ok "a failed continue is not logged as sent; it is retried" || no "failed continue marked done"
-S "SCRIPT_PATH='$TMP/bin/fail-osrc'; _ws_limits"; [ "$(grep -c . "$TMP/fails4")" = 1 ] && ok "a failed continue backs off (no full script spawn every tick)" || no "retried at once: $(grep -c . "$TMP/fails4")"
+S "SCRIPT_PATH='$TMP/bin/fail-osrc'; $CONT_OK _ws_limits"; [ "$(grep -c . "$TMP/fails4")" = 1 ] && ok "a failed continue backs off (no full script spawn every tick)" || no "retried at once: $(grep -c . "$TMP/fails4")"
 lim "OSRC_NOW=$(( $(date +%s) + 61 ))"; [ "$(grep -c '^E ' "$TMP/sent4")" = 1 ] && ok "the retry sends it once" || no "E retry"
 own sess1 G; limit_state G limit:777; log limit G "plan limit hit: z (epoch $((now + 100)))"; lim; rm -f "$OSRC_HOME/owners/sess1/G"
 lim "OSRC_NOW=$((now + 200))"; ! grep -q '^G ' "$TMP/sent4" && ok "ownership is checked again when the continue is due" || no "continued a lane disowned after its banner"
@@ -320,7 +321,31 @@ kill "$sj" 2>/dev/null
 kill "$st" 2>/dev/null
 fresh 20; mkdir -p "$OSRC_HOME/watchsvc/limits"; echo fallback > "$OSRC_HOME/watchsvc/installed"; own sess1 K; S "_sv_state_read K; SVS_LK='limit:1'; _sv_state_write K"
 echo "3 $(( $(date +%s) + 900 ))" > "$OSRC_HOME/watchsvc/limits/K.try"; log limit K "plan limit hit: x (epoch $(( $(date +%s) - 5 )))"
-S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"; grep -q '^K ' "$TMP/sent4" && ok "a new limit banner does not inherit the old banner's backoff" || no "new banner waited out a stale backoff"
+S "SCRIPT_PATH='$TMP/bin/fake-osrc'; $CONT_OK _ws_limits"; grep -q '^K ' "$TMP/sent4" && ok "a new limit banner does not inherit the old banner's backoff" || no "new banner waited out a stale backoff"
+
+echo "=== rv F18: the continue re-reads billing and the screen right before the send ==="
+FX="$SCRIPT_DIR/fixtures/screen"
+ck() { # <bill> <fixture> -> "rc:<why>" from the real _ws_continue_ok (record, billing and capture stubbed)
+  S "_session_record() { printf 'codex\\tgpt-x\\n'; }; osrc_lane_billing() { echo $1; }; _osrc_screen_engine_of() { printf codex; }
+     _osrc_screen_capture() { cat '$FX/$2'; }; w=\"\$(_ws_continue_ok s1)\"; echo \"\$?:\$w\""; }
+[ "$(ck subscription cx-idle.ansi)" = "0:" ] && ok "subscription lane, empty ready composer -> continue" || no "idle composer refused: $(ck subscription cx-idle.ansi)"
+[ "$(ck subscription cx-limit-usage.ansi)" = "0:" ] && ok "old limit banner above an empty composer -> continue" || no "limit banner refused: $(ck subscription cx-limit-usage.ansi)"
+case "$(ck subscription cx-approval.ansi)" in 1:*approval*) ok "a menu/prompt on screen holds the continue" ;; *) no "menu screen: $(ck subscription cx-approval.ansi)" ;; esac
+case "$(ck subscription cc-composer-typed-unsent.ansi)" in 1:*) ok "typed text in the composer holds the continue" ;; *) no "typed composer: $(ck subscription cc-composer-typed-unsent.ansi)" ;; esac
+for b in metered unknown; do case "$(ck $b cx-idle.ansi)" in 3:*"bills $b"*) ok "a $b lane is never continued automatically" ;; *) no "$b lane: $(ck $b cx-idle.ansi)" ;; esac; done
+fresh 18f; mkdir -p "$OSRC_HOME/watchsvc"; echo fallback > "$OSRC_HOME/watchsvc/installed"; : > "$TMP/sent4"
+own sess1 M; own sess1 N; limit_state M limit:1; limit_state N limit:2
+log limit M "plan limit hit: x (epoch $(( $(date +%s) - 5 )))"; log limit N "plan limit hit: x (epoch $(( $(date +%s) - 5 )))"
+S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _session_record() { printf 'codex\\tgpt-x\\n'; }; _osrc_screen_engine_of() { printf codex; }
+   osrc_lane_billing() { echo metered; }; _osrc_screen_capture() { cat '$FX/cx-idle.ansi'; }; _ws_limits"
+! grep -q '^[MN] ' "$TMP/sent4" && [ -f "$OSRC_HOME/watchsvc/limits/M.done" ] && grep -q '"kind":"approval","target":"M".*bills metered' "$OSRC_HOME/lanes/events.jsonl" \
+  && ok "metered lane after its reset: no keys, one approval row naming the billing, not retried" || no "metered continue: sent=[$(cat "$TMP/sent4")]"
+fresh 18g; mkdir -p "$OSRC_HOME/watchsvc"; echo fallback > "$OSRC_HOME/watchsvc/installed"; : > "$TMP/sent4"
+own sess1 P; limit_state P limit:1; log limit P "plan limit hit: x (epoch $(( $(date +%s) - 5 )))"
+S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _session_record() { printf 'codex\\tgpt-x\\n'; }; _osrc_screen_engine_of() { printf codex; }
+   osrc_lane_billing() { echo subscription; }; _osrc_screen_capture() { cat '$FX/cx-approval.ansi'; }; _ws_limits"
+! grep -q '^P ' "$TMP/sent4" && [ ! -f "$OSRC_HOME/watchsvc/limits/P.done" ] && [ -f "$OSRC_HOME/watchsvc/limits/P.try" ] \
+  && ok "a prompt on screen after the reset: no keys, retried with backoff" || no "prompt continue: sent=[$(cat "$TMP/sent4")]"
 
 echo "=== install / uninstall: explicit, idempotent, reversible ==="
 fresh 7; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd.log\n' "$TMP" > "$TMP/bin/systemctl"; chmod +x "$TMP/bin/systemctl"

@@ -281,10 +281,27 @@ _ws_notify() { # <title> <body>: best effort, never blocks
 # is answered once and a failed send is retried with backoff (limits/<id>.try). A lane that moved on,
 # or that nobody owns any more when the send is due, is forgotten. With no cursor yet (first run, or a
 # reinstall) the whole log is read, so a lane parked on a limit before the install is still continued.
+# _ws_continue_ok <session> -> rc0 when an automatic `continue` may be typed: the session's recorded
+# lane bills free or subscription, and its pane shows the engine's own empty composer, ready (idle,
+# composer, or the old limit banner above it). rc3 (prints why) for a metered/unknown-billing lane;
+# rc1 (prints why) for any other screen: a menu, a prompt, typed text, or a pane that cannot be read.
+_ws_continue_ok() {
+  local rec prov model lane bill cap eng
+  rec="$(_session_record "$1" 2>/dev/null)"; prov="$(printf '%s' "$rec" | cut -f1)"; model="$(printf '%s' "$rec" | cut -f2)"
+  lane="$(_osrc_session_lane "$prov" 2>/dev/null)"
+  bill="$(osrc_lane_billing "${lane:-unknown}" "$model" "$prov" 2>/dev/null)"
+  case "$bill" in free|subscription) ;; *) printf 'lane %s bills %s' "${lane:-unknown}" "${bill:-unknown}"; return 3 ;; esac
+  cap="$(_osrc_screen_capture "$1" 2>/dev/null)" || { printf 'pane unreadable'; return 1; }
+  eng="$(_osrc_screen_engine_of "$1" 2>/dev/null)"; _osrc_screen_analyze_text "${eng:-$prov}" <<<"$cap"
+  [ "${OSRC_SCR_COMPOSER_FOUND:-0}" = 1 ] && [ -z "${OSRC_SCR_COMPOSER:-}" ] \
+    && case "$OSRC_SCR_STATE" in idle|composer|limit) true ;; *) false ;; esac \
+    || { printf 'screen is %s, not an empty ready composer' "${OSRC_SCR_STATE:-unknown}"; return 1; }
+  return 0
+}
 _ws_limits() {
   [ "${OSRC_WATCH_LIMIT_AUTO:-1}" = 0 ] && return 0
   [ -f "$(_ws_root)/installed" ] || return 0
-  local d f cur cg c2 gen size now t detail ts ep secs ph rc older=""
+  local d f cur cg c2 gen size now t detail ts ep secs ph rc why older=""
   d="$(_ws_root)/limits"; mkdir -p "$d" 2>/dev/null || return 1
   f="$(_sv_lanes)/events.jsonl"; now="$(_sv_now)"
   size="$(_sv_num "$({ wc -c < "$f"; } 2>/dev/null | tr -d ' ')" 0)"
@@ -324,6 +341,17 @@ _ws_limits() {
     [ -f "$f.sending" ] && [ $(( now - $(_sv_num "$(stat -c %Y "$f.sending" 2>/dev/null || stat -f %m "$f.sending" 2>/dev/null)" "$now") )) -gt "$(_sv_num "${OSRC_WATCH_TICK_TIMEOUT:-}" 300)" ] && rm -f "$f.sending"
     ( set -C; printf '%s\n' "$$" > "$f.sending" ) 2>/dev/null || continue
     [ "$(cat "$f.done" 2>/dev/null)" = "$ep" ] && { rm -f "$f.sending"; continue; }   # another loop sent it meanwhile
+    # Re-read billing and the screen right before the keys go in: a post-limit overage or
+    # pay-as-you-go prompt must never receive them, and a metered lane is the user's call (rv F18).
+    why="$(_ws_continue_ok "$t")"; rc=$?
+    if [ "$rc" = 3 ]; then
+      printf '%s\n' "$ep" > "$f.done"; rm -f "$f.try" "$f.sending"
+      _sv_append approval "$t" "limit reset, not continued automatically: $why" "OUTSOURCERER_TMUX=$t $SCRIPT_PATH session send continue" watcher \
+        "$(basename "$(dirname "$(ls -1 "$OSRC_HOME"/owners/*/"$t" 2>/dev/null | head -1)")")"
+      continue
+    elif [ "$rc" != 0 ]; then
+      rm -f "$f.sending"; _ws_log "continue to $t held: $why (attempt $(_ws_backoff "$f.try")), re-reading with backoff"; continue
+    fi
     OUTSOURCERER_TMUX="$t" OSRC_STREAM=1 "$SCRIPT_PATH" session send "continue" >/dev/null 2>&1 </dev/null; rc=$?
     # rc 0 verified, rc 2 submitted but unverified (never resend: that would be a second continue).
     case "$rc" in 0|2) ;; *) rm -f "$f.sending"; _ws_log "continue to $t after its limit reset failed (rc $rc; attempt $(_ws_backoff "$f.try")), retrying with backoff"; continue ;; esac
