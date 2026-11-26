@@ -481,19 +481,21 @@ _cloudrun_launch() {
 
 # ---- registration --------------------------------------------------------------------------------
 # _cloudrun_register <id> <vehicle> <branch> <transport> <url> <repo-arg> <base> <brief>
-#                    <donewhen> <pack> <ref>
+#                    <donewhen> <pack> <ref> [model]
 # L2 path: `lane add` (writes remote/<id>.json + _owner_record + immediate poll). Fallback: write a
 # schema-compatible remote/<id>.json ourselves so a later-merged L2 picks the lane up, plus
 # _owner_record per CONTRACT.md.
 _cloudrun_register() {
   local id="$1" vehicle="$2" branch="$3" transport="$4" url="$5" repo="$6" base="$7" brief="$8"
-  local donewhen="${9:-}" pack="${10:-}" ref="${11:-}"
+  local donewhen="${9:-}" pack="${10:-}" ref="${11:-}" model="${12:-}"
+  # Hover cards name the model; no --model means the vehicle's own default, said as such.
+  [ -n "$model" ] || model="$vehicle default"
   local now; now="$(_cloudrun_now)"
   if type cmd_lane >/dev/null 2>&1; then
     local -a largs=(add "$id" --branch "$branch" --repo "$repo" --ready READY --base "$base" --brief "$brief")
     [ -n "$donewhen" ] && largs+=(--done-when "check:$donewhen")
     if ( cmd_lane "${largs[@]}" ) >/dev/null 2>"$(_cloudrun_cdir)/$id.lane.err"; then
-      _cloudrun_json_extras "$id" "$vehicle" "$ref" "$pack"
+      _cloudrun_json_extras "$id" "$vehicle" "$ref" "$pack" "$model"
       return 0
     fi
     die "cloud: lane add failed for '$id': $(tail -1 "$(_cloudrun_cdir)/$id.lane.err" 2>/dev/null)"
@@ -504,28 +506,28 @@ _cloudrun_register() {
   if have jq; then
     jq -n --arg id "$id" --arg branch "$branch" --arg repo "$repo" --arg transport "$transport" \
       --arg url "$url" --arg base "$base" --arg brief "$brief" --arg dw "$donewhen" --arg vehicle "$vehicle" \
-      --arg ref "$ref" --arg pack "$pack" --argjson now "$now" '{
+      --arg ref "$ref" --arg pack "$pack" --arg model "$model" --argjson now "$now" '{
         id:$id, branch:$branch, repo:$repo, transport:$transport, url:$url, ready_marker:"READY",
         base:$base, brief:$brief, done_when:$dw, created_ts:$now, last_poll_ts:0, last_ok_ts:0,
         err_count:0, err_kind:"", err_msg:"", seen_branch:false, branch_deleted:false,
         head:"", head_msg:"", head_ready:false, last_push_ts:$now, ready_head:"", ready_ts:0,
-        check:null, vehicle:$vehicle, session_ref:$ref, pack:$pack}' \
+        check:null, vehicle:$vehicle, session_ref:$ref, pack:$pack, model:$model}' \
       > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" || { rm -f "$tmp"; die "cloud: could not write $f"; }
   else
-    printf '{"id":"%s","branch":"%s","repo":"%s","transport":"%s","url":"%s","ready_marker":"READY","base":"%s","brief":"%s","done_when":"%s","created_ts":%s,"last_poll_ts":0,"last_ok_ts":0,"err_count":0,"err_kind":"","err_msg":"","seen_branch":false,"branch_deleted":false,"head":"","head_msg":"","head_ready":false,"last_push_ts":%s,"ready_head":"","ready_ts":0,"check":null,"vehicle":"%s","session_ref":"%s","pack":"%s"}\n' \
-      "$id" "$branch" "$repo" "$transport" "$url" "$base" "$brief" "$donewhen" "$now" "$now" "$vehicle" "$ref" "$pack" > "$tmp" \
+    printf '{"id":"%s","branch":"%s","repo":"%s","transport":"%s","url":"%s","ready_marker":"READY","base":"%s","brief":"%s","done_when":"%s","created_ts":%s,"last_poll_ts":0,"last_ok_ts":0,"err_count":0,"err_kind":"","err_msg":"","seen_branch":false,"branch_deleted":false,"head":"","head_msg":"","head_ready":false,"last_push_ts":%s,"ready_head":"","ready_ts":0,"check":null,"vehicle":"%s","session_ref":"%s","pack":"%s","model":"%s"}\n' \
+      "$id" "$branch" "$repo" "$transport" "$url" "$base" "$brief" "$donewhen" "$now" "$now" "$vehicle" "$ref" "$pack" "$model" > "$tmp" \
       && mv -f "$tmp" "$f" || { rm -f "$tmp"; die "cloud: could not write $f"; }
   fi
   _owner_record "$id" || { rm -f "$f"; die "cannot register owner for $id"; }
   return 0
 }
 
-# _cloudrun_json_extras <id> <vehicle> <ref> <pack> -> best-effort extra fields on the L2-written
+# _cloudrun_json_extras <id> <vehicle> <ref> <pack> <model> -> best-effort extra fields on the L2-written
 # record (jq only; never fails the launch).
 _cloudrun_json_extras() {
   local f="$(_cloudrun_rdir)/$1.json"
   [ -f "$f" ] && have jq || return 0
-  jq --arg v "$2" --arg r "$3" --arg p "$4" '. + {vehicle:$v, session_ref:$r, pack:$p}' "$f" > "$f.tmp.$$" 2>/dev/null \
+  jq --arg v "$2" --arg r "$3" --arg p "$4" --arg m "$5" '. + {vehicle:$v, session_ref:$r, pack:$p, model:$m}' "$f" > "$f.tmp.$$" 2>/dev/null \
     && mv -f "$f.tmp.$$" "$f" || rm -f "$f.tmp.$$"
   return 0
 }
@@ -709,7 +711,7 @@ its last output:
 $(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
   fi
   pid="$(printf '%s' "$launch_out" | sed -n '1p')"; ref="$(printf '%s' "$launch_out" | sed -n '2p')"
-  _cloudrun_register "$id" "$veh" "$branch" "$transport" "$url" "$repo" "$base" "$brief" "$donewhen" "$pack" "$ref"
+  _cloudrun_register "$id" "$veh" "$branch" "$transport" "$url" "$repo" "$base" "$brief" "$donewhen" "$pack" "$ref" "$model"
   _cloudrun_done_contract "$id" "$fetch" "$branch" "$top"
   printf 'cloud %s: %s session started on %s (branch %s)\n' "$id" "$veh" "$display" "$branch"
   printf '  session: %s\n' "$ref"

@@ -560,6 +560,13 @@ grep -q 't-claude.READY' <<<"$sec" && ok "launch: pack carries READY contract" |
 [ -f "$OSRC_HOME/remote/t-claude.json" ] && ok "lane: remote/t-claude.json registered" || bad "lane: json missing"
 { _t3b_pipe="$(jq -r '.vehicle // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -qx 'claude' <<<"$_t3b_pipe"; } \
   && ok "lane: vehicle field = claude" || bad "lane: vehicle field wrong"
+# Hover cards name lane, model, issue and PR: the cloud track carries the model it was started with,
+# and a lane started without --model says it runs the vehicle's default.
+[ "$(jq -r '.model // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" = sonnet-test ] \
+  && ok "lane: model recorded at registration" || bad "lane: model not recorded"
+type _osrc_hub_lane_remote >/dev/null 2>&1 || . "$SCRIPT_DIR/../lib/hub.sh" >/dev/null 2>&1
+[ "$(_osrc_hub_lane_remote t-claude 2>/dev/null | jq -r '.model // empty')" = sonnet-test ] \
+  && ok "hover: cloud track names its model" || bad "hover: cloud track model missing: $(_osrc_hub_lane_remote t-claude 2>&1 | head -3)"
 { _t3b_pipe="$(jq -r '.session_ref // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -q 'claude.ai' <<<"$_t3b_pipe"; } \
   && ok "lane: session_ref captured from launch log" || bad "lane: session_ref missing"
 { _t3b_pipe="$(jq -r '.branch // empty' "$OSRC_HOME/remote/t-claude.json" 2>/dev/null)" && grep -qx 'cloud/t-claude' <<<"$_t3b_pipe"; } \
@@ -610,6 +617,9 @@ out="$( cd "$WORK" && OSRC_CLOUD_ACK=1 OSRC_CLOUD_LAUNCH_WAIT=8 bash -c '
 out="$(cmd_lane() { echo 'fixture registry failure' >&2; return 1; }; _cloudrun_register t-l2fail devin cloud/t-l2fail git "$BARE" "$WORK" main "$BRIEF" '' '' '' 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'fixture registry failure' <<<"$out" && [ ! -e "$OSRC_HOME/remote/t-l2fail.json" ] \
   && ok "register: real helper failure is surfaced without fallback" || bad "register: helper failure concealed (rc=$rc): $out"
+( unset -f cmd_lane; _cloudrun_register t-nomodel devin cloud/t-nomodel git "$BARE" "$WORK" main "$BRIEF" '' '' '' ) >/dev/null 2>&1
+[ "$(jq -r '.model // empty' "$OSRC_HOME/remote/t-nomodel.json" 2>/dev/null)" = "devin default" ] \
+  && ok "register: no --model records the vehicle default" || bad "register: default model not recorded"
 
 # ============================== conserve mode -> devin preferred =====================
 # (a) lane-posture down marker on the claude-native lane (key cc)
