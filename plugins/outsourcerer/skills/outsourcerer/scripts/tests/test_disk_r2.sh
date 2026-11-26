@@ -79,7 +79,7 @@ H="$(home f9b "$(printf 'OSRC_DISK_MIN_GB=9999999999999\n')")"; read -r l p c <<
 [ "$l" = "${d%% *}" ] && [ "$p" -le $(( l * 3 / 4 )) ] && [ "$c" -gt 0 ] && ok "a 13-digit launch floor is rejected, pause stays under launch" || bad "floors $l $p $c"
 setfree $(( l - 1048576 ))
 g="$(osrc "$H" '_osrc_disk_gate fg; echo gate-rc=$?')"
-grep -q "< $(( l / 1048576 ))GB launch floor" <<<"$g" && ok "the gate enforces the floor status shows" || bad "gate: $g"
+grep -q "< $(( l / 1048576 )).0G launch floor" <<<"$g" && ok "the gate enforces the floor status shows" || bad "gate: $g"
 H="$(home f9c "$(printf 'OSRC_DISK_MIN_GB=5000000\nOSRC_DISK_PAUSE_GB=08\nOSRC_DISK_CRITICAL_GB=1\n')")"
 o="$(osrc "$H" '_osrc_disk_floors_kb')"
 [ "$o" = "1048576000000 8388608 1048576" ] && ok "7 digits clamp to 1,000,000 GB; 08 reads as 8 GB, not octal" || bad "floors: $o"

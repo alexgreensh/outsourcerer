@@ -293,7 +293,8 @@ jq -n '{sha:"aaaaaaa1111111111111111111111111111111aa", commit:{message:"READY: 
 tick 2000; ev="$(events)"
 grep -q '^EVENT done ghlane .*READY aaaaaaa' <<<"$ev" && ok "gh transport: READY detected from one commits API call" || bad "gh READY missed: $ev"
 [ "$(jq -r .err_count "$OSRC_HOME/remote/ghlane.json")" = 0 ] && ok "a good poll clears the error state" || bad "error state stuck"
-jq -n '{sha:"bbbbbbb2222222222222222222222222222222bb", commit:{message:"more work"}, files:[]}' > "$GH_OUT"; : > "$GH_CONTENTS_OK"; tick 5; events >/dev/null
+# (the READY poll above read that head's RESULT; this check is about the later push, so its log starts empty)
+: > "$GH_LOG"; jq -n '{sha:"bbbbbbb2222222222222222222222222222222bb", commit:{message:"more work"}, files:[]}' > "$GH_OUT"; : > "$GH_CONTENTS_OK"; tick 5; events >/dev/null
 [ "$(jq -r .head_ready "$OSRC_HOME/remote/ghlane.json")" = false ] && ! grep -q 'contents/' "$GH_LOG" && ok "gh transport: a READY file from an EARLIER commit does not make a later push READY (no contents calls either)" || bad "gh sticky READY"
 rm -f "$GH_CONTENTS_OK"
 
