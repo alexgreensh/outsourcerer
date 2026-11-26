@@ -12,7 +12,7 @@ command -v jq >/dev/null 2>&1 || { echo "SKIP: jq not installed"; exit 0; }
 
 TMP="$(mktemp -d "${TMPDIR%/}/.rvwatch-test.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }
 KILL=""
-cleanup_all() { local p; for p in $KILL; do kill -9 "$p" 2>/dev/null; done; rm -rf "$TMP"; }
+cleanup_all() { local p; for p in $KILL; do kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null; done; rm -rf "$TMP"; }
 trap cleanup_all EXIT
 export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1
 export OUTSOURCERER_DEPTH=0 OSRC_CATALOG_VALIDATE=0
