@@ -146,5 +146,22 @@ o="$(osrc "_osrc_disk_paused_secs \"$JD\"")"
 [ "$(cat "$JD/disk-paused-secs" 2>/dev/null)" -ge 100 ] && [ "$o" -ge 100 ] && [ "$o" -lt 200 ] \
   && [ -z "$(ls "$JD" | grep unbanked)" ] && ok "the next bank folds the span in once ($o)" || bad "next bank: secs=$(cat "$JD/disk-paused-secs" 2>/dev/null) total=$o files=$(ls "$JD")"
 
+echo "=== F20: supervise trusts a pause record only while its process is really stopped ==="
+svk() { osrc "SCRIPT_PATH=x; _sv_observe $1 \$(date +%s) >/dev/null 2>&1; echo \"k=\$SV_K\"" | tail -1; }
+J=job-f20; P="$(fakejob "$J")"; JD="$OSRC_JOBS_T/$J"
+osrc "_osrc_disk_pause_job \"$JD\"" >/dev/null
+sed "s/^since|.*/since|$(( $(date +%s) - 120 ))/" "$JD/disk-paused" > "$JD/rec.tmp" && mv "$JD/rec.tmp" "$JD/disk-paused"
+[ "$(svk $J)" = k=disk-paused ] && [ -f "$JD/disk-paused" ] && ok "a really stopped lane is reported disk-paused" || bad "stopped lane not disk-paused"
+kill -CONT "$P"   # the record now lies: e.g. a monitor killed mid-resume
+o="$(svk $J)"
+[ "$o" != k=disk-paused ] && [ ! -f "$JD/disk-paused" ] && ! stopped "$P" \
+  && ok "a stale record is dropped and the lane's real state is read ($o)" || bad "stale record trusted: $o rec=$([ -f "$JD/disk-paused" ] && echo kept)"
+J=job-f20b; P="$(fakejob "$J")"; JD="$OSRC_JOBS_T/$J"
+printf 'since|%s\nproc|d|%s|0|%s\n' "$(date +%s)" "$P" "$(osrc "_pid_start_identity $P")" > "$JD/disk-paused"
+[ "$(svk $J)" = k=disk-paused ] && [ -f "$JD/disk-paused" ] && ok "a record younger than the grace (pause in progress) is trusted" || bad "fresh record dropped"
+J=job-f20c; mkdir -p "$OSRC_JOBS_T/$J"; echo running > "$OSRC_JOBS_T/$J/status"
+printf 'since|%s\nproc|d|%s|0|gone\n' "$(( $(date +%s) - 120 ))" "$(osrc_test_dead_pid)" > "$OSRC_JOBS_T/$J/disk-paused"
+o="$(svk $J)"; [ "$o" != k=disk-paused ] && [ ! -f "$OSRC_JOBS_T/$J/disk-paused" ] && ok "a record naming only dead processes is dropped ($o)" || bad "dead-process record trusted: $o"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

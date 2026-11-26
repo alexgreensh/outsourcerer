@@ -817,6 +817,27 @@ _osrc_disk_target_paused() {
   [ -f "$(_osrc_disk_dir)/paused/tmux-$1" ]
 }
 
+# _osrc_disk_paused_live <id> -> 0 when <id>'s pause record still names a SIGSTOPped process, is
+# under a minute old (a pause still being written), or `ps -o stat=` cannot tell; it then makes sure
+# a monitor exists to resume it (a SIGKILLed monitor leaves lanes stopped). 1 when the record is
+# stale (nothing it names is stopped, e.g. a tmux session killed while paused): retired here.
+_osrc_disk_paused_live() {
+  local rec tag role pid grp sid st since
+  rec="$OSRC_JOBS/${1:-}/disk-paused"; [ -f "$rec" ] || rec="$(_osrc_disk_dir)/paused/tmux-${1:-}"
+  [ -f "$rec" ] || return 1
+  since="$(_osrc_disk_pause_since "$1")"; case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  [ $(( $(date +%s) - since )) -ge 60 ] && [ -n "$(ps -o stat= -p "$$" 2>/dev/null)" ] \
+    || { _osrc_disk_heartbeat >/dev/null 2>&1; return 0; }
+  while IFS='|' read -r tag role pid grp sid; do
+    [ "$tag" = proc ] && _osrc_disk_same "$pid" "$sid" || continue
+    st="$(ps -o stat= -p "$pid" 2>/dev/null)"
+    case "$st" in *T*) _osrc_disk_heartbeat >/dev/null 2>&1; return 0 ;; esac
+  done < "$rec"
+  _osrc_disk_log "stale pause record $rec: nothing it names is stopped; retired"
+  _osrc_disk_resume_rec "$rec" >/dev/null 2>&1
+  return 1
+}
+
 _osrc_disk_pause_since() { sed -n 's/^since|//p' "$OSRC_JOBS/$1/disk-paused" "$(_osrc_disk_dir)/paused/tmux-$1" 2>/dev/null | head -1; }
 
 # _osrc_disk_paused_note <id> -> the one line status, the hub and supervise show for a disk-paused lane.
