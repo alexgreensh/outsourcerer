@@ -206,8 +206,10 @@ token if `/dev/urandom` is unreadable.
 
 **Never looks dead (0.17, `lib/hub-assets/hub-alive.js`, `lib/mc_alive.sh`).** A strip at the top always
 says whether the page is live: `Live · updated 12s ago`, or the reason a call failed with the age of the
-last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: this tab's key is from an
-older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
+last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: export failing since
+14:05` (the hub answers but its exports fail: it sends `export_error` and `export_error_since`), or
+`Starting: showing the last saved state` (a restarted hub serving its last `export.json`, `warming`),
+or `Not live: this tab's key is from an older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
 POSTs the tab's old key to `/reopen`. The hub keeps salted SHA-256 hashes of the keys it served in
 `hub/keys.json` (0600, newest 5, a retired key is honoured for 12 hours, and only to a same-origin browser request) and answers with the current page
 URL only for a key it retired; no key, an unknown key or the current key gets 403 and the "run outsourcerer
