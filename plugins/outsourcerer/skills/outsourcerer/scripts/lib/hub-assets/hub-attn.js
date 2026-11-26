@@ -11,19 +11,19 @@
   const HEADLINE = 'something is waiting on you', STEADY_MS = 1000, NOTE_KEY = 'osrc-hub-notify';
 
   // Lanes move band only once their new band held for one more export (a flicker never reshuffles the page).
-  // update() -> {count, fresh}: waiting-on-you items now, and the projects with an item that was not
-  // waiting at the last export (empty on the first call: nothing is "new" on first load).
+  // update() -> {count, fresh, moved}: waiting-on-you items now, the projects with an item that was not
+  // waiting at the last export (empty on the first call: nothing is "new" on first load), and whether a lane changed band.
   function Tracker() {
     const st = {}; let gen = null, prev = null;
     function update(projects, openDecs) {
-      const g = projects.map((p) => p.exported_at || 0).join(',');
+      const g = projects.map((p) => p.exported_at || 0).join(','); let moved = false;
       if (g !== gen) {
         gen = g; const live = {};
         projects.forEach((p) => (p.lanes || []).forEach((l) => {
           const k = p.id + '\n' + l.id, b = bandOf(l.attention), s = st[k]; live[k] = 1;
           if (!s) st[k] = { band: b, cand: null };
           else if (b === s.band) s.cand = null;
-          else if (s.cand === b) { s.band = b; s.cand = null; } else s.cand = b;
+          else if (s.cand === b) { s.band = b; s.cand = null; moved = true; } else s.cand = b;
         }));
         Object.keys(st).forEach((k) => { if (!live[k]) delete st[k]; });
       }
@@ -34,7 +34,7 @@
       });
       if (prev) Object.keys(items).forEach((k) => { if (!prev[k] && !fresh.includes(items[k])) fresh.push(items[k]); });
       prev = items;
-      return { count: Object.keys(items).length, fresh };
+      return { count: Object.keys(items).length, fresh, moved };
     }
     const band = (p, l) => { const s = st[p.id + '\n' + l.id]; return s ? s.band : bandOf(l.attention); };
     return { update, band };
