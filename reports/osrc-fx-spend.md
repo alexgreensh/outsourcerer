@@ -79,7 +79,7 @@ mktemp template in test_spend_attack). All 4 are fixed in 182061e.
 Base: round-1 head 06b90b1 (kept). Branch `cloud/osrc-fx-spend-r2`. These are the live-test findings
 from the 0.18.0 sandbox run, plus three orchestrator findings. `outsourcerer.sh` stays at 18835 lines:
 every edit is on an existing line, or is paired with a trimmed comment line. New code is in `lib/`
-(spend.sh 987 lines, spend-paths.sh about 180 lines).
+(spend.sh 987 lines, spend-paths.sh 151 lines).
 
 | Finding | Fix | Regression test (fails on 06b90b1) |
 |---------|-----|------------------------------------|
@@ -100,7 +100,34 @@ the flag, and so on).
 
 ### Tests run (Linux, bash 5, uid 0, niced, one at a time)
 
-BATCH_RESULTS
+All runs below are at the final head unless noted. Each result is the suite's exit code and its RESULT line.
+
+- New and registered: `test_spend_r2` 19/19 rc 0, `test_hermetic_disk_home` rc 0.
+- Updated: `test_spend_lib_failclosed` 12/12, `test_spend_attack` 62/62, `test_spend_consent` 57/57,
+  `test_lane_billing` 145/145, `test_p56_r2` 66/66, `test_loops` 29/29, `test_loop_escalate` 31/31,
+  `test_no_phantom_jobs` 18/18, `test_tests_set_home` 5/5. All rc 0.
+- Unchanged and rc 0 (run one at a time, niced): test_factory_tasks, test_loop_resume,
+  test_fanout_json, test_supervise, test_p56_factory_child, test_factory_exclude, test_launch_sites,
+  test_devin_launch_gate, test_devin_probe_strict, test_session_control, test_marker_forgery,
+  test_limit_gate, test_cloud_gate, test_devin_alias_resolution, test_model_selection_parity,
+  test_cost_disclosure, test_escalation_classify, test_session_send_verify, test_managed_send,
+  test_p56_billing, test_devin_free_guard, test_devin_catalog_free_tier, test_opencode_lane,
+  test_heartbeat_autoarm, test_accounts, test_cleanup_manifest.
+- Before/after proofs:
+  - `test_spend_r2` against the 06b90b1 engine: 5 passed, 14 failed.
+  - test_spend_attack send-model rows with the gate call removed: 4/4 fail.
+  - test_spend_lib_failclosed symlink rows on 06b90b1: `syntax` and `nocaps` fail with the Mac signature.
+  - F8 receipt on 06b90b1: `[free-tier]` banner plus "$0 cash".
+
+`bash tests/conformance.sh`:
+- First run: rc 1, 262 passed, 7 failed. Two of the failures were mine. The fanout preflight ran
+  before fanout's own lane checks and also preflighted the local lane, which broke
+  test_opencode_lane and test_heartbeat_autoarm; both were fixed in 1139bd8. Two were transient
+  disk-pressure hits (6 GB free at that moment): test_accounts and test_cleanup_manifest. Both pass
+  alone and in the final run.
+- Final run, at 1139bd8: **rc 1, 266 passed, 3 failed, 14 skipped.** The 3 failures are
+  test_harness_isolation, test_vocab_hygiene and test_parity_insource_refresh, the same uid-0
+  failures documented in round 1, which also fail on base.
 
 ### What remains unproven (round 2)
 
