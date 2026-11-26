@@ -104,5 +104,18 @@ o="$(run cleanup fo-g 2>&1)"; rc=$?
   && [ ! -d "$R/.outsourcerer/worktrees/fo-a" ] && [ -d "$R/.outsourcerer/worktrees/fo-b" ] \
   && ok "fanout cleanup names the member it kept and fails" || bad "fanout summary (rc=$rc): $o"
 
+echo "=== F14: cleanup --apply keeps a job dir while its worktree is still ASK ==="
+mkwt "$R" job-rc; W="$R/.outsourcerer/worktrees/job-rc"; printf 'K=1\n' > "$W/.env"
+echo done > "$OSRC_JOBS_T/job-rc/status"
+mf() { jq -cn --arg p "$1" --arg k "$2" --arg s "$3" --arg r "$4" '{path:$p,kind:$k,session:$s,repo:$r,ts:1}' >> "$OSRC_HOME/created.jsonl"; }
+mf "$OSRC_JOBS_T/job-rc" job job-rc ""; mf "$W" worktree job-rc "$R"
+find "$OSRC_JOBS_T/job-rc" "$W" -exec touch -t 202001010000 {} + 2>/dev/null
+o="$(run cleanup --apply 2>&1)"
+[ -f "$OSRC_JOBS_T/job-rc/worktree.json" ] && [ -d "$W" ] && ok "the job dir and its receipt survive while the worktree is ASK" || bad "receipt deleted with worktree still ASK: $o"
+grep -q 'job-rc.*still there' <<<"$(run cleanup 2>&1)" && ok "dry run names why the job dir is kept" || bad "dry run reason missing"
+rm -f "$W/.env"; find "$W" -exec touch -t 202001010000 {} + 2>/dev/null
+o="$(run cleanup --apply 2>&1)"
+[ ! -d "$W" ] && [ ! -d "$OSRC_JOBS_T/job-rc" ] && ok "once the worktree is SAFE both go in one apply" || bad "after SAFE: wt=$([ -d "$W" ] && echo kept) job=$([ -d "$OSRC_JOBS_T/job-rc" ] && echo kept): $o"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

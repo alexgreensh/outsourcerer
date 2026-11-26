@@ -275,6 +275,14 @@ _osrc_cleanup_verdict() {
     esac
   fi
 
+  # A job/loop/isolated dir holds its worktree's receipt (worktree.json): deleting it first would
+  # leave that worktree ASK forever ("no record") and `cleanup <id>` blind. Kept until it is gone.
+  case "$kind" in job|loop|isolated)
+    if [ -e "$pp/worktree.json" ]; then
+      local rw; rw="$(jq -r '.path // ""' "$pp/worktree.json" 2>/dev/null)" || { printf 'ASK\tworktree receipt unreadable\n'; return 0; }
+      [ -n "$rw" ] && { [ -e "$rw" ] || [ -L "$rw" ]; } && { printf 'ASK\tits worktree %s is still there (this dir holds its receipt)\n' "$rw"; return 0; }
+    fi ;;
+  esac
   case "$kind" in
     job)
       # A job dir is the lane's evidence. SAFE only when it finished clean AND its
