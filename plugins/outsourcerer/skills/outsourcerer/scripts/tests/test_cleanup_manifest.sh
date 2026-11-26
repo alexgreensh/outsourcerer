@@ -22,7 +22,7 @@ export GIT_CONFIG_GLOBAL="$TMP/gitconfig" GIT_CONFIG_NOSYSTEM=1 OUTSOURCERER_DEP
 # launch/critical floors (settings file) so the 6GB gate fixtures sit in the band on any volume.
 export OSRC_DISK_POLICY_POLL=1 OSRC_DISK_MONITOR_IDLE_TICKS=1
 mkdir -p "$HOME" "$OSRC_HOME" "$XDG_CONFIG_HOME" "$OSRC_HOME/jobs"
-for _h in "$OSRC_HOME" "$TMP/osrc2"; do mkdir -p "$_h/disk-policy"; printf 'OSRC_DISK_MIN_GB=10\nOSRC_DISK_CRITICAL_GB=1\n' > "$_h/disk-policy/settings"; done
+for _h in "$OSRC_HOME" "$TMP/osrc2"; do mkdir -p "$_h/disk-policy"; printf 'OSRC_DISK_MIN_GB=10\nOSRC_DISK_CRITICAL_GB=1\nOSRC_DISK_PAUSE_GB=0\n' > "$_h/disk-policy/settings"; done
 printf '[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n' > "$GIT_CONFIG_GLOBAL"
 
 pass=0; fail=0

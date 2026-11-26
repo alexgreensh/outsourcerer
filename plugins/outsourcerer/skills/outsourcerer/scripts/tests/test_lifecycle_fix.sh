@@ -66,7 +66,7 @@ SH
   # refuses under 10 GB free, which made this case fail on any low-disk host for a reason unrelated
   # to the send-keys contract it tests.
   export OSRC_HOME="$TMP/session-start-home" OSRC_CLOUD_ACK=1 OSRC_CLOUD_ACKED=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_SOURCED=1
-  mkdir -p "$OSRC_HOME/disk-policy"; echo OSRC_DISK_MIN_GB=0 > "$OSRC_HOME/disk-policy/settings"
+  mkdir -p "$OSRC_HOME/disk-policy"; printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
   mkdir -p "$TMP/bin-session"
   cat > "$TMP/bin-session/devin" <<'SH'
 #!/usr/bin/env bash

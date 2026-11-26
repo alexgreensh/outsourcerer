@@ -204,8 +204,9 @@ rm -f "$OSRC_HOME/runs"; t0="$(date +%s)"; OSRC_HUB_EXPORT_WAIT=8 sf 4
 rm -rf "$lk"
 # Back-to-back leaders: a follower takes the first result written after it arrived.
 mkdir -p "$lk"; echo "$$" > "$lk/pid"
-( sleep 1; printf '{"run":"other"}\n' > "$OSRC_HOME/hub/flight/w"; mv -f "$OSRC_HOME/hub/flight/w" "$OSRC_HOME/hub/flight/all.f00.json" ) &
-OSRC_HUB_EXPORT_WAIT=6 sf 5; wait
+# The write lands well after the follower has sourced the script (over 1 s on a loaded Mac) and read its baseline.
+( sleep 5; printf '{"run":"other"}\n' > "$OSRC_HOME/hub/flight/w"; mv -f "$OSRC_HOME/hub/flight/w" "$OSRC_HOME/hub/flight/all.f00.json" ) &
+OSRC_HUB_EXPORT_WAIT=15 sf 5; wait
 [ "$(cat "$TMP/sf.5")" = '{"run":"other"}' ] && ok "a follower does not wait through the next leader once a fresh result exists" || no "follower starved: $(cat "$TMP/sf.5")"
 rm -rf "$lk"
 

@@ -366,7 +366,7 @@ chmod +x "$TMP/tmuxbin/tmux"
 : > "$TMP/tmux.log"
 # This probe is about the loader, not free space: lift the disk floor in the test's own home so a full
 # host disk cannot turn it into a SKIP (floors come only from the settings file, never an export).
-mkdir -p "$OSRC_HOME/disk-policy" && echo OSRC_DISK_MIN_GB=0 > "$OSRC_HOME/disk-policy/settings"
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 ( unset OSRC_SOURCED; cd "$WD" && \
   env -u OSRC_SOURCED OSRC_TMUX_LOG="$TMP/tmux.log" PATH="$TMP/tmuxbin:$PATH" \
     OSRC_HOME="$OSRC_HOME" OSRC_SESSION_NAME="l5-symlink-probe" \

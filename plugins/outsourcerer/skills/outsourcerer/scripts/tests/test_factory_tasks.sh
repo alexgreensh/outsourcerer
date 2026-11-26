@@ -24,7 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 export OSRC_HOME="$TMP/state"; mkdir -p "$OSRC_HOME"
 # These tests are about launches, not free space: a full host disk must not fail them. Floors come only
 # from this settings file (never an export), so set it in the test's own home.
-mkdir -p "$OSRC_HOME/disk-policy" && echo OSRC_DISK_MIN_GB=0 > "$OSRC_HOME/disk-policy/settings"
+mkdir -p "$OSRC_HOME/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$OSRC_HOME/disk-policy/settings"
 export OSRC_FLEET_SUPERVISION=0 OSRC_HEARTBEAT_DISABLED=1 OSRC_BLIND_TURN_GUARD=0
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
 pass=0; fail=0
