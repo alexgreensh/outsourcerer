@@ -193,3 +193,19 @@ Conformance: see `## Conformance` below.
   `paused` job to `status=Paused`, note "paused; paused: free disk is under the floor". Either the
   test or `_osrc_hub_lane_job` needs to follow the other. I did not touch it (disk-monitor scope).
   F22's wording covers both shapes.
+
+## Conformance
+`bash plugins/outsourcerer/skills/outsourcerer/scripts/tests/conformance.sh` (niced, run once on
+head `df65d8c`): **RESULT: 272 passed, 4 failed, 14 skipped, rc=1**. `test_rv_watch` is green.
+
+All four failing suites also fail on the base `80575c4`. I ran each one alone in a worktree at the
+base and saw the same FAIL lines:
+- `test_harness_isolation`: "behavioral: fail-closed failed (rc=0, count=3)".
+- `test_vocab_hygiene`: "original was damaged on failed write" and "failed rewrite reported
+  success".
+- `test_parity_insource_refresh`: "read-only target: rc=0".
+- `test_disk_r2`: the F2 hub-lane shape (see Needs).
+
+This container runs as root (uid 0). The first three test read-only or failed-write paths, which
+root bypasses, so they are probably environment-only. They are not caused by this lane, but
+conformance is red, so RESULT says `rc=1`.
