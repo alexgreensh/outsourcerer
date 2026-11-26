@@ -155,3 +155,32 @@ _osrc_task_spend_own() {  # <task-json> <dispatch-model> -> rc0 when the task's 
 }
 
 _OSRC_LIBEND_SPENDPATHS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)
+
+# _osrc_dv_model_verify <pane> <gated-id> -> Devin's picker selects by fuzzy search text, so after
+# the switch read which model the session now shows (the observer adapter, else the last catalog id
+# on the pane's bottom lines) and compare it with the id the gate judged (rv F5). On a mismatch it
+# switches back to the recorded model; rc0 only when the gated id is confirmed.
+_osrc_dv_model_verify() {
+  local pane="$1" want seen="" ids t i prev
+  want="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+  ids="$(_catalog_load dv 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  for i in 1 2 3; do
+    sleep 1
+    seen="$(_session_model_observe dv "tmux:$pane" "${SESSION_NAME:-}" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    [ "$seen" = unknown ] && seen=""
+    if [ -z "$seen" ]; then
+      for t in $(tmux capture-pane -p -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -3 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._:/\n-' ' '); do
+        grep -qxF -- "$t" <<<"$ids" && seen="$t"
+      done
+    fi
+    [ "$seen" = "$want" ] && return 0
+  done
+  if [ -z "$seen" ]; then
+    echo "ERROR: session model: could not read which model the Devin picker selected, so the switch to $2 is UNVERIFIED (a fuzzy match can land on a paid sibling). Check now:  $0 session read   and stop the session if it shows another model." >&2
+    return 1
+  fi
+  prev="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f2)"
+  echo "ERROR: session model: the Devin picker selected $seen, not $2 (the model the spend gate judged).${prev:+ Switching back to $prev.} Re-run with the exact id:  $0 session model <id>" >&2
+  [ -n "$prev" ] && _session_model_restore_devin "$pane" "$prev" >/dev/null 2>&1
+  return 1
+}

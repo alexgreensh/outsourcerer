@@ -51,7 +51,10 @@ case "${1:-}" in
 esac
 case " $* " in *" -p "*|*" -c "*) exit 0 ;; esac
 echo "Devin ready >"
-while IFS= read -r l; do echo "tui-input $l" >> "${STUB_LOG:-/dev/null}"; done
+# after a picker pick it shows "model: <id>" like a footer: the typed id, or the contents of
+# $STUB_LOG.pick (a fuzzy match landing on another row)
+while IFS= read -r l; do echo "tui-input $l" >> "${STUB_LOG:-/dev/null}"
+  case "$l" in *$'\e'm*) p="${l##*$'\e'm}"; [ -s "${STUB_LOG:-/dev/null}.pick" ] && p="$(cat "$STUB_LOG.pick")"; echo "model: $p" ;; esac; done
 exec sleep 60
 EOF
 # claude: not logged in (billing unprovable = unknown); any launch is logged.
@@ -282,6 +285,12 @@ if wait_log 'swe-1-7-max --respect' && [ "$rc" -eq 0 ]; then
   : > "$LOG"; out="$(engine session model swe-1-7-high)"; rc=$?
   wait_log 'tui-input.*swe-1-7-high' && ok "model:switch to the exact Free swe-1-7-high needs no consent" \
     || bad "model:Free switch blocked (rc=$rc): $(printf '%s' "$out" | tail -2)"
+  # the picker's fuzzy filter lands on a paid sibling: say so, switch back, exit nonzero (rv F5)
+  echo swe-2-1-high > "$LOG.pick"; : > "$LOG"; out="$(engine session model swe-1-7-high)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'selected swe-2-1-high, not swe-1-7-high' <<<"$out" && wait_log 'tui-input.*swe-1-7-max'; then
+    ok "model:a picker that selects another model than the gated id is caught and switched back"
+  else bad "model:unverified pick (rc=$rc): $(printf '%s' "$out" | tail -2)"; fi
+  rm -f "$LOG.pick"
   : > "$LOG"; out="$(engine session model)"; rc=$?
   sleep 2
   if grep -q 'tui-input' "$LOG"; then bad "model:bare session model drove the picker with no consent (choice unknown)"

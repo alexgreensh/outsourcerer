@@ -15925,8 +15925,7 @@ _managed_session_model() { # <session-id> [model-name/filter]
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
   case "$prov" in
     devin|dv)
-      tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }
-      sleep 1
+      tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }; sleep 1
       tmux send-keys -t "$pane" M-m || { _endpoint_mutation_unlock "$key"; return 1; }
       sleep 1
       if [ -n "$filter" ]; then
@@ -15935,6 +15934,7 @@ _managed_session_model() { # <session-id> [model-name/filter]
         sleep 1
       fi
       tmux send-keys -t "$pane" Enter || { _endpoint_mutation_unlock "$key"; return 1; }
+      [ -z "$filter" ] || _osrc_dv_model_verify "$pane" "$filter" || rc=1   # fuzzy pick: confirm the gated id (lib/spend-paths.sh)
       ;;
     cc|claude)
       # Claude-native uses the /model picker; a target model name is required (there is no blind switch).
