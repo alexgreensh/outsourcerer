@@ -220,6 +220,15 @@ for envset in "OSRC_SPEND_OK=1" "OSRC_SPEND_GATE=0" "_OSRC_SPEND_BOUND_LANE=dv _
   : > "$LOG"; out="$(export $envset; engine run -m swe-1-7-max "say hi")"; rc=$?
   refuses_paid "once:env $envset grants nothing" "$out" "$rc" swe-1-7-max
 done
+# Inherited lane-table cache entries (rv F1): the table is first-value-wins, so an exported
+# _OSRC_LF_local__disp=or made OpenRouter resolve to the free local lane. Clean env, fresh process.
+for envset in "_OSRC_LF_local__disp=or|_OSRC_LF_local__aliases=or openrouter tokenrouter" \
+              "_OSRC_LT_KEY=$(sed -n 's/^OSRC_LANE_REGISTRY="\([^"]*\)".*/\1/p' "$SRC")|_OSRC_LF_local__disp=or|_OSRC_LF_local__aliases=or openrouter tokenrouter"; do
+  b="$(IFS='|'; set -f; env -i HOME="$HOME" PATH="$PATH" OSRC_HOME="$DOH" $envset /bin/bash "$SRC" lane limits 2>&1 </dev/null)"
+  row="$(grep -E '^ *or ' <<<"$b" | head -1)"
+  case "$row" in *metered*) ok "lanetable:inherited ${envset%%=*}... leaves OpenRouter metered" ;;
+    *) bad "lanetable:inherited ${envset%%=*}... rewrote OpenRouter: '$row'" ;; esac
+done
 # The bg job marker: a wrong token, or a job dir outside $OSRC_HOME/jobs, grants nothing.
 mkdir -p "$DOH/jobs/j1" "$TMP/elsewhere"
 printf '#osrc-spend-ok token=t0k\ndv|swe-1-7-max\n' > "$DOH/jobs/j1/.spend-ok"

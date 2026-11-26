@@ -3079,7 +3079,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"; unset _OSRC_LT_KEY   # never inherited (with _OSRC_LF_* it would stand in for the descriptors)
 
 # The registry as one table (_OSRC_LF_<lane>__<field>), built once per process right after the last
 # descriptor and rebuilt only if OSRC_LANE_REGISTRY changes: lookups are fork-free (a launch did 536 forked reads).
@@ -3087,7 +3087,7 @@ OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi
 _lane_table() {
   [ "${_OSRC_LT_KEY:-}" = "$OSRC_LANE_REGISTRY" ] && return 0
   local _l _v
-  [ -z "${_OSRC_LT_KEY:-}" ] || for _v in $(compgen -v _OSRC_LF_ 2>/dev/null); do unset "$_v"; done   # a changed registry starts clean
+  for _v in $(compgen -v _OSRC_LF_ 2>/dev/null); do unset "$_v"; done   # always start clean: first-value-wins must never keep an inherited value
   printf() { # shellcheck disable=SC2059
     if [ "$1" = '%s\n' ]; then shift; local x f; for x in "$@"; do
         f="${x%%=*}"; case "$f" in ''|*[!a-z0-9_]*) continue ;; esac
