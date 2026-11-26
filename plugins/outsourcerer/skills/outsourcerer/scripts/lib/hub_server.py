@@ -793,6 +793,8 @@ def make_handler(hub):
                 payload, err = hub.projects_payload()
                 if err:   # the page reads both: "Not live: export failing since HH:MM"
                     payload = dict(payload, export_error=err, export_error_since=hub.export_error_at or int(time.time()))
+                if hub.warming:   # a restart serving the last run's export.json until its first export lands
+                    payload = dict(payload, warming=True)
                 self._send_json(payload)
             elif path == "/api/answers":
                 self._send_json(hub.answers())

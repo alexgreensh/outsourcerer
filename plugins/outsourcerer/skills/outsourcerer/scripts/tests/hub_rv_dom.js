@@ -73,7 +73,17 @@ async function f33() {
   ok(Q.text() === 'Live · updated 2s ago', 'F33: a healthy export still reads Live (got: ' + Q.text() + ')');
 }
 
-const S = { F32: f32, F33: f33 };
+// F34: a restarted hub serves the previous run's export.json (warming) until its first export lands.
+async function f34() {
+  let warm = true;
+  const P = alive(() => Promise.resolve(res(Object.assign({ generated_at: 1800000000 - 3600, projects: [] }, warm ? { warming: true } : {}))));
+  await P.window.fetch('/api/projects'); await tick(); await tick(); P.paint();
+  ok(P.text() === 'Starting: showing the last saved state from 1 h ago until the first export finishes', 'F34: warming says it shows the last saved state (got: ' + P.text() + ')');
+  warm = false; await P.window.fetch('/api/projects'); await tick(); await tick(); P.paint();
+  ok(/^Live · updated 0s ago/.test(P.text()), 'F34: the first fresh export returns the strip to Live (got: ' + P.text() + ')');
+}
+
+const S = { F32: f32, F33: f33, F34: f34 };
 (async () => {
   if (!S[section]) { console.log('FAIL: unknown section ' + section); process.exit(1); }
   await S[section]();

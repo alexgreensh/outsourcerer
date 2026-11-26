@@ -62,5 +62,14 @@ if on F33; then
   else no "F33: the hub did not start: $(cat "$SRV_HOME/err")"; fi
 fi
 
+if on F34; then
+  dom F34
+  if srv_start 'sleep 4; exit 1' "$SAVED"; then
+    j="$(srv_get /api/projects)"
+    jq -e '.warming == true and .projects[0].id == "p1"' >/dev/null 2>&1 <<<"$j" \
+      && ok "F34: a warm start serves the saved export marked warming" || no "F34: payload: $j"
+  else no "F34: the hub did not start: $(cat "$SRV_HOME/err")"; fi
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
