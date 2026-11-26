@@ -77,6 +77,21 @@ done
 OSRC_HOME="$TMP/f28/other" OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1; _osrc_mc_hub_ours "$1" "python3 hub_server.py --osrc-home=$2 --port 1"' "$SRC" "$P" "$TMP/f28/real" \
   && bad "another home claimed the hub" || ok "a different home is still not ours"
 
+echo "=== F29: a hub that is only slow gets a longer second probe before it is stopped ==="
+H="$(home f29)"; mkdir -p "$H/hub" "$H/mission-control" "$TMP/f29bin"
+printf 'import time\ntime.sleep(300)\n' > "$TMP/f29bin/hub_server.py"
+python3 "$TMP/f29bin/hub_server.py" --osrc-home="$H" --port 8799 </dev/null >/dev/null 2>&1 & P=$!; KILL="$KILL $P"
+printf '0123456789abcdef0123456789abcdef\n' > "$H/hub/token"
+# fake curl: answers 200 only when given a timeout of 5 s or more (a hub slow under load)
+printf '#!/bin/sh\nm=0; while [ $# -gt 0 ]; do [ "$1" = -m ] && m=$2; shift; done\n[ "$m" -ge 5 ] && printf 200 || printf 000\n' > "$TMP/f29bin/curl"; chmod +x "$TMP/f29bin/curl"
+o="$(PATH="$TMP/f29bin:$PATH" OSRC_HOME="$H" OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1
+  printf "{\"pid\":%s,\"port\":8799}\n" "$1" > "$(_osrc_mc_dir)/serve.json"
+  _osrc_mc_stale_hub() { return 1; }   # same code: only liveness is under test
+  u="$(_osrc_mc_hub_reuse "")"; echo "rc=$? url=$u"' "$SRC" "$P" 2>&1)"
+sleep 0.3
+kill -0 "$P" 2>/dev/null && grep -q 'rc=0 url=http://127.0.0.1:8799/?t=0123456789abcdef0123456789abcdef' <<<"$o" \
+  && ok "the slow hub is kept and reused" || bad "slow hub: alive=$(kill -0 "$P" 2>/dev/null && echo y || echo n) $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"

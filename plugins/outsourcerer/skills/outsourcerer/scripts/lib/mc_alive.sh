@@ -109,12 +109,20 @@ _osrc_mc_stop_hub() {
   return 0
 }
 # _osrc_mc_hub_reuse [port]: `mc`'s decision after its token probe. With the port that answered: reuse it
-# (rc 0) unless it runs older code (stopped, rc 1). With none (no answer): a live hub of ours that did not
-# answer is wedged, so it is stopped first (a new one would only hit "address in use"); rc 1.
+# (rc 0) unless it runs older code (stopped, rc 1). With none (no answer): a live hub of ours gets one
+# more probe with a longer timeout (OSRC_MC_PROBE_RETRY_SECS, 10), since a hub slow under load is not
+# wedged; if it answers, its URL is printed and rc 0. Else it is wedged and stopped first (a new one
+# would only hit "address in use"); rc 1.
 _osrc_mc_hub_reuse() {
-  local live
+  local live tok
   if [ -n "${1:-}" ]; then _osrc_mc_stale_hub "$1" && return 1; return 0; fi
   live="$(_osrc_mc_hub_live)" || return 1
+  tok="$(tr -d ' \n' < "$OSRC_HOME/hub/token" 2>/dev/null)"
+  if [ "${#tok}" -eq 32 ] && command -v curl >/dev/null 2>&1 \
+     && [ "$(curl -s -m "${OSRC_MC_PROBE_RETRY_SECS:-10}" -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $tok" "http://127.0.0.1:${live##* }/api/answers" 2>/dev/null)" = 200 ]; then
+    _osrc_mc_stale_hub "${live##* }" && return 1
+    printf 'http://127.0.0.1:%s/?t=%s\n' "${live##* }" "$tok"; return 0
+  fi
   printf '[outsourcerer] Mission Control (pid %s) did not answer; restarting it\n' "${live%% *}" >&2
   _osrc_mc_stop_hub "${live%% *}"; return 1
 }
