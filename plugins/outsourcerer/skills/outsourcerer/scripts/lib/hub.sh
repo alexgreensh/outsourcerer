@@ -73,7 +73,7 @@ _osrc_hub_lane_status() {
   local raw="$1" rv="$2" extra="${3:-}"
   local st="$raw"
   case "$rv" in
-    MERGE) st="Merged" ;;
+    MERGE) st="Approved" ;; LANDED) st="Merged" ;;   # a verdict approves; only evidence of a merge says Merged
     BLOCK) st="Blocked" ;;
     CHANGES) st="Building"; extra="${extra:+$extra; }changes requested by review" ;;
   esac
@@ -87,7 +87,7 @@ _osrc_hub_lane_status() {
     failed|wedged|timeout) st="Failed" ;;
     canceled|interrupted) st="Canceled" ;;
     gone) st="" ;;
-    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused|Closed) : ;;
+    Merged|Approved|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused|Closed) : ;;
     *) st="Building" ;;
   esac
   local pct=""
@@ -187,7 +187,7 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   fi
   local raw="$st"
   [ "$st" = "ready" ] && [ -n "$rv" ] && raw="verdict-$rv"
-  [ "$st" = "done" ] && [ -z "$rv" ] && rv="MERGE"
+  ! type _osrc_hub_landed >/dev/null 2>&1 || ! _osrc_hub_landed "$id" "$head" || rv=LANDED   # never inferred from done
   mapped="$(_osrc_hub_lane_status "$raw" "$rv" "${msg:+$msg}${head7:+ @${head7}}")"
   mstat="${mapped%%|*}"; mapped="${mapped#*|}"; mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
@@ -236,7 +236,7 @@ _osrc_hub_lane_for_raw() {
   local id="$1" rmap="$2"
   if [ -f "$OSRC_HOME/remote/$id.json" ]; then _osrc_hub_lane_remote "$id" && return 0; fi
   if [ -d "$OSRC_JOBS/$id" ]; then
-    local lj; lj="$(_osrc_hub_lane_job "$id")" && { local rv; rv="$(_osrc_hub_review_verdict "$id" "$rmap")"; if [ -n "$rv" ]; then lj="$(jq -c --arg rv "$rv" '.status = (if $rv=="MERGE" then "Merged" elif $rv=="BLOCK" then "Blocked" else .status end) + {pct:(if $rv=="MERGE" then 100 else .pct end)}' <<<"$lj")"; fi; printf '%s' "$lj"; return 0; }
+    local lj; lj="$(_osrc_hub_lane_job "$id")" && { local rv; rv="$(_osrc_hub_review_verdict "$id" "$rmap")"; if [ -n "$rv" ]; then [ "$rv" != MERGE ] || ! type _osrc_hub_landed >/dev/null 2>&1 || ! _osrc_hub_landed "$id" || rv=LANDED; lj="$(jq -c --arg rv "$rv" 'if $rv == "LANDED" then . + {status: "Merged", pct: 100} elif $rv == "MERGE" then .status = "Approved" | del(.pct) elif $rv == "BLOCK" then .status = "Blocked" | del(.pct) else . end' <<<"$lj")"; fi; printf '%s' "$lj"; return 0; }
   fi
   _osrc_hub_lane_session "$id" && return 0
   _osrc_hub_lane_fallback "$id"

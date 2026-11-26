@@ -121,5 +121,26 @@ if on F38; then
   grep -q "'Closed'" "$LIB/hub-assets/hub-home.js" && ok "F38: the page lists Closed among ended lanes" || no "F38: hub-home.js ENDED lacks Closed"
 fi
 
+if on F39; then
+  # A review verdict MERGE is an approval; only a landed flag or a merged PR / closed-merged item says Merged.
+  mkdir -p "$OSRC_HOME/remote" "$OSRC_HOME/review/items" "$OSRC_HOME/hub/cache"
+  echo '{"branch":"feat-r1","head":"abc1234def","repo":"acme/widget"}' > "$OSRC_HOME/remote/r1.json"
+  rs() { lib eval "osrc_remote_state() { echo $1; }; _osrc_review_verdict_for() { printf '%s' '$2'; }; _osrc_hub_lane_for_raw r1 '{}'" | jq -r '"\(.status)|\(.pct // "")"'; }
+  a="$(rs done MERGE)"; b="$(rs done '')"
+  [ "$a" = "Approved|" ] && ok "F39: a cloud lane with a MERGE verdict reads Approved" || no "F39: MERGE verdict reads $a"
+  [ "$b" = "Done|100" ] && ok "F39: a done cloud lane with no verdict reads Done, not Merged" || no "F39: done, no verdict reads $b"
+  echo '{"head":"abc1234def","state":"closed","closed_reason":"merged"}' > "$OSRC_HOME/review/items/r1-abc1234.json"
+  c="$(rs done MERGE)"
+  [ "$c" = "Merged|100" ] && ok "F39: a closed-as-merged review item reads Merged" || no "F39: closed-merged reads $c"
+  mkjob j39 done
+  d="$(lib _osrc_hub_lane_for_raw j39 '{"j39":"MERGE"}' | jq -r '"\(.status)|\(.pct // "")"')"
+  [ "$d" = "Approved|" ] && ok "F39: a job with a MERGE verdict reads Approved, not Merged 100%" || no "F39: job MERGE reads $d"
+  echo '{"prs":[{"number":7,"headRefName":"feat-j39","mergedAt":"2026-11-01T00:00:00Z","closedAt":"2026-11-01T00:00:00Z"}]}' > "$OSRC_HOME/hub/cache/gh-acme_widget.json"
+  e="$(lib _osrc_hub_lanes_prs '[{"id":"j39","status":"Approved","branch":"feat-j39"}]' acme/widget | jq -r '.[0] | "\(.status)|\(.pct // "")|\(.prs)"')"
+  [ "$e" = "Merged|100|#7" ] && ok "F39: an approved lane whose PR merged reads Merged" || no "F39: merged PR reads $e"
+  r5="$(lib _osrc_hub_truth '{"lanes":[{"id":"x","status":"Approved"}]}' "$(date +%s)" | jq -r '.lanes[0].attention')"
+  [ "$r5" = ready ] && ok "F39: an Approved lane is ready to land, not working" || no "F39: Approved attention $r5"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
